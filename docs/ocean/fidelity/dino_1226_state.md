@@ -1,3 +1,95 @@
+## #1455 queue item 3 (2026-08-03) — CEILING-PROOFs for the 4 `ldf_slp` rows (wslpi/wslpj/uslp/vslp)
+
+Task: write quantitative ceiling-proofs for the four `ldf_slp` rows, extending the
+2026-07-30 "all 3 stopping-rule conditions re-verified" note (which asserted the
+conditions held but never derived a formula that PREDICTS the tail's size and
+location) and citing the 2026-08-02 `ldf_eiv kappa (aeiu)` ceiling-proof (whose
+mechanism this task's finding upstream-confirms).
+
+**Reproduced the recorded tuples exactly** (`ldf_slp_per_element.py`, fp64/CPU,
+`e3t=both`, RUN_GDB restart+dumps): wslpi 1.000000/0.999962, wslpj 1.000000/0.999957,
+uslp 1.000000/1.000017, vslp 1.000000/1.000021 — bit-for-bit match, no re-measurement
+drift.
+
+**(a) Roundoff** — re-confirmed unchanged: `prd` err_norm=1.804e-11, `zbw`=9.369e-16,
+both at/below the 1e-9 bar.
+
+**(b) Transcription** — re-read `ldfslp.F90` at HEAD (`zbj=MIN(zbw,-100|zaj|,`
+`-7e3/e3w|zaj|)` :316-317, `zww=(zfk*zaj/(zbj-zeps)+(1-zfk)*zck*zwslpj_hml)*wmask`
+:328, `zwslpj_hml` recurrence set at `jk=nmln+1` :331-332 via the bottom-to-top loop
+:209) against `gm_redi_latlon_cgrid.py` (`swj_int=zaj/(zbj-zeps)` :1134, `kanc=nmln`
+gather :1138, documented convention :874/:1135-1137) — verbatim. Additionally
+CONFIRMED the anchor **index** itself against NEMO's own dumped `nmln`
+(`dump_nmln.bin`): 9839/9920 wet columns land at `kanc=nmln` exactly as the
+documented 0-based/1-based convention requires; 81/9920 shallow-MLD columns at
+`kanc=nmln-1`; BOTH produce **zero** ML-branch error in their own column sets — the
+anchor index is not the error source.
+
+**(c) Mechanism, quantitative — TWO REGIMES** (the new result; prior notes described
+the amplification qualitatively but never predicted it):
+
+- **Regime 1 (outside mixed layer, `zfk=1`, 71.7% of wet w-cells)**: the EXACT
+  closed-form `zaj/(zbj-zeps)` (no Taylor linearization) reproduces the measured
+  `zww_raw` (pre-Shapiro wslpj) err_norm distribution at **ratio 1.000 on both p99
+  and max** (predicted 6.204e-07/4.355e-05 vs measured 6.204e-07/4.355e-05). A naive
+  first-order Taylor propagation (`df=da/(zbj-eps)-a*db/(zbj-eps)^2`) under-predicts
+  by ~500x at p99 — recorded as a negative result: the amplification must be
+  evaluated as the exact quotient difference near `zbj→0`, not linearized.
+- **Regime 2 (inside mixed layer, `zfk<1`, 28.3% of cells)**: **100% of the global
+  p99-tail and max (wslpj) / 98.5% (wslpi) / 58-56% (uslp/vslp, mixed with regime 1)
+  live here.** Traced the recurrence with the PRODUCTION-captured `kanc`/`swj_int`/
+  `hml`/`r1_hmlw` locals directly (no re-derivation): `wslpj[ML] = zck * r1_hmlw *`
+  `swj_int[kanc]`. `swj_int` AT the anchor is itself at roundoff (verified: at the
+  worst ML cell, `swj_int_lego == swj_int_nemo` to 7 significant figures). The
+  residual is **exclusively** in `r1_hmlw = 1/max(hml-gdepw_top,10)`: `hml`
+  (legoESM) vs NEMO's dumped `hmlp` differ by up to 1.2943 m (median 0.0056 m, p99
+  1.2540 m) — this is the **already-open `zdf_mxl (nmln)` row's own hmlp DEBT**
+  ("hmlp (the DEPTH) still shows max|diff| 1.2943 m because our hml omits the live
+  (1+r3t) stretch on gdepw"), not a new defect. Substituting `r1_hmlw` computed from
+  NEMO's own dumped `hmlp` (holding everything else fixed) reproduces the measured
+  ML-branch err_norm at **ratio 1.000 (p99) / 0.999 (max)** for wslpj, and
+  **1.000/1.000** for wslpi — a tighter closure than the `aeiu` family's own
+  0.85x/0.6% precedent cited in the task brief.
+- **uslp/vslp**: same two-regime family, but mixed (58.3%/56.2% of the p99-tail
+  inside ML, the row's global MAX itself sitting OUTSIDE ML in an entirely-outside-ML
+  3x3 neighbourhood — ruling out Shapiro-smoother cross-ML contamination as the max's
+  source). Both regimes independently confirmed via the shared wslpi/wslpj chain, so
+  no residual is left unexplained even though the split is less clean than the
+  w-point rows.
+
+**vslp median reconciled (queue item 4)**: the older per-stage note's "1.609e-06"
+median is **not** a live discrepancy. Section (M) of this same probe run reproduces
+both numbers in one pass: with legoESM's own e2v metric (median|rel| vs NEMO
+mesh_mask e2v = 2.798e-05, a genuine but separately-tracked metric mismatch — "the e2
+METRIC owns the i-vs-j asymmetry", already flagged in this probe), vslp's median WAS
+1.609e-06; substituting NEMO's own dumped e2v collapses it to 3.807e-10, matching the
+CURRENT recorded median (3.265e-10) to within re-measurement noise. The 1.609e-06
+figure was measured before a metric fix that has since landed in production — Rule
+1e closed. The e1u-side control (the same substitution on uslp's e1u moves it 0.0%)
+confirms the fix is directionally isolated to the j-face, not creating a new
+asymmetry.
+
+**Verdict, all four rows: DEBT, CEILING.** Both stopping-rule-3 regimes are now
+quantitatively closed, not merely asserted. Neither regime is a new independent
+defect: regime 1 is conditioning inherited from `zbj`'s own already-documented
+near-zero tail; regime 2 is inherited from the already-open `zdf_mxl (nmln)` hmlp
+DEBT. **The gate has no formal CEILING `classify()` outcome** (only AT BAR/DEBT/
+UNMEASURED) — these four rows stay DEBT per the gate's own mechanical rules. The
+human CEILING-category decision flagged by the `aeiu` row (2026-08-02) remains
+pending; this task adds a second, independently-derived family member (four rows,
+not one) closing at ratio ~1.0 as further evidence for that decision, not a
+substitute for it.
+
+Gate notes updated in `fidelity_bar_gate.py` (prepended CEILING-PROOF paragraphs to
+all four `"ldf_slp {wslpi,wslpj,uslp,vslp}"` rows; `corr`/`ratio` tuple values
+unchanged, prior history preserved verbatim below the new text).
+`JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/ocean/unit/test_fidelity_bar_gate.py -q`
+→ **8 passed in 0.13s**; the gate script itself still runs end-to-end (`AT BAR 15 |
+DEBT 32 | UNMEASURED 5 | WAIVED 1`, `ldf_slp` rows unchanged at DEBT with identical
+corr/ratio). No production code touched.
+
+---
+
 ## #1455 GRIND-ORDER 1a (2026-08-03) — barotropic loop-entry seed: RE-VERIFIED EXACT, no fix warranted
 
 Task: check whether the shared upstream cause for `dyn_spg_ts pssh`/`puu_b`/`un_adv`
