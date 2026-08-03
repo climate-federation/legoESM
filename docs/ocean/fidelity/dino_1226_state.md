@@ -452,8 +452,27 @@ precision, zero tuple moves, zero classification flips**. The dyn_vor EEN u/v ca
 Provenance breakages found instead (queued, not numerics findings):
 - `zdftke pdlr` + `composite avt/avm`: cited scripts drifted format — no longer print the
   corr/ratio the rows cite. Restore the print or re-derive the metric before re-measuring.
-- `dom_qco_r3c r3t`: `harness_dom_qco_r3c.exe` aborts (MPI_ABORT 123) — rebuild needed.
-- 4 rows' cited probes absent from disk (already in the provenance-missing count);
+- ~~`dom_qco_r3c r3t`: `harness_dom_qco_r3c.exe` aborts (MPI_ABORT 123) — rebuild needed.~~
+  **RESOLVED 2026-08-03 (#1455 provenance-restore item): NOT broken, no rebuild.** The
+  abort reproduces only when running the exe from `UNIT_HARNESS/` (no namelists there —
+  NEMO's own message: "bad opening file: namelist_ref"). The existing exe is already
+  copied into `RUN_GDB/` (the documented rundir); `run_dom_qco_r3c_probe.py --rundir
+  .../RUN_GDB` runs clean and reproduces the row's harness cross-check exactly
+  (r3t corr=1.0/ratio=1.0/max|diff|=1.11e-16, n=9920). Wrong invocation dir, not a defect.
+- ~~4 rows' cited probes absent from disk~~ **2 of 4 RESTORED 2026-08-03**:
+  `probe_dyn_cor_2d.py` + `probe_bottom_drag.py` rebuilt from scratch as committed
+  scripts under `scripts/validate/ocean_fidelity/dino_1226/` (sibling zu_frc-probe
+  structure; fp64, e3t=both, registry, align-scan self-checks; physics-validator
+  reviewed CLEAN). Provenance-missing 15→13. Fresh measurements (RUN_GDB kt=57601,
+  excl. seam col 49) vs recorded, old tuples PRESERVED in the gate rows, NO
+  classification flips (all stay DEBT):
+  * `dyn_cor_2d` u: 0.999717/0.998805 → **1.000000/1.000039**; v: 1.0/0.999928 →
+    **1.000000/0.999945** (fresh reconstruction ≠ re-run of the lost probe; Rule 1e
+    noted in-row).
+  * `dyn_drg_init` u: 0.999937/1.000278 → **1.000000/1.000004**; v: 0.999961/0.999988 →
+    **1.000000/1.000004** (both now 4e-6 from bar — much tighter, still DEBT).
+  Remaining absent: `probe_n2.py` (eos_rab alpha + bn2), `probe_1226_r2_item3_sshnxt.py`,
+  `probe_1226_r2_item4_domqco.py` (r3u/r3v), `_probe_1455_een_vor_bottom_bisect.py`;
   `STABILITY e3t_0` + `mlf_baro_corr` carry no MEASURED_AT at all.
 - `puu_b`/`un_adv` MEASURED_AT stamps lagged their own reconfirmations — refreshed to
   a69fcbfd9. RULE: bump the stamp on every reconfirmation, not just tuple changes.
