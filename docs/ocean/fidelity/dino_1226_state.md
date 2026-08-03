@@ -1,3 +1,54 @@
+## RESUMED 2026-08-02 — bn2 live-e3w divisor coverage sweep, CLOSED (one latent gate fixed, inert on DINO)
+
+Parked item "live-e3w divisor in bn2" resolved by coverage, not by a new physics
+change. NEMO's divisor is `eosbn2.F90:1467`: `pn2(...) = grav*(zaw*dT-zbw*dS) /
+e3w(ji,jj,jk,Kmm) * wmask(ji,jj,jk)` — LIVE `e3w(Kmm)`, i.e. `e3w_0*(1+r3t)`
+under `key_qco`. Searched (Rule 0): every call site of
+`compute_buoyancy_frequency_nemo_bn2` (`eos.py`, `gm_redi_latlon_cgrid.py` x3,
+`k_profiles.py` x2, `enhanced_diffusion.py`, `_shared.py` TKE passthrough).
+ALL already thread live `gdept`/`gdepw_int` (via `nemo_bn2_live_ladders` or an
+equivalent Jacobian stretch), except one inconsistency:
+`_nemo_mld_from_n2_integral` (`gm_redi_latlon_cgrid.py:505`, the
+`gm_redi_mld_criterion="n2_integral"` MLD path the DINO kamm card selects)
+applied the `jacobian` stretch whenever non-`None`, with no
+`isinstance(z_coord, OceanPartialCellCoordinate)` gate — unlike its sibling
+`_nemo_wpoint_e3w_wmask_n2` (:787-788), which already has that gate because a
+plain `OceanZStarCoordinate`'s `jacobian` is `(eta+H_bathy)/H_max` (global
+normalisation), NOT `(1+r3t)`. **Currently INERT on DINO** — the kamm card
+always builds `OceanPartialCellCoordinate` (real bathymetry/partial cells), so
+the two forms coincide there — but a landmine for any future z*-only caller.
+Fixed to match the sibling gate exactly (no new config surface); direct
+synthetic-violation test added (`test_n2_integral_live_e3w_gated_on_partial_
+cell_coordinate`, `tests/ocean/unit/test_nemo_mld_criterion.py`) proving BOTH
+directions (z*-only: bit-identical to `jacobian=None`; partial-cell: the
+stretch measurably changes the result).
+
+Re-measured post-fix (fp64 explicit, `LEGOESM_NEMO_E3T=both`, BEFORE-level
+`tke_dump_rn2b` per the time-level registry) via
+`eos_rab_bn2_per_element.py` — reproduces the CLOSED note exactly (fix is a
+no-op on the active card, as predicted):
+- GLOBAL (n_wet=332,134 T / 332,214 W-interfaces): corr 1.00000000, mean-ratio
+  1.000000, err_norm median **1.413e-17**, p99 2.940e-15, max 9.046e-15.
+- DEEP SOUTHERN BOX (T-rows 14-22, k>=27, n_wet=2,941): corr **1.0**, ratio
+  **0.9999999999999998**, err_norm median **4.444e-16**, p99 3.555e-15, max
+  7.111e-15.
+
+Both AT BAR (`corr>=1-1e-9`, `|ratio-1|<=1e-6`, per-element `<=1e-9`). Gate
+row `bn2 (rn2b)` note updated with this re-verification; `AT BAR 15 | DEBT 32
+| UNMEASURED 5 | WAIVED 1 | total 53` unchanged (no row moved category — this
+was a coverage-completeness fix, not a new measurement).
+
+Tests: `tests/ocean/unit/test_nemo_mld_criterion.py` (6 passed, incl. the new
+one), `pytest -k "fidelity_bar or time_level"` (28 passed, 14 skipped).
+REVIEW PENDING (agent-review) — codex CLI unavailable this session.
+
+**Next**: item 5, `ldf_slp` (already CONDITIONING-LIMITED / RESOLVED-WITH-NOTE
+per the 2026-07-30 human decisions above) — sweep otherwise ready to move to
+whatever comes after `ldf_slp` in the NEMO execution order, or to the Redi/
+GM lane the 2026-08-02 twin-budget work re-ranked as leading (see below).
+
+---
+
 # DINO/NEMO fidelity campaign (#1226) — current state digest
 
 **Purpose.** One short file agent briefs can point at instead of re-typing context.

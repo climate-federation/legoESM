@@ -502,7 +502,16 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # is NOT centred between its interfaces, so the midpoint biases the
         # alpha/beta interpolation and puts ~4e-4 median error into N^2.
         _gdepw_int = z_iface[:-1]
-        if jacobian is not None:
+        # #1226 bn2 live-e3w divisor (eosbn2.F90:1467, pn2 = ... / e3w(Kmm)):
+        # NEMO's e3w(Kmm) = e3w_0*(1+r3t) under key_qco.  ``jacobian`` IS
+        # (1+r3t) = (eta+H_bathy)/H_bathy ONLY on an OceanPartialCellCoordinate
+        # -- on a pure z* coordinate it is (eta+H_bathy)/H_max instead (a
+        # DIFFERENT quantity, compute_ocean_jacobian's own docstring), so
+        # stretching by it there would be a mistranscription, not a fix.
+        # Matches the identical gate in _nemo_wpoint_e3w_wmask_n2 above
+        # (:787-788) -- same physical quantity, same guard, no new config
+        # surface.
+        if jacobian is not None and isinstance(z_coord, OceanPartialCellCoordinate):
             _J = jnp.asarray(jacobian, dtype)[..., None]     # (nlat,nlon,1)
             _gdept = _gdept[None, None, :] * _J
             _gdepw_int = _gdepw_int[None, None, :] * _J

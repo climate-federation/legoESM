@@ -161,6 +161,84 @@ def test_criteria_differ_on_surface_inversion():
     assert int(mb_n2[0, 0]) < int(mb_rho[0, 0])
 
 
+def test_n2_integral_live_e3w_gated_on_partial_cell_coordinate():
+    """#1226 bn2 live-e3w divisor (eosbn2.F90:1467, pn2 = ... / e3w(Kmm)).
+
+    ``jacobian`` IS NEMO's live stretch ``(1+r3t) = (eta+H_bathy)/H_bathy``
+    ONLY on an ``OceanPartialCellCoordinate`` (``compute_ocean_jacobian``);
+    on a plain ``OceanZStarCoordinate`` the SAME-NAMED ``jacobian`` argument
+    is a different quantity, ``(eta+H_bathy)/H_max``.  Synthetic-violation
+    check: with ``t_depth_ref`` set and a jacobian far from 1.0,
+      * on ``OceanPartialCellCoordinate`` the MLD must be sensitive to the
+        stretch (bit-different from the unstretched/jacobian=None case) --
+        proves the gate CAN fire when it should;
+      * on ``OceanZStarCoordinate`` the result must be BIT-IDENTICAL to
+        jacobian=None -- proves the gate does NOT misapply the wrong
+        stretch there (the bug this test guards against: a bare
+        ``if jacobian is not None`` would have applied it on both).
+    """
+    from legoesm.ocean.vertical import (
+        OceanPartialCellCoordinate, OceanZStarCoordinate,
+    )
+
+    z_iface = jnp.cumsum(jnp.full((NLEV,), D))
+    z_full_ref = -(z_iface - 0.5 * D)
+    z_half_ref = jnp.concatenate([jnp.zeros((1,)), -z_iface])
+    t_depth_ref = jnp.abs(z_full_ref) + 1.0   # deliberately off-midpoint
+
+    z_star = OceanZStarCoordinate(
+        n_levels=NLEV, H_max=float(z_iface[-1]),
+        z_full_ref=z_full_ref, z_half_ref=z_half_ref,
+        dz_ref=jnp.full((NLEV,), D), dz_half_ref=jnp.full((NLEV - 1,), D),
+        t_depth_ref=t_depth_ref,
+    )
+    partial = OceanPartialCellCoordinate(
+        n_levels=NLEV, H_max=z_star.H_max,
+        z_full_ref=z_full_ref, z_half_ref=z_half_ref,
+        dz_ref=z_star.dz_ref, dz_half_ref=z_star.dz_half_ref,
+        h_partial=jnp.broadcast_to(z_star.dz_ref, (1, 1, NLEV)),
+        bottom_level=jnp.full((1, 1), NLEV - 1, dtype=jnp.int32),
+        is_active=jnp.ones((1, 1, NLEV), dtype=bool),
+        t_depth_ref=t_depth_ref,
+    )
+
+    # Weak lapse (as in test_n2_integral_mld_matches_analytic_crossing) so the
+    # integral accumulates over SEVERAL deep interfaces before crossing the
+    # threshold -- giving depth-dependent alpha/beta (nemo_seos_alpha_beta's
+    # mu1/mu2 pressure terms) leverage to move m_base under the stretch.
+    k_ml = 5
+    lapse = 0.02
+    T = np.full(NLEV, 18.0)
+    for k in range(k_ml, NLEV):
+        T[k] = 18.0 - lapse * (k - (k_ml - 1))
+    T_j, S_j, mask = _column(T)
+    # far from 1.0 -- DINO's mu1=1.497e-4 thermobaric coefficient (eos.py
+    # NemoSEOSConfig) needs a large stretch to move m_base by a whole
+    # interface; 5.0 is unphysical but this test isolates gate LOGIC, not
+    # a realistic eta/H_bathy ratio.
+    jac = jnp.full((1, 1), 5.0)
+
+    hml_none, mb_none = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, z_star, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=None)
+    hml_zstar, mb_zstar = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, z_star, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=jac)
+    hml_partial, mb_partial = _nemo_mld_from_n2_integral(
+        T_j, S_j, mask, partial, _lin_eos, 0.01, constants.g, RHO0,
+        jacobian=jac)
+
+    # Plain z* coordinate: gate must NOT fire -- bit-identical to jacobian=None.
+    assert float(hml_zstar[0, 0]) == float(hml_none[0, 0])
+    assert int(mb_zstar[0, 0]) == int(mb_none[0, 0])
+
+    # Partial-cell coordinate: gate MUST fire -- the stretch changes gdept/gdepw
+    # fed to compute_buoyancy_frequency_nemo_bn2, so the result must differ from
+    # the unstretched case (proves the branch is non-vacuous on this input).
+    assert (float(hml_partial[0, 0]) != float(hml_none[0, 0])
+            or int(mb_partial[0, 0]) != int(mb_none[0, 0]))
+
+
 def test_dispatch_raises_on_unknown_criterion():
     T_j, S_j, mask = _column(np.linspace(18.0, 2.0, NLEV))
     z_coord = _uniform_zcoord()
