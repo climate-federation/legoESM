@@ -1,3 +1,132 @@
+## #1455 queue follow-up — reconcile `puu_b`/`un_adv` DEBT rows + seam localization (2026-08-03)
+
+Reconciliation task for the two rows still just outside the gate bar after the
+`tau_x_prev`/`tau_y_prev` sign fix below. Gate bar: `corr>=1-1e-9` AND
+`|ratio-1|<=1e-6`.
+
+**Step 1 — rerun to reconfirm (fp64, `LEGOESM_NEMO_E3T=both`, RUN_GDB
+restart, `spg_substep_chain.py`).** All three rows reproduced EXACTLY, no
+drift (CONFIRMED, fresh instrument run):
+
+| row | corr | ratio | err_norm |
+|---|---|---|---|
+| `dyn_spg_ts pssh` | 1.000000 | 1.000000 | 4.4725e-05 | AT BAR, reconfirmed |
+| `dyn_spg_ts puu_b` | 1.000000 | 0.999992 | 3.2039e-04 | DEBT, misses ratio bar by 8e-6 |
+| `dyn_spg_ts un_adv` | 1.000000 | 0.999998 | 1.3331e-04 | DEBT, misses ratio bar by 2e-6 |
+
+**Step 2 — seam-localization test.** The wind-forcing term itself
+(`zu_frc`) has an ALREADY-DOCUMENTED, cross-referenced (not re-derived)
+signature: `zu_frc_write_ledger.py` STEP 3 localizes its post-fix residual
+to 162/9758 (1.66%) of wet u-faces, ALL at column 49, the periodic-seam/
+DINO-sill column (`sill_lon_m_deg=1.0`). Since `puu_b`/`un_adv` are driven
+by `zu_frc` as a frozen forcing re-added every barotropic substep (STAGE
+6b/7 in `spg_substep_chain.py`, ratio-of-predicted-to-measured 1.023 for
+the substep-1 propagation), the natural hypothesis was that the residual
+ratio gap on `puu_b`/`un_adv` is ALSO seam-carried.
+
+Added a small diagnostic block to `spg_substep_chain.py` (STAGE 3, right
+after the existing `un_adv_final` `_report` call): recompute
+`puu_b_final`/`un_adv_final` with `umask2`'s column 49 masked OUT (same
+column-index convention as the ledger's `_outlier_cols`, post
+`_u_to_nemo` slice). 197/9758 wet u-faces excluded.
+
+RESULT (CONFIRMED, fresh instrument run):
+
+| row | full-domain ratio | ex-seam ratio (col 49 masked) | direction |
+|---|---|---|---|
+| `puu_b` | 0.999992 (n=9758) | 0.999989 (n=9561) | WORSE (|ratio-1| 8e-6 -> 11e-6) |
+| `un_adv` | 0.999998 (n=9758) | 0.999996 (n=9561) | WORSE (|ratio-1| 2e-6 -> 4e-6) |
+
+Masking the seam column does NOT close the gap — it moves in the wrong
+direction for both rows. **Verdict: NOT seam-carried (CONFIRMED, not
+forced).** This does not contradict the `zu_frc` row's own column-49
+finding: that finding describes pointwise ratio *outliers* in the wind
+increment itself (a narrower, differently-shaped defect, 162 faces out of
+a much larger domain), not the aggregate RMS-ratio gap on `puu_b`/`un_adv`.
+STAGE 6b/7 (already in `spg_substep_chain.py`, unchanged this task) still
+show the zu_frc/substep-loop lane is the dominant contributor IN AGGREGATE
+(predicted-from-forcing/measured-substep1 ratio 1.023) — but the specific
+~1e-5-scale ratio tail that keeps `puu_b`/`un_adv` just outside the bar is
+diffuse across the wet-face population, not reducible to one column.
+
+**Step 4 — pssh regression guard.** Reconfirmed AT BAR (corr=1.000000,
+ratio=1.000000), no drift since the wind fix landed (CONFIRMED).
+
+**Not chased further (out of scope/budget for this task):** why the
+diffuse tail sits at 8e-6/2e-6 rather than roundoff. STAGE 6b/7's own
+already-catalogued drag/RSS-magnitude checks (measured and refuted as
+*dominant* owners at their own scale, per the existing note) remain the
+next lead if this is revisited — this task's job was reconciliation +
+localization, not a new root-cause hunt, and the seam hypothesis (the one
+concrete, testable lead) has now been checked and refuted by measurement
+rather than left as an assumption.
+
+**Step 2b — alignment pass (not-seam-carried branch, one candidate deep).**
+Candidate selection from the `zu_frc_write_ledger.py` STEP 1 table: of the
+active writers, :336 (depth-sum) and the drag (:382) / wind (:432) pieces
+are all already measured against their own NEMO dumps; the ONE un-closed
+line is **dynspg_ts.F90:367 `zu_frc -= zu_trd*ssumask`** (the 2-D Coriolis
+removal), which the 2026-07-29 history flagged as "STRUCTURAL GAP: legoESM
+has NO zu_trd subtraction at all... must be checked".
+
+THE RULE transcription check result: **MATCH — and the "structural gap"
+claim is RETRACTED.** legoESM's counterpart exists and EXECUTES for this
+card:
+
+- NEMO: `dyn_cor_2D_init(Kmm)` (dynspg_ts.F90:359) + `dyn_cor_2D(puu_b(Kmm),
+  pvv_b(Kmm)) → zu_frc -= zu_trd*ssumask` (:363, :366-367).
+- legoESM: `ocean_model_latlon_cgrid.py:3264-3306` subtracts
+  `barotropic_coriolis_een_pre_step(state_mid.u, state_mid.v, h_k_pre)` from
+  `F_slow_u`/`F_slow_v`, gated on `coriolis_scheme="explicit_ab2"` AND
+  `barotropic_coriolis_split="live"` — both set by the `nemo_dino_kamm_mlf`
+  card (`dino.py:1331`/`:1353`); path-executes CONFIRMED (run log prints
+  `barotropic_coriolis=een_metric`, captured kw carries
+  `add_barotropic_coriolis`).
+- Coefficient time level: `barotropic_een_seed="nemo_kmm"` (`dino.py:1380`)
+  == NEMO's `dyn_cor_2D_init(Kmm)`. Stencil: the same
+  `een_barotropic_coriolis` helper the live substep loop applies
+  (`barotropic_latlon_cgrid.py:612-632`), substep-0 cancellation exact by
+  construction. Operand: NEMO uses `puu_b(Kmm)`; lego depth-averages
+  `state_mid.u = u_now + dt·du_dt_pert`, which is depth-mean-invariant
+  (`du_dt_pert` removes `F_slow_u` with the same `h_u_pre` weights,
+  `:2890`) — equivalence PLAUSIBLE-by-algebra on top of STAGE 5's CONFIRMED
+  exact weight coincidence, not directly re-measured.
+
+No mismatch — pass run-and-clean, no production change. The stale STAGE-7
+print in `spg_substep_chain.py` ("no zu_trd-equivalent at all", a
+PROVE-THE-PATH-EXECUTES failure: its read stopped at :2836-2844) was
+corrected in place; the 2026-07-29 gate-row "strongest lead" text is
+retracted in the `puu_b` row note (history preserved verbatim).
+
+**Step 2c — Rule-1e reconciliation, 1.023 vs 1.000 (STAGE 6b).** At HEAD
+the fresh run prints: `ratio predicted/measured: u=1.023  v=1.020`
+(predicted substep-1 err_norm from forcing `1.8031e-05` vs measured
+`1.7618e-05`). The historical "ratio 1.000" (predicted 2.9661e-04 vs
+measured 2.9656e-04) was measured at the PRE-wind-fix zu_frc scale
+(8.03e-3, since collapsed 16.5x). Both correct at their epochs; at HEAD it
+is **1.023 (CONFIRMED, printed line quoted)**. More informative: STAGE 6d's
+linear-accumulation closure NO LONGER holds post-fix —
+`substep-1 err_norm=1.7618e-05 x 68 substeps = 1.1981e-03 vs measured
+final(puu_b)=3.2039e-04 -> fraction explained=3.739` (pre-fix: 101.2%). So
+substep-1 remains forcing-owned (CONFIRMED), but the FINAL tail is 3.7x
+SMALLER than frozen-forcing linear accumulation predicts: the post-fix
+zu_frc residual partially cancels through the 68-substep window
+(PLAUSIBLE: boxcar cancellation of a sign-mixed residual), i.e. the
+remaining 8e-6/2e-6 ratio tails are no longer attributable to zu_frc alone
+by the old linear argument — consistent with the diffuse, non-seam-carried
+character measured in Step 2.
+
+**Files touched:** `scripts/validate/ocean_fidelity/dino_1226/spg_substep_chain.py`
+(added the ex-seam diagnostic block, STAGE 3; corrected the stale STAGE-7
+item-4 zu_trd print + comment), `fidelity_bar_gate.py`
+(prepended dated notes to `pssh`/`puu_b`/`un_adv` rows, then appended the
+alignment-pass + reconciliation findings to the same paragraphs; numeric
+`(corr, ratio)` tuples UNCHANGED — rerun reproduced them exactly, so no
+tuple edit was warranted). `tests/ocean/unit/test_fidelity_bar_gate.py`
+re-run after each edit (see test-run note appended by this task).
+
+---
+
 ## #1455 queue item — `zu_frc` centred wind (2026-08-03) — ROOT CAUSE FOUND AND FIXED, `dyn_spg_ts puu_b`/`un_adv`/`pssh` all closed massively
 
 Resumption condition (`wnd_dump_z{u,v}_frc_inc.bin` dumps exist) was met.

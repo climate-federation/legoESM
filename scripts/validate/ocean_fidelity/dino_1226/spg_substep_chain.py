@@ -595,6 +595,27 @@ def main() -> int:
     _shift_scan("puu_b_final (u-face)", _u_to_nemo(u_final_bar), nemo_puu_b, umask2)
     _shift_scan("pssh_final (T-point)", np.asarray(state_final.eta.data), nemo_pssh, land)
 
+    # --- #1455 ex-seam diagnostic: puu_b/un_adv miss the |ratio-1|<=1e-6 bar
+    # by only ~8e-6/2e-6 (STAGE 3 above). zu_frc_write_ledger.py STEP 3
+    # already localized the wind-forcing residual to column 49 (the
+    # periodic-seam/DINO-sill column, sill_lon_m_deg=1.0) in this EXACT
+    # umask2 column-index space (post _u_to_nemo slice, i.e. the same NEMO
+    # u-column axis-1 index the ledger's `_outlier_cols` prints). Test
+    # whether masking that one column out of umask2 closes puu_b/un_adv to
+    # the bar -- a pure DIAGNOSTIC re-mask, NOT a change to the official
+    # full-domain gate population (umask2 itself is untouched below).
+    print("\n=== #1455 EX-SEAM DIAGNOSTIC: umask2 with column 49 (periodic seam) "
+          "masked OUT, cf. zu_frc_write_ledger.py STEP 3 column-49 localization ===")
+    _seam_col = 49
+    umask2_exseam = umask2.copy()
+    umask2_exseam[:, _seam_col] = False
+    _n_seam = int(umask2[:, _seam_col].sum())
+    print(f"  faces excluded at column {_seam_col}: {_n_seam} "
+          f"(of {int(umask2.sum())} total wet u-faces)")
+    _report("puu_b_final [ex-seam]", _u_to_nemo(u_final_bar), nemo_puu_b, umask2_exseam)
+    _report("un_adv_final [ex-seam] (Hu_avg)", _u_to_nemo(np.asarray(Hu_avg)), nemo_un_adv,
+            umask2_exseam)
+
     # --- STAGE 4: seed-error attribution -- (A) is the 3-D velocity being
     # averaged already wrong, or (B) is the averaging/weighting wrong?
     # Cross-check via the INDEPENDENT stp_dump_07_dynspg_* dump family
@@ -750,19 +771,31 @@ def main() -> int:
     print(f"STAGE 7 v-component: err_norm live={e_zv_live:.4e}  static={e_zv_static:.4e}")
 
     # --- STAGE 7 item (4): the zu_frc -= zu_trd*ssumask subtraction
-    # (dynspg_ts.F90:304/:367). legoESM's F_slow_u construction (:2839-2841)
-    # has NO analogous post-hoc subtraction of a separately-tracked drift/trend
-    # term after the depth-integral -- the only subtractive term in the whole
-    # F_slow_u chain is the barotropic_drag_substep block (:2901-2923, OFF by
-    # default) and the du_dt_pert split (:2876, which REMOVES F_slow_u from
-    # du_dt for the 3-D perturbation -- the opposite direction, computed AFTER
-    # F_slow_u is finalized, so it cannot be the missing zu_trd term). Checked:
+    # (dynspg_ts.F90:304/:367). STALE-CLAIM CORRECTION (2026-08-03, #1455
+    # follow-up): the original note here concluded "STRUCTURAL absence" from
+    # reading only :2836-2844 -- but the subtraction DOES exist and DOES run
+    # for this card, in the explicit_ab2 + barotropic_coriolis_split="live"
+    # branch at ocean_model_latlon_cgrid.py:3264-3306 (see corrected print
+    # below for the full transcription check). Kept as a documented
+    # PROVE-THE-PATH-EXECUTES failure: the earlier read stopped at the
+    # F_slow_u assembly and missed the later lane-gated block.
     print(f"\nSTAGE 7 item 4 (zu_trd subtraction): "
           f"barotropic_drag_substep={getattr(mc, 'barotropic_drag_substep', False)}  "
-          "-- legoESM's F_slow_u has no zu_trd-equivalent post-hoc subtraction "
-          "at all (confirmed by reading ocean_model_latlon_cgrid.py:2836-2844: "
-          "F_slow_u is finalized at :2841 with nothing subtracted after); this "
-          "is a STRUCTURAL absence, not a sign/mask mismatch in an existing term.")
+          "-- CORRECTED 2026-08-03 (#1455 follow-up, prior print was STALE): "
+          "legoESM DOES have the zu_trd-equivalent subtraction for THIS lane. "
+          "The old claim ('no subtraction at all, F_slow_u finalized at :2841') "
+          "only read ocean_model_latlon_cgrid.py:2836-2844; under the kamm_mlf "
+          "card's coriolis_scheme='explicit_ab2' + barotropic_coriolis_split="
+          "'live' (dino.py:1331/1353), the later block at :3264-3306 subtracts "
+          "barotropic_coriolis_een_pre_step(state_mid.u, state_mid.v, h_k_pre) "
+          "from F_slow_u/F_slow_v -- the exact counterpart of NEMO "
+          "dynspg_ts.F90:359-367 (dyn_cor_2D_init(Kmm) + dyn_cor_2D(puu_b(Kmm)) "
+          "-> zu_frc -= zu_trd*ssumask). Transcription check: coefficient time "
+          "level matches (barotropic_een_seed='nemo_kmm', dino.py:1380); "
+          "operand matches to roundoff (state_mid.u = u + dt*du_dt_pert is "
+          "depth-mean-invariant since du_dt_pert removes F_slow_u with the "
+          "same weights, :2890). No mismatch found -- THE RULE: exact match, "
+          "no invented correction.")
 
     # --- STAGE 7 item (3): is 8.03e-3 quantitatively consistent with the
     # depth-mean of the known 3-D trend-error rows (dyn_ldf 3.9e-3, dyn_vor EEN
