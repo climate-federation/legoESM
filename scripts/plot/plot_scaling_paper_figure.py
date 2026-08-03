@@ -32,14 +32,14 @@ from matplotlib.lines import Line2D
 # (devices, ms/step). Job ids are the provenance for each series.
 SOURCES = {
     "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64), "
-                  "LL2048@64 26502539, LL2048@128 26534060",
+                  "LL2048@64 26502539, LL2048@128 26534060, LL2304@96 26628072",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
-    "oc_latlon": "26460444-501/26460365/26493592",
+    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039",
     "oc_tripole": "26493837/26493648",
     "oc_mpas": "26494036 (f64), 26494908 (f32)",
 }
@@ -51,7 +51,8 @@ PANELS = [
                 ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)]),
                 ("float32 (LL2048)", [(64, 6.73), (128, 5.58)]),
                 ],
-        scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60)],
+        scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60),
+                 ("LL2304 @96", 96, 7.87)],
         note="LL2048@128 = 39.1 GC/s",
     ),
     dict(
@@ -84,11 +85,13 @@ PANELS = [
         note="ico to 1024; lat-lon 2-D\neff 0.83 @512",
     ),
     dict(
-        key="oc_latlon", title="lat–lon", sub="576×1152 L20 · A100 NCCL",
+        key="oc_latlon", title="lat–lon", sub="LL576/LL2304 L20 · A100 NCCL",
         series=[("float32", [(1, 36.45), (2, 22.48), (4, 12.84), (8, 11.04), (16, 8.71)]),
                 ("float64", [(1, 64.81), (2, 41.63), (4, 22.09)]),
-                ("mixed (f64 store)", [(1, 52.80), (4, 19.13)])],
-        note="best arm shown",
+                ("mixed (f64 store)", [(1, 52.80), (4, 19.13)]),
+                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)])],
+        note="LL2304@128 = 13.0 GC/s
+(post-fix hundreds receipts)",
     ),
     dict(
         key="oc_tripole", title="tripole (ORCA fold)", sub="576×1152 L20 · A100 NCCL",
@@ -116,6 +119,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "float32 (LL2048)": "#009E73",
           "f64 lat-lon 2-D (r512)": "#CC79A7",
           "f32 (s8 lloyd-0)": "#009E73",
+          "f32 (LL2304)": "#CC79A7",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -125,6 +129,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "float32 (LL2048)": "^",
            "f64 lat-lon 2-D (r512)": "D",
            "f32 (s8 lloyd-0)": "v",
+           "f32 (LL2304)": "^",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 

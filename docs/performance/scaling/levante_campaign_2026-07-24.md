@@ -2070,3 +2070,19 @@ DKRZ ticket draft = this section.
 
 Falsification v3 in queue: oc LL2304 @96 (26646038) / @128 (26646039),
 exclude l50081,l50100 (superset; harmless).
+
+## OCEAN AT HUNDREDS: falsification v3 PASSES (jobs 26646038/26646039)
+
+First-ever ocean lat-lon multicontroller receipts past 64 GPUs, on the
+fixed lane (l50081+l50100 excluded; l50081 exclusion harmless-superset):
+
+| arm | cols/GPU | ms/step | GC/s |
+|---|---|---|---|
+| LL2304x4608 L20 @96 | 110.6k | 18.25 | 11.63 |
+| LL2304x4608 L20 @128 | 82.9k | 16.33 | **13.00** |
+
+* 13.0 GC/s at 128 GPUs = **2.7x the previous ocean best** (4.75 GC/s,
+  LL1152@64). Strong 96->128: speedup 1.117 for 1.333x devices =
+  **eff 0.84** — a healthy-tile strong leg on the ocean lane.
+* This closes the user directive's ocean-hundreds gap: both lat-lon
+  lanes (atm + ocean) now hold receipts at 96-128 GPUs, MPAS at 128.
