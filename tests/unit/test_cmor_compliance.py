@@ -39,17 +39,31 @@ FILL = 1.0e20
 
 # Variables the AMIP lane writes, by table, with the shape they need.
 _AMON_2D = (
-    "clivi", "clt", "clwvi", "evspsbl", "hfls", "hfss", "hurs", "pr", "prw",
-    "ps", "psl", "rlds", "rldscs", "rlus", "rlut", "rlutcs", "rsds", "rsdscs",
-    "rsdt", "rsus", "rsut", "rsutcs", "tas", "tauu", "tauv", "ts",
+    "clivi", "clt", "clwvi", "evspsbl", "hfls", "hfss", "hurs", "huss", "pr",
+    "prc", "prsn", "prw", "ps", "psl", "rlds", "rldscs", "rlus", "rlut",
+    "rlutcs", "rsds", "rsdscs", "rsdt", "rsus", "rsuscs", "rsut", "rsutcs",
+    "rtmt", "sfcWind", "tas", "tasmax", "tasmin", "tauu", "tauv", "ts",
+    "uas", "vas",
 )
 _AMON_3D = ("cli", "clw", "hur", "hus", "ta", "ua", "va", "wap", "zg")
 
-# The 15 flux variables that MUST carry ``positive`` (defect 1).
-FLUX_VARS = (
-    "hfls", "hfss", "rlds", "rldscs", "rlus", "rlut", "rlutcs", "rsds",
-    "rsdscs", "rsdt", "rsus", "rsut", "rsutcs", "tauu", "tauv",
-)
+
+def _amon_flux_vars():
+    """Amon variables the official table declares a ``positive`` for.
+
+    DERIVED from the table rather than hand-listed: vendoring a new flux
+    entry (``rtmt``, ``rsuscs``, ...) then automatically extends this gate
+    instead of silently leaving the new variable unchecked.
+    ``test_flux_var_set_is_covered`` asserts the fixture writes all of them,
+    so a table entry can never join the set without being exercised.
+    """
+    entries = tables.load_table("Amon")
+    return tuple(
+        sorted(v for v, e in entries.items() if e.get("positive"))
+    )
+
+
+FLUX_VARS = _amon_flux_vars()
 
 
 @pytest.fixture(scope="module")
@@ -198,8 +212,23 @@ def test_compliance_walk_is_non_vacuous(amip_files, tmp_path):
     assert collect_attribute_problems({("Amon", "rsut"): src}) == []
 
 
+def test_flux_var_set_is_covered():
+    """Every Amon entry declaring ``positive`` is actually written above.
+
+    Keeps the derived ``FLUX_VARS`` honest: vendoring a flux variable but
+    forgetting to write it would otherwise shrink this gate silently.
+    """
+    written = set(_AMON_2D) | set(_AMON_3D)
+    uncovered = sorted(set(FLUX_VARS) - written)
+    assert not uncovered, (
+        f"Amon table declares ``positive`` for {uncovered} but the fixture "
+        f"never writes them, so their ``positive`` is unchecked."
+    )
+
+
 def test_flux_variables_have_positive(amip_files):
-    """Defect 1: all 15 flux variables carry the table's ``positive``."""
+    """Defect 1: every flux variable carries the table's ``positive``."""
+    assert len(FLUX_VARS) >= 15, FLUX_VARS
     missing = []
     for var in FLUX_VARS:
         path = amip_files[("Amon", var)]
