@@ -1117,19 +1117,73 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "the PGF term -- see the fidelity strategy doc's harness/"
                                                               "model split. The bottom-heavy accumulation signature "
                                                               "that motivated the #1226 blocker-1 investigation is GONE."),
-    "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED [e3t=both, re-verified: "
-                                                              "e2u/e1u substitution leaves ratio 1.001180->1.001180 "
-                                                              "unchanged; harness (B) REFUTED]. RE-MEASURED at HEAD "
-                                                              "c8e5d305b (probe_hpg_vor_1226.py, RUN_GDB kt=57601): "
-                                                              "offset scan {-1,0,+1} confirms a sharp offset=0 peak "
-                                                              "(-1=0.996081, +0=0.999896, +1=0.996184); corr 0.999896/"
-                                                              "ratio 1.001180 exactly reproduced. UNCHANGED."),
-    "dyn_vor EEN v":                 (0.999932,   1.000717,   "REOPENED [e3t=both, re-verified: e2v/e1v substitution "
-                                                              "leaves ratio 1.000717->1.000717 unchanged; harness (B) "
-                                                              "REFUTED]. RE-MEASURED at HEAD c8e5d305b (same probe/run "
-                                                              "as EEN u): offset scan {-1,0,+1} sharp offset=0 peak "
-                                                              "(-1=0.996937, +0=0.999932, +1=0.996976); corr 0.999932/"
-                                                              "ratio 1.000717 exactly reproduced. UNCHANGED."),
+    "dyn_vor EEN u":                 (0.999999,   0.999886,   "*** #1455 BISECT (2026-08-03, "
+                                                              "_probe_1455_een_vor_bottom_bisect.py, fp64, "
+                                                              "LEGOESM_NEMO_E3T=both, RUN_GDB restart+vor_dump_du.bin) "
+                                                              "*** RULE-1e: old tuple (0.999896/1.001180, measured "
+                                                              "2026-07-28 at c8e5d305b) did NOT reproduce -- fresh run "
+                                                              "gives 0.999999/0.999886, independently reproduced twice "
+                                                              "by the adversarial reviewer (CONFIRMED). Bottom-4-level "
+                                                              "1.04-1.07x bias GONE: mbkt-relative |x|ratio flat "
+                                                              "0.9998-0.9999 at every bin 0..6 (9141-9758 pts/bin), "
+                                                              "absolute-level flat 0.9999-1.0000, partial-cell frac "
+                                                              "0.000 (full-step topo), topo-step split ~1.2x mild. "
+                                                              "*** RETRACTION (same session, adversarial review): an "
+                                                              "earlier draft attributed the change to commit 2cbbd837e "
+                                                              "(#1418 neumann_fill_vertex seam fix). REFUTED by direct "
+                                                              "control: reviewer reverted 2cbbd837e's diff and re-ran "
+                                                              "-- BYTE-IDENTICAL corr/ratio. The neumann_fill_vertex "
+                                                              "call (ocean_pe_latlon_cgrid.py:2174) sits under `if "
+                                                              "_mom_adv in (weno5/7/9)`; this recipe runs "
+                                                              "momentum_advection='vector_invariant' -> the al81/"
+                                                              "een_total branch (line 2194, pv_flux_al81_partial_cell), "
+                                                              "which never touches that helper. A prove-the-path-"
+                                                              "executes failure, caught before commit. *** CAUSE OF THE "
+                                                              "TUPLE CHANGE: UNATTRIBUTED. Ruled out: #1418 (revert "
+                                                              "A/B), config drift (vorticity_scheme/een_q_boundary/"
+                                                              "een_e3f_scheme byte-identical c8e5d305b vs HEAD, "
+                                                              "reviewer-verified), metric_convention fc99d825b "
+                                                              "(ancestry: predates c8e5d305b). LEADING CANDIDATE (file-"
+                                                              "mtime evidence, not proof): the ORACLE DUMPS were "
+                                                              "regenerated -- vor_dump_du/dv.bin are dated Jul 30 "
+                                                              "22:31, AFTER the Jul 28 c8e5d305b measurement (the Jul "
+                                                              "30 RUN_GDB re-run that produced the stp_dump_* files); "
+                                                              "the old tuple was measured against a different dump "
+                                                              "generation. Second lane: an unidentified lego-side "
+                                                              "change on the al81/een_total path in c8e5d305b..HEAD. "
+                                                              "Distinguishing these needs the old dump bytes (gone) or "
+                                                              "a checkout-bisect -- NOT done (out of budget). NEMO-"
+                                                              "source search for a remaining transcription diff found "
+                                                              "none: live e3f_vor under key_qco+key_vco_3d "
+                                                              "(domzgr_substitute.h90:130 `e3f_vor = e3f_0vor * "
+                                                              "(1+r3f*fe3mask)`, e3f_0vor = dynvor.F90:965-976 static "
+                                                              "nn_e3f_typ=1 masked avg, r3f = domqco.F90:172-184) vs "
+                                                              "lego's _een_e3f_h_vtx live-corner average: order-of-"
+                                                              "operations differs in principle but is inert on this "
+                                                              "full-step state (no per-column r3t spread; 9b6aca6ac "
+                                                              "A/B precedent). CLASSIFICATION per THE RULE: STOP -- "
+                                                              "no new transcription diff, no proven inheritance; "
+                                                              "residual 1.14e-4 ratio gap diffuse, still outside "
+                                                              "BAR_RATIO_EPS (~114x) and BAR_CORR. STILL DEBT. "
+                                                              "Review: agent-adversarial-review RAN (codex CLI "
+                                                              "unavailable on this account); verdict caught the false "
+                                                              "attribution above; probe mechanics (u/v face alignment, "
+                                                              "halo strip, jpkm1 slice, mbkt binning, 9758-face "
+                                                              "census) all CONFIRMED correct."),
+    "dyn_vor EEN v":                 (0.999997,   1.000214,   "*** #1455 BISECT (2026-08-03, same probe/run as EEN u "
+                                                              "above, vor_dump_dv.bin) *** RULE-1e: old tuple "
+                                                              "(0.999932/1.000717, c8e5d305b) did NOT reproduce -- "
+                                                              "fresh 0.999997/1.000214 (reviewer-reproduced, "
+                                                              "CONFIRMED). Bottom bias GONE: mbkt-relative |x|ratio "
+                                                              "flat 1.0001-1.0002 bins 0..6. Topo-step split: median-"
+                                                              "rel 7.25e-4 (step) vs 3.31e-4 (flat), ~2.2x -- mildly "
+                                                              "elevated, not dominant. Cause of the tuple change "
+                                                              "UNATTRIBUTED -- same evidence chain and same #1418 "
+                                                              "RETRACTION as the EEN u row (revert A/B byte-identical; "
+                                                              "leading candidate = Jul 30 oracle-dump regeneration). "
+                                                              "Per THE RULE: STOP. STILL DEBT (ratio ~214x outside "
+                                                              "BAR_RATIO_EPS). Review: agent-adversarial-review RAN, "
+                                                              "see EEN u row."),
     "dyn_adv KEG":                   (1.0,        1.000000,   "byte-exact"),
     "dyn_adv ZAD":                   (0.999999999594, 1.000001489, "RE-MEASURED (this task, #1226 ITEM 1/2, "
                                                               "scope-capped follow-up to commit 5bdcf219e) on the "
@@ -2709,8 +2763,13 @@ MEASURED_AT: dict[str, str] = {
     # UNCHANGED (only their notes gained a #1455 ww-inheritance finding), so
     # their MEASURED_AT stamps stay at c1ba30e39.
     "traadv_fct (SALINITY)": "ed67e7302",
-    "dyn_vor EEN u": "c8e5d305b",
-    "dyn_vor EEN v": "c8e5d305b",
+    # 2026-08-03 (#1455 bisect): re-measured at HEAD on the uncommitted
+    # working tree (this task) -- old tuple (measured at c8e5d305b) did not
+    # reproduce; cause UNATTRIBUTED (see the rows' notes: #1418 attribution
+    # retracted by revert-A/B; leading candidate is the Jul 30 oracle-dump
+    # regeneration) -- update to the real sha once committed.
+    "dyn_vor EEN u": "HEAD (uncommitted, this task)",
+    "dyn_vor EEN v": "HEAD (uncommitted, this task)",
     "dyn_adv ZAD": "5bdcf219e",  # RE-MEASURED this task (ITEM 1/2), post-fix, active-only population; supersedes c8e5d305b
     "zdftke pdlr": "e0fac585e",
     "zdftke composite avt/avm": "e0fac585e",
@@ -2779,8 +2838,8 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct horizontal tend": "traadv_fct_probe.py",
     "traadv_fct vertical upstream flux": "traadv_fct_probe.py",
     "dyn_hpg (du)": "hpg_tendency_compare.py",
-    "dyn_vor EEN u": "probe_hpg_vor_1226.py",        # cited, never committed
-    "dyn_vor EEN v": "probe_hpg_vor_1226.py",         # "same probe/run as EEN u" per its own note
+    "dyn_vor EEN u": "_probe_1455_een_vor_bottom_bisect.py",  # #1455 bisect, scripts/tmp/ (gitignored _probe_* convention, never committed -- same as its predecessor probe_hpg_vor_1226.py)
+    "dyn_vor EEN v": "_probe_1455_een_vor_bottom_bisect.py",  # "same probe/run as EEN u" per its own note
     "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
     "dyn_adv ZAD": "zad_gate_corr_ratio_1226.py",  # RE-CORRECTED (this task): real-restart, 3-D-umask (active-only) measurement post-fix 5bdcf219e; supersedes unit_harness/run_dyn_zad_probe.py (synthetic-input, independent, DEBT either way -- see MEASUREMENTS history note) and the phantom probe_1226_keg_zad_split.py
     "zdftke pdlr": "zdftke_chain_walk.py",
