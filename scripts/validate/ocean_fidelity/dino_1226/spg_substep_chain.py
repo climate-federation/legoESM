@@ -297,11 +297,18 @@ def _report(name: str, lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> 
     m = mask & np.isfinite(lego) & np.isfinite(nemo)
     lo, ne = lego[m], nemo[m]
     rms = float(np.sqrt(np.mean(ne**2)))
+    rms_lego = float(np.sqrt(np.mean(lo**2)))
     err_norm = float(np.sqrt(np.mean((lo - ne) ** 2))) / rms if rms > 0 else float("nan")
     corr = float(np.corrcoef(lo, ne)[0, 1]) if lo.size > 1 else float("nan")
+    # #1455 grind-order 1a: mean-ratio RMS(lego)/RMS(nemo), the SAME
+    # aggregate the fidelity_bar_gate.py ledger's (corr, ratio, note) tuples
+    # record -- added so this probe's re-verification runs can update those
+    # tuples directly instead of leaving "ratio" undefined here.
+    ratio = rms_lego / rms if rms > 0 else float("nan")
     near_zero = float(np.mean(np.abs(ne) < 1e-3 * (rms if rms > 0 else 1.0)))
     print(f"  {name:<28s} corr={corr:.6f}  err_norm=|lego-nemo|/RMS(nemo)={err_norm:.4e}  "
-          f"RMS(nemo)={rms:.4e}  near_zero_frac={near_zero:.3f}  n={int(m.sum())}")
+          f"RMS(nemo)={rms:.4e}  ratio(RMS(lego)/RMS(nemo))={ratio:.6f}  "
+          f"near_zero_frac={near_zero:.3f}  n={int(m.sum())}")
     return corr, err_norm
 
 

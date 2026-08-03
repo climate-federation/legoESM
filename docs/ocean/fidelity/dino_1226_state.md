@@ -1,3 +1,83 @@
+## #1455 GRIND-ORDER 1a (2026-08-03) — barotropic loop-entry seed: RE-VERIFIED EXACT, no fix warranted
+
+Task: check whether the shared upstream cause for `dyn_spg_ts pssh`/`puu_b`/`un_adv`
+(the "barotropic loop-entry seed" — depth-mean of the before-level 3-D velocity via
+`_depth_average_to_faces`) is a real transcription gap. **It is not — the seed is
+already exact.**
+
+**Transcription read**: NEMO's loop-entry seed (`puu_b(:,:,Kbb)`, `dynspg_ts.F90:573`)
+is a carried prognostic array, last written by `dyn_atf_qco` at the end of the prior
+step. Under DINO's `key_qco`/`ln_dynadv_vec` (`dynatf_qco.F90:222-235`):
+`uu_b(Kmm) = [Sum_k e3u_0(k)*(1+r3u_f)*u(k,Kmm)*umask(k)] * r1_hu_0/(1+r3u_f)`, where
+`r3u_f` (`domqco.F90::dom_qco_r3c`, called from `stpmlf.F90:317`) is a face-AREA-
+WEIGHTED MEAN of the two T-point `ssh/ht_0` ratios — **constant in k**. That factor
+cancels exactly between numerator and denominator (linear scalar outside a sum,
+identical in both), reducing the seed to a pure **`e3u_0` (static reference
+thickness)-weighted mean** — verified algebraically by hand.
+
+**legoESM comparison**: `_depth_average_to_faces`
+(`barotropic_latlon_cgrid.py:129`) builds `h_k` via `compute_layer_thickness`
+(per-T-cell live Jacobian `(eta+H_bathy)/H_bathy` times reference `h_partial`, i.e.
+NEMO's `r3t` convention but NOT yet face-averaged), then `min_cell_to_uface(h_k)`
+(min of the two live-dilated T-cell thicknesses, MOM6/MITgcm `hFacW` convention) —
+structurally a DIFFERENT order of operations (cell-dilate-then-face-min vs NEMO's
+face-static-thickness-then-uniform-dilate-cancel). The DINO kamm card already runs
+`barotropic_seed_face_depth="nemo_ssh_avg"` (`dino.py:1225`), a previously-built
+gated option for a related but distinct convention (NEMO's substep-finalization
+ssh-average face depth, `dynspg_ts.F90`'s `puu_b(Kaa)` normalization) — not this
+specific `dynatf_qco` seed formula.
+
+**Measurement (spg_substep_chain.py, fp64 explicit via `PrecisionPolicy.fp64()` +
+`require_fp64`, `LEGOESM_NEMO_E3T=both`, before-level per the time-level registry,
+real y5 DINO restart `DINO_00057600_restart.nc`)**: despite the structural
+difference, the two conventions are **numerically identical on this dataset**:
+- Seed (`un_e_init`/`vn_e_init`): corr 1.000000/1.000000, ratio 1.000000/1.000000,
+  err_norm 2.19e-16/2.22e-16 — roundoff, not the stale 2.3e-2 the row notes
+  previously carried (that number was measured under the WRONG `e3t=off` 1-D
+  ladder, already flagged stale by the notes' own 2026-07-29 "CORRECTED" text).
+- STAGE 5 PAYOFF (pre-existing in the probe): recomputing the seed with NEMO's own
+  `e3u_0*umask`/`e3v_0*vmask` weights in place of legoESM's live min-rule
+  `h_u`/`h_v` — result **also collapses to roundoff** (1.98e-16/1.93e-16).
+- STAGE 5 wet-face audit: `sum_k(h_face)` pointwise relative diff = **0.0000e+00**
+  max across all 9758 wet u-faces (n_faces_differing=0). DINO's full-step
+  bathymetry (`e3u_0==e3t_0`) makes the two conventions coincide exactly here.
+
+**⇒ NO production fix.** Per THE RULE (exact-match transcription check, no invented
+correction): the seed passed. `BarotropicConfig.barotropic_seed_face_depth`'s own
+documented "11% shelf-column floor divergence" caveat is real but NOT triggered by
+this restart — a different, narrower condition than "the seed is wrong."
+
+**The three gate rows' residual is NOT seed-inherited** — it traces to the
+already-independently-tracked `zu_frc`/substep-loop lane (STAGE 6b/7: predicted-
+from-forcing vs measured-substep-1 ratio 1.000 on the u-component), explicitly OUT
+OF SCOPE for this grind-order item per its own task brief.
+
+**Gate rows updated** (numbers only — bar constants `corr>=1-1e-9`/`|ratio-1|<=1e-6`
+untouched, no row promoted past DEBT since neither threshold is met):
+
+| row | corr (old→new) | ratio (old→new) | err_norm |
+|---|---|---|---|
+| `dyn_spg_ts pssh` | 0.999994→0.999999 | 0.998600→0.999627 | 1.271e-3 |
+| `dyn_spg_ts puu_b` | 0.999809→0.999951 | 0.987200→0.995294 | 1.127e-2 |
+| `dyn_spg_ts un_adv` | 0.999949→0.999978 | 0.991600→0.996540 | 7.546e-3 |
+
+Drift vs the stale 2026-07-29 tuples is consistent with unrelated intervening
+fixes (e.g. the 2026-08-02 bn2/e3w coverage fix) touching the 3-D state, not a
+regression. `spg_substep_chain.py::_report` gained a `ratio=RMS(lego)/RMS(nemo)`
+return (previously undefined in this probe) so the ledger's `(corr, ratio, note)`
+convention could be populated directly — trivial diagnostic-script addition, no
+production code touched, no review gate triggered. All three row notes prepend the
+2026-08-03 reconciliation ahead of the preserved 2026-07-29 history.
+
+Full gate re-run: `AT BAR 15 | DEBT 32 | UNMEASURED 5 | WAIVED 1 | total 53` —
+unchanged (as expected: a reconciliation, not a fix).
+
+**Next** (not run here, out of scope per task bound): resume the `zu_frc`
+resumption condition already recorded above (the wind-term dump comparison) if the
+campaign wants to keep grinding the barotropic momentum-row family.
+
+---
+
 ## RESUMED 2026-08-02 — bn2 live-e3w divisor coverage sweep, CLOSED (one latent gate fixed, inert on DINO)
 
 Parked item "live-e3w divisor in bn2" resolved by coverage, not by a new physics
