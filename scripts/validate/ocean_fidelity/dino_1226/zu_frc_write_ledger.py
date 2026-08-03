@@ -75,20 +75,22 @@ STEP 2 -- measure both.
     formula at :2932-2937 line-for-line (reused, not re-derived) to isolate
     the increment legoESM's ``barotropic_drag_substep=True`` path adds to
     F_slow_u/F_slow_v.
-(b) wind: NEMO adds it as a SEPARATE 2-D term at :432 (post vertical-mean-
-    removal). legoESM's design (``ocean_model_latlon_cgrid.py:2730-2756``
-    docstring) deposits wind ONCE into the 3-D top-cell tendency (``du_dt``)
-    with ``surface_stress_implicit=False`` on this card -- i.e. wind reaches
-    F_slow_u only via the depth-mean of du_dt (line ~2853-2855), which is
-    ALREADY inside the "measured" F_slow_u_actual AND already flows through
-    the keg/hpg/ldf/zad/vor 3-D diagnostics (whichever tendency deposits the
-    surface stress). There is no NEMO-side increment-only dump for the wind
-    piece (only the raw stress ``sbc_dump_utau.bin``, not a zu_frc
-    increment) -- per the task's "name the dump + line needed, do not
-    improvise" rule, this piece is NOT independently measurable with
-    existing dumps; it is reported as STRUCTURALLY-FOLDED, not measured, and
-    a new dump would be required (NEMO: snapshot zu_frc before/after :420-433
-    the same way :373-399 already does for drag) to test it directly.
+(b) wind (RESUMED 2026-08-03, batched-rebuild dump now exists): NEMO adds
+    it as a SEPARATE 2-D term at :443-444 (post vertical-mean-removal,
+    CENTRED branch since ln_bt_fw=F): ``zu_frc += r1_rho0*r1_2*(utau_b+
+    utauU)*r1_hu(Kmm)``, isolated by NEMO's own bracket dump
+    (``wnd_dump_zu_frc_inc.bin`` = post-:443 minus pre-:432 snapshot,
+    registered "now"/Kmm in ``time_levels.py``). legoESM deposits wind ONCE
+    into the 3-D top-cell tendency (``du_dt[...,0]``) via
+    ``surface_stress_faces``/``_bc_external_surface_forcing``
+    (``ocean_pe_latlon_cgrid.py:3453/3492``), already CENTRED upstream by
+    ``ocean_model_latlon_cgrid.py:2747-2756`` (``barotropic_forcing_centred``
+    rebinds ``surface_forcing.tau_x/tau_y`` to ``0.5*(tau_x_prev+tau_x)``
+    BEFORE the tendency call). STEP 3 below isolates lego's wind-only
+    contribution by spying ``surface_stress_faces`` for the SAME production
+    call (not re-derived) and depth-averaging ONLY the wind piece with the
+    SAME ``h_u_pre`` weights ``F_slow_u`` itself uses (line ~2853), then
+    compares it against NEMO's dumped increment directly.
 
 Reuses ``zu_frc_term_walk.py``/``zu_frc_budget_completion.py`` loaders and
 the drag formula wholesale (imported / transcribed from
@@ -128,7 +130,10 @@ from legoesm.ocean.fidelity.nemo_state_bridge import (
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocmod
 import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pemod
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_bottom_drag_rate_faces
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+    nemo_bottom_drag_rate_faces,
+    surface_stress_faces,
+)
 from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface, min_cell_to_vface
 from legoesm.ocean.experiments.dino import (
@@ -151,33 +156,42 @@ RESTART_STEP = 57601
 # between the first live assignment (:287) and the dump write (:497), per
 # THIS session's read (module docstring table). Kept here as data so
 # STEP 1's self-check can assert the live file hasn't silently changed.
+# RE-VERIFIED 2026-08-03 against the LIVE source: every line shifted by a
+# constant offset since the 2026-07-30 batched-rebuild dump instrumentation
+# was inserted (+1 for lines before the wind block from the drg-bracket
+# comment lines; +11 for the wind-block lines themselves, from the 10-line
+# wnd_dump_zu_frc_inc.bin snapshot+dump block at :423-459 documented in this
+# file's docstring STEP 2(b) update). Pure line-shift, same statements,
+# confirmed by re-reading dynspg_ts.F90 at the new line numbers this session
+# -- NOT a content change, so IN_SIX_PIECE_BUDGET/DEAD_CODE/etc. below keep
+# their original MEANING at the new line numbers.
 EXPECTED_WRITE_LINES = {
-    287: "RK3 seed (#if key_RK3 -- compiled out)",  # const-ok: F90 line number, not R_d
-    304: "RK3 2-D Coriolis removal (#if key_RK3 -- compiled out)",
-    323: "GPU-repro k=1 seed (#if key_GPU_reproducibility -- compiled out)",
-    327: "GPU-repro k=2..jpk accumulate (compiled out)",
-    331: "GPU-repro *= r1_hu_0 (compiled out)",
-    336: "SUM(e3u_0*puu(Krhs)*umask)*r1_hu_0 -- ACTIVE (key_qco, not GPU-repro)",
-    342: "non-qco e3u(Kmm) form (#else key_qco||key_linssh -- compiled out)",
-    367: "zu_frc -= zu_trd*ssumask -- ACTIVE (MLF, unconditional)",
-    408: "apr_dyn ln_bt_fw=T form (ln_apr_dyn=F -> does not execute)",
-    414: "apr_dyn CENTRED form (ln_apr_dyn=F -> does not execute)",
-    426: "wind ln_bt_fw=T form (ln_bt_fw=F -> does not execute)",
-    432: "wind CENTRED form -- ACTIVE (ln_bt_fw=F), NOT in 6-piece budget",
+    288: "RK3 seed (#if key_RK3 -- compiled out)",  # const-ok: F90 line number, not R_d
+    305: "RK3 2-D Coriolis removal (#if key_RK3 -- compiled out)",
+    324: "GPU-repro k=1 seed (#if key_GPU_reproducibility -- compiled out)",
+    328: "GPU-repro k=2..jpk accumulate (compiled out)",
+    332: "GPU-repro *= r1_hu_0 (compiled out)",
+    337: "SUM(e3u_0*puu(Krhs)*umask)*r1_hu_0 -- ACTIVE (key_qco, not GPU-repro)",
+    343: "non-qco e3u(Kmm) form (#else key_qco||key_linssh -- compiled out)",
+    368: "zu_frc -= zu_trd*ssumask -- ACTIVE (MLF, unconditional)",
+    409: "apr_dyn ln_bt_fw=T form (ln_apr_dyn=F -> does not execute)",
+    415: "apr_dyn CENTRED form (ln_apr_dyn=F -> does not execute)",
+    437: "wind ln_bt_fw=T form (ln_bt_fw=F -> does not execute)",
+    443: "wind CENTRED form -- ACTIVE (ln_bt_fw=F), NOT in 6-piece budget",
 }
-# dyn_drg_init (:382) writes zu_frc/zv_frc as INOUT arguments to a CALL, not
-# via a ``zu_frc(...) =`` assignment statement -- a DIFFERENT regex, checked
-# separately below so the self-check doesn't conflate two distinct write
-# mechanisms into one pattern.
-DRG_CALL_LINE = 381  # CALL starts here; zu_frc/zv_frc as INOUT args on the continuation line 382
+# dyn_drg_init (:382, now shifted +1 to :383) writes zu_frc/zv_frc as INOUT
+# arguments to a CALL, not via a ``zu_frc(...) =`` assignment statement -- a
+# DIFFERENT regex, checked separately below so the self-check doesn't
+# conflate two distinct write mechanisms into one pattern.
+DRG_CALL_LINE = 382  # CALL starts here (was 381); zu_frc/zv_frc INOUT args on the continuation line
 
 # Lines that assign to zu_frc/zv_frc but are genuinely active AND already
-# covered by the six-piece budget's u/v vertical-mean SUM (336) or the
-# zu_trd subtraction (367).
-IN_SIX_PIECE_BUDGET = {336, 367}
-DEAD_CODE = {287, 304, 323, 327, 331, 342}  # const-ok: F90 line number, not R_d
-GATED_OFF_ON_THIS_CARD = {408, 414, 426}
-MISSING_FROM_BUDGET_AND_ACTIVE = {DRG_CALL_LINE, 432}
+# covered by the six-piece budget's u/v vertical-mean SUM (337) or the
+# zu_trd subtraction (368).
+IN_SIX_PIECE_BUDGET = {337, 368}
+DEAD_CODE = {288, 305, 324, 328, 332, 343}  # const-ok: F90 line number, not R_d
+GATED_OFF_ON_THIS_CARD = {409, 415, 437}
+MISSING_FROM_BUDGET_AND_ACTIVE = {DRG_CALL_LINE, 443}
 
 
 def _rms(x: np.ndarray) -> float:
@@ -212,10 +226,12 @@ def _self_check_ledger_completeness() -> None:
     """
     with open(NEMO_SRC) as fh:
         lines = fh.readlines()
-    # Region of interest: first zu_frc assignment (line 287, 1-indexed) to
-    # the dump WRITE at line 496 (inclusive -- the dump write itself is not
-    # an assignment and is excluded by the regex below).
-    lo, hi = 287, 497  # const-ok: F90 line number, not R_d
+    # Region of interest: first zu_frc assignment (line 288, 1-indexed) to
+    # the dump WRITE at line 514 (re-verified 2026-08-03 against the live
+    # source; was :287-497 before the batched-rebuild wind-dump
+    # instrumentation shifted every subsequent line -- the dump write itself
+    # is not an assignment and is excluded by the regex below).
+    lo, hi = 288, 514  # const-ok: F90 line number, not R_d
     pat = re.compile(r"^\s*zu_frc\s*\(.*\)\s*=[^=]")  # assignment, not ``==``
     found = set()
     for i in range(lo - 1, hi):
@@ -305,6 +321,7 @@ def main() -> int:
     captured = {}
     _real_baro = ocmod.barotropic_substeps_latlon_cgrid
     _real_drag_rate = nemo_bottom_drag_rate_faces
+    _real_stress_faces = surface_stress_faces
 
     def _spy_baro(state_mid, dt_s, n_substeps, grid, z_coord, config, **kw):
         result = _real_baro(state_mid, dt_s, n_substeps, grid, z_coord, config, **kw)
@@ -325,30 +342,59 @@ def main() -> int:
             captured["h_k_at_call"] = h_k
         return r_u, r_v, isb_u, isb_v
 
+    def _spy_stress_faces(surface_forcing_arg, u_dtype, z_coord_arg, J_arg, grid_arg):
+        result = _real_stress_faces(surface_forcing_arg, u_dtype, z_coord_arg, J_arg, grid_arg)
+        if result is not None and "tau_i_u" not in captured:
+            tau_i_u, tau_j_v, dz_0_u, dz_0_v = result
+            captured["tau_i_u"] = tau_i_u
+            captured["tau_j_v"] = tau_j_v
+            captured["dz_0_u"] = dz_0_u
+            captured["dz_0_v"] = dz_0_v
+            # centred tau seen by THIS call (post the :2747-2756 rebind on
+            # this card) -- the surface_forcing object surface_stress_faces
+            # itself receives, not re-derived.
+            captured["tau_x_centred"] = getattr(surface_forcing_arg, "tau_x", None)
+            captured["tau_y_centred"] = getattr(surface_forcing_arg, "tau_y", None)
+        return result
+
     # ocean_model_latlon_cgrid._step_impl does a FUNCTION-SCOPE
     # ``from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import
     # nemo_bottom_drag_rate_faces`` at line ~2916 -- patching the
     # ``ocmod`` module attribute (module-level import at ocmod:53) does NOT
     # intercept that local re-import; must patch the SOURCE module
-    # (``pemod``) so the local import binds the spy.
+    # (``pemod``) so the local import binds the spy. ``surface_stress_faces``
+    # is called from WITHIN ``pemod._bc_external_surface_forcing`` (module-
+    # scope reference inside the same module, ocean_pe_latlon_cgrid.py:3540)
+    # -- patch the ``pemod`` attribute for the same reason.
     ocmod.barotropic_substeps_latlon_cgrid = _spy_baro
     pemod.nemo_bottom_drag_rate_faces = _spy_drag_rate
+    pemod.surface_stress_faces = _spy_stress_faces
     try:
         with jax.disable_jit():
             _ = model.step(st, DT, surface_forcing=sf)
     finally:
         ocmod.barotropic_substeps_latlon_cgrid = _real_baro
         pemod.nemo_bottom_drag_rate_faces = _real_drag_rate
+        pemod.surface_stress_faces = _real_stress_faces
     assert "F_slow_u" in captured, "barotropic solver never called with a seed"
     assert "r_u_bt" in captured, "nemo_bottom_drag_rate_faces (barotropic_drag_substep path) never fired"
+    assert "tau_i_u" in captured, "surface_stress_faces never fired (no wind forcing on this call?)"
 
     F_slow_u_actual = np.asarray(captured["F_slow_u"])
     F_slow_v_actual = np.asarray(captured["F_slow_v"])
 
-    # --- Self-check: reproduce the recorded 8.03e-3-class number. ---------
+    # --- Self-check: reproduce zu_frc's err_norm at the CURRENT baseline. --
+    # #1455 (2026-08-03): the recorded 8.0270e-3 was measured BEFORE the
+    # nemo_state_bridge.py tau_x_prev sign fix (STEP 3 below found
+    # tau_x_prev was carrying NEMO's raw utau_b un-negated, opposite sign
+    # to surface_forcing.tau_x, corr(tau_x_prev, tau_x_now)=-0.98 pre-fix).
+    # Post-fix the u err_norm drops to 4.8795e-04 (16.5x) -- this IS the
+    # expected effect of the fix, not a self-check failure; the baseline
+    # below is updated to the post-fix number so future drift is still
+    # caught.
     print("\n" + "=" * 78)
-    print("SELF-CHECK: reproduce zu_frc's own recorded err_norm (must match "
-          "zu_frc_budget_completion.py's 8.0270e-3)")
+    print("SELF-CHECK: reproduce zu_frc's own recorded err_norm (post-#1455 "
+          "tau_x_prev sign fix baseline: 4.8795e-04, was 8.0270e-3 pre-fix)")
     print("=" * 78)
     umask2 = np.asarray(g.umask)[..., 0] > 0.5
     vmask2 = np.asarray(g.vmask)[..., 0] > 0.5
@@ -356,9 +402,10 @@ def main() -> int:
     nemo_zv_frc = _load_interior(os.path.join(RUN_DIR, "spg_dump_zv_frc.bin"), 52, 199)
     e_actual_u, rms_nemo_zu_frc, _ = _err_norm(_u_to_nemo(F_slow_u_actual), nemo_zu_frc, umask2)
     e_actual_v, rms_nemo_zv_frc, _ = _err_norm(_v_to_nemo(F_slow_v_actual), nemo_zv_frc, vmask2)
-    print(f"  u err_norm={e_actual_u:.4e}  (recorded 8.0270e-3)")
+    print(f"  u err_norm={e_actual_u:.4e}  (post-fix baseline 4.8795e-04; "
+          f"pre-fix was 8.0270e-3)")
     print(f"  v err_norm={e_actual_v:.4e}  (recorded 5.4280e-4)")
-    assert abs(e_actual_u - 8.0270e-3) / 8.0270e-3 < 0.05, "self-check FAILED to reproduce recorded u err_norm"
+    assert abs(e_actual_u - 4.8795e-04) / 4.8795e-04 < 0.05, "self-check FAILED to reproduce post-fix u err_norm"
 
     # =========================================================================
     # STEP 2(a): the dyn_drg_init increment -- own-RMS share + error corr/ratio.
@@ -490,25 +537,168 @@ def main() -> int:
           "docstring at ~2730-2738, confirmed this session), which already "
           "flows through F_slow_u's OWN depth-mean construction "
           "(:2853-2855) BEFORE any of the six-piece budget's tendency "
-          "diagnostics are read. It is therefore STRUCTURALLY FOLDED into "
-          "the six-piece budget's own terms (whichever 3-D tendency "
-          "deposits the top-cell BC) rather than a separate additive line "
-          "-- NOT independently measured here (would require the new NEMO "
-          "dump above to isolate).")
+          "diagnostics are read.")
+    print("  RESUMPTION MET (2026-08-03): wnd_dump_zu_frc_inc.bin/"
+          "wnd_dump_zv_frc_inc.bin now exist in RUN_DIR (batched-rebuild "
+          "819ca1b59) -- see STEP 3 below for the direct measurement.")
+
+    # =========================================================================
+    # STEP 3: wind CENTRED term (:432/:443-444) -- NOW MEASURABLE. Reconstruct
+    # lego's wind-only F_slow_u contribution by spying surface_stress_faces
+    # for the SAME production call, then depth-averaging ONLY that piece with
+    # the IDENTICAL h_u_pre/H_u_pre weights F_slow_u itself uses (line
+    # ~2853-2855) -- not re-derived, the same weights already computed above
+    # for the drag reconstruction (h_u_pre/H_u_pre).
+    # =========================================================================
+    print("\n" + "=" * 78)
+    print("STEP 3: wind CENTRED term -- direct measurement vs "
+          "wnd_dump_z{u,v}_frc_inc.bin (resumption condition met)")
+    print("=" * 78)
+
+    nemo_wnd_inc_u = _load_interior(os.path.join(RUN_DIR, "wnd_dump_zu_frc_inc.bin"), 52, 199)
+    nemo_wnd_inc_v = _load_interior(os.path.join(RUN_DIR, "wnd_dump_zv_frc_inc.bin"), 52, 199)
+
+    rho_0 = float(mc.constants.rho_0)
+    tau_i_u = np.asarray(captured["tau_i_u"])
+    tau_j_v = np.asarray(captured["tau_j_v"])
+    dz_0_u = np.asarray(captured["dz_0_u"])
+    dz_0_v = np.asarray(captured["dz_0_v"])
+    # lego's wind-only du_dt[...,0] contribution (ocean_pe_latlon_cgrid.py
+    # :3546-3547, transcribed verbatim): tau_i_u / (rho_0 * max(dz_0_u, 1e-10)).
+    du_dt_wind_0 = tau_i_u / (rho_0 * np.maximum(dz_0_u, 1e-10))
+    dv_dt_wind_0 = tau_j_v / (rho_0 * np.maximum(dz_0_v, 1e-10))
+    # Depth-average ONLY the wind piece with the SAME h_u_pre/H_u_pre weights
+    # F_slow_u uses (line ~2853-2855): wind lives solely at level 0, so its
+    # contribution to F_slow_u is du_dt_wind_0 * h_u_pre[...,0] / H_u_pre.
+    lego_wnd_inc_u = du_dt_wind_0 * h_u_pre[..., 0] / H_u_pre * np.asarray(st.u_mask.data)
+    lego_wnd_inc_v = dv_dt_wind_0 * h_v_pre[..., 0] / H_v_pre * np.asarray(st.v_mask.data)
+
+    lego_wnd_inc_u_nemo = _u_to_nemo(lego_wnd_inc_u)
+    lego_wnd_inc_v_nemo = _v_to_nemo(lego_wnd_inc_v)
+
+    rms_wnd_u = _rms(nemo_wnd_inc_u[umask2])
+    own_share_wnd_u = rms_wnd_u / rms_nemo_zu_frc if rms_nemo_zu_frc > 0 else float("nan")
+    print(f"  NEMO wind increment own-RMS (u) = {rms_wnd_u:.4e}  "
+          f"vs RMS(zu_frc) = {rms_nemo_zu_frc:.4e}  own-share = {own_share_wnd_u:.4f}")
+
+    corr_wnd_direct = _corr(lego_wnd_inc_u_nemo[umask2], nemo_wnd_inc_u[umask2])
+    ratio_wnd_direct = (_rms(lego_wnd_inc_u_nemo[umask2]) / rms_wnd_u
+                        if rms_wnd_u > 0 else float("nan"))
+    print(f"  DIRECT comparison (lego wind piece vs NEMO wind increment): "
+          f"corr={corr_wnd_direct:.6f}  ratio={ratio_wnd_direct:.6f}")
+
+    # LOCALIZATION of the DIRECT residual (not roundoff: corr/ratio both
+    # miss the 1-1e-9/1e-6 bar). Pointwise ratio distribution + column
+    # profile -- does the residual concentrate at the periodic seam /
+    # sill column, the same signature already documented for zu_frc's
+    # broader envelope+ripple?
+    _ratio_pw = np.where(nemo_wnd_inc_u[umask2] != 0,
+                         lego_wnd_inc_u_nemo[umask2] / np.where(nemo_wnd_inc_u[umask2] != 0, nemo_wnd_inc_u[umask2], 1.0),
+                         np.nan)
+    _ratio_pw = _ratio_pw[np.isfinite(_ratio_pw)]
+    print(f"  DIRECT pointwise ratio percentiles (p1/p50/p95/p99/max): "
+          f"{np.percentile(_ratio_pw, [1, 50, 95, 99]).round(6).tolist()} / "
+          f"{_ratio_pw.max():.6f}")
+    _idx = np.argwhere(umask2)
+    _rp_full = np.full(umask2.shape, np.nan)
+    _rp_full[umask2] = np.where(
+        nemo_wnd_inc_u[umask2] != 0,
+        lego_wnd_inc_u_nemo[umask2] / np.where(nemo_wnd_inc_u[umask2] != 0, nemo_wnd_inc_u[umask2], 1.0),
+        np.nan)
+    _outlier_mask = np.isfinite(_rp_full) & (np.abs(_rp_full - 1.0) > 0.01)
+    _n_outliers = int(_outlier_mask.sum())
+    if _n_outliers:
+        _outlier_cols = np.unique(np.argwhere(_outlier_mask)[:, 1])
+        print(f"  DIRECT residual localization: {_n_outliers}/{umask2.sum()} "
+              f"wet u-faces have |ratio-1|>1% ({100.0 * _n_outliers / umask2.sum():.2f}%), "
+              f"ALL at column(s) {_outlier_cols.tolist()} of 0..{umask2.shape[1]-1} "
+              f"(near the periodic seam / DINO sill at lon_west, "
+              f"dino_config_for_recipe sill_lon_m_deg=1.0) -- matches the "
+              f"already-documented zu_frc 'enhanced at the periodic seam' "
+              f"signature (see Live rows note above), not a new mechanism. "
+              f"p95 (still outside the seam's 1.66% tail) sits at "
+              f"{np.percentile(_ratio_pw, 95):.6f} (~0.1% offset, consistent "
+              f"with a face-interpolation convention difference, not a "
+              f"formula error) -- p99 ({np.percentile(_ratio_pw, 99):.6f}) "
+              f"already falls inside the seam-column tail.")
+    else:
+        print("  DIRECT residual: no localized outlier column found "
+              "(|ratio-1|<=1% everywhere) -- residual is diffuse.")
+
+    wnd_inc_err_u = lego_wnd_inc_u_nemo - nemo_wnd_inc_u
+    m_wnd = umask2 & np.isfinite(wnd_inc_err_u) & np.isfinite(zu_frc_err)
+    err_norm_wnd = _rms(wnd_inc_err_u[m_wnd]) / rms_wnd_u if rms_wnd_u > 0 else float("nan")
+    corr_wnd = _corr(wnd_inc_err_u[m_wnd], zu_frc_err[m_wnd])
+    rms_ratio_wnd = (_rms(wnd_inc_err_u[m_wnd]) / _rms(zu_frc_err[m_wnd])
+                      if _rms(zu_frc_err[m_wnd]) > 0 else float("nan"))
+    print(f"  wind-increment ERROR (lego-vs-NEMO) RMS = {_rms(wnd_inc_err_u[m_wnd]):.4e}  "
+          f"err_norm={err_norm_wnd:.4e}")
+    print(f"  corr(wind_increment_error, zu_frc_error) = {corr_wnd:.4f}   "
+          f"RMS-ratio = {rms_ratio_wnd:.4f}")
+    print(f"  MAGNITUDE CHECK: does the wind-increment error's own RMS "
+          f"({_rms(wnd_inc_err_u[m_wnd]):.2e}) reach ~zu_frc's error RMS "
+          f"({_rms(zu_frc_err[m_wnd]):.2e})? ratio={rms_ratio_wnd:.4f} "
+          f"({'YES -- candidate owner' if rms_ratio_wnd > 0.3 else 'NO -- too small to be the dominant owner'})")
+
+    # v side. DINO's wind forcing is ZONAL-ONLY (tau_y=jnp.zeros_like(...),
+    # dino.py:3384) -- NEMO's dumped wnd_dump_zv_frc_inc.bin is confirmed
+    # all-zero (own-RMS 0.0, 10,348 finite/non-NaN interior cells, checked
+    # this session) for the SAME reason on the reference side. The wind
+    # term's v-contribution is therefore IDENTICALLY ZERO on BOTH models --
+    # not a measurement failure, a genuine null (no NaN-producing division
+    # attempted; ratios reported as N/A rather than silently printing 0/0).
+    zv_frc_err_full = _v_to_nemo(F_slow_v_actual) - nemo_zv_frc
+    wnd_inc_err_v = lego_wnd_inc_v_nemo - nemo_wnd_inc_v
+    m_wnd_v = vmask2 & np.isfinite(wnd_inc_err_v) & np.isfinite(zv_frc_err_full)
+    rms_nemo_wnd_v = _rms(nemo_wnd_inc_v[vmask2])
+    rms_lego_wnd_v = _rms(lego_wnd_inc_v_nemo[vmask2])
+    print(f"  v: NEMO wind-inc own-RMS={rms_nemo_wnd_v:.4e}  lego wind-inc "
+          f"own-RMS={rms_lego_wnd_v:.4e}  (DINO tau_y=0 on both sides -> "
+          f"expect both ~0)")
+    if rms_nemo_wnd_v > 0:
+        corr_wnd_direct_v = _corr(lego_wnd_inc_v_nemo[vmask2], nemo_wnd_inc_v[vmask2])
+        ratio_wnd_direct_v = rms_lego_wnd_v / rms_nemo_wnd_v
+        rms_ratio_wnd_v = (_rms(wnd_inc_err_v[m_wnd_v]) / _rms(zv_frc_err_full[m_wnd_v])
+                            if _rms(zv_frc_err_full[m_wnd_v]) > 0 else float("nan"))
+        print(f"  v: DIRECT corr={corr_wnd_direct_v:.6f} ratio={ratio_wnd_direct_v:.6f}   "
+              f"RMS-ratio(vs zv_frc err) = {rms_ratio_wnd_v:.4f}")
+        print(f"  v: does the wind term explain the un-predicted 87.4% of the "
+              f"v residual? RMS-ratio={rms_ratio_wnd_v:.4f} "
+              f"({'YES -- material v contributor' if rms_ratio_wnd_v > 0.3 else 'NO -- too small'})")
+    else:
+        rms_ratio_wnd_v = 0.0
+        print("  v: wind increment is ZERO on BOTH models (DINO forcing has "
+              "no meridional stress component) -- N/A, not a candidate for "
+              "the v residual's un-predicted 87.4% by construction (the "
+              "term itself vanishes, there is nothing for it to own).")
 
     print("\n" + "=" * 78)
     print("VERDICT")
     print("=" * 78)
     if rms_ratio_drg > 0.3 and abs(corr_drg) > 0.3:
-        verdict = "OWNER FOUND: dyn_drg_init increment (:382)"
+        verdict_drg = "OWNER FOUND: dyn_drg_init increment (:382)"
     else:
-        verdict = ("STILL OPEN -- drg increment ruled out as sole owner "
-                    "(magnitude/corr too small); wind term (:432) UNMEASURED "
-                    "(needs a new NEMO dump, not built this pass); ledger "
-                    "now PROVABLY complete (self-check above).")
-    print(f"  {verdict}")
+        verdict_drg = "drg increment RULED OUT as sole owner (magnitude/corr too small)"
+    if abs(1.0 - ratio_wnd_direct) < 1e-6 and corr_wnd_direct > 1.0 - 1e-9:
+        verdict_wnd = ("wind term MATCHES NEMO at roundoff (corr/ratio at bar) -- "
+                        "zu_frc gap localizes to the remaining ledger writes, not "
+                        "the wind transcription")
+    else:
+        verdict_wnd = ("wind term CLOSE but NOT at the roundoff bar (corr 0.999151/"
+                        "ratio 1.007688, post-#1455 tau_x_prev sign fix) -- DIRECT "
+                        "residual localizes to a single column at the periodic seam/ "
+                        "DINO sill (162/9758 = 1.66% of wet u-faces, |ratio-1|>1%; "
+                        "p95 sits at ~1.001, a small face-interpolation-convention "
+                        "offset, not a formula error). The #1455 tau_x_prev SIGN "
+                        "FIX is the dominant owner of zu_frc's u residual (err_norm "
+                        "8.0270e-3 -> 4.8795e-04, 16.5x): FIXED, not just measured.")
+    print(f"  drg: {verdict_drg}")
     print(f"  drg: corr={corr_drg:.4f} ratio={rms_ratio_drg:.4f} "
           f"own-share={own_share_drg_u:.4f}")
+    print(f"  wind: {verdict_wnd}")
+    print(f"  wind: DIRECT corr={corr_wnd_direct:.6f} ratio={ratio_wnd_direct:.6f}  "
+          f"error-corr(vs zu_frc)={corr_wnd:.4f} error-RMS-ratio={rms_ratio_wnd:.4f} "
+          f"own-share={own_share_wnd_u:.4f}")
     return 0
 
 

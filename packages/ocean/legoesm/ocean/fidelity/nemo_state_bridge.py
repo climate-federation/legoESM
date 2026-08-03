@@ -650,10 +650,30 @@ def bridge_before_state_topo(
     # (NEMO nit000 convention, sbcmod.F90:568-573) exactly as an un-bridged
     # cold start would, so barotropic_forcing_centred=True still gets a
     # defined ½(before+now) average rather than an AttributeError.
+    #
+    # SIGN CONVENTION (#1455 fix): ``OceanSurfaceForcing.tau_x`` is stored
+    # internally in the ATMOSPHERIC (negated) convention everywhere it is
+    # built from a raw NEMO-convention stress array -- ``dino.py:3383``
+    # (``tau_x=-forcing["tau_u_cell_2d"]``) and the sibling
+    # ``nemo_recipe.py:768`` (``tau_x=-utau``) both negate, with the same
+    # documented reason: ``surface_stress_faces``/``_bc_external_surface_
+    # forcing`` (ocean_pe_latlon_cgrid.py:3465-3466) applies the ocean
+    # REACTION ``-tau_x`` a SECOND time, so the net stress the ocean feels
+    # equals NEMO's raw ``utau``.  ``before.tau_x`` here is NEMO's raw
+    # ``utau_b`` (nemo_io.py:259, no sign manipulation) -- the SAME
+    # NEMO-convention quantity ``dino.py``/``nemo_recipe.py`` negate before
+    # storing.  Without the matching negation, ``_leapfrog_step``'s
+    # ``barotropic_forcing_centred`` average (``0.5*(state.tau_x_prev +
+    # surface_forcing.tau_x)``, ocean_model_latlon_cgrid.py:2754) mixes
+    # opposite-sign-convention operands: measured corr(tau_x_prev, tau_x_now)
+    # = -0.98 on the DINO y5 restart before this fix, collapsing the
+    # centred average to near-zero at 2/3 of wet u-faces (own-RMS ratio
+    # 0.039 vs NEMO's dumped wnd_dump_zu_frc_inc.bin increment,
+    # zu_frc_write_ledger.py STEP 3).
     if before.tau_x is not None:
-        replacements["tau_x_prev"] = jnp.asarray(before.tau_x)
+        replacements["tau_x_prev"] = -jnp.asarray(before.tau_x)
     if before.tau_y is not None:
-        replacements["tau_y_prev"] = jnp.asarray(before.tau_y)
+        replacements["tau_y_prev"] = -jnp.asarray(before.tau_y)
     return st._replace(**replacements)
 
 

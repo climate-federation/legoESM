@@ -1,3 +1,95 @@
+## #1455 queue item — `zu_frc` centred wind (2026-08-03) — ROOT CAUSE FOUND AND FIXED, `dyn_spg_ts puu_b`/`un_adv`/`pssh` all closed massively
+
+Resumption condition (`wnd_dump_z{u,v}_frc_inc.bin` dumps exist) was met.
+Measured legoESM's wind-only barotropic contribution against the dump by
+spying `surface_stress_faces` on the production call and depth-averaging
+ONLY the wind piece with the same `h_u_pre`/`H_u_pre` weights `F_slow_u`
+itself uses (`zu_frc_write_ledger.py` STEP 3, new code this session).
+
+**Found a real transcription bug, not a residual to accept.**
+`nemo_state_bridge.py::bridge_before_state_topo` seeded
+`state.tau_x_prev`/`tau_y_prev` directly from NEMO's raw `utau_b`/`vtau_b`
+(`nemo_io.py:259-260`, no sign manipulation). But every
+`OceanSurfaceForcing.tau_x` producer stores `tau_x` in the ATMOSPHERIC
+(negated) convention when built from a raw NEMO-convention stress array
+(`dino.py:3383`: `tau_x=-forcing["tau_u_cell_2d"]`; sibling
+`nemo_recipe.py:768`: `tau_x=-utau`) — `surface_stress_faces` negates AGAIN
+(`ocean_pe_latlon_cgrid.py:3465-3466`) to recover the ocean-reaction stress
+the deposit actually uses. The `barotropic_forcing_centred` average
+(`0.5*(state.tau_x_prev + surface_forcing.tau_x)`,
+`ocean_model_latlon_cgrid.py:2754`) was therefore mixing OPPOSITE-sign
+operands. Measured `corr(tau_x_prev, tau_x_now) = -0.98` on the DINO y5
+restart before the fix — the centred wind term collapsed to near-zero at
+2/3 of wet u-faces instead of tracking NEMO's dumped increment.
+
+**Fix** (2 lines, `nemo_state_bridge.py`): negate `before.tau_x`/`before.tau_y`
+when seeding `tau_x_prev`/`tau_y_prev`. Also fixed a stale test that had
+asserted the bug as correct
+(`tests/ocean/unit/test_nemo_state_bridge.py::test_bridge_before_state_topo_populates_before_fields`,
+`assert allclose(tau_x_prev, before.tau_x)` → now asserts the negation).
+50 tests pass (`test_nemo_state_bridge.py` + `test_leapfrog_integrator.py`,
+`JAX_ENABLE_X64=1`). Fix is confined to the fidelity harness's restart
+bridge — never touches a production run path.
+
+**Post-fix wind-term DIRECT measurement**: corr=0.999151, ratio=1.007688 —
+close but not roundoff. Residual localizes to 162/9758 (1.66%) of wet
+u-faces, ALL at column 49, the periodic-seam/DINO-sill column
+(`sill_lon_m_deg=1.0`) — matches the ALREADY-documented "zu_frc enhanced at
+the periodic seam" signature, not a new mechanism; p95 elsewhere sits at
+~1.001 (small face-interpolation-convention offset, not a formula error).
+v-component: DINO's wind is ZONAL-ONLY (`tau_y=jnp.zeros_like(...)`,
+`dino.py:3384`) and NEMO's `wnd_dump_zv_frc_inc.bin` is confirmed all-zero
+for the same reason — the wind term's v-contribution is IDENTICALLY ZERO on
+BOTH models, so it does NOT explain the un-predicted 87.4% of the v
+residual (still open, a genuinely separate v-only cause).
+
+**Downstream impact, re-measured (`spg_substep_chain.py`, fp64, e3t=both,
+RUN_GDB):**
+
+| row | corr (old→new) | ratio (old→new) | err_norm (old→new) |
+|---|---|---|---|
+| `zu_frc` (own) | — | — | 8.0270e-3 → 4.8795e-04 (16.5x) |
+| `dyn_spg_ts pssh` | 0.999999→1.000000 | 0.999627→1.000000 | 1.271e-3→4.4725e-05 |
+| `dyn_spg_ts puu_b` | 0.999951→1.000000 | 0.995294→0.999992 | 1.127e-2→3.2039e-04 (35x) |
+| `dyn_spg_ts un_adv` | 0.999978→1.000000 | 0.996540→0.999998 | 7.546e-3→1.3331e-04 (56x) |
+
+`puu_b`/`un_adv` remain DEBT (`|ratio-1|` misses the `1e-6` bar by
+8e-6/2e-6 respectively) but are effectively closed — the residual is
+consistent with the same sill/seam-localized wind tail plus the
+already-measured-and-refuted drag/other ledger pieces. `pssh` reads AT BAR.
+
+Gate re-run: `AT BAR 18 (was 15) | DEBT 30 (was 32) | UNMEASURED 4 (was 5) |
+WAIVED 1 | total 53`. `fidelity_bar_gate.py` rows updated (`pssh`/`puu_b`/
+`un_adv`) with the new numbers, prior history preserved verbatim below each.
+`zu_frc_write_ledger.py` extended with STEP 3 (the wind measurement) and the
+STEP 1 line-number ledger re-verified against the live NEMO source (every
+line shifted by the batched-rebuild dump instrumentation; table updated,
+self-check passes).
+
+**Not chased further (out of scope, in-budget)**: the 1.66%-of-cells
+sill/seam residual and the still-open "why doesn't puu_b/un_adv hit
+`1e-6`" tail — both small, localized, and consistent with already-recorded
+signatures (periodic-seam enhancement, face-interpolation-convention
+offsets). The v-residual's second, wind-independent cause remains open.
+
+**RISK FLAG for prior twin/budget results**: `bridge_before_state_topo` is
+called by every #1226 twin script that seeds a leap-frog before-state under
+`barotropic_forcing_centred=True` (kamm_twin_90d.py, spg_substep_chain.py,
+zu_frc_*.py, momentum_jacobian_probe.py, atf_filter_walk.py, and others —
+grep `bridge_before_state_topo` under `scripts/validate/ocean_fidelity/
+dino_1226/`). Any PRIOR measurement from one of these scripts that touched
+a centred-wind-dependent quantity in its FIRST few steps (before
+`_seed_centred_forcing_carry` has overwritten `tau_x_prev` with a
+model-computed value) was built on the pre-fix sign bug and should be
+treated as suspect until re-run. This is a HARNESS-ONLY bug (never a
+production path) — no production climate run is affected — but any
+"twin day-1/step-1" wind-sensitive number in this file predating
+2026-08-03 may need re-verification if it becomes load-bearing again.
+Not re-run here (out of scope/budget for this task); flagging so a future
+session doesn't quote a stale number as current.
+
+---
+
 ## #1455 queue item 3 (2026-08-03) — CEILING-PROOFs for the 4 `ldf_slp` rows (wslpi/wslpj/uslp/vslp)
 
 Task: write quantitative ceiling-proofs for the four `ldf_slp` rows, extending the
