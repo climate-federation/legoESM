@@ -169,8 +169,18 @@ jobs:
           # dispatch hardening, scripts layout, ...). Stopping at the first
           # failure reports one violation per run and hides the rest, which is
           # how ~30 of them accumulated unnoticed.
+          #
+          # -n 4 --dist loadfile: spread the files over four WORKER PROCESSES.
+          # Run as one process, this set reliably dies partway through with
+          # "Fatal Python error: Segmentation fault" inside XLA compilation of a
+          # reverse-mode HLO (see docs/dev-notes/xla-compile-crash.md).  Every
+          # subset passes on its own, so breaking the sequence up avoids it —
+          # and it is ~4x faster.  NOTE this is a mitigation, not a guarantee:
+          # loadfile keeps a worker alive across the files it is handed, so
+          # process state still accumulates within a worker.  If the crash
+          # returns, the deterministic fallback is one pytest process per file.
           python -m pytest "${files[@]}" --timeout=300 \
-            --tb=short -q
+            --tb=short -q -n 4 --dist loadfile
         shell: bash
         timeout-minutes: 30
       - name: FV3-native grid fidelity tests (phase 1)
