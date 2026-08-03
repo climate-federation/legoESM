@@ -102,3 +102,13 @@ def test_shape_mismatch_refused():
 def test_wrong_leading_axis_raises():
     with pytest.raises(ValueError):
         geom_band_fingerprint(np.ones((3, 2)), N_BANDS)
+
+
+def test_scalar_type_divergence_distinguished():
+    # codex r21: python 0 and 0.0 share raw bytes on 64-bit hosts; the
+    # dtype-aware leaf digest must still tell them apart.
+    from legoesm.parallel.geometry_consistency import leaf_digest48
+
+    assert leaf_digest48(0) != leaf_digest48(0.0)
+    assert leaf_digest48(1.5) == leaf_digest48(1.5)
+    assert leaf_digest48(np.float32(1.5)) != leaf_digest48(np.float64(1.5))

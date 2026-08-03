@@ -45,6 +45,7 @@ import numpy as np
 
 __all__ = [
     "addressable_shard_put",
+    "leaf_digest48",
     "assert_pytree_bytes_equal",
     "band_fingerprint",
     "band_fingerprints_agree",
@@ -703,6 +704,20 @@ def checked_shard_put(arr, name, sharding, *, context, n_bands):
         host.shape, sharding, lambda idx: host[idx])
 
 
+def leaf_digest48(x) -> float:
+    # Dtype-AWARE 48-bit digest of one numeric leaf. content_hash48 alone
+    # hashes raw bytes, so python 0 and 0.0 (both eight zero bytes on a
+    # 64-bit host) collide although jnp.asarray builds distinct
+    # integer/float inputs from them (codex r21). The dtype code and shape
+    # are folded in so a cross-rank TYPE divergence fails the gate too.
+    import hashlib
+
+    a = np.asarray(x)
+    meta = f"{np.dtype(a.dtype).num}:{a.shape}".encode()
+    h = hashlib.blake2b(meta + a.tobytes(), digest_size=6)
+    return float(int.from_bytes(h.digest(), "big"))
+
+
 def assert_pytree_bytes_equal(tree, what):
     """Cheap multi-process replacement for the per-leaf assert_equal that
     :func:`checked_shard_put`-style puts bypass on NON-band inputs (state /
@@ -718,8 +733,7 @@ def assert_pytree_bytes_equal(tree, what):
     # bypass the gate. Non-numeric leaves (None, strings) stay excluded.
     leaves = [x for x in jax.tree_util.tree_leaves(tree)
               if hasattr(x, "ndim") or isinstance(x, (int, float, complex))]
-    vals = np.array([content_hash48(np.asarray(x)) for x in leaves],
-                    dtype=np.float64)
+    vals = np.array([leaf_digest48(x) for x in leaves], dtype=np.float64)
     g = multihost_utils.process_allgather(vals)
     if not bool(np.all(g == g[0])):
         bad = [i for i in range(len(leaves))
