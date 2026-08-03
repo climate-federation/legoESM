@@ -32,7 +32,7 @@ import pytest
 netCDF4 = pytest.importorskip("netCDF4")
 
 from legoesm.io import cmor_table_loader as tables  # noqa: E402
-from legoesm.io.cmor_output import CFWriter  # noqa: E402
+from legoesm.io.cmor_output import CFWriter, merged_variable_attrs  # noqa: E402
 
 # CMIP6 fill/missing sentinel (every official table Header: "1e20").
 FILL = 1.0e20
@@ -391,6 +391,41 @@ def test_filenames_carry_time_range(amip_files):
         if not re.search(r"_\d{6,8}-\d{6,8}$", stem):
             bad.append(f"{stem}: no _YYYYMM-YYYYMM / _YYYYMMDD-YYYYMMDD suffix")
     assert not bad, "filename problems:\n  " + "\n  ".join(bad)
+
+
+# ---------------------------------------------------------------------------
+# A producer overriding cell_methods must not drop the table's area clause
+# ---------------------------------------------------------------------------
+
+def test_cell_methods_override_keeps_the_area_clause():
+    """A producer supplies the TIME clause; the AREA clause is the table's.
+
+    The MPAS lean path relabels snapshot-sampled fields to be honest about
+    sampling.  Those overrides were written as a bare ``"time: point"``,
+    which on ``tas``/``psl`` silently reintroduced the missing-``area:``
+    defect on exactly the snapshot-fed files.
+    """
+    amon = tables.load_table("Amon")
+
+    # tas is an area variable -> the area clause is restored.
+    got = merged_variable_attrs(amon["tas"], {"cell_methods": "time: point"})
+    assert got["cell_methods"] == "area: mean time: point"
+
+    # ua is a plev variable with a BARE table cell_methods -> no area
+    # clause may be invented for it.
+    got = merged_variable_attrs(amon["ua"], {"cell_methods": "time: point"})
+    assert got["cell_methods"] == "time: point"
+
+    # An override that already carries an area clause is left alone.
+    got = merged_variable_attrs(
+        amon["tas"], {"cell_methods": "area: mean time: maximum"}
+    )
+    assert got["cell_methods"] == "area: mean time: maximum"
+
+    # No override -> exactly the table entry, and other extras still merge.
+    got = merged_variable_attrs(amon["tas"], {"comment": "hi"})
+    assert got["cell_methods"] == amon["tas"]["cell_methods"]
+    assert got["comment"] == "hi"
 
 
 # ---------------------------------------------------------------------------
