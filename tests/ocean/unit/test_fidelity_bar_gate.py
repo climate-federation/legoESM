@@ -163,3 +163,42 @@ def test_unit_call_harness_scripts_exist_on_disk():
     assert (scripts_dir / "unit_harness" / "run_dyn_zad_probe.py").is_file()
     assert (scripts_dir / "unit_harness" / "run_dom_qco_r3c_probe.py").is_file()
     assert (scripts_dir / "ww_inheritance_walk.py").is_file()
+
+
+def test_traadv_fct_ww_inheritance_script_exists_and_is_cited():
+    """#1455: traadv_fct_ww_inheritance.py (the ww-substitution/quantitative-
+    inheritance test for the traadv_fct family, following the same pattern
+    as ww_inheritance_walk.py for dyn_adv ZAD) is a real committed file, and
+    every row it re-measured cites it in the gate note -- not just a claim
+    that would silently rot if the file were ever deleted/renamed."""
+    scripts_dir = SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"
+    assert (scripts_dir / "traadv_fct_ww_inheritance.py").is_file()
+
+    mod = _load_module()
+    rows_citing_it = [
+        "traadv_fct fluxes",
+        "traadv_fct tendency (T)",
+        "traadv_fct horizontal tend",
+        "traadv_fct vertical upstream flux",
+        "traadv_fct (SALINITY)",
+    ]
+    for term in rows_citing_it:
+        _corr, _ratio, note = mod.MEASUREMENTS[term]
+        assert "traadv_fct_ww_inheritance.py" in note, (
+            f"{term!r} note does not cite traadv_fct_ww_inheritance.py")
+        assert "#1455" in note
+
+
+def test_traadv_fct_salinity_row_measured_at_updated():
+    """The SALINITY row's tuple genuinely moved on re-measurement (Rule 1e
+    reconciliation, not a silent overwrite): MEASURED_AT must reflect the
+    NEW measuring commit, not the stale c1ba30e39 stamp the other 4
+    (unchanged-tuple) traadv_fct rows still correctly carry."""
+    mod = _load_module()
+    assert mod.MEASURED_AT["traadv_fct (SALINITY)"] != "c1ba30e39"
+    for term in ("traadv_fct fluxes", "traadv_fct tendency (T)",
+                 "traadv_fct horizontal tend",
+                 "traadv_fct vertical upstream flux"):
+        assert mod.MEASURED_AT[term] == "c1ba30e39", (
+            f"{term!r}'s tuple did not change -- MEASURED_AT should stay "
+            "c1ba30e39 unless the corr/ratio numbers themselves moved")
