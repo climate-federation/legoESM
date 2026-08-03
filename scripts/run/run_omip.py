@@ -2372,12 +2372,21 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
             "--enable-latlon-spmd).")
-    _dyn_step = (spmd_step if spmd_step is not None
-                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
+    # aux threading (codex r18 P1): the SPMD step's sharded geometry
+    # stacks must cross THIS jit boundary as an ARGUMENT — captured in the
+    # closure they become outer-trace constants whose value jax cannot
+    # fetch for non-addressable arrays on multicontroller (see
+    # make_sharded_ocean_step's aux note).
+    if spmd_step is not None:
+        def _dyn_step(st, d, aux=None, **kw):
+            return spmd_step(st, d, aux=aux, **kw)
+    else:
+        def _dyn_step(st, d, aux=None, **kw):
+            return model._step_impl(st, d, **kw)
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step,
-                 ice_state=None):
+                 ice_state=None, aux=None):
         def step_body(carry, idx):
             if enable_sea_ice:
                 state_in, ice_in = carry
@@ -2454,7 +2463,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 sponge_step = sponge
 
             new_state = _dyn_step(
-                state_in, dt,
+                state_in, dt, aux=aux,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
             )
 
@@ -2572,8 +2581,12 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
             "--enable-latlon-spmd).")
-    _dyn_step = (spmd_step if spmd_step is not None
-                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
+    if spmd_step is not None:
+        def _dyn_step(st, d, aux=None, **kw):
+            return spmd_step(st, d, aux=aux, **kw)
+    else:
+        def _dyn_step(st, d, aux=None, **kw):
+            return model._step_impl(st, d, **kw)
 
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
@@ -2587,7 +2600,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
                      block_start_day, block_start_day_forcing,
-                     ice_state=None):
+                     ice_state=None, aux=None):
             dt_days = dt / 86400.0
 
             def step_body(carry, idx):
@@ -2724,7 +2737,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
                             if enable_sponge else None)
                 new_state = _dyn_step(
-                    state_in, dt, freshwater=fw,
+                    state_in, dt, aux=aux, freshwater=fw,
                     surface_forcing=sf, sponge=sponge_k,
                 )
 
@@ -3389,6 +3402,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # (ocean_state, ice_state); thread the ice state across blocks.
         _ice_on = bool(jra55_state.get("enable_sea_ice", False))
         ice_state = jra55_state.get("ice_state_init") if _ice_on else None
+        # SPMD aux (codex r18 P1): pass the step's sharded geometry stacks
+        # into every block_fn call as an ARGUMENT (see the builders' note).
+        _spmd_aux = getattr(spmd_step, "aux", None)
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt, spmd_step=spmd_step)
@@ -3450,7 +3466,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        ice_state,
+                        ice_state, aux=_spmd_aux,
                     )
                 else:
                     state = bfn(
@@ -3458,17 +3474,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
+                        aux=_spmd_aux,
                     )
             else:
                 if _ice_on:
                     state, ice_state = block_fn(
                         state, atm_stack, runoff_stack,
-                        jnp.int32(block_start), ice_state,
+                        jnp.int32(block_start), ice_state, aux=_spmd_aux,
                     )
                 else:
                     state = block_fn(
                         state, atm_stack, runoff_stack,
-                        jnp.int32(block_start),
+                        jnp.int32(block_start), aux=_spmd_aux,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
