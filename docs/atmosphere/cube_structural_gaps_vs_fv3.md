@@ -127,3 +127,25 @@ This promotes the cc↔corner projection from "ranked #1 by inspection" to
 **measured material**, and is the first quantitative attribution for the dead
 jet. Keeping the prognostic state in D staggering between steps is therefore not
 a fidelity nicety — it is worth a factor of ~2 in eddy activity here.
+
+## MEASURED, 200 DAYS: persistent-D FIXES the dead jet (2026-08-03)
+
+The paired same-commit 200-day run (PR #1462) settles it. One knob
+(`LEGOESM_HS_PERSISTENT_D=1`), both verticals, control reproducing the audit
+baselines exactly:
+
+| vertical | control (cc round-trip) | treatment (persistent-D) | ratio |
+|---|---|---|---|
+| sigma | 13.0 m/s FAIL | **38.6 m/s PASS** | **2.97** |
+| hybrid | 12.6 m/s FAIL | **40.9 m/s PASS** | **3.25** |
+
+Both treatment arms clear the #1028 gate (≥ 20) **and** the ~30 m/s Held-Suarez
+benchmark, sustained through day ~195 (equilibrated, not transient). The frozen
+bands (≥ 1.50 = major contributor) are exceeded by ~2×. The 20-day A/B's factor
+2.63 was, as stated at the time, a lower bound: at equilibrium the outer
+projection alone accounted for the bulk of the dead jet.
+
+Residual, still unmeasured: the physics adapter converts D → cc on every RK
+stage and lifts tendencies back (`primitive_eq_cdgrid.py:1613`/`:1045`). One
+seed, C36, env-gated knob — the default flip is a separate decision requiring
+the full matrix.
