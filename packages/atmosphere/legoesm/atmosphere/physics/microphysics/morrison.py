@@ -1437,6 +1437,79 @@ def morrison_microphysics(
     dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
 
+    # SAM N_r consistency limiter — the RAIN analogue of the N_i/N_s/N_g
+    # limiters, previously MISSING.  Rain was the only prognostic number
+    # species with no post-step number/mass consistency bound, so orphan rain
+    # number (q_r ~ 0, N_r > 0) was IMMORTAL: every N_r sink is proportional
+    # to the rain mass or to a mass tendency — evaporation (donor-clamped to
+    # q_r/dt above), self-collection/breakup (both carry q_r), Bigg freezing
+    # (acts on rain mass) — so all vanish together as q_r -> 0 and the net
+    # tendency in an orphan cell is EXACTLY zero at any N_r (measured over
+    # 1e6..1e22).  Being inert, the orphan number was then advected as a
+    # dycore tracer and accumulated without bound wherever the flow converged
+    # and no mass-proportional sink could reach it: the production reference
+    # reached N_r = 2.8e19 /m^3 by day 120 with 42% of all points orphaned and
+    # the extremes piled into the STRATOSPHERE (median level 2, ~20 hPa,
+    # T ~ 207 K), i.e. rain number where rain cannot exist.  This is the exact
+    # failure mode the module already documents and fixes for ICE below
+    # ("century3 at N_i = 1e193"); rain was simply missed.
+    #
+    # UNITS — NOT a copy of the ice algebra.  N_i/N_s/N_g are PER-MASS [1/kg]
+    # but N_r is PER-VOLUME [1/m^3] (see output.py:30-33 and the LAMR unit note
+    # above), so inverting the SAME slope definition used for the fall speed,
+    #     LAMR^3 = pi * rho_water * N_r / (rho * q_r)     (:1118-1120)
+    # gives N_r = LAMR^3 * rho * q_r / (pi * rho_water) — carrying an EXTRA
+    # factor of rho that the per-mass ice/snow expressions do not have.
+    # Reusing config.lamr_min/lamr_max (SAM LAMMINR/LAMMAXR), the same bounds
+    # already applied to lamr at :1121; no new coefficient is introduced.
+    #
+    # SIGN/MONOTONICITY (mandatory check, CLAUDE.md): LAMR is an INVERSE-size
+    # slope, so at fixed mass a LARGER LAMR means SMALLER drops and therefore
+    # MORE of them: N_r is monotonically increasing in LAMR^3.  Hence
+    # lamr_max -> n_r_hi and lamr_min -> n_r_lo, and n_r_hi >= n_r_lo since
+    # lamr_max > lamr_min.  Both bounds are proportional to q_r_new, so when
+    # the rain mass vanishes both collapse to zero and the clip drives N_r to
+    # zero — the orphan number is removed rather than merely bounded.
+    #
+    # CONSERVATION: this is a NUMBER sink with no mass counterpart, which is
+    # correct precisely because there is no mass to conserve (q_r < QSMALL).
+    # dq_r_dt is untouched, so the water budget is unchanged.  Identical
+    # asymmetry to the N_i clearing below.
+    # EXCLUSIONS PORTED FROM THE SIBLING LIMITERS — stated explicitly:
+    #   KEPT  the UPPER bound (lamr_max -> n_r_hi).  This is what bounds the
+    #         orphan runaway, and it is what makes the number collapse with the
+    #         mass (n_r_hi ∝ q_r_new -> 0).
+    #   KEPT  the explicit QSMALL clearing (see below), from the N_i limiter.
+    #   KEPT  the post-step mass reference q_r_new (SAM in-place reset
+    #         semantics); using the OLD mass made N_i alternate 0 <-> lami_min
+    #         across steps, per the N_i comment below.
+    #   DROPPED the LOWER bound (lamr_min -> n_r_lo), which N_i/N_s/N_g DO
+    #         apply.  Reason: the lower bound CREATES rain number wherever rain
+    #         MASS appears without number — and the scheme deliberately routes
+    #         no number in the single-moment snow/graupel melting path, which
+    #         `tests/unit/test_m2005_number_budget_gaps.py::
+    #         TestMeltNumberBecomesRainNumber::
+    #         test_single_moment_snow_has_no_number_to_route` pins at exactly
+    #         0.0.  Applying it made that oracle test fail with dN_r_dt =
+    #         +0.0811.  Manufacturing drops at the max permitted size is the
+    #         OPPOSITE defect (too FEW drops) from the orphan runaway this fix
+    #         targets, is not needed to bound it, and would silently change the
+    #         documented single-moment melting behaviour.  Out of scope: one
+    #         change at a time.  If a "rain mass with no number" defect is ever
+    #         demonstrated, the lower bound is the fix for THAT, on its own
+    #         evidence.
+    q_r_new = jnp.maximum(jnp.clip(q_r, 0.0) + dq_r_dt * dt, 0.0)
+    _cr_psd = jnp.pi * constants.rho_water
+    n_r_hi = config.lamr_max ** 3 * rho * q_r_new / _cr_psd
+    n_r_new = jnp.minimum(jnp.clip(N_r, 0.0) + dN_r_dt * dt, n_r_hi)
+    # Explicit QSMALL clearing, kept from the N_i limiter and deliberately NOT
+    # dropped: the n_r_hi bound already tends to zero with q_r_new, but the
+    # explicit gate makes the orphan case exact at q_r_new == 0 and keeps the
+    # AD path well-defined there.  (N_s/N_g omit it; they are not the species
+    # that accumulated, and adding it there is out of scope for this fix.)
+    n_r_new = jnp.where(q_r_new > 1.0e-14, n_r_new, 0.0)
+    dN_r_dt = (n_r_new - jnp.clip(N_r, 0.0)) / jnp.maximum(dt, 1.0e-10)
+
     # SAM N_i consistency limiter (mirrors the N_s pattern below): bound the
     # POST-STEP number so LAMI stays in [lami_min, lami_max] w.r.t. the
     # POST-STEP mass, and CLEAR the number entirely below QSMALL — orphan
