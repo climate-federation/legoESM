@@ -4294,9 +4294,16 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
         # projection costs a factor 2.63 in banded EKE and 1.9x in poleward
         # u'v' -- a MATERIAL eddy suppressor and the leading measured
-        # candidate for the #1028 dead jet.  Diagnostics convert D -> cc at
-        # diagnostic cadence only.  Unset => bit-identical to the previous
-        # behaviour (the state never converts, _cc is the identity).
+        # candidate for the #1028 dead jet.  PRECISION (codex pd-review
+        # MEDIUM): this keeps the state persistent-D BETWEEN MACRO STEPS;
+        # the existing physics adapter still converts D -> cc at every RK
+        # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
+        # :1613/:1045), so the inner conversions remain.  Matrix
+        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
+        # bit-identical (the state never converts, _cc is the identity).
+        # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
+        # sqrt(u^2+v^2) at centres -- the same operator either way, since
+        # the legacy wrapper also exits through fv3_to_hydrostatic.
         _hs_persistent_d = (
             os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
             in ("1", "true", "yes", "on"))
