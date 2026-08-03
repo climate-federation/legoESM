@@ -242,6 +242,29 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # steps/day at rn_rdt=2700s per namelist_cfg nn_it000/nn_itend). Distinct
     # per-day file, never REPLACE'd across days (same anti-provenance-trap
     # reasoning as wzv_dump_ww_call1/call2 above). ---
+
+    # --- #1455 A5 (2026-08-02): NEMO per-cell isoneutral(Redi) tracer trend
+    # ttrd_ldf, dumped into the per-rank restart via iom_rstput (MY_SRC/
+    # trddump.F90 trddump_write, called from restart.F90:187). Registered by
+    # its BEFORE (Kbb) time level: traldf_iso_lap's tracer gradients
+    # zdit/zdjt/zdkt read pt_in(...,Kbb) at traldf_iso_scheme.h90:26-30, i.e.
+    # the diffusive operator differentiates the before-level tracer field, not
+    # the now-level one. The trend is captured in trddump_tra
+    # (trdtra.F90:348) from ptrdx = the Krhs delta traldf.F90:95-112
+    # accumulated across the single traldf_iso_lap call (horizontal A11/A22 +
+    # the K33 vertical diagonal combined; trdtra.F90:376 case jptra_ldf). This
+    # is a NetCDF restart variable, not a ".bin" dump, but its level is
+    # recorded here for the same reason as every entry above: comparing it
+    # against a now-level lego field silently substitutes a T_now-T_before
+    # difference for "error". lego's box_heat_budget evaluates iso_redi+k33 on
+    # the state's OWN T/S (2-level scheme, no NEMO before-twin) -- flagged, not
+    # asserted equivalent (see scripts/tmp/redi_localize_1455_a5.py).
+    "ttrd_ldf": ("before", "traldf_iso_scheme.h90:26-30 zdit/zdjt/zdkt read "
+                            "pt_in(...,Kbb); accumulated to Krhs traldf.F90:95, "
+                            "captured trdtra.F90:348/376 (jptra_ldf), written "
+                            "restart.F90:187 -> MY_SRC/trddump.F90 trddump_write"),
+    "strd_ldf": ("before", "salinity twin of ttrd_ldf (same traldf_iso_lap "
+                            "Kbb read, trddump_tra ptrdy)"),
 }
 
 _FACE10_WZV_SOURCE = (

@@ -498,6 +498,77 @@ increment −3.78; NEMO cell integration reproduces lego's BOL−EUL to ~1% on a
    CONDITIONING-LIMITED `ldf_slp` rows, slope structure in the deep southern box at the y20
    state, and the k33 wiring.
 
+## #1455 A5 — TRUE same-state Redi comparison (2026-08-02): NO positive operator seed; delta OPPOSITE-signed & 10× smaller
+
+The completing measurement for the Redi lane. Prior "localization" (sibling probe
+`redi_localize_1455_a5.py`) compared lego's Redi field at the y20 origin against NEMO's
+`ttrd_ldf` at kt=230720 — NEMO's OWN trajectory **10 days later** — a confound. Here NEMO's
+`ttrd_ldf` is the trend accumulated during **STEP 1** out of the y20 restart (kt=230401,
+`RUN_TWIN_STEP1/`, nn_stock=1), evaluated reading Kbb = the IDENTICAL y20 state lego is
+evaluated on. Both sides in NEMO's (rho0=1026, cp=3991.868) convention. fp64 explicit
+(dtypes printed). Time level registry-checked: `time_level_for_dump("ttrd_ldf")=="before"`
+(traldf_iso_scheme.h90:26-30 Kbb read; new registry entry in `time_levels.py`).
+Probe: `scripts/tmp/redi_samestate_1455_a5.py`.
+
+**BIT-IDENTITY CONTROL (mandatory) — PASSED.** `RUN_TWIN_STEP1` (nn_stock=1) vs
+`RUN_TWIN_FACE10` (nn_stock=32) day-1 (step-32, kt=230432) restarts are **bit-for-bit
+identical** across all 16 rank pieces for every prognostic field (tn/sn/un/vn/tb/sb/ub/vb/
+sshn/sshb). ⇒ the trend-dump cadence does not perturb the trajectory; the step-1 `ttrd_ldf`
+is on the genuine y20 trajectory. Day-0 gate also 0.0 (max|dT|=max|d_eta|=max|du|=0), before-
+bridge tb/sb/ub/vb = 0.0.
+
+**Deep southern box (rows 14-22, k>=27 i.e. >1400 m), STEP 1, lego − NEMO, W/m2 on the box:**
+
+| | box W/m2 |
+|---|---|
+| lego iso_redi+k33 | **−3.028** |
+| NEMO ttrd_ldf (step 1) | **−2.951** |
+| **DELTA (lego − NEMO), same-state** | **−0.077** |
+| [context] lego(t=0) − NEMO(step 32) | −0.068 |
+
+**RECONCILIATION (Rule 1e) vs the recorded year-mean +0.77 (same lego−NEMO convention):**
+- **SIGN IS OPPOSITE.** Recorded Q1→Q4 iso_redi delta = +0.37, +0.50, +0.88, +1.21 (lego
+  LESS negative ⇒ warming excess into box). At the truly identical state lego's Redi is
+  **MORE** negative than NEMO (−3.028 vs −2.951) ⇒ delta **−0.077**. Magnitude ~10× smaller
+  than the +0.77 year mean and ~5× smaller than the +0.37 Q1 mean.
+- ⇒ **CONFIRMED: there is NO positive operator-level Redi seed on the identical state.** The
+  +0.77 accumulated excess is NOT present as a same-state operator mismatch at t=0 — it must
+  grow from state divergence (the two trajectories' Redi fields diverging as the states drift),
+  supporting the attractor / divergence picture rather than a fixed operator bias. This mirrors
+  the "+0.37 operator seed" retraction (that was ~86% adv-form-vs-flux-form bookkeeping): the
+  Redi lane, like the advection lane, shows **no commensurable same-state seed**.
+
+**CAVEAT — the two sides are NOT perfectly the same quantity (K33 hole; verified this run).**
+lego's `k33` bucket is **identically 0** (nonzero frac 0.0, max 0.0 at fp64 — re-confirmed),
+so lego's `iso_redi+k33` = horizontal isoneutral Redi ONLY, while NEMO's `ttrd_ldf` = horizontal
+Redi **+ the K33 vertical diagonal** (traldf_iso_scheme.h90:128/136). The delta therefore
+carries lego's-missing-K33 wherever NEMO's K33 is nonzero. This is visible as the cancelling
+K33/diapycnal triple at k=24/25/26 (just above the horizon; net +0.007, so it barely touches
+the k>=27 box integral) and taints the k>=27 integral by whatever NEMO K33 lives below 1400 m
+(recorded NEMO K33 analog ~5.6% of its vertmix ⇒ small, same order as the −0.077). NET: the
+**"no positive seed / opposite sign" conclusion is robust** (the horizontal-Redi comparison is
+like-for-like and the K33 hole can only make lego MORE negative, reinforcing the negative
+delta), but the exact −0.077 magnitude is confounded by the K33 split at the ~5% level — do not
+over-precision it. The parked k33-split hole is the clean follow-up.
+
+**Structure (CONFIRMED for the y20 snapshot; localization target, not the ~0 magnitude):**
+- **Depth**: below the 1400 m horizon the per-level deltas are small (each k row ~−0.01 to
+  −0.09 W/m2). The dominant signal sits in a **cancelling K33/diapycnal triple just ABOVE the
+  horizon** (k=24/25/26 = 915/1059/1220 m: −0.353, +0.483, −0.138 W/m2, net +0.007) — a
+  vertical-diagonal (K33) placement difference, not a horizontal Redi leak. Consistent with
+  the parked "lego k33 bucket ≡ 0 vs NEMO zdf−zdfp ~5.6%" hole.
+- **Latitude**: deltas peak at rows 11-19 (−65 to −62°S, each ~−0.09 to −0.10 W/m2) — the
+  deep-convection southern rows — decaying northward. Same rows the surface warm bias lives.
+- **Concentration**: top 10% of deep cells carry 58% of |W| / 75% of signed W (moderate, not
+  a hotspot). Top-10 cells: rows 18-21, depth 2115-2429 m, **steep slopes |slope|~8-11e-3**
+  (box median 2.6e-3), N²~4-7e-7 — high-slope deep cells where lego's Redi is more negative.
+
+**VERDICT DATA (for the caller, no verdict baked in the probe):** the same-state Redi delta is
+~0 (−0.077 W/m2) and opposite-signed to the accumulated +0.77 ⇒ the twin's Redi excess grows
+from divergence, not from a fixed operator seed. The residual structure is a K33/diapycnal
+placement difference in a thin band just above the 1400 m horizon (steep-slope deep cells),
+not a horizontal-Redi bias — a candidate for the parked k33-split hole, but small.
+
 ## STEP-1 PROBE (2026-08-02) — an OPERATOR-LEVEL SEED EXISTS: +0.37 W/m2 at day 1
 **[SUPERSEDED by the RETRACTION block above — the seed was ~86% form-mismatch bookkeeping]**
 
