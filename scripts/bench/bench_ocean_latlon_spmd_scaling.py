@@ -471,10 +471,16 @@ def main() -> int:
         _blk, _nblk, _probe = max(0, args.steps - 1), 1, 0
     else:
         _blk, _nblk, _probe = args.steps, args.blocks, args.probe_steps
+    # aux threads the sharded geometry stacks through the jit boundary as
+    # an ARGUMENT (outer-trace constants of non-addressable arrays are
+    # unfetchable — see make_sharded_ocean_step's aux note).
+    _aux = getattr(step, "aux", None)
     s, timing = timed_scan_blocks(
-        lambda st: step(st, args.dt), s,
+        (lambda st, aux: step(st, args.dt, aux=aux)) if _aux is not None
+        else (lambda st: step(st, args.dt)),
+        s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
-        sync_label="ocean_latlon_spmd_bench")
+        sync_label="ocean_latlon_spmd_bench", aux=_aux)
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller

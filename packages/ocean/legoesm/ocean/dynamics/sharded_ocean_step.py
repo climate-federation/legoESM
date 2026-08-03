@@ -335,6 +335,67 @@ def _build_band_vertex_masks(model, n_dev):
     return [jnp.asarray(vmask[r * nl: r * nl + nl + 1]) for r in range(n_dev)]
 
 
+def _addressable_shard_put(arr, sharding):
+    """Put an array onto a (possibly multi-process) sharding WITHOUT jax's
+    whole-array cross-process ``assert_equal``.
+
+    Under multicontroller, ``jax.device_put(numpy_array, sharding)`` calls
+    ``multihost_utils.assert_equal`` on the FULL array
+    (jax _src/dispatch.py::_device_put_sharding_impl) — a
+    ``process_allgather`` whose output is ``[n_processes, *shape]`` on one
+    device: at LL2304 L20 one 3-D field is 849 MB, so 96 processes fetch
+    81.5 GB > an 80 GB A100 (the wall that killed oc @96/@128, jobs
+    26644681/26644682, AFTER the geometry-broadcast fix; @64 = 54.3 GB
+    just fit, which is why smaller ladders never saw it).
+
+    Single-process: the historical ``jax.device_put``, byte-unchanged and
+    with no host round-trip (codex r17 — the input may already be a jax
+    device array). Multicontroller: ``jax.make_array_from_callback``
+    supplies each process's addressable shards directly — no consistency
+    collective. The ``device_put`` bit-identity CONTRACT is preserved by
+    the callers' cheap exact-hash gate (:func:`assert_pytree_bytes_equal`)
+    instead of jax's full-array allgather.
+    """
+    if jax.process_count() <= 1:
+        return jax.device_put(arr, sharding)
+    host = np.asarray(arr)
+    return jax.make_array_from_callback(
+        host.shape, sharding, lambda idx: host[idx])
+
+
+def assert_pytree_bytes_equal(tree, what):
+    """Cheap multi-process replacement for the per-leaf ``assert_equal``
+    that :func:`_addressable_shard_put` bypasses (codex r17 HIGH-1).
+
+    Hashes every array leaf's BYTES (48-bit positional digest — the same
+    exactness as ``device_put``'s contract) into one small vector,
+    allgathers it, and refuses on any cross-process mismatch. Cost is one
+    tiny collective + a host-side hash pass, independent of process count
+    — vs jax's [n_processes, full_array] allgather.
+
+    No-op single-process. Symmetric: every process hashes the same leaves
+    in the same order, so all raise or none.
+    """
+    if jax.process_count() <= 1:
+        return
+    from jax.experimental import multihost_utils
+
+    leaves = [x for x in jax.tree_util.tree_leaves(tree)
+              if hasattr(x, "ndim")]
+    vals = np.array([_content_hash48(np.asarray(x)) for x in leaves],
+                    dtype=np.float64)
+    g = multihost_utils.process_allgather(vals)
+    if not bool(np.all(g == g[0])):
+        bad = [i for i in range(len(leaves))
+               if not bool(np.all(g[:, i] == g[0, i]))]
+        raise RuntimeError(
+            f"{what}: array leaves {bad} differ across processes (48-bit "
+            f"byte digests disagree) — the inputs each process built are "
+            f"NOT identical, which the removed jax device_put assert "
+            f"would have refused. Fix the per-process build before "
+            f"sharding.")
+
+
 def shard_state_latlon(state, mesh):
     """Lay out a ``LatLonCGridOceanState`` for the lat-band SPMD step.
 
@@ -354,6 +415,7 @@ def shard_state_latlon(state, mesh):
     # wall-masked — the carrier drops it and reconstructs it as zero, which
     # would silently delete a LIVE seam row.  Host-side check on the
     # concrete state (this fn runs outside jit).
+    assert_pytree_bytes_equal(state, "shard_state_latlon")
     vm = getattr(state, "v_mask", None)
     if vm is not None:
         import numpy as _np
@@ -371,7 +433,7 @@ def shard_state_latlon(state, mesh):
         if field is None:
             return None
         sh = NamedSharding(mesh, _lat_spec(field.data))
-        return field.replace(data=jax.device_put(field.data, sh))
+        return field.replace(data=_addressable_shard_put(field.data, sh))
 
     def _shard_v(field):
         if field is None:
@@ -389,7 +451,7 @@ def shard_state_latlon(state, mesh):
         nlat1 = field.data.shape[0]
         v_lower = field.data[:nlat1 - 1]           # drop the top pole-wall row
         sh = NamedSharding(mesh, _lat_spec(v_lower))
-        return field.replace(data=jax.device_put(v_lower, sh))
+        return field.replace(data=_addressable_shard_put(v_lower, sh))
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
@@ -406,10 +468,12 @@ def shard_state_latlon(state, mesh):
             updates[name] = _shard_cell(val)
         else:
             # Non-Field, non-None leaf (e.g. a raw array carry like psi).
-            # Shard 2-D+ on lat, replicate lower-rank — matches shard_pytree.
+            # ndim>=1 lat-shards via _lat_spec (1-D included); only true
+            # scalars replicate (codex r17: the old "replicate lower-rank"
+            # wording did not match _lat_spec's behaviour).
             arr = jnp.asarray(val)
             spec = _lat_spec(arr) if arr.ndim >= 1 else P()
-            updates[name] = jax.device_put(arr, NamedSharding(mesh, spec))
+            updates[name] = _addressable_shard_put(arr, NamedSharding(mesh, spec))
     return state._replace(**updates)
 
 
@@ -426,12 +490,13 @@ def shard_forcing_latlon(forcing, mesh):
     """
     if forcing is None or mesh is None:
         return forcing
+    assert_pytree_bytes_equal(forcing, "shard_forcing_latlon")
 
     def _put(leaf):
         if leaf is None:
             return None
         arr = jnp.asarray(leaf)
-        return jax.device_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+        return _addressable_shard_put(arr, NamedSharding(mesh, _lat_spec(arr)))
 
     return jax.tree.map(_put, forcing)
 
@@ -464,6 +529,8 @@ def shard_forcing_stack_latlon(stack, mesh):
     if mesh is None:
         return stack
 
+    assert_pytree_bytes_equal(stack, "shard_forcing_stack_latlon")
+
     def _put(leaf):
         if leaf is None or not hasattr(leaf, "ndim"):
             return leaf
@@ -474,7 +541,7 @@ def shard_forcing_stack_latlon(stack, mesh):
             spec = P("lat", None)
         else:
             spec = P()
-        return jax.device_put(arr, NamedSharding(mesh, spec))
+        return _addressable_shard_put(arr, NamedSharding(mesh, spec))
 
     return jax.tree.map(_put, stack)
 
@@ -825,7 +892,18 @@ def make_sharded_ocean_step(model, mesh):
                     f"(n_lat, n_lon[, nlev]) to shard on the lat axis.")
 
     def sharded_step(state, dt, freshwater=None, surface_forcing=None,
-                     sponge=None, t_seconds=None):
+                     sponge=None, t_seconds=None, aux=None):
+        # ``aux`` (codex/2-proc repro 2026-08-03): the geometry + vmask
+        # stacks are SHARDED global arrays; when this wrapper runs INSIDE
+        # an outer trace (a bench/driver ``jit``/``scan`` over the step —
+        # jit-of-jit inlines the inner call), concrete closure arrays
+        # become OUTER-TRACE CONSTANTS and jax's MLIR constant handler
+        # tries to fetch their value — impossible for non-addressable
+        # arrays (RuntimeError: 'Fetching value ... non-addressable'; the
+        # multicontroller lane has been broken this way since the
+        # #1370-iii stack sharding). Callers that wrap the step in their
+        # own jit MUST thread ``step.aux`` through their jit boundary as
+        # an ARGUMENT and pass it back here.
         # ONE forcing operand: None fields drop out of the pytree structure,
         # so specs derived by tree.map skip them automatically and the
         # structure key below distinguishes every None<->array combination.
@@ -895,12 +973,16 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, forcing, geom_stacks, vmask_stack,
-                      jnp.asarray(dt))
+            _geom, _vmask = aux if aux is not None else (geom_stacks,
+                                                        vmask_stack)
+            return fn(state, forcing, _geom, _vmask, jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
 
+    # Expose the stacks so outer-jit callers can pass them as arguments
+    # (see the ``aux`` note in the signature).
+    sharded_step.aux = (geom_stacks, vmask_stack)
     return sharded_step
 
 
@@ -928,12 +1010,15 @@ def make_sharded_ocean_step_global(model, mesh):
     inner = make_sharded_ocean_step(model, mesh)
 
     def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
-        # Scatter the global state to the band layout; the forcing is sharded
-        # INSIDE ``inner`` (make_sharded_ocean_step lays it out), so pass it
-        # through global.
+        # Scatter the global state AND forcing to the band layout explicitly
+        # (codex r17 item 3: the old comment claimed inner sharded the
+        # forcing; it forwarded it global and relied on implicit JIT input
+        # placement — which under multicontroller pays jax's whole-array
+        # device_put assert, the nd-linear wall this module removes).
         ss = shard_state_latlon(state, mesh)
-        ss = inner(ss, dt, surface_forcing=surface_forcing,
-                   freshwater=freshwater)
+        ss = inner(ss, dt,
+                   surface_forcing=shard_forcing_latlon(surface_forcing, mesh),
+                   freshwater=shard_forcing_latlon(freshwater, mesh))
         return gather_state_latlon(ss, mesh)
 
     return sharded_step_global

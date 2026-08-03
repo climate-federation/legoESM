@@ -2038,3 +2038,35 @@ existing arg/buffer dump probe (scripts/tmp/_bufdump_compileonly.py +
 oc128_bufdump.sbatch — both currently hard-coded to 128 virtual
 devices, to be ADAPTED to @96) to NAME the arguments — then a targeted fix (shard-local slices as args, or
 donate/rematerialise) unblocks oc at 96-224 GPUs.
+
+## The deadlock node is NAMED: l50100 (bisect complete) — and the multicontroller ocean lane is FIXED
+
+Bisect chain (each rung the same s9-32GPU probe config): the 32-node
+block -> ensemble rep0's 8 nodes (26641282 reproduced) -> {l50081,
+l50100} (26642924 passed / 26642925 failed) -> **l50100** (26645625
+passed with l50081 aboard / 26645627 failed with l50100 aboard). Four
+independent reproductions; all IB ports ACTIVE; NCCL rings connect;
+the hang is post-init — a wedged-node class invisible to port state.
+OPERATIONAL: exclude ONLY l50100 now (31 nodes return to service);
+DKRZ ticket draft = this section.
+
+### Multicontroller ocean: THREE stacked walls found and fixed (codex r14-r19)
+
+1. **Geometry-stack broadcast** (nd x 849 MB psum program) — removed;
+   per-band fingerprint gate + unit tests (PR pending).
+2. **jax device_put's whole-array assert_equal** ([n_proc, field] on one
+   device: 54.3 GB fits at 64 procs, 81.5 GB > A100 at 96) —
+   _addressable_shard_put at 5 setup sites + exact-hash
+   assert_pytree_bytes_equal preserves the bit-identity contract.
+3. **jit-of-jit constant capture** ('Fetching value ... non-addressable';
+   BROKEN SINCE #1370-iii sharded the stacks — the old device_put path
+   fails identically in a 2-process CPU repro, so every post-Jul-30
+   multicontroller ocean failure was this class behind the arg wall) —
+   the stacks now thread through outer jit boundaries as ARGUMENTS:
+   step.aux + timed_scan_blocks(aux=) + both run_omip JRA55 block
+   builders (codex r18 P1) + all four invocation sites.
+   2-proc CPU repro emits a full receipt (15.09 ms, gloo); 28 parity/
+   bench tests + 44 run_omip tests green; codex r19 VERDICT: SHIP.
+
+Falsification v3 in queue: oc LL2304 @96 (26646038) / @128 (26646039),
+exclude l50081,l50100 (superset; harmless).
