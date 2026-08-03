@@ -164,12 +164,39 @@ def build_slot_indices(
     raise ValueError(f"unknown freq {freq!r} (allowed: {_VALID_FREQ})")
 
 
+#: Tape variables carrying a per-layer SOIL PROFILE rather than a single value
+#: per column.  Their accumulator is ``(n_slots, ncol, n_layers)`` and they are
+#: written with a trailing ``layer`` dimension.  Everything else on a tape stays
+#: ``(n_slots, ncol)``, so mixing profile and scalar variables on one tape works.
+PROFILE_VARS = ("T_soil", "theta_soil")
+
+
+def is_profile_var(name: str) -> bool:
+    """True if ``name`` is archived as a per-layer soil profile."""
+    return name in PROFILE_VARS
+
+
 def init_tape_accumulator(tape: TapeSpec, n_slots: int, ncol: int,
-                          dtype=jnp.float64) -> dict[str, Any]:
-    """Zero-initialised accumulator for one tape."""
+                          dtype=jnp.float64, n_layers: int | None = None) -> dict[str, Any]:
+    """Zero-initialised accumulator for one tape.
+
+    ``n_layers`` is required only when the tape requests a variable in
+    :data:`PROFILE_VARS`; those get a trailing layer axis.
+    """
+    if n_layers is None and any(is_profile_var(v) for v in tape.vars):
+        raise ValueError(
+            f"tape {tape.name!r} requests profile variable(s) "
+            f"{[v for v in tape.vars if is_profile_var(v)]} but n_layers was not "
+            "supplied; the accumulator cannot be shaped without it")
+
+    def _zeros(var):
+        shape = ((n_slots, ncol, n_layers) if is_profile_var(var)
+                 else (n_slots, ncol))
+        return jnp.zeros(shape, dtype)
+
     return {
         "count": jnp.zeros(n_slots, dtype),
-        **{var: jnp.zeros((n_slots, ncol), dtype) for var in tape.vars},
+        **{var: _zeros(var) for var in tape.vars},
     }
 
 
@@ -193,14 +220,22 @@ def accumulate_tape_step(
 def finalize_tape(carry: dict[str, Any], tape: TapeSpec) -> dict[str, np.ndarray]:
     """Post-scan reduce.  Divides mean tapes by counts; passes through inst tapes."""
     if tape.average == "mean":
-        count = np.asarray(carry["count"])
-        denom = np.maximum(count, 1.0)[:, None]
-        return {var: np.asarray(carry[var]) / denom for var in tape.vars}
+        count = np.maximum(np.asarray(carry["count"]), 1.0)
+        out = {}
+        for var in tape.vars:
+            a = np.asarray(carry[var])
+            # Broadcast the per-slot count against however many trailing axes the
+            # variable has: (n_slots, ncol) for scalars, (n_slots, ncol, n_layers)
+            # for profiles.  A hardcoded [:, None] silently mis-divides profiles.
+            out[var] = a / count.reshape((-1,) + (1,) * (a.ndim - 1))
+        return out
     return {var: np.asarray(carry[var]) for var in tape.vars}
 
 
 __all__ = [
+    "PROFILE_VARS",
     "TapeSpec",
+    "is_profile_var",
     "default_config_path",
     "load_output_config",
     "build_slot_indices",

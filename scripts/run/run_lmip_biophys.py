@@ -232,6 +232,12 @@ _VAR_META = {
                        "units": "kg m-2 s-1"},
     "sublimation":    {"long_name": "snowpack sublimation (negative = frost deposition)",
                        "units": "kg m-2 s-1", "standard_name": "surface_snow_sublimation_flux"},
+    "T_soil":         {"long_name": "soil temperature profile (all layers)", "units": "K",
+                       "standard_name": "soil_temperature"},
+    "theta_soil":     {"long_name": "soil volumetric water content profile "
+                                    "(all layers, liquid+ice)", "units": "m3 m-3",
+                       "standard_name": "volume_fraction_of_condensed_water_in_soil"},
+    "dz":             {"long_name": "soil layer thickness", "units": "m"},
     "soil_water":     {"long_name": "total column soil water (all layers, liquid+ice)",
                        "units": "kg m-2", "standard_name": "soil_moisture_content"},
     "surface_water":  {"long_name": "surface ponding store", "units": "kg m-2"},
@@ -682,15 +688,6 @@ def run(args) -> int:
                       for t in args._cfg_output_tapes["tapes"]]
     else:
         tape_specs = load_output_config(args.output_config or None)
-    tape_slots = {}                                # (slot_idx, n_slots, slot_times) per tape
-    tape_accums = {}
-    for tape in tape_specs:
-        slot_idx, n_slots, slot_times = build_slot_indices(model_times_s, tape.freq)
-        tape_slots[tape.name] = (jnp.asarray(slot_idx), n_slots, slot_times)
-        tape_accums[tape.name] = init_tape_accumulator(tape, n_slots, ncol)
-    print("tapes: " + " | ".join(
-        f"{t.name}(freq={t.freq},avg={t.average},vars={len(t.vars)})" for t in tape_specs))
-
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
     # Layer thicknesses [m] for the total-column soil-water integral.  Taken from
     # the SAME SoilGridConfig the model integrates on, so the diagnostic cannot
@@ -700,10 +697,27 @@ def run(args) -> int:
         from legoesm.land.soil_thermal import (
             compute_heat_capacity as _soil_heat_capacity,
         )
-        _soil_dz = jnp.asarray(make_soil_grid(config.soil_grid).dz)
+        _sg = make_soil_grid(config.soil_grid)
+        _soil_dz = jnp.asarray(_sg.dz)
+        _n_soil_layers = int(_sg.n_layers)
+        _soil_z_node = np.asarray(_sg.z_node)          # layer midpoint depth [m]
+        _soil_dz_np = np.asarray(_sg.dz)
     else:
         _soil_dz = None
         _soil_heat_capacity = None
+        _n_soil_layers = 1                    # slab: profile vars are unavailable
+        _soil_z_node = np.zeros(1)
+        _soil_dz_np = np.zeros(1)
+
+    tape_slots = {}                                # (slot_idx, n_slots, slot_times) per tape
+    tape_accums = {}
+    for tape in tape_specs:
+        slot_idx, n_slots, slot_times = build_slot_indices(model_times_s, tape.freq)
+        tape_slots[tape.name] = (jnp.asarray(slot_idx), n_slots, slot_times)
+        tape_accums[tape.name] = init_tape_accumulator(
+            tape, n_slots, ncol, n_layers=_n_soil_layers)
+    print("tapes: " + " | ".join(
+        f"{t.name}(freq={t.freq},avg={t.average},vars={len(t.vars)})" for t in tape_specs))
 
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
@@ -799,6 +813,10 @@ def run(args) -> int:
             values["surface_water"] = (
                 _ZEROS if new_state.surface_water is None
                 else new_state.surface_water * constants.rho_water)
+            # Full soil PROFILES (ncol, n_layers).  The tape machinery gives these
+            # a trailing layer axis; every other variable stays per-column.
+            values["T_soil"] = new_state.T_soil
+            values["theta_soil"] = new_state.theta_soil
             values["snowmelt"] = budget.snowmelt
             values["refreeze"] = budget.refreeze
             values["sublimation"] = budget.sublimation
@@ -809,6 +827,9 @@ def run(args) -> int:
             for _k in ("G", "soil_heat", "melt_energy", "soil_water", "surface_water",
                        "snowmelt", "refreeze", "sublimation"):
                 values[_k] = _ZEROS
+            # slab land has no soil column; keep the keys present but degenerate
+            values["T_soil"] = _ZEROS[:, None]
+            values["theta_soil"] = _ZEROS[:, None]
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal
@@ -825,7 +846,14 @@ def run(args) -> int:
             return jnp.where(m, o, n)
         new_state = jax.tree_util.tree_map(_revert, new_state, state)
         revert_count = revert_count + reverted.astype(revert_count.dtype)
-        values = {k: jnp.where(reverted, jnp.nan, v) for k, v in values.items()}
+        # ``reverted`` is (ncol,) but PROFILE variables are (ncol, n_layers), so the
+        # mask must broadcast along whatever trailing axes a value carries.
+        def _mask_reverted(v):
+            v = jnp.asarray(v)
+            m = reverted.reshape((ncol,) + (1,) * (v.ndim - 1))
+            return jnp.where(m, jnp.nan, v)
+
+        values = {k: _mask_reverted(v) for k, v in values.items()}
         values["reverted"] = reverted.astype(jnp.float64)
         new_accums = {}
         for tape in tape_specs:                    # unrolled at trace time
@@ -896,28 +924,50 @@ def run(args) -> int:
         year's annual file.  Latlon uses the (time, lat, lon) rectangular layout;
         other grids fall back to (time, ncol)."""
         import xarray as xr
-        masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
+        from legoesm.land.output_tapes import is_profile_var
+        # ``land`` is (ncol,); a profile field is (ncol, n_layers), so the mask has
+        # to broadcast along the trailing layer axis rather than be applied flat.
+        def masked(a):
+            a = np.asarray(a, np.float64)
+            m = land.reshape((-1,) + (1,) * (a.ndim - 1))
+            return np.where(m, a, np.nan)
+
         dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
+        dims_prof = dims + ("layer",)
         for tape in tape_specs:
             ids = np.asarray(slot_ids_by_tape[tape.name])
             if ids.size == 0:
                 continue
-            finalized = finalize_tape(accums[tape.name], tape)   # var -> (n_slots, ncol)
+            finalized = finalize_tape(accums[tape.name], tape)   # var -> (n_slots, ncol[, nlay])
             _, _, slot_times = tape_slots[tape.name]
             st = np.asarray(slot_times)[ids]
 
-            def pack(arr):
+            def pack(arr, profile=False):
                 arr2 = np.stack([masked(arr[i]) for i in ids])
-                return arr2.reshape(ids.size, nlat, nlon) if is_latlon else arr2
+                if not is_latlon:
+                    return arr2
+                tail = (arr2.shape[-1],) if profile else ()
+                return arr2.reshape((ids.size, nlat, nlon) + tail)
 
-            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
+            data_vars = {}
+            has_profile = False
+            for v in tape.vars:
+                prof = is_profile_var(v)
+                has_profile |= prof
+                data_vars[v] = ((dims_prof if prof else dims), pack(finalized[v], prof))
             # Emit the per-cell land fraction so analysis can area-weight / mask
             # without relying on a hard threshold at run time.
             _lf = np.asarray(land_fraction, np.float64)
             data_vars["land_fraction"] = (
                 (("lat", "lon"), _lf.reshape(nlat, nlon)) if is_latlon
                 else (("ncol",), _lf))
+            if has_profile:
+                # depth of each layer MIDPOINT [m]; dz travels with it so column
+                # integrals need no re-derivation of the soil grid downstream.
+                data_vars["dz"] = (("layer",), _soil_dz_np.astype(np.float64))
             coords = {"time": (("time",), st / _SEC_PER_DAY)}
+            if has_profile:
+                coords["layer"] = (("layer",), _soil_z_node.astype(np.float64))
             if is_latlon:
                 coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
             else:
