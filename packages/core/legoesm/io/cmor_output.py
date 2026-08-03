@@ -118,6 +118,18 @@ _TABLE_REALM: Dict[str, str] = {
     "fx": "atmos",
 }
 
+# Cell-measure variables each realm's files refer to.  They are written as
+# separate fx/Ofx files alongside the variable files in the DRS, so a data
+# file names them in ``external_variables``.  A file that CONTAINS one of
+# these must not also name it (CF-1.7 2.6.3); ``_global_attrs`` filters the
+# variable being written out of this list.
+_REALM_EXTERNAL_VARIABLES: Dict[str, Tuple[str, ...]] = {
+    "atmos": ("areacella",),
+    "land": ("areacella", "sftlf"),
+    "ocean": ("areacello",),
+    "seaIce": ("areacello",),
+}
+
 # CMIP6 surface-field reference heights [m].  These variables are defined
 # at a fixed height above the surface rather than at a model level, so they
 # carry a scalar ``height`` coordinate per CMIP6 spec.
@@ -985,15 +997,18 @@ class CFWriter:
         # external_variables: areacella for atmos, areacella/sftlf for land,
         # areacello for ocean.  These cell-area files live alongside the
         # variable files in the DRS and are referenced by name.
+        #
+        # CF-1.7 2.6.3 forbids naming a variable that IS in this file:
+        # "the variables named by external_variables ... must not be present
+        # in the file".  The measure files themselves (fx/areacella,
+        # Ofx/areacello, Lmon-realm sftlf) are exactly that collision, so the
+        # variable being written is filtered out -- confirmed by cfchecks
+        # 4.1.0, which reported it as a hard ERROR on areacella_fx.
         realm = attrs["realm"]
-        if realm == "atmos":
-            attrs["external_variables"] = "areacella"
-        elif realm == "land":
-            attrs["external_variables"] = "areacella sftlf"
-        elif realm == "ocean":
-            attrs["external_variables"] = "areacello"
-        elif realm == "seaIce":
-            attrs["external_variables"] = "areacello"
+        externals = _REALM_EXTERNAL_VARIABLES.get(realm, ())
+        externals = tuple(name for name in externals if name != var_name)
+        if externals:
+            attrs["external_variables"] = " ".join(externals)
         return attrs
 
     def _output_path(

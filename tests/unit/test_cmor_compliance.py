@@ -351,6 +351,33 @@ def test_external_variables_matches_cell_measures(amip_files):
             )
 
 
+def test_external_variables_are_not_in_the_file(amip_files):
+    """CF-1.7 2.6.3: a name in ``external_variables`` must NOT be present.
+
+    The measure files are the collision: ``areacella_fx`` both CONTAINS
+    ``areacella`` and (before the fix) named it as external, which
+    ``cfchecks`` 4.1.0 reports as a hard ERROR:
+
+        ERROR: (2.6.3): Variable areacella named as an external variable
+        must not be present in this file
+
+    Not in the original audit -- found by running the real CF checker.
+    """
+    problems = []
+    for (table_id, var), path in sorted(amip_files.items()):
+        with _open(path) as ds:
+            if "external_variables" not in ds.ncattrs():
+                continue
+            named = set(str(ds.getncattr("external_variables")).split())
+            clash = sorted(named & set(ds.variables))
+            if clash:
+                problems.append(
+                    f"{table_id}/{var}: external_variables names {clash}, "
+                    f"which the file itself contains"
+                )
+    assert not problems, "CF 2.6.3 violations:\n  " + "\n  ".join(problems)
+
+
 def test_filenames_carry_time_range(amip_files):
     """Defect 7: DRS filenames end with the time range for time tables."""
     bad = []
