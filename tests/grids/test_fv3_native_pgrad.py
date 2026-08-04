@@ -1,0 +1,545 @@
+"""Direct unit test for ``legoesm.core.fv3_native_pgrad`` (the ONE
+km-general geopk / p_grad_c / one_grad_p implementation) and for the
+``gen_geopk_pgrad_oracle`` serializer.
+
+Deliberately FIXTURE-FREE: the bit-exact Fortran certificate lives in
+``test_fv3_native_geopk_pgrad.py`` and needs the sbatch-generated npz
+files; everything here runs from synthetic state so the module and the
+gen script are covered even before the oracle has been regenerated.
+
+What it pins:
+
+* dispatch hardening — every unported branch RAISES instead of silently
+  running the wrong formulas (``use_cond``, non-hydrostatic,
+  ``a2b_ord != 4``, bad ``a2b_ord``/``km``);
+* the geopk write WINDOWS (CG 1-halo vs D 2-halo vs the ``computehalo``
+  full-data-domain extension) and the column recursion invariants;
+* the SW-adapter REFACTOR EQUIVALENCE (UNCERTAIN U10): the four km=1
+  entry points in ``fv3_native_duo_stepper`` lost their bodies to the
+  shared kernel, so this file carries the pre-refactor km=1 formulas as
+  a frozen LEGACY REFERENCE and asserts bit-for-bit equality.  That is
+  the only reason numerics are repeated in this file.
+"""
+
+import hashlib
+import importlib.util
+import os
+
+import numpy as np
+import pytest
+
+REPO = os.path.join(os.path.dirname(__file__), "..", "..")
+N, NG = 8, 3
+M_A = N + 2 * NG
+M_B = M_A + 1
+SENTINEL = 1.0e30
+
+
+def _load_gen():
+    path = os.path.join(REPO, "scripts", "validate", "fv3_native",
+                        "gen_geopk_pgrad_oracle.py")
+    spec = importlib.util.spec_from_file_location(
+        "gen_geopk_pgrad_oracle", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def bd():
+    from legoesm.core.fv3_native_sw_core import Bounds
+
+    return Bounds.single_tile(N, NG)
+
+
+def _synthetic(km, seed=7):
+    """Smooth, strictly positive, level- and (i,j)-varying column."""
+    rng = np.random.default_rng(seed)
+    ii, jj = np.meshgrid(np.arange(M_A), np.arange(M_A), indexing="ij")
+    shape = 1.0 + 0.05 * np.cos(2.0 * np.pi * ii / M_A) \
+        * np.sin(2.0 * np.pi * (jj + 0.5) / M_A)
+    frac = np.array([0.2, 0.45, 0.35])[:km]
+    frac = frac / frac.sum()
+    delp = np.stack([f * (1.0e5 - 100.0) * shape for f in frac], axis=-1)
+    pt = np.stack([(300.0 - 10.0 * (k + 1)) * shape for k in range(km)],
+                  axis=-1)
+    hs = 1.5e4 * shape
+    return {
+        "delp": delp, "pt": pt, "hs": hs,
+        "uc": rng.standard_normal((M_B, M_A, km)) * 10.0,
+        "vc": rng.standard_normal((M_A, M_B, km)) * 10.0,
+        "u": rng.standard_normal((M_A, M_B, km)) * 10.0,
+        "v": rng.standard_normal((M_B, M_A, km)) * 10.0,
+    }
+
+
+def _gs():
+    """Gridstruct dict with real cube geometry at this resolution.
+
+    ``rdyc`` is truncated to the (m_a, m_a) p_grad_c dummy sub-block
+    exactly as the oracle serializes it (UNCERTAIN U4).
+    """
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct,
+    )
+
+    gs = dict(build_fv3_native_gridstruct(N, NG, tile=1,
+                                          radius=FV3_RADIUS_M,
+                                          omega=FV3_OMEGA))
+    gs["rdyc"] = np.asarray(gs["rdyc"])[:, :M_A]
+    gs.update(bounded_domain=False, grid_type=0, sw_corner=True,
+              se_corner=True, nw_corner=True, ne_corner=True)
+    return gs
+
+
+# ---------------------------------------------------------------- dispatch
+
+def test_geopk_use_cond_raises(bd):
+    from legoesm.core.fv3_native_pgrad import geopk
+
+    st = _synthetic(2)
+    with pytest.raises(ValueError, match="USE_COND"):
+        geopk(st["delp"], st["pt"], st["hs"], bd, km=2, ptop=100.0,
+              akap=2.0 / 7.0, cp_air=1004.0, cg=True, duogrid=True,
+              computehalo=False, npx=N + 1, npy=N + 1, a2b_ord=4,
+              use_cond=True)
+
+
+def test_geopk_unknown_a2b_ord_and_km_raise(bd):
+    from legoesm.core.fv3_native_pgrad import geopk
+
+    st = _synthetic(2)
+    kw = dict(km=2, ptop=100.0, akap=2.0 / 7.0, cp_air=1004.0, cg=True,
+              duogrid=True, computehalo=False, npx=N + 1, npy=N + 1)
+    with pytest.raises(ValueError, match="a2b_ord"):
+        geopk(st["delp"], st["pt"], st["hs"], bd, a2b_ord=3, **kw)
+    with pytest.raises(ValueError, match="km"):
+        geopk(st["delp"], st["pt"], st["hs"], bd,
+              **{**kw, "km": 0, "a2b_ord": 4})
+
+
+def test_p_grad_c_nonhydrostatic_raises(bd):
+    from legoesm.core.fv3_native_pgrad import p_grad_c
+
+    st = _synthetic(2)
+    z = np.zeros((M_A, M_A, 3))
+    with pytest.raises(NotImplementedError, match="non-hydrostatic"):
+        p_grad_c(1.0, st["delp"], z, z, st["uc"], st["vc"], {}, bd,
+                 npz=2, hydrostatic=False)
+
+
+def test_one_grad_p_guards_raise(bd):
+    from legoesm.core.fv3_native_pgrad import one_grad_p
+
+    st = _synthetic(2)
+    z = np.zeros((M_A, M_A, 3))
+    div = np.zeros((N + 1, N + 1))
+    kw = dict(npx=N + 1, npy=N + 1, npz=2, dt=1.0, ptop=100.0,
+              akap=2.0 / 7.0)
+    with pytest.raises(NotImplementedError, match="a2b_ord"):
+        one_grad_p(st["u"], st["v"], z, z, div, None, {}, bd,
+                   a2b_ord=2, **kw)
+    with pytest.raises(NotImplementedError, match="non-hydrostatic"):
+        one_grad_p(st["u"], st["v"], z, z, div, None, {}, bd,
+                   hydrostatic=False, **kw)
+
+
+# ------------------------------------------------------------ geopk shape
+
+@pytest.mark.parametrize("km", (1, 2, 3))
+def test_geopk_write_windows(bd, km):
+    """CG=T takes the 1-halo box; CG=F/a2b_ord=4 the 2-halo box; the
+    duo ``computehalo`` extension reaches the FULL data domain."""
+    from legoesm.core.fv3_native_pgrad import geopk
+
+    st = _synthetic(km)
+    kw = dict(km=km, ptop=100.0, akap=2.0 / 7.0, cp_air=1004.0,
+              duogrid=True, npx=N + 1, npy=N + 1, a2b_ord=4,
+              unwritten_fill=SENTINEL)
+    lo = 1 - NG
+    gc = geopk(st["delp"], st["pt"], st["hs"], bd, cg=True,
+               computehalo=False, **kw)
+    inner = slice(1 - 1 - lo, N + 1 - lo + 1)
+    assert np.isfinite(gc["pk"][inner, inner]).all()
+    assert (gc["pk"][inner, inner] != SENTINEL).all()
+    mask = np.ones((M_A, M_A), dtype=bool)
+    mask[inner, inner] = False
+    assert (gc["pk"][mask] == SENTINEL).all()
+    assert (gc["gz"][mask] == SENTINEL).all()
+    # pkz is NEVER written on the CG pass (dyn_core.F90:2781)
+    assert (gc["pkz"] == SENTINEL).all()
+
+    gd2 = geopk(st["delp"], st["pt"], st["hs"], bd, cg=False,
+                computehalo=False, **kw)
+    wide = slice(1 - 2 - lo, N + 2 - lo + 1)
+    mask2 = np.ones((M_A, M_A), dtype=bool)
+    mask2[wide, wide] = False
+    assert (gd2["pk"][mask2] == SENTINEL).all()
+
+    gdh = geopk(st["delp"], st["pt"], st["hs"], bd, cg=False,
+                computehalo=True, **kw)
+    assert (gdh["pk"] != SENTINEL).all()
+    assert (gdh["gz"] != SENTINEL).all()
+    assert np.isfinite(gdh["pkz"]).all()
+
+
+@pytest.mark.parametrize("km", (2, 3))
+def test_geopk_column_invariants(bd, km):
+    from legoesm.core.fv3_native_pgrad import geopk
+
+    st = _synthetic(km)
+    akap = 2.0 / 7.0
+    ptop = 100.0
+    out = geopk(st["delp"], st["pt"], st["hs"], bd, km=km, ptop=ptop,
+                akap=akap, cp_air=1004.0, cg=False, duogrid=True,
+                computehalo=True, npx=N + 1, npy=N + 1, a2b_ord=4,
+                unwritten_fill=SENTINEL)
+    pk, gz = out["pk"], out["gz"]
+    assert pk.shape == (M_A, M_A, km + 1)
+    # k=1 interface is exactly ptop**akap, the `**` OPERATOR form
+    assert (pk[:, :, 0] == ptop ** akap).all()
+    # pressure integrates DOWNWARD: pk strictly increasing in k
+    assert (np.diff(pk, axis=-1) > 0.0).all()
+    # gz seeded at the SURFACE from hs and integrated UPWARD
+    assert np.array_equal(gz[:, :, km], st["hs"])
+    assert (np.diff(gz, axis=-1) < 0.0).all()
+    # pe/peln are the same column in different units, on the peln window
+    ci = slice(NG, NG + N)
+    assert np.allclose(np.exp(out["peln"]), out["pe"][1:-1, :, 1:-1],
+                       rtol=1e-12, atol=0.0)
+    # pkz strictly between its bracketing interfaces
+    pkc = pk[ci, ci, :]
+    assert (out["pkz"] > pkc[:, :, :-1]).all()
+    assert (out["pkz"] < pkc[:, :, 1:]).all()
+
+
+def test_geopk_accumulation_is_top_down(bd):
+    """The running ``p1d`` accumulator is order-sensitive: a bottom-up
+    sum of the SAME delp must differ bitwise somewhere."""
+    from legoesm.core.fv3_native_pgrad import geopk
+
+    km = 3
+    st = _synthetic(km)
+    ptop, akap = 100.0, 2.0 / 7.0
+    out = geopk(st["delp"], st["pt"], st["hs"], bd, km=km, ptop=ptop,
+                akap=akap, cp_air=1004.0, cg=False, duogrid=True,
+                computehalo=True, npx=N + 1, npy=N + 1, a2b_ord=4,
+                unwritten_fill=SENTINEL)
+    # bottom-up: accumulate the SAME layers from the surface upward, then
+    # add ptop last.  Same exact real number, different rounding path.
+    acc = np.zeros((M_A, M_A))
+    for k in range(km, 0, -1):
+        acc = acc + st["delp"][:, :, k - 1]
+    rev = np.ascontiguousarray(np.exp(akap * np.log(acc + ptop)))
+    got = np.ascontiguousarray(out["pk"][:, :, km])
+    diff = int((got.view(np.uint64) != rev.view(np.uint64)).sum())
+    assert diff > 0, (
+        "top-down and bottom-up accumulation agree bitwise EVERYWHERE — "
+        "the synthetic column is too smooth to discriminate the sum "
+        "order (a fixture defect, not a pass)")
+
+
+# ------------------------------------------------- SW adapter equivalence
+# The four km=1 entry points lost their bodies to the shared kernel
+# (spec 3.2 / UNCERTAIN U10).  The functions below are the FROZEN
+# pre-refactor implementations, kept ONLY as the equivalence reference.
+
+def _legacy_geopk_sw(delp2d, hs, bd, pt, halo):
+    is_, ie = bd.is_, bd.ie
+    m = delp2d.shape[0]
+    pkc = np.zeros((m, m, 2))
+    gz = np.zeros((m, m, 2))
+    lo = 1 - bd.ng
+    sl = slice(is_ - halo - lo, ie + halo - lo + 1)
+    pkc[sl, sl, 0] = 0.0
+    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delp2d[sl, sl]))
+    gz[sl, sl, 1] = hs[sl, sl]
+    ptv = 1.0 if pt is None else pt[sl, sl]
+    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1] - pkc[sl, sl, 0])
+    return pkc, gz
+
+
+def _legacy_p_grad_c(dt2, pkc, gz, uc, vc, gs, bd):
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    lo = 1 - bd.ng
+    rdxc, rdyc = gs["rdxc"], gs["rdyc"]
+    wk = pkc[:, :, 1] - pkc[:, :, 0]
+
+    def wk_at(i, j):
+        return wk[i - lo, j - lo]
+
+    def gz_at(i, j, k):
+        return gz[i - lo, j - lo, k - 1]
+
+    def pk_at(i, j, k):
+        return pkc[i - lo, j - lo, k - 1]
+
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            uc[i - lo, j - lo] += dt2 * rdxc[i - lo, j - lo] / (
+                wk_at(i - 1, j) + wk_at(i, j)) * (
+                (gz_at(i - 1, j, 2) - gz_at(i, j, 1))
+                * (pk_at(i, j, 2) - pk_at(i - 1, j, 1))
+                + (gz_at(i - 1, j, 1) - gz_at(i, j, 2))
+                * (pk_at(i - 1, j, 2) - pk_at(i, j, 1)))
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            vc[i - lo, j - lo] += dt2 * rdyc[i - lo, j - lo] / (
+                wk_at(i, j - 1) + wk_at(i, j)) * (
+                (gz_at(i, j - 1, 2) - gz_at(i, j, 1))
+                * (pk_at(i, j, 2) - pk_at(i, j - 1, 1))
+                + (gz_at(i, j - 1, 1) - gz_at(i, j, 2))
+                * (pk_at(i, j - 1, 2) - pk_at(i, j, 1)))
+
+
+def _legacy_one_grad_p(u, v, pkc, gz, divg2, gs, bd, npx, npy, dt, d_ext):
+    from legoesm.core.fv3_native_d_sw import a2b_ord4
+    from legoesm.grids.fv3_native_gridstruct import fort
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+    ng = bd.ng
+    lo = 1 - ng
+    gsf = {
+        "grid_lon": fort(gs["grid_lon"], isd, jsd),
+        "grid_lat": fort(gs["grid_lat"], isd, jsd),
+        "agrid_lon": fort(gs["agrid_lon"], isd, jsd),
+        "agrid_lat": fort(gs["agrid_lat"], isd, jsd),
+        "dxa": fort(gs["dxa"], isd, jsd), "dya": fort(gs["dya"], isd, jsd),
+        "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
+        "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
+        "bounded_domain": False, "grid_type": 0,
+        "sw_corner": True, "se_corner": True,
+        "nw_corner": True, "ne_corner": True,
+    }
+    pk1 = np.array(pkc[:, :, 0], copy=True)
+    pk2 = np.array(pkc[:, :, 1], copy=True)
+    gz1 = np.array(gz[:, :, 0], copy=True)
+    gz2 = np.array(gz[:, :, 1], copy=True)
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1 + 1):
+            pk1[i - lo, j - lo] = 0.0
+    wkb = np.zeros_like(pk2)
+    for arr in (pk2, gz1, gz2):
+        a2b_ord4(fort(arr, isd, jsd), fort(wkb, isd, jsd), gsf, npx, npy,
+                 is_, ie, js, je, ng, replace=True, duogrid=True)
+    wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
+    wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
+    if d_ext > 0.0:
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1):
+                wk2[i - 1, j - 1] = divg2[i - 1, j - 1] - divg2[i, j - 1]
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1 + 1):
+                wk1[i - 1, j - 1] = divg2[i - 1, j - 1] - divg2[i - 1, j]
+
+    def at(a, i, j):
+        return a[i - lo, j - lo]
+
+    wk = pk2 - pk1
+    rdx, rdy = gs["rdx"], gs["rdy"]
+    for j in range(js, je + 1 + 1):
+        for i in range(is_, ie + 1):
+            u[i - lo, j - lo] = rdx[i - lo, j - lo] * (
+                wk2[i - 1, j - 1] + u[i - lo, j - lo]
+                + dt / (at(wk, i, j) + at(wk, i + 1, j)) * (
+                    (at(gz2, i, j) - at(gz1, i + 1, j))
+                    * (at(pk2, i + 1, j) - at(pk1, i, j))
+                    + (at(gz1, i, j) - at(gz2, i + 1, j))
+                    * (at(pk2, i, j) - at(pk1, i + 1, j))))
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1 + 1):
+            v[i - lo, j - lo] = rdy[i - lo, j - lo] * (
+                wk1[i - 1, j - 1] + v[i - lo, j - lo]
+                + dt / (at(wk, i, j) + at(wk, i, j + 1)) * (
+                    (at(gz2, i, j) - at(gz1, i, j + 1))
+                    * (at(pk2, i, j + 1) - at(pk1, i, j))
+                    + (at(gz1, i, j) - at(gz2, i, j + 1))
+                    * (at(pk2, i, j) - at(pk1, i, j + 1))))
+
+
+def _bitsame(a, b):
+    a = np.ascontiguousarray(a, dtype=np.float64)
+    b = np.ascontiguousarray(b, dtype=np.float64)
+    return a.shape == b.shape and int(
+        (a.view(np.uint64) != b.view(np.uint64)).sum()) == 0
+
+
+@pytest.mark.parametrize("with_pt", (True, False))
+def test_sw_geopk_adapters_match_legacy(bd, with_pt):
+    from legoesm.core.fv3_native_duo_stepper import (
+        geopk_sw_1lev,
+        geopk_sw_1lev_d,
+    )
+
+    rng = np.random.default_rng(11)
+    delp = np.abs(rng.standard_normal((M_A, M_A))) + 2.0
+    hs = rng.standard_normal((M_A, M_A)) * 1.0e3
+    pt = (np.full((M_A, M_A), 0.7) + 0.01 * rng.standard_normal((M_A, M_A))
+          if with_pt else None)
+    for fn, halo in ((geopk_sw_1lev, 1), (geopk_sw_1lev_d, 2)):
+        got_pk, got_gz = fn(delp, hs, bd, pt=pt)
+        want_pk, want_gz = _legacy_geopk_sw(delp, hs, bd, pt, halo)
+        assert _bitsame(got_pk, want_pk), fn.__name__
+        assert _bitsame(got_gz, want_gz), fn.__name__
+
+
+def test_sw_p_grad_c_adapter_matches_legacy(bd):
+    from legoesm.core.fv3_native_duo_stepper import (
+        geopk_sw_1lev,
+        p_grad_c_1lev,
+    )
+
+    gs = _gs()
+    rng = np.random.default_rng(13)
+    delpc = np.abs(rng.standard_normal((M_A, M_A))) + 2.0
+    hs = rng.standard_normal((M_A, M_A)) * 1.0e3
+    pkc, gz = geopk_sw_1lev(delpc, hs, bd, pt=np.full((M_A, M_A), 0.9))
+    uc0 = rng.standard_normal((M_B, M_A))
+    vc0 = rng.standard_normal((M_A, M_B))
+    uc_a, vc_a = uc0.copy(), vc0.copy()
+    uc_b, vc_b = uc0.copy(), vc0.copy()
+    p_grad_c_1lev(0.5 * 225.0, delpc, pkc, gz, uc_a, vc_a, gs, bd)
+    _legacy_p_grad_c(0.5 * 225.0, pkc, gz, uc_b, vc_b, gs, bd)
+    assert _bitsame(uc_a, uc_b)
+    assert _bitsame(vc_a, vc_b)
+    assert not _bitsame(uc_a, uc0), "the PG update did not move uc"
+
+
+def test_sw_one_grad_p_adapter_matches_legacy(bd):
+    from legoesm.core.fv3_native_duo_stepper import (
+        geopk_sw_1lev_d,
+        one_grad_p_1lev,
+    )
+
+    gs = _gs()
+    rng = np.random.default_rng(17)
+    delp = np.abs(rng.standard_normal((M_A, M_A))) + 2.0
+    hs = rng.standard_normal((M_A, M_A)) * 1.0e3
+    pt = np.full((M_A, M_A), 0.9)
+    divg2 = rng.standard_normal((N + 1, N + 1)) * 1.0e3
+    u0 = rng.standard_normal((M_A, M_B))
+    v0 = rng.standard_normal((M_B, M_A))
+
+    pk_a, gz_a = geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+    ua, va = u0.copy(), v0.copy()
+    one_grad_p_1lev(ua, va, pk_a, gz_a, divg2, gs, bd, N + 1, N + 1,
+                    dt=225.0, d_ext=0.02)
+
+    pk_b, gz_b = geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+    ub, vb = u0.copy(), v0.copy()
+    _legacy_one_grad_p(ub, vb, pk_b, gz_b, divg2, gs, bd, N + 1, N + 1,
+                       225.0, 0.02)
+    assert _bitsame(ua, ub)
+    assert _bitsame(va, vb)
+    assert not _bitsame(ua, u0), "the PG tail did not move u"
+
+
+# --------------------------------------------------------- gen serializer
+
+def test_gen_serializer_layout_and_tamper():
+    gen = _load_gen()
+    fields = {}
+    lo = 1 - gen.NG
+    m_a = gen.RES + 2 * gen.NG
+    km = 2
+    rng = np.random.default_rng(23)
+    for _tok, key, origin in gen.INPUT_FIELDS:
+        if origin == "s":
+            fields[key] = 1.25
+        elif key in ("edge_w", "edge_e", "edge_s", "edge_n"):
+            fields[key] = rng.standard_normal(gen.RES + 1)
+        elif key == "logexp_probe":
+            fields[key] = np.linspace(100.0, 1.0e5, gen.NPROBE)
+        elif key == "divg2":
+            fields[key] = rng.standard_normal((gen.RES + 1, gen.RES + 1))
+        elif key in ("delpc", "ptc", "delp", "pt", "q_con"):
+            fields[key] = rng.standard_normal((m_a, m_a, km))
+        elif key in ("uc", "v"):
+            fields[key] = rng.standard_normal((m_a + 1, m_a, km))
+        elif key in ("vc", "u"):
+            fields[key] = rng.standard_normal((m_a, m_a + 1, km))
+        elif key == "rdxc":
+            fields[key] = rng.standard_normal((m_a + 1, m_a))
+        elif key in ("rdx",):
+            fields[key] = rng.standard_normal((m_a, m_a + 1))
+        elif key in ("rdy",):
+            fields[key] = rng.standard_normal((m_a + 1, m_a))
+        elif key in ("grid_lon", "grid_lat"):
+            fields[key] = rng.standard_normal((m_a + 1, m_a + 1))
+        else:
+            fields[key] = rng.standard_normal((m_a, m_a))
+
+    blob = gen.serialize_geopk_pgrad_inputs(fields, gen.RES, gen.NG, km)
+    text = blob.decode()
+    head = text.split("\n")
+    assert head[0] == f"# res {gen.RES}"
+    assert head[1] == f"# ng {gen.NG}"
+    assert head[2] == f"# km {km}"
+    for tag in ("# dt ", "# dt2 ", "# ptop ", "# akap ", "# cpair ",
+                "# dext "):
+        assert any(ln.startswith(tag) for ln in head[:12]), tag
+    # every declared token appears, in the declared ORDER
+    pos = -1
+    for tok, _key, _o in gen.INPUT_FIELDS:
+        idx = text.find(f"\n{tok} ")
+        assert idx > 0, tok
+        assert idx > pos, f"{tok} out of canonical order"
+        pos = idx
+    # 3-D records carry FOUR fields after the token, 2-D three, 1-D two
+    by_tok = {}
+    for ln in head:
+        if not ln or ln.startswith("#"):
+            continue
+        pp = ln.split()
+        by_tok.setdefault(pp[0], set()).add(len(pp))
+    assert by_tok["DELP"] == {5}
+    assert by_tok["HS"] == {4}
+    assert by_tok["EDGE_W"] == {3}
+    assert by_tok["DA_MIN_C"] == {2}
+    # halo-origin fields start at 1-ng, base-1 fields at 1
+    assert f"\nHS {lo} {lo} " in text
+    assert "\nDIVG2 1 1 " in text
+    # determinism + tamper
+    assert gen.serialize_geopk_pgrad_inputs(fields, gen.RES, gen.NG,
+                                            km) == blob
+    tampered = dict(fields)
+    tampered["delp"] = fields["delp"].copy()
+    tampered["delp"].flat[0] = np.nextafter(tampered["delp"].flat[0], np.inf)
+    bad = gen.serialize_geopk_pgrad_inputs(tampered, gen.RES, gen.NG, km)
+    assert hashlib.sha256(bad).hexdigest() != \
+        hashlib.sha256(blob).hexdigest()
+
+
+def test_gen_output_layout_covers_every_token():
+    gen = _load_gen()
+    shapes, origins = gen.output_layout(gen.RES, gen.NG, 3)
+    for _tok, key in gen.TOKEN2KEY.items():
+        assert key in shapes, key
+        assert key in origins, key
+        assert len(origins[key]) == len(shapes[key])
+    assert shapes["pe_c"] == (gen.RES + 2, 4, gen.RES + 2)
+    assert origins["pe_c"] == (0, 1, 0)
+    assert shapes["logexp_out"] == (gen.NPROBE,)
+
+
+def test_gen_dead_input_claims_are_declared_fields():
+    gen = _load_gen()
+    keys = {k for _t, k, _o in gen.INPUT_FIELDS}
+    for key, reason in gen.DEAD_INPUTS.items():
+        assert key in keys, key
+        assert len(reason) > 30, key
+    assert "q_con" in gen.DEAD_INPUTS
+    assert gen.KM_PROFILES[2] != gen.KM_PROFILES[3][:2]
+
+
+def test_gen_km_profiles_are_not_a_refinement():
+    """km=3 must NOT reproduce the km=2 interfaces, else
+    ``test_km2_km3_differ`` in the oracle gate would be a tautology."""
+    gen = _load_gen()
+    for km, frac in gen.KM_PROFILES.items():
+        assert abs(sum(frac) - 1.0) < 1e-12, km
+        assert len(set(frac)) == len(frac), f"km={km} has equal layers"
+    assert abs(gen.KM_PROFILES[3][0] - gen.KM_PROFILES[2][0]) > 1e-3
