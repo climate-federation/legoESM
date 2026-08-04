@@ -90,6 +90,10 @@ def hydrostatic_pressure(z_m: np.ndarray, T: np.ndarray, qv: np.ndarray,
     top), matching ``theta_prime[..., -1]`` being the surface.  We integrate
     from the surface (last index) upward.
 
+    ``z_m`` holds FULL-level heights, so the first step carries the pressure
+    from the ground (z = 0, p = ``p_sfc``) up to the lowest full level at its
+    ACTUAL height ``z[0]`` — not a half-layer guess.
+
     Returns p with the same leading shape as ``T``.
     """
     # Work bottom-up, then flip back.
@@ -97,10 +101,8 @@ def hydrostatic_pressure(z_m: np.ndarray, T: np.ndarray, qv: np.ndarray,
     Tv = (T * (1.0 + (1.0 / constants.epsilon - 1.0) * qv))[..., ::-1]
     nz = z.size
     p = np.empty_like(Tv)
-    # Surface layer: half a layer thickness below the first full level.
-    dz0 = z[0] if nz == 1 else (z[1] - z[0]) * 0.5
     p[..., 0] = p_sfc * np.exp(
-        -constants.g * dz0 / (constants.R_d * Tv[..., 0]))
+        -constants.g * z[0] / (constants.R_d * Tv[..., 0]))
     for k in range(1, nz):
         dz = z[k] - z[k - 1]
         Tv_mid = 0.5 * (Tv[..., k] + Tv[..., k - 1])
@@ -109,21 +111,39 @@ def hydrostatic_pressure(z_m: np.ndarray, T: np.ndarray, qv: np.ndarray,
     return p[..., ::-1]
 
 
-def layer_mass(p: np.ndarray) -> np.ndarray:
-    """Mass element dm = -dp/g [kg/m^2] per full level, top-down ordering.
+def layer_thickness(z_m: np.ndarray) -> np.ndarray:
+    """Layer thickness dz [m] per full level, top-down ordering.
 
-    Uses half-level pressures reconstructed as the geometric mean of adjacent
-    full levels; the top boundary extends to p=0 and the bottom to the
-    surface pressure implied by extrapolating the lowest layer.
+    Half levels are the midpoints between full levels, with the surface pinned
+    at z=0 and the model top mirrored from the topmost layer.  This reproduces
+    the geometry the driver's own CWV diagnostic integrates over
+    (``rce_diagnostics.column_water_vapor_plane`` uses the model ``dz``), which
+    is why control C1 can be expected to close.
     """
-    nz = p.shape[-1]
-    p_half = np.empty(p.shape[:-1] + (nz + 1,), dtype=p.dtype)
-    p_half[..., 1:nz] = np.sqrt(p[..., :-1] * p[..., 1:])
-    p_half[..., 0] = 0.0                                   # model top
-    # Bottom half-level: mirror the lowest layer's log-thickness.
-    p_half[..., nz] = p[..., -1] ** 2 / p_half[..., nz - 1]
-    dm = np.diff(p_half, axis=-1) / constants.g
-    return dm
+    z_asc = z_m[::-1]
+    nz = z_asc.size
+    zh = np.empty(nz + 1)
+    zh[0] = 0.0                                     # surface
+    zh[1:nz] = 0.5 * (z_asc[:-1] + z_asc[1:])
+    zh[nz] = z_asc[-1] + (z_asc[-1] - zh[nz - 1])   # mirror the top layer
+    return np.diff(zh)[::-1]
+
+
+def layer_mass(p: np.ndarray, z_m: np.ndarray, T: np.ndarray,
+               qv: np.ndarray) -> np.ndarray:
+    """Mass element dm = rho*dz [kg/m^2] per full level, top-down ordering.
+
+    ``rho = p / (R_d T_v)`` from the ideal gas law on the snapshot's own state.
+
+    An earlier version used ``dm = -dp/g`` with geometric-mean half-level
+    pressures.  That form disagreed with the driver's stored CWV by 6.2% (its
+    top boundary p=0 and its extrapolated bottom half-level are both crude),
+    which control C1 caught and rejected.  The ``rho*dz`` form matches the
+    height-based integral the driver actually performs.
+    """
+    Tv = T * (1.0 + (1.0 / constants.epsilon - 1.0) * qv)
+    rho = p / (constants.R_d * Tv)
+    return rho * layer_thickness(z_m)
 
 
 def qv_from_mse(mse_kJ: np.ndarray, T: np.ndarray,
@@ -158,7 +178,7 @@ def analyse_volumes(vol_files: list[Path], p_sfc: float,
         qc = _require_finite("qcloud", d["qcloud"])
         cond = _require_finite("cond", d["cond"])
         p = hydrostatic_pressure(z, T, qv, p_sfc)
-        dm = layer_mass(p)
+        dm = layer_mass(p, z, T, qv)
 
         cwv = np.sum(qv * dm, axis=-1)                     # kg/m^2 == mm
         cwp = np.sum(cond * dm, axis=-1)
@@ -259,32 +279,73 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
           "microphysics flux -- see rce_diagnostics.precipitation_rate_proxy_plane")
     print(f"  E is a BULK ESTIMATE recomputed here: C_h={_RCEMIP1_C_H}, "
           f"gust floor={_RCEMIP1_GUST_MS} m/s, T_sfc={t_sfc} K")
-    print("\n   day | P_proxy[mm/d]  P_max | CWV_mean CWV_max | "
-          "E_est[mm/d] | E-P[mm/d] | |U|sfc")
+    print("  P_budget is the WATER-BUDGET estimate P = E - d(CWV)/dt, "
+          "centred-differenced between consecutive snapshots.")
+    print("  CWV_max/CWV_mean is the convective-cell discriminator: real cells "
+          "give max >> mean; the column-symmetric trap never crosses 60 mm.")
     ref = {}
     qsat_sfc = float(saturation_mixing_ratio(
         jnp.asarray(t_sfc), jnp.asarray(WING_P_SFC)))
-    for i, path in enumerate(sfc_files):
+    days, cwv_m, cwv_x, p_proxy, p_max, e_est, spd_m = ([] for _ in range(7))
+    for path in sfc_files:
         with np.load(path) as ds:
             day = float(ds["day"])
             precip = _require_finite("precip", np.asarray(ds["precip"]))
             cwv = _require_finite("cwv", np.asarray(ds["cwv"]))
-            ref[round(day, 3)] = float(cwv.mean())
-            if i % stride and path is not sfc_files[-1]:
-                continue
-            qv_s = np.asarray(ds["qv_sfc"])
-            u_s = np.asarray(ds["u_sfc"])
-            v_s = np.asarray(ds["v_sfc"])
-            spd = np.sqrt(u_s ** 2 + v_s ** 2)
-            spd_eff = np.sqrt(spd ** 2 + _RCEMIP1_GUST_MS ** 2)
-            rho_s = 1.15
-            evap = rho_s * _RCEMIP1_C_H * spd_eff * (qsat_sfc - qv_s)
-            e_mmday = float(evap.mean()) * SEC_PER_DAY
-            p_mmday = float(precip.mean())
-            print(f"{day:6.2f} | {p_mmday:12.4f} {float(precip.max()):6.1f} | "
-                  f"{float(cwv.mean()):8.2f} {float(cwv.max()):7.2f} | "
-                  f"{e_mmday:11.3f} | {e_mmday - p_mmday:9.3f} | "
-                  f"{float(spd.mean()):6.3f}")
+            qv_s = _require_finite("qv_sfc", np.asarray(ds["qv_sfc"]))
+            spd = np.sqrt(np.asarray(ds["u_sfc"]) ** 2
+                          + np.asarray(ds["v_sfc"]) ** 2)
+        ref[round(day, 3)] = float(cwv.mean())
+        # RCEMIP1 bulk evaporation with the code's OWN coefficients
+        # (rce_surface_flux._RCEMIP1_C_H / _RCEMIP1_GUSTINESS_FLOOR_MS).
+        # Surface air density from the ideal gas law on the run's own p_sfc and
+        # near-surface humidity -- no hardcoded density literal.
+        rho_s = WING_P_SFC / (constants.R_d * t_sfc
+                              * (1.0 + (1.0 / constants.epsilon - 1.0) * qv_s))
+        spd_eff = np.sqrt(spd ** 2 + _RCEMIP1_GUST_MS ** 2)
+        evap = rho_s * _RCEMIP1_C_H * spd_eff * (qsat_sfc - qv_s)
+        days.append(day)
+        cwv_m.append(float(cwv.mean()))
+        cwv_x.append(float(cwv.max()))
+        p_proxy.append(float(precip.mean()))
+        p_max.append(float(precip.max()))
+        e_est.append(float(evap.mean()) * SEC_PER_DAY)
+        spd_m.append(float(spd.mean()))
+    days = np.asarray(days)
+    cwv_m = np.asarray(cwv_m)
+    e_est = np.asarray(e_est)
+    # d(CWV)/dt by centred differences on the SAME grid as E.
+    dcwv = np.gradient(cwv_m, days)
+    p_budget = e_est - dcwv
+
+    print("\n   day | P_proxy  P_max | P_budget | CWV_mean CWV_max  max/mean | "
+          "E_est | dCWV/dt | |U|sfc")
+    print("       |   [mm/d]       |   [mm/d] |    [mm]     [mm]           | "
+          "[mm/d] |  [mm/d] |  [m/s]")
+    for i in range(len(days)):
+        if i % stride and i != len(days) - 1:
+            continue
+        print(f"{days[i]:6.2f} | {p_proxy[i]:7.4f} {p_max[i]:6.1f} | "
+              f"{p_budget[i]:8.3f} | {cwv_m[i]:8.2f} {cwv_x[i]:8.2f} "
+              f"{cwv_x[i]/max(cwv_m[i], 1e-9):9.3f} | {e_est[i]:6.3f} | "
+              f"{dcwv[i]:7.3f} | {spd_m[i]:6.3f}")
+
+    # C4: rates over an explicitly stated window, printed next to the number.
+    for lo, hi in ((0.0, 10.0), (10.0, 30.0), (days[-1] - 20.0, days[-1])):
+        m = (days >= lo) & (days <= hi)
+        if m.sum() < 2:
+            continue
+        print(f"\n  WINDOW days {lo:.1f}-{hi:.1f} ({int(m.sum())} snapshots), "
+              "every number below from THIS window only:")
+        print(f"    P_budget = E - dCWV/dt : {p_budget[m].mean():7.3f} mm/day "
+              f"(Wing 2018 RCE plateau ~3 mm/day)")
+        print(f"    P_proxy  (q_r * 5 m/s) : "
+              f"{np.asarray(p_proxy)[m].mean():7.3f} mm/day")
+        print(f"    E_est                  : {e_est[m].mean():7.3f} mm/day")
+        print(f"    CWV_mean               : {cwv_m[m].mean():7.2f} mm "
+              f"(drift {cwv_m[m][-1] - cwv_m[m][0]:+.2f} mm over the window)")
+        print(f"    CWV_max/CWV_mean       : "
+              f"{np.mean(np.asarray(cwv_x)[m] / cwv_m[m]):7.3f}")
     return ref
 
 

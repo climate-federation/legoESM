@@ -34,10 +34,11 @@ def test_hydrostatic_pressure_matches_the_isothermal_analytic_solution():
     qv = np.zeros_like(z)
     p = rcb.hydrostatic_pressure(z, T, qv, p_s)
     H = constants.R_d * T0 / constants.g
-    # The first full level sits half a layer above the surface.
-    expected = p_s * np.exp(-(z - 0.5 * (z_asc[1] - z_asc[0])) / H)
+    expected = p_s * np.exp(-z / H)              # exact isothermal solution
     np.testing.assert_allclose(p, expected, rtol=2e-4)
     assert np.all(np.diff(p) > 0), "p must increase downward (top-down order)"
+    # z=0 is in the grid, so the bottom entry must be p_sfc itself.
+    assert p[-1] == pytest.approx(p_s, rel=1e-12)
 
 
 def test_hydrostatic_pressure_uses_virtual_temperature():
@@ -49,16 +50,31 @@ def test_hydrostatic_pressure_uses_virtual_temperature():
     assert np.all(p_moist[:-1] > p_dry[:-1])
 
 
+def test_layer_thickness_tiles_the_column_without_gap_or_overlap():
+    """dz must sum to the top half-level height and every layer be positive."""
+    z = np.linspace(30_000.0, 550.0, 30)          # top-down, uniform
+    dz = rcb.layer_thickness(z)
+    assert dz.shape == z.shape
+    assert np.all(dz > 0.0)
+    # Uniform full levels starting at 550 m with spacing 1100 m is exactly the
+    # legoESM plane-CRM default grid; every layer should then be ~ the spacing,
+    # and the lowest one reaches the ground.
+    z2 = (np.arange(30) * 1100.0 + 550.0)[::-1]
+    dz2 = rcb.layer_thickness(z2)
+    np.testing.assert_allclose(dz2, 1100.0, rtol=1e-12)
+    assert dz2.sum() == pytest.approx(30 * 1100.0)
+
+
 def test_layer_mass_integrates_to_the_surface_pressure_over_g():
-    """Sum of dm over the column must be p_sfc/g -- the exact mass of a
+    """Sum of rho*dz over the column must be p_sfc/g -- the exact mass of a
     hydrostatic column.  This is the control that makes every column integral
     downstream trustworthy."""
-    z = np.linspace(30_000.0, 0.0, 120)
-    T = 290.0 - 0.0065 * z
-    T = np.maximum(T, 200.0)
+    z = np.linspace(30_000.0, 20.0, 600)
+    T = np.maximum(290.0 - 0.0065 * z, 200.0)
+    qv = np.zeros_like(z)
     p_s = 101_480.0
-    p = rcb.hydrostatic_pressure(z, T, np.zeros_like(z), p_s)
-    dm = rcb.layer_mass(p)
+    p = rcb.hydrostatic_pressure(z, T, qv, p_s)
+    dm = rcb.layer_mass(p, z, T, qv)
     total = float(dm.sum())
     assert np.all(dm > 0.0), "every layer mass must be positive"
     np.testing.assert_allclose(total, p_s / constants.g, rtol=0.02)
@@ -112,7 +128,7 @@ def test_cwv_control_fails_loudly_on_a_wrong_column_integral(tmp_path, capsys):
                             0.05, bogus)
     # ... and PASSES when the stored CWV is consistent.
     p = rcb.hydrostatic_pressure(z, T, qv, rcb.WING_P_SFC)
-    good_cwv = float(np.sum(qv * rcb.layer_mass(p)))
+    good_cwv = float(np.sum(qv * rcb.layer_mass(p, z, T, qv)))
     rcb.analyse_volumes([d3 / "vol_00000100.npz"], rcb.WING_P_SFC,
                         0.05, {1.0: good_cwv})
 
