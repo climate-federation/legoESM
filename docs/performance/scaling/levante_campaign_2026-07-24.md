@@ -2382,3 +2382,43 @@ future: the replicated broadcast reaches the limit when
 above ~332 MB — around LL5760x11520 at 256 processes. Revisit there,
 not before. (The SHARDED-geometry mode already uses the assert-free
 `checked_shard_put` from PR #1458 and is unaffected either way.)
+
+### #2 REPRICED BY MEASUREMENT — the packing ceiling is ~6 %, not 7-16 %
+
+The consult's #2 estimate (4.0-4.4 ms, i.e. 7-16 %) was built on the
+PRE-fusion 41-CP count and a speculative grouping. The post-fusion
+histogram (nd=8 virtual-CPU census, fused ON) prices what is actually
+left — 29 CPs in six shape classes:
+
+| count | shape | what it is |
+|---|---|---|
+| 6 | f32[1,79898] | the FUSED entry multi-pad (T,u,dp), 2/stage |
+| 6 | f32[2,1028,26] | halo=2 PPM pad, 2/stage |
+| 6 | f32[1,1026,27] | Bln-stack interface pad (fold family) |
+| 6 | f32[1,1024,27] | v-face interface pad (BC family) |
+| 4 | f32[1] | loop-invariant GEOMETRY (grid.lat, cos_lat) |
+| 1 | f32[1,1024,26] | singleton |
+
+Two findings that change the plan:
+
+* **The four 1-D pads are pure grid geometry** (`grid.lat` /
+  `cos_lat` at `_vface_cos_lat_core:87`, `curl_vertex_cgrid:1098/1218`,
+  `tendencies:494`) — loop-invariant, and XLA already CSEs them across
+  the three RK stages, so they cost **4 CPs / 16 bytes total**.
+  Hoisting them host-side (the band grids are all available at factory
+  time, so the padded metrics need NO communication) removes 4 CPs =
+  4 x 29.7 us = 0.119 ms = **2.5 %** at the @128 working point.
+* **The only other count lever is cross-family fusion**: the Bln
+  (fold-family) and v-face (BC-family) interface pads differ ONLY in
+  their pole rows — their interior exchange is identical, so an
+  "exchange once, apply per-family pole fill" helper would take 12 CPs
+  to 6 = a further ~3.7 %. That is delicate pole-semantics surgery on
+  the dycore.
+
+Realistic combined ceiling: **~6 %**, versus the 7-16 % the consult
+projected from the stale count. Given the pole-semantics risk on the
+cross-family half, #2 is recorded as MEASURED-AND-DEPRIORITIZED rather
+than attempted: the cheap, safe part (geometry hoist, 2.5 %) is a
+clean follow-up if wanted; the risky part is not worth ~3.7 % on a
+lane already at ratio 1.83-1.96. Consistent with the campaign's
+standing conclusion that the remaining distance is structural.
