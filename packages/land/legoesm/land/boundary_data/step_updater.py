@@ -37,7 +37,7 @@ from legoesm.land.boundary_data._internals import (
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
     pft_lookup_arrays,
 )
-from legoesm.land.boundary_data.builders import glacier_mask
+from legoesm.land.boundary_data.builders import dominant_pft_index, glacier_mask
 from legoesm.land.boundary_data.gap_fill import (
     surfdata_covered,
     bare_canopy_params, bare_land_surface_params,

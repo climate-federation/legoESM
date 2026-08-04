@@ -1,4 +1,4 @@
-"""Multi-layer snow-column (_future) conservation + physics validation.
+"""Multi-layer snow-column conservation + physics validation.
 
 Covers: the equal-mass remap conservation (water + enthalpy), water-mass
 conservation over a run, the FULL energy budget through liquid heat capacity /
@@ -11,13 +11,16 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.land._future.snow_column import (
+from legoesm.land.snow_column import (
     SnowColumnConfig,
     SnowColumnState,
     _enthalpy,
     _remap_equal_mass,
+    apply_sublimation,
     column_enthalpy,
     initial_snow_state,
+    pack_top_temperature,
+    snow_base_interface_conductance,
     step_snow_column,
     total_water,
 )
@@ -130,6 +133,49 @@ def test_empty_pack_is_safe():
                                 jnp.zeros((4,)), jnp.zeros((4,)), 3600.0, CFG)
     assert jnp.all(jnp.isfinite(s2.T)) and jnp.all(jnp.isfinite(s2.swe_ice))
     assert jnp.allclose(total_water(s2), 0.0, atol=1e-12)
+
+
+def test_apply_sublimation_conserves_mass_and_enthalpy():
+    """Sublimation removes ICE mass and exactly its sensible enthalpy; the returned
+    delta_H closes the column enthalpy budget.  Deposition (negative) adds frost."""
+    s = _packed_state()
+    subl = jnp.array([1.0, 0.5, 0.0])            # kg/m^2 removed this step
+    w0, H0 = total_water(s), column_enthalpy(s)
+    s2, dH = apply_sublimation(s, subl, CFG)
+    # Mass: total water drops by exactly the removed ice mass (liquid untouched).
+    assert jnp.allclose(total_water(s2), w0 - subl, atol=1e-10)
+    # Enthalpy: column change equals the reported delta_H (budget-closing term).
+    assert jnp.allclose(column_enthalpy(s2) - H0, dH, atol=1e-6)
+    # Never removes more ice than present; result stays finite/non-negative.
+    assert jnp.all(s2.swe_ice >= -1e-12) and jnp.all(jnp.isfinite(s2.T))
+
+    # Deposition (frost): negative subl adds ice to the top layer.
+    dep = jnp.array([-0.3, 0.0, 0.0])
+    s3, dH3 = apply_sublimation(s, dep, CFG)
+    assert jnp.allclose(total_water(s3), w0 - dep, atol=1e-10)   # -dep = +0.3 added
+    assert jnp.allclose(column_enthalpy(s3) - H0, dH3, atol=1e-6)
+    assert s3.swe_ice[0, 0] > s.swe_ice[0, 0]                    # added to TOP layer
+
+
+def test_apply_sublimation_capped_at_available_ice():
+    """A sublimation demand exceeding the pack ice removes all of it, no more."""
+    s = _packed_state()
+    total_ice = jnp.sum(s.swe_ice, axis=-1)
+    s2, _ = apply_sublimation(s, total_ice + 5.0, CFG)   # over-demand
+    assert jnp.allclose(jnp.sum(s2.swe_ice, axis=-1), 0.0, atol=1e-9)
+    assert jnp.all(s2.swe_ice >= -1e-12)
+
+
+def test_base_conductance_and_top_temperature():
+    """Base interface conductance is positive/finite and rises with density (Sturm);
+    pack_top_temperature returns the top layer's T."""
+    s = _packed_state()
+    g = snow_base_interface_conductance(s, CFG)
+    assert jnp.all(g > 0.0) and jnp.all(jnp.isfinite(g))
+    # Denser pack conducts better (k ~ (rho/rho_ref)^exp, exp>0).
+    s_dense = s._replace(density=s.density * 1.5)
+    assert jnp.all(snow_base_interface_conductance(s_dense, CFG) > g)
+    assert jnp.allclose(pack_top_temperature(s), s.T[..., 0])
 
 
 def test_jit_and_differentiable():

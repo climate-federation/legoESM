@@ -40,11 +40,28 @@ from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.snow_budget import update_snow
+from legoesm.land.snow_column import (
+    apply_sublimation,
+    pack_top_temperature,
+    snow_base_interface_conductance,
+    step_snow_column,
+    total_water,
+)
 from legoesm.land.state import MultiLayerLandState
+
+# Snow thermal scheme dispatch (validated on the static config value at the shared
+# impl entry — see MultiLayerLandConfig.snow_scheme).  Grow this set as schemes are
+# wired; an unknown value must raise, never silently fall through to a default.
+_SUPPORTED_SNOW_SCHEMES = ("single", "multilayer")
+
+# Minimum soil-top half-interface distance [m] for the snow<->soil interface
+# conductance (mirrors snow_column._DZ_HALF_MIN): bounds k/(dz/2) for a vanishing
+# top-layer thickness so g_iface stays finite.
+_SOIL_TOP_DZ_HALF_MIN = 1e-4
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
-from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.soil_thermal import compute_thermal_conductivity, solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
@@ -374,6 +391,34 @@ def _step_multilayer_land_impl(
     parameters flow through the standard land rollout.  All three are ignored by
     the non-CLM-ML schemes and by forward-only runs.
     """
+    # Dispatch hardening: validate the snow scheme on the STATIC config value at fn
+    # entry (never inside the traced body).  Unknown value -> hard error so a typo
+    # cannot silently run the wrong snow physics.
+    if config.snow_scheme not in _SUPPORTED_SNOW_SCHEMES:
+        raise ValueError(
+            f"Unknown snow_scheme {config.snow_scheme!r}; expected one of "
+            f"{_SUPPORTED_SNOW_SCHEMES}.")
+    if config.snow_scheme == "multilayer":
+        # Phase 2b Stage 3: the prognostic multi-layer snow column is coupled below
+        # (canopy -> column -> soil sequential operator split).  Scoped to the
+        # two-leaf canopy surface scheme (the LMIP + flux-site config); the SEB /
+        # CLM-ML coupling is a later extension.  Fail loudly rather than silently
+        # run the single-node budget under a 'multilayer' label.
+        # See docs/land/phase2b_snow_thermal_plan.md.
+        if not isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+            raise ValueError(
+                "snow_scheme='multilayer' is currently supported only with the "
+                "TwoLeafCanopyConfig surface scheme (the LMIP / flux-site config); "
+                f"got {type(config.surface_scheme).__name__}. Use snow_scheme='single' "
+                "with other surface schemes.")
+        if config.elev_bands is not None:
+            raise ValueError(
+                "snow_scheme='multilayer' and elev_bands (sub-grid snow bands) are "
+                "mutually exclusive snow representations; enable only one.")
+        if state.snow_column is None:
+            raise ValueError(
+                "snow_scheme='multilayer' requires state.snow_column; initialise with "
+                "init_multilayer_land_state(config=...) so the prognostic column exists.")
     lp = land_params
     T_soil = state.T_soil        # (ncol, n_layers)
     psi = state.psi_soil         # (ncol, n_layers)
@@ -414,6 +459,29 @@ def _step_multilayer_land_impl(
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]
     ncol = T_surface.shape[0]
+
+    # --- Multi-layer snow column: lagged (start-of-step) diagnostics (Stage 3) ---
+    # When snow_scheme=="multilayer" the prognostic column buffers the surface energy
+    # flux from the soil.  Compute the lagged pack SWE / top-T here so the surface
+    # scheme's ground boundary is the PACK-TOP temperature where a pack exists (the
+    # skin the atmosphere actually exchanges with under snow), and the cell-mean
+    # ``snow`` handed to the albedo/latent blocks is the column total SWE.  Sequential
+    # operator split: these lagged values also set G_bottom below (see the snow phase).
+    _use_snow_column = config.snow_scheme == "multilayer"
+    if _use_snow_column:
+        _pack_swe_lagged = total_water(state.snow_column)              # (ncol,)
+        # THERMALLY-ACTIVE pack (zero-layer-snow threshold): only a pack thick enough
+        # to carry its own surface energy budget insulates the soil.  A thin dusting
+        # accumulates + brightens albedo but the surface flux still reaches the soil
+        # (routing a full Q_top into a ~0-heat-capacity layer would melt it in one
+        # step).  See SnowColumnConfig.thermal_active_swe.
+        _has_pack_lagged = _pack_swe_lagged > config.snow_column.thermal_active_swe
+        _pack_top_T_lagged = pack_top_temperature(state.snow_column)   # (ncol,)
+        # Canopy ground boundary = pack-top T where thermally packed, else soil top.
+        T_surface = jnp.where(_has_pack_lagged, _pack_top_T_lagged, T_surface)
+        # Cell-mean SWE the snow/albedo/latent blocks read = the column total (the
+        # column is authoritative for SWE, incl. sub-threshold snow for albedo).
+        snow = _pack_swe_lagged
 
     # --- Sub-grid elevation-band snow (opt-in gaps 1,2,4) ---
     # Re-partition the cell precipitation phase PER elevation band (lapse-downscaled
@@ -710,6 +778,24 @@ def _step_multilayer_land_impl(
     tau_y = surface_out.tau_y
     G_surface = surface_out.G_soil
 
+    # Snow-free base albedo that the snow feedback (and banded radiation) blends
+    # on top of.  The canopy schemes (TwoLeafCanopy / CLM-ML) diagnose a per-cell
+    # snow-free surface albedo from their OWN shortwave radiative transfer — the
+    # soil-colour ``ALB_VIS``/``ALB_NIR`` (moisture-darkened) blended with the
+    # vegetation — and return it in ``surface_out.albedo``.  The SEB path carries
+    # the per-cell veg/soil blend (``lp.albedo_veg`` + dry-soil brightening) in
+    # ``albedo_land``.  ``CanopyLandParams`` has NO ``albedo_veg`` field, so
+    # ``_get(lp, "albedo_veg", config.albedo_land)`` above silently collapses the
+    # canopy base to the scalar ``config.albedo_land``; without this split the
+    # reported/coupled canopy albedo degenerates to a uniform base + snow bands
+    # and drops all soil-colour + vegetation structure (while the canopy energy
+    # balance still used the real per-cell albedo — an inconsistency too).  The
+    # canopy RT already accounts for soil reflectance, so no dry-soil brightening
+    # is re-applied to ``surface_out.albedo``.
+    _is_canopy = isinstance(
+        config.surface_scheme, (TwoLeafCanopyConfig, CLMMLCanopyConfig))
+    snowfree_base = surface_out.albedo if _is_canopy else albedo_land
+
     # --- Banded surface radiation (gaps 1,2): override the cell-mean radiation in
     # G_surface with the area-weighted per-band balance (elevation-lapsed SW/LW +
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
@@ -726,16 +812,17 @@ def _step_multilayer_land_impl(
         _bands_eff = state.snow_bands + jnp.where(
             _band_surviving, snowfall_bands * dt, 0.0)
         if config.snow_albedo_feedback and lat is not None:
-            # Snow-free base = ``albedo_land`` (per-cell CLM map / lp.albedo_veg, or the
-            # config scalar carrying the trainable pft_alb) so the base flows to the
-            # gradient — NOT the latitude-band veg albedo, which would zero pft_alb.
-            _base = jnp.broadcast_to(albedo_land, T_surface.shape)
+            # Snow-free base = ``snowfree_base`` (per-cell canopy RT albedo for the
+            # canopy schemes, else the SEB per-cell CLM map / lp.albedo_veg + dry-soil
+            # brightening scalar carrying the trainable pft_alb) so the base flows to
+            # the gradient — NOT the latitude-band veg albedo, which would zero pft_alb.
+            _base = jnp.broadcast_to(snowfree_base, T_surface.shape)
             alpha_bands = band_albedo(
                 _bands_eff, state.snow_age_bands, _base, _cover_fn, _alb_fn,
                 ice_bands=ice_bands_in, cfg=bands)
         else:
             alpha_bands = jnp.broadcast_to(
-                jnp.reshape(albedo_land, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
+                jnp.reshape(snowfree_base, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
         band_rad = band_net_radiation(
             T_surface, alpha_bands, forcing.sw_down, forcing.lw_down, emissivity, bands)
         # surface_out.G_soil = sw_net + lw_net - shflx - lhflx; swap the radiation.
@@ -780,6 +867,57 @@ def _step_multilayer_land_impl(
         blow_subl = band_step.blow_subl        # (ncol,) blowing-snow sublimation [kg/m2/s]
         # Frozen glacier discharge + ablation ice meltwater both leave as runoff.
         cap_runoff = band_step.ice_runoff + ice_melt / dt
+    elif _use_snow_column:
+        # --- Multi-layer prognostic snow column (Stage 3, sequential split) ---
+        # Q_top = the surface net flux (G_surface, computed by the canopy against the
+        # lagged pack-top T) enters the pack TOP; a prescribed conductive flux
+        # G_bottom = g_iface*(T_pack_base - T_soil_top) (positive DOWNWARD into soil)
+        # leaves the base and is handed UNCHANGED to the soil top BC below, so the
+        # snow<->soil seam conserves energy.  Fusion is handled INSIDE the column
+        # (enthalpy method) -> no melt_energy term here.  Empty-pack columns bypass
+        # the column (Q_top=0 into the inert pack; the soil gets the full G_surface),
+        # so a snow-free cell is bit-identical to snow_scheme="single".
+        _sc = state.snow_column
+        # Interface conductance g_iface = harmonic mean of the pack-base and soil-top
+        # half-conductances (both >= 0).  Lagged (start-of-step) T -> explicit split.
+        _g_base = snow_base_interface_conductance(_sc, config.snow_column)   # W/m2/K
+        _k_soil_top = compute_thermal_conductivity(
+            theta, config.hydraulics, config.thermal)[:, 0]                  # W/m/K
+        _g_soil_top = _k_soil_top / jnp.maximum(
+            0.5 * grid.dz[0], _SOIL_TOP_DZ_HALF_MIN)                         # W/m2/K
+        _g_iface = jnp.where(
+            _has_pack_lagged,
+            2.0 * _g_base * _g_soil_top / jnp.maximum(_g_base + _g_soil_top, 1e-30),
+            0.0)
+        G_bottom = _g_iface * (_sc.T[..., -1] - T_soil[:, 0])   # +downward into soil
+        # Only packed columns take Q_top / lose G_bottom; empty ones just accumulate
+        # fresh snow (at T_air) and stay inert this step.
+        _Q_top_col = jnp.where(_has_pack_lagged, G_surface, 0.0)
+        _G_bottom_col = jnp.where(_has_pack_lagged, G_bottom, 0.0)
+        _sc_new, drainage, drainage_heat = step_snow_column(
+            _sc, precip_snow_eff, forcing.T_lowest,
+            _Q_top_col, _G_bottom_col, dt, config.snow_column)
+        # Soil top BC flux: G_bottom + the drained meltwater's enthalpy where packed,
+        # else the full surface flux (empty-pack bypass).
+        G_surface = jnp.where(
+            _has_pack_lagged, G_bottom + drainage_heat / dt, G_surface)
+        snow_new = total_water(_sc_new)              # pre-sublimation cell SWE [kg/m2]
+        snow_melt = drainage                         # meltwater leaving the base [kg/m2]
+        # Column has no separate age clock: reset on fresh snowfall, else age; zero
+        # once the pack is empty (mirrors update_snow's albedo-age semantics).
+        _fresh = precip_snow_eff * dt > 1e-6
+        snow_age_new = jnp.where(_fresh, 0.0, snow_age + dt)
+        snow_age_new = jnp.where(
+            snow_new > config.snow_column.min_pack_swe, snow_age_new, 0.0)
+        snow_bands_new = state.snow_bands
+        snow_age_bands_new = state.snow_age_bands
+        ice_bands_new = state.ice_bands
+        ice_melt = jnp.zeros_like(snow_new)
+        refreeze = jnp.zeros_like(snow_new)
+        blow_subl = jnp.zeros_like(snow_new)
+        cap_runoff = jnp.zeros_like(snow_new)
+        _soil_surface_conductance = jnp.where(
+            _has_pack_lagged, _g_iface, surface_out.surface_conductance)
     else:
         snow_new, snow_age_new, snow_melt = update_snow(
             snow, snow_age, T_surface, precip_snow_eff, dt,
@@ -794,12 +932,15 @@ def _step_multilayer_land_impl(
         refreeze = jnp.zeros_like(snow_new)
         blow_subl = jnp.zeros_like(snow_new)
         cap_runoff = jnp.zeros_like(snow_new)
-    # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
-    # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
-    # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
-    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt
-                   + blow_subl * constants.L_s)
-    G_surface = G_surface - melt_energy
+    if not _use_snow_column:
+        # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME
+        # L_f; rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation
+        # (gap 5) consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
+        # Multilayer: fusion is handled INSIDE the column, so this is skipped.
+        melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt
+                       + blow_subl * constants.L_s)
+        G_surface = G_surface - melt_energy
+        _soil_surface_conductance = surface_out.surface_conductance
 
     # --- Latent mass partition (component- and phase-correct, water-limited) ---
     # The surface latent flux is split into a SNOWPACK-sublimation energy stream
@@ -848,7 +989,15 @@ def _step_multilayer_land_impl(
     sublim_demand = snow_latent / constants.L_s
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
-    snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
+    if _use_snow_column:
+        # Remove the sublimated ICE mass (+ its sensible enthalpy) from the pack; the
+        # L_s ENERGY is already booked in Q_top (=G_surface) as -lhflx over snow, so
+        # mass-removal here closes the coupled seam.  Deposition (sublim<0) adds frost.
+        _sc_new, _ = apply_sublimation(
+            _sc_new, sublim_actual * dt, config.snow_column)
+        snow_new = total_water(_sc_new)
+    else:
+        snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
     if bands is not None:
         # Redistribute the aggregate sublimation/deposition across bands (preserve the
         # band distribution + aggregate mass); empty-pack deposition (frost) spreads
@@ -1021,12 +1170,16 @@ def _step_multilayer_land_impl(
     # T_sfc-dependence implicit here, removing the explicit-coupling large-dt/thin-
     # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
     # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
+    # Multilayer snow (packed cells): the soil top is driven by G_bottom =
+    # g_iface*(T_pack_base - T_soil_top), so the implicit Robin term is g_iface itself
+    # (= -dG_bottom/dT_soil_top >= 0) rather than the canopy's pack-top conductance
+    # (``_soil_surface_conductance`` above already blends the two by pack presence).
     G_surface = G_surface + evap_excess_energy
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
         G_surface, dt,
-        surface_conductance=surface_out.surface_conductance,
+        surface_conductance=_soil_surface_conductance,
     )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---
@@ -1078,6 +1231,11 @@ def _step_multilayer_land_impl(
         # store (no ``None`` -> array carry-structure change under a scan).
         W_canopy=(_match(W_canopy_new, state.W_canopy)
                   if state.W_canopy is not None else None),
+        # Snow-column carry: the stepped column for snow_scheme="multilayer"
+        # (Stage 3), else None (single-scheme passthrough).  ``_sc_new`` is the
+        # post-thermal, post-sublimation column; ``snow_depth`` above == its total
+        # SWE (set via ``snow_new``) for albedo/diagnostics/restart consistency.
+        snow_column=(_sc_new if _use_snow_column else state.snow_column),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1087,13 +1245,17 @@ def _step_multilayer_land_impl(
     # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
     albedo_land_post = _albedo_base + dry_soil_brightening(
         richards_out.theta_new[:, 0], config.land_albedo)
+    # Canopy schemes' snow-free base is the per-cell RT albedo (single per-step
+    # value; no start/end-of-step brightening split — the RT already used the
+    # step's soil moisture).  See ``snowfree_base`` above.
+    snowfree_base_post = surface_out.albedo if _is_canopy else albedo_land_post
 
     if bands is not None:
         # Post-step banded albedo + up-welling LW for the atmosphere: the SAME
         # flux-weighted band radiation as the pre-step (gap 1), so the coupler sees a
         # consistent albedo (alpha_eff) and banded LW emission (not a cell-mean value).
         if config.snow_albedo_feedback and lat is not None:
-            _base_new = jnp.broadcast_to(albedo_land_post, T_surface_new.shape)
+            _base_new = jnp.broadcast_to(snowfree_base_post, T_surface_new.shape)
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
@@ -1102,7 +1264,7 @@ def _step_multilayer_land_impl(
                 ice_bands=ice_bands_new, cfg=bands)
         else:
             alpha_bands_new = jnp.broadcast_to(
-                jnp.reshape(albedo_land_post, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
+                jnp.reshape(snowfree_base_post, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
         band_rad_new = band_net_radiation(
             T_surface_new, alpha_bands_new, forcing.sw_down, forcing.lw_down,
             emissivity, bands)
@@ -1110,10 +1272,12 @@ def _step_multilayer_land_impl(
         lw_up_new = band_rad_new.lw_up_agg
     else:
         if config.snow_albedo_feedback and lat is not None:
-            # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
+            # Per-cell snow-free base: the canopy RT albedo (soil-colour +
+            # vegetation) for the canopy schemes, else the SEB per-cell CLM
+            # PFT / trainable blend — snow feedback blends on top.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
-                base_albedo=jnp.broadcast_to(albedo_land_post, T_surface_new.shape))
+                base_albedo=jnp.broadcast_to(snowfree_base_post, T_surface_new.shape))
         else:
             alpha_new = surface_out.albedo
         # lw_up recomputed with post-step surface T and surface scheme's
@@ -1326,6 +1490,17 @@ def init_multilayer_land_state(
     else:
         canopy_state = None
 
+    # Prognostic multi-layer snow column: an empty pack on cold start (all layers
+    # zero SWE, T at freezing, fresh-snow density) when the multilayer scheme is
+    # selected; ``None`` keeps the legacy single cell-mean pytree.  Match the soil
+    # dtype so the column does not start float32 under a float64 state.
+    if config.snow_scheme == "multilayer":
+        from legoesm.land.snow_column import initial_snow_state
+        snow_column = initial_snow_state((ncol,), config.snow_column,
+                                         dtype=T_soil.dtype)
+    else:
+        snow_column = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -1342,6 +1517,7 @@ def init_multilayer_land_state(
         canopy_state=canopy_state,
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
+        snow_column=snow_column,
     )
 
 

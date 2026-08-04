@@ -1,0 +1,89 @@
+# 10-year CRU-JRA-forced BIOPHYSICS-ONLY LMIP at ~2 deg latlon, two-leaf canopy,
+# with the CLM-FAITHFUL MULTI-LAYER SNOW COLUMN (Phase 2b).
+#
+# CONTROLLED COMPARISON vs the baseline lmip_canopy_10yr.yaml: this file is
+# BYTE-IDENTICAL to that baseline EXCEPT `physics.snow_scheme: multilayer` (the
+# baseline is the implicit `single`).  Grid, forcing + its sampling (CRU-JRA
+# 1920-1929, hourly), surfdata, dt/n_steps, all physics knobs, land_frac_min, and
+# the output tapes are held fixed so any difference in the boreal/Arctic soil
+# temperature + snow is attributable ONLY to the snow scheme.  Do NOT edit anything
+# but the snow scheme here, or the comparison is confounded (CLAUDE.md controlled-
+# comparison rule).
+#
+# What to look for (validation): the multi-layer snow column INSULATES the soil, so
+# the boreal/Arctic winter T_soil_top should sit meaningfully WARMER than the
+# snow-blind single budget (which overcools toward air T, ~221 K in the raw run),
+# with SWE bounded and reverts.nc ~0.  See docs/land/phase2b_snow_thermal_plan.md.
+#
+# ⚠️ CALIBRATION (#730): the interactive canopy conductance is UNCALIBRATED and can
+# OVER-TRANSPIRE; interpret the biophysics climatology accordingly (unchanged from
+# the baseline — this run isolates the SNOW change only).
+
+template_name: biophysics/lmip_canopy_10yr_mlsnow
+template_version: 1.0.0
+description: 10-year CRU-JRA biophysics LMIP, 2 deg, two-leaf canopy + MOST + MULTILAYER snow
+
+grid:
+  type: latlon
+  resolution: 90                # 90 x 180 ~ 2 deg
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy   # mechanistic canopy (intrinsic stomata)
+  bulk_scheme: most                 # stability-dependent surface exchange (land)
+  # --- composable knobs (defaults shown; all optional) ---
+  stomatal_model: ball_berry        # canopy leaf conductance: ball_berry | medlyn
+  snow_albedo_feedback: true
+  # CLM-faithful multi-layer prognostic snow column (Phase 2b): buffers the surface
+  # energy flux from the soil so a snow-covered boreal cell does not overcool.  The
+  # ONLY change from lmip_canopy_10yr.yaml.  two_leaf_canopy-only.
+  snow_scheme: multilayer
+  # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  ON for the
+  # production run (kept identical to the baseline).
+  enable_freeze_thaw: true
+  # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
+  vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)
+  g1: null                          # stomatal slope (ball_berry ~2.97-27, medlyn ~1.3-12)
+  gs_max: null                      # max conductance [mol/m2/s] (~0.099-0.9)
+  # SimpleSEB-only interactive Jarvis stomata (ignored by the canopy scheme):
+  stomata_enabled: false
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5
+  suffix: ""
+  year_start: 1920
+  year_end: 1929                  # 10 contiguous years (stage all with download_lmip_data.sh)
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c250617.nc
+
+time:
+  dt: 3600.0                      # 1 h
+  n_steps: 87600                  # 10 years hourly (10 * 8760)
+  start_doy: 0.0
+
+restart:
+  from: ""                        # cold start; set to a restart_*.npz to chain
+
+land_frac_min: 0.0                # any surfdata land (was 0.5; forcing now finite on all land)
+land_mask_file: ""
+
+output:
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip, reverted]
+
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]
+
+    - name: annual
+      freq: annual
+      average: mean
+      vars: [T_sfc, shflx, lhflx, runoff, precip]

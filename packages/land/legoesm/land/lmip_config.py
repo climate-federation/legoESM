@@ -10,6 +10,7 @@ An experiment is fully described by a YAML file with this schema::
       land_mode: multilayer | slab
       surface_scheme: two_leaf_canopy | simple_seb
       bulk_scheme: most | constant
+      enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
 
     forcing:
       source: cru_jra | synthetic
@@ -32,7 +33,7 @@ An experiment is fully described by a YAML file with this schema::
     restart:
       from: <path to a .npz or "">     # "" -> cold start
 
-    land_frac_min: float                # 0..1 mask threshold (default 0.5)
+    land_frac_min: float                # surfdata land threshold (default 0.0 = any land)
     land_mask_file: <optional CMIP6 sftlf path>
 
     output:
@@ -53,6 +54,8 @@ _GRID_TYPES = ("latlon", "gaussian", "cubed_sphere")
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
+_STOMATA_MODELS = ("ball_berry", "medlyn")
+_SNOW_SCHEMES = ("single", "multilayer")
 _FORCING_SOURCES = ("cru_jra", "synthetic")
 
 _DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
@@ -104,10 +107,46 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(f"physics.surface_scheme={physics['surface_scheme']!r} not in {_SURFACE_SCHEMES}")
     if physics["bulk_scheme"] not in _BULK_SCHEMES:
         raise ValueError(f"physics.bulk_scheme={physics['bulk_scheme']!r} not in {_BULK_SCHEMES}")
-    if physics["surface_scheme"] == "simple_seb" and physics["bulk_scheme"] == "most":
+    # NOTE: simple_seb + MOST is now SUPPORTED — land/stable fixed SimpleSEB
+    # cold-start stability and amip_sota runs exactly this pairing, so the prior
+    # blanket rejection has been removed.
+
+    # --- Composable physics knobs (optional; defaults = the AMIP-consistent
+    #     multilayer two-leaf canopy).  None means "use the land default / the
+    #     per-PFT surfdata value". ------------------------------------------------
+    physics.setdefault("stomatal_model", "ball_berry")
+    if physics["stomatal_model"] not in _STOMATA_MODELS:
         raise ValueError(
-            "physics: simple_seb + MOST is numerically unstable — use bulk_scheme=constant "
-            "or surface_scheme=two_leaf_canopy")
+            f"physics.stomatal_model={physics['stomatal_model']!r} not in {_STOMATA_MODELS}")
+    physics.setdefault("stomata_enabled", False)
+    physics.setdefault("snow_albedo_feedback", True)
+    # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain, off by
+    # default = bit-identical sensible-only soil heat).  Enabling it stabilises
+    # boreal/Arctic winter columns whose energy budget otherwise diverges once
+    # the top layer crosses the freezing point.  Multilayer-only (the slab land
+    # has no soil column); harmlessly ignored for land_mode='slab'.
+    physics.setdefault("enable_freeze_thaw", False)
+    if not isinstance(physics["enable_freeze_thaw"], bool):
+        raise ValueError(
+            f"physics.enable_freeze_thaw must be a bool "
+            f"(got {physics['enable_freeze_thaw']!r})")
+    # Snow thermal scheme (Phase 2b): "single" (default, single-node bulk SWE) or
+    # "multilayer" (CLM-faithful prognostic snow column that insulates the soil).
+    # Multilayer is two_leaf_canopy-only (step_multilayer_land raises otherwise).
+    physics.setdefault("snow_scheme", "single")
+    if physics["snow_scheme"] not in _SNOW_SCHEMES:
+        raise ValueError(
+            f"physics.snow_scheme={physics['snow_scheme']!r} not in {_SNOW_SCHEMES}")
+    if physics["snow_scheme"] == "multilayer" and physics["surface_scheme"] != "two_leaf_canopy":
+        raise ValueError(
+            "physics.snow_scheme='multilayer' requires surface_scheme='two_leaf_canopy' "
+            f"(got {physics['surface_scheme']!r}).")
+    # Stomatal calibration scalars (None = land default / per-PFT): sanity bounds
+    # (StomataConfig.__param_spec__ enforces tighter physical ranges downstream).
+    for _k, _lo, _hi in (("vc_max25", 10.0, 200.0), ("g1", 0.5, 30.0), ("gs_max", 0.05, 1.5)):
+        _v = physics.get(_k)
+        if _v is not None and not (_lo <= float(_v) <= _hi):
+            raise ValueError(f"physics.{_k}={_v} out of sane range [{_lo}, {_hi}]")
 
     req("forcing", ("source", "year_start", "year_end"))
     forcing = data["forcing"]
@@ -180,7 +219,7 @@ def validate_config(data: dict) -> LMIPConfig:
         time=time,
         restart=restart,
         output=output,
-        land_frac_min=float(data.get("land_frac_min", 0.5)),
+        land_frac_min=float(data.get("land_frac_min", 0.0)),
         land_mask_file=str(data.get("land_mask_file", "")),
         raw=data,
     )
