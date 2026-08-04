@@ -222,13 +222,14 @@ def test_reference_is_written_top_down_like_the_plane_crm(tmp_path):
     with np.load(sorted((tmp_path / "snapshots3d").glob("vol_*.npz"))[0]) as ds:
         z = np.asarray(ds["z"], float)
         T = np.asarray(ds["T"], float)[0, 0]
+        it = int(round(float(ds["day"]) * 86400.0 / 3600.0))   # fixture is hourly
     assert np.all(np.diff(z) < 0), "z must be strictly decreasing (top-down)"
     assert z[0] == pytest.approx(z_asc[-1])      # model top first
     assert z[-1] == pytest.approx(z_asc[0])      # surface last
     # The PROFILE must be flipped with it -- a flipped z with an unflipped T is
     # the silent version of this bug.
     assert T[-1] > T[0], "surface must be warmer than the top after flipping"
-    np.testing.assert_allclose(T, profs["T"][0][::-1])
+    np.testing.assert_allclose(T, profs["T"][it][::-1])
 
 
 def test_reference_already_top_down_is_left_alone(tmp_path):
@@ -238,6 +239,7 @@ def test_reference_already_top_down_is_left_alone(tmp_path):
     frr.build_reference(profs_desc, z_desc, t, tmp_path, last_days=1.0,
                         n_snapshots=5, to_mixing_ratio=False, source="t")
     with np.load(sorted((tmp_path / "snapshots3d").glob("vol_*.npz"))[0]) as ds:
+        it = int(round(float(ds["day"]) * 86400.0 / 3600.0))
         np.testing.assert_allclose(np.asarray(ds["z"], float), z_desc)
         np.testing.assert_allclose(np.asarray(ds["T"], float)[0, 0],
-                                   profs_desc["T"][0])
+                                   profs_desc["T"][it])
