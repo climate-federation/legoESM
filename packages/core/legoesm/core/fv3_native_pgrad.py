@@ -57,6 +57,26 @@ SCOPE / EXCLUSIONS carried from the brick spec: ONE face, translation
 certificate only — no six-face exchange or averaging cadence, no
 ``-DUSE_COND`` condensate loading, no ``-DSW_DYNAMICS`` build of the
 oracle lane, hydrostatic only, ``beta <= 0``, ``a2b_ord = 4``.
+
+TRANSLATION vs FIDELITY (UNCERTAIN U1).  ``ptop``, ``akap`` and
+``cp_air`` are ARGUMENTS here, never repo constants: FMS
+``constants_mod`` is absent from the Zenodo tree, ``akap`` is an INPUT to
+this chain, and substituting ``legoesm.constants.kappa``
+(``R_d/c_pd`` != 2/7) would silently change what the oracle certifies.
+Codex r20 CONFIRMED that choice as correct for a routine-translation
+oracle, and listed what a later FIDELITY claim (as opposed to a
+translation claim) must ADDITIONALLY pin, recorded here verbatim:
+
+    - exact Zenodo archive/file hashes and preprocess defines;
+    - FMS ``constants_mod`` source/object hash and resolved ``cp_air``,
+      ``R_d``, and real kind;
+    - runtime ``ptop``, ``akap``, and thermodynamic configuration;
+    - compiler, version, flags, libm/platform, and linked extract
+      dependencies;
+    - committed fixtures plus the run manifest above.
+
+Until every one of those is pinned, this module and its fixtures support
+a TRANSLATION claim only.
 """
 
 from __future__ import annotations

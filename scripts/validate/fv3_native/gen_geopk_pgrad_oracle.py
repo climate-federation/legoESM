@@ -116,11 +116,20 @@ INPUT_FIELDS = (
 # checked two-sidedly by `test_every_serialized_input_is_consumed`, and
 # each reason is echoed into the fixture's `input_lineage`.
 _A2B_DEAD = (
-    "dxa/dya/grid_lon/grid_lat/agrid_lon/agrid_lat/edge_w/e/s/n: on the "
-    "DUO branch a2b_ord4 takes the interior-everywhere arms (a2b_edge.F90 "
-    "gates 98/185/241) and reads NONE of them; the Fortran still "
-    "associates the pointers unconditionally, so they must exist and are "
-    "serialized for interface fidelity")
+    "dxa/dya/grid_lon/grid_lat/agrid_lon/agrid_lat/edge_w/e/s/n: CERTIFIED "
+    "DEAD BY CALL-PATH TRACE of the EXTRACTED a2b_ord4 "
+    "(fv3_dsw5_duo_extract.F90:36-316, the certified a2b_edge_duo_mod). "
+    "The three duo gates `bounded_domain .or. dg%is_initialized` sit at "
+    "abs lines 84, 171 and 227; EVERY consumption of grid/agrid/dxa/dya/"
+    "edge_* and EVERY call to the helper extrap_corner lies at abs lines "
+    "96-217, i.e. strictly inside those gates' `else` arms, and there is "
+    "no use at or after the third gate nor in the `replace` tail. "
+    "extrap_corner (abs 318-330) is the only caller of great_circle_dist "
+    "(abs 323-324), so that helper is transitively dead too.  The Fortran "
+    "associates the pointers unconditionally (abs 62-70), so the fields "
+    "must EXIST and are serialized for interface fidelity.  The trace is "
+    "corroborated two-sidedly by test_every_serialized_input_is_consumed "
+    "(perturbing them moves no chain token)")
 DEAD_INPUTS = {
     "q_con": "q_con: unreferenced without -DUSE_COND (dyn_core.F90:2721-"
              "2724/2747-2750/2772-2773); serialized to keep the argument "
@@ -177,7 +186,44 @@ TOKEN2KEY = {
     "U_OGP_DPPOISON": "u_ogp_dppoison",
     "V_OGP_DPPOISON": "v_ogp_dppoison",
     "LOGEXP_OUT": "logexp_out",
+    # codex r20 finding 3: the POISONED ARGUMENT itself, dumped
+    # immediately before each poison re-run, so "the poison was
+    # installed" is evidence rather than an assumption
+    "DELPC_POISONED": "delpc_poisoned",
+    "DELP_POISONED": "delp_poisoned",
+    # codex r20 finding 4: two per-cell CANARY passes (see the driver)
+    "PKC_C_CAN1": "pkc_c_can1", "GZ_C_CAN1": "gz_c_can1",
+    "PKZ_C_CAN1": "pkz_c_can1", "PKC_D_CAN1": "pkc_d_can1",
+    "GZ_D_CAN1": "gz_d_can1", "PKZ_D_CAN1": "pkz_d_can1",
+    "PKC_C_CAN2": "pkc_c_can2", "GZ_C_CAN2": "gz_c_can2",
+    "PKZ_C_CAN2": "pkz_c_can2", "PKC_D_CAN2": "pkc_d_can2",
+    "GZ_D_CAN2": "gz_d_can2", "PKZ_D_CAN2": "pkz_d_can2",
 }
+
+# The two per-cell canary seeds, mirrored bit-for-bit by
+# ``canary_field`` below and by ``fill_canary`` in the driver.
+CANARY_SEEDS = {"1": 1.0e30, "2": -7.0e24}
+
+# Tokens the FORTRAN alone produces (no python counterpart): the port
+# has no notion of "the poisoned argument" or of a canary fill, so these
+# are deliberately outside the port-vs-fixture comparison and are
+# asserted directly on the fixture instead.
+FORTRAN_ONLY_TOKENS = ("delpc_poisoned", "delp_poisoned") + tuple(
+    f"{a}_can{s}" for s in ("1", "2")
+    for a in ("pkc_c", "gz_c", "pkz_c", "pkc_d", "gz_d", "pkz_d"))
+
+
+def canary_field(shape, origin, seed: float) -> np.ndarray:
+    """The driver's ``fill_canary`` (fv3_geopk_pgrad_driver.F90),
+    reproduced BITWISE — pure IEEE arithmetic, same statement order, no
+    libm.  ``n`` is unique per (i, j, k) on this grid."""
+    ni, nj, nk = shape
+    i0, j0, k0 = origin
+    ii = (np.arange(ni) + i0)[:, None, None]
+    jj = (np.arange(nj) + j0)[None, :, None]
+    kk = (np.arange(nk) + k0)[None, None, :]
+    n = ii + 41 * jj + 1601 * kk
+    return seed * (1.0 + 1.0e-6 * n.astype(np.float64))
 
 
 def output_layout(res: int = RES, ng: int = NG, km: int = 2) -> tuple:
@@ -200,11 +246,26 @@ def output_layout(res: int = RES, ng: int = NG, km: int = 2) -> tuple:
         "u_ogp_dppoison": (m_a, m_b, km),
         "v_ogp_dppoison": (m_b, m_a, km),
         "logexp_out": (NPROBE,),
+        "delpc_poisoned": (m_a, m_a, km),
+        "delp_poisoned": (m_a, m_a, km),
     }
+    for s in ("1", "2"):
+        shapes[f"pkc_c_can{s}"] = cell3
+        shapes[f"gz_c_can{s}"] = cell3
+        shapes[f"pkc_d_can{s}"] = cell3
+        shapes[f"gz_d_can{s}"] = cell3
+        shapes[f"pkz_c_can{s}"] = (res, res, km)
+        shapes[f"pkz_d_can{s}"] = (res, res, km)
     origins = {k: (lo, lo, 1) for k in
                ("pkc_c", "gz_c", "pkc_d", "gz_d", "pk_ogp", "gz_ogp",
                 "uc_pgc", "vc_pgc", "uc_pgc_dppoison", "vc_pgc_dppoison",
-                "u_ogp", "v_ogp", "u_ogp_dppoison", "v_ogp_dppoison")}
+                "u_ogp", "v_ogp", "u_ogp_dppoison", "v_ogp_dppoison",
+                "delpc_poisoned", "delp_poisoned",
+                "pkc_c_can1", "gz_c_can1", "pkc_d_can1", "gz_d_can1",
+                "pkc_c_can2", "gz_c_can2", "pkc_d_can2", "gz_d_can2")}
+    for s in ("1", "2"):
+        origins[f"pkz_c_can{s}"] = (1, 1, 1)
+        origins[f"pkz_d_can{s}"] = (1, 1, 1)
     # pe/peln keep the upstream (i, k, j) axis order
     origins["pe_c"] = origins["pe_d"] = (0, 1, 0)
     origins["peln_c"] = origins["peln_d"] = (1, 1, 1)
@@ -595,6 +656,105 @@ def _sha(path: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
+MANIFEST_SCHEMA = "geopk_pgrad_run_manifest_v1"
+# Every field the manifest MUST carry.  `--pack` refuses without them.
+MANIFEST_REQUIRED = (
+    "schema", "km", "repo_sha", "compiler", "compiler_version",
+    "compiler_target", "flags", "defines", "executable_sha256",
+    "input_sha256", "output_sha256",
+)
+# Every Fortran source the sbatch compiles into the executable.  Each
+# must appear as `source.<name>` in the manifest AND still hash the same
+# in the repo at pack time — that is the binding codex r20 blocker 2
+# asked for: a changed extract/shim/driver/a2b dependency can no longer
+# be stamped onto stale Fortran output.
+MANIFEST_SOURCES = (
+    "fv3_swcore_shim.F90",
+    "fv3_geopk_pgrad_shim.F90",
+    "fv3_tpcore_duo_extract.F90",
+    "fv3_dsw5_duo_extract.F90",
+    "fv3_geopk_pgrad_extract.F90",
+    "fv3_geopk_pgrad_driver.F90",
+)
+
+
+def manifest_path(work: str, km: int) -> str:
+    return f"{work}/run_manifest_km{km}.txt"
+
+
+def read_manifest_text(text: str) -> dict:
+    """Parse the sbatch-written ``key=value`` run manifest."""
+    out = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SystemExit(f"malformed manifest line: {line!r}")
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+def read_manifest(path: str) -> dict:
+    with open(path) as fh:
+        return read_manifest_text(fh.read())
+
+
+def verify_manifest(work: str, km: int, input_sha: str) -> dict:
+    """REQUIRE the run manifest and bind the packed fixture to the run
+    that produced it (codex r20 blocker 2).
+
+    Without this, ``--pack`` verified only that the STAGING serialises to
+    the current input text, then stamped hashes of the CURRENT
+    extract/shim/driver onto whatever Fortran output happened to be on
+    disk — so a changed source, compiler or preprocessor could be packed
+    against stale output and the extract-hash certificate proved nothing.
+    """
+    path = manifest_path(work, km)
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"missing run manifest {path} — refusing to pack.  The "
+            "fixture must be bound to the build+run that produced it "
+            "(hashes of every compiled source, the preprocess defines, "
+            "compiler+version+flags, the executable, and the input and "
+            "output texts).  Re-run "
+            "scripts/cluster/fv3_native/geopk_pgrad_oracle.sbatch, which "
+            "emits it; do NOT hand-pack")
+    man = read_manifest(path)
+    missing = [k for k in MANIFEST_REQUIRED if k not in man]
+    if missing:
+        raise SystemExit(f"run manifest is missing fields: {missing}")
+    if man["schema"] != MANIFEST_SCHEMA:
+        raise SystemExit(f"run manifest schema {man['schema']!r} != "
+                         f"{MANIFEST_SCHEMA!r}")
+    if int(man["km"]) != km:
+        raise SystemExit(f"run manifest is for km={man['km']}, packing "
+                         f"km={km}")
+    if man["input_sha256"] != input_sha:
+        raise SystemExit(
+            "the manifest's input_sha256 does not match the canonical "
+            "serialisation of the staged arrays — the Fortran run did "
+            "NOT consume these inputs")
+    out_txt = f"{work}/geopk_pgrad_output_km{km}.txt"
+    if _sha(out_txt) != man["output_sha256"]:
+        raise SystemExit(
+            f"{out_txt} does not hash to the manifest's output_sha256 — "
+            "the output text changed after the run was recorded")
+    for name in MANIFEST_SOURCES:
+        key = f"source.{name}"
+        if key not in man:
+            raise SystemExit(f"run manifest is missing {key}")
+        now = _sha(os.path.join(HERE, name))
+        if now != man[key]:
+            raise SystemExit(
+                f"{name} has CHANGED since the executable was built "
+                f"(repo {now}, built {man[key]}) — the Fortran output on "
+                "disk was produced by different sources.  Rebuild and "
+                "re-run; refusing to certify stale output")
+    return man
+
+
 def _gen(work: str, km: int) -> None:
     fields = build_inputs(km)
     blob = serialize_geopk_pgrad_inputs(fields, RES, NG, km)
@@ -618,6 +778,7 @@ def _pack(work: str, km: int) -> None:
                          f"staging_km{km}.npz — regenerate; refusing to "
                          "pack a drifted fixture")
     inp_hash = hashlib.sha256(canon).hexdigest()
+    man = verify_manifest(work, km, inp_hash)
 
     shapes, origins = output_layout(RES, NG, km)
     outs = {k: np.full(v, np.nan) for k, v in shapes.items()}
@@ -714,6 +875,8 @@ def _pack(work: str, km: int) -> None:
         libm_probe_max_ulp=ulp_libm,
         sumorder_ndiff=n_sum, sumorder_ncells=n_cells,
         grading_policy=grading,
+        run_manifest=open(manifest_path(work, km)).read(),
+        **{f"manifest_{k.replace('.', '_')}": v for k, v in man.items()},
         input_lineage=lineage)
     print("fixture packed;", fix)
     print("input_sha256", inp_hash)

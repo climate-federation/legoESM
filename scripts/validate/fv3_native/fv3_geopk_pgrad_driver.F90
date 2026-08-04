@@ -227,8 +227,15 @@ program fv3_geopk_pgrad_driver
   call dump3('VC_PGC', vc, bd%isd, bd%jsd, 1)
 
   ! ---- step 2b: delpc-poison control (spec 5.2) ----
+  ! codex r20 finding 3: the poison RESULT equals the normal result when
+  ! the branch is correct, so the result tokens alone cannot prove the
+  ! poison was ever installed — a driver that silently dropped the
+  ! assignment would pass everything.  Dump the POISONED ARGUMENT ITSELF
+  ! immediately before the call; the test asserts every element carries
+  ! POISON.
   uc = uc0; vc = vc0
   delpc = POISON
+  call dump3('DELPC_POISONED', delpc, bd%isd, bd%jsd, 1)
   call p_grad_c(dt2, km, delpc, pkc, gz, uc, vc, bd, gs%rdxc, gs%rdyc, &
                 .true.)
   call dump3('UC_PGC_DPPOISON', uc, bd%isd, bd%jsd, 1)
@@ -261,11 +268,25 @@ program fv3_geopk_pgrad_driver
   u = u0; v = v0
   pkc = pkc0; gz = gz0
   delp = POISON
+  call dump3('DELP_POISONED', delp, bd%isd, bd%jsd, 1)
   call one_grad_p(u, v, pkc, gz, divg2, delp, dt, bd%ng, gs, bd, npx, &
                   npy, km, ptop, .true., 4, dext)
   call dump3('U_OGP_DPPOISON', u, bd%isd, bd%jsd, 1)
   call dump3('V_OGP_DPPOISON', v, bd%isd, bd%jsd, 1)
   delp = delp0
+
+  ! ---- step 5: PER-CELL CANARY passes (codex r20 finding 4) ----
+  ! A CONSTANT 1e30 sentinel proves the VALUE of an unwritten slot, not
+  ! the ABSENCE of a write: a kernel that rewrote the slot with the same
+  ! constant would pass.  Two extra runs with DISTINCT, position-
+  ! dependent canaries fix that — an unwritten slot keeps ITS OWN canary
+  ! (so the two runs DIFFER there and each equals its own canary), while
+  ! every genuinely written slot AGREES between the runs and with the
+  ! 1e30 main run.  On the D pass, where computehalo=.true. is claimed to
+  ! write the FULL data domain, the two runs must agree EVERYWHERE — that
+  ! upgrades "no 1e30 survives" to "every slot was actually written".
+  call canary_pass(1.0e30, '1')
+  call canary_pass(-7.0e24, '2')
 
   close(u_out)
   write(*, *) 'fv3_geopk_pgrad_driver: chain dumped, km =', km
@@ -351,6 +372,53 @@ contains
       end do
     end do
   end subroutine dump3
+
+  ! Non-uniform PER-CELL canary.  n is unique per (i,j,k) on this grid
+  ! (|i|,|j| <= res+ng < 41/2 and |k| <= km+1 < 1601/41), and the
+  ! expression is pure IEEE arithmetic (no libm), so the python side
+  ! reproduces it BITWISE with the same statement order.
+  subroutine fill_canary(a, i0, j0, k0, s)
+    real, intent(out) :: a(:, :, :)
+    integer, intent(in) :: i0, j0, k0
+    real, intent(in) :: s
+    integer :: ii, jj, kk, n
+    do kk = 1, size(a, 3)
+      do jj = 1, size(a, 2)
+        do ii = 1, size(a, 1)
+          n = (ii + i0 - 1) + 41*(jj + j0 - 1) + 1601*(kk + k0 - 1)
+          a(ii, jj, kk) = s * (1.0 + 1.0e-6 * real(n))
+        end do
+      end do
+    end do
+  end subroutine fill_canary
+
+  subroutine refill_canary(s)
+    real, intent(in) :: s
+    call fill_canary(pkc, bd%isd, bd%jsd, 1, s)
+    call fill_canary(gz, bd%isd, bd%jsd, 1, s)
+    call fill_canary(pe, bd%is - 1, 1, bd%js - 1, s)
+    call fill_canary(peln, bd%is, 1, bd%js, s)
+    call fill_canary(pkz, bd%is, bd%js, 1, s)
+  end subroutine refill_canary
+
+  subroutine canary_pass(s, tag)
+    real, intent(in) :: s
+    character(len=*), intent(in) :: tag
+    call refill_canary(s)
+    call geopk(ptop, pe, peln, delpc, pkc, gz, hs, ptc, q_con, pkz, km, &
+               akap, .true., gs%bounded_domain, gs%dg%is_initialized, &
+               .false., npx, npy, 4, bd)
+    call dump3('PKC_C_CAN'//tag, pkc, bd%isd, bd%jsd, 1)
+    call dump3('GZ_C_CAN'//tag, gz, bd%isd, bd%jsd, 1)
+    call dump3('PKZ_C_CAN'//tag, pkz, bd%is, bd%js, 1)
+    call refill_canary(s)
+    call geopk(ptop, pe, peln, delp, pkc, gz, hs, pt, q_con, pkz, km, &
+               akap, .false., gs%bounded_domain, fl%duogrid, &
+               .true., npx, npy, 4, bd)
+    call dump3('PKC_D_CAN'//tag, pkc, bd%isd, bd%jsd, 1)
+    call dump3('GZ_D_CAN'//tag, gz, bd%isd, bd%jsd, 1)
+    call dump3('PKZ_D_CAN'//tag, pkz, bd%is, bd%js, 1)
+  end subroutine canary_pass
 
   subroutine dump1(nm, a, i0)
     character(len=*), intent(in) :: nm

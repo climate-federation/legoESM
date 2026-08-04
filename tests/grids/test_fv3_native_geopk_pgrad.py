@@ -66,7 +66,25 @@ the hydrostatic branch never reads them.
 
 FIXTURES are produced by ``scripts/cluster/fv3_native/
 geopk_pgrad_oracle.sbatch`` (NEVER hand-written) into
-``tests/grids/fixtures/geopk_pgrad_oracle_c12_km{2,3}.npz``.
+``tests/grids/fixtures/geopk_pgrad_oracle_c12_km{2,3}.npz``.  They ARE
+the certificate and MUST be committed (``test_fixtures_are_committed``),
+and each is bound to the build+run that produced it by a RUN MANIFEST
+that ``--pack`` refuses to proceed without
+(``test_run_manifest_binds_the_build``).
+
+TRANSLATION vs FIDELITY (U1).  This gate certifies a TRANSLATION only.
+Codex r20 CONFIRMED that keeping ``ptop``/``akap``/``cp_air``
+header-settable — and NOT substituting ``constants.kappa`` — is right for
+an oracle-matching brick, and listed what a later FIDELITY claim must
+ADDITIONALLY pin, recorded verbatim:
+
+    - exact Zenodo archive/file hashes and preprocess defines;
+    - FMS ``constants_mod`` source/object hash and resolved ``cp_air``,
+      ``R_d``, and real kind;
+    - runtime ``ptop``, ``akap``, and thermodynamic configuration;
+    - compiler, version, flags, libm/platform, and linked extract
+      dependencies;
+    - committed fixtures plus the run manifest above.
 
 The transcendental probe ``test_a_transcendental_agreement_probe`` is
 defined and RUNS FIRST on purpose: ``geopk`` is the first brick in this
@@ -90,18 +108,6 @@ VALID = os.path.join(REPO, "scripts", "validate", "fv3_native")
 SENTINEL = 1.0e30
 POISON = -9.0e9
 KMS = (2, 3)
-
-# Every Fortran file the geopk_pgrad sbatch compiles.  The brick's OWN
-# extract/driver/shim are pinned via the FIXTURE records (they cannot go
-# stale that way); the SHARED, pre-existing files are pinned here.
-_EXTRACT_SHA = {
-    "fv3_swcore_shim.F90":
-        "6a8df780cdf64600d2e592e78853e8516253d89992f3f62f3fa71a2b53003e50",
-    "fv3_tpcore_duo_extract.F90":
-        "71f930b3b3b6291955259e46b7dfcd8bcba5c500206c9b0a5377f24c8f8d99c9",
-    "fv3_dsw5_duo_extract.F90":
-        "27448ad8dc97cb7b1cfbe80910d680b005850b2c001f69709a7f2af289c01b86",
-}
 
 # Finer-grained per-subroutine block hashes INSIDE this brick's extract,
 # so an unrelated edit to the file (a comment, another block) does not
@@ -215,20 +221,54 @@ def _load_gen():
     return mod
 
 
+def fixture_path(km):
+    return os.path.join(FIX, f"geopk_pgrad_oracle_c12_km{km}.npz")
+
+
 def _load(km):
-    path = os.path.join(FIX, f"geopk_pgrad_oracle_c12_km{km}.npz")
-    if not os.path.exists(path):
-        pytest.skip(f"{os.path.basename(path)} not generated yet — run "
-                    "scripts/cluster/fv3_native/geopk_pgrad_oracle.sbatch")
+    """Load a fixture, FAILING LOUDLY if it is absent or stale.
+
+    Deliberately NOT ``pytest.skip`` (codex r20 blocker 1): the fixtures
+    ARE the certificate.  A skip turns the whole gate into a silent no-op
+    exactly when the certificate is missing — which is the state codex
+    found at e2b06d364, where both npz files were untracked.
+    """
+    path = fixture_path(km)
+    assert os.path.exists(path), (
+        f"{os.path.basename(path)} is MISSING.  The fixture is the "
+        "certificate, not a build artefact: regenerate it with "
+        "scripts/cluster/fv3_native/geopk_pgrad_oracle.sbatch and "
+        f"`git add tests/grids/fixtures/{os.path.basename(path)}`")
     npz = np.load(path, allow_pickle=True)
     for key in ("libm_probe_ndiff", "libm_probe_n", "grading_policy",
-                "sumorder_ndiff"):
-        if key not in npz.files:
-            pytest.skip(
-                f"{os.path.basename(path)} predates the spec-5.4 grading "
-                f"records (missing '{key}') — regenerate with "
-                "scripts/cluster/fv3_native/geopk_pgrad_oracle.sbatch")
+                "sumorder_ndiff", "run_manifest", "manifest_schema"):
+        assert key in npz.files, (
+            f"{os.path.basename(path)} predates the current certificate "
+            f"records (missing '{key}') — regenerate with "
+            "scripts/cluster/fv3_native/geopk_pgrad_oracle.sbatch")
     return npz
+
+
+def test_fixtures_are_committed():
+    """The commit must carry the certificate (codex r20 blocker 1).
+
+    At e2b06d364 both fixtures existed on disk but were absent from
+    ``git ls-files``, so the commit alone proved nothing.  Nothing in
+    ``.gitignore`` excludes them — they were simply never added — and
+    every sibling brick's fixture (``dsw5_duo_oracle_c12.npz``,
+    ``fv3_duogrid_oracle_n2.npz``, …) IS tracked.
+    """
+    import subprocess
+
+    for km in KMS:
+        rel = os.path.relpath(fixture_path(km), os.path.abspath(REPO))
+        rc = subprocess.run(
+            ["git", "-C", os.path.abspath(REPO), "ls-files",
+             "--error-unmatch", rel],
+            capture_output=True, text=True).returncode
+        assert rc == 0, (
+            f"{rel} is NOT tracked by git — the commit carries no "
+            f"reproducible certificate.  Run `git add {rel}`")
 
 
 def _fields(oracle):
@@ -355,6 +395,19 @@ def test_a_transcendental_agreement_probe(km):
     * the count must stay within the absolute envelope;
     * every difference must be a LAST-BIT difference (<=1 ULP) — a
       larger gap is not "environment" and must not be excused as one.
+
+    LIMIT OF THE PROBE (codex r20 finding 7, CONFIRMED).  This is an
+    ATTRIBUTION instrument, not a proof that geopk's CORE uses
+    ``exp(akap*log(p))``: the probe is a standalone loop, so a port could
+    compute it with ``exp(akap*log())`` while using ``**`` inside geopk
+    and the probe would never notice.  What forecloses that substitution
+    is ``test_geopk_pk_is_exp_log_of_the_bit_exact_pe``, which requires
+    the port's ``pk`` to equal ``exp(akap*log(<Fortran pe>))`` BITWISE —
+    a ``**`` core differs from that by ~2-4 ULP and fails it.  Note the
+    exact-``PK``-comparison route is NOT available on this host (``pkc``
+    is ULP-graded, and its cap would absorb a ``**``-vs-``exp(log)``
+    swap), so that bit-exact re-derivation is the load-bearing check
+    here, not a redundancy.
     """
     oracle = _load(km)
     gen = _load_gen()
@@ -425,23 +478,49 @@ def test_input_hash_enforced_and_tamper(km):
 
 
 @pytest.mark.parametrize("km", KMS)
-def test_extract_sha_manifest(km):
+def test_run_manifest_binds_the_build(km):
+    """The fixture is bound to the BUILD+RUN that produced it (codex r20
+    blocker 2).
+
+    Before this, ``--pack`` verified only that the staging serialised to
+    the current input text, then stamped hashes of the CURRENT
+    extract/shim/driver onto whatever Fortran output was on disk — so a
+    changed source, compiler or preprocessor could be packed against
+    stale output and the extract-hash certificate proved nothing.  The
+    manifest closes that: it records the input and output hashes, the
+    hash of EVERY compiled source, the preprocess defines, the
+    compiler+version+target+flags and the executable hash, ``--pack``
+    REFUSES without it, and this test re-verifies the source hashes
+    against the repo as it stands now.
+    """
+    gen = _load_gen()
     oracle = _load(km)
-    for name, want in _EXTRACT_SHA.items():
-        path = os.path.join(VALID, name)
-        got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-        assert got == want, (
-            f"{name} drifted from the bytes the fixture certifies (got "
-            f"{got}) — regenerate geopk_pgrad_oracle_c12_km{km}.npz")
-    for name, key in (("fv3_geopk_pgrad_extract.F90",
-                       "geopk_pgrad_extract_sha256"),
-                      ("fv3_geopk_pgrad_driver.F90", "driver_sha256"),
-                      ("fv3_geopk_pgrad_shim.F90", "shim_sha256")):
-        path = os.path.join(VALID, name)
-        got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-        assert got == str(oracle[key]), (
-            f"{name} drifted from the bytes the fixture certifies (got "
-            f"{got}) — regenerate geopk_pgrad_oracle_c12_km{km}.npz")
+    man = gen.read_manifest_text(str(oracle["run_manifest"]))
+    assert man["schema"] == gen.MANIFEST_SCHEMA
+    assert int(man["km"]) == km
+    for key in gen.MANIFEST_REQUIRED:
+        assert key in man and man[key] != "", key
+    # the preprocess lane is part of the certificate
+    assert "SW_DYNAMICS" in man["defines"] and "USE_COND" in man["defines"]
+    assert man["compiler"] == "gfortran"
+    assert man["flags"] and "-fdefault-real-8" in man["flags"]
+    # every compiled source must STILL hash to what was built
+    for name in gen.MANIFEST_SOURCES:
+        got = hashlib.sha256(
+            open(os.path.join(VALID, name), "rb").read()).hexdigest()
+        assert got == man[f"source.{name}"], (
+            f"{name} drifted from the bytes the fixture certifies (repo "
+            f"{got}, built {man[f'source.{name}']}) — the committed "
+            f"fixture no longer matches the sources; regenerate "
+            f"geopk_pgrad_oracle_c12_km{km}.npz")
+    # the standalone hash records must agree with the manifest
+    assert str(oracle["geopk_pgrad_extract_sha256"]) == \
+        man["source.fv3_geopk_pgrad_extract.F90"]
+    assert str(oracle["driver_sha256"]) == \
+        man["source.fv3_geopk_pgrad_driver.F90"]
+    assert str(oracle["shim_sha256"]) == \
+        man["source.fv3_geopk_pgrad_shim.F90"]
+    assert str(oracle["input_sha256"]) == man["input_sha256"]
 
 
 def test_extract_block_sha_pinned():
@@ -861,6 +940,178 @@ def test_ogp_replace_semantics(km):
         assert _nd(pk_post[outside][..., k], pk_pre[outside][..., k]) == 0, k
     assert (pk_post[b, b, 0] == ptop ** akap).all()
     assert _nd(pk_post[outside][..., 0], pk_pre[outside][..., 0]) == 0
+
+
+@pytest.mark.parametrize("km", KMS)
+def test_poison_was_installed(km):
+    """The poison re-runs prove NOTHING unless the poison was installed
+    (codex r20 finding 3).
+
+    Correct hydrostatic behaviour makes the poisoned result EQUAL the
+    normal result, and the python generator emits the normal arrays for
+    the ``*_DPPOISON`` tokens by construction — so a driver that silently
+    dropped the ``delpc = POISON`` / ``delp = POISON`` assignment would
+    pass every result comparison.  The driver therefore dumps the
+    POISONED ARGUMENT ITSELF immediately before each call
+    (``DELPC_POISONED`` / ``DELP_POISONED``); this asserts every element
+    carries the poison.  Only the two together — poison installed AND
+    output unchanged — establish that the hydrostatic branch never reads
+    it.
+    """
+    oracle = _load(km)
+    res, ng = int(oracle["res"]), int(oracle["ng"])
+    m_a = res + 2 * ng
+    for key in ("delpc_poisoned", "delp_poisoned"):
+        a = np.asarray(oracle[key], dtype=np.float64)
+        assert a.shape == (m_a, m_a, km), (key, a.shape)
+        assert (a == POISON).all(), (
+            f"{key}: {int((a != POISON).sum())}/{a.size} elements are NOT "
+            f"{POISON} — the driver did not install the poison, so the "
+            "*_DPPOISON equality proves nothing")
+
+
+@pytest.mark.parametrize("km", KMS)
+def test_canary_proves_absence_of_writes(km):
+    """A CONSTANT sentinel proves a VALUE, not the ABSENCE of a write
+    (codex r20 finding 4).
+
+    A kernel that rewrote an "unwritten" slot with the same 1e30 constant
+    would pass the sentinel tests.  The driver therefore re-runs both
+    geopk calls twice more with DISTINCT, position-dependent canaries.
+    Then:
+
+    * a genuinely WRITTEN slot is independent of the canary — the two
+      canary runs and the 1e30 main run must all agree BITWISE;
+    * a genuinely UNWRITTEN slot keeps its own canary — the two runs must
+      each equal their own canary field and DIFFER from each other.
+
+    On the D pass (``computehalo=.true.``) the claim is the opposite:
+    the two runs must agree EVERYWHERE, which upgrades "no 1e30 survives"
+    into "every slot was actually written".
+    """
+    gen = _load_gen()
+    oracle = _load(km)
+    res, ng = int(oracle["res"]), int(oracle["ng"])
+    m_a = res + 2 * ng
+    box = _box(oracle, extra=1)
+    outside = np.ones((m_a, m_a), dtype=bool)
+    outside[box, box] = False
+    lo = 1 - ng
+    cell3, cell_org = (m_a, m_a, km + 1), (lo, lo, 1)
+    comp3, comp_org = (res, res, km), (1, 1, 1)
+
+    # --- C pass: written box canary-independent, ring canary-carrying
+    for base, shape, org in (("pkc_c", cell3, cell_org),
+                             ("gz_c", cell3, cell_org)):
+        a1 = np.asarray(oracle[f"{base}_can1"], dtype=np.float64)
+        a2 = np.asarray(oracle[f"{base}_can2"], dtype=np.float64)
+        main = np.asarray(oracle[base], dtype=np.float64)
+        assert _nd(a1[box, box], a2[box, box]) == 0, (
+            f"{base}: the WRITTEN box depends on the canary — geopk read "
+            "uninitialised memory")
+        assert _nd(a1[box, box], main[box, box]) == 0, (
+            f"{base}: the written box differs from the 1e30 run")
+        c1 = gen.canary_field(shape, org, gen.CANARY_SEEDS["1"])
+        c2 = gen.canary_field(shape, org, gen.CANARY_SEEDS["2"])
+        assert _nd(a1[outside], c1[outside]) == 0, (
+            f"{base}: a slot OUTSIDE the CG write box was overwritten — "
+            "the 1e30 sentinel test could not have detected this")
+        assert _nd(a2[outside], c2[outside]) == 0, base
+        assert (a1[outside] != a2[outside]).all(), base
+    # pkz is NEVER written on the CG pass: canary survives everywhere
+    z1 = np.asarray(oracle["pkz_c_can1"], dtype=np.float64)
+    z2 = np.asarray(oracle["pkz_c_can2"], dtype=np.float64)
+    assert _nd(z1, gen.canary_field(comp3, comp_org,
+                                    gen.CANARY_SEEDS["1"])) == 0
+    assert _nd(z2, gen.canary_field(comp3, comp_org,
+                                    gen.CANARY_SEEDS["2"])) == 0
+    assert (z1 != z2).all()
+
+    # --- D pass: computehalo=.true. must write EVERY slot
+    for base in ("pkc_d", "gz_d", "pkz_d"):
+        a1 = np.asarray(oracle[f"{base}_can1"], dtype=np.float64)
+        a2 = np.asarray(oracle[f"{base}_can2"], dtype=np.float64)
+        main = np.asarray(oracle[base], dtype=np.float64)
+        assert _nd(a1, a2) == 0, (
+            f"{base}: {_nd(a1, a2)} slots still carry their canary — the "
+            "computehalo extension did NOT write the full data domain")
+        assert _nd(a1, main) == 0, base
+
+
+@pytest.mark.parametrize("km", KMS)
+def test_per_k_influence_matrix(km):
+    """Per-level, per-consumer influence structure (codex r20 finding 5).
+
+    "km=2 differs from km=3" and "some token changed" can both pass while
+    a level is zeroed or two levels are swapped.  This asserts the exact
+    dependency STRUCTURE the column recursion implies, so a level swap or
+    a lost accumulator has nowhere to hide:
+
+      delp[L] -> pe[kk]  changes iff kk >= L+1 (interfaces BELOW the
+                         layer), unchanged for kk <= L;
+      delp[L] -> pkz[k]  changes iff k >= L;
+      pt[L]   -> gz[j]   changes iff j <= L (geopotential ABOVE the
+                         layer), unchanged for j > L;
+      delpc[L]-> uc_pgc  changes.
+
+    The first row is exactly the "dropping the p1d accumulation must fail
+    at interfaces above level 1" requirement: a port using ``delp[k-1]``
+    instead of the running sum leaves pe[kk] independent of delp[L] for
+    every L < kk-1, and that fires here.
+    """
+    oracle, gen, flds, base = _port(km)
+
+    def _perturb(key, level):
+        pert = {k: np.array(v, dtype=np.float64, copy=True)
+                for k, v in flds.items()}
+        pert[key][:, :, level] = pert[key][:, :, level] * (1.0 + 1.0e-6)
+        return gen.run_port(pert, km)
+
+    for lev in range(km):
+        out = _perturb("delp", lev)
+        for kk in range(km + 1):
+            moved = _nd(out["pe_d"][:, kk, :], base["pe_d"][:, kk, :]) != 0
+            if kk >= lev + 1:
+                assert moved, (
+                    f"delp[{lev}] does not reach interface pe[{kk}] — the "
+                    "running p1d accumulator is not being carried down "
+                    "the column")
+            else:
+                assert not moved, (
+                    f"delp[{lev}] reached interface pe[{kk}] ABOVE it — "
+                    "the column recursion is inverted or mis-indexed")
+        for k in range(km):
+            moved = _nd(out["pkz_d"][:, :, k], base["pkz_d"][:, :, k]) != 0
+            assert moved == (k >= lev), (f"delp[{lev}] -> pkz[{k}]", moved)
+
+        out = _perturb("pt", lev)
+        for j in range(km + 1):
+            moved = _nd(out["gz_d"][:, :, j], base["gz_d"][:, :, j]) != 0
+            assert moved == (j <= lev), (
+                f"pt[{lev}] -> gz[{j}] influence is wrong: gz integrates "
+                "UPWARD from hs, so pt at level L may only move gz at "
+                "interfaces at or above L")
+
+        out = _perturb("delpc", lev)
+        assert _nd(out["uc_pgc"], base["uc_pgc"]) != 0, (
+            f"delpc[{lev}] does not reach the C-grid wind update")
+
+
+@pytest.mark.parametrize("km", KMS)
+def test_fortran_only_tokens_are_all_asserted(km):
+    """Bookkeeping: every FORTRAN-only token (no python counterpart) is
+    covered by a test above, so nothing is dumped-but-unconstrained."""
+    gen = _load_gen()
+    oracle = _load(km)
+    covered = {"delpc_poisoned", "delp_poisoned"} | {
+        f"{a}_can{s}" for s in ("1", "2")
+        for a in ("pkc_c", "gz_c", "pkz_c", "pkc_d", "gz_d", "pkz_d")}
+    assert set(gen.FORTRAN_ONLY_TOKENS) == covered
+    for key in covered:
+        assert key in oracle.files, key
+        assert np.isfinite(np.asarray(oracle[key], dtype=np.float64)).all()
+    # and they are deliberately OUTSIDE the port-comparison bucket
+    assert not (set(gen.FORTRAN_ONLY_TOKENS) & set(_CHAIN_TOKENS))
 
 
 @pytest.mark.parametrize("km", KMS)
