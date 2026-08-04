@@ -207,7 +207,6 @@ def fv3_divergence_corner_2d(
 
     if dgrid_ne_halo:
         from legoesm.core.fv3_sw_core import (
-            d2a2c_ua_va_halo,
             d2a2c_ua_va_halo_4d,
             sina_u_v_from_sin_sg,
         )
@@ -268,25 +267,27 @@ def fv3_divergence_corner_2d(
         u4 = u_cov if _is_4d else u_cov[..., None]
         v_cov4 = v_cov if _is_4d else v_cov[..., None]
 
+        # DGRID_NE exchange first: the padded winds feed BOTH the uf/vf
+        # stencil below and the s3 local-ghost D->A (no second exchange).
+        u_full, v_full = _dgrid_ne_halo(u4, v_cov4)
+
         # real_metric_ghosts: Fortran's ghost-ring ua/va (sw_core.F90:3513)
         # are evaluated with REAL gridstruct halo cosa_s/rsin2, not
         # edge-replicated pads.  The ring cells this lane reads at panel
         # boundaries (va(0,j), ua(i,0), ...) were the last edge-replicated
         # input feeding the O(1/dx) solid-body boundary residual.
-        if _is_4d:
-            ua_h1, va_h1 = d2a2c_ua_va_halo_4d(
-                u4, v_cov4, cdgrid, real_metric_ghosts=True,
-                covariant_halo=True)
-        else:
-            ua_h1, va_h1 = d2a2c_ua_va_halo(
-                u4[..., 0], v_cov4[..., 0], cdgrid,
-                real_metric_ghosts=True,
-                covariant_halo=True,
-            )
-            ua_h1 = ua_h1[..., None]
-            va_h1 = va_h1[..., None]
+        # local_ghost_d2a (s3, 2026-08-04): the ring utmp/vtmp themselves
+        # come from Fortran's LOCAL D->A over the DGRID_NE-haloed covariant
+        # winds (sw_core.F90:3474-3517), not from the geographic A-halo of
+        # physical values — the last structural mismatch feeding the W/E
+        # seam-line B-node residual (argmax at (F, i in {0,n}, j=1) after
+        # the DGRID_NE fix).  Always the 4D entry: u4/v_cov4 carry a level
+        # axis in both the 2D and 4D callers.
+        ua_h1, va_h1 = d2a2c_ua_va_halo_4d(
+            u4, v_cov4, cdgrid, real_metric_ghosts=True,
+            covariant_halo=True, local_ghost_d2a=True,
+            u_d_pad=u_full, v_d_pad=v_full)
 
-        u_full, v_full = _dgrid_ne_halo(u4, v_cov4)
         u_pad = u_full[:, :, 1:-1, :]
         v_pad = v_full[:, 1:-1, :, :]
 
