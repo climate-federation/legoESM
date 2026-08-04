@@ -710,24 +710,6 @@ def _step_multilayer_land_impl(
     tau_y = surface_out.tau_y
     G_surface = surface_out.G_soil
 
-    # Snow-free base albedo that the snow feedback (and banded radiation) blends
-    # on top of.  The canopy schemes (TwoLeafCanopy / CLM-ML) diagnose a per-cell
-    # snow-free surface albedo from their OWN shortwave radiative transfer — the
-    # soil-colour ``ALB_VIS``/``ALB_NIR`` (moisture-darkened) blended with the
-    # vegetation — and return it in ``surface_out.albedo``.  The SEB path carries
-    # the per-cell veg/soil blend (``lp.albedo_veg`` + dry-soil brightening) in
-    # ``albedo_land``.  ``CanopyLandParams`` has NO ``albedo_veg`` field, so
-    # ``_get(lp, "albedo_veg", config.albedo_land)`` above silently collapses the
-    # canopy base to the scalar ``config.albedo_land``; without this split the
-    # reported/coupled canopy albedo degenerates to a uniform base + snow bands
-    # and drops all soil-colour + vegetation structure (while the canopy energy
-    # balance still used the real per-cell albedo — an inconsistency too).  The
-    # canopy RT already accounts for soil reflectance, so no dry-soil brightening
-    # is re-applied to ``surface_out.albedo``.
-    _is_canopy = isinstance(
-        config.surface_scheme, (TwoLeafCanopyConfig, CLMMLCanopyConfig))
-    snowfree_base = surface_out.albedo if _is_canopy else albedo_land
-
     # --- Banded surface radiation (gaps 1,2): override the cell-mean radiation in
     # G_surface with the area-weighted per-band balance (elevation-lapsed SW/LW +
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
@@ -744,17 +726,16 @@ def _step_multilayer_land_impl(
         _bands_eff = state.snow_bands + jnp.where(
             _band_surviving, snowfall_bands * dt, 0.0)
         if config.snow_albedo_feedback and lat is not None:
-            # Snow-free base = ``snowfree_base`` (per-cell canopy RT albedo for the
-            # canopy schemes, else the SEB per-cell CLM map / lp.albedo_veg + dry-soil
-            # brightening scalar carrying the trainable pft_alb) so the base flows to
-            # the gradient — NOT the latitude-band veg albedo, which would zero pft_alb.
-            _base = jnp.broadcast_to(snowfree_base, T_surface.shape)
+            # Snow-free base = ``albedo_land`` (per-cell CLM map / lp.albedo_veg, or the
+            # config scalar carrying the trainable pft_alb) so the base flows to the
+            # gradient — NOT the latitude-band veg albedo, which would zero pft_alb.
+            _base = jnp.broadcast_to(albedo_land, T_surface.shape)
             alpha_bands = band_albedo(
                 _bands_eff, state.snow_age_bands, _base, _cover_fn, _alb_fn,
                 ice_bands=ice_bands_in, cfg=bands)
         else:
             alpha_bands = jnp.broadcast_to(
-                jnp.reshape(snowfree_base, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
+                jnp.reshape(albedo_land, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
         band_rad = band_net_radiation(
             T_surface, alpha_bands, forcing.sw_down, forcing.lw_down, emissivity, bands)
         # surface_out.G_soil = sw_net + lw_net - shflx - lhflx; swap the radiation.
@@ -1106,17 +1087,13 @@ def _step_multilayer_land_impl(
     # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
     albedo_land_post = _albedo_base + dry_soil_brightening(
         richards_out.theta_new[:, 0], config.land_albedo)
-    # Canopy schemes' snow-free base is the per-cell RT albedo (single per-step
-    # value; no start/end-of-step brightening split — the RT already used the
-    # step's soil moisture).  See ``snowfree_base`` above.
-    snowfree_base_post = surface_out.albedo if _is_canopy else albedo_land_post
 
     if bands is not None:
         # Post-step banded albedo + up-welling LW for the atmosphere: the SAME
         # flux-weighted band radiation as the pre-step (gap 1), so the coupler sees a
         # consistent albedo (alpha_eff) and banded LW emission (not a cell-mean value).
         if config.snow_albedo_feedback and lat is not None:
-            _base_new = jnp.broadcast_to(snowfree_base_post, T_surface_new.shape)
+            _base_new = jnp.broadcast_to(albedo_land_post, T_surface_new.shape)
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
@@ -1125,7 +1102,7 @@ def _step_multilayer_land_impl(
                 ice_bands=ice_bands_new, cfg=bands)
         else:
             alpha_bands_new = jnp.broadcast_to(
-                jnp.reshape(snowfree_base_post, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
+                jnp.reshape(albedo_land_post, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
         band_rad_new = band_net_radiation(
             T_surface_new, alpha_bands_new, forcing.sw_down, forcing.lw_down,
             emissivity, bands)
@@ -1133,12 +1110,10 @@ def _step_multilayer_land_impl(
         lw_up_new = band_rad_new.lw_up_agg
     else:
         if config.snow_albedo_feedback and lat is not None:
-            # Per-cell snow-free base: the canopy RT albedo (soil-colour +
-            # vegetation) for the canopy schemes, else the SEB per-cell CLM
-            # PFT / trainable blend — snow feedback blends on top.
+            # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
-                base_albedo=jnp.broadcast_to(snowfree_base_post, T_surface_new.shape))
+                base_albedo=jnp.broadcast_to(albedo_land_post, T_surface_new.shape))
         else:
             alpha_new = surface_out.albedo
         # lw_up recomputed with post-step surface T and surface scheme's

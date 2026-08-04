@@ -49,7 +49,6 @@ import jax.numpy as jnp
 from functools import partial
 from typing import NamedTuple
 
-from legoesm import constants
 from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
@@ -418,27 +417,6 @@ def canopy_forward(
             rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
-    # --- Semi-implicit surface conductance lambda = -dG/dTs (>= 0) for the soil-
-    # thermal Robin BC.  The two-leaf canopy hands solve_soil_thermal an EXPLICIT
-    # (Neumann) ground-heat BC; over a cold/stiff/thin-top-layer surface that
-    # diverges to NaN (boreal/Arctic).  Mirror simple_seb's Robin-BC linearisation
-    # of the ground surface energy balance G = Rn_soil - LE_soil - H_soil (Tc, q_c
-    # held fixed, so these are the DIRECT ground-surface slopes):
-    #   d(-Rn)/dTs = 4 eps_s sigma Ts^3            (ground LW emission)
-    #   dH_soil/dTs = rhoa Cp / rah_below          (ground->canopy-air sensible)
-    #   dLE_soil/dTs = lam rhoa g_soil dq_sat/dTs  (Clausius-Clapeyron; g_soil the
-    #                                               soil-evap conductance)
-    # All three terms are >= 0, so lambda only ADDS to the tridiagonal diagonal
-    # (strictly stabilising; it can never destabilise a well-behaved cell).  The
-    # uncapped latent slope is used deliberately (over-damps a supply-limited
-    # surface, erring toward stability -- same choice as simple_seb).
-    _g_soil_evap = b.fStress_soil / jnp.maximum(raw_soil_evap, 1e-9)
-    _dqs_dTs = q_s * b.lam / (constants.R_v * jnp.maximum(Ts, 1.0) ** 2)
-    soil_conductance = (
-        4.0 * b.epss * constants.sigma_sb * Ts ** 3
-        + b.rhoa * b.Cp / jnp.maximum(rah_below, 1e-6)
-        + jnp.maximum(b.lam * b.rhoa * _g_soil_evap * _dqs_dTs, 0.0))
-
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
@@ -446,8 +424,7 @@ def canopy_forward(
         LE_wet_Sun=LE_wet_Sun, LE_wet_Sh=LE_wet_Sh,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,
-        G=G, soil_conductance=soil_conductance,
-        Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
+        G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,
         eps_col=eps_col, LW_emit=LW_emit,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
         ustar=ustar, zeta=zeta,
