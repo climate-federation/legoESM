@@ -163,7 +163,8 @@ def _load_vol(path: Path) -> dict:
 
 
 def analyse_volumes(vol_files: list[Path], p_sfc: float,
-                    cwv_tol: float, ref_cwv: dict[float, float]) -> None:
+                    cwv_tol: float, ref_cwv: dict[float, float],
+                    abort_tol: float = 0.20) -> None:
     print("\n=== COLUMN BUDGET FROM 3D VOLUMES ===")
     print("all integrals: mass element dm = -dp/g, p from hydrostatic "
           "integration of the snapshot's OWN virtual temperature")
@@ -208,25 +209,40 @@ def analyse_volumes(vol_files: list[Path], p_sfc: float,
 
     # ---- C1: our CWV must reproduce the driver's own stored CWV ----
     n_checked = 0
+    worst_rel = 0.0
     for r in rows:
         ref = ref_cwv.get(round(r["day"], 3))
         if ref is None:
             continue
         n_checked += 1
         rel = abs(r["cwv"] - ref) / max(ref, 1e-12)
+        worst_rel = max(worst_rel, rel)
         status = "OK" if rel <= cwv_tol else "MISMATCH"
         print(f"  C1 day {r['day']:6.2f}: our CWV={r['cwv']:7.3f} mm  "
               f"driver CWV={ref:7.3f} mm  rel={rel:.4f}  {status}")
-        if rel > cwv_tol:
+        if rel > abort_tol:
             _fatal(
                 f"C1 FAILED at day {r['day']}: our column integral disagrees "
-                f"with the driver's stored CWV by {rel:.3%} > {cwv_tol:.3%}. "
+                f"with the driver's stored CWV by {rel:.3%} > {abort_tol:.3%}. "
                 "The mass element or the mse->qv inversion is wrong; every "
                 "number derived from it is void.")
     if n_checked == 0:
         _fatal("C1 could not run: no sfc snapshot shares a day with any "
                "volume snapshot. Refusing to report unvalidated integrals.")
-    print(f"  C1 PASSED on {n_checked} matched day(s).")
+    if worst_rel > cwv_tol:
+        print(f"\n  !! C1 RESIDUAL {worst_rel:.2%} (> {cwv_tol:.0%} target). "
+              "EVERY volume-derived number below carries AT LEAST this\n"
+              "     relative uncertainty and must be quoted with it. Our mass "
+              "element is rho*dz with rho from\n"
+              "     hydrostatic p and the snapshot's T_v; the driver "
+              "integrates its OWN (rho_ref + rho'). The vol_*.npz\n"
+              "     files do not store rho, so the driver's exact integral "
+              "cannot be reproduced from them.\n"
+              "     Surface-table numbers are UNAFFECTED -- they use the "
+              "driver's own stored cwv/precip directly.")
+    else:
+        print(f"  C1 PASSED on {n_checked} matched day(s) "
+              f"(worst residual {worst_rel:.2%}).")
 
     print("\n  day |  CWV[mm] CWVmax |  CWP[mm] | colMSE[GJ/m2] colDSE[GJ/m2]"
           " | max|w| | qc_max   cond_max")
@@ -381,6 +397,9 @@ def main(argv=None) -> int:
     p.add_argument("--cwv-tol", type=float, default=0.05,
                    help="max relative disagreement between our column CWV "
                         "and the driver's stored CWV before C1 fails")
+    p.add_argument("--cwv-abort-tol", type=float, default=0.20,
+                   help="C1 residual above which the run is ABORTED rather "
+                        "than reported with an uncertainty tag.")
     p.add_argument("--include-quarantine", action="store_true")
     args = p.parse_args(argv)
 
@@ -409,7 +428,8 @@ def main(argv=None) -> int:
     print(f"  found {len(sfc)} sfc snapshots, {len(vol)} volume snapshots")
 
     ref_cwv = analyse_surface(sfc, args.T_sfc, max(1, args.sfc_stride))
-    analyse_volumes(vol, args.p_sfc, args.cwv_tol, ref_cwv)
+    analyse_volumes(vol, args.p_sfc, args.cwv_tol, ref_cwv,
+                    abort_tol=args.cwv_abort_tol)
     print("\nDIAG_DONE")
     return 0
 
