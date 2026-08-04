@@ -2070,3 +2070,68 @@ def test_capture_is_invariant_to_the_fused_pair_env_toggle(monkeypatch):
     np.testing.assert_array_equal(
         np.asarray(out0.salt_flux_v_int.data),
         np.asarray(out1.salt_flux_v_int.data))
+
+
+def test_both_gateway_builders_accept_and_thread_store_salt_flux():
+    """codex round-1 RED 1: the driver PASSED store_salt_flux to builders that
+    did not accept it -- every gateway run would have died with TypeError.
+    Signature AND body-threading are asserted for BOTH supported grids, the
+    same shape as the store_mass_flux sibling test."""
+    import inspect
+
+    from scripts.run import run_omip_core2 as R
+
+    for builder in (R.build_tripole, R.build_latlon_bathy):
+        sig = inspect.signature(builder)
+        assert "store_salt_flux" in sig.parameters, (
+            f"{builder.__name__} does not accept store_salt_flux -- the "
+            "driver call site raises TypeError on every gateway run")
+        assert sig.parameters["store_salt_flux"].default is False
+        src = inspect.getsource(builder)
+        assert '_ovr["store_salt_flux"] = True' in src, (
+            f"{builder.__name__} accepts the flag but never threads it into "
+            "the config override -- the capture would silently stay off")
+
+
+@pytest.mark.parametrize("outer", ["ab2", "leapfrog"])
+def test_store_salt_flux_refuses_non_forward_euler_outer(outer):
+    """codex round-1 RED 2: outer AB2 blends S_incr_prev across steps, so the
+    per-step captured pair is NOT the applied flux; leapfrog applies 2*dt*F^n
+    to the BEFORE state.  Both must refuse at construction."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from scripts.run import run_omip
+
+    grid, z_coord, config, _model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    kw = dict(store_salt_flux=True, outer_integrator=outer)
+    if outer == "leapfrog":
+        # leapfrog has its own config prerequisites; the salt guard must fire
+        # FIRST so the refusal reason is the honest one -- if leapfrog's own
+        # validation fires first that is acceptable too, but the construction
+        # must NOT succeed.  Match on either message, assert failure.
+        with pytest.raises(ValueError):
+            LatLonCGridOceanModel(grid, z_coord, config._replace(**kw))
+        return
+    with pytest.raises(ValueError, match="outer_integrator"):
+        LatLonCGridOceanModel(grid, z_coord, config._replace(**kw))
+
+
+def test_implicit_unsplit_rejects_store_salt_flux():
+    """codex round-1 RED 3: the unsplit lane bypasses _step_impl, so seeded
+    slots would sit at zero and require_salt would integrate an exact salt
+    transport of 0.  Same refusal as store_mass_flux."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from scripts.run import run_omip
+
+    grid, z_coord, config, _model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    cfg = config.replace_flat(barotropic_solver="implicit_unsplit")
+    cfg = cfg._replace(store_salt_flux=True)
+    with pytest.raises(ValueError, match="store_salt_flux"):
+        LatLonCGridOceanModel(grid, z_coord, cfg)

@@ -611,7 +611,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
-                  store_mass_flux=False):
+                  store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -860,6 +860,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # instead of reconstructing h*u from the post-barotropic velocity.
         # Pure diagnostic -- the trajectory is unchanged.
         _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue: keep the column-integrated advective SALT flux so the
+        # gateway accumulator integrates the model's own limited fluxes
+        # (exact channel) alongside its upwind estimate.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -998,7 +1003,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
                   prescribed_flow=None, no_gm_redi=False,
-                  store_mass_flux=False):
+                  store_mass_flux=False, store_salt_flux=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -1087,6 +1092,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         # the tripole left every supported latlon run silently reconstructing
         # (codex RED 6).
         _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue, threaded in BOTH builders for the same RED-6 reason.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,

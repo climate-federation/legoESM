@@ -2092,6 +2092,15 @@ class LatLonCGridOceanModel:
                     "store_mass_flux (the tracer-advecting flux is formed "
                     "inside the advective-form tendency, not in a shared "
                     "mass-flux block the step can capture)")
+            if getattr(config, "store_salt_flux", False):
+                # codex round-1 RED 3: same bypass -- _unsplit_ab2_step never
+                # runs _step_impl's capture, so the seeded 2-D slots would sit
+                # at ZERO forever and require_salt=True would happily integrate
+                # an exact salt transport of 0 (a lie with the right shape).
+                _unsupported.append(
+                    "store_salt_flux (the advective salt flux is formed "
+                    "inside the advective-form tendency the unsplit step "
+                    "uses; the capture lives in _step_impl)")
             if _unsupported:
                 raise ValueError(
                     'barotropic_solver="implicit_unsplit" does not yet support: '
@@ -2534,6 +2543,21 @@ class LatLonCGridOceanModel:
                     f"'euler' (got {config.tracer_time_integrator!r}): under "
                     "AB2/RK3 the applied salt flux is a multi-level/staged "
                     "combination the capture would misrepresent.")
+            _outer_for_salt = getattr(config, "outer_integrator",
+                                      "forward_euler")
+            if _outer_for_salt != "forward_euler":
+                # codex round-1 RED 2: the OUTER AB2 blends the FULL explicit
+                # tracer increment (S_incr_prev) across steps -- the applied
+                # update is a_n*dS^n - a_p*dS^{n-1} even with the inner
+                # integrator at euler, so the per-step captured pair is NOT
+                # the applied flux.  Leapfrog applies 2*dt*F^n to the BEFORE
+                # state (a different base and weight).  Refuse both.
+                raise ValueError(
+                    "store_salt_flux requires outer_integrator="
+                    f"'forward_euler' (got {_outer_for_salt!r}): the outer "
+                    "AB2/leapfrog combine explicit tracer increments across "
+                    "time levels, so a single-step captured flux would not "
+                    "be the applied one.")
             if config.tracer_advection in ("ppm_fct", "fct2",
                                            "dst3_multidim", "som"):
                 raise ValueError(

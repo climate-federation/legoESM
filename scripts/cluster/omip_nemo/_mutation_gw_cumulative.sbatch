@@ -29,6 +29,7 @@ SECT=$WT/packages/ocean/legoesm/ocean/diagnostics_sections.py
 DRIVER=$WT/scripts/run/run_omip_core2.py
 DRV_T=tests/unit/test_run_omip_core2_gateway_transports.py
 SECT_T=tests/ocean/unit/test_diagnostics_sections.py
+MFS_T=tests/ocean/unit/test_mass_flux_store.py
 
 # swap <file> <old> <new> — exact single-occurrence replacement, asserted.
 # A STALE ANCHOR ABORTS THE JOB: a silent no-op mutation yields a GREEN test
@@ -200,9 +201,11 @@ run M14 "$DRV_T::test_differencing_two_dumps_equals_a_fresh_accumulator_over_tha
 restore "$DRV_T"
 
 echo "#### M15: simulate the dump WRITING BACK to the state (1e-12 on S) ####"
-swap "$WT/$DRV_T" '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+swap "$WT/$DRV_T" '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored",
+                           require_salt=True)
         R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)' \
-                  '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+                  '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored",
+                           require_salt=True)
         s_on = s_on._replace(   # MUTATION: the diagnostic perturbs the state
             S=s_on.S.replace(data=s_on.S.data + jnp.asarray(1e-12)))
         R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)'
@@ -366,12 +369,20 @@ restore scripts/run/run_omip_core2.py
 echo "=== CONTROL: unmutated worktree must be GREEN ==="
 DIRTY="$(git -C "$WT" status --porcelain --untracked-files=no | tr '\n' ' ')"
 echo "tree dirty? [$DIRTY]"
+# TWO invocations (three suites in one interpreter SIGABRT, job 9311668);
+# the control covers every file the mutations target, incl. the salt suite.
 $PY -m pytest "$DRV_T" "$SECT_T" -q --no-header -p no:cacheprovider \
-  --basetemp="$BT/control" 2>&1 \
+  --basetemp="$BT/control_a" 2>&1 \
   | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
-  | tail -10
-CONTROL_RC=${PIPESTATUS[0]}
-echo "=== EXIT(control) $CONTROL_RC   (expect ZERO) ==="
+  | tail -6
+CONTROL_RC_A=${PIPESTATUS[0]}
+$PY -m pytest "$MFS_T" -q --no-header -p no:cacheprovider \
+  --basetemp="$BT/control_b" 2>&1 \
+  | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
+  | tail -6
+CONTROL_RC_B=${PIPESTATUS[0]}
+CONTROL_RC=$(( CONTROL_RC_A > CONTROL_RC_B ? CONTROL_RC_A : CONTROL_RC_B ))
+echo "=== EXIT(control) $CONTROL_RC (a=$CONTROL_RC_A b=$CONTROL_RC_B)   (expect ZERO) ==="
 
 # ===================================================== the verdict, enforced
 FAIL=0

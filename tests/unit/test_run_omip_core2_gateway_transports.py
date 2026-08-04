@@ -1313,14 +1313,26 @@ def test_end_to_end_exact_column_differs_from_upwind_on_a_front(tmp_path):
                              store_mass_flux=True, store_salt_flux=True)
     model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state("latlon", grid, z_coord, 1000.0)
-    # front + flow: seed v and a zonal S step so the limiter is active on
-    # meridionally-crossed faces too
+    # PRE-STEP front + flow (codex round-1 MEDIUM: the first version
+    # overrode v AFTER the step, so exact-vs-upwind differed BY CONSTRUCTION
+    # and a broken capture could pass).  Both channels now measure the SAME
+    # step: a meridional S front + sinusoid (limiter-active) and a tilted
+    # eta + meridional jet that the step turns into real fluxes.
     S = np.asarray(state.S.data)
-    n_lat = S.shape[0]
-    S_front = np.where((np.arange(n_lat) < n_lat // 2)[:, None, None],
-                       30.0, 36.0) * np.ones_like(S)
-    state = state._replace(S=state.S.replace(
-        data=jnp.asarray(S_front, dtype=state.S.data.dtype)))
+    n_lat, n_lon = S.shape[0], S.shape[1]
+    lonw = 2.5 * np.sin(2.0 * np.pi * np.arange(n_lon) / n_lon)
+    S_front = (np.where((np.arange(n_lat) < n_lat // 2)[:, None, None],
+                        30.0, 36.0)
+               + lonw[None, :, None]) * np.ones_like(S)
+    eta = 0.2 * (np.linspace(-1, 1, n_lat)[:, None]
+                 * np.sin(2 * np.pi * np.arange(n_lon) / n_lon)[None, :])
+    v0 = 0.05 * np.ones_like(np.asarray(state.v.data))
+    state = state._replace(
+        S=state.S.replace(data=jnp.asarray(S_front,
+                                           dtype=state.S.data.dtype)),
+        eta=state.eta.replace(data=jnp.asarray(eta,
+                                               dtype=state.eta.data.dtype)),
+        v=state.v.replace(data=jnp.asarray(v0, dtype=state.v.data.dtype)))
     geom = promote_gateway_geometry(getattr(model, "grid", grid))
     lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
                         * np.ones((1, grid.n_lon)))
@@ -1331,8 +1343,6 @@ def test_end_to_end_exact_column_differs_from_upwind_on_a_front(tmp_path):
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     for k in range(1, 3):
         state = model.step(state, 600.0)
-        state = state._replace(
-            v=state.v.replace(data=jnp.full_like(state.v.data, 0.05)))
         acc = gateway_step(acc, stack, state, z_coord, geom,
                            source="stored", require_salt=True)
         R._gateway_cumulative_row(csv, acc, k, float(k))
@@ -1347,13 +1357,13 @@ def test_end_to_end_exact_column_differs_from_upwind_on_a_front(tmp_path):
     assert got_ex != 0.0, "exact channel accumulated nothing"
     np.testing.assert_allclose(got_ex, float(np.asarray(acc.salt_exact).sum()),
                                rtol=1e-12)
-    # NOTE: after the v-override the stored pair is the STEP's flux while the
-    # upwind estimate uses the OVERRIDDEN v -- so the two channels measure
-    # different quantities here BY CONSTRUCTION of the fixture; the assertion
-    # is only that the exact channel carries its own, distinct numbers.
-    assert abs(got_ex - got_up) > 1e-6 * max(abs(got_up), 1.0), (
+    # Both channels measured the SAME step from the same state, so their
+    # difference is the genuine limiter-vs-upwind gap on a limiter-active
+    # front -- nonzero, but not enormous.  A capture that stored the upwind
+    # product would make them EQUAL (mutation M27's model-level twin).
+    assert abs(got_ex - got_up) > 1e-9 * max(abs(got_up), 1.0), (
         "exact and upwind columns are identical -- the exact channel is a "
-        "copy, not a measurement")
+        "copy of the upwind estimate, not the model's own flux")
 
 
 def test_driver_gateway_call_passes_require_salt():
