@@ -513,10 +513,16 @@ def score_against_les(means, *, reference, p_full, scored):
     # louis's 1.938. Map any non-finite component to a large finite penalty
     # (finite so the gradient stays usable and the line search can still
     # reject the step).
-    any_bad = jnp.any(~jnp.isfinite(jnp.stack(
-        [jnp.asarray(v) for v in predicted.values()] + [stacked])))
+    # Check the (nlev,) predictions and the (n_scored,) component scores
+    # SEPARATELY -- stacking them together is a shape error.
+    pred_bad = jnp.any(jnp.stack([
+        jnp.any(~jnp.isfinite(jnp.asarray(predicted[k]))) for k in scored]))
+    comp_bad = jnp.any(~jnp.isfinite(stacked))
+    any_bad = pred_bad | comp_bad
     combined = jnp.where(any_bad, NONFINITE_PENALTY, combined)
-    components = {k: jnp.where(jnp.isfinite(v), v, NONFINITE_PENALTY)
+    # Every COMPONENT is penalised too. Otherwise a NaN rollout still reports
+    # per-variable zeros -- "perfect" -- while only the aggregate is large.
+    components = {k: jnp.where(any_bad, NONFINITE_PENALTY, v)
                   for k, v in components.items()}
     return components, combined
 
@@ -1143,6 +1149,21 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             return r.score_default
         return float("inf")
 
+    def _penalised(r) -> bool:
+        # An arm that hit the non-finite penalty must not be ranked at all --
+        # with --skip-tuning there is no gradient gate to catch it, and a
+        # penalty of 1000 still "beats" any genuine score above 1000.
+        vals = [v for v in (r.score_default, r.score_tuned) if v is not None]
+        vals += list((r.per_case_default or {}).values())
+        vals += list((r.per_case_tuned or {}).values())
+        return any(v >= NONFINITE_PENALTY * 0.99 for v in vals)
+
+    for r in results:
+        if r.status in _RANKABLE and _penalised(r):
+            r.status = "nonfinite_rollout"
+            r.error = (r.error or "") + (
+                " non-finite rollout on at least one case; excluded from the "
+                "ranking")
     rankable = [r for r in results
                 if r.status in _RANKABLE and r.score_default is not None]
     excluded = [r for r in results if r not in rankable]
@@ -1251,26 +1272,24 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         f"# SCM turbulence closures vs LES — {args.case}", "",
     ]
     if args.radiation_confound:
-        lines += [
-            "> **THIS IS NOT A TURBULENCE RANKING.** "
-            "`--allow-radiation-mismatch` was used: "
-            + args.radiation_confound, "",
-        ]
+        lines += ["> **THIS IS NOT A TURBULENCE RANKING.** "
+                  "`--allow-radiation-mismatch` was used:", ""]
+        lines += [f"> - **{k}**: {v}" for k, v in
+                  args.radiation_confound.items()] + [""]
     lines += [
-        f"LES reference: `{reference.source_dir}`, window "
-        f"{reference.window_label}, {int(reference.mask.sum())} of "
-        f"{case.nlev} SCM levels inside the LES domain.", "",
-        f"SCM: nlev={args.nlev}, dt={args.dt} s, {args.hours} h, "
-        f"trailing {args.analysis_hours} h averaged (same window as the LES).",
+        "\n".join(
+            f"- **{a.name}**: `{a.les_dir}`, window {a.reference.window_label}, "
+            f"{int(a.reference.mask.sum())} of {a.case.nlev} SCM levels inside "
+            f"the LES domain, scored on {', '.join(a.scored)}"
+            for a in arms),
         "",
-        "Every arm shares one initial column, one large-scale forcing and one "
-        "surface boundary condition, all built from the same gSAM deck the LES "
-        "read; only `PhysicsConfig.turbulence` differs, and that is checked "
-        "mechanically rather than assumed. Scored on "
-        f"{', '.join(args.scored)} — normalized by the LES "
-        "profile's own mass-weighted spread, combined in quadrature. Lower is "
-        "better.", "",
-        "| rank | scheme | status | score (default) | score (tuned) | "
+        f"SCM: dt={args.dt} s, one parameter set per scheme fitted to ALL "
+        f"{len(arms)} case(s) jointly; the joint score is the mean of the "
+        "per-case normalized scores.", "",
+        "Within every case, all arms share one initial column, one forcing and "
+        "one surface boundary condition; only `PhysicsConfig.turbulence` "
+        "differs, checked mechanically. Lower is better.", "",
+        "| rank | scheme | status | joint (default) | joint (tuned) | "
         "trained | frozen |",
         "|---|---|---|---|---|---|---|",
     ]

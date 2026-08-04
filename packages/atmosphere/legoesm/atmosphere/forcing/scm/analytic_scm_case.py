@@ -21,9 +21,13 @@ time-varying prescribed surface temperature cannot be traced (its validator
 materialises with NumPy), so a ``T_s``-driven case could not be gradient-tuned
 at all without changing that validator first.
 
-The comparable region stops at 0.75*Lz wherever the LES applies its Rayleigh
-sponge (``run_spectral_sbl.py`` and ``run_spectral_les.py`` both do); above
-that the LES is relaxed toward a reference and represents nothing.
+Two heights, deliberately distinct. The SCM column spans the LES DOMAIN
+(``les_lz_m``) so its lid matches the LES lid; SCORING stops at
+``les_domain_top_m``, which is the sponge base where the LES sponges
+(``run_spectral_sbl.py`` and ``run_spectral_les.py``, top 25 %) and the lid
+itself where it does not (``run_spectral_cbl.py`` has no sponge). Conflating
+them put a lid 400 m below CBL's 1600 m domain and truncated its entrainment
+layer -- a scoring cutoff must never become a physical boundary.
 """
 from __future__ import annotations
 
@@ -49,7 +53,6 @@ __all__ = [
 ]
 
 _P_S_PA = 1.0e5          # the analytic drivers are Boussinesq; 1000 hPa column
-_Z_TOP_PAD = 1.25        # build the column a little above the scored region
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,13 @@ class AnalyticSCMCaseSpec:
     v_geo_m_s: float
     f_c: float
     les_z0_m: float
-    les_domain_top_m: float          # 0.75*Lz where the LES sponges
+    # The LES domain depth: the SCM column spans THIS, so the physical lid
+    # matches the LES lid.
+    les_lz_m: float
+    # Where SCORING stops. Equal to les_lz_m when the LES has no sponge; the
+    # sponge base otherwise. Conflating the two put a lid 400 m below CBL's
+    # 1600 m domain and truncated its entrainment layer.
+    les_domain_top_m: float
     default_dt_s: float
     scored: tuple[str, ...]
     note: str
@@ -88,7 +97,7 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         inversion_width_m=25.0,
         sfc_theta_flux_K_m_s=-0.005,       # stable: cooling the surface layer
         u_geo_m_s=8.0, v_geo_m_s=0.0, f_c=1.39e-4,
-        les_z0_m=0.1, les_domain_top_m=300.0,     # 0.75 * 400 m (sponge above)
+        les_z0_m=0.1, les_lz_m=400.0, les_domain_top_m=300.0,  # sponge > 300 m
         default_dt_s=10.0,
         scored=("theta", "u", "v"),        # stable BL + low-level jet
         note="GABLS1 stable boundary layer; constant -0.005 K m/s surface "
@@ -100,7 +109,8 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         inversion_width_m=0.0,             # driver uses a sharp jnp.where
         sfc_theta_flux_K_m_s=0.06,
         u_geo_m_s=0.0, v_geo_m_s=0.0, f_c=0.0,
-        les_z0_m=0.1, les_domain_top_m=1200.0,    # 0.75 * 1600 m
+        # run_spectral_cbl.py has NO sponge, so scoring runs to the lid.
+        les_z0_m=0.1, les_lz_m=1600.0, les_domain_top_m=1600.0,
         default_dt_s=10.0,
         # No rotation and no geostrophic wind, so u and v stay ~0 and their
         # spread is ~0: scoring them would divide by the floor.
@@ -115,7 +125,7 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         inversion_width_m=0.0,
         sfc_theta_flux_K_m_s=0.0,          # neutral
         u_geo_m_s=10.0, v_geo_m_s=0.0, f_c=1.0e-4,
-        les_z0_m=0.1, les_domain_top_m=750.0,     # 0.75 * 1000 m
+        les_z0_m=0.1, les_lz_m=1000.0, les_domain_top_m=750.0,  # sponge > 750 m
         default_dt_s=10.0,
         # Neutral by construction: theta is constant, so its spread is ~0 and
         # a normalized theta score is meaningless. The Ekman spiral IS the
@@ -206,13 +216,13 @@ def load_analytic_scm_case(case: str, *, nlev: int = 48,
 
     # Hydrostatic p(z) from the analytic theta, via the SHARED mapping the deck
     # bridge uses. Dry cases, so theta_v == theta.
-    z_top = spec.les_domain_top_m * _Z_TOP_PAD
+    z_top = spec.les_lz_m
     z_ref = np.linspace(0.0, z_top, 512)
     z_aux, p_aux = hydrostatic_pressure_from_theta(
         z_ref, _theta_profile(spec, z_ref), _P_S_PA,
     )
     sigma_top = float(
-        np.interp(spec.les_domain_top_m, z_aux[::-1], p_aux[::-1]) / _P_S_PA
+        np.interp(spec.les_lz_m, z_aux[::-1], p_aux[::-1]) / _P_S_PA
     )
     if not 0.0 < sigma_top < 1.0:
         raise ValueError(f"derived sigma_top={sigma_top} outside (0, 1)")

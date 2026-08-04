@@ -190,8 +190,12 @@ _CASE_ALIASES: dict[str, frozenset[str]] = {
     # inversion, constant flux, no Coriolis) -- NOT Wangara Day 33. The case
     # is named for what it is; the driver's label is accepted as an alias so
     # the archived reference still loads.
-    "cbl": frozenset({"cbl", "wangara"}),
-    "wangara": frozenset({"wangara", "cbl"}),
+    # NOT cross-aliased with "wangara". run_spectral_cbl.py mislabels its
+    # output, so the archived reference is renamed on disk rather than
+    # accepted here -- otherwise a REAL Wangara Day-33 directory (moist,
+    # rotating, diurnally forced) would silently become the CBL reference.
+    "cbl": frozenset({"cbl", "cbl_n91", "nieuwstadt"}),
+    "wangara": frozenset({"wangara"}),
     "ekman": frozenset({"ekman", "neutral", "neutral_spectral"}),
 }
 
