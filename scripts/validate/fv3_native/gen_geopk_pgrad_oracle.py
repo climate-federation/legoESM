@@ -752,7 +752,57 @@ def verify_manifest(work: str, km: int, input_sha: str) -> dict:
                 f"(repo {now}, built {man[key]}) — the Fortran output on "
                 "disk was produced by different sources.  Rebuild and "
                 "re-run; refusing to certify stale output")
+
+    # --- codex r21 blocker B: source hashes ALONE are not a binding.
+    # Checking only `source.*` let a HAND-EDITED manifest carry an
+    # arbitrary executable_sha256 and repo_sha and still authorise stale
+    # output — which is round 20's blocker 2 all over again.  Re-derive
+    # BOTH from the environment and refuse on mismatch.
+    exe = os.path.join(work, "drv")
+    if not os.path.exists(exe):
+        raise SystemExit(
+            f"the built executable {exe} is gone — it must be RETAINED so "
+            "the manifest's executable_sha256 can be re-derived.  Without "
+            "it the manifest is self-asserted, not verified")
+    exe_now = _sha(exe)
+    if exe_now != man["executable_sha256"]:
+        raise SystemExit(
+            f"the executable in the work dir hashes {exe_now} but the "
+            f"manifest records {man['executable_sha256']} — the binary "
+            "that produced this output is not the one recorded")
+    repo_now = git_head()
+    if repo_now is None:
+        raise SystemExit(
+            "cannot resolve the repo HEAD to verify the manifest's "
+            "repo_sha — refusing to pack an unverifiable certificate")
+    if repo_now != man["repo_sha"]:
+        raise SystemExit(
+            f"the checkout is at {repo_now} but the manifest records "
+            f"{man['repo_sha']} — the run and the tree disagree")
+
+    # --- ordering: the output must not predate the binary that claims to
+    # have written it, nor the input it claims to have consumed.  Catches
+    # "fresh binary, stale output" that hash equality alone allows.
+    in_txt = f"{work}/geopk_pgrad_input.txt"
+    t_exe, t_in, t_out = (os.path.getmtime(exe), os.path.getmtime(in_txt),
+                          os.path.getmtime(out_txt))
+    if t_out < t_exe or t_out < t_in:
+        raise SystemExit(
+            f"{out_txt} predates the executable or its input "
+            f"(exe {t_exe}, input {t_in}, output {t_out}) — it cannot be "
+            "the product of this build+input")
     return man
+
+
+def git_head() -> str | None:
+    import subprocess
+
+    try:
+        res = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
 
 
 def _gen(work: str, km: int) -> None:

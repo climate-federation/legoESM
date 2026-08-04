@@ -465,6 +465,116 @@ def test_sw_one_grad_p_adapter_matches_legacy(bd):
 
 # --------------------------------------------------------- gen serializer
 
+def _mutation_footprint(call, arrays):
+    """``({name: n_changed_words}, {name: post_call_bytes}, return_value)``
+    for one call over the CALLER-OWNED arrays it was handed."""
+    before = {k: np.array(v, dtype=np.float64, copy=True)
+              for k, v in arrays.items()}
+    ret = call()
+    fp, after = {}, {}
+    for k, v in arrays.items():
+        a = np.ascontiguousarray(v, dtype=np.float64)
+        b = np.ascontiguousarray(before[k], dtype=np.float64)
+        fp[k] = int((a.view(np.uint64) != b.view(np.uint64)).sum())
+        after[k] = a.copy()
+    return fp, after, ret
+
+
+def test_sw_adapter_mutation_footprints(bd):
+    """The FULL aliasing contract of all four km=1 adapters (codex r21
+    blocker A).
+
+    Comparing only the returned/updated winds is NOT bit-identity: the
+    first version of ``one_grad_p_1lev`` passed the caller's pkc/gz
+    straight into the shared kernel, whose ``a2b_ord4(replace=True)``
+    mutates them in place — 169 pkc words and 338 gz words moved where
+    the legacy body moved ZERO, and the u/v-only test happily passed.
+    This asserts the EXACT mutation footprint (which caller-owned arrays
+    change, and by how many words) against the frozen legacy reference
+    for every adapter, plus bitwise equality of every array afterwards.
+    """
+    from legoesm.core.fv3_native_duo_stepper import (
+        geopk_sw_1lev,
+        geopk_sw_1lev_d,
+        one_grad_p_1lev,
+        p_grad_c_1lev,
+    )
+
+    gs = _gs()
+    rng = np.random.default_rng(29)
+    delp = np.abs(rng.standard_normal((M_A, M_A))) + 2.0
+    hs = rng.standard_normal((M_A, M_A)) * 1.0e3
+    pt = np.full((M_A, M_A), 0.9) + 0.01 * rng.standard_normal((M_A, M_A))
+    divg2 = rng.standard_normal((N + 1, N + 1)) * 1.0e3
+    u0 = rng.standard_normal((M_A, M_B))
+    v0 = rng.standard_normal((M_B, M_A))
+    uc0 = rng.standard_normal((M_B, M_A))
+    vc0 = rng.standard_normal((M_A, M_B))
+
+    # ---- adapters 1 & 2: the geopk pair must mutate NOTHING
+    for fn, halo in ((geopk_sw_1lev, 1), (geopk_sw_1lev_d, 2)):
+        aa = {"delp": delp.copy(), "hs": hs.copy(), "pt": pt.copy()}
+        fp_a, _af, ret_a = _mutation_footprint(
+            lambda a=aa, f=fn: f(a["delp"], a["hs"], bd, pt=a["pt"]), aa)
+        ll = {"delp": delp.copy(), "hs": hs.copy(), "pt": pt.copy()}
+        fp_l, _lf, ret_l = _mutation_footprint(
+            lambda a=ll, h=halo: _legacy_geopk_sw(a["delp"], a["hs"], bd,
+                                                  a["pt"], h), ll)
+        assert fp_a == fp_l, (fn.__name__, fp_a, fp_l)
+        assert fp_a == {"delp": 0, "hs": 0, "pt": 0}, (fn.__name__, fp_a)
+        assert _bitsame(ret_a[0], ret_l[0]) and _bitsame(ret_a[1], ret_l[1])
+
+    # ---- adapter 3: p_grad_c updates uc/vc ONLY
+    pkc, gz = geopk_sw_1lev(delp, hs, bd, pt=pt)
+    aa = {"uc": uc0.copy(), "vc": vc0.copy(), "delpc": delp.copy(),
+          "pkc": pkc.copy(), "gz": gz.copy(),
+          "rdxc": np.array(gs["rdxc"]), "rdyc": np.array(gs["rdyc"])}
+    gsa = dict(gs, rdxc=aa["rdxc"], rdyc=aa["rdyc"])
+    fp_a, af_a, _r = _mutation_footprint(
+        lambda: p_grad_c_1lev(112.5, aa["delpc"], aa["pkc"], aa["gz"],
+                              aa["uc"], aa["vc"], gsa, bd), aa)
+    ll = {"uc": uc0.copy(), "vc": vc0.copy(), "delpc": delp.copy(),
+          "pkc": pkc.copy(), "gz": gz.copy(),
+          "rdxc": np.array(gs["rdxc"]), "rdyc": np.array(gs["rdyc"])}
+    gsl = dict(gs, rdxc=ll["rdxc"], rdyc=ll["rdyc"])
+    fp_l, af_l, _r = _mutation_footprint(
+        lambda: _legacy_p_grad_c(112.5, ll["pkc"], ll["gz"], ll["uc"],
+                                 ll["vc"], gsl, bd), ll)
+    assert fp_a == fp_l, ("p_grad_c_1lev", fp_a, fp_l)
+    assert fp_a["uc"] > 0 and fp_a["vc"] > 0
+    for key in ("delpc", "pkc", "gz", "rdxc", "rdyc"):
+        assert fp_a[key] == 0, (key, fp_a[key])
+    for key in aa:
+        assert _bitsame(af_a[key], af_l[key]), key
+
+    # ---- adapter 4: one_grad_p updates u/v ONLY (the regression)
+    pkd, gzd = geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+    aa = {"u": u0.copy(), "v": v0.copy(), "pkc": pkd.copy(),
+          "gz": gzd.copy(), "divg2": divg2.copy(),
+          "rdx": np.array(gs["rdx"]), "rdy": np.array(gs["rdy"])}
+    gsa = dict(gs, rdx=aa["rdx"], rdy=aa["rdy"])
+    fp_a, af_a, _r = _mutation_footprint(
+        lambda: one_grad_p_1lev(aa["u"], aa["v"], aa["pkc"], aa["gz"],
+                                aa["divg2"], gsa, bd, N + 1, N + 1,
+                                dt=225.0, d_ext=0.02), aa)
+    ll = {"u": u0.copy(), "v": v0.copy(), "pkc": pkd.copy(),
+          "gz": gzd.copy(), "divg2": divg2.copy(),
+          "rdx": np.array(gs["rdx"]), "rdy": np.array(gs["rdy"])}
+    gsl = dict(gs, rdx=ll["rdx"], rdy=ll["rdy"])
+    fp_l, af_l, _r = _mutation_footprint(
+        lambda: _legacy_one_grad_p(ll["u"], ll["v"], ll["pkc"], ll["gz"],
+                                   ll["divg2"], gsl, bd, N + 1, N + 1,
+                                   225.0, 0.02), ll)
+    assert fp_a == fp_l, ("one_grad_p_1lev", fp_a, fp_l)
+    assert fp_a["u"] > 0 and fp_a["v"] > 0
+    for key in ("pkc", "gz", "divg2", "rdx", "rdy"):
+        assert fp_a[key] == 0, (
+            f"one_grad_p_1lev mutated caller-owned {key} in {fp_a[key]} "
+            "words; the legacy body mutated ZERO — copy-on-entry lost")
+    for key in aa:
+        assert _bitsame(af_a[key], af_l[key]), key
+
+
 def test_gen_serializer_layout_and_tamper():
     gen = _load_gen()
     fields = {}
@@ -537,6 +647,76 @@ def test_gen_serializer_layout_and_tamper():
     bad = gen.serialize_geopk_pgrad_inputs(tampered, gen.RES, gen.NG, km)
     assert hashlib.sha256(bad).hexdigest() != \
         hashlib.sha256(blob).hexdigest()
+
+
+def test_verify_manifest_rejects_tampering(tmp_path):
+    """The run-manifest gate must be NON-VACUOUS (codex r21 blocker B).
+
+    Round 20's fix checked only the six ``source.*`` hashes, so a
+    hand-edited manifest carrying an arbitrary ``executable_sha256`` and
+    ``repo_sha`` was still accepted — the binding did not exist.  This
+    builds a manifest that PASSES, then tampers with each load-bearing
+    field in turn and requires a refusal every time.
+    """
+    import hashlib as _h
+
+    gen = _load_gen()
+    head = gen.git_head()
+    if head is None:
+        pytest.skip("no git checkout to verify repo_sha against")
+    work = str(tmp_path)
+    km = 2
+    (tmp_path / "geopk_pgrad_input.txt").write_bytes(b"# res 12\n")
+    (tmp_path / f"geopk_pgrad_output_km{km}.txt").write_bytes(b"X 1 1 1 0\n")
+    (tmp_path / "drv").write_bytes(b"\x7fELF-not-really")
+
+    def _sha_path(p):
+        return _h.sha256(open(p, "rb").read()).hexdigest()
+
+    good = {
+        "schema": gen.MANIFEST_SCHEMA, "km": str(km), "repo_sha": head,
+        "compiler": "gfortran", "compiler_version": "GNU Fortran x",
+        "compiler_target": "x86_64-pc-linux-gnu",
+        "flags": "-O2 -fdefault-real-8", "defines": "NONE",
+        "executable_sha256": _sha_path(tmp_path / "drv"),
+        "input_sha256": _sha_path(tmp_path / "geopk_pgrad_input.txt"),
+        "output_sha256": _sha_path(
+            tmp_path / f"geopk_pgrad_output_km{km}.txt"),
+    }
+    for name in gen.MANIFEST_SOURCES:
+        good[f"source.{name}"] = _sha_path(
+            os.path.join(REPO, "scripts", "validate", "fv3_native", name))
+
+    def _write(man):
+        with open(gen.manifest_path(work, km), "w") as fh:
+            for k, v in man.items():
+                fh.write(f"{k}={v}\n")
+
+    _write(good)
+    gen.verify_manifest(work, km, good["input_sha256"])   # baseline PASSES
+
+    bogus = "0" * 64
+    for field, value in (("executable_sha256", bogus),
+                         ("repo_sha", "f" * 40),
+                         ("output_sha256", bogus),
+                         (f"source.{gen.MANIFEST_SOURCES[0]}", bogus),
+                         ("schema", "wrong_schema"),
+                         ("km", "3")):
+        bad = dict(good)
+        bad[field] = value
+        _write(bad)
+        with pytest.raises(SystemExit):
+            gen.verify_manifest(work, km, good["input_sha256"])
+    # a manifest that simply omits a required field is also refused
+    for field in ("executable_sha256", "repo_sha"):
+        bad = {k: v for k, v in good.items() if k != field}
+        _write(bad)
+        with pytest.raises(SystemExit):
+            gen.verify_manifest(work, km, good["input_sha256"])
+    # and a mismatched input hash (staging vs run) is refused
+    _write(good)
+    with pytest.raises(SystemExit):
+        gen.verify_manifest(work, km, bogus)
 
 
 def test_gen_output_layout_covers_every_token():

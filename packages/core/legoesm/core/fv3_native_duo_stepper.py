@@ -709,20 +709,28 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
     numerics.  ``u``/``v`` are passed as ``[:, :, None]`` VIEWS so the
     in-place update writes through.
 
-    BEHAVIOUR NOTE: the pre-refactor km=1 body worked on COPIES of the
+    ALIASING CONTRACT (codex r21 blocker A — a REGRESSION this adapter
+    briefly shipped).  The pre-refactor km=1 body worked on COPIES of the
     pkc/gz planes, so the caller's ``pkc``/``gz`` survived the a2b
     ``replace=True``.  The shared kernel is faithful to dyn_core and
-    mutates them in place.  Both call sites in this module
-    (``full_acoustic_step_sixface``) discard ``pkc``/``gz`` immediately
-    after this call, so the stepper is unaffected; a future caller that
-    needs the A-grid planes back must copy them itself.
+    mutates them IN PLACE; passing the caller's arrays straight through
+    silently mutated 169 ``pkc`` words and 338 ``gz`` words where the
+    legacy body mutated ZERO.  The earlier justification ("both call
+    sites discard them") was wrong on principle: the frozen legacy
+    reference is the contract and the burden is on the port, not on
+    every present and future caller.  This adapter therefore restores
+    COPY-ON-ENTRY.  ``test_sw_adapter_mutation_footprints`` asserts the
+    full footprint — which arrays change and by how many words — for all
+    four adapters, not just the returned/updated winds.
     """
     from legoesm.core.fv3_native_pgrad import one_grad_p as _one_grad_p_km
 
-    _one_grad_p_km(u[:, :, np.newaxis], v[:, :, np.newaxis], pkc, gz,
-                   divg2, None, gs, bd, npx=npx, npy=npy, npz=1, dt=dt,
-                   ptop=0.0, akap=1.0, hydrostatic=True, a2b_ord=4,
-                   d_ext=d_ext, ng=bd.ng, duogrid=True,
+    pk_work = np.array(pkc, dtype=np.float64, copy=True)
+    gz_work = np.array(gz, dtype=np.float64, copy=True)
+    _one_grad_p_km(u[:, :, np.newaxis], v[:, :, np.newaxis], pk_work,
+                   gz_work, divg2, None, gs, bd, npx=npx, npy=npy, npz=1,
+                   dt=dt, ptop=0.0, akap=1.0, hydrostatic=True,
+                   a2b_ord=4, d_ext=d_ext, ng=bd.ng, duogrid=True,
                    bvertex_mean2=_PG_BVERTEX_MEAN2)
 
 

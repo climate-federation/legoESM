@@ -39,6 +39,10 @@ gfortran $FF -J "$W" $S/fv3_geopk_pgrad_driver.F90 \
 # the repo, so a changed extract/shim/driver/a2b dependency, compiler or
 # preprocessor can no longer be stamped onto stale Fortran output.
 SOURCES="fv3_swcore_shim.F90 fv3_geopk_pgrad_shim.F90 fv3_tpcore_duo_extract.F90 fv3_dsw5_duo_extract.F90 fv3_geopk_pgrad_extract.F90 fv3_geopk_pgrad_driver.F90"
+# hash-then-run: EXE_SHA is taken from the freshly linked binary BEFORE
+# any driver run, and $W/drv is RETAINED so --pack can re-derive it (a
+# manifest whose executable_sha256 is merely self-asserted is not a
+# binding — codex r21 blocker B).  Never delete $W/drv before --pack.
 CC_VER=$(gfortran --version | head -1)
 CC_TGT=$(gfortran -dumpmachine)
 EXE_SHA=$(sha256sum "$W/drv" | cut -d' ' -f1)

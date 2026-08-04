@@ -611,12 +611,68 @@ def test_geopk_d_transcendental_ulp(km):
 
 
 @pytest.mark.parametrize("km", KMS)
+def test_geopk_d_pk_is_exp_log_of_the_reconstructed_pressure(km):
+    """Close the ULP bucket's named hole on the D pass (codex r21).
+
+    The caps in ``_ULP_TOL`` are GUARDRAILS, not proof: a LOCALIZED 1-ULP
+    error in the port's own ``pkc_d`` would sit inside them.  The C pass
+    is already pinned exactly (below) but ``pe`` exists only on
+    ``[is-1,ie+1]``, whereas the ``computehalo`` D pass writes the FULL
+    data domain — so a C-only rederivation leaves the D halo uncovered.
+
+    This closes it over the whole domain: the pressure column is a PURE
+    RUNNING SUM of the serialized ``delp`` (libm-free, so reconstructible
+    bit-exactly anywhere), it is ANCHORED to the Fortran by requiring the
+    reconstruction to equal ``pe_d`` bitwise on the window where ``pe``
+    exists, and the port's ``pkc_d`` must then equal
+    ``exp(akap*log(<that pressure>))`` BITWISE EVERYWHERE.  After this the
+    only unproven step left anywhere in geopk is the FORTRAN's own
+    ``log``/``exp`` — exactly the quarantine's stated residual — and a
+    ``**``-vs-``exp(log)`` substitution in the port cannot hide in the
+    ULP cap.
+    """
+    oracle, _gen, _f, out = _port(km)
+    res, ng = int(oracle["res"]), int(oracle["ng"])
+    ptop, akap = float(oracle["ptop"]), float(oracle["akap"])
+    delp = np.asarray(oracle["in_delp"], dtype=np.float64)
+
+    # top-down running sum over the FULL data domain (same order as the
+    # port's p1d accumulator, dyn_core.F90:2744)
+    p = np.empty((delp.shape[0], delp.shape[1], km + 1), dtype=np.float64)
+    p[:, :, 0] = ptop
+    for k in range(1, km + 1):
+        p[:, :, k] = p[:, :, k - 1] + delp[:, :, k - 1]
+
+    # anchor: on the pe window the reconstruction IS the Fortran pressure
+    sl = slice(ng - 1, ng + res + 1)
+    pe = np.asarray(oracle["pe_d"], dtype=np.float64)
+    for k in range(km + 1):
+        assert _nd(p[sl, sl, k], pe[:, k, :]) == 0, (
+            f"the reconstructed pressure disagrees with the Fortran pe at "
+            f"interface {k} — the anchor for this test is invalid")
+
+    pk = np.asarray(out["pkc_d"], dtype=np.float64)
+    assert (pk[:, :, 0] == ptop ** akap).all()
+    for k in range(1, km + 1):
+        want = np.exp(akap * np.log(p[:, :, k]))
+        assert _nd(pk[:, :, k], want) == 0, (
+            f"level {k}: the port's pkc_d is NOT exp(akap*log(p)) of its "
+            "own accumulated pressure over the full data domain — a "
+            "localized transcendental defect the ULP cap would absorb")
+
+
+@pytest.mark.parametrize("km", KMS)
 def test_geopk_pk_is_exp_log_of_the_bit_exact_pe(km):
     """ATTRIBUTION: the port's ``pk`` is exactly
     ``exp(akap*log(pe))`` of a ``pe`` that is itself certified BIT-EXACT
     against the Fortran.  So the ONLY unproven step inside geopk's
     transcendental core is the host's own ``log``/``exp`` evaluation —
-    the quarantine is complete, not hand-waved."""
+    the quarantine is complete, not hand-waved.
+
+    The CG write box equals the ``pe`` window exactly, so this covers the
+    whole C pass; the D pass is covered over the full data domain by
+    ``test_geopk_d_pk_is_exp_log_of_the_reconstructed_pressure``.
+    """
     oracle, _gen, _f, out = _port(km)
     res, ng = int(oracle["res"]), int(oracle["ng"])
     akap = float(oracle["akap"])
@@ -1047,17 +1103,30 @@ def test_per_k_influence_matrix(km):
     dependency STRUCTURE the column recursion implies, so a level swap or
     a lost accumulator has nowhere to hide:
 
-      delp[L] -> pe[kk]  changes iff kk >= L+1 (interfaces BELOW the
-                         layer), unchanged for kk <= L;
-      delp[L] -> pkz[k]  changes iff k >= L;
-      pt[L]   -> gz[j]   changes iff j <= L (geopotential ABOVE the
-                         layer), unchanged for j > L;
-      delpc[L]-> uc_pgc  changes.
+      delp[L]  -> pe[kk], pkc[m], peln[m]  change iff index >= L+1
+                          (interfaces BELOW the layer), unchanged above;
+      delp[L]  -> pkz[k]                   changes iff k >= L;
+      delp[L]  -> gz[j]                    changes for every j <= km-1
+                          and NEVER for j == km (the hs seed);
+      delp[L]  -> u_ogp[k], v_ogp[k]       change for every k;
+      pt[L]    -> gz[j]                    changes iff j <= L
+                          (geopotential ABOVE the layer);
+      pt[L]    -> pe, pkc, peln, pkz       NEVER (pt enters only the gz
+                          recursion — a sharp cross-contamination guard);
+      pt[L]    -> u_ogp[k], v_ogp[k]       change iff k <= L;
+      ptc[L]   -> uc_pgc[k], vc_pgc[k]     change iff k <= L;
+      delpc[L] -> uc_pgc, vc_pgc           change at every level.
 
     The first row is exactly the "dropping the p1d accumulation must fail
     at interfaces above level 1" requirement: a port using ``delp[k-1]``
     instead of the running sum leaves pe[kk] independent of delp[L] for
     every L < kk-1, and that fires here.
+
+    LABEL (codex r21): the ``delpc -> uc_pgc/vc_pgc`` row is a WHOLE-CHAIN
+    dependency routed through the FIRST geopk (delpc is that call's
+    ``delp`` argument), NOT a direct read by the hydrostatic ``p_grad_c``
+    — which never touches ``delpc`` at all, as the poison re-run and
+    ``test_poison_was_installed`` establish independently.
     """
     oracle, gen, flds, base = _port(km)
 
@@ -1067,34 +1136,69 @@ def test_per_k_influence_matrix(km):
         pert[key][:, :, level] = pert[key][:, :, level] * (1.0 + 1.0e-6)
         return gen.run_port(pert, km)
 
+    def _moved(out, key, sl):
+        return _nd(out[key][sl], base[key][sl]) != 0
+
     for lev in range(km):
+        # ---------- delp: the column recursion itself ----------
         out = _perturb("delp", lev)
         for kk in range(km + 1):
-            moved = _nd(out["pe_d"][:, kk, :], base["pe_d"][:, kk, :]) != 0
-            if kk >= lev + 1:
-                assert moved, (
-                    f"delp[{lev}] does not reach interface pe[{kk}] — the "
-                    "running p1d accumulator is not being carried down "
-                    "the column")
-            else:
-                assert not moved, (
-                    f"delp[{lev}] reached interface pe[{kk}] ABOVE it — "
-                    "the column recursion is inverted or mis-indexed")
+            want = kk >= lev + 1
+            assert _moved(out, "pe_d", np.s_[:, kk, :]) == want, (
+                f"delp[{lev}] -> pe[{kk}]: expected moved={want}.  Below "
+                "the layer this is the running p1d accumulator; above it, "
+                "a change means the recursion is inverted or mis-indexed")
+            assert _moved(out, "pkc_d", np.s_[:, :, kk]) == want, (
+                f"delp[{lev}] -> pkc[{kk}]")
+            assert _moved(out, "peln_d", np.s_[:, kk, :]) == want, (
+                f"delp[{lev}] -> peln[{kk}]")
         for k in range(km):
-            moved = _nd(out["pkz_d"][:, :, k], base["pkz_d"][:, :, k]) != 0
-            assert moved == (k >= lev), (f"delp[{lev}] -> pkz[{k}]", moved)
+            assert _moved(out, "pkz_d", np.s_[:, :, k]) == (k >= lev), (
+                f"delp[{lev}] -> pkz[{k}]")
+        for j in range(km + 1):
+            assert _moved(out, "gz_d", np.s_[:, :, j]) == (j <= km - 1), (
+                f"delp[{lev}] -> gz[{j}]: every interface above the "
+                "surface depends on the pressure column, and gz[km] is "
+                "the hs seed and must NEVER move")
+        for k in range(km):
+            assert _moved(out, "u_ogp", np.s_[:, :, k]), (
+                f"delp[{lev}] -> u_ogp[{k}] is dead")
+            assert _moved(out, "v_ogp", np.s_[:, :, k]), (
+                f"delp[{lev}] -> v_ogp[{k}] is dead")
 
+        # ---------- pt: enters ONLY the gz recursion ----------
         out = _perturb("pt", lev)
         for j in range(km + 1):
-            moved = _nd(out["gz_d"][:, :, j], base["gz_d"][:, :, j]) != 0
-            assert moved == (j <= lev), (
+            assert _moved(out, "gz_d", np.s_[:, :, j]) == (j <= lev), (
                 f"pt[{lev}] -> gz[{j}] influence is wrong: gz integrates "
                 "UPWARD from hs, so pt at level L may only move gz at "
                 "interfaces at or above L")
+        assert _nd(out["pe_d"], base["pe_d"]) == 0, "pt leaked into pe"
+        assert _nd(out["pkc_d"], base["pkc_d"]) == 0, "pt leaked into pkc"
+        assert _nd(out["peln_d"], base["peln_d"]) == 0, "pt leaked into peln"
+        assert _nd(out["pkz_d"], base["pkz_d"]) == 0, "pt leaked into pkz"
+        for k in range(km):
+            want = k <= lev
+            assert _moved(out, "u_ogp", np.s_[:, :, k]) == want, (
+                f"pt[{lev}] -> u_ogp[{k}]: the D wind update reads gz at "
+                "interfaces k and k+1 only")
+            assert _moved(out, "v_ogp", np.s_[:, :, k]) == want, (
+                f"pt[{lev}] -> v_ogp[{k}]")
 
+        # ---------- C-stage inputs -> the C wind update ----------
+        out = _perturb("ptc", lev)
+        for k in range(km):
+            want = k <= lev
+            assert _moved(out, "uc_pgc", np.s_[:, :, k]) == want, (
+                f"ptc[{lev}] -> uc_pgc[{k}]")
+            assert _moved(out, "vc_pgc", np.s_[:, :, k]) == want, (
+                f"ptc[{lev}] -> vc_pgc[{k}]")
         out = _perturb("delpc", lev)
-        assert _nd(out["uc_pgc"], base["uc_pgc"]) != 0, (
-            f"delpc[{lev}] does not reach the C-grid wind update")
+        for k in range(km):
+            assert _moved(out, "uc_pgc", np.s_[:, :, k]), (
+                f"delpc[{lev}] -> uc_pgc[{k}] is dead")
+            assert _moved(out, "vc_pgc", np.s_[:, :, k]), (
+                f"delpc[{lev}] -> vc_pgc[{k}] is dead")
 
 
 @pytest.mark.parametrize("km", KMS)
