@@ -59,18 +59,50 @@ def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
     genuinely carries an O(U/dx) seam divergence.  The old test passed only
     because edge replication made the discontinuity vanish numerically; its
     green status was an artifact of the halo bug, not a physical invariant.
-    The threshold was NOT relaxed; the assertion is now exact instead.
 
-    With unit metrics the answer is fixed by the stencil alone.  FV3's
-    pre-corner-removal form is
+    INTEGER EXPECTATIONS RE-DERIVED INDEPENDENTLY (2026-08-04).  The old
+    +8/+5 integers were derived from the helper's own documentation; they
+    are re-derived here from (a) the Fortran stencil and (b) the ghost
+    semantics CERTIFIED value-level against ``analytic_swcore_state``
+    halos by the transplant probe (fv3_recon/transplant2_9311777.log) --
+    NOT from dgrid_halo's tables.
+
+    Stencil (sw_core.F90 divergence_corner, unit metrics, cosa=0):
         D(i,j) = r_A [ vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j) ]
-    and at a SE vertex the one nonphysical fourth-cell flux is removed
-    (sw_core.F90:2209-2224), leaving
+    with the one nonphysical fourth-cell flux removed at each cube vertex
+    (sw_core.F90:2209-2224), e.g. SE:
         D_SE = r_A [ -vf(n,1) + uf(n-1,1) - uf(n,1) ].
-    Face 4's east ``u`` ghost is ``-v`` from face 1 (dgrid_halo.py:284), so
-    for u=5, v=3:
-        ordinary face-4 east seam:  3 - 3 + 5 - (-3) = +8
-        face-4 SE vertex:              -3 + 5 - (-3) = +5
+
+    Certified ghost semantics used, with u=5, v=3 per-face-uniform:
+
+    1. (4,E) <- (1,N) is a QUARTER-TURN (axis-swap) seam: face 4's east u
+       ghost = -v_1, sourced from v_1's outermost CELL row (v's j axis is
+       cell-staggered; no inward step applies).  Certified: transplant log
+       ``VEC u F=4 edge=W/E max_abs=0.0`` (lines 190-191, 242-243) -- the
+       pre-fix helper was ALREADY exact on these strips.  Hence
+           east seam  D(n,1) = (3-3) + (5-(-3)) = +8
+           SE vertex  D_SE   = -3 + 5 - (-3)    = +5
+       UNCHANGED by the 2026-08-04 fix, and provably so: the fix touches
+       only node-axis source rows (invisible under per-face-uniform
+       fields, and this seam's source row is cell-axis anyway) and the
+       four half-turn signs (this seam is quarter-turn).
+
+    2. NEW half-turn assertions (RED on the pre-fix helper, which copied
+       these strips UNSIGNED and returned 0):
+       (4,N) <- (2,N) and (2,S) <- (5,S) are HALF-TURN seams (same-axis,
+       reversed transverse): the neighbour frame is rotated 180 degrees,
+       so covariant components cross with sign -1 (certified: log line
+       269 ``VEC v F=4 edge=N got=-2.5 want=+2.5`` exact negation; line
+       260 same for F=2 S).  With v = 3 everywhere the v ghost is -3:
+           face-4 north seam D(1,n) = (3-(-3)) + (5-5) = +6
+           face-2 south seam D(1,0) = (-3-3)   + (5-5) = -6
+
+    NOTE the operator consumes ONLY u W/E + v S/N ghosts (it trims the
+    other axis, _fv3_divergence_corner.py:430-431), so the node-axis
+    source-row half of the 2026-08-04 fix is NOT observable from this
+    stencil -- it is pinned value-level by
+    tests/atmosphere/dycore/regression/test_dgrid_vector_halo_iter1078.py
+    ::TestValueLevelVsAnalyticSwcoreHalos.
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
@@ -92,9 +124,15 @@ def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
     v = jnp.full_like(u, 3.0)
     out = fv3_divergence_corner_2d(u, v, cd, dgrid_ne_halo=True)
 
+    # (1) quarter-turn seam -- unchanged integers (derivation above)
     np.testing.assert_allclose(np.asarray(out[4, n, 1]), 8.0,
                                rtol=0.0, atol=1e-6)
     np.testing.assert_allclose(np.asarray(out[4, n, 0]), 5.0,
+                               rtol=0.0, atol=1e-6)
+    # (2) half-turn seams -- covariant sign -1 (pre-fix helper gave 0 here)
+    np.testing.assert_allclose(np.asarray(out[4, 1, n]), 6.0,
+                               rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(out[2, 1, 0]), -6.0,
                                rtol=0.0, atol=1e-6)
 
 
@@ -534,19 +572,31 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
     Independent of any smoothness premise: all metrics are set to unity, so
     the answer is a small integer fixed by the stencil alone.
 
-    FV3's SW-vertex stencil after its one-extra-flux removal
+    FV3's SE-vertex stencil after its one-extra-flux removal
     (sw_core.F90:2209 then :2215) is
 
-        divg_d(1,1) = -vf(1,1) + uf(0,1) - uf(1,1)
+        D_SE = -vf(n,1) + uf(n-1,1) - uf(n,1)
 
-    so the cross-panel value that MUST survive is ``uf(0,1)`` -- the west ``u``
-    ghost.  Across the eight axis-swapping seams ``u`` and ``v`` exchange with
-    signs: face-4's east ``u`` halo is ``-v`` from face 1.  Setting v=1 on face
-    1 alone therefore puts +1 at face 4's SE corner.
+    so the cross-panel value that MUST survive is the east ``u`` ghost
+    ``uf(n,1)``.
 
-    Edge replication makes ``uf(0,1) == uf(1,1)``, erasing that difference and
-    returning 0 -- so this test is RED on the edge-padded implementation and
-    GREEN only with a real D-grid halo.
+    INTEGER RE-DERIVED INDEPENDENTLY (2026-08-04) from the ghost semantics
+    certified value-level against ``analytic_swcore_state`` halos
+    (fv3_recon/transplant2_9311777.log), NOT from the helper's tables:
+    (4,E) <- (1,N) is a quarter-turn seam, so face-4's east u ghost is
+    ``-v_1`` sourced from v_1's outermost CELL row (v's j axis is
+    cell-staggered -- the 2026-08-04 node-axis inward-row rule does not
+    apply, and per-face-uniform v is row-blind anyway).  The sign was
+    certified already-correct pre-fix: log lines 190-191/242-243 show
+    ``VEC u F=4 edge=W/E max_abs=0.0`` against FV3 truth.  With v=1 on
+    face 1 only and u=0:
+
+        D_SE = -0 + 0 - (-1) = +1
+
+    -- the SAME integer as before the fix, for the stated reasons.  Edge
+    replication instead makes ``uf(n,1) == uf(n-1,1)`` and returns 0, so
+    this test is RED on an edge-padded implementation and GREEN only with
+    a real DGRID_NE halo.
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))

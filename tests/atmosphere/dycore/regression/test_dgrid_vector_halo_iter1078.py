@@ -1,4 +1,20 @@
-"""FV3_3D iter-1078: DGRID_NE vector halo with axis-swap component swap."""
+"""FV3_3D iter-1078: DGRID_NE vector halo with axis-swap component swap.
+
+2026-08-04 EXTENSION: the original constant-per-face tests were VALUE-BLIND
+to two defect classes the transplant probe caught against certified FV3
+truth (fv3_recon/transplant2_9311777.log):
+
+1. node-axis ghost strips sourced the neighbour's SEAM line (which this
+   face already stores) instead of the line one INWARD — invisible to a
+   constant field, where both lines hold the same value;
+2. the four half-turn seams (2,S),(2,N),(4,N),(5,S) copied covariant
+   components UNSIGNED — no old test probed those strips.
+
+``TestHalfTurnSeamSigns`` and ``TestNodeAxisSourceRowOneInward`` pin each
+class with exact integers; ``TestValueLevelVsAnalyticSwcoreHalos`` is the
+value-level gate against ``analytic_swcore_state``'s certified halos that
+would have caught BOTH.
+"""
 from __future__ import annotations
 
 import jax
@@ -16,6 +32,21 @@ def _build_distinct_per_face(n, nlev=1):
         u_d = u_d.at[f].set(float(f + 1))
         v_d = v_d.at[f].set(float(f + 1) * 10.0)
     return u_d, v_d
+
+
+def _build_linear_fields(n, nlev=1):
+    """u varies along its NODE axis j; v along its node axis i.
+
+    Exposes the normal-axis SOURCE-ROW choice at every seam: the shared
+    seam line and the one-inward line differ by exactly 1.0, so a
+    seam-line copy (the pre-2026-08-04 defect) is an exact integer error.
+    """
+    u = np.zeros((6, n, n + 1, nlev))
+    v = np.zeros((6, n + 1, n, nlev))
+    for f in range(6):
+        u[f] = 100.0 * (f + 1) + np.arange(n + 1)[None, :, None]
+        v[f] = 100.0 * (f + 1) + np.arange(n + 1)[:, None, None]
+    return jnp.asarray(u), jnp.asarray(v)
 
 
 class TestVectorHaloShapes:
@@ -122,3 +153,231 @@ class TestSameAxisStillFaithful:
             np.asarray(u_pad[0, n + 1, 1:n + 2, 0]),
             np.full(n + 1, 2.0),
         )
+
+
+class TestHalfTurnSeamSigns:
+    """Half-turn (same-axis REVERSED) seams negate BOTH covariant components.
+
+    CONNECTIVITY pairs: (2,S)<->(5,S) and (2,N)<->(4,N) — the neighbour's
+    frame is rotated 180 degrees, so its +i/+j basis is the negation of
+    this face's continued basis and covariant components cross with sign
+    -1.  Certified vs analytic_swcore_state halos: transplant log line 260
+    ``VEC v F=2 edge=S got=-2.5 want=+2.5`` (exact negation).  The pre-fix
+    helper copied these strips UNSIGNED, so every assertion here was RED
+    on it (ghosts read +value).  Constant per-face fields (u_f=f+1,
+    v_f=10(f+1)) make the expectations exact.
+    """
+
+    @pytest.fixture(scope="class")
+    def padded(self):
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+        n = 4
+        u_d, v_d = _build_distinct_per_face(n)
+        return n, pad_halo_dgrid_vector_4d(u_d, v_d)
+
+    @pytest.mark.parametrize("face,edge,nbr", [
+        (2, "S", 5), (2, "N", 4), (4, "N", 2), (5, "S", 2),
+    ])
+    def test_half_turn_ghosts_negate_both_components(self, padded, face, edge, nbr):
+        n, (u_pad, v_pad) = padded
+        u_want = -float(nbr + 1)          # -u_nbr
+        v_want = -10.0 * float(nbr + 1)   # -v_nbr
+        if edge == "S":
+            u_got = u_pad[face, 1:n + 1, 0, 0]
+            v_got = v_pad[face, 1:n + 2, 0, 0]
+        else:
+            u_got = u_pad[face, 1:n + 1, n + 2, 0]
+            v_got = v_pad[face, 1:n + 2, n + 1, 0]
+        np.testing.assert_array_equal(np.asarray(u_got), np.full(n, u_want))
+        np.testing.assert_array_equal(np.asarray(v_got), np.full(n + 1, v_want))
+
+
+class TestNodeAxisSourceRowOneInward:
+    """Node-axis ghosts source the neighbour row ONE INWARD of the seam.
+
+    On a component's node-staggered axis (u: j, v: i) the outermost line
+    IS the shared seam — both faces store that physical line — so the
+    depth-1 ghost must carry the line one inward.  The pre-fix helper
+    copied the seam line on EVERY seam including identity ones (transplant
+    log line 176: create face 0 u S got=+3.5355 (shared edge)
+    want=+3.2270 (one beyond); line 250 for v W; line 232 for the
+    axis-swap class).  ``_build_linear_fields`` makes the two candidate
+    rows differ by exactly 1.0, so each assertion is RED on a seam-line
+    copy.
+    """
+
+    @pytest.fixture(scope="class")
+    def padded(self):
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+        n = 4
+        u_d, v_d = _build_linear_fields(n)
+        return n, pad_halo_dgrid_vector_4d(u_d, v_d)
+
+    def test_same_axis_identity_u_south_row(self, padded):
+        """(0,S) <- (5,N), unreversed: ghost = u_5 at j=n-1, NOT j=n."""
+        n, (u_pad, _) = padded
+        np.testing.assert_array_equal(
+            np.asarray(u_pad[0, 1:n + 1, 0, 0]),
+            np.full(n, 600.0 + (n - 1)),
+        )
+
+    def test_same_axis_identity_v_west_row(self, padded):
+        """(0,W) <- (3,E): ghost = v_3 at i=n-1, NOT i=n."""
+        n, (_, v_pad) = padded
+        np.testing.assert_array_equal(
+            np.asarray(v_pad[0, 0, 1:n + 1, 0]),
+            np.full(n, 400.0 + (n - 1)),
+        )
+
+    def test_axis_swap_u_south_sources_inward_v_row(self, padded):
+        """(1,S) <- (5,E), sign_uv=-1: ghost = -v_5 at i=n-1, NOT i=n.
+
+        v_5 depends only on i, so the reversed transverse order is
+        value-invisible and the row choice is isolated.
+        """
+        n, (u_pad, _) = padded
+        np.testing.assert_array_equal(
+            np.asarray(u_pad[1, 1:n + 1, 0, 0]),
+            np.full(n, -(600.0 + (n - 1))),
+        )
+
+
+class TestValueLevelVsAnalyticSwcoreHalos:
+    """VALUE-LEVEL certification vs ``analytic_swcore_state`` halos.
+
+    Certifies value-level semantics (not just stencil wiring): transplants
+    each native tile's PHYSICAL covariant D-grid winds into the create
+    layout, runs ``pad_halo_dgrid_vector_4d``, and compares every depth-1
+    side ghost strip against the analytic state's OWN halos — which are
+    evaluated directly at the kinked-node geometry, i.e. exactly what the
+    FV3 mpp DGRID_NE exchange delivers (fv3_native_gridstruct.py
+    docstring).  This is the unit-level port of
+    fv3_recon/probe_transplant.py's TRANSPLANT_VEC section, which caught
+    both 2026-08-04 defect classes (node-axis seam-row copies + missing
+    half-turn signs, log fv3_recon/transplant2_9311777.log).
+
+    Adapter (INDEPENDENT of dgrid_halo's tables — non-circular):
+    - create face F = np.rot90(native tile PERM[F]+1, ROT[F])
+      (cubed_sphere.py GNOMONIC_ED_FACE_PERM/_ROT, pinned below);
+    - covariant components relabel with the frame: k=1 maps
+      (e1,e2)->(-e2,+e1) so u_c=-v_n, v_c=+u_n; composing gives
+      SU=(+,-,-,+), SV=(+,+,-,-) indexed by k, with the staggered
+      arrays swapping for odd k (probe_transplant_NOTES.md §8);
+    - alpha=pi/4 breaks the polar 4-fold symmetry (alpha=0 masks
+      wrong-neighbour defects on the polar tiles by symmetry).
+    """
+
+    N = 12
+    NG = 3
+    U0 = 5.0
+    ALPHA = np.pi / 4.0
+    SU = (1.0, -1.0, -1.0, 1.0)
+    SV = (1.0, 1.0, -1.0, -1.0)
+
+    @staticmethod
+    def _to_native_frame(uc, vc, k, n):
+        """Continuous create coords -> native coords, create=rot90(native,k)."""
+        if k == 0:
+            return uc, vc
+        if k == 1:
+            return vc, n - uc
+        if k == 2:
+            return n - uc, n - vc
+        return n - vc, uc
+
+    @staticmethod
+    def _classify(x):
+        """Integer -> ('node', idx); half-integer -> ('cell', idx).  Exact."""
+        x2 = 2.0 * x
+        r = round(x2)
+        assert x2 == float(r), x
+        return ("node", r // 2) if r % 2 == 0 else ("cell", (r - 1) // 2)
+
+    @pytest.fixture(scope="class")
+    def transplant(self):
+        from legoesm.grids.cubed_sphere import (
+            GNOMONIC_ED_FACE_PERM as PERM,
+            GNOMONIC_ED_FACE_ROT as ROT,
+        )
+        from legoesm.grids.fv3_native_gridstruct import (
+            analytic_swcore_state,
+            build_fv3_native_gridstruct,
+        )
+        n, ng = self.N, self.NG
+        # pinned literals (test_fv3_native_metrics_phase2.py:297-298)
+        assert tuple(PERM) == (0, 1, 3, 4, 2, 5)
+        assert tuple(ROT) == (0, 0, 3, 3, 1, 0)
+        gs = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
+        st = [analytic_swcore_state(g, u0=self.U0, alpha=self.ALPHA)
+              for g in gs]
+        u_c = np.empty((6, n, n + 1))
+        v_c = np.empty((6, n + 1, n))
+        for F in range(6):
+            g, k = PERM[F], ROT[F]
+            u_nat = st[g]["u"][ng:ng + n, ng:ng + n + 1]
+            v_nat = st[g]["v"][ng:ng + n + 1, ng:ng + n]
+            assert np.abs(u_nat).max() <= self.U0 * 1.001
+            assert np.abs(v_nat).max() <= self.U0 * 1.001
+            if k % 2 == 0:
+                u_c[F] = self.SU[k] * np.rot90(u_nat, k)
+                v_c[F] = self.SV[k] * np.rot90(v_nat, k)
+            else:
+                u_c[F] = self.SU[k] * np.rot90(v_nat, k)
+                v_c[F] = self.SV[k] * np.rot90(u_nat, k)
+        return st, u_c, v_c, tuple(PERM), tuple(ROT)
+
+    def test_all_side_ghost_strips_match_certified_halos(self, transplant):
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+        st, u_c, v_c, PERM, ROT = transplant
+        n, ng, u0 = self.N, self.NG, self.U0
+        u_p, v_p = pad_halo_dgrid_vector_4d(
+            jnp.asarray(u_c[..., None]), jnp.asarray(v_c[..., None]))
+        u_p = np.asarray(u_p)[..., 0]
+        v_p = np.asarray(v_p)[..., 0]
+
+        # interiors bit-untouched
+        np.testing.assert_array_equal(u_p[:, 1:-1, 1:-1], u_c)
+        np.testing.assert_array_equal(v_p[:, 1:-1, 1:-1], v_c)
+
+        def strips(field):
+            # depth-1 side ghost (ic, jc) lists in field-local staggered
+            # indices; diagonal corner cells excluded.
+            if field == "u":   # (n, n+1): ic cell, jc node
+                return {"W": [(-1, j) for j in range(n + 1)],
+                        "E": [(n, j) for j in range(n + 1)],
+                        "S": [(i, -1) for i in range(n)],
+                        "N": [(i, n + 1) for i in range(n)]}
+            return {"W": [(-1, j) for j in range(n)],
+                    "E": [(n + 1, j) for j in range(n)],
+                    "S": [(i, -1) for i in range(n + 1)],
+                    "N": [(i, n) for i in range(n + 1)]}
+
+        atol = 1e-9 * u0   # expected floor ~1e-13 (same numbers both sides)
+        n_cmp = 0
+        for field, padded in (("u", u_p), ("v", v_p)):
+            for F in range(6):
+                g, k = PERM[F], ROT[F]
+                sgn = self.SU[k] if field == "u" else self.SV[k]
+                for edge, cells in strips(field).items():
+                    got = []
+                    want = []
+                    for ic, jc in cells:
+                        uc_, vc_ = ((ic + 0.5, float(jc)) if field == "u"
+                                    else (float(ic), jc + 0.5))
+                        un, vn = self._to_native_frame(uc_, vc_, k, n)
+                        ti, ii = self._classify(un)
+                        tj, jj = self._classify(vn)
+                        assert ti != tj, (field, F, edge, ic, jc)
+                        arr = st[g]["u"] if ti == "cell" else st[g]["v"]
+                        w = arr[ng + ii, ng + jj]
+                        # BIG_NUMBER sentinel / physicality guard
+                        assert abs(w) <= u0 * 1.001, (field, F, edge, ic, jc, w)
+                        want.append(sgn * w)
+                        got.append(padded[F, ic + 1, jc + 1])
+                        n_cmp += 1
+                    np.testing.assert_allclose(
+                        np.asarray(got), np.asarray(want), rtol=0.0,
+                        atol=atol,
+                        err_msg=f"{field} F={F} T={g + 1} k={k} edge={edge}")
+        # 2*(n+1) + 2*n strips per field per face
+        assert n_cmp == 2 * 6 * (2 * (n + 1) + 2 * n)
