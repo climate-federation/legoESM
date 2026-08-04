@@ -2129,3 +2129,96 @@ The @192 ask starved 20+ h (48-node block vs a 55-healthy-node pool);
   512-rank CPU lat-lon; the remaining improvement paths are the
   documented structural follow-ups (SoL-class device collectives,
   #1100 partition-local mesh, ensemble orchestration).
+
+## AT-SCALE fabric constants (jobs 26677438/26677439) — the limit lines move
+
+The roofline constants were measured at 8 GPUs / 2 nodes; remeasured at
+the gap's own scale with the SAME chained-fori_loop microbench
+(dispatch-subtracted):
+
+| communicator | latency (us) | bandwidth (GB/s) |
+|---|---|---|
+| 8 GPU / 2 nodes | 26.3 | 23.5 |
+| 64 GPU / 16 nodes | 28.4 | **12.1** |
+| 128 GPU / 32 nodes | 29.7 | **12.1** |
+
+* **Topology-LATENCY term: refuted for the chained-ring pattern
+  measured** (+13 % at 16x the communicator; the fori_loop chain prices
+  dependency-chained ring cost). SCOPE (codex r23): the microbench
+  measures ppermute rings with dispatch subtracted — not production
+  pair patterns, packing, synchronization skew, or all-reduce; the
+  bound's one-latency AR term is a MODEL ASSUMPTION.
+* **Bandwidth HALVES past 2 nodes** (ring crossing switch tiers shares
+  links): 23.5 -> 12.1 GB/s. The bound's byte term doubles.
+* Recomputed distances with at-scale constants:
+  - LL2048@128 f32: comm = 41x29.7us + 18.54MB/12.1 = 2.750 ms;
+    t_bound 2.780; **measured/bound 2.01** (was 2.94). Pricing every
+    CP at the sweep's 512 KiB row (82.085 us; the census MEAN payload
+    is 441.6 KiB, so this slightly over-prices): 41x82.085us + one
+    29.7us AR-assumption = 3.395 ms -> **ratio 1.64** (post-overlap
+    5.077 -> **1.50**). (codex r23 corrected the first draft's 3.11.)
+  - LL2048@64 f32: comm 2.698 vs compute 2.837 — BALANCED regime;
+    bound 2.865, ratio 2.35 (compute-edge, unchanged).
+  - MPAS s9@np64: comm = 33x28.4us + 29.49MB/12.1 = 3.375; bound
+    3.403; **ratio 2.82** (was 4.47).
+* Honest reframe: with constants measured AT the deployment scale, the
+  panels sit ~1.8-2.8x above the serialized model, and the comm term is
+  now BYTE-dominated — bytes are physical (halo areas), so the
+  remaining levers are OVERLAP (hide comm under compute; the closed
+  ledger's null was the latency-dominated ocean nd4-16 regime, not
+  this one — A/B job 26677529 submitted at @64 with the XLA
+  latency-hiding scheduler + pipelined collectives) and exchange-COUNT
+  packing (skew amplification).
+
+## OVERLAP VERDICTS (jobs 26677602 / 26677668 / 26677669) — the first positive lever
+
+XLA latency-hiding scheduler + pipelined p2p (flag names verified
+against the installed stack after a guessed name aborted arm B of
+26677529; that job still banked clean controls 6.667/6.724):
+
+| lane | A | B (overlap) | A2 | effect |
+|---|---|---|---|---|
+| LL2048@64 | 6.615 | 6.069 | 6.635 | **-8.4 %** |
+| LL2048@128 | 5.547 | **5.077** | 5.527 | **-8.3 %** |
+| MPAS s9@64 | 9.710 | 9.720 | 9.680 | 0.0 % (null) |
+
+* Twice-reproduced ~8 % on the lat-lon lane at two scales with 0.3-0.4 %
+  control drift; BELOW the pre-registered 10 % bar (reported as such),
+  wired strictly OPT-IN (`LEGOESM_XLA_OVERLAP=1`) — never a shared
+  default: cube_tiled_step force-disables latency hiding for a known
+  sensitivity, MPAS is null, and appended flags would poison future
+  A/B control arms (codex r23). Parity suites green with flags on (CPU-virtual — the GPU-side
+  check is the A/B rows themselves). MPAS: honest null — the
+  edge-coloured hand schedule does not benefit.
+* New LL2048@128 best: **5.077 ms = 43.0 GC/s**; measured/at-scale-bound
+  = 5.077/2.780 = **1.83** (sweep-based bound 3.11 -> **1.63**).
+
+## MPAS #1100 wall NAMED + FIXED: replicate_pytree
+
+The s9 STEP program is clean (bufdump: 0.02 GB args, 4 per-shard
+params) — the s10 162 GB was `replicate_pytree(mesh)`: a replicated
+device_put of the 1.268 GB global-mesh pytree = 128 x 1.268 =
+162.3 GB (matches the failure to 0.1 %), the SAME jax
+whole-array-assert + replicated-logical wall as the ocean lane. Fixed
+via the shared assert-free put + exact-hash contract gate
+(PR #1457 pattern) in `parallel/mesh.py`; 2-proc multicontroller MPAS
+repro green (56.97 ms, s5), voronoi parity 5 passed. NOTE (codex r23):
+replicate_pytree is generic — the multi-process path can reach other
+lanes (cube CLI); a structure pre-gate + direct tests added same
+round. Falsification = s10@128 rerun (job 26677812, in queue): a PASS
+is the receipt for MPAS at 128 GPUs; 192/224 remain EXPECTED-unlocked
+pending their own runs.
+
+## Lat-lon packing follow-up (designed, not yet built)
+
+CP records (nd=8 census): the 41 CPs are SIX classes — 13x[1,1024,26],
+6x[1,1025,26], 6x[2,1028,26], 6x[1,1026,27], 6x[1,1024,27] array
+exchanges (31 one-row + 6 two-row) and 4 scalar f32[1] — codex r23
+corrected the first draft's two-class count. Grouping by shape alone
+does NOT prove packability: fields must be AVAILABLE at a common
+program point, so the design step is a stage-local liveness analysis
+across the RK stages (the `make_latlon_band_wall_multi_pad_body`
+machinery exists for the ocean wall lane; the atm dycore pads
+per-field). The ~6-group / ~4.0-4.4 ms projection is SPECULATIVE until
+that analysis is done. Dycore surgery — staged as the next engineering
+item.
