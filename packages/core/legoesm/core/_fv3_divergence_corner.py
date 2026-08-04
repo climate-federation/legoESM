@@ -229,22 +229,44 @@ def fv3_divergence_corner_2d(
                 )
             return pad_halo_dgrid_vector_4d(u_d, v_d)
 
-        u4 = u_fv3 if _is_4d else u_fv3[..., None]
-        v_orth4 = v_fv3 if _is_4d else v_fv3[..., None]
-
-        u_orth_full, _ = _dgrid_ne_halo(u4, v_orth4)
-        u_orth_i_pad = u_orth_full[:, :, 1:-1, :]
-        u_at_v = 0.25 * (
-            u_orth_i_pad[:, :-1, :-1, :]
-            + u_orth_i_pad[:, 1:, :-1, :]
-            + u_orth_i_pad[:, :-1, 1:, :]
-            + u_orth_i_pad[:, 1:, 1:, :]
-        )
+        # COVARIANT D-point lift (2026-08-04, replaces the mixed-convention
+        # 4-corner u_at_v construct).  Depth-binned probe measured the old
+        # lift O(1)-wrong exactly on the seam line: it pushed the
+        # ORTHONORMAL V.e_i through the COVARIANT-convention DGRID
+        # exchange (u_at_v d0 = 0.75, x cosa_seam 0.49 = the 0.36 v_cov4
+        # seam error), while its interior converged O(dx^2).  The faithful
+        # lift needs NO halo at all: both corner endpoints of every edge
+        # are on-face.  corners -> geographic (exact inverse of
+        # rotate_winds_geo_to_grid) -> 2-point average along the edge ->
+        # project onto the EXACT stagger bases (angle_edge_x/y), with
+        # covariant v = cosa*(V.e_i) + sina*(V.e_i_perp) at the v points.
         sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
-        v_cov4 = (
-            cdgrid.cosa_u[..., None] * u_at_v
-            + sina_u[..., None] * v_orth4
-        )
+
+        def _bcast(m):
+            return m[..., None] if _is_4d else m
+
+        ca_c = _bcast(jnp.cos(cdgrid.angle_corner))
+        sa_c = _bcast(jnp.sin(cdgrid.angle_corner))
+        u_e_c = ca_c * u_corner - sa_c * v_corner
+        v_n_c = sa_c * u_corner + ca_c * v_corner
+        # u D-points: x-edge midpoints (6, n, n+1) — average along i.
+        u_e_ex = 0.5 * (u_e_c[:, :-1, :] + u_e_c[:, 1:, :])
+        v_n_ex = 0.5 * (v_n_c[:, :-1, :] + v_n_c[:, 1:, :])
+        ca_ex = _bcast(jnp.cos(cdgrid.angle_edge_x))
+        sa_ex = _bcast(jnp.sin(cdgrid.angle_edge_x))
+        u_cov = ca_ex * u_e_ex + sa_ex * v_n_ex
+        # v D-points: y-edge midpoints (6, n+1, n) — average along j.
+        u_e_ey = 0.5 * (u_e_c[:, :, :-1] + u_e_c[:, :, 1:])
+        v_n_ey = 0.5 * (v_n_c[:, :, :-1] + v_n_c[:, :, 1:])
+        ca_ey = _bcast(jnp.cos(cdgrid.angle_edge_y))
+        sa_ey = _bcast(jnp.sin(cdgrid.angle_edge_y))
+        vei_ey = ca_ey * u_e_ey + sa_ey * v_n_ey
+        veip_ey = -sa_ey * u_e_ey + ca_ey * v_n_ey
+        v_cov = (_bcast(cdgrid.cosa_u) * vei_ey
+                 + _bcast(sina_u) * veip_ey)
+
+        u4 = u_cov if _is_4d else u_cov[..., None]
+        v_cov4 = v_cov if _is_4d else v_cov[..., None]
 
         # real_metric_ghosts: Fortran's ghost-ring ua/va (sw_core.F90:3513)
         # are evaluated with REAL gridstruct halo cosa_s/rsin2, not
