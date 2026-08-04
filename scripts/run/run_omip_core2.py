@@ -3163,7 +3163,7 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
 
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
-                   io_proc: bool = True, ice_state=None):
+                   io_proc: bool = True, ice_state=None, grid=None):
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -3194,6 +3194,37 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
+    # The TRACER-ADVECTING mass flux, when the run captured it
+    # (``store_mass_flux``/``--gateway-transports``).  #1442: ``state.u`` is the
+    # velocity BEFORE the barotropic transport correction
+    # ``delta_U = (Hu_avg - Hu_3d)/H_u_old`` -- that correction reaches the
+    # tracer flux and never reaches ``state.u`` -- so an offline diagnostic that
+    # rebuilds ``h * u`` from a snapshot is missing a depth-uniform mode.
+    # MEASURED on eORCA1 (nemolev_trp_icemelt70_d90): the reconstructed net
+    # meridional transport differed from the convergence implied by the measured
+    # sea-level change by 0.35-1.28 Sv at every latitude -- ~100% of the
+    # apparent signal at 66N.  #1440 made the corrected flux available IN STATE;
+    # persisting it here is what lets an offline reader use it.
+    # EXTRA keys only: old readers ignore them and old snapshots stay loadable.
+    _stored_flux = False
+    for _name in ("mass_flux_u", "mass_flux_v", "mass_flux_w"):
+        _f = getattr(state, _name, None)
+        if _f is not None and getattr(_f, "data", None) is not None:
+            save_kw[_name] = np.asarray(_f.data)
+            _stored_flux = True
+    # The flux is THICKNESS-weighted velocity [m^2/s], so a reader still needs
+    # the face widths to reach m^3/s (codex: the arrays alone are not
+    # self-contained). Those live on the runtime grid, which an offline reader
+    # does not have, so save them alongside — only when a flux was stored, and
+    # only if the grid exposes them (a regular lat-lon grid may not).
+    if _stored_flux and grid is not None:
+        for _m in ("dy_u", "dx_v", "dx_u", "dy_v"):
+            _val = getattr(grid, _m, None)
+            if _val is not None:
+                try:
+                    save_kw[_m] = np.asarray(_val)
+                except Exception:       # pragma: no cover - exotic grid proxy
+                    pass
     # Free surface: needed to RESTART a run from this snapshot (--restart-from)
     # without a barotropic-adjustment shock; the scorer ignores it.
     eta = getattr(state, "eta", None)
@@ -6008,7 +6039,8 @@ def main() -> int:
                 if not d["finite"]:
                     print("[ABORT] non-finite state", flush=True)
                     _save_snapshot(out_dir, f"blowup_step{step}",
-                                   state, lat2d, lon2d, io_proc=_is_io_proc())
+                                   state, lat2d, lon2d, grid=grid,
+                                   io_proc=_is_io_proc())
                     _close_csv()
                     return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
@@ -6019,7 +6051,7 @@ def main() -> int:
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
                 _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
-                               z_coord=z_coord, io_proc=_is_io_proc())
+                               z_coord=z_coord, grid=grid, io_proc=_is_io_proc())
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
         _io = _is_io_proc()
@@ -6717,7 +6749,7 @@ def main() -> int:
                 # global layout (abort boundary — one gather, then exit).
                 state = _ensure_global_state(state)
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
-                               io_proc=_is_io_proc(), ice_state=ice_state)
+                               grid=grid, io_proc=_is_io_proc(), ice_state=ice_state)
                 _close_csv()
                 # Dump what the accumulator reached before the abort: the last
                 # cadence row alone would understate the run, and the run-end
@@ -6744,7 +6776,7 @@ def main() -> int:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
-                           z_coord=z_coord, io_proc=_is_io_proc(),
+                           z_coord=z_coord, grid=grid, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] year {yr} saved", flush=True)
 
