@@ -29,6 +29,7 @@ SECT=$WT/packages/ocean/legoesm/ocean/diagnostics_sections.py
 DRIVER=$WT/scripts/run/run_omip_core2.py
 DRV_T=tests/unit/test_run_omip_core2_gateway_transports.py
 SECT_T=tests/ocean/unit/test_diagnostics_sections.py
+MFS_T=tests/ocean/unit/test_mass_flux_store.py
 
 # swap <file> <old> <new> — exact single-occurrence replacement, asserted.
 # A STALE ANCHOR ABORTS THE JOB: a silent no-op mutation yields a GREEN test
@@ -63,7 +64,7 @@ NRUN=0
 # Guards against a SHORT run being read as a clean one.  A stale anchor aborts
 # (below), and a deleted mutation block would otherwise just shrink the suite
 # silently; both are caught by comparing the count at the verdict.
-EXPECTED_MUTATIONS=25
+EXPECTED_MUTATIONS=33
 
 run() {      # run <label> <pytest args...>
   local label=$1; shift
@@ -107,7 +108,8 @@ run M3 "$SECT_T::test_cumulative_row_columns_follow_the_accumulator_name_order"
 restore packages/ocean/legoesm/ocean/diagnostics_sections.py
 
 echo "#### M4: drop the names/arrays arity check ####"
-swap "$SECT" '    if len(vol) != len(acc.names) or len(tr) != len(acc.names):' \
+swap "$SECT" '    if len(vol) != len(acc.names) or len(tr) != len(acc.names) \
+            or len(se) != len(acc.names):' \
              '    if False:   # MUTATION: arity unchecked'
 run M4 "$SECT_T::test_cumulative_row_rejects_an_accumulator_whose_arrays_do_not_match_names"
 restore packages/ocean/legoesm/ocean/diagnostics_sections.py
@@ -199,9 +201,11 @@ run M14 "$DRV_T::test_differencing_two_dumps_equals_a_fresh_accumulator_over_tha
 restore "$DRV_T"
 
 echo "#### M15: simulate the dump WRITING BACK to the state (1e-12 on S) ####"
-swap "$WT/$DRV_T" '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+swap "$WT/$DRV_T" '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored",
+                           require_salt=True)
         R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)' \
-                  '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+                  '        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored",
+                           require_salt=True)
         s_on = s_on._replace(   # MUTATION: the diagnostic perturbs the state
             S=s_on.S.replace(data=s_on.S.data + jnp.asarray(1e-12)))
         R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)'
@@ -300,16 +304,99 @@ swap "$DRIVER" '    _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)' \
 run M26 "$DRV_T::test_driver_writes_a_run_end_row_and_closes_after_the_loop"
 restore scripts/run/run_omip_core2.py
 
+# ============================== store_salt_flux exact channel (M27 - M32)
+MODEL=$WT/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+SECT2=$WT/packages/ocean/legoesm/ocean/diagnostics_sections.py
+MFS_T=tests/ocean/unit/test_mass_flux_store.py
+
+echo "#### M27: model advects with UPWIND faces (capture==upwind) ####"
+echo "####      the discriminator must detect a capture indistinguishable"
+echo "####      from the donor-cell estimate ####"
+swap "$MODEL" '            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)' \
+               '            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = upwind_to_u_points(tr, mass_flux_u)              # MUTATION
+            tr_v = upwind_to_v_points(tr, mass_flux_v, grid=grid)   # MUTATION'
+run M27 "$MFS_T::test_sharp_front_discriminates_capture_from_upwind"
+restore packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+
+echo "#### M28: drop the orientation sign from the exact-salt reduction ####"
+swap "$SECT2" '    wu = (u_sel_stack.astype(sfu2.dtype) * u_sign[None, :, :]
+          * dy_u.astype(sfu2.dtype)[None, :, :])
+    wv = (v_sel_stack.astype(sfv2.dtype) * v_sign[None, :, :]
+          * dx_v.astype(sfv2.dtype)[None, :, :])' \
+               '    wu = (u_sel_stack.astype(sfu2.dtype)
+          * dy_u.astype(sfu2.dtype)[None, :, :])   # MUTATION: no sign
+    wv = (v_sel_stack.astype(sfv2.dtype)
+          * dx_v.astype(sfv2.dtype)[None, :, :])   # MUTATION: no sign'
+run M28 "$DRV_T::test_gateway_exact_salt_orientation_on_a_synthetic_pair"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M29: transports.txt writer drops the exact-salt lines ####"
+swap "$DRIVER" '            _se_mean = acc.salt_exact_mean
+            if _se_mean is not None:' \
+               '            _se_mean = acc.salt_exact_mean
+            if False:   # MUTATION: exact lines never written'
+run M29 "$DRV_T::test_transports_txt_appends_exact_salt_lines_after_the_legacy_block"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M30: seed_salt_flux_carry becomes a no-op ####"
+swap "$MODEL" '    if not store_salt_flux:
+        return state
+    _shapes = {
+        "salt_flux_u_int": tuple(jnp.shape(state.u.data))[:-1],' \
+               '    if True:                       # MUTATION: never seeds
+        return state
+    _shapes = {
+        "salt_flux_u_int": tuple(jnp.shape(state.u.data))[:-1],'
+run M30 "$MFS_T::test_salt_carry_survives_integrate_scan"
+restore packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+
+echo "#### M31: CSV exact column silently carries the UPWIND sums ####"
+swap "$SECT2" '        cells.append(repr(se[i]))' \
+             '        cells.append(repr(tr[i]))   # MUTATION: upwind copied'
+run M31 "$SECT_T::test_cumulative_row_round_trips_exactly"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M32: driver drops require_salt from the per-step call ####"
+swap "$DRIVER" '                    require_salt=True)' \
+               '                    )  # MUTATION: exact channel not required'
+run M32 "$DRV_T::test_driver_gateway_call_passes_require_salt"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M33: report an INCOMPLETE exact channel as complete (writer) ####"
+swap "$SECT2" '        if self.n_salt != self.n or self.n == 0:
+            return None' \
+               '        if False:   # MUTATION: incompleteness ignored
+            return None'
+run M33 "$DRV_T::test_incomplete_exact_channel_omits_the_transports_txt_lines"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M34: CSV writes numeric cells for an incomplete channel ####"
+swap "$SECT2" '    _complete = acc.n_salt == acc.n' \
+               '    _complete = True   # MUTATION: incompleteness ignored'
+run M34 "$SECT_T::test_incomplete_exact_channel_writes_nan_not_zero"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
 # ==================================================================== control
 echo "=== CONTROL: unmutated worktree must be GREEN ==="
 DIRTY="$(git -C "$WT" status --porcelain --untracked-files=no | tr '\n' ' ')"
 echo "tree dirty? [$DIRTY]"
+# TWO invocations (three suites in one interpreter SIGABRT, job 9311668);
+# the control covers every file the mutations target, incl. the salt suite.
 $PY -m pytest "$DRV_T" "$SECT_T" -q --no-header -p no:cacheprovider \
-  --basetemp="$BT/control" 2>&1 \
+  --basetemp="$BT/control_a" 2>&1 \
   | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
-  | tail -10
-CONTROL_RC=${PIPESTATUS[0]}
-echo "=== EXIT(control) $CONTROL_RC   (expect ZERO) ==="
+  | tail -6
+CONTROL_RC_A=${PIPESTATUS[0]}
+$PY -m pytest "$MFS_T" -q --no-header -p no:cacheprovider \
+  --basetemp="$BT/control_b" 2>&1 \
+  | grep -vE "jax_plugins|xla_bridge|cuda|versions_helpers|_check_cuda|plugin_module" \
+  | tail -6
+CONTROL_RC_B=${PIPESTATUS[0]}
+CONTROL_RC=$(( CONTROL_RC_A > CONTROL_RC_B ? CONTROL_RC_A : CONTROL_RC_B ))
+echo "=== EXIT(control) $CONTROL_RC (a=$CONTROL_RC_A b=$CONTROL_RC_B)   (expect ZERO) ==="
 
 # ===================================================== the verdict, enforced
 FAIL=0

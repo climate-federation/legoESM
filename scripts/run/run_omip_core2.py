@@ -611,7 +611,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
-                  store_mass_flux=False):
+                  store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -860,6 +860,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # instead of reconstructing h*u from the post-barotropic velocity.
         # Pure diagnostic -- the trajectory is unchanged.
         _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue: keep the column-integrated advective SALT flux so the
+        # gateway accumulator integrates the model's own limited fluxes
+        # (exact channel) alongside its upwind estimate.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -998,7 +1003,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
                   prescribed_flow=None, no_gm_redi=False,
-                  store_mass_flux=False):
+                  store_mass_flux=False, store_salt_flux=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -1087,6 +1092,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         # the tripole left every supported latlon run silently reconstructing
         # (codex RED 6).
         _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue, threaded in BOTH builders for the same RED-6 reason.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -2992,6 +3000,14 @@ def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
             for nm, (vol_sv, salt) in rows.items():
                 fh.write(f"gateway_{nm}_vol_Sv {vol_sv:.6f}\n")
                 fh.write(f"gateway_{nm}_salt_psu_m3s {salt:.6e}\n")
+            # EXACT advective salt transport (store_salt_flux), APPENDED
+            # after the legacy block so every pre-existing line stays
+            # byte-identical; absent (legacy accumulator) => no new lines.
+            _se_mean = acc.salt_exact_mean
+            if _se_mean is not None:
+                for i, nm in enumerate(acc.names):
+                    fh.write(f"gateway_{nm}_salt_exact_psu_m3s "
+                             f"{float(_se_mean[i]):.6e}\n")
     except Exception as e:  # a diagnostic must never crash the run
         print(f"[gateway] transport diag skipped: {type(e).__name__}: {e}")
 
@@ -4309,7 +4325,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "through the Arctic gateways (Bering/Pacific, "
                         "Davis/CAA, Atlantic/Nordic, Siberian) on the "
                         "lat>=66N region boundary and append them to "
-                        "transports.txt. ALSO dumps the accumulator's "
+                        "transports.txt (upwind AND, via store_salt_flux, "
+                        "the model's EXACT advective salt transport; their "
+                        "difference is the face-scheme gap plus a one-step "
+                        "salinity time-level offset). ALSO dumps the "
+                        "accumulator's "
                         "CUMULATIVE sums + step count to "
                         f"{GATEWAY_CUMULATIVE_CSV} at the "
                         "--snapshot-every-days cadence (plus one row at run "
@@ -4826,6 +4846,8 @@ def main() -> int:
             gm_kappa_min=args.gm_kappa_min,
             store_mass_flux=bool(getattr(args, "gateway_transports",
                                          False)),
+            store_salt_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -4963,6 +4985,8 @@ def main() -> int:
             # reconstruction the flag exists to replace (codex RED 6).
             store_mass_flux=bool(getattr(args, "gateway_transports",
                                          False)),
+            store_salt_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "latlon"
 
@@ -5029,6 +5053,20 @@ def main() -> int:
                     "advected with, and the YAML would turn it back off AFTER "
                     "the builder, silently downgrading the diagnostic to the "
                     "h*u reconstruction. Drop one of the two.")
+            # Identical conflict class for the EXACT-salt capture: the
+            # builders set store_salt_flux from --gateway-transports and the
+            # per-step gateway call passes require_salt=True, so a YAML
+            # switch-off would turn the promised exact channel into a raise
+            # at step 1 -- fail at setup instead, with the reason.
+            if ("store_salt_flux" in _ovr
+                    and getattr(args, "gateway_transports", False)
+                    and not _ovr["store_salt_flux"]):
+                raise ValueError(
+                    "--gateway-transports conflicts with --config "
+                    "ocean.store_salt_flux=false: the flag turns the "
+                    "exact-salt capture ON (require_salt=True in the gateway "
+                    "accumulator), and the YAML would turn it back off AFTER "
+                    "the builder. Drop one of the two.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config.replace_flat(**_ovr),
                 # Preserve the zdfiwm maps through the YAML rebuild (codex
@@ -6533,7 +6571,11 @@ def main() -> int:
                     # store_mass_flux ON for this flag, so a state without the
                     # capture means some config path disabled it -- raise
                     # rather than silently integrate h*u (#1442, codex r6 RED3).
-                    source="stored")
+                    source="stored",
+                    # Same promise for the EXACT salt channel: the builders
+                    # set store_salt_flux with this flag, so a state without
+                    # the pair means a config path disabled the capture.
+                    require_salt=True)
             except Exception as _gw_e:
                 print(f"[gateway] DISABLED at step {step} after "
                       f"{type(_gw_e).__name__}: {_gw_e}")

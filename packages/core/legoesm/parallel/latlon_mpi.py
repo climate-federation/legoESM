@@ -2171,6 +2171,12 @@ def scatter_state_latlon_cgrid_ocean(state, layout: LatLonBandLayout):
             getattr(state, "mass_flux_v", None), s, e + 1),
         mass_flux_w=_maybe_field_slice_lat(
             getattr(state, "mass_flux_w", None), s, e),
+        # store_salt_flux: 2-D column-integrated pair; u-face lat-sliced like
+        # ``u``, v-face staggered like ``v`` (n_lat+1 rows -> s, e+1).
+        salt_flux_u_int=_maybe_field_slice_lat(
+            getattr(state, "salt_flux_u_int", None), s, e),
+        salt_flux_v_int=_maybe_field_slice_lat(
+            getattr(state, "salt_flux_v_int", None), s, e + 1),
     )
 
 
@@ -2224,6 +2230,10 @@ def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
                                 layout, is_v_face=True)
     mfw_g = _gather_field_ocean(getattr(local_state, "mass_flux_w", None),
                                 layout)
+    sfu_g = _gather_field_ocean(getattr(local_state, "salt_flux_u_int", None),
+                                layout)
+    sfv_g = _gather_field_ocean(getattr(local_state, "salt_flux_v_int", None),
+                                layout, is_v_face=True)
     if layout.rank == 0:
         return local_state._replace(
             u=u_g, v=v_g, T=T_g, S=S_g, eta=eta_g, H_bathy=H_g,
@@ -2231,6 +2241,7 @@ def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
             T_som=tsom_g, S_som=ssom_g,
             T_flux_div_prev=tfd_g, S_flux_div_prev=sfd_g,
             mass_flux_u=mfu_g, mass_flux_v=mfv_g, mass_flux_w=mfw_g,
+            salt_flux_u_int=sfu_g, salt_flux_v_int=sfv_g,
         )
     return None
 

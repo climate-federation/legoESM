@@ -1365,10 +1365,15 @@ def test_store_mass_flux_is_the_last_config_field():
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     fields = LatLonCGridOceanConfig._fields
-    assert fields[-1] == "store_mass_flux", (
-        f"store_mass_flux is at index {fields.index('store_mass_flux')} of "
-        f"{len(fields)}; a new field must be APPENDED, never inserted -- "
-        f"the field after it is {fields[fields.index('store_mass_flux') + 1]!r}")
+    # The contract is APPEND-ONLY, so the pinned tail GROWS as fields are
+    # appended; each addition extends this tuple (a deliberate, visible
+    # edit).  store_salt_flux was appended after store_mass_flux (the
+    # exact-salt gateway instrument), preserving every earlier position.
+    tail = ("store_mass_flux", "store_salt_flux")
+    assert fields[-len(tail):] == tail, (
+        f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
+        "must be APPENDED, never inserted -- positional callers break "
+        "otherwise")
 
 
 def test_store_mass_flux_survives_flat_construction_and_replace():
@@ -1641,6 +1646,10 @@ def test_scan_drivers_seed_the_carry_before_their_lax_scan():
         ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py",
          "state = seed_mass_flux_carry(state, True)",
          "lax.scan(_body, (state, step0), idx_t_block)", 1),
+        # the SALT carry has the same scan boundary (store_salt_flux)
+        ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py",
+         "state = seed_salt_flux_carry(state, True)",
+         "lax.scan(_body, (state, step0), idx_t_block)", 1),
     ]
     for rel, seed_tok, scan_tok, n_expected in checks:
         lines = (root / rel).read_text().splitlines()
@@ -1658,8 +1667,12 @@ def test_scan_drivers_seed_the_carry_before_their_lax_scan():
                 f"{rel}:{s + 1}: the seed call's result is not bound to "
                 f"`state`: {lines[s].strip()!r}")
             rebinds = [k for k in range(s + 1, c)
-                       if lines[k].strip().startswith("state = ")
-                       or lines[k].strip().startswith("state, ")]
+                       if (lines[k].strip().startswith("state = ")
+                           or lines[k].strip().startswith("state, "))
+                       # the SALT-carry seed is the other half of the same
+                       # seeding boundary, not a discard -- it re-binds state
+                       # to the seeded value by design (store_salt_flux).
+                       and "seed_salt_flux_carry(state" not in lines[k]]
             assert not rebinds, (
                 f"{rel}: `state` is rebound at line(s) "
                 f"{[k + 1 for k in rebinds]} between the seed ({s + 1}) and "
@@ -1692,7 +1705,7 @@ def test_generic_ocean_archive_neither_writes_nor_restores_the_diagnostics(
         DIAGNOSTIC_SLOTS, load_restart, save_restart,
     )
 
-    assert set(DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS)
+    assert set(DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS)
 
     _g, _z, model, state = _setup(store=True)
     out = model.step(_perturbed(state), _DT)
@@ -1761,7 +1774,7 @@ def test_run_omip_restart_does_not_persist_the_diagnostic_flux():
     """
     from scripts.run.run_omip import _RESTART_DIAGNOSTIC_SLOTS
 
-    assert set(_RESTART_DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS)
+    assert set(_RESTART_DIAGNOSTIC_SLOTS) == set(_NEW_SLOTS) | set(_SALT_SLOTS)
 
 
 def test_restart_round_trip_drops_nothing_it_wrote(tmp_path):
@@ -1805,3 +1818,320 @@ def test_restart_round_trip_drops_nothing_it_wrote(tmp_path):
                                    rtol=0, atol=0,
                                    err_msg=f"{name} did not survive the "
                                            "restart round trip")
+
+
+# ===========================================================================
+# store_salt_flux: the EXACT advective salt flux (gateway exact-salt
+# instrument).  Design notes that the tests below pin:
+#   * the capture is the column-integrated pair behind the S update's
+#     horizontal divergence -- so with UNIFORM salinity it must equal
+#     S0 * (vertical sum of the stored mass flux) EXACTLY (the Y11-class
+#     identity: on a uniform field every face scheme reduces to S0*mass);
+#   * on a LIMITER-ACTIVE front it must DIFFER from the donor-cell upwind
+#     estimate (the discriminator -- with uniform S the two are identical,
+#     so only a front can tell the capture from an upwind re-derivation);
+#   * refuse-not-ignore config guards (AB2/RK3/FCT/SOM);
+#   * seeded scan carry, non-perturbation, and the 2-D shape contract.
+# ===========================================================================
+
+_SALT_SLOTS = ("salt_flux_u_int", "salt_flux_v_int")
+
+
+def _setup_salt(store: bool, *, adv: str = "superbee", tti: str = "euler"):
+    """Tiny lat-lon model with store_salt_flux (+ store_mass_flux for the
+    identity test's reference pair); superbee to match the production run."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from scripts.run import run_omip
+
+    grid, z_coord, config, model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    config = config._replace(tracer_advection=adv,
+                             tracer_time_integrator=tti,
+                             store_mass_flux=True,
+                             store_salt_flux=store)
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, 1000.0)
+    return grid, z_coord, model, state
+
+
+def _with_front(state, s_lo=30.0, s_hi=36.0):
+    """A sharp zonal salinity front + the standard flow perturbation.
+
+    The front is the DISCRIMINATOR's fuel: superbee's limited face value on a
+    step differs from the donor-cell value wherever the limiter is active,
+    while on smooth/uniform S the schemes coincide and the test would pass
+    for an upwind-storing capture too (the Y11 vacuity).
+    """
+    st = _perturbed(state)
+    S = np.asarray(st.S.data)
+    n_lon = S.shape[1]
+    # step front + strong smooth sinusoid: at a PURE step the TVD limiter
+    # ratio is 0 at the jump face and the limited value IS the upwind value
+    # (the first version of the discriminator measured rel ~1e-4 for exactly
+    # that reason); the sinusoid puts the limiter in its centered-ish regime
+    # (ratio ~1) on most faces, where limited != upwind by O(dS/2).
+    lon_wave = 2.5 * np.sin(2.0 * np.pi * np.arange(n_lon) / n_lon)
+    S_front = (np.where((np.arange(n_lon) < n_lon // 2)[None, :, None],
+                        s_lo, s_hi)
+               + lon_wave[None, :, None]) * np.ones_like(S)
+    return st._replace(S=st.S.replace(
+        data=jnp.asarray(S_front, dtype=st.S.data.dtype)))
+
+
+def test_store_salt_flux_populates_2d_pair():
+    _g, _z, model, state = _setup_salt(store=True)
+    out = model.step(_with_front(state), _DT)
+    for nm in _SALT_SLOTS:
+        f = getattr(out, nm)
+        assert f is not None, f"{nm} was not stored"
+        a = np.asarray(f.data)
+        assert a.ndim == 2, f"{nm} must be the COLUMN-INTEGRATED 2-D pair"
+        assert np.all(np.isfinite(a)), f"{nm} has non-finite entries"
+        assert np.any(a != 0.0), f"{nm} is identically zero -- vacuous"
+    assert np.asarray(out.salt_flux_u_int.data).shape == \
+        np.asarray(out.u.data).shape[:2]
+    assert np.asarray(out.salt_flux_v_int.data).shape == \
+        np.asarray(out.v.data).shape[:2]
+
+
+def test_store_salt_flux_off_leaves_slots_none():
+    _g, _z, model, state = _setup_salt(store=False)
+    out = model.step(_with_front(state), _DT)
+    for nm in _SALT_SLOTS:
+        assert getattr(out, nm) is None, f"{nm} populated with the flag off"
+
+
+def test_salt_capture_does_not_perturb_the_trajectory():
+    """OFF vs ON: bit-identical digests over the pre-existing leaves."""
+    _g0, _z0, m_off, s0 = _setup_salt(store=False)
+    _g1, _z1, m_on, s1 = _setup_salt(store=True)
+    p0, p1 = _with_front(s0), _with_front(s1)
+
+    def _dig(state):
+        # blank BOTH diagnostic families: the mass triple is on in both arms
+        # (identical), the salt pair only in the ON arm -- the digest must
+        # compare the TRAJECTORY, not the presence of the new slots.
+        import hashlib
+        h = hashlib.sha256()
+        for name in state._fields:
+            if name in _NEW_SLOTS or name in _SALT_SLOTS:
+                continue
+            leaf = getattr(state, name)
+            data = getattr(leaf, "data", None)
+            if data is None:
+                h.update(f"{name}:None".encode())
+                continue
+            a = np.asarray(data)
+            h.update(f"{name}:{a.shape}:{a.dtype}".encode())
+            h.update(np.ascontiguousarray(a, dtype=np.float64).tobytes())
+        return h.hexdigest()
+
+    assert _dig(p0) == _dig(p1), "the two inputs already differ"
+    d_off, d_on = _dig(m_off.step(p0, _DT)), _dig(m_on.step(p1, _DT))
+    assert d_off == d_on, (
+        f"store_salt_flux perturbed the trajectory: {d_off} != {d_on}")
+
+
+def test_uniform_salinity_identity_exact_equals_s0_times_mass_flux():
+    """Y11 identity: uniform S => captured pair == S0 * sum_k(mass flux).
+
+    This pins units, orientation, staggering and the vertical sum in one
+    equality -- and its own non-degeneracy (the mass flux is nonzero).
+    """
+    _g, _z, model, state = _setup_salt(store=True)
+    S0 = 34.0
+    st = _perturbed(state)
+    st = st._replace(S=st.S.replace(
+        data=jnp.full_like(st.S.data, S0)))
+    out = model.step(st, _DT)
+    mf_u2 = np.asarray(out.mass_flux_u.data).sum(axis=-1)
+    mf_v2 = np.asarray(out.mass_flux_v.data).sum(axis=-1)
+    assert np.any(mf_u2 != 0.0) and np.any(mf_v2 != 0.0), (
+        "zero mass flux -- the identity would be 0 == 0 (vacuous)")
+    # NOT exact to 0 ULP: the advected S inside the step is S_mid (post-
+    # physics), which the minimal preset leaves EQUAL to S0 except where
+    # surface/vertical physics touched it; tolerance covers the cast chain.
+    # STORAGE precision is f32 on this path (the step's closing cast), so
+    # the identity holds to f32 round-off of a 4-level sum, not 1e-9.
+    _rtol = 1e-9 if np.asarray(out.salt_flux_u_int.data).dtype == np.float64 \
+        else 5e-5
+    np.testing.assert_allclose(
+        np.asarray(out.salt_flux_u_int.data), S0 * mf_u2, rtol=_rtol,
+        atol=_rtol * float(np.max(np.abs(S0 * mf_u2))),
+        err_msg="u-face captured salt flux != S0 * column mass flux")
+    np.testing.assert_allclose(
+        np.asarray(out.salt_flux_v_int.data), S0 * mf_v2, rtol=_rtol,
+        atol=_rtol * float(np.max(np.abs(S0 * mf_v2))),
+        err_msg="v-face captured salt flux != S0 * column mass flux")
+
+
+def test_sharp_front_discriminates_capture_from_upwind():
+    """THE DISCRIMINATOR: on a limiter-active front, the captured (superbee)
+    salt flux must DIFFER from the donor-cell upwind estimate built from the
+    same stored mass flux -- exactly the difference the gateway instrument
+    exists to measure.  With uniform S the two coincide (previous test), so
+    THIS test is what a capture that stored the upwind product would fail
+    (proven by mutation: swap the tvd face value for upwind -> red).
+    """
+    from legoesm.ocean.diagnostics_sections import upwind_face_values
+
+    _g, _z, model, state = _setup_salt(store=True)
+    st = _with_front(state)
+    S_pre = np.asarray(st.S.data).copy()
+    out = model.step(st, _DT)
+    mfu = jnp.asarray(out.mass_flux_u.data)
+    mfv = jnp.asarray(out.mass_flux_v.data)
+    tr_u, tr_v = upwind_face_values(jnp.asarray(S_pre), mfu, mfv, model.grid)
+    up_u2 = np.asarray(mfu * tr_u).sum(axis=-1)
+    up_v2 = np.asarray(mfv * tr_v).sum(axis=-1)
+    cap_u2 = np.asarray(out.salt_flux_u_int.data)
+    cap_v2 = np.asarray(out.salt_flux_v_int.data)
+    # non-degeneracy: real transport on both estimates
+    assert np.max(np.abs(up_u2)) > 0.0 and np.max(np.abs(cap_u2)) > 0.0
+    denom = max(np.max(np.abs(up_u2)), np.max(np.abs(up_v2)))
+    rel = max(np.max(np.abs(cap_u2 - up_u2)),
+              np.max(np.abs(cap_v2 - up_v2))) / denom
+    assert rel > 1e-3, (
+        f"captured flux is indistinguishable from the upwind estimate on a "
+        f"sharp front (rel {rel:.2e}) -- either the limiter never activated "
+        "(degenerate fixture) or the capture stores the upwind product")
+
+
+@pytest.mark.parametrize("bad_tti", ["ab2", "rk3"])
+def test_store_salt_flux_refuses_non_euler_integrators(bad_tti):
+    with pytest.raises(ValueError, match="store_salt_flux requires"):
+        _setup_salt(store=True, tti=bad_tti)
+
+
+@pytest.mark.parametrize("bad_adv", ["ppm_fct", "dst3_multidim"])
+def test_store_salt_flux_refuses_inkernel_flux_schemes(bad_adv):
+    with pytest.raises(ValueError, match="store_salt_flux is not supported"):
+        _setup_salt(store=True, adv=bad_adv)
+
+
+def test_salt_carry_survives_integrate_scan():
+    """Seeded carry: integrate() must not crash or restructure (None->Field)."""
+    _g, _z, model, state = _setup_salt(store=True)
+    _final, traj = model.integrate(_with_front(state), duration=2 * _DT,
+                                   dt=_DT)
+    for nm in _SALT_SLOTS:
+        assert getattr(traj[0], nm) is not None, (
+            f"trajectory[0].{nm} is None -- the carry was not seeded and "
+            "every later entry has a different treedef")
+        assert getattr(traj[-1], nm) is not None
+    a = np.asarray(traj[-1].salt_flux_u_int.data)
+    assert np.any(a != 0.0), "the final step stored nothing"
+
+
+def test_seed_salt_flux_carry_is_idempotent_and_canonical():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_salt_flux_carry,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+
+    _g, _z, model, state = _setup_salt(store=True)
+    s1 = seed_salt_flux_carry(state, True)
+    s2 = seed_salt_flux_carry(s1, True)
+    import jax
+    assert jax.tree_util.tree_structure(s1) == jax.tree_util.tree_structure(s2)
+    # the fixture stores BOTH families; the step populates the mass triple
+    # too, so the treedef comparison needs the full seeded carry
+    s1 = seed_mass_flux_carry(s1, True)
+    out = model.step(_with_front(s1), _DT)
+    assert jax.tree_util.tree_structure(out) == \
+        jax.tree_util.tree_structure(s1), (
+        "seeded treedef != stepped treedef -- lax.scan would reject the carry")
+    assert seed_salt_flux_carry(state, False) is state
+
+
+def test_capture_is_invariant_to_the_fused_pair_env_toggle(monkeypatch):
+    """LEGOESM_TRACER_PAIR=1 must not change the captured pair: the capture
+    forces the unfused path, documented bit-identical."""
+    import os
+
+    _g, _z, model, state = _setup_salt(store=True)
+    st = _with_front(state)
+    monkeypatch.setenv("LEGOESM_TRACER_PAIR", "0")
+    out0 = model.step(st, _DT)
+    monkeypatch.setenv("LEGOESM_TRACER_PAIR", "1")
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    model2 = LatLonCGridOceanModel(_g, _z, model.config)   # fresh trace
+    out1 = model2.step(st, _DT)
+    np.testing.assert_array_equal(
+        np.asarray(out0.salt_flux_u_int.data),
+        np.asarray(out1.salt_flux_u_int.data))
+    np.testing.assert_array_equal(
+        np.asarray(out0.salt_flux_v_int.data),
+        np.asarray(out1.salt_flux_v_int.data))
+
+
+def test_both_gateway_builders_accept_and_thread_store_salt_flux():
+    """codex round-1 RED 1: the driver PASSED store_salt_flux to builders that
+    did not accept it -- every gateway run would have died with TypeError.
+    Signature AND body-threading are asserted for BOTH supported grids, the
+    same shape as the store_mass_flux sibling test."""
+    import inspect
+
+    from scripts.run import run_omip_core2 as R
+
+    for builder in (R.build_tripole, R.build_latlon_bathy):
+        sig = inspect.signature(builder)
+        assert "store_salt_flux" in sig.parameters, (
+            f"{builder.__name__} does not accept store_salt_flux -- the "
+            "driver call site raises TypeError on every gateway run")
+        assert sig.parameters["store_salt_flux"].default is False
+        src = inspect.getsource(builder)
+        assert '_ovr["store_salt_flux"] = True' in src, (
+            f"{builder.__name__} accepts the flag but never threads it into "
+            "the config override -- the capture would silently stay off")
+
+
+@pytest.mark.parametrize("outer", ["ab2", "leapfrog"])
+def test_store_salt_flux_refuses_non_forward_euler_outer(outer):
+    """codex round-1 RED 2: outer AB2 blends S_incr_prev across steps, so the
+    per-step captured pair is NOT the applied flux; leapfrog applies 2*dt*F^n
+    to the BEFORE state.  Both must refuse at construction."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from scripts.run import run_omip
+
+    grid, z_coord, config, _model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    kw = dict(store_salt_flux=True, outer_integrator=outer)
+    if outer == "leapfrog":
+        # leapfrog has its own config prerequisites; the salt guard must fire
+        # FIRST so the refusal reason is the honest one -- if leapfrog's own
+        # validation fires first that is acceptable too, but the construction
+        # must NOT succeed.  Match on either message, assert failure.
+        with pytest.raises(ValueError):
+            LatLonCGridOceanModel(grid, z_coord, config._replace(**kw))
+        return
+    with pytest.raises(ValueError, match="outer_integrator"):
+        LatLonCGridOceanModel(grid, z_coord, config._replace(**kw))
+
+
+def test_implicit_unsplit_rejects_store_salt_flux():
+    """codex round-1 RED 3: the unsplit lane bypasses _step_impl, so seeded
+    slots would sit at zero and require_salt would integrate an exact salt
+    transport of 0.  Same refusal as store_mass_flux."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from scripts.run import run_omip
+
+    grid, z_coord, config, _model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    cfg = config.replace_flat(barotropic_solver="implicit_unsplit")
+    cfg = cfg._replace(store_salt_flux=True)
+    with pytest.raises(ValueError, match="store_salt_flux"):
+        LatLonCGridOceanModel(grid, z_coord, cfg)

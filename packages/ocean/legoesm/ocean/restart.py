@@ -58,7 +58,8 @@ _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 # Not writing them makes save and load agree by construction.  Mirrors
 # ``run_omip._RESTART_DIAGNOSTIC_SLOTS`` for the other npz lane.
 DIAGNOSTIC_SLOTS: tuple[str, ...] = (
-    "mass_flux_u", "mass_flux_v", "mass_flux_w")
+    "mass_flux_u", "mass_flux_v", "mass_flux_w",
+    "salt_flux_u_int", "salt_flux_v_int")
 
 
 def _iter_state_fields(state) -> list[str]:
