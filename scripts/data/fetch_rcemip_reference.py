@@ -238,9 +238,12 @@ def build_reference(profiles: dict[str, np.ndarray], z_m: np.ndarray,
     if to_mixing_ratio:
         qv_all = qv_all / (1.0 - qv_all)
     dq = float(np.max(np.abs(qv_all - profiles["qv"])))
-    print(f"  humidity convention: "
-          f"{'MIXING RATIO (converted from hus)' if to_mixing_ratio else 'SPECIFIC (hus as-is, matches our Wing IC)'}"
-          f"; max |r - q| = {dq:.3e} kg/kg")
+    print(f"  humidity written: "
+          + ("converted q -> r = q/(1-q); max |r - q| = %.3e kg/kg" % dq
+             if to_mixing_ratio else
+             "source values unchanged (QV_avg is ALREADY a mixing ratio, "
+             "matching legoESM's q_v tracer; pass --humidity hus "
+             "--to-mixing-ratio only if you switch source)"))
 
     vol_dir = dest / "snapshots3d"
     sfc_dir = dest / "snapshots"
