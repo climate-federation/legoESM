@@ -112,3 +112,21 @@ def test_scalar_type_divergence_distinguished():
     assert leaf_digest48(0) != leaf_digest48(0.0)
     assert leaf_digest48(1.5) == leaf_digest48(1.5)
     assert leaf_digest48(np.float32(1.5)) != leaf_digest48(np.float64(1.5))
+
+
+def test_replicate_pytree_single_process_unchanged():
+    # codex r23: replicate_pytree's multi-process branch must not perturb
+    # the single-process path (replicated_sharding=None returns the tree
+    # untouched; a real single-device sharding takes the historical
+    # device_put branch, byte-identical values).
+    import jax.numpy as jnp
+    from legoesm.parallel.mesh import DeviceConfig, replicate_pytree
+
+    cfg = DeviceConfig(
+        mesh=None, face_sharding=None, replicated_sharding=None,
+        n_devices=1, backend="cpu", is_distributed=False, tiling=(1, 1),
+        grid_type="voronoi", voronoi_dims=None)
+    tree = {"a": jnp.arange(4.0), "b": 3}
+    out = replicate_pytree(tree, cfg)
+    assert np.allclose(np.asarray(out["a"]), np.arange(4.0))
+    assert out["b"] == 3
