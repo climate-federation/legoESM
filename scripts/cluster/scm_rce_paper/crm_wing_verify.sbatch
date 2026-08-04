@@ -76,7 +76,7 @@ echo "########## 3. COLUMN BUDGET of the existing 80-day run ###############"
 echo "  (run 9285110: 128x128 dx=2km nlev=30 UNIFORM dz=1100m, rrtmgp+kessler,"
 echo "   --theta-noise-amp 0.5 --seed-kind band_noise, 80 sim-days)"
 JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu $PY scripts/validate/rcemip_column_budget.py \
-  --run-dir "$RUN80" --sfc-stride 16 2>&1 | tail -80
+  --run-dir "$RUN80" --sfc-stride 16 --no-water-budget 2>&1 | tail -80
 echo "budget rc=${PIPESTATUS[0]}"
 
 echo

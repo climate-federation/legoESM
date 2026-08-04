@@ -282,7 +282,7 @@ def analyse_volumes(vol_files: list[Path], p_sfc: float,
 
 
 def analyse_surface(sfc_files: list[Path], t_sfc: float,
-                    stride: int) -> dict[float, float]:
+                    stride: int, water_budget: bool = True) -> dict[float, float]:
     """Precip / CWV trajectory + an RCEMIP bulk surface-flux estimate.
 
     Returns {day: driver_cwv_mean} so the volume analysis can validate its own
@@ -323,7 +323,9 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
         # wrong. run_rcemip_plane now records shflx/lhflx into every surface
         # snapshot via make_surface_flux_diagnostic, which calls the same shared
         # routine the prognostic path uses.
-        if lhflx is None:
+        if lhflx is None and not water_budget:
+            evap = np.zeros_like(qv_s)
+        elif lhflx is None:
             _fatal(
                 "surface snapshots carry no 'lhflx'. This run predates the "
                 "flux-recording change in run_rcemip_plane. REFUSING to "
@@ -331,7 +333,8 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
                 "produced a 5x-wrong evaporation before. Re-run with the "
                 "current driver, or pass --no-water-budget to get the "
                 "CWV/precip-proxy table without E or P_budget.")
-        evap = lhflx / constants.L_v
+        else:
+            evap = lhflx / constants.L_v
         days.append(day)
         cwv_m.append(float(cwv.mean()))
         cwv_x.append(float(cwv.max()))
@@ -419,6 +422,11 @@ def main(argv=None) -> int:
     p.add_argument("--cwv-tol", type=float, default=0.05,
                    help="max relative disagreement between our column CWV "
                         "and the driver's stored CWV before C1 fails")
+    p.add_argument("--water-budget", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Compute E and P_budget from the recorded lhflx. "
+                        "--no-water-budget reports only CWV and the precip "
+                        "PROXY, for runs predating flux recording.")
     p.add_argument("--cwv-abort-tol", type=float, default=0.20,
                    help="C1 residual above which the run is ABORTED rather "
                         "than reported with an uncertainty tag.")
@@ -449,7 +457,11 @@ def main(argv=None) -> int:
         _fatal(f"no vol_*.npz under {run_dir/'snapshots3d'}")
     print(f"  found {len(sfc)} sfc snapshots, {len(vol)} volume snapshots")
 
-    ref_cwv = analyse_surface(sfc, args.T_sfc, max(1, args.sfc_stride))
+    if not args.water_budget:
+        print("\n  --no-water-budget: E and P_budget columns are DISABLED and "
+              "printed as 0. Only CWV and the precip PROXY are meaningful.")
+    ref_cwv = analyse_surface(sfc, args.T_sfc, max(1, args.sfc_stride),
+                              water_budget=args.water_budget)
     analyse_volumes(vol, args.p_sfc, args.cwv_tol, ref_cwv,
                     abort_tol=args.cwv_abort_tol)
     print("\nDIAG_DONE")
