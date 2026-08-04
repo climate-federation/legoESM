@@ -82,6 +82,24 @@ review, not ocean physics.
 
 ---
 
+# DECISION 2 EXECUTED 2026-08-04 — sh2 unparked; face-avm option landed; measurement UNRECONCILED
+
+Chain walk: the face-native shear FORMULA is exact (baseline reproduces `tke_dump_sh2.bin` to
+2.15e-22); production multiplies by T-point K_M where NEMO uses face-summed avm + coast
+doubling (`zdfsh2.F90:80-94`). "Architectural blocker" claim CHALLENGED and REFUTED — NEMO
+face-averages T-point avm on the fly; so does the new option. Landed:
+`tke_shear_avm_weighting="tpoint"(default)|"nemo_face"` (B1 both call sites, B2 post-mixing
+guard, N1 periodic seam wrap + failing-under-edge-repeat test, 60/60 fp64, reviews SHIP).
+**Card NOT wired.** Measured: sh2 ratio 0.295→0.630 (2x closer), pdlr/avt corr improve, ~1.8%
+mean overshoot. Bonus: chain_walk STAGE 4 harness fix (feed true `tke_dump_rn2`, not rn2b):
+MXL isolation 0.00992→0.00069 — the parked MXL re-walk item is DONE.
+
+**UNRECONCILED — no further sh2 claims until resolved**: production-path sh2 corr measures
+0.33-0.35 in the newest probe vs 0.995 (Candidate G, same function) vs 0.934 (old record) —
+different populations (|ref|>1e-12 vs noise-floor-restricted) and input conventions; the old
+record's probe source is unfindable. NEXT: ONE canonical committed sh2 probe with locked
+population + input conventions; only then wire-or-not the card. Row stays DEBT.
+
 # PARKED 2026-08-03 — resume here (token budget; user call)
 
 **Where the grind stands** (issue #1455 = the living checklist; PR #1460 = the working PR):
