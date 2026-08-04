@@ -146,3 +146,87 @@ def test_c1_refuses_to_report_when_no_day_matches(tmp_path):
              qcloud=col(np.zeros_like(z)), w=col(np.zeros_like(z)))
     with pytest.raises(SystemExit):
         rcb.analyse_volumes([d3 / "vol_00000100.npz"], rcb.WING_P_SFC, 0.05, {})
+
+
+# --- adaptive dt (P2) — pure helpers from scripts/run/run_rcemip_plane.py ---
+
+_RUN = Path(__file__).resolve().parents[2] / "scripts" / "run"
+if str(_RUN) not in sys.path:
+    sys.path.insert(0, str(_RUN))
+
+
+def _ladder():
+    import run_rcemip_plane as rcp
+    return rcp.adaptive_dt_ladder
+
+
+def test_adaptive_dt_halves_above_ca_hi_and_stops_at_the_floor():
+    lad = _ladder()
+    kw = dict(ca_hi=0.5, ca_lo=0.1, min_factor=0.125)
+    dt = 20.0
+    for expect in (10.0, 5.0, 2.5, 2.5, 2.5):     # floor = 20*0.125 = 2.5
+        dt = lad(dt, 20.0, courant=0.9, **kw)
+        assert dt == pytest.approx(expect)
+
+
+def test_adaptive_dt_restores_toward_base_but_never_past_it():
+    lad = _ladder()
+    kw = dict(ca_hi=0.5, ca_lo=0.1, min_factor=0.125)
+    dt = 2.5
+    for expect in (5.0, 10.0, 20.0, 20.0):
+        dt = lad(dt, 20.0, courant=0.01, **kw)
+        assert dt == pytest.approx(expect)
+
+
+def test_adaptive_dt_holds_inside_the_dead_band():
+    lad = _ladder()
+    assert lad(10.0, 20.0, courant=0.3, ca_hi=0.5, ca_lo=0.1,
+               min_factor=0.125) == pytest.approx(10.0)
+
+
+def test_adaptive_dt_rungs_are_exact_powers_of_two_so_jit_cache_hits():
+    """Every rung must be bit-exactly reachable from both directions, else a
+    'restored' dt is a NEW Python float and forces a fresh compilation."""
+    lad = _ladder()
+    kw = dict(ca_hi=0.5, ca_lo=0.1, min_factor=0.125)
+    down, dt = [], 20.0
+    for _ in range(3):
+        dt = lad(dt, 20.0, courant=0.9, **kw)
+        down.append(dt)
+    up = []
+    for _ in range(3):
+        dt = lad(dt, 20.0, courant=0.01, **kw)
+        up.append(dt)
+    # coming back up must land on exactly the same float objects' values
+    assert up[:-1] == down[-2::-1], (down, up)
+    assert len(set(down) | set(up)) <= 4      # bounded retrace count
+
+
+def test_adaptive_dt_rejects_inverted_or_impossible_thresholds():
+    lad = _ladder()
+    with pytest.raises(ValueError):
+        lad(10.0, 20.0, 0.3, ca_hi=0.1, ca_lo=0.5, min_factor=0.125)
+    with pytest.raises(ValueError):
+        lad(10.0, 20.0, 0.3, ca_hi=0.5, ca_lo=0.1, min_factor=0.0)
+    with pytest.raises(ValueError):
+        lad(10.0, 20.0, 0.3, ca_hi=0.5, ca_lo=0.1, min_factor=2.0)
+
+
+def test_courant_uses_dz_for_w_and_dx_for_horizontal():
+    """The F11 CFL error was dividing a VERTICAL velocity by the HORIZONTAL
+    spacing. Pin that w goes with dz and u,v go with dx."""
+    import run_rcemip_plane as rcp
+    import jax.numpy as jnp
+    from types import SimpleNamespace as NS
+    st = NS(w=NS(data=jnp.array([[[10.0]]])),
+            u=NS(data=jnp.array([[[4.0]]])),
+            v=NS(data=jnp.array([[[2.0]]])))
+    ca_v, ca_h = rcp.courant_numbers(st, dx=4000.0, dz_min=1100.0, dt=20.0)
+    assert ca_v == pytest.approx(10.0 * 20.0 / 1100.0)
+    assert ca_h == pytest.approx(4.0 * 20.0 / 4000.0)
+    # The documented F11 case: w=225, dt=20, dx=4 km, dz=1100 m.
+    ca_v2, _ = rcp.courant_numbers(
+        NS(w=NS(data=jnp.array([[[225.0]]])), u=NS(data=jnp.zeros((1, 1, 1))),
+           v=NS(data=jnp.zeros((1, 1, 1)))),
+        dx=4000.0, dz_min=1100.0, dt=20.0)
+    assert ca_v2 == pytest.approx(4.09, abs=0.01)   # NOT the 0.225 in F11

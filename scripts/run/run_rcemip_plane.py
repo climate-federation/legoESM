@@ -677,6 +677,55 @@ from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
 _LEGACY_N_SEED_LEV = 4
 
 
+def courant_numbers(state, dx: float, dz_min: float, dt: float):
+    """(Ca_vertical, Ca_horizontal) advective Courant numbers.
+
+    ``Ca_v = max|w| * dt / dz`` and ``Ca_h = max(|u|,|v|) * dt / dx``.
+
+    NOTE the vertical one divides by **dz**, not dx.  F11 in
+    docs/science/specs/CRM_implementation.md computed ``max|w| * dt / dx`` — a
+    vertical velocity against a horizontal spacing — and concluded 0.225 "well
+    under 1"; with the model's actual dz that same case is 4.09.  The length
+    scale must match the direction the velocity advects in.
+    """
+    max_w = float(jnp.max(jnp.abs(state.w.data)))
+    max_uv = float(jnp.maximum(jnp.max(jnp.abs(state.u.data)),
+                               jnp.max(jnp.abs(state.v.data))))
+    return max_w * dt / dz_min, max_uv * dt / dx
+
+
+def adaptive_dt_ladder(dt_cur: float, dt_base: float, courant: float, *,
+                       ca_hi: float, ca_lo: float,
+                       min_factor: float) -> float:
+    """Next dt from a POWER-OF-TWO ladder rooted at ``dt_base``.
+
+    Halve while ``courant > ca_hi``; double (back toward ``dt_base``, never
+    past it) while ``courant < ca_lo``; otherwise hold.  ``min_factor`` bounds
+    how far down the ladder we may go (e.g. 0.125 = three halvings).
+
+    Why a LADDER and not a continuous dt: ``model.step`` is jitted and takes
+    ``dt`` as a Python float, so every DISTINCT dt value triggers a retrace.
+    (The claim in F11 that per-call dt changes do not retrace was about
+    ``step_halo``; this driver calls ``model.step``, and either way a jitted
+    callable specialises on a Python-float argument.)  A power-of-two ladder
+    bounded by ``min_factor`` admits at most ``log2(1/min_factor) + 1`` distinct
+    values, hence a bounded, small number of compilations for the whole run.
+    Halving/doubling by 2 also keeps dt exactly representable, so revisiting a
+    rung reuses the cached executable instead of compiling a near-duplicate.
+    """
+    if not (0.0 < min_factor <= 1.0):
+        raise ValueError(f"min_factor must be in (0, 1], got {min_factor}.")
+    if not (0.0 < ca_lo < ca_hi):
+        raise ValueError(
+            f"need 0 < ca_lo < ca_hi, got ca_lo={ca_lo}, ca_hi={ca_hi}.")
+    dt_min = dt_base * min_factor
+    if courant > ca_hi:
+        return max(dt_cur * 0.5, dt_min)
+    if courant < ca_lo:
+        return min(dt_cur * 2.0, dt_base)
+    return dt_cur
+
+
 def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
                                 theta_noise_amp=0.1, n_seed_lev=None,
                                 n_tracers=3, seed_kind="smooth_k1",
@@ -1112,6 +1161,29 @@ def parse_args():
                         "0.5 = explicit-diffusion CFL bound — above NaNs. "
                         "Recommended for RCE runs with theta_noise_amp > 0; "
                         "leave off for clean Wing IC + active moist physics.")
+    p.add_argument("--adaptive-dt", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Shrink dt on a POWER-OF-TWO ladder when the advective "
+                        "Courant number rises, and restore it when the "
+                        "transient passes. OFF by default; the default path is "
+                        "unchanged. NOTE the measured failure of the 128^2 "
+                        "reference run is a thermodynamic DRIFT, not a CFL "
+                        "blow-up (F12), so this is a robustness net for "
+                        "higher-resolution runs, not a cure for that drift.")
+    p.add_argument("--adaptive-dt-ca-hi", type=float, default=0.5,
+                   help="Halve dt above this Courant number.")
+    p.add_argument("--adaptive-dt-ca-lo", type=float, default=0.1,
+                   help="Double dt (never past --dt) below this Courant "
+                        "number.")
+    p.add_argument("--adaptive-dt-min-factor", type=float, default=0.125,
+                   help="Lowest rung as a fraction of --dt (0.125 = three "
+                        "halvings). Bounds the number of JIT retraces: "
+                        "model.step specialises on the Python float dt, so a "
+                        "continuous dt would recompile constantly.")
+    p.add_argument("--adaptive-dt-check-every", type=int, default=10,
+                   help="Steps between Courant checks. Each check forces a "
+                        "device->host sync on max|w|, so checking every step "
+                        "costs throughput.")
     p.add_argument("--theta-noise-amp", type=float, default=0.0,
                    help="Initial theta' perturbation amplitude [K]. For "
                         "--seed-kind wing2018 this is the LOWEST-LAYER "
@@ -1693,7 +1765,32 @@ def main():
                     )
                 land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
+    # --- adaptive dt (opt-in; the default path is byte-identical) ----------
+    dt_cur = args.dt
+    t_sim = _start_step * args.dt
+    _dz_min = float(jnp.min(jnp.asarray(hc.dz)))
+    _dt_rungs: dict[float, int] = {}
+    if args.adaptive_dt:
+        print(f"  ADAPTIVE dt: base={args.dt} s, ladder floor="
+              f"{args.dt * args.adaptive_dt_min_factor} s, halve above Ca="
+              f"{args.adaptive_dt_ca_hi}, restore below Ca="
+              f"{args.adaptive_dt_ca_lo}, checked every "
+              f"{args.adaptive_dt_check_every} steps.")
+        print(f"  Courant uses dz_min={_dz_min:.1f} m for w and dx="
+              f"{args.dx:.1f} m for u,v.")
     for i in range(_start_step, args.steps):
+        if args.adaptive_dt and (i - _start_step) % args.adaptive_dt_check_every == 0:
+            ca_v, ca_h = courant_numbers(state, args.dx, _dz_min, dt_cur)
+            dt_new = adaptive_dt_ladder(
+                dt_cur, args.dt, max(ca_v, ca_h),
+                ca_hi=args.adaptive_dt_ca_hi, ca_lo=args.adaptive_dt_ca_lo,
+                min_factor=args.adaptive_dt_min_factor)
+            if dt_new != dt_cur:
+                print(f"  [adaptive dt] step {i}: Ca_v={ca_v:.3f} "
+                      f"Ca_h={ca_h:.3f} -> dt {dt_cur:g} -> {dt_new:g} s",
+                      flush=True)
+                dt_cur = dt_new
+            _dt_rungs[dt_cur] = _dt_rungs.get(dt_cur, 0) + 1
         if args.land:
             if land_rad_refresh_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
@@ -1703,14 +1800,14 @@ def main():
                 )
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
-                    state, cached_rad_tend, args.dt,
+                    state, cached_rad_tend, dt_cur,
                 )
             if land_sfc_flux_jit is not None:
                 surface_tend, land_surface_diag = land_sfc_flux_jit(
                     state, land_T_sfc,
                 )
                 state = apply_plane_tendency_forward_euler(
-                    state, surface_tend, args.dt,
+                    state, surface_tend, dt_cur,
                 )
             land_T_sfc, land_energy_diag = update_land_slab_temperature(
                 land_T_sfc,
@@ -1718,12 +1815,12 @@ def main():
                 cached_land_rad_sfc["lw_down"],
                 land_surface_diag["shflx"],
                 land_surface_diag["lhflx"],
-                args.dt,
+                dt_cur,
                 args.land_heat_capacity,
                 args.land_albedo,
                 land_emissivity,
             )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            state = model.step(state, dt=dt_cur, physics_fn=physics_fn)
         else:
             if rad_jit is not None and (
                 i % args.radiation_interval == 0 or cached_rad_tend is None
@@ -1731,9 +1828,9 @@ def main():
                 cached_rad_tend = rad_jit(state)
             if cached_rad_tend is not None:
                 state = apply_radiation_forward_euler(
-                    state, cached_rad_tend, args.dt,
+                    state, cached_rad_tend, dt_cur,
                 )
-            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            state = model.step(state, dt=dt_cur, physics_fn=physics_fn)
         # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
         # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
         # The advective-form tracer advection under strong div(u) — e.g. a
@@ -1752,9 +1849,10 @@ def main():
         # config leaves machine-zero negatives so clip is a no-op there.
         # ponytail: local clip, revisit a mass-conserving *local* limiter (per-
         # column borrow) if a long equilibrium run shows CWV drift.
+        t_sim += dt_cur
         state = apply_positive_filter_state(state, mode="clip")
         if (i + 1) % args.print_every == 0 or i == 0:
-            t = (i + 1) * args.dt
+            t = t_sim
             max_w = float(jnp.max(jnp.abs(state.w.data)))
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
@@ -1790,10 +1888,10 @@ def main():
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
-                snap_dir, i + 1, (i + 1) * args.dt, state, grid, hc,
+                snap_dir, i + 1, t_sim, state, grid, hc,
             )
             _emit_profile_npz(
-                snap_dir, i + 1, (i + 1) * args.dt, state, hc,
+                snap_dir, i + 1, t_sim, state, hc,
             )
         # Surface + 4-level field snapshots (rce_snapshot) and full-3D viz dumps.
         if _surf_every and (i + 1) % _surf_every == 0:
@@ -1801,17 +1899,17 @@ def main():
                 {"T_s": land_T_sfc} if args.land else None
             )
             rce_snapshot.save_surface_levels(
-                args.output, i + 1, (i + 1) * args.dt, state, grid, hc,
+                args.output, i + 1, t_sim, state, grid, hc,
                 heights_m=_snap_heights, surface_fields=_surface_fields)
         if (i + 1) in _snap3d_steps:
             rce_snapshot.save_3d(
-                args.output, i + 1, (i + 1) * args.dt, state, grid, hc)
-            print(f"  [3D snapshot dumped @ day {(i+1)*args.dt/86400:.1f}]",
+                args.output, i + 1, t_sim, state, grid, hc)
+            print(f"  [3D snapshot dumped @ day {t_sim/86400:.1f}]",
                   flush=True)
         if _ckpt_every and (i + 1) % _ckpt_every == 0:
             rce_checkpoint.save(args.output / "checkpoints", i + 1,
-                                (i + 1) * args.dt, state)
-            print(f"  [checkpoint @ step {i+1}, day {(i+1)*args.dt/86400:.2f}]",
+                                t_sim, state)
+            print(f"  [checkpoint @ step {i+1}, day {t_sim/86400:.2f}]",
                   flush=True)
 
     if args.snapshot_every > 0:
@@ -1819,6 +1917,15 @@ def main():
             snap_dir, args.output / "profile_evolution.png",
         )
 
+    if args.adaptive_dt:
+        # Record the ladder actually used: the number of DISTINCT rungs bounds
+        # the number of JIT retraces, and a run that never left the base rung
+        # means the feature was a no-op (which the log must show, not hide).
+        print("\n  adaptive dt rungs visited (dt [s]: checks at that rung): "
+              + ", ".join(f"{k:g}: {v}" for k, v in sorted(_dt_rungs.items())))
+        print(f"  distinct rungs = {len(_dt_rungs)} "
+              f"(bounds the JIT retrace count); final dt = {dt_cur:g} s; "
+              f"t_sim = {t_sim/86400:.3f} days")
     print(f"\nOutput: {args.output}")
 
 
