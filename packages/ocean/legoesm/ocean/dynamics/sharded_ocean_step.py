@@ -90,7 +90,17 @@ _GEOM_STATIC_FIELDS = frozenset(
 # the sharded state as ``v_lower = field[0:n_lat]`` (P("lat")) and reconstructed
 # to the band's nl+1 faces in-body.  All OTHER array state fields are cell/u
 # leading-dim n_lat and shard P("lat") directly.
-_V_STAGGERED_STATE_FIELDS = ("v", "v_mask")
+#
+# ``mass_flux_v`` (#1442 ``store_mass_flux``, codex RED 3) belongs here for the
+# same reason ``v`` does -- it IS a v-face field.  Omitting it gave it the CELL
+# spec, so its n_lat+1 leading dim was neither split by the band slicer nor
+# reconstructed in-body: an immediate divisibility error at best, a silently
+# misaligned flux at worst.  The drop/re-append-zero round-trip is valid for it
+# on the same grounds as ``v``: ``mass_flux_v = h_v_old * v_corrected *
+# v_mask_3d`` and the pole-wall ``v_mask[n_lat] == 0``, so the top row it
+# reconstructs as zero IS zero.  ``mass_flux_u`` is a u-face field (leading dim
+# n_lat, like ``u``) and correctly takes the default cell sharding.
+_V_STAGGERED_STATE_FIELDS = ("v", "v_mask", "mass_flux_v")
 
 
 def _geom_array_field_names(geom):
@@ -890,6 +900,21 @@ def make_sharded_ocean_step(model, mesh):
         _agree_ocean_spmd_call(
             mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
             where="make_sharded_ocean_step.step", aux=aux)
+        # store_mass_flux (#1442, codex RED 3): ``out_specs=in_spec`` is derived
+        # from the INPUT state, so a step that ADDS mass_flux_u/v leaves has no
+        # spec for them.  Seed them here -- BEFORE ``in_spec`` -- through the
+        # model's own shared seeder, which sizes them off state.u/state.v and so
+        # produces the ``v_lower`` (n_lat) shape this carrier already holds.
+        # No-op when the flag is off or the slots are already seeded, so the
+        # cache key and the historical path are unchanged.
+        # Rank-uniform: keyed off the STATIC config bool, not rank-local data,
+        # so every rank seeds identically (no structure divergence across the
+        # collectives below).
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            seed_mass_flux_carry,
+        )
+        state = seed_mass_flux_carry(
+            state, getattr(model.config, "store_mass_flux", False))
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the

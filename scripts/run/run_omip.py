@@ -2305,6 +2305,29 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     return raw_stack, runoff_stack, record_meta
 
 
+def _seed_mass_flux_for_scan(model, state):
+    """Seed ``store_mass_flux``'s state slots before a ``lax.scan`` (#1442).
+
+    The block scans below carry the ocean state as a ``lax.scan`` CARRY, and
+    ``_step_impl`` turns ``mass_flux_u``/``_v``/``_w`` from ``None`` into
+    ``Field``s when the flag is on -- a carry-structure mismatch that aborts
+    the scan on the first iteration (codex round-6 RED 1).  Seeding here, at
+    the scan-driver boundary, is the fix; seeding inside the SPMD step is too
+    late because this scan wraps it.
+
+    Grid-agnostic: keyed off ``getattr(model.config, "store_mass_flux", False)``
+    so an MPAS / cube model (whose config has no such field, and whose state
+    has no such slots) returns unchanged, and so does any lat-lon run with the
+    flag off.  Called for its structure, never for its values.
+    """
+    if not getattr(model.config, "store_mass_flux", False):
+        return state
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+    )
+    return seed_mass_flux_carry(state, True)
+
+
 def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     """Return a JIT-compiled block function that runs N steps via lax.scan.
 
@@ -2508,6 +2531,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             return new_state, None
 
         n = atm_stack["sw_down"].shape[0]
+        state = _seed_mass_flux_for_scan(model, state)
         init = (state, ice_state) if enable_sea_ice else state
         final, _ = jax.lax.scan(
             step_body, init, jnp.arange(n, dtype=jnp.int32),
@@ -2772,6 +2796,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     return (new_state, new_ice), None
                 return new_state, None
 
+            state = _seed_mass_flux_for_scan(model, state)
             init = (state, ice_state) if enable_sea_ice else state
             final, _ = jax.lax.scan(
                 step_body, init,
@@ -2970,6 +2995,23 @@ def _join_restart_writer():
             "exists)") from err
 
 
+# State slots this restart format deliberately does NOT persist: pure
+# DIAGNOSTICS the next step rewrites unconditionally from the prognostic state.
+#
+# ``_load_restart`` reconstructs from a FRESH template whose optional slots are
+# ``None``, and it skips any slot the template leaves ``None`` -- so a slot
+# written on save is SILENTLY DROPPED on load.  For a diagnostic that asymmetry
+# is harmless in the trajectory but it (a) wastes checkpoint bytes (the #1442
+# pair is ~145 MB uncompressed at eORCA1 L75) and (b) reads, to anyone
+# inspecting the npz, as a persisted quantity that is in fact ignored.  Not
+# writing them makes save and load agree by construction (codex YELLOW 10).
+#
+# Same classification the run_omip_core2 restart applies through its explicit
+# ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
+# this is the older npz lane, which has no such policy table.
+_RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+
+
 def _save_restart(state, day, step, output_dir, ice_state=None,
                   grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
@@ -3029,6 +3071,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         "grid_type": grid_type,
     }
     for f in state._fields:
+        if f in _RESTART_DIAGNOSTIC_SLOTS:
+            continue
         obj = getattr(state, f)
         if obj is None or not hasattr(obj, "data"):
             continue

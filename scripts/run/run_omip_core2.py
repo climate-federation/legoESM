@@ -610,7 +610,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
-                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT):
+                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
+                  store_mass_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -853,6 +854,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
               f"IWM={'on' if _use_iwm else 'off'} "
               f"DDM={'on' if _use_ddm else 'off'}")
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.
+        _ovr["store_mass_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -990,7 +997,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
-                  prescribed_flow=None, no_gm_redi=False):
+                  prescribed_flow=None, no_gm_redi=False,
+                  store_mass_flux=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -1069,6 +1077,16 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     # implicit solve is unconditionally stable -> force it on for the OMIP latlon
     # path (20-level happened to stay under the explicit CFL; 75-level does not).
     _ovr["implicit_vertical_mixing"] = True
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.  Threaded here as
+        # well as in build_tripole because --gateway-transports supports BOTH
+        # app grids (SUPPORTED_APP_GRIDS = ("tripole", "latlon")); wiring only
+        # the tripole left every supported latlon run silently reconstructing
+        # (codex RED 6).
+        _ovr["store_mass_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -2948,6 +2966,169 @@ def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir,
         print(f"[transports] ACC@Drake diag skipped: {type(e).__name__}: {e}")
 
 
+def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
+    """APPEND time-mean Arctic gateway transports to transports.txt.
+
+    ``acc`` is the GatewayAccumulator carried through the step loop (None when
+    --gateway-transports is off).  Sign: POSITIVE = INTO the Arctic.  Volume in
+    Sv, salt in psu*m^3/s.  Non-fatal, like its siblings.
+    """
+    if acc is None:
+        return
+    try:
+        if acc.n == 0:
+            print("[gateway] no steps accumulated; nothing written")
+            return
+        rows = acc.as_dict()
+        if not io_proc:
+            return
+        print(f"[gateway] time-mean over {acc.n} steps (+ = INTO the Arctic):")
+        for nm, (vol_sv, salt) in rows.items():
+            print(f"[gateway]   {nm:<16} {vol_sv:+8.3f} Sv   "
+                  f"{salt:+.4e} psu m^3/s")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(out_dir) / "transports.txt", "a") as fh:
+            fh.write(f"gateway_n_steps {acc.n}\n")
+            for nm, (vol_sv, salt) in rows.items():
+                fh.write(f"gateway_{nm}_vol_Sv {vol_sv:.6f}\n")
+                fh.write(f"gateway_{nm}_salt_psu_m3s {salt:.6e}\n")
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] transport diag skipped: {type(e).__name__}: {e}")
+
+
+GATEWAY_CUMULATIVE_CSV = "gateway_transports.csv"
+
+
+class _GatewayCumulativeCsv:
+    """Writer state for ``gateway_transports.csv``.
+
+    Three fields, each load-bearing:
+
+    ``fh``      the open handle, or ``None`` once the writer has been DISABLED.
+                A write failure disables it permanently instead of leaving a
+                broken handle to be retried at every later cadence (codex
+                round-1 YELLOW 2).
+    ``names``   the gateway order the HEADER was built from.  A row whose
+                accumulator names differ is refused, so a gateway's transport
+                can never land under another gateway's column.
+    ``last_n``  the accumulator count of the last row written.  Dump points can
+                coincide -- the run-end row, the abort row and a cadence row
+                can all land on the same step -- and a duplicated endpoint
+                would make a reader's window silently zero-length.
+    """
+
+    __slots__ = ("fh", "names", "last_n")
+
+    def __init__(self, fh, names):
+        self.fh = fh
+        self.names = tuple(names)
+        self.last_n = None
+
+
+def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
+    """Open ``gateway_transports.csv`` and write its header.  Returns a handle.
+
+    WHY A SECOND FILE, AND WHY A CSV.  ``transports.txt`` is the run's
+    key-value scalar dump: one ``name value`` line per quantity, written ONCE
+    at run end.  Repeating that block per cadence would give duplicate keys
+    that no existing reader of that file expects, so the whole-run block stays
+    exactly as it is (byte-identical) and the per-cadence series goes to its
+    own file -- the same split the driver already makes between the run-end
+    scalars and ``diag_timeseries.csv``.  The CSV follows that sibling's
+    conventions: opened once with a header, one row appended and FLUSHED per
+    dump (observable mid-run under a pipe-buffered stdout), process-0 only,
+    closed at the end.
+
+    Returns a :class:`_GatewayCumulativeCsv`, or ``None`` when disabled or on
+    any failure.  ``None`` makes every other function here a no-op, so a
+    writer problem degrades the diagnostic and never the run.
+    """
+    if not io_proc:
+        return None
+    # Bound OUTSIDE the try so the except can close a handle that was opened
+    # before the header write failed; returning None with the file still open
+    # leaked it for the rest of the run (codex round-2 YELLOW 2).
+    fh = None
+    try:
+        from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns
+        names = tuple(names)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        fh = open(Path(out_dir) / GATEWAY_CUMULATIVE_CSV, "w")
+        fh.write(",".join(gateway_cumulative_columns(names)) + "\n")
+        fh.flush()
+        return _GatewayCumulativeCsv(fh, names)
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV disabled: {type(e).__name__}: {e}")
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:  # noqa: BLE001 -- already failing; nothing to add
+                pass
+        return None
+
+
+def _gateway_cumulative_row(gw_csv, acc, step, day) -> None:
+    """APPEND one CUMULATIVE-sum row and flush.  No-op when either is ``None``.
+
+    CUMULATIVE, never per-window: nothing is reset, so the run-end whole-run
+    mean is produced by the very same accumulator and a window is recovered by
+    the reader as ``(cumsum_b - cumsum_a) / (n_b - n_a)``.
+
+    A row is SKIPPED (not written) in three cases, each of which would corrupt
+    a reader's arithmetic rather than merely lose a row:
+      * the accumulator's names disagree with the header's -> mis-assigned
+        columns;
+      * ``acc.n`` equals the last row's ``n_steps`` -> a duplicated endpoint,
+        whose window has zero steps;
+      * the writer has already been disabled by an earlier failure.
+    """
+    if gw_csv is None or acc is None or gw_csv.fh is None:
+        return
+    try:
+        from legoesm.ocean.diagnostics_sections import (
+            format_gateway_cumulative_row,
+        )
+        if tuple(acc.names) != gw_csv.names:
+            # Skip the row rather than write one whose columns mean something
+            # other than what the header says.  Loud, because a mis-assigned
+            # gateway column is exactly the kind of defect that survives review.
+            print(f"[gateway] cumulative row SKIPPED at step {step}: "
+                  f"accumulator names {tuple(acc.names)} != header names "
+                  f"{gw_csv.names}; the columns would be mis-assigned.")
+            return
+        n = int(acc.n)
+        if gw_csv.last_n is not None and n == gw_csv.last_n:
+            # Dump points coincide when the run ends exactly on a cadence
+            # boundary, or when the abort fires on a step already dumped.  Two
+            # identical rows give a reader a zero-step window and a 0/0 mean.
+            return
+        gw_csv.fh.write(format_gateway_cumulative_row(acc, step, day) + "\n")
+        gw_csv.fh.flush()
+        gw_csv.last_n = n
+    except Exception as e:  # a diagnostic must never crash the run
+        # DISABLE, do not merely skip: the handle may be broken (full disk,
+        # closed file, dead NFS mount) and retrying it at every later cadence
+        # would spam the log and write nothing (codex round-1 YELLOW 2).
+        print(f"[gateway] cumulative CSV DISABLED at step {step} after "
+              f"{type(e).__name__}: {e}")
+        try:
+            gw_csv.fh.close()
+        except Exception:  # noqa: BLE001 -- already failing; nothing to add
+            pass
+        gw_csv.fh = None
+
+
+def _gateway_cumulative_close(gw_csv) -> None:
+    """Close the cumulative CSV.  No-op when never opened or already disabled."""
+    if gw_csv is None or gw_csv.fh is None:
+        return
+    try:
+        gw_csv.fh.close()
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV close failed: {type(e).__name__}: {e}")
+    gw_csv.fh = None
+
+
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
     """Global meridional ocean heat transport (NH peak / SH min) [PW] from the
     LIVE state.  Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h
@@ -4092,6 +4273,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "over-salinifies ice growth by ~1.35x and "
                         "over-dilutes rivers (2026-07-18 Arctic "
                         "halocline-erosion audit). latlon/tripole/mpas.")
+    p.add_argument("--gateway-transports", action="store_true",
+                   help="Accumulate TIME-MEAN volume and salt transports "
+                        "through the Arctic gateways (Bering/Pacific, "
+                        "Davis/CAA, Atlantic/Nordic, Siberian) on the "
+                        "lat>=66N region boundary and append them to "
+                        "transports.txt. ALSO dumps the accumulator's "
+                        "CUMULATIVE sums + step count to "
+                        f"{GATEWAY_CUMULATIVE_CSV} at the "
+                        "--snapshot-every-days cadence (plus one row at run "
+                        "end), so the mean over ANY window is recovered "
+                        "exactly by differencing two rows: "
+                        "(cumsum_b - cumsum_a) / (n_b - n_a). Nothing is "
+                        "reset, so the transports.txt whole-run mean is "
+                        "unchanged. Pure diagnostic: reads the state "
+                        "after each step and never writes back, so the "
+                        "trajectory is bit-identical with the flag off. "
+                        "Sign: POSITIVE = INTO the Arctic. tripole / latlon "
+                        "host-loop runs only.")
     p.add_argument("--no-normalize-freshwater", action="store_true",
                    help="EXPLICITLY disable the global surface-freshwater "
                         "normalization the latlon/tripole/mpas setups enable "
@@ -4594,6 +4793,8 @@ def main() -> int:
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -4725,6 +4926,12 @@ def main() -> int:
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
+            # #1442: same --gateway-transports override the tripole branch
+            # passes.  "latlon" IS in SUPPORTED_APP_GRIDS, so leaving it out
+            # made every supported latlon gateway run fall back to the h*u
+            # reconstruction the flag exists to replace (codex RED 6).
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "latlon"
 
@@ -4774,6 +4981,23 @@ def main() -> int:
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
                     "section and use the CLI flags -- not both.")
+            # Same class of conflict for #1442 (codex round-6 RED 3): this
+            # rebuild happens AFTER the gateway builders set store_mass_flux
+            # from --gateway-transports, so a YAML
+            # ``ocean: {store_mass_flux: false}`` would silently switch the
+            # capture back off and the gateway accumulator would quietly
+            # integrate the h*u reconstruction under a flag that promises the
+            # exact flux.  Fail loud; YAML never wins over the explicit CLI.
+            if ("store_mass_flux" in _ovr
+                    and getattr(args, "gateway_transports", False)
+                    and not _ovr["store_mass_flux"]):
+                raise ValueError(
+                    "--gateway-transports conflicts with --config "
+                    "ocean.store_mass_flux=false: the flag turns the capture ON "
+                    "so the diagnostic integrates the flux the model actually "
+                    "advected with, and the YAML would turn it back off AFTER "
+                    "the builder, silently downgrading the diagnostic to the "
+                    "h*u reconstruction. Drop one of the two.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config.replace_flat(**_ovr),
                 # Preserve the zdfiwm maps through the YAML rebuild (codex
@@ -5696,6 +5920,21 @@ def main() -> int:
                else "grid!=tripole or WOA-nudging / spin-up-drag / SSS-restoring "
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
+    # --gateway-transports lane guards.  MUST precede the `use_scan` branch,
+    # which RETURNS from main(): a guard after it never executes and the flag
+    # is silently ignored (codex H3).  The predicate lives in the ocean package
+    # so it is directly unit-testable; this call site is what makes it bite.
+    if getattr(args, "gateway_transports", False):
+        from legoesm.ocean.diagnostics_sections import validate_gateway_lanes
+        try:
+            validate_gateway_lanes(
+                use_scan=bool(use_scan),
+                spmd_persistent=bool(
+                    getattr(args, "spmd_persistent_state", False)),
+                app_grid_type=app_grid_type)
+        except ValueError as _gw_err:
+            raise SystemExit(str(_gw_err))
+
     if use_scan:
         # NEMO ln_crt_dwn relative winds are host-loop only: the on-device scan
         # body (compute_omip2_surface_forcing_jax) has no current-feedback wiring,
@@ -5880,6 +6119,69 @@ def main() -> int:
                   f"the first {args.diag_momentum_step} steps (debug window).",
                   flush=True)
     _pers_needs_prestep_global = bool(_pers_forced)
+
+    # --- Arctic gateway transport accumulator (pure diagnostic) ----------
+    _gw_acc = None
+    _gw_gates = None
+    _gw_geom = None
+    _gw_csv = None
+    if getattr(args, "gateway_transports", False):
+        if getattr(state, "v", None) is None:
+            print("[gateway] needs C-grid v faces; DISABLED for this run.")
+        else:
+            from legoesm.ocean.diagnostics_sections import (
+                promote_gateway_geometry, setup_gateway_accumulator,
+            )
+            _gw_lat = (jnp.degrees(jnp.asarray(grid.lat_T))
+                       if hasattr(grid, "lat_T") else jnp.asarray(lat2d))
+            _gw_lon = (jnp.degrees(jnp.asarray(grid.lon_T))
+                       if hasattr(grid, "lon_T") else jnp.asarray(lon2d))
+            # Setup is inside the same non-fatal boundary as the per-step call
+            # (codex round-4 RED): a diagnostic must never abort the run.
+            try:
+                _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
+                    _gw_lat, _gw_lon, state.land_mask.data)
+                # Promote ONCE, and prefer the model's own geometry: the ocean
+                # model already ran ensure_geometry(grid, metric_convention=
+                # config.metric_convention) in its constructor, so model.grid
+                # has the RIGHT face metrics.  Promoting inside the per-step
+                # call rebuilt every metric array each step and silently
+                # defaulted the convention to "exact" (codex r3 finding 1).
+                _gw_geom = promote_gateway_geometry(
+                    getattr(model, "grid", grid),
+                    metric_convention=getattr(model.config,
+                                              "metric_convention", "exact"))
+            except Exception as _gw_e:
+                print(f"[gateway] setup FAILED, diagnostic disabled: "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                _gw_acc = _gw_gates = _gw_geom = None
+            if _gw_acc is not None:
+                print(f"[gateway] accumulating through {len(_gw_gates.names)} "
+                      f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
+                      f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); "
+                      "+ = INTO Arctic")
+                # Per-cadence CUMULATIVE dump.  The run-end transports.txt
+                # block is a WHOLE-RUN mean, which cannot separate the
+                # cold-start adjustment from the settled window; differencing
+                # two rows of this file gives the mean over ANY window:
+                #   mean(n_a, n_b] = (cumsum_b - cumsum_a) / (n_b - n_a).
+                _gw_csv = _gateway_cumulative_open(
+                    out_dir, _gw_acc.names, io_proc=_is_io_proc())
+                if _gw_csv is not None:
+                    if snap_every > 0:
+                        print(f"[gateway] cumulative dumps -> "
+                              f"{GATEWAY_CUMULATIVE_CSV} every {snap_every} "
+                              f"steps ({args.snapshot_every_days:g} d) plus "
+                              f"one at run end; difference two rows for a "
+                              f"windowed mean", flush=True)
+                    else:
+                        # Honest, not silent: with no snapshot cadence the file
+                        # gets ONE row (run end) and carries no more
+                        # information than transports.txt already does.
+                        print(f"[gateway] --snapshot-every-days is 0, so "
+                              f"{GATEWAY_CUMULATIVE_CSV} will hold only the "
+                              f"run-end row; pass --snapshot-every-days N to "
+                              f"make windowed means recoverable", flush=True)
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
@@ -6177,6 +6479,43 @@ def main() -> int:
             # fail-fasts at setup if the tide is enabled).
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
+        if _gw_acc is not None:
+            # READ-ONLY: `state` is never reassigned here, so the trajectory
+            # is bit-identical to a run without the flag.
+            #
+            # NON-FATAL BOUNDARY (codex round-4 RED): this is a DIAGNOSTIC and
+            # must never abort a production run, exactly like its sibling
+            # _gateway_transport_diag.  gateway_step deliberately raises on a
+            # bad geometry, and that raise sits INSIDE the step loop, so
+            # without this guard a diagnostic could kill a multi-day run.  On
+            # any failure: log once, disable the accumulator, keep integrating.
+            # Note it does NOT fall back to per-step promotion -- that was the
+            # defect the raise exists to prevent.
+            from legoesm.ocean.diagnostics_sections import gateway_step
+            try:
+                _gw_acc = gateway_step(
+                    _gw_acc, _gw_gates, state, z_coord, _gw_geom,
+                    min_water_column_m=getattr(model.config,
+                                               "min_water_column_m", None),
+                    # "stored", not "auto": both supported grid branches turn
+                    # store_mass_flux ON for this flag, so a state without the
+                    # capture means some config path disabled it -- raise
+                    # rather than silently integrate h*u (#1442, codex r6 RED3).
+                    source="stored")
+            except Exception as _gw_e:
+                print(f"[gateway] DISABLED at step {step} after "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                # SALVAGE THE TAIL before discarding the accumulator (codex
+                # round-1 RED).  gateway_step is pure and the assignment above
+                # never happened, so _gw_acc still holds the LAST GOOD state,
+                # with n = step - 1.  Without this dump everything accumulated
+                # since the previous cadence row is lost -- and so is the
+                # whole-run block, because _gateway_transport_diag(None) is a
+                # no-op.  The writer suppresses a duplicate n, so a failure on
+                # the step right after a cadence dump adds no second row.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step - 1,
+                                        (step - 1) * dt / _SEC_PER_DAY)
+                _gw_acc = None
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
@@ -6380,6 +6719,11 @@ def main() -> int:
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
                                io_proc=_is_io_proc(), ice_state=ice_state)
                 _close_csv()
+                # Dump what the accumulator reached before the abort: the last
+                # cadence row alone would understate the run, and the run-end
+                # writer below is never reached on this path.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
+                _gateway_cumulative_close(_gw_csv)
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
@@ -6391,6 +6735,11 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
+            # Same cadence as the snapshot, and AFTER this step's
+            # gateway_step, so the row's n_steps matches the snapshot's day.
+            # `step != n_steps` above excludes the final step; the run-end row
+            # below covers it, so each dump point appears exactly once.
+            _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
@@ -6410,6 +6759,13 @@ def main() -> int:
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    # Run-end CUMULATIVE row FIRST, then the whole-run mean.  The last window
+    # (e.g. days 60-90 of a 90-day run) is only recoverable if the final totals
+    # are dumped: the cadence block above skips step == n_steps.
+    _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
+                            n_steps * dt / _SEC_PER_DAY)
+    _gateway_cumulative_close(_gw_csv)
+    _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()
     rate = n_steps / (time.time() - t_wall)
