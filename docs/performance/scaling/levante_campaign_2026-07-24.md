@@ -2358,3 +2358,27 @@ production arm (explicit_substep + wide halo, 18 steps):
 * Recommendation for the ocean lat-lon lane: set
   `LEGOESM_LATLON_SPMD_FUSED_HALO=1`, leave `LEGOESM_XLA_OVERLAP`
   OFF. New ocean best: **13.43 GC/s at 128 GPUs** (was 13.0).
+
+### #6 REFUTED OFFLINE — the atm replicated-geometry broadcast is NOT walled at 192
+
+Consult item #6 proposed porting the ocean geometry-consistency fix to
+the atm lane to "remove the unverified high-process setup wall" before
+retrying LL2880@192. Cheap arithmetic (measured field sizes, no GPU
+hours) refutes the premise: `_build_geometry_stacks` calls
+`broadcast_checked` **per field**, so the psum program is
+`n_processes x ONE stacked field`, not `x the whole stack`:
+
+| config | fields | max stacked field | broadcast program | vs 63.8 GB limit |
+|---|---|---|---|---|
+| LL2048@128 (ran) | 13 | 0.0336 GB | 4.3 GB | 6.7 % |
+| LL2304@144 (ran) | 13 | 0.0425 GB | 6.1 GB | 9.6 % |
+| LL2880@192 (target) | 13 | 0.0664 GB | **12.7 GB** | 20 % |
+
+So the @192 attempts were QUEUE-starved, not walled — the port would
+have bought ~0 % (as the consult itself predicted for steady state)
+against a wall that does not exist at these sizes. THRESHOLD for the
+future: the replicated broadcast reaches the limit when
+`n_proc x field_bytes > 63.8 GB`, i.e. a single 2-D f32 geometry field
+above ~332 MB — around LL5760x11520 at 256 processes. Revisit there,
+not before. (The SHARDED-geometry mode already uses the assert-free
+`checked_shard_put` from PR #1458 and is unaffected either way.)
