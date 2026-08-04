@@ -2292,3 +2292,39 @@ the at-scale model); the scaling story there is the s10@128 record
 (14.98 GC/s), the DECELERATING matched-tile cost (1.90 -> 1.46 per
 4x), and ensemble parallelism (+0.6 % co-execution). Deeper wins need
 XLA fusion-granularity work on unstructured ops — upstream-class.
+
+## Codex improvement consult (2026-08-04) + first verdicts
+
+Ranked candidate list (transcript
+`.physics-validator/scaling_campaign/codex_consult_improvements_2026-08-04.md`):
+(1) transfer fused+overlap to the unreceipted ocean LL2304@128 arm —
+TOP PICK; (2) stage-local packing past 29 CPs; (3) fuse the 2-D pencil
+wall pad; (4) MPAS s10@192; (5) MPAS profile-guided manual fusion;
+(6) port the ocean geometry-consistency fix to the atm lane + retry
+LL2880@192.
+
+### #3 REFUTED — the 2-D pencil fused wall pad is SLOWER (job 26692375)
+
+`pad_with_pole_bc_lat_multi_2d` was implemented (dtype-grouped single
+sendrecv pair per cut, the band lane's pattern), verified on 2 ranks
+value- and gradient-identical to the per-field path, then A/B'd at
+r512 / 512 ranks:
+
+| arm | ms/step |
+|---|---|
+| A off | 45.20 |
+| B fused | **49.87 (+9.4 %)** |
+| A2 off | 45.96 |
+
+Outside the 1.7 % A/A2 bracket in the WRONG direction, so the change
+was REVERTED (implementation + test + CI entry removed rather than
+left as dead code; recoverable from this session's history). PLAUSIBLE
+mechanism (not instrumented): a 2-D pencil's per-field lat slab is
+`n_lon_local`-wide — much smaller than the band lane's full-row slab —
+so the fused path's concatenate/slice memory traffic exceeds the
+sendrecv latency it removes. NOTE this does NOT contradict the band
+lane's fused win (`LEGOESM_LATLON_FUSED_HALO=1`, default on): different
+slab size, different balance. Lesson for the ledger: a lever confirmed
+on one decomposition is NOT transferable by analogy — every lane needs
+its own A/B, and this one paid for itself by catching a regression
+before it shipped.
