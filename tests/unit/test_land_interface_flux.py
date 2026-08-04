@@ -631,6 +631,20 @@ class TestConfigValidation:
                 land_mask_path="x.nc",
             ).validate_strict()
 
+    def test_validate_strict_rejects_unified_on_latlon_spmd(self):
+        """The lat-lon operator-split SPMD lane builds a FRESH per-band
+        pipeline that never receives f_land / slab_land_active, so the slab
+        SEB never steps and 'unified' is silently inert (codex R1 P1)."""
+        from legoesm.driver.config import GridConfig
+        with pytest.raises(ValueError, match="land_interface_flux"):
+            ExperimentConfig(
+                grid=GridConfig(grid_type="latlon"),
+                turbulence="holtslag_boville",
+                land_interface_flux="unified",
+                land_mask_path="x.nc",       # tile gate satisfied — must
+                enable_latlon_spmd=True,     # still reject the lane
+            ).validate_strict()
+
     def test_validate_strict_rejects_unified_with_ml_physics(self):
         """physics_parameterization='ml' computes its own surface fluxes,
         bypassing the turbulence surface layer — 'unified' would unify with

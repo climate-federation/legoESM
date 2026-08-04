@@ -2256,6 +2256,23 @@ class ExperimentConfig(NamedTuple):
                     "scheme's surface layer), so the slab would unify with a "
                     "law the atmosphere does not apply."
                 )
+            # The lat-lon operator-split SPMD lane builds a FRESH per-band
+            # pipeline (model_driver.build_physics_pipeline on band_grid) and
+            # never copies the post-construction land attributes that only
+            # ever land on self.physics (f_land, slab_land_active).  The band
+            # pipeline therefore sees land INACTIVE and skips the slab SEB
+            # entirely, so the flag would be silently inert (codex review P1).
+            # NB this is a property of the SPMD lane, not of this flag — slab
+            # land does not step there at all; guarding the flag is in scope,
+            # fixing that lane is not.
+            if self.enable_latlon_spmd:
+                errors.append(
+                    "land_interface_flux='unified' is consumed by the slab "
+                    "SEB, which the lat-lon operator-split SPMD lane never "
+                    "steps: enable_latlon_spmd=True builds a fresh per-band "
+                    "physics pipeline that never receives f_land / "
+                    "slab_land_active, so the flag would be silently inert."
+                )
         # Slab-land heat capacity [J/m^2/K]: must be positive-finite (the
         # semi-implicit denominator is C_land - dt*dflux_dT; C_land <= 0 flips
         # its sign and the update diverges).  Bounds span thin-skin (~1e4,
