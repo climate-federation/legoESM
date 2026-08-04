@@ -32,7 +32,7 @@ from matplotlib.lines import Line2D
 # (devices, ms/step). Job ids are the provenance for each series.
 SOURCES = {
     "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64), "
-                  "LL2048@64 26502539, LL2048@128 26534060, LL2304@96 26628072, @144 26657279",
+                  "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
@@ -51,10 +51,11 @@ PANELS = [
                 ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)]),
                 ("float32 (LL2048)", [(64, 6.73), (128, 5.58)]),
                 ("f32 (LL2304)", [(96, 7.87), (144, 5.78)]),
+                ("f32 LL2048 fused+ovl", [(64, 5.278), (128, 4.745)]),
                 ],
         scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60),
                  ("LL2880 @144", 144, 7.40)],
-        note="LL2880@144 = 58.3 GC/s;\nLL2304 96→144 eff 0.91",
+        note="fused+overlap: 4.745 ms @128\n= 46 GC/s, ratio 1.96 (bound)",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -122,6 +123,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (s8 lloyd-0)": "#009E73",
           "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
+          "f32 LL2048 fused+ovl": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -133,6 +135,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (s8 lloyd-0)": "v",
            "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
+           "f32 LL2048 fused+ovl": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 

@@ -2245,3 +2245,50 @@ factory: column-local vmix solves shard trivially; the
 barotropic/baroclinic split is the design work. Estimated days-scale
 feature with existing infra; staged as a follow-up, NOT attempted in
 this round.
+
+## FUSED HALO + OVERLAP: the stacked levers (jobs 26681636 / 26681858) — lat-lon at ratio 1.4
+
+The audit-item-7 SPMD fused multi-pad already existed OPT-IN
+(`LEGOESM_LATLON_SPMD_FUSED_HALO=1`, contract: "flip per deck only with
+a measured GPU A/B receipt") — census 41 -> 29 CPs/step at IDENTICAL
+bytes. The receipts:
+
+| arm | @64 (ms) | @128 (ms) |
+|---|---|---|
+| A off | 6.590 | 5.573 |
+| B fused | 6.264 (-5.4 %) | 5.325 (-4.5 %) |
+| C fused+overlap | **5.278 (-20.3 %)** | **4.745 (-15.0 %)** |
+| A2 off | 6.650 | 5.585 |
+
+* The combined effect EXCEEDS the additive expectation (20.3 % vs
+  13.8 % at @64; 15.0 % vs 12.9 % at @128) — CONSISTENT WITH fewer,
+  larger CPs giving the latency-hiding scheduler more to hide
+  (mechanism plausible, not instrumented).
+* **New LL2048@128 best: 4.745 ms = 46.0 GC/s.** The bound must be
+  REPRICED for the fused count (codex r26 — the lever moves the model
+  too): 29 CPs x 29.7 us + 18.54 MB / 12.1 GB/s = 2.394, bound
+  2.423 ms -> **measured/bound 1.96** (fit); sweep-priced at the new
+  ~639 KiB/message (linear interpolation 524 KiB -> 1 MiB rows,
+  ~88 us/CP): 29 x 88.2 + 29.7 us = 2.588 -> **~1.83**. @64: 5.278 vs
+  the compute-dominated 2.865 bound -> 1.84 (unchanged by count).
+* Parity: 23 tests green with the fused env ON; the COLLECTIVE PAYLOAD
+  is byte-identical to the per-field pads (local concat/split traffic
+  differs), A/A2 drift 0.2-0.9 %.
+* Wired: the lat-lon hundreds launchers set BOTH envs — code-path
+  validated (the exact 144-GPU points carry no dedicated A/B receipt);
+  everything else stays opt-in (cube force-disables latency hiding;
+  MPAS null).
+
+## MPAS closure: at the practical stack limit
+
+nsys (26680051): compute is a ~2.7 us MICROKERNEL storm (launch/
+scheduling-bound — explains the overlap null) and NCCL SendRecv medians
+~2x the clean wire estimate (skew absorbed in kernels). CUDA-graph
+levers REFUTED (26680791: min-graph-size = exact no-op; command-buffer
+with collectives +23 % WORSE). With protocol, partition, placement,
+combining, overlap and graphs all receipted null, single-trajectory
+MPAS stands at its practical XLA/NCCL stack limit (s9@64 ratio 2.82 on
+the at-scale model); the scaling story there is the s10@128 record
+(14.98 GC/s), the DECELERATING matched-tile cost (1.90 -> 1.46 per
+4x), and ensemble parallelism (+0.6 % co-execution). Deeper wins need
+XLA fusion-granularity work on unstructured ops — upstream-class.
