@@ -2666,6 +2666,126 @@ def compute_omega_hybrid(
     return omega
 
 
+def compute_omega_total(
+    vert_velocity_half: jax.Array,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array,
+    v_grad_lnps: jax.Array,
+    coord,
+) -> jax.Array:
+    r"""FULL pressure velocity :math:`\omega = Dp/Dt` at full levels [Pa/s].
+
+    This is the CMIP6 ``wap`` quantity.  It is the sum of ALL THREE terms of
+    the material derivative of pressure on a terrain-following coordinate --
+    the two the dycores' adiabatic-heating helpers
+    (:func:`compute_pressure_velocity` / :func:`compute_omega_hybrid`) already
+    return, PLUS the horizontal pressure-advection term those two deliberately
+    omit (the dycores add its heating contribution separately, through
+    ``kappa*T*v.grad(ln p_s)``).  Assembling ``wap`` from only the first two
+    would drop a term that is O(1) over sloping terrain and in strong
+    surface-pressure gradients.
+
+    Derivation.  On a coordinate ``eta`` whose pressure depends on the
+    horizontal position ONLY through ``p_s(x, t)`` -- true for BOTH families
+    used here, ``p = sigma * p_s`` (pure sigma) and ``p = A*p_ref + B*p_s``
+    (hybrid) -- the chain rule for a parcel gives::
+
+        omega = Dp/Dt
+              = (dp/dt)|_eta            (LOCAL, coordinate-surface tendency)
+              + v . grad_eta(p)          (HORIZONTAL advection of pressure)
+              + eta_dot * dp/deta        (VERTICAL transport across coord surfaces)
+
+    With ``dp/dp_s`` denoting the coordinate's own sensitivity of pressure to
+    surface pressure (``= sigma_full`` in pure sigma, ``= B_full`` in hybrid,
+    because ``A*p_ref`` is time- and space-independent), the first two terms
+    are::
+
+        (dp/dt)|_eta      = (dp/dp_s) * dp_s/dt                       [term 1]
+        v . grad_eta(p)   = (dp/dp_s) * v . grad(p_s)
+                          = (dp/dp_s) * p_s * v . grad(ln p_s)        [term 2]
+
+    and the third is exactly the half-level vertical mass flux the continuity
+    closure diagnosed, averaged to full levels::
+
+        eta_dot * dp/deta = p_s * sigma_dot   (sigma)   /   F   (hybrid) [term 3]
+
+    Terms 1 and 3 are supplied by the existing shared helpers; only term 2 is
+    added here.
+
+    SIGN CONVENTION (CMIP6 ``wap``, stated once and walked per term).
+    ``omega`` is positive for pressure INCREASING following the flow, i.e.
+    positive DOWNWARD; ascent gives NEGATIVE ``wap``.  Walking the terms in
+    this repo's conventions:
+
+    * ``sigma``/``B`` increase DOWNWARD (index 0 = model top, index -1 =
+      surface, ``sigma_half[0] = 0``, ``sigma_half[-1] = 1``) and are
+      non-negative, so each term keeps the sign of its own factor.
+    * term 1: falling surface pressure (``dp_s/dt < 0``) lowers the pressure
+      of every coordinate surface -> negative -> ascent.  Correct.
+    * term 2: flowing toward higher surface pressure
+      (``v . grad(ln p_s) > 0``) raises the parcel's pressure -> positive
+      -> descent.  Correct.
+    * term 3: ``sigma_dot`` (and the hybrid ``F``) is positive DOWNWARD --
+      the convention ``compute_sigma_dot_from_cumsum`` /
+      ``compute_mass_flux_from_cumsum`` produce and ``vertical_advection``
+      consumes -- so downward transport across coordinate surfaces is
+      positive.  Correct.
+
+    Parameters
+    ----------
+    vert_velocity_half : jax.Array
+        The coordinate's OWN half-level vertical velocity, shape
+        ``(..., nlev+1)``: ``sigma_dot`` [1/s] for a :class:`SigmaCoordinate`
+        (as returned by :func:`compute_sigma_dot_from_cumsum`) or the mass
+        flux ``F = eta_dot * dp/deta`` [Pa/s] for a
+        :class:`HybridSigmaPressureCoordinate` (as returned by
+        :func:`compute_mass_flux_from_cumsum`).  The asymmetry is inherited
+        from the two helpers this function delegates term 1+3 to.
+    p_s : jax.Array
+        Surface pressure [Pa], shape ``(...,)``.
+    dp_s_dt : jax.Array
+        Surface-pressure tendency [Pa/s], shape ``(...,)``.  Pass the
+        CONTINUITY-closure value that the same ``vert_velocity_half`` was
+        diagnosed with: a p_s hyperdiffusion / physics increment added
+        afterwards has no matching vertical mass flux, so including it would
+        make the three terms mutually inconsistent.
+    v_grad_lnps : jax.Array
+        ``v . grad(ln p_s)`` at FULL levels [1/s], shape ``(..., nlev)`` --
+        the RAW quantity, before any coordinate rescaling a caller may apply
+        for its adiabatic-heating term.
+    coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        ``omega`` at full levels [Pa/s], shape ``(..., nlev)``, positive
+        DOWNWARD.
+
+    Raises
+    ------
+    TypeError
+        On an unrecognised coordinate type -- never a silent default, which
+        would publish a wrong-coordinate omega (dispatch hardening).
+    """
+    if isinstance(coord, HybridSigmaPressureCoordinate):
+        # Terms 1+3: B_full * dp_s/dt + F_full.
+        omega = compute_omega_hybrid(vert_velocity_half, p_s, dp_s_dt, coord)
+        dp_dps = coord.B_full
+    elif isinstance(coord, SigmaCoordinate):
+        # Terms 1+3: sigma_full * dp_s/dt + p_s * sigma_dot_full.
+        omega = compute_pressure_velocity(
+            vert_velocity_half, p_s, dp_s_dt, coord)
+        dp_dps = coord.sigma_full
+    else:
+        raise TypeError(
+            "compute_omega_total: unsupported vertical coordinate "
+            f"{type(coord).__name__}; expected SigmaCoordinate or "
+            "HybridSigmaPressureCoordinate")
+
+    # Term 2 -- horizontal advection of pressure, (dp/dp_s) * p_s * v.grad(ln p_s).
+    return omega + dp_dps * p_s[..., None] * v_grad_lnps
+
+
 # ==============================================================================
 # Height-based vertical coordinate (non-hydrostatic)
 # ==============================================================================

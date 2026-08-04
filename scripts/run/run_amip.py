@@ -362,6 +362,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "parity with the coupled cube/latlon pipeline — "
                              "the ERA5-IC lane's extreme Antarctic columns are "
                              "a suspected fp32-optics NaN trigger).")
+    parser.add_argument("--mpas-k-h-scale", type=float, default=None,
+                        dest="mpas_k_h_scale",
+                        help="MPAS: decouple the SCALAR (temperature) "
+                             "Laplacian K_h from the momentum one. Both "
+                             "normally come from --a-h-scale, so every "
+                             "a_h_scale experiment is a TWO-variable change. "
+                             "Same scale as --a-h-scale; unset (default) "
+                             "keeps the legacy K_h == nu_del2 coupling. Use "
+                             "--a-h-scale 0 --mpas-k-h-scale 0.25 to isolate "
+                             "the momentum Laplacian, and --a-h-scale 0.25 "
+                             "--mpas-k-h-scale 0 to isolate the scalar one.")
+    parser.add_argument("--mpas-nu-del4-t-scale", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_del4_T_scale,
+                        dest="mpas_nu_del4_T_scale",
+                        help="MPAS HORIZONTAL biharmonic hyperdiffusion of T, "
+                             "as a multiple of the momentum nu_del4 that "
+                             "--hyperdiff-scale already sets (1.0 = same "
+                             "coefficient). K_h — T's ONLY horizontal "
+                             "dissipation — is tied to --a-h-scale, so "
+                             "a_h_scale=0 leaves T undamped at every scale "
+                             "while momentum keeps its biharmonic; this "
+                             "restores grid-scale T control scale-selectively "
+                             "(res-5, dt=75 s: single-cell spike tau 2.56 h at "
+                             "1.0 vs 9.8 h for the a_h=0.25 Laplacian, but "
+                             "2000 km wave 6.34 d vs 2.91 d). 0 disables "
+                             "(default).")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -660,6 +686,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "liquid cloud (the AMIP albedo bias) WITHOUT a "
                              "surface-evaporation trade.  0 = off (default); "
                              "warm-start/ramp only (cold-start caveat).")
+    # Louis stability-function / mixing-length scalars.  These ExperimentConfig
+    # fields existed and were documented as targeting LouisConfig, but until
+    # d8268e6fa nothing threaded them into the kernel, so there was no point
+    # exposing them.  ``turbulence_config_for`` now threads any NON-DEFAULT
+    # value into the active louis sub-config on every lane (FV / MPAS /
+    # spectral), so give them CLI flags.  Defaults equal the LouisConfig
+    # defaults => no _replace => byte-identical.
+    # (No --louis-ck / --louis-z0 / --louis-ch-neutral / --louis-cd-neutral:
+    #  louis_Ck has no LouisConfig field at all, and z0 / Ch_neutral /
+    #  Cd_neutral target SurfaceLayerConfig, which is trained through the AIMIP
+    #  classical bundle rather than this scalar route.  All four are rejected by
+    #  validate_strict when set away from their default rather than accepted and
+    #  ignored.)
+    parser.add_argument("--louis-l-mix-max", dest="louis_l_mix_max",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_l_mix_max,
+                        help="Louis asymptotic (free-troposphere) mixing length "
+                             "[m] (LouisConfig.l_mix_max, default 100). HIGHER "
+                             "=> stronger free-tropospheric vertical mixing. "
+                             "Bounds 20..400.")
+    parser.add_argument("--louis-ri-crit", dest="louis_Ri_crit",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_Ri_crit,
+                        help="Louis critical Richardson number "
+                             "(LouisConfig.Ri_crit, default 0.25) above which "
+                             "stable-regime mixing is shut off. Bounds 0.1..0.6.")
+    parser.add_argument("--louis-b-louis", dest="louis_b_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_b_louis,
+                        help="Louis stability-function coefficient b "
+                             "(LouisConfig.b_louis, default 5.0). Bounds 2..10.")
+    parser.add_argument("--louis-c-louis", dest="louis_c_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_c_louis,
+                        help="Louis unstable-regime coefficient c "
+                             "(LouisConfig.c_louis, default 16.6). Bounds 5..30.")
+    parser.add_argument("--louis-d-louis", dest="louis_d_louis",
+                        type=float, default=_EXPERIMENT_DEFAULTS.louis_d_louis,
+                        help="Louis stable-regime coefficient d "
+                             "(LouisConfig.d_louis, default 5.0). Bounds 2..15.")
     # Shared validator: composites keep working and a typo is now rejected at
     # the CLI (this flag previously had `type=str` with no validation at all).
     parser.add_argument("--gravity-wave-drag", type=parse_gwd_spec,
@@ -807,6 +869,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg/m] for --diagnostic-condensate-scheme="
                              "adiabatic (None=CloudConfig default 1.5e-6 ~ "
                              "1.5 g/kg per km; bounds 5e-7..3e-6).")
+    parser.add_argument("--cloud-nc-default", dest="cloud_Nc_default",
+                        type=float, default=None,
+                        help="Specified cloud-droplet number concentration "
+                             "[1/m^3] for the M2005 gamma-PSD liquid effective "
+                             "radius (CloudConfig.Nc_default). Read in EVERY "
+                             "column of a specified-Nc double-moment run "
+                             "(morrison with predict_Nc=False), where the "
+                             "default 1e8 is a CONTINENTAL value applied "
+                             "globally; marine air is ~1e7-5e7. LOWER => larger "
+                             "droplets => less reflective liquid cloud (the "
+                             "SW/albedo lever). None=CloudConfig default 1e8; "
+                             "bounds 1e7..1e9.")
+    parser.add_argument("--cloud-conv-cloud-coeff",
+                        dest="cloud_conv_cloud_coeff",
+                        type=float, default=None,
+                        help="Slingo (1987) convective cloud amount per e-fold "
+                             "of convective precip (CloudConfig.conv_cloud_coeff). "
+                             "HIGHER => more anvil cover for the same convective "
+                             "rain. With the defaults (coeff 0.04, cap 0.15) the "
+                             "companion --cloud-conv-cloud-max cap only binds "
+                             "above ~43x the P0 reference rate, so this is the "
+                             "lever that actually moves tropical anvil cover. "
+                             "None=CloudConfig default 0.04; bounds 0.0..0.5.")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Add the convective (thin-cirrus) cloud-fraction "
@@ -1768,6 +1853,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_nu_del4_T_scale=args.mpas_nu_del4_T_scale,
+        mpas_k_h_scale=args.mpas_k_h_scale,
         mpas_vert4_t_filter=args.mpas_vert4_t_filter,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         conservation_fixer=args.conservation_fixer,
@@ -1901,6 +1988,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
+        louis_l_mix_max=args.louis_l_mix_max,
+        louis_Ri_crit=args.louis_Ri_crit,
+        louis_b_louis=args.louis_b_louis,
+        louis_c_louis=args.louis_c_louis,
+        louis_d_louis=args.louis_d_louis,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
@@ -1916,6 +2008,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
+        cloud_Nc_default=args.cloud_Nc_default,
+        cloud_conv_cloud_coeff=args.cloud_conv_cloud_coeff,
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,

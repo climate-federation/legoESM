@@ -175,8 +175,13 @@ def test_atm_scalar_map_is_pipeline_threaded():
         # scheme leaf, and get_gwd_fn hands the pipeline that LEAF as gwd_config.
         "HinesConfig": {"gravity_wave_drag": "hines"},
         "McFarlaneConfig": {"gravity_wave_drag": "mcfarlane"},
+        # turbulence: turbulence_config_for overlays the NON-DEFAULT louis_*
+        # scalars onto the louis leaf, and _resolve_turbulence hands the
+        # pipeline that LEAF as turbulence_config.
+        "LouisConfig": {"turbulence": "louis"},
     }
     resolved_attr = {
+        "LouisConfig": "turbulence_config",
         "HinesConfig": "gwd_config",
         "McFarlaneConfig": "gwd_config",
         "SBMConfig": "convection_config",
@@ -207,9 +212,12 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 "sundqvist",
                 rh_crit=getattr(pipe, "_cloud_rh_crit", None),
                 q_c_diagnostic=getattr(pipe, "_cloud_q_c_diagnostic", None),
+                conv_cloud_coeff=getattr(
+                    pipe, "_cloud_conv_cloud_coeff", None),
                 conv_cloud_max=getattr(pipe, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     pipe, "_cloud_conv_cloud_condensate", None),
+                Nc_default=getattr(pipe, "_cloud_Nc_default", None),
                 cloud_inhomogeneity_factor=getattr(
                     pipe, "_cloud_inhomogeneity_factor", None),
                 cloud_optics_inhomogeneity=getattr(
@@ -290,6 +298,12 @@ def test_atm_scalar_map_has_no_under_claim():
          lambda pipe, field: getattr(pipe.gwd_config, field, None)),
         ("McFarlaneConfig", "mcfarlane_", {"gravity_wave_drag": "mcfarlane"},
          lambda pipe, field: getattr(pipe.gwd_config, field, None)),
+        # Louis: turbulence_config_for overlays the flat louis_* scalars onto
+        # the louis leaf, which get_turbulence_fn returns as turbulence_config.
+        # LouisConfig.b_heat_ratio has no louis_b_heat_ratio scalar, so the
+        # ec_lower lookup below skips it (genuinely unreachable, baselined).
+        ("LouisConfig", "louis_", {"turbulence": "louis"},
+         lambda pipe, field: getattr(pipe.turbulence_config, field, None)),
     ]
     # Companion drift-guard: the family list scanned below must exactly match
     # the config classes present in the verified allowlist map.  The selector /

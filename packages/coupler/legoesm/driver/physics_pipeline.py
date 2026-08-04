@@ -295,8 +295,10 @@ class PhysicsPipeline:
         # byte-identical); set by build_physics_pipeline from ExperimentConfig.
         self._cloud_rh_crit = None
         self._cloud_q_c_diagnostic = None
+        self._cloud_conv_cloud_coeff = None
         self._cloud_conv_cloud_max = None
         self._cloud_conv_cloud_condensate = None
+        self._cloud_Nc_default = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
         self._cloud_partial_coverage_optics = None
@@ -2064,9 +2066,11 @@ class PhysicsPipeline:
                                   and conv_precip is not None),
                 rh_crit=getattr(self, "_cloud_rh_crit", None),
                 q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
+                conv_cloud_coeff=getattr(self, "_cloud_conv_cloud_coeff", None),
                 conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     self, "_cloud_conv_cloud_condensate", None),
+                Nc_default=getattr(self, "_cloud_Nc_default", None),
                 cloud_inhomogeneity_factor=getattr(
                     self, "_cloud_inhomogeneity_factor", None),
                 cloud_optics_inhomogeneity=getattr(
@@ -3837,6 +3841,9 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)
+    pipeline._cloud_conv_cloud_coeff = getattr(
+        config, 'cloud_conv_cloud_coeff', None)
+    pipeline._cloud_Nc_default = getattr(config, 'cloud_Nc_default', None)
     pipeline._cloud_inhomogeneity_factor = getattr(
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(

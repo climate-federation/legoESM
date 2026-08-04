@@ -266,6 +266,34 @@ class DycoreConfig(NamedTuple):
     # sponge/polar-filter passthrough).  Appended last to preserve
     # positional ABI (codex #1029 r3 #2).
     sb81_omega_conversion: bool = False
+    # HORIZONTAL biharmonic hyperdiffusion of T on the MPAS hydrostatic dycore,
+    # as a MULTIPLE of the momentum ``nu_del4`` this same ``hyperdiff_scale``
+    # already produces (so 1.0 gives T exactly the biharmonic u has, and there
+    # is no second magic coefficient).  Why it exists: ``component_factory``
+    # feeds ``a_h_scale`` to BOTH ``nu_del2`` (momentum Laplacian) and ``K_h``
+    # (scalar T Laplacian), and ``K_h`` is the ONLY horizontal dissipation T
+    # ever gets — so ``a_h_scale=0``, the setting that recovers midlatitude
+    # storm tracks, leaves T with NO horizontal damping at any scale while
+    # momentum keeps its biharmonic.  Setting this > 0 restores T's grid-scale
+    # control scale-selectively (res-5 SCVT, dt=75 s: single-cell spike
+    # τ = 2.56 h at scale 1.0 vs 9.8 h for the a_h=0.25 Laplacian; 2000 km wave
+    # τ = 6.34 d vs 2.91 d — more grid-noise control, LESS eddy damping).
+    # Only wired to the MPAS PE dycore.  0.0 (default) is an exact no-op.
+    # Appended last to preserve positional ABI.
+    mpas_nu_del4_T_scale: float = 0.0
+    # DECOUPLE the scalar (temperature) Laplacian from the momentum one on the
+    # MPAS PE dycore.  ``component_factory`` sets ``nu_del2 = K_h = A_h``, both
+    # from ``a_h_scale``, so EVERY ``a_h_scale`` experiment is a TWO-variable
+    # change: it moves the momentum vector Laplacian AND T's only horizontal
+    # dissipation together.  ``None`` (default) keeps that legacy coupling
+    # bit-identically; a float overrides ONLY ``K_h``, using the SAME
+    # ``compute_diffusion`` formula with ``a_h_scale`` replaced by this value,
+    # so ``mpas_k_h_scale`` and ``a_h_scale`` are on one common scale.  This
+    # exists to make the confound separable as a pure config experiment
+    # (a_h_scale=0 + mpas_k_h_scale=0.25 isolates the momentum Laplacian;
+    # a_h_scale=0.25 + mpas_k_h_scale=0 isolates the scalar one).
+    # Appended last to preserve positional ABI.
+    mpas_k_h_scale: float | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -619,8 +647,25 @@ class ExperimentConfig(NamedTuple):
     # may leave (breaks the cloud-temperature runaway that full reduction caused).
     # None => CloudConfig default (0.0 = no floor).
     cloud_clubb_cf_override_floor: float | None = None
+    # Slingo (1987) convective cloud-amount per e-fold of convective precip
+    # (CloudConfig.conv_cloud_coeff).  HIGHER => more cumulus/anvil cover for
+    # the same convective rain.  Its neighbour ``cloud_conv_cloud_max`` is a
+    # CAP, so with the production defaults (coeff 0.04, cap 0.15) the cap only
+    # binds above ~43x the P0 reference rate; without this knob a calibration
+    # member could only move the cap, which is inert over most of the tropics.
+    # None => CloudConfig default 0.04.  Bounds (0.0, 0.5).
+    cloud_conv_cloud_coeff: float | None = None
     cloud_conv_cloud_max: float | None = None
     cloud_conv_cloud_condensate: float | None = None
+    # Specified cloud-droplet number concentration [1/m^3] for the M2005
+    # gamma-PSD liquid effective radius (CloudConfig.Nc_default), used wherever
+    # the prognostic droplet-number tracer is 0/garbage — i.e. EVERY column of a
+    # specified-Nc double-moment run (morrison with predict_Nc=False).  The
+    # default 1.0e8 is a CONTINENTAL concentration applied globally, including
+    # over ocean where ~1e7-5e7 is observed; LOWER => larger droplets => less
+    # reflective liquid cloud (the shortwave/albedo lever).  None => CloudConfig
+    # default 1.0e8.  Bounds (1e7, 1e9).
+    cloud_Nc_default: float | None = None
     # Diagnostic in-cloud condensate vertical structure for the stratiform
     # radiative floor (CloudConfig.diagnostic_condensate_scheme):
     #   "constant"  — flat q_c_diagnostic at every cloudy level (validated
@@ -1464,6 +1509,33 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        if not (math.isfinite(d.mpas_nu_del4_T_scale)
+                and 0.0 <= d.mpas_nu_del4_T_scale <= 1.0e3):
+            errors.append(
+                "dycore.mpas_nu_del4_T_scale (horizontal T biharmonic, as a "
+                "multiple of the momentum nu_del4) must be a finite value in "
+                f"[0, 1e3], got {d.mpas_nu_del4_T_scale!r}")
+        elif d.mpas_nu_del4_T_scale > 0.0 and d.discretization != "mpas":
+            # Fail loudly rather than silently ignore: only the MPAS PE
+            # factory branch forwards nu_del4_T (same contract as
+            # ``mpas_qv_smooth_del2_m2s`` / ``refuse_unwired_moisture_flux_form``).
+            errors.append(
+                "dycore.mpas_nu_del4_T_scale is an MPAS-lane knob; "
+                f"discretization={d.discretization!r} would silently ignore "
+                "it. Set it to 0.0 or select discretization='mpas'.")
+        if d.mpas_k_h_scale is not None:
+            if not (math.isfinite(d.mpas_k_h_scale)
+                    and 0.0 <= d.mpas_k_h_scale <= 1.0e3):
+                errors.append(
+                    "dycore.mpas_k_h_scale (scalar-diffusion scale, decoupled "
+                    "from a_h_scale) must be None or a finite value in "
+                    f"[0, 1e3], got {d.mpas_k_h_scale!r}")
+            elif d.discretization != "mpas":
+                errors.append(
+                    "dycore.mpas_k_h_scale is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} would silently "
+                    "ignore it. Set it to None or select "
+                    "discretization='mpas'.")
         # Dynamical-core axis membership.  Mirror the gate in
         # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
         # config-validation time, instead of deep in the solver factory at JIT.
@@ -1625,6 +1697,31 @@ class ExperimentConfig(NamedTuple):
         if not (0.0 <= self.autoconv_pe_max <= 1.0):
             errors.append(
                 f"autoconv_pe_max must be in [0, 1], got {self.autoconv_pe_max}"
+            )
+        # Cross-field: on BECHTOLD the IFS in-plume rain formation produces the
+        # rain profile itself and sets ``_split_done`` BEFORE the precip-split
+        # dispatch (bechtold.py:2855-2908 — the ``elif`` at 2911 is the only
+        # branch that runs the split, and line 3198 skips the late block), so a
+        # requested Sundqvist autoconversion split can NEVER execute while the
+        # in-plume path is on.  ``autoconv_q_c_crit`` / ``autoconv_pe_max`` are
+        # then silently inert, which is what the 2026-08-01 calibration sweep
+        # measured (a full-range A/B on both scalars moved rsut by 0.00 W/m^2 on
+        # the production MPAS lane).  Refuse at CONFIG time — the same class the
+        # morrison_* scheme gate above closes, and the resolver never sees the
+        # combination as an error on its own.  Scoped to bechtold: no other
+        # mass-flux scheme has an in-plume path (TiedtkeConfig has no
+        # ``use_ifs_inplume_precip`` field), so their split still runs.
+        if (self.convective_precip_split == "autoconversion"
+                and self.convection == "bechtold"
+                and self.bechtold_use_ifs_inplume_precip):
+            errors.append(
+                "convective_precip_split='autoconversion' is UNREACHABLE while "
+                "bechtold_use_ifs_inplume_precip=True: the IFS in-plume rain "
+                "formation preempts the detrainment split, so autoconv_q_c_crit "
+                "/ autoconv_pe_max would be silently ignored. Pass "
+                "--no-bechtold-use-ifs-inplume-precip to use the split, or keep "
+                "convective_precip_split='constant' and tune the in-plume "
+                "conversion knobs (bechtold_rprcon / bechtold_dnoprc) instead."
             )
         if self.bechtold_conv_top_pa <= 0.0:
             errors.append(
@@ -1848,6 +1945,23 @@ class ExperimentConfig(NamedTuple):
                     f"cloud-path radiation (rrtmgp/rrtmg); radiation="
                     f"{self.radiation!r} ignores cloud paths."
                 )
+        # The RATE is read ONLY by ``_adiabatic_incloud_condensate``
+        # (cloud_fraction.py), which runs only under the 'adiabatic' scheme, so
+        # setting it while the scheme is 'constant' calibrates a parameter the
+        # run never reads.  The 2026-08-01 sweep did exactly that (full-range
+        # A/B moved rsut by 0.00 W/m^2).  Completes the guard family above,
+        # which pins the SCHEME's inert combinations but not the rate's.
+        if (self.cloud_adiabatic_lwc_rate is not None
+                and self.cloud_diagnostic_condensate_scheme != "adiabatic"):
+            errors.append(
+                f"cloud_adiabatic_lwc_rate={self.cloud_adiabatic_lwc_rate!r} is "
+                "read ONLY by the 'adiabatic' diagnostic-condensate scheme, but "
+                "cloud_diagnostic_condensate_scheme="
+                f"{self.cloud_diagnostic_condensate_scheme!r}; the override "
+                "would be silently inert. Set "
+                "cloud_diagnostic_condensate_scheme='adiabatic' to use it, or "
+                "drop the rate."
+            )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "
@@ -2245,6 +2359,63 @@ class ExperimentConfig(NamedTuple):
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
             )
+        # Louis stability-function scalars that ARE threaded into the kernel by
+        # turbulence_config_for: bounds mirror LouisConfig.__param_spec__ /
+        # aimip_params.PARAM_CONSTRAINTS so an out-of-range knob fails here
+        # rather than deep in the stability functions.  (The not(lo<=x<=hi)
+        # form also rejects NaN/Inf.)
+        for _f, _lo, _hi in (
+            ("louis_l_mix_max", 20.0, 400.0),
+            ("louis_Ri_crit", 0.1, 0.6),
+            ("louis_b_louis", 2.0, 10.0),
+            ("louis_c_louis", 5.0, 30.0),
+            ("louis_d_louis", 2.0, 15.0),
+        ):
+            _v = getattr(self, _f)
+            if not (_lo <= _v <= _hi):
+                errors.append(
+                    f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
+        # Louis scalars that are NOT threaded anywhere: REFUSE a non-default
+        # value instead of accepting it and running different physics than the
+        # user asked for (the exposed-but-ignored class this repo raises on).
+        #   louis_Ck            — LouisConfig has NO Ck field at all; the Louis
+        #                         stability functions take b/c/d, not a Ck.
+        #   louis_z0 / louis_Ch_neutral / louis_Cd_neutral
+        #                       — these name SurfaceLayerConfig fields, but
+        #                         apply_surface_flux_config threads only
+        #                         bulk_scheme / gustiness_w_zi /
+        #                         thermo_convention / stability_scheme, so the
+        #                         values never reach the surface layer.  The
+        #                         SurfaceLayerConfig params are calibrated
+        #                         through the AIMIP classical bundle
+        #                         (aimip_params.surface_*), which is the
+        #                         supported route; see the conscious exclusion
+        #                         note in _params_reachability_baseline.py.
+        # Left at their defaults they are harmless (they equal the scheme
+        # defaults), so only a CHANGED value is an error.
+        # The default comes from ``_field_defaults`` so the guard cannot drift
+        # from the declaration above it.
+        for _f, _why in (
+            ("louis_Ck",
+             "LouisConfig has no 'Ck' field (the Louis stability functions are "
+             "parameterised by b_louis/c_louis/d_louis)"),
+            ("louis_z0",
+             "nothing threads it into SurfaceLayerConfig.z0"),
+            ("louis_Ch_neutral",
+             "nothing threads it into SurfaceLayerConfig.Ch_neutral"),
+            ("louis_Cd_neutral",
+             "nothing threads it into SurfaceLayerConfig.Cd_neutral"),
+        ):
+            if getattr(self, _f) != self._field_defaults[_f]:
+                errors.append(
+                    f"{_f}={getattr(self, _f)!r} would be SILENTLY IGNORED: "
+                    f"{_why}. Setting it changes nothing in the run, so it is "
+                    "refused rather than accepted. Calibrate the surface layer "
+                    "through the AIMIP classical parameter bundle "
+                    "(aimip_params), or use the threaded Louis scalars "
+                    "louis_l_mix_max / louis_Ri_crit / louis_{b,c,d}_louis."
+                )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
@@ -2331,8 +2502,10 @@ class ExperimentConfig(NamedTuple):
         for _f, _lo, _hi in (
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            ("cloud_conv_cloud_coeff", 0.0, 0.5),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
+            ("cloud_Nc_default", 1.0e7, 1.0e9),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
             ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),

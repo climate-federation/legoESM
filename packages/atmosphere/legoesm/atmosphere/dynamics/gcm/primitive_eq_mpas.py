@@ -63,6 +63,7 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     compute_sigma_dot_from_cumsum,
     compute_mass_flux_from_cumsum,
+    compute_omega_total,
     vertical_advection,
     vertical_advection_hybrid,
     vertical_advection_theta,
@@ -188,6 +189,27 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # not one operation in the tracer block changes.  Last field to preserve
     # positional ABI.
     moisture_flux_form: bool = False
+    # #1354 second mode: HORIZONTAL biharmonic hyperdiffusion of T [m⁴/s] —
+    # ``dT/dt -= nu_del4_T · ∇²(∇²T)`` — the scalar analogue of the momentum
+    # ``nu_del4``.  Motivation: ``K_h`` is the ONLY horizontal dissipation this
+    # dycore ever applies to T (``nu_del4`` acts on ``u`` only, ``nu_del4_ps``
+    # on ``p_s`` only, and the tracers get none at all), and the driver ties
+    # ``K_h`` to the SAME ``a_h_scale`` as ``nu_del2``.  Setting
+    # ``a_h_scale = 0`` to recover storm tracks therefore drops T's horizontal
+    # damping to ZERO AT EVERY SCALE, while momentum keeps its biharmonic —
+    # measured on the res-5 SCVT mesh (dc_min = 200.6 km, dt = 75 s) a
+    # single-cell T spike decays with τ = 9.8 h under ``K_h`` at
+    # ``a_h_scale = 0.25`` and not at all at 0.  The biharmonic restores
+    # grid-scale control SCALE-SELECTIVELY: at ``nu_del4_T = nu_del4``
+    # (1.87e16 m⁴/s) the same single-cell spike decays with τ = 2.56 h (3.8×
+    # FASTER than the a_h=0.25 Laplacian) while a 2000 km wave sees τ = 6.34 d
+    # and a 4000 km wave τ = 101 d (2.2× and 8.7× SLOWER than that Laplacian) —
+    # i.e. more grid-noise control for less synoptic-eddy damping.  Reuses the
+    # ``div(grad T)`` the ``K_h`` batch already builds when both are on, so the
+    # incremental cost is one gradient + one divergence per RHS evaluation.
+    # 0.0 (default) is an exact no-op — the whole term is behind a Python
+    # ``if`` on this STATIC float.  Last field to preserve positional ABI.
+    nu_del4_T: float = 0.0
 
 
 # ============================================================================
@@ -291,7 +313,8 @@ def mpas_hydrostatic_tendencies(
     config: MPASPrimitiveEquationConfig = MPASPrimitiveEquationConfig(),
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
-) -> MPASHydrostaticTendencies:
+    return_omega: bool = False,
+):
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
     Parameters
@@ -303,10 +326,27 @@ def mpas_hydrostatic_tendencies(
     physics_tendency : MPASHydrostaticTendencies, optional
     dt : float
         Time step (needed for APVM correction).
+    return_omega : bool, optional
+        STATIC diagnostic gate (a Python bool in a closure, NOT a traced
+        value -- ``jnp.where`` would trace both branches).  Default ``False``
+        computes NOTHING extra and returns the tendencies exactly as before,
+        so the hot RK path is byte-identical.  ``True`` additionally assembles
+        the CMIP6 ``wap`` pressure velocity and CHANGES THE RETURN to
+        ``(tendencies, omega)`` -- see :meth:`MPASPrimitiveEquationModel.diagnose_omega`,
+        the only production caller, which runs it once per DIAGNOSTIC interval
+        (not per step).  The extra work is one add + two multiplies on an
+        ``(nCells, nlev)`` array: every expensive input (the flux-form mass
+        divergence, its cumsum, sigma-dot / mass flux, ``v.grad(ln p_s)``) is
+        already in hand.
 
     Returns
     -------
     MPASHydrostaticTendencies
+        When ``return_omega`` is ``False`` (the default).
+    tuple[MPASHydrostaticTendencies, jax.Array]
+        When ``return_omega`` is ``True``: the tendencies plus ``omega``
+        [Pa/s] at cell centres and full levels, shape ``(nCells, nlev)``,
+        POSITIVE DOWNWARD (the CMIP6 ``wap`` convention).
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
@@ -351,9 +391,15 @@ def mpas_hydrostatic_tendencies(
     # it has 1 + 1 = ``nlev + 1`` slots.  Saves one full
     # ``gradient_edge`` (2D) call per RHS evaluation — same Loop 148/159
     # exploit as the latlon PE (B, ln_ps) batch.
+    #
+    # ``grad T`` is needed by EITHER scalar T diffusion: the ``K_h`` Laplacian
+    # (``K_h·div(grad T)``) or the ``nu_del4_T`` biharmonic (whose INNER
+    # Laplacian is the same ``div(grad T)``).  One static Python flag gates
+    # both, so with both off the batch is bit-identical to the pre-#1354 form.
+    _need_grad_T = config.K_h > 0 or config.nu_del4_T > 0
     n_cells_BT = bernoulli_3d.shape[0]
     nlev_BT = bernoulli_3d.shape[-1]
-    if config.K_h > 0:
+    if _need_grad_T:
         _BT_stack = jnp.stack(
             [bernoulli_3d, T_3d], axis=-1,
         )  # (nCells, nlev, 2)
@@ -364,7 +410,7 @@ def mpas_hydrostatic_tendencies(
         [_BT_flat, ln_ps[:, jnp.newaxis]], axis=-1,
     )  # (nCells, nlev*K + 1)
     _BTln_grad = gradient_edge_3d(_BTln_input, mesh)
-    if config.K_h > 0:
+    if _need_grad_T:
         _grad_BT = _BTln_grad[:, : nlev_BT * 2].reshape(-1, nlev_BT, 2)
         grad_B_3d = _grad_BT[..., 0]
         grad_T_3d_pre = _grad_BT[..., 1]
@@ -505,7 +551,7 @@ def mpas_hydrostatic_tendencies(
     # (dp_edge_3d is dA+dB·p_s at edges when hybrid, p_s_edge·Δσ when σ).
     _div_input_list.append(u_3d * dp_edge_3d)
     _idx_udp = len(_div_input_list) - 1
-    if config.K_h > 0:
+    if _need_grad_T:
         _div_input_list.append(grad_T_3d_pre)
         _idx_gradT = len(_div_input_list) - 1
 
@@ -518,7 +564,7 @@ def mpas_hydrostatic_tendencies(
     div_uT_3d = _div_outputs[..., _idx_uT]
     div_flux_lnps = _div_outputs[..., _idx_ulnps]
     div_dp_3d = _div_outputs[..., _idx_udp]  # flux-form div(u·dp), both branches
-    if config.K_h > 0:
+    if _need_grad_T:
         _div_grad_T = _div_outputs[..., _idx_gradT]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
@@ -526,6 +572,31 @@ def mpas_hydrostatic_tendencies(
     # computed in the batched blocks above; reuse the cached results.
     if config.K_h > 0:
         horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
+
+    # Scalar BIHARMONIC diffusion of T: ``-nu_del4_T · ∇²(∇²T)``.  Sign: for a
+    # mode with ``∇²T = -λT`` (λ > 0 for every non-constant mode of the
+    # discrete Laplacian) this is ``-nu_del4_T·λ²T`` — a damping, matching the
+    # ``nu_del4_ps`` surface-pressure form below and OPPOSITE in sign to the
+    # ``+K_h·∇²T`` Laplacian above (whose operator is already negative).  The
+    # INNER Laplacian is exactly the ``_div_grad_T`` the K_h batch produced, so
+    # only the OUTER grad+div is extra work.
+    #
+    # DISTRIBUTED SCOPE (exclusion deliberately inherited, not overlooked):
+    # ``operators_voronoi.vector_laplacian_del4_3d`` offers a ``mid_refresh``
+    # hook because a two-pass stencil spans 4 hops — twice an explicit-MPI
+    # ``halo_depth=2`` budget — so the outer pass would read a stale ring.
+    # This dycore passes ``mid_refresh`` NOWHERE: its momentum del4 (above) and
+    # its ``nu_del4_ps`` two-pass (below) both omit it, because the atmosphere
+    # MPAS lane is distributed by SPMD SHARDING (XLA inserts the collectives
+    # behind the ``cellsOnEdge``/``edgesOnCell`` gathers), not by an explicit
+    # halo ring with a hop budget.  Only ``ocean/dynamics/ocean_pe_mpas.py``,
+    # which owns a real ``halo_refresh``, threads it.  This term keeps the same
+    # scope as its two siblings; if this dycore ever gains an explicit-halo
+    # path, all THREE two-pass operators need the refresh together.
+    if config.nu_del4_T > 0:
+        _del4_T = divergence_cell_3d(
+            gradient_edge_3d(_div_grad_T, mesh), mesh)
+        horiz_adv_T_3d = horiz_adv_T_3d - config.nu_del4_T * _del4_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
@@ -587,6 +658,24 @@ def mpas_hydrostatic_tendencies(
         # κ·T·σ̇/σ is now folded into ``vert_thermo_T`` above — NO double-count.
         omega_ps = sigma_coord.sigma_full * dp_s_dt[:, None]
 
+    # ω diagnostic (CMIP6 ``wap``) references — free name bindings, no HLO;
+    # same cheap-stage-reference pattern as the #1311 budget ledger.
+    #
+    # ``_omega_dps_dt`` is pinned to the CONTINUITY-closure surface-pressure
+    # tendency, i.e. BEFORE the ``nu_del4_ps`` hyperdiffusion below and before
+    # the physics ``dp_s_dt`` increment in step 6.  Both of those change p_s
+    # with NO matching vertical mass flux, so folding them into ω while
+    # ``_omega_vert`` still came from the unfiltered closure would make the
+    # three ω terms mutually inconsistent.  This is also EXACTLY the
+    # ``dp_s_dt`` the dycore's own ``omega_ps`` (and hence its adiabatic
+    # heating) uses, so the published ``wap`` is the ω the thermodynamics saw.
+    _omega_dps_dt = dp_s_dt
+    # The coordinate's own half-level vertical velocity, (nCells, nlev+1):
+    # σ̇ [1/s] on pure sigma, the mass flux F = η̇·∂p/∂η [Pa/s] on hybrid.
+    # ``compute_omega_total`` dispatches on the coordinate type and consumes
+    # whichever the branch above produced.
+    _omega_vert = mass_flux if _hybrid else sigma_dot
+
     # Surface pressure hyperdiffusion: -nu * del2(del2(p_s))
     if config.nu_del4_ps > 0:
         del2_ps = divergence_cell(gradient_edge(p_s, mesh), mesh)
@@ -619,6 +708,37 @@ def mpas_hydrostatic_tendencies(
     # ``div_flux_lnps`` was already computed via the batched divergence
     # block above; just combine it with ``div_3d`` here.
     v_grad_lnps = div_flux_lnps - ln_ps[:, None] * div_3d  # (nCells, nlev)
+
+    # --- ω = Dp/Dt for the CMIP6 ``wap`` export (static gate; OFF by default,
+    #     so the RK hot path below is untouched).  Assembled from the THREE
+    #     terms of the material derivative on this coordinate by the shared
+    #     ``grids.vertical.compute_omega_total`` (full derivation + sign walk
+    #     in its docstring — do NOT re-derive it here):
+    #
+    #       term 1  (∂p/∂p_s)·dp_s/dt          local coordinate-surface tendency
+    #       term 2  (∂p/∂p_s)·p_s·v·∇ln p_s    horizontal advection of pressure
+    #       term 3  p_s·σ̇  /  F                vertical transport across surfaces
+    #
+    #     where ∂p/∂p_s = σ_full for the pure-σ branch (p = σ·p_s) and B_full
+    #     for the hybrid branch (p = A·p_ref + B·p_s).  Terms 1+3 are the
+    #     dycore's own ``compute_pressure_velocity`` / ``compute_omega_hybrid``.
+    #
+    #     ``v_grad_lnps`` MUST be taken here, BEFORE the hybrid rescale two
+    #     lines below turns it into the (B·p_s/p_adiab)-weighted form the
+    #     adiabatic-heating term needs — that rescaled array is ω_adv/p, not
+    #     v·∇ln p_s, and feeding it in would divide term 2 by the pressure a
+    #     second time.
+    #
+    #     SIGN: positive DOWNWARD (pressure increasing following the flow);
+    #     an ASCENDING column reports NEGATIVE wap.  σ (and B) increase
+    #     downward here — σ_half[0] = 0 at the model top, σ_half[-1] = 1 at
+    #     the surface — and σ̇ > 0 is downward, the convention
+    #     ``compute_sigma_dot_from_cumsum`` produces and ``vertical_advection``
+    #     consumes; so no sign flip is applied anywhere on this path.
+    omega_total = None
+    if return_omega:
+        omega_total = compute_omega_total(
+            _omega_vert, p_s, _omega_dps_dt, v_grad_lnps, sigma_coord)
 
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s),
     # so the adiabatic correction needs the same factor.
@@ -765,7 +885,7 @@ def mpas_hydrostatic_tendencies(
             for _i, k in enumerate(_tnames)
         }
 
-    return MPASHydrostaticTendencies(
+    _tend = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
         dT_dt=Field(data=dT_dt_3d, name="dT_dt",
@@ -776,6 +896,13 @@ def mpas_hydrostatic_tendencies(
                        dims=("nCells",), units="m²/s³"),
         tracer_tendencies=tracer_tends_out,
     )
+    # STATIC gate: the default return type / arity is unchanged, so every
+    # existing caller (RK stages, the SPMD sharder, the MPI step) is
+    # untouched.  ``omega_total`` is a raw array, not a Field, and never
+    # enters the RK carry — it is a per-interval DIAGNOSTIC, not a tendency.
+    if return_omega:
+        return _tend, omega_total
+    return _tend
 
 
 def _vertical_advection_edge(
@@ -867,6 +994,37 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             state, self.mesh, self.sigma_coord, self.config,
             physics_tendency=physics_tendency, dt=dt,
         )
+
+    def diagnose_omega(self, state: MPASHydrostaticState) -> jax.Array:
+        """Pressure velocity ω = Dp/Dt [Pa/s] at cell centres, full levels.
+
+        This is the CMIP6 ``wap`` field, POSITIVE DOWNWARD: an ascending
+        column reports a NEGATIVE value.  Shape ``(nCells, nlev)``, TOA-first
+        like every other 3-D field on this lane.
+
+        ω is not a prognostic and is not carried in the RK loop — it is
+        DIAGNOSED from the state by re-running the dycore's own RHS with the
+        static ``return_omega`` gate, which is the only way to get the
+        continuity-closure σ̇ / mass flux and ``v·∇ln p_s`` without
+        re-deriving them (CLAUDE.md: no duplicate dycore numerics).  It costs
+        one extra RHS evaluation, so it is meant for the DIAGNOSTIC cadence
+        (``diag_days``, typically 1 simulated day = hundreds of steps), not
+        for the hot loop; the CMOR feed treats it exactly like the other
+        state-derived 3-D fields (``ta``/``hus``/``ua``/``va``/``clw``), i.e.
+        as the INSTANTANEOUS end-of-interval sample.
+
+        Jitted separately from ``_step_jit`` so the step's compiled hot path
+        is unaffected.
+        """
+        return self._omega_jit(state)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _omega_jit(self, state: MPASHydrostaticState) -> jax.Array:
+        _, omega = mpas_hydrostatic_tendencies(
+            state, self.mesh, self.sigma_coord, self.config,
+            physics_tendency=None, dt=0.0, return_omega=True,
+        )
+        return omega
 
     def step(
         self,

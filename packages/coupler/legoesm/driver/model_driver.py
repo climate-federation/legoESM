@@ -233,8 +233,14 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         convective_cloud=(_conv_cloud and allow_convective_cloud),
         rh_crit=getattr(cfg, "cloud_rh_crit", None),
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
+        conv_cloud_coeff=getattr(cfg, "cloud_conv_cloud_coeff", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
+        # Specified droplet number for the M2005 liquid-r_eff PSD: the SW/albedo
+        # lever on the MPAS lane, where every column of a specified-Nc morrison
+        # run falls back to it.  Missing here would be the same silent-drop the
+        # inhomogeneity block below documents.
+        Nc_default=getattr(cfg, "cloud_Nc_default", None),
         # Sub-grid cloud-optics inhomogeneity + the diagnostic-condensate
         # selectors.  These were MISSING here while the FV pipeline forwarded
         # them (physics_pipeline.py:2067-2077), so on the MPAS lane
@@ -6113,6 +6119,38 @@ class ModelDriver:
             # Geographic cell-centre winds from the edge-normal velocity.
             u_east, v_north = reconstruct_cell_velocity(
                 state.u.data, self.grid)
+            # CMIP6 ``wap``: the pressure velocity omega = Dp/Dt [Pa/s],
+            # POSITIVE DOWNWARD, DIAGNOSED from the dycore's own RHS
+            # (``MPASPrimitiveEquationModel.diagnose_omega``) — omega is not a
+            # prognostic, and rebuilding it here would duplicate the
+            # continuity closure.  One extra RHS evaluation per DIAGNOSTIC
+            # interval (not per step); an instantaneous end-of-interval
+            # sample, like the other state-derived 3-D fields.  Skipped
+            # (never zeroed) on any dynamics object without the method — the
+            # non-hydrostatic MPAS model and the MPI-sharded lane both lack
+            # it, and a zero wap would read as a motionless atmosphere.
+            omega = None
+            _omega_fn = getattr(self.model, "diagnose_omega", None)
+            if _omega_fn is not None:
+                try:
+                    omega = _omega_fn(state)
+                    # Local shape gate: the model's mesh and ``self.grid``
+                    # are the same object on the serial lane, but a
+                    # 1-rank Voronoi layout could in principle hand the
+                    # feed a different cell count.  A mismatch raises
+                    # inside the feed's PHASE-1 contract and would cost the
+                    # WHOLE interval's CMOR means; drop wap alone instead.
+                    if tuple(omega.shape) != tuple(state.T.data.shape):
+                        raise ValueError(
+                            f"omega shape {tuple(omega.shape)} != state.T "
+                            f"{tuple(state.T.data.shape)}")
+                except Exception as exc:
+                    if not getattr(self, "_logged_omega_fallback", False):
+                        logger.warning(
+                            "  CMOR wap: omega diagnosis failed (%s); the "
+                            "field is SKIPPED for this run.", exc)
+                        self._logged_omega_fallback = True
+                    omega = None
             # Water vapour + cloud condensate (moist runs only).  q_c/q_i
             # feed the CMOR ``clt`` total-cloud-cover reduction; both are
             # absent on a dry run and on warm-rain microphysics (no q_i),
@@ -6215,6 +6253,23 @@ class ModelDriver:
             # drops the whole CMOR feed.
             tas = None
             ts = None
+            # CMOR ``ts`` (surface SKIN temperature) — NEVER the lowest-level
+            # air T (that would mislabel air T as skin T).  Read the anchor
+            # ``_run_mpas`` actually handed the physics
+            # (``forcing["T_sfc"]``, stashed per step): that is the field the
+            # radiation emitted from, so ``rlus = rlds - lw_net_sfc`` and
+            # ``ts`` stay a consistent pair.  Reconstructing the bare
+            # sst/sic blend instead DROPPED the land-lapse correction and
+            # the interactive multilayer-land skin, driving the published
+            # implied emissivity to 0.27 .. 1.08 over land (>1 is
+            # thermodynamically impossible).
+            #
+            # Read OUTSIDE the get_sst_sic try/except below: the anchor is
+            # self-sufficient, so an SST-loader failure must not drop a ``ts``
+            # we already hold.
+            _anchor = getattr(self, "_mpas_T_sfc_anchor", None)
+            if _anchor is not None:
+                ts = jnp.asarray(_anchor).reshape(-1)
             _get_sst_sic = getattr(self, "get_sst_sic", None)
             if _get_sst_sic is not None:
                 try:
@@ -6230,16 +6285,12 @@ class ModelDriver:
                     if (getattr(self.config, "mpas_ice_skin_prognostic", False)
                             and getattr(self, "_ice_T_skin", None) is not None):
                         _tas_ice = self._ice_T_skin
-                    # CMOR ``ts`` (surface SKIN temperature): the SAME
-                    # sst/sic/ice-skin blend the 2 m tas extrapolation and
-                    # the radiation/turbulence boundary use — NEVER the
-                    # lowest-level air T (that would mislabel air T as skin
-                    # T).  Only available when prescribed sst/sic are on
-                    # this path; skipped otherwise.  CAVEAT (documented,
-                    # matching the surface-flux boundary itself): over LAND
-                    # cells this carries the nearest-ocean SST fill of the
-                    # AMIP loader, not an interactive land-tile skin.
-                    if _tas_ice is not None:
+                    # ``ts`` FALLBACK (no stashed anchor): the sst/sic blend,
+                    # the pre-existing behaviour — correct over open ocean,
+                    # and the only surface information available on a lane
+                    # that never built a ``T_sfc`` forcing, or before the
+                    # first step of a restart link.
+                    if ts is None and _tas_ice is not None:
                         from legoesm.forcing.surface_utils import (
                             blend_surface_temperature,
                         )
@@ -6300,6 +6351,7 @@ class ModelDriver:
                 q_g=q_g,
                 u_east=u_east,
                 v_north=v_north,
+                omega=omega,
                 precip=precip,
                 phis=state.phis.data,
                 tas=tas,
@@ -6577,7 +6629,11 @@ class ModelDriver:
             # snapshot here; it predates this set but was omitted from it).
             _diag.cmip_snapshot_vars = {
                 "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "ts",
-                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs"}
+                "clt", "clwvi", "clivi", "clw", "cli", "zg", "hur", "hurs",
+                # ``wap`` is DIAGNOSED from the end-of-interval state (one
+                # extra dycore RHS at the feed), so it is a snapshot on
+                # exactly the same footing as ta/ua/va — not a time mean.
+                "wap"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
@@ -7085,7 +7141,7 @@ class ModelDriver:
                 _qv_smooth_nu, _cfl,
             )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
-        _compute_T_sfc = None
+        _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
         if _ice_skin_on and not _sst_forcing:
             raise ValueError(
@@ -7165,7 +7221,7 @@ class ModelDriver:
             def _blend_T_sfc(_sst, _sic):
                 # Blend prescribed SST with the ice component (constant T_ice,
                 # or the per-cell prognostic skin READ AT CALL TIME) and apply
-                # the land-lapse correction.  Split out of _compute_T_sfc so
+                # the land-lapse correction.  Split out of the SST sampling so
                 # the per-step loop can RE-ANCHOR from the cached daily SST/SIC
                 # against the freshly advanced skin every model step — the
                 # physics must consume the CURRENT skin, not the day-start
@@ -7196,12 +7252,10 @@ class ModelDriver:
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
-            def _compute_T_sfc(day):
-                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
-                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
-                # data), sea-ice-blended, as a (nCells,) surface temperature.
-                _sst, _sic = self.get_sst_sic(day)
-                return _blend_T_sfc(_sst, _sic)
+            # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
+            # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
+            # call site so the daily block can keep the sampled ``sic`` for the
+            # surface-albedo blend.)
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.
@@ -7232,6 +7286,85 @@ class ModelDriver:
                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
             )
 
+        # ---- Surface shortwave albedo boundary condition -------------------
+        # Radiation on this lane takes its surface albedo from the traced
+        # ``forcing["sfc_albedo"]`` built below.  Before that channel existed
+        # every column — land included — was solved at the scalar
+        # ``RRTMGPConfig.sfc_albedo`` (0.06, OPEN OCEAN), so 35.6% of the globe
+        # reflected shortwave like seawater.  Confirmed in three completed runs
+        # whose published rsus/rsds implied an albedo of exactly 0.0600 at both
+        # the global min and max.
+        #
+        # ``_create_physics`` already resolved the static land albedo in
+        # precedence order (albedo_land_path -> surfdata -> latitude-vegetation
+        # default) into ``self.physics.albedo_land``; the MPAS lane simply
+        # never read it.  Reuse that field rather than re-deriving it.
+        from legoesm.forcing.surface_utils import (
+            blend_surface_property, blended_surface_albedo,
+        )
+        _albedo_ocean = float(cfg.albedo_ocean)
+        _albedo_ice = float(cfg.albedo_ice)
+        _albedo_land_static = None
+        # RANK-LOCAL land test, computed here rather than reusing ``_has_land``
+        # (which only exists inside the mpas_land_beta / lapse guard above and
+        # would be undefined for a default config).  Rank-local is the RIGHT
+        # scope for the albedo: each rank blends its own cells, and an
+        # ocean-only rank correctly needs no land albedo.  No collective here,
+        # so a per-rank verdict cannot deadlock.
+        _alb_has_land = (_f_land_cells is not None
+                         and bool(jnp.any(_f_land_cells > 0.0)))
+        # Land fraction used by the albedo blend: None when there is no land,
+        # so the helper's "land fraction without a land albedo" guard fires
+        # only on a genuine misconfiguration.
+        _alb_f_land = _f_land_cells if _alb_has_land else None
+        _sea_albedo_day = None   # (nCells,) ocean/ice albedo of the last day
+        _sfc_albedo_on = (cfg.radiation != "none")
+        if _sfc_albedo_on and _alb_has_land:
+            _alb_land = getattr(self.physics, "albedo_land", None)
+            if _alb_land is None:
+                # Fail loudly: silently reverting to the ocean albedo over land
+                # is the defect this block exists to prevent.
+                raise ValueError(
+                    "MPAS run has a land fraction (f_land > 0) but no land "
+                    "surface albedo was resolved. Refusing to apply the OCEAN "
+                    f"albedo ({_albedo_ocean:g}) to every land column — that "
+                    "under-reflects shortwave over 100% of the land surface. "
+                    "Pass --albedo-land-file (a static land-albedo NetCDF), "
+                    "or --surfdata, or ensure the latitude-vegetation default "
+                    "(legoesm.surface_albedo.land_vegetation_albedo) is built "
+                    "in ModelDriver._create_physics."
+                )
+            _albedo_land_static = jnp.asarray(_alb_land).reshape(-1)
+            if _albedo_land_static.shape != (_ncell_alb := int(
+                    self.state.T.data.shape[0]),):
+                raise ValueError(
+                    f"land albedo shape {tuple(_albedo_land_static.shape)} != "
+                    f"(nCells={_ncell_alb},) — the albedo map was not "
+                    f"regridded onto this MPAS mesh."
+                )
+            # A NaN or an out-of-range albedo would poison every sunlit column
+            # silently (as a heating error, not a crash); refuse it here.
+            if not bool(jnp.all(jnp.isfinite(_albedo_land_static))):
+                raise ValueError(
+                    "land surface albedo contains non-finite values — refusing "
+                    "to hand a NaN surface boundary condition to radiation.")
+            _alb_lo = float(jnp.min(_albedo_land_static))
+            _alb_hi = float(jnp.max(_albedo_land_static))
+            if not (0.0 <= _alb_lo and _alb_hi <= 1.0):
+                raise ValueError(
+                    f"land surface albedo out of physical range "
+                    f"[{_alb_lo:.3f}, {_alb_hi:.3f}] — must lie in [0, 1].")
+            logger.info(
+                "  Surface albedo: ocean=%.3f ice=%.3f land=[%.3f,%.3f] "
+                "mean=%.3f (f_land mean=%.3f)",
+                _albedo_ocean, _albedo_ice, _alb_lo, _alb_hi,
+                float(jnp.mean(_albedo_land_static)),
+                float(jnp.mean(_f_land_cells)))
+        elif _sfc_albedo_on:
+            logger.info(
+                "  Surface albedo: ocean=%.3f ice=%.3f (no land fraction)",
+                _albedo_ocean, _albedo_ice)
+
         # ---- Interactive multilayer (Richards) land tile — MPAS port -------
         # Phase-1 coupling contract (tasks/mpas_land_port.md): the land is
         # stepped OUTSIDE the jitted atmosphere step, once per dt, forced by
@@ -7255,6 +7388,7 @@ class ModelDriver:
             )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
+        _land_albedo_cells = None      # (nCells,) land albedo of the last step
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
         if _land_ml_on:
@@ -7290,7 +7424,11 @@ class ModelDriver:
                 new_state, resp, _carbon = step_multilayer_land(
                     land_state, a2s, _lml_cfg, _lml_umin, DT,
                     lat=_lml_lat, doy=doy, land_params=_lml_params)
-                return new_state, resp.T_sfc
+                # resp.albedo is the END-OF-STEP land albedo, already
+                # snow-brightened by the tile (band_albedo / snow_albedo) and
+                # dry-soil-brightened.  It used to be discarded here, so the
+                # land tile's snow-albedo feedback never reached radiation.
+                return new_state, resp.T_sfc, resp.albedo
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -7773,7 +7911,7 @@ class ModelDriver:
                 if _fd_int != _last_force_day:
                     # Coupled ocean/land: step the coupler's (grid-agnostic) slab
                     # ocean + land for the elapsed day BEFORE re-sampling SST, so
-                    # the daily _compute_T_sfc below reads the just-updated ocean
+                    # the daily SST resample below reads the just-updated ocean
                     # SST (the coupled driver overrides get_sst_sic -> ocean SST).
                     # Daily coupling cadence, matching the SST-refresh cadence.
                     # step 0 has nothing to step yet (_last_force_day is None).
@@ -7850,16 +7988,34 @@ class ModelDriver:
                         #    double-count (codex-1 finding 2).
                         # SST is daily piecewise-constant (prescribed); only the
                         # ice fraction of T_sfc evolves sub-daily with the skin.
+                        # Sample SST/SIC ONCE and keep the ice fraction: the
+                        # surface-albedo blend below needs the same ``sic`` the
+                        # temperature blend used.  Identical to the previous
+                        # ``_compute_T_sfc(day)`` (which is exactly
+                        # ``_blend_T_sfc(*get_sst_sic(day))``) and to the
+                        # ice-skin branch, so T_sfc is byte-identical.
+                        _sst_now, _sic_now = self.get_sst_sic(
+                            _force_day_canonical)
+                        _sst_day = jnp.asarray(_sst_now).reshape(-1)
+                        _sic_day = jnp.asarray(_sic_now).reshape(-1)
                         if _ice_skin_on:
-                            _sst_now, _sic_now = self.get_sst_sic(
-                                _force_day_canonical)
-                            _ice_sst_cur = jnp.asarray(_sst_now).reshape(-1)
-                            _ice_sic_cur = jnp.asarray(_sic_now).reshape(-1)
-                            _forcing_daily["T_sfc"] = _blend_T_sfc(
-                                _ice_sst_cur, _ice_sic_cur)
-                        else:
-                            _forcing_daily["T_sfc"] = _compute_T_sfc(
-                                _force_day_canonical)
+                            _ice_sst_cur = _sst_day
+                            _ice_sic_cur = _sic_day
+                        _forcing_daily["T_sfc"] = _blend_T_sfc(
+                            _sst_day, _sic_day)
+                        # Tile-blended surface shortwave albedo.  ONE formula
+                        # (forcing.surface_utils.blended_surface_albedo) shared
+                        # with the FV lane's blend; ocean/ice first, then the
+                        # land fraction.  Without this key radiation falls back
+                        # to the scalar config albedo (0.06 = open ocean) for
+                        # EVERY column, land included.
+                        if _sfc_albedo_on:
+                            _sea_albedo_day = blend_surface_property(
+                                _sic_day, _albedo_ice, _albedo_ocean)
+                            _forcing_daily["sfc_albedo"] = (
+                                blended_surface_albedo(
+                                    _sic_day, _alb_f_land, _albedo_ice,
+                                    _albedo_ocean, _albedo_land_static))
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -7916,11 +8072,38 @@ class ModelDriver:
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
                         + _f_land_cells * _land_T_skin)
+                # Interactive land ALBEDO (same one-step lag as the skin T
+                # above): the multilayer tile's end-of-step albedo already
+                # carries the snow brightening and the dry-soil brightening, so
+                # this is how the snow-albedo feedback reaches radiation on
+                # this lane.  Re-blend against the day's ocean/ice albedo so
+                # only the land fraction is replaced.
+                if (_land_ml_on and _land_albedo_cells is not None
+                        and _sea_albedo_day is not None
+                        and "sfc_albedo" in _forcing):
+                    _forcing["sfc_albedo"] = (
+                        (1.0 - _f_land_cells) * _sea_albedo_day
+                        + _f_land_cells * _land_albedo_cells)
                 # Phase 2b (#1312): traced per-cell beta_soil (same one-step
                 # lag as the skin T above; seeded pre-loop so the key is
                 # structurally stable — no retrace).
                 if _land_beta_cells is not None:
                     _forcing["beta_land"] = _land_beta_cells
+                # CMOR ``ts`` source: stash the FULLY RESOLVED per-cell
+                # surface anchor the physics is about to consume — AFTER the
+                # land-lapse correction (inside _blend_T_sfc) and AFTER the
+                # interactive-land skin blend above.  The CMOR feed used to
+                # RECONSTRUCT ts from get_sst_sic as the bare ocean/ice
+                # blend, which is a DIFFERENT field: it omits both terms, so
+                # the published ts disagreed with the surface the radiation
+                # actually emitted from and the implied emissivity
+                # rlus / (sigma ts^4) ran to 0.27 .. 1.08 over land (rlus is
+                # rlds - lw_net_sfc, both derived from THIS anchor).
+                # Publishing the anchor makes the pair consistent by
+                # construction.  Cheap: binds one (nCells,) device array per
+                # step, no host sync and no retrace.
+                if "T_sfc" in _forcing:
+                    self._mpas_T_sfc_anchor = _forcing["T_sfc"]
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -7995,7 +8178,8 @@ class ModelDriver:
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
-                    self._land_ml_state, _land_T_skin = _land_step_fn(
+                    (self._land_ml_state, _land_T_skin,
+                     _land_albedo_cells) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     if _land_beta_fn is not None:

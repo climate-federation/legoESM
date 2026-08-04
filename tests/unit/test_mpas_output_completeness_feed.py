@@ -871,3 +871,155 @@ def test_driver_omits_ts_without_prescribed_sst(mesh):
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
     assert dc._spatial_monthly._max_count_ever > 0, "nothing fed at all"
     assert "field_2d_ts" not in out
+
+
+# =====================================================================
+# wap: omega = Dp/Dt (CMIP6 sign convention: POSITIVE DOWNWARD)
+# =====================================================================
+#
+# The dycore assembles omega already in the CMIP6 convention
+# (grids.vertical.compute_omega_total; derivation + sign walk there, and
+# the numerics are covered by
+# tests/atmosphere/dycore/unit/test_mpas_omega_wap.py).  What these tests
+# protect is the TRANSPORT: the feed must publish it as ``wap`` WITHOUT
+# flipping the sign, reordering the vertical axis, zero-filling it when
+# absent, or half-committing on a malformed input.
+
+def test_wap_reaches_the_accumulator(mesh):
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    assert _feed(dc, f, omega=np.full((n, NLEV), -0.05))
+    wap = _mean3d(dc, "wap")
+    assert wap is not None, "wap absent from the MPAS CMOR feed"
+    # A constant native field survives the area-neutral IDW regrid and the
+    # (bounded-extrapolating) plev19 interpolation unchanged -- and stays
+    # NEGATIVE.  A stray sign flip would give +0.05 and go red.
+    np.testing.assert_allclose(wap[np.isfinite(wap)], -0.05, rtol=1e-10)
+
+
+def test_wap_sign_and_level_order_survive_the_feed(mesh):
+    """Ascent aloft / subsidence below must arrive that way round.
+
+    The native profile is TOA-first and INCREASES with model level index
+    (= increases with pressure): [-1.0 ... +1.0] Pa/s, i.e. rising air in
+    the upper column and sinking air near the surface.  On plev19 (stored
+    in ASCENDING pressure) the published profile must therefore start
+    NEGATIVE at the top, end POSITIVE at the bottom, and increase
+    monotonically in between.  Red on a sign flip AND on a reversed
+    vertical axis -- a flip would invert both ends, a reversal would make
+    the profile decrease.
+    """
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    prof = np.linspace(-1.0, 1.0, NLEV)          # TOA-first
+    assert _feed(dc, f, omega=np.tile(prof, (n, 1)))
+    wap = _mean3d(dc, "wap")
+    assert wap is not None
+
+    # Column-mean over the valid (finite) cells at each plev level.
+    col = np.array([np.nanmean(wap[..., k][np.isfinite(wap[..., k])])
+                    for k in range(wap.shape[-1])])
+    assert np.isfinite(col).all()
+    assert col[0] < -0.5, (
+        f"the TOP plev level is not the ASCENDING (negative) end: {col[0]}")
+    assert col[-1] > 0.5, (
+        f"the BOTTOM plev level is not the SUBSIDING (positive) end: "
+        f"{col[-1]}")
+    assert np.all(np.diff(col) >= -1e-12), (
+        "wap does not increase monotonically with pressure — the vertical "
+        f"axis is reversed relative to the native TOA-first input: {col}")
+
+
+def test_wap_skipped_without_omega(mesh):
+    """Absent omega => the field is SKIPPED, never zeroed: a zero wap reads
+    downstream as a globally motionless atmosphere."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    assert _feed(dc, f)
+    assert _mean3d(dc, "wap") is None, "wap fabricated without an omega input"
+    assert _mean3d(dc, "ta") is not None, "nothing was fed at all"
+
+
+def test_malformed_omega_raises_without_committing(mesh):
+    """omega is validated in the transactional PHASE 1, like every other
+    3-D input -- a wrong level count must not leave a half-updated
+    accumulator."""
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    before_2d = set(dc._spatial_monthly._data_2d)
+    before_3d = set(dc._spatial_monthly._data_3d)
+    before_max = dc._spatial_monthly._max_count_ever
+    with pytest.raises(ValueError, match="omega"):
+        _feed(dc, f, omega=np.zeros((n, NLEV - 1)))
+    assert set(dc._spatial_monthly._data_2d) == before_2d
+    assert set(dc._spatial_monthly._data_3d) == before_3d
+    assert dc._spatial_monthly._max_count_ever == before_max
+
+
+def test_driver_forwards_diagnosed_omega_to_wap(mesh):
+    """END-TO-END through the symbol the production lane runs.
+
+    ``_feed_mpas_cmip_accumulators`` must call the dycore's
+    ``diagnose_omega`` and forward the result as ``omega=``.  Red if
+    either half of that wiring is removed.
+    """
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    n = int(mesh.nCells)
+    fake = _fake_driver(mesh, dc, f)
+    seen = {}
+
+    def _diagnose(state):
+        seen["called"] = True
+        # Distinct, non-round value so a zero-fill or a stale array cannot
+        # masquerade as a pass.
+        return np.full((n, NLEV), -0.037)
+
+    fake.model.diagnose_omega = _diagnose
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+
+    assert seen.get("called"), "the driver never asked the dycore for omega"
+    wap = _mean3d(dc, "wap")
+    assert wap is not None, "diagnosed omega never reached CMOR as wap"
+    np.testing.assert_allclose(wap[np.isfinite(wap)], -0.037, rtol=1e-10)
+
+
+def test_driver_skips_wap_without_losing_the_interval(mesh):
+    """A dynamics object with NO ``diagnose_omega`` (the MPAS
+    non-hydrostatic model, the MPI-sharded lane) must drop wap ALONE --
+    the rest of the interval's CMOR means still commit."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sig = _collector(mesh)
+    f = _fields(mesh, sig)
+    fake = _fake_driver(mesh, dc, f)
+    assert not hasattr(fake.model, "diagnose_omega")
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+
+    assert _mean3d(dc, "wap") is None, "wap fabricated on a lane without omega"
+    assert _mean3d(dc, "ta") is not None, "the whole interval was lost"
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_2d_ps" in out
+
+
+def test_driver_wap_failure_does_not_abort_the_feed(mesh):
+    """A raising / wrong-shaped ``diagnose_omega`` costs wap, never the
+    interval -- the shape gate at the call site keeps the failure out of
+    the feed's PHASE-1 contract."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    for _bad in (lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
+                 lambda state: np.zeros((int(mesh.nCells), NLEV + 3))):
+        dc, sig = _collector(mesh)
+        f = _fields(mesh, sig)
+        fake = _fake_driver(mesh, dc, f)
+        fake.model.diagnose_omega = _bad
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        assert _mean3d(dc, "wap") is None
+        assert _mean3d(dc, "ta") is not None, (
+            "a wap failure took the whole CMOR interval with it")
