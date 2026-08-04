@@ -275,11 +275,13 @@ def fv3_divergence_corner_2d(
         # input feeding the O(1/dx) solid-body boundary residual.
         if _is_4d:
             ua_h1, va_h1 = d2a2c_ua_va_halo_4d(
-                u4, v_cov4, cdgrid, real_metric_ghosts=True)
+                u4, v_cov4, cdgrid, real_metric_ghosts=True,
+                covariant_halo=True)
         else:
             ua_h1, va_h1 = d2a2c_ua_va_halo(
                 u4[..., 0], v_cov4[..., 0], cdgrid,
                 real_metric_ghosts=True,
+                covariant_halo=True,
             )
             ua_h1 = ua_h1[..., None]
             va_h1 = va_h1[..., None]

@@ -620,7 +620,7 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
-def d2a2c_d_to_a(u_d, v_d, cdgrid):
+def d2a2c_d_to_a(u_d, v_d, cdgrid, covariant_halo=False):
     """D-grid → A-grid covariant step of d2a2c (Steps 1+2), verbatim.
 
     utmp/vtmp = covariant cell-centre winds (2nd-order base, 4th-order
@@ -642,6 +642,28 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
         vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
     grid = cdgrid.base
+    if covariant_halo:
+        # 2026-08-04: utmp/vtmp are COVARIANT cell-centre winds, but the
+        # default exchange below runs pad_halo_vector's ORTHOGONAL branch
+        # (no cos_theta/sin_theta) — the repo's own long-standing
+        # "silently wrong at seams" note.  The covariant branch converts
+        # through geographic components exactly, and its back-rotation
+        # gets the SIGNED cross-seam metric halo (cos-type quarter-turn
+        # flip) instead of the sign-blind iter-838 scalar exchange.
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        ct_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.cosa_cell[..., None], cos_type=True, halo=2)[..., 0]
+        st_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.sina_cell[..., None], cos_type=False, halo=2)[..., 0]
+        return pad_halo_vector(
+            utmp, vtmp,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+            cos_theta=cdgrid.cosa_cell, sin_theta=cdgrid.sina_cell,
+            cos_theta_padded=ct_pad, sin_theta_padded=st_pad,
+        )
     return pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
@@ -651,7 +673,7 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
     )
 
 
-def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
+def d2a2c_d_to_a_4d(u_d, v_d, cdgrid, covariant_halo=False):
     """4D (all-levels-one-message) :func:`d2a2c_d_to_a` (#811).
 
     The D→A covariant averages are pure-local — they slice ``u_d``/``v_d`` on the
@@ -678,6 +700,21 @@ def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
         vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
     grid = cdgrid.base
+    if covariant_halo:
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        ct_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.cosa_cell[..., None], cos_type=True, halo=2)[..., 0]
+        st_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.sina_cell[..., None], cos_type=False, halo=2)[..., 0]
+        return pad_halo_vector_4d(
+            utmp, vtmp,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+            cos_theta=cdgrid.cosa_cell, sin_theta=cdgrid.sina_cell,
+            cos_theta_padded=ct_pad, sin_theta_padded=st_pad,
+        )
     return pad_halo_vector_4d(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
@@ -1352,7 +1389,8 @@ class _D2A2CFields(NamedTuple):
     ss_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg S, h1 halo
 
 
-def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False):
+def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                        covariant_halo=False):
     """Compute the global padded fields the A→C step (and the tiled stage)
     consume: D→A covariant winds (:func:`d2a2c_d_to_a`), the A-grid
     contravariant ua/va, the staggered dx/dy, and the halo-padded sin_sg
@@ -1370,7 +1408,8 @@ def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False):
     cos-type sign law).  Default False = bit-identical legacy behaviour."""
     grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid,
+                                      covariant_halo=covariant_halo)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
     if real_metric_ghosts:
@@ -1396,7 +1435,8 @@ def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False):
                         sn_pad_y, ss_pad_y)
 
 
-def d2a2c_ua_va_halo(u_d, v_d, cdgrid, real_metric_ghosts=False):
+def d2a2c_ua_va_halo(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                     covariant_halo=False):
     """FV3 D->A ``ua``/``va`` with exactly ONE A-grid halo ring.
 
     The corner-divergence routine needs A-grid winds that already carry a
@@ -1418,23 +1458,27 @@ def d2a2c_ua_va_halo(u_d, v_d, cdgrid, real_metric_ghosts=False):
     masks them out; a reader that does consume them fails loudly.
     """
     fields = d2a2c_global_fields(u_d, v_d, cdgrid,
-                                 real_metric_ghosts=real_metric_ghosts)
+                                 real_metric_ghosts=real_metric_ghosts,
+                                 covariant_halo=covariant_halo)
     return fields.ua_pad[:, 1:-1, 1:-1], fields.va_pad[:, 1:-1, 1:-1]
 
 
-def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid, real_metric_ghosts=False):
+def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                        covariant_halo=False):
     """All-levels-one-message counterpart of :func:`d2a2c_ua_va_halo`.
 
     Returns ``(6, n+2, n+2, nlev)``.  Uses :func:`d2a2c_global_fields_4d`,
     whose single vector halo covers every level in one message.
     """
     fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid,
-                                    real_metric_ghosts=real_metric_ghosts)
+                                    real_metric_ghosts=real_metric_ghosts,
+                                    covariant_halo=covariant_halo)
     return (fields.ua_pad[:, 1:-1, 1:-1, :],
             fields.va_pad[:, 1:-1, 1:-1, :])
 
 
-def d2a2c_global_fields_4d(u_d, v_d, cdgrid, real_metric_ghosts=False):
+def d2a2c_global_fields_4d(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                           covariant_halo=False):
     """4D (all-levels-one-message) :func:`d2a2c_global_fields` (#811).
 
     The single VECTOR wind halo is done once via :func:`d2a2c_d_to_a_4d`; every
@@ -1448,7 +1492,8 @@ def d2a2c_global_fields_4d(u_d, v_d, cdgrid, real_metric_ghosts=False):
     """
     grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(u_d, v_d, cdgrid)   # (6, n+4, n+4, nlev)
+    utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(
+        u_d, v_d, cdgrid, covariant_halo=covariant_halo)  # (6, n+4, n+4, nlev)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
     if real_metric_ghosts:

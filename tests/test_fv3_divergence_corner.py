@@ -74,11 +74,19 @@ def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # Unit-metric world: the 2026-08-04 covariant lift also consumes the
+    # rotation angles (angle_corner, angle_edge_x/y) — zero them so the
+    # lift reduces to plain 2-point averaging and the stencil-only integer
+    # expectations below stay exact (cosa_u=0 / sin_sg=1 already make the
+    # covariant projection the identity).
     cd = cd._replace(
         dyc=jnp.ones_like(cd.dyc), dxc=jnp.ones_like(cd.dxc),
         sin_sg=jnp.ones_like(cd.sin_sg), cos_sg=jnp.zeros_like(cd.cos_sg),
         rarea_c=jnp.ones_like(cd.rarea_c),
         cosa_u=jnp.zeros_like(cd.cosa_u), cosa_v=jnp.zeros_like(cd.cosa_v),
+        angle_corner=jnp.zeros_like(cd.angle_corner),
+        angle_edge_x=jnp.zeros_like(cd.angle_edge_x),
+        angle_edge_y=jnp.zeros_like(cd.angle_edge_y),
     )
     u = jnp.full((6, n + 1, n + 1), 5.0)
     v = jnp.full_like(u, 3.0)
@@ -542,6 +550,9 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # Zeroed rotation angles: see the companion exact-seam test — the
+    # covariant lift must reduce to plain averaging for the stencil-only
+    # +1 expectation to stay exact.
     cd = cd._replace(
         dyc=jnp.ones_like(cd.dyc),
         dxc=jnp.ones_like(cd.dxc),
@@ -550,6 +561,9 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
         rarea_c=jnp.ones_like(cd.rarea_c),
         cosa_u=jnp.zeros_like(cd.cosa_u),
         cosa_v=jnp.zeros_like(cd.cosa_v),
+        angle_corner=jnp.zeros_like(cd.angle_corner),
+        angle_edge_x=jnp.zeros_like(cd.angle_edge_x),
+        angle_edge_y=jnp.zeros_like(cd.angle_edge_y),
     )
 
     u = jnp.zeros((6, n + 1, n + 1))
