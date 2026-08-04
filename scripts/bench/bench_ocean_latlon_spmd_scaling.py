@@ -45,8 +45,21 @@ import sys
 import time
 from pathlib import Path
 
-import jax
 import numpy as np
+
+# #1361 / PR #1376 codex High: JAX must NOT be imported at module load — the
+# preflight has to be able to reject a config before anything touches the
+# driver or queries devices. `jax` is bound by `_import_jax()`, which every
+# function that uses it calls first (idempotent).
+jax = None  # type: ignore[assignment]
+
+
+def _import_jax():
+    """Bind the module-level ``jax`` name. Idempotent."""
+    global jax
+    if jax is None:
+        import jax as _jax
+        jax = _jax
 
 # Sibling-script import (ocean_invariants / conservation helpers reuse —
 # same pattern as bench_ocean_mpi_scaling's own cross-script imports).
@@ -92,6 +105,7 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     trivial rest fixed point, mirroring the SPMD equivalence gate's IC
     recipe.
     """
+    _import_jax()
     import jax.numpy as jnp
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -183,6 +197,7 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
 
 
 def _block(state):
+    _import_jax()
     jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
                            if leaf is not None])
 
@@ -198,6 +213,13 @@ def main() -> int:
                    help="weak mode: lat rows per device")
     p.add_argument("--steps", type=int, default=12,
                    help="Steps per fused lax.scan timing block.")
+    p.add_argument("--device-hbm", type=str,
+                   default=os.environ.get("LEGOESM_DEVICE_HBM"),
+
+                   help="#1361 memory preflight: target device whose HBM the "
+                        "estimated per-device footprint must fit "
+                        "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
+                        "estimate printed, no gate.")
     p.add_argument("--warmup", type=int, default=2,
                    help="(retained for CLI compat; fused-block timing "
                         "separates compile/probe/blocks explicitly).")
@@ -319,11 +341,49 @@ def main() -> int:
     if args.steps < 1:
         raise SystemExit(f"--steps must be >= 1, got {args.steps}")
 
+    # #1361 preflight -- identical contract to the atm twin, via the SHARED
+    # validators (no re-implemented divisibility/memory arithmetic here).
+    from legoesm.scaling_preflight import (
+        preflight_or_exit, validate_divisibility, validate_memory,
+    )
+    if args.mode == "strong":
+        preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
+                          axis="n_lat")
+    _n_lat_est = (args.n_lat if args.mode == "strong"
+                  else args.nlat_per_dev * args.n_devices)
+    # Whether the estimate may be divided by n_devices depends on WHERE the
+    # global rest-state init lands, which is decided by the cpu-backend
+    # availability this bench keys its own fallback on (see the
+    # `jax.local_devices(backend="cpu")` block below). With a cpu backend the
+    # globals are built in HOST RAM and only per-band shards are device_put ->
+    # sharded. Without one (JAX_PLATFORMS=cuda), the fallback materialises the
+    # global state ON the accelerator -> NOT sharded, and dividing by n_devices
+    # would under-estimate by exactly n_devices and wave through the OOM this
+    # preflight exists to reject. Both directions matter: codex flagged the
+    # missing case first, then the unconditional sharded=False as a FALSE
+    # "does not fit" for the documented JAX_PLATFORMS=cuda,cpu lane
+    # (LL2304/L60 on 64 devices: 170.9 GiB unsharded vs 2.67 GiB/device).
+    # Read from the env, never from jax — the preflight runs before any import.
+    _platforms = [p.strip() for p in
+                  os.environ.get("JAX_PLATFORMS", "").split(",") if p.strip()]
+    _host_side_global_init = (args.n_devices > 1
+                              and (not _platforms or "cpu" in _platforms))
+    _est = preflight_or_exit(
+        validate_memory, n_columns=_n_lat_est * args.n_lon, nlev=args.nlev,
+        n_devices=args.n_devices, device=args.device_hbm,
+        sharded=_host_side_global_init)
+    print(f"[preflight] ok: n_lat={_n_lat_est} n_lon={args.n_lon} "
+          f"nlev={args.nlev} n_devices={args.n_devices} "
+          f"est={_est / 1024**3:.1f} GB/device", flush=True)
+
     # Align the legoESM precision POLICY with the jax x64 flag: the ocean
     # state dtype comes from get_policy().storage (default fp32), so an
     # x64-flag-only run would build f32 states and gate them against
     # f64-labeled tolerances (the tripole lane caught this; the same fix
     # as bench_ocean_mpi_scaling._ensure_precision).
+    # Preflight has passed -> JAX may now be imported (deferred for #1361).
+    _import_jax()
+
     from legoesm.core.precision import PrecisionPolicy, set_policy
 
     # Single source of truth = the LIVE jax x64 flag (an in-process caller
@@ -471,10 +531,16 @@ def main() -> int:
         _blk, _nblk, _probe = max(0, args.steps - 1), 1, 0
     else:
         _blk, _nblk, _probe = args.steps, args.blocks, args.probe_steps
+    # aux threads the sharded geometry stacks through the jit boundary as
+    # an ARGUMENT (outer-trace constants of non-addressable arrays are
+    # unfetchable — see make_sharded_ocean_step's aux note).
+    _aux = getattr(step, "aux", None)
     s, timing = timed_scan_blocks(
-        lambda st: step(st, args.dt), s,
+        (lambda st, aux: step(st, args.dt, aux=aux)) if _aux is not None
+        else (lambda st: step(st, args.dt)),
+        s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
-        sync_label="ocean_latlon_spmd_bench")
+        sync_label="ocean_latlon_spmd_bench", aux=_aux)
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller

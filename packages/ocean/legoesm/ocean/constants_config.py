@@ -65,7 +65,9 @@ VEROS_CONSTANTS_CONFIG = ConstantsConfig(
 # stretch was accounted for.
 NEMO_CONSTANTS_CONFIG = ConstantsConfig(
     g=9.80665, rho_0=1026.0, c_sw=3991.86795711963,
-    Omega=7.292116e-05, R_earth=6371229.0,
+    # Deliberately NOT legoesm.constants: reproducing NEMO's own numbers IS the
+    # point of this preset (provenance in the block comment above).
+    Omega=7.292116e-05, R_earth=6371229.0,  # const-ok: NEMO phycst.F90 omega/ra
 )
 
 

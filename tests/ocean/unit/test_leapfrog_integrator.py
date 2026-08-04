@@ -339,6 +339,76 @@ def test_leapfrog_from_rest_nemo_before_and_burchard_do_not_crash():
     assert np.all(np.isfinite(np.asarray(s2.u.data)))
 
 
+def test_leapfrog_from_rest_nemo_face_native_does_not_crash():
+    """#1226 sh2_walk.py Candidate E/F regression: nemo_dino_kamm_mlf's
+    ACTUAL runtime combination -- tke_shear_production="nemo_face_native"
+    together with bottom_tke_bc=True (the real card also sets
+    tke_bottom_bc=True) on a PARTIAL-CELL z-coordinate (the card always
+    uses one; nemo_face_native requires z_coord.is_active). Two real bugs
+    were caught and fixed by this exact combination during development:
+    (1) the model's cc_state pre-collapse silently defeated the face-
+    native geometry (fixed: ocean_model_latlon_cgrid.py's fallback K-profile
+    call now keeps u/v at their raw C-grid face shape for this option), and
+    (2) _tke_bottom_dirichlet's take_along_axis assumed cell-centred u/v
+    (fixed: it now collapses locally when needed). A from-rest run must
+    step at least twice with no crash/NaN."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate,
+    )
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    n_lat, n_lon, n_levels, H_max = 8, 16, 5, 3000.0
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z0c = create_ocean_z_star(n_levels=n_levels, H_max=H_max)
+    H_bathy = jnp.full((n_lat, n_lon), H_max * 0.62)
+    z = create_partial_cell_coordinate(z0c, H_bathy)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=H_bathy)
+    assert state.T_before is None and state.u_before is None
+
+    _lateral_mixing_none = type(OceanPhysicsConfig().lateral_mixing)(
+        scheme="none")
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(tke_n2_time_level="nemo_before",
+                          tke_shear_production="nemo_face_native",
+                          bottom_tke_bc=True, prognostic=True)),
+        convection=OceanConvectionConfig(scheme="none"),
+        lateral_mixing=_lateral_mixing_none,
+    )
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=2.0e4, A_v=1.0e-3, K_v=1.0e-4,
+        bottom_drag_r=1.0e-3, bottom_drag_scheme="nemo_quadratic",
+        bottom_drag_cd0=1.0e-3, bottom_drag_cdmax=0.1,
+        bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        n_barotropic_substeps=8, enable_runtime_checks=False,
+        implicit_vertical_mixing=True,
+        outer_integrator="leapfrog", coriolis_scheme="explicit_ab2",
+        vorticity_scheme="een_total", physics=physics,
+        barotropic_forcing_centred=True, barotropic_een_seed="nemo_kmm",
+    )
+    model = LatLonCGridOceanModel(grid, z, cfg)
+
+    s1 = model.step(state, dt=_DT)   # step 0 (Euler start)
+    assert np.all(np.isfinite(np.asarray(s1.T.data)))
+    assert np.all(np.isfinite(np.asarray(s1.u.data)))
+    s2 = model.step(s1, dt=_DT)      # step 1 (genuine leap-frog)
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+    assert np.all(np.isfinite(np.asarray(s2.u.data)))
+
+
 def test_n2_nemo_before_tracers_bridged_state_not_clobbered():
     """Sibling regression: a state that ALREADY carries bridged/restart
     before-level fields (kamm_twin_90d --bridge-before) must NOT be

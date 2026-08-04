@@ -35,6 +35,11 @@ from legoesm.core.operators_cdgrid import (
     pad_halo_auto,
 )
 from legoesm.grids.duogrid import ext_vector_dgrid
+from legoesm.grids.duogrid_bgrid_ring import (
+    apply_bgrid_ring1,
+    build_bgrid_ring1_map,
+    build_d5_metric_bundle,
+)
 from legoesm.grids.halo import (
     CONNECTIVITY,
     EAST,
@@ -1375,6 +1380,35 @@ def d2a2c_global_fields(u_d, v_d, cdgrid):
                         sn_pad_y, ss_pad_y)
 
 
+def d2a2c_ua_va_halo(u_d, v_d, cdgrid):
+    """FV3 D->A ``ua``/``va`` with exactly ONE A-grid halo ring.
+
+    The corner-divergence routine needs A-grid winds that already carry a
+    cross-panel ring.  Building them by a four-corner average of the D-grid
+    corner winds and then scalar-padding is NOT FV3's operation: FV3 passes
+    the output of ``d2a2c_vect`` (sw_core.F90:148-160), which is the
+    covariant-to-contravariant D->A algebra, not an average.
+
+    Inputs are FV3-COVARIANT D winds.  Returns ``(ua, va)`` of shape
+    ``(6, n+2, n+2)`` -- physical cells at ``[1:-1, 1:-1]`` -- sliced from
+    the h2 ring that :func:`d2a2c_global_fields` already computes, so no
+    additional halo exchange is issued.
+    """
+    fields = d2a2c_global_fields(u_d, v_d, cdgrid)
+    return fields.ua_pad[:, 1:-1, 1:-1], fields.va_pad[:, 1:-1, 1:-1]
+
+
+def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid):
+    """All-levels-one-message counterpart of :func:`d2a2c_ua_va_halo`.
+
+    Returns ``(6, n+2, n+2, nlev)``.  Uses :func:`d2a2c_global_fields_4d`,
+    whose single vector halo covers every level in one message.
+    """
+    fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid)
+    return (fields.ua_pad[:, 1:-1, 1:-1, :],
+            fields.va_pad[:, 1:-1, 1:-1, :])
+
+
 def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
     """4D (all-levels-one-message) :func:`d2a2c_global_fields` (#811).
 
@@ -1710,7 +1744,7 @@ def d2a2c_vect_4d(u_d, v_d, cdgrid):
 # ==============================================================================
 
 
-def _sina_u_v_from_sin_sg(cdgrid):
+def sina_u_v_from_sin_sg(cdgrid):
     """Return `sina_u` (6, n+1, n) and `sina_v` (6, n, n+1) constructed
     from FV3 sub-grid `sin_sg` per ``fv_grid_utils.F90:505-518``.
 
@@ -2091,7 +2125,7 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     cosa_u = cdgrid.cosa_u
     cosa_v = cdgrid.cosa_v
     # iter-87: shared helper sin_sg sub-grid form (Fortran-faithful vs sqrt(1-cosa²))
-    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+    sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
 
     dxc = cdgrid.dxc          # (6, n+1, n)
     dyc = cdgrid.dyc          # (6, n, n+1)
@@ -2105,8 +2139,6 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # the BOUNDED gridstruct's D5 geometry (real native halo
         # strips) in create layout, built once per n (trace-time
         # numpy, jnp constants under jit).
-        from legoesm.grids.duogrid_bgrid_ring import build_d5_metric_bundle
-
         d5_bundle = build_d5_metric_bundle(n)
         dxc = jnp.asarray(d5_bundle["dxc"], dtype=dxc.dtype)
         dyc = jnp.asarray(d5_bundle["dyc"], dtype=dyc.dtype)
@@ -2250,11 +2282,6 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                 # code's output (duogrid_bgrid_ring).  Map is
                 # grid-static: built once per n (disk-cached), applied
                 # as a jit-safe gather/segment-sum.
-                from legoesm.grids.duogrid_bgrid_ring import (
-                    apply_bgrid_ring1,
-                    build_bgrid_ring1_map,
-                )
-
                 _grid_nord = int(getattr(
                     getattr(cdgrid.base, "duogrid", None), "k2e_nord",
                     2))
@@ -2437,7 +2464,7 @@ def _vorticity_flux(v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid):
     on averaged quantities.
     """
     n = cdgrid.n
-    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+    sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
 
     fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
@@ -3212,7 +3239,7 @@ def fb_v_d_to_covariant(u_d, v_d, cdgrid):
     covariant formulas (ut/vt rsin, KE c·C products, circulation, B-grid
     Courant, one_grad_p) was the FB panel-edge instability root cause.
     """
-    sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
+    sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
     ubar = _u_orth_at_v_points(u_d, v_d, cdgrid)
     return cdgrid.cosa_u * ubar + sina_u * v_d
 
@@ -3251,7 +3278,7 @@ def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
     its gradient.  Changing the pass count changes BOTH the primal and
     the gradient — keep primal/adjoint consistent (2 passes).
     """
-    sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
+    sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
     rs = 1.0 / jnp.maximum(sina_u, _EPS)
     n = cdgrid.n
     u_pad0 = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')

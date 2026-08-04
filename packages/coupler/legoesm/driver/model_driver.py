@@ -249,6 +249,11 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_optics_inhomogeneity=getattr(
             cfg, "cloud_optics_inhomogeneity", None),
         cloud_fsd=getattr(cfg, "cloud_fsd", None),
+        cloud_partial_coverage_optics=getattr(
+            cfg, "cloud_partial_coverage_optics", None),
+        cloud_vertical_overlap_optics=getattr(
+            cfg, "cloud_vertical_overlap_optics", None),
+        cloud_n_subcolumns=getattr(cfg, "cloud_n_subcolumns", None),
         diagnostic_condensate_scheme=getattr(
             cfg, "cloud_diagnostic_condensate_scheme", None),
         adiabatic_lwc_rate=getattr(cfg, "cloud_adiabatic_lwc_rate", None),
@@ -1341,13 +1346,26 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
+        # Per-cell land fraction on the grid pytree (canonical name
+        # ``land_frac``) so the GWD integration's ``_extract_land_frac``
+        # finds it (e3sm_cam's driver-level oro landfrac scaling).  Reuses
+        # the ``self._f_land`` computed above — no new loader.  Attached
+        # only where the grid type carries the field (VoronoiMesh since
+        # 2026-07-30); other grids keep legacy behaviour.
+        if (getattr(self.grid, "land_frac", "no-field") is None
+                and self._f_land is not None):
+            self.grid = self.grid._replace(
+                land_frac=jnp.asarray(self._f_land, dtype=_sd).reshape(-1))
+
         # Per-column subgrid orographic stddev for the orographic GWD launch
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
         # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
         # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
         # uniform 500 m mountain over ocean columns too. Only loaded when the
-        # active GWD has an orographic member; otherwise the file is unused
-        # (and non-cube/Gaussian grids could not even carry the field).
+        # active GWD has an orographic member; otherwise the file is unused.
+        # ``load_subgrid_orography``'s regrid target handles cube (rank-3),
+        # structured lat-lon (rank-2) AND unstructured Voronoi (rank-1 cell
+        # centres) grids — see ``_target_grid_degrees``.
         sso_path = getattr(self.config, "subgrid_orography_path", "")
         if sso_path:
             _oro_members = ("mcfarlane", "lindzen", "e3sm_cam")
@@ -1363,11 +1381,16 @@ class ModelDriver:
                 sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-                except (ValueError, AttributeError) as e:
+                # NamedTuple._replace raises TypeError ("Got unexpected field
+                # names"), NOT ValueError/AttributeError -- so this guard never
+                # fired and a raw collections traceback escaped instead of the
+                # message below. Found by a lat-lon run dying at setup.
+                except (TypeError, ValueError, AttributeError) as e:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                        f"field (supported: CubedSphereGrid, GaussianGrid)"
+                        f"field (supported: CubedSphereGrid, GaussianGrid, "
+                        f"VoronoiMesh)"
                     ) from e
                 logger.info(
                     f"  Subgrid orography: {sso_path} "
@@ -2948,6 +2971,7 @@ class ModelDriver:
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
+            vcoord=self.sigma,
             dsigma=self.sigma.dsigma,
             experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,
@@ -6077,10 +6101,17 @@ class ModelDriver:
             # Geographic cell-centre winds from the edge-normal velocity.
             u_east, v_north = reconstruct_cell_velocity(
                 state.u.data, self.grid)
-            # Water vapour (moist runs only).
-            q_v = None
-            if (state.tracers is not None and "q_v" in state.tracers):
-                q_v = state.tracers["q_v"].data
+            # Water vapour + cloud condensate (moist runs only).  q_c/q_i
+            # feed the CMOR ``clt`` total-cloud-cover reduction; both are
+            # absent on a dry run and on warm-rain microphysics (no q_i),
+            # which the collector skips rather than publishing a zero.
+            def _tracer(name):
+                if state.tracers is None or name not in state.tracers:
+                    return None
+                return state.tracers[name].data
+            q_v = _tracer("q_v")
+            q_c = _tracer("q_c")
+            q_i = _tracer("q_i")
             # Flux fields (slots of the sfc_diag contract: 2 precip
             # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
             # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
@@ -6196,6 +6227,8 @@ class ModelDriver:
                 p_s=state.p_s.data,
                 lat_deg=lat_deg,
                 q_v=q_v,
+                q_c=q_c,
+                q_i=q_i,
                 u_east=u_east,
                 v_north=v_north,
                 precip=precip,
@@ -6327,20 +6360,31 @@ class ModelDriver:
         ``range(start_step, n_steps_total)`` and treat ``--days`` as total;
         do not copy their launcher convention here.
         """
-        # --budget-ledger is a compiled-segment (SegmentCarry) diagnostic —
-        # the per-process attribution hooks live in the FV segment loops and
-        # are NOT wired into this lean loop.  It used to be SILENTLY inert
-        # here (#1311: chains passed the flag and got no ledger, so the
-        # conv-pairing gate quietly never ran); refuse loudly until the
-        # attribution port lands.
-        if bool(getattr(self.config.output, "budget_ledger", False)):
+        # --budget-ledger (#1311, MPAS attribution port): the per-process
+        # ledger on this lane is PER-COLUMN, (nCells, N_LEDGER, 2) — built for
+        # the single-grid-point detonation question, where a global mean
+        # washes the signal to ~1e-4 of itself.  Physics rows ride out of the
+        # combined physics on HydrostaticTendencies.ledger_rows; the dycore
+        # stage rows (dynamics/clips + the closure residual) are filled in
+        # ``_step_jit``; the eager loop below accumulates the per-step ledger
+        # and writes ``budget_ledger_columns.npz`` (per-column schema — a
+        # deliberately DIFFERENT filename from the FV lane's global-row
+        # ``budget_ledger.npz``) at the diagnostic cadence.  The
+        # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
+        # working path) is retained below only for MPI, where the per-rank
+        # ledger gather is not yet wired.
+        # NOTE: _mpi_world_size EXISTS-but-is-None on the serial lane, so the
+        # getattr default never applies — the `or 1` covers the None.
+        if (bool(getattr(self.config.output, "budget_ledger", False))
+                and ((getattr(self, "_mpi_world_size", 1) or 1) > 1
+                     or getattr(self, "_voronoi_layout", None) is not None)):
             raise ValueError(
-                "--budget-ledger is not implemented on the MPAS lean loop "
-                "(#1311): the per-process ledger accumulates inside the FV "
-                "compiled segments (SegmentCarry), which this path does not "
-                "use.  Run without the flag, or use the FV lanes for "
-                "ledger-attributed budget runs, until the MPAS attribution "
-                "port lands."
+                "--budget-ledger on the MPAS lane is serial-only for now "
+                "(#1311): the per-column ledger rides model.step's eager "
+                "side-channel, which the cell-partition MPI step bypasses "
+                "(even at -np 1 — the flag would be SILENTLY inert there, "
+                "the exact #1311 failure mode this refusal exists to "
+                "prevent).  Run the serial lane, or drop the flag."
             )
         import time
 
@@ -6766,13 +6810,15 @@ class ModelDriver:
                 _land_lapse_K_m * 1.0e3, _land_beta,
                 float(jnp.mean(_f_land_cells)),
             )
+        _budget_ledger_on = bool(getattr(cfg.output, "budget_ledger", False))
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
                                           if (_land_beta != 1.0
                                               or _land_beta_soil_on)
                                           else None),
-                                  land_beta=_land_beta)
+                                  land_beta=_land_beta,
+                                  budget_ledger=_budget_ledger_on)
 
         # ---- Radiation sub-cycle (issue #316, MPAS port) ----
         # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
@@ -6797,7 +6843,8 @@ class ModelDriver:
                                  if (_land_beta != 1.0
                                      or _land_beta_soil_on)
                                  else None),
-                         land_beta=_land_beta)
+                         land_beta=_land_beta,
+                         budget_ledger=_budget_ledger_on)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -7606,6 +7653,12 @@ class ModelDriver:
         # the first boundary / when the skin feature is off).
         _ice_sst_cur = None
         _ice_sic_cur = None
+        # Budget-ledger accumulator (#1311): sum of the per-step per-column
+        # ledgers over the current diagnostic interval; divided by the step
+        # count at emission -> MEAN RATES, then reset.  Device arrays until
+        # the (already host-syncing) diag block reads them.
+        _led_accum = None
+        _led_nsteps = 0
         from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             # Enter the daily-boundary block also when a coupler segment_callback
@@ -7788,6 +7841,15 @@ class ModelDriver:
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+                # Budget-ledger accumulation (#1311): the per-step per-column
+                # ledger rides the same eager side-channel as _phys_state.
+                # None when the flag is off (structural, zero cost).
+                if _budget_ledger_on:
+                    _ls = getattr(self.model, "_step_ledger", None)
+                    if _ls is not None:
+                        _led_accum = (_ls if _led_accum is None
+                                      else _led_accum + _ls)
+                        _led_nsteps += 1
                 # Prognostic ice skin: advance ONE model step (dt=DT) with the
                 # freshly exported surface energy fluxes (sfc_diag slots
                 # 0 sw_net, 1 lw_net [W/m^2, +into surface]; 6 shflx, 7 lhflx
@@ -8048,6 +8110,48 @@ class ModelDriver:
                        else f"  Ni^max={_ni_max:.1e}/kg")
                     + f"  ({rate:.1f} sim-days/s)"
                 )
+
+                # Budget-ledger emission (#1311): interval-mean per-column
+                # rates -> budget_ledger_columns.npz (overwritten each
+                # interval; the
+                # per-interval history is in the log lines).  The log line
+                # reports the column with the LARGEST dry-enthalpy total —
+                # exactly the detonating-column question — attributed to its
+                # largest row.  Host sync is fine here: this block already
+                # pulled scalars off-device.
+                if _budget_ledger_on and _led_accum is not None:
+                    from legoesm.diagnostics.process_ledger import (
+                        LEDGER_PROCESSES,
+                    )
+                    _led_rates = np.asarray(_led_accum) / max(_led_nsteps, 1)
+                    _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
+                    _hot = int(np.argmax(np.abs(_tot_e)))
+                    _hot_rows = _led_rates[_hot, :, 1]
+                    _hot_row = int(np.argmax(np.abs(_hot_rows)))
+                    logger.info(
+                        "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell %d "
+                        "(top row: %s %.3e; steps=%d)",
+                        _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
+                        _hot_rows[_hot_row], _led_nsteps)
+                    # PER-COLUMN schema, deliberately a DIFFERENT filename
+                    # from the FV lane's global-row ``budget_ledger.npz``
+                    # (days/rates history): a consumer reading one schema
+                    # must never silently get the other.  Overwritten each
+                    # interval — on a blow-up the surviving file is the last
+                    # pre-detonation interval, which is the one that matters.
+                    if self.output_dir is not None:
+                        np.savez(
+                            str(self.output_dir
+                                / "budget_ledger_columns.npz"),
+                            ledger_rates=_led_rates,
+                            processes=np.asarray(LEDGER_PROCESSES),
+                            columns=np.asarray(
+                                ("water_kg_m2_s", "energy_W_m2")),
+                            n_steps=_led_nsteps,
+                            day=elapsed_day + START_DAY,
+                        )
+                    _led_accum = None
+                    _led_nsteps = 0
 
                 # Blowup detection: finiteness AND physical bounds (#871 — a
                 # runaway to 8e8 K was finite for 1138 steps under a

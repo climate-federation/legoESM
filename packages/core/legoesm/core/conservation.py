@@ -86,6 +86,27 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     return q_v_out, T_out
 
 
+#: Tracers eligible for the column-conserving borrow: PER-MASS fields whose
+#: dsigma-weighted column integral is what mass-weighted transport conserves —
+#: the water mixing ratios [kg/kg] and the per-mass numbers [#/kg]
+#: (``N_i``/``N_s``/``N_g``).  ``N_c``/``N_r`` are per-VOLUME [#/m^3]
+#: (HydrometeorState), so this weight has no conservation meaning for them:
+#: they keep the plain clip pending a density-aware repair (codex 2026-07-28;
+#: their invention rate is ~e15 slower than N_i's was).
+#:
+#: Lives here, next to the clip it gates, rather than in the MPAS PE dycore:
+#: the serial (atmosphere) and MPI (parallel) lanes both need it, and the
+#: parallel one importing an atmosphere module broke the "legoesm-core member
+#: imports nothing above it" contract.
+BORROW_ELIGIBLE_TRACERS = frozenset(
+    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i", "N_s", "N_g"})
+
+
+def is_borrow_eligible_tracer(name: str) -> bool:
+    """True for a per-mass tracer, tolerating a ``trc_`` prefix."""
+    return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
+
+
 def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
     """Clip ``q`` to zero WITHOUT creating mass: borrow the deficit back.
 

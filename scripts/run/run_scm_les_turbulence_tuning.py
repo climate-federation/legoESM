@@ -58,18 +58,21 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
     SAM_SCM_CASES,
     load_sam_scm_case,
 )
+from legoesm import constants  # noqa: E402
+from legoesm.atmosphere.physics._shared import exner_function  # noqa: E402
 from legoesm.atmosphere.physics.combined import PhysicsConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.config import (  # noqa: E402
     TurbulenceConfig,
 )
+from legoesm.core.bulk_flux import neutral_drag_coefficient  # noqa: E402
 from legoesm.ml.training import TrainingConfig, create_optimizer  # noqa: E402
 from legoesm.training.les_reference import (  # noqa: E402
     SCORED_VARIABLES,
     load_les_reference,
 )
+from legoesm.core.param_overrides import apply_param_overrides  # noqa: E402
 from legoesm.training.param_collector import (  # noqa: E402
-    apply_param_overrides,
     build_registry,
     build_trainable_params,
 )
@@ -124,10 +127,98 @@ _ATM_TURB_NAMESPACE = "atm.turb."
 # configuration: identical across arms except turbulence
 # --------------------------------------------------------------------------
 
+def build_surface_config(case, *, bulk_scheme: str = "constant"):
+    """The ONE surface-layer config every arm uses, derived from case physics.
+
+    The SCM default is a fixed ``Cd_neutral = 1.5e-3``, while every one of
+    these LES cases drives its momentum stress with a MOST wall model at the
+    case roughness. At BOMEX's z0 = 1e-4 m and a ~20 m lowest level the neutral
+    log law gives Cd = 1.07e-3 and u* = 0.287 m/s at the 8.75 m/s trade wind --
+    which is the LES's u* -- whereas the SCM default gives 0.339 m/s, a 18%
+    surface-stress error the closures would otherwise be tuned to compensate
+    for.
+
+    So ``Cd_neutral`` is DERIVED as the neutral-MOST drag
+    ``kappa^2 / ln^2(z_ref / z0)`` at the case's own z0, evaluated at the SCM's
+    lowest full level (the level whose wind ``compute_surface_fluxes`` is
+    handed) rather than the 10 m default, which would be inconsistent with
+    that wind.
+
+    ``bulk_scheme`` stays "constant" for these cases ON PURPOSE. All three
+    prescribe or fix their surface HEAT flux (BOMEX/DYCOMS prescribe SHF/LHF,
+    RICO uses fixed van Zanten C_H/C_Q), and the iterative "most" path derives
+    heat from MOST scaling while ignoring Ch_neutral -- it would double-count a
+    prescribed flux. "constant" with a log-law-derived Cd reproduces the LES
+    momentum drag while leaving the heat channel to the case definition.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    z0 = float(case.spec.les_z0_m)
+    z_ref = float(case.z_full[-1])
+    if not z0 > 0.0 or not z_ref > z0:
+        raise ValueError(
+            f"need 0 < z0 ({z0}) < z_ref ({z_ref}) for a log-law drag."
+        )
+    cd_neutral = float(neutral_drag_coefficient(z_ref, z0))
+    prescribed = case.forcing.prescribe == "fluxes"
+    if prescribed:
+        ch_neutral = 0.0            # heat comes from the prescribed channel
+    elif case.spec.bulk_ch is not None:
+        ch_neutral = float(case.spec.bulk_ch)
+    else:
+        ch_neutral = cd_neutral
+    # SurfaceLayerConfig has ONE Ch_neutral and its consumer applies it to both
+    # the sensible and the latent flux, so a case whose LES uses separate C_H
+    # and C_Q cannot be reproduced exactly. Say so rather than carrying
+    # bulk_ce as metadata that merely LOOKS applied.
+    if (not prescribed and case.spec.bulk_ce is not None
+            and case.spec.bulk_ch is not None
+            and abs(case.spec.bulk_ce - case.spec.bulk_ch) > 1.0e-12):
+        pct = 100.0 * (case.spec.bulk_ce - case.spec.bulk_ch) / case.spec.bulk_ch
+        print(f"  WARNING: {case.name} LES uses separate C_H="
+              f"{case.spec.bulk_ch:.6f} and C_Q={case.spec.bulk_ce:.6f}, but "
+              f"SurfaceLayerConfig has a single Ch_neutral applied to BOTH "
+              f"fluxes. The latent flux therefore runs {pct:+.1f}% off the "
+              "LES; moisture tuning will absorb part of that.")
+    if bulk_scheme not in ("constant", "most"):
+        raise ValueError(
+            f"surface bulk_scheme={bulk_scheme!r} not supported here; "
+            "choose 'constant' or 'most'."
+        )
+    if bulk_scheme == "most" and prescribed:
+        raise ValueError(
+            "bulk_scheme='most' cannot be combined with a prescribed surface "
+            "heat flux: the MOST path derives the heat flux from its own "
+            "scaling and ignores Ch_neutral, so the prescribed flux would be "
+            "counted twice."
+        )
+    return SurfaceLayerConfig(
+        z0=z0, z_ref=z_ref,
+        Cd_neutral=cd_neutral, Ch_neutral=ch_neutral,
+        bulk_scheme=bulk_scheme,
+    )
+
+
+# CLUBBParams entries with NO consumer anywhere in clubb.py, on either the
+# diagnostic or the prognostic path. They are registry entries without an
+# implementation, so they can never be tuned and their gradient is structurally
+# zero: the six C_invrs_tau_* belong to the Guo (2021) invrs_tau reformulation
+# that is not ported (compute_tau_family implements only the CAM-default
+# simple form), and the rest have no call site at all.
+CLUBB_UNIMPLEMENTED_PARAMS: tuple[str, ...] = (
+    "C10", "c_K10h", "Lscale_mu_coef", "mult_coef",
+    "coef_spread_DG_means_rt", "coef_spread_DG_means_thl",
+    "slope_coef_spread_DG_means_w",
+    "C_invrs_tau_bkgnd", "C_invrs_tau_sfc", "C_invrs_tau_shear",
+    "C_invrs_tau_N2", "C_invrs_tau_N2_wp2", "C_invrs_tau_N2_xp2",
+)
+
+
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          microphysics: str = "none",
                          bulk_ch: float | None = None,
-                         bulk_ce: float | None = None) -> PhysicsConfig:
+                         bulk_ce: float | None = None,
+                         surface=None,
+                         clubb_prognostic: bool = True) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
@@ -142,20 +233,29 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
             f"{list(TURBULENCE_SCHEMES)}."
         )
     turb = TurbulenceConfig(scheme=scheme)
-    if scheme == "clubb" and getattr(turb, "clubb", None) is None:
-        turb = turb._replace(clubb=CLUBBConfig())
+    if scheme == "clubb":
+        # The DIAGNOSTIC path (prognostic=False, the library default) reads only
+        # six CLUBBParams fields and just four of them have a live gradient
+        # (c_K, gamma_coef, lmin_coef, mu) -- beta cancels algebraically there
+        # because Skw is passed as zeros, which pins mixt_frac to 0.5. The
+        # prognostic path evolves the full moment set and takes the tunable
+        # tier-1+2 count from 4 to 35 of 48. The SCM carries the moments in
+        # PhysicsState.clubb_moments, so nothing else has to change.
+        clubb_cfg = getattr(turb, "clubb", None) or CLUBBConfig()
+        turb = turb._replace(
+            clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
+        )
     sub = getattr(turb, scheme)
-    surface = sub.surface
-    if prescribed_fluxes:
-        surface = surface._replace(Ch_neutral=0.0)
-    else:
-        # Interactive surface: adopt the case's LES bulk exchange coefficients
-        # so the closures are not ranked on their ability to compensate for a
-        # surface-flux error. Applied identically on every arm.
-        if bulk_ch is not None:
+    if surface is None:
+        # Fallback for callers with no case in hand (tests): keep the scheme's
+        # own default and only honour the prescribed-flux requirement.
+        surface = sub.surface
+        if prescribed_fluxes:
+            surface = surface._replace(Ch_neutral=0.0)
+        elif bulk_ch is not None:
             surface = surface._replace(Ch_neutral=float(bulk_ch))
-        if bulk_ce is not None and hasattr(surface, "Ce_neutral"):
-            surface = surface._replace(Ce_neutral=float(bulk_ce))
+    # The SAME SurfaceLayerConfig object on every arm: the surface boundary
+    # must not be a per-scheme degree of freedom.
     turb = turb._replace(**{scheme: sub._replace(surface=surface)})
     base = PhysicsConfig()
     return PhysicsConfig(
@@ -306,10 +406,12 @@ def _theta_from_T(T_profile, p_full):
 
     p_s carries no tendency in these cases, so Exner is a constant of the run;
     ``_assert_surface_pressure_static`` verifies that rather than assuming it.
+
+    Uses the shared ``exner_function`` rather than an inline
+    ``(p/p_ref)**kappa`` so the SCM, the global model and the CRM cannot drift
+    apart on the Poisson exponent.
     """
-    from legoesm import constants
-    exner = (jnp.asarray(p_full) / constants.p_ref) ** constants.kappa
-    return jnp.asarray(T_profile) / exner
+    return jnp.asarray(T_profile) / exner_function(jnp.asarray(p_full))
 
 
 def _assert_surface_pressure_static(ps_history, p_s: float, tol_pa: float = 1.0):
@@ -480,6 +582,11 @@ def _assert_strict_bounds(params: TrainablePhysicsParams) -> None:
 @dataclass
 class SchemeResult:
     scheme: str
+    # ok / tuned            -> rankable, score reflects a real optimisation
+    # no_reducing_step      -> line search never accepted; score IS the default
+    # no_active_gradient    -> every parameter disconnected from the loss
+    # no_tunable_params     -> nothing spec'd to tune
+    # failed / tune_failed  -> raised
     status: str
     score_default: float | None = None
     score_tuned: float | None = None
@@ -499,6 +606,8 @@ def evaluate_scheme(scheme: str, *, case, reference, args) -> tuple:
         scheme, prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
         microphysics=args.microphysics,
         bulk_ch=case.spec.bulk_ch, bulk_ce=case.spec.bulk_ce,
+        surface=args.surface_config,
+        clubb_prognostic=args.clubb_prognostic,
     )
     means, ps_hist = _rollout_means(
         None, base_cfg=cfg, case=case, dt=args.dt, hours=args.hours,
@@ -541,11 +650,28 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
         result.wall_s = time.time() - t0
         return result
     stats = _grad_stats(preflight_grads, args.grad_nonzero_tol)
+
+    def _freeze_reason(name: str, stat: dict) -> str:
+        if not stat["finite"]:
+            return "non-finite gradient"
+        # Distinguish "this parameter has no implementation" from "this
+        # parameter simply does not matter here". Reporting both as one number
+        # would hide that a chunk of the CLUBB registry has no consumer at all.
+        field = name.rsplit(".", 1)[-1]
+        if scheme == "clubb" and field in CLUBB_UNIMPLEMENTED_PARAMS:
+            return ("UNIMPLEMENTED: no consumer anywhere in clubb.py on either "
+                    "the diagnostic or the prognostic path, so its gradient is "
+                    "structurally zero and it can never be tuned")
+        return f"|grad| <= {args.grad_nonzero_tol:g} in preflight"
+
     frozen = {
-        name: ("non-finite gradient" if not s["finite"]
-               else f"|grad| <= {args.grad_nonzero_tol:g} in preflight")
-        for name, s in stats.items() if not s["nonzero"]
+        name: _freeze_reason(name, st)
+        for name, st in stats.items() if not st["nonzero"]
     }
+    n_unimpl = sum(1 for r in frozen.values() if r.startswith("UNIMPLEMENTED"))
+    if n_unimpl:
+        print(f"    {n_unimpl} parameter(s) have NO implementation and can "
+              "never be tuned (see frozen_reason in the JSON)")
     keep = {name for name, s in stats.items() if s["nonzero"]}
     result.frozen = frozen
     if not keep:
@@ -595,6 +721,10 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
               f"{'accepted' if accepted else 'no reducing step -> stop'}",
               flush=True)
         if not accepted:
+            if step == 1:
+                # Nothing was ever accepted: the reported score is the default,
+                # so calling this arm "tuned" would overstate it.
+                result.status = "no_reducing_step"
             break
 
     result.loss_history = loss_history
@@ -681,6 +811,18 @@ def parse_args(argv=None):
                         "would absorb into the turbulence parameters. The heat "
                         "and moisture fluxes ARE matched (both prescribed from "
                         "the deck), so theta and qv are the well-posed target.")
+    p.add_argument("--clubb-prognostic", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="run full CLUBB on its prognostic path. The diagnostic "
+                        "default leaves 44 of 48 tunable params with a zero "
+                        "gradient; prognostic makes 35 of 48 live.")
+    p.add_argument("--surface-bulk-scheme", default="constant",
+                   choices=("constant", "most"),
+                   help="surface flux law, IDENTICAL on every arm. 'constant' "
+                        "uses a Cd derived from the neutral log law at the "
+                        "case's own LES z0 (which reproduces the LES u*), and "
+                        "is required whenever the case prescribes its surface "
+                        "heat flux, since the MOST path would double-count it.")
     p.add_argument("--microphysics", default="none",
                    help="microphysics scheme, held identical across arms. "
                         "'none' means the SCM cannot condense, so its cloud "
@@ -698,6 +840,11 @@ def main(argv=None) -> int:
     if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("JAX_ENABLE_X64=1 is required for this driver.")
 
+    args.radiation_confound = (
+        _RADIATION_MISMATCH[args.case]
+        if (args.case in _RADIATION_MISMATCH and args.allow_radiation_mismatch)
+        else None
+    )
     if args.case in _RADIATION_MISMATCH and not args.allow_radiation_mismatch:
         raise SystemExit(
             f"refusing to tune {args.case!r}: {_RADIATION_MISMATCH[args.case]}\n"
@@ -772,6 +919,15 @@ def main(argv=None) -> int:
               "average the LES's actual window so both sides match.")
     if actual_analysis_h <= 0.0:
         raise SystemExit("LES analysis window has zero span.")
+    n_analysis = int(round(actual_analysis_h * 3600.0 / args.dt))
+    if abs(n_analysis * args.dt / 3600.0 - actual_analysis_h) > 1.0e-9:
+        raise SystemExit(
+            f"--dt {args.dt} s does not divide the LES analysis window "
+            f"({actual_analysis_h:.6f} h = {actual_analysis_h * 3600.0:.1f} s): "
+            f"{n_analysis} steps cover {n_analysis * args.dt / 3600.0:.6f} h, so "
+            "the two sides would average different spans while the report "
+            "claimed one window. Pick a dt that divides it."
+        )
     args.analysis_hours = actual_analysis_h
 
     print(f"case={args.case} nlev={args.nlev} dt={args.dt}s hours={hours} "
@@ -787,7 +943,16 @@ def main(argv=None) -> int:
             f"{list(reference.scored_variables())}"
         )
     print(f"  scored variables: {list(args.scored)}")
-    print(f"  surface: prescribe={case.forcing.prescribe}")
+    args.surface_config = build_surface_config(
+        case, bulk_scheme=args.surface_bulk_scheme,
+    )
+    sc = args.surface_config
+    _u_ref = float(np.hypot(case.u_profile[-1], case.v_profile[-1]))
+    print(f"  surface: prescribe={case.forcing.prescribe} "
+          f"bulk={sc.bulk_scheme} z0={sc.z0:.2e} m z_ref={sc.z_ref:.1f} m")
+    print(f"           Cd={sc.Cd_neutral:.4e} Ch={sc.Ch_neutral:.4e} "
+          f"-> u*={(sc.Cd_neutral ** 0.5) * _u_ref:.3f} m/s at |U|="
+          f"{_u_ref:.2f} m/s (SAME config on every arm)")
 
     configs = {}
     profiles_default: dict[str, dict[str, np.ndarray]] = {}
@@ -819,6 +984,12 @@ def main(argv=None) -> int:
             print(f"    FAILED {res.error}", flush=True)
         res.wall_s = time.time() - t0
         results.append(res)
+        # Each arm rebuilds the SCM inside its loss and compiles fresh graphs,
+        # so executables and buffers accumulate across the nine arms. Drop them
+        # between arms: on a 32 GB card the campaign died with
+        # CUDA_ERROR_ILLEGAL_ADDRESS partway through, while the same arms pass
+        # in isolation and on a 48 GB card.
+        jax.clear_caches()
 
     if configs:
         _assert_arms_differ_only_in_turbulence(configs)
@@ -853,10 +1024,21 @@ def main(argv=None) -> int:
                 print(f"    default={res.score_default:.6g} -> "
                       f"tuned={res.score_tuned:.6g} "
                       f"({res.n_trained} params trained)")
+            jax.clear_caches()
 
     _write_outputs(outdir, args, case, reference, results)
     _write_profiles(outdir, case, reference, profiles_default)
     print(f"\nwrote {outdir}")
+
+    # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
+    # campaign, but the EXIT CODE must still report them: a run where every arm
+    # failed was previously indistinguishable from a clean sweep, and a wrapper
+    # script checking $? would have called it success.
+    failed = [r for r in results if r.status in ("failed", "tune_failed")]
+    if failed:
+        print(f"\n{len(failed)} of {len(results)} arm(s) FAILED: "
+              + ", ".join(f"{r.scheme} ({r.status})" for r in failed))
+        return 1
     return 0
 
 
@@ -897,7 +1079,11 @@ def _half_pressures(case) -> np.ndarray:
 def _write_outputs(outdir: Path, args, case, reference, results) -> None:
     # A failed or gradient-dead arm must NOT be ranked: one that fails after a
     # single favourable update would otherwise be reported as the winner.
-    _RANKABLE = {"ok", "tuned", "no_tunable_params", "no_active_gradient"}
+    # An arm is RANKED only if its score reflects a genuine optimisation.
+    # "no_active_gradient" was previously included, which let a closure whose
+    # parameters are disconnected from the loss be ranked -- possibly FIRST --
+    # on its untouched default score against genuinely tuned arms.
+    _RANKABLE = {"ok", "tuned"}
 
     def _score_of(r):
         if r.score_tuned is not None:
@@ -924,6 +1110,10 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
 
     payload = {
         "case": args.case,
+        # Present and non-null ONLY when --allow-radiation-mismatch was used.
+        # Without this the JSON claimed a controlled comparison while ranking a
+        # case whose LES radiation the SCM cannot reproduce.
+        "RADIATION_CONFOUND": args.radiation_confound,
         "protocol": {
             "nlev": args.nlev, "dt_s": args.dt, "hours": args.hours,
             "analysis_hours": args.analysis_hours,
@@ -943,6 +1133,19 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             # Stated, not buried. Each of these is identical across arms, so
             # the ranking stays controlled, but each degrades the absolute
             # LES-match and could be absorbed into a tuned parameter.
+            "single_surface_exchange_coefficient": (
+                None if case.spec.bulk_ce is None
+                or case.spec.bulk_ch is None
+                or case.forcing.prescribe == "fluxes"
+                else {
+                    "les_C_H": case.spec.bulk_ch,
+                    "les_C_Q": case.spec.bulk_ce,
+                    "scm_Ch_neutral_applied_to_both": case.spec.bulk_ch,
+                    "latent_flux_error_pct": 100.0
+                    * (case.spec.bulk_ce - case.spec.bulk_ch)
+                    / case.spec.bulk_ch,
+                }
+            ),
             "known_scm_les_differences": [
                 "Surface momentum: the SCM uses a constant-Cd bulk drag while "
                 "the LES uses a z0 log-law wall model. This is why u and v are "
@@ -982,6 +1185,14 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
 
     lines = [
         f"# SCM turbulence closures vs LES — {args.case}", "",
+    ]
+    if args.radiation_confound:
+        lines += [
+            "> **THIS IS NOT A TURBULENCE RANKING.** "
+            "`--allow-radiation-mismatch` was used: "
+            + args.radiation_confound, "",
+        ]
+    lines += [
         f"LES reference: `{reference.source_dir}`, window "
         f"{reference.window_label}, {int(reference.mask.sum())} of "
         f"{case.nlev} SCM levels inside the LES domain.", "",

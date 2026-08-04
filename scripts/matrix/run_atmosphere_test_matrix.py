@@ -1578,6 +1578,22 @@ def _run_timeloop(
                              f"threshold {float(blowup_threshold):.1f}"
                     ),
                 }
+                # codex r2 P1: capture the diagnostic scalars AT the
+                # blow-up state itself.  The loop breaks here, before
+                # the ``step % diag_every`` block, so without this the
+                # series (and any argmax localisation it carries) stops
+                # at the last clean checkpoint and never records the
+                # event it exists to localise.  Stored separately from
+                # the clean series so a reader cannot mistake a
+                # blown-up sample for a healthy one.
+                try:
+                    diag["_blowup_info"]["scalars_at_blowup"] = {
+                        k: (float(v) if np.isfinite(v) else None)
+                        for k, v in scalar_fn(state).items()
+                        if isinstance(v, (int, float, np.floating))
+                    }
+                except Exception as _exc:      # diagnostics must never mask the blow-up
+                    diag["_blowup_info"]["scalars_at_blowup_error"] = repr(_exc)
                 blown_up = True
                 break
 
@@ -1938,6 +1954,23 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
             f"(day {blowup_info.get('day', 0):.2f}), "
             f"reason: {blowup_info['reason']}"
         )
+        # codex r3 P2: surface the scalars captured AT the blow-up state.
+        # They were being recorded and then discarded -- the CSV writer
+        # skips private keys, so the postmortem data never reached a
+        # reader.  Emit the extrema (and any argmax localisation the
+        # scalars carry) into the notes line, sorted for stable output.
+        _at = blowup_info.get("scalars_at_blowup")
+        if _at:
+            blowup_str += "; at blowup: " + ", ".join(
+                f"{k}={v:.4g}" for k, v in sorted(_at.items())
+                if v is not None)
+            _none = sorted(k for k, v in _at.items() if v is None)
+            if _none:
+                blowup_str += f"; non-finite at blowup: {','.join(_none)}"
+        elif blowup_info.get("scalars_at_blowup_error"):
+            blowup_str += (
+                "; at-blowup scalars UNAVAILABLE: "
+                f"{blowup_info['scalars_at_blowup_error']}")
         if original_notes:
             rows = {**rows, "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
@@ -4254,16 +4287,57 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
+        # --- #1028 persistent-D option (2026-08-03) ---------------------
+        # LEGOESM_HS_PERSISTENT_D=1 keeps the prognostic state in FV3 D
+        # staggering BETWEEN steps, instead of the default cc -> corner ->
+        # cc round trip every step.  Measured motivation (frozen-threshold
+        # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
+        # projection costs a factor 2.63 in banded EKE and 1.9x in poleward
+        # u'v' -- a MATERIAL eddy suppressor and the leading measured
+        # candidate for the #1028 dead jet.  PRECISION (codex pd-review
+        # MEDIUM): this keeps the state persistent-D BETWEEN MACRO STEPS;
+        # the existing physics adapter still converts D -> cc at every RK
+        # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
+        # :1613/:1045), so the inner conversions remain.  Matrix
+        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
+        # bit-identical (the state never converts, _cc is the identity).
+        # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
+        # sqrt(u^2+v^2) at centres -- the same operator either way, since
+        # the legacy wrapper also exits through fv3_to_hydrostatic.
+        _hs_persistent_d = (
+            os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        if _hs_persistent_d:
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+                fv3_to_hydrostatic as _f2h,
+                hydrostatic_to_fv3 as _h2f,
+            )
+            from legoesm.grids.cubed_sphere_cdgrid import (
+                create_cubed_sphere_cdgrid as _mk_cdgrid)
+            _hs_cdgrid = _mk_cdgrid(grid)
+            state = _h2f(state, _hs_cdgrid)          # convert ONCE
+            print("  #1028 persistent-D: prognostic state stays in D "
+                  "staggering between steps (LEGOESM_HS_PERSISTENT_D=1)")
+
+            def _cc(s):
+                """D -> cc for diagnostics only (diagnostic cadence)."""
+                return _f2h(s, _hs_cdgrid) if hasattr(s, "u_d") else s
+        else:
+            def _cc(s):
+                return s
+
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(global_integral(s.p_s, grid))
+        mass_fn = lambda s: float(global_integral(_cc(s).p_s, grid))
 
         def check_fn(s):
+            s = _cc(s)
             return (check_finite({"T": s.T.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
         def scalar_fn(s):
+            s = _cc(s)
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(
@@ -4273,8 +4347,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
         _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
         _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
-        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
-        key_array_fn = lambda s: s.T.data
+        extract_fn = lambda s: _extract_hydro_cube_latlon(_cc(s), _cos_a, _sin_a)
+        key_array_fn = lambda s: s.T.data   # T exists on BOTH state types
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -5901,6 +5975,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         hd = _hyperdiff_cube(n)
 
+        # --- NH cube blow-up attribution knobs (2026-07-30) ---
+        # One env var per candidate, each DEFAULTING to the shipped value,
+        # so these knobs alone change nothing when unset.  (That is NOT a
+        # claim that the whole branch is unchanged: the corner-damp gate
+        # fix and the TC3 rotation change DO alter TC1/TC2/TC3 results —
+        # codex r2 P1.)  Mirrors the LEGOESM_CDD_* precedent used by the
+        # HS / baroclinic branches.
+        #   LEGOESM_NH_COMPACT_OUTER=1  compact outer del^2 => the
+        #       biharmonic actually damps 2*dx (default path has an exact
+        #       2*dx null; see CDGridCompressibleEulerConfig).
+        #   LEGOESM_NH_CDD_D4BG=<float> corner-divergence del-4
+        #       coefficient; 0 deactivates the corner-damp block entirely
+        #       (reproduces the pre-2026-07-29 dead-gate behaviour).
+        #   LEGOESM_NH_DAMP_W=<float>   FV3 del-n damping on w
+        #       (sw_core.F90:1078 del6_vt_flux), off by default.
+        _nh_compact_outer = (
+            os.environ.get("LEGOESM_NH_COMPACT_OUTER", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        _nh_cdd_d4bg = float(os.environ.get("LEGOESM_NH_CDD_D4BG", "0.16"))
+        _nh_damp_w = float(os.environ.get("LEGOESM_NH_DAMP_W", "0.0"))
+
         if test_case == "tc1":
             from tests.test_cases.dcmip2025 import dcmip25_tc1_init
             state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=nlev)
@@ -5969,7 +6064,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-17: corner-div damping del-4
                 # background pair (factory defaults).
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -6061,7 +6158,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -6132,7 +6231,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
@@ -6161,8 +6262,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-7: report total dry mass alongside |w|_max so mass
             # drift becomes visible in mean_timeseries.csv (cubed-sphere
             # NH supports anchored mass via fix_mass + compute_nh_dry_mass).
+            #
+            # 2026-07-30: ``max_abs_u`` and the argmax LOCATION of both
+            # |u| and |w| are logged too.  The blow-up trip metric in
+            # ``check_fn`` is max|u| (not |w|), and until now the series
+            # held only |w| — so a run could trip at |u| = 5069 m/s while
+            # the only logged field read a benign 9.8 m/s, with no record
+            # of WHERE either maximum sat.  face/i/j/k localise the burst
+            # (cube vertices are the 4 corners of every face).
             from legoesm.core.conservation import compute_nh_dry_mass
+            _u_abs = jnp.abs(s.u.data)
+            _w_abs = jnp.abs(s.w.data)
+            _u_at = jnp.unravel_index(jnp.argmax(_u_abs), _u_abs.shape)
+            _w_at = jnp.unravel_index(jnp.argmax(_w_abs), _w_abs.shape)
             return {
+                "max_abs_u": float(jnp.max(_u_abs)),
+                "u_argmax_face": float(_u_at[0]), "u_argmax_i": float(_u_at[1]),
+                "u_argmax_j": float(_u_at[2]), "u_argmax_k": float(_u_at[3]),
+                "w_argmax_face": float(_w_at[0]), "w_argmax_i": float(_w_at[1]),
+                "w_argmax_j": float(_w_at[2]), "w_argmax_k": float(_w_at[3]),
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),
@@ -6369,15 +6487,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             raise NotImplementedError(
                 f"Spectral NH: unsupported test case {test_case}")
 
-        # Small-Earth factor and sponge config per test case
+        # Small-Earth factor and sponge config per test case.
+        # ``rotating`` comes from the SAME case parameter dicts the cube and
+        # MPAS arms read, so all three grids agree on Coriolis: TC2 rotates
+        # (radius/X, f*X, the DCMIP small-planet convention), TC3 does not
+        # (the squall-line spec has no Coriolis).  Previously the spectral
+        # model scaled f by X unconditionally, so its TC3 arm ran at f*60
+        # against f=0 on cube and MPAS (codex r3 P1).
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
+        )
         if test_case == "tc2a":
             sef = 20.0
+            _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
             sef = 60.0
+            _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
             sef = 1.0
+            _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
@@ -6401,6 +6531,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_coeff=sponge_c,
             hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
+            rotating=_rotating,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,

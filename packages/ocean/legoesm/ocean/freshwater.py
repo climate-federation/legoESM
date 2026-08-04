@@ -273,17 +273,10 @@ _THIN_CELL_M = 1.0e-3  # top-cell thickness below which the closure is inert [m]
 def _global_weighted_sums(num_field, den_field, w, owned_mask=None):
     """``(Σ num_field*w, Σ den_field*w)`` reduced correctly on EVERY backend.
 
-    Mirrors the reduction inside :func:`normalize_freshwater_net` so the
-    salinity-weighted salt correction cannot drift from the freshwater mean's
-    owned-cell / lat-SPMD handling.  Re-deriving it by hand is exactly how the
-    salt correction silently lost the lat-SPMD ``psum`` and would have applied a
-    different lambda per latitude band.
-
-    NOTE (accuracy, codex round-3): ``normalize_freshwater_net`` still contains
-    its own inline copy of this reduction -- the arithmetic is identical, but
-    this helper is NOT yet literally shared by both.  Folding that caller onto
-    this helper is a follow-up kept separate because that function's arithmetic
-    must stay bit-identical for already-validated runs.
+    Extracted from :func:`normalize_freshwater_net` so the freshwater mean and
+    the salinity-weighted salt correction share ONE reduction.  Re-deriving it
+    is exactly how the salt correction silently lost the lat-SPMD ``psum`` and
+    would have applied a different lambda per latitude band.
 
     ``owned_mask=None`` keeps the legacy serial/lat-SPMD arm (bit-identical);
     passing it takes the MPI owned-cell arm via ``global_sum_if_distributed``
@@ -450,13 +443,10 @@ def joint_volume_salt_virtual_salt_flux(
     #    basis is unsafe precisely in the situation this function exists to
     #    fix: with negative cells present, ∮S dA can pass through zero while
     #    ∮S F' dA does not, silently dropping the correction.
-    #        lambda = ∮b F' dA / ∮b dA,   G = b*(F' - lambda)
-    #    ∮G dA = ∮b F' dA - lambda*∮b dA = 0 exactly, and G = 0 wherever S <= 0.
-    #    (b in BOTH the numerator and the correction -- see the docstring; a
-    #    signed numerator against a max(S,0) correction is a support mismatch.)
-    #    The reduction goes through `_global_weighted_sums`, which carries the
-    #    same owned-cell / lat-SPMD handling as the freshwater mean, so lambda
-    #    cannot silently drift from it.
+    #        lambda = ∮S F' dA / ∮b dA,   G = S*F' - lambda*b
+    #    ∮G dA = ∮S F' dA - lambda*∮b dA = 0 exactly, and G = 0 wherever S <= 0.
+    #    The reduction is the SHARED one (`_global_weighted_sums`) so lambda
+    #    cannot drift from the freshwater mean's owned-cell / lat-SPMD handling.
     # The basis appears in BOTH the numerator and the correction.  Using signed
     # S in the numerator with a max(S,0) correction is a SUPPORT MISMATCH: a
     # cell with S < 0 would then receive the flux S*F' but no correction, so it

@@ -563,6 +563,20 @@ class ExperimentConfig(NamedTuple):
     # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
     cloud_optics_inhomogeneity: str = "constant"
     cloud_fsd: float | None = None
+    # Partial-cloud-COVER optics: "none" (legacy/byte-identical) or
+    # "two_column".  The solver has no McICA/overlap and sees ONE
+    # homogeneous column at the grid-mean path, i.e. R(cf*tau_ic); the
+    # independent-column answer cf*R(tau_ic)+(1-cf)*R(0) is DARKER because R
+    # is concave.  "two_column" applies the exact inversion of that identity.
+    cloud_partial_coverage_optics: str = "none"
+    # VERTICAL overlap optics: "none" (legacy/byte-identical) or
+    # "max_random" (n_sub deterministic maximum-random-overlap subcolumns,
+    # measured -30% cloud albedo and +18 W/m2 OLR vs a Monte-Carlo
+    # reference; costs n_sub x the radiation time). MUTUALLY EXCLUSIVE with
+    # cloud_partial_coverage_optics="two_column" -- both correct partial
+    # coverage, so enabling both double-discounts the cloud.
+    cloud_vertical_overlap_optics: str = "none"
+    cloud_n_subcolumns: int = 8
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1332,6 +1346,11 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
     hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    # HinesConfig.launch_p [Pa]; 0.0 = unset = legacy SURFACE launch.
+    # A non-orographic wave launched at the surface is born supersaturated
+    # in the weakly stratified BL and breaks at its own launch level
+    # (measured: 55% of its momentum deposited below 1 km).
+    hines_launch_p: float = 0.0
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
@@ -1590,6 +1609,34 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"cloud_optics_inhomogeneity must be one of {_valid_inhom}, "
                 f"got {self.cloud_optics_inhomogeneity!r}"
+            )
+        _valid_cover = ("none", "two_column")
+        if self.cloud_partial_coverage_optics not in _valid_cover:
+            errors.append(
+                f"cloud_partial_coverage_optics must be one of {_valid_cover}, "
+                f"got {self.cloud_partial_coverage_optics!r}"
+            )
+        _valid_overlap = ("none", "max_random")
+        if self.cloud_vertical_overlap_optics not in _valid_overlap:
+            errors.append(
+                f"cloud_vertical_overlap_optics must be one of "
+                f"{_valid_overlap}, got {self.cloud_vertical_overlap_optics!r}"
+            )
+        if (self.cloud_partial_coverage_optics != "none"
+                and self.cloud_vertical_overlap_optics != "none"):
+            # Caught here as well as at the scheme, so a bad config fails at
+            # startup rather than inside the first radiation call.
+            errors.append(
+                "cloud_partial_coverage_optics and "
+                "cloud_vertical_overlap_optics are mutually exclusive (both "
+                "correct partial cloud coverage); got "
+                f"{self.cloud_partial_coverage_optics!r} and "
+                f"{self.cloud_vertical_overlap_optics!r}"
+            )
+        if not 1 <= int(self.cloud_n_subcolumns) <= 64:
+            errors.append(
+                f"cloud_n_subcolumns must be in [1, 64], got "
+                f"{self.cloud_n_subcolumns}"
             )
         # External-forcing source selectors.  The driver activates each channel
         # with a ``cfg.<field> == "external"``-style equality gate
@@ -2543,6 +2590,7 @@ class ExperimentConfig(NamedTuple):
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
             hyperdiff_scale=getattr(amip_cfg, 'hyperdiff_scale', 1.0),
+            a_h_scale=getattr(amip_cfg, 'a_h_scale', 1.0),
         )
         output = OutputConfig(
             output_dir=getattr(amip_cfg, 'output_dir', ''),
@@ -2935,12 +2983,37 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     return d
 
 
-def experiment_config_from_dict(d: dict) -> ExperimentConfig:
+def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentConfig:
     """Reconstruct ExperimentConfig from a dict (e.g. loaded from JSON).
 
     Unknown fields are silently dropped for forward-compatibility
     (so older checkpoints with removed fields still load).
+
+    ``strict=True`` raises on any unknown key instead. Use it for LAUNCH
+    configs: silently dropping a key there means a typo -- e.g. ``grid.type``
+    where the field is ``grid_type`` -- loads cleanly and runs a DIFFERENT
+    experiment than the file describes, with nothing in the log to say so.
+    Checkpoint reload keeps the permissive default.
     """
+    if strict:
+        unknown = []
+        for key, cls in _SUB_CONFIGS.items():
+            if key in d and isinstance(d[key], dict):
+                known_sub = set(cls._fields)
+                unknown += [f"{key}.{k}" for k in d[key] if k not in known_sub
+                            and not (key == "output" and k == "evaluation")]
+                ev = d[key].get("evaluation")
+                if isinstance(ev, dict):
+                    unknown += [f"{key}.evaluation.{k}" for k in ev
+                                if k not in set(EvaluationConfig._fields)]
+        known_top = set(ExperimentConfig._fields)
+        unknown += [k for k in d if k not in known_top]
+        if unknown:
+            raise ValueError(
+                "unknown config field(s): " + ", ".join(sorted(unknown))
+                + ". Loading a launch config with strict=True refuses to "
+                  "silently drop keys, because a dropped key runs a different "
+                  "experiment than the file describes.")
     # Reconstruct sub-configs
     sub_values = {}
     for key, cls in _SUB_CONFIGS.items():
@@ -3043,7 +3116,12 @@ def save_experiment_config(config: ExperimentConfig, path: Path | str) -> None:
         json.dump(experiment_config_to_dict(config), f, indent=2, default=str)
 
 
-def load_experiment_config(path: Path | str) -> ExperimentConfig:
-    """Load ExperimentConfig from JSON file."""
+def load_experiment_config(path: Path | str, *,
+                          strict: bool = False) -> ExperimentConfig:
+    """Load ExperimentConfig from JSON file.
+
+    ``strict=True`` refuses unknown keys -- see
+    :func:`experiment_config_from_dict`. Launch scripts should pass it.
+    """
     with open(path) as f:
-        return experiment_config_from_dict(json.load(f))
+        return experiment_config_from_dict(json.load(f), strict=strict)

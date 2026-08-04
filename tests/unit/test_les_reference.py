@@ -21,7 +21,7 @@ DOMAIN_TOP = 2000.0
 
 
 def _write_frames(tmp_path, n_frames=6, *, nz=NZ_LES, corrupt=None,
-                  drop_var=None, t_step=0.5, values=None, case_label=None):
+                  drop_var=None, t_step=0.5, values=None, case_label="synthetic"):
     """Write ``n_frames`` synthetic LES profile frames; return the dir."""
     prof = tmp_path / "profiles"
     prof.mkdir(parents=True, exist_ok=True)
@@ -206,7 +206,8 @@ def test_inconsistent_frame_variable_sets_are_refused(tmp_path):
     z = np.linspace(25.0, DOMAIN_TOP, NZ_LES)
     np.savez(prof / "prof_006.npz", t_hours=np.asarray(3.5), z=z,
              theta=300.0 + 0.003 * z, qv=np.ones(NZ_LES) * 1e-2,
-             u=np.zeros(NZ_LES), v=np.zeros(NZ_LES), wth=np.zeros(NZ_LES))
+             u=np.zeros(NZ_LES), v=np.zeros(NZ_LES), wth=np.zeros(NZ_LES),
+             case=np.asarray("synthetic"))
     with pytest.raises(ValueError, match="different variable set"):
         _load(tmp_path, analysis_hours=1.0)
 
@@ -247,7 +248,7 @@ def test_duplicate_timestamps_are_refused(tmp_path):
              theta=300.0 + 0.003 * z, qv=1.0e-2 - 2.0e-6 * z,
              u=-8.0 + 0.001 * z, v=np.zeros(NZ_LES),
              wth=np.zeros(NZ_LES), wqv=np.zeros(NZ_LES),
-             tke=0.5 * np.ones(NZ_LES))
+             tke=0.5 * np.ones(NZ_LES), case=np.asarray("synthetic"))
     with pytest.raises(ValueError, match="share t_hours"):
         _load(tmp_path)
 
@@ -262,3 +263,47 @@ def test_mask_stops_at_the_top_les_cell_centre_not_the_domain_lid(tmp_path):
     ref = _load(tmp_path, z_scm=z_scm, p_half=p_half, domain_top_m=5000.0)
     assert np.all(ref.z_scm[ref.mask] <= ref.z_les[-1] + 1e-9)
     assert not ref.mask[0], "level above the top LES centre must be excluded"
+
+
+# --- round-3 review fixes ---------------------------------------------------
+
+def test_unlabelled_frames_are_refused(tmp_path):
+    """A frame with no 'case' label previously sailed through, so a stale frame
+    from another case that lacked its label was scored as this one."""
+    _write_frames(tmp_path, n_frames=6, case_label=None)
+    with pytest.raises(ValueError, match="no 'case' label"):
+        _load(tmp_path, case="bomex")
+
+
+def test_empty_case_label_is_refused(tmp_path):
+    _write_frames(tmp_path, n_frames=6, case_label="   ")
+    with pytest.raises(ValueError, match="no 'case' label"):
+        _load(tmp_path, case="bomex")
+
+
+@pytest.mark.parametrize("label", ["b", "bomex_experiment", "bo"])
+def test_prefix_lookalike_labels_are_refused(tmp_path, label):
+    """`startswith` matching accepted these; only exact names or registered
+    aliases may pass."""
+    _write_frames(tmp_path, n_frames=6, case_label=label)
+    with pytest.raises(ValueError, match="written by LES case"):
+        _load(tmp_path, case="bomex")
+
+
+def test_registered_alias_still_accepted(tmp_path):
+    _write_frames(tmp_path, n_frames=6, case_label="DYCOMS_RF01")
+    assert _load(tmp_path, case="dycoms").n_frames >= 2
+
+
+def test_frames_on_different_grids_are_refused(tmp_path):
+    """Same level COUNT, different Lz: averaging by index would mix two grids."""
+    _write_frames(tmp_path, n_frames=6, case_label="bomex")
+    prof = tmp_path / "profiles"
+    z_other = np.linspace(25.0, DOMAIN_TOP * 2.0, NZ_LES)   # different grid
+    np.savez(prof / "prof_009.npz", t_hours=np.asarray(3.25), z=z_other,
+             theta=300.0 + 0.003 * z_other, qv=np.full(NZ_LES, 1e-2),
+             u=np.zeros(NZ_LES), v=np.zeros(NZ_LES),
+             wth=np.zeros(NZ_LES), wqv=np.zeros(NZ_LES),
+             tke=np.full(NZ_LES, 0.5), case=np.asarray("bomex"))
+    with pytest.raises(ValueError, match="different vertical grid"):
+        _load(tmp_path, case="bomex", analysis_hours=1.0)

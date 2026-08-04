@@ -222,8 +222,11 @@ def _enumerate_protected_modules(repo_root: Path) -> list[str]:
 
     files: list[Path] = []
 
-    # Full grids/ subtree (carve-aware path resolution).
-    grids_dir = legoesm_source_path("grids")
+    # repo_root= so a run from a git WORKTREE resolves paths inside ITS OWN
+    # tree: legoesm.__path__ reports the editable install's roots, which point
+    # at the canonical checkout, and the relative_to() at the end of this
+    # function then raised a bare ValueError naming a foreign path (#1389).
+    grids_dir = legoesm_source_path("grids", repo_root)
     if grids_dir.exists():
         files.extend(sorted(grids_dir.rglob("*.py")))
 
@@ -238,7 +241,7 @@ def _enumerate_protected_modules(repo_root: Path) -> list[str]:
         "parallel/cubesphere_exchange.py",
     ):
         try:
-            path = legoesm_source_path(rel)
+            path = legoesm_source_path(rel, repo_root)
         except FileNotFoundError:
             continue
         if path not in files:

@@ -189,8 +189,9 @@ def test_live_pool_forward_differentiable_in_carbon_params():
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.live_pool_forward import compute_biomass_lai
+    from legoesm.core.param_overrides import apply_param_overrides
     from legoesm.training.param_collector import (
-        apply_param_overrides, build_trainable_params,
+        build_trainable_params,
     )
 
     npp = jnp.asarray([400.0, 700.0, 900.0])

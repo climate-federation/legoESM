@@ -1204,6 +1204,12 @@ class LatLonCGridGeometry(NamedTuple):
     cos_lat, sin_lat : jax.Array
         Legacy 1D arrays (n_lat,) for backward compatibility with
         operators that have not yet been migrated to per-cell metrics.
+    cos_lat_v : jax.Array
+        Legacy 1D array (n_lat+1,) of ``|cos(lat_v)|`` at the TRUE v-face
+        latitudes, matching ``LatLonGrid.cos_lat_v``.  On a stretched grid
+        the true faces are NOT the midpoints of ``lat`` (NEMO DINO: 2.5e-4
+        relative), so a consumer needing ``cos(gphiv)`` -- e.g. NEMO's
+        independently-evaluated ``ahtv`` -- must read this, not rebuild it.
     lat, lon : jax.Array
         Legacy 1D arrays (n_lat,) and (n_lon,).
     dlon, dlat : float
@@ -1253,6 +1259,7 @@ class LatLonCGridGeometry(NamedTuple):
     # Legacy compatibility fields
     cos_lat: jax.Array  # (n_lat,) clamped cos(lat) at cell centers
     sin_lat: jax.Array  # (n_lat,) sin(lat) at cell centers
+    cos_lat_v: jax.Array  # (n_lat+1,) clamped |cos(lat_v)| at v-faces
     lat: jax.Array      # (n_lat,) 1D cell-center latitudes [rad]
     lon: jax.Array      # (n_lon,) 1D cell-center longitudes [rad]
     dlon: float         # scalar longitude spacing (0.0 sentinel for tripole)
@@ -1553,9 +1560,15 @@ def create_latlon_geometry(
         area_legacy = area_lat_1d[:, None] * jnp.ones((1, n_lon))
     else:
         dlat_1d = None  # uniform — use scalar dlat everywhere
+        lat_face = (lat_face_1d if lat_face_1d is not None
+                    else compute_v_face_coords(lat_1d, dlat)[0])
         area_legacy = _exact_uniform_cell_area_lat(
             radius, lat_1d, dlat, dlon, n_lon
         )
+    # TRUE v-face cos, same clamp as compute_v_face_coords so this agrees
+    # with the bridged LatLonGrid to storage-dtype roundoff (not bit-exact:
+    # the grid casts lat_v then cos's, this cos's the faces then casts).
+    cos_lat_v_1d = jnp.maximum(jnp.abs(jnp.cos(lat_face)), 1e-10)
 
     total_area = jnp.sum(area_legacy)
 
@@ -1646,6 +1659,25 @@ def create_latlon_geometry(
         dy_v = dy_v_1d[:, jnp.newaxis] * jnp.ones((1, n_lon))
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
+    if metric_convention == "nemo_isotropic":
+        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # the SAME expression as pe1v.  Under the isotropic convention the
+        # meridional v-point scale factor IS the zonal one, evaluated at the
+        # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport
+        # metric).  legoESM's "exact" dy_v is the true finite-difference
+        # spacing instead, differing from NEMO's e2v by median 2.798e-05 /
+        # max 8.241e-03 -- which lands directly in ldf_slp's vslp, whose
+        # divisor is e2v (#1226; substituting NEMO's own e2v collapses vslp
+        # 1.609e-06 -> 3.807e-10, while the same substitution with e1u moves
+        # uslp 0.0%).
+        #
+        # This does NOT touch the #516 invariant: that governs dx_v (the
+        # ZONAL length of a v-face) via vface_zonal_cos_lat, and the
+        # strain/stress adjoint pair + divergence/advection mass consistency
+        # hold because every operator SHARES that metric, not because of its
+        # value.  dy_v is a different field and does not appear in either.
+        dy_v = (radius * dlon) * cos_lat_v_1d[:, jnp.newaxis] \
+            * jnp.ones((1, n_lon))
 
     # ------- Vertex (q-point) area (n_lat+1, n_lon+1) -------
     # Matches curl_vertex_cgrid: A_q(i) = R^2 * dlon * |sin(lat[i]) - sin(lat[i-1])|
@@ -1700,6 +1732,7 @@ def create_latlon_geometry(
         fold=fold,
         cos_lat=_c(cos_lat_1d),
         sin_lat=_c(sin_lat_1d),
+        cos_lat_v=_c(cos_lat_v_1d),
         lat=_c(lat_1d),
         lon=_c(lon_1d),
         dlon=float(dlon),
@@ -1888,6 +1921,7 @@ def create_beta_plane_cgrid_geometry(
         fold=_inactive_fold(n_lon),
         cos_lat=jnp.ones((n_lat,), dtype=dtype),
         sin_lat=jnp.zeros((n_lat,), dtype=dtype),
+        cos_lat_v=jnp.ones((n_lat + 1,), dtype=dtype),
         lat=_c(lat_1d),
         lon=_c(lon_1d),
         dlon=float(dx_m / radius),

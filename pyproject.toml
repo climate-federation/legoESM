@@ -57,7 +57,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.26",
     "netCDF4>=1.6",
-    "dataclasses-json>=0.6",
     "scipy>=1.10",
     "pandas>=2.0",
 ]
@@ -443,17 +442,20 @@ ignore_imports = [
     # parameterization. Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml]
     # extras (top-level imports; the base component does not pull these modules —
     # both sfno_pe and ucast_pe are lazily re-exported by dynamics/__init__).
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.sfno",
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.sfno",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.conservation",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.ucast",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.conservation",
+    # Paths carry the ``neural`` bucket introduced by a16e1493a (dynamics/ reorg
+    # into gcm/les/crm/shared/neural) — the pre-reorg flat paths matched nothing
+    # and, with unmatched_ignore_imports_alerting = "error", broke lint-imports.
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.conservation",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.ucast",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.conservation",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.normalization",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.io",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.model",
@@ -463,6 +465,10 @@ ignore_imports = [
     # OPTIONAL FEATURE: ocean Stommel-gyre tracer experiment drift diagnostic.
     # Declared by the legoesm-ocean[tools] extra (deferred/function-scope import).
     "legoesm.ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics",
+    # OPTIONAL FEATURE: q-flux climatology reuses the AMIP monthly regrid +
+    # cyclic mid-month interpolation. legoesm-ocean[tools] extra; deferred to
+    # function scope so a bare legoesm-ocean can still import the module.
+    "legoesm.ocean.forcing.qflux -> legoesm.forcing.amip",
 ]
 
 [[tool.importlinter.contracts]]

@@ -57,6 +57,59 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
 - **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
 
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If my premise is wrong — if I've misdiagnosed the bug, or the thing I'm asking
+for won't work — say so before writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate
+between them, then test. Do not go straight to a fix. Do not agree with a cause
+I suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here.
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code I didn't ask about. Long unbroken generations drift into invention — prefer
+a small verified diff over a large plausible one.
+
 ## Attribution Gates — MANDATORY, each from a real 2026-07 failure
 Model is near operational. Every rule below is mechanical: satisfy it or state
 explicitly that you did not. "I was careful" is not compliance.
@@ -189,6 +242,69 @@ pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
   the run directory for a scorecard/manifest/diagnostic that answers the
   question, and `scripts/validate/` for a validator. Reading an existing
   artifact costs seconds; a new probe costs an hour and needs its own controls.
+
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+**This applies to THIS repo's own API too** — it is large enough that memory is
+unreliable. FAILURES in ONE session (2026-07-30): `AerosolConfig(reference_aod=)`
+(really `reference_aod_550`), `McFarlaneConfig(N_ref=)` (no such field),
+`run_amip.build_parser` (really `build_arg_parser`), `from legoesm.grids import
+create_grid` (really `legoesm.grids.factory`). Each cost a full probe round-trip.
+Worse, `RRTMGPConfig()` defaults `include_clouds=False`, so an offline harness
+that omits it returns CLEAR-SKY fluxes and EVERY cloud gradient is exactly 0.0 —
+a silently wrong number, not an error. Read the NamedTuple `_fields` /
+`_field_defaults` before constructing a config.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If the user's premise is wrong — if they have misdiagnosed the bug, or the thing
+being asked for will not work — say so BEFORE writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate between
+them, then test. Do not go straight to a fix. Do not agree with a cause the user
+suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here. (Applies
+  directly to `_sendrecv_vjp` in `halo_exchange.py` and any new MPI-AD path.)
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code the user did not ask about. Long unbroken generations drift into invention —
+prefer a small verified diff over a large plausible one.
 
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
@@ -326,7 +442,7 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
   - The collector selects tiers `1..N` (`build_trainable_params(config, tier="core"/"extended"/"aggressive", include=, exclude=)`); flip a param's status with a 1-line `tunable_tier` edit. See [[param-hygiene-spec-effort]].
 - **Loop-iteration COUNTS are never config/trainable** → module constant (e.g. `_N_EVP_DEFAULT = 120`), not a config field, not a kwarg-default literal. Structurally guaranteed: ints are not spec-eligible, so an iteration count can never reach the trainable collector. See [[loop-counts-never-trainable]].
 - **A tunable closure whose default is a `constants.X` reference** (e.g. `S_ice_new = constants.S_ice_bulk_default`) is *eligible* (may be a `__param_spec__` param with explicit bounds + tier) though not *required* (the AST gate won't force it). Expose genuine calibratable closures; keep environmental references (ocean salinity) fixed/excluded.
-- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `param_collector.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
+- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `legoesm.core.param_overrides.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
 
 ## Naming
 - Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.

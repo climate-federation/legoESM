@@ -291,6 +291,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_pv_flux"),
+        # #1455: lateral_viscosity_e3_weighting dispatch (raises on an unknown
+        # e3-weighting variant, and when paired with any operator other than
+        # nemo_div_curl).
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
@@ -327,6 +331,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # typo would silently run the Veros flux BC, a ~60x different surface
         # TKE under wind).
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_surface_tke_dirichlet"),
+        # TKE shear-production discretization dispatch (tke_shear_production:
+        # squared_centered | nemo_burchard | nemo_face_native; #1226
+        # sh2_walk.py Candidate E/F face-native zdfsh2.F90 transcription
+        # added 2026-07-30) — a typo would silently keep the T-collapsed
+        # squared form instead of the face-native shear NEMO actually
+        # computes.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "tke_vertical_mixing"),
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py", "_validate_post_mixing_cfg"),
         ("packages/ocean/legoesm/ocean/scm.py", "__init__"),
         ("packages/tools/legoesm/forcing/amip.py", "get_amip_preset"),
         ("packages/tools/legoesm/forcing/experiments.py", "create_experiment_config"),

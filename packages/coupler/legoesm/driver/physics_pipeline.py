@@ -299,6 +299,9 @@ class PhysicsPipeline:
         self._cloud_conv_cloud_condensate = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
+        self._cloud_partial_coverage_optics = None
+        self._cloud_vertical_overlap_optics = None
+        self._cloud_n_subcolumns = None
         self._cloud_fsd = None
         self._cloud_p_xr = None
         self._cloud_alpha_xr = None
@@ -2069,6 +2072,11 @@ class PhysicsPipeline:
                 cloud_optics_inhomogeneity=getattr(
                     self, "_cloud_optics_inhomogeneity", None),
                 cloud_fsd=getattr(self, "_cloud_fsd", None),
+                cloud_partial_coverage_optics=getattr(
+                    self, "_cloud_partial_coverage_optics", None),
+                cloud_vertical_overlap_optics=getattr(
+                    self, "_cloud_vertical_overlap_optics", None),
+                cloud_n_subcolumns=getattr(self, "_cloud_n_subcolumns", None),
                 p_xr=getattr(self, "_cloud_p_xr", None),
                 alpha_xr=getattr(self, "_cloud_alpha_xr", None),
                 diagnostic_condensate_scheme=getattr(
@@ -3424,6 +3432,32 @@ def turbulence_config_for(config):
                     and "cloudtop_entrainment_efficiency" in getattr(nested, "_fields", ())):
                 tc = tc._replace(**{scheme: nested._replace(
                     cloudtop_entrainment_efficiency=eff)})
+        # Louis stability-function scalars (the calibration campaign's
+        # inert-params finding, 2026-08-01): ExperimentConfig documents
+        # louis_l_mix_max / louis_Ri_crit / louis_{b,c,d}_louis as targeting
+        # LouisConfig, and the ML tuning path (aimip_params) injects them —
+        # but THIS function, the single source every dycore's production
+        # kernel consumes, silently dropped them: setting --louis-l-mix-max
+        # changed nothing while reporting success.  Thread any NON-DEFAULT
+        # value into the active louis sub-config; an all-defaults config
+        # takes no _replace, preserving the byte-identity contract above.
+        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
+        # LouisConfig field and are NOT threaded here — still inert, see the
+        # upstream note in the calibration repo.)
+        if tc.scheme == "louis" and tc.louis is not None:
+            _louis_updates = {}
+            for exp_name, leaf_name in (
+                    ("louis_l_mix_max", "l_mix_max"),
+                    ("louis_Ri_crit", "Ri_crit"),
+                    ("louis_b_louis", "b_louis"),
+                    ("louis_c_louis", "c_louis"),
+                    ("louis_d_louis", "d_louis")):
+                val = getattr(config, exp_name, None)
+                if val is not None and float(val) != float(
+                        getattr(tc.louis, leaf_name)):
+                    _louis_updates[leaf_name] = float(val)
+            if _louis_updates:
+                tc = tc._replace(louis=tc.louis._replace(**_louis_updates))
         return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
@@ -3515,6 +3549,9 @@ def gwd_config_for(config):
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
         Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
+        # None (default) = legacy surface launch, byte-identical.
+        launch_p=(None if getattr(config, "hines_launch_p", 0.0) in (0.0, None)
+                  else float(config.hines_launch_p)),
     )
     return gc._replace(mcfarlane=mc, hines=hn)
 
@@ -3794,6 +3831,11 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(
         config, 'cloud_optics_inhomogeneity', None)
+    pipeline._cloud_partial_coverage_optics = getattr(
+        config, 'cloud_partial_coverage_optics', None)
+    pipeline._cloud_vertical_overlap_optics = getattr(
+        config, 'cloud_vertical_overlap_optics', None)
+    pipeline._cloud_n_subcolumns = getattr(config, 'cloud_n_subcolumns', None)
     pipeline._cloud_fsd = getattr(config, 'cloud_fsd', None)
     pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
     pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)

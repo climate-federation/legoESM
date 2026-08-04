@@ -13,7 +13,7 @@ from __future__ import annotations
 from legoesm.atmosphere.physics.combined import PhysicsConfig
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig, CLUBBParams
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
-from legoesm.training.param_collector import apply_param_overrides
+from legoesm.core.param_overrides import apply_param_overrides
 
 import scripts.run.run_scm_rce_campaign as campaign
 

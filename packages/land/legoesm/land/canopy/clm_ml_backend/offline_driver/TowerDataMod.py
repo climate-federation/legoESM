@@ -11,6 +11,7 @@ Fortran lines 1-130
 """
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 # ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ tower_id: list[str] = [
 # ---------------------------------------------------------------------------
 
 # Latitude of tower (degrees) — Fortran: real(r8) :: tower_lat(ntower)
-tower_lat: Array = jnp.array(
+tower_lat: np.ndarray = np.array(
     [
         0.00,  # index 0: unused
         42.54,  #  1  US-Ha1
@@ -78,11 +79,11 @@ tower_lat: Array = jnp.array(
         38.49,  # 14  CHATS7
         45.56,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Longitude of tower (degrees) — Fortran: real(r8) :: tower_lon(ntower)
-tower_lon: Array = jnp.array(
+tower_lon: np.ndarray = np.array(
     [
         0.00,  # index 0: unused
         -72.17,  #  1  US-Ha1
@@ -101,7 +102,7 @@ tower_lon: Array = jnp.array(
         -121.84,  # 14  CHATS7
         -84.71,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # ---------------------------------------------------------------------------
@@ -109,7 +110,7 @@ tower_lon: Array = jnp.array(
 # ---------------------------------------------------------------------------
 
 # CLM PFT for tower site — Fortran: integer :: tower_pft(ntower)
-tower_pft: Array = jnp.array(
+tower_pft: np.ndarray = np.array(
     [
         0,  # index 0: unused
         7,  #  1  US-Ha1  broadleaf_deciduous_temperate_tree
@@ -128,7 +129,7 @@ tower_pft: Array = jnp.array(
         7,  # 14  CHATS7  broadleaf_deciduous_temperate_tree
         7,  # 15  UMBSmw  broadleaf_deciduous_temperate_tree
     ],
-    dtype=jnp.int32,
+    dtype=np.int32,
 )
 
 # ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ tower_tex: list[str] = [
 
 # Percent sand (used when >= 0; -999 triggers texture class lookup)
 # Fortran: real(r8) :: tower_sand(ntower)
-tower_sand: Array = jnp.array(
+tower_sand: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         -999.0,  #  1  US-Ha1
@@ -177,12 +178,12 @@ tower_sand: Array = jnp.array(
         10.0,  # 14  CHATS7
         -999.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Percent clay (used when >= 0; -999 triggers texture class lookup)
 # Fortran: real(r8) :: tower_clay(ntower)
-tower_clay: Array = jnp.array(
+tower_clay: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         -999.0,  #  1  US-Ha1
@@ -201,12 +202,12 @@ tower_clay: Array = jnp.array(
         35.0,  # 14  CHATS7
         -999.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Soil organic matter (kg/m3) — Fortran lines 67-70
 # Fortran: real(r8) :: tower_organic(ntower)
-tower_organic: Array = jnp.array(
+tower_organic: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         0.0,  #  1  US-Ha1
@@ -225,12 +226,12 @@ tower_organic: Array = jnp.array(
         50.0,  # 14  CHATS7
         0.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # CLM soil color class — Fortran lines 72-74
 # Fortran: integer :: tower_isoicol(ntower)
-tower_isoicol: Array = jnp.array(
+tower_isoicol: np.ndarray = np.array(
     [
         0,  # index 0: unused
         18,  #  1  US-Ha1
@@ -249,12 +250,12 @@ tower_isoicol: Array = jnp.array(
         15,  # 14  CHATS7
         17,  # 15  UMBSmw
     ],
-    dtype=jnp.int32,
+    dtype=np.int32,
 )
 
 # Depth to bedrock (m) — Fortran lines 76-79
 # Fortran: real(r8) :: tower_zbed(ntower)
-tower_zbed: Array = jnp.array(
+tower_zbed: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         50.0,  #  1  US-Ha1
@@ -273,7 +274,7 @@ tower_zbed: Array = jnp.array(
         2.0,  # 14  CHATS7
         50.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # ---------------------------------------------------------------------------
@@ -282,7 +283,7 @@ tower_zbed: Array = jnp.array(
 
 # Flux tower height (m); -999 triggers a default of 30 m — Fortran lines 81-85
 # Fortran: real(r8) :: tower_ht(ntower)
-tower_ht: Array = jnp.array(
+tower_ht: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         30.0,  #  1  US-Ha1
@@ -301,12 +302,12 @@ tower_ht: Array = jnp.array(
         23.0,  # 14  CHATS7
         46.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Canopy height (m) — Fortran lines 87-91
 # Fortran: real(r8) :: tower_canht(ntower)
-tower_canht: Array = jnp.array(
+tower_canht: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         23.0,  #  1  US-Ha1
@@ -325,12 +326,12 @@ tower_canht: Array = jnp.array(
         10.0,  # 14  CHATS7
         21.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Fine root biomass (g biomass/m2); -999 = unavailable — Fortran lines 93-97
 # Fortran: real(r8) :: tower_root(ntower)
-tower_root: Array = jnp.array(
+tower_root: np.ndarray = np.array(
     [
         0.0,  # index 0: unused
         500.0,  #  1  US-Ha1
@@ -349,7 +350,7 @@ tower_root: Array = jnp.array(
         500.0,  # 14  CHATS7
         500.0,  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # ---------------------------------------------------------------------------
@@ -361,7 +362,7 @@ tower_root: Array = jnp.array(
 
 # Leaf area density beta distribution parameters — Fortran lines 99-107
 # Fortran: real(r8) :: tower_pbeta_lai(ntower,2)
-tower_pbeta_lai: Array = jnp.array(
+tower_pbeta_lai: np.ndarray = np.array(
     [
         [0.0, 0.0],  # index 0: unused
         [-999.0, -999.0],  #  1  US-Ha1
@@ -380,12 +381,12 @@ tower_pbeta_lai: Array = jnp.array(
         [2.6, 1.3],  # 14  CHATS7
         [-999.0, -999.0],  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # Stem area density beta distribution parameters — Fortran lines 109-117
 # Fortran: real(r8) :: tower_pbeta_sai(ntower,2)
-tower_pbeta_sai: Array = jnp.array(
+tower_pbeta_sai: np.ndarray = np.array(
     [
         [0.0, 0.0],  # index 0: unused
         [-999.0, -999.0],  #  1  US-Ha1
@@ -404,7 +405,7 @@ tower_pbeta_sai: Array = jnp.array(
         [1.8, 1.3],  # 14  CHATS7
         [-999.0, -999.0],  # 15  UMBSmw
     ],
-    dtype=jnp.float64,
+    dtype=np.float64,
 )
 
 # ---------------------------------------------------------------------------
@@ -412,7 +413,7 @@ tower_pbeta_sai: Array = jnp.array(
 # ---------------------------------------------------------------------------
 
 # Forcing data time step (minutes) — Fortran: integer :: tower_time(ntower)
-tower_time: Array = jnp.array(
+tower_time: np.ndarray = np.array(
     [
         0,  # index 0: unused
         60,  #  1  US-Ha1
@@ -431,5 +432,5 @@ tower_time: Array = jnp.array(
         30,  # 14  CHATS7
         60,  # 15  UMBSmw
     ],
-    dtype=jnp.int32,
+    dtype=np.int32,
 )

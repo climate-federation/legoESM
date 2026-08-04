@@ -95,26 +95,43 @@ from legoesm.training.scm_rce_metrics import (
     weighted_std as weighted_std_jax,
 )
 
+# Each fallback below narrows on ``exc.name``: only the module that actually
+# moved may trigger it.  Any OTHER ModuleNotFoundError (a broken install, a
+# renamed transitive dependency) must surface as itself rather than being
+# rerouted to an obsolete path and reported as the wrong error.
+try:
+    from legoesm.core.param_overrides import apply_param_overrides
+except ModuleNotFoundError as exc:  # pragma: no cover - older trees
+    if exc.name != "legoesm.core.param_overrides":
+        raise
+    try:  # the helper used to live next to the collector
+        from legoesm.training.param_collector import (  # type: ignore
+            apply_param_overrides,
+        )
+    except ModuleNotFoundError as exc2:
+        if exc2.name != "legoesm.training.param_collector":
+            raise
+        from legoesm.driver.param_collector import (  # type: ignore
+            apply_param_overrides,
+        )
+
 try:
     from legoesm.training.param_collector import (
-        apply_param_overrides,
         build_registry,
         build_trainable_params,
     )
-    from legoesm.training.trainable_params import (
-        TrainablePhysicsParams,
-        range_to_sigmoid_array,
-    )
-except ModuleNotFoundError:  # pragma: no cover - compatibility with older trees
+except ModuleNotFoundError as exc:  # pragma: no cover - older trees
+    if exc.name != "legoesm.training.param_collector":
+        raise
     from legoesm.driver.param_collector import (  # type: ignore
-        apply_param_overrides,
         build_registry,
         build_trainable_params,
     )
-    from legoesm.training.trainable_params import (  # type: ignore
-        TrainablePhysicsParams,
-        range_to_sigmoid_array,
-    )
+
+from legoesm.training.trainable_params import (
+    TrainablePhysicsParams,
+    range_to_sigmoid_array,
+)
 
 
 SECONDS_PER_DAY = 86_400.0

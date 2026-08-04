@@ -10,7 +10,7 @@ set +e
 # Unit gate for the whole LES -> SCM turbulence-tuning stack.
 # CPU-only and x64: these are numerics/convention tests, so per CLAUDE.md they
 # run in float64 (an fp32 mismatch here would not be a real failure).
-WT=/burg/glab/users/pg2328/les_scm_bridge_wt
+WT=${GATE_WT:-/burg/glab/users/pg2328/les_scm_bridge_wt}
 cd $WT || exit 1
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "host: $(hostname)"

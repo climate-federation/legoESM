@@ -1116,6 +1116,32 @@ def replicate_pytree(pytree, config: DeviceConfig):
     if config.replicated_sharding is None:
         return pytree
 
+    # Multicontroller (2026-08-04, the MPAS s10 162 GB wall): a plain
+    # replicated device_put of a NUMPY/host leaf runs jax's whole-array
+    # cross-process assert_equal ([n_proc, leaf] on one device) and the
+    # replicated logical size is n_dev x leaf — for the s10 global mesh
+    # (1.27 GB of arrays) that is 128 x 1.27 = 162.5 GB, matching the
+    # gpu_hlo_schedule failure to 0.1 %. Route through the shared
+    # assert-free put (owned/full shards per process, no consistency
+    # collective) with ONE cheap exact-hash contract gate for the whole
+    # pytree — the same PR #1457 pattern as the ocean lane. The
+    # single-process path inside the helper is the historical
+    # device_put, byte-unchanged.
+    import jax as _jax
+
+    if _jax.process_count() > 1:
+        from legoesm.parallel.geometry_consistency import (
+            addressable_shard_put, assert_pytree_bytes_equal)
+
+        assert_pytree_bytes_equal(pytree, "replicate_pytree")
+
+        def _replicate_leaf(leaf):
+            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
+                return leaf
+            return addressable_shard_put(leaf, config.replicated_sharding)
+
+        return jax.tree.map(_replicate_leaf, pytree)
+
     def _replicate_leaf(leaf):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf

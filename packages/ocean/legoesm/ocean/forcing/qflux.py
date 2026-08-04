@@ -21,10 +21,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.forcing.amip import (
-    climatology_interp_indices,
-    regrid_monthly_latlon_to_grid,
-)
+# ``legoesm.forcing`` ships in legoesm-tools, so the AMIP climatology helpers
+# are imported where they are used (deferred pattern) rather than at module
+# level: a bare ``pip install legoesm-ocean`` must still be able to import this
+# module — component independence, import-linter contract #2.
 
 
 class QFluxForcing(NamedTuple):
@@ -80,6 +80,8 @@ def load_qflux_climatology(path: str, grid) -> QFluxForcing:
     finally:
         ds.close()
 
+    from legoesm.forcing.amip import regrid_monthly_latlon_to_grid
+
     qflux = regrid_monthly_latlon_to_grid(data, lat_src, lon_src, grid)
     # Follow the active precision policy (float32 by default; float64 under
     # JAX_ENABLE_X64).  A 12-month climatology's day axis (15..349) and the
@@ -100,5 +102,7 @@ def qflux_at_time(forcing: QFluxForcing, day: float) -> jnp.ndarray:
     times = forcing.times
     if times.shape[0] == 1:
         return forcing.qflux[0]
+    from legoesm.forcing.amip import climatology_interp_indices
+
     idx, idx_next, weight = climatology_interp_indices(times, day)
     return (1.0 - weight) * forcing.qflux[idx] + weight * forcing.qflux[idx_next]

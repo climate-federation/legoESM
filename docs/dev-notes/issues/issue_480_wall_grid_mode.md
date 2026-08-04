@@ -48,7 +48,7 @@ advection reconstruction** — `LatLonCGridOceanConfig.tracer_wall_neumann_fill`
 (default **True**). The reconstruction now sees a **flat extension** across solid walls
 instead of the masked cold cell — i.e. the physical **no-flux insulating wall**, which is
 exactly what Oceananigans' clean grid-edge wall does. Implemented as `recon_fill_mask`
-threaded into `_compute_advection_flux_div` / `_compute_advection_flux_div_pair` /
+threaded into `_compute_advection_flux_div` / `compute_advection_flux_div_pair` /
 `_ssp_rk3_tracer_pair_step` (the fill happens inside the reconstruction; the flux-form
 UPDATE and land-gating keep the ORIGINAL tracer, so stored dead-cell values are unchanged).
 The mask is the **per-level `active_3d` (`is_active`)**, not the 2D surface land_mask, so

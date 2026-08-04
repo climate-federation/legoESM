@@ -34,6 +34,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    checked_shard_put,
     coerce_bool, coerce_count, config_digest48, name_digest48,
     tree_schema_digest48)
 
@@ -488,16 +489,31 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
     assert_schema_agrees(ordered_names, n_dev,
                          context="make_sharded_atm_latlon_step",
                          arrays=[raw[n] for n in ordered_names])
-    raw = {
-        name: jnp.asarray(broadcast_checked(
-            raw[name], name, context="make_sharded_atm_latlon_step"))
-        for name in ordered_names
-    }
+    # SHARDED mode: checked_shard_put replaces broadcast_checked +
+    # device_put (the ocean walls, PR #1457) — owned slabs only, per-slab
+    # gate. REPLICATED mode (codex r22): keep the byte-CANONICAL
+    # process-0 broadcast — every device must hold identical replicated
+    # geometry (an rtol-gated per-process copy would let ULP drift into
+    # the replicated contract and process-dependent evolution); the
+    # walls are soft here (2-D ~MB fields), so canonical wins.
     spec_of = lat_spec if shard_geometry else (lambda _arr: P())
-    stacks = {
-        name: jax.device_put(arr, NamedSharding(mesh, spec_of(arr)))
-        for name, arr in raw.items()
-    }
+    if shard_geometry:
+        stacks = {
+            name: checked_shard_put(
+                raw[name], name, NamedSharding(mesh, spec_of(raw[name])),
+                context="make_sharded_atm_latlon_step",
+                n_bands=int(raw[name].shape[0]))
+            for name in ordered_names
+        }
+    else:
+        stacks = {
+            name: jax.device_put(
+                jnp.asarray(broadcast_checked(
+                    raw[name], name,
+                    context="make_sharded_atm_latlon_step")),
+                NamedSharding(mesh, P()))
+            for name in ordered_names
+        }
     stacks_spec = {name: spec_of(arr) for name, arr in raw.items()}
     return template, array_field_names, stacks, stacks_spec
 
@@ -1582,17 +1598,26 @@ def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
     assert_schema_agrees(ordered_names, p_lat * p_lon,
                          context="make_sharded_atm_latlon_step_2d",
                          arrays=[raw[n] for n in ordered_names])
-    raw = {
-        name: jnp.asarray(broadcast_checked(
-            raw[name], name, context="make_sharded_atm_latlon_step_2d"))
-        for name in ordered_names
-    }
+    # 2-D twin of the mode branch above (see that note).
     spec_of = tile_spec if shard_geometry else (lambda _arr: P())
-    stacks = {
-        name: jax.device_put(arr, NamedSharding(mesh, spec_of(arr)))
-        for name, arr in raw.items()
-    }
-    stacks_spec = {name: spec_of(arr) for name, arr in raw.items()}
+    if shard_geometry:
+        stacks = {
+            name: checked_shard_put(
+                raw[name], name, NamedSharding(mesh, spec_of(raw[name])),
+                context="make_sharded_atm_latlon_step_2d",
+                n_bands=int(raw[name].shape[0]))
+            for name in ordered_names
+        }
+    else:
+        stacks = {
+            name: jax.device_put(
+                jnp.asarray(broadcast_checked(
+                    raw[name], name,
+                    context="make_sharded_atm_latlon_step_2d")),
+                NamedSharding(mesh, P()))
+            for name in ordered_names
+        }
+    stacks_spec = {name: spec_of(raw[name]) for name in ordered_names}
     return template, array_field_names, stacks, stacks_spec
 
 

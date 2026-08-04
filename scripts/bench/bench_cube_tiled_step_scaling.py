@@ -85,6 +85,13 @@ def main() -> int:
     p.add_argument("--resolution", type=int, default=48,
                    help="Cells per cube edge N (must divide by kt).")
     p.add_argument("--nlev", type=int, default=30)
+    p.add_argument("--device-hbm", type=str,
+                   default=os.environ.get("LEGOESM_DEVICE_HBM"),
+
+                   help="#1361 memory preflight: target device whose HBM the "
+                        "estimated per-device footprint must fit "
+                        "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
+                        "estimate printed, no gate.")
     p.add_argument("--steps", type=int, default=6,
                    help="Timing samples — repeated single-shot steps on the "
                         "pristine input (the tiled adapter is one-shot, not a "
@@ -119,6 +126,26 @@ def main() -> int:
         raise SystemExit(
             f"--resolution {args.resolution} must divide by --kt {args.kt} "
             f"(tile-local edge = N/kt).")
+
+    # #1361 preflight, BEFORE distributed init / jax import / any allocation.
+    # The C1152 L60 kt=3 arm needed 105.7 GB/device against 80 GB HBM and only
+    # found out during compile, two arms into the job.
+    from legoesm.scaling_preflight import (
+        preflight_or_exit, validate_device_count, validate_memory,
+    )
+    _n_devices = 6 * args.kt * args.kt
+    preflight_or_exit(validate_device_count, "tiled", _n_devices)
+    # sharded=False: per #1370 the cube lanes still allocate GLOBAL-sized
+    # buffers per device, which is why the C1152 arm measured 105.7 GB/device.
+    # Dividing by n_devices here would under-estimate by 54x and wave that very
+    # configuration through. Flip to True when #1370 lands.
+    _est = preflight_or_exit(
+        validate_memory,
+        n_columns=6 * args.resolution * args.resolution, nlev=args.nlev,
+        n_devices=_n_devices, device=args.device_hbm, sharded=False)
+    print(f"[preflight] ok: C{args.resolution} L{args.nlev} kt={args.kt} "
+          f"n_devices={_n_devices} est={_est / 1024**3:.1f} GB/device",
+          flush=True)
 
     if args.multicontroller:
         from legoesm.parallel.early_init import (

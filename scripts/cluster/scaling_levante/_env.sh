@@ -82,5 +82,26 @@ export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5}"
 export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PHB}"
 export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
 
+# --- XLA overlap defaults for the lat-lon SPMD lanes (2026-08-04) --------
+# Latency-hiding scheduler + pipelined p2p: -8.4% at LL2048@64 (job
+# 26677602) and -8.3% at @128 (26677668), A/A2 drift 0.3-0.4% — twice-
+# reproduced, parity suites green with flags on. MPAS lane: null (0.0%,
+# 26677669 — its edge-coloured schedule does not benefit; harmless).
+# Below the pre-registered 10% bar AND other lanes are unvalidated
+# (cube_tiled_step.sbatch force-disables latency hiding for a known
+# comm-init sensitivity; MPAS is null) — so this is strictly OPT-IN
+# (codex r23): set LEGOESM_XLA_OVERLAP=1 in validated lat-lon
+# launchers; never a shared default, and A/B control arms must keep
+# REPLACING XLA_FLAGS, not appending.
+if [ "${LEGOESM_XLA_OVERLAP:-0}" = 1 ]; then
+  export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_pipelined_p2p=true"
+fi
+
 export TMPDIR="${TMPDIR:-$SCRATCH/tmp}"
 mkdir -p "$TMPDIR" 2>/dev/null || true
+
+# #1361 memory preflight: target device whose HBM the benches gate against
+# (`--device-hbm`). Set in the SHARED env so the gate is on for every launcher
+# that sources this file — codex found the Derecho-only export left every
+# Levante bench ungated. Levante's GPU jobs request `--constraint=a100_80`.
+export LEGOESM_DEVICE_HBM="${LEGOESM_DEVICE_HBM:-a100-80}"

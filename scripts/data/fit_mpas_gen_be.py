@@ -8,11 +8,13 @@ import glob
 import json
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import yaml
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
-from legoesm.da.gen_be import GenBEParams, fit_gen_be, save_gen_be_params
+from legoesm.da.gen_be import fit_gen_be, save_gen_be_params
 from legoesm.grids.factory import create_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -77,83 +79,57 @@ def _state_from_sample(path: Path) -> HydrostaticState:
     )
 
 
-def _mode_to_physical(eigenvectors: np.ndarray, eigenvalues: np.ndarray) -> np.ndarray:
-    return eigenvectors.T * np.sqrt(np.maximum(eigenvalues, 1.0e-30))[:, None]
-
-
-def _physical_to_modes(eigenvectors: np.ndarray, eigenvalues: np.ndarray) -> np.ndarray:
-    return eigenvectors / np.sqrt(np.maximum(eigenvalues, 1.0e-30))[None, :]
-
-
-def _adjust_balance(
-    base: GenBEParams,
-    temperature_scale: float,
-    pressure_scale: float,
-    minimum_eigenvalue_fraction: float,
-) -> tuple[GenBEParams, dict]:
-    levels = int(base.n_levels)
-    eigenvectors = np.asarray(base.vert_eig_vec, dtype=np.float64).copy()
-    eigenvalues = np.asarray(base.vert_eig_val, dtype=np.float64).copy()
-    regression = np.asarray(base.reg_coeff, dtype=np.float64).copy()
-    length_scale = np.asarray(base.len_scale, dtype=np.float64).copy()
-    pressure_std = float(np.asarray(base.std_ps))
-    pressure_rows = slice(0, 1)
-    temperature_rows = slice(1 + 2 * levels, 1 + 3 * levels)
-    temperature_regression = regression[temperature_rows].copy()
-    pressure_regression = regression[pressure_rows].copy()
-
-    old_transform = _mode_to_physical(eigenvectors[2], eigenvalues[2])
-    old_covariance = old_transform.T @ old_transform
-    balanced_covariance = (
-        old_transform.T @ (temperature_regression @ temperature_regression.T) @ old_transform
+def _horizontal_normalization(
+    mesh,
+    length_scale: jax.Array,
+    diffusion_iterations: int,
+    probes: int,
+    seed: int,
+) -> np.ndarray:
+    """Estimate the MPAS diffusion square-root diagonal normalization."""
+    columns = int(mesh.grid_n_columns)
+    neighbors = jnp.clip(jnp.asarray(mesh.cellsOnCell), 0, columns - 1)
+    edges = jnp.clip(jnp.asarray(mesh.edgesOnCell), 0, int(mesh.nEdges) - 1)
+    edge_count = jnp.asarray(mesh.nEdgesOnCell)
+    mask = jnp.arange(neighbors.shape[0])[:, None] < edge_count[None, :]
+    area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
+    dc_edge = jnp.asarray(mesh.dcEdge, dtype=jnp.float64)
+    dv_edge = jnp.asarray(mesh.dvEdge, dtype=jnp.float64)
+    weights = jnp.where(
+        mask,
+        dv_edge[edges] / jnp.maximum(dc_edge[edges], 1.0) / jnp.maximum(area[None, :], 1.0),
+        0.0,
     )
-    factor = temperature_scale * (2.0 - temperature_scale)
-    residual = old_covariance - factor * balanced_covariance
-    residual = 0.5 * (residual + residual.T)
-    residual_values, residual_vectors = np.linalg.eigh(residual)
-    floor = max(
-        minimum_eigenvalue_fraction * float(np.max(np.diag(old_covariance))),
-        1.0e-12,
+    max_diagonal = jnp.max(jnp.sum(weights, axis=0))
+    step_m2 = jnp.clip(
+        length_scale**2 / (2.0 * diffusion_iterations),
+        0.0,
+        0.49 / jnp.maximum(max_diagonal, 1.0e-30),
     )
-    clipped = np.maximum(residual_values, floor)
-    order = np.argsort(clipped)[::-1]
-    new_values = clipped[order]
-    new_vectors = residual_vectors[:, order]
-    inverse_transform = _physical_to_modes(new_vectors, new_values)
-    balanced_physical = (temperature_scale * temperature_regression.T) @ old_transform
-    regression[temperature_rows] = (balanced_physical @ inverse_transform).T
-    eigenvectors[2] = new_vectors
-    eigenvalues[2] = new_values
 
-    pressure_balanced_fraction = float(np.sum(pressure_regression**2))
-    pressure_residual_factor = max(
-        1.0 - pressure_scale * (2.0 - pressure_scale) * pressure_balanced_fraction,
-        minimum_eigenvalue_fraction,
-    )
-    new_pressure_std = pressure_std * np.sqrt(pressure_residual_factor)
-    regression[pressure_rows] = pressure_regression * (
-        pressure_scale * pressure_std / max(new_pressure_std, 1.0e-30)
-    )
-    adjusted = GenBEParams(
-        vert_eig_vec=eigenvectors,
-        vert_eig_val=eigenvalues,
-        std_ps=np.asarray(new_pressure_std),
-        reg_coeff=regression,
-        len_scale=length_scale,
-        tracer_names=tuple(base.tracer_names),
-        n_levels=levels,
-        wind_transform=base.wind_transform,
-    )
-    audit = {
-        "temperature_balance_scale": temperature_scale,
-        "surface_pressure_balance_scale": pressure_scale,
-        "minimum_eigenvalue_fraction": minimum_eigenvalue_fraction,
-        "surface_pressure_std_before_pa": pressure_std,
-        "surface_pressure_std_after_pa": float(new_pressure_std),
-        "temperature_eigenvalues_clipped": int(np.sum(residual_values < floor)),
-        "wind_transform": base.wind_transform,
-    }
-    return adjusted, audit
+    @jax.jit
+    def smooth(values):
+        def step(current, _):
+            neighbor_values = current[neighbors, :]
+            laplacian = jnp.sum(
+                weights[..., None] * (neighbor_values - current[None, :, :]),
+                axis=0,
+            )
+            return current + step_m2[None, :] * laplacian, None
+
+        return jax.lax.scan(step, values, None, length=diffusion_iterations)[0]
+
+    variance = jnp.zeros_like(length_scale, dtype=jnp.float64)
+    for probe in range(probes):
+        white = jax.random.rademacher(
+            jax.random.PRNGKey(seed + probe),
+            (columns, int(length_scale.shape[0])),
+            dtype=jnp.float64,
+        )
+        smoothed = smooth(white)
+        variance += jnp.mean(smoothed * smoothed, axis=0)
+    normalization = 1.0 / jnp.sqrt(jnp.maximum(variance / probes, 1.0e-30))
+    return np.asarray(jax.device_get(normalization), dtype=np.float64)
 
 
 def main() -> None:
@@ -181,13 +157,50 @@ def main() -> None:
         sigma_coord=sigma,
         vert_corr_length=float(be_config["vertical_correlation_length"]),
         default_len_scale_km=float(be_config["default_horizontal_length_scale_km"]),
+        balance_n_modes=int(be_config["balance_predictor_modes"]),
+        balance_lat_center_deg=float(be_config["balance_latitude_center_degrees"]),
+        balance_lat_half_width_deg=float(be_config["balance_latitude_half_width_degrees"]),
     )
-    adjusted, audit = _adjust_balance(
-        base,
-        float(be_config["temperature_balance_scale"]),
-        float(be_config["surface_pressure_balance_scale"]),
-        float(be_config["minimum_eigenvalue_fraction"]),
+    levels = int(base.n_levels)
+    standard_deviation_scale = float(be_config["nmc_standard_deviation_scale"])
+    final_standard_deviation_scale = float(be_config["final_standard_deviation_scale"])
+    length_scale = np.asarray(base.len_scale, dtype=np.float64).copy()
+    length_scale[1 : 1 + 2 * levels] *= float(be_config["wind_length_scale"])
+    length_scale *= float(be_config["final_horizontal_length_scale_multiplier"])
+    eigenvalue_scale = (standard_deviation_scale * final_standard_deviation_scale) ** 2
+    pressure_scale = standard_deviation_scale * final_standard_deviation_scale
+    horizontal_normalization = _horizontal_normalization(
+        mesh,
+        jnp.asarray(length_scale),
+        int(be_config["diffusion_iterations"]),
+        int(be_config["normalization_probes"]),
+        int(be_config["normalization_seed"]),
     )
+    adjusted = base._replace(
+        vert_eig_val=jnp.asarray(base.vert_eig_val) * eigenvalue_scale,
+        std_ps=jnp.asarray(base.std_ps) * pressure_scale,
+        len_scale=jnp.asarray(length_scale),
+        horiz_norm=jnp.asarray(horizontal_normalization),
+    )
+    audit = {
+        "balance_predictor_modes": int(be_config["balance_predictor_modes"]),
+        "balance_latitude_center_degrees": float(be_config["balance_latitude_center_degrees"]),
+        "balance_latitude_half_width_degrees": float(
+            be_config["balance_latitude_half_width_degrees"]
+        ),
+        "nmc_standard_deviation_scale": standard_deviation_scale,
+        "wind_length_scale": float(be_config["wind_length_scale"]),
+        "final_horizontal_length_scale_multiplier": float(
+            be_config["final_horizontal_length_scale_multiplier"]
+        ),
+        "final_standard_deviation_scale": final_standard_deviation_scale,
+        "diffusion_iterations": int(be_config["diffusion_iterations"]),
+        "normalization_probes": int(be_config["normalization_probes"]),
+        "horizontal_normalization_min": float(horizontal_normalization.min()),
+        "horizontal_normalization_mean": float(horizontal_normalization.mean()),
+        "horizontal_normalization_max": float(horizontal_normalization.max()),
+        "wind_transform": base.wind_transform,
+    }
     output_path = Path(be_config["output_path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_gen_be_params(adjusted, output_path)

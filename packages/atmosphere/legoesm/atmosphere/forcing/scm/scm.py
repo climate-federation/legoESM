@@ -640,7 +640,14 @@ class SingleColumnModel:
         # ``bulk_scheme='constant'`` family + ``Ch_neutral=0``.
         # Phase F fix #2 codex iter-1 high finding.
         bulk_scheme = getattr(surf, "bulk_scheme", "constant")
-        if bulk_scheme in ("coare3", "large_yeager"):
+        # "most" belongs here too: surface_layer.compute_surface_fluxes routes
+        # ("most", "coare3", "large_yeager") to the SAME compute_most_fluxes
+        # path, which derives the heat flux from MOST scaling and ignores
+        # Ch_neutral. Omitting it let prescribe="fluxes" + bulk_scheme="most"
+        # through, silently double-counting the prescribed surface heat flux --
+        # and the Ch_neutral check below cannot catch it, because under MOST
+        # Ch_neutral is inert and is legitimately left at 0.
+        if bulk_scheme in ("most", "coare3", "large_yeager"):
             raise ValueError(
                 "SCMForcing.prescribe='fluxes' is set, but the active "
                 f"turbulence scheme {turb.scheme!r} uses "

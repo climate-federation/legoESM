@@ -1693,6 +1693,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # upwind backward-Euler solve, so "centered_full"/"nemo_advective" would be
     # a silent no-op).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit b6d0d9877):
+    # ONLY consumed by vertical_momentum_scheme="nemo_advective". Selects how
+    # nemo_advective_vertical_momentum_advection masks its bottom/straddling
+    # u-/v-faces -- see VALID_ZAD_BOTTOM_FACE_MASK in
+    # legoesm.ocean.vertical for the full NEMO-transcription rationale.
+    # "min_rule" (default, bit-identical): AND-of-neighbours interface mask.
+    # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
+    # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
+    zad_bottom_face_mask: str = "min_rule"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
@@ -1713,6 +1722,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     vector operators). The ACC recipe opts in. Literal default -> safe after
     #     `constants`.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # #1455: e3 (layer-thickness) weighting of the "nemo_div_curl" div/curl,
+    # ONLY meaningful when lateral_viscosity_operator="nemo_div_curl" (raises
+    # otherwise). "off" (default, bit-identical) keeps the documented
+    # simplification (divergence_cgrid/curl_vertex_cgrid weight only the
+    # horizontal e1/e2 metrics, never e3); "nemo_e3" restores NEMO's e3u/e3v/e3f
+    # weighting inside the div/curl (dynldf_lev_rot_scheme.h90:22-29,41,51),
+    # closing the topographic-step residual on the dyn_ldf gate rows. See
+    # nemo_ldf_lap_viscosity_e3_cgrid.
+    lateral_viscosity_e3_weighting: str = "off"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag

@@ -318,6 +318,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
+    parser.add_argument("--a-h-scale", type=float,
+                        default=_DYCORE_DEFAULTS.a_h_scale,
+                        dest="a_h_scale",
+                        help="Second-order Laplacian viscosity multiplier "
+                             "(A_h = a_h_scale * 3e-3 * dx_min^2 / dt). NOT "
+                             "scale-selective: it damps as k^2, so it reaches "
+                             "the baroclinic eddies that drive the "
+                             "midlatitude jet. At 2.5 deg / dt=75 s the "
+                             "default 1.0 damps a 2000 km wave in 0.73 d and "
+                             "4000 km in 2.9 d, comparable to or faster than "
+                             "the ~1-2 d eddy growth time — the failure mode "
+                             "component_factory records at 16x this value "
+                             "(\'crushing the midlatitude eddy-driven "
+                             "jets\'). 0 relies on the scale-selective "
+                             "4th-order hyperdiff alone.")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -677,6 +692,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that breaks the plane-parallel tau-saturation a "
                              "scalar cannot -- a thick cloud is reduced MORE than "
                              "a thin one).")
+    parser.add_argument("--cloud-vertical-overlap-optics",
+                        dest="cloud_vertical_overlap_optics",
+                        choices=["none", "max_random"], default="none",
+                        help="VERTICAL cloud-overlap optics. The solver has "
+                             "no McICA/overlap, so cloud spread thinly over "
+                             "many partly cloudy layers is solved as ONE "
+                             "deep uniform cloud. 'max_random' re-solves "
+                             "the column as --cloud-n-subcolumns "
+                             "deterministic maximum-random-overlap "
+                             "subcolumns and averages: measured -30%% cloud "
+                             "albedo and +18 W/m2 OLR. Costs n_sub x the "
+                             "radiation time. Mutually exclusive with "
+                             "--cloud-partial-coverage-optics=two_column.")
+    parser.add_argument("--cloud-n-subcolumns", dest="cloud_n_subcolumns",
+                        type=int, default=8,
+                        help="Subcolumns for --cloud-vertical-overlap-optics"
+                             "=max_random. Measured against a Monte-Carlo "
+                             "reference: 8 leaves 2.5%% of the signal, 4 "
+                             "leaves 18%%. Default 8.")
+    parser.add_argument("--cloud-partial-coverage-optics",
+                        dest="cloud_partial_coverage_optics",
+                        choices=["none", "two_column"], default="none",
+                        help="Partial-cloud-COVER optics. The radiation "
+                             "solver has no McICA/overlap: it sees ONE "
+                             "homogeneous column at the grid-mean water "
+                             "path, R(cf*tau_ic), which is ALWAYS brighter "
+                             "than the independent-column cf*R(tau_ic)+"
+                             "(1-cf)*R(0) because R is concave. "
+                             "'two_column' thins the path by the exact "
+                             "inversion of that identity (chi<=1, so it can "
+                             "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -1280,6 +1326,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[m/s] (default 2.0). Larger = stronger "
                              "non-orographic drag; the low-level extratropical "
                              "westerly bias is the observable lever.")
+    parser.add_argument("--hines-launch-p", type=float, default=None,
+                        dest="hines_launch_p",
+                        help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
+                             "(e.g. 70000 = 700 hPa). Unset/0 keeps the legacy "
+                             "SURFACE launch, where the wave is born "
+                             "supersaturated in the weakly stratified boundary "
+                             "layer (sigma_sat = N/m_star is smallest there) "
+                             "and breaks at its own launch level instead of "
+                             "aloft. No drag is deposited at or below the "
+                             "launch level.")
     parser.add_argument("--hines-fmax", type=float, default=None,
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
@@ -1632,6 +1688,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         discretization=args.discretization,
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
+        a_h_scale=args.a_h_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
@@ -1771,6 +1828,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_clubb_cf_override_floor=args.cloud_clubb_cf_override_floor,
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
+        cloud_partial_coverage_optics=args.cloud_partial_coverage_optics,
+        cloud_vertical_overlap_optics=args.cloud_vertical_overlap_optics,
+        cloud_n_subcolumns=args.cloud_n_subcolumns,
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
@@ -1835,6 +1895,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
             else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
+        hines_launch_p=(
+            args.hines_launch_p
+            if args.hines_launch_p is not None else 0.0),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
         mcfarlane_tau_max=(

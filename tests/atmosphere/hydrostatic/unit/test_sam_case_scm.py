@@ -29,6 +29,7 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
 )
 
 from legoesm import constants  # noqa: E402
+from legoesm.atmosphere.physics._shared import exner_function  # noqa: E402
 
 
 def _deck_available(case: str) -> bool:
@@ -71,7 +72,7 @@ def test_surface_temperature_flux_has_no_exner_factor():
     got = surface_kinematic_temperature_flux(shf, rho)
     assert got == pytest.approx(shf / (rho * constants.c_pd), rel=1e-12)
     # and it is NOT the theta-flux form
-    exner_sfc = (1.015e5 / constants.p_ref) ** constants.kappa
+    exner_sfc = float(exner_function(1.015e5))
     theta_flux = shf / (rho * constants.c_pd * exner_sfc)
     assert not np.isclose(got, theta_flux, rtol=1e-6)
 
@@ -146,7 +147,7 @@ def test_les_mask_excludes_levels_above_an_explicit_taller_column():
 def test_temperature_is_theta_times_exner_of_the_scm_pressure():
     """IC temperature must be consistent with the SCM's OWN sigma pressure."""
     case = load_sam_scm_case("bomex", nlev=40)
-    exner = (case.p_full / constants.p_ref) ** constants.kappa
+    exner = np.asarray(exner_function(case.p_full))
     theta = case.T_profile / exner
     # theta must increase upward => decrease with index reversed... in a
     # top-to-bottom column theta DEcreases with index (warmer aloft).
@@ -183,7 +184,7 @@ def test_theta_adv_round_trips_to_the_deck_absolute_T_tendency():
     lsf = read_sam_lsf(f"{case.case_dir}/lsf")
     deck = interp_forcing_to_levels(lsf, case.z_full, day=float(lsf.days[0]))
 
-    exner = (case.p_full / constants.p_ref) ** constants.kappa
+    exner = np.asarray(exner_function(case.p_full))
     theta_adv = np.asarray(case.forcing.theta_adv(0.0))
     np.testing.assert_allclose(theta_adv * exner, deck["T_adv"], rtol=1e-9,
                                atol=1e-18)
@@ -231,7 +232,7 @@ def test_deck_sounding_drives_the_column_not_a_hardcoded_profile():
     case = load_sam_scm_case("bomex", nlev=64)
     snd = read_sam_snd(f"{case.case_dir}/snd")
     inside = case.les_mask()
-    exner = (case.p_full / constants.p_ref) ** constants.kappa
+    exner = np.asarray(exner_function(case.p_full))
     theta = case.T_profile / exner
     deck_theta = np.interp(case.z_full[inside], snd.z, snd.theta)
     np.testing.assert_allclose(theta[inside], deck_theta, rtol=2e-3)

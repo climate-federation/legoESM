@@ -668,6 +668,10 @@ def _call_radiation_backend(
 
     # Compute cloud properties if cloud scheme is active.
     cloud_kwargs = {}
+    # Bound unconditionally: the subcolumn-overlap block below reads both, and
+    # with cloud_scheme="none" this branch never runs.
+    cloud_props = None
+    cloud_config = None
     if radiation_config.cloud_scheme != "none":
         # Honor a caller-supplied ``cloud_config`` (e.g., AIMIP's
         # trainable Xu-Randall knobs) when present; otherwise build a
@@ -720,6 +724,40 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
+    # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
+    # spread thinly over many partly cloudy layers is solved as one deep
+    # uniform cloud.  Measured against a Monte-Carlo independent-column
+    # reference on a real model state, that costs ~30% of the cloud albedo
+    # (0.3995 -> 0.2786) and ~18 W/m2 of OLR (219.2 -> 237.8, reference 239.0).
+    # See clouds/subcolumns.py for the validation and for the closed-form
+    # alternative that was measured and rejected.
+    #
+    # The kwargs are chosen BEFORE the solve so exactly ONE solve runs: an
+    # earlier version solved the base column and then the subcolumns and threw
+    # the base away, doubling the cost and compiling an extra shape.
+    _ov = ("none" if cloud_props is None else
+           getattr(cloud_config, "cloud_vertical_overlap_optics", "none"))
+    _n_sub = 1
+    if _ov == "max_random":
+        from legoesm.atmosphere.physics.clouds import subcolumns as _sub
+        _n_sub = int(getattr(cloud_config, "cloud_n_subcolumns",
+                             _sub.N_SUBCOLUMNS_DEFAULT))
+        _ncol = T.shape[0]
+        _mask = _sub.generate_subcolumns(cloud_props.cloud_fraction, _n_sub)
+        _lwp, _iwp = _sub.subcolumn_paths(
+            _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
+        _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
+        _rad_kwargs["cloud_path_liq"] = _lwp
+        _rad_kwargs["cloud_path_ice"] = _iwp
+    elif _ov != "none":
+        # Dispatch hardening: a typo must never silently run the legacy
+        # single-column path (validated on the static config value).
+        raise ValueError(
+            f"unknown cloud_vertical_overlap_optics {_ov!r}; "
+            "expected 'none' or 'max_random'"
+        )
+
     # Column-chunk the rrtmgp solve when configured: the per-block body
     # compiles ONCE at ``column_chunk_size`` columns, capping the highly
     # super-linear rrtmgp XLA compile time at higher horizontal resolution.
@@ -731,6 +769,10 @@ def _call_radiation_backend(
         )
     else:
         result = rrtmgp_solver.solve_columns(**_rad_kwargs)
+
+    if _n_sub > 1:
+        from legoesm.atmosphere.physics.clouds import subcolumns as _sub
+        result = _sub.average_output(result, _n_sub, T.shape[0])
 
     # When using daytime-effective cos(SZA), the solver computes SW fluxes at
     # the daytime level (1/f_day times too large).  Rescale to daily-mean.

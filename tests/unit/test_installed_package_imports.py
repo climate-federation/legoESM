@@ -78,8 +78,11 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 # packages/<member>/src/legoesm after the carve), reported repo-relative so the
 # scan + the parametrize IDs stay stable, plus scripts.
 from tests.legoesm_paths import legoesm_root_paths as _legoesm_root_paths
+# repo_root= keeps this working from a git WORKTREE: legoesm.__path__ reports
+# the EDITABLE INSTALL's paths, which point at the canonical checkout, and the
+# bare relative_to() below then raised ValueError naming a foreign path (#1389).
 PRODUCTION_ROOTS = tuple(
-    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths()
+    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths(REPO_ROOT)
 ) + ("scripts",)
 
 
@@ -94,9 +97,40 @@ PRODUCTION_ROOTS = tuple(
 # long-term fix per issue #188 is to move the canonical IC/diagnostic harnesses
 # (tests.test_cases.*, tests.williamson_diagnostic, tests.legoesm_paths) into
 # the installed legoesm package so production code never imports from tests/.
+# 2026-07-31 (#1389): 49 stale entries removed (files deleted from
+# scripts/tmp/) and 8 live ones added below, all of them the SAME three IC
+# modules (baroclinic_wave, williamson, colliding_modons) that the entries
+# above already carry — net 62 -> 21 entries, so the list still ratchets DOWN.
+# The real fix is unchanged and unblocked by these entries: move those three
+# modules into the installed package.  52 files import them, so that migration
+# is its own PR, not a rider on a red-main fix.
 GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
+    'scripts/bench/bench_cube_shardmap_halo.py': frozenset({
+        'tests.test_cases.baroclinic_wave',
+    }),
+    'scripts/bench/bench_fv3_sw_fb_vs_production.py': frozenset({
+        'tests.test_cases.williamson',
+    }),
+    'scripts/bench/bench_mpas_spmd_scaling.py': frozenset({
+        'tests.test_cases.baroclinic_wave',
+    }),
     'scripts/bench/run_cpu_mpi_scaling.py': frozenset({
         'tests.test_cases.baroclinic_wave',
+    }),
+    'scripts/validate/fv3_native/extvec_stage_dump.py': frozenset({
+        'tests.test_cases.colliding_modons',
+    }),
+    'scripts/validate/fv3_native/run_duo_stepper_modon.py': frozenset({
+        'tests.test_cases.colliding_modons',
+    }),
+    'scripts/validate/fv3_native/stage_ke_budget.py': frozenset({
+        'tests.test_cases.colliding_modons',
+    }),
+    'scripts/validate/fv3_native/twin_block1_zoom.py': frozenset({
+        'tests.test_cases.colliding_modons',
+    }),
+    'scripts/validate/fv3_native/wedge_sharp_compare.py': frozenset({
+        'tests.test_cases.colliding_modons',
     }),
     'scripts/bench/run_levante_gpu_scaling.py': frozenset({
         'tests.test_cases.baroclinic_wave',
@@ -134,160 +168,6 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         'tests.atmosphere.shallow_water.test_cases.williamson',
         'tests.test_cases.cosine_bell',
         'tests.test_iter921_w2_v_vs_h_pareto_sentinel',
-    }),
-    'scripts/tmp/diag_cosine_bell_longrun.py': frozenset({
-        'tests.test_cases.cosine_bell',
-    }),
-    'scripts/tmp/diagnostic/diag_506_advective_freestream.py': frozenset({
-        'tests.test_cases.cosine_bell',
-    }),
-    'scripts/tmp/diagnostic/diag_506b_fv3_sinsg_gcl.py': frozenset({
-        'tests.test_cases.cosine_bell',
-    }),
-    'scripts/tmp/diagnostic/diag_williamson2.py': frozenset({
-        'tests.unit.test_williamson2_cdgrid',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_all_metric_d_con_sites_ast_guard_iter353.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_corner_div_damp_dt_actual_iter189.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_corner_div_damp_smag_vort_iter187.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_cross_face_du_proj_ast_iter373.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_cross_face_duogrid_pairing_doc_iter388.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_d_con_top_zero_ast_guard_iter435.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_d_sw4_corner_ke_fix_iter869.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_da_min_c_fortran_fidelity_iter867.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_dyn_exner_pkz_equivalence_doc_iter395.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_factory_d4_bg_d2_bg_k_ast_iter453.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_fv3_boundary_fix_duogrid_gate_iter865.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_fv3_dddmp_kwarg_iter872.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_fv3_fv_tp_2d_flux_sync_iter864.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_fv3_nh_toolkit_iter172.py': frozenset({
-        'tests._iter187_marker',
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_fv3_pe_toolkit_iter188.py': frozenset({
-        'tests._iter187_marker',
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_heat_source_del2_ast_iter460.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter1002_w2_target_met.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-        'tests.test_cases.cosine_bell',
-        'tests.test_cases.williamson',
-        'tests.test_cases.williamson_extended',
-        'tests.test_iter921_w2_v_vs_h_pareto_sentinel',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter911_w2_resolution_sentinel.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter922_ppm_boundary_pareto_sentinel.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter924_cosine_bell_production_sentinel.py': frozenset({
-        'tests.test_cases.cosine_bell',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter926_use_fv3_dsw5_corner_damping.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter928_fortran_fidelity_gap_markers.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter930_boundary_fix_div_damp_load_bearing.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter931_bare_al_cube_vertex_resolution_scaling.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter932_iter893_velocity_tendency_invariant.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter934_fb_chain_low_res_stability.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter941_bgrid_ne_sync_unconditional.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter944_cgrid_ne_ut_vt_vort_sync.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter945_dgrid_ppm_cross_face_halo.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter947_uc_vc_new_via_old_delta.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_iter951_fb_chain_v_ll_linf_tracking.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-        'tests.test_iter921_w2_v_vs_h_pareto_sentinel',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_legoesm_min_edge_factories_ast_iter485.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_nh_5_dcon_sites_flag_coverage_iter361.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_nh_duogrid_halo_ast_guard_iter327.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_nh_dynamic_exner_ast_guard_iter342.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_nh_vector_halo_ast_guard_iter329.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_pe_4_dcon_sites_flag_coverage_iter362.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_pe_duogrid_ke_correction_ast_guard_iter334.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_ppm_1d_boundary_indices_iter884.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_ppm_1d_fortran_xppm_boundary_iter888.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_ppm_edge_values_clip_iter880.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_rayleigh_fast_ast_guard_iter450.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_sponge_boost_ast_guard_iter445.py': frozenset({
-        'tests.legoesm_paths',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_sw_clipped_scan_step_iter549.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
-    }),
-    'scripts/tmp/dycore_iter_archive/test_sw_make_clipped_step_iter531.py': frozenset({
-        'tests.atmosphere.shallow_water.test_cases.williamson',
     }),
     'scripts/validate/run_colliding_modons.py': frozenset({
         'tests.test_cases.colliding_modons',
