@@ -34,7 +34,10 @@
 #
 # Submit as:  ARM=V sbatch crm_vgrid_ab.sbatch   /   ARM=R sbatch ...
 #SBATCH --account=glab
-#SBATCH --partition=glab1
+# burst has free GPU capacity; glab1 is non-preempt but was fully subscribed.
+# Runs checkpoint every 21600 steps and accept RESTART=latest, so a preemption
+# is recoverable.
+#SBATCH --partition=burst
 #SBATCH --gres=gpu:1
 #SBATCH --job-name=crm_vgrid
 #SBATCH --cpus-per-task=4
