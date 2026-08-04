@@ -205,6 +205,120 @@ def fv3_divergence_corner_2d(
     n = cdgrid.n
     _is_4d = u_corner.ndim == 4
 
+    if dgrid_ne_halo:
+        from legoesm.core.fv3_sw_core import (
+            d2a2c_ua_va_halo,
+            d2a2c_ua_va_halo_4d,
+            sina_u_v_from_sin_sg,
+        )
+        from legoesm.grids.dgrid_halo import (
+            pad_halo_dgrid_scalar_pair_4d,
+            pad_halo_dgrid_sg_slots_4d,
+            pad_halo_dgrid_vector_4d,
+        )
+        from legoesm.grids.halo import get_halo_backend
+
+        def _dgrid_ne_halo(u_d, v_d):
+            if get_halo_backend() == "mpi":
+                from legoesm.grids.dgrid_halo import (
+                    pad_halo_dgrid_vector_4d_replicated_mpi,
+                )
+                from legoesm.grids.halo import get_mpi_topology
+                return pad_halo_dgrid_vector_4d_replicated_mpi(
+                    u_d, v_d, get_mpi_topology(),
+                )
+            return pad_halo_dgrid_vector_4d(u_d, v_d)
+
+        u4 = u_fv3 if _is_4d else u_fv3[..., None]
+        v_orth4 = v_fv3 if _is_4d else v_fv3[..., None]
+
+        u_orth_full, _ = _dgrid_ne_halo(u4, v_orth4)
+        u_orth_i_pad = u_orth_full[:, :, 1:-1, :]
+        u_at_v = 0.25 * (
+            u_orth_i_pad[:, :-1, :-1, :]
+            + u_orth_i_pad[:, 1:, :-1, :]
+            + u_orth_i_pad[:, :-1, 1:, :]
+            + u_orth_i_pad[:, 1:, 1:, :]
+        )
+        sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
+        v_cov4 = (
+            cdgrid.cosa_u[..., None] * u_at_v
+            + sina_u[..., None] * v_orth4
+        )
+
+        if _is_4d:
+            ua_h1, va_h1 = d2a2c_ua_va_halo_4d(u4, v_cov4, cdgrid)
+        else:
+            ua_h1, va_h1 = d2a2c_ua_va_halo(
+                u4[..., 0], v_cov4[..., 0], cdgrid,
+            )
+            ua_h1 = ua_h1[..., None]
+            va_h1 = va_h1[..., None]
+
+        u_full, v_full = _dgrid_ne_halo(u4, v_cov4)
+        u_pad = u_full[:, :, 1:-1, :]
+        v_pad = v_full[:, 1:-1, :, :]
+
+        dyc_h, dxc_h = pad_halo_dgrid_scalar_pair_4d(
+            cdgrid.dyc[..., None], cdgrid.dxc[..., None],
+            axis_swap_sign=+1.0,
+        )
+        dyc_pad = dyc_h[:, :, 1:-1, :]
+        dxc_pad = dxc_h[:, 1:-1, :, :]
+
+        sin_sg_h, cos_sg_h = pad_halo_dgrid_sg_slots_4d(
+            cdgrid.sin_sg[..., :4], cdgrid.cos_sg[..., :4],
+        )
+        sin_uf = 0.5 * (
+            sin_sg_h[:, :, :-1, 3] + sin_sg_h[:, :, 1:, 1]
+        )
+        cos_uf = 0.5 * (
+            cos_sg_h[:, :, :-1, 3] + cos_sg_h[:, :, 1:, 1]
+        )
+        sin_vf = 0.5 * (
+            sin_sg_h[:, :-1, :, 2] + sin_sg_h[:, 1:, :, 0]
+        )
+        cos_vf = 0.5 * (
+            cos_sg_h[:, :-1, :, 2] + cos_sg_h[:, 1:, :, 0]
+        )
+
+        va_at_jface = 0.5 * (
+            va_h1[:, :, :-1, :] + va_h1[:, :, 1:, :]
+        )
+        ua_at_iface = 0.5 * (
+            ua_h1[:, :-1, :, :] + ua_h1[:, 1:, :, :]
+        )
+
+        j_face = jnp.arange(n + 1)
+        is_uf_boundary = ((j_face == 0) | (j_face == n))[None, None, :, None]
+        uf_boundary = u_pad * dyc_pad * sin_uf[..., None]
+        uf_interior = (
+            (u_pad - va_at_jface * cos_uf[..., None])
+            * dyc_pad * sin_uf[..., None]
+        )
+        uf = jnp.where(is_uf_boundary, uf_boundary, uf_interior)
+
+        i_face = jnp.arange(n + 1)
+        is_vf_boundary = ((i_face == 0) | (i_face == n))[None, :, None, None]
+        vf_boundary = v_pad * dxc_pad * sin_vf[..., None]
+        vf_interior = (
+            (v_pad - ua_at_iface * cos_vf[..., None])
+            * dxc_pad * sin_vf[..., None]
+        )
+        vf = jnp.where(is_vf_boundary, vf_boundary, vf_interior)
+
+        divg_d = (
+            vf[:, :, :-1, :] - vf[:, :, 1:, :]
+            + uf[:, :-1, :, :] - uf[:, 1:, :, :]
+        )
+        divg_d = divg_d.at[:, 0, 0, :].add(-vf[:, 0, 0, :])
+        divg_d = divg_d.at[:, n, 0, :].add(-vf[:, n, 0, :])
+        divg_d = divg_d.at[:, n, n, :].add(vf[:, n, n + 1, :])
+        divg_d = divg_d.at[:, 0, n, :].add(vf[:, 0, n + 1, :])
+        divg_d = divg_d * cdgrid.rarea_c[..., None]
+        return divg_d if _is_4d else divg_d[..., 0]
+
+
     # Step 2: pad ua, va with halo=1 so the cosa cross-correction at
     # j-1 / i-1 reads neighbour-panel cells (cross-face values).
     # FV3_3D iter-1044: dispatch pad_halo vs pad_halo_4d by ndim so
