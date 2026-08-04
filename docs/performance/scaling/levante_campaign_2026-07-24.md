@@ -2328,3 +2328,33 @@ slab size, different balance. Lesson for the ledger: a lever confirmed
 on one decomposition is NOT transferable by analogy — every lane needs
 its own A/B, and this one paid for itself by catching a regression
 before it shipped.
+
+### #1 PARTLY CONFIRMED — ocean LL2304@128: fused halo -4.9 %; overlap no benefit observed (job 26692291)
+
+The top-pick transfer of the two atm levers to the unreceipted ocean
+production arm (explicit_substep + wide halo, 18 steps):
+
+| arm | ms/step | GC/s |
+|---|---|---|
+| A off | 16.620 | 12.78 |
+| B fused | **15.807 (-4.9 %)** | **13.43** |
+| C fused+overlap | 15.942 (-4.1 %) | 13.32 |
+| A2 off | 16.610 | 12.78 |
+
+* **Fused halo transfers: -4.9 %** (A/A2 drift 0.06 % — a very tight
+  bracket), matching the atm lane's -4.5/-5.4 %. Census — an nd=8
+  VIRTUAL-CPU algorithmic proxy at the same solver config, NOT a
+  128-GPU collective trace: **206 -> 133 collective-permutes/step**
+  (-35 % CP count; all-reduces stay 7 in both arms, so the cut is
+  CP-only, and it is the largest CP-count reduction measured in this
+  campaign).
+* **Overlap shows NO benefit in this receipt**: C is 0.9 % slower than
+  B — but that 0.135 ms difference was NOT replicated (one B/C pair),
+  so the honest statement is "no benefit observed; leave the flags off
+  on this lane pending a replicated B/C". HYPOTHESIS (uninstrumented):
+  the barotropic subcycle is a long dependent chain with little
+  independent compute to hide comm under, so there is little for the
+  latency-hiding scheduler to exploit.
+* Recommendation for the ocean lat-lon lane: set
+  `LEGOESM_LATLON_SPMD_FUSED_HALO=1`, leave `LEGOESM_XLA_OVERLAP`
+  OFF. New ocean best: **13.43 GC/s at 128 GPUs** (was 13.0).
