@@ -46,15 +46,21 @@ horizontal dimension is exact, not an approximation.
 ``<dest>/snapshots/sfc_XXXXXXXX.npz`` carries the 4-height cross-check block
 (``heights, T_levels, qv_levels, cond_levels``) used by ``_surface_cross_check``.
 
-CONVENTION WARNING (read before trusting a comparison)
-------------------------------------------------------
-RCEMIP ``hus`` is SPECIFIC humidity; legoESM's ``q_v`` tracer is a MIXING
-RATIO.  They differ by ``r = q/(1-q)``, i.e. ~1.9% at q = 18.65 g/kg.  We keep
-``hus`` as-is by default because legoESM's own Wing IC does the same (it feeds
-the RCEMIP specific humidity ``q0 = 0.01865`` straight into the mixing-ratio
-tracer), so DEFAULT behaviour is consistent with our IC.  Pass
-``--to-mixing-ratio`` for the strictly correct conversion; the difference is
-reported either way so it is never silent.
+Humidity convention
+-------------------
+Default ``--humidity qv`` reads SAM's ``QV_avg``, the native water-vapour
+MIXING RATIO in kg/kg, which is exactly what legoESM's ``q_v`` tracer holds —
+so there is NO specific-vs-mixing-ratio conversion to get wrong.  The CMOR
+``hus_avg`` (specific humidity) is available via ``--humidity hus`` but is 83%
+fill for SAM_CRM/RCE_small300 (only 397 of 2400 times fully finite), which the
+script reports and refuses rather than silently interpolating.
+
+Two file conventions that WILL bite a naive reader, both handled here:
+  * ``time`` carries ``units = "day"`` (0.02 .. 99.98), not seconds. Treating
+    it as seconds collapses a 100-day run into 100 s and empties every
+    equilibrium window. Units are read from the file and unknown units are
+    fatal.
+  * ``p`` carries ``units = "mb"``, not Pa.
 """
 
 from __future__ import annotations
@@ -87,7 +93,13 @@ MSE_J_TO_KJ = 1.0e-3
 #: PLUS precipitating liquid+ice; ``qcloud`` is the cloud part alone.
 CLOUD_VARS = ("clw_avg", "cli_avg")
 PRECIP_COND_VARS = ("plw_avg", "pli_avg")
-REQUIRED_VARS = ("ta_avg", "hus_avg") + CLOUD_VARS + PRECIP_COND_VARS
+#: Humidity source.  ``QV_avg`` is SAM's native water-vapour MIXING RATIO
+#: [kg/kg] -- directly comparable to legoESM's q_v tracer, so no specific-vs-
+#: mixing-ratio conversion is needed at all.  ``hus_avg`` is the CMOR specific
+#: humidity and, for SAM_CRM/RCE_small300, is 83% fill (only 397 of 2400 times
+#: are fully finite), so it is a fallback, not the default.
+HUMIDITY_VARS = {"qv": "QV_avg", "hus": "hus_avg"}
+REQUIRED_VARS = ("ta_avg",) + CLOUD_VARS + PRECIP_COND_VARS
 
 
 def _fatal(msg: str) -> None:
@@ -166,6 +178,28 @@ def _open_nc(path: Path):
     except ImportError:
         _fatal("neither xarray nor netCDF4 is importable; cannot read the "
                "RCEMIP netCDF files. `pip install xarray netcdf4`.")
+
+
+#: Recognised time units in the RCEMIP 1D files -> seconds.
+_TIME_UNIT_SECONDS = {"day": SEC_PER_DAY, "days": SEC_PER_DAY,
+                      "hour": 3600.0, "hours": 3600.0,
+                      "s": 1.0, "sec": 1.0, "second": 1.0, "seconds": 1.0}
+
+
+def time_to_seconds(ds) -> np.ndarray:
+    """Time axis in SECONDS, from the file's own ``units`` attribute.
+
+    SAM_CRM/RCE_small300 stores ``units = "day"`` running 0.02 .. 99.98, so
+    treating the raw numbers as seconds silently collapses a 100-day run into
+    100 seconds and makes every equilibrium window empty.  Unknown units are
+    FATAL rather than assumed.
+    """
+    t = np.asarray(ds["time"].values, dtype=np.float64).reshape(-1)
+    units = str(ds["time"].attrs.get("units", "")).strip().lower()
+    if units not in _TIME_UNIT_SECONDS:
+        _fatal(f"unrecognised time units {units!r}; refusing to guess. "
+               f"Known: {sorted(_TIME_UNIT_SECONDS)}")
+    return t * _TIME_UNIT_SECONDS[units]
 
 
 def _pick(ds, names: tuple[str, ...]) -> str:
@@ -278,9 +312,16 @@ def main(argv=None) -> int:
                         "protocol suggests the last 25 days.")
     p.add_argument("--n-snapshots", type=int, default=10,
                    help="how many vol_*.npz to emit (campaign needs >= 5).")
+    p.add_argument("--humidity", choices=sorted(HUMIDITY_VARS),
+                   default="qv",
+                   help="Humidity source: 'qv' = SAM QV_avg, the native MIXING "
+                        "RATIO [kg/kg] that matches legoESM's q_v tracer "
+                        "exactly (default); 'hus' = CMOR specific humidity, "
+                        "which is 83%% fill for SAM_CRM/RCE_small300.")
     p.add_argument("--to-mixing-ratio", action="store_true",
-                   help="convert RCEMIP specific humidity to mixing ratio "
-                        "r = q/(1-q). Default OFF to match our Wing IC.")
+                   help="convert specific humidity to mixing ratio r = q/(1-q). "
+                        "Only meaningful with --humidity hus; QV_avg is "
+                        "ALREADY a mixing ratio.")
     p.add_argument("--check-size", action="store_true",
                    help="print the download cost and exit without fetching.")
     args = p.parse_args(argv)
@@ -289,7 +330,8 @@ def main(argv=None) -> int:
         _fatal("--n-snapshots must be >= 5; run_scm_rce_campaign requires at "
                "least 5 vol_*.npz files.")
 
-    urls = {v: object_url(args.model, args.case, v) for v in REQUIRED_VARS}
+    wanted = REQUIRED_VARS + (HUMIDITY_VARS[args.humidity],)
+    urls = {v: object_url(args.model, args.case, v) for v in wanted}
     print(f"model={args.model} case={args.case}")
     if args.check_size:
         total = 0
@@ -320,7 +362,7 @@ def main(argv=None) -> int:
     zname = _pick(ds_T, ("z", "height", "zg", "lev"))
     T = np.asarray(ds_T[tname].values, dtype=np.float64)
     z_m = np.asarray(ds_T[zname].values, dtype=np.float64).reshape(-1)
-    time_s = np.asarray(ds_T["time"].values, dtype=np.float64).reshape(-1)
+    time_s = time_to_seconds(ds_T)
     if T.ndim != 2:
         T = T.reshape(time_s.size, z_m.size)
     print(f"\n  grid: nz={z_m.size} levels, z = {z_m.min():.0f} .. "
@@ -336,7 +378,16 @@ def main(argv=None) -> int:
         a = np.asarray(ds[nm].values, dtype=np.float64)
         return a.reshape(time_s.size, z_m.size)
 
-    qv = _load("hus_avg")
+    hvar = HUMIDITY_VARS[args.humidity]
+    qv = _load(hvar)
+    n_bad = int(np.sum(~np.isfinite(qv)))
+    if n_bad:
+        print(f"  WARNING: {hvar} has {n_bad}/{qv.size} non-finite entries "
+              f"({100.0*n_bad/qv.size:.1f}%).")
+        if args.humidity == "hus":
+            _fatal(f"{hvar} is not usable; rerun with --humidity qv (SAM's "
+                   "native mixing ratio, which is complete).")
+        _fatal(f"{hvar} unexpectedly has gaps.")
     qcloud = sum(_load(v) for v in CLOUD_VARS)
     cond = qcloud + sum(_load(v) for v in PRECIP_COND_VARS)
 

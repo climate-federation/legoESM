@@ -162,3 +162,47 @@ def test_build_reference_rejects_z_profile_mismatch(tmp_path):
 def test_cli_rejects_fewer_than_five_snapshots():
     with pytest.raises(SystemExit):
         frr.main(["--n-snapshots", "3", "--check-size"])
+
+
+class _FakeTime:
+    def __init__(self, values, units):
+        self.values = np.asarray(values)
+        self.attrs = {"units": units} if units is not None else {}
+
+
+class _FakeDS:
+    def __init__(self, values, units):
+        self._t = _FakeTime(values, units)
+
+    def __getitem__(self, k):
+        assert k == "time"
+        return self._t
+
+
+def test_time_to_seconds_honours_the_files_units_attribute():
+    """RCEMIP 1D files store time in DAYS. Reading them as seconds turns a
+    100-day run into 100 s and makes every equilibrium window empty."""
+    days = np.array([0.0208333, 50.0, 99.9791667])
+    got = frr.time_to_seconds(_FakeDS(days, "day"))
+    np.testing.assert_allclose(got, days * 86400.0)
+    assert got[-1] / 86400.0 == pytest.approx(99.979, abs=1e-3)
+    # hours and seconds also supported
+    np.testing.assert_allclose(
+        frr.time_to_seconds(_FakeDS(np.array([2.0]), "hours")), [7200.0])
+    np.testing.assert_allclose(
+        frr.time_to_seconds(_FakeDS(np.array([5.0]), "seconds")), [5.0])
+
+
+def test_time_to_seconds_refuses_to_guess_unknown_units():
+    with pytest.raises(SystemExit):
+        frr.time_to_seconds(_FakeDS(np.array([1.0]), "fortnights"))
+    with pytest.raises(SystemExit):
+        frr.time_to_seconds(_FakeDS(np.array([1.0]), None))
+
+
+def test_default_humidity_is_the_native_mixing_ratio():
+    """QV_avg is a MIXING RATIO (matches our q_v tracer) and is complete;
+    hus_avg is specific humidity and is 83% fill for SAM_CRM/RCE_small300."""
+    assert frr.HUMIDITY_VARS["qv"] == "QV_avg"
+    assert frr.HUMIDITY_VARS["hus"] == "hus_avg"
+    assert "hus_avg" not in frr.REQUIRED_VARS
