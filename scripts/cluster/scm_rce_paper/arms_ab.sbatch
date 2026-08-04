@@ -28,6 +28,20 @@ cd $WT
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "host: $(hostname)"
 export JAX_PLATFORMS=cpu
+# XLA CPU JIT memory. Every arm of 9311347 died with
+#   LLVM ERROR: Unable to allocate section memory!
+# after 0.5-3.7 h — the COMPILER's allocator exhausting host RAM, not the
+# model. Raising --mem does not help: --tune-evals 48 drives many distinct
+# compilations per scheme and LLVM section memory accumulates across them.
+# A persistent cache makes repeat shapes reuse compiled code instead of
+# recompiling, across evals AND across arms.
+export JAX_COMPILATION_CACHE_DIR=/burg/glab/users/pg2328/.jax_cache_scmrce
+export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=0
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+# Cap the compiler's own parallelism; each worker holds its own LLVM arena.
+export XLA_FLAGS="--xla_cpu_enable_fast_math=false"
+export OMP_NUM_THREADS=4
 export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
