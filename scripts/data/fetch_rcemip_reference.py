@@ -222,6 +222,23 @@ def build_reference(profiles: dict[str, np.ndarray], z_m: np.ndarray,
     nt, nz = profiles["T"].shape
     if z_m.size != nz:
         _fatal(f"z has {z_m.size} levels but the profiles have {nz}.")
+
+    # VERTICAL ORIENTATION. RCEMIP stores z ASCENDING (37 -> 33000 m); the
+    # legoESM plane CRM stores it DESCENDING / top-down (32450 -> 550 m), and
+    # run_scm_rce_campaign derives sigma half-levels assuming that convention.
+    # Writing the source order produced
+    #   ValueError: Derived CRM-matching sigma half-levels are not monotone.
+    # Flip everything together so z and the profiles never desynchronise.
+    if z_m.size > 1 and z_m[0] < z_m[-1]:
+        order = np.argsort(z_m)[::-1]
+        z_m = z_m[order]
+        profiles = {k: v[:, order] for k, v in profiles.items()}
+        print("  flipped RCEMIP ascending z -> legoESM top-down ordering "
+              f"(z[0]={z_m[0]:.0f} m at the model top, z[-1]={z_m[-1]:.0f} m "
+              "at the surface)")
+    if not np.all(np.diff(z_m) < 0):
+        _fatal("z is not strictly decreasing after reordering; the campaign's "
+               "sigma-coordinate builder requires a monotone top-down grid.")
     t_end = float(time_s[-1])
     t_start = t_end - last_days * SEC_PER_DAY
     sel = np.nonzero(time_s >= t_start)[0]
