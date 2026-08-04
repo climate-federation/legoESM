@@ -21,6 +21,9 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_snd  # noqa: E402
 from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
+    WING_SEED_AMP_FIFTH_K,
+    WING_SEED_AMP_LOWEST_K,
+    WING_SEED_N_LAYERS,
     band_limited_seed_pattern,
     build_gate_ideal_setup,
     build_lba_setup,
@@ -28,6 +31,8 @@ from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
     build_sam_case_initial_state,
     apply_prescribed_surface_fluxes_plane,
     coriolis_f0,
+    wing2018_seed_amplitudes,
+    wing2018_thermal_noise_seed,
     _random_band_theta_seed,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402
@@ -405,3 +410,99 @@ def test_random_band_theta_seed_in_lowest_levels_zero_mean():
     for k in range(nlev - n_seed, nlev):
         assert abs(seed[..., k].mean()) < 1e-10            # zero horizontal mean
     assert 0.3 * amp < seed[..., -1].std() < 3.0 * amp     # amplitude ~ amp
+
+
+# --- Wing 2018 RCEMIP protocol seed (Sect. 3.2.3) ------------------------
+#
+# Protocol text being pinned (Wing et al. 2018, GMD 11, 793-813, Sect. 3.2.3):
+#   "symmetry is to be broken by prescribing a small amount of thermal noise in
+#    the five lowest layers (an amplitude of 0.1 K in the lowest layer,
+#    decreasing linearly to 0.02 K in the fifth layer)."
+
+
+def test_wing2018_seed_amplitudes_match_the_published_taper():
+    """The protocol numbers, verbatim: 0.10 -> 0.02 K linearly over 5 layers."""
+    amps = wing2018_seed_amplitudes()
+    assert amps.shape == (WING_SEED_N_LAYERS,)
+    assert amps[0] == pytest.approx(WING_SEED_AMP_LOWEST_K)   # lowest layer
+    assert amps[-1] == pytest.approx(WING_SEED_AMP_FIFTH_K)   # fifth layer
+    np.testing.assert_allclose(amps, [0.10, 0.08, 0.06, 0.04, 0.02], atol=1e-12)
+    # "decreasing linearly" => constant second difference of zero.
+    np.testing.assert_allclose(np.diff(amps, 2), 0.0, atol=1e-12)
+
+
+def test_wing2018_seed_amplitudes_scale_preserves_protocol_shape():
+    """amp_lowest rescales the taper without changing its 0.2 ratio."""
+    amps = wing2018_seed_amplitudes(amp_lowest=0.5)
+    assert amps[0] == pytest.approx(0.5)
+    assert amps[-1] / amps[0] == pytest.approx(
+        WING_SEED_AMP_FIFTH_K / WING_SEED_AMP_LOWEST_K)
+
+
+def test_wing2018_seed_amplitudes_reject_zero_amplitude():
+    """A zero-amplitude symmetry breaker is the iter-149 column-symmetric trap:
+    the run looks healthy and convection never initiates. Fail loudly."""
+    with pytest.raises(ValueError, match="amp_lowest must be > 0"):
+        wing2018_seed_amplitudes(amp_lowest=0.0)
+    with pytest.raises(ValueError, match="n_seed_lev must be >= 1"):
+        wing2018_seed_amplitudes(n_seed_lev=0)
+
+
+def test_wing2018_thermal_noise_seed_structure_amplitude_and_zero_mean():
+    ny, nx, nlev = 12, 10, 20
+    seed = np.asarray(wing2018_thermal_noise_seed(ny, nx, nlev, rng_seed=3))
+    assert seed.shape == (ny, nx, nlev)
+    # Only the five LOWEST layers are perturbed; top-down storage => last five.
+    assert np.all(seed[..., :nlev - WING_SEED_N_LAYERS] == 0.0)
+    assert np.any(seed[..., -WING_SEED_N_LAYERS:] != 0.0)
+    amps = wing2018_seed_amplitudes()          # lowest first
+    for j in range(WING_SEED_N_LAYERS):
+        layer = seed[..., -1 - j]              # j=0 is the LOWEST layer
+        a = amps[j]
+        # Bounded by its own layer amplitude (uniform[-A, A], zero-mean shift
+        # can only move it by < A).
+        assert np.max(np.abs(layer)) <= 2.0 * a
+        assert np.max(np.abs(layer)) > 0.3 * a, "layer amplitude collapsed"
+        # Zero horizontal mean (our documented deviation; see the docstring).
+        assert abs(layer.mean()) < 1e-12
+    # The taper must be MONOTONE decreasing upward in RMS, which is the whole
+    # point of the protocol shape — a uniform-amplitude seed would not be.
+    rms = [seed[..., -1 - j].std() for j in range(WING_SEED_N_LAYERS)]
+    assert all(rms[j] > rms[j + 1] for j in range(WING_SEED_N_LAYERS - 1)), rms
+
+
+def test_wing2018_thermal_noise_seed_is_deterministic_under_rng_seed():
+    a = np.asarray(wing2018_thermal_noise_seed(8, 8, 12, rng_seed=7))
+    b = np.asarray(wing2018_thermal_noise_seed(8, 8, 12, rng_seed=7))
+    c = np.asarray(wing2018_thermal_noise_seed(8, 8, 12, rng_seed=8))
+    np.testing.assert_array_equal(a, b)          # same seed => bit-identical
+    assert not np.array_equal(a, c)              # different seed => different
+
+
+def test_wing2018_thermal_noise_seed_is_white_not_band_limited():
+    """The protocol says 'noise'. Distinguish it from band_limited_seed_pattern
+    by spectral content: white noise has power at the Nyquist wavenumber, the
+    band-limited pattern has EXACTLY zero there (that is its defining property).
+
+    This is the discriminator that would catch someone silently routing
+    'wing2018' to the legacy band-limited helper.
+    """
+    ny = nx = 32
+    seed = np.asarray(wing2018_thermal_noise_seed(ny, nx, 8, rng_seed=1))
+    lowest = seed[..., -1]
+    spec = np.abs(np.fft.fft2(lowest))
+    nyq = spec[ny // 2, nx // 2]                    # 2-dx mode
+    assert nyq > 1e-3 * spec.max(), "wing2018 seed has no grid-scale power"
+    band = band_limited_seed_pattern(ny, nx, k_max=6, rng_seed=1)
+    band_nyq = np.abs(np.fft.fft2(band))[ny // 2, nx // 2]
+    assert band_nyq < 1e-9, "control failed: band pattern should be band-limited"
+
+
+def test_wing2018_seed_can_opt_out_of_the_zero_mean_deviation():
+    """zero_horizontal_mean=False gives the LITERAL protocol (no such
+    constraint is imposed by Wing 2018)."""
+    raw = np.asarray(wing2018_thermal_noise_seed(
+        16, 16, 10, rng_seed=2, zero_horizontal_mean=False))
+    # An unconstrained uniform draw has a nonzero (O(A/sqrt(N))) layer mean.
+    assert abs(raw[..., -1].mean()) > 1e-6
+    assert np.max(np.abs(raw[..., -1])) <= WING_SEED_AMP_LOWEST_K

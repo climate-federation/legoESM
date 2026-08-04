@@ -180,6 +180,96 @@ def band_limited_seed_pattern(ny, nx, k_max=6, rng_seed=0):
     return field / std if std > 0 else field
 
 
+# --- Wing 2018 RCEMIP symmetry-breaking thermal noise ---------------------
+# Wing et al. (2018), GMD 11, 793-813, Sect. 3.2.3 "Initialization procedure",
+# p. 798, VERBATIM:
+#
+#   "For both RCE_small and RCE_large, symmetry is to be broken by prescribing
+#    a small amount of thermal noise in the five lowest layers (an amplitude of
+#    0.1 K in the lowest layer, decreasing linearly to 0.02 K in the fifth
+#    layer). This will allow convection to start within the first few hours of
+#    each simulation."
+#
+# That sentence is the ENTIRE protocol specification.  Note it says *noise*,
+# i.e. a RANDOM field — it is NOT a smooth Gaussian bubble.  (An earlier note in
+# docs/science/specs/CRM_implementation.md asserted the protocol specifies a
+# "smooth Gaussian"; that reading is incorrect and is retracted there.)
+WING_SEED_N_LAYERS = 5           # "the five lowest layers"
+WING_SEED_AMP_LOWEST_K = 0.1     # K — "an amplitude of 0.1 K in the lowest layer"
+WING_SEED_AMP_FIFTH_K = 0.02     # K — "decreasing linearly to 0.02 K in the fifth"
+
+
+def wing2018_seed_amplitudes(n_seed_lev: int = WING_SEED_N_LAYERS,
+                             amp_lowest: float = WING_SEED_AMP_LOWEST_K):
+    """Per-layer Wing-2018 noise amplitude [K], LOWEST layer first.
+
+    Linear taper from ``amp_lowest`` down to ``amp_lowest * r``, where
+    ``r = WING_SEED_AMP_FIFTH_K / WING_SEED_AMP_LOWEST_K = 0.2`` is the
+    protocol ratio.  At the protocol defaults (5 layers, 0.1 K) this returns
+    exactly ``[0.10, 0.08, 0.06, 0.04, 0.02]`` K.
+
+    ``amp_lowest`` is a scale: it sets the lowest-layer amplitude in K while
+    preserving the protocol *shape*.  ``amp_lowest=0.1`` is the faithful value.
+    """
+    if n_seed_lev < 1:
+        raise ValueError(f"n_seed_lev must be >= 1, got {n_seed_lev}.")
+    if amp_lowest <= 0.0:
+        raise ValueError(
+            f"amp_lowest must be > 0 for a symmetry-breaking seed, got "
+            f"{amp_lowest}. A zero-amplitude Wing seed leaves the state "
+            "column-symmetric and convection never initiates.")
+    ratio = WING_SEED_AMP_FIFTH_K / WING_SEED_AMP_LOWEST_K
+    if n_seed_lev == 1:
+        return np.asarray([amp_lowest], dtype=np.float64)
+    return np.linspace(amp_lowest, amp_lowest * ratio, n_seed_lev)
+
+
+def wing2018_thermal_noise_seed(ny, nx, nlev, *,
+                                n_seed_lev: int = WING_SEED_N_LAYERS,
+                                amp_lowest: float = WING_SEED_AMP_LOWEST_K,
+                                rng_seed: int = 0,
+                                zero_horizontal_mean: bool = True,
+                                dtype=jnp.float64):
+    """Wing 2018 Sect. 3.2.3 thermal-noise θ' seed, shape ``(ny, nx, nlev)``.
+
+    Level ordering is TOP-DOWN (the plane CRM convention): array index ``-1``
+    is the LOWEST model layer, so the 0.1 K amplitude lands on ``[..., -1]``
+    and the 0.02 K amplitude on ``[..., -n_seed_lev]``.
+
+    Randomness is i.i.d. per horizontal point AND per layer, drawn UNIFORMLY on
+    ``[-A_k, +A_k]``.  Determinism is by ``rng_seed`` through
+    ``numpy.random.default_rng`` (host-side, as in
+    :func:`band_limited_seed_pattern`), so the field is reproducible.
+
+    Two documented DEVIATIONS, both deliberate — the protocol is SILENT on each,
+    so these are our choices and must not be represented as RCEMIP requirements:
+
+    * **Distribution.** The paper says only "amplitude"; uniform on
+      ``[-A, +A]`` is the standard reading. A Gaussian with ``sigma = A`` would
+      be equally defensible but is unbounded.
+    * **Zero horizontal mean.** Not required by RCEMIP. We subtract the
+      per-layer horizontal mean by default so the seed injects no net
+      layer-mean buoyancy (it pairs with the hydrostatic ``rho'`` construction
+      in the callers, which would otherwise perturb the domain-mean mass).
+      Pass ``zero_horizontal_mean=False`` for the literal protocol.
+
+    The protocol does NOT disambiguate θ from absolute T. At these levels the
+    Exner function is within 1% of unity, so the two differ by <1% for a 0.1 K
+    perturbation; the plane CRM prognoses ``θ'``, so we perturb ``θ'``.
+    """
+    n_seed_lev = min(int(n_seed_lev), int(nlev))
+    amps = wing2018_seed_amplitudes(n_seed_lev, amp_lowest)   # lowest first
+    rng = np.random.default_rng(rng_seed)
+    # (ny, nx, n_seed_lev) i.i.d. uniform[-1, 1], scaled per layer.
+    noise = rng.uniform(-1.0, 1.0, size=(ny, nx, n_seed_lev))
+    # amps[0] is the LOWEST layer; top-down storage puts it LAST.
+    noise = noise * amps[::-1].reshape(1, 1, n_seed_lev)
+    if zero_horizontal_mean:
+        noise = noise - noise.mean(axis=(0, 1), keepdims=True)
+    seed = jnp.zeros((ny, nx, nlev), dtype=dtype)
+    return seed.at[..., -n_seed_lev:].set(jnp.asarray(noise, dtype=dtype))
+
+
 def _random_band_theta_seed(ny, nx, nlev, n_seed_lev, amp, k_max, rng_seed,
                             dtype):
     """Band-limited RANDOM θ' seed (SAM-like C4 broadband BL noise) in the lowest

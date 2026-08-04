@@ -667,12 +667,18 @@ def emit_crm_profiles(state, height_coord, out_dir, label="run",
 
 
 from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
+    WING_SEED_N_LAYERS,
     band_limited_seed_pattern as _band_limited_seed_pattern,
+    wing2018_seed_amplitudes,
+    wing2018_thermal_noise_seed as _wing2018_thermal_noise_seed,
 )
+
+# Legacy (pre-Wing) seed depth for the smooth_k1 / band_noise kinds.
+_LEGACY_N_SEED_LEV = 4
 
 
 def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
-                                theta_noise_amp=0.1, n_seed_lev=4,
+                                theta_noise_amp=0.1, n_seed_lev=None,
                                 n_tracers=3, seed_kind="smooth_k1",
                                 seed_kmax=6, rng_seed=0,
                                 q_sfc=WING_Q_SFC_DEFAULT):
@@ -684,10 +690,23 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
     ~10 steps at dx=2 km regardless of dt. Zero-mean horizontal so
     total energy is conserved at IC.
 
-    ``seed_kind``: ``"smooth_k1"`` (default, legacy — a single k=1 cosine, the
-    safe-but-laminar symmetry breaker) or ``"band_noise"`` (CONV-TRIGGER #83 — a
-    band-limited random field k=1..``seed_kmax`` that seeds a CELL POPULATION so
-    convection can actually organise; needs the vertical-w filter on, see #82).
+    ``seed_kind``:
+
+    * ``"wing2018"`` — the RCEMIP PROTOCOL seed (Wing et al. 2018, GMD 11,
+      793-813, Sect. 3.2.3): i.i.d. RANDOM thermal noise in the five lowest
+      layers with amplitude 0.1 K in the lowest layer tapering linearly to
+      0.02 K in the fifth. ``theta_noise_amp`` is the LOWEST-layer amplitude
+      in K, so ``theta_noise_amp=0.1`` reproduces the protocol exactly.
+      ``n_seed_lev`` defaults to 5 for this kind.
+    * ``"smooth_k1"`` (legacy default — a single k=1 cosine, the
+      safe-but-laminar symmetry breaker).
+    * ``"band_noise"`` (CONV-TRIGGER #83 — a band-limited random field
+      k=1..``seed_kmax`` that seeds a CELL POPULATION so convection can
+      actually organise; needs the vertical-w filter on, see #82).
+
+    For the two legacy kinds ``theta_noise_amp`` multiplies a unit-amplitude
+    (``smooth_k1``, peak 1) or unit-STD (``band_noise``) pattern applied at the
+    SAME amplitude on every seeded level — neither matches the protocol taper.
 
     ``n_tracers``: 3 = q_v, q_c, q_r (Kessler/Sundqvist/Thompson layout
     head); 9 = full Morrison/Seifert-Beheng with N_c, N_r, N_i + ice
@@ -700,8 +719,19 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
     tracers = tracers.at[..., 0].set(
         jnp.broadcast_to(q_v, (ny, nx, nlev)),
     )
+    if n_seed_lev is None:
+        n_seed_lev = (WING_SEED_N_LAYERS if seed_kind == "wing2018"
+                      else _LEGACY_N_SEED_LEV)
     n_seed_lev = min(n_seed_lev, nlev)
-    if seed_kind == "band_noise":
+    if seed_kind == "wing2018":
+        # RCEMIP protocol seed — per-LAYER amplitude taper and i.i.d. random
+        # noise, so it cannot be expressed as a single 2D pattern like the two
+        # legacy kinds. Returns the full (ny, nx, nlev) theta' directly.
+        theta_p = _wing2018_thermal_noise_seed(
+            ny, nx, nlev, n_seed_lev=n_seed_lev,
+            amp_lowest=theta_noise_amp, rng_seed=rng_seed, dtype=dtype)
+        pattern_2d = None
+    elif seed_kind == "band_noise":
         pattern_2d = jnp.asarray(
             _band_limited_seed_pattern(ny, nx, k_max=seed_kmax,
                                        rng_seed=rng_seed), dtype=dtype)
@@ -716,15 +746,18 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
                       * jnp.cos(2 * jnp.pi * ix / nx)[None, :])
     else:
         raise ValueError(
-            f"seed_kind={seed_kind!r} invalid; use 'smooth_k1' or 'band_noise'.")
-    theta_noise = (theta_noise_amp * pattern_2d[:, :, None]
-                    * jnp.ones((1, 1, n_seed_lev), dtype=dtype))
-    # Subtract horizontal mean (already ~zero-mean; keep for degenerate grids).
-    theta_noise = theta_noise - jnp.mean(theta_noise, axis=(0, 1),
-                                         keepdims=True)
-    theta_p = jnp.zeros_like(rest.theta_prime.data)
-    # Bottom 4 levels in top-down indexing = LAST 4 array entries.
-    theta_p = theta_p.at[..., -n_seed_lev:].set(theta_noise)
+            f"seed_kind={seed_kind!r} invalid; use 'wing2018', 'smooth_k1' or "
+            "'band_noise'.")
+    if pattern_2d is not None:
+        theta_noise = (theta_noise_amp * pattern_2d[:, :, None]
+                       * jnp.ones((1, 1, n_seed_lev), dtype=dtype))
+        # Subtract horizontal mean (already ~zero-mean; keep for degenerate
+        # grids).
+        theta_noise = theta_noise - jnp.mean(theta_noise, axis=(0, 1),
+                                             keepdims=True)
+        theta_p = jnp.zeros_like(rest.theta_prime.data)
+        # Bottom n_seed_lev levels in top-down indexing = LAST array entries.
+        theta_p = theta_p.at[..., -n_seed_lev:].set(theta_noise)
     # Hydrostatic-balance IC: set rho' = -rho_0 * theta'/theta_0 so the
     # initial pressure perturbation is zero (matches the warm-bubble
     # convention used by tests/validation/test_plane_nh_rising_thermal.py).
@@ -1080,19 +1113,31 @@ def parse_args():
                         "Recommended for RCE runs with theta_noise_amp > 0; "
                         "leave off for clean Wing IC + active moist physics.")
     p.add_argument("--theta-noise-amp", type=float, default=0.0,
-                   help="Initial theta' perturbation amplitude [K] at bottom 4 "
-                        "levels. 0 = clean Wing IC (stable at dt up to 10 s "
-                        "per iter-9/14); 0.1 = Wing 2018 standard symmetry "
-                        "breaker (blows up at dx>=2 km without LES — iter-212 "
-                        "in run_rce_mpi_long.py).")
-    p.add_argument("--seed-kind", choices=["smooth_k1", "band_noise"],
+                   help="Initial theta' perturbation amplitude [K]. For "
+                        "--seed-kind wing2018 this is the LOWEST-LAYER "
+                        "amplitude and 0.1 reproduces the RCEMIP protocol "
+                        "exactly (taper 0.10->0.02 K over 5 layers). For the "
+                        "legacy kinds it is a uniform amplitude on the bottom "
+                        "4 levels. 0 = clean Wing IC, column-symmetric — "
+                        "convection never initiates (precip stays ~5e-4 "
+                        "mm/day, the iter-149 trap).")
+    p.add_argument("--seed-kind",
+                   choices=["wing2018", "smooth_k1", "band_noise"],
                    default="smooth_k1",
-                   help="IC theta' perturbation spectrum (CONV-TRIGGER #83): "
-                        "'smooth_k1' (legacy single wave, stable but laminar) or "
-                        "'band_noise' (band-limited k=1..seed-kmax, seeds a "
-                        "convective-cell population; use with --si-w-filter-nu).")
+                   help="IC theta' perturbation. 'wing2018' = the RCEMIP "
+                        "PROTOCOL seed (Wing 2018 Sect. 3.2.3: i.i.d. random "
+                        "thermal noise, five lowest layers, 0.1 K tapering "
+                        "linearly to 0.02 K); 'smooth_k1' (legacy default, "
+                        "single k=1 wave — stable but laminar); 'band_noise' "
+                        "(band-limited k=1..seed-kmax, CONV-TRIGGER #83).")
     p.add_argument("--seed-kmax", type=int, default=6,
-                   help="Max wavenumber for --seed-kind band_noise (≪ nx/2).")
+                   help="Max wavenumber for --seed-kind band_noise (≪ nx/2). "
+                        "Not used by 'wing2018' (which is white by protocol).")
+    p.add_argument("--seed-rng", type=int, default=0,
+                   help="RNG seed for the random seed kinds ('wing2018', "
+                        "'band_noise'). Was hardwired to 0, so every run drew "
+                        "the identical perturbation field; vary it for "
+                        "ensemble members.")
     p.add_argument("--vertical-theta-diffusion", type=float, default=0.0,
                    help="Constant-ν vertical Laplacian diffusion of θ' [m²/s] "
                         "(DYCORE-ROBUST #82 probe: tests whether damping the θ' "
@@ -1301,6 +1346,15 @@ def main():
     print(f"  semi_implicit={args.semi_implicit}, substep_horizontal_acoustic="
           f"{args.substep_horizontal_acoustic}, si_w_filter_nu={args.si_w_filter_nu}, "
           f"seed_kind={args.seed_kind}, sgs_vertical={args.sgs_vertical}")
+    # Record the FULL seed specification: a run whose symmetry breaker is a
+    # silent no-op looks identical in every other log line (the iter-149
+    # column-symmetric trap), so the amplitude and RNG seed must be on record.
+    print(f"  seed: kind={args.seed_kind} theta_noise_amp="
+          f"{args.theta_noise_amp} K rng_seed={args.seed_rng}"
+          + (f" -> per-layer amps [K] (lowest first) = "
+             f"{np.array2string(wing2018_seed_amplitudes(WING_SEED_N_LAYERS, args.theta_noise_amp), precision=3)}"
+             if args.seed_kind == 'wing2018' and args.theta_noise_amp > 0
+             else ""))
     # codex iter-63 [LOW]: record whether --radiation was DEFAULTED (vs
     # explicit) so logs are self-describing — the gray→rrtmgp default flip
     # (#85) silently changes the experiment when the flag is omitted.
@@ -1521,7 +1575,7 @@ def main():
     state = _build_rcemip_initial_state(
         grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
         n_tracers=n_tracers, seed_kind=args.seed_kind, seed_kmax=args.seed_kmax,
-        q_sfc=q_sfc_rce,
+        rng_seed=args.seed_rng, q_sfc=q_sfc_rce,
     )
     # Optional restart from a checkpoint (resume long runs after a crash/fix).
     sys.path.insert(0, str(Path(__file__).resolve().parent))
