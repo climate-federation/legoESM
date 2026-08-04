@@ -134,7 +134,6 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
-        snow_scheme=cfg.physics.get("snow_scheme", "single"),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -392,7 +391,6 @@ def run(args) -> int:
         base_cfg = MultiLayerLandConfig(
             surface_scheme=surf, soil_grid=SoilGridConfig(),
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
-            snow_scheme=args.snow_scheme,
             stomata=stomata,
             # Soil-water latent zero-curtain: off is bit-identical sensible-only
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved

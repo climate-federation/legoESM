@@ -622,41 +622,6 @@ class TestMultilayerLandStep(unittest.TestCase):
             has_precipitation=jnp.ones(ncol),
         )
 
-    def test_snow_scheme_dispatch_hardening(self):
-        """Unknown snow_scheme raises; 'multilayer' is gated until Phase 2b coupling.
-
-        Dispatch hardening (CLAUDE.md): the snow-thermal scheme is validated on the
-        static config value at fn entry, so a typo cannot silently run the wrong snow
-        physics.  Stage 1 only wires the config gate — 'multilayer' must refuse
-        rather than fall through to the single-node budget under a different label.
-        """
-        from legoesm.land.config import MultiLayerLandConfig
-        from legoesm.land.multilayer_land import (
-            step_multilayer_land, init_multilayer_land_state,
-        )
-        ncol = 4
-        forcing = self._make_forcing(ncol)
-
-        # Default 'single' runs (baseline behaviour).
-        cfg_single = MultiLayerLandConfig()
-        self.assertEqual(cfg_single.snow_scheme, "single")
-        state = init_multilayer_land_state(ncol, cfg_single, T_init=280.0)
-        step_multilayer_land(state, forcing, cfg_single, U_min=1.0, dt=600.0)
-
-        # Unknown value -> ValueError naming the field.
-        cfg_bad = cfg_single._replace(snow_scheme="mutlilayer")  # typo
-        with self.assertRaises(ValueError) as ctx:
-            step_multilayer_land(state, forcing, cfg_bad, U_min=1.0, dt=600.0)
-        self.assertIn("snow_scheme", str(ctx.exception))
-
-        # 'multilayer' is scoped to the two-leaf canopy scheme (Stage 3); with the
-        # default SimpleSEB surface scheme it must raise a clear ValueError rather
-        # than silently run the single-node budget.
-        cfg_ml = cfg_single._replace(snow_scheme="multilayer")
-        with self.assertRaises(ValueError) as ml_ctx:
-            step_multilayer_land(state, forcing, cfg_ml, U_min=1.0, dt=600.0)
-        self.assertIn("TwoLeafCanopyConfig", str(ml_ctx.exception))
-
     def test_basic_step(self):
         """Single step should produce valid state and response."""
         from legoesm.land.config import MultiLayerLandConfig

@@ -55,7 +55,6 @@ _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
 _STOMATA_MODELS = ("ball_berry", "medlyn")
-_SNOW_SCHEMES = ("single", "multilayer")
 _FORCING_SOURCES = ("cru_jra", "synthetic")
 
 # --- Schema SANITY bounds for user-supplied stomatal overrides (name, lo, hi) ---
@@ -140,17 +139,6 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.enable_freeze_thaw must be a bool "
             f"(got {physics['enable_freeze_thaw']!r})")
-    # Snow thermal scheme (Phase 2b): "single" (default, single-node bulk SWE) or
-    # "multilayer" (CLM-faithful prognostic snow column that insulates the soil).
-    # Multilayer is two_leaf_canopy-only (step_multilayer_land raises otherwise).
-    physics.setdefault("snow_scheme", "single")
-    if physics["snow_scheme"] not in _SNOW_SCHEMES:
-        raise ValueError(
-            f"physics.snow_scheme={physics['snow_scheme']!r} not in {_SNOW_SCHEMES}")
-    if physics["snow_scheme"] == "multilayer" and physics["surface_scheme"] != "two_leaf_canopy":
-        raise ValueError(
-            "physics.snow_scheme='multilayer' requires surface_scheme='two_leaf_canopy' "
-            f"(got {physics['surface_scheme']!r}).")
     # Stomatal calibration scalars (None = land default / per-PFT): sanity bounds
     # (StomataConfig.__param_spec__ enforces tighter physical ranges downstream).
     for _k, _lo, _hi in _STOMATA_SANITY_BOUNDS:

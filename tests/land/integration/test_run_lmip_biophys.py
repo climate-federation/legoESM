@@ -169,40 +169,6 @@ def test_canopy_run_tapes_gpp_and_et(tmp_path):
     assert np.abs(transp).max() < 50.0 and np.abs(soil_evap).max() < 50.0   # mm/day
 
 
-def test_multilayer_snow_scheme_runs_end_to_end(tmp_path):
-    """The driver plumbs physics.snow_scheme=multilayer into MultiLayerLandConfig and
-    runs to completion (config -> driver -> coupled snow column -> output).  Guards
-    against a silent no-op: the config validates, the run PASSes, and snow_depth
-    (== column total SWE for the multilayer scheme) is finite in the tape."""
-    import yaml
-    import xarray as xr
-    from legoesm.land.lmip_config import validate_config
-    mod = _load_driver()
-    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
-    out = tmp_path / "out"
-    cfg = validate_config({
-        "grid": {"type": "latlon", "resolution": 4},
-        "physics": {"land_mode": "multilayer",
-                    "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most",
-                    "snow_scheme": "multilayer", "enable_freeze_thaw": True},
-        "forcing": {"source": "synthetic", "data_dir": "",
-                    "year_start": 2000, "year_end": 2000},
-        "surfdata": {"path": str(sd)},
-        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
-        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
-                              "vars": ["T_sfc", "snow_depth", "T_soil_top"]}]},
-    }).raw
-    assert cfg["physics"]["snow_scheme"] == "multilayer"
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
-    assert _run_config(mod, cfg_path, out) == 0                # PASS (no NaN over land)
-
-    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
-    for v in ("T_sfc", "snow_depth", "T_soil_top"):
-        assert np.all(np.isfinite(ds[v].values)), f"{v} non-finite under multilayer snow"
-    assert float(ds["snow_depth"].min()) >= 0.0                # SWE never negative
-
-
 def test_build_model_times_synthetic_starts_at_zero():
     mod = _load_driver()
     t = mod.build_model_times(196.0, 3600.0, 5, synthetic=True)

@@ -74,10 +74,3 @@ class MultiLayerLandState(NamedTuple):
     # keeps its own internal ``h2ocan`` store inside ``canopy_state`` and does
     # NOT use this field.
     W_canopy: jax.Array | None = None
-    # Prognostic multi-layer snow column (``snow_column.SnowColumnState``:
-    # per-layer swe_ice/swe_liq/T/density, shape (ncol, n_snow_layers)) — present
-    # iff ``config.snow_scheme == "multilayer"``; ``None`` (default / "single")
-    # runs the single cell-mean ``snow_depth`` budget.  The cell-mean ``snow_depth``
-    # (= column total SWE) is still carried for diagnostics/restart/albedo when the
-    # column is active.  See ``docs/land/phase2b_snow_thermal_plan.md``.
-    snow_column: Any | None = None

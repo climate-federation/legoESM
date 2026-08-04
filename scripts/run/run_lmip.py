@@ -432,12 +432,6 @@ def _save_restart(
         payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
         if state.ice_bands is not None:
             payload["ice_bands"] = np.asarray(state.ice_bands)
-    # Multi-layer snow column (snow_scheme="multilayer") round-trips its 4 prognostic
-    # leaves so a restart keeps the equilibrated column instead of resetting to an
-    # empty pack.
-    if getattr(state, "snow_column", None) is not None:
-        for _f in ("swe_ice", "swe_liq", "T", "density"):
-            payload[f"snow_col_{_f}"] = np.asarray(getattr(state.snow_column, _f))
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -483,19 +477,6 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
-    # Multi-layer snow column (snow_scheme="multilayer"): restore when present, else
-    # (scheme newly enabled on a legacy restart) seed an empty pack so the step has
-    # state.  Reconstructs the SnowColumnState NamedTuple from the saved leaves.
-    if config.snow_scheme == "multilayer":
-        from legoesm.land.snow_column import SnowColumnState, initial_snow_state
-        if "snow_col_swe_ice" in data:
-            state = state._replace(snow_column=SnowColumnState(
-                **{_f: jnp.asarray(data[f"snow_col_{_f}"])
-                   for _f in ("swe_ice", "swe_liq", "T", "density")}))
-        else:
-            state = state._replace(snow_column=initial_snow_state(
-                (state.snow_depth.shape[0],), config.snow_column,
-                dtype=state.T_soil.dtype))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
