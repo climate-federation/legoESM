@@ -1113,6 +1113,23 @@ def parse_args():
                         "also momentum unless --momentum-advection set). van_leer "
                         "(default) = 2nd-order TVD, monotone (≈MPDATA), stencil 4. "
                         "weno5 = 5th-order WENO-Z; upwind1 = 1st-order (smoke).")
+    p.add_argument("--positivity-mode",
+                   choices=["clip", "compensated", "off"],
+                   default="clip",
+                   help="Post-step water-tracer positivity filter. 'clip' "
+                        "(default, current behaviour) is a LOCAL max(q,0) and "
+                        "is NOT mass-conserving -- it CREATES water wherever a "
+                        "cell goes negative. #969 accepted that on the argument "
+                        "that negatives are ~1e-4 and 'only fire under "
+                        "pathological noisy convection', and flagged: 'revisit "
+                        "a mass-conserving local limiter if a long equilibrium "
+                        "run shows CWV drift'. An 80-day band_noise run DID: "
+                        "CWV 39.9 -> 127.9 mm against an RCEMIP reference of "
+                        "42.2. 'compensated' conserves column water globally; "
+                        "'off' disables the filter entirely so the raw "
+                        "advection negatives are visible. Exposed so the "
+                        "water-source hypothesis can be A/B'd instead of "
+                        "argued.")
     p.add_argument("--momentum-advection",
                    choices=["upwind1", "centered", "van_leer", "weno5"],
                    default="centered",
@@ -1698,10 +1715,23 @@ def main():
         # config leaves machine-zero negatives so clip is a no-op there.
         # ponytail: local clip, revisit a mass-conserving *local* limiter (per-
         # column borrow) if a long equilibrium run shows CWV drift.
-        state = apply_positive_filter_state(state, mode="clip")
+        # MEASURE the filter's water creation instead of asserting it is
+        # negligible. #969 argued the bias was small; an 80-day run drifted
+        # CWV 39.9 -> 127.9 mm (RCEMIP 42.2), which is the exact symptom that
+        # commit said would justify revisiting. Sum the water tracers either
+        # side of the filter and accumulate the difference.
+        if args.positivity_mode != "off":
+            _w_before = float(jnp.sum(state.tracers.data[..., :3]))
+            state = apply_positive_filter_state(
+                state, mode=args.positivity_mode)
+            _w_after = float(jnp.sum(state.tracers.data[..., :3]))
+            _WATER_CREATED[0] += (_w_after - _w_before)
+            _WATER_ABS[0] += abs(_w_after - _w_before)
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
+            _wtot = float(jnp.sum(state.tracers.data[..., :3]))
+            _wfrac = (_WATER_CREATED[0] / _wtot) if _wtot else 0.0
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
             max_qv = float(jnp.max(state.tracers.data[..., 0]))
@@ -1711,7 +1741,8 @@ def main():
             rel = abs(mass - mass0) / abs(mass0)
             line = (f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  "
                     f"{min_th:12.4e}  {max_th:12.4e}  {max_qv:9.3e}  "
-                    f"{rel:8.2e}  rho'={max_rhop:.2e} minTr={min_tr:.2e}")
+                    f"{rel:8.2e}  rho'={max_rhop:.2e} minTr={min_tr:.2e}"
+                    f" dH2O={_WATER_CREATED[0]:+.3e}({_wfrac:+.2e})")
             if args.land:
                 Ts_min = float(jnp.min(land_T_sfc))
                 Ts_mean = float(jnp.mean(land_T_sfc))
