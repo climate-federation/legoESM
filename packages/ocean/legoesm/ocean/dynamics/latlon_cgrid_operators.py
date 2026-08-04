@@ -1397,6 +1397,199 @@ def nemo_ldf_lap_viscosity_cgrid(
     return visc_u, visc_v
 
 
+def min_cell_to_vertex(h_k: jnp.ndarray, grid: LatLonGrid) -> jnp.ndarray:
+    """Min-rule interpolation of a cell-centre thickness to vertex (F) points.
+
+    Vertex value = min of the 4 surrounding T-cells (SW, SE, NW, NE), the
+    same convention as :func:`min_cell_to_uface`/:func:`min_cell_to_vface`
+    extended to the corner stagger — the "min" branch of ``_een_e3f_h_vtx``
+    (``ocean_pe_latlon_cgrid.py``, NEMO ``e3f`` at a vorticity vertex), factored
+    here as a standalone helper (that function also threads an unrelated
+    Fu/u pair through the same halo pad for the EEN vorticity flux, so it
+    cannot be called for a thickness-only need without dummy args).
+
+    Wall BC: south/north physical poles get an all-dry (zero) row via the
+    zero-padded cell field, matching ``min_cell_to_vface``. Tripolar fold:
+    the north row is the min over the local pair AND the fold-partner pair
+    (same convention as ``_een_e3f_h_vtx``'s "min" branch).
+
+    Parameters
+    ----------
+    h_k : (n_lat, n_lon, ...) at cell centres.
+    grid : LatLonGrid.
+
+    Returns
+    -------
+    h_vtx : (n_lat+1, n_lon+1, ...) at vertices.
+    """
+    h_sw = jnp.roll(h_k, 1, axis=1)  # west-neighbour cell (periodic lon)
+    h_padded = pad_ns_zero(h_k)
+    h_sw_padded = pad_ns_zero(h_sw)
+    h_vtx = jnp.minimum(
+        jnp.minimum(h_padded[:-1], h_padded[1:]),
+        jnp.minimum(h_sw_padded[:-1], h_sw_padded[1:]),
+    )  # (n_lat+1, n_lon)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        fold = grid.fold
+        h_partner = h_k[-1:, fold.perm_T]
+        h_sw_partner = h_sw[-1:, fold.perm_T]
+        h_vtx_north = jnp.minimum(
+            jnp.minimum(h_k[-1:], h_sw[-1:]),
+            jnp.minimum(h_partner, h_sw_partner),
+        )
+        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+    return jnp.concatenate([h_vtx, h_vtx[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def nemo_ldf_lap_viscosity_e3_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    ahmt: jnp.ndarray,
+    ahmf: jnp.ndarray,
+    h_k: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity, e3-THICKNESS-WEIGHTED
+    div/curl (#1455 topographic-step residual fix).
+
+    :func:`nemo_ldf_lap_viscosity_cgrid` documents a KNOWN simplification:
+    the shared ``divergence_cgrid``/``curl_vertex_cgrid`` it reuses weight
+    only by the horizontal metrics (e1/e2), never the vertical layer
+    thickness e3 — on DINO's full-step grid ``e3u_0 == e3t_0`` (no interior
+    horizontal e3 variance) so that simplification is invisible almost
+    everywhere, but it is NOT invisible at a topographic step, where the
+    neighbouring T/U/V columns genuinely differ in thickness. This variant
+    restores NEMO's e3 weighting.
+
+    Faithful transcription of NEMO 5.0.2
+    ``src/OCE/DYN/dynldf_lev_rot_scheme.h90`` (lines quoted; ``lap`` branch,
+    ``np_typ_rot`` — the ONLY branch this operator implements, matching its
+    sibling)::
+
+        ! :24-25 (zcur, F-point) -- e3f is an OUTER scalar prefactor on the
+        ! circulation; the velocities inside are NOT individually weighted:
+        zcur(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * e3f(ji-1,jj-1,jk) * r1_e1e2f(ji-1,jj-1) &
+             * (  ( e2v(ji,jj-1)*pv_in(ji,jj-1,jk,Kbb) - e2v(ji-1,jj-1)*pv_in(ji-1,jj-1,jk,Kbb) )  &
+                - ( e1u(ji-1,jj)*pu_in(ji-1,jj,jk,Kbb) - e1u(ji-1,jj-1)*pu_in(ji-1,jj-1,jk,Kbb) )  )
+        ! :27-29 (zdiv, T-point) -- EACH velocity face term is weighted by ITS
+        ! OWN face e3 (e3u/e3v) INSIDE the flux sum; the WHOLE divergence is
+        ! then divided by the outer e3t:
+        zdiv(ji,jj) = ahmt(ji,jj,jk) * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kbb)  &
+             * (  ( e2u(ji,jj)*e3u(ji,jj,jk,Kbb)*pu_in(ji,jj,jk,Kbb) - e2u(ji-1,jj)*e3u(ji-1,jj,jk,Kbb)*pu_in(ji-1,jj,jk,Kbb) )  &
+                + ( e1v(ji,jj)*e3v(ji,jj,jk,Kbb)*pv_in(ji,jj,jk,Kbb) - e1v(ji,jj-1)*e3v(ji,jj-1,jk,Kbb)*pv_in(ji,jj-1,jk,Kbb) )  )
+        ! :41-42, 51-52 (grad-div / curl-of-curl) -- the curl branch ALSO
+        ! divides by the outer e3u/e3v (at Kmm); the div branch does NOT:
+        pu(Krhs) += - ( zcur(ji,jj) - zcur(ji,jj-1) ) * r1_e2u(ji,jj) / e3u(ji,jj,jk,Kmm)  &
+                    + ( zdiv(ji+1,jj) - zdiv(ji,jj) ) * r1_e1u(ji,jj)
+        pv(Krhs) += + ( zcur(ji,jj) - zcur(ji-1,jj) ) * r1_e1v(ji,jj) / e3v(ji,jj,jk,Kmm)  &
+                    + ( zdiv(ji,jj+1) - zdiv(ji,jj) ) * r1_e2v(ji,jj)
+
+    Algebraic reduction to the SHARED primitives (no new metric code): since
+    ``divergence_cgrid(U, V, grid)`` already computes exactly
+    ``r1_e1e2t · [(U)_e·e2u − (U)_w·e2u + (V)_n·e1v − (V)_s·e1v]`` for face
+    fields ``U``, ``V`` — i.e. the SAME e1u/e2v face metrics NEMO's flux sum
+    uses — feeding it the THICKNESS-WEIGHTED faces ``h_u·u``, ``h_v·v``
+    reproduces NEMO's bracketed flux sum term-for-term, leaving only the
+    ``ahmt/e3t`` outer scale to apply. Likewise ``curl_vertex_cgrid(u, v,
+    grid)`` is exactly NEMO's circulation bracket (e3-free, matching the h90
+    lines above), so the ``ahmf·e3f`` outer scale multiplies it directly.
+    ``h_k``/``h_u``/``h_v``/``h_vtx`` are legoESM's e3t/e3u/e3v/e3f analogues
+    (min-rule face/vertex thickness, :func:`min_cell_to_uface`/
+    :func:`min_cell_to_vface`/:func:`min_cell_to_vertex` — the SAME
+    min-rule convention ``_bc_vertical_and_depthmean_velocity`` already uses
+    for ``h_u``/``h_v``, Adcroft-Hill-Marshall 1997 eq. 11-13). This uses ONE
+    thickness (no separate Kbb-vs-Kmm split — legoESM's leapfrog does not
+    carry two independent time levels for this diagnostic-style call), which
+    is exact when e3 is a slowly-varying free-surface field (true for DINO's
+    z-star) and is documented here as the one simplification kept.
+
+    With CONSTANT ``h_k`` (e.g. a flat-bottom column, uniform e3 in the
+    horizontal), ``h_u``/``h_v``/``h_vtx`` all collapse to that same
+    constant, ``divergence_cgrid(h·u, h·v) = h·divergence_cgrid(u, v)``, the
+    outer ``/e3t`` cancels the injected ``h``, and the curl branch's
+    ``e3f·curl`` and its ``/e3u``, ``/e3v`` division likewise cancel — so
+    this function is BIT-IDENTICAL to :func:`nemo_ldf_lap_viscosity_cgrid` on
+    uniform thickness (the synthetic-violation self-test below).  On a
+    topographic step (horizontally-varying e3) it differs, closing the
+    #1455 gate residual.
+
+    Parameters
+    ----------
+    u, v : face velocities (2-D or 3-D).
+    grid : LatLonGrid.
+    ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
+    ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
+    h_k : cell-centre layer thickness (NEMO e3t), same shape as ``u``'s
+        cell-centre analogue (2-D or 3-D matching ``u``/``v``).
+    mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
+
+    Returns
+    -------
+    visc_u, visc_v : the viscous momentum tendency (coefficient embedded).
+    """
+    is_3d = u.ndim == 3
+
+    def _bm(m):
+        if is_3d:
+            return m if m.ndim == 3 else m[..., jnp.newaxis]
+        return m
+
+    def _bc(c):
+        return c[:, None, None] if is_3d else c[:, None]
+
+    u_eff = u if u_mask is None else u * _bm(u_mask)
+    v_eff = v if v_mask is None else v * _bm(v_mask)
+
+    # Thickness at faces/vertex (e3u/e3v/e3f analogues), min-rule (same
+    # convention as h_u/h_v built for the vertical-velocity/PV stages).
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
+    h_vtx = min_cell_to_vertex(h_k, grid)
+
+    # 1. e3-weighted divergence at T-points: divergence_cgrid on the
+    #    thickness-weighted faces reproduces NEMO's e2u*e3u*u / e1v*e3v*v
+    #    flux sum exactly (SAME e1/e2 face metrics); ahmt/e3t is the outer
+    #    scale (h90:27-29).
+    div_e3 = divergence_cgrid(h_u * u_eff, h_v * v_eff, grid)
+    if mask is not None:
+        div_e3 = div_e3 * _bm(mask)
+    h_k_safe = jnp.where(h_k > 0.0, h_k, 1.0)  # dry T-cell: div_e3 already 0
+    zdiv = div_e3 * _bc(ahmt) / h_k_safe
+
+    # 2. e3-weighted vorticity at F-points: curl_vertex_cgrid is NEMO's
+    #    e3-free circulation bracket; ahmf*e3f is the outer scale (h90:22-25).
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        vmask = (vertex_mask if vertex_mask is not None
+                 else compute_vertex_mask(mask, grid=grid))
+        zeta = zeta * _bm(vmask)
+    zcur = zeta * _bc(ahmf) * h_vtx
+
+    # 3. grad(zdiv) − k×grad(zcur)/e3u,e3v (h90:32-52; curl branch alone
+    #    divides by the outer face thickness, div branch does not).
+    grad_div_u = gradient_x_cgrid(zdiv, grid)
+    grad_div_v = gradient_y_cgrid(zdiv, grid)
+    grad_curl_u = gradient_curl_to_u(zcur, grid)
+    grad_curl_v = gradient_curl_to_v(zcur, grid)
+    h_u_safe = jnp.where(h_u > 0.0, h_u, 1.0)   # dry u-face: grad_curl_u masked to 0 below
+    h_v_safe = jnp.where(h_v > 0.0, h_v, 1.0)
+
+    visc_u = grad_div_u - grad_curl_u / h_u_safe
+    visc_v = grad_div_v + grad_curl_v / h_v_safe
+
+    if u_mask is not None:
+        visc_u = visc_u * _bm(u_mask)
+    if v_mask is not None:
+        visc_v = visc_v * _bm(v_mask)
+    return visc_u, visc_v
+
+
 def flux_divergence_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,

@@ -502,7 +502,16 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # is NOT centred between its interfaces, so the midpoint biases the
         # alpha/beta interpolation and puts ~4e-4 median error into N^2.
         _gdepw_int = z_iface[:-1]
-        if jacobian is not None:
+        # #1226 bn2 live-e3w divisor (eosbn2.F90:1467, pn2 = ... / e3w(Kmm)):
+        # NEMO's e3w(Kmm) = e3w_0*(1+r3t) under key_qco.  ``jacobian`` IS
+        # (1+r3t) = (eta+H_bathy)/H_bathy ONLY on an OceanPartialCellCoordinate
+        # -- on a pure z* coordinate it is (eta+H_bathy)/H_max instead (a
+        # DIFFERENT quantity, compute_ocean_jacobian's own docstring), so
+        # stretching by it there would be a mistranscription, not a fix.
+        # Matches the identical gate in _nemo_wpoint_e3w_wmask_n2 above
+        # (:787-788) -- same physical quantity, same guard, no new config
+        # surface.
+        if jacobian is not None and isinstance(z_coord, OceanPartialCellCoordinate):
             _J = jnp.asarray(jacobian, dtype)[..., None]     # (nlat,nlon,1)
             _gdept = _gdept[None, None, :] * _J
             _gdepw_int = _gdepw_int[None, None, :] * _J
@@ -538,14 +547,22 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # here as long as n2_int is built on that SAME spacing, which it is.
     #
     # The DEPTH is a different matter: NEMO's hmlp = gdepw(nmln,Kmm) IS the live
-    # w-depth and does carry (1+r3t) = 1 + ssh/H (domzgr_substitute.h90:131).
-    # We do NOT apply it: eta is not threaded into this function (see the scope
-    # note on _apply_nemo_mld_slope_ramp), and z_coord.h_partial is the STATIC
-    # at-rest thickness (vertical.py:42) -- it is eta-independent, so deriving a
-    # stretch from it yields exactly 1.0 on every DINO column (measured) and
-    # would be a mislabel, not a correction.  The omission is bounded by
-    # max|ssh/H| = 6.3e-4 on the DINO y5 state, well below the errors being
-    # chased here; thread eta if a config with a large free surface needs it.
+    # w-depth and does carry (1+r3t), r3t=ssh/ht_0 (domqco.F90:160,
+    # domzgr_substitute.h90:131,140 under DINO's key_qco+key_vco_3d build:
+    # gdepw(i,j,k,t) = gdepw_3d(i,j,k)*(1+r3t(i,j,t)), no key_isf).  #1226
+    # queue item 5 FIX: apply it.  ``jacobian`` (threaded into this function
+    # since the live-e3w fix above) already IS that exact (1+r3t) factor on
+    # an OceanPartialCellCoordinate -- ht_0 there is H_bathy (vertical.py
+    # compute_ocean_jacobian: J=(eta+H_bathy)/H_bathy=1+eta/H_bathy=1+r3t) --
+    # so no new quantity/config surface, just consuming what already flows
+    # through.  Gated identically to the sibling live-e3w branches above
+    # (:514, :796): a plain z*-coordinate's jacobian is (eta+H_bathy)/H_max,
+    # a DIFFERENT quantity, so stretching hml by it there would be a
+    # mistranscription. CONFIRMED against NEMO's own dumped hmlp on the DINO
+    # y5 state (this function's own prior note, kept for provenance):
+    # gdepw_0[nmln-1]*(1+ssh/H) reproduces it to max err 0.0 m over 9920 wet
+    # columns -- this is exactly that substitution, now applied in the
+    # return path instead of only in a verification note.
     # Reference w-level nlb10 = first interface at/below ~10 m; contributions
     # above it are excluded (the near-surface is mixed by definition), so the
     # MLD is floored at ~10 m exactly as NEMO's nmln>=nlb10 initialisation.
@@ -608,9 +625,13 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # hmlp = gdepw(nmln,Kmm) (zdfmxl.F90:104).  z_iface[m] = gdepw_0(m+2) and
     # nmln = m_base+2, so this is gdepw_0(nmln).  Convention CERTIFIED against
     # NEMO's own dumped hmlp on the DINO y5 state: gdepw_0[nmln-1]*(1+ssh/H)
-    # reproduces it to max err 0.0 m over 9920 wet columns (the (1+ssh/H) factor
-    # is the live-depth stretch discussed above, which we do not apply here).
-    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon)
+    # reproduces it to max err 0.0 m over 9920 wet columns.
+    hml = jnp.take(z_iface, m_base)                   # (n_lat, n_lon), gdepw_0(nmln)
+    if jacobian is not None and isinstance(z_coord, OceanPartialCellCoordinate):
+        # Live-depth stretch (1+r3t) -- see the comment block above this
+        # function's N^2-integral live-e3w gate for the full derivation;
+        # same gate, same jacobian, no new quantity.
+        hml = hml * jnp.asarray(jacobian, dtype)
     return hml, m_base
 
 
@@ -659,23 +680,33 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
     mixed-layer interfaces are overwritten by the ramp.  ``rho_c`` [kg/m^3] is
     the MLD density criterion.  JIT/AD-safe (clip + where + take_along_axis).
 
-    ponytail: the MLD depth ``hml`` is built from reference thicknesses
-    (``z_coord.dz_ref``), ignoring z-star ``eta``/jacobian stretching — negligible
-    for the flat-bottom, ``eta~0`` oracle configs (GYRE/DINO) this targets; carry
-    the jacobian when a stretched/topography oracle needs it.
+    #1455 queue item 5: NEMO's ``wslp(k) = gdepw(k) / MAX(hmlp,10) * wslp_base``
+    (ldfslp.F90:284-297) uses the LIVE ``gdepw(k)`` for BOTH the numerator
+    profile depth and (via ``hmlp``) the denominator — the same live
+    ``(1+r3t)`` stretch (domzgr_substitute.h90:131,140) on both.  ``_nemo_mld``
+    now returns a LIVE-stretched ``hml`` on an ``OceanPartialCellCoordinate``
+    (see ``_nemo_mld_from_n2_integral``'s own fix), so the profile depth
+    ``z_iface`` used for the ``ramp``/``in_ml`` comparison here must carry the
+    SAME stretch or the two sides of ``z_iface <= hml`` compare a static
+    quantity against a live one — gated identically (isinstance check, no new
+    config surface).
     """
     nlev_m1 = S_x.shape[-1]
     hml, m_base = _nemo_mld(
         mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0,
         active_3d=active_3d, jacobian=jacobian)
     z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
+    z_iface_3d = z_iface[None, None, :]               # (1, 1, nlev-1), broadcastable
+    if jacobian is not None and isinstance(z_coord, OceanPartialCellCoordinate):
+        # (n_lat, n_lon, nlev-1) live-stretched profile depth.
+        z_iface_3d = z_iface_3d * jnp.asarray(jacobian, dtype=z_iface.dtype)[:, :, None]
     # wslp_base = slope one interface BELOW the ML base (NEMO nmln+1).
     m_ref = jnp.clip(m_base + 1, 0, nlev_m1 - 1)
     Sx_base = jnp.take_along_axis(S_x, m_ref[:, :, None], axis=-1)  # (n_lat,n_lon,1)
     Sy_base = jnp.take_along_axis(S_y, m_ref[:, :, None], axis=-1)
-    ramp = z_iface[None, None, :] / jnp.maximum(
+    ramp = z_iface_3d / jnp.maximum(
         hml[:, :, None], _NEMO_HMLW_FLOOR_M)          # (n_lat, n_lon, nlev-1)
-    in_ml = z_iface[None, None, :] <= hml[:, :, None]
+    in_ml = z_iface_3d <= hml[:, :, None]
     S_x = jnp.where(in_ml, ramp * Sx_base, S_x)
     S_y = jnp.where(in_ml, ramp * Sy_base, S_y)
     return S_x, S_y

@@ -21,6 +21,14 @@ def test_eos_rab_and_rn2b_dumps_are_before_level():
         assert time_level_for_dump(name) == "before", name
 
 
+def test_ttrd_ldf_trend_is_before_level():
+    """#1455 A5: NEMO's isoneutral(Redi) tracer trend reads Kbb tracer
+    gradients (traldf_iso_scheme.h90:26-30) -- before level. Pins the label
+    so a wrong "now" cannot be introduced silently."""
+    assert time_level_for_dump("ttrd_ldf") == "before"
+    assert time_level_for_dump("strd_ldf") == "before"
+
+
 def test_raw_pre_shapiro_slope_dumps_are_registered():
     """The ldf_slp internals split (formula vs smoother) needs these."""
     assert time_level_for_dump("eiv_dump_zwz_raw.bin") == "before"

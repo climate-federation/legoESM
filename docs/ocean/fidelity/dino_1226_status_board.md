@@ -117,6 +117,12 @@ NEMO continues 96.1, 104.4, 112.4, 117.6, 121.1 … 142.8 Sv by year 20
 (RUN_20Y_REBUILD). NEMO years 2-4 were written as a single 4-year mean, so
 no annual means exist for them — that is why those rows are blank.
 
+**The NEMO record ENDS at year 20 and is still climbing there** (y18 140.41,
+y19 140.74, y20 142.81 = +2.07/yr). 142.8 is a spin-up snapshot, NOT an
+equilibrium. Do not use it as a denominator for legoESM years > 20 — that
+compares different windows (Rule 7). See the RETRACTION block at the top of
+`dino_1226_state.md`. Extending the NEMO reference is the blocking measurement.
+
 **Result 1 — the fix set is climate-inert.** 0.1 Sv of a 23.4 Sv gap
 (0.4%). SST corr, SSH small-scale ratio and SST bias are identical to 3
 decimals at every year. Eighteen genuine transcription bugs moved the ACC by
