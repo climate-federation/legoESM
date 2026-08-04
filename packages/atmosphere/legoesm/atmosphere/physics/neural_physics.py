@@ -699,6 +699,7 @@ def build_column_physics(
 def make_column_physics_fn(
     neural_physics: NeuralPhysics,
     grid,
+    momentum_physics_fn=None,
 ):
     """Create a spectral PE ``physics_fn`` from a column MLP (Rasp et al. 2018).
 
@@ -715,7 +716,41 @@ def make_column_physics_fn(
     2. Flatten to columns, build surface forcing, forward (neural_column_forward)
     3. Extract dT/dt (+ rescaled dq_v/dt) and SH-analyse back to spectral
 
-    Momentum (vor, div) and surface-pressure (lnps) tendencies are zero.
+    MOMENTUM (#1464).  The column MLP has no momentum head, so on its own this
+    adapter returns ZERO vor/div tendencies — the arm has **no surface
+    turbulent drag**.
+
+    STATED PRECISELY, because the first version of this note overclaimed and
+    adversarial review refuted it: this is NOT "no momentum sink of any kind".
+    The spectral PE RHS hyperdiffuses vor and div independently of
+    ``physics_fn``, and the WB campaign additionally applies a per-step
+    high-wavenumber spectral filter, so both arms carry substantial NUMERICAL
+    momentum damping.  What the learned arm lacks is the PHYSICAL surface
+    stress that the classical arm gets from its inherited
+    ``TurbulenceConfig.scheme = "smagorinsky"``.
+
+    That asymmetry is real and worth removing, but it is a HYPOTHESIS for the
+    T106 result, not a demonstration: the degradation there ranked as a missing
+    drag would predict (``wind_speed_10m`` 3.83x, ``u10`` 3.02x at 240 h,
+    monotone in height, ``z500`` the only field that improved), and the
+    decisive test is a controlled re-score, not this docstring.
+
+    Pass ``momentum_physics_fn`` — any ``physics_fn(state, grid, sigma_coord)``
+    returning a tendency state — to supply the vor/div tendencies the network
+    cannot.  ``None`` keeps the historical zero behaviour bit-identically.
+
+    ``lnps`` is deliberately NOT taken from that source.  Surface stress has no
+    surface-pressure tendency; the PE already forms ``dlnps/dt`` from
+    continuity and merely ADDS any physics contribution, so letting an
+    arbitrary momentum source inject a mean ``dlnps/dt`` would break dry-mass
+    conservation with mass anchoring off (codex).  T and the tracers likewise
+    always come from the network.
+
+    NOT A CLOSED BUDGET, deliberately: taking a turbulence scheme's stress
+    while dropping its heat flux is a hybrid, not "the same physics with a
+    different parameterisation".  The alternative — importing the scheme's
+    ``dT/dt`` too — would put a second thermodynamic parameterisation next to
+    the network, which is the confound this exists to remove.
     """
     # Deferred imports (spectral dycore + Gaussian grid) to avoid a physics <->
     # dynamics package import cycle at module load; run once at adapter build.
@@ -793,6 +828,21 @@ def make_column_physics_fn(
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
+        # Momentum + lnps: from the supplied physics when given, else zero
+        # (#1464 -- see the factory docstring for why zero is not neutral).
+        # Python-level branch on a build-time argument, so only one side is
+        # ever traced (the CLAUDE.md feature-gating exception).
+        if momentum_physics_fn is None:
+            vor_t, div_t = zero_3d, zero_3d
+        else:
+            _mom = momentum_physics_fn(state, grid_, sigma_coord)
+            vor_t = _mom.vor_hat.data
+            div_t = _mom.div_hat.data
+        # lnps stays ZERO regardless of the source — see the factory docstring
+        # (a momentum source has no surface-pressure tendency, and injecting a
+        # mean dlnps/dt here would break dry-mass conservation).
+        lnps_t = zero_2d
+
         tracers_out = zero_like_tracers(state.tracers)
         if tracers_out is not None and "q_v" in tracers_out:
             # dq_v/dt from the moisture head (outputs nlev:2*nlev), rescaled to
@@ -809,10 +859,11 @@ def make_column_physics_fn(
                 tracers_out["q_v"] = dq_v_dt.astype(template.dtype)
 
         return SpectralHydrostaticState(
-            vor_hat=state.vor_hat.replace(data=zero_3d),
-            div_hat=state.div_hat.replace(data=zero_3d),
+            vor_hat=state.vor_hat.replace(data=vor_t),
+            div_hat=state.div_hat.replace(data=div_t),
             T_hat=state.T_hat.replace(data=dT_hat),
-            lnps_hat=state.lnps_hat.replace(data=zero_2d),
+            lnps_hat=state.lnps_hat.replace(data=lnps_t),
+            # phis is orography: a physics tendency on it is always zero.
             phis_hat=state.phis_hat.replace(data=zero_2d),
             tracers=tracers_out,
         )
