@@ -342,7 +342,9 @@ class AIMIPClassicalParams(eqx.Module):
         return base._replace(
             tau_M_u_relax=d["tiedtke_tau_M_u_relax"],
             tau_MC_proxy=d["tiedtke_tau_MC_proxy"],
-            cape_threshold=d["tiedtke_cape_threshold"],
+            # cape_threshold is NOT overridden: #1417 dropped it from
+            # _TIEDTKE_TRAINABLE (AD-unreachable trigger), so it is absent
+            # from as_dict() and TiedtkeConfig's published default stands.
             downdraft_alpha=d["tiedtke_downdraft_alpha"],
             downdraft_RH_min=d["tiedtke_downdraft_RH_min"],
             epsilon_deep=d["tiedtke_epsilon_deep"],
@@ -452,7 +454,9 @@ class AIMIPClassicalParams(eqx.Module):
         return base._replace(
             tau_c=d["sbm_tau_c"],
             rh_ref=d["sbm_RH_ref"],
-            cape_threshold=d["sbm_CAPE_threshold"],
+            # cape_threshold is NOT overridden: #1417 dropped it from
+            # _SBM_TRAINABLE (AD-unreachable trigger), so it is absent from
+            # as_dict() and SBMConfig's published default stands.
         )
 
     def to_gray_radiation_config(self):

@@ -44,6 +44,12 @@ import jax
 import numpy as np
 
 __all__ = [
+    "addressable_shard_put",
+    "leaf_digest48",
+    "assert_pytree_bytes_equal",
+    "band_fingerprint",
+    "band_fingerprints_agree",
+    "checked_shard_put",
     "content_hash48",
     "name_digest48",
     "schema_fingerprint",
@@ -596,3 +602,167 @@ def broadcast_checked(arr, name: str, *, context: str) -> np.ndarray:
             f"config/grid inconsistency, not autotune noise; refusing to "
             f"broadcast process 0 over it.")
     return np.asarray(multihost_utils.broadcast_one_to_all(host))
+
+
+# --- assert-free sharded puts + per-band gates (2026-08-03, ocean walls) ----
+# Three stacked multicontroller walls were found on the ocean lane (codex
+# r14-r19; PR #1457): (1) broadcast_one_to_all of a band stack lowers to an
+# [n_processes, stack] psum program (nd x 849 MB at LL2304 L20 — 81.5 GB at
+# 96 procs); (2) jax.device_put of a NUMPY array onto an all-process
+# sharding internally runs multihost_utils.assert_equal on the FULL array
+# ([n_proc, field] landing on ONE device: fits under an 80 GB A100 up to
+# ~64 procs, dies at 96 — jax _src/dispatch.py::_device_put_sharding_impl);
+# (3) a concrete sharded-global array captured by an OUTER trace (jit-of-
+# jit) becomes an MLIR constant whose value cannot be fetched for
+# non-addressable arrays. The helpers below remove (1) and (2) — (3) is the
+# callers' aux-threading contract, see make_sharded_ocean_step.
+
+def band_fingerprint(host, n_bands):
+    """Per-band fingerprint of a band-STACKED field (leading axis n_bands).
+
+    PREREQUISITE: ``n_bands`` (and each field's dtype class / shape) must
+    already be schema-gated across processes (:func:`assert_schema_agrees`)
+    — the payload widths depend on it, and mismatched widths would hang the
+    allgather rather than raise.
+
+    Exact dtypes (int/bool/uint): one positional 48-bit byte digest per
+    band. Floats: per-band ``[sum, sum_of_squares, absmax]`` of finite
+    entries plus per-band non-finite counts folded into ``struct``.
+    Per-band (not whole-array) because each process's OWN bytes become the
+    live inputs for the bands it owns under the assert-free put: a
+    band-local drift must not hide in a whole-array sum (codex r14).
+    DOCUMENTED RESIDUALS: a within-band float change preserving all three
+    moments to rtol, and non-finite entries changing position/kind at a
+    fixed per-band count, pass the float gate.
+    """
+    host = np.asarray(host)
+    if host.ndim == 0 or host.shape[0] != n_bands:
+        raise ValueError(
+            f"band_fingerprint: leading axis "
+            f"{host.shape[0] if host.ndim else '<0-d>'} != n_bands "
+            f"{n_bands}")
+    is_exact = host.dtype.kind in "biu"
+    struct = [float(host.ndim), *map(float, host.shape),
+              float(np.dtype(host.dtype).num)]
+    if is_exact:
+        vals = np.array([content_hash48(host[b]) for b in range(n_bands)],
+                        dtype=np.float64)
+    else:
+        per_band = []
+        for b in range(n_bands):
+            flat = host[b].ravel()
+            finite = flat[np.isfinite(flat)]
+            f64 = finite.astype(np.float64)
+            struct.append(float(flat.size - finite.size))
+            per_band.extend([
+                float(f64.sum()) if f64.size else 0.0,
+                float((f64 * f64).sum()) if f64.size else 0.0,
+                float(np.abs(f64).max()) if f64.size else 0.0,
+            ])
+        vals = np.array(per_band, dtype=np.float64)
+    return np.array(struct, dtype=np.float64), vals, is_exact
+
+
+def band_fingerprints_agree(g_struct, g_vals, is_exact, rtol=None):
+    """True iff every process's :func:`band_fingerprint` matches process 0's."""
+    if rtol is None:
+        rtol = _FLOAT_RTOL
+    struct_ok = bool(np.all(g_struct == g_struct[0]))
+    if is_exact:
+        vals_ok = bool(np.all(g_vals == g_vals[0]))
+    else:
+        vals_ok = bool(np.allclose(g_vals, g_vals[0], rtol=rtol, atol=0.0))
+    return struct_ok and vals_ok
+
+
+def checked_shard_put(arr, name, sharding, *, context, n_bands):
+    """Gate a band-stacked field per band, then put WITHOUT broadcast or
+    jax's whole-array device_put assert (walls 1+2 above).
+
+    Single-process: plain ``jax.device_put`` — byte-unchanged, no host
+    round trip. Multi-process: per-band fingerprint gate (symmetric raise
+    on real divergence), then ``jax.make_array_from_callback`` hands each
+    process exactly its addressable slabs. Cross-process byte-identity of
+    NON-owned bands is not required — owned bands are the only bytes that
+    reach any device, and their drift is bounded by the gate.
+    """
+    if jax.process_count() <= 1:
+        return jax.device_put(arr, sharding)
+    from jax.experimental import multihost_utils
+
+    host = np.asarray(arr)
+    struct, vals, is_exact = band_fingerprint(host, n_bands)
+    g_struct = multihost_utils.process_allgather(struct)
+    g_vals = multihost_utils.process_allgather(vals)
+    if not band_fingerprints_agree(g_struct, g_vals, is_exact):
+        raise RuntimeError(
+            f"{context}: band-stacked field {name!r} DIVERGES across "
+            f"processes (exact_dtype={is_exact}, "
+            f"gathered={g_vals.tolist()}) — a real config/grid "
+            f"inconsistency, not autotune noise; refusing to shard it.")
+    return jax.make_array_from_callback(
+        host.shape, sharding, lambda idx: host[idx])
+
+
+def leaf_digest48(x) -> float:
+    # Dtype-AWARE 48-bit digest of one numeric leaf. content_hash48 alone
+    # hashes raw bytes, so python 0 and 0.0 (both eight zero bytes on a
+    # 64-bit host) collide although jnp.asarray builds distinct
+    # integer/float inputs from them (codex r21). The dtype code and shape
+    # are folded in so a cross-rank TYPE divergence fails the gate too.
+    import hashlib
+
+    a = np.asarray(x)
+    meta = f"{np.dtype(a.dtype).num}:{a.shape}".encode()
+    h = hashlib.blake2b(meta + a.tobytes(), digest_size=6)
+    return float(int.from_bytes(h.digest(), "big"))
+
+
+def assert_pytree_bytes_equal(tree, what):
+    """Cheap multi-process replacement for the per-leaf assert_equal that
+    :func:`checked_shard_put`-style puts bypass on NON-band inputs (state /
+    forcing pytrees): one 48-bit digest per array leaf, one tiny allgather,
+    symmetric raise on mismatch. No-op single-process.
+    """
+    if jax.process_count() <= 1:
+        return
+    from jax.experimental import multihost_utils
+
+    # Numeric python scalars included (codex r20 item 1): the scatter
+    # paths jnp.asarray + put them, so a rank-divergent scalar must not
+    # bypass the gate. Non-numeric leaves (None, strings) stay excluded.
+    leaves = [x for x in jax.tree_util.tree_leaves(tree)
+              if hasattr(x, "ndim") or isinstance(x, (int, float, complex))]
+    # STRUCTURE pre-gate (codex r23): agree the leaf COUNT + tree schema
+    # in one fixed-width collective BEFORE the per-leaf gather — two
+    # processes with different pytrees would otherwise enter a
+    # mismatched-width allgather and hang instead of raising.
+    pre = np.array([float(len(leaves)), tree_schema_digest48(tree)],
+                   dtype=np.float64)
+    g_pre = multihost_utils.process_allgather(pre)
+    if not bool(np.all(g_pre == g_pre[0])):
+        raise RuntimeError(
+            f"{what}: pytree STRUCTURE differs across processes "
+            f"(leaf-count/schema digests {g_pre.tolist()}) — fix the "
+            f"per-process build before sharding.")
+    vals = np.array([leaf_digest48(x) for x in leaves], dtype=np.float64)
+    g = multihost_utils.process_allgather(vals)
+    if not bool(np.all(g == g[0])):
+        bad = [i for i in range(len(leaves))
+               if not bool(np.all(g[:, i] == g[0, i]))]
+        raise RuntimeError(
+            f"{what}: array leaves {bad} differ across processes (48-bit "
+            f"byte digests disagree) — the per-process inputs are NOT "
+            f"identical, which jax's device_put assert would have refused. "
+            f"Fix the per-process build before sharding.")
+
+
+def addressable_shard_put(arr, sharding):
+    """Ungated assert-free put (walls 1+2) for inputs whose cross-process
+    consistency the CALLER has already gated (state/forcing pytrees via
+    :func:`assert_pytree_bytes_equal`). Single-process: plain device_put."""
+    if jax.process_count() <= 1:
+        return jax.device_put(arr, sharding)
+    host = np.asarray(arr)
+    return jax.make_array_from_callback(
+        host.shape, sharding, lambda idx: host[idx])

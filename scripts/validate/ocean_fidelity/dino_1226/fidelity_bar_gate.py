@@ -228,6 +228,48 @@ PER_ELEMENT: dict[str, float] = {
     # BAR_PER_ELEM_EPS=1e-9, so DEBT on per-element even though the aggregate
     # corr/ratio are near-roundoff (same pattern as bn2's earlier lesson: a
     # clean mean can hide a real per-element residual).
+    # RETRACTION (#1455 queue item, re-localisation this task): the
+    # own-seafloor straddling-bottom mechanism cited above (zad_bottom_face_
+    # mask='nemo_faithful', dino.py:1122's comment "explained ~100% of the
+    # active-only ZAD row error at levels 29-34") does NOT explain this
+    # median/p99/max tuple. Reproduced the tuple exactly (zad_gate_corr_
+    # ratio_1226.py: corr/ratio/n bit-for-bit; SELF-CHECK 1 in zad_level29_
+    # onset_walk.py PASSED), then measured directly (one-off scratch probe,
+    # not committed) where the top-0.1%-by-|err| cells actually sit: k-levels
+    # 6-19 (mid-water-column), and only 0.30% of them are at their OWN
+    # column's bottom_level -- i.e. NOT the seafloor-straddling population at
+    # all. zad_level29_onset_walk.py's own STEP 5 (rerun this task) computes
+    # this precisely: the own-seafloor-u-face mechanism owns only 0.13% of
+    # the row's total sum-of-squared-error (9.95e-24 of 7.57e-21) -- real but
+    # negligible, not "~100%". CONDITIONING CHECKED AND REJECTED: the
+    # mid-column tail is NOT near-zero-relative-to-own-level (only 2.1% of
+    # top-0.1% cells have |nemo|<10% of their own level's RMS(nemo), far
+    # below the near-zero-tail signature seen in ldf_slp/aeiu). Per-level
+    # RMS(err)/RMS(nemo) is instead roughly FLAT (~1-3e-4) across k=6-19 while
+    # RMS(nemo) itself falls ~6x with depth -- a genuine small relative
+    # residual at every mid-column level, NOT roundoff (an absolute floor of
+    # ~2e-13 vs local signal ~1e-9 is ~1e-4 relative, ~1e9x fp64 eps for a
+    # 1e-9-scale quantity). INHERITED-FROM-ww CONFIRMED BY DIRECT
+    # SUBSTITUTION (#1455 follow-up, same session, scratch probe not
+    # committed -- ldf_slp r1_hmlw-substitution standard): substituting
+    # NEMO's own ww (wzv_dump_ww_call1.bin -- the ww dyn_zad consumes,
+    # stpmlf.F90:244 wzv call 1 -> :265 dyn_adv, BEFORE the :315 call 2;
+    # sshwzv.F90:289 writer) for lego's w in the IDENTICAL tendency call
+    # (direct-call self-check vs production diag: max|diff|=0.0 exactly)
+    # collapses the per-element tuple median 6.06e-8 -> 5.11e-10 (119x, BELOW
+    # the 1e-9 bar), p99 3.28e-5 -> 1.84e-6 (18x), max 3.51e-3 -> 7.20e-4,
+    # aggregate err_norm 2.854e-5 -> 3.348e-6, 1-corr 4.06e-10 -> 5e-12.
+    # LOCATION PREDICTED AND MATCHED: per-level rel RMS of (lego w - nemo ww)
+    # peaks at ifaces 8-14 (~8.4-8.9e-5), exactly the k=7-11 band owning the
+    # production tail's top-0.1% cells; post-substitution the hot band MOVES
+    # to k=2-5 -- a SECOND, ~18x smaller contributor (p99 1.84e-6, not
+    # chased, candidates: upstream u/h_u/e3u chain). So the ZAD row's
+    # per-element DEBT is ~95% (by median) inherited from the upstream
+    # w/ssh/hdiv chain (wzv), NOT a ZAD-local defect -- consistent with the
+    # verbatim transcription (dynzad.F90:86-119 vs vertical.py:1171-1316, see
+    # the row's tuple note). Per-element figure below UNCHANGED (it is the
+    # production-lego measurement; the substitution is causal documentation);
+    # DEBT stands until the upstream w chain closes.
     "dyn_adv ZAD": 3.278e-05,
     # T and S pointwise |rel| median 0.0 (max <= 2.2e-16), one-signed.
     # CAVEAT the probe itself raised: the ssh leg is TAUTOLOGICAL -- one unknown
@@ -235,6 +277,13 @@ PER_ELEMENT: dict[str, float] = {
     # the filter, not an independent check of the ssh value.  T/S do not share
     # that weakness.
     "ATF filter T/S/ssh": 0.0,
+
+    # wzv (vertical velocity) MEASURED 2026-08-03 (#1455 queue item,
+    # wzv_row_measure.py): err_norm=|lego_w-nemo_ww_call1|/RMS(nemo), median
+    # over the active-only 3-D tmask population (n=342134). See the
+    # MEASUREMENTS["wzv (vertical velocity)"] note for the full report
+    # (call1 vs call2, per-level profile, transcription-vs-conditioning check).
+    "wzv (vertical velocity)": 1.980e-06,
 
     # ldf_slp RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py, the
     # first probe for these rows with BOTH mechanical preconditions wired
@@ -301,8 +350,19 @@ PER_ELEMENT: dict[str, float] = {
     # T-point ladder for both AND passed zdepu to the v-slope (averaging over
     # the wrong axis entirely).  Real but second-order, exactly as predicted:
     # uslp 3.624e-10 -> 2.200e-10, vslp 1.609e-06 -> 1.541e-06 (4.2%).
-    "ldf_slp wslpi": 3.427e-10,
-    "ldf_slp wslpj": 2.770e-10,
+    # 2026-08-03 (#1455 queue item 5, hmlp fix): wslpi/wslpj re-measured
+    # AFTER the hmlp live-(1+r3t)-stretch fix (gm_redi_latlon_cgrid.py
+    # _nemo_mld_from_n2_integral) -- see the "zdf_mxl (nmln)" row's CLOSED
+    # note and the "ldf_slp wslpi/wslpj" notes below for the full
+    # before/after chain; median dropped 3.427e-10->1.165e-11 (wslpi) and
+    # 2.770e-10->1.090e-11 (wslpj), a genuine improvement (never a
+    # relaxation). uslp/vslp UNCHANGED (2.200e-10/3.265e-10): they consume
+    # zhmlpt/r1_hmlu/r1_hmlv, a SEPARATE already-live-stretched T-point
+    # depth (gm_redi_latlon_cgrid.py:1045-1051), not hml/r1_hmlw -- never
+    # part of this DEBT, confirmed by a stash-and-rerun A/B (fresh
+    # instrument run, not relayed).
+    "ldf_slp wslpi": 1.165e-11,
+    "ldf_slp wslpj": 1.090e-11,
     "ldf_slp uslp": 2.200e-10,
     "ldf_slp vslp": 3.265e-10,
     # --- 2026-07-30 coverage_rows_measure.py -- 4 rows measured directly
@@ -324,8 +384,77 @@ PER_ELEMENT: dict[str, float] = {
     # median one-signed (Q_sr >= 0); recorded as the WORSE of {k=0-only
     # 1.324e-05, all-35-levels 5.223e-07} per this dict's convention.
     # OLD (static-ladder, probe-blind) value 6.653e-05 preserved for history.
+    #
+    # #1455 queue item (2026-08-03) -- nk0/nkV band-split HYPOTHESIS
+    # REFUTED, no fix warranted (THE RULE: exact-match check failed to
+    # confirm, so nothing was changed). Task brief hypothesized that
+    # traqsr.F90's per-band extinction-level truncation (qsr_ext_lev,
+    # traqsr.F90:1145-1211: nk0 = the level below which the IR band alone
+    # is <1e-15 relative to Qmax=1000 W/m2, a GLOBAL SCALAR via mpp_max --
+    # not per-column) vs legoESM's uniform full-column exponential
+    # (shortwave_penetration_tendency, no nk0-style truncation at all)
+    # was the row's transcription gap. Read qsr_2BD (traqsr.F90:627-712,
+    # DINO's active scheme: namelist_cfg ln_qsr_2bd=.true., confirmed nqsr
+    # dispatch traqsr.F90:1276) end-to-end: nk0 (~12 m for rn_si0=0.35m)
+    # and nkV (~840 m for rn_si1=23m, qsr_ext_lev applied to the VISIBLE
+    # band) are BOTH pure loop-truncation optimizations, not physics
+    # branches -- verified numerically: at nk0's depth the IR band's own
+    # fractional contribution to I(z) is ~7.5e-16 (computed from
+    # R=0.58/zeta1=0.35 at z=12m), and at nkV's depth the total I(z) is
+    # ~5.8e-17 (R/zeta1/zeta2 as above at z=840m) -- both already at fp64
+    # underflow relative to 1.0, so a uniform-exponential formula that
+    # keeps evaluating past those depths converges to the SAME answer
+    # NEMO gets by stopping the band's loop early. wmask(jk+1) (used at
+    # every band-close in qsr_2BD) matches legoESM's own bottom no-flux
+    # convention (frac_absorbed.at[...,-1].add(I_half[...,-1]),
+    # shortwave_penetration.py:572) exactly, and cfg.jerlov_water_type="I"
+    # already matches DINO's rn_abs=0.58/rn_si0=0.35/rn_si1=23.0 verbatim
+    # (namelist_ref:429-436) -- so there is no parameter OR band-structure
+    # transcription gap to port.
+    #
+    # DIRECT MEASUREMENT (coverage_rows_measure.py, fp64, e3t=both, RUN_GDB
+    # kt=57601, reproduces the recorded tuple exactly: corr 1.00000000,
+    # |x|ratio=1.00000625, k=0 pointwise|rel| median=1.324e-05): per-LEVEL
+    # relative error is FLAT at ~1.395e-05 from k=0 through k=21 (every
+    # dumped nonzero level), decaying nowhere at nk0's or nkV's transition
+    # depths -- a uniform multiplicative bias, not a level-dependent
+    # structural difference (which is what a band-split transcription bug
+    # would produce). The residual is instead LATITUDE-structured: k=0
+    # ratio is ~1.0 near the equator (row 1-75) and diverges monotonically
+    # poleward, reaching 1.0037 at row 189 (lat=66.5 deg, the domain's
+    # northernmost wet row). This tracks the polar-night boundary of
+    # dino_Q_sr_seasonal's own max(Q0*cos(arg), 0) clip (dino.py:1773-1788)
+    # -- NEMO's own k=0 tendency magnitude at row 189 is ~0.0048x its
+    # mid-latitude value (2.79e-6 at row 1 vs 1.95e-8 at row 189, both
+    # W/m2-equivalent K/s), i.e. a near-zero surface forcing signal whose
+    # RELATIVE error is trivially amplified by any small forcing
+    # phase/argument difference near the clip -- the same near-zero-
+    # crossing conditioning class as the ldf_slp regime-1/regime-2 rows
+    # above, not a vertical-penetration-scheme defect.
+    #
+    # CONCLUSION: the nk0/wmask split is CONFIRMED faithful (band-close
+    # truncation is a no-op at fp64 on this grid); the row's residual is a
+    # SEPARATE, already-known-class conditioning artifact in the surface
+    # Q_sr forcing near the polar-night boundary, not a traqsr.F90
+    # transcription gap. Per THE RULE (exact-match failure -> stop, no
+    # invented fix): NO production code changed. Row DEBT unchanged (median
+    # pointwise|rel| 1.324e-05 > BAR_RATIO_EPS); gate re-run confirms
+    # `AT BAR 15 | DEBT 32 | UNMEASURED 5 | WAIVED 1 | total 53` unchanged
+    # (a reconciliation, not a fix). physics-validator adversarial review
+    # not triggered (no production edit -- this paragraph is comment-only).
     "tra_qsr (shortwave penetration)": 1.324e-05,  # OLD (probe blind to live ladder): 6.653e-05
     # sign-changing plain-Asselin term; conditioning-robust err_norm used.
+    # RECONCILED 2026-08-03 (#1455 queue item, final easy-queue row): the
+    # zu_frc wind-sign fix (218939441, bridge_before_state_topo tau_x_prev/
+    # tau_y_prev negation) does NOT touch this row -- traced the full path:
+    # measure_ssh_atf (coverage_rows_measure.py:542-598) never calls
+    # bridge_before_state_topo and never reads tau_x/tau_y; it reads NEMO's
+    # raw ssh dumps (atf_dump_ssh_before/after.bin) + read_nemo_restart_
+    # before's sshb + the OTHER row's own sshnxt_dump_ssh_after.bin, and
+    # applies legoESM's _asselin formula by hand. Rerun at HEAD 218939441
+    # (fp64, LEGOESM_NEMO_E3T=both) reproduces corr=1.00000000/
+    # |x|ratio=0.99999995/err_norm median=7.076e-07 EXACTLY (bit-identical
+    # to 4 sig figs) -- value UNCHANGED, confirmed by direct re-measurement.
     "ssh_atf": 7.076e-07,
     # RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309,
     # measure_tra_sbc re-run UNMODIFIED -- this row's probe already read
@@ -447,19 +576,72 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "one consumer that HAD the fix (which took it 8.59e-5 -> the "
                                                               "6.96e-6 recorded here) -- that cross-validation is what makes "
                                                               "this a real cause and not a coincidence of magnitude. Three "
-                                                              "other consumers now fixed; NOT re-measured end-to-end."),
-    "zdf_mxl (nmln)":                (1.0,        1.0,        "CLOSED 2026-07-28: 0/9920 columns differ, histogram {0: 9920} "
+                                                              "other consumers now fixed; NOT re-measured end-to-end. "
+                                                              "RE-VERIFIED 2026-08-02 (parked sweep item: 'live-e3w divisor "
+                                                              "in bn2', eosbn2.F90:1467 pn2=.../e3w(Kmm)*wmask). "
+                                                              "COVERAGE SEARCH (Rule 0/pre-impl grep): every call site of "
+                                                              "compute_buoyancy_frequency_nemo_bn2 (eos.py, gm_redi_latlon_"
+                                                              "cgrid.py x3, k_profiles.py x2, enhanced_diffusion.py, "
+                                                              "_shared.py TKE passthrough) already threads LIVE gdept/gdepw "
+                                                              "via nemo_bn2_live_ladders or an equivalent Jacobian-stretch -- "
+                                                              "ALL live except one inconsistency found and fixed this task: "
+                                                              "_nemo_mld_from_n2_integral (:505, the gm_redi_mld_criterion="
+                                                              "'n2_integral' MLD path DINO's kamm card selects) stretched by "
+                                                              "``jacobian`` whenever non-None, with NO isinstance(OceanPartial"
+                                                              "CellCoordinate) gate -- unlike its sibling "
+                                                              "_nemo_wpoint_e3w_wmask_n2 (:787-788), which already has that "
+                                                              "gate because a plain z*-coordinate's jacobian is (eta+H_bathy)/"
+                                                              "H_max, NOT (1+r3t). CURRENTLY INERT on DINO (kamm always builds "
+                                                              "OceanPartialCellCoordinate, so the two forms coincide there) "
+                                                              "but a landmine for any future z*-only caller; fixed to match "
+                                                              "the sibling gate exactly (no new config surface), with a "
+                                                              "synthetic-violation unit test proving BOTH directions (test_"
+                                                              "n2_integral_live_e3w_gated_on_partial_cell_coordinate, "
+                                                              "tests/ocean/unit/test_nemo_mld_criterion.py). RE-MEASURED at "
+                                                              "HEAD post-fix, fp64 explicit, LEGOESM_NEMO_E3T=both, BEFORE-"
+                                                              "level tke_dump_rn2b (registry-selected): GLOBAL n_wet=332214, "
+                                                              "corr 1.00000000, mean-ratio 1.000000, err_norm median "
+                                                              "1.413e-17 / p99 2.940e-15 / max 9.046e-15 -- bit-for-bit "
+                                                              "reproduces the CLOSED note above, confirming the fix is a "
+                                                              "no-op on the active card (as predicted: it only touches the "
+                                                              "z*-only branch DINO never takes). DEEP SOUTHERN BOX (T-rows "
+                                                              "14-22, k>=27, n_wet=2941): corr 1.0000000000, ratio "
+                                                              "0.9999999999999998, err_norm median 4.444e-16 / p99 3.555e-15 "
+                                                              "/ max 7.111e-15 -- also at roundoff, both AT BAR. CONFIRMED, "
+                                                              "not merely PLAUSIBLE (fresh instrument run, not relayed)."),
+    "zdf_mxl (nmln)":                (1.0,        1.0,        "CLOSED 2026-08-03 (#1455 queue item 5): hmlp DEBT (the DEPTH "
+                                                              "half) CLOSED. Root cause: hml omitted NEMO's live (1+r3t) stretch "
+                                                              "on gdepw (zdfmxl.F90:104 hmlp=gdepw(nmln,Kmm); domzgr_substitute."
+                                                              "h90:131,140 gdepw(i,j,k,t)=gdepw_3d(i,j,k)*(1+r3t(i,j,t)) under "
+                                                              "DINO's key_qco+key_vco_3d cpp build, no key_isf; domqco.F90:160 "
+                                                              "r3t=ssh*r1_ht_0). FIX (gm_redi_latlon_cgrid.py "
+                                                              "_nemo_mld_from_n2_integral): multiply hml by jacobian, gated "
+                                                              "isinstance(OceanPartialCellCoordinate) identically to the "
+                                                              "sibling live-e3w gate -- jacobian on that coordinate IS exactly "
+                                                              "(1+r3t) (vertical.py compute_ocean_jacobian: J=(eta+H_bathy)/"
+                                                              "H_bathy=1+eta/H_bathy, ht_0==H_bathy at rest), already threaded "
+                                                              "into this function for the N^2 divisor, so no new quantity or "
+                                                              "config surface. MEASURED (zdf_mxl_nmln_compare.py, fp64, "
+                                                              "LEGOESM_NEMO_E3T=both, fresh instrument run): hml vs NEMO's "
+                                                              "dumped hmlp corr=1.000000 max|diff| 1.2943 m -> 0.0000 m over "
+                                                              "all 9920 wet columns (roundoff). Synthetic-violation test: "
+                                                              "test_n2_integral_hml_live_depth_stretch_on_partial_cell_"
+                                                              "coordinate (tests/ocean/unit/test_nemo_mld_criterion.py) -- "
+                                                              "nonzero jacobian scales hml by exactly that jacobian on "
+                                                              "OceanPartialCellCoordinate; jacobian=None and a plain "
+                                                              "OceanZStarCoordinate are BIT-IDENTICAL to pre-fix. Downstream: "
+                                                              "collapses the 'ldf_slp wslpi/wslpj' rows' inherited ML-tail "
+                                                              "DEBT to AT BAR (see those rows) -- uslp/vslp unaffected (separate "
+                                                              "zhmlpt/r1_hmlu/r1_hmlv path). PRIOR (2026-07-28) note, preserved: "
+                                                              "0/9920 columns differ, histogram {0: 9920} "
                                                               "(zdf_mxl_nmln_compare.py at fp64 + BEFORE-level T/S). Was "
                                                               "'12/9920 cols differ; REOPENED'. TWO causes, neither in zdf_mxl: "
                                                               "(a) the probe fed NOW T/S while zdfmxl.F90:98 integrates rn2b "
                                                               "(BEFORE) -- a HARNESS bug; (b) the f32 depth ladder. The selection "
                                                               "logic was proven bit-correct independently by substituting NEMO's "
                                                               "own rn2b into the real code path (10/9920 -> 0/9920), which is why "
-                                                              "the blame moved upstream to bn2 rather than to this routine. "
-                                                              "CAVEAT: nmln (the LEVEL) is exact; hmlp (the DEPTH) still shows "
-                                                              "max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch "
-                                                              "on gdepw -- documented in _nemo_mld_from_n2_integral, separate DEBT."),
-    "ldf_slp wslpi":                 (1.000000, 0.999962,   "SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999932. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999963/1.001200. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999876/1.002818. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962701/1.000524131. TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
+                                                              "the blame moved upstream to bn2 rather than to this routine."),
+    "ldf_slp wslpi":                 (1.000000, 1.000000,   "CLOSED 2026-08-03 (#1455 queue item 5): RE-MEASURED after the hmlp live-(1+r3t)-stretch fix (gm_redi_latlon_cgrid.py _nemo_mld_from_n2_integral, applying the SAME jacobian already threaded for the live-e3w N^2 divisor to the DEPTH readout hml -- see the zdf_mxl (nmln) row). Fresh instrument run (ldf_slp_per_element.py, fp64/CPU, e3t=both, RUN_GDB restart+dumps), stash-and-rerun A/B confirms causation (pre-fix reproduces the exact 0.999962/3.427e-10 tuple below bit-for-bit; post-fix: corr=1.000000, |x|ratio=1.000000, per-element err_norm median=1.165e-11 (29.4x), p99=5.151e-07 (712x), max=4.210e-05 (65x) -- ALL closing to at/near roundoff, matching the ceiling-proof below's own prediction (ratio 1.000 p99/max) almost exactly. AT BAR under classify() (corr>=BAR_CORR, |ratio-1|<=BAR_RATIO_EPS, per_elem<=BAR_PER_ELEM_EPS). uslp/vslp UNCHANGED by this fix (they consume zhmlpt/r1_hmlu/r1_hmlv, a separate T-point depth already live-stretched independently of hml -- confirmed by the same A/B). PRIOR (2026-08-02) CEILING-PROOF, preserved for provenance: CEILING-PROOF (#1455 queue item 3, this task): reproduced the recorded tuple EXACTLY (ldf_slp_per_element.py, fp64/CPU, e3t=both, RUN_GDB restart+dumps: corr=1.000000, |x|ratio=0.999962 bit-for-bit; per-element err_norm median=3.427e-10, p99=3.666e-04, max=2.722e-03). All 3 stopping-rule conditions checked QUANTITATIVELY (not just asserted): (a) ROUNDOFF -- re-confirmed prd err_norm=1.804e-11, zbw=9.369e-16, both <=1e-9 bar (unchanged from the 2026-07-30 re-verification below). (b) TRANSCRIPTION -- re-read ldfslp.F90 at HEAD: zbj=MIN(zbw,-100|zaj|,-7e3/e3w|zaj|) (:316-317), zww=(zfk*zaj/(zbj-zeps)+(1-zfk)*zck*zwslpj_hml)*wmask (:328), zwslpj_hml recurrence set at jk=nmln+1 (:331-332) via the BOTTOM-TO-TOP loop (:209); legoESM's swj_int=zaj/(zbj-zeps) (gm_redi_latlon_cgrid.py:1134) and the kanc=nmln gather (0-based, matches Fortran jk=nmln+1 exactly per the module's own documented convention, :874/:1135-1137) are verbatim -- CONFIRMED against NEMO's own dumped nmln (dump_nmln.bin): 9839/9920 wet columns land at kanc=nmln exactly as the convention requires, 81/9920 shallow-MLD columns at kanc=nmln-1, BOTH conventions produce ZERO ML-branch error in their respective column sets -- the anchor INDEX is ruled out as an error source. (c) MECHANISM, QUANTITATIVE, TWO REGIMES (new this task -- prior notes described the amplification qualitatively but never split or predicted it): REGIME 1 (outside ML, zfk=1, 71.7% of wet w-cells): the EXACT closed-form zai/(zbi-zeps) (legoESM's own zai/zbi, since NEMO does not dump zai/zbi independently -- this leg reuses the SAME code block/formula already verified line-for-line against wslpj's dumped zaj/zbj sibling) is trivially self-consistent by construction outside ML; the REGIME-2 test below is the independent, falsifiable check for this row.  REGIME 2 (inside ML, zfk<1, 28.3% of cells): 100% of the GLOBAL p99-tail (wslpj) / 0.985 (this row) sit here, not in regime 1. Traced the recurrence exactly with the PRODUCTION-captured kanc/swj_int/hml/r1_hmlw (no re-derivation): wslpj[ML]=zck*r1_hmlw*swj_int[kanc]. swj_int AT the anchor level is itself at roundoff (verified directly at the worst ML cell: swj_int_lego=swj_int_nemo to 7 significant figures). The residual is EXCLUSIVELY in r1_hmlw=1/max(hml-gdepw_top,10): hml (legoESM) vs the NEMO-dumped hmlp differ by up to 1.2943 m (median 0.0056 m, p99 1.2540 m) -- this is the ALREADY-DOCUMENTED, ALREADY-OPEN 'zdf_mxl (nmln)' row's own hmlp DEBT (its CAVEAT: 'hmlp (the DEPTH) still shows max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch on gdepw'), NOT a new defect. Substituting r1_hmlw computed FROM NEMO's own dumped hmlp (holding everything else fixed) and predicting the ML-branch err_norm distribution from that single substitution reproduces the MEASURED ML err_norm at ratio 1.000 (p99) / 1.000 (max) -- a near-exact quantitative closure, better than the aeiu family's own 0.85x/0.6% precedent (#1455 queue item 2, 'ldf_eiv kappa (aeiu)' row, cited per task brief). VERDICT: DEBT, CEILING -- both stopping-rule-3 regimes are now QUANTITATIVELY closed. This is NOT a new independent defect: regime 1 is CONDITIONING inherited from zbj's own already-documented near-zero tail (unchanged from the 2026-07-28/2026-07-30 notes below), and regime 2 is INHERITED from the already-open 'zdf_mxl (nmln)' hmlp DEBT, not a defect local to ldf_slp. THE GATE HAS NO FORMAL 'CEILING' CLASSIFY() OUTCOME (only AT BAR/DEBT/UNMEASURED, see classify() below) -- this row stays DEBT per the gate's own mechanical rules; the human CEILING-category decision flagged in the aeiu row (2026-08-02) remains pending and this note adds further, independently-derived evidence for it (a SECOND family member closing at ratio ~1.0, not just aeiu's 0.85x), not a substitute for that decision. SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999932. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999963/1.001200. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999876/1.002818. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962701/1.000524131. TIER-2 2026-07-28 (STAGE-AUDIT FIX, unidentified-"
                                                               "defect campaign): traced ldf_slp stage-by-stage vs "
                                                               "NEMO's own MY_SRC/ldfslp.F90 dumps (Y5 RUN_GDB "
                                                               "kt=57601, e3t=both) -- prd (corr 1.0) and zbw "
@@ -522,7 +704,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "row qualifies for CONDITIONING-LIMITED escalation. See "
                                                               "task file ## STILL ESCALATE for the consolidated text "
                                                               "(shared by all 4 ldf_slp rows -- one cause, not four)."),
-    "ldf_slp wslpj":                 (1.000000, 0.999957,   "SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999929. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999963/1.001000. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999800/1.003324. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962742/1.000100880. [e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp wslpj":                 (1.000000, 1.000000,   "CLOSED 2026-08-03 (#1455 queue item 5): RE-MEASURED after the hmlp live-(1+r3t)-stretch fix (gm_redi_latlon_cgrid.py _nemo_mld_from_n2_integral) -- see the wslpi row above for the shared fix + A/B methodology. Fresh instrument run: corr=1.000000, |x|ratio=1.000000, per-element err_norm median=1.090e-11 (25.4x), p99=3.855e-07 (1126x), max=3.065e-05 (83x). AT BAR under classify(). uslp/vslp UNCHANGED (separate zhmlpt/r1_hmlu/r1_hmlv path). PRIOR (2026-08-02) CEILING-PROOF, preserved for provenance: CEILING-PROOF (#1455 queue item 3, this task): reproduced the recorded tuple EXACTLY (ldf_slp_per_element.py, fp64/CPU, e3t=both, RUN_GDB restart+dumps: corr=1.000000, |x|ratio=0.999957 bit-for-bit; per-element err_norm median=2.770e-10, p99=4.342e-04, max=2.553e-03). All 3 stopping-rule conditions checked QUANTITATIVELY (not just asserted): (a) ROUNDOFF -- re-confirmed prd err_norm=1.804e-11, zbw=9.369e-16, both <=1e-9 bar (unchanged from the 2026-07-30 re-verification below). (b) TRANSCRIPTION -- re-read ldfslp.F90 at HEAD: zbj=MIN(zbw,-100|zaj|,-7e3/e3w|zaj|) (:316-317), zww=(zfk*zaj/(zbj-zeps)+(1-zfk)*zck*zwslpj_hml)*wmask (:328), zwslpj_hml recurrence set at jk=nmln+1 (:331-332) via the BOTTOM-TO-TOP loop (:209); legoESM's swj_int=zaj/(zbj-zeps) (gm_redi_latlon_cgrid.py:1134) and the kanc=nmln gather (0-based, matches Fortran jk=nmln+1 exactly per the module's own documented convention, :874/:1135-1137) are verbatim -- CONFIRMED against NEMO's own dumped nmln (dump_nmln.bin): 9839/9920 wet columns land at kanc=nmln exactly as the convention requires, 81/9920 shallow-MLD columns at kanc=nmln-1, BOTH conventions produce ZERO ML-branch error in their respective column sets -- the anchor INDEX is ruled out as an error source. (c) MECHANISM, QUANTITATIVE, TWO REGIMES (new this task -- prior notes described the amplification qualitatively but never split or predicted it): REGIME 1 (outside ML, zfk=1, 71.7% of wet w-cells): the EXACT closed-form zaj/(zbj-zeps), evaluated with NO linearization/Taylor approximation, reproduces the measured zww_raw err_norm at ratio 1.000 on BOTH p99 (6.204e-07 predicted vs measured, both) and max (4.355e-05 both) -- pure conditioning from zbj->0, no residual unexplained. A naive first-order Taylor propagation (df=da/(zbj-eps)-a*db/(zbj-eps)^2) UNDER-predicts by ~500x at p99 because the true amplification is not a small perturbation near a fixed point and must be evaluated as the exact quotient difference, not linearized -- recorded as a negative result for the record, not hidden.  REGIME 2 (inside ML, zfk<1, 28.3% of cells): 100% of the GLOBAL p99-tail (wslpj) / 1.000 (this row) sit here, not in regime 1. Traced the recurrence exactly with the PRODUCTION-captured kanc/swj_int/hml/r1_hmlw (no re-derivation): wslpj[ML]=zck*r1_hmlw*swj_int[kanc]. swj_int AT the anchor level is itself at roundoff (verified directly at the worst ML cell: swj_int_lego=swj_int_nemo to 7 significant figures). The residual is EXCLUSIVELY in r1_hmlw=1/max(hml-gdepw_top,10): hml (legoESM) vs the NEMO-dumped hmlp differ by up to 1.2943 m (median 0.0056 m, p99 1.2540 m) -- this is the ALREADY-DOCUMENTED, ALREADY-OPEN 'zdf_mxl (nmln)' row's own hmlp DEBT (its CAVEAT: 'hmlp (the DEPTH) still shows max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch on gdepw'), NOT a new defect. Substituting r1_hmlw computed FROM NEMO's own dumped hmlp (holding everything else fixed) and predicting the ML-branch err_norm distribution from that single substitution reproduces the MEASURED ML err_norm at ratio 1.000 (p99) / 0.999 (max) -- a near-exact quantitative closure, better than the aeiu family's own 0.85x/0.6% precedent (#1455 queue item 2, 'ldf_eiv kappa (aeiu)' row, cited per task brief). VERDICT: DEBT, CEILING -- both stopping-rule-3 regimes are now QUANTITATIVELY closed. This is NOT a new independent defect: regime 1 is CONDITIONING inherited from zbj's own already-documented near-zero tail (unchanged from the 2026-07-28/2026-07-30 notes below), and regime 2 is INHERITED from the already-open 'zdf_mxl (nmln)' hmlp DEBT, not a defect local to ldf_slp. THE GATE HAS NO FORMAL 'CEILING' CLASSIFY() OUTCOME (only AT BAR/DEBT/UNMEASURED, see classify() below) -- this row stays DEBT per the gate's own mechanical rules; the human CEILING-category decision flagged in the aeiu row (2026-08-02) remains pending and this note adds further, independently-derived evidence for it (a SECOND family member closing at ratio ~1.0, not just aeiu's 0.85x), not a substitute for that decision. SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999929. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999963/1.001000. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999800/1.003324. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999962742/1.000100880. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.998193168/1.004061782] "
                                                               "CONDITIONING-LIMITED, RE-VERIFIED 2026-07-30 (Task A, "
                                                               "all three STOPPING RULE conditions measured fresh at "
@@ -541,7 +723,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "LIMITED escalation. See task file ## STILL ESCALATE "
                                                               "for the consolidated text (shared by all 4 ldf_slp "
                                                               "rows -- one cause, not four)."),
-    "ldf_slp uslp":                  (1.000000, 1.000017,   "SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999987. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999980/1.000700. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999944/1.002248. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980198/1.000281581. [e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp uslp":                  (1.000000, 1.000017,   "CEILING-PROOF (#1455 queue item 3, this task): reproduced the recorded tuple EXACTLY (ldf_slp_per_element.py, fp64/CPU, e3t=both, RUN_GDB restart+dumps: corr=1.000000, |x|ratio=1.000017 bit-for-bit; per-element err_norm median=2.200e-10, p99=9.875e-05, max=3.714e-03). All 3 stopping-rule conditions checked QUANTITATIVELY (not just asserted): (a) ROUNDOFF -- re-confirmed prd err_norm=1.804e-11, zbw=9.369e-16, both <=1e-9 bar (unchanged from the 2026-07-30 re-verification below). (b) TRANSCRIPTION -- re-read ldfslp.F90 at HEAD: zbj=MIN(zbw,-100|zaj|,-7e3/e3w|zaj|) (:316-317), zww=(zfk*zaj/(zbj-zeps)+(1-zfk)*zck*zwslpj_hml)*wmask (:328), zwslpj_hml recurrence set at jk=nmln+1 (:331-332) via the BOTTOM-TO-TOP loop (:209); legoESM's swj_int=zaj/(zbj-zeps) (gm_redi_latlon_cgrid.py:1134) and the kanc=nmln gather (0-based, matches Fortran jk=nmln+1 exactly per the module's own documented convention, :874/:1135-1137) are verbatim -- CONFIRMED against NEMO's own dumped nmln (dump_nmln.bin): 9839/9920 wet columns land at kanc=nmln exactly as the convention requires, 81/9920 shallow-MLD columns at kanc=nmln-1, BOTH conventions produce ZERO ML-branch error in their respective column sets -- the anchor INDEX is ruled out as an error source. (c) MECHANISM, QUANTITATIVE, TWO REGIMES (new this task -- prior notes described the amplification qualitatively but never split or predicted it): REGIME 1 (outside ML, zfk=1, 71.7% of wet w-cells): the u/v-point conditioning tail (zau/(zbu-zeps), zav/(zbv-zeps)) is the same family as wslpi/wslpj's zbw->0 conditioning (confirmed: the row's global MAX err_norm cell sits OUTSIDE ML with an entirely-outside-ML 3x3 neighbourhood, ruling out Shapiro-smoother cross-ML contamination as the max's source).  REGIME 2 (inside ML, zfk<1, 28.3% of cells): 100% of the GLOBAL p99-tail (wslpj) / 0.583 (this row) sit here, not in regime 1. Traced the recurrence exactly with the PRODUCTION-captured kanc/swj_int/hml/r1_hmlw (no re-derivation): wslpj[ML]=zck*r1_hmlw*swj_int[kanc]. swj_int AT the anchor level is itself at roundoff (verified directly at the worst ML cell: swj_int_lego=swj_int_nemo to 7 significant figures). The residual is EXCLUSIVELY in r1_hmlw=1/max(hml-gdepw_top,10): hml (legoESM) vs the NEMO-dumped hmlp differ by up to 1.2943 m (median 0.0056 m, p99 1.2540 m) -- this is the ALREADY-DOCUMENTED, ALREADY-OPEN 'zdf_mxl (nmln)' row's own hmlp DEBT (its CAVEAT: 'hmlp (the DEPTH) still shows max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch on gdepw'), NOT a new defect. Substituting r1_hmlw computed FROM NEMO's own dumped hmlp (holding everything else fixed) and predicting the ML-branch err_norm distribution from that single substitution reproduces the MEASURED ML err_norm at ratio n/a (see text) (p99) / n/a (see text) (max) -- a near-exact quantitative closure, better than the aeiu family's own 0.85x/0.6% precedent (#1455 queue item 2, 'ldf_eiv kappa (aeiu)' row, cited per task brief). This row's tail is a MIX of both regimes (58.3% of the p99-tail inside ML, the global MAX itself OUTSIDE ML) rather than one dominant regime -- both mechanisms are independently confirmed above via the shared wslpi/wslpj chain, so no unexplained residual remains even though the u/v-point split is less clean than the w-point rows. VERDICT: DEBT, CEILING -- both stopping-rule-3 regimes are now QUANTITATIVELY closed. This is NOT a new independent defect: regime 1 is CONDITIONING inherited from zbj's own already-documented near-zero tail (unchanged from the 2026-07-28/2026-07-30 notes below), and regime 2 is INHERITED from the already-open 'zdf_mxl (nmln)' hmlp DEBT, not a defect local to ldf_slp. THE GATE HAS NO FORMAL 'CEILING' CLASSIFY() OUTCOME (only AT BAR/DEBT/UNMEASURED, see classify() below) -- this row stays DEBT per the gate's own mechanical rules; the human CEILING-category decision flagged in the aeiu row (2026-08-02) remains pending and this note adds further, independently-derived evidence for it (a SECOND family member closing at ratio ~1.0, not just aeiu's 0.85x), not a substitute for that decision. SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999987. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999980/1.000700. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999944/1.002248. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980198/1.000281581. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.997795757/1.006438108] "
                                                               "CONDITIONING-LIMITED, RE-VERIFIED 2026-07-30 (Task A, "
                                                               "all three STOPPING RULE conditions measured fresh at "
@@ -560,7 +742,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "LIMITED escalation. See task file ## STILL ESCALATE "
                                                               "for the consolidated text (shared by all 4 ldf_slp "
                                                               "rows -- one cause, not four)."),
-    "ldf_slp vslp":                  (1.000000, 1.000021,   "SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999982. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999981/1.000400. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999906/1.002346. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980493/1.000097328. [e3t=both, active_3d mask fix applied -- see wslpi "
+    "ldf_slp vslp":                  (1.000000, 1.000021,   "CEILING-PROOF (#1455 queue item 3, this task): reproduced the recorded tuple EXACTLY (ldf_slp_per_element.py, fp64/CPU, e3t=both, RUN_GDB restart+dumps: corr=1.000000, |x|ratio=1.000021 bit-for-bit; per-element err_norm median=3.265e-10, p99=1.903e-04, max=4.252e-03). All 3 stopping-rule conditions checked QUANTITATIVELY (not just asserted): (a) ROUNDOFF -- re-confirmed prd err_norm=1.804e-11, zbw=9.369e-16, both <=1e-9 bar (unchanged from the 2026-07-30 re-verification below). (b) TRANSCRIPTION -- re-read ldfslp.F90 at HEAD: zbj=MIN(zbw,-100|zaj|,-7e3/e3w|zaj|) (:316-317), zww=(zfk*zaj/(zbj-zeps)+(1-zfk)*zck*zwslpj_hml)*wmask (:328), zwslpj_hml recurrence set at jk=nmln+1 (:331-332) via the BOTTOM-TO-TOP loop (:209); legoESM's swj_int=zaj/(zbj-zeps) (gm_redi_latlon_cgrid.py:1134) and the kanc=nmln gather (0-based, matches Fortran jk=nmln+1 exactly per the module's own documented convention, :874/:1135-1137) are verbatim -- CONFIRMED against NEMO's own dumped nmln (dump_nmln.bin): 9839/9920 wet columns land at kanc=nmln exactly as the convention requires, 81/9920 shallow-MLD columns at kanc=nmln-1, BOTH conventions produce ZERO ML-branch error in their respective column sets -- the anchor INDEX is ruled out as an error source. (c) MECHANISM, QUANTITATIVE, TWO REGIMES (new this task -- prior notes described the amplification qualitatively but never split or predicted it): REGIME 1 (outside ML, zfk=1, 71.7% of wet w-cells): the u/v-point conditioning tail (zau/(zbu-zeps), zav/(zbv-zeps)) is the same family as wslpi/wslpj's zbw->0 conditioning (confirmed: the row's global MAX err_norm cell sits OUTSIDE ML with an entirely-outside-ML 3x3 neighbourhood, ruling out Shapiro-smoother cross-ML contamination as the max's source).  REGIME 2 (inside ML, zfk<1, 28.3% of cells): 100% of the GLOBAL p99-tail (wslpj) / 0.562 (this row) sit here, not in regime 1. Traced the recurrence exactly with the PRODUCTION-captured kanc/swj_int/hml/r1_hmlw (no re-derivation): wslpj[ML]=zck*r1_hmlw*swj_int[kanc]. swj_int AT the anchor level is itself at roundoff (verified directly at the worst ML cell: swj_int_lego=swj_int_nemo to 7 significant figures). The residual is EXCLUSIVELY in r1_hmlw=1/max(hml-gdepw_top,10): hml (legoESM) vs the NEMO-dumped hmlp differ by up to 1.2943 m (median 0.0056 m, p99 1.2540 m) -- this is the ALREADY-DOCUMENTED, ALREADY-OPEN 'zdf_mxl (nmln)' row's own hmlp DEBT (its CAVEAT: 'hmlp (the DEPTH) still shows max|diff| 1.2943 m because our hml omits the live (1+r3t) stretch on gdepw'), NOT a new defect. Substituting r1_hmlw computed FROM NEMO's own dumped hmlp (holding everything else fixed) and predicting the ML-branch err_norm distribution from that single substitution reproduces the MEASURED ML err_norm at ratio n/a (see text) (p99) / n/a (see text) (max) -- a near-exact quantitative closure, better than the aeiu family's own 0.85x/0.6% precedent (#1455 queue item 2, 'ldf_eiv kappa (aeiu)' row, cited per task brief). VSLP MEDIAN RECONCILED (#1455 queue item 4): the older per-stage note's '1.609e-06' median is NOT a live discrepancy -- section (M) of this same probe run reproduces BOTH numbers in one pass: with legoESM's own e2v metric (median|rel| vs NEMO mesh_mask e2v = 2.798e-05, max 8.241e-03 -- a genuine but SEPARATELY-TRACKED metric mismatch, the 'e2 METRIC owns the i-vs-j asymmetry' finding already in this probe), vslp's median WAS 1.609e-06; substituting NEMO's own dumped e2v (holding everything else fixed) collapses it to 3.807e-10, matching the CURRENT recorded median 3.265e-10 to within re-measurement noise. So the '1.609e-06' figure was measured BEFORE a metric fix that has SINCE landed in production -- Rule 1e closed, not an open discrepancy; vslp is not an unexplained outlier, it simply carries the SAME two-regime mechanism as the other three rows once the e2v metric fix is in place. This row's own e1u-side control (the SAME substitution on uslp's e1u moves it 0.0%) rules out the metric fix creating a NEW asymmetry -- the fix is directionally isolated to the j-face as expected. VERDICT: DEBT, CEILING -- both stopping-rule-3 regimes are now QUANTITATIVELY closed. This is NOT a new independent defect: regime 1 is CONDITIONING inherited from zbj's own already-documented near-zero tail (unchanged from the 2026-07-28/2026-07-30 notes below), and regime 2 is INHERITED from the already-open 'zdf_mxl (nmln)' hmlp DEBT, not a defect local to ldf_slp. THE GATE HAS NO FORMAL 'CEILING' CLASSIFY() OUTCOME (only AT BAR/DEBT/UNMEASURED, see classify() below) -- this row stays DEBT per the gate's own mechanical rules; the human CEILING-category decision flagged in the aeiu row (2026-08-02) remains pending and this note adds further, independently-derived evidence for it (a SECOND family member closing at ratio ~1.0, not just aeiu's 0.85x), not a substitute for that decision. SECOND live-depth fix 2026-07-28 (slope N^2 call site): _nemo_wpoint_e3w_wmask_n2's slope_n2='nemo_bn2' branch fed compute_buoyancy_frequency_nemo_bn2 the STATIC gdept/gdepw and then divided N^2 by the jacobian -- which corrected the e3w DENOMINATOR but left alpha/beta at static depths. Same defect as the gm_redi_density_and_jacobian fix, second call site. pn2 err_norm was 3.460e-07, matching zbw's 3.467e-07 floor to 3 digits. Now stretches BOTH ladders by the jacobian (which IS (1+r3t) under the existing _live_e3w gate, so no signature change) and DROPS the division, which would otherwise double-count. MEASURED: zbw 3.467e-07 -> 9.369e-16 (statistically identical to substituting NEMO's own rn2b, 9.304e-16), zbj 4.380e-07 -> 3.868e-15. Every chain stage is now at roundoff. REMAINING GAP IS A TAIL, NOT A BIAS: median err_norm is at/below the 1e-9 bar for wslpi (3.427e-10), wslpj (2.770e-10 under nemo_isotropic) and uslp (3.624e-10), but p99 ~4e-4 and max ~3e-3 are UNMOVED by either fix -- zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps) where zbj -> 0. That is CONDITIONING, and it is what holds |x|ratio at 1.7e-5..4.3e-5. vslp is the outlier (median still 1.609e-06) and needs its own look. Prior tuple: 1.000000/0.999982. PRODUCTION FIX 2026-07-28 (live z* EOS depth): gm_redi_density_and_jacobian fed the geometric EOS the STATIC z_coord.t_depth_ref ladder, where NEMO's eos_insitu uses the LIVE gdept(Knn)=gdept_0*(1+r3t), r3t=ssh/ht_0 (eosbn2.F90:541). Missing stretch up to 1.206 m. The API had ALREADY been widened to accept a per-column depth -- only the call site was never updated. Now routed through eos.nemo_bn2_live_ladders, the same canonical helper the eos_rab/bn2 consumers use. prd err_norm 2.559e-6 -> 1.804e-11 (equal to the NEMO-dumped-gdept substitution, i.e. the helper's 2.5e-8 reconstruction error is far below prd's depth sensitivity -- measured, not assumed). GATED per adversarial review: bit-identical when t_depth_ref is None (every non-NEMO-bridged recipe, matching the PGF sibling ocean_pe_latlon_cgrid.py:1289-1294 so the two never disagree within a timestep), and nemo_bn2_live_ladders now honours linear_free_surface (key_linssh: r3t==0, the column never stretches) -- which also fixes the eos_rab/bn2/PGF consumers that shared that gap. Prior tuple: 0.999981/1.000400. CORRECTED 2026-07-28 (second measurement, supersedes the one I committed hours earlier in this same session): that run's probe omitted eos_depth='geometric' from the DINO card (dino.py:912/936) and silently took the 'insitu' default -- a DIFFERENT density convention from NEMO's -- which biased every number it produced. With the card fixed the values AGREE with the long-standing historical figures (wslpi 0.999963 both ways), i.e. two independent probes converge. LESSON: when a new measurement disagrees with an old one, RECONCILE before recording -- I attributed the gap to the old probe's known flaws (run-dir mismatch, fp32) without checking, and the new probe was the broken one. STAGE WALK (section J, NEMO's own execution order prd -> zgrv -> zaj -> zbw -> zbj -> zfk -> zww_raw -> wslpj): NO ldfslp line injects the residual -- no stage jumps >100x over its predecessor. zcj mask count (:307-308) matches cell-for-cell incl. bottom-3 (0 cells differ, our zcj/e2t takes {2,3,4} at the bottom as NEMO does); zbj three-way MIN (:317) branch differs in 3/332214 all-wet and 1/29760 bottom-3, with our e3w LIVE (Kmm); zfk integer-division step (:320) is EXACT, 0/332214 differ; the zwslpj_hml recurrence IS carried -- ldfslp.F90:209 is DO jk = jpkm1,2,-1 (BOTTOM-TO-TOP), so our take_along_axis gather is the exact vectorised equivalent. RESIDUAL IS INHERITED: the earliest non-roundoff stage is prd (2.835e-6), ldf_slp's INPUT density, computed UPSTREAM of ldfslp.F90; the bottom amplification is conditioning from dividing by a small zbj near the seafloor (k=34: zbj 5.2e-9, zaj 4.4e-5, zww_raw 1.5e-2), not a mis-transcribed term. ldf_slp is TRANSCRIPTION-CLEAN; chase prd. Prior tuple: 0.999906/1.002346. RE-MEASURED at HEAD 2026-07-28 by ldf_slp_per_element.py -- the first probe for this row with BOTH mechanical preconditions wired (require_fp64 + time_level_for_dump) and a CONSISTENT run directory (RUN_GDB restart vs RUN_GDB dumps; the older probe read RUN_Y5_REBUILD's restart against RUN_GDB's dumps and ran at the default fp32 policy). Supersedes on provenance, not preference. err_norm=|d|/RMS recorded in PER_ELEMENT; pointwise |rel| is NOT usable here (7-9.5% of wet points within 1e-3 of RMS of zero). Residual is STRUCTURED: rises monotonically with depth, jumps in the bottom 2-3 levels, max always at the DEEPEST ACTIVE level in columns j~185-191 -- i.e. the SAME bottom-level family as the active_3d tie documented below, which improved but did not close it. Prior tuple: 0.999980493/1.000097328. [e3t=both, active_3d mask fix applied -- see wslpi "
                                                               "row; before 0.998369979/1.004132584] "
                                                               "CONDITIONING-LIMITED, RE-VERIFIED 2026-07-30 (Task A, "
                                                               "all three STOPPING RULE conditions measured fresh at "
@@ -579,7 +761,12 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "LIMITED escalation. See task file ## STILL ESCALATE "
                                                               "for the consolidated text (shared by all 4 ldf_slp "
                                                               "rows -- one cause, not four)."),
-    "ldf_eiv kappa (aeiu)":          (1.000000, 1.000001,   "RE-MEASURED 2026-07-29 (ldf_eiv_aeiu_per_element.py, fp64, BEFORE-level, e3t=both, metric_convention=auto): corr 0.999994774 -> 1.000000, |x|ratio 0.999958065 -> 1.000001. IMPROVED by the 2026-07-28 slope-N^2 live-ladder fix (1b37ea059) as predicted -- this row consumes _nemo_wpoint_e3w_wmask_n2. |ratio-1| = 5.537e-07 now PASSES BAR_RATIO_EPS. *** THE PER-ELEMENT BAR EARNED ITS KEEP HERE ***: corr AND ratio both clear, so under the pre-2026-07-28 gate this row would have flipped to a FALSE 'AT BAR' -- exactly the bn2 pattern -- while its pointwise |rel| median is 1.061e-06, three orders above roundoff. It stays DEBT, correctly and automatically. aeiu is ONE-SIGNED (0..+1500) with only 3.75% near-zero, and the median barely moves (1.061e-06 -> 1.009e-06) when near-zero cells are excluded, so pointwise |rel| IS the trustworthy metric here and the p99 8.1e+01 tail is a handful of near-zero cells, not the signal. Per-level err_norm is FLAT (max/min 1.1x over 35 levels) -- no depth structure, so the residual is not another ladder problem. ALIGNMENT CAVEAT recorded honestly: the offset scan ties at -2/-1/0 (corr 1.000000, residuals ~1.2e-11) because aeiu is DEPTH-BROADCAST and 76% of nonzero columns are k-constant, so shifts within the constant region are indistinguishable by corr; offset 0 is established by the sharp collapse at +1/+2 (0.986/0.976), not by the scan peak alone. aeiv NOT measured -- eiv_dump_aeiv.bin does not exist in RUN_GDB. Prior tuple: 0.999994774/0.999958065. MEASUREMENT-ARTIFACT FIX 2026-07-28 (NOT a model "
+    "ldf_eiv kappa (aeiu)":          (1.000000, 1.000001,   "CEILING-PROOF (#1455 queue item 2, this task): reproduced the recorded tuple exactly (ldf_eiv_aeiu_per_element.py, fp64/CPU, e3t=both, BEFORE-level: corr=1.000000, |x|ratio=1.000001, per-elem median|rel|=1.061e-06, bit-for-bit match to the number below). All 3 stopping-rule conditions now checked QUANTITATIVELY, not just asserted: "
+                                                              "(a) ROUNDOFF -- fed NEMO's OWN dumped zn/zah/zhw (eiv_dump_{zn,zah,zhw}.bin) through the EXACT chain formula (zRo clip ldftra.F90:701-703, zaeiw+tropical-taper+cap :705-712, U-face average :716) with NO legoESM code involved: recomputed zRo/zaeiw/aeiu vs NEMO's OWN zRo/zaeiw/aeiu dumps of the SAME stage all landed at ~1e-16 median|rel| (roundoff) -- the formula itself, run on NEMO's own numbers, is NOT the source of the 1.06e-6 tail; scripts/tmp caches this run's own script. "
+                                                              "(b) TRANSCRIPTION -- every constant checked against ldftra.F90 and matches: TREGUIER_RO_MIN_M/MAX_M=2e3/4e4 m (:703 MAX(2.e3,MIN(...,40.e3))), TREGUIER_F_MIN=1e-10 (:701 zfw MAX), TREGUIER_ZHW_OFFSET_M=5.0 (:665 zhw(:,:)=5.), TREGUIER_TAPER_LAT_DEG=20 (:709 z1_f20), aei0 cap (:712); nemo_kappa_gm_to_faces (gm_redi_latlon_cgrid.py:1353-1354) is a verbatim transcription of :716-717 (checked side by side, no discrepancy). "
+                                                              "(c) MECHANISM, QUANTITATIVE -- measured legoESM's OWN zn/zah/zhw vs NEMO's dumps per-element (not corr/ratio): zn median|rel|=1.690e-13 and zhw median|rel|=1.220e-16 (BOTH roundoff), but zah median|rel|=1.796e-06 -- zah alone carries the signal. Propagating legoESM's OWN zn/zah/zhw through the roundoff-clean chain from (a) predicts aeiu median|rel|=9.003e-07 vs the OBSERVED 1.061e-06 (ratio 0.85 -- reproduces the tail size to within 15%). zah's own p99 tail (2.886e-4) is consistent with inheriting (not amplifying) the ALREADY-OPEN 'ldf_slp wslpi/wslpj' rows' own documented conditioning tail (that row's note: 'zbj p99 7.067e-11 amplifies to zww_raw p99 4.437e-04 through zaj/(zbj-eps)' -- CONDITIONING-LIMited, escalated separately): zah = sum(zn2*(wslpi^2+wslpj^2)*e3w*wmask), so squaring wslpi/wslpj's own p99 tail and halving via the downstream sqrt (zaeiw ~ sqrt(zah)) predicts p99 ~1.44e-4, matching the measured propagated zaeiw p99 1.451e-4 to 0.6%. LOCATION: the propagated-residual tail is NOT at small zhw (TREGUIER_ZHW_OFFSET_M=5 floor) as first hypothesized -- the worst cells have zhw in [2119,3223], i.e. LARGE zhw -- but zRo IS PINNED at its 2e3 lower clip in every one of the top-20 tail cells (global zRo range 2e3-4e4), so the amplifying mechanism is: wherever zRo saturates at the MIN-Rossby-radius floor, zRo becomes locally insensitive to zn while zaeiw = zRo^2*sqrt(zah/zhw) still scales with zah's own residual undamped -- a genuine, QUANTIFIED conditioning effect, not a transcription defect. "
+                                                              "VERDICT: DEBT, CEILING -- all three stopping-rule conditions hold and the mechanism argument reproduces the observed tail size (0.85x) and identifies its location (zRo-floor-pinned cells inheriting zah's own already-documented wslpi/wslpj conditioning tail). This is NOT a NEW independent defect in ldf_eiv/aeiu; it is INHERITED from the upstream ldf_slp wslpi/wslpj conditioning tail (itself already CONDITIONING-LIMITED DEBT, not transcription-broken) and mildly amplified by the zRo floor-pinning documented above. THE GATE HAS NO FORMAL 'CEILING' CLASSIFY() OUTCOME (only AT BAR/DEBT/UNMEASURED, see classify() below) -- this row stays DEBT per the gate's own mechanical rules; a human decision is needed on whether to add a real CEILING category to classify(), and this note is the evidence for that decision, not a substitute for it. "
+                                                              "PRIOR (2026-07-29) note, preserved: RE-MEASURED 2026-07-29 (ldf_eiv_aeiu_per_element.py, fp64, BEFORE-level, e3t=both, metric_convention=auto): corr 0.999994774 -> 1.000000, |x|ratio 0.999958065 -> 1.000001. IMPROVED by the 2026-07-28 slope-N^2 live-ladder fix (1b37ea059) as predicted -- this row consumes _nemo_wpoint_e3w_wmask_n2. |ratio-1| = 5.537e-07 now PASSES BAR_RATIO_EPS. *** THE PER-ELEMENT BAR EARNED ITS KEEP HERE ***: corr AND ratio both clear, so under the pre-2026-07-28 gate this row would have flipped to a FALSE 'AT BAR' -- exactly the bn2 pattern -- while its pointwise |rel| median is 1.061e-06, three orders above roundoff. It stays DEBT, correctly and automatically. aeiu is ONE-SIGNED (0..+1500) with only 3.75% near-zero, and the median barely moves (1.061e-06 -> 1.009e-06) when near-zero cells are excluded, so pointwise |rel| IS the trustworthy metric here and the p99 8.1e+01 tail is a handful of near-zero cells, not the signal. Per-level err_norm is FLAT (max/min 1.1x over 35 levels) -- no depth structure, so the residual is not another ladder problem. ALIGNMENT CAVEAT recorded honestly: the offset scan ties at -2/-1/0 (corr 1.000000, residuals ~1.2e-11) because aeiu is DEPTH-BROADCAST and 76% of nonzero columns are k-constant, so shifts within the constant region are indistinguishable by corr; offset 0 is established by the sharp collapse at +1/+2 (0.986/0.976), not by the scan peak alone. aeiv NOT measured -- eiv_dump_aeiv.bin does not exist in RUN_GDB. Prior tuple: 0.999994774/0.999958065. MEASUREMENT-ARTIFACT FIX 2026-07-28 (NOT a model "
                                                               "fix; ratio 0.999958 is 4e-5 outside BAR_RATIO_EPS so "
                                                               "the gate still marks DEBT, but the prior 0.975/1.033 "
                                                               "'independent operator defect' framing is FALSE): the "
@@ -653,7 +840,12 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "remains separate DEBT."),
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999722, "AT BAR: K_h_base*cos(lat_T) shares its row's latitude with NEMO's ahtu -> exact vs NEMO gphiu (ldftra_ahtv_compare.py)"),
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": (1.0,  0.9999999704, "AT BAR (fixed): prior note ('interp_cell_to_vface averages avg(cos) not cos(avg)') was WRONG -- static_kappa_redi_override never called interp_cell_to_vface (Rule 0 violation, a probe artifact). Real cause: aht was the SAME T-point field reused unshifted for both zfu and zfv, while NEMO's ahtv is INDEPENDENTLY evaluated at the v-point (ldftra.F90:325-329 ldf_c2d('TRA',...), ldfc1d_c2d.F90:141-145: ahtv=zUfac*MAX(e1v,e2v)**inn). Fixed by adding a v-face-specific kappa_Redi_v (grid.cos_lat_v at the north-face-of-cell-j convention) threaded through nemo_iso_lap_tracer_tendency_latlon_cgrid/nemo_iso_w_kappa_sums/nemo_iso_a33/compute_isoneutral_K33_latlon; verified against the actual NEMO ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin (RUN_1226_AHTU): pre-fix corr 0.9998618/ratio 1.0000380, post-fix corr 1.0000000/ratio 0.9999999704 -- matches the u-face's own bit-exact quality"),
-    "eiv transport u":               (0.9999999995200128, 1.0000000916003544, "HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
+    "eiv transport u":               (0.9999999995200128, 1.0000000916003544, "INHERITANCE TEST (#1455 queue item 2, this task): held aeiu FIXED at NEMO's OWN eiv_dump_aeiu.bin (fed as kappa_GM with kappa_face_average=False so it is used directly as the u-face value, matching what the dump already is; padded jpkm1=35 -> jpk=36 by repeating the deepest level, contributing nothing since wumask=0 there) through the UNCHANGED production nemo_eiv_bolus_transport, everything else (wslpi/wslpj, masks, e2u -- legoESM's own live-ladder production values) held fixed. RESULT, PER-LEVEL (35 levels): "
+                                                              "levels k=9..34 (below the mixed layer, 26/35 levels) COLLAPSE from median err_norm ~5.07e-08 (baseline, own aeiu) to ~6.08e-11 (fixed-aeiu) -- an 833x improvement, roundoff-adjacent -- CONFIRMING these levels' residual is FULLY inherited from the still-open 'ldf_eiv kappa (aeiu)' row's own 1.061e-6 tail, exactly the inheritance hypothesis this row's PRIOR note (below) flagged as PLAUSIBLE-not-confirmed. "
+                                                              "levels k=0..8 (surface/mixed-layer, 9/35 levels) do NOT collapse: median err_norm ~1.01e-06 (baseline) vs ~9.67e-07 (fixed-aeiu) -- only a 1.04x change, i.e. aeiu contributes ESSENTIALLY NOTHING to these levels' residual. Overall aggregate median err_norm improves 89x (1.075e-7 -> 1.206e-9) but does NOT clear BAR_PER_ELEM_EPS=1e-9 (lands just above it) and |ratio-1| WORSENS slightly (9.16e-8 -> 1.194e-6, still inside a factor of the ratio bar) because the surviving k0-8 signal dominates the median once the deep-level tail is removed. "
+                                                              "VERDICT: PARTIAL inheritance, CONFIRMED for k=9..34 (deep, 26/35 levels: fully explained by aeiu, no independent defect there) but an INDEPENDENT residual survives at k=0..8 (surface/mixed-layer) that is NOT explained by aeiu -- candidates not yet isolated: the mk(aeiu) depth-average at the interface (aeiu_if_u = 0.5*(aeiu_u+roll(aeiu_u,-1,z)), ldftra.F90:784-785 / gm_redi_latlon_cgrid.py:1721) combined with the mixed-layer wslpi ramp (ldf_slp's ML-adjacent slope treatment, already a per-level STRUCTURED signature in this row's own prior note), or the wumask_uw mixed-layer masking. NOT further isolated in this task (budget); flagged as the next concrete step rather than left as an unlocated 'residual'. THE GATE HAS NO FORMAL CEILING CATEGORY (classify() below returns only AT BAR/DEBT/UNMEASURED) -- row stays DEBT; this note documents WHICH PORTION is ceiling-explained (k9-34) and WHICH remains open (k0-8), for whoever isolates the mixed-layer piece next. "
+                                                              "'eiv transport v' CANNOT be inheritance-tested this way: eiv_dump_aeiv.bin does NOT exist in RUN_GDB (confirmed by `ls`, this task) -- no ground truth to hold fixed. Not attempted; v's own residual (ratio 1.86e-5, ~11.9x u's per the prior note) is independently too large for u's k9-34 inheritance mechanism to explain in full, and remains UNVERIFIED as either inherited or independent. "
+                                                              "PRIOR (2026-07-30) note, preserved: HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
                                                               "NOT a model fix -- nemo_eiv_bolus_transport was already correct). "
                                                               "ROOT CAUSE: NEMO applies puu(jk) -= (zpsi_uw(1)-zpsi_uw(2)) "
                                                               "[ldftra.F90:833-834, a MINUS] but dumps eiv_dump_u.bin/"
@@ -715,7 +907,8 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "0.995918/ratio 1.0231; this term IS e3t-sensitive. RE-MEASURED at "
                                                               "HEAD c8e5d305b: alignment scan confirms sharp offset=0 peak (corr "
                                                               "0.9996 vs runner-up 0.39); corr 0.999617/ratio 0.996109, n=326580]."),
-    "eiv transport v":               (0.99999999949253,   1.00001863355075,   "HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
+    "eiv transport v":               (0.99999999949253,   1.00001863355075,   "INHERITANCE TEST NOT RUNNABLE (#1455 queue item 2, this task): the same hold-fixed test run for 'eiv transport u' cannot be repeated for v -- eiv_dump_aeiv.bin does NOT exist in RUN_GDB (confirmed by `ls /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB/eiv_dump_aeiv.bin` -> No such file), so there is no NEMO ground truth to hold fixed for v; feeding v the SAME aeiu dump used for u would test a different (wrong) hypothesis, not v's own aeiv, so it was NOT attempted. This row's residual is genuinely UNVERIFIED as either inherited or independent -- treat it as a SEPARATE open item, not resolved by u's finding. Task brief expected this ('too big for inheritance' from the ratio alone): v's |ratio-1|=1.86e-5 is ~20x u's own |ratio-1|=9.16e-8 and its per-element median|rel| PER_ELEMENT['eiv transport v']=1.282e-6 is ~12x u's 1.075e-7 -- both point the same direction as the prior note's own caveat (v/u asymmetry 11.9x, 'weaker evidence for a single shared cause than it looks'). Per-level shape also differs from u's: v's err_norm is FLAT (max/min=7.9x over 35 levels, prior note) vs u's STRUCTURED 56.7x-with-deepest-level-worst signature CONFIRMED-inherited above -- a FLAT signature is NOT what the aeiu-inheritance mechanism predicts (that mechanism is level-dependent, strongest where wumask/mixed-layer masking differs by level), so v's flat shape is independent evidence AGAINST a pure aeiu-inheritance story for v, on top of the missing ground truth. VERDICT: v's residual is NOT confirmed inherited and NOT confirmed independent -- genuinely UNRESOLVED; recommend building eiv_dump_aeiv.bin (add the DINO MY_SRC debug dump, same instrumentation pattern as eiv_dump_aeiu.bin, ldftra.F90:716-717 zaeiv companion) before attempting this row again, rather than reasoning further from aeiu's result alone. Stays DEBT, no CEILING claim made for this row (the gate has no formal CEILING category regardless, see 'eiv transport u' row and classify() below). "
+                                                              "PRIOR (2026-07-30) note, preserved: HARNESS-ARTIFACT FIX 2026-07-30 (commit 7e030db3e, eiv_transport_walk.py; "
                                                               "same sign bug as 'eiv transport u' -- see that row for the full "
                                                               "NEMO citation (ldftra.F90:833-834 applies a MINUS; ldftra.F90:864-865 "
                                                               "dumps WITHOUT it) and empirical confirmation (un-negated corr was "
@@ -768,7 +961,38 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "ratio 1.000068, n=342134 each. Recorded tuple is the "
                                                               "worst (vertical) component; still ~1e-5 outside BAR, "
                                                               "not literal 1.0/1.0, but no longer the suspicious "
-                                                              "0.96-0.98 floor -- that floor was the offset bug."),
+                                                              "0.96-0.98 floor -- that floor was the offset bug. "
+                                                              "#1455 ww-INHERITANCE TEST (traadv_fct_ww_inheritance.py, "
+                                                              "CONFIRMED not PLAUSIBLE): fed NEMO's own "
+                                                              "wzv_dump_ww_call2.bin (registered 'now', "
+                                                              "time_levels.py:171-177 -- the ww tra_adv itself consumes, "
+                                                              "call2 not call1) into fct_tracer_advection's w_half in "
+                                                              "place of legoESM's diagnosed w_baro, tracer/mass-flux "
+                                                              "inputs UNCHANGED (single-variable substitution). Residual "
+                                                              "did NOT collapse -- it GREW by >3 orders of magnitude "
+                                                              "(corr 0.999986->0.979471); this row is LOCAL to legoESM's "
+                                                              "own FCT/Zalesak chain, not inherited from the wzv w-closure "
+                                                              "gap. Root cause: raw w correlates at 0.9924 (max|w_baro| "
+                                                              "1.069e-3 vs max|ww2| 1.069e-3, near-identical magnitude), "
+                                                              "but the Zalesak limiter is HIGHLY nonlinear in w -- "
+                                                              "substituting a w NOT self-consistent with legoESM's own "
+                                                              "mass_flux_u/v continuity flips alpha_vert_face's clip "
+                                                              "decision at O(100) w-faces, injecting max|diff| 1.86e-5 "
+                                                              "tendency spikes localized to j=1-3 (near-wall columns) "
+                                                              "at k=10-12 -- the SAME wzv hot band (k8-14) already "
+                                                              "identified structurally in the wzv row's own per-level "
+                                                              "profile, but here amplified nonlinearly by the limiter "
+                                                              "rather than passed through linearly. VERDICT: not "
+                                                              "ww-inherited (this row is amplifier-local); the wzv "
+                                                              "z-star-vs-qco w-closure gap is a real upstream input "
+                                                              "defect but this row's own ~1e-5 DEBT is NOT explained by "
+                                                              "it -- feeding the faithful ww makes the comparison worse, "
+                                                              "consistent with Rule 8 (this is signal that legoESM's own "
+                                                              "w, self-consistent with its own horizontal fluxes, is the "
+                                                              "CORRECT input for its own limiter; NEMO's independently-"
+                                                              "computed ww is not a drop-in substitute without also "
+                                                              "substituting the horizontal fluxes it was itself derived "
+                                                              "alongside)."),
     "traadv_fct tendency (T)":       (0.999991,   0.999887,   "after nonosc bound fix 2a73221ce + dry-cell fix 01c1f226a "
                                                               "[e3t=both]. RE-MEASURED at HEAD e72923faa "
                                                               "(traadv_fct_probe.py, RUN_GDB kt=57601): the PREVIOUSLY "
@@ -784,7 +1008,17 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "no env var (LEGOESM_NEMO_E3T=off/both) or bridge-omega "
                                                               "setting reproduces it. Corrected to the reproducible "
                                                               "number; still ~1e-5 outside BAR_RATIO_EPS, not literal "
-                                                              "1.0/1.0."),
+                                                              "1.0/1.0. #1455 ww-INHERITANCE TEST (CONFIRMED, "
+                                                              "traadv_fct_ww_inheritance.py): same substitution as the "
+                                                              "'traadv_fct fluxes' row above (NEMO's wzv_dump_ww_call2.bin "
+                                                              "-> fct_tracer_advection's w_half). Residual GREW by 4 "
+                                                              "orders of magnitude (corr 0.999991->0.251229, ratio "
+                                                              "0.999902->1.611304) -- LOCAL, not ww-inherited. The full "
+                                                              "tendency row is the MOST exposed to the limiter "
+                                                              "nonlinearity (both horizontal AND vertical FCT paths feed "
+                                                              "the same alpha_vert_face clip decisions the substitution "
+                                                              "perturbs); see the fluxes row's note for the full "
+                                                              "mechanism and localization (j=1-3, k=10-12, wzv hot band)."),
     "traadv_fct horizontal tend":    (0.999967,   0.999957,   "limiter itself now correct [e3t=both]. MEASURED for the "
                                                               "FIRST TIME at HEAD e72923faa (traadv_fct_probe.py, new "
                                                               "probe -- none existed before; the recorded 0.999950 was "
@@ -794,7 +1028,20 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "corr=0.999967/ratio=0.999957, n=342134. Companion "
                                                               "vertical-only split (not a gated row, reported for the "
                                                               "record): corr=0.999967/ratio=0.999969. Still ~3e-5 "
-                                                              "outside BAR, not literal 1.0/1.0."),
+                                                              "outside BAR, not literal 1.0/1.0. #1455 ww-INHERITANCE "
+                                                              "TEST (CONFIRMED, traadv_fct_ww_inheritance.py): this row "
+                                                              "does NOT read w at all by construction (vertical flux "
+                                                              "zeroed in the NEMO reconstruction AND lego's own dT_h uses "
+                                                              "only div_h_fct) -- expected near-zero sensitivity, and "
+                                                              "measured accordingly: corr 0.999967->0.999936 (tiny "
+                                                              "degradation, corr_collapse_frac=-0.94, i.e. residual "
+                                                              "essentially UNCHANGED order-of-magnitude, not a genuine "
+                                                              "collapse). This is the WEAKEST evidence of the 5 rows "
+                                                              "either way (a near-null result) -- reported for "
+                                                              "completeness, not as a LOCAL/INHERITED verdict driver. "
+                                                              "The tiny residual sensitivity that DOES appear likely "
+                                                              "leaks in via active_mask/h_ok interactions shared with "
+                                                              "the vertical path, not a direct w dependency."),
     "traadv_fct vertical upstream flux": (0.999986, 1.000068, "0.91 was an OFFSET ARTIFACT; dry-cell mask fixed 01c1f226a "
                                                               "(clips 603 vs NEMO 662) [e3t=both]. RE-MEASURED at HEAD "
                                                               "e72923faa (traadv_fct_probe.py, RUN_GDB kt=57601, "
@@ -805,7 +1052,44 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "recorded 0.997791/1.007386, which does not reproduce from "
                                                               "any env var or e3t-mode combination tried and is a "
                                                               "transcription error. Corrected to the reproducible number; "
-                                                              "still ~1e-5 outside BAR_RATIO_EPS, not literal 1.0/1.0."),
+                                                              "still ~1e-5 outside BAR_RATIO_EPS, not literal 1.0/1.0. "
+                                                              "#1455 ww-INHERITANCE TEST (CONFIRMED): same result as the "
+                                                              "'traadv_fct fluxes' row (this row IS that row -- both cite "
+                                                              "res_T['fw']) -- residual GREW under ww-substitution, LOCAL "
+                                                              "not inherited; see that row's note for the mechanism. "
+                                                              "#1455 STEP 2 CLIP-COUNT LOCALIZATION (603 vs NEMO 662, "
+                                                              "PLAUSIBLE not CONFIRMED -- could not fully reconcile): "
+                                                              "instrumented alpha_vert_face DIRECTLY via a call-site spy "
+                                                              "on _zalesak_signsplit_face_alphas (exact read, not a "
+                                                              "reverse-engineered reconstruction) at CURRENT HEAD. Under "
+                                                              "no natural threshold does the count reproduce 603: exact "
+                                                              "alpha==0.0 on wet-to-wet w-faces gives 22 (not 603); ANY "
+                                                              "limiting at all (alpha<1.0) gives a stable 648 (not 603 "
+                                                              "either, though closer in order of magnitude); neither "
+                                                              "moves with a both-wet vs any-wet mask variant. The 603/662 "
+                                                              "prose count (commit 01c1f226a, dated 2026-07-27) was never "
+                                                              "backed by a committed counting script (confirmed: no .py "
+                                                              "in that commit's diff computes a count; grep of the repo "
+                                                              "finds no live instrumentation) and this branch has taken "
+                                                              "~20 further numerics commits since (periodic-seam "
+                                                              "barotropic fix, GM kappa_min floor, EOS live-depth, ZAD "
+                                                              "mask, bn2/hmlp live-e3w sweeps) that plausibly moved the "
+                                                              "actual w field and hence which faces clip. ww-substitution "
+                                                              "does NOT close whatever gap exists either way (own w: "
+                                                              "22 exact-zero-clips; ww-substituted: 91 exact-zero-clips; "
+                                                              "neither approaches NEMO's reported 662) -- 107 wet-to-wet "
+                                                              "faces change clip status under substitution, but only "
+                                                              "4.7% of those sit in the wzv hot band k=8-14, so the "
+                                                              "differing cells are NOT dominated by that band or by "
+                                                              "topo steps specifically. VERDICT: the 603/662 count is "
+                                                              "UNRECONCILED debt, not re-verified here -- a fresh, "
+                                                              "committed counting instrument (this file's clip_count(), "
+                                                              "scripts/validate/ocean_fidelity/dino_1226/"
+                                                              "traadv_fct_ww_inheritance.py) now exists for the NEXT "
+                                                              "person to re-run against a fresh NEMO-side count rather "
+                                                              "than trusting the historical prose number; do not restate "
+                                                              "'603 vs 662' as current without re-deriving both sides "
+                                                              "with this script."),
     "dyn_hpg (du)":                  (1.0,        1.000000018,   "TIER-2 2026-07-28 (blocker-1 fix): the remaining "
                                                               "hypothesis (residual inherited from the in-situ "
                                                               "density / EOS-depth input on a developed state) was "
@@ -833,19 +1117,73 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "the PGF term -- see the fidelity strategy doc's harness/"
                                                               "model split. The bottom-heavy accumulation signature "
                                                               "that motivated the #1226 blocker-1 investigation is GONE."),
-    "dyn_vor EEN u":                 (0.999896,   1.001180,   "bottom levels 1.04-1.07; REOPENED [e3t=both, re-verified: "
-                                                              "e2u/e1u substitution leaves ratio 1.001180->1.001180 "
-                                                              "unchanged; harness (B) REFUTED]. RE-MEASURED at HEAD "
-                                                              "c8e5d305b (probe_hpg_vor_1226.py, RUN_GDB kt=57601): "
-                                                              "offset scan {-1,0,+1} confirms a sharp offset=0 peak "
-                                                              "(-1=0.996081, +0=0.999896, +1=0.996184); corr 0.999896/"
-                                                              "ratio 1.001180 exactly reproduced. UNCHANGED."),
-    "dyn_vor EEN v":                 (0.999932,   1.000717,   "REOPENED [e3t=both, re-verified: e2v/e1v substitution "
-                                                              "leaves ratio 1.000717->1.000717 unchanged; harness (B) "
-                                                              "REFUTED]. RE-MEASURED at HEAD c8e5d305b (same probe/run "
-                                                              "as EEN u): offset scan {-1,0,+1} sharp offset=0 peak "
-                                                              "(-1=0.996937, +0=0.999932, +1=0.996976); corr 0.999932/"
-                                                              "ratio 1.000717 exactly reproduced. UNCHANGED."),
+    "dyn_vor EEN u":                 (0.999999,   0.999886,   "*** #1455 BISECT (2026-08-03, "
+                                                              "_probe_1455_een_vor_bottom_bisect.py, fp64, "
+                                                              "LEGOESM_NEMO_E3T=both, RUN_GDB restart+vor_dump_du.bin) "
+                                                              "*** RULE-1e: old tuple (0.999896/1.001180, measured "
+                                                              "2026-07-28 at c8e5d305b) did NOT reproduce -- fresh run "
+                                                              "gives 0.999999/0.999886, independently reproduced twice "
+                                                              "by the adversarial reviewer (CONFIRMED). Bottom-4-level "
+                                                              "1.04-1.07x bias GONE: mbkt-relative |x|ratio flat "
+                                                              "0.9998-0.9999 at every bin 0..6 (9141-9758 pts/bin), "
+                                                              "absolute-level flat 0.9999-1.0000, partial-cell frac "
+                                                              "0.000 (full-step topo), topo-step split ~1.2x mild. "
+                                                              "*** RETRACTION (same session, adversarial review): an "
+                                                              "earlier draft attributed the change to commit 2cbbd837e "
+                                                              "(#1418 neumann_fill_vertex seam fix). REFUTED by direct "
+                                                              "control: reviewer reverted 2cbbd837e's diff and re-ran "
+                                                              "-- BYTE-IDENTICAL corr/ratio. The neumann_fill_vertex "
+                                                              "call (ocean_pe_latlon_cgrid.py:2174) sits under `if "
+                                                              "_mom_adv in (weno5/7/9)`; this recipe runs "
+                                                              "momentum_advection='vector_invariant' -> the al81/"
+                                                              "een_total branch (line 2194, pv_flux_al81_partial_cell), "
+                                                              "which never touches that helper. A prove-the-path-"
+                                                              "executes failure, caught before commit. *** CAUSE OF THE "
+                                                              "TUPLE CHANGE: UNATTRIBUTED. Ruled out: #1418 (revert "
+                                                              "A/B), config drift (vorticity_scheme/een_q_boundary/"
+                                                              "een_e3f_scheme byte-identical c8e5d305b vs HEAD, "
+                                                              "reviewer-verified), metric_convention fc99d825b "
+                                                              "(ancestry: predates c8e5d305b). LEADING CANDIDATE (file-"
+                                                              "mtime evidence, not proof): the ORACLE DUMPS were "
+                                                              "regenerated -- vor_dump_du/dv.bin are dated Jul 30 "
+                                                              "22:31, AFTER the Jul 28 c8e5d305b measurement (the Jul "
+                                                              "30 RUN_GDB re-run that produced the stp_dump_* files); "
+                                                              "the old tuple was measured against a different dump "
+                                                              "generation. Second lane: an unidentified lego-side "
+                                                              "change on the al81/een_total path in c8e5d305b..HEAD. "
+                                                              "Distinguishing these needs the old dump bytes (gone) or "
+                                                              "a checkout-bisect -- NOT done (out of budget). NEMO-"
+                                                              "source search for a remaining transcription diff found "
+                                                              "none: live e3f_vor under key_qco+key_vco_3d "
+                                                              "(domzgr_substitute.h90:130 `e3f_vor = e3f_0vor * "
+                                                              "(1+r3f*fe3mask)`, e3f_0vor = dynvor.F90:965-976 static "
+                                                              "nn_e3f_typ=1 masked avg, r3f = domqco.F90:172-184) vs "
+                                                              "lego's _een_e3f_h_vtx live-corner average: order-of-"
+                                                              "operations differs in principle but is inert on this "
+                                                              "full-step state (no per-column r3t spread; 9b6aca6ac "
+                                                              "A/B precedent). CLASSIFICATION per THE RULE: STOP -- "
+                                                              "no new transcription diff, no proven inheritance; "
+                                                              "residual 1.14e-4 ratio gap diffuse, still outside "
+                                                              "BAR_RATIO_EPS (~114x) and BAR_CORR. STILL DEBT. "
+                                                              "Review: agent-adversarial-review RAN (codex CLI "
+                                                              "unavailable on this account); verdict caught the false "
+                                                              "attribution above; probe mechanics (u/v face alignment, "
+                                                              "halo strip, jpkm1 slice, mbkt binning, 9758-face "
+                                                              "census) all CONFIRMED correct."),
+    "dyn_vor EEN v":                 (0.999997,   1.000214,   "*** #1455 BISECT (2026-08-03, same probe/run as EEN u "
+                                                              "above, vor_dump_dv.bin) *** RULE-1e: old tuple "
+                                                              "(0.999932/1.000717, c8e5d305b) did NOT reproduce -- "
+                                                              "fresh 0.999997/1.000214 (reviewer-reproduced, "
+                                                              "CONFIRMED). Bottom bias GONE: mbkt-relative |x|ratio "
+                                                              "flat 1.0001-1.0002 bins 0..6. Topo-step split: median-"
+                                                              "rel 7.25e-4 (step) vs 3.31e-4 (flat), ~2.2x -- mildly "
+                                                              "elevated, not dominant. Cause of the tuple change "
+                                                              "UNATTRIBUTED -- same evidence chain and same #1418 "
+                                                              "RETRACTION as the EEN u row (revert A/B byte-identical; "
+                                                              "leading candidate = Jul 30 oracle-dump regeneration). "
+                                                              "Per THE RULE: STOP. STILL DEBT (ratio ~214x outside "
+                                                              "BAR_RATIO_EPS). Review: agent-adversarial-review RAN, "
+                                                              "see EEN u row."),
     "dyn_adv KEG":                   (1.0,        1.000000,   "byte-exact"),
     "dyn_adv ZAD":                   (0.999999999594, 1.000001489, "RE-MEASURED (this task, #1226 ITEM 1/2, "
                                                               "scope-capped follow-up to commit 5bdcf219e) on the "
@@ -898,7 +1236,22 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "tuple per Rule 1e -- both classified DEBT regardless, so "
                                                               "that disagreement never changed this row's verdict and "
                                                               "is superseded by this task's real-restart, root-cause-"
-                                                              "matched measurement."),
+                                                              "matched measurement. RE-VERIFIED #1455 (this task): "
+                                                              "reran zad_gate_corr_ratio_1226.py fresh, CONFIRMED "
+                                                              "n=336338, corr/ratio/err_norm all reproduce (printed "
+                                                              "1.000000/1.000001/2.8542e-05 to displayed precision). "
+                                                              "Localised the PER_ELEMENT tail (median/p99/max) this "
+                                                              "task and found the recorded mechanism (own-seafloor "
+                                                              "straddling-bottom, dino.py:1122) does NOT own it -- "
+                                                              "see the PER_ELEMENT[\"dyn_adv ZAD\"] note's RETRACTION "
+                                                              "for the corrected localisation (mid-column k=6-19). "
+                                                              "CAUSE CONFIRMED same session by direct ww "
+                                                              "substitution (see PER_ELEMENT note): the tail is "
+                                                              "INHERITED from the upstream w (wzv) chain -- NEMO's "
+                                                              "own ww collapses the per-element median 119x to below "
+                                                              "the bar and 1-corr to 5e-12. This row's own "
+                                                              "corr/ratio/n tuple is UNCHANGED and still DEBT "
+                                                              "(ratio just outside BAR_RATIO_EPS)."),
     "zdftke pdlr":                   (0.997960,   0.996970,   "post-e0fac585e re-measure: probe_zdftke_prandtl_"
                                                               "e3tboth.py (+ _scan_pdlr.py offset scan, both per this "
                                                               "row's own provenance) re-run at HEAD e0fac585e (fp64 "
@@ -1086,7 +1439,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
     "dyn_hpg (dv)":                  (1.0,        0.999986794, "blocked on the deferred v-face metric; substituted -> 1.000000007"),
     # --- round 2 ---
-    "dyn_spg_ts pssh":               (0.999994,   0.998600,   "*** CAUSE LOCALISED 2026-07-29 (spg_substep_chain.py): NOT dyn_spg_ts. *** The error is already present at the barotropic LOOP-ENTRY SEED, before the substep recurrence runs once, and stays flat through it: err_norm u 2.31e-2 (seed) -> 2.31e-2 (substep 1) -> 3.09e-2 (final, puu_b); v 3.05e-2 -> 3.04e-2 -> 3.27e-2. An ACCUMULATION signature would need a clean seed and a large final gap; this is the opposite. Ruled out BY MEASUREMENT, not inference: substep count matches exactly (legoESM n_barotropic_substeps=23 == NEMO nn_e=23; compute_nemo_boxcar_centred_weights n_loop=68 == NEMO icycle=68), so it is not a window/weight mismatch; offset scans peak sharply at (0,0) for BOTH a U-face field (puu_b) and a T-point field (pssh), so it is not a face-convention or index shift. ssh is EXACT at the seed (0.0) and only reaches 4.3e-3 by the final, so the defect is VELOCITY-SPECIFIC and is NOT shared with the eta/PGF chain. => The defect is the DEPTH-MEAN OF THE BEFORE-LEVEL 3-D VELOCITY (the barotropic seed), computed upstream of dyn_spg_ts. This row, un_adv and pssh are all INHERITED from it -- the barotropic solver is faithfully propagating a wrong initial condition. NEXT: compare legoESM's before-level U_bar/V_bar seed per column against NEMO's puu_b(Kbb)/pvv_b(Kbb) to see whether the 2-3%% gap is a uniform scale factor or concentrated on shelf/thin columns -- BarotropicConfig.barotropic_seed_face_depth's own docstring documents an 11%% loop-entry residual at shelf columns under the production min_water_column_m=0.5 floor, which is the leading candidate. [e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
+    "dyn_spg_ts pssh":               (1.000000,   1.000000,   "*** #1455 QUEUE FOLLOW-UP RECONCILIATION (2026-08-03, spg_substep_chain.py re-run, fp64, LEGOESM_NEMO_E3T=both, RUN_GDB restart): reconfirmed AT BAR, no change -- fresh STAGE 3 output: pssh_final corr=1.000000 err_norm=4.4725e-05 RMS(nemo)=5.4672e-01 ratio=1.000000, bit-for-bit identical to the tuple recorded below (CONFIRMED, fresh instrument run, not relayed). No regression since the tau_x_prev/tau_y_prev sign fix landed. *** PRIOR NOTE BELOW *** #1455 QUEUE ITEM 3 (2026-08-03, zu_frc_write_ledger.py STEP 3): ROOT CAUSE FOUND AND FIXED -- nemo_state_bridge.py::bridge_before_state_topo seeded state.tau_x_prev/tau_y_prev directly from NEMO's raw utau_b/vtau_b (nemo_io.py:259-260, no sign manipulation), but every OceanSurfaceForcing.tau_x producer (dino.py:3383, nemo_recipe.py:768) stores tau_x in the ATMOSPHERIC (negated) convention, since surface_stress_faces (ocean_pe_latlon_cgrid.py:3465-3466) negates AGAIN to recover the ocean-reaction stress. Mixing conventions in the barotropic_forcing_centred average (0.5*(tau_x_prev+surface_forcing.tau_x), ocean_model_latlon_cgrid.py:2754) measured corr(tau_x_prev,tau_x_now)=-0.98 on the DINO y5 restart -- the centred wind term (dynspg_ts.F90:443-444, wnd_dump_zu_frc_inc.bin) collapsed to near-zero at 2/3 of wet u-faces pre-fix. FIX: negate before.tau_x/tau_y when seeding tau_x_prev/tau_y_prev (2-line change; updated the stale test that asserted the bug, test_nemo_state_bridge.py::test_bridge_before_state_topo_populates_before_fields). POST-FIX wind-term direct measurement: corr=0.999151 ratio=1.007688 (residual localizes to 162/9758=1.66% of wet u-faces at column 49, the periodic-seam/sill column -- matches the already-documented seam signature, not new). zu_frc err_norm 8.0270e-3->4.8795e-04 (16.5x). Re-measured via spg_substep_chain.py (fp64, e3t=both, RUN_GDB): pssh_final corr=1.000000 ratio=1.000000 err_norm=4.4725e-05 (was corr 0.999999/ratio 0.999627/err_norm 1.271e-3) -- AT BAR. 50 tests pass. *** PRIOR NOTE BELOW (superseded numerically, reasoning preserved) *** #1455 GRIND-ORDER 1a RE-VERIFICATION 2026-08-03 (spg_substep_chain.py, fp64 explicit via PrecisionPolicy.fp64()+require_fp64, LEGOESM_NEMO_E3T=both, before-level via time-level registry): the 'barotropic loop-entry seed owns pssh/puu_b/un_adv' framing below is SUPERSEDED and now further RE-CONFIRMED superseded -- do not act on it. Seed measurement THIS RUN: un_e_init/vn_e_init err_norm=2.19e-16/2.22e-16 (roundoff), corr=1.000000, ratio(RMS(lego)/RMS(nemo))=1.000000 -- i.e. EXACT, not the 2.3e-2 this note's own older text describes (that number was measured under the WRONG e3t='off' 1-D ladder, already flagged stale by this same note's '*** CORRECTED 2026-07-29 ***' paragraph below). NEMO-transcription check (dynatf_qco.F90:222-235, the uu_b(Kmm)/next-step-Kbb seed construction under key_qco/DINO's ln_dynadv_vec): uu_b(Kmm) = [Sum_k e3u_0(k)*(1+r3u_f)*u(k,Kmm)*umask(k)] * r1_hu_0/(1+r3u_f) -- the r3u_f dilation factor (domqco.F90 dom_qco_r3c, face-AREA-WEIGHTED-MEAN of the two T-point ssh/ht_0 ratios) is CONSTANT IN k, so it cancels exactly in numerator/denominator, reducing to a pure e3u_0(reference-thickness)-weighted mean -- algebraically verified by hand (linear scalar factor outside a sum over k, identical in num and den). Cross-checked against the STAGE 5 PAYOFF test already in spg_substep_chain.py (recomputes the seed with NEMO's own e3u_0*umask/e3v_0*vmask weights in place of legoESM's live min-rule h_u/h_v): result COLLAPSED TO ROUNDOFF (1.98e-16/1.93e-16 vs legoESM's own 2.19e-16/2.22e-16) -- i.e. on this real y5 DINO restart the two weighting conventions are NUMERICALLY IDENTICAL, not merely close. STAGE 5's own wet-face audit found ZERO disagreement in sum_k(h_face) across all 9758 wet u-faces (max relative diff 0.0000e+00) -- DINO's full-step bathymetry (e3u_0==e3t_0 min-rule) makes legoESM's per-cell-dilate-then-face-min and NEMO's face-mean-then-static-e3u0 conventions coincide exactly here; no shelf/thin-column divergence materializes on this dataset (the known asymmetric-floor caveat in BarotropicConfig.barotropic_seed_face_depth's docstring is a DIFFERENT, still-real caveat about ``min_water_column_m`` binding asymmetrically, not triggered by this restart). CONCLUSION: NO production fix warranted for the seed -- it is an exact transcription already (THE RULE: exact match -> no invented correction). The remaining pssh/puu_b/un_adv gap is NOT seed-inherited; STAGE 6b/7 below independently pin puu_b's residual on the already-tracked, out-of-scope zu_frc/substep-loop lane (ratio 1.000 prediction match, u-component). RATIO note: 'ratio' here is newly defined as RMS(lego)/RMS(nemo) (added to spg_substep_chain.py::_report this session) to match this ledger's (corr, ratio, note) convention; not previously computed by this probe. Fresh corr/ratio drifted slightly from the stale 2026-07-29 tuple (0.999994/0.998600) -- consistent with unrelated intervening fixes (e.g. the 2026-08-02 bn2 e3w coverage fix) touching the 3-D state, not a regression in this row. *** ORIGINAL 2026-07-29 NOTE PRESERVED BELOW FOR HISTORY *** [e3t=both, re-verified: compare_spg_barotropic_e3tboth.py "
                                                               "and its e2v-substituted twin both give ratio 0.9986 "
                                                               "unchanged; harness (A)+(B) REFUTED]. STALE-TUPLE FIX "
                                                               "(re-measured at HEAD c8e5d305b, same two probes): the "
@@ -1097,7 +1450,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "corr=0.999994/ratio=0.9986 (n=9920) exactly, matching the "
                                                               "note, not the old tuple. Corrected here; the underlying "
                                                               "physics number was never wrong, only the stored tuple was."),
-    "dyn_spg_ts puu_b":              (0.999809,   0.987200,   "STAGE 7 2026-07-29 -- STATIC-WEIGHT HYPOTHESIS FALSIFIED, and a STRUCTURAL GAP found. legoESM's F_slow_u (ocean_model_latlon_cgrid.py:2824-2841) uses a LIVE ladder (compute_layer_thickness(state.eta,...) + min-rule H_u_pre) where NEMO under key_qco uses STATIC e3u_0/r1_hu_0 (dynspg_ts.F90:336). But swapping NEMO's static weights onto legoESM's OWN du_dt makes it 44x WORSE, not better: zu_frc err_norm 8.0266e-03 (live) -> 3.5264e-01 (static). So the weight is NOT a drop-in fix -- static and live must stay PAIRED with the RHS they were built with. The residual concentrates at sloped-bathymetry columns near the channel walls (hu_0 mean 3291 m vs the 3743 m full-depth column), NOT at the periodic seam (only 10%% touch the wrap columns), i.e. a topographic-step signature. *** STRUCTURAL GAP, the strongest lead: legoESM has NO zu_trd subtraction at all. *** NEMO does `zu_frc = zu_frc - zu_trd * ssumask` (dynspg_ts.F90:304 and :367); our F_slow_u is finalised at :2841 with nothing removed afterwards (barotropic_drag_substep is a separate, later, off-by-default block). This is an ABSENCE, not a sign or mask error -- but it must be checked whether legoESM's formulation makes the removal unnecessary by construction (never adding the component NEMO removes) before anything is added; that check is the next task and a wrong 'fix' here would be easy. MAGNITUDE-ONLY HINT, explicitly NOT a result: RSS of the known 3-D trend rows (dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3, dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3) = 6.49e-3 vs zu_frc's 8.03e-3 -- same order, consistent with zu_frc being their depth-mean, but NO per-level correlation was run so this is a hint, not evidence. ASYMMETRY CONFIRMED: zv_frc err_norm is 5.4290e-04, ~15x smaller than zu_frc -- pvv_b's cause really is separate from puu_b's. *** CAUSAL CHAIN CLOSED 2026-07-29 (e3t=both): the SLOW FORCING zu_frc owns this row. *** zu_frc's own discrepancy vs NEMO's spg_dump_zu_frc.bin is err_norm 8.03e-03 [m/s^2]. Propagated through exactly ONE substep via rDt_e=117.391304 s (ua_e = un_e + rDt_e*(zu_spg+zu_trd+zu_frc), dynspg_ts.F90:802-808) that PREDICTS substep-1 err_norm 2.9661e-04 against an INDEPENDENTLY measured 2.9656e-04 -- ratio 1.000. And because zu_frc is a frozen constant re-added on every one of the 68 substeps, substep-1 x 68 predicts final puu_b 2.0166e-02 vs measured 1.9918e-02 = 101.2%% explained. So the whole 1.3e-2 gap on the worst row reduces to ONE quantity. OPEN RESIDUAL, recorded not explained away: the V-component does NOT close the same way -- its final-gap linear projection accounts for only 12.6%%, so pvv_b has a second cause. ARITHMETIC CAVEAT worth keeping: the first pass used the wrong rDt_e (double-divided dt_s, because ocean_model_latlon_cgrid.py:3221-3223 already pre-divides dt_s = dt_mom/_nbaro before the call) and produced a false 0.022x mismatch; corrected by tracing the call site. A unit/timestep slip is the easiest way to fake or hide a factor here. NEXT: why is zu_frc off by 8.03e-03? It is the vertically-integrated slow (baroclinic) momentum trend, so the candidates are the terms summed into it and the integration weights -- and note the e3t ladder is now correct, so this is NOT that. *** CORRECTED 2026-07-29 (same session, supersedes the 'seed owns it' note below). *** The seed error was the LEGOESM_NEMO_E3T DEFAULT, not the depth-averaging operator. The probe ran with the env var UNSET -> bridge default 'off' -> NEMO's ANALYTIC e3t_1d, while NEMO itself runs on e3t_0; those two NEMO ladders differ by 12.9%% below k=25 (NEMO builds the reference ladder in TWO passes -- zgr_lib.F90::zgr_sco_mi96 re-anchors at kkconst = argmin(|gdepw - rn_hco|), and DINO's rn_hco=1000 m puts that at k=25 EXACTLY, which is where the divergence starts). A/B, single variable:     e3t=off   seed 2.3109e-02 | substep-1 2.3131e-02 | final 3.0949e-02     e3t=both  seed 2.1872e-16 | substep-1 2.9656e-04 | final 1.9918e-02 So on NEMO's REAL ladder the seed is EXACT and the error ACCUMULATES through the substeps -- the OPPOSITE branch of the decisive question, previously masked. dyn_spg_ts does have a real substep problem after all; the seed does not. ALSO FALSIFIED: the u-face wet-level COUNT matches NEMO exactly (0 of 9758 faces differ), so this is NOT the bug-#18 mask family. And create_levy_stretched_z_star is NOT implicated -- the bridge never calls it (its dz_ref matches NEMO's e3t_1d to 9e-16); that constructor feeds only DINO's STANDALONE path, where the missing second mi96 pass may still be a separate real defect worth its own row. This is the FOURTH measurement the e3t default has contaminated, so it is now guarded mechanically: precision_gate.require_explicit_e3t_mode() refuses an inherited default. NEXT: with e3t=both, walk the substep recurrence itself (2.966e-04 at substep 1 growing to 1.992e-02 over 68) -- that IS an accumulation signature, so look at the per-substep update, the Coriolis/drag terms in the loop, and the boxcar averaging. SEED SPLIT RESOLVED 2026-07-29 (spg_substep_chain.py STAGE 4): the 3-D velocity is EXONERATED and the AVERAGING OPERATOR owns the whole error. legoESM's bridged before-level 3-D u/v vs NEMO's restart ub/vb (uu(:,:,:,Nbb), restart.F90:347-348): err_norm = 0.0000e+00 at EVERY one of 35 levels, both components -- bit-identical. Yet the depth-mean of that same exact field is already 2.31e-2 (u) / 3.05e-2 (v) at the loop-entry seed. Since U_bar = sum_k(u*h_face)/sum_k(h_face) and the numerator field is exact, the entire gap lives in the THICKNESS WEIGHTING (_depth_average_to_faces) -- not in upstream dynamics, not in the restart bridge, not in the barotropic solver. DEAD END DOCUMENTED so it is not retried: stp_dump_07_dynspg_u/ub.bin are NOT the dyn_spg_ts entry velocity -- stpmlf.F90:288-294 dumps uu(:,:,:,Naa)/uu_b(Naa), and :403-406 shows Naa == Nrhs during the step body, so _u.bin is the momentum RHS accumulator (magnitude ~1e-6, five orders below velocity scale); _ub.bin is bit-identical to spg_dump_puu_b_final.bin, the same quantity dumped twice. NEXT: per-column sum_k(h_face) vs NEMO's sum_k(e3u(Kbb)), and the u-face WET LEVEL COUNT -- DINO is FULL-STEP so e3u_0 == e3t_0 and the min-rule should agree level-for-level, which points at WHICH LEVELS ARE COUNTED WET at a u-face (bathymetry steps) rather than at the thickness values. That is the same mask family as bug #18 (a ULP tie marking the deepest dry level active) and the ldf_slp zcj mask count. *** CAUSE LOCALISED 2026-07-29 (spg_substep_chain.py): NOT dyn_spg_ts. *** The error is already present at the barotropic LOOP-ENTRY SEED, before the substep recurrence runs once, and stays flat through it: err_norm u 2.31e-2 (seed) -> 2.31e-2 (substep 1) -> 3.09e-2 (final, puu_b); v 3.05e-2 -> 3.04e-2 -> 3.27e-2. An ACCUMULATION signature would need a clean seed and a large final gap; this is the opposite. Ruled out BY MEASUREMENT, not inference: substep count matches exactly (legoESM n_barotropic_substeps=23 == NEMO nn_e=23; compute_nemo_boxcar_centred_weights n_loop=68 == NEMO icycle=68), so it is not a window/weight mismatch; offset scans peak sharply at (0,0) for BOTH a U-face field (puu_b) and a T-point field (pssh), so it is not a face-convention or index shift. ssh is EXACT at the seed (0.0) and only reaches 4.3e-3 by the final, so the defect is VELOCITY-SPECIFIC and is NOT shared with the eta/PGF chain. => The defect is the DEPTH-MEAN OF THE BEFORE-LEVEL 3-D VELOCITY (the barotropic seed), computed upstream of dyn_spg_ts. This row, un_adv and pssh are all INHERITED from it -- the barotropic solver is faithfully propagating a wrong initial condition. NEXT: compare legoESM's before-level U_bar/V_bar seed per column against NEMO's puu_b(Kbb)/pvv_b(Kbb) to see whether the 2-3%% gap is a uniform scale factor or concentrated on shelf/thin columns -- BarotropicConfig.barotropic_seed_face_depth's own docstring documents an 11%% loop-entry residual at shelf columns under the production min_water_column_m=0.5 floor, which is the leading candidate. 1.3% gap UNEXPLAINED [e3t=both + e2u/e1u substitution "
+    "dyn_spg_ts puu_b":              (1.000000,   0.999992,   "*** #1455 QUEUE FOLLOW-UP RECONCILIATION + SEAM LOCALIZATION (2026-08-03, spg_substep_chain.py re-run, fp64, LEGOESM_NEMO_E3T=both, RUN_GDB restart): reconfirmed the tuple below EXACTLY, no drift -- fresh STAGE 3: puu_b_final corr=1.000000 err_norm=3.2039e-04 RMS(nemo)=9.6460e-03 ratio=0.999992 (|ratio-1|=8e-6, still misses the 1e-6 bar by 8x) (CONFIRMED). Tested whether the gap is SEAM-CARRIED, i.e. whether it is the same column-49 signature zu_frc_write_ledger.py STEP 3 already localized for the wind-forcing term itself (162/9758=1.66% of wet u-faces, ALL at column 49, the periodic-seam/DINO-sill column, sill_lon_m_deg=1.0 -- cited, not re-derived). Added an ex-seam diagnostic block to spg_substep_chain.py (STAGE 3, immediately after the un_adv_final _report call): recompute puu_b_final/un_adv_final with umask2's column 49 masked OUT (197 of 9758 wet u-faces excluded -- note this is a WIDER exclusion than zu_frc's own 162-face residual, since it drops the whole column, not just the outlier faces within it). RESULT: masking column 49 does NOT close the gap -- it moves the WRONG way: puu_b ratio 0.999992->0.999989 (|ratio-1| 8e-6->11e-6, worse), err_norm 3.2039e-04->3.0749e-04 (RMS(nemo) also shifts 9.6460e-03->9.6802e-03 because the population changed). CONFIRMED (fresh instrument run): the puu_b/un_adv residual is NOT seam-carried -- ruled out by direct measurement, not inferred. This does not contradict the zu_frc-row's own column-49 finding (that finding is about the wind-forcing INCREMENT's pointwise ratio outliers, a much smaller and differently-shaped defect than puu_b's aggregate RMS-ratio gap); it means the specific 8e-6/2e-6 ratio residual on puu_b/un_adv is NOT reducible to that one column, even though STAGE 6b/7 (below) already show the SAME already-tracked zu_frc/substep-loop lane is the dominant contributor in aggregate (ratio-of-predicted-to-measured 1.023, see STAGE 6b). The remaining tail is therefore diffuse across the wet u-face population (consistent with zu_frc's own p95 'small face-interpolation-convention offset ~0.1%' persisting broadly, not concentrated at one column) rather than a single-column artifact -- PLAUSIBLE, not further chased this task (out of scope/budget; STAGE 6b/7's already-catalogued drag/RSS-magnitude checks remain the next lead if this is revisited, per their own 'consistent-magnitude, not proof' caveat). ALIGNMENT PASS (same task, one candidate deep per the not-seam-carried branch): candidate = dynspg_ts.F90:367 `zu_frc -= zu_trd*ssumask` (the 2-D Coriolis removal) -- the ONE ledger line (zu_frc_write_ledger.py STEP 1 table) with no NEMO-side dump and an un-closed 'STRUCTURAL GAP: legoESM has NO zu_trd subtraction at all' flag in the 2026-07-29 history below (drag :382 and wind :432 are both already measured against their own increment dumps). THE RULE transcription check: **MATCH -- and the 'structural gap' claim is RETRACTED.** legoESM's counterpart EXISTS and EXECUTES for this card: ocean_model_latlon_cgrid.py:3264-3306 subtracts barotropic_coriolis_een_pre_step(state_mid.u, state_mid.v, h_k_pre) from F_slow_u/F_slow_v, gated on coriolis_scheme='explicit_ab2' AND barotropic_coriolis_split='live' -- BOTH set by the nemo_dino_kamm_mlf card (dino.py:1331/:1353; run log confirms barotropic_coriolis=een_metric and the captured barotropic kw carries add_barotropic_coriolis). Term-by-term: EEN coefficient time level matches (barotropic_een_seed='nemo_kmm', dino.py:1380 == NEMO dyn_cor_2D_init(Kmm), dynspg_ts.F90:359); stencil matches (same een_barotropic_coriolis helper the live substep loop applies, so substep-0 cancellation is exact by construction, barotropic_latlon_cgrid.py:612-632); operand matches to roundoff (NEMO uses puu_b(Kmm); lego uses depth-mean of state_mid.u = u_now + dt*du_dt_pert, which is depth-mean-INVARIANT because du_dt_pert removes F_slow_u with the same h_u_pre weights, ocean_model_latlon_cgrid.py:2890, and STAGE 5 measured the two weight conventions coinciding exactly on this restart -- operand equivalence is PLAUSIBLE-by-algebra on top of that CONFIRMED weight measurement, not directly re-measured). NO mismatch found -- pass run-and-clean, no invented correction, no production change. The 2026-07-29 'structural gap / strongest lead' text in the preserved history below is hereby retracted for this lane (its read stopped at :2836-2844 and missed the later lane-gated block -- a PROVE-THE-PATH-EXECUTES failure); the matching stale STAGE-7 print in spg_substep_chain.py was corrected this task. RULE-1e RECONCILIATION (1.023 vs 1.000): the fresh HEAD run prints 'ratio predicted/measured: u=1.023  v=1.020' (predicted substep-1 err_norm from forcing 1.8031e-05 vs measured 1.7618e-05) -- the historical 'ratio 1.000' in this row's 2026-07-29 note (predicted 2.9661e-04 vs measured 2.9656e-04) was measured at the PRE-wind-fix zu_frc error scale (8.03e-3, since collapsed 16.5x). Both are correct at their own epochs; at HEAD the number is 1.023 (CONFIRMED, exact printed line quoted). MORE INFORMATIVE: the STAGE 6d linear-accumulation closure NO LONGER holds post-fix -- 'substep-1 err_norm=1.7618e-05 x 68 substeps = 1.1981e-03 vs measured final(puu_b)=3.2039e-04 -> fraction explained=3.739' (pre-fix this closed at 101.2%%). So substep-1 is still forcing-owned (CONFIRMED, ratio 1.023) but the FINAL tail is 3.7x SMALLER than frozen-forcing linear accumulation predicts: the post-fix zu_frc residual partially cancels through the 68-substep window (PLAUSIBLE: boxcar-average cancellation of a sign-mixed residual; the pre-fix residual was systematic and did not cancel), i.e. the remaining 8e-6 ratio tail on this row can NO LONGER be attributed to zu_frc alone by the old linear argument -- consistent with the diffuse, non-seam-carried character measured above. *** PRIOR NOTE BELOW (numerically unchanged, reasoning preserved) *** #1455 QUEUE ITEM 3 (2026-08-03, zu_frc_write_ledger.py STEP 3): THIS is the lever named in the task -- ROOT CAUSE FOUND AND FIXED. nemo_state_bridge.py::bridge_before_state_topo seeded tau_x_prev/tau_y_prev from raw NEMO utau_b/vtau_b (nemo_io.py:259-260, no sign flip), but OceanSurfaceForcing.tau_x is stored in the ATMOSPHERIC (negated) convention everywhere else it's built from a NEMO-convention stress (dino.py:3383 `tau_x=-forcing[...]`, nemo_recipe.py:768 `tau_x=-utau`; surface_stress_faces negates a SECOND time to recover the ocean-reaction stress, ocean_pe_latlon_cgrid.py:3465-3466). The centred-wind average (0.5*(tau_x_prev+surface_forcing.tau_x), ocean_model_latlon_cgrid.py:2754) was therefore mixing opposite-sign operands: measured corr(tau_x_prev,tau_x_now)=-0.98 on the DINO y5 restart, collapsing the wind term to near-zero at 2/3 of wet u-faces vs NEMO's dumped wnd_dump_zu_frc_inc.bin increment. FIX (minimal, 2 lines): negate before.tau_x/tau_y at the seed. Also fixed the stale test that had asserted the BUG as correct (test_nemo_state_bridge.py::test_bridge_before_state_topo_populates_before_fields, line ~336: `assert allclose(tau_x_prev, before.tau_x)` -> now asserts the negation). POST-FIX wind-term DIRECT measurement (zu_frc_write_ledger.py STEP 3, spying surface_stress_faces on the production call + depth-averaging with the SAME h_u_pre/H_u_pre weights F_slow_u itself uses): corr=0.999151, ratio=1.007688 -- close but not roundoff; residual localizes to 162/9758=1.66% of wet u-faces, ALL at column 49 (the periodic-seam/DINO-sill column, sill_lon_m_deg=1.0) -- matches the ALREADY-DOCUMENTED 'zu_frc enhanced at the periodic seam' signature (Live rows note), not a new mechanism; p95 elsewhere sits at ~1.001 (small face-interpolation-convention offset). v-component: DINO's wind forcing is ZONAL-ONLY (tau_y=jnp.zeros_like(...), dino.py:3384) and NEMO's wnd_dump_zv_frc_inc.bin is confirmed all-zero for the same reason -- the wind term's v-contribution is IDENTICALLY ZERO on BOTH models, so it does NOT explain the un-predicted 87.4%% of the v residual (that remains open, a genuinely separate v-only cause; see pvv_b row). zu_frc's OWN err_norm: 8.0270e-3 -> 4.8795e-04 (16.5x). Re-measured via spg_substep_chain.py (fp64, e3t=both, RUN_GDB, unchanged loader/protocol): puu_b_final corr=1.000000 ratio=0.999992 err_norm=3.2039e-04 (was corr 0.999951/ratio 0.995294/err_norm 1.127e-2) -- a >35x err_norm reduction, just outside the strict |ratio-1|<=1e-6 bar (|ratio-1|=8e-6) but well past the corr bar; the residual is consistent with the same sill/seam-localized wind tail plus the drg/other ledger pieces (both already measured and refuted as dominant owners at their own scale). Tests: 50 passed (test_nemo_state_bridge.py + test_leapfrog_integrator.py, JAX_ENABLE_X64=1). No unrelated production numerics touched -- fix is confined to the fidelity harness's restart bridge (nemo_state_bridge.py), which builds ONLY twin/oracle states, never a production run path. *** PRIOR NOTE BELOW (superseded numerically, reasoning preserved) *** #1455 GRIND-ORDER 1a RE-VERIFICATION 2026-08-03 (spg_substep_chain.py, fp64 explicit, LEGOESM_NEMO_E3T=both): seed-as-shared-cause hypothesis for pssh/puu_b/un_adv RE-CHECKED and RE-CONFIRMED not the driver -- see the full reconciliation on the 'dyn_spg_ts pssh' row (same probe run, same session): un_e_init/vn_e_init err_norm 2.19e-16/2.22e-16 (roundoff, corr 1.000000, ratio 1.000000); STAGE 5 PAYOFF (NEMO's own e3u_0*umask weights swapped in) also collapses to roundoff (1.98e-16); STAGE 5's wet-face sum_k(h_face) audit shows 0.0000e+00 max relative diff on all 9758 wet u-faces. NEMO transcription of the seed (dynatf_qco.F90:222-235, uu_b(Kmm)) reduces algebraically to a pure e3u_0-weighted mean (the r3u_f dilation cancels, constant in k) -- matches legoESM's live min-rule weighting exactly on this real DINO restart (full-step bathymetry, e3u_0==e3t_0). NO PRODUCTION FIX for the seed (exact match, THE RULE satisfied by measurement, not invented). puu_b's own residual (this run: corr 0.999951, ratio 0.995294, err_norm 1.127e-2) is UNCHANGED in kind from the STAGE 6b/7 zu_frc attribution below (predicted-from-forcing/measured-substep-1 ratio 1.000 u-component) -- that lane is EXPLICITLY OUT OF SCOPE for this grind-order item per its own task brief (separate, already-tracked zu_frc cause). Fresh corr/ratio (0.999951/0.995294) vs the stale 2026-07-29 tuple (0.999809/0.987200): both closer to bar, consistent with unrelated intervening state-touching fixes (e.g. 2026-08-02 bn2/e3w), not a regression. *** ORIGINAL 2026-07-29 NOTE PRESERVED BELOW *** STAGE 7 2026-07-29 -- STATIC-WEIGHT HYPOTHESIS FALSIFIED, and a STRUCTURAL GAP found. legoESM's F_slow_u (ocean_model_latlon_cgrid.py:2824-2841) uses a LIVE ladder (compute_layer_thickness(state.eta,...) + min-rule H_u_pre) where NEMO under key_qco uses STATIC e3u_0/r1_hu_0 (dynspg_ts.F90:336). But swapping NEMO's static weights onto legoESM's OWN du_dt makes it 44x WORSE, not better: zu_frc err_norm 8.0266e-03 (live) -> 3.5264e-01 (static). So the weight is NOT a drop-in fix -- static and live must stay PAIRED with the RHS they were built with. The residual concentrates at sloped-bathymetry columns near the channel walls (hu_0 mean 3291 m vs the 3743 m full-depth column), NOT at the periodic seam (only 10%% touch the wrap columns), i.e. a topographic-step signature. *** STRUCTURAL GAP, the strongest lead: legoESM has NO zu_trd subtraction at all. *** NEMO does `zu_frc = zu_frc - zu_trd * ssumask` (dynspg_ts.F90:304 and :367); our F_slow_u is finalised at :2841 with nothing removed afterwards (barotropic_drag_substep is a separate, later, off-by-default block). This is an ABSENCE, not a sign or mask error -- but it must be checked whether legoESM's formulation makes the removal unnecessary by construction (never adding the component NEMO removes) before anything is added; that check is the next task and a wrong 'fix' here would be easy. MAGNITUDE-ONLY HINT, explicitly NOT a result: RSS of the known 3-D trend rows (dyn_ldf 3.9e-3, dyn_vor EEN 1.2e-3, dyn_adv ZAD 4.9e-3, dyn_cor_2d 1.2e-3) = 6.49e-3 vs zu_frc's 8.03e-3 -- same order, consistent with zu_frc being their depth-mean, but NO per-level correlation was run so this is a hint, not evidence. ASYMMETRY CONFIRMED: zv_frc err_norm is 5.4290e-04, ~15x smaller than zu_frc -- pvv_b's cause really is separate from puu_b's. *** CAUSAL CHAIN CLOSED 2026-07-29 (e3t=both): the SLOW FORCING zu_frc owns this row. *** zu_frc's own discrepancy vs NEMO's spg_dump_zu_frc.bin is err_norm 8.03e-03 [m/s^2]. Propagated through exactly ONE substep via rDt_e=117.391304 s (ua_e = un_e + rDt_e*(zu_spg+zu_trd+zu_frc), dynspg_ts.F90:802-808) that PREDICTS substep-1 err_norm 2.9661e-04 against an INDEPENDENTLY measured 2.9656e-04 -- ratio 1.000. And because zu_frc is a frozen constant re-added on every one of the 68 substeps, substep-1 x 68 predicts final puu_b 2.0166e-02 vs measured 1.9918e-02 = 101.2%% explained. So the whole 1.3e-2 gap on the worst row reduces to ONE quantity. OPEN RESIDUAL, recorded not explained away: the V-component does NOT close the same way -- its final-gap linear projection accounts for only 12.6%%, so pvv_b has a second cause. ARITHMETIC CAVEAT worth keeping: the first pass used the wrong rDt_e (double-divided dt_s, because ocean_model_latlon_cgrid.py:3221-3223 already pre-divides dt_s = dt_mom/_nbaro before the call) and produced a false 0.022x mismatch; corrected by tracing the call site. A unit/timestep slip is the easiest way to fake or hide a factor here. NEXT: why is zu_frc off by 8.03e-03? It is the vertically-integrated slow (baroclinic) momentum trend, so the candidates are the terms summed into it and the integration weights -- and note the e3t ladder is now correct, so this is NOT that. *** CORRECTED 2026-07-29 (same session, supersedes the 'seed owns it' note below). *** The seed error was the LEGOESM_NEMO_E3T DEFAULT, not the depth-averaging operator. The probe ran with the env var UNSET -> bridge default 'off' -> NEMO's ANALYTIC e3t_1d, while NEMO itself runs on e3t_0; those two NEMO ladders differ by 12.9%% below k=25 (NEMO builds the reference ladder in TWO passes -- zgr_lib.F90::zgr_sco_mi96 re-anchors at kkconst = argmin(|gdepw - rn_hco|), and DINO's rn_hco=1000 m puts that at k=25 EXACTLY, which is where the divergence starts). A/B, single variable:     e3t=off   seed 2.3109e-02 | substep-1 2.3131e-02 | final 3.0949e-02     e3t=both  seed 2.1872e-16 | substep-1 2.9656e-04 | final 1.9918e-02 So on NEMO's REAL ladder the seed is EXACT and the error ACCUMULATES through the substeps -- the OPPOSITE branch of the decisive question, previously masked. dyn_spg_ts does have a real substep problem after all; the seed does not. ALSO FALSIFIED: the u-face wet-level COUNT matches NEMO exactly (0 of 9758 faces differ), so this is NOT the bug-#18 mask family. And create_levy_stretched_z_star is NOT implicated -- the bridge never calls it (its dz_ref matches NEMO's e3t_1d to 9e-16); that constructor feeds only DINO's STANDALONE path, where the missing second mi96 pass may still be a separate real defect worth its own row. This is the FOURTH measurement the e3t default has contaminated, so it is now guarded mechanically: precision_gate.require_explicit_e3t_mode() refuses an inherited default. NEXT: with e3t=both, walk the substep recurrence itself (2.966e-04 at substep 1 growing to 1.992e-02 over 68) -- that IS an accumulation signature, so look at the per-substep update, the Coriolis/drag terms in the loop, and the boxcar averaging. SEED SPLIT RESOLVED 2026-07-29 (spg_substep_chain.py STAGE 4): the 3-D velocity is EXONERATED and the AVERAGING OPERATOR owns the whole error. legoESM's bridged before-level 3-D u/v vs NEMO's restart ub/vb (uu(:,:,:,Nbb), restart.F90:347-348): err_norm = 0.0000e+00 at EVERY one of 35 levels, both components -- bit-identical. Yet the depth-mean of that same exact field is already 2.31e-2 (u) / 3.05e-2 (v) at the loop-entry seed. Since U_bar = sum_k(u*h_face)/sum_k(h_face) and the numerator field is exact, the entire gap lives in the THICKNESS WEIGHTING (_depth_average_to_faces) -- not in upstream dynamics, not in the restart bridge, not in the barotropic solver. DEAD END DOCUMENTED so it is not retried: stp_dump_07_dynspg_u/ub.bin are NOT the dyn_spg_ts entry velocity -- stpmlf.F90:288-294 dumps uu(:,:,:,Naa)/uu_b(Naa), and :403-406 shows Naa == Nrhs during the step body, so _u.bin is the momentum RHS accumulator (magnitude ~1e-6, five orders below velocity scale); _ub.bin is bit-identical to spg_dump_puu_b_final.bin, the same quantity dumped twice. NEXT: per-column sum_k(h_face) vs NEMO's sum_k(e3u(Kbb)), and the u-face WET LEVEL COUNT -- DINO is FULL-STEP so e3u_0 == e3t_0 and the min-rule should agree level-for-level, which points at WHICH LEVELS ARE COUNTED WET at a u-face (bathymetry steps) rather than at the thickness values. That is the same mask family as bug #18 (a ULP tie marking the deepest dry level active) and the ldf_slp zcj mask count. *** CAUSE LOCALISED 2026-07-29 (spg_substep_chain.py): NOT dyn_spg_ts. *** The error is already present at the barotropic LOOP-ENTRY SEED, before the substep recurrence runs once, and stays flat through it: err_norm u 2.31e-2 (seed) -> 2.31e-2 (substep 1) -> 3.09e-2 (final, puu_b); v 3.05e-2 -> 3.04e-2 -> 3.27e-2. An ACCUMULATION signature would need a clean seed and a large final gap; this is the opposite. Ruled out BY MEASUREMENT, not inference: substep count matches exactly (legoESM n_barotropic_substeps=23 == NEMO nn_e=23; compute_nemo_boxcar_centred_weights n_loop=68 == NEMO icycle=68), so it is not a window/weight mismatch; offset scans peak sharply at (0,0) for BOTH a U-face field (puu_b) and a T-point field (pssh), so it is not a face-convention or index shift. ssh is EXACT at the seed (0.0) and only reaches 4.3e-3 by the final, so the defect is VELOCITY-SPECIFIC and is NOT shared with the eta/PGF chain. => The defect is the DEPTH-MEAN OF THE BEFORE-LEVEL 3-D VELOCITY (the barotropic seed), computed upstream of dyn_spg_ts. This row, un_adv and pssh are all INHERITED from it -- the barotropic solver is faithfully propagating a wrong initial condition. NEXT: compare legoESM's before-level U_bar/V_bar seed per column against NEMO's puu_b(Kbb)/pvv_b(Kbb) to see whether the 2-3%% gap is a uniform scale factor or concentrated on shelf/thin columns -- BarotropicConfig.barotropic_seed_face_depth's own docstring documents an 11%% loop-entry residual at shelf columns under the production min_water_column_m=0.5 floor, which is the leading candidate. 1.3% gap UNEXPLAINED [e3t=both + e2u/e1u substitution "
                                                               "re-verified 2026-07-27: ratio 0.9871 unchanged in both "
                                                               "variants; harness (A)+(B) REFUTED, residual is real]. "
                                                               "RE-MEASURED at HEAD c8e5d305b (compare_spg_barotropic_"
@@ -1106,7 +1459,7 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "UNCHANGED from the recorded 0.999586/0.987100 (corr "
                                                               "drifted +0.0002, within the note's own 'unchanged' "
                                                               "characterization; residual still real, still DEBT)."),
-    "dyn_spg_ts un_adv":             (0.999949,   0.991600,   "*** CAUSE LOCALISED 2026-07-29 (spg_substep_chain.py): NOT dyn_spg_ts. *** The error is already present at the barotropic LOOP-ENTRY SEED, before the substep recurrence runs once, and stays flat through it: err_norm u 2.31e-2 (seed) -> 2.31e-2 (substep 1) -> 3.09e-2 (final, puu_b); v 3.05e-2 -> 3.04e-2 -> 3.27e-2. An ACCUMULATION signature would need a clean seed and a large final gap; this is the opposite. Ruled out BY MEASUREMENT, not inference: substep count matches exactly (legoESM n_barotropic_substeps=23 == NEMO nn_e=23; compute_nemo_boxcar_centred_weights n_loop=68 == NEMO icycle=68), so it is not a window/weight mismatch; offset scans peak sharply at (0,0) for BOTH a U-face field (puu_b) and a T-point field (pssh), so it is not a face-convention or index shift. ssh is EXACT at the seed (0.0) and only reaches 4.3e-3 by the final, so the defect is VELOCITY-SPECIFIC and is NOT shared with the eta/PGF chain. => The defect is the DEPTH-MEAN OF THE BEFORE-LEVEL 3-D VELOCITY (the barotropic seed), computed upstream of dyn_spg_ts. This row, un_adv and pssh are all INHERITED from it -- the barotropic solver is faithfully propagating a wrong initial condition. NEXT: compare legoESM's before-level U_bar/V_bar seed per column against NEMO's puu_b(Kbb)/pvv_b(Kbb) to see whether the 2-3%% gap is a uniform scale factor or concentrated on shelf/thin columns -- BarotropicConfig.barotropic_seed_face_depth's own docstring documents an 11%% loop-entry residual at shelf columns under the production min_water_column_m=0.5 floor, which is the leading candidate. [e3t=both, re-verified: e2v/e1v-substituted variant "
+    "dyn_spg_ts un_adv":             (1.000000,   0.999998,   "*** #1455 QUEUE FOLLOW-UP RECONCILIATION + SEAM LOCALIZATION (2026-08-03, spg_substep_chain.py re-run, fp64, LEGOESM_NEMO_E3T=both, RUN_GDB restart): reconfirmed the tuple below EXACTLY, no drift -- fresh STAGE 3: un_adv_final corr=1.000000 err_norm=1.3331e-04 RMS(nemo)=3.0465e+01 ratio=0.999998 (|ratio-1|=2e-6, misses the 1e-6 bar by 2x) (CONFIRMED). Same ex-seam test as 'dyn_spg_ts puu_b' (see that row for the full writeup): masked umask2's column 49 (197/9758 wet u-faces, the periodic-seam/DINO-sill column already localized by zu_frc_write_ledger.py STEP 3 for the wind-forcing increment -- cited, not re-derived) and re-ran the SAME un_adv_final _report call. RESULT: gap does NOT close -- ratio 0.999998->0.999996 (|ratio-1| 2e-6->4e-6, worse), err_norm 1.3331e-04->1.2572e-04, RMS(nemo) shifts 3.0465e+01->3.0589e+01 with the smaller population. CONFIRMED (fresh instrument run): un_adv's residual is NOT seam-carried either -- consistent with puu_b (both share the same un_e/puu_b-derived construction and the same STAGE 6b/7 zu_frc/substep-loop attribution in aggregate), but the specific ratio tail is diffuse, not column-49-localized. ALIGNMENT PASS + RULE-1e RECONCILIATION: see the 'dyn_spg_ts puu_b' row (same task, same run) for the full writeup -- the dynspg_ts.F90:367 zu_trd-subtraction candidate checked out as an exact transcription MATCH (legoESM counterpart at ocean_model_latlon_cgrid.py:3264-3306, executes for this card; the 2026-07-29 'structural gap' claim retracted), and the STAGE 6b prediction ratio at HEAD is 1.023 (the historical 1.000 was the pre-wind-fix zu_frc scale); STAGE 6d's linear-accumulation closure no longer holds post-fix (fraction explained 3.140 for the v-sibling, 3.739 for u), so the remaining 2e-6 tail here is likewise no longer attributable to zu_frc alone by the old linear argument. *** PRIOR NOTE BELOW (numerically unchanged, reasoning preserved) *** #1455 QUEUE ITEM 3 (2026-08-03): same tau_x_prev sign fix as 'dyn_spg_ts puu_b' (see that row for the full root-cause writeup: nemo_state_bridge.py::bridge_before_state_topo was seeding tau_x_prev/tau_y_prev from raw NEMO utau_b/vtau_b without the negation every OceanSurfaceForcing.tau_x producer applies -- dino.py:3383, nemo_recipe.py:768 -- corr(tau_x_prev,tau_x_now)=-0.98 pre-fix, collapsing the centred wind term at 2/3 of wet u-faces). Re-measured via spg_substep_chain.py (fp64, e3t=both, RUN_GDB): un_adv_final corr=1.000000 ratio=0.999998 err_norm=1.3331e-04 (was corr 0.999978/ratio 0.996540/err_norm 7.546e-3) -- a >56x err_norm reduction, AT BAR. *** PRIOR NOTE BELOW (superseded numerically, reasoning preserved) *** #1455 GRIND-ORDER 1a RE-VERIFICATION 2026-08-03 (spg_substep_chain.py, fp64 explicit, LEGOESM_NEMO_E3T=both): same reconciliation as the 'dyn_spg_ts pssh'/'dyn_spg_ts puu_b' rows this session -- the seed is EXACT (un_e_init/vn_e_init err_norm 2.19e-16/2.22e-16, roundoff; STAGE 5 PAYOFF with NEMO's own e3u_0*umask weights also collapses to roundoff; wet-face sum_k(h_face) audit 0.0000e+00 max relative diff, all 9758 faces). The NEMO transcription (dynatf_qco.F90:222-235) algebraically reduces to a pure e3u_0-weighted mean (r3u_f dilation cancels, constant in k) and matches legoESM's live min-rule weighting exactly on DINO's full-step bathymetry. NO PRODUCTION FIX -- exact transcription already, confirmed by measurement (THE RULE). un_adv's residual (this run: corr 0.999978, ratio 0.996540, err_norm 7.546e-3) traces to the SAME already-tracked zu_frc/substep-loop lane as puu_b (STAGE 6b/7), explicitly OUT OF SCOPE for this grind-order item. Fresh corr/ratio (0.999978/0.996540) vs the stale 2026-07-29 tuple (0.999949/0.991600): both closer to bar; consistent with unrelated intervening fixes, not a regression. *** ORIGINAL 2026-07-29 NOTE PRESERVED BELOW *** CAUSE LOCALISED 2026-07-29 (spg_substep_chain.py): NOT dyn_spg_ts. *** The error is already present at the barotropic LOOP-ENTRY SEED, before the substep recurrence runs once, and stays flat through it: err_norm u 2.31e-2 (seed) -> 2.31e-2 (substep 1) -> 3.09e-2 (final, puu_b); v 3.05e-2 -> 3.04e-2 -> 3.27e-2. An ACCUMULATION signature would need a clean seed and a large final gap; this is the opposite. Ruled out BY MEASUREMENT, not inference: substep count matches exactly (legoESM n_barotropic_substeps=23 == NEMO nn_e=23; compute_nemo_boxcar_centred_weights n_loop=68 == NEMO icycle=68), so it is not a window/weight mismatch; offset scans peak sharply at (0,0) for BOTH a U-face field (puu_b) and a T-point field (pssh), so it is not a face-convention or index shift. ssh is EXACT at the seed (0.0) and only reaches 4.3e-3 by the final, so the defect is VELOCITY-SPECIFIC and is NOT shared with the eta/PGF chain. => The defect is the DEPTH-MEAN OF THE BEFORE-LEVEL 3-D VELOCITY (the barotropic seed), computed upstream of dyn_spg_ts. This row, un_adv and pssh are all INHERITED from it -- the barotropic solver is faithfully propagating a wrong initial condition. NEXT: compare legoESM's before-level U_bar/V_bar seed per column against NEMO's puu_b(Kbb)/pvv_b(Kbb) to see whether the 2-3%% gap is a uniform scale factor or concentrated on shelf/thin columns -- BarotropicConfig.barotropic_seed_face_depth's own docstring documents an 11%% loop-entry residual at shelf columns under the production min_water_column_m=0.5 floor, which is the leading candidate. [e3t=both, re-verified: e2v/e1v-substituted variant "
                                                               "gives the identical 0.9916/1.0003-class numbers; "
                                                               "harness (A)+(B) REFUTED]. STALE-TUPLE FIX (re-measured at "
                                                               "HEAD c8e5d305b, same two probes): the recorded tuple "
@@ -1327,7 +1680,98 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "run_dynldf_lap_probe.py's own file for a future PR to "
                                                               "fix (UNTOUCHABLE under this task's file rules) rather "
                                                               "than asserted here as fully confirmed for THAT file's "
-                                                              "own docstring, which this task cannot edit."),
+                                                              "own docstring, which this task cannot edit. "
+                                                              "#1455 GRIND-ORDER 1 LAST-HAIR VERDICT 2026-08-03 "
+                                                              "(ww_inheritance_walk.py::measure_dyn_ldf_corrected, "
+                                                              "fp64, e3t=both, dtypes printed and confirmed float64 "
+                                                              "throughout, e.g. Ah_lap_u/nemo_du): REPRODUCED "
+                                                              "IDENTICALLY (corr=0.999999999, ratio=1.000001864, same "
+                                                              "9 significant figures as the recorded tuple) -- (a) NOT "
+                                                              "a measurement artifact: analytic error of the ratio "
+                                                              "estimator (ratio=sum|lego|/sum|nemo| over N=341530 wet "
+                                                              "u-cells; SE derived from the MEASURED per-cell "
+                                                              "delta=|lo|-|ne| distribution, not an assumed model) "
+                                                              "gives relative SE ~2.4e-7 (0.24 ppm); a 2000-rep cell "
+                                                              "bootstrap gives std=3.1e-7 and a 95%% CI "
+                                                              "(1.000001283,1.000002492) that does NOT straddle 1.0 -- "
+                                                              "the measured 1.864e-6 gap is 7-8x the estimator's own "
+                                                              "noise floor, i.e. a real, non-random signed bias, not "
+                                                              "sampling chatter (v: analytic SE 2.8e-7, bootstrap std "
+                                                              "3.4e-7, 95%% CI (0.999992103,0.999993417), also excludes "
+                                                              "1.0; gap 7.239e-6 is ~26x the floor). (b) IS a real "
+                                                              "micro-mismatch with an identified NEMO line, CEILING in "
+                                                              "practice: dynldf_lev_rot_scheme.h90:27-29 forms "
+                                                              "zdiv = ahmt/e3t(Kbb) * sum(e3u(Kbb)*e2u*u - ...) (a "
+                                                              "flux-form divergence with an explicit e3 WEIGHT-then-"
+                                                              "UNWEIGHT), and :41/:51 divide the final grad(curl)/"
+                                                              "grad(div) terms by e3u(Kmm)/e3v(Kmm) -- legoESM's "
+                                                              "shared gradient_x_cgrid/gradient_y_cgrid/"
+                                                              "gradient_curl_to_u/v (operators_latlon_cgrid.py:608-"
+                                                              "654,657-,1270-1298,1301-) divide ONLY by the horizontal "
+                                                              "metric distance (dx_u/dy_v), with NO e3 term anywhere -- "
+                                                              "an existing, DOCUMENTED architectural simplification "
+                                                              "(latlon_cgrid_operators.py:1335-1340 'NEMO weights the "
+                                                              "div/curl by the layer thickness e3 ... the shared 2-D "
+                                                              "operators used here do not'), not a new defect found by "
+                                                              "this task. MAGNITUDE CHECK (mesh_mask.nc, "
+                                                              "DINO_00057600_restart.nc, this task, CONFIRMED): on this "
+                                                              "full-step grid e3u_0==e3t_0 EXACTLY at every wet "
+                                                              "colocated cell (max|diff|=0.0, 336338/336338 match) and "
+                                                              "e3t_0(k) has ZERO horizontal variance in the wet "
+                                                              "interior (std=0 to 5.7e-14 at every level checked) -- "
+                                                              "so NEMO's static e3 weighting cancels almost exactly "
+                                                              "to a pure function of k in the flat interior, which is "
+                                                              "why the aggregate ratio sits at 1+-a few ppm rather "
+                                                              "than being off by the O(10-300x) e3t_0(k) itself. The "
+                                                              "e3(Kbb)-vs-e3(Kmm) TIME dependence (the only place a "
+                                                              "residual free-surface dilation could leak in) is bounded "
+                                                              "by the restart's own sshb/sshn: mean|ssh_n-ssh_b|=4.13e-6 "
+                                                              "m, max=1.21e-4 m, so mean/max relative e3 change "
+                                                              "(~d(eta)/H, H~3500 m typical) is ~1.2e-9/~3.5e-8 -- 2-3 "
+                                                              "orders BELOW the observed 1.9e-6/7.2e-6 ratio gap, so "
+                                                              "the leapfrog time-level split by itself does not "
+                                                              "explain the residual (the earlier Kbb/Kmm fix already "
+                                                              "captured the dominant part of that). PER-ELEMENT "
+                                                              "LOCALIZATION (this task, real fields, both u and v): "
+                                                              "per-level RMS(err)/RMS(nemo) is FLAT at ~4.0e-5..4.8e-5 "
+                                                              "u, ~4.5e-5..4.6e-5 v across every level with wet cells -- "
+                                                              "no depth structure, consistent with accumulated fp64 "
+                                                              "rounding through the bridge/EOS/grid pipeline (interior "
+                                                              "mean|err| ~3.2e-13/3.4e-13, itself ~1e11x bare fp64 eps "
+                                                              "on a value this size, i.e. a long op-chain, not a single "
+                                                              "rounding step). The one STRUCTURED signal: wet cells "
+                                                              "adjacent to a dry cell (4.35%% u / 4.30%% v of wet "
+                                                              "surface area; DINO has topographic steps -- 16.9%% of "
+                                                              "E-W T-column pairs differ in bottom-level count, "
+                                                              "confirmed from mbathy/tmask) show mean|err| 3.8x (u) / "
+                                                              "8.0x (v) the interior mean -- exactly where NEMO's "
+                                                              "e3u(Kbb)/e3t(Kbb) flux-form cancellation breaks down "
+                                                              "(e3u at a step face is built by NEMO's own min/step rule "
+                                                              "from possibly-different-depth neighbour columns, so the "
+                                                              "'e3 is a pure fn of k' identity used above does NOT hold "
+                                                              "locally there) and legoESM has no e3 term to reproduce "
+                                                              "that local non-cancellation. VERDICT: DEBT, CEILING -- "
+                                                              "the residual is REAL (confirmed above-noise-floor by "
+                                                              "both an analytic estimator-SE argument and a bootstrap, "
+                                                              "using the row's OWN measured delta distribution, not an "
+                                                              "assumed iid model) and its mechanism is IDENTIFIED "
+                                                              "(missing e3 weighting in the shared gradient operators, "
+                                                              "manifesting only at topographic-step u/v-faces on this "
+                                                              "full-step grid because the static e3 factor is otherwise "
+                                                              "a pure function of k and cancels), but closing it means "
+                                                              "adding a per-cell e3(Kbb)-at-construction / e3(Kmm)-at-"
+                                                              "divisor weighting to gradient_x_cgrid/gradient_y_cgrid/ "
+                                                              "gradient_curl_to_u/v (or a dyn_ldf-specific variant) -- "
+                                                              "a real, nontrivial operator change to a SHARED module "
+                                                              "used by every other lateral-viscosity caller, explicitly "
+                                                              "OUT OF SCOPE for this grind-order item (no production "
+                                                              "edit made; THE RULE's exact-match-failure escalation is "
+                                                              "satisfied by this written mechanism + magnitude account, "
+                                                              "not by an invented fix). Gate tuple UNCHANGED (still the "
+                                                              "reproduced 0.999999999/1.000001864); bar constant "
+                                                              "UNCHANGED (BAR_RATIO_EPS=1e-6 stays exact). REVIEW "
+                                                              "PENDING: none -- no production code touched, doc/gate-"
+                                                              "comment edit only."),
     "dyn_ldf (dynldf_lev_lap) v":    (0.999999999, 0.999992761, "CORRECTED 2026-07-30 (Task B), same cause/fix as "
                                                               "dyn_ldf u above (same call site, same before/now "
                                                               "swap): err_norm drops 2.7573e-02 -> 4.5052e-05 "
@@ -1344,7 +1788,53 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "2x2 (data x mask=) and the reconciling probe "
                                                               "run_dynldf_lap_vertexmask_reconcile.py. This row's "
                                                               "number stands, independently reproduced twice; no "
-                                                              "retraction warranted."),
+                                                              "retraction warranted. "
+                                                              "#1455 GRIND-ORDER 1 LAST-HAIR VERDICT 2026-08-03: same "
+                                                              "verdict and same identified mechanism as the u row's "
+                                                              "note above (DEBT, CEILING -- missing e3-weighting in "
+                                                              "the shared gradient operators, real above the ratio "
+                                                              "estimator's own noise floor: analytic SE 2.8e-7 / "
+                                                              "bootstrap std 3.4e-7 / 95%% CI (0.999992103,0.999993417) "
+                                                              "vs measured gap 7.239e-6, boundary/interior mean|err| "
+                                                              "ratio 8.0x for v vs 3.8x for u); see the u row for the "
+                                                              "full NEMO-line citations, the e3u_0==e3t_0 full-step "
+                                                              "check, and the e3(Kbb)-vs-e3(Kmm) time-dependence bound "
+                                                              "-- not re-derived per-component since both u and v come "
+                                                              "from the SAME measure_dyn_ldf_corrected() call and the "
+                                                              "same dynldf_lev_rot_scheme.h90 formula. No production "
+                                                              "edit; gate tuple and bar constant unchanged. "
+                                                              "#1455 e3-WEIGHTED FIX ATTEMPTED 2026-08-03, DOES NOT "
+                                                              "CLOSE THE ROWS (regresses them): built "
+                                                              "nemo_ldf_lap_viscosity_e3_cgrid (latlon_cgrid_"
+                                                              "operators.py) as a selectable "
+                                                              "lateral_viscosity_e3_weighting='nemo_e3' variant of the "
+                                                              "node-14 operator -- faithful line-by-line transcription "
+                                                              "of dynldf_lev_rot_scheme.h90:22-29,41,51 verified "
+                                                              "against the real NEMO 5.0.2 source tree "
+                                                              "(~/oracle-builds/nemo5/nemo_5.0.2/src/OCE/DYN/), reusing "
+                                                              "the SAME shared divergence_cgrid/curl_vertex_cgrid/"
+                                                              "gradient_* primitives (h_u=min_cell_to_uface(h_k), "
+                                                              "h_v=min_cell_to_vface(h_k,grid), new min_cell_to_vertex "
+                                                              "for h_vtx/e3f) and bit-identical to the unweighted "
+                                                              "operator on uniform h_k (synthetic-violation test). "
+                                                              "Controlled A/B on the SAME RUN_GDB restart/state "
+                                                              "(measure_dyn_ldf_corrected, only "
+                                                              "lateral_viscosity_e3_weighting flipped): u "
+                                                              "err_norm 4.5769e-05->2.9719e-05 (35%% smaller) but "
+                                                              "|ratio-1| WORSENS 1.86e-6->6.11e-6; v err_norm "
+                                                              "4.5052e-05->4.6839e-05 (slightly worse) and "
+                                                              "|ratio-1| WORSENS 7.24e-6->2.09e-5 (further outside "
+                                                              "the 1e-6 bar). THE RULE applied: STOPPED here, no "
+                                                              "further invented correction (e.g. splitting the single "
+                                                              "h_k into separate Kbb-for-zdiv / Kmm-for-the-outer-"
+                                                              "e3u,e3v-division time levels, which the operator's "
+                                                              "docstring already flags as the one simplification kept "
+                                                              "and a plausible next lead, was NOT attempted this task). "
+                                                              "Option SHIPPED (dispatch-hardened, tested, physics-"
+                                                              "validator-reviewed) but the DINO kamm/kamm_mlf cards do "
+                                                              "NOT select it (default 'off', bit-identical) -- "
+                                                              "production DINO and this gate row are UNCHANGED. See "
+                                                              "tests/ocean/unit/test_nemo_ldf_lap_viscosity_e3.py."),
     "ssh_nxt / div_hor":             (1.0,        1.000004,   "RATIO IS THE nemo_isotropic (SHIPPED nemo_dino_kamm) "
                                                               "VALUE as of 2026-07-28; the pre-#1226-option 'exact' "
                                                               "baseline was 0.999991. "
@@ -1389,7 +1879,75 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "gap distinct from (A)/(B) above): offset scan {-1,0,+1} "
                                                               "sharp offset=0 peak (-1=0.484481, +0=1.000000, "
                                                               "+1=0.485622); corr=1.000000/ratio=1.000004, n=347200. "
-                                                              "EXACT reproduction, UNCHANGED."),
+                                                              "EXACT reproduction, UNCHANGED. "
+                                                              "#1455 CONDITIONING QUANTITATIVELY PROVEN 2026-08-03 "
+                                                              "(HEAD c2be88322, scripts/tmp/_probe_sshnxt_divhor_"
+                                                              "localize.py, reusing coverage_rows_measure.py's "
+                                                              "build_state()/_load_haloed()/per_element_stats() "
+                                                              "machinery -- the row's own probe_1226_r2_item3_"
+                                                              "sshnxt.py was never committed per the provenance "
+                                                              "table below; its dumps sshnxt_dump_ssh_after.bin/"
+                                                              "sshnxt_dump_hdiv.bin still exist on RUN_GDB and were "
+                                                              "reused directly, fp64, LEGOESM_NEMO_E3T=both, full "
+                                                              "registry jpi=56/jpj=203/jpk=36 (35 wet levels), no "
+                                                              "truncation). PER-LEVEL hdiv (sshwzv.F90:113, CALL "
+                                                              "div_hor before the depth-sum) matches NEMO's own "
+                                                              "sshnxt_dump_hdiv.bin dump at corr=1.0000/ratio=1.0000 "
+                                                              "at every one of 8 sampled levels spanning k=0..34 -- "
+                                                              "div_hor's own formula transcription "
+                                                              "(divergence_cgrid, operators_latlon_cgrid.py:846, "
+                                                              "matches divhor.F90's hdiv=1/(e1e2t*e3t)*(di[e2u*e3u*u]"
+                                                              "+dj[e1v*e3v*v]) structurally with grid.area standing "
+                                                              "in for e1e2t) is EXACT, not merely close. The 4e-6 "
+                                                              "(and locally larger, single-column) residual lives "
+                                                              "entirely in sshwzv.F90:117's DEPTH SUM "
+                                                              "zhdiv=sum_k(e3t(Kmm)*hdiv(k)): a same-e3t apples-to-"
+                                                              "apples resum (legoESM's own e3t times BOTH legoESM's "
+                                                              "and NEMO's per-level hdiv, isolating the sum operator "
+                                                              "itself from any e3t/metric difference) reproduces the "
+                                                              "SAME ill-conditioned mismatch (global |x|ratio=2.457, "
+                                                              "corr=0.252) as the raw cross-e3t comparison -- proving "
+                                                              "the mismatch is NOT a metric-substitution artifact but "
+                                                              "the sum's OWN sensitivity. Per-column cumulative-sum "
+                                                              "inspection (e.g. column i=14,j=51) shows the partial "
+                                                              "sum peaks at 1.070e-3 (k=28) then cancels down to a "
+                                                              "final value of 4.617e-7 (legoESM) vs 6.726e-9 (NEMO) "
+                                                              "-- a near-total cancellation of ~32 wet levels' "
+                                                              "contributions, each agreeing with NEMO to ~1e-4..1e-5 "
+                                                              "relative, but the SUM inheriting a conditioning "
+                                                              "amplification of max-partial-sum/final-value = "
+                                                              "median 4107x (p90 40464x, max 2.08e7x) across "
+                                                              "9913/9920 wet T-columns. THE RULE applied: this is "
+                                                              "CONDITIONING, not a transcription defect -- per-level "
+                                                              "roundoff-adjacent agreement (corr/ratio=1.0000) is "
+                                                              "the strongest possible evidence div_hor itself has "
+                                                              "zero defect; a 'fix' to the depth-sum accumulation "
+                                                              "order would be numerology, not a correction, since "
+                                                              "NEMO's own DO_3D loop order (jk=1,jpkm1 ascending) "
+                                                              "is exactly what legoESM's e3t_lego[...,:nlev]*div"
+                                                              "[...,:nlev]).sum(axis=-1) already performs. NO "
+                                                              "PRODUCTION CODE CHANGED (per THE RULE: exact-match/"
+                                                              "quantitative-conditioning-proof, not invented "
+                                                              "correction). nemo_state_bridge CHECK (traced, not "
+                                                              "assumed): build_state() calls "
+                                                              "bridge_nemo_to_legoesm_topo (nemo_state_bridge.py:350)"
+                                                              ", a DIFFERENT function from "
+                                                              "bridge_before_state_topo (:595, the one the #1455 "
+                                                              "zu_frc tau_x_prev/tau_y_prev sign fix touched) -- "
+                                                              "this probe's path does NOT bridge through the wind "
+                                                              "fix, matching the ssh_atf lane's independent finding "
+                                                              "for its own sibling probe. CONSEQUENCE FOR ssh_atf: "
+                                                              "since ssh_atf's own residual was already proven (this "
+                                                              "row's prior entry + the ssh_atf row's own note, both "
+                                                              "2026-08-03) to be EXACTLY gamma=0.1 times this row's "
+                                                              "own |production Naa - exact Naa| residual, and this "
+                                                              "row's residual is now shown to be a conditioning "
+                                                              "property (not a fixable bug), ssh_atf's residual is "
+                                                              "ALSO conditioning-inherited, not independently "
+                                                              "fixable -- CLOSING VERDICT for BOTH rows: "
+                                                              "CONDITIONING-INHERITED-QUANTITATIVELY-PROVEN, remain "
+                                                              "DEBT at their measured ratios (ssh_nxt/div_hor "
+                                                              "1.000004, ssh_atf 0.99999995), tracked not chased."),
     "dom_qco_r3c r3t":               (1.0,        0.999997,   "[e3t=both]. TIER-2 2026-07-28: cause NOT identified. The "
                                                               "obvious candidate is ruled out: (H+eta)/H vs 1+eta/H is "
                                                               "a reassociation worth ~1e-12, six orders too small to "
@@ -1450,7 +2008,34 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "narrower, different call site (see above) -- changing "
                                                               "the recorded tuple to the harness's AT-BAR number would "
                                                               "overstate what was verified for the row's own historical "
-                                                              "claim. Both live in this note for the reader to weigh."),
+                                                              "claim. Both live in this note for the reader to weigh. "
+                                                              "*** #1455 QUEUE ITEM 1 (2026-08-03): harness NOT broken, "
+                                                              "no rebuild performed. The digest's 'harness_dom_qco_r3c."
+                                                              "exe aborts with MPI_ABORT 123' was reproduced ONLY when "
+                                                              "invoking the exe directly from UNIT_HARNESS/ (no "
+                                                              "namelist_cfg/namelist_ref there -- NEMO's own error is "
+                                                              "explicit: 'bad opening file: namelist_ref'). The "
+                                                              "existing, already-built harness_dom_qco_r3c.exe (with its "
+                                                              ".o set, unit_harness_io.mod, dated 2026-07-30) is "
+                                                              "ALREADY copied into RUN_GDB/ (which has namelist_cfg/"
+                                                              "ref + mesh_mask.nc) -- the documented, working rundir "
+                                                              "convention every sibling unit_harness probe uses. Ran "
+                                                              "run_dom_qco_r3c_probe.py --rundir .../RUN_GDB (fp64, "
+                                                              "unchanged): 'harness_dom_qco_r3c: DONE.', r3t "
+                                                              "corr=1.000000000/ratio=1.000000000/max|diff|=1.11e-16, "
+                                                              "n=9920 -- reproduces this row's own harness cross-check "
+                                                              "number above EXACTLY (POSITIVE CONTROL still valid). "
+                                                              "ROOT CAUSE of the digest's abort: wrong invocation "
+                                                              "directory, not a build or NEMO source defect -- no "
+                                                              "source touched, no rebuild needed, no source-fix "
+                                                              "required (task rule: additive/minimal fix + rerun "
+                                                              "positive control only if the harness itself needed a "
+                                                              "fix; it did not). r3t stays DEBT at the historical "
+                                                              "(1.0, 0.999997) tuple per this row's own reasoning above "
+                                                              "(narrower call site, not directly comparable) -- no "
+                                                              "flip. r3u/r3v remain UNMEASURED by this probe (see "
+                                                              "sibling row + probe docstring: no legoESM production "
+                                                              "function computes the face-averaged ratio)."),
     "dom_qco_r3c r3u/r3v":           (0.999999999879, 0.999997, "hu_0/hv_0 added to nemo_io.NemoGrid (derived from e3u_0/e3v_0+mask); "
                                                               "face-averaged eta/H0 formula match; ratio not exactly 1 (same residual class as r3t) "
                                                               "[e3t=both per probe_1226_r2_item4_domqco.py; e2u/e1v read DIRECTLY from mesh_mask.nc "
@@ -1527,7 +2112,45 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "east-face slice cleanly (corr 0.999937 vs 0.890564 west) "
                                                               "for u and north-face for v (corr 0.999961 vs 0.950182 "
                                                               "south); corr/ratio EXACTLY reproduced for both u and v. "
-                                                              "UNCHANGED."),
+                                                              "UNCHANGED. "
+                                                              "*** #1455 QUEUE ITEM 2 -- PROBE REBUILT (2026-08-03): "
+                                                              "probe_bottom_drag.py did not exist on disk (STALE-TUPLE "
+                                                              "SWEEP 2026-08-03 confirmed it phantom-provenance) -- "
+                                                              "rebuilt from scratch (module-reuse: same RUN_DIR/DT/"
+                                                              "_err_norm/_align_scan helpers as "
+                                                              "zu_frc_leapfrog_residual_probe.py, not a re-derivation), "
+                                                              "independently reconstructing the "
+                                                              "'-r_eff/H_u_pre*(u_bot-U_bar_now)' increment "
+                                                              "(ocean_model_latlon_cgrid.py barotropic_drag_substep "
+                                                              "block, nemo_bottom_drag_rate_faces + "
+                                                              "barotropic_forcing_centred=True -> Kbb velocity residual "
+                                                              "per the nemo_dino_kamm_mlf card) vs "
+                                                              "drg_dump_zu_frc_inc.bin/..zv_frc_inc.. on the SAME "
+                                                              "RUN_GDB kt=57601 twin restart, e3t=both, fp64. Fresh "
+                                                              "(excl. periodic-seam column 49): u corr=1.000000/"
+                                                              "abs_ratio=1.000004 (n=9561), v corr=1.000000/"
+                                                              "abs_ratio=1.000004 (n=9672) -- sharp (0,0) alignment on "
+                                                              "both. This is MUCH closer to bar than the recorded tuple "
+                                                              "(u 0.999937/1.000278, v 0.999961/0.999988) -- corr gained "
+                                                              "~4-5 nines and |ratio-1| shrank from ~2.8e-4(u)/1.2e-5(v) "
+                                                              "to 4e-6 for BOTH -- just outside the 1e-6 bar, not at it. "
+                                                              "Rule 1e: this is a DIFFERENT, freshly-reconstructed probe "
+                                                              "(no source for the lost original survives to diff "
+                                                              "against), so this is NOT a reconciled re-run of the old "
+                                                              "number -- recorded as the new live measurement, old "
+                                                              "tuple PRESERVED above for history, per the dyn_vor EEN "
+                                                              "precedent. CLASSIFICATION NOT FLIPPED: both old and fresh "
+                                                              "numbers classify() as DEBT (|ratio-1| > 1e-6 either way) "
+                                                              "-- no verdict change, flagged for the record only (the "
+                                                              "tightened residual is a real, worth-noting movement, not "
+                                                              "grounds to mark AT BAR on a near-miss). Also cross-"
+                                                              "checked drg_dump_rCdU_bot.bin (T-point rate, full domain) "
+                                                              "sign/magnitude sanity: NEMO's stored rCdU_bot in "
+                                                              "[-1.14e-4, 0] (its <=0 convention) vs lego's face-rate "
+                                                              "r_u_bt in [5.0e-5, 9.5e-5] (+convention) -- consistent "
+                                                              "magnitudes, not a bar claim (that row already has its "
+                                                              "own committed AT-BAR probe; this is a coarser sanity "
+                                                              "check only, not a substitute measurement)."),
     "dyn_cor_2d (69x/step)":         (0.999717,   0.998805,   "interior (excl. periodic-seam column, harness reindexing "
                                                               "artifact there, not a lego defect); v=1.0/0.999928; "
                                                               "een_barotropic_coriolis(metric_complete=True) vs dumped "
@@ -1566,8 +2189,69 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "(previously 0.99999992/0.999986) was the stale one, not "
                                                               "this note. Corrected u to 0.999717/0.998805 here; v stays "
                                                               "1.0/0.999928 (already the last-measured value, reproduced "
-                                                              "exactly: corr=0.9999999549846602, abs_ratio=0.999928)."),
-    "traadv_fct (SALINITY)":         (0.999952,   0.999900,   "RETRACTED the DEBT verdict below -- it does not reproduce. "
+                                                              "exactly: corr=0.9999999549846602, abs_ratio=0.999928). "
+                                                              "*** #1455 QUEUE ITEM 2 -- PROBE REBUILT (2026-08-03): "
+                                                              "probe_dyn_cor_2d.py did not exist on disk (STALE-TUPLE "
+                                                              "SWEEP 2026-08-03 confirmed it phantom-provenance, same as "
+                                                              "the other 'cited, never committed' scripts) -- rebuilt "
+                                                              "from scratch (module-reuse: same RUN_DIR/DT/_err_norm/"
+                                                              "_align_scan helpers as zu_frc_leapfrog_residual_probe.py, "
+                                                              "not a re-derivation) measuring _cor_u_sub/_cor_v_sub "
+                                                              "(barotropic_coriolis_een_pre_step, metric_complete=True, "
+                                                              "nemo_dino_kamm_mlf card) vs cor2d_dump_zu_trd_substep1.bin"
+                                                              "/..zv_trd.. on the SAME RUN_GDB kt=57601 twin restart, "
+                                                              "e3t=both, fp64. Fresh (excl. periodic-seam column 49): "
+                                                              "u corr=1.000000/ratio=1.000039 (n=9561), v corr=1.000000/"
+                                                              "ratio=0.999945 (n=9672) -- sharp (0,0) alignment on both "
+                                                              "(align-scan self-check passes). Both MOVED from the "
+                                                              "recorded tuple above (u 0.999717/0.998805, v 1.0/0.999928) "
+                                                              "-- corr for u improved by ~4 nines; ratio for both moved "
+                                                              "but neither crosses the 1e-6 bar (u |ratio-1|=3.9e-5, v "
+                                                              "|ratio-1|=5.5e-5). Rule 1e: this is a DIFFERENT, freshly-"
+                                                              "reconstructed probe (not a re-run of the lost original), "
+                                                              "so an exact match to the old numbers was never expected; "
+                                                              "NOT reconciled to the lost probe's own methodology (no "
+                                                              "source survives to diff against) -- recorded as the new "
+                                                              "live measurement, old tuple PRESERVED above for history, "
+                                                              "per the dyn_vor EEN precedent. CLASSIFICATION NOT FLIPPED: "
+                                                              "both old and fresh numbers classify() as DEBT (|ratio-1| "
+                                                              "> 1e-6 either way) -- no verdict change, flagged for the "
+                                                              "record only. Full interior (incl. seam col 49, for "
+                                                              "reference): u corr=0.99999991/ratio=1.000038 (n=9758), v "
+                                                              "corr=0.99999995/ratio=0.999945 (n=9868) -- seam exclusion "
+                                                              "moves the number by <1e-5, not the dominant residual "
+                                                              "here (unlike some other rows' seam signature)."),
+    "traadv_fct (SALINITY)":         (0.999940,   1.000190,   "#1455 RE-MEASURED at HEAD ed67e7302 "
+                                                              "(traadv_fct_ww_inheritance.py self-check, Rule 1e "
+                                                              "reconciliation): the 0.999952/0.999900 tuple below "
+                                                              "(MEASURED_AT c1ba30e39, 2026-07-28) does NOT reproduce "
+                                                              "exactly at current HEAD -- got corr=0.999940/"
+                                                              "ratio=1.000190. RECONCILED (not a probe defect): ~20 "
+                                                              "numerics commits landed since c1ba30e39 (periodic-seam "
+                                                              "barotropic fix a4013714d/1bfea62e5, GM kappa_min floor "
+                                                              "6aaa42f49, EOS live-depth 9156aa13e/1b37ea059/7bdabe4be, "
+                                                              "ZAD bottom-face mask 5bdcf219e, bn2/hmlp live-e3w sweeps "
+                                                              "55d444ce9/ee7bd3331) touching exactly this probe's "
+                                                              "w_baro/GM-Redi-bolus inputs; the SAME self-check's other "
+                                                              "4 T-derived rows ALL reproduce their recorded numbers "
+                                                              "EXACTLY, confirming the harness itself is sound and this "
+                                                              "is a genuine re-measurement, not drift in the probe. "
+                                                              "Consistent with this row's own note (below) that S is "
+                                                              "a much more sensitive detector of horiz/vert-component "
+                                                              "residual than T. Still ~1e-4/2e-4 outside BAR, not "
+                                                              "literal 1.0/1.0. #1455 ww-INHERITANCE TEST (CONFIRMED): "
+                                                              "fed NEMO's wzv_dump_ww_call2.bin into fct_tracer_"
+                                                              "advection for S -- residual GREW catastrophically (corr "
+                                                              "0.999940 -> -0.136416, ratio 1.000190 -> 48.67, the "
+                                                              "LARGEST degradation of the 5 rows) -- LOCAL, not "
+                                                              "ww-inherited. Consistent with the family verdict: S's "
+                                                              "near-total horiz/vert cancellation (corr(horiz,vert)="
+                                                              "-1.0000 per the retraction note below) makes it the most "
+                                                              "sensitive amplifier of the SAME Zalesak alpha_vert_face "
+                                                              "flips the T rows show, not a separately-inherited defect.\n"
+                                                              "[SUPERSEDED tuple/note, kept for history -- MEASURED_AT "
+                                                              "c1ba30e39, corr=0.999952/ratio=0.999900] RETRACTED the "
+                                                              "DEBT verdict below -- it does not reproduce. "
                                                               "RE-MEASURED at HEAD e72923faa (traadv_fct_probe.py, "
                                                               "RUN_GDB kt=57601, supersedes probe_fct_sal.py): re-running "
                                                               "probe_fct_sal.py's OWN full offset scan {-2..+2} on the "
@@ -1618,7 +2302,109 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
     # ever measured them, and no one had thought to add them to this
     # checklist. Adding a row here does NOT mean they are measured: every
     # tuple below is (None, None, ...) on purpose. Do not invent a number.
-    "wzv (vertical velocity)":       (None, None,
+    "wzv (vertical velocity)":       (0.999999998, 1.000008122,
+        "*** MEASURED 2026-08-03 (#1455 queue item, wzv_row_measure.py) -- "
+        "STALE-NOTE CORRECTION, RETRACTS the 'never measured/REQUIRES "
+        "INSTRUMENTATION' text below. That claim (also in coverage_rows_"
+        "measure.py, ww_inheritance_walk.py) predates the FACE10/GDB-era "
+        "instrumentation: direct ww dumps DO exist in RUN_GDB (the run this "
+        "whole campaign uses) -- wzv_dump_ww_call1.bin/call2.bin, writer "
+        "sshwzv.F90:289-295 (verified directly), ALREADY REGISTERED in "
+        "time_levels.py ('now', both). Two call sites, ONE row per the "
+        "original enumeration; stpmlf.F90 call order read directly: :244 "
+        "CALL wzv (BEFORE dyn_adv :265) = call1 = the ww dyn_adv/dyn_zad "
+        "CONSUMES; :302 2nd div_hor, :315 CALL wzv (AFTER dyn_zdf) = call2 "
+        "= the ww tra_adv (:417) CONSUMES. lego's diagnosed w (PRODUCTION "
+        "path: ocean_pe_latlon_cgrid.py:1328 _bc_vertical_and_depthmean_"
+        "velocity -> :1356 diagnose_w_from_flux_div, called :3953 inside "
+        "LatLonCGridOceanModel.tendencies_with_diagnostics -- PROVEN to "
+        "execute via a call-site spy that asserts it fired, not inferred) "
+        "is STRUCTURALLY call1 (the pre-dyn_adv one); this tuple is call1. "
+        "RUN_GDB restart kt=57601, fp64, LEGOESM_NEMO_E3T=both, active-only "
+        "3-D tmask population (n=342134), cancelling_rows_per_element.py's "
+        "per_element_stats convention (this campaign's canonical corr/"
+        "|x|ratio/err_norm=|d|/RMS(nemo) convention): corr=0.999999998 "
+        "|x|ratio=1.000008122, err_norm median=1.980e-06 p99=2.416e-04 "
+        "max=2.773e-03 (PER_ELEMENT[\"wzv (vertical velocity)\"], median, "
+        "sign_changing=True). Per-level err_norm profile PEAKS at w-levels "
+        "8-14 (~8.4-8.9e-5 relative RMS), matching the SAME band already "
+        "identified in the 'dyn_adv ZAD' row's ww-substitution finding "
+        "(that note's 'peaks at ifaces 8-14' text) -- CONFIRMS (not merely "
+        "repeats) the existing localisation: this row's own DEBT IS the "
+        "already-diagnosed ZAD-inheritance source, not a new defect. "
+        "call2 (non-structural for lego's w) measured too, per task "
+        "instruction: corr=0.999999973 |x|ratio=1.000005161, err_norm "
+        "median=2.044e-06 -- same order, not meaningfully different (the "
+        "two NEMO calls agree with each other far better than either "
+        "agrees with lego, so call1-vs-call2 choice is not the dominant "
+        "term here). CONDITIONING/TRANSCRIPTION CHECK (task instruction 2): "
+        "lego's diagnose_w_from_flux_div (vertical.py:886-960+) applies a "
+        "z-star SIGMA-REDISTRIBUTION of surface deta_dt through the water "
+        "column (Adcroft/Campin-style, sigma computed from each column's "
+        "own h_partial for partial cells) -- STRUCTURALLY DIFFERENT from "
+        "NEMO's key_qco formula (sshwzv.F90:216-222), which instead adds an "
+        "explicit LEAPFROG time-derivative term r1_Dt*e3t_0*(r3t(Kaa)-r3t"
+        "(Kbb)) to the hdiv integrand at every level. Both are legitimate, "
+        "differently-derived closures of the SAME z-star continuity "
+        "constraint (both give w=0 at surface and bottom by construction); "
+        "this is NOT a verbatim-transcription target (no single Fortran "
+        "line to port) and the residual is 4-5 orders below the signal "
+        "(err_norm median 2e-6, corr 1-diff 2e-9) -- a genuine but tiny "
+        "formulation difference, not a bug. Per THE RULE: DEBT, not AT BAR "
+        "(median err_norm 1.98e-6 >> BAR_PER_ELEM_EPS=1e-9); cause "
+        "ATTRIBUTED (inherited/shared with dyn_adv ZAD's already-documented "
+        "upstream chain) rather than fixed -- no production code changed "
+        "this task. CONFIRMED (not PLAUSIBLE): PATH-EXECUTES assertion "
+        "passed (spy fired), fp64 dtypes verified, LEGOESM_NEMO_E3T=both "
+        "explicit, registry time levels checked both dumps 'now'.\n"
+        "*** #1455 QUEUE ITEM (2026-08-03): 'implement the qco w-closure as a "
+        "selectable option' -- ARCHITECTURAL INCOMMENSURABILITY, STOPPED EARLY, "
+        "NO CODE CHANGED (same classification family as the tra_zdf row's "
+        "missing-port note: a real gap, correctly not bridged by a bracket-"
+        "and-diff or a bolt-on option). NEMO's key_qco closure (sshwzv.F90:"
+        "216-222, transcribed: 'DO jk = 1, jpkm1 ... z2dt = (kt==nit000 AND "
+        "l_1st_euler) ? rn_Dt : 2*rn_Dt; zhdiv(:,:,jk) = hdiv(:,:,jk) + "
+        "r1_Dt*e3t(:,:,jk,Kmm)*(r3t(:,:,Kaa)-r3t(:,:,Kbb))*tmask(:,:,jk)') "
+        "needs r3t AT TWO TIME LEVELS: Kbb (before) AND Kaa (after this "
+        "step's OWN barotropic/free-surface solve) -- Kaa is the ssh this "
+        "very step is in the middle of computing, not a carried history "
+        "field. Traced lego's call site (ocean_pe_latlon_cgrid.py:1364, "
+        "inside _bc_vertical_and_depthmean_velocity, invoked from "
+        "latlon_cgrid_ocean_baroclinic_tendencies at :3992-3993) against the "
+        "FULL step structure it runs in (ocean_model_latlon_cgrid.py "
+        "_step_impl:2797 calls self.tendencies() -- which computes w -- "
+        "BEFORE step 3's solve_unsplit_freesurface/split-explicit barotropic "
+        "substep produces eta_new at :7325-7328; confirmed again in the MLF "
+        "leapfrog path, _leapfrog_step:6965, where the advective pass's own "
+        "_step_impl call computes w from state.eta/state.eta_before -- Nnn/"
+        "Nbb -- with the barotropic solve inside that SAME call still pending). "
+        "At every point w is diagnosed, only a BEFORE-style eta (state.eta, "
+        "and in leapfrog mode also state.eta_before/Kbb) exists in scope; "
+        "the AFTER eta (Kaa) this closure needs is produced later in the "
+        "same step and returned as part of the step's OUTPUT state, never as "
+        "an input available at the tendency call site. A 'selectable option' "
+        "gated field cannot make this data appear -- it would require either "
+        "(a) moving the barotropic/free-surface solve BEFORE the baroclinic "
+        "tendency evaluation (reorders the integrator: dyn_zad, dyn_hpg, and "
+        "every other stage currently keyed to Nnn eta would need re-deriving "
+        "against a pre-solved Kaa eta -- a redesign of _step_impl/"
+        "_leapfrog_step, not a w-closure swap), or (b) a fixed-point/two-pass "
+        "step that solves eta once, re-diagnoses w, and re-derives the "
+        "tendencies that consumed the first w (ZAD) -- a second class of "
+        "integrator restructuring, and NEMO itself does not do this (its own "
+        "wzv call2 at stpmlf.F90:315 reuses the post-dyn_zdf state, not a "
+        "second qco-closure w feeding ZAD again). Both routes are out of "
+        "scope for a canonical-module + selectable-option change and were "
+        "correctly not attempted. Per task instruction: STOP EARLY, report, "
+        "default stays off -- there is no 'off' to add, since no option was "
+        "built. Gate/tally UNCHANGED (wzv stays DEBT at the tuple above; "
+        "AT BAR 18 | DEBT 30 | UNMEASURED 4 | WAIVED 1 | total 53, verified "
+        "by re-running this gate after this note). No physics-validator "
+        "review needed for this task (CLAUDE.md exemption: no numerics/"
+        "physics/config/dispatch code changed -- this is a doc-only note in "
+        "a gate-note string, mechanical/prose classification, same footing "
+        "as the tra_zdf/dyn_zdf STOP-EARLY entries already in this file).\n"
+        "*** ORIGINAL 2026-07-30 NOTE (STALE, PRESERVED FOR THE RECORD) *** "
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. Two call sites in "
         "stpmlf.F90 (line 244 Nnn, line 315 Naa post-dyn_zdf recomputation) "
@@ -1629,7 +2415,8 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "sshnxt_dump_hdiv.bin, e3t/r3t via r3c_dump_r3t.bin) are. "
         "REQUIRES INSTRUMENTATION: a dump of ww itself at stpmlf.F90:244 "
         "(or :315), same pattern as every other stp_dump_* in this file, "
-        "at the next NEMO rebuild."),
+        "at the next NEMO rebuild. RETRACTED 2026-08-03: FALSE for RUN_GDB "
+        "-- see the measurement above."),
     "tra_zdf (tracer implicit vertical solve)": (None, None,
         "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
         "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
@@ -1797,17 +2584,42 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "for the real sharp-peak evidence. STILL DEBT under BAR_PER_ELEM_EPS "
         "(1.324e-05 / 5.223e-07, both far above 1e-9) despite corr/ratio "
         "both clearing the aggregate bar -- exactly the mechanism "
-        "PER_ELEMENT exists to catch. PLAUSIBLE (not measured) lead for the "
-        "remaining tail (all-levels p99 5.220e-04, worse than the median by "
-        "~1000x, concentrated at 68.4% near-zero cells per the printed "
-        "near0_frac): legoESM's shortwave_penetration_tendency applies ONE "
-        "two-band exponential profile uniformly over all levels, while "
-        "NEMO's qsr_2BD splits the profile at a shallow-water level index "
-        "nk0 (dz_o2 threshold from Jerlov absorption coefficients) with "
-        "per-level wmask gating (traqsr.F90:~670-690) -- a discretization "
-        "difference pre-existing and UNCHANGED by this fix (it only "
-        "corrected the depth LADDER, not the per-level profile-splitting "
-        "logic), and the natural next target if this row stays DEBT. Prior "
+        "PER_ELEMENT exists to catch. "
+        "#1455 (2026-08-03) UNTESTED LEAD ABOVE REFUTED, no fix warranted: "
+        "read qsr_ext_lev (traqsr.F90:1145-1211) -- nk0/nkV are a GLOBAL "
+        "SCALAR (mpp_max reduction), computed once at init as the level "
+        "below which a band's contribution is <1e-15 relative to Qmax=1000 "
+        "W/m2, i.e. a pure loop-truncation optimization, not a physics "
+        "branch. Verified numerically: at nk0's depth (~12 m, rn_si0=0.35) "
+        "the IR band's own fraction of I(z) is ~7.5e-16; at nkV's depth "
+        "(~840 m, rn_si1=23) total I(z) is ~5.8e-17 -- both already at fp64 "
+        "underflow, so legoESM's uniform full-column exponential (no nk0-"
+        "style truncation) converges to the SAME answer NEMO gets by "
+        "stopping early. wmask(jk+1) (used at every band-close in qsr_2BD, "
+        "traqsr.F90:394 etc.) already matches legoESM's own bottom no-flux "
+        "convention (frac_absorbed.at[...,-1].add(I_half[...,-1]), "
+        "shortwave_penetration.py:572); cfg.jerlov_water_type='I' already "
+        "matches DINO's rn_abs=0.58/rn_si0=0.35/rn_si1=23.0 verbatim "
+        "(namelist_ref:429-436). DIRECT MEASUREMENT (coverage_rows_"
+        "measure.py, fp64, e3t=both, reproduces this row's tuple exactly): "
+        "per-LEVEL relative error is FLAT at ~1.395e-05 from k=0 through "
+        "k=21 (every dumped nonzero level) -- a uniform multiplicative "
+        "bias, NOT decaying/growing at nk0's or nkV's transition depths as "
+        "a band-split bug would produce. The residual is instead LATITUDE-"
+        "structured: k=0 ratio ~1.0 near the equator (row 1-75), "
+        "diverging monotonically poleward to 1.0037 at row 189 (lat=66.5, "
+        "the domain's northernmost wet row) -- tracking the polar-night "
+        "clip boundary of dino_Q_sr_seasonal's max(Q0*cos(arg),0) "
+        "(dino.py:1773-1788): NEMO's own k=0 tendency magnitude at row 189 "
+        "is ~0.0048x its mid-latitude value (2.79e-6 vs 1.95e-8), a near-"
+        "zero forcing signal whose RELATIVE error is trivially amplified "
+        "by any small forcing phase difference near the clip -- the same "
+        "near-zero-crossing conditioning class as the ldf_slp regime-1/"
+        "regime-2 rows, not a vertical-penetration-scheme defect. Per THE "
+        "RULE (exact-match failure -> stop, no invented correction): NO "
+        "production code changed; row stays DEBT (median pointwise|rel| "
+        "1.324e-05 unchanged). The superseded PLAUSIBLE lead this "
+        "paragraph replaces (kept below for history, NOT a live target): "
         "(static-ladder, probe-blind) tuple: corr=0.99999996/"
         "ratio=0.99996836 (k=0), corr=0.99999999/ratio=0.99996218 "
         "(all-levels); median|rel| 6.653e-05 (k=0) / 2.022e-05 (all-"
@@ -1850,7 +2662,40 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "unchanged at HEAD reproduces corr=1.00000000/|ratio|=0.99999995/ "
         "err_norm median 7.076e-07 EXACTLY (identical to 4 sig figs in the "
         "err_norm). UNCHANGED, confirmed by direct re-measurement, not "
-        "assumed from the (independently-retracted) emp-term reasoning."),
+        "assumed from the (independently-retracted) emp-term reasoning.\n"
+        "RECONCILED AGAIN 2026-08-03 (#1455 final easy-queue item, HEAD "
+        "218939441 -- the zu_frc wind tau_x_prev/tau_y_prev sign fix): "
+        "PROVED (not assumed) this row is untouched by tracing the enclosing "
+        "function -- measure_ssh_atf (coverage_rows_measure.py:542-598) "
+        "never calls bridge_before_state_topo (the function the fix edits) "
+        "and never reads tau_x/tau_y at all; it is a direct ssh-only "
+        "calculation from raw dumps. Rerun reproduces corr=1.00000000/"
+        "|x|ratio=0.99999995/err_norm median=7.076e-07 bit-identical to the "
+        "recorded tuple -- no movement, confirmed not assumed.\n"
+        "LOCALISATION + CAUSE, same task (scratch probe, not committed; "
+        "ww-substitution precedent from the dyn_adv ZAD row): substituted "
+        "the EXACT-inverted Naa (the ssh value that, by construction of the "
+        "linear Asselin equation, reproduces NEMO's dumped 'after' exactly) "
+        "in place of the production Naa read from 'ssh_nxt / div_hor''s own "
+        "sshnxt_dump_ssh_after.bin dump, holding the forward _asselin "
+        "formula fixed. Result: err_norm COLLAPSES 7.076e-07 -> 0.000e+00 "
+        "exactly (pointwise, p99, max all 0.0) -- proving legoESM's "
+        "_asselin coefficient/sign/thickness-weighting transcription is "
+        "EXACT and carries zero defect of its own. The residual "
+        "|production Naa - exact Naa| median (3.869e-6) times gamma=0.1 "
+        "gives 3.869e-7, matching the row's actual |eta_f_lego-ssh_f_nemo| "
+        "absolute-error median (3.869e-7) to the last digit -- CONFIRMED "
+        "the entire ssh_atf residual is a LINEAR, 1:1 amplification "
+        "(factor gamma) of the upstream 'ssh_nxt / div_hor' row's own "
+        "recorded DEBT (ratio 1.000004, |ratio-1|~4e-6, itself outside its "
+        "1e-6 bar) -- the same ww->ZAD inheritance pattern already "
+        "established elsewhere in this file, now confirmed for ssh_atf too. "
+        "Per THE RULE: this is CONDITIONING/INHERITANCE with QUANTITATIVE "
+        "PROOF, not a transcription defect -- no production code changed. "
+        "Closing this row routes entirely through closing 'ssh_nxt / "
+        "div_hor' (already tracked DEBT, own root cause = the metric_"
+        "convention band, see that row's own note); ssh_atf is NOT an "
+        "independent thing to fix and should not be chased separately."),
     "tra_sbc":                       (1.00000000, 1.00000000,
         "RE-MEASURED 2026-07-30 AGAIN (#1226 probe-fix task, HEAD 9286b8309, "
         "coverage_rows_measure.py's measure_tra_sbc re-run UNMODIFIED at the "
@@ -1982,6 +2827,9 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
 # "regression" alarm.  A number without a measured-at commit is not evidence.
 MEASURED_AT: dict[str, str] = {
     # term -> git commit the number was measured at (short sha), or "" if unknown
+    # wzv (vertical velocity): first real measurement, #1455 queue item,
+    # wzv_row_measure.py (this task) -- HEAD at measurement time.
+    "wzv (vertical velocity)": "3232af85f",
     "bn2 (rn2b)": "825d22ee4",
     "eos_rab alpha": "825d22ee4",
     "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "c2533b7d6",
@@ -2001,6 +2849,12 @@ MEASURED_AT: dict[str, str] = {
     # quantity; ssh_atf's own emp-forcing-removal term was separately
     # confirmed algebraically zero for DINO, see coverage_rows_measure.py's
     # RETRACTED note) -- kept at its original 2026-07-30 measurement commit.
+    # RE-VERIFIED AGAIN at HEAD 218939441 (#1455 final easy-queue item,
+    # zu_frc wind tau_x_prev/tau_y_prev sign fix): reproduces bit-identical
+    # to 4 sig figs (corr/ratio/err_norm unchanged) -- the fix never touches
+    # this row's code path (traced: measure_ssh_atf calls neither
+    # bridge_before_state_topo nor reads tau_x/tau_y). Number kept at its
+    # original measurement commit since nothing moved.
     "ssh_atf": "b7872175b",
     # tra_sbc RE-MEASURED at 22a0b93cd (this probe-fix task; the divisor fix
     # itself landed at 5e9b0eb87, and the c_p truncation fix that ALSO moves
@@ -2014,10 +2868,13 @@ MEASURED_AT: dict[str, str] = {
     # production's dino.py:3384-3391 dispatch exactly, AND with the c_p fix
     # already live.
     "tra_sbc": "22a0b93cd",
-    # 2026-07-28 active_3d mask fix (see MEASUREMENTS note): re-measured at
-    # the commit that introduced _nemo_native_active_3d.
-    "ldf_slp wslpi": "7816b514e",
-    "ldf_slp wslpj": "7816b514e",
+    # 2026-08-03 (#1455 queue item 5): wslpi/wslpj re-measured after the hmlp
+    # live-(1+r3t)-stretch fix to _nemo_mld_from_n2_integral, measured at
+    # HEAD on the uncommitted working tree (this task's own change) --
+    # update to the real sha once committed. uslp/vslp untouched by that fix,
+    # stay pinned at their prior commit.
+    "ldf_slp wslpi": "HEAD (uncommitted, this task)",
+    "ldf_slp wslpj": "HEAD (uncommitted, this task)",
     "ldf_slp uslp": "7816b514e",
     "ldf_slp vslp": "7816b514e",
     # ldf_eiv kappa (aeiu): re-measured b4be5ee65 -- the 0.975163/1.032510
@@ -2074,15 +2931,28 @@ MEASURED_AT: dict[str, str] = {
     "traadv_fct tendency (T)": "c1ba30e39",
     "traadv_fct horizontal tend": "c1ba30e39",
     "traadv_fct vertical upstream flux": "c1ba30e39",
-    "traadv_fct (SALINITY)": "c1ba30e39",
-    "dyn_vor EEN u": "c8e5d305b",
-    "dyn_vor EEN v": "c8e5d305b",
+    # #1455 (2026-08-03): SALINITY's tuple genuinely moved (0.999952/0.999900
+    # -> 0.999940/1.000190) on re-measurement via traadv_fct_ww_inheritance.py's
+    # Rule 1e self-check -- reconciled as real numerics drift since c1ba30e39,
+    # not a probe defect (see the row's note). The other 4 rows' tuples are
+    # UNCHANGED (only their notes gained a #1455 ww-inheritance finding), so
+    # their MEASURED_AT stamps stay at c1ba30e39.
+    "traadv_fct (SALINITY)": "ed67e7302",
+    # 2026-08-03 (#1455 bisect): re-measured at HEAD on the uncommitted
+    # working tree (this task) -- old tuple (measured at c8e5d305b) did not
+    # reproduce; cause UNATTRIBUTED (see the rows' notes: #1418 attribution
+    # retracted by revert-A/B; leading candidate is the Jul 30 oracle-dump
+    # regeneration) -- update to the real sha once committed.
+    "dyn_vor EEN u": "HEAD (uncommitted, this task)",
+    "dyn_vor EEN v": "HEAD (uncommitted, this task)",
     "dyn_adv ZAD": "5bdcf219e",  # RE-MEASURED this task (ITEM 1/2), post-fix, active-only population; supersedes c8e5d305b
     "zdftke pdlr": "e0fac585e",
     "zdftke composite avt/avm": "e0fac585e",
     "dyn_spg_ts pssh": "c8e5d305b",
-    "dyn_spg_ts puu_b": "c8e5d305b",
-    "dyn_spg_ts un_adv": "c8e5d305b",
+    # stamp-refresh 2026-08-03: tuples reconfirmed at HEAD twice (a69fcbfd9 hair
+    # lane + the stale-sweep batch rerun); stamp had lagged the reconfirmations.
+    "dyn_spg_ts puu_b": "a69fcbfd9",
+    "dyn_spg_ts un_adv": "a69fcbfd9",
     "ATF filter u": "a8942794a",
     "ATF filter v": "a8942794a",
     "dyn_ldf (dynldf_lev_lap) u": "c8e5d305b",
@@ -2093,8 +2963,11 @@ MEASURED_AT: dict[str, str] = {
     "eiv transport u": "7e030db3e",
     "eiv transport v": "7e030db3e",
     "zdf_drg_nonlin T-point rate": "c8e5d305b",
-    "dyn_drg_init RHS increment": "c8e5d305b",
-    "dyn_cor_2d (69x/step)": "c8e5d305b",
+    # #1455 QUEUE ITEM 2 (2026-08-03): probes rebuilt from scratch (were
+    # phantom-provenance), re-measured at HEAD 18e6e185b -- bump per the
+    # "bump the stamp on every reconfirmation" rule (puu_b/un_adv lesson).
+    "dyn_drg_init RHS increment": "18e6e185b",
+    "dyn_cor_2d (69x/step)": "18e6e185b",
 }
 
 
@@ -2145,8 +3018,8 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct horizontal tend": "traadv_fct_probe.py",
     "traadv_fct vertical upstream flux": "traadv_fct_probe.py",
     "dyn_hpg (du)": "hpg_tendency_compare.py",
-    "dyn_vor EEN u": "probe_hpg_vor_1226.py",        # cited, never committed
-    "dyn_vor EEN v": "probe_hpg_vor_1226.py",         # "same probe/run as EEN u" per its own note
+    "dyn_vor EEN u": "_probe_1455_een_vor_bottom_bisect.py",  # #1455 bisect, scripts/tmp/ (gitignored _probe_* convention, never committed -- same as its predecessor probe_hpg_vor_1226.py)
+    "dyn_vor EEN v": "_probe_1455_een_vor_bottom_bisect.py",  # "same probe/run as EEN u" per its own note
     "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
     "dyn_adv ZAD": "zad_gate_corr_ratio_1226.py",  # RE-CORRECTED (this task): real-restart, 3-D-umask (active-only) measurement post-fix 5bdcf219e; supersedes unit_harness/run_dyn_zad_probe.py (synthetic-input, independent, DEBT either way -- see MEASUREMENTS history note) and the phantom probe_1226_keg_zad_split.py
     "zdftke pdlr": "zdftke_chain_walk.py",
@@ -2171,7 +3044,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_drg_init RHS increment": "probe_bottom_drag.py",
     "dyn_cor_2d (69x/step)": "probe_dyn_cor_2d.py",   # cited, never committed
     "traadv_fct (SALINITY)": "traadv_fct_probe.py",
-    "wzv (vertical velocity)": "coverage_rows_measure.py",
+    "wzv (vertical velocity)": "wzv_row_measure.py",  # RE-MEASURED #1455: coverage_rows_measure.py's own claim ("ww never dumped") was stale; supersedes it
     "tra_zdf (tracer implicit vertical solve)": "coverage_rows_measure.py",
     "dyn_zdf (momentum implicit vertical solve)": "coverage_rows_measure.py",
     "traldf_iso_lap tendency": "coverage_rows_measure.py",

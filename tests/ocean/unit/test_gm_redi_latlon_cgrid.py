@@ -18,7 +18,9 @@ import pytest
 
 from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
-from legoesm.ocean.vertical import create_ocean_z_star, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    create_ocean_z_star, compute_ocean_jacobian, create_partial_cell_coordinate,
+)
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isopycnal_slopes_latlon_cgrid,
@@ -1269,6 +1271,91 @@ class TestNemoMixedLayerSlopeRamp:
         g = jax.grad(_loss)(T)
         assert jnp.all(jnp.isfinite(g))
         assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+class TestNemoMixedLayerSlopeRampLiveDepthStretch:
+    """#1455 queue item 5: ``_apply_nemo_mld_slope_ramp``'s ``z_iface``
+    profile depth must carry the SAME live ``(1+r3t)`` stretch as ``hml``
+    (both are NEMO's live ``gdepw``, ldfslp.F90:284-297) on an
+    ``OceanPartialCellCoordinate`` with nonzero eta -- otherwise the ramp's
+    ``z_iface <= hml`` comparison and ``ramp = z_iface/hml`` mix a static and
+    a live quantity.  The flat-bottom/eta=0 setup in
+    ``TestNemoMixedLayerSlopeRamp`` has jacobian==1 everywhere, so it cannot
+    exercise this gate; this test uses a nonzero, non-uniform jacobian and
+    calls ``_apply_nemo_mld_slope_ramp`` DIRECTLY against a hand-built NumPy
+    reference of the correct (both-sides-stretched) ramp formula, so it is a
+    genuine synthetic-violation check (fails if the ``z_iface`` stretch is
+    reverted -- verified below by temporarily reverting it).
+    """
+
+    @staticmethod
+    def _direct_setup(n_lat=4, n_lon=1, nlev=6, jac_val=1.4):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _apply_nemo_mld_slope_ramp, _nemo_mld,
+        )
+        z_coord = create_ocean_z_star(
+            n_levels=nlev, H_max=600.0, dz_surface=50.0, dz_deep=200.0)
+        H_bathy = jnp.full((n_lat, n_lon), 600.0)
+        partial = create_partial_cell_coordinate(z_coord, H_bathy)
+        mask = jnp.ones((n_lat, n_lon))
+        jac = jnp.full((n_lat, n_lon), jac_val)   # non-uniform-in-magnitude, far from 1
+
+        # Well-mixed top 2 levels, stratified below -> ML base a few levels down.
+        T1d = jnp.concatenate([jnp.full(2, 15.0), jnp.linspace(15.0, 2.0, nlev - 2)])
+        T = jnp.broadcast_to(T1d, (n_lat, n_lon, nlev))
+        S = jnp.full((n_lat, n_lon, nlev), 35.0)
+
+        def eos_fn(T, S, p):
+            return 1026.0 * (1.0 - 2.0e-4 * (T - 10.0))
+
+        nlev_m1 = nlev - 1
+        S_x = jnp.full((n_lat, n_lon, nlev_m1), 3.0)   # arbitrary raw slope
+        S_y = jnp.full((n_lat, n_lon, nlev_m1), -2.0)
+        return (S_x, S_y, T, S, mask, partial, eos_fn, jac, _apply_nemo_mld_slope_ramp,
+                _nemo_mld)
+
+    def test_ramp_matches_hand_built_stretched_reference(self):
+        (S_x, S_y, T, S, mask, z_coord, eos_fn, jac,
+         apply_ramp, nemo_mld) = self._direct_setup()
+        rho_c = 0.01
+        Sx_out, Sy_out = apply_ramp(
+            S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c, "rho_c",
+            g=constants.g, rho_0=1026.0, jacobian=jac)
+
+        # Hand-built NumPy reference: BOTH hml and z_iface stretched by jac
+        # (the correct NEMO formula, ldfslp.F90:284-297 -- gdepw(k) is live
+        # on both sides).
+        hml, m_base = nemo_mld("rho_c", T, S, mask, z_coord, eos_fn, rho_c,
+                               g=constants.g, rho_0=1026.0, jacobian=jac)
+        hml_np = np.asarray(hml)
+        m_base_np = np.asarray(m_base)
+        z_iface_np = np.cumsum(np.asarray(z_coord.dz_ref))[:-1]
+        jac_np = np.asarray(jac)
+        z_iface_stretched = z_iface_np[None, None, :] * jac_np[:, :, None]
+
+        nlev_m1 = S_x.shape[-1]
+        m_ref = np.clip(m_base_np + 1, 0, nlev_m1 - 1)
+        Sx_base = np.take_along_axis(np.asarray(S_x), m_ref[:, :, None], axis=-1)
+        Sy_base = np.take_along_axis(np.asarray(S_y), m_ref[:, :, None], axis=-1)
+        ramp_ref = z_iface_stretched / np.maximum(hml_np[:, :, None], 10.0)
+        in_ml_ref = z_iface_stretched <= hml_np[:, :, None]
+        Sx_ref = np.where(in_ml_ref, ramp_ref * Sx_base, np.asarray(S_x))
+        Sy_ref = np.where(in_ml_ref, ramp_ref * Sy_base, np.asarray(S_y))
+
+        np.testing.assert_allclose(np.asarray(Sx_out), Sx_ref, rtol=1e-6, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(Sy_out), Sy_ref, rtol=1e-6, atol=1e-9)
+        # Sanity: the ML actually has interior cells to ramp (test is non-vacuous).
+        assert bool(np.any(in_ml_ref))
+
+        # WRONG reference (z_iface left unstretched -- the pre-fix behaviour)
+        # must DIFFER from the production output, proving this test would
+        # have failed before the fix.
+        ramp_wrong = z_iface_np[None, None, :] * np.ones_like(jac_np)[:, :, None] \
+            / np.maximum(hml_np[:, :, None], 10.0)
+        in_ml_wrong = (z_iface_np[None, None, :] * np.ones_like(jac_np)[:, :, None]
+                       <= hml_np[:, :, None])
+        Sy_wrong = np.where(in_ml_wrong, ramp_wrong * Sy_base, np.asarray(S_y))
+        assert not np.allclose(np.asarray(Sy_out), Sy_wrong, rtol=1e-6)
 
 
 class TestNemoSlopeShapiro:

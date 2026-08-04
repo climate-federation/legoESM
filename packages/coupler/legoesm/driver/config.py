@@ -2983,12 +2983,37 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     return d
 
 
-def experiment_config_from_dict(d: dict) -> ExperimentConfig:
+def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentConfig:
     """Reconstruct ExperimentConfig from a dict (e.g. loaded from JSON).
 
     Unknown fields are silently dropped for forward-compatibility
     (so older checkpoints with removed fields still load).
+
+    ``strict=True`` raises on any unknown key instead. Use it for LAUNCH
+    configs: silently dropping a key there means a typo -- e.g. ``grid.type``
+    where the field is ``grid_type`` -- loads cleanly and runs a DIFFERENT
+    experiment than the file describes, with nothing in the log to say so.
+    Checkpoint reload keeps the permissive default.
     """
+    if strict:
+        unknown = []
+        for key, cls in _SUB_CONFIGS.items():
+            if key in d and isinstance(d[key], dict):
+                known_sub = set(cls._fields)
+                unknown += [f"{key}.{k}" for k in d[key] if k not in known_sub
+                            and not (key == "output" and k == "evaluation")]
+                ev = d[key].get("evaluation")
+                if isinstance(ev, dict):
+                    unknown += [f"{key}.evaluation.{k}" for k in ev
+                                if k not in set(EvaluationConfig._fields)]
+        known_top = set(ExperimentConfig._fields)
+        unknown += [k for k in d if k not in known_top]
+        if unknown:
+            raise ValueError(
+                "unknown config field(s): " + ", ".join(sorted(unknown))
+                + ". Loading a launch config with strict=True refuses to "
+                  "silently drop keys, because a dropped key runs a different "
+                  "experiment than the file describes.")
     # Reconstruct sub-configs
     sub_values = {}
     for key, cls in _SUB_CONFIGS.items():
@@ -3091,7 +3116,12 @@ def save_experiment_config(config: ExperimentConfig, path: Path | str) -> None:
         json.dump(experiment_config_to_dict(config), f, indent=2, default=str)
 
 
-def load_experiment_config(path: Path | str) -> ExperimentConfig:
-    """Load ExperimentConfig from JSON file."""
+def load_experiment_config(path: Path | str, *,
+                          strict: bool = False) -> ExperimentConfig:
+    """Load ExperimentConfig from JSON file.
+
+    ``strict=True`` refuses unknown keys -- see
+    :func:`experiment_config_from_dict`. Launch scripts should pass it.
+    """
     with open(path) as f:
-        return experiment_config_from_dict(json.load(f))
+        return experiment_config_from_dict(json.load(f), strict=strict)

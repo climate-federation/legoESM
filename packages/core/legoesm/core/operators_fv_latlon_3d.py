@@ -193,6 +193,7 @@ def cgrid_fv_flux_divergence_latlon_3d(
     v_face_3d: jax.Array,
     grid: LatLonGrid,
     limiter: bool = True,
+    q_pad: jax.Array | None = None,
 ) -> jax.Array:
     """Conservative PPM flux divergence using C-grid face velocities (3D).
 
@@ -219,8 +220,13 @@ def cgrid_fv_flux_divergence_latlon_3d(
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad scalar with halo=2 for PPM reconstruction (all levels at once)
-    q_pad = pad_halo_latlon_3d(q_3d, halo=2)
+    # Pad scalar with halo=2 for PPM reconstruction (all levels at once).
+    # ``q_pad`` lets the caller supply a pre-padded field so several
+    # PPM-advected scalars ride ONE grouped halo exchange (the lat-lon
+    # packing work, 2026-08-04): shape must be the halo=2 fold-family
+    # pad of ``q_3d`` — i.e. exactly ``pad_halo_latlon_3d(q_3d, halo=2)``.
+    if q_pad is None:
+        q_pad = pad_halo_latlon_3d(q_3d, halo=2)
 
     # --- Longitude flux ---
     q_L_lon, q_R_lon = _ppm_reconstruct_lon_3d(q_pad, limiter)  # (n_lat, n_lon+1, nlev)
@@ -279,6 +285,7 @@ def cgrid_fv_scalar_advection_latlon_3d(
     v_face_3d: jax.Array,
     grid: LatLonGrid,
     limiter: bool = True,
+    q_pad: jax.Array | None = None,
 ) -> jax.Array:
     """PPM advection of scalar by C-grid face velocities (3D, advective form).
 
@@ -298,7 +305,7 @@ def cgrid_fv_scalar_advection_latlon_3d(
     jax.Array, shape (n_lat, n_lon, nlev)
     """
     flux_form = cgrid_fv_flux_divergence_latlon_3d(
-        q_3d, u_face_3d, v_face_3d, grid, limiter,
+        q_3d, u_face_3d, v_face_3d, grid, limiter, q_pad=q_pad,
     )
     div_v = _cgrid_velocity_divergence_3d(u_face_3d, v_face_3d, grid)
     return flux_form + q_3d * div_v

@@ -262,3 +262,79 @@ Interpretation, decided in advance so the result is not read after the fact:
 `eddy_ke` by subtracting **face-local** components rather than geographic winds.
 That diagnostic must be recomputed before it is used physically — on the cube,
 face-local and geographic eddy fields are different quantities.
+
+## Claims tightened (2026-08-02, external review)
+
+The three headline results above were stated too strongly. Each is real, but each
+certifies less than the wording implied.
+
+**The W2 twin is an EXTERNAL, not a controlled, comparison.** Our runner samples
+through a `c2l-ord2` lens with nearest-cell remapping
+(`run_duo_stepper_w2.py:7`), while the Zenodo reference is regridded with
+`fregrid`. The gate itself says so (`w2_duo_oracle_gate.py:12`). So `0.0167`
+reproducing the baseline exactly is faithful **for the declared bounded-duo
+configuration and that observable** — it is not a like-for-like field comparison
+against the Fortran.
+
+**Equal modon peaks establish symmetry and amplitude only.** `peakW == peakE` to
+every digit rules out cube-induced asymmetry in the peak, and day-5 `19.753` vs
+`19.75` matches the amplitude baseline. Neither statement constrains **phase,
+trajectory, or field fidelity**. The stronger check is a native-lattice
+checkpoint comparison; the modon runner already supports state dumps
+(`run_duo_stepper_modon.py:63`).
+
+**The visual gate is a regression fingerprint, not a physical oracle.** It
+generates its baseline from the same model (`visual_regression.py:137`, `:182`),
+so `SSIM 1.0000` means "unchanged since the reference was taken", not "physically
+correct". CI runs it non-blocking (`ci.yml:223`).
+
+None of this retracts a measurement. It bounds what the measurements support.
+
+## Ranked improvements (external review, by expected error reduction)
+
+1. **Make a recipe the executable source of truth.** One checked-in recipe fixes
+   case, grid, nlev, vertical coordinate, dt policy, days, oracle mode, required
+   flags, artifact schema, reference digest, commit and scheduler profile; a
+   single submitter resolves, validates, submits and writes `run.json`, and
+   `.sbatch` files become thin executors. Gates must **reject** an artifact whose
+   embedded recipe hash, `n`, `dt`, `ext_bundle`, `oracle_conventions`,
+   vector-corner mode or reference digest disagree with the request — turning a
+   dropped flag into a contract failure instead of an interpretive mistake. This
+   alone removes nearly all six launch errors made during this audit;
+   `duo_stepper_w2.sbatch:16` can currently pass `--ext-bundle` without
+   `--oracle-conventions`, and `w2_duo_oracle_gate.py:69,:149` trusts a
+   caller-supplied `--res`.
+2. **Separate model-state diagnosis from generic-driver control**, via
+   matrix-native day-10 checkpoints, and replace the Held-Suarez health quantity
+   with a named physical diagnostic — area-weighted zonal-mean geographic
+   eastward jet at a stated latitude/level, plus EKE and the latitude/level of
+   the peak. The present gate compares a **pointwise local wind magnitude**
+   against prose about a ~30 m/s **zonal-mean** jet
+   (`run_atmosphere_test_matrix.py:527`, `:4299`). The dead jet is real; the
+   comparison is not like-for-like.
+3. **Put the cube-fidelity tests in required CI and test the merge result.** CI
+   collects everything but executes only selected grid files (`ci.yml:74`,
+   `:169`) — the raw-slot, metric-pair, W2 gate and D-grid regression tests are
+   not among them. Add a required `cube-fidelity` job, add `merge_group`
+   triggers, require checks on the merge SHA, and dismiss stale approvals. The
+   stale-head merge that dropped this campaign's review fixes is exactly what
+   that prevents.
+4. **Replace the remaining blind and common-mode tests.** Named as highest risk:
+   `test_dgrid_metric_pair_halo.py:48` (sign test compares the helper to itself;
+   uniform field cannot expose orientation), `test_dgrid_vector_halo_iter1078.py:12`
+   and `test_dgrid_halo_iter1076.py:30` (spatially constant faces make reversal
+   invisible; the latter explicitly accepts axis-swap edge fallback),
+   `test_d2a2c_ua_va_halo.py:49` (its reference is the same implementation, and
+   its "not a four-corner average" control uses unrelated random corners), and
+   the `iter326`/`iter335`/`iter234` imprint A/Bs, which prove wiring changes
+   something rather than that either branch is right. The raw-slot canonical
+   table from #1445 is the pattern to copy. Residual gap: face IDs still come
+   from repo `CONNECTIVITY` (`dgrid_halo.py:382`) — one stretched-C5 FV3 slot
+   dump would close it as a fixture.
+5. **Do not make the corner-divergence port the next investment.** It is real
+   fidelity debt and eventually necessary for NH, but it is gated off, the
+   standard HS CDD settings default to zero (`run_atmosphere_test_matrix.py:4111`),
+   and it cannot explain the dead jet. When it is done, do it as **one vertical
+   slice** — raw slots, paired metrics and `d2a2c` wired together, validated
+   against an independent fixture, real-metric solid body XPASSing, TC1 restored
+   — rather than accruing more helper-only work.
