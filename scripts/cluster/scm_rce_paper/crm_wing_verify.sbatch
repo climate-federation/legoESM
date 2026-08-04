@@ -88,6 +88,33 @@ $PY scripts/data/fetch_rcemip_reference.py \
 echo "fetch rc=$?"
 
 echo
+echo "##### 6. END-TO-END: can run_scm_rce_campaign CONSUME the reference? ####"
+echo "  (file count is not evidence -- call the campaign's OWN reader)"
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu $PY - <<'PYEOF2' 2>&1 | tail -40
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("scripts/run").resolve()))
+import numpy as np
+import run_scm_rce_campaign as camp
+ref_dir = pathlib.Path(
+    "/burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300")
+prof = camp.build_reference_profiles(ref_dir, last_n=5)
+print("build_reference_profiles OK ->", type(prof).__name__)
+for f in getattr(prof, "_fields", []):
+    v = getattr(prof, f)
+    a = np.asarray(v) if not isinstance(v, (str, type(None))) else None
+    if a is not None and a.ndim:
+        print(f"  {f:28s} shape={a.shape} finite={bool(np.all(np.isfinite(a)))}"
+              f" range=[{float(np.nanmin(a)):.4g}, {float(np.nanmax(a)):.4g}]")
+    else:
+        print(f"  {f:28s} = {v}")
+sig = camp.make_sigma_coordinate_from_reference(prof)
+print("make_sigma_coordinate_from_reference OK; nlev =",
+      np.asarray(sig.p_full if hasattr(sig, "p_full") else sig.sigma_full).size)
+print("CAMPAIGN_CONSUME=OK")
+PYEOF2
+echo "consume rc=$?"
+
+echo
 echo "--- reference dir contents ---"
 ls -la /burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300/snapshots3d/ 2>&1 | tail -12
 echo "vol count: $(ls /burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300/snapshots3d/vol_*.npz 2>/dev/null | wc -l)"
