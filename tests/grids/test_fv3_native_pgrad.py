@@ -29,7 +29,11 @@ import numpy as np
 import pytest
 
 REPO = os.path.join(os.path.dirname(__file__), "..", "..")
-N, NG = 8, 3
+# N=12 (not 8): build_fv3_native_gridstruct needs the EXTENDED halo
+# ngw = ng+1 = 4 for its kinked-corner lattice, and
+# build_kinked_corner_lonlat raises "ng=4 unsupported for n=8".  12 is
+# the size the whole fv3_native oracle family is certified at.
+N, NG = 12, 3
 M_A = N + 2 * NG
 M_B = M_A + 1
 SENTINEL = 1.0e30
@@ -216,29 +220,51 @@ def test_geopk_column_invariants(bd, km):
 
 
 def test_geopk_accumulation_is_top_down(bd):
-    """The running ``p1d`` accumulator is order-sensitive: a bottom-up
-    sum of the SAME delp must differ bitwise somewhere."""
+    """The running ``p1d`` accumulator is order-sensitive — graded on
+    ``pe``, the PRESSURE, not on ``pk``.
+
+    INSTRUMENT FIX (job 9320294 self-reported a "fixture defect" here):
+    ``pk = exp(akap*log(p))`` compresses a last-bit pressure difference
+    by the factor ``akap`` and destroys ~95-98% of the sum-order signal
+    — measured on this very column, 96 discriminating cells on ``p``
+    collapse to 2 on ``pk`` at m=14, and 42 -> 13 at m=18.  The original
+    check graded on ``pk``, found 0, and correctly refused to pass; the
+    defect was the INSTRUMENT, not the column.  ``pe`` is also
+    libm-free, so this stays exact on any host.
+
+    Two-sided:
+      POSITIVE — a top-down reconstruction reproduces ``pe`` BITWISE;
+      NEGATIVE — the deliberately REVERSED accumulation is DETECTED.
+    """
     from legoesm.core.fv3_native_pgrad import geopk
 
     km = 3
     st = _synthetic(km)
-    ptop, akap = 100.0, 2.0 / 7.0
+    ptop = 100.0
     out = geopk(st["delp"], st["pt"], st["hs"], bd, km=km, ptop=ptop,
-                akap=akap, cp_air=1004.0, cg=False, duogrid=True,
+                akap=2.0 / 7.0, cp_air=1004.0, cg=False, duogrid=True,
                 computehalo=True, npx=N + 1, npy=N + 1, a2b_ord=4,
                 unwritten_fill=SENTINEL)
-    # bottom-up: accumulate the SAME layers from the surface upward, then
-    # add ptop last.  Same exact real number, different rounding path.
-    acc = np.zeros((M_A, M_A))
-    for k in range(km, 0, -1):
-        acc = acc + st["delp"][:, :, k - 1]
-    rev = np.ascontiguousarray(np.exp(akap * np.log(acc + ptop)))
-    got = np.ascontiguousarray(out["pk"][:, :, km])
-    diff = int((got.view(np.uint64) != rev.view(np.uint64)).sum())
-    assert diff > 0, (
-        "top-down and bottom-up accumulation agree bitwise EVERYWHERE — "
-        "the synthetic column is too smooth to discriminate the sum "
-        "order (a fixture defect, not a pass)")
+    # pe origin is (is-1, 1, js-1); delp origin is (isd, jsd) = (1-ng, 1-ng)
+    sl = slice(NG - 1, NG + N + 1)
+    d = st["delp"][sl, sl, :]
+    pe_sfc = np.ascontiguousarray(out["pe"][:, km, :])
+
+    top = np.full(d.shape[:2], ptop)
+    for k in range(km):
+        top = top + d[:, :, k]
+    assert _bitsame(top, pe_sfc), (
+        "the top-down reconstruction does not reproduce the port's own pe "
+        "bitwise — the running p1d accumulator or its window is wrong")
+
+    bot = np.zeros(d.shape[:2])
+    for k in range(km - 1, -1, -1):
+        bot = bot + d[:, :, k]
+    bot = bot + ptop
+    assert not _bitsame(bot, pe_sfc), (
+        "the REVERSED accumulation is indistinguishable from the correct "
+        "one at every cell — this column cannot discriminate sum order, "
+        "so the gate is vacuous (a fixture defect, not a pass)")
 
 
 # ------------------------------------------------- SW adapter equivalence

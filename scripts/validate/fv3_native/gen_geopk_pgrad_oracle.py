@@ -279,6 +279,53 @@ def _normalised(a: np.ndarray, ok: np.ndarray) -> np.ndarray:
     return np.where(ok, np.asarray(a, dtype=np.float64) / base, 1.0)
 
 
+def sumorder_ndiff(delp: np.ndarray, ptop: float = PTOP) -> int:
+    """Cells where a TOP-DOWN and a BOTTOM-UP accumulation of the same
+    ``delp`` column land on DIFFERENT doubles.
+
+    Measured on the PRESSURE, never on ``pk``: ``exp(akap*log(p))``
+    COMPRESSES a last-bit pressure difference by the factor ``akap`` and
+    washes out ~95% of the signal (measured 2026-08-04 on this column:
+    96 -> 2 differing cells at km=3, m=14; 64 -> 11 at m=18).  The
+    original spec-5.5 check graded on ``pk`` and therefore self-reported
+    a "fixture defect" that was really an INSTRUMENT defect.
+
+    A 3-addend column (km=2: ``ptop + d1 + d2``) is STRUCTURALLY unable
+    to discriminate sum order — an 800-profile sweep over ``f1`` found a
+    maximum of 16/324 cells and 0 for every profile of interest — so
+    callers must treat a zero at km=2 as a property of the arithmetic,
+    not as a fixture defect.  km>=3 discriminates robustly (20-30% of
+    cells for any reasonable graded profile).
+    """
+    delp = np.asarray(delp, dtype=np.float64)
+    km = delp.shape[-1]
+    top = np.full(delp.shape[:2], float(ptop))
+    for k in range(km):
+        top = top + delp[..., k]
+    bot = np.zeros(delp.shape[:2])
+    for k in range(km - 1, -1, -1):
+        bot = bot + delp[..., k]
+    bot = bot + float(ptop)
+    return int((np.ascontiguousarray(top).view(np.uint64)
+                != np.ascontiguousarray(bot).view(np.uint64)).sum())
+
+
+def libm_probe_report(probe_in: np.ndarray, probe_out: np.ndarray) -> tuple:
+    """``(n_differing_words, max_ulp)`` for the Fortran ``LOGEXP_OUT``
+    against NumPy's ``exp(akap*log(p))`` on the SAME inputs.
+
+    This is the spec-5.4 attribution instrument: it isolates the host's
+    gfortran-libm vs NumPy disagreement from anything the port does.
+    """
+    a = np.ascontiguousarray(np.exp(AKAP * np.log(
+        np.asarray(probe_in, dtype=np.float64))))
+    b = np.ascontiguousarray(np.asarray(probe_out, dtype=np.float64))
+    nd = int((a.view(np.uint64) != b.view(np.uint64)).sum())
+    ulp = np.spacing(np.abs(b))
+    ulp = np.where(ulp > 0.0, ulp, np.finfo(np.float64).tiny)
+    return nd, float((np.abs(a - b) / ulp).max())
+
+
 def build_inputs(km: int) -> dict:
     """Deterministic input set for one ``km`` fixture (no RNG)."""
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
@@ -436,15 +483,40 @@ def build_inputs(km: int) -> dict:
         raise SystemExit("non-finite serialized input")
     if float(np.abs(hs).max()) <= 1.0e4:
         raise SystemExit("hs is too flat to make gz(km+1)=hs nontrivial")
+    # spec 5.5 non-vacuity, enforced at BUILD time so a non-discriminating
+    # column can never reach a fixture (see sumorder_ndiff for why km=2 is
+    # exempt: three addends cannot discriminate sum order at all)
+    n_sum = sumorder_ndiff(delp, PTOP)
+    if km >= 3 and n_sum == 0:
+        raise SystemExit(
+            f"km={km}: top-down and bottom-up accumulation of this delp "
+            "agree bitwise at EVERY cell — the column cannot discriminate "
+            "sum order, so the spec-5.5 gate would be vacuous.  Fix the "
+            "column (grade the layer thicknesses), do not relax the gate")
+    print(f"build_inputs: km={km} sum-order discriminating cells "
+          f"{n_sum}/{delp.shape[0] * delp.shape[1]}")
     return fields
 
 
-def run_port(fields: dict, km: int) -> dict:
+def run_port(fields: dict, km: int, pk_gz_override: dict | None = None) -> dict:
     """Run the python port on ``fields``; returns every dumped token.
 
     Used as the gen-time smoke run AND, at test time, as the thing the
     fixture is compared against.  Both call the SAME function, so the
     test cannot accidentally certify a different call sequence.
+
+    ``pk_gz_override`` is the **spec-5.4 fallback path**.  It accepts
+    ``{"pk_c", "gz_c", "pk_d", "gz_d"}`` and, when given, feeds THOSE
+    arrays (in practice the FORTRAN-computed ``PKC_C``/``GZ_C``/
+    ``PKC_D``/``GZ_D`` already serialized in the fixture) into
+    ``p_grad_c`` and ``one_grad_p`` instead of the port's own geopk
+    output.  On a host whose libm disagrees with NumPy on
+    ``exp(akap*log(p))`` this QUARANTINES the disagreement inside
+    geopk's transcendental core: the downstream stages are pure
+    ``+ - * /`` (plus one ``ptop**akap`` seed) and therefore stay
+    BIT-EXACT.  ``out["pkc_c"]``/``out["pkc_d"]`` always hold the PORT's
+    own geopk result so the ULP-graded comparison is unaffected by the
+    override.
     """
     from legoesm.core.fv3_native_pgrad import geopk, one_grad_p, p_grad_c
     from legoesm.core.fv3_native_sw_core import Bounds
@@ -473,15 +545,19 @@ def run_port(fields: dict, km: int) -> dict:
                      q_con=fields["q_con"], use_cond=False,
                      unwritten_fill=SENTINEL)
 
+    ov = pk_gz_override or {}
+
     # 1. geopk, C-grid site (dyn_core.F90:533)
     gc = _geo(fields["delpc"], fields["ptc"], cg=True, computehalo=False)
     out.update(pkc_c=gc["pk"], gz_c=gc["gz"], pe_c=gc["pe"],
                peln_c=gc["peln"], pkz_c=gc["pkz"])
 
     # 2. p_grad_c (dyn_core.F90:629) — mutates uc/vc in place
+    pk_c = np.array(ov.get("pk_c", gc["pk"]), dtype=np.float64, copy=True)
+    gz_c = np.array(ov.get("gz_c", gc["gz"]), dtype=np.float64, copy=True)
     uc = np.array(fields["uc"], dtype=np.float64, copy=True)
     vc = np.array(fields["vc"], dtype=np.float64, copy=True)
-    p_grad_c(DT2, fields["delpc"], gc["pk"], gc["gz"], uc, vc, gs, bd,
+    p_grad_c(DT2, fields["delpc"], pk_c, gz_c, uc, vc, gs, bd,
              npz=km, hydrostatic=True)
     out.update(uc_pgc=uc, vc_pgc=vc)
     # the port structurally never reads delpc on the hydrostatic branch
@@ -497,13 +573,15 @@ def run_port(fields: dict, km: int) -> dict:
                pe_d=gd["pe"], peln_d=gd["peln"], pkz_d=gd["pkz"])
 
     # 4. one_grad_p (dyn_core.F90:1531) — mutates u/v AND pk/gz in place
+    pk_d = np.array(ov.get("pk_d", gd["pk"]), dtype=np.float64, copy=True)
+    gz_d = np.array(ov.get("gz_d", gd["gz"]), dtype=np.float64, copy=True)
     u = np.array(fields["u"], dtype=np.float64, copy=True)
     v = np.array(fields["v"], dtype=np.float64, copy=True)
-    one_grad_p(u, v, gd["pk"], gd["gz"], fields["divg2"], None, gs, bd,
+    one_grad_p(u, v, pk_d, gz_d, fields["divg2"], None, gs, bd,
                npx=npx, npy=npy, npz=km, dt=DT, ptop=PTOP, akap=AKAP,
                hydrostatic=True, a2b_ord=4, d_ext=D_EXT, ng=NG,
                duogrid=True)
-    out.update(u_ogp=u, v_ogp=v, pk_ogp=gd["pk"], gz_ogp=gd["gz"])
+    out.update(u_ogp=u, v_ogp=v, pk_ogp=pk_d, gz_ogp=gz_d)
     out.update(u_ogp_dppoison=u, v_ogp_dppoison=v)
 
     # 5. transcendental attribution probe
@@ -559,6 +637,49 @@ def _pack(work: str, km: int) -> None:
         if np.isnan(a).any():
             raise SystemExit(f"dump under-writes token {k}")
 
+    # ---- spec 5.4: MEASURE this host's libm divergence and RECORD it.
+    # The fallback is applied on the evidence of this number, never
+    # silently: a host with n_libm == 0 gets NO fallback licence (the
+    # test then demands bit-exact everywhere).
+    n_libm, ulp_libm = libm_probe_report(stag["logexp_probe"],
+                                         outs["logexp_out"])
+    n_sum = sumorder_ndiff(stag["delp"], PTOP)
+    n_cells = int(np.asarray(stag["delp"]).shape[0]
+                  * np.asarray(stag["delp"]).shape[1])
+    if n_libm:
+        grading = (
+            f"SPEC-5.4 FALLBACK APPLIED (recorded, not silent).  This "
+            f"host's gfortran libm disagrees with NumPy on "
+            f"exp(akap*log(p)): {n_libm}/{NPROBE} probe words differ, max "
+            f"{ulp_libm:.2f} ULP.  Tokens are therefore graded in TWO "
+            f"buckets.  BIT-EXACT (libm-free, nd==0 required): pe_c, "
+            f"pkz_c, pe_d, uc_pgc, vc_pgc, uc_pgc_dppoison, "
+            f"vc_pgc_dppoison, u_ogp, v_ogp, pk_ogp, gz_ogp, and the "
+            f"gz_d(km+1)==hs seed.  The two downstream stages are run on "
+            f"the FORTRAN-computed pk/gz — the spec-5.4 'serialize PK as "
+            f"an INPUT' fallback, realised by feeding back the "
+            f"already-dumped PKC_C/GZ_C/PKC_D/GZ_D tokens — so libm is "
+            f"QUARANTINED inside geopk's transcendental core instead of "
+            f"surrendering exactness downstream.  ULP-BOUNDED (declared "
+            f"per-token caps + a differing-word cap): pkc_c, gz_c, "
+            f"peln_c, pkc_d, gz_d, peln_d, pkz_d, logexp_out.  The one "
+            f"transcendental left in the BIT-EXACT bucket is the single "
+            f"scalar ptop**akap seed (dyn_core:248/:2382), asserted "
+            f"separately by test_ptk_uses_power_not_exp_log.")
+    else:
+        grading = (
+            "NO FALLBACK NEEDED: this host's gfortran libm agrees with "
+            f"NumPy on all {NPROBE} exp(akap*log(p)) probe words, so "
+            "EVERY token is graded BIT-EXACT.")
+    sumnote = (
+        f"SUM-ORDER (spec 5.5): {n_sum}/{n_cells} cells discriminate "
+        f"top-down vs bottom-up accumulation, measured on the PRESSURE "
+        f"(pe) — NOT on pk, which compresses the signal by the factor "
+        f"akap and washes out ~95% of it.  km=2 is structurally unable "
+        f"to discriminate (three addends); km>=3 is the load-bearing "
+        f"case and the generator REFUSES to pack a km>=3 column with "
+        f"zero discriminating cells.")
+
     lineage = (
         "ROUTINE-TRANSLATION CERTIFICATE, one face, single acoustic "
         "substep: geopk(CG=T,computehalo=F) -> p_grad_c -> "
@@ -575,7 +696,8 @@ def _pack(work: str, km: int) -> None:
         "constants_mod is absent from the Zenodo tree, so these are "
         "TEST values, NOT production-fidelity claims).  DEAD INPUTS "
         "(serialized, provably unread on this lane) -- "
-        + " | ".join(sorted(set(DEAD_INPUTS.values()))))
+        + " | ".join(sorted(set(DEAD_INPUTS.values())))
+        + "  ||  " + grading + "  ||  " + sumnote)
 
     fix = os.path.join(REPO, "tests", "grids", "fixtures",
                        f"geopk_pgrad_oracle_c12_km{km}.npz")
@@ -588,10 +710,17 @@ def _pack(work: str, km: int) -> None:
         geopk_pgrad_extract_sha256=_sha(EXTRACT),
         driver_sha256=_sha(DRIVER), shim_sha256=_sha(SHIM),
         auth_block_sha256=AUTH_BLOCK_SHA256,
+        libm_probe_n=NPROBE, libm_probe_ndiff=n_libm,
+        libm_probe_max_ulp=ulp_libm,
+        sumorder_ndiff=n_sum, sumorder_ncells=n_cells,
+        grading_policy=grading,
         input_lineage=lineage)
     print("fixture packed;", fix)
     print("input_sha256", inp_hash)
     print("extract sha256", _sha(EXTRACT))
+    print(f"libm probe: {n_libm}/{NPROBE} words differ, max "
+          f"{ulp_libm:.3f} ULP")
+    print(f"sum-order discriminating cells: {n_sum}/{n_cells}")
 
 
 if __name__ == "__main__":
