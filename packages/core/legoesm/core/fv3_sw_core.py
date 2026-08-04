@@ -1352,20 +1352,36 @@ class _D2A2CFields(NamedTuple):
     ss_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg S, h1 halo
 
 
-def d2a2c_global_fields(u_d, v_d, cdgrid):
+def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False):
     """Compute the global padded fields the A→C step (and the tiled stage)
     consume: D→A covariant winds (:func:`d2a2c_d_to_a`), the A-grid
     contravariant ua/va, the staggered dx/dy, and the halo-padded sin_sg
     edge components.  Single source for both d2a2c_vect and the tiled
     per-tile kernels (P4 phase-1b approach C — the tiled stage runs the cheap
-    D→A globally then shards these into the per-tile A→C)."""
+    D→A globally then shards these into the per-tile A→C).
+
+    ``real_metric_ghosts`` (2026-08-04): Fortran evaluates the ghost-ring
+    ua/va (sw_core.F90:3513, spans TWO ghost rings) with REAL gridstruct halo
+    metrics; the default ``mode='edge'`` pads replicate the edge value
+    instead, corrupting every ghost-ring ua/va a consumer reads across a
+    panel seam (the ``divergence_corner`` O(1/dx) boundary residual).  True
+    switches cosa_s/rsin2 to the faithful cross-seam ring
+    (:func:`~legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d`,
+    cos-type sign law).  Default False = bit-identical legacy behaviour."""
     grid = cdgrid.base
     h = 2
     utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    if real_metric_ghosts:
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        cos_sg5_pad = pad_halo_dgrid_cell_scalar_4d(
+            cos_sg5[..., None], cos_type=True, halo=h)[..., 0]
+        rsin2_pad = pad_halo_dgrid_cell_scalar_4d(
+            rsin2[..., None], cos_type=False, halo=h)[..., 0]
+    else:
+        cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+        rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
     ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
     va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
@@ -1380,7 +1396,7 @@ def d2a2c_global_fields(u_d, v_d, cdgrid):
                         sn_pad_y, ss_pad_y)
 
 
-def d2a2c_ua_va_halo(u_d, v_d, cdgrid):
+def d2a2c_ua_va_halo(u_d, v_d, cdgrid, real_metric_ghosts=False):
     """FV3 D->A ``ua``/``va`` with exactly ONE A-grid halo ring.
 
     The corner-divergence routine needs A-grid winds that already carry a
@@ -1393,23 +1409,32 @@ def d2a2c_ua_va_halo(u_d, v_d, cdgrid):
     ``(6, n+2, n+2)`` -- physical cells at ``[1:-1, 1:-1]`` -- sliced from
     the h2 ring that :func:`d2a2c_global_fields` already computes, so no
     additional halo exchange is issued.
+
+    ``real_metric_ghosts=True`` (2026-08-04): the ring is evaluated with the
+    faithful cross-seam cosa_s/rsin2 halo instead of edge replication (see
+    :func:`d2a2c_global_fields`).  The four ring CORNER cells are then
+    poisoned (SG_BIG_NUMBER products) — FV3's fill-corner convention for
+    them is unverified here, and the divergence-corner consumer provably
+    masks them out; a reader that does consume them fails loudly.
     """
-    fields = d2a2c_global_fields(u_d, v_d, cdgrid)
+    fields = d2a2c_global_fields(u_d, v_d, cdgrid,
+                                 real_metric_ghosts=real_metric_ghosts)
     return fields.ua_pad[:, 1:-1, 1:-1], fields.va_pad[:, 1:-1, 1:-1]
 
 
-def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid):
+def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid, real_metric_ghosts=False):
     """All-levels-one-message counterpart of :func:`d2a2c_ua_va_halo`.
 
     Returns ``(6, n+2, n+2, nlev)``.  Uses :func:`d2a2c_global_fields_4d`,
     whose single vector halo covers every level in one message.
     """
-    fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid)
+    fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid,
+                                    real_metric_ghosts=real_metric_ghosts)
     return (fields.ua_pad[:, 1:-1, 1:-1, :],
             fields.va_pad[:, 1:-1, 1:-1, :])
 
 
-def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
+def d2a2c_global_fields_4d(u_d, v_d, cdgrid, real_metric_ghosts=False):
     """4D (all-levels-one-message) :func:`d2a2c_global_fields` (#811).
 
     The single VECTOR wind halo is done once via :func:`d2a2c_d_to_a_4d`; every
@@ -1426,8 +1451,15 @@ def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
     utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(u_d, v_d, cdgrid)   # (6, n+4, n+4, nlev)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    if real_metric_ghosts:
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        cos_sg5_pad = pad_halo_dgrid_cell_scalar_4d(
+            cos_sg5[..., None], cos_type=True, halo=h)[..., 0]
+        rsin2_pad = pad_halo_dgrid_cell_scalar_4d(
+            rsin2[..., None], cos_type=False, halo=h)[..., 0]
+    else:
+        cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+        rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
     # [..., None] broadcasts the 2D grid constant over the trailing level axis.
     ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]
     va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]

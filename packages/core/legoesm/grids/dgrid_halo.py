@@ -543,6 +543,87 @@ def _sg_fill_diagonals(sin_p, cos_p, n):
     return sin_p, cos_p
 
 
+# --- FV3 cell-centre metric halo (2026-08-04) --------------------------------
+# ``d2a2c_vect`` computes the A-grid contravariant ua/va over the FULL data
+# domain (Fortran ``is-1-id .. ie+1+id`` = TWO ghost rings, sw_core.F90:3513)
+# from utmp/vtmp and the CELL-CENTRE metrics cosa_s/rsin2, whose ghost values
+# in FV3 come from the gridstruct halo: fv_grid_utils evaluates them locally
+# at ghost positions from the mpp-exchanged grid geometry.  For the same
+# physical cell seen across a seam, the tangent pair relabels as
+# (e_i, e_j) -> (e_j, -e_i) per quarter turn, so cos(angle) picks up a sign
+# while sin-even quantities copy through — the phase-2B rot90 remap law
+# (cos-type odd, sin/rsin even).  Edge-replicating these pads instead (the
+# pre-2026-08-04 behaviour) feeds d2a2c's ghost-ring ua/va with wrong metric
+# values, which ``divergence_corner`` then consumes at panel boundaries.
+
+
+def pad_halo_dgrid_cell_scalar_4d(
+    q: jax.Array,
+    *,
+    cos_type: bool = False,
+    halo: int = 2,
+) -> jax.Array:
+    """Halo a cell-centre scalar metric (``cosa_s``/``rsin2``-like).
+
+    Parameters
+    ----------
+    q : (6, n, n, nlev)
+        Cell-centre metric field.
+    cos_type : bool
+        ``True`` for quantities that transform like ``e_i . e_j``
+        (``cosa_s`` = ``cos_sg[..., 4]``): ghost strips across the eight
+        quarter-turn seams are negated.  ``False`` for even quantities
+        (``rsin2``, ``sin_sg``-center): plain copies everywhere.
+    halo : int
+        Ghost rings per side (default 2, matching Fortran's UA/VA span).
+
+    Returns
+    -------
+    (6, n+2*halo, n+2*halo, nlev) with physical cells at
+    ``[halo:-halo, halo:-halo]``.  The four ``halo x halo`` diagonal corner
+    blocks are POISONED at :data:`SG_BIG_NUMBER`: FV3 fills cell-centre
+    corner regions with its fill_corners AGRID convention, which no
+    consumer of THIS helper reads (divergence_corner's boundary forms mask
+    them out; edge_interpolate4 stencils stay on physical rows), so an
+    obviously wrong number is safer than an unverified convention.
+    """
+    if q.ndim != 4:
+        raise ValueError(
+            f"pad_halo_dgrid_cell_scalar_4d requires (6, n, n, nlev); got "
+            f"{tuple(q.shape)}")
+    if q.shape[0] != 6 or q.shape[1] != q.shape[2]:
+        raise ValueError(
+            f"expected 6 square faces; got {tuple(q.shape)}")
+
+    from legoesm.grids.halo import pad_halo_4d
+    q_pad = pad_halo_4d(q, halo=halo)
+
+    if cos_type:
+        # Sign overlay: pad_halo_4d already places the correct source CELLS
+        # (identity/reversal per seam); only the quarter-turn seams need the
+        # tensorial cos sign.  Half-turn seams keep +1.
+        n = q.shape[1]
+        m = n + 2 * halo
+        sign = np.ones((6, m, m, 1), dtype=np.float64)
+        for (face, edge) in _SG_QUARTER_TURN:
+            if edge == WEST:
+                sign[face, :halo, :, :] = -1.0
+            elif edge == EAST:
+                sign[face, -halo:, :, :] = -1.0
+            elif edge == SOUTH:
+                sign[face, :, :halo, :] = -1.0
+            else:  # NORTH
+                sign[face, :, -halo:, :] = -1.0
+        q_pad = q_pad * jnp.asarray(sign, dtype=q_pad.dtype)
+
+    # Poison the diagonal corner blocks (both metrics classes).
+    q_pad = q_pad.at[:, :halo, :halo, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, -halo:, :halo, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, -halo:, -halo:, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, :halo, -halo:, :].set(SG_BIG_NUMBER)
+    return q_pad
+
+
 # --- FV3 SCALAR_PAIR / CGRID_NE staggered-metric halo (2026-07-31) ---
 # Companion to ``pad_halo_dgrid_vector_4d``.  The corner-divergence routine
 # needs the SEAM METRICS (dyc/dxc, sina_v/sina_u, cosa_v/cosa_u) to cross

@@ -246,11 +246,18 @@ def fv3_divergence_corner_2d(
             + sina_u[..., None] * v_orth4
         )
 
+        # real_metric_ghosts: Fortran's ghost-ring ua/va (sw_core.F90:3513)
+        # are evaluated with REAL gridstruct halo cosa_s/rsin2, not
+        # edge-replicated pads.  The ring cells this lane reads at panel
+        # boundaries (va(0,j), ua(i,0), ...) were the last edge-replicated
+        # input feeding the O(1/dx) solid-body boundary residual.
         if _is_4d:
-            ua_h1, va_h1 = d2a2c_ua_va_halo_4d(u4, v_cov4, cdgrid)
+            ua_h1, va_h1 = d2a2c_ua_va_halo_4d(
+                u4, v_cov4, cdgrid, real_metric_ghosts=True)
         else:
             ua_h1, va_h1 = d2a2c_ua_va_halo(
                 u4[..., 0], v_cov4[..., 0], cdgrid,
+                real_metric_ghosts=True,
             )
             ua_h1 = ua_h1[..., None]
             va_h1 = va_h1[..., None]
@@ -289,6 +296,16 @@ def fv3_divergence_corner_2d(
             ua_h1[:, :-1, :, :] + ua_h1[:, 1:, :, :]
         )
 
+        # ORACLE NOTE (2026-08-04): the boundary uf/vf forms below are the
+        # AVERAGED slot pairs — u*dyc*0.5*(sin_sg(i,j-1,4)+sin_sg(i,j,2)) at
+        # j==1|npy and the vf mirror at i==1|npx.  BOTH reference trees agree:
+        # Zenodo symmetryclean sw_core.F90:2190/:2205-2206 AND plain FV3
+        # 6f658bd0 divergence_corner.  A codex round-14 review prescribed
+        # replacing these with d2a2c_vect's DIRECTIONAL upwind selection
+        # (sw_core.F90:3589-3593 etc.) — that selection belongs to the C-wind
+        # edge branches of d2a2c_vect, not to divergence_corner, which never
+        # consumes uc/vc.  Rejected against both sources; do not "fix" this
+        # to directional.
         j_face = jnp.arange(n + 1)
         is_uf_boundary = ((j_face == 0) | (j_face == n))[None, None, :, None]
         uf_boundary = u_pad * dyc_pad * sin_uf[..., None]
