@@ -671,12 +671,15 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     """
     from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
 
-    # float64 metrics: the default float32 metric_dtype floors every bin at
-    # ~1.4e-8, which is ABOVE the converged seam residual (2026-08-04: d0
-    # reached 2.0e-8 at n=32) — the convergence-order assertions cannot
-    # resolve at that floor.  Precision fix, not a tolerance change.
-    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n),
-                                    metric_dtype=jnp.float64)
+    # Full float64 fixture: metric_dtype alone is NOT enough — the corner
+    # coordinates the wind is built from (lat_corner/angle_corner) follow
+    # the BASE grid dtype (cubed_sphere_cdgrid.py "_base = base.lon.dtype"),
+    # so a float32 base floors the interior bin at ~1.4e-8 regardless
+    # (codex r19 CONFIRMED; the gate log carried the f64->f32 scatter
+    # FutureWarning).  Precision fix, not a tolerance change.
+    cd = create_cubed_sphere_cdgrid(
+        create_cubed_sphere(n, dtype=jnp.float64),
+        metric_dtype=jnp.float64)
     u_east = speed * jnp.cos(cd.lat_corner)
     v_north = jnp.zeros_like(u_east)
     u_corner, v_corner = rotate_winds_geo_to_grid(
