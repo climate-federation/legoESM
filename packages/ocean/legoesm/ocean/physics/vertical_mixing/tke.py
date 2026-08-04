@@ -103,7 +103,7 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -1339,8 +1339,16 @@ def _prandtl_number(
     shear_sq: jnp.ndarray,
     kappaM: jnp.ndarray,
     cfg: TKEConfig,
+    p_sh2_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Turbulent Prandtl number for the K_H = K_M / Pr relation.
+
+    ``p_sh2_override``, when given (``tke_shear_avm_weighting="nemo_face"``),
+    replaces the internally-formed ``p_sh2 = kappaM * shear_sq`` with the
+    caller's avm-face-weighted ``p_sh2``
+    (:func:`_shared.avm_weighted_shear_production`) — the #1455 sh2
+    chain-walk avm-weighting fix. ``None`` (default) is BIT-IDENTICAL to the
+    prior behaviour.
 
     Mirrors ``veros/core/tke.py:74-90``:
 
@@ -1392,11 +1400,14 @@ def _prandtl_number(
         bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
                              dtype=N2.dtype)
         # p_sh2 (avm-weighted shear production, [m^2/s^3]) — zdfsh2.F90:80-94
-        # face-averages OLD avm onto the shear product; legoESM's single
-        # per-interface K_M has no face-avg analog, so kappaM*shear_sq is
-        # the faithful cell-centred transcription (== P_s_curr at the
-        # call site, tke.py:1932).
-        p_sh2 = kappaM * shear_sq
+        # face-averages OLD avm onto the shear product. Default (p_sh2_
+        # override=None, BIT-IDENTICAL): legoESM's single per-interface
+        # K_M has no face-avg analog, so kappaM*shear_sq is the T-collapsed
+        # approximation (== P_s_curr at the call site, tke.py:1932).
+        # tke_shear_avm_weighting="nemo_face" (#1455): the caller supplies
+        # the exact face-averaged p_sh2 instead (_shared.
+        # avm_weighted_shear_production).
+        p_sh2 = kappaM * shear_sq if p_sh2_override is None else p_sh2_override
         # NB with NEMO's default rn_bshear = 1e-20 the kappaM factors cancel
         # almost everywhere (bshear is ~9 decades below kappaM*shear_sq in any
         # realistic regime), so zri ~= N2/shear_sq: nemo_ri is then
@@ -1479,6 +1490,7 @@ def compute_K_from_tke(
     shear_sq: jnp.ndarray | None = None,
     z_interface: jnp.ndarray | None = None,
     N2_prandtl: jnp.ndarray | None = None,
+    p_sh2_override: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""Compute K_M and K_H from TKE and the mixing length.
 
@@ -1556,7 +1568,8 @@ def compute_K_from_tke(
                 f"shear_sq for the Prandtl-number computation."
             )
         _N2_pr = N2 if N2_prandtl is None else N2_prandtl
-        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg)
+        _p_sh2_pr = None if p_sh2_override is None else p_sh2_override(K_M)
+        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg, _p_sh2_pr)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
         # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
@@ -2010,6 +2023,38 @@ def tke_vertical_mixing(
                 "them (silent-no-op guard).")
         shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
 
+    # avm face-averaging inside p_sh2 (#1455 sh2 chain-walk avm-weighting
+    # gap, unpark attempt): "tpoint" (default, BIT-IDENTICAL) keeps the
+    # existing K_M*shear_sq external multiply; "nemo_face" instead computes
+    # the full zdfsh2.F90:80-94 p_sh2 (avm face-averaged INSIDE the face
+    # sum) per sub-iteration from K_M_curr, via
+    # _shared.avm_weighted_shear_production. Only meaningful paired with
+    # tke_shear_production="nemo_face_native" (same face-native geometry;
+    # avm-weighting a T-collapsed shear_sq would double-apply the T-point
+    # combine) — raise otherwise (dispatch hardening).
+    _avm_weighting = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_weighting not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting: must be one of "
+            f"('tpoint', 'nemo_face'), got {_avm_weighting!r}.")
+    _p_sh2_face_fn = None
+    if _avm_weighting == "nemo_face":
+        if _shear_disc != "nemo_face_native":
+            raise ValueError(
+                "TKEConfig.tke_shear_avm_weighting='nemo_face' requires "
+                "tke_shear_production='nemo_face_native' (the avm "
+                f"face-averaging is only meaningful with the matching "
+                f"face-native shear geometry), got tke_shear_production="
+                f"{_shear_disc!r}.")
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production as _avm_weighted_shear_production,
+        )
+
+        def _p_sh2_face_fn(kappaM_T):
+            return _avm_weighted_shear_production(
+                u_face_now, v_face_now, u_face_before, v_face_before,
+                dz_half, u_mask_3d, v_mask_3d, kappaM_T)
+
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
@@ -2117,8 +2162,10 @@ def tke_vertical_mixing(
             l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
-            z_interface=z_interface, N2_prandtl=N2b)
-        P_s_curr = K_M_curr * shear_sq
+            z_interface=z_interface, N2_prandtl=N2b,
+            p_sh2_override=_p_sh2_face_fn)
+        P_s_curr = (K_M_curr * shear_sq if _p_sh2_face_fn is None
+                    else _p_sh2_face_fn(K_M_curr))
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=K_M_curr, K_H_old=K_H_curr,
@@ -2156,7 +2203,8 @@ def tke_vertical_mixing(
         l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
-        z_interface=z_interface, N2_prandtl=N2b)
+        z_interface=z_interface, N2_prandtl=N2b,
+        p_sh2_override=_p_sh2_face_fn)
 
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
 
@@ -2187,6 +2235,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
             "Unknown TKEConfig.tke_shear_production shear-discretization: "
             "must be one of ('squared_centered', 'nemo_burchard', "
             f"'nemo_face_native'), got {_tke_shear!r}.")
+    _avm_w = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_w not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting: must be one of "
+            f"('tpoint', 'nemo_face'), got {_avm_w!r}.")
+    if timing == "post_mixing_veros" and _avm_w == "nemo_face":
+        raise ValueError(
+            "TKEConfig.tke_shear_avm_weighting='nemo_face' is not supported "
+            "with buoyancy_timing='post_mixing_veros' — tke_set_diffusivities "
+            "never assembles the face-weighted p_sh2 and would silently keep "
+            "the tpoint weighting. Use the standard pre_mixing path.")
     if timing == "post_mixing_veros" and _tke_shear in (
             "nemo_burchard", "nemo_face_native"):
         raise ValueError(

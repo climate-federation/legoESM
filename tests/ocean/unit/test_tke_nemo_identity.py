@@ -687,6 +687,206 @@ class TestFaceNativeShear:
         np.testing.assert_allclose(out, 0.0, atol=0.0)
 
 
+def _nemo_zdfsh2_avm_reference_loop(u_now, v_now, u_bef, v_bef, dz_half,
+                                    u_mask, v_mask, kappaM_T):
+    """Independent triple-Python-loop transcription of the AVM-WEIGHTED
+    zdfsh2.F90:80-94 (#1455 sh2 chain-walk avm-weighting gap): ``avm``
+    face-summed (NOT averaged -- NEMO's own :79 comment "2 x shear
+    production... energy conserving form") INSIDE the per-face term, before
+    the 0.25 T-point coast-doubled combine. NOT a call into
+    ``avm_weighted_shear_production`` -- an independent re-derivation, same
+    role as ``_nemo_zdfsh2_reference_loop`` above."""
+    n_lat, n_lon, n_int = dz_half.shape
+    dz_sq = dz_half * dz_half
+    dz_sq_u = np.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+    dz_sq_v = np.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+    p_sh2 = np.zeros((n_lat, n_lon, n_int))
+    for j in range(n_lat):
+        for i in range(n_lon):
+            for k in range(n_int):
+                zsh2u = {}
+                for ii in (i, i + 1):
+                    du_now = u_now[j, ii, k] - u_now[j, ii, k + 1]
+                    du_bef = u_bef[j, ii, k] - u_bef[j, ii, k + 1]
+                    # Zonal kappa pairing WRAPS periodically (#1455 review
+                    # N1): seam face gets kappa[-1]+kappa[0], never
+                    # 2*kappa[edge].
+                    avm_l = kappaM_T[j, (ii - 1) % n_lon, k]
+                    avm_r = kappaM_T[j, ii % n_lon, k]
+                    zsh2u[ii] = ((avm_l + avm_r) * du_now * du_bef
+                                / dz_sq_u[j, ii, k] * wumask[j, ii, k])
+                zsh2v = {}
+                for jj in (j, j + 1):
+                    dv_now = v_now[jj, i, k] - v_now[jj, i, k + 1]
+                    dv_bef = v_bef[jj, i, k] - v_bef[jj, i, k + 1]
+                    avm_s = kappaM_T[jj - 1, i, k] if jj - 1 >= 0 else kappaM_T[jj, i, k]
+                    avm_n = kappaM_T[jj, i, k] if jj < n_lat else kappaM_T[jj - 1, i, k]
+                    zsh2v[jj] = ((avm_s + avm_n) * dv_now * dv_bef
+                                / dz_sq_v[jj, i, k] * wvmask[jj, i, k])
+                coast_u = 2.0 - u_mask[j, i, k + 1] * u_mask[j, i + 1, k + 1]
+                coast_v = 2.0 - v_mask[j, i, k + 1] * v_mask[j + 1, i, k + 1]
+                p_sh2[j, i, k] = 0.25 * (
+                    (zsh2u[i] + zsh2u[i + 1]) * coast_u
+                    + (zsh2v[j] + zsh2v[j + 1]) * coast_v
+                )
+    return p_sh2
+
+
+class TestAvmWeightedShearProduction:
+    """#1455 sh2 chain-walk avm-weighting unpark: synthetic-violation tests
+    for ``_shared.avm_weighted_shear_production`` (the ``tke_shear_
+    avm_weighting="nemo_face"`` option). Both directions per the task
+    spec: uniform K_M gives the PREDICTED (not naively "bit-identical")
+    relationship to the "tpoint" path, and a strong K_M gradient near a
+    coast makes the two paths differ."""
+
+    def _case(self, n_lat=4, n_lon=5, nlev=6, seed=7):
+        rng = np.random.default_rng(seed)
+        u_face = rng.standard_normal((n_lat, n_lon + 1, nlev)) * 0.1
+        v_face = rng.standard_normal((n_lat + 1, n_lon, nlev)) * 0.1
+        u_face_b = u_face + rng.standard_normal(u_face.shape) * 0.01
+        v_face_b = v_face + rng.standard_normal(v_face.shape) * 0.01
+        dz_half = np.full((n_lat, n_lon, nlev - 1), 10.0)
+        bottom_level = rng.integers(2, nlev, size=(n_lat, n_lon))
+        k = np.arange(nlev).reshape(1, 1, nlev)
+        is_active = k <= bottom_level[:, :, None]
+        u_mask, v_mask = _face_masks_3d_reference(is_active)
+        return u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask
+
+    def test_matches_independent_reference_loop(self):
+        """Vectorised implementation matches an independent from-scratch
+        triple-Python-loop transcription (not a call into the function
+        under test)."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production,
+        )
+        u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask = self._case()
+        n_lat, n_lon, n_int = dz_half.shape
+        rng = np.random.default_rng(11)
+        kappaM_T = np.abs(rng.uniform(0.5, 5.0, (n_lat, n_lon, n_int)))
+        ref = _nemo_zdfsh2_avm_reference_loop(
+            u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask, kappaM_T)
+        out = np.asarray(avm_weighted_shear_production(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask),
+            jnp.asarray(kappaM_T)))
+        np.testing.assert_allclose(out, ref, rtol=0, atol=1e-10)
+
+    def test_uniform_kappaM_gives_exactly_2x_tpoint(self):
+        """Synthetic self-consistency control (task step 2/4): with
+        SPATIALLY UNIFORM K_M, NEMO's own "avm(i+1)+avm(i)" is a face SUM
+        (not an average -- NEMO's own zdfsh2.F90:79 comment: "2 x shear
+        production... energy conserving form"), so the avm-weighted p_sh2
+        must equal EXACTLY 2*K0*shear_sq_tpoint, NOT be bit-identical to
+        the "tpoint" path K_M*shear_sq. Verified against BOTH the all-open-
+        ocean case (coast weight 1.0 everywhere) and a case with a coastal
+        mask (coast weight 2.0 exercised) -- the 2x relationship holds
+        regardless of the coast-doubling weight, since that weight
+        multiplies both formulas identically."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native, avm_weighted_shear_production,
+        )
+        for use_coast_mask in (False, True):
+            u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask = (
+                self._case(seed=3))
+            if not use_coast_mask:
+                u_mask = np.ones_like(u_mask)
+                v_mask = np.ones_like(v_mask)
+            n_lat, n_lon, n_int = dz_half.shape
+            K0 = 2.7
+            kappaM_uniform = jnp.full((n_lat, n_lon, n_int), K0)
+            shear_sq = vertical_shear_face_native(
+                jnp.asarray(u_face), jnp.asarray(v_face),
+                jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+                jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask))
+            p_sh2_tpoint = kappaM_uniform * shear_sq
+            p_sh2_nemo_face = avm_weighted_shear_production(
+                jnp.asarray(u_face), jnp.asarray(v_face),
+                jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+                jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask),
+                kappaM_uniform)
+            np.testing.assert_allclose(
+                np.asarray(p_sh2_nemo_face), 2.0 * np.asarray(p_sh2_tpoint),
+                rtol=0, atol=1e-10,
+                err_msg=f"use_coast_mask={use_coast_mask}: uniform-K_M "
+                        "self-consistency (nemo_face == 2*tpoint) FAILED")
+
+    def test_varying_kappaM_differs_from_2x_tpoint_near_gradient(self):
+        """With a STRONG K_M gradient at a coastal mask cell, nemo_face !=
+        2*tpoint (the two formulas only coincide for spatially uniform
+        K_M) -- and away from the gradient (flat K_M region) they DO
+        coincide, confirming the difference is gradient-driven, not a
+        blanket offset."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_face_native, avm_weighted_shear_production,
+        )
+        u_face, v_face, u_face_b, v_face_b, dz_half, u_mask, v_mask = (
+            self._case(seed=5))
+        n_lat, n_lon, n_int = dz_half.shape
+        K_T = jnp.full((n_lat, n_lon, n_int), 1.0)
+        # Sharp local spike + a flat region elsewhere.
+        K_T = K_T.at[1, 2, :].set(50.0)
+        K_T = K_T.at[1, 1, :].set(0.02)
+        shear_sq = vertical_shear_face_native(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask))
+        p_sh2_tpoint = K_T * shear_sq
+        p_sh2_nemo_face = avm_weighted_shear_production(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face_b), jnp.asarray(v_face_b),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask),
+            K_T)
+        diff = np.asarray(p_sh2_nemo_face) - 2.0 * np.asarray(p_sh2_tpoint)
+        assert np.max(np.abs(diff)) > 1e-6, (
+            "expected nemo_face to DIFFER from 2*tpoint near the K_M "
+            "gradient -- test would pass vacuously if they always matched")
+        # Far from the gradient (e.g. column (3,4), away from the spike),
+        # the two formulas should still coincide since K_M is locally flat
+        # there and its neighbours are also flat.
+        np.testing.assert_allclose(
+            np.asarray(p_sh2_nemo_face)[3, 4, :],
+            2.0 * np.asarray(p_sh2_tpoint)[3, 4, :], rtol=0, atol=1e-10)
+
+    def test_periodic_seam_face_wraps_kappa(self):
+        """#1455 review N1: at an ALL-WET zonal-periodic seam, the seam
+        u-face kappa pairing must WRAP -- kappa[-1]+kappa[0] -- not
+        edge-repeat (2*kappa[0]). Analytic case: v-shear zeroed, uniform
+        unit u-shear, kappa = 1+i in lon =>
+        p_sh2[:, 0, :] = 0.25*bare*((k[-1]+k[0]) + (k[0]+k[1])).
+        FAILS under edge-repeat padding (gives 2*k[0] at the seam)."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production,
+        )
+        n_lat, n_lon, nlev = 2, 4, 4
+        kk = np.arange(nlev)
+        u_face = np.broadcast_to(-0.1 * kk, (n_lat, n_lon + 1, nlev)).copy()
+        v_face = np.zeros((n_lat + 1, n_lon, nlev))
+        dz_half = np.full((n_lat, n_lon, nlev - 1), 10.0)
+        u_mask = np.ones((n_lat, n_lon + 1, nlev))
+        v_mask = np.ones((n_lat + 1, n_lon, nlev))
+        kappa = np.broadcast_to(
+            (1.0 + np.arange(n_lon))[None, :, None],
+            (n_lat, n_lon, nlev - 1)).copy()
+        out = np.asarray(avm_weighted_shear_production(
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(u_face), jnp.asarray(v_face),
+            jnp.asarray(dz_half), jnp.asarray(u_mask), jnp.asarray(v_mask),
+            jnp.asarray(kappa)))
+        bare = (0.1 * 0.1) / (10.0 * 10.0)  # du_now*du_bef / dz_sq per face
+        kap = 1.0 + np.arange(n_lon)
+        for i in range(n_lon):
+            expected = 0.25 * bare * (
+                (kap[(i - 1) % n_lon] + kap[i])          # west face (wraps)
+                + (kap[i] + kap[(i + 1) % n_lon]))       # east face (wraps)
+            np.testing.assert_allclose(
+                out[:, i, :], expected, rtol=0, atol=1e-12,
+                err_msg=f"lon column {i}: seam/interior kappa wrap wrong")
+
+
 def _face_native_orchestrator_inputs(n_lat=3, n_lon=4, nlev=6, seed=3):
     """Full ``tke_vertical_mixing``-level fixture for the wiring/dispatch
     tests: RAW C-grid face u/v (now + before), a per-level wet mask pair
@@ -814,6 +1014,133 @@ class TestFaceNativeShearWiring:
             tke_vertical_mixing(
                 cfg=TKEConfig(), tke_old=None, dt=3600.0, rho_0=_RHO0,
                 n_iterations=1, **kwargs)
+
+
+class TestAvmWeightingWiring:
+    """#1455 sh2 chain-walk avm-weighting unpark: end-to-end
+    ``tke_vertical_mixing`` dispatch for ``tke_shear_avm_weighting``
+    ("tpoint" default | "nemo_face"), NOT yet wired to any production kamm
+    card (available option only, per the task's step 3)."""
+
+    def test_default_is_byte_identical(self):
+        """tke_shear_avm_weighting="tpoint" (implicit default) must be
+        BIT-IDENTICAL to a TKEConfig that never mentions the field."""
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        base = tke_vertical_mixing(
+            cfg=TKEConfig(), tke_old=None, dt=3600.0, rho_0=_RHO0,
+            n_iterations=3, **base_kwargs)
+        explicit = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_avm_weighting="tpoint"),
+            tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=3,
+            **base_kwargs)
+        np.testing.assert_array_equal(
+            np.asarray(base.tke_new), np.asarray(explicit.tke_new))
+
+    def test_unknown_value_raises(self):
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        with pytest.raises(ValueError, match="tke_shear_avm_weighting"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_avm_weighting="bogus"),
+                tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                **base_kwargs)
+
+    def test_nemo_face_requires_nemo_face_native_shear(self):
+        """'nemo_face' avm weighting without the matching face-native
+        shear geometry must raise -- avm-weighting a T-collapsed shear_sq
+        would double-apply the T-point combine."""
+        kwargs = _face_native_orchestrator_inputs()
+        base_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                        "v_face_now", "u_face_before", "v_face_before",
+                        "face_masks_3d")
+        }
+        with pytest.raises(ValueError, match="tke_shear_production"):
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_avm_weighting="nemo_face"),
+                tke_old=None, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                **base_kwargs)
+
+    def test_nemo_face_changes_result_and_stays_finite(self):
+        kwargs = _face_native_orchestrator_inputs()
+        tke_seed = jnp.full(kwargs["dz_half"].shape, 1e-2)
+        face_native_out = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="nemo_face_native",
+                          prandtl_mode="nemo_ri"),
+            tke_old=tke_seed, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+            **kwargs,
+        )
+        avm_face_out = tke_vertical_mixing(
+            cfg=TKEConfig(tke_shear_production="nemo_face_native",
+                          tke_shear_avm_weighting="nemo_face",
+                          prandtl_mode="nemo_ri"),
+            tke_old=tke_seed, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+            **kwargs,
+        )
+        assert bool(np.all(np.isfinite(np.asarray(avm_face_out.tke_new))))
+        assert not np.allclose(
+            np.asarray(face_native_out.tke_new),
+            np.asarray(avm_face_out.tke_new))
+
+    def test_final_K_call_gets_face_weighted_override(self):
+        """Regression (#1455 review B1): EVERY compute_K_from_tke call —
+        including the post-loop one producing the RETURNED K_M/K_H — must
+        receive the face-weighted p_sh2_override when 'nemo_face' is
+        selected (spy idiom, same as TestRn2bTimeLevel)."""
+        kwargs = _face_native_orchestrator_inputs()
+        import legoesm.ocean.physics.vertical_mixing.tke as _tke_mod
+        overrides_seen = []
+        _orig = _tke_mod.compute_K_from_tke
+
+        def _spy(*a, **kw):
+            overrides_seen.append(kw.get("p_sh2_override"))
+            return _orig(*a, **kw)
+
+        _tke_mod.compute_K_from_tke = _spy
+        try:
+            tke_vertical_mixing(
+                cfg=TKEConfig(tke_shear_production="nemo_face_native",
+                              tke_shear_avm_weighting="nemo_face",
+                              prandtl_mode="nemo_ri"),
+                tke_old=jnp.full(kwargs["dz_half"].shape, 1e-2),
+                dt=3600.0, rho_0=_RHO0, n_iterations=1, **kwargs)
+        finally:
+            _tke_mod.compute_K_from_tke = _orig
+        # n_iterations=1 → in-loop call + final call = 2; both overridden.
+        assert len(overrides_seen) >= 2
+        assert all(o is not None for o in overrides_seen)
+
+    def test_nemo_face_blocked_on_post_mixing_path(self):
+        """Regression (#1455 review B2): 'nemo_face' with
+        buoyancy_timing='post_mixing_veros' must raise, never silently
+        keep the tpoint weighting on the tke_set_diffusivities path.
+        Exercised via _validate_post_mixing_cfg — the guard shared by
+        tke_set_diffusivities/tke_integrate_post_mixing (tke_vertical_mixing
+        rejects post_mixing_veros earlier with its own message)."""
+        import legoesm.ocean.physics.vertical_mixing.tke as _tke_mod
+        with pytest.raises(
+                ValueError,
+                match="tke_shear_avm_weighting='nemo_face' is not supported"):
+            _tke_mod._validate_post_mixing_cfg(
+                TKEConfig(buoyancy_timing="post_mixing_veros",
+                          tke_shear_avm_weighting="nemo_face"))
+        # And the membership arm on the same path:
+        with pytest.raises(ValueError,
+                           match="Unknown TKEConfig.tke_shear_avm_weighting"):
+            _tke_mod._validate_post_mixing_cfg(
+                TKEConfig(tke_shear_avm_weighting="bogus"))
 
 
 class TestRn2bTimeLevel:

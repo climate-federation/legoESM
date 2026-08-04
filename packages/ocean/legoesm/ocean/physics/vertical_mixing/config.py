@@ -511,6 +511,30 @@ class TKEConfig(NamedTuple):
     #   ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO by the walk's
     #   Candidate B, corr 1.000/ratio 0.9999).
     tke_shear_production: str = "squared_centered"
+    # ----- avm face-averaging inside p_sh2 (#1455 sh2 chain-walk, unpark) -----
+    # "nemo_face_native"'s own docstring/comment above documents avm
+    # face-averaging as a scope limit ("no face-averaging analog... not
+    # transcribed") — this axis is that transcription, gated SEPARATELY so
+    # the shear-geometry fix (above) and the avm-weighting fix (this field)
+    # can be measured/enabled independently.
+    # ``"tpoint"`` (default, BIT-IDENTICAL legacy): ``p_sh2 = K_M * shear_sq``
+    #   with a single per-interface T-point ``K_M`` multiplying the
+    #   (already T-collapsed) ``shear_sq`` — the existing production path.
+    # ``"nemo_face"``: NEMO's literal ``zdfsh2.F90:80-94`` — ``K_M`` is
+    #   face-averaged (summed, NOT meaned: NEMO's own comment reads "2 x
+    #   shear production... energy conserving form") separately at each
+    #   u-/v-face via array rolls on the existing 3-D ``K_M`` (no new
+    #   staggered state), multiplied into the per-face shear BEFORE the
+    #   0.25 T-point coast-doubled combine
+    #   (:func:`_shared.avm_weighted_shear_production`). For spatially
+    #   UNIFORM K_M this returns EXACTLY ``2 * K_M * shear_sq_tpoint`` (a
+    #   verified algebraic identity, NOT a bug — NEMO's own "2x" form), so
+    #   it is NOT bit-identical to "tpoint" even in the uniform-K_M limit.
+    #   Requires ``tke_shear_production="nemo_face_native"`` (the avm
+    #   weighting is only meaningful with the matching face-native shear
+    #   geometry; construction raises otherwise) and the same raw C-grid
+    #   face state that mode already requires.
+    tke_shear_avm_weighting: str = "tpoint"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

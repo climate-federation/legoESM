@@ -278,6 +278,108 @@ def vertical_shear_face_native(
     return p_sh2
 
 
+def avm_weighted_shear_production(
+    u_face_now: jnp.ndarray, v_face_now: jnp.ndarray,
+    u_face_before: jnp.ndarray, v_face_before: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    u_mask: jnp.ndarray, v_mask: jnp.ndarray,
+    kappaM_T: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
+    face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
+    (#1455 sh2 chain-walk avm-weighting gap — see the module docstring on
+    :func:`vertical_shear_face_native`, which explicitly scopes OUT this
+    avm face-averaging as "no face-averaging analog"; this function is that
+    analog, using array rolls on legoESM's already-existing 3-D ``K_M``, not
+    new staggered state).
+
+    .. code-block:: fortran
+
+        ! zdfsh2.F90:80-94 (no-Stokes-drift branch)
+        zsh2u(ji,jj) = ( avm(ji+1,jj,jk) + avm(ji,jj,jk) )   &   ! avm INSIDE
+           &         * ( uu(jk-1,Kmm)-uu(jk,Kmm) ) * ( uu(jk-1,Kbb)-uu(jk,Kbb) ) &
+           &         / ( e3uw(jk,Kmm)*e3uw(jk,Kbb) ) * wumask(jk)
+        zsh2v analogous at v-faces
+        p_sh2(ji,jj,jk) = 0.25 * ( (zsh2u(ji-1,jj)+zsh2u(ji,jj))*(2-umask*umask)
+                                  + (zsh2v(ji,jj-1)+zsh2v(ji,jj))*(2-vmask*vmask) )
+
+    NB (verified by the synthetic self-consistency control, #1455 step 2):
+    NEMO's own comment at :79 reads "2 x shear production ... (energy
+    conserving form)" — ``avm(ji+1)+avm(ji)`` is a face SUM, not an average,
+    so for spatially UNIFORM ``kappaM_T = K0`` this function returns EXACTLY
+    ``2 * K0 * shear_sq_tpoint`` (``shear_sq_tpoint`` = the T-collapsed
+    output of :func:`vertical_shear_face_native`), NOT
+    ``K0 * shear_sq_tpoint``. This is NOT a bug — it is NEMO's own
+    documented "energy conserving form" convention (verified against the
+    literal Fortran, not inferred) — so this function returns the full
+    ``p_sh2`` PRODUCT directly rather than a ``shear_sq`` the caller
+    multiplies by a bare ``K_M``, precisely because that external multiply
+    cannot reproduce the avm-INSIDE-the-face-sum structure.
+
+    Parameters
+    ----------
+    u_face_now, v_face_now, u_face_before, v_face_before, dz_half, u_mask,
+    v_mask : as :func:`vertical_shear_face_native`.
+    kappaM_T : ``(n_lat, n_lon, nlev-1)`` — T-point (single per-interface)
+        viscosity — face-summed here via array rolls, matching NEMO's
+        ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
+        NB time level: NEMO computes ``zdf_sh2`` ONCE per step from the
+        previous-step ``p_avm``; legoESM's orchestrator wires the CURRENT
+        sub-iteration ``K_M_curr`` (same convention its pre-existing tpoint
+        path uses) — a documented deviation of the sub-iteration loop
+        structure, not of this function.
+
+    Returns
+    -------
+    p_sh2 : ``(n_lat, n_lon, nlev-1)`` — avm-weighted shear production
+        [m^2/s^3] at T-point interfaces (matches ``tke_dump_sh2.bin``
+        units), SIGNED.
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    dz_sq = dz_safe * dz_safe
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+
+    def _face_shear_over_dzsq(u_face_n, u_face_b, dz_sq_face):
+        du_now = u_face_n[..., :-1] - u_face_n[..., 1:]
+        du_bef = u_face_b[..., :-1] - u_face_b[..., 1:]
+        return du_now * du_bef / dz_sq_face
+
+    dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+    dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+
+    zsh2u_bare = _face_shear_over_dzsq(u_face_now, u_face_before, dz_sq_u) * wumask
+    zsh2v_bare = _face_shear_over_dzsq(v_face_now, v_face_before, dz_sq_v) * wvmask
+
+    coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
+    coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]
+
+    # Face-sum kappaM_T (T-point) onto each u-/v-face via array rolls —
+    # NEMO's avm(ji+1,jj,jk)+avm(ji,jj,jk), a SUM not a mean (matches the
+    # "2 x" comment above). Zonal (u-face) boundary pads WRAP periodically:
+    # the seam face between T[-1] and T[0] gets kappa[-1]+kappa[0] — correct
+    # under BOTH seam conventions (a land-column seam masks it via wumask
+    # anyway; the nemo_faithful all-wet seam needs the true wrapped sum;
+    # #1455 review N1). Meridional (v-face) boundaries are walls in every
+    # recipe this option targets — edge-repeat there is never selected
+    # (masked by wvmask/coast_v; same idiom as dz_sq_v above).
+    kM_left_u = jnp.concatenate([kappaM_T[:, -1:, :], kappaM_T], axis=1)
+    kM_right_u = jnp.concatenate([kappaM_T, kappaM_T[:, :1, :]], axis=1)
+    kM_face_u = kM_left_u + kM_right_u          # (n_lat, n_lon+1, nlev-1)
+    kM_left_v = jnp.concatenate([kappaM_T[:1, :, :], kappaM_T], axis=0)
+    kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
+    kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
+
+    zsh2u = kM_face_u * zsh2u_bare
+    zsh2v = kM_face_v * zsh2v_bare
+
+    p_sh2 = 0.25 * (
+        (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
+        + (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v
+    )
+    return p_sh2
+
+
 def richardson_number(
     N2: jnp.ndarray,
     u_cell: jnp.ndarray,
