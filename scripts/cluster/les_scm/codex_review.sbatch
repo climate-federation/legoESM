@@ -26,51 +26,59 @@ export PATH=/burg-archive/home/pg2328/.nvm/versions/node/v24.16.0/bin:$PATH
 OUT=/burg-archive/glab/users/pg2328/legoESM/logs/les_codex_review_$SLURM_JOB_ID.md
 
 read -r -d '' PROMPT <<'EOF'
-SECOND-ROUND adversarial review of the LES-to-SCM turbulence-closure tuning
-stack. A first round returned 11 findings; they have been fixed. Be hostile:
-verify the fixes are REAL and find what round one missed. Rank HIGH/MEDIUM/LOW
-with file:line and a concrete failure scenario. Report ONLY defects.
+Adversarial review of a MULTI-CASE LES-to-SCM turbulence tuning stack and a
+stratocumulus entrainment investigation. Be hostile: report ONLY defects,
+ranked HIGH/MEDIUM/LOW with file:line and a concrete failure scenario.
 
 Files:
+  packages/atmosphere/legoesm/atmosphere/forcing/scm/analytic_scm_case.py  (NEW)
   packages/atmosphere/legoesm/atmosphere/forcing/scm/sam_case_scm.py
   packages/ml/legoesm/training/les_reference.py
+  packages/ml/legoesm/training/scm_rce_metrics.py
   scripts/run/run_scm_les_turbulence_tuning.py
-  scripts/run/les_record.py
-  tests/atmosphere/hydrostatic/unit/test_sam_case_scm.py
-  tests/unit/test_les_reference.py
-  tests/atmosphere/hydrostatic/test_run_scm_les_turbulence_tuning.py
+  scripts/cluster/les_scm/dycoms_entrainment_ab.sbatch
 
-PART A - are these fixes real, or cosmetic?
- 1. Column top is now the LES domain top (sigma_top derived from
-    les_domain_top_m). Does that actually bound the column, and is the
-    derivation correct given the p(z) reconstruction?
- 2. Height mapping and rho_sfc now use virtual potential temperature. Is the
-    theta_v formula right, is epsilon used correctly, and does it match what
-    spectral_les_moist.make_anelastic_reference does?
- 3. surface_mode is declared per case. Is RICO's "T_s" actually what
-    run_rico_les.py does, and does the SCM's interactive bulk flux then
-    resemble the LES's C_H/C_Q coefficients at all?
- 4. Constant surface series collapse to constants. Does that genuinely keep
-    T_s off the traced path in the rollout, or does another traced call remain?
- 5. u/v dropped from the default score. Does anything still tune against them?
- 6. --hours must equal the LES reference end. Can the check be bypassed?
- 7. Terminal-frame recording in the six LES drivers: is the `_last_rec_h`
-    tracker correct in EVERY driver, in scope, and free of duplicate emission?
-    Check the Lagrangian-SDM path in run_bomex_les.py specifically.
- 8. Frame case-matching and duplicate-timestamp rejection: can a wrong or
-    stale reference still get through (e.g. missing 'case' key, subtly
-    different times, a frame outside the analysis window)?
+PART A - the new analytic-case bridge. Each case was transcribed from the LES
+driver that produced its stored reference, because the same-named cases in
+scripts/matrix/scm/ do NOT match (run_spectral_cbl.py integrates Nieuwstadt
+CBL_N91, not Wangara Day 33; the archived GABLS1 reference took the
+constant-flux branch, not the cooling-T_s branch).
+ 1. Verify each transcription against its driver: theta profile (including the
+    tanh-smoothed GABLS1 inversion), surface flux sign and magnitude,
+    Coriolis, geostrophic wind, z0, domain top. Any value that does not match
+    the driver is a defect.
+ 2. les_domain_top_m is set to 0.75*Lz wherever the LES sponges. Is that the
+    right cut, and is the sponge really at 0.75*Lz in each driver?
+ 3. The SCM column is built by a hydrostatic theta->p mapping while these LES
+    are BOUSSINESQ with uniform dz. Does that mismatch invalidate the
+    comparison, and is the resulting z placement right?
+ 4. Ekman scores u,v only and CBL scores theta only. Is that justified, or is
+    a scored variable being dropped that carries real signal?
 
-PART B - what round one missed. Prioritise:
- - Any remaining sign/unit error, checked against the CONSUMER not docstrings.
- - Gradient correctness: does the loss actually depend on the turbulence
-   parameters for EACH of the nine schemes, or will some silently freeze?
-   Is jax.checkpoint applied so the chunked scan is correct, not just cheap?
- - The masked_step lax.cond padding and the [:nsteps] slice: can padding reach
-   the analysis mean, the p_s drift assert, or a gradient?
- - Anything that makes the ACROSS-SCHEME ranking not controlled.
- - Tests that would pass even if the feature were removed (assert-nothing
-   tests, tests that inspect a delegating wrapper).
+PART B - the multi-case joint tuning.
+ 5. joint = mean over cases of a per-case normalized score. Can one case
+    dominate or be silently ignored? Are the per-case scores really
+    commensurable given each is normalized by its OWN reference spread?
+ 6. The window guard now tolerates half an SCM timestep. Can that hide a real
+    window mismatch?
+ 7. A non-finite rollout is mapped to NONFINITE_PENALTY because safe_sqrt(NaN)
+    returns 0 and 0 is the perfect score. Is the penalty applied everywhere it
+    must be (per-case scores, per-component scores, the joint, the gradient
+    path)? Can a NaN still reach a ranking or a tuned parameter? Does the
+    penalty break the line search or the preflight freeze?
+ 8. Per-case surface configs, per-case scored variables, per-case windows: is
+    the across-scheme control still valid, i.e. is it still true that within a
+    case only PhysicsConfig.turbulence differs?
+ 9. Anything left over from the single-case refactor: dead code, stale
+    references, output fields that no longer mean what they say.
+
+PART C - the DYCOMS entrainment A/B.
+10. The experiment concludes: the coarse config burns off worse over 2 h than
+    the fine one, so the good 0.25 h smoke was TIME not resolution; removing
+    the Lilly SGS suppression makes it worse, so that suppression is active.
+    Are those conclusions supported by the arms actually run, or is there a
+    confound (arm A changes BOTH nx/ny/nz AND Lx/Ly - is that one variable)?
+11. Is 2 h long enough to conclude anything about a 4 h case?
 EOF
 
 echo "$PROMPT" > $CODEX_HOME/prompt.txt

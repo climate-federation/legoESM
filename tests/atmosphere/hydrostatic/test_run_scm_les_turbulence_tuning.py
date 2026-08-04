@@ -624,3 +624,48 @@ def test_dt_must_divide_the_analysis_window(tmp_path, monkeypatch):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--outdir", str(tmp_path / "o"), "--dt", "7000",
                   "--nlev", "16", "--schemes", "louis", "--skip-tuning"])
+
+
+# --- a blown-up rollout must score WORST, not best -------------------------
+
+def test_nonfinite_prediction_scores_worst_not_best():
+    """safe_sqrt(NaN) is 0.0 and 0 is the PERFECT score, so a scheme that blows
+    up would rank first. Observed live: an mynn25 CBL arm went non-finite and
+    scored 0.000 against louis's 1.938.
+    """
+    import types
+    import jax.numpy as jnp
+    import numpy as _np
+
+    nlev = 6
+    ref = types.SimpleNamespace(
+        mask=_np.ones(nlev, dtype=bool),
+        weights=_np.full(nlev, 1.0 / nlev),
+        profiles={"theta": _np.linspace(300.0, 303.0, nlev)},
+        scored_variables=lambda: ("theta",),
+    )
+    p_full = _np.linspace(9.0e4, 1.0e5, nlev)
+
+    good = {"T": jnp.asarray(_np.linspace(300.0, 303.0, nlev)),
+            "qv": jnp.zeros(nlev), "u": jnp.zeros(nlev), "v": jnp.zeros(nlev)}
+    bad = {**good, "T": jnp.full(nlev, jnp.nan)}
+
+    _c, s_good = drv.score_against_les(good, reference=ref, p_full=p_full,
+                                       scored=("theta",))
+    _c, s_bad = drv.score_against_les(bad, reference=ref, p_full=p_full,
+                                      scored=("theta",))
+    s_good, s_bad = float(s_good), float(s_bad)
+    assert _np.isfinite(s_bad), "penalty must be finite so the line search works"
+    assert s_bad >= drv.NONFINITE_PENALTY * 0.99, s_bad
+    assert s_bad > s_good, (
+        f"a non-finite rollout scored {s_bad} against a good {s_good}; "
+        "it must lose, not win")
+
+
+def test_safe_sqrt_still_returns_zero_for_nan():
+    """Documents WHY the penalty lives at the scoring boundary: safe_sqrt's
+    NaN->0 behaviour is deliberate (finite gradient at a perfect fit) and is
+    shared with the RCE campaign, so it is not changed here."""
+    import jax.numpy as jnp
+    from legoesm.training.scm_rce_metrics import safe_sqrt
+    assert float(safe_sqrt(jnp.asarray(float("nan")))) == 0.0

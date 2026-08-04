@@ -76,6 +76,7 @@ class LESReference:
     profiles: dict[str, np.ndarray]       # name -> (nlev,)
     z_les: np.ndarray                     # (n_les,) [m] native LES levels
     profiles_les: dict[str, np.ndarray]   # name -> (n_les,) native, for plots
+    scored: tuple[str, ...] = SCORED_VARIABLES
 
     @property
     def window_label(self) -> str:
@@ -84,7 +85,7 @@ class LESReference:
         return f"{t0:.2f}-{t1:.2f} h ({self.n_frames} frames)"
 
     def scored_variables(self) -> tuple[str, ...]:
-        return tuple(v for v in SCORED_VARIABLES if v in self.profiles)
+        return tuple(v for v in self.scored if v in self.profiles)
 
 
 def mass_weights_from_pressure(p_half: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -184,7 +185,14 @@ _CASE_ALIASES: dict[str, frozenset[str]] = {
     "rico": frozenset({"rico"}),
     "dycoms": frozenset({"dycoms", "dycoms_rf01", "dycoms_rf02", "dycomsii"}),
     "gabls1": frozenset({"gabls1"}),
-    "wangara": frozenset({"wangara"}),
+    # run_spectral_cbl.py labels its output "wangara", but the case it
+    # integrates is Nieuwstadt CBL_N91 (theta = 300 K under an 800 m
+    # inversion, constant flux, no Coriolis) -- NOT Wangara Day 33. The case
+    # is named for what it is; the driver's label is accepted as an alias so
+    # the archived reference still loads.
+    "cbl": frozenset({"cbl", "wangara"}),
+    "wangara": frozenset({"wangara", "cbl"}),
+    "ekman": frozenset({"ekman", "neutral", "neutral_spectral"}),
 }
 
 
@@ -231,6 +239,7 @@ def load_les_reference(
     domain_top_m: float,
     analysis_hours: float,
     min_frames: int = 2,
+    scored: tuple[str, ...] = SCORED_VARIABLES,
 ) -> LESReference:
     """Build a time-mean LES reference on the SCM levels.
 
@@ -314,12 +323,12 @@ def load_les_reference(
 
     wanted = [v for v in SCORED_VARIABLES + DIAGNOSTIC_VARIABLES
               if v in available]
-    missing_scored = [v for v in SCORED_VARIABLES if v not in available]
+    missing_scored = [v for v in scored if v not in available]
     if missing_scored:
         raise ValueError(
             f"LES frames in {prof_dir} lack the scored variable(s) "
             f"{missing_scored}; available: {sorted(available)}. A dry case has "
-            "no 'qv' and cannot score a moist case's variables."
+            "no 'qv', so it must not be asked to score it."
         )
     if "wth" not in available:
         raise ValueError(
@@ -347,4 +356,5 @@ def load_les_reference(
         profiles=profiles,
         z_les=z_les,
         profiles_les=profiles_les,
+        scored=scored,
     )

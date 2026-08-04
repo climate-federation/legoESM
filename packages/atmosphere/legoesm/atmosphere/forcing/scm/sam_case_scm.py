@@ -220,6 +220,51 @@ def _interp_scalar_fn(days_s: np.ndarray, values: np.ndarray):
     return lambda t: jnp.interp(jnp.asarray(t, dtype=v_arr.dtype), t_arr, v_arr)
 
 
+def hydrostatic_pressure_from_theta(z_m, theta_K, p_s_pa: float, *,
+                                    n_aux: int = _AUX_LEVELS):
+    """``(z, p)`` top-to-bottom for an arbitrary theta(z), integrated
+    hydrostatically from ``p_s_pa``.
+
+    Shared by the deck bridge and the analytic-case bridge so the two cannot
+    grow different vertical mappings. The integration itself is NOT written
+    here: an auxiliary :class:`HeightCoordinate` is built with ``theta_ref_fn``
+    set to the supplied profile -- the same integrator
+    ``build_sam_case_height_coord`` gives the LES -- and its Exner reference is
+    inverted with the shared :func:`exner_to_pressure`.
+
+    ``theta_K`` should be the VIRTUAL potential temperature where moisture is
+    present; for a dry case theta_v == theta.
+    """
+    z_arr = np.asarray(z_m, dtype=np.float64)
+    th_arr = np.asarray(theta_K, dtype=np.float64)
+    z_top = float(np.max(z_arr))
+    z_j = jnp.asarray(z_arr)
+    th_j = jnp.asarray(th_arr)
+
+    def theta_ref_fn(z):
+        return jnp.interp(z, z_j, th_j)
+
+    hc = create_stretched_height_coordinate(
+        n_aux, H=z_top, dz_sfc=0.5 * z_top / n_aux,
+        theta_ref_fn=theta_ref_fn, p_sfc=float(p_s_pa),
+    )
+    z_aux = np.asarray(hc.z_full, dtype=np.float64)
+    p_aux = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    if np.any(np.diff(z_aux) >= 0.0):
+        raise ValueError("auxiliary height coordinate is not top-to-bottom.")
+    if np.any(np.diff(p_aux) <= 0.0):
+        raise ValueError(
+            "hydrostatic pressure must increase downward; got a non-monotonic "
+            "p(z) from the supplied theta profile."
+        )
+    return z_aux, p_aux
+
+
+def heights_from_pressure(z_aux, p_aux, p_full_pa: np.ndarray) -> np.ndarray:
+    """Public alias of the p->z inversion, for the analytic-case bridge."""
+    return _heights_from_pressure(z_aux, p_aux, p_full_pa)
+
+
 def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
     """Hydrostatic ``p(z)`` for a deck whose ``p`` column is the ``-999`` sentinel.
 
