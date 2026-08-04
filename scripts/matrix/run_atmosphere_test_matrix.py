@@ -4287,16 +4287,57 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
+        # --- #1028 persistent-D option (2026-08-03) ---------------------
+        # LEGOESM_HS_PERSISTENT_D=1 keeps the prognostic state in FV3 D
+        # staggering BETWEEN steps, instead of the default cc -> corner ->
+        # cc round trip every step.  Measured motivation (frozen-threshold
+        # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
+        # projection costs a factor 2.63 in banded EKE and 1.9x in poleward
+        # u'v' -- a MATERIAL eddy suppressor and the leading measured
+        # candidate for the #1028 dead jet.  PRECISION (codex pd-review
+        # MEDIUM): this keeps the state persistent-D BETWEEN MACRO STEPS;
+        # the existing physics adapter still converts D -> cc at every RK
+        # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
+        # :1613/:1045), so the inner conversions remain.  Matrix
+        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
+        # bit-identical (the state never converts, _cc is the identity).
+        # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
+        # sqrt(u^2+v^2) at centres -- the same operator either way, since
+        # the legacy wrapper also exits through fv3_to_hydrostatic.
+        _hs_persistent_d = (
+            os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        if _hs_persistent_d:
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+                fv3_to_hydrostatic as _f2h,
+                hydrostatic_to_fv3 as _h2f,
+            )
+            from legoesm.grids.cubed_sphere_cdgrid import (
+                create_cubed_sphere_cdgrid as _mk_cdgrid)
+            _hs_cdgrid = _mk_cdgrid(grid)
+            state = _h2f(state, _hs_cdgrid)          # convert ONCE
+            print("  #1028 persistent-D: prognostic state stays in D "
+                  "staggering between steps (LEGOESM_HS_PERSISTENT_D=1)")
+
+            def _cc(s):
+                """D -> cc for diagnostics only (diagnostic cadence)."""
+                return _f2h(s, _hs_cdgrid) if hasattr(s, "u_d") else s
+        else:
+            def _cc(s):
+                return s
+
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(global_integral(s.p_s, grid))
+        mass_fn = lambda s: float(global_integral(_cc(s).p_s, grid))
 
         def check_fn(s):
+            s = _cc(s)
             return (check_finite({"T": s.T.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
         def scalar_fn(s):
+            s = _cc(s)
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(
@@ -4306,8 +4347,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
         _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
         _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
-        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
-        key_array_fn = lambda s: s.T.data
+        extract_fn = lambda s: _extract_hydro_cube_latlon(_cc(s), _cos_a, _sin_a)
+        key_array_fn = lambda s: s.T.data   # T exists on BOTH state types
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi

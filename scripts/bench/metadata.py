@@ -895,6 +895,7 @@ def timed_scan_blocks(
     n_blocks: int = 2,
     probe_steps: int = 3,
     sync_label: str = "timed_scan_blocks",
+    aux=None,
 ):
     """Measurement-contract timing: fused ``lax.scan`` blocks + probe latency.
 
@@ -1005,10 +1006,18 @@ def timed_scan_blocks(
             from jax.experimental import multihost_utils
             multihost_utils.sync_global_devices(f"{sync_label}_{tag}")
 
+    # Normalize to a 2-arg advance (see the aux note below): top-level
+    # calls here are outside any trace, so passing aux is just an argument.
+    if aux is None:
+        def _advance(carry, _aux):
+            return advance(carry)
+    else:
+        _advance = advance
+
     # --- 1. compile (first call of advance, separated from all timing) ---
     _fence("compile_start")
     t0 = time.perf_counter()
-    state = advance(state)
+    state = _advance(state, aux)
     _block(state)
     compile_ms = (time.perf_counter() - t0) * 1e3
 
@@ -1017,7 +1026,7 @@ def timed_scan_blocks(
     probe_ms = []
     for _ in range(probe_steps):
         t0 = time.perf_counter()
-        state = advance(state)
+        state = _advance(state, aux)
         _block(state)
         probe_ms.append((time.perf_counter() - t0) * 1e3)
     step_latency_ms = float(np.median(probe_ms)) if probe_ms else float("nan")
@@ -1026,10 +1035,16 @@ def timed_scan_blocks(
     input_dtypes = jax.tree_util.tree_map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
+    # ``aux``: extra pytree threaded through the jit boundary as an ARGUMENT
+    # (never a closure capture). Needed when ``advance`` internally calls a
+    # jit function over SHARDED-global auxiliary arrays (the ocean band
+    # geometry stacks): jit-of-jit inlines the inner call, so concrete
+    # closure arrays would become outer-trace CONSTANTS whose value the MLIR
+    # handler cannot fetch for non-addressable arrays (2026-08-03 repro).
     @jax.jit
-    def _scan_run(st):
+    def _scan_run(st, _aux):
         def _body(carry, _):
-            new = advance(carry)
+            new = _advance(carry, _aux)
             new = jax.tree_util.tree_map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -1046,7 +1061,7 @@ def timed_scan_blocks(
     # schedule — counts stay matched.
     _pre = jax.tree_util.tree_map(lambda x: x, state)
     t0 = time.perf_counter()
-    _pre_out = _scan_run(_pre)
+    _pre_out = _scan_run(_pre, aux)
     _block(_pre_out)
     scan_compile_ms = (time.perf_counter() - t0) * 1e3
     del _pre, _pre_out
@@ -1055,7 +1070,7 @@ def timed_scan_blocks(
     for b in range(n_blocks):
         _fence(f"block{b}_start")
         t0 = time.perf_counter()
-        state = _scan_run(state)
+        state = _scan_run(state, aux)
         _block(state)
         block_ms.append((time.perf_counter() - t0) * 1e3)
     _fence("blocks_end")
