@@ -107,7 +107,8 @@ run M3 "$SECT_T::test_cumulative_row_columns_follow_the_accumulator_name_order"
 restore packages/ocean/legoesm/ocean/diagnostics_sections.py
 
 echo "#### M4: drop the names/arrays arity check ####"
-swap "$SECT" '    if len(vol) != len(acc.names) or len(tr) != len(acc.names):' \
+swap "$SECT" '    if len(vol) != len(acc.names) or len(tr) != len(acc.names) \
+            or len(se) != len(acc.names):' \
              '    if False:   # MUTATION: arity unchecked'
 run M4 "$SECT_T::test_cumulative_row_rejects_an_accumulator_whose_arrays_do_not_match_names"
 restore packages/ocean/legoesm/ocean/diagnostics_sections.py
