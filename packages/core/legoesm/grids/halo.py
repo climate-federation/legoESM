@@ -1180,6 +1180,10 @@ def pad_halo_vector_4d(
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector_4d: pass BOTH cos_theta and sin_theta or "
+            "neither; one alone silently selects the orthogonal rotation.")
     covariant = cos_theta is not None and sin_theta is not None
     if covariant and (cos_theta_padded is None or sin_theta_padded is None):
         raise ValueError(
@@ -2144,6 +2148,11 @@ def pad_halo_vector(
             f"pad_halo_vector, got {halo}")
 
     _EPS = float(jnp.finfo(jnp.float32).eps)
+
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector: pass BOTH cos_theta and sin_theta or neither; "
+            "one alone silently selects the orthogonal rotation (codex r18).")
 
     if cos_theta is not None and sin_theta is not None:
         # Non-orthogonal rotation (exact for cubed-sphere grids).

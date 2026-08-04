@@ -631,16 +631,26 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid, covariant_halo=False):
     ``tiled_padded_block`` (h2) slice — no staggered D-wind halo needed.
     """
     n = cdgrid.n
-    npt = min(4, n // 2)
+    # Fortran npt is FIXED at 4 for grid_type<3 non-bounded (sw_core.F90:3410);
+    # the band bounds below clamp it away for n<7 exactly as Fortran's
+    # max/min loop limits do.  The old min(4, n//2) invented a nonzero band
+    # at n=4..6 where Fortran has none (codex r18).
+    npt = 4
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
-    if n > 2 * npt and npt > 0:
+    # Fourth-order band: Fortran covers cells max(npt,js-1)..min(npy-npt,je+1)
+    # = 0-based 3..n-4 at npt=4 (sw_core.F90:3460-3468).  The pre-2026-08-04
+    # slice [npt : n-npt] was OFF BY ONE at both ends (codex r18 CONFIRMED:
+    # at C8 it left ZERO fourth-order rows where Fortran has two).
+    if n > 2 * npt - 2 and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        utmp = utmp.at[:, :, npt - 1:n - npt + 1].set(
+            u4[:, :, npt - 2:n - npt])
         v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+        vtmp = vtmp.at[:, npt - 1:n - npt + 1, :].set(
+            v4[:, npt - 2:n - npt, :])
     grid = cdgrid.base
     if covariant_halo:
         # 2026-08-04: utmp/vtmp are COVARIANT cell-centre winds, but the
@@ -689,16 +699,26 @@ def d2a2c_d_to_a_4d(u_d, v_d, cdgrid, covariant_halo=False):
     ``(utmp_pad, vtmp_pad)`` each ``(6, n+4, n+4, nlev)``.
     """
     n = cdgrid.n
-    npt = min(4, n // 2)
+    # Fortran npt is FIXED at 4 for grid_type<3 non-bounded (sw_core.F90:3410);
+    # the band bounds below clamp it away for n<7 exactly as Fortran's
+    # max/min loop limits do.  The old min(4, n//2) invented a nonzero band
+    # at n=4..6 where Fortran has none (codex r18).
+    npt = 4
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n, nlev)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    if n > 2 * npt and npt > 0:
+    # Fourth-order band: Fortran covers cells max(npt,js-1)..min(npy-npt,je+1)
+    # = 0-based 3..n-4 at npt=4 (sw_core.F90:3460-3468).  The pre-2026-08-04
+    # slice [npt : n-npt] was OFF BY ONE at both ends (codex r18 CONFIRMED:
+    # at C8 it left ZERO fourth-order rows where Fortran has two).
+    if n > 2 * npt - 2 and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        utmp = utmp.at[:, :, npt - 1:n - npt + 1].set(
+            u4[:, :, npt - 2:n - npt])
         v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+        vtmp = vtmp.at[:, npt - 1:n - npt + 1, :].set(
+            v4[:, npt - 2:n - npt, :])
     grid = cdgrid.base
     if covariant_halo:
         from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
