@@ -671,7 +671,12 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     """
     from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
 
-    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # float64 metrics: the default float32 metric_dtype floors every bin at
+    # ~1.4e-8, which is ABOVE the converged seam residual (2026-08-04: d0
+    # reached 2.0e-8 at n=32) — the convergence-order assertions cannot
+    # resolve at that floor.  Precision fix, not a tolerance change.
+    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n),
+                                    metric_dtype=jnp.float64)
     u_east = speed * jnp.cos(cd.lat_corner)
     v_north = jnp.zeros_like(u_east)
     u_corner, v_corner = rotate_winds_geo_to_grid(
@@ -692,29 +697,14 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     }
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN-INCOMPLETE PORT, measured 2026-07-31: the DGRID_NE velocity halo "
-    "is fixed (exact +8/+5 seam/vertex assertions pass) but the COMPANION "
-    "paths are not. Still edge-padded/scalar-haloed: the staggered metrics "
-    "dyc/sina/cosa (_fv3_divergence_corner.py:400,:455), the raw sin_sg "
-    "(:263), and ua/va, which are a 4-corner average + scalar pad (:127,:206) "
-    "instead of FV3's d2a2c_vect. Measured solid-body errors still DOUBLE per "
-    "refinement at boundary (3.10e-6/6.61e-6/1.35e-5) and vertex "
-    "(2.09e-6/4.39e-6/9.01e-6) for n=8/16/32 -- O(1/dx) on a field with NO "
-    "physical seam jump. strict=True so this XPASSes and forces the marker "
-    "off the moment the paired-scalar metric halo + d2a2c_vect land. "
-    "GATE-BLINDNESS WARNING (2026-07-31): the exact unit-metric assertions "
-    "(+8/+5/+1) CANNOT substitute for this test. They set sin=1 and cos=0, so "
-    "they stay GREEN even with a WRONG raw sin_sg/cos_sg seam permutation -- "
-    "the very layer still unported. This solid-body oracle is the only gate "
-    "here that samples boundary and vertex points with REAL metrics, so it is "
-    "the one that decides. BLOCKED ON a raw-slot halo, conceptually "
-    "pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg) -> (6,n+2,n+2,4), encoding the "
-    "8 axis-swap SLOT permutations plus the 4 vertex fills: divergence_corner "
-    "reads MIXED raw slots at boundaries -- (j-1,4)+(j,2) for uf and "
-    "(i-1,3)+(i,1) for vf (sw_core.F90:2187-2207) -- NOT staggered sina/cosa, "
-    "so pad_halo_dgrid_scalar_pair_4d cannot supply it and substituting the "
-    "staggered pair there would be a guess."))
+# xfail RESOLVED 2026-08-04: the four-fix chain (cell-metric ghost ring
+# 3b154754c, halo-free covariant lift dfb9fcf59 + covariant D->A halo
+# 468d4ed26, DGRID vector-halo source rows + half-turn signs f7669ba99,
+# local-ghost D->A ring 0b2327471) took the solid-body seam residual from
+# d0 = 4.9e-6..2.3e-5 (x2/refinement, O(1/dx)) to 6.4e-8..2.0e-8
+# (CONVERGING, ~4x the certified NumPy-oracle floor of 4.4e-9 at n=32).
+# The marker came off with the fix that made it pass; float64 metrics in
+# the fixture lift the f32 floor that masked the interior order.
 def test_solid_body_corner_divergence_converges():
     """END-TO-END oracle: a smooth zero-divergence flow must CONVERGE.
 
