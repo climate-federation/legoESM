@@ -140,6 +140,47 @@ def _rcemip_qv_profile(z: jax.Array,
 # -------- Surface-flux physics_fn (bulk_flux only) -------- #
 
 
+def make_surface_flux_diagnostic(T_sfc: float, p_sfc: float, wd: float = 0.0,
+                                 qv_slot: int = 0):
+    """Return ``fn(state, hc) -> (shflx, lhflx)`` [W/m^2] for SNAPSHOT recording.
+
+    Calls the SAME shared routine the prognostic path uses
+    (:func:`legoesm.core.bulk_flux.compute_sam_oceflx_fluxes` with
+    :func:`sam_ocean_surface_q`), so the recorded flux IS the model's flux and
+    no bulk closure is re-derived downstream.
+
+    This exists because reconstructing E offline got it wrong: an analysis
+    script assumed the Wing-2018 ``C_h = 1.5e-3`` + 5 m/s gustiness closure,
+    while this driver runs SAM's iterative Monin-Obukhov scheme with
+    ``vmag = max(1, |U|)`` and ``q_sfc = 0.981 qsat(SST)`` (see SF-1/SF-2/SF-3
+    in _make_surface_flux_physics). The 5x wind-floor difference alone made the
+    reconstructed evaporation, and every precipitation number derived from it,
+    unusable.
+    """
+    from legoesm.core.bulk_flux import (
+        compute_sam_oceflx_fluxes, sam_ocean_surface_q,
+    )
+    q_sfc = float(sam_ocean_surface_q(jnp.asarray(T_sfc), p_sfc))
+
+    def _diag(state, hc_in):
+        k_sfc = state.theta_prime.data.shape[-1] - 1
+        theta_lo = hc_in.theta_ref + state.theta_prime.data
+        theta_lo = theta_lo[..., k_sfc]
+        rho_lo = (hc_in.rho_ref + state.rho_prime.data)[..., k_sfc]
+        q_lo = state.tracers.data[..., k_sfc, qv_slot]
+        _, _, shflx, lhflx, _ = compute_sam_oceflx_fluxes(
+            u_atm=state.u.data[..., k_sfc], v_atm=state.v.data[..., k_sfc],
+            theta_atm=theta_lo, q_atm=q_lo,
+            T_sfc=jnp.full_like(theta_lo, T_sfc),
+            q_sfc=jnp.full_like(theta_lo, q_sfc),
+            rho=rho_lo, z_bot=hc_in.z_full[k_sfc],
+            exner_sfc=hc_in.exner_ref[k_sfc], wd=wd,
+        )
+        return shflx, lhflx
+
+    return _diag
+
+
 def _make_surface_flux_physics(
     grid, height_coord, terrain_metric,
     T_sfc: float, p_sfc: float, wd: float = 0.0,
@@ -1765,6 +1806,13 @@ def main():
                     )
                 land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
+    # Snapshot-time surface-flux diagnostic (ocean branch only): the MODEL's
+    # own SAM flux, so offline budgets never re-derive a bulk closure.
+    _sfc_flux_diag_jit = None
+    if not args.land and not args.no_surface_flux and not args.no_physics:
+        _sfc_flux_diag = make_surface_flux_diagnostic(args.T_sfc, p_sfc_rcemip)
+        _sfc_flux_diag_jit = jax.jit(lambda st: _sfc_flux_diag(st, hc))
+
     # --- adaptive dt (opt-in; the default path is byte-identical) ----------
     dt_cur = args.dt
     t_sim = _start_step * args.dt
@@ -1898,6 +1946,13 @@ def main():
             _surface_fields = (
                 {"T_s": land_T_sfc} if args.land else None
             )
+            if _sfc_flux_diag_jit is not None:
+                _sh, _lh = _sfc_flux_diag_jit(state)
+                # W/m^2. Record the MODEL's own flux so an offline water budget
+                # integrates it instead of re-deriving a bulk closure.
+                _surface_fields = dict(_surface_fields or {})
+                _surface_fields["shflx"] = np.asarray(_sh)
+                _surface_fields["lhflx"] = np.asarray(_lh)
             rce_snapshot.save_surface_levels(
                 args.output, i + 1, t_sim, state, grid, hc,
                 heights_m=_snap_heights, surface_fields=_surface_fields)

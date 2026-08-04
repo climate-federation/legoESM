@@ -60,8 +60,6 @@ from legoesm.atmosphere.idealized.rcemip_initial_conditions import (  # noqa: E4
 
 MSE_KJ_TO_J = 1.0e3  # rce_snapshot stores MSE in kJ/kg
 SEC_PER_DAY = 86400.0
-_RCEMIP1_C_H = 1.5e-3
-_RCEMIP1_GUST_MS = 5.0
 
 
 def _fatal(msg: str) -> None:
@@ -293,15 +291,13 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
     print("=== SURFACE TRAJECTORY (driver's own stored fields) ===")
     print("  precip is the driver's PROXY (q_r[k_sfc]*rho*5 m/s), NOT a "
           "microphysics flux -- see rce_diagnostics.precipitation_rate_proxy_plane")
-    print(f"  E is a BULK ESTIMATE recomputed here: C_h={_RCEMIP1_C_H}, "
-          f"gust floor={_RCEMIP1_GUST_MS} m/s, T_sfc={t_sfc} K")
+    print(f"  E = lhflx/L_v from the MODEL'S OWN recorded latent-heat "
+          f"flux (T_sfc={t_sfc} K); no bulk closure is re-derived here.")
     print("  P_budget is the WATER-BUDGET estimate P = E - d(CWV)/dt, "
           "centred-differenced between consecutive snapshots.")
     print("  CWV_max/CWV_mean is the convective-cell discriminator: real cells "
           "give max >> mean; the column-symmetric trap never crosses 60 mm.")
     ref = {}
-    qsat_sfc = float(saturation_mixing_ratio(
-        jnp.asarray(t_sfc), jnp.asarray(WING_P_SFC)))
     days, cwv_m, cwv_x, p_proxy, p_max, e_est, spd_m = ([] for _ in range(7))
     for path in sfc_files:
         with np.load(path) as ds:
@@ -311,15 +307,31 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
             qv_s = _require_finite("qv_sfc", np.asarray(ds["qv_sfc"]))
             spd = np.sqrt(np.asarray(ds["u_sfc"]) ** 2
                           + np.asarray(ds["v_sfc"]) ** 2)
+            lhflx = (_require_finite("lhflx", np.asarray(ds["lhflx"]))
+                     if "lhflx" in ds.files else None)
         ref[round(day, 3)] = float(cwv.mean())
-        # RCEMIP1 bulk evaporation with the code's OWN coefficients
-        # (rce_surface_flux._RCEMIP1_C_H / _RCEMIP1_GUSTINESS_FLOOR_MS).
-        # Surface air density from the ideal gas law on the run's own p_sfc and
-        # near-surface humidity -- no hardcoded density literal.
-        rho_s = WING_P_SFC / (constants.R_d * t_sfc
-                              * (1.0 + (1.0 / constants.epsilon - 1.0) * qv_s))
-        spd_eff = np.sqrt(spd ** 2 + _RCEMIP1_GUST_MS ** 2)
-        evap = rho_s * _RCEMIP1_C_H * spd_eff * (qsat_sfc - qv_s)
+        # E comes from the MODEL's OWN recorded latent-heat flux. It is NOT
+        # reconstructed here.
+        #
+        # RETRACTION: an earlier version of this script rebuilt E from a
+        # Wing-2018 bulk closure (C_h = 1.5e-3, 5 m/s gustiness floor). The
+        # driver actually runs SAM's iterative Monin-Obukhov ocean flux with
+        # vmag = max(1, |U|) and q_sfc = 0.981 qsat(SST)
+        # (run_rcemip_plane._make_surface_flux_physics, SF-1/SF-2/SF-3). At the
+        # observed |U| ~ 0.05 m/s the wind floor alone differs by 5x, so the
+        # reconstructed E -- and the precipitation inferred from it -- were
+        # wrong. run_rcemip_plane now records shflx/lhflx into every surface
+        # snapshot via make_surface_flux_diagnostic, which calls the same shared
+        # routine the prognostic path uses.
+        if lhflx is None:
+            _fatal(
+                "surface snapshots carry no 'lhflx'. This run predates the "
+                "flux-recording change in run_rcemip_plane. REFUSING to "
+                "reconstruct a bulk closure offline -- that is exactly what "
+                "produced a 5x-wrong evaporation before. Re-run with the "
+                "current driver, or pass --no-water-budget to get the "
+                "CWV/precip-proxy table without E or P_budget.")
+        evap = lhflx / constants.L_v
         days.append(day)
         cwv_m.append(float(cwv.mean()))
         cwv_x.append(float(cwv.max()))
@@ -353,8 +365,18 @@ def analyse_surface(sfc_files: list[Path], t_sfc: float,
             continue
         print(f"\n  WINDOW days {lo:.1f}-{hi:.1f} ({int(m.sum())} snapshots), "
               "every number below from THIS window only:")
-        print(f"    P_budget = E - dCWV/dt : {p_budget[m].mean():7.3f} mm/day "
-              f"(Wing 2018 RCE plateau ~3 mm/day)")
+        # Endpoint difference INSIDE the window: averaging np.gradient would
+        # pull in samples from OUTSIDE it at the two boundaries.
+        idx = np.nonzero(m)[0]
+        dcwv_win = ((cwv_m[idx[-1]] - cwv_m[idx[0]])
+                    / (days[idx[-1]] - days[idx[0]]))
+        p_win = e_est[m].mean() - dcwv_win
+        print(f"    P_budget = <E> - dCWV/dt : {p_win:7.3f} mm/day "
+              f"(Wing 2018 RCE plateau ~3 mm/day; dCWV/dt from the window "
+              f"ENDPOINTS = {dcwv_win:+.3f} mm/day)")
+        print("      NOTE condensate storage d(CWP)/dt is NOT included (CWP is "
+              "only in the sparse 3D volumes); it is small in quasi-steady RCE "
+              "but this is a stated omission, not a verified-zero term.")
         print(f"    P_proxy  (q_r * 5 m/s) : "
               f"{np.asarray(p_proxy)[m].mean():7.3f} mm/day")
         print(f"    E_est                  : {e_est[m].mean():7.3f} mm/day")
