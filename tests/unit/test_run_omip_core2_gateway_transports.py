@@ -576,7 +576,8 @@ def test_row_refuses_to_write_columns_that_would_be_mis_assigned(tmp_path):
     swapped = GatewayAccumulator(("davis_caa", "bering_pacific"),
                                  jnp.asarray([1.0, 2.0]),
                                  jnp.asarray([3.0, 4.0]), 1,
-                                 salt_exact=jnp.asarray([5.0, 6.0]))
+                                 salt_exact=jnp.asarray([5.0, 6.0]),
+                                 n_salt=1)
     R._gateway_cumulative_row(csv, swapped, 1, 0.1)   # must not raise
     R._gateway_cumulative_close(csv)
     _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
@@ -1024,7 +1025,7 @@ def test_n_steps_is_the_accumulator_count_not_the_step_index(tmp_path):
     assert step != n_acc, "the fixture must make the two distinguishable"
     acc = GatewayAccumulator(("davis_caa",), jnp.asarray([1.5e6]),
                              jnp.asarray([5.1e7]), n_acc,
-                             salt_exact=jnp.asarray([6.3e7]))
+                             salt_exact=jnp.asarray([6.3e7]), n_salt=n_acc)
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     R._gateway_cumulative_row(csv, acc, step, 6.25)
     R._gateway_cumulative_close(csv)
@@ -1050,7 +1051,7 @@ def test_a_repeated_dump_point_is_not_written_twice(tmp_path):
 
     acc = GatewayAccumulator(("davis_caa",), jnp.asarray([2.0e6]),
                              jnp.asarray([3.0e6]), 42,
-                             salt_exact=jnp.asarray([4.0e6]))
+                             salt_exact=jnp.asarray([4.0e6]), n_salt=42)
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     # The STEP LABEL differs on the two calls that carry the SAME acc.n --
     # exactly what the driver does (the abort path labels its salvage row
@@ -1085,7 +1086,8 @@ def test_a_write_failure_disables_the_writer_instead_of_retrying_it(tmp_path):
     def _accs():
         return [GatewayAccumulator(("davis_caa",), jnp.asarray([float(k)]),
                                    jnp.asarray([float(k)]), k,
-                                   salt_exact=jnp.asarray([float(k)]))
+                                   salt_exact=jnp.asarray([float(k)]),
+                                   n_salt=k)
                 for k in (1, 2, 3)]
 
     healthy = tmp_path / "healthy"
@@ -1158,7 +1160,8 @@ def test_transports_txt_appends_exact_salt_lines_after_the_legacy_block(
     acc = GatewayAccumulator(("bering_pacific", "atlantic_nordic"),
                              jnp.asarray([2.0e6, 6.0e6]),
                              jnp.asarray([4.0e6, 8.0e6]), 2,
-                             salt_exact=jnp.asarray([5.0e6, 1.0e7]))
+                             salt_exact=jnp.asarray([5.0e6, 1.0e7]),
+                             n_salt=2)
     R._gateway_transport_diag(acc, tmp_path, io_proc=True)
     assert (tmp_path / "transports.txt").read_bytes() == (
         b"gateway_n_steps 2\n"
@@ -1376,3 +1379,22 @@ def test_driver_gateway_call_passes_require_salt():
     assert "require_salt=True" in window, (
         "the driver's gateway_step call does not require the exact salt "
         "channel it just enabled")
+
+
+def test_incomplete_exact_channel_omits_the_transports_txt_lines(tmp_path):
+    """codex final RED 2, writer half: an allocated-but-incomplete channel
+    must not append exact lines (a zero would read as a measurement)."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    acc = GatewayAccumulator(("davis_caa",), jnp.asarray([2.0e6]),
+                             jnp.asarray([3.0e6]), 5,
+                             salt_exact=jnp.asarray([0.0]), n_salt=2)
+    R._gateway_transport_diag(acc, tmp_path, io_proc=True)
+    txt = (tmp_path / "transports.txt").read_text()
+    assert "gateway_davis_caa_vol_Sv" in txt, "the legacy block must still write"
+    assert "salt_exact" not in txt, (
+        "an INCOMPLETE exact channel (n_salt=2 of n=5) wrote exact lines -- "
+        "a never-advanced zero would be read as a measured transport")

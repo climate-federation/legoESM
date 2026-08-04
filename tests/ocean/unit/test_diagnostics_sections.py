@@ -531,7 +531,10 @@ def _acc(names, vols, trs, n):
     # salt_exact, not tracer" assertions vacuously true.
     se = t * 1.5 + 0.125
     assert not np.array_equal(np.asarray(se), np.asarray(t)), "degenerate fixture"
-    return GatewayAccumulator(tuple(names), v, t, int(n), salt_exact=se)
+    # n_salt == n: the exact channel observed every step (COMPLETE); the
+    # incompleteness path has its own dedicated test.
+    return GatewayAccumulator(tuple(names), v, t, int(n), salt_exact=se,
+                              n_salt=int(n))
 
 
 # Values chosen so that NOT ONE of them survives a 6-decimal round trip -- that
@@ -700,3 +703,26 @@ def test_differencing_two_cumulative_rows_recovers_a_window_mean():
     assert window == pytest.approx(per_step_b, rel=1e-12)
     assert whole == pytest.approx((per_step_a * n_a + per_step_b * n_b)
                                   / (n_a + n_b), rel=1e-12)
+
+
+def test_incomplete_exact_channel_writes_nan_not_zero():
+    """codex final RED 2: a preallocated zero that never advanced must not be
+    written as 'the exact transport was zero'.  n_salt != n => nan cells."""
+    from legoesm.ocean.diagnostics_sections import (
+        format_gateway_cumulative_row, gateway_cumulative_columns,
+        new_gateway_accumulator,
+    )
+    acc = new_gateway_accumulator(_NAMES3)
+    # simulate 3 accumulated steps of which the exact channel saw only 1
+    acc = acc._replace(volume=acc.volume + 1.0, tracer=acc.tracer + 1.0,
+                       n=3, n_salt=1, salt_exact=acc.salt_exact + 5.0)
+    cols = gateway_cumulative_columns(acc.names)
+    got = dict(zip(cols, format_gateway_cumulative_row(acc, 3, 1.0).split(",")))
+    for nm in _NAMES3:
+        v = float(got[f"{nm}_salt_exact_cumsum_psu_m3s"])
+        assert np.isnan(v), (
+            f"{nm}: incomplete exact channel wrote {v!r}, not nan -- a reader "
+            "would difference a fabricated rate")
+        assert not np.isnan(float(got[f"{nm}_vol_cumsum_m3s"])), (
+            "the volume column must stay numeric; only the exact channel is "
+            "incomplete")

@@ -640,8 +640,10 @@ class LatLonCGridOceanState(NamedTuple):
     # S to the stored mass flux -- a stated approximation that became the
     # leading candidate for the +4.79 psu m unexplained Arctic budget
     # remainder.  These slots store what the model ACTUALLY moved, so the
-    # exact and upwind section transports can be accumulated side by side and
-    # their difference IS the approximation error.
+    # exact and upwind section transports can be accumulated side by side;
+    # their difference is the face-scheme (upwind-vs-limiter) gap PLUS a
+    # one-step salinity time-level offset (the upwind diagnostic samples the
+    # post-step S) -- see GatewayAccumulator.salt_exact.
     #
     # 2-D BY DESIGN (vertical sum): section transports need only the column
     # integral; the 3-D pair would cost ~145 MB/state like the mass triple vs

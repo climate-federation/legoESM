@@ -64,7 +64,7 @@ NRUN=0
 # Guards against a SHORT run being read as a clean one.  A stale anchor aborts
 # (below), and a deleted mutation block would otherwise just shrink the suite
 # silently; both are caught by comparing the count at the verdict.
-EXPECTED_MUTATIONS=31
+EXPECTED_MUTATIONS=33
 
 run() {      # run <label> <pytest args...>
   local label=$1; shift
@@ -364,6 +364,20 @@ swap "$DRIVER" '                    require_salt=True)' \
                '                    )  # MUTATION: exact channel not required'
 run M32 "$DRV_T::test_driver_gateway_call_passes_require_salt"
 restore scripts/run/run_omip_core2.py
+
+echo "#### M33: report an INCOMPLETE exact channel as complete (writer) ####"
+swap "$SECT2" '        if self.n_salt != self.n or self.n == 0:
+            return None' \
+               '        if False:   # MUTATION: incompleteness ignored
+            return None'
+run M33 "$DRV_T::test_incomplete_exact_channel_omits_the_transports_txt_lines"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M34: CSV writes numeric cells for an incomplete channel ####"
+swap "$SECT2" '    _complete = acc.n_salt == acc.n' \
+               '    _complete = True   # MUTATION: incompleteness ignored'
+run M34 "$SECT_T::test_incomplete_exact_channel_writes_nan_not_zero"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
 
 # ==================================================================== control
 echo "=== CONTROL: unmutated worktree must be GREEN ==="

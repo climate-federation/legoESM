@@ -368,9 +368,25 @@ class GatewayAccumulator(NamedTuple):
     # rather than the upwind estimate in ``tracer``.  ``None`` (the default,
     # so legacy positional constructions keep working) means the accumulator
     # was built without the exact channel; ``new_gateway_accumulator`` always
-    # allocates it.  The DIFFERENCE ``tracer - salt_exact`` is the upwind-vs-
-    # limiter approximation error, per window, for free.
+    # allocates it.
+    #
+    # WHAT THE TWO CHANNELS' DIFFERENCE IS -- STATED PRECISELY (codex final-
+    # round RED 1): ``tracer`` applies donor-cell upwind values of the POST-
+    # STEP salinity to the stored mass flux, while ``salt_exact`` is the flux
+    # the step applied to the PRE-advection (mid-step) salinity with the
+    # limiter.  Their difference is therefore the face-scheme (upwind-vs-
+    # limiter) gap PLUS a one-step time-level/physics offset in the sampled
+    # salinity -- dominated by the scheme gap on a >1-step mean, but NOT a
+    # pure approximation-error measurement.  The EXACT channel alone is the
+    # budget-grade number.
     salt_exact: jnp.ndarray | None = None
+    # How many of the ``n`` accumulated steps ALSO advanced ``salt_exact``
+    # (codex final-round RED 2): a caller may legally accumulate states
+    # without the stored pair (require_salt=False), and a preallocated zero
+    # that never advanced must never be WRITTEN as "the exact transport was
+    # zero".  The channel is COMPLETE -- and only then reportable -- when
+    # ``n_salt == n``.
+    n_salt: int = 0
 
     @property
     def volume_sv(self) -> jnp.ndarray:
@@ -384,8 +400,15 @@ class GatewayAccumulator(NamedTuple):
 
     @property
     def salt_exact_mean(self) -> jnp.ndarray | None:
-        """Time-mean EXACT salt transport per gateway [psu m^3/s] (or None)."""
+        """Time-mean EXACT salt transport per gateway [psu m^3/s].
+
+        ``None`` when the channel was never allocated OR is INCOMPLETE
+        (``n_salt != n``): a mean over steps the channel did not observe
+        would report a fabricated (under-counted) transport as exact.
+        """
         if self.salt_exact is None:
+            return None
+        if self.n_salt != self.n or self.n == 0:
             return None
         return self.salt_exact / max(self.n, 1)
 
@@ -454,7 +477,13 @@ def format_gateway_cumulative_row(acc: GatewayAccumulator, step: int,
             "channel; the CSV schema carries the exact-salt column "
             "unconditionally, so a legacy accumulator cannot be dumped "
             "(build it with new_gateway_accumulator).")
-    se = [float(v) for v in acc.salt_exact]
+    # INCOMPLETE exact channel (n_salt != n): the cumulative sums did not
+    # observe every accumulated step, so differencing them would fabricate a
+    # rate.  ``nan`` poisons any arithmetic honestly (codex final RED 2); the
+    # production driver passes require_salt=True, keeping the channel
+    # complete, so a nan here is itself a diagnostic.
+    _complete = acc.n_salt == acc.n
+    se = [float(v) if _complete else float("nan") for v in acc.salt_exact]
     if len(vol) != len(acc.names) or len(tr) != len(acc.names) \
             or len(se) != len(acc.names):
         raise ValueError(
@@ -481,7 +510,7 @@ def new_gateway_accumulator(names: tuple[str, ...]) -> GatewayAccumulator:
     """
     dt = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
     z = jnp.zeros((len(names),), dtype=dt)
-    return GatewayAccumulator(tuple(names), z, z, 0, salt_exact=z)
+    return GatewayAccumulator(tuple(names), z, z, 0, salt_exact=z, n_salt=0)
 
 
 @jax.jit
@@ -557,7 +586,9 @@ def accumulate_gateways(acc: GatewayAccumulator, stack: GatewayStack,
 
     ``salt_flux_u2``/``salt_flux_v2`` (both or neither): the model's stored
     column-integrated advective salt-flux pair [psu m^2/s], accumulated into
-    ``acc.salt_exact`` alongside the upwind estimate in ``acc.tracer``.
+    ``acc.salt_exact`` alongside the upwind estimate in ``acc.tracer`` (their
+    difference = face-scheme gap PLUS a one-step salinity time-level offset;
+    see the ``salt_exact`` field comment).
     Passing them into an accumulator built WITHOUT the exact channel
     (``salt_exact is None``) raises -- silently dropping the exact numbers a
     caller supplied is the silent-downgrade defect class again (#1442 codex
@@ -604,11 +635,14 @@ def accumulate_gateways(acc: GatewayAccumulator, stack: GatewayStack,
         stack.u_sel, stack.u_sign, stack.v_sel, stack.v_sign,
         tracer_u, tracer_v)
     se = acc.salt_exact
+    n_salt = acc.n_salt
     if salt_flux_u2 is not None:
         se = _accumulate_salt_exact_jit(
             acc.salt_exact, salt_flux_u2, salt_flux_v2, dy_u, dx_v,
             stack.u_sel, stack.u_sign, stack.v_sel, stack.v_sign)
-    return GatewayAccumulator(acc.names, vol, tr, acc.n + 1, salt_exact=se)
+        n_salt = acc.n_salt + 1
+    return GatewayAccumulator(acc.names, vol, tr, acc.n + 1, salt_exact=se,
+                              n_salt=n_salt)
 
 
 # Selectable provenance for :func:`mass_fluxes_from_state`.  An unknown value
