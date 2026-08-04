@@ -2320,12 +2320,19 @@ def _seed_mass_flux_for_scan(model, state):
     has no such slots) returns unchanged, and so does any lat-lon run with the
     flag off.  Called for its structure, never for its values.
     """
-    if not getattr(model.config, "store_mass_flux", False):
+    _mass = getattr(model.config, "store_mass_flux", False)
+    _salt = getattr(model.config, "store_salt_flux", False)
+    if not (_mass or _salt):
         return state
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         seed_mass_flux_carry,
+        seed_salt_flux_carry,
     )
-    return seed_mass_flux_carry(state, True)
+    if _mass:
+        state = seed_mass_flux_carry(state, True)
+    if _salt:
+        state = seed_salt_flux_carry(state, True)
+    return state
 
 
 def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
@@ -3009,7 +3016,8 @@ def _join_restart_writer():
 # Same classification the run_omip_core2 restart applies through its explicit
 # ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
 # this is the older npz lane, which has no such policy table.
-_RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+_RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
+                             "salt_flux_u_int", "salt_flux_v_int")
 
 
 def _save_restart(state, day, step, output_dir, ice_state=None,

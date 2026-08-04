@@ -537,8 +537,9 @@ class LatLonCGridOceanState(NamedTuple):
     # ``cast_pytree(..., "storage")`` rounds these along with everything else,
     # so a run computing in f64 and storing in f32 keeps the f32 value.  VOLUME
     # flux only: tracer transports built from it still apply their own face
-    # scheme (the gateway accumulator's salt transport remains a post-step
-    # UPWIND diagnostic, not the model's own tracer flux).  Populated ONLY when
+    # scheme (the gateway accumulator's UPWIND salt transport is a post-step
+    # diagnostic; the model's own advective salt flux is stored separately by
+    # ``store_salt_flux`` via ``salt_flux_u_int``/``salt_flux_v_int`` below).  Populated ONLY when
     # ``LatLonCGridOceanConfig.store_mass_flux`` is True; default None => inert,
     # zero behaviour change (same None-seeding pattern as ``tke``/``bt_hist``).
     #
@@ -627,6 +628,33 @@ class LatLonCGridOceanState(NamedTuple):
     # centres), and cell-centred horizontally, so it shards/scatters exactly
     # like a tracer.  Equals the base ``w_baro`` when GM through-FCT is off.
     mass_flux_w: object = None
+    # Column-integrated ADVECTIVE SALT flux on u/v faces [psu m^2/s]: the
+    # vertical sum over levels of ``mass_flux_* * S_face`` with S_face from
+    # the run's OWN tracer scheme (superbee/TVD-limited on the production
+    # path) -- the arrays behind the horizontal part of the salt update's
+    # ``div_h(mass_flux * S_face)`` term, summed over k.  Populated ONLY when
+    # ``LatLonCGridOceanConfig.store_salt_flux`` is True; default None =>
+    # inert (same None-seeding pattern as ``mass_flux_*``).
+    #
+    # WHY: the gateway accumulator's salt transport applied donor-cell UPWIND
+    # S to the stored mass flux -- a stated approximation that became the
+    # leading candidate for the +4.79 psu m unexplained Arctic budget
+    # remainder.  These slots store what the model ACTUALLY moved, so the
+    # exact and upwind section transports can be accumulated side by side and
+    # their difference IS the approximation error.
+    #
+    # 2-D BY DESIGN (vertical sum): section transports need only the column
+    # integral; the 3-D pair would cost ~145 MB/state like the mass triple vs
+    # ~1.9 MB for this pair.  A consumer needing the vertical structure must
+    # extend the capture, not reconstruct it from these.
+    #
+    # Shapes: (n_lat, n_lon+1) u-faces, (n_lat+1, n_lon) v-faces.  Like the
+    # mass triple these are rounded to storage precision by the step's
+    # closing cast.  The SAME no-budget-identity caveats as the mass triple
+    # apply; additionally these are the EULER-path instantaneous fluxes
+    # (config-enforced: store_salt_flux rejects AB2/RK3/FCT/SOM).
+    salt_flux_u_int: object = None
+    salt_flux_v_int: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -2352,6 +2380,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``zdf_drag_in_matrix`` onward for any caller that passes positionally).
     # ANY new field goes HERE, below this one -- never mid-tuple.
     store_mass_flux: bool = False
+    # Store the column-integrated ADVECTIVE SALT flux the tracer update was
+    # evaluated with (the salt analogue of ``store_mass_flux``; gateway exact-
+    # salt instrument).  PURE DIAGNOSTIC, off by default; costs TWO 2-D face
+    # arrays (~1.9 MB at eORCA1 in fp64 -- the vertical sum, NOT the 3-D pair,
+    # is stored: section transports only need the column integral and the 3-D
+    # pair would cost ~145 MB like the mass triple).  Static Python bool.
+    # SUPPORTED SCOPE (constructor-enforced, refuse-not-ignore): tracer
+    # schemes whose horizontal face flux is exposed (upwind/tvd/superbee/
+    # centered/ppm/dst3/weno5/weno7) under ``tracer_time_integrator="euler"``.
+    # FCT/multidim schemes form fluxes inside their own kernels, AB2/RK3 apply
+    # multi-level/staged combinations -- a capture there would NOT be "the
+    # flux the model applied", so those configs RAISE instead of storing a
+    # lie.
+    store_salt_flux: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -63,7 +63,7 @@ NRUN=0
 # Guards against a SHORT run being read as a clean one.  A stale anchor aborts
 # (below), and a deleted mutation block would otherwise just shrink the suite
 # silently; both are caught by comparing the count at the verdict.
-EXPECTED_MUTATIONS=25
+EXPECTED_MUTATIONS=31
 
 run() {      # run <label> <pytest args...>
   local label=$1; shift
@@ -298,6 +298,67 @@ echo "####      (the selector that codex round-2 found unstripped) ####"
 swap "$DRIVER" '    _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)' \
                '    # MUTATION _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)'
 run M26 "$DRV_T::test_driver_writes_a_run_end_row_and_closes_after_the_loop"
+restore scripts/run/run_omip_core2.py
+
+# ============================== store_salt_flux exact channel (M27 - M32)
+MODEL=$WT/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+SECT2=$WT/packages/ocean/legoesm/ocean/diagnostics_sections.py
+MFS_T=tests/ocean/unit/test_mass_flux_store.py
+
+echo "#### M27: model advects with UPWIND faces (capture==upwind) ####"
+echo "####      the discriminator must detect a capture indistinguishable"
+echo "####      from the donor-cell estimate ####"
+swap "$MODEL" '            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)' \
+               '            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = upwind_to_u_points(tr, mass_flux_u)              # MUTATION
+            tr_v = upwind_to_v_points(tr, mass_flux_v, grid=grid)   # MUTATION'
+run M27 "$MFS_T::test_sharp_front_discriminates_capture_from_upwind"
+restore packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+
+echo "#### M28: drop the orientation sign from the exact-salt reduction ####"
+swap "$SECT2" '    wu = (u_sel_stack.astype(sfu2.dtype) * u_sign[None, :, :]
+          * dy_u.astype(sfu2.dtype)[None, :, :])
+    wv = (v_sel_stack.astype(sfv2.dtype) * v_sign[None, :, :]
+          * dx_v.astype(sfv2.dtype)[None, :, :])' \
+               '    wu = (u_sel_stack.astype(sfu2.dtype)
+          * dy_u.astype(sfu2.dtype)[None, :, :])   # MUTATION: no sign
+    wv = (v_sel_stack.astype(sfv2.dtype)
+          * dx_v.astype(sfv2.dtype)[None, :, :])   # MUTATION: no sign'
+run M28 "$DRV_T::test_gateway_exact_salt_orientation_on_a_synthetic_pair"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M29: transports.txt writer drops the exact-salt lines ####"
+swap "$DRIVER" '            _se_mean = acc.salt_exact_mean
+            if _se_mean is not None:' \
+               '            _se_mean = acc.salt_exact_mean
+            if False:   # MUTATION: exact lines never written'
+run M29 "$DRV_T::test_transports_txt_appends_exact_salt_lines_after_the_legacy_block"
+restore scripts/run/run_omip_core2.py
+
+echo "#### M30: seed_salt_flux_carry becomes a no-op ####"
+swap "$MODEL" '    if not store_salt_flux:
+        return state
+    _shapes = {
+        "salt_flux_u_int": tuple(jnp.shape(state.u.data))[:-1],' \
+               '    if True:                       # MUTATION: never seeds
+        return state
+    _shapes = {
+        "salt_flux_u_int": tuple(jnp.shape(state.u.data))[:-1],'
+run M30 "$MFS_T::test_salt_carry_survives_integrate_scan"
+restore packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+
+echo "#### M31: CSV exact column silently carries the UPWIND sums ####"
+swap "$SECT2" '        cells.append(repr(se[i]))' \
+             '        cells.append(repr(tr[i]))   # MUTATION: upwind copied'
+run M31 "$SECT_T::test_cumulative_row_round_trips_exactly"
+restore packages/ocean/legoesm/ocean/diagnostics_sections.py
+
+echo "#### M32: driver drops require_salt from the per-step call ####"
+swap "$DRIVER" '                    require_salt=True)' \
+               '                    )  # MUTATION: exact channel not required'
+run M32 "$DRV_T::test_driver_gateway_call_passes_require_salt"
 restore scripts/run/run_omip_core2.py
 
 # ==================================================================== control

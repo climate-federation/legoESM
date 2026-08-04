@@ -575,7 +575,8 @@ def test_row_refuses_to_write_columns_that_would_be_mis_assigned(tmp_path):
                                      io_proc=True)
     swapped = GatewayAccumulator(("davis_caa", "bering_pacific"),
                                  jnp.asarray([1.0, 2.0]),
-                                 jnp.asarray([3.0, 4.0]), 1)
+                                 jnp.asarray([3.0, 4.0]), 1,
+                                 salt_exact=jnp.asarray([5.0, 6.0]))
     R._gateway_cumulative_row(csv, swapped, 1, 0.1)   # must not raise
     R._gateway_cumulative_close(csv)
     _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
@@ -767,7 +768,8 @@ def test_the_cumulative_dump_leaves_transports_txt_byte_identical(tmp_path):
 # ---------------------------------------------------- non-perturbation (SHA)
 
 
-_MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+_MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
+                    "salt_flux_u_int", "salt_flux_v_int")
 
 
 def _digest(state) -> str:
@@ -819,7 +821,11 @@ def test_accumulating_and_dumping_does_not_perturb_the_trajectory(tmp_path):
             grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
             physics_preset="minimal", water_type="II")
         if store:
-            config = config._replace(store_mass_flux=True)
+            # BOTH captures, as the driver enables them for
+            # --gateway-transports: this test is the non-perturbation proof
+            # for the exact-salt channel too.
+            config = config._replace(store_mass_flux=True,
+                                     store_salt_flux=True)
             model = LatLonCGridOceanModel(grid, z_coord, config)
         state = run_omip._init_rest_state("latlon", grid, z_coord, 1000.0)
         return grid, z_coord, model, state
@@ -856,7 +862,8 @@ def test_accumulating_and_dumping_does_not_perturb_the_trajectory(tmp_path):
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     for k in range(1, n_steps + 1):
         s_on = m_on.step(s_on, dt)
-        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored")
+        acc = gateway_step(acc, stack, s_on, z1, geom, source="stored",
+                           require_salt=True)
         R._gateway_cumulative_row(csv, acc, k, k * dt / 86400.0)
     R._gateway_cumulative_close(csv)
 
@@ -1016,7 +1023,8 @@ def test_n_steps_is_the_accumulator_count_not_the_step_index(tmp_path):
     step, n_acc = 900, 617          # deliberately unequal
     assert step != n_acc, "the fixture must make the two distinguishable"
     acc = GatewayAccumulator(("davis_caa",), jnp.asarray([1.5e6]),
-                             jnp.asarray([5.1e7]), n_acc)
+                             jnp.asarray([5.1e7]), n_acc,
+                             salt_exact=jnp.asarray([6.3e7]))
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     R._gateway_cumulative_row(csv, acc, step, 6.25)
     R._gateway_cumulative_close(csv)
@@ -1041,7 +1049,8 @@ def test_a_repeated_dump_point_is_not_written_twice(tmp_path):
     from scripts.run import run_omip_core2 as R
 
     acc = GatewayAccumulator(("davis_caa",), jnp.asarray([2.0e6]),
-                             jnp.asarray([3.0e6]), 42)
+                             jnp.asarray([3.0e6]), 42,
+                             salt_exact=jnp.asarray([4.0e6]))
     csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
     # The STEP LABEL differs on the two calls that carry the SAME acc.n --
     # exactly what the driver does (the abort path labels its salvage row
@@ -1075,7 +1084,8 @@ def test_a_write_failure_disables_the_writer_instead_of_retrying_it(tmp_path):
 
     def _accs():
         return [GatewayAccumulator(("davis_caa",), jnp.asarray([float(k)]),
-                                   jnp.asarray([float(k)]), k)
+                                   jnp.asarray([float(k)]), k,
+                                   salt_exact=jnp.asarray([float(k)]))
                 for k in (1, 2, 3)]
 
     healthy = tmp_path / "healthy"
@@ -1117,10 +1127,13 @@ def test_transports_txt_content_is_pinned_exactly(tmp_path):
     acc = GatewayAccumulator(("bering_pacific", "atlantic_nordic"),
                              jnp.asarray([2.0e6, 6.0e6]),
                              jnp.asarray([4.0e6, 8.0e6]), 2)
+    assert acc.salt_exact is None
     R._gateway_transport_diag(acc, tmp_path, io_proc=True)
     # read_BYTES, not read_text: text mode normalises newlines, so a writer
     # that emitted CRLF would compare equal and the "literal bytes" claim
-    # would be false (codex round-2 YELLOW 4).
+    # would be false (codex round-2 YELLOW 4).  A LEGACY accumulator (no
+    # exact channel) must produce EXACTLY the historical bytes -- the
+    # exact-salt lines are appended only when the channel exists.
     assert (tmp_path / "transports.txt").read_bytes() == (
         b"gateway_n_steps 2\n"
         b"gateway_bering_pacific_vol_Sv 1.000000\n"
@@ -1128,6 +1141,34 @@ def test_transports_txt_content_is_pinned_exactly(tmp_path):
         b"gateway_atlantic_nordic_vol_Sv 3.000000\n"
         b"gateway_atlantic_nordic_salt_psu_m3s 4.000000e+06\n"
     ), "the transports.txt output contract moved"
+
+
+def test_transports_txt_appends_exact_salt_lines_after_the_legacy_block(
+        tmp_path):
+    """With the exact channel present, its lines APPEND (legacy bytes intact).
+
+    Values are chosen distinct from the upwind channel so a writer that
+    copied one into the other cannot pass.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import GatewayAccumulator
+    from scripts.run import run_omip_core2 as R
+
+    acc = GatewayAccumulator(("bering_pacific", "atlantic_nordic"),
+                             jnp.asarray([2.0e6, 6.0e6]),
+                             jnp.asarray([4.0e6, 8.0e6]), 2,
+                             salt_exact=jnp.asarray([5.0e6, 1.0e7]))
+    R._gateway_transport_diag(acc, tmp_path, io_proc=True)
+    assert (tmp_path / "transports.txt").read_bytes() == (
+        b"gateway_n_steps 2\n"
+        b"gateway_bering_pacific_vol_Sv 1.000000\n"
+        b"gateway_bering_pacific_salt_psu_m3s 2.000000e+06\n"
+        b"gateway_atlantic_nordic_vol_Sv 3.000000\n"
+        b"gateway_atlantic_nordic_salt_psu_m3s 4.000000e+06\n"
+        b"gateway_bering_pacific_salt_exact_psu_m3s 2.500000e+06\n"
+        b"gateway_atlantic_nordic_salt_exact_psu_m3s 5.000000e+06\n"
+    ), "the exact-salt lines are wrong or the legacy block moved"
 
 
 def test_driver_salvages_the_accumulated_tail_when_gateway_step_fails():
@@ -1198,3 +1239,130 @@ def test_a_failed_header_write_closes_the_handle(tmp_path, monkeypatch):
         "pass without the fix")
     assert all(fh.closed for fh in opened), (
         "the CSV handle was left open after the header write failed")
+
+
+# =====================================================================
+# EXACT advective salt channel (store_salt_flux)
+# =====================================================================
+
+
+def test_gateway_step_require_salt_raises_without_the_pair():
+    """A run that promised the exact channel must not silently downgrade."""
+    from legoesm.ocean.diagnostics_sections import gateway_step
+
+    grid, z_coord, model, state, geom, acc, stack = _gw_setup()
+    s1 = model.step(state, 600.0)
+    assert getattr(s1, "salt_flux_u_int", None) is None, (
+        "fixture must lack the stored pair for this test to bite")
+    with pytest.raises(ValueError, match="salt_flux_u_int"):
+        gateway_step(acc, stack, s1, z_coord, geom, require_salt=True)
+
+
+def test_gateway_exact_salt_orientation_on_a_synthetic_pair():
+    """Hand-set constant v-face salt flux => exact transport is c * sum of
+    signed selected face lengths, computable independently from the geometry.
+    Flipping c flips the result (orientation is live, not decorative)."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.diagnostics_sections import gateway_step
+
+    grid, z_coord, model, state, geom, acc, stack = _gw_setup()
+    s1 = model.step(state, 600.0)
+    c = 7.5                                   # psu m^2/s, uniform northward
+    sfu = jnp.zeros(np.asarray(s1.u.data).shape[:2])
+    sfv = jnp.full(np.asarray(s1.v.data).shape[:2], c)
+    from legoesm.core.field import Field
+    s1 = s1._replace(
+        salt_flux_u_int=Field(data=sfu, name="salt_flux_u_int",
+                              dims=("lat", "lon_u"), units="psu m^2/s"),
+        salt_flux_v_int=Field(data=sfv, name="salt_flux_v_int",
+                              dims=("lat_v", "lon"), units="psu m^2/s"))
+    a1 = gateway_step(acc, stack, s1, z_coord, geom, require_salt=True)
+    dx_v = np.asarray(geom.dx_v)
+    want = np.array([
+        c * float((np.asarray(stack.v_sel[g]) * np.asarray(stack.v_sign)
+                   * dx_v).sum())
+        for g in range(len(acc.names))])
+    assert np.any(want != 0.0), "no selected v-face -- vacuous fixture"
+    np.testing.assert_allclose(np.asarray(a1.salt_exact), want, rtol=1e-12,
+                               err_msg="exact salt != c * signed face lengths")
+    # orientation is live: flip the flux, the transport flips
+    s2 = s1._replace(salt_flux_v_int=s1.salt_flux_v_int.replace(data=-sfv))
+    a2 = gateway_step(acc, stack, s2, z_coord, geom, require_salt=True)
+    np.testing.assert_allclose(np.asarray(a2.salt_exact), -want, rtol=1e-12)
+
+
+def test_end_to_end_exact_column_differs_from_upwind_on_a_front(tmp_path):
+    """Driver-shaped chain with BOTH captures on and a salinity front: the
+    CSV's exact column must differ from the upwind column (that difference IS
+    the instrument's purpose), and must equal the accumulator's own sums."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.diagnostics_sections import (
+        gateway_step, promote_gateway_geometry, setup_gateway_accumulator,
+    )
+    from scripts.run import run_omip, run_omip_core2 as R
+
+    grid, z_coord, config, model, _kind = run_omip._create_setup(
+        grid_type="latlon", resolution="16x32", nlev=4, H_max=1000.0,
+        physics_preset="minimal", water_type="II")
+    config = config._replace(tracer_advection="superbee",
+                             store_mass_flux=True, store_salt_flux=True)
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, 1000.0)
+    # front + flow: seed v and a zonal S step so the limiter is active on
+    # meridionally-crossed faces too
+    S = np.asarray(state.S.data)
+    n_lat = S.shape[0]
+    S_front = np.where((np.arange(n_lat) < n_lat // 2)[:, None, None],
+                       30.0, 36.0) * np.ones_like(S)
+    state = state._replace(S=state.S.replace(
+        data=jnp.asarray(S_front, dtype=state.S.data.dtype)))
+    geom = promote_gateway_geometry(getattr(model, "grid", grid))
+    lat2d = jnp.asarray(np.degrees(np.asarray(grid.lat))[:, None]
+                        * np.ones((1, grid.n_lon)))
+    lon2d = jnp.asarray(np.degrees(np.asarray(grid.lon))[None, :]
+                        * np.ones((grid.n_lat, 1)))
+    acc, stack, _f = setup_gateway_accumulator(
+        lat2d, lon2d, state.land_mask.data, lat_min_deg=0.0)
+    csv = R._gateway_cumulative_open(tmp_path, acc.names, io_proc=True)
+    for k in range(1, 3):
+        state = model.step(state, 600.0)
+        state = state._replace(
+            v=state.v.replace(data=jnp.full_like(state.v.data, 0.05)))
+        acc = gateway_step(acc, stack, state, z_coord, geom,
+                           source="stored", require_salt=True)
+        R._gateway_cumulative_row(csv, acc, k, float(k))
+    R._gateway_cumulative_close(csv)
+    _h, rows = _read_csv(tmp_path / R.GATEWAY_CUMULATIVE_CSV)
+    assert len(rows) == 2
+    got_up = 0.0
+    got_ex = 0.0
+    for nm in acc.names:
+        got_up += float(rows[-1][f"{nm}_salt_cumsum_psu_m3s"])
+        got_ex += float(rows[-1][f"{nm}_salt_exact_cumsum_psu_m3s"])
+    assert got_ex != 0.0, "exact channel accumulated nothing"
+    np.testing.assert_allclose(got_ex, float(np.asarray(acc.salt_exact).sum()),
+                               rtol=1e-12)
+    # NOTE: after the v-override the stored pair is the STEP's flux while the
+    # upwind estimate uses the OVERRIDDEN v -- so the two channels measure
+    # different quantities here BY CONSTRUCTION of the fixture; the assertion
+    # is only that the exact channel carries its own, distinct numbers.
+    assert abs(got_ex - got_up) > 1e-6 * max(abs(got_up), 1.0), (
+        "exact and upwind columns are identical -- the exact channel is a "
+        "copy, not a measurement")
+
+
+def test_driver_gateway_call_passes_require_salt():
+    """The driver enables the capture, so its per-step call must REQUIRE it
+    (silent-downgrade defense, same class as source='stored')."""
+    lines = _driver_lines()
+    call = next(i for i, ln in enumerate(lines)
+                if "_gw_acc = gateway_step(" in _code(ln))
+    window = "".join(_code(ln) for ln in lines[call:call + 14])
+    assert "require_salt=True" in window, (
+        "the driver's gateway_step call does not require the exact salt "
+        "channel it just enabled")

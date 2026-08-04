@@ -526,7 +526,12 @@ def _acc(names, vols, trs, n):
     assert v.dtype == jnp.float64 and t.dtype == jnp.float64, (
         f"x64 is off ({v.dtype}); the exactness assertions below would be "
         "testing float32 round-tripping instead")
-    return GatewayAccumulator(tuple(names), v, t, int(n))
+    # The exact-salt channel gets values DISTINCT from the upwind channel
+    # (x1.5 + a shift): identical arrays would make the "exact column carries
+    # salt_exact, not tracer" assertions vacuously true.
+    se = t * 1.5 + 0.125
+    assert not np.array_equal(np.asarray(se), np.asarray(t)), "degenerate fixture"
+    return GatewayAccumulator(tuple(names), v, t, int(n), salt_exact=se)
 
 
 # Values chosen so that NOT ONE of them survives a 6-decimal round trip -- that
@@ -545,7 +550,7 @@ def test_cumulative_columns_and_row_have_the_same_arity():
     acc = _acc(_NAMES3, _AWKWARD_VOL, _AWKWARD_TR, 17)
     cols = gateway_cumulative_columns(acc.names)
     cells = format_gateway_cumulative_row(acc, 17, 0.5).split(",")
-    assert len(cols) == len(cells) == 3 + 2 * len(_NAMES3), (
+    assert len(cols) == len(cells) == 3 + 3 * len(_NAMES3), (
         f"header {len(cols)} vs row {len(cells)} cells -- a ragged CSV")
     assert cols[:3] == ("step", "day", "n_steps")
 
@@ -581,6 +586,12 @@ def test_cumulative_row_round_trips_exactly():
     for i, nm in enumerate(_NAMES3):
         assert float(got[f"{nm}_vol_cumsum_m3s"]) == _AWKWARD_VOL[i]
         assert float(got[f"{nm}_salt_cumsum_psu_m3s"]) == _AWKWARD_TR[i]
+        se_want = float(np.asarray(acc.salt_exact)[i])
+        assert float(got[f"{nm}_salt_exact_cumsum_psu_m3s"]) == se_want
+        assert (float(got[f"{nm}_salt_exact_cumsum_psu_m3s"])
+                != float(got[f"{nm}_salt_cumsum_psu_m3s"])), (
+            "exact and upwind columns carry the same value -- the fixture "
+            "is degenerate or the writer copied one into the other")
 
 
 def test_cumulative_row_writes_the_sum_not_the_mean():
@@ -628,9 +639,23 @@ def test_cumulative_row_rejects_an_accumulator_whose_arrays_do_not_match_names()
         GatewayAccumulator, format_gateway_cumulative_row,
     )
     bad = GatewayAccumulator(_NAMES3, jnp.asarray([1.0, 2.0]),
-                             jnp.asarray([1.0, 2.0, 3.0]), 4)
+                             jnp.asarray([1.0, 2.0, 3.0]), 4,
+                             salt_exact=jnp.asarray([1.0, 2.0, 3.0]))
     with pytest.raises(ValueError, match="mis-assigned"):
         format_gateway_cumulative_row(bad, 4, 1.0)
+
+
+def test_cumulative_row_refuses_a_legacy_accumulator_without_exact_channel():
+    """The CSV schema is unconditional; a None salt_exact cannot be dumped."""
+    from legoesm.ocean.diagnostics_sections import (
+        GatewayAccumulator, format_gateway_cumulative_row,
+    )
+    legacy = GatewayAccumulator(_NAMES3, jnp.asarray([1.0, 2.0, 3.0]),
+                                jnp.asarray([1.0, 2.0, 3.0]), 4)
+    assert legacy.salt_exact is None, "default did not stay None -- the "\
+        "legacy-constructor compatibility this test pins is gone"
+    with pytest.raises(ValueError, match="salt_exact"):
+        format_gateway_cumulative_row(legacy, 4, 1.0)
 
 
 def test_cumulative_columns_are_unique_and_name_every_gateway():
@@ -641,6 +666,7 @@ def test_cumulative_columns_are_unique_and_name_every_gateway():
     for nm in names:
         assert f"{nm}_vol_cumsum_m3s" in cols
         assert f"{nm}_salt_cumsum_psu_m3s" in cols
+        assert f"{nm}_salt_exact_cumsum_psu_m3s" in cols
 
 
 def test_differencing_two_cumulative_rows_recovers_a_window_mean():
