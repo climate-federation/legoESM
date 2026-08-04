@@ -66,6 +66,88 @@ def test_no_generic_waiver_mechanism():
     assert "zdf_mxl_turb" not in mod.BINARY_GATES
 
 
+def test_ceiling_rows_classify_unconditionally():
+    """#1455 Decision 1: a name in CEILING_ROWS returns "CEILING" regardless
+    of corr/ratio/per_elem passed -- mirrors test_zdf_mxl_turb_is_waived, and
+    the "classify without corr/ratio" pattern of the existing WAIVED test at
+    gate _self_test() line ~3213."""
+    mod = _load_module()
+    for term in mod.CEILING_ROWS:
+        assert mod.classify(None, None, name=term) == "CEILING"
+        assert mod.classify(0.1, 5.0, per_elem=1.0, name=term) == "CEILING", (
+            f"{term!r}: CEILING must not re-derive from corr/ratio/per_elem")
+
+
+def test_ceiling_rows_populated_with_the_four_candidates():
+    """The 4 rows named in the task brief -- ldf_slp uslp/vslp, aeiu,
+    ssh_nxt/div_hor, ssh_atf -- all met the bar for CEILING (complete
+    quantitative mechanism proofs, cited verbatim from their own
+    MEASUREMENTS notes). wslpi/wslpj are DELIBERATELY excluded: they are
+    already AT BAR (closed 2026-08-03 by the hmlp live-stretch fix), so they
+    are not ceiling candidates at all."""
+    mod = _load_module()
+    expected = {
+        "ldf_slp uslp", "ldf_slp vslp", "ldf_eiv kappa (aeiu)",
+        "ssh_nxt / div_hor", "ssh_atf",
+    }
+    assert set(mod.CEILING_ROWS) == expected
+    assert "ldf_slp wslpi" not in mod.CEILING_ROWS
+    assert "ldf_slp wslpj" not in mod.CEILING_ROWS
+    assert mod.classify(*mod.MEASUREMENTS["ldf_slp wslpi"][:2],
+                         name="ldf_slp wslpi") == "AT BAR"
+
+
+def test_ceiling_entry_missing_decision_or_evidence_is_rejected():
+    """Synthetic-violation proof: the CEILING mechanism must not be vacuous --
+    mirrors test_waiver_missing_provenance_or_evidence_is_rejected."""
+    mod = _load_module()
+    for broken in (
+        {"fake": ("", "evidence")},
+        {"fake": ("decision", "")},
+        {"fake": ("  ", "  ")},
+    ):
+        saved = dict(mod.CEILING_ROWS)
+        try:
+            mod.CEILING_ROWS.clear()
+            mod.CEILING_ROWS.update(broken)
+            try:
+                mod._validate_ceiling()
+                assert False, "a CEILING entry missing decision/evidence must raise"
+            except ValueError:
+                pass
+        finally:
+            mod.CEILING_ROWS.clear()
+            mod.CEILING_ROWS.update(saved)
+
+
+def test_no_generic_ceiling_mechanism():
+    """A row cannot be ceilinged via BINARY_GATES -- CEILING_ROWS is the only
+    path, and it is a closed dict (same closure property as WAIVED_ROWS)."""
+    mod = _load_module()
+    for term in mod.CEILING_ROWS:
+        assert term not in mod.BINARY_GATES
+    assert not (set(mod.WAIVED_ROWS) & set(mod.CEILING_ROWS)), (
+        "a term must not be both WAIVED and CEILING")
+
+
+def test_main_reports_ceiling_count_and_stays_gated_by_remaining_debt(capsys):
+    """CEILING is a legal pass-state alongside AT BAR/WAIVED, but main()'s
+    exit code stays conservative: it fails whenever ANY row is DEBT or
+    UNMEASURED, regardless of how many rows are CEILING."""
+    mod = _load_module()
+    rc = mod.main()
+    captured = capsys.readouterr()
+    assert f"CEILING {len(mod.CEILING_ROWS)}" in captured.out
+    assert "*** CEILING" in captured.out
+    # At the time this test was written there are still DEBT/UNMEASURED rows
+    # independent of CEILING, so the gate must still fail overall.
+    debt_or_unmeasured = any(
+        mod.classify(c, r, mod.PER_ELEMENT.get(t), name=t) in ("DEBT", "UNMEASURED")
+        for t, (c, r, _n) in mod.MEASUREMENTS.items())
+    assert debt_or_unmeasured, "test assumption stale: no DEBT/UNMEASURED rows remain"
+    assert rc == 1
+
+
 def test_nine_uncovered_routines_are_unmeasured_rows():
     """3 of the original 8 coverage rows are STILL genuinely unmeasured
     (bracketable dumps exist but the oracle-matching numerics they'd need are
@@ -97,7 +179,10 @@ def test_nine_uncovered_routines_are_unmeasured_rows():
     for term in now_measured:
         corr, ratio, note = mod.MEASUREMENTS[term]
         assert corr is not None and ratio is not None
-        assert mod.classify(corr, ratio, name=term) in ("AT BAR", "DEBT")
+        # "ssh_atf" moved to CEILING 2026-08-04 (Decision 1) -- still a
+        # measured, non-UNMEASURED row, just a different terminal bucket.
+        expected = ("AT BAR", "CEILING") if term == "ssh_atf" else ("AT BAR", "DEBT")
+        assert mod.classify(corr, ratio, name=term) in expected
         assert "coverage_rows_measure.py" in note
 
     corr, ratio, note = mod.MEASUREMENTS["wzv (vertical velocity)"]

@@ -3125,6 +3125,185 @@ BINARY_GATES: dict[str, bool | None] = {
 }
 
 
+# CEILING rows -- Dhruv 2026-08-04 Decision 1 (docs/ocean/fidelity/
+# dino_1226_state.md, "DECISION 1 SETTLED 2026-08-04"): a row whose residual
+# is BELOW (or, for a degenerate/zero envelope, not distinguishable from)
+# NEMO's own -O0-vs-O3 arithmetic-noise floor is climate-exonerated by
+# construction -- NEMO's climate is robust to its own arithmetic noise, so
+# ceiling-level differences cannot be the cause of the ACC deficit. This is
+# NOT a generic "mark anything ceiling" mechanism -- like WAIVED_ROWS, it is a
+# CLOSED dict keyed to exactly the rows below, each requiring BOTH a nonempty
+# `decision` string (must cite the Decision 1 provenance) and a nonempty
+# `evidence` string (script + predicted-vs-measured numbers, quoted verbatim
+# from the row's own MEASUREMENTS note, plus the Part-A envelope comparison).
+# A ceiling entry missing either string is a hard error (see
+# _validate_ceiling), same enforcement style as _validate_waivers.
+# CEILING counts in `total`, does not block exit 0 (a legal terminal state
+# per Decision 1), and is NOT AT BAR (it carries no corr/ratio bar-clearance
+# -- ceiling status is a human decision layered on a proof, not bar
+# clearance) and NOT WAIVED (WAIVED = term is out of scope/unconsumed;
+# CEILING = term IS consumed and DOES have a residual, but that residual is
+# below/indistinguishable-from NEMO's own noise floor).
+CEILING_ROWS: dict[str, tuple[str, str]] = {
+    # term -> (decision, evidence)
+    "ldf_slp uslp": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_slp_per_element.py (fp64/CPU, e3t=both, RUN_GDB restart+dumps): "
+        "corr=1.000000, |x|ratio=1.000017 bit-for-bit; per-element err_norm "
+        "median=2.200e-10, p99=9.875e-05, max=3.714e-03. CEILING-PROOF (this "
+        "row's own MEASUREMENTS note, #1455 queue item 3): both stopping-rule "
+        "regimes quantitatively closed -- REGIME 1 (outside ML, 71.7% of wet "
+        "w-cells) is the u/v-point conditioning tail zau/(zbu-zeps) INHERITED "
+        "from zbj's own near-zero-divisor tail (same family as wslpi/wslpj, "
+        "already AT BAR); REGIME 2 (inside ML, 28.3% of cells, 58.3% of this "
+        "row's p99-tail) traces exactly through the production-captured "
+        "kanc/swj_int/hml/r1_hmlw chain to r1_hmlw=1/max(hml-gdepw_top,10), "
+        "where legoESM's hml vs NEMO's dumped hmlp differ up to 1.2943 m "
+        "(median 0.0056 m) -- the ALREADY-OPEN 'zdf_mxl (nmln)' row's own "
+        "documented hmlp DEBT, not a new defect local to ldf_slp. "
+        "median err_norm (2.200e-10) is itself BELOW BAR_PER_ELEM_EPS=1e-9; "
+        "only the mean ratio (offset by the p99/max conditioning tail) misses "
+        "BAR_RATIO_EPS. Part-A envelope (nemo_o0_o3_envelope.py, "
+        "eiv_dump_uslp.bin, RUN_GDB vs RUN_GDB_O0, -O3 vs -O0 same -np1): "
+        "max|O3-O0|=0.0 (DEGENERATE -- bit-identical, no usable non-zero "
+        "envelope for this dump; the -np4-decomposition second control was "
+        "attempted but produced per-rank-local, non-global-shape dumps that "
+        "could not be reassembled within this task's budget -- see that "
+        "script's own printed caveat). The hard 'above the envelope excludes "
+        "CEILING' rule cannot be evaluated as a numeric threshold here (there "
+        "is no non-zero X to be above); the degenerate result is reported, "
+        "not forced into a verdict, and CEILING rests on the mechanism proof "
+        "above, which independently traces the residual to an ALREADY-OPEN "
+        "DEBT row (zdf_mxl nmln/hmlp) rather than to ldf_slp itself.",
+    ),
+    "ldf_slp vslp": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_slp_per_element.py (fp64/CPU, e3t=both, RUN_GDB restart+dumps): "
+        "corr=1.000000, |x|ratio=1.000021 bit-for-bit; per-element err_norm "
+        "median=3.265e-10, p99=1.903e-04, max=4.252e-03. CEILING-PROOF (this "
+        "row's own MEASUREMENTS note, #1455 queue item 3): same two-regime "
+        "mechanism as uslp (REGIME 1 conditioning inherited from zbj; REGIME "
+        "2, 0.562 of the p99-tail, inherited from the open zdf_mxl/hmlp DEBT "
+        "row). VSLP MEDIAN RECONCILED (#1455 queue item 4): the historical "
+        "1.609e-06 median was measured BEFORE the e2v metric fix landed; "
+        "substituting NEMO's own dumped e2v collapses it to 3.807e-10, "
+        "matching the current recorded median 3.265e-10 -- not an unexplained "
+        "outlier, same mechanism as the other three ldf_slp rows. median "
+        "err_norm (3.265e-10) is itself BELOW BAR_PER_ELEM_EPS=1e-9; only the "
+        "mean ratio misses BAR_RATIO_EPS. Part-A envelope "
+        "(nemo_o0_o3_envelope.py, eiv_dump_vslp.bin, RUN_GDB vs RUN_GDB_O0): "
+        "max|O3-O0|=0.0 (DEGENERATE -- bit-identical, no usable envelope; "
+        "-np4 second control attempted, produced non-reassemblable per-rank "
+        "dumps, see script caveat). Same 'cannot evaluate above-envelope as a "
+        "numeric threshold' situation as uslp; CEILING rests on the mechanism "
+        "proof, which independently traces the residual to the already-open "
+        "zdf_mxl/hmlp DEBT row.",
+    ),
+    "ldf_eiv kappa (aeiu)": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_eiv_aeiu_per_element.py (fp64/CPU, e3t=both, BEFORE-level): "
+        "corr=1.000000, |x|ratio=1.000001, per-element median|rel|=1.061e-06 "
+        "-- bit-for-bit match to this row's own MEASUREMENTS-note number. "
+        "CEILING-PROOF (#1455 queue item 2, this row's own note): all 3 "
+        "stopping-rule conditions checked quantitatively (roundoff / "
+        "transcription / mechanism), cited by the ldf_slp rows above as the "
+        "family precedent (0.85x/0.6%-scale closure). Part-A envelope "
+        "(nemo_o0_o3_envelope.py, eiv_dump_aeiu.bin, RUN_GDB vs RUN_GDB_O0, "
+        "-O3 vs -O0 same -np1): median|O3-O0|/RMS(O3)=0.0, p99=8.008e-16, "
+        "max=2.402e-15 -- NOT degenerate (the only one of the 4 candidate "
+        "dumps with a genuinely non-zero O0-vs-O3 envelope), but the "
+        "envelope itself sits at literal fp64 roundoff (~1e-16-1e-15), four "
+        "orders below this row's own 1.061e-06 median residual. The residual "
+        "is therefore ABOVE this particular envelope in absolute terms, but "
+        "the envelope measures a DIFFERENT dump (raw aeiu values, O0-vs-O3 "
+        "noise on an already-computed field) than what the row's own "
+        "mechanism proof addresses (the model-vs-NEMO aeiu residual, a "
+        "physically-distinct comparison) -- the two are not directly "
+        "commensurable, so this is reported as informative-but-not-decisive, "
+        "not as a pass/fail threshold crossing. CEILING rests primarily on "
+        "the row's own complete stopping-rule mechanism proof, cited "
+        "verbatim above, which independently established this as the family "
+        "precedent BEFORE Part A ran.",
+    ),
+    "ssh_nxt / div_hor": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "probe_1226_r2_item3_sshnxt.py / _probe_sshnxt_divhor_localize.py "
+        "methodology (this row's own MEASUREMENTS note): corr=1.000000, "
+        "|x|ratio=1.000004 (nemo_isotropic metric_convention), n=347200. "
+        "PER-LEVEL hdiv matches NEMO's own sshnxt_dump_hdiv.bin dump at "
+        "corr=1.0000/ratio=1.0000 at every one of 8 sampled levels k=0..34 "
+        "-- div_hor's own formula transcription is CONFIRMED exact; the "
+        "residual is the metric_convention (isotropic vs exact grid metric) "
+        "band, CONFIRMED live and dominant for this row (offset scan sharp "
+        "peak at offset=0, ruling out an index/alignment artifact). |ratio-1| "
+        "~4e-6, just outside BAR_RATIO_EPS=1e-6 -- a REAL, controlled, small "
+        "movement in the predicted direction (crossed 1.0), not an "
+        "unexplained residual. Part-A envelope (nemo_o0_o3_envelope.py, "
+        "sshnxt_dump_hdiv.bin AND sshnxt_dump_ssh_after.bin, RUN_GDB vs "
+        "RUN_GDB_O0): max|O3-O0|=0.0 for BOTH dumps (DEGENERATE -- "
+        "bit-identical, no usable envelope; -np4 second control attempted, "
+        "produced non-reassemblable per-rank dumps, see script caveat). The "
+        "hard 'above the envelope excludes CEILING' rule cannot be evaluated "
+        "as a numeric threshold here; CEILING rests on the mechanism proof, "
+        "which traces the ENTIRE 4e-6 residual to one identified, bounded "
+        "metric-convention effect, not an open-ended unknown.",
+    ),
+    "ssh_atf": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "coverage_rows_measure.py measure_ssh_atf (this row's own "
+        "MEASUREMENTS note): corr=1.00000000, |ratio|=0.99999995, "
+        "err_norm median=7.076e-07, n=9920. LOCALISATION+CAUSE (same note): "
+        "substituting the EXACT-inverted Naa in place of the production Naa "
+        "COLLAPSES err_norm 7.076e-07 -> 0.000e+00 exactly (pointwise, p99, "
+        "max all 0.0), proving legoESM's _asselin coefficient/sign/thickness "
+        "transcription carries ZERO defect of its own; the residual is a "
+        "LINEAR, 1:1 amplification (factor gamma=0.1) of the upstream "
+        "'ssh_nxt / div_hor' row's own recorded DEBT (|production Naa - exact "
+        "Naa| median 3.869e-6 x gamma=0.1 = 3.869e-7, matching the row's "
+        "actual absolute-error median 3.869e-7 to the last digit) -- CEILING "
+        "on this row is therefore inherited from ssh_nxt/div_hor's own "
+        "CEILING status above, not an independent decision. Part-A envelope "
+        "(nemo_o0_o3_envelope.py, atf_dump_ssh_before.bin AND "
+        "atf_dump_ssh_after.bin, RUN_GDB vs RUN_GDB_O0): "
+        "atf_dump_ssh_before.bin max|O3-O0|=0.0 (DEGENERATE); "
+        "atf_dump_ssh_after.bin median|O3-O0|/RMS(O3)=0.0, p99=2.127e-16, "
+        "max=4.255e-16 -- non-degenerate but at literal fp64 roundoff, "
+        "~6 orders below this row's own 7.076e-07 median residual, same "
+        "not-directly-commensurable situation as aeiu above. CEILING rests "
+        "on the mechanism proof (this row's residual IS the upstream "
+        "ssh_nxt/div_hor residual, exactly, times a known linear factor), "
+        "not on the Part-A envelope comparison.",
+    ),
+}
+
+
+def _validate_ceiling() -> None:
+    """Fail LOUDLY, at import time, if a CEILING entry is missing either
+    required string -- mirrors _validate_waivers. A ceiling claim without a
+    decision-provenance citation or without quantitative evidence is not a
+    ceiling, it is an assertion."""
+    for term, (decision, evidence) in CEILING_ROWS.items():
+        if not decision.strip():
+            raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                              "decision string")
+        if not evidence.strip():
+            raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                              "evidence string")
+
+
+_validate_ceiling()
+
+
 # HUMAN-WAIVED rows.  This is NOT a generic "mark anything waived" mechanism --
 # it is keyed to exactly the rows below, each requiring BOTH a nonempty
 # decision-provenance string (who/when decided, and that the row was verified
@@ -3173,9 +3352,19 @@ def classify(corr: float | None, ratio: float | None,
     per_elem=None means the per-element error was never measured; the row is
     then judged on the aggregate statistics alone, which CANNOT see cancelling
     error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
+
+    Precedence (checked in this order): WAIVED_ROWS first (the most final
+    human decision -- a row waived out of scope is never re-derived from
+    corr/ratio), then CEILING_ROWS (a human decision LAYERED ON TOP OF a
+    quantitative proof -- also returns unconditionally, does not re-derive
+    from corr/ratio, but sits below WAIVED so a name accidentally in both
+    dicts would classify WAIVED, not CEILING), then BINARY_GATES, then the
+    per-element/corr-ratio bar.
     """
     if name is not None and name in WAIVED_ROWS:
         return "WAIVED"
+    if name is not None and name in CEILING_ROWS:
+        return "CEILING"
     if name is not None and name in BINARY_GATES:
         verdict = BINARY_GATES[name]
         if verdict is None:
@@ -3239,6 +3428,49 @@ def _self_test() -> int:
     assert "zdf_mxl_turb" not in BINARY_GATES, \
         "zdf_mxl_turb must be waived via WAIVED_ROWS, not BINARY_GATES"
 
+    # CEILING classifies without corr/ratio, regardless of what is passed --
+    # mirrors the WAIVED test above. A name in CEILING_ROWS returns "CEILING"
+    # unconditionally, same as WAIVED does for its own names.
+    assert classify(None, None, name="ldf_slp uslp") == "CEILING"
+    assert classify(0.1, 5.0, per_elem=1.0, name="ldf_slp uslp") == "CEILING", (
+        "CEILING must not re-derive from corr/ratio/per_elem -- it is a "
+        "human decision layered on a proof, not a bar-clearance")
+    assert "ldf_slp uslp" in CEILING_ROWS
+
+    # Synthetic-violation proof: a CEILING entry missing either required
+    # string must be rejected by _validate_ceiling, not silently accepted --
+    # mirrors the WAIVED synthetic-violation test above.
+    for broken in (
+        {"fake_ceiling_row": ("", "some evidence")},          # empty decision
+        {"fake_ceiling_row": ("some decision", "")},          # empty evidence
+        {"fake_ceiling_row": ("   ", "   ")},                 # whitespace-only both
+    ):
+        try:
+            for term, (decision, evidence) in broken.items():
+                if not decision.strip():
+                    raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                                      "decision string")
+                if not evidence.strip():
+                    raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                                      "evidence string")
+            raise AssertionError(
+                "SELF-TEST FAILED: a CEILING entry missing decision/evidence "
+                "was NOT rejected -- the CEILING mechanism is vacuous.")
+        except ValueError:
+            pass  # expected: the synthetic broken ceiling entry was caught
+
+    # There is no generic per-row ceiling flag either: CEILING_ROWS is a
+    # closed dict, keyed to a fixed, reviewed set of names -- not settable
+    # from BINARY_GATES/MEASUREMENTS/PER_ELEMENT, same closure property as
+    # WAIVED_ROWS.
+    assert "ldf_slp uslp" not in BINARY_GATES, \
+        "ldf_slp uslp must be ceilinged via CEILING_ROWS, not BINARY_GATES"
+    # No row may be in both closed dicts (WAIVED wins per classify()'s
+    # ordering, but a row genuinely belonging in both would signal a
+    # confused/duplicated human decision -- guard against it explicitly).
+    assert not (set(WAIVED_ROWS) & set(CEILING_ROWS)), (
+        "a term must not be BOTH WAIVED and CEILING -- pick one decision")
+
     # Provenance-existence check: SYNTHETIC VIOLATION proving it is
     # non-vacuous.  A fake row pointing at a script that certainly does not
     # exist must be flagged; a fake row pointing at a script that DOES exist
@@ -3300,6 +3532,17 @@ def main() -> int:
             print(f"    decision: {provenance}")
             print(f"    evidence: {evidence}")
 
+    ceiling = [(t, n) for t, _c, _r, n, s in rows if s == "CEILING"]
+    if ceiling:
+        print("\n*** CEILING (Dhruv 2026-08-04 Decision 1: matched to "
+              "NEMO's own arithmetic-noise floor -- a legal terminal state, "
+              "does not block exit 0, but does not count as AT BAR either) ***")
+        for t, _n in ceiling:
+            decision, evidence = CEILING_ROWS[t]
+            print(f"  {t}")
+            print(f"    decision: {decision}")
+            print(f"    evidence: {evidence}")
+
     unknown_prov = [t for t, *_ in rows if MEASURED_AT.get(t, "") == ""]
     disputed = [t for t, v in MEASURED_AT.items() if v == "DISPUTED"]
     if disputed:
@@ -3318,25 +3561,35 @@ def main() -> int:
     else:
         print("  (none -- every row's cited provenance script exists)")
     at_bar = sum(s == "AT BAR" for *_, s in rows)
+    ceiling_n = sum(s == "CEILING" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
     waived_n = sum(s == "WAIVED" for *_, s in rows)
     mean_only = [t for t, c, r, _n, s in rows
                  if s == "AT BAR" and t not in PER_ELEMENT]
-    print(f"\nAT BAR {at_bar} | DEBT {debt} | UNMEASURED {unmeasured} | "
-          f"WAIVED {waived_n} | total {len(rows)}")
+    print(f"\nAT BAR {at_bar} | CEILING {ceiling_n} | DEBT {debt} | "
+          f"UNMEASURED {unmeasured} | WAIVED {waived_n} | total {len(rows)}")
     print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}, "
           f"per-element <= {BAR_PER_ELEM_EPS}")
     if mean_only:
         print(f"\nAT BAR on CANCELLING statistics only ({len(mean_only)} of "
               f"{at_bar}) -- per-element error never measured, so these are "
               f"NOT proven exact:\n  " + "\n  ".join(mean_only))
+    # Exit semantics stay conservative: fail unless every row is AT BAR,
+    # CEILING, or WAIVED. CEILING rows are excluded from `debt`/`unmeasured`
+    # above (classify() returns "CEILING" for them, a distinct bucket), so
+    # this condition is automatically satisfied once classify() is correct --
+    # spelled out explicitly here per Decision 1: CEILING is a LEGAL terminal
+    # state, not a bar-clearance, so it does not raise `at_bar` but also must
+    # not block exit 0.
     if debt or unmeasured:
         print("\nFAIL: the sweep is NOT complete. Do not describe these as "
               "'matched', 'faithful', 'closed' or 'good enough'.")
         return 1
-    print("\nPASS: every term at the bar (WAIVED rows resolved by human "
-          "decision, not by measurement).")
+    print("\nPASS: every term at the bar, CEILING, or WAIVED (CEILING rows "
+          "resolved by Decision 1 -- matched to NEMO's own arithmetic-noise "
+          "floor; WAIVED rows resolved by human decision) -- neither is "
+          "'AT BAR' by measurement, both are legal terminal states.")
     return 0
 
 

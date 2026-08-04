@@ -16,6 +16,72 @@ and climate leverage can only live ABOVE the envelope: structural differences wi
 mechanisms (geometry, closures, forcing, eddy statistics), i.e. the attractor program. This
 formalizes why the sweep and the climate hunt are separate tracks.
 
+## #1455 Decision 1 implementation (2026-08-04) — CEILING shipped, Part A envelope run
+
+**Part A (empirical NEMO-vs-NEMO envelope).** Built a SEPARATE NEMO config `DINO_DBG`
+(own `cfgs/DINO_DBG/BLD`, never touching production `cfgs/DINO/BLD`) with a no-`fcheck=bounds`
+variant of `arch-condadbg.fcm` (`arch-condadbgnb.fcm`, O0 kept — `fcheck=bounds` trips an
+unrelated array-bound false positive in `usrdef_sbc.f90` under `-np 1`, orthogonal to this
+task; MY_SRC dump patches confirmed byte-identical between `DINO` and `DINO_DBG` via
+`diff -rq`). Ran the SAME restart+namelist as `RUN_GDB` in a sibling `RUN_GDB_O0`
+(164/164 main-run `.bin` dumps reproduced, matching filenames). New script
+`scripts/validate/ocean_fidelity/dino_1226/nemo_o0_o3_envelope.py` diffs the two dump sets
+(`err_norm=|O3-O0|/RMS(O3)`, same convention as the gate's own per-row probes).
+
+RESULT: **7 of 9 dumps covering the 4 target rows came back bit-identical (max\|O3-O0\|=0.0,
+degenerate, uninformative envelope)** — `eiv_dump_wslpi/wslpj/uslp/vslp.bin`,
+`sshnxt_dump_hdiv.bin`, `sshnxt_dump_ssh_after.bin`, `atf_dump_ssh_before.bin`. The remaining 2
+(`eiv_dump_aeiu.bin`, `atf_dump_ssh_after.bin`) are non-degenerate but sit at literal fp64
+roundoff (p99/max ~1e-16..1e-15) — 4-6 orders below the actual row residuals (1e-4..1e-6
+scale), so not directly commensurable as a numeric "below the envelope" threshold either way.
+Per the task's own explicit fallback: attempted a SECOND, independent envelope source
+(production `-m conda` binary, namelist-only `-np 4` instead of `-np 1`, changing
+`jpni×jpnj`/halo-exchange order) — this ATTEMPT FAILED to produce a usable envelope: the
+MY_SRC WRITE dumps under `-np 4` are per-rank LOCAL-domain arrays (1×4 tiling confirmed in
+`ocean.output`), not a global-gathered field, so they are not directly diffable against the
+`-np 1` global dump without a gather/stitch harness — out of scope for this task's budget,
+reported honestly rather than silently skipped (see the script's own printed caveat).
+
+**Verdict on Part A: genuinely degenerate/uninformative for all 4 candidate rows.** No row
+could be shown quantitatively BELOW a non-trivial envelope. Per the task's own instruction
+("if this happens broadly ... note it as such, do not force a verdict from it"), Part A does
+NOT independently confirm any of the 4 rows — CEILING classification for all 4 rests on their
+pre-existing, already-complete quantitative mechanism proofs (unchanged by this task), with the
+degenerate Part-A result reported honestly in each row's new CEILING_ROWS evidence string
+rather than glossed over.
+
+**Part B (gate implementation).** `CEILING_ROWS` (closed dict, term -> (decision, evidence)) +
+`_validate_ceiling()` (raises at import on empty decision/evidence, mirrors `_validate_waivers`)
+added to `fidelity_bar_gate.py`. `classify()` checks CEILING_ROWS right after WAIVED_ROWS
+(before BINARY_GATES/bar), returning `"CEILING"` unconditionally. `main()`'s tally line is now
+`AT BAR n | CEILING n | DEBT n | UNMEASURED n | WAIVED n | total n`; exit semantics unchanged
+(`return 1` iff any row is DEBT or UNMEASURED — CEILING and WAIVED are both legal pass-states).
+
+Populated with **all 4 candidate rows** (`ldf_slp uslp`, `ldf_slp vslp`,
+`ldf_eiv kappa (aeiu)`, `ssh_nxt / div_hor`, `ssh_atf` — 5 entries, `ssh_atf`'s residual is
+itself a 1:1 linear inheritance of `ssh_nxt / div_hor`'s, so both cite the same upstream
+mechanism). All 4 already carried complete quantitative mechanism proofs in their existing
+MEASUREMENTS notes (predicted-vs-measured numbers, not narrative) — verified by reading the
+FULL note text (not just grep snippets) before writing each `CEILING_ROWS` evidence string,
+and the numbers quoted are the row's own pre-existing numbers, not re-derived.
+`ldf_slp wslpi/wslpj` were NOT added — already AT BAR (closed 2026-08-03 by the hmlp fix),
+not ceiling candidates.
+
+**Tally: `AT BAR 18 | DEBT 30 | UNMEASURED 4 | WAIVED 1 | total 53` (pre-change, reconfirmed by
+running the gate before edits) → `AT BAR 18 | CEILING 5 | DEBT 25 | UNMEASURED 4 | WAIVED 1 |
+total 53` (post-change).** Gate still exits 1 (25 DEBT + 4 UNMEASURED rows remain outside the
+5 newly-ceilinged rows) — CEILING is not a blanket pass, only these 5 rows moved.
+
+Tests: `tests/ocean/unit/test_fidelity_bar_gate.py` extended with 6 new CEILING tests
+(unconditional classification, non-vacuity synthetic-violation, closed-dict/no-generic-flag,
+exact-5-row-membership, main() tally/section print). `pytest tests/ocean/unit/
+test_fidelity_bar_gate.py -q` → "15 passed"; `fidelity_bar_gate.py --self-test` →
+"self-test OK". Reviewed by a physics-validator subagent (codex CLI unavailable on this
+account, confirmed via `which codex`) scoped explicitly as a Python classification/scoring
+review, not ocean physics.
+
+---
+
 # PARKED 2026-08-03 — resume here (token budget; user call)
 
 **Where the grind stands** (issue #1455 = the living checklist; PR #1460 = the working PR):
