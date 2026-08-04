@@ -310,6 +310,111 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
 
 
+def _mpas_sfc_slot(sfc_diag, accum, i: int, *, accum_partial: bool = False):
+    """Read slot ``i`` of the MPAS surface/TOA diagnostic contract.
+
+    Slot map (see ``ModelDriver._feed_mpas_cmip_accumulators`` for the full
+    contract): 0 sw_net_sfc, 1 lw_net_sfc [both +into surface], 2 precip
+    [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa [+up except 5],
+    6 hfss, 7 hfls [both +up], 8 rsds, 9 rlds [both +down].
+
+    Prefers the #1353 per-step INTERVAL MEAN when the accumulator ran, else
+    the last step's instantaneous value.  Returns ``None`` when the run has
+    no radiation/turbulence, when the slot is absent, or when the caller
+    reports a PARTIAL accumulator window (a short restart-boundary interval
+    whose mean would misrepresent the labelled window).
+
+    Module-level (not a method) so the duck-typed driver stand-ins the CMOR
+    feed tests use keep working, and so it is directly unit-testable.  Shared
+    by the CMOR feed and the lightweight conservation timeseries so the two
+    cannot drift apart on which flux definition they publish.
+    """
+    if accum is not None:
+        if accum_partial:
+            return None
+        m = accum.mean(i)
+        if m is not None:
+            return m
+    if (sfc_diag is not None and len(sfc_diag) > i
+            and sfc_diag[i] is not None):
+        return sfc_diag[i].data
+    return None
+
+
+def _merge_timeseries_chunks(chunk_paths) -> dict:
+    """Merge per-restart-link lightweight timeseries chunks into one record.
+
+    Each chunk is one job's ``timeseries.npz`` payload, keyed on an ABSOLUTE
+    ``days`` axis.  Chunks are concatenated and sorted by day; when links
+    OVERLAP (a job re-ran days a previous job already wrote, e.g. after a
+    crash-restart from an older checkpoint) the LATER-STARTING chunk wins for
+    the duplicated days, because it is the one whose trajectory the subsequent
+    links actually continued from.
+
+    Parameters
+    ----------
+    chunk_paths : sequence of path-like
+        Chunk files, in the order they should be applied (ascending start
+        day -- the caller's ``sorted(glob(...))`` over the zero-padded
+        ``chunk_day%09.2f`` names gives exactly that).
+
+    Returns
+    -------
+    dict
+        ``{key: np.ndarray}`` ready for ``np.savez``.  Empty dict when no
+        chunk is readable, which the caller treats as "write this link only".
+
+    Notes
+    -----
+    Chunks written by DIFFERENT code versions can carry different key sets;
+    a key missing from one chunk is filled with NaN over that chunk's days so
+    the columns stay index-aligned with ``days`` (never silently shortened).
+    A corrupt/unreadable chunk is skipped with a warning rather than losing
+    the whole history.
+    """
+    frames: list[dict] = []
+    keys: list[str] = []
+    for p in chunk_paths:
+        try:
+            with np.load(str(p), allow_pickle=False) as z:
+                f = {k: np.asarray(z[k], dtype=np.float64).ravel()
+                     for k in z.files}
+        except Exception as exc:  # pragma: no cover - corrupt-file guard
+            logger.warning("timeseries chunk %s unreadable (%s); skipped.",
+                           p, exc)
+            continue
+        if "days" not in f or f["days"].size == 0:
+            continue
+        frames.append(f)
+        for k in f:
+            if k not in keys:
+                keys.append(k)
+    if not frames:
+        return {}
+
+    # Later chunks win on duplicated days: walk in order and truncate every
+    # already-accumulated day that this chunk re-covers.
+    days_out = np.empty(0, dtype=np.float64)
+    cols = {k: np.empty(0, dtype=np.float64) for k in keys}
+    for f in frames:
+        d = f["days"]
+        n = d.size
+        keep = days_out < d[0]
+        days_out = np.concatenate([days_out[keep], d])
+        for k in keys:
+            v = f.get(k)
+            if v is None or v.size != n:
+                # Absent (older chunk schema) or ragged: NaN over this span
+                # rather than a misaligned splice.
+                v = np.full(n, np.nan, dtype=np.float64)
+            cols[k] = np.concatenate([cols[k][keep], v])
+
+    order = np.argsort(days_out, kind="stable")
+    out = {k: cols[k][order] for k in keys if k != "days"}
+    out["days"] = days_out[order]
+    return out
+
+
 class _MPASSfcFluxAccum:
     """Per-step accumulator for the MPAS eager loop's ``_sfc_diag`` flux
     slots so the CMOR feed hands INTERVAL MEANS to the accumulators instead
@@ -842,6 +947,20 @@ class ModelDriver:
         # #1353 per-step flux accumulator (built in _run_mpas when the CMOR
         # feed is on; None keeps every other path a no-op).
         self._mpas_sfc_accum = None
+        # Conservation trackers for the lightweight MPAS timeseries.  The
+        # MPAS lane bypasses DiagnosticCollector.collect (and hence ITS
+        # trackers), so it owns its own instances of the SAME shared classes;
+        # without these the energy/moisture residual channels were all-NaN
+        # and both conservation checks were silently inert on the production
+        # lane.  Cheap host-side objects -- built here so every path has them.
+        # Function-scope import: model_driver defers every
+        # ``legoesm.diagnostics`` import (see the column_integrals /
+        # process_ledger call sites) to keep module import light.
+        from legoesm.diagnostics.energy_budget import (
+            EnergyBudgetTracker as _EBT, MoistureBudgetTracker as _MBT,
+        )
+        self._mpas_energy_tracker = _EBT()
+        self._mpas_moisture_tracker = _MBT()
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
@@ -6056,6 +6175,151 @@ class ModelDriver:
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
 
+    def _mpas_timeseries_extras(self, abs_day: float) -> dict[str, float]:
+        """Global-mean surface/TOA fluxes + CONSERVATION RESIDUALS for the
+        lightweight MPAS ``timeseries.npz``.
+
+        ``_run_mpas`` populates only state-derived channels (T_atm, max_wind,
+        dry_mass_ps, CWV); every flux channel and BOTH conservation residuals
+        were therefore written as all-NaN by
+        :meth:`_save_lightweight_timeseries`, and because
+        ``validate_amip_run.py`` skipped a NaN residual the energy and moisture
+        conservation checks were SILENTLY INERT on the entire production lane
+        (confirmed on a completed 365-day AMIP chain: 0/155 finite samples,
+        "ALL CHECKS PASSED").  This closes that hole.
+
+        Reuses the SHARED :class:`EnergyBudgetTracker` /
+        :class:`MoistureBudgetTracker` (the same objects the cube/lat-lon
+        ``DiagnosticCollector.collect`` path drives) rather than re-deriving a
+        budget here, so both lanes report one residual definition:
+        energy ``R = TOA_net - dE/dt`` [W/m2], moisture ``R = E - P - dW/dt``
+        [mm/day].
+
+        Returns a FIXED key set (NaN for a channel this configuration genuinely
+        cannot measure, e.g. a dry or radiation-free run) so the per-channel
+        lists stay index-aligned with ``days`` for every diagnostic interval.
+
+        Global means use EQUAL CELL WEIGHT, matching the convention already
+        documented in :meth:`_mpas_global_diag` for the quasi-uniform SCVT mesh
+        (``area_weights=None`` on the trackers); this is the same weighting the
+        lane's existing T_atm / CWV channels use, so the residual is consistent
+        with them.
+
+        Must be called BEFORE :meth:`_feed_mpas_cmip_accumulators`, which
+        RESETS the flux accumulator in its ``finally`` block.
+        """
+        import numpy as _np
+        nan = float("nan")
+        keys = ("T_low", "sst", "sic", "precip", "sw_up_toa", "lw_up_toa",
+                "sw_net_sfc", "lw_net_sfc", "energy_residual",
+                "moisture_residual")
+        out = {k: nan for k in keys}
+        try:
+            state = self.state
+            _accum = getattr(self, "_mpas_sfc_accum", None)
+            _sfc_diag = getattr(self.model, "_sfc_diag", None)
+            _partial = (_accum is not None and _accum.has_samples()
+                        and not _accum.is_complete())
+
+            def _slot(i):
+                return _mpas_sfc_slot(_sfc_diag, _accum, i,
+                                      accum_partial=_partial)
+
+            sw_net_sfc = _slot(0)
+            lw_net_sfc = _slot(1)
+            precip = _slot(2)
+            lw_up_toa = _slot(3)
+            sw_up_toa = _slot(4)
+            sw_down_toa = _slot(5)
+            hfls = _slot(7)
+
+            q_v = None
+            if state.tracers is not None and "q_v" in state.tracers:
+                q_v = state.tracers["q_v"].data
+
+            p_s = state.p_s.data
+            # Hybrid-correct layer thickness: dp = dA*p_ref + dB*p_s.  The
+            # p_s*dsigma form is wrong by dA*(p_s - p_ref) over terrain and
+            # q_v is bottom-heavy, so the moisture budget needs the real dp.
+            _dp = (self.sigma.layer_thickness_dp(p_s)
+                   if hasattr(self.sigma, "layer_thickness_dp") else None)
+            _p_full = (self.sigma.pressure_at_full(p_s)
+                       if hasattr(self.sigma, "pressure_at_full") else None)
+
+            out["T_low"] = float(jnp.mean(state.T.data[..., -1]))
+
+            _get_sst_sic = getattr(self, "get_sst_sic", None)
+            if _get_sst_sic is not None:
+                try:
+                    _sst, _sic = _get_sst_sic(abs_day)
+                    out["sst"] = float(jnp.mean(jnp.asarray(_sst)))
+                    out["sic"] = float(jnp.mean(jnp.asarray(_sic)))
+                except Exception as exc:
+                    logger.warning(
+                        "  timeseries: sst/sic sample failed at day %.2f "
+                        "(%s); channel left NaN.", abs_day, exc)
+
+            if precip is not None:
+                # kg/m2/s -> mm/day, the unit the other lanes publish.
+                out["precip"] = float(jnp.mean(precip)) * 86400.0
+            for _k, _f in (("sw_up_toa", sw_up_toa), ("lw_up_toa", lw_up_toa),
+                           ("sw_net_sfc", sw_net_sfc),
+                           ("lw_net_sfc", lw_net_sfc)):
+                if _f is not None:
+                    out[_k] = float(jnp.mean(_f))
+
+            elapsed_s = float(abs_day) * 86400.0
+
+            # ENERGY closure: needs the full radiative quartet; a run without
+            # radiation leaves the channel NaN rather than closing against a
+            # fabricated zero flux.
+            if (q_v is not None and sw_down_toa is not None
+                    and sw_up_toa is not None and lw_up_toa is not None
+                    and sw_net_sfc is not None and lw_net_sfc is not None):
+                # ``state.u`` is EDGE-NORMAL on MPAS (nEdges, nlev) and there
+                # is no ``state.v``; the column energy integral needs
+                # cell-collocated (u_east, v_north).  Same Perot
+                # reconstruction the CMOR feed uses -- passing the raw edge
+                # array would be a shape error, and zeroing v would drop half
+                # the (small) kinetic term.
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                _u_cell, _v_cell = reconstruct_cell_velocity(
+                    state.u.data, self.grid)
+                _b = self._mpas_energy_tracker.update(
+                    state.T.data, q_v, _u_cell, _v_cell, state.phis.data, p_s,
+                    self.sigma.dsigma, self.sigma.sigma_full,
+                    sw_down_toa, sw_up_toa, lw_up_toa,
+                    sw_net_sfc, lw_net_sfc,
+                    elapsed_seconds=elapsed_s,
+                    area_weights=None, dp=_dp, p_full=_p_full,
+                )
+                out["energy_residual"] = float(_b.residual)
+
+            # MOISTURE closure: E - P - dW/dt.  Needs vapour AND precip; hfls
+            # absent means no evaporation flux was computed, so close against
+            # E = 0 exactly as the cube lane does.
+            if q_v is not None and precip is not None:
+                _m = self._mpas_moisture_tracker.update(
+                    q_v, p_s, self.sigma.dsigma, precip,
+                    hfls if hfls is not None else jnp.zeros_like(p_s),
+                    elapsed_seconds=elapsed_s,
+                    area_weights=None, dp=_dp,
+                )
+                out["moisture_residual"] = float(_m.residual)
+        except Exception as exc:  # pragma: no cover - defensive diag guard
+            # A diagnostic failure must never abort the run, but it must be
+            # LOUD: the NaN it leaves behind is now a validator FAILURE, not a
+            # silent skip, so this cannot quietly disable conservation again.
+            logger.error(
+                "  timeseries conservation sample FAILED at day %.2f "
+                "(channels left NaN -> validate_amip_run will FAIL): %s",
+                abs_day, exc)
+        # Guard against a non-finite sneaking through as a "measured" value.
+        for k, v in out.items():
+            if not _np.isfinite(v):
+                out[k] = nan
+        return out
+
     def _mpas_cmip_feed_enabled(self, diag) -> tuple[bool, bool]:
         """Decide whether the per-interval MPAS CMOR accumulator feed runs.
 
@@ -6197,16 +6461,8 @@ class ModelDriver:
                     "interval.", day, _accum._steps, _accum.expected_steps)
 
             def _sfc_slot(i):
-                if _accum is not None:
-                    if _accum_partial:
-                        return None
-                    m = _accum.mean(i)
-                    if m is not None:
-                        return m
-                if (_sfc_diag is not None and len(_sfc_diag) > i
-                        and _sfc_diag[i] is not None):
-                    return _sfc_diag[i].data
-                return None
+                return _mpas_sfc_slot(_sfc_diag, _accum, i,
+                                      accum_partial=_accum_partial)
             precip = _sfc_slot(2)
             rlut = _sfc_slot(3)
             rsut = _sfc_slot(4)
@@ -8385,7 +8641,13 @@ class ModelDriver:
                     _cwv = (float(jnp.mean(_cwv_field))
                             if _cwv_field is not None else float("nan"))
 
-                _ts["days"].append(elapsed_day)
+                # ABSOLUTE simulated day, not job-local: the restart chain
+                # concatenates links into one timeseries, and a job-local
+                # axis would restart at 1 every link (the completed 365-day
+                # chain's file ran 1..155 -- the last link's local days).
+                # It also feeds validate_amip_run's sim_days tolerance gate,
+                # which was reading a link length as the run length.
+                _ts["days"].append(START_DAY + elapsed_day)
                 _ts["T_atm"].append(mean_T)
                 _ts["T_min"].append(T_min)
                 _ts["T_max"].append(T_max)
@@ -8393,6 +8655,17 @@ class ModelDriver:
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
                 _ts["CWV"].append(_cwv)
+
+                # Flux channels + CONSERVATION RESIDUALS.  Must run BEFORE
+                # _feed_mpas_cmip_accumulators, which resets the #1353 flux
+                # accumulator in its ``finally`` block (reading after the
+                # reset would silently downgrade every interval mean to the
+                # last step's instantaneous value).  Fixed key set, one
+                # append per key per interval, so every channel stays
+                # index-aligned with ``days``.
+                for _k, _v in self._mpas_timeseries_extras(
+                        START_DAY + elapsed_day).items():
+                    _ts.setdefault(_k, []).append(_v)
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -9153,7 +9426,10 @@ class ModelDriver:
                 max_wind = float(_stats_host[4])
                 T_finite = bool(_stats_host[5] > 0.5)
 
-                _ts["days"].append(elapsed_day)
+                # ABSOLUTE simulated day (see _run_mpas): the writer now
+                # chains restart links into one record, and a job-local axis
+                # would make consecutive links collide on days 1..N.
+                _ts["days"].append(START_DAY + elapsed_day)
                 _ts["T_atm"].append(mean_T)
                 _ts["T_min"].append(T_min)
                 _ts["T_max"].append(T_max)
@@ -9330,24 +9606,37 @@ class ModelDriver:
                 return nan
             return np.array(v, dtype=np.float64)
 
-        np.savez(
-            out_dir / "timeseries.npz",
-            days=days,
-            T_atm=_arr("T_atm"),
-            T_low=_arr("T_low") if "T_low" in ts else nan,
-            max_wind=_arr("max_wind"),
-            dry_mass_ps=_arr("dry_mass_ps"),
-            sst=_arr("sst") if "sst" in ts else nan,
-            sic=_arr("sic") if "sic" in ts else nan,
-            precip=_arr("precip") if "precip" in ts else nan,
-            CWV=_arr("CWV") if "CWV" in ts else nan,
-            sw_up_toa=_arr("sw_up_toa") if "sw_up_toa" in ts else nan,
-            lw_up_toa=_arr("lw_up_toa") if "lw_up_toa" in ts else nan,
-            sw_net_sfc=_arr("sw_net_sfc") if "sw_net_sfc" in ts else nan,
-            lw_net_sfc=_arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
-            energy_residual=_arr("energy_residual") if "energy_residual" in ts else nan,
-            moisture_residual=_arr("moisture_residual") if "moisture_residual" in ts else nan,
-        )
+        link = {
+            "days": days,
+            "T_atm": _arr("T_atm"),
+            "T_low": _arr("T_low") if "T_low" in ts else nan,
+            "max_wind": _arr("max_wind"),
+            "dry_mass_ps": _arr("dry_mass_ps"),
+            "sst": _arr("sst") if "sst" in ts else nan,
+            "sic": _arr("sic") if "sic" in ts else nan,
+            "precip": _arr("precip") if "precip" in ts else nan,
+            "CWV": _arr("CWV") if "CWV" in ts else nan,
+            "sw_up_toa": _arr("sw_up_toa") if "sw_up_toa" in ts else nan,
+            "lw_up_toa": _arr("lw_up_toa") if "lw_up_toa" in ts else nan,
+            "sw_net_sfc": _arr("sw_net_sfc") if "sw_net_sfc" in ts else nan,
+            "lw_net_sfc": _arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
+            "energy_residual": (_arr("energy_residual")
+                                if "energy_residual" in ts else nan),
+            "moisture_residual": (_arr("moisture_residual")
+                                  if "moisture_residual" in ts else nan),
+        }
+        # RESTART CHAINING: persist THIS link as its own immutable chunk, then
+        # rebuild timeseries.npz as the merge of every chunk.  The writer used
+        # to overwrite timeseries.npz per link, so a completed 365-day chain
+        # retained only its final link (days 1-210 of the cc_on year existed
+        # nowhere on disk) and timeseries_incremental/ stayed empty.
+        incr_dir = out_dir / "timeseries_incremental"
+        incr_dir.mkdir(parents=True, exist_ok=True)
+        _first = float(days[0]) if days.size else 0.0
+        np.savez(incr_dir / f"chunk_day{_first:09.2f}.npz", **link)
+        merged = _merge_timeseries_chunks(
+            sorted(incr_dir.glob("chunk_day*.npz")))
+        np.savez(out_dir / "timeseries.npz", **(merged if merged else link))
         # Persist the run summary in the same place run_amip's main path
         # writes it, so `validate_amip_run.py` can read the status line.
         import time as _time
@@ -10088,7 +10377,9 @@ class ModelDriver:
                     jnp.max(s.T.data), jnp.mean(s.p_s.data),
                     jnp.max(jnp.sqrt(s.u.data ** 2 + s.v.data ** 2)),
                 ]))
-                _ts["days"].append(day - self.config.start_day)
+                # ABSOLUTE simulated day (see _run_mpas): the writer chains
+                # restart links, so a job-local axis would collide.
+                _ts["days"].append(day)
                 _ts["T_atm"].append(float(_stats[0]))
                 _ts["T_min"].append(float(_stats[1]))
                 _ts["T_max"].append(float(_stats[2]))

@@ -136,9 +136,12 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
     # all modes; ``--strict`` is reserved for warning-level diagnostics
     # (precip/moisture residual).
     status_failed = False
+    radiation = None
     if res_path.exists():
         text = res_path.read_text()
         for line in text.splitlines():
+            if line.startswith("Radiation:"):
+                radiation = line.split(":", 1)[1].strip().lower()
             if line.startswith("Status:"):
                 print(f"  Run status line: {line.strip()}")
                 if "BLOWUP" in line or "FAIL" in line:
@@ -200,22 +203,56 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
     # ``n`` keeps a year-long run inside the cold-start band and would
     # mask a divergent imbalance.  The right gate is elapsed simulated
     # time, which is what the radiative-equilibrium argument cares about.
-    if "energy_residual" in ts:
-        res = ts["energy_residual"]
-        rmax = float(np.nanmax(np.abs(res))) if res.size else 0.0
-        sim_days = float(days[-1]) if days.size > 0 else 0.0
-        # Tighten the bound as the simulation progresses (in days, not
-        # samples):
-        if sim_days < 30.0:
-            bound, warn_thr = 500.0, 200.0   # cold start
-        elif sim_days < 365.0:
-            bound, warn_thr = 200.0, 50.0    # spin-up
-        else:
-            bound, warn_thr = 50.0, 5.0      # production
+    # A NaN conservation residual is a MEASUREMENT FAILURE, not a pass.  It
+    # used to be ``skip_if_nan=True``: because ``resid > tol`` is False for
+    # NaN, a run whose residual channel was never populated printed
+    # "[SKIP] not measured" and then "ALL CHECKS PASSED" with NO conservation
+    # check at all.  That is exactly what a completed 365-day MPAS AMIP chain
+    # did (0/155 finite samples in both residual channels).  A residual is
+    # legitimately absent ONLY when the run has no radiation to close against.
+    # Absence of the channel is treated exactly like an all-NaN channel: both
+    # mean "not measured".  The discriminator for FAIL-vs-SKIP is whether the
+    # run had radiation to close against, read from results.txt.  A file with
+    # no ``Radiation:`` line is UNDETERMINABLE (not from our drivers, or a
+    # minimal fixture) and skips with a message saying so -- an honest
+    # "could not evaluate", never a silent pass.
+    res = ts["energy_residual"] if "energy_residual" in ts else np.zeros(0)
+    _finite = np.isfinite(res) if res.size else np.zeros(0, dtype=bool)
+    n_finite = int(_finite.sum())
+    rmax = float(np.max(np.abs(res[_finite]))) if n_finite else float("nan")
+    sim_days = float(days[-1]) if days.size > 0 else 0.0
+    # Tighten the bound as the simulation progresses (in days, not samples):
+    if sim_days < 30.0:
+        bound, warn_thr = 500.0, 200.0   # cold start
+    elif sim_days < 365.0:
+        bound, warn_thr = 200.0, 50.0    # spin-up
+    else:
+        bound, warn_thr = 50.0, 5.0      # production
+    _absent = "energy_residual" not in ts
+    if n_finite == 0 and radiation is None:
+        print("  [SKIP] |TOA energy residual|: cannot evaluate — results.txt "
+              "declares no 'Radiation:' line, so whether a closure was "
+              "expected is undeterminable"
+              + (" (channel ABSENT)" if _absent else ""))
+    elif n_finite == 0 and radiation == "none":
+        print("  [SKIP] |TOA energy residual|: run has no radiation "
+              f"(Radiation: {radiation})")
+    elif n_finite == 0:
+        _what = ("channel ABSENT from timeseries.npz" if _absent
+                 else f"0 of {res.size} samples finite")
+        print(f"  [FAIL] |TOA energy residual| NEVER MEASURED: {_what} on a "
+              f"run with radiation={radiation!r}. The energy conservation "
+              "check is INERT.")
+        failures.append("toa_residual_unmeasured")
+    else:
+        if n_finite < res.size:
+            print(f"  [WARN] TOA energy residual: only {n_finite} of "
+                  f"{res.size} samples finite")
+            warns.append("toa_residual_partial")
         if not _check(
             f"|TOA energy residual| max [W/m²] "
-            f"(sim_days={sim_days:.1f}, bound={bound})",
-            rmax, lambda x: x < bound, fatal=True, skip_if_nan=True,
+            f"(sim_days={sim_days:.1f}, bound={bound}, n={n_finite})",
+            rmax, lambda x: x < bound, fatal=True,
         ):
             failures.append("toa_residual")
         elif rmax > warn_thr:
@@ -241,13 +278,39 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
         else:
             print("  [SKIP] Mean p_s conservation: not measured")
 
-    # Moisture residual (optional)
-    if "moisture_residual" in ts:
-        mres = ts["moisture_residual"]
-        mr_max = (float(np.nanmax(np.abs(mres)))
-                  if mres.size and np.any(np.isfinite(mres)) else float("nan"))
-        if not _check("|moisture residual| max [mm/day]", mr_max,
-                      lambda x: x < 5.0, fatal=False, skip_if_nan=True):
+    # Moisture residual.  Same fail-loud rule as the energy residual: an
+    # unmeasured closure is a FAILURE.  Legitimately absent only on a DRY run,
+    # which the CWV channel identifies (no vapour -> nothing to close).
+    mres = ts["moisture_residual"] if "moisture_residual" in ts else np.zeros(0)
+    _mfin = np.isfinite(mres) if mres.size else np.zeros(0, dtype=bool)
+    m_n = int(_mfin.sum())
+    mr_max = (float(np.max(np.abs(mres[_mfin]))) if m_n else float("nan"))
+    _m_absent = "moisture_residual" not in ts
+    # A DRY run has nothing to close.  ``radiation is None`` additionally
+    # means the file does not declare its own configuration, so the check is
+    # undeterminable rather than failed (same rule as the energy residual).
+    _dry = ("CWV" not in ts or ts["CWV"].size == 0
+            or not np.any(np.isfinite(ts["CWV"])))
+    if m_n == 0 and (_dry or radiation is None):
+        _why = "dry run (no CWV measured)" if _dry else (
+            "cannot evaluate — results.txt declares no 'Radiation:' line")
+        print(f"  [SKIP] |moisture residual|: {_why}"
+              + (" (channel ABSENT)" if _m_absent else ""))
+    elif m_n == 0:
+        _what = ("channel ABSENT from timeseries.npz" if _m_absent
+                 else f"0 of {mres.size} samples finite")
+        print(f"  [FAIL] |moisture residual| NEVER MEASURED: {_what} on a "
+              "MOIST run. The moisture conservation check is INERT.")
+        failures.append("moisture_residual_unmeasured")
+    else:
+        if m_n < mres.size:
+            print(f"  [WARN] moisture residual: only {m_n} of "
+                  f"{mres.size} samples finite")
+            warns.append("moisture_residual_partial")
+        if not _check(
+            f"|moisture residual| max [mm/day] (n={m_n})",
+            mr_max, lambda x: x < 5.0, fatal=False,
+        ):
             warns.append("moisture_residual")
 
     # Per-cell hfls sanity tripwire (FATAL).  A time-mean surface latent
