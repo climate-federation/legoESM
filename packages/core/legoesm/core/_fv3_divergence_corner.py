@@ -148,7 +148,7 @@ def fv3_divergence_corner_2d(
     v_corner: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
     *,
-    dgrid_ne_halo: bool = False,
+    dgrid_ne_halo: bool = True,
 ) -> jnp.ndarray:
     """Faithful port of FV3 ``sw_core.F90:divergence_corner`` (2D or 4D).
 
@@ -721,7 +721,7 @@ def fv3_divergence_corner_3d(
     v_corner_3d: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
     *,
-    dgrid_ne_halo: bool = False,
+    dgrid_ne_halo: bool = True,
 ) -> jnp.ndarray:
     """3D wrapper around the now-4D-native :func:`fv3_divergence_corner_2d`.
 
