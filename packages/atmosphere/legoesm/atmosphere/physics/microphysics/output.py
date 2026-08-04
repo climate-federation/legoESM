@@ -95,6 +95,19 @@ class MicrophysicsOutput(NamedTuple):
     # convective vapour sink (both draw the same pre-physics q_v).  ``None`` for
     # schemes that do not expose it (the joint clamp then skips the micro term).
     dq_v_to_qc_dt: jax.Array | None = None
+    # Optional SOLID-PHASE part of ``precipitation`` [kg/m^2/s, same
+    # positive-into-the-surface sense], i.e. the ice + snow + graupel
+    # sedimentation flux at the surface.  This is CMIP6 ``prsn``
+    # ("precipitation of all forms of water in the SOLID phase"), and it is
+    # a SUBSET of ``precipitation``: 0 <= precipitation_solid <=
+    # precipitation by construction, since both are sums of the SAME
+    # per-species dt-limited surface fluxes.
+    #
+    # ``None`` for schemes that do not resolve frozen precipitation
+    # separately (warm-rain and bulk schemes).  It is left None rather than
+    # set to zero there: a zero would be published as "this model never
+    # snows anywhere", which is a claim, not an absence.
+    precipitation_solid: jax.Array | None = None
 
 
 def make_zero_hydrometeors(

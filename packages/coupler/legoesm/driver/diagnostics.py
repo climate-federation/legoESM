@@ -354,6 +354,12 @@ class DiagnosticCollector:
             _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
             self._spatial_monthly = SpatialMonthlyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
+                # CMIP6 ``Amon`` tasmin/tasmax are "time: minimum/maximum
+                # WITHIN DAYS, time: mean OVER DAYS" — the monthly mean of
+                # the DAILY extrema, not the monthly extremum.  Reuses the
+                # same ``tas`` field the ``day`` table's extremes track, so
+                # the two tables cannot disagree on a day's extreme.
+                daily_extreme_fields={"tas": ("tasmin", "tasmax")},
             )
             # Daily accumulator (CMIP6 ``day`` table) — tracks running
             # min/max for tas so tasmin/tasmax can be emitted.
@@ -1454,6 +1460,8 @@ class DiagnosticCollector:
         rlutcs=None,
         rsdscs=None,
         rldscs=None,
+        rsuscs=None,
+        prsn=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1477,11 +1485,17 @@ class DiagnosticCollector:
           TOA/surface flux block (``rlut``/``rsut``/``rsdt``/``hfss``/
           ``hfls``/``evspsbl``/``rsds``/``rlds`` and the derived
           ``rsus``/``rlus``), the clear-sky quartet
-          ``rsutcs``/``rlutcs`` (TOA outgoing) and
-          ``rsdscs``/``rldscs`` (surface downwelling) — present only when
-          the clear-sky diagnostic is enabled, ``ts`` (surface skin temperature when the
+          ``rsutcs``/``rlutcs`` (TOA outgoing), ``rsdscs``/``rldscs``
+          (surface downwelling) and ``rsuscs`` (surface UPwelling SW) —
+          present only when the clear-sky diagnostic is enabled, ``ts`` (surface skin temperature when the
           driver supplies the sst/sic/ice blend) and ``tauu``/``tauv``
-          (surface wind stress, CMOR downward-positive).
+          (surface wind stress, CMOR downward-positive).  Also the derived
+          ``rtmt`` (= ``rsdt - rsut - rlut``, CMOR positive DOWN) and the
+          near-surface set ``huss``/``uas``/``vas``/``sfcWind`` — all four
+          taken at the LOWEST MODEL LEVEL rather than 2 m / 10 m (the same
+          documented deviation ``hurs`` already carries), with ``sfcWind``
+          formed as the per-sample wind SPEED so its monthly mean is the
+          mean speed, not the speed of the mean wind.
         * 3-D on plev19 (``add_3d``): ``ta``, ``hus`` (*q_v*), ``ua``
           (*u_east*), ``va`` (*v_north*), ``wap`` (*omega*).
         * Daily (``SpatialDailyAccumulator``): ``tas``/``pr``/``psl`` plus
@@ -1593,7 +1607,15 @@ class DiagnosticCollector:
                     # Clear-sky TOA outgoing: interval MEANS from the same
                     # per-step accumulator as their all-sky partners
                     # rsut/rlut, so they share the midpoint calendar bin.
-                    "rsutcs", "rlutcs", "rsdscs", "rldscs")
+                    "rsutcs", "rlutcs", "rsdscs", "rldscs", "rsuscs",
+                    # prsn is the frozen SUBSET of pr, produced by the same
+                    # per-step accumulator, so it shares pr's midpoint bin.
+                    "prsn",
+                    # rtmt is an exact linear combination of the interval-mean
+                    # rsdt/rsut/rlut, so it IS an interval mean and must share
+                    # their midpoint bin (an endpoint bin would shift it one
+                    # interval late relative to its own three terms).
+                    "rtmt")
         _FLUX_DAILY = ("pr", "rsut", "rlut")
         _FLUX_ZONAL = ("precip",)
 
@@ -1667,6 +1689,21 @@ class DiagnosticCollector:
         # solve as the TOA pair.  No conversion or sign flip here.
         rsdscs_np = None if rsdscs is None else np.asarray(rsdscs, dtype=_f64)
         rldscs_np = None if rldscs is None else np.asarray(rldscs, dtype=_f64)
+        # Clear-sky SURFACE UPWELLING shortwave (CMIP6 rsuscs): positive UP
+        # -- the table's own ``positive="up"``, and the OPPOSITE orientation
+        # to the rsdscs it pairs with.  The producer hands over the same
+        # cloud-free solve's ``sw_flux_up[:, -1]`` (the albedo-reflected
+        # clear-sky downwelling), already positive up, so no conversion or
+        # sign flip here.  Consistency check the pair satisfies by
+        # construction: 0 <= rsuscs <= rsdscs (surface albedo in [0, 1]).
+        rsuscs_np = None if rsuscs is None else np.asarray(rsuscs, dtype=_f64)
+        # Snowfall flux (CMIP6 prsn) [kg/m^2/s]: the SOLID-phase (ice +
+        # snow + graupel) part of the surface sedimentation flux, in the
+        # SAME positive-into-the-surface sense as ``precip`` (CMOR ``pr``)
+        # and a SUBSET of it -- 0 <= prsn <= pr by construction, since both
+        # are sums of the same per-species dt-limited fluxes.  No sign flip
+        # or unit conversion: the microphysics already reports kg/m^2/s.
+        prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1697,6 +1734,8 @@ class DiagnosticCollector:
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsdscs", rsdscs_np, (_ncol,)),
             ("rldscs", rldscs_np, (_ncol,)),
+            ("rsuscs", rsuscs_np, (_ncol,)),
+            ("prsn", prsn_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1734,6 +1773,57 @@ class DiagnosticCollector:
         rlus_np = (None if (rlds_np is None or lwnet_np is None)
                    else rlds_np - lwnet_np)
 
+        # rtmt — CMIP6 "net downward radiative flux at top of model".
+        # Sign convention at the term (stated once, walked per term):
+        #   rsdt (CMOR) [W/m^2, positive DOWN]  incoming SW at the model top
+        #   rsut (CMOR) [W/m^2, positive UP]    outgoing SW at the model top
+        #   rlut (CMOR) [W/m^2, positive UP]    outgoing LW at the model top
+        #   rtmt (CMOR) [W/m^2, positive DOWN]  -- the table declares
+        #                                       positive="down"
+        # net(+down) = down(+down) - up(+up) - up(+up)
+        #   =>  rtmt = rsdt - rsut - rlut.
+        # All three terms are the radiation solver's fluxes at the SAME half
+        # level (``*_flux_*[:, 0]``, the top of the model column), so this is
+        # the top-of-MODEL flux the table asks for; the model carries no
+        # atmosphere above that level, so it equals the top-of-atmosphere net.
+        # Derived only when ALL THREE are present; otherwise SKIPPED, never
+        # zeroed (a zero rtmt would read as a planet in exact radiative
+        # equilibrium).
+        rtmt_np = (None if (rsdt_np is None or rsut_np is None
+                            or rlut_np is None)
+                   else rsdt_np - rsut_np - rlut_np)
+
+        # ---- Near-surface (height2m / height10m) diagnostics -------------
+        # DOCUMENTED DEVIATION, identical in kind to the pre-existing
+        # ``hurs``: these are the LOWEST-MODEL-LEVEL values, not MOST
+        # extrapolations to 2 m / 10 m.  The shared surface-layer helper
+        # (``core.bulk_flux.compute_most_fluxes``) returns ``T_2m`` ONLY --
+        # there is no humidity or wind profile output to reuse, and
+        # re-deriving one here would duplicate surface-layer numerics that
+        # belong in the physics module.  ``tas`` is the one field that DOES
+        # get the 2 m MOST treatment (the driver passes it in).
+        #
+        # huss: published from ``q_v`` exactly as the 3-D ``hus`` already is,
+        # so the surface value and the profile cannot disagree.  Note the
+        # model's ``q_v`` is a MIXING RATIO (thermo: q_sat = eps*e/(p-e)),
+        # i.e. per unit DRY air, while CMIP6 ``huss``/``hus`` are specific
+        # humidity per unit MOIST air -- ~2 % high at 20 g/kg.  That
+        # convention is inherited from ``hus``, not introduced here.
+        huss_np = None if q_v_np is None else q_v_np[..., -1]
+        # uas/vas: GEOGRAPHIC east/north cell-centre components (MPAS: from
+        # reconstruct_cell_velocity), lowest model level.  No sign flip --
+        # CMIP6 ``uas``/``vas`` are eastward/northward wind, the same
+        # orientation the reconstruction produces.
+        uas_np = None if u_east_np is None else u_east_np[..., -1]
+        vas_np = None if v_north_np is None else v_north_np[..., -1]
+        # sfcWind: the mean of the SPEED, never the speed of the mean wind.
+        # The magnitude is formed HERE, per sample, so what the monthly
+        # accumulator averages is already |V|; averaging uas/vas first and
+        # taking the magnitude at write time would understate the wind
+        # wherever the direction varies (the classic error on this variable).
+        sfcwind_np = (None if (uas_np is None or vas_np is None)
+                      else np.hypot(uas_np, vas_np))
+
         # Sea-level pressure (hypsometric) — shared by the spatial ``psl`` and
         # the zonal ``psl`` band; compute once when phis is available (shape
         # validated above, so the broadcast is safe).
@@ -1762,6 +1852,11 @@ class DiagnosticCollector:
                 ('tas', tas_field),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
+                # Snowfall flux: the frozen subset of pr (see the coercion
+                # block above).  Skipped when the active microphysics does
+                # not resolve the split -- never zeroed, since a zero prsn
+                # is the claim "it never snows".
+                ('prsn', prsn_np),
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
@@ -1776,7 +1871,14 @@ class DiagnosticCollector:
                 # zeroed.
                 ('rsdscs', rsdscs_np),
                 ('rldscs', rldscs_np),
+                # Clear-sky SURFACE UPWELLING SW (positive UP, see the
+                # coercion block above) -- the clear-sky partner of the
+                # derived all-sky rsus.  Skipped when absent, never zeroed.
+                ('rsuscs', rsuscs_np),
                 ('rsdt', rsdt_np),
+                # Net downward radiative flux at the top of the model
+                # (rsdt - rsut - rlut; sign walk at the derivation above).
+                ('rtmt', rtmt_np),
                 ('hfss', hfss_np),
                 ('hfls', hfls_np),
                 ('evspsbl', evspsbl_np),
@@ -1794,6 +1896,12 @@ class DiagnosticCollector:
                 # by the driver at the feed call site).
                 ('tauu', tauu_np),
                 ('tauv', tauv_np),
+                # Near-surface state snapshots (height2m / height10m) — all
+                # lowest-model-level, see the derivation block above.
+                ('huss', huss_np),
+                ('uas', uas_np),
+                ('vas', vas_np),
+                ('sfcWind', sfcwind_np),
             ):
                 if _src is None:
                     continue

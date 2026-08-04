@@ -1078,12 +1078,13 @@ def make_voronoi_mpi_step(
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
             # CMOR TOA + surface flux extras — mirror the serial producer's
-            # 16-slot contract (primitive_eq_mpas.step) EXACTLY so the
+            # 18-slot contract (primitive_eq_mpas.step) EXACTLY so the
             # one-rank MPI-voronoi coupled lane exports the same fields.
             # Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
             # sw_down_toa, shflx, lhflx, sw_down_sfc, lw_down_sfc,
             # tau_x_sfc, tau_y_sfc, sw_up_toa_clearsky, lw_up_toa_clearsky,
-            # sw_down_sfc_clearsky, lw_down_sfc_clearsky) — the consumer
+            # sw_down_sfc_clearsky, lw_down_sfc_clearsky,
+            # sw_up_sfc_clearsky, precip_solid) — the consumer
             # (model_driver._feed_mpas_cmip_accumulators) reads slots by
             # this order; _marshal_land_forcing reads 8/9.
             _extras = tuple(getattr(_pt, _k, None) for _k in (
@@ -1092,7 +1093,8 @@ def make_voronoi_mpi_step(
                 "sw_down_sfc", "lw_down_sfc",
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky"))
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                "sw_up_sfc_clearsky", "precip_solid"))
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):

@@ -547,6 +547,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # diagnostic (not a tendency) so the lean MPAS loop can export it.
         precip_accum = (first.precip.data
                         if getattr(first, "precip", None) is not None else None)
+        # SOLID-phase surface precip (CMOR prsn), summed across the SAME
+        # modules and with the SAME None-means-absent rule as precip above,
+        # so the pair can never come from different module sets.
+        precip_solid_accum = (
+            first.precip_solid.data
+            if getattr(first, "precip_solid", None) is not None else None)
         # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
         # feed: each comes from exactly ONE module (TOA trio from radiation,
         # shflx/lhflx and the surface stress tau_x/tau_y from turbulence),
@@ -560,7 +566,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         # (None otherwise, so the first-non-None combine is
                         # a no-op).
                         "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                        "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+                        "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                        # Clear-sky SURFACE upwelling SW (CMOR rsuscs) —
+                        # same producer, same gate as the quartet above.
+                        "sw_up_sfc_clearsky")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -639,6 +648,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if getattr(t, "precip", None) is not None:
                 precip_accum = (t.precip.data if precip_accum is None
                                 else precip_accum + t.precip.data)
+            if getattr(t, "precip_solid", None) is not None:
+                precip_solid_accum = (
+                    t.precip_solid.data if precip_solid_accum is None
+                    else precip_solid_accum + t.precip_solid.data)
 
             for _k in _DIAG_FIELDS:
                 if sfc_diag_extras[_k] is None:
@@ -646,7 +659,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends, phys_updates, first, precip_accum,
-                sfc_diag_extras, _led)
+                sfc_diag_extras, _led, precip_solid_accum)
 
     def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                         combined_tracer_tends):
@@ -670,15 +683,24 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             tracer_tendencies=tracer_tends_out,
         )
 
-    def _attach_sfc_precip(combined, first, precip_accum):
+    def _attach_sfc_precip(combined, first, precip_accum,
+                           precip_solid_accum=None):
         """Carry surface precip [kg/m^2/s] on the combined tendency (dropped by
         _build_combined) so the lean MPAS loop can export it. No-op / byte-
-        identical when microphysics produced no precip (precip_accum is None)."""
-        if precip_accum is None:
-            return combined
-        return combined._replace(precip=Field(
-            data=precip_accum, name="precip",
-            dims=first.dp_s_dt.dims, units="kg/m^2/s"))
+        identical when microphysics produced no precip (precip_accum is None).
+
+        ``precip_solid_accum`` is the SOLID-phase subset (CMOR prsn),
+        attached under the same rule: None -> field left unset."""
+        _set = {}
+        if precip_accum is not None:
+            _set["precip"] = Field(
+                data=precip_accum, name="precip",
+                dims=first.dp_s_dt.dims, units="kg/m^2/s")
+        if precip_solid_accum is not None:
+            _set["precip_solid"] = Field(
+                data=precip_solid_accum, name="precip_solid",
+                dims=first.dp_s_dt.dims, units="kg/m^2/s")
+        return combined._replace(**_set) if _set else combined
 
     def _attach_sfc_diag_extras(combined, extras):
         """Carry the per-module surface/TOA diagnostic Fields (TOA trio from
@@ -711,7 +733,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first,
-             precip_accum, sfc_diag_extras, _led) = _accumulate(
+             precip_accum, sfc_diag_extras, _led,
+             precip_solid_accum) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing,
                 ledger_rows=(_non_rad_rows if _budget_ledger else None))
             if cached_rad is not None:
@@ -739,7 +762,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # for the turbulence shflx/lhflx extras (radiation's TOA extras
             # are None here; the consumer keeps the last radiation-step
             # value slot-wise, exactly like sw/lw net).
-            combined = _attach_sfc_precip(combined, first, precip_accum)
+            combined = _attach_sfc_precip(combined, first, precip_accum,
+                                       precip_solid_accum)
             combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
             if _led is not None:
                 combined = combined._replace(ledger_rows=_led)
@@ -752,7 +776,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
          combined_tracer_tends, phys_updates, first,
-         precip_accum, sfc_diag_extras, _led) = _accumulate(
+         precip_accum, sfc_diag_extras, _led,
+         precip_solid_accum) = _accumulate(
             tagged_fns, state, grid, sigma_coord, phys_state, forcing,
             ledger_rows=(_ledger_row_of if _budget_ledger else None))
         # Cache the radiative heating contribution for the held sub-cycle
@@ -783,7 +808,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 sw_down_sfc=first.sw_down_sfc, lw_down_sfc=first.lw_down_sfc)
         # Same for surface precip (from microphysics; _build_combined drops it)
         # and the TOA/turbulent-flux diagnostic extras.
-        combined = _attach_sfc_precip(combined, first, precip_accum)
+        combined = _attach_sfc_precip(combined, first, precip_accum,
+                                       precip_solid_accum)
         combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
         if _led is not None:
             combined = combined._replace(ledger_rows=_led)

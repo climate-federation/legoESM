@@ -445,11 +445,32 @@ class SpatialMonthlyAccumulator:
         Target lat-lon grid dimensions.
     nlev : int
         Number of vertical levels (for 3-D fields).
+    daily_extreme_fields : mapping, optional
+        ``{source_field: (min_out_name, max_out_name)}``, e.g.
+        ``{"tas": ("tasmin", "tasmax")}``.  For each listed source the
+        accumulator keeps a running WITHIN-DAY min and max and, when the
+        day rolls over, commits that day's two extrema as ordinary 2-D
+        fields under the given output names.  Their monthly mean is then
+        the **mean over days of the within-day extremum**, which is
+        exactly the CMIP6 ``Amon`` cell_methods for ``tasmin``/``tasmax``
+        (``"area: mean time: minimum within days time: mean over days"``)
+        -- NOT the monthly extremum, which is a different statistic.
+
+        The per-day extrema are committed WITHOUT bumping
+        ``_call_counts``, so the partial-month guard in :meth:`finalize`
+        keeps the exact behaviour it had before this option existed.
+
+        Forward-only, like the rest of the class: :meth:`finalize` and
+        :meth:`pop_completed_months` flush the pending day and clear it,
+        so feeding more samples for an already-flushed day would count
+        that day twice.  No caller does that (the driver feeds
+        monotonically in time).
     """
 
     MONTH_DAYS = MonthlyAccumulator.MONTH_DAYS
 
-    def __init__(self, nlat: int, nlon: int, nlev: int = 0):
+    def __init__(self, nlat: int, nlon: int, nlev: int = 0,
+                 daily_extreme_fields: dict[str, tuple[str, str]] | None = None):
         self.nlat = nlat
         self.nlon = nlon
         self.nlev = nlev
@@ -463,6 +484,11 @@ class SpatialMonthlyAccumulator:
         # ``pop_completed_months``. This lets ``finalize`` apply the
         # partial-month guard when only the in-progress bucket remains.
         self._max_count_ever: int = 0
+        self.daily_extreme_fields: dict[str, tuple[str, str]] = dict(
+            daily_extreme_fields or {})
+        # In-progress within-day extrema:
+        #   {source_field: [year, doy_int, min_array, max_array]}
+        self._day_ext: dict[str, list] = {}
 
     @staticmethod
     def day_to_month(day_of_year: float) -> int:
@@ -497,6 +523,86 @@ class SpatialMonthlyAccumulator:
             s, c = bucket[name]
             s += arr.astype(np.float64)
             bucket[name] = (s, c + 1)
+        self._update_daily_extremes(day_of_year, year, fields)
+
+    # ---- within-day extrema -> monthly mean (CMIP6 tasmin/tasmax) -------
+
+    def _accumulate_2d_raw(
+        self, key: tuple[int, int], fields: dict[str, np.ndarray],
+    ) -> None:
+        """Add pre-shaped 2-D fields into *key*'s bucket WITHOUT touching
+        ``_call_counts``.
+
+        The daily-extreme commits must not inflate the per-bucket call
+        count: that count drives the partial-month guard, and one extra
+        increment per day would change which months :meth:`finalize`
+        keeps for every EXISTING variable.
+        """
+        bucket = self._data_2d.setdefault(key, {})
+        for name, arr in fields.items():
+            if name not in bucket:
+                bucket[name] = (np.zeros_like(arr, dtype=np.float64), 0)
+            s, c = bucket[name]
+            s += arr.astype(np.float64)
+            bucket[name] = (s, c + 1)
+
+    def _commit_day_extremes(self, src: str) -> None:
+        """Fold the pending within-day min/max of *src* into ITS OWN day's
+        month bucket, then drop the pending entry."""
+        entry = self._day_ext.pop(src, None)
+        if entry is None:
+            return
+        yr, doy, mn, mx = entry
+        min_name, max_name = self.daily_extreme_fields[src]
+        self._accumulate_2d_raw(
+            (int(yr), self.day_to_month(float(doy))),
+            {min_name: mn, max_name: mx},
+        )
+
+    def _flush_pending_extremes(
+        self, before_key: tuple[int, int] | None = None,
+    ) -> None:
+        """Commit pending within-day extrema.
+
+        ``before_key`` (year, month) restricts the flush to days that lie
+        strictly before that month -- used by
+        :meth:`pop_completed_months` so a day belonging to a month about
+        to be popped is not silently lost, while the in-progress month's
+        day stays open.  ``None`` flushes everything (end of run).
+        """
+        for src in list(self._day_ext):
+            yr, doy, _, _ = self._day_ext[src]
+            if (before_key is not None
+                    and (int(yr), self.day_to_month(float(doy)))
+                    >= before_key):
+                continue
+            self._commit_day_extremes(src)
+
+    def _update_daily_extremes(
+        self, day_of_year: float, year: int, fields: dict[str, np.ndarray],
+    ) -> None:
+        """Update (and roll over) the within-day min/max of every tracked
+        source present in *fields*."""
+        if not self.daily_extreme_fields:
+            return
+        day_key = (int(year), int(day_of_year))
+        for src in self.daily_extreme_fields:
+            arr = fields.get(src)
+            if arr is None:
+                continue
+            arr = np.asarray(arr, dtype=np.float64)
+            entry = self._day_ext.get(src)
+            if entry is not None and (entry[0], entry[1]) != day_key:
+                # The day rolled over: the previous day is COMPLETE, so
+                # its extrema are a valid "within days" statistic now.
+                self._commit_day_extremes(src)
+                entry = None
+            if entry is None:
+                self._day_ext[src] = [day_key[0], day_key[1],
+                                      arr.copy(), arr.copy()]
+            else:
+                np.minimum(entry[2], arr, out=entry[2])
+                np.maximum(entry[3], arr, out=entry[3])
 
     def add_3d(
         self,
@@ -539,6 +645,10 @@ class SpatialMonthlyAccumulator:
             'field_2d_{name}' : (n_months, nlat, nlon) — 2-D means
             'field_3d_{name}' : (n_months, nlat, nlon, nlev) — 3-D means
         """
+        # End of run: the last (possibly partial) day's extrema are the
+        # best within-day statistic available for it, so commit them
+        # rather than dropping the day from tasmin/tasmax entirely.
+        self._flush_pending_extremes()
         months_2d = set(self._data_2d.keys())
         months_3d = set(self._data_3d.keys())
         all_months = sorted(months_2d | months_3d)
@@ -626,6 +736,11 @@ class SpatialMonthlyAccumulator:
             Empty ``{'months': []}`` if no months are ready.
         """
         current_key = (current_year, current_month)
+        # A pending day that belongs to a month about to be popped is
+        # COMPLETE (the calendar has moved past it) — commit it first or
+        # its extrema would be freed with the bucket.  The in-progress
+        # month's pending day is left open.
+        self._flush_pending_extremes(before_key=current_key)
         completed_2d = {k for k in self._data_2d if k < current_key}
         completed_3d = {k for k in self._data_3d if k < current_key}
         completed = sorted(completed_2d | completed_3d)
@@ -720,6 +835,15 @@ class SpatialMonthlyAccumulator:
             "buckets_3d": [[int(yr), int(mo)] for (yr, mo) in self._data_3d],
             "data_2d": data_2d,
             "data_3d": data_3d,
+            # In-progress WITHIN-DAY extrema (tasmin/tasmax).  OPTIONAL on
+            # read, so this stays schema version 1: a checkpoint written
+            # before the feature simply has no entry and restores with no
+            # pending day, costing at most the extrema of the ONE partial
+            # day straddling that link.
+            "day_ext": [
+                [src, int(yr), int(doy), _put(mn), _put(mx)]
+                for src, (yr, doy, mn, mx) in self._day_ext.items()
+            ],
         }
         out: dict[str, np.ndarray] = {"__manifest__": _encode_manifest(manifest)}
         out.update(arrays)
@@ -760,6 +884,19 @@ class SpatialMonthlyAccumulator:
             self._data_3d.setdefault((int(yr), int(mo)), {})[name] = (
                 np.array(state[akey], dtype=np.float64), int(fcount),
             )
+        # Optional (see get_state): absent in a pre-feature checkpoint.
+        # Only sources this instance is CONFIGURED to track are restored —
+        # a stale entry for a source no longer tracked has no output names
+        # to commit under and would raise at rollover.
+        self._day_ext = {}
+        for src, yr, doy, min_key, max_key in manifest.get("day_ext", []):
+            if src not in self.daily_extreme_fields:
+                continue
+            self._day_ext[src] = [
+                int(yr), int(doy),
+                np.array(state[min_key], dtype=np.float64),
+                np.array(state[max_key], dtype=np.float64),
+            ]
 
 
 class SpatialDailyAccumulator:

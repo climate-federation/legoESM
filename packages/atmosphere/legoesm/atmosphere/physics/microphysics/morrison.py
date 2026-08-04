@@ -1598,6 +1598,10 @@ def morrison_microphysics(
     # surface flux from ``sedimentation_tendency`` so column water
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
+    # CMIP6 ``prsn``: the SOLID-phase subset of the same surface fluxes
+    # (ice + snow + graupel; rain excluded).  Same dt-limited fluxes, so
+    # 0 <= precipitation_solid <= precipitation holds by construction.
+    precipitation_solid = precip_i + precip_s + precip_g
 
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
@@ -1614,6 +1618,7 @@ def morrison_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precipitation_solid=precipitation_solid,
         dN_s_dt=dN_s_dt,
         dN_g_dt=dN_g_dt,
     )

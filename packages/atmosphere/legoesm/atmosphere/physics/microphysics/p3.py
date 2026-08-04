@@ -552,6 +552,9 @@ def p3_microphysics(
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / dt_step)
 
     precipitation = precip_r + precip_i
+    # CMIP6 ``prsn``: P3 carries ONE ice category, so its whole frozen
+    # surface flux is ``precip_i``.
+    precipitation_solid = precip_i
 
     return MicrophysicsOutput(
         dT_dt=dT_dt,
@@ -565,4 +568,5 @@ def p3_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precipitation_solid=precipitation_solid,
     )

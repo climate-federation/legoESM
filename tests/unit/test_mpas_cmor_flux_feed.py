@@ -283,7 +283,9 @@ def _tend_with_extras():
         sw_up_toa_clearsky=_f("sw_up_toa_clr", 13.0),
         lw_up_toa_clearsky=_f("lw_up_toa_clr", 14.0),
         sw_down_sfc_clearsky=_f("sw_down_sfc_clr", 15.0),
-        lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0))
+        lw_down_sfc_clearsky=_f("lw_down_sfc_clr", 16.0),
+        sw_up_sfc_clearsky=_f("sw_up_sfc_clr", 17.0),
+        precip_solid=_f("precip_solid", 18.0))
 
 
 # Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
@@ -293,18 +295,19 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "sw_down_sfc", "lw_down_sfc",
                 "tau_x_sfc", "tau_y_sfc",
                 "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
+                "sw_up_sfc_clearsky", "precip_solid")
 
 
 class TestSfcDiagContract:
-    """Lock the 16-slot sfc_diag tuple contract shared by BOTH producers
+    """Lock the 18-slot sfc_diag tuple contract shared by BOTH producers
     (serial + MPI-voronoi) and the driver consumer's slot mapping."""
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 16
+        assert len(sfc_diag) == 18
         # Consumer (_feed_mpas_cmip_accumulators): slot 0->sw_net (rsus
         # derivation), 1->lw_net (rlus), 3->rlut, 4->rsut, 5->rsdt,
         # 6->hfss, 7->hfls, 8->rsds, 9->rlds (+ _marshal_land_forcing),
@@ -327,6 +330,11 @@ class TestSfcDiagContract:
         assert sfc_diag[13].name == "lw_up_toa_clr"    # rlutcs
         assert sfc_diag[14].name == "sw_down_sfc_clr"  # rsdscs
         assert sfc_diag[15].name == "lw_down_sfc_clr"  # rldscs
+        # Slot 16 is surface UPWELLING (+up) — the opposite orientation to
+        # its slot-14 partner rsdscs (+down).  Still no sign flip.
+        assert sfc_diag[16].name == "sw_up_sfc_clr"     # rsuscs
+        # Slot 17 is the frozen SUBSET of slot 2's total precip, same sense.
+        assert sfc_diag[17].name == "precip_solid"      # prsn
 
     def test_both_producers_extract_the_same_extra_order(self):
         """The serial and MPI producers must list the SAME extras keys in
@@ -1292,3 +1300,699 @@ class TestDriftingCadenceHonesty:
         dc.cmip_snapshot_phase_frac = self._phase_frac(
             0.0, 2.5, 10, 8, 21600.0)
         assert "12:00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]
+
+
+# ===========================================================================
+# CMIP6 Amon gap closure: rtmt + the near-surface set (huss/uas/vas/sfcWind)
+# ===========================================================================
+
+class TestRtmt:
+    """``rtmt`` = net DOWNWARD radiative flux at the top of the model.
+
+    The CMIP6 table declares ``positive="down"``, so with rsdt positive
+    down and rsut/rlut positive up the only correct combination is
+    ``rsdt - rsut - rlut``.  A sign slip here is invisible in a
+    presence-only check: with the FLUXES values it would still produce a
+    plausible-looking O(1-100) W/m^2 number.
+    """
+
+    def test_rtmt_is_rsdt_minus_rsut_minus_rlut(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rtmt" in out
+        expect = FLUXES["rsdt"] - FLUXES["rsut"] - FLUXES["rlut"]
+        assert expect == pytest.approx(3.0)          # 340 - 99 - 238
+        np.testing.assert_allclose(
+            out["field_2d_rtmt"], expect, rtol=1e-9)
+
+    def test_positive_attribute_is_down(self):
+        """The table's ``positive`` is the contract the sign walk must
+        match — assert it rather than trusting the comment."""
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("rtmt")
+        assert table == "Amon"
+        assert entry["positive"] == "down"
+        assert entry["units"] == "W m-2"
+
+    def test_sign_responds_to_each_term(self, mesh):
+        """Perturb ONE term at a time and check rtmt moves by exactly the
+        signed amount — catches a swapped rsut/rlut or a dropped minus."""
+        base = FLUXES["rsdt"] - FLUXES["rsut"] - FLUXES["rlut"]
+        for term, sign in (("rsdt", +1.0), ("rsut", -1.0), ("rlut", -1.0)):
+            dc, sigma_full = _make_collector(mesh)
+            f = _base_fields(mesh, sigma_full)
+            n = f["p_s"].shape[0]
+            fluxes = dict(FLUXES)
+            fluxes[term] = fluxes[term] + 10.0
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f,
+                **{k: np.full(n, v) for k, v in fluxes.items()})
+            out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+            got = float(np.mean(out["field_2d_rtmt"]))
+            assert got == pytest.approx(base + sign * 10.0, rel=1e-9), term
+
+    @pytest.mark.parametrize("missing", ["rsdt", "rsut", "rlut"])
+    def test_absent_term_skips_rtmt_never_zeroes_it(self, mesh, missing):
+        """A zero rtmt would read as exact radiative equilibrium."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        fluxes = {k: np.full(n, v) for k, v in FLUXES.items()
+                  if k != missing}
+        dc.feed_cmip_accumulators_native(day=15.0, **f, **fluxes)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rtmt" not in out
+
+    def test_rtmt_is_an_interval_mean(self):
+        """It is a linear combination of the interval-mean rsdt/rsut/rlut,
+        so it must ride the _FLUX_2D midpoint bin with them."""
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"rtmt"' in flux_block
+
+
+# Near-surface probe values: a wind that REVERSES between the two samples,
+# so the monthly mean of uas is 0 while the mean SPEED is 12 m/s.  That is
+# the discriminating case for sfcWind.
+NEAR_SFC_Q = 0.012          # kg/kg at the lowest model level
+
+
+class TestNearSurfaceSet:
+    def _feed(self, dc, mesh, sigma_full, day, u, v, q=NEAR_SFC_Q):
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        nlev = f["T"].shape[1]
+        # Lowest model level is index -1; put a DIFFERENT value aloft so a
+        # wrong level index is caught rather than silently passing.
+        def _col(surface_value, aloft):
+            col = np.full((n, nlev), aloft, dtype=np.float64)
+            col[:, -1] = surface_value
+            return col
+        return dc.feed_cmip_accumulators_native(
+            day=day, **f,
+            q_v=_col(q, 0.5 * q),
+            u_east=_col(u, 3.0 * u if u else 7.0),
+            v_north=_col(v, 3.0 * v if v else 7.0))
+
+    def test_fields_reach_monthly_accumulator_from_lowest_level(
+            self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0, u=12.0, v=0.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f"field_2d_{name}" in out, name
+        # Uniform field -> IDW (partition of unity) regrid is EXACT.
+        np.testing.assert_allclose(
+            out["field_2d_huss"], NEAR_SFC_Q, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_uas"], 12.0, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_vas"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(out["field_2d_sfcWind"], 12.0, rtol=1e-9)
+
+    def test_sfcwind_is_the_mean_speed_not_the_speed_of_the_mean(
+            self, mesh):
+        """THE classic error on this variable.  Two samples with opposite
+        zonal wind: mean(uas) = 0 but mean(|V|) = 12 m/s.  A writer that
+        formed sqrt(mean(uas)^2 + mean(vas)^2) would publish 0."""
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 10.0, u=+12.0, v=0.0)
+        self._feed(dc, mesh, sigma_full, 20.0, u=-12.0, v=0.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        uas = float(np.mean(out["field_2d_uas"]))
+        wind = float(np.mean(out["field_2d_sfcWind"]))
+        assert uas == pytest.approx(0.0, abs=1e-9)
+        assert wind == pytest.approx(12.0, rel=1e-9), (
+            "sfcWind collapsed toward the speed of the MEAN wind")
+
+    def test_speed_uses_both_components(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0, u=3.0, v=4.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(
+            out["field_2d_sfcWind"], 5.0, rtol=1e-9)
+
+    def test_absent_inputs_are_skipped_never_zeroed(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        dc.feed_cmip_accumulators_native(day=15.0, **f)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f"field_2d_{name}" not in out, name
+
+    def test_variables_are_in_the_amon_table_with_reference_heights(self):
+        from legoesm.io.cmor_output import (
+            _VAR_REFERENCE_HEIGHT, lookup_cmor_entry,
+        )
+        expect = {"huss": ("1", 2.0), "uas": ("m s-1", 10.0),
+                  "vas": ("m s-1", 10.0), "sfcWind": ("m s-1", 10.0)}
+        for name, (units, height) in expect.items():
+            table, entry = lookup_cmor_entry(name)
+            assert table == "Amon", name
+            assert entry["units"] == units, name
+            assert _VAR_REFERENCE_HEIGHT[name] == height, name
+
+    def test_driver_marks_them_as_snapshots(self):
+        """They are instantaneous end-of-interval samples like hus/ua/va,
+        so the lean MPAS driver must disclose that on the written file."""
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._run_mpas)
+        block = src.split("cmip_snapshot_vars = {")[1].split("}")[0]
+        for name in ("huss", "uas", "vas", "sfcWind"):
+            assert f'"{name}"' in block, name
+
+
+class TestNewAmonVarsReachTheWriter:
+    """End-to-end through the REAL writer: feed -> accumulator -> NetCDF.
+    Presence alone is not enough — units and magnitudes are asserted."""
+
+    def test_files_carry_table_units_and_plausible_values(
+            self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        nlev = f["T"].shape[1]
+        q = np.full((n, nlev), 0.004)
+        q[:, -1] = 0.012
+        u = np.full((n, nlev), 20.0)
+        u[:, -1] = 6.0
+        v = np.full((n, nlev), 0.0)
+        v[:, -1] = 8.0
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=q, u_east=u, v_north=v,
+            **{k: np.full(n, val) for k, val in FLUXES.items()})
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        expect = {
+            "rtmt": ("W m-2", 3.0),                    # 340 - 99 - 238
+            "huss": ("1", 0.012),
+            "uas": ("m s-1", 6.0),
+            "vas": ("m s-1", 8.0),
+            "sfcWind": ("m s-1", 10.0),                # hypot(6, 8)
+        }
+        for name, (units, value) in expect.items():
+            paths = sorted(tmp_path.rglob(f"{name}_Amon_*.nc"))
+            assert paths, f"{name} was never written by the CMOR writer"
+            with xr.open_dataset(paths[0]) as ds:
+                assert ds[name].attrs["units"] == units, name
+                got = float(np.nanmean(ds[name].values))
+                assert got == pytest.approx(value, rel=1e-5), name
+        # ``positive`` is a real physical claim on rtmt — check the file.
+        with xr.open_dataset(
+                sorted(tmp_path.rglob("rtmt_Amon_*.nc"))[0]) as ds:
+            assert ds["rtmt"].attrs["positive"] == "down"
+
+
+# ===========================================================================
+# Amon tasmin / tasmax — monthly MEAN of the WITHIN-DAY extrema
+# ===========================================================================
+
+class TestAmonDailyExtremes:
+    """CMIP6 ``Amon`` declares
+
+        tasmax  "area: mean time: maximum within days time: mean over days"
+
+    i.e. the mean over days of each day's maximum.  A monthly MAXIMUM (the
+    easy mistake) is a different, much larger statistic.
+    """
+
+    def _acc(self):
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        return SpatialMonthlyAccumulator(
+            nlat=2, nlon=3,
+            daily_extreme_fields={"tas": ("tasmin", "tasmax")})
+
+    @staticmethod
+    def _f(value, nlat=2, nlon=3):
+        return {"tas": np.full((nlat, nlon), float(value))}
+
+    def test_table_cell_methods_is_mean_over_days_of_daily_extrema(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        for name, word in (("tasmax", "maximum"), ("tasmin", "minimum")):
+            table, entry = lookup_cmor_entry(name)
+            assert table == "Amon", name
+            assert entry["cell_methods"] == (
+                f"area: mean time: {word} within days time: mean over days")
+
+    def test_monthly_mean_of_daily_extrema_not_monthly_extremum(self):
+        """Day 1 spans 280..300 (max 300), day 2 spans 270..290 (max 290).
+        Mean of daily maxima = 295.  The monthly MAXIMUM would be 300 and
+        the monthly MEAN of all samples 285 — both wrong."""
+        acc = self._acc()
+        for v in (280.0, 300.0, 290.0):
+            acc.add_2d(1.0, 0, self._f(v))
+        for v in (270.0, 290.0, 275.0):
+            acc.add_2d(2.0, 0, self._f(v))
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 295.0)
+        np.testing.assert_allclose(out["field_2d_tasmin"][0], 275.0)
+        # Sanity: the plain monthly mean of tas is a different number.
+        np.testing.assert_allclose(
+            out["field_2d_tas"][0], np.mean(
+                [280.0, 300.0, 290.0, 270.0, 290.0, 275.0]))
+
+    def test_days_are_weighted_equally_regardless_of_sample_count(self):
+        """"mean OVER DAYS" — a day sampled 4x must not outweigh a day
+        sampled once."""
+        acc = self._acc()
+        for _ in range(4):
+            acc.add_2d(1.0, 0, self._f(300.0))
+        acc.add_2d(2.0, 0, self._f(280.0))
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 290.0)
+
+    def test_last_partial_day_is_committed_at_finalize(self):
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        assert "tas" in acc._day_ext            # still pending
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 300.0)
+        assert not acc._day_ext                 # flushed
+
+    def test_extrema_land_in_their_own_month_across_a_boundary(self):
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))     # 31 Jan
+        acc.add_2d(32.0, 0, self._f(250.0))     # 1 Feb
+        out = acc.finalize(min_sample_fraction=0)
+        assert out["months"] == [(0, 1), (0, 2)]
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 300.0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][1], 250.0)
+
+    def test_pop_completed_months_does_not_lose_the_boundary_day(self):
+        """The pending 31-Jan day belongs to a month about to be popped —
+        it must be committed, not freed with the bucket."""
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))
+        popped = acc.pop_completed_months(0, 2)
+        assert popped["months"] == [(0, 1)]
+        np.testing.assert_allclose(popped["field_2d_tasmax"][0], 300.0)
+
+    def test_pop_leaves_the_in_progress_day_open(self):
+        acc = self._acc()
+        acc.add_2d(31.0, 0, self._f(300.0))     # January, completed below
+        acc.add_2d(32.0, 0, self._f(250.0))     # February, in progress
+        acc.pop_completed_months(0, 2)
+        assert "tas" in acc._day_ext            # Feb 1 still open
+        acc.add_2d(32.0, 0, self._f(260.0))     # same day, warmer
+        out = acc.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 260.0)
+
+    def test_call_counts_untouched_by_the_extreme_commits(self):
+        """The daily commits must not inflate the per-bucket call count —
+        that count drives the partial-month guard for EVERY variable."""
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        acc = self._acc()
+        ref = SpatialMonthlyAccumulator(nlat=2, nlon=3)
+        for day, v in ((1.0, 300.0), (2.0, 280.0), (3.0, 290.0)):
+            acc.add_2d(day, 0, self._f(v))
+            ref.add_2d(day, 0, self._f(v))
+        assert acc._call_counts == ref._call_counts
+        assert acc._max_count_ever == ref._max_count_ever
+
+    def test_disabled_by_default_is_byte_identical(self):
+        from legoesm.diagnostics.monthly_means import (
+            SpatialMonthlyAccumulator,
+        )
+        acc = SpatialMonthlyAccumulator(nlat=2, nlon=3)
+        acc.add_2d(1.0, 0, self._f(300.0))
+        out = acc.finalize(min_sample_fraction=0)
+        assert "field_2d_tasmax" not in out
+        assert "field_2d_tasmin" not in out
+
+    def test_state_roundtrip_carries_the_pending_day(self):
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        acc.add_2d(1.0, 0, self._f(270.0))      # same day, still pending
+        b = self._acc()
+        b.set_state(acc.get_state())
+        # The restored accumulator continues the SAME day.
+        b.add_2d(1.0, 0, self._f(310.0))
+        out = b.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tasmax"][0], 310.0)
+        np.testing.assert_allclose(out["field_2d_tasmin"][0], 270.0)
+
+    def test_pre_feature_checkpoint_restores_without_a_pending_day(self):
+        """``day_ext`` is optional on read, so schema version 1 checkpoints
+        written before this feature still load."""
+        import json
+        acc = self._acc()
+        acc.add_2d(1.0, 0, self._f(300.0))
+        state = dict(acc.get_state())
+        manifest = json.loads(str(state["__manifest__"].item()))
+        del manifest["day_ext"]
+        state["__manifest__"] = np.asarray(json.dumps(manifest))
+        b = self._acc()
+        b.set_state(state)                       # must not raise
+        assert b._day_ext == {}
+
+    def test_collector_configures_tas_extremes(self, mesh):
+        dc, _ = _make_collector(mesh)
+        assert dc._spatial_monthly.daily_extreme_fields == {
+            "tas": ("tasmin", "tasmax")}
+
+    def test_reaches_the_real_writer_with_amon_units(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        # Two samples on day 10 (288 / 300 K) and one on day 11 (280 K):
+        # daily maxima 300 and 280 -> Amon tasmax = 290 K.
+        for day, tas in ((10.0, 288.0), (10.0, 300.0), (11.0, 280.0)):
+            dc.feed_cmip_accumulators_native(
+                day=day, **f, tas=np.full(n, tas))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        for name, value in (("tasmax", 290.0), ("tasmin", 284.0)):
+            paths = sorted(tmp_path.rglob(f"{name}_Amon_*.nc"))
+            assert paths, f"{name} was never written"
+            with xr.open_dataset(paths[0]) as ds:
+                assert ds[name].attrs["units"] == "K"
+                got = float(np.nanmean(ds[name].values))
+                assert got == pytest.approx(value, rel=1e-6), name
+
+
+# ===========================================================================
+# Amon rsuscs — clear-sky SURFACE UPWELLING shortwave (sfc_diag slot 16)
+# ===========================================================================
+
+class TestRsuscs:
+    """The clear-sky quartet's missing fifth member.
+
+    Sign convention, walked once here and asserted below:
+      rsdscs [W/m^2, +DOWN]  surface downwelling, clear sky   (slot 14)
+      rsuscs [W/m^2, +UP]    surface upwelling,   clear sky   (slot 16)
+    They are a DOWN/UP pair, not two same-signed fluxes, and the table
+    declares ``positive="up"`` on rsuscs alone.
+    """
+
+    VALUE = 37.5        # ~0.15 albedo against the CLEARSKY rsdscs of 250
+
+    def test_reaches_the_monthly_accumulator_unflipped(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()},
+            rsuscs=np.full(n, self.VALUE))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rsuscs" in out
+        np.testing.assert_allclose(
+            out["field_2d_rsuscs"], self.VALUE, rtol=1e-9)
+        # Physical ordering the pair must satisfy: 0 <= rsuscs <= rsdscs
+        # (surface albedo in [0, 1]).  A sign flip breaks the left bound.
+        got = float(np.mean(out["field_2d_rsuscs"]))
+        assert 0.0 <= got <= float(np.mean(out["field_2d_rsdscs"]))
+
+    def test_table_declares_positive_up(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("rsuscs")
+        assert table == "Amon"
+        assert entry["positive"] == "up"
+        assert entry["units"] == "W m-2"
+        assert entry["standard_name"] == (
+            "surface_upwelling_shortwave_flux_in_air_assuming_clear_sky")
+
+    def test_is_an_interval_mean(self):
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"rsuscs"' in flux_block
+
+    def test_malformed_input_raises_and_commits_nothing(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="rsuscs"):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, rsuscs=np.zeros(n - 1))
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_absent_is_skipped_never_zeroed(self, mesh):
+        """A zero rsuscs would read as a perfectly black surface."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()})
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rsuscs" not in out
+
+    def test_accumulator_covers_slot_16(self):
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        assert 16 in _MPASSfcFluxAccum.SLOTS
+        acc = _MPASSfcFluxAccum()
+        for v in (10.0, 20.0, 60.0):
+            row = [None] * 17
+            row[16] = types.SimpleNamespace(data=np.full(4, v))
+            acc.add(tuple(row))
+        np.testing.assert_allclose(acc.mean(16), 30.0)
+
+    def test_driver_reads_slot_16_and_forwards_it(self):
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        assert "rsuscs = _sfc_slot(16)" in src
+        assert "rsuscs=rsuscs," in src
+
+    def test_radiation_packer_carries_it_with_none_default(self, mesh):
+        """The packer must default it to None (byte-identical when the
+        clear-sky diagnostic is off) and pass a supplied array through
+        unchanged."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _pack_hydrostatic_tendencies,
+        )
+        from legoesm.core.field import Field as _F
+        from legoesm.core.state import MPASHydrostaticState
+
+        n, nlev = int(mesh.nCells), NLEV
+        state = MPASHydrostaticState(
+            u=_F(data=np.zeros((int(mesh.nEdges), nlev)), name="u",
+                 dims=("edge", "lev"), units="m/s"),
+            T=_F(data=np.full((n, nlev), 250.0), name="T",
+                 dims=("cell", "lev"), units="K"),
+            p_s=_F(data=np.full(n, 1.0e5), name="p_s",
+                   dims=("cell",), units="Pa"),
+            phis=_F(data=np.zeros(n), name="phis",
+                    dims=("cell",), units="m2/s2"))
+        dT = np.zeros((n, nlev))
+        bare = _pack_hydrostatic_tendencies(dT, state, (n, nlev), (n,))
+        assert bare.sw_up_sfc_clearsky is None
+        packed = _pack_hydrostatic_tendencies(
+            dT, state, (n, nlev), (n,),
+            sw_up_sfc_clearsky=np.full(n, 42.0))
+        np.testing.assert_allclose(
+            np.asarray(packed.sw_up_sfc_clearsky.data), 42.0)
+
+    def test_producer_reads_the_surface_half_level_not_toa(self):
+        """rsuscs is ``sw_flux_up[:, -1]`` (SURFACE) — reading ``[:, 0]``
+        would silently publish rsutcs a second time under a surface name.
+
+        ``_make_hydrostatic_radiation`` is the factory that BUILDS the
+        physics_fn running on the MPAS lane, so its source is where the
+        clear-sky block actually lives; asserting against
+        ``make_radiation_physics`` (a dispatcher that only selects it)
+        would pass while proving nothing."""
+        import inspect
+        from legoesm.atmosphere.physics.radiation import integration
+        src = inspect.getsource(integration._make_hydrostatic_radiation)
+        assert "_sw_up_sfc_clr = _rad_out_clr.sw_flux_up[:, -1]" in src
+        assert "sw_up_sfc_clearsky=_sw_up_sfc_clr" in src
+
+    def test_end_to_end_through_the_real_writer(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            **{k: np.full(n, v) for k, v in FLUXES.items()},
+            **{k: np.full(n, v) for k, v in CLEARSKY.items()},
+            rsuscs=np.full(n, self.VALUE))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        paths = sorted(tmp_path.rglob("rsuscs_Amon_*.nc"))
+        assert paths, "rsuscs was never written by the CMOR writer"
+        with xr.open_dataset(paths[0]) as ds:
+            assert ds["rsuscs"].attrs["units"] == "W m-2"
+            assert ds["rsuscs"].attrs["positive"] == "up"
+            got = float(np.nanmean(ds["rsuscs"].values))
+            assert got == pytest.approx(self.VALUE, rel=1e-5)
+
+
+# ===========================================================================
+# Amon prsn — snowfall flux (sfc_diag slot 17)
+# ===========================================================================
+
+class TestPrsn:
+    """``prsn`` is the SOLID-phase part of the surface sedimentation flux —
+    a SUBSET of ``pr``, in the SAME positive-into-the-surface sense, and in
+    the same kg/m2/s units.  Both are sums of the SAME per-species
+    dt-limited surface fluxes, so 0 <= prsn <= pr holds by construction.
+    """
+
+    PR = 9.0e-5         # kg/m2/s  ~ 7.8 mm/day
+    PRSN = 2.0e-5       # kg/m2/s  ~ 1.7 mm/day of snow water equivalent
+
+    def test_reaches_the_monthly_accumulator_as_a_subset_of_pr(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            precip=np.full(n, self.PR), prsn=np.full(n, self.PRSN))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_prsn" in out
+        np.testing.assert_allclose(
+            out["field_2d_prsn"], self.PRSN, rtol=1e-9)
+        got_pr = float(np.mean(out["field_2d_pr"]))
+        got_sn = float(np.mean(out["field_2d_prsn"]))
+        assert 0.0 <= got_sn <= got_pr
+
+    def test_table_entry(self):
+        from legoesm.io.cmor_output import lookup_cmor_entry
+        table, entry = lookup_cmor_entry("prsn")
+        assert table == "Amon"
+        assert entry["units"] == "kg m-2 s-1"
+        assert entry["standard_name"] == "snowfall_flux"
+        # A flux with no declared sign convention — like pr.
+        assert entry.get("positive", "") == ""
+
+    def test_is_an_interval_mean_like_pr(self):
+        import inspect
+        src = inspect.getsource(
+            DiagnosticCollector.feed_cmip_accumulators_native)
+        flux_block = src.split("_FLUX_2D = ")[1].split("_FLUX_DAILY")[0]
+        assert '"prsn"' in flux_block
+
+    def test_malformed_input_raises_and_commits_nothing(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="prsn"):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, prsn=np.zeros(n - 1))
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_absent_is_skipped_never_zeroed(self, mesh):
+        """A zero prsn is the CLAIM "it never snows", not an absence."""
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, precip=np.full(n, self.PR))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_pr" in out
+        assert "field_2d_prsn" not in out
+
+    def test_accumulator_covers_slot_17(self):
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        assert 17 in _MPASSfcFluxAccum.SLOTS
+        acc = _MPASSfcFluxAccum()
+        for v in (1.0e-5, 2.0e-5, 6.0e-5):
+            row = [None] * 18
+            row[17] = types.SimpleNamespace(data=np.full(4, v))
+            acc.add(tuple(row))
+        np.testing.assert_allclose(acc.mean(17), 3.0e-5)
+
+    def test_driver_reads_slot_17_and_forwards_it(self):
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        assert "prsn = _sfc_slot(17)" in src
+        assert "prsn=prsn," in src
+
+    def test_morrison_reports_the_frozen_subset(self):
+        """The production scheme.  ``precipitation_solid`` must be exactly
+        ice+snow+graupel — using the total (or including rain) would
+        publish pr twice under two names."""
+        import inspect
+        from legoesm.atmosphere.physics.microphysics import morrison
+        src = inspect.getsource(morrison)
+        assert ("precipitation_solid = precip_i + precip_s + precip_g"
+                in src)
+        assert "precipitation = precip_r + precip_i + precip_s + precip_g" \
+            in src
+
+    def test_microphysics_output_default_is_none(self):
+        """Schemes that do not resolve the split must leave it unset."""
+        from legoesm.atmosphere.physics.microphysics.output import (
+            MicrophysicsOutput, make_zero_output,
+        )
+        assert "precipitation_solid" in MicrophysicsOutput._fields
+        assert (MicrophysicsOutput._field_defaults["precipitation_solid"]
+                is None)
+        assert make_zero_output(2, 3).precipitation_solid is None
+
+    def test_tendency_carrier_default_is_none(self):
+        from legoesm.core.state import HydrostaticTendencies
+        assert "precip_solid" in HydrostaticTendencies._fields
+        assert (HydrostaticTendencies._field_defaults["precip_solid"]
+                is None)
+
+    def test_combined_physics_sums_it_alongside_precip(self):
+        """The pair must come from the SAME module set — a module counted
+        for pr but not prsn would break the subset relation."""
+        import inspect
+        from legoesm.atmosphere.physics import combined
+        src = inspect.getsource(combined._make_hydrostatic_combined)
+        assert 'if getattr(t, "precip_solid", None) is not None:' in src
+        assert "precip_solid_accum + t.precip_solid.data" in src
+
+    def test_end_to_end_through_the_real_writer(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            precip=np.full(n, self.PR), prsn=np.full(n, self.PRSN))
+        dc._write_cmip_data(
+            dc._spatial_monthly.finalize(min_sample_fraction=0))
+
+        paths = sorted(tmp_path.rglob("prsn_Amon_*.nc"))
+        assert paths, "prsn was never written by the CMOR writer"
+        with xr.open_dataset(paths[0]) as ds:
+            assert ds["prsn"].attrs["units"] == "kg m-2 s-1"
+            got = float(np.nanmean(ds["prsn"].values))
+            assert got == pytest.approx(self.PRSN, rel=1e-5)
+            # Plausibility: a snowfall rate in mm/day, not a mislabelled
+            # accumulated depth or a per-hour rate.
+            assert 0.0 < got * 86400.0 < 100.0
