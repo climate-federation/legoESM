@@ -408,6 +408,19 @@ class TestHbKvfMinOverride:
             ExperimentConfig(turbulence="louis", hb_kvf_min=0.2))
         assert "kvf_min" not in tc.louis._fields
 
+    def test_non_hb_scheme_rejected_by_validate_strict(self):
+        """The resolver above is a silent no-op on a scheme without kvf_min,
+        so validate_strict must refuse the combination rather than let a run
+        proceed with an inert knob (codex review P2)."""
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="silently inert"):
+            ExperimentConfig(turbulence="louis", hb_kvf_min=0.2).validate_strict()
+
+    def test_hb_scheme_with_kvf_min_accepted(self):
+        """Guard non-vacuity: the SAME knob on holtslag_boville must pass."""
+        self._cfg(hb_kvf_min=0.2).validate_strict()
+
     def test_explicit_turbulence_override_stays_authoritative(self):
         from legoesm.atmosphere.physics.turbulence.config import (
             HoltslagBovilleConfig, TurbulenceConfig,
@@ -426,3 +439,58 @@ class TestHbKvfMinOverride:
         for bad in (-1.0, 0.0, 11.0, math.nan, "0.2"):
             with pytest.raises(ValueError):
                 self._cfg(hb_kvf_min=bad).validate_strict()
+
+
+class TestSurfaceStabilityRequiresAStabilityDependentLaw:
+    """surface_stability_scheme must not be accepted where it moves only the
+    2 m diagnostic and not the surface fluxes (codex review P2)."""
+
+    def test_constant_bulk_scheme_untiled_is_rejected(self):
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="surface_stability_scheme"):
+            ExperimentConfig(
+                turbulence="louis",
+                surface_bulk_scheme="constant",     # ignores the stable branch
+                surface_stability_scheme="gryanik2020",
+            ).validate_strict()
+
+    def test_stability_dependent_bulk_scheme_is_accepted(self):
+        """Non-vacuity: the same scheme with coare3 must pass."""
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(
+            turbulence="louis",
+            surface_bulk_scheme="coare3",
+            surface_stability_scheme="gryanik2020",
+        ).validate_strict()
+
+    def test_surface_tiled_with_real_land_is_exempt(self):
+        """The tiled land tile is ocean_cfg._replace(bulk_scheme='most'), so
+        it INHERITS the stability scheme and moves real land fluxes even with
+        a 'constant' top-level scheme — this combination must NOT be rejected
+        (codex R3 P2: the first form of the guard was too broad)."""
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(
+            turbulence="louis",                 # a tiled-capable kernel
+            surface_tiled=True,
+            slab_land_active=True,              # tiled needs an active land tile
+            topography="realistic",             # ...with f_land > 0
+            surface_bulk_scheme="constant",
+            surface_stability_scheme="gryanik2020",
+        ).validate_strict()
+
+    def test_surface_tiled_without_real_land_is_still_rejected(self):
+        """Exemption scope: topography='flat' derives f_land == 0 everywhere,
+        so the tiled path never engages and the scheme is diagnostic-only
+        again (codex R4 P2 — the exemption was itself too broad)."""
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="surface_stability_scheme"):
+            ExperimentConfig(
+                turbulence="louis",
+                surface_tiled=True,
+                slab_land_active=True,
+                topography="flat",              # ...but no actual land
+                surface_bulk_scheme="constant",
+                surface_stability_scheme="gryanik2020",
+            ).validate_strict()

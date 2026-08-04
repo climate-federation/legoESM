@@ -1825,10 +1825,49 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020")
+        # A tiled surface WITH REAL LAND is exempt from the second check
+        # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
+        # (physics_pipeline ~:701), so it INHERITS the injected
+        # stability_scheme and runs the land Monin-Obukhov law with it — real
+        # land fluxes move even though the top-level scheme is "constant"
+        # (codex R3 P2: the first form of that guard was too broad and would
+        # have rejected this working configuration).  "Real land" is the same
+        # predicate used elsewhere in this method: an explicit mask, or an
+        # active tile with a topography that actually derives f_land > 0 —
+        # topography="flat" gives f_land == 0 everywhere, so the tiled path
+        # never engages and the scheme would be diagnostic-only again
+        # (codex R4 P2).
+        _tiled_with_real_land = self.surface_tiled and bool(
+            self.land_mask_path
+            or ((self.slab_land_active or self.use_multilayer_land)
+                and self.topography != "flat"))
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
                 f"got {self.surface_stability_scheme!r}"
+            )
+        # The stability selector only acts on the STABLE branch of the
+        # iterative MOST solver, and surface_layer.compute_surface_fluxes
+        # routes ONLY ("most", "coare3", "large_yeager") through that solver —
+        # bulk_scheme="constant" takes the constant-Cd path and ignores
+        # stability entirely.  But the 2 m diagnostic (diagnostics.py) builds
+        # a COARE profile with the selected scheme regardless, so the pair
+        # would leave the physics untouched while MOVING the published tas.
+        # A knob that changes only the diagnostic is worse than an inert one
+        # (codex review P2) — reject it, unless _tiled_with_real_land above.
+        elif (self.surface_stability_scheme != "dyer1974"
+                and self.surface_bulk_scheme == "constant"
+                and not _tiled_with_real_land):
+            errors.append(
+                f"surface_stability_scheme="
+                f"{self.surface_stability_scheme!r} needs a "
+                f"stability-dependent surface_bulk_scheme ('coare3' or "
+                f"'large_yeager' — 'most' is a turbulence-config bulk_scheme, "
+                f"not an experiment-level one, and VALID_SURFACE_BULK "
+                f"rejects it), or surface_tiled=True whose land tile runs "
+                f"MOST; with 'constant' and untiled surfaces the fluxes "
+                f"ignore the stable branch entirely and only the 2 m "
+                f"diagnostic would move."
             )
         # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
         # (via _resolve_turbulence on the turbulence config).  With
@@ -2210,6 +2249,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"hb_kvf_min (free-atmosphere diffusivity floor [m^2/s]) must "
                 f"be None or finite in (0, 10]; got {self.hb_kvf_min!r}."
+            )
+        # ...and it is only consumed by a turbulence scheme whose nested
+        # config carries a ``kvf_min`` field (holtslag_boville).  On any other
+        # scheme _resolve_turbulence_config finds no field and the _replace
+        # never happens, so the run would proceed with the knob silently
+        # inert (codex review P2; same class as the k_h_scale lane guard).
+        elif self.hb_kvf_min is not None and self.turbulence != "holtslag_boville":
+            errors.append(
+                f"hb_kvf_min is consumed only by the holtslag_boville "
+                f"free-atmosphere diffusivity floor; with "
+                f"turbulence={self.turbulence!r} the override reaches no "
+                f"scheme field and would be silently inert."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):

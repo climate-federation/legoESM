@@ -561,6 +561,11 @@ def psi_m_coare(zeta, stability_scheme="dyer1974"):
     Safe branching (min/max on inputs) keeps gradients NaN-free in the
     inactive branch, matching :func:`psi_m`.
     """
+    # Dispatch hardening AT ENTRY on the static string: without this a typo'd
+    # scheme only raises after the whole unstable branch has been traced (and
+    # never at all for a caller that reaches this function directly rather
+    # than through compute_most_fluxes, which validates for itself).
+    validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
@@ -607,6 +612,7 @@ def psi_h_coare(zeta, stability_scheme="dyer1974"):
     form, which is itself the Beljaars & Holtslag (1991) ψ_h with rounded
     constants — see :func:`psi_m_coare` for the full semantics and why.
     """
+    validate_stability_scheme(stability_scheme)  # entry dispatch hardening
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
