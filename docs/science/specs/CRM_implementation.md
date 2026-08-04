@@ -185,6 +185,114 @@ iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 flipped 
 
 ---
 
+### F12. F11's two headline claims are instrument artefacts; the vertical grid was never refined (2026-08-04)
+
+**Three retractions, then the measurements that replace them.**
+
+**RETRACTION 1 — the Wing 2018 perturbation spec.** F11's fix-path list says
+"Wing 2018 RCEMIP Section 3.1 actually specifies smooth Gaussian, not white
+noise — the current driver implementation deviates." **That is wrong.** The
+initialisation spec is Sect. **3.2.3** (p. 798), and it reads, verbatim:
+
+> "For both RCE_small and RCE_large, symmetry is to be broken by prescribing a
+> small amount of thermal noise in the five lowest layers (an amplitude of 0.1 K
+> in the lowest layer, decreasing linearly to 0.02 K in the fifth layer). This
+> will allow convection to start within the first few hours of each simulation."
+
+It is RANDOM noise, not a Gaussian bubble. So `smooth_k1` — the driver DEFAULT —
+is the deviation, and `band_noise` was the closer of the two. Neither reproduces
+the per-layer 0.10/0.08/0.06/0.04/0.02 K taper, and both seed 4 layers, not 5.
+`seed_kind="wing2018"` now implements the protocol
+(`sam_case_setup.wing2018_thermal_noise_seed`). The protocol is SILENT on the
+noise distribution and imposes no zero-mean constraint; our uniform-on-[-A,A]
+draw and zero-mean subtraction are documented as OUR choices. §3.1 is "Required
+simulations" — the wrong section was cited.
+
+**RETRACTION 2 — "precip is ~6 orders of magnitude below Wing 2018".** That
+rests on `rce_diagnostics.precipitation_rate_proxy_plane`, which its own
+docstring says "is NOT a tracking of microphysical precipitation flux": it is
+`q_r[k_sfc] * rho * 5.0 m/s` sampled instantaneously. Measured against the
+column water budget on run 9285110 (128x128, dx=2 km, 80 sim-days, rrtmgp +
+Kessler, band_noise amp 0.5), over MATCHED windows:
+
+| window | P from budget (E - dCWV/dt) | P from the proxy | ratio |
+|--------|------------------------------|------------------|-------|
+| days 0-10  | 6.71 mm/day | 2.48 mm/day  | 2.7x |
+| days 10-30 | 4.62 mm/day | 1.07 mm/day  | 4.3x |
+| days 60-80 | **3.02 mm/day** | **0.089 mm/day** | **34x** |
+
+The Wing 2018 plateau is ~3 mm/day. **The model precipitates at approximately
+the right rate; the diagnostic under-reports it by up to 34x, and the error
+GROWS as the state drifts.** Every precipitation claim in this document that
+cites the proxy — including "7.46 mm/day at iter-223" and "~5e-4 mm/day" for the
+column-symmetric trap — is unvalidated. Use
+`scripts/validate/rcemip_column_budget.py`, which reports both.
+
+**RETRACTION 3 — the CFL diagnosis.** F11 dismisses adaptive dt because
+"max|w|=225 m/s gave Ca_adv=0.225, well under 1". That number is
+`max|w| * dt / dx` — a VERTICAL velocity against a HORIZONTAL spacing. With the
+actual dz (below), the vertical CFL `max|w| * dt / dz` at dx=4 km, dt=20 s,
+w=225 m/s is **4.09**, not 0.225. The conclusion happens to survive for the LES
+dx=500 m cases (0.102) because there dx < dz, but it is unsound for the dx=4 km
+headline it was applied to.
+
+**THE STRUCTURAL FINDING — dz = 1100 m, uniform, at every level.** Both drivers
+default to `--vertical-grid uniform` / no `--stretched-vertical`, i.e.
+`dz = H/nlev = 33000/30 = 1100 m` from the surface to the model top. Therefore:
+
+* The entire subcloud layer lives inside HALF of one grid cell, and the surface
+  flux is diluted over 1100 m (`dq_v/dt = lhflx/(L_v*rho*dz_sfc)`).
+* At the "LES dx=500 m" runs of iter-220..227, **dz/dx = 2.2** — cells more than
+  twice as tall as wide. **Refining dx alone made the grid MORE anisotropic.**
+  F11 fix-path-1 ("resolve convection explicitly: drop dx to 1 km or 256 m") was
+  therefore never actually tested: a convective plume was not resolved in the
+  vertical at ANY dx tried.
+* Smagorinsky's mixing length `(dx*dy*dz)^(1/3)` is dz-dominated at LES dx.
+* RCEMIP specifies ~74 levels stretched from ~50 m at the surface — which
+  `run_rcemip_plane.py --stretched-vertical` already implements and documents
+  ("RCEMIP1: nlev=74 ... dz_sfc=50m"), and which no CRM run has ever used.
+
+**WHAT ACTUALLY FAILS.** Run 9285110 did NOT blow up: it completed 80 sim-days,
+ended at max|w| = 2.9 m/s, and reached a quasi-steady water balance
+(E = 3.18, P = 3.02 mm/day, CWV drift +3.1 mm over the last 20 days). It
+converges to the WRONG equilibrium:
+
+* CWV 39.9 -> 127.9 mm (RCEMIP at SST=300 K is ~35-45 mm) — ~3x too moist.
+* T(11.5 km) 217.4 -> 261.4 K (**+44 K**); T(9.35 km) 237.2 -> 274.9 K (+38 K);
+  T(0.55 km) 290.3 -> 297.7 K (+7 K). The 0.55-11.55 km lapse rate collapses
+  from 6.6 K/km (a moist adiabat) to **3.3 K/km** — absolutely stable.
+* q_v(11.5 km) 0.12 -> 9.42 g/kg, an ~80x moistening at RH ~160%.
+* The cellularity discriminator CWV_max/CWV_mean decays 1.51 (days 0-10) ->
+  1.38 -> **1.21** (days 60-80): convective cells form, then fade as the column
+  stabilises.
+* theta'_max reached +372 K / -111 K, which the reference run's gate reported as
+  "max(theta prime) over the whole run: 0.0 K" and passed as `CRM_STATUS=OK`.
+  That gate awk'd a column that matched nothing. Any replacement gate must be
+  shown to FAIL on a known-bad line before it is believed.
+
+So the open problem is NOT "convection will not initiate" and NOT "the dycore
+NaNs". It is a **thermodynamic drift to an over-moist, over-warm, convectively
+suppressed equilibrium**, with the coarse uniform vertical grid as the leading
+suspect. The A/B that isolates it is
+`scripts/cluster/scm_rce_paper/crm_vgrid_ab.sbatch` (arm V: 30 uniform levels;
+arm R: 74 stretched from 50 m; identical in every other respect).
+
+**AN INDEPENDENT REFERENCE EXISTS AND IS ESSENTIALLY FREE.** The published
+RCEMIP ensemble is public at DKRZ Swift with no credentials
+(`https://swift.dkrz.de/v1/dkrz_70a517a8-039d-4a1b-a30d-841923f8bc7a/RCEMIP/`;
+note `swiftbrowser.dkrz.de/public/...` returns HTTP 200 with an HTML PAGE for a
+`.nc` path, so `curl --fail` exits 0 with a 9 KB web page — magic-byte check
+every download). The 1D tier (`f(z,t)` hourly-mean profiles: `ta`, `hus`,
+`clw`, `cli`, `plw`, `pli`, `cldfrac`) is **~0.8 MB per variable, ~5 MB for a
+whole model/case**, versus ~3 GB (2D) and ~4 GB (3D). The SCM-RCE campaign's
+reference reader immediately averages over the horizontal, so a domain-mean
+profile is EXACT for its purposes. `scripts/data/fetch_rcemip_reference.py`
+pulls it and writes the `--reference-dir` layout. Using it removes the
+self-consistency bias of ranking convection schemes against a "CRM" that is
+legoESM itself.
+
+---
+
 ## Roadmap (concrete, ordered)
 
 Status legend: `[x]` = done · `[~]` = partial · `[!]` = obsolete ·
