@@ -68,8 +68,16 @@ import numpy as np
 
 from legoesm import constants
 
-SWIFT_ROOT = ("https://swiftbrowser.dkrz.de/public/"
+#: The OBJECT endpoint.  ``swiftbrowser.dkrz.de/public/...`` is the human
+#: browser: it returns a 200 with an HTML page for a .nc path, so ``curl
+#: --fail`` does NOT catch it and you silently get a 9 KB web page named
+#: ``*.nc``.  The download link inside that page points here.  Every fetch is
+#: additionally magic-byte checked (see _check_netcdf) so this can never
+#: regress into "the tool exited 0, therefore we have data".
+SWIFT_ROOT = ("https://swift.dkrz.de/v1/"
               "dkrz_70a517a8-039d-4a1b-a30d-841923f8bc7a/RCEMIP")
+BROWSER_ROOT = ("https://swiftbrowser.dkrz.de/public/"
+                "dkrz_70a517a8-039d-4a1b-a30d-841923f8bc7a/RCEMIP")
 DEFAULT_CACERT = "/etc/pki/tls/certs/ca-bundle.crt"
 SEC_PER_DAY = 86400.0
 MSE_J_TO_KJ = 1.0e-3
@@ -104,6 +112,30 @@ def _curl(url: str, cacert: str, out: Path | None, head: bool = False) -> str:
     if res.returncode != 0:
         _fatal(f"curl failed ({res.returncode}) for {url}\n{res.stderr}")
     return res.stdout
+
+
+#: netCDF-3 ("CDF\x01/\x02") and netCDF-4/HDF5 ("\x89HDF") file signatures.
+_NC_MAGIC = (b"CDF\x01", b"CDF\x02", b"CDF\x05", b"\x89HDF")
+
+
+def _check_netcdf(path: Path, url: str) -> None:
+    """A downloaded file that is not netCDF is FATAL, never a warning.
+
+    The DKRZ browser host answers a .nc request with HTTP 200 and an HTML
+    page, so neither the exit code nor ``curl --fail`` distinguishes data from
+    a web page.  The magic bytes do.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        _fatal(f"{path} is missing or empty after fetching {url}")
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+    if not any(head.startswith(m) for m in _NC_MAGIC):
+        path.unlink(missing_ok=True)
+        _fatal(
+            f"{url} did not return netCDF (first bytes {head!r}). If this is "
+            "HTML you are hitting the browser host, not the object store; the "
+            "object endpoint is SWIFT_ROOT. Deleted the bad file so a rerun "
+            "cannot use it from cache.")
 
 
 def remote_size(url: str, cacert: str) -> int:
@@ -280,6 +312,7 @@ def main(argv=None) -> int:
             print(f"  fetching {v:12s} ...", flush=True)
             _curl(u, args.cacert, dst)
             print(f"           {dst.stat().st_size/1e6:7.3f} MB")
+        _check_netcdf(dst, u)          # magic bytes, cached files included
         local[v] = dst
 
     ds_T = _open_nc(local["ta_avg"])

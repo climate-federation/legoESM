@@ -39,11 +39,37 @@ def _synthetic(nt=40, nz=12):
     return dict(T=T, qv=qv, qcloud=qcloud, cond=cond), z, time_s
 
 
-def test_object_url_is_the_documented_dkrz_1d_path():
+def test_object_url_targets_the_object_store_not_the_browser():
+    """swiftbrowser.dkrz.de returns HTTP 200 + an HTML page for a .nc path, so
+    pointing at it yields a 9 KB web page named *.nc and a zero exit code.
+    The object endpoint is swift.dkrz.de/v1."""
     u = frr.object_url("SAM_CRM", "RCE_small300", "ta_avg")
-    assert u.startswith("https://swiftbrowser.dkrz.de/public/")
+    assert u.startswith("https://swift.dkrz.de/v1/")
+    assert "swiftbrowser" not in u
     assert u.endswith("/SAM_CRM/RCE_small300/1D/"
                       "SAM_CRM_RCE_small300_1D_ta_avg.nc")
+
+
+def test_check_netcdf_rejects_an_html_page_and_deletes_it(tmp_path):
+    """Non-vacuity for the magic-byte guard: it must FAIL on the exact failure
+    that got through before (an HTML page saved as .nc), and must remove the
+    file so a rerun cannot pick it up from cache."""
+    bad = tmp_path / "ta_avg.nc"
+    bad.write_bytes(b"\n<!DOCTYPE html>\n<html><head><title>Swiftbrowser")
+    with pytest.raises(SystemExit):
+        frr._check_netcdf(bad, "http://example/ta_avg.nc")
+    assert not bad.exists(), "a bad download must not survive in the cache"
+
+    empty = tmp_path / "empty.nc"
+    empty.write_bytes(b"")
+    with pytest.raises(SystemExit):
+        frr._check_netcdf(empty, "http://example/empty.nc")
+
+    # ... and PASSES on a real netCDF-3 signature.
+    good = tmp_path / "good.nc"
+    good.write_bytes(b"CDF\x01" + b"\x00" * 64)
+    frr._check_netcdf(good, "http://example/good.nc")
+    assert good.exists()
 
 
 def test_build_reference_writes_the_campaign_layout(tmp_path):
