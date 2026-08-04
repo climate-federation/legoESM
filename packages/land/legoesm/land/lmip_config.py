@@ -58,6 +58,16 @@ _STOMATA_MODELS = ("ball_berry", "medlyn")
 _SNOW_SCHEMES = ("single", "multilayer")
 _FORCING_SOURCES = ("cru_jra", "synthetic")
 
+# --- Schema SANITY bounds for user-supplied stomatal overrides (name, lo, hi) ---
+# NOT physics coefficients: these only bracket obvious typos at config-load time.
+# The authoritative physical ranges are the scheme's StomataConfig.__param_spec__,
+# which is enforced downstream; these are deliberately wider.
+_STOMATA_SANITY_BOUNDS = (
+    ("vc_max25", 10.0, 200.0),     # umol m-2 s-1
+    ("g1", 0.5, 30.0),             # ball_berry slope / medlyn g1
+    ("gs_max", 0.05, 1.5),         # mol m-2 s-1
+)
+
 _DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
 
 
@@ -143,7 +153,7 @@ def validate_config(data: dict) -> LMIPConfig:
             f"(got {physics['surface_scheme']!r}).")
     # Stomatal calibration scalars (None = land default / per-PFT): sanity bounds
     # (StomataConfig.__param_spec__ enforces tighter physical ranges downstream).
-    for _k, _lo, _hi in (("vc_max25", 10.0, 200.0), ("g1", 0.5, 30.0), ("gs_max", 0.05, 1.5)):
+    for _k, _lo, _hi in _STOMATA_SANITY_BOUNDS:
         _v = physics.get(_k)
         if _v is not None and not (_lo <= float(_v) <= _hi):
             raise ValueError(f"physics.{_k}={_v} out of sane range [{_lo}, {_hi}]")
