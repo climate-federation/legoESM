@@ -1,3 +1,21 @@
+# DECISION 1 SETTLED 2026-08-04 (Dhruv) — CEILING category + the empirical envelope principle
+
+**CEILING is APPROVED** as a formal gate category (closed dict + evidence strings + non-vacuity
+test, WAIVED_ROWS pattern). **Gold-standard evidence = the EMPIRICAL NEMO-vs-NEMO envelope**:
+rebuild NEMO at -O0 (`arch-condadbg.fcm` exists from the port), re-dump the same per-step
+quantities, diff per row. Our residual <= NEMO(-O3)-vs-NEMO(-O0) ⇒ matched in the strongest
+sense that exists (you cannot be closer to NEMO than NEMO is to itself). Above the envelope ⇒
+the ceiling claim FAILS and real debt remains — the control has teeth. Mechanism proofs stay
+as silver standard until the -O0 run exists.
+
+**THE PRINCIPLE (Dhruv, verbatim intent): ceiling-level differences CANNOT be the cause of the
+~21% ACC deficit — otherwise NEMO would not be a trustworthy model.** NEMO's climate is robust
+to its own arithmetic noise (different builds/compilers ⇒ same climate); therefore any row
+whose residual sits at/below the empirical envelope is **climate-exonerated by construction**,
+and climate leverage can only live ABOVE the envelope: structural differences with real
+mechanisms (geometry, closures, forcing, eddy statistics), i.e. the attractor program. This
+formalizes why the sweep and the climate hunt are separate tracks.
+
 # PARKED 2026-08-03 — resume here (token budget; user call)
 
 **Where the grind stands** (issue #1455 = the living checklist; PR #1460 = the working PR):
