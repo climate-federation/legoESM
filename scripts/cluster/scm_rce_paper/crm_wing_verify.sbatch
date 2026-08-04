@@ -12,6 +12,8 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/crm_wingverify_%j.out
 set +e
+# Pipelines: $? after `cmd | tail` is TAIL's status, not cmd's. Use
+# ${PIPESTATUS[0]} wherever a piped command's exit code is reported.
 
 BRANCH="${BRANCH:-crm/rcemip-resolved-convection}"
 WT="${WT:-/burg-archive/glab/users/pg2328/_wt_crmverify_$SLURM_JOB_ID}"
@@ -35,7 +37,7 @@ JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu $PY -m pytest -q \
   tests/unit/test_fetch_rcemip_reference.py \
   tests/unit/test_rcemip_column_budget.py \
   2>&1 | tail -30
-echo "tests rc=$?"
+echo "tests rc=${PIPESTATUS[0]}"
 
 echo
 echo "############ 2. NON-VACUITY: seed dispatch must REJECT junk ##########"
@@ -53,11 +55,15 @@ print("seeded levels (nonzero):", [k for k in range(12) if np.any(s[..., k] != 0
 print("per-layer max|theta'| lowest->up:",
       [float(np.abs(s[..., -1 - j]).max()) for j in range(5)])
 import run_rcemip_plane as rcp
+old_argv = sys.argv
 try:
-    rcp.parse_args(["--seed-kind", "garbage"])
+    sys.argv = ["run_rcemip_plane.py", "--seed-kind", "garbage"]
+    rcp.parse_args()
     print("DISPATCH-GUARD FAIL: junk seed-kind accepted")
 except SystemExit:
     print("DISPATCH-GUARD OK: argparse rejects --seed-kind garbage")
+finally:
+    sys.argv = old_argv
 try:
     wing2018_seed_amplitudes(amp_lowest=0.0)
     print("ZERO-AMP GUARD FAIL: silent no-op seed accepted")
@@ -71,7 +77,7 @@ echo "  (run 9285110: 128x128 dx=2km nlev=30 UNIFORM dz=1100m, rrtmgp+kessler,"
 echo "   --theta-noise-amp 0.5 --seed-kind band_noise, 80 sim-days)"
 JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu $PY scripts/validate/rcemip_column_budget.py \
   --run-dir "$RUN80" --sfc-stride 16 2>&1 | tail -80
-echo "budget rc=$?"
+echo "budget rc=${PIPESTATUS[0]}"
 
 echo
 echo "########## 4. RCEMIP community reference: SIZE CHECK #################"
@@ -85,7 +91,7 @@ $PY scripts/data/fetch_rcemip_reference.py \
   --cache /burg-archive/glab/users/pg2328/legoESM/data/rcemip_raw \
   --dest /burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300 \
   --last-days 25 --n-snapshots 10 2>&1 | tail -30
-echo "fetch rc=$?"
+echo "fetch rc=${PIPESTATUS[0]}"
 
 echo
 echo "##### 6. END-TO-END: can run_scm_rce_campaign CONSUME the reference? ####"
@@ -112,7 +118,7 @@ print("make_sigma_coordinate_from_reference OK; nlev =",
       np.asarray(sig.p_full if hasattr(sig, "p_full") else sig.sigma_full).size)
 print("CAMPAIGN_CONSUME=OK")
 PYEOF2
-echo "consume rc=$?"
+echo "consume rc=${PIPESTATUS[0]}"
 
 echo
 echo "--- reference dir contents ---"

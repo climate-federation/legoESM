@@ -100,6 +100,12 @@ PRECIP_COND_VARS = ("plw_avg", "pli_avg")
 #: are fully finite), so it is a fallback, not the default.
 HUMIDITY_VARS = {"qv": "QV_avg", "hus": "hus_avg"}
 REQUIRED_VARS = ("ta_avg",) + CLOUD_VARS + PRECIP_COND_VARS
+#: Surface precipitation lives in the 2D tier only (there is no 1D `pr`).
+#: ~88 MB for SAM_CRM/RCE_small300 -- the one file worth paying for, because
+#: run_scm_rce_campaign scores SCM precipitation against the reference and a
+#: MISSING reference precip scores every scheme against 0 mm/day.
+PRECIP_VAR_2D = "pr"
+PRECIP_TIER = "2D"
 
 
 def _fatal(msg: str) -> None:
@@ -107,8 +113,8 @@ def _fatal(msg: str) -> None:
     raise SystemExit(2)
 
 
-def object_url(model: str, case: str, var: str) -> str:
-    return f"{SWIFT_ROOT}/{model}/{case}/1D/{model}_{case}_1D_{var}.nc"
+def object_url(model: str, case: str, var: str, tier: str = "1D") -> str:
+    return f"{SWIFT_ROOT}/{model}/{case}/{tier}/{model}_{case}_{tier}_{var}.nc"
 
 
 def _curl(url: str, cacert: str, out: Path | None, head: bool = False) -> str:
@@ -213,7 +219,8 @@ def _pick(ds, names: tuple[str, ...]) -> str:
 def build_reference(profiles: dict[str, np.ndarray], z_m: np.ndarray,
                     time_s: np.ndarray, dest: Path, *,
                     last_days: float, n_snapshots: int,
-                    to_mixing_ratio: bool, source: str) -> None:
+                    to_mixing_ratio: bool, source: str,
+                    precip_mm_day: np.ndarray | None = None) -> None:
     """Write the campaign-format reference from domain-mean profiles.
 
     ``profiles`` holds ``T`` [K], ``qv`` [kg/kg specific], ``qcloud`` and
@@ -295,10 +302,15 @@ def build_reference(profiles: dict[str, np.ndarray], z_m: np.ndarray,
             qcloud=col(qcloud), w=col(np.zeros_like(T)),
             source=source,
         )
+        sfc_payload = {}
+        if precip_mm_day is not None:
+            # Domain-mean surface precip [mm/day] as a 1x1 field: the campaign
+            # means over the horizontal, so a scalar map is exact for it.
+            sfc_payload["precip"] = np.full((1, 1), float(precip_mm_day[it]))
         np.savez(
             sfc_dir / f"sfc_{step:08d}.npz",
             day=float(time_s[it]) / SEC_PER_DAY, t_s=float(time_s[it]),
-            heights=heights,
+            heights=heights, **sfc_payload,
             T_levels=T[hidx].reshape(-1, 1, 1),
             qv_levels=qv[hidx].reshape(-1, 1, 1),
             cond_levels=cond[hidx].reshape(-1, 1, 1),
@@ -306,6 +318,12 @@ def build_reference(profiles: dict[str, np.ndarray], z_m: np.ndarray,
         )
     print(f"  wrote {len(take)} vol_*.npz -> {vol_dir}")
     print(f"  wrote {len(take)} sfc_*.npz -> {sfc_dir}")
+    if precip_mm_day is not None:
+        sel_p = precip_mm_day[take]
+        print(f"  reference surface precip over the window: "
+              f"mean {sel_p.mean():.3f} mm/day, range "
+              f"[{sel_p.min():.3f}, {sel_p.max():.3f}] "
+              "(Wing 2018 RCE plateau ~3 mm/day)")
     (dest / "SOURCE.txt").write_text(
         f"{source}\n\nFetched by scripts/data/fetch_rcemip_reference.py from\n"
         f"{SWIFT_ROOT}\n\nCite: Wing et al. (2018), GMD 11, 793-813, "
@@ -342,6 +360,14 @@ def main(argv=None) -> int:
                    help="convert specific humidity to mixing ratio r = q/(1-q). "
                         "Only meaningful with --humidity hus; QV_avg is "
                         "ALREADY a mixing ratio.")
+    p.add_argument("--with-precip", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Also fetch the 2D surface precipitation 'pr' (~88 MB; "
+                        "there is no 1D precip) and write the domain mean into "
+                        "each sfc_*.npz. ON by default because "
+                        "run_scm_rce_campaign scores SCM precipitation against "
+                        "the reference, and a MISSING reference precip ranks "
+                        "every scheme against 0 mm/day.")
     p.add_argument("--check-size", action="store_true",
                    help="print the download cost and exit without fetching.")
     args = p.parse_args(argv)
@@ -352,6 +378,9 @@ def main(argv=None) -> int:
 
     wanted = REQUIRED_VARS + (HUMIDITY_VARS[args.humidity],)
     urls = {v: object_url(args.model, args.case, v) for v in wanted}
+    if args.with_precip:
+        urls[PRECIP_VAR_2D] = object_url(args.model, args.case, PRECIP_VAR_2D,
+                                         tier=PRECIP_TIER)
     print(f"model={args.model} case={args.case}")
     if args.check_size:
         total = 0
@@ -411,13 +440,31 @@ def main(argv=None) -> int:
     qcloud = sum(_load(v) for v in CLOUD_VARS)
     cond = qcloud + sum(_load(v) for v in PRECIP_COND_VARS)
 
+    precip_mm_day = None
+    if args.with_precip:
+        ds_p = _open_nc(local[PRECIP_VAR_2D])
+        pname = _pick(ds_p, (PRECIP_VAR_2D, "pr_avg"))
+        pr = np.asarray(ds_p[pname].values, dtype=np.float64)   # kg/m2/s
+        t_p = time_to_seconds(ds_p)
+        pr_mean = pr.reshape(t_p.size, -1).mean(axis=1) * SEC_PER_DAY
+        if not np.all(np.isfinite(pr_mean)):
+            _fatal(f"{pname} has non-finite values; refusing to write a "
+                   "reference whose precipitation would score schemes against "
+                   "NaN/0.")
+        # Map the profile times onto the precip times (they share the run).
+        precip_mm_day = np.interp(time_s, t_p, pr_mean)
+        print(f"  precip: {pname} [{ds_p[pname].attrs.get('units')}] over "
+              f"{pr.shape} -> domain-mean {pr_mean.mean():.3f} mm/day "
+              f"(full run)")
+
     source = (f"RCEMIP {args.model} {args.case} 1D domain-mean profiles "
               f"(Wing et al. 2018, GMD 11, 793-813), fetched from DKRZ Swift")
     build_reference(
         {"T": T, "qv": qv, "qcloud": qcloud, "cond": cond},
         z_m, time_s, args.dest,
         last_days=args.last_days, n_snapshots=args.n_snapshots,
-        to_mixing_ratio=args.to_mixing_ratio, source=source)
+        to_mixing_ratio=args.to_mixing_ratio, source=source,
+        precip_mm_day=precip_mm_day)
     print("\nFETCH_DONE")
     return 0
 

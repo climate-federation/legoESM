@@ -8,6 +8,8 @@
 #SBATCH --time=01:30:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/crm_codex_%j.out
 set +e
+# Pipelines: $? after `cmd | tail` is TAIL's status, not cmd's. Use
+# ${PIPESTATUS[0]} wherever a piped command's exit code is reported.
 BRANCH="${BRANCH:-crm/rcemip-resolved-convection}"
 WT="${WT:-/burg-archive/glab/users/pg2328/_wt_crmcodex_$SLURM_JOB_ID}"
 SRC=/burg-archive/glab/users/pg2328/legoESM
@@ -79,7 +81,7 @@ Report findings as SEVERITY: file:line: problem -> fix. Be specific and
 adversarial; say plainly if something is fine. Do not restate the diff.
 PROMPT
 )" 2>&1 | tail -180
-echo "codex rc=$?"
+echo "codex rc=${PIPESTATUS[0]}"
 git -C "$SRC" worktree remove --force "$WT" >/dev/null 2>&1
 rm -rf "$CODEX_HOME"
 echo "ALLDONE"

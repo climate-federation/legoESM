@@ -215,18 +215,34 @@ docstring says "is NOT a tracking of microphysical precipitation flux": it is
 column water budget on run 9285110 (128x128, dx=2 km, 80 sim-days, rrtmgp +
 Kessler, band_noise amp 0.5), over MATCHED windows:
 
-| window | P from budget (E - dCWV/dt) | P from the proxy | ratio |
-|--------|------------------------------|------------------|-------|
-| days 0-10  | 6.71 mm/day | 2.48 mm/day  | 2.7x |
-| days 10-30 | 4.62 mm/day | 1.07 mm/day  | 4.3x |
-| days 60-80 | **3.02 mm/day** | **0.089 mm/day** | **34x** |
+**>> THE BUDGET NUMBERS FIRST PUBLISHED HERE (P = 6.71 / 4.62 / 3.02 mm/day
+over days 0-10 / 10-30 / 60-80) ARE RETRACTED. <<** Codex adversarial review
+found that the validator reconstructed evaporation from a Wing-2018 bulk closure
+(`C_h = 1.5e-3`, 5 m/s gustiness floor, taken from `crm/rce_surface_flux`) that
+the driver DOES NOT USE. `run_rcemip_plane` runs SAM's iterative Monin-Obukhov
+ocean flux (`core.bulk_flux.compute_sam_oceflx_fluxes`) with
+`vmag = max(1, |U|)` and `q_sfc = 0.981 qsat(SST)` (SF-1/SF-2/SF-3). At the
+observed `|U| ~ 0.05 m/s` the wind floor alone differs by 5x, so E — and every
+precipitation rate inferred from it — was wrong. This is the re-derivation the
+repo's shared-utilities rule exists to prevent.
 
-The Wing 2018 plateau is ~3 mm/day. **The model precipitates at approximately
-the right rate; the diagnostic under-reports it by up to 34x, and the error
-GROWS as the state drifts.** Every precipitation claim in this document that
-cites the proxy — including "7.46 mm/day at iter-223" and "~5e-4 mm/day" for the
-column-symmetric trap — is unvalidated. Use
-`scripts/validate/rcemip_column_budget.py`, which reports both.
+`run_rcemip_plane` now RECORDS `shflx`/`lhflx` into every surface snapshot via
+`make_surface_flux_diagnostic`, which calls the same shared routine the
+prognostic path uses, and the validator hard-fails on a run that lacks it rather
+than reconstructing a closure. A corrected budget must be measured from a run
+carrying that record; none exists yet.
+
+What survives the retraction, because it does NOT depend on the flux estimate:
+
+* The driver's `precip` field is a PROXY — `q_r[k_sfc] * rho * 5.0 m/s`, which
+  its own docstring says "is NOT a tracking of microphysical precipitation
+  flux". It reports 2.48 / 1.07 / 0.089 mm/day over the three windows above.
+  **Any precipitation claim in this document that cites it — "7.46 mm/day at
+  iter-223", "~5e-4 mm/day" for the column-symmetric trap, "6 orders of
+  magnitude low" — rests on an unvalidated instrument** and is at best
+  provisional until re-measured against a recorded flux.
+* CWV, its drift, and the CWV_max/CWV_mean cellularity ratio come from the
+  driver's OWN stored fields and are unaffected.
 
 **RETRACTION 3 — the CFL diagnosis.** F11 dismisses adaptive dt because
 "max|w|=225 m/s gave Ca_adv=0.225, well under 1". That number is

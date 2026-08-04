@@ -45,6 +45,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/crm_vgrid_%j.out
 set +e
+# Pipelines: $? after `cmd | tail` is TAIL's status, not cmd's. Use
+# ${PIPESTATUS[0]} wherever a piped command's exit code is reported.
 
 ARM="${ARM:?set ARM=V (uniform dz=1100m control) or ARM=R (RCEMIP stretched)}"
 BRANCH="${BRANCH:-crm/rcemip-resolved-convection}"

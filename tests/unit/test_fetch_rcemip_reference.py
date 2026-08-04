@@ -109,8 +109,10 @@ def test_mse_roundtrip_recovers_qv_exactly(tmp_path):
                        - constants.g * z_b) / constants.L_v
             day = float(ds["day"])
         it = int(round(day * 86400.0 / 3600.0))
-        np.testing.assert_allclose(qv_back[0, 0], profs["qv"][it], rtol=1e-12,
-                                   atol=1e-15)
+        # build_reference flips ascending input to top-down, so compare
+        # against the flipped source profile.
+        np.testing.assert_allclose(qv_back[0, 0], profs["qv"][it][::-1],
+                                   rtol=1e-12, atol=1e-15)
 
 
 def test_mixing_ratio_conversion_changes_qv_by_the_right_amount(tmp_path):
@@ -133,8 +135,9 @@ def test_mixing_ratio_conversion_changes_qv_by_the_right_amount(tmp_path):
     r = _qv(tmp_path / "mix")
     np.testing.assert_allclose(r, q / (1.0 - q), rtol=1e-12)
     # ~1.9% at the surface value 0.01865 -- big enough to matter, small enough
-    # that a silent swap would not be caught by eye.
-    assert 0.015 < float(r[0] / q[0] - 1.0) < 0.025
+    # that a silent swap would not be caught by eye. Storage is TOP-DOWN, so
+    # the surface (largest q) is the LAST entry.
+    assert 0.015 < float(r[-1] / q[-1] - 1.0) < 0.025
 
 
 def test_build_reference_refuses_a_window_with_too_few_times(tmp_path):
