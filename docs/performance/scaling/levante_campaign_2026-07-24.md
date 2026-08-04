@@ -2106,3 +2106,26 @@ processes is UNVERIFIED and plausibly walled exactly as ocean was.
 Port = same checked_shard_put swap + aux threading; needs its own
 parity run + a 2-proc repro before any atm hundreds rerun on merged
 main.
+
+## FINAL RECEIPTS (job 26657279): atm lat-lon at 144 GPUs — campaign records
+
+The @192 ask starved 20+ h (48-node block vs a 55-healthy-node pool);
+144 divides both grids and scheduled overnight:
+
+| arm | cols/GPU | ms/step | GC/s |
+|---|---|---|---|
+| LL2304x4608 @144 | 73.7k | 5.78 | 47.76 |
+| LL2880x5760 @144 | 115.2k | 7.40 | **58.32** |
+
+* **58.3 GC/s is the campaign's highest throughput** (prior record
+  39.1, LL2048@128).
+* Strong LL2304 96 -> 144: 7.872 -> 5.78 = 1.362x for 1.5x devices =
+  **eff 0.91** — the healthiest >64-GPU strong leg measured (tiles
+  110.6k -> 73.7k, both far above the floor). (@96 ran the pre-merge
+  worktree; the put-path fixes are SETUP-only, so steady timing is
+  comparable.)
+* Campaign close-out: every directive lane holds 96-144-GPU receipts
+  (atm lat-lon 96/128/144, ocean lat-lon 96/128, MPAS 128) plus
+  512-rank CPU lat-lon; the remaining improvement paths are the
+  documented structural follow-ups (SoL-class device collectives,
+  #1100 partition-local mesh, ensemble orchestration).
