@@ -2222,3 +2222,26 @@ machinery exists for the ocean wall lane; the atm dycore pads
 per-field). The ~6-group / ~4.0-4.4 ms projection is SPECULATIVE until
 that analysis is done. Dycore surgery — staged as the next engineering
 item.
+
+## #1100 WALL DOWN (job 26677812): MPAS s10 @ 128 GPUs — new record
+
+Post-replicate_pytree-fix falsification PASSES: subdiv-10 (10.49M
+cells, lloyd-0) at 128 GPUs = **18.20 ms = 14.98 GC/s — the new
+MPAS-atmosphere record** (2.1x the s9 peak of 7.10), at 81.9k
+cells/GPU (above the ~30k floor). The lloyd-0 matched-tile weak series
+gains a THIRD rung: s8@8 6.58 -> s9@32 12.47 -> s10@128 18.20 ms —
+per-4x-scale cost 1.895 then 1.460: the scale-out term DECELERATES
+with size. 192/224-GPU rungs are expected-feasible (48/56-node asks;
+queue-starved historically — submit opportunistically).
+
+## Ocean-MPAS GPU path: SCOPED (not built)
+
+The ocean MPAS lane is CPU-MPI by design (`bench_ocean_mpas_scaling`
+docstring). A GPU/SPMD twin would reuse the now-generic voronoi
+machinery (cell-partition reorder, padded local meshes, edge-coloured
+ppermute halo, the fixed replicate/put path) and wire the OCEAN MPAS
+tendencies (`ocean_pe_mpas`) into a `make_voronoi_sharded_step`-class
+factory: column-local vmix solves shard trivially; the
+barotropic/baroclinic split is the design work. Estimated days-scale
+feature with existing infra; staged as a follow-up, NOT attempted in
+this round.
