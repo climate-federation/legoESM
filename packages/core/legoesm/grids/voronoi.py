@@ -1104,6 +1104,19 @@ def _trisk_walk(iEdge, c, global_sign, k_slot,
 
 _MESH_CACHE_ENV = "LEGOESM_MESH_CACHE_DIR"
 _MESH_CACHE_DISABLE_ENV = "LEGOESM_MESH_CACHE_DISABLE"
+
+# Big-mesh policy (codex round-19, issue: subdiv-8 cap blocked 128-GPU MPAS).
+# Levels <= ROUTINE build freely (cheap). ROUTINE+1 .. MAX are
+# cache-or-prewarm ONLY: a hit loads; a miss raises unless this process is
+# the designated single builder (env below + exclusive lockfile — the
+# opt-in alone would be a thundering herd across an MPI launch). > MAX is
+# hard-refused (42M+ cells; the scipy SphericalVoronoi path does not scale
+# there). Build cost measured 2026-07-29: one Lloyd iteration = 21.6 s at
+# subdiv-7, 87.1 s at subdiv-8 (~4x per level).
+_BIG_MESH_ROUTINE_LEVEL = 8
+_BIG_MESH_MAX_LEVEL = 10
+_BIG_MESH_BUILD_ENV = "LEGOESM_ALLOW_BIG_MESH_BUILD"
+_BIG_MESH_LOCK_STALE_S = 7200.0   # lloyd=50 at subdiv-9 ~ 5 h; lloyd=0 ~ min
 # Bump whenever the SCVT/connectivity/geometry construction changes VALUES for
 # unchanged args (e.g. edits to _lloyd_relaxation / _build_mesh_from_generators).
 # The schema check below only catches FIELD changes; a value-changing algorithm
@@ -1269,13 +1282,21 @@ def create_voronoi_mesh(
     -------
     VoronoiMesh
     """
-    if subdivision_level > 8:
+    if subdivision_level > _BIG_MESH_MAX_LEVEL:
         n_cells = 10 * 4 ** subdivision_level + 2
         raise ValueError(
-            f"subdivision_level={subdivision_level} would create {n_cells:.2e} cells. "
-            f"Maximum supported level is 8 (655,362 cells). "
-            f"For higher resolutions, use load_mpas_mesh() with a pre-built mesh file."
+            f"subdivision_level={subdivision_level} would create {n_cells:.2e} "
+            f"cells — unsupported (hard cap {_BIG_MESH_MAX_LEVEL}; the scipy "
+            f"SphericalVoronoi build path does not scale there). For higher "
+            f"resolutions, use load_mpas_mesh() with a pre-built mesh file."
         )
+    # Levels above the routine cap are CACHE-OR-PREWARM only (codex round-19
+    # design): a valid cache hit is always admissible; a MISS is refused
+    # unless this process is the designated prewarmer — otherwise an N-rank
+    # MPI launch would have every rank silently rebuild for hours (build is
+    # ~87 s/Lloyd-iteration at subdiv-8, ~4x that at 9). The prewarm path is
+    # single-builder: an exclusive lockfile serialises concurrent opt-ins.
+    _big = subdivision_level > _BIG_MESH_ROUTINE_LEVEL
 
     # Disk cache: a uniform SCVT mesh is deterministic in these args, so skip the
     # expensive rebuild on a hit.  density_fn meshes are NOT cached (a callable
@@ -1288,6 +1309,51 @@ def create_voronoi_mesh(
         cached = _load_voronoi_cache(cache_path)
         if cached is not None:
             return cached
+
+    _lock_path = None
+    if _big:
+        if not use_cache:
+            raise ValueError(
+                f"subdivision_level={subdivision_level} needs the mesh disk "
+                f"cache (density_fn=None and {_MESH_CACHE_DISABLE_ENV} unset)"
+                f" — an uncached big-mesh build would repeat per rank.")
+        if os.environ.get(_BIG_MESH_BUILD_ENV, "") != "1":
+            raise ValueError(
+                f"subdivision_level={subdivision_level}: no cached mesh at "
+                f"{cache_path} and this process is not the designated "
+                f"prewarmer. Build the cache ONCE via scripts/data/"
+                f"prewarm_voronoi_mesh.py (or set {_BIG_MESH_BUILD_ENV}=1 in "
+                f"a SINGLE-process job), then rerun.")
+        # Single-builder lock (codex round-19: the opt-in alone is a
+        # thundering herd — N authorized ranks could all miss). O_EXCL
+        # lockfile beside the cache; losers wait for the winner's atomic
+        # os.replace to land and then load it. Stale locks (builder died)
+        # are stolen after _BIG_MESH_LOCK_STALE_S with a warning.
+        _lock_path = f"{cache_path}.lock"
+        import time as _time
+        while True:
+            try:
+                _fd = os.open(_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(_fd, str(os.getpid()).encode())
+                os.close(_fd)
+                break                      # we are the builder
+            except FileExistsError:
+                for _ in range(int(_BIG_MESH_LOCK_STALE_S)):
+                    _time.sleep(1.0)
+                    cached = _load_voronoi_cache(cache_path)
+                    if cached is not None:
+                        return cached      # winner finished; use its mesh
+                    if not os.path.exists(_lock_path):
+                        break              # lock released without a cache?!
+                else:
+                    try:                   # stale: builder likely died
+                        os.unlink(_lock_path)
+                    except FileNotFoundError:
+                        pass
+                    import warnings
+                    warnings.warn(
+                        f"stale big-mesh lock {_lock_path} removed after "
+                        f"{_BIG_MESH_LOCK_STALE_S}s; taking over the build.")
 
     # Step 1: Icosahedral base
     verts, triangles = _icosahedral_base()
@@ -1313,6 +1379,13 @@ def create_voronoi_mesh(
     mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if use_cache and cache_path is not None:
         _save_voronoi_cache(cache_path, mesh)
+    if _lock_path is not None:
+        # Release AFTER the atomic cache save: waiters poll the cache, so
+        # the lock's job is done once the mesh is loadable.
+        try:
+            os.unlink(_lock_path)
+        except FileNotFoundError:
+            pass
     return mesh
 
 

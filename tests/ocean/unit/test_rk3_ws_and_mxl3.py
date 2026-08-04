@@ -142,7 +142,13 @@ def test_nn_mxl3_scans_match_direct_loop():
         lup[..., k] = np.minimum(lup[..., k - 1] + e3[..., k - 1],
                                  l_w[..., k])
     ldn = l_w.copy()
-    for k in range(n - 2, -1, -1):
+    # #1226 ldown-seed fix (zdftke.F90:678 + 786-789): the deepest carried
+    # row is itself BOUNDED, seeded from NEMO's untouched zmxlm(jpk) =
+    # rmxl_min; under the legacy (+1-row) dz_cell contract the e3t paired
+    # with that seed step is dz_cell's own last row (the e3t(jpk) proxy).
+    ldn[..., n - 1] = np.minimum(cfg.mxl_min + e3[..., n - 1],
+                                 l_w[..., n - 1])
+    for k in range(n - 2, 0, -1):
         ldn[..., k] = np.minimum(ldn[..., k + 1] + e3[..., k + 1],
                                  l_w[..., k])
     ref_k = np.maximum(np.minimum(lup, ldn), cfg.mxl_min)[..., 1:]

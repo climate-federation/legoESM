@@ -66,6 +66,30 @@ def weighted_rmse(diff: jax.Array, weights: jax.Array) -> jax.Array:
     return safe_sqrt(jnp.sum(weights * diff ** 2))
 
 
+def normalized_profile_rmse(
+    ref_profile: jax.Array,
+    profile: jax.Array,
+    weights: jax.Array,
+    *,
+    profile_floor: jax.Array | float,
+) -> jax.Array:
+    """Mass-weighted RMSE of ``profile`` vs ``ref_profile``, normalized by the
+    reference's own mass-weighted standard deviation (floored).
+
+    The single-variable core of every profile score in this module and in the
+    LES-vs-SCM turbulence scoring: normalizing by the reference's spread makes
+    variables with wildly different units (K vs kg/kg vs K m/s) commensurable,
+    so they can be combined in quadrature without an arbitrary unit weight.
+    """
+    ref_profile = jnp.asarray(ref_profile)
+    dtype = ref_profile.dtype
+    profile = jnp.asarray(profile, dtype=dtype)
+    weights = jnp.asarray(weights, dtype=dtype)
+    floor = jnp.asarray(profile_floor, dtype=dtype)
+    std = jnp.maximum(weighted_std(ref_profile, weights), floor)
+    return weighted_rmse((profile - ref_profile) / std, weights)
+
+
 def score_profiles_jax(
     ref: Any,
     T_profile: jax.Array,
@@ -85,12 +109,12 @@ def score_profiles_jax(
     qcond_ref = jnp.asarray(ref.qcond_ref, dtype=dtype)
     floor = jnp.asarray(profile_floor, dtype=dtype)
 
-    T_std = jnp.maximum(weighted_std(T_ref, weights), floor)
-    qv_std = jnp.maximum(weighted_std(qv_ref, weights), floor)
-    qcond_std = jnp.maximum(weighted_std(qcond_ref, weights), floor)
-    T_rmse = weighted_rmse((T_profile - T_ref) / T_std, weights)
-    qv_rmse = weighted_rmse((qv_profile - qv_ref) / qv_std, weights)
-    cloud_rmse = weighted_rmse((qcond_profile - qcond_ref) / qcond_std, weights)
+    T_rmse = normalized_profile_rmse(T_ref, T_profile, weights,
+                                     profile_floor=floor)
+    qv_rmse = normalized_profile_rmse(qv_ref, qv_profile, weights,
+                                      profile_floor=floor)
+    cloud_rmse = normalized_profile_rmse(qcond_ref, qcond_profile, weights,
+                                         profile_floor=floor)
     combined = safe_sqrt((T_rmse**2 + qv_rmse**2 + cloud_rmse**2) / 3.0)
     return T_rmse, qv_rmse, cloud_rmse, combined
 

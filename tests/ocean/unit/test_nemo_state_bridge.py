@@ -333,8 +333,14 @@ def test_bridge_before_state_topo_populates_before_fields():
     v_before = np.asarray(st.v_before.data)
     assert np.allclose(v_before[1:, :, :][wet3], before.v[wet3])
     assert np.allclose(np.asarray(st.eta_before.data), before.ssh)
-    assert np.allclose(np.asarray(st.tau_x_prev), before.tau_x)
-    assert np.allclose(np.asarray(st.tau_y_prev), before.tau_y)
+    # #1455 sign fix: tau_x_prev must be NEGATED relative to the raw NEMO
+    # utau_b (before.tau_x) to match the atmospheric-convention storage
+    # every OceanSurfaceForcing.tau_x producer uses (dino.py:3383,
+    # nemo_recipe.py:768) -- surface_stress_faces negates ONCE more to
+    # recover the ocean-reaction stress, so before.tau_x and tau_x_prev
+    # must carry OPPOSITE signs, not equal values.
+    assert np.allclose(np.asarray(st.tau_x_prev), -before.tau_x)
+    assert np.allclose(np.asarray(st.tau_y_prev), -before.tau_y)
 
     # T/S at wet cells match the raw restart exactly (only dry cells are
     # Neumann-filled, same as the now-level T/S bridge).

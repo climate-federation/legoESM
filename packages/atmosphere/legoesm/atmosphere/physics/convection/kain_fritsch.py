@@ -108,6 +108,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -1248,7 +1249,12 @@ def kain_fritsch_convection(
         # -2.01e-4 kg/m^2/s on the deep-tropical column) that the column
         # water+MSE budget below would otherwise carry; implicit_flux
         # telescopes it to the vanishing top/base boundary flux.
-        subsidence_solve="implicit_flux", p_half=p_half, dt=dt,
+        # Promoted from a hardcoded "implicit_flux" to a config field whose
+        # DEFAULT is "implicit_flux" -- shipped behaviour unchanged, but the
+        # matched-kernel SCM-RCE campaign can now address every member of the
+        # mass-flux family through one uniform knob.
+        subsidence_solve=config.subsidence_solve, p_half=p_half, dt=dt,
+        theta_implicit=config.theta_implicit,
     )
     # ``plume.q_c_u`` has already passed through CONDLOAD, so this retained
     # source is the non-precipitating cloud condensate.  The fallout flux
@@ -1270,7 +1276,13 @@ def kain_fritsch_convection(
     # cloud, latent already released).  Measured: closes vapor-MSE on the capped
     # column to machine precision with NO double-count — the kernel's
     # subsidence/detrainment dT does not already carry this latent.
-    dT_dt = dT_dt + (constants.L_v / constants.c_pd) * dq_c_conv_dt
+    # Factored onto the SHARED helper (CLAUDE.md: no duplicated numerics) so
+    # Tiedtke / ZM / Arakawa-Wu use the identical form.  The helper is a no-op
+    # when subsidence_solve == "advective", which is CORRECT: that solve emits
+    # the condensate WITHOUT debiting vapor, so no condensation enthalpy is
+    # owed and adding it would create energy from nothing.
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # Downdraft re-evaporation (POTENTIAL — scaled by the moisture limiter
     # below along with the rest of the CONDLOAD precip cycle).

@@ -108,6 +108,271 @@ from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
 # ---------------------------------------------------------------------------
+# store_mass_flux carry (#1442)
+# ---------------------------------------------------------------------------
+# Units of the stored tracer-advecting mass flux: thickness x velocity.  NOT
+# the "m/s" of the u/v Fields whose dims/staggering these inherit (codex
+# YELLOW 7 -- a mislabelled Field silently mis-scales any CF/netCDF export).
+MASS_FLUX_UNITS = "m^2/s"
+# The vertical partner is a VELOCITY at layer interfaces, not a thickness-
+# weighted face flux -- the continuity operator already divided by thickness.
+MASS_FLUX_W_UNITS = "m/s"
+MASS_FLUX_W_DIMS = ("lat", "lon", "level_interface")
+MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+
+
+def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
+    """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
+
+    THE SINGLE CONSTRUCTOR for these Fields (#1442).  Both the hot-path capture
+    in ``_step_impl`` and the ``seed_scan_carry`` / SPMD pre-seed go through
+    here, so the seeded carry's metadata is IDENTICAL to what the step writes.
+    That identity is load-bearing, not cosmetic: ``Field`` carries its
+    ``name``/``dims``/``units``/``staggering`` as pytree AUX DATA, so a seed
+    that differs in ANY of them is a different treedef and ``lax.scan`` rejects
+    the carry (the same trap the leapfrog ``u_before`` seeding comment records).
+
+    ``u_field``/``v_field`` donate dims and staggering (identical face layout);
+    only ``name`` and ``units`` are overridden.  ``w_field`` donates only its
+    staggering -- ``mass_flux_w`` lives at layer INTERFACES (nlev+1), one more
+    level than ``state.w``, so it carries its own dims.
+    """
+    return (
+        u_field.replace(data=mfu_data, name="mass_flux_u",
+                        units=MASS_FLUX_UNITS),
+        v_field.replace(data=mfv_data, name="mass_flux_v",
+                        units=MASS_FLUX_UNITS),
+        w_field.replace(data=mfw_data, name="mass_flux_w",
+                        dims=MASS_FLUX_W_DIMS, units=MASS_FLUX_W_UNITS),
+    )
+
+
+def _is_canonical_mass_flux(field, canonical, want_shape, want_dtype) -> bool:
+    """True when ``field`` already matches what the step writes, exactly.
+
+    The exit condition for :func:`seed_mass_flux_carry`'s fast path.  It must
+    cover EVERYTHING the slow path would have produced, or the fast path is a
+    hole -- so it compares against a Field BUILT BY ``mass_flux_fields`` from
+    the same donors, using ``Field.tree_flatten``'s own aux tuple rather than
+    a hand-listed subset.
+
+    That indirection is the point (codex round-8 RED 2).  The hand-listed
+    version checked ``name`` and ``units`` and silently ignored ``dims`` (for
+    the u/v pair), ``long_name`` and ``staggering`` -- all of which ARE pytree
+    aux data, all of which the step re-derives from the donor field, and any
+    one of which is enough to make the next ``lax.scan`` reject the carry.
+    Comparing the flattened aux tuple cannot omit a member, and it keeps
+    tracking ``Field`` if that class ever gains one.
+
+    SHAPE and DTYPE are compared too -- they are dynamic, not aux, so
+    ``tree_flatten`` does not cover them, and a ``lax.scan`` rejects a carry on
+    either.  The slow path raises on a shape mismatch and zero-fills at the
+    donor's dtype, so a fast path that skipped them would silently accept a
+    ``v_lower``-shaped slot in a global state, or an f64 slot in an f32 state
+    that the step then re-emits at storage precision (codex round-9 YELLOW 3).
+    """
+    if field is None:
+        return False
+    if tuple(jnp.shape(field.data)) != tuple(want_shape):
+        return False
+    if jnp.asarray(field.data).dtype != want_dtype:
+        return False
+    return field.tree_flatten()[1] == canonical.tree_flatten()[1]
+
+
+def seed_mass_flux_carry(state, store_mass_flux: bool):
+    """Pre-seed the ``mass_flux_*`` slots to zeros for a constant pytree.
+
+    With ``store_mass_flux`` on, the step turns these slots from ``None`` into
+    ``Field``s, which CHANGES THE STATE TREEDEF.  Unseeded that breaks every
+    multi-step entry path, silently until it crashes:
+
+    * ``lax.scan`` -- carry-in structure != carry-out structure (the model's
+      own ``integrate``/``integrate_scan``, the JRA55 block scans in
+      ``run_omip``, the CORE2 ``--scan-block`` in ``omip2_applicator``);
+    * a direct jitted ``step`` loop -- the first step retraces and recompiles;
+    * the SPMD ``shard_map`` -- ``out_specs`` is derived from the INPUT state,
+      so an output leaf with no matching spec is an error.
+
+    Zeros are the correct seed (unlike ``bt_hist``, whose zero reads as a
+    meaningful "continuation" state): nothing in the step READS these slots --
+    they are written unconditionally every step when the flag is on -- so the
+    seed value can never reach the trajectory.
+
+    SHAPE-AGNOSTIC: shapes come from ``state.u``/``state.v``/``state.w``, so
+    this is correct for the full-domain state AND for the SPMD ``v_lower``
+    carrier (where ``state.v`` already has the n_lat, not n_lat+1, leading
+    dim).
+
+    CANONICALIZING, not merely filling (codex round-6 YELLOW 4).  Every slot is
+    rebuilt through :func:`mass_flux_fields`, INCLUDING ones that arrive
+    already populated: a pair restored from a state built by an earlier commit
+    carries the old ``units="m/s"`` metadata, and since Field metadata is
+    pytree aux data that alone is a treedef mismatch against what the step
+    writes.  Preserving such a Field verbatim -- which the first version of
+    this function did -- would reintroduce exactly the scan crash it exists to
+    prevent.
+
+    VALUES are RETAINED SUBJECT TO THE DTYPE CONVERSION; metadata is
+    normalized.  The cast is deliberate and can be lossy (f64 -> the f32
+    storage donor), and a caller CAN observe the narrowed values on the seeded
+    carry before the next step overwrites them -- so "preserved" would be too
+    strong.  It is done because a slot at a different precision is a
+    ``lax.scan`` carry mismatch the moment the step re-emits it at storage
+    precision, and these are per-step diagnostics.  A populated slot whose
+    SHAPE disagrees with its donor field is a hard error instead -- checked
+    BEFORE the cast, so a slot that is wrong in both still raises.
+
+    Idempotent, and a no-op when the flag is off.  The already-canonical fast
+    path below is keyed on the METADATA, not merely on "every slot is
+    non-None" (codex round-6 YELLOW 4 / round-7 YELLOW 5): the cheap
+    non-None test is exactly the shortcut that lets a legacy ``m/s`` pair
+    through, so it must not be the exit condition.  Persistent-SPMD host loops
+    call this every step and hit the fast path from step 2 on.
+
+    NON-GOAL (explicit, so a later reviewer does not re-open it): this is not
+    an adversarial boundary.  The checks here exist to catch DRIFT -- a state
+    assembled by an older commit, a v_lower carrier handed to a global path, a
+    restart archive written under a previous convention -- on a shared HPC
+    filesystem where the realistic threats are stale artefacts and my own
+    mistakes.  A hand-forged state that satisfies every check and still lies,
+    or a caller that mutates the slots after seeding, is out of scope; the
+    step overwrites all three unconditionally on the next call anyway.
+    """
+    if not store_mass_flux:
+        return state
+    nlev_i = state.w.data.shape[-1] + 1          # interfaces = nlev + 1
+    _shapes = {
+        "mass_flux_u": tuple(jnp.shape(state.u.data)),
+        "mass_flux_v": tuple(jnp.shape(state.v.data)),
+        "mass_flux_w": tuple(jnp.shape(state.w.data))[:-1] + (nlev_i,),
+    }
+    # Reference Fields built from the SAME donors the step uses.  Only their
+    # AUX data is read (the donors' own arrays are passed straight through as
+    # placeholders -- no allocation, no device work); shapes are checked
+    # separately against ``_shapes``.
+    _canon = mass_flux_fields(state.u, state.v, state.w,
+                              state.u.data, state.v.data, state.w.data)
+    _dtype = jnp.asarray(state.u.data).dtype
+    if all(_is_canonical_mass_flux(getattr(state, _n), _c, _shapes[_n], _dtype)
+           for _n, _c in zip(MASS_FLUX_SLOTS, _canon)):
+        return state
+
+    def _data(slot, donor_shape):
+        cur = getattr(state, slot)
+        if cur is None:
+            return jnp.zeros(donor_shape, dtype=_dtype)
+        # SHAPE FIRST, then dtype (codex round-10 RED 1).  The round-9 version
+        # normalized dtype and RETURNED before validating the shape, so a slot
+        # that was wrong in BOTH was silently narrowed and accepted -- the
+        # guard stopped firing for exactly the states it most needed to catch.
+        # A wrong shape is a hard error; a wrong dtype is a fixable
+        # normalization, so the error has to come first.
+        got = tuple(jnp.shape(cur.data))
+        if got != tuple(donor_shape):
+            raise ValueError(
+                f"seed_mass_flux_carry: {slot} has shape {got}, expected "
+                f"{tuple(donor_shape)}.  A stored mass flux must match its "
+                "u/v/w face layout; a mismatch means the state was assembled "
+                "for a different grid or a different (v_lower vs global) "
+                "staggering carrier.")
+        # Dtype is normalized to the donor's: a slot at a different precision
+        # is a lax.scan carry mismatch once the step re-emits it at storage
+        # precision (codex round-9 YELLOW 3).
+        if jnp.asarray(cur.data).dtype != _dtype:
+            return jnp.asarray(cur.data).astype(_dtype)
+        return cur.data
+
+    mfu, mfv, mfw = mass_flux_fields(
+        state.u, state.v, state.w,
+        _data("mass_flux_u", _shapes["mass_flux_u"]),
+        _data("mass_flux_v", _shapes["mass_flux_v"]),
+        _data("mass_flux_w", _shapes["mass_flux_w"]))
+    return state._replace(mass_flux_u=mfu, mass_flux_v=mfv, mass_flux_w=mfw)
+
+
+# ---------------------------------------------------------------------------
+# store_salt_flux carry (gateway exact-salt instrument)
+# ---------------------------------------------------------------------------
+# Column-integrated advective salt flux: thickness x velocity x salinity,
+# summed over levels.  2-D by design -- see the ``salt_flux_u_int`` state
+# docstring for the cost/scope decision.
+SALT_FLUX_UNITS = "psu m^2/s"
+SALT_FLUX_U_DIMS = ("lat", "lon_u")
+SALT_FLUX_V_DIMS = ("lat_v", "lon")
+SALT_FLUX_SLOTS = ("salt_flux_u_int", "salt_flux_v_int")
+
+
+def salt_flux_fields(u_field, v_field, sfu_data, sfv_data):
+    """Wrap the column-integrated salt fluxes as the two ``salt_flux_*_int``
+    Fields.  THE SINGLE CONSTRUCTOR, exactly as ``mass_flux_fields`` is for
+    the mass triple: the hot-path capture and every seed go through here so
+    the carry treedef (Field metadata is pytree AUX data) cannot drift.
+
+    ``u_field``/``v_field`` donate staggering; the dims are OWN 2-D tuples
+    (the donors are 3-D level fields) and units are the salt-flux units.
+    """
+    return (
+        u_field.replace(data=sfu_data, name="salt_flux_u_int",
+                        dims=SALT_FLUX_U_DIMS, units=SALT_FLUX_UNITS),
+        v_field.replace(data=sfv_data, name="salt_flux_v_int",
+                        dims=SALT_FLUX_V_DIMS, units=SALT_FLUX_UNITS),
+    )
+
+
+def seed_salt_flux_carry(state, store_salt_flux: bool):
+    """Pre-seed ``salt_flux_u_int``/``salt_flux_v_int`` for a constant pytree.
+
+    The salt sibling of :func:`seed_mass_flux_carry`, for the same reason:
+    with the flag on the step turns the slots from ``None`` into ``Field``s,
+    which changes the state treedef and breaks every multi-step entry path
+    (``lax.scan`` carries, jitted step loops, SPMD ``shard_map`` out_specs).
+    Zeros are the correct seed -- nothing reads the slots; the step
+    overwrites them unconditionally every step when the flag is on.
+
+    SHAPE-AGNOSTIC via the u/v donors (correct for the global state AND the
+    SPMD ``v_lower`` carrier); CANONICALIZING like the mass version (a
+    populated slot is rebuilt through :func:`salt_flux_fields`, its dtype
+    normalized to the donor's, and a shape mismatch is a hard error --
+    checked BEFORE the cast).  Idempotent; no-op when the flag is off.
+    The same drift-not-adversary NON-GOAL applies.
+    """
+    if not store_salt_flux:
+        return state
+    _shapes = {
+        "salt_flux_u_int": tuple(jnp.shape(state.u.data))[:-1],
+        "salt_flux_v_int": tuple(jnp.shape(state.v.data))[:-1],
+    }
+    _canon = salt_flux_fields(state.u, state.v, state.u.data, state.v.data)
+    _dtype = jnp.asarray(state.u.data).dtype
+    if all(_is_canonical_mass_flux(getattr(state, _n), _c, _shapes[_n], _dtype)
+           for _n, _c in zip(SALT_FLUX_SLOTS, _canon)):
+        return state
+
+    def _data(slot, want_shape):
+        cur = getattr(state, slot)
+        if cur is None:
+            return jnp.zeros(want_shape, dtype=_dtype)
+        got = tuple(jnp.shape(cur.data))
+        if got != tuple(want_shape):
+            raise ValueError(
+                f"seed_salt_flux_carry: {slot} has shape {got}, expected "
+                f"{tuple(want_shape)}.  A stored salt flux must match its "
+                "u/v face layout; a mismatch means the state was assembled "
+                "for a different grid or a different (v_lower vs global) "
+                "staggering carrier.")
+        if jnp.asarray(cur.data).dtype != _dtype:
+            return jnp.asarray(cur.data).astype(_dtype)
+        return cur.data
+
+    sfu, sfv = salt_flux_fields(
+        state.u, state.v,
+        _data("salt_flux_u_int", _shapes["salt_flux_u_int"]),
+        _data("salt_flux_v_int", _shapes["salt_flux_v_int"]))
+    return state._replace(salt_flux_u_int=sfu, salt_flux_v_int=sfv)
+
+
+# ---------------------------------------------------------------------------
 # Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
 # ---------------------------------------------------------------------------
 
@@ -190,8 +455,19 @@ def _compute_advection_flux_div(
     recon_fill_mask: jnp.ndarray | None = None,
     linssh_top_flux: bool = False,
     tr_before: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    return_h_fluxes: bool = False,
+):
     """Compute advection flux divergence for a single tracer field.
+
+    ``return_h_fluxes`` (static Python bool): additionally return the
+    HORIZONTAL face flux pair ``(tracer_flux_u, tracer_flux_v)`` [tracer
+    m^2/s per level] as a 4-tuple ``(div_hut, vert_flux_div, F_u, F_v)`` --
+    the arrays whose divergence IS ``div_hut``, i.e. what the flux-form
+    update actually moves through the faces (store_salt_flux capture).
+    RAISES for the schemes that form fluxes inside their own kernels
+    (``ppm_fct``/``fct2``/``dst3_multidim``): exposing a DIFFERENT
+    reconstruction there would store a flux the model did not apply
+    (refuse-not-ignore).
 
     ``tr_before`` (leapfrog only): BEFORE-level (Kbb) tracer for the FCT
     monotonicity base (see ``fct_tracer_advection``).  ``None`` on the FE/AB2
@@ -242,6 +518,14 @@ def _compute_advection_flux_div(
         if tr_before is not None:
             tr_before = neumann_fill_cgrid(tr_before, recon_fill_mask, grid=grid)
 
+    if return_h_fluxes and tracer_advection in ("ppm_fct", "fct2",
+                                                "dst3_multidim"):
+        raise ValueError(
+            f"return_h_fluxes: tracer_advection={tracer_advection!r} forms "
+            "its limited fluxes inside its own kernel and does not expose "
+            "them; a store_salt_flux capture here would not be the applied "
+            "flux.  Use an exposed-flux scheme (upwind/tvd/superbee/"
+            "centered/ppm/dst3/weno5/weno7).")
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
         div_hut, vert_flux_div = fct_tracer_advection(
@@ -358,6 +642,19 @@ def _compute_advection_flux_div(
             f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
+    if return_h_fluxes:
+        try:
+            _h_flux_pair = (tracer_flux_u, tracer_flux_v)
+        except NameError:
+            # Structurally unreachable: every scheme that falls through to
+            # here either bound the pair above or raised at entry.  Kept as a
+            # hard error so a NEW scheme added without exposing its fluxes
+            # cannot silently return garbage under the capture flag.
+            raise ValueError(
+                f"return_h_fluxes: scheme {tracer_advection!r} reached the "
+                "return without binding tracer_flux_u/v -- wire its capture "
+                "or add it to the refused set.")
+
     if linssh_top_flux:
         # NEMO key_linssh top-cell concentration/dilution: the surface
         # vertical advective flux is F[0] = w0*T0 (first-order, OUTSIDE any
@@ -368,6 +665,8 @@ def _compute_advection_flux_div(
         vert_flux_div = vert_flux_div.at[..., 0].add(
             w_baro[..., 0] * tr[..., 0])
 
+    if return_h_fluxes:
+        return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
     return div_hut, vert_flux_div
 
 
@@ -395,8 +694,17 @@ def compute_advection_flux_div_pair(
     linssh_top_flux: bool = False,
     tr_a_before: jnp.ndarray | None = None,
     tr_b_before: jnp.ndarray | None = None,
+    return_b_h_fluxes: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    ``return_b_h_fluxes`` (static Python bool, store_salt_flux capture):
+    additionally return tracer B's HORIZONTAL face flux pair, as a 3-tuple
+    ``(pair_a, pair_b, (F_u_b, F_v_b))``.  The capture takes the UNFUSED
+    per-tracer path unconditionally: the fused level-stack (opt-in via
+    LEGOESM_TRACER_PAIR=1, documented bit-identical and measured SLOWER)
+    would need its slice bookkeeping duplicated here for no numeric
+    difference.  Default False returns the legacy 2-tuple, byte-identical.
 
     ``tr_a_before``/``tr_b_before`` (leapfrog only): BEFORE-level (Kbb) tracers
     forwarded to the FCT monotonicity base (see ``fct_tracer_advection``).  FCT
@@ -431,25 +739,29 @@ def compute_advection_flux_div_pair(
     # Kept opt-in: bit-identical (tests/ocean/unit/
     # test_tracer_pair_advection.py) and the trade may flip on GPU.
     if (
-        tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
+        return_b_h_fluxes
+        or tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
         or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
     ):
-        return (
-            _compute_advection_flux_div(
-                tr_a, tracer_advection, mass_flux_u, mass_flux_v,
-                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
-                recon_fill_mask=recon_fill_mask,
-                linssh_top_flux=linssh_top_flux,
-                tr_before=tr_a_before,
-            ),
-            _compute_advection_flux_div(
-                tr_b, tracer_advection, mass_flux_u, mass_flux_v,
-                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
-                recon_fill_mask=recon_fill_mask,
-                linssh_top_flux=linssh_top_flux,
-                tr_before=tr_b_before,
-            ),
+        pair_a = _compute_advection_flux_div(
+            tr_a, tracer_advection, mass_flux_u, mass_flux_v,
+            w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
+            tr_before=tr_a_before,
         )
+        out_b = _compute_advection_flux_div(
+            tr_b, tracer_advection, mass_flux_u, mass_flux_v,
+            w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            recon_fill_mask=recon_fill_mask,
+            linssh_top_flux=linssh_top_flux,
+            tr_before=tr_b_before,
+            return_h_fluxes=return_b_h_fluxes,
+        )
+        if return_b_h_fluxes:
+            div_b, vert_b, sf_u, sf_v = out_b
+            return pair_a, (div_b, vert_b), (sf_u, sf_v)
+        return pair_a, out_b
 
     nlev = tr_a.shape[-1]
     # Wall tracer BC (#480): fill the HORIZONTAL reconstruction tracer over the
@@ -831,7 +1143,21 @@ def static_kappa_redi_override(gm_cfg, grid):
     n_lon = int(getattr(grid, "n_lon"))
     kappa_T = (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)
+    # cos at the TRUE v-face latitude, matching NEMO's cos(gphiv).  Carried by
+    # BOTH LatLonGrid and LatLonCGridGeometry (the from-rest path); do NOT
+    # rebuild it from midpoints of grid.lat -- on a stretched grid the true
+    # faces are not the midpoints (DINO: 2.5e-4) -- and do NOT substitute
+    # vface_zonal_cos_lat, which is the #516 pole-zeroed transport metric.
     cos_lat_v = jnp.asarray(grid.cos_lat_v)[1:]           # north face of cell j
+    if bool(getattr(getattr(grid, "fold", None), "is_active", False)):
+        # Tripole has NO 1-D v-face axis; its cos_lat_v is a zonal-mean
+        # representative, not the real face metric.  The ndim!=1 guard above
+        # does NOT catch it (tripole stores a zonal-mean 1-D lat), so refuse
+        # here rather than run a fabricated ahtv.  fold.is_active is a STATIC
+        # Python bool -- never inspect array VALUES here, this runs inside jit.
+        raise ValueError(
+            "kappa_redi_lat_scaling needs a 1-D v-face cos(lat_v); a tripolar "
+            "grid has no 1-D v-face axis. Supply a 2-D kappa_Redi field.")
     kappa_v = (gm_cfg.kappa_Redi * cos_lat_v)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat_v.dtype)
     return kappa_T, kappa_v
@@ -1574,6 +1900,7 @@ class LatLonCGridOceanModel:
             VALID_MOMENTUM_FLUX_SCHEME,
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
+            VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -1632,6 +1959,21 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
                 f"got {config.lateral_viscosity_operator!r}",
             )
+        # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
+        _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
+        if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
+            raise ValueError(
+                f"lateral_viscosity_e3_weighting must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_E3_WEIGHTING)}, "
+                f"got {_e3w!r}",
+            )
+        if _e3w != "off" and config.lateral_viscosity_operator != "nemo_div_curl":
+            raise ValueError(
+                "lateral_viscosity_e3_weighting != 'off' requires "
+                "lateral_viscosity_operator='nemo_div_curl' (it selects the "
+                f"e3-weighting of THAT operator's div/curl); got "
+                f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
+            )
         _vert_mom_scheme = getattr(
             config, "vertical_momentum_scheme", "upwind_perturbation")
         if _vert_mom_scheme not in VALID_VERTICAL_MOMENTUM_SCHEME:
@@ -1639,6 +1981,18 @@ class LatLonCGridOceanModel:
                 f"vertical_momentum_scheme must be one of "
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
+            )
+        # #1226 level-29-onset fix: bottom/straddling-face mask convention for
+        # nemo_advective_vertical_momentum_advection (only consumed under
+        # vertical_momentum_scheme="nemo_advective"; validated unconditionally
+        # here so a typo on ANY recipe fails fast at config construction).
+        from legoesm.ocean.vertical import VALID_ZAD_BOTTOM_FACE_MASK
+        _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
+        if _zad_mask_mode not in VALID_ZAD_BOTTOM_FACE_MASK:
+            raise ValueError(
+                f"zad_bottom_face_mask must be one of "
+                f"{sorted(VALID_ZAD_BOTTOM_FACE_MASK)}, "
+                f"got {_zad_mask_mode!r}",
             )
         # Reject centered_full / nemo_advective + adaptive-implicit vertadv:
         # the adaptive-implicit path (ln_zad_Aimp) replaces the explicit
@@ -1725,6 +2079,28 @@ class LatLonCGridOceanModel:
             if (_vm is not None and getattr(_vm, "scheme", None) == "tke"
                     and getattr(getattr(_vm, "tke", None), "prognostic", False)):
                 _unsupported.append("prognostic TKE")
+            # store_mass_flux (#1442, codex RED 5): the capture lives in
+            # _step_impl, which _unsplit_ab2_step BYPASSES entirely (it advects
+            # tracers through the advective-form tendency -- there is no shared
+            # mass-flux block to capture).  Silently, the slots would stay None
+            # on step 1 and then hold a STALE value forever once seeded, which a
+            # transport diagnostic would integrate as if it were live.  Reject,
+            # exactly as prescribed_flow is rejected for the same structural
+            # reason (see _validate_config's prescribed_flow guard).
+            if getattr(config, "store_mass_flux", False):
+                _unsupported.append(
+                    "store_mass_flux (the tracer-advecting flux is formed "
+                    "inside the advective-form tendency, not in a shared "
+                    "mass-flux block the step can capture)")
+            if getattr(config, "store_salt_flux", False):
+                # codex round-1 RED 3: same bypass -- _unsplit_ab2_step never
+                # runs _step_impl's capture, so the seeded 2-D slots would sit
+                # at ZERO forever and require_salt=True would happily integrate
+                # an exact salt transport of 0 (a lie with the right shape).
+                _unsupported.append(
+                    "store_salt_flux (the advective salt flux is formed "
+                    "inside the advective-form tendency the unsplit step "
+                    "uses; the capture lives in _step_impl)")
             if _unsupported:
                 raise ValueError(
                     'barotropic_solver="implicit_unsplit" does not yet support: '
@@ -1980,14 +2356,16 @@ class LatLonCGridOceanModel:
                     "(Nbb) tracers only exist as state.T_before/S_before "
                     "under the leap-frog (NEMO Modified-Leap-Frog) time "
                     f"integrator. Got outer_integrator={_outer_int!r}.")
-            if (getattr(_tke_cfg_ctor, "tke_shear_production",
-                        "squared_centered") == "nemo_burchard"
+            _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
+                                     "squared_centered")
+            if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int != "leapfrog"):
                 raise ValueError(
-                    'vertical_mixing.tke.tke_shear_production='
-                    '"nemo_burchard" requires outer_integrator="leapfrog": '
-                    "the Burchard now×before shear cross term only exists "
-                    "as state.u_before/v_before under the leap-frog (NEMO "
+                    f'vertical_mixing.tke.tke_shear_production='
+                    f'{_tke_shear_ctor!r} requires outer_integrator='
+                    '"leapfrog": both the Burchard now×before cross term '
+                    "and its face-native extension only exist as "
+                    "state.u_before/v_before under the leap-frog (NEMO "
                     f"Modified-Leap-Frog) time integrator. Got "
                     f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
@@ -2151,6 +2529,43 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
+        if getattr(config, "store_salt_flux", False):
+            # Refuse-not-ignore: the capture stores "the flux the model
+            # applied", which is only well-defined per step on the euler
+            # path with a scheme that exposes its horizontal fluxes.  AB2
+            # extrapolates two levels' divergences, RK3 combines stages,
+            # FCT/multidim form fluxes inside their kernels, SOM advects
+            # moments -- storing any single-stage pair there would be a lie
+            # with the right shape.
+            if config.tracer_time_integrator != "euler":
+                raise ValueError(
+                    "store_salt_flux requires tracer_time_integrator="
+                    f"'euler' (got {config.tracer_time_integrator!r}): under "
+                    "AB2/RK3 the applied salt flux is a multi-level/staged "
+                    "combination the capture would misrepresent.")
+            _outer_for_salt = getattr(config, "outer_integrator",
+                                      "forward_euler")
+            if _outer_for_salt != "forward_euler":
+                # codex round-1 RED 2: the OUTER AB2 blends the FULL explicit
+                # tracer increment (S_incr_prev) across steps -- the applied
+                # update is a_n*dS^n - a_p*dS^{n-1} even with the inner
+                # integrator at euler, so the per-step captured pair is NOT
+                # the applied flux.  Leapfrog applies 2*dt*F^n to the BEFORE
+                # state (a different base and weight).  Refuse both.
+                raise ValueError(
+                    "store_salt_flux requires outer_integrator="
+                    f"'forward_euler' (got {_outer_for_salt!r}): the outer "
+                    "AB2/leapfrog combine explicit tracer increments across "
+                    "time levels, so a single-step captured flux would not "
+                    "be the applied one.")
+            if config.tracer_advection in ("ppm_fct", "fct2",
+                                           "dst3_multidim", "som"):
+                raise ValueError(
+                    "store_salt_flux is not supported with tracer_advection="
+                    f"{config.tracer_advection!r}: the scheme does not expose "
+                    "its horizontal face fluxes (FCT/multidim form them "
+                    "in-kernel; SOM advects moments).  Use upwind/tvd/"
+                    "superbee/centered/ppm/dst3/weno5/weno7.")
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
@@ -4044,14 +4459,41 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             else:
-                _pair_divs = compute_advection_flux_div_pair(
-                    T_mid, S_mid, _adv,
-                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
-                    h_k_old, h_u_old, h_v_old, _grid, dt,
-                    recon_fill_mask=_wall_fill_mask,
-                    linssh_top_flux=_linssh,
-                    tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
-                )
+                # store_salt_flux capture (static config bool): ask the pair
+                # helper for tracer B's (= SALT's) horizontal face flux pair
+                # -- the SAME arrays whose divergence updates S below, not a
+                # recomputation.  Constructor guards restrict the flag to the
+                # euler integrator and exposed-flux schemes, so this branch
+                # is the only advection lane it can reach.
+                _cap_salt = bool(getattr(self.config, "store_salt_flux",
+                                         False))
+                if _cap_salt:
+                    _pair_a, _pair_b, (_sf_u3, _sf_v3) = (
+                        compute_advection_flux_div_pair(
+                            T_mid, S_mid, _adv,
+                            mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
+                            h_k_old, h_u_old, h_v_old, _grid, dt,
+                            recon_fill_mask=_wall_fill_mask,
+                            linssh_top_flux=_linssh,
+                            tr_a_before=_T_adv_before,
+                            tr_b_before=_S_adv_before,
+                            return_b_h_fluxes=True,
+                        ))
+                    _pair_divs = (_pair_a, _pair_b)
+                    # Column integral NOW, while the 3-D pair is live: the
+                    # state stores only the 2-D vertical sum (see the state
+                    # docstring for the 145 MB-vs-2 MB decision).
+                    _salt_flux_u2 = _sf_u3.sum(axis=-1)
+                    _salt_flux_v2 = _sf_v3.sum(axis=-1)
+                else:
+                    _pair_divs = compute_advection_flux_div_pair(
+                        T_mid, S_mid, _adv,
+                        mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
+                        h_k_old, h_u_old, h_v_old, _grid, dt,
+                        recon_fill_mask=_wall_fill_mask,
+                        linssh_top_flux=_linssh,
+                        tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
+                    )
 
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
@@ -4174,6 +4616,61 @@ class LatLonCGridOceanModel:
             S=state_new.S.replace(data=S_corrected),
             w=w_field,
         )
+
+        # #1442: keep the tracer-advecting mass fluxes instead of discarding
+        # them.  PURE DIAGNOSTIC -- read-only capture of values this step
+        # already computed; nothing above depends on the branch, so the
+        # trajectory is bit-identical with the flag off or on.
+        #
+        # ``mass_flux_u_tr``/``mass_flux_v_tr`` (NOT ``mass_flux_u``/``_v``) are
+        # what lines ~3961/3965 actually advect T and S with: they start as
+        # ``h_u_old * u_corrected`` -- i.e. WITH the barotropic transport
+        # correction ``(Hu_avg - Hu_3d)/H_u_old`` that never reaches
+        # ``state.u`` -- and are REPLACED by the bolus-inclusive flux under the
+        # EXACT condition ``_want_bolus`` tests above, namely BOTH
+        # ``gm_redi.gm_bolus_advection == "through_fct"`` AND
+        # ``gm_redi.slope_scheme == "nemo_iso_lap"`` (the default "centred"
+        # bolus is an in-operator flux and never enters this pair; no other
+        # slope scheme exports a bolus transport at all).  Storing the ``_tr``
+        # pair therefore closes the barotropic omission always, and the
+        # GM-bolus omission in that configuration.
+        #
+        # Static Python bool on a config leaf, so this is a compile-time
+        # branch (the CLAUDE.md feature-gating exception): only one side is
+        # ever traced and the pytree structure is fixed for the whole run.
+        #
+        # A MATCHED TRIPLE: ``w_baro_tr`` is stored alongside the horizontal
+        # pair.  ``state.w`` above is built from the BASE ``w_baro`` (it is the
+        # momentum/continuity/eta vertical velocity and must not change), so
+        # under through-FCT GM the stored pair and ``state.w`` are NOT
+        # consistent -- storing the pair's own vertical partner is what closes
+        # that (codex YELLOW 9).  With GM off, ``w_baro_tr is w_baro``.
+        #
+        # Metadata comes from the SHARED ``mass_flux_fields`` constructor that
+        # ``seed_mass_flux_carry`` also uses, so the scan carry's treedef
+        # (Field name/dims/units are pytree AUX data) matches this exactly.
+        if self.config.store_mass_flux:
+            _mfu_field, _mfv_field, _mfw_field = mass_flux_fields(
+                state.u, state.v, state.w,
+                mass_flux_u_tr, mass_flux_v_tr, w_baro_tr)
+            state_new = state_new._replace(mass_flux_u=_mfu_field,
+                                           mass_flux_v=_mfv_field,
+                                           mass_flux_w=_mfw_field)
+
+        # store_salt_flux: the column-integrated advective SALT flux pair the
+        # S update above was evaluated with (gateway exact-salt instrument).
+        # Same pure-diagnostic contract as the mass triple: read-only capture
+        # of arrays this step already computed; static config bool; metadata
+        # through the SHARED salt_flux_fields constructor so the scan-carry
+        # treedef matches seed_salt_flux_carry exactly.  The constructor
+        # guards (euler + exposed-flux scheme + not SOM) make the capture
+        # branch above the only lane, so _salt_flux_u2/_v2 are always bound
+        # here when the flag is on.
+        if getattr(self.config, "store_salt_flux", False):
+            _sfu_field, _sfv_field = salt_flux_fields(
+                state.u, state.v, _salt_flux_u2, _salt_flux_v2)
+            state_new = state_new._replace(salt_flux_u_int=_sfu_field,
+                                           salt_flux_v_int=_sfv_field)
 
         # 8. Freshwater forcing (virtual salt flux only)
         #
@@ -4595,8 +5092,13 @@ class LatLonCGridOceanModel:
         machinery as ``zdf_drag_in_matrix``
         (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
         :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
-        re-derived drag coefficient. ``cc_state`` must already carry
-        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``).
+        re-derived drag coefficient. ``cc_state`` normally already carries
+        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``); under
+        ``tke_shear_production="nemo_face_native"`` the caller instead
+        passes the RAW (uncollapsed) face state (so ``_vmix_K_profiles`` can
+        reconstruct zdfsh2.F90's face-native shear) — this helper collapses
+        u/v to the T-point itself in that case, exactly like every other
+        caller of ``_vmix_K_profiles`` already does before this stage.
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4624,8 +5126,12 @@ class LatLonCGridOceanModel:
         h_k = self.z_coord.h_partial
         _bl = jnp.maximum(self.z_coord.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_bot = jnp.take_along_axis(cc_state.u.data, _bl_idx, axis=-1)[..., 0]
-        v_bot = jnp.take_along_axis(cc_state.v.data, _bl_idx, axis=-1)[..., 0]
+        u_cc, v_cc = cc_state.u.data, cc_state.v.data
+        if u_cc.shape[1] != h_k.shape[1]:
+            u_cc = 0.5 * (u_cc[:, :-1, :] + u_cc[:, 1:, :])
+            v_cc = 0.5 * (v_cc[:-1, :, :] + v_cc[1:, :, :])
+        u_bot = jnp.take_along_axis(u_cc, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(v_cc, _bl_idx, axis=-1)[..., 0]
         h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
         r_t = nemo_effective_bottom_drag_r(
             u_bot, v_bot, h_bot,
@@ -5335,12 +5841,32 @@ class LatLonCGridOceanModel:
                     vertical_mixing=VerticalMixingConfig(scheme="none"),
                     convection=OceanConvectionConfig(scheme="none"),
                 )
-            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
-            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
-            cc_state = state._replace(
-                u=state.u.replace(data=u_cell),
-                v=state.v.replace(data=v_cell),
+            # #1226 sh2_walk.py Candidate E/F (nemo_face_native): that TKE
+            # branch of _vmix_K_profiles self-detects face-staggered vs.
+            # cell-centred u/v (k_profiles.py:513) and needs the RAW
+            # (uncollapsed) faces to reconstruct zdfsh2.F90's face-native
+            # shear -- pre-collapsing here (as every OTHER scheme requires;
+            # richardson/catke pass state.u.data straight through with no
+            # staggering check of their own) would silently degrade
+            # nemo_face_native to the T-collapsed Burchard geometry. Skip
+            # the collapse ONLY for this scheme+option combination; every
+            # other scheme/option keeps the BIT-IDENTICAL pre-collapse.
+            _vmix_cfg_here = getattr(physics_config, "vertical_mixing", None)
+            _keep_raw_faces = (
+                _vmix_cfg_here is not None
+                and _vmix_cfg_here.scheme == "tke"
+                and getattr(_vmix_cfg_here.tke, "tke_shear_production",
+                           "squared_centered") == "nemo_face_native"
             )
+            if _keep_raw_faces:
+                cc_state = state
+            else:
+                u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+                v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+                cc_state = state._replace(
+                    u=state.u.replace(data=u_cell),
+                    v=state.v.replace(data=v_cell),
+                )
             # Use the model's own EOS for the vmix density / static-stability
             # N² so the TKE convection trigger (n2_mode="adiabatic") is
             # consistent with the dynamical core. None for Wright leaves the
@@ -7427,6 +7953,18 @@ class LatLonCGridOceanModel:
                 f"(duration={duration!r}, dt={dt!r})",
             )
 
+        # store_mass_flux (#1442, codex round-6 YELLOW 5): seed BEFORE the
+        # first step and before trajectory[0] is captured.  Unseeded, the
+        # jitted step sees a different input treedef on iteration 2 (None ->
+        # Field) and RETRACES, and trajectory[0] carries a different pytree
+        # structure from every later entry -- so a caller that stacks the
+        # trajectory gets a structure error rather than an array.  No-op when
+        # the flag is off.
+        state = seed_mass_flux_carry(
+            state, getattr(self.config, "store_mass_flux", False))
+        state = seed_salt_flux_carry(
+            state, getattr(self.config, "store_salt_flux", False))
+
         trajectory = [state]
         step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
         # Thread the traced elapsed model time ONLY when the equilibrium tide is
@@ -7681,6 +8219,19 @@ class LatLonCGridOceanModel:
             state = state._replace(
                 dtke=Field(data=dtke0, name="dtke",
                            dims=("lat", "lon", "level"), units="m^2/s^3"))
+
+        # store_mass_flux carry (#1442): the step turns mass_flux_u/v from
+        # None into Fields, so an unseeded carry is a None -> Field transition
+        # that crashes lax.scan AND retraces a direct jitted step loop.  Seed
+        # to zeros through the SAME constructor the step writes with, so the
+        # treedef (Field name/dims/units are aux data) matches exactly.  The
+        # seed value is unreachable: nothing READS these slots.  The salt
+        # sibling (store_salt_flux) seeds through ITS shared constructor for
+        # the identical reason.
+        state = seed_mass_flux_carry(
+            state, getattr(self.config, "store_mass_flux", False))
+        state = seed_salt_flux_carry(
+            state, getattr(self.config, "store_salt_flux", False))
 
         # Rigid-lid: pre-build the static island/depth data (host-side
         # flood-fill) so the scan captures it as a compile-time constant, and

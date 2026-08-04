@@ -29,7 +29,7 @@ observation:
   three_dvar_time_hours: 0.0
 
 background_error:
-  horizontal_length_scale_multiplier: 3.0
+  horizontal_length_scale_multiplier: 1.0
   standard_deviation_multiplier: 3.0
   diffusion_iterations: 400
 

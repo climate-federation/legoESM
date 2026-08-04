@@ -35,6 +35,9 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
+from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
 from legoesm.ice.transport import advect_ice_tracers
 from legoesm.ice.itd import (
@@ -55,10 +58,12 @@ from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.rheology import strain_rates
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
     dynamic_to_slab,
+    slab_to_dynamic,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
@@ -78,9 +83,6 @@ def grid_supports_ice_dynamics(grid) -> bool:
     Public so an external coupler driver can pick a supported dynamics scheme
     (or fall back to ``free_drift``) before calling :func:`step_sea_ice`.
     """
-    from legoesm.grids.cubed_sphere import CubedSphereGrid
-    from legoesm.grids.latlon import LatLonGrid
-    from legoesm.grids.voronoi import VoronoiMesh
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
 
 
@@ -98,7 +100,6 @@ def grid_supports_ice_transport(grid) -> bool:
     """
     if grid_supports_ice_dynamics(grid):
         return True
-    from legoesm.grids.latlon import LatLonCGridGeometry
     return isinstance(grid, LatLonCGridGeometry)
 
 
@@ -118,8 +119,6 @@ def _base_spatial_ndim(grid):
     be detected correctly on every grid rather than via the
     cubed-sphere-only ``h.ndim > 3`` heuristic.
     """
-    from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
-    from legoesm.grids.voronoi import VoronoiMesh
     if isinstance(grid, VoronoiMesh):
         return 1
     if isinstance(grid, (LatLonGrid, LatLonCGridGeometry)):
@@ -300,7 +299,6 @@ def step_sea_ice(
     # never produces pole-reaching rows.
     if config.dynamics in ("evp", "mevp") and grid is not None:
         import numpy as _np
-        from legoesm.grids.latlon import LatLonGrid
         if isinstance(grid, LatLonGrid):
             try:
                 lat_host = _np.asarray(grid.lat)
@@ -382,7 +380,6 @@ def step_sea_ice(
                     "init_dynamic_ice_state(shape, n_categories=...) and "
                     "distribute_to_categories before calling step_sea_ice."
                 )
-            from legoesm.ice.state import slab_to_dynamic
             state = slab_to_dynamic(state)
         # Validate dynamic-state shape against the configured number of
         # categories (grid-aware) so a stale state cannot silently run a
@@ -1686,7 +1683,6 @@ def _closing_rate_from_velocity(
     the repo AD rules).  The ``1e-20`` sqrt floors keep the gradient finite at
     zero deformation (numerics floor, not tunable).
     """
-    from legoesm.ice.rheology import strain_rates
     eps_11, eps_22, eps_12 = strain_rates(u_ice, v_ice, grid)
     div = eps_11 + eps_22
     shear = jnp.sqrt((eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2 + 1e-20)

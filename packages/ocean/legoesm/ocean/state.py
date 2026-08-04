@@ -531,6 +531,132 @@ class LatLonCGridOceanState(NamedTuple):
     tau_x_prev: object = None
     tau_y_prev: object = None
     freshwater_eta_prev: object = None
+    # THE TRACER-ADVECTING MASS FLUXES [m^2/s] at u/v faces: a STORAGE-PRECISION
+    # SNAPSHOT of the volume flux this step's flux-form tracer update was
+    # evaluated with (#1442).  Not bit-exact "as used" -- the step's closing
+    # ``cast_pytree(..., "storage")`` rounds these along with everything else,
+    # so a run computing in f64 and storing in f32 keeps the f32 value.  VOLUME
+    # flux only: tracer transports built from it still apply their own face
+    # scheme (the gateway accumulator's UPWIND salt transport is a post-step
+    # diagnostic; the model's own advective salt flux is stored separately by
+    # ``store_salt_flux`` via ``salt_flux_u_int``/``salt_flux_v_int`` below).  Populated ONLY when
+    # ``LatLonCGridOceanConfig.store_mass_flux`` is True; default None => inert,
+    # zero behaviour change (same None-seeding pattern as ``tke``/``bt_hist``).
+    #
+    # WHY THIS EXISTS: ``u``/``v`` are the velocity BEFORE the barotropic
+    # transport correction.  The step forms
+    # ``u_corrected = u + (Hu_avg - Hu_3d)/H_u_old`` and advects tracers with
+    # ``h_u_old * u_corrected`` (plus the GM bolus flux under the exact
+    # condition below: gm_bolus_advection="through_fct" AND
+    # slope_scheme="nemo_iso_lap"), but
+    # ``u_corrected`` is never written back to the state.  So no consumer of a
+    # state or a snapshot could reconstruct the flux the model actually used:
+    # the reconstruction ``h_new * u`` was measured to differ by 0.35-1.28 Sv
+    # per zonal section on eORCA1 -- about 100% of the apparent net at 66N.
+    # These fields close that gap for BOTH the barotropic and the GM-bolus
+    # term.  Shapes match ``u``/``v``: (n_lat, n_lon+1, nlev) and
+    # (n_lat+1, n_lon, nlev); UNITS are ``m^2/s`` (thickness x velocity), NOT
+    # the ``m/s`` of the ``u``/``v`` Fields whose dims/staggering they inherit.
+    #
+    # A MATCHED ADVECTING TRIPLE with ``mass_flux_w`` below -- NOT with
+    # ``state.w``.  ``_step_impl`` diagnoses ``w_baro`` from the BASE
+    # horizontal pair and only afterwards forms the bolus-inclusive ``_tr``
+    # pair, whose own re-diagnosed vertical partner is
+    # ``add_bolus_to_advecting_flux``'s ``w_baro_tr``.  ``state.w`` stays the
+    # BASE ``w_baro`` (it is the momentum/continuity/eta vertical velocity and
+    # must not change), so under ``gm_bolus_advection="through_fct"`` pairing
+    # the stored horizontal fields with ``state.w`` mixes two different
+    # advecting fields.  Pair these three with each other.
+    #
+    # WHAT THE TRIPLE IS, EXACTLY: the ADVECTIVE transport this step's
+    # flux-form tracer update was evaluated with -- the arrays behind the
+    # ``div_h(mass_flux * T_face) + delta_z(mass_flux_w * T_iface)`` term.
+    #
+    # SCOPE, deliberately narrow (codex round-8 YELLOW 6): it is the CURRENT,
+    # INSTANTANEOUS advective field, not the whole tracer update.  Under the
+    # inner AB2 (``tracer_time_integrator="ab2"``) the applied flux divergence
+    # is an extrapolation over ``T_flux_div_prev`` as well; RK3, the outer AB2
+    # and leapfrog combine stages / historical increments; and the non-advective
+    # terms (vertical mixing, GM/Redi diffusion, surface forcing, the
+    # conservation fixer) are not represented here at all.  Reconstructing an
+    # applied tendency needs that history too.
+    #
+    # NO BUDGET IDENTITY IS CLAIMED IN GENERAL, and that is the fourth version
+    # of this note -- the first three each asserted one and each was refuted:
+    #   v1 "divergence-free"       -- false under a moving z* column;
+    #   v2 "== -dh/dt"             -- also false: thickness ALSO moves through
+    #      the freshwater eta forcing, the eta floor and the volume-drift
+    #      projection, none of them advective, none of them in these arrays;
+    #   v3 "not divergence-free"   -- overstated, see the exception below.
+    # A closed 3-D budget needs BOTH thickness time levels PLUS those
+    # source/projection terms; a consumer can rebuild the thicknesses from
+    # ``eta``/``H_bathy`` with ``legoesm.ocean.vertical.compute_layer_thickness``
+    # (the routine the step itself uses).  Do not re-derive a shortcut here.
+    #
+    # CONFIGURATIONS WHERE THE TRIPLE IS NON-DIVERGENT TO ROUND-OFF (not
+    # exactly -- these arrays are stored at the run's storage precision, so
+    # even an analytically exact relation shows a few ULP, and NONE of this is
+    # covered by a test): a FIXED column, i.e. ``linear_free_surface`` (NEMO
+    # key_linssh, where ``compute_ocean_jacobian`` pins the column to its
+    # eta = 0 reference) or the rigid lid.  There the layer thickness is
+    # time-INVARIANT, ``dh/dt`` vanishes, and the diagnosed ``w`` is the pure
+    # continuity integral of the horizontal divergence.  It is the MOVING-z*
+    # (default) column that carries the sigma/thickness tendency.  Treat this
+    # paragraph as a POINTER, not a citable fact: verify it for your config
+    # before relying on it.
+    #
+    # The one invariant a test pins: the GM BOLUS INCREMENT carried by the
+    # triple is discretely NON-DIVERGENT (the bolus is column-non-divergent by
+    # construction and ``w_baro_tr`` is re-diagnosed through the SAME
+    # continuity operator), so the through-FCT and centred arms have IDENTICAL
+    # total divergence.  That is what makes the FCT limiter
+    # constancy-preserving on the bolus-augmented field.
+    #
+    # EXACT IN THE OPERATORS, TO ROUND-OFF IN THESE ARRAYS.  The relation holds
+    # exactly for the pre-cast fields inside the step; the three legs stored
+    # here are independently rounded to the storage precision, so a consumer
+    # measures it to a few ULP, not to zero.  The test asserts it with a
+    # tolerance for exactly that reason -- do not read "exact" off this
+    # paragraph and then report a residual as a defect.
+    mass_flux_u: object = None
+    mass_flux_v: object = None
+    # The VERTICAL partner of the pair above [m/s], at layer INTERFACES:
+    # ``add_bolus_to_advecting_flux``'s ``w_baro_tr``, re-diagnosed from the
+    # bolus-augmented horizontal divergence by the SAME continuity operator
+    # that built ``w_baro``.  Shape ``(n_lat, n_lon, nlev+1)`` -- one MORE
+    # level than ``state.w`` (which is the interface pair averaged to cell
+    # centres), and cell-centred horizontally, so it shards/scatters exactly
+    # like a tracer.  Equals the base ``w_baro`` when GM through-FCT is off.
+    mass_flux_w: object = None
+    # Column-integrated ADVECTIVE SALT flux on u/v faces [psu m^2/s]: the
+    # vertical sum over levels of ``mass_flux_* * S_face`` with S_face from
+    # the run's OWN tracer scheme (superbee/TVD-limited on the production
+    # path) -- the arrays behind the horizontal part of the salt update's
+    # ``div_h(mass_flux * S_face)`` term, summed over k.  Populated ONLY when
+    # ``LatLonCGridOceanConfig.store_salt_flux`` is True; default None =>
+    # inert (same None-seeding pattern as ``mass_flux_*``).
+    #
+    # WHY: the gateway accumulator's salt transport applied donor-cell UPWIND
+    # S to the stored mass flux -- a stated approximation that became the
+    # leading candidate for the +4.79 psu m unexplained Arctic budget
+    # remainder.  These slots store what the model ACTUALLY moved, so the
+    # exact and upwind section transports can be accumulated side by side;
+    # their difference is the face-scheme (upwind-vs-limiter) gap PLUS a
+    # one-step salinity time-level offset (the upwind diagnostic samples the
+    # post-step S) -- see GatewayAccumulator.salt_exact.
+    #
+    # 2-D BY DESIGN (vertical sum): section transports need only the column
+    # integral; the 3-D pair would cost ~145 MB/state like the mass triple vs
+    # ~1.9 MB for this pair.  A consumer needing the vertical structure must
+    # extend the capture, not reconstruct it from these.
+    #
+    # Shapes: (n_lat, n_lon+1) u-faces, (n_lat+1, n_lon) v-faces.  Like the
+    # mass triple these are rounded to storage precision by the step's
+    # closing cast.  The SAME no-budget-identity caveats as the mass triple
+    # apply; additionally these are the EULER-path instantaneous fluxes
+    # (config-enforced: store_salt_flux rejects AB2/RK3/FCT/SOM).
+    salt_flux_u_int: object = None
+    salt_flux_v_int: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -1693,6 +1819,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # upwind backward-Euler solve, so "centered_full"/"nemo_advective" would be
     # a silent no-op).
     vertical_momentum_scheme: str = "upwind_perturbation"
+    # #1226 level-29-onset fix (zad_level29_onset_walk.py, commit b6d0d9877):
+    # ONLY consumed by vertical_momentum_scheme="nemo_advective". Selects how
+    # nemo_advective_vertical_momentum_advection masks its bottom/straddling
+    # u-/v-faces -- see VALID_ZAD_BOTTOM_FACE_MASK in
+    # legoesm.ocean.vertical for the full NEMO-transcription rationale.
+    # "min_rule" (default, bit-identical): AND-of-neighbours interface mask.
+    # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
+    # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
+    zad_bottom_face_mask: str = "min_rule"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
@@ -1713,6 +1848,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     vector operators). The ACC recipe opts in. Literal default -> safe after
     #     `constants`.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # #1455: e3 (layer-thickness) weighting of the "nemo_div_curl" div/curl,
+    # ONLY meaningful when lateral_viscosity_operator="nemo_div_curl" (raises
+    # otherwise). "off" (default, bit-identical) keeps the documented
+    # simplification (divergence_cgrid/curl_vertex_cgrid weight only the
+    # horizontal e1/e2 metrics, never e3); "nemo_e3" restores NEMO's e3u/e3v/e3f
+    # weighting inside the div/curl (dynldf_lev_rot_scheme.h90:22-29,41,51),
+    # closing the topographic-step residual on the dyn_ldf gate rows. See
+    # nemo_ldf_lap_viscosity_e3_cgrid.
+    lateral_viscosity_e3_weighting: str = "off"
     # Lateral side boundary condition for the harmonic viscosity:
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag
@@ -2223,6 +2367,35 @@ class LatLonCGridOceanConfig(NamedTuple):
     # -> "before" set equal to "now"), so the average degenerates to NOW on
     # step 1 exactly like NEMO. Default False -> BIT-IDENTICAL.
     barotropic_forcing_centred: bool = False
+    # Store the TRACER-ADVECTING mass fluxes on the returned state (#1442).
+    # PURE DIAGNOSTIC: it changes nothing the step computes, it only stops
+    # throwing the flux away.  Off by default because it costs THREE extra
+    # arrays of state -- the u/v face pair plus the vertical partner
+    # ``mass_flux_w`` at layer interfaces (~215 MB at eORCA1 L75 in fp64;
+    # ~107 MB in fp32, the default storage precision).  Static Python bool read
+    # in a closure, so both branches are NOT traced and enabling it cannot
+    # cause a retrace mid-run.
+    #
+    # APPENDED AT THE END of the NamedTuple, like every field above it, to
+    # preserve positional construction for legacy call sites (codex RED 1: the
+    # first version inserted it mid-tuple, silently shifting every field from
+    # ``zdf_drag_in_matrix`` onward for any caller that passes positionally).
+    # ANY new field goes HERE, below this one -- never mid-tuple.
+    store_mass_flux: bool = False
+    # Store the column-integrated ADVECTIVE SALT flux the tracer update was
+    # evaluated with (the salt analogue of ``store_mass_flux``; gateway exact-
+    # salt instrument).  PURE DIAGNOSTIC, off by default; costs TWO 2-D face
+    # arrays (~1.9 MB at eORCA1 in fp64 -- the vertical sum, NOT the 3-D pair,
+    # is stored: section transports only need the column integral and the 3-D
+    # pair would cost ~145 MB like the mass triple).  Static Python bool.
+    # SUPPORTED SCOPE (constructor-enforced, refuse-not-ignore): tracer
+    # schemes whose horizontal face flux is exposed (upwind/tvd/superbee/
+    # centered/ppm/dst3/weno5/weno7) under ``tracer_time_integrator="euler"``.
+    # FCT/multidim schemes form fluxes inside their own kernels, AB2/RK3 apply
+    # multi-level/staged combinations -- a capture there would NOT be "the
+    # flux the model applied", so those configs RAISE instead of storing a
+    # lie.
+    store_salt_flux: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

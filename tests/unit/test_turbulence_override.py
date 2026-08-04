@@ -61,6 +61,41 @@ def test_override_none_is_default_byte_identical():
     assert a == b
 
 
+def test_louis_scalars_reach_the_kernel_config():
+    """The 2026-08-01 calibration-campaign finding: louis_l_mix_max /
+    louis_c_louis (& friends) were documented in driver/config.py as targeting
+    LouisConfig, threaded between config objects, and injected by the ML
+    tuning path — but turbulence_config_for, the single source every dycore's
+    production kernel consumes, silently dropped them. The two scalars ranked
+    2nd and 5th in the C48 sensitivity sweep tuned NOTHING. Each documented
+    scalar must reach its LouisConfig leaf."""
+    cfg = _config(turbulence="louis")._replace(
+        louis_l_mix_max=250.0, louis_Ri_crit=0.4, louis_b_louis=4.0,
+        louis_c_louis=12.0, louis_d_louis=6.0)
+    tc = turbulence_config_for(cfg)
+    assert tc.scheme == "louis"
+    assert float(tc.louis.l_mix_max) == 250.0
+    assert float(tc.louis.Ri_crit) == 0.4
+    assert float(tc.louis.b_louis) == 4.0
+    assert float(tc.louis.c_louis) == 12.0
+    assert float(tc.louis.d_louis) == 6.0
+
+
+def test_louis_defaults_stay_byte_identical():
+    """All-default louis scalars ⇒ no _replace: the identity contract that
+    every pre-fix run is bit-reproducible must survive the threading."""
+    a = turbulence_config_for(_config(turbulence="louis"))
+    assert a == TurbulenceConfig(scheme="louis")
+
+
+def test_louis_scalars_do_not_touch_other_schemes():
+    """A non-louis scheme with (inapplicable) louis scalars set is unchanged —
+    the threading is scoped to the active scheme, not sprayed."""
+    cfg = _config(turbulence="clubb_lite")._replace(louis_l_mix_max=250.0)
+    a = turbulence_config_for(cfg)
+    assert a == TurbulenceConfig(scheme="clubb_lite")
+
+
 def test_override_reaches_built_fv_pipeline():
     """The override's C_K reaches the REAL FV physics pipeline's turbulence
     config (the kernel that clubb_lite_turbulence reads C_K from)."""

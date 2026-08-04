@@ -187,8 +187,8 @@ def test_d13c_forward_differentiable_through_param_override_path():
     jax.config.update("jax_enable_x64", True)
     from legoesm.land.carbon.d13c_forward import simulate_archetype_d13c
     from legoesm.land.stomata import StomataConfig
+    from legoesm.core.param_overrides import apply_param_overrides
     from legoesm.training.param_collector import (
-        apply_param_overrides,
         build_trainable_params,
     )
 

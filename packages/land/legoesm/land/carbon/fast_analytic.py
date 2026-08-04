@@ -285,7 +285,7 @@ def analytic_som_soc(
     (``tor_som_active`` / ``tor_som_slow`` / ``tor_som_passive`` /
     ``f_active_to_slow`` / ``f_slow_to_passive`` / ``som_freeze_floor`` /
     ``Q10_het_exp`` / ``cwd_humification_eff``) spliced in by
-    ``param_collector.apply_param_overrides`` INSIDE the loss; ``jax.grad`` of any
+    ``legoesm.core.param_overrides.apply_param_overrides`` INSIDE the loss; ``jax.grad`` of any
     SOC-based loss flows to all eight at ~zero cost.  ``som_freeze_floor`` and
     ``Q10_het_exp`` enter through the per-sample modifier ``m(T(t))``, so the full
     seasonal/diurnal temperature integral (not a mean-T proxy) sets their effect.

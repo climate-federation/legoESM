@@ -34,7 +34,10 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
+from pathlib import Path
 from typing import NamedTuple
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -45,7 +48,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.convection.config import (
-    SBMConfig, MassFluxConfig, ConvectiveEDMFConfig, KuoConfig,
+    SBMConfig, DCAConfig, MassFluxConfig, ConvectiveEDMFConfig, KuoConfig,
     ZhangMcFarlaneConfig, KainFritschConfig, EmanuelConfig,
     TiedtkeConfig, BechtoldConfig,
 )
@@ -53,6 +56,7 @@ from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.mass_flux import (
     mass_flux_convection, edmf_convection,
 )
+from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
 from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
     zhang_mcfarlane_convection,
@@ -114,9 +118,53 @@ def stable_sounding(ncol: int = 4, nlev: int = 30):
     return T, q_v, p_full, p_half
 
 
+def _with_solve(cfg, subsidence_solve: str):
+    """Apply the matched-kernel override to ONE scheme sub-config.
+
+    ``subsidence_solve="as_shipped"`` returns the config untouched.  A scheme
+    with no ``subsidence_solve`` field (sbm / dca / kuo -- adjustment or
+    Kuo-type closures with no compensating-subsidence kernel; emanuel --
+    shipped buoyancy-sorting path bypasses the shared kernel) is returned
+    untouched too, and ``kernel_arm_status`` below reports that explicitly so
+    a reader never assumes it was kernel-matched.
+    """
+    if subsidence_solve == "as_shipped":
+        return cfg
+    if not hasattr(cfg, "subsidence_solve"):
+        return cfg
+    return cfg._replace(subsidence_solve=subsidence_solve)
+
+
+def kernel_arm_status(name: str, subsidence_solve: str) -> str:
+    """Human-readable record of what the arm actually did to this scheme."""
+    if subsidence_solve == "as_shipped":
+        return "as_shipped"
+    cfg = _CONFIG_FACTORY[name]()
+    if not hasattr(cfg, "subsidence_solve"):
+        return f"not_applicable:{name}"
+    return f"forced:{name}={subsidence_solve}"
+
+
+# Default sub-config per scheme, used ONLY by ``kernel_arm_status`` to decide
+# whether the knob exists.  Kept next to ``call_scheme`` so the two cannot
+# drift apart.
+_CONFIG_FACTORY = {
+    "sbm": SBMConfig,
+    "dca": DCAConfig,
+    "kuo": KuoConfig,
+    "mass_flux": MassFluxConfig,
+    "edmf": ConvectiveEDMFConfig,
+    "zhang_mcfarlane": ZhangMcFarlaneConfig,
+    "kain_fritsch": KainFritschConfig,
+    "emanuel": EmanuelConfig,
+    "tiedtke": TiedtkeConfig,
+    "bechtold": BechtoldConfig,
+}
+
+
 def call_scheme(
     name: str, T, q_v, p_full, p_half, dt: float = 1800.0,
-    *, fresh_carry: bool = False,
+    *, fresh_carry: bool = False, subsidence_solve: str = "as_shipped",
 ):
     """Invoke a scheme by name with safe defaults; return ConvectionOutput.
 
@@ -124,7 +172,15 @@ def call_scheme(
     to zero so the trigger gating is exercised cleanly (otherwise the
     slow ``tau_adj`` / ``tau_a`` relaxation keeps the scheme firing
     from a non-zero initial M_c / a_u).
+
+    ``subsidence_solve`` selects the matched-kernel arm -- ``"as_shipped"``
+    (defaults) or ``"implicit_flux"`` / ``"advective"`` forced on every scheme
+    that owns the knob.  See ``kernel_arm_status``.
     """
+    if subsidence_solve not in ("as_shipped", "implicit_flux", "advective"):
+        raise ValueError(
+            f"call_scheme: unknown subsidence_solve {subsidence_solve!r}"
+        )
     ncol, nlev = T.shape
     u = jnp.zeros_like(T)
     v = jnp.zeros_like(T)
@@ -133,16 +189,20 @@ def call_scheme(
     common = dict(T=T, q_v=q_v, p_full=p_full, p_half=p_half, dt=dt)
     if name == "sbm":
         return sbm_convection(**common, config=SBMConfig())
+    if name == "dca":
+        return dca_convection(**common, config=DCAConfig())
     if name == "mass_flux":
         M_c0 = jnp.zeros((ncol,)) if fresh_carry else jnp.full((ncol,), 0.005)
         out, _ = mass_flux_convection(
-            **common, M_c=M_c0, config=MassFluxConfig(),
+            **common, M_c=M_c0,
+            config=_with_solve(MassFluxConfig(), subsidence_solve),
         )
         return out
     if name == "edmf":
         a_u0 = jnp.zeros((ncol,)) if fresh_carry else jnp.full((ncol,), 0.05)
         out, _ = edmf_convection(
-            **common, a_u=a_u0, config=ConvectiveEDMFConfig(),
+            **common, a_u=a_u0,
+            config=_with_solve(ConvectiveEDMFConfig(), subsidence_solve),
         )
         return out
     if name == "kuo":
@@ -150,13 +210,15 @@ def call_scheme(
     if name == "zhang_mcfarlane":
         out, _ = zhang_mcfarlane_convection(
             **common, u=u, v=v, conv_prog_profile=prog,
-            config=ZhangMcFarlaneConfig(enable_cmt=False),
+            config=_with_solve(
+                ZhangMcFarlaneConfig(enable_cmt=False), subsidence_solve),
         )
         return out
     if name == "kain_fritsch":
         out, _ = kain_fritsch_convection(
             **common, w_grid=jnp.zeros_like(T),
-            conv_prog_profile=prog, config=KainFritschConfig(),
+            conv_prog_profile=prog,
+            config=_with_solve(KainFritschConfig(), subsidence_solve),
         )
         return out
     if name == "emanuel":
@@ -167,7 +229,8 @@ def call_scheme(
     if name == "tiedtke":
         out, _ = tiedtke_convection(
             **common, u=u, v=v, conv_prog_profile=prog,
-            config=TiedtkeConfig(enable_cmt=False),
+            config=_with_solve(
+                TiedtkeConfig(enable_cmt=False), subsidence_solve),
             moisture_convergence=jnp.zeros_like(T),
         )
         return out
@@ -175,7 +238,9 @@ def call_scheme(
         out, _, _ = bechtold_convection(
             **common, u=u, v=v, conv_prog_profile=prog,
             conv_stoch_state=stoch, prng_key=None,
-            config=BechtoldConfig(enable_stochastic=False, enable_cmt=False),
+            config=_with_solve(
+                BechtoldConfig(enable_stochastic=False, enable_cmt=False),
+                subsidence_solve),
             moisture_convergence=jnp.zeros_like(T),
         )
         return out
@@ -212,8 +277,55 @@ def column_diagnostics(out: ConvectionOutput, p_half) -> Diagnostics:
     )
 
 
+def kernel_arm_residuals(out: ConvectionOutput, p_half) -> dict[str, float]:
+    """Separate VAPOR-MSE and TOTAL-WATER residuals for the kernel-arm sweep.
+
+    WHICH INVARIANT, AND WHY NOT ``column_diagnostics``: Tests 1-4 above report
+    ``H + Q_v + Q_c`` as their energy residual.  That is the RIGHT quantity for
+    a scheme that hands microphysics condensate whose latent heat has NOT been
+    released, but it is the WRONG one for this package's actual convention --
+    ``dq_c_conv_dt`` is ALREADY-CONDENSED cloud (Kain-Fritsch, Bechtold, EDMF,
+    Tiedtke, ZM and Arakawa-Wu all add ``+(L_v/c_p) dq_c`` in-scheme).  Under
+    that convention a perfectly paired scheme has ``H + Q_v = 0`` and
+    ``H + Q_v + Q_c = Q_c``, so reporting the latter would show a fictitious
+    "non-conservation" that scales with condensate -- and, because ``Q_c``
+    excludes ``dq_r_conv_dt``, would also move with precipitation routing while
+    the thermodynamics is unchanged.  That is exactly the kind of
+    arm-dependent, non-kernel residual that would corrupt a published ranking.
+
+    Reported instead, as three separate numbers:
+      * ``vapor_mse_residual_W_m2``  = int (c_p dT + L_v dq_v) dp/g  -> 0
+      * ``water_residual_kg_m2_s``   = int (dq_v + dq_c + dq_r) dp/g -> 0
+      * ``condensate_throughput_kg_m2_s`` = int dq_c dp/g  -- a SCALE for the
+        two residuals above, never itself part of an "error".
+
+    Sign convention: tendencies are SOURCES (``state += dt*tend``); arrays are
+    surface-LAST so ``dp = p_half[1:] - p_half[:-1] > 0``.
+    """
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dq_r = getattr(out, "dq_r_conv_dt", None)
+    dq_r = jnp.zeros_like(out.dq_c_conv_dt) if dq_r is None else dq_r
+    vapor_mse = float(jnp.mean(jnp.sum(
+        (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt) * dp,
+        axis=1) / constants.g))
+    water = float(jnp.mean(jnp.sum(
+        (out.dq_v_dt + out.dq_c_conv_dt + dq_r) * dp, axis=1) / constants.g))
+    thr = float(jnp.mean(jnp.sum(
+        (out.dq_c_conv_dt + dq_r) * dp, axis=1) / constants.g))
+    return {
+        "vapor_mse_residual_W_m2": vapor_mse,
+        "water_residual_kg_m2_s": water,
+        "condensate_throughput_kg_m2_s": thr,
+        "latent_throughput_W_m2": constants.L_v * thr,
+        "vapor_mse_rel_to_latent": (
+            abs(vapor_mse) / abs(constants.L_v * thr)
+            if abs(constants.L_v * thr) > 1e-12 else float("nan")
+        ),
+    }
+
+
 SCHEMES = (
-    "sbm",
+    "sbm", "dca",
     "mass_flux", "edmf", "kuo",
     "zhang_mcfarlane", "kain_fritsch", "emanuel",
     "tiedtke", "bechtold",
@@ -236,8 +348,16 @@ _NEAR_ZERO_EXEMPT = {"kuo", "kain_fritsch"}
 _NEAR_ZERO_H = 200.0   # W/m²
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run all validation tests; return 0 on success, 1 on any failure."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--json-out", type=Path, default=None,
+        help=("Write the Test-5 matched-kernel conservation sweep (per scheme, "
+              "per kernel arm, per probe sounding) as JSON for the SCM-RCE "
+              "convection paper tables."),
+    )
+    args = parser.parse_args(argv)
     print("=" * 78)
     print("  Convection physics validation")
     print("=" * 78)
@@ -358,6 +478,53 @@ def main() -> int:
                 f"near-zero regime so this is a real divergence)"
             )
 
+    # ---- Test 5: MATCHED-KERNEL conservation sweep ------------------------
+    # Deliverable for the SCM-RCE convection intercomparison: the column
+    # MSE-conservation residual for EVERY scheme under BOTH kernel arms, so a
+    # published ranking can be read next to the conservation error of the
+    # scheme that produced it.
+    #
+    # The residual is COLUMN-DEPENDENT (a documented property of this family),
+    # so BOTH probe soundings are reported -- quoting one number as "the"
+    # residual would be misleading.
+    print()
+    print("  Test 5 - matched-kernel conservation sweep")
+    print("    vaporMSE  = int (c_p dT + L_v dq_v) dp/g  [W/m^2]   -> 0")
+    print("    rel/latent= |vaporMSE| / (L_v * int dq_c dp/g)      -> 0")
+    print("      (a ratio of ~1.0 means the condensation heating is MISSING)")
+    print("    water     = int (dq_v + dq_c + dq_r) dp/g [kg/m^2/s] -> 0")
+    print("    arm 'as_shipped' = scheme defaults; 'implicit_flux' = forced")
+    print("    conservative kernel on every scheme that owns the knob.")
+    print()
+    kernel_report = {}
+    for probe_name, cols in (
+        ("tropical", (T, q_v, p_full, p_half)),
+        ("stable", (T_st, q_v_st, p_full_st, p_half_st)),
+    ):
+        pT, pq, ppf, pph = cols
+        print(f"    -- probe: {probe_name} sounding --")
+        print(f"    {'scheme':>16}  {'arm':>14}  {'vaporMSE':>11}  "
+              f"{'rel/latent':>10}  {'water':>11}  {'status':>26}")
+        for name in SCHEMES:
+            for arm in ("as_shipped", "implicit_flux"):
+                status = kernel_arm_status(name, arm)
+                out_k = call_scheme(
+                    name, pT, pq, ppf, pph, subsidence_solve=arm)
+                r = kernel_arm_residuals(out_k, pph)
+                r["status"] = status
+                kernel_report.setdefault(probe_name, {}).setdefault(
+                    name, {})[arm] = r
+                print(f"    {name:>16}  {arm:>14}  "
+                      f"{r['vapor_mse_residual_W_m2']:11.3e}  "
+                      f"{r['vapor_mse_rel_to_latent']:10.3e}  "
+                      f"{r['water_residual_kg_m2_s']:11.3e}  {status:>26}")
+        print()
+
+    if args.json_out is not None:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(kernel_report, indent=2) + "\n")
+        print(f"  kernel-arm conservation report -> {args.json_out}")
+
     # ---- Final summary ----------------------------------------------------
     print()
     print("=" * 78)
@@ -367,7 +534,8 @@ def main() -> int:
             print(f"    - {msg}")
         print("=" * 78)
         return 1
-    print("  VALIDATION PASSED — all 4 tests clean across the scheme matrix.")
+    print("  VALIDATION PASSED — tests 1-4 clean across the scheme matrix "
+          "(test 5 is a REPORT, not a gate).")
     print("=" * 78)
     return 0
 

@@ -97,7 +97,7 @@ MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
-                          moist=False):
+                          moist=False, lloyd_iterations=50):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
@@ -117,7 +117,8 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     from legoesm.parallel.mesh import create_voronoi_device_mesh
     from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
 
-    mesh = create_voronoi_mesh(subdivision_level=subdivision)
+    mesh = create_voronoi_mesh(subdivision_level=subdivision,
+                               lloyd_iterations=lloyd_iterations)
     mesh = reorder_voronoi_for_sharding(mesh, reorder_target, method=method)
     if run_nd > 1 and (mesh.nCells % run_nd or mesh.nEdges % run_nd):
         # Padding only guarantees divisibility for reorder_target.
@@ -179,6 +180,11 @@ def main() -> int:
                    help="icosahedral subdivision level L "
                         "(nCells = 10*4^L + 2 before ghost padding)")
     p.add_argument("--nlev", type=int, default=8)
+    p.add_argument("--lloyd", type=int, default=50,
+                   help="Lloyd relaxation iterations for the mesh. 50 = "
+                        "production SCVT; 0 = labelled synthetic scaling "
+                        "mesh (scaling receipts only, never physics — "
+                        "must match the prewarmed cache key at subdiv>=9).")
     p.add_argument("--n-devices", type=int, required=True)
     p.add_argument("--reorder-for", type=int, default=None,
                    help="partition/reorder the mesh for THIS device count "
@@ -307,7 +313,7 @@ def main() -> int:
             f"partition target.")
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
-        moist=(args.physics == "kessler"))
+        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd)
 
     if args.multicontroller:
         # Every process computed the reorder independently — assert the
@@ -492,6 +498,9 @@ def main() -> int:
         subdivision=args.subdivision, n_devices=nd,
         n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
         partition_method=args.partition_method, physics=args.physics,
+        # lloyd=0 is the LABELLED synthetic scaling mesh — anti-masquerade:
+        # a row without this field could pass as a production-SCVT receipt.
+        lloyd_iterations=args.lloyd,
         # Requested vs EFFECTIVE (post-"auto") strategy — a JSONL row
         # saying "auto" would not reveal whether ppermute or allgather
         # was actually measured (codex M3c-2 MINOR).

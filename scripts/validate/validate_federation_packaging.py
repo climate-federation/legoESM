@@ -32,6 +32,7 @@ import sysconfig
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import NoReturn
 
 REPO = Path(__file__).resolve().parents[2]
 MEMBERS = (
@@ -86,7 +87,7 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def _fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
+def _fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 
@@ -251,6 +252,12 @@ def check_root_absent_install(wheels: dict[str, Path], tmp: Path) -> None:
         "import legoesm.core, legoesm.ocean, legoesm.grids\n"
         "from legoesm import constants, thermo, surface_albedo\n"
         "from legoesm.ocean.dynamics.barotropic_mpas import barotropic_substeps_mpas\n"
+        # legoesm-tools is NOT installed here: qflux must still IMPORT (its
+        # legoesm.forcing.amip uses are deferred to function scope).  The
+        # import-linter ignore for that edge holds regardless of import
+        # timing, so this is the only gate that would catch a regression to a
+        # top-level AMIP import.
+        "import legoesm.ocean.forcing.qflux\n"
         "assert abs(constants.g - 9.80616) < 1e-6\n"
         "print('OK')\n"
     )

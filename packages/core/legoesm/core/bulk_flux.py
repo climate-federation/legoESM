@@ -197,6 +197,48 @@ def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
     return jnp.sqrt(u ** 2 + v ** 2 + gustiness ** 2)
 
 
+# Floors for the neutral log-law drag. _LN_RATIO_FLOOR is the same 0.5 the
+# iterative solver applies to its own denominator (``_denom_floor`` in
+# compute_most_fluxes), so the neutral limit is bounded exactly as the in-loop
+# form is; _Z0_FLOOR_M matches the roughness floor used there.
+_LN_RATIO_FLOOR = 0.5
+_Z0_FLOOR_M = 1.0e-12
+
+
+def neutral_drag_coefficient(z_ref, z0):
+    """Neutral-limit bulk drag coefficient ``Cd = (kappa / ln(z_ref/z0))^2``.
+
+    The canonical home for the neutral log-law drag, so a single-column model,
+    the global model and the CRM cannot each grow their own copy. It is the
+    zero-stability limit of the profile this module already integrates: with
+    ``psi_m = 0`` the iterative solver's ``u* = kappa*U/ln(z_ref/z0)``
+    (the ``u_star`` initialisation below) is exactly ``sqrt(Cd)*U``.
+
+    That in-loop expression is deliberately NOT rewritten in terms of this
+    helper: ``kappa*U/ln`` and ``sqrt((kappa/ln)^2)*U`` are algebraically equal
+    but not bit-identical, and that code path is shared by the ocean, sea-ice,
+    land and coupler surface schemes. ``tests`` pins the two forms to agree.
+
+    Parameters
+    ----------
+    z_ref : array or float
+        Height at which the wind is evaluated [m]. Use the height of the model
+        level whose wind is actually passed to the flux routine, not a nominal
+        10 m, or the drag will be inconsistent with that wind.
+    z0 : array or float
+        Aerodynamic roughness length [m].
+
+    Returns
+    -------
+    array
+        Neutral drag coefficient [-].
+    """
+    z_ref = jnp.asarray(z_ref)
+    z0 = jnp.asarray(z0, dtype=z_ref.dtype)
+    ln_ratio = jnp.log(z_ref / jnp.maximum(z0, _Z0_FLOOR_M))
+    return (KAPPA / jnp.maximum(ln_ratio, _LN_RATIO_FLOOR)) ** 2
+
+
 def validate_bulk_scheme(scheme: str) -> None:
     """Raise ``ValueError`` on an unknown bulk-flux scheme name.
 

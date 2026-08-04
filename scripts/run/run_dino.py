@@ -590,8 +590,9 @@ def main():
             cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
     if args.nemo_faithful_grid:
         if args.grid != "latlon":
-            p.error("--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
-                    "mesh); rerun with --grid latlon.")
+            raise SystemExit(
+                "--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
+                "mesh); rerun with --grid latlon.")
         # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
         # whatever recipe/overrides preceded it (must not be clobbered after).
         cfg = nemo_faithful_dino_config(base=cfg)

@@ -73,7 +73,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
             "cape_qadv_weight": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "IFS RCAPQADV=0.8 (sucumf.F90:219)", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Bechtold et al. (2008)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
@@ -107,7 +107,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "EDMF mass-flux stability cap", "shape": None},
             "a_u_init": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "EDMF scheme default", "shape": None},
             "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "EDMF scheme default", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "EDMF scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: EDMF scheme default", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "EDMF scheme default", "shape": None},
             "tau_a": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "EDMF scheme default", "shape": None},
         },
@@ -120,7 +120,7 @@ __param_spec__ = {
             "mixing_fraction": "numerics: per-iteration adjustment fraction (default 1.0 at domain boundary, not sigmoid-tunable)",
         },
         "params": {
-            "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "trigger", "reference": "Manabe et al. (1965) moist adjustment", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Manabe et al. (1965) moist adjustment", "shape": None},
         },
     },
     "EmanuelConfig": {
@@ -144,7 +144,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
@@ -181,6 +181,7 @@ __param_spec__ = {
             "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
             "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
             "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Kain & Fritsch (1990) stability cap", "shape": None},
@@ -229,12 +230,13 @@ __param_spec__ = {
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "M_c_init": "default 0 = disabled/off (initial base mass flux, enable via config, not training)",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the prognostic mass-flux core",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) stability cap", "shape": None},
             "M_scale": {"units": "kg/m^2/s", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) equilibrium mass-flux scale", "shape": None},
             "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Arakawa & Wu (2013) scheme default", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Arakawa & Wu (2013) scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Arakawa & Wu (2013) scheme default", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Arakawa & Wu (2013) bulk plume", "shape": None},
             "tau_adj": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Arakawa & Wu (2013) mass-flux relaxation", "shape": None},
         },
@@ -246,7 +248,7 @@ __param_spec__ = {
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
         },
         "params": {
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Frierson (2007)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Frierson (2007)", "shape": None},
             "rh_ref": {"units": "1", "bounds": (0.4, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Frierson (2007) reference RH", "shape": None, "legacy_name": "sbm_RH_ref"},
             "tau_c": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Frierson (2007) relaxation timescale", "shape": None, "legacy_name": "sbm_tau_c"},
         },
@@ -265,12 +267,13 @@ __param_spec__ = {
             "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
             "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Tiedtke (1989)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
@@ -298,10 +301,11 @@ __param_spec__ = {
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "parcel_tpert": "default 0 = disabled/off (optional PBL temperature perturbation)",
             "tp_fac": "default 0 = disabled/off (PBL-perturbation multiplier)",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Zhang & McFarlane (1995) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Zhang & McFarlane (1995)", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "cmt_c_u": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Zhang & McFarlane (1995) bulk plume", "shape": None},
@@ -622,6 +626,27 @@ class MassFluxConfig(NamedTuple):
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # Selects the compensating-subsidence + detrainment solve in the SHARED
+    # kernel ``mass_flux.apply_mass_flux_kernel``; see
+    # ``BechtoldConfig.subsidence_solve`` for the full rationale and the
+    # measured leak numbers.  ``"advective"`` (DEFAULT HERE — preserves this
+    # scheme's shipped behaviour byte-for-byte) is the legacy donor-cell
+    # advective form, which leaves a non-telescoping ``(phi/rho) dM/dz``
+    # residual so column MSE / total water close only to truncation order.
+    # ``"implicit_flux"`` selects the IMPLICIT (backward-Euler, theta-blended)
+    # CONSERVATIVE flux-form solve: the flux divergence telescopes to the
+    # vanishing top/base boundary flux (machine-precision column closure) and
+    # the detrained condensate is paired with its vapor sink ``-dq_c``.
+    # NOTE the two solves are NOT merely different discretisations of one
+    # operator: implicit_flux additionally books that vapor sink, so switching
+    # changes the column water budget ON PURPOSE.  Unknown values raise
+    # ValueError at kernel entry (static Python str; dispatch-hardening).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler); the kernel clamps to [0.5, 1.0].  Unused when
+    # ``subsidence_solve == "advective"``.
+    theta_implicit: float = 1.0
 
 
 class ZhangMcFarlaneConfig(NamedTuple):
@@ -711,6 +736,14 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # existing scheme test fixtures were calibrated against.
     buoyancy_death_memory: bool = False
     precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
 
 class KainFritschConfig(NamedTuple):
@@ -911,6 +944,16 @@ class KainFritschConfig(NamedTuple):
     # source down here leaked column water with no output channel to receive
     # the precipitating fraction.  The full detrained condensate is now handed
     # to microphysics, which applies precip efficiency via autoconversion.
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve``.  Kain-Fritsch DEFAULTS to
+    # ``"implicit_flux"`` (PR #988 hardcoded it at the call site; this promotes
+    # the hardcoded value to a config field with the SAME default, so shipped
+    # behaviour is unchanged and the matched-kernel campaign can address every
+    # member of the family uniformly).  Selecting ``"advective"`` also disables
+    # the paired detrained-condensate latent release, because the advective
+    # solve does not debit vapor for that condensate.
+    subsidence_solve: str = "implicit_flux"
+    theta_implicit: float = 1.0
 
 
 class EmanuelConfig(NamedTuple):
@@ -1089,6 +1132,15 @@ class EmanuelConfig(NamedTuple):
     # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
     # ``EPMAX = 0.999``).
     precip_efficiency_max: float = 0.999
+    # NOTE: Emanuel deliberately has NO ``subsidence_solve`` selector, unlike
+    # the rest of the mass-flux family.  Its SHIPPED path
+    # (``use_genuine_mixing=True``) is a buoyancy-sorting MIXING MATRIX that
+    # computes its own tendencies and never calls
+    # ``mass_flux.apply_mass_flux_kernel``; only the legacy surrogate branch
+    # does, and that branch's ``sort_multiplier`` rescaling would leave an
+    # unpaired vapor debit under a vapor-debiting solve.  See the comment at
+    # the kernel call in emanuel.py.  Emanuel is therefore reported as
+    # OUTSIDE the matched-kernel family, not silently kernel-matched.
 
 
 class TiedtkeConfig(NamedTuple):
@@ -1222,7 +1274,37 @@ class TiedtkeConfig(NamedTuple):
     precip_split_scheme: str = "constant"
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
+    # --- mass-flux kernel vertical solve (Tiedtke 1989 flux form / #824) ---
+    # See ``MassFluxConfig.subsidence_solve`` (identical semantics; the shared
+    # kernel is ``mass_flux.apply_mass_flux_kernel``).  ``"advective"`` is the
+    # DEFAULT HERE and preserves this scheme's shipped behaviour byte-for-byte;
+    # ``"implicit_flux"`` is the conservative flux-form solve that also books
+    # the ``-dq_c`` vapor sink.  Unknown values raise at kernel entry.
+    subsidence_solve: str = "advective"
+    theta_implicit: float = 1.0
 
+
+# --- CAPE trigger trainability (#1417) --------------------------------------
+# `cape_threshold` (and the `cape_sharpness` beside it) are declared tier 0 =
+# EXCLUDED in every spec below, though they read like textbook tunables.
+#
+# The trigger is `sigmoid(cape_sharpness * (CAPE - cape_threshold))`. Above an
+# argument of ~36.7 the sigmoid returns EXACTLY 1.0 in float64, so its VJP
+# `s*(1-s)` is EXACTLY 0 -- measured: x=36.0 -> 2.220e-16, x=37.0 -> 0.0. A
+# deep-tropical column sits far inside that dead zone (measured CAPE
+# 4679/6992/5042/5042/1641 J/kg for bechtold/emanuel/mass_flux/tiedtke/
+# zhang_mcfarlane), and a stable column clamps CAPE to exactly 0 through the
+# positive-part integrand, which is a second dead zone. Gradient survives only
+# in a narrow marginal band, so in a training run dominated by vigorous or
+# stable columns -- most of the globe, most of the time -- these parameters are
+# collected by `build_trainable_params` and then silently do not move.
+#
+# Excluding them keeps the spec TRUTHFUL. Making them genuinely trainable needs
+# a reformulated trigger (normalise by a CAPE scale, or soften the positive-part
+# clamp); both change trigger behaviour and must be validated as physics, not
+# slipped in as a tier edit. `kain_fritsch` is unaffected (cape_threshold = 0,
+# it gates on the trigger function instead).
+# ----------------------------------------------------------------------------
 
 class BechtoldConfig(NamedTuple):
     """Configuration for the Bechtold/IFS convection scheme.

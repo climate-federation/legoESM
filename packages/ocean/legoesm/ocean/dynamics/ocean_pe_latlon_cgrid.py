@@ -89,6 +89,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_laplacian_dissipation_cgrid,
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
+    nemo_ldf_lap_viscosity_e3_cgrid,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -187,6 +188,13 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
     {"vector_laplacian", "flux_divergence", "nemo_div_curl"})
+# e3 (layer-thickness) weighting selector for the "nemo_div_curl" operator's
+# div/curl (config.lateral_viscosity_e3_weighting; #1455). "off" (default,
+# bit-identical) = the documented divergence_cgrid/curl_vertex_cgrid
+# horizontal-metrics-only simplification; "nemo_e3" = NEMO's e3u/e3v/e3f
+# weighting restored (nemo_ldf_lap_viscosity_e3_cgrid). Only valid when
+# lateral_viscosity_operator="nemo_div_curl" (validated at construction).
+VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -2540,12 +2548,20 @@ def _bc_vertical_momentum_advection(
                 face_area_v = grid.dx_v * grid.dy_v
                 u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
                 v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                # #1226 level-29-onset fix: which bottom/straddling-face mask
+                # convention nemo_advective_vertical_momentum_advection uses.
+                # Default "min_rule" is bit-identical; "nemo_faithful" is the
+                # dynzad.F90/dynzdf.F90:121 transcription (see
+                # VALID_ZAD_BOTTOM_FACE_MASK, legoesm.ocean.vertical).
+                _zad_mask_mode = getattr(config, "zad_bottom_face_mask", "min_rule")
                 diag_vertadv_u = _nemo_advective_vertical_momentum_advection(
                     u_full, w_area_u, h_u_old, face_area_u[..., jnp.newaxis],
-                    face_active=u_face_active)
+                    face_active=u_face_active,
+                    bottom_face_mask_mode=_zad_mask_mode)
                 diag_vertadv_v = _nemo_advective_vertical_momentum_advection(
                     v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
-                    face_active=v_face_active)
+                    face_active=v_face_active,
+                    bottom_face_mask_mode=_zad_mask_mode)
             else:
                 # Default: 1st-order upwind of the PERTURBATION velocity.
                 # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
@@ -2649,6 +2665,23 @@ def _bc_horizontal_viscosity(
             "lateral_viscosity_operator must be 'vector_laplacian', "
             f"'flux_divergence', or 'nemo_div_curl', got {_visc_op!r}"
         )
+    # #1455: e3-weighting selector dispatch (same defense-in-depth as
+    # _visc_op above — also validated at LatLonCGridOceanModel construction,
+    # ocean_model_latlon_cgrid.py, but this function is called directly by
+    # unit tests / other call sites too, so it re-checks at fn entry).
+    _e3_weighting = getattr(config, "lateral_viscosity_e3_weighting", "off")
+    if _e3_weighting not in ("off", "nemo_e3"):
+        raise ValueError(
+            "lateral_viscosity_e3_weighting (e3-weighting variant) must be "
+            f"one of 'off', 'nemo_e3', got {_e3_weighting!r}"
+        )
+    if _e3_weighting != "off" and _visc_op != "nemo_div_curl":
+        raise ValueError(
+            "lateral_viscosity_e3_weighting != 'off' requires "
+            "lateral_viscosity_operator='nemo_div_curl' (it selects the "
+            f"e3-weighting of THAT operator's div/curl); got "
+            f"lateral_viscosity_operator={_visc_op!r}"
+        )
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
@@ -2717,9 +2750,24 @@ def _bc_horizontal_viscosity(
             if vertex_mask is not None:
                 _vm3 = _vm3 * vertex_mask[..., jnp.newaxis]
             _visc_vmask = _vm3
-        diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
-            u, v, grid, _ahmt, _ahmf,
-            mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+        # #1455: e3-weighting selector (already validated above: "off"
+        # (default) keeps the existing horizontal-metrics-only div/curl
+        # BIT-IDENTICAL; "nemo_e3" restores NEMO's e3u/e3v/e3f weighting,
+        # dynldf_lev_rot_scheme.h90:22-29,41,51).
+        if _e3_weighting == "nemo_e3":
+            if h_k is None:
+                raise ValueError(
+                    "lateral_viscosity_e3_weighting='nemo_e3' requires the "
+                    "cell-centre layer thickness h_k to be passed to "
+                    "_bc_horizontal_viscosity."
+                )
+            diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
+                u, v, grid, _ahmt, _ahmf, h_k,
+                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+        else:
+            diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
+                u, v, grid, _ahmt, _ahmf,
+                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         if _want_kdiss_flux:
             # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:

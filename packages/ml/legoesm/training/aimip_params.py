@@ -58,7 +58,10 @@ from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
 _TIEDTKE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("tiedtke_tau_M_u_relax", 600.0, 14400.0, "sigmoid"),
     ParamConstraint("tiedtke_tau_MC_proxy", 1800.0, 28800.0, "sigmoid"),
-    ParamConstraint("tiedtke_cape_threshold", 10.0, 500.0, "sigmoid"),
+    # tiedtke_cape_threshold REMOVED (#1417): the trigger sigmoid saturates
+    # to exactly 1.0 in a convecting column and CAPE clamps to exactly 0 in a
+    # stable one, so its gradient is EXACTLY zero in both regimes. It was
+    # being optimised with no signal; its spec is tier 0 for the same reason.
     ParamConstraint("tiedtke_downdraft_alpha", 0.05, 0.6, "sigmoid"),
     ParamConstraint("tiedtke_downdraft_RH_min", 0.1, 0.6, "sigmoid"),
     # Extended: entrainment / detrainment + closure knobs (audit pass).
@@ -166,7 +169,8 @@ _SUNDQVIST_TRAINABLE: list[ParamConstraint] = [
 _SBM_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("sbm_tau_c", 1800.0, 21600.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
-    ParamConstraint("sbm_CAPE_threshold", 10.0, 500.0, "sigmoid"),
+    # sbm_CAPE_threshold REMOVED (#1417): same AD-unreachable trigger as
+    # tiedtke_cape_threshold — see the note there.
 ]
 
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
@@ -338,7 +342,9 @@ class AIMIPClassicalParams(eqx.Module):
         return base._replace(
             tau_M_u_relax=d["tiedtke_tau_M_u_relax"],
             tau_MC_proxy=d["tiedtke_tau_MC_proxy"],
-            cape_threshold=d["tiedtke_cape_threshold"],
+            # cape_threshold is NOT overridden: #1417 dropped it from
+            # _TIEDTKE_TRAINABLE (AD-unreachable trigger), so it is absent
+            # from as_dict() and TiedtkeConfig's published default stands.
             downdraft_alpha=d["tiedtke_downdraft_alpha"],
             downdraft_RH_min=d["tiedtke_downdraft_RH_min"],
             epsilon_deep=d["tiedtke_epsilon_deep"],
@@ -448,7 +454,9 @@ class AIMIPClassicalParams(eqx.Module):
         return base._replace(
             tau_c=d["sbm_tau_c"],
             rh_ref=d["sbm_RH_ref"],
-            cape_threshold=d["sbm_CAPE_threshold"],
+            # cape_threshold is NOT overridden: #1417 dropped it from
+            # _SBM_TRAINABLE (AD-unreachable trigger), so it is absent from
+            # as_dict() and SBMConfig's published default stands.
         )
 
     def to_gray_radiation_config(self):

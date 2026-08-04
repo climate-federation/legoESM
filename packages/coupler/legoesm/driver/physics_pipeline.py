@@ -3647,6 +3647,32 @@ def turbulence_config_for(config):
             if (nested is not None
                     and "kvf_min" in getattr(nested, "_fields", ())):
                 tc = tc._replace(**{scheme: nested._replace(kvf_min=kvf)})
+        # Louis stability-function scalars (the calibration campaign's
+        # inert-params finding, 2026-08-01): ExperimentConfig documents
+        # louis_l_mix_max / louis_Ri_crit / louis_{b,c,d}_louis as targeting
+        # LouisConfig, and the ML tuning path (aimip_params) injects them —
+        # but THIS function, the single source every dycore's production
+        # kernel consumes, silently dropped them: setting --louis-l-mix-max
+        # changed nothing while reporting success.  Thread any NON-DEFAULT
+        # value into the active louis sub-config; an all-defaults config
+        # takes no _replace, preserving the byte-identity contract above.
+        # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
+        # LouisConfig field and are NOT threaded here — still inert, see the
+        # upstream note in the calibration repo.)
+        if tc.scheme == "louis" and tc.louis is not None:
+            _louis_updates = {}
+            for exp_name, leaf_name in (
+                    ("louis_l_mix_max", "l_mix_max"),
+                    ("louis_Ri_crit", "Ri_crit"),
+                    ("louis_b_louis", "b_louis"),
+                    ("louis_c_louis", "c_louis"),
+                    ("louis_d_louis", "d_louis")):
+                val = getattr(config, exp_name, None)
+                if val is not None and float(val) != float(
+                        getattr(tc.louis, leaf_name)):
+                    _louis_updates[leaf_name] = float(val)
+            if _louis_updates:
+                tc = tc._replace(louis=tc.louis._replace(**_louis_updates))
         return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the

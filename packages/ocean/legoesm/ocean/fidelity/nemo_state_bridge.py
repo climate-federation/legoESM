@@ -281,6 +281,72 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     return out_e3t, out_td, "e3t_0"
 
 
+_FP32_BRIDGE_WARNED = False
+
+
+def _warn_if_not_fp64() -> None:
+    """One-shot loud warning when an oracle bridge is built in single precision.
+
+    NEMO/MITgcm/Veros are fp64.  RUNNING legoESM in fp32 is a legitimate
+    performance choice, so this is NOT an error -- but COMPARING against an
+    oracle in fp32 measures our own rounding (f32 eps = 1.19e-7), and that is
+    how the f32 depth ladder silently corrupted every #1226 measurement for
+    weeks (it rounded NEMO's f64 gdept_1d to ~7 digits; median |rel| 2.555e-8 =
+    0.21 x f32 eps).  ``JAX_ENABLE_X64=1`` does NOT change the policy.
+
+    Comparison probes should use the HARD gate
+    :func:`legoesm.ocean.fidelity.precision_gate.require_fp64` instead of
+    relying on this warning.
+    """
+    global _FP32_BRIDGE_WARNED
+    if _FP32_BRIDGE_WARNED:
+        return
+    from legoesm.core.precision import get_policy
+    import jax.numpy as _jnp
+    if _jnp.dtype(get_policy().control) == _jnp.float64:
+        return
+    _FP32_BRIDGE_WARNED = True
+    import warnings
+    warnings.warn(
+        "NEMO oracle bridge built under a NON-fp64 precision policy "
+        f"(control={_jnp.dtype(get_policy().control).name}). Model RUNS in "
+        "fp32 are fine, but any COMPARISON against the oracle is then "
+        "measuring float32 rounding, not physics (f32 eps = 1.19e-7). "
+        "JAX_ENABLE_X64=1 does NOT change this -- set "
+        "PrecisionPolicy.fp64() via legoesm.core.precision.set_policy, and "
+        "use ocean.fidelity.precision_gate.require_fp64 for a hard gate.",
+        RuntimeWarning, stacklevel=3,
+    )
+
+
+def detect_metric_convention(grid, rtol: float = 1e-12) -> str:
+    """Read the oracle's OWN grid to decide its horizontal metric convention.
+
+    NEMO's ``mesh_mask`` carries both ``e1t`` and ``e2t``, so the convention is
+    OBSERVABLE rather than something to assume:
+
+    * DINO's ``usr_def_hgr.F90:111-119`` sets ``pe2t = pe1t =
+      ra*rad*COS(phi)*rn_e1_deg`` — Mercator conformality imposed analytically
+      — so ``e1t == e2t`` EXACTLY  → ``"nemo_isotropic"``.
+    * A config carrying a genuine finite-difference meridional metric has
+      ``e1t != e2t``  → ``"exact"``.
+
+    Detecting beats a hard default because this bridge also serves
+    non-isotropic NEMO configs (GYRE), where forcing ``"nemo_isotropic"`` would
+    be wrong.  It also beats trusting a recipe card, which can drift out of
+    step with the mesh_mask actually being read.
+
+    Getting this wrong is not subtle in its consequences: the shipped
+    ``"exact"`` default mismatched NEMO's ``e2v`` by median 2.798e-05, which
+    ``ldf_slp``'s ``vslp`` divides by — worth 4 orders of magnitude on that row
+    (#1226).
+    """
+    e1t = np.asarray(grid.e1t, dtype=np.float64)
+    e2t = np.asarray(grid.e2t, dtype=np.float64)
+    rel = np.abs(e1t - e2t) / np.maximum(np.abs(e2t), 1e-30)
+    return "nemo_isotropic" if float(rel.max()) <= rtol else "exact"
+
+
 def bridge_nemo_to_legoesm_topo(
     grid: NemoGrid,
     state: NemoState,
@@ -290,7 +356,7 @@ def bridge_nemo_to_legoesm_topo(
     radius: float = constants.R_earth,
     f_rtol: float = 1e-3,
     full_step: bool = False,
-    metric_convention: str = "exact",
+    metric_convention: str = "auto",
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -355,6 +421,17 @@ def bridge_nemo_to_legoesm_topo(
         If ``gphiv`` is missing, the bathymetry is not full-step, or the built
         Coriolis does not match NEMO ``ff_t`` to ``f_rtol``.
     """
+    # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
+    # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
+    # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
+    # analytically), giving e1t == e2t EXACTLY, whereas a config with a genuine
+    # finite-difference meridional metric has e1t != e2t.  Detecting beats a
+    # hard default because this bridge also serves non-isotropic NEMO configs
+    # (GYRE), where forcing "nemo_isotropic" would be wrong.
+    if metric_convention == "auto":
+        metric_convention = detect_metric_convention(grid)
+
+    _warn_if_not_fp64()
     if grid.gphiv is None:
         raise ValueError(
             "bridge_nemo_to_legoesm_topo requires grid.gphiv (V-point latitudes) "
@@ -573,10 +650,30 @@ def bridge_before_state_topo(
     # (NEMO nit000 convention, sbcmod.F90:568-573) exactly as an un-bridged
     # cold start would, so barotropic_forcing_centred=True still gets a
     # defined ½(before+now) average rather than an AttributeError.
+    #
+    # SIGN CONVENTION (#1455 fix): ``OceanSurfaceForcing.tau_x`` is stored
+    # internally in the ATMOSPHERIC (negated) convention everywhere it is
+    # built from a raw NEMO-convention stress array -- ``dino.py:3383``
+    # (``tau_x=-forcing["tau_u_cell_2d"]``) and the sibling
+    # ``nemo_recipe.py:768`` (``tau_x=-utau``) both negate, with the same
+    # documented reason: ``surface_stress_faces``/``_bc_external_surface_
+    # forcing`` (ocean_pe_latlon_cgrid.py:3465-3466) applies the ocean
+    # REACTION ``-tau_x`` a SECOND time, so the net stress the ocean feels
+    # equals NEMO's raw ``utau``.  ``before.tau_x`` here is NEMO's raw
+    # ``utau_b`` (nemo_io.py:259, no sign manipulation) -- the SAME
+    # NEMO-convention quantity ``dino.py``/``nemo_recipe.py`` negate before
+    # storing.  Without the matching negation, ``_leapfrog_step``'s
+    # ``barotropic_forcing_centred`` average (``0.5*(state.tau_x_prev +
+    # surface_forcing.tau_x)``, ocean_model_latlon_cgrid.py:2754) mixes
+    # opposite-sign-convention operands: measured corr(tau_x_prev, tau_x_now)
+    # = -0.98 on the DINO y5 restart before this fix, collapsing the
+    # centred average to near-zero at 2/3 of wet u-faces (own-RMS ratio
+    # 0.039 vs NEMO's dumped wnd_dump_zu_frc_inc.bin increment,
+    # zu_frc_write_ledger.py STEP 3).
     if before.tau_x is not None:
-        replacements["tau_x_prev"] = jnp.asarray(before.tau_x)
+        replacements["tau_x_prev"] = -jnp.asarray(before.tau_x)
     if before.tau_y is not None:
-        replacements["tau_y_prev"] = jnp.asarray(before.tau_y)
+        replacements["tau_y_prev"] = -jnp.asarray(before.tau_y)
     return st._replace(**replacements)
 
 

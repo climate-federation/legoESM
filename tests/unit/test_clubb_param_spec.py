@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import pytest
 from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig, CLUBBParams
+from legoesm.core.param_overrides import apply_param_overrides
 from legoesm.training.param_collector import (
-    apply_param_overrides,
     build_registry,
     build_trainable_params,
 )

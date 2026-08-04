@@ -90,13 +90,13 @@ residual was found and is now tracked, but it is far too small to explain 13%.
   config snapshot; the live value is 1501.1854665553683.
 - **Field comparison (u-point, all 36 levels, both hemispheres)**: corr
   1.0000000000, ratio 1.0000000000, rel-err median 0, p90 1.7e-16 — roundoff.
-  **AT BAR.** legoESM's `_static_kappa_redi_override` (T-point `cos(lat)`
+  **AT BAR.** legoESM's `static_kappa_redi_override` (T-point `cos(lat)`
   field) → `interp_cell_to_uface` (same-row average) is a no-op for a
   field that is constant along a row, so it reproduces NEMO's direct
   `cos(gphiu)` evaluation exactly.
 - **v-point — FIXED 2026-07-27 (tier-2 item 1)**. The original note here
   ("`interp_cell_to_vface` averages `cos(φ_j)` and `cos(φ_j+1)`... `avg(cos) ≠
-  cos(avg)`") was **WRONG** — `_static_kappa_redi_override` never called
+  cos(avg)`") was **WRONG** — `static_kappa_redi_override` never called
   `interp_cell_to_vface`; grep + `git log -p --follow` confirm it has never
   existed in that function. That description was a probe-reimplementation
   artifact (Rule 0: "trace the real dispatch chain, a probe that re-implements
@@ -114,7 +114,7 @@ residual was found and is now tracked, but it is far too small to explain 13%.
   this grid (u shares its T-row's latitude) so the u-face was already exact;
   `cos(lat_v)` is a genuinely different (row-shifted) value that legoESM was
   never computing at all.
-  **Fix**: `_static_kappa_redi_override` now returns `(kappa_T, kappa_v)`,
+  **Fix**: `static_kappa_redi_override` now returns `(kappa_T, kappa_v)`,
   with `kappa_v = K_h_base·grid.cos_lat_v[1:]` (the true v-face latitude,
   north-face-of-cell-j convention matching `grid.dx_v[1:,:]`). A new
   keyword-only `kappa_Redi_v`/`kappa_redi_v_override` (default `None` ⇒ reuse

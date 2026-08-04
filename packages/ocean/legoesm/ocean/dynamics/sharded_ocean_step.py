@@ -46,7 +46,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    FLAG_ABSENT, addressable_shard_put, assert_flags_agree,
+    assert_pytree_bytes_equal, assert_schema_agrees, checked_shard_put,
     coerce_bool, coerce_count, config_digest48, name_digest48,
     tree_schema_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
@@ -89,7 +90,18 @@ _GEOM_STATIC_FIELDS = frozenset(
 # the sharded state as ``v_lower = field[0:n_lat]`` (P("lat")) and reconstructed
 # to the band's nl+1 faces in-body.  All OTHER array state fields are cell/u
 # leading-dim n_lat and shard P("lat") directly.
-_V_STAGGERED_STATE_FIELDS = ("v", "v_mask")
+#
+# ``mass_flux_v`` (#1442 ``store_mass_flux``, codex RED 3) belongs here for the
+# same reason ``v`` does -- it IS a v-face field.  Omitting it gave it the CELL
+# spec, so its n_lat+1 leading dim was neither split by the band slicer nor
+# reconstructed in-body: an immediate divisibility error at best, a silently
+# misaligned flux at worst.  The drop/re-append-zero round-trip is valid for it
+# on the same grounds as ``v``: ``mass_flux_v = h_v_old * v_corrected *
+# v_mask_3d`` and the pole-wall ``v_mask[n_lat] == 0``, so the top row it
+# reconstructs as zero IS zero.  ``mass_flux_u`` is a u-face field (leading dim
+# n_lat, like ``u``) and correctly takes the default cell sharding.
+_V_STAGGERED_STATE_FIELDS = ("v", "v_mask", "mass_flux_v",
+                             "salt_flux_v_int")
 
 
 def _geom_array_field_names(geom):
@@ -311,6 +323,7 @@ def shard_state_latlon(state, mesh):
     # wall-masked — the carrier drops it and reconstructs it as zero, which
     # would silently delete a LIVE seam row.  Host-side check on the
     # concrete state (this fn runs outside jit).
+    assert_pytree_bytes_equal(state, "shard_state_latlon")
     vm = getattr(state, "v_mask", None)
     if vm is not None:
         import numpy as _np
@@ -328,7 +341,7 @@ def shard_state_latlon(state, mesh):
         if field is None:
             return None
         sh = NamedSharding(mesh, _lat_spec(field.data))
-        return field.replace(data=jax.device_put(field.data, sh))
+        return field.replace(data=addressable_shard_put(field.data, sh))
 
     def _shard_v(field):
         if field is None:
@@ -346,7 +359,7 @@ def shard_state_latlon(state, mesh):
         nlat1 = field.data.shape[0]
         v_lower = field.data[:nlat1 - 1]           # drop the top pole-wall row
         sh = NamedSharding(mesh, _lat_spec(v_lower))
-        return field.replace(data=jax.device_put(v_lower, sh))
+        return field.replace(data=addressable_shard_put(v_lower, sh))
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
@@ -366,7 +379,9 @@ def shard_state_latlon(state, mesh):
             # Shard 2-D+ on lat, replicate lower-rank — matches shard_pytree.
             arr = jnp.asarray(val)
             spec = _lat_spec(arr) if arr.ndim >= 1 else P()
-            updates[name] = jax.device_put(arr, NamedSharding(mesh, spec))
+            # ndim>=1 lat-shards via _lat_spec (1-D included); only true
+            # scalars replicate.
+            updates[name] = addressable_shard_put(arr, NamedSharding(mesh, spec))
     return state._replace(**updates)
 
 
@@ -387,12 +402,13 @@ def shard_forcing_latlon(forcing, mesh):
     _agree_ocean_mesh_entry(mesh, forcing, where="shard_forcing_latlon")
     if forcing is None or mesh is None:
         return forcing
+    assert_pytree_bytes_equal(forcing, "shard_forcing_latlon")
 
     def _put(leaf):
         if leaf is None:
             return None
         arr = jnp.asarray(leaf)
-        return jax.device_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+        return addressable_shard_put(arr, NamedSharding(mesh, _lat_spec(arr)))
 
     return jax.tree.map(_put, forcing)
 
@@ -429,6 +445,8 @@ def shard_forcing_stack_latlon(stack, mesh):
     if mesh is None:
         return stack
 
+    assert_pytree_bytes_equal(stack, "shard_forcing_stack_latlon")
+
     def _put(leaf):
         if leaf is None or not hasattr(leaf, "ndim"):
             return leaf
@@ -439,7 +457,7 @@ def shard_forcing_stack_latlon(stack, mesh):
             spec = P("lat", None)
         else:
             spec = P()
-        return jax.device_put(arr, NamedSharding(mesh, spec))
+        return addressable_shard_put(arr, NamedSharding(mesh, spec))
 
     return jax.tree.map(_put, stack)
 
@@ -601,10 +619,12 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
 _OCEAN_CALL_ENTRY_FLAGS = (
     "has_mesh", "n_dev", "axis_names", "axis_sizes",
     "state_schema", "has_forcing", "forcing_schema",
+    "has_aux", "aux_schema",
 )
 
 
-def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
+def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str,
+                           aux=None) -> None:
     """Agree a returned ocean SPMD callable's per-CALL inputs, FIRST statement.
 
     #1362 round 4, blocker 7.  ``sharded_step`` runs ``_validate_forcing_layout``
@@ -629,6 +649,10 @@ def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str) -> None:
         float(forcing is not None),
         (tree_schema_digest48(forcing) if forcing is not None
          else FLAG_ABSENT),
+        # aux (codex r20 item 2): a rank-local None-vs-provided or schema
+        # mismatch must fail HERE, not desynchronize the jit call below.
+        float(aux is not None),
+        (tree_schema_digest48(aux) if aux is not None else FLAG_ABSENT),
     ), context=where)
 
 
@@ -715,19 +739,17 @@ def make_sharded_ocean_step(model, mesh):
     rep = NamedSharding(mesh, P("lat"))
 
     def _replicated_put(arr, name):
-        # Multicontroller: a P() (fully-replicated) device_put ASSERTS the
-        # value is bit-identical on every process. The band-geometry arrays
-        # are (re)computed per process and can differ in their last ULPs
-        # (per-process XLA autotuning on device-derived grid fields), which
-        # trips that assert at larger sizes (job 26450848: LL576 np=4,
-        # area-scale fields differing at 1e-7 relative). broadcast_checked
-        # verifies cross-process agreement (raising on a REAL divergence
-        # rather than letting process 0 mask it) and then broadcasts process
-        # 0's bytes. Shared with the atmosphere lat-lon lane (#1362) —
-        # legoesm.parallel.geometry_consistency is the ONE implementation.
-        host = broadcast_checked(
-            arr, name, context="make_sharded_ocean_step")
-        return jax.device_put(jnp.asarray(host), rep)
+        # (Name kept for history; this is a SHARDED P("lat") stack put.)
+        # checked_shard_put replaces the broadcast_checked+device_put pair:
+        # the broadcast's psum program is [n_processes, stack] (nd x 849 MB
+        # at LL2304 — the @96/@128 wall), and a numpy device_put onto an
+        # all-process sharding pays jax's whole-array assert_equal on top.
+        # The per-band gate keeps the divergence contract (n_bands is
+        # schema-gated just below, so payload widths agree). ONE shared
+        # implementation: legoesm.parallel.geometry_consistency.
+        return checked_shard_put(
+            arr, name, rep, context="make_sharded_ocean_step",
+            n_bands=n_dev)
 
     # Schema gate FIRST (one fixed-shape collective every process reaches):
     # a process-dependent field list or a mixed jax_enable_x64 setting would
@@ -865,13 +887,38 @@ def make_sharded_ocean_step(model, mesh):
                     f"(n_lat, n_lon[, nlev]) to shard on the lat axis.")
 
     def sharded_step(state, dt, freshwater=None, surface_forcing=None,
-                     sponge=None, t_seconds=None):
+                     sponge=None, t_seconds=None, aux=None):
+        # ``aux``: the sharded geometry+vmask stacks. When this wrapper runs
+        # INSIDE an outer trace (a bench/driver jit/scan — jit-of-jit
+        # inlines the inner call), concrete closure arrays become
+        # OUTER-trace constants whose value the MLIR handler cannot fetch
+        # for non-addressable arrays (broken since #1370-iii sharded the
+        # stacks). Outer-jit callers MUST thread ``step.aux`` through their
+        # jit boundary as an ARGUMENT and pass it back here.
         # ONE forcing operand: None fields drop out of the pytree structure,
         # so specs derived by tree.map skip them automatically and the
         # structure key below distinguishes every None<->array combination.
         _agree_ocean_spmd_call(
             mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
-            where="make_sharded_ocean_step.step")
+            where="make_sharded_ocean_step.step", aux=aux)
+        # store_mass_flux (#1442, codex RED 3): ``out_specs=in_spec`` is derived
+        # from the INPUT state, so a step that ADDS mass_flux_u/v leaves has no
+        # spec for them.  Seed them here -- BEFORE ``in_spec`` -- through the
+        # model's own shared seeder, which sizes them off state.u/state.v and so
+        # produces the ``v_lower`` (n_lat) shape this carrier already holds.
+        # No-op when the flag is off or the slots are already seeded, so the
+        # cache key and the historical path are unchanged.
+        # Rank-uniform: keyed off the STATIC config bool, not rank-local data,
+        # so every rank seeds identically (no structure divergence across the
+        # collectives below).
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            seed_mass_flux_carry,
+            seed_salt_flux_carry,
+        )
+        state = seed_mass_flux_carry(
+            state, getattr(model.config, "store_mass_flux", False))
+        state = seed_salt_flux_carry(
+            state, getattr(model.config, "store_salt_flux", False))
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
@@ -938,12 +985,16 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, forcing, geom_stacks, vmask_stack,
-                      jnp.asarray(dt))
+            _geom, _vmask = aux if aux is not None else (geom_stacks,
+                                                        vmask_stack)
+            return fn(state, forcing, _geom, _vmask, jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
 
+    # Expose the stacks so outer-jit callers can pass them as arguments
+    # (see the ``aux`` note in the signature).
+    sharded_step.aux = (geom_stacks, vmask_stack)
     return sharded_step
 
 
@@ -976,12 +1027,15 @@ def make_sharded_ocean_step_global(model, mesh):
     def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
         _agree_ocean_spmd_call(mesh, state, (surface_forcing, freshwater),
                                where="make_sharded_ocean_step_global.step")
-        # Scatter the global state to the band layout; the forcing is sharded
-        # INSIDE ``inner`` (make_sharded_ocean_step lays it out), so pass it
-        # through global.
+        # Scatter the global state AND forcing to the band layout
+        # explicitly (the old comment claimed inner sharded the forcing;
+        # it forwarded it global and relied on implicit JIT input
+        # placement — jax's whole-array device_put assert under
+        # multicontroller, the nd-linear wall this module removes).
         ss = shard_state_latlon(state, mesh)
-        ss = inner(ss, dt, surface_forcing=surface_forcing,
-                   freshwater=freshwater)
+        ss = inner(ss, dt,
+                   surface_forcing=shard_forcing_latlon(surface_forcing, mesh),
+                   freshwater=shard_forcing_latlon(freshwater, mesh))
         return gather_state_latlon(ss, mesh)
 
     return sharded_step_global
