@@ -160,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--monthly-means", action="store_true", default=True)
     parser.add_argument("--no-monthly-means", dest="monthly_means", action="store_false")
     parser.add_argument("--cmip-output", action="store_true", default=False)
+    # Clear-sky TOA diagnostic (rsutcs/rlutcs) + the cloud CMOR trio
+    # (clt/clwvi/clivi).  ON by default — the deck reports CRE — but it is now
+    # a REAL cost on the MPAS lane: it adds a second clouds-off radiation solve
+    # per radiation step (~2x the radiation time).  It used to be silently
+    # ignored there, so this flag was free; ``--no-clear-sky-diag`` is the
+    # opt-out for a spin-up / throughput run that does not score CRE.
+    parser.add_argument("--clear-sky-diag", dest="clear_sky_diag",
+                        action="store_true", default=True)
+    parser.add_argument("--no-clear-sky-diag", dest="clear_sky_diag",
+                        action="store_false")
 
     # Multi-node MPI
     parser.add_argument("--distributed", action="store_true", default=False,
@@ -266,9 +276,11 @@ def main(argv: list[str] | None = None) -> int:
         "--cloud-rh-crit-bl", str(args.cloud_rh_crit_bl),
         "--cloud-sigma-bl", str(args.cloud_sigma_bl),
         "--microphysics", args.microphysics,
-        # Diagnostics
-        "--clear-sky-diag",
     ]
+
+    # Diagnostics
+    if args.clear_sky_diag:
+        cmd.append("--clear-sky-diag")
 
     if args.diurnal_cycle:
         cmd.append("--diurnal-cycle")

@@ -40,7 +40,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.precision import cast_pytree
-from legoesm.core.state import MPASHydrostaticState
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPAS_SFC_DIAG_MPI_UNPUBLISHED,
+    MPASHydrostaticState,
+)
 # NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
 # shared-substrate ``parallel`` package).  Importing them here would make
 # legoesm-core depend on legoesm-atmosphere (a cycle), so — exactly as
@@ -1077,15 +1081,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
-            # CMOR TOA + surface turbulent-flux extras — mirror the serial
-            # producer's 8-slot contract (primitive_eq_mpas.step) EXACTLY so the
-            # one-rank MPI-voronoi coupled lane exports rlut/rsut/rsdt/hfss/hfls
-            # too. Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
-            # sw_down_toa, shflx, lhflx) — the consumer (model_driver
-            # _feed_mpas_cmip_accumulators) reads slots 3-7 by this order.
-            _extras = tuple(getattr(_pt, _k, None) for _k in (
-                "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc"))
+            # CMOR TOA + surface turbulent-flux extras.  Built from the SHARED
+            # ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract (core.state) so this
+            # producer can no longer drift from the serial one and from the
+            # consumer's slot map: a ONE-rank Voronoi MPI run is exactly the
+            # case ``ModelDriver._mpas_cmip_feed_enabled`` turns the CMOR feed
+            # ON for, and while this tuple stopped at slot 7 that run accepted
+            # ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.
+            # ``MPAS_SFC_DIAG_MPI_UNPUBLISHED`` keys stay None AT THEIR SLOT
+            # (never shortened — a shorter tuple is what misindexes).
+            _extras = tuple(
+                None if _k in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+                else getattr(_pt, _k, None)
+                for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):

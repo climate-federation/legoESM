@@ -304,6 +304,63 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
 
 
+def clear_sky_pass_effective(
+    *, clear_sky_diag: bool, radiation: str, spatial_feed_on: bool,
+    feed_steps_reached: bool = True,
+) -> tuple[bool, str | None]:
+    """Should the MPAS lane actually run the clouds-off second radiation pass?
+
+    ``--clear-sky-diag`` buys a second radiation solve per radiation step
+    (~2x the radiation cost) for the CMOR rsutcs/rlutcs pair.  Two
+    configurations consume that cost and can publish NOTHING, and both used
+    to be indistinguishable from success (#843; the exact silent-drop class
+    of #1385):
+
+    * ``radiation="none"`` — ``_make_hydrostatic_combined`` builds no
+      radiation module at all, so the tendency never carries
+      ``sw_up_toa_clr``/``lw_up_toa_clr`` and ``make_radiation_physics``'s
+      unsupported-model guard is never even reached.  The host-side cloud
+      trio (clt/clwvi/clivi) is UNAFFECTED — it derives from the q_c/q_i
+      tracers and the collector's own cloud scheme — so only the flux pair
+      is lost here.
+    * the SPATIAL CMOR feed is off.  All five new fields are written only
+      into the spatial (``Amon``) accumulator — the zonal monthly one holds
+      none of them — so ``monthly_means`` alone is NOT enough, and neither is
+      a multi-rank layout (where ``_mpas_cmip_feed_enabled`` already refuses
+      to feed).  Without a live spatial feed nothing is published at all.
+    * the run never REACHES a diagnostic boundary (``--days 1
+      --diag-days 5``, or any ``diag_days`` whose interval exceeds the
+      remaining steps): the feed loop simply never fires, so every CMOR
+      field — not just these five — is absent, and the second pass would be
+      paid on every radiation step for nothing.
+
+    Returns ``(run_the_pass, reason_or_None)``.  A non-None reason is a
+    human-readable clause for a LOUD warning; the caller warns rather than
+    raising, because dry / Held-Suarez / throughput runs legitimately carry
+    the flag from a launcher default and aborting them over a diagnostic
+    would be worse than skipping it.  Slots 10/11 have exactly ONE consumer
+    (``_feed_mpas_cmip_accumulators``), so skipping the pass when that
+    consumer is absent loses nothing.
+    """
+    if not clear_sky_diag:
+        return False, None
+    if not spatial_feed_on:
+        return False, ("the SPATIAL CMOR feed is off (needs --cmip-output on "
+                       "a single-rank run; --monthly-means alone feeds only "
+                       "the zonal accumulator, which carries none of these "
+                       "fields), so NONE of rsutcs/rlutcs/clt/clwvi/clivi can "
+                       "be published")
+    if not feed_steps_reached:
+        return False, ("this run never reaches a diagnostic boundary "
+                       "(diag_days exceeds the remaining run length), so the "
+                       "CMOR feed never fires and no field at all is written")
+    if radiation == "none":
+        return False, ("radiation='none', so rsutcs/rlutcs cannot be "
+                       "produced (the cloud trio clt/clwvi/clivi is "
+                       "unaffected and still published)")
+    return True, None
+
+
 class _MPASSfcFluxAccum:
     """Per-step accumulator for the MPAS eager loop's ``_sfc_diag`` flux
     slots so the CMOR feed hands INTERVAL MEANS to the accumulators instead
@@ -313,7 +370,10 @@ class _MPASSfcFluxAccum:
     instantaneous diurnal pattern while labeled ``time: mean``).
 
     Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
-    4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields.
+    4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
+    plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
+    port), which is only ever non-None when ``--clear-sky-diag`` is on
+    (empty slots add nothing: dump/restore stay byte-identical when off).
     State-derived fields (tas/ta/ua/...) stay snapshots; the collector
     labels them honestly via ``cmip_snapshot_vars``.
 
@@ -340,7 +400,7 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7)
+    SLOTS = (2, 3, 4, 5, 6, 7, 10, 11)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -6153,12 +6213,14 @@ class ModelDriver:
             q_i = _tracer("q_i")
             # Flux fields (slots of the sfc_diag contract: 2 precip
             # [kg/m2/s], 3 lw_up_toa, 4 sw_up_toa, 5 sw_down_toa, 6 shflx,
-            # 7 lhflx) — INTERVAL MEANS from the per-step accumulator when
-            # it ran (#1353; makes the CMOR ``time: mean`` label true for
-            # these diurnal fields at any diag cadence), else the last
-            # step's instantaneous value (pre-#1353 fallback).  None on
-            # runs without radiation/turbulence; the collector skips
-            # absent fields.
+            # 7 lhflx, 10 sw_up_toa_clr, 11 lw_up_toa_clr) — INTERVAL MEANS
+            # from the per-step accumulator when it ran (#1353; makes the
+            # CMOR ``time: mean`` label true for these diurnal fields at any
+            # diag cadence), else the last step's instantaneous value
+            # (pre-#1353 fallback).  None on runs without
+            # radiation/turbulence — and slots 10/11 are None unless
+            # --clear-sky-diag is on (#843); the collector skips absent
+            # fields.
             _sfc_diag = getattr(self.model, "_sfc_diag", None)
             _accum = getattr(self, "_mpas_sfc_accum", None)
             # A SHORT window (first interval after an off-cadence restart or
@@ -6193,6 +6255,29 @@ class ModelDriver:
             rsdt = _sfc_slot(5)
             hfss = _sfc_slot(6)
             hfls = _sfc_slot(7)
+            # Clear-sky TOA pair (#843): slots populated only when
+            # --clear-sky-diag is on, so these are None (fields absent from
+            # the CMOR output, byte-identical) in the default configuration.
+            rsutcs = _sfc_slot(10)
+            rlutcs = _sfc_slot(11)
+            # Cloud-diagnostic CMOR fields (clt/clwvi/clivi), gated by the
+            # SAME --clear-sky-diag flag (one knob turns on the whole
+            # cloud/CRE CMOR set on this lane; default off = byte-identical
+            # outputs + sidecars for the running chains).  Pass the CLOUD
+            # condensate tracers; the collector derives the RADIATIVE water
+            # paths + max-random total cover.  Same once-per-interval 00 UTC
+            # snapshot sampling as every state-derived field on this lane
+            # (diurnal-alias caveat shared with tas/ps/prw — labelled via
+            # cmip_snapshot_vars).
+            q_c = None
+            q_i = None
+            _out_cfg = getattr(getattr(self, "config", None), "output", None)
+            if (getattr(_out_cfg, "clear_sky_diag", False)
+                    and state.tracers is not None):
+                if "q_c" in state.tracers:
+                    q_c = state.tracers["q_c"].data
+                if "q_i" in state.tracers:
+                    q_i = state.tracers["q_i"].data
             # 2 m ``tas`` via MOST similarity when prescribed sst/sic are on
             # this path (``get_sst_sic`` set for a radiation+SST run) — matches
             # the cube-path collect() ``tas`` instead of a bare lowest-level
@@ -6278,6 +6363,8 @@ class ModelDriver:
                 rsdt=rsdt,
                 hfss=hfss,
                 hfls=hfls,
+                rsutcs=rsutcs,
+                rlutcs=rlutcs,
                 flux_interval_days=_flux_days,
             )
         except Exception as exc:  # pragma: no cover - defensive diag guard
@@ -6476,6 +6563,32 @@ class ModelDriver:
                 "gather + global weights on rank 0.)",
                 getattr(self, "_mpi_world_size", 1))
 
+        # --clear-sky-diag DEGRADES LOUDLY, NEVER SILENTLY (#843): skip the
+        # second radiation pass in the configurations that cannot publish it,
+        # and say so.  See ``clear_sky_pass_effective`` for the two cases.
+        self._mpas_clear_sky_effective, _cs_why = clear_sky_pass_effective(
+            clear_sky_diag=bool(getattr(cfg.output, "clear_sky_diag", False)),
+            radiation=str(getattr(cfg, "radiation", "none")),
+            # The SPATIAL accumulator is the only home of the five new
+            # fields, and the feed must actually be allowed to run (a
+            # multi-rank layout is refused above).
+            spatial_feed_on=bool(
+                self._mpas_cmip_feed_on
+                and getattr(_diag, "_spatial_monthly", None) is not None),
+            # First feed lands ``_rem`` steps in — the SAME arithmetic the
+            # snapshot-phase label below and the feed trigger itself use.
+            # If that is past the end of the run the loop never fires.
+            feed_steps_reached=(
+                DIAG_INTERVAL > 0
+                and (DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL))
+                <= n_steps_total),
+        )
+        if _cs_why is not None and getattr(self, "_mpi_rank", 0) == 0:
+            logger.warning(
+                "  --clear-sky-diag is ON but %s.  The clouds-off second "
+                "radiation pass is DISABLED rather than run and discarded.",
+                _cs_why)
+
         # #1353: per-step flux accumulation so the CMOR feed hands interval
         # MEANS (not the 00 UTC end-of-interval snapshot) for the strongly
         # diurnal fields pr/rlut/rsut/rsdt/hfss/hfls.  State-derived fields
@@ -6532,6 +6645,11 @@ class ModelDriver:
                      or _true_cad_days >= 1.0)):
             _diag.cmip_snapshot_vars = {
                 "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va"}
+            if cfg.output.clear_sky_diag:
+                # The cloud-diagnostic trio (fed only with --clear-sky-diag,
+                # see _feed_mpas_cmip_accumulators) is state-derived => same
+                # once-per-interval snapshot sampling caveat as tas/ps/prw.
+                _diag.cmip_snapshot_vars |= {"clt", "clwvi", "clivi"}
             # Label with the TRUE sampling cadence (integer steps x dt), not
             # the requested diag_days the step arithmetic truncated — e.g.
             # diag_days=1 at dt=10000 s samples every 0.926 d, and claiming
@@ -6756,6 +6874,17 @@ class ModelDriver:
                 # external CMIP6 ozone FILE arrives per-step via the traced
                 # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
+                # --clear-sky-diag on the MPAS lane (#843 lean-lane port):
+                # clouds-off second radiation pass per radiation step ->
+                # sfc_diag slots 10/11 -> CMOR rsutcs/rlutcs.  Previously the
+                # flag was a SILENT NO-OP here (the accumulators lived only in
+                # _run_compiled).  Default False = byte-identical build.
+                # ``_mpas_clear_sky_effective`` is the flag AFTER the
+                # publishability check above: it is False (with a loud
+                # warning) when nothing could consume the second pass, so a
+                # misconfigured run does not pay 2x radiation for a
+                # discarded diagnostic.
+                clear_sky_diag=bool(self._mpas_clear_sky_effective),
             ),
             # grid_dx_m: SCVT sqrt(mean cell area) [m] — auto-fills Bechtold's
             # IFS ZTAURES resolution factor (codex 2026-07-23 finding A;
@@ -7267,9 +7396,10 @@ class ModelDriver:
                 # Slot contract (primitive_eq_mpas #1318 CMOR feed +
                 # land port union): (sw_net, lw_net, precip, lw_up_toa,
                 # sw_up_toa, sw_down_toa, shflx, lhflx,
-                # sw_down_sfc, lw_down_sfc) — the DOWNWELLING surface
-                # fluxes the land needs are slots 8/9 (NOT 3/4, which are
-                # now TOA fields).
+                # sw_down_sfc, lw_down_sfc[, sw_up_toa_clr, lw_up_toa_clr])
+                # — the DOWNWELLING surface fluxes the land needs are slots
+                # 8/9 (NOT 3/4, which are TOA fields; 10/11 are the #843
+                # clear-sky TOA pair, present only with --clear-sky-diag).
                 if (_sd is None or len(_sd) < 10
                         or _sd[8] is None or _sd[9] is None):
                     return None
