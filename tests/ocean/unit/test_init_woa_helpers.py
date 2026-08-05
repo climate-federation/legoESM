@@ -51,9 +51,18 @@ def test_interp_handles_nan_and_too_few_valid():
     got = _interp_profile_to_z_coord(profile, woa_depths, z)
     assert np.allclose(got, 18.0)
     assert got.shape == (z.n_levels,)
-    # All-NaN → zeros (documented fallback), still no NaN leaks.
+    # All-NaN → NaN, so ``init_ocean_from_woa``'s T_fill/S_fill applies.
+    #
+    # This previously asserted zeros and called NaN the leak.  It is the other
+    # way round: NaN is CAUGHT by the caller's
+    # ``np.where(np.isnan(T_out), T_fill, T_out)``, while 0.0 sails straight
+    # through it and enters the model as T = 0 degC / S = 0 PSU -- fresh water
+    # at 0 degC (rho = 999.8) beside ~1027 sea water.  On the FESOM2-matched
+    # CORE2 config that gave 1569 wet columns a density step of up to
+    # 30 kg/m^3 and ~42 m/s in one 2400 s step.
     got0 = _interp_profile_to_z_coord(np.full(3, np.nan), woa_depths, z)
-    assert np.all(np.isfinite(got0)) and np.allclose(got0, 0.0)
+    assert np.all(np.isnan(got0))
+    assert not np.any(got0 == 0.0)
 
 
 # --- _analytical_woa_profiles -----------------------------------------------

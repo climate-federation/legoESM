@@ -80,6 +80,9 @@ VMIX=${VMIX:-explicit}
 # converge to dx ~ 970 m at 89.5N.  FESOM2's unstructured CORE2 mesh has no
 # polar singularity to close, which is why the reference run does not need this.
 NCAP=${NCAP:-90.0}
+# Polar sponge: config has sponge_lat_max = 60.0 with sponge_width_deg = 5.0, so
+# everything poleward of 60 deg sits in the sponge band.  SPONGE=0 disables it.
+SPONGE=${SPONGE:-1}
 
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
@@ -130,6 +133,7 @@ EOF
     $( [ "$FIXER" = 0 ] && echo --no-conservation-fixer ) \
     $( [ "$VMIX" = implicit ] && echo --implicit-vertical-mixing ) \
     --north-cap-lat "$NCAP" \
+    $( [ "$SPONGE" = 0 ] && echo --jra55-no-sponge ) \
     --runoff-routing "$ROUTING" \
     --runoff-radius-km 500 \
     $( [ "$WOA_INIT" = 1 ] && echo --woa-init ) \
