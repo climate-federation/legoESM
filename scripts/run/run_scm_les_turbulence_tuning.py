@@ -689,11 +689,22 @@ def _arm_score(scheme: str, arm: "CaseArm", args, params=None,
         params, base_cfg=cfg, case=arm.case, dt=arm.dt, hours=arm.hours,
         analysis_hours=arm.analysis_hours, chunk_steps=arm.chunk_steps,
     )
+    # theta = T/Exner uses the case's FIXED p_full, which is only valid while
+    # p_s is static. Discarding ps_hist left this check permanently
+    # unexecuted while the output still advertised it.
+    #
+    # ONLY on the untraced path: the assert concretizes with float(), so
+    # calling it inside the differentiated loss would raise
+    # TracerArrayConversionError. params is None exactly on the evaluation
+    # path, which is where a drift would show up anyway -- the tuned
+    # parameters cannot change p_s, only the physics can.
+    drift = (None if params is not None
+             else _assert_surface_pressure_static(ps_hist, arm.case.p_s))
     components, combined = score_against_les(
         means, reference=arm.reference, p_full=arm.case.p_full,
         scored=arm.scored,
     )
-    return means, ps_hist, components, combined
+    return means, drift, components, combined
 
 
 def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
@@ -704,16 +715,21 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
     equally. That is the point of the multi-case fit: a parameter set that wins
     on trade cumulus by wrecking the stable boundary layer must not score well.
     """
-    per_case, per_components = {}, {}
+    per_case, per_components, drifts, means_out = {}, {}, {}, []
     total = None
     for i, arm in enumerate(arms):
         cfg = None if cfgs is None else cfgs[i]
-        _m, _ps, comp, combined = _arm_score(
+        _m, _drift, comp, combined = _arm_score(
             scheme, arm, args, params=params, base_cfg=cfg)
+        means_out.append(_m)
         per_case[arm.name] = combined
         per_components[arm.name] = comp
+        if _drift is not None:
+            drifts[arm.name] = float(_drift)
         total = combined if total is None else total + combined
     joint = total / float(len(arms))
+    joint_score.last_ps_drift_pa = drifts
+    joint_score.last_means = means_out
     return joint, per_case, per_components
 
 
@@ -932,6 +948,18 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         # Half a step is the finest the SCM can resolve, so a residual below
         # it is not a window mismatch -- it is rounding, and it is reported.
         les_end = float(ref.window_hours[1])
+        if args.hours is not None:
+            # Honour it, but only where it still lands on the reference: the
+            # whole point of the guard below is that both sides average the
+            # same window. Silently ignoring the flag was worse than either
+            # obeying or refusing it.
+            if abs(float(args.hours) - les_end) > 0.5 * args.dt / 3600.0:
+                raise SystemExit(
+                    f"{name}: --hours {args.hours} does not match the LES "
+                    f"reference end {les_end:.6f} h, so the two sides would "
+                    "average different windows. Omit --hours to follow the "
+                    "reference.")
+            les_end = float(args.hours)
         nsteps = max(1, int(round(les_end * 3600.0 / args.dt)))
         end_residual_s = abs(nsteps * args.dt - les_end * 3600.0)
         if end_residual_s > 0.5 * args.dt:
@@ -956,9 +984,20 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
                   f"{max(end_residual_s, span_residual_s):.3f} s of the LES "
                   f"endpoint/window (dt = {args.dt:g} s); the residual is "
                   "below one SCM step.")
-        # integrate whole steps; the arm carries what the SCM will ACTUALLY do
+        # Round the window START, not the span, so the endpoint and the start
+        # are snapped on the SAME grid. Rounding both endpoint and span
+        # independently lets each sit within half a step while their DIFFERENCE
+        # moves the window start by nearly a full step.
+        n_start = nsteps - n_an
+        start_residual_s = abs(
+            n_start * args.dt - float(ref.window_hours[0]) * 3600.0)
+        if start_residual_s > 0.5 * args.dt:
+            raise SystemExit(
+                f"{name}: with --dt {args.dt} s the analysis window would "
+                f"start {start_residual_s:.3f} s from the LES window start, "
+                "more than half a step.")
         les_end = nsteps * args.dt / 3600.0
-        span = n_an * args.dt / 3600.0
+        span = (nsteps - n_start) * args.dt / 3600.0
         surface = build_surface_config(
             case, bulk_scheme=args.surface_bulk_scheme)
         arms.append(CaseArm(
@@ -991,6 +1030,12 @@ def main(argv=None) -> int:
             if n not in ALL_CASES:
                 raise SystemExit(
                     f"unknown case {n!r}; choose from {list(ALL_CASES)}")
+            if n in les_dirs:
+                raise SystemExit(
+                    f"--cases lists {n!r} more than once. Duplicates would "
+                    "double-weight that case in the joint loss and overwrite "
+                    "its per-case entry in the report, so only one directory "
+                    "would actually be read.")
             case_names.append(n)
             les_dirs[n] = Path(d.strip())
     else:
@@ -1048,6 +1093,7 @@ def main(argv=None) -> int:
               f"Cd={sc.Cd_neutral:.4e} Ch={sc.Ch_neutral:.4e}")
 
     configs: dict[str, list] = {}
+    profiles: dict[str, list] = {}
     results: list[SchemeResult] = []
     for scheme in schemes:
         print(f"\n[eval] {scheme}", flush=True)
@@ -1058,8 +1104,17 @@ def main(argv=None) -> int:
             joint, per_case, per_comp = joint_score(
                 scheme, arms, args, params=None, cfgs=cfgs)
             configs[scheme] = cfgs
+            profiles[scheme] = [
+                {"theta": np.asarray(_theta_from_T(mm["T"], a.case.p_full)),
+                 "qv": np.asarray(mm["qv"]), "u": np.asarray(mm["u"]),
+                 "v": np.asarray(mm["v"])}
+                for a, mm in zip(arms, joint_score.last_means)
+            ]
             res.score_default = float(joint)
             res.per_case_default = {k: float(v) for k, v in per_case.items()}
+            res.ps_drift_pa = max(
+                getattr(joint_score, "last_ps_drift_pa", {}).values(),
+                default=None)
             res.components_default = {
                 k: {kk: float(vv) for kk, vv in c.items()}
                 for k, c in per_comp.items()}
@@ -1110,6 +1165,10 @@ def main(argv=None) -> int:
             jax.clear_caches()
 
     _write_outputs(outdir, args, arms, results)
+    for i, a in enumerate(arms):
+        _write_case_profiles(outdir, a, {s_: p_[i]
+                                         for s_, p_ in profiles.items()
+                                         if p_[i] is not None})
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1131,6 +1190,30 @@ def _half_pressures(case) -> np.ndarray:
         case.nlev, sigma_top=case.sigma_top, dtype=jnp.float64,
     )
     return np.asarray(sigma.sigma_half, dtype=np.float64) * case.p_s
+
+
+def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
+    """One profiles npz PER CASE, so the plot keeps working and a successful
+    run does not silently lose its profile-level audit trail."""
+    payload = {
+        "z_scm": np.asarray(arm.case.z_full),
+        "p_full": np.asarray(arm.case.p_full),
+        "mask": np.asarray(arm.reference.mask),
+        "weights": np.asarray(arm.reference.weights),
+        "z_les": np.asarray(arm.reference.z_les),
+        "window_hours": np.asarray(arm.reference.window_hours),
+        "scored": np.asarray(list(arm.scored)),
+    }
+    for name, prof in arm.reference.profiles.items():
+        payload[f"les_scmlev_{name}"] = np.asarray(prof)
+    for name, prof in arm.reference.profiles_les.items():
+        payload[f"les_native_{name}"] = np.asarray(prof)
+    for scheme, prof in per_scheme.items():
+        for name, values in prof.items():
+            payload[f"scm_{scheme}_{name}"] = np.asarray(values)
+    out = outdir / (f"profiles_{arm.name}.npz" if outdir.name != arm.name
+                    else "profiles.npz")
+    np.savez(out, **payload)
 
 
 def _write_outputs(outdir: Path, args, arms, results) -> None:
