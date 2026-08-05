@@ -414,6 +414,26 @@ Fixed by returning NaN so the documented fill (1.5 °C / 34.7 PSU) applies.
 Codex adversarial review CLEAR on all four questions (NaN-escape, other
 callers, single-sample branch, regression).
 
+**The zeros were not confined to the IC.** `_setup_jra55_forcing_state` builds
+the polar sponge reference and the SSS restoring target from the SAME array:
+
+```python
+state["sponge_T_ref_3d"] = jnp.asarray(T_woa)
+state["sponge_S_ref_3d"] = jnp.asarray(S_woa)
+state["sss_target_2d"]   = jnp.asarray(S_woa[..., 0])
+```
+
+So before the fix the model was also *relaxing toward* T = 0 °C / S = 0 PSU in
+those 1569 columns, for the whole run — not merely starting from them. The
+sponge band is |lat| > 60, and the rest-lane "mode 2" failure (§3.7, surface
+T runaway in an otherwise motionless ocean) sits at lat 61.5, level 0, inside
+that band.
+
+That is a **LEAD, NOT A DIAGNOSIS**, and two things argue against the simple
+version of it: relaxing toward 0 would COOL, whereas mode 2 heats to +141 °C;
+and the SSS piston flux at 5e-7 m/s is ~0.008 PSU/step, far too small. Test it
+by re-running the rest lane post-fix rather than assuming.
+
 **Still open:** residual max \|Δρ\| = 8.38 kg/m³ between adjacent 1° cells is
 high enough to suspect another defect of the same family. Unexamined.
 
