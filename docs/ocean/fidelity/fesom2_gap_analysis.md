@@ -393,20 +393,36 @@ the cell where the model's own `j_maxu`/`i_maxu` diagnostic puts the maximum
 
 | PGF component | implied `du` in one 2400 s step |
 |---|---|
-| full | 41.87 m/s |
+| **full** | **41.87 m/s** |
 | barotropic (depth-mean) | 22.30 m/s |
-| **baroclinic (deviation)** | **22.21 m/s** |
+| baroclinic (deviation) | 22.21 m/s |
 
-The model reports `max_speed = 21.95 m/s` at step 1, from `max_speed = 0.0`
-at step 0. That matches the **baroclinic-only** prediction to 1.2 %, which
-says the barotropic solver (`implicit_cn`) *is* absorbing the depth-mean part
-correctly — what survives is the unbalanced baroclinic shear, and that alone
-is supercritical (dx = 16 km at 81.5 N gives CFL = 3.2).
+A dedicated 1-step run (`--days 0.028`, so `n_steps = 1`) gives a snapshot with
+`_step = 1` and face `|u|max = 42.30 m/s`, from `0.0` at step 0. Against the
+**full** unbalanced PGF that is a **1.0 % match**, and it is the comparison to
+use: both sides are the raw face velocity.
 
-Everything downstream is advective wreckage, not a separate defect: `T`
-reaches 149 °C and `S` reaches −204 PSU, concentrated in coastal (33 % of
-coastal columns vs 0.67 % interior) and shallow columns (median 1180 m vs
-3828 m global).
+Do NOT pair the model's `max_speed` timeseries diagnostic (21.95 m/s at step 1)
+with the baroclinic-only figure. `max_speed` is a CELL-CENTRE average of the
+same field whose face maximum is 42.30 — a different staggering and a different
+reduction — so the apparent 1.2 % agreement compares two different quantities
+and says nothing about whether the barotropic solver absorbed the depth-mean.
+An earlier revision of this section drew that conclusion; it is retracted. What
+the barotropic solver does on step 1 is **not established here**.
+
+The kick is supercritical on its own: dx = 16 km at 81.5 N gives CFL = 3.2.
+
+Everything else is advective wreckage inside that same first step, not a
+separate defect: `T` reaches 149 °C and `S` reaches −204 PSU, concentrated in
+coastal (33 % of coastal columns vs 0.67 % interior) and shallow columns
+(median 1180 m vs 3828 m global). These are step-1 values — the 1-step run
+reproduces the 30-day run's snapshot exactly — so the pattern describes where
+the velocity kick did its damage, not a slow drift.
+
+Note on the snapshot: `snapshot_final.npz` writes `_step = n_steps` regardless
+of when the run stopped, so a blown-up 30-day run's snapshot LOOKS like a
+day-30 state while actually holding step 1. Confirm the step with a dedicated
+short run before reading anything spatial out of it.
 
 **Refuted**, each by a one-variable arm at `--diag-every 1` or an offline
 measurement — do not re-chase these:
