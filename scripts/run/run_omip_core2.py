@@ -4293,6 +4293,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--gm-aei0", type=float, default=_GM_AEI0_DEFAULT,
                    help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
                         "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
+    p.add_argument("--freshwater-closure", type=str, default=None,
+                   choices=["none", "virtual_salt_flux", "real_freshwater"],
+                   help="Ocean freshwater closure. 'virtual_salt_flux' "
+                        "(current default) applies a virtual salt flux "
+                        "-S_ref*F_fw/(rho0*dz0) ON TOP OF the z-star eta "
+                        "channel, which already conserves h*S while the "
+                        "column stretches -- a spurious salt source NEMO "
+                        "does not have under variable volume (measured at "
+                        "+10.109 psu.m of excess Arctic salt over 60 d). "
+                        "'real_freshwater' keeps the eta/volume channel and "
+                        "drops ONLY that virtual-salt term; the genuine "
+                        "sea-ice salt flux pathway is unaffected. See "
+                        "docs/dev-notes/ocean_real_freshwater_design.md.")
     p.add_argument("--freshwater-salinity", type=str, default="s_ref",
                    choices=["s_ref", "local"],
                    help="Salinity multiplying the freshwater flux in the "
@@ -5407,6 +5420,10 @@ def main() -> int:
     _fw_cfg_kw = {}
     if args.freshwater_salinity != "s_ref":
         _fw_cfg_kw["freshwater_salinity"] = args.freshwater_salinity
+    if args.freshwater_closure is not None:
+        # Default None means "leave the config default alone", so an
+        # unset flag stays bit-identical to previous runs.
+        _fw_cfg_kw["freshwater_closure"] = args.freshwater_closure
     if args.no_normalize_freshwater:
         # EXPLICIT opt-out of the global-freshwater normalization.  The
         # CORE-II P-E+R integral is a real ~+0.65 Sv imbalance, so turning

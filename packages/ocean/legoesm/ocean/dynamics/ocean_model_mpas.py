@@ -182,12 +182,12 @@ class MPASOceanModel:
                 'barotropic substep. Use barotropic_solver="explicit_substep" to '
                 'apply it, or leave the filter at its "cosine" default.',
                 stacklevel=2)
-        _valid_fw = ("none", "virtual_salt_flux")
+        _valid_fw = ("none", "virtual_salt_flux", "real_freshwater")
         if self.config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, got "
                 f"{self.config.freshwater_closure!r} (the MPAS path implements "
-                "only virtual_salt_flux; real_freshwater is not available here)"
+                "virtual_salt_flux and real_freshwater)"
             )
         # NEMO ln_rnf_depth_ini per-cell runoff spread-depth map [m]: fail fast
         # on a bad map (mirrors LatLonCGridOceanConfig validation).  A zero/
@@ -759,6 +759,15 @@ class MPASOceanModel:
             # this local sum (single-rank-correct) until owned-mask plumbing
             # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
+                if config.freshwater_closure == "real_freshwater":
+                    # codex RED: the multi-rank refusal for freshwater
+                    # normalization lives inside the virtual-salt block,
+                    # which real_freshwater skips -- but this eta mean is
+                    # still RANK-LOCAL, so guard it here too.
+                    from legoesm.ocean.freshwater import (
+                        refuse_multiprocess_eta_normalization,
+                    )
+                    refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
                 F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(

@@ -958,7 +958,13 @@ def mpas_ocean_baroclinic_tendencies(
     # the free-surface equation (including freshwater via F_slow_eta passed
     # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
     # applied here as a tracer tendency.
-    if freshwater is not None and config.freshwater_closure != "none":
+    # `real_freshwater`: skip ONLY the virtual-salt block.  The eta/volume
+    # channel (F_slow_eta in ocean_model_mpas.step) already carries the
+    # freshwater, and the z-star tracer step conserves h*S while the column
+    # stretches, so a VSF on top is a spurious salt source NEMO does not
+    # have.  The genuine surface_forcing.salt_flux pathway is untouched.
+    if (freshwater is not None
+            and config.freshwater_closure not in ("none", "real_freshwater")):
         # When ``normalize_freshwater`` is on, remove the global area-mean of the
         # net freshwater flux so the virtual-salt closure conserves GLOBAL SALT
         # (the same correction the free-surface eta path applies for volume in

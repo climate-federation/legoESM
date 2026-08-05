@@ -1664,7 +1664,7 @@ class LatLonCGridOceanModel:
                 f"min_water_column_m must be > 0, got "
                 f"{config.min_water_column_m!r}",
             )
-        _valid_fw = {"none", "virtual_salt_flux"}
+        _valid_fw = {"none", "virtual_salt_flux", "real_freshwater"}
         if config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, "
@@ -1676,8 +1676,12 @@ class LatLonCGridOceanModel:
                 f"freshwater_salinity must be one of {_valid_fw_sal}, "
                 f"got {getattr(config, 'freshwater_salinity', 's_ref')!r}",
             )
-        if (getattr(config, "freshwater_salinity", "s_ref") == "local"
+        if (config.freshwater_closure != "real_freshwater"
+                and getattr(config, "freshwater_salinity", "s_ref") == "local"
                 and bool(getattr(config, "normalize_freshwater", False))):
+            # Under `real_freshwater` no salinity multiplies the freshwater
+            # flux at all (the VSF block is skipped), so this combination is
+            # inert rather than unsound -- do not reject a legitimate config.
             # normalize_freshwater promises ZERO global salt tendency, which
             # holds only for a SCALAR S_ref (S_ref*∫F' dA = 0).  With the
             # local-S field the covariance ∫S_local·F' dA is generally
@@ -3372,6 +3376,38 @@ class LatLonCGridOceanModel:
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
+            if (self.config.freshwater_closure == "real_freshwater"
+                    and bool(getattr(self.config, "normalize_freshwater",
+                                     False))):
+                # codex RED: lat-lon's ONLY freshwater normalizer lives inside
+                # the virtual-salt block, which `real_freshwater` skips -- so
+                # without this, normalize_freshwater=True would silently become
+                # a no-op in the new mode (normalize-on and normalize-off
+                # numerically identical).  Normalize the eta/VOLUME forcing
+                # instead, which is what the flag must mean once there is no
+                # virtual-salt channel to normalize.
+                #
+                # Scoped to real mode ONLY: the virtual-mode normalizer is left
+                # exactly where it was, so existing runs stay bit-identical.
+                #
+                # MPI: this is a rank-local mean (matching the MPAS eta path);
+                # multi-rank use is refused by the guard alongside it.
+                from legoesm.ocean.freshwater import (
+                    refuse_multiprocess_eta_normalization,
+                )
+                refuse_multiprocess_eta_normalization(
+                    "LatLonCGridOceanModel")
+                _lm = state.land_mask.data
+                _area = self.grid.area_T if hasattr(self.grid, "area_T") else None
+                if _area is None:
+                    raise ValueError(
+                        "real_freshwater + normalize_freshwater needs grid "
+                        "cell areas (grid.area_T) to form the area-weighted "
+                        "mean; none available on this grid")
+                _w = _area * _lm
+                _den = jnp.sum(_w)
+                _mean = jnp.sum(F_slow_eta * _area) / jnp.maximum(_den, 1e-10)
+                F_slow_eta = (F_slow_eta - _mean * _lm)
             # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
             # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
             # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's
@@ -4462,7 +4498,17 @@ class LatLonCGridOceanModel:
         # the barotropic continuity equation (via F_slow_eta), so no
         # post-hoc eta correction is needed.  Only the virtual salt
         # flux remains here, applied to the top layer of S.
-        if freshwater is not None and self.config.freshwater_closure != "none":
+        # `real_freshwater` (NEMO variable-volume convention): the eta/volume
+        # channel above ALREADY represents dilution -- the z-star tracer step
+        # hS_new = h_old*S - dt*div  then  S_new = hS_new/h_new preserves h*S
+        # while the column stretches.  Adding a virtual salt flux on top of
+        # that is a SEPARATE salt-content source that NEMO does not have; it
+        # was measured at +10.109 psu.m of spurious Arctic salt over 60 days
+        # (docs/dev-notes/ocean_real_freshwater_design.md).  So skip ONLY this
+        # block; the genuine surface_forcing.salt_flux pathway is untouched.
+        if (freshwater is not None
+                and self.config.freshwater_closure
+                not in ("none", "real_freshwater")):
             dz_0 = h_k_new[..., 0]
             _S_dtype = state_new.S.data.dtype
             # Salinity entering the virtual-salt closure: the fixed scalar
