@@ -58,7 +58,13 @@ NCOL = 6 * N * N
 DT = 60.0
 N_STEPS = 2
 START_DAY = 0.0
-RAD_UPDATE_STEPS = 2   # exercise the held-radiation cadence
+# Cadence 1 is the ONLY value this lane accepts: build_tile_step_unified pins
+# static_need_rad=True, which discards the per-step predicate, so >1 is refused
+# by make_tiled_operator_split_step (see
+# test_tiled_operator_split_refuses_rad_update_steps_above_one).  This was 2,
+# which now raises -- and never exercised a held-radiation cadence anyway, since
+# the predicate was being thrown away.
+RAD_UPDATE_STEPS = 1
 
 
 def _mesh():
@@ -367,6 +373,32 @@ def test_tiled_operator_split_envelope_refusals():
             dataclasses.replace(statics,
                                 owned_mask=jnp.ones((6,))),
             fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT)
+
+
+def test_tiled_operator_split_refuses_rad_update_steps_above_one():
+    """``rad_update_steps > 1`` must be refused, not silently ignored.
+
+    The step body computes the cadence predicate (``need_rad_and_time``) and
+    passes it to ``statics.step_unified``, but ``build_tile_step_unified`` pins
+    ``static_need_rad=True``, which DELETES the predicate and always takes the
+    radiation branch -- so the knob ran a denser cadence than configured, with
+    no error. Coupled tiled runs raise at the driver dispatch before reaching
+    here, so the silent path was the UNCOUPLED tiled cube run.
+
+    Non-vacuity: the identical call at ``rad_update_steps=1`` builds fine (the
+    sibling tests above all use it), so the refusal is keyed on the knob and
+    not on the fixture being unbuildable.
+    """
+    mesh = _mesh()
+    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
+    with pytest.raises(NotImplementedError, match="rad_update_steps"):
+        make_tiled_operator_split_step(
+            model, mesh, statics,
+            fix_mass=True, rad_update_steps=2, start_day=0.0, kt=KT)
+    # Same call, cadence 1 -> builds.
+    assert make_tiled_operator_split_step(
+        model, mesh, statics,
+        fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT) is not None
 
 
 def test_build_tile_step_unified_refuses_column_sharding():

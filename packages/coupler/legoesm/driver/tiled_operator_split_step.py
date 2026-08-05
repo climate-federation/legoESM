@@ -322,8 +322,30 @@ def make_tiled_operator_split_step(
 
     ENVELOPE refusals (loud): ``statics.qv_smooth_coeff != 0`` (full-cube
     ∇⁴ halo), ``statics.owned_mask is not None`` (MPI-replicated
-    semantics do not compose with the single-controller tile mesh).
+    semantics do not compose with the single-controller tile mesh),
+    ``rad_update_steps > 1`` (see below).
     """
+    # Radiation cadence is NOT honoured on this lane.  The body below computes
+    # the cadence predicate per step (``need_rad_and_time``) and passes it to
+    # ``statics.step_unified``, but that callable is built by
+    # ``build_tile_step_unified`` with ``static_need_rad=True``, which DELETES
+    # the predicate and unconditionally takes the radiation branch
+    # (physics_pipeline.py:2556).  So ``rad_update_steps > 1`` bought nothing
+    # here and ran a DENSER radiation cadence than configured, silently -- the
+    # wrong-physics-on-a-live-knob case the dispatch-hardening doctrine
+    # forbids.  Coupled runs already raise at the driver dispatch before
+    # reaching this lane, so the silent path was the UNCOUPLED tiled cube run
+    # (codex adversarial review; sibling of the same defect fixed on the
+    # lat-band SPMD lane).  No ``int()`` on the comparison: a fractional 1.5
+    # would truncate to 1 and slip past a cast-then-compare guard.
+    if rad_update_steps > 1:
+        raise NotImplementedError(
+            f"make_tiled_operator_split_step: rad_update_steps="
+            f"{rad_update_steps} is not honoured on the tiled cube lane -- "
+            "build_tile_step_unified pins static_need_rad=True, so the cadence "
+            "predicate is discarded and radiation runs EVERY step regardless. "
+            "Set rad_update_steps=1 (radiation every step -- correct, just "
+            "more expensive), or run the non-tiled lane.")
     cfg = model.config
     n = int(model.grid.n)
     nlev = int(model.sigma_coord.n_levels)

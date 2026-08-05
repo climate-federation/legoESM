@@ -11268,6 +11268,18 @@ class ModelDriver:
             elif (cfg.unfused_radiation
                     and RAD_UPDATE_STEPS > 1
                     and seg_steps % RAD_UPDATE_STEPS == 0
+                    # PHASE gate.  The host loop below hardcodes "advance
+                    # exactly RAD_UPDATE_STEPS held steps, then refresh", which
+                    # only lands on the configured boundary when the segment
+                    # STARTS on one.  Without this a restart at a non-aligned
+                    # step silently shifts the refresh by an arbitrary offset
+                    # rather than the documented one step -- e.g. s=2, k=4
+                    # refreshes after step 5 where the cadence asks for step 3
+                    # (codex adversarial review).  Falls through to the fused
+                    # path, which is phase-general (compiled_segments.py
+                    # _run_subcycled) and therefore always correct; the only
+                    # cost is this segment's XLA compile boundary.
+                    and int(carry.step_index) % RAD_UPDATE_STEPS == 0
                     and self._ensemble_size == 1
                     and getattr(run_segment, "run_norad_scan", None) is not None
                     and getattr(run_segment, "run_rad", None) is not None):
