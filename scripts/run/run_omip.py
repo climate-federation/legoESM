@@ -509,7 +509,18 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--r-factor-max", type=float, default=0.2,
                    help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
     p.add_argument("--north-cap-lat", type=float, default=90.0,
-                   help="Latitude [°N] above which all cells become land (default 80).")
+                   help=(
+                       "Latitude [°N] above which all cells become land. "
+                       "DEFAULT 90 = NO CAP: the North Pole stays open. On a "
+                       "global regular lat-lon grid the meridians converge "
+                       "there (dx = R·dlon·cos(lat) ≈ 970 m at 89.5°N), so an "
+                       "uncapped pole is a CFL trap — a rest-state OMIP run at "
+                       "dt=2400 s reached |u| = 19 m/s and advective CFL 47 at "
+                       "89.5°N within 3 steps. Capping at 80 removed it "
+                       "(|u|max 0.014 m/s). Cap unless you know the polar "
+                       "dynamics are handled. (The help here previously "
+                       "claimed 'default 80', which was wrong.)"
+                   ))
     p.add_argument("--south-cap-lat", type=float, default=-80.0,
                    help=(
                        "Latitude [°S] below which all cells become land. "
@@ -4516,10 +4527,23 @@ def run_omip_single(grid_type: str, args) -> dict:
         land_mask_init = jnp.asarray(land_mask_init, dtype=jnp.float64)
         n_ocean = int(np.sum(np.asarray(land_mask_init) > 0.5))
         n_total = int(np.prod(np.asarray(land_mask_init).shape))
+        _ncap = float(getattr(args, "north_cap_lat", 90.0))
+        _cap_str = (f"N-cap={_ncap:g}°N" if _ncap < 90.0
+                    else "N-cap=NONE (pole open)")
         print(f"  Bathymetry: {Path(args.bathymetry).name} "
               f"({n_ocean}/{n_total} ocean cells, "
               f"H_min={args.H_min}m, {args.smoothing_passes} smoothing passes, "
-              f"r_max={args.r_factor_max})")
+              f"r_max={args.r_factor_max}, {_cap_str})")
+        # An uncapped pole on a GLOBAL regular lat-lon grid is a CFL trap:
+        # dx = R*dlon*cos(lat) collapses to ~970 m at 89.5 N, so a modest
+        # velocity there is wildly supercritical (measured: |u| = 19 m/s ->
+        # advective CFL 47 within 3 steps of a rest state at dt = 2400 s;
+        # capping at 80 N left |u|max = 0.014 m/s).  The tripole path already
+        # reported its cap; this lane did not, so an open pole was SILENT.
+        if _ncap >= 90.0 and grid_type == "latlon":
+            print("  WARNING: North Pole is UNCAPPED on a regular lat-lon "
+                  "grid — dx ~ 970 m at 89.5°N. Pass --north-cap-lat (e.g. 80) "
+                  "unless the polar dynamics are known to be handled.")
 
         # Equatorial-only extra smoothing.
         # The 30-day spinup diagnosed a barotropic standing-mode
