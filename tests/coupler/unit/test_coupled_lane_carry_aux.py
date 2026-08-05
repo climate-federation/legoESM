@@ -134,7 +134,15 @@ def test_uncoupled_segment_callback_does_not_trigger_refusal():
 # Ratchets: neither dispatch branch nor either consumer may lose its guard
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("lane_call", [
-    "status = self._run_compiled_latlon_spmd(start_step, start_day)",
+    # Anchored at the point the UNGUARDED lane is entered, which is not the
+    # same place for the two lanes.  The lat-lon SPMD dispatch branch fans out
+    # into TWO sub-lanes -- operator-split (which DOES stash the held surface
+    # fields; tests/parallel/test_operator_split_spmd_carry_aux_export.py) and
+    # stateless dynamics-only/Held-Suarez (which stashes nothing) -- so the
+    # guard sits on the stateless sub-lane inside _run_compiled_latlon_spmd,
+    # not at the dispatch, which cannot tell them apart.  The cube lane has no
+    # such split and stays guarded at the dispatch.
+    "physics_fn = self._latlon_spmd_physics_fn()",
     "status = self._run_tiled_cube_spmd(start_step, start_day)",
 ])
 def test_dispatch_branches_are_guarded(lane_call):
@@ -145,9 +153,38 @@ def test_dispatch_branches_are_guarded(lane_call):
     idx = src.index(lane_call)
     window = src[max(0, idx - 900):idx]
     assert "_reject_coupled_lane" in window, (
-        f"dispatch branch {lane_call!r} is not preceded by a "
+        f"lane entry {lane_call!r} is not preceded by a "
         "_reject_coupled_lane guard: a coupled run on this lane would force "
         "the surface with sw_down=0 and precip=0.")
+
+
+def test_operator_split_spmd_sublane_stashes_the_export_keys():
+    """The counterpart of the ratchet above: the lat-lon SPMD dispatch lost its
+    blanket refusal ONLY because the operator-split sub-lane exports the three
+    keys.  Inspect the symbol that actually RUNS (``_run_operator_split_spmd``,
+    not a delegating wrapper), so deleting the export cannot leave the dispatch
+    silently unguarded."""
+    import inspect
+    from legoesm.driver.model_driver import ModelDriver
+
+    src = inspect.getsource(ModelDriver._run_operator_split_spmd)
+    for key in ("held_sw_net_sfc", "held_lw_net_sfc", "seg_precip"):
+        assert f'self._carry_aux["{key}"]' in src, (
+            f"_run_operator_split_spmd no longer stashes {key!r} into "
+            "_carry_aux, but the run() dispatch no longer refuses coupled runs "
+            "on the lat-lon SPMD lane -- a coupled run would force the surface "
+            "with zero shortwave / precip, silently.")
+    assert '_nm.endswith("_accum")' in src and "carry._replace(**_reseed)" in src, (
+        "_run_operator_split_spmd no longer reseeds the segment accumulators. "
+        "This lane threads ONE carry across every segment, so without the "
+        "reseed segment_accum_to_rate divides a RUN-total accumulation by a "
+        "single segment's duration and the exported precip rate inflates.")
+    assert "rad_update_steps" in src and "does not honour" in src, (
+        "_run_operator_split_spmd lost its rad_update_steps refusal. This lane "
+        "builds step_unified with static_need_rad=True, which DELETES the "
+        "need_rad predicate (physics_pipeline.py) and always runs radiation -- "
+        "so rad_update_steps>1 is a SILENT no-op here while the serial twin "
+        "honours it, and coupled runs now reach this lane.")
 
 
 @pytest.mark.parametrize("driver_file", [

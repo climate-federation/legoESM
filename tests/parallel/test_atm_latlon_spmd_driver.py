@@ -42,6 +42,11 @@ class _DriverStub:
     _latlon_spmd_physics_fn = ModelDriver._latlon_spmd_physics_fn
     _operator_split_spmd_active = ModelDriver._operator_split_spmd_active
     _run_compiled_latlon_spmd = ModelDriver._run_compiled_latlon_spmd
+    # The coupled-lane refusal moved INTO _run_compiled_latlon_spmd (it now
+    # guards the stateless sub-lane, which this stub exercises, rather than the
+    # run() dispatch that cannot tell the sub-lanes apart).  A no-op here: the
+    # stub never sets _requires_surface_flux_export, so it returns immediately.
+    _reject_coupled_lane = ModelDriver._reject_coupled_lane
 
     def __init__(self, model, state, cfg):
         self.config = cfg
