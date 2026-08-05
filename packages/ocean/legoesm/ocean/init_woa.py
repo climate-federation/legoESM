@@ -121,8 +121,24 @@ def _interp_profile_to_z_coord(
     # Remove NaN entries from WOA profile
     valid = ~np.isnan(profile)
     if valid.sum() < 2:
-        # Not enough valid data — return surface value everywhere
-        return np.full(z_coord.n_levels, profile[valid][0] if valid.any() else 0.0)
+        # Not enough valid data.  ONE valid entry is propagated down the
+        # column; NONE returns NaN so the caller's fill (T_fill_C / S_fill_psu)
+        # applies.
+        #
+        # Returning 0.0 here instead of NaN was a real defect: 0.0 is not NaN,
+        # so ``np.where(np.isnan(T_out), T_fill, T_out)`` below never replaced
+        # it, and a wet cell whose source column had no data entered the model
+        # as T = 0 degC, S = 0 PSU.  Fresh water at 0 degC is rho = 999.8
+        # against ~1027 for real sea water, so such a cell sat next to normal
+        # ocean with a density jump up to 30 kg/m^3 -- larger than the entire
+        # ocean's density range.  On the FESOM2-matched CORE2 config that gave
+        # a hydrostatic pressure-gradient acceleration of 2e-2 m/s^2 and ~42 m/s
+        # in a single 2400 s step, i.e. an immediate blowup (1569 wet columns
+        # affected; see docs/ocean/fidelity/fesom2_gap_analysis.md 3.7).
+        return np.full(
+            z_coord.n_levels,
+            profile[valid][0] if valid.any() else np.nan,
+        )
 
     return np.interp(model_depths, woa_depths[valid], profile[valid])
 
