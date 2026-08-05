@@ -595,3 +595,245 @@ def test_ddm_rejected_loudly_on_unsupported_grids(grid):
     args = parse_args(["--grid", grid, "--ddm"])
     with pytest.raises(SystemExit, match="--ddm is supported on the lat-lon"):
         _apply_drag_iwm_overrides(args, grid, None, None, object(), object())
+
+
+# ---------------------------------------------------------------------------
+# --dz-ref-file: exact external vertical grid (FESOM CORE2 47 levels, NEMO
+# e3t_1d).  Without it the level COUNT can be matched but not the PLACEMENT --
+# `dz_ref_override` existed in `_create_setup` but was unreachable from the CLI.
+# ---------------------------------------------------------------------------
+
+def test_dz_ref_file_defaults_to_none():
+    from scripts.run.run_omip import load_dz_ref_file
+
+    assert parse_args(["--grid", "latlon"]).dz_ref_file is None
+    assert load_dz_ref_file(None) is None
+
+
+def test_dz_ref_file_round_trips_text_and_npy(tmp_path):
+    import numpy as np
+
+    from scripts.run.run_omip import load_dz_ref_file
+
+    dz = np.array([5.0, 5.0, 10.0, 20.0, 40.0])
+
+    txt = tmp_path / "levels.txt"
+    txt.write_text("# FESOM CORE2-style thicknesses [m]\n"
+                   + "\n".join(f"{v}" for v in dz) + "\n")
+    args = parse_args(["--grid", "latlon", "--dz-ref-file", str(txt)])
+    assert args.dz_ref_file == str(txt)
+    np.testing.assert_allclose(load_dz_ref_file(str(txt)), dz)
+
+    npy = tmp_path / "levels.npy"
+    np.save(npy, dz)
+    np.testing.assert_allclose(load_dz_ref_file(str(npy)), dz)
+
+
+def test_dz_ref_file_builds_the_exact_z_star_coordinate(tmp_path):
+    """The loaded thicknesses must become the model's ACTUAL layers, not a
+    stretched approximation to them."""
+    import numpy as np
+
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+    from scripts.run.run_omip import load_dz_ref_file
+
+    dz = np.array([5.0, 5.0, 10.0, 10.0, 10.0, 15.0, 20.0, 25.0])
+    p = tmp_path / "levels.txt"
+    p.write_text("\n".join(f"{v}" for v in dz))
+    z_coord = create_z_star_from_thicknesses(load_dz_ref_file(str(p)))
+    np.testing.assert_allclose(np.asarray(z_coord.dz_ref), dz, rtol=0, atol=0)
+    # Interfaces are the cumulative sum, so the bottom is the total depth.
+    assert float(np.abs(np.asarray(z_coord.z_half_ref)[-1])) == pytest.approx(
+        float(dz.sum()))
+
+
+@pytest.mark.parametrize("bad,match", [
+    ("", "empty"),
+    ("5.0\n-1.0\n", "non-positive"),
+    ("5.0\nnan\n", "non-finite"),
+])
+def test_dz_ref_file_rejects_bad_profiles(tmp_path, bad, match):
+    """A non-positive or non-finite thickness makes z* non-monotonic and every
+    depth-indexed diagnostic downstream quietly wrong -- fail at parse time."""
+    from scripts.run.run_omip import load_dz_ref_file
+
+    p = tmp_path / "bad.txt"
+    p.write_text(bad)
+    with pytest.raises(SystemExit, match=match):
+        load_dz_ref_file(str(p))
+
+
+def test_dz_ref_file_missing_path_raises():
+    from scripts.run.run_omip import load_dz_ref_file
+
+    with pytest.raises(SystemExit, match="not found"):
+        load_dz_ref_file("/nonexistent/levels.txt")
+
+
+# ---------------------------------------------------------------------------
+# Sea-ice rheology.  The --jra55-sea-ice lane used to hard-code
+# SeaIceConfig(), i.e. dynamics="none" / n_categories=1 -- a thermodynamic slab
+# with NO rheology, unreachable from the CLI, while FESOM2 runs EVP with 120
+# subcycles.  These pin the new flags AND the unchanged default.
+# ---------------------------------------------------------------------------
+
+def test_ice_rheology_defaults_reproduce_the_historical_slab():
+    args = parse_args(["--grid", "latlon"])
+    assert args.ice_dynamics == "none"
+    assert args.ice_categories == 1
+    for f in ("ice_n_evp", "ice_p_star", "ice_e_yield", "ice_c_strength",
+              "ice_delta_min", "ice_alpha_mevp", "ice_beta_mevp"):
+        assert getattr(args, f) is None, f
+
+
+def test_ice_rheology_flags_parse():
+    args = parse_args([
+        "--grid", "latlon",
+        "--ice-dynamics", "evp",
+        "--ice-categories", "7",
+        "--ice-n-evp", "120",
+        "--ice-p-star", "30000",
+        "--ice-e-yield", "2.0",
+        "--ice-c-strength", "20.0",
+        "--ice-delta-min", "1e-11",
+        "--ice-alpha-mevp", "250",
+        "--ice-beta-mevp", "250",
+    ])
+    assert args.ice_dynamics == "evp"
+    assert args.ice_categories == 7
+    assert args.ice_n_evp == 120
+    assert args.ice_p_star == 30000.0
+    assert args.ice_delta_min == 1e-11
+    assert args.ice_alpha_mevp == 250.0
+
+
+def test_ice_dynamics_rejects_unknown_solver():
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--ice-dynamics", "vp"])
+
+
+# ---------------------------------------------------------------------------
+# River-runoff routing (--runoff-routing / --runoff-radius-km).
+# Default "none" keeps the historical behaviour, in which runoff landing on a
+# dry cell is DISCARDED by the model's masking (~71 % of the JRA55-do total).
+# ---------------------------------------------------------------------------
+
+def test_runoff_routing_defaults_to_the_historical_behaviour():
+    args = parse_args(["--grid", "latlon"])
+    assert args.runoff_routing == "none"
+    assert args.runoff_radius_km == 500.0   # FESOM2 runoff_radius
+
+
+def test_runoff_routing_flags_parse():
+    args = parse_args(["--grid", "latlon", "--runoff-routing", "spread",
+                       "--runoff-radius-km", "300"])
+    assert args.runoff_routing == "spread"
+    assert args.runoff_radius_km == 300.0
+
+
+def test_runoff_routing_rejects_unknown_scheme():
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon", "--runoff-routing", "nearset"])
+
+
+def test_route_runoff_stack_is_identity_without_a_map():
+    """`--runoff-routing none` must not touch a single value."""
+    import numpy as np
+
+    from scripts.run.run_omip import _route_runoff_stack
+
+    stack = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+    out = _route_runoff_stack(stack, None)
+    assert out is stack
+
+
+def test_route_runoff_stack_conserves_over_the_whole_stack():
+    """Routing is applied per record; the discharge of EVERY record must
+    survive, not just the first."""
+    import numpy as np
+
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.forcing.runoff_mapper import build_runoff_map
+    from scripts.run.run_omip import _route_runoff_stack
+
+    n_lat, n_lon = 6, 12
+    g = create_latlon_grid(n_lat, n_lon=n_lon)
+    area = np.asarray(g.area)
+    lat_c = np.asarray(g.lat2d)
+    lon_c = np.asarray(g.lon2d)
+    mask = np.ones((n_lat, n_lon), dtype=bool)
+    mask[:, 4:7] = False
+
+    stack = np.zeros((3, n_lat, n_lon))
+    stack[0, 2, 5] = 1.0e-3
+    stack[1, 3, 5] = 2.0e-3
+    stack[2, 4, 6] = 5.0e-4
+
+    rmap = build_runoff_map(mask, area, lat_c, lon_c, radius_m=1.2e7)
+    out = np.asarray(_route_runoff_stack(stack, rmap))
+    assert out.shape == stack.shape
+    for k in range(stack.shape[0]):
+        assert float(np.sum(out[k] * area)) == pytest.approx(
+            float(np.sum(stack[k] * area)), rel=1e-12)
+        assert np.all(out[k][~mask] == 0.0)
+
+
+# --- codex round-4 regressions ---------------------------------------------
+
+def test_dz_ref_file_must_agree_with_H_max(tmp_path):
+    """An external vertical grid whose total depth differs from --H-max
+    silently rescales every full-depth column: the coordinate comes from the
+    file, the bathymetry from --H-max."""
+    import numpy as np
+
+    from scripts.run.run_omip import (
+        _validate_dz_ref_against_setup, load_dz_ref_file,
+    )
+
+    dz = np.full(8, 100.0)                      # 800 m total
+    p = tmp_path / "levels.txt"
+    p.write_text("\n".join(f"{v}" for v in dz))
+    loaded = load_dz_ref_file(str(p))
+
+    _validate_dz_ref_against_setup(loaded, 8, 800.0)          # agrees: fine
+    with pytest.raises(SystemExit, match="sums to"):
+        _validate_dz_ref_against_setup(loaded, 8, 5500.0)
+    with pytest.raises(SystemExit, match="but --nlev"):
+        _validate_dz_ref_against_setup(loaded, 47, 800.0)
+    _validate_dz_ref_against_setup(None, 40, 5500.0)          # no file: no-op
+
+
+def test_dz_ref_file_rejects_2d_input(tmp_path):
+    """Ravelling a 2-D file would invent a vertical grid from its storage
+    order rather than failing."""
+    import numpy as np
+
+    from scripts.run.run_omip import load_dz_ref_file
+
+    p = tmp_path / "levels.npy"
+    np.save(p, np.full((4, 2), 10.0))
+    with pytest.raises(SystemExit, match="1-D"):
+        load_dz_ref_file(str(p))
+
+
+def test_runoff_routing_refused_on_mpas():
+    """friver reaches MPAS through a non-conservative IDW interpolation, so
+    routing there would conserve an already-wrong discharge."""
+    import numpy as np
+
+    from scripts.run.run_omip import _build_runoff_map_for_run
+
+    args = parse_args(["--grid", "mpas", "--runoff-routing", "nearest"])
+    with pytest.raises(SystemExit, match="not available on --grid mpas"):
+        _build_runoff_map_for_run(args, object(), "mpas",
+                                  np.ones((4, 4), dtype=bool))
+
+
+def test_runoff_map_not_built_when_routing_is_off():
+    import numpy as np
+
+    from scripts.run.run_omip import _build_runoff_map_for_run
+
+    args = parse_args(["--grid", "mpas"])
+    assert _build_runoff_map_for_run(
+        args, object(), "mpas", np.ones((4, 4), dtype=bool)) is None
