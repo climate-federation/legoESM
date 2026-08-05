@@ -9894,59 +9894,6 @@ class ModelDriver:
                 "(Richards) land (use_multilayer_land): the prognostic soil "
                 "column is single-rank-validated (rides carry.land_ml with no "
                 "band spec).  Use the slab land tile for the SPMD lane.")
-        # Radiation cadence: NOT honoured on this lane, so refuse it rather
-        # than run a different cadence than the config asks for.
-        # ``make_sharded_operator_split_step`` does compute the serial
-        # prologue's predicate per step (``_need_rad_and_time``,
-        # sharded_operator_split_step.py:405) and pass it in as ``need_rad``,
-        # but the ``step_unified`` built below with ``static_need_rad=True``
-        # DELETES that predicate and always takes the radiation branch
-        # (physics_pipeline.py:2556) -- so ``rad_update_steps > 1`` silently
-        # bought nothing here, while the serial twin honours it by building
-        # BOTH variants and selecting between them (:10259).  That was
-        # invisible while coupled runs were refused on this lane; they are not
-        # any more, and a coupled run whose surface fluxes came from a
-        # different radiation cadence than requested is exactly the silent
-        # wrong-physics the dispatch-hardening doctrine forbids.
-        #
-        # ``static_need_rad=None`` (letting the pipeline's own ``lax.cond``
-        # fire) WOULD honour the cadence correctly -- the two predicates agree
-        # exactly, with ZERO phase offset: serial computes
-        # ``(step_idx + 1) % rad_update_steps == 0`` (compiled_segments.py:1934)
-        # and its subcycle scan runs ``rad_update_steps - 1`` held steps then
-        # ONE radiation step (:2254), i.e. radiation on the LAST step of each
-        # subcycle, which is what the sharded ``_need_rad_and_time``
-        # (sharded_operator_split_step.py:202) selects too.
-        #
-        # So why refuse rather than pass None?  Because the obvious gate --
-        # parity against the serial twin -- is not currently a valid comparator.
-        # MEASURED at this deck (C8/nlev4, gray+SBM, 151 steps => a 144-step
-        # segment plus a 7-STEP TAIL, rad_update_steps=2): the cond version
-        # moves held_lw_net_sfc by 3.6e-3 where the static version moved it by
-        # 0, but serial-vs-SPMD then sits at 1.97e-3 versus 1.63e-5 at
-        # rad_update_steps=1.  That gap is SERIAL's, not this lane's: a segment
-        # whose length does not divide rad_update_steps fails ``_use_subcycle``
-        # (compiled_segments.py:2585) and falls back to ``_run_single``, which
-        # computes the predicate and then hands it to the SAME
-        # ``static_need_rad=True`` variant that discards it -- so serial
-        # radiates on ALL of tail steps 144-150 where the cadence asks for
-        # 145/147/149.  Refusing here keeps this lane honest while that serial
-        # short-tail defect is open; every-step radiation stays available.
-        # (Codex adversarial review round 2 refuted an earlier "cadence phase
-        # disagreement" reading of the same 1.97e-3 -- there is no phase error.)
-        #
-        # No ``int()`` on the comparison: a fractional 1.5 would truncate to 1
-        # and slip past a cast-then-compare guard (codex r2 LOW).
-        if cfg.rad_update_steps > 1:
-            raise NotImplementedError(
-                f"operator-split lat-band SPMD does not honour "
-                f"rad_update_steps={cfg.rad_update_steps}: the sharded step's "
-                "cadence predicate is discarded by the static_need_rad=True "
-                "step_unified, so radiation would run EVERY step regardless. "
-                "Set rad_update_steps=1 for this lane (radiation every step -- "
-                "correct, just more expensive), or run single-device "
-                "(enable_latlon_spmd=False) where the serial subcycled lane "
-                "implements the cadence on segments whose length divides it.")
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         DT = ctx["DT"]
@@ -9982,7 +9929,42 @@ class ModelDriver:
         # serves every band — the make_sharded_operator_split_step CONTRACT). ---
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
         band_physics = build_physics_pipeline(band_grid, self.sigma, cfg)
-        band_su = band_physics.build_step_unified(static_need_rad=True)
+        # Radiation cadence.  ``make_sharded_operator_split_step`` computes the
+        # serial prologue's predicate per step (``_need_rad_and_time``,
+        # sharded_operator_split_step.py:202) and passes it in as ``need_rad``,
+        # but a ``step_unified`` built with ``static_need_rad=True`` DELETES
+        # that predicate and always takes the radiation branch
+        # (physics_pipeline.py:2556) -- which made ``rad_update_steps > 1`` a
+        # silent no-op on this lane.  ``None`` above 1 keeps the pipeline's own
+        # ``lax.cond``, which honours it.
+        #
+        # The two lanes' predicates agree with ZERO phase offset: serial
+        # computes ``(step_idx + 1) % k == 0`` (compiled_segments.py:1934) and
+        # its subcycle scan radiates on the LAST step of each cycle (:2254),
+        # which is exactly what ``_need_rad_and_time`` selects.  Serial-vs-SPMD
+        # held_lw_net_sfc at rad_update_steps=2 MEASURES 2.52e-5 (C8/nlev4,
+        # gray+SBM, 151 steps = a 144-step segment plus a 7-step tail), the same
+        # order as the 1.63e-5 at rad_update_steps=1 -- i.e. the ordinary
+        # band-cut residual, with no cadence term left.  Gated by
+        # tests/parallel/test_operator_split_spmd_carry_aux_export.py::
+        # test_radiation_cadence_matches_serial.
+        #
+        # This was refused outright until the serial short-tail defect was
+        # fixed: a segment whose length did not divide the cadence fell back to
+        # a body that discarded the predicate, so serial radiated every step and
+        # the same comparison read 1.97e-3 -- a SERIAL error, not this lane's.
+        #
+        # The issue-#316 rationale for eliding the cond -- bounding XLA compile
+        # when step_unified is inlined into a LONG lax.scan -- does not apply
+        # here: this lane dispatches ``sharded_step`` once per step from Python
+        # (:10099), so there is no long scan to inline into.  The cond is NOT
+        # free, though: both branches land in the jitted unified step, which is
+        # itself invoked inside the jitted shard_map body.  UNMEASURED at
+        # production resolution with rrtmgp -- the numbers quoted above are a
+        # C8/nlev4 gray deck, so treat the compile-time and peak-memory cost of
+        # the second branch as unknown rather than negligible (codex review).
+        band_su = band_physics.build_step_unified(
+            static_need_rad=(True if ctx["RAD_UPDATE_STEPS"] <= 1 else None))
 
         # --- GHG species order (mirrors build_segment_fn): the sharded step
         # rebuilds ghg_vmr_override from the per-segment forcing.ghg_vmr; None

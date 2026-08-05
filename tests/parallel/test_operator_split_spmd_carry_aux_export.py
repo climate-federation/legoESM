@@ -197,31 +197,68 @@ def test_operator_split_spmd_exports_surface_fields_like_serial(tmp_path):
         f"threads one carry and must reseed it explicitly.")
 
 
-def test_rad_update_steps_above_one_is_refused_not_silently_ignored(tmp_path):
-    """The lane builds ``step_unified`` with ``static_need_rad=True``, which
-    DELETES the cadence predicate the sharded step computes -- so radiation runs
-    every step no matter what ``rad_update_steps`` says.  That was invisible
-    while coupled runs were refused here; now that they reach this lane it would
-    be a coupled surface flux produced under a different radiation cadence than
-    the config requested.  Must refuse, not silently ignore.
+def test_radiation_cadence_matches_serial(tmp_path):
+    """``rad_update_steps > 1`` must reach the exported surface fluxes, and must
+    do so the way the serial twin does.
 
-    Non-vacuity: rad_update_steps=1 (below) runs to COMPLETED on the identical
-    deck, so the refusal is keyed on the knob and not on the config being
-    unrunnable.  The measured cost of NOT refusing is recorded at the raise
-    site: honouring the pipeline cond instead leaves serial-vs-SPMD held LW at
-    1.97e-3 versus 1.63e-5 at rad_update_steps=1.
+    The sharded step computes the serial prologue's cadence predicate and passes
+    it in, but a ``step_unified`` pinned to ``static_need_rad=True`` DELETES it
+    and always radiates.  This lane pinned it, so the knob was a silent no-op --
+    invisible while coupled runs were refused here, a coupled-flux divergence
+    once they are not.
+
+    Two gates, because either one alone passes on a broken lane:
+      (a) SPMD@2 == serial@2 -- the lane applies the cadence the serial twin
+          applies.  Asserted on held_lw_net_sfc: the SW net is solar geometry x
+          albedo and cadence-insensitive on this deck, which would make the gate
+          vacuous.
+      (b) SPMD@2 != SPMD@1 -- the knob changes the answer, so (a) cannot be
+          satisfied by BOTH arms ignoring it (exactly the bug).
+
+    SCOPE, stated because this pair is NOT sufficient on its own (codex
+    adversarial review): both gates read one INTEGRATED field at the end of the
+    run, so a wrong phase, a wrong refresh COUNT, or a defect confined to the
+    heating profile could move the knob and still slip under (a).  The
+    event-level gate that pins the actual refresh steps is
+    tests/parallel/test_atm_latlon_operator_split_spmd.py::
+    test_sharded_step_radiates_on_exactly_the_cadence_steps.  This test's job is
+    the complementary one: that the END-TO-END driver lane agrees with the
+    serial twin, which the step-level test cannot see.
+
+    Bound for (a) is 1e-4, not the 1e-3 the export parity test uses: the
+    measured value is 2.52e-5, the same order as the 1.63e-5 at
+    rad_update_steps=1, so 1e-3 would have been 40x looser than the evidence
+    supports.  Before the serial short-tail fix (compiled_segments.py
+    ``_run_subcycled``) this same comparison read 1.97e-3, and pinning
+    static_need_rad back to True reads 3.575e-3 -- both far above 1e-4.
     """
     if len(jax.devices()) < N_DEV:
         pytest.skip(f"needs --xla_force_host_platform_device_count={N_DEV}")
 
-    with pytest.raises(NotImplementedError, match="rad_update_steps"):
-        _run(str(tmp_path / "rus2"), spmd=True, rad_update_steps=2)
+    ser_2, _ = _run(str(tmp_path / "ser2"), spmd=False, rad_update_steps=2)
+    spmd_2, _ = _run(str(tmp_path / "spmd2"), spmd=True, rad_update_steps=2)
+    spmd_1, _ = _run(str(tmp_path / "spmd1"), spmd=True, rad_update_steps=1)
 
-    # The same deck at rad_update_steps=1 must still run -- otherwise the check
-    # above would pass for the wrong reason.
-    driver, per_seg = _run(str(tmp_path / "rus1"), spmd=True, rad_update_steps=1)
-    assert driver._carry_aux.get("held_lw_net_sfc") is not None
-    assert len(per_seg) >= 2
+    def _rel(a, b):
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        return float(np.abs(a - b).max() / max(np.abs(a).max(), 1e-30))
+
+    drift = _rel(ser_2._carry_aux["held_lw_net_sfc"],
+                 spmd_2._carry_aux["held_lw_net_sfc"])
+    assert drift < 1e-4, (
+        f"held_lw_net_sfc relative drift {drift:.3e} between serial and SPMD at "
+        f"rad_update_steps=2 (measured 2.52e-5 when correct; 3.575e-3 with "
+        f"static_need_rad pinned True; 1.97e-3 before the serial short-tail "
+        f"fix): the SPMD lane is not applying the radiation cadence the serial "
+        f"lane applies.")
+
+    knob = _rel(spmd_1._carry_aux["held_lw_net_sfc"],
+                spmd_2._carry_aux["held_lw_net_sfc"])
+    assert knob > 1e-9, (
+        f"rad_update_steps=1 and =2 produced held_lw_net_sfc within {knob:.3e} "
+        f"on the SPMD lane -- the cadence predicate is being discarded again, "
+        f"so the parity gate above proves nothing.")
 
 
 def test_stateless_spmd_sublane_still_refuses_a_coupled_run(tmp_path):

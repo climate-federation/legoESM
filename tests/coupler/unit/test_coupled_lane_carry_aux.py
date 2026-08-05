@@ -179,12 +179,14 @@ def test_operator_split_spmd_sublane_stashes_the_export_keys():
         "This lane threads ONE carry across every segment, so without the "
         "reseed segment_accum_to_rate divides a RUN-total accumulation by a "
         "single segment's duration and the exported precip rate inflates.")
-    assert "rad_update_steps" in src and "does not honour" in src, (
-        "_run_operator_split_spmd lost its rad_update_steps refusal. This lane "
-        "builds step_unified with static_need_rad=True, which DELETES the "
-        "need_rad predicate (physics_pipeline.py) and always runs radiation -- "
-        "so rad_update_steps>1 is a SILENT no-op here while the serial twin "
-        "honours it, and coupled runs now reach this lane.")
+    assert 'static_need_rad=(True if ctx["RAD_UPDATE_STEPS"] <= 1 else None)' in src, (
+        "_run_operator_split_spmd pinned static_need_rad back to True. That "
+        "DELETES the need_rad predicate the sharded step computes "
+        "(physics_pipeline.py), making rad_update_steps>1 a SILENT no-op on "
+        "this lane while the serial twin honours it -- and coupled runs reach "
+        "this lane. Behavioural gate: tests/parallel/"
+        "test_operator_split_spmd_carry_aux_export.py::"
+        "test_radiation_cadence_matches_serial.")
 
 
 @pytest.mark.parametrize("driver_file", [

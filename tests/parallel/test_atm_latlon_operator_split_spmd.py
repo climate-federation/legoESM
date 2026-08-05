@@ -35,6 +35,8 @@ from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
+import dataclasses
+
 from legoesm.core.conservation import global_area_sum
 from legoesm.core.operators_latlon_3d import hyperdiffusion_3d
 from legoesm.driver.compiled_segments import (
@@ -230,3 +232,89 @@ def test_operator_split_spmd_matches_serial(use_polar_filter):
     assert t_diff > 1e-12, (
         f"T bit-identical to serial ({t_diff:.2e}) — the band decomposition did "
         f"not actually run; the gate would be vacuous.")
+
+
+def _mock_step_unified_rad_marking(need_rad, *args, **kwargs):
+    """``_mock_step_unified_stateful`` that MARKS each radiation step.
+
+    On a radiation step every held field is bumped by 1; on a held step every
+    held field is returned untouched.  ``need_rad`` is a TRACED boolean, so the
+    selection is ``jnp.where`` (never a Python ``if``).  After a run each held
+    field therefore equals the number of steps that took the radiation branch,
+    and comparing consecutive steps says exactly WHICH steps refreshed.
+
+    Marking ALL SIX held fields, not just the surface LW, is deliberate: a
+    cadence defect confined to the heating profile or the TOA fluxes would be
+    invisible in a surface-only check.
+    """
+    phys_out, held_new, T_land = _mock_step_unified_stateful(
+        need_rad, *args, **kwargs)
+    bump = jnp.where(need_rad, 1.0, 0.0)
+    return (phys_out,
+            tuple(h + bump.astype(h.dtype) for h in held_new),
+            T_land)
+
+
+@pytest.mark.parametrize("rad_update_steps", [1, 2, 3])
+def test_sharded_step_radiates_on_exactly_the_cadence_steps(rad_update_steps):
+    """EVENT-LEVEL cadence gate: which steps refresh radiation, not just what
+    the fluxes look like at the end.
+
+    The driver-level parity test compares final ``held_lw_net_sfc`` against the
+    serial lane, which is an integrated, indirect signal -- a wrong phase, a
+    wrong refresh COUNT, or a defect confined to the heating profile can all hide
+    inside a small final-flux difference (codex adversarial review).  This drives
+    ``make_sharded_operator_split_step`` one step at a time and asserts the
+    refresh set is EXACTLY ``{i : (i+1) % rad_update_steps == 0}``, that all six
+    held fields are byte-unchanged between refreshes, and that they keep their
+    lat-band sharding across both a refresh and a hold step.
+    """
+    mesh = _mesh()
+    model, statics, carry, forcing = _build_harness()
+    statics = dataclasses.replace(
+        statics, step_unified=_mock_step_unified_rad_marking)
+    step = make_sharded_operator_split_step(
+        model, mesh, statics, fix_mass=True,
+        rad_update_steps=rad_update_steps, start_day=0.0)
+
+    HELD = ("held_dT_rad", "held_sw_net_sfc", "held_lw_net_sfc",
+            "held_sw_up_toa", "held_lw_up_toa", "held_sw_down_toa")
+    c = shard_operator_split_carry(carry, mesh)
+    assert "lat" in c.T.sharding.spec, "carry not lat-partitioned — vacuous"
+    f = shard_operator_split_forcing(forcing, mesh)
+
+    n_steps = 7
+    refreshed, prev = [], {k: 0.0 for k in HELD}
+    for i in range(n_steps):
+        c = step(c, f)
+        for name in HELD:
+            leaf = getattr(c, name)
+            # Sharding must survive BOTH branches (codex: no existing test
+            # asserts held_* sharding after a conditional step).
+            assert "lat" in leaf.sharding.spec, (
+                f"{name} lost its lat-band sharding at step {i} "
+                f"(spec={leaf.sharding.spec})")
+        now = {k: float(np.asarray(jax.device_put(
+            getattr(c, k), jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec()))).max()) for k in HELD}
+        # Every held field must move together, or not at all.
+        moved = {k for k in HELD if now[k] > prev[k] + 0.5}
+        assert moved in (set(), set(HELD)), (
+            f"step {i}: held fields disagree on whether radiation ran "
+            f"(moved={sorted(moved)}) — a partial refresh")
+        if moved:
+            refreshed.append(i)
+        else:
+            for k in HELD:
+                assert now[k] == pytest.approx(prev[k]), (
+                    f"step {i}: {k} changed on a HELD step ({prev[k]} -> "
+                    f"{now[k]}); held radiation must be bit-stable between "
+                    f"refreshes")
+        prev = now
+
+    expected = [i for i in range(n_steps) if (i + 1) % rad_update_steps == 0]
+    assert refreshed == expected, (
+        f"radiation refreshed on steps {refreshed} at "
+        f"rad_update_steps={rad_update_steps}; the cadence "
+        f"(i+1)%{rad_update_steps}==0 asks for {expected}. "
+        f"{'Every step -> the need_rad predicate is being discarded.' if refreshed == list(range(n_steps)) else 'Phase error.'}")
