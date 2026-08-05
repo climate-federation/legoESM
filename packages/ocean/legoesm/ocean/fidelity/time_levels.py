@@ -233,7 +233,100 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "Interior 52x199, 2-D."),
     "wnd_dump_zv_frc_inc.bin": ("now", "v twin of wnd_dump_zu_frc_inc.bin (same "
                                         "bracket, vtau_b+vtauV, r1_hv(:,:,Kmm))."),
+
+    # --- FACE10 task (2026-08-01): w1400 face-flux + EIV bolus 10-day
+    # measurement. Additive WRITE-only per-day dumps (kt = nit000 + 32*iday,
+    # iday=1..10 -> DAY suffix NN=01..10), gated MOD(kt-nit000,32)==0 in
+    # MY_SRC/sshwzv.F90 and MOD(kt-kit000,32)==0 in MY_SRC/ldftra.F90 (nit000
+    # == kit000, both are the FACE10 run's first-step index 230401; 32
+    # steps/day at rn_rdt=2700s per namelist_cfg nn_it000/nn_itend). Distinct
+    # per-day file, never REPLACE'd across days (same anti-provenance-trap
+    # reasoning as wzv_dump_ww_call1/call2 above). ---
+
+    # --- #1455 A5 (2026-08-02): NEMO per-cell isoneutral(Redi) tracer trend
+    # ttrd_ldf, dumped into the per-rank restart via iom_rstput (MY_SRC/
+    # trddump.F90 trddump_write, called from restart.F90:187). Registered by
+    # its BEFORE (Kbb) time level: traldf_iso_lap's tracer gradients
+    # zdit/zdjt/zdkt read pt_in(...,Kbb) at traldf_iso_scheme.h90:26-30, i.e.
+    # the diffusive operator differentiates the before-level tracer field, not
+    # the now-level one. The trend is captured in trddump_tra
+    # (trdtra.F90:348) from ptrdx = the Krhs delta traldf.F90:95-112
+    # accumulated across the single traldf_iso_lap call (horizontal A11/A22 +
+    # the K33 vertical diagonal combined; trdtra.F90:376 case jptra_ldf). This
+    # is a NetCDF restart variable, not a ".bin" dump, but its level is
+    # recorded here for the same reason as every entry above: comparing it
+    # against a now-level lego field silently substitutes a T_now-T_before
+    # difference for "error". lego's box_heat_budget evaluates iso_redi+k33 on
+    # the state's OWN T/S (2-level scheme, no NEMO before-twin) -- flagged, not
+    # asserted equivalent (see scripts/tmp/redi_localize_1455_a5.py).
+    "ttrd_ldf": ("before", "traldf_iso_scheme.h90:26-30 zdit/zdjt/zdkt read "
+                            "pt_in(...,Kbb); accumulated to Krhs traldf.F90:95, "
+                            "captured trdtra.F90:348/376 (jptra_ldf), written "
+                            "restart.F90:187 -> MY_SRC/trddump.F90 trddump_write"),
+    "strd_ldf": ("before", "salinity twin of ttrd_ldf (same traldf_iso_lap "
+                            "Kbb read, trddump_tra ptrdy)"),
 }
+
+_FACE10_WZV_SOURCE = (
+    "Per-day twin of wzv_dump_ww_call1/2.bin: SAME post-wzv_MLF pww (bottom "
+    "BC + upward hdiv integration + bdy/AGRIF masking all done), same WRITE "
+    "site MY_SRC sshwzv.F90:295-ff (new block inserted directly after the "
+    "existing call1/call2 dump, sshwzv.F90:299-321). pww is the NOW "
+    "(Kmm=Nnn) diagnosed w; 'now' time level, matching call1/call2. Full "
+    "jpi x jpj (halo incl.), jk=1..jpk, w-grid. Gated MOD(kt-nit000,32)==0, "
+    "kt in nit000+32..nit000+320 (FACE10 run's 10-day window)."
+)
+_FACE10_EIV_W_SOURCE = (
+    "EIV/bolus contribution to pww, captured EXACTLY as the increment added "
+    "to pww (MY_SRC ldftra.F90 ldf_eiv_trp_MLF, add statement at the (now) "
+    "line directly below the new dump block, ldftra.F90:952-954; dump block "
+    "ldftra.F90:922-951). zw_eiv_incr = (zpsi_uw(:,:,1)-zpsi_uw(i-1,:,1)) + "
+    "(zpsi_vw(:,:,1)-zpsi_vw(:,j-1,1)), captured into a local BEFORE the "
+    "production ADD so the add statement itself is untouched -- this is the "
+    "TRUE increment, not an approximation (ideal quantity from step 2b, "
+    "achievable additively; no traadv.F90 restructuring needed since "
+    "ldf_eiv_trp_MLF folds EIV into pww BEFORE tra_adv consumes it -- read "
+    "traadv.F90:208-210,343-344 and ldftra.F90:923-926 to confirm this "
+    "ordering). 'now' time level (Kmm=Nnn slopes/coeffs feed this add, same "
+    "stage as wslpi/aeiu used elsewhere in ldf_eiv_trp_MLF). Interior "
+    "T2D(nn_hls), jk=1..jpkm1, w-grid. Gated MOD(kt-kit000,32)==0, kt in "
+    "kit000+32..kit000+320."
+)
+_FACE10_EIV_U_SOURCE = (
+    "CORRECTED LABEL (2026-08-01, caught in post-processing): contains the "
+    "raw bolus STREAMFUNCTION zpsi_uw(:,:,1) -- psi at the interface at the "
+    "TOP of cell jk -- NOT the transport increment (WRITE at MY_SRC "
+    "ldftra.F90:957, inside the per-day dump block). The TRUE added "
+    "increment u_eiv(jk) = psi(top of jk+1) - psi(top of jk), i.e. vertical "
+    "differencing of this dump (last level: -psi, since psi at the bottom "
+    "interface is 0 via wumask); validated by reproducing legoESM's own "
+    "(total - Eulerian) face numbers to ~1% (face10_verdict.py). An earlier "
+    "registry entry mislabeled this as the increment "
+    "zpsi_uw(1)-zpsi_uw(2); that quantity is what the ORIGINAL single-shot "
+    "eiv_dump_u.bin (ldftra.F90:864) dumps, not this per-day file. 'now' "
+    "time level. Full jpi x jpj, jk=1..jpkm1, u-grid."
+)
+_FACE10_EIV_V_SOURCE = (
+    "v twin of eiv_dump_u_dayNN.bin (WRITE ldftra.F90:958, raw "
+    "zpsi_vw(:,:,1) streamfunction -- same corrected label, same vertical-"
+    "differencing reconstruction for the true v_eiv increment, v-grid)."
+)
+# Filenames carry a _rankNN suffix (16 MPI ranks, jpni=2 x jpnj=8): a FIRST
+# version of the Fortran dump used one shared filename across all ranks, so
+# every rank's OPEN(...STATUS='REPLACE') raced on the SAME path and only the
+# last writer's data survived (caught via file-size check -- 250560 bytes ==
+# exactly one rank's local array, not 16 -- BEFORE any physics number was
+# read from it). Fixed by suffixing narea (dom_oce, 1-based MPI rank) into
+# the filename; registry entries below match the CORRECTED per-rank names.
+for _iday in range(1, 11):
+    _nn = f"{_iday:02d}"
+    for _rank in range(16):
+        _rr = f"{_rank:02d}"
+        _DUMP_TIME_LEVEL[f"wzv_dump_ww_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_WZV_SOURCE)
+        _DUMP_TIME_LEVEL[f"eiv_dump_w_incr_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_W_SOURCE)
+        _DUMP_TIME_LEVEL[f"eiv_dump_u_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_U_SOURCE)
+        _DUMP_TIME_LEVEL[f"eiv_dump_v_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_V_SOURCE)
+del _iday, _nn, _rank, _rr
 
 
 def register_dump(basename: str, level: TimeLevel, source: str) -> None:

@@ -722,6 +722,19 @@ class DINOConfig:
     # worst-case, machine-level only at the equator); the difference is the
     # coefficient-gradient placement cross-terms.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # #1455: e3-weighting of the "nemo_div_curl" div/curl (only meaningful
+    # paired with lateral_viscosity_operator="nemo_div_curl"; construction
+    # raises otherwise). "off" (default, bit-identical) keeps the documented
+    # horizontal-metrics-only simplification; "nemo_e3" restores NEMO's
+    # e3u/e3v/e3f weighting (dynldf_lev_rot_scheme.h90:22-29,41,51). A
+    # faithful transcription (verified against NEMO 5.0.2 source), but a
+    # controlled A/B on the RUN_GDB restart measured it WORSENING the
+    # dyn_ldf gate rows, not closing them -- so the kamm card leaves this
+    # at the default "off" (see the card comment near
+    # "lateral_viscosity_operator": "nemo_div_curl" for the measurement).
+    # See LatLonCGridOceanConfig.lateral_viscosity_e3_weighting /
+    # nemo_ldf_lap_viscosity_e3_cgrid.
+    lateral_viscosity_e3_weighting: str = "off"
     # hi_precision_pressure is intentionally NOT a DINOConfig field —
     # the lat-lon dycore already pins it True at ocean_pe_latlon_cgrid.py
     # so a field on this config would never be read.
@@ -1116,9 +1129,17 @@ DINO_RECIPES: dict[str, dict] = {
         # b6d0d9877): dynzad.F90:86-119 has no per-face umask/vmask guard --
         # masking is deferred to dynzdf.F90:121's post-hoc *umask(jk).  The
         # default "min_rule" AND-of-neighbours mask incorrectly discards a
-        # straddling face's still-wet deeper T-neighbour ww (explained ~100%
-        # of the active-only ZAD row error at levels 29-34).  See
-        # DINOConfig.zad_bottom_face_mask docstring above.
+        # straddling face's still-wet deeper T-neighbour ww.  This IS the
+        # NEMO-faithful transcription (dynzad.F90:86-119 vs vertical.py's
+        # nemo_advective_vertical_momentum_advection) and stays the default
+        # here regardless.  RETRACTED (#1455, re-localisation): "explained
+        # ~100% of the active-only ZAD row error at levels 29-34" -- this is
+        # NOT what re-running zad_level29_onset_walk.py's own STEP 5 shows;
+        # the own-seafloor-u-face mechanism owns only 0.13% of the row's
+        # total sum-of-squared-error, and the row's actual p99/max tail
+        # concentrates at mid-column k=6-19, not the k=29-34 straddling
+        # population. See fidelity_bar_gate.py PER_ELEMENT["dyn_adv ZAD"]
+        # for the corrected localisation and current DEBT status.
         "zad_bottom_face_mask": "nemo_faithful",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
@@ -1159,6 +1180,15 @@ DINO_RECIPES: dict[str, dict] = {
         #    rn_Uv=0.27; NO boost/floor). Node 14: NEMO dyn_ldf_lev_lap embeds
         #    ahmt(T)/ahmf(F)=½·rn_Uv·MAX(e1,e2) inside div/curl. --
         "lateral_viscosity_operator": "nemo_div_curl",
+        # #1455: e3-weighted div/curl variant EXISTS (lateral_viscosity_e3_
+        # weighting="nemo_e3", nemo_ldf_lap_viscosity_e3_cgrid) as a faithful
+        # transcription of dynldf_lev_rot_scheme.h90:22-29,41,51 -- but a
+        # controlled A/B on the RUN_GDB restart (ww_inheritance_walk.py::
+        # measure_dyn_ldf_corrected) measured it WORSENING both gate rows
+        # (u |ratio-1| 1.86e-6->6.11e-6, v 7.24e-6->2.09e-5), not closing
+        # them. NOT selected here (default "off", bit-identical) pending
+        # further investigation (see DINOConfig.lateral_viscosity_e3_
+        # weighting docstring and the dyn_ldf gate row notes).
         "A_h_eq_boost": 1.0,
         "A_h_floor": 0.0,
         # -- Barotropic / free surface (namdyn_spg: ln_dynspg_ts=T; nn_bt_flt=2; nn_e=30) --
@@ -2922,6 +2952,11 @@ def dino_lat_lon_model_config(
         # the faithful NEMO cards). Default "vector_laplacian" keeps the A_h·cos(φ)
         # scalar path byte-identical for every other recipe.
         lateral_viscosity_operator=cfg.lateral_viscosity_operator,
+        # #1455: e3-weighting of the nemo_div_curl div/curl (default "off",
+        # bit-identical; the kamm card leaves this at "off" -- the
+        # e3-weighted variant regressed the dyn_ldf gate rows in a
+        # controlled A/B, see the card comment).
+        lateral_viscosity_e3_weighting=cfg.lateral_viscosity_e3_weighting,
         K_h=(0.0 if cfg.lateral_tracer_mixing == "isoneutral"
              else K_h_base),   # iso-neutral replaces iso-level diffusion
         A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer

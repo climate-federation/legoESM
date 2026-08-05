@@ -733,6 +733,18 @@ def assert_pytree_bytes_equal(tree, what):
     # bypass the gate. Non-numeric leaves (None, strings) stay excluded.
     leaves = [x for x in jax.tree_util.tree_leaves(tree)
               if hasattr(x, "ndim") or isinstance(x, (int, float, complex))]
+    # STRUCTURE pre-gate (codex r23): agree the leaf COUNT + tree schema
+    # in one fixed-width collective BEFORE the per-leaf gather — two
+    # processes with different pytrees would otherwise enter a
+    # mismatched-width allgather and hang instead of raising.
+    pre = np.array([float(len(leaves)), tree_schema_digest48(tree)],
+                   dtype=np.float64)
+    g_pre = multihost_utils.process_allgather(pre)
+    if not bool(np.all(g_pre == g_pre[0])):
+        raise RuntimeError(
+            f"{what}: pytree STRUCTURE differs across processes "
+            f"(leaf-count/schema digests {g_pre.tolist()}) — fix the "
+            f"per-process build before sharding.")
     vals = np.array([leaf_digest48(x) for x in leaves], dtype=np.float64)
     g = multihost_utils.process_allgather(vals)
     if not bool(np.all(g == g[0])):

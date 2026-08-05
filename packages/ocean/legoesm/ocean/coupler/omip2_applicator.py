@@ -1234,6 +1234,26 @@ def build_omip2_scan_block_fn(
                 st = model._apply_freeze_floor(st)
             return (st, step + 1), None
 
+        # store_mass_flux (#1442, codex round-6 RED 2): ``_step_impl`` turns
+        # the mass_flux_* slots from None into Fields when the flag is on, so
+        # an unseeded carry aborts this scan on iteration 1 with a carry
+        # structure mismatch.  Seed at the scan boundary.  STATIC gate on a
+        # config bool (never a traced value), and a no-op for every model whose
+        # config lacks the field -- so the historical path is untouched.
+        #
+        # This also fixes the RETURNED structure: without it block_fn would
+        # return a state whose slots are Fields while its input's were None,
+        # retracing this jit on the host loop's second block.
+        if getattr(model.config, "store_mass_flux", False):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                seed_mass_flux_carry,
+            )
+            state = seed_mass_flux_carry(state, True)
+        if getattr(model.config, "store_salt_flux", False):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                seed_salt_flux_carry,
+            )
+            state = seed_salt_flux_carry(state, True)
         (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
         return state
 

@@ -24,6 +24,9 @@
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 export JAX_PLATFORMS=cuda,cpu
+# Validated combo (jobs 26681636/26681858: -20.3%/-15.0%, parity green):
+export LEGOESM_LATLON_SPMD_FUSED_HALO=1
+export LEGOESM_XLA_OVERLAP=1
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
 export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"

@@ -107,12 +107,23 @@ for year in range(1, YEARS + 1):
         if (k + 1) % 960 == 0:
             Td = np.asarray(st.T.data); m = np.asarray(st.land_mask.data) > 0.5
             us = np.asarray(st.u.data[..., 0])
+            # ponytail: maxabs over u/v/eta is the per-step stability signal the
+            # true-ladder A/B needs (blow-up shows in velocity before T NaNs).
+            maxu = float(np.max(np.abs(np.asarray(st.u.data))))
+            maxv = float(np.max(np.abs(np.asarray(st.v.data))))
+            maxeta = float(np.max(np.abs(np.asarray(st.eta.data))))
             print(f"  y{year} day {(k+1)*DT/86400:5.1f}  T[{Td[m].min():.1f},{Td[m].max():.1f}] "
-                  f"usurf[{us.min():.3f},{us.max():.3f}] finite={np.isfinite(Td[m]).all()}", flush=True)
+                  f"usurf[{us.min():.3f},{us.max():.3f}] "
+                  f"max|u|={maxu:.3f} max|v|={maxv:.3f} max|eta|={maxeta:.3f} "
+                  f"finite={np.isfinite(Td[m]).all()}", flush=True)
     mean = {f: np.asarray(acc[f]) / (NSTEPS - ACC0) for f in acc}
     mean["land_mask"] = np.asarray(st.land_mask.data)
     out_year = OUT if year == 1 else OUT.replace(".npz", f"_y{year}.npz")
     np.savez(out_year, **mean)
     Td = np.asarray(st.T.data); m = mean["land_mask"] > 0.5
+    maxu = float(np.max(np.abs(np.asarray(st.u.data))))
+    maxv = float(np.max(np.abs(np.asarray(st.v.data))))
+    maxeta = float(np.max(np.abs(np.asarray(st.eta.data))))
     print(f"DONE year {year}/{YEARS} ({kglob*DT/86400:.1f}d cumulative) "
+          f"max|u|={maxu:.3f} max|v|={maxv:.3f} max|eta|={maxeta:.3f} "
           f"STABLE={np.isfinite(Td[m]).all() and Td[m].max()<45} -> {out_year}", flush=True)

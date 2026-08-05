@@ -735,6 +735,82 @@ from legoesm.atmosphere.physics.neural_physics import (  # noqa: E402
 )
 
 
+def make_turbulence_only_spectral_physics(dt,
+                                          turbulence_scheme="smagorinsky",
+                                          turbulence_cfg=None):
+    """A spectral ``physics_fn`` carrying ONLY the turbulence scheme (#1464).
+
+    NAMED FOR WHAT IT IS, not for what it is used for. This was first written
+    as ``make_momentum_only_*``, which was wrong: MEASURED on a sheared state,
+    ``smagorinsky`` returns vor/div tendencies of 1.44e-9 / 1.30e-9 AND a
+    temperature tendency of 1.64e-5 — the scheme diffuses heat as well as
+    momentum. The T part is real physics and is not zeroed here; it is the
+    CONSUMER that drops it, because ``make_column_physics_fn`` takes only
+    vor/div/lnps from its momentum source and always keeps the network's
+    thermodynamics.
+
+    Built to pair with ``make_column_mlp_spectral_physics``, whose network has
+    no momentum head and therefore returns zero vor/div — a model with no
+    surface drag at all. Passing this in gives the learned arm the SAME
+    momentum sink the classical arm gets by default
+    (``TurbulenceConfig.scheme = "smagorinsky"``, inherited whenever a
+    ``PhysicsConfig`` is built with only radiation and convection named), so
+    the two arms differ in their THERMODYNAMICS and nothing else.
+
+    Radiation, convection, microphysics and GWD are explicitly ``"none"`` here
+    — the network owns those. Being explicit matters: the confound this fixes
+    came from a sub-config that was never named and so kept its default.
+
+    Parameters
+    ----------
+    dt : float
+        Physics timestep [s], as for the other builders here.
+    turbulence_scheme : str
+        Any scheme ``TurbulenceConfig`` accepts. Validated by the factory's own
+        dispatch, which raises on an unknown name.
+    turbulence_cfg : TurbulenceConfig, optional
+        A fully-built config; overrides ``turbulence_scheme`` when given.
+    """
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.atmosphere.physics.radiation import RadiationConfig
+    from legoesm.atmosphere.physics.convection import ConvectionConfig
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag import (
+        GravityWaveDragConfig,
+    )
+
+    turb = (turbulence_cfg if turbulence_cfg is not None
+            else TurbulenceConfig(scheme=turbulence_scheme))
+    # STATELESS ONLY. This wrapper passes no PhysicsState and discards the
+    # carry the scheme returns, so a TKE-family scheme would re-seed its
+    # prognostic TKE from the floor on EVERY call — a silently different
+    # closure, not the one named (codex). Refuse rather than run it wrong;
+    # threading the carry is the fix if one of these is ever wanted here.
+    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf")
+    if turb.scheme in _STATEFUL:
+        raise ValueError(
+            f"make_turbulence_only_spectral_physics: {turb.scheme!r} is a "
+            f"PROGNOSTIC scheme and this builder threads no PhysicsState, so "
+            f"its carry would be re-seeded from the floor every step. Use a "
+            f"stateless scheme (e.g. 'smagorinsky', 'louis', "
+            f"'holtslag_boville', 'ysu') or thread the carry first.")
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=turb,
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt)
+
+    def physics_fn(state, grid_, sigma_coord):
+        result = raw_fn(state, grid_, sigma_coord)
+        return result[0] if isinstance(result, tuple) else result
+
+    return physics_fn
+
+
 # =============================================================================
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
