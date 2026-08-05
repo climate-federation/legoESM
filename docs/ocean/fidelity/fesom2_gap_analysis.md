@@ -377,7 +377,47 @@ model's own grid* is not this number — a 1° cell swallows more coastline than
 a 0.5625° one, so the true loss is smaller. The measurement establishes that
 routing is required, not how much is lost.
 
-### 3.7 CONFIRMED (open) — the matched cold start dies on step 1
+### 3.7a ROOT CAUSE (fixed) — no-data IC columns entered as T = 0 °C, S = 0 PSU
+
+**This supersedes the framing in §3.7 below.** The step-1 blowup was NOT the
+unavoidable price of cold-starting from realistic hydrography. It was a defect
+in the IC builder, and fixing it cuts the kick 24×.
+
+`init_woa.py::_interp_profile_to_z_coord` returned `np.full(nlev, 0.0)` when a
+source column had ZERO valid entries. `0.0` is not NaN, so
+`init_ocean_from_woa`'s `np.where(np.isnan(T_out), T_fill, T_out)` never
+replaced it. A **wet** cell whose climatology column had no data was
+initialised as **fresh water at 0 °C** — ρ = 999.8 against ~1027 for sea water.
+
+| | before | after |
+|---|---|---|
+| wet cells with `S == 0` | **39 032** | **0** |
+| wet columns affected | 1 569 | 0 |
+| max adjacent \|Δρ\| | **29.74** kg/m³ | 8.38 kg/m³ |
+| max hydrostatic \|PGF\| | 0.0202 m/s² | 8.59e-4 m/s² |
+| implied `du` in one 2400 s step | **48.6 m/s** | **2.06 m/s** |
+
+29.7 kg/m³ across one cell face exceeds the entire ocean's density range. The
+zero columns are also exactly what the §3.7 damage map was tracking — its
+"coastal / shallow enrichment" and its worst columns (Ross Sea, lat −79.5,
+lon 173–180) are the no-data columns, not a coastal process.
+
+**This answers the question §3.7 left open — why FESOM2 survives the same
+`phc3.0_winter.nc`.** FESOM2 never had these cells; legoESM manufactured them.
+
+Two pre-existing tests asserted the defect (`test_interp_all_nan_returns_zero`,
+described as a "documented degenerate fallback", and an all-NaN → zeros
+assertion commented "still no NaN leaks"). The truth is the reverse: NaN is
+CAUGHT by the fill, `0.0` sails through it. Both corrected.
+
+Fixed by returning NaN so the documented fill (1.5 °C / 34.7 PSU) applies.
+Codex adversarial review CLEAR on all four questions (NaN-escape, other
+callers, single-sample branch, regression).
+
+**Still open:** residual max \|Δρ\| = 8.38 kg/m³ between adjacent 1° cells is
+high enough to suspect another defect of the same family. Unexamined.
+
+### 3.7 CONFIRMED — the matched cold start dies on step 1 (mechanism)
 
 The matched run **does not integrate**. It fails on the FIRST timestep, and
 the cause is the initialisation, not the forcing.
@@ -466,9 +506,17 @@ repo has `coriolis_f_safe` for the equatorial `f → 0` floor, but its
 thermal-wind helpers assume a linear EOS and are not drop-in), or abandoning
 the matched IC for rest + restoring — which changes the experiment.
 
-Second, **why FESOM2 survives the same `phc3.0_winter.nc` cold start is NOT
-established.** No measurement here supports any explanation, and none should
-be asserted until one exists.
+Second, **why FESOM2 survives the same `phc3.0_winter.nc` cold start** — this
+is now ANSWERED by §3.7a: legoESM's IC builder was manufacturing fresh-water
+cells that FESOM2 never had. The paragraph that stood here previously said no
+explanation was established; that was true when written and is now superseded.
+
+Note also that the first bullet above ("no timestep rescues an unbalanced
+start … needs dt ≈ 30 s") was computed from the DEFECTIVE IC. With the zero
+cells removed the implied kick is 2.06 m/s, not 48.6, so the conclusion that
+thermal-wind-balanced initialisation is REQUIRED does not follow from this
+evidence any more. Whether balancing is still worth doing is an open question,
+not a demonstrated necessity.
 
 Method note: the failure step is only resolvable at `--diag-every 1`.
 `run_omip` sets `block_size = max(1, diag_every)` and runs the blowup check
