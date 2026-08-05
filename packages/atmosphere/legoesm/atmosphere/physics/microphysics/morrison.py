@@ -1426,6 +1426,108 @@ def morrison_microphysics(
     dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
 
+    # SAM-style N_r consistency CEILING (the LAMMAXR side of module_mp_graupel
+    # .f90's in-place "adjust var check" — the rain analog of the N_i/N_s/N_g
+    # limiters below; rain was the ONE two-moment species missing a prognostic
+    # number repair): cap the POST-STEP rain number so LAMR cannot exceed
+    # lamr_max w.r.t. the POST-STEP mass, and CLEAR orphan number below
+    # QSMALL.  N_r is per-VOLUME [1/m^3] (HydrometeorState conventions), so
+    # the PSD bound carries the rho*q_r factor of the LAMR slope used by the
+    # fall-speed/evaporation/Bigg kernels above
+    # (lamr = (pi*rho_w*N_r/(rho*q_r))^(1/3)):
+    #   N_r_hi = lamr_max^3 * rho * q_r_new / (pi*rho_w).
+    # Forensics (2026-08-04, cldF_fsd cell 9576, diagnosis_cell9576.md):
+    # without this ceiling the transport-side naive positivity clip inflated
+    # N_r to 1e15-1e25 /m^3 (2000+ cells above 1e8 by day 465), pinning LAMR
+    # at lamr_max => sub-drizzle V_t_r (~0.4 m/s) => rain could not
+    # precipitate; ~55 kg/m^2 of water pooled in one lowest-layer cell and
+    # locked into a period-2 graupel<->rain melt/freeze flip-flop
+    # (+-115 K/step) whose Bigg freeze removes mass 4.2e6x faster
+    # (fractionally) than number (the orphan-number ratchet), ending in the
+    # day-540 NaN.
+    # DELIBERATELY CEILING-ONLY: the SAM check also RAISES N_r to the
+    # lamr_min (big-drop) floor, but on the failing campaign state 66% of
+    # cell-levels sit BELOW the window (measured, _probe_cell9576_i_healthy),
+    # so the floor would broadly perturb warm-rain number dynamics
+    # (self-collection, NSUBR) far outside this defect — it needs its own
+    # validated change.  The ceiling alone removes the death mechanism.
+    # The jnp.where keeps the ORIGINAL dN_r_dt BITWISE wherever the ceiling
+    # and the orphan clearing are no-ops, so a cell at-or-below the window
+    # with q_r above QSMALL is exactly unchanged — EXCEPT within the fp
+    # margin band described below: a post-step number within
+    # 4*eps*max(N_r, ceiling) of the ceiling is now clipped (and its rate
+    # recomputed) where it previously passed through.
+    q_r_new = jnp.maximum(jnp.clip(q_r, 0.0) + dq_r_dt * dt, 0.0)
+    _cr_psd = jnp.pi * constants.rho_water
+    n_r_hi = config.lamr_max ** 3 * rho * q_r_new / _cr_psd
+    n_r_post = jnp.clip(N_r, 0.0) + dN_r_dt * dt
+    # AIM 4*eps BELOW THE CEILING, RELATIVE TO max(N_r, ceiling) (codex
+    # adversarial review, 2026-08-04).  "4*eps of the SCALE", not "4 ulp":
+    # eps*S is 1-2 ulp(S) depending on where S sits in its binade, so this is
+    # 4-8 ulp of the scale, and MORE than that in units of ulp(ceiling)
+    # whenever N_r exceeds the ceiling — which is exactly the case it exists
+    # to cover.
+    # The cap is applied here to a NUMBER, but it leaves this routine as a
+    # RATE and every caller reconstructs N_r + dt*dN_r_dt then floors at 0
+    # (compiled_segments.py:1259 and :2097, model_driver.py:948).  Collapsing
+    # N_r ~ 1e23 to ~7e7 in ONE step is a catastrophic cancellation:
+    # fl(dN_r_dt*dt) carries an absolute error of ~ulp(N_r), so a target
+    # placed exactly AT the ceiling reconstructs ABOVE it (measured without
+    # this margin: 1.0036x at N_r=1e22, 1.18x at 1e23, 1.89x at 1e24).
+    # This is NOT cosmetic: N_r is consumed UNCLIPPED by number-linear
+    # kernels on the NEXT call — SB2001 self-collection (_warm_rain.py:1064)
+    # and Bigg freezing number/mass (_warm_rain.py:1111-1112) — so a residual
+    # overshoot scales those rates directly and is NOT absorbed by the
+    # jnp.clip(lamr, lamr_min, lamr_max) that protects the fall speed.
+    # 4 ulp is the right size and is dt-INDEPENDENT: every error term in the
+    # round-trip scales as eps*S where S = max(N_r, ceiling) — fl of the
+    # quotient contributes eps*|target-N_r|/dt, which the caller's *dt turns
+    # back into eps*S — so dt cancels and ~3 eps*S is the bound.  (An FMA in
+    # the caller rounds once instead of twice, so it can only help.)
+    # THE RESIDUAL LIMIT IS A LATTICE LIMIT, NOT A MARGIN FAILURE: once
+    # ulp(N_r) exceeds the ceiling itself, NO target is representable and the
+    # reconstruction cannot land below it.  That crossover is
+    # N_r > ceiling/eps, so it moves with the ceiling (i.e. with q_r and rho),
+    # it is not a fixed N_r.  MEASURED (60 random mantissas per binade,
+    # scripts/tmp/_probe_mantissa.py, and a dt sweep in _probe_dt.py): with
+    # q_r = 1 g/kg the caller-stored N_r is at or below the ceiling for every
+    # mantissa up to 2^78 ~ 4.6e23 at dt = 75/150 s and to well beyond at the
+    # production dt = 240 s (worst ratio 0.39); at dt = 30 s the smaller
+    # ceiling pulls the crossover down and 2^78 already shows 1.21.  Above
+    # the crossover the residual doubles per binade.  Fixing THAT needs a
+    # post-update cap applied by the state updaters (a caller-side change),
+    # deliberately not in this PR — and it is unreachable in a run where this
+    # ceiling has been active from the start, since it takes the ratchet this
+    # very code removes to reach N_r ~ 1e23 (campaign's observed max 2.25e23).
+    # Cost to healthy cells: a cell is newly clipped only if its post-step
+    # number lies within 4*eps*max(N_r, ceiling) of the ceiling.  That is
+    # 4*eps ~ 8.9e-16 RELATIVE to the ceiling while N_r <= ceiling — i.e. for
+    # every healthy cell.  For N_r >> ceiling the band widens in proportion
+    # to N_r/ceiling and can swallow the ceiling entirely (the target then
+    # floors at 0), but that is precisely the pathological state the ceiling
+    # exists to collapse, not a cell whose number was already consistent.
+    # Locked by test_ceiling_holds_across_dynamic_range.
+    _n_scale = jnp.maximum(jnp.clip(N_r, 0.0), n_r_hi)
+    _n_margin = 4.0 * jnp.finfo(jnp.result_type(n_r_post)).eps * _n_scale
+    # jnp.where keeps an INFINITE ceiling (q_r already +inf) a PASS-THROUGH:
+    # inf - inf would be NaN, so subtracting the margin unguarded would turn
+    # a state the un-margined code merely declines to touch into a fresh NaN.
+    # Scope, precisely: this covers +inf ONLY.  A NaN ceiling still
+    # propagates NaN — but so did the un-margined jnp.minimum(n_r_post, NaN),
+    # so that is pre-existing behaviour and not a regression this margin
+    # introduces.  DEFENSIVE and deliberately untested: q_r = inf has already
+    # destroyed the column through every other term, so a unit test driving
+    # it would assert on NaNs from unrelated kernels, and a test that instead
+    # re-implemented this arithmetic would pass with the guard deleted and
+    # prove nothing.
+    _n_cap = jnp.maximum(
+        n_r_hi - jnp.where(jnp.isfinite(n_r_hi), _n_margin, 0.0), 0.0)
+    n_r_new = jnp.minimum(n_r_post, _n_cap)
+    n_r_new = jnp.where(q_r_new > 1.0e-14, n_r_new, 0.0)
+    dN_r_dt = jnp.where(
+        n_r_new == n_r_post, dN_r_dt,
+        (n_r_new - jnp.clip(N_r, 0.0)) / jnp.maximum(dt, 1.0e-10))
+
     # SAM N_i consistency limiter (mirrors the N_s pattern below): bound the
     # POST-STEP number so LAMI stays in [lami_min, lami_max] w.r.t. the
     # POST-STEP mass, and CLEAR the number entirely below QSMALL — orphan
