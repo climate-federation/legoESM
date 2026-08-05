@@ -377,6 +377,74 @@ model's own grid* is not this number — a 1° cell swallows more coastline than
 a 0.5625° one, so the true loss is smaller. The measurement establishes that
 routing is required, not how much is lost.
 
+### 3.7 CONFIRMED (open) — the matched cold start dies on step 1
+
+The matched run **does not integrate**. It fails on the FIRST timestep, and
+the cause is the initialisation, not the forcing.
+
+`--woa-init` installs the full 3-D PHC3 density field while keeping **zero
+velocity and zero eta** (`run_omip.py`, "Keep zero velocity, zero eta — let
+the model adjust"). The entire baroclinic pressure gradient is therefore
+unopposed on step 1.
+
+Measured offline from the IC (1° lat-lon, 47 CORE2 levels, dt = 2400 s), at
+the cell where the model's own `j_maxu`/`i_maxu` diagnostic puts the maximum
+(lat 81.5 N, lon 96):
+
+| PGF component | implied `du` in one 2400 s step |
+|---|---|
+| full | 41.87 m/s |
+| barotropic (depth-mean) | 22.30 m/s |
+| **baroclinic (deviation)** | **22.21 m/s** |
+
+The model reports `max_speed = 21.95 m/s` at step 1, from `max_speed = 0.0`
+at step 0. That matches the **baroclinic-only** prediction to 1.2 %, which
+says the barotropic solver (`implicit_cn`) *is* absorbing the depth-mean part
+correctly — what survives is the unbalanced baroclinic shear, and that alone
+is supercritical (dx = 16 km at 81.5 N gives CFL = 3.2).
+
+Everything downstream is advective wreckage, not a separate defect: `T`
+reaches 149 °C and `S` reaches −204 PSU, concentrated in coastal (33 % of
+coastal columns vs 0.67 % interior) and shallow columns (median 1180 m vs
+3828 m global).
+
+**Refuted**, each by a one-variable arm at `--diag-every 1` or an offline
+measurement — do not re-chase these:
+
+* explicit vertical mixing — implicit buys exactly one step (1 → 2);
+* the conservation fixer — disabled, still step 1;
+* runoff routing — amplification 1.0×, `dS`/step 0.17 PSU;
+* thin bottom cells — no column below 1 m (3.267 m vs 3.244 m clean);
+* barotropic CFL — the solver is already `implicit_cn`;
+* polar-meridian CFL — the Fourier polar filter is already on;
+* corrupt IC salinity — the 1e-4 PSU cells are the real Amazon plume, and
+  FESOM2 reads the same file.
+
+The existing mitigation does not apply: `--T-ramp-days` ramps the **wind
+stress** only (`tau × min(1, t/T_ramp)`), not the internal PGF.
+
+Two things follow. First, no timestep rescues an unbalanced start here —
+killing a 22 m/s kick needs dt ≈ 30 s. A stable matched cold start requires
+initialising `u`/`v` in thermal-wind balance with the density field (the
+repo has `coriolis_f_safe` for the equatorial `f → 0` floor, but its
+thermal-wind helpers assume a linear EOS and are not drop-in), or abandoning
+the matched IC for rest + restoring — which changes the experiment.
+
+Second, **why FESOM2 survives the same `phc3.0_winter.nc` cold start is NOT
+established.** No measurement here supports any explanation, and none should
+be asserted until one exists.
+
+Method note: the failure step is only resolvable at `--diag-every 1`.
+`run_omip` sets `block_size = max(1, diag_every)` and runs the blowup check
+only at block boundaries, so five earlier arms at `--diag-every 36` all
+reported "step 36" — the first check, not the first failure. Arms run at
+coarse `DIAG` prove only "this setting alone does not fix it".
+
+Also found while diagnosing: `--north-cap-lat` defaults to **90.0** while its
+help text says "(default 80)", so a global lat-lon ocean runs with an **open
+North Pole**; the FESOM-match sbatch never passed the flag at all. Both are
+now explicit via its `NCAP` knob.
+
 ### 3.6 Numerics differences that are real but second-order
 
 | Item | FESOM2 | legoESM | Assessment |
@@ -509,6 +577,11 @@ transformations change delivered values:
    the ocean instead of 30.0 %. The residual 1.4 % has no wet cell in range
    and is printed at setup, not hidden.
 
-What the run establishes is that legoESM ingests **the same source data** and
-integrates stably under it — the prerequisite for any later controlled
-comparison, and the thing that surfaced §3.1.
+What the run establishes is that legoESM ingests **the same source data** —
+the thing that surfaced §3.1.
+
+It does **not** establish that legoESM integrates stably under it. **It does
+not: the matched configuration fails on step 1** (§3.7), from the
+initialisation rather than the forcing. Until that is resolved there is no
+integration to compare, controlled or otherwise. An earlier revision of this
+section claimed stable integration; that claim was wrong and is retracted.
