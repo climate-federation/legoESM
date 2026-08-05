@@ -412,6 +412,26 @@ the barotropic solver does on step 1 is **not established here**.
 
 The kick is supercritical on its own: dx = 16 km at 81.5 N gives CFL = 3.2.
 
+**Confirmed by perturbation.** Removing the 3-D density field — `WOA_INIT=0`,
+i.e. a uniform rest state, everything else byte-identical and `--diag-every 1`
+on both sides — removes the kick:
+
+| arm | `max_speed` at step 1 | first bad step |
+|---|---|---|
+| WOA/PHC3 cold start | 21.95 m/s | 1 |
+| rest init (uniform T/S) | **0.00998 m/s** | 2 |
+
+A **2200× reduction** in the step-1 velocity, which is what the mechanism
+predicts and what no competing explanation on the refuted list would produce.
+(Both numbers are the same `max_speed` cell-centre diagnostic, so this
+comparison is staggering-consistent.)
+
+**A SECOND, SEPARATE DEFECT is visible here and is NOT attributed**: the rest
+lane still fails at step 2, from a step-1 velocity of 0.01 m/s that cannot
+itself destabilise anything. Whatever kills the rest lane is a different
+mechanism from the cold-start kick, and fixing the initialisation will not fix
+it.
+
 Everything else is advective wreckage inside that same first step, not a
 separate defect: `T` reaches 149 °C and `S` reaches −204 PSU, concentrated in
 coastal (33 % of coastal columns vs 0.67 % interior) and shallow columns
