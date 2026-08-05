@@ -11,6 +11,26 @@ oracle needed. Per conserved quantity Q in {volume, salt, heat}, per step::
 Correct model -> residual ~1e-15 relative. A systematic nonzero residual is
 an internal source/sink that should not exist.
 
+#1492 follow-up (STEP 3): ``--surface-tendency-placement leapfrog_rhs`` folds
+the DINO surface tendency into the leap-frog Nnn RHS (matching NEMO's
+``tra_sbc(Nnn, ts, Nrhs)``, see ``DINOConfig.surface_tendency_placement``)
+instead of the legacy pre-step "applied_now" state mutation that this file's
+0.1 deployment found retains only ~0.444 of the applied flux per step
+(residual coefficient -0.556, closed-form MLF/Asselin recursion match, see
+mlf_retention_algebra.py). Re-run BOTH placements to compare the residual
+coefficient before/after.
+
+MEASURED (20-day reproduction, --surface-tendency-placement applied_now vs
+leapfrog_rhs, adversarial-review note): heat coefficient -0.5568 (R2=0.559)
+-> -0.000055; salt -0.5628 (R2=0.999) -> -0.0021; final-day relative residual
+heat 5.0e-6 -> 1.1e-9 (~4600x), salt 1.0e-10 -> 3.1e-13 (~320x). NOTE: this
+reproduction's applied_now R2 (0.559) is lower than the original 0.1 finding's
+R2 (0.9998) though the SLOPE matches closely (-0.5568 vs -0.556) -- the two
+runs are NOT the identical protocol (different restart/window), so treat the
+slope (the physics) as the comparable quantity and the R2 (fit scatter) as
+run-specific; do not read -0.5568@R2=0.559 and -0.556@R2=0.9998 as a
+discrepancy in the mechanism itself.
+
 Rationale (FESOM2-JAX, arXiv:2608.01546): every operator here is already
 verified near-clean in isolation (fidelity_bar_gate.py), so a climate-
 timescale drift must arise where operators are JOINED; a budget-closure
@@ -124,7 +144,7 @@ def _global_integrals(state, z_coord, area, min_water_column_m):
 
 
 def _applied_forcing_flux(state_before, forcing, z_coord, cfg, dt, t_seconds, area,
-                          min_water_column_m):
+                          min_water_column_m, *, return_rate=False):
     """APPLIED (not re-derived) dV/dH/dS contribution [m^3/s, W, psu.m^3/s]
     from ``apply_dino_lat_lon_surface_forcing`` for this ONE step, by
     diffing the function's own output against its own input -- the same
@@ -135,7 +155,36 @@ def _applied_forcing_flux(state_before, forcing, z_coord, cfg, dt, t_seconds, ar
     docstring) -- checked by assertion below rather than assumed, so a
     future change that starts moving eta here cannot silently go
     unaccounted.
+
+    ``return_rate=True`` (#1492 ``surface_tendency_placement="leapfrog_rhs"``):
+    the applicator does NOT mutate T/S in this mode (only u, per its own
+    ``return_rate`` docstring) -- it returns ``(state, (dT_dt, dS_dt))``
+    instead.  The APPLIED content rate is then computed directly from that
+    SAME rate (no diff needed since T/S truly did not move here): ``dH/dt =
+    rho0*cp*integral(h*dT_dt)``, ``dS/dt = integral(h*dS_dt)``, using the
+    UNCHANGED thickness ``h`` from ``state_before`` -- exactly what
+    ``model.step(..., external_tracer_rate=(dT_dt,dS_dt))`` will apply over
+    ``dt`` at the Nnn evaluation point, so this is the bookkeeping-consistent
+    "applied flux" the residual should be measured against.  Also returns the
+    rate tuple (2nd retval slot) so the caller can thread it into
+    ``model.step``.
     """
+    if return_rate:
+        state_after, (dT_dt, dS_dt) = apply_dino_lat_lon_surface_forcing(
+            state_before, forcing, z_coord, cfg, dt, t_seconds=t_seconds,
+            return_rate=True)
+        h = np.asarray(compute_layer_thickness(
+            np.asarray(state_before.eta.data, dtype=np.float64),
+            np.asarray(state_before.H_bathy.data, dtype=np.float64), z_coord,
+            min_water_column_m=min_water_column_m), dtype=np.float64)
+        mask = (np.asarray(state_before.land_mask.data) > 0.5)[:, :, None]
+        vol_cell = h * area[..., None] * mask
+        dH_dt = RHO0 * CP * float(np.sum(
+            vol_cell * np.asarray(dT_dt, dtype=np.float64), dtype=np.float64))
+        dS_dt_tot = float(np.sum(
+            vol_cell * np.asarray(dS_dt, dtype=np.float64), dtype=np.float64))
+        return state_after, 0.0, dH_dt, dS_dt_tot, (dT_dt, dS_dt)
+
     state_after = apply_dino_lat_lon_surface_forcing(
         state_before, forcing, z_coord, cfg, dt, t_seconds=t_seconds)
     d_eta = np.asarray(state_after.eta.data) - np.asarray(state_before.eta.data)
@@ -158,12 +207,13 @@ def _applied_forcing_flux(state_before, forcing, z_coord, cfg, dt, t_seconds, ar
     # ``model.step`` alone (forcing contribution cancels identically).
     V_b, H_b, S_b = _global_integrals(state_before, z_coord, area, min_water_column_m)
     V_a, H_a, S_a = _global_integrals(state_after, z_coord, area, min_water_column_m)
-    return state_after, (V_a - V_b) / dt, (H_a - H_b) / dt, (S_a - S_b) / dt
+    return state_after, (V_a - V_b) / dt, (H_a - H_b) / dt, (S_a - S_b) / dt, None
 
 
 def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
               poison: str | None = None, restart_file: str = Y20_RESTART,
-              asselin_gamma: float | None = None):
+              asselin_gamma: float | None = None,
+              surface_tendency_placement: str = "applied_now"):
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
 
@@ -195,11 +245,24 @@ def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 
+    # #1492 STEP 3: NEMO-faithful surface-tendency placement option under test.
+    if surface_tendency_placement not in ("applied_now", "leapfrog_rhs"):
+        raise SystemExit(
+            f"Unknown surface_tendency_placement {surface_tendency_placement!r}: "
+            "expected 'applied_now' or 'leapfrog_rhs'.")
+    _use_rhs = surface_tendency_placement == "leapfrog_rhs"
+    print(f"surface_tendency_placement={surface_tendency_placement}")
+
     import jax
     import jax.numpy as jnp
 
     area = np.asarray(br.geometry.area, dtype=np.float64)
-    dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
+    if _use_rhs:
+        dyn = jax.jit(lambda st, t, rate: model.step(
+            st, DT, surface_forcing=sf, t_seconds=t,
+            external_tracer_rate=rate))
+    else:
+        dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
 
     # --- Non-vacuity self-test injection (mandatory, item 4): perturb ONE
     # tracer field by a known relative amount right after day 0 and confirm
@@ -223,14 +286,17 @@ def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
 
     for k in range(nsteps):
         t_next = (k + 1) * DT
-        st, dV_dt, dH_dt, dS_dt = _applied_forcing_flux(
+        st, dV_dt, dH_dt, dS_dt, ext_rate = _applied_forcing_flux(
             st, forcing, br.z_coord, cfg, DT, t_next, area,
-            mc.min_water_column_m)
+            mc.min_water_column_m, return_rate=_use_rhs)
         accum_dV_applied += dV_dt * DT
         accum_dH_applied += dH_dt * DT
         accum_dS_applied += dS_dt * DT
 
-        st = dyn(st, jnp.asarray(t_next))
+        if _use_rhs:
+            st = dyn(st, jnp.asarray(t_next), ext_rate)
+        else:
+            st = dyn(st, jnp.asarray(t_next))
         t_seconds = t_next
 
         if k == 0 and poison_q is not None:
@@ -304,6 +370,12 @@ def _parse_args(argv=None):
     p_run.add_argument("--asselin-gamma", type=float, default=None,
                         help="override the Robert-Asselin coefficient (0.0 = "
                              "filter OFF) -- the ATF/leapfrog discriminator")
+    p_run.add_argument("--surface-tendency-placement", default="applied_now",
+                        choices=("applied_now", "leapfrog_rhs"),
+                        help="#1492 STEP 3: 'leapfrog_rhs' folds the DINO "
+                             "surface tendency into the leap-frog Nnn RHS "
+                             "(NEMO tra_sbc placement) instead of the legacy "
+                             "pre-step state mutation")
 
     sub.add_parser("selftest")
     return p.parse_args(argv)
@@ -338,7 +410,8 @@ def main(argv=None):
         return
     run_audit(args.out, args.days, fix_eta_drift=not args.no_fix_eta_drift,
               poison=args.poison, restart_file=args.restart_file,
-              asselin_gamma=args.asselin_gamma)
+              asselin_gamma=args.asselin_gamma,
+              surface_tendency_placement=args.surface_tendency_placement)
 
 
 if __name__ == "__main__":

@@ -2668,8 +2668,19 @@ class LatLonCGridOceanModel:
                    _ab2_scope_override: str | None = None,
                    _barotropic_substep_scale: int = 1,
                    _barotropic_before_state=None,
-                   _fct_tracer_before=None):
+                   _fct_tracer_before=None,
+                   _external_tracer_rate=None):
         """Core step logic — no JIT wrapper.
+
+        ``_external_tracer_rate`` (private, #1492 DINO ``surface_tendency_
+        placement="leapfrog_rhs"``): optional ``(dT_dt, dS_dt)`` full-column
+        rate pair [degC/s, PSU/s], already masked, SUMMED into the explicit
+        ``tend.dT_dt``/``tend.dS_dt`` before the ``dt·`` combine below --
+        i.e. it becomes part of the SAME RHS accumulator every other
+        explicit tracer tendency uses, matching NEMO's ``tra_sbc`` writing
+        into ``ts(Krhs)`` (trasbc.F90:150-155) BEFORE ``tra_zdf`` forms
+        ``Kaa`` from it. ``None`` (every caller except the leap-frog Nnn
+        pass under the new DINO placement) ⇒ bit-identical.
 
         ``_fct_tracer_before`` (private, MLF): ``(T_before, S_before)`` — the
         BEFORE-level (Nbb) tracers the leap-frog step passes so the FCT/Zalesak
@@ -2798,6 +2809,19 @@ class LatLonCGridOceanModel:
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override)
+        # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
+        # externally-supplied surface tracer RATE into the SAME explicit RHS
+        # every other tendency uses -- BEFORE the diss-withholding split and
+        # the dt-combine below, matching NEMO's tra_sbc(Nnn, ts, Nrhs) writing
+        # into the shared Krhs accumulator ahead of tra_zdf's Kaa combine.
+        # None (default / every caller except the leap-frog Nnn pass under
+        # the new placement) ⇒ bit-identical.
+        if _external_tracer_rate is not None:
+            _dT_ext, _dS_ext = _external_tracer_rate
+            tend = tend._replace(
+                dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data + _dT_ext),
+                dS_dt=tend.dS_dt.replace(data=tend.dS_dt.data + _dS_ext),
+            )
 
         # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
         # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
@@ -5969,8 +5993,17 @@ class LatLonCGridOceanModel:
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
-             vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
+             vertex_mask=None, t_seconds=None,
+             external_tracer_rate=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
+
+        ``external_tracer_rate`` (optional ``(dT_dt, dS_dt)`` array pair,
+        full-column, masked, units degC/s and PSU/s): summed into the
+        EXPLICIT tracer RHS on the leap-frog Nnn advective pass ONLY (#1492
+        DINO ``surface_tendency_placement="leapfrog_rhs"`` — see
+        ``DINOConfig`` docstring + ``_step_impl``'s ``_external_tracer_rate``).
+        Requires ``outer_integrator="leapfrog"``; ``None`` (default, every
+        other outer integrator) ⇒ bit-identical, no-op elsewhere.
 
         Eager Python shim over the JIT-compiled ``_step_jitted``: fills
         the build-once vertex-mask cache from CONCRETE state BEFORE the
@@ -6038,15 +6071,26 @@ class LatLonCGridOceanModel:
                 "step_checked(), or drive the run via integrate()/"
                 "integrate_scan() which thread it automatically."
             )
+        if (external_tracer_rate is not None
+                and getattr(self.config, "outer_integrator", "forward_euler")
+                != "leapfrog"):
+            raise ValueError(
+                "external_tracer_rate is only consumed by the leap-frog "
+                "Nnn advective pass (config.outer_integrator='leapfrog'); "
+                f"got outer_integrator={self.config.outer_integrator!r}. "
+                "Passing it under another integrator would be a silent "
+                "no-op.")
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
-            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+            external_tracer_rate=external_tracer_rate)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
                      freshwater=None, surface_forcing=None,
                      sponge=None, *, grid=None,
-                     vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
+                     vertex_mask=None, t_seconds=None,
+                     external_tracer_rate=None) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -6096,7 +6140,8 @@ class LatLonCGridOceanModel:
             new_state = self._leapfrog_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
-                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                external_tracer_rate=external_tracer_rate)
         else:
             new_state = self._step_impl(state, dt, freshwater=freshwater,
                                         surface_forcing=surface_forcing,
@@ -6741,8 +6786,15 @@ class LatLonCGridOceanModel:
     def _leapfrog_step(self, state: LatLonCGridOceanState, dt: float,
                        freshwater=None, surface_forcing=None, sponge=None,
                        *, grid=None, vertex_mask=None,
-                       t_seconds=None) -> LatLonCGridOceanState:
+                       t_seconds=None,
+                       external_tracer_rate=None) -> LatLonCGridOceanState:
         """NEMO Modified-Leap-Frog step (``stp_MLF``, ``stpmlf.F90``, key_qco DINO).
+
+        ``external_tracer_rate`` (#1492): see ``step()`` docstring. Threaded
+        ONLY into the advective Nnn pass's ``_step_impl`` call below (as
+        ``_external_tracer_rate``) — matching NEMO's ``tra_sbc(kstp, Nnn, ts,
+        Nrhs)`` call (stpmlf.F90:342), which runs once per step at Nnn, NOT
+        on the separate Nbb dissipative pass this method also runs.
 
         Three time levels — before ``Nbb`` (t-dt, carried on the state's
         ``{u,v,T,S,eta}_before`` fields), now ``Nnn`` (t, = ``state``), after
@@ -6971,7 +7023,12 @@ class LatLonCGridOceanModel:
             # (NEMO nonosc(Kbb), p2dt=2dt) — else the FE-certified (Nnn,dt)
             # bounds admit cold undershoot at high-lat wall fronts under 2dt.
             _fct_tracer_before=(
-                state.T_before.data, state.S_before.data))
+                state.T_before.data, state.S_before.data),
+            # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
+            # externally-supplied surface tracer RHS into THIS (Nnn advective)
+            # pass only, matching tra_sbc's Nnn-only call — see this method's
+            # docstring and the ``step()`` param doc.
+            _external_tracer_rate=external_tracer_rate)
         # 1b. DISSIPATIVE Nbb pass — evaluate dyn_ldf(Kbb)/tra_ldf(Kbb) + the GM/eiv
         #     trend on the BEFORE state and keep ONLY its dissipative increment
         #     (2dt·diss(Nbb), applied forward-in-time). The GM/Redi destabiliser is

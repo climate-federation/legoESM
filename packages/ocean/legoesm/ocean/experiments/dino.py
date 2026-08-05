@@ -243,6 +243,35 @@ class DINOConfig:
     # Only the ``nemo_dino_kamm``/``nemo_dino_kamm_mlf``-family exactness
     # presets set "nemo_live". Unknown value raises (dispatch hardening).
     shortwave_penetration_ladder: str = "static"
+    # NEMO trasbc.F90 surface-flux TIME-LEVEL PLACEMENT (#1492): NEMO's
+    # tra_sbc writes sbc_tsc into the tracer RHS accumulator ts(Krhs) at Nnn
+    # (stpmlf.F90:342 ``CALL tra_sbc(kstp, Nnn, ts, Nrhs)``), which then enters
+    # the leap-frog combine ``pt(Kaa) = e3t(Kbb)*pt(Kbb) + 2dt*e3t(Kmm)*pt(Krhs)``
+    # (trazdf.F90:272-273) alongside advection/diffusion -- i.e. the surface
+    # flux is folded into the SAME 2dt-weighted RHS as everything else, based
+    # off Kbb.  legoESM's ``apply_dino_lat_lon_surface_forcing`` instead writes
+    # its increment directly onto the "now" state OUTSIDE model.step, before
+    # ``_leapfrog_step`` ever runs -- so it lands on BOTH sides of the
+    # explicit combine's ``(state_expl.T - state.T)`` difference and cancels
+    # there, entering the trajectory only through the Asselin filter's "now"
+    # weight.  Global-closure audit (#1492 0.1): this retains only
+    # 1/(1+2*gamma)... measured ~0.444 of the applied flux per step (residual
+    # coefficient -0.556, R2 0.9998, same for heat AND salt -- confirmed by
+    # closed-form recursion match in the 0.1 follow-up, see
+    # global_closure_audit.py).
+    # "applied_now" (DEFAULT, bit-identical legacy): apply_dino_lat_lon_
+    # surface_forcing mutates T/S directly, called by the driver before
+    # model.step() -- every existing DINO run/twin/card is unaffected.
+    # "leapfrog_rhs" (NEW, faithful): apply_dino_lat_lon_surface_forcing
+    # returns the surface tendency RATE instead of a mutated state; the
+    # driver passes it to model.step(..., external_tracer_rate=(dT_dt,dS_dt))
+    # so it is summed into the EXPLICIT tendency (tend.dT_dt/dS_dt) on the
+    # Nnn advective pass ONLY (_step_impl's ``_external_tracer_rate`` kwarg,
+    # matching tra_sbc's Nnn-only call) -- i.e. it becomes part of the SAME
+    # 2dt*RHS the leap-frog combine already applies, exactly like NEMO.
+    # Requires outer_integrator="leapfrog"; unknown value raises (dispatch
+    # hardening).
+    surface_tendency_placement: str = "applied_now"
     # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
     # / zdf_baroclinic_only docstrings for the full transcription. Threaded
     # 1:1 (same field names) to the model config. Default False on both =
@@ -3414,7 +3443,7 @@ def dino_step_surface_forcing(forcing):
 
 
 def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
-                                        t_seconds=None):
+                                        t_seconds=None, return_rate=False):
     """Apply DINO surface forcing on the lat-lon Mercator grid.
 
     Components (paper eqs 7-10):
@@ -3427,7 +3456,20 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
       eq 9  — A_S(S*-S) salinity restoring at top layer (also implicit)
       eq 10 — Jerlov type I column-distributed Q_sr through all levels
 
-    Returns a new state (immutable update of T, S, u).
+    ``return_rate`` (#1492, ``DINOConfig.surface_tendency_placement=
+    "leapfrog_rhs"``): when True, T/S are NOT mutated here — instead this
+    returns ``(state, (dT_dt, dS_dt))`` where ``state`` is UNCHANGED (u still
+    gets its wind kick, unless ``wind_through_step``) and ``(dT_dt, dS_dt)``
+    is the SAME full-column tendency the default path would have applied
+    (``dT_dt_restoring``/``dS_dt_col`` below), for the caller to thread into
+    ``model.step(..., external_tracer_rate=(dT_dt, dS_dt))`` so it is summed
+    into the EXPLICIT tendency on the Nnn pass — matching NEMO's
+    ``tra_sbc(Nnn, ts, Nrhs)`` placement (see DINOConfig.
+    surface_tendency_placement docstring). Default False = legacy state-
+    mutation path, bit-identical.
+
+    Returns a new state (immutable update of T, S, u) when
+    ``return_rate=False``; ``(state, (dT_dt, dS_dt))`` otherwise.
     """
     from legoesm.ocean.physics.surface_forcing.config import (
         RestoringConfig, tau_from_flux_coefficient,
@@ -3551,10 +3593,8 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # Jerlov penetration, independently gated by shortwave_penetration_ladder
     # (traqsr.F90 is a separate NEMO routine from trasbc.F90/surface_flux_divisor).
     mask3 = cell_mask[..., None]
-    dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top)
-    dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top)
-    new_T = state.T.data + dt * dT_dt_restoring * mask3
-    new_S = state.S.data + dt * dS_dt_col * mask3
+    dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top) * mask3
+    dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top) * mask3
 
     # u tendency at u-faces (eq 7) — SKIPPED when the wind goes through
     # model.step(surface_forcing=...) (wind_through_step: the dynamics-core
@@ -3568,10 +3608,17 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         new_u_top = u_top + dt * du_dt_top * u_face_mask
         new_u = state.u.data.at[..., 0].set(new_u_top)
 
-    return state._replace(
+    state_u = state._replace(
+        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
+    )
+    if return_rate:
+        return state_u, (dT_dt_restoring, dS_dt_col)
+
+    new_T = state.T.data + dt * dT_dt_restoring
+    new_S = state.S.data + dt * dS_dt_col
+    return state_u._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
-        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
     )
 
 
