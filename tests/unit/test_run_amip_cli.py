@@ -379,6 +379,74 @@ def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
             cfg._replace(land_gs_max=bad).validate_strict()
 
 
+def test_land_interface_flux_flag_flows_to_config():
+    """--land-interface-flux round-trips into ExperimentConfig; default is the
+    byte-identical 'legacy_dual'; 'unified' selects the single-flux-law slab
+    SEB (one flux law at the land-air interface; the semi-implicit
+    discretization term remains — see _step_slab_land)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_interface_flux == "legacy_dual"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "holtslag_boville", "--slab-land-active",
+        "--topography", "etopo",
+    ]), parser))
+    assert cfg.land_interface_flux == "unified"
+    cfg.validate_strict()
+
+    # slab_land_active over FLAT topography derives f_land == 0 (no land) —
+    # 'unified' would silently never step; validate_strict must reject it
+    # (codex R2 finding: the tile-presence gate must see through the flag).
+    flat = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "holtslag_boville", "--slab-land-active",
+    ]), parser))
+    with pytest.raises(ValueError, match="land_interface_flux"):
+        flat.validate_strict()
+
+    # Unknown value is rejected by argparse choices (before validate_strict).
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--land-interface-flux", "both"])
+
+
+def test_land_interface_flux_unified_requires_turbulence():
+    """validate_strict rejects unified without a turbulence scheme (there is
+    no atmosphere-side surface-layer law to unify with)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "none", "--slab-land-active",
+        "--topography", "etopo",
+    ]), parser))
+    with pytest.raises(ValueError, match="land_interface_flux"):
+        cfg.validate_strict()
+
+
+def test_c_land_flag_flows_to_config():
+    """--c-land round-trips into ExperimentConfig.C_land (previously the
+    config field was silently inert — never threaded to the pipeline)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.C_land == 2.0e5
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--c-land", "5e5",
+    ]), parser))
+    assert cfg.C_land == 5.0e5
+    cfg.validate_strict()
+
+    bad = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--c-land", "0.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="C_land"):
+        bad.validate_strict()
+
+
 def test_land_soil_moisture_init_frac_flag_flows_to_config():
     """--land-soil-moisture-init-frac round-trips (issue #730 drier-cold-start
     knob); default 0.5 is byte-identical to the init default."""

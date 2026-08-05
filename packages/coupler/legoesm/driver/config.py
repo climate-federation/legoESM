@@ -1356,6 +1356,32 @@ class ExperimentConfig(NamedTuple):
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
                                                 # "mg" (E3SM MG, GCM default) |
                                                 # "sam" (gSAM M2005 anvil tune)
+    # Flux law the SLAB-land skin energy balance debits at the land-air
+    # interface (physics_pipeline._step_slab_land):
+    #   "legacy_dual" (default, byte-identical): the slab debits its OWN
+    #       constant-C_H/C_E no-stability bulk fluxes while the atmosphere's
+    #       turbulence scheme debits stability-dependent surface-layer fluxes
+    #       (compute_surface_fluxes, config.surface) from the SAME interface —
+    #       two different flux laws, measured same-state mismatch
+    #       +75..+152 W/m^2 (a spurious skin heat source; energy is NOT
+    #       conserved at the interface).  Kept as the default only for
+    #       reproducibility of existing runs.
+    #   "unified": the slab consumes the SAME sensible+latent flux law the
+    #       atmosphere side applies (the turbulence scheme's surface layer on
+    #       the blended surface; the tiled land-MOST law when surface_tiled),
+    #       so both sides are ONE function of ONE state — the flux-LAW split
+    #       is gone.  What remains is the semi-implicit time-discretization
+    #       term max(d(SH+LE)/dT,0)*dT_skin (vanishes as the skin nears
+    #       equilibrium; NOT a systematic two-law bias, but the same ORDER as
+    #       the removed defect at a 4-hourly radiation cadence — see
+    #       _step_slab_land's measured table; a shorter rad_update_steps or a
+    #       larger C_land shrinks it).  ENERGY-ONLY scope: the soil-water
+    #       bucket still drains its legacy beta*C_E bulk evaporation (the
+    #       pre-existing non-tiled water-budget non-closure, warned at driver
+    #       setup, is unchanged).  Requires an active turbulence scheme and
+    #       an active slab land tile on the pipeline lanes (validate_strict).
+    # Appended at the tuple END to preserve the positional ABI.
+    land_interface_flux: str = "legacy_dual"
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2169,6 +2195,93 @@ class ExperimentConfig(NamedTuple):
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
             )
+        # Slab-land interface flux law: membership + the unified law needs an
+        # atmosphere-side surface-layer law to unify WITH.  turbulence="none"
+        # has no turbulence-scheme surface layer, so "unified" would silently
+        # degrade to the legacy slab bulk — reject loudly instead.  The
+        # multilayer (Richards) land tile replaces the slab SEB entirely, so
+        # the flag would be a silent no-op there — reject that too.
+        _valid_land_iface = ("legacy_dual", "unified")
+        if self.land_interface_flux not in _valid_land_iface:
+            errors.append(
+                f"land_interface_flux must be one of {_valid_land_iface}, "
+                f"got {self.land_interface_flux!r}"
+            )
+        elif self.land_interface_flux == "unified":
+            if self.turbulence == "none":
+                errors.append(
+                    "land_interface_flux='unified' requires an active "
+                    "turbulence scheme (its surface layer IS the unified flux "
+                    "law); with turbulence='none' the slab would silently "
+                    "fall back to its own bulk law. Use the default "
+                    "'legacy_dual' or enable a turbulence scheme."
+                )
+            if self.use_multilayer_land:
+                errors.append(
+                    "land_interface_flux='unified' applies to the SLAB land "
+                    "SEB only; use_multilayer_land replaces the slab, so the "
+                    "flag would be a silent no-op. Drop one of the two."
+                )
+            if not (self.land_mask_path
+                    or (self.slab_land_active and self.topography != "flat")):
+                errors.append(
+                    "land_interface_flux='unified' needs an ACTIVE slab land "
+                    "tile with actual land: pass land_mask_path, or "
+                    "slab_land_active=True with a real topography "
+                    "(topography='flat' derives f_land == 0 everywhere, so "
+                    "the slab SEB never steps and the flag is a silent "
+                    "no-op)."
+                )
+            # Mirror the model_driver.run() lane dispatch exactly: the MPAS
+            # (grid_type-keyed) and spectral lanes run _run_mpas /
+            # _run_spectral with combined.make_physics — the driver
+            # PhysicsPipeline slab never steps there, so 'unified' would be
+            # silently inert (codex R2: land_mask_path satisfied the tile
+            # gate on MPAS without tripping the slab-flag rejection).
+            if _is_mpas or d.discretization == "spectral":
+                errors.append(
+                    "land_interface_flux='unified' is consumed only by the "
+                    "driver PhysicsPipeline slab (the compiled/per-step "
+                    "lanes); the MPAS and spectral lanes build their physics "
+                    "via combined.make_physics and never step the slab SEB — "
+                    "the flag would be silently inert on "
+                    f"discretization={d.discretization!r} / "
+                    f"grid_type={g.grid_type!r}."
+                )
+            if self.physics_parameterization != "none":
+                errors.append(
+                    "land_interface_flux='unified' is not supported with "
+                    "physics_parameterization='ml': the ML physics computes "
+                    "its own surface fluxes (bypassing the turbulence "
+                    "scheme's surface layer), so the slab would unify with a "
+                    "law the atmosphere does not apply."
+                )
+            # The lat-lon operator-split SPMD lane builds a FRESH per-band
+            # pipeline (model_driver.build_physics_pipeline on band_grid) and
+            # never copies the post-construction land attributes that only
+            # ever land on self.physics (f_land, slab_land_active).  The band
+            # pipeline therefore sees land INACTIVE and skips the slab SEB
+            # entirely, so the flag would be silently inert (codex review P1).
+            # NB this is a property of the SPMD lane, not of this flag — slab
+            # land does not step there at all; guarding the flag is in scope,
+            # fixing that lane is not.
+            if self.enable_latlon_spmd:
+                errors.append(
+                    "land_interface_flux='unified' is consumed by the slab "
+                    "SEB, which the lat-lon operator-split SPMD lane never "
+                    "steps: enable_latlon_spmd=True builds a fresh per-band "
+                    "physics pipeline that never receives f_land / "
+                    "slab_land_active, so the flag would be silently inert."
+                )
+        # Slab-land heat capacity [J/m^2/K]: must be positive-finite (the
+        # semi-implicit denominator is C_land - dt*dflux_dT; C_land <= 0 flips
+        # its sign and the update diverges).  Bounds span thin-skin (~1e4,
+        # a few mm of soil) to full-column (~1e8, tens of m of water).
+        if not (1.0e4 <= self.C_land <= 1.0e8):
+            errors.append(
+                f"C_land (slab-land heat capacity [J/m^2/K]) must be finite "
+                f"in [1e4, 1e8]; got {self.C_land!r}."
+            )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
@@ -2659,6 +2772,10 @@ class ExperimentConfig(NamedTuple):
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
             C_land=getattr(amip_cfg, 'C_land', 2.0e5),
+            # Legacy checkpoints predate the flag and ran the legacy dual-law
+            # slab, so the default is the correct restart behaviour.
+            land_interface_flux=getattr(
+                amip_cfg, 'land_interface_flux', 'legacy_dual'),
             emissivity_land=getattr(amip_cfg, 'emissivity_land', constants.emissivity_land),
             beta_land=getattr(amip_cfg, 'beta_land', 1.0),
             use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
