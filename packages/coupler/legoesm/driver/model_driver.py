@@ -9909,28 +9909,44 @@ class ModelDriver:
         # different radiation cadence than requested is exactly the silent
         # wrong-physics the dispatch-hardening doctrine forbids.
         #
-        # Not fixed by simply passing ``static_need_rad=None`` (letting the
-        # pipeline's own ``lax.cond`` fire): MEASURED at this deck (C8/nlev4,
-        # gray+SBM, 151 steps, rad_update_steps=2) that honours *a* cadence --
-        # the knob moves held_lw_net_sfc by 3.6e-3 where it previously moved it
-        # by 0 -- but leaves serial-vs-SPMD at 1.97e-3, versus 1.63e-5 at
-        # rad_update_steps=1, while the underlying T drift grows only 2.7x.
-        # That is a cadence PHASE disagreement, not amplified band-cut residual:
-        # serial restructures into a nested subcycle scan for
-        # rad_update_steps > 1 (compiled_segments.py:1583-1594), and which step
-        # of a subcycle carries the radiation call was not established.  Until
-        # it is, refusing is honest and every-step radiation stays available.
-        _rad_steps = int(cfg.rad_update_steps)
-        if _rad_steps > 1:
+        # ``static_need_rad=None`` (letting the pipeline's own ``lax.cond``
+        # fire) WOULD honour the cadence correctly -- the two predicates agree
+        # exactly, with ZERO phase offset: serial computes
+        # ``(step_idx + 1) % rad_update_steps == 0`` (compiled_segments.py:1934)
+        # and its subcycle scan runs ``rad_update_steps - 1`` held steps then
+        # ONE radiation step (:2254), i.e. radiation on the LAST step of each
+        # subcycle, which is what the sharded ``_need_rad_and_time``
+        # (sharded_operator_split_step.py:202) selects too.
+        #
+        # So why refuse rather than pass None?  Because the obvious gate --
+        # parity against the serial twin -- is not currently a valid comparator.
+        # MEASURED at this deck (C8/nlev4, gray+SBM, 151 steps => a 144-step
+        # segment plus a 7-STEP TAIL, rad_update_steps=2): the cond version
+        # moves held_lw_net_sfc by 3.6e-3 where the static version moved it by
+        # 0, but serial-vs-SPMD then sits at 1.97e-3 versus 1.63e-5 at
+        # rad_update_steps=1.  That gap is SERIAL's, not this lane's: a segment
+        # whose length does not divide rad_update_steps fails ``_use_subcycle``
+        # (compiled_segments.py:2585) and falls back to ``_run_single``, which
+        # computes the predicate and then hands it to the SAME
+        # ``static_need_rad=True`` variant that discards it -- so serial
+        # radiates on ALL of tail steps 144-150 where the cadence asks for
+        # 145/147/149.  Refusing here keeps this lane honest while that serial
+        # short-tail defect is open; every-step radiation stays available.
+        # (Codex adversarial review round 2 refuted an earlier "cadence phase
+        # disagreement" reading of the same 1.97e-3 -- there is no phase error.)
+        #
+        # No ``int()`` on the comparison: a fractional 1.5 would truncate to 1
+        # and slip past a cast-then-compare guard (codex r2 LOW).
+        if cfg.rad_update_steps > 1:
             raise NotImplementedError(
                 f"operator-split lat-band SPMD does not honour "
-                f"rad_update_steps={_rad_steps}: the sharded step's cadence "
-                "predicate is discarded by the static_need_rad=True "
+                f"rad_update_steps={cfg.rad_update_steps}: the sharded step's "
+                "cadence predicate is discarded by the static_need_rad=True "
                 "step_unified, so radiation would run EVERY step regardless. "
                 "Set rad_update_steps=1 for this lane (radiation every step -- "
                 "correct, just more expensive), or run single-device "
                 "(enable_latlon_spmd=False) where the serial subcycled lane "
-                "implements the cadence.")
+                "implements the cadence on segments whose length divides it.")
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         DT = ctx["DT"]
