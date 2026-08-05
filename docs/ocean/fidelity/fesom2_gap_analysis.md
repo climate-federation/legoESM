@@ -481,6 +481,37 @@ help text says "(default 80)", so a global lat-lon ocean runs with an **open
 North Pole**; the FESOM-match sbatch never passed the flag at all. Both are
 now explicit via its `NCAP` knob.
 
+### 3.8 The convective trigger misses compressibility-masked instability
+
+Not a blowup cause — recorded because it is a real physics difference the
+matched configuration is running with, and it is a one-field change.
+
+The run uses `convection.enhanced_diffusion.n2_mode = "insitu"` (the default).
+`convective_K_A_flag`'s own docstring says what that costs:
+
+> `"insitu"`/`"insitu_signed"` (default, BIT-IDENTICAL legacy) use the in-situ
+> density gradient — but **compressibility can leave a statically-unstable
+> column with `N² > 0`, so convection is MISSED**. `"adiabatic"` uses the TRUE
+> static stability (adiabatic parcel displacement to the upper cell's
+> pressure) […] a compressibility-masked unstable column then gives `N² < 0`
+> and the trigger fires.
+
+So the trigger **under**-fires: genuinely unstable columns whose instability is
+masked by the adiabatic compression term do not convect. This matters most
+exactly where deep convection matters — the high-latitude water-mass formation
+regions the CORE2 hindcast is usually judged on.
+
+`n2_mode="adiabatic"` is implemented and validated in the same function, and
+the enhanced-diffusion factory already threads `T`, `S` and `p_cell` for it.
+Switching is a config change, not new code — but it is NOT bit-identical, so
+it must not be folded into an unrelated arm.
+
+Verified by reading `physics/convection/enhanced_diffusion.py` (the mode set is
+validated at function entry, so a typo raises rather than silently selecting a
+different N²). **What FESOM2 uses for its own convective stability test was NOT
+checked**, so no claim is made that this is a difference *from FESOM2* — only
+that it is a difference from the true static stability.
+
 ### 3.6 Numerics differences that are real but second-order
 
 | Item | FESOM2 | legoESM | Assessment |
