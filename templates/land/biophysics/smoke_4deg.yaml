@@ -57,7 +57,7 @@ time:
 restart:
   from: ""
 
-land_frac_min: 0.5
+land_frac_min: 0.0                # any surfdata land (was 0.5; forcing now finite on all land)
 land_mask_file: ""
 
 output:
