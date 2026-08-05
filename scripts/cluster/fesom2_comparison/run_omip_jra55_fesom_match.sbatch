@@ -51,6 +51,30 @@ REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.claude/worktrees/levante-o
 MAIN=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
 SCRATCH=/scratch/b/b381103/fesom2_comparison
 DAYS=${DAYS:-30}
+# Attribution knobs: change ONE per arm so a difference is attributable.
+ROUTING=${ROUTING:-nearest}          # none | nearest | spread
+ICE_DYN=${ICE_DYN:-evp}              # none | evp | mevp
+USE_DZ=${USE_DZ:-1}                  # 1 = FESOM's 47 levels, 0 = default stretch
+NLEV=${NLEV:-47}
+HMAX=${HMAX:-6250.0}
+WOA_INIT=${WOA_INIT:-1}              # 1 = PHC3 cold start, 0 = rest + restoring
+TAG=${TAG:-}
+# Diagnostic stride.  This also sets the compiled block length, and the BLOWUP
+# check runs only at block boundaries -- so it bounds the resolution with which
+# a failure step can be located.  At the default 36 (= 1 day at dt=2400 s) every
+# arm reports "step 36" no matter when it actually diverged.  Set DIAG=1 to
+# localize.
+DIAG=${DIAG:-36}
+# The conservation fixer is a GLOBAL operator: one non-finite cell entering its
+# reduction poisons every cell in a single step, which erases the origin of a
+# blowup.  FIXER=0 keeps a failure local so it can be located.
+FIXER=${FIXER:-1}
+# Vertical mixing on the latlon path is EXPLICIT by default, and the KPP
+# cfl_cap_dt_s ceiling is only applied on the MPAS path
+# (vertical_mixing/mpas_integration.py:449), so nothing bounds K here.  With
+# K_conv = 1 m^2/s, a 5 m top layer and dt = 2400 s the diffusion number is
+# K*dt/dz^2 = 96 (>> 0.5).  FESOM2 mixes implicitly.  VMIX=implicit tests that.
+VMIX=${VMIX:-explicit}
 
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
@@ -81,9 +105,9 @@ EOF
 "$REPO/.venv/bin/python" scripts/run/run_omip.py \
     --grid latlon \
     --resolution 180x360 \
-    --nlev 47 \
-    --dz-ref-file "$DZ" \
-    --H-max 6250.0 \
+    --nlev "$NLEV" \
+    $( [ "$USE_DZ" = 1 ] && echo --dz-ref-file "$DZ" ) \
+    --H-max "$HMAX" \
     --dt 2400.0 \
     --days "$DAYS" \
     --precision fp64 \
@@ -92,18 +116,20 @@ EOF
     --forcing-mode jra55_do_tropical \
     --jra55-cache "$SCRATCH/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice \
-    --ice-dynamics evp \
+    --ice-dynamics "$ICE_DYN" \
     --ice-n-evp 120 \
     --ice-p-star 30000 \
     --ice-e-yield 2.0 \
     --ice-c-strength 20.0 \
     --ice-delta-min 1e-11 \
-    --runoff-routing nearest \
+    $( [ "$FIXER" = 0 ] && echo --no-conservation-fixer ) \
+    $( [ "$VMIX" = implicit ] && echo --implicit-vertical-mixing ) \
+    --runoff-routing "$ROUTING" \
     --runoff-radius-km 500 \
-    --woa-init \
+    $( [ "$WOA_INIT" = 1 ] && echo --woa-init ) \
     --woa-t "$SCRATCH/phc3_winter_woa_format.nc" \
     --woa-s "$SCRATCH/phc3_winter_woa_format.nc" \
-    --output "$SCRATCH/omip_fesom_match_${DAYS}d" \
-    --diag-every 36
+    --output "$SCRATCH/omip_fesom_match_${DAYS}d${TAG}" \
+    --diag-every "$DIAG"
 
 echo "=== done ==="
