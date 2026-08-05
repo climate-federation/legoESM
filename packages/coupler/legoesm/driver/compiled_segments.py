@@ -2232,15 +2232,35 @@ def build_segment_fn(
     )
 
     def _run_subcycled(carry: SegmentCarry, n_steps: int,
-                       forcing: SegmentForcing) -> SegmentCarry:
+                       forcing: SegmentForcing, lead: int) -> SegmentCarry:
         """Issue #316: outer-rad × inner-no-rad nested scan.
 
-        Each outer iteration runs ``rad_update_steps - 1`` cheap
-        held-radiation steps followed by one fresh-radiation step.
-        This matches the legacy ``need_rad = ((idx+1) %
-        rad_update_steps) == 0`` cadence (fresh radiation on the last
-        step of every cycle) while keeping the RRTMGP/gray HLO out of
-        the hot inner body and out of any ``lax.cond``.
+        Reproduces the legacy ``need_rad = ((idx+1) % rad_update_steps) == 0``
+        cadence -- fresh radiation on the last step of every cycle -- while
+        keeping the RRTMGP/gray HLO out of the hot inner body and out of any
+        ``lax.cond``.
+
+        Phase is derived from the ABSOLUTE step index, not assumed.  Radiation
+        fires at absolute ``i`` with ``(i+1) % k == 0``, so an arbitrary segment
+        ``[s, s+n)`` decomposes as::
+
+            lead no-rad | 1 rad | n_outer x (k-1 no-rad, 1 rad) | tail no-rad
+
+        with ``lead = (-(s+1)) % k`` supplied by the caller as a STATIC Python
+        int (:func:`_subcycle_lead`) — it cannot be derived here, since this
+        body runs under ``jax.jit`` where ``carry.step_index`` is a tracer.
+        That handles a segment whose length is
+        NOT a multiple of ``k`` and one that starts mid-cycle, which the two
+        earlier ``_use_subcycle`` restrictions instead punted to ``_run_single``
+        -- and ``_run_single`` hands its ``need_rad`` to the
+        ``static_need_rad=True`` variant, which DELETES it and radiates on EVERY
+        step (physics_pipeline.py:2556).  So the punt was not a conservative
+        fallback: it silently ran a different cadence than requested.  Concrete
+        case that motivated this (codex adversarial review): a 151-step run at
+        ``rad_update_steps=2`` is a 144-step segment plus a 7-STEP TAIL; the
+        tail radiated on all of steps 144-150 where the cadence asks for
+        145/147/149.
+
         """
         body_rad = _make_single_step(forcing, step_fn=step_unified)
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
@@ -2248,17 +2268,33 @@ def build_segment_fn(
             body_rad = jax.checkpoint(body_rad, prevent_cse=False)
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
 
-        n_outer = n_steps // rad_update_steps
-        n_held = rad_update_steps - 1
+        k = rad_update_steps
+
+        def _scan_no_rad(c, length):
+            if length <= 0:
+                return c
+            c, _ = jax.lax.scan(body_no_rad, c, None, length=length)
+            return c
+
+        # Segment ends before the first radiation step -> all held, no rad.
+        if lead >= n_steps:
+            return _scan_no_rad(carry, n_steps)
+
+        carry = _scan_no_rad(carry, lead)
+        carry, _ = body_rad(carry, None)
+
+        rest = n_steps - lead - 1
+        n_outer, tail = rest // k, rest % k
+        n_held = k - 1
 
         def _outer_step(c: SegmentCarry, _):
-            if n_held > 0:
-                c, _ = jax.lax.scan(body_no_rad, c, None, length=n_held)
+            c = _scan_no_rad(c, n_held)
             c, _ = body_rad(c, None)
             return c, None
 
-        final_carry, _ = jax.lax.scan(_outer_step, carry, None, length=n_outer)
-        return final_carry
+        if n_outer > 0:
+            carry, _ = jax.lax.scan(_outer_step, carry, None, length=n_outer)
+        return _scan_no_rad(carry, tail)
 
     def _run_single(carry: SegmentCarry, n_steps: int,
                     forcing: SegmentForcing) -> SegmentCarry:
@@ -2532,10 +2568,10 @@ def build_segment_fn(
             land_ml=land_ml_new,
         )
 
-    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
+    @partial(jax.jit, static_argnums=(1, 3), donate_argnums=(0,))
     def _run_subcycled_jit(carry: SegmentCarry, n_steps: int,
-                           forcing: SegmentForcing) -> SegmentCarry:
-        return _run_subcycled(carry, n_steps, forcing)
+                           forcing: SegmentForcing, lead: int) -> SegmentCarry:
+        return _run_subcycled(carry, n_steps, forcing, lead)
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def _run_single_jit(carry: SegmentCarry, n_steps: int,
@@ -2560,33 +2596,36 @@ def build_segment_fn(
     def _use_subcycle(carry: SegmentCarry, n_steps: int) -> bool:
         """Decide whether the subcycled scan path is valid for this call.
 
-        Three Python-side conditions must hold (codex iter review #1/2/3):
-        1. The cond-free no-rad variant must be available.
-        2. ``n_steps`` must be a clean multiple of ``rad_update_steps`` so
-           the outer scan length is an integer and the final rad step
-           lands on the last inner index of the segment.
-        3. The *absolute* step index at segment start must also be a
-           multiple of ``rad_update_steps``.  The legacy cond body fires
-           radiation at step indices where ``(step_idx+1) %
-           rad_update_steps == 0`` — i.e., the last inner step of each
-           cycle.  If the segment starts mid-cycle (e.g., a checkpoint
-           restart at a non-aligned step), the subcycled outer body's
-           "k-1 no-rad + 1 rad" pattern would fire rad on the wrong
-           absolute step.  We block subcycling and fall back to the
-           legacy scan in that case so radiation timing is preserved
-           bit-exactly.
+        ONE condition now: the cond-free no-rad variant must exist.
 
-        ``carry.step_index`` is a ``jnp.int32`` scalar; reading it with
-        ``int(...)`` blocks until any prior device work completes, but
-        this happens once per Python segment call (not inside the hot
-        scan) so the perf hit is negligible.
+        This used to also require ``n_steps % rad_update_steps == 0`` and an
+        aligned ``carry.step_index``, because the outer body assumed a segment
+        was a whole number of cycles starting on a cycle boundary.  Both
+        restrictions are gone: ``_run_subcycled`` derives the phase from the
+        absolute step index and emits the leading/trailing held-radiation steps
+        explicitly, so it is exact for any ``(start_step, n_steps)``.
+
+        Removing them is a FIX, not a relaxation.  Falling back to
+        ``_run_single`` was never cadence-preserving: that body computes
+        ``need_rad`` and then passes it to the ``static_need_rad=True``
+        variant, which discards it and radiates every step.  A ragged final
+        segment or a restart at a non-aligned step therefore ran a denser
+        radiation cadence than configured, silently.
         """
-        if not _subcycle_available:
-            return False
-        if n_steps % rad_update_steps != 0:
-            return False
-        start_step = int(carry.step_index)
-        return start_step % rad_update_steps == 0
+        return _subcycle_available
+
+    def _subcycle_lead(carry: SegmentCarry) -> int:
+        """Held-radiation steps before this segment's FIRST radiation step.
+
+        Radiation fires at absolute ``i`` with ``(i+1) % k == 0``, so from a
+        segment starting at ``s`` the first such ``i`` is ``s + (-(s+1)) % k``.
+        Returned as a STATIC Python int for ``_run_subcycled``'s scan lengths:
+        ``carry.step_index`` is a ``jnp.int32`` scalar, and reading it with
+        ``int(...)`` blocks until prior device work completes — fine once per
+        Python segment call (this is the same blocking read ``_use_subcycle``
+        performed before the phase-general rewrite), impossible inside the jit.
+        """
+        return (-(int(carry.step_index) + 1)) % rad_update_steps
 
     # ------------------------------------------------------------------
     # Optional single-process multi-GPU sharding (third replication
@@ -2834,8 +2873,15 @@ def build_segment_fn(
             }
             target = _targets[kind]
             _has_static_nsteps = kind in ("single", "subcycled")
+            # "subcycled" also takes a 4th STATIC arg, the radiation-phase
+            # ``lead`` (``_subcycle_lead``); it sets scan lengths, so it must
+            # be static, and it stays out of the dynamic-arg tree the
+            # ``in_shardings`` 2-tuple below binds against.
+            _static_argnums = ((1, 3) if kind == "subcycled"
+                               else (1,) if _has_static_nsteps else None)
             jit_kwargs: dict = (
-                dict(static_argnums=(1,)) if _has_static_nsteps else {}
+                dict(static_argnums=_static_argnums)
+                if _static_argnums is not None else {}
             )
             if pin:
                 # NOTE: with ``static_argnums`` JAX matches
@@ -2892,11 +2938,14 @@ def build_segment_fn(
             Updated state after n_steps.
         """
         if _use_subcycle(carry, n_steps):
+            # STATIC phase, read once here (never under the jit) — see
+            # ``_subcycle_lead``.
+            lead = _subcycle_lead(carry)
             if _sharding_active:
                 return _get_sharded_jit("subcycled", True, carry, forcing)(
-                    carry, n_steps, forcing,
+                    carry, n_steps, forcing, lead,
                 )
-            return _run_subcycled_jit(carry, n_steps, forcing)
+            return _run_subcycled_jit(carry, n_steps, forcing, lead)
         if _sharding_active:
             return _get_sharded_jit("single", True, carry, forcing)(
                 carry, n_steps, forcing,
