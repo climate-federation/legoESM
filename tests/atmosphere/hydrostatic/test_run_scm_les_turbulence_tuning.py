@@ -205,7 +205,12 @@ def test_scored_variables_default_excludes_the_wind():
     so tuning against u/v would absorb a surface-drag mismatch into the
     turbulence parameters. Heat and moisture fluxes ARE matched."""
     args = drv.parse_args(["--case", "bomex", "--les-dir", "x"])
-    assert args.score_variables == "theta,qv"
+    # "" means PER-CASE: a dry case has no q_v and a neutral case has no usable
+    # theta, so a single global pair cannot be right for every case.
+    assert args.score_variables == ""
+    assert drv.case_scored("bomex", None) == ("theta", "qv")
+    assert drv.case_scored("ekman", None) == ("u", "v")
+    assert drv.case_scored("cbl", None) == ("theta",)
 
 
 def test_unknown_scored_variable_is_a_hard_error():
@@ -232,13 +237,21 @@ def test_mismatched_hours_is_refused_as_a_window_confound(tmp_path, monkeypatch)
         scored_variables=lambda: ("theta", "qv"),
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
-    monkeypatch.setattr(drv, "load_sam_scm_case",
+    monkeypatch.setattr(drv, "load_case",
                         lambda *a, **k: types.SimpleNamespace(
-                            nlev=4, p_s=1.0e5, sigma_top=0.7,
+                            nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+                            spec=types.SimpleNamespace(
+                                les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
                             z_full=__import__("numpy").linspace(3000, 20, 4),
+                            p_full=__import__("numpy").linspace(7e4, 1e5, 4),
                             les_domain_top_m=3000.0,
                             forcing=types.SimpleNamespace(prescribe="fluxes")))
-    with pytest.raises(SystemExit, match="different times"):
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
+    with pytest.raises(SystemExit, match="different windows"):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--hours", "6"])
 
@@ -495,7 +508,8 @@ def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
         window_label="4.00-6.00 h (13 frames)",
     )
     fake_case = types.SimpleNamespace(
-        nlev=4, p_s=1.0e5, sigma_top=0.7, spec=types.SimpleNamespace(
+        nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+        spec=types.SimpleNamespace(
             les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
         z_full=_np.linspace(3000.0, 20.0, 4),
         p_full=_np.linspace(7e4, 1e5, 4),
@@ -504,14 +518,19 @@ def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
         forcing=types.SimpleNamespace(prescribe="fluxes"),
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
-    monkeypatch.setattr(drv, "load_sam_scm_case", lambda *a, **k: fake_case)
+    monkeypatch.setattr(drv, "load_case", lambda *a, **k: fake_case)
     monkeypatch.setattr(drv, "_half_pressures",
                         lambda case: _np.linspace(7e4, 1e5, 5))
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
 
     def _boom(*_a, **_k):
         raise RuntimeError("simulated CUDA fault")
 
-    monkeypatch.setattr(drv, "evaluate_scheme", _boom)
+    monkeypatch.setattr(drv, "joint_score", _boom)
 
     rc = drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                    "--outdir", str(tmp_path / "out"),
@@ -612,15 +631,30 @@ def test_dt_must_divide_the_analysis_window(tmp_path, monkeypatch):
     fake_ref = types.SimpleNamespace(
         source_dir=str(tmp_path), window_hours=(4.0, 6.0), n_frames=13,
         mask=_np.ones(4, dtype=bool), weights=_np.full(4, 0.25),
-        z_les=_np.linspace(20.0, 3000.0, 8), profiles={}, profiles_les={},
-        scored_variables=lambda: ("theta", "qv"),
+        z_les=_np.linspace(20.0, 3000.0, 8),
+        profiles={"theta": _np.linspace(300.0, 303.0, 4),
+                  "qv": _np.full(4, 1e-2)},
+        profiles_les={}, scored_variables=lambda: ("theta", "qv"),
         window_label="4.00-6.00 h",
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
     monkeypatch.setattr(drv, "_half_pressures",
-                        lambda case: _np.linspace(7e4, 1e5, 17))
-    # 2 h window, dt = 7000 s does not divide 7200 s
-    with pytest.raises(SystemExit, match="does not divide"):
+                        lambda case: _np.linspace(7e4, 1e5, 5))
+    monkeypatch.setattr(drv, "load_case", lambda *a, **k: types.SimpleNamespace(
+        nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+        spec=types.SimpleNamespace(les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
+        z_full=_np.linspace(3000.0, 20.0, 4),
+        p_full=_np.linspace(7e4, 1e5, 4),
+        u_profile=_np.full(4, -8.0), v_profile=_np.zeros(4),
+        les_domain_top_m=3000.0,
+        forcing=types.SimpleNamespace(prescribe="fluxes")))
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
+    # a 7000 s step cannot land on a 2 h window within half a step
+    with pytest.raises(SystemExit, match="cannot"):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--outdir", str(tmp_path / "o"), "--dt", "7000",
                   "--nlev", "16", "--schemes", "louis", "--skip-tuning"])

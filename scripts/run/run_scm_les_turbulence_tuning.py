@@ -168,6 +168,12 @@ PROFILE_FLOOR = 1.0e-8
 # Score assigned to a non-finite rollout. Large enough to lose every
 # comparison, finite so gradients and the line search still work.
 NONFINITE_PENALTY = 1.0e3
+# The SCM's window may miss the LES window by at most this fraction of the
+# window itself. Not a fraction of the timestep: rounding already bounds that
+# residual by half a step, so a step-based test is vacuous. 1% of a 2 h window
+# is 72 s, far below the LES frame cadence, while GABLS1's real 0.1 s endpoint
+# overshoot is 0.0014% and passes.
+_WINDOW_TOL_FRAC = 0.01
 _LINE_SEARCH_SCALES = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01, 0.005, 0.001)
 # Registry namespace for the ATMOSPHERIC turbulence configs. Class names alone
 # collide across components (the ocean also registers a TKEConfig).
@@ -966,22 +972,27 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
                     "reference.")
             les_end = float(args.hours)
         nsteps = max(1, int(round(les_end * 3600.0 / dt)))
+        # Tolerance is a fraction of the WINDOW, not of the step. n =
+        # round(T/dt) makes the residual <= dt/2 BY CONSTRUCTION, so a
+        # "half a step" test can never fire -- it was vacuous. What matters is
+        # whether the two sides average materially different intervals, which
+        # is a fraction of the window.
         end_residual_s = abs(nsteps * dt - les_end * 3600.0)
-        if end_residual_s > 0.5 * dt:
+        if end_residual_s > _WINDOW_TOL_FRAC * les_end * 3600.0:
             raise SystemExit(
                 f"{name}: --dt {dt} s cannot land on the LES record end "
                 f"{les_end:.6f} h: {nsteps} steps miss it by "
-                f"{end_residual_s:.3f} s, more than half a step, so the SCM "
+                f"{end_residual_s:.3f} s, over {_WINDOW_TOL_FRAC:.0%} of it, so the SCM "
                 "would not end where the reference does."
             )
         span = les_end - float(ref.window_hours[0])
         n_an = max(1, int(round(span * 3600.0 / dt)))
         span_residual_s = abs(n_an * dt - span * 3600.0)
-        if span_residual_s > 0.5 * dt:
+        if span_residual_s > _WINDOW_TOL_FRAC * span * 3600.0:
             raise SystemExit(
                 f"{name}: --dt {dt} s cannot cover the retained analysis "
                 f"window {span:.6f} h: {n_an} steps miss it by "
-                f"{span_residual_s:.3f} s, more than half a step, so the two "
+                f"{span_residual_s:.3f} s, over {_WINDOW_TOL_FRAC:.0%} of it, so the two "
                 "sides would average different spans."
             )
         if max(end_residual_s, span_residual_s) > 1.0e-6:
@@ -996,7 +1007,7 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         n_start = nsteps - n_an
         start_residual_s = abs(
             n_start * dt - float(ref.window_hours[0]) * 3600.0)
-        if start_residual_s > 0.5 * dt:
+        if start_residual_s > _WINDOW_TOL_FRAC * span * 3600.0:
             raise SystemExit(
                 f"{name}: with --dt {dt} s the analysis window would "
                 f"start {start_residual_s:.3f} s from the LES window start, "
@@ -1054,9 +1065,13 @@ def main(argv=None) -> int:
                 "Pass --allow-radiation-mismatch to override; the output will "
                 "be labelled a confound.")
 
-    args.scored_override = tuple(
-        v.strip() for v in args.score_variables.split(",") if v.strip()
-    ) if args.score_variables else None
+    if args.score_variables:
+        args.scored_override = tuple(
+            v.strip() for v in args.score_variables.split(",") if v.strip())
+        if not args.scored_override:
+            raise SystemExit("--score-variables selected nothing")
+    else:
+        args.scored_override = None      # "" => per-case defaults
     args.scored = args.scored_override or ("theta", "qv")
     bad_scored = [v for v in args.scored if v not in SCORED_VARIABLES]
     if bad_scored:
