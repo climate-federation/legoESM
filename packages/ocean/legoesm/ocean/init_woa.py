@@ -62,6 +62,39 @@ WOA_DEPTHS = np.array([
 ], dtype=np.float64)
 
 
+def interp_column_to_depths(
+    col_src: np.ndarray,
+    src_depths: np.ndarray,
+    dst_depths: np.ndarray,
+) -> np.ndarray:
+    """Interpolate one T/S column from ``src_depths`` onto ``dst_depths``.
+
+    NaN-safe: non-finite source entries (land, below-seafloor fill) are
+    dropped before interpolating, and a column with fewer than two valid
+    entries returns all-NaN so the caller's fill logic — not a fabricated
+    value — decides what goes there.  Below the deepest valid source level
+    the deepest valid value is held (``np.interp``'s edge behaviour).
+
+    Shared helper for the IC-preparation scripts that re-level an external
+    climatology onto :data:`WOA_DEPTHS`.  NOTE this is no longer *required*:
+    :func:`init_ocean_from_woa` now reads the source depth axis from the FILE
+    and only falls back to :data:`WOA_DEPTHS` when the file has none.
+    Re-levelling first remains useful when a caller wants one common axis for
+    several sources.
+
+    Parameters
+    ----------
+    col_src : 1-D array of values at ``src_depths``.
+    src_depths : 1-D array, positive downward, ascending.
+    dst_depths : 1-D array, positive downward, ascending.
+    """
+    good = np.isfinite(col_src)
+    if good.sum() < 2:
+        return np.full(np.shape(dst_depths), np.nan)
+    return np.interp(dst_depths, np.asarray(src_depths)[good],
+                     np.asarray(col_src)[good])
+
+
 def _interp_profile_to_z_coord(
     profile: np.ndarray,
     woa_depths: np.ndarray,
@@ -157,6 +190,36 @@ def _open_woa_dataset(path: str | Path):
     return xr.open_dataset(path_str, decode_times=False)
 
 
+#: Coordinate names a climatology may use for its vertical axis.  Matched
+#: case-insensitively; the variable's OWN dimension order is consulted first,
+#: so an unusual name is still found as long as it is the field's 2nd axis.
+_DEPTH_AXIS_NAMES: tuple[str, ...] = (
+    "depth", "z", "lev", "level", "deptht", "depth_bnds_mid", "olevel",
+)
+
+
+def _depth_axis_of(ds, var_name: str):
+    """Positive depths [m] for ``ds[var_name]``'s vertical axis, or ``None``.
+
+    Resolution order, so an unusual coordinate name is not silently missed:
+    (1) the variable's OWN second dimension (time, DEPTH, lat, lon) when that
+    dimension has coordinate values; (2) any recognised name from
+    :data:`_DEPTH_AXIS_NAMES`, case-insensitively.
+    """
+    dims = getattr(ds[var_name], "dims", ())
+    if len(dims) >= 2:
+        cand = dims[1]
+        if cand in ds.coords or cand in ds.variables:
+            return np.abs(np.asarray(ds[cand].values, dtype=np.float64))
+    lowered = {str(k).lower(): k for k in
+               list(ds.coords) + list(ds.variables)}
+    for name in _DEPTH_AXIS_NAMES:
+        if name in lowered:
+            return np.abs(
+                np.asarray(ds[lowered[name]].values, dtype=np.float64))
+    return None
+
+
 def load_woa18(
     T_path: str | Path | None = None,
     S_path: str | Path | None = None,
@@ -164,7 +227,8 @@ def load_woa18(
     T_var: str | None = None,
     S_var: str | None = None,
     monthly_layout: str = "concatenated",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+           np.ndarray | None]:
     """Load WOA18 climatology (annual or monthly) from Zarr/NetCDF.
 
     Parameters
@@ -204,6 +268,12 @@ def load_woa18(
     S_woa : array, shape (n_lat, n_lon, n_depth)
     lat_woa : array, shape (n_lat,)  — degrees
     lon_woa : array, shape (n_lon,)  — degrees [0, 360)
+    depth_woa : array, shape (n_depth,) — POSITIVE depths [m] read from the
+        FILE, or ``None`` if it carries no recognisable depth coordinate
+        (``depth``/``z``/``lev``/``level``/``deptht``).  Callers must prefer
+        this over :data:`WOA_DEPTHS`: a non-WOA climatology on its own levels
+        (PHC3's 33, WOCE's 75) read against the hardcoded WOA axis puts deep
+        water in the thermocline without raising anything.
     """
     if monthly_layout not in ("concatenated", "single_file_per_month"):
         raise ValueError(
@@ -266,17 +336,64 @@ def load_woa18(
     T_woa = _read(ds_T, t_name, "T", T_path)
     lat_woa = np.array(ds_T["lat"].values)
     lon_woa = np.array(ds_T["lon"].values)
+    # The FILE's own depth axis, when it has one.  Reading it here rather than
+    # assuming ``WOA_DEPTHS`` is what lets a non-WOA climatology (PHC3, WOCE,
+    # EN4) be used without its deep values being read as if they sat in the
+    # top few hundred metres -- a silently wrong ocean, not an error.  A file
+    # with no recognisable depth coordinate returns ``None`` and the caller
+    # falls back to ``WOA_DEPTHS``.
+    depth_woa = _depth_axis_of(ds_T, t_name)
     ds_T.close()
 
     ds_S = _open_woa_dataset(S_path)
     S_woa = _read(ds_S, s_name, "S", S_path)
+    depth_S = _depth_axis_of(ds_S, s_name)
     ds_S.close()
+
+    # T and S are interpolated onto the model levels with ONE axis, so they
+    # must agree.  Equal level COUNTS with different depths would otherwise
+    # place salinity at the temperature file's depths without a word.
+    if depth_woa is not None and depth_S is not None:
+        # Tolerance is PRACTICAL, not exact: a legitimate pair can differ by
+        # float32-vs-float64 storage of the same nominal levels (5500.0 m is
+        # 5500.0005 in float32), and rejecting that would be a false alarm.
+        # 1 mm absolute + 1e-6 relative is far below any real level spacing
+        # and far above storage roundoff.
+        if depth_woa.shape != depth_S.shape or not np.allclose(
+                depth_woa, depth_S, rtol=1e-6, atol=1e-3):
+            raise ValueError(
+                f"T file {T_path!r} and S file {S_path!r} have DIFFERENT "
+                f"depth axes ({depth_woa[:3]}... vs {depth_S[:3]}...). "
+                "They are interpolated onto the model levels with a single "
+                "axis, so salinity would be placed at the temperature file's "
+                "depths. Re-level them onto a common axis first."
+            )
+    elif depth_S is not None and depth_woa is None:
+        # Only S carries an axis: use it rather than falling back to WOA's.
+        depth_woa = depth_S
 
     # Transpose to (lat, lon, depth) for easier interpolation
     T_woa = np.transpose(T_woa, (1, 2, 0))
     S_woa = np.transpose(S_woa, (1, 2, 0))
 
-    return T_woa, S_woa, lat_woa, lon_woa
+    for _axis, _field, _name, _path, _label in (
+        (depth_woa, T_woa, t_name, T_path, "T"),
+        (depth_S, S_woa, s_name, S_path, "S"),
+    ):
+        if _axis is not None and _axis.size != _field.shape[-1]:
+            raise ValueError(
+                f"WOA {_label} file {_path!r}: depth coordinate has "
+                f"{_axis.size} entries but {_name!r} has "
+                f"{_field.shape[-1]} levels."
+            )
+    if T_woa.shape[-1] != S_woa.shape[-1]:
+        raise ValueError(
+            f"T file {T_path!r} has {T_woa.shape[-1]} levels but S file "
+            f"{S_path!r} has {S_woa.shape[-1]}; they are interpolated onto "
+            "the model levels together."
+        )
+
+    return T_woa, S_woa, lat_woa, lon_woa, depth_woa
 
 
 def _nearest_neighbor_2d(
@@ -584,7 +701,7 @@ def init_ocean_from_woa(
         # Load from WOA18 NetCDF files.  The guard above ensures that
         # ``monthly_layout='single_file_per_month'`` implies
         # ``month is None``, so this single call covers both layouts.
-        T_woa, S_woa, lat_woa, lon_woa = load_woa18(
+        T_woa, S_woa, lat_woa, lon_woa, depth_woa = load_woa18(
             T_path, S_path, month=month,
             T_var=T_var, S_var=S_var,
             monthly_layout=monthly_layout,
@@ -610,7 +727,22 @@ def init_ocean_from_woa(
         T_flat = T_woa_horiz.reshape(flat_shape)
         S_flat = S_woa_horiz.reshape(flat_shape)
 
-        woa_depths = WOA_DEPTHS[:T_woa.shape[-1]]
+        # Source depth axis: the FILE's own when it has one, otherwise the
+        # WOA18 standard levels.  Reading it from the file is what lets a
+        # non-WOA climatology (PHC3's 33 levels, WOCE's 75) be used directly;
+        # the ``WOA_DEPTHS[:n]`` fallback silently mis-levels such a file, so
+        # it is only reached when the file genuinely has no depth coordinate.
+        if depth_woa is not None:
+            woa_depths = np.asarray(depth_woa, dtype=np.float64)
+            if not np.all(np.diff(woa_depths) > 0):
+                raise ValueError(
+                    "WOA/climatology depth coordinate is not strictly "
+                    f"ascending after abs(); got {woa_depths[:5]}..."
+                    f"{woa_depths[-3:]}. np.interp requires monotonic source "
+                    "depths."
+                )
+        else:
+            woa_depths = WOA_DEPTHS[:T_woa.shape[-1]]
 
         T_out = np.stack([
             _interp_profile_to_z_coord(T_flat[i], woa_depths, z_coord)

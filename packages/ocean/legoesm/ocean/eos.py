@@ -1050,6 +1050,145 @@ def unesco80_eos(
 
 
 # ==============================================================================
+# Adiabatic lapse rate and potential temperature (Bryden 1973 / Fofonoff 1977;
+# the ``ATG`` / ``THETA`` pair of Fofonoff & Millard 1983, UNESCO Tech. Papers
+# in Marine Science No. 44 — the same reference as the UNESCO-80 EOS above).
+#
+# Why this lives here: observational hydrographies (WOA, PHC) archive IN-SITU
+# temperature, while every EOS and prognostic tracer in this package is
+# POTENTIAL temperature.  Initialising from an archive without converting
+# leaves the deep ocean warm by the adiabatic compression term — about
+# 0.1 degC at 1000 m and 0.5 degC at 5000 m — a systematic stratification
+# error, not noise.  FESOM2 applies exactly this conversion when
+# ``namelist.oce`` sets ``t_insitu = .true.`` (``gen_ic3d.F90`` ->
+# ``insitu2pot`` -> ``ptheta``/``atg`` in ``oce_ale_pressure_bv.F90``).
+#
+# Units are the oceanographic ones the polynomial was fitted in, NOT this
+# module's SI pressure: pressure in DECIBARS, temperature in degC (IPTS-68),
+# salinity on the practical scale (IPSS-78).  Hence the ``_dbar`` suffixes.
+# ==============================================================================
+
+# ATG polynomial coefficients, grouped as in the published Horner form.
+# Check value: ATG = 3.255976e-4 degC/dbar at S=40, T=40 degC, p=10000 dbar.
+_ATG_T0 = 3.5803e-5
+_ATG_T1 = 8.5258e-6
+_ATG_T2 = -6.836e-8
+_ATG_T3 = 6.6228e-10
+_ATG_DS0 = 1.8932e-6
+_ATG_DS1 = -4.2393e-8
+_ATG_P0 = 1.8741e-8
+_ATG_P1 = -6.7795e-10
+_ATG_P2 = 8.733e-12
+_ATG_P3 = -5.4481e-14
+_ATG_PDS0 = -1.1351e-10
+_ATG_PDS1 = 2.7759e-12
+_ATG_PP0 = -4.6206e-13
+_ATG_PP1 = 1.8676e-14
+_ATG_PP2 = -2.1687e-16
+
+# Runge-Kutta 4 weights in the Bryden (1973) / Fofonoff (1977) arrangement
+# (Gill's method: the 0.29289322 = 1 - 1/sqrt(2) family), transcribed from the
+# published ``THETA`` routine rather than re-derived, so the check value below
+# pins them.  coeff-ok: fixed integration weights of a cited algorithm, not a
+# tunable closure.
+_THETA_RK_A1 = 0.29289322
+_THETA_RK_B1 = 0.58578644
+_THETA_RK_C1 = 0.121320344
+_THETA_RK_A2 = 1.707106781
+_THETA_RK_B2 = 3.414213562
+_THETA_RK_C2 = 4.121320344
+
+
+def adiabatic_temperature_gradient(
+    S: jnp.ndarray,
+    T_C: jnp.ndarray,
+    p_dbar: jnp.ndarray,
+) -> jnp.ndarray:
+    """Adiabatic temperature gradient dT/dp [degC/dbar] (Bryden 1973).
+
+    Parameters
+    ----------
+    S : practical salinity (IPSS-78).
+    T_C : in-situ temperature [degC] (IPTS-68).
+    p_dbar : pressure [dbar].  In the oceanographic approximation this is
+        numerically the depth in metres, which is how both FESOM2's
+        ``insitu2pot`` and :func:`potential_temperature`'s callers use it.
+
+    Returns
+    -------
+    dT/dp [degC/dbar], same shape as the broadcast inputs.
+    """
+    ds = S - 35.0
+    t = T_C
+    p = p_dbar
+    return (
+        (
+            ((_ATG_PP2 * t + _ATG_PP1) * t + _ATG_PP0) * p
+            + (
+                (_ATG_PDS1 * t + _ATG_PDS0) * ds
+                + ((_ATG_P3 * t + _ATG_P2) * t + _ATG_P1) * t
+                + _ATG_P0
+            )
+        ) * p
+        + (_ATG_DS1 * t + _ATG_DS0) * ds
+        + ((_ATG_T3 * t + _ATG_T2) * t + _ATG_T1) * t
+        + _ATG_T0
+    )
+
+
+def potential_temperature(
+    S: jnp.ndarray,
+    T_C: jnp.ndarray,
+    p_dbar: jnp.ndarray,
+    p_ref_dbar: float = 0.0,
+) -> jnp.ndarray:
+    """In-situ -> potential temperature [degC] at ``p_ref_dbar``.
+
+    Fourth-order Runge-Kutta integration of
+    :func:`adiabatic_temperature_gradient` from ``p_dbar`` to
+    ``p_ref_dbar``, i.e. the ``THETA`` routine of Fofonoff & Millard (1983).
+    Pure and elementwise, so it is jit/grad/vmap-safe; the fixed four-stage
+    integration has no data-dependent control flow.
+
+    Check value (pinned in ``tests/ocean/unit/test_eos_potential_temperature.py``):
+    ``theta = 36.89073 degC`` for ``S=40``, ``T_C=40``, ``p_dbar=10000``,
+    ``p_ref_dbar=0``.
+
+    Parameters
+    ----------
+    S : practical salinity (IPSS-78).
+    T_C : in-situ temperature [degC] (IPTS-68).
+    p_dbar : in-situ pressure [dbar] (~ depth in metres).
+    p_ref_dbar : reference pressure [dbar], default 0 (the surface), which is
+        the convention for the model's prognostic potential temperature.
+
+    Returns
+    -------
+    Potential temperature [degC], same shape as the broadcast inputs.
+    """
+    h = p_ref_dbar - p_dbar
+    t = T_C
+    p = p_dbar
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + 0.5 * xk
+    q = xk
+    p = p + 0.5 * h
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + _THETA_RK_A1 * (xk - q)
+    q = _THETA_RK_B1 * xk + _THETA_RK_C1 * q
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + _THETA_RK_A2 * (xk - q)
+    q = _THETA_RK_B2 * xk - _THETA_RK_C2 * q
+    p = p + 0.5 * h
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    return t + (xk - 2.0 * q) / 6.0
+
+
+# ==============================================================================
 # Veros "nonlinear EOS variant 2" (Vallis 2008) — eq_of_state_type=3 in
 # Veros (despite the "_eq2" file name, this is what
 # ``veros/core/density/get_rho.py`` dispatches to for type=3).
