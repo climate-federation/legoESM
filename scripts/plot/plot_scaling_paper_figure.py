@@ -32,11 +32,11 @@ from matplotlib.lines import Line2D
 # (devices, ms/step). Job ids are the provenance for each series.
 SOURCES = {
     "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64), "
-                  "LL2048@64 26502539, LL2048@128 26534060, LL2304@96 26628072, @144 26657279",
+                  "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
-                "s8-lloyd0 26628076",
+                "s8-lloyd0 26628076, s10@128 26677812",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
     "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039",
@@ -51,10 +51,11 @@ PANELS = [
                 ("float64", [(4, 16.11), (8, 11.34), (16, 5.62)]),
                 ("float32 (LL2048)", [(64, 6.73), (128, 5.58)]),
                 ("f32 (LL2304)", [(96, 7.87), (144, 5.78)]),
+                ("f32 LL2048 fused+ovl", [(64, 5.278), (128, 4.745)]),
                 ],
         scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60),
                  ("LL2880 @144", 144, 7.40)],
-        note="LL2880@144 = 58.3 GC/s;\nLL2304 96→144 eff 0.91",
+        note="fused+overlap: 4.745 ms @128\n= 46 GC/s, ratio 1.96 (bound)",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -63,14 +64,15 @@ PANELS = [
         note="f64 pending",
     ),
     dict(
-        key="atm_mpas", title="MPAS icosahedral", sub="subdiv-8/9 L26 · A100 NCCL",
+        key="atm_mpas", title="MPAS icosahedral", sub="subdiv-8/9/10 L26 · A100 NCCL",
         series=[("f32 (s8 · lloyd-50)", [(2, 19.90), (4, 14.12), (8, 6.92),
                                          (16, 7.10), (32, 8.13), (64, 5.27),
                                          (128, 6.47)]),
                 ("float32 (subdiv-9)", [(32, 12.47), (64, 9.60), (128, 11.48)]),
                 ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
+                ("f32 (s10 lloyd-0)", [(128, 18.20)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="observed weak eff 0.53–0.67\nat near-matched tile (lloyd-0)",
+        note="s10@128 = 15.0 GC/s (record);\nweak 4x-cost decelerates 1.90→1.46",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -119,7 +121,9 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "float32 (LL2048)": "#009E73",
           "f64 lat-lon 2-D (r512)": "#CC79A7",
           "f32 (s8 lloyd-0)": "#009E73",
+          "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
+          "f32 LL2048 fused+ovl": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -129,7 +133,9 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "float32 (LL2048)": "^",
            "f64 lat-lon 2-D (r512)": "D",
            "f32 (s8 lloyd-0)": "v",
+           "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
+           "f32 LL2048 fused+ovl": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 
