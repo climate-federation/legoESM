@@ -39,7 +39,10 @@ set +e
 # REFUTES:       LWP < 20 g/m2 OR cover < 0.6.
 # No cheaper offline test exists -- cloud-top entrainment is LES dynamics.
 # ---------------------------------------------------------------------------
-WT=/burg/glab/users/pg2328/les_scm_wt
+# Overridable so the job can be pinned to the SAME worktree a review saw.
+# It previously hardcoded a different tree than the reviewed commit, so an
+# arm could test other LES/SGS code while being cited as evidence.
+WT=${AB_WT:-/burg/glab/users/pg2328/les_scm_wt}
 cd $WT || exit 1
 echo "PINNED sha: $(git rev-parse HEAD)"; echo "host: $(hostname)"; nvidia-smi -L
 export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$PYTHONPATH
@@ -57,10 +60,14 @@ arm () {   # label, then driver args
   # 4 h, so the driver's second-half mean IS the published hours 2-4 window.
   # The previous round ran 2 h and therefore averaged hours 1-2 while comparing
   # against a 2-4 h target.
+  # PIPESTATUS, not $?: piping through grep|tail records TAIL's status, so an
+  # OOM, traceback or blow-up reported rc=0 and a green Slurm job.
   $PY scripts/run/run_dycoms_les.py --hours 4 --record-frames 24 \
       --print-every 8000 --output $OUT/$label "$@" 2>&1 \
     | grep -E "FINAL|BLOWUP|Error" | tail -3
-  echo "ARM $label rc=$? wall=$((SECONDS - t0))s"
+  local rc=${PIPESTATUS[0]}
+  echo "ARM $label rc=$rc wall=$((SECONDS - t0))s"
+  [ "$rc" -ne 0 ] && echo "ARM $label FAILED -- do not cite this arm"
 }
 
 # Geometry and timestep are IDENTICAL in every arm. The previous round changed

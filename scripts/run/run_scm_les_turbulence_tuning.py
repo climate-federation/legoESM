@@ -501,6 +501,16 @@ def score_against_les(means, *, reference, p_full, scored):
         "u": means["u"],
         "v": means["v"],
     }
+    # Check EVERY predicted field, not just the scored ones: CBL scores theta
+    # alone, so a NaN u/v/qv rollout would otherwise pass with a finite score.
+    any_bad = jnp.any(jnp.stack([
+        jnp.any(~jnp.isfinite(jnp.asarray(v))) for v in predicted.values()]))
+    # Double-where: sanitise BEFORE the arithmetic so no NaN enters the graph.
+    # A forward-only where still lets a NaN poison the reverse-mode VJP, which
+    # then shows up as a bogus "non-finite gradient" freeze instead of a
+    # rejected rollout.
+    predicted = {k: jnp.where(jnp.isfinite(v), v, 0.0)
+                 for k, v in predicted.items()}
     components = {}
     for name in scored:
         ref_profile = jnp.asarray(
@@ -521,10 +531,7 @@ def score_against_les(means, *, reference, p_full, scored):
     # reject the step).
     # Check the (nlev,) predictions and the (n_scored,) component scores
     # SEPARATELY -- stacking them together is a shape error.
-    pred_bad = jnp.any(jnp.stack([
-        jnp.any(~jnp.isfinite(jnp.asarray(predicted[k]))) for k in scored]))
-    comp_bad = jnp.any(~jnp.isfinite(stacked))
-    any_bad = pred_bad | comp_bad
+    any_bad = any_bad | jnp.any(~jnp.isfinite(stacked))
     combined = jnp.where(any_bad, NONFINITE_PENALTY, combined)
     # Every COMPONENT is penalised too. Otherwise a NaN rollout still reports
     # per-variable zeros -- "perfect" -- while only the aggregate is large.
@@ -674,6 +681,7 @@ class SchemeResult:
     error: str | None = None
     wall_s: float = 0.0
     ps_drift_pa: float | None = None
+    nonfinite_cases: list[str] | None = None
     per_case_default: dict[str, float] | None = None
     per_case_tuned: dict[str, float] | None = None
 
@@ -722,6 +730,7 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
     on trade cumulus by wrecking the stable boundary layer must not score well.
     """
     per_case, per_components, drifts, means_out = {}, {}, {}, []
+    nonfinite = set()
     total = None
     for i, arm in enumerate(arms):
         cfg = None if cfgs is None else cfgs[i]
@@ -732,9 +741,19 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
         per_components[arm.name] = comp
         if _drift is not None:
             drifts[arm.name] = float(_drift)
+        # Record the FLAG rather than inferring it from the score magnitude:
+        # a legitimately huge score (a near-uniform reference divided by the
+        # 1e-8 spread floor) is indistinguishable from the sentinel otherwise,
+        # and a valid loss above the penalty would make a NaN candidate look
+        # like an improvement to the line search.
+        if params is None and not np.isfinite(float(combined)):
+            nonfinite.add(arm.name)
+        elif params is None and float(combined) >= NONFINITE_PENALTY:
+            nonfinite.add(arm.name)
         total = combined if total is None else total + combined
     joint = total / float(len(arms))
     joint_score.last_ps_drift_pa = drifts
+    joint_score.last_nonfinite = nonfinite
     joint_score.last_means = means_out
     return joint, per_case, per_components
 
@@ -1135,6 +1154,8 @@ def main(argv=None) -> int:
             res.ps_drift_pa = max(
                 getattr(joint_score, "last_ps_drift_pa", {}).values(),
                 default=None)
+            res.nonfinite_cases = sorted(
+                getattr(joint_score, "last_nonfinite", set()))
             res.components_default = {
                 k: {kk: float(vv) for kk, vv in c.items()}
                 for k, c in per_comp.items()}
@@ -1253,19 +1274,15 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         return float("inf")
 
     def _penalised(r) -> bool:
-        # An arm that hit the non-finite penalty must not be ranked at all --
-        # with --skip-tuning there is no gradient gate to catch it, and a
-        # penalty of 1000 still "beats" any genuine score above 1000.
-        vals = [v for v in (r.score_default, r.score_tuned) if v is not None]
-        vals += list((r.per_case_default or {}).values())
-        vals += list((r.per_case_tuned or {}).values())
-        return any(v >= NONFINITE_PENALTY * 0.99 for v in vals)
+        # Uses the flag recorded during evaluation, not the score magnitude.
+        return bool(getattr(r, "nonfinite_cases", None))
 
     for r in results:
         if r.status in _RANKABLE and _penalised(r):
             r.status = "nonfinite_rollout"
             r.error = (r.error or "") + (
-                " non-finite rollout on at least one case; excluded from the "
+                " non-finite rollout on "
+                f"{', '.join(r.nonfinite_cases or ['?'])}; excluded from the "
                 "ranking")
     rankable = [r for r in results
                 if r.status in _RANKABLE and r.score_default is not None]
@@ -1333,6 +1350,14 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                 "Resolved vs parameterized: the LES resolves the large eddies "
                 "the SCM closure must represent — that difference IS the "
                 "quantity being tuned, not an error.",
+                "Fixed comparison heights: the LES target is interpolated ONCE "
+                "onto the initial hydrostatic heights, while the SCM's own "
+                "level heights drift with temperature (a 5 K warming moves a "
+                "mid-column level ~18 m). The reported error therefore mixes "
+                "thermal expansion with turbulence error. Re-interpolating the "
+                "target each step would make the reference a function of the "
+                "scheme being scored, which is worse; the effect is identical "
+                "across arms, so the RANKING is unaffected.",
             ],
         },
         "cases": [

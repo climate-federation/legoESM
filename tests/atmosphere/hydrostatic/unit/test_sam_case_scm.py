@@ -130,7 +130,12 @@ def test_column_top_is_the_les_domain_top_not_the_sounding_top():
     assert case.z_full[0] < snd_top - 500.0, "column still spans the sounding"
     mask = case.les_mask()
     assert mask.dtype == bool and mask.shape == (64,)
-    assert mask.all(), "whole column should now lie inside the LES domain"
+    # Scoring stops at the SPONGE BASE, above which the LES relaxes toward a
+    # reference; the column itself still spans the full domain.
+    assert case.les_score_top_m == pytest.approx(
+        case.spec.les_sponge_frac * case.les_domain_top_m)
+    assert 0 < mask.sum() < 64, "sponge region must be excluded from scoring"
+    assert np.all(case.z_full[mask] <= case.les_score_top_m)
 
 
 @requires_bomex
@@ -138,8 +143,8 @@ def test_les_mask_excludes_levels_above_an_explicit_taller_column():
     """With an explicit taller column the mask must still exclude the top."""
     case = load_sam_scm_case("bomex", nlev=64, sigma_top=0.645)
     mask = case.les_mask()
-    assert np.all(case.z_full[mask] <= case.les_domain_top_m)
-    assert np.all(case.z_full[~mask] > case.les_domain_top_m)
+    assert np.all(case.z_full[mask] <= case.les_score_top_m)
+    assert np.all(case.z_full[~mask] > case.les_score_top_m)
     assert mask[-1] and not mask[0]
 
 
@@ -219,10 +224,19 @@ def test_forcing_callables_are_jax_traceable():
 
 
 @requires_bomex
-def test_coriolis_matches_latitude_and_can_be_disabled():
+def test_coriolis_matches_the_les_driver_not_the_latitude():
+    """The cases HARDCODE f. Deriving it from latitude gave DYCOMS
+    2*Omega*sin(31.5) = 7.62e-5 against the driver's 3.76e-5, a 2.03x error
+    the tuner would have charged to turbulence parameters."""
     case = load_sam_scm_case("bomex", nlev=16)
-    expect = 2.0 * constants.Omega * np.sin(np.deg2rad(case.latitude_deg))
-    assert case.forcing.f_c == pytest.approx(expect, rel=1e-12)
+    assert case.forcing.f_c == pytest.approx(case.spec.les_f_c, rel=1e-12)
+    derived = 2.0 * constants.Omega * np.sin(np.deg2rad(case.latitude_deg))
+    dyc = SAM_SCM_CASES["dycoms"]
+    dyc_derived = 2.0 * constants.Omega * np.sin(np.deg2rad(31.5))
+    assert not np.isclose(dyc_derived, dyc.les_f_c, rtol=0.1), (
+        "latitude-derived f must differ from the driver's, or this guard is "
+        "vacuous")
+    del derived
     assert load_sam_scm_case("bomex", nlev=16, coriolis=False).forcing.f_c == 0.0
 
 
@@ -282,7 +296,9 @@ def test_height_mapping_uses_virtual_potential_temperature():
         theta_ref_fn=lambda z: jnp.interp(z, z_snd, theta_dry),
         p_sfc=case.p_s,
     )
-    p_dry = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    # same staggering as the shipped mapping (interfaces)
+    p_dry = np.asarray(exner_to_pressure(
+        getattr(hc, "exner_ref_half", hc.exner_ref)), dtype=np.float64)
     z_aux, p_moist = mod._deck_pressure_profile(snd, case.p_s)
     # the two mappings must differ measurably where the air is moist
     rel = np.abs(p_moist - p_dry) / p_dry
