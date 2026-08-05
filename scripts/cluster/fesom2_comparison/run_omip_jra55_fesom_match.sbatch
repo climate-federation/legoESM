@@ -75,6 +75,11 @@ FIXER=${FIXER:-1}
 # K_conv = 1 m^2/s, a 5 m top layer and dt = 2400 s the diffusion number is
 # K*dt/dz^2 = 96 (>> 0.5).  FESOM2 mixes implicitly.  VMIX=implicit tests that.
 VMIX=${VMIX:-explicit}
+# --north-cap-lat DEFAULTS TO 90.0 (its help text claiming "default 80" is
+# wrong), so a global lat-lon ocean runs with an OPEN North Pole: meridians
+# converge to dx ~ 970 m at 89.5N.  FESOM2's unstructured CORE2 mesh has no
+# polar singularity to close, which is why the reference run does not need this.
+NCAP=${NCAP:-90.0}
 
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
@@ -124,6 +129,7 @@ EOF
     --ice-delta-min 1e-11 \
     $( [ "$FIXER" = 0 ] && echo --no-conservation-fixer ) \
     $( [ "$VMIX" = implicit ] && echo --implicit-vertical-mixing ) \
+    --north-cap-lat "$NCAP" \
     --runoff-routing "$ROUTING" \
     --runoff-radius-km 500 \
     $( [ "$WOA_INIT" = 1 ] && echo --woa-init ) \
