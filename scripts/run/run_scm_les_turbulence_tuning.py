@@ -876,7 +876,11 @@ def parse_args(argv=None):
     p.add_argument("--schemes", default="all",
                    help="comma-separated subset, or 'all'")
     p.add_argument("--nlev", type=int, default=DEFAULT_NLEV)
-    p.add_argument("--dt", type=float, default=DEFAULT_DT_S)
+    p.add_argument("--dt", type=float, default=None,
+                   help="physics timestep, ALL cases. Default: each case's own "
+                        "spec value (60 s for the cumulus decks, 10 s for the "
+                        "dry PBL cases). A single 60 s step blew mynn25 up on "
+                        "CBL, whose convective eddy turnover is ~850 s.")
     p.add_argument("--hours", type=float, default=None,
                    help="SCM run length; defaults to the LES record length")
     p.add_argument("--analysis-hours", type=float,
@@ -934,6 +938,7 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
     arms = []
     for name in case_names:
         case = load_case(name, nlev=args.nlev, dt=args.dt)
+        dt = float(args.dt) if args.dt is not None else float(case.dt)
         scored = case_scored(name, args.scored_override)
         ref = load_les_reference(
             les_dirs[name], case=name, z_scm=case.z_full,
@@ -953,28 +958,28 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
             # whole point of the guard below is that both sides average the
             # same window. Silently ignoring the flag was worse than either
             # obeying or refusing it.
-            if abs(float(args.hours) - les_end) > 0.5 * args.dt / 3600.0:
+            if abs(float(args.hours) - les_end) > 0.5 * dt / 3600.0:
                 raise SystemExit(
                     f"{name}: --hours {args.hours} does not match the LES "
                     f"reference end {les_end:.6f} h, so the two sides would "
                     "average different windows. Omit --hours to follow the "
                     "reference.")
             les_end = float(args.hours)
-        nsteps = max(1, int(round(les_end * 3600.0 / args.dt)))
-        end_residual_s = abs(nsteps * args.dt - les_end * 3600.0)
-        if end_residual_s > 0.5 * args.dt:
+        nsteps = max(1, int(round(les_end * 3600.0 / dt)))
+        end_residual_s = abs(nsteps * dt - les_end * 3600.0)
+        if end_residual_s > 0.5 * dt:
             raise SystemExit(
-                f"{name}: --dt {args.dt} s cannot land on the LES record end "
+                f"{name}: --dt {dt} s cannot land on the LES record end "
                 f"{les_end:.6f} h: {nsteps} steps miss it by "
                 f"{end_residual_s:.3f} s, more than half a step, so the SCM "
                 "would not end where the reference does."
             )
         span = les_end - float(ref.window_hours[0])
-        n_an = max(1, int(round(span * 3600.0 / args.dt)))
-        span_residual_s = abs(n_an * args.dt - span * 3600.0)
-        if span_residual_s > 0.5 * args.dt:
+        n_an = max(1, int(round(span * 3600.0 / dt)))
+        span_residual_s = abs(n_an * dt - span * 3600.0)
+        if span_residual_s > 0.5 * dt:
             raise SystemExit(
-                f"{name}: --dt {args.dt} s cannot cover the retained analysis "
+                f"{name}: --dt {dt} s cannot cover the retained analysis "
                 f"window {span:.6f} h: {n_an} steps miss it by "
                 f"{span_residual_s:.3f} s, more than half a step, so the two "
                 "sides would average different spans."
@@ -990,19 +995,19 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         # moves the window start by nearly a full step.
         n_start = nsteps - n_an
         start_residual_s = abs(
-            n_start * args.dt - float(ref.window_hours[0]) * 3600.0)
-        if start_residual_s > 0.5 * args.dt:
+            n_start * dt - float(ref.window_hours[0]) * 3600.0)
+        if start_residual_s > 0.5 * dt:
             raise SystemExit(
-                f"{name}: with --dt {args.dt} s the analysis window would "
+                f"{name}: with --dt {dt} s the analysis window would "
                 f"start {start_residual_s:.3f} s from the LES window start, "
                 "more than half a step.")
-        les_end = nsteps * args.dt / 3600.0
-        span = (nsteps - n_start) * args.dt / 3600.0
+        les_end = nsteps * dt / 3600.0
+        span = (nsteps - n_start) * dt / 3600.0
         surface = build_surface_config(
             case, bulk_scheme=args.surface_bulk_scheme)
         arms.append(CaseArm(
             name=name, case=case, reference=ref, scored=scored,
-            hours=les_end, analysis_hours=span, dt=args.dt,
+            hours=les_end, analysis_hours=span, dt=dt,
             chunk_steps=args.chunk_steps, surface=surface,
             prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
             les_dir=str(les_dirs[name]),
@@ -1270,7 +1275,8 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         # case whose LES radiation the SCM cannot reproduce.
         "RADIATION_CONFOUND": args.radiation_confound,
         "protocol": {
-            "nlev": args.nlev, "dt_s": args.dt,
+            "nlev": args.nlev,
+            "dt_s": {a.name: a.dt for a in arms},
             "cases": [a.name for a in arms],
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
             "steps": args.steps,
@@ -1366,7 +1372,7 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             f"the LES domain, scored on {', '.join(a.scored)}"
             for a in arms),
         "",
-        f"SCM: dt={args.dt} s, one parameter set per scheme fitted to ALL "
+        f"SCM: per-case dt, one parameter set per scheme fitted to ALL "
         f"{len(arms)} case(s) jointly; the joint score is the mean of the "
         "per-case normalized scores.", "",
         "Within every case, all arms share one initial column, one forcing and "

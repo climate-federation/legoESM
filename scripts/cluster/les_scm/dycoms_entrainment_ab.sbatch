@@ -54,40 +54,36 @@ arm () {   # label, then driver args
   echo "ARM $label  $*"
   local t0=$SECONDS
   rm -rf $OUT/$label; mkdir -p $OUT/$label
-  $PY scripts/run/run_dycoms_les.py --hours 2 --record-frames 12 \
-      --print-every 4000 --output $OUT/$label "$@" 2>&1 \
-    | grep -E "FINAL|BLOWUP|Error|h max\|w\|" | tail -6
+  # 4 h, so the driver's second-half mean IS the published hours 2-4 window.
+  # The previous round ran 2 h and therefore averaged hours 1-2 while comparing
+  # against a 2-4 h target.
+  $PY scripts/run/run_dycoms_les.py --hours 4 --record-frames 24 \
+      --print-every 8000 --output $OUT/$label "$@" 2>&1 \
+    | grep -E "FINAL|BLOWUP|Error" | tail -3
   echo "ARM $label rc=$? wall=$((SECONDS - t0))s"
 }
 
-# A: smoke geometry, run LONG -> separates time from resolution/domain
-arm A_coarse_long   --nx 32 --ny 32 --nz 64  --Lx 1120 --Ly 1120 --Lz 1500 --dt 0.5
-# B: production geometry -> reproduce the baseline failure
-arm B_baseline      --nx 96 --ny 96 --nz 192 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.5
-# C: control on the Lilly stable-stratification SGS suppression
-arm C_no_lilly      --nx 96 --ny 96 --nz 192 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.5 \
-                    --no-sgs-buoyancy
-# D: finer inversion, dz 7.8 -> 5.2 m (RF01 spec is 5 m)
-arm D_nz288         --nx 96 --ny 96 --nz 288 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.35
+# Geometry and timestep are IDENTICAL in every arm. The previous round changed
+# nx/ny/nz with Lx/Ly in one arm and nz with dt in another, so neither could be
+# attributed. The theta budget showed the dominant warming is UNRESOLVED
+# transport (+0.187 K/h, 123% of the total, against radiation reaching the
+# mixed layer at only -0.013 K/h), so every arm here varies exactly one
+# unresolved-transport setting.
+G="--nx 96 --ny 96 --nz 192 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.5"
+
+arm R_baseline    $G
+arm R_smagorinsky $G --sgs-model smagorinsky
+arm R_static_cs   $G --static --cs 0.18
+arm R_weno5       $G --scalar-advection weno5
+arm R_nufloor     $G --nu-floor 0.5
 
 echo "=============================================================="
-echo "SUMMARY (ref: LWP 50-80 g/m2, cloud cover ~1.0, z_i 840-870 m)"
-$PY - "$OUT" <<'PYEOF2'
-import sys, glob
-from pathlib import Path
-import numpy as np
-out = Path(sys.argv[1])
-print(f"{'arm':16s} {'LWP g/m2':>9s} {'cover':>7s} {'z_i m':>7s}   verdict")
-for a in ("A_coarse_long", "B_baseline", "C_no_lilly", "D_nz288"):
-    f = out / a / "dycoms_les_final.npz"
-    if not f.exists():
-        print(f"{a:16s} {'-':>9s} {'-':>7s} {'-':>7s}   NO OUTPUT"); continue
-    with np.load(f, allow_pickle=True) as d:
-        lwp = float(d["lwp_timemean"]) if "lwp_timemean" in d.files else float(d["lwp"])
-        cc = float(d["cloud_cover_timemean"]) if "cloud_cover_timemean" in d.files else float(d["cloud_cover"])
-        zi = float(d["zi"]) if "zi" in d.files else float("nan")
-    ok = "SOLVED" if (lwp >= 40.0 and cc >= 0.9) else (
-         "burned off" if (lwp < 20.0 or cc < 0.6) else "partial")
-    print(f"{a:16s} {lwp:9.1f} {cc:7.3f} {zi:7.0f}   {ok}")
-PYEOF2
+echo "SUMMARY  ref: LWP 50-80 g/m2, cover ~1.0, z_i 840-870 m (hours 2-4)"
+$PY /burg-archive/glab/users/pg2328/legoESM/scripts/validate/dycoms_theta_budget.py \
+    $OUT/R_baseline 2>/dev/null | tail -3
+for a in R_baseline R_smagorinsky R_static_cs R_weno5 R_nufloor; do
+  echo "--- $a"
+  $PY /burg-archive/glab/users/pg2328/legoESM/scripts/validate/dycoms_theta_budget.py \
+      $OUT/$a 2>/dev/null | tail -2
+done
 echo "DONE $(date +%T)"
