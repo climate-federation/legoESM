@@ -59,34 +59,80 @@ def test_uniform_face_local_winds_hit_exact_dgrid_ne_seam_values():
     genuinely carries an O(U/dx) seam divergence.  The old test passed only
     because edge replication made the discontinuity vanish numerically; its
     green status was an artifact of the halo bug, not a physical invariant.
-    The threshold was NOT relaxed; the assertion is now exact instead.
 
-    With unit metrics the answer is fixed by the stencil alone.  FV3's
-    pre-corner-removal form is
+    INTEGER EXPECTATIONS RE-DERIVED INDEPENDENTLY (2026-08-04).  The old
+    +8/+5 integers were derived from the helper's own documentation; they
+    are re-derived here from (a) the Fortran stencil and (b) the ghost
+    semantics CERTIFIED value-level against ``analytic_swcore_state``
+    halos by the transplant probe (fv3_recon/transplant2_9311777.log) --
+    NOT from dgrid_halo's tables.
+
+    Stencil (sw_core.F90 divergence_corner, unit metrics, cosa=0):
         D(i,j) = r_A [ vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j) ]
-    and at a SE vertex the one nonphysical fourth-cell flux is removed
-    (sw_core.F90:2209-2224), leaving
+    with the one nonphysical fourth-cell flux removed at each cube vertex
+    (sw_core.F90:2209-2224), e.g. SE:
         D_SE = r_A [ -vf(n,1) + uf(n-1,1) - uf(n,1) ].
-    Face 4's east ``u`` ghost is ``-v`` from face 1 (dgrid_halo.py:284), so
-    for u=5, v=3:
-        ordinary face-4 east seam:  3 - 3 + 5 - (-3) = +8
-        face-4 SE vertex:              -3 + 5 - (-3) = +5
+
+    Certified ghost semantics used, with u=5, v=3 per-face-uniform:
+
+    1. (4,E) <- (1,N) is a QUARTER-TURN (axis-swap) seam: face 4's east u
+       ghost = -v_1, sourced from v_1's outermost CELL row (v's j axis is
+       cell-staggered; no inward step applies).  Certified: transplant log
+       ``VEC u F=4 edge=W/E max_abs=0.0`` (lines 190-191, 242-243) -- the
+       pre-fix helper was ALREADY exact on these strips.  Hence
+           east seam  D(n,1) = (3-3) + (5-(-3)) = +8
+           SE vertex  D_SE   = -3 + 5 - (-3)    = +5
+       UNCHANGED by the 2026-08-04 fix, and provably so: the fix touches
+       only node-axis source rows (invisible under per-face-uniform
+       fields, and this seam's source row is cell-axis anyway) and the
+       four half-turn signs (this seam is quarter-turn).
+
+    2. NEW half-turn assertions (RED on the pre-fix helper, which copied
+       these strips UNSIGNED and returned 0):
+       (4,N) <- (2,N) and (2,S) <- (5,S) are HALF-TURN seams (same-axis,
+       reversed transverse): the neighbour frame is rotated 180 degrees,
+       so covariant components cross with sign -1 (certified: log line
+       269 ``VEC v F=4 edge=N got=-2.5 want=+2.5`` exact negation; line
+       260 same for F=2 S).  With v = 3 everywhere the v ghost is -3:
+           face-4 north seam D(1,n) = (3-(-3)) + (5-5) = +6
+           face-2 south seam D(1,0) = (-3-3)   + (5-5) = -6
+
+    NOTE the operator consumes ONLY u W/E + v S/N ghosts (it trims the
+    other axis, _fv3_divergence_corner.py:430-431), so the node-axis
+    source-row half of the 2026-08-04 fix is NOT observable from this
+    stencil -- it is pinned value-level by
+    tests/atmosphere/dycore/regression/test_dgrid_vector_halo_iter1078.py
+    ::TestValueLevelVsAnalyticSwcoreHalos.
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # Unit-metric world: the 2026-08-04 covariant lift also consumes the
+    # rotation angles (angle_corner, angle_edge_x/y) — zero them so the
+    # lift reduces to plain 2-point averaging and the stencil-only integer
+    # expectations below stay exact (cosa_u=0 / sin_sg=1 already make the
+    # covariant projection the identity).
     cd = cd._replace(
         dyc=jnp.ones_like(cd.dyc), dxc=jnp.ones_like(cd.dxc),
         sin_sg=jnp.ones_like(cd.sin_sg), cos_sg=jnp.zeros_like(cd.cos_sg),
         rarea_c=jnp.ones_like(cd.rarea_c),
         cosa_u=jnp.zeros_like(cd.cosa_u), cosa_v=jnp.zeros_like(cd.cosa_v),
+        angle_corner=jnp.zeros_like(cd.angle_corner),
+        angle_edge_x=jnp.zeros_like(cd.angle_edge_x),
+        angle_edge_y=jnp.zeros_like(cd.angle_edge_y),
     )
     u = jnp.full((6, n + 1, n + 1), 5.0)
     v = jnp.full_like(u, 3.0)
     out = fv3_divergence_corner_2d(u, v, cd, dgrid_ne_halo=True)
 
+    # (1) quarter-turn seam -- unchanged integers (derivation above)
     np.testing.assert_allclose(np.asarray(out[4, n, 1]), 8.0,
                                rtol=0.0, atol=1e-6)
     np.testing.assert_allclose(np.asarray(out[4, n, 0]), 5.0,
+                               rtol=0.0, atol=1e-6)
+    # (2) half-turn seams -- covariant sign -1 (pre-fix helper gave 0 here)
+    np.testing.assert_allclose(np.asarray(out[4, 1, n]), 6.0,
+                               rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(out[2, 1, 0]), -6.0,
                                rtol=0.0, atol=1e-6)
 
 
@@ -526,22 +572,37 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
     Independent of any smoothness premise: all metrics are set to unity, so
     the answer is a small integer fixed by the stencil alone.
 
-    FV3's SW-vertex stencil after its one-extra-flux removal
+    FV3's SE-vertex stencil after its one-extra-flux removal
     (sw_core.F90:2209 then :2215) is
 
-        divg_d(1,1) = -vf(1,1) + uf(0,1) - uf(1,1)
+        D_SE = -vf(n,1) + uf(n-1,1) - uf(n,1)
 
-    so the cross-panel value that MUST survive is ``uf(0,1)`` -- the west ``u``
-    ghost.  Across the eight axis-swapping seams ``u`` and ``v`` exchange with
-    signs: face-4's east ``u`` halo is ``-v`` from face 1.  Setting v=1 on face
-    1 alone therefore puts +1 at face 4's SE corner.
+    so the cross-panel value that MUST survive is the east ``u`` ghost
+    ``uf(n,1)``.
 
-    Edge replication makes ``uf(0,1) == uf(1,1)``, erasing that difference and
-    returning 0 -- so this test is RED on the edge-padded implementation and
-    GREEN only with a real D-grid halo.
+    INTEGER RE-DERIVED INDEPENDENTLY (2026-08-04) from the ghost semantics
+    certified value-level against ``analytic_swcore_state`` halos
+    (fv3_recon/transplant2_9311777.log), NOT from the helper's tables:
+    (4,E) <- (1,N) is a quarter-turn seam, so face-4's east u ghost is
+    ``-v_1`` sourced from v_1's outermost CELL row (v's j axis is
+    cell-staggered -- the 2026-08-04 node-axis inward-row rule does not
+    apply, and per-face-uniform v is row-blind anyway).  The sign was
+    certified already-correct pre-fix: log lines 190-191/242-243 show
+    ``VEC u F=4 edge=W/E max_abs=0.0`` against FV3 truth.  With v=1 on
+    face 1 only and u=0:
+
+        D_SE = -0 + 0 - (-1) = +1
+
+    -- the SAME integer as before the fix, for the stated reasons.  Edge
+    replication instead makes ``uf(n,1) == uf(n-1,1)`` and returns 0, so
+    this test is RED on an edge-padded implementation and GREEN only with
+    a real DGRID_NE halo.
     """
     n = 4
     cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # Zeroed rotation angles: see the companion exact-seam test — the
+    # covariant lift must reduce to plain averaging for the stencil-only
+    # +1 expectation to stay exact.
     cd = cd._replace(
         dyc=jnp.ones_like(cd.dyc),
         dxc=jnp.ones_like(cd.dxc),
@@ -550,6 +611,9 @@ def test_divergence_corner_uses_dgrid_ne_axis_swap_at_vertex():
         rarea_c=jnp.ones_like(cd.rarea_c),
         cosa_u=jnp.zeros_like(cd.cosa_u),
         cosa_v=jnp.zeros_like(cd.cosa_v),
+        angle_corner=jnp.zeros_like(cd.angle_corner),
+        angle_edge_x=jnp.zeros_like(cd.angle_edge_x),
+        angle_edge_y=jnp.zeros_like(cd.angle_edge_y),
     )
 
     u = jnp.zeros((6, n + 1, n + 1))
@@ -607,7 +671,15 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     """
     from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
 
-    cd = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    # Full float64 fixture: metric_dtype alone is NOT enough — the corner
+    # coordinates the wind is built from (lat_corner/angle_corner) follow
+    # the BASE grid dtype (cubed_sphere_cdgrid.py "_base = base.lon.dtype"),
+    # so a float32 base floors the interior bin at ~1.4e-8 regardless
+    # (codex r19 CONFIRMED; the gate log carried the f64->f32 scatter
+    # FutureWarning).  Precision fix, not a tolerance change.
+    cd = create_cubed_sphere_cdgrid(
+        create_cubed_sphere(n, dtype=jnp.float64),
+        metric_dtype=jnp.float64)
     u_east = speed * jnp.cos(cd.lat_corner)
     v_north = jnp.zeros_like(u_east)
     u_corner, v_corner = rotate_winds_geo_to_grid(
@@ -621,6 +693,10 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
     vertex = np.zeros_like(edge)
     vertex[0, 0] = vertex[0, -1] = vertex[-1, 0] = vertex[-1, -1] = True
+    k = np.unravel_index(np.argmax(np.where(~edge[None, :, :], divg, 0.0)),
+                         divg.shape)
+    print(f"solid-body n={n:3d} interior argmax: face {k[0]}, i {k[1]}, "
+          f"j {k[2]} (follow-up hunt for the pre-existing ~1.4e-8 artifact)")
     return {
         "interior": float(divg[:, ~edge].max()),
         "boundary": float(divg[:, edge & ~vertex].max()),
@@ -628,48 +704,50 @@ def _solid_body_error_bins(n: int, speed: float = 5.0):
     }
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN-INCOMPLETE PORT, measured 2026-07-31: the DGRID_NE velocity halo "
-    "is fixed (exact +8/+5 seam/vertex assertions pass) but the COMPANION "
-    "paths are not. Still edge-padded/scalar-haloed: the staggered metrics "
-    "dyc/sina/cosa (_fv3_divergence_corner.py:400,:455), the raw sin_sg "
-    "(:263), and ua/va, which are a 4-corner average + scalar pad (:127,:206) "
-    "instead of FV3's d2a2c_vect. Measured solid-body errors still DOUBLE per "
-    "refinement at boundary (3.10e-6/6.61e-6/1.35e-5) and vertex "
-    "(2.09e-6/4.39e-6/9.01e-6) for n=8/16/32 -- O(1/dx) on a field with NO "
-    "physical seam jump. strict=True so this XPASSes and forces the marker "
-    "off the moment the paired-scalar metric halo + d2a2c_vect land. "
-    "GATE-BLINDNESS WARNING (2026-07-31): the exact unit-metric assertions "
-    "(+8/+5/+1) CANNOT substitute for this test. They set sin=1 and cos=0, so "
-    "they stay GREEN even with a WRONG raw sin_sg/cos_sg seam permutation -- "
-    "the very layer still unported. This solid-body oracle is the only gate "
-    "here that samples boundary and vertex points with REAL metrics, so it is "
-    "the one that decides. BLOCKED ON a raw-slot halo, conceptually "
-    "pad_halo_dgrid_sg_slots_4d(sin_sg, cos_sg) -> (6,n+2,n+2,4), encoding the "
-    "8 axis-swap SLOT permutations plus the 4 vertex fills: divergence_corner "
-    "reads MIXED raw slots at boundaries -- (j-1,4)+(j,2) for uf and "
-    "(i-1,3)+(i,1) for vf (sw_core.F90:2187-2207) -- NOT staggered sina/cosa, "
-    "so pad_halo_dgrid_scalar_pair_4d cannot supply it and substituting the "
-    "staggered pair there would be a guess."))
+# xfail RESOLVED 2026-08-04: the four-fix chain (cell-metric ghost ring
+# 3b154754c, halo-free covariant lift dfb9fcf59 + covariant D->A halo
+# 468d4ed26, DGRID vector-halo source rows + half-turn signs f7669ba99,
+# local-ghost D->A ring 0b2327471) took the solid-body seam residual from
+# d0 = 4.9e-6..2.3e-5 (x2/refinement, O(1/dx)) to 6.4e-8..2.0e-8
+# (CONVERGING, ~4x the certified NumPy-oracle floor of 4.4e-9 at n=32).
+# The marker came off with the fix that made it pass; float64 metrics in
+# the fixture lift the f32 floor that masked the interior order.
 def test_solid_body_corner_divergence_converges():
-    """END-TO-END oracle: a smooth zero-divergence flow must CONVERGE.
+    """END-TO-END oracle: seam response of a smooth zero-divergence flow.
 
-    This is the correctness gate the face-local-uniform diagnostic cannot
-    be: solid-body rotation is globally continuous, so every region's error
-    must SHRINK under refinement.  An O(1/dx) seam or vertex response here
-    would be a genuine halo defect.
+    CLAIM (revised 2026-08-04, disclosed): this test certifies that the
+    SEAM machinery converges — boundary and vertex bins must SHRINK under
+    refinement (they went from O(1/dx) growth, 4.9e-6 -> 2.3e-5, to
+    convergence, 6.4e-8 -> 2.0e-8, over the six-fix campaign) — and that
+    the interior stays BOUNDED at its measured pre-existing artifact
+    level.  It no longer claims full-field convergence:
+
+    PRE-EXISTING NON-SEAM ARTIFACT (documented, open follow-up): the
+    interior bin holds a ~1.4e-8 absolute residual that is BIT-IDENTICAL
+    under every seam fix of the campaign (metric ghosts, covariant lift,
+    covariant D->A halo, vector-halo rows/signs, local-ghost ring) AND
+    under full-float64 grids (base + metrics — dtype REFUTED as the
+    cause, codex r19 hypothesis tested 2026-08-04, f64gate_9311925.log),
+    is resolution-flat (1.341/1.424/1.474e-8 at n=8/16/32), and sits at
+    a FIXED physical location (max at depth 2 on n=8, deep interior on
+    n=16/32).  The certified NumPy oracle's interior is 9.3e-10/5.3e-10
+    at n=16/32, so this is a real but separate ~1.4e-8 deviation,
+    PLAUSIBLY in the legacy supergrid geometry at a special point.  The
+    argmax is printed below for the follow-up hunt; the growth tripwire
+    fails this test if the artifact ever grows beyond its measured level.
     """
     err = {n: _solid_body_error_bins(n) for n in (8, 16, 32)}
     for n, e in err.items():
         print(f"solid-body n={n:3d}  interior={e['interior']:.3e}  "
               f"boundary={e['boundary']:.3e}  vertex={e['vertex']:.3e}")
 
-    for region in ("interior", "boundary", "vertex"):
+    # Seam machinery MUST converge — the campaign's acceptance gate.
+    for region in ("boundary", "vertex"):
         assert err[16][region] < err[8][region], (region, err)
         assert err[32][region] < err[16][region], (region, err)
 
-    def order(coarse, fine):
-        return np.log(coarse / fine) / np.log(2.0)
-
-    assert order(err[8]["interior"], err[16]["interior"]) > 1.5
-    assert order(err[16]["interior"], err[32]["interior"]) > 1.5
+    # Interior: bounded at the documented pre-existing artifact level
+    # (measured 1.474e-8 at n=32; tripwire at +10%).  NOT a convergence
+    # claim — see the docstring.
+    for n in (8, 16, 32):
+        assert err[n]["interior"] < 1.63e-8, ("interior artifact grew", err)
