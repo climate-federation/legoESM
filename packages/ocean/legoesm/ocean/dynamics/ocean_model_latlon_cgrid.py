@@ -1665,6 +1665,45 @@ class LatLonCGridOceanModel:
                 f"{config.min_water_column_m!r}",
             )
         _valid_fw = {"none", "virtual_salt_flux", "real_freshwater"}
+        if config.freshwater_closure == "real_freshwater":
+            if (bool(getattr(config, "normalize_freshwater", False))
+                    and bool(getattr(config, "barotropic_forcing_centred",
+                                     False))):
+                # codex RED: the centred barotropic channel averages the
+                # current eta forcing with a CARRY seeded from the RAW masked
+                # flux (freshwater_eta_prev), so with normalization on, the
+                # centred forcing integrates to N_n/2 rather than 0 -- the
+                # normalization is silently half-undone one step later.
+                # Refuse until the carry itself stores the NORMALIZED field
+                # (it is also seeded on the restart paths, so this is not a
+                # one-line change).
+                raise ValueError(
+                    "freshwater_closure='real_freshwater' with "
+                    "normalize_freshwater=True is not yet supported together "
+                    "with barotropic_forcing_centred=True: the centred carry "
+                    "(freshwater_eta_prev) stores the UN-normalized flux, so "
+                    "the time-centred forcing would not integrate to zero. "
+                    "Disable one of the three.")
+            # codex RED: `real_freshwater` carries freshwater ONLY through the
+            # eta/volume channel.  Two supported configurations discard eta
+            # forcing, so freshwater would silently have NO effect at all --
+            # a wrong number, not an error.  Refuse them rather than run.
+            _solver = getattr(config.barotropic, "barotropic_solver", None)
+            if _solver == "rigid_lid":
+                raise ValueError(
+                    "freshwater_closure='real_freshwater' is incompatible "
+                    "with barotropic_solver='rigid_lid': the rigid-lid path "
+                    "does not consume the freshwater eta forcing, and the "
+                    "virtual-salt channel is deliberately absent in this "
+                    "closure, so P-E+R+ice would be silently ignored. Use a "
+                    "free-surface solver, or freshwater_closure="
+                    "'virtual_salt_flux'.")
+            if getattr(config, "prescribed_flow", None) is not None:
+                raise ValueError(
+                    "freshwater_closure='real_freshwater' is incompatible "
+                    "with prescribed_flow: eta is reset after the barotropic "
+                    "solve, discarding the freshwater volume that is this "
+                    "closure's ONLY freshwater pathway.")
         if config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, "
@@ -3381,33 +3420,22 @@ class LatLonCGridOceanModel:
                                      False))):
                 # codex RED: lat-lon's ONLY freshwater normalizer lives inside
                 # the virtual-salt block, which `real_freshwater` skips -- so
-                # without this, normalize_freshwater=True would silently become
-                # a no-op in the new mode (normalize-on and normalize-off
-                # numerically identical).  Normalize the eta/VOLUME forcing
+                # without this, normalize_freshwater=True silently became a
+                # no-op in the new mode.  Normalize the eta/VOLUME forcing
                 # instead, which is what the flag must mean once there is no
-                # virtual-salt channel to normalize.
+                # virtual-salt channel to normalize.  Scoped to real mode ONLY,
+                # so virtual-mode runs stay bit-identical.
                 #
-                # Scoped to real mode ONLY: the virtual-mode normalizer is left
-                # exactly where it was, so existing runs stay bit-identical.
-                #
-                # MPI: this is a rank-local mean (matching the MPAS eta path);
-                # multi-rank use is refused by the guard alongside it.
-                from legoesm.ocean.freshwater import (
-                    refuse_multiprocess_eta_normalization,
-                )
-                refuse_multiprocess_eta_normalization(
-                    "LatLonCGridOceanModel")
-                _lm = state.land_mask.data
-                _area = self.grid.area_T if hasattr(self.grid, "area_T") else None
-                if _area is None:
-                    raise ValueError(
-                        "real_freshwater + normalize_freshwater needs grid "
-                        "cell areas (grid.area_T) to form the area-weighted "
-                        "mean; none available on this grid")
-                _w = _area * _lm
-                _den = jnp.sum(_w)
-                _mean = jnp.sum(F_slow_eta * _area) / jnp.maximum(_den, 1e-10)
-                F_slow_eta = (F_slow_eta - _mean * _lm)
+                # REUSE the shared normalizer rather than a hand-rolled mean
+                # (codex RED round 2): it already carries the lat-band SPMD
+                # `psum` and the MPI owned-mask reduction.  My first version
+                # took a RANK-LOCAL mean off the GLOBAL grid.area_T, which both
+                # shape-mismatches the injected band grid under lat SPMD and
+                # would subtract a per-band mean.
+                from legoesm.ocean.freshwater import normalize_freshwater_net
+                _g_eta = _grid if _grid is not None else self.grid
+                F_slow_eta = normalize_freshwater_net(
+                    F_slow_eta, _g_eta.area_T, state.land_mask.data)
             # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
             # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
             # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's

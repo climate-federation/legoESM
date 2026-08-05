@@ -132,8 +132,6 @@ class TestVolumeChannelUntouched:
         # ever becomes `not in ("none", "real_freshwater")` the mode would stop
         # adding freshwater volume entirely, which is a different (and wrong)
         # model, so pin it.
-        src = inspect.getsource(LatLonCGridOceanModel._step_impl)
-        assert 'freshwater_eta_tendency' not in src or True  # applied earlier
         from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as m
         whole = inspect.getsource(m)
         i = whole.index("F_slow_eta = freshwater_eta_tendency")
@@ -176,6 +174,14 @@ class TestSaltMassConservation:
     @staticmethod
     def _setup(closure):
         import jax.numpy as jnp
+        # codex YELLOW, and decisive: the salt-mass baseline is ~1.72e15 kg
+        # while the VSF signal is ~6.72e7 kg.  One FP32 ULP near that baseline
+        # is ~1.34e8 kg -- LARGER THAN THE SIGNAL -- so in fp32 this test's
+        # pass/fail is reduction-rounding noise.  JAX_ENABLE_X64=1 alone does
+        # NOT fix it: legoESM constructors cast to get_policy().control, which
+        # defaults to float32.  Force the policy.
+        from legoesm.core.precision import PrecisionPolicy, set_policy
+        set_policy(PrecisionPolicy.fp64())
         from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -225,10 +231,14 @@ class TestSaltMassConservation:
         m0 = self._salt_mass(st, cfg, g, z)
         s1 = model.step(st, dt, freshwater=fw)
         m1 = self._salt_mass(s1, cfg, g, z)
-        return m0, m1, F_int, dt, cfg
+        # Volume actually added, so a bug that silently DROPS the eta/volume
+        # channel cannot masquerade as "conserves salt" (codex YELLOW).
+        dV = float(jnp.sum(g.area_T * st.land_mask.data
+                           * (s1.eta.data - st.eta.data)))
+        return m0, m1, F_int, dt, cfg, dV
 
     def test_real_freshwater_conserves_salt_mass(self):
-        m0, m1, F_int, dt, cfg = self._run("real_freshwater")
+        m0, m1, F_int, dt, cfg, dV = self._run("real_freshwater")
         assert F_int > 0.0, "vacuous: zero net freshwater forcing"
         expected_vsf = -1e-3 * cfg.S_ref * dt * F_int
         assert abs(expected_vsf) > 0.0, "vacuous: no VSF signal to detect"
@@ -236,10 +246,32 @@ class TestSaltMassConservation:
         assert abs(m1 - m0) < 1e-3 * abs(expected_vsf), (
             f"real_freshwater changed salt mass by {m1 - m0:.6e} kg; the VSF "
             f"signal it must avoid is {expected_vsf:.6e} kg")
+        # ...and the freshwater VOLUME must actually have been applied.
+        #
+        # This assertion FIRED on its first real run at dV/expected = 0.550000
+        # -- exactly `barotropic_implicit_theta_eta = 0.55`.  That is the
+        # Crank-Nicolson implicit weight: after ONE step only theta of the
+        # forcing has entered eta, so the naive one-step expectation was wrong,
+        # not the model.  (Salt conservation passed throughout, which is
+        # precisely why this check is needed: a silently DROPPED eta channel
+        # would also "conserve salt".)
+        #
+        # Bound it rather than hardcode theta, so the test does not encode one
+        # solver's coefficient: any substantial fraction proves the channel is
+        # live, while dV ~ 0 (the failure mode that matters) still fails.
+        expected_dV = dt * F_int / cfg.rho_0
+        assert expected_dV > 0.0
+        frac = dV / expected_dV
+        assert 0.3 < frac < 1.15, (
+            f"eta/volume channel did not receive the freshwater: dV={dV:.6e} "
+            f"m3 is {frac:.4f} of the inviscid expectation {expected_dV:.6e}. "
+            f"Salt conservation alone would ALSO hold if the channel were "
+            f"silently dropped, so this pins it. (A one-step implicit solve "
+            f"legitimately delivers ~theta of the forcing.)")
 
     def test_virtual_salt_flux_does_NOT_conserve(self):
         # The non-vacuity proof: the SAME assertion fails on the old closure.
-        m0, m1, F_int, dt, cfg = self._run("virtual_salt_flux")
+        m0, m1, F_int, dt, cfg, _dV = self._run("virtual_salt_flux")
         expected_vsf = -1e-3 * cfg.S_ref * dt * F_int
         assert abs(m1 - m0) > 0.1 * abs(expected_vsf), (
             "virtual_salt_flux should CHANGE salt mass by ~"
