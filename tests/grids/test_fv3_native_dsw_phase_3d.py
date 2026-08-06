@@ -23,7 +23,24 @@ DT = 30.0
 @pytest.fixture(scope="module")
 def ctx():
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
-    return build_six_face_duo_context(N, NG)
+    # use_ext_bundle=True is REQUIRED, not incidental: DUO_DECK_CFG runs
+    # nord=2, and the post-p_grad_c divgd exchange at dyn_core.F90:652 has
+    # no faithful implementation without the bundle. A default context
+    # here tested the interim index-copy path, which leaves the B-grid
+    # corner diagonal stale -- the path that produced a 1e11 D wind.
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True)
+
+
+@pytest.fixture(scope="module")
+def ctx_interim():
+    """Context that DECLARES the non-faithful interim exchange.
+
+    Only for the tests that are about the fallback itself. ext_exclude is
+    the existing measurement opt-in; naming it is what keeps the interim
+    path from being reachable by accident.
+    """
+    from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"))
 
 
 def _state(km, seed=0):
@@ -83,17 +100,62 @@ def test_shapes_and_levels(ctx):
 def test_km1_matches_the_certified_km1_sequence(ctx):
     """Stage-3 check: the 3-D assembler must add cadence, not change math.
     Reproduces d_sw1 -> average_allflux_shared_edges -> d_sw2 by hand and
-    requires bit equality."""
+    requires bit equality.
+
+    THE REFERENCE MUST START FROM THE SAME C-GRID STATE, BUT MUST NOT
+    INHERIT IT FROM THE CODE UNDER TEST. dsw_transport_phase_3d performs
+    the post-p_grad_c duo exchanges (dyn_core.F90:652 and :655) on the csw
+    dict it is handed, IN PLACE, before it calls d_sw1.
+
+    Two wrong ways to write this, both of which were actually written:
+      * a SECOND, fresh csw for the reference -- compares an exchanged
+        path against an unexchanged one. 40/324 elements differed, most at
+        1e-13 but the SW corner at -3.42e+32, and the test was red from
+        the commit that introduced it.
+      * the SUT-mutated csw fed straight into the reference -- like-for-
+        like, but now a no-op, wrong-face, wrong-stagger or absent
+        exchange is shared by both sides and cannot be detected. Deleting
+        the divg_d exchange, i.e. the defect this file is supposed to
+        cover, would pass.
+
+    So the reference exchanges its OWN pre-exchange copy through the same
+    public helper.
+
+    WHAT THIS TEST DOES AND DOES NOT COVER. It asserts delp/pt, which
+    depend on uc/vc, so dropping the uc/vc exchange from
+    dsw_transport_phase_3d fails it. It CANNOT detect a dropped divg_d
+    exchange: unit 4 passes only uc/vc into d_sw1 (divg_d is first
+    consumed by d_sw5, dyn_core.F90:1107, i.e. unit 5), so divg_d never
+    reaches delp/pt here. An earlier version of this docstring claimed
+    otherwise and was wrong. The SUT call site for divg_d is covered by
+    test_the_sut_exchanges_divg_d below; helper correctness by
+    test_the_authoritative_exchange_fills_the_corner_diagonal.
+    """
+    import copy as _copy
+
     from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo, d_sw2_duo
     from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
+    from legoesm.core.fv3_native_duo_stepper import (
+        exchange_post_pgrad_sixface,
+    )
     from legoesm.grids.fv3_native_gridstruct import (
         average_allflux_shared_edges,
     )
 
     st = _state(1, seed=4)
-    got = _run(ctx, st, 1)
-
     csw = csw_phase_3d(ctx, st, dt2=0.5 * DT, km=1)
+    csw_ref = _copy.deepcopy(csw)
+    got = dsw_transport_phase_3d(ctx, st, csw, dt=DT, km=1)
+
+    # the reference applies the exchange itself, on its own copy
+    exchange_post_pgrad_sixface(
+        ctx,
+        [csw_ref[t]["divg_d"][:, :, 0] for t in range(6)],
+        [csw_ref[t]["uc"][:, :, 0] for t in range(6)],
+        [csw_ref[t]["vc"][:, :, 0] for t in range(6)],
+        nord=DUO_DECK_CFG["nord"])
+    csw = csw_ref
+
     bd, npx, m_a = ctx["bd"], N + 1, N + 2 * NG
     c = DUO_DECK_CFG
     s1 = [d_sw1_duo(
@@ -117,6 +179,240 @@ def test_km1_matches_the_certified_km1_sequence(ctx):
                 got[t][name][:, :, 0], ref[name],
                 err_msg=f"face {t + 1} {name}: 3-D path diverged from the "
                         f"certified km=1 d_sw1/barrier/d_sw2 sequence")
+
+    # NON-VACUITY. A bit-equality assertion against a hand-rolled
+    # reference is worthless unless the reference can disagree. Rebuild it
+    # with the barrier REMOVED and require that it no longer matches -- if
+    # this passes, the assertion above is checking nothing.
+    s1_nb = [d_sw1_duo(
+        st[t]["delp"][:, :, 0], st[t]["pt"][:, :, 0], st[t]["w"][:, :, 0],
+        csw[t]["uc"][:, :, 0], csw[t]["vc"][:, :, 0],
+        np.zeros((npx, m_a)), np.zeros((m_a, npx)),
+        np.zeros((npx, m_a)), np.zeros((m_a, npx)),
+        ctx["gs6"][t], bd, npx, npx, dt=DT,
+        hord_tr=c["hord_tr"], hord_vt=c["hord_vt"], hord_tm=c["hord_tm"],
+        hord_dp=c["hord_dp"], nord_v=c["nord_v"], nord_t=0,
+        damp_v=c["damp_v"], damp_t=0.0, workspace_sentinel=0.0)
+        for t in range(6)]
+    # ... no average_allflux_shared_edges here -- that is the removal.
+    unbarriered = [d_sw2_duo(s1_nb[t]["delp"], s1_nb[t]["pt"],
+                             s1_nb[t]["allflux_x"], s1_nb[t]["allflux_y"],
+                             ctx["gs6"][t], bd) for t in range(6)]
+    # FINITE-ONLY. np.array_equal calls same-position NaNs unequal, so a
+    # single shared NaN would satisfy `any(...)` while no finite value had
+    # moved at all -- the assertion would pass vacuously on a field that
+    # is entirely garbage.
+    moved = False
+    for t in range(6):
+        for name in ("delp", "pt"):
+            a = got[t][name][:, :, 0]
+            b = unbarriered[t][name]
+            fin = np.isfinite(a) & np.isfinite(b)
+            assert fin.any(), (
+                f"face {t + 1} {name}: no finite values to compare, so the "
+                f"non-vacuity check cannot mean anything")
+            if np.any(a[fin] != b[fin]):
+                moved = True
+    assert moved, (
+        "dropping the barrier from the reference changed no FINITE value, "
+        "so the bit-equality assertion above cannot detect a missing "
+        "barrier")
+
+
+def test_the_authoritative_exchange_fills_the_corner_diagonal(ctx,
+                                                              ctx_interim):
+    """The defect that produced the 1e11 wind, guarded directly.
+
+    dyn_core.F90:652 exchanges divgd through ext_scalar(...,1,1), whose
+    k2e Lagrange fill covers the corner-diagonal halo
+    (fv_duogrid.F90:523-566). The interim index-copy helper says in its
+    own docstring that it leaves those regions untouched. d_sw5's nord=2
+    n-loop reads them (sw_core.F90:1748-1758) and scales them by
+    dd8 ~ 1e32, so "untouched" means "whatever c_sw left", which measured
+    -9.1e7 against a 1e-8 compute window.
+
+    Assert the authoritative path CHANGES the corner diagonal and the
+    interim path does NOT. Both directions matter: only checking the
+    authoritative side would pass even if the interim helper had silently
+    become authoritative, and vice versa.
+    """
+    from legoesm.core.fv3_native_duo_stepper import (
+        exchange_post_pgrad_sixface,
+    )
+    from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
+
+    bd = ctx["bd"]
+    # one cell strictly inside the SW corner-diagonal block: i < is and
+    # j < js, i.e. neither an i-edge strip nor a j-edge strip
+    ci, cj = bd.is_ - 1 - bd.isd, bd.js - 1 - bd.jsd
+
+    def corner_after(c):
+        st = _state(1, seed=11)
+        csw = csw_phase_3d(c, st, dt2=0.5 * DT, km=1)
+        before = float(csw[0]["divg_d"][ci, cj, 0])
+        exchange_post_pgrad_sixface(
+            c,
+            [csw[t]["divg_d"][:, :, 0] for t in range(6)],
+            [csw[t]["uc"][:, :, 0] for t in range(6)],
+            [csw[t]["vc"][:, :, 0] for t in range(6)],
+            nord=DUO_DECK_CFG["nord"])
+        return before, float(csw[0]["divg_d"][ci, cj, 0])
+
+    b_auth, a_auth = corner_after(ctx)
+    b_int, a_int = corner_after(ctx_interim)
+
+    assert b_auth == b_int, (
+        "the two contexts must start from the same c_sw corner value for "
+        f"this comparison to mean anything ({b_auth!r} vs {b_int!r})")
+    assert a_int == b_int, (
+        "the interim exchange is documented to leave corner diagonals "
+        f"untouched but it changed {b_int!r} -> {a_int!r}; either the "
+        "helper changed or this probe is reading an edge strip")
+    assert a_auth != b_auth, (
+        "the authoritative ext_scalar exchange left the B-grid corner "
+        f"diagonal at {b_auth!r}, i.e. it did NOT do the k2e corner fill "
+        "that dyn_core.F90:652 relies on")
+    assert np.isfinite(a_auth), (
+        f"authoritative exchange produced {a_auth!r} in the corner diagonal")
+
+
+def test_the_sut_exchanges_divg_d(ctx):
+    """dsw_transport_phase_3d must actually perform the divg_d exchange.
+
+    The cadence test above cannot see this: unit 4 hands only uc/vc to
+    d_sw1, and divg_d is not consumed until d_sw5 (dyn_core.F90:1107). So
+    the exchange could be deleted from the unit-4 call site and every
+    delp/pt assertion would still pass -- while unit 5 quietly went back
+    to reading a stale corner diagonal and emitting a 1e11 wind.
+
+    Assert it at the call site instead: the corner-diagonal cell of the
+    csw dict handed to the SUT must differ afterwards.
+    """
+    bd = ctx["bd"]
+    ci, cj = bd.is_ - 1 - bd.isd, bd.js - 1 - bd.jsd
+
+    st = _state(KM, seed=13)
+    csw = csw_phase_3d(ctx, st, dt2=0.5 * DT, km=KM)
+    before = [np.array(csw[t]["divg_d"][:, :, k], copy=True)
+              for t in range(6) for k in range(KM)]
+    dsw_transport_phase_3d(ctx, st, csw, dt=DT, km=KM)
+
+    corner_moved = any(
+        csw[t]["divg_d"][ci, cj, k] != before[t * KM + k][ci, cj]
+        for t in range(6) for k in range(KM))
+    assert corner_moved, (
+        "dsw_transport_phase_3d left every face/level divg_d corner "
+        "diagonal untouched -- the dyn_core.F90:652 ext_scalar(divgd,1,1) "
+        "call is missing from the unit-4 call site, and d_sw5 will scale "
+        "the stale value by dd8 ~ 1e32")
+    for t in range(6):
+        for k in range(KM):
+            assert np.isfinite(csw[t]["divg_d"][:, :, k]).all(), (
+                f"face {t + 1} level {k}: divg_d non-finite after the "
+                f"post-p_grad_c exchange")
+
+
+def test_nord_zero_skips_the_divgd_exchange_but_not_the_winds(ctx):
+    """dyn_core.F90:652 gates divgd on nord > 0; :655 gates uc/vc on nothing.
+
+    Asserted explicitly because the two orders differ in name only on the
+    shipped deck (nord == nord_v == 2), so a gate on the wrong variable is
+    invisible there.
+
+    The csw here is built by csw_phase_3d's own nord (2), not 0: upstream
+    c_sw only computes divg_d when nord > 0 (sw_core.F90:153), so a real
+    nord=0 deck would have no meaningful divg_d to exchange at all. This
+    test is about the GATE, so it keeps a populated divg_d and checks that
+    the gate declines to touch it -- which is strictly harder to pass than
+    starting from zeros.
+    """
+    from legoesm.core.fv3_native_duo_stepper import (
+        exchange_post_pgrad_sixface,
+    )
+
+    st = _state(1, seed=5)
+    csw = csw_phase_3d(ctx, st, dt2=0.5 * DT, km=1)
+    dg_before = [np.array(csw[t]["divg_d"][:, :, 0], copy=True)
+                 for t in range(6)]
+    uc_before = [np.array(csw[t]["uc"][:, :, 0], copy=True)
+                 for t in range(6)]
+    vc_before = [np.array(csw[t]["vc"][:, :, 0], copy=True)
+                 for t in range(6)]
+
+    exchange_post_pgrad_sixface(
+        ctx,
+        [csw[t]["divg_d"][:, :, 0] for t in range(6)],
+        [csw[t]["uc"][:, :, 0] for t in range(6)],
+        [csw[t]["vc"][:, :, 0] for t in range(6)],
+        nord=0)
+
+    for t in range(6):
+        np.testing.assert_array_equal(
+            csw[t]["divg_d"][:, :, 0], dg_before[t],
+            err_msg=f"face {t + 1}: nord=0 must not exchange divgd "
+                    f"(dyn_core.F90:652 gates it on nord > 0)")
+    # BOTH components: dyn_core.F90:655 passes uc AND vc to ext_vector,
+    # so checking only uc would pass on a helper that silently dropped vc.
+    assert any(not np.array_equal(csw[t]["uc"][:, :, 0], uc_before[t])
+               for t in range(6)), (
+        "nord=0 must still exchange uc -- dyn_core.F90:655 is not gated "
+        "on nord")
+    assert any(not np.array_equal(csw[t]["vc"][:, :, 0], vc_before[t])
+               for t in range(6)), (
+        "nord=0 must still exchange vc -- dyn_core.F90:655 passes both "
+        "components")
+
+
+def test_the_interim_exchange_must_be_asked_for(ctx_interim):
+    """A context that cannot run the faithful exchange must SAY so.
+
+    Upstream has no fallback for dyn_core.F90:652. Silently substituting
+    the interim helper at nord > 0 is the wrong-number path; it has to be
+    an explicit ext_exclude opt-in.
+    """
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+        exchange_post_pgrad_sixface,
+    )
+
+    plain = build_six_face_duo_context(N, NG)  # no bundle, no opt-out
+    st = _state(1, seed=6)
+    csw = csw_phase_3d(plain, st, dt2=0.5 * DT, km=1)
+    args = ([csw[t]["divg_d"][:, :, 0] for t in range(6)],
+            [csw[t]["uc"][:, :, 0] for t in range(6)],
+            [csw[t]["vc"][:, :, 0] for t in range(6)])
+
+    with pytest.raises(ValueError, match="divgd exchange"):
+        exchange_post_pgrad_sixface(plain, *args, nord=2)
+
+    # nord=0 skips divgd, but dyn_core.F90:655's uc/vc exchange is NOT
+    # gated on nord, so an undeclared context is still refused -- gating
+    # the guard on nord would have left one silent substitution behind.
+    with pytest.raises(ValueError, match="uc/vc exchange"):
+        exchange_post_pgrad_sixface(plain, *args, nord=0)
+
+    # declaring only divgd is still not enough: cvec is its own opt-in
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context as _bld,
+    )
+    divgd_only = _bld(N, NG, ext_exclude=("divgd",))
+    csw3 = csw_phase_3d(divgd_only, st, dt2=0.5 * DT, km=1)
+    with pytest.raises(ValueError, match="uc/vc exchange"):
+        exchange_post_pgrad_sixface(
+            divgd_only,
+            [csw3[t]["divg_d"][:, :, 0] for t in range(6)],
+            [csw3[t]["uc"][:, :, 0] for t in range(6)],
+            [csw3[t]["vc"][:, :, 0] for t in range(6)],
+            nord=2)
+
+    # and the fully declared opt-out is allowed
+    csw2 = csw_phase_3d(ctx_interim, st, dt2=0.5 * DT, km=1)
+    exchange_post_pgrad_sixface(
+        ctx_interim,
+        [csw2[t]["divg_d"][:, :, 0] for t in range(6)],
+        [csw2[t]["uc"][:, :, 0] for t in range(6)],
+        [csw2[t]["vc"][:, :, 0] for t in range(6)],
+        nord=2)
 
 
 def test_the_barrier_actually_couples_faces(ctx):

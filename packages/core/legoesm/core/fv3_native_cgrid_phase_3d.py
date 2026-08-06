@@ -59,7 +59,8 @@ def csw_phase_3d(ctx: dict, state: list, dt2: float, km: int, *,
     ``dt2`` is the half step (``dyn_core.F90`` passes ``dt2`` to c_sw).
     ``nord`` comes from the deck: the shipped duo decks run ``nord = 2``,
     which is why the ``divgd`` exchange downstream is required at all
-    (``dyn_core.F90:706`` gates it on ``nord > 0``).
+    (``dyn_core.F90:652`` gates it on ``nord > 0``; :706 is the
+    ``flagstruct%regional`` branch and never runs on the duo lane).
     """
     require_no_remap_needed(km)
     from legoesm.core.fv3_native_sw_core import c_sw

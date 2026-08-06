@@ -45,13 +45,55 @@ import numpy as np
 from legoesm.core.fv3_native_state_3d import level_slice, require_no_remap_needed
 
 # The shipped duo decks: nord=2, vtdm4=0.12, hord*=6, d_ext=0, dddmp=0,
-# n_sponge=-1 (so the k=1/2/3 sponge branch at dyn_core.F90:833 is SKIPPED
+# n_sponge=-1 (so the k=1/2/3 sponge branch at dyn_core.F90:1067 is SKIPPED
 # and the coefficients are level-invariant -- Lane A's single flat config
 # is structurally correct for this deck, it is not a missing feature).
 DUO_DECK_CFG = {
     "hord_tr": 6, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
-    "nord_v": 2, "damp_v": 0.12,
+    # ``nord`` is the DIVERGENCE-damping order (d_sw5); ``nord_v`` is the
+    # VORTICITY-damping order (d_sw1/d_sw6). They coincide at 2 on this
+    # deck, which is exactly why gating the divgd exchange on the wrong
+    # one of the two was invisible -- dyn_core.F90:652 gates on nord.
+    "nord": 2, "nord_v": 2, "damp_v": 0.12,
 }
+
+
+def _exchange_post_pgrad(ctx: dict, csw_outs: list, km: int, *,
+                         nord: int) -> None:
+    """Apply the shared post-``p_grad_c`` duo exchanges at every level.
+
+    The oracle's exchanges are 3-D calls over the whole column; this lane
+    holds one 2-D array per level, so it drives the shared six-face helper
+    once per k. Level-independent by construction -- ``ext_scalar`` /
+    ``ext_vector`` are horizontal operators.
+
+    The per-level arrays are handed over as UNCONDITIONAL copies and
+    written back afterwards. ``csw_outs[t][name][:, :, k]`` is a strided
+    view, and the exchange chain (mpp analog -> k2e ring remap -> Lagrange
+    corner fill) is only certified against ordinary 2-D arrays.
+
+    ``np.copy`` here, NOT ``np.ascontiguousarray``: the latter is
+    copy-IF-NEEDED, and for a C-order ``(i, j, 1)`` field ``[:, :, 0]`` is
+    already contiguous, so it would alias the parent at km=1 and copy at
+    km>1 -- the same code taking two different aliasing paths depending on
+    the level count, silently.
+    """
+    from legoesm.core.fv3_native_duo_stepper import (
+        exchange_post_pgrad_sixface,
+    )
+
+    for k in range(km):
+        uc6 = [np.array(csw_outs[t]["uc"][:, :, k], copy=True)
+               for t in range(6)]
+        vc6 = [np.array(csw_outs[t]["vc"][:, :, k], copy=True)
+               for t in range(6)]
+        dg6 = [np.array(csw_outs[t]["divg_d"][:, :, k], copy=True)
+               for t in range(6)]
+        exchange_post_pgrad_sixface(ctx, dg6, uc6, vc6, nord=nord)
+        for t in range(6):
+            csw_outs[t]["uc"][:, :, k] = uc6[t]
+            csw_outs[t]["vc"][:, :, k] = vc6[t]
+            csw_outs[t]["divg_d"][:, :, k] = dg6[t]
 
 
 def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
@@ -72,10 +114,6 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
         average_allflux_shared_edges,
     )
 
-    from legoesm.grids.fv3_native_gridstruct import (
-        exchange_bgrid_scalar_halos, exchange_cgrid_vector_halos,
-    )
-
     c = dict(DUO_DECK_CFG)
     c.update(cfg or {})
     n, ng, bd = ctx["n"], ctx["ng"], ctx["bd"]
@@ -83,20 +121,32 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
     m_a = n + 2 * ng
 
     # --- POST-p_grad_c duo exchanges, BEFORE d_sw1 ------------------------
-    # dyn_core.F90:706  if (duogrid .and. nord > 0) ext_scalar(divgd,...,1,1)
-    # dyn_core.F90:709  if (duogrid)                ext_vector(uc,vc,1,0,0,1)
+    # dyn_core.F90:652  if (duogrid .and. nord > 0) ext_scalar(divgd,...,1,1)
+    # dyn_core.F90:655  if (duogrid)                ext_vector(uc,vc,1,0,0,1)
+    # (:653 is blank, :654 is the .not.duogrid group-halo completion.
+    # :706/:709 are the REGIONAL branch -- regional_boundary_update -- and
+    # were the wrong anchor: they are not on the duo lane at all.)
+    #
     # Omitting these leaves uc/vc/divgd halos stale, so d_sw1 transports
     # garbage: the first sub-step produced delp ~ -1.5e39 and 267 non-finite
-    # u values before this was added. The km=1 lane does the same exchanges
-    # at fv3_native_duo_stepper.dsw12_step_sixface.
-    for k in range(km):
-        uc6 = [csw_outs[t]["uc"][:, :, k] for t in range(6)]
-        vc6 = [csw_outs[t]["vc"][:, :, k] for t in range(6)]
-        dg6 = [csw_outs[t]["divg_d"][:, :, k] for t in range(6)]
-        for t in range(1, 7):
-            if c["nord_v"] > 0:
-                exchange_bgrid_scalar_halos(dg6, t, n, ng)
-            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    # u values before any exchange was added.
+    #
+    # WHICH exchange matters as much as whether. The mpp-analog index-copy
+    # helpers fill the four edge STRIPS and leave the CORNER-DIAGONAL halo
+    # untouched (fv3_native_gridstruct.exchange_bgrid_scalar_halos says so
+    # in its own docstring), whereas upstream ext_scalar is the k2e Lagrange
+    # fill that covers those regions. d_sw5's divergence-damping n-loop at
+    # nord=2 reads i,j = is-2..ie+3 (sw_core.F90:1748-1758; the i+1/j+1
+    # operands push the high side to ie+3/je+3) -- INTO the corner
+    # diagonal -- so with
+    # the interim helper divg_d(0,0) stayed at the c_sw halo value -9.1e7
+    # while the compute window was 1e-8, and `ke += dd8*divg_d` with
+    # dd8 = (da_min_c*d4_bg)**(nord+1) = 9.9e31 turned that into
+    # ke(1,1) = -4.97e16, hence a 1e11 D wind out of d_sw6.
+    # The km=1 lane (fv3_native_duo_stepper.dsw12_step_sixface) already
+    # routed through the authoritative path; this is the same dispatch,
+    # including the ext_exclude opt-outs, so the two lanes cannot drift.
+    _exchange_post_pgrad(ctx, csw_outs, km, nord=c["nord"])
 
     # --- d_sw1 at every level, on every face -------------------------------
     # Held as [face][k] rather than merged: the barrier consumes one level
