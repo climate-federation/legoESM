@@ -901,6 +901,9 @@ def _build_radiation_config(
 
 def _build_microphysics_config(
     scheme: str, homogeneous_ice_nucleation: bool = False,
+    hard_saturation_adjustment: bool = False,
+    hard_sat_adjust_threshold: float | None = None,
+    hard_sat_max_heating_K: float | None = None,
 ) -> MicrophysicsConfig | None:
     if scheme == "none":
         return None
@@ -919,14 +922,55 @@ def _build_microphysics_config(
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
-        return MicrophysicsConfig(
+        cfg = MicrophysicsConfig(
             scheme=scheme,
             morrison=MorrisonConfig(
                 morrison_flavor="sam",
                 homogeneous_ice_nucleation=homogeneous_ice_nucleation,
             ),
         )
-    return MicrophysicsConfig(scheme=scheme)
+    else:
+        cfg = MicrophysicsConfig(scheme=scheme)
+
+    # Hard (iterated) saturation-adjustment guard.  This driver is the RCE/CRM
+    # lane, i.e. exactly where a super-saturated initial sounding can occur, so
+    # the guard needs a CLI route here -- it previously had none for ANY
+    # scheme, which is why a ~140 %-RH RCEMIP sounding could not be run with
+    # the guard on without editing code.
+    #
+    # Threading goes through the SHARED
+    # ``apply_microphysics_experiment_flags`` (never a private copy of the
+    # dispatch): it applies the flags to the ACTIVE sub-config only and raises
+    # LOUDLY for a scheme that does not carry the guard (sdm / fast_sbm), so a
+    # silently-inert flag is impossible.  Wrapped in a Python ``if`` so the
+    # all-defaults path returns the exact object it always did.
+    if (hard_saturation_adjustment
+            or hard_sat_adjust_threshold is not None
+            or hard_sat_max_heating_K is not None):
+        # A float override without the boolean gate would be SILENTLY INERT
+        # (the schemes branch on a static ``if config.hard_saturation_
+        # adjustment``), so refuse it rather than let a user believe they
+        # tuned something. Mirrors ExperimentConfig.validate_strict, which
+        # this driver does not go through.
+        if not hard_saturation_adjustment:
+            _set = [n for n, v in
+                    (("--hard-sat-adjust-threshold", hard_sat_adjust_threshold),
+                     ("--hard-sat-max-heating-k", hard_sat_max_heating_K))
+                    if v is not None]
+            raise ValueError(
+                f"{', '.join(_set)} requires --hard-saturation-adjustment "
+                "(the override would be silently inert without it)."
+            )
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        cfg = cfg._replace(**{scheme: apply_microphysics_experiment_flags(
+            getattr(cfg, scheme), scheme,
+            hard_saturation_adjustment=hard_saturation_adjustment,
+            hard_sat_adjust_threshold=hard_sat_adjust_threshold,
+            hard_sat_max_heating_K=hard_sat_max_heating_K,
+        )})
+    return cfg
 
 
 def dx_aware_hyperdiff(dx, base=1.0e8, dx_ref=1000.0):
@@ -1191,6 +1235,33 @@ def parse_args():
                             "fast_sbm", "ml_emulator", "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
+    # --- Hard (iterated) saturation-adjustment guard -----------------------
+    # This is the RCE/CRM lane, where a super-saturated initial sounding is a
+    # real configuration (a ~140 %-RH RCEMIP sounding produced a persistent
+    # column-water drift). The guard had NO CLI route in this driver for any
+    # scheme, so it could only be enabled by editing code.
+    p.add_argument("--hard-saturation-adjustment",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Enable the iterated (bracketed-bisection) saturation "
+                        "adjustment: wherever q_v exceeds "
+                        "--hard-sat-adjust-threshold * q_sat, condensation is "
+                        "blended toward the enthalpy-conserving on-curve "
+                        "value instead of the slower smooth-sigmoid rate, "
+                        "rate-limited by --hard-sat-max-heating-k. Default off "
+                        "=> byte-identical to the historical smooth path. "
+                        "Carried by kessler/sundqvist/seifert_beheng/morrison/"
+                        "thompson/p3/ml_emulator; sdm and fast_sbm resolve "
+                        "super-saturation explicitly and REJECT the flag.")
+    p.add_argument("--hard-sat-adjust-threshold", type=float, default=None,
+                   help="RH trigger for the hard saturation adjustment "
+                        "(default: the scheme's 1.1). Requires "
+                        "--hard-saturation-adjustment.")
+    p.add_argument("--hard-sat-max-heating-k", type=float, default=None,
+                   help="Per-step latent-heating cap [K] for the hard "
+                        "saturation adjustment (default: the scheme's 5.0), so "
+                        "a large super-saturation pool drains onto the curve "
+                        "over MANY steps rather than releasing its full latent "
+                        "heat at once. Requires --hard-saturation-adjustment.")
     p.add_argument("--homogeneous-ice-nucleation",
                    action=argparse.BooleanOptionalAction, default=False,
                    help="Morrison M2005 ONLY: enable Koop-2000 homogeneous ice "
@@ -1439,7 +1510,10 @@ def main():
             radiation_config, args.land_albedo,
         )
     microphysics_config = _build_microphysics_config(
-        args.microphysics, args.homogeneous_ice_nucleation)
+        args.microphysics, args.homogeneous_ice_nucleation,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=args.hard_sat_max_heating_k)
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
