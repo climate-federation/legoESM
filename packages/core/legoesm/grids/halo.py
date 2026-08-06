@@ -1156,6 +1156,10 @@ def pad_halo_vector_4d(
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
     duogrid=None,
+    cos_theta: jax.Array | None = None,
+    sin_theta: jax.Array | None = None,
+    cos_theta_padded: jax.Array | None = None,
+    sin_theta_padded: jax.Array | None = None,
     monotone_clip: bool = False,
     monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
@@ -1165,10 +1169,27 @@ def pad_halo_vector_4d(
     Inputs are (6, n, n, nlev); rotation angles are (6, n, n) and get
     broadcast over the trailing level axis.
 
+    ``cos_theta``/``sin_theta`` (2026-08-04): COVARIANT components on
+    non-orthogonal cells, same semantics as :func:`pad_halo_vector`.  The
+    4D covariant branch requires ``cos_theta_padded``/``sin_theta_padded``
+    (the faithful signed metric halo, e.g. from
+    ``legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d``) — there is
+    no legacy sign-blind fallback here, deliberately.
+
     Returns
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector_4d: pass BOTH cos_theta and sin_theta or "
+            "neither; one alone silently selects the orthogonal rotation.")
+    covariant = cos_theta is not None and sin_theta is not None
+    if covariant and (cos_theta_padded is None or sin_theta_padded is None):
+        raise ValueError(
+            "pad_halo_vector_4d covariant branch requires "
+            "cos_theta_padded/sin_theta_padded (signed metric halo); "
+            "pass them from pad_halo_dgrid_cell_scalar_4d.")
     # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
     # non-square guard.  Vector halo also assumes square (n, n) per
     # face — all internal kernels and the SPMD/MPI dispatches share
@@ -1185,6 +1206,11 @@ def pad_halo_vector_4d(
         )
     # SPMD dispatch: pack both components into a single collective.
     if _halo_backend == "spmd" and _spmd_mesh is not None and halo == 1:
+        if covariant:
+            raise NotImplementedError(
+                "pad_halo_vector_4d covariant branch is not wired into the "
+                "SPMD halo=1 fast path; it would silently run the "
+                "orthogonal rotation.")
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
@@ -1208,8 +1234,17 @@ def pad_halo_vector_4d(
     ca = cos_angle[..., None]
     sa = sin_angle[..., None]
     # Step 1: convert to geographic
-    u_east = ca * u_data - sa * v_data
-    v_north = sa * u_data + ca * v_data
+    if covariant:
+        # Covariant components on non-orthogonal cells (mirror of the 2D
+        # pad_halo_vector branch): V.x_hat = u, V.y_hat = (v - ct*u)/st.
+        _eps32 = float(jnp.finfo(jnp.float32).eps)
+        ct = cos_theta[..., None]
+        st = jnp.maximum(sin_theta, _eps32)[..., None]
+        u_east = ca * u_data + sa * (u_data * ct - v_data) / st
+        v_north = sa * u_data + ca * (v_data - u_data * ct) / st
+    else:
+        u_east = ca * u_data - sa * v_data
+        v_north = sa * u_data + ca * v_data
     # Step 2: pad as scalars.
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
@@ -1256,8 +1291,21 @@ def pad_halo_vector_4d(
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
-    u_padded = cap * u_east_padded + sap * v_north_padded
-    v_padded = -sap * u_east_padded + cap * v_north_padded
+    if covariant:
+        # Reconstruct COVARIANT components in the halo using the SIGNED
+        # padded non-orthogonality metrics (cos-type flips across
+        # quarter-turn seams — see pad_halo_dgrid_cell_scalar_4d).
+        ct_pad = cos_theta_padded[..., None] \
+            if cos_theta_padded.ndim == 3 else cos_theta_padded
+        st_pad = sin_theta_padded[..., None] \
+            if sin_theta_padded.ndim == 3 else sin_theta_padded
+        cos_beta = cap * ct_pad - sap * st_pad
+        sin_beta = sap * ct_pad + cap * st_pad
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = cos_beta * u_east_padded + sin_beta * v_north_padded
+    else:
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = -sap * u_east_padded + cap * v_north_padded
     return u_padded, v_padded
 
 
@@ -2032,6 +2080,8 @@ def pad_halo_vector(
     duogrid=None,
     cos_theta: jax.Array | None = None,
     sin_theta: jax.Array | None = None,
+    cos_theta_padded: jax.Array | None = None,
+    sin_theta_padded: jax.Array | None = None,
     monotone_clip: bool = False,
     monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
@@ -2098,6 +2148,11 @@ def pad_halo_vector(
             f"pad_halo_vector, got {halo}")
 
     _EPS = float(jnp.finfo(jnp.float32).eps)
+
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector: pass BOTH cos_theta and sin_theta or neither; "
+            "one alone silently selects the orthogonal rotation (codex r18).")
 
     if cos_theta is not None and sin_theta is not None:
         # Non-orthogonal rotation (exact for cubed-sphere grids).
@@ -2173,16 +2228,27 @@ def pad_halo_vector(
         # Iter-838 (Codex stop-time review): replace `mode='edge'` padding
         # of `cos_theta`/`sin_theta` (same-face extension, loses cross-
         # face metric values at panel boundaries) with proper cross-face
-        # halo exchange via `pad_halo`.  The non-orthogonality metrics
-        # are scalar cell-centre fields, continuous across panel seams,
-        # but their numerical values on face F's halo at a seam with
-        # face G should come from G's metric, not a copy of F's.  Matches
-        # Fortran's halo-exchanged `gridstruct%sin_sg(:,:,5)` /
-        # `cos_sg(:,:,5)` semantics at panel boundaries.
-        ct_pad = pad_halo(cos_theta, halo=halo, interp_offsets=interp_offsets,
-                          duogrid=duogrid)
-        st_pad = pad_halo(sin_theta, halo=halo, interp_offsets=interp_offsets,
-                          duogrid=duogrid)
+        # halo exchange via `pad_halo`.
+        # 2026-08-04 CAVEAT on the iter-838 exchange: cos_theta is a
+        # COS-TYPE quantity (transforms like e_i.e_j) — across the eight
+        # quarter-turn seams the local-basis value is MINUS the
+        # neighbour's, and the sign-blind scalar `pad_halo` below misses
+        # that flip (its "matches Fortran cos_sg(:,:,5) semantics" claim
+        # was prose, never certified).  Callers wanting the faithful
+        # signed halo pass `cos_theta_padded`/`sin_theta_padded`
+        # (e.g. from legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d)
+        # which take precedence; the legacy exchange remains the default
+        # for byte-compatibility.
+        if cos_theta_padded is not None and sin_theta_padded is not None:
+            ct_pad = cos_theta_padded
+            st_pad = sin_theta_padded
+        else:
+            ct_pad = pad_halo(cos_theta, halo=halo,
+                              interp_offsets=interp_offsets,
+                              duogrid=duogrid)
+            st_pad = pad_halo(sin_theta, halo=halo,
+                              interp_offsets=interp_offsets,
+                              duogrid=duogrid)
         cos_beta = cap * ct_pad - sap * st_pad
         sin_beta = sap * ct_pad + cap * st_pad
         u_padded = cap * u_east_padded + sap * v_north_padded

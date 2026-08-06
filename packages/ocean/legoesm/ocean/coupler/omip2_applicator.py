@@ -1249,6 +1249,11 @@ def build_omip2_scan_block_fn(
                 seed_mass_flux_carry,
             )
             state = seed_mass_flux_carry(state, True)
+        if getattr(model.config, "store_salt_flux", False):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                seed_salt_flux_carry,
+            )
+            state = seed_salt_flux_carry(state, True)
         (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
         return state
 

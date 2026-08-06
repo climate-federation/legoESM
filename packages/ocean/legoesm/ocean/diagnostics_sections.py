@@ -363,6 +363,30 @@ class GatewayAccumulator(NamedTuple):
     volume: jnp.ndarray
     tracer: jnp.ndarray
     n: int
+    # EXACT advective salt transport sums [psu m^3/s], accumulated from the
+    # model's OWN stored column-integrated salt-flux pair (store_salt_flux)
+    # rather than the upwind estimate in ``tracer``.  ``None`` (the default,
+    # so legacy positional constructions keep working) means the accumulator
+    # was built without the exact channel; ``new_gateway_accumulator`` always
+    # allocates it.
+    #
+    # WHAT THE TWO CHANNELS' DIFFERENCE IS -- STATED PRECISELY (codex final-
+    # round RED 1): ``tracer`` applies donor-cell upwind values of the POST-
+    # STEP salinity to the stored mass flux, while ``salt_exact`` is the flux
+    # the step applied to the PRE-advection (mid-step) salinity with the
+    # limiter.  Their difference is therefore the face-scheme (upwind-vs-
+    # limiter) gap PLUS a one-step time-level/physics offset in the sampled
+    # salinity -- dominated by the scheme gap on a >1-step mean, but NOT a
+    # pure approximation-error measurement.  The EXACT channel alone is the
+    # budget-grade number.
+    salt_exact: jnp.ndarray | None = None
+    # How many of the ``n`` accumulated steps ALSO advanced ``salt_exact``
+    # (codex final-round RED 2): a caller may legally accumulate states
+    # without the stored pair (require_salt=False), and a preallocated zero
+    # that never advanced must never be WRITTEN as "the exact transport was
+    # zero".  The channel is COMPLETE -- and only then reportable -- when
+    # ``n_salt == n``.
+    n_salt: int = 0
 
     @property
     def volume_sv(self) -> jnp.ndarray:
@@ -373,6 +397,20 @@ class GatewayAccumulator(NamedTuple):
     def tracer_mean(self) -> jnp.ndarray:
         """Time-mean tracer transport per gateway [tracer-units * m^3/s]."""
         return self.tracer / max(self.n, 1)
+
+    @property
+    def salt_exact_mean(self) -> jnp.ndarray | None:
+        """Time-mean EXACT salt transport per gateway [psu m^3/s].
+
+        ``None`` when the channel was never allocated OR is INCOMPLETE
+        (``n_salt != n``): a mean over steps the channel did not observe
+        would report a fabricated (under-counted) transport as exact.
+        """
+        if self.salt_exact is None:
+            return None
+        if self.n_salt != self.n or self.n == 0:
+            return None
+        return self.salt_exact / max(self.n, 1)
 
     def as_dict(self) -> dict[str, tuple[float, float]]:
         """{gateway: (volume_Sv, tracer_transport)} time means."""
@@ -391,6 +429,7 @@ class GatewayAccumulator(NamedTuple):
 # ---------------------------------------------------------------------------
 _CUM_VOL_SUFFIX = "_vol_cumsum_m3s"
 _CUM_SALT_SUFFIX = "_salt_cumsum_psu_m3s"
+_CUM_SALT_EXACT_SUFFIX = "_salt_exact_cumsum_psu_m3s"
 
 # Fixed leading columns.  ``n_steps`` is the accumulator's OWN count, not the
 # model step index: the two agree only while every step accumulated, and the
@@ -411,6 +450,7 @@ def gateway_cumulative_columns(names) -> tuple[str, ...]:
     for nm in names:
         cols.append(f"{nm}{_CUM_VOL_SUFFIX}")
         cols.append(f"{nm}{_CUM_SALT_SUFFIX}")
+        cols.append(f"{nm}{_CUM_SALT_EXACT_SUFFIX}")
     return tuple(cols)
 
 
@@ -431,15 +471,30 @@ def format_gateway_cumulative_row(acc: GatewayAccumulator, step: int,
     """
     vol = [float(v) for v in acc.volume]
     tr = [float(v) for v in acc.tracer]
-    if len(vol) != len(acc.names) or len(tr) != len(acc.names):
+    if acc.salt_exact is None:
         raise ValueError(
-            f"gateway accumulator has {len(vol)} volume / {len(tr)} tracer "
-            f"entries for {len(acc.names)} names -- the row would be "
-            f"mis-assigned to the header built from those names.")
+            "format_gateway_cumulative_row: accumulator has no salt_exact "
+            "channel; the CSV schema carries the exact-salt column "
+            "unconditionally, so a legacy accumulator cannot be dumped "
+            "(build it with new_gateway_accumulator).")
+    # INCOMPLETE exact channel (n_salt != n): the cumulative sums did not
+    # observe every accumulated step, so differencing them would fabricate a
+    # rate.  ``nan`` poisons any arithmetic honestly (codex final RED 2); the
+    # production driver passes require_salt=True, keeping the channel
+    # complete, so a nan here is itself a diagnostic.
+    _complete = acc.n_salt == acc.n
+    se = [float(v) if _complete else float("nan") for v in acc.salt_exact]
+    if len(vol) != len(acc.names) or len(tr) != len(acc.names) \
+            or len(se) != len(acc.names):
+        raise ValueError(
+            f"gateway accumulator has {len(vol)} volume / {len(tr)} tracer / "
+            f"{len(se)} exact-salt entries for {len(acc.names)} names -- the "
+            f"row would be mis-assigned to the header built from those names.")
     cells = [str(int(step)), f"{float(day):.6f}", str(int(acc.n))]
     for i in range(len(acc.names)):
         cells.append(repr(vol[i]))
         cells.append(repr(tr[i]))
+        cells.append(repr(se[i]))
     return ",".join(cells)
 
 
@@ -455,7 +510,7 @@ def new_gateway_accumulator(names: tuple[str, ...]) -> GatewayAccumulator:
     """
     dt = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
     z = jnp.zeros((len(names),), dtype=dt)
-    return GatewayAccumulator(tuple(names), z, z, 0)
+    return GatewayAccumulator(tuple(names), z, z, 0, salt_exact=z, n_salt=0)
 
 
 @jax.jit
@@ -473,6 +528,25 @@ def _accumulate_jit(vol_acc, tr_acc, mfu, mfv, dy_u, dx_v,
           + jnp.sum(wv * mfv[None] * tracer_v[None], axis=(1, 2, 3)))
     return (vol_acc + vol.astype(vol_acc.dtype),
             tr_acc + tr.astype(tr_acc.dtype))
+
+
+@jax.jit
+def _accumulate_salt_exact_jit(se_acc, sfu2, sfv2, dy_u, dx_v,
+                               u_sel_stack, u_sign, v_sel_stack, v_sign):
+    """Exact-salt accumulation from the stored COLUMN-INTEGRATED pair.
+
+    ``sfu2``/``sfv2`` are 2-D [psu m^2/s] (already thickness-weighted and
+    vertically summed by the model), so the face transport is simply
+    ``flux * face_length`` -- the same metric convention as the volume path,
+    minus the level axis.
+    """
+    wu = (u_sel_stack.astype(sfu2.dtype) * u_sign[None, :, :]
+          * dy_u.astype(sfu2.dtype)[None, :, :])
+    wv = (v_sel_stack.astype(sfv2.dtype) * v_sign[None, :, :]
+          * dx_v.astype(sfv2.dtype)[None, :, :])
+    se = (jnp.sum(wu * sfu2[None], axis=(1, 2))
+          + jnp.sum(wv * sfv2[None], axis=(1, 2)))
+    return se_acc + se.astype(se_acc.dtype)
 
 
 class GatewayStack(NamedTuple):
@@ -504,8 +578,24 @@ def accumulate_gateways(acc: GatewayAccumulator, stack: GatewayStack,
                         mfu: jnp.ndarray, mfv: jnp.ndarray,
                         dy_u: jnp.ndarray, dx_v: jnp.ndarray,
                         tracer_u: jnp.ndarray,
-                        tracer_v: jnp.ndarray) -> GatewayAccumulator:
-    """Add one timestep's transports to ``acc`` (pure; returns a new carry)."""
+                        tracer_v: jnp.ndarray,
+                        salt_flux_u2: jnp.ndarray | None = None,
+                        salt_flux_v2: jnp.ndarray | None = None
+                        ) -> GatewayAccumulator:
+    """Add one timestep's transports to ``acc`` (pure; returns a new carry).
+
+    ``salt_flux_u2``/``salt_flux_v2`` (both or neither): the model's stored
+    column-integrated advective salt-flux pair [psu m^2/s], accumulated into
+    ``acc.salt_exact`` alongside the upwind estimate in ``acc.tracer`` (their
+    difference = face-scheme gap PLUS a one-step salinity time-level offset;
+    see the ``salt_exact`` field comment).
+    Passing them into an accumulator built WITHOUT the exact channel
+    (``salt_exact is None``) raises -- silently dropping the exact numbers a
+    caller supplied is the silent-downgrade defect class again (#1442 codex
+    r6 RED 3).  Passing NEITHER leaves ``salt_exact`` untouched (None stays
+    None; an allocated channel simply does not advance -- REFUSED instead at
+    the gateway_step level, which knows the driver's intent).
+    """
     if tuple(stack.names) != tuple(acc.names):
         raise ValueError(
             f"gateway stack names {stack.names} do not match the accumulator's "
@@ -522,11 +612,37 @@ def accumulate_gateways(acc: GatewayAccumulator, stack: GatewayStack,
             f"gateway stack selector shapes {stack.u_sel.shape[1:]}/"
             f"{stack.v_sel.shape[1:]} do not match the flux fields "
             f"{mfu.shape[:2]}/{mfv.shape[:2]}.")
+    if (salt_flux_u2 is None) != (salt_flux_v2 is None):
+        raise ValueError(
+            "accumulate_gateways: salt_flux_u2 and salt_flux_v2 must be "
+            "passed together (got one of the pair).")
+    if salt_flux_u2 is not None and acc.salt_exact is None:
+        raise ValueError(
+            "accumulate_gateways: exact salt fluxes were passed but this "
+            "accumulator has no salt_exact channel (built by a legacy "
+            "constructor?).  Use new_gateway_accumulator, or drop the pair.")
+    if salt_flux_u2 is not None:
+        if jnp.shape(salt_flux_u2) != jnp.shape(mfu)[:2] \
+                or jnp.shape(salt_flux_v2) != jnp.shape(mfv)[:2]:
+            raise ValueError(
+                f"accumulate_gateways: salt-flux pair shapes "
+                f"{jnp.shape(salt_flux_u2)}/{jnp.shape(salt_flux_v2)} do not "
+                f"match the face grids {jnp.shape(mfu)[:2]}/"
+                f"{jnp.shape(mfv)[:2]} (expect the COLUMN-INTEGRATED 2-D "
+                "pair, not the 3-D fluxes).")
     vol, tr = _accumulate_jit(
         acc.volume, acc.tracer, mfu, mfv, dy_u, dx_v,
         stack.u_sel, stack.u_sign, stack.v_sel, stack.v_sign,
         tracer_u, tracer_v)
-    return GatewayAccumulator(acc.names, vol, tr, acc.n + 1)
+    se = acc.salt_exact
+    n_salt = acc.n_salt
+    if salt_flux_u2 is not None:
+        se = _accumulate_salt_exact_jit(
+            acc.salt_exact, salt_flux_u2, salt_flux_v2, dy_u, dx_v,
+            stack.u_sel, stack.u_sign, stack.v_sel, stack.v_sign)
+        n_salt = acc.n_salt + 1
+    return GatewayAccumulator(acc.names, vol, tr, acc.n + 1, salt_exact=se,
+                              n_salt=n_salt)
 
 
 # Selectable provenance for :func:`mass_fluxes_from_state`.  An unknown value
@@ -714,8 +830,15 @@ def promote_gateway_geometry(grid, *, metric_convention: str = "exact"):
 
 def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
                  geom, *, min_water_column_m: float | None = None,
-                 source: str = "auto") -> GatewayAccumulator:
+                 source: str = "auto",
+                 require_salt: bool = False) -> GatewayAccumulator:
     """Accumulate ONE timestep from a post-step state.  Pure: reads only.
+
+    ``require_salt``: refuse a state without the stored EXACT salt-flux pair
+    (``store_salt_flux``) instead of silently accumulating upwind-only -- the
+    driver that enabled the capture passes True.  Default False keeps every
+    legacy caller (states predating the slots) working, with ``salt_exact``
+    advancing only when the pair is present.
 
     ``source`` is forwarded to :func:`mass_fluxes_from_state`.  A driver that
     KNOWS it enabled ``store_mass_flux`` should pass ``source="stored"``: then
@@ -769,6 +892,25 @@ def gateway_step(acc: GatewayAccumulator, stack: GatewayStack, state, z_coord,
         state, z_coord, geom, min_water_column_m=min_water_column_m,
         source=source)
     tr_u, tr_v = upwind_face_values(state.S.data, mfu, mfv, geom)
+    # EXACT salt channel: the model's own stored column-integrated advective
+    # salt-flux pair (store_salt_flux).  ``require_salt`` is the driver's
+    # promise-enforcement, exactly like source="stored" for the mass flux: a
+    # config path that silently disabled the capture must RAISE, not quietly
+    # downgrade the exact channel to upwind-only (#1442 codex r6 RED 3).
+    sfu = getattr(state, "salt_flux_u_int", None)
+    sfv = getattr(state, "salt_flux_v_int", None)
+    _has_salt = sfu is not None and sfv is not None
+    if require_salt and not _has_salt:
+        raise ValueError(
+            "gateway_step(require_salt=True): the state carries no "
+            "salt_flux_u_int/salt_flux_v_int.  Set "
+            "LatLonCGridOceanConfig.store_salt_flux=True on the run, or drop "
+            "require_salt to accumulate the upwind estimate only.")
+    if _has_salt:
+        return accumulate_gateways(
+            acc, stack, mfu, mfv,
+            jnp.asarray(geom.dy_u), jnp.asarray(geom.dx_v), tr_u, tr_v,
+            salt_flux_u2=sfu.data, salt_flux_v2=sfv.data)
     return accumulate_gateways(acc, stack, mfu, mfv,
                                jnp.asarray(geom.dy_u), jnp.asarray(geom.dx_v),
                                tr_u, tr_v)

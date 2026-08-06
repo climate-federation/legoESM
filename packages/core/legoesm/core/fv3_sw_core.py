@@ -620,7 +620,7 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
-def d2a2c_d_to_a(u_d, v_d, cdgrid):
+def d2a2c_d_to_a(u_d, v_d, cdgrid, covariant_halo=False):
     """D-grid → A-grid covariant step of d2a2c (Steps 1+2), verbatim.
 
     utmp/vtmp = covariant cell-centre winds (2nd-order base, 4th-order
@@ -631,17 +631,49 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
     ``tiled_padded_block`` (h2) slice — no staggered D-wind halo needed.
     """
     n = cdgrid.n
-    npt = min(4, n // 2)
+    # Fortran npt is FIXED at 4 for grid_type<3 non-bounded (sw_core.F90:3410);
+    # the band bounds below clamp it away for n<7 exactly as Fortran's
+    # max/min loop limits do.  The old min(4, n//2) invented a nonzero band
+    # at n=4..6 where Fortran has none (codex r18).
+    npt = 4
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
-    if n > 2 * npt and npt > 0:
+    # Fourth-order band: Fortran covers cells max(npt,js-1)..min(npy-npt,je+1)
+    # = 0-based 3..n-4 at npt=4 (sw_core.F90:3460-3468).  The pre-2026-08-04
+    # slice [npt : n-npt] was OFF BY ONE at both ends (codex r18 CONFIRMED:
+    # at C8 it left ZERO fourth-order rows where Fortran has two).
+    if n > 2 * npt - 2 and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        utmp = utmp.at[:, :, npt - 1:n - npt + 1].set(
+            u4[:, :, npt - 2:n - npt])
         v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+        vtmp = vtmp.at[:, npt - 1:n - npt + 1, :].set(
+            v4[:, npt - 2:n - npt, :])
     grid = cdgrid.base
+    if covariant_halo:
+        # 2026-08-04: utmp/vtmp are COVARIANT cell-centre winds, but the
+        # default exchange below runs pad_halo_vector's ORTHOGONAL branch
+        # (no cos_theta/sin_theta) — the repo's own long-standing
+        # "silently wrong at seams" note.  The covariant branch converts
+        # through geographic components exactly, and its back-rotation
+        # gets the SIGNED cross-seam metric halo (cos-type quarter-turn
+        # flip) instead of the sign-blind iter-838 scalar exchange.
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        ct_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.cosa_cell[..., None], cos_type=True, halo=2)[..., 0]
+        st_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.sina_cell[..., None], cos_type=False, halo=2)[..., 0]
+        return pad_halo_vector(
+            utmp, vtmp,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+            cos_theta=cdgrid.cosa_cell, sin_theta=cdgrid.sina_cell,
+            cos_theta_padded=ct_pad, sin_theta_padded=st_pad,
+        )
     return pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
@@ -651,7 +683,7 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
     )
 
 
-def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
+def d2a2c_d_to_a_4d(u_d, v_d, cdgrid, covariant_halo=False):
     """4D (all-levels-one-message) :func:`d2a2c_d_to_a` (#811).
 
     The D→A covariant averages are pure-local — they slice ``u_d``/``v_d`` on the
@@ -667,17 +699,42 @@ def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
     ``(utmp_pad, vtmp_pad)`` each ``(6, n+4, n+4, nlev)``.
     """
     n = cdgrid.n
-    npt = min(4, n // 2)
+    # Fortran npt is FIXED at 4 for grid_type<3 non-bounded (sw_core.F90:3410);
+    # the band bounds below clamp it away for n<7 exactly as Fortran's
+    # max/min loop limits do.  The old min(4, n//2) invented a nonzero band
+    # at n=4..6 where Fortran has none (codex r18).
+    npt = 4
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n, nlev)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    if n > 2 * npt and npt > 0:
+    # Fourth-order band: Fortran covers cells max(npt,js-1)..min(npy-npt,je+1)
+    # = 0-based 3..n-4 at npt=4 (sw_core.F90:3460-3468).  The pre-2026-08-04
+    # slice [npt : n-npt] was OFF BY ONE at both ends (codex r18 CONFIRMED:
+    # at C8 it left ZERO fourth-order rows where Fortran has two).
+    if n > 2 * npt - 2 and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        utmp = utmp.at[:, :, npt - 1:n - npt + 1].set(
+            u4[:, :, npt - 2:n - npt])
         v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+        vtmp = vtmp.at[:, npt - 1:n - npt + 1, :].set(
+            v4[:, npt - 2:n - npt, :])
     grid = cdgrid.base
+    if covariant_halo:
+        from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+        ct_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.cosa_cell[..., None], cos_type=True, halo=2)[..., 0]
+        st_pad = pad_halo_dgrid_cell_scalar_4d(
+            cdgrid.sina_cell[..., None], cos_type=False, halo=2)[..., 0]
+        return pad_halo_vector_4d(
+            utmp, vtmp,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+            cos_theta=cdgrid.cosa_cell, sin_theta=cdgrid.sina_cell,
+            cos_theta_padded=ct_pad, sin_theta_padded=st_pad,
+        )
     return pad_halo_vector_4d(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
@@ -685,6 +742,112 @@ def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
         interp_offsets=grid.halo_interp_offsets_h2,
         halo=2,
     )
+
+
+def _d2a2c_local_ghost_ring_4d(u_d, v_d, cdgrid, u_d_pad=None, v_d_pad=None):
+    """Fortran-faithful LOCAL ghost-ring D→A (s3, 2026-08-04) — 4D core.
+
+    Fortran ``d2a2c_vect`` computes utmp/vtmp LOCALLY over the full data
+    domain from the mpp-haloed COVARIANT D winds — its 0.5-average edge
+    bands at ``jsd < npt`` etc. cover exactly the ghost rows/columns
+    (sw_core.F90:3474-3508; certified NumPy port
+    fv3_native_sw_core.py:212-243) — and then evaluates the ghost-ring
+    ua/va with real metrics (:3512-3517).  The legacy JAX route instead
+    computes PHYSICAL utmp/vtmp and halos the A-grid values through the
+    geographic ``pad_halo_vector`` — a different operator at panel seams.
+
+    The D-halo ghosts delivered by :func:`pad_halo_dgrid_vector_4d` are
+    COVARIANT components in the LOCAL face frame (node-axis ghosts one
+    row beyond the shared seam, half-turn signs) — certified value-level
+    against ``analytic_swcore_state``'s mpp-equivalent halos
+    (fv3_recon/transplant2_9311777.log, TRANSPLANT_VEC=PASS).  A local
+    two-point average at a ghost cell over those ghosts is therefore
+    PRECISELY Fortran's ghost-utmp/vtmp semantics.
+
+    Banding: the 4th-order interpolation applies on the Fortran block —
+    0-based cells ``[npt-1, n-npt]`` (= ``[3, n-4]`` at the fixed
+    ``npt=4``) in BOTH axes; everywhere else INCLUDING the ghost ring is
+    the 0.5 two-point average.  Note the Fortran band restricts the
+    TRANSVERSE axis too (utmp i-range ``max(npt,isd)..min(npx-npt,ied)``,
+    oracle :213-220); the legacy :func:`d2a2c_d_to_a` band is transverse-
+    unrestricted — a separate latent deviation deliberately left
+    untouched here (default path byte-stable).
+
+    Corner handling: the Fortran utmp/vtmp corner MIRRORS
+    (sw_core.F90:3527-3546/:3620-3639; oracle :252-259/:325-340) are NOT
+    ported: Fortran computes the full-domain UA/VA (:3512-3517, oracle
+    :246-249) BEFORE those mirrors run, and the mirror-written slots
+    (0-based i or j in {-3..-1, n..n+2} corner-adjacent bands) never
+    enter the ring-1 side cells built here (side ghosts at PHYSICAL
+    transverse positions read only side-strip D ghosts).  The UA/VA
+    corner OVERRIDES (oracle :277-284/:333-340) touch only diagonal /
+    ring-2 slots; here the four ring DIAGONAL cells are POISONED at
+    ``SG_BIG_NUMBER`` instead (the divergence-corner consumer provably
+    masks them; a reader fails loudly).
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1, nlev); v_d : (6, n+1, n, nlev)
+        FV3-COVARIANT D winds (physical).
+    u_d_pad, v_d_pad : optional precomputed DGRID_NE-padded winds,
+        (6, n+2, n+3, nlev) / (6, n+3, n+2, nlev) — the ``global_fields=``
+        idiom: the divergence lane already exchanges these, so passing
+        them avoids a second halo exchange.  When omitted the exchange is
+        issued here.
+
+    Returns
+    -------
+    (utmp, vtmp, ua, va) : each (6, n+2, n+2, nlev)
+        1-ring extended lattice, physical cells at ``[1:-1, 1:-1]``; ua/va
+        ring diagonals poisoned.
+    """
+    from legoesm.grids.dgrid_halo import (
+        SG_BIG_NUMBER,
+        pad_halo_dgrid_cell_scalar_4d,
+        pad_halo_dgrid_vector_4d,
+    )
+    n = cdgrid.n
+    if u_d_pad is None or v_d_pad is None:
+        u_d_pad, v_d_pad = pad_halo_dgrid_vector_4d(u_d, v_d)
+    if u_d_pad.shape[1:3] != (n + 2, n + 3) or \
+            v_d_pad.shape[1:3] != (n + 3, n + 2):
+        raise ValueError(
+            "u_d_pad/v_d_pad must be DGRID_NE h1-padded winds "
+            f"(6, n+2, n+3, nlev)/(6, n+3, n+2, nlev); got "
+            f"{tuple(u_d_pad.shape)} / {tuple(v_d_pad.shape)}")
+
+    # 0.5 two-point average over the FULL 1-ring lattice (Fortran edge
+    # bands INCLUDING ghost rows/columns).
+    utmp = 0.5 * (u_d_pad[:, :, :-1] + u_d_pad[:, :, 1:])   # (6, n+2, n+2, ·)
+    vtmp = 0.5 * (v_d_pad[:, :-1, :] + v_d_pad[:, 1:, :])
+    npt = 4  # FIXED for grid_type<3 non-bounded (sw_core.F90:3410)
+    if n > 2 * npt - 2:
+        # u4[..., m] is the 4th-order utmp for 0-based cell j == m (padded
+        # node window m..m+3 == nodes m-1..m+2); v4 mirrored on i.
+        u4 = (_A2 * (u_d_pad[:, :, :-3] + u_d_pad[:, :, 3:])
+              + _A1 * (u_d_pad[:, :, 1:-2] + u_d_pad[:, :, 2:-1]))
+        v4 = (_A2 * (v_d_pad[:, :-3, :] + v_d_pad[:, 3:, :])
+              + _A1 * (v_d_pad[:, 1:-2, :] + v_d_pad[:, 2:-1, :]))
+        lo, hi = npt, n - npt + 2       # padded-cell slice == cells [3, n-4]
+        utmp = utmp.at[:, lo:hi, lo:hi].set(
+            u4[:, lo:hi, npt - 1:n - npt + 1])
+        vtmp = vtmp.at[:, lo:hi, lo:hi].set(
+            v4[:, npt - 1:n - npt + 1, lo:hi])
+
+    # ua/va over the ring with REAL cross-seam cell metrics (cos-type odd,
+    # rsin even — the certified pad_halo_dgrid_cell_scalar_4d law).
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    cos1 = pad_halo_dgrid_cell_scalar_4d(
+        cos_sg5[..., None], cos_type=True, halo=1)[..., 0]
+    rs1 = pad_halo_dgrid_cell_scalar_4d(
+        cdgrid.rsin2_cell[..., None], cos_type=False, halo=1)[..., 0]
+    ua = (utmp - vtmp * cos1[..., None]) * rs1[..., None]
+    va = (vtmp - utmp * cos1[..., None]) * rs1[..., None]
+    for _ii in (0, -1):
+        for _jj in (0, -1):
+            ua = ua.at[:, _ii, _jj, :].set(SG_BIG_NUMBER)
+            va = va.at[:, _ii, _jj, :].set(SG_BIG_NUMBER)
+    return utmp, vtmp, ua, va
 
 
 def d2a2c_uc_4th_local(utmp_pad):
@@ -1352,22 +1515,72 @@ class _D2A2CFields(NamedTuple):
     ss_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg S, h1 halo
 
 
-def d2a2c_global_fields(u_d, v_d, cdgrid):
+def d2a2c_global_fields(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                        covariant_halo=False, local_ghost_d2a=False,
+                        u_d_pad=None, v_d_pad=None):
     """Compute the global padded fields the A→C step (and the tiled stage)
     consume: D→A covariant winds (:func:`d2a2c_d_to_a`), the A-grid
     contravariant ua/va, the staggered dx/dy, and the halo-padded sin_sg
     edge components.  Single source for both d2a2c_vect and the tiled
     per-tile kernels (P4 phase-1b approach C — the tiled stage runs the cheap
-    D→A globally then shards these into the per-tile A→C)."""
+    D→A globally then shards these into the per-tile A→C).
+
+    ``real_metric_ghosts`` (2026-08-04): Fortran evaluates the ghost-ring
+    ua/va (sw_core.F90:3513, spans TWO ghost rings) with REAL gridstruct halo
+    metrics; the default ``mode='edge'`` pads replicate the edge value
+    instead, corrupting every ghost-ring ua/va a consumer reads across a
+    panel seam (the ``divergence_corner`` O(1/dx) boundary residual).  True
+    switches cosa_s/rsin2 to the faithful cross-seam ring
+    (:func:`~legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d`,
+    cos-type sign law).  Default False = bit-identical legacy behaviour.
+
+    ``local_ghost_d2a`` (s3, 2026-08-04): construct utmp/vtmp Fortran's
+    way via :func:`_d2a2c_local_ghost_ring_4d` — LOCAL D→A over a 1-ring
+    lattice from DGRID_NE-haloed covariant D winds — instead of
+    compute-then-A-halo.  Requires ``real_metric_ghosts=True``.  The
+    returned h2 containers carry VALID ring-1 + physical values and a
+    POISONED (``SG_BIG_NUMBER``) outer ring-2: ring-2/3 slots are consumed
+    only by d2a2c_vect's A→C tail (edge_interpolate4 / C1C2C3 stencils),
+    which the opting-in divergence lane does not run — a consumer that
+    reads them fails loudly.  ``u_d_pad``/``v_d_pad`` optionally pass the
+    already-exchanged DGRID_NE winds (``global_fields=`` idiom, avoids a
+    second exchange).  ``covariant_halo`` is inert in this mode (no A-grid
+    wind exchange is issued at all)."""
     grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
-    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
-    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    if local_ghost_d2a:
+        if not real_metric_ghosts:
+            raise ValueError(
+                "local_ghost_d2a=True requires real_metric_ghosts=True: the "
+                "local-ghost ring is defined with the faithful cross-seam "
+                "cell metrics; a mixed mode would silently blend semantics")
+        from legoesm.grids.dgrid_halo import SG_BIG_NUMBER
+        utmp1, vtmp1, ua1, va1 = _d2a2c_local_ghost_ring_4d(
+            u_d[..., None], v_d[..., None], cdgrid,
+            u_d_pad=None if u_d_pad is None else u_d_pad[..., None],
+            v_d_pad=None if v_d_pad is None else v_d_pad[..., None])
+        pad = [(0, 0), (1, 1), (1, 1)]
+        utmp_pad = jnp.pad(utmp1[..., 0], pad, constant_values=SG_BIG_NUMBER)
+        vtmp_pad = jnp.pad(vtmp1[..., 0], pad, constant_values=SG_BIG_NUMBER)
+        ua_pad = jnp.pad(ua1[..., 0], pad, constant_values=SG_BIG_NUMBER)
+        va_pad = jnp.pad(va1[..., 0], pad, constant_values=SG_BIG_NUMBER)
+    else:
+        utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid,
+                                          covariant_halo=covariant_halo)
+        if real_metric_ghosts:
+            from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+            cos_sg5_pad = pad_halo_dgrid_cell_scalar_4d(
+                cos_sg5[..., None], cos_type=True, halo=h)[..., 0]
+            rsin2_pad = pad_halo_dgrid_cell_scalar_4d(
+                rsin2[..., None], cos_type=False, halo=h)[..., 0]
+        else:
+            cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)],
+                                  mode='edge')
+            rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+        ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+        va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
     dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
     offsets = grid.halo_interp_offsets
@@ -1380,7 +1593,9 @@ def d2a2c_global_fields(u_d, v_d, cdgrid):
                         sn_pad_y, ss_pad_y)
 
 
-def d2a2c_ua_va_halo(u_d, v_d, cdgrid):
+def d2a2c_ua_va_halo(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                     covariant_halo=False, local_ghost_d2a=False,
+                     u_d_pad=None, v_d_pad=None):
     """FV3 D->A ``ua``/``va`` with exactly ONE A-grid halo ring.
 
     The corner-divergence routine needs A-grid winds that already carry a
@@ -1393,23 +1608,49 @@ def d2a2c_ua_va_halo(u_d, v_d, cdgrid):
     ``(6, n+2, n+2)`` -- physical cells at ``[1:-1, 1:-1]`` -- sliced from
     the h2 ring that :func:`d2a2c_global_fields` already computes, so no
     additional halo exchange is issued.
+
+    ``real_metric_ghosts=True`` (2026-08-04): the ring is evaluated with the
+    faithful cross-seam cosa_s/rsin2 halo instead of edge replication (see
+    :func:`d2a2c_global_fields`).  The four ring CORNER cells are then
+    poisoned (SG_BIG_NUMBER products) — FV3's fill-corner convention for
+    them is unverified here, and the divergence-corner consumer provably
+    masks them out; a reader that does consume them fails loudly.
+
+    ``local_ghost_d2a=True`` (s3, 2026-08-04): the ring comes from the
+    Fortran-faithful LOCAL ghost D→A (:func:`_d2a2c_local_ghost_ring_4d`)
+    instead of the compute-then-A-halo route; ``u_d_pad``/``v_d_pad``
+    optionally reuse an existing DGRID_NE exchange.
     """
-    fields = d2a2c_global_fields(u_d, v_d, cdgrid)
+    fields = d2a2c_global_fields(u_d, v_d, cdgrid,
+                                 real_metric_ghosts=real_metric_ghosts,
+                                 covariant_halo=covariant_halo,
+                                 local_ghost_d2a=local_ghost_d2a,
+                                 u_d_pad=u_d_pad, v_d_pad=v_d_pad)
     return fields.ua_pad[:, 1:-1, 1:-1], fields.va_pad[:, 1:-1, 1:-1]
 
 
-def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid):
+def d2a2c_ua_va_halo_4d(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                        covariant_halo=False, local_ghost_d2a=False,
+                        u_d_pad=None, v_d_pad=None):
     """All-levels-one-message counterpart of :func:`d2a2c_ua_va_halo`.
 
     Returns ``(6, n+2, n+2, nlev)``.  Uses :func:`d2a2c_global_fields_4d`,
     whose single vector halo covers every level in one message.
+    ``local_ghost_d2a``/``u_d_pad``/``v_d_pad``: see
+    :func:`d2a2c_ua_va_halo`.
     """
-    fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid)
+    fields = d2a2c_global_fields_4d(u_d, v_d, cdgrid,
+                                    real_metric_ghosts=real_metric_ghosts,
+                                    covariant_halo=covariant_halo,
+                                    local_ghost_d2a=local_ghost_d2a,
+                                    u_d_pad=u_d_pad, v_d_pad=v_d_pad)
     return (fields.ua_pad[:, 1:-1, 1:-1, :],
             fields.va_pad[:, 1:-1, 1:-1, :])
 
 
-def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
+def d2a2c_global_fields_4d(u_d, v_d, cdgrid, real_metric_ghosts=False,
+                           covariant_halo=False, local_ghost_d2a=False,
+                           u_d_pad=None, v_d_pad=None):
     """4D (all-levels-one-message) :func:`d2a2c_global_fields` (#811).
 
     The single VECTOR wind halo is done once via :func:`d2a2c_d_to_a_4d`; every
@@ -1420,17 +1661,48 @@ def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
     per-level version — so ``jax.vmap`` can map the wind fields (axis -1) and
     capture the constants (``None``) when running ``d2a2c_vect``'s A→C tail via
     its ``global_fields=`` fast path.
+
+    ``local_ghost_d2a``/``u_d_pad``/``v_d_pad`` (s3, 2026-08-04): see
+    :func:`d2a2c_global_fields` — Fortran-faithful local ghost D→A ring,
+    poisoned ring-2, requires ``real_metric_ghosts=True``.
     """
     grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(u_d, v_d, cdgrid)   # (6, n+4, n+4, nlev)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
-    # [..., None] broadcasts the 2D grid constant over the trailing level axis.
-    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]
-    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]
+    if local_ghost_d2a:
+        if not real_metric_ghosts:
+            raise ValueError(
+                "local_ghost_d2a=True requires real_metric_ghosts=True: the "
+                "local-ghost ring is defined with the faithful cross-seam "
+                "cell metrics; a mixed mode would silently blend semantics")
+        from legoesm.grids.dgrid_halo import SG_BIG_NUMBER
+        utmp1, vtmp1, ua1, va1 = _d2a2c_local_ghost_ring_4d(
+            u_d, v_d, cdgrid, u_d_pad=u_d_pad, v_d_pad=v_d_pad)
+        pad = [(0, 0), (1, 1), (1, 1), (0, 0)]
+        utmp_pad = jnp.pad(utmp1, pad, constant_values=SG_BIG_NUMBER)
+        vtmp_pad = jnp.pad(vtmp1, pad, constant_values=SG_BIG_NUMBER)
+        ua_pad = jnp.pad(ua1, pad, constant_values=SG_BIG_NUMBER)
+        va_pad = jnp.pad(va1, pad, constant_values=SG_BIG_NUMBER)
+    else:
+        utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(
+            u_d, v_d, cdgrid,
+            covariant_halo=covariant_halo)  # (6, n+4, n+4, nlev)
+        if real_metric_ghosts:
+            from legoesm.grids.dgrid_halo import pad_halo_dgrid_cell_scalar_4d
+            cos_sg5_pad = pad_halo_dgrid_cell_scalar_4d(
+                cos_sg5[..., None], cos_type=True, halo=h)[..., 0]
+            rsin2_pad = pad_halo_dgrid_cell_scalar_4d(
+                rsin2[..., None], cos_type=False, halo=h)[..., 0]
+        else:
+            cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)],
+                                  mode='edge')
+            rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+        # [..., None] broadcasts the 2D grid constant over the level axis.
+        ua_pad = ((utmp_pad - vtmp_pad * cos_sg5_pad[..., None])
+                  * rsin2_pad[..., None])
+        va_pad = ((vtmp_pad - utmp_pad * cos_sg5_pad[..., None])
+                  * rsin2_pad[..., None])
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
     dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
     offsets = grid.halo_interp_offsets

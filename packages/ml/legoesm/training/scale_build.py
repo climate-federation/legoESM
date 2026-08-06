@@ -315,8 +315,25 @@ def _build_mode_components_spectral(cfg, yml):
             nlev=nlev, hidden_dim=int(ov.get("nn_hidden", 256)),
             n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
 
+        # #1464: the learned arm has no momentum head, so without this it runs
+        # with NO surface turbulent drag while the `physics` arm it is scored
+        # against inherits TurbulenceConfig.scheme="smagorinsky". Opt-in so no
+        # existing campaign changes silently; `neural_gcm.surface_drag: true`
+        # in the campaign YAML makes the two arms differ in thermodynamics
+        # only. Built ONCE here, not per make_physics_fn call, so the closure
+        # is a compile-time constant.
+        _drag_fn = None
+        if bool(ov.get("surface_drag", False)):
+            from legoesm.training.neural_gcm_spectral import (
+                make_turbulence_only_spectral_physics,
+            )
+            _drag_fn = make_turbulence_only_spectral_physics(
+                dt, turbulence_scheme=str(ov.get("surface_drag_scheme",
+                                                 "smagorinsky")))
+
         def make_physics_fn(p):
-            return make_column_mlp_spectral_physics(p, grid)
+            return make_column_mlp_spectral_physics(
+                p, grid, momentum_physics_fn=_drag_fn)
         uses_forcing = True
 
     elif cfg.mode == "sfno":

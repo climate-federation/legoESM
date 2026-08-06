@@ -26,7 +26,7 @@ def test_minimal_config_validates():
     assert cfg.grid["type"] == "latlon"
     assert cfg.forcing["k_neighbors"] == 4                # default applied
     assert cfg.restart["from"] == ""                       # default applied
-    assert cfg.land_frac_min == 0.5                        # default applied
+    assert cfg.land_frac_min == 0.0                        # default: any surfdata land (no arbitrary cutoff)
 
 
 def test_missing_required_field_raises():
@@ -41,6 +41,40 @@ def test_bad_grid_type_raises():
     bad["grid"]["type"] = "voronoi"
     with pytest.raises(ValueError, match="grid.type"):
         validate_config(bad)
+
+
+def test_simple_seb_plus_most_now_accepted():
+    # land/stable fixed SimpleSEB cold-start stability (amip_sota runs this
+    # pairing), so the prior blanket rejection is gone.  (main re-adds a
+    # rejection each sync; this branch keeps the pairing accepted — see the
+    # merge note.  LMIP production uses two_leaf_canopy+most, unaffected either way.)
+    cfg_in = _minimal()
+    cfg_in["physics"]["bulk_scheme"] = "most"        # simple_seb + most
+    cfg = validate_config(cfg_in)
+    assert cfg.physics["bulk_scheme"] == "most"
+
+
+def test_physics_knob_defaults():
+    cfg = validate_config(_minimal())
+    p = cfg.physics
+    assert p["stomatal_model"] == "ball_berry"       # canopy leaf conductance model
+    assert p["stomata_enabled"] is False             # SimpleSEB Jarvis off (amip_sota)
+    assert p["snow_albedo_feedback"] is True
+    assert p.get("vc_max25") is None                 # None -> per-PFT / land default
+
+
+def test_freeze_thaw_defaults_off():
+    # Off by default = bit-identical sensible-only soil heat (no behaviour change
+    # for existing configs that don't mention it).
+    cfg = validate_config(_minimal())
+    assert cfg.physics["enable_freeze_thaw"] is False
+
+
+def test_freeze_thaw_override_on():
+    ok = _minimal()
+    ok["physics"]["enable_freeze_thaw"] = True
+    cfg = validate_config(ok)
+    assert cfg.physics["enable_freeze_thaw"] is True
 
 
 def test_land_cover_dataset_defaults_to_clm5():
@@ -76,11 +110,29 @@ def test_land_use_change_unknown_key_raises():
         validate_config(bad)
 
 
-def test_simple_seb_plus_most_rejected_at_config_time():
+def test_freeze_thaw_non_bool_raises():
     bad = _minimal()
-    bad["physics"]["bulk_scheme"] = "most"
-    with pytest.raises(ValueError, match="simple_seb"):
+    bad["physics"]["enable_freeze_thaw"] = "yes"     # must be a real bool
+    with pytest.raises(ValueError, match="enable_freeze_thaw"):
         validate_config(bad)
+
+
+def test_bad_stomatal_model_raises():
+    bad = _minimal()
+    bad["physics"]["stomatal_model"] = "jarvis"      # not a canopy leaf model
+    with pytest.raises(ValueError, match="stomatal_model"):
+        validate_config(bad)
+
+
+def test_stomatal_calibration_bounds():
+    bad = _minimal()
+    bad["physics"]["vc_max25"] = 1000.0              # absurd
+    with pytest.raises(ValueError, match="vc_max25"):
+        validate_config(bad)
+    ok = _minimal()
+    ok["physics"].update(vc_max25=60.0, g1=9.0, gs_max=0.3)
+    cfg = validate_config(ok)
+    assert cfg.physics["vc_max25"] == 60.0
 
 
 def test_source_cru_jra_requires_data_dir():

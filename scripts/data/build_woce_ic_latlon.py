@@ -94,18 +94,9 @@ def regrid_curv_to_latlon(field_lev, src_lat2d, src_lon2d, ocean2d,
     return flat.reshape(tgt_lat1d.size, tgt_lon1d.size)
 
 
-def vertical_interp_to_woa(col_native, src_depths, woa_depths):
-    """Interp one column from native (NEMO) depths to WOA depths; NaN-safe.
-    Below the deepest valid native level the value is held (np.interp edge)."""
-    good = np.isfinite(col_native)
-    if good.sum() < 2:
-        return np.full(woa_depths.shape, np.nan)
-    return np.interp(woa_depths, src_depths[good], col_native[good])
-
-
 def build(woce_t, woce_s, out_dir, month=None):
     import xarray as xr
-    from legoesm.ocean.init_woa import WOA_DEPTHS
+    from legoesm.ocean.init_woa import WOA_DEPTHS, interp_column_to_depths
 
     dt = xr.open_dataset(woce_t, decode_times=False)
     ds_ = xr.open_dataset(woce_s, decode_times=False)
@@ -149,8 +140,8 @@ def build(woce_t, woce_s, out_dir, month=None):
     Sw = np.empty_like(Tw)
     for j in range(tgt_lat.size):
         for i in range(tgt_lon.size):
-            Tw[:, j, i] = vertical_interp_to_woa(Tll[:, j, i], src_z, WOA_DEPTHS)
-            Sw[:, j, i] = vertical_interp_to_woa(Sll[:, j, i], src_z, WOA_DEPTHS)
+            Tw[:, j, i] = interp_column_to_depths(Tll[:, j, i], src_z, WOA_DEPTHS)
+            Sw[:, j, i] = interp_column_to_depths(Sll[:, j, i], src_z, WOA_DEPTHS)
 
     # No-data sentinel = NaN (NOT 0).  Targets with no valid donor within max_deg
     # (continents / isolated cells) stay NaN, exactly as a real WOA18 land cell.

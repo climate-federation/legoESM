@@ -100,7 +100,8 @@ _GEOM_STATIC_FIELDS = frozenset(
 # v_mask_3d`` and the pole-wall ``v_mask[n_lat] == 0``, so the top row it
 # reconstructs as zero IS zero.  ``mass_flux_u`` is a u-face field (leading dim
 # n_lat, like ``u``) and correctly takes the default cell sharding.
-_V_STAGGERED_STATE_FIELDS = ("v", "v_mask", "mass_flux_v")
+_V_STAGGERED_STATE_FIELDS = ("v", "v_mask", "mass_flux_v",
+                             "salt_flux_v_int")
 
 
 def _geom_array_field_names(geom):
@@ -912,9 +913,12 @@ def make_sharded_ocean_step(model, mesh):
         # collectives below).
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             seed_mass_flux_carry,
+            seed_salt_flux_carry,
         )
         state = seed_mass_flux_carry(
             state, getattr(model.config, "store_mass_flux", False))
+        state = seed_salt_flux_carry(
+            state, getattr(model.config, "store_salt_flux", False))
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
