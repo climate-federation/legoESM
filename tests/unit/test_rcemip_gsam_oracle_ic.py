@@ -111,7 +111,7 @@ def _baseline_sounding(base: dict) -> SAMSounding:
         theta=np.asarray(base["theta"], dtype=np.float64),
         q_v=np.asarray(base["q_v"], dtype=np.float64),   # already kg/kg
         u=np.zeros_like(z), v=np.zeros_like(z),
-        pres0=float(ic.WING_P_SFC / 100.0),
+        pres0=float(base["pres0_mb"]),
     )
 
 
@@ -219,6 +219,12 @@ def test_analytic_fallback_is_anchored_to_the_oracle():
     base = _load_baseline()
     e = _analytic_errors(ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT,
                          base)
+    # NOTE dq_sfc_rel is ~0 BY CONSTRUCTION for the shipped q_sfc: it is
+    # defined as the value that reproduces the sounding's lowest level through
+    # this very shape function. It is kept because it is NOT vacuous for the
+    # value it exists to reject (the pre-oracle 0.01865 is 31 % off), but it
+    # cannot fail for a correctly-derived q_0 — do not read it as evidence
+    # that the moisture PROFILE matches.
     assert e["dq_sfc_rel"] <= _ANALYTIC_Q_SFC_RTOL, e
     assert e["dT_sfc"] <= _ANALYTIC_T_SFC_TOL_K, e
     assert e["dRH_sfc"] <= _ANALYTIC_RH_TOL, e
@@ -420,7 +426,13 @@ def _column_checks(snd, z_o, theta_o, p_o_mb, q_o, label):
                                atol=1e-12, err_msg=f"{label}: q_v plumbing")
 
     # Oracle T on the model levels, from the FILE's pressure column.
-    p_i_pa = np.interp(z_m, z_o, np.asarray(p_o_mb, dtype=np.float64)) * 100.0
+    # Interpolate log(p), not p: pressure is near-exponential in z, and linear
+    # interpolation across the vendored ~2.5 km stratospheric gaps introduced a
+    # ~2 K artefact that was NOT a property of the IC (measured job 9331694,
+    # error growing with height and peaking at z=16225 m). Interpolating in log
+    # space is the physically correct choice, not a tolerance concession.
+    p_i_pa = np.exp(np.interp(
+        z_m, z_o, np.log(np.asarray(p_o_mb, dtype=np.float64)))) * 100.0
     T_o_i = theta_i * (p_i_pa / constants.p_ref) ** constants.kappa
     dT = np.abs(T_m - T_o_i)[inside]
     assert dT.max() <= _IC_T_TOL_K, (
@@ -477,29 +489,118 @@ def test_sounding_ic_is_not_supersaturated():
 # The CLI surface
 # --------------------------------------------------------------------------
 
-def test_run_rcemip_plane_exposes_the_sounding_flags():
-    """``--sounding`` / ``--sounding-grd`` round-trip through the driver's own
-    parser (a library-only fix that no run script can reach is not a fix)."""
+def test_run_rcemip_plane_exposes_the_sounding_flag():
+    """``--sounding`` round-trips through the driver's own parser, and the
+    default stays analytic so no existing RCEMIP result changes meaning.
+
+    NOTE this is only an argparse check. The wiring itself is covered by
+    ``test_driver_sounding_path_builds_the_column`` below — a CLI round-trip
+    would pass even if the entire ``--sounding`` branch in ``main()`` were
+    deleted, which is exactly the vacuity this file has to avoid.
+    """
     from scripts.run.run_rcemip_plane import parse_args
 
-    args = parse_args(["--sounding", "/tmp/snd", "--sounding-grd", "/tmp/grd",
-                       "--stretched-vertical"])
+    args = parse_args(["--sounding", "/tmp/snd", "--stretched-vertical"])
     assert args.sounding == "/tmp/snd"
-    assert args.sounding_grd == "/tmp/grd"
     assert args.stretched_vertical is True
-    # default stays analytic — the sounding path is strictly opt-in, so no
-    # existing RCEMIP result silently changes meaning.
     assert parse_args([]).sounding is None
-    assert parse_args([]).sounding_grd is None
+    # --sounding-grd was removed: gSAM's CASES/RCEMIP1/grd is a 1-column list
+    # that read_sam_grd rejects, so the flag could never have worked on the
+    # file its help text named.
+    assert not hasattr(parse_args([]), "sounding_grd")
+
+
+def test_driver_sounding_path_builds_the_column(tmp_path):
+    """THE WIRING TEST: the driver's own sounding path builds the column.
+
+    Exercises ``build_sounding_height_coord`` + ``build_sounding_initial_state``
+    — the functions ``main()`` calls — rather than argparse strings, so this
+    fails if the ``--sounding`` branch is deleted or unhooked.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.grids.plane import create_plane_grid
+    from scripts.run.run_rcemip_plane import (
+        build_sounding_height_coord,
+        build_sounding_initial_state,
+        parse_args,
+    )
+
+    snd_path = tmp_path / "snd"
+    _write_synthetic_snd(snd_path, n_lev=60, z_top=25_000.0)
+    args = parse_args(["--sounding", str(snd_path), "--stretched-vertical",
+                       "--nlev", "64", "--H", "20000",
+                       "--theta-noise-amp", "0.0"])
+    snd, hc = build_sounding_height_coord(args, ic.WING_P_SFC,
+                                          dtype=jnp.float64)
+    assert hc.n_levels == 64
+    grid = create_plane_grid(nx=4, ny=4, nlev=64, dx=4000.0, dy=4000.0,
+                             dtype=jnp.float64)
+    st = build_sounding_initial_state(snd, grid, hc, args, 3,
+                                      dtype=jnp.float64)
+
+    z_m = np.asarray(hc.z_full, dtype=np.float64)
+    q_m = np.asarray(st.tracers.data, dtype=np.float64)[0, 0, :, 0]
+    # q_v came from the sounding, in kg/kg, into tracer slot 0.
+    np.testing.assert_allclose(
+        q_m, np.interp(z_m, np.asarray(snd.z), np.asarray(snd.q_v)),
+        rtol=1e-10, atol=1e-14)
+    # theta' ~ 0 because theta_ref IS the sounding (no acoustic shock at t=0).
+    assert np.abs(np.asarray(st.theta_prime.data)).max() < 1e-8
+    assert np.isfinite(np.asarray(hc.rho_ref)).all()
+    assert np.asarray(hc.rho_ref).min() > 0.0
+
+
+@pytest.mark.parametrize("argv_extra, expect", [
+    (["--nlev", "64"], "requires --stretched-vertical"),          # no stretch
+    (["--stretched-vertical", "--nlev", "30"], "too coarse"),     # too coarse
+])
+def test_driver_sounding_path_refuses_bad_configurations(tmp_path, argv_extra,
+                                                         expect):
+    """Each guard raises with its OWN message — a SystemExit alone is not
+    evidence, since any unrelated crash produces one."""
+    import jax.numpy as jnp
+
+    from scripts.run.run_rcemip_plane import (
+        build_sounding_height_coord, parse_args)
+
+    snd_path = tmp_path / "snd"
+    _write_synthetic_snd(snd_path, n_lev=60, z_top=25_000.0)
+    args = parse_args(["--sounding", str(snd_path), "--H", "20000"]
+                      + argv_extra)
+    with pytest.raises(SystemExit, match=expect):
+        build_sounding_height_coord(args, ic.WING_P_SFC, dtype=jnp.float64)
+
+
+def test_driver_sounding_path_refuses_a_missing_file_and_a_wrong_p_sfc(tmp_path):
+    import jax.numpy as jnp
+
+    from scripts.run.run_rcemip_plane import (
+        build_sounding_height_coord, parse_args)
+
+    base = ["--stretched-vertical", "--nlev", "64", "--H", "20000"]
+    missing = parse_args(["--sounding", str(tmp_path / "nope")] + base)
+    with pytest.raises(SystemExit, match="file not found"):
+        build_sounding_height_coord(missing, ic.WING_P_SFC, dtype=jnp.float64)
+
+    snd_path = tmp_path / "snd"
+    _write_synthetic_snd(snd_path, n_lev=60, z_top=25_000.0)
+    args = parse_args(["--sounding", str(snd_path)] + base)
+    # A deck whose p_sfc disagrees with the p_sfc the flux/radiation code uses
+    # must fail loudly, not silently run two different surface pressures.
+    with pytest.raises(SystemExit, match="surface pressure"):
+        build_sounding_height_coord(args, ic.WING_P_SFC + 5_000.0,
+                                    dtype=jnp.float64)
 
 
 # --------------------------------------------------------------------------
 # The extraction script (every new .py gets a direct test)
 # --------------------------------------------------------------------------
 
-def _write_synthetic_snd(path: Path, n_lev: int = 40) -> None:
+def _write_synthetic_snd(path: Path, n_lev: int = 40,
+                         z_top: float = 20_000.0) -> None:
     """A minimal but VALID SAM ``snd``: header, one block, 6 columns."""
-    z = np.linspace(40.0, 20_000.0, n_lev)
+    z = np.linspace(40.0, z_top, n_lev)
     p = 1014.8 * np.exp(-z / 8000.0)
     theta = 297.0 + 4.0e-3 * z
     q = 14.0 * np.exp(-z / 4000.0)                     # g/kg
@@ -538,8 +639,13 @@ def test_extraction_script_round_trips(tmp_path):
     T, rh = _rh_from(got["theta"], got["p"], got["q_v"])
     np.testing.assert_allclose(T, got["T"], rtol=1e-10)
     np.testing.assert_allclose(rh, got["rh"], rtol=1e-8)
+    # full-column max is over ALL levels, so it must be >= the vendored
+    # subset's max and must equal the max of the source column.
+    _, src_rh = _rh_from(np.asarray(src.theta), np.asarray(src.p),
+                         np.asarray(src.q_v))
     assert got["full_column_summary"]["rh_max"] == pytest.approx(
-        max(rh.max(), got["full_column_summary"]["rh_max"]))
+        float(src_rh.max()), rel=1e-10)
+    assert got["full_column_summary"]["rh_max"] >= rh.max() - 1e-12
 
 
 def test_extraction_level_selection_includes_the_named_extrema():
@@ -594,6 +700,12 @@ def test_vendored_baseline_matches_the_real_gsam_file():
                                rtol=1e-12)
     np.testing.assert_allclose(np.asarray(snd.q_v)[idx], base["q_v"],
                                rtol=1e-12)
+    # p matters as much as the rest: the vendored T and rh are DERIVED from it,
+    # so a corrupted pressure column would otherwise pass unnoticed.
+    np.testing.assert_allclose(np.asarray(snd.p)[idx], base["p"], rtol=1e-12)
+    # And the header surface pressure, which the driver's --sounding p_sfc
+    # guard compares against.
+    assert float(snd.pres0) == pytest.approx(base["pres0_mb"], rel=1e-12)
 
 
 @requires_gsam
