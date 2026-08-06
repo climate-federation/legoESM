@@ -39,6 +39,28 @@ inverse lives inside ``Lagrangian_to_Eulerian``
 (``fv_dynamics.F90:396-410``), and hydrostatic never recomputes ``pkz``
 (``:281-293``), it reuses what the previous remap left.
 
+...BUT THE WINDOW IS NOT REACHABLE IN THE ORACLE ITSELF, which matters
+for how the reference is generated. ``tools/fv_eta.F90:101`` selects the
+vertical coordinate on ``km`` and has no table below 5: ``:241`` handles
+``km == 5 .or. km == 10`` analytically, and ``case(20)`` upward covers the
+rest. Asking the oracle for ``npz = 3`` yields NaN ak/bk and an abort
+("var_hi: computed model top ... bottom/top dz = NaN NaN", then
+``free(): invalid size``). So every RUNNABLE oracle 3-D column has
+``npz >= 5``, i.e. the remap always fires there.
+
+The reference is therefore taken at the ``dyn_core`` BOUNDARY rather than
+the outer-step boundary: ``Lagrangian_to_Eulerian`` runs after
+``dyn_core`` returns (``fv_dynamics.F90:618``, inside the ``npz > 4``
+block opened at ``:568``), so one complete acoustic loop is remap-free by
+construction. Generate at ``npz = 5`` with the analytic coordinate of
+``fv_eta.F90:241`` -- ``ptop = 500e2``, ``ks = 0``,
+``bk(k) = (k-1)/km``, ``ak(k) = ptop*(1 - bk(k))`` -- which is exactly
+reproducible on our side.
+
+This module's guard still refuses ``km > 4`` because OUR stepper has no
+remap; it is a statement about our lane, not a claim that the oracle can
+be run there.
+
 LAYOUT CONTRACT
 ---------------
 Transcribed from ``fv3_native_pgrad``'s module docstring, which declares
