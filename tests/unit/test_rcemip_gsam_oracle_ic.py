@@ -303,7 +303,19 @@ def test_pre_oracle_constants_fail_the_gate():
 # The --sounding path: read_sam_snd -> sam_case_setup -> plane IC
 # --------------------------------------------------------------------------
 
-def _build_ic_from(snd, *, nlev=48, H=20_000.0, dz_sfc=50.0):
+# Model column used by the round-trip tests.  nlev=96 (not 48) is a MEASURED
+# requirement, not padding: at nlev=48 the stretched grid reaches dz ~1.8 km by
+# the tropopause, and linearly interpolating gSAM's cold point — a sharp V at
+# 14.5 km — onto that grid and back overshoots it by 1.08 K (job 9331622),
+# above the 0.5 K budget.  The overshoot is a grid-resolution artefact of a
+# kink, not a pipeline error: every other level agreed to <0.5 K and the
+# surface to 0.003 K.  Refining the column is the honest fix; widening the
+# tolerance would have hidden a real IC bug of the same size.
+_IC_NLEV = 96
+_IC_H = 20_000.0
+
+
+def _build_ic_from(snd, *, nlev=_IC_NLEV, H=_IC_H, dz_sfc=50.0):
     """Run the SHARED SAM-deck setup path and return (z, T, q_v, RH) columns."""
     import jax.numpy as jnp
 
@@ -383,6 +395,19 @@ def test_sounding_ic_matches_the_oracle_through_the_column():
     q_o = np.asarray(base["q_v"])[keep]
     wet = q_o > 1.0e-4                      # rtol is meaningless in dry air
     np.testing.assert_allclose(q_i[wet], q_o[wet], rtol=5 * _IC_Q_RTOL)
+
+    # The cold point is the hardest level in the column — a sharp V that linear
+    # interpolation overshoots WARM on any grid too coarse to resolve it (the
+    # measured nlev=48 failure). Call it out by name so a resolution regression
+    # reads as "the tropopause moved", not as a diffuse column drift.
+    T_o = np.asarray(base["T"])
+    k_cold = int(np.argmin(T_o))
+    if keep[k_cold]:
+        T_cold_model = float(np.interp(z_o[k_cold], z_m[order], T_m[order]))
+        assert abs(T_cold_model - T_o[k_cold]) <= _IC_T_TOL_K, (
+            f"cold point z={z_o[k_cold]:.0f} m: IC {T_cold_model:.3f} K vs "
+            f"oracle {T_o[k_cold]:.3f} K — is the column resolving the "
+            f"tropopause kink (nlev={_IC_NLEV}, H={_IC_H:.0f} m)?")
 
 
 def test_sounding_ic_is_not_supersaturated():

@@ -90,6 +90,24 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "all" ]; then
       tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py
   rc=$?; echo "PYTEST(with-oracle) rc=$rc"; [ $rc -ne 0 ] && rc_all=1
 
+  # CONTROL: the plane-CRM end-to-end smoke writes into /local pytest tmpdirs
+  # and failed on 9331622 with FileNotFoundError on progress.txt — a scratch
+  # issue, not a physics one.  "A new failure is not yours until reproduced
+  # with your change stashed": run the SAME file from origin/main, same node,
+  # same env, and print both verdicts side by side.
+  echo "=== CONTROL: same CRM e2e file on origin/main (unchanged tree) ==="
+  MAINWT=/burg-archive/glab/users/pg2328/legoESM_wt/rce_main_${SLURM_JOB_ID}
+  git -C "$REPO" worktree add --detach "$MAINWT" origin/main >/dev/null 2>&1
+  echo "CONTROL sha $(git -C "$MAINWT" rev-parse HEAD)"
+  ( cd "$MAINWT"
+    _mp="$MAINWT"; for _d in "$MAINWT"/packages/*/; do
+      [ -d "${_d}legoesm" ] && _mp="${_mp}:${_d}"; done
+    PYTHONPATH="${_mp}:${MAINWT}/src" "$PY" -m pytest -q --no-header --tb=line \
+        tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py \
+        2>&1 | tail -12 )
+  echo "CONTROL(main) rc=$?"
+  git -C "$REPO" worktree remove --force "$MAINWT" >/dev/null 2>&1 || true
+
   echo "=== PYTEST oracle gate, oracle path ABSENT (skip-cleanly check) ==="
   env -u LEGOESM_GSAM_ROOT "$PY" -m pytest -q \
       tests/unit/test_rcemip_gsam_oracle_ic.py
