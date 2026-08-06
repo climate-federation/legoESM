@@ -1,3 +1,39 @@
+# GM EXONERATED 2026-08-06 — sensitivity test REFUTES it; the 1.5x gap is UNRECONCILED
+
+**Decisive test**: armB rerun with kappa_GM scaled x1.5 toward NEMO's measured value, 140
+config fields compared / 0 differ (sole variable is the kappa scale, applied by an env-gated
+monkeypatch in `scripts/tmp/`, no production code). Result — the overshoot got **WORSE**:
+
+| yr | NEMO | armB ctrl | armB x1.5 | ctrl−N | x1.5−N |
+|---|---|---|---|---|---|
+| 5 | 91.13 | 91.41 | 91.55 | +0.28 | +0.42 |
+| 10 | 121.07 | 121.58 | 122.02 | **+0.51** | **+0.95** |
+
++0.44 Sv AWAY from NEMO = 4.8x the floor, wrong-signed and resolvable. Slope dACC/d(deep
+contrast) moved 1.013x → 1.042x, i.e. further from 1.0. Density barely moved; only the momentum
+response did. **⇒ GM arrest does not own the excess. All four candidate sinks are now
+exonerated: wind, bottom drag, lateral viscosity (state symptom), GM.**
+
+### Three corrections
+1. **`kappa_GM_max=200.0` is NOT a cap** — a log artifact (`dino_year_screen_fullframe.py:115`)
+   printing a static placeholder (`dino.py:2784`) the Treguier diagnostic overrides at runtime.
+2. **The real cap is `TreguierConfig.aei0 = 1500.0`, and NEMO's is ALSO exactly 1500**
+   (`ldftra.F90:631-633`, `aei0 = 0.5*rn_Ue*rn_Le` = 0.5*0.03*1e5; namelist_cfg:301-302).
+   **CORRECTION: this digest's earlier "kappa_GM cap=3000" was the UN-HALVED product — wrong.**
+   No unfaithful config difference exists. Not binding either: 0.055% of cells, capped/uncapped
+   band-mean ratio 1.000.
+3. **The 1.5x kappa gap is UNRECONCILED and must not be built on.** This lane measures armB
+   band-mean kappa 159/188/217 at y11/15/20 against NEMO's 161/186/205 — essentially EQUAL. The
+   prior lane's armB values (102.5/118.9/135.8) used a different band mask. Rule 1e: reconcile
+   before either is quoted again. **The exoneration above does NOT depend on which is right** —
+   the sensitivity experiment tests the response directly.
+
+### What this leaves
+All four sinks the momentum lane enumerated are exonerated — but that list omitted the sink that
+DOMINATES an ACC-like channel: **TOPOGRAPHIC FORM STRESS across the Drake sill** (the pressure
+force on the ridge), which is NOT the same as quadratic bottom friction and was never measured.
+That is the leading untested candidate for the 1.27x transport-per-density excess.
+
 # NEMO GM DIAGNOSTICS 2026-08-06 — NEMO's kappa_gm is 1.5x armB's (state effect, NOT a formula defect)
 
 New NEMO run `RUN_EIV_DIAG/` (y10->y20 continuation, additive WRITE-only eiv dumps in
