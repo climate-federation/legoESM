@@ -25,20 +25,21 @@ What this file locks down, in three layers:
    EMPTY, and against a synthetic factory source, proving the gate fails when
    it should (CLAUDE.md: every gate ships a synthetic-violation self-test).
 
-3. **Behavioural tests** -- a config-presence test would NOT have caught the
-   motivating failure, because the field was present on all five bulk schemes
-   and simply defaulted off. So the property that actually failed is asserted
-   directly: from a super-saturated column (RH 1.4, the real case), with
-   ``hard_saturation_adjustment=True`` every guarded scheme drives RH to <= ~1
-   within a bounded number of steps; the byte-identity of the OFF path is
-   asserted too, and the under-drain of the default is asserted for the schemes
-   where it is the observed behaviour (see ``_DEFAULT_UNDERDRAINS`` -- the
-   per-scheme expectations are MEASURED, not assumed).
+3. **Consumption + behaviour** -- structural presence is not enough.
+   :func:`test_every_guarded_scheme_actually_reads_the_flag` requires each
+   guarded module to READ all three config fields, closing the evasion where a
+   scheme declares them, imports ``saturation_adjustment`` (as every bulk module
+   already does) and never passes ``hard_adjust=``. The runtime property that
+   actually failed is asserted in
+   ``tests/unit/test_supersaturation_guard_behaviour.py``.
 
-A tripwire, not a proof: the AST scan keys on the factory function's own
-``return "<name>", ...`` tuples, so a scheme reached by some other mechanism
-would not be discovered. Discovery is sanity-checked against a minimum count so
-a refactor that empties it fails loudly instead of passing vacuously.
+A tripwire, not a proof. Discovery reads the factory two independent ways --
+the ``return "<name>", ...`` tuples and the ``config.scheme == "<name>"``
+comparisons -- and requires them to AGREE, so an evasion has to defeat both at
+once; it is also sanity-checked against a minimum count so a refactor that
+empties it fails loudly instead of passing vacuously. A scheme reached by some
+third mechanism entirely (a registry table, a helper in another module) would
+still be missed.
 """
 
 from __future__ import annotations
@@ -47,9 +48,6 @@ import ast
 import pathlib
 
 import pytest
-
-from tests import _ratchet_audit as ra
-
 from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_DEFAULTS,
     HARD_SAT_GUARD_EXEMPT,
@@ -57,6 +55,8 @@ from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_SCHEMES,
     MicrophysicsConfig,
 )
+
+from tests import _ratchet_audit as ra
 
 # SHRINK-ONLY baseline. An exemption may be REMOVED (a scheme gaining the
 # guard); adding one requires editing this line, which forces the reviewer to
@@ -353,7 +353,7 @@ def test_sdm_exemption_discloses_its_clear_cell_gap() -> None:
     )
 
 
-def test_every_guarded_scheme_actually_READS_the_flag() -> None:
+def test_every_guarded_scheme_actually_reads_the_flag() -> None:
     """Structural presence is not enough: the scheme must CONSUME
     ``config.hard_saturation_adjustment``.
 
@@ -498,7 +498,7 @@ def test_selftest_docstring_only_match_is_rejected() -> None:
 
 
 def test_selftest_a_scheme_that_ignores_the_flag_is_flagged(tmp_path) -> None:
-    """Non-vacuity for :func:`test_every_guarded_scheme_actually_READS_the_flag`
+    """Non-vacuity for :func:`test_every_guarded_scheme_actually_reads_the_flag`
     — the concrete evasion it closes: import the shared entry point (as every
     bulk module already does) but never pass ``hard_adjust=``."""
     src = (

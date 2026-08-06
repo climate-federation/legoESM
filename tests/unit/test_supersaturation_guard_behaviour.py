@@ -15,10 +15,10 @@ Protocol (held IDENTICAL across every arm; the ONLY variable is
     ``legoesm.thermo.saturation_mixing_ratio`` at the CURRENT (T, q_v)
     -- no re-derived saturation curve (CLAUDE.md).
 
-Every threshold below is MEASURED, not guessed: the numbers in
-``_MEASURED_RH_STEP1`` come from ``scripts/tmp/_probe_supersat_guard.py`` on
-SLURM job 9331634 (x64=1, CPU), quoted in the docstring so a future change of
-behaviour is visible as a diff, not as a silent re-tune of the assertion.
+Every threshold below is MEASURED, not guessed: the numbers come from
+``scripts/tmp/_probe_supersat_guard.py`` on SLURM job 9331634 (x64=1, CPU) and
+are quoted here so a future change of behaviour shows up as a diff rather than
+as a silent re-tune of an assertion.
 
     scheme          hard=False  hard=True   (RH after 1 step from RH0 = 1.4)
     kessler            1.0589      1.0000
@@ -60,9 +60,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_SCHEMES,
     KesslerConfig,
@@ -73,18 +70,22 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SundqvistConfig,
     ThompsonConfig,
 )
-from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
-    MicrophysicsEmulator, ml_microphysics,
+    MicrophysicsEmulator,
+    ml_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+from legoesm.thermo import saturation_mixing_ratio
+
+from legoesm import constants
 
 pytestmark = pytest.mark.skipif(
     not jax.config.jax_enable_x64,
