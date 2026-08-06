@@ -255,7 +255,10 @@ class DINOConfig:
     # explicit combine's ``(state_expl.T - state.T)`` difference and cancels
     # there, entering the trajectory only through the Asselin filter's "now"
     # weight.  Global-closure audit (#1492 0.1): this retains only
-    # 1/(1+2*gamma)... measured ~0.444 of the applied flux per step (residual
+    # ~0.444 (= 4/9 at gamma=0.1) of the applied flux per step.  NOTE: an
+    # earlier revision of this comment labelled the retention "1/(1+2*gamma)"
+    # -- that closed form is WRONG (it gives 0.833 at gamma=0.1); the
+    # MEASURED and independently reproduced value is 4/9 = 0.4445 (residual
     # coefficient -0.556, R2 0.9998, same for heat AND salt -- confirmed by
     # closed-form recursion match in the 0.1 follow-up, see
     # global_closure_audit.py).

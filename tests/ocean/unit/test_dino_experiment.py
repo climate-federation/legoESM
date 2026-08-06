@@ -1441,8 +1441,11 @@ class TestSurfaceTendencyPlacement:
     only ~0.44 of the applied surface flux per step (the increment lands on
     BOTH sides of the leap-frog combine's ``state_expl.T - state.T`` and
     cancels there, entering only via the Asselin filter's "now" weight;
-    closed-form MLF/Asselin recursion match: retention = 1/(1+2*gamma) ...
-    numerically 0.4444 for gamma=0.1, see mlf_retention_algebra.py). NEMO's
+    closed-form MLF/Asselin recursion match: retention numerically 0.4444
+    = 4/9 for gamma=0.1, see mlf_retention_algebra.py. NOTE the label
+    "1/(1+2*gamma)" used in an earlier revision is WRONG -- it evaluates to
+    0.833 at gamma=0.1; only the NUMBER 4/9 is right, reproduced twice by
+    independent instruments on different grids). NEMO's
     ``trasbc.F90`` instead writes into the RHS accumulator BEFORE the
     ``tra_zdf``/leap-frog combine (stpmlf.F90:342 ``tra_sbc(kstp, Nnn, ts,
     Nrhs)``). These tests pin the new "leapfrog_rhs" placement end-to-end

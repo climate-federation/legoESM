@@ -9,12 +9,22 @@ Everything else byte-identical to kamm_run180.py.
 Usage: kamm_run180_v2.py <nsteps> <out.npz>   (nsteps=5760 for full 180d)
 """
 import os, sys, dataclasses, numpy as np, jax, jax.numpy as jnp
+from legoesm.core.precision import PrecisionPolicy, set_policy
+# #1492: fp64 policy EXPLICIT (JAX_ENABLE_X64 alone does not change the
+# legoESM precision policy -- see nemo_state_bridge.py's own warning). Must
+# run before any geometry/state construction below.
+set_policy(PrecisionPolicy.fp64())
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
+from legoesm.ocean.fidelity.precision_gate import require_explicit_e3t_mode
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (dino_config_for_recipe, dino_lat_lon_model_config,
     dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays, apply_dino_lat_lon_surface_forcing,
     dino_step_surface_forcing)
+
+_e3t_mode = require_explicit_e3t_mode(context="dino_year_screen_fullframe")
+print(f"LEGOESM_NEMO_E3T={_e3t_mode}  JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')}  "
+      f"x64_enabled={jax.config.jax_enable_x64}")
 
 RECIPE = sys.argv[1]; OUT = sys.argv[2]; DT = 2700.0
 NSTEPS = 11520; ACC0 = 0  # 1-year screen: full year-1 mean (matched to NEMO annual mean)
@@ -56,6 +66,17 @@ if os.environ.get("DINO_NO_GM"):
     # discriminating power and only the multi-year curve can be trusted.
     cfg = dataclasses.replace(cfg, use_gm_redi=False)
     print("ABLATION: use_gm_redi=False")
+# #1492: NEMO-faithful surface-flux placement A/B (see DINOConfig.
+# surface_tendency_placement docstring). Default "applied_now" = legacy,
+# bit-identical to every prior from-rest screen; unknown value raises
+# (dispatch hardening, matches twin_y20_box_budget.py's own guard).
+SURF_PLACEMENT = os.environ.get("DINO_SURFACE_PLACEMENT", "applied_now")
+if SURF_PLACEMENT not in ("applied_now", "leapfrog_rhs"):
+    raise SystemExit(f"Unknown DINO_SURFACE_PLACEMENT={SURF_PLACEMENT!r}: "
+                      "expected 'applied_now' or 'leapfrog_rhs'")
+cfg = dataclasses.replace(cfg, surface_tendency_placement=SURF_PLACEMENT)
+print(f"surface_tendency_placement={SURF_PLACEMENT}")
+USE_RHS = SURF_PLACEMENT == "leapfrog_rhs"
 if INIT_RESTART:
     st = br.state          # the bridged NEMO state itself, NOT the analytic rest IC
     print(f"INIT from developed NEMO restart: {INIT_RESTART}")
@@ -87,7 +108,11 @@ sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore ext
 print(f"slope_scheme={mc.gm_redi.slope_scheme} kappa_GM_max={float(jnp.max(jnp.abs(mc.gm_redi.kappa_GM))):.1f}")
 print(f"tau_x[Pa] min/max = {float(jnp.min(sf.tau_x)):.3f}/{float(jnp.max(sf.tau_x)):.3f}")
 
-dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))  # sf constant (annual tau)
+if USE_RHS:
+    dyn = jax.jit(lambda st, rate: model.step(
+        st, DT, surface_forcing=sf, external_tracer_rate=rate))
+else:
+    dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))  # sf constant (annual tau)
 
 # DINO_YEARS>1 runs consecutive years and writes ONE annual mean per year
 # (suffix _y2, _y3, ...), so a multi-year run reproduces exactly what NEMO's
@@ -99,9 +124,15 @@ for year in range(1, YEARS + 1):
     acc = {k: jnp.zeros_like(getattr(st, k).data) for k in ("T", "S", "eta", "u", "v")}
     for k in range(NSTEPS):
         kglob += 1
-        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                t_seconds=kglob * DT)
-        st = dyn(st)
+        if USE_RHS:
+            st, ext_rate = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=kglob * DT,
+                return_rate=True)
+            st = dyn(st, ext_rate)
+        else:
+            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
+                                                    t_seconds=kglob * DT)
+            st = dyn(st)
         if k >= ACC0:
             for f in acc: acc[f] = acc[f] + getattr(st, f).data
         if (k + 1) % 960 == 0:
