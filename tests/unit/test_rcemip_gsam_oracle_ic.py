@@ -61,12 +61,12 @@ BASELINE = (Path(__file__).resolve().parents[1] / "oracle_baselines"
 # probe for `test_pre_oracle_constants_fail_the_gate`.
 _PRE_ORACLE_TRIPLE = (295.0, 0.0067, 0.01865)
 
-# Tolerances for "the analytic Wing form reproduces the oracle".  These are
-# LOOSE on purpose: the analytic form is a two-piece fit and cannot represent
-# the oracle's warming stratosphere, so the analytic gate is restricted to the
-# troposphere and asks only that the constants be oracle-anchored rather than
-# from a different case.  The values are set just wide enough to pass with the
-# oracle-derived constants and are ~5x tighter than the pre-oracle error.
+# Tolerances for "the analytic Wing form reproduces the oracle".  The analytic
+# form is a two-piece fit and cannot represent the oracle's WARMING
+# stratosphere, so the T comparison stops at the tropopause and asks only that
+# the constants be oracle-anchored rather than from a different case.  The
+# surface state and the cold point are gated separately and tightly, because
+# the calibration is constrained through both.
 _ANALYTIC_T_SFC_TOL_K = 0.75      # surface T, |analytic - oracle|
 _ANALYTIC_Q_SFC_RTOL = 0.03       # surface q_v, relative
 _ANALYTIC_TROP_T_MAE_K = 3.0      # mean |dT| over z <= 15 km
@@ -75,11 +75,6 @@ _ANALYTIC_RH_TOL = 0.10           # surface RH, absolute
 # calibration is endpoint-constrained through it (measured error 0.000 K); the
 # retracted least-squares calibration missed by 5.030 K.
 _ANALYTIC_COLD_POINT_TOL_K = 1.0
-# Height below which the analytic column must stay subsaturated. Above this the
-# two-piece Wing form is structurally too moist against gSAM (see the
-# `..._known_limitation` test); this covers the boundary layer and the whole
-# depth over which the pre-oracle IC was saturated.
-_ANALYTIC_RH_VALID_Z_MAX = 10_000.0   # m
 
 # Tolerances for the SOUNDING path (read_sam_snd -> sam_case_setup -> IC).
 # This is a round trip through OUR interpolation onto model levels, so the only
@@ -94,6 +89,12 @@ _IC_RH_TOL = 0.03
 # overshoot at nlev=48, job 9331622) rather than folded into _IC_T_TOL_K, which
 # would have loosened every other level in the column by the same amount.
 _IC_COLD_POINT_TOL_K = 1.5
+# Above the tropopause the model's hydrostatic integral and gSAM's own pressure
+# column have been integrated over ~20 km on DIFFERENT grids, so their
+# difference accumulates with height: measured monotone 0.006 K at the lowest
+# level to 0.611 K at 19.7 km. Budgeted separately so the troposphere keeps the
+# tight 0.5 K.
+_IC_T_STRAT_TOL_K = 1.0
 
 
 def _load_baseline() -> dict:
@@ -275,50 +276,28 @@ def _first_supersaturated_z(T_v0, Gamma, q_sfc, z_max=30_000.0):
     return (None, rh) if hit.size == 0 else (float(z[hit[0]]), rh)
 
 
-def test_analytic_fallback_is_not_supersaturated_below_the_upper_troposphere():
-    """The analytic column must not ship supersaturated through the depth where
-    convection is initiated — the failure mode the oracle exposed (RH 1.396 at
-    the surface, saturated to ~10 km).
+def test_analytic_fallback_is_not_supersaturated():
+    """The analytic column must not ship supersaturated ANYWHERE — the failure
+    mode the oracle exposed (RH 1.396 at the surface, saturated to ~10 km).
 
     Checked on the profile the module actually emits, so it fails for ANY
-    (T_v0, Gamma, q_sfc) triple that saturates in this layer, not just the
-    known-bad one.
+    (T_v0, Gamma, q_sfc) triple that saturates, not just the known-bad one.
 
-    Scope, stated rather than quietly chosen: the gate stops at
-    ``_ANALYTIC_RH_VALID_Z_MAX`` because the analytic form supersaturates near
-    the tropopause for structural reasons — see the companion
-    ``..._known_limitation`` test.  It is NOT a tolerance widened to go green:
-    the pre-oracle triple violates this test inside the boundary layer.
+    History worth keeping: under an intermediate least-squares calibration
+    (Gamma = 0.0074034) this gate had to be SCOPED to z <= 10 km, because the
+    steeper lapse made the column cross RH=1 near the tropopause where Wing's
+    moisture shape leaves far more vapour than gSAM carries. A companion test
+    pinned that as a documented limitation. The endpoint-constrained
+    calibration removed it: the column is subsaturated over the whole 0-30 km
+    range, so the scope restriction and the limitation test are both gone. If a
+    future recalibration needs the scope back, that is a signal about the
+    calibration, not a licence to narrow the gate.
     """
     z_hit, rh = _first_supersaturated_z(
-        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT,
-        z_max=_ANALYTIC_RH_VALID_Z_MAX)
+        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT, z_max=30_000.0)
     assert z_hit is None, (
         f"analytic IC supersaturates at z={z_hit:.0f} m "
-        f"(max RH {rh.max():.3f} below {_ANALYTIC_RH_VALID_Z_MAX:.0f} m)")
-
-
-def test_analytic_form_supersaturates_near_the_tropopause_known_limitation():
-    """DOCUMENTED LIMITATION, pinned so it cannot drift unnoticed.
-
-    Wing's moisture shape ``exp(-z/z_q1)·exp(-(z/z_q2)²)`` leaves far more
-    vapour at the cold point than gSAM carries (measured job 9331613: ~9e-3
-    vs 1e-3 g/kg at 14.5 km), so once ``Gamma`` is steepened to the oracle's
-    value the analytic column crosses RH=1 in the upper troposphere.  No
-    ``(T_v0, Gamma, q_sfc)`` choice removes this — it is the two-piece form,
-    not the calibration.  The fix is the tabulated sounding (``--sounding``).
-
-    If a future change reshapes the analytic moisture profile and this test
-    starts FAILING, that is good news: fold the height into the gate above and
-    delete this one.
-    """
-    z_hit, _ = _first_supersaturated_z(
-        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT)
-    assert z_hit is not None and z_hit > _ANALYTIC_RH_VALID_Z_MAX, (
-        "the analytic form no longer supersaturates aloft — the moisture "
-        "shape has been improved; fold that height into "
-        "test_analytic_fallback_is_not_supersaturated_below_the_upper_"
-        "troposphere and remove this limitation test.")
+        f"(max RH {rh.max():.3f} over 0-30 km)")
 
 
 def test_pre_oracle_constants_fail_the_gate():
@@ -338,8 +317,7 @@ def test_pre_oracle_constants_fail_the_gate():
         "to catch.")
     # and specifically: that triple supersaturated the column from the SURFACE
     # up, which is what made the CRM condense violently on step 1.
-    z_hit, rh = _first_supersaturated_z(T_v0, Gamma, q_sfc,
-                                        z_max=_ANALYTIC_RH_VALID_Z_MAX)
+    z_hit, rh = _first_supersaturated_z(T_v0, Gamma, q_sfc, z_max=10_000.0)
     assert z_hit is not None and z_hit < 100.0, (
         f"the pre-oracle triple no longer supersaturates near the surface "
         f"(first RH>=1 at {z_hit}) — the non-vacuity probe has gone stale.")
@@ -469,11 +447,25 @@ def _column_checks(snd, z_o, theta_o, p_o_mb, q_o, label):
     p_i_pa = np.exp(np.interp(
         z_m, z_o, np.log(np.asarray(p_o_mb, dtype=np.float64)))) * 100.0
     T_o_i = theta_i * (p_i_pa / constants.p_ref) ** constants.kappa
-    dT = np.abs(T_m - T_o_i)[inside]
-    assert dT.max() <= _IC_T_TOL_K, (
-        f"{label}: hydrostatic column vs gSAM's own pressure differs by "
-        f"{dT.max():.3f} K (mean {dT.mean():.3f} K) at "
-        f"z={z_m[inside][int(np.argmax(dT))]:.0f} m")
+    # Budget split by height. Our exner comes from a hydrostatic integral on
+    # the MODEL grid; gSAM's p column came from an integral on ITS grid. The
+    # difference between two such integrations accumulates UPWARD, and that is
+    # exactly what is measured: monotone from 0.006 K at the lowest level to
+    # 0.611 K at 19.7 km (job 9331711). Tolerating the accumulation aloft while
+    # keeping the troposphere tight reports the physics; a single loose number
+    # would have hidden a 0.5 K tropospheric error.
+    dT = np.abs(T_m - T_o_i)
+    trop = inside & (z_m <= 15_000.0)
+    strat = inside & (z_m > 15_000.0)
+    assert dT[trop].max() <= _IC_T_TOL_K, (
+        f"{label}: TROPOSPHERIC hydrostatic column vs gSAM's own pressure "
+        f"differs by {dT[trop].max():.3f} K (mean {dT[trop].mean():.3f} K) at "
+        f"z={z_m[trop][int(np.argmax(dT[trop]))]:.0f} m")
+    if strat.any():
+        assert dT[strat].max() <= _IC_T_STRAT_TOL_K, (
+            f"{label}: STRATOSPHERIC hydrostatic column differs by "
+            f"{dT[strat].max():.3f} K at "
+            f"z={z_m[strat][int(np.argmax(dT[strat]))]:.0f} m")
     assert np.isfinite(rh_m).all()
     return z_m, T_m, q_m, rh_m, order
 
@@ -576,10 +568,18 @@ def test_driver_sounding_path_builds_the_column(tmp_path):
 
     z_m = np.asarray(hc.z_full, dtype=np.float64)
     q_m = np.asarray(st.tracers.data, dtype=np.float64)[0, 0, :, 0]
-    # q_v came from the sounding, in kg/kg, into tracer slot 0.
+    # q_v came from the sounding, in kg/kg, into tracer slot 0. Compared only
+    # WITHIN the sounding's range: the model's lowest level sits below the
+    # sounding's first level, where np.interp clamps but the production helper
+    # extrapolates — a difference in the comparison, not in the code.
+    z_snd = np.asarray(snd.z)
+    inside = (z_m >= z_snd.min()) & (z_m <= z_snd.max())
+    assert inside.sum() >= 50, inside.sum()
     np.testing.assert_allclose(
-        q_m, np.interp(z_m, np.asarray(snd.z), np.asarray(snd.q_v)),
+        q_m[inside], np.interp(z_m[inside], z_snd, np.asarray(snd.q_v)),
         rtol=1e-10, atol=1e-14)
+    # The below-sounding level must still be physical, not clamped to zero.
+    assert 0.5 * q_m[inside][-1] < q_m[~inside].min() <= 2.0 * q_m[inside][-1]
     # theta' ~ 0 because theta_ref IS the sounding (no acoustic shock at t=0).
     assert np.abs(np.asarray(st.theta_prime.data)).max() < 1e-8
     assert np.isfinite(np.asarray(hc.rho_ref)).all()
