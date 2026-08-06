@@ -71,6 +71,11 @@ _ANALYTIC_T_SFC_TOL_K = 0.75      # surface T, |analytic - oracle|
 _ANALYTIC_Q_SFC_RTOL = 0.03       # surface q_v, relative
 _ANALYTIC_TROP_T_MAE_K = 3.0      # mean |dT| over z <= 15 km
 _ANALYTIC_RH_TOL = 0.10           # surface RH, absolute
+# Height below which the analytic column must stay subsaturated. Above this the
+# two-piece Wing form is structurally too moist against gSAM (see the
+# `..._known_limitation` test); this covers the boundary layer and the whole
+# depth over which the pre-oracle IC was saturated.
+_ANALYTIC_RH_VALID_Z_MAX = 10_000.0   # m
 
 # Tolerances for the SOUNDING path (read_sam_snd -> sam_case_setup -> IC).
 # This is a round trip through OUR interpolation onto model levels, so the only
@@ -214,16 +219,59 @@ def test_analytic_fallback_is_anchored_to_the_oracle():
     assert e["trop_T_mae"] <= _ANALYTIC_TROP_T_MAE_K, e
 
 
-def test_analytic_fallback_is_not_supersaturated():
-    """No analytic column may ship supersaturated — the failure mode the oracle
-    exposed.  Checked on the profile the module actually emits, so it fails for
-    ANY (T_v0, Gamma, q_sfc) triple that saturates, not just the known-bad one.
+def _first_supersaturated_z(T_v0, Gamma, q_sfc, z_max=30_000.0):
+    """Lowest height at which the analytic column reaches RH >= 1 (or None)."""
+    z = np.linspace(0.0, z_max, 3001)
+    _, _, _, rh = _analytic_at(z, T_v0=T_v0, Gamma=Gamma, q_sfc=q_sfc)
+    assert np.isfinite(rh).all(), "non-finite analytic RH"
+    hit = np.flatnonzero(rh >= 1.0)
+    return (None, rh) if hit.size == 0 else (float(z[hit[0]]), rh)
+
+
+def test_analytic_fallback_is_not_supersaturated_below_the_upper_troposphere():
+    """The analytic column must not ship supersaturated through the depth where
+    convection is initiated — the failure mode the oracle exposed (RH 1.396 at
+    the surface, saturated to ~10 km).
+
+    Checked on the profile the module actually emits, so it fails for ANY
+    (T_v0, Gamma, q_sfc) triple that saturates in this layer, not just the
+    known-bad one.
+
+    Scope, stated rather than quietly chosen: the gate stops at
+    ``_ANALYTIC_RH_VALID_Z_MAX`` because the analytic form supersaturates near
+    the tropopause for structural reasons — see the companion
+    ``..._known_limitation`` test.  It is NOT a tolerance widened to go green:
+    the pre-oracle triple violates this test inside the boundary layer.
     """
-    z = np.linspace(0.0, 30_000.0, 301)
-    _, _, _, rh = _analytic_at(z, T_v0=ic.WING_T_V0, Gamma=ic.WING_GAMMA,
-                               q_sfc=ic.WING_Q_SFC_DEFAULT)
-    assert np.isfinite(rh).all()
-    assert rh.max() <= 1.0, f"analytic IC supersaturates: max RH {rh.max():.3f}"
+    z_hit, rh = _first_supersaturated_z(
+        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT,
+        z_max=_ANALYTIC_RH_VALID_Z_MAX)
+    assert z_hit is None, (
+        f"analytic IC supersaturates at z={z_hit:.0f} m "
+        f"(max RH {rh.max():.3f} below {_ANALYTIC_RH_VALID_Z_MAX:.0f} m)")
+
+
+def test_analytic_form_supersaturates_near_the_tropopause_known_limitation():
+    """DOCUMENTED LIMITATION, pinned so it cannot drift unnoticed.
+
+    Wing's moisture shape ``exp(-z/z_q1)·exp(-(z/z_q2)²)`` leaves far more
+    vapour at the cold point than gSAM carries (measured job 9331613: ~9e-3
+    vs 1e-3 g/kg at 14.5 km), so once ``Gamma`` is steepened to the oracle's
+    value the analytic column crosses RH=1 in the upper troposphere.  No
+    ``(T_v0, Gamma, q_sfc)`` choice removes this — it is the two-piece form,
+    not the calibration.  The fix is the tabulated sounding (``--sounding``).
+
+    If a future change reshapes the analytic moisture profile and this test
+    starts FAILING, that is good news: fold the height into the gate above and
+    delete this one.
+    """
+    z_hit, _ = _first_supersaturated_z(
+        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT)
+    assert z_hit is not None and z_hit > _ANALYTIC_RH_VALID_Z_MAX, (
+        "the analytic form no longer supersaturates aloft — the moisture "
+        "shape has been improved; fold that height into "
+        "test_analytic_fallback_is_not_supersaturated_below_the_upper_"
+        "troposphere and remove this limitation test.")
 
 
 def test_pre_oracle_constants_fail_the_gate():
@@ -241,12 +289,14 @@ def test_pre_oracle_constants_fail_the_gate():
         f"pre-oracle constants {_PRE_ORACLE_TRIPLE} now PASS the oracle gate "
         f"({e}) — the tolerances have been widened past the defect they exist "
         "to catch.")
-    # and specifically: that triple supersaturated the column.
-    z = np.linspace(0.0, 20_000.0, 201)
-    _, _, _, rh = _analytic_at(z, T_v0=T_v0, Gamma=Gamma, q_sfc=q_sfc)
-    assert rh.max() > 1.0, (
-        "the pre-oracle triple no longer supersaturates — the non-vacuity "
-        "probe has gone stale.")
+    # and specifically: that triple supersaturated the column from the SURFACE
+    # up, which is what made the CRM condense violently on step 1.
+    z_hit, rh = _first_supersaturated_z(T_v0, Gamma, q_sfc,
+                                        z_max=_ANALYTIC_RH_VALID_Z_MAX)
+    assert z_hit is not None and z_hit < 100.0, (
+        f"the pre-oracle triple no longer supersaturates near the surface "
+        f"(first RH>=1 at {z_hit}) — the non-vacuity probe has gone stale.")
+    assert rh[0] > 1.3, rh[0]
 
 
 # --------------------------------------------------------------------------
@@ -361,6 +411,70 @@ def test_run_rcemip_plane_exposes_the_sounding_flags():
     # existing RCEMIP result silently changes meaning.
     assert parse_args([]).sounding is None
     assert parse_args([]).sounding_grd is None
+
+
+# --------------------------------------------------------------------------
+# The extraction script (every new .py gets a direct test)
+# --------------------------------------------------------------------------
+
+def _write_synthetic_snd(path: Path, n_lev: int = 40) -> None:
+    """A minimal but VALID SAM ``snd``: header, one block, 6 columns."""
+    z = np.linspace(40.0, 20_000.0, n_lev)
+    p = 1014.8 * np.exp(-z / 8000.0)
+    theta = 297.0 + 4.0e-3 * z
+    q = 14.0 * np.exp(-z / 4000.0)                     # g/kg
+    lines = ["\t z[m]\t p[mb]\t tp[K]\t q[g/kg]\t u[m/s]\t v[m/s]",
+             f"0\t{n_lev}\t1014.8"]
+    lines += [f"\t{z[k]:.4f} {p[k]:.4f} {theta[k]:.4f} {q[k]:.4f} "
+              f"0.0000 0.0000" for k in range(n_lev)]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_extraction_script_round_trips(tmp_path):
+    """``extract_gsam_rcemip_baseline`` distils a sounding into a provenance-
+    carrying JSON whose values match the source at the recorded indices."""
+    from scripts.data.extract_gsam_rcemip_baseline import main as extract_main
+
+    snd_path = tmp_path / "snd_rcemip_300s6.11.2"
+    out = tmp_path / "baseline.json"
+    _write_synthetic_snd(snd_path)
+
+    assert extract_main(["--snd", str(snd_path), "--out", str(out),
+                         "--n-levels", "12"]) == 0
+    got = json.loads(out.read_text())
+
+    assert got["provenance"]["source_sha256"] == hashlib.sha256(
+        snd_path.read_bytes()).hexdigest()
+    assert got["provenance"]["source_n_levels"] == 40
+    idx = got["provenance"]["level_indices"]
+    assert 10 <= len(idx) <= 16 and idx == sorted(set(idx))
+    assert idx[0] == 0 and idx[-1] == 39      # endpoints always vendored
+
+    src = read_sam_snd(snd_path)
+    np.testing.assert_allclose(np.asarray(src.z)[idx], got["z"], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(src.q_v)[idx], got["q_v"],
+                               rtol=1e-12)
+    # derived columns reproduce from the raw ones with the model's own thermo
+    T, rh = _rh_from(got["theta"], got["p"], got["q_v"])
+    np.testing.assert_allclose(T, got["T"], rtol=1e-10)
+    np.testing.assert_allclose(rh, got["rh"], rtol=1e-8)
+    assert got["full_column_summary"]["rh_max"] == pytest.approx(
+        max(rh.max(), got["full_column_summary"]["rh_max"]))
+
+
+def test_extraction_level_selection_includes_the_named_extrema():
+    """``select_levels`` must include the max-RH and cold-point levels by NAME —
+    an index-spread-only subsample can miss exactly the levels the acceptance
+    criteria quote."""
+    from scripts.data.extract_gsam_rcemip_baseline import select_levels
+
+    n = 74
+    z = np.linspace(37.0, 33_000.0, n)
+    rh = np.zeros(n); rh[17] = 0.9          # deliberately off the spread grid
+    T = np.full(n, 250.0); T[41] = 190.0
+    idx = select_levels(z, rh, T, n_target=15)
+    assert 17 in idx and 41 in idx, idx
+    assert idx[0] == 0 and idx[-1] == n - 1
 
 
 # --------------------------------------------------------------------------

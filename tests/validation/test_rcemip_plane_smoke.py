@@ -106,13 +106,18 @@ def test_rcemip_profiles_match_wing_2018_values():
     z = jnp.array([0.0, 4_000.0, 15_000.0, 20_000.0])
     theta = _rcemip_theta_profile(z, T_sfc=300.0)
     q_v = _rcemip_qv_profile(z, q_sfc=0.018)
-    # RCEMIP T_v0=295 K fixed (Wing 2018 Tab 1; was wrongly SST-derived → ~8 K
-    # too warm). Cold point (15 km) actual T = T_v0-Γ·z_t = 194.5 K ✓.
-    assert float(theta[0]) == pytest.approx(290.47, rel=1.0e-3)
-    assert float(theta[1]) == pytest.approx(305.87, rel=1.0e-3)
-    assert float(theta[2]) == pytest.approx(355.34, rel=1.0e-3)
+    # Anchors RE-MEASURED 2026-08-06 (SLURM job 9331621, x64) after the RCE300
+    # constants were calibrated against the gSAM oracle sounding
+    # (T_v0 295->300.444 K, Gamma 0.0067->0.0074034, q_sfc 0.01865->0.0142014).
+    # The isothermal cap is now T_v0-Γ·z_t = 189.39 K; gSAM's own cold point is
+    # 194.42 K at 14.5 km, and its stratosphere then WARMS — a structure this
+    # two-piece analytic form cannot carry (use --sounding). Previous anchors
+    # under the disproven 295 K profile: 290.47 / 305.87 / 355.34 / 456.69.
+    assert float(theta[0]) == pytest.approx(296.6252, rel=1.0e-3)
+    assert float(theta[1]) == pytest.approx(308.4996, rel=1.0e-3)
+    assert float(theta[2]) == pytest.approx(346.5404, rel=1.0e-3)
     # stratosphere is ISOTHERMAL ⇒ θ RISES (was the buggy constant cap)
-    assert float(theta[3]) == pytest.approx(456.69, rel=1.0e-3)
+    assert float(theta[3]) == pytest.approx(448.4009, rel=1.0e-3)
     assert float(theta[3]) > float(theta[2])
     # q_v: two-scale Wing decay; surface=0.018, 4 km ≈ 4.98e-3, strat floor 1e-11
     assert float(q_v[0]) == pytest.approx(0.018, rel=1.0e-6)

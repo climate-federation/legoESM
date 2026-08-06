@@ -55,7 +55,7 @@ if [ "$MODE" = "bootstrap" ]; then
   # Surface EVERY anchor the RCE300 recalibration moves, with the measured
   # value, so the anchors are updated from output rather than from arithmetic.
   echo "=== BLAST RADIUS: tests that pin the old RCE300 calibration ==="
-  "$PY" -m pytest -q --no-header -x --tb=short \
+  "$PY" -m pytest -q --no-header --tb=short \
       tests/unit/test_rcemip_wing_ic.py \
       tests/unit/test_compute_reference_state_p_sfc_iter95.py \
       tests/validation/test_rcemip_plane_smoke.py \
@@ -81,10 +81,13 @@ fi
 
 if [ "$MODE" = "test" ] || [ "$MODE" = "all" ]; then
   echo "=== PYTEST oracle gate (LEGOESM_GSAM_ROOT set => full-column checks ON) ==="
-  "$PY" -m pytest -q \
+  "$PY" -m pytest -q --tb=short \
       tests/unit/test_rcemip_gsam_oracle_ic.py \
       tests/unit/test_rcemip_wing_ic.py \
-      tests/unit/test_compute_reference_state_p_sfc_iter95.py
+      tests/unit/test_compute_reference_state_p_sfc_iter95.py \
+      tests/validation/test_rcemip_plane_smoke.py \
+      tests/atmosphere/hydrostatic/test_build_rcemip1_small_reference.py \
+      tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py
   rc=$?; echo "PYTEST(with-oracle) rc=$rc"; [ $rc -ne 0 ] && rc_all=1
 
   echo "=== PYTEST oracle gate, oracle path ABSENT (skip-cleanly check) ==="
