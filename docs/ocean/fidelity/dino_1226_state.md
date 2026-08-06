@@ -1,3 +1,34 @@
+# C1 CLOSED 2026-08-06 — the climate result is REPRODUCIBLE and BIT-DETERMINISTIC
+
+Fresh independently-invoked arm A reproduced the original run **bit-for-bit over 4 consecutive
+model years** (all six saved fields, fp64, max|orig−repro| = **exactly 0.000e+00**; ACC diff
++0.00e+00 Sv at y1-y4). Determinism established ⇒ remaining years and arm B add no information.
+Headline re-scored through the validated harness from the recorded outputs: ACC y5 armA 67.06 /
+armB **91.41** / NEMO 91.13 = **+98.84%** gap closed; y10 83.03 / **121.58** / 121.07 =
+**+98.67%**.
+
+**QUALIFICATION to the dense-water claim (found in this lane, correcting what was posted):** at
+y5 armB's σ>1.6 volume is 0.00e0 — **but so is NEMO's**, so the "0.94-1.03x NEMO's volume" claim
+holds only **from y10 onward**, where NEMO itself first forms that class. At y10: σ>1.5 armA
+0.163x vs armB **0.997x**; σ>1.6 armA **0.000x** vs armB **1.031x**. "armA makes ZERO water
+denser than σ=1.6" is confirmed for every year in which NEMO makes any.
+
+**Correction to the adversarial review's C1**: it claimed the run "left no recoverable
+provenance". Partly wrong — `results/dino_1492_20y/arm{A,B}.log` were on disk throughout with
+the env line. The genuine gap was narrower: recipe / `DINO_YEARS` / output path arrive as argv
+and were never echoed. Fixed permanently — the harness now prints `ARGV=` and the run env.
+
+MANIFEST (results/ is gitignored, so this text is the record): git
+`0c92bd468a5e8926fcaaaa7e1300d881b0f85804` (branch feat/nemo-dino-topo-bridge);
+`CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both DINO_YEARS=10
+DINO_SURFACE_PLACEMENT=applied_now|leapfrog_rhs`; fp64 policy set in-script before geometry;
+recipe `nemo_dino_kamm_mlf`, DT=2700 s, 11520 steps/yr, ACC0=0; donor `RUN_TRAJ/mesh_mask.nc` +
+`DINO_00000320_restart.nc`, nn_hls=0, periodic_i, full_step; overrides lon_west=1.0,
+lon_east=49.0, sill_lon=1.0. **Config diff: 140 fields compared, exactly 1 differs**
+(`surface_tendency_placement`); `outer_integrator=leapfrog` on both.
+Harness gates (fatal, both PASS): NEMO y10 ACC **121.07 Sv**; band volume **2.694775e+16 m³**
+(rel 4.98e-8); topo census **342134 wet cells**, u/v face masks EXACT.
+
 # sh2 RECONCILED 2026-08-06 (#1492 item 0.3) — TWO RECORDED NUMBERS ARE UNSOURCED; STRIKE THEM
 
 Canonical probe `scripts/validate/ocean_fidelity/dino_1226/sh2_canonical.py` (3e1e9507d) locks

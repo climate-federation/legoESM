@@ -25,6 +25,13 @@ from legoesm.ocean.experiments.dino import (dino_config_for_recipe, dino_lat_lon
 _e3t_mode = require_explicit_e3t_mode(context="dino_year_screen_fullframe")
 print(f"LEGOESM_NEMO_E3T={_e3t_mode}  JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')}  "
       f"x64_enabled={jax.config.jax_enable_x64}")
+# #1492 C1: results/ is gitignored, so the LOG is the only surviving provenance.
+# The env line above was recoverable; the recipe, year count and output path were
+# NOT (they arrive as argv and were never echoed), which is the gap the review hit.
+print(f"ARGV={' '.join(sys.argv)}")
+print(f"DINO_YEARS={os.environ.get('DINO_YEARS')}  "
+      f"DINO_SURFACE_PLACEMENT={os.environ.get('DINO_SURFACE_PLACEMENT')}  "
+      f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
 RECIPE = sys.argv[1]; OUT = sys.argv[2]; DT = 2700.0
 NSTEPS = 11520; ACC0 = 0  # 1-year screen: full year-1 mean (matched to NEMO annual mean)
