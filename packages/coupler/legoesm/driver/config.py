@@ -638,8 +638,9 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Hard (iterated) saturation-adjustment guard for the warm-rain schemes
-    # (kessler/seifert_beheng/morrison/thompson/p3): where q_v exceeds the
+    # Hard (iterated) saturation-adjustment guard, carried by EVERY guarded
+    # scheme (microphysics/config.HARD_SAT_GUARD_SCHEMES: the five bulk
+    # warm-rain ones plus sundqvist and ml_emulator): where q_v exceeds the
     # scheme's hard_sat_adjust_threshold * q_sat, an iterated saturation
     # adjustment drains q_v ONTO the liquid saturation curve (conserving
     # c_pd*T + L_v*q_v exactly), rate-limited to hard_sat_max_heating_K per step,

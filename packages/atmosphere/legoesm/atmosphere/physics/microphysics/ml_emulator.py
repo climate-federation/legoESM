@@ -16,8 +16,9 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    hard_saturation_drain,
+    hard_saturation_blend,
 )
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsMLEmulatorConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -71,13 +72,19 @@ __physics_contract__ = {
         "scheme (dT_dt latent heating, precipitation >= 0 via a softplus head). "
         "Being a LEARNED surrogate it enforces NO hard conservation -- no "
         "contract-level conservation is claimed; positivity of precip is "
-        "structural, other outputs are unconstrained. The OPT-IN hard "
-        "saturation-adjustment guard (config.hard_saturation_adjustment, "
-        "default False) is the ONE structurally-conserving correction: it "
-        "drains post-step super-saturation with -dq_v = +dq_c and "
-        "dT = (L_v/c_pd)*dq_c, conserving total water and c_pd*T + L_v*q_v "
-        "for the drained mass."
+        "structural, other outputs are unconstrained -- hence conserves: "
+        "none. The OPT-IN hard saturation-adjustment guard "
+        "(config.hard_saturation_adjustment, default False) constrains ONLY "
+        "ITS OWN increment: it drains post-step super-saturation with "
+        "-dq_v = +dq_c and dT = (L_v/c_pd)*dq_c, so the drained mass conserves "
+        "total water and c_pd*T + L_v*q_v. It does NOT make the scheme "
+        "conservative, because the network's own tendencies remain "
+        "unconstrained."
     ),
+    # The RAW emulator conserves nothing; the opt-in guard's contribution
+    # alone is water- and enthalpy-conserving. "none" is the honest
+    # scheme-level answer because the guard defaults OFF and, even ON, only
+    # its own increment is constrained -- the network's tendencies are not.
     "conserves": ["none"],
     "differentiable": True,
     "reference": "Learned microphysics emulator (Equinox MLP); cf. Rasp, Pritchard & Gentine (2018), PNAS 115, 9684-9689",
@@ -156,21 +163,42 @@ def ml_microphysics(
     # --- OPT-IN hard (iterated) saturation-adjustment guard -----------------
     # A learned surrogate emits UNCONSTRAINED tendencies, so it can leave the
     # column super-saturated (its own contract claims ``conserves: none``).
-    # The guard is the SAME shared implementation the bulk schemes use, but at
-    # the POST-STEP placement the validated MPAS driver hook uses, because the
-    # emulator exposes no internal condensation rate to blend into: evaluate
-    # the state the emulator's tendencies WILL produce and drain whatever
-    # super-saturation remains there.
+    # The guard is the SAME shared implementation the bulk schemes use, at the
+    # POST-STEP placement the validated MPAS driver hook uses -- the emulator
+    # exposes no internal condensation rate to blend into, so we evaluate the
+    # state its tendencies WILL produce and drain what remains super-saturated.
+    #
+    # WHY ``hard_saturation_blend(0, ...)`` AND NOT ``hard_saturation_drain``:
+    # the two differ ONLY in their activation gate, and the drain's gate is a
+    # HARD ``jnp.where(q_v > thr*q_sat, ...)`` step.  Its docstring states the
+    # scope condition that licenses that step -- "a HARD gate is appropriate
+    # here because the post-step hook is EAGER (outside jit / no autodiff
+    # through it), so the smooth ramp the in-scheme AD path needs is
+    # unnecessary".  That condition does NOT hold here: the emulator runs
+    # inside jit and is the one scheme whose weights are trained through
+    # ``eqx.filter_value_and_grad``, so a step discontinuity at RH = threshold
+    # would put a jump in the loss surface and a one-sided gradient at the
+    # gate.  Passing a ZERO base rate to the blend gives the same pure drain
+    # with the SMOOTH sigmoid activation the AD path requires:
+    #     blended = 0 + activation*(cond_hard - 0) = activation*cond_hard,
+    # then the same no-overshoot cap and the same per-step heating/mass rate
+    # limit.  (Porting a reference implementation means porting its exclusions,
+    # not just its formula.)
     #
     # Sign convention: ``rate >= 0`` is a DRAIN of vapour into cloud water
     # (positive = condensation).  Applying it as
     #     q_v -= rate*dt ;  q_c += rate*dt ;  T += (L_v/c_pd)*rate*dt
     # moves water (no source/sink of total water: -dq_v = +dq_c) and conserves
     # the moist enthalpy c_pd*T + L_v*q_v exactly, matching the identity every
-    # other scheme's adjustment satisfies.  ``hard_saturation_drain`` rate-
-    # limits against the POST-step q_v it is handed, so the corrected
-    # q_v_post - rate*dt is >= 0 by construction even when the emulator's raw
-    # prediction is aggressive.
+    # other scheme's adjustment satisfies.
+    #
+    # POSITIVITY, stated precisely (the earlier claim here was too strong): the
+    # rate limit caps the drain at ``min(dqv_cap, max(q_v_post, 0))/dt``, so
+    # WHERE THE EMULATOR LEAVES q_v_post >= 0 the corrected vapour is >= 0.
+    # Where the raw network already predicts q_v_post < 0 the cap collapses to
+    # zero and the guard is NEUTRAL, not corrective -- it never makes a
+    # negative vapour more negative, but it does not repair one either. Raw
+    # emulator positivity is out of scope for a saturation guard.
     #
     # STATIC Python ``if`` on a compile-time bool (CLAUDE.md feature-gating
     # exception): default False => not traced, byte-identical to the raw
@@ -178,8 +206,10 @@ def ml_microphysics(
     if config.hard_saturation_adjustment:
         T_post = T + dT_dt * dt
         q_v_post = q_v + dq_v_dt * dt
-        rate = hard_saturation_drain(
-            T_post, q_v_post, p_full, dt,
+        q_sat_post = saturation_mixing_ratio(T_post, p_full)
+        rate = hard_saturation_blend(
+            jnp.zeros_like(q_v_post), T_post, q_v_post, p_full, dt,
+            q_sat_post,
             config.hard_sat_adjust_threshold,
             config.hard_sat_max_heating_K,
         )

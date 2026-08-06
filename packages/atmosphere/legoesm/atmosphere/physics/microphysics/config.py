@@ -67,14 +67,25 @@ HARD_SAT_GUARD_SCHEMES = (
 # claim).  Adding an entry needs the same standard of evidence.
 HARD_SAT_GUARD_EXEMPT = {
     "sdm": (
-        "Super-Droplet Method: super-saturation is a PROGNOSTIC quantity here, "
-        "not a residual to be clipped. sdm/column.py computes the saturation "
-        "ratio S = e/e_sat and sdm/condensation.py integrates the "
-        "Maxwell/Koehler droplet growth law dr/dt against (S-1), so the "
-        "vapour sink is the resolved condensational growth of the droplet "
-        "population. Overlaying an instantaneous on-curve adjustment would "
-        "double-count that sink and destroy the activation/relaxation "
-        "transient the method exists to represent."
+        "Super-Droplet Method: WHERE DROPLETS EXIST, super-saturation is a "
+        "PROGNOSTIC quantity, not a residual to be clipped -- "
+        "sdm/column.py computes the saturation ratio via "
+        "relative_humidity(T, p_full, q_v) and "
+        "sdm/condensation.py::integrate_radius advances the Maxwell/Koehler "
+        "growth law dr/dt against (S-1), so the vapour sink is the resolved "
+        "condensational growth of the population. Overlaying an instantaneous "
+        "on-curve adjustment would double-count that sink and destroy the "
+        "activation/relaxation transient the method exists to represent. "
+        "KNOWN LIMITATION THIS EXEMPTION DOES NOT COVER: the default "
+        "condensation-only adapter (column_do_coalescence=False) has NO "
+        "aerosol-Koehler activation, so with q_c = 0 the reconstruction gives "
+        "N_eff = 0 and a super-saturated CLEAR cell is left undrained at any "
+        "RH (its own comment says so: 'A supersaturated clear cell still "
+        "produces nothing'). That is a missing-ACTIVATION defect in SDM, "
+        "pinned by test_sdm_clear_cell_supersaturation_is_a_known_gap; the "
+        "fix is activation (the column_do_coalescence=True branch already "
+        "nucleates cdnc embryos where S > 1), NOT bolting a bulk saturation "
+        "adjustment onto a super-droplet scheme."
     ),
     "fast_sbm": (
         "Fast spectral-bin microphysics: same reason as sdm, at bin "
@@ -456,8 +467,24 @@ class SundqvistConfig(NamedTuple):
     # enthalpy-consistent equilibrium ``q_eq = q_sat(T + L_v/c_pd*(q_v-q_eq))``
     # and rate-limits the per-step heating to ``hard_sat_max_heating_K``, so a
     # large pool drains ONTO the curve over several steps instead of detonating.
+    #
+    # THRESHOLD SEMANTICS DIFFER ON THIS SCHEME -- read before tuning.  In
+    # ``hard_saturation_blend`` the RH threshold controls only the smooth
+    # activation ramp; the on-curve CAP ``min(blended, cond_hard)`` is applied
+    # UNCONDITIONALLY.  For the five bulk schemes the smooth rate is divided by
+    # the psychrometric factor, so it rarely exceeds ``cond_hard`` and the cap
+    # seldom binds -- there the guard really does "fire above the threshold".
+    # Sundqvist's smooth rate has NO psychrometric division, so it exceeds
+    # ``cond_hard`` wherever the RH_crit sigmoid saturates: at T=300 K,
+    # p=90 kPa, RH=1.02 the activation is only 0.083 yet the cap still cuts the
+    # rate ~5x.  So on Sundqvist the guard changes the answer at essentially
+    # every super-saturated cell and ``hard_sat_adjust_threshold`` is a WEAK
+    # knob (it modulates the smooth/on-curve blend below the cap, not an
+    # on/off trigger).  Its __param_spec__ tier-2 entry is kept for
+    # cross-scheme uniformity of the sweep interface; do not expect the
+    # (1.0, 2.0) sweep to behave like it does on Kessler.
     hard_saturation_adjustment: bool = False
-    hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
+    hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
 

@@ -6680,8 +6680,9 @@ class ModelDriver:
             raise ValueError(
                 f"hard_saturation_adjustment=True is not supported by the "
                 f"{cfg.microphysics!r} microphysics scheme on the MPAS path; "
-                "use a warm-rain scheme (kessler, seifert_beheng, morrison, "
-                "thompson, p3) or drop --hard-saturation-adjustment."
+                "use a scheme carrying the guard (microphysics/config."
+                "HARD_SAT_GUARD_SCHEMES) or drop "
+                "--hard-saturation-adjustment."
             )
         # _hsub already carries any --hard-sat-adjust-threshold /
         # --hard-sat-max-heating-k ExperimentConfig overrides: they are

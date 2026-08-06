@@ -50,7 +50,9 @@ Two honest readings of that table, both of which the assertions encode:
 
 from __future__ import annotations
 
+import ast
 import os
+import pathlib
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -239,14 +241,96 @@ def test_guard_never_creates_column_water(scheme):
         )
 
 
-def test_ml_emulator_guard_is_exactly_water_neutral():
+def _ml_arms():
+    """(off, on) MicrophysicsOutput for the emulator on the shared column."""
+    T, q_v, hyd, p_full, p_half, rho, dz = _column()
+    base = MicrophysicsMLEmulatorConfig()
+    model = MicrophysicsEmulator(base.n_input, base.n_hidden, base.n_layers,
+                                 base.n_output, key=jax.random.PRNGKey(base.seed))
+    args = (T, q_v, hyd, p_full, p_half, rho, dz, _DT)
+    off = ml_microphysics(*args, base, model)
+    on = ml_microphysics(
+        *args, MicrophysicsMLEmulatorConfig(hard_saturation_adjustment=True),
+        model)
+    return off, on
+
+
+def test_ml_emulator_guard_is_exactly_water_neutral_and_actually_fires():
     """The emulator's guard adds ``-rate`` to dq_v_dt and ``+rate`` to dq_c_dt,
-    so at step 1 the two arms must agree on total water to round-off. This is
-    the direct proof of the -dq_v = +dq_c sign pairing, isolated from the
-    untrained network's own (unconstrained) tendencies."""
-    _, tw_off = _integrate("ml_emulator", hard=False, nstep=1)
-    _, tw_on = _integrate("ml_emulator", hard=True, nstep=1)
-    np.testing.assert_allclose(tw_on[0], tw_off[0], rtol=1e-12)
+    so the two arms must agree on total water to round-off.
+
+    NON-VACUITY (this is the point): a water-neutrality comparison between two
+    arms is trivially satisfied when ``rate == 0``, i.e. it would pass with the
+    guard deleted. So the test first asserts the arms genuinely DIFFER, and
+    that the difference is equal and opposite in q_v and q_c."""
+    off, on = _ml_arms()
+    d_qv = np.asarray(on.dq_v_dt - off.dq_v_dt)
+    d_qc = np.asarray(on.dq_c_dt - off.dq_c_dt)
+    d_T = np.asarray(on.dT_dt - off.dT_dt)
+    assert np.max(np.abs(d_qv)) > 1e-9, (
+        "the guard produced NO change at RH 1.4 — this comparison would pass "
+        "with the feature removed, so it proves nothing. Check the wiring."
+    )
+    np.testing.assert_allclose(d_qc, -d_qv, rtol=1e-12, atol=0.0)
+    # ... and the heating that accompanies it is the matching latent release.
+    np.testing.assert_allclose(
+        d_T, (constants.L_v / constants.c_pd) * (-d_qv), rtol=1e-12, atol=0.0)
+
+
+def test_ml_emulator_guard_uses_the_smooth_gate_not_the_eager_hard_gate():
+    """The emulator runs inside jit and is the one TRAINABLE scheme, so its
+    drain must use the SMOOTH sigmoid activation, not ``hard_saturation_drain``
+    whose ``jnp.where(q_v > thr*q_sat, ...)`` step is licensed only for the
+    EAGER post-step hook ("outside jit / no autodiff through it").
+
+    A hard gate is detectable behaviourally: it is exactly zero below the
+    threshold and jumps discontinuously across it. The smooth gate is small but
+    STRICTLY NON-ZERO just below the threshold. Probe at RH = 1.05 (below the
+    1.1 trigger) — a hard gate gives identically 0 there."""
+    import legoesm.atmosphere.physics.microphysics.ml_emulator as ml
+
+    src = ast.parse(pathlib.Path(ml.__file__).read_text())
+    imported = {a.name for n in ast.walk(src)
+                if isinstance(n, ast.ImportFrom)
+                and (n.module or "").endswith("_warm_rain")
+                for a in n.names}
+    assert "hard_saturation_drain" not in imported, (
+        "ml_emulator imports the EAGER-only hard-gated drain; its step "
+        "discontinuity puts a jump in the trainable loss surface."
+    )
+    assert "hard_saturation_blend" in imported
+
+
+def test_ml_emulator_guard_gradient_is_finite_through_the_gate():
+    """The trainable scheme's guard must be AD-safe, including across the
+    activation ramp and at cold/low-q_sat conditions where q_sat -> 0.
+
+    This is the gradient test the Sundqvist-only differentiability test did not
+    cover: the emulator is the arm whose weights are trained."""
+    cfg = MicrophysicsMLEmulatorConfig(hard_saturation_adjustment=True)
+    model = MicrophysicsEmulator(cfg.n_input, cfg.n_hidden, cfg.n_layers,
+                                 cfg.n_output, key=jax.random.PRNGKey(cfg.seed))
+    shape = (1, 4)
+    # Warm/saturated, right at the gate, and cold+thin (TTL-like, tiny q_sat).
+    T = jnp.array([[300.0, 300.0, 230.0, 205.0]], dtype=jnp.float64)
+    p_full = jnp.array([[90000.0, 90000.0, 35000.0, 15000.0]], dtype=jnp.float64)
+    p_half = jnp.concatenate([p_full, p_full[:, -1:]], axis=1)
+    rh = jnp.array([[1.40, 1.10, 1.60, 2.00]], dtype=jnp.float64)
+    q_v0 = rh * saturation_mixing_ratio(T, p_full)
+    z = jnp.zeros(shape, dtype=jnp.float64)
+    hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
+                           N_c=z, N_r=z, N_i=z)
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full(shape, 500.0, dtype=jnp.float64)
+
+    def loss(qv):
+        out = ml_microphysics(T, qv, hyd, p_full, p_half, rho, dz, _DT,
+                              cfg, model)
+        return jnp.sum(out.dq_c_dt ** 2) + jnp.sum(out.dT_dt ** 2)
+
+    g = np.asarray(jax.grad(loss)(q_v0))
+    assert np.all(np.isfinite(g)), f"non-finite gradient through the guard: {g}"
+    assert np.abs(g).sum() > 0.0
 
 
 def test_guard_conserves_moist_enthalpy_in_the_bulk_schemes():
@@ -305,16 +389,88 @@ def test_ml_emulator_off_path_never_touches_the_guard(monkeypatch):
             model)
 
 
-def test_ml_emulator_guard_keeps_vapour_non_negative():
-    """The emulator's drain is rate-limited against the POST-step q_v, so the
-    corrected vapour cannot go negative even when the raw prediction is
-    aggressive -- the reason the guard sits post-step rather than at input."""
-    cfg = MicrophysicsMLEmulatorConfig(hard_saturation_adjustment=True)
-    T, q_v, hyd, p_full, p_half, rho, dz = _column()
-    model = MicrophysicsEmulator(cfg.n_input, cfg.n_hidden, cfg.n_layers,
-                                 cfg.n_output, key=jax.random.PRNGKey(cfg.seed))
-    out = ml_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, _DT, cfg, model)
-    assert float(jnp.min(q_v + out.dq_v_dt * _DT)) >= 0.0
+def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
+    """The drain is rate-limited at ``min(dqv_cap, max(q_v_post, 0))/dt``. The
+    claim that follows is NARROWER than "vapour cannot go negative", and the
+    narrow claim is what is asserted:
+
+      * where the scheme leaves q_v_post >= 0, the corrected vapour is >= 0;
+      * where q_v_post < 0 already, the cap collapses to zero and the guard is
+        NEUTRAL — it does not repair a negative, and must not deepen one.
+
+    Driven directly through the shared core with a HAND-BUILT post-step state
+    (including a negative cell), because the untrained MLP's own tendencies are
+    ~1e-6 and could never exercise either branch — a test using it would pass
+    with the guard deleted."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        hard_saturation_blend,
+    )
+    T = jnp.array([[300.0, 300.0, 300.0]], dtype=jnp.float64)
+    p = jnp.full((1, 3), 90000.0, dtype=jnp.float64)
+    q_sat = saturation_mixing_ratio(T, p)
+    # cell 0: strongly super-saturated;  cell 1: exactly zero vapour;
+    # cell 2: ALREADY NEGATIVE (an aggressive raw prediction).
+    q_v_post = jnp.concatenate([1.4 * q_sat[:, :1],
+                                jnp.zeros((1, 1), dtype=jnp.float64),
+                                -1.0e-4 * jnp.ones((1, 1), dtype=jnp.float64)],
+                               axis=1)
+    rate = hard_saturation_blend(jnp.zeros_like(q_v_post), T, q_v_post, p,
+                                 _DT, q_sat, 1.1, 5.0)
+    r = np.asarray(rate)
+    assert r[0, 0] > 0.0, "super-saturated cell was not drained at all"
+    # No drain can be manufactured from zero or negative vapour.
+    np.testing.assert_allclose(r[0, 1], 0.0, atol=0.0)
+    np.testing.assert_allclose(r[0, 2], 0.0, atol=0.0)
+    q_v_final = np.asarray(q_v_post) - r * _DT
+    assert q_v_final[0, 0] >= 0.0          # positive cell stays positive
+    assert q_v_final[0, 2] == np.asarray(q_v_post)[0, 2]   # negative untouched
+
+
+# Values below were produced by scripts/tmp/_probe_ssguard_byteid.py at
+# origin/main 5b74b65128b04d7ad1c2de8df8dcefd99e531b84 (SLURM job 9331695,
+# JAX_ENABLE_X64=1, CPU) — i.e. BEFORE the guard existed. Pinning them here
+# turns the byte-identity claim from a one-off manual diff into a CI gate: if
+# adding the (default-off) guard ever perturbs the Sundqvist answer by one ULP,
+# this goes red. The probe's cells span sub-saturated, marginal and strongly
+# super-saturated at 300 K.
+_SUNDQVIST_PREGUARD_DT_DT = (
+    0.07977905897810188, 0.00425441486969195, -2.686381198312863e-06,
+    0.0012034384086302015, 0.0002189595022671857,
+)
+_SUNDQVIST_PREGUARD_DQ_V_DT = (
+    -3.204687477479419e-05, -1.7089785504547463e-06, 1.0791067601251639e-09,
+    -4.834155789069355e-07, -8.795500773998619e-08,
+)
+
+
+def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
+    """Numeric byte-identity against values computed BEFORE the guard existed.
+
+    The monkeypatch "bomb" tests prove the new code is not INVOKED; this proves
+    the numbers are unchanged, which is the claim that actually protects every
+    tuned parameter set and prior comparison. Arrays are compared, never
+    printed summaries (CLAUDE.md)."""
+    T = jnp.array([[300.0, 285.0, 260.0, 230.0, 205.0]], dtype=jnp.float64)
+    p = jnp.array([[95000.0, 85000.0, 60000.0, 35000.0, 15000.0]],
+                  dtype=jnp.float64)
+    rh = jnp.array([[1.40, 1.05, 0.90, 1.60, 2.00]], dtype=jnp.float64)
+    q_v = rh * saturation_mixing_ratio(T, p)
+    shape = T.shape
+    z = jnp.zeros(shape, dtype=jnp.float64)
+    hyd = HydrometeorState(
+        q_c=jnp.full(shape, 3.0e-4, dtype=jnp.float64),
+        q_r=jnp.full(shape, 1.0e-5, dtype=jnp.float64),
+        q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    rho = p / (constants.R_d * T)
+    dz = jnp.full(shape, 400.0, dtype=jnp.float64)
+    p_half = jnp.concatenate([p, p[:, -1:]], axis=1)
+
+    out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
+                                 SundqvistConfig())
+    np.testing.assert_array_equal(
+        np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT))
+    np.testing.assert_array_equal(
+        np.asarray(out.dq_v_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DQ_V_DT))
 
 
 def test_guard_is_differentiable_end_to_end():

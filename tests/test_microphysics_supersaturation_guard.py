@@ -182,6 +182,33 @@ def classify_config(scheme: str, sub) -> str | None:
 # ---------------------------------------------------------------------------
 # 1. The ratchet
 # ---------------------------------------------------------------------------
+def discover_factory_scheme_tests(source: str) -> set[str]:
+    """Scheme names the factory COMPARES against (``config.scheme == "x"``).
+
+    Cross-check for :func:`discover_factory_schemes`, which reads only the
+    ``return`` tuples. A new branch written as
+    ``name = "brandnew"; return name, fn, cfg`` (a Name, not a Constant) is
+    invisible to the return scan; it is NOT invisible here, so the two sets
+    disagreeing goes red instead of silently under-reporting coverage.
+    """
+    tree = ast.parse(source)
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == _FACTORY_FN), None)
+    if fn is None:
+        raise AssertionError(
+            f"{_FACTORY_FN} not found in microphysics/integration.py — the "
+            "ratchet's discovery anchor moved; re-point it (do NOT delete)."
+        )
+    out: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Compare):
+            for c in node.comparators:
+                if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                    out.add(c.value)
+    return out
+
+
 def test_discovery_is_not_vacuous() -> None:
     schemes = discover_factory_schemes(_integration_source())
     assert len(schemes) >= _MIN_SCHEMES, (
@@ -190,6 +217,24 @@ def test_discovery_is_not_vacuous() -> None:
         "ratchet would be silently vacuous; fix discovery."
     )
     assert "kessler" in schemes and "none" in schemes
+
+
+def test_return_scan_and_comparison_scan_agree() -> None:
+    """Two independent readings of the factory must see the SAME scheme set.
+
+    The return-tuple scan can be evaded (a Name instead of a string literal, a
+    registry-table dispatch, a helper function); the ``==`` comparison scan has
+    different blind spots. Requiring agreement means an evasion has to defeat
+    both at once, and a mismatch names the scheme that slipped through."""
+    returns = set(discover_factory_schemes(_integration_source()))
+    compares = discover_factory_scheme_tests(_integration_source())
+    assert returns == compares, (
+        "the factory's ``return`` names and its ``config.scheme ==`` names "
+        f"disagree: only-returned={sorted(returns - compares)}, "
+        f"only-compared={sorted(compares - returns)}. One of the two scans is "
+        "missing a branch — do not silence this, fix discovery, or the "
+        "coverage ratchet under-reports."
+    )
 
 
 def test_every_factory_scheme_is_guarded_or_exempt() -> None:
@@ -229,29 +274,110 @@ def test_exemption_list_is_shrink_only() -> None:
     )
 
 
-def test_exempt_reasons_name_real_modules() -> None:
-    """Each exemption reason claims specific source files resolve
-    super-saturation explicitly. Verify those files exist and contain the named
-    machinery — a reason string is a CLAIM (CLAUDE.md), not decoration."""
+def _defined_or_called_names(path: pathlib.Path) -> set[str]:
+    """Names DEFINED or CALLED in ``path``, from the AST — so a match cannot be
+    satisfied by a docstring or a comment.
+
+    This distinction is the point. The first cut of this test asserted that the
+    literal ``"S = e/e_sat"`` appeared in ``sdm/column.py``. It does — in the
+    MODULE DOCSTRING. The line that actually runs is
+    ``S = relative_humidity(T, p_full, q_v)``. Deleting the whole condensation
+    implementation and leaving the docstring kept the test green: exactly the
+    CLAUDE.md ``inspect.getsource(wrapper)`` failure, where an assertion names
+    something other than the symbol that RUNS.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                names.add(fn.id)
+            elif isinstance(fn, ast.Attribute):
+                names.add(fn.attr)
+    return names
+
+
+def test_exempt_reasons_name_symbols_that_actually_run() -> None:
+    """Each exemption reason claims specific machinery resolves
+    super-saturation. Verify the named symbols are DEFINED or CALLED there — a
+    reason string is a CLAIM (CLAUDE.md), and a docstring is not evidence that
+    anything executes."""
     root = ra.repo_root() / "packages/atmosphere/legoesm/atmosphere/physics/microphysics"
     claims = {
-        "sdm": [("sdm/condensation.py", "saturation_vapor_pressure"),
-                ("sdm/column.py", "S = e/e_sat")],
-        "fast_sbm": [("fast_sbm/supersaturation.py", "def integrate_supersaturation"),
-                     ("fast_sbm/diffusional_growth.py", "supersaturation")],
+        "sdm": [("sdm/condensation.py", "integrate_radius"),
+                ("sdm/condensation.py", "saturation_vapor_pressure"),
+                ("sdm/column.py", "relative_humidity")],
+        "fast_sbm": [
+            ("fast_sbm/supersaturation.py", "integrate_supersaturation"),
+            ("fast_sbm/condensation_driver.py", "integrate_supersaturation"),
+        ],
     }
     for scheme, items in claims.items():
         assert scheme in HARD_SAT_GUARD_EXEMPT
-        for rel, needle in items:
+        for rel, symbol in items:
             path = root / rel
             assert path.is_file(), f"{scheme} exemption cites missing {rel}"
-            assert needle in path.read_text(), (
-                f"{scheme} exemption claims {rel} contains {needle!r}; it does "
-                "not. The reason string is stale — re-verify or drop the "
-                "exemption."
+            assert symbol in _defined_or_called_names(path), (
+                f"{scheme} exemption rests on {symbol!r} running in {rel}; it "
+                "is neither defined nor called there. The reason string is "
+                "stale — re-verify it or drop the exemption."
             )
     # "none" is exempt because the factory returns no function for it.
     assert discover_factory_schemes(_integration_source())["none"] is None
+
+
+def test_sdm_exemption_discloses_its_clear_cell_gap() -> None:
+    """The sdm exemption is NARROWER than 'sdm resolves super-saturation'.
+
+    Its default condensation-only adapter has no aerosol-Koehler activation:
+    ``N_eff = where(m_drop >= m_min, cdnc, q_c*rho/m_min)`` is 0 when q_c = 0,
+    so a super-saturated CLEAR cell is left undrained at any RH — precisely the
+    q_c = 0, RH 1.4 configuration that motivated this whole ratchet. The
+    exemption is still right (the fix is activation, not a bulk adjustment
+    bolted onto a super-droplet scheme), but it must SAY SO rather than imply
+    blanket coverage."""
+    reason = HARD_SAT_GUARD_EXEMPT["sdm"]
+    for needle in ("KNOWN LIMITATION", "column_do_coalescence", "N_eff = 0"):
+        assert needle in reason, (
+            f"the sdm exemption no longer discloses its clear-cell gap "
+            f"({needle!r} missing). Do not let it read as blanket coverage."
+        )
+    src = (ra.repo_root()
+           / "packages/atmosphere/legoesm/atmosphere/physics/microphysics"
+           / "sdm/column.py").read_text()
+    assert "A supersaturated clear cell still produces nothing" in src, (
+        "sdm/column.py no longer documents the no-activation gap — if SDM "
+        "gained activation, re-verify and narrow the exemption reason."
+    )
+
+
+def test_every_guarded_scheme_actually_READS_the_flag() -> None:
+    """Structural presence is not enough: the scheme must CONSUME
+    ``config.hard_saturation_adjustment``.
+
+    Without this, a new scheme could declare the three fields, join
+    HARD_SAT_GUARD_SCHEMES, import ``saturation_adjustment`` (which every bulk
+    module already does for its ordinary smooth condensation) and simply never
+    pass ``hard_adjust=``. Every other test in this file would be green while
+    the guard was silently inert — verbatim the failure this ratchet's own
+    error strings claim to prevent."""
+    root = ra.repo_root() / "packages/atmosphere/legoesm/atmosphere/physics/microphysics"
+    for scheme in HARD_SAT_GUARD_SCHEMES:
+        tree = ast.parse((root / f"{scheme}.py").read_text())
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert "hard_saturation_adjustment" in attrs, (
+            f"{scheme}.py never reads ``config.hard_saturation_adjustment``, "
+            "so its guard fields are decorative and the flag is silently "
+            "inert. Gate the shared adjustment on it."
+        )
+        for field in ("hard_sat_adjust_threshold", "hard_sat_max_heating_K"):
+            assert field in attrs, (
+                f"{scheme}.py never reads ``config.{field}``, but it is a "
+                "declared tier-2 __param_spec__ tunable — tuning it would do "
+                "nothing."
+            )
 
 
 def test_all_guarded_schemes_share_one_implementation() -> None:
@@ -349,3 +475,52 @@ def test_selftest_discovery_finds_a_synthetic_new_scheme() -> None:
 def test_selftest_discovery_fails_loudly_when_anchor_missing() -> None:
     with pytest.raises(AssertionError, match="discovery anchor"):
         discover_factory_schemes("def something_else():\n    return 1\n")
+
+
+def test_selftest_docstring_only_match_is_rejected() -> None:
+    """Non-vacuity for :func:`_defined_or_called_names`: a symbol appearing
+    ONLY in a docstring or comment must NOT count as running, or the exemption
+    check reverts to the defect it was written to fix."""
+    import tempfile
+
+    src = ('"""Docs mention integrate_supersaturation and S = e/e_sat."""\n'
+           "# integrate_supersaturation in a comment too\n"
+           "def a_real_def():\n    return 1\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+        fh.write(src)
+        tmp = pathlib.Path(fh.name)
+    try:
+        found = _defined_or_called_names(tmp)
+        assert "integrate_supersaturation" not in found   # docstring/comment
+        assert "a_real_def" in found                      # a real def IS seen
+    finally:
+        tmp.unlink()
+
+
+def test_selftest_a_scheme_that_ignores_the_flag_is_flagged(tmp_path) -> None:
+    """Non-vacuity for :func:`test_every_guarded_scheme_actually_READS_the_flag`
+    — the concrete evasion it closes: import the shared entry point (as every
+    bulk module already does) but never pass ``hard_adjust=``."""
+    src = (
+        "from ..._warm_rain import saturation_adjustment\n"
+        "def newscheme(T, q_v, cfg):\n"
+        "    cond, q_sat = saturation_adjustment(T, q_v, 1.0, 1.0)\n"
+        "    return cond\n"
+    )
+    attrs = {n.attr for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Attribute)}
+    assert "hard_saturation_adjustment" not in attrs
+
+    ok = (
+        "from ..._warm_rain import saturation_adjustment\n"
+        "def newscheme(T, q_v, cfg):\n"
+        "    return saturation_adjustment(\n"
+        "        T, q_v, 1.0, 1.0,\n"
+        "        hard_adjust=cfg.hard_saturation_adjustment,\n"
+        "        hard_threshold=cfg.hard_sat_adjust_threshold,\n"
+        "        hard_max_heating_K=cfg.hard_sat_max_heating_K)\n"
+    )
+    ok_attrs = {n.attr for n in ast.walk(ast.parse(ok))
+                if isinstance(n, ast.Attribute)}
+    assert {"hard_saturation_adjustment", "hard_sat_adjust_threshold",
+            "hard_sat_max_heating_K"} <= ok_attrs
