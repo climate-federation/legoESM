@@ -206,7 +206,22 @@ def ml_microphysics(
     if config.hard_saturation_adjustment:
         T_post = T + dT_dt * dt
         q_v_post = q_v + dq_v_dt * dt
-        q_sat_post = saturation_mixing_ratio(T_post, p_full)
+        # q_sat in fp64 when x64 is available, then back to the state dtype --
+        # the SAME promotion ``saturation_adjustment`` applies for the bulk
+        # schemes (issue #618). At fp32 the exp/softplus/division chain in
+        # saturation_mixing_ratio carries ~1.7e-8 kg/kg absolute error, a large
+        # RELATIVE error on a marginal supersaturation residual, which would
+        # leave this drain's activation ramp and on-curve bracket less accurate
+        # than every other guarded scheme's on the production configuration
+        # (fp32 arrays under jax_enable_x64=True). Static Python ``if`` on the
+        # compile-time flag: the x64-off path is unchanged and no fp64 leaks
+        # into the state.
+        if jax.config.jax_enable_x64:
+            q_sat_post = saturation_mixing_ratio(
+                T_post.astype(jnp.float64),
+                p_full.astype(jnp.float64)).astype(q_v_post.dtype)
+        else:
+            q_sat_post = saturation_mixing_ratio(T_post, p_full)
         rate = hard_saturation_blend(
             jnp.zeros_like(q_v_post), T_post, q_v_post, p_full, dt,
             q_sat_post,
