@@ -1,3 +1,23 @@
+# OVERSHOOT = H-DEFECT 2026-08-06 (opus analysis lane) — CONFIRMED structural, and LOCALIZED to the MOMENTUM side
+
+Three independent discriminators, all on existing data (armB y1-20 npz + NEMO y6-40; harness
+self-checks passed first):
+1. **No time shift collapses it** — per-metric best Δ spans −1.0..+0.5 yr (H-lag needs ~one Δ);
+   at the best joint Δ every metric's residual is still 23-137x the 0.091 Sv floor.
+2. **State-space departure**: armB sits ON NEMO's ACC-vs-deep-contrast curve through y10
+   (perpendicular departure floor-scale; slope ratio 1.02), then lifts OFF — +3.2 Sv at y11,
+   **+8.5 Sv at y20 at MATCHED deep contrast** (~95x floor).
+3. **dACC/d(deep contrast)**: armB −530 vs NEMO −418 Sv/(kg/m3) = **1.27x steeper** post-y10
+   (1.63x vs upper contrast).
+
+**⇒ The density field is RIGHT (deep contrast corr 0.998, dense classes within 1-4% at matched
+years); the ACC's dynamical response to it is TOO STRONG.** The excess lives in the MOMENTUM
+balance — for the same density forcing, armB is arrested less. Candidate sinks, now under a
+matched-year offline comparison (lane running): GM/eddy form stress (kappa response), bottom
+drag, lateral viscosity (note the open dyn_ldf e3-weighting escalation sits exactly here).
+The restoring-timescale lag story is dead: a density-side rate change moves you ALONG the
+curve, not off it.
+
 # NOISE FLOOR MEASURED 2026-08-06 (#1492 item 2.1) — the acceptance bar is now QUANTIFIED
 
 3-member NEMO micro-ensemble (1e-14-relative T perturbations to the y20 restart, every other
