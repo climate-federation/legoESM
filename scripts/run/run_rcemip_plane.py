@@ -990,7 +990,17 @@ def parse_args():
     p.add_argument("--land-T-init", type=float, default=None,
                    help="Initial LAND slab surface temperature [K]. Default: "
                         "use --T-sfc.")
-    p.add_argument("--hyperdiff", type=float, default=1.0e6)
+    p.add_argument("--hyperdiff", type=float, default=None,
+                   help="Biharmonic hyperdiffusion coefficient [m^4/s]. "
+                        "Default None auto-scales as dx_aware_hyperdiff(dx) = "
+                        "1e8*(dx/1000)^4, matching run_gate_plane.py and "
+                        "run_lba_plane.py. The biharmonic CFL AND the 2*dx "
+                        "damping rate both go as K/dx^4, so a FIXED "
+                        "coefficient is wrong at any dx but one — the previous "
+                        "fixed 1.0e6 default was ~4 orders too weak at "
+                        "dx=4 km, and iter-62-66 measured that too little "
+                        "grad^4 leaves the domain laminar. Pass an explicit "
+                        "value to override.")
     p.add_argument("--smag-cs", type=float, default=0.19,
                    help="Smagorinsky Cs; SAM default 0.19 (dosmagor).")
     p.add_argument("--turbulence-closure",
@@ -1272,6 +1282,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # dx-aware biharmonic coefficient (single source of truth shared with the
+    # GATE/LBA drivers). Resolved here so every downstream consumer, the config
+    # echo and the run metadata all see the same number.
+    _hyperdiff_auto = args.hyperdiff is None
+    if _hyperdiff_auto:
+        args.hyperdiff = dx_aware_hyperdiff(args.dx)
+    if args.hyperdiff < 0.0:
+        raise SystemExit("--hyperdiff must be non-negative.")
     if args.land:
         if args.land_heat_capacity <= 0.0:
             raise SystemExit("--land-heat-capacity must be positive.")
@@ -1286,7 +1304,9 @@ def main():
     print(f"RCEMIP1 plane: nx={args.nx} ny={args.ny} nlev={args.nlev}")
     print(f"  dx={args.dx} m, Lz={args.H} m, dt={args.dt} s, "
           f"{args.steps} steps -> t_final={args.steps * args.dt:.1f} s")
-    print(f"  T_sfc={args.T_sfc} K, hyperdiff={args.hyperdiff:.2e}, "
+    print(f"  T_sfc={args.T_sfc} K, "
+          f"hyperdiff={args.hyperdiff:.2e}"
+          f"{' (dx-aware auto)' if _hyperdiff_auto else ' (explicit)'}, "
           f"smag_cs={args.smag_cs}, closure={args.turbulence_closure}"
           + (f" (DNS: nu={args.molecular_viscosity:.2e} m^2/s)"
              if args.turbulence_closure == "molecular" else ""))
@@ -1301,6 +1321,19 @@ def main():
     print(f"  semi_implicit={args.semi_implicit}, substep_horizontal_acoustic="
           f"{args.substep_horizontal_acoustic}, si_w_filter_nu={args.si_w_filter_nu}, "
           f"seed_kind={args.seed_kind}, sgs_vertical={args.sgs_vertical}")
+    # CONV-TRIGGER #83 preflight. theta_noise_amp defaults to 0, which leaves
+    # the rest state horizontally uniform — and a uniform state STAYS uniform,
+    # so the run produces a laminar radiative-equilibrium column while exiting
+    # 0. Say so up front; the end-of-run verdict confirms it either way.
+    if args.theta_noise_amp <= 0.0:
+        print("  *** NO IC PERTURBATION (--theta-noise-amp 0): this run cannot "
+              "convect — it will stay a horizontally uniform column.")
+        print("  *** For RCE use: --theta-noise-amp 0.1 --seed-kind band_noise "
+              "--seed-kmax 8   (see docs/user-guide/rcemip1_crm.md)")
+    elif args.seed_kind == "smooth_k1":
+        print("  *** seed_kind=smooth_k1 puts all seed energy in ONE k=1 "
+              "cosine: expect a single domain-filling circulation, not a "
+              "convective-cell population. Use --seed-kind band_noise for RCE.")
     # codex iter-63 [LOW]: record whether --radiation was DEFAULTED (vs
     # explicit) so logs are self-describing — the gray→rrtmgp default flip
     # (#85) silently changes the experiment when the flag is omitted.
@@ -1578,6 +1611,12 @@ def main():
               f"({args.snapshot_days} d); 3D dumps at steps "
               f"{sorted(_snap3d_steps)} (days {args.snapshot3d_days})")
 
+    _run_max_w = 0.0
+    _diag_samples = 0
+    _went_non_finite = False
+    # Second half of whatever step range this invocation actually integrates
+    # (respects --restart, where the loop starts at the checkpoint step).
+    _diag_window_start = _start_step + (args.steps - _start_step) // 2
     if args.land:
         print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
               "max(q_v)   d(mass)    T_s[min/mean/max] Qs SH LH")
@@ -1702,6 +1741,16 @@ def main():
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
+            # Track peak |w| so a run that never convected can SAY SO at the end
+            # (CONV-TRIGGER #83): an un-seeded RCE otherwise exits 0 with a clean
+            # mass budget and no indication that nothing ever happened.
+            # Only the SECOND HALF counts. The rest state's initial hydrostatic
+            # adjustment transient is ~0.8 m/s at step 1 even when the domain is
+            # perfectly uniform and stays that way, so a whole-run peak would
+            # clear any sane convective threshold and the check would never fire.
+            if np.isfinite(max_w) and (i + 1) >= _diag_window_start:
+                _run_max_w = max(_run_max_w, max_w)
+                _diag_samples += 1
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
             max_qv = float(jnp.max(state.tracers.data[..., 0]))
@@ -1733,6 +1782,7 @@ def main():
             if bad or badtr:
                 print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
                       f"— aborting.")
+                _went_non_finite = True
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
@@ -1764,6 +1814,49 @@ def main():
         _render_profile_evolution_png(
             snap_dir, args.output / "profile_evolution.png",
         )
+
+    # CONV-TRIGGER #83 verdict. A convecting RCE reaches several m/s; a run that
+    # never broke symmetry sits at ~1e-4 m/s while still exiting 0 with a clean
+    # mass budget, which is exactly how a laminar run gets mistaken for a
+    # successful one. Report it rather than leaving the reader to notice.
+    _LAMINAR_MAX_W = 0.1  # m/s
+    if _went_non_finite:
+        # The run crashed. Reporting a peak |w| here would read as a health
+        # statistic for an integration that did not finish.
+        print(f"\n  *** RUN ABORTED NON-FINITE — the peak |w| of "
+              f"{_run_max_w:.3e} m/s is from the steps BEFORE the blow-up and "
+              f"says nothing about the intended integration.")
+    elif _diag_samples == 0:
+        # |w| is only sampled on print steps. If --print-every is coarse enough
+        # that none landed in the window, _run_max_w is still 0.0 and calling
+        # that "laminar" would libel a perfectly good convecting run.
+        print("\n  (no |w| samples in the second half of the run — "
+              "--print-every is too coarse to judge whether it convected; "
+              "no verdict)")
+    elif _run_max_w < _LAMINAR_MAX_W:
+        print(f"\n  *** LAMINAR RUN: peak |w| over the second half of the "
+              f"integration was {_run_max_w:.3e} m/s "
+              f"(< {_LAMINAR_MAX_W} m/s).")
+        print("  *** The domain never convected — it stayed a horizontally "
+              "uniform column.")
+        if args.radiation == "none" or args.turbulence_closure == "molecular":
+            # Not every use of this driver WANTS convection: DNS/LES closure
+            # probes and no-radiation dycore smokes are legitimately laminar,
+            # so state the fact without prescribing an RCE fix.
+            print("  *** (expected for a DNS/LES closure probe or a "
+                  "no-radiation dycore smoke — not a problem there.)")
+        elif args.theta_noise_amp <= 0.0:
+            print("  *** Cause: --theta-noise-amp is 0, so the initial state "
+                  "has NO perturbation to break symmetry.")
+            print("  *** Fix: --theta-noise-amp 0.1 --seed-kind band_noise "
+                  "--seed-kmax 8 (see docs/user-guide/rcemip1_crm.md).")
+        else:
+            print(f"  *** --theta-noise-amp is {args.theta_noise_amp}, so the "
+                  "seed was applied but did not grow; check the seed spectrum "
+                  "(--seed-kind/--seed-kmax) and the run length.")
+    else:
+        print(f"\n  peak |w| over the second half of the run: "
+              f"{_run_max_w:.2f} m/s")
 
     print(f"\nOutput: {args.output}")
 

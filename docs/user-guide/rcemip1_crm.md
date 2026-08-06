@@ -59,7 +59,7 @@ minutes of simulated time. `kessler` and `sundqvist` inherit the state directly.
 | dt | 6 s | pairs with nlev = 100; see below |
 | precision | `float32` + `LEGOESM_RCEMIP_PLANE_FP32=1` | driver default is float64; fp32 roughly halves GPU time |
 | **seed** | `--theta-noise-amp 0.05 --seed-kind band_noise --seed-kmax 8` | **mandatory — see below** |
-| hyperdiffusion | `1.0e7` | measured stable at this grid; the driver's 1.0e6 default is dx-blind |
+| hyperdiffusion | `1.0e7`, passed explicitly | the value the 60-day reference run actually used and the one verified here. `run_rcemip_plane.py` now defaults to `dx_aware_hyperdiff(dx)` = 1e8*(dx/1000)^4 (2.56e10 at dx = 4 km) instead of the old dx-blind 1.0e6; both convect, so the wrapper pins the proven number rather than silently changing the reference configuration |
 | radiation | `rrtmgp --clouds` in both phases, refreshed every 150 steps = 900 s | inside the 300-1800 s RCEMIP norm; gray under-drives, see below |
 | microphysics | `kessler` (spin-up) / your choice (production) | |
 | SGS, acoustics | driver defaults: Smagorinsky `Cs = 0.19`, `--sgs-vertical`, `--substep-horizontal-acoustic`, `--semi-implicit` | CRM preset, 3-D SGS |
@@ -121,9 +121,22 @@ peak, is the thing to look for.** The same run under `SPINUP_RAD=gray` traces
 nearly the same early curve (peak 17.6 m/s) — the two diverge in the sustained
 convective intensity over the longer haul, not in whether convection triggers.
 
-If `max|w|` is still at 1e-3 m/s or below after the first simulated hour, the
-seed did not take — check the `seed_kind=` and `theta_noise_amp` values echoed
-in the run log header.
+You no longer have to notice this yourself. `run_rcemip_plane.py` warns up front
+when `--theta-noise-amp` is 0 (or when `seed_kind` is `smooth_k1`), and prints a
+verdict at the end:
+
+```
+  *** LAMINAR RUN: peak |w| over the second half of the integration was 3.783e-03 m/s (< 0.1 m/s).
+  *** The domain never convected — it stayed a horizontally uniform radiative-equilibrium column.
+```
+
+The peak is measured over the **second half** of the run, because the rest
+state's initial hydrostatic adjustment reaches ~0.8 m/s at step 1 even for a
+column that stays perfectly uniform — a whole-run peak would clear any
+convective threshold and the check would never fire. It is sampled on print
+steps only, so a very coarse `--print-every` yields "no verdict" rather than a
+false one. A run that aborts non-finite says so instead of reporting a
+healthy-looking peak.
 
 Expected published-range signatures once spun up: CWV around 45-55 mm,
 mid-tropospheric w RMS around 0.3-0.7 m/s, cloud fraction around 0.2, a
