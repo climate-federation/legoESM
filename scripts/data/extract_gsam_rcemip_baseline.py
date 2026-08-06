@@ -119,10 +119,14 @@ def main(argv: list[str] | None = None) -> int:
                             "identical blocks (day 0 and day 1000)",
             "reader": "legoesm.atmosphere.forcing.sam_case_forcing.read_sam_snd",
             "extraction_script": "scripts/data/extract_gsam_rcemip_baseline.py",
+            # A reproduction command must be RUNNABLE by the next person, so it
+            # names the tracked destination rather than whatever scratch path
+            # this invocation happened to use.
             "command": (f"python scripts/data/extract_gsam_rcemip_baseline.py "
-                        f"--snd $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/"
-                        f"{src.name} --out {args.out} "
+                        f"--snd $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/{src.name} "
+                        f"--out tests/oracle_baselines/gsam_rcemip300_snd.json "
                         f"--n-levels {args.n_levels}"),
+            "written_to": str(args.out),
             "level_indices": idx,
         },
         "units": {
