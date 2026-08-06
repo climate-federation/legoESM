@@ -115,30 +115,40 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "all" ]; then
 fi
 
 if [ "$MODE" = "smoke" ] || [ "$MODE" = "all" ]; then
+  # nlev=64 keeps the stretch ratio under the dz_top/dz_sfc>30 warning;
+  # --semi-implicit is required by the driver whenever
+  # substep_horizontal_acoustic is on (its default) — omitting it made BOTH
+  # arms exit 1 on 9331622, which is why the analytic arm is run as a control
+  # rather than assumed unaffected.
+  COMMON="--nx 8 --ny 8 --nlev 64 --dx 4000.0 --dt 2.0 --steps 2 --H 20000.0
+          --stretched-vertical --semi-implicit --radiation gray
+          --microphysics kessler"
+
   echo "=== SMOKE: run_rcemip_plane.py --sounding (2 steps) ==="
-  "$PY" scripts/run/run_rcemip_plane.py \
-      --nx 8 --ny 8 --nlev 40 --dx 4000.0 --dt 2.0 --steps 2 \
-      --H 20000.0 --stretched-vertical --sounding "$SND" \
-      --radiation gray --microphysics kessler \
+  "$PY" scripts/run/run_rcemip_plane.py $COMMON --sounding "$SND" \
       --output "$REPO/results/gsam_rcemip/smoke_sounding_${SLURM_JOB_ID}"
   rc=$?; echo "SMOKE(sounding) rc=$rc"; [ $rc -ne 0 ] && rc_all=1
 
-  echo "=== SMOKE: analytic default unchanged (2 steps) ==="
-  "$PY" scripts/run/run_rcemip_plane.py \
-      --nx 8 --ny 8 --nlev 40 --dx 4000.0 --dt 2.0 --steps 2 \
-      --H 20000.0 --stretched-vertical \
-      --radiation gray --microphysics kessler \
+  echo "=== SMOKE: analytic default unchanged (2 steps) — CONTROL ==="
+  "$PY" scripts/run/run_rcemip_plane.py $COMMON \
       --output "$REPO/results/gsam_rcemip/smoke_analytic_${SLURM_JOB_ID}"
   rc=$?; echo "SMOKE(analytic) rc=$rc"; [ $rc -ne 0 ] && rc_all=1
 
   echo "=== NEGATIVE: --sounding without --stretched-vertical must FAIL ==="
-  "$PY" scripts/run/run_rcemip_plane.py \
-      --nx 8 --ny 8 --nlev 40 --dx 4000.0 --dt 2.0 --steps 1 \
-      --H 20000.0 --sounding "$SND" \
-      --output "$REPO/results/gsam_rcemip/smoke_neg_${SLURM_JOB_ID}"
+  neg_out=$("$PY" scripts/run/run_rcemip_plane.py \
+      --nx 8 --ny 8 --nlev 64 --dx 4000.0 --dt 2.0 --steps 1 --H 20000.0 \
+      --semi-implicit --sounding "$SND" \
+      --output "$REPO/results/gsam_rcemip/smoke_neg_${SLURM_JOB_ID}" 2>&1)
   rc=$?
-  if [ $rc -eq 0 ]; then echo "NEGATIVE rc=0 -> GATE FAILED (should have exited)"; rc_all=1
-  else echo "NEGATIVE rc=$rc (expected non-zero) OK"; fi
+  # rc!=0 alone is NOT evidence — any unrelated crash would satisfy it. Require
+  # the guard's OWN message (the exit-code-is-not-evidence rule).
+  if [ $rc -ne 0 ] && printf '%s' "$neg_out" | grep -q -- "--sounding requires --stretched-vertical"; then
+    echo "NEGATIVE rc=$rc with the expected guard message OK"
+  else
+    echo "NEGATIVE rc=$rc but the --stretched-vertical guard message was ABSENT -> GATE FAILED"
+    printf '%s\n' "$neg_out" | tail -5
+    rc_all=1
+  fi
 fi
 
 echo "=== GATE DONE rc_all=$rc_all ==="
