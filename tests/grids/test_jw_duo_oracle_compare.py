@@ -245,9 +245,16 @@ def test_truncated_arm_is_flagged_in_the_table(tmp_path, monkeypatch, capsys):
     jw.main(["--ours", short, "--label", "crashed",
              "--ours", full, "--label", "healthy", "--days", "1,2"])
     out = capsys.readouterr().out
-    rows = {ln.split()[0] + " " + ln.split()[1] if ln.startswith("oracle")
-            else ln.split()[0]: ln
-            for ln in out.splitlines() if ln[:1].isalpha()}
+    # main() prints the rms' table first and a min/max block afterwards, and
+    # both start with the arm label -- keep the FIRST occurrence so the
+    # assertions read the table row, not the later block.
+    rows: dict[str, str] = {}
+    for ln in out.splitlines():
+        if not ln[:1].isalpha():
+            continue
+        parts = ln.split()
+        key = " ".join(parts[:2]) if ln.startswith("oracle") else parts[0]
+        rows.setdefault(key, ln)
     assert "TRUNCATED" in rows["crashed"]
     # An arm that RUNS PAST the reference window is fine, not truncated...
     assert "TRUNCATED" not in rows["healthy"]
