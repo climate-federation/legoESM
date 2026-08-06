@@ -1467,20 +1467,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "snowfall and melts (degree-day), brightening the "
                              "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
                              "Requires an active land tile (--slab-land-active).")
-    parser.add_argument("--surface-stability-scheme", default="dyer1974",
-                        choices=["dyer1974", "beljaars_holtslag1991",
-                                 "grachev2007_sheba", "gryanik2020"],
-                        dest="surface_stability_scheme",
-                        help="Stable-regime (zeta>0) Monin-Obukhov similarity "
-                             "functions for the MOST-family surface bulk schemes "
-                             "(coare3/large_yeager/most), applied consistently to "
-                             "the atmosphere surface layer AND the coupler ocean "
-                             "tile (mirrors run_coupled.py). 'dyer1974' (default) "
-                             "= historical linear -5*zeta (byte-identical); "
-                             "'beljaars_holtslag1991' = the new stable-BL form "
-                             "that avoids the stable flux collapse; "
-                             "'grachev2007_sheba'/'gryanik2020' = SHEBA strong-"
-                             "stable forms. Unstable branch stays Businger-Dyer.")
     parser.add_argument("--sponge", default=False,
                         action=argparse.BooleanOptionalAction,
                         dest="sponge_enabled",
@@ -2101,7 +2087,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
-        surface_stability_scheme=args.surface_stability_scheme,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
