@@ -1,3 +1,44 @@
+# NEMO GM DIAGNOSTICS 2026-08-06 — NEMO's kappa_gm is 1.5x armB's (state effect, NOT a formula defect)
+
+New NEMO run `RUN_EIV_DIAG/` (y10->y20 continuation, additive WRITE-only eiv dumps in
+`cfgs/DINO/MY_SRC/ldftra.F90` commit `158afdb` in the DINO config repo). **Bit-identity control
+PASSED before any number was used**: 1520 variable-tiles x 16 tiles exact fp64 equality vs
+RUN_20Y's own y11 restart ⇒ the dump block is physics-inert.
+
+Matched years, identical band/mask/contraction both sides, fp64:
+
+| year | kappa_gm NEMO | armB | ratio | bolus PE NEMO | armB | ratio |
+|---|---|---|---|---|---|---|
+| y11 | 161.15 | 102.48 | **1.573** | 6.33e-5 | 4.40e-5 | 1.437 |
+| y15 | 186.22 | 118.90 | **1.566** | 6.88e-5 | 5.05e-5 | 1.364 |
+| y20 | 205.27 | 135.77 | **1.512** | 6.13e-5 | 5.63e-5 | 1.088 |
+
+NEMO zonal-mean kappa peaks 446-454 m2/s (row 79, lat -19.6, subtropical) and runs **59-343
+m2/s inside the ACC band**.
+
+**⇒ armB is UNDER-ARRESTED by GM, correctly signed for the too-barotropic/high-transport
+signature. CONFIRMED.**
+
+**CRITICAL DISTINCTION — this is NOT a transcription defect.** The gate's `ldf_eiv kappa
+(aeiu)` row is CEILING at ~1e-6 per-element: our Treguier chain is essentially EXACT evaluated
+on the SAME state. The 1.5x above is each model's kappa on ITS OWN state ⇒ a state<->closure
+FEEDBACK, not an independent formula cause. Do not conflate the two.
+
+**Two complications against over-claiming (agent's own, kept):** the kappa ratio is FLAT
+(1.573→1.512) while the transport divergence GROWS; and the bolus ratio SHRINKS (1.437→1.088),
+plausibly armB's isopycnals steepening in partial compensation. A sufficient owner would more
+naturally show a growing deficit.
+
+**Agent self-retraction (caught pre-claim):** its first armB pass hardcoded `f_t = zeros`,
+collapsing the Treguier Rossby radius to kappa ≡ 0; fixed and locked with an assert. Those
+numbers are void; the table above is post-fix and reproduces the recorded v1 probe values
+(y15 118.8993, y20 135.7671).
+
+**NEXT (lane running):** (1) is our `kappa_GM_max=200.0` cap BINDING, when NEMO's in-band kappa
+reaches 343 and NEMO's own limit is ~3000? A binding cap would be a direct unfaithful config
+difference. (2) the decisive sensitivity run — armB with GM arrest raised toward NEMO's, does
+the 1.27x transport-per-density slope move toward 1.0?
+
 # RULE-8 LADDER PARADOX DISSOLVED 2026-08-06 — RETRACTED, it was an artifact of the surface defect
 
 Post-fix 10-yr A/B (both arms `leapfrog_rhs`, one env var differs, `git diff` over
