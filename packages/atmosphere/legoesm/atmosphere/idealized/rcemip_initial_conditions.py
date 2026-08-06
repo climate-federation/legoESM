@@ -134,7 +134,29 @@ WING_T_V0 = 299.274
 # estimator is used since the surface state is what the gate asserts.
 # Was 0.01865: 31 % too moist, and ~= q_sat(300 K) — the SATURATION value had
 # been used where the case calls for a subsaturated ~14.2 g/kg.
+#
+# CONVENTION: gSAM's `q` column is a MIXING RATIO, and so is this value.  The
+# SAM-deck path already feeds mixing ratios straight into the model's q_v
+# tracer for every case (read_sam_snd -> build_sam_case_initial_state), so the
+# two agree.  Docstrings in this module have historically said "specific
+# humidity"; the difference is q = r/(1+r), i.e. ~1.4 % here, below the
+# calibration's own estimator spread but NOT zero — do not treat the two labels
+# as interchangeable when tightening any tolerance below ~1 %.
 WING_Q_SFC_DEFAULT = 0.0142014
+
+# CONSUMERS THAT MOVED WITH THIS RECALIBRATION (they call the wing2018_*
+# functions with MODULE DEFAULTS, so their reference column changed):
+#   * scripts/run/run_scm_rce_campaign.py — the SCM-RCE sigma coordinate and
+#     wing_initial_profiles. It feeds results/scm_rce_campaign/
+#     tuned_parameters.json, which is the init for train_scm_rce_params.py, so
+#     any previously tuned parameters were tuned against the OLD column and
+#     should be regenerated before being compared to new ones.
+#   * scripts/data/build_rcemip1_small_reference.py — any existing
+#     results/rcemip1_small_wing_ocean bundle is now stale w.r.t. the code that
+#     reads it; regenerate rather than mixing vintages.
+# Callers that pass T_v0/Gamma/q_sfc EXPLICITLY (run_rce_mpi_long.py,
+# run_rce_mpi_experiment.py, run_rce_smoke_stretched.py, the plane-CRM dt and
+# CFL benchmarks) are unaffected.
 
 # Virtual-temperature factor: T_v = T · (1 + VIRTUAL_FACTOR · q_v).
 # Derived from the molecular-weight ratio so the value stays in sync
