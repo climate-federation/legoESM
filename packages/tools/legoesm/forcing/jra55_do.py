@@ -32,10 +32,13 @@ Design choices
   The cache time axis is contiguous noleap (365 days/year × N years
   × 8 records/day) so the driver's linear-in-time interp uses the
   index, not absolute dates.
-* **Mixed cadences (3-hourly winds, 6-hourly T/q/P) are resampled to
-  a common 3-hourly axis** at cache-build time.  The 6-hourly fields
-  are linearly interpolated between adjacent samples.  Documented in
-  the cache attrs.
+* **Mixed cadences are resampled to a common 3-hourly axis** at
+  cache-build time; whatever is coarser is linearly interpolated between
+  adjacent samples.  Documented in the cache attrs.  NOTE the DKRZ
+  ``JRA55-do-v1.4.0`` distribution ships ``tas``/``huss``/``psl``
+  3-HOURLY (2920 records/year), not 6-hourly, so for that source the
+  interpolation is an identity — every slot is already populated.  The
+  resampling stays because other distributions do mix cadences.
 * **Runoff (`friver`) is stored on the model grid as the conservative
   regrid output** — i.e., it lands on whatever grid cells the source
   land grid maps to, including land cells.  Coastal redistribution is
@@ -59,15 +62,32 @@ CMOR name   Description                           Units
 ==========  ====================================  ================
 ``uas``     10 m eastward wind                    m/s
 ``vas``     10 m northward wind                   m/s
-``tas``     2 m air temperature                   K
-``huss``    2 m specific humidity                 kg/kg
+``tas``     10 m air temperature                  K
+``huss``    10 m specific humidity                kg/kg
 ``psl``     sea-level pressure                    Pa
 ``rsds``    surface downwelling shortwave         W/m²
 ``rlds``    surface downwelling longwave          W/m²
 ``prra``    rainfall flux                         kg/m²/s
 ``prsn``    snowfall flux                         kg/m²/s
-``friver``  river runoff                          kg/m²/s
+``friver``  river runoff (per OCEAN area)         kg/m²/s
 ==========  ====================================  ================
+
+Two things about that table that are easy to get wrong:
+
+* ``tas`` and ``huss`` are at **10 m**, not 2 m.  The v1.4.0 files carry an
+  explicit ``height = 10.0 m`` coordinate on all of ``uas``/``vas``/``tas``/
+  ``huss``; the CF ``comment`` string "usually, 2 meter" is CMOR-table
+  boilerplate that contradicts the file's own coordinate.  Bulk-flux callers
+  must pass ``z_t = z_q = 10.0``.
+* ``friver`` is nominally normalised by the **ocean portion** of its cell
+  (``cell_measures: area: areacello``, ``cell_methods: area: mean where
+  sea``), but at 0.25 deg a river-mouth cell is essentially all ocean, so an
+  area-weighted integral over full cells IS the physical discharge (9.35e8
+  kg/s on 1 JANUARY 1958 -- the annual MEAN is 1.354e9, ~15 % above the
+  1.18 Sv observational estimate of Dai & Trenberth 2002).  What it needs is
+  COASTAL ROUTING: ~71 % of the discharge sits on cells a coarser ocean mask
+  calls land, and dry-cell masking discards rather than relocates it.  See
+  ``docs/ocean/fidelity/fesom2_gap_analysis.md`` section 3.5.
 """
 
 from __future__ import annotations
@@ -123,7 +143,7 @@ _FORCING_NORMALIZATION: str = "fracarea"
 #: OMIP without sea ice.
 JRA55_VARIABLES: tuple[str, ...] = (
     "uas", "vas",                 # winds (3-hourly)
-    "tas", "huss", "psl",         # T, q, p_sl (6-hourly)
+    "tas", "huss", "psl",         # T, q, p_sl (3-hourly in v1.4.0)
     "rsds", "rlds",               # SW down, LW down (3-hourly)
     "prra", "prsn",               # rainfall, snowfall (3-hourly)
     "friver",                     # river runoff (daily)
@@ -995,9 +1015,13 @@ def jra55_to_atm_surface(
       virtual temperature: ``ρ = p / (R_d · T_v)`` with
       ``T_v = T (1 + 0.61 q)``.
     - ``p_lowest = p_surface = psl`` because JRA55-do delivers all
-      atmospheric state at the surface (10 m for winds, 2 m for T/q).
-      The ~2 m offset for T/q is handled by the bulk-flux solver via
-      :data:`CouplerConfig.z_t_atm` (see Item 1 audit), not here.
+      atmospheric state near the surface -- and in v1.4.0 that is **10 m for
+      all of** ``uas``/``vas``/``tas``/``huss`` (each file carries an explicit
+      ``height = 10.0 m`` coordinate).  The reference height reaches the
+      bulk-flux solver through :data:`CouplerConfig.z_t_atm` /
+      ``z_q_atm``, not here; both are 10.0 for this dataset.  An earlier
+      version of this note said 2 m for T/q, which cost ~10 % of the
+      turbulent fluxes.
     - ``cos_zenith`` is computed from absolute date + lat/lon.
 
     Parameters

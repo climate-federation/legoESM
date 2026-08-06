@@ -1190,6 +1190,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Land roughness length z0 [m] for the tiled land MOST "
                              "scheme (only used with --surface-tiled). Default "
                              f"{_EXPERIMENT_DEFAULTS.surface_z0_land}.")
+    parser.add_argument("--land-interface-flux", dest="land_interface_flux",
+                        choices=["legacy_dual", "unified"],
+                        default=_EXPERIMENT_DEFAULTS.land_interface_flux,
+                        help="Flux law the slab-land SEB debits at the "
+                             "land-air interface. 'legacy_dual' (default, "
+                             "byte-identical): the slab uses its own constant-"
+                             "C_H/C_E no-stability bulk law while the "
+                             "atmosphere debits the turbulence scheme's "
+                             "stability-dependent surface fluxes — two laws, "
+                             "measured same-state mismatch +75..+152 W/m2. "
+                             "'unified': the slab consumes the SAME surface-"
+                             "layer law the atmosphere applies (ONE flux law "
+                             "at the interface; the semi-implicit "
+                             "max(dF/dT,0)*dT_skin discretization term "
+                             "remains and is only small at a short "
+                             "--rad-update-steps cadence). Requires an "
+                             "active --turbulence scheme and an active slab "
+                             "land tile.")
+    parser.add_argument("--c-land", dest="C_land", type=float,
+                        default=_EXPERIMENT_DEFAULTS.C_land,
+                        help="Slab-land effective heat capacity [J/m2/K] "
+                             "(validate_strict bounds [1e4, 1e8]). Default "
+                             f"{_EXPERIMENT_DEFAULTS.C_land:.1e} (~0.15 m "
+                             "active soil layer).")
     parser.add_argument("--land-soil-bucket", action="store_true", default=False,
                         dest="land_soil_bucket",
                         help="Prognostic soil-water bucket (Manabe) on the slab-land "
@@ -1887,6 +1911,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
         slab_land_active=args.slab_land_active,
+        land_interface_flux=args.land_interface_flux,
+        C_land=args.C_land,
         surface_tiled=args.surface_tiled,
         surface_z0_land=args.surface_z0_land,
         land_soil_bucket=args.land_soil_bucket,

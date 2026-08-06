@@ -2292,3 +2292,133 @@ the at-scale model); the scaling story there is the s10@128 record
 (14.98 GC/s), the DECELERATING matched-tile cost (1.90 -> 1.46 per
 4x), and ensemble parallelism (+0.6 % co-execution). Deeper wins need
 XLA fusion-granularity work on unstructured ops — upstream-class.
+
+## Codex improvement consult (2026-08-04) + first verdicts
+
+Ranked candidate list (transcript
+`.physics-validator/scaling_campaign/codex_consult_improvements_2026-08-04.md`):
+(1) transfer fused+overlap to the unreceipted ocean LL2304@128 arm —
+TOP PICK; (2) stage-local packing past 29 CPs; (3) fuse the 2-D pencil
+wall pad; (4) MPAS s10@192; (5) MPAS profile-guided manual fusion;
+(6) port the ocean geometry-consistency fix to the atm lane + retry
+LL2880@192.
+
+### #3 REFUTED — the 2-D pencil fused wall pad is SLOWER (job 26692375)
+
+`pad_with_pole_bc_lat_multi_2d` was implemented (dtype-grouped single
+sendrecv pair per cut, the band lane's pattern), verified on 2 ranks
+value- and gradient-identical to the per-field path, then A/B'd at
+r512 / 512 ranks:
+
+| arm | ms/step |
+|---|---|
+| A off | 45.20 |
+| B fused | **49.87 (+9.4 %)** |
+| A2 off | 45.96 |
+
+Outside the 1.7 % A/A2 bracket in the WRONG direction, so the change
+was REVERTED (implementation + test + CI entry removed rather than
+left as dead code; recoverable from this session's history). PLAUSIBLE
+mechanism (not instrumented): a 2-D pencil's per-field lat slab is
+`n_lon_local`-wide — much smaller than the band lane's full-row slab —
+so the fused path's concatenate/slice memory traffic exceeds the
+sendrecv latency it removes. NOTE this does NOT contradict the band
+lane's fused win (`LEGOESM_LATLON_FUSED_HALO=1`, default on): different
+slab size, different balance. Lesson for the ledger: a lever confirmed
+on one decomposition is NOT transferable by analogy — every lane needs
+its own A/B, and this one paid for itself by catching a regression
+before it shipped.
+
+### #1 PARTLY CONFIRMED — ocean LL2304@128: fused halo -4.9 %; overlap no benefit observed (job 26692291)
+
+The top-pick transfer of the two atm levers to the unreceipted ocean
+production arm (explicit_substep + wide halo, 18 steps):
+
+| arm | ms/step | GC/s |
+|---|---|---|
+| A off | 16.620 | 12.78 |
+| B fused | **15.807 (-4.9 %)** | **13.43** |
+| C fused+overlap | 15.942 (-4.1 %) | 13.32 |
+| A2 off | 16.610 | 12.78 |
+
+* **Fused halo transfers: -4.9 %** (A/A2 drift 0.06 % — a very tight
+  bracket), matching the atm lane's -4.5/-5.4 %. Census — an nd=8
+  VIRTUAL-CPU algorithmic proxy at the same solver config, NOT a
+  128-GPU collective trace: **206 -> 133 collective-permutes/step**
+  (-35 % CP count; all-reduces stay 7 in both arms, so the cut is
+  CP-only, and it is the largest CP-count reduction measured in this
+  campaign).
+* **Overlap shows NO benefit in this receipt**: C is 0.9 % slower than
+  B — but that 0.135 ms difference was NOT replicated (one B/C pair),
+  so the honest statement is "no benefit observed; leave the flags off
+  on this lane pending a replicated B/C". HYPOTHESIS (uninstrumented):
+  the barotropic subcycle is a long dependent chain with little
+  independent compute to hide comm under, so there is little for the
+  latency-hiding scheduler to exploit.
+* Recommendation for the ocean lat-lon lane: set
+  `LEGOESM_LATLON_SPMD_FUSED_HALO=1`, leave `LEGOESM_XLA_OVERLAP`
+  OFF. New ocean best: **13.43 GC/s at 128 GPUs** (was 13.0).
+
+### #6 REFUTED OFFLINE — the atm replicated-geometry broadcast is NOT walled at 192
+
+Consult item #6 proposed porting the ocean geometry-consistency fix to
+the atm lane to "remove the unverified high-process setup wall" before
+retrying LL2880@192. Cheap arithmetic (measured field sizes, no GPU
+hours) refutes the premise: `_build_geometry_stacks` calls
+`broadcast_checked` **per field**, so the psum program is
+`n_processes x ONE stacked field`, not `x the whole stack`:
+
+| config | fields | max stacked field | broadcast program | vs 63.8 GB limit |
+|---|---|---|---|---|
+| LL2048@128 (ran) | 13 | 0.0336 GB | 4.3 GB | 6.7 % |
+| LL2304@144 (ran) | 13 | 0.0425 GB | 6.1 GB | 9.6 % |
+| LL2880@192 (target) | 13 | 0.0664 GB | **12.7 GB** | 20 % |
+
+So the @192 attempts were QUEUE-starved, not walled — the port would
+have bought ~0 % (as the consult itself predicted for steady state)
+against a wall that does not exist at these sizes. THRESHOLD for the
+future: the replicated broadcast reaches the limit when
+`n_proc x field_bytes > 63.8 GB`, i.e. a single 2-D f32 geometry field
+above ~332 MB — around LL5760x11520 at 256 processes. Revisit there,
+not before. (The SHARDED-geometry mode already uses the assert-free
+`checked_shard_put` from PR #1458 and is unaffected either way.)
+
+### #2 REPRICED BY MEASUREMENT — the packing ceiling is ~6 %, not 7-16 %
+
+The consult's #2 estimate (4.0-4.4 ms, i.e. 7-16 %) was built on the
+PRE-fusion 41-CP count and a speculative grouping. The post-fusion
+histogram (nd=8 virtual-CPU census, fused ON) prices what is actually
+left — 29 CPs in six shape classes:
+
+| count | shape | what it is |
+|---|---|---|
+| 6 | f32[1,79898] | the FUSED entry multi-pad (T,u,dp), 2/stage |
+| 6 | f32[2,1028,26] | halo=2 PPM pad, 2/stage |
+| 6 | f32[1,1026,27] | Bln-stack interface pad (fold family) |
+| 6 | f32[1,1024,27] | v-face interface pad (BC family) |
+| 4 | f32[1] | loop-invariant GEOMETRY (grid.lat, cos_lat) |
+| 1 | f32[1,1024,26] | singleton |
+
+Two findings that change the plan:
+
+* **The four 1-D pads are pure grid geometry** (`grid.lat` /
+  `cos_lat` at `_vface_cos_lat_core:87`, `curl_vertex_cgrid:1098/1218`,
+  `tendencies:494`) — loop-invariant, and XLA already CSEs them across
+  the three RK stages, so they cost **4 CPs / 16 bytes total**.
+  Hoisting them host-side (the band grids are all available at factory
+  time, so the padded metrics need NO communication) removes 4 CPs =
+  4 x 29.7 us = 0.119 ms = **2.5 %** at the @128 working point.
+* **The only other count lever is cross-family fusion**: the Bln
+  (fold-family) and v-face (BC-family) interface pads differ ONLY in
+  their pole rows — their interior exchange is identical, so an
+  "exchange once, apply per-family pole fill" helper would take 12 CPs
+  to 6 = a further ~3.7 %. That is delicate pole-semantics surgery on
+  the dycore.
+
+Realistic combined ceiling: **~6 %**, versus the 7-16 % the consult
+projected from the stale count. Given the pole-semantics risk on the
+cross-family half, #2 is recorded as MEASURED-AND-DEPRIORITIZED rather
+than attempted: the cheap, safe part (geometry hoist, 2.5 %) is a
+clean follow-up if wanted; the risky part is not worth ~3.7 % on a
+lane already at ratio 1.83-1.96. Consistent with the campaign's
+standing conclusion that the remaining distance is structural.

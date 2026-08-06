@@ -790,3 +790,4 @@ class TestSingleReducePCG:
         assert (cfg.barotropic_implicit_pcg_variant
                 == LatLonCGridOceanConfig()
                 .barotropic.barotropic_implicit_pcg_variant)
+

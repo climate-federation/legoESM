@@ -2230,6 +2230,7 @@ class ModelDriver:
                     f"  Land tile: ACTIVE (slab land, C_land="
                     f"{self.physics.C_land:.1e} J/m2/K, "
                     f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    f"interface_flux={self.physics.land_interface_flux}, "
                     f"tiled_surface={self.physics.surface_tiled}"
                     + (f", z0_land={self.physics.surface_z0_land:g}m"
                        if self.physics.surface_tiled else "")
@@ -2254,6 +2255,35 @@ class ModelDriver:
             # unused (the land/ocean blend reads the multilayer surface T+albedo).
             if getattr(self.config, "use_multilayer_land", False):
                 self._setup_multilayer_land(_sd)
+
+        # Runtime fail-fast (codex R3): land_interface_flux='unified' exists
+        # to fix an energy-conservation defect — if the slab tile did NOT
+        # actually activate (e.g. an all-zero land-mask file, or a topography
+        # that derived no land, both of which pass validate_strict), the flag
+        # would silently never apply.  Refuse instead of running a config the
+        # user believes is conservative.  Under MPI the activation is
+        # rank-local (an ocean-only rank legitimately has no land while a
+        # neighbour does — codex R4), so the guard tests the GLOBAL
+        # any-rank activation; every rank reaches this collective (the
+        # guard is unconditional in _create_physics).
+        if (getattr(self.config, "land_interface_flux",
+                    "legacy_dual") == "unified"):
+            _slab_on = bool(self.physics.slab_land_active)
+            from legoesm.grids.halo import get_mpi_topology
+            if get_mpi_topology() is not None:
+                from legoesm.parallel.reductions import global_max_mpi
+                _slab_on = bool(
+                    float(global_max_mpi(
+                        jnp.asarray(1.0 if _slab_on else 0.0))) > 0.0)
+            if not _slab_on:
+                raise ValueError(
+                    "land_interface_flux='unified' was requested but the "
+                    "slab land tile did not activate on any rank (no land "
+                    "in the mask/topography, or no activation flag) — the "
+                    "unified interface law would silently never apply. "
+                    "Check --land-mask-file / --topography / "
+                    "--slab-land-active."
+                )
 
     def _setup_multilayer_land(self, storage_dtype) -> None:
         """Activate the differentiable multilayer (Richards) land tile.
@@ -5919,13 +5949,11 @@ class ModelDriver:
                 # segment loop over the validated run_atm_latlon_spmd, distinct
                 # from the jitted compiled_segments scan (zero surgical risk to
                 # the shared hot loop).
-                self._reject_coupled_lane(
-                    "enable_latlon_spmd (lat-band SPMD)",
-                    "a dynamics-only / Held-Suarez or operator-split SPMD "
-                    "envelope",
-                    "Run the coupled case single-device "
-                    "(enable_latlon_spmd=False) so the compiled lane -- which "
-                    "does stash the held fields -- is selected.")
+                # NOTE: the coupled-lane refusal is NOT here.  This branch
+                # cannot tell the two SPMD sub-lanes apart, and the
+                # operator-split one DOES stash the held surface fields; the
+                # refusal now lives in _run_compiled_latlon_spmd, on the
+                # stateless sub-lane that genuinely produces none.
                 status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif (self.config.grid.grid_type == "cubed_sphere"
                     and self._device_config is not None
@@ -9133,8 +9161,9 @@ class ModelDriver:
         surface radiation / precipitation the coupler consumes.
 
         The coupled drivers read ``held_sw_net_sfc`` / ``held_lw_net_sfc`` /
-        ``seg_precip`` out of ``self._carry_aux``.  The lat-lon SPMD and
-        sub-face-tiled cube lanes never write them, so the coupled
+        ``seg_precip`` out of ``self._carry_aux``.  The STATELESS lat-lon SPMD
+        sub-lane (dynamics-only / Held-Suarez) and the sub-face-tiled cube
+        lanes never write them, so the coupled
         ocean/land/ice tiles would be forced with ``sw_down=0`` and
         ``precip=0`` -- perpetual polar night plus an evaporation-only
         freshwater budget, and SILENTLY: no NaN, no exception, and the
@@ -9205,6 +9234,19 @@ class ModelDriver:
                     "scan segments yet. Unset the flag, or set the "
                     "parameterizations to 'none' / use held_suarez_forcing.")
             return self._run_operator_split_spmd(start_step, start_day, mesh)
+        # STATELESS sub-lane only (dynamics-only / Held-Suarez): no radiation,
+        # no microphysics, so nothing ever writes held_sw_net_sfc /
+        # held_lw_net_sfc / seg_precip into _carry_aux.  The operator-split
+        # sub-lane above DOES stash them and returned already, so the refusal
+        # sits here rather than at the run() dispatch (which cannot distinguish
+        # the two).
+        self._reject_coupled_lane(
+            "enable_latlon_spmd (stateless lat-band SPMD)",
+            "a dynamics-only / Held-Suarez envelope with no radiation or "
+            "precipitation source",
+            "Configure the general unified physics so the operator-split SPMD "
+            "sub-lane is selected (it stashes the held fields), or run the "
+            "coupled case single-device (enable_latlon_spmd=False).")
         physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
         DT = cfg.dycore.dt
         n_steps_total = int(cfg.days * 86400.0 / DT)
@@ -9852,7 +9894,7 @@ class ModelDriver:
         from jax.sharding import NamedSharding, PartitionSpec as P
         from legoesm.forcing.external import get_solar_forcing_at_time
         from legoesm.driver.compiled_segments import (
-            pack_carry, pack_forcing, unpack_carry,
+            pack_carry, pack_forcing, unpack_carry, segment_accum_to_rate,
             build_operator_split_statics, GHG_SPECIES_ORDER,
         )
         from legoesm.driver.sharded_operator_split_step import (
@@ -9924,7 +9966,42 @@ class ModelDriver:
         # serves every band — the make_sharded_operator_split_step CONTRACT). ---
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
         band_physics = build_physics_pipeline(band_grid, self.sigma, cfg)
-        band_su = band_physics.build_step_unified(static_need_rad=True)
+        # Radiation cadence.  ``make_sharded_operator_split_step`` computes the
+        # serial prologue's predicate per step (``_need_rad_and_time``,
+        # sharded_operator_split_step.py:202) and passes it in as ``need_rad``,
+        # but a ``step_unified`` built with ``static_need_rad=True`` DELETES
+        # that predicate and always takes the radiation branch
+        # (physics_pipeline.py:2556) -- which made ``rad_update_steps > 1`` a
+        # silent no-op on this lane.  ``None`` above 1 keeps the pipeline's own
+        # ``lax.cond``, which honours it.
+        #
+        # The two lanes' predicates agree with ZERO phase offset: serial
+        # computes ``(step_idx + 1) % k == 0`` (compiled_segments.py:1934) and
+        # its subcycle scan radiates on the LAST step of each cycle (:2254),
+        # which is exactly what ``_need_rad_and_time`` selects.  Serial-vs-SPMD
+        # held_lw_net_sfc at rad_update_steps=2 MEASURES 2.52e-5 (C8/nlev4,
+        # gray+SBM, 151 steps = a 144-step segment plus a 7-step tail), the same
+        # order as the 1.63e-5 at rad_update_steps=1 -- i.e. the ordinary
+        # band-cut residual, with no cadence term left.  Gated by
+        # tests/parallel/test_operator_split_spmd_carry_aux_export.py::
+        # test_radiation_cadence_matches_serial.
+        #
+        # This was refused outright until the serial short-tail defect was
+        # fixed: a segment whose length did not divide the cadence fell back to
+        # a body that discarded the predicate, so serial radiated every step and
+        # the same comparison read 1.97e-3 -- a SERIAL error, not this lane's.
+        #
+        # The issue-#316 rationale for eliding the cond -- bounding XLA compile
+        # when step_unified is inlined into a LONG lax.scan -- does not apply
+        # here: this lane dispatches ``sharded_step`` once per step from Python
+        # (:10099), so there is no long scan to inline into.  The cond is NOT
+        # free, though: both branches land in the jitted unified step, which is
+        # itself invoked inside the jitted shard_map body.  UNMEASURED at
+        # production resolution with rrtmgp -- the numbers quoted above are a
+        # C8/nlev4 gray deck, so treat the compile-time and peak-memory cost of
+        # the second branch as unknown rather than negligible (codex review).
+        band_su = band_physics.build_step_unified(
+            static_need_rad=(True if ctx["RAD_UPDATE_STEPS"] <= 1 else None))
 
         # --- GHG species order (mirrors build_segment_fn): the sharded step
         # rebuilds ghg_vmr_override from the per-segment forcing.ghg_vmr; None
@@ -10092,6 +10169,52 @@ class ModelDriver:
                     _v = getattr(carry_full, _nm)
                     if _v is not None:
                         self.tracers[_nm] = _v
+
+            # --- Coupled-lane surface export (the reason this lane is no longer
+            # refused to coupled drivers).  Both coupled drivers read
+            # held_sw_net_sfc / held_lw_net_sfc / seg_precip off ``_carry_aux``
+            # (``coupling_fields.require_surface_radiation_aux``); without them
+            # the ocean/land/ice tiles are forced with sw_down=0 and precip=0,
+            # SILENTLY.  Units/conventions are the PRODUCER-side contract
+            # _run_compiled uses at :11282: held_* are the instantaneous net
+            # surface fluxes [W/m2] radiation last held, seg_precip is a RATE
+            # [kg/m2/s] positive-DOWN (into the surface).
+            #
+            # Read off ``carry_full`` (the REPLICATED gather), not ``carry``:
+            # the coupler consumes them on the full global grid alongside
+            # ``self.state``, and a band-sharded leaf would mis-shape against
+            # ``jnp.zeros_like(p_s)`` in _build_atm_forcing.
+            self._carry_aux["held_sw_net_sfc"] = carry_full.held_sw_net_sfc
+            self._carry_aux["held_lw_net_sfc"] = carry_full.held_lw_net_sfc
+            self._carry_aux["seg_precip"] = segment_accum_to_rate(
+                carry_full.precip_accum, seg_steps, DT)
+            # RESEED every segment accumulator.  ``segment_accum_to_rate``
+            # divides by THIS segment's duration and its contract
+            # (compiled_segments.py:531-534) is "from a zero reseed at every
+            # segment start" — _run_compiled gets that free by re-packing the
+            # carry each segment (:11138, which zeroes precip_accum and the
+            # whole *_toa_accum / *_sfc_accum / t_low_accum family, and lets
+            # pack_carry default shflx_accum/lhflx_accum to zeros).  This lane
+            # THREADS one carry across all segments, so each accumulator would
+            # otherwise be a RUN total: seg_precip alone is what the coupler
+            # reads today, but resetting only that one leaves every sibling as a
+            # silent trap for the SPMD diagnostics writers that are the declared
+            # follow-up here (codex review).  Reset by SUFFIX so a future
+            # accumulator cannot be forgotten, at each leaf's OWN dtype and
+            # sharding (pack_carry promotes accumulators to the precision
+            # policy's storage dtype, which need not equal state.T's ``_sd``).
+            _reseed = {
+                _nm: jax.device_put(
+                    jnp.zeros(_leaf.shape, _leaf.dtype), _leaf.sharding)
+                for _nm in carry._fields
+                if _nm.endswith("_accum") or _nm == "max_cfl"
+                # None leaves are the "diagnostic off" encoding (e.g.
+                # budget_ledger_accum) — keep them None, not zeros, or the
+                # carry's pytree structure changes mid-run and retraces.
+                for _leaf in (getattr(carry, _nm),) if _leaf is not None
+            }
+            carry = carry._replace(**_reseed)
+
             finite = bool(jnp.isfinite(state.p_s.data).all()
                           & jnp.isfinite(state.T.data).all())
             if not finite:
@@ -11164,6 +11287,18 @@ class ModelDriver:
             elif (cfg.unfused_radiation
                     and RAD_UPDATE_STEPS > 1
                     and seg_steps % RAD_UPDATE_STEPS == 0
+                    # PHASE gate.  The host loop below hardcodes "advance
+                    # exactly RAD_UPDATE_STEPS held steps, then refresh", which
+                    # only lands on the configured boundary when the segment
+                    # STARTS on one.  Without this a restart at a non-aligned
+                    # step silently shifts the refresh by an arbitrary offset
+                    # rather than the documented one step -- e.g. s=2, k=4
+                    # refreshes after step 5 where the cadence asks for step 3
+                    # (codex adversarial review).  Falls through to the fused
+                    # path, which is phase-general (compiled_segments.py
+                    # _run_subcycled) and therefore always correct; the only
+                    # cost is this segment's XLA compile boundary.
+                    and int(carry.step_index) % RAD_UPDATE_STEPS == 0
                     and self._ensemble_size == 1
                     and getattr(run_segment, "run_norad_scan", None) is not None
                     and getattr(run_segment, "run_rad", None) is not None):

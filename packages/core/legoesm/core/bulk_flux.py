@@ -727,11 +727,18 @@ def compute_most_fluxes(
         Reference height for the wind / momentum [m] (default 10).
     z_t : float or None
         Reference height for atmospheric temperature [m]. Defaults to
-        ``z_ref`` (single-height mode). For OMIP / JRA55-do, set to 2.0
-        — JRA55-do delivers ``tas`` at 2 m while ``uas, vas`` are at 10 m.
+        ``z_ref`` (single-height mode).  For OMIP-2 / JRA55-do use **10.0**:
+        the v1.4.0 files carry an explicit ``height = 10.0 m`` coordinate on
+        ``tas`` and ``huss`` as well as on ``uas``/``vas`` (the CF
+        ``comment`` string "usually, 2 meter" is CMOR-table boilerplate that
+        contradicts the file's own coordinate), and FESOM2 forces the same
+        dataset with ``ncar_bulk_z_tair = ncar_bulk_z_shum = 10.0``.  This
+        docstring previously said 2.0; declaring the 10 m state at 2 m
+        inflates the air-sea gradients by ~10 % of the turbulent fluxes.
     z_q : float or None
         Reference height for atmospheric specific humidity [m]. Defaults
-        to ``z_ref`` (single-height mode). Typically 2.0 for OMIP.
+        to ``z_ref`` (single-height mode).  10.0 for OMIP-2 / JRA55-do, per
+        the note on ``z_t``.
     z0_init : float
         Initial momentum roughness length [m] (default 1e-4).
     scheme : str
