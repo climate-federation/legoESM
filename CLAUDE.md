@@ -200,6 +200,59 @@ explicitly that you did not. "I was careful" is not compliance.
   claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
   buys a code change and a relaunch.
 
+## Assumption Gates — from six wrong assumptions in ONE session (2026-08-05/06)
+User callout: *"you keep making a lot of assumptions that prove to be wrong."*
+The gates above stop wrong CLAIMS about the model; these stop the cheaper,
+more frequent error — being wrong about the CODE AND DATA IN FRONT OF YOU.
+Every rule below is mechanical and each cost a full round-trip.
+
+- **AN ARRAY'S LAYOUT IS AN API — READ IT, INCLUDING AXIS ORDER.** The
+  "never infer an API" rule covers signatures; it also covers array SHAPE,
+  AXIS ORDER, index base, and padding convention. Before the first index of
+  any mesh/state field, print its `.shape`. FAILURE: indexed
+  `mesh.cellsOnCell[c, k]` assuming `(nCells, 6)`; it is `(6, nCells)`, so
+  the probe raised `IndexError` on every method. `cellsOnEdge` is `(2,
+  nEdges)` — one unambiguous pair per edge, usually the better handle.
+- **A PROXY IS NOT THE QUANTITY. If the real number is produced by a specific
+  code path, GET IT BY CALLING THAT PATH.** Re-deriving a lookalike from
+  first principles silently answers a different question. FAILURE: computed
+  `max_degree` from 1-ring `cellsOnEdge` adjacency and reported it as the
+  "ppermute round count" — the real exchange is halo-depth-aware, so the
+  proxy said 8 rounds for every method/rank count while the real schedule
+  said 12→14. The proxy could not even reproduce the known answer, which is
+  the tell: **run the proxy against a case whose real value you already know
+  BEFORE using it on the unknown one.**
+- **AN OPTIMIZER ONLY HELPS IF ITS OBJECTIVE IS THE BINDING TERM — state
+  which quantity it minimizes, and confirm that quantity is the measured
+  bottleneck.** FAILURE: assumed METIS would cut MPAS ppermute rounds; METIS
+  minimizes EDGE CUT, the bottleneck is MAX_DEGREE, and measured they move
+  OPPOSITELY (metis 19 rounds @64 vs sfc 14, while metis has the lower cut).
+  "Better partitioner" is not a mechanism.
+- **A TABLE YOU PARSED IS NOT DATA UNTIL YOU SPOT-CHECK IT.** Any derived
+  summary quoted to a human, or fed to a review agent, needs ≥2 rows verified
+  by eye against the raw source first. FAILURE: a regex over multi-line
+  series lists attached subdiv-9's `9.60/11.48 ms` to the `s8` label, and
+  that mislabelled pair went into a codex prompt as fact.
+- **PRE-IMPL GREP COVERS TESTS, NOT JUST FUNCTIONS.** Before writing a test,
+  grep for one that already asserts the same invariant. FAILURE: added two
+  tests counting PCG reduction sites that duplicated the existing
+  `test_reduction_count_halved`; codex had to point it out.
+- **WHEN A TEST FAILS, DECIDE WHETHER THE EXPECTATION OR THE CODE IS WRONG,
+  AND SAY WHICH.** The assertion you just wrote is a claim with no more
+  standing than the code. FAILURE: asserted `LEGOESM_..._FUSED_HALO=""` meant
+  OFF; the resolver is `!= "0"`, so `""` means ON — the test was wrong, not
+  the default.
+- **BEFORE PROPOSING COMPUTE, CHECK THE PATH IS BUILT — grep the driver for
+  the decomposition/sharding the run would need.** FAILURE: scoped a
+  128-GPU coupled ladder before finding that `CoupledESM` contains three
+  occurrences of "shard", all in comments — the coupled ocean is replicated,
+  so the ladder would have measured an unbuilt path.
+- **WHEN TWO MECHANISMS COULD EXPLAIN A NUMBER, NAME THE MEASUREMENT THAT
+  DISCRIMINATES THEM AND RUN IT BEFORE REPORTING EITHER.** FAILURE: reported
+  a serial-vs-SPMD gap as a "cadence PHASE disagreement"; the predicates
+  agree with ZERO offset and the real cause was a serial short-tail fallback.
+  One `grep` of the two predicates would have settled it.
+
 ## Compute Discipline — speculation costs GPU-hours, not just credibility
 User, 2026-07-30 (THIRD callout in five days): *"You keep making very
 speculative assumptions... be much more precise so we do not waste time with
