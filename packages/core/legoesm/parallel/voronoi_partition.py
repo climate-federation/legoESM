@@ -1031,15 +1031,43 @@ def reorder_voronoi_for_sharding(
     n_devices : int
         Number of devices (partitions).
     method : str
-        ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
-        ``"geometric"`` (RCB), ``"metis"``, or ``"sfc"`` (Hilbert
-        space-filling-curve contiguous chunks).
+        ``"auto"`` -> ``"sfc"`` on THIS path (see below), ``"geometric"``
+        (RCB), ``"metis"``, or ``"sfc"`` (Hilbert space-filling-curve
+        contiguous chunks).
 
     Returns
     -------
     VoronoiMesh
         Mesh with reordered entities and remapped connectivity.
     """
+    # ``auto`` resolves to SFC HERE, not to the global METIS-if-available
+    # policy.  This is the SPMD/ppermute path, where the cost that binds at
+    # high device counts is the number of collective-permute ROUNDS -- equal
+    # to the max degree of the post-reorder depth-3-plus-closure comm graph,
+    # since the edge coloring already reaches that lower bound.  METIS
+    # minimizes its ``cellsOnCell`` EDGE CUT, which is a different objective,
+    # and measured on the real halo-aware layout the two move OPPOSITELY:
+    #
+    #   rounds (= max_degree)      64 dev   128 dev
+    #     subdiv-8  geometric        16       21
+    #     subdiv-8  sfc              12       14
+    #     subdiv-8  metis            13       19
+    #     subdiv-9  geometric        14       18
+    #     subdiv-9  sfc              11       13
+    #     subdiv-9  metis            14       18
+    #
+    # SFC wins at every mesh and device count; at SSP-RK3's 3 halo fills per
+    # step, auto->metis would cost +15 collective-permutes/step at 128 on
+    # both meshes.  This became live rather than theoretical when pymetis
+    # became importable in the venvs, which silently flipped auto to the
+    # worst choice for this path.  The high-count launchers pin ``sfc``
+    # explicitly, so their receipts are unaffected either way.
+    #
+    # SCOPE: only this function.  ``initialize_voronoi_mpi`` (route-A MPI)
+    # and ``partition_voronoi_mesh`` keep the global policy -- their halo
+    # exchange is not this ppermute schedule and no census was run for them.
+    if method == "auto":
+        method = "sfc"
     # Validate at entry (CLAUDE.md: fail early) BEFORE the single-device shortcut,
     # so an unknown method raises even when no partitioning happens.
     method = resolve_partition_method(method)

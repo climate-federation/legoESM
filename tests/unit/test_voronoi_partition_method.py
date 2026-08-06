@@ -239,3 +239,71 @@ class TestSFCWiring:
         # Default method (auto->geometric here) now SFC-orders within owners.
         reordered = reorder_voronoi_for_sharding(mesh, 2)
         assert reordered.nCells == mesh.nCells
+
+
+def test_sharding_reorder_auto_is_sfc_not_metis(monkeypatch):
+    """``auto`` on the SPMD reorder path must resolve to SFC.
+
+    The global ``resolve_partition_method`` policy prefers METIS when pymetis
+    is importable, which optimizes EDGE CUT. The cost that binds this path at
+    high device counts is the collective-permute ROUND count (= max degree of
+    the post-reorder depth-3+closure comm graph). Measured on the real layout
+    those objectives move oppositely -- subdiv-8 @128: sfc 14 rounds, metis 19
+    -- so auto must NOT inherit the METIS preference here.
+
+    Asserted behaviourally, by which partitioner the reorder actually calls:
+    a check on the resolver alone would prove nothing about this path.
+    """
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel import voronoi_partition as vp
+
+    # Non-vacuity: if the global policy would not have picked METIS anyway,
+    # there is nothing for this test to distinguish.
+    if vp.resolve_partition_method("auto") != "metis":
+        pytest.skip("global auto policy is not METIS here (pymetis absent) — "
+                    "this test only bites when auto would otherwise pick it")
+
+    used = []
+    for name in ("partition_cells_sfc", "partition_cells_metis",
+                 "partition_cells_geometric"):
+        real = getattr(vp, name)
+
+        def _tap(m, n, _real=real, _name=name):
+            used.append(_name)
+            return _real(m, n)
+
+        monkeypatch.setattr(vp, name, _tap)
+
+    vp.reorder_voronoi_for_sharding(create_voronoi_mesh(subdivision_level=3), 4)
+
+    assert used == ["partition_cells_sfc"], (
+        f"reorder_voronoi_for_sharding(method='auto') used {used}; it must "
+        f"use SFC — METIS costs +15 collective-permutes/step at 128 devices "
+        f"on subdiv-8/9.")
+
+
+def test_sharding_reorder_still_honours_an_explicit_method(monkeypatch):
+    """The auto override must not hijack an EXPLICIT choice — a deck that
+    pins metis/geometric (or a future census that prefers one) still gets it."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel import voronoi_partition as vp
+
+    names = ("partition_cells_sfc", "partition_cells_metis",
+             "partition_cells_geometric")
+    # Capture the REAL functions once: re-wrapping inside the loop would tap
+    # an already-tapped function and double-count.
+    originals = {n: getattr(vp, n) for n in names}
+    mesh = create_voronoi_mesh(subdivision_level=3)
+
+    for method, expect in (("metis", "partition_cells_metis"),
+                           ("geometric", "partition_cells_geometric"),
+                           ("sfc", "partition_cells_sfc")):
+        used = []
+        for name in names:
+            def _tap(m, n, _real=originals[name], _name=name):
+                used.append(_name)
+                return _real(m, n)
+
+            monkeypatch.setattr(vp, name, _tap)
+        vp.reorder_voronoi_for_sharding(mesh, 4, method=method)
+        assert used == [expect], f"method={method!r} used {used}"
