@@ -71,6 +71,10 @@ _ANALYTIC_T_SFC_TOL_K = 0.75      # surface T, |analytic - oracle|
 _ANALYTIC_Q_SFC_RTOL = 0.03       # surface q_v, relative
 _ANALYTIC_TROP_T_MAE_K = 3.0      # mean |dT| over z <= 15 km
 _ANALYTIC_RH_TOL = 0.10           # surface RH, absolute
+# Tropopause cap vs the oracle cold point. Tight BECAUSE the shipped
+# calibration is endpoint-constrained through it (measured error 0.000 K); the
+# retracted least-squares calibration missed by 5.030 K.
+_ANALYTIC_COLD_POINT_TOL_K = 1.0
 # Height below which the analytic column must stay subsaturated. Above this the
 # two-piece Wing form is structurally too moist against gSAM (see the
 # `..._known_limitation` test); this covers the boundary layer and the whole
@@ -206,6 +210,37 @@ def _analytic_errors(T_v0, Gamma, q_sfc, base):
         "dRH_sfc": abs(float(rh_a[0] - rh_o[0])),
         "trop_T_mae": float(np.abs(T_a[trop] - T_o[trop]).mean()),
     }
+
+
+def test_analytic_cold_point_matches_the_oracle():
+    """THE GATE THAT WAS MISSING. The analytic tropopause must reproduce gSAM's
+    cold point.
+
+    An intermediate calibration of this module fitted ``(T_v0, Gamma)`` by
+    least squares over the troposphere, which minimises the MEAN residual and
+    misses both endpoints: it moved the analytic cold point 5.03 K below the
+    oracle, and the existing 193-196 K band in
+    ``test_build_rcemip1_small_reference`` was widened to 187-192 K to
+    accommodate it. Nothing gated the quantity itself. This does.
+
+    The cold point sets OLR, cirrus and CAPE, so it is not a decoration; the
+    tolerance is tight because the shipped calibration is endpoint-constrained
+    THROUGH it and hits it to 0.000 K.
+    """
+    base = _load_baseline()
+    T_o = np.asarray(base["T"], dtype=np.float64)
+    T_cold_o = float(T_o.min())
+    T_cap = ic.WING_T_V0 - ic.WING_GAMMA * ic.WING_Z_T   # virtual == actual, q_t~0
+    assert abs(T_cap - T_cold_o) <= _ANALYTIC_COLD_POINT_TOL_K, (
+        f"analytic tropopause cap {T_cap:.3f} K vs oracle cold point "
+        f"{T_cold_o:.3f} K. Fix the CONSTANTS, not this tolerance — a fit that "
+        "minimises the tropospheric mean will fail here by ~5 K.")
+    # Non-vacuity: the pre-oracle triple happened to hit the cold point (that is
+    # what it was chosen for), so guard with the estimator that did NOT.
+    T_lstsq = 300.444 - 0.0074034 * ic.WING_Z_T
+    assert abs(T_lstsq - T_cold_o) > _ANALYTIC_COLD_POINT_TOL_K, (
+        "the retracted least-squares calibration now passes the cold-point "
+        "gate — the tolerance has been widened past the defect it catches.")
 
 
 def test_analytic_fallback_is_anchored_to_the_oracle():

@@ -10,6 +10,7 @@
     "reader": "legoesm.atmosphere.forcing.sam_case_forcing.read_sam_snd",
     "extraction_script": "scripts/data/extract_gsam_rcemip_baseline.py",
     "command": "python scripts/data/extract_gsam_rcemip_baseline.py --snd $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/snd_rcemip_300s6.11.2 --out tests/oracle_baselines/gsam_rcemip300_snd.json --n-levels 15",
+    "written_to": "tests/oracle_baselines/gsam_rcemip300_snd.json",
     "level_indices": [
       0,
       6,
@@ -24,8 +25,7 @@
       60,
       66,
       73
-    ],
-    "written_to": "tests/oracle_baselines/gsam_rcemip300_snd.json"
+    ]
   },
   "units": {
     "z": "m",
@@ -35,11 +35,33 @@
     "T": "K (derived: theta*(p/p_ref)^kappa)",
     "rh": "dimensionless (derived: q_v / legoesm.thermo.saturation_mixing_ratio(T, p); a MIXING-RATIO ratio, matching SAM's q column convention)"
   },
+  "wing_calibration": {
+    "q_sfc": 0.014201399706623258,
+    "q_sfc_lstsq": 0.014772872599549349,
+    "lstsq": {
+      "T_v0": 300.44375169077017,
+      "Gamma": 0.00740335466489675,
+      "r2": 0.9956730671677896,
+      "trop_Tv_mae": 2.00117013784423,
+      "cold_point_err": -5.029578609992825
+    },
+    "endpoints": {
+      "T_v0": 299.2739969013271,
+      "Gamma": 0.006990065771601023,
+      "trop_Tv_mae": 2.2258655172665556,
+      "cold_point_err": 0.0
+    },
+    "oracle_cold_point_T_v": 194.42301032731177,
+    "oracle_cold_point_z": 14500.0,
+    "n_trop_levels": 38
+  },
+  "pres0_mb": 1014.8,
   "oracle_is": [
     "z",
     "p",
     "theta",
-    "q_v"
+    "q_v",
+    "pres0_mb"
   ],
   "derived_by_legoesm_thermo": [
     "T",

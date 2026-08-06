@@ -89,13 +89,29 @@ WING_T_SFC_DEFAULT = 300.0  # K, prescribed RCE300 SEA-SURFACE temperature. This
 # RH = 0.7545; max RH over the column = 0.8892 at z = 667 m; cold point
 # 194.42 K at 14.5 km.
 #
-# K/m, tropospheric lapse rate.  Least squares on T_v(z) over the 38 oracle
-# levels with z <= z_t (R^2 = 0.99567).  Independent 2-point secant
-# (37 m -> 10 km) gives 0.0073219 — a 1.1 % spread.
-# Was 0.0067 (Wing analytic-form value): 10 % too weak against the oracle.
-WING_GAMMA = 0.0074034
-# K, surface VIRTUAL temperature: the INTERCEPT of the same least-squares fit
-# (independent 2-point estimator 299.727 K — a 0.24 % spread).
+# K/m, tropospheric lapse rate, and K, surface VIRTUAL temperature.
+#
+# ENDPOINT-CONSTRAINED fit (scripts/data/extract_gsam_rcemip_baseline.py
+# ::calibrate_wing_constants, estimator "endpoints"): the straight line through
+# the back-extrapolated surface T_v(0) and the oracle's COLD POINT.
+#
+# RETRACTED, and why it matters — the first version of this calibration used a
+# LEAST-SQUARES fit of T_v over z <= z_t, giving T_v0 = 300.444 K and
+# Gamma = 0.0074034 K/m (R^2 = 0.99567). That estimator minimises the mean
+# tropospheric residual and therefore misses BOTH endpoints, because gSAM's
+# lapse is not constant — it is steeper in the densely-sampled lower
+# troposphere. Measured cost: it put the analytic tropopause 5.030 K BELOW the
+# oracle's cold point, on the quantity that sets OLR, cirrus and CAPE. That is
+# ~60x worse than the value it replaced, against the very oracle being fitted.
+# It was nearly shipped, with the resulting regression absorbed by widening a
+# test band from 193-196 K to 187-192 K — the exact failure mode of "fix the
+# test until it is green".
+#
+# The endpoint estimator costs 0.225 K of tropospheric mean error (2.226 vs
+# 2.001 K) and reduces the cold-point error from -5.030 K to +0.000 K.
+# Both estimators are computed and recorded in the tracked baseline's
+# "wing_calibration" block, so the choice is auditable rather than asserted.
+WING_GAMMA = 0.0069901
 #
 # Two previous values, both now disproven directly against gSAM's sounding
 # rather than by argument:
@@ -108,7 +124,7 @@ WING_GAMMA = 0.0074034
 #            virtual temperature; the oracle's air is ~3 K cooler than the SST,
 #            so this overshoots by ~2.7 K.  T_v0 is therefore NOT derived from
 #            T_sfc here — deriving it is precisely the error.
-WING_T_V0 = 300.444
+WING_T_V0 = 299.274
 # kg/kg, surface (z=0) water-vapour mixing ratio.  The oracle's 37 m value
 # 14.0703 g/kg extrapolated to z=0 through the Wing shape function
 # exp(-z/z_q1)*exp(-(z/z_q2)^2), which reproduces the 37 m level EXACTLY.

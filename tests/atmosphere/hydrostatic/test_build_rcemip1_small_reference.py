@@ -54,12 +54,13 @@ def test_build_reference_roundtrips_wing_profiles_through_campaign_reader(tmp_pa
     outdir = tmp_path / "ref"
     diag = builder.build_reference(outdir, n_levels=48, n_volumes=3)
 
-    # Wing cold point is T_v0 - Gamma*z_t = 300.444 - 0.0074034*15000
-    # = 189.39 K after the 2026-08-06 gSAM-oracle calibration (was 194.5 K
-    # under the disproven T_v0=295 / Gamma=0.0067 pair). gSAM's own cold point
-    # is 194.42 K at 14.5 km — the analytic two-piece form undershoots it by
-    # ~5 K, which is the structural gap --sounding exists to close.
-    assert 187.0 < diag["cold_point_T_K"] < 192.0
+    # Wing cold point is T_v0 - Gamma*z_t = 299.274 - 0.0069901*15000
+    # = 194.42 K, which is gSAM's own cold point EXACTLY (the calibration is
+    # endpoint-constrained through it). The original 193-196 K band therefore
+    # STANDS. An intermediate least-squares calibration moved this to 189.4 K
+    # and the band was widened to 187-192 to accommodate it; that was the wrong
+    # way round, and the fix was the constant, not the band. Do not widen this.
+    assert 193.0 < diag["cold_point_T_K"] < 196.0
     assert 13.0 < diag["cold_point_z_km"] < 17.0
     # Lowest-level Wing air temperature ~297.9 K at z=0
     # (T_v0 / (1 + eps^-1 q_sfc)); this is the surface AIR temp, not the
