@@ -28,7 +28,8 @@ def ctx():
     # no faithful implementation without the bundle. A default context
     # here tested the interim index-copy path, which leaves the B-grid
     # corner diagonal stale -- the path that produced a 1e11 D wind.
-    return build_six_face_duo_context(N, NG, use_ext_bundle=True)
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                      oracle_conventions=True)
 
 
 @pytest.fixture(scope="module")
@@ -38,9 +39,17 @@ def ctx_interim():
     Only for the tests that are about the fallback itself. ext_exclude is
     the existing measurement opt-in; naming it is what keeps the interim
     path from being reachable by accident.
+
+    oracle_conventions=True MUST match the `ctx` fixture: the corner test
+    compares the two contexts cell-for-cell, so the exchange has to be the
+    ONLY variable. With mismatched conventions the c_sw corner value is
+    -1.18e-09 on the bounded grid and 1.25e+07 on the plain one, and the
+    comparison measures the grid rather than the exchange. (That is not
+    hypothetical -- the confound guard in that test caught exactly this.)
     """
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
-    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"))
+    return build_six_face_duo_context(N, NG, oracle_conventions=True,
+                                      ext_exclude=("divgd", "cvec"))
 
 
 def _state(km, seed=0):

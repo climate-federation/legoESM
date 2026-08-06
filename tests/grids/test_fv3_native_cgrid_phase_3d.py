@@ -37,7 +37,7 @@ def _compute(ctx, a):
 @pytest.fixture(scope="module")
 def ctx():
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
-    return build_six_face_duo_context(N, NG)
+    return build_six_face_duo_context(N, NG, oracle_conventions=True)
 
 
 def _seeded_state(km, seed=0):
@@ -132,10 +132,22 @@ def test_km1_through_the_3d_path_matches_the_certified_2d_kernel(ctx):
                         f"certified 2-D kernel at km=1")
 
 
-def test_duogrid_flag_is_actually_forwarded(ctx):
+def test_duogrid_flag_is_actually_forwarded():
     """c_sw's `duogrid` DEFAULTS TO FALSE. This session already lost a
     measurement to an unpassed default, so prove the flag reaches the
-    kernel by showing the two settings differ."""
+    kernel by showing the two settings differ.
+
+    Builds its OWN plain context instead of using the module fixture:
+    the fixture is oracle_conventions=True, i.e. bounded_domain=True, and
+    that state only ARISES from duogrid (fv_arrays.F90:1512,
+    bounded_domain = regional .or. nested .or. duogrid). So
+    duogrid=False + bounded_domain=True is not a configuration the oracle
+    can produce, and d2a2c_vect rightly refuses it -- the un-ported
+    bounded arm is the regional/nested one, not the duo one. Varying the
+    flag is only meaningful on a context where both settings are legal.
+    """
+    from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    ctx = build_six_face_duo_context(N, NG)
     st = _seeded_state(KM, seed=5)
     on = csw_phase_3d(ctx, st, dt2=10.0, km=KM, duogrid=True)
     off = csw_phase_3d(ctx, _seeded_state(KM, seed=5), dt2=10.0, km=KM,

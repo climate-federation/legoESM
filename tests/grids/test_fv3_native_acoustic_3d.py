@@ -32,7 +32,17 @@ def ctx():
     # k2e machinery). Its default is False -- the interim index-copy
     # exchanges -- and an unpassed default has already cost this campaign
     # one measurement, so it is explicit here.
-    return build_six_face_duo_context(N, NG, use_ext_bundle=True)
+    # oracle_conventions=True is the ONLY lane the oracle can produce:
+    # fv_arrays.F90:1512 sets bounded_domain = regional .or. nested .or.
+    # duogrid, so duogrid FORCES bounded_domain=.true., and
+    # fv_grid_utils.F90:224 then leaves all four corner flags .false.
+    # With bounded_domain=False the port runs blocks upstream skips --
+    # d_sw4's corner-KE fix (sw_core.F90:1441) and d_sw1's west/east
+    # edge blocks (sw_core.F90:656), both guarded on .not.bounded --
+    # and reads 1e8 cube-vertex cosa/rsina where the bounded builder
+    # has the real 120-degree kink values (cosa=-1/2, rsina=4/3).
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                      oracle_conventions=True)
 
 
 def _state(km, seed=0):
