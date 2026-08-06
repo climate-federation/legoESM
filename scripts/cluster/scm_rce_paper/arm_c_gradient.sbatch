@@ -53,6 +53,17 @@ if [ "$SCHEME" = "bechtold" ]; then BPOL=train_deterministic; fi
 
 echo "SCHEME=$SCHEME  KERNEL_ARM=$ARM  bechtold_policy=$BPOL"
 echo "init tuned_parameters from: $AB/tuned_parameters.json"
+# Arm C is the GRADIENT arm and must start from arm B's derivative-free
+# optimum. If that file is absent, train_scm_rce_params falls back to the
+# shipped *Config defaults -- which silently turns arm C into a second copy of
+# arm A and makes the three-method ranking compare B against a mislabelled A.
+# Fail instead. Quarantined runs under _stale_selfref/ and
+# _stale_contaminated_ref/ were scored against the old reference; a stale file
+# reachable at this path would be worse than a missing one.
+if [ ! -s "$AB/tuned_parameters.json" ]; then
+  echo "ARM_STATUS=FAILED (missing/empty $AB/tuned_parameters.json; arm B did not publish)"
+  echo ALLDONE; exit 4
+fi
 
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/train_scm_rce_params.py \
   --reference-dir $REF \
