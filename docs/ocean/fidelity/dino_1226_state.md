@@ -18,6 +18,23 @@ drag, lateral viscosity (note the open dyn_ldf e3-weighting escalation sits exac
 The restoring-timescale lag story is dead: a density-side rate change moves you ALONG the
 curve, not off it.
 
+# MOMENTUM-SINK DISCRIMINATION 2026-08-06 — wind/drag RULED OUT; GM the last unfalsified sink
+
+Matched-year offline comparison, identical formulas/masks both sides (one v1 self-retraction:
+lego drag initially used MOM6's ke0=0.01 instead of the card's 2.5e-3 — corrected before
+propagating). Wind power: flat, ruled out. Bottom drag: control-window equal (1.032 at y10),
+non-monotonic after (1.034 at y20) — fails the divergence signature, ruled out. **Lateral
+viscous dissipation: THE signature** — 0.962 at y10 (control) rising monotonically to **1.358
+at y20** — but A_h and the operator are identical by construction, so this is a **state
+symptom**: armB retains horizontal/deep shear NEMO sheds post-y10. Corroborating: armB's
+SURFACE u at y20 is LOWER than NEMO's (0.0439 vs 0.0461) while its transport is HIGHER ⇒
+**too-barotropic, too-deep-reaching flow**. The sink that acts selectively on deep/barotropic
+flow — **GM/eddy form stress — is by elimination the only unfalsified owner of the 1.27x**.
+Cross-oracle echo: the Phase-G Veros campaign ended at the same signature ("too-barotropic,
+EKE overshoot") — this looks like a legoESM trait, not a DINO quirk. Missing datum = NEMO's
+own kappa_gm/bolus at matched years; RUN_EIV_DIAG lane launched (y10→y20 continuation with
+additive eiv dumps, bit-identity-gated).
+
 # NOISE FLOOR MEASURED 2026-08-06 (#1492 item 2.1) — the acceptance bar is now QUANTIFIED
 
 3-member NEMO micro-ensemble (1e-14-relative T perturbations to the y20 restart, every other
