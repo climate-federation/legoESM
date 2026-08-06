@@ -30,16 +30,25 @@ REF=${REF:-/burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300}
 # default-substep results under the control's name.
 OUTBASE=${OUTBASE:-arms_ab}
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/${OUTBASE}_${ARM}
+mkdir -p "$OUT"
 echo "KERNEL_ARM=$ARM  OUT=$OUT"
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --reference-dir $REF --outdir $OUT --subsidence-solve $ARM \
   --days 100 --dt 600 --analysis-days 5 --last-reference-files 5 \
   --radiation rrtmgp --tune-evals 48 --tune-seed 20260705 \
   --scm-convection-substeps ${SUBSTEPS:-10} \
-  --merge-only 2>&1 | tail -60
-echo "merge rc=${PIPESTATUS[0]}"
-echo "=== ranking table ==="; sed -n '1,80p' $OUT/summary.md 2>&1
+  --merge-only > "$OUT/.merge.log" 2>&1
 RC=$?
-if [ "$RC" -ne 0 ]; then echo "STAGE_STATUS=FAILED rc=$RC"; echo ALLDONE; exit "$RC"; fi
+tail -60 "$OUT/.merge.log"
+echo "merge rc=$RC"
+# Capture RC from the merge itself. A previous revision of this block read
+# `RC=$?` AFTER the `sed` that prints the table, so a failed merge with a
+# readable stale summary.md still reported STAGE_STATUS=OK -- the same
+# "status of the last echo" defect this stage was meant to fix.
+if [ "$RC" -ne 0 ]; then echo "STAGE_STATUS=FAILED merge rc=$RC"; echo ALLDONE; exit "$RC"; fi
+if [ ! -s "$OUT/summary.md" ]; then
+  echo "STAGE_STATUS=FAILED (merge rc=0 but $OUT/summary.md missing/empty)"; echo ALLDONE; exit 3
+fi
+echo "=== ranking table ==="; sed -n '1,80p' "$OUT/summary.md"
 echo "STAGE_STATUS=OK"
 echo ALLDONE

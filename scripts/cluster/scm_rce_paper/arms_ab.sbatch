@@ -62,6 +62,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --radiation rrtmgp \
   --tune-evals 48 \
   --tune-seed 20260705 \
+  --scm-convection-substeps ${SUBSTEPS:-10} \
   --no-merge 2>&1
 RC=$?
 echo "rc=$RC"
