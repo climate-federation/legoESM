@@ -78,9 +78,19 @@ arm () {   # label, then driver args
 # unresolved-transport setting.
 G="--nx 96 --ny 96 --nz 192 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.5"
 
-arm R_baseline    $G
-arm R_smagorinsky $G --sgs-model smagorinsky
-arm R_static_cs   $G --static --cs 0.18
+# ARM LABELS MUST NAME WHAT THE FLAGS ACTUALLY DO. The previous two SGS arms
+# tested nothing they claimed:
+#   "R_smagorinsky" passed --sgs-model smagorinsky WITHOUT --static. The dynamic
+#     path ignores --sgs-model (run_dycoms_les.py:110-113), so that arm was a
+#     bit-identical DUPLICATE of R_baseline reported as an SGS-model effect.
+#   "R_static_cs" passed --static --cs 0.18, but 0.18 is already the --cs
+#     DEFAULT and --sgs-model still defaulted to vreman. So it varied only
+#     --static, and was a dynamic-vs-static test mislabelled as a Cs test.
+# Each arm below differs from the one named in its comment by ONE flag.
+arm R_baseline    $G                                     # dynamic Vreman (default)
+arm R_static_vre  $G --static                            # vs baseline: dynamic -> static
+arm R_static_smag $G --static --sgs-model smagorinsky    # vs R_static_vre: Vreman -> Smagorinsky
+arm R_smag_cs10   $G --static --sgs-model smagorinsky --cs 0.10  # vs R_static_smag: Cs 0.18 -> 0.10
 arm R_weno5       $G --scalar-advection weno5
 arm R_nufloor     $G --nu-floor 0.5
 
@@ -88,7 +98,7 @@ echo "=============================================================="
 echo "SUMMARY  ref: LWP 50-80 g/m2, cover ~1.0, z_i 840-870 m (hours 2-4)"
 $PY /burg-archive/glab/users/pg2328/legoESM/scripts/validate/dycoms_theta_budget.py \
     $OUT/R_baseline 2>/dev/null | tail -3
-for a in R_baseline R_smagorinsky R_static_cs R_weno5 R_nufloor; do
+for a in R_baseline R_static_vre R_static_smag R_smag_cs10 R_weno5 R_nufloor; do
   echo "--- $a"
   $PY /burg-archive/glab/users/pg2328/legoESM/scripts/validate/dycoms_theta_budget.py \
       $OUT/$a 2>/dev/null | tail -2
