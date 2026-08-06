@@ -137,6 +137,22 @@ def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
         hs = (np.asarray(hs6[t], dtype=np.float64) if hs6 is not None
               else np.zeros(field_shape("delp", n, ng, 1)[:2],
                             dtype=np.float64))
+        # geopk integrates p1d = ptop + cumsum(delpc) and takes log(p1d)
+        # (fv3_native_pgrad.py:245). A NON-POSITIVE delpc is perfectly
+        # FINITE, so it sails through every isfinite() check and only turns
+        # into NaN one stage later inside the log -- which is exactly how a
+        # sub-step-2 blow-up got mis-attributed twice. Fail at the source,
+        # naming the face and level.
+        _dc = np.asarray(out["delpc"])
+        _win = _dc[bd.is_ - bd.isd:bd.ie - bd.isd + 1,
+                   bd.js - bd.jsd:bd.je - bd.jsd + 1, :]
+        if not np.all(np.isfinite(_win)) or _win.min() <= 0.0:
+            _k = int(np.argmin(_win.min(axis=(0, 1))))
+            raise ValueError(
+                f"face {t + 1}: delpc entering geopk has min "
+                f"{_win.min():.6g} at level {_k} (must be > 0). geopk will "
+                f"take log(ptop + cumsum(delpc)); a non-positive layer mass "
+                f"is finite and would surface as NaN one stage later.")
         got = geopk(out["delpc"], out["ptc"], hs, bd,
                     km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=True, duogrid=True, computehalo=False,

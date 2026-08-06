@@ -49,6 +49,12 @@ from legoesm.core.fv3_native_state_3d import (
 )
 
 
+# Loose physical sanity bounds for a dry hydrostatic column. Not tuning --
+# these are orders of magnitude above anything valid, so tripping one means
+# the integration has diverged, not that a coefficient needs adjusting.
+_SANE_MAX = {"delp": 1.0e6, "pt": 1.0e4, "u": 1.0e4, "v": 1.0e4}
+
+
 def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
                             scalars: bool, winds: bool) -> None:
     """Duo halo exchanges, applied per level.
@@ -65,13 +71,34 @@ def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
         if scalars:
             for name in ("delp", "pt"):
                 f6 = [state[t][name][:, :, k] for t in range(6)]
-                for t in range(1, 7):
-                    exchange_agrid_scalar_halos(f6, t, n, ng)
+                _pad_scalars_6(f6, ctx, n, ng, exchange_agrid_scalar_halos)
         if winds:
             u6 = [state[t]["u"][:, :, k] for t in range(6)]
             v6 = [state[t]["v"][:, :, k] for t in range(6)]
             for t in range(1, 7):
                 exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+
+
+def _pad_scalars_6(f6, ctx, n, ng, fallback) -> None:
+    """A-grid scalar halo fill for one level, all six faces.
+
+    Prefers ``duo_pad_scalars`` -- the certified k2e Lagrange halo remap
+    (``pad_halo`` with the real ``DuoGridData``), i.e. the faithful
+    ``ext_scalar`` analog. It replaces the WHOLE padded array, so the
+    corner-diagonal regions get filled.
+
+    ``exchange_agrid_scalar_halos`` is the interim index-copy exchange: it
+    fills the four edge halos but leaves the corner diagonals at their
+    sentinel, and PPM stencils reach into those corners. That is the
+    suspected source of the sub-step-2 blow-up, so the interim path is only
+    a fallback for a context built without the ext bundle, and it says so.
+    """
+    from legoesm.core.fv3_native_duo_stepper import duo_pad_scalars
+    if ctx.get("dg") is not None:
+        duo_pad_scalars(f6, ctx)
+        return
+    for t in range(1, 7):
+        fallback(f6, t, n, ng)
 
 
 def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
@@ -113,8 +140,8 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
         for k in range(km):
             for _nm in ("delp", "pt"):
                 f6 = [dsw[t][_nm][:, :, k] for t in range(6)]
-                for t in range(1, 7):
-                    exchange_agrid_scalar_halos(f6, t, n_, ng_)
+                _pad_scalars_6(f6, ctx, n_, ng_,
+                               exchange_agrid_scalar_halos)
 
     dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt, ptop=ptop,
                             akap=akap, cp_air=cp_air, a2b_ord=a2b_ord)
@@ -171,4 +198,23 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             f"sub-step {it}/{n_split}: face {t + 1} {name} "
                             f"has {bad} non-finite value(s) inside the "
                             f"compute window")
+                    # FINITENESS IS NOT ENOUGH. A delp of 1e9 is finite and
+                    # passes every isfinite() check, then drives delpc
+                    # negative one sub-step later and only becomes NaN
+                    # inside geopk's log. Catching the magnitude here names
+                    # the sub-step that actually diverged.
+                    if name == "delp" and win.min() <= 0.0:
+                        raise RuntimeError(
+                            f"sub-step {it}/{n_split}: face {t + 1} delp min "
+                            f"{win.min():.6g} <= 0 -- non-positive layer mass")
+                    lim = _SANE_MAX.get(name)
+                    if lim is not None:
+                        peak = float(np.abs(win).max())
+                        if peak > lim:
+                            raise RuntimeError(
+                                f"sub-step {it}/{n_split}: face {t + 1} "
+                                f"{name} peaked at {peak:.6g}, above the "
+                                f"sanity bound {lim:g}. Finite but "
+                                f"non-physical -- the divergence starts "
+                                f"HERE, not where the NaN appears.")
     return state

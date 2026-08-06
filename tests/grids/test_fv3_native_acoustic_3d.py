@@ -21,31 +21,45 @@ from legoesm.core.fv3_native_state_3d import build_state_3d, state_signature
 N, NG = 12, 3
 KM = 3
 PTOP, AKAP, CP = 100.0, 0.2857142857142857, 1004.6
+P_SFC = 1.0e5      # a real surface pressure; see _state
 DT = 30.0
 
 
 @pytest.fixture(scope="module")
 def ctx():
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
-    return build_six_face_duo_context(N, NG)
+    # use_ext_bundle=True is the FAITHFUL duo path (ext_scalar/ext_vector
+    # k2e machinery). Its default is False -- the interim index-copy
+    # exchanges -- and an unpassed default has already cost this campaign
+    # one measurement, so it is explicit here.
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True)
 
 
 def _state(km, seed=0):
-    """A quiescent, hydrostatically sane column: positive layer masses and
-    a realistic temperature, so a failure is the cadence and not garbage
-    input."""
+    """A quiescent, hydrostatically SANE column.
+
+    The layer masses must sum to a real surface pressure. An earlier
+    version used delp = 1000 Pa per level, giving ps ~ 3100 Pa -- about 3%
+    of an atmosphere. The pressure-gradient and geopotential terms are then
+    grossly out of balance and the solver answers with |u| ~ 1e11, which is
+    the CORRECT response to a nonsense state, not a dycore defect. Each
+    layer therefore carries (p_sfc - ptop)/km.
+    """
     rng = np.random.default_rng(seed)
     st = build_state_3d(N, NG, km)
     for t, face in enumerate(st):
         ii = np.arange(face["delp"].shape[0])[:, None]
         jj = np.arange(face["delp"].shape[1])[None, :]
+        dp0 = (P_SFC - PTOP) / km          # ~33 000 Pa at km=3
         for k in range(km):
             # Horizontal STRUCTURE is required: with a horizontally uniform
             # delp/pt the halo exchange is a genuine no-op and the
-            # first_substep gate test cannot detect anything.
-            face["delp"][:, :, k] = (1000.0 + 10.0 * k
-                                     + 0.5 * np.sin(0.3 * ii + 0.2 * jj)
-                                     + 0.05 * t)
+            # first_substep gate test cannot detect anything. The
+            # perturbation is ~0.01% of the layer mass -- enough to make the
+            # exchange observable, small enough to stay hydrostatic.
+            face["delp"][:, :, k] = (dp0
+                                     + 2.0 * np.sin(0.3 * ii + 0.2 * jj)
+                                     + 0.5 * t)
             face["pt"][:, :, k] = (280.0 + 2.0 * k
                                    + 0.3 * np.cos(0.25 * ii - 0.15 * jj))
             face["u"][:, :, k] = 1e-2 * rng.standard_normal(
