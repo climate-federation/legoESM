@@ -255,10 +255,14 @@ class DINOConfig:
     # explicit combine's ``(state_expl.T - state.T)`` difference and cancels
     # there, entering the trajectory only through the Asselin filter's "now"
     # weight.  Global-closure audit (#1492 0.1): this retains only
-    # ~0.444 (= 4/9 at gamma=0.1) of the applied flux per step.  NOTE: an
-    # earlier revision of this comment labelled the retention "1/(1+2*gamma)"
-    # -- that closed form is WRONG (it gives 0.833 at gamma=0.1); the
-    # MEASURED and independently reproduced value is 4/9 = 0.4445 (residual
+    # ~0.444 (= 4/9 at gamma=0.1) of the applied flux per step.  CLOSED FORM
+    # (derived independently in the #1492 review, eigen-decomposition of the
+    # 2-state [T_before, T_now] Asselin/leapfrog recursion, eigenvalues 1 and
+    # 2*gamma-1):
+    #     retention(gamma) = (1 - 2*gamma) / (2 * (1 - gamma))
+    # -> 4/9 at gamma=0.1, 1/2 as gamma->0.  NOTE: an earlier revision of this
+    # comment labelled it "1/(1+2*gamma)" -- that is WRONG (0.833 at
+    # gamma=0.1); the measured value is 4/9 = 0.4445 (residual
     # coefficient -0.556, R2 0.9998, same for heat AND salt -- confirmed by
     # closed-form recursion match in the 0.1 follow-up, see
     # global_closure_audit.py).
@@ -3445,6 +3449,35 @@ def dino_step_surface_forcing(forcing):
     )
 
 
+def _check_surface_tendency_placement(cfg, return_rate: bool) -> None:
+    """Couple ``cfg.surface_tendency_placement`` to the ``return_rate`` route.
+
+    #1492 review C2: the config field was DECORATIVE -- three call sites each
+    derived their own ``return_rate`` boolean and separately stamped the field
+    onto ``cfg``, so a caller that set ``surface_tendency_placement=
+    "leapfrog_rhs"`` but forgot ``return_rate=True`` silently got the LEGACY
+    placement, which discards ~56% of every applied surface flux (retention
+    (1-2*gamma)/(2*(1-gamma)) = 4/9 at gamma=0.1).  A config field that lies
+    about what will happen is exactly the silent-dispatch class the repo's
+    hardening doctrine exists to close, so make it load-bearing: any
+    disagreement between the declared placement and the actual route raises.
+    """
+    placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if placement not in ("applied_now", "leapfrog_rhs"):
+        raise ValueError(
+            f"Unknown DINOConfig.surface_tendency_placement {placement!r}: "
+            "expected 'applied_now' or 'leapfrog_rhs'.")
+    if (placement == "leapfrog_rhs") != bool(return_rate):
+        raise ValueError(
+            f"surface_tendency_placement={placement!r} disagrees with "
+            f"return_rate={return_rate!r}: 'leapfrog_rhs' REQUIRES "
+            "return_rate=True (the rate is threaded into the Nnn leapfrog "
+            "RHS via model.step(external_tracer_rate=...)), and "
+            "'applied_now' REQUIRES return_rate=False (post-step state "
+            "mutation). Mixing them silently reverts to legacy placement "
+            "(#1492).")
+
+
 def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
                                         t_seconds=None, return_rate=False):
     """Apply DINO surface forcing on the lat-lon Mercator grid.
@@ -3474,6 +3507,11 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     Returns a new state (immutable update of T, S, u) when
     ``return_rate=False``; ``(state, (dT_dt, dS_dt))`` otherwise.
     """
+    # #1492 C2: make cfg.surface_tendency_placement load-bearing (was
+    # decorative -- a caller could declare "leapfrog_rhs" and silently get
+    # the legacy 4/9-retention placement).
+    _check_surface_tendency_placement(cfg, return_rate)
+
     from legoesm.ocean.physics.surface_forcing.config import (
         RestoringConfig, tau_from_flux_coefficient,
     )

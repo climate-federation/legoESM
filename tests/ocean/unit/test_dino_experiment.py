@@ -16,6 +16,7 @@ the slopbuster-mandated direct-coverage entry point.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -1467,10 +1468,18 @@ class TestSurfaceTendencyPlacement:
         frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
         dt = cfg.dt
 
+        # #1492 C2: the placement field is load-bearing, so each route is
+        # called with the cfg that DECLARES it. The point of the test is
+        # unchanged: the two routes must compute the SAME tendency and differ
+        # only in where it is consumed.
+        cfg_legacy = dataclasses.replace(
+            cfg, surface_tendency_placement="applied_now")
+        cfg_rhs = dataclasses.replace(
+            cfg, surface_tendency_placement="leapfrog_rhs")
         st_legacy = dino.apply_dino_lat_lon_surface_forcing(
-            st, frc, z, cfg, dt, t_seconds=dt)
+            st, frc, z, cfg_legacy, dt, t_seconds=dt)
         st_rate, (dT_dt, dS_dt) = dino.apply_dino_lat_lon_surface_forcing(
-            st, frc, z, cfg, dt, t_seconds=dt, return_rate=True)
+            st, frc, z, cfg_rhs, dt, t_seconds=dt, return_rate=True)
         # T/S UNCHANGED in return_rate mode (only u still gets its wind kick).
         np.testing.assert_array_equal(np.asarray(st_rate.T.data),
                                       np.asarray(st.T.data))
@@ -1503,8 +1512,14 @@ class TestSurfaceTendencyPlacement:
         model = LatLonCGridOceanModel(g, z, mc)
         st = dino_lat_lon_state(g, z, cfg)
         frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        # #1492 C2: obtaining a rate requires the cfg to DECLARE the rhs
+        # route (the applier now raises on a placement/return_rate mismatch);
+        # the point under test is the SEPARATE guard that rejects that rate
+        # when the model's outer integrator is not leap-frog.
+        cfg_rhs = dataclasses.replace(
+            cfg, surface_tendency_placement="leapfrog_rhs")
         _, rate = dino.apply_dino_lat_lon_surface_forcing(
-            st, frc, z, cfg, cfg.dt, t_seconds=cfg.dt, return_rate=True)
+            st, frc, z, cfg_rhs, cfg.dt, t_seconds=cfg.dt, return_rate=True)
         with pytest.raises(ValueError, match="leap-frog"):
             model.step(st, dt=cfg.dt, external_tracer_rate=rate)
 
@@ -1544,20 +1559,25 @@ class TestSurfaceTendencyPlacement:
         n_steps = 6
 
         def run(placement):
+            # #1492 C2: the config field is now LOAD-BEARING -- the applier
+            # raises if cfg.surface_tendency_placement disagrees with the
+            # return_rate route, so each direction must carry its own cfg.
+            cfg_p = dataclasses.replace(cfg,
+                                        surface_tendency_placement=placement)
             s = st0
             applied_total = 0.0
             for k in range(n_steps):
                 t_next = (k + 1) * dt
                 if placement == "leapfrog_rhs":
                     s, (rT, rS) = dino.apply_dino_lat_lon_surface_forcing(
-                        s, frc, z, cfg, dt, t_seconds=t_next, return_rate=True)
+                        s, frc, z, cfg_p, dt, t_seconds=t_next, return_rate=True)
                     applied_total += float(np.mean(
                         np.asarray(rT)[..., 0][mean_mask])) * dt
                     s = model.step(s, dt=dt, external_tracer_rate=(rT, rS))
                 else:
                     s_before = s
                     s = dino.apply_dino_lat_lon_surface_forcing(
-                        s, frc, z, cfg, dt, t_seconds=t_next)
+                        s, frc, z, cfg_p, dt, t_seconds=t_next)
                     applied_total += float(np.mean(
                         (np.asarray(s.T.data) - np.asarray(s_before.T.data)
                          )[..., 0][mean_mask]))
