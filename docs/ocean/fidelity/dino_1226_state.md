@@ -1,3 +1,30 @@
+# sh2 RECONCILED 2026-08-06 (#1492 item 0.3) — TWO RECORDED NUMBERS ARE UNSOURCED; STRIKE THEM
+
+Canonical probe `scripts/validate/ocean_fidelity/dino_1226/sh2_canonical.py` (3e1e9507d) locks
+every choice prior probes left free and asserts the live config selects the production path
+before trusting a number. Result of reconciling the three-way split:
+
+| historical number | status |
+|---|---|
+| **0.33-0.35** | **EXPLAINED — an ALIGNMENT BUG.** Same production code, vertical offset −2 instead of the established +1. Offset scan peaks sharply at +1. Not different physics. |
+| **0.934** | **STRUCK — no surviving source.** Appears in `sh2_walk.py`'s docstring as a TARGET, not a result. `fidelity_bar_gate.py` does not compute it. Re-running that walk's Candidates A-F tops out at 0.983. |
+| **0.995 ("Candidate G")** | **STRUCK — no surviving source.** `grep -rn "Candidate G"` hits ONLY the prose doc; no `.py` defines it. |
+
+⇒ **The only sh2 number with a reproducible probe behind it is corr 0.7318 / ratio 0.790**
+(production path, |ref|>1e-12 population = 21.3% of wet points, fp64, e3t printed, kt=57601
+via the registry). It is BELOW every historical claim. Do not quote 0.934 or 0.995 again.
+
+**DECISION: do NOT wire `tke_shear_avm_weighting="nemo_face"` to the kamm card.** On the
+canonical population it moves the sh2 ratio 0.790 → 1.129 — overshooting as far as the default
+undershoots — and the two weightings differ from EACH OTHER by less than either differs from
+the standing gate rows (Δcorr ≤ 0.0018; `pdlr` identical to 6 dp). The earlier "2x magnitude
+improvement" was measured on the UNRESTRICTED population where the ratio is 83x/166x and is
+dominated by near-zero/near-zero noise. The option stays available, default `tpoint`, unwired.
+
+**Lesson (the reason item 0.3 exists):** two numbers carried in this campaign's record for
+weeks had no reproducible probe behind them, and a third was a mis-aligned probe reading of
+the same code. A row without a canonical committed probe is UNMEASURED regardless of history.
+
 # DECISION 1 SETTLED 2026-08-04 (Dhruv) — CEILING category + the empirical envelope principle
 
 **CEILING is APPROVED** as a formal gate category (closed dict + evidence strings + non-vacuity
