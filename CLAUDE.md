@@ -538,7 +538,33 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
-Precise+concrete. Explicit assumptions. Numerics change → explain effect on stability, accuracy, conservation, differentiability. No guesses as facts. **No Read images** unless user asks; report path.
+User callout 2026-08-06: *"you are quite unclear... provide more succinct,
+clear summary, clear choice, do not make many but targeted and verified
+assumptions."* Evidence the reader has to assemble into a conclusion is not a
+report. Structure, in this order, and stop:
+
+1. **VERDICT first, <=2 lines.** What is true / what happened. Never open with
+   method, caveats, or a narration of what was run.
+2. **THE DECISION, if any: ONE recommendation.** Name the option you would
+   take and why, in one line. A menu of options with balanced caveats pushes
+   the work back onto the user — only list alternatives when they genuinely
+   must choose, and even then say which you'd pick.
+3. **EVIDENCE: only what changes the verdict.** The decisive number, file:line,
+   or measurement. Not everything checked.
+
+- **AT MOST ONE unverified claim per response, explicitly labelled PLAUSIBLE.**
+  Everything else is verified before it is stated. Do not enumerate candidate
+  causes — pick the one you tested and report it. Untested hypotheses are
+  clutter that reads as findings.
+- **Do not narrate the process.** Tool calls are already visible. Report the
+  outcome, not the itinerary.
+- **Table only for >=3 things compared on >=2 axes.** Otherwise a sentence.
+- **Retract in one line and move on.** No re-litigating a superseded claim.
+- **Caveats: only those that change what the user should DO.** A limitation
+  nobody would act on belongs in the commit message, not the reply.
+- Numerics change -> state effect on stability, accuracy, conservation,
+  differentiability. No guesses as facts.
+- **No Read images** unless user asks; report path.
 
 # iterate-with-codex agent
 1. Implement change
