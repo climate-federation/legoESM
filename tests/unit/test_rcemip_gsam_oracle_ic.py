@@ -602,14 +602,13 @@ def test_full_gsam_column_sounding_ic():
     — catches a subsample that flatters the comparison."""
     snd = read_sam_snd(_gsam_snd_path())
     z_o = np.asarray(snd.z, dtype=np.float64)
-    _, _, _, rh_m, _ = _column_checks(
+    z_m, _, _, rh_m, _ = _column_checks(
         snd, z_o, np.asarray(snd.theta, dtype=np.float64),
         np.asarray(snd.p, dtype=np.float64),
         np.asarray(snd.q_v, dtype=np.float64), "full gSAM column")
     _, rh_o = _rh_from(np.asarray(snd.theta), np.asarray(snd.p),
                        np.asarray(snd.q_v))
     assert rh_m.max() <= 1.0, rh_m.max()
-    z_m = np.asarray(_build_ic_from(snd)[0])
     k = int(np.argmin(z_m))
     assert abs(rh_m[k] - np.interp(z_m[k], z_o, rh_o)) <= _IC_RH_TOL
 
