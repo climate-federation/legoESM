@@ -580,14 +580,27 @@ def test_no_inline_exner_or_virtual_temperature_in_this_stack():
 
 # --- round-3 review fixes ---------------------------------------------------
 
-def test_gradient_dead_arms_are_not_ranked():
-    """A closure whose parameters are disconnected from the loss must not be
-    ranked -- possibly first -- on its untouched default score."""
-    import inspect
-    src = inspect.getsource(drv._write_outputs)
-    assert '_RANKABLE = {"ok", "tuned"}' in src, (
-        "no_active_gradient / no_tunable_params must NOT be rankable")
-    assert "no_active_gradient" not in src.split("_RANKABLE")[1][:120]
+def test_only_arms_with_a_valid_score_are_ranked():
+    """An arm is rankable exactly when its score is a real measurement.
+
+    Asserts on the SET, not on a source string: an inspect.getsource() check
+    passes while proving nothing about what the code does.
+
+    "no_reducing_step" and friends ARE ranked -- their default score is a
+    genuine measurement and the status column says it was not improved.
+    Excluding them deleted closures whose default was good but which the fixed
+    line-search scales could not move. What must never rank is an arm that
+    RAISED or whose rollout went non-finite: safe_sqrt(NaN) is 0.0, the
+    perfect score, so such an arm would rank FIRST.
+    """
+    rankable = drv._RANKABLE
+    for status in ("ok", "tuned", "no_reducing_step", "no_active_gradient",
+                   "no_tunable_params"):
+        assert status in rankable, f"{status} has a valid score; rank it"
+    for status in ("failed", "tune_failed", "nonfinite"):
+        assert status not in rankable, (
+            f"{status} has no valid score; ranking it can put a blown-up "
+            "arm first")
 
 
 @pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
@@ -684,10 +697,13 @@ def test_nonfinite_prediction_scores_worst_not_best():
             "qv": jnp.zeros(nlev), "u": jnp.zeros(nlev), "v": jnp.zeros(nlev)}
     bad = {**good, "T": jnp.full(nlev, jnp.nan)}
 
-    _c, s_good = drv.score_against_les(good, reference=ref, p_full=p_full,
-                                       scored=("theta",))
-    _c, s_bad = drv.score_against_les(bad, reference=ref, p_full=p_full,
-                                      scored=("theta",))
+    _c, s_good, bad_good = drv.score_against_les(
+        good, reference=ref, p_full=p_full, scored=("theta",))
+    _c, s_bad, bad_bad = drv.score_against_les(
+        bad, reference=ref, p_full=p_full, scored=("theta",))
+    # The FLAG is the contract, not the magnitude: a near-uniform reference
+    # over the spread floor makes a legitimately huge finite score.
+    assert not bool(bad_good) and bool(bad_bad)
     s_good, s_bad = float(s_good), float(s_bad)
     assert _np.isfinite(s_bad), "penalty must be finite so the line search works"
     assert s_bad >= drv.NONFINITE_PENALTY * 0.99, s_bad

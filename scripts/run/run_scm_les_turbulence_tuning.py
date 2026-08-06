@@ -168,6 +168,15 @@ PROFILE_FLOOR = 1.0e-8
 # Score assigned to a non-finite rollout. Large enough to lose every
 # comparison, finite so gradients and the line search still work.
 NONFINITE_PENALTY = 1.0e3
+
+# Rank on any arm whose score is a VALID measurement, and let the status
+# column say how it was obtained. Excluding "no_reducing_step" dropped
+# closures whose DEFAULT score was genuinely good but which the fixed
+# line-search scales could not improve -- a scheme scoring 0.2 vanished
+# while a worse, marginally tunable one won. Only arms that raised, or
+# whose rollout went non-finite, are unrankable.
+_RANKABLE = {"ok", "tuned", "no_reducing_step", "no_active_gradient",
+             "no_tunable_params"}
 # The SCM's window may miss the LES window by at most this fraction of the
 # window itself. Not a fraction of the timestep: rounding already bounds that
 # residual by half a step, so a step-based test is vacuous. 1% of a 2 h window
@@ -1017,7 +1026,7 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         if max(end_residual_s, span_residual_s) > 1.0e-6:
             print(f"  NOTE {name}: SCM lands within "
                   f"{max(end_residual_s, span_residual_s):.3f} s of the LES "
-                  f"endpoint/window (dt = {args.dt:g} s); the residual is "
+                  f"endpoint/window (dt = {dt:g} s); the residual is "
                   "below one SCM step.")
         # Round the window START, not the span, so the endpoint and the start
         # are snapped on the SAME grid. Rounding both endpoint and span
@@ -1264,14 +1273,6 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
     # "no_active_gradient" was previously included, which let a closure whose
     # parameters are disconnected from the loss be ranked -- possibly FIRST --
     # on its untouched default score against genuinely tuned arms.
-    # Rank on any arm whose score is a VALID measurement, and let the status
-    # column say how it was obtained. Excluding "no_reducing_step" dropped
-    # closures whose DEFAULT score was genuinely good but which the fixed
-    # line-search scales could not improve -- a scheme scoring 0.2 vanished
-    # while a worse, marginally tunable one won. Only arms that raised, or
-    # whose rollout went non-finite, are unrankable.
-    _RANKABLE = {"ok", "tuned", "no_reducing_step", "no_active_gradient",
-                 "no_tunable_params"}
 
     def _score_of(r):
         if r.score_tuned is not None:
