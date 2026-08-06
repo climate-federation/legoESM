@@ -1367,11 +1367,20 @@ which is why the true-ladder instability is the campaign's critical path, not mo
   (2026-07-30: identical on both ladders, and structurally impossible — `nemo_eiv_bolus_transport`
   uses only `e2u`/`e1v`, no `e3` term), **abyssal slope-cap population** (flat, within ~10%).
   `use_gm_redi=False` (zeros κ_GM only, Redi untouched) still restores stability.
-  **THE OPEN CONTRADICTION and the next cheap check**: κ_GM, slopes and bolus divergence are all
-  ladder-insensitive, yet addendum 36 recorded the bolus entering the advecting flux **37% larger**
-  on the true grid. Since `psi = κ × slope`, those cannot all hold. **Reconcile the 37%: is it
-  real, and is it the same quantity?** (Five metric-identity incidents occurred on 2026-07-30 —
-  treat any un-reconciled cross-script figure as suspect.)
+  ~~**THE OPEN CONTRADICTION**: addendum 36 recorded the bolus entering the advecting flux 37%
+  larger on the true grid.~~ **RESOLVED / STRUCK 2026-08-06 (#1455 item B): THERE IS NO
+  CONTRADICTION — the 37% figure was RETRACTED BY ITS OWN AUTHOR in addendum 38, two addenda
+  later, and the retraction never propagated.** It was `np.abs(bolus_u).max()` over the WHOLE
+  array **including inactive sub-seafloor cells carrying garbage**; wet-masked it is **+3.8%**.
+  It was also **not a lego-vs-NEMO comparison at all** — it compared legoESM's own two vertical
+  grids (wrong-grid vs true-grid). No script computes it (one-off interactive). Both
+  `ldf_eiv_trp_MLF` (NEMO) and `nemo_eiv_bolus_transport` (lego) are thickness-independent by
+  construction, so a real +37% grid sensitivity was never algebraically possible. The genuine
+  issue in that thread was a **pattern correlation of 0.77**, root-caused to slopes/N² plus a
+  Shapiro periodic-seam bug and fixed to ~1.0 (addenda 41→59). **Standing validated number: the
+  y20 twin face-delivery match at 1-2%** (`RUN_TWIN_FACE10_DUMPS`, ψ→increment reconstruction,
+  three faces, all 10 days). Propagation vector fixed: `project_dino_nemo_oracle.md` re-cited
+  addendum 36 without 38.
 - **zdftke composite** — real residual (corr 0.966; ~5% signal-weighted ratio), **INDEPENDENT of
   sh2** (substituting NEMO's own sh2 moved corr 0.9633 → 0.9656). Candidates, all now unblocked by
   the rebuild: buoyancy sink `p_avt*rn2` (`zdftke.F90:495`), `zmxlm` (`:814-819`), tridiagonal
