@@ -3,9 +3,9 @@
 #SBATCH --partition=burst
 #SBATCH --job-name=scmrce_c
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=120G
 #SBATCH --time=48:00:00
-#SBATCH --array=0-9
+#SBATCH --array=0-9%2
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/scmrce_c_%A_%a.out
 set +e
 # ---------------------------------------------------------------------------
@@ -31,13 +31,20 @@ cd $WT
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "host: $(hostname)"
 export JAX_PLATFORMS=cpu
+# Arms of 9311347 died with `LLVM ERROR: Unable to allocate section memory!`
+# after 0.5-3.7 h — the XLA CPU JIT's allocator, not the model, which is why
+# raising --mem alone did not help. A persistent cache reuses compilations.
+export JAX_COMPILATION_CACHE_DIR=/burg/glab/users/pg2328/.jax_cache_scmrce
+export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=0
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
 export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 SCHEMES=(sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold)
 SCHEME=${SCHEMES[$SLURM_ARRAY_TASK_ID]}
 ARM=${ARM:-as_shipped}
-REF=/burg-archive/glab/users/pg2328/legoESM/results/rcemip1_n128_ocean
+REF=${REF:-/burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300}
 AB=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/arms_ab_${ARM}
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/arm_c_${ARM}/${SCHEME}
 
@@ -60,5 +67,10 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/train_scm_rce_params.py \
   --analysis-days 5 \
   --last-reference-files 5 \
   --radiation rrtmgp 2>&1
-echo "rc=$?"
+RC=$?
+echo "rc=$RC"
+# FAIL LOUD: a wrapper ending on `echo ALLDONE` returns ITS status,
+# which made 9284304/9311117/9311347 record COMPLETED 0:0 while aborting.
+if [ "$RC" -ne 0 ]; then echo "STAGE_STATUS=FAILED rc=$RC"; echo ALLDONE; exit "$RC"; fi
+echo "STAGE_STATUS=OK"
 echo ALLDONE
