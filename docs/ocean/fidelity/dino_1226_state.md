@@ -1,3 +1,24 @@
+# ORACLE PROVENANCE GAP CLOSED 2026-08-06 (Phase 4 item) — `cfgs/DINO` is now version-controlled
+
+The gap that produced the 2026-07-31 scare (the binary behind `RUN_20Y` had been rebuilt over,
+recoverable only as *numerically* equivalent via a bit-identity control) is fixed. `cfgs/DINO`
+is now its OWN git repo at
+`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO` (commit `491ac8d`, 313 files:
+`MY_SRC/` ×24 `.F90`, namelists, arch, EXPREF). Runtime outputs / `BLD/` / binaries / `*.nc` /
+`*.bin` are gitignored.
+
+**Why its own repo, not a commit into the NEMO clone:** that clone's remote is
+`forge.nemo-ocean.eu` (upstream NEMO), and `cfgs/DINO` was untracked there — committing into it
+would pollute a clone of upstream and collide with any future `git pull`.
+
+`.binary_provenance.txt` records the md5 + mtime of the `nemo.exe` that produced every current
+reference run (`RUN_20Y(_REBUILD)`, `RUN_40Y(_REBUILD)`, `RUN_TWIN_*`, `RUN_GDB`, `RUN_ENS_M*`),
+together with the bit-identity control that certifies it (year 20 re-run from the y19 restart:
+all 1520 restart variables × 16 tiles bit-identical; ACC 142.8098167694 both sides).
+
+**Standing rule going forward:** a reference trajectory that cannot be tied to the source that
+produced it is not a reference. Commit `cfgs/DINO` before any run whose output will be cited.
+
 # C1 CLOSED 2026-08-06 — the climate result is REPRODUCIBLE and BIT-DETERMINISTIC
 
 Fresh independently-invoked arm A reproduced the original run **bit-for-bit over 4 consecutive
