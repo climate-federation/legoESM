@@ -137,14 +137,25 @@ def test_duogrid_flag_is_actually_forwarded():
     measurement to an unpassed default, so prove the flag reaches the
     kernel by showing the two settings differ.
 
-    Builds its OWN plain context instead of using the module fixture:
-    the fixture is oracle_conventions=True, i.e. bounded_domain=True, and
-    that state only ARISES from duogrid (fv_arrays.F90:1512,
-    bounded_domain = regional .or. nested .or. duogrid). So
-    duogrid=False + bounded_domain=True is not a configuration the oracle
-    can produce, and d2a2c_vect rightly refuses it -- the un-ported
-    bounded arm is the regional/nested one, not the duo one. Varying the
-    flag is only meaningful on a context where both settings are legal.
+    Builds its OWN plain context instead of using the module fixture,
+    because the fixture is bounded and `d2a2c_vect` has no bounded port.
+
+    THE IMPLICATION IS ONE-WAY. fv_arrays.F90:1512 is
+    `bounded_domain = regional .or. nested .or. duogrid`, so duogrid
+    forces bounded -- but bounded does NOT force duogrid: regional and
+    nested runs are bounded with duogrid false. An earlier version of
+    this docstring claimed `duogrid=False, bounded_domain=True` was
+    unreachable, which reverses the implication; that pair is exactly the
+    regional/nested category, and it is the category `d2a2c_vect`'s
+    NotImplementedError legitimately marks as un-ported (upstream calls
+    it with a literal .false. and routes bounded non-duo through
+    divergence_corner_nest, sw_core.F90:150-160).
+
+    SCOPE, stated plainly: with a plain context the duogrid=True arm is
+    itself the upstream-impossible `duogrid=T, bounded=F` pair, so this
+    test proves the flag reaches the kernel and changes behaviour -- it
+    does NOT certify either arm's numbers. That is all its name should be
+    read as claiming.
     """
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     ctx = build_six_face_duo_context(N, NG)

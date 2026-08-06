@@ -433,6 +433,17 @@ def exchange_post_pgrad_sixface(ctx: dict, divgd6: list, uc6: list,
     ``ext_exclude=("divgd", ...)``, which is already the documented
     non-faithful measurement opt-in.
 
+    SCOPE -- this is the POST-``p_grad_c`` site only. It is NOT "the one
+    exchange entry point": ``csw_step_sixface(exchange=True)`` still calls
+    the interim helpers directly, unguarded by ``use_ext_bundle`` or
+    ``ext_exclude``. That is deliberately not routed here, because it is a
+    different point in the cadence -- and upstream has no duo exchange
+    there at all (after ``c_sw`` at ``dyn_core.F90:489`` it only STARTS a
+    non-duo group update at ``:501``; the duo exchanges are these two,
+    after ``p_grad_c`` at ``:629``). So that call site is a separate open
+    question about whether it should exist, not a second caller of this
+    helper. Do not describe the two as unified until that is settled.
+
     All three arrays are mutated in place.
     """
     if len(divgd6) != 6 or len(uc6) != 6 or len(vc6) != 6:

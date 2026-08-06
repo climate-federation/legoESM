@@ -40,16 +40,19 @@ def ctx_interim():
     the existing measurement opt-in; naming it is what keeps the interim
     path from being reachable by accident.
 
-    oracle_conventions=True MUST match the `ctx` fixture: the corner test
-    compares the two contexts cell-for-cell, so the exchange has to be the
-    ONLY variable. With mismatched conventions the c_sw corner value is
-    -1.18e-09 on the bounded grid and 1.25e+07 on the plain one, and the
-    comparison measures the grid rather than the exchange. (That is not
-    hypothetical -- the confound guard in that test caught exactly this.)
+    ONE VARIABLE vs the `ctx` fixture. The corner test compares the two
+    contexts cell-for-cell, so everything except the divgd exchange has to
+    match: same oracle_conventions, same use_ext_bundle, and `cvec` NOT
+    excluded -- only `divgd`. An earlier version differed in conventions
+    AND in whether the bundle existed at all, which made the comparison
+    measure the grid instead of the exchange (c_sw's corner value is
+    -1.18e-09 bounded vs 1.25e+07 plain; that test's own confound guard
+    caught it).
     """
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     return build_six_face_duo_context(N, NG, oracle_conventions=True,
-                                      ext_exclude=("divgd", "cvec"))
+                                      use_ext_bundle=True,
+                                      ext_exclude=("divgd",))
 
 
 def _state(km, seed=0):
