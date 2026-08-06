@@ -504,12 +504,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # choice 2 omits — a larger upper-ocean mixing length -> more mixed-layer
     # mixing -> cooler SST (the tropical-warm fix candidate).  The tripole
     # k_profiles path already threads dz_ref/jacobian/taum so choice 3 is live.
+    # 4 selects NEMO nn_mxl=2 — the value ORCA1's namelist_cfg ACTUALLY sets
+    # (`nn_mxl = 2`, verified in RUN_GATEWAY/namelist_cfg).  Choices 3 and 4
+    # share the lup/ldown sweeps and the same eddy-coefficient length
+    # l_k = min(lup,ldn); they differ ONLY in the dissipation length
+    # (tke.py:764-785): choice 3 uses l_eps = sqrt(lup*ldn), choice 4 uses
+    # l_eps = l_k = min(lup,ldn).  Since min <= sqrt(product), choice 4
+    # dissipates MORE (eps = c_eps*e^{3/2}/l_eps), so it retains stratification
+    # that choice 3 mixes away.  Until 2026-08-06 argparse accepted 4 while this
+    # builder raised on it, so `--tke-mxl-choice 4` crashed the run.
     if mxl_choice is not None:
-        if int(mxl_choice) not in (2, 3):
+        if int(mxl_choice) not in (2, 3, 4):
             raise ValueError(
                 f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; "
-                "expected 2 (Veros Bougeault-Lacarrere) or 3 (NEMO nn_mxl=3 "
-                "+ ln_mxl0 anchor).")
+                "expected 2 (Veros Bougeault-Lacarrere), 3 (NEMO nn_mxl=3 "
+                "+ ln_mxl0 anchor) or 4 (NEMO nn_mxl=2 + ln_mxl0 anchor, "
+                "the value ORCA1's namelist_cfg actually runs).")
         _cfg = _cfg._replace(tke_mxl_choice=int(mxl_choice))
     # Prognostic vs diagnostic TKE (``--tke-prognostic``).  DEFAULT keeps the
     # card value (False = the DINO-validated quasi-steady Mode-B diagnostic, 3

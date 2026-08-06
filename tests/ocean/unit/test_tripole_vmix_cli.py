@@ -218,12 +218,51 @@ def test_orca1_zdftke_mxl_choice_override():
     assert c2.tke_mxl_choice == 2
     # ONLY the mixing-length choice changes; every other leaf byte-identical.
     assert c2._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
-    for bad in (1, 4, 0):
+    # 4 = NEMO nn_mxl=2, the value ORCA1's namelist_cfg actually sets. Until
+    # 2026-08-06 this raised while argparse advertised it, so --tke-mxl-choice 4
+    # crashed the run; this loop USED to assert 4 was invalid, i.e. the test
+    # encoded the bug.
+    c4 = r.orca1_zdftke_config(mxl_choice=4)
+    assert c4.tke_mxl_choice == 4
+    assert c4._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
+    for bad in (1, 0, 5):
         with pytest.raises(ValueError, match="mxl_choice"):
             r.orca1_zdftke_config(mxl_choice=bad)
     # composes with surface_bc (both overrides apply, independent)
     both = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2)
     assert both.tke_mxl_choice == 2 and both.surface_bc == "veros_flux"
+
+
+def test_tke_mxl_choice_argparse_and_builder_agree():
+    """Every value ``--tke-mxl-choice`` ADVERTISES must be one the config
+    builder ACCEPTS.
+
+    The 2026-08-06 defect: argparse carried ``choices=[2, 3, 4]`` with help text
+    saying "4 = NEMO nn_mxl=2, which is what the ORCA1 namelist actually runs",
+    while ``orca1_zdftke_config`` raised ValueError on 4.  So the oracle-correct
+    setting passed CLI validation and then crashed inside the builder, leaving
+    ORCA1's own ``nn_mxl = 2`` unreachable from the OMIP driver.
+
+    Non-vacuity: this fails if EITHER layer changes without the other -- drop 4
+    from argparse and the advertised set shrinks below what the builder takes;
+    re-narrow the builder and the raises-check below trips.
+    """
+    r = _runner()
+    # NOT a hasattr()/skip guard: a renamed factory must FAIL this test, not
+    # silently skip it (the same silent-degradation trap as a hasattr fallback).
+    parser = r._build_arg_parser()
+    action = next(a for a in parser._actions
+                  if "--tke-mxl-choice" in getattr(a, "option_strings", ()))
+    advertised = set(action.choices)
+    assert 4 in advertised, "argparse must still advertise the ORCA1 value"
+    for v in sorted(advertised):
+        cfg = r.orca1_zdftke_config(mxl_choice=v)         # must not raise
+        assert cfg.tke_mxl_choice == v
+    # and the builder must still REJECT anything not advertised (dispatch
+    # hardening -- a silently-accepted unknown would run different physics).
+    for bad in sorted({0, 1, 5, 9} - advertised):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
 
 
 def test_builder_tke_mxl_choice_threads():
