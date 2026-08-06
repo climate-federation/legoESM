@@ -111,6 +111,7 @@ absolute numbers come from a different reference state than the original probe.
 """
 from __future__ import annotations
 
+import re as _re
 import sys
 
 # The bar.  Roundoff only -- these are NOT tolerances for physics differences.
@@ -126,6 +127,315 @@ BAR_RATIO_EPS = 1e-6
 # mismatches 10 -> 0, see zdf_mxl_nmln_compare.py).  A term is only AT BAR if
 # its per-element error is ALSO at roundoff.
 BAR_PER_ELEM_EPS = 1e-9
+
+# #1492 item 0.2 (SIGNED OFF 2026-08-05, the sign-off comment IS the spec;
+# follows FESOM2-JAX arXiv:2608.01546 SS2.4): tolerance-BY-ARITHMETIC-CLASS.
+# BAR_PER_ELEM_EPS above stays the single legacy per-element bar (nothing
+# reads it for a NEW purpose); CLASS_BAR below is what classify() actually
+# consults for the per-element axis, keyed off ROW_CLASS.  corr/ratio
+# criteria (BAR_CORR/BAR_RATIO_EPS) are UNCHANGED -- the spec only replaces
+# the per-element bar, and the class bars govern that axis only.
+#
+#   POINTWISE / NEIGHBOUR-STENCIL -- pointwise EOS/coefficient/stencil
+#     evaluations with no cross-cell flux assembly or global reduction.
+#     Rounding alone should reproduce these to fp64 roundoff.
+#   ACCUMULATING -- flux assembly onto control volumes, substep/implicit
+#     accumulation, global or depth sums.  JAX's reduction order does not
+#     match NEMO's Fortran loop order (reassociation), so roundoff alone is
+#     NOT achievable -- 1e-12 is the bar for "no residual beyond
+#     reassociation".
+#   CONDITIONED -- ratios with to-zero denominators or branch flips (near-
+#     zero conditioning tails).  These get NO class bar at all: they are
+#     gated entirely by the pre-existing CEILING_ROWS mechanism-proof
+#     machinery (unchanged by this task), never by a numeric per-element
+#     threshold, because a small perturbation near a singularity is
+#     inherently unbounded in relative terms.
+#
+# Per the sign-off: "class assignment is auditable and shrink-only in
+# permissiveness (a row may be tightened, never loosened, without a
+# recorded decision)"; "rows whose class assignment is not obvious from the
+# operator stay at the strict default (1e-15) until argued otherwise."
+BAR_POINTWISE = 1e-15
+BAR_ACCUMULATING = 1e-12
+
+# term -> (class, justification).  CLOSED dict: every one of the 53
+# MEASUREMENTS rows must appear (enforced by _validate_row_class, mirroring
+# _validate_waivers/_validate_ceiling's closure style).  `class` is one of
+# "POINTWISE", "ACCUMULATING", "CONDITIONED" -- machine-readable, consulted
+# by classify() for the per-element criterion (CONDITIONED rows are NOT
+# subject to a class-bar check at all; they clear via CEILING_ROWS only, or
+# else are DEBT/UNMEASURED like any other row -- see classify()).
+# Justification is a ONE-LINE statement of what the operator actually does
+# (read from each row's own MEASUREMENTS/PER_ELEMENT note -- not guessed),
+# citing the mechanism, not just restating the class name.
+ROW_CLASS: dict[str, tuple[str, str]] = {
+    "sbc (utau/qsr/qns/sfx)": ("POINTWISE",
+        "pointwise bulk-forcing evaluation per surface cell, no flux "
+        "assembly across cells (cancelling_rows_per_element.py note)."),
+    "eos_rab beta": ("POINTWISE",
+        "pointwise EOS coefficient evaluation (eosbn2.F90 rab_3d), one "
+        "cell in, one value out."),
+    "eos_rab alpha": ("POINTWISE",
+        "pointwise EOS coefficient evaluation (eosbn2.F90 rab_3d), same "
+        "family as beta above."),
+    "bn2 (rn2b)": ("POINTWISE",
+        "pointwise buoyancy-frequency finite difference between a cell "
+        "and its own vertical neighbour (eosbn2.F90 bn2_t), a 2-point "
+        "stencil, no cross-column assembly."),
+    "zdf_mxl (nmln)": ("POINTWISE",
+        "per-column level-selection against a local N^2 criterion "
+        "(zdfmxl.F90), no cross-cell flux assembly -- an integer argmax "
+        "over one column's own levels."),
+    "ldf_slp wslpi": ("POINTWISE",
+        "neighbour-stencil isoneutral slope (ldfslp.F90 zaj/zbj/zck), "
+        "local T/u/w-point differences, no global reduction."),
+    "ldf_slp wslpj": ("POINTWISE",
+        "same neighbour-stencil slope family as wslpi (j-component)."),
+    "ldf_slp uslp": ("CONDITIONED",
+        "the SAME slope stencil as wslpi/wslpj, but its own MEASUREMENTS "
+        "note documents a near-zero-divisor conditioning tail "
+        "(zau/(zbu-zeps)) as the row's mechanism, and Dhruv's 2026-08-04 "
+        "Decision 1 CEILING decision note (CEILING_ROWS) already governs "
+        "its terminal status -- not a class-bar per-element threshold."),
+    "ldf_slp vslp": ("CONDITIONED",
+        "same conditioning-tail mechanism as uslp (v-component), same "
+        "2026-08-04 Decision 1 CEILING decision note."),
+    "ldf_eiv kappa (aeiu)": ("CONDITIONED",
+        "pointwise GM coefficient FORMULA (ldftra.F90 zaeiw/aeiu, local "
+        "Rossby-radius taper per cell), but its own MEASUREMENTS note and "
+        "Dhruv 2026-08-04 Decision 1 CEILING entry document an inherited "
+        "near-zero-divisor conditioning tail (same family as uslp/vslp's "
+        "zbj->0 tail) as the mechanism behind its residual -- "
+        "CEILING_ROWS-gated, so classed CONDITIONED despite the "
+        "underlying formula being local."),
+    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": ("POINTWISE",
+        "pointwise Redi coefficient K_h*cos(lat) evaluation, no flux "
+        "assembly."),
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": ("POINTWISE",
+        "pointwise v-face Redi coefficient evaluation, same family as "
+        "ahtu."),
+    "eiv transport u": ("ACCUMULATING",
+        "bolus transport is a depth-integrated/face-summed quantity "
+        "(nemo_eiv_bolus_transport) built from slopes across multiple "
+        "levels -- an accumulation, not a single-cell evaluation."),
+    "eiv transport v": ("ACCUMULATING",
+        "same accumulating transport formula as the u-component."),
+    "traadv_fct fluxes": ("ACCUMULATING",
+        "FCT/Zalesak flux assembly across cell faces with limiter "
+        "clipping decisions that depend on neighbouring-cell fluxes -- "
+        "a control-volume flux assembly, the canonical ACCUMULATING case."),
+    "traadv_fct tendency (T)": ("ACCUMULATING",
+        "full horizontal+vertical FCT tendency, i.e. the flux-divergence "
+        "assembly onto the T control volume."),
+    "traadv_fct horizontal tend": ("ACCUMULATING",
+        "horizontal-only FCT flux-divergence assembly (vertical flux "
+        "zeroed), still a multi-face flux sum."),
+    "traadv_fct vertical upstream flux": ("ACCUMULATING",
+        "vertical FCT flux assembly with Zalesak limiting across "
+        "vertically-neighbouring faces."),
+    "dyn_hpg (du)": ("ACCUMULATING",
+        "hydrostatic pressure gradient is a vertical integral of density "
+        "from the surface (eos_geometric_depth_1d + cumulative sum), a "
+        "depth accumulation, not a pointwise evaluation."),
+    "dyn_vor EEN u": ("POINTWISE",
+        "EEN vorticity flux is a fixed 9-point (triad) stencil per "
+        "vertex/face, evaluated locally with no depth or global "
+        "reduction (pv_flux_al81_partial_cell)."),
+    "dyn_vor EEN v": ("POINTWISE",
+        "same fixed local triad stencil as EEN u (v-component)."),
+    "dyn_adv KEG": ("POINTWISE",
+        "kinetic-energy-gradient term is a local finite difference of "
+        "u^2+v^2 between neighbouring cells, no accumulation (measured "
+        "byte-exact)."),
+    "dyn_adv ZAD": ("ACCUMULATING",
+        "vertical advection of momentum sums flux contributions from "
+        "both bracketing T-neighbours at the interface, folded into a "
+        "z*-volume-form tendency across the column (dynzad.F90) -- an "
+        "accumulation, not a single-point stencil."),
+    "zdftke pdlr": ("ACCUMULATING",
+        "Prandtl number consumes the full vertical shear/TKE/N2 profile "
+        "produced by the TKE closure's implicit tridiagonal integration "
+        "across the column -- an accumulated upstream quantity, not a "
+        "local evaluation (row's own note traces it to upstream "
+        "sh2/rn2b/avm_in inputs)."),
+    "zdftke composite avt/avm": ("ACCUMULATING",
+        "closure-exit avt/avm are the accumulated output of the TKE "
+        "column's implicit vertical integration (zdftke.F90), same "
+        "accumulation class as pdlr."),
+    "STABILITY on NEMO true grid (e3t_0)": ("ACCUMULATING",
+        "a multi-year prognostic stability/climate run, the extreme end "
+        "of accumulation (thousands of accumulated timesteps) -- not a "
+        "per-element residual row at all, but classed ACCUMULATING per "
+        "the strict-default rule since it is not a single-step pointwise "
+        "comparison either."),
+    "dyn_hpg (dv)": ("ACCUMULATING",
+        "same vertical density-integral PGF formula as dyn_hpg (du)."),
+    "dyn_spg_ts pssh": ("ACCUMULATING",
+        "barotropic free-surface height accumulated over the substep "
+        "loop (dynspg_ts.F90 sub-cycling), a temporal accumulation, not "
+        "a single evaluation."),
+    "dyn_spg_ts puu_b": ("ACCUMULATING",
+        "barotropic velocity accumulated over the same substep loop as "
+        "pssh."),
+    "dyn_spg_ts un_adv": ("ACCUMULATING",
+        "substep-accumulated barotropic advective correction, same "
+        "sub-cycling loop as pssh/puu_b."),
+    "ATF filter u": ("POINTWISE",
+        "Robert-Asselin filter is a fixed 3-point (before/now/after) "
+        "recurrence per point, no cross-cell flux assembly."),
+    "ATF filter v": ("POINTWISE",
+        "same 3-point Asselin recurrence as ATF filter u."),
+    "ATF filter T/S/ssh": ("POINTWISE",
+        "same 3-point Asselin recurrence, tracer/ssh variant."),
+    "dyn_ldf (dynldf_lev_lap) u": ("POINTWISE",
+        "Laplacian lateral-friction operator is a fixed local "
+        "div-of-grad stencil over immediate neighbours "
+        "(dynldf_lev_rot_scheme.h90), no global reduction."),
+    "dyn_ldf (dynldf_lev_lap) v": ("POINTWISE",
+        "same local Laplacian stencil as the u-component."),
+    "ssh_nxt / div_hor": ("CONDITIONED",
+        "already governed by Dhruv's 2026-08-04 Decision 1 CEILING "
+        "decision note (CEILING_ROWS): the row's own note traces its "
+        "residual to a metric-convention BAND (isotropic vs exact grid "
+        "metric), a systematic bias rather than a clean pointwise or "
+        "accumulating residual, and its CEILING-PROOF explicitly "
+        "concerns whether the residual sits at/above NEMO's own "
+        "arithmetic-noise floor -- the CONDITIONED category is the "
+        "closest fit for a row whose bar-clearance question is already "
+        "answered by mechanism-proof, not a numeric per-element bar."),
+    "dom_qco_r3c r3t": ("POINTWISE",
+        "r3t = eta/H0 is a pointwise per-column ratio (domqco.F90), "
+        "structurally confirmed (this row's own note) to have no "
+        "horizontal-metric or cross-cell term at all."),
+    "dom_qco_r3c r3u/r3v": ("POINTWISE",
+        "r3u/r3v are face-AVERAGES of r3t across exactly 2 neighbouring "
+        "T-columns -- a neighbour-stencil, not a global accumulation."),
+    "mlf_baro_corr": ("POINTWISE",
+        "algebra-only barotropic correction applied pointwise per face "
+        "(row's own note: 'algebra only; needs _step_impl hook') -- "
+        "unmeasured, so the strict default stands pending an actual "
+        "per-element measurement."),
+    "lbc_lnk sign": ("POINTWISE",
+        "halo/periodic-seam COPY identity, an exact pointwise "
+        "index-alignment check (max|halo_col - periodic_image_col|), "
+        "no arithmetic accumulation at all."),
+    "zdf_mxl_turb": ("POINTWISE",
+        "WAIVED (missing term, out of scope) -- classed at the strict "
+        "default since it was never measured and WAIVED_ROWS already "
+        "governs its terminal status regardless of class."),
+    "zdf_drg_nonlin T-point rate": ("POINTWISE",
+        "pointwise nonlinear bottom-drag rate evaluation from local "
+        "bottom u/v, no cross-cell assembly."),
+    "dyn_drg_init RHS increment": ("POINTWISE",
+        "pointwise drag-rate x |U| increment per bottom face "
+        "(nemo_bottom_drag_rate_faces), local formula, no accumulation."),
+    "dyn_cor_2d (69x/step)": ("ACCUMULATING",
+        "barotropic Coriolis term accumulated over the SAME 69-substep "
+        "barotropic sub-cycling loop as dyn_spg_ts (row's own name "
+        "states the substep count) -- an explicit accumulation, not a "
+        "single evaluation."),
+    "traadv_fct (SALINITY)": ("ACCUMULATING",
+        "same FCT/Zalesak flux-assembly family as the other traadv_fct "
+        "rows, salinity tracer."),
+    "wzv (vertical velocity)": ("ACCUMULATING",
+        "diagnosed w is a cumulative vertical integral of the horizontal "
+        "mass-flux divergence from the surface down through the column "
+        "(diagnose_w_from_flux_div) -- a depth accumulation."),
+    "tra_zdf (tracer implicit vertical solve)": ("ACCUMULATING",
+        "implicit tridiagonal vertical solve over the full column "
+        "(trazdf.F90 zwt/zwi/zwd/zws), an accumulated multi-level solve, "
+        "not a pointwise evaluation -- unmeasured, so still gated at "
+        "this class's 1e-12 bar once a number exists."),
+    "dyn_zdf (momentum implicit vertical solve)": ("ACCUMULATING",
+        "same implicit tridiagonal column solve family as tra_zdf, "
+        "momentum variant (dynzdf.F90)."),
+    "traldf_iso_lap tendency": ("POINTWISE",
+        "unmeasured; strict default per the sign-off's burden-of-proof "
+        "rule -- no dumped bracket exists yet to argue otherwise, and "
+        "the operator IS a local isoneutral-Laplacian stencil (same "
+        "family as dyn_ldf) once ported, not an accumulation."),
+    "ldf_dyn coefficient": ("POINTWISE",
+        "pointwise viscosity-coefficient evaluation (ahmt/ahmf, "
+        "dynldf.F90), local metric formula per T-/F-point."),
+    "tra_qsr (shortwave penetration)": ("POINTWISE",
+        "Beer-Lambert two-band exponential evaluated pointwise per cell "
+        "at its own depth (traqsr.F90 qsr_2BD), no cross-cell flux "
+        "assembly (each level's absorption depends only on its own "
+        "depth, not on neighbouring cells)."),
+    "ssh_atf": ("CONDITIONED",
+        "already governed by its own Dhruv 2026-08-04 Decision 1 CEILING "
+        "decision note (CEILING_ROWS): the row's own note derives its "
+        "residual as a LINEAR 1:1 inheritance (factor gamma=0.1) of the "
+        "upstream 'ssh_nxt / div_hor' row's own CONDITIONED/CEILING "
+        "residual, not an independent pointwise or accumulating defect "
+        "-- classed the same as its inherited-from row."),
+    "tra_sbc": ("POINTWISE",
+        "pointwise surface-flux divisor and tau_T application per "
+        "surface cell (trasbc.F90), no cross-cell assembly -- measured "
+        "at literal roundoff (1.936e-16), consistent with this class."),
+}
+
+
+# Permissiveness ranking, STRICTEST first -- shrink-only per the sign-off ("a
+# row may be tightened freely; loosening requires a recorded decision
+# string"). CONDITIONED is the loosest rank: it carries NO numeric per-element
+# bar at all (class_bar_for returns +inf), so landing a row there is the
+# maximal possible loosening -- the one case this file can check mechanically
+# without a separate frozen-baseline file (there is no historical "previous
+# class" to diff against for a from-scratch classification; see the
+# 0.2 test suite for why a full baseline-ratchet file would be over-built for
+# a single closed 53-row dict). Any row classified CONDITIONED must therefore
+# cite a decision in its own justification -- mirrors WAIVED_ROWS/CEILING_ROWS
+# requiring a decision-provenance string for their own human judgment calls.
+_CLASS_RANK = {"POINTWISE": 0, "ACCUMULATING": 1, "CONDITIONED": 2}
+
+
+def _validate_row_class() -> None:
+    """Fail LOUDLY, at import time, if ROW_CLASS drifts from MEASUREMENTS
+    (every row must be classified, no more/no less -- mirrors
+    _validate_waivers/_validate_ceiling's closure enforcement), if any entry
+    uses an unknown class name, carries an empty justification, or lands in
+    the loosest (CONDITIONED) rank without a recorded decision citation in
+    its justification."""
+    for term, (cls, justification) in ROW_CLASS.items():
+        if cls not in _CLASS_RANK:
+            raise ValueError(f"ROW_CLASS[{term!r}] has unknown class {cls!r} "
+                              f"-- must be one of {sorted(_CLASS_RANK)}")
+        if not justification.strip():
+            raise ValueError(f"ROW_CLASS[{term!r}] has an empty "
+                              "justification string")
+        if cls == "CONDITIONED" and not _re.search(r"[Dd]ecision\s+\d",
+                                                   justification):
+            # Requires a NUMBERED decision citation ("Decision 1"), not just
+            # the word "decision" anywhere -- "no decision was made" must NOT
+            # pass (adversarial-review finding, 2026-08-06).
+            raise ValueError(
+                f"ROW_CLASS[{term!r}] is classified CONDITIONED (the "
+                "loosest rank -- no numeric class bar at all) but its "
+                "justification cites no numbered decision (e.g. 'Decision "
+                "1') -- a loosening requires a recorded decision string, "
+                "per the #1492 item 0.2 sign-off")
+        if cls == "CONDITIONED" and term not in CEILING_ROWS:
+            # Without this, a CONDITIONED row NOT in CEILING_ROWS would fall
+            # through classify() with class_bar=+inf and could clear AT BAR
+            # on cancelling corr/ratio statistics alone -- exactly the bn2
+            # regression the per-element bar exists to prevent (see
+            # BAR_PER_ELEM_EPS's comment), reopened for one class
+            # (adversarial-review finding, 2026-08-06). Every CONDITIONED
+            # row MUST be mechanism-proof-gated via CEILING_ROWS.
+            raise ValueError(
+                f"ROW_CLASS[{term!r}] is CONDITIONED (no numeric class bar) "
+                "but is not in CEILING_ROWS -- a CONDITIONED row must be "
+                "mechanism-proof-gated, else it clears on cancelling "
+                "statistics")
+    missing = set(MEASUREMENTS.keys()) - set(ROW_CLASS.keys())
+    if missing:
+        raise ValueError(f"ROW_CLASS is missing entries for: {sorted(missing)}")
+    extra = set(ROW_CLASS.keys()) - set(MEASUREMENTS.keys())
+    if extra:
+        raise ValueError(f"ROW_CLASS has entries for rows not in "
+                          f"MEASUREMENTS: {sorted(extra)}")
+
 
 # term -> measured per-element error (median or max |rel|, whichever the
 # measuring probe reports -- record the LARGER when both are known).  Absent =
@@ -3354,15 +3664,49 @@ def _validate_waivers() -> None:
 
 
 _validate_waivers()
+_validate_row_class()
+
+
+def class_bar_for(name: str | None) -> float:
+    """The #1492 item 0.2 per-element bar for `name`'s arithmetic class.
+
+    POINTWISE/NEIGHBOUR-STENCIL -> BAR_POINTWISE (1e-15, stricter than the
+    legacy BAR_PER_ELEM_EPS=1e-9).  ACCUMULATING -> BAR_ACCUMULATING (1e-12).
+    CONDITIONED has NO class bar (returns +inf) -- those rows are governed
+    entirely by the pre-existing CEILING_ROWS mechanism-proof machinery, per
+    the sign-off ("mechanism-proven CEILING, existing machinery, unchanged").
+    A name absent from ROW_CLASS (should not happen once _validate_row_class
+    has run) defaults to the strictest bar, per the sign-off's burden-of-proof
+    rule ("unclear class defaults to the strict 1e-15").
+    """
+    if name is None or name not in ROW_CLASS:
+        return BAR_POINTWISE
+    cls, _justification = ROW_CLASS[name]
+    if cls == "POINTWISE":
+        return BAR_POINTWISE
+    if cls == "ACCUMULATING":
+        return BAR_ACCUMULATING
+    return float("inf")  # CONDITIONED: no numeric class bar, CEILING-gated
 
 
 def classify(corr: float | None, ratio: float | None,
              per_elem: float | None = None, name: str | None = None) -> str:
-    """AT BAR requires corr, MEAN ratio AND per-element error at roundoff.
+    """AT BAR requires corr, MEAN ratio AND per-element error at the row's
+    OWN ARITHMETIC-CLASS bar (#1492 item 0.2: POINTWISE 1e-15, ACCUMULATING
+    1e-12, CONDITIONED ungated-by-class -- see class_bar_for).
 
     per_elem=None means the per-element error was never measured; the row is
     then judged on the aggregate statistics alone, which CANNOT see cancelling
     error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
+
+    NEAR-CLASS(1e-9, below class bar): a row whose per-element error clears
+    the LEGACY 1e-9 bar (so it would have been "AT BAR" under the pre-#1492
+    single-bar regime) but MISSES its own (stricter) class bar -- the sign-off
+    text's "rows currently AT BAR in this class must tighten or be
+    reclassified".  Reported as a distinct, visible intermediate state rather
+    than silently folded into plain DEBT, so the tally can show exactly how
+    many rows moved because of the tolerance-by-class tightening versus how
+    many were already DEBT under the old 1e-9 bar.
 
     Precedence (checked in this order): WAIVED_ROWS first (the most final
     human decision -- a row waived out of scope is never re-derived from
@@ -3383,7 +3727,10 @@ def classify(corr: float | None, ratio: float | None,
         return "AT BAR" if verdict else "DEBT"
     if corr is None or ratio is None:
         return "UNMEASURED"
-    if per_elem is not None and per_elem > BAR_PER_ELEM_EPS:
+    class_bar = class_bar_for(name)
+    if per_elem is not None and per_elem > class_bar:
+        if per_elem <= BAR_PER_ELEM_EPS:
+            return "NEAR-CLASS"
         return "DEBT"
     if corr >= BAR_CORR and abs(ratio - 1.0) <= BAR_RATIO_EPS:
         return "AT BAR"
@@ -3574,14 +3921,51 @@ def main() -> int:
     at_bar = sum(s == "AT BAR" for *_, s in rows)
     ceiling_n = sum(s == "CEILING" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
+    near_class = sum(s == "NEAR-CLASS" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
     waived_n = sum(s == "WAIVED" for *_, s in rows)
     mean_only = [t for t, c, r, _n, s in rows
                  if s == "AT BAR" and t not in PER_ELEMENT]
     print(f"\nAT BAR {at_bar} | CEILING {ceiling_n} | DEBT {debt} | "
+          f"NEAR-CLASS(1e-9, below class bar) {near_class} | "
           f"UNMEASURED {unmeasured} | WAIVED {waived_n} | total {len(rows)}")
-    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}, "
-          f"per-element <= {BAR_PER_ELEM_EPS}")
+    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}; "
+          f"per-element by class (#1492 item 0.2): POINTWISE <= "
+          f"{BAR_POINTWISE}, ACCUMULATING <= {BAR_ACCUMULATING}, "
+          f"CONDITIONED -> CEILING_ROWS mechanism-proof only "
+          f"(legacy single bar was {BAR_PER_ELEM_EPS})")
+
+    # *** PER-CLASS TALLY (#1492 item 0.2) *** -- the sign-off requires the
+    # gate to report the tally PER CLASS, not just the flat AT BAR/DEBT/...
+    # counts above.
+    print("\n*** PER-CLASS TALLY ***")
+    for cls in ("POINTWISE", "ACCUMULATING", "CONDITIONED"):
+        cls_rows = [(t, s) for t, _c, _r, _n, s in rows
+                    if ROW_CLASS.get(t, (None, None))[0] == cls]
+        cls_at_bar = sum(s == "AT BAR" for _t, s in cls_rows)
+        cls_ceiling = sum(s == "CEILING" for _t, s in cls_rows)
+        cls_debt = sum(s == "DEBT" for _t, s in cls_rows)
+        cls_near = sum(s == "NEAR-CLASS" for _t, s in cls_rows)
+        cls_unmeasured = sum(s == "UNMEASURED" for _t, s in cls_rows)
+        cls_waived = sum(s == "WAIVED" for _t, s in cls_rows)
+        bar_str = {"POINTWISE": f"<= {BAR_POINTWISE}",
+                   "ACCUMULATING": f"<= {BAR_ACCUMULATING}",
+                   "CONDITIONED": "CEILING_ROWS mechanism-proof only"}[cls]
+        print(f"  {cls:<13s} (bar {bar_str}): total {len(cls_rows)} | "
+              f"AT BAR {cls_at_bar} | CEILING {cls_ceiling} | "
+              f"DEBT {cls_debt} | NEAR-CLASS {cls_near} | "
+              f"UNMEASURED {cls_unmeasured} | WAIVED {cls_waived}")
+
+    near_class_rows = [t for t, _c, _r, _n, s in rows if s == "NEAR-CLASS"]
+    if near_class_rows:
+        print(f"\nNEAR-CLASS(1e-9, below class bar) -- {len(near_class_rows)} "
+              "row(s) clear the LEGACY 1e-9 per-element bar (would have been "
+              "AT BAR before #1492 item 0.2) but MISS their own arithmetic "
+              "class's stricter bar. Per the sign-off: 'rows currently AT "
+              "BAR in this class must tighten or be reclassified' -- these "
+              "are NOT silently demoted to plain DEBT, they are a distinct, "
+              "visible intermediate state:\n  " + "\n  ".join(near_class_rows))
+
     if mean_only:
         print(f"\nAT BAR on CANCELLING statistics only ({len(mean_only)} of "
               f"{at_bar}) -- per-element error never measured, so these are "
@@ -3592,8 +3976,10 @@ def main() -> int:
     # this condition is automatically satisfied once classify() is correct --
     # spelled out explicitly here per Decision 1: CEILING is a LEGAL terminal
     # state, not a bar-clearance, so it does not raise `at_bar` but also must
-    # not block exit 0.
-    if debt or unmeasured:
+    # not block exit 0. NEAR-CLASS is NOT a legal terminal state (the sign-off
+    # requires those rows to tighten or reclassify), so it gates exit 0 the
+    # same as DEBT/UNMEASURED.
+    if debt or unmeasured or near_class:
         print("\nFAIL: the sweep is NOT complete. Do not describe these as "
               "'matched', 'faithful', 'closed' or 'good enough'.")
         return 1

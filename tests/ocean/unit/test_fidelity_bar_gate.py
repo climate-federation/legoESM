@@ -287,3 +287,228 @@ def test_traadv_fct_salinity_row_measured_at_updated():
         assert mod.MEASURED_AT[term] == "c1ba30e39", (
             f"{term!r}'s tuple did not change -- MEASURED_AT should stay "
             "c1ba30e39 unless the corr/ratio numbers themselves moved")
+
+
+# --- #1492 item 0.2: tolerance-by-arithmetic-class ---------------------------
+
+
+def test_row_class_is_a_closed_dict_covering_every_measurement_row():
+    """ROW_CLASS must classify EXACTLY the 53 MEASUREMENTS rows -- no more,
+    no less (mirrors the WAIVED_ROWS/CEILING_ROWS closure style). Removing a
+    class entry (or adding a phantom one) must be caught by
+    _validate_row_class(), not silently tolerated."""
+    mod = _load_module()
+    assert set(mod.ROW_CLASS.keys()) == set(mod.MEASUREMENTS.keys())
+    for term, (cls, justification) in mod.ROW_CLASS.items():
+        assert cls in ("POINTWISE", "ACCUMULATING", "CONDITIONED"), (
+            f"{term!r} has an unknown class {cls!r}")
+        assert justification.strip(), f"{term!r} has an empty justification"
+
+
+def test_removing_a_class_entry_fails_validation():
+    """Synthetic-violation proof: a row missing from ROW_CLASS must be
+    rejected by _validate_row_class -- the closed-dict property is not
+    vacuous."""
+    mod = _load_module()
+    saved = dict(mod.ROW_CLASS)
+    try:
+        victim = next(iter(saved))
+        mod.ROW_CLASS.clear()
+        mod.ROW_CLASS.update({k: v for k, v in saved.items() if k != victim})
+        try:
+            mod._validate_row_class()
+            assert False, "removing a ROW_CLASS entry must raise"
+        except ValueError as e:
+            assert victim in str(e)
+    finally:
+        mod.ROW_CLASS.clear()
+        mod.ROW_CLASS.update(saved)
+
+
+def test_class_bar_for_is_a_pure_function_of_row_class_and_named_constants():
+    """class_bar_for must dispatch on ROW_CLASS's class label to exactly the
+    two named constants (BAR_POINTWISE, BAR_ACCUMULATING) -- a caller cannot
+    quietly relax a class's bar via some other threshold, only by editing the
+    module-level constant (a visible diff, not a silent runtime path)."""
+    mod = _load_module()
+    assert mod.class_bar_for("sbc (utau/qsr/qns/sfx)") == mod.BAR_POINTWISE
+    assert mod.class_bar_for("traadv_fct fluxes") == mod.BAR_ACCUMULATING
+    assert mod.class_bar_for("ssh_nxt / div_hor") == float("inf")  # CONDITIONED
+    # Unclear/absent class defaults to the STRICT bar (burden of proof rule).
+    assert mod.class_bar_for("not-a-real-row-at-all") == mod.BAR_POINTWISE
+    assert mod.class_bar_for(None) == mod.BAR_POINTWISE
+
+
+def test_loosening_to_conditioned_without_a_decision_citation_fails_validation():
+    """CONDITIONED is the loosest rank (class_bar_for returns +inf -- no
+    numeric bar at all), so landing a row there is the maximal possible
+    loosening. Mechanical enforcement of the sign-off's 'loosening requires a
+    recorded decision string': _validate_row_class must reject a CONDITIONED
+    entry whose justification does not cite a NUMBERED decision. Uses an
+    existing CEILING row so only the decision-citation axis varies.
+    Synthetic-violation proof, mirrors the WAIVED/CEILING missing-string
+    tests above."""
+    mod = _load_module()
+    saved = dict(mod.ROW_CLASS)
+    row = "ldf_slp uslp"  # already CONDITIONED + in CEILING_ROWS
+    try:
+        # No decision mention at all -> rejected.
+        mod.ROW_CLASS[row] = (
+            "CONDITIONED", "just a vague claim of conditioning, no citation")
+        try:
+            mod._validate_row_class()
+            assert False, ("a CONDITIONED entry without a decision citation "
+                            "must raise -- the loosening check is VACUOUS")
+        except ValueError as e:
+            assert "decision" in str(e).lower()
+        # GAMED string containing the bare word "decision" but no numbered
+        # citation -> still rejected (adversarial-review finding: the plain
+        # substring check passed 'no decision was made here').
+        mod.ROW_CLASS[row] = ("CONDITIONED", "no decision was made here")
+        try:
+            mod._validate_row_class()
+            assert False, ("a bare 'decision' substring must NOT satisfy "
+                            "the citation check -- it is gameable")
+        except ValueError:
+            pass
+        # A proper numbered decision citation -> accepted.
+        mod.ROW_CLASS[row] = (
+            "CONDITIONED", "Dhruv 2026-08-04 Decision 1: cites a decision.")
+        mod._validate_row_class()  # must not raise
+    finally:
+        mod.ROW_CLASS.clear()
+        mod.ROW_CLASS.update(saved)
+
+
+def test_conditioned_row_not_in_ceiling_rows_fails_validation():
+    """Adversarial-review finding (2026-08-06): a CONDITIONED row NOT in
+    CEILING_ROWS would fall through classify() with class_bar=+inf and could
+    clear AT BAR on cancelling corr/ratio statistics alone -- the exact bn2
+    regression the per-element bar exists to prevent, reopened for one
+    class. _validate_row_class must therefore enforce CONDITIONED subset-of
+    CEILING_ROWS mechanically, not by current coincidence."""
+    mod = _load_module()
+    saved = dict(mod.ROW_CLASS)
+    try:
+        # A non-CEILING row loosened to CONDITIONED, WITH a valid decision
+        # citation (so only the CEILING-membership axis is violated).
+        mod.ROW_CLASS["sbc (utau/qsr/qns/sfx)"] = (
+            "CONDITIONED", "Dhruv 2026-08-04 Decision 1: synthetic violation.")
+        try:
+            mod._validate_row_class()
+            assert False, ("a CONDITIONED row outside CEILING_ROWS must "
+                            "raise -- the mechanism-proof gate is VACUOUS")
+        except ValueError as e:
+            assert "CEILING_ROWS" in str(e)
+    finally:
+        mod.ROW_CLASS.clear()
+        mod.ROW_CLASS.update(saved)
+
+
+def test_synthetic_pointwise_row_at_1e12_is_not_at_bar_for_its_class():
+    """Non-vacuity proof for the STRICTER POINTWISE bar: a per-element error
+    of 1e-12 would have cleared the legacy BAR_PER_ELEM_EPS=1e-9 (so it is
+    NOT plain DEBT under the old regime) but must NOT be "AT BAR" under the
+    new POINTWISE bar of 1e-15 -- it must land on NEAR-CLASS instead, per the
+    sign-off's 'rows currently AT BAR in this class must tighten or be
+    reclassified'."""
+    mod = _load_module()
+    assert 1e-12 <= mod.BAR_PER_ELEM_EPS
+    assert 1e-12 > mod.BAR_POINTWISE
+    result = mod.classify(1.0, 1.0, per_elem=1e-12,
+                           name="sbc (utau/qsr/qns/sfx)")  # a real POINTWISE row
+    assert result == "NEAR-CLASS", (
+        f"a 1e-12 per-element error on a POINTWISE row must be NEAR-CLASS, "
+        f"not {result!r} -- the class bar would be VACUOUS otherwise")
+    # And confirm it would have been AT BAR under the legacy single bar.
+    assert 1e-12 <= mod.BAR_PER_ELEM_EPS
+
+
+def test_synthetic_accumulating_row_at_1e10_is_debt_not_near_class():
+    """An ACCUMULATING row with per-element error 1e-10 misses BOTH the
+    legacy 1e-9 bar's neighbourhood check (it clears 1e-9 itself, so this
+    checks a value BETWEEN the class bar and something that also fails the
+    class bar) -- more precisely: a value that clears BAR_ACCUMULATING=1e-12
+    must be AT BAR, and a value between BAR_ACCUMULATING and
+    BAR_PER_ELEM_EPS=1e-9 must be NEAR-CLASS (same as the POINTWISE case
+    above), proving the per-class dispatch in class_bar_for is actually
+    consulted (not just BAR_POINTWISE hardcoded everywhere)."""
+    mod = _load_module()
+    row = "traadv_fct fluxes"  # a real ACCUMULATING row
+    assert mod.ROW_CLASS[row][0] == "ACCUMULATING"
+    # Clears the ACCUMULATING bar -> AT BAR.
+    assert mod.classify(1.0, 1.0, per_elem=1e-13, name=row) == "AT BAR"
+    # Between ACCUMULATING (1e-12) and the legacy bar (1e-9) -> NEAR-CLASS.
+    assert mod.classify(1.0, 1.0, per_elem=1e-10, name=row) == "NEAR-CLASS"
+    # Above the legacy bar entirely -> plain DEBT, same as before #1492.
+    assert mod.classify(1.0, 1.0, per_elem=1e-3, name=row) == "DEBT"
+
+
+def test_conditioned_rows_are_not_gated_by_a_numeric_class_bar():
+    """CONDITIONED rows get NO class-bar check (class_bar_for returns +inf
+    for them) -- they clear via the pre-existing CEILING_ROWS mechanism-proof
+    machinery only, per the sign-off ('mechanism-proven CEILING, existing
+    machinery, unchanged'). All 4 CONDITIONED rows in this gate are in fact
+    already in CEILING_ROWS; this test proves the CONDITIONED class itself
+    imposes no separate numeric threshold (a huge per_elem does not flip a
+    non-CEILING CONDITIONED row to DEBT via the class bar)."""
+    mod = _load_module()
+    conditioned = {t for t, (cls, _j) in mod.ROW_CLASS.items()
+                   if cls == "CONDITIONED"}
+    assert conditioned, "expected at least one CONDITIONED row"
+    for term in conditioned:
+        assert term in mod.CEILING_ROWS, (
+            f"{term!r} is CONDITIONED but not in CEILING_ROWS -- every "
+            "CONDITIONED row in this gate is expected to already be "
+            "mechanism-proven CEILING")
+        # classify() must still return CEILING unconditionally (precedence
+        # check happens before the class-bar branch is ever reached).
+        assert mod.classify(0.0, 100.0, per_elem=1e6, name=term) == "CEILING"
+
+
+def test_wslpi_wslpj_are_the_two_rows_that_tightened_out_of_at_bar():
+    """The concrete #1492 item 0.2 regression this task exists for: 'rows
+    currently AT BAR in this class must tighten or be reclassified'.
+    ldf_slp wslpi/wslpj were AT BAR under the legacy 1e-9 bar (per-element
+    ~1.1e-11) but MISS the new POINTWISE bar of 1e-15 -- they must now show
+    as NEAR-CLASS, not silently stay AT BAR and not silently vanish into
+    plain DEBT."""
+    mod = _load_module()
+    for term in ("ldf_slp wslpi", "ldf_slp wslpj"):
+        cls, _j = mod.ROW_CLASS[term]
+        assert cls == "POINTWISE"
+        corr, ratio, _note = mod.MEASUREMENTS[term]
+        per_elem = mod.PER_ELEMENT[term]
+        assert mod.BAR_POINTWISE < per_elem <= mod.BAR_PER_ELEM_EPS, (
+            f"{term!r}'s per-element value moved outside the expected "
+            "NEAR-CLASS band -- update this test if it was re-measured")
+        assert mod.classify(corr, ratio, per_elem, name=term) == "NEAR-CLASS"
+
+
+def test_main_reports_per_class_tally(capsys):
+    """main() must print a per-class breakdown (the sign-off requires 'the
+    gate reports the tally per class'), and the NEAR-CLASS count/list."""
+    mod = _load_module()
+    rc = mod.main()
+    captured = capsys.readouterr()
+    assert "PER-CLASS TALLY" in captured.out
+    assert "POINTWISE" in captured.out and "ACCUMULATING" in captured.out
+    assert "CONDITIONED" in captured.out
+    assert "NEAR-CLASS(1e-9, below class bar)" in captured.out
+    # NEAR-CLASS is not a legal terminal state -- it must gate exit 0 exactly
+    # like DEBT/UNMEASURED (both still present independent of this feature).
+    assert rc == 1
+
+
+def test_near_class_gates_exit_code():
+    """A NEAR-CLASS verdict must count toward gate failure (rc=1), not be
+    silently absorbed into a passing count -- the sign-off treats it as
+    'must tighten or be reclassified', not a terminal state."""
+    mod = _load_module()
+    assert mod.classify(1.0, 1.0, per_elem=1e-12,
+                         name="sbc (utau/qsr/qns/sfx)") == "NEAR-CLASS"
+    # Cross-check against main()'s own gating condition directly.
+    rows = [(t, c, r, n, mod.classify(c, r, mod.PER_ELEMENT.get(t), name=t))
+            for t, (c, r, n) in mod.MEASUREMENTS.items()]
+    near_class = sum(s == "NEAR-CLASS" for *_, s in rows)
+    assert near_class > 0, "test assumption stale: no NEAR-CLASS rows remain"
