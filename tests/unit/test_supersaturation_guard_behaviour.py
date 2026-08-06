@@ -437,10 +437,19 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
 # Values below were produced by scripts/tmp/_probe_ssguard_byteid.py at
 # origin/main 5b74b65128b04d7ad1c2de8df8dcefd99e531b84 (SLURM job 9331695,
 # JAX_ENABLE_X64=1, CPU) — i.e. BEFORE the guard existed. Pinning them here
-# turns the byte-identity claim from a one-off manual diff into a CI gate: if
-# adding the (default-off) guard ever perturbs the Sundqvist answer by one ULP,
-# this goes red. The probe's cells span sub-saturated, marginal and strongly
-# super-saturated at 300 K.
+# turns the byte-identity claim from a one-off manual diff into a CI gate. The
+# cells span sub-saturated, marginal and strongly super-saturated at 300 K.
+#
+# TOLERANCE, deliberately not exact equality. The TRUE byte-identity proof is
+# the same-platform base-vs-branch array diff (0 differing lines) plus the
+# monkeypatch bomb showing the guard code is never executed; this constant is
+# a CI TRIPWIRE, and an exact `assert_array_equal` on a float64 exp/division
+# chain would be brittle to a backend or jax-version ULP change and would get
+# "fixed" by re-pinning the numbers — quietly destroying the tripwire. rtol
+# 1e-13 is ~2 orders above fp64 ULP noise and ~12 orders below the smallest
+# effect the guard could have (enabling it changes these tendencies by O(1)),
+# so it cannot mask a real perturbation.
+_PREGUARD_RTOL = 1.0e-13
 _SUNDQVIST_PREGUARD_DT_DT = (
     0.07977905897810188, 0.00425441486969195, -2.686381198312863e-06,
     0.0012034384086302015, 0.0002189595022671857,
@@ -475,10 +484,25 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
 
     out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
                                  SundqvistConfig())
-    np.testing.assert_array_equal(
-        np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT))
-    np.testing.assert_array_equal(
-        np.asarray(out.dq_v_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DQ_V_DT))
+    np.testing.assert_allclose(
+        np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT),
+        rtol=_PREGUARD_RTOL, atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(out.dq_v_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DQ_V_DT),
+        rtol=_PREGUARD_RTOL, atol=0.0)
+
+    # NON-VACUITY: the tripwire must actually be tight enough to SEE the guard.
+    # Turning it on must violate the same tolerance by a wide margin — without
+    # this, a loosened rtol could silently render the whole test decorative.
+    on = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
+                                SundqvistConfig(hard_saturation_adjustment=True))
+    rel = np.max(np.abs(
+        (np.asarray(on.dT_dt).ravel() - np.array(_SUNDQVIST_PREGUARD_DT_DT))
+        / np.array(_SUNDQVIST_PREGUARD_DT_DT)))
+    assert rel > 1.0e6 * _PREGUARD_RTOL, (
+        f"enabling the guard moved dT_dt by only rel={rel}; the pinned "
+        "baseline is too loose to detect a real change."
+    )
 
 
 def test_guard_is_differentiable_end_to_end():
