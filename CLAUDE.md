@@ -200,6 +200,64 @@ explicitly that you did not. "I was careful" is not compliance.
   claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
   buys a code change and a relaunch.
 
+## Implementation Discipline — the CODE and its PROSE are both claims
+User, 2026-08-06: *"Be much more conscientious and careful when implementing.
+Be systematic, check, do not be sloppy or too fast."* Every rule below is from
+a defect shipped in the ONE session that prompted it, and every one was caught
+by the adversarial reviewer rather than by me — i.e. each was avoidable by
+reading two more lines before typing. Slow down at these exact points.
+
+- **A DOCSTRING/COMMENT THAT DESCRIBES BEHAVIOUR IS A TESTABLE CLAIM. Trace the
+  data flow before writing it.** FAILURE: wrote "dropping this call now makes
+  the test fail" about the `divg_d` exchange — false, because unit 4 hands only
+  `uc`/`vc` to `d_sw1` and `divg_d` is not consumed until `d_sw5`. The sentence
+  was written from intent, not from the call chain. Before asserting "X is
+  covered by this test", name the consumer of X and confirm it executes inside
+  the test's span.
+- **NEVER WRITE "this removes the question entirely" ABOUT AN API YOU HAVE NOT
+  READ.** FAILURE: claimed `np.ascontiguousarray` gives an unconditional copy;
+  it is copy-IF-NEEDED, so it aliased at km=1 and copied at km>1 — one line of
+  code with two aliasing behaviours, asserted as safe. Extends *Never infer an
+  API* to the STRENGTH of a guarantee, not just the signature.
+- **SCOPE WORDS — "both", "all", "every", "cannot", "unified", "always" — GET
+  A GREP BEFORE THEY GET TYPED.** FAILURE: "both lanes now route through one
+  helper" while `csw_step_sixface` still called the interim helpers directly.
+  It went into a COMMIT MESSAGE, which cannot be edited afterwards. Weaken to
+  what you verified ("the post-p_grad_c site") or run the grep.
+- **RE-READ A BOOLEAN IMPLICATION IN THE SOURCE BEFORE RESTATING IT; ONE-WAY
+  IS NOT TWO-WAY.** FAILURE: `bounded_domain = regional .or. nested .or.
+  duogrid` means duogrid⇒bounded, and I wrote that the converse pair was
+  "unreachable" — inverting it and mislabelling a legitimate regional/nested
+  category as impossible. Quote the line next to the restatement so the
+  direction is checkable.
+- **A CONTROL THAT PERTURBS A ZERO IS NOT A CONTROL. Print the baseline value
+  the perturbation multiplies BEFORE trusting the result.** FAILURE: the
+  divg-corner probe scaled `divg_d(1,1)` by 3 where that cell is exactly 0.0,
+  so the control was a no-op and proved nothing; the claim actually rested on a
+  predicted==actual identity. Say which check carried the claim.
+- **AN A/B MUST DIFFER IN ONE FIELD OF THE CONSTRUCTOR, AND YOU MUST DIFF THE
+  CONSTRUCTOR ARGS TO KNOW.** FAILURE: compared two contexts that differed in
+  grid conventions AND in whether the ext bundle existed, while asserting it
+  isolated the exchange. Applies to fixtures, not just runs — the controlled-
+  comparison rule covers `pytest` fixtures too.
+- **A NEW TEST/FIXTURE IS PART OF THE DIFF: RUN THE SUITE THAT CONSUMES IT,
+  NOT ONLY THE TEST YOU WROTE.** A fixture edit is a change to every test in
+  the module.
+- **SHELL COMMANDS THAT CAN PROMPT WILL SILENTLY NOT RUN.** Use `git checkout
+  --`/`git restore`, `cp -f`, `rm -f`; never bare `cp`/`mv` for a revert.
+  FAILURE: a bare `cp` hit an interactive overwrite prompt and the "revert"
+  never applied — one `git status` short of reporting a clean tree that was
+  not clean. VERIFY EVERY REVERT with `git status --porcelain`.
+- **A LOG-SCRAPING GUARD MUST EXCLUDE THE PROMPT/COMMAND IT ECHOES.** FAILURE:
+  a review wrapper grepped its whole log for a failure token that its own
+  prompt contained, so it "retried" every time and never printed its exit
+  status. Same class as a test that cannot fail.
+- **BUDGET THE REVIEW LOOP INTO THE WORK.** The adversarial reviewer found real
+  defects in EACH of three rounds here; rounds 2 and 3 were not ceremony. Do
+  not present a first-round implementation as finished, and do not treat
+  "tests pass" as the terminal condition — the round-1 diff passed 401 tests
+  while still containing a silent fallback and a false docstring.
+
 ## Compute Discipline — speculation costs GPU-hours, not just credibility
 User, 2026-07-30 (THIRD callout in five days): *"You keep making very
 speculative assumptions... be much more precise so we do not waste time with
@@ -559,6 +617,11 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 Precise+concrete. Explicit assumptions. Numerics change → explain effect on stability, accuracy, conservation, differentiability. No guesses as facts. **No Read images** unless user asks; report path.
+
+**TERSE. Caveman register (user, 2026-08-06: "You speak too much... no need to waste tokens").** Fragments OK. Drop articles/filler/hedging/pleasantries. No narrating what you are about to do, no restating the request, no re-explaining a finding already stated. Prose is for FINDINGS, not for process.
+- **ALWAYS end with a findings summary** — table or bullets: what was measured, the number, CONFIRMED vs PLAUSIBLE, what is still open. That summary is the deliverable; the rest is scaffolding.
+- Long verbatim tool output → quote only the DECISIVE line (`N passed`, the failing assert, the peak value).
+- Commits/PRs/code comments/security warnings stay full English.
 
 # iterate-with-codex agent
 1. Implement change
