@@ -48,12 +48,40 @@ from legoesm import constants
 # Wing 2018 Tab A1 canonical constants.
 WING_GAMMA = 0.0067         # K/m, lapse rate below tropopause
 WING_Z_T = 15_000.0         # m, tropopause height
-WING_T_V0 = 295.0           # K, surface VIRTUAL temperature — RCEMIP (Wing 2018
-                            # Tab 1) PRESCRIBES this FIXED for ALL SST cases
-                            # (295/300/305 K); only q_v0 and the surface BC vary
-                            # with SST. Deriving it from the SST instead made the
-                            # whole profile (incl. the tropopause cold point
-                            # T_v0-Γ·z_t) ~8 K too warm at SST=300.
+# K, surface VIRTUAL temperature.  MUST be consistent with the case's SST and
+# q_sfc: T_v0 = T_sfc * (1 + 0.608 * q_sfc).
+#
+# The previous value was a FIXED 295.0 for every SST case, on the reading that
+# RCEMIP prescribes one T_v0 for all of 295/300/305 K while only q_v0 varies.
+# That is internally inconsistent and made the RCE300 initial column
+# SUPERSATURATED:
+#
+#     z (km)    T (K)     RH
+#      0.0      291.7    1.396      <- 140 % relative humidity at the surface
+#      1.1      285.0    1.389
+#      2.3      278.1    1.361
+#      4.6      263.8    1.271
+#      6.8      249.0    1.163
+#      9.1      233.9    1.068
+#
+# RCEMIP's q_0 DOES vary by case (12.00 / 18.65 / 24.00 g/kg at 295 / 300 /
+# 305 K).  Pairing the RCE300 moisture (q_sfc = 0.01865) with a 295 K virtual
+# temperature puts ~40 % more vapour in the column than it can hold, so the
+# sounding condenses violently from the first step.  That is almost certainly
+# the "qc buoyancy cascade" the CRM notes attribute to Kessler being bulk: the
+# trigger is the initial state, not the microphysics.
+#
+# Deriving T_v0 from the case gives T_v0 = 300 * (1 + 0.608 * 0.01865)
+# = 303.4 K and a surface RH of ~0.83 — a physical tropical sounding.
+#
+# NOT independently verified against the Wing 2018 text: the GMD PDF exceeds
+# the fetch limit and the equations did not surface in search.  The argument
+# here is internal consistency plus the RH test, and `test_rcemip_ic_not_
+# supersaturated` is the real guard — it fails for ANY (T_v0, q_sfc) pairing
+# that produces RH > 1, whichever constant a future editor prefers.
+WING_T_V0_FIXED_LEGACY = 295.0   # retained for regression comparison only
+
+
 WING_Z_Q1 = 4_000.0         # m, q_v lower-troposphere e-folding scale
 WING_Z_Q2 = 7_500.0         # m, q_v upper-troposphere Gaussian scale
 WING_Q_T = 1.0e-11          # kg/kg, stratospheric humidity floor
@@ -67,6 +95,22 @@ WING_Q_SFC_DEFAULT = 0.01865  # kg/kg (RCE300 case)
 # raw 0.608 is the standard ε-derived value (1/ε - 1 = R_v/R_d - 1 ≈
 # 0.608 for ε = R_d/R_v ≈ 0.622) — anchor it to the central constant.
 _VIRTUAL_T_FACTOR = 1.0 / constants.epsilon - 1.0
+
+
+def wing2018_T_v0(T_sfc: float = WING_T_SFC_DEFAULT,
+                  q_sfc: float = WING_Q_SFC_DEFAULT) -> float:
+    """Surface VIRTUAL temperature for the case, ``T_sfc*(1 + 0.608*q_sfc)``.
+
+    Derived rather than hardcoded so T_v0 and q_sfc cannot drift apart. A
+    mismatched pair is exactly what made the RCE300 initial column 140 %
+    saturated; see the note on ``WING_T_V0_FIXED_LEGACY`` above.
+    """
+    return float(T_sfc) * (1.0 + _VIRTUAL_T_FACTOR * float(q_sfc))
+
+
+# Module default for the RCE300 case, DERIVED so it cannot drift from q_sfc.
+WING_T_V0 = wing2018_T_v0()
+
 
 
 def wing2018_virtual_temperature_profile(
