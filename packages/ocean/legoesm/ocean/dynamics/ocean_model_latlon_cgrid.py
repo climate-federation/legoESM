@@ -1832,6 +1832,24 @@ class LatLonCGridOceanModel:
                     "with prescribed_flow: eta is reset after the barotropic "
                     "solve, discarding the freshwater volume that is this "
                     "closure's ONLY freshwater pathway.")
+        # #1484 codex round-2 HIGH: the C-grid reaches the SAME shared
+        # conservation fixer as MPAS, whose volume target is V_new = V_old --
+        # it assumes no volume source. Under real_freshwater it would delete
+        # the freshwater AFTER fix_eta_drift correctly added it, leaving the
+        # whole sum(A*F)/rho_0 as residual. Guarded on MPAS in round 1; the
+        # C-grid was missed, and it is reachable on either barotropic solver
+        # with any explicit filter. fix_volume=False is safe for VOLUME (the
+        # fixer mutates eta only inside that branch), so that stays allowed.
+        if (config.freshwater_closure == "real_freshwater"
+                and getattr(config, "use_conservation_fixer", False)
+                and getattr(config, "fix_volume", True)):
+            raise ValueError(
+                'freshwater_closure="real_freshwater" is incompatible with '
+                "use_conservation_fixer=True + fix_volume=True: the fixer "
+                "drives V_new to V_old, which DELETES the freshwater volume "
+                "source (residual = sum(A*F)/rho_0) after fix_eta_drift has "
+                "added it. Set fix_volume=False, or give the fixer a "
+                "freshwater-aware volume target (#1484).")
         # #1484 codex CRITICAL/HIGH: real_freshwater moves the whole
         # freshwater signal into the VOLUME channel, so any configuration that
         # does not deliver the full eta source to dV/dt silently loses mass.

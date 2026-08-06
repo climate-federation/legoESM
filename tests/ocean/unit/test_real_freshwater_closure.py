@@ -315,17 +315,33 @@ def test_mpas_tendency_entrypoint_refuses_an_unknown_closure():
         fn(**kwargs)
 
 
-def test_mpas_model_refuses_real_freshwater_with_the_volume_fixer():
-    """The fixer drives V_new -> V_old, which DELETES the freshwater volume
-    source under real mode (residual = sum(A*F)/rho_0)."""
+def test_volume_fixer_combination_is_refused_on_the_cgrid():
+    """codex round-2 HIGH: the C-grid reaches the same volume-resetting fixer.
+
+    Behavioural, replacing a source-string check that would have passed with a
+    broken condition as long as both identifiers still appeared in __init__.
+    """
     import pytest
 
-    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
 
-    assert issubclass(ValueError, Exception)
-    # The guard reads only config fields, so a minimal stand-in exercises it.
-    src = __import__("inspect").getsource(MPASOceanModel.__init__ if hasattr(
-        MPASOceanModel, "__init__") else MPASOceanModel)
-    assert "use_conservation_fixer" in src and "fix_volume" in src, (
-        "the real_freshwater + conservation-fixer guard is gone; that "
-        "combination silently deletes the freshwater volume source (#1484)")
+    g = create_beta_plane_cgrid_geometry(8, 8, dx_m=50e3, f0=1e-4, beta=0.0)
+    z = create_ocean_z_star(3, H_max=300.0)
+
+    def _cfg(closure, fix_volume):
+        return LatLonCGridOceanConfig.from_flat(
+            freshwater_closure=closure, use_conservation_fixer=True,
+            fix_volume=fix_volume, enable_runtime_checks=False)
+
+    with pytest.raises(ValueError, match="fix_volume"):
+        LatLonCGridOceanModel(g, z, _cfg("real_freshwater", True))
+    # fix_volume=False is safe for VOLUME -- the fixer only mutates eta inside
+    # that branch -- so it must stay allowed.
+    LatLonCGridOceanModel(g, z, _cfg("real_freshwater", False))
+    # ...and the virtual closure keeps the combination it always had.
+    LatLonCGridOceanModel(g, z, _cfg("virtual_salt_flux", True))
