@@ -146,7 +146,7 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
     # The km=1 lane (fv3_native_duo_stepper.dsw12_step_sixface) already
     # routed through the authoritative path; this is the same dispatch,
     # including the ext_exclude opt-outs, so the two lanes cannot drift.
-    _exchange_post_pgrad(ctx, csw_outs, km, nord=c["nord"])
+    _exchange_post_pgrad(ctx, csw_outs, km, nord=int(c["nord"]))
 
     # --- d_sw1 at every level, on every face -------------------------------
     # Held as [face][k] rather than merged: the barrier consumes one level

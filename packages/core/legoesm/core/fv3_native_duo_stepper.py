@@ -90,13 +90,6 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         build_fv3_native_gridstruct_bounded,
     )
 
-    # radius/omega: the W2 balanced state, the duo-target gate and the
-    # Zenodo reference all use the FMS constants printed by the duo run
-    # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
-    # constants.R_earth/Omega defaults put a broad scale error on every
-    # metric and Coriolis term (codex vertex-diff P2).
-    # omega override: the colliding-modon case runs a NON-ROTATING
-    # planet (FV3 case 8; omega=0); default = the FMS value
     # Validated for EVERY context, not just bundle ones: ext_exclude is
     # now also how a NON-bundle caller declares that it accepts the
     # interim post-p_grad_c exchange (exchange_post_pgrad_sixface refuses
@@ -106,6 +99,13 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     if bad:
         raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
 
+    # radius/omega: the W2 balanced state, the duo-target gate and the
+    # Zenodo reference all use the FMS constants printed by the duo run
+    # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
+    # constants.R_earth/Omega defaults put a broad scale error on every
+    # metric and Coriolis term (codex vertex-diff P2).
+    # omega override: the colliding-modon case runs a NON-ROTATING
+    # planet (FV3 case 8; omega=0); default = the FMS value
     if omega is None:
         omega = FV3_OMEGA
     if oracle_conventions:
@@ -392,7 +392,8 @@ def exchange_post_pgrad_sixface(ctx: dict, divgd6: list, uc6: list,
     """The post-``p_grad_c`` duo exchanges, shared by every lane.
 
     ``dyn_core.F90:652``  ``if (duogrid .and. nord > 0) ext_scalar(divgd, dg, bd, domain, 1,1)``
-    ``dyn_core.F90:655``  ``if (duogrid)                ext_vector(uc, vc, dg, bd, domain, gridstruct, flagstruct, 1,0,0,1)``
+    ``dyn_core.F90:655``  ``if (duogrid) ext_vector(uc, vc, dg, bd, domain,
+                          gridstruct, flagstruct, 1,0,0,1)``
 
     (``:653`` is BLANK and ``:654`` is the ``.not. duogrid`` group-halo
     completion; the vector call is ``:655``. ``:706``/``:709`` are the
@@ -451,6 +452,14 @@ def exchange_post_pgrad_sixface(ctx: dict, divgd6: list, uc6: list,
             "exchange_post_pgrad_sixface expects six faces per array, got "
             f"{len(divgd6)}/{len(uc6)}/{len(vc6)} -- a short list would "
             "silently exchange a subset of the cube")
+    # nord is a damping ORDER: integral by construction. The deck dicts mix
+    # ints and floats, so a caller reads out as float and int() would round
+    # 2.7 to 2 without a word -- reject instead. (mypy flagged the float;
+    # the silent-truncation hazard is the reason not to just cast.)
+    if nord != int(nord):
+        raise ValueError(
+            f"nord must be an integral damping order, got {nord!r}")
+    nord = int(nord)
     n, ng = ctx["n"], ctx["ng"]
     exclude = tuple(ctx.get("ext_exclude", ()))
 
@@ -569,7 +578,7 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     cfg = dict(_SW_CFG_DEFAULT)
     cfg.update(sw_cfg or {})
     divgd6 = [o["divg_d"] for o in csw_outs]
-    exchange_post_pgrad_sixface(ctx, divgd6, uc6, vc6, nord=cfg["nord"])
+    exchange_post_pgrad_sixface(ctx, divgd6, uc6, vc6, nord=int(cfg["nord"]))
     if sd:
         for t in range(6):
             sd(204, t, "uc", uc6[t])

@@ -145,11 +145,11 @@ def test_km1_matches_the_certified_km1_sequence(ctx):
     """
     import copy as _copy
 
-    from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo, d_sw2_duo
     from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
     from legoesm.core.fv3_native_duo_stepper import (
         exchange_post_pgrad_sixface,
     )
+    from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo, d_sw2_duo
     from legoesm.grids.fv3_native_gridstruct import (
         average_allflux_shared_edges,
     )
@@ -248,10 +248,10 @@ def test_the_authoritative_exchange_fills_the_corner_diagonal(ctx,
     authoritative side would pass even if the interim helper had silently
     become authoritative, and vice versa.
     """
+    from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
     from legoesm.core.fv3_native_duo_stepper import (
         exchange_post_pgrad_sixface,
     )
-    from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
 
     bd = ctx["bd"]
     # one cell strictly inside the SW corner-diagonal block: i < is and
