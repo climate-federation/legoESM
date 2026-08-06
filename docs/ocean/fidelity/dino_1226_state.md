@@ -1,3 +1,55 @@
+# FORM STRESS = THE MISSING ARREST 2026-08-06 — and the 1.5x GM claim is RETRACTED
+
+**RETRACTION FIRST (mine, recorded earlier today as CONFIRMED):** "NEMO's kappa_gm is 1.5x
+armB's ⇒ armB under-arrested by GM" is **WRONG**. The two lanes never differed by band mask —
+they ran DIFFERENT CHAINS. Chain A (generic lat-lon slopes, surface-referenced p=0) gives
+102.5/118.9/135.8; chain B — the chain armB ACTUALLY integrates (`gm_redi_slope_scheme=
+'nemo_iso_lap'`, `eos_depth='geometric'`) — gives 159.1/187.6/217.0 vs NEMO 161.2/186.2/205.3.
+**Corrected armB/NEMO kappa ratio = 0.987 / 1.008 / 1.057 — no GM deficit exists.** This also
+independently explains why the x1.5 kappa run came out wrong-signed.
+
+**THE FINDING — topographic form stress across the Drake sill, the sink the enumeration omitted:**
+
+| | |
+|---|---|
+| \|F_topo\|/F_wind (BOTH sides) | **0.83** ⇒ the DOMINANT sink |
+| bottom drag / F_wind | **0.002** ⇒ every enumerated sink was minor by construction |
+| armB/NEMO ratio, y6-y10 (control) | 1.0020 ± 0.0032 |
+| armB/NEMO ratio, y15-y20 | **0.9590 ± 0.0034** |
+| separation | **9.11 sigma**, clean step at y13, 8 sustained years |
+
+Equal in the control window, diverging after — the sink lane's own discriminator — correctly
+signed as the missing arrest (deficit ~3.7e10 N). Consistent with every surviving observation:
+too-barotropic, deeper-reaching, surface u LOWER at HIGHER transport.
+
+Sign convention derived and CHECKED (z up, floor z=−H): `F_topo = +∮ p_b (dH/dx) dx`, sink ⇔
+F_topo<0 while F_wind>0, asserted in code and independently re-derived in review. Five
+instrument controls passed BEFORE any number: NEMO y10 ACC 121.070; **flat bottom → exactly 0**;
+constant p_b → 1.5 N; rho0*g*H self-term → 1.25 N; sill real. A sign assertion FIRED mid-run —
+lego stores `tau_x` NEGATED vs NEMO's `sozotaux` (ratio exactly −1.0000); post-flip both give
+band-mean +0.11670 Pa, reproducing the earlier flat wind control. Conditioning: per-longitude
+~1e15 N cancelling to ~8e11 N, fp64 floor bracketed at 0.6-24 N ⇒ signal 1.5e9x above it.
+
+**WHAT IT CANNOT SUPPORT (kept):** the budget does NOT close — residual −0.16..−0.20 x F_wind on
+BOTH sides (lateral/eddy flux omitted; NEMO Coriolis unavailable from grid_U), and the lego−NEMO
+residual difference IS the form-stress difference ⇒ circular, so the budget cannot independently
+certify this. That 4.1% quantitatively owns the 1.27x excess is **PLAUSIBLE, not confirmed**.
+Note a naive F ∝ U² predicts MORE form stress at 27% higher transport, not less ⇒ this is an
+**efficiency deficit in the p_b/slope correlation**, not a transport-slaved response.
+Localization is weak: a distributed sub-percent modulation across the whole ridge.
+**Interfacial form stress NOT computed** (needs ⟨v'p'⟩ at matched times; both sides are annual
+means) — stated, not substituted. The BOTTOM term has no such gap: topography is static so
+⟨p_b dH/dx⟩ = ⟨p_b⟩ dH/dx exactly.
+
+Review (physics-validator): all six challenged items SOUND, incl. independent sign re-derivation
+and three-way rejection of the y13 step as an indexing artifact. One latent footgun found and
+fixed (unmasked surface rho); every headline number bit-unchanged.
+
+**NEXT:** an efficiency deficit in the bottom-pressure/slope correlation at a steep sill points
+at the **pressure-gradient-force scheme and partial-cell treatment at steep topography** — a
+known z-coordinate weak spot the campaign has already flagged elsewhere ("partial-cell DYNAMIC
+fidelity", the smc03/adcroft PGF options). Test whether the 4.1% traces to the PGF scheme.
+
 # GM EXONERATED 2026-08-06 — sensitivity test REFUTES it; the 1.5x gap is UNRECONCILED
 
 **Decisive test**: armB rerun with kappa_GM scaled x1.5 toward NEMO's measured value, 140
