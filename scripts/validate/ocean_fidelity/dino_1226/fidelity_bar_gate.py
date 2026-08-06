@@ -2999,10 +2999,14 @@ MEASURED_AT: dict[str, str] = {
 # similar ground but was never verified to reproduce probe_n2.py's own
 # numbers in this task, so it is not substituted here.
 PROVENANCE_SCRIPT: dict[str, str] = {
-    "sbc (utau/qsr/qns/sfx)": "",                    # note is a bare "exact", no script named
+    # #1492 evidence audit: wired to the script that already reproduces it
+    # (bit-exact, e.g. qns 4.693e-16) but was only named in prose.
+    "sbc (utau/qsr/qns/sfx)": "cancelling_rows_per_element.py",
     "eos_rab beta": "",                              # note is a bare "bit-exact", no script named
-    "eos_rab alpha": "probe_n2.py",                  # cited, never committed
-    "bn2 (rn2b)": "probe_n2.py",                     # cited, never committed
+    # #1492: probe_n2.py never existed; eos_rab_bn2_per_element.py reproduces
+    # the CURRENT PER_ELEMENT values exactly (alpha median|rel|=0.0).
+    "eos_rab alpha": "eos_rab_bn2_per_element.py",
+    "bn2 (rn2b)": "eos_rab_bn2_per_element.py",       # #1492: reproduces bn2 median|rel|=5.880e-16
     "zdf_mxl (nmln)": "zdf_mxl_nmln_compare.py",
     "ldf_slp wslpi": "ldf_slp_per_element.py",
     "ldf_slp wslpj": "ldf_slp_per_element.py",
@@ -3010,7 +3014,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "ldf_slp vslp": "ldf_slp_per_element.py",
     "ldf_eiv kappa (aeiu)": "ldf_eiv_aeiu_per_element.py",
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": "ldftra_ahtv_compare.py",
-    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "",        # no script named in this row's note
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "ldftra_ahtv_compare.py",  # #1492: reproduces the tuple bit-for-bit
     "eiv transport u": "eiv_transport_walk.py",
     "eiv transport v": "eiv_transport_walk.py",
     "traadv_fct fluxes": "traadv_fct_probe.py",
@@ -3018,9 +3022,10 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct horizontal tend": "traadv_fct_probe.py",
     "traadv_fct vertical upstream flux": "traadv_fct_probe.py",
     "dyn_hpg (du)": "hpg_tendency_compare.py",
-    "dyn_vor EEN u": "_probe_1455_een_vor_bottom_bisect.py",  # #1455 bisect, scripts/tmp/ (gitignored _probe_* convention, never committed -- same as its predecessor probe_hpg_vor_1226.py)
+    # #1492: promoted out of gitignored scripts/tmp/ into a committed canonical probe.
+    "dyn_vor EEN u": "dyn_vor_een_bottom_bisect.py",
     "dyn_vor EEN v": "_probe_1455_een_vor_bottom_bisect.py",  # "same probe/run as EEN u" per its own note
-    "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
+    "dyn_adv KEG": "cancelling_rows_per_element.py",   # #1492 (reproduces 4.771e-19 vs recorded 3.578e-19 -- same roundoff tier, not identical)
     "dyn_adv ZAD": "zad_gate_corr_ratio_1226.py",  # RE-CORRECTED (this task): real-restart, 3-D-umask (active-only) measurement post-fix 5bdcf219e; supersedes unit_harness/run_dyn_zad_probe.py (synthetic-input, independent, DEBT either way -- see MEASUREMENTS history note) and the phantom probe_1226_keg_zad_split.py
     "zdftke pdlr": "zdftke_chain_walk.py",
     "zdftke composite avt/avm": "southern_vmix_profile.py",
@@ -3031,10 +3036,16 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_spg_ts un_adv": "spg_substep_chain.py",
     "ATF filter u": "atf_filter_walk.py",  # CORRECTED 2026-07-30 (was atf_lego_extract_e3tboth.py -- cited, never committed)
     "ATF filter v": "atf_filter_walk.py",  # CORRECTED 2026-07-30, same run as ATF filter u
-    "ATF filter T/S/ssh": "",                         # note is a bare "exact", no script named
+    "ATF filter T/S/ssh": "cancelling_rows_per_element.py",  # #1492: reproduces 0.0 exact
     "dyn_ldf (dynldf_lev_lap) u": "ww_inheritance_walk.py",  # CORRECTED (this task): the row's LIVE tuple (0.999999999, 1.000001864) is measured by ww_inheritance_walk.py::measure_dyn_ldf_corrected (EXISTS, confirmed by `find`), NOT probe_1226_r2_item2_dynldf.py (the OLD tuple's citation, which does not exist) -- PROVENANCE_SCRIPT was stale after the 2026-07-30 Task B correction; the phantom-provenance sweep (this task) caught the mismatch between the row's CURRENT tuple and its cited script.
     "dyn_ldf (dynldf_lev_lap) v": "ww_inheritance_walk.py",  # CORRECTED (this task), same cause as u above -- ww_inheritance_walk.py::measure_dyn_ldf_corrected covers both u and v (same function, dict result)
-    "ssh_nxt / div_hor": "probe_1226_r2_item3_sshnxt.py",  # cited, never committed
+    # #1492: rebuilt as a committed canonical probe. CAVEAT -- it reproduces the
+    # load-bearing part EXACTLY (per-level hdiv corr=1.000000, n matches) but NOT
+    # the recorded details: ratio 1.000019 vs 1.000004, amplification median 3060x
+    # vs 4107x (max 8.66e6 vs 2.08e7). Both old and new probes were scratch files.
+    # The CEILING verdict rests on the reproduced part; the quantitative tail is
+    # probe-dependent at ~5x on |ratio-1| and ~25% on the amplification median.
+    "ssh_nxt / div_hor": "sshnxt_divhor_canonical.py",
     "dom_qco_r3c r3t": "unit_harness/run_dom_qco_r3c_probe.py",  # CORRECTED (this task): probe_1226_r2_item4_domqco.py (the OLD tuple's citation) does not exist; this row's LIVE, re-runnable measurement is the unit-call harness probe (measures nemo_r3t_stretch specifically, a narrower call site than the OLD tuple's ocean_pe_latlon_cgrid.py inline duplicate -- see MEASUREMENTS note)
     "dom_qco_r3c r3u/r3v": "probe_1226_r2_item4_domqco.py",
     "mlf_baro_corr": "",                              # note: "algebra only; needs _step_impl hook"
