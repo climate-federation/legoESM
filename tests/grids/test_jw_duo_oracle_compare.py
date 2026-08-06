@@ -223,8 +223,8 @@ def test_build_curves_scores_every_arm_on_the_same_days(tmp_path, monkeypatch):
     assert used == [1.0, 2.0]
     for per_day in curves.values():
         assert sorted(per_day) == [1.0, 2.0]
-    assert spans["short"] == (0.0, 2.0)
-    assert spans["oracle duo"] == (0.0, 9.0)
+    assert spans[("ours", "short")] == (0.0, 2.0)
+    assert spans[("oracle", "duo")] == (0.0, 9.0)
 
 
 def test_truncated_arm_is_flagged_in_the_table(tmp_path, monkeypatch, capsys):
@@ -250,7 +250,8 @@ def test_truncated_arm_is_flagged_in_the_table(tmp_path, monkeypatch, capsys):
     # assertions read the table row, not the later block.
     rows: dict[str, str] = {}
     for ln in out.splitlines():
-        if not ln[:1].isalpha():
+        if not ln[:1].isalpha() or ln.startswith(("AMPLITUDE", "DISTANCE",
+                                                  "arm", "NOTE", "wrote")):
             continue
         parts = ln.split()
         key = " ".join(parts[:2]) if ln.startswith("oracle") else parts[0]
@@ -319,3 +320,174 @@ def test_oracle_reference_loads_if_present():
     early = jw.ps_stats(ps[jw.at_day(t, 1.0)], lat)["rms_prime_hPa"]
     late = jw.ps_stats(ps[jw.at_day(t, 9.0)], lat)["rms_prime_hPa"]
     assert late > 20.0 * early
+
+
+# ============================================================== round 2
+# Every test below pins a defect the adversarial review found in round 1.
+
+def _oracle_stub(ps_field=None, nt=10):
+    t = np.arange(float(nt))
+
+    def fake(res, arm):
+        ps = (np.full((nt, LAT.size, LON.size), 1.0e5)
+              if ps_field is None else ps_field)
+        return t, ps, LAT, LON
+    return fake
+
+
+def test_amplitude_ratio_alone_cannot_prove_agreement(monkeypatch, tmp_path):
+    """THE round-1 RED. rms' compares each field to ITSELF, so a field with
+    the right amplitude and a totally wrong pattern scores 1.0x. The new
+    rmse column must expose it."""
+    rng = np.random.default_rng(7)
+    truth = 1.0e5 + rng.normal(0.0, 200.0, (10, LAT.size, LON.size))
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    # Same amplitude, independent pattern.
+    impostor = 1.0e5 + rng.normal(0.0, 200.0, (10, LAT.size, LON.size))
+    p = _write_npz(tmp_path / "imp", times_days=np.arange(10.0),
+                   p_s=impostor, lat=LAT, lon=LON)
+    curves, days, _ = jw.build_curves("C48", [("impostor", p)], [1.0])
+    st = curves[("ours", "impostor")][1.0]
+    ratio = st["rms_prime_hPa"] / curves[("oracle", "duo")][1.0]["rms_prime_hPa"]
+    assert 0.9 < ratio < 1.1, "amplitude ratio should look innocent"
+    # ...while the true distance is ~sqrt(2)x the field amplitude.
+    assert st["rmse_hPa"] > 1.2 * st["rms_prime_hPa"]
+
+
+def test_rmse_is_zero_for_an_identical_field(monkeypatch, tmp_path):
+    rng = np.random.default_rng(8)
+    truth = 1.0e5 + rng.normal(0.0, 200.0, (10, LAT.size, LON.size))
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    p = _write_npz(tmp_path / "same", times_days=np.arange(10.0),
+                   p_s=truth.copy(), lat=LAT, lon=LON)
+    curves, _, _ = jw.build_curves("C48", [("same", p)], [1.0])
+    assert curves[("ours", "same")][1.0]["rmse_hPa"] == pytest.approx(0.0,
+                                                                     abs=1e-12)
+
+
+def test_rmse_sees_a_uniform_offset_that_rms_prime_hides(monkeypatch,
+                                                         tmp_path):
+    """`ours = oracle + 5000 Pa` is a 50 hPa mass bias, not a convention."""
+    truth = np.full((10, LAT.size, LON.size), 1.0e5)
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    p = _write_npz(tmp_path / "off", times_days=np.arange(10.0),
+                   p_s=truth + 5000.0, lat=LAT, lon=LON)
+    curves, _, _ = jw.build_curves("C48", [("off", p)], [1.0])
+    st = curves[("ours", "off")][1.0]
+    assert st["rms_prime_hPa"] == pytest.approx(0.0, abs=1e-12)   # hidden
+    assert st["rmse_hPa"] == pytest.approx(50.0, rel=1e-9)        # caught
+    assert st["bias_hPa"] == pytest.approx(50.0, rel=1e-9)
+
+
+def test_a_different_canvas_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    small_lat = np.linspace(-90.0, 90.0, 73)
+    small_lon = np.arange(0.5, 360.0, 2.5)
+    p = _write_npz(tmp_path / "wrong", times_days=np.arange(10.0),
+                   p_s=np.full((10, 73, small_lon.size), 1.0e5),
+                   lat=small_lat, lon=small_lon)
+    with pytest.raises(ValueError, match="grid size mismatch"):
+        jw.build_curves("C48", [("wrong", p)], [1.0])
+
+
+def test_axis_lengths_must_match_the_data(tmp_path):
+    p = _write_npz(tmp_path / "bad", times_days=np.arange(3.0),
+                   p_s=np.full((5, LAT.size, LON.size), 1.0e5),
+                   lat=LAT, lon=LON)
+    with pytest.raises(ValueError, match="do not match"):
+        jw.load_ours(p)
+
+
+def test_a_label_cannot_impersonate_the_oracle(monkeypatch, tmp_path):
+    """--label 'oracle duo' used to overwrite the reference, making the
+    denominator user data. Origin is now structural."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    p = _write_npz(tmp_path / "spoof", times_days=np.arange(10.0),
+                   p_s=np.full((10, LAT.size, LON.size), 1.0e5),
+                   lat=LAT, lon=LON)
+    curves, _, _ = jw.build_curves("C48", [("oracle duo", p)], [1.0])
+    assert ("oracle", "duo") in curves and ("ours", "oracle duo") in curves
+    assert curves[("oracle", "duo")][1.0]["rmse_hPa"] == pytest.approx(0.0,
+                                                                       abs=1e-12)
+
+
+def test_duplicate_labels_are_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    p = _write_npz(tmp_path / "dup", times_days=np.arange(10.0),
+                   p_s=np.full((10, LAT.size, LON.size), 1.0e5),
+                   lat=LAT, lon=LON)
+    with pytest.raises(ValueError, match="duplicate --label"):
+        jw.build_curves("C48", [("a", p), ("a", p)], [1.0])
+
+
+def test_gate_fails_with_no_arms(monkeypatch, capsys):
+    """An empty `bad` set used to exit PASS having compared nothing."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    assert jw.main(["--days", "1,2", "--max-rms-ratio", "5"]) == 1
+    out = capsys.readouterr().out
+    assert "JW_DUO_GATE: FAIL" in out and "no --ours arm" in out
+
+
+def test_gate_fails_on_a_truncated_arm(monkeypatch, tmp_path, capsys):
+    """TRUNCATED used to be a printed comment the gate ignored."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    short = _write_npz(tmp_path / "sh", times_days=np.arange(3.0),
+                       p_s=np.full((3, LAT.size, LON.size), 1.0e5),
+                       lat=LAT, lon=LON)
+    assert jw.main(["--ours", short, "--label", "crashed",
+                    "--days", "1,2", "--max-rms-ratio", "500"]) == 1
+    assert "TRUNCATED" in capsys.readouterr().out
+
+
+def test_gate_fails_when_day_1_is_not_the_gate_day(monkeypatch, tmp_path,
+                                                   capsys):
+    """--days 3,5 used to silently gate day 3 while advertising day 1."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    p = _write_npz(tmp_path / "ok", times_days=np.arange(10.0),
+                   p_s=np.full((10, LAT.size, LON.size), 1.0e5),
+                   lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "a", "--days", "3,5",
+                    "--max-rms-ratio", "5"]) == 1
+    assert "not day 1" in capsys.readouterr().out
+
+
+def test_gate_still_passes_a_genuinely_good_arm(monkeypatch, tmp_path, capsys):
+    """Non-vacuity in the other direction: the hardening must not make the
+    gate unpassable."""
+    rng = np.random.default_rng(9)
+    truth = 1.0e5 + rng.normal(0.0, 100.0, (10, LAT.size, LON.size))
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    p = _write_npz(tmp_path / "good", times_days=np.arange(10.0),
+                   p_s=truth.copy(), lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "good", "--days", "1,2",
+                    "--max-rms-ratio", "5"]) == 0
+    assert "JW_DUO_GATE: PASS" in capsys.readouterr().out
+
+
+def test_rmse_aligns_the_two_longitude_conventions_exactly():
+    """The correctness property of ps_rmse: the SAME field stored on the
+    oracle's 0.5..359.5 axis and on the matrix's -179.5..179.5 axis must
+    difference to exactly zero. The first implementation indexed axis 1
+    (latitude) instead of the last axis and raised IndexError; a version
+    that indexed nothing would silently score a 180-degree phase error as
+    a huge RMSE, which is the same bug pointing the other way."""
+    rng = np.random.default_rng(11)
+    lon_o = LON                        # 0.5 .. 359.5
+    lon_m = (LON - 180.0) % 360.0      # matrix convention, mapped back
+    truth = 1.0e5 + rng.normal(0.0, 200.0, (1, LAT.size, LON.size))
+    ours = np.empty_like(truth)
+    ours[..., np.argsort(lon_m)] = truth[..., np.argsort(lon_o)]
+    st = jw.ps_rmse(ours, lon_m, truth, lon_o, LAT)
+    assert st["rmse_hPa"] == pytest.approx(0.0, abs=1e-12)
+    assert st["max_abs_diff_hPa"] == pytest.approx(0.0, abs=1e-12)
+    # Non-vacuity: a genuine half-globe phase error must NOT score zero.
+    shifted = np.roll(truth, LON.size // 2, axis=-1)
+    bad = jw.ps_rmse(shifted, lon_o, truth, lon_o, LAT)
+    assert bad["rmse_hPa"] > 1.0
+
+
+def test_rmse_rejects_a_latitude_axis_of_the_wrong_length():
+    rng = np.random.default_rng(12)
+    a = 1.0e5 + rng.normal(0.0, 100.0, (1, LAT.size, LON.size))
+    with pytest.raises(ValueError, match="latitude axis"):
+        jw.ps_rmse(a, LON, a, LON, LAT[:-1])
