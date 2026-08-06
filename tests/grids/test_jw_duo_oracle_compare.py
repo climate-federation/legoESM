@@ -291,11 +291,11 @@ def test_gate_is_not_vacuous(tmp_path, monkeypatch, capsys):
         + rng.normal(0.0, 1500.0, (nt, LAT.size, LON.size))})
 
     assert jw.main(["--ours", quiet, "--label", "quiet",
-                    "--days", "1,2", "--max-rms-ratio", "5"]) == 0
+                    "--days", "1,2", "--max-rmse-hpa", "1.0"]) == 0
     assert "JW_DUO_GATE: PASS" in capsys.readouterr().out
 
     assert jw.main(["--ours", noisy, "--label", "noisy",
-                    "--days", "1,2", "--max-rms-ratio", "5"]) == 1
+                    "--days", "1,2", "--max-rmse-hpa", "1.0"]) == 1
     assert "JW_DUO_GATE: FAIL" in capsys.readouterr().out
 
 
@@ -423,7 +423,7 @@ def test_duplicate_labels_are_rejected(monkeypatch, tmp_path):
 def test_gate_fails_with_no_arms(monkeypatch, capsys):
     """An empty `bad` set used to exit PASS having compared nothing."""
     monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
-    assert jw.main(["--days", "1,2", "--max-rms-ratio", "5"]) == 1
+    assert jw.main(["--days", "1,2", "--max-rmse-hpa", "1.0"]) == 1
     out = capsys.readouterr().out
     assert "JW_DUO_GATE: FAIL" in out and "no --ours arm" in out
 
@@ -435,7 +435,7 @@ def test_gate_fails_on_a_truncated_arm(monkeypatch, tmp_path, capsys):
                        p_s=np.full((3, LAT.size, LON.size), 1.0e5),
                        lat=LAT, lon=LON)
     assert jw.main(["--ours", short, "--label", "crashed",
-                    "--days", "1,2", "--max-rms-ratio", "500"]) == 1
+                    "--days", "1,2", "--max-rmse-hpa", "500"]) == 1
     assert "TRUNCATED" in capsys.readouterr().out
 
 
@@ -447,7 +447,7 @@ def test_gate_fails_when_day_1_is_not_the_gate_day(monkeypatch, tmp_path,
                    p_s=np.full((10, LAT.size, LON.size), 1.0e5),
                    lat=LAT, lon=LON)
     assert jw.main(["--ours", p, "--label", "a", "--days", "3,5",
-                    "--max-rms-ratio", "5"]) == 1
+                    "--max-rmse-hpa", "1.0"]) == 1
     assert "not day 1" in capsys.readouterr().out
 
 
@@ -460,7 +460,7 @@ def test_gate_still_passes_a_genuinely_good_arm(monkeypatch, tmp_path, capsys):
     p = _write_npz(tmp_path / "good", times_days=np.arange(10.0),
                    p_s=truth.copy(), lat=LAT, lon=LON)
     assert jw.main(["--ours", p, "--label", "good", "--days", "1,2",
-                    "--max-rms-ratio", "5"]) == 0
+                    "--max-rmse-hpa", "1.0", "--max-rms-ratio", "5"]) == 0
     assert "JW_DUO_GATE: PASS" in capsys.readouterr().out
 
 
@@ -491,3 +491,94 @@ def test_rmse_rejects_a_latitude_axis_of_the_wrong_length():
     a = 1.0e5 + rng.normal(0.0, 100.0, (1, LAT.size, LON.size))
     with pytest.raises(ValueError, match="latitude axis"):
         jw.ps_rmse(a, LON, a, LON, LAT[:-1])
+
+
+# ============================================================== round 3
+# Round 2 rejected the gate: it computed RMSE and then gated on amplitude.
+
+def test_amplitude_only_gate_is_refused(monkeypatch, tmp_path, capsys):
+    """--max-rms-ratio alone must not be accepted as an oracle gate."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    p = _write_npz(tmp_path / "a", times_days=np.arange(10.0),
+                   p_s=np.full((10, LAT.size, LON.size), 1.0e5),
+                   lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "a", "--days", "1,2",
+                    "--max-rms-ratio", "5"]) == 1
+    assert "cannot stand alone" in capsys.readouterr().out
+
+
+def test_uniform_offset_impostor_now_FAILS_the_gate(monkeypatch, tmp_path,
+                                                    capsys):
+    """THE round-2 RED, made permanent. ours = duo + 5000 Pa has amplitude
+    ratio 1.0 and would have PASSED the old amplitude gate; it is a 50 hPa
+    mass bias and must fail on distance."""
+    truth = np.full((10, LAT.size, LON.size), 1.0e5)
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    p = _write_npz(tmp_path / "off", times_days=np.arange(10.0),
+                   p_s=truth + 5000.0, lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "offset", "--days", "1,2",
+                    "--max-rmse-hpa", "1.0", "--max-rms-ratio", "5"]) == 1
+    out = capsys.readouterr().out
+    assert "RMSE vs duo = 50.0000" in out and "bias +50.0000" in out
+
+
+def test_nan_threshold_is_refused(monkeypatch, tmp_path, capsys):
+    """`x > nan` is always False, so a nan threshold disabled the gate."""
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub())
+    p = _write_npz(tmp_path / "n", times_days=np.arange(10.0),
+                   p_s=np.full((10, LAT.size, LON.size), 5.0e5) * 0 + 1.0e5,
+                   lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "a", "--days", "1,2",
+                    "--max-rmse-hpa", "nan"]) == 1
+    assert "not finite" in capsys.readouterr().out
+
+
+def test_rmse_gate_passes_an_actually_matching_arm(monkeypatch, tmp_path,
+                                                   capsys):
+    rng = np.random.default_rng(21)
+    truth = 1.0e5 + rng.normal(0.0, 100.0, (10, LAT.size, LON.size))
+    monkeypatch.setattr(jw, "load_oracle", _oracle_stub(truth))
+    p = _write_npz(tmp_path / "same", times_days=np.arange(10.0),
+                   p_s=truth.copy(), lat=LAT, lon=LON)
+    assert jw.main(["--ours", p, "--label", "same", "--days", "1,2",
+                    "--max-rmse-hpa", "0.001"]) == 0
+    assert "JW_DUO_GATE: PASS" in capsys.readouterr().out
+
+
+def test_ps_rmse_is_a_mean_over_frames_not_a_sum():
+    """With w summing to 1 per frame, a stack of nf frames must not make
+    the 'rms' grow as sqrt(nf)."""
+    rng = np.random.default_rng(22)
+    one = rng.normal(0.0, 100.0, (1, LAT.size, LON.size))
+    many = np.repeat(one, 7, axis=0)
+    a = jw.ps_rmse(one, LON, np.zeros_like(one), LON, LAT)["rmse_hPa"]
+    b = jw.ps_rmse(many, LON, np.zeros_like(many), LON, LAT)["rmse_hPa"]
+    assert b == pytest.approx(a, rel=1e-12)
+
+
+def test_ps_rmse_rejects_incommensurable_longitude_axes():
+    rng = np.random.default_rng(23)
+    a = 1.0e5 + rng.normal(0.0, 100.0, (1, LAT.size, LON.size))
+    shifted = LON + 0.25          # same count, different physical centres
+    with pytest.raises(ValueError, match="same physical centres"):
+        jw.ps_rmse(a, shifted, a, LON, LAT)
+
+
+def test_load_ours_rejects_a_non_monotonic_time_axis(tmp_path):
+    kw = _good_npz_kwargs()
+    kw["times_days"] = np.array([0.0, 2.0, 1.0])
+    with pytest.raises(ValueError, match="strictly increasing"):
+        jw.load_ours(_write_npz(tmp_path, **kw))
+
+
+def test_load_ours_rejects_nonfinite_times(tmp_path):
+    kw = _good_npz_kwargs()
+    kw["times_days"] = np.array([0.0, 1.0, np.nan])
+    with pytest.raises(ValueError, match="non-finite"):
+        jw.load_ours(_write_npz(tmp_path, **kw))
+
+
+def test_at_day_rejects_a_nan_time():
+    """abs(nan - day) > tol is False, so a NaN would satisfy the check."""
+    with pytest.raises(ValueError, match="non-finite"):
+        jw.at_day(np.array([0.0, np.nan, 2.0]), 1.0)

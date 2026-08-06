@@ -83,19 +83,46 @@ FV3_OMEGA = 7.2921e-5
 
 
 class fort:
-    """Fortran-indexed 2-D/3-D view over a numpy array (lo bounds given)."""
+    """Fortran-indexed 2-D/3-D view over a numpy array (lo bounds given).
 
-    def __init__(self, a: np.ndarray, ilo: int, jlo: int):
+    ``strict_rank`` closes a silent-wrong-number trap that matters as soon
+    as the six-face stepper grows a vertical axis.  ``__getitem__`` splits
+    the subscript as ``i, j, *k``, so reading ``f[i, j]`` from a 3-D array
+    leaves ``k == []`` and returns the WHOLE COLUMN, which then broadcasts
+    through the 2-D stage kernels without raising.  A 3-D state fed into a
+    routine that expects one level would therefore produce numbers rather
+    than an error.
+
+    The default stays ``False`` so every existing bit-exact-certified call
+    site keeps its current behaviour; the km-general driver builds its
+    views with ``strict_rank=True`` so a rank slip is fatal there.
+    """
+
+    __slots__ = ("a", "ilo", "jlo", "strict_rank")
+
+    def __init__(self, a: np.ndarray, ilo: int, jlo: int, *,
+                 strict_rank: bool = False):
         self.a = a
         self.ilo = ilo
         self.jlo = jlo
+        self.strict_rank = strict_rank
+
+    def _check(self, idx, k):
+        if self.strict_rank and (2 + len(k)) != self.a.ndim:
+            raise IndexError(
+                f"fort(strict_rank=True): {2 + len(k)} subscripts {idx!r} "
+                f"on a {self.a.ndim}-D array of shape {self.a.shape}. A "
+                f"2-subscript read of a 3-D array returns the whole column "
+                f"and broadcasts silently -- pass the level explicitly.")
 
     def __getitem__(self, idx):
         i, j, *k = idx
+        self._check(idx, k)
         return self.a[(i - self.ilo, j - self.jlo, *k)]
 
     def __setitem__(self, idx, v):
         i, j, *k = idx
+        self._check(idx, k)
         self.a[(i - self.ilo, j - self.jlo, *k)] = v
 
 
