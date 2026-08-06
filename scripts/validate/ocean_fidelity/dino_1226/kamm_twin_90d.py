@@ -208,6 +208,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = False,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
+                       surface_tendency_placement: str | None = None,
                        restart_file: str = RESTART_FILE):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
@@ -229,6 +230,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     and only gates kappa_GM/treguier.enabled/visbeck.enabled on this flag;
     see dino.py:2437-2503). ``None`` (default) leaves the recipe's own value.
 
+    ``surface_tendency_placement``: optional override of
+    ``DINOConfig.surface_tendency_placement`` (#1492 A/B: "applied_now" is
+    the legacy defect path -- surface_forcing mutates T/S directly before
+    model.step(); "leapfrog_rhs" is the NEMO-faithful fix -- the surface
+    tendency rate is folded into the Nnn RHS instead, see dino.py:262-281).
+    ``None`` (default) leaves the recipe's own value.
+
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
     """
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
@@ -240,6 +248,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
     if use_gm_redi is not None:
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
+    if surface_tendency_placement is not None:
+        cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
     _ba = os.environ.get("DINO_BOLUS_ADV")
     if _ba:
         # #1226: "through_fct" folds the GM bolus into the ADVECTING MASS FLUX;
@@ -307,15 +317,50 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
              bridge_tke: bool = False, bridge_before: bool = False,
              vmix_scheme: str | None = None,
-             use_gm_redi: bool | None = None) -> bool:
-    """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable."""
+             use_gm_redi: bool | None = None,
+             surface_tendency_placement: str | None = None,
+             perturb_seed: int | None = None) -> bool:
+    """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
+
+    ``perturb_seed``: optional #1492 item-2.2 noise-control lane -- if set,
+    applies a 1e-14-relative multiplicative perturbation to the bridged
+    now-level T (``T *= 1 + 1e-14 * N(0,1)`` per grid point,
+    ``numpy.random.default_rng(perturb_seed)``), mirroring
+    ``scripts/tmp/_perturb_restart_ensemble.py``'s documented ensemble
+    pattern (same eps, same draw shape) but applied post-bridge to the
+    legoESM state's now-level T only -- this twin runner's default
+    (non-``--bridge-before``) state carries no before-level T, so there is
+    no tb to perturb in lockstep.
+    """
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
-        use_gm_redi=use_gm_redi)
+        use_gm_redi=use_gm_redi,
+        surface_tendency_placement=surface_tendency_placement)
+
+    if perturb_seed is not None:
+        rng = np.random.default_rng(perturb_seed)
+        t0 = np.asarray(st.T.data, dtype=np.float64)
+        factor = 1.0 + 1e-14 * rng.standard_normal(t0.shape)
+        t_pert = jnp.asarray(t0 * factor, dtype=st.T.data.dtype)
+        d_t = float(np.max(np.abs(np.asarray(t_pert) - t0)))
+        rel = float(np.max(np.abs(np.asarray(t_pert) - t0) / np.maximum(np.abs(t0), 1e-30)))
+        print(f"PERTURB seed={perturb_seed}: max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}",
+              flush=True)
+        st = st._replace(T=st.T.replace(data=t_pert))
     nsteps = STEPS_PER_DAY * n_days
 
-    dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
+    # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
+    # the rate into model.step(external_tracer_rate=...) (run_dino.py's
+    # driver wiring, mirrored; _check_surface_tendency_placement raises on a
+    # mismatch, so the legacy applied_now loop cannot silently run a
+    # leapfrog_rhs config).
+    _sf_placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if _sf_placement == "leapfrog_rhs":
+        dyn = jax.jit(lambda st, ext: model.step(st, DT, surface_forcing=sf,
+                                                  external_tracer_rate=ext))
+    else:
+        dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
@@ -326,19 +371,31 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
 
     snap_days = tuple(d for d in SNAP_DAYS if d <= n_days) if save_3d else ()
-    t3d, s3d, eta3d = {}, {}, {}
+    t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
     if save_3d:
         t3d[0] = np.asarray(st.T.data, dtype=np.float32)
         s3d[0] = np.asarray(st.S.data, dtype=np.float32)
         eta3d[0] = np.asarray(st.eta.data, dtype=np.float32)
-        print("captured day-0 3-D T/S snapshot", flush=True)
+        # full-depth u/v faces (NOT just the surface level captured by
+        # u_daily/v_daily below) -- required for ACC (acc_thermal_wind.py's
+        # acc_full integrates over all NZ levels), so a snapshot day's u/v
+        # must carry the whole water column, matching T3d/S3d's full depth.
+        u3d[0] = np.asarray(st.u.data, dtype=np.float32)
+        v3d[0] = np.asarray(st.v.data, dtype=np.float32)
+        print("captured day-0 3-D T/S/u/v snapshot", flush=True)
 
     blew_up_at = None
     t0 = time.time()
     for k in range(nsteps):
-        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                 t_seconds=(k + 1) * DT)
-        st = dyn(st)
+        if _sf_placement == "leapfrog_rhs":
+            st, _ext_rate = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT,
+                return_rate=True)
+            st = dyn(st, _ext_rate)
+        else:
+            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
+                                                     t_seconds=(k + 1) * DT)
+            st = dyn(st)
 
         if (k + 1) % STEPS_PER_DAY == 0:
             day_idx = (k + 1) // STEPS_PER_DAY - 1
@@ -366,7 +423,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
                 t3d[day_num] = np.asarray(st.T.data, dtype=np.float32)
                 s3d[day_num] = np.asarray(st.S.data, dtype=np.float32)
                 eta3d[day_num] = np.asarray(st.eta.data, dtype=np.float32)
-                print(f"  captured day {day_num} full 3-D T/S snapshot", flush=True)
+                u3d[day_num] = np.asarray(st.u.data, dtype=np.float32)
+                v3d[day_num] = np.asarray(st.v.data, dtype=np.float32)
+                print(f"  captured day {day_num} full 3-D T/S/u/v snapshot", flush=True)
 
             print(f"  day {(k+1)*DT/86400:6.1f}  T[{tmin:.1f},{tmax:.1f}] finite={finite} "
                   f"max|eta|={np.nanmax(np.abs(eta_now)):.4f} "
@@ -395,6 +454,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             save_kwargs[f"T3d_day{d}"] = t3d[d]
             save_kwargs[f"S3d_day{d}"] = s3d[d]
             save_kwargs[f"eta3d_day{d}"] = eta3d[d]
+            save_kwargs[f"u3d_day{d}"] = u3d[d]
+            save_kwargs[f"v3d_day{d}"] = v3d[d]
 
     np.savez(out_path, **save_kwargs)
     print(f"SAVED {out_path}  stable={stable}  "
@@ -408,7 +469,7 @@ def _parse_args(argv=None):
     p.add_argument("out", help="output .npz path")
     p.add_argument("--days", type=int, default=90, help="twin length in days (default 90)")
     p.add_argument("--save-3d", action="store_true",
-                    help="also save full 3-D T/S at days 0/30/60/90")
+                    help="also save full 3-D T/S/eta/u/v at days 0/30/60/90")
     p.add_argument("--run-traj", default=RUN_TRAJ, help="NEMO RUN_TRAJ dir (mesh_mask donor)")
     p.add_argument("--run-stepdump", default=RUN_STEPDUMP,
                     help="NEMO RUN_STEPDUMP dir (restart donor)")
@@ -435,6 +496,17 @@ def _parse_args(argv=None):
                          "diagnostics while leaving kappa_Redi / isoneutral "
                          "slopes untouched -- see dino.py:2437-2503); "
                          "default None leaves the recipe's own value")
+    p.add_argument("--surface-tendency-placement", default=None,
+                    choices=("applied_now", "leapfrog_rhs"),
+                    help="override DINOConfig.surface_tendency_placement "
+                         "(#1492 A/B: 'applied_now' legacy defect vs "
+                         "'leapfrog_rhs' NEMO-faithful fix); default None "
+                         "leaves the recipe's own value")
+    p.add_argument("--perturb-seed", type=int, default=None,
+                    help="#1492 item-2.2 noise control: apply a 1e-14-relative "
+                         "multiplicative perturbation to the bridged now-level "
+                         "T using numpy.random.default_rng(seed); default None "
+                         "= no perturbation")
     return p.parse_args(argv)
 
 
@@ -459,6 +531,16 @@ def _smoke_check_vmix_scheme_override():
     assert base.use_gm_redi is True, "override must not mutate the original cfg"
     print("OK: --use-gm-redi override changes cfg.use_gm_redi (True -> False)")
 
+    assert base.surface_tendency_placement == "applied_now", (
+        f"expected nemo_dino_kamm_mlf default surface_tendency_placement="
+        f"'applied_now', got {base.surface_tendency_placement!r}")
+    rhs = dataclasses.replace(base, surface_tendency_placement="leapfrog_rhs")
+    assert rhs.surface_tendency_placement == "leapfrog_rhs"
+    assert base.surface_tendency_placement == "applied_now", (
+        "override must not mutate the original cfg")
+    print("OK: --surface-tendency-placement override changes cfg.surface_tendency_placement "
+          "(applied_now -> leapfrog_rhs)")
+
 
 def main(argv=None):
     args = _parse_args(argv)
@@ -468,7 +550,9 @@ def main(argv=None):
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
-              vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi)
+              vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
+              surface_tendency_placement=args.surface_tendency_placement,
+              perturb_seed=args.perturb_seed)
 
 
 if __name__ == "__main__":
