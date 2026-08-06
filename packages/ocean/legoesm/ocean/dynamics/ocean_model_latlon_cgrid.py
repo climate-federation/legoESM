@@ -1832,6 +1832,26 @@ class LatLonCGridOceanModel:
                     "with prescribed_flow: eta is reset after the barotropic "
                     "solve, discarding the freshwater volume that is this "
                     "closure's ONLY freshwater pathway.")
+        # #1484 codex CRITICAL/HIGH: real_freshwater moves the whole
+        # freshwater signal into the VOLUME channel, so any configuration that
+        # does not deliver the full eta source to dV/dt silently loses mass.
+        # MEASURED on the split-explicit lane with fix_eta_drift OFF: only
+        # ~55% of the source reaches dV/dt (the cosine filter's average over
+        # n=20 substeps), i.e. in - out - dV/dt = 0.4667*sum(A*F)/rho_0 != 0.
+        # Under the OLD virtual-salt closure that volume defect was masked
+        # chemically by the salt forcing; real mode removes the mask, so the
+        # combination must be refused rather than run non-conserving.
+        if (config.freshwater_closure == "real_freshwater"
+                and not getattr(config, "fix_eta_drift", True)):
+            raise ValueError(
+                'freshwater_closure="real_freshwater" requires '
+                "fix_eta_drift=True: the filtered barotropic substep delivers "
+                "only the filter-average of the eta source to the tracer "
+                "thickness (measured ~55% at n=20 with the cosine filter), and "
+                "fix_eta_drift is what projects eta onto the source-inclusive "
+                "target. With it off the freshwater volume budget does not "
+                "close (in - out - dV/dt != 0) and, unlike the virtual-salt "
+                "closure, nothing compensates chemically (#1484).")
         if config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, "

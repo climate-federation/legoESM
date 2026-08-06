@@ -5462,6 +5462,26 @@ def main() -> int:
         # Default None means "leave the config default alone", so an
         # unset flag stays bit-identical to previous runs.
         _fw_cfg_kw["freshwater_closure"] = args.freshwater_closure
+        # #1484 codex HIGH: SSS restoring is DERIVED as a virtual-salt
+        # equivalent -- sss_restoring inverts a target salt tendency into a
+        # water flux using S_target and a CONFIGURED z1. Under
+        # real_freshwater there is no virtual-salt term at all: the same
+        # number acts through volume-only dilution, whose realized strength
+        # depends on the LIVE salinity and the ACTUAL top-cell thickness, so
+        # the relaxation is the wrong magnitude. Refuse the pairing here --
+        # this is where restoring is switched on -- rather than in the ocean
+        # config, which has no restoring field to key off (the flux arrives
+        # as FreshwaterForcing.restoring, a traced array).
+        if (args.freshwater_closure == "real_freshwater"
+                and getattr(args, "sss_restore", False)):
+            raise SystemExit(
+                "--freshwater-closure real_freshwater is not compatible with "
+                "--sss-restore: the restoring flux is computed as a "
+                "VIRTUAL-salt equivalent (S_target + a fixed z1), so under "
+                "volume-only dilution it applies the wrong relaxation "
+                "strength. Drop --sss-restore, or keep the virtual_salt_flux "
+                "closure, until the restoring is reformulated for real "
+                "freshwater (#1484).")
     if args.no_normalize_freshwater:
         # EXPLICIT opt-out of the global-freshwater normalization.  The
         # CORE-II P-E+R integral is a real ~+0.65 Sv imbalance, so turning

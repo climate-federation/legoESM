@@ -182,6 +182,20 @@ class MPASOceanModel:
                 'barotropic substep. Use barotropic_solver="explicit_substep" to '
                 'apply it, or leave the filter at its "cosine" default.',
                 stacklevel=2)
+        # #1484 codex HIGH: the conservation fixer's volume target is
+        # V_new = V_old, i.e. it ASSUMES no volume source. Under
+        # real_freshwater the entire freshwater signal IS a volume source, so
+        # fix_volume would delete it and leave the full sum(A*F)/rho_0 as
+        # residual. Refuse until the fixer takes a freshwater-aware target.
+        if (self.config.freshwater_closure == "real_freshwater"
+                and getattr(self.config, "use_conservation_fixer", False)
+                and getattr(self.config, "fix_volume", True)):
+            raise ValueError(
+                'freshwater_closure="real_freshwater" is incompatible with '
+                "use_conservation_fixer=True + fix_volume=True: the fixer "
+                "drives V_new to V_old, which DELETES the freshwater volume "
+                "source (residual = sum(A*F)/rho_0). Set fix_volume=False, or "
+                "give the fixer a freshwater-aware volume target (#1484).")
         _valid_fw = ("none", "virtual_salt_flux", "real_freshwater")
         if self.config.freshwater_closure not in _valid_fw:
             raise ValueError(

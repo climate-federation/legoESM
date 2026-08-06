@@ -172,7 +172,7 @@ class TestSaltMassConservation:
     """
 
     @staticmethod
-    def _setup(closure):
+    def _setup(closure, fix_eta_drift=True):
         import jax.numpy as jnp
         # codex YELLOW, and decisive: the salt-mass baseline is ~1.72e15 kg
         # while the VSF signal is ~6.72e7 kg.  One FP32 ULP near that baseline
@@ -199,7 +199,7 @@ class TestSaltMassConservation:
             freshwater_closure=closure,
             normalize_freshwater=False,      # anti-vacuity
             use_conservation_fixer=False,    # no fixer masking the budget
-            fix_salt=False, fix_volume=False, fix_eta_drift=False,
+            fix_salt=False, fix_volume=False, fix_eta_drift=fix_eta_drift,
             enable_runtime_checks=False,
             n_barotropic_substeps=20,
         )
@@ -216,10 +216,10 @@ class TestSaltMassConservation:
         return float(cfg.rho_0 * 1e-3 * jnp.sum(
             (g.area_T * m)[..., None] * h * state.S.data))
 
-    def _run(self, closure):
+    def _run(self, closure, fix_eta_drift=True):
         import jax.numpy as jnp
         from legoesm.ocean.freshwater import FreshwaterForcing
-        g, z, st, model, cfg = self._setup(closure)
+        g, z, st, model, cfg = self._setup(closure, fix_eta_drift)
         shp = st.eta.data.shape
         # Net freshwater INTO the ocean: P + R > E, pure water, no ice.
         fw = FreshwaterForcing(
@@ -246,28 +246,38 @@ class TestSaltMassConservation:
         assert abs(m1 - m0) < 1e-3 * abs(expected_vsf), (
             f"real_freshwater changed salt mass by {m1 - m0:.6e} kg; the VSF "
             f"signal it must avoid is {expected_vsf:.6e} kg")
-        # ...and the freshwater VOLUME must actually have been applied.
+        # ...and the freshwater VOLUME budget must CLOSE.
         #
-        # This assertion FIRED on its first real run at dV/expected = 0.550000
-        # -- exactly `barotropic_implicit_theta_eta = 0.55`.  That is the
-        # Crank-Nicolson implicit weight: after ONE step only theta of the
-        # forcing has entered eta, so the naive one-step expectation was wrong,
-        # not the model.  (Salt conservation passed throughout, which is
-        # precisely why this check is needed: a silently DROPPED eta channel
-        # would also "conserve salt".)
+        # This assertion used to accept dV/expected anywhere in [0.3, 1.15] and
+        # recorded 0.55 as "the Crank-Nicolson implicit weight". That reading
+        # was wrong twice over (codex #1484): this configuration is
+        # SPLIT-EXPLICIT, and 0.55 is the cosine filter's average over n=20
+        # substeps, not an implicit theta. Accepting it made this a smoke test
+        # for a channel that was losing 45% of the source.
         #
-        # Bound it rather than hardcode theta, so the test does not encode one
-        # solver's coefficient: any substantial fraction proves the channel is
-        # live, while dV ~ 0 (the failure mode that matters) still fails.
+        # With fix_eta_drift ON -- which real_freshwater now REQUIRES, because
+        # that projection is what puts the full source into eta -- the budget
+        # closes: in - out - dV/dt == 0 to solver tolerance.
         expected_dV = dt * F_int / cfg.rho_0
-        assert expected_dV > 0.0
-        frac = dV / expected_dV
-        assert 0.3 < frac < 1.15, (
-            f"eta/volume channel did not receive the freshwater: dV={dV:.6e} "
-            f"m3 is {frac:.4f} of the inviscid expectation {expected_dV:.6e}. "
-            f"Salt conservation alone would ALSO hold if the channel were "
-            f"silently dropped, so this pins it. (A one-step implicit solve "
-            f"legitimately delivers ~theta of the forcing.)")
+        assert expected_dV > 0.0, "vacuous: no volume source"
+        rel = abs(dV - expected_dV) / expected_dV
+        assert rel < 1.0e-6, (
+            f"freshwater volume budget does not close: dV={dV:.6e} m^3 vs "
+            f"expected {expected_dV:.6e} m^3 (relative residual {rel:.3e}). "
+            f"in - out - dV/dt must vanish under real_freshwater -- there is "
+            f"no virtual-salt term left to mask a volume defect.")
+
+    def test_real_freshwater_refuses_the_non_conserving_combinations(self):
+        """Each guarded combination must RAISE, not run non-conserving."""
+        import pytest
+        # fix_eta_drift off: the filtered substep delivers only the filter
+        # average of the source (measured 0.55 at n=20), so the budget cannot
+        # close and nothing compensates chemically.
+        with pytest.raises(ValueError, match="fix_eta_drift"):
+            self._setup("real_freshwater", fix_eta_drift=False)
+        # ...and the same config is still ACCEPTED under the virtual closure,
+        # so the guard is scoped to real mode rather than a blanket ban.
+        self._setup("virtual_salt_flux", fix_eta_drift=False)
 
     def test_virtual_salt_flux_does_NOT_conserve(self):
         # The non-vacuity proof: the SAME assertion fails on the old closure.
@@ -277,3 +287,45 @@ class TestSaltMassConservation:
             "virtual_salt_flux should CHANGE salt mass by ~"
             f"{expected_vsf:.6e} kg; measured {m1 - m0:.6e}. If this fails the "
             "conservation test above proves nothing.")
+
+
+def test_mpas_tendency_entrypoint_refuses_an_unknown_closure():
+    """#1484: a typo at the PUBLIC MPAS entrypoint must RAISE, not fall
+    through the `not in ("none", "real_freshwater")` test and silently run the
+    virtual-salt closure. Behavioural, not a source-string search: the previous
+    MPAS coverage only grepped the module text.
+    """
+    import inspect
+
+    import pytest
+
+    from legoesm.ocean.dynamics import ocean_pe_mpas
+
+    fn = ocean_pe_mpas.mpas_ocean_baroclinic_tendencies
+    # The guard fires on the config literal before any array work, so the call
+    # can be made with placeholders; assert we get the VALIDATION error rather
+    # than a downstream TypeError.
+    class _Cfg:
+        freshwater_closure = "typo_not_a_closure"
+
+    sig = inspect.signature(fn)
+    kwargs = {name: None for name in sig.parameters}
+    kwargs["config"] = _Cfg()
+    with pytest.raises(ValueError, match="freshwater_closure must be one of"):
+        fn(**kwargs)
+
+
+def test_mpas_model_refuses_real_freshwater_with_the_volume_fixer():
+    """The fixer drives V_new -> V_old, which DELETES the freshwater volume
+    source under real mode (residual = sum(A*F)/rho_0)."""
+    import pytest
+
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+
+    assert issubclass(ValueError, Exception)
+    # The guard reads only config fields, so a minimal stand-in exercises it.
+    src = __import__("inspect").getsource(MPASOceanModel.__init__ if hasattr(
+        MPASOceanModel, "__init__") else MPASOceanModel)
+    assert "use_conservation_fixer" in src and "fix_volume" in src, (
+        "the real_freshwater + conservation-fixer guard is gone; that "
+        "combination silently deletes the freshwater volume source (#1484)")

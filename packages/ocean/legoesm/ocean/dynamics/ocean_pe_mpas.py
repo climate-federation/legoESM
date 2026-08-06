@@ -124,6 +124,15 @@ def mpas_ocean_baroclinic_tendencies(
     -------
     MPASOceanTendencies
     """
+    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
+    # must not fall through the "not in (none, real_freshwater)" test below and
+    # silently run the virtual-salt closure. The constructor validates too;
+    # this is the direct-call path.
+    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
+    if config.freshwater_closure not in _VALID_FW:
+        raise ValueError(
+            f"freshwater_closure must be one of {_VALID_FW}, got "
+            f"{config.freshwater_closure!r} (mpas_ocean_baroclinic_tendencies)")
     g = config.g
     rho_0 = config.rho_0
 
