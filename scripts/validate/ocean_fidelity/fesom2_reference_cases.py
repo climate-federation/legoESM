@@ -42,6 +42,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
+
 # Config keys that decide whether a truth value is comparable at all.
 DISCRIMINANTS = (
     "cyclic_length", "which_toy", "toy_ocean", "state_equation",
@@ -50,53 +52,48 @@ DISCRIMINANTS = (
 )
 
 
-def _scalar(text: str):
-    t = text.strip().strip('"').strip("'")
-    for cast in (int, float):
-        try:
-            return cast(t)
-        except ValueError:
-            pass
-    if t in ("True", "true"):
-        return True
-    if t in ("False", "false"):
-        return False
-    return t
+def _walk_scalars(node, out: dict) -> None:
+    """Collect DISCRIMINANT keys with scalar values from anywhere in the tree.
+
+    FESOM nests them under ``namelist.config`` / ``namelist.oce`` sub-blocks
+    whose names differ between setups, so the keys are gathered by name rather
+    than by path.
+    """
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in DISCRIMINANTS and not isinstance(v, (dict, list)):
+                out[k] = v
+            else:
+                _walk_scalars(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_scalars(v, out)
 
 
 def parse_setup(path: Path) -> dict:
     """Pull ``fcheck`` values and the config discriminants out of a setup.yml.
 
-    Deliberately a small hand parser rather than a YAML dependency: we need
-    only two shapes (the ``fcheck:`` block and ``key: value`` lines), and the
-    files are upstream-controlled, so a parse failure must be loud rather than
-    silently returning {}.
+    Uses PyYAML (already a dependency) rather than a hand parser. An earlier
+    hand-rolled version was rejected in review for a concrete reason: it
+    treated *any* indented mapping beneath ``fcheck:`` as truth values, so a
+    nested block under ``fcheck`` would have been flattened into bogus
+    reference numbers. Real YAML also gets quoting, comments, duplicate keys
+    (``test_souf`` declares ``geometry:`` twice) and multiline values right.
+
+    Only SCALAR entries directly under ``fcheck`` are accepted as truth
+    values; anything nested is ignored rather than silently flattened.
     """
-    lines = path.read_text().splitlines()
-    fcheck: dict = {}
+    with path.open() as fh:
+        doc = yaml.safe_load(fh) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path}: top level is not a mapping")
+    raw = doc.get("fcheck") or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: 'fcheck' is not a mapping ({type(raw).__name__})")
+    fcheck = {k: v for k, v in raw.items()
+              if not isinstance(v, (dict, list))}
     cfg: dict = {}
-    in_fcheck = False
-    fcheck_indent = None
-    for ln in lines:
-        if not ln.strip() or ln.lstrip().startswith("#"):
-            continue
-        indent = len(ln) - len(ln.lstrip())
-        if ln.strip().startswith("fcheck:"):
-            in_fcheck, fcheck_indent = True, indent
-            continue
-        if in_fcheck:
-            if indent <= fcheck_indent:
-                in_fcheck = False
-            elif ":" in ln:
-                k, v = ln.split(":", 1)
-                if v.strip():
-                    fcheck[k.strip()] = _scalar(v)
-                continue
-        if ":" in ln:
-            k, v = ln.split(":", 1)
-            k = k.strip()
-            if k in DISCRIMINANTS and v.strip():
-                cfg[k] = _scalar(v)
+    _walk_scalars({k: v for k, v in doc.items() if k != "fcheck"}, cfg)
     return {"fcheck": fcheck, "config": cfg}
 
 

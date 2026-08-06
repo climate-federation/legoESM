@@ -97,6 +97,42 @@ def test_fcheck_block_ends_at_dedent(tmp_path):
     assert "trailing_key" not in rec["fcheck"]
 
 
+def test_nested_block_under_fcheck_is_not_flattened(tmp_path):
+    """Codex review finding on the first (hand-parsed) version: it treated ANY
+    indented mapping beneath ``fcheck:`` as truth values, so a nested block
+    would have been flattened into bogus reference numbers. Only SCALARS
+    directly under fcheck may count."""
+    text = _SETUP + """    nested:
+        bogus: 123.456
+        also_bogus: 7.0
+"""
+    d = _write(tmp_path, "test_thing", text)
+    fc = ref.parse_setup(d / "setup.yml")["fcheck"]
+    assert "bogus" not in fc and "also_bogus" not in fc
+    assert "nested" not in fc
+    assert set(fc) == {"salt", "temp", "u"}
+
+
+def test_comments_and_quoting_do_not_corrupt_values(tmp_path):
+    """The other half of the same finding: real YAML handles comments and
+    quotes, a line-splitter does not."""
+    text = """\
+fcheck:
+    temp: 14.5   # trailing comment must not become part of the value
+    label: "PP"
+"""
+    d = _write(tmp_path, "test_thing", text)
+    fc = ref.parse_setup(d / "setup.yml")["fcheck"]
+    assert fc["temp"] == pytest.approx(14.5)
+    assert fc["label"] == "PP"
+
+
+def test_non_mapping_fcheck_raises(tmp_path):
+    d = _write(tmp_path, "test_thing", "fcheck: 5\n")
+    with pytest.raises(ValueError, match="not a mapping"):
+        ref.parse_setup(d / "setup.yml")
+
+
 def test_collect_skips_setups_without_truth_values(tmp_path):
     _write(tmp_path, "test_with", _SETUP)
     _write(tmp_path, "test_without", "mesh: x\nntasks: 2\n")
@@ -109,11 +145,3 @@ def test_collect_skips_setups_without_truth_values(tmp_path):
 def test_collect_raises_when_there_is_no_setups_dir(tmp_path):
     with pytest.raises(SystemExit, match="no setups/"):
         ref.collect(tmp_path / "nowhere")
-
-
-def test_scalar_casts_without_mangling_strings():
-    assert ref._scalar(" 1 ") == 1
-    assert ref._scalar("1.5") == pytest.approx(1.5)
-    assert ref._scalar('"PP"') == "PP"
-    assert ref._scalar("False") is False
-    assert ref._scalar("True") is True
