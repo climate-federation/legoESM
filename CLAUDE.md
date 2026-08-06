@@ -110,6 +110,22 @@ One change at a time. Do not refactor adjacent code, rename things, or "improve"
 code I didn't ask about. Long unbroken generations drift into invention — prefer
 a small verified diff over a large plausible one.
 
+**DO NOT EXTRAPOLATE. Do only what was asked** (user directive 2026-08-06).
+The ask is the deliverable, not a starting point to reason outward from.
+
+- A related-looking problem you notice is a ONE-LINE report, not a work item.
+  Name it and stop; do not start it.
+- Do not widen scope because a fix "would only be complete if" something
+  adjacent were also done. Ship the ask; state the boundary.
+- New artifacts (scripts, benches, plots, panels, public APIs, config knobs)
+  only when asked or genuinely required to finish the ask. If unsure whether
+  it is required, it is not — ask in one line.
+- Do not propose or launch compute the user did not ask for.
+- FAILURES 2026-08-05/06: scoped a 128-GPU coupled ladder nobody requested off
+  a question about existing plots; added a coupled panel to a figure when asked
+  to assess the figure; wrote probes and helper scripts for questions that were
+  never posed. Each cost a round-trip and buried the actual answer.
+
 ## Attribution Gates — MANDATORY, each from a real 2026-07 failure
 Model is near operational. Every rule below is mechanical: satisfy it or state
 explicitly that you did not. "I was careful" is not compliance.
@@ -538,7 +554,20 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
-User callout 2026-08-06: *"you are quite unclear... provide more succinct,
+**SECOND callout, same day (2026-08-06), because the rule below was written and
+then ignored: _"stop being verbose. It is really hard to understand. be more
+direct, to the point, clear about issues. Bullets summarizing."_ Plus: _"aren't
+you using caveman?"_ — the terse mode was ACTIVE and I was still writing essays.**
+- **BULLETS BY DEFAULT.** Prose paragraphs are the failure mode. One line per fact.
+- **Lead with the issue.** Not how it was found.
+- **Delete every sentence that does not change what the user does next.**
+- **Never re-explain a caveat already stated once.**
+- **No near-miss stories.** "I almost got X wrong" is not a finding. State the
+  corrected number and move on.
+- If a terse mode (caveman/ponytail) is active, IT APPLIES TO THE WHOLE REPLY —
+  including findings, status, and caveats. Length is not a substitute for rigor.
+
+User callout 2026-08-06 (earlier): *"you are quite unclear... provide more succinct,
 clear summary, clear choice, do not make many but targeted and verified
 assumptions."* Evidence the reader has to assemble into a conclusion is not a
 report. Structure, in this order, and stop:
