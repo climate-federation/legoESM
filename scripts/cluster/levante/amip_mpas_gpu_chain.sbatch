@@ -126,8 +126,26 @@ fi
 # MPAS restart contract (model_driver._run_mpas): --days is the REMAINING
 # days for this link, NOT the absolute target (cube/lat-lon convention).
 # Do NOT pass --start-day; the restart checkpoint carries the time origin.
-DAYS_THIS_JOB=$(( TARGET_DAYS - LATEST_DAY ))
-echo "  This link runs ${DAYS_THIS_JOB} remaining days (of ${TARGET_DAYS})"
+# LAT-LON restart contract is the OPPOSITE: the compiled lane resumes at the
+# checkpoint's absolute day and --days is the ABSOLUTE target, so passing
+# remaining days computes NEGATIVE steps and the link exits after 0 steps
+# (observed 2026-08-02: "Starting compiled run: -51840 steps" looped the llF
+# chain forever). Detect the lane from EXTRA.
+# Detect the lat-lon lane from EXTRA *or* from a CONFIG_YAML that sets the
+# grid (codex: submit_fullphys.sh selects lat-lon via YAML only, which the
+# EXTRA-only detector missed — reintroducing the negative-step loop there).
+_IS_LATLON=0
+[[ " ${EXTRA:-} " == *"--grid-type latlon"* ]] && _IS_LATLON=1
+if [[ -f "${CONFIG_YAML:-}" ]] && grep -Eq '^[[:space:]]*grid_type:[[:space:]]*"?latlon' "${CONFIG_YAML}"; then
+    # EXTRA overrides YAML, so only trust the YAML when EXTRA has no grid-type.
+    [[ " ${EXTRA:-} " != *"--grid-type "* ]] && _IS_LATLON=1
+fi
+if (( _IS_LATLON )); then
+    DAYS_THIS_JOB=${TARGET_DAYS}
+else
+    DAYS_THIS_JOB=$(( TARGET_DAYS - LATEST_DAY ))
+fi
+echo "  This link runs to/for ${DAYS_THIS_JOB} days (target ${TARGET_DAYS}, resume day ${LATEST_DAY})"
 # The run-manifest guard hashes the FULL config incl. --days, so the
 # remaining-days convention makes every link a "different config" in the
 # same directory.  Archive the prior link's manifest (provenance kept

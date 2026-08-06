@@ -116,6 +116,12 @@ class DiffusionCoeffs(NamedTuple):
     A_h: float         # Laplacian viscosity [m^2/s]
     hyperdiff: float   # Biharmonic hyperdiffusion [m^4/s]
     div_damp: float    # Divergence damping [m^2/s]
+    # Horizontal THERMAL diffusivity [m^2/s].  Historically locked to A_h;
+    # k_h_scale=None keeps that (byte-identical).  A separate scale decouples
+    # the momentum-viscosity circulation lever (a_h_scale) from the thermal
+    # smoothing that stabilizes vertical computational modes (the cldG abs-145
+    # tropical sawtooth died with BOTH scaled 0.25).
+    K_h_A: float = None
 
 
 def _grid_min_dx(grid) -> float:
@@ -179,7 +185,10 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     c_grav = 300.0
     div_damp = dc.div_damp_scale * c_grav * dx_min / (2.0 * 3.14159)
 
-    return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp)
+    _khs = getattr(dc, "k_h_scale", None)
+    K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
+    return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
+                           K_h_A=K_h_A)
 
 
 # Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
@@ -595,7 +604,10 @@ def create_atmosphere_dycore(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
-            K_h=_K_h,
+            # main's k_h_scale (diff.K_h_A) is the default and matches the
+            # other two MPAS sites; mpas_k_h_scale overrides it only when
+            # explicitly set, so neither flag is silently inert.
+            K_h=(_K_h if _k_h_scale is not None else diff.K_h_A),
             # conservation_fixer=False overrides fix_mass=True (lat-lon
             # contract; codex 2026-07-12 round 2 — this branch predates
             # the audit but had the same gap).
@@ -647,7 +659,7 @@ def create_atmosphere_dycore(
         nh_cfg = MPASCompressibleEulerConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
-            K_h=diff.A_h,
+            K_h=diff.K_h_A,
             fix_mass=dc.fix_mass and dc.conservation_fixer,
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )

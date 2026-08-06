@@ -90,13 +90,13 @@ def test_init_creates_expected_files(tmp_path):
 def test_init_rejects_bad_override(tmp_path):
     sd = _write_smoke_surfdata(tmp_path)
     out = tmp_path / "expt"
-    with pytest.raises(ValueError, match="simple_seb"):    # config validator catches it
+    with pytest.raises(ValueError, match="stomatal_model"):   # config validator catches it
         _run_init([
             "biophysics/smoke_test",
             "--name", "bad",
             "--output-dir", str(out),
             "-o", f"surfdata.path={sd}",
-            "-o", "physics.bulk_scheme=most",              # simple_seb + MOST = illegal
+            "-o", "physics.stomatal_model=jarvis",            # not a canopy leaf model
         ])
     assert not out.exists() or not (out / "config.yaml").exists()
 

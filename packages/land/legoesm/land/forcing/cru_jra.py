@@ -35,10 +35,10 @@ KD-tree / inverse-distance machinery (``legoesm.grids.regridding``) into the lan
 model's column space, and the variable map produces the standard
 :class:`legoesm.core.coupling_fields.AtmToSurface`.
 
-This module is M1 of the LMIP forcing workplan (``docs/land/lmip_s3_scope.md``):
-read + regrid + variable map with **nearest-time** selection.  The 6h->dt
-temporal disaggregation (zenith-weighted SW, constant-hold precip, linear interp
-for the rest) is M2 and builds on the two time axes carried here.
+This module reads + regrids + variable-maps the CRU-JRA streams with
+**nearest-time** selection.  The 6h->dt temporal disaggregation (zenith-weighted
+SW, constant-hold precip, linear interp for the rest) builds on the two time axes
+carried here.
 """
 
 from __future__ import annotations
@@ -343,25 +343,35 @@ def build_forcing_weights(
 
     Reuses the shared regridding machinery (the same path surfdata uses), so the
     coarse-target regrid is consistent with the boundary-data regrid.
+
+    CRU-JRA is LAND-ONLY (ocean = NaN, ~57% of source cells), so the KD-tree is
+    built from LAND source cells only (``src_valid`` = finite ``tbot``).  Without
+    this a coastal model column whose 4 nearest CRU-JRA cells are all ocean
+    regrids to NaN -> a NaN cold-start -> that column NaNs for the whole run.
+    Land-only source guarantees every column draws its nearest ACTUAL land
+    forcing, so no land column is ever unforced.
     """
+    src_land = np.isfinite(np.asarray(forcing.tbot, dtype=np.float64)).any(axis=0)
     return compute_latlon_to_voronoi_weights(
         np.radians(np.asarray(forcing.lat, dtype=np.float64)),
         np.radians(np.asarray(forcing.lon, dtype=np.float64)),
         np.asarray(tgt_lat_rad, dtype=np.float64),
         np.asarray(tgt_lon_rad, dtype=np.float64),
         k_neighbors=k_neighbors,
+        src_valid=src_land,
     )
 
 
 def _regrid_series(field_txy: np.ndarray, weights: RegridWeights) -> np.ndarray:
     """Regrid ``(n_time, n_lat, n_lon)`` -> ``(n_time, ncol)``.
 
-    Uses the **NaN-aware** IDW regrid: CRU-JRA is land-only (ocean = NaN, ~57 %
-    of cells), so plain IDW would bleed ocean NaN into every target with a wet
-    neighbour.  NaN-aware drops missing neighbours and renormalises; a target is
-    NaN only when ALL its neighbours are ocean (open sea), which the land mask
-    discards downstream.  ``regrid_scalar*`` flattens the LEADING spatial dims and
-    preserves trailing dims, so move time to the trailing axis, regrid, move back.
+    Uses the **NaN-aware** IDW regrid as a belt-and-braces safety net: the weights
+    are already built from LAND source cells only (``build_forcing_weights`` passes
+    ``src_valid``), so every column's neighbours are finite land and no all-ocean
+    target survives — NaN-aware then only guards against isolated missing values
+    within an otherwise-land neighbourhood.  ``regrid_scalar*`` flattens the LEADING
+    spatial dims and preserves trailing dims, so move time to the trailing axis,
+    regrid, move back.
     """
     src = np.moveaxis(np.asarray(field_txy), 0, -1)        # (nlat, nlon, n_time)
     out = np.asarray(regrid_scalar_nan_aware(jnp.asarray(src), weights))  # (ncol, n_time)

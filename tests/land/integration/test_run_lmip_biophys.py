@@ -73,6 +73,18 @@ def _run_config(mod, cfg_path, out_dir, restart_from=""):
     ])
 
 
+def test_declared_reconstruction_on_static_surfdata_fails_fast(tmp_path):
+    """LULCC guard through the driver: declaring a transient reconstruction on a
+    single-year surfdata must raise BEFORE the run (silent no-LULCC is forbidden)."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))          # single cover year
+    out = tmp_path / "out"
+    cfg_path = _write_smoke_config(
+        tmp_path, sd, extra_overrides=["surfdata.land_cover_dataset=hyde"])
+    with pytest.raises(SystemExit, match="single cover year"):
+        _run_config(mod, cfg_path, out)
+
+
 def test_biophys_driver_synthetic_smoke(tmp_path):
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
@@ -95,6 +107,66 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
     assert np.all(np.isfinite(ds["T_sfc"].values))
     assert float(ds["T_sfc"].min()) > 200.0
     assert float(ds["T_sfc"].max()) < 360.0
+    # CF metadata: every variable carries a long_name + units, coords are labelled,
+    # and the file opens (the "days since year_start" units string must NOT be on
+    # the time coord or xarray fails to CF-decode it).
+    assert ds.attrs.get("Conventions") == "CF-1.8"
+    assert ds["T_sfc"].attrs["units"] == "K" and ds["T_sfc"].attrs["long_name"]
+    assert ds["lhflx"].attrs["units"] == "W m-2"
+    assert ds["lat"].attrs["units"] == "degrees_north"
+    assert ds["lon"].attrs["units"] == "degrees_east"
+    assert ds["time"].attrs["units"] == "days"          # plain duration, not CF datetime
+    for v in ds.data_vars:
+        assert ds[v].attrs.get("units") is not None, f"{v} missing units"
+        assert ds[v].attrs.get("long_name"), f"{v} missing long_name"
+
+
+def test_canopy_run_tapes_gpp_and_et(tmp_path):
+    """A two-leaf-canopy run tapes GPP [gC/m2/day] and ET [mm/day]: GPP is finite,
+    never negative (gross uptake), and positive where the lit canopy photosynthesises;
+    ET is finite.  Covers the surface_out.gpp -> tape path (dropped from the
+    TileResponse when carbon is off)."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "out"
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer",
+                    "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},  # 2 days -> daylight
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["GPP", "ET", "transp", "soil_evap", "Rnet",
+                                       "lhflx", "LAI"]}]},
+    }).raw
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert _run_config(mod, cfg_path, out) == 0
+
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
+    gpp = np.asarray(ds["GPP"].values)
+    et = np.asarray(ds["ET"].values)
+    transp = np.asarray(ds["transp"].values)
+    soil_evap = np.asarray(ds["soil_evap"].values)
+    rnet = np.asarray(ds["Rnet"].values)
+    for name, a in (("GPP", gpp), ("ET", et), ("transp", transp),
+                    ("soil_evap", soil_evap), ("Rnet", rnet)):
+        assert np.all(np.isfinite(a)), f"{name} non-finite"
+    assert (gpp >= 0.0).all()                 # gross primary production is uptake, never negative
+    assert gpp.max() > 0.0                     # some lit, vegetated canopy photosynthesises
+    assert np.abs(et).max() < 50.0             # mm/day, sane bound
+    assert np.abs(rnet).max() < 1500.0         # W/m2, sane bound
+    # transpiration + soil evaporation partition the total ET (warm synthetic run:
+    # no snow, so L_eff = L_v throughout and the two components sum to ET).
+    assert abs(np.nanmean(transp + soil_evap) - np.nanmean(et)) < 1.0   # mm/day
+    # both components are physically bounded; either can be slightly negative
+    # (canopy or soil dew / condensation), so bound the magnitude, not the sign.
+    assert np.abs(transp).max() < 50.0 and np.abs(soil_evap).max() < 50.0   # mm/day
 
 
 def test_build_model_times_synthetic_starts_at_zero():
@@ -135,12 +207,18 @@ def test_chunked_scan_straddles_year_boundary(tmp_path):
     assert np.isfinite(T[0]).sum() > 0
     assert np.isfinite(T[1]).sum() > 0
 
-    # Restart filename encodes total model time elapsed: 8764 h = 1 year + 4 h
-    # → year 2001, doy 0, hour 4.  Proves the chunked loop bookkept time
-    # correctly across the boundary.
-    restarts = list(out.glob("restart_*.npz"))
-    assert len(restarts) == 1
-    assert restarts[0].name == "restart_2001_d000h04.npz"
+    # Per-year annual NetCDFs + resumable restarts are flushed inside the loop so
+    # a wall-clock timeout keeps every FINISHED year.  Year 2000 (8760 h = 1 exact
+    # year) -> the annual file + restart_2001_d000h00 (a clean resume seed); year
+    # 2001 (+4 h) and the final end-of-run restart -> restart_2001_d000h04 (total
+    # time = 1 year + 4 h, proving the chunked loop bookkept time across the
+    # boundary).
+    assert (out / "lmip_biophys.annual.2000.nc").exists()
+    assert (out / "lmip_biophys.annual.2001.nc").exists()
+    assert xr.open_dataset(out / "lmip_biophys.annual.2000.nc").sizes["time"] == 1
+    restarts = {p.name for p in out.glob("restart_*.npz")}
+    assert "restart_2001_d000h00.npz" in restarts        # resume seed after year 2000
+    assert "restart_2001_d000h04.npz" in restarts        # after year 2001 / final (total time)
 
 
 def test_oversize_forcing_estimate_fails_fast(tmp_path):
@@ -289,3 +367,54 @@ def test_slab_mode_gate_reads_real_state(tmp_path):
     ])
     rc = _run_config(mod, cfg_path, out)
     assert rc in (0, 1)                                       # gate read real state, no crash
+
+
+def test_freeze_thaw_wires_into_soil_thermal(tmp_path):
+    """physics.enable_freeze_thaw must reach the constructed
+    MultiLayerLandConfig.thermal and be recorded in the run's restart metadata
+    (sourced from that config, not the raw args) — proving the
+    YAML -> _args_from_config -> MultiLayerLandConfig.thermal wiring
+    end-to-end.  Default is off; the override turns it on."""
+    from legoesm.land.restart import load_land_restart
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+
+    def _meta_freeze_thaw(out_dir):
+        r = list(out_dir.glob("restart_*.npz"))[0]
+        _, meta = load_land_restart(r, expected_land_mode="multilayer",
+                                    expected_ncol=32, expected_n_layers=None)
+        return meta["metadata"]["enable_freeze_thaw"]
+
+    # Default: freeze/thaw off (schema default = bit-identical sensible heat).
+    out_off = tmp_path / "ft_off"
+    assert _run_config(mod, _write_smoke_config(tmp_path, sd), out_off) == 0
+    assert _meta_freeze_thaw(out_off) is False
+
+    # Override on: the flag flows through to the soil-thermal config and the run
+    # (freeze/thaw physics is exercised) completes over land.
+    out_on = tmp_path / "ft_on"
+    cfg_on = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.enable_freeze_thaw=true"])
+    assert _run_config(mod, cfg_on, out_on) == 0
+    assert _meta_freeze_thaw(out_on) is True
+
+
+def test_two_leaf_canopy_most_runs(tmp_path):
+    """The mechanistic two-leaf canopy (intrinsic Ball-Berry stomata) + MOST
+    bulk flux must run end-to-end and produce finite, physical surface T over
+    land — the default LMIP physics path (land/stable)."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "canopy"
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.surface_scheme=two_leaf_canopy",
+        "physics.bulk_scheme=most",
+    ])
+    rc = _run_config(mod, cfg_path, out)
+    assert rc in (0, 1)                                       # completes (canopy path works)
+    import xarray as xr
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
+    T = ds["T_sfc"].values
+    assert np.isfinite(T).any()
+    finite = T[np.isfinite(T)]
+    assert finite.min() > 200.0 and finite.max() < 360.0     # physical surface T

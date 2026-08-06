@@ -319,6 +319,34 @@ def duo_pad_scalars(f6: list, ctx: dict) -> None:
         f6[t][:, :] = padded[t]
 
 
+def _geopk_sw_adapter(delp2d: np.ndarray, hs: np.ndarray, bd,
+                      pt: np.ndarray | None, *, cg: bool) -> tuple:
+    """Shared body of the two km=1 SW geopk adapters.
+
+    Folds the ``-DSW_DYNAMICS`` convention (akap=1, ptop=0, pt defaults
+    to 1, NO cp_air, no peln/pkz) and the 2-D<->3-D staging onto the ONE
+    km-general kernel in :mod:`legoesm.core.fv3_native_pgrad`.  Carries
+    no numerics of its own.
+
+    ``unwritten_fill=0.0`` (not the oracle's 1e30 sentinel) keeps the
+    returned halos byte-identical to the pre-refactor km=1 code, which
+    allocated ``np.zeros`` and wrote only the compute box — see
+    UNCERTAIN U10.  ``cp_air=1.0`` is inert: the SW branch (:2770) drops
+    the factor entirely.
+    """
+    from legoesm.core.fv3_native_pgrad import geopk as _geopk_km
+
+    delp3 = np.asarray(delp2d, dtype=np.float64)[:, :, None]
+    pt3 = (np.ones_like(delp3) if pt is None
+           else np.asarray(pt, dtype=np.float64)[:, :, None])
+    out = _geopk_km(delp3, pt3, hs, bd, km=1, ptop=0.0, akap=1.0,
+                    cp_air=1.0, cg=cg, duogrid=True, computehalo=False,
+                    npx=bd.ie + 1, npy=bd.je + 1, a2b_ord=4,
+                    bounded_domain=False, sw_dynamics=True,
+                    unwritten_fill=0.0)
+    return out["pk"], out["gz"]
+
+
 def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
                   pt: np.ndarray | None = None) -> tuple:
     """dyn_core.F90 geopk (2660-2790), SW_DYNAMICS branch, km=1, CG=T.
@@ -328,20 +356,10 @@ def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
     (the SW_DYNAMICS increment, NO cp_air).  CG=.true. ranges:
     ifirst=is-1..ie+1 (c_sw's delpc compute ring covers exactly this).
     Returns (pkc, gz) with a trailing 2-level axis on the data domain.
+
+    ADAPTER over ``fv3_native_pgrad.geopk`` — no duplicated numerics.
     """
-    is_, ie = bd.is_, bd.ie
-    m = delpc.shape[0]
-    pkc = np.zeros((m, m, 2))
-    gz = np.zeros((m, m, 2))
-    lo = 1 - bd.ng
-    sl = slice(is_ - 1 - lo, ie + 1 - lo + 1)
-    pkc[sl, sl, 0] = 0.0
-    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delpc[sl, sl]))
-    gz[sl, sl, 1] = hs[sl, sl]
-    ptv = 1.0 if pt is None else pt[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
-                                           - pkc[sl, sl, 0])
-    return pkc, gz
+    return _geopk_sw_adapter(delpc, hs, bd, pt, cg=True)
 
 
 def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
@@ -351,38 +369,16 @@ def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
     uc over (is:ie+1, js:je) and vc over (is:ie, js:je+1).  Mutates
     uc/vc (numpy data-domain arrays) in place; delpc unused on the
     hydrostatic branch (kept for signature fidelity).
+
+    ADAPTER over ``fv3_native_pgrad.p_grad_c`` — the 2-D uc/vc are
+    passed as ``[:, :, None]`` VIEWS so the in-place update writes
+    through to the caller's arrays.
     """
-    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    lo = 1 - bd.ng
-    rdxc = gs["rdxc"]
-    rdyc = gs["rdyc"]
-    wk = pkc[:, :, 1] - pkc[:, :, 0]
+    from legoesm.core.fv3_native_pgrad import p_grad_c as _p_grad_c_km
 
-    def wk_at(i, j):
-        return wk[i - lo, j - lo]
-
-    def gz_at(i, j, k):
-        return gz[i - lo, j - lo, k - 1]
-
-    def pk_at(i, j, k):
-        return pkc[i - lo, j - lo, k - 1]
-
-    for j in range(js, je + 1):
-        for i in range(is_, ie + 1 + 1):
-            uc[i - lo, j - lo] += dt2 * rdxc[i - lo, j - lo] / (
-                wk_at(i - 1, j) + wk_at(i, j)) * (
-                (gz_at(i - 1, j, 2) - gz_at(i, j, 1))
-                * (pk_at(i, j, 2) - pk_at(i - 1, j, 1))
-                + (gz_at(i - 1, j, 1) - gz_at(i, j, 2))
-                * (pk_at(i - 1, j, 2) - pk_at(i, j, 1)))
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1):
-            vc[i - lo, j - lo] += dt2 * rdyc[i - lo, j - lo] / (
-                wk_at(i, j - 1) + wk_at(i, j)) * (
-                (gz_at(i, j - 1, 2) - gz_at(i, j, 1))
-                * (pk_at(i, j, 2) - pk_at(i, j - 1, 1))
-                + (gz_at(i, j - 1, 1) - gz_at(i, j, 2))
-                * (pk_at(i, j - 1, 2) - pk_at(i, j, 1)))
+    _p_grad_c_km(dt2, np.asarray(delpc, dtype=np.float64)[:, :, None],
+                 pkc, gz, uc[:, :, np.newaxis], vc[:, :, np.newaxis],
+                 gs, bd, npz=1, hydrostatic=True)
 
 
 def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
@@ -682,19 +678,22 @@ def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd,
     """geopk D-grid call (CG=.false., a2b_ord=4, duo): ranges widen to
     is-2..ie+2 (dyn_core geopk range guard).  Same SW km=1 formulas as
     the C version; delp halos must be freshly exchanged (dyn_core does
-    ext_scalar(delp/pt) right before this call)."""
-    is_, ie = bd.is_, bd.ie
-    m = delp.shape[0]
-    pkc = np.zeros((m, m, 2))
-    gz = np.zeros((m, m, 2))
-    lo = 1 - bd.ng
-    sl = slice(is_ - 2 - lo, ie + 2 - lo + 1)
-    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delp[sl, sl]))
-    gz[sl, sl, 1] = hs[sl, sl]
-    ptv = 1.0 if pt is None else pt[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
-                                           - pkc[sl, sl, 0])
-    return pkc, gz
+    ext_scalar(delp/pt) right before this call).
+
+    ADAPTER over ``fv3_native_pgrad.geopk`` — no duplicated numerics.
+
+    OPEN ITEM (pre-existing, NOT introduced by the adapter refactor):
+    dyn_core.F90:1402 passes ``computehalo=.true.`` at this site, which
+    on the duo lane extends the write box to the FULL data domain
+    (isd..ied, jsd..jed) whenever ``is==1`` and ``ie==npx-1``.  This
+    km=1 path has always used the un-extended is-2..ie+2 box and is kept
+    that way here so the six-face stepper does not move; it is benign
+    for the stepper (a2b needs only is-2..ie+2 and the halos are
+    exchange-filled) but it IS a divergence from upstream.  The
+    ``computehalo`` extension itself is certified by the km>1 oracle
+    (``PKC_D``/``GZ_D`` carry no sentinel), not by this adapter.
+    """
+    return _geopk_sw_adapter(delp, hs, bd, pt, cg=False)
 
 
 def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
@@ -705,101 +704,34 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
     D-grid PG update converts the circulation-form d_sw6 winds back to
     covariant: u = rdx*(wk2 + u + dt/(wk+wk(i+1))*(cross-terms)).
     Mutates u/v in place (data-domain numpy arrays).
+
+    ADAPTER over ``fv3_native_pgrad.one_grad_p`` — no duplicated
+    numerics.  ``u``/``v`` are passed as ``[:, :, None]`` VIEWS so the
+    in-place update writes through.
+
+    ALIASING CONTRACT (codex r21 blocker A — a REGRESSION this adapter
+    briefly shipped).  The pre-refactor km=1 body worked on COPIES of the
+    pkc/gz planes, so the caller's ``pkc``/``gz`` survived the a2b
+    ``replace=True``.  The shared kernel is faithful to dyn_core and
+    mutates them IN PLACE; passing the caller's arrays straight through
+    silently mutated 169 ``pkc`` words and 338 ``gz`` words where the
+    legacy body mutated ZERO.  The earlier justification ("both call
+    sites discard them") was wrong on principle: the frozen legacy
+    reference is the contract and the burden is on the port, not on
+    every present and future caller.  This adapter therefore restores
+    COPY-ON-ENTRY.  ``test_sw_adapter_mutation_footprints`` asserts the
+    full footprint — which arrays change and by how many words — for all
+    four adapters, not just the returned/updated winds.
     """
-    from legoesm.core.fv3_native_d_sw import a2b_ord4, fort
+    from legoesm.core.fv3_native_pgrad import one_grad_p as _one_grad_p_km
 
-    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    isd, jsd = bd.isd, bd.jsd
-    ng = bd.ng
-    lo = 1 - ng
-
-    gsf = {
-        "grid_lon": fort(gs["grid_lon"], isd, jsd),
-        "grid_lat": fort(gs["grid_lat"], isd, jsd),
-        "agrid_lon": fort(gs["agrid_lon"], isd, jsd),
-        "agrid_lat": fort(gs["agrid_lat"], isd, jsd),
-        "dxa": fort(gs["dxa"], isd, jsd),
-        "dya": fort(gs["dya"], isd, jsd),
-        "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
-        "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
-        "bounded_domain": bool(gs.get("bounded_domain", False)),
-        "grid_type": 0,
-        "sw_corner": bool(gs.get("sw_corner", True)),
-        "se_corner": bool(gs.get("se_corner", True)),
-        "nw_corner": bool(gs.get("nw_corner", True)),
-        "ne_corner": bool(gs.get("ne_corner", True)),
-    }
-
-    pk1 = np.array(pkc[:, :, 0], copy=True)
-    pk2 = np.array(pkc[:, :, 1], copy=True)
-    gz1 = np.array(gz[:, :, 0], copy=True)
-    gz2 = np.array(gz[:, :, 1], copy=True)
-    # pk(:,:,1) = top_value (ptk = ptop**akap = 0) on the B ring
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1 + 1):
-            pk1[i - lo, j - lo] = 0.0
-    wkb = np.zeros_like(pk2)
-    pg_bvertex_mean2 = _PG_BVERTEX_MEAN2
-    for arr in (pk2, gz1, gz2):
-        fq = fort(arr, isd, jsd)
-        fwk = fort(wkb, isd, jsd)
-        a2b_ord4(fq, fwk, gsf, npx, npy, is_, ie, js, je, ng,
-                 replace=True, duogrid=True)
-        if pg_bvertex_mean2:
-            # DIAGNOSTIC (codex vertex-kill C3 screen, NON-FAITHFUL):
-            # replace the four projected B vertices with the mean of
-            # their two edge neighbours — isolates the PG-tail
-            # B-vertex projection as an amplifier
-            B = fort(arr, isd, jsd)
-            snap = {(i, j): B[i, j]
-                    for i in (is_, is_ + 1, ie, ie + 1)
-                    for j in (js, js + 1, je, je + 1)}
-            B[is_, js] = 0.5 * (snap[(is_ + 1, js)] + snap[(is_, js + 1)])
-            B[ie + 1, js] = 0.5 * (snap[(ie, js)] + snap[(ie + 1, js + 1)])
-            B[ie + 1, je + 1] = 0.5 * (snap[(ie, je + 1)]
-                                       + snap[(ie + 1, je)])
-            B[is_, je + 1] = 0.5 * (snap[(is_ + 1, je + 1)]
-                                    + snap[(is_, je)])
-
-    if d_ext > 0.0:
-        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
-        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
-        for j in range(js, je + 1 + 1):
-            for i in range(is_, ie + 1):
-                wk2[i - 1, j - 1] = (divg2[i - 1, j - 1]
-                                     - divg2[i + 1 - 1, j - 1])
-        for j in range(js, je + 1):
-            for i in range(is_, ie + 1 + 1):
-                wk1[i - 1, j - 1] = (divg2[i - 1, j - 1]
-                                     - divg2[i - 1, j + 1 - 1])
-    else:
-        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
-        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
-
-    def at(a, i, j):
-        return a[i - lo, j - lo]
-
-    wk = pk2 - pk1
-    rdx = gs["rdx"]
-    rdy = gs["rdy"]
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1):
-            u[i - lo, j - lo] = rdx[i - lo, j - lo] * (
-                wk2[i - 1, j - 1] + u[i - lo, j - lo]
-                + dt / (at(wk, i, j) + at(wk, i + 1, j)) * (
-                    (at(gz2, i, j) - at(gz1, i + 1, j))
-                    * (at(pk2, i + 1, j) - at(pk1, i, j))
-                    + (at(gz1, i, j) - at(gz2, i + 1, j))
-                    * (at(pk2, i, j) - at(pk1, i + 1, j))))
-    for j in range(js, je + 1):
-        for i in range(is_, ie + 1 + 1):
-            v[i - lo, j - lo] = rdy[i - lo, j - lo] * (
-                wk1[i - 1, j - 1] + v[i - lo, j - lo]
-                + dt / (at(wk, i, j) + at(wk, i, j + 1)) * (
-                    (at(gz2, i, j) - at(gz1, i, j + 1))
-                    * (at(pk2, i, j + 1) - at(pk1, i, j))
-                    + (at(gz1, i, j) - at(gz2, i, j + 1))
-                    * (at(pk2, i, j) - at(pk1, i, j + 1))))
+    pk_work = np.array(pkc, dtype=np.float64, copy=True)
+    gz_work = np.array(gz, dtype=np.float64, copy=True)
+    _one_grad_p_km(u[:, :, np.newaxis], v[:, :, np.newaxis], pk_work,
+                   gz_work, divg2, None, gs, bd, npx=npx, npy=npy, npz=1,
+                   dt=dt, ptop=0.0, akap=1.0, hydrostatic=True,
+                   a2b_ord=4, d_ext=d_ext, ng=bd.ng, duogrid=True,
+                   bvertex_mean2=_PG_BVERTEX_MEAN2)
 
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,

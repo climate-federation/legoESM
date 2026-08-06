@@ -178,8 +178,12 @@ def test_setup_returns_expected_keys(tmp_path):
     # Coupler config carries the Item-1 fixes
     assert state["coupler_cfg"].bulk_scheme == "large_yeager"
     assert state["coupler_cfg"].z_ref == 10.0
-    assert state["coupler_cfg"].z_t_atm == 2.0
-    assert state["coupler_cfg"].z_q_atm == 2.0
+    # ALL THREE at 10 m: JRA55-do's tas/huss/uas each carry an explicit
+    # height=10 m coordinate, and FESOM2 forces the same dataset with
+    # ncar_bulk_z_tair = ncar_bulk_z_shum = 10.0.  These previously asserted
+    # 2.0, pinning a defect worth ~+11.5 W/m^2 of latent heat flux.
+    assert state["coupler_cfg"].z_t_atm == 10.0
+    assert state["coupler_cfg"].z_q_atm == 10.0
     assert state["co2_ppmv"] == 400.0
 
 
@@ -1363,3 +1367,108 @@ def test_block_window_raises_when_block_wraps_more_than_once():
     with pytest.raises(ValueError, match="more than once"):
         run_omip._jra55_block_record_window(
             3, 4, 5400.0, 2, True)
+
+
+# ============================================================================
+# Sea-ice rheology reachability (--ice-dynamics / --ice-categories)
+#
+# The lane used to hard-code SeaIceConfig(), i.e. dynamics="none",
+# n_categories=1 -- a thermodynamic slab with no rheology and no way to change
+# it, while FESOM2 runs EVP with 120 subcycles.  These check the whole chain:
+# flag -> SeaIceConfig -> the right STATE type -> the grid the strain rates need.
+# ============================================================================
+
+def _ice_setup(tmp_path, **kw):
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_sea_ice=True, **kw)
+    return run_omip._setup_jra55_forcing_state(args, grid, "latlon"), grid
+
+
+def test_ice_defaults_still_build_the_slab_state(tmp_path):
+    """Default flags must reproduce the historical 3-field slab exactly."""
+    from legoesm.ice.state import SeaIceState
+
+    state, _ = _ice_setup(tmp_path)
+    assert state["ice_config"].dynamics == "none"
+    assert state["ice_config"].n_categories == 1
+    assert isinstance(state["ice_state_init"], SeaIceState)
+    # The slab needs no grid metrics, and passing them would change nothing.
+    assert state["ice_grid"] is None
+
+
+def test_evp_builds_a_dynamic_state_and_supplies_the_grid(tmp_path):
+    """Selecting a rheology must switch the STATE type too -- a SeaIceState
+    has no velocity or stress fields for the solver to advance."""
+    from legoesm.ice.state import DynamicSeaIceState
+
+    state, grid = _ice_setup(tmp_path, ice_dynamics="evp", ice_n_evp=120,
+                             ice_p_star=30000.0, ice_delta_min=1e-11)
+    cfg = state["ice_config"]
+    assert cfg.dynamics == "evp"
+    assert cfg.N_evp == 120
+    assert cfg.P_star == 30000.0
+    assert cfg.Delta_min == 1e-11
+    ice = state["ice_state_init"]
+    assert isinstance(ice, DynamicSeaIceState)
+    assert ice.u_ice.data.shape == (4, 8)
+    assert ice.sigma_12.data.shape == (4, 8)
+    # Strain rates need the metrics; None here would give zero deformation
+    # and a rheology that silently does nothing.
+    assert state["ice_grid"] is grid
+
+
+def test_multi_category_adds_the_trailing_category_axis(tmp_path):
+    from legoesm.ice.state import DynamicSeaIceState
+
+    state, grid = _ice_setup(tmp_path, ice_categories=7)
+    ice = state["ice_state_init"]
+    assert isinstance(ice, DynamicSeaIceState)
+    assert ice.h_ice.data.shape == (4, 8, 7)
+    # Velocity/stress stay spatial-only whatever the category count.
+    assert ice.u_ice.data.shape == (4, 8)
+    # A DynamicSeaIceState needs the grid EVEN WITH dynamics="none": the step
+    # validates the state's spatial rank against it, and with grid=None it
+    # assumes the cubed sphere and fails on the first step (codex r4 #5).
+    assert state["ice_config"].dynamics == "none"
+    assert state["ice_grid"] is grid
+
+
+def test_mevp_parameters_reach_the_config(tmp_path):
+    state, _ = _ice_setup(tmp_path, ice_dynamics="mevp",
+                          ice_alpha_mevp=250.0, ice_beta_mevp=250.0)
+    cfg = state["ice_config"]
+    assert cfg.dynamics == "mevp"
+    assert cfg.alpha_mevp == 250.0
+    assert cfg.beta_mevp == 250.0
+
+
+def test_rheology_refused_on_a_grid_without_strain_rates(tmp_path):
+    """Tripole has no strain-rate branch; refusing beats zero deformation.
+
+    The tripole setup path reads 2-D ``lat_T``/``lon_T``, so the stand-in
+    carries them — otherwise the test would pass on an unrelated
+    ``AttributeError`` and prove nothing about the guard.
+    """
+    import numpy as np
+
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
+
+    class _Tripole:
+        lat_T = np.radians(np.linspace(-60.0, 60.0, 4))[:, None] * np.ones(8)
+        lon_T = np.radians(np.linspace(0.0, 315.0, 8))[None, :] * np.ones(
+            (4, 1))
+
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_sea_ice=True,
+                               ice_dynamics="evp")
+    with pytest.raises(SystemExit, match="not supported on"):
+        run_omip._setup_jra55_forcing_state(args, _Tripole(), "tripole")
+
+
+def test_zero_or_negative_categories_rejected(tmp_path):
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_sea_ice=True,
+                               ice_categories=0)
+    with pytest.raises(SystemExit, match="must be >= 1"):
+        run_omip._setup_jra55_forcing_state(args, grid, "latlon")
