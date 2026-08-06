@@ -1264,7 +1264,14 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
     # "no_active_gradient" was previously included, which let a closure whose
     # parameters are disconnected from the loss be ranked -- possibly FIRST --
     # on its untouched default score against genuinely tuned arms.
-    _RANKABLE = {"ok", "tuned"}
+    # Rank on any arm whose score is a VALID measurement, and let the status
+    # column say how it was obtained. Excluding "no_reducing_step" dropped
+    # closures whose DEFAULT score was genuinely good but which the fixed
+    # line-search scales could not improve -- a scheme scoring 0.2 vanished
+    # while a worse, marginally tunable one won. Only arms that raised, or
+    # whose rollout went non-finite, are unrankable.
+    _RANKABLE = {"ok", "tuned", "no_reducing_step", "no_active_gradient",
+                 "no_tunable_params"}
 
     def _score_of(r):
         if r.score_tuned is not None:
