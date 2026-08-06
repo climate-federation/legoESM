@@ -243,6 +243,14 @@ class DycoreConfig(NamedTuple):
     # sponge/polar-filter passthrough).  Appended last to preserve
     # positional ABI (codex #1029 r3 #2).
     sb81_omega_conversion: bool = False
+    # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
+    # a_h_scale exactly as before, byte-identical).  Decouples the circulation
+    # lever (momentum nu_del2) from the thermal smoothing that damps vertical
+    # computational modes.  WIRED ONLY into the MPAS thermal diffusion path;
+    # validate_strict refuses it on other discretizations (silently-inert
+    # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
+    # to preserve the positional ABI (codex review).
+    k_h_scale: float | None = None
 
 
 class EvaluationConfig(NamedTuple):
@@ -733,9 +741,12 @@ class ExperimentConfig(NamedTuple):
     # surface bulk schemes.  Threaded into BOTH the atmosphere
     # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
     # run_coupled so the two sides of the interface always use the SAME
-    # stable functions ("dyer1974" default = byte-identical -5*zeta;
-    # "grachev2007_sheba"/"gryanik2020" = SHEBA Arctic forms;
-    # "beljaars_holtslag1991").
+    # stable functions ("dyer1974" default = byte-identical: -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the COARE-native
+    # stable form on coare3 — itself BH91 with rounded constants, so on
+    # coare3 selecting "beljaars_holtslag1991" is a rounding-level change and
+    # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
+    # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
@@ -1383,6 +1394,15 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     land_interface_flux: str = "legacy_dual"
 
+    # Free-atmosphere diffusivity floor override [m^2/s] for schemes carrying a
+    # ``kvf_min`` field (holtslag_boville).  None = scheme default (byte-
+    # identical).  CAUSALITY-PROBE knob for the polar-night stable-transport
+    # runaway (interior K floors at kvf_min under a surface inversion while the
+    # LW deficit is tens of W/m^2); the paper-grade remedy is an interior
+    # stable-tail selector, not this floor.  Appended at the tuple END to
+    # preserve the positional ABI.
+    hb_kvf_min: float | None = None
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -1832,10 +1852,49 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020")
+        # A tiled surface WITH REAL LAND is exempt from the second check
+        # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
+        # (physics_pipeline ~:701), so it INHERITS the injected
+        # stability_scheme and runs the land Monin-Obukhov law with it — real
+        # land fluxes move even though the top-level scheme is "constant"
+        # (codex R3 P2: the first form of that guard was too broad and would
+        # have rejected this working configuration).  "Real land" is the same
+        # predicate used elsewhere in this method: an explicit mask, or an
+        # active tile with a topography that actually derives f_land > 0 —
+        # topography="flat" gives f_land == 0 everywhere, so the tiled path
+        # never engages and the scheme would be diagnostic-only again
+        # (codex R4 P2).
+        _tiled_with_real_land = self.surface_tiled and bool(
+            self.land_mask_path
+            or ((self.slab_land_active or self.use_multilayer_land)
+                and self.topography != "flat"))
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
                 f"got {self.surface_stability_scheme!r}"
+            )
+        # The stability selector only acts on the STABLE branch of the
+        # iterative MOST solver, and surface_layer.compute_surface_fluxes
+        # routes ONLY ("most", "coare3", "large_yeager") through that solver —
+        # bulk_scheme="constant" takes the constant-Cd path and ignores
+        # stability entirely.  But the 2 m diagnostic (diagnostics.py) builds
+        # a COARE profile with the selected scheme regardless, so the pair
+        # would leave the physics untouched while MOVING the published tas.
+        # A knob that changes only the diagnostic is worse than an inert one
+        # (codex review P2) — reject it, unless _tiled_with_real_land above.
+        elif (self.surface_stability_scheme != "dyer1974"
+                and self.surface_bulk_scheme == "constant"
+                and not _tiled_with_real_land):
+            errors.append(
+                f"surface_stability_scheme="
+                f"{self.surface_stability_scheme!r} needs a "
+                f"stability-dependent surface_bulk_scheme ('coare3' or "
+                f"'large_yeager' — 'most' is a turbulence-config bulk_scheme, "
+                f"not an experiment-level one, and VALID_SURFACE_BULK "
+                f"rejects it), or surface_tiled=True whose land tile runs "
+                f"MOST; with 'constant' and untiled surfaces the fluxes "
+                f"ignore the stable branch entirely and only the 2 m "
+                f"diagnostic would move."
             )
         # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
         # (via _resolve_turbulence on the turbulence config).  With
@@ -2194,6 +2253,41 @@ class ExperimentConfig(NamedTuple):
                 f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
+            )
+        # k_h_scale: negative is anti-diffusive (rejected); wired ONLY into
+        # the MPAS thermal diffusion — refuse elsewhere rather than run inert.
+        if d.k_h_scale is not None:
+            if not isinstance(d.k_h_scale, (int, float)) or not (
+                    0.0 <= float(d.k_h_scale) <= 100.0):
+                errors.append(
+                    f"dycore.k_h_scale must be None or finite in [0, 100]; "
+                    f"got {d.k_h_scale!r}.")
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.k_h_scale is only wired into the MPAS thermal "
+                    "diffusion path; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Unset it or use the MPAS lane.")
+        # Free-atmosphere diffusivity-floor override: None, or finite in
+        # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
+        if self.hb_kvf_min is not None and (
+                not isinstance(self.hb_kvf_min, (int, float))
+                or not (0.0 < float(self.hb_kvf_min) <= 10.0)):
+            errors.append(
+                f"hb_kvf_min (free-atmosphere diffusivity floor [m^2/s]) must "
+                f"be None or finite in (0, 10]; got {self.hb_kvf_min!r}."
+            )
+        # ...and it is only consumed by a turbulence scheme whose nested
+        # config carries a ``kvf_min`` field (holtslag_boville).  On any other
+        # scheme _resolve_turbulence_config finds no field and the _replace
+        # never happens, so the run would proceed with the knob silently
+        # inert (codex review P2; same class as the k_h_scale lane guard).
+        elif self.hb_kvf_min is not None and self.turbulence != "holtslag_boville":
+            errors.append(
+                f"hb_kvf_min is consumed only by the holtslag_boville "
+                f"free-atmosphere diffusivity floor; with "
+                f"turbulence={self.turbulence!r} the override reaches no "
+                f"scheme field and would be silently inert."
             )
         # Slab-land interface flux law: membership + the unified law needs an
         # atmosphere-side surface-layer law to unify WITH.  turbulence="none"

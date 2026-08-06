@@ -84,5 +84,7 @@ binds).  The `None` sentinel is threaded through `SurfaceLayerConfig`,
   oracle; AeroBulk has an ice branch (Andreas 2015 lineage) — candidate v2.
 - `coare3p6`/`ecmwf` columns are free to add to the baseline if those
   schemes are ever implemented.
-- `return_2m` diagnostic still uses Businger-Dyer ψ_h for `coare3`
-  (clamped diagnostic, not a flux) — cosmetic follow-up from review.
+- ~~`return_2m` diagnostic still uses Businger-Dyer ψ_h for `coare3`~~
+  RESOLVED: the diagnostic ψ_h is scheme-matched to the main loop
+  (`psi_h_coare(zeta_d, stability_scheme)` for `coare3`, including the
+  selectable stable branch — see `bulk_flux.compute_most_fluxes`).

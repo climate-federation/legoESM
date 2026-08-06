@@ -194,6 +194,40 @@ class TestDiffusionCoeffs:
         diff = compute_diffusion(grid, dc)
         assert diff.div_damp > 0.0
 
+    def test_k_h_scale_none_is_locked_to_A_h(self):
+        """Default (None) keeps the historical lock K_h_A == A_h EXACTLY —
+        the byte-identity contract for every existing run.
+
+        CONTRACT guard, not a feature test: it passes with the k_h_scale
+        wiring deleted (the legacy behaviour IS K_h_A == A_h), so it detects
+        the DEFAULT drifting, not the feature going missing.  Feature removal
+        is caught by test_k_h_scale_decouples_thermal_from_momentum.
+        """
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0))
+        assert diff.K_h_A == diff.A_h
+
+    def test_k_h_scale_decouples_thermal_from_momentum(self):
+        """A non-None k_h_scale must move the THERMAL coefficient only, and
+        must scale it linearly — that decoupling from a_h_scale is the whole
+        point of the knob (codex review P3: it had no test)."""
+        grid = _make_cubed_sphere_grid()
+        base = compute_diffusion(grid, DycoreConfig(dt=600.0, a_h_scale=1.0))
+        got = compute_diffusion(
+            grid, DycoreConfig(dt=600.0, a_h_scale=1.0, k_h_scale=0.25))
+        assert got.A_h == base.A_h, "momentum viscosity must not move"
+        assert got.K_h_A == pytest.approx(0.25 * base.K_h_A, rel=1e-12), (
+            "thermal diffusivity must scale linearly with k_h_scale")
+
+    def test_k_h_scale_rejected_off_the_mpas_lane(self):
+        """It is wired only into the MPAS thermal tendencies, so a non-MPAS
+        config must fail loudly instead of running with an inert knob."""
+        with pytest.raises(ValueError, match="k_h_scale"):
+            ExperimentConfig(
+                grid=GridConfig(grid_type="cubed_sphere"),
+                dycore=DycoreConfig(k_h_scale=0.25),
+            ).validate_strict()
+
     def test_zero_scale_gives_zero(self):
         grid = _make_cubed_sphere_grid()
         dc = DycoreConfig(dt=600.0, hyperdiff_scale=0.0, div_damp_scale=0.0)
