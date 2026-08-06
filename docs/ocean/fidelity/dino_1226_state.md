@@ -1,3 +1,32 @@
+# RULE-8 LADDER PARADOX DISSOLVED 2026-08-06 — RETRACTED, it was an artifact of the surface defect
+
+Post-fix 10-yr A/B (both arms `leapfrog_rhs`, one env var differs, `git diff` over
+`packages/`+`src/` between the two arms' commits = EMPTY, census-gated both):
+
+| yr | NEMO | L-off | L-both | off−N | both−N |
+|---|---|---|---|---|---|
+| 5 | 91.13 | 94.30 | 91.41 | +3.17 | **+0.28** |
+| 10 | 121.07 | 126.36 | 121.58 | +5.29 | **+0.51** |
+
+At y10 `both` wins EVERY metric (deep-contrast error 1.6x floor vs off's 71x).
+
+**The ladder effect never changed sign.** Rescoring the surviving PRE-fix 40-yr npz through the
+same harness: `both−off` = −1.74 (y5) / −2.37 (y10) / −4.38 (y20) pre-fix vs −2.89 / −4.79
+post-fix. `both` is BELOW `off` in both eras, same sign, similar magnitude. What changed is
+where NEMO sits relative to the pair: pre-fix both arms undershot NEMO by 22-38 Sv so "lower"
+meant "worse"; post-fix `off` OVERSHOOTS and `both` lands on target, so "lower" means "onto
+the reference".
+
+⇒ **RETRACTED: "the true 3-D ladder tracks NEMO worse — something compensates for the wrong
+geometry."** The faithful geometry was never anti-correlated with fidelity; it was scored
+against a trajectory the surface-placement defect had displaced far below NEMO. A conclusion
+that shaped months of prioritisation, dissolved by fixing an unrelated defect.
+
+CAVEATS: no post-fix run passes y10, so the old "7.4 Sv at y40" has no protocol-matched
+counterpart (cross-era comparison labelled as such, Rule 7). `both`'s y10 residual (0.51 Sv) is
+still 5.6x the floor — the armB overshoot, ~10x smaller than `off`'s. y1-y2 marginally favour
+`off` (0.18/0.39 Sv) in the from-rest transient.
+
 # OVERSHOOT = H-DEFECT 2026-08-06 (opus analysis lane) — CONFIRMED structural, and LOCALIZED to the MOMENTUM side
 
 Three independent discriminators, all on existing data (armB y1-20 npz + NEMO y6-40; harness
