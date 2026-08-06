@@ -354,6 +354,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "max(q,0).  The naive clamp invents ~+30 kg/m2/yr "
                              "of water on a century AMIP run (measured); this "
                              "cuts that 10.4x.  Off = bit-identical to before.")
+    parser.add_argument("--mpas-vert-advection-scheme",
+                        choices=("upwind", "van_leer"),
+                        default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
+                        help="Vertical advection scheme on the MPAS sigma lane "
+                             "(theta, tracers, edge winds).  'upwind' (default) "
+                             "is first-order donor cell, whose implicit "
+                             "diffusion K_sigma=|sigma_dot|*dsigma/2 warms the "
+                             "tropical UTLS by +0.822 K/day (measured, 91.4 hPa). "
+                             "'van_leer' is the 2nd-order TVD alternative "
+                             "(bounded face reconstruction; monotone update "
+                             "under a Courant condition nu_k+nu_k+1<=1, "
+                             "derived for a UNIFORM grid -- measured max "
+                             "0.0642 on that run, 15.6x inside it; needs "
+                             "nlev>=4).  Default = bit-identical.")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -1748,6 +1762,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+        mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,

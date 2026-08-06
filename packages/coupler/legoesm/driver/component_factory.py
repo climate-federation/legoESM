@@ -562,6 +562,8 @@ def create_atmosphere_dycore(
             nu_vert4_T=dc.mpas_nu_vert4_T,
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
+            # Sigma-lane vertical advection scheme (see DycoreConfig).
+            vert_advection_scheme=dc.mpas_vert_advection_scheme,
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
