@@ -537,7 +537,11 @@ def score_against_les(means, *, reference, p_full, scored):
     # per-variable zeros -- "perfect" -- while only the aggregate is large.
     components = {k: jnp.where(any_bad, NONFINITE_PENALTY, v)
                   for k, v in components.items()}
-    return components, combined
+    # any_bad is returned so no caller ever has to INFER "was this rollout
+    # non-finite?" from the score magnitude. A near-uniform reference divided
+    # by the 1e-8 spread floor produces a legitimately huge FINITE score, which
+    # a >= NONFINITE_PENALTY test misclassifies as a blow-up.
+    return components, combined, any_bad
 
 
 # --------------------------------------------------------------------------
@@ -714,11 +718,11 @@ def _arm_score(scheme: str, arm: "CaseArm", args, params=None,
     # parameters cannot change p_s, only the physics can.
     drift = (None if params is not None
              else _assert_surface_pressure_static(ps_hist, arm.case.p_s))
-    components, combined = score_against_les(
+    components, combined, bad = score_against_les(
         means, reference=arm.reference, p_full=arm.case.p_full,
         scored=arm.scored,
     )
-    return means, drift, components, combined
+    return means, drift, components, combined, bad
 
 
 def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
@@ -734,21 +738,17 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
     total = None
     for i, arm in enumerate(arms):
         cfg = None if cfgs is None else cfgs[i]
-        _m, _drift, comp, combined = _arm_score(
+        _m, _drift, comp, combined, bad = _arm_score(
             scheme, arm, args, params=params, base_cfg=cfg)
         means_out.append(_m)
         per_case[arm.name] = combined
         per_components[arm.name] = comp
         if _drift is not None:
             drifts[arm.name] = float(_drift)
-        # Record the FLAG rather than inferring it from the score magnitude:
-        # a legitimately huge score (a near-uniform reference divided by the
-        # 1e-8 spread floor) is indistinguishable from the sentinel otherwise,
-        # and a valid loss above the penalty would make a NaN candidate look
-        # like an improvement to the line search.
-        if params is None and not np.isfinite(float(combined)):
-            nonfinite.add(arm.name)
-        elif params is None and float(combined) >= NONFINITE_PENALTY:
+        # The FLAG, not the magnitude. `bad` is traced when params is not
+        # None, so it is only concretized on the evaluation path -- which is
+        # the only path that reports a non-finite arm anyway.
+        if params is None and bool(bad):
             nonfinite.add(arm.name)
         total = combined if total is None else total + combined
     joint = total / float(len(arms))
