@@ -1305,8 +1305,11 @@ that failed is a SUCCESS of the process.
   without the NEMO-side dump either. Recommend **pause**: ledger now provably complete, drag
   ruled out, wind is the one remaining untested line but requires new instrumentation: out of
   scope for the unit harness (emergent solver behaviour).
-- **`zdftke sh2`** — ESCALATION 1: exact transcription in, restricted-to-signal ratio 0.904.
-  Family measured **climate-inert**, so parking is defensible.
+- **`zdftke sh2`** — ESCALATION 1: exact transcription in, ~~restricted-to-signal ratio 0.904~~
+  **STRUCK 2026-08-06 (evidence audit): 0.904 is prose-only with no committed probe — the same
+  class as the struck 0.934/0.995, missed by the first sh2 sweep.** The only sh2 number with a
+  reproducible probe is **corr 0.7318 / ratio 0.790** (`sh2_canonical.py`, |ref|>1e-12
+  population). Family measured climate-inert, so parking is defensible.
 - **`ldf_slp` ×4** — CONDITIONING-LIMITED, all three stopping-rule conditions verified.
 
 ## Measured strategic result — read before prioritising
