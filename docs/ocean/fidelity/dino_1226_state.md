@@ -1,3 +1,34 @@
+# NOISE FLOOR MEASURED 2026-08-06 (#1492 item 2.1) — the acceptance bar is now QUANTIFIED
+
+3-member NEMO micro-ensemble (1e-14-relative T perturbations to the y20 restart, every other
+variable bit-identical — verified per tile; 10 years each, model years 21-30; all clean, EXIT=0,
+divergence saturates by y3-y5). Harness gate passed on every invocation (NEMO y10 ACC = 121.07
+exactly). Runs: `RUN_ENS_M{1,2,3}/`; full per-year table in the ensemble lane transcript +
+`noise_floor_out.txt`.
+
+**The floor (max over branch-years 1-10, n=3 — treat as order-of-magnitude, ~50% sampling
+uncertainty on the std):**
+
+| metric | range (max) | std (max) |
+|---|---|---|
+| ACC | **0.091 Sv** (~0.06%) | 0.050 |
+| contrast <1400 m | 1.1e-4 kg/m3 | 5.7e-5 |
+| contrast >1400 m | 4.5e-5 kg/m3 | 2.3e-5 |
+| S-band surface sigma max | 9.5e-5 | 5.3e-5 |
+| census sigma>1.2 / 1.4 / 1.5 / 1.6 | rel 9.6e-5 / 2.5e-4 / 4.9e-4 / 1.1e-3 | — |
+
+**Consequences:**
+1. **Arm B's post-y10 ACC overshoot (1.021-1.052x) is OUTSIDE the floor by 35-85x — a real
+   structural residual**, not internal variability. (Caveat attached: floor measured on the
+   y20-branch state, overshoot on the from-rest trajectory; the two-orders margin survives any
+   plausible state dependence, but no finer statement is supported.) It joins the Rule-8 ladder
+   paradox at the top of the Phase-3 ranked list.
+2. **The 2.2 acceptance targets, staged 5x/2x/1x**: ACC 0.45 / 0.18 / 0.09 Sv; contrasts and
+   census scale from the table.
+3. **Retroactive**: every "null"/"climate-inert" call in this campaign predates this floor, and
+   every current lego-vs-NEMO residual sits far above it — nothing measured so far is
+   noise-limited. DINO's annual-mean statistics are dramatically less noisy than assumed.
+
 # ORACLE PROVENANCE GAP CLOSED 2026-08-06 (Phase 4 item) — `cfgs/DINO` is now version-controlled
 
 The gap that produced the 2026-07-31 scare (the binary behind `RUN_20Y` had been rebuilt over,
