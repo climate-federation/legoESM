@@ -961,7 +961,10 @@ def cfl_guard(dt, dx, dz_min, n_acoustic_substeps=6, c_s=350.0, label="run"):
             f"acoustic CFL (dt≲{0.04 * dz_min:.1f} s) — reduce dt.", stacklevel=3)
 
 
-def parse_args():
+def parse_args(argv=None):
+    """Parse the driver CLI. ``argv=None`` reads ``sys.argv`` (production);
+    passing a list is what the CLI round-trip tests use — same convention as
+    ``run_omip.parse_args`` / ``run_amip.parse_args``."""
     p = argparse.ArgumentParser(description="RCEMIP1 plane NH harness.")
     p.add_argument("--nx", type=int, default=16)
     p.add_argument("--ny", type=int, default=16)
@@ -1212,6 +1215,20 @@ def parse_args():
     p.add_argument("--dz-sfc", type=float, default=50.0,
                    help="Surface-layer thickness [m] for stretched vertical "
                         "coordinate. RCEMIP1 standard = 50 m.")
+    p.add_argument("--sounding", type=str, default=None,
+                   help="Initialise from a TABULATED SAM-format sounding "
+                        "(gSAM CASES/RCEMIP1/snd_rcemip_300s6.11.2 for RCE300) "
+                        "instead of the analytic Wing 2018 profile. Read via "
+                        "the shared read_sam_snd + sam_case_setup path used by "
+                        "BOMEX/RICO/DYCOMS/GATE. gSAM's own sounding is NOT the "
+                        "Wing analytic form (lapse 7.47 vs 6.70 K/km, and a "
+                        "WARMING rather than isothermal stratosphere), so this "
+                        "is the faithful RCEMIP1 IC. Requires "
+                        "--stretched-vertical. Default (unset) = analytic.")
+    p.add_argument("--sounding-grd", type=str, default=None,
+                   help="With --sounding: use the EXACT gSAM 'grd' vertical "
+                        "levels (CASES/RCEMIP1/grd) instead of the geometric "
+                        "stretch; --nlev/--H/--dz-sfc are then ignored.")
     p.add_argument("--snapshot-days", type=float, default=0.0,
                    help="Save surface + 4-level-field npz every N SIM-DAYS "
                         "(precip, CWV, column-max w, condensate/w/qv/MSE at 4 "
@@ -1267,7 +1284,7 @@ def parse_args():
     p.add_argument("--vortex-seed-ztop", type=float, default=12.0e3,
                    help="Vertical extent of the seed vortex [m]; wind tapers "
                         "cos² from full at surface to 0 at ZTOP (default 12 km).")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main():
@@ -1372,18 +1389,81 @@ def main():
     # Single surface humidity drives BOTH the θ hydrostatic (virtual-T) base
     # and the q_v IC (codex iter-61 [MED] — keep them from desyncing).
     q_sfc_rce = WING_Q_SFC_DEFAULT
-    def theta_ref_fn(z):
-        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
-    if args.stretched_vertical:
-        hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
+    # --sounding: initialise from a TABULATED SAM sounding instead of the
+    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
+    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
+    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
+    # tropospheric lapse and a stratosphere that WARMS with height, where the
+    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
+    # choice can represent the second difference, so the faithful RCEMIP1 IC has
+    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
+    #
+    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
+    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
+    #                                          -> build_sam_case_initial_state
+    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
+    # are handled in exactly one place for every SAM-deck case.
+    snd = None
+    if args.sounding is not None:
+        from legoesm.atmosphere.dynamics.crm.sam_case_setup import (
+            build_sam_case_height_coord,
+            build_sam_case_initial_state,
         )
+        from legoesm.atmosphere.forcing.sam_case_forcing import (
+            extend_sounding_to_top,
+            read_sam_snd,
+        )
+        snd_path = Path(args.sounding)
+        if not snd_path.is_file():
+            raise SystemExit(
+                f"--sounding {snd_path}: file not found. gSAM's RCEMIP1 deck "
+                "lives at $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/ (e.g. "
+                "snd_rcemip_300s6.11.2 for the RCE300 case).")
+        # build_sam_case_height_coord only builds a STRETCHED (or exact-grd)
+        # column — the SAM-faithful grid.  Refuse rather than silently ignore
+        # --stretched-vertical, so the vertical grid a run used is never a
+        # surprise (dispatch-hardening: no silent coercion).
+        if not args.stretched_vertical and args.sounding_grd is None:
+            raise SystemExit(
+                "--sounding requires --stretched-vertical (or --sounding-grd "
+                "<gSAM grd file>): the tabulated-sounding path builds the "
+                "SAM-faithful stretched column, and silently overriding a "
+                "requested uniform grid would hide which grid a run used.")
+        snd = read_sam_snd(snd_path)
+        # Cover the model top so theta_ref does not clamp constant (dry-neutral)
+        # aloft; SAM extrapolates on the US-standard-atmosphere T ratio and
+        # extend_sounding_to_top replicates that.
+        snd = extend_sounding_to_top(snd, float(args.H))
+        # The sounding carries its OWN surface pressure (RCEMIP1: 1014.8 mb,
+        # identical to WING_P_SFC — assert rather than assume, so a deck with a
+        # different p_sfc cannot silently disagree with the flux/radiation code
+        # that still uses p_sfc_rcemip).
+        p_sfc_snd = float(snd.pres0) * 100.0
+        if abs(p_sfc_snd - p_sfc_rcemip) > 1.0:
+            raise SystemExit(
+                f"--sounding {snd_path}: surface pressure {p_sfc_snd:.1f} Pa "
+                f"disagrees with the RCEMIP1 p_sfc {p_sfc_rcemip:.1f} Pa used "
+                "by the surface-flux and radiation paths.")
+        hc = build_sam_case_height_coord(
+            snd, nlev=args.nlev, H=args.H, p_sfc_pa=p_sfc_snd,
+            dz_sfc=args.dz_sfc, grd_file=args.sounding_grd, dtype=dtype,
+        )
+        print(f"  SOUNDING IC: {snd_path} "
+              f"({np.asarray(snd.z).size} levels after top-extension, "
+              f"p_sfc={p_sfc_snd/100.0:.1f} mb)")
     else:
-        hc = create_height_coordinate(
-            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
+        def theta_ref_fn(z):
+            return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
+        if args.stretched_vertical:
+            hc = create_stretched_height_coordinate(
+                args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
+                theta_ref_fn=theta_ref_fn,
+            )
+        else:
+            hc = create_height_coordinate(
+                args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+                theta_ref_fn=theta_ref_fn,
+            )
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
@@ -1518,11 +1598,25 @@ def main():
         n_tracers = 9
     else:
         n_tracers = 3
-    state = _build_rcemip_initial_state(
-        grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
-        n_tracers=n_tracers, seed_kind=args.seed_kind, seed_kmax=args.seed_kmax,
-        q_sfc=q_sfc_rce,
-    )
+    if snd is not None:
+        # Shared SAM-deck IC builder: u/v/q_v interpolated from the sounding,
+        # θ' = θ_snd − θ_ref (≈0, θ_ref IS the sounding) + the same bottom-level
+        # symmetry-breaking seed, and the same DRY hydrostatic ρ' closure the
+        # analytic path uses.  ``band_noise`` is this driver's name for the
+        # builder's ``band_random`` seed — the SAME band-limited field.
+        state = build_sam_case_initial_state(
+            snd, grid, hc, n_tracers=n_tracers,
+            seed_amp=args.theta_noise_amp,
+            seed_kind=("band_random" if args.seed_kind == "band_noise"
+                       else args.seed_kind),
+            seed_kmax=args.seed_kmax, dtype=dtype,
+        )
+    else:
+        state = _build_rcemip_initial_state(
+            grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
+            n_tracers=n_tracers, seed_kind=args.seed_kind,
+            seed_kmax=args.seed_kmax, q_sfc=q_sfc_rce,
+        )
     # Optional restart from a checkpoint (resume long runs after a crash/fix).
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import rce_checkpoint  # noqa: E402
