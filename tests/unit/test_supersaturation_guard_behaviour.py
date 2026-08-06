@@ -370,13 +370,20 @@ def test_sundqvist_off_path_never_touches_the_guard(monkeypatch):
 
 
 def test_ml_emulator_off_path_never_touches_the_guard(monkeypatch):
-    """Same byte-identity proof for the emulator's post-step drain."""
+    """Same byte-identity proof for the emulator's post-step drain.
+
+    The patched name is ``hard_saturation_blend`` — the emulator deliberately
+    does NOT use ``hard_saturation_drain``, whose hard ``jnp.where`` gate is
+    licensed only for the eager (non-jit, non-AD) driver hook. Binding this
+    test to the symbol that actually runs is the point: when the emulator was
+    switched from the drain to the blend, this test went red rather than
+    silently passing against a name nothing called."""
     import legoesm.atmosphere.physics.microphysics.ml_emulator as ml
 
     def _bomb(*a, **k):
-        raise AssertionError("hard_saturation_drain called on the OFF path")
+        raise AssertionError("hard_saturation_blend called on the OFF path")
 
-    monkeypatch.setattr(ml, "hard_saturation_drain", _bomb)
+    monkeypatch.setattr(ml, "hard_saturation_blend", _bomb)
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     cfg = MicrophysicsMLEmulatorConfig()
     model = MicrophysicsEmulator(cfg.n_input, cfg.n_hidden, cfg.n_layers,
