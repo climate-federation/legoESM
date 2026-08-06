@@ -31,6 +31,28 @@ REF=${REF:-/burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300}
 OUTBASE=${OUTBASE:-arms_ab}
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/${OUTBASE}_${ARM}
 mkdir -p "$OUT"
+# COMPLETENESS GATE. run_scm_rce_convection_intercomparison.py --merge-only
+# collects whatever scheme_*.json checkpoints happen to exist and raises only
+# when there are ZERO of them. So a run where 3 of 10 schemes aborted still
+# produces a clean-looking ranking of the 7 survivors, with nothing in
+# summary.md saying which are missing -- and since merge is chained afterany on
+# the arms (deliberately, so one dead scheme does not sink the round), that is
+# the DEFAULT path, not an edge case. A ranking silently computed over a subset
+# is worse than no ranking: it is publishable and wrong.
+SCHEMES="sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold"
+MISSING=""
+for s in $SCHEMES; do
+  [ -s "$OUT/scheme_${s}.json" ] || MISSING="$MISSING $s"
+done
+if [ -n "$MISSING" ]; then
+  echo "INCOMPLETE: missing scheme checkpoints:$MISSING"
+  if [ "${ALLOW_PARTIAL:-0}" != "1" ]; then
+    echo "STAGE_STATUS=FAILED (incomplete scheme set; rerun the failed arms, or"
+    echo "  set ALLOW_PARTIAL=1 to publish a table explicitly labelled partial)"
+    echo ALLDONE; exit 5
+  fi
+  echo "ALLOW_PARTIAL=1 -- publishing a PARTIAL ranking on purpose."
+fi
 echo "KERNEL_ARM=$ARM  OUT=$OUT"
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --reference-dir $REF --outdir $OUT --subsidence-solve $ARM \
@@ -48,6 +70,15 @@ echo "merge rc=$RC"
 if [ "$RC" -ne 0 ]; then echo "STAGE_STATUS=FAILED merge rc=$RC"; echo ALLDONE; exit "$RC"; fi
 if [ ! -s "$OUT/summary.md" ]; then
   echo "STAGE_STATUS=FAILED (merge rc=0 but $OUT/summary.md missing/empty)"; echo ALLDONE; exit 3
+fi
+if [ -n "$MISSING" ]; then
+  # The job log rotates and gets lost; summary.md is what gets read months
+  # later. Stamp the omission into the artifact, at the TOP where it cannot be
+  # scrolled past.
+  { echo "> **PARTIAL RANKING.** Missing scheme checkpoints:$MISSING"
+    echo "> Published with ALLOW_PARTIAL=1. Do not compare against a full-set run."
+    echo
+    cat "$OUT/summary.md"; } > "$OUT/summary.md.tmp" && mv -f "$OUT/summary.md.tmp" "$OUT/summary.md"
 fi
 echo "=== ranking table ==="; sed -n '1,80p' "$OUT/summary.md"
 echo "STAGE_STATUS=OK"
