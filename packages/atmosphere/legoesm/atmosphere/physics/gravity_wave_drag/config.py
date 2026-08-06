@@ -87,7 +87,7 @@ __param_spec__ = {
         "params": {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
-            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-11, 1.0e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Charron & Manzini (2002); CAM frontgfc trigger threshold", "shape": None},
+            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-16, 1.0e-13), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM namelist_defaults_eam.xml frontgfc 1.25e-15 (7.5e-16 at 4x5; 2e-14 at ne120np4 on E3SM master); Charron & Manzini (2002)", "shape": None},
             "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
             # --- launch / trigger levels ---
             "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
@@ -137,7 +137,6 @@ __param_spec__ = {
             "Fr_sharpness": "sigmoid sharpness of the saturation stress-ratio breaking transition (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
-            "N_ref": "declared but never read by lindzen_gwd (N is computed from the local theta gradient); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -233,11 +232,6 @@ class LindzenConfig(NamedTuple):
         Sub-grid topographic height [m] (default 500).
     k_wave : float
         Horizontal wavenumber [1/m] (default 2*pi/100e3).
-    N_ref : float
-        RESERVED / currently unused (default 0.01) — N is diagnosed from the
-        local stratification (theta gradient via ``brunt_vaisala_n_full``), not
-        from this field, so setting it does NOT change the launch/saturation
-        stress.
     fcrit2 : float
         Critical Froude number squared scaling the saturation CAP VALUE
         (``tau_sat_eff = fcrit2*tau_sat`` — the oracle ``effkwv = kwv*fcrit2``
@@ -282,7 +276,6 @@ class LindzenConfig(NamedTuple):
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
-    N_ref: float = 0.01
     fcrit2: float = 1.0
     Fr_sharpness: float = 20.0
     crit_level_sharpness: float = 10.0
@@ -453,6 +446,25 @@ class HinesConfig(NamedTuple):
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
+    # Launch pressure [Pa].  ``None`` (default) launches at the SURFACE —
+    # the legacy behaviour, byte-identical.  A non-orographic wave launched
+    # at the surface is born SUPERSATURATED wherever the launch amplitude
+    # exceeds ``sigma_sat = N/m_star``, and N is SMALLEST in the well-mixed
+    # boundary layer: on the 2.5 deg AMIP state the default 2.0 m/s exceeds
+    # the 1.25 m/s sigma_sat at 140 m over 78.5% of the planet's area, so
+    # the wave breaks AT its own launch level and deposits 55% of its
+    # momentum below 1 km (only 35% above 12 km).  Setting a launch level
+    # above the BL makes the scheme behave like a non-orographic source:
+    # no drag is deposited below it and the wave starts propagating there.
+    # Sibling schemes all carry one (E3SMFrontalConfig.launch_p, E3SM
+    # ``gw_front`` kbotbg); Hines was the only one without.
+    #
+    # NOT in ``__param_spec__``: spec eligibility is computed from a plain
+    # ``: float`` annotation, and this is ``float | None``.  That is the
+    # right classification anyway — the value selects a level INDEX by
+    # argmin, so the drag is piecewise-constant in it and it is not usefully
+    # differentiable (mirrors E3SM's static init-time kbotbg selection).
+    launch_p: float | None = None
 
 
 class PrognosticSpectralConfig(NamedTuple):
@@ -534,8 +546,15 @@ class E3SMFrontalConfig(NamedTuple):
     taubgnd : float
         Background source strength [Pa] (default 1.5e-3, CAM ``taubgnd``).
     frontgfc : float
-        Frontogenesis-function critical threshold [K^2/(m^2 s)]
-        (default 1.0e-10, CAM ``frontgfc``).
+        Frontogenesis-function critical threshold [K^2/(m^2 s)] above which
+        the frontal source launches (default 1.25e-15 — the E3SM OPERATIONAL
+        namelist value, namelist_defaults_eam.xml:524; the coarse 4x5 grid
+        uses 7.5e-16).  The earlier default of 1.0e-10 sat ~5 ORDERS OF
+        MAGNITUDE above anything the resolved flow produces (10-day r16 AMIP
+        A/B 2026-07-20: max frontgf 5.4e-15, p99 2.4e-16), so the frontal
+        source could NEVER fire; 1.25e-15 sits at the observed
+        distribution's tail, selecting only the strongest resolved fronts —
+        exactly the CAM design intent.
     c0 : float
         Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
     launch_p : float
@@ -566,7 +585,7 @@ class E3SMFrontalConfig(NamedTuple):
         AMIP-gated.
     """
     taubgnd: float = 1.5e-3
-    frontgfc: float = 1.0e-10
+    frontgfc: float = 1.25e-15
     c0: float = 30.0
     launch_p: float = 5.0e4
     front_p: float = 6.0e4

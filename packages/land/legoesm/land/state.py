@@ -68,3 +68,9 @@ class MultiLayerLandState(NamedTuple):
     # Holds the ``mlcanopy_type`` instance carried forward between steps.
     # ``None`` when the CLM-ML canopy scheme is not active.
     canopy_state: Any | None = None
+    # Intercepted canopy water store [kg m-2], (ncol,) — the shared canopy
+    # interception scheme (``config.interception``; two-leaf / SimpleSEB path).
+    # ``None`` (legacy / interception off) carries no store.  The CLM-ML canopy
+    # keeps its own internal ``h2ocan`` store inside ``canopy_state`` and does
+    # NOT use this field.
+    W_canopy: jax.Array | None = None

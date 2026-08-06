@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics.convection.output import (
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
+    release_detrained_condensate_latent,
     stratosphere_mass_flux_gate,
     compute_column_geometry,
 )
@@ -145,12 +146,16 @@ __physics_contract__ = {
         "fold it back into cloud so no water is lost); the optional downdraft cools and moistens the sub-cloud "
         "layer by rain evaporation; the optional CMT drag opposes the "
         "cloud-relative wind shear; surface at the last vertical index. "
-        "Column enthalpy/total-water closure is delegated to the orchestrator "
-        "rebalance + microphysics (the shared mass-flux kernel is not "
-        "self-closing), so no hard conservation is claimed for the raw "
-        "tendencies."
+        "IN-SCHEME CLOSURE (2026-07-22, default implicit_flux solve + "
+        "released detrained-condensate latent): column total water "
+        "integral(dq_v+dq_c+dq_r) dp/g = 0 and column moist enthalpy "
+        "integral(c_pd*dT + L_v*dq_v) dp/g = 0 (L_f books cancel "
+        "internally), gated by tests/unit/test_bechtold_column_conservation "
+        "on every flag set.  The legacy subsidence_solve='advective' path "
+        "conserves only to truncation order (documented residual) and "
+        "remains selectable for byte-exact reproduction."
     ),
-    "conserves": ["none"],
+    "conserves": ["moisture", "energy"],
     "differentiable": True,
     "reference": (
         "Bechtold et al. (2008), QJRMS 134, 1337-1351; Bechtold et al. "
@@ -1001,6 +1006,8 @@ def _ifs_inplume_precip_conversion(
     z: jax.Array,
     eps_profile: jax.Array,
     pkineu: jax.Array,
+    rprcon: float = _IFS_RPRCON,
+    dnoprc: float = _IFS_ZDNOPRC,
 ) -> tuple[jax.Array, jax.Array]:
     r"""IFS in-updraft precipitation formation (cuascn.F90:718-773).
 
@@ -1077,7 +1084,7 @@ def _ifs_inplume_precip_conversion(
     zcbf = jnp.where(
         zdt > 0.0, 1.0 + _IFS_Z_CPRC2 * jnp.sqrt(zdt_safe), 1.0,
     )
-    zlcrit = _IFS_ZDNOPRC / zcbf
+    zlcrit = dnoprc / zcbf
 
     # Ascent geometry, surface-first for the scan (matches the plume scan).
     z_sf = z[:, ::-1].astype(_dtype)
@@ -1102,7 +1109,7 @@ def _ifs_inplume_precip_conversion(
     cond_sf = jnp.maximum(q_c_sf - q_c_prev_sf * decay_sf, 0.0)
 
     zzco_sf = (
-        (_IFS_RPRCON / g)
+        (rprcon / g)
         / (_IFS_WU_DRAG_FACTOR * zwu_sf)
         * (1.0 + _IFS_LIQ_CONV_ENHANCE * alpha_liq[:, ::-1])
         * zcbf[:, ::-1]
@@ -1143,7 +1150,7 @@ def _ifs_inplume_precip_conversion(
         # level above the departure level, so a supersaturated LAUNCH state
         # must not shed zero-path-length rain via the Z_CLDMAX clip
         # (codex R1 #3).
-        convert = (L_pre > _IFS_ZDNOPRC) & (dz_k > 0.0)
+        convert = (L_pre > dnoprc) & (dz_k > 0.0)
         L_new = jnp.where(convert, L_conv, L_pre)
         precip_k = jnp.maximum(L_pre - L_new, 0.0)
         return L_new.astype(_dtype), (L_new, precip_k)
@@ -2484,6 +2491,7 @@ def bechtold_convection(
         )
         L_converted, precip_frac = _ifs_inplume_precip_conversion(
             plume.q_c_u, plume.T_u, z, eps_profile, pkineu,
+            rprcon=config.rprcon, dnoprc=config.dnoprc,
         )
         plume = plume._replace(q_c_u=L_converted)
     if config.use_ifs_cape_closure or config.use_convective_turnover_tau:
@@ -2777,6 +2785,46 @@ def bechtold_convection(
     dq_c_conv_dt = (
         dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
+    # -- Condensation latent heat of the detrained condensate (2026-07-22
+    # column-enthalpy fix).  SIGN CONVENTION in scope: tendencies are
+    # SOURCES (state += dt*tend), z up, condensation WARMS (+L_v), budget
+    # on h = c_p*T + L_v*q_v closes as in - out - d(storage) = 0.  The
+    # plume condensed this water from vapor on the way up, but the kernel's
+    # environment tendencies only ever booked the transport/mixing of
+    # (T_u - T): the vapor -> liquid conversion enthalpy never reached the
+    # column.  Measured (leaf budget probe, quasi-steady 20-level tropical
+    # fixture, conservative implicit_flux transport): column
+    # ∫(c_pd*dT + L_v*dq_v) dp/g = -L_v * ∫dq_c_conv dp/g to 4 digits
+    # (-56.85 W/m² vs 56.86) — i.e. the residual IS the unheated
+    # detrainment, the mechanism behind the AMIP heating/moisture
+    # mispairing (2-yr pilot: E-P gap 1.4 mm/day, mid-troposphere warm
+    # runaway equilibrating against a heating field decoupled from its
+    # water sink).  Booked at the detrainment source levels (same field,
+    # same stratosphere gate); the downstream rain SPLITS (constant /
+    # autoconversion) carve mass out of this already-heated source, and
+    # the IFS in-plume rain synthesizes its own vapor sink with its own
+    # +L_v pairing (codex R1 #2 block below) — no share is heated twice.
+    # Sub-cloud/downdraft re-evaporation books -L_v on evaporation, so the
+    # formation (+L_v here) / evaporation (-L_v there) loop now closes.
+    # GATED on the solve (codex adversarial review r2, finding 2).  This term
+    # was previously UNCONDITIONAL, which over-heated the column by exactly
+    # ``L_v * int dq_c dp/g`` under the non-default
+    # ``BechtoldConfig(subsidence_solve="advective")``: that branch emits the
+    # condensate WITHOUT the implicit branch's ``-dq_c`` vapor debit, so no
+    # condensation enthalpy is owed there.  On the SHIPPED default
+    # ("implicit_flux") the helper returns exactly the previous expression, so
+    # default behaviour is byte-identical.
+    #
+    # PAIRING: this keeps Bechtold's OWN ``dq_c_conv_dt`` rather than the
+    # kernel's third return.  VERIFIED EQUIVALENT (codex r3 finding 5 corrected
+    # an earlier claim of mine that they could differ): ``M_u_new`` is already
+    # clipped to ``M_b_max`` BEFORE both the kernel call and this recomputation,
+    # and both apply the same stratosphere gate, so the helper's input and the
+    # kernel's vapor debit are the same profile.  Using the local variable
+    # therefore changes nothing today and keeps the default byte-identical; a
+    # future edit to either formula must preserve that equality.
+    dT_dt = release_detrained_condensate_latent(
+        dT_dt, dq_c_conv_dt, config.subsidence_solve)
 
     # -- Early precip split (IFS sub-cloud evap path only) -------------------
     # The Kessler evaporation needs the POST-SPLIT rain-source profile (only

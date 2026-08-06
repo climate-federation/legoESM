@@ -95,6 +95,10 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     anchor_mass_to_initial: bool = False
     acoustic_off_centering: float = 0.0   # Off-centering beta; 0=centered, 0.1 long runs
     # FV3_3D iter 168: corner-div damping (mirror of PE iter-16/18; FV3 sw_core.F90:1641-1822 d_sw5)
+    # ENABLE SELECTORS: block activates when d2_bg>0 OR (d4_bg>0 AND nord>0)
+    # (corner_div_damp_active).  dddmp is a MODIFIER only — never activates
+    # alone (deviation from FV3's always-on d_sw; default 0.20 would flip
+    # every legacy all-zero config).
     corner_div_damp_d2_bg: float = 0.0
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
@@ -231,6 +235,22 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     use_fv3_d_con_cv: bool = False
         # FV3_3D iter 320: c_v denominator for NH d_con (FV3 dyn_core.F90:1795 cv_air branch).
         # NH conserves internal energy c_v·T; c_pd under-heats by c_v/c_p≈0.714 (~40%). PE unaffected.
+    # APPENDED at the end of the NamedTuple on purpose: inserting a field
+    # mid-definition silently corrupts any positional construction (codex r2 P1).
+    hyperdiff_compact_outer: bool = False
+        # When False (default, bit-identical) the OUTER del^2 of the biharmonic
+        # is the wide div(grad) form, whose reach-2 centred difference is
+        # IDENTICALLY ZERO on a (-1)^i grid mode: the composite del^4 has an
+        # exact 2*dx NULL and cannot damp the grid-scale checkerboard
+        # (operators_3d.hyperdiffusion_3d docstring).  True selects the compact
+        # outer stencil, transfer symbol 16 sin^4(k dx/2), MAXIMAL at 2*dx —
+        # the behaviour of FV3's del6_vt_flux, whose fluxes are reach-1 adjacent
+        # differences (sw_core.F90:2066,2078).
+        # NOT YET DEMONSTRATED area-conservative or energy-dissipative on the
+        # varying cubed-sphere metric (codex r2 P1): laplacian_compact_3d is a
+        # raw second difference over local dx^2/dy^2 with no area-weighted flux
+        # pairing, so sum(area*L(f)) need not telescope.  Diagnostic/attribution
+        # knob only until that is measured; do not enable in production configs.
 
 
 def _apply_top_sponge_damp_boost(damp_corner, da_min_c, config):
@@ -376,11 +396,13 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 7. D-grid momentum tendencies ---
     # iter-74: interp ζ only; add f_corner directly (interp(f_cc)≠f_corner gives O(dx²) Coriolis err).
     # FV3_3D iter 170/190: a2b_ord4 for ζ_corner (mirror of PE 14); shared with iter-187 smag_vort cap.
-    _need_zeta_a2b_for_smag = (
-        config.corner_div_damp_d2_bg > 0.0
-        and config.corner_div_damp_d4_bg > 0.0
-        and config.corner_div_damp_nord > 0
+    # ζ needed whenever the del-4 branch runs — which no longer requires
+    # d2_bg>0 (see corner_div_damp_active).
+    from legoesm.core._fv3_divergence_corner import (
+        corner_div_damp_active as _cdd_active,
+        corner_div_damp_higher_order_active as _cdd_ho_active,
     )
+    _need_zeta_a2b_for_smag = _cdd_ho_active(config)
     _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
@@ -606,7 +628,11 @@ def cdgrid_compressible_euler_slow_tendencies(
         _dtheta_p_dt_ah_cc = None
 
     # FV3_3D iter 168: B-grid corner-div damp (mirror of PE iter-16/18; FV3 sw_core.F90:1641-1822 d_sw5)
-    if config.corner_div_damp_d2_bg > 0.0:
+    # Activation matches FV3 (no d2_bg master switch): d2_bg>0 OR the
+    # del-4 pair (d4_bg>0 AND nord>0).  The old ``d2_bg > 0`` gate left
+    # the matrix NH configs (d2_bg=0, nord=1, d4_bg=0.16) with ZERO
+    # corner damping → DCMIP TC2/TC3 cube vertex blow-up.
+    if _cdd_active(config):
         from legoesm.core._fv3_divergence_corner import (
             fv3_divergence_corner_3d,
         )
@@ -632,7 +658,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         # Step 3: del-(2*(nord+1)) damp (FV3 sw_core.F90:1725-1822, nord>0)
         # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
         # would break the iter-22 bit-for-bit test; mirror of PE-side rationale).
-        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+        if _cdd_ho_active(config):
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
             )
@@ -938,17 +964,24 @@ def cdgrid_compressible_euler_slow_tendencies(
         _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
         # Inner ∇² (compact stencil) — shared across all four fields.
         _lap1 = laplacian_compact_3d(_hyper_flat, grid)
-        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
-        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
-        # iter-169: use the imported ``_pad_halo_4d_module`` alias —
-        _dg = getattr(grid, 'duogrid', None)
-        _offsets = None if _dg is not None else grid.halo_interp_offsets
-        _lap1_pad = _pad_halo_4d_module(_lap1, interp_offsets=_offsets, duogrid=_dg)
-        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
-        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
-        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
-            n_face_h, n_i_h, n_j_h, nlev_h, 4,
-        )
+        if config.hyperdiff_compact_outer:
+            # Compact outer ∇²: ∇⁴ = ∇²_compact(∇²_compact(f)), the
+            # (1,-4,6,-4,1) stencil that is MAXIMAL at 2Δx.
+            _lap2 = laplacian_compact_3d(_lap1, grid).reshape(
+                n_face_h, n_i_h, n_j_h, nlev_h, 4,
+            )
+        else:
+            # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
+            # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+            # iter-169: use the imported ``_pad_halo_4d_module`` alias —
+            _dg = getattr(grid, 'duogrid', None)
+            _offsets = None if _dg is not None else grid.halo_interp_offsets
+            _lap1_pad = _pad_halo_4d_module(_lap1, interp_offsets=_offsets, duogrid=_dg)
+            _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
+            _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
+            _lap2 = divergence_3d(_gx, _gy, grid).reshape(
+                n_face_h, n_i_h, n_j_h, nlev_h, 4,
+            )
         # Per-field hyperdiff coefficients
         du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
         dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
@@ -962,6 +995,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
         hyper_out_flat = hyperdiffusion_3d(
             hyper_flat, grid, _coeff_uvT,
+            compact_outer=config.hyperdiff_compact_outer,
         )
         hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
         du_dt = du_dt + hyper_out[..., 0]
@@ -970,6 +1004,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     elif _coeff_rho > 0:
         drho_p_dt = drho_p_dt + hyperdiffusion_3d(
             rho_p, grid, _coeff_rho,
+            compact_outer=config.hyperdiff_compact_outer,
         )
 
     # --- 14. Sponge layer ---
@@ -1005,7 +1040,10 @@ def cdgrid_compressible_euler_slow_tendencies(
 
     dw_dt = horiz_adv_w_half - sponge_half * w
     if config.hyperdiff_w_coeff > 0:
-        dw_dt = dw_dt + hyperdiffusion_3d(w, grid, config.hyperdiff_w_coeff)
+        dw_dt = dw_dt + hyperdiffusion_3d(
+            w, grid, config.hyperdiff_w_coeff,
+            compact_outer=config.hyperdiff_compact_outer,
+        )
 
     # --- 16. Physics ---
     if physics_tendency is not None:

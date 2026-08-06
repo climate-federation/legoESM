@@ -22,14 +22,39 @@ use_polar_filter: true
 dt: 600.0
 
 # Convection: override the inherited `bechtold` with `sbm` on THIS lane (#869).
-# A controlled single-variable bisect from the day-45 restart state (conv carry
-# stripped) showed bechtold re-develops a polar-night (mid-Feb, ~71N/lev-1)
-# temperature runaway that blows the run at day ~47 REGARDLESS of every numerics
-# lever (polar filter on/off, GWD off/hines-swap, fp32/fp64, hyperdiff x2,
-# sponge x2, dt/2, stale-carry) — while sbm from the SAME state completes to day
-# 60 and a 95-day soak is stable.  sbm also lifts hfls from ~40 to ~70 W/m2
-# (#847).  The cube C12 lane (amip_production.yaml) keeps bechtold; the bechtold
-# polar-night blowup is tracked as a separate convection-scheme bug.
+#
+# EVIDENCE BELOW IS SCOPED TO THIS LANE'S RESOLUTION (resolution: 24 = 7.5 deg,
+# nlev: 20, dt: 600).  It does NOT generalise to a finer lat-lon grid — see the
+# 2.5-degree measurements at the end of this block.
+#
+# At 7.5 deg: a controlled single-variable bisect from the day-45 restart state
+# (conv carry stripped) showed bechtold re-develops a polar-night
+# (mid-Feb, ~71N/lev-1) temperature runaway that blows the run at day ~47
+# REGARDLESS of every numerics lever (polar filter on/off, GWD off/hines-swap,
+# fp32/fp64, hyperdiff x2, sponge x2, dt/2, stale-carry) — while sbm from the
+# SAME state completes to day 60 and a 95-day soak is stable.  sbm also lifts
+# hfls from ~40 to ~70 W/m2 (#847).  The cube C12 lane (amip_production.yaml)
+# keeps bechtold.
+#
+# AT 2.5 DEGREES, sbm DOES NOT RESCUE IT (measured 2026-08-01, resolution: 72,
+# nlev: 30, vertical_coord: sigma, dt: 300, polar filter on, morrison, from
+# day 0 — one variable changed between the two arms):
+#     convection: bechtold -> BLOWUP day 69, T min 161.8 K -> 71.5 K
+#     convection: sbm      -> BLOWUP day 73, T min  98.5 K
+# Both fail within 4 days of each other with the same character, so at this
+# resolution the CONVECTION SCHEME IS NOT THE CAUSE.
+#
+# The 2.5-degree failure also sits somewhere ELSE than the 7.5-degree one.
+# Located offline from the day-60 checkpoint (9 days before failure):
+#     min T 161.8 K at latitude -83.8 deg (ANTARCTIC), LEVEL 3 of 30, i.e. near
+#     the MODEL TOP, not lev-1 at the surface;
+#     profile at that row: 228.9 218.8 216.1 [161.8] 169.6 174.6 181.9 ...
+#     — a SHARP SINGLE-LEVEL spike, not a deep polar-night radiative collapse.
+# So do NOT carry "mid-Feb / ~71N / lev-1 / it's bechtold" over to a finer grid:
+# at 2.5 deg it is 10 March, 83.8 SOUTH, near the model top, and scheme-agnostic.
+# Cause at 2.5 deg is UNKNOWN; remaining untested candidates are the
+# top-of-model sponge, vertical advection at the polar singularity, and the
+# Fourier polar filter aloft.  (GWD was already excluded at 7.5 deg above.)
 convection: sbm
 # The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
 # rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so

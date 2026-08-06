@@ -26,27 +26,54 @@ from legoesm import constants
 from legoesm.core.field import Field
 
 
-def taylor_test(loss_fn, x0, hs=(1e-1, 1e-2, 1e-3, 1e-4)):
+_TAYLOR_HS = (1e-1, 1e-2, 1e-3, 1e-4)
+
+
+def taylor_test(loss_fn, x0, hs=_TAYLOR_HS):
     """Run a Taylor test and return convergence ratios.
 
     Returns list of |J(x+h*dx)-J(x)-h*<g,dx>|/h^2 for each h.
     For correct gradients, these should be approximately constant.
+
+    Kept for the existing call sites; :func:`taylor_test_full` returns the
+    extra quantities the strengthened assertion needs.
+    """
+    return taylor_test_full(loss_fn, x0, hs=hs)["ratios"]
+
+
+def taylor_test_full(loss_fn, x0, hs=_TAYLOR_HS):
+    """Taylor test returning ratios, RAW first-order remainders, J0 and hs.
+
+    The raw remainder ``r1(h) = |J(x+h dx) - J(x) - h <g,dx>|`` is the
+    quantity that actually discriminates a correct gradient: for a right
+    gradient r1 ~ C h^2, so it must SHRINK as h shrinks.  The normalised
+    ``ratio = r1/h^2`` is only "approximately constant" for a correct
+    gradient, and a bound on the ratio alone is a weak test — a
+    first-order-wrong gradient gives r1 ~ C' h, whose ratio GROWS like
+    1/h, which is exactly what the decrease check below catches.
     """
     J0 = loss_fn(x0)
     grad = jax.grad(loss_fn)(x0)
     dx = grad / jnp.linalg.norm(grad)
     gdx = jnp.sum(grad * dx)
 
-    ratios = []
+    ratios, remainders = [], []
     for h in hs:
         J_pert = loss_fn(x0 + h * dx)
         remainder = jnp.abs(J_pert - J0 - h * gdx)
+        remainders.append(float(remainder))
         ratios.append((remainder / h ** 2).item())
-    return ratios
+    return {
+        "ratios": ratios,
+        "remainders": remainders,
+        "J0": float(jnp.abs(J0)),
+        "hs": list(hs),
+        "gdx": float(jnp.abs(gdx)),
+    }
 
 
 def assert_taylor_ok(ratios, name=""):
-    """Check Taylor test convergence.
+    """Check Taylor test convergence (ratio-bound form).
 
     The ratio r(h) = |J(x+h*dx)-J(x)-h*<g,dx>|/h^2 should be bounded
     and approximately constant for correct gradients.
@@ -58,6 +85,88 @@ def assert_taylor_ok(ratios, name=""):
     if len(ratios) >= 2:
         assert ratios[-1] < 1000 * ratios[0] + 1e-6, (
             f"{name}: Taylor ratios diverging: {ratios}"
+        )
+
+
+# Noise floor for the Taylor remainder, expressed as a multiple of the
+# float64 round-off of the ``J(x+h dx) - J(x)`` difference (~eps*|J0|).
+# 100x eps leaves a real margin above pure round-off while staying far
+# BELOW the genuine 2nd-order signal — the calibration matters: too high
+# a floor silently declares every valid sample "noise" and the check
+# becomes vacuous (observed with an absolute 1e-13 clamp: Held-Suarez
+# J0 ~ 5e-7 has ALL its remainders below 1e-13 yet decays a textbook
+# 100x per decade), too low and the small-h round-off plateau is
+# mistaken for a gradient defect.
+_TAYLOR_NOISE_EPS_MULTIPLE = 100.0
+
+# A correct (2nd-order) gradient gives r1(h/10)/r1(h) ~ 0.01; a
+# first-order-WRONG gradient gives ~0.1.  The acceptance threshold is
+# ``slack * (h_next/h)**2`` with slack = 5, i.e. 0.05 per decade —
+# a 5x tolerance on the h^2 prediction that still sits a clear factor 2
+# BELOW the first-order signature, so the two are discriminated.
+_TAYLOR_ORDER_SLACK = 5.0
+
+
+def assert_taylor_second_order(result, name="", slack=_TAYLOR_ORDER_SLACK,
+                               growth_slack=2.0):
+    """Assert 2nd-order convergence of the Taylor remainder.
+
+    This is the strong form the spec asks for ("if the ratio grows as
+    h -> 0, the gradient is WRONG"); ``assert_taylor_ok``'s 1000x ratio
+    bound alone would let a first-order-wrong gradient through over the
+    tested 4-decade h range.
+
+    Two checks, both restricted to remainders ABOVE the float64
+    cancellation floor (below it the measurement is round-off, not
+    signal, and demanding anything of it tests the floating-point noise
+    rather than the adjoint):
+
+    1. **Order** — the first above-floor consecutive pair (largest h,
+       best resolved) must decay like ``h^2`` to within ``slack``.  This
+       is what actually separates a right gradient from a wrong one.
+    2. **No growth** — no later above-floor pair may grow by more than
+       ``growth_slack``.
+    """
+    r1 = result["remainders"]
+    hs = result["hs"]
+    eps64 = float(jnp.finfo(jnp.float64).eps)
+    floor = max(_TAYLOR_NOISE_EPS_MULTIPLE * eps64 * result["J0"], 1e-300)
+
+    assert all(jnp.isfinite(jnp.asarray(r)) for r in r1), (
+        f"{name}: Taylor remainders have NaN/Inf: {r1}"
+    )
+
+    pairs = [
+        (i - 1, i) for i in range(1, len(r1))
+        if r1[i - 1] > floor and r1[i] > floor
+    ]
+    assert pairs, (
+        f"{name}: no consecutive Taylor sample pair was above the float64 "
+        f"cancellation floor ({floor:.3e}) — the test is vacuous.  Rescale "
+        f"the loss (mean instead of sum) or widen the h range so the "
+        f"h*<g,dx> signal is resolvable. remainders={r1} "
+        f"J0={result['J0']:.3e}"
+    )
+
+    # (1) Order check on the best-resolved pair.
+    i0, i1 = pairs[0]
+    predicted = (hs[i1] / hs[i0]) ** 2
+    observed = r1[i1] / r1[i0]
+    assert observed <= slack * predicted, (
+        f"{name}: Taylor remainder is NOT converging at 2nd order "
+        f"(h={hs[i0]:.0e} -> {hs[i1]:.0e}: {r1[i0]:.3e} -> {r1[i1]:.3e}, "
+        f"ratio {observed:.3e}, h^2 prediction {predicted:.3e}). "
+        f"A first-order ratio (~{hs[i1]/hs[i0]:.2e}) means the GRADIENT IS "
+        f"WRONG. remainders={r1} floor={floor:.3e}"
+    )
+
+    # (2) No growth on the remaining resolved pairs.
+    for i0, i1 in pairs[1:]:
+        assert r1[i1] <= r1[i0] * growth_slack, (
+            f"{name}: Taylor remainder GREW when h shrank "
+            f"(h={hs[i0]:.0e} -> {hs[i1]:.0e}: {r1[i0]:.3e} -> "
+            f"{r1[i1]:.3e}) while still above the noise floor "
+            f"({floor:.3e}) — the gradient is WRONG. remainders={r1}"
         )
 
 
@@ -98,8 +207,9 @@ class TestTaylorDynamics:
             out = model.step(s, dt)
             return jnp.sum(out.h ** 2)
 
-        ratios = taylor_test(loss, state.h)
-        assert_taylor_ok(ratios, "Shallow water lat-lon Taylor test")
+        res = taylor_test_full(loss, state.h)
+        assert_taylor_ok(res["ratios"], "Shallow water lat-lon Taylor test")
+        assert_taylor_second_order(res, "Shallow water lat-lon Taylor test")
 
     def test_primitive_eq_latlon(self):
         import math
@@ -150,8 +260,9 @@ class TestTaylorDynamics:
             out = model.step(s, dt)
             return jnp.mean(out.T ** 2)
 
-        ratios = taylor_test(loss, state.T)
-        assert_taylor_ok(ratios, "Primitive eq lat-lon Taylor test")
+        res = taylor_test_full(loss, state.T)
+        assert_taylor_ok(res["ratios"], "Primitive eq lat-lon Taylor test")
+        assert_taylor_second_order(res, "Primitive eq lat-lon Taylor test")
 
 
 # ============================================================================
@@ -185,8 +296,48 @@ class TestTaylorPhysics:
             tend = held_suarez_forcing(s, grid, sigma)
             return jnp.sum(tend.dT_dt.data ** 2)
 
-        ratios = taylor_test(loss, state.T.data)
-        assert_taylor_ok(ratios, "Held-Suarez Taylor test")
+        res = taylor_test_full(loss, state.T.data)
+        assert_taylor_ok(res["ratios"], "Held-Suarez Taylor test")
+        assert_taylor_second_order(res, "Held-Suarez Taylor test")
+
+    def test_gray_radiation(self):
+        """Spec 9b explicitly names gray radiation alongside Held-Suarez.
+
+        Gray radiation is the only physics with a *nonlinear* (sigma^4
+        Stefan-Boltzmann) response to the differentiated variable, so it
+        is the one place a first-order-only adjoint would still pass the
+        finiteness checks while failing the 2nd-order Taylor remainder.
+        """
+        from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+        from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+
+        config = GrayRadiationConfig()
+        ncol, nlev = 8, 5
+        key = jax.random.PRNGKey(11)
+        T = 250.0 + 10.0 * jax.random.normal(key, (ncol, nlev))
+        # Index 0 = TOA, -1 = surface (gray_radiation reads p_half[:, -1]
+        # as p_s); inverting it zeroes the column optical depth via the
+        # dtau >= 0 clamp and makes the Taylor test vacuous.
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1e5, nlev + 1), (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        sfc_temp = 290.0 * jnp.ones(ncol)
+        lat = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, ncol)
+        q_v = 1e-3 * jnp.ones((ncol, nlev))
+        insolation = 400.0 * jnp.ones(ncol)
+
+        def loss(T_data):
+            out = gray_radiation(T_data, p_full, p_half, sfc_temp, lat,
+                                 q_v, insolation, config)
+            # mean (not sum) keeps the loss O(1) so the h*<g,dx> signal
+            # stays above the float64 cancellation floor across the
+            # tested h range (same reasoning as the PE case above).
+            return jnp.mean(out.lw_flux_up ** 2)
+
+        res = taylor_test_full(loss, T)
+        assert_taylor_ok(res["ratios"], "Gray radiation Taylor test")
+        assert_taylor_second_order(res, "Gray radiation Taylor test")
 
 
 # ============================================================================
@@ -226,8 +377,9 @@ class TestTaylorLand:
             out, _, _ = step_land(s, forcing, config, U_min=1.0, dt=60.0)
             return jnp.sum(out.T_soil.data ** 2)
 
-        ratios = taylor_test(loss, state.T_soil.data)
-        assert_taylor_ok(ratios, "Slab land Taylor test")
+        res = taylor_test_full(loss, state.T_soil.data)
+        assert_taylor_ok(res["ratios"], "Slab land Taylor test")
+        assert_taylor_second_order(res, "Slab land Taylor test")
 
 
 # ============================================================================
@@ -270,8 +422,9 @@ class TestTaylorIce:
             )
             return jnp.sum(out.T_ice.data ** 2)
 
-        ratios = taylor_test(loss, state.T_ice.data)
-        assert_taylor_ok(ratios, "Slab ice Taylor test")
+        res = taylor_test_full(loss, state.T_ice.data)
+        assert_taylor_ok(res["ratios"], "Slab ice Taylor test")
+        assert_taylor_second_order(res, "Slab ice Taylor test")
 
 
 # ============================================================================
@@ -299,8 +452,9 @@ class TestTaylorCoupler:
             )
             return jnp.sum(shflx ** 2)
 
-        ratios = taylor_test(loss, T_sfc)
-        assert_taylor_ok(ratios, "COARE3 Taylor test")
+        res = taylor_test_full(loss, T_sfc)
+        assert_taylor_ok(res["ratios"], "COARE3 Taylor test")
+        assert_taylor_second_order(res, "COARE3 Taylor test")
 
 
 # ============================================================================
@@ -372,7 +526,8 @@ class TestTaylorCostFunction:
         # Start the Taylor test away from the background so J_b also
         # contributes a non-trivial (non-zero) gradient.
         x0 = x_b + 30.0 * jax.random.normal(jax.random.PRNGKey(11), x_b.shape)
-        ratios = taylor_test(cost_fn, x0)
-        assert_taylor_ok(ratios, "4D-Var cost function Taylor test")
+        res = taylor_test_full(cost_fn, x0)
+        assert_taylor_ok(res["ratios"], "4D-Var cost function Taylor test")
+        assert_taylor_second_order(res, "4D-Var cost function Taylor test")
 
 

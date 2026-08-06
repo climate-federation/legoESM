@@ -55,6 +55,9 @@ _MULTILAYER_FIELDS = (
 # restart and the template carry it.
 _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     "surface_water", "snow_bands", "snow_age_bands", "ice_bands",
+    # Intercepted canopy-water store (present iff interception is enabled); real
+    # mass, so it must round-trip or the warm start leaks it.
+    "W_canopy",
 )
 
 

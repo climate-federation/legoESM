@@ -619,6 +619,125 @@ class TestHeldSuarezParams:
 
 
 # ===========================================================================
+# 11e-bis  Gray radiation parameters  (spec category 11b)
+# ===========================================================================
+
+def _gray_column(ncol=8, nlev=5):
+    """Radiation column: structured T, moist so the interactive-vapor LW
+    optical-depth term is live.
+
+    Vertical index convention: 0 = TOA, -1 = surface (``gray_radiation``
+    reads ``p_s = p_half[:, -1]``), so p INCREASES with index.  Inverting
+    it makes ``dtau_dry`` negative, ``jnp.maximum(dtau, 0)`` zeroes the
+    whole column optical depth, and every LW optical-depth parameter
+    silently becomes unreachable — a vacuous pass.
+    """
+    key = jax.random.PRNGKey(7)
+    T = 250.0 + 10.0 * jax.random.normal(key, (ncol, nlev))
+    p_half = jnp.broadcast_to(
+        jnp.linspace(100.0, 1.0e5, nlev + 1), (ncol, nlev + 1)
+    )
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    sfc_temp = 290.0 * jnp.ones(ncol)
+    lat = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, ncol)
+    q_v = 5.0e-3 * jnp.ones((ncol, nlev))
+    insolation = 400.0 * jnp.ones(ncol)
+    return T, p_full, p_half, sfc_temp, lat, q_v, insolation
+
+
+class TestGrayRadiationParams:
+    """Every ``GrayRadiationConfig`` float field that ``gray_radiation``
+    actually READS must be reachable by ``jax.grad``.
+
+    Gray radiation is the tunable radiation backend (RRTMGP's tables are
+    not AD-reachable — see the 11j note), so these are the only radiation
+    parameters a parameter-estimation user can calibrate.  A zero
+    gradient here means the advertised knob is dead.
+
+    NOT tested here, and NOT a defect: ``S_0``, ``obliquity`` and
+    ``perpetual_equinox`` are never read by ``gray_radiation`` — the TOA
+    ``insolation`` is a prescribed ARGUMENT (computed upstream in
+    ``radiation/solar.py``).  Differentiating the kernel w.r.t. ``S_0``
+    would therefore be zero by construction, not by defect; the SW
+    forcing path is covered instead by the ``insolation`` gradient in
+    ``test_diff_atmosphere_physics.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+        from legoesm.atmosphere.physics.radiation.config import (
+            GrayRadiationConfig,
+        )
+        self.gray = gray_radiation
+        self.GrayCfg = GrayRadiationConfig
+        (self.T, self.p_full, self.p_half, self.sfc_temp, self.lat,
+         self.q_v, self.insolation) = _gray_column()
+
+    def _loss(self, name, p, field="lw_flux_up"):
+        cfg = self.GrayCfg()._replace(**{name: p})
+        out = self.gray(self.T, self.p_full, self.p_half, self.sfc_temp,
+                        self.lat, self.q_v, self.insolation, cfg)
+        return jnp.sum(getattr(out, field) ** 2)
+
+    # --- LW optical depth ------------------------------------------------
+    def test_tau_equator(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("tau_equator", p), 7.2, "Gray tau_equator",
+        )
+
+    def test_tau_pole(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("tau_pole", p), 1.8, "Gray tau_pole",
+        )
+
+    def test_linear_frac(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("linear_frac", p), 0.2, "Gray linear_frac",
+        )
+
+    def test_tau_moist_coeff(self):
+        # Interactive-vapor LW add-on; live only when q_v is not None.
+        assert_param_grad_ok(
+            lambda p: self._loss("tau_moist_coeff", p), 0.0115,
+            "Gray tau_moist_coeff",
+        )
+
+    def test_lw_diff_factor(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("lw_diff_factor", p), 1.66,
+            "Gray lw_diff_factor",
+        )
+
+    def test_sfc_emissivity(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("sfc_emissivity", p), 1.0,
+            "Gray sfc_emissivity",
+        )
+
+    # --- SW --------------------------------------------------------------
+    def test_sw_tau_0(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("sw_tau_0", p, field="sw_heating_rate"),
+            0.22, "Gray sw_tau_0",
+        )
+
+    def test_sw_exponent(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("sw_exponent", p, field="sw_heating_rate"),
+            2.0, "Gray sw_exponent",
+        )
+
+    def test_sfc_albedo(self):
+        # Scalar-albedo path (sfc_albedo argument left None), which is what
+        # the standalone / idealized configurations use.
+        assert_param_grad_ok(
+            lambda p: self._loss("sfc_albedo", p, field="sw_flux_up"),
+            0.31, "Gray sfc_albedo",
+        )
+
+
+# ===========================================================================
 # 11f  Land model parameters (slab + bucket hydrology)
 # ===========================================================================
 
@@ -710,8 +829,36 @@ class TestLandParams:
         # Roughness length only enters the surface fluxes under the MOST
         # bulk scheme (the "constant" scheme uses fixed Cd/Ch and ignores
         # z0).  Probe under bulk_scheme="most" so the parameter is live.
+        #
+        # FIXED (this sweep): this test previously used the shared
+        # ``_land_forcing`` default, which sets ``T_lowest = 280 K`` —
+        # EXACTLY the ``_land_state`` soil temperature.  With zero
+        # air-surface temperature difference the sensible-heat flux is
+        # identically zero, so the turbulent exchange whose roughness
+        # dependence this test exists to sense contributes nothing and
+        # ``jax.grad`` returned exactly 0.  The test therefore FAILED on
+        # main while reporting "z0_land is unreachable by AD", which is
+        # NOT true.  Instrumented (not inferred):
+        #   * ``compute_most_fluxes`` w.r.t. ``z0_init`` is non-zero for
+        #     all of most / coare3 / large_yeager (5.4e6 / 6.0e1 /
+        #     -4.4e-2), so the bulk kernel is fine;
+        #   * with a real dT (``T_lowest = 285 K``) the FULL
+        #     ``step_land`` gradient d(sum T_soil^2)/d(z0_land) is
+        #     non-zero at EVERY z0 probed from 1e-4 to 0.5, and equals
+        #     3.50e+02 at the 0.05 default;
+        #   * the ``LAND_MAX_EXCHANGE_COEFF = 0.02`` cap was ruled OUT
+        #     as the mechanism — capped and uncapped calls return
+        #     bit-identical gradients at every z0 tested.
+        # So the parameter IS reachable; only the degenerate zero-dT
+        # column hid it.  A warm-air forcing is used here (the shared
+        # default is left untouched so the other TestLandParams probes
+        # keep their established configuration).
+        warm_forcing = _land_forcing(self.ncol, T_lowest=285.0 * jnp.ones(self.ncol))
         assert_param_grad_ok(
-            self._loss_factory("z0_land", base_cfg_kwargs={"bulk_scheme": "most"}),
+            self._loss_factory(
+                "z0_land", base_cfg_kwargs={"bulk_scheme": "most"},
+                forcing=warm_forcing,
+            ),
             0.05, "Land z0_land (MOST)",
         )
 
@@ -759,6 +906,164 @@ class TestLandParams:
             dt=600.0, field="snow_depth",
         )
         assert_param_grad_ok(loss, 5.0e-6, "Land snow_melt_rate")
+
+
+class TestLandCarbonParams:
+    """Carbon-cycle tunables named by spec 11f (light-use efficiency,
+    Beer-law extinction, photosynthesis temperature optimum/width, and
+    the respiration ``Q10``) must be reachable by ``jax.grad``.
+
+    These are the primary targets of every land-carbon calibration
+    (biomass / SIF / FLUXNET streams), so a dead knob here silently
+    reduces the calibration to a subset of its declared control vector.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.land.carbon.carbon_cycle import (
+            compute_gpp, som_decomposition_rate,
+        )
+        from legoesm.land.carbon.config import CarbonConfig
+        self.compute_gpp = compute_gpp
+        self.som_rate = som_decomposition_rate
+        self.CarbonCfg = CarbonConfig
+        ncol = 8
+        ones = jnp.ones(ncol)
+        self.sw_down = 300.0 * ones
+        self.T = (constants.T_freeze + 22.0) * ones
+        self.LAI = 3.0 * ones
+        self.co2 = 400.0 * ones
+        self.beta = 0.8 * ones
+        self.precip = 3.0e-5 * ones
+
+    def _gpp_loss(self, name, p):
+        cfg = self.CarbonCfg()._replace(**{name: p})
+        gpp = self.compute_gpp(self.sw_down, self.T, self.LAI, self.co2,
+                               self.beta, cfg)
+        return jnp.sum(gpp ** 2)
+
+    def test_epsilon_light_use_efficiency(self):
+        assert_param_grad_ok(
+            lambda p: self._gpp_loss("epsilon", p), 1.0, "Carbon epsilon (LUE)",
+        )
+
+    def test_k_ext_beer_law(self):
+        assert_param_grad_ok(
+            lambda p: self._gpp_loss("k_ext", p), 0.5, "Carbon k_ext",
+        )
+
+    def test_T_opt_C(self):
+        assert_param_grad_ok(
+            lambda p: self._gpp_loss("T_opt_C", p), 25.0, "Carbon T_opt_C",
+        )
+
+    def test_T_width_C(self):
+        assert_param_grad_ok(
+            lambda p: self._gpp_loss("T_width_C", p), 15.0, "Carbon T_width_C",
+        )
+
+    def test_Q10_het_exp_respiration(self):
+        """Heterotrophic respiration Q10 through the SOM decomposition rate.
+
+        ``compute_gpp`` cannot reach it (GPP is the assimilation side),
+        so the probe uses the public ``som_decomposition_rate`` wrapper —
+        the same kinetics the prognostic step applies to each SOM pool.
+        """
+        def loss(p):
+            cfg = self.CarbonCfg()._replace(Q10_het_exp=p)
+            r = self.som_rate(self.T, self.precip, jnp.asarray(2.0e-3),
+                              cfg, jnp.asarray(1.0))
+            return jnp.sum(r ** 2)
+
+        assert_param_grad_ok(loss, 0.09, "Carbon Q10_het_exp")
+
+
+class TestStomataParams:
+    """Stomatal-conductance tunables named by spec 11f: ``Vc_max25``
+    (max carboxylation) and the ``g1`` slopes for both Ball-Berry and
+    Medlyn, plus the Jarvis PAR half-saturation.
+
+    ``g1_bb`` / ``g1_med`` are probed through the explicit-arg kernels
+    ``ball_berry_gs`` / ``medlyn_gs`` (the single source of the gs
+    numerics for BOTH land stacks), so the test pins the slope itself
+    rather than whichever branch a config happens to select.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.land.stomata import (
+            StomataConfig, ball_berry_gs, medlyn_gs, jarvis_gs,
+            coupled_farquhar_stomata,
+        )
+        self.StomataCfg = StomataConfig
+        self.ball_berry_gs = ball_berry_gs
+        self.medlyn_gs = medlyn_gs
+        self.jarvis_gs = jarvis_gs
+        self.coupled = coupled_farquhar_stomata
+        ncol = 8
+        ones = jnp.ones(ncol)
+        self.A = 10.0 * ones          # [umol CO2/m2/s]
+        self.RH = 0.7 * ones
+        self.Cs = 380.0 * ones        # [umol/mol]
+        self.VPD_kPa = 1.2 * ones
+        self.T = (constants.T_freeze + 22.0) * ones
+        self.sw_down = 300.0 * ones
+        self.q_air = 8.0e-3 * ones
+        self.p_surface = 1.0e5 * ones
+        self.beta_soil = 0.8 * ones
+        self.LAI = 3.0 * ones
+        self.co2 = 400.0 * ones
+
+    def test_g1_ball_berry(self):
+        def loss(p):
+            gs = self.ball_berry_gs(self.A, self.RH, self.Cs, p, 0.01)
+            return jnp.sum(gs ** 2)
+
+        assert_param_grad_ok(loss, 9.0, "Stomata g1_bb (Ball-Berry slope)")
+
+    def test_g1_medlyn(self):
+        def loss(p):
+            gs = self.medlyn_gs(self.A, self.VPD_kPa, self.Cs, p, 0.01)
+            return jnp.sum(gs ** 2)
+
+        assert_param_grad_ok(loss, 4.0, "Stomata g1_med (Medlyn slope)")
+
+    def test_K_PAR_jarvis(self):
+        def loss(p):
+            cfg = self.StomataCfg(enabled=True)._replace(K_PAR=p)
+            gs = self.jarvis_gs(self.T, self.sw_down, self.q_air,
+                                self.p_surface, self.beta_soil, cfg)
+            return jnp.sum(gs ** 2)
+
+        assert_param_grad_ok(loss, 200.0, "Stomata K_PAR (Jarvis)")
+
+    def test_gs_max_jarvis(self):
+        def loss(p):
+            cfg = self.StomataCfg(enabled=True)._replace(gs_max=p)
+            gs = self.jarvis_gs(self.T, self.sw_down, self.q_air,
+                                self.p_surface, self.beta_soil, cfg)
+            return jnp.sum(gs ** 2)
+
+        assert_param_grad_ok(loss, 0.3, "Stomata gs_max (Jarvis)")
+
+    def test_Vc_max25_through_coupled_solver(self):
+        """``Vc_max25`` through the coupled A-gs Newton solver.
+
+        This is the parameter estimation target for photosynthetic
+        capacity, and it must survive the ``jax.jvp``-based element-wise
+        ``dF/dCi`` inside the Newton iteration (Phase-2 refactor).
+        """
+        def loss(p):
+            cfg = self.StomataCfg(
+                enabled=True, stomata_model="ball_berry",
+            )._replace(Vc_max25=p)
+            gs, gpp = self.coupled(
+                self.T, self.sw_down, self.co2, self.q_air,
+                self.p_surface, self.LAI, self.beta_soil, cfg,
+            )
+            return jnp.sum(gs ** 2) + jnp.sum(gpp ** 2)
+
+        assert_param_grad_ok(loss, 60.0, "Stomata Vc_max25 (coupled A-gs)")
 
 
 # ===========================================================================
@@ -955,15 +1260,133 @@ class TestOceanPhysicsParams:
             "Ocean Richardson A_bg",
         )
 
+
+class TestOceanTKEParams:
+    """Prognostic-TKE closure tunables (``c_k``, ``c_eps``, ``alpha_tke``,
+    ``tke_surface_min``) must be reachable by ``jax.grad``.
+
+    The TKE scheme is the production OMIP vertical-mixing closure, so its
+    coefficients are the ones an ocean parameter-estimation run would
+    actually calibrate; a dead knob here means the whole calibration is
+    a no-op.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        self.tke = tke_vertical_mixing
+        self.TKECfg = TKEConfig
+        u, v, T, S, rho, z_coord, _jac = _ocean_column()
+        self.u, self.v, self.T, self.S, self.rho = u, v, T, S, rho
+        nlev = u.shape[-1]
+        # Interface spacing (nlev-1 interfaces between cell centres).
+        self.dz_half = jnp.broadcast_to(
+            jnp.asarray([15.0, 30.0, 60.0][: nlev - 1]), u.shape[:-1] + (nlev - 1,)
+        )
+        self.tke_old = jnp.full(u.shape[:-1] + (nlev - 1,), 1.0e-4)
+        self.tau_x = jnp.full(u.shape[:-1], 0.1)
+        self.tau_y = jnp.full(u.shape[:-1], 0.05)
+
+    def _loss(self, name, p, field="K_H"):
+        cfg = self.TKECfg()._replace(**{name: p})
+        out = self.tke(
+            self.u, self.v, self.T, self.S, self.rho, self.dz_half,
+            self.tke_old, self.tau_x, self.tau_y, 3600.0, cfg,
+        )
+        return jnp.sum(getattr(out, field) ** 2)
+
+    def test_c_k(self):
+        assert_param_grad_ok(lambda p: self._loss("c_k", p), 0.1, "TKE c_k")
+
+    def test_c_eps(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("c_eps", p, field="tke_new"), 0.7, "TKE c_eps",
+        )
+
+    def test_alpha_tke(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("alpha_tke", p, field="tke_new"), 30.0,
+            "TKE alpha_tke",
+        )
+
+
+class TestOceanBottomDragParams:
+    """NEMO ``zdfdrg`` bottom-drag coefficients must be AD-reachable.
+
+    Probed through the shared single-owner helper
+    ``nemo_effective_bottom_drag_r`` (the same function every grid's
+    drag path calls) rather than through ``model.step``: the model
+    gates the drag family on a *static* Python ``if config.bottom_drag_r
+    > 0`` feature flag (the sanctioned CLAUDE.md feature-gating
+    exception), so a traced ``bottom_drag_r`` cannot cross that boundary
+    by design.  The COEFFICIENTS below are what the drag law actually
+    multiplies, and those must flow.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            nemo_effective_bottom_drag_r,
+        )
+        self.drag_r = nemo_effective_bottom_drag_r
+        shape = (6, 4, 4)
+        self.u_bot = 0.15 * jnp.ones(shape)
+        self.v_bot = 0.08 * jnp.ones(shape)
+        self.h_bot = 200.0 * jnp.ones(shape)
+
+    def _loss(self, scheme, name, p, **fixed):
+        kwargs = dict(cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3,
+                      von_karman=constants.kappa_vk)
+        kwargs.update(fixed)
+        kwargs[name] = p
+        r = self.drag_r(self.u_bot, self.v_bot, self.h_bot,
+                        scheme=scheme, **kwargs)
+        return jnp.sum(r ** 2)
+
+    def test_cd0_quadratic(self):
+        # np_non_lin: zcd = Cd0 exactly, so d(r)/d(cd0) is the cleanest probe.
+        assert_param_grad_ok(
+            lambda p: self._loss("nemo_quadratic", "cd0", p), 1.0e-3,
+            "Ocean bottom drag cd0 (nemo_quadratic)",
+        )
+
+    def test_ke0_background_tidal_ke(self):
+        assert_param_grad_ok(
+            lambda p: self._loss("nemo_quadratic", "ke0", p), 2.5e-3,
+            "Ocean bottom drag ke0",
+        )
+
+    def test_z0_loglayer(self):
+        # np_loglayer: zcd = clip((kappa/ln(0.5 h/z0))^2, cd0, cd_max).
+        # With h_bot = 200 m and z0 = 3e-3 m the raw Cd is ~2.2e-3, inside
+        # the [cd0, cd_max] window, so the clip is INACTIVE and the z0
+        # derivative is live (a clipped point would legitimately give 0).
+        assert_param_grad_ok(
+            lambda p: self._loss("nemo_loglayer", "z0", p), 3.0e-3,
+            "Ocean bottom drag z0 (nemo_loglayer)",
+        )
+
+
 # ===========================================================================
 # 11j  RRTMGP — coverage note
 # ===========================================================================
 #
-# RRTMGP gas-absorption coefficients are table-based and not
-# differentiable through the lookup (integer band indexing + clamped
-# interpolation table reads).  Surface emissivity / aerosol-optical-depth
-# scaling are differentiable but live in the radiation driver layer and
-# are exercised by ``test_diff_atmosphere_physics.py`` (gray radiation
-# emissivity / optical-depth coefficients are covered there).  No new
-# RRTMGP parameter is independently AD-reachable at the kernel level, so
-# none is asserted here.
+# NON-DIFFERENTIABLE (genuine limitation, not a bug): RRTMGP
+# gas-absorption coefficients are table-based and unreachable by AD
+# through the lookup (integer band indexing + clamped interpolation
+# table reads).  A user calibrating radiation must therefore use the
+# GRAY backend; RRTMGP's spectroscopy is fixed input data, not a
+# trainable parameter set.
+#
+# The AD-reachable radiation parameters are the gray ones, and they are
+# now asserted directly in ``TestGrayRadiationParams`` above
+# (tau_equator / tau_pole / linear_frac / tau_moist_coeff /
+# lw_diff_factor / sfc_emissivity / sw_tau_0 / sw_exponent /
+# sfc_albedo).  The earlier version of this note claimed that coverage
+# lived in ``test_diff_atmosphere_physics.py``; it did not — that module
+# only exercised gradients w.r.t. STATE (sfc_temp), never w.r.t. the
+# config parameters — so the claim is corrected here rather than left
+# pointing at coverage that did not exist.

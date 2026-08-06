@@ -653,18 +653,22 @@ def test_bechtold_mse_conservation_within_tolerance():
         moisture_convergence=jnp.zeros_like(T),
     )
     dp = ph[:, 1:] - ph[:, :-1]
-    # The latent-heat sink C is the FULL detrained condensate: the #929 rain
-    # split moves precip_efficiency of it from dq_c_conv_dt into dq_r_conv_dt,
-    # but the latent heat of ALL of it is already booked in dT_dt (H), so the
-    # enthalpy budget must sum dq_c + dq_r (the split re-partitions water
-    # downstream; it does not change the scheme's internal energy balance).
-    dqr = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else 0.0
+    # RELEASED-latent convention (unified 2026-07-22): the condensation
+    # latent heat of the FULL detrained condensate is booked in dT_dt at
+    # the detrainment source levels (the column-enthalpy fix), so the
+    # closure metric is simply H + Q = 0 on h = c_p*T + L_v*q_v — the
+    # condensate's latent is inside H, its WATER is tracked by the
+    # separate column-water closure (test_bechtold_column_conservation).
+    # This matches the pipeline consumer: microphysics treats grid q_c as
+    # released-latent liquid (books -L_v when re-evaporating it), so a
+    # deferred-latent hand-off destroyed column enthalpy at the interface
+    # (measured -L_v*C = -57 W/m² on the production fixture — the AMIP
+    # heating/moisture mispairing).
     H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
     Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum((out.dq_c_conv_dt + dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
-    assert rel < 0.10, (
-        f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
+    rel = abs(H + Q) / (abs(H) + abs(Q) + 1e-10)
+    assert rel < 0.02, (
+        f"Bechtold (implicit_flux) MSE residual {H+Q:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
     )
 
@@ -689,12 +693,15 @@ def test_bechtold_mse_conservation_within_tolerance():
         ),
         moisture_convergence=jnp.zeros_like(T),
     )
+    # Same RELEASED-latent metric: the in-plume rain's +L_v pairing AND the
+    # detrained condensate's formation heat are both inside H now (one
+    # convention scheme-wide; the pre-2026-07-22 mixed-convention debt is
+    # retired).
     H2 = float(jnp.sum(out_ip.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
     Q2 = float(jnp.sum(out_ip.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C2 = float(jnp.sum(out_ip.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel2 = abs(H2 + Q2 + C2) / (abs(H2) + abs(Q2) + abs(C2) + 1e-10)
-    assert rel2 < 0.10, (
-        f"Bechtold in-plume-precip MSE residual {H2+Q2+C2:.1f} W/m^2 "
+    rel2 = abs(H2 + Q2) / (abs(H2) + abs(Q2) + 1e-10)
+    assert rel2 < 0.02, (
+        f"Bechtold in-plume-precip MSE residual {H2+Q2:.1f} W/m^2 "
         f"({rel2*100:.1f}% of total) — the rain-formation latent release "
         f"and the vapor sink have diverged"
     )

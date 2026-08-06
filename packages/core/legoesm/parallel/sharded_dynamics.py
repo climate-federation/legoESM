@@ -651,6 +651,14 @@ class _SingleDeviceStep:
 # Sharded step construction
 # ======================================================================
 
+# Sub-face tile factors whose tiled step is bit-identity-validated against the
+# global op. kt=2 (24 devices) and kt=3 (54) were validated standalone AND in a
+# 2-node multi-controller run (rel=0.0). Anything else replicates the global
+# state instead of sharding it, so it is REFUSED rather than silently run
+# (#1360). Grow this set only together with the validation evidence.
+VALIDATED_TILE_FACTORS = frozenset({2, 3})
+
+
 def make_sharded_step(
     model,
     config: DeviceConfig,
@@ -761,11 +769,32 @@ def make_sharded_step(
     # ``docs/performance/scaling/cube_production_tiling_design.md``.  NOT Ginsburg-benchable
     # (np>6 anti-scales on Gloo-TCP/PCIe) — future-HW capability.
     import os as _os
-    _tiled_ok = (
+    _tiled_requested = (
         _os.environ.get("LEGOESM_TILED_SPMD", "0") == "1"
         and _tiling[0] == _tiling[1] and _tiling[0] >= 2
         and _n == 6 * _tiling[0] * _tiling[1]
     )
+    # #1360: an UNVALIDATED kt used to fall through this branch silently, which
+    # left the step replicating the GLOBAL state on every device. The user then
+    # saw an opaque XLA argument-size error --
+    #   "The byte size of input/output arguments (83247045120) exceeds the base
+    #    limit (63820333056)"  (job 26495955, C768/L60 f32 at kt=4/96 devices)
+    # -- which reads as an OOM, not as "this tiling is not supported". That is
+    # the silent-fallback pattern the dispatch-hardening rule exists to kill:
+    # refuse loudly instead, naming what IS validated.
+    if _tiled_requested and _tiling[0] not in VALIDATED_TILE_FACTORS:
+        raise ValueError(
+            f"tiled cube SPMD is bit-identity-validated only at kt in "
+            f"{sorted(VALIDATED_TILE_FACTORS)} (6*kt^2 = "
+            f"{[6 * k * k for k in sorted(VALIDATED_TILE_FACTORS)]} devices); "
+            f"got kt={_tiling[0]} ({_n} devices). Running it would NOT shard: "
+            f"the step falls back to replicating the global state on every "
+            f"device and dies with an XLA argument-size error that looks like "
+            f"an OOM (#1360). Validate that kt the way kt=2/3 were "
+            f"(tiled-vs-global bit identity + a multi-controller run, "
+            f"scripts/validate/validate_tiled_fv3_sw_multinode.py) and add it "
+            f"to VALIDATED_TILE_FACTORS, or use a validated device count.")
+    _tiled_ok = _tiled_requested
     if ((_face_ok or _tiled_ok)
             and config.mesh is not None
             and "face" in getattr(config.mesh, 'axis_names', ())):
@@ -1139,6 +1168,11 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
         edgeSignOnCell=pad2_col(mesh.edgeSignOnCell, pad_c, fill=0.0),
         edgeSignOnVertex=pad2_col(mesh.edgeSignOnVertex, pad_v, fill=0.0),
         meshDensity=pad1(mesh.meshDensity, pad_c, fill=0.0),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else pad1(mesh.subgrid_topo_stddev,
+                                       pad_c, fill=0.0)),
+        land_frac=(None if mesh.land_frac is None
+                   else pad1(mesh.land_frac, pad_c, fill=0.0)),
     )
 
 
@@ -1789,6 +1823,33 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 # would silently ride through the packed SPMD halo exchange UNEXCHANGED
 # (stale halos on every RK stage) — fail loudly so the cell-pack layout,
 # the physics application and this set are extended deliberately.
+# Workload signatures — (n_devices, global edge rows, global cell rows,
+# nlev), all trace-time-static — where a tendency-output
+# optimization_barrier is measured to pay. OBSERVED CORRELATION, not a
+# proven XLA cost-model account: at ico-L8 np4 (and only there among
+# np2/4/8) the compiled step carries three once-per-step 3.3-3.6 ms
+# serialized loop-fusion kernels that the HLO frame table resolves to the
+# RK pytree_axpy (pytree_ops.py), ~10.9 ms/step in total (nsys 26479922,
+# HLO 26480096), and the barrier removes most of that: same-day ladder
+# np4 17.78 -> 14.10 ms (-20.7%) with np2 +1.2% (noise) and np8 0.0%
+# (jobs 26486123 dead-gate vs 26486163). An UNgated barrier regressed np2
+# by 10.7% in the earlier experiment (26480310), hence the gate. The
+# signature includes cell rows + nlev because L8's edge count
+# (1,966,080, unpadded — padding pads CELLS, e.g. 655,362 -> 655,376 for
+# 16) is divisible several ways and edge rows alone would fire on
+# unmeasured workloads (codex round-12). The dtype is part of the
+# signature for the same reason — fusion decisions depend on element
+# type, and the receipt is f32-only (f64 unmeasured as of 2026-07-27).
+# Grow ONLY with a measured receipt for the exact signature.
+# PROVISIONAL f64 np8 entry under test (job 26493638: f64 np4 is HEALTHY
+# at eff 0.95 while np8 ANTI-scales 20.10 -> 21.42 — the candidate
+# pathological shape shifts one rung with the doubled element size).
+# Receipt job decides whether this entry stays.
+_FUSION_BARRIER_WORKLOADS = frozenset({
+    (4, 1_966_080, 655_376, 26, "float32"),
+    (8, 1_966_080, 655_376, 26, "float64"),
+})
+
 _VORONOI_SPMD_STATE_FIELDS = frozenset(
     {"u", "T", "p_s", "phis", "v", "tracers"})
 
@@ -2349,6 +2410,17 @@ def make_voronoi_sharded_step(
                     s.u.data, s.T.data, s.p_s.data, s.phis.data,
                     _pack_tracers(s), dt, mesh_arg, halo_arg,
                 )
+                # Static workload-gated fusion barrier (codex rounds
+                # 11-12; see _FUSION_BARRIER_WORKLOADS). Every gate
+                # operand is trace-time static (closure int + aval
+                # shapes) — no retrace; the barrier is an identity for
+                # numerics and AD.
+                _sig = (n_dev, s.u.data.shape[0],
+                        s.T.data.shape[0], s.T.data.shape[1],
+                        str(s.u.data.dtype))
+                if _sig in _FUSION_BARRIER_WORKLOADS:
+                    du, dT, dps, dq = jax.lax.optimization_barrier(
+                        (du, dT, dps, dq))
                 tr_tend = None
                 if s.tracers is not None:
                     tr_tend = {

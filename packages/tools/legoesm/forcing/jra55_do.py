@@ -32,10 +32,13 @@ Design choices
   The cache time axis is contiguous noleap (365 days/year × N years
   × 8 records/day) so the driver's linear-in-time interp uses the
   index, not absolute dates.
-* **Mixed cadences (3-hourly winds, 6-hourly T/q/P) are resampled to
-  a common 3-hourly axis** at cache-build time.  The 6-hourly fields
-  are linearly interpolated between adjacent samples.  Documented in
-  the cache attrs.
+* **Mixed cadences are resampled to a common 3-hourly axis** at
+  cache-build time; whatever is coarser is linearly interpolated between
+  adjacent samples.  Documented in the cache attrs.  NOTE the DKRZ
+  ``JRA55-do-v1.4.0`` distribution ships ``tas``/``huss``/``psl``
+  3-HOURLY (2920 records/year), not 6-hourly, so for that source the
+  interpolation is an identity — every slot is already populated.  The
+  resampling stays because other distributions do mix cadences.
 * **Runoff (`friver`) is stored on the model grid as the conservative
   regrid output** — i.e., it lands on whatever grid cells the source
   land grid maps to, including land cells.  Coastal redistribution is
@@ -59,15 +62,32 @@ CMOR name   Description                           Units
 ==========  ====================================  ================
 ``uas``     10 m eastward wind                    m/s
 ``vas``     10 m northward wind                   m/s
-``tas``     2 m air temperature                   K
-``huss``    2 m specific humidity                 kg/kg
+``tas``     10 m air temperature                  K
+``huss``    10 m specific humidity                kg/kg
 ``psl``     sea-level pressure                    Pa
 ``rsds``    surface downwelling shortwave         W/m²
 ``rlds``    surface downwelling longwave          W/m²
 ``prra``    rainfall flux                         kg/m²/s
 ``prsn``    snowfall flux                         kg/m²/s
-``friver``  river runoff                          kg/m²/s
+``friver``  river runoff (per OCEAN area)         kg/m²/s
 ==========  ====================================  ================
+
+Two things about that table that are easy to get wrong:
+
+* ``tas`` and ``huss`` are at **10 m**, not 2 m.  The v1.4.0 files carry an
+  explicit ``height = 10.0 m`` coordinate on all of ``uas``/``vas``/``tas``/
+  ``huss``; the CF ``comment`` string "usually, 2 meter" is CMOR-table
+  boilerplate that contradicts the file's own coordinate.  Bulk-flux callers
+  must pass ``z_t = z_q = 10.0``.
+* ``friver`` is nominally normalised by the **ocean portion** of its cell
+  (``cell_measures: area: areacello``, ``cell_methods: area: mean where
+  sea``), but at 0.25 deg a river-mouth cell is essentially all ocean, so an
+  area-weighted integral over full cells IS the physical discharge (9.35e8
+  kg/s on 1 JANUARY 1958 -- the annual MEAN is 1.354e9, ~15 % above the
+  1.18 Sv observational estimate of Dai & Trenberth 2002).  What it needs is
+  COASTAL ROUTING: ~71 % of the discharge sits on cells a coarser ocean mask
+  calls land, and dry-cell masking discards rather than relocates it.  See
+  ``docs/ocean/fidelity/fesom2_gap_analysis.md`` section 3.5.
 """
 
 from __future__ import annotations
@@ -92,6 +112,7 @@ from legoesm.forcing.time_utils import (
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
     apply_conservative_regrid,
+    check_axis_span,
     compute_overlap_weights,
 )
 from legoesm.ocean.freshwater import FreshwaterForcing
@@ -104,12 +125,25 @@ from legoesm.ocean.freshwater import FreshwaterForcing
 #: Records per noleap day on the cache time axis (3-hourly).
 RECORDS_PER_DAY: int = 8
 
+#: Normalisation for the forcing remap, matching the OMIP2 applicator (kept as a
+#: named constant in both places rather than a bare literal, since it is a physics
+#: policy).  JRA55-do is Gaussian with outermost centre ~+-89.570 deg -> inferred
+#: outer edge ~+-89.849 deg, a 0.151 deg polar gap (3.4x narrower than CORE-II's),
+#: so the polar destination row is partly covered: 0.977 at 1 deg, 0.633 at 0.25
+#: deg, and uncovered entirely below ~0.15 deg.  Every cached channel is INTENSIVE
+#: (tas, huss, psl, winds, radiative and precip flux densities) and the shortfall is
+#: a DATA GAP, so 'fracarea' returns the mean of the overlapping source rather than
+#: coverage x field, and polar_fill covers rows beyond the source's band.  Not
+#: strictly conservative by construction -- correct magnitude is what matters for an
+#: intensive field.  See regrid_polar_coverage_2026-07-24.md.
+_FORCING_NORMALIZATION: str = "fracarea"
+
 #: Variables this module reads / regrids / caches.  Exactly the set
 #: needed to populate AtmToSurface and the freshwater path for tropical
 #: OMIP without sea ice.
 JRA55_VARIABLES: tuple[str, ...] = (
     "uas", "vas",                 # winds (3-hourly)
-    "tas", "huss", "psl",         # T, q, p_sl (6-hourly)
+    "tas", "huss", "psl",         # T, q, p_sl (3-hourly in v1.4.0)
     "rsds", "rlds",               # SW down, LW down (3-hourly)
     "prra", "prsn",               # rainfall, snowfall (3-hourly)
     "friver",                     # river runoff (daily)
@@ -509,12 +543,27 @@ def build_jra55_cache(
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
+    # Clamp src/target lat edges into [-pi/2, pi/2]: for a COARSE source the
+    # uniform-spacing edge inference can overshoot the pole (the 8-row test
+    # fixture's 86 deg outer centre lands at ~98 deg), where sin() caps below 1
+    # and leaves a spurious polar gap -- the polar rows would then regrid a
+    # constant to LESS than its value.  INERT on real TL319 JRA55-do, whose
+    # inferred outer edge is ~+-89.85 deg; kept as a cheap guard for coarse or
+    # irregular inputs.  _grid_edges_from_centers returns RADIANS.
+    src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
+    target_lat_edges = np.clip(config.target_lat_edges, -np.pi / 2, np.pi / 2)
 
     # Periodic longitude wrap: the source grid may not cover the full
     # [0°, 360°] range of the target (e.g. JRA55 TL319 at 640 points
     # has edges [-0.28°, 359.72°] which leaves a 0.28° gap at the
     # wrap point).  Fix by appending one ghost column at +360°.
     # The ghost column's data will be the first column's data (wrap).
+    # PRECONDITION the wrap-pad relies on, checked BEFORE padding: the RAW source
+    # must tile the full 360 deg.  The +360 ghost below would turn a partial
+    # source into one cell spanning the whole missing sector, which then reports
+    # COMPLETE longitude coverage to the weight builder.
+    check_axis_span(src_lon_edges, 2.0 * np.pi,
+                    name="JRA55-do source longitude")
     src_lon_edges_deg = np.degrees(src_lon_edges)
     target_lon_max = np.degrees(config.target_lon_edges[-1])
     if src_lon_edges_deg[-1] < target_lon_max - 1e-6:
@@ -527,9 +576,18 @@ def build_jra55_cache(
     else:
         _lon_wrap_pad = False
 
+    # fracarea + polar_fill treat JRA55-do's physical polar gap (see the constant's
+    # rationale above), after which every destination cell sums to 1 and
+    # require_full_coverage is the STRICT invariant again -- so a longitude
+    # seam/ghost deficit still raises.  The raw-longitude precondition the wrap-pad
+    # above relies on is asserted before that pad.
+    # See regrid_polar_coverage_2026-07-24.md
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
-        config.target_lat_edges, config.target_lon_edges,
+        target_lat_edges, config.target_lon_edges,
+        require_full_coverage=True,
+        normalization=_FORCING_NORMALIZATION,
+        polar_fill=True,
     )
 
     # Allocate output arrays on the cache axis.
@@ -957,9 +1015,13 @@ def jra55_to_atm_surface(
       virtual temperature: ``ρ = p / (R_d · T_v)`` with
       ``T_v = T (1 + 0.61 q)``.
     - ``p_lowest = p_surface = psl`` because JRA55-do delivers all
-      atmospheric state at the surface (10 m for winds, 2 m for T/q).
-      The ~2 m offset for T/q is handled by the bulk-flux solver via
-      :data:`CouplerConfig.z_t_atm` (see Item 1 audit), not here.
+      atmospheric state near the surface -- and in v1.4.0 that is **10 m for
+      all of** ``uas``/``vas``/``tas``/``huss`` (each file carries an explicit
+      ``height = 10.0 m`` coordinate).  The reference height reaches the
+      bulk-flux solver through :data:`CouplerConfig.z_t_atm` /
+      ``z_q_atm``, not here; both are 10.0 for this dataset.  An earlier
+      version of this note said 2 m for T/q, which cost ~10 % of the
+      turbulent fluxes.
     - ``cos_zenith`` is computed from absolute date + lat/lon.
 
     Parameters

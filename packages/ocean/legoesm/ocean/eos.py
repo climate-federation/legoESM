@@ -622,18 +622,107 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     w-interface depths). Both positive-down [m], static ``(nlev,)`` /
     ``(nlev-1,)`` grid quantities.
 
-    Residual (documented): these are the REFERENCE ladders. NEMO's ``bn2``
-    uses the time-level ``gdept(Kmm)``; for the DINO linear-free-surface
-    (``key_linssh``) case that equals ``gdept_1d`` exactly, and for full z*
-    the ``eta``-perturbation on the thermobaric ``mu1·gdept`` term is
-    ``O(eta/H) ≈ 1e-3`` — negligible vs the dominant ``lambda1·zt`` and
-    ``ΔT`` signal (``mu1 = 1.5e-4`` /m). The zrw weight and e3w are grid-fixed.
+    These are the STATIC REFERENCE ladders (NEMO ``gdept_1d``/``gdepw_1d``).
+    NEMO's ``bn2``/``rab_3d_t`` evaluate at the LIVE ``gdept(Kmm)``; under
+    ``key_linssh`` that equals ``gdept_1d`` exactly, but under z* (``key_qco``)
+    it is the stretched ladder — use :func:`nemo_bn2_live_ladders` there.
+    Measured against NEMO's own ``kt==nit000`` ``gdept(Kmm)`` dump on DINO y5,
+    the static ladder is off by median ``1.5e-4`` relative vs ``2.5e-8`` for
+    the stretched one (#1226).
     """
     z_full = jnp.abs(z_coord.z_full_ref)
     t_depth = getattr(z_coord, "t_depth_ref", None)
     gdept = z_full if t_depth is None else jnp.asarray(t_depth)
     gdepw_int = jnp.abs(z_coord.z_half_ref[1:-1])
     return gdept, gdepw_int
+
+
+def nemo_r3t_stretch(z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray) -> jnp.ndarray:
+    """NEMO ``key_qco`` T-point z* stretch factor ``(1 + r3t)``.
+
+    ``r3t = ssh/ht_0`` (``domqco.F90:160``, ``dom_qco_r3c``), used throughout
+    ``domzgr_substitute.h90`` macros as ``e3t(i,j,k,t) = e3t_0(i,j,k)*(1+r3t
+    (i,j,t))`` (``:139``) and ``gdept(i,j,k,t) = gdept_0(i,j,k)*(1+r3t(i,j,t))``
+    (``:145``/``:56``).  Standalone extraction of the stretch factor
+    previously embedded in :func:`nemo_bn2_live_ladders` (#1226 round-2)
+    so OTHER live-thickness/live-depth sites (e.g. the DINO ``trasbc.F90``
+    surface-flux divisor, #1226) reuse the identical formula instead of
+    re-deriving ``r3t``.
+
+    ``r3t`` uses the LOCAL column depth ``H_bathy`` (NEMO ``ht_0``) — NOT the
+    z* Jacobian from :func:`~legoesm.ocean.vertical.compute_ocean_jacobian`,
+    which is ``(eta + H_bathy)/H_max`` (normalised by the GLOBAL maximum
+    depth) and is a different quantity: using it here is off by median 1.1e-1
+    relative vs 2.5e-8 for this form, measured against NEMO's own
+    ``gdept(Kmm)`` dump (#1226).
+
+    Parameters
+    ----------
+    z_coord : vertical coordinate — only ``linear_free_surface`` is read.
+    eta : array ``(...)`` — sea-surface height [m] at the SAME time level
+        NEMO evaluates.
+    H_bathy : array ``(...)`` — local column depth [m], positive.
+
+    Returns
+    -------
+    array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
+    """
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
+        # never stretches.  Mirrors the same special case in
+        # vertical.compute_ocean_jacobian (:813-815).
+        return jnp.ones_like(jnp.asarray(eta))
+    # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
+    # rather than eta/0 -> inf/NaN poisoning the downstream chain.
+    H = jnp.asarray(H_bathy)
+    r3t = jnp.where(H > 0.0, jnp.asarray(eta) / jnp.where(H > 0.0, H, 1.0), 0.0)
+    # Safety floor on the stretch, NOT on r3t: a column driven to
+    # eta + H_bathy <= 0 (unclamped restart/IC, wetting-drying) would give a
+    # NON-POSITIVE geometric depth/thickness, which silently flips the sign
+    # of downstream terms.  Callers that already clamp eta (the PGF passes
+    # eta_safe) never reach this; it exists so an unclamped caller degrades
+    # loudly-wrong rather than silently-plausible.
+    return jnp.maximum(1.0 + r3t, 1.0e-6)
+
+
+def nemo_bn2_live_ladders(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``(gdept, gdepw_int)`` at NEMO's LIVE ``gdept(Kmm)`` under z*.
+
+    NEMO ``key_qco`` (no ``key_isf``) expands ``gdept(i,j,k,t)`` to the PURE
+    multiplicative stretch ``gdept_0*(1 + r3t)`` with ``r3t = ssh/ht_0``
+    (``domzgr_substitute.h90:139`` with ``Tisf -> Time()`` at ``:56``,
+    ``domqco.F90:160``).  There is NO ``-ssh`` shift: that is the SEPARATE
+    ``gdept_z0`` macro (``:145``), a z=0-referenced depth whose only consumer
+    is ``dynhpg.F90``.  ``gdept`` is depth below the instantaneous free
+    surface, which is the pressure proxy the S-EOS wants
+    (``eosbn2.F90:1166`` uses the plain ``gdept`` macro).
+
+    Parameters
+    ----------
+    z_coord : vertical coordinate — supplies the static reference ladders.
+    eta : array ``(...)`` — sea-surface height [m] at the SAME time level
+        NEMO evaluates (``Kmm``; ``rab_b``/``rn2b`` are BEFORE-level).
+    H_bathy : array ``(...)`` — local column depth [m], positive.
+
+    Returns
+    -------
+    tuple of array — ``(gdept, gdepw_int)``, shapes ``(..., nlev)`` /
+    ``(..., nlev-1)``, positive-down [m].
+    """
+    gdept, gdepw_int = nemo_bn2_depth_ladders(z_coord)
+    if getattr(z_coord, "linear_free_surface", False):
+        # NEMO key_linssh: domqco is NOT active, so r3t == 0 and
+        # gdept(Kmm) == gdept_0 EXACTLY -- the column never stretches.
+        # Short-circuit BEFORE calling nemo_r3t_stretch: that helper
+        # broadcasts against eta's shape even when returning all-ones,
+        # which would change the STATIC ladders' shape here (adversarial
+        # review finding F1 regression guard,
+        # test_linear_free_surface_column_never_stretches).
+        return gdept, gdepw_int
+    stretch = nemo_r3t_stretch(z_coord, eta, H_bathy)[..., jnp.newaxis]
+    return gdept * stretch, gdepw_int * stretch
 
 
 # ==============================================================================
@@ -958,6 +1047,145 @@ def unesco80_eos(
 
     rho = rho_0 / (1.0 - p_bar / K)
     return rho
+
+
+# ==============================================================================
+# Adiabatic lapse rate and potential temperature (Bryden 1973 / Fofonoff 1977;
+# the ``ATG`` / ``THETA`` pair of Fofonoff & Millard 1983, UNESCO Tech. Papers
+# in Marine Science No. 44 — the same reference as the UNESCO-80 EOS above).
+#
+# Why this lives here: observational hydrographies (WOA, PHC) archive IN-SITU
+# temperature, while every EOS and prognostic tracer in this package is
+# POTENTIAL temperature.  Initialising from an archive without converting
+# leaves the deep ocean warm by the adiabatic compression term — about
+# 0.1 degC at 1000 m and 0.5 degC at 5000 m — a systematic stratification
+# error, not noise.  FESOM2 applies exactly this conversion when
+# ``namelist.oce`` sets ``t_insitu = .true.`` (``gen_ic3d.F90`` ->
+# ``insitu2pot`` -> ``ptheta``/``atg`` in ``oce_ale_pressure_bv.F90``).
+#
+# Units are the oceanographic ones the polynomial was fitted in, NOT this
+# module's SI pressure: pressure in DECIBARS, temperature in degC (IPTS-68),
+# salinity on the practical scale (IPSS-78).  Hence the ``_dbar`` suffixes.
+# ==============================================================================
+
+# ATG polynomial coefficients, grouped as in the published Horner form.
+# Check value: ATG = 3.255976e-4 degC/dbar at S=40, T=40 degC, p=10000 dbar.
+_ATG_T0 = 3.5803e-5
+_ATG_T1 = 8.5258e-6
+_ATG_T2 = -6.836e-8
+_ATG_T3 = 6.6228e-10
+_ATG_DS0 = 1.8932e-6
+_ATG_DS1 = -4.2393e-8
+_ATG_P0 = 1.8741e-8
+_ATG_P1 = -6.7795e-10
+_ATG_P2 = 8.733e-12
+_ATG_P3 = -5.4481e-14
+_ATG_PDS0 = -1.1351e-10
+_ATG_PDS1 = 2.7759e-12
+_ATG_PP0 = -4.6206e-13
+_ATG_PP1 = 1.8676e-14
+_ATG_PP2 = -2.1687e-16
+
+# Runge-Kutta 4 weights in the Bryden (1973) / Fofonoff (1977) arrangement
+# (Gill's method: the 0.29289322 = 1 - 1/sqrt(2) family), transcribed from the
+# published ``THETA`` routine rather than re-derived, so the check value below
+# pins them.  coeff-ok: fixed integration weights of a cited algorithm, not a
+# tunable closure.
+_THETA_RK_A1 = 0.29289322
+_THETA_RK_B1 = 0.58578644
+_THETA_RK_C1 = 0.121320344
+_THETA_RK_A2 = 1.707106781
+_THETA_RK_B2 = 3.414213562
+_THETA_RK_C2 = 4.121320344
+
+
+def adiabatic_temperature_gradient(
+    S: jnp.ndarray,
+    T_C: jnp.ndarray,
+    p_dbar: jnp.ndarray,
+) -> jnp.ndarray:
+    """Adiabatic temperature gradient dT/dp [degC/dbar] (Bryden 1973).
+
+    Parameters
+    ----------
+    S : practical salinity (IPSS-78).
+    T_C : in-situ temperature [degC] (IPTS-68).
+    p_dbar : pressure [dbar].  In the oceanographic approximation this is
+        numerically the depth in metres, which is how both FESOM2's
+        ``insitu2pot`` and :func:`potential_temperature`'s callers use it.
+
+    Returns
+    -------
+    dT/dp [degC/dbar], same shape as the broadcast inputs.
+    """
+    ds = S - 35.0
+    t = T_C
+    p = p_dbar
+    return (
+        (
+            ((_ATG_PP2 * t + _ATG_PP1) * t + _ATG_PP0) * p
+            + (
+                (_ATG_PDS1 * t + _ATG_PDS0) * ds
+                + ((_ATG_P3 * t + _ATG_P2) * t + _ATG_P1) * t
+                + _ATG_P0
+            )
+        ) * p
+        + (_ATG_DS1 * t + _ATG_DS0) * ds
+        + ((_ATG_T3 * t + _ATG_T2) * t + _ATG_T1) * t
+        + _ATG_T0
+    )
+
+
+def potential_temperature(
+    S: jnp.ndarray,
+    T_C: jnp.ndarray,
+    p_dbar: jnp.ndarray,
+    p_ref_dbar: float = 0.0,
+) -> jnp.ndarray:
+    """In-situ -> potential temperature [degC] at ``p_ref_dbar``.
+
+    Fourth-order Runge-Kutta integration of
+    :func:`adiabatic_temperature_gradient` from ``p_dbar`` to
+    ``p_ref_dbar``, i.e. the ``THETA`` routine of Fofonoff & Millard (1983).
+    Pure and elementwise, so it is jit/grad/vmap-safe; the fixed four-stage
+    integration has no data-dependent control flow.
+
+    Check value (pinned in ``tests/ocean/unit/test_eos_potential_temperature.py``):
+    ``theta = 36.89073 degC`` for ``S=40``, ``T_C=40``, ``p_dbar=10000``,
+    ``p_ref_dbar=0``.
+
+    Parameters
+    ----------
+    S : practical salinity (IPSS-78).
+    T_C : in-situ temperature [degC] (IPTS-68).
+    p_dbar : in-situ pressure [dbar] (~ depth in metres).
+    p_ref_dbar : reference pressure [dbar], default 0 (the surface), which is
+        the convention for the model's prognostic potential temperature.
+
+    Returns
+    -------
+    Potential temperature [degC], same shape as the broadcast inputs.
+    """
+    h = p_ref_dbar - p_dbar
+    t = T_C
+    p = p_dbar
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + 0.5 * xk
+    q = xk
+    p = p + 0.5 * h
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + _THETA_RK_A1 * (xk - q)
+    q = _THETA_RK_B1 * xk + _THETA_RK_C1 * q
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    t = t + _THETA_RK_A2 * (xk - q)
+    q = _THETA_RK_B2 * xk - _THETA_RK_C2 * q
+    p = p + 0.5 * h
+
+    xk = h * adiabatic_temperature_gradient(S, t, p)
+    return t + (xk - 2.0 * q) / 6.0
 
 
 # ==============================================================================
@@ -2276,9 +2504,27 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
     if eos_depth == "geometric":
         # NEMO eos_insitu: density from the GEOMETRIC gdept, not the in-situ
         # hydrostatic integral.  p = rho0*g*gdept -> zh recovers gdept exactly.
-        depth = getattr(z_coord, "t_depth_ref", None)
-        if depth is None:
-            depth = jnp.abs(z_coord.z_full_ref)
+        # LIVE gdept(Kmm) = gdept_0*(1+r3t), matching eosbn2.F90:541 and the
+        # production GM/Redi path (gm_redi_density_and_jacobian).  Feeding the
+        # STATIC ladder here left this consumer -- reached via
+        # fidelity/tendency_probe.py, i.e. the ORACLE TENDENCY COMPARISON --
+        # on a different density convention from the model it is measuring
+        # (#1226; the same defect cost prd a depth-structured 2.559e-6).
+        # Gated exactly like its siblings: bit-identical when no fidelity
+        # ladder is carried, and nemo_bn2_live_ladders honours
+        # linear_free_surface (key_linssh: the column never stretches).
+        _td = getattr(z_coord, "t_depth_ref", None)
+        _H = getattr(getattr(state, "H_bathy", None), "data", None)
+        _eta = getattr(getattr(state, "eta", None), "data", None)
+        if _td is None:
+            depth = jnp.abs(z_coord.z_full_ref)          # unchanged
+        elif _H is None or _eta is None:
+            # No free-surface information on this state (e.g. an analytic
+            # column in a unit test): keep the STATIC ladder, bit-identical to
+            # the pre-change behaviour rather than silently switching ladders.
+            depth = jnp.asarray(_td)
+        else:
+            depth = nemo_bn2_live_ladders(z_coord, _eta, _H)[0]
         r0 = rho_0 if rho0 is None else rho0
         p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
         return eos_fn(state.T.data, state.S.data, p_eos)

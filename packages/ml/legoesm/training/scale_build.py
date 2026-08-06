@@ -113,6 +113,38 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
             break
 
 
+def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
+    """This rank's contiguous shard of the ``(year, i_ic, i_tg)`` index list.
+
+    #1286 fix B: the ERA5 index tuples are cheap (no GPU arrays), so we
+    materialize the full ORDERED list here and hand each rank ONLY its slice —
+    the loaders then build carries for that slice alone, never the global set.
+    The partition is BIT-IDENTICAL to the previous
+    ``shard_samples(build_all(), rank, nproc)`` (data_parallel.shard_samples,
+    drop_remainder): contiguous ``per = n // nproc``, rank ``p`` gets
+    ``idx[p*per:(p+1)*per]``.  Single process -> the full list.
+    """
+    idx = list(_training_sample_indices(cfg, yml, times, snaps_per_day, stride))
+    if nproc <= 1:
+        return idx
+    per = len(idx) // nproc          # drop_remainder: balanced shards
+    start = rank * per
+    return idx[start:start + per]
+
+
+def _sample_to_host(sample):
+    """Pull a built ``(ic, target, forcing)`` off-device to host numpy leaves.
+
+    #1286 fix A: the per-run ``samples`` list is kept host-resident so the whole
+    training set is NOT parked in device memory; the training loop
+    ``device_put``s one sample at a time.  ``jax.device_get`` converts every
+    device-array leaf to numpy and passes non-array leaves through unchanged;
+    the build's transient device allocation is freed once this returns.
+    """
+    import jax
+    return jax.device_get(sample)
+
+
 def _load_run_amip():
     """Exec scripts/run/run_amip.py as a module to reuse its arg parser + config builder."""
     path = _REPO / "scripts" / "run" / "run_amip.py"
@@ -283,8 +315,25 @@ def _build_mode_components_spectral(cfg, yml):
             nlev=nlev, hidden_dim=int(ov.get("nn_hidden", 256)),
             n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
 
+        # #1464: the learned arm has no momentum head, so without this it runs
+        # with NO surface turbulent drag while the `physics` arm it is scored
+        # against inherits TurbulenceConfig.scheme="smagorinsky". Opt-in so no
+        # existing campaign changes silently; `neural_gcm.surface_drag: true`
+        # in the campaign YAML makes the two arms differ in thermodynamics
+        # only. Built ONCE here, not per make_physics_fn call, so the closure
+        # is a compile-time constant.
+        _drag_fn = None
+        if bool(ov.get("surface_drag", False)):
+            from legoesm.training.neural_gcm_spectral import (
+                make_turbulence_only_spectral_physics,
+            )
+            _drag_fn = make_turbulence_only_spectral_physics(
+                dt, turbulence_scheme=str(ov.get("surface_drag_scheme",
+                                                 "smagorinsky")))
+
         def make_physics_fn(p):
-            return make_column_mlp_spectral_physics(p, grid)
+            return make_column_mlp_spectral_physics(
+                p, grid, momentum_physics_fn=_drag_fn)
         uses_forcing = True
 
     elif cfg.mode == "sfno":
@@ -489,7 +538,8 @@ def era5_time_to_forcing_calendar(time_ns, year):
     return doy_1based, sod
 
 
-def _load_era5_samples_spectral(cfg, yml, grid, sigma):
+def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
+                                rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
 
     ``ic``/``target`` are SegmentCarry on the Gaussian grid
@@ -498,6 +548,10 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
     ``T_sfc``/``sic`` (ncol,) + calendar scalars — SegmentForcing doctrine, all
     traced so per-sample values never retrace).  Consumed only inside the
     spectral ``make_run_seg(...).raw`` (opaque to the trainer loop).
+
+    #1286: with ``nproc > 1`` this builds ONLY ``rank``'s contiguous shard (fix
+    B — no global materialization); with ``host_resident`` each built sample is
+    moved off-device to host numpy (fix A — the loop ``device_put``s per batch).
     """
     import jax.numpy as jnp
 
@@ -515,8 +569,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
     stride = int(roll_h) // era5_cfg.dt_hours
 
     samples = []
-    for year, i_ic, i_tg in _training_sample_indices(
-            cfg, yml, times, snaps_per_day, stride):
+    for year, i_ic, i_tg in _sharded_indices(
+            cfg, yml, times, snaps_per_day, stride, rank, nproc):
         ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
         target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
         sst_src = load_era5_slice(era5_cfg, i_ic)
@@ -529,12 +583,20 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
             "day_of_year": jnp.asarray(doy_1based),
             "seconds_of_day": jnp.asarray(sod),
         }
-        samples.append((ic, target, forcing))
+        sample = (ic, target, forcing)
+        samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 
 
-def load_era5_samples(cfg, yml, grid, sigma):
-    """(ic, target, forcing) samples over the train windows, on the lat-lon grid."""
+def load_era5_samples(cfg, yml, grid, sigma, *,
+                      rank=0, nproc=1, host_resident=False):
+    """(ic, target, forcing) samples over the train windows, on the lat-lon grid.
+
+    #1286: ``nproc > 1`` builds ONLY ``rank``'s contiguous shard (fix B);
+    ``host_resident`` keeps the samples on host numpy (fix A).  Defaults
+    (``rank=0, nproc=1, host_resident=False``) reproduce the previous
+    global-eager behaviour byte-for-byte for existing callers.
+    """
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
@@ -544,7 +606,9 @@ def load_era5_samples(cfg, yml, grid, sigma):
     from legoesm.driver.compiled_segments import pack_forcing
 
     if getattr(cfg, "training_core", "latlon") == "spectral":
-        return _load_era5_samples_spectral(cfg, yml, grid, sigma)
+        return _load_era5_samples_spectral(
+            cfg, yml, grid, sigma,
+            rank=rank, nproc=nproc, host_resident=host_resident)
 
     era5_cfg = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))._replace(
         zarr_store=yml["era5_zarr"])
@@ -559,8 +623,8 @@ def load_era5_samples(cfg, yml, grid, sigma):
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
 
     samples = []
-    for year, i_ic, i_tg in _training_sample_indices(
-            cfg, yml, times, snaps_per_day, stride):
+    for year, i_ic, i_tg in _sharded_indices(
+            cfg, yml, times, snaps_per_day, stride, rank, nproc):
         ic = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
         target = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
         sst_src = load_era5_slice(era5_cfg, i_ic)
@@ -572,7 +636,8 @@ def load_era5_samples(cfg, yml, grid, sigma):
             day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"])
-        samples.append((ic, target, forcing))
+        sample = (ic, target, forcing)
+        samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 
 

@@ -139,6 +139,11 @@ class CanopyForcingBundle(NamedTuple):
     # r_ss + Sakaguchi-Zeng 2009 litter; see energy_balance.soil_surface_evap_
     # resistance).  Zeros recover the pure-aerodynamic (legacy beta) behaviour.
     r_soil_surface: jax.Array
+    # Wetted leaf fraction [0-1] from the canopy-water store (interception).  The
+    # wet part evaporates at the boundary-layer limit (no stomatal resistance),
+    # so LE rises with wetness (interception loss).  0.0 = dry (no interception,
+    # the default so every existing bundle construction is unchanged).
+    fwet: jax.Array = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -218,23 +223,23 @@ def _canopy_residual(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -259,7 +264,7 @@ def _canopy_residual(
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_soil_evap,
-        b.fStress_soil, b.Ps)
+        b.fStress_soil, b.Ps, fwet=b.fwet)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -363,23 +368,40 @@ def canopy_forward(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
-            stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+            fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode)
+
+    # Wet-leaf evaporation (interception loss): the fwet share of each leaf's
+    # latent flux, which is sourced from the canopy-water store rather than
+    # transpired from the root zone.  Attribution matches the BT conductance
+    # blend g_lh_eff = (1-fwet)*g_lh + fwet/Rb (exact for BT; a close proxy for
+    # PM, whose rc_eff uses the same vapour-conductance blend).  The caller
+    # routes ``LE_wet_canopy`` to the store and ``LE_canopy - LE_wet_canopy`` to
+    # the transpiration sink.
+    def _le_wet(LE, gs, Rb):
+        Rb_s = jnp.maximum(Rb, 1e-9)             # guard 1/Rb (matches leaf LE)
+        g_lh = gs / (gs * Rb_s + 1.0)
+        g_lh_wet = 1.0 / Rb_s
+        g_lh_eff = (1.0 - b.fwet) * g_lh + b.fwet * g_lh_wet
+        return LE * jnp.where(g_lh_eff > 0.0,
+                              b.fwet * g_lh_wet / g_lh_eff, 0.0)
+    LE_wet_Sun = _le_wet(LE_Sun, gs_Sun, Rb_Sun)
+    LE_wet_Sh = _le_wet(LE_Sh, gs_Sh, Rb_Sh)
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
@@ -399,6 +421,7 @@ def canopy_forward(
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
+        LE_wet_Sun=LE_wet_Sun, LE_wet_Sh=LE_wet_Sh,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,
         G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW, LW_out=LW_out,

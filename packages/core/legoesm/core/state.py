@@ -125,6 +125,47 @@ class HydrostaticTendencies(NamedTuple):
     # this is the SURFACE precip (micro sedimentation), NOT the column vapour
     # sink (which is P-E and would double-count the separately-applied evap).
     precip: Field | None = None
+    # TOA radiative fluxes (CMOR sign conventions: *_up positive UPWARD /
+    # outgoing, sw_down_toa positive DOWNWARD / incoming) [W/m^2], carried on
+    # the radiation tendency so the lean MPAS loop can feed the CMOR
+    # rlut/rsut/rsdt accumulators (PhysicsOutput carries the equivalent on the
+    # compiled path). None on non-radiation tendencies / radiation off.
+    sw_up_toa: Field | None = None
+    lw_up_toa: Field | None = None
+    sw_down_toa: Field | None = None
+    # Surface turbulent fluxes [W/m^2, positive UPWARD out of the surface —
+    # the CMOR hfss/hfls convention, matching the surface-layer helpers'
+    # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
+    # feed (evspsbl is derived downstream as lhflx / L_v). None when
+    # turbulence is off or a scheme computes no surface fluxes.
+    shflx_sfc: Field | None = None
+    lhflx_sfc: Field | None = None
+    # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
+    # radiation tendency for the lean MPAS/spectral loops: an interactive land
+    # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
+    # NET fluxes above cannot be inverted for them without assuming the
+    # radiation code's surface albedo/emissivity at the consumer.  None on
+    # non-radiation tendencies; appended at the end with None defaults so every
+    # existing (incl. positional) constructor is unaffected.
+    sw_down_sfc: Field | None = None
+    lw_down_sfc: Field | None = None
+    # PER-COLUMN process ledger, shape (ncol, N_LEDGER, 2) — the last axis is
+    # [water kg/m^2/s, dry-enthalpy W/m^2] and the middle axis indexes
+    # ``diagnostics.process_ledger.LEDGER_PROCESSES``.  Carried on the COMBINED
+    # tendency so the lean MPAS loop can attribute a column's heating/moistening
+    # to a NAMED scheme (#1311: --budget-ledger is an FV compiled-segment
+    # diagnostic and refuses on this lane, so MPAS had no per-process
+    # attribution at all).  Only the PHYSICS rows are filled here; the
+    # dynamics/clips rows are stage deltas the dycore step fills.
+    #
+    # Deliberately a raw array, not a Field: it is not a model variable and has
+    # no grid dims.  It is a per-step DIAGNOSTIC and is never checkpointed —
+    # unlike PhysicsState, whose save loop np.asarray()s every field and whose
+    # restart completeness-validates the overlay, so a new carry field there
+    # would risk rejecting existing checkpoints.
+    # None (default) = ledger off, byte-identical; appended at the end so every
+    # existing (incl. positional) constructor is unaffected.
+    ledger_rows: object | None = None
 
 
 class FV3HydrostaticState(NamedTuple):
@@ -570,6 +611,15 @@ class MPASOceanState(NamedTuple):
     H_bathy: Field
     land_mask: Field
     rho_ref_z: Field | None = None
+    # Prognostic TKE [m^2/s^2] at the interior interfaces, Field
+    # (nCells, nlev-1) — carried across model steps when the prognostic
+    # TKE vertical-mixing closure is active (vertical_mixing.tke.prognostic
+    # =True), mirroring LatLonCGridOceanState.tke: each step runs ONE
+    # backward-Euler TKE solve seeded from this field and stores the update
+    # back.  Default None -> inert (the diagnostic quasi-steady Mode-B
+    # chain): zero behaviour change for every existing MPAS run/restart.
+    # APPENDED LAST so positional/tuple consumers keep their field order.
+    tke: Field | None = None
 
 
 class MPASOceanTendencies(NamedTuple):

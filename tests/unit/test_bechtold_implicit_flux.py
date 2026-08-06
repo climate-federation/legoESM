@@ -198,22 +198,27 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
             config=BechtoldConfig(
                 enable_stochastic=False, enable_cmt=False, subsidence_solve=ss,
                 use_ifs_cape_closure=use_ifs_cape_closure,
+                # capdcycl subtracts from the closure's ZCAPE; the fn-entry
+                # guard requires it OFF whenever the closure is off
+                use_ifs_capdcycl=use_ifs_cape_closure,
                 use_ifs_subcloud_evap=False,
                 use_ifs_inplume_precip=False,
+                # snow melt lives inside the sub-cloud precip march; the
+                # fn-entry guard requires both-or-neither with subcloud_evap
+                use_ifs_snow_melt=False,
             ),
             moisture_convergence=jnp.zeros_like(T),
         )
-        # The latent-heat sink C is the FULL detrained condensate: with the
-        # default #929 rain split (precip_efficiency=0.7) precip_efficiency of
-        # it moves from dq_c_conv_dt into dq_r_conv_dt, but the latent heat of
-        # ALL of it is already booked in dT_dt (H), so the enthalpy budget must
-        # sum dq_c + dq_r (the split re-partitions water downstream; it does
-        # not change the scheme's internal energy balance).
-        _dqr = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else 0.0
+        # RELEASED-latent convention (unified 2026-07-22): the condensation
+        # latent heat of the FULL detrained condensate is booked in dT_dt at
+        # the detrainment source levels, so the closure metric is H + Q = 0
+        # on h = c_p*T + L_v*q_v.  Summing a separate C term would DOUBLE
+        # COUNT the condensate latent (pre-fix this test measured exactly
+        # rel = |C|/(|H|+|Q|+|C|) = 1/3 with H+Q ~ 0).  The condensate's
+        # WATER is closed separately (test_bechtold_column_conservation).
         H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
         Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-        C = float(jnp.sum((out.dq_c_conv_dt + _dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
-        return abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+        return abs(H + Q) / (abs(H) + abs(Q) + 1e-10)
 
     # DEFAULT scheme (IFS cape closure ON since 2026-07-16): both solves must
     # meet the hard bar.  The closure changes the M_u magnitude regime, so the

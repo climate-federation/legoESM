@@ -15,19 +15,13 @@ base: config/aimip/aimip_era5.yaml
 cfg_overrides:
   aimip_n_epochs: 12          # 2-step RRTMGP at T63 is ~2x single-step;
                               # aimip_patience=3 early-stops at convergence.
-  loss:
-    # --- ACE2 loss ---
-    residual_normalize: true  # scale by std of 6h Δ (ACE2 residual scaling)
-    normalize_by_scale: false # superseded by residual_normalize
-    multi_step_hours: [6, 12]      # 2 autoregressive 6h steps (ACE2)
-    multi_step_weights: [1.0, 1.0] # equal weight per step (ACE2 sums them)
-    w_T: 0.5
-    w_u: 0.5
-    w_v: 0.5
-    w_q: 0.5
-    w_ps: 0.3
-    level_weighting: "pressure"
-    # bias / CRPS / spectral weights omitted -> default 0.0 => pure MSE (ACE2)
+  # The ACE2 loss numbers live ONCE in config/wb/loss_presets/ace2.yaml
+  # (D5); this suite's previous inline loss block was byte-identical.
+  # loss: {} REPLACES the base aimip_era5.yaml loss block wholesale
+  # (cfg_overrides shallow-merge), so the preset alone defines the loss —
+  # same effective config as the previous inline block.
+  loss_preset: ace2
+  loss: {}
 
 variants:
   - classical

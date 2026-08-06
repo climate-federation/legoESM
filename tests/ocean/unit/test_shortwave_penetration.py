@@ -189,3 +189,83 @@ def test_column_sw_conservation_shallow_water():
     col_heating = jnp.sum(dT_dt * rho_0 * c_sw * dz_actual, axis=-1)
     # Bottom-layer absorption fix must keep column closure exact.
     assert jnp.allclose(col_heating, sw_down, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# #1226 traqsr.F90:665-712 qsr_2BD live gdepw ladder (z_half_stretch=)
+# ---------------------------------------------------------------------
+
+def test_z_half_stretch_none_is_bit_identical_to_no_kwarg():
+    """z_half_stretch=None (the default) must be byte-identical to the
+    pre-existing call signature -- non-bridged callers are unaffected."""
+    sw_down, dz_ref, z_half_ref, J = _setup()
+    out_no_kwarg = shortwave_penetration_tendency(sw_down, dz_ref, z_half_ref, J)
+    out_none = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, J, z_half_stretch=None)
+    assert jnp.max(jnp.abs(out_no_kwarg - out_none)) == 0.0
+
+
+def test_z_half_stretch_one_matches_static():
+    """A stretch of exactly 1.0 everywhere (r3t=0, the DINOConfig() default
+    'static' case) must reproduce the static-ladder tendency bit-for-bit --
+    proves the ONLY difference the new kwarg introduces is the stretch
+    itself, matching the #1226 tra_qsr_tem_piece_decompose.py Part 2b
+    self-check pattern."""
+    sw_down, dz_ref, z_half_ref, J = _setup(nx=4, ny=3, nlev=10, H=200.0)
+    stretch_one = jnp.ones((4, 3))
+    out_static = shortwave_penetration_tendency(sw_down, dz_ref, z_half_ref, J)
+    out_stretch_one = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, J, z_half_stretch=stretch_one)
+    assert jnp.max(jnp.abs(out_static - out_stretch_one)) == 0.0
+
+
+def test_z_half_stretch_matches_independent_transcription():
+    """A per-column stretch != 1 must reproduce an INDEPENDENT transcription
+    of NEMO's qsr_2BD (traqsr.F90:665-712): the two-band formula evaluated
+    at the stretched interface depths AND the stretched layer thickness
+    (domzgr_substitute.h90:139's single e3t_0*(1+r3t) factor), built here
+    from raw numpy/jnp, never calling the function under test for its own
+    formula."""
+    import numpy as np
+
+    nx, ny, nlev, H = 3, 2, 6, 120.0
+    sw_down = jnp.full((nx, ny), 180.0)
+    dz_ref = jnp.full((nlev,), H / nlev)
+    z_half_ref = -jnp.linspace(0.0, H, nlev + 1)
+    J = jnp.ones((nx, ny))
+    stretch = jnp.array([[1.02, 0.97], [1.10, 0.90], [1.00, 1.05]])  # (nx, ny)
+
+    params = JERLOV_TYPES["II"]
+    R, zeta1, zeta2 = params.R, params.zeta1, params.zeta2
+    from legoesm.ocean.eos import rho_0, c_sw
+
+    z_half_live = np.asarray(z_half_ref)[None, None, :] * np.asarray(stretch)[:, :, None]
+    I_half = R * np.exp(z_half_live / zeta1) + (1.0 - R) * np.exp(z_half_live / zeta2)
+    frac = I_half[:, :, :-1] - I_half[:, :, 1:]
+    frac[:, :, -1] += I_half[:, :, -1]
+    dz_live = np.asarray(dz_ref)[None, None, :] * np.asarray(stretch)[:, :, None]
+    expect = np.asarray(sw_down)[:, :, None] * frac / (rho_0 * c_sw * dz_live)
+
+    got = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, J, z_half_stretch=stretch)
+    assert jnp.allclose(got, jnp.asarray(expect), rtol=1e-12, atol=1e-18)
+
+
+def test_z_half_stretch_preserves_column_conservation():
+    """Column heat closure must still hold under a live (non-unity) stretch
+    -- the interface-flux telescoping argument does not depend on the
+    ladder being static."""
+    from legoesm.ocean.eos import rho_0, c_sw
+
+    nx, ny, nlev, H = 2, 2, 8, 300.0
+    sw_down = jnp.full((nx, ny), 220.0)
+    dz_ref = jnp.full((nlev,), H / nlev)
+    z_half_ref = -jnp.linspace(0.0, H, nlev + 1)
+    J = jnp.ones((nx, ny))
+    stretch = jnp.array([[1.05, 0.95], [1.2, 0.8]])
+
+    dT_dt = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, J, z_half_stretch=stretch)
+    dz_live = dz_ref[None, None, :] * stretch[:, :, None]
+    col_heating = jnp.sum(dT_dt * rho_0 * c_sw * dz_live, axis=-1)
+    assert jnp.allclose(col_heating, sw_down, rtol=1e-12)

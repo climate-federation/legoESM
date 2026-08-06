@@ -310,7 +310,7 @@ def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
     # would pass through _replace UNSLICED silently — fail loudly so
     # the scatter/gather pair is extended deliberately.
     _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
-                 "rho_ref_z"}
+                 "rho_ref_z", "tke"}
     if set(global_state._fields) != _expected:
         raise ValueError(
             "scatter_state_mpas_ocean: MPASOceanState schema changed "
@@ -330,6 +330,9 @@ def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
         w=_cell(global_state.w),
         H_bathy=_cell(global_state.H_bathy),
         land_mask=_cell(global_state.land_mask),
+        # Prognostic TKE carry: cell-centered (nCells, nlev-1); None when the
+        # prognostic TKE closure is off (none-safe — slice only when seeded).
+        tke=(None if global_state.tke is None else _cell(global_state.tke)),
     )
     return new
 
@@ -350,6 +353,8 @@ def gather_state_mpas_ocean(local_state, partition: VoronoiPartition):
         w=_g(local_state.w, "cell"),
         H_bathy=_g(local_state.H_bathy, "cell"),
         land_mask=_g(local_state.land_mask, "cell"),
+        tke=(None if local_state.tke is None
+             else _g(local_state.tke, "cell")),
     )
 
 
@@ -380,7 +385,12 @@ def exchange_state_mpas_ocean(local_state, layout: VoronoiPartitionLayout):
     # field would silently pass through UNEXCHANGED — fail loudly so the
     # scatter/gather/exchange triple is extended deliberately.
     _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
-                 "rho_ref_z"}
+                 "rho_ref_z", "tke"}
+    # ``tke`` (prognostic TKE carry) is deliberately NOT exchanged: the TKE
+    # closure is COLUMN-LOCAL (no lateral stencil reads the carry), halo
+    # columns are seeded at scatter, and each rank advances its own columns —
+    # a halo copy would be dead traffic. Revisit if TKE advection
+    # (advection_scheme != 'none') ever lands on MPAS.
     if set(local_state._fields) != _expected:
         raise ValueError(
             "exchange_state_mpas_ocean: MPASOceanState schema changed "
@@ -811,6 +821,19 @@ def make_voronoi_mpi_step(
     # forwards to ``mpas_hydrostatic_tendencies(state, mesh, sigma_coord, config)``
     # with the matching defaults (physics_tendency=None, dt=0.0).
     local_model = type(model)(local_mesh, sigma_coord, config)
+    # The floors' conserving tracer clamp weights columns by THIS
+    # sigma_coord's dsigma while the serial path uses model.sigma_coord — a
+    # direct caller passing a mismatched coordinate would silently conserve
+    # against the wrong thickness (codex 2026-07-26 round 2, finding 6 nit).
+    # Setup-time host check, zero hot-path cost.
+    import numpy as _np
+    if not _np.array_equal(_np.asarray(sigma_coord.dsigma),
+                           _np.asarray(model.sigma_coord.dsigma)):
+        raise ValueError(
+            "make_voronoi_mpi_step: sigma_coord.dsigma differs from "
+            "model.sigma_coord.dsigma — the MPI floors would conserve "
+            "tracers against the wrong layer thicknesses. Pass the model's "
+            "own vertical coordinate.")
 
     # Pre-compute the owned-area mask and the global total area once at
     # setup time.  Both are state-independent constants:
@@ -1026,8 +1049,9 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
-        # Surface-flux diagnostic (sw_net_sfc, lw_net_sfc, precip) the coupler
-        # reads from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
+        # Surface-flux diagnostic (8-slot contract: sw_net_sfc, lw_net_sfc,
+        # precip, then the CMOR TOA/turbulent-flux extras) the coupler reads
+        # from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
         # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
         # tendency and publish it (rank-local, matching the rank-local state the
         # MPI-voronoi coupler already sees).  Without this the coupled MPI-voronoi
@@ -1053,9 +1077,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
+            # CMOR TOA + surface turbulent-flux extras — mirror the serial
+            # producer's 8-slot contract (primitive_eq_mpas.step) EXACTLY so the
+            # one-rank MPI-voronoi coupled lane exports rlut/rsut/rsdt/hfss/hfls
+            # too. Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
+            # sw_down_toa, shflx, lhflx) — the consumer (model_driver
+            # _feed_mpas_cmip_accumulators) reads slots 3-7 by this order.
+            _extras = tuple(getattr(_pt, _k, None) for _k in (
+                "lw_up_toa", "sw_up_toa", "sw_down_toa",
+                "shflx_sfc", "lhflx_sfc"))
             if (_sw_sfc is not None or _lw_sfc is not None
-                    or _pr_sfc is not None):
-                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
+                    or _pr_sfc is not None
+                    or any(_e is not None for _e in _extras)):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
@@ -1078,6 +1112,19 @@ def make_voronoi_mpi_step(
                     for k in state_new.tracers
                 })
 
+        # Global mass fixer BEFORE the floors, mirroring the serial ordering
+        # (codex 2026-07-26 round 2, finding 5): the fixer touches ONLY p_s
+        # and the floors touch ONLY T/tracers, so the stages commute — but
+        # diagnosed column water is sum(q*p_s*dsigma)/g, so correcting p_s
+        # AFTER the conserving tracer clamp shifted water by c*B/g.  With p_s
+        # finalised first, the clamp conserves against the final p_s exactly.
+        # (Owned cells + allreduce — correct under the cell partition, unlike
+        # the model's internal fixer which would double-count halo cells.)
+        if config.fix_mass:
+            state_new = _fix_mass_mpi(
+                state_new, state, _owned_area, _total_area_global,
+            )
+
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
         if config.T_min > 0:
@@ -1085,18 +1132,68 @@ def make_voronoi_mpi_step(
             state_new = state_new._replace(
                 T=state_new.T.replace(data=T_clipped))
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                k: f.replace(data=jnp.maximum(f.data, 0.0))
-                for k, f in state_new.tracers.items()
-            })
+            # Mirror the serial floors EXACTLY (codex 2026-07-26 review of
+            # fc7e7dce8: this block previously hard-coded the plain clamp, so
+            # ``conservative_tracer_clamp`` was SILENTLY INERT under MPI — the
+            # repo's recurring dropped-flag defect class).  The borrow is
+            # column-local, so it needs no halo/allreduce and is identical on
+            # owned and halo cells.
+            if getattr(config, "conservative_tracer_clamp", False):
+                from legoesm.core.conservation import (
+                    conservative_positive_clip_global,
+                    is_borrow_eligible_tracer,
+                )
+                # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
+                # mirrors the serial floors exactly (see primitive_eq_mpas:
+                # the naive clip INVENTED per-mass number every step, x2.2/day
+                # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
+                # plain clip pending density-aware repair).  GLOBAL residual
+                # redistribution over OWNED cells via allreduce-SUM (the one
+                # AD-safe collective) so the factor is decomposition-
+                # independent; owned-mask weighting keeps halo cells out of
+                # the budget exactly like the mass fixer.
+                # TRUE layer-mass dp weight (post-mass-fix p_s): identical
+                # rescale on pure sigma (per-column p_s cancels), correct on
+                # hybrid where dsigma is not the layer mass (codex
+                # 2026-07-28 round 2).  Non-positive dp zero-weighted.
+                _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _owned = layout.owned_mask_cells[:, None]
+                # BROADCAST-allreduce VJP wrapper, NOT global_sum_mpi: the
+                # summed scalar is broadcast back into every rank's rescale
+                # factor, whose correct transpose is allreduce(SUM) of the
+                # cotangent — identity-VJP global_sum_mpi drops the cross-
+                # rank term (the #811 flux-form scale lesson; codex
+                # 2026-07-28 round 2).
+                from legoesm.core.conservation import (
+                    broadcast_allreduce_sum,
+                )
 
-        # Global mass fixer (owned cells + allreduce — correct under the
-        # cell partition, unlike the model's internal fixer which would
-        # double-count halo cells and gates MPI on jax.process_count()).
-        if config.fix_mass:
-            state_new = _fix_mass_mpi(
-                state_new, state, _owned_area, _total_area_global,
-            )
+                def _mpi_owned_sum(x, _o=_owned):
+                    return broadcast_allreduce_sum(
+                        jnp.sum(jnp.where(_o, x, 0.0)))
+
+                # SORTED iteration: the closure issues collectives per
+                # tracer, so every rank must pair allreduces for the SAME
+                # tracer — dict insertion order is not a cross-rank contract
+                # (codex 2026-07-28: mismatched orders would silently corrupt
+                # every factor).
+                state_new = state_new._replace(tracers={
+                    k: state_new.tracers[k].replace(data=(
+                        conservative_positive_clip_global(
+                            state_new.tracers[k].data, _dp,
+                            sum_fn=_mpi_owned_sum)[0]
+                        if is_borrow_eligible_tracer(k)
+                        else jnp.maximum(state_new.tracers[k].data, 0.0)))
+                    for k in sorted(state_new.tracers)
+                })
+            else:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
+
+        # (mass fixer moved above the floors — codex round-2 finding 5.)
 
         return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
 
@@ -1132,7 +1229,15 @@ def make_voronoi_mpi_step(
             # (post-jit), same as the serial ``self._sfc_diag``.
             if not any(isinstance(leaf, jax.core.Tracer)
                        for leaf in jax.tree_util.tree_leaves(_sfc)):
-                _prev = getattr(model, "_sfc_diag", None) or (None, None, None)
+                # Pad the shorter of (prev, new) so a length mismatch (a
+                # held-radiation step that returns the 3-slot default vs an
+                # 8-slot published prev, or a mid-session contract growth) merges
+                # slot-wise instead of truncating via zip — mirrors the serial
+                # primitive_eq_mpas merge.
+                _prev = getattr(model, "_sfc_diag", None) or ()
+                _n = max(len(_sfc), len(_prev))
+                _prev = _prev + (None,) * (_n - len(_prev))
+                _sfc = _sfc + (None,) * (_n - len(_sfc))
                 model._sfc_diag = tuple(
                     new if new is not None else old
                     for new, old in zip(_sfc, _prev))

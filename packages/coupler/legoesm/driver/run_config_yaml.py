@@ -167,8 +167,9 @@ def load_params_config(path) -> dict:
 # physics pipeline ACTUALLY threads from that scalar into the resolved scheme
 # config (``build_cloud_config`` for clouds; ``_resolve_convection`` for
 # sbm/bechtold).  Many ``<prefix>_<field>`` scalars EXIST on ExperimentConfig
-# yet are never read (``_resolve_turbulence``/``_resolve_microphysics``/
-# ``_resolve_gwd`` build default configs and patch only a few fields), so a
+# yet are never read (``_resolve_turbulence``/``_resolve_microphysics`` build
+# default configs and patch only a few fields; ``_resolve_gwd`` did too until
+# ``gwd_config_for`` landed — see its GWD block below), so a
 # name-convention map would silently claim dead overrides.  The membership here
 # is machine-verified end-to-end by ``test_atm_scalar_map_is_pipeline_threaded``
 # (builds a pipeline per entry, asserts the resolved scheme config carries the
@@ -183,23 +184,89 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     "atm.clouds.CloudConfig.adiabatic_lwc_rate": "cloud_adiabatic_lwc_rate",
+    # morrison ice-process scalars -> thread_morrison_scalars
+    # (physics_pipeline; shared with the MPAS lane) — wired 2026-07-26 after
+    # the flag-reachability audit found all five dangling.
+    "atm.micro.MorrisonConfig.bergeron_rate": "morrison_bergeron_rate",
+    "atm.micro.MorrisonConfig.rime_coeff": "morrison_rime_coeff",
+    "atm.micro.MorrisonConfig.dep_coeff": "morrison_dep_coeff",
+    "atm.micro.MorrisonConfig.agg_coeff": "morrison_agg_coeff",
+    "atm.micro.MorrisonConfig.k_au": "morrison_k_au",
+    "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
+    "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
+    "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
+    "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
-    "atm.clouds.CloudConfig.cloud_inhomogeneity_factor": "cloud_inhomogeneity_factor",
+    # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:
+    # upstream #1280 moved it to CloudConfig's __param_spec__ EXCLUDED
+    # partition (default 1.0 sits ON its physical bound — not a well-posed
+    # sigmoid tunable), which drops it from the param registry, and a map key
+    # absent from the registry breaks the --params loader contract (the
+    # semantic conflict this branch inherited on merge).  The flat
+    # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
+    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
+        "cloud_partial_coverage_optics",
+    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
+        "cloud_vertical_overlap_optics",
+    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # bechtold penetrative-downdraft closure knobs -> the dedicated
+    # _bechtold_kwargs threading in _resolve_convection (unconditional), so
+    # they are --params-reachable (2026-07-23; previously baselined CLI-only).
+    "atm.conv.BechtoldConfig.downdraft_alpha": "bechtold_downdraft_alpha",
+    "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
-    # marine-Sc cloud-top entrainment -> turbulence_config_for (single source of
-    # truth for FV/MPAS/spectral); the flat scalar is the single on/off+strength
-    # knob (0 = off), so --params both sets and activates it.
-    "atm.turb.LouisConfig.cloudtop_entrainment_efficiency": "louis_cloudtop_entrainment_efficiency",
+    # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
+    # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
+    # post-step drain reads the same threaded sub-config in model_driver).
+    # One flat scalar serves all five warm-rain schemes (only the active
+    # scheme's sub-config is built).
+    "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.MorrisonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.P3Config.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.P3Config.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
+    # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
+    # upstream excluded it from the __param_spec__ registry (default 0.0 = off
+    # sits ON its bound), so the qualified name no longer exists for the
+    # --params loader.  The flat scalar louis_cloudtop_entrainment_efficiency
+    # remains settable via --config / CLI.  FOLLOW-UP: if --params reachability
+    # is wanted back, re-spec the param with an activation-aware transform
+    # instead of re-adding a dangling map key.
+    # gravity wave drag -> gwd_config_for (physics_pipeline), which every lane
+    # (FV pipeline / MPAS / spectral) now routes through.  Before it, these
+    # scalars existed on ExperimentConfig but NO production path read them.
+    # ``tau_max`` is tier 3 (a numerics clip), so the tier-1/2 reachability
+    # audit does not require it — it is mapped anyway because the same resolver
+    # threads it and the map's contract is "what the pipeline actually threads".
+    "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
+    "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
+    "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
+    "atm.gwd.McFarlaneConfig.tau_max": "mcfarlane_tau_max",
+    # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``
+    # entry (its computed 2*pi/100e3 default is not a float literal, so the
+    # AST-based spec gate never required one) — there is no qualified name to
+    # map.  Speccing it needs a bounds decision (ml/tuning.py says 1e-5..2e-4,
+    # aimip_params says 1e-5..5e-4).  Until then its ONLY route is the
+    # ``--mcfarlane-k-wave`` flag (which is also what makes the key legal in a
+    # ``--config`` YAML — load_yaml_config rejects any key that is not a parser
+    # dest), and validate_strict guards it positive+finite.
     # NOTE: the idealized GRAY radiation scheme threads a few of its params
     # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
     # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the
@@ -248,7 +315,7 @@ def _route_overrides_by_class(node, by_key: dict, *, applied: set):
             )
         applied.add(key)
         # apply_param_overrides validates every field is on the NamedTuple.
-        from legoesm.training.param_collector import apply_param_overrides
+        from legoesm.core.param_overrides import apply_param_overrides
         node = apply_param_overrides(node, by_key[key])
     return node
 

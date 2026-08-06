@@ -27,9 +27,12 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
-from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
+from legoesm.coupler.ocean_forcing import (
+    blend_ice_ocean_forcing,
+    omip_sea_ice_surface_forcing,
+)
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState
 from legoesm.ocean.freshwater import FreshwaterForcing
@@ -164,3 +167,222 @@ def test_helper_is_jittable():
 
     new_ice, fw, sf = run(ice0, sst_K)
     assert np.all(np.isfinite(np.asarray(sf.q_net)))
+
+
+def test_wrapper_partitions_with_post_step_concentration():
+    """The wrapper must partition with the POST-step concentration (the ONE
+    documented time level for this legacy entry).  Grow ice from OPEN WATER in
+    one step (freezing SST, very cold air, NO shortwave, weak LW down -> the
+    open-water surface energy balance Q_sfc < 0 -> lead freeze raises A from
+    0), then check the pure f_open-scaled channels (sw_down, evap — no
+    ice-term addition) against exactly (1 - A_new).  A regression to the
+    PRE-step concentration would leave them unscaled (f_open = 1 - 0 = 1) and
+    fail the exact match."""
+    sf0, fw0 = _open_ocean_forcing()
+    sst_K = jnp.full(SHAPE, constants.T_freeze_ocean)   # at freezing
+    ice0 = _ice_state(conc=0.0, h_ice=0.0, T_ice=250.0)
+    # Polar-night freezing: no SW (the default _atm carries 200 W/m2, which
+    # cancels the cold-air heat loss and blocks open-water freeze) + weak
+    # downwelling LW so the net surface balance is strongly negative.
+    atm = _atm(240.0)._replace(sw_down=jnp.zeros(SHAPE),
+                               lw_down=150.0 * jnp.ones(SHAPE))
+    new_ice, fw, sf = omip_sea_ice_surface_forcing(
+        ice_state=ice0, ice_config=SeaIceConfig(), atm=atm,
+        ocean_sst_K=sst_K, open_ocean_sf=sf0, open_ocean_fw=fw0, dt=DT,
+    )
+    A_new = np.clip(np.asarray(new_ice.concentration.data), 0.0, 1.0)
+    # The step actually changed the concentration (else the time level is
+    # untestable here) — lead freeze must have formed ice from open water.
+    assert float(A_new.max()) > 1.0e-6, "no ice formed; freezing-case broken"
+    f_open = 1.0 - A_new
+    np.testing.assert_allclose(np.asarray(sf.sw_down),
+                               f_open * np.asarray(sf0.sw_down), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(fw.evap),
+                               f_open * np.asarray(fw0.evap), rtol=1e-12)
+
+
+def test_wrapper_masks_land_cells():
+    """ocean_mask threaded through the wrapper: land cells (mask=0) keep the
+    FULL open-ocean forcing (f_open=1) and receive zero ice->ocean exchange,
+    regardless of what the (unmasked) ice step produced there.  Guards the
+    --jra55-sea-ice land-mask routing (run_omip.py passes
+    state_in.land_mask.data)."""
+    sf0, fw0 = _open_ocean_forcing()
+    sst_K = jnp.full(SHAPE, constants.T_freeze_ocean)
+    ice0 = _ice_state(conc=0.8, h_ice=2.0, T_ice=255.0)
+    mask = jnp.ones(SHAPE).at[:2, :].set(0.0)   # top half land
+    land = np.asarray(mask) == 0.0
+    new_ice, fw, sf = omip_sea_ice_surface_forcing(
+        ice_state=ice0, ice_config=SeaIceConfig(), atm=_atm(250.0),
+        ocean_sst_K=sst_K, open_ocean_sf=sf0, open_ocean_fw=fw0, dt=DT,
+        ocean_mask=mask,
+    )
+    # Land: no ice->ocean exchange, full-cell open forcing untouched.
+    np.testing.assert_allclose(np.asarray(fw.ice_fw)[land], 0.0)
+    np.testing.assert_allclose(np.asarray(sf.salt_flux)[land], 0.0)
+    np.testing.assert_allclose(np.asarray(sf.q_net)[land],
+                               np.asarray(sf0.q_net)[land], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(sf.tau_x)[land],
+                               np.asarray(sf0.tau_x)[land], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(fw.evap)[land],
+                               np.asarray(fw0.evap)[land], rtol=1e-12)
+    # Ocean rows still partitioned (ice persists under the cold forcing).
+    A_sea = np.asarray(new_ice.concentration.data)[~land]
+    assert float(A_sea.max()) > 0.5
+    assert not np.allclose(np.asarray(sf.q_net)[~land],
+                           np.asarray(sf0.q_net)[~land])
+
+
+# ===========================================================================
+# blend_ice_ocean_forcing — direct-blend contracts (controlled TileResponse,
+# no ice step => exact assertions).
+# ===========================================================================
+def _tile_response(shape, *, salt=0.0, heat=0.0, ice_fw=0.0, sx=0.0, sy=0.0):
+    """TileResponse with only the ice->ocean channels set (per the verified
+    conventions: heat/freshwater/salt PER-GRID-CELL, stress PER-ICE-TILE)."""
+    z = jnp.zeros(shape)
+    return TileResponse(
+        T_sfc=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+        lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=jnp.full(shape, float(ice_fw)),
+        ocean_heat_extraction=jnp.full(shape, float(heat)),
+        ocean_stress_x=jnp.full(shape, float(sx)),
+        ocean_stress_y=jnp.full(shape, float(sy)),
+        surface_mass_flux=z,
+        salt_flux=jnp.full(shape, float(salt)))
+
+
+def test_blend_rejects_preowned_channels():
+    """The blend OWNS sf.freshwater / sf.salt_flux: a caller pre-setting
+    either raises loudly (silent overwrite could hide a double application
+    or discard another supplied salt/freshwater source)."""
+    resp = _tile_response(SHAPE)
+    sf0, fw0 = _open_ocean_forcing()
+    with pytest.raises(ValueError, match="freshwater"):
+        blend_ice_ocean_forcing(
+            ice_resp=resp, ice_concentration=jnp.zeros(SHAPE),
+            open_sf=sf0._replace(freshwater=jnp.zeros(SHAPE)),
+            open_fw=fw0)
+    with pytest.raises(ValueError, match="salt_flux"):
+        blend_ice_ocean_forcing(
+            ice_resp=resp, ice_concentration=jnp.zeros(SHAPE),
+            open_sf=sf0._replace(salt_flux=jnp.zeros(SHAPE)),
+            open_fw=fw0)
+
+
+def test_blend_preserves_untouched_channels():
+    """Channels the blend does not own (e.g. ``chl`` for the RGB shortwave
+    penetration) pass through untouched — the blend must never silently drop
+    a caller-set field of the surface-forcing struct."""
+    resp = _tile_response(SHAPE)
+    sf0, fw0 = _open_ocean_forcing()
+    chl = jnp.full(SHAPE, 0.2)
+    fw, sf = blend_ice_ocean_forcing(
+        ice_resp=resp, ice_concentration=jnp.full(SHAPE, 0.5),
+        open_sf=sf0._replace(chl=chl), open_fw=fw0,
+        ocean_mask=jnp.ones(SHAPE))
+    assert sf.chl is chl
+
+
+def test_blend_no_mask_equals_all_ocean_mask():
+    """ocean_mask=None (legacy flat-bottom callers) == an all-ones mask."""
+    resp = _tile_response(SHAPE, salt=1e-6, heat=5.0, ice_fw=2e-6, sx=0.01)
+    sf0, fw0 = _open_ocean_forcing()
+    conc = jnp.full(SHAPE, 0.4)
+    fw_a, sf_a = blend_ice_ocean_forcing(
+        ice_resp=resp, ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=None)
+    fw_b, sf_b = blend_ice_ocean_forcing(
+        ice_resp=resp, ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=jnp.ones(SHAPE))
+    for a, b in ((fw_a.evap, fw_b.evap), (fw_a.ice_fw, fw_b.ice_fw),
+                 (sf_a.q_net, sf_b.q_net), (sf_a.tau_x, sf_b.tau_x),
+                 (sf_a.salt_flux, sf_b.salt_flux),
+                 (sf_a.freshwater, sf_b.freshwater)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b))
+
+
+def test_jra55_builders_thread_land_mask_to_wrapper():
+    """Source-wiring guard (AST-based): BOTH run_omip.py JRA55 block builders
+    pass ocean_mask=state_in.land_mask.data to omip_sea_ice_surface_forcing —
+    the land-bearing lat-lon-bathy/tripole lanes must never regress to the
+    all-ocean default (spurious land-cell ice budgets at the blend)."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2]
+           / "scripts" / "run" / "run_omip.py").read_text()
+    tree = ast.parse(src)
+    builders = {"_build_jra55_block_fn", "_build_jra55_block_fn_interp"}
+    seen = {}
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in builders):
+            continue
+        calls = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "omip_sea_ice_surface_forcing"
+        ]
+        assert len(calls) == 1, (
+            f"{fn.name}: expected exactly 1 omip_sea_ice_surface_forcing "
+            f"call, found {len(calls)}")
+        kw = {k.arg: k.value for k in calls[0].keywords}
+        assert "ocean_mask" in kw, (
+            f"{fn.name}: sea-ice call lost its ocean_mask= land-mask routing")
+
+        def _attr_chain(node):
+            parts = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+            return ".".join(reversed(parts))
+
+        chain = _attr_chain(kw["ocean_mask"])
+        assert chain == "state_in.land_mask.data", (
+            f"{fn.name}: ocean_mask must be state_in.land_mask.data, "
+            f"got {chain!r}")
+        seen[fn.name] = True
+    assert set(seen) == builders, (
+        f"missing JRA55 builder(s) in run_omip.py: {builders - set(seen)}")
+
+
+def test_blend_gates_direct_precip_by_ice_model_snow_reservoir():
+    """OMIP double-count guard (#1250): when the ice model OWNS a snow reservoir
+    (v2 / _thermo_v2 -- it routes the ice-fraction rain/snow to the ocean via
+    freshwater_flux -> ice_fw), the DIRECT full-cell precip channel must be
+    scaled to the open-water share f_open=(1-A) so ice-fraction precip lands
+    exactly ONCE (matching the coupled-ESM path).  For a reservoir-less slab
+    (default gate False) the direct channel stays full-cell (no regression).
+    Sign: precip +into ocean; f_open in [0,1] is a pure fraction (no sign flip).
+    """
+    A_val = 0.5
+    conc = jnp.full(SHAPE, A_val)
+    sf0, fw0 = _open_ocean_forcing()          # fw0.precip = 1e-5 full-cell P
+    P = np.asarray(fw0.precip)
+    # v2 ice tile delivers the ice-fraction precip share (A*P) via freshwater_flux
+    ice_fw_share = A_val * float(np.max(P))
+    resp_v2 = _tile_response(SHAPE, ice_fw=ice_fw_share)
+
+    # v2: direct precip is scaled to the open-water share f_open*P.
+    fw_v2, _ = blend_ice_ocean_forcing(
+        ice_resp=resp_v2, ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=jnp.ones(SHAPE),
+        ice_owns_snow_reservoir=True)
+    np.testing.assert_allclose(np.asarray(fw_v2.precip), P * (1.0 - A_val))
+    # Total precip delivered = direct (f_open*P) + ice_fw share (A*P) == P,
+    # counted ONCE -- NOT (1+A)*P, NOT (1-A)*P.  (f_water = f_open+A = 1, so
+    # ice_ocean_forcing_from_ice_response passes the ice_fw share through 1:1.)
+    total = np.asarray(fw_v2.precip) + np.asarray(fw_v2.ice_fw)
+    np.testing.assert_allclose(total, P)
+    # Explicitly reject the unpatched double-count value.
+    assert not np.allclose(total, P * (1.0 + A_val))
+
+    # slab / legacy-dynamic (default gate False): direct precip stays full-cell;
+    # ice_fw carries melt/freeze only (0 here) -> P counted once, unchanged.
+    fw_slab, _ = blend_ice_ocean_forcing(
+        ice_resp=_tile_response(SHAPE, ice_fw=0.0), ice_concentration=conc,
+        open_sf=sf0, open_fw=fw0, ocean_mask=jnp.ones(SHAPE))
+    np.testing.assert_allclose(np.asarray(fw_slab.precip), P)

@@ -749,8 +749,21 @@ class TestMultilayerLandStep(unittest.TestCase):
             state, forcing, config, U_min=1.0, dt=600.0,
         )
 
+        # Fields WITHOUT a NamedTuple default are mandatory on every tile and
+        # must be populated arrays; the defaulted ones (``T_rad``,
+        # ``ice_concentration_thermo``) are opt-in channels that a land tile
+        # legitimately leaves as None for its consumers to fall back from.
+        # Checked this way rather than by skipping every None, so a mandatory
+        # field silently becoming None still fails.
+        optional = set(type(response)._field_defaults)
         for name in response._fields:
             arr = getattr(response, name)
+            if arr is None:
+                self.assertIn(
+                    name, optional,
+                    f"TileResponse.{name} is mandatory but was None",
+                )
+                continue
             self.assertTrue(
                 jnp.all(jnp.isfinite(arr)),
                 f"TileResponse.{name} has non-finite values",

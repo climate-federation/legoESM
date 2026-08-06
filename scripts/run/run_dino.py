@@ -171,7 +171,8 @@ def _parse_args():
         help="Adaptive kappa_GM scaling (DINOConfig.gm_kappa_scheme): "
              "'visbeck' (Visbeck 1997, historical default) or 'treguier' "
              "(Treguier 1997 / NEMO nn_aei_ijk_t=21 — the DINO oracle "
-             "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
+             "scaling, cap aei0=0.5*rn_Ue*rn_Le=1500 m2/s, ldftra.F90:332). "
+             "Lat-lon only.",
     )
     p.add_argument(
         "--gm-redi-mld-criterion", choices=("rho_c", "n2_integral"),
@@ -208,7 +209,7 @@ def _parse_args():
     p.add_argument(
         "--treguier-aei0", type=float, default=None,
         help="Treguier kappa cap aei0 [m2/s] (DINOConfig.treguier_aei0, "
-             "default 3000 = the DINO namelist rn_Ue*rn_Le). Ignored unless "
+             "default 1500 = 0.5*rn_Ue*rn_Le, ldftra.F90:332). Ignored unless "
              "--gm-kappa-scheme treguier.",
     )
     p.add_argument(
@@ -589,8 +590,9 @@ def main():
             cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
     if args.nemo_faithful_grid:
         if args.grid != "latlon":
-            p.error("--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
-                    "mesh); rerun with --grid latlon.")
+            raise SystemExit(
+                "--nemo-faithful-grid is lat-lon only (NEMO's Mercator DINO "
+                "mesh); rerun with --grid latlon.")
         # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
         # whatever recipe/overrides preceded it (must not be clobbered after).
         cfg = nemo_faithful_dino_config(base=cfg)

@@ -176,7 +176,12 @@ def main(argv: list[str] | None = None) -> int:
                                  # Legacy aliases for the SCVT mesh,
                                  # normalised by run_amip.py
                                  "voronoi", "icosahedral", "mpas_voronoi"])
-    parser.add_argument("--discretization", type=str, default="finite_volume",
+    # Default None → resolved per-grid in main() (codex r2): keep the deck's
+    # historical 'finite_volume' for cube/latlon but pick 'mpas' for the
+    # Voronoi mesh, whose only supported discretization is 'mpas'. A hard-coded
+    # 'finite_volume' default made a bare --grid-type voronoi die at the dycore
+    # factory on (hydrostatic, finite_volume, mpas).
+    parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
 
@@ -286,6 +291,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="Extra args forwarded verbatim to run_amip.py")
 
     args = parser.parse_args(argv)
+
+    # Resolve the per-grid discretization default (codex r2): preserve the
+    # deck's historical 'finite_volume' for cube/latlon; the Voronoi mesh only
+    # supports 'mpas'.  Done here so the spectral_path / mpas_path activity
+    # labels below and the forwarded flag all see a concrete value.
+    if args.discretization is None:
+        if args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                              "mpas"):
+            args.discretization = "mpas"
+        elif args.grid_type == "gaussian":
+            args.discretization = "spectral"
+        else:
+            args.discretization = "finite_volume"
 
     # ``ModelDriver`` only consumes the volcanic file when
     # ``aerosol_forcing == "external"``.  When the user disables
@@ -575,7 +593,8 @@ def main(argv: list[str] | None = None) -> int:
     rad_active = rad in ("rrtmg", "rrtmgp")
     spectral_path = (args.grid_type == "gaussian"
                      and args.discretization == "spectral")
-    mpas_path = (args.grid_type == "voronoi"
+    mpas_path = (args.grid_type in ("voronoi", "mpas", "mpas_voronoi",
+                                    "icosahedral")
                  and args.discretization == "mpas")
     effective_active = rad_active
 

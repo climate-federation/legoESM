@@ -61,6 +61,29 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_hard_saturation_adjustment_flag_flows_to_config():
+    """--hard-saturation-adjustment round-trips to ExperimentConfig (opt-in
+    warm-rain hard saturation-adjustment guard; default OFF)."""
+    parser = build_arg_parser()
+    # default OFF: byte-identical smooth microphysics path
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.hard_saturation_adjustment is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_on.hard_saturation_adjustment is True
+
+    # BooleanOptionalAction exposes the explicit --no- off switch.
+    cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--no-hard-saturation-adjustment",
+    ]), parser))
+    assert cfg_no.hard_saturation_adjustment is False
+
+
 def test_use_clubb_cloud_fraction_flag_flows_to_config():
     """--use-clubb-cloud-fraction round-trips to ExperimentConfig (marine-Sc
     albedo lever; radiation then reads diagnostic CLUBB's PDF cloud fraction)."""
@@ -170,17 +193,46 @@ def test_no_surface_tiled_overrides_yaml_default():
     assert cfg.surface_tiled is False
 
 
-def test_multilayer_land_rejected_on_mpas():
-    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
-    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
-    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+def test_multilayer_land_accepted_on_mpas():
+    """use_multilayer_land + MPAS grid parses (MPAS port,
+    tasks/mpas_land_port.md): the tile is stepped in the MPAS driver loop with
+    skin-T feedback via forcing['T_sfc'].  The old early argparse rejection
+    (VoronoiMesh had no lat/lat2d) is retired — setup now reads latCell."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "mpas", "--discretization", "mpas",
+        "--use-multilayer-land",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.use_multilayer_land is True
+    cfg.validate_strict()
+
+
+def test_multilayer_land_still_rejected_on_spectral():
+    """The SPECTRAL standalone path keeps the early rejection (passive land
+    tile, no soil-column stepping wired there)."""
     parser = build_arg_parser()
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
             "--dataset", "analytical",
-            "--grid-type", "mpas", "--discretization", "mpas",
+            "--truncation", "21", "--discretization", "spectral",
             "--use-multilayer-land",
         ]), parser)
+
+
+def test_canopy_schemes_rejected_on_mpas():
+    """Canopy surface schemes (two_leaf/clm_ml) need the coupled pipeline's
+    clm_ml threading — only simple_seb is wired on the MPAS lane; a canopy
+    selection must fail early, not silently run simple_seb."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical",
+                "--grid-type", "mpas", "--discretization", "mpas",
+                "--use-multilayer-land", "--land-surface-scheme", scheme,
+            ]), parser)
 
 
 def test_clm_surfdata_path_flows_to_config():
@@ -327,6 +379,74 @@ def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
             cfg._replace(land_gs_max=bad).validate_strict()
 
 
+def test_land_interface_flux_flag_flows_to_config():
+    """--land-interface-flux round-trips into ExperimentConfig; default is the
+    byte-identical 'legacy_dual'; 'unified' selects the single-flux-law slab
+    SEB (one flux law at the land-air interface; the semi-implicit
+    discretization term remains — see _step_slab_land)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_interface_flux == "legacy_dual"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "holtslag_boville", "--slab-land-active",
+        "--topography", "etopo",
+    ]), parser))
+    assert cfg.land_interface_flux == "unified"
+    cfg.validate_strict()
+
+    # slab_land_active over FLAT topography derives f_land == 0 (no land) —
+    # 'unified' would silently never step; validate_strict must reject it
+    # (codex R2 finding: the tile-presence gate must see through the flag).
+    flat = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "holtslag_boville", "--slab-land-active",
+    ]), parser))
+    with pytest.raises(ValueError, match="land_interface_flux"):
+        flat.validate_strict()
+
+    # Unknown value is rejected by argparse choices (before validate_strict).
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--land-interface-flux", "both"])
+
+
+def test_land_interface_flux_unified_requires_turbulence():
+    """validate_strict rejects unified without a turbulence scheme (there is
+    no atmosphere-side surface-layer law to unify with)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--turbulence", "none", "--slab-land-active",
+        "--topography", "etopo",
+    ]), parser))
+    with pytest.raises(ValueError, match="land_interface_flux"):
+        cfg.validate_strict()
+
+
+def test_c_land_flag_flows_to_config():
+    """--c-land round-trips into ExperimentConfig.C_land (previously the
+    config field was silently inert — never threaded to the pipeline)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.C_land == 2.0e5
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--c-land", "5e5",
+    ]), parser))
+    assert cfg.C_land == 5.0e5
+    cfg.validate_strict()
+
+    bad = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--c-land", "0.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="C_land"):
+        bad.validate_strict()
+
+
 def test_land_soil_moisture_init_frac_flag_flows_to_config():
     """--land-soil-moisture-init-frac round-trips (issue #730 drier-cold-start
     knob); default 0.5 is byte-identical to the init default."""
@@ -352,10 +472,53 @@ def test_land_surface_scheme_flag_flows_to_config():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.land_surface_scheme == "simple_seb"
 
+    # Canopy schemes require --use-multilayer-land (they run inside the multilayer
+    # land tile); the flag round-trips with it set.
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+        "--use-multilayer-land",
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
+
+    # clm_ml is a first-class selector (S4-AMIP plumbing); validate_strict must
+    # ACCEPT it (the coupled ncol>1 capability gate lives in the driver setup,
+    # not here — single-point CLM-ML runs today via run_lmip).
+    cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land",
+    ]), parser))
+    assert cfg_clm.land_surface_scheme == "clm_ml"
+    cfg_clm.validate_strict()  # must not raise
+
+
+def test_clm_ml_use_surfdata_pft_flag_flows_to_config():
+    """--clm-ml-use-surfdata-pft round-trips (per-column dominant PFT for CLM-ML ->
+    mixed-PFT columns handled by the group-by-structure scan).  Default off."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clm_ml_use_surfdata_pft is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--use-multilayer-land", "--clm-ml-use-surfdata-pft",
+    ]), parser))
+    assert cfg_on.clm_ml_use_surfdata_pft is True
+
+
+def test_canopy_scheme_requires_multilayer_land():
+    """A canopy surface scheme without --use-multilayer-land is a hard CLI error,
+    not a silent drop to the slab land (dispatch-hardening)."""
+    parser = build_arg_parser()
+    for scheme in ("two_leaf", "clm_ml"):
+        with pytest.raises(SystemExit):
+            _postprocess_args(parser.parse_args([
+                "--dataset", "analytical", "--land-surface-scheme", scheme,
+            ]), parser)
+    # simple_seb (the default) is a no-op on the slab and is NOT gated.
+    _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
+    ]), parser)
 
 
 def test_sponge_flags_flow_to_config():
@@ -375,6 +538,106 @@ def test_sponge_flags_flow_to_config():
     assert cfg.sponge_enabled is True
     assert cfg.sponge_coeff_per_day == 4.0
     assert cfg.sponge_sigma_top == 0.2
+
+
+def test_hard_sat_override_flags_flow_and_validate():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip;
+    gate + spec-bounds enforcement (day-137 drain-capacity lever)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "10.0",
+        "--hard-sat-adjust-threshold", "1.05",
+    ]), parser))
+    assert cfg.hard_sat_max_heating_K == 10.0
+    assert cfg.hard_sat_adjust_threshold == 1.05
+    cfg.validate_strict()
+
+    # Override without the boolean gate -> refused (silently-inert config).
+    cfg_nogate = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_saturation_adjustment=True"):
+        cfg_nogate.validate_strict()
+
+    # Spec bounds enforced.
+    cfg_oob = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-max-heating-k", "80.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg_oob.validate_strict()
+
+
+def test_mpas_land_boundary_flags_flow_to_config():
+    """--mpas-land-lapse-k-per-km / --mpas-land-beta round-trip (MPAS land
+    surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_lapse_K_per_km == 0.0
+    assert cfg_default.mpas_land_beta == 1.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
+    ]), parser))
+    assert cfg.mpas_land_lapse_K_per_km == 6.5
+    assert cfg.mpas_land_beta == 0.6
+    # validate_strict is exercised in test_mpas_land_boundary (the bare CLI
+    # invocation here has topography='flat', which the inert-corner guard
+    # correctly refuses).
+
+
+def test_mpas_qv_smoothing_flag_flows_to_config():
+    """--mpas-qv-smooth-del2-m2s round-trip (MPAS horizontal moisture
+    smoothing, 2026-07-23 speckle fix); default byte-identical OFF."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_qv_smooth_del2_m2s == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-qv-smooth-del2-m2s", "2e5",
+    ]), parser))
+    assert cfg.mpas_qv_smooth_del2_m2s == 2.0e5
+    # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
+
+
+def test_mpas_land_beta_soil_flag_flows_to_config():
+    """--mpas-land-beta-soil round-trip (#1312 phase 2b traced beta_soil);
+    default byte-identical OFF, --no- form revertible from a YAML True."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_beta_soil is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--use-multilayer-land", "--mpas-land-beta-soil",
+    ]), parser))
+    assert cfg.mpas_land_beta_soil is True
+
+    parser2 = build_arg_parser()
+    parser2.set_defaults(mpas_land_beta_soil=True)   # simulates a YAML pin
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-mpas-land-beta-soil",
+    ]), parser2))
+    assert cfg_off.mpas_land_beta_soil is False
+    # validate_strict inert-corner guards live in
+    # test_mpas_multilayer_land_port (refusal without multilayer land).
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -892,6 +1155,31 @@ def test_bechtold_cape_threshold_flows_to_config():
     assert cfg.validate_strict() is None
 
 
+def test_bechtold_subsidence_solve_flows_to_config():
+    """--bechtold-subsidence-solve round-trips into ExperimentConfig (the
+    day-65 blowup-bisect stability escape hatch); unset matches the
+    BechtoldConfig default (byte-identical); unknown value rejected at
+    the parser (choices) and by validate_strict membership."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--bechtold-subsidence-solve", "advective",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "advective"
+    assert cfg.validate_strict() is None
+
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.bechtold_subsidence_solve == "implicit_flux"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--bechtold-subsidence-solve", "bogus"])
+    with pytest.raises(ValueError, match="bechtold_subsidence_solve"):
+        cfg._replace(bechtold_subsidence_solve="bogus").validate_strict()
+
+
 def test_bechtold_cape_threshold_defaults_to_scheme_default():
     """Unset → matches BechtoldConfig.cape_threshold (byte-identical)."""
     parser = build_arg_parser()
@@ -942,10 +1230,17 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
+        "--a-h-scale", "0.25",
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
 
+    # a_h_scale is the SECOND-ORDER Laplacian viscosity multiplier. It is not
+    # scale-selective (damps as k^2) so it reaches the baroclinic eddies that
+    # drive the midlatitude jet; component_factory records "crushing the
+    # midlatitude eddy-driven jets" at 16x the default. It was a DycoreConfig
+    # field with no CLI flag until 2026-07-31.
+    assert cfg.dycore.a_h_scale == 0.25
     assert cfg.dycore.hyperdiff_scale == 1.25
     assert cfg.dycore.div_damp_scale == 0.75
     assert cfg.dycore.conservation_fixer is False
@@ -1015,7 +1310,6 @@ def test_aimip_classical_checkpoint_flag():
 def _serialise_aimip_defaults(tmp_path):
     """Write a default AIMIPClassicalParams checkpoint for the override tests."""
     import equinox as eqx
-
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
     ckpt = tmp_path / "epoch_defaults.eqx"
@@ -1654,8 +1948,8 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
     gustiness (coare3/300) rather than reverting to to_louis_config's default
     constant surface — the clobber that silently made --surface-bulk-scheme a
     no-op on every AIMIP run (anemic evaporation, hfls ~6 vs ~88)."""
-    from legoesm.atmosphere.physics.turbulence.config import (
-        LouisConfig, SurfaceLayerConfig)
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig, SurfaceLayerConfig
+
     from scripts.run.run_amip import _louis_with_preserved_surface
     # trained Louis carries a DEFAULT (constant) surface, exactly as
     # to_louis_config() builds it from the trained Cd/Ch/z0:
@@ -1673,8 +1967,8 @@ def test_aimip_louis_preserves_resolved_surface_scheme():
 def test_aimip_louis_preserve_surface_noop_without_prev():
     """No prior turbulence config (e.g. turbulence was none) -> trained Louis
     returned unchanged."""
-    from legoesm.atmosphere.physics.turbulence.config import (
-        LouisConfig, SurfaceLayerConfig)
+    from legoesm.atmosphere.physics.turbulence.config import LouisConfig, SurfaceLayerConfig
+
     from scripts.run.run_amip import _louis_with_preserved_surface
     trained = LouisConfig(surface=SurfaceLayerConfig())
     assert _louis_with_preserved_surface(trained, None) is trained
@@ -1684,6 +1978,7 @@ def test_sundqvist_tuning_flags_round_trip_and_override():
     """--sundqvist-{qc-crit,rh-crit,auto-rate} parse and override a
     SundqvistConfig with final precedence; unset knobs stay at the base."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     d = parser.parse_args(["--dataset", "analytical"])
@@ -1701,6 +1996,7 @@ def test_sundqvist_tuning_flags_round_trip_and_override():
 def test_sundqvist_overrides_noop_without_flags():
     """No override flags -> the SAME config object (identity)."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical"])
@@ -1711,6 +2007,7 @@ def test_sundqvist_overrides_noop_without_flags():
 def test_sundqvist_overrides_noop_for_non_sundqvist_micro():
     """A sundqvist override is ignored when microphysics != sundqvist."""
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+
     from scripts.run.run_amip import _apply_sundqvist_overrides
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical",
@@ -2035,6 +2332,41 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_sb81_omega_conversion_flag_flows_to_dycore_config():
+    """#1029 ω-side: --sb81-omega-conversion round-trips into DycoreConfig;
+    default OFF (the SB81 conversion is opt-in until the #1029(b) lid
+    treatment lands)."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sb81_omega_conversion is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sb81-omega-conversion",
+    ]), parser))
+    assert cfg_on.dycore.sb81_omega_conversion is True
+
+
+def test_budget_ledger_flag_flows_to_output_config():
+    """--budget-ledger (per-process budget attribution diagnostic)
+    round-trips into OutputConfig; default OFF = byte-identical model."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.output.budget_ledger is False   # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--budget-ledger",
+    ]), parser))
+    assert cfg_on.output.budget_ledger is True
+
+    # BooleanOptionalAction: a YAML-true value stays CLI-overridable.
+    cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-budget-ledger",
+    ]), parser))
+    assert cfg_neg.output.budget_ledger is False
 
 
 def test_convective_precip_efficiency_allows_bechtold():
@@ -2887,3 +3219,192 @@ def test_restart_still_requires_forcing_path_for_real_data():
         "--forcing-path", "/tmp/sst.nc",
     ]), parser)
     assert args.forcing_path == "/tmp/sst.nc"
+
+
+def test_voronoi_default_discretization_is_mpas():
+    """2026-07-21 audit: bare --grid-type voronoi must resolve the only
+    supported discretization ('mpas'), not the generic 'centered' default that
+    dies at the dycore factory on (hydrostatic, centered, mpas)."""
+    p = build_arg_parser()
+    for grid in ("voronoi", "icosahedral", "mpas_voronoi", "mpas"):
+        args = _postprocess_args(p.parse_args(["--grid-type", grid]), p)
+        assert args.discretization == "mpas", (
+            f"--grid-type {grid} resolved discretization "
+            f"{args.discretization!r}, expected 'mpas'")
+
+
+def test_build_config_resolves_voronoi_discretization_without_postprocess():
+    """A caller that builds a config WITHOUT _postprocess_args (codex r2)
+    must still get the per-grid default, not the None-sentinel 'centered'."""
+    p = build_arg_parser()
+    args = p.parse_args(["--grid-type", "voronoi"])
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "mpas"
+
+
+def test_truncation_only_triggers_spectral_fallback():
+    """--truncation N without --discretization spectral must still fall back
+    off prognostic schemes (postprocess resolves discretization='spectral'
+    BEFORE the fallback runs; the old order made this a silent no-op)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    assert args.discretization == "spectral"
+    args = _apply_spectral_scheme_fallback(args, argv, p)
+    assert args.convection == "sbm"
+    assert args.gravity_wave_drag == "rayleigh"
+
+
+def test_spectral_fallback_rejects_dependent_option_silent_noop():
+    """--truncation 21 --convective-precip-efficiency 0.5: the fallback would
+    downgrade convection to sbm, silently ignoring the mass-flux-only option;
+    it must error instead of accept-then-ignore (codex r2)."""
+    p = build_arg_parser()
+    argv = ["--truncation", "21", "--convective-precip-efficiency", "0.5"]
+    args = _postprocess_args(p.parse_args(argv), p)
+    with pytest.raises(SystemExit):
+        _apply_spectral_scheme_fallback(args, argv, p)
+
+
+def test_hard_sat_override_flags_flow_to_config():
+    """--hard-sat-adjust-threshold / --hard-sat-max-heating-k round-trip onto
+    the ExperimentConfig flat scalars (day-137 summer-regime drain tuning);
+    defaults None keep the per-scheme __param_spec__ values."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.hard_sat_adjust_threshold is None
+    assert cfg_default.hard_sat_max_heating_K is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-saturation-adjustment",
+        "--hard-sat-adjust-threshold", "1.2",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    assert cfg.hard_sat_adjust_threshold == 1.2
+    assert cfg.hard_sat_max_heating_K == 10.0
+    cfg.validate_strict()
+
+
+def test_hard_sat_override_without_gate_is_refused():
+    """An override without --hard-saturation-adjustment would be silently
+    inert (the floats are only read where the boolean gate fires) —
+    validate_strict must refuse it."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--hard-sat-max-heating-k", "10.0",
+    ]), parser))
+    with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
+        cfg.validate_strict()
+
+
+def test_hard_sat_override_bounds_enforced():
+    """Out-of-spec-bounds overrides are refused (threshold (1,2) /
+    heating (0.5,50) per the warm-rain __param_spec__)."""
+    parser = build_arg_parser()
+    for flags, match in (
+            (["--hard-sat-adjust-threshold", "0.9"], "hard_sat_adjust_threshold"),
+            (["--hard-sat-max-heating-k", "100.0"], "hard_sat_max_heating_K")):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", "morrison",
+            "--hard-saturation-adjustment", *flags,
+        ]), parser))
+        with pytest.raises(ValueError, match=match):
+            cfg.validate_strict()
+
+
+def test_hard_saturation_adjustment_requires_warm_rain_scheme():
+    """--hard-saturation-adjustment with a non-warm-rain microphysics scheme
+    (default sundqvist, or none) is silently inert at runtime
+    (_resolve_microphysics / the MPAS post-step drain early-return before the
+    flag is read) — validate_strict must refuse it (codex F3)."""
+    parser = build_arg_parser()
+    for micro in ("sundqvist", "none"):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", micro,
+            "--hard-saturation-adjustment",
+        ]), parser))
+        with pytest.raises(ValueError, match="warm-rain microphysics"):
+            cfg.validate_strict()
+
+
+def test_morrison_flavor_round_trips():
+    """--morrison-flavor sam round-trips into ExperimentConfig; default mg."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-flavor", "sam",
+    ]), parser))
+    assert cfg.morrison_flavor == "sam"
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.morrison_flavor == "mg"
+
+
+def test_morrison_flavor_yaml_route():
+    """--config YAML route (keys become parser defaults): morrison_flavor: sam
+    must reach ExperimentConfig, and an explicit CLI flag must still win."""
+    parser = build_arg_parser()
+    parser.set_defaults(morrison_flavor="sam", microphysics="morrison")
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg.morrison_flavor == "sam"
+    cfg_cli = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--morrison-flavor", "mg",
+    ]), parser))
+    assert cfg_cli.morrison_flavor == "mg"
+
+
+def test_bechtold_rprcon_dnoprc_thread_and_validate():
+    """bechtold_rprcon / bechtold_dnoprc (IFS in-plume conversion constants,
+    the anvil-source levers) thread into the hot-loop BechtoldConfig on BOTH
+    resolvers; defaults byte-identical; validate_strict bounds enforced."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    cfg = ExperimentConfig(convection="bechtold", bechtold_rprcon=5.0e-3,
+                           bechtold_dnoprc=1.0e-4)
+    leaf = _resolve_convection(cfg)[1]
+    assert (leaf.rprcon, leaf.dnoprc) == (5.0e-3, 1.0e-4)
+    cc = convection_config_for(cfg)
+    assert (cc.bechtold.rprcon, cc.bechtold.dnoprc) == (5.0e-3, 1.0e-4)
+    d = _resolve_convection(ExperimentConfig(convection="bechtold"))[1]
+    assert (d.rprcon, d.dnoprc) == (1.4e-3, 3.0e-4)
+    with pytest.raises(ValueError, match="bechtold_rprcon"):
+        ExperimentConfig(bechtold_rprcon=1.0).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_dnoprc"):
+        ExperimentConfig(bechtold_dnoprc=1.0e-2).validate_strict()
+
+
+def test_inplume_conversion_responds_to_rprcon():
+    """Non-vacuity: the in-plume conversion must produce MORE precip at
+    higher rprcon and at lower dnoprc on a moist synthetic plume profile —
+    the knob the 2026-07-27 anvil campaign tunes.  Guards against the
+    silent-constant regression (the fn ignoring its new args)."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        _ifs_inplume_precip_conversion,
+    )
+
+    ncol, nlev = 2, 12
+    z = jnp.linspace(12000.0, 200.0, nlev)[None, :].repeat(ncol, 0)
+    # Condensate just above the precip-onset threshold: the conversion is
+    # RATE-limited there (a saturated profile compresses the rprcon response
+    # into the Sundqvist exp plateau and the test goes vacuous).
+    q_c_u = jnp.full((ncol, nlev), 5.0e-4)
+    T_u = jnp.linspace(210.0, 295.0, nlev)[None, :].repeat(ncol, 0)  # noqa: N806 (T = temperature, domain convention)
+    eps = jnp.full((ncol, nlev), 1.0e-4)
+    ke = jnp.full((ncol, nlev), 2.0)
+
+    def total_precip(rprcon, dnoprc):
+        _, pf = _ifs_inplume_precip_conversion(
+            q_c_u, T_u, z, eps, ke, rprcon=rprcon, dnoprc=dnoprc)
+        return float(jnp.sum(pf))
+
+    base = total_precip(1.4e-3, 3.0e-4)
+    assert total_precip(5.6e-3, 3.0e-4) > base * 1.05
+    assert total_precip(1.4e-3, 1.0e-4) > base

@@ -41,6 +41,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blend_surface_property,
     distribute_column_aod_to_layers,
+    place_stratospheric_aod_profile_to_layers,
 )
 
 __all__ = [
@@ -76,4 +77,5 @@ __all__ = [
     "blend_surface_temperature",
     "blend_surface_property",
     "distribute_column_aod_to_layers",
+    "place_stratospheric_aod_profile_to_layers",
 ]

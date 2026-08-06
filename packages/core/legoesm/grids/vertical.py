@@ -32,11 +32,14 @@ References
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -102,8 +105,11 @@ def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
     dtype=None,
+    tropopause_refine: float = 1.0,
+    sigma_refine: float = 0.12,
+    refine_width: float = 0.45,
 ) -> SigmaCoordinate:
-    """Create a uniformly spaced sigma coordinate.
+    """Create a sigma coordinate (uniform by default).
 
     Parameters
     ----------
@@ -117,6 +123,14 @@ def create_sigma_coordinate(
         Dtype for coordinate arrays. If None, uses the precision
         policy's compute dtype (defaults to float32 when no policy
         is active). Explicit dtype overrides the policy.
+    tropopause_refine : float
+        Peak density ratio for the tropopause refinement (see
+        :func:`tropopause_refined_sigma_half`).  ``1.0`` (default) is the
+        UNIFORM grid, bit-identical to the pre-refinement behaviour.
+        Values > 1 redistribute layers toward ``sigma_refine`` at the SAME
+        level count — the fix for the unresolved tropical cold point.
+    sigma_refine, refine_width : float
+        Centre (in sigma) and log-sigma half-width of the refinement.
 
     Returns
     -------
@@ -133,7 +147,16 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    if tropopause_refine == 1.0:
+        # Uniform (default) — kept as the literal linspace so the untouched
+        # path stays bit-identical to the pre-refinement code.
+        sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    else:
+        sigma_half = jnp.asarray(
+            tropopause_refined_sigma_half(
+                n_levels, sigma_top=sigma_top, sigma_refine=sigma_refine,
+                refine=tropopause_refine, width=refine_width),
+            dtype=dtype)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
     dsigma = sigma_half[1:] - sigma_half[:-1]
 
@@ -161,6 +184,117 @@ def create_sigma_coordinate(
         fractional_sigma=fractional_sigma,
         dsigma_full=dsigma_full,
     )
+
+
+def tropopause_refined_sigma_half(
+    n_levels: int,
+    sigma_top: float = 0.01,
+    sigma_refine: float = 0.12,
+    refine: float = 3.0,
+    width: float = 0.45,
+) -> np.ndarray:
+    """Half-level sigma with layers REDISTRIBUTED toward the tropopause.
+
+    The uniform-in-sigma default (:func:`create_sigma_coordinate`) spaces
+    every layer by the same ``dp = dsigma * p_s`` — about 33 hPa at 30
+    levels — so the tropical tropopause layer, whose structure is a
+    10-20 hPa affair, is spanned by ~3 levels and the model forms no cold
+    point (its coldest tropical level lands at the ~26 hPa top instead of
+    ~100 hPa; measured 2026-07-25).  Adding levels does NOT fix this: at
+    40 levels the TTL still gets 4 levels, and that L40 run (uniform σ,
+    24.4 hPa in EVERY layer) blew up at day 46 with dt=60.  The L40 failure
+    mode is NOT attributed here — it appeared across levels 0-11 (10-302 hPa)
+    and no mechanism has been instrumented; "thin layers destabilise" is an
+    untested hypothesis, so it is not used as a design argument below.
+
+    So redistribute at FIXED count instead.  Levels are placed by the
+    standard equidistribution principle: they are the quantiles of a
+    density ``d(sigma)`` in SIGMA space, so a flat density reproduces the
+    uniform default exactly and the refinement only steals layers from the
+    (over-resolved) mid-troposphere::
+
+        d(sigma) = 1 + (refine - 1) * exp(-0.5 * ((ln sigma - ln sigma_refine) / width)^2)
+
+    The bump is Gaussian in LOG sigma because atmospheric structure scales
+    with log-pressure; ``width`` is therefore in log-sigma units (0.45 ~ a
+    factor e^0.45 = 1.6 in pressure either side of the centre).  Working in
+    sigma (not log-sigma) for the equidistribution is deliberate: a pure
+    log-sigma grid would put 166 hPa between the lowest levels at 30
+    levels and destroy the boundary layer.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of layers (returns ``n_levels + 1`` half levels).
+    sigma_top : float
+        Sigma of the model top (same meaning as in
+        :func:`create_sigma_coordinate`).
+    sigma_refine : float
+        Centre of the refinement, in sigma (0.12 ~ 120 hPa at p_s = 1000
+        hPa — the tropical cold point).
+    refine : float
+        Peak density ratio.  ``refine = 1`` reproduces the uniform grid
+        EXACTLY (the identity case, pinned by a test).
+    width : float
+        Gaussian half-width of the bump in log-sigma units.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_levels + 1,)``
+        Monotone increasing half-level sigma from ``sigma_top`` to 1.
+    """
+    if not (refine >= 1.0 and width > 0.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need refine >= 1 and width > 0; "
+            f"got refine={refine!r}, width={width!r}")
+    if not (0.0 < sigma_top < sigma_refine < 1.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need 0 < sigma_top < "
+            f"sigma_refine < 1; got sigma_top={sigma_top!r}, "
+            f"sigma_refine={sigma_refine!r}")
+    # Fine auxiliary QUADRATURE grid; the quantile inversion below is a 1-D
+    # interp, so resolution here only sets the placement accuracy (not a
+    # runtime cost: this runs once at setup, on the host, in float64).
+    # LOG-spaced, matching the density's own log-σ structure: a σ-uniform mesh
+    # has constant Δσ ≈ 5e-5 and therefore CANNOT resolve a narrow bump placed
+    # near the lid (``width`` 0.02 at ``sigma_refine`` ≈ ``sigma_top`` = 1e-5
+    # spans Δσ ~ 2e-7, i.e. zero mesh points), giving a worst-case placement
+    # error of 3.1e-5 in σ over the allowed parameter box.  The log mesh
+    # resolves every allowed bump uniformly: worst case 2.0e-7 (155x better),
+    # and it moves the DEFAULT grid by only 7.8e-9 in σ (8e-6 hPa) — toward
+    # the exact answer, not away.  ``refine == 1`` stays exact either way
+    # (a constant integrand is exact under the trapezoid on any mesh).
+    s = np.geomspace(sigma_top, 1.0, 20001, dtype=np.float64)
+    _ln = np.log(s)
+    dens = 1.0 + (refine - 1.0) * np.exp(
+        -0.5 * ((_ln - np.log(sigma_refine)) / width) ** 2)
+    # DELIBERATELY single-bump.  A matching surface bump was tried and
+    # rejected (measured 2026-07-25, 30 levels, refine=3): it does protect
+    # the lowest layer (42 -> 23 hPa) but it is very WIDE in sigma (it spans
+    # sigma ~ 0.6-1.0), so it starves the tropopause back to 5 levels from 8
+    # and thickens the TOP layer to 57 hPa.  At 30 levels the grid cannot
+    # refine both ends; the tropopause is the identified defect, so it wins.
+    # ACCEPTED COSTS, both measured at nlev=30 / refine=3, both real:
+    #   (a) the lowest layer coarsens ~30% (33 -> 42 hPa);
+    #   (b) the thinnest layer is 14.2 hPa at ~113 hPa — 42% THINNER than
+    #       anything the L40 run that blew up ever had, and inside the same
+    #       10-302 hPa band where that failure appeared.  The top layer k=0
+    #       does thicken (33 -> 40 hPa), but that covers ONE level of a
+    #       twelve-level failure, so it is NOT a safety argument.
+    #   (c) the max adjacent-layer thickness ratio rises 1.00 -> 1.62,
+    #       vs <= 1.07 on every grid this model has run successfully.
+    # Equidistribution: place levels at equal increments of the cumulative
+    # density, so spacing ~ 1/d — fine where d is large.
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1])
+                                           * np.diff(s))])
+    cum /= cum[-1]
+    targets = np.linspace(0.0, 1.0, n_levels + 1)
+    half = np.interp(targets, cum, s)
+    # Pin the ends exactly (interp round-off would otherwise move the lid
+    # and the surface by ~1e-16, which the hydrostatic integration and the
+    # p_s = sigma=1 identity both assume).
+    half[0], half[-1] = sigma_top, 1.0
+    return half
 
 
 def pressure_from_sigma(
@@ -727,12 +861,63 @@ def create_hybrid_coordinate(
     )
 
 
+def hybrid_min_valid_surface_pressure(
+    A_half, B_half, p_ref: float = constants.p_ref,
+) -> float:
+    """Lowest surface pressure [Pa] at which every layer still has ``dp > 0``.
+
+    ``dp_k = dA_k p_ref + dB_k p_s`` is LINEAR in ``p_s``, so a layer with
+    ``dA_k < 0`` (which the near-surface layers of a hybrid grid always have,
+    since ``A`` must return to 0 at the ground) collapses and then INVERTS once
+    ``p_s`` drops below ``-dA_k p_ref / dB_k``.  The binding layer is the one
+    with the largest such ratio.
+
+    Below the returned pressure the coordinate hands the dycore NEGATIVE layer
+    mass -- not a diagnostic nuisance: ``dp_from_hybrid`` feeds
+    ``primitive_eq_latlon_cgrid``, ``primitive_eq_cdgrid``, ``spectral_pe`` and
+    ``primitive_eq_mpas``.
+
+    Returns 0.0 when no layer can invert (e.g. ``dA >= 0`` everywhere).
+
+    Raises
+    ------
+    ValueError
+        If a layer is invalid at EVERY surface pressure rather than below some
+        threshold: ``dB < 0`` (non-monotone B), or ``dA <= 0`` with ``dB == 0``
+        (``dp = dA p_ref <= 0`` regardless of ``p_s``).  Returning a finite
+        "safe" pressure for those would be a false all-clear.
+    """
+    import numpy as np
+
+    dA = np.diff(np.asarray(A_half, dtype=np.float64))
+    dB = np.diff(np.asarray(B_half, dtype=np.float64))
+
+    if np.any(dB < 0.0):
+        raise ValueError(
+            f"hybrid B_half must be non-decreasing; got {int((dB < 0).sum())} "
+            "layer(s) with dB < 0 (dp would depend on p_s with the wrong sign)"
+        )
+    degenerate = (dB == 0.0) & (dA <= 0.0)
+    if np.any(degenerate):
+        raise ValueError(
+            f"{int(degenerate.sum())} hybrid layer(s) have dB == 0 and "
+            "dA <= 0, so dp = dA*p_ref <= 0 at EVERY surface pressure -- the "
+            "grid is invalid, not merely limited to high p_s"
+        )
+
+    bad = (dA < 0.0) & (dB > 0.0)
+    if not bad.any():
+        return 0.0
+    return float(np.max(-dA[bad] * p_ref / dB[bad]))
+
+
 def make_hybrid_levels(
     n_levels: int,
     p_top_Pa: float = 200.0,
     p_ref: float = constants.p_ref,
     transition_exponent: int = 3,
     stretching: float = 0.0,
+    p_s_min_Pa: float | None = None,
 ) -> HybridSigmaPressureCoordinate:
     """Generate hybrid coordinate with smooth sigma-to-pressure transition.
 
@@ -761,6 +946,26 @@ def make_hybrid_levels(
         2-3 = enhanced boundary layer resolution. The stretching maps
         eta -> sinh(s*eta)/sinh(s), concentrating levels near eta=1
         (the surface).
+    p_s_min_Pa : float, optional
+        Lowest surface pressure this grid must remain valid at.  When given,
+        a coordinate that would produce NEGATIVE layer mass at that pressure
+        is a hard error instead of silent garbage.  Pass the minimum ``p_s``
+        the orography actually produces.
+
+    Raises
+    ------
+    ValueError
+        If ``p_s_min_Pa`` is given and the generated levels invert above it.
+
+    Notes
+    -----
+    With the default ``B = eta**3`` the near-surface ``dB/deta -> 3``, so
+    ``dp > 0`` needs ``p_s > (2 p_ref + p_top)/3 ~= 667 hPa``.  Real orography
+    goes well below that: a 2.5-degree AMIP run reaches ``p_s = 543 hPa`` over
+    the Tibetan Plateau, with 0.91% of global area under the threshold.  A
+    warning naming the threshold is emitted whenever it exceeds 600 hPa, which
+    the default configuration does -- see
+    :func:`hybrid_min_valid_surface_pressure`.
 
     Returns
     -------
@@ -774,6 +979,25 @@ def make_hybrid_levels(
         eta = 1.0 - np.sinh(stretching * (1.0 - eta)) / np.sinh(stretching)
     B_half = eta ** transition_exponent
     A_half = eta - B_half + (p_top_Pa / p_ref) * (1.0 - eta)
+
+    # Validity gate: below this surface pressure the near-surface layers carry
+    # NEGATIVE mass, and dp_from_hybrid feeds the dycore, not just diagnostics.
+    p_s_min_valid = hybrid_min_valid_surface_pressure(A_half, B_half, p_ref)
+    if p_s_min_Pa is not None and p_s_min_valid >= p_s_min_Pa:
+        raise ValueError(
+            f"hybrid levels invert (dp <= 0) below p_s = "
+            f"{p_s_min_valid / 100.0:.1f} hPa, but p_s_min_Pa requires validity "
+            f"down to {p_s_min_Pa / 100.0:.1f} hPa. Lower transition_exponent "
+            f"(currently {transition_exponent}) or raise p_s_min_Pa."
+        )
+    if p_s_min_valid > 6.0e4:
+        logger.warning(
+            "hybrid levels (n=%d, exponent=%d, stretching=%.1f) carry NEGATIVE "
+            "layer mass for p_s < %.1f hPa; real orography reaches ~543 hPa "
+            "over Tibet (~0.9%% of global area). Pass p_s_min_Pa to make this "
+            "a hard error, or use vertical_coord='sigma'.",
+            n_levels, transition_exponent, stretching, p_s_min_valid / 100.0,
+        )
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
 
@@ -1942,6 +2166,69 @@ def sm1_edge_fv3(
     return ze_new
 
 
+def sb81_halflevel_construction(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Simmons-Burridge (1981) half-level construction for hybrid coordinates.
+
+    Single source for the (p_half_safe, ln_ratio, alpha) triple used by BOTH
+    the hydrostatic geopotential integration and the momentum
+    pressure-gradient correction.  Sharing the bit-identical ``alpha`` is a
+    correctness requirement, not hygiene: the discrete rest-over-terrain
+    cancellation of ``-grad(Phi) - R_d T grad(ln p)`` (#1029) holds only when
+    the two terms difference the SAME floating-point fields.
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+
+    Returns
+    -------
+    (p_half_safe, ln_ratio, alpha)
+        Interface pressures clipped away from zero (..., nlev+1), layer log
+        ratios ``ln(p_{k+1/2}/p_{k-1/2})`` (..., nlev), and the exact SB81
+        ``alpha_k = 1 - (p_{k-1/2}/dp_k) ln_ratio_k`` (..., nlev).
+    """
+    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
+    p_half_safe = jnp.clip(p_half, 1e-10, None)
+    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    return p_half_safe, ln_ratio, alpha
+
+
+def sb81_full_level_ln_p(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> jax.Array:
+    """SB81 full-level log-pressure ``ln p_k = ln p_{k+1/2} - alpha_k``.
+
+    This is the discrete field whose horizontal gradient forms the
+    energy-consistent pair with ``-grad(Phi)`` from
+    :func:`compute_geopotential_hybrid`: because
+    ``sum_{j>k} ln_ratio_j = ln p_s - ln p_{k+1/2}`` telescopes, at uniform
+    temperature ``-grad(Phi_k) - R_d T grad(ln p_k)`` reduces to
+    ``-grad(phi_s + R_d T ln p_s)``, which vanishes identically for a
+    hydrostatically balanced rest state over terrain (#1029).  On a pure-sigma
+    or ``A=0`` coordinate it reduces to ``ln p_s`` plus a spatially
+    constant per-level offset, so its gradient equals ``grad(ln p_s)`` — the
+    sigma-path correction — up to a ~1e-12 top-layer artifact of the
+    ``p_half`` zero-clip when the top interface pressure is exactly 0
+    (``alpha_0`` picks up a weak ``p_s`` dependence through the clipped
+    ``ln`` ratio; physically nil, pinned by the A=0 unit test).
+
+    Returns
+    -------
+    jax.Array
+        Full-level log-pressure, shape (..., nlev).
+    """
+    p_half_safe, _, alpha = sb81_halflevel_construction(coord, p_s)
+    return jnp.log(p_half_safe[..., 1:]) - alpha
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,
@@ -1970,17 +2257,8 @@ def compute_geopotential_hybrid(
     """
     R_d = constants.R_d
 
-    # Compute hybrid pressures at interfaces and full levels
-    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
-    p_full = pressure_from_hybrid(coord, p_s, full=True)   # (..., nlev)
-
-    p_half_safe = jnp.clip(p_half, 1e-10, None)
-    jnp.clip(p_full, 1e-10, None)
-
-    # Log ratios and exact Simmons-Burridge alpha — spatially dependent
-    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
-    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
-    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
+    # Half-level construction shared with the hybrid PGF correction (#1029)
+    _, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
 
     # Geopotential thickness of each full layer
     dPhi = R_d * T * ln_ratio  # (..., nlev)
@@ -2254,6 +2532,104 @@ def vertical_advection_theta_hybrid(
 
     # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
     return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+
+
+def sb81_omega_over_p_dyn(
+    cumsum_mass_div: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array | None = None,
+) -> jax.Array:
+    """SB81 α-weighted DYNAMIC part of the energy conversion ``(ω/p)_k``.
+
+    Simmons & Burridge (1981) / IFS discretization of the non-advective part
+    of the thermodynamic conversion term (#1029 ω-side)::
+
+        (ω/p)_k^dyn = -(1/Δp_k) [ L_k · (Σ_{j<k} C_j - B_top·dp_s/dt)
+                                   + α_k · C_k ]
+
+    with ``C_j = ∇·(v_j Δp_j)`` the flux-form layer mass divergence,
+    ``L_k = ln(p_{k+1/2}/p_{k-1/2})`` and ``α_k`` the exact SB81 alpha from
+    :func:`sb81_halflevel_construction` — the SAME half-level construction
+    the geopotential integration and the momentum/thermo ``ln p`` gradients
+    use (the arithmetic ``ω_full / p_full`` form this replaces was a third,
+    independent discretization of the same continuous operator).  ``Δp_k``
+    is differenced INTERNALLY from the same clipped half-level pressures as
+    ``L_k``/``α_k`` — passing an externally-built ``dA + dB·p_s`` thickness
+    would differ by rounding (and by the clip in a zero-p-top layer),
+    breaking the discrete identities below.
+
+    The caller adds the advective part ``v_k · ∇(ln p_k^SB)`` separately
+    (the shared SB81 full-level field of :func:`sb81_full_level_ln_p`);
+    together they discretize the full ``ω/p``.  The ``∂p/∂t`` and
+    ``η̇ ∂p/∂η`` contributions are CONTAINED in the cumulative-divergence
+    expression (continuity + the ``F = 0`` top closure fold them in) —
+    EXCEPT the top-boundary term when the coordinate's top interface itself
+    moves in pressure (``B_top != 0``, e.g. a sigma-like coordinate with
+    ``p_top = sigma_top·p_s``): there ``(∂p/∂t + η̇ ∂p/∂η)(p̂) =
+    B_top·dp_s/dt - cumsum(p̂)`` and the constant layer-averages against
+    ``dp/p`` to ``+ B_top·dp_s/dt·L_k/Δp_k``.  Pass ``dp_s_dt`` (the RAW
+    continuity diagnosis ``-D_total/B_range``, NOT a globally corrected
+    variant — a zero-mean fixer applied to the prognostic ``dp_s/dt``
+    breaks the continuity identity this derivation rests on) to include
+    it; the term is multiplied by ``coord.B_half[0]`` traced (no Python
+    branch), so ``B_top = 0`` coordinates const-fold it away and the
+    function stays jit/AD-safe for traced coordinates.
+
+    Discrete column identity (unit-tested to fp64 roundoff, not bit
+    exactness — separate ``log``/multiply/reduce roundings)::
+
+        Σ_k Δp_k (ω/p)_k^dyn = -Σ_j C_j (ln p_s - ln p_j^SB)
+                               + B_top·dp_s/dt · ln(p_s / p_top_safe)
+
+    i.e. the column-integrated conversion telescopes onto the SAME discrete
+    ``ln p^SB`` field whose gradient does the momentum PGF work.  This is a
+    VERTICAL-discretization consistency statement only: on the C-grid the
+    horizontal pairing (face-flux ``C`` vs the centre-averaged
+    ``v·∇ln p^SB`` product) is not exact summation-by-parts, so no exact
+    global energy-conservation claim follows (#1029 tracks the residual
+    via the forced ``held_suarez_topo`` A/B, not an algebraic proof).
+
+    Top-layer convention at an exactly-zero-pressure top: the clipped
+    construction gives ``α_0 → 1`` (documented in
+    :func:`sb81_full_level_ln_p`), NOT the IFS ``α_1 = ln 2`` special case
+    — chosen so the conversion, the geopotential and the ``ln p^SB``
+    gradients keep ONE α field; adopting the IFS convention would have to
+    change all three together.
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)`` — INCLUSIVE cumulative flux-form mass
+        divergence, shape (..., nlev) [Pa/s].
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    dp_s_dt : jax.Array or None
+        RAW surface-pressure tendency ``-D_total/B_range``, shape (...,)
+        [Pa/s].  Only consumed through ``B_top`` (moving-top coordinates);
+        ``None`` omits the term.
+
+    Returns
+    -------
+    jax.Array
+        ``(ω/p)_k^dyn``, shape (..., nlev) [1/s].
+    """
+    p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+    # Internal Δp from the SAME clipped half-level pressures as L/α.
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    # C_k from the inclusive cumsum (C_0 = cumsum_0): one Pad HLO, no concat.
+    pad_axes = ((0, 0),) * (cumsum_mass_div.ndim - 1) + ((1, 0),)
+    cumsum_excl = jnp.pad(cumsum_mass_div[..., :-1], pad_axes)  # Σ_{j<k} C_j
+    C = cumsum_mass_div - cumsum_excl                           # C_k
+    if dp_s_dt is not None:
+        # Moving-top term: traced multiply by B_half[0] (jit/AD-safe; a
+        # static B_top = 0 const-folds to the fixed-top expression).
+        cumsum_excl = cumsum_excl - coord.B_half[0] * dp_s_dt[..., jnp.newaxis]
+    num = ln_ratio * cumsum_excl + alpha * C
+    # 1e-10 Pa: division-safety floor only (real layer thicknesses are far
+    # above it; matches the module's other dp floors).
+    return -num / jnp.maximum(dp, 1e-10)
 
 
 def compute_omega_hybrid(

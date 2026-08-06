@@ -18,7 +18,9 @@ import pytest
 
 from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
-from legoesm.ocean.vertical import create_ocean_z_star, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    create_ocean_z_star, compute_ocean_jacobian, create_partial_cell_coordinate,
+)
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isopycnal_slopes_latlon_cgrid,
@@ -212,6 +214,46 @@ class TestConservation:
             assert relative < 1e-10, f"Conservation violated: relative error {relative:.2e}"
         else:
             assert abs(integral) < 1e-20
+
+    def test_tracer_integral_conserved_with_floored_treguier_kappa(self):
+        """A nonzero ``TreguierConfig.kappa_min`` installs a FINITE kappa_GM in
+        the equatorial band where the NEMO taper would give zero — i.e. it
+        switches the bolus transport ON there.  The operator must stay
+        flux-divergence-conservative with that spatially varying, floored
+        coefficient (the floor changes the closure, it must not create or
+        destroy tracer)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jacobian, grid, cfg,
+        )
+        # Mimic a floored Treguier field: taper -> 0 toward the equator, then
+        # clamped up to kappa_min, so the band carries GM it otherwise wouldn't.
+        f20 = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(20.0))
+        f_2d = jnp.broadcast_to(grid.f, mask.shape)
+        taper = jnp.minimum(1.0, jnp.abs(f_2d) / f20)      # the NEMO taper
+        raw = cfg.kappa_GM * taper
+        # This fixture's grid does not reach the equator, so pick the floor
+        # from the field itself: it must bind on SOME columns and not others,
+        # i.e. the coefficient really is spatially varying and partly floored.
+        kappa_min = float(jnp.median(raw))
+        kappa_gm_field = jnp.maximum(raw, kappa_min)
+        assert bool((kappa_gm_field > raw + 1e-9).any()), "floor never binds"
+        assert bool((kappa_gm_field == raw).any()), "floor binds everywhere"
+        assert float(jnp.min(kappa_gm_field)) == pytest.approx(kappa_min)
+        dT = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask,
+            z_coord, jacobian, grid, kappa_gm_field, cfg.kappa_Redi,
+        )
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        area = grid.area[:, :, jnp.newaxis]
+        integral = float(jnp.sum(dT * dz * area * mask[:, :, jnp.newaxis]))
+        max_dT = float(jnp.max(jnp.abs(dT)))
+        total_vol = float(jnp.sum(dz * area * mask[:, :, jnp.newaxis]))
+        assert max_dT > 0, "floored kappa must produce a nonzero tendency"
+        relative = abs(integral) / (max_dT * total_vol)
+        assert relative < 1e-10, f"Conservation violated: {relative:.2e}"
 
 
 # =====================================================================
@@ -1231,6 +1273,91 @@ class TestNemoMixedLayerSlopeRamp:
         assert float(jnp.max(jnp.abs(g))) > 0.0
 
 
+class TestNemoMixedLayerSlopeRampLiveDepthStretch:
+    """#1455 queue item 5: ``_apply_nemo_mld_slope_ramp``'s ``z_iface``
+    profile depth must carry the SAME live ``(1+r3t)`` stretch as ``hml``
+    (both are NEMO's live ``gdepw``, ldfslp.F90:284-297) on an
+    ``OceanPartialCellCoordinate`` with nonzero eta -- otherwise the ramp's
+    ``z_iface <= hml`` comparison and ``ramp = z_iface/hml`` mix a static and
+    a live quantity.  The flat-bottom/eta=0 setup in
+    ``TestNemoMixedLayerSlopeRamp`` has jacobian==1 everywhere, so it cannot
+    exercise this gate; this test uses a nonzero, non-uniform jacobian and
+    calls ``_apply_nemo_mld_slope_ramp`` DIRECTLY against a hand-built NumPy
+    reference of the correct (both-sides-stretched) ramp formula, so it is a
+    genuine synthetic-violation check (fails if the ``z_iface`` stretch is
+    reverted -- verified below by temporarily reverting it).
+    """
+
+    @staticmethod
+    def _direct_setup(n_lat=4, n_lon=1, nlev=6, jac_val=1.4):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _apply_nemo_mld_slope_ramp, _nemo_mld,
+        )
+        z_coord = create_ocean_z_star(
+            n_levels=nlev, H_max=600.0, dz_surface=50.0, dz_deep=200.0)
+        H_bathy = jnp.full((n_lat, n_lon), 600.0)
+        partial = create_partial_cell_coordinate(z_coord, H_bathy)
+        mask = jnp.ones((n_lat, n_lon))
+        jac = jnp.full((n_lat, n_lon), jac_val)   # non-uniform-in-magnitude, far from 1
+
+        # Well-mixed top 2 levels, stratified below -> ML base a few levels down.
+        T1d = jnp.concatenate([jnp.full(2, 15.0), jnp.linspace(15.0, 2.0, nlev - 2)])
+        T = jnp.broadcast_to(T1d, (n_lat, n_lon, nlev))
+        S = jnp.full((n_lat, n_lon, nlev), 35.0)
+
+        def eos_fn(T, S, p):
+            return 1026.0 * (1.0 - 2.0e-4 * (T - 10.0))
+
+        nlev_m1 = nlev - 1
+        S_x = jnp.full((n_lat, n_lon, nlev_m1), 3.0)   # arbitrary raw slope
+        S_y = jnp.full((n_lat, n_lon, nlev_m1), -2.0)
+        return (S_x, S_y, T, S, mask, partial, eos_fn, jac, _apply_nemo_mld_slope_ramp,
+                _nemo_mld)
+
+    def test_ramp_matches_hand_built_stretched_reference(self):
+        (S_x, S_y, T, S, mask, z_coord, eos_fn, jac,
+         apply_ramp, nemo_mld) = self._direct_setup()
+        rho_c = 0.01
+        Sx_out, Sy_out = apply_ramp(
+            S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c, "rho_c",
+            g=constants.g, rho_0=1026.0, jacobian=jac)
+
+        # Hand-built NumPy reference: BOTH hml and z_iface stretched by jac
+        # (the correct NEMO formula, ldfslp.F90:284-297 -- gdepw(k) is live
+        # on both sides).
+        hml, m_base = nemo_mld("rho_c", T, S, mask, z_coord, eos_fn, rho_c,
+                               g=constants.g, rho_0=1026.0, jacobian=jac)
+        hml_np = np.asarray(hml)
+        m_base_np = np.asarray(m_base)
+        z_iface_np = np.cumsum(np.asarray(z_coord.dz_ref))[:-1]
+        jac_np = np.asarray(jac)
+        z_iface_stretched = z_iface_np[None, None, :] * jac_np[:, :, None]
+
+        nlev_m1 = S_x.shape[-1]
+        m_ref = np.clip(m_base_np + 1, 0, nlev_m1 - 1)
+        Sx_base = np.take_along_axis(np.asarray(S_x), m_ref[:, :, None], axis=-1)
+        Sy_base = np.take_along_axis(np.asarray(S_y), m_ref[:, :, None], axis=-1)
+        ramp_ref = z_iface_stretched / np.maximum(hml_np[:, :, None], 10.0)
+        in_ml_ref = z_iface_stretched <= hml_np[:, :, None]
+        Sx_ref = np.where(in_ml_ref, ramp_ref * Sx_base, np.asarray(S_x))
+        Sy_ref = np.where(in_ml_ref, ramp_ref * Sy_base, np.asarray(S_y))
+
+        np.testing.assert_allclose(np.asarray(Sx_out), Sx_ref, rtol=1e-6, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(Sy_out), Sy_ref, rtol=1e-6, atol=1e-9)
+        # Sanity: the ML actually has interior cells to ramp (test is non-vacuous).
+        assert bool(np.any(in_ml_ref))
+
+        # WRONG reference (z_iface left unstretched -- the pre-fix behaviour)
+        # must DIFFER from the production output, proving this test would
+        # have failed before the fix.
+        ramp_wrong = z_iface_np[None, None, :] * np.ones_like(jac_np)[:, :, None] \
+            / np.maximum(hml_np[:, :, None], 10.0)
+        in_ml_wrong = (z_iface_np[None, None, :] * np.ones_like(jac_np)[:, :, None]
+                       <= hml_np[:, :, None])
+        Sy_wrong = np.where(in_ml_wrong, ramp_wrong * Sy_base, np.asarray(S_y))
+        assert not np.allclose(np.asarray(Sy_out), Sy_wrong, rtol=1e-6)
+
+
 class TestNemoSlopeShapiro:
     """``GMRediConfig.nemo_slope_shapiro`` = NEMO ldfslp horizontal Shapiro filter.
 
@@ -1354,8 +1481,13 @@ class TestNemoIsoLapOperator:
         act = ((mask[:, :, jnp.newaxis] > 0.5)
                & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
                ).astype(T.dtype)
+        # The dispatcher NEGATES the mode-b producer slopes into NEMO's
+        # ldfslp sign convention (2026-07-17 winter ttrd_ldf certificate —
+        # see the mode-b branch comment in gm_redi_tracer_tendency_latlon);
+        # feed the direct call the same negated slopes.  (This test was
+        # broken on main since the negation landed; fixed with #1226.)
         dT_direct = nemo_iso_lap_tracer_tendency_latlon_cgrid(
-            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jac_d, grid,
+            T, -S_x, -S_y, mask, u_mask, v_mask, z_coord, jac_d, grid,
             cfg_n.kappa_Redi, act)
         assert jnp.allclose(dT, dT_direct, rtol=1e-12, atol=1e-30)
 
@@ -1688,3 +1820,368 @@ class TestMSCStabilize:
         b0 = self._call(a0)
         on0 = self._call(a0, msc_stabilize=True, dt=3600.0)
         assert jnp.allclose(b0, on0, rtol=1e-10, atol=1e-30)
+
+
+class TestK33NemoNativeA33:
+    """#1226: the nemo_native K33 is NEMO's traldf_iso_a33 ah_wslp2 — the
+    mask-normalized 4-point ahtu/ahtv w-average times the SAME wslpi/wslpj
+    the explicit operator differences.  A K33 built from a different slope
+    discretization under-covers the dropped diagonal and the net vertical
+    diffusivity goes negative — the kappa-scaled DINO tracer runaway.
+    """
+
+    def _cfg_native(self, cfg):
+        return cfg._replace(
+            slope_scheme="nemo_iso_lap", slope_positions="nemo_native",
+            slope_limit="nemo_cap", implicit_K33=True, kappa_GM=0.0)
+
+    def test_homogeneous_tracer_rest_on_staircase(self):
+        """Homogeneous T,S on a STAIRCASE bathymetry: slopes are zero, so the
+        explicit tendency AND the implicit K33 must both be exactly zero —
+        the #1226 instrument-(a) rest gate."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        # staircase: shoal the eastern third by 2 levels
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        T0 = jnp.full_like(T, 10.0)
+        S0 = jnp.full_like(S, 35.0)
+        dT, dS = gm_redi_tracer_tendency_latlon(
+            T0, S0, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert float(jnp.max(jnp.abs(dT))) == 0.0
+        assert float(jnp.max(jnp.abs(dS))) == 0.0
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        K33 = compute_isoneutral_K33_latlon(
+            T0, S0, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert K33.shape == (n_lat, n_lon, nlev - 1)
+        assert float(jnp.max(jnp.abs(K33))) == 0.0
+
+    def test_interior_matches_kappa_slope_square(self):
+        """Flat bottom, uniform kappa, away from walls: ah_wslp2 reduces to
+        kappa*(wslpi^2+wslpj^2) — the pre-#1226 formula is the interior
+        limit of the a33 transcription (regression anchor)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_n = self._cfg_native(cfg)
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon, compute_nemo_native_slopes,
+            gm_redi_density_and_jacobian)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        ref = (cfg_n.kappa_Redi * (wi ** 2 + wj ** 2))[:, :, 1:]
+        # interior cells only (2 rows/cols from any wall)
+        d = jnp.abs(K33 - ref)[2:-2, 2:-2, :]
+        r = jnp.abs(ref)[2:-2, 2:-2, :]
+        assert float(jnp.max(d)) <= 1e-12 * max(float(jnp.max(r)), 1e-30), (
+            f"interior a33 != kappa*S^2: max|d|={float(jnp.max(d)):.3e} "
+            f"vs max|ref|={float(jnp.max(r)):.3e}")
+
+    def test_k33_finite_nonnegative_on_staircase(self):
+        """Staircase walls: the mask-normalized w-kappa stays finite and
+        K33 >= 0 everywhere (zero where the w-point is dry)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        assert bool(jnp.all(jnp.isfinite(K33)))
+        assert float(jnp.min(K33)) >= 0.0
+        # sub-seafloor interfaces of the shoaled columns carry ZERO K33
+        # (interface m sits atop cell m+1; cells nlev-2, nlev-1 are dry there)
+        shoal = K33[:, 2 * n_lon // 3:, nlev - 3:]
+        assert float(jnp.max(jnp.abs(shoal))) == 0.0
+
+    def test_a33_stencil_nonuniform_kappa_staircase(self):
+        """Level-pairing + kappa-placement gate (codex r1 #5): with a kappa
+        field varying in BOTH row and depth and a staircase with partial-wet
+        stencils, K33 must equal the direct NEMO-index a33 formula
+        (faces (k-1,k), masked-kappa sum / wet count, wmask(k) factor) at
+        every interface.  A k/k+1 pairing error or an unmasked kappa sum
+        shifts this everywhere the kappa profile varies."""
+        import numpy as np
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        cfg_n = self._cfg_native(cfg)
+        dz = jnp.asarray(z_coord.dz_ref)
+        H_stair = jnp.asarray(H_bathy).at[:, 2 * n_lon // 3:].set(
+            float(jnp.sum(dz[:-2])))
+        # kappa varying in row AND depth (3-D center field)
+        kap = (1000.0
+               * (1.0 + 0.3 * jnp.arange(n_lat)[:, None, None] / n_lat)
+               * (1.0 + 0.5 * jnp.arange(nlev)[None, None, :] / nlev)
+               * jnp.ones((n_lat, n_lon, nlev)))
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon, compute_nemo_native_slopes,
+            gm_redi_density_and_jacobian, nemo_iso_face_masks)
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_stair, grid, z_coord, cfg_n,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            kappa_redi_override=kap)
+        # ---- direct NEMO-index reference ----
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_stair, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(dz) - dz
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_stair[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        um3, vm3, wm3 = (np.asarray(a) for a in
+                         nemo_iso_face_masks(u_mask, v_mask, act))
+        kapn = np.asarray(kap)
+        win, wjn = np.asarray(wi), np.asarray(wj)
+        ref = np.zeros((n_lat, n_lon, nlev - 1))
+        for j in range(n_lat):
+            for i in range(n_lon):
+                im1 = (i - 1) % n_lon   # roll semantics of the operator
+                jm1 = (j - 1) % n_lat
+                for m in range(nlev - 1):
+                    k = m + 1           # w-point at the TOP of cell k
+                    cu = (um3[j, i, k] + um3[j, im1, k]
+                          + um3[j, i, k - 1] + um3[j, im1, k - 1])
+                    su = (kapn[j, i, k] * um3[j, i, k]
+                          + kapn[j, im1, k] * um3[j, im1, k]
+                          + kapn[j, i, k - 1] * um3[j, i, k - 1]
+                          + kapn[j, im1, k - 1] * um3[j, im1, k - 1])
+                    cv = (vm3[j, i, k] + vm3[jm1, i, k]
+                          + vm3[j, i, k - 1] + vm3[jm1, i, k - 1])
+                    sv = (kapn[j, i, k] * vm3[j, i, k]
+                          + kapn[jm1, i, k] * vm3[jm1, i, k]
+                          + kapn[j, i, k - 1] * vm3[j, i, k - 1]
+                          + kapn[jm1, i, k - 1] * vm3[jm1, i, k - 1])
+                    zahu = su * wm3[j, i, k] / max(cu, 1.0)
+                    zahv = sv * wm3[j, i, k] / max(cv, 1.0)
+                    ref[j, i, m] = (zahu * win[j, i, k] ** 2
+                                    + zahv * wjn[j, i, k] ** 2)
+        np.testing.assert_allclose(
+            np.asarray(K33), ref, rtol=1e-12, atol=1e-20,
+            err_msg="K33 != direct traldf_iso_a33 NEMO-index reference")
+
+    def test_msc_akz_split_identities(self):
+        """ln_traldf_msc=T (the DINO namelist): the a33 split must satisfy
+        0 <= akz <= ah_wslp2 + dt-independent identity checks — the explicit
+        remainder (ah_wslp2 - akz) is what scheme.h90 puts back in the flux,
+        so implicit(akz) + explicit remainder == full diagonal by
+        construction, and small dt drives akz -> 0 (all-explicit regime)."""
+        import numpy as np
+        from legoesm.grids.latlon import ensure_geometry
+        from legoesm.ocean.eos import make_eos_fn
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_nemo_native_slopes, gm_redi_density_and_jacobian,
+            nemo_iso_a33, nemo_iso_face_masks)
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_n = self._cfg_native(cfg)
+        rho_d, _ = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord, eos="linear", mask=mask)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        _, _, wi, wj = compute_nemo_native_slopes(
+            rho_d, T, S, mask, u_mask, v_mask, z_coord, grid, cfg_n,
+            make_eos_fn("linear", None), active_3d=act)
+        um3, vm3, wm3 = nemo_iso_face_masks(u_mask, v_mask, act)
+        aht = jnp.broadcast_to(jnp.asarray(2000.0, T.dtype), T.shape)
+        geom = ensure_geometry(grid)
+        e1u_c, e2v_c = geom.dx_u[:, 1:], geom.dy_v[1:, :]
+        e3t = z_coord.dz_ref[None, None, :] * jnp.ones_like(T)
+        e3w = 0.5 * (jnp.roll(e3t, +1, 2) + e3t)
+        e3w = e3w.at[:, :, 0].set(e3t[:, :, 0])
+        ahw_f, akz_f = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=None, msc=False)
+        assert bool(jnp.all(akz_f == ahw_f))          # msc=F: full implicit
+        ahw, akz = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=2700.0, msc=True)
+        np.testing.assert_array_equal(np.asarray(ahw), np.asarray(ahw_f))
+        assert float(jnp.min(akz)) >= 0.0
+        # akz <= zcoef0*e3w2/dt with the -1/2 cap => akz < ah_wslp2 + akz_h*e3w2
+        # (weak identity); the STRONG stability property: explicit remainder
+        # obeys the half-CFL bound  dt*(ah_wslp2 - akz)/e3w2 <= 1/2 + dt*akz_h
+        # remainder never exceeds the full diagonal (akz >= 0), and the cap
+        # is monotone in dt: a larger dt sends MORE of the diagonal implicit.
+        rem = np.asarray(ahw - akz)
+        assert np.all(rem <= np.asarray(ahw) + 1e-12)
+        _, akz_2x = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=5400.0, msc=True)
+        assert np.all(np.asarray(akz_2x) >= np.asarray(akz) - 1e-15)
+        # small dt -> cap not reached -> akz == 0 everywhere
+        _, akz_small = nemo_iso_a33(
+            aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
+            dt=1e-3, msc=True)
+        assert float(jnp.max(akz_small)) == 0.0
+        # msc=True without dt raises loudly
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="requires dt"):
+            nemo_iso_a33(aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c,
+                         e3w ** 2, dt=None, msc=True)
+
+    def test_msc_k33_getter_returns_akz_and_guard(self):
+        """Composition: with msc_stabilize=True the K33 getter returns the
+        CAPPED akz (< the msc=False full diagonal wherever the cap binds),
+        and msc without implicit_K33 is rejected loudly at dispatch."""
+        import numpy as np
+        import pytest as _pytest
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            compute_isoneutral_K33_latlon)
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_full = self._cfg_native(cfg)
+        cfg_msc = cfg_full._replace(msc_stabilize=True)
+        K_full = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_full,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask)
+        K_msc = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_msc,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            dt=2700.0)
+        assert np.all(np.asarray(K_msc) <= np.asarray(K_full) + 1e-15)
+        assert float(jnp.min(K_msc)) >= 0.0
+        # msc without implicit_K33 -> loud dispatch error
+        cfg_bad = cfg_msc._replace(implicit_K33=False)
+        with _pytest.raises(ValueError, match="requires implicit_K33"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                dt=2700.0)
+        # ... and msc on the mode_b placement is rejected too (the flag
+        # would otherwise be silently ignored — guard covers ALL branches).
+        cfg_bad2 = cfg_msc._replace(slope_positions="mode_b")
+        with _pytest.raises(ValueError, match="nemo_native"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad2,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                dt=2700.0)
+
+    def test_msc_guard_covers_all_schemes(self):
+        """msc_stabilize on triads/centered is rejected at fn entry (codex
+        r7) — no scheme branch silently ignores the flag."""
+        import pytest as _pytest
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        for scheme in ("triads", "centered"):
+            cfg_bad = cfg._replace(
+                slope_scheme=scheme, msc_stabilize=True, kappa_GM=0.0)
+            with _pytest.raises(ValueError, match="nemo_iso_lap"):
+                gm_redi_tracer_tendency_latlon(
+                    T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                    eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+                    dt=2700.0)
+
+
+class TestNemoNativeActive3dBottomTie:
+    """#1226 (ldf_slp stage audit, 2026-07-28): ``_nemo_native_active_3d``
+    must use ``z_coord.is_active`` (an EXACT per-column integer bottom-level
+    compare) rather than a float ``top-depth < H_bathy`` tie.
+
+    Root-cause reproduction: on the DINO Y5 RUN_GDB twin, a column whose
+    bathymetry lands almost exactly on the deepest level's top interface had
+    ``H_bathy`` (bridge's per-column ``cumsum(e3t_0)``) and
+    ``cumsum(z_coord.dz_ref)`` (the GLOBAL representative ladder) disagree by
+    a few ULPs, so the float compare ``z_top[k] < H_bathy`` spuriously
+    included the dry deepest level as ACTIVE.  That fed a wrong ``vmask3``/
+    ``zgrv`` into ``compute_nemo_native_slopes``, degrading its w-point
+    horizontal-density-gradient stage (``zaj``) from corr 1.000000 to 0.9806
+    at that level only — the first deviating stage in the wslpi/wslpj/uslp/
+    vslp/ldf_eiv-aeiu five-row debt.  This test builds the SAME shape of tie
+    directly (a two-column domain where column 0's ``H_bathy`` sits a few
+    ULPs BELOW the reference cumulative depth at the deepest level, exactly
+    like the measured case) and asserts the deepest level is masked DRY.
+    """
+
+    def test_bottom_level_ulp_tie_masks_dry(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_native_active_3d,
+        )
+        from legoesm.ocean.vertical import (
+            create_z_star_from_thicknesses, create_full_step_coordinate,
+        )
+        dz = jnp.asarray([100.0, 100.0, 100.0, 100.0], dtype=jnp.float64)
+        z_coord = create_z_star_from_thicknesses(dz)
+        # Column 0: bottom lands EXACTLY at the top of the deepest level (a
+        # dry level 3) -- H_bathy computed as an independently-rounded twin
+        # of cumsum(dz)[:3] that differs by a few ULPs (the measured
+        # H_bathy=3454.796630859375 vs z_top[34]=3454.79638671875 case,
+        # reproduced at this grid's scale). Column 1: fully wet control.
+        z_top3 = float(jnp.cumsum(dz)[2])   # top-of-level-3 interface = 300.0
+        H_bathy = jnp.asarray(
+            [[np.nextafter(z_top3, np.inf)], [400.0]], dtype=jnp.float64)
+        mask = jnp.ones((2, 1), dtype=jnp.float64)
+        # is_active path: bottom_level from an exact 3-D wet-count, matching
+        # NEMO's own tmask column sum (this is what the fidelity bridge
+        # actually threads through, not the float construction below).
+        bottom_level = jnp.asarray([[2], [3]], dtype=jnp.int32)  # (n_lat, n_lon)
+        z_coord_pc = create_full_step_coordinate(z_coord, bottom_level=bottom_level)
+
+        act = _nemo_native_active_3d(mask, z_coord_pc, H_bathy, jnp.float64)
+        assert act.shape == (2, 1, 4)
+        # Column 0's deepest level (k=3) MUST be dry -- the exact is_active
+        # compare, not the float tie.
+        assert float(act[0, 0, 3]) == 0.0
+        assert float(act[0, 0, 2]) == 1.0
+        # Column 1 fully wet.
+        assert float(act[1, 0, 3]) == 1.0
+
+        # Ground truth this fails under the OLD (pre-fix) float construction
+        # -- proves the bug this test guards against is real, not vacuous.
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act_old = (
+            (mask[:, :, jnp.newaxis] > 0.5)
+            & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+        ).astype(jnp.float64)
+        assert float(act_old[0, 0, 3]) == 1.0, (
+            "reproduction is vacuous: the OLD float-tie construction must "
+            "mis-mask this column's deepest level ACTIVE for the bug to be "
+            "real (H_bathy was built as the next float above z_top[3])")
+
+    def test_no_is_active_falls_back_to_float_construction(self):
+        """A plain z-star (no partial cells) has no ``is_active`` -- the
+        float fallback must still run (not raise) and match the legacy
+        formula exactly, so byte-identical byte-for-byte on every existing
+        pure-z* caller (GYRE-flat, non-full-step DINO, etc.)."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_native_active_3d,
+        )
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        dz = jnp.asarray([100.0, 100.0, 100.0, 100.0], dtype=jnp.float64)
+        z_coord = create_z_star_from_thicknesses(dz)
+        assert getattr(z_coord, "is_active", None) is None
+        mask = jnp.ones((2, 1), dtype=jnp.float64)
+        H_bathy = jnp.asarray([[400.0], [200.0]], dtype=jnp.float64)
+        act = _nemo_native_active_3d(mask, z_coord, H_bathy, jnp.float64)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        expected = (
+            (mask[:, :, jnp.newaxis] > 0.5)
+            & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
+        ).astype(jnp.float64)
+        assert jnp.array_equal(act, expected)

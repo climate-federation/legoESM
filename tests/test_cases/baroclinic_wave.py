@@ -764,3 +764,151 @@ def baroclinic_wave_init_spectral(
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
         tracers=tracers,
     )
+
+
+def build_sharded_baroclinic_wave_state_mpas(
+    mesh,
+    sigma_coord,
+    dev_config,
+    perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
+):
+    """Partition-local MPAS baroclinic-wave state (#1100 MPAS twin).
+
+    The multi-device invariant of ``build_sharded_held_suarez_state_atm_latlon``
+    for the voronoi lane: every state leaf is created with
+    ``jax.make_array_from_callback``, whose callback runs only for the
+    cell/edge ranges owned by THIS process's addressable devices — no
+    per-process global state build, no global ``device_put``.  The mesh
+    itself remains global on every process (its partition-local
+    construction through the SFC machinery is the OPEN remainder of
+    #1100 — connectivity, not analytic IC).
+
+    Value-identical per shard to
+    ``shard_pytree(baroclinic_wave_init_mpas(mesh, sigma, ...), dev_config)``:
+    every field is ELEMENTWISE per cell/edge (fixed-iteration bisection,
+    analytic wind/temperature/perturbation, saturation taper), so a row
+    slice of the global computation equals the same computation on the row
+    slice up to shape-specialized codegen.  The REQUIRED contract is a
+    few-ULP match (XLA does not guarantee exact bits across differently
+    shaped compilations); on the pinned CPU stack the match is measured
+    EXACT — both gated by
+    ``tests/parallel/test_mpas_partitionlocal_build.py``.  "No global
+    build" applies to the O(nCells*nlev) STATE leaves; O(nEntities) 1-D
+    temporaries (``cos(angleEdge)``) are still evaluated in full, like the
+    global mesh itself.
+
+    Requires ``reorder_voronoi_for_sharding`` padding (nCells and nEdges
+    divisible by the device count) — the same precondition
+    ``shard_pytree`` has.  ``dev_config.face_sharding is None`` (single
+    device) falls back to the global builder unchanged.
+    """
+    import jax
+
+    from legoesm.core.state import MPASHydrostaticState
+
+    if dev_config.face_sharding is None:
+        return baroclinic_wave_init_mpas(
+            mesh, sigma_coord,
+            perturbed=perturbed, moist=moist, rh_init=rh_init)
+
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    nlev = sigma_coord.n_levels
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+
+    lat_c = mesh.latCell    # (nCells,)
+    lat_e = mesh.latEdge    # (nEdges,)
+    lon_e = mesh.lonEdge    # (nEdges,)
+    cos_angle = jnp.cos(mesh.angleEdge)  # (nEdges,)
+
+    shard = dev_config.face_sharding     # P("device") on axis 0
+
+    def _levels_block(lat_blk, fn):
+        """Stack per-level elementwise results for an entity slice.
+
+        EXACT per-element expressions of baroclinic_wave_init_mpas's level
+        loop (zeros + .at[:, k].set) so slices stay bit-identical."""
+        n_loc = lat_blk.shape[0]
+        out = jnp.zeros((n_loc, nlev))
+        for k in range(nlev):
+            out = out.at[:, k].set(fn(float(sigma_full[k]), lat_blk))
+        return out
+
+    def _T_cb(idx):
+        lat_blk = lat_c[idx[0]]
+
+        def _T_level(sig_k, latb):
+            p_t = jnp.full(latb.shape, sig_k * P0)
+            z = find_z_for_pressure(p_t, latb)
+            _, T_k = evaluate_pressure_temperature(z, latb)
+            return T_k
+
+        return _levels_block(lat_blk, _T_level)
+
+    def _u_cb(idx):
+        lat_blk = lat_e[idx[0]]
+        lon_blk = lon_e[idx[0]]
+        cos_blk = cos_angle[idx[0]]
+
+        def _u_level(sig_k, latb):
+            p_t = jnp.full(latb.shape, sig_k * P0)
+            z = find_z_for_pressure(p_t, latb)
+            _, T_e = evaluate_pressure_temperature(z, latb)
+            u_zonal = compute_zonal_wind(z, latb, T_e)
+            if perturbed:
+                u_zonal = u_zonal + exponential_perturbation(latb, lon_blk, z)
+            return u_zonal * cos_blk
+
+        return _levels_block(lat_blk, _u_level)
+
+    def _ps_cb(idx):
+        return jnp.full(lat_c[idx[0]].shape, P0)
+
+    def _phis_cb(idx):
+        return jnp.zeros(lat_c[idx[0]].shape)
+
+    def _make(gshape, cb):
+        return jax.make_array_from_callback(gshape, shard, cb)
+
+    T_arr = _make((nCells, nlev), _T_cb)
+    u_arr = _make((nEdges, nlev), _u_cb)
+    ps_arr = _make((nCells,), _ps_cb)
+    phis_arr = _make((nCells,), _phis_cb)
+
+    tracers = None
+    if moist:
+        from legoesm.thermo import saturation_mixing_ratio
+
+        def _qv_cb(idx):
+            # Same expression as the global builder, on the cell slice:
+            # q_v = min(rh · q_sat(T, p_s·σ) · σ², q_sat).  Recomputes the
+            # T block for this slice (elementwise -> bit-identical).
+            T_blk = _T_cb(idx)
+            ps_blk = _ps_cb(idx)
+            p_full = ps_blk[:, None] * sigma_full[None, :]
+            q_sat = saturation_mixing_ratio(T_blk, p_full)
+            return jnp.minimum(
+                rh_init * q_sat * sigma_full[None, :] ** 2, q_sat)
+
+        def _qzero_cb(idx):
+            return jnp.zeros((lat_c[idx[0]].shape[0], nlev))
+
+        tracers = {
+            "q_v": Field(data=_make((nCells, nlev), _qv_cb), name="q_v",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_c": Field(data=_make((nCells, nlev), _qzero_cb), name="q_c",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_r": Field(data=_make((nCells, nlev), _qzero_cb), name="q_r",
+                         dims=("nCells", "level"), units="kg/kg"),
+        }
+
+    return MPASHydrostaticState(
+        u=Field(data=u_arr, name="u", dims=("nEdges", "level"), units="m/s"),
+        T=Field(data=T_arr, name="T", dims=("nCells", "level"), units="K"),
+        p_s=Field(data=ps_arr, name="p_s", dims=("nCells",), units="Pa"),
+        phis=Field(data=phis_arr, name="phis", dims=("nCells",),
+                   units="m^2/s^2"),
+        tracers=tracers,
+    )

@@ -442,3 +442,51 @@ def test_start_day_convention_disambiguation(tmp_path):
     # A non-matching day still means epoch.
     ctx = d._prepare_run_context(288, 2.0, restore_carry=False)
     assert ctx["START_DAY"] == 2.0
+
+
+def _build_sigma_mpas_driver(tmpdir: str, days: float,
+                             tropopause_refine: float = 1.0) -> ModelDriver:
+    """Same MPAS driver on the SIGMA coordinate, refinement selectable."""
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
+                        nlev=MPAS_NLEV, vertical_coord="sigma",
+                        tropopause_refine=tropopause_refine),
+        dycore=DycoreConfig(discretization="mpas", dt=DT),
+        output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
+        days=days, start_day=0.0,
+        dataset="analytical", radiation="gray",
+        convection="none", turbulence="tke", precision="fp64",
+        distributed=False,
+    )
+    d = ModelDriver(cfg, output_dir=tmpdir)
+    d.setup()
+    return d
+
+
+def test_mpas_restart_rejects_a_different_vertical_grid(tmp_path):
+    """A checkpoint written on uniform sigma must NOT silently restart on a
+    tropopause-refined grid of the SAME nlev.
+
+    ``grid.tropopause_refine`` redistributes levels at FIXED nlev, so every
+    array shape is identical and the existing shape guards cannot see the
+    difference — the profiles would just be reinterpreted at the wrong
+    pressures (a silent physics error, never a crash).  ``meta_vgrid`` (the (A, B) half-level pair)
+    in the checkpoint is what closes that hole.
+    """
+    out = str(tmp_path / "uniform")
+    d_uni = _build_sigma_mpas_driver(out, TWO_STEPS_DAYS)
+    assert d_uni.run() == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(out, "checkpoint_day_*.npz")))[-1]
+    assert "meta_vgrid" in np.load(ckpt).files
+
+    # Same nlev, different level POSITIONS -> must raise, not reinterpret.
+    d_ref = _build_sigma_mpas_driver(str(tmp_path / "refined"),
+                                     TWO_STEPS_DAYS, tropopause_refine=3.0)
+    assert d_ref.state.T.data.shape == d_uni.state.T.data.shape
+    with pytest.raises(ValueError, match="DIFFERENT vertical grid"):
+        d_ref.load_checkpoint(ckpt)
+
+    # The matching grid still loads (the guard is not just "always raise").
+    d_same = _build_sigma_mpas_driver(str(tmp_path / "same"), TWO_STEPS_DAYS)
+    step, day = d_same.load_checkpoint(ckpt)
+    assert step > 0 and day > 0.0

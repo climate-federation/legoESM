@@ -20,18 +20,49 @@ from __future__ import annotations
 import pathlib
 
 
-def legoesm_root_paths() -> list[pathlib.Path]:
+def legoesm_root_paths(repo_root: pathlib.Path | None = None,
+                       ) -> list[pathlib.Path]:
     """Every filesystem root of the ``legoesm`` namespace package.
 
     One entry today (``.../src/legoesm``); several once the carve lands
     (``.../src/legoesm`` + ``.../packages/<member>/src/legoesm``).
+
+    ``repo_root`` makes this WORKTREE-TOLERANT (#1389).  ``legoesm.__path__``
+    reports the paths of the *editable install*, which point at the canonical
+    checkout — so a test running from a ``git worktree`` got roots outside its
+    own tree and blew up in ``Path.relative_to`` with a bare ``ValueError``
+    naming a foreign repo path.  Pass the caller's repo root and every root is
+    remapped to the equivalent directory inside it when one exists; roots with
+    no counterpart there are returned unchanged.
     """
     import legoesm
 
-    return [pathlib.Path(p) for p in legoesm.__path__]
+    roots = [pathlib.Path(p).resolve() for p in legoesm.__path__]
+    if repo_root is None:
+        return roots
+    repo_root = pathlib.Path(repo_root).resolve()
+    out: list[pathlib.Path] = []
+    for root in roots:
+        if root.is_relative_to(repo_root):
+            out.append(root)
+            continue
+        # `.../src/legoesm` or `.../packages/<member>/legoesm`: try the
+        # shortest tail that resolves inside this checkout.
+        for depth in (2, 3, 1):
+            if len(root.parts) < depth:
+                continue
+            candidate = repo_root.joinpath(*root.parts[-depth:])
+            if candidate.is_dir():
+                out.append(candidate)
+                break
+        else:
+            out.append(root)
+    return out
 
 
-def legoesm_source_path(rel: str | pathlib.PurePath) -> pathlib.Path:
+def legoesm_source_path(rel: str | pathlib.PurePath,
+                        repo_root: pathlib.Path | None = None,
+                        ) -> pathlib.Path:
     """Resolve a path *under* the ``legoesm`` package across all namespace roots.
 
     ``rel`` is the path beneath ``legoesm/`` — e.g. ``"runtime/backend.py"`` or
@@ -45,13 +76,14 @@ def legoesm_source_path(rel: str | pathlib.PurePath) -> pathlib.Path:
     elif parts[:1] == ("legoesm",):
         parts = parts[1:]
     sub = pathlib.Path(*parts)
-    for root in legoesm_root_paths():
+    roots = legoesm_root_paths(repo_root)
+    for root in roots:
         candidate = root / sub
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
         f"{rel!r} not found under any legoesm namespace root: "
-        f"{[str(p) for p in legoesm_root_paths()]}"
+        f"{[str(p) for p in roots]}"
     )
 
 

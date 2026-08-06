@@ -22,7 +22,14 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 ## Operating Mode
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
-- **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict. Exempt: trivial/mechanical edits (typo, comment, rename, doc/markdown/`.tex`-only, single config value).
+- **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict.
+  **If the review SUBAGENT dies (spend limit, API error), that is NOT a review
+  waiver — the codex CLI is a separate binary with separate credentials and is
+  usually still reachable: `codex exec --sandbox read-only -C <repo> "<prompt>"`
+  (`which codex`, `~/.codex/auth.json`). Try the CLI directly before ever
+  proceeding unreviewed, and if BOTH are unavailable say "UNREVIEWED" in every
+  status until one succeeds.** 2026-07-26: a subagent hit a monthly spend limit
+  and many iterations ran unreviewed while the CLI worked fine the whole time. Exempt: trivial/mechanical edits (typo, comment, rename, doc/markdown/`.tex`-only, single config value).
 - **Pre-impl search mandatory**: before new fn/helper/class/operator/diagnostic/init/load/loss/numerical routine, grep `src/legoesm/` for similar names/docstrings/formulas in `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`. State searched+found. Similar exists → extend/factor.
 - **Shared utilities — never re-derive** (prod, scripts, validators, plotters, tests, notebooks, probes):
   - Constants: `from legoesm import constants` → `T_freeze`, `R_d`, `c_pd`, `L_v`, `R_v`, `epsilon`, `g`, `p_ref`, `kappa`, `sigma_sb`, `T_freeze_ocean`. No literals `273.15`/`287.0`/`1004.64`/`2.501e6`/`461.51`/`0.622`/`9.80616`/`6.371e6`/`7.292e-5`.
@@ -49,6 +56,328 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
   - Plotters NOT exempt. Use model helpers for q_sat, RH, ρ, virtual T, MSE.
 - No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
 - **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
+
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If my premise is wrong — if I've misdiagnosed the bug, or the thing I'm asking
+for won't work — say so before writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate
+between them, then test. Do not go straight to a fix. Do not agree with a cause
+I suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here.
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code I didn't ask about. Long unbroken generations drift into invention — prefer
+a small verified diff over a large plausible one.
+
+## Attribution Gates — MANDATORY, each from a real 2026-07 failure
+Model is near operational. Every rule below is mechanical: satisfy it or state
+explicitly that you did not. "I was careful" is not compliance.
+
+- **PROVE THE PATH EXECUTES before blaming a line.** Naming a file:line as the
+  cause requires showing that line runs in the configuration under test: print
+  the ENCLOSING FUNCTION (`awk` the nearest `def` above it) and confirm the
+  active lane/driver calls it. FAILURE: blamed the positivity clamps at
+  `model_driver.py:10923` for the century's water source; they live in
+  `_run_per_step` while the century runs `_run_mpas`, which contains no
+  moisture clamp at all. A fix was nearly written for a lane the run never
+  touches. Same class as reading an entry point instead of the full path.
+- **REUSING A REFERENCE IMPL MEANS PORTING ITS EXCLUSIONS, not just its
+  formula.** State which of the reference's guards/scope conditions you kept
+  and which you dropped, with a reason for each. FAILURE: copied
+  `spectral_les_moist.conserving_positive` but not its `n_water` split, so the
+  column-conserving borrow was applied to number concentrations
+  (`N_c`/`N_i`/`N_r`) — unphysical, and it fed M2005 deposition (~N_i^(2/3)),
+  producing a fake "accelerating dry bias" that was reported before being
+  caught.
+- **A TEST THAT INSPECTS SOURCE MUST NAME THE SYMBOL THAT RUNS, and must be
+  shown to FAIL when the feature is removed.** An `inspect.getsource(X)`
+  assertion where X is a delegating wrapper passes while proving nothing.
+  FAILURE: asserted against `MPASPrimitiveEquationModel.step`; the floors are
+  in `_step_jit`.
+- **TOOL STATUS IS NOT EVIDENCE — read the output tail.** An exit code without
+  the tool's own success line (pytest's `N passed`, "COMPLETED in Xs") is
+  UNVERIFIED; OOM kills and timeouts can surface as success. FAILURE: reported
+  a regression suite green on exit-0 that was actually `Out Of Memory` mid-run.
+  Quote the decisive line when claiming a suite passed.
+- **EVERY BASELINE/ALLOW-LIST REASON STRING IS A CLAIM — verify it in code
+  before writing it.** A plausible-sounding reason permanently hides a real
+  defect. FAILURE: classified `convective_buoyancy_death_memory` as "carried in
+  SegmentCarry" (it is not — the leaf `BechtoldConfig.buoyancy_death_memory`
+  exists and nothing maps to it), asserted an `SBMConfig.precip_efficiency`
+  leaf that does not exist, and credited `micro_substeps` to a consumer that
+  reads `args.`, not the config field.
+- **RATE / TENDENCY / SKILL COMPARISONS: identical windows on BOTH sides, and
+  print the window next to the number.** Differing spans is a confound, not a
+  result. FAILURE: TCW over days 190-530 vs CMOR year 1 gave "+38.7 kg/m2/yr";
+  matched windows gave +13.4. Extends the existing controlled-comparison rule
+  to derived rates.
+- **A DIAGNOSTIC'S PRINTED PRECISION BOUNDS THE RATE YOU CAN CLAIM.** Log CWV
+  at 0.1 kg/m2 over 8 days resolves only ~±4.6 kg/m2/yr — do not report a
+  trend inside one quantum. Prefer fp64 from model state (checkpoints) over
+  parsed log lines. Same class as the throughput-quantization error.
+- **`JAX_ENABLE_X64=1` on any numerics/conservation test.** An fp32 mismatch is
+  NOT a failure until re-run with x64; and a *new* failure is not yours until
+  reproduced with your change stashed. Do both before reporting a regression.
+- **RUN-TARGET PARAMS ARE ABSOLUTE (`TARGET_DAYS`), and "latest checkpoint"
+  MOVES.** For a controlled pair, COPY the pinned checkpoint into each arm dir;
+  never use a `PREV_CKPT_DIR`-style newest-wins pointer while another run is
+  advancing. FAILURE (twice): arms exited instantly at "Already at/past
+  target".
+- **A LAUNCHER FLAG THAT SWITCHES ONE FORCING CHANNEL MUST SWITCH ALL OF
+  THEM.** Verify the resolved paths in the run log, not the flag you passed.
+  FAILURE: `CENTURY_DECK=1` set era-correct ozone+volcanic but left 1979-2016
+  SST.
+- **PROSE IS A POINTER, NEVER A CITABLE FACT.** A code comment, docstring,
+  `AMIP.md`/`docs/` entry or "Known issue" that names a limitation, a guard, or
+  a missing feature MUST be re-verified in the CURRENT code at the point of use
+  before it is repeated as a finding — this repo routinely fixes things without
+  updating its prose. When a comment names the module that imposes a guard,
+  OPEN THAT MODULE. FAILURES (2026-07-30, three in one day): quoted the
+  `_run_mpas` "turbulent surface fluxes are intentionally NOT applied" comment
+  and `AMIP.md` Known #3 to claim MPAS has no turbulence — the MPAS turbulence
+  path exists (`turbulence/integration.py`, Perot edge->cell) and the run
+  resolves `turbulence=louis` + `surface_bulk_scheme=coare3`; and doubted a
+  cloud_fraction comment that was exactly right.
+- **THE FIRST GUARD YOU FIND IS NOT THE ONLY GUARD — follow the value to its
+  CONSUMER before declaring it unclamped/unchecked.** FAILURE: reported "no
+  upper bound on r_eff" from `rrtmgp.py`'s `clip(x, 1e-6, None)`; the real
+  clamp to the lookup-table range is one call deeper in
+  `rrtmgp/optics/cloud_optics.py`. Same class as blaming a line without proving
+  its enclosing function runs.
+- **A GLOBAL STATISTIC ON A NON-UNIFORM GRID NEEDS AREA WEIGHTS.** Never
+  `np.mean(field)` for a global mean on lat-lon (or any stretched grid) — use
+  `cos(lat)` or the model's `areacella`. FAILURE: reported "+17 hPa of dry mass
+  created" from an unweighted `p_s` mean; the AREA-WEIGHTED mass was invariant
+  at 983.493 hPa to 6 digits, i.e. the defect did not exist. Habits carried
+  from the quasi-uniform MPAS/SCVT mesh are INVALID on lat-lon.
+- **A PROPOSED MECHANISM MUST SURVIVE A SCALING / PERTURBATION TEST BEFORE IT
+  IS CITED AS THE CAUSE.** If X is claimed to drive Y, change X by a known
+  factor and check Y responds as the mechanism predicts. FAILURE: proposed
+  "damp-to-rest pumps mass convergence" (predicts ~linear in the sponge
+  coefficient); quartering the coefficient slowed growth only 1.5x, refuting
+  it — the fix would have shipped on a false mechanism. Label every uncaught
+  claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
+  buys a code change and a relaunch.
+
+## Compute Discipline — speculation costs GPU-hours, not just credibility
+User, 2026-07-30 (THIRD callout in five days): *"You keep making very
+speculative assumptions... be much more precise so we do not waste time with
+useless simulations."* The gates above stop wrong CLAIMS; these stop wrong
+RUNS. A simulation launched on a hypothesis that no measurement can refute is
+pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
+
+- **NO COMPUTE ON AN UNFALSIFIABLE HYPOTHESIS. Before submitting ANY job
+  costing >1 GPU-hour, write down three things: (a) the exact number the run
+  will produce, (b) the value that CONFIRMS and the value that REFUTES, (c)
+  why a cheaper offline/CPU test on an EXISTING checkpoint cannot answer it.
+  Cannot fill all three -> DO NOT SUBMIT; run the cheap test first.** Nearly
+  every question asked so far (fluxes, tendencies, radii, momentum budgets,
+  cloud optics) was answerable offline from a saved checkpoint in minutes.
+  FAILURE 2026-07-30: submitted two 5-YEAR full-physics runs (8 h walltime
+  each) while the model had a KNOWN unfixed +56 W/m2 albedo error and no
+  low-level circulation — five simulated years of a broken climate, answering
+  no question that had been asked.
+- **RANK ERRORS BY MAGNITUDE BEFORE CHOOSING WHAT TO WORK ON.** Run the full
+  scorecard FIRST and work the LARGEST term; re-rank after every fix. FAILURE
+  2026-07-30: spent most of a session on the hfls deficit (-40 W/m2) while the
+  dominant error was rsut (+56 W/m2) — and the scorecard naming it was already
+  sitting in the run directory, unread.
+- **ONE VARIABLE PER PRODUCTION RUN.** N simultaneous config changes answer
+  ZERO questions, because no output is attributable to any one of them. A
+  multi-change config is legitimate ONLY as a deliberate new BASELINE that is
+  labelled as such and never compared term-by-term against the old one.
+  FAILURE 2026-07-30: one launch flipped ~8 switches at once.
+- **A LONG RUN ON A MODEL WITH AN UNFIXED DOMINANT ERROR IS WASTE.** Before
+  extending past ~30 simulated days, state the largest outstanding scorecard
+  term and why the run is still worth its GPU-hours. Fix the big term, then
+  extend. Short validation windows (days) are for "does it run and is the new
+  physics behaving"; multi-year windows are for a model that already passes.
+- **NEVER LEAD WITH AN ARITHMETIC COINCIDENCE.** A hand-computed ratio that
+  "matches" an observed ratio is not evidence when the calculation omits
+  factors the code actually applies. State it as arithmetic, or don't state
+  it. FAILURE 2026-07-30: "cover x tau ~ 1.9x matches the 1.9x albedo" ignored
+  the sub-grid inhomogeneity factor the radiation applies to the cloud paths.
+- **PREFER THE INSTRUMENT THAT ALREADY EXISTS.** Before writing a probe, check
+  the run directory for a scorecard/manifest/diagnostic that answers the
+  question, and `scripts/validate/` for a validator. Reading an existing
+  artifact costs seconds; a new probe costs an hour and needs its own controls.
+
+## Diagnosis Discipline — one session, ~10 GPU arms, 5 of them wasted
+2026-08-05/06, FESOM2-match OMIP blowup. Every rule is mechanical and comes
+from a specific failure in that one session. The root cause turned out to be a
+one-line IC defect findable offline in seconds; the arms bought nothing.
+
+- **SANITY-CHECK EVERY PROBE NUMBER AGAINST A PHYSICAL RANGE BEFORE BUILDING
+  ON IT — one line of arithmetic, before the conclusion.** Convert it to a
+  quantity whose plausible span you know and compare. FAILURE: a PGF probe
+  returned 0.02 m/s^2 and I built a whole attribution on it; that value implies
+  a ~14 kg/m^3 density difference between ADJACENT 1-degree cells when the
+  entire ocean spans ~6 kg/m^3. The check takes seconds, the number sat unused
+  for hours, and running it immediately would have exposed the real defect
+  (cells initialised to T=0/S=0) before a single GPU arm.
+
+- **A FAILURE STEP OR LOCATION IS NOT A SIGNATURE UNTIL THE DIAGNOSTIC IS SHOWN
+  TO RESOLVE IT.** State the instrument's resolution and confirm the reported
+  step is not merely its first sample. FAILURE: five one-variable arms all
+  reported "BLOWUP at step 36" and I read that config-invariance as physics.
+  `run_omip` sets `block_size = max(1, diag_every)` and only tests at block
+  boundaries, so 36 was the FIRST LOOK. At `--diag-every 1` the answer was
+  step 1. Corollary: arms run at coarse diagnostic stride prove only "this
+  setting alone does not fix it", NEVER "this setting has no effect".
+
+- **REFUTE WITH STATES, NOT EXIT CODES OR FAILURE STEPS.** Two runs failing at
+  the same step can be failing for different reasons. FAILURE: declared the
+  open North Pole "refuted" because capping did not move the blowup step; the
+  states showed capping HAD removed that mode (|u|max 19.27 -> 0.0137 m/s) and
+  merely uncovered a second, unrelated one at the same step number.
+
+- **A PROBE IS PRODUCTION CODE FOR THE "NEVER INFER AN API" RULE, AND ITS FIRST
+  OUTPUT IS UNTRUSTED.** Read the signature of every function a probe calls,
+  including this repo's own. FAILURE: called
+  `build_runoff_map(lat, lon, mask, area)` when the signature is
+  `(ocean_mask, cell_area, lat_rad, lon_rad)`, so `cell_area` received
+  `deg2rad(lon)` — exactly 0 at lon 0 — and I reported a NaN "conservation
+  defect" in shipped code that did not exist.
+
+- **A PLAUSIBLE-LOOKING VALUE IS MORE DANGEROUS THAN A NaN, IN CODE AND IN
+  TESTS.** A sentinel that is a valid number of the right dtype passes every
+  finite/NaN guard downstream. FAILURE: `_interp_profile_to_z_coord` returned
+  `0.0` for a no-data column; `0.0` is not NaN, so the caller's
+  `where(isnan, fill, x)` never fired and 39032 wet cells entered the model as
+  fresh water at 0 degC. TWO COMMITTED TESTS ASSERTED THAT BEHAVIOUR, one
+  calling it a "documented degenerate fallback" and one commenting "still no
+  NaN leaks" — the exact inversion of the truth. When a degenerate branch must
+  return something, return NaN (or raise) so the guard downstream can see it,
+  and treat any test that asserts a magic sentinel as suspect.
+
+- **BUDGET CLOSURE BEFORE HYPOTHESES.** For any conservation-relevant blowup or
+  drift, run the closure/redistribution check FIRST — it names the operator
+  class instead of ranking guesses. Canonical probe:
+  `scripts/validate/ocean_fidelity/omip_conservation_closure.py`. On first
+  deployment it refuted the hypothesis I was about to spend a GPU arm on (a
+  dipole whose two-cell sum GREW is not a diffusion instability) and localised
+  a config-invariant source to a single column. See
+  `docs/ocean/fidelity/fidelity_to_fesom2jax_level_plan.md` (#1492) Phase 0.1.
+
+- **A THROWAWAY PROBE'S NUMBER IS UNMEASURED. COMMIT THE PROBE.** Per #1492
+  Phase 0.3: one committed probe per row, locked conventions, provenance
+  (git SHA + inputs + flags) stamped on every run. Inline heredoc probes are
+  not citable, cannot be re-run against a changed model, and hide their own
+  bugs — both defects above came from uncommitted ones, and committing the
+  closure probe immediately surfaced two more inside it.
+
+- **DAMAGE-FIELD CORRELATIONS ARE NOT MECHANISMS.** In a blown-up field,
+  "worst cells are coastal / shallow / polar" describes where damage LANDED,
+  which is usually downstream of a single upstream defect. FAILURE: measured
+  P(bad|coastal)=33% vs 0.67% interior, a real 50x enrichment, and treated it
+  as a coastal process; those were simply the columns the IC defect had
+  corrupted. Before citing a spatial pattern, confirm the snapshot is the
+  ORIGIN state (`snapshot_final.npz` stamps `_step = n_steps` regardless of
+  when the run stopped — verify with a dedicated 1-step run).
+
+## Epistemic rules (non-negotiable)
+
+### Never infer an API — read it
+Before calling any function from JAX, Equinox, Optax, Diffrax, jaxKAN, or any
+other dependency: grep the installed source in site-packages and read the actual
+signature. Do not reconstruct it from memory. This applies to argument names,
+argument order, keyword-only args, and return arity.
+
+If a symbol lives under `jax.experimental.*`, assume the API has changed since
+your training data. Verify or search. Do not guess module paths.
+
+**This applies to THIS repo's own API too** — it is large enough that memory is
+unreliable. FAILURES in ONE session (2026-07-30): `AerosolConfig(reference_aod=)`
+(really `reference_aod_550`), `McFarlaneConfig(N_ref=)` (no such field),
+`run_amip.build_parser` (really `build_arg_parser`), `from legoesm.grids import
+create_grid` (really `legoesm.grids.factory`). Each cost a full probe round-trip.
+Worse, `RRTMGPConfig()` defaults `include_clouds=False`, so an offline harness
+that omits it returns CLEAR-SKY fluxes and EVERY cloud gradient is exactly 0.0 —
+a silently wrong number, not an error. Read the NamedTuple `_fields` /
+`_field_defaults` before constructing a config.
+
+### Report uncertainty explicitly
+End any non-trivial code response with an `UNVERIFIED:` block listing:
+- APIs used but not read from source
+- assumptions about library versions or runtime behavior
+- anything that would silently produce wrong numbers rather than an error
+
+An empty block is a valid answer. A missing block is not.
+
+If the user's premise is wrong — if they have misdiagnosed the bug, or the thing
+being asked for will not work — say so BEFORE writing code.
+
+### Diagnose before patching
+When something fails: state the candidate causes and how to discriminate between
+them, then test. Do not go straight to a fix. Do not agree with a cause the user
+suggested unless evidence supports it.
+
+## Verification (JAX-specific)
+Code is not done until it has run. Claims about correctness require output.
+
+- **Shapes/dtypes**: check with `jax.eval_shape` before running anything
+  expensive. Cheap and catches most errors.
+- **Gradients**: any new `custom_vjp`/`custom_jvp`, adjoint, or hand-derived
+  derivative must pass `jax.test_util.check_grads(f, args, order=2)` before you
+  claim it works. A gradient that runs is not a gradient that is correct — this
+  is the single most common way to ship a silently wrong result here. (Applies
+  directly to `_sendrecv_vjp` in `halo_exchange.py` and any new MPI-AD path.)
+- **jit parity**: run the function eager and under `jit`, compare outputs.
+  Divergence means a tracer bug (Python-side branching, `.item()`, `if` on a
+  traced value, host callbacks).
+- **Sharding**: verify with `jax.debug.visualize_array_sharding` or by printing
+  `.sharding`, not by reasoning about what the annotation should do.
+- **Numerics**: default is float32. State the tolerance you're comparing at.
+  Don't use `==` on floats. If a test needs float64, say so explicitly rather
+  than silently enabling `jax_enable_x64`.
+- **donate_argnums / buffer donation**: never add without confirming the donated
+  buffer isn't reused. This fails silently or crashes far from the cause.
+
+## Scope
+One change at a time. Do not refactor adjacent code, rename things, or "improve"
+code the user did not ask about. Long unbroken generations drift into invention —
+prefer a small verified diff over a large plausible one.
 
 ## JAX
 - Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
@@ -99,9 +428,18 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Parallel: unsharded vs sharded, single-rank vs MPI.
 - Too expensive: say what ran/didn't, residual risk.
 - **CRITICAL — Controlled comparison: change ONE variable, hold the eval protocol FIXED to the baseline.** To claim a change (resolution, params, scheme, days) improved/degraded/"is comparable" vs a prior result, keep EVERYTHING else byte-identical to that baseline: forcing data + its sampling (years/days/hours/climatology), evaluation grid, metric definition (bias vs RMSE), region masks, timestepping. A metric that moved because the protocol/sampling changed is a **CONFOUND, not a result** — NEVER compare a number computed on one sampling/grid/metric to a number from another and call the difference an effect. If a resource limit (network cap, compute, time) forces a lighter or different sampling, **re-run the BASELINE at that SAME sampling before comparing** — a fresh baseline is cheap insurance; a confounded claim is not. Before writing "improved"/"degraded"/"better"/"comparable" vs any earlier number, explicitly confirm the two configs differ ONLY in the variable under test; if you cannot, say so and claim NO direction. Report the full config (data+sampling, grid, days/steps, params, metric) next to every number so the reader knows exactly what is being compared. Assuming two runs are comparable when the setup drifted is the error that turns "we improved it" into "we degraded it."
+- **CRITICAL — Precision gate for comparison/skill/causal claims (do NOT be sloppy — 2026-07-20 EC-site lesson).** (a) **Harness self-check FIRST**: before reporting a NEW scheme's skill vs a validated baseline, run the KNOWN baseline through your OWN harness and confirm it reproduces the baseline's established/published number (±small tol). If your harness scores a validated scheme wildly off — e.g. two-leaf H looked "broken" (NSE≈−1) when the paper figure tracks obs — the HARNESS is wrong; fix it BEFORE any new-scheme claim. (b) **Match the reference metric EXACTLY**: metric aggregation (daily-mean vs half-hourly point-wise NSE), window (multi-year JJA vs one summer), masks (valid-forcing) are ALL part of the protocol. Report the SAME metric the reference used, plus any alternative, WITH the sample N. A single-window point-wise metric is NOT a skill verdict, and never rank schemes by a metric that punishes one scheme's known artifact (point-wise scatter/spikes) while ignoring the dimension of interest (mean diurnal shape). (c) **Never let a QC mask flatter one side**: if you drop a scheme's unphysical spikes from scoring, report BOTH the failures-penalized primary score AND the separately-labeled plausible-only sensitivity score. (d) **Do NOT INFER causal origin — INSTRUMENT it**: "the spikes come from X" requires LOGGING X and the alternatives (raw vs intermediate vs final), not deduction from reading one code path; "correctly hooked up" requires reading the FULL path, not the entry point. (e) **Label every claim CONFIRMED (evidence shown) vs PLAUSIBLE (inferred)** — adversarial review WILL refute over-confident inferences; state uncertainty up front rather than presenting a verdict table that a five-minute check overturns.
 - **CRITICAL — Visual verify spatial/grid artifacts**: passing tests+norms NECESSARY ≠ SUFFICIENT for cubed-sphere ops, halo exchange, diffusion coeffs, grid metrics. Edge artifacts/cube imprint/grid-scale noise only detected visually (v-wind W2, wind_speed W5). Run `--only sw --grid cubed_sphere --quick` + inspect PNGs vs baseline. Norms can improve while artifacts worsen. Never claim "tests pass, edge fixed" from pytest alone.
 - **Diffusion sensitivity**: div damping + hyperdiff AMPLIFY halo errors at cubed-sphere face boundaries. Check W2 v-wind visually when touching `_hyperdiff_cube`, `_div_damp_cube`, diffusion params.
 - **Visual-regression gate (cube imprint)**: `scripts/validate/visual_regression.py --check` numericises the W2 v-wind cube-imprint check (SSIM + per-panel perceptual hash + edge-artifact ratio vs tiny committed ref in `tests/visual_baselines/`). Deterministic metric math gated in CI (`tests/test_visual_regression_metrics.py`); full cube-SW `--check` runs as a NIGHTLY non-blocking CI job until tolerances are calibrated across CI hardware. Tiny numeric baselines (.npy+json) ARE tracked — the one carve-out to "no tracked visual baselines".
+- **CRITICAL — VALIDATE THE INSTRUMENT BEFORE QUOTING ITS NUMBER (2026-07-25 duogrid lesson: 8 confident claims, all retracted).** A diagnostic script is UNTRUSTED CODE until it passes its own controls. Never state a finding — never write "measured", "confirmed", "proven", "VERDICT" — from a probe's first output. **Before quoting any diagnostic number, run these five checks and say in the message that you ran them:**
+  1. **Right conserved/invariant quantity?** Budget what the SYSTEM conserves, not a convenient proxy. (Failed: reported "vertex creates energy" from **KE alone** — KE is NOT conserved in shallow water, it trades with PE. Total `E=∫area(½h|V|²+½gh²)` reversed the sign of the conclusion.)
+  2. **Same transform / units / staggering on BOTH sides?** Two "A-grid winds" from different operators are DIFFERENT QUANTITIES. (Failed: ours `c2l_ord2` vs oracle `C2L_ORD=4` — the SAME raw state gave 1.96e-2 vs 5.79e-2, a 3× swing that WAS the reported effect. Also: never budget across a stage boundary where the state changes representation — mid-step FV3 winds are in circulation form, which produced ±5.6e10 garbage. REPEAT OFFENCE 2026-08-05, this time SHIPPED and then retracted: paired a predicted face velocity (41.87 m/s) against the model's `max_speed` timeseries diagnostic (21.95 m/s), which is a CELL-CENTRE average of the same field whose face maximum was 42.30 — the apparent "1.2 % agreement" was an artifact of comparing across the staggering, and it went into a merged PR before the 1-step run exposed it. Name the staggering AND the reduction of both sides in the sentence that quotes them.)
+  3. **Same time, resolution, config?** Index by MATCHED TIME, not frame number. (Failed: mapped day→frame as `round(day)-1` against an HOURLY file, comparing our day-1 to their hour-1; and quoted a **C12** wedge gain (~300×) as the mechanism for a **C48** instability, where it is ~124×.)
+  4. **Is the metric measuring what its name says?** Prove it on a synthetic case with a KNOWN answer before use. (Failed: called `mean|f−4-neighbour-mean|` a "2Δx grid-scale" measure — it is a high-pass/curvature residual that a merely sharper SMOOTH feature reproduces. Failed: a "gain" probe that re-filled a FIXED source, which is trivially 1.0000 by construction.)
+  5. **Can the reduction support the claim?** `max` over tiles/corners/components taken independently per run can peak at DIFFERENT physical locations; a max-of-per-tile-means is not a global mean. Keep argmax metadata and map to a common physical location before claiming "localized".
+  Plus: **diff ARRAYS, never printed summaries** (claimed "bit-identical ⇒ deterministic, not chaos"; the arrays actually differed by 9e-6 — only the rounded printout matched). **Never let a probe print its own verdict** ("=> the growth is REAL") — the interpretation belongs in the analysis after the controls pass, not baked into the tool where it gets echoed back as evidence. **`nanmax`/`nanmean`/`nansum` hide failures** — make NaN and missing frames FATAL. **Record every effective flag, env var and git SHA in each artifact**; a default `--n 36` silently mis-slicing a C48 file runs fine and lies.
+- **CRITICAL — LABEL EVERY CLAIM, AND PREFER RETRACTING EARLY.** Tag each statement **CONFIRMED** (control-passed evidence shown, instrument validated) vs **PLAUSIBLE** (inferred / single-run / uncontrolled). A chain of PLAUSIBLE steps is not CONFIRMED. When a later measurement contradicts an earlier claim, **retract it loudly and immediately in the same message and in the memory file** — do not quietly move on, because stale confident claims get built on. Run the codex adversarial review on the DIAGNOSTIC TOOLING, not just the model code: the instruments decide what you believe, so a bug there manufactures a confident wrong physics conclusion. Cheap self-check before any big claim: *"what measurement would make this false, and did I run it?"* If the answer is no, the claim is PLAUSIBLE at best.
 
 ## Domain Architect vs Syntax Engine (AI guardrails)
 See `docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the human dictates the *logic* (units, signs, conserved qty, valid scheme sets, references, acceptance criteria); AI fills the *body*; every declared invariant is checked **mechanically** so violations fail LOUDLY. Each gate is a **tripwire, not a proof** and ships a synthetic-violation self-test (provably non-vacuous). NON-NEGOTIABLE harness (extend, never weaken; budgets/TODOs shrink only):
@@ -177,7 +515,7 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
   - The collector selects tiers `1..N` (`build_trainable_params(config, tier="core"/"extended"/"aggressive", include=, exclude=)`); flip a param's status with a 1-line `tunable_tier` edit. See [[param-hygiene-spec-effort]].
 - **Loop-iteration COUNTS are never config/trainable** → module constant (e.g. `_N_EVP_DEFAULT = 120`), not a config field, not a kwarg-default literal. Structurally guaranteed: ints are not spec-eligible, so an iteration count can never reach the trainable collector. See [[loop-counts-never-trainable]].
 - **A tunable closure whose default is a `constants.X` reference** (e.g. `S_ice_new = constants.S_ice_bulk_default`) is *eligible* (may be a `__param_spec__` param with explicit bounds + tier) though not *required* (the AST gate won't force it). Expose genuine calibratable closures; keep environmental references (ocean salinity) fixed/excluded.
-- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `param_collector.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
+- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `legoesm.core.param_overrides.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
 
 ## Naming
 - Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.

@@ -158,6 +158,46 @@ def compute_config_hash(config, kind: str | None = None) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
+                        kind: str | None = None) -> bool:
+    """True when *config* is provenance-identical to a stored manifest entry.
+
+    Exact hash match, or the SCHEMA-GROWTH case: a field added to the config
+    schema AFTER the manifest was written (top-level key absent from
+    ``stored_resolved``) is ignored PROVIDED it holds its default in *config*.
+    Without this, every added ExperimentConfig field bricked every older run
+    directory at the next chain link ("manifest written for a DIFFERENT
+    config") even though the run is semantically identical — reproduced by
+    codex on the 2026-07-27 morrison-field additions.  A NEW field at a
+    NON-default value is a real config difference and still refuses, so
+    provenance mixing stays impossible; tampering with any key the manifest
+    DOES store still changes the restricted hash.
+    """
+    kind = kind or detect_config_kind(config)
+    if compute_config_hash(config, kind) == stored_hash:
+        return True
+    # Growth tolerance is TOP-LEVEL and ATMOSPHERE-shaped: ocean records
+    # (required constructor args, nested growth) cannot prove their new
+    # fields are defaults, so the except below returns False for them —
+    # i.e. ocean keeps the pre-change STRICT behaviour, never an exception
+    # (codex 2026-07-27 round 2).
+    try:
+        current = _serialize_config(config, kind)
+        stored_keys = set(stored_resolved)
+        new_keys = set(current) - stored_keys
+        if not new_keys:
+            return False
+        defaults = _serialize_config(type(config)(), kind)
+        if any(k not in defaults or current[k] != defaults[k]
+               for k in new_keys):
+            return False
+        restricted = {k: v for k, v in current.items() if k in stored_keys}
+        text = json.dumps(restricted, sort_keys=True)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+    except Exception:
+        return False  # cannot prove schema growth: fail closed (strict)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -581,7 +621,7 @@ def validate_run_manifest(manifest: dict) -> None:
     # still validate (back-compat).
     kind = config.get("config_kind", "atmosphere")
     rebuilt = _deserialize_config(resolved, kind)
-    if compute_config_hash(rebuilt, kind) != config_hash:
+    if not config_hash_matches(config_hash, resolved, rebuilt, kind):
         raise ValueError(
             "run manifest config_hash does not match its resolved_config "
             "(corrupt or tampered provenance)"

@@ -2,7 +2,9 @@
 selectable; coupled slab/ocean runs on cubed_sphere/latlon/voronoi AND gaussian
 (spectral) — the spectral state is synthesized to grid in _build_atm_forcing and
 _run_spectral recomputes/stashes the surface radiation at the coupling boundary
-(A2). A 3-D dynamic ocean on gaussian stays gated (spectral ocean is idealized)."""
+(A2). A 3-D dynamic ocean on gaussian runs on a DISTINCT lat-lon ocean grid via
+the conservative cross-grid remap (GaussianGrid.lat_v quadrature edges), same as
+the cube atm; a co-located spectral 3-D ocean stays idealized."""
 from __future__ import annotations
 
 import os
@@ -26,9 +28,10 @@ def test_grid_choice_accepted(grid):
     assert args.grid == grid
 
 
-def test_gaussian_dynamic_ocean_coupled_is_gated():
-    """Coupled --grid gaussian with a 3-D DYNAMIC ocean is gated cleanly (a
-    spectral dynamic ocean is idealized / not wired); the slab is supported."""
+def test_gaussian_dynamic_ocean_requires_distinct_ocean_grid():
+    """Coupled --grid gaussian --ocean dynamic WITHOUT --ocean-grid is a clean
+    SystemExit (the spectral atm has no co-located 3-D ocean dycore; it needs a
+    distinct lat-lon ocean grid), NOT a traceback and NOT the old blanket gate."""
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
@@ -38,11 +41,21 @@ def test_gaussian_dynamic_ocean_coupled_is_gated():
          "--days", "1"],
         env=env, capture_output=True, text=True, timeout=180)
     combined = result.stdout + result.stderr
-    assert result.returncode != 0, "coupled gaussian+dynamic should be gated"
-    assert "gaussian" in combined and "slab ocean only" in combined, \
-        f"missing the clear gate message.\n{combined[-600:]}"
+    assert result.returncode != 0, "gaussian+dynamic without --ocean-grid must exit"
+    assert "gaussian" in combined and "--ocean-grid latlon" in combined, \
+        f"missing the distinct-ocean-grid message.\n{combined[-600:]}"
     assert "Traceback" not in combined, \
         f"gate should be a clean SystemExit, not a traceback.\n{combined[-800:]}"
+
+
+def test_gaussian_dynamic_ocean_with_distinct_grid_parses():
+    """--grid gaussian --ocean dynamic --ocean-grid latlon:<res> is now REACHABLE
+    (the Gaussian<->latlon conservative cross-grid remap is wired): the args
+    parse and the distinct ocean-grid spec is accepted (no SystemExit at parse)."""
+    args = build_parser().parse_args(
+        ["--grid", "gaussian", "--ocean", "dynamic", "--ocean-grid", "latlon:48"])
+    assert args.grid == "gaussian" and args.ocean == "dynamic"
+    assert args.ocean_grid == "latlon:48"
 
 
 def test_gaussian_slab_coupled_runs(tmp_path):
@@ -74,3 +87,42 @@ def test_gaussian_slab_coupled_runs(tmp_path):
     assert hi - lo > 5.0, (
         f"SST spread {hi - lo:.1f}K too small — ocean under-forced (zero-SW "
         f"regression?)")
+
+
+def test_ocean_mode_label_mapping():
+    """GAP-5 guard companion: the public accessor maps every SimpleOceanConfig
+    mode onto its CoupledConfig.ocean_mode value, None on unknown."""
+    from legoesm.driver.coupled_config import ocean_mode_label
+
+    assert ocean_mode_label("fixed") == "slab"
+    assert ocean_mode_label("slab") == "slab"
+    assert ocean_mode_label("two_layer") == "two_layer"
+    assert ocean_mode_label("dynamic") is None
+    assert ocean_mode_label("typo") is None
+
+
+def test_resolve_coupled_microphysics_per_grid_default():
+    """2026-07-22 audit: coupled spectral path defaults to graph-tractable
+    kessler (the double-moment default segfaults XLA-CPU codegen at production
+    nlev); other grids keep morrison; explicit choices are honored."""
+    from scripts.run.run_coupled import resolve_coupled_microphysics
+
+    # default (None) is grid-dependent
+    assert resolve_coupled_microphysics("gaussian", None) == (
+        "kessler", "defaulted_kessler")
+    for g in ("cubed_sphere", "latlon", "voronoi"):
+        assert resolve_coupled_microphysics(g, None) == (
+            "morrison", "defaulted_morrison")
+
+    # explicit light scheme honored everywhere without warning
+    assert resolve_coupled_microphysics("gaussian", "kessler") == (
+        "kessler", "kept")
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")
+
+    # explicit heavy scheme on spectral is honored but flagged for the warning
+    assert resolve_coupled_microphysics("gaussian", "morrison") == (
+        "morrison", "explicit_heavy_warn")
+    # heavy scheme on a non-spectral grid is fine (no codegen wall there)
+    assert resolve_coupled_microphysics("cubed_sphere", "morrison") == (
+        "morrison", "kept")

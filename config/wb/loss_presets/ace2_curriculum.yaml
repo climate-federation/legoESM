@@ -1,0 +1,28 @@
+# ACE2 loss for rollout-length CURRICULUM training + light bias penalties.
+#
+# Same residual-normalized state loss as the ace2 preset, but adds a modest
+# global-mean (bias) penalty on the drift-prone fields so a curriculum run
+# is nudged toward the right climatological mean instead of only minimizing
+# per-step variance. Under a rollout curriculum run_aimip OVERRIDES
+# multi_step_hours to the sorted curriculum leads (targets are loaded per
+# lead), so the multi_step_hours below is a placeholder for the
+# no-curriculum fallback only.
+#
+# Bias weights are deliberately small relative to the w_* MSE weights (a
+# nudge, not a dominating term) and act on residual-normalized fields.
+loss:
+  residual_normalize: true
+  normalize_by_scale: false
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  w_T: 0.5
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.5
+  w_ps: 0.3
+  level_weighting: pressure
+  # --- light global-mean bias penalties (drift / systematic-bias control) ---
+  w_bias_T: 2.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0

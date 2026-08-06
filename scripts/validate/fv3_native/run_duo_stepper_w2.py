@@ -85,6 +85,10 @@ def main():
     ap.add_argument("--dt", type=float, default=450.0)
     ap.add_argument("--days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
+                    help="along-ring k2e order: 2 = authoritative live "
+                         "default (2026-07-27 root cause), 4 = "
+                         "historical mirror-monolith order")
     ap.add_argument("--ext-bundle", action="store_true",
                     help="faithful ext_scalar/ext_vector duo exchanges "
                          "(fv3_native_ext_vector) + ext halo metrics")
@@ -122,7 +126,8 @@ def main():
                                      ext_exclude=excl,
                                      use_ext_metrics=args.ext_metrics,
                                      oracle_conventions=args.
-                                     oracle_conventions)
+                                     oracle_conventions,
+                                     k2e_nord=args.k2e_nord)
     states = w2_six_face_state(ctx)
     nmap = build_nearest_map(ctx)
 
@@ -156,6 +161,7 @@ def main():
         mode = "interim exchanges"
     np.savez_compressed(
         args.out, times_days=np.array(times),
+        k2e_nord=np.array(args.k2e_nord),
         v=np.stack(frames), lat=np.linspace(-90, 90, 181),
         lon=np.arange(360, dtype=float),
         ext_bundle=np.array(bool(args.ext_bundle)),

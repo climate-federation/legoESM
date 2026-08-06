@@ -329,12 +329,23 @@ def main():
                 },
             )
         else:
+            # Classical-mode radiation pin (campaign_driver, D1).
+            from legoesm.training.campaign_driver import (
+                validate_classical_radiation,
+            )
+            validate_classical_radiation(
+                str(cfg.get("aimip_radiation", "rrtmgp")),
+                smoke=bool(cfg.get("smoke", False)),
+                allow_non_rrtmgp=bool(cfg.get("allow_non_rrtmgp", False)),
+            )
             non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
                 params, grid, dt,
                 radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 rad_update_interval_steps=args.rad_update_interval,
                 convection_scheme=str(cfg["aimip_convection"]),
                 turbulence_scheme=str(cfg["aimip_turbulence"]),
+                surface_bulk_scheme=str(
+                    cfg.get("aimip_surface_bulk_scheme", "constant")),
                 gwd_scheme=str(cfg["aimip_gwd"]),
                 microphysics_scheme=str(cfg["aimip_microphysics"]),
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
@@ -371,6 +382,8 @@ def main():
             rad_update_interval_steps=args.rad_update_interval,
             convection_scheme=str(cfg["aimip_convection"]),
             turbulence_scheme=str(cfg["aimip_turbulence"]),
+            surface_bulk_scheme=str(
+                cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg["aimip_gwd"]),
             microphysics_scheme=str(cfg["aimip_microphysics"]),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),

@@ -28,10 +28,13 @@ subset of tracer slots (caller picks which slots count toward
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import jax
 import jax.numpy as jnp
+
+if TYPE_CHECKING:  # annotation-only: keeps the core import out of the runtime path
+    from legoesm.core.state import PlaneNonHydrostaticState
 
 
 def _validate_water_slot_indices(

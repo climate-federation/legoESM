@@ -6,9 +6,11 @@ velocity staggering (NEMO east/north face -> legoESM u/v faces), and the state
 placement.
 """
 import numpy as np
+import pytest
 
-from legoesm.ocean.fidelity.nemo_io import NemoGrid, NemoState
+from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
+    bridge_before_state_topo,
     bridge_nemo_to_legoesm,
     bridge_nemo_to_legoesm_topo,
 )
@@ -158,6 +160,38 @@ def test_topo_bridge_geometry_matches_nemo_metrics():
     assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
 
 
+def test_topo_bridge_metric_convention_default_is_bit_identical():
+    """#1226: metric_convention default omission == explicit "exact"."""
+    grid, state, _ = _synthetic_topo()
+    out_default = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    out_exact = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True, metric_convention="exact")
+    for f in ("dx_T", "dy_T", "area_T", "dx_v", "dy_v", "area_q"):
+        np.testing.assert_array_equal(
+            getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
+
+
+def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():
+    """metric_convention="nemo_isotropic" is forwarded to create_latlon_geometry:
+    dy_T becomes dx_T (NEMO's pe1t=pe2t isotropic identity). The synthetic
+    fixture's e2t is built to match the "exact" formula (a true R*dlat), so an
+    isotropic bridge is compared against an isotropic-consistent e2t (:=e1t)
+    here -- otherwise the bridge's own e2t-vs-dy_T sanity guard (a REAL safety
+    check on live NEMO mesh_mask data, not weakened here) would legitimately
+    reject this fixture as a mismatched build."""
+    grid, state, _ = _synthetic_topo()
+    grid_iso = grid._replace(e2t=grid.e1t.copy())
+    out_iso = bridge_nemo_to_legoesm_topo(
+        grid_iso, state, periodic_i=True, metric_convention="nemo_isotropic")
+    np.testing.assert_allclose(
+        np.asarray(out_iso.geometry.dy_T), np.asarray(out_iso.geometry.dx_T),
+        rtol=1e-6,
+    )
+    with pytest.raises(ValueError, match="metric_convention"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, metric_convention="bogus")
+
+
 def test_topo_bridge_topography_and_staggering():
     grid, state, k_bot = _synthetic_topo()
     out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
@@ -261,3 +295,82 @@ def test_topo_bridge_variable_dlat_uses_faces():
     # And the southernmost row (driven by the reflected south face) is correct.
     e2t_south = constants.R_earth * (lat_face[1] - lat_face[0])
     assert abs(float(dy_T[0, 0]) - e2t_south) < 1e-6 * e2t_south
+
+
+# ---------------------------------------------------------------------------
+# bridge_before_state_topo (#1317 leap-frog before-level bridge)
+# ---------------------------------------------------------------------------
+def _synthetic_before(grid, rng_seed=3):
+    rng = np.random.default_rng(rng_seed)
+    ny, nx, nz = grid.tmask.shape
+    return NemoBeforeState(
+        T=15.0 + rng.random((ny, nx, nz)), S=35.0 + rng.random((ny, nx, nz)),
+        u=rng.random((ny, nx, nz)), v=rng.random((ny, nx, nz)),
+        ssh=0.01 * rng.random((ny, nx)),
+        tau_x=0.1 * rng.random((ny, nx)), tau_y=0.1 * rng.random((ny, nx)),
+    )
+
+
+def test_bridge_before_state_topo_populates_before_fields():
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    before = _synthetic_before(grid)
+
+    st = bridge_before_state_topo(br, grid, before, periodic_i=True)
+    assert st.T_before is not None and st.T_before.data.shape == (TNY, TNX, TNZ)
+    assert st.S_before is not None
+    assert st.u_before.data.shape == br.state.u.data.shape
+    assert st.v_before.data.shape == br.state.v.data.shape
+    assert st.eta_before.data.shape == br.state.eta.data.shape
+    assert st.tau_x_prev is not None
+    assert st.tau_y_prev is not None
+
+    # SAME staggering convention as the now-level bridge: NEMO u -> west-wall
+    # prepend (or periodic wrap), NEMO v -> south-wall prepend.
+    wet3 = grid.tmask > 0.5
+    u_before = np.asarray(st.u_before.data)
+    assert np.allclose(u_before[:, 1:, :][wet3], before.u[wet3])
+    v_before = np.asarray(st.v_before.data)
+    assert np.allclose(v_before[1:, :, :][wet3], before.v[wet3])
+    assert np.allclose(np.asarray(st.eta_before.data), before.ssh)
+    # #1455 sign fix: tau_x_prev must be NEGATED relative to the raw NEMO
+    # utau_b (before.tau_x) to match the atmospheric-convention storage
+    # every OceanSurfaceForcing.tau_x producer uses (dino.py:3383,
+    # nemo_recipe.py:768) -- surface_stress_faces negates ONCE more to
+    # recover the ocean-reaction stress, so before.tau_x and tau_x_prev
+    # must carry OPPOSITE signs, not equal values.
+    assert np.allclose(np.asarray(st.tau_x_prev), -before.tau_x)
+    assert np.allclose(np.asarray(st.tau_y_prev), -before.tau_y)
+
+    # T/S at wet cells match the raw restart exactly (only dry cells are
+    # Neumann-filled, same as the now-level T/S bridge).
+    assert np.allclose(np.asarray(st.T_before.data)[wet3], before.T[wet3])
+    assert np.allclose(np.asarray(st.S_before.data)[wet3], before.S[wet3])
+
+    # now-level fields are untouched (this function is purely additive).
+    assert np.allclose(np.asarray(st.T.data), np.asarray(br.state.T.data))
+
+
+def test_bridge_before_state_topo_missing_tau_leaves_prev_none():
+    """A restart without utau_b/vtau_b (NemoBeforeState.tau_x/tau_y=None)
+    leaves state.tau_x_prev/tau_y_prev at their None default -- the
+    _leapfrog_step Euler-start branch (gated on state.u_before, not
+    tau_x_prev) still seeds "before := now" for the centred-forcing carry
+    on step 1, matching the NEMO nit000 convention."""
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    before = _synthetic_before(grid)._replace(tau_x=None, tau_y=None)
+
+    st = bridge_before_state_topo(br, grid, before, periodic_i=True)
+    assert st.u_before is not None   # velocity/tracer before-state still set
+    assert st.tau_x_prev is None
+    assert st.tau_y_prev is None
+
+
+def test_bridge_before_state_topo_closed_basin_u_wall():
+    grid, state, _ = _synthetic_topo()
+    br = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=False)
+    before = _synthetic_before(grid)
+    st = bridge_before_state_topo(br, grid, before, periodic_i=False)
+    u_before = np.asarray(st.u_before.data)
+    assert np.allclose(u_before[:, 0, :], 0.0)   # closed -> west wall, not periodic

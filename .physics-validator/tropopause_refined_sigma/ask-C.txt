@@ -1,0 +1,53 @@
+You have NO repository access. Do NOT use tools. Answer from this text alone,
+in <= 40 lines. Be adversarial; try hard to find a failure I missed.
+
+Setup: hydrostatic sigma-coordinate GCM, MPAS unstructured horizontal mesh,
+~500 km cells, nlev = 30, dt = 75 s, model top sigma = 0.01 (~10 hPa),
+100-year AMIP. Physics: Bechtold mass-flux convection, McFarlane+Hines
+gravity-wave drag, RRTMGP radiation every 48 steps, warm+ice bulk
+microphysics with a "hard saturation adjustment", horizontal del2 moisture
+smoothing, a vertical index-space biharmonic filter on T and tracers
+(nu = 2e-6 1/s), prognostic ice skin, slab land.
+
+The vertical grid is changing from UNIFORM 32.5 hPa layers to a
+tropopause-refined grid with these thicknesses (hPa, top -> bottom):
+39.8 24.6 17.3 14.9 14.2 14.3 14.9 16.1 17.9 20.2 23.2 26.8 30.7 34.4 37.4
+39.4 40.7 41.4 41.8 42.1 42.2 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3 42.3
+Thinnest layer 14.2 hPa (was 32.5), at ~113 hPa. Level count is UNCHANGED.
+
+EMPIRICAL PRIOR: the same model at nlev=40 with a UNIFORM grid (24.4 hPa in
+every layer, same 10 hPa lid, same dt=75) spiked to 92 m/s wind at day 39 and
+went 100% NaN at day 46 with dt=60. The failure appeared FIRST in levels 0-11,
+i.e. 10-302 hPa (top-down), with a T_min = 175 K precursor.
+
+My analysis so far:
+- First-order-upwind vertical advective CFL = |sigma_dot|*dt/min(diff(sigma_full)).
+  With sigma_dot ~ omega/p_s and omega up to 5 Pa/s (extreme at 500 km),
+  CFL <= 0.26 on the new grid at dt=75. Not binding.
+- The index-space biharmonic filter's explicit limit is 16*nu*dt = 2.4e-3.
+  It is index-based, so refinement does not change it at all.
+- Both GWD schemes cap acceleration at min(umcfac*U/dt, tndmax_per_day/86400),
+  which is layer-thickness INDEPENDENT.
+
+Q1. What did I miss? Name every term in a hydrostatic sigma primitive-equation
+model OR its physics whose stability or accuracy limit scales like 1/dsigma,
+1/dp, or 1/dz, and evaluate each at dp = 14.2 hPa, dt = 75 s, p = 113 hPa,
+T = 195 K. Be concrete about which ones actually bind.
+
+Q2. Given the empirical prior (uniform 24.4 hPa layers spanning 10-302 hPa
+failed top-down), is a grid with 14.2-17.9 hPa layers at 99-175 hPa MORE or
+LESS likely to fail? The change's author argues it is SAFER because the
+TOP layer (k=0) thickens from 32.5 to 39.8 hPa. Is that argument sound given
+the failure spanned levels 0-11, not just k=0?
+
+Q3. What is the single most likely mechanism by which this change makes the
+100-year run WORSE (not better) than the uniform grid? Consider in particular:
+the model currently has a +17.8 K warm bias at 100 hPa and stratospheric water
+vapour 20x observed, and the whole purpose of the refinement is to resolve a
+cold point at ~95-100 hPa. What happens to a convection scheme, a
+microphysics scheme, and a radiation scheme when the layer they were tuned on
+suddenly halves in thickness in one part of the column and grows 30% in
+another?
+
+Q4. Name the ONE diagnostic I should extract from the 60-day stability arm now
+running that would most cheaply falsify "refine=3 is safe for 100 years".

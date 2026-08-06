@@ -70,6 +70,214 @@ def vertical_shear_squared(
     return du * du + dv * dv
 
 
+def vertical_shear_burchard(
+    u_now: jnp.ndarray, v_now: jnp.ndarray,
+    u_before: jnp.ndarray, v_before: jnp.ndarray,
+    dz_half: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Burchard (2002) energy-conserving now×before shear cross term.
+
+    Faithful port of the TIME discretization NEMO's ``zdf_sh2`` uses
+    (zdfsh2.F90:44-92, the no-Stokes-drift branch):
+
+    .. math::
+
+        sh2 = \left(\frac{du_{now}}{dz}\right)\!
+              \left(\frac{du_{before}}{dz}\right)
+            + \left(\frac{dv_{now}}{dz}\right)\!
+              \left(\frac{dv_{before}}{dz}\right)
+
+    i.e. the shear production entering the TKE budget is linear in the
+    NOW gradient and linear in the BEFORE (leap-frog) gradient of the
+    SAME velocity component — not the squared now-only form
+    (:func:`vertical_shear_squared`). This is the energy-conserving
+    discretization consistent with the implicit-vertical-friction/
+    leap-frog time stepping (Burchard 2002): the shear production
+    entering the TKE budget is built from the SAME du/dz, dv/dz the
+    implicit friction solve actually applied between the before and now
+    states, so the KE removed by friction and the TKE produced by shear
+    balance exactly (to the implicit solve's own truncation).
+
+    NEMO additionally averages ``avm`` at u/v-points then face-interpolates
+    to the T-point before applying this shear (zdfsh2.F90:80-90, wet-only
+    2-2 coast masking) — a staggered-C-grid detail with no analog on
+    legoESM's cell-centred TKE closure (which already applies a SINGLE
+    per-interface ``K_M`` uniformly, exactly as
+    :func:`vertical_shear_squared`'s caller does); only the TIME
+    discretization (now×before vs now²) is transcribed here.
+
+    Parameters
+    ----------
+    u_now, v_now, u_before, v_before : (..., nlev) — cell-centre velocities
+        at the NOW and (leap-frog) BEFORE time levels.
+    dz_half : (..., nlev-1) — distance between cell centres.
+
+    Returns
+    -------
+    sh2 : (..., nlev-1) — Burchard shear production at interfaces. May be
+        NEGATIVE where the now/before gradients have opposite sign (a
+        genuine feature of the energy-conserving form, unlike the
+        squared-now form which is always >= 0); the caller (P_s = K_M·sh2)
+        should treat this as a signed production term, matching NEMO's
+        ``en += rn_Dt·p_sh2`` (zdftke.F90:414, no clipping).
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    du_now = (u_now[..., 1:] - u_now[..., :-1]) / dz_safe
+    dv_now = (v_now[..., 1:] - v_now[..., :-1]) / dz_safe
+    du_before = (u_before[..., 1:] - u_before[..., :-1]) / dz_safe
+    dv_before = (v_before[..., 1:] - v_before[..., :-1]) / dz_safe
+    return du_now * du_before + dv_now * dv_before
+
+
+def vertical_shear_face_native(
+    u_face_now: jnp.ndarray, v_face_now: jnp.ndarray,
+    u_face_before: jnp.ndarray, v_face_before: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    u_mask: jnp.ndarray, v_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""NEMO ``zdf_sh2`` face-native shear "equivalent shear-squared" — the
+    T-point-collapse-before-differencing fix (#1226 ``sh2_walk.py`` Candidate
+    E/F; see ``sh2_walk.py`` header for the A/B evidence: corr 0.982 / ratio
+    0.975 unrestricted, ratio 0.912 restricted-to-signal, vs the naive
+    T-collapse-first approximation's corr 0.963 / ratio 0.556).
+
+    NEMO differences the RAW u-/v-FACE velocities first, one vertical
+    difference PER FACE, and combines the two adjacent faces' shears onto
+    the T-point ONLY AFTER squaring/cross-multiplying (zdfsh2.F90:78-94,
+    no-Stokes-drift branch, ``ln_stshear=.false.``/``ln_wave=.false.`` —
+    namelist_ref:597,212, confirmed live for DINO):
+
+    .. code-block:: fortran
+
+        ! zdfsh2.F90:78-91 (DO_2D(1,0,1,0), jk=2,jpkm1)
+        zsh2u(ji,jj) = ( avm(ji+1,jj,jk) + avm(ji,jj,jk) )              &
+           &         * ( uu(ji,jj,jk-1,Kmm) - uu(ji,jj,jk,Kmm) )        &
+           &         * ( uu(ji,jj,jk-1,Kbb) - uu(ji,jj,jk,Kbb) )        &
+           &         / ( e3uw(ji,jj,jk,Kmm) * e3uw(ji,jj,jk,Kbb) ) * wumask(ji,jj,jk)
+        zsh2v(ji,jj) = analogous at v-faces                              ! :85-91
+        ! zdfsh2.F90:92-94 (DO_2D(0,0,0,0)) -- T-point combination, coast
+        ! doubling weight "2 - mask*mask" (=2 at a coast, 1 in the open ocean;
+        ! NEMO's own comment: "wmask useless as zsh2 are masked")
+        p_sh2(ji,jj,jk) = 0.25 * (   ( zsh2u(ji-1,jj) + zsh2u(ji,jj) )        &
+           &                       * ( 2. - umask(ji-1,jj,jk)*umask(ji,jj,jk) )   &
+           &                     + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) )          &
+           &                       * ( 2. - vmask(ji,jj-1,jk)*vmask(ji,jj,jk) )   )
+
+    legoESM's u-/v-face arrays use the WEST-face convention (``u[..., i]`` is
+    the west face of ``T[..., i]``, ``u[..., i+1]`` its east face —
+    :func:`legoesm.grids.operators_latlon_cgrid.interp_cell_to_uface`), the
+    mirror image of NEMO's east-face-of-T(i) indexing; the T-point
+    combination below uses the matching pair ``(zsh2u[i], zsh2u[i+1])``
+    (NOT NEMO's literal ``(i-1, i)``) so the SAME two faces bracketing T(i)
+    are combined either way.
+
+    Two deliberate scope limits, both already documented at the same class
+    of simplification by :func:`vertical_shear_burchard` /
+    ``tke._prandtl_number``'s ``"nemo_ri"`` docstring, kept here rather than
+    re-derived:
+
+    * ``avm`` is NOT face-averaged — this function does not carry a
+      viscosity at all (mirrors :func:`vertical_shear_squared`'s contract:
+      it returns a bare shear-production-EQUIVALENT quantity that the caller
+      multiplies by its own single per-interface ``K_M``, exactly as
+      ``P_s = K_M · shear_sq`` already does downstream). NEMO's own
+      face-averaged-``avm`` complicates unit tracking without changing the
+      dominant effect the #1226 walk isolated (Candidate B: static-vs-live
+      metric was negligible; the avm face-averaging was never isolated as
+      its own candidate because ``_vertical_shear_squared`` already shares
+      the single-``K_M`` simplification with every other scheme on this
+      C-grid).
+    * The vertical metric ``dz_half`` is the caller's STATIC reference
+      spacing (T-point ``dz_half_ref·J``), not NEMO's LIVE
+      ``e3uw(Kmm)·e3uw(Kbb)`` QCO-stretched product — Candidate B measured
+      this substitution as negligible for DINO (corr 1.000, ratio 0.9999;
+      SSH-driven r3u/r3v ~ 1e-4..1e-3), so using the static metric here is
+      an oracle-supported approximation, not an untested guess.
+
+    Parameters
+    ----------
+    u_face_now, v_face_now, u_face_before, v_face_before : arrays.
+        ``u_face`` : ``(n_lat, n_lon+1, nlev)``, ``v_face`` :
+        ``(n_lat+1, n_lon, nlev)`` — RAW (uncollapsed) C-grid face
+        velocities at the NOW and (leap-frog) BEFORE time levels,
+        west-face-of-T(i) / south-face-of-T(j) convention.
+    dz_half : ``(n_lat, n_lon, nlev-1)`` — T-point distance between cell
+        centres (static reference metric; see scope limit above).
+    u_mask, v_mask : ``(n_lat, n_lon+1, nlev)`` / ``(n_lat+1, n_lon, nlev)``
+        — per-LEVEL wet face masks (``umask``/``vmask`` in NEMO's sense:
+        product of the two adjacent T-cells' wet flags at that level, e.g.
+        :func:`compute_face_masks_3d`, or a 2-D static mask broadcast to
+        every level by the caller). Used BOTH for the coast-doubling
+        weight (matching NEMO's ``umask``/``vmask``) and, after this
+        function derives the vertical-adjacency product internally
+        (``wumask``/``wvmask``, dommsk.F90:176-182), for the interior
+        zero-out at the seafloor transition.
+
+    Returns
+    -------
+    shear_sq_equivalent : ``(n_lat, n_lon, nlev-1)`` — face-native
+        shear-production equivalent at T-point interfaces, SIGNED (the
+        now×before cross term can be negative, mirroring
+        :func:`vertical_shear_burchard`). The caller forms
+        ``P_s = K_M · shear_sq_equivalent`` exactly as the squared/Burchard
+        forms do.
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    dz_sq = dz_safe * dz_safe
+
+    # dommsk.F90:176-182 wumask/wvmask: interior jk = mask(jk)*mask(jk-1)
+    # (vertical adjacency of the SAME face across consecutive levels).
+    # Interfaces here (index k, k=0..nlev-2) sit BETWEEN T-levels k and
+    # k+1, so the two mask levels bracketing interface k are (k, k+1) —
+    # matching zdf_sh2's jk-1/jk pair (its jk indexes the UPPER level of
+    # the pair, one-based; our 0-based interface k plays the same role).
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+
+    def _face_shear_over_dzsq(u_face_n, u_face_b, dz_sq_face):
+        # Vertical difference AT the face, one difference per face level —
+        # NOT collapsed to the T-point first (zdfsh2.F90:80-84/85-90).
+        du_now = u_face_n[..., :-1] - u_face_n[..., 1:]
+        du_bef = u_face_b[..., :-1] - u_face_b[..., 1:]
+        return du_now * du_bef / dz_sq_face
+
+    # u-faces share the T grid's lat axis (0) and vertical axis (-1); only
+    # the lon axis (-2) is n_lon+1 instead of n_lon. dz_sq is T-shaped
+    # (n_lat, n_lon, nlev-1); Candidate B (static-vs-live metric) measured
+    # this substitution as negligible for DINO (corr 1.000, ratio 0.9999),
+    # so reusing each T column's own dz at its adjacent face (no separate
+    # u/v-face metric) is an oracle-supported approximation. Pad by
+    # repeating the last column/row (the periodic-fold / wall face has no
+    # T-neighbour on that side; its shear is masked out by wumask/wvmask
+    # there in every recipe this option targets, so the padded dz value is
+    # never selected).
+    dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+    dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+
+    zsh2u = _face_shear_over_dzsq(u_face_now, u_face_before, dz_sq_u) * wumask
+    zsh2v = _face_shear_over_dzsq(v_face_now, v_face_before, dz_sq_v) * wvmask
+
+    # Coast-doubling weight "2 - mask*mask" (zdfsh2.F90:92-94): =2 at a
+    # coast (one neighbouring face dry), =1 in the open ocean (both wet).
+    # umask/vmask here are the RAW per-level face masks (not wumask/wvmask
+    # — matching NEMO's literal ``umask(ji-1,jj,jk)*umask(ji,jj,jk)``,
+    # zdfsh2.F90:93), evaluated at the interior interface's UPPER T-level
+    # (index k+1, matching zdf_sh2's jk) since NEMO's own comment notes
+    # "wmask useless as zsh2 are masked" — the coast weight only needs to
+    # know which NEIGHBOUR is dry, not repeat the vertical wet test.
+    coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
+    coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]
+
+    # T-point combination: T(i) is bracketed by faces i (west) and i+1
+    # (east) under legoESM's convention (the mirror of NEMO's (i-1, i)
+    # east-face-of-T(i) pairing — see docstring).
+    p_sh2 = 0.25 * (
+        (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
+        + (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v
+    )
+    return p_sh2
+
+
 def richardson_number(
     N2: jnp.ndarray,
     u_cell: jnp.ndarray,
@@ -194,6 +402,18 @@ def compute_N2(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
+        # NEMO evaluates alpha/beta at the LIVE gdept(Kmm) = gdept_0*(1+r3t)
+        # and divides by the LIVE e3w(Kmm) = e3w_0*(1+r3t), r3t = eta/ht_0
+        # (domzgr_substitute.h90:131,139; eosbn2.F90 rab_3d_t/bn2_t).  The
+        # caller (k_profiles.py / enhanced_diffusion.py) applies that stretch
+        # via eos.nemo_bn2_live_ladders BEFORE this call, and
+        # compute_buoyancy_frequency_nemo_bn2 derives e3w as diff(t_depth)
+        # internally (NEMO's e3w_0 IS the gdept_0 centre-difference, verified
+        # exactly against mesh_mask), so the stretch propagates through
+        # alpha/beta AND e3w -- no separate division here (that would
+        # double-count it).  NB the stretch factor is the LOCAL 1+eta/H_bathy,
+        # NOT legoESM's z* Jacobian (eta+H)/H_max -- see the warning in
+        # eos.nemo_bn2_live_ladders (#1226).
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
             T_cell, S_cell, t_depth, w_depth, g=g,
@@ -425,6 +645,13 @@ def tridiag_thomas(a, b, c, d):
     are unused (left as zero by the caller). Returns ``x`` of shape ``(..., N)``.
     Shared by the TKE and CATKE backward-Euler vertical solves.
     """
+    # Mixed-precision guard: callers may assemble rows from float32 state
+    # fields and float64 scalars (JAX_ENABLE_X64 promotes constants). The
+    # lax.scan carries are seeded from `b`/`d` while the bodies compute in
+    # the promoted dtype — a mismatch is a hard TypeError at trace time.
+    # Unify once at entry; no-op when dtypes already agree.
+    common = jnp.result_type(a, b, c, d)
+    a, b, c, d = (x.astype(common) for x in (a, b, c, d))
     N = b.shape[-1]
 
     def step(carry, k):

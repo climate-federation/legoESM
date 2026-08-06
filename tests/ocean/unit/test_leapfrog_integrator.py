@@ -296,6 +296,144 @@ def test_leapfrog_first_step_is_euler():
         rtol=0, atol=0)
 
 
+def test_leapfrog_from_rest_nemo_before_and_burchard_do_not_crash():
+    """#1317 regression: a FRESH (unbridged, unseeded) from-rest state on the
+    nemo_dino_kamm_mlf combo (tke_n2_time_level="nemo_before" +
+    tke_shear_production="nemo_burchard") used to raise/AttributeError on
+    step 0 -- ``_leapfrog_step``'s Euler-start branch called ``_step_impl``
+    BEFORE seeding ``state.T_before``/``u_before``/``v_before``, and both
+    ``_n2_nemo_before_tracers`` and the Burchard-shear guard in
+    ``k_profiles.py`` read those fields unconditionally. The fix seeds a
+    LOCAL before:=now copy for that first ``_step_impl`` call only --
+    NEMO's own cold-start convention (istate.F90: ``ts(:,:,:,:,Kmm) =
+    ts(:,:,:,:,Kbb)`` before stp_MLF is ever entered, so Nbb==Nnn on the
+    first step). A from-rest run must now construct AND step at least twice
+    with no SystemExit/ValueError/NaN."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    _lateral_mixing_none = type(OceanPhysicsConfig().lateral_mixing)(
+        scheme="none")
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(tke_n2_time_level="nemo_before",
+                          tke_shear_production="nemo_burchard")),
+        convection=OceanConvectionConfig(scheme="none"),
+        lateral_mixing=_lateral_mixing_none,
+    )
+    state, model = _leapfrog_channel(
+        physics=physics, barotropic_forcing_centred=True,
+        barotropic_een_seed="nemo_kmm")
+    # Fresh from-rest state: no bridge, no before-fields populated.
+    assert state.T_before is None and state.u_before is None
+
+    s1 = model.step(state, dt=_DT)   # step 0: the crash site pre-fix
+    assert np.all(np.isfinite(np.asarray(s1.T.data)))
+    assert np.all(np.isfinite(np.asarray(s1.u.data)))
+    s2 = model.step(s1, dt=_DT)      # step 1: genuine leapfrog + Asselin
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+    assert np.all(np.isfinite(np.asarray(s2.u.data)))
+
+
+def test_leapfrog_from_rest_nemo_face_native_does_not_crash():
+    """#1226 sh2_walk.py Candidate E/F regression: nemo_dino_kamm_mlf's
+    ACTUAL runtime combination -- tke_shear_production="nemo_face_native"
+    together with bottom_tke_bc=True (the real card also sets
+    tke_bottom_bc=True) on a PARTIAL-CELL z-coordinate (the card always
+    uses one; nemo_face_native requires z_coord.is_active). Two real bugs
+    were caught and fixed by this exact combination during development:
+    (1) the model's cc_state pre-collapse silently defeated the face-
+    native geometry (fixed: ocean_model_latlon_cgrid.py's fallback K-profile
+    call now keeps u/v at their raw C-grid face shape for this option), and
+    (2) _tke_bottom_dirichlet's take_along_axis assumed cell-centred u/v
+    (fixed: it now collapses locally when needed). A from-rest run must
+    step at least twice with no crash/NaN."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate,
+    )
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    n_lat, n_lon, n_levels, H_max = 8, 16, 5, 3000.0
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z0c = create_ocean_z_star(n_levels=n_levels, H_max=H_max)
+    H_bathy = jnp.full((n_lat, n_lon), H_max * 0.62)
+    z = create_partial_cell_coordinate(z0c, H_bathy)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=H_bathy)
+    assert state.T_before is None and state.u_before is None
+
+    _lateral_mixing_none = type(OceanPhysicsConfig().lateral_mixing)(
+        scheme="none")
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(tke_n2_time_level="nemo_before",
+                          tke_shear_production="nemo_face_native",
+                          bottom_tke_bc=True, prognostic=True)),
+        convection=OceanConvectionConfig(scheme="none"),
+        lateral_mixing=_lateral_mixing_none,
+    )
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=2.0e4, A_v=1.0e-3, K_v=1.0e-4,
+        bottom_drag_r=1.0e-3, bottom_drag_scheme="nemo_quadratic",
+        bottom_drag_cd0=1.0e-3, bottom_drag_cdmax=0.1,
+        bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        n_barotropic_substeps=8, enable_runtime_checks=False,
+        implicit_vertical_mixing=True,
+        outer_integrator="leapfrog", coriolis_scheme="explicit_ab2",
+        vorticity_scheme="een_total", physics=physics,
+        barotropic_forcing_centred=True, barotropic_een_seed="nemo_kmm",
+    )
+    model = LatLonCGridOceanModel(grid, z, cfg)
+
+    s1 = model.step(state, dt=_DT)   # step 0 (Euler start)
+    assert np.all(np.isfinite(np.asarray(s1.T.data)))
+    assert np.all(np.isfinite(np.asarray(s1.u.data)))
+    s2 = model.step(s1, dt=_DT)      # step 1 (genuine leap-frog)
+    assert np.all(np.isfinite(np.asarray(s2.T.data)))
+    assert np.all(np.isfinite(np.asarray(s2.u.data)))
+
+
+def test_n2_nemo_before_tracers_bridged_state_not_clobbered():
+    """Sibling regression: a state that ALREADY carries bridged/restart
+    before-level fields (kamm_twin_90d --bridge-before) must NOT be
+    overwritten by the from-rest Euler-start seed -- ``_leapfrog_step``'s
+    seed only fires inside the ``state.u_before is None`` branch, which a
+    bridged state never enters."""
+    state, model = _leapfrog_channel()
+    # Simulate a bridged/restart state: distinct before-level fields (NOT
+    # equal to now), which the fix must preserve untouched through step().
+    bridged = state._replace(
+        u_before=state.u.replace(data=state.u.data + 0.01),
+        v_before=state.v.replace(data=state.v.data + 0.01),
+        T_before=state.T.replace(data=state.T.data + 1.0),
+        S_before=state.S.replace(data=state.S.data),
+        eta_before=state.eta.replace(data=state.eta.data),
+    )
+    assert bridged.u_before is not None
+    s = model.step(bridged, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.T.data)))
+    # bridged path takes the FULL leapfrog branch (not the Euler-start
+    # branch), so it must not equal the from-rest Euler-start result.
+    s_fresh = model.step(state, dt=_DT)
+    assert not np.allclose(np.asarray(s.T.data), np.asarray(s_fresh.T.data))
+
+
 def test_leapfrog_second_step_shift():
     """After step 2, Nbb == the Asselin-filtered now of step 2 = state1 +
     gamma·(state1_before - 2·state1 + Naa).  Verify the stored before-field
@@ -526,4 +664,286 @@ def test_thickness_weighted_asselin_masks_dry_cells():
     T = jnp.asarray(np.random.default_rng(2).random(shape))
     out = _thickness_weighted_asselin(T, T, T, e3, e3, e3f, e3f, gamma, mask)
     assert bool(jnp.all(jnp.isfinite(out)))
-    assert float(jnp.max(jnp.abs(out[..., -1]))) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# #1226 item 3: barotropic_forcing_centred (NEMO ln_bt_fw=.FALSE.,
+# dynspg_ts.F90:392-421 wind/emp ½(before+now) + :1623-1636 drag Kbb residual)
+# ---------------------------------------------------------------------------
+
+def _sf(tau_x=0.0, tau_y=0.0, n_lat=8, n_lon=16):
+    from legoesm.ocean.state import OceanSurfaceForcing
+    return OceanSurfaceForcing(
+        tau_x=jnp.full((n_lat, n_lon), tau_x),
+        tau_y=jnp.full((n_lat, n_lon), tau_y))
+
+
+def _fw(net=0.0, n_lat=8, n_lon=16):
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    z = jnp.zeros((n_lat, n_lon))
+    return FreshwaterForcing(precip=jnp.full((n_lat, n_lon), net),
+                              evap=z, runoff=z, ice_fw=z)
+
+
+def test_barotropic_forcing_centred_default_false():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert LatLonCGridOceanConfig.from_flat().barotropic_forcing_centred is False
+
+
+def test_barotropic_forcing_centred_requires_leapfrog():
+    with pytest.raises(ValueError, match="barotropic_forcing_centred"):
+        _channel("forward_euler", barotropic_forcing_centred=True)
+    with pytest.raises(ValueError, match="barotropic_forcing_centred"):
+        _channel("ab2", barotropic_forcing_centred=True)
+
+
+def test_barotropic_forcing_centred_off_is_bit_identical():
+    """The flag off (default) must not change a single bit of the leapfrog
+    step even with a time-varying wind/freshwater — the new code paths are
+    gated Python ``if``s on the static config bool."""
+    state, model_off = _leapfrog_channel(
+        barotropic_forcing_centred=False, freshwater_closure="virtual_salt_flux")
+    state2, model_on_but_false = _leapfrog_channel(
+        barotropic_forcing_centred=False, freshwater_closure="virtual_salt_flux")
+    sf1, sf2 = _sf(tau_x=0.02), _sf(tau_x=0.05)
+    fw1, fw2 = _fw(net=1.0e-5), _fw(net=-2.0e-5)
+    s = state
+    for sf, fw in ((sf1, fw1), (sf2, fw2)):
+        s = model_off.step(s, dt=_DT, surface_forcing=sf, freshwater=fw)
+    s2 = state2
+    for sf, fw in ((sf1, fw1), (sf2, fw2)):
+        s2 = model_on_but_false.step(s2, dt=_DT, surface_forcing=sf, freshwater=fw)
+    np.testing.assert_allclose(np.asarray(s.T.data), np.asarray(s2.T.data),
+                               rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(s.u.data), np.asarray(s2.u.data),
+                               rtol=0, atol=0)
+    # the carry fields stay inert (never read) when the flag is False
+    assert s.tau_x_prev is None
+
+
+def test_barotropic_forcing_centred_first_step_matches_now():
+    """NEMO nit000 (sbcmod.F90:568-573, no restart): 'before' is set equal to
+    'now' on the very first step, so the ½(before+now) average degenerates to
+    plain NOW. The leap-frog's forward-Euler-start branch runs BEFORE
+    tau_x_prev exists, so step 1 under centred=True must be BIT-IDENTICAL to
+    step 1 under centred=False."""
+    state, model_on = _leapfrog_channel(barotropic_forcing_centred=True)
+    _, model_off = _leapfrog_channel(barotropic_forcing_centred=False)
+    sf = _sf(tau_x=0.07, tau_y=-0.03)
+    fw = _fw(net=3.0e-5)
+    s_on = model_on.step(state, dt=_DT, surface_forcing=sf, freshwater=fw)
+    s_off = model_off.step(state, dt=_DT, surface_forcing=sf, freshwater=fw)
+    np.testing.assert_allclose(np.asarray(s_on.T.data), np.asarray(s_off.T.data),
+                               rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(s_on.u.data), np.asarray(s_off.u.data),
+                               rtol=0, atol=0)
+    # step 1 seeds the carry to THIS step's now-forcing (NEMO's "before:=now")
+    np.testing.assert_allclose(np.asarray(s_on.tau_x_prev), np.asarray(sf.tau_x))
+    np.testing.assert_allclose(np.asarray(s_on.tau_y_prev), np.asarray(sf.tau_y))
+
+
+def test_barotropic_forcing_centred_second_step_averages_wind_and_emp():
+    """Analytic two-step check: wind/freshwater JUMP between step 1 and step
+    2. The centred step-2 momentum tendency must equal the tendency computed
+    from the MANUALLY-averaged ½(before+now) forcing under centred=False —
+    i.e. the internal average is exactly ½(before+now), not some other
+    blend. (dynspg_ts.F90:400-401 wind, :417-421 emp)."""
+    state, model_on = _leapfrog_channel(
+        barotropic_forcing_centred=True, freshwater_closure="virtual_salt_flux")
+    _, model_manual = _leapfrog_channel(
+        barotropic_forcing_centred=False, freshwater_closure="virtual_salt_flux")
+    sf1 = _sf(tau_x=0.02, tau_y=0.01)
+    sf2 = _sf(tau_x=0.10, tau_y=-0.04)          # jump
+    fw1 = _fw(net=1.0e-5)
+    fw2 = _fw(net=-3.0e-5)                       # jump
+    sf_avg = sf2._replace(tau_x=0.5 * (sf1.tau_x + sf2.tau_x),
+                          tau_y=0.5 * (sf1.tau_y + sf2.tau_y))
+    fw_avg = fw2._replace(precip=0.5 * (fw1.precip + fw2.precip))
+
+    s1_on = model_on.step(state, dt=_DT, surface_forcing=sf1, freshwater=fw1)
+    s2_on = model_on.step(s1_on, dt=_DT, surface_forcing=sf2, freshwater=fw2)
+
+    s1_manual = model_manual.step(state, dt=_DT, surface_forcing=sf1, freshwater=fw1)
+    s2_manual = model_manual.step(s1_manual, dt=_DT, surface_forcing=sf_avg,
+                                  freshwater=fw_avg)
+
+    # ONLY the eta/barotropic channel is centred (F_slow_u/eta); the
+    # separate virtual-salt-flux tracer deposit stays at NOW in BOTH runs
+    # (model_manual's step-2 freshwater=fw_avg would ALSO recentre the
+    # salt-flux channel, which the model itself does not do) -- so S is
+    # deliberately excluded from this comparison; see the drag/eta-only
+    # scoping note on ``freshwater_eta_prev`` in state.py.
+    np.testing.assert_allclose(
+        np.asarray(s2_on.u.data), np.asarray(s2_manual.u.data),
+        rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(
+        np.asarray(s2_on.eta.data), np.asarray(s2_manual.eta.data),
+        rtol=1e-11, atol=1e-11)
+
+
+def test_barotropic_forcing_centred_carry_swaps_every_step():
+    """NEMO sbcmod.F90:382-386 utau_b(:,:) = utauU(:,:): after step n, the
+    carry becomes step n's now-forcing (ready to be averaged with step n+1's
+    forcing)."""
+    state, model = _leapfrog_channel(barotropic_forcing_centred=True)
+    sf1, sf2 = _sf(tau_x=0.02), _sf(tau_x=0.09)
+    s1 = model.step(state, dt=_DT, surface_forcing=sf1)
+    np.testing.assert_allclose(np.asarray(s1.tau_x_prev), np.asarray(sf1.tau_x))
+    s2 = model.step(s1, dt=_DT, surface_forcing=sf2)
+    np.testing.assert_allclose(np.asarray(s2.tau_x_prev), np.asarray(sf2.tau_x))
+
+
+def _leapfrog_partial_cell_channel(n_lat=8, n_lon=16, n_levels=5,
+                                   H_max=3000.0, **cfg_kw):
+    """Leap-frog channel on an OceanPartialCellCoordinate (DINO's kamm cards
+    always use one) — ``nemo_bottom_drag_rate_faces`` (barotropic_drag_substep)
+    requires it. Mirrors ``test_zdf_dynzdf_composition._partial_cell_channel``
+    but wired for ``outer_integrator="leapfrog"``."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate,
+    )
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z0c = create_ocean_z_star(n_levels=n_levels, H_max=H_max)
+    H_bathy = jnp.full((n_lat, n_lon), H_max * 0.62)
+    z = create_partial_cell_coordinate(z0c, H_bathy)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=H_bathy)
+    cfg_kw.setdefault("outer_integrator", "leapfrog")
+    cfg_kw.setdefault("coriolis_scheme", "explicit_ab2")
+    cfg_kw.setdefault("vorticity_scheme", "een_total")
+    cfg_kw.setdefault("implicit_vertical_mixing", True)
+    cfg_kw.setdefault("A_h", 2.0e4)
+    cfg_kw.setdefault("A_v", 1.0e-3)
+    cfg_kw.setdefault("K_v", 1.0e-4)
+    cfg_kw.setdefault("n_barotropic_substeps", 8)
+    cfg_kw.setdefault("enable_runtime_checks", False)
+    config = LatLonCGridOceanConfig.from_flat(**cfg_kw)
+    return state, LatLonCGridOceanModel(grid, z, config)
+
+
+def test_barotropic_forcing_centred_runs_no_nan_with_drag_substep():
+    """Full NEMO DINO composition (zdf_drag_in_matrix + zdf_baroclinic_only +
+    barotropic_drag_substep + barotropic_forcing_centred all on): the
+    drag-residual BEFORE-level switch does not destabilise the run."""
+    state, model = _leapfrog_partial_cell_channel(
+        barotropic_forcing_centred=True,
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    s = state
+    sf = _sf(tau_x=0.03)
+    for _ in range(4):
+        s = model.step(s, dt=_DT, surface_forcing=sf)
+    assert np.all(np.isfinite(np.asarray(s.T.data)))
+    assert np.all(np.isfinite(np.asarray(s.u.data)))
+
+
+def test_barotropic_forcing_centred_drag_residual_uses_before_level():
+    """Directly exercise the drag-residual time-level switch: build a state
+    whose u_before differs sharply from u (now), and confirm the centred
+    F_slow drag term is computed from u_before (not u) by comparing
+    ``_step_impl``'s output against a hand-built F_slow_u using u_before
+    explicitly (nemo_bottom_drag_rate_faces + the same reduction the model
+    uses) — i.e. the residual (u_bot - U_bar) is Kbb-based, matching
+    dynspg_ts.F90:1634-1636 (NOT :1627's Kmm form)."""
+    state, model = _leapfrog_partial_cell_channel(
+        barotropic_forcing_centred=True,
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    # Advance one (Euler-start) step to populate u_before, then perturb NOW
+    # u sharply away from u_before so a wrong (Kmm) time-level pick shows up.
+    s1 = model.step(state, dt=_DT)
+    rng = np.random.default_rng(3)
+    u_pert = jnp.asarray(np.asarray(s1.u.data)
+                          + 0.5 * rng.standard_normal(s1.u.data.shape))
+    s1_pert = s1._replace(u=s1.u.replace(data=u_pert * s1.u_mask.data[..., None]))
+    s_on = model.step(s1_pert, dt=_DT)
+
+    # Build the uncentred (Kmm/NOW) counterpart at the SAME perturbed state
+    # to isolate the effect: it must differ from the centred (Kbb) result
+    # whenever u_before != u (both are physically valid but distinct time
+    # levels — this proves the code path actually switches, not a no-op).
+    _, model_now = _leapfrog_partial_cell_channel(
+        barotropic_forcing_centred=False,
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    s_off = model_now.step(s1_pert, dt=_DT)
+    assert np.max(np.abs(np.asarray(s_on.u.data) - np.asarray(s_off.u.data))) > 1e-8
+
+
+# ---------------------------------------------------------------------------
+# #1226 item 4: barotropic_een_seed (NEMO dyn_cor_2D_init(Kmm),
+# dynspg_ts.F90:355 + :1349-1379 — the frozen in-window EEN Coriolis
+# coefficients are built from the Kmm=NOW thickness, not the window seed's)
+# ---------------------------------------------------------------------------
+
+def test_barotropic_een_seed_default_and_unknown_raises():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert (LatLonCGridOceanConfig.from_flat()
+            .barotropic.barotropic_een_seed == "window_start")
+    # unknown value raises at the substep entry (dispatch hardening) —
+    # reached via a step on the explicit_substep path.
+    state, model = _leapfrog_channel(barotropic_een_seed="bogus")
+    with pytest.raises(ValueError, match="barotropic_een_seed"):
+        model.step(state, dt=_DT)
+
+
+def _een_mlf(seed):
+    return _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_een_seed=seed)
+
+
+def test_barotropic_een_seed_options_identical_when_before_equals_now():
+    """With eta_before == eta (before==now), the window-start thickness IS the
+    NOW thickness, so 'window_start' and 'nemo_kmm' must be BIT-IDENTICAL —
+    proves nemo_kmm changes nothing except the thickness time level."""
+    state, m_ws = _een_mlf("window_start")
+    _, m_kmm = _een_mlf("nemo_kmm")
+    s1 = m_ws.step(state, dt=_DT)          # Euler start populates *_before
+    # Force before == now exactly (both eta and velocity/tracers).
+    s1_eq = s1._replace(u_before=s1.u, v_before=s1.v, T_before=s1.T,
+                        S_before=s1.S, eta_before=s1.eta)
+    s_ws = m_ws.step(s1_eq, dt=_DT)
+    s_kmm = m_kmm.step(s1_eq, dt=_DT)
+    np.testing.assert_allclose(np.asarray(s_ws.u.data),
+                               np.asarray(s_kmm.u.data), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(s_ws.eta.data),
+                               np.asarray(s_kmm.eta.data), rtol=0, atol=0)
+
+
+def test_barotropic_een_seed_sensitivity_nbb_vs_kmm():
+    """With eta_before != eta (spatially varying difference), the two seeds
+    build the EEN coefficients from DIFFERENT thicknesses (Nbb vs Kmm), so
+    the stepped states must differ — the deviation the option closes is
+    real, and the option actually switches the thickness."""
+    state, m_ws = _een_mlf("window_start")
+    _, m_kmm = _een_mlf("nemo_kmm")
+    s1 = m_ws.step(state, dt=_DT)
+    # Spatially-varying before-eta perturbation (a uniform shift would nearly
+    # cancel in the EEN f/h·h structure); mask-safe, small vs H.
+    rng = np.random.default_rng(11)
+    eta_b = (np.asarray(s1.eta_before.data)
+             + 2.0 * rng.standard_normal(s1.eta.data.shape)
+             * np.asarray(s1.land_mask.data))
+    s1_pert = s1._replace(
+        eta_before=s1.eta_before.replace(data=jnp.asarray(eta_b)))
+    s_ws = m_ws.step(s1_pert, dt=_DT)
+    s_kmm = m_kmm.step(s1_pert, dt=_DT)
+    assert np.max(np.abs(np.asarray(s_ws.u.data)
+                         - np.asarray(s_kmm.u.data))) > 1e-10

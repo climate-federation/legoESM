@@ -107,17 +107,26 @@ class CouplerConfig(NamedTuple):
     # SurfaceLayerConfig.thermo_convention by run_coupled.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default,
-    # historical -5*zeta), "beljaars_holtslag1991", "grachev2007_sheba"
-    # (Arctic/SHEBA), "gryanik2020".  Unstable branch is Businger-Dyer for
-    # every choice; validated at dispatch (unknown -> ValueError).
+    # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default;
+    # historical -5*zeta on most/large_yeager, and on coare3 the SENTINEL for
+    # the byte-identical COARE-native stable form — itself BH91 with rounded
+    # constants, see bulk_flux.psi_m_coare), "beljaars_holtslag1991",
+    # "grachev2007_sheba" (Arctic/SHEBA), "gryanik2020".  Unstable branch is
+    # Businger-Dyer (Fairall blend on coare3) for every choice; validated at
+    # dispatch (unknown -> ValueError).
     stability_scheme: str = "dyer1974"
     z_ref: float = 10.0               # Wind reference height [m]
     # Air temperature / specific humidity reference heights. Default to
     # z_ref for legacy single-height callers (lake, idealized adapter,
-    # AMIP-style runs that read from the lowest atm level). For OMIP /
-    # JRA55-do, set both to 2.0 — the reanalysis delivers ``tas`` and
-    # ``huss`` at 2 m while ``uas, vas`` are at 10 m.
+    # AMIP-style runs that read from the lowest atm level).  For OMIP-2 /
+    # JRA55-do keep them at 10.0: the v1.4.0 files carry an explicit
+    # ``height = 10.0 m`` coordinate on ``tas`` and ``huss`` as well as on
+    # ``uas``/``vas``, and FESOM2 forces the same dataset with
+    # ``ncar_bulk_z_tair = ncar_bulk_z_shum = 10.0``.  This comment
+    # previously said 2.0 (the CF ``comment`` string on ``tas`` says
+    # "usually, 2 meter", which is CMOR-table boilerplate contradicted by the
+    # file's own coordinate); declaring the 10 m state at 2 m inflates the
+    # turbulent fluxes by ~10 %.
     z_t_atm: float = 10.0             # Air-temperature reference height [m]
     z_q_atm: float = 10.0             # Specific-humidity reference height [m]
     bulk_n_iter: int = 5              # MOST iterations (coare3/large_yeager)

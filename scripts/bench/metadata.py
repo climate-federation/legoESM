@@ -108,6 +108,20 @@ def _env_flag_true(name: str) -> bool:
 _COLLECTIVE_PERMUTE_RE = re.compile(r"collective[_-]permute(?:[_-]start)?\(")
 
 
+def _count_op_calls(hlo_text: str, rx: "re.Pattern[str]") -> int:
+    """Count lines of ``hlo_text`` matching the op-call regex ``rx``.
+
+    The ``-done``/``_done`` async companion is excluded STRUCTURALLY by the
+    regex — ``op(?:[_-]start)?\\(`` cannot match ``op-done(`` (the char after
+    the op name is ``-``/``_``, not ``(`` or a ``start`` suffix) — so no
+    substring ``"done" not in line`` filter is used: that filter would
+    false-drop a legitimate collective whose line merely CONTAINS "done"
+    elsewhere (an XLA ``metadata={op_name="…/done_stage/…"}`` tag, a
+    ``%done_mass`` SSA name).  The ``\\(`` op-call anchor still keeps a
+    config-header ``XLA_FLAGS`` echo (a flag name, no paren) from inflating."""
+    return sum(1 for line in hlo_text.splitlines() if rx.search(line))
+
+
 def count_collective_permutes(hlo_text: str) -> int:
     """Count ``collective_permute`` OPS in a lowered/compiled HLO text dump.
 
@@ -115,14 +129,11 @@ def count_collective_permutes(hlo_text: str) -> int:
     count is fixed by the partition/edge-coloring schedule, not the data), so
     it is the round-count metric #1113 needs to decompose multi-node overhead.
     Matches the op-call form only (StableHLO underscore + optimized-XLA hyphen,
-    async ``-start`` counted once, ``-done`` companion excluded), so
-    config-header flag names that merely CONTAIN "collective_permute" never
+    async ``-start`` counted once, ``-done`` companion excluded by the regex),
+    so config-header flag names that merely CONTAIN "collective_permute" never
     inflate the count.  Canonical for every bench that reports
     ``hlo_collective_permutes`` (cube tiled, MPAS ico) — no re-implementation."""
-    return sum(
-        1 for line in hlo_text.splitlines()
-        if _COLLECTIVE_PERMUTE_RE.search(line) and "done" not in line
-    )
+    return _count_op_calls(hlo_text, _COLLECTIVE_PERMUTE_RE)
 
 
 def hlo_collective_permutes(fn, *args) -> int | None:
@@ -135,14 +146,82 @@ def hlo_collective_permutes(fn, *args) -> int | None:
     (#1175, ``MPAS_CP_COMBINE``) fuses rounds during optimization — the whole
     metric #1113 tracks. Pre-optimization StableHLO would overstate CPs versus
     the timed executable. Matches the cube tiled bench, which compiles too.
-    Returns ``None`` (never raises) if lowering/compilation is unsupported, so
-    a timing probe can record "unknown" rather than crash."""
+    Returns ``None`` (never raises) if lowering/compilation is unsupported OR
+    the backend's ``as_text()`` yields no HLO, so a timing probe can record
+    "unknown" rather than crash."""
     import jax
     try:
         text = jax.jit(fn).lower(*args).compile().as_text()
+        return count_collective_permutes(text) if text else None
     except Exception:
         return None
-    return count_collective_permutes(text)
+
+
+def _op_call_re(op_name: str) -> "re.Pattern[str]":
+    """Op-call-form matcher for a single HLO collective ``op_name``.
+
+    ``op_name`` is the hyphen spelling (``"all-reduce"``).  Matches BOTH the
+    optimized-XLA hyphen and StableHLO underscore spellings, an optional async
+    ``-start``/``_start`` suffix, and requires the ``(`` op-call form so a
+    config-header ``XLA_FLAGS`` echo that merely CONTAINS the op name can never
+    inflate the count (same guard as :data:`_COLLECTIVE_PERMUTE_RE`)."""
+    stem = op_name.replace("-", "[_-]")
+    return re.compile(stem + r"(?:[_-]start)?\(")
+
+
+#: Every collective OP family a scaling row can run.  ``collective-permute`` is
+#: the band/face halo (reuse the canonical permute regex so its count stays
+#: bit-identical to :func:`count_collective_permutes`); ``all-reduce`` is the
+#: conservation fixer AND the ocean implicit-CN PCG reduction wall (~120/step —
+#: the #1 ocean strong-scaling bottleneck, invisible to a permute-only census);
+#: the rest surface any SPMD resharding an operator introduces.
+_COLLECTIVE_OP_RES: dict[str, "re.Pattern[str]"] = {
+    "collective_permute": _COLLECTIVE_PERMUTE_RE,
+    "all_reduce": _op_call_re("all-reduce"),
+    "all_gather": _op_call_re("all-gather"),
+    "all_to_all": _op_call_re("all-to-all"),
+    "reduce_scatter": _op_call_re("reduce-scatter"),
+}
+
+
+def count_collectives(hlo_text: str) -> dict[str, int]:
+    """Full per-family collective census of a lowered/compiled HLO text dump.
+
+    Superset of :func:`count_collective_permutes`: adds ``all_reduce`` (the
+    reduction wall that dominates ocean implicit-CN strong scaling and hides
+    from a permute-only count), ``all_gather``, ``all_to_all``,
+    ``reduce_scatter``.  Same STATIC, op-call-form discipline (see
+    :func:`_count_op_calls`: config-header flag names never inflate; an async
+    collective counts once via ``-start`` with its ``-done`` companion excluded
+    by the regex, NOT by a fragile line-wide substring test).  Keys are
+    underscore-normalized op names plus a ``total``.  Canonical census for the
+    scaling-diagnosis tool and the SPMD benches — no re-implementation."""
+    counts = {key: _count_op_calls(hlo_text, rx)
+              for key, rx in _COLLECTIVE_OP_RES.items()}
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def hlo_collective_census(fn, *args) -> dict[str, int] | None:
+    """Best-effort full collective census of the COMPILED HLO of ``fn(*args)``.
+
+    Superset of :func:`hlo_collective_permutes` — compiles (so combined /
+    pipelined collectives are reflected as executed, not as emitted) and runs
+    :func:`count_collectives`.  Returns ``None`` (never raises) if
+    lowering/compilation is unsupported OR the backend's ``as_text()`` yields
+    no HLO, so a probe records "unknown" not a crash.
+
+    NOTE the count is device-count- and FLAG-dependent: the DEFAULT schedule is
+    reproducible from a CPU virtual-device compile, but GPU-only XLA collective
+    combining / pipelined-p2p (``--xla_gpu_collective_permute_combine_*``, lane
+    T) can lower the optimized count — which is exactly why the cluster jobs run
+    this against the REAL on-device executable, not a CPU proxy."""
+    import jax
+    try:
+        text = jax.jit(fn).lower(*args).compile().as_text()
+        return count_collectives(text) if text else None
+    except Exception:
+        return None
 
 
 def _is_empty(v: Any) -> bool:
@@ -816,6 +895,7 @@ def timed_scan_blocks(
     n_blocks: int = 2,
     probe_steps: int = 3,
     sync_label: str = "timed_scan_blocks",
+    aux=None,
 ):
     """Measurement-contract timing: fused ``lax.scan`` blocks + probe latency.
 
@@ -926,10 +1006,18 @@ def timed_scan_blocks(
             from jax.experimental import multihost_utils
             multihost_utils.sync_global_devices(f"{sync_label}_{tag}")
 
+    # Normalize to a 2-arg advance (see the aux note below): top-level
+    # calls here are outside any trace, so passing aux is just an argument.
+    if aux is None:
+        def _advance(carry, _aux):
+            return advance(carry)
+    else:
+        _advance = advance
+
     # --- 1. compile (first call of advance, separated from all timing) ---
     _fence("compile_start")
     t0 = time.perf_counter()
-    state = advance(state)
+    state = _advance(state, aux)
     _block(state)
     compile_ms = (time.perf_counter() - t0) * 1e3
 
@@ -938,7 +1026,7 @@ def timed_scan_blocks(
     probe_ms = []
     for _ in range(probe_steps):
         t0 = time.perf_counter()
-        state = advance(state)
+        state = _advance(state, aux)
         _block(state)
         probe_ms.append((time.perf_counter() - t0) * 1e3)
     step_latency_ms = float(np.median(probe_ms)) if probe_ms else float("nan")
@@ -947,10 +1035,16 @@ def timed_scan_blocks(
     input_dtypes = jax.tree_util.tree_map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
+    # ``aux``: extra pytree threaded through the jit boundary as an ARGUMENT
+    # (never a closure capture). Needed when ``advance`` internally calls a
+    # jit function over SHARDED-global auxiliary arrays (the ocean band
+    # geometry stacks): jit-of-jit inlines the inner call, so concrete
+    # closure arrays would become outer-trace CONSTANTS whose value the MLIR
+    # handler cannot fetch for non-addressable arrays (2026-08-03 repro).
     @jax.jit
-    def _scan_run(st):
+    def _scan_run(st, _aux):
         def _body(carry, _):
-            new = advance(carry)
+            new = _advance(carry, _aux)
             new = jax.tree_util.tree_map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -967,7 +1061,7 @@ def timed_scan_blocks(
     # schedule — counts stay matched.
     _pre = jax.tree_util.tree_map(lambda x: x, state)
     t0 = time.perf_counter()
-    _pre_out = _scan_run(_pre)
+    _pre_out = _scan_run(_pre, aux)
     _block(_pre_out)
     scan_compile_ms = (time.perf_counter() - t0) * 1e3
     del _pre, _pre_out
@@ -976,7 +1070,7 @@ def timed_scan_blocks(
     for b in range(n_blocks):
         _fence(f"block{b}_start")
         t0 = time.perf_counter()
-        state = _scan_run(state)
+        state = _scan_run(state, aux)
         _block(state)
         block_ms.append((time.perf_counter() - t0) * 1e3)
     _fence("blocks_end")

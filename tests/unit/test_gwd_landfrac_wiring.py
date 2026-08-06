@@ -219,15 +219,76 @@ def test_e3sm_orographic_source_gets_no_netdt():
     assert "netdt_col" not in rec.kwargs
 
 
-def test_e3sm_frontal_source_rejected_in_coupled_pipeline():
-    """Dispatch hardening: no dycore FRONTGF producer exists, so a coupled
-    frontal selection would be a silent no-op (kernel None -> zeros).  The
-    builder must reject it loudly."""
+def test_e3sm_frontal_source_threads_frontgf_on_latlon(monkeypatch):
+    """END-TO-END: with the frontal source on a SUPPORTED grid family
+    (lat-lon), the builder no longer rejects — it sets ``_gwd_takes_frontgf``
+    and the kernel receives ``frontgf_col`` from the frontogenesis producer.
+    The producer is replaced by a sentinel emitting a LEVEL- and
+    COLUMN-DISTINCT array so the assert catches a transpose / wrong-source
+    array (mirrors the netdt sentinel test)."""
+    from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
     over = GravityWaveDragConfig(
         scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="frontal", pgwv=8))
+    grid, pipe = _pipe_over(over, convection="none")
+    assert pipe._gwd_takes_frontgf is True
+
+    ncol = NLAT * NLON
+    sentinel = (jnp.arange(ncol)[:, None] * 10.0
+                + jnp.arange(NLEV)[None, :]) * 1e-6   # distinct per (col, lev)
+    seen = {}
+
+    def fgf_stub(u, v, T, p_full, grid_arg):
+        seen["grid"] = grid_arg
+        return sentinel, jnp.zeros_like(sentinel)
+
+    monkeypatch.setattr(frontogenesis, "compute_frontogenesis", fgf_stub)
+    rec = _Recorder()
+    pipe.gwd_fn = rec
+    _run_step(grid, pipe)
+    assert rec.kwargs is not None
+    assert "frontgf_col" in rec.kwargs, "frontgf_col not threaded to the kernel"
+    fg = rec.kwargs["frontgf_col"]
+    assert fg.shape == (ncol, NLEV)
+    assert jnp.array_equal(fg, sentinel), (
+        "frontgf_col is not the producer's array (transpose/wrong source)")
+    assert seen["grid"] is pipe._grid, "producer must receive the pipeline grid"
+
+
+def test_e3sm_frontal_source_rejected_on_unsupported_grid(monkeypatch):
+    """Dispatch hardening RETAINED where no producer exists: when the grid
+    family is unsupported (cubed-sphere / MPAS today) the builder still
+    rejects the frontal selection loudly — the kernel's frontgf_col=None ->
+    zeros path would otherwise be a silent no-op."""
+    from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMCAMConfig,
+        GravityWaveDragConfig,
+    )
+    monkeypatch.setattr(
+        frontogenesis, "frontogenesis_supported", lambda g: False)
+    over = GravityWaveDragConfig(
+        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="frontal", pgwv=8))
     with pytest.raises(ValueError, match="frontal.*not.*wired|FRONTGF"):
         _pipe_over(over, convection="none")
+
+
+def test_e3sm_nonfrontal_sources_never_send_frontgf():
+    """Orographic / convective sources: the flag stays False and no
+    frontgf kwarg is sent (no useless per-step producer calls)."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMCAMConfig,
+        GravityWaveDragConfig,
+    )
+    for src in ("orographic", "convective"):
+        grid, pipe = _pipe_over(GravityWaveDragConfig(
+            scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source=src, pgwv=8)))
+        assert pipe._gwd_takes_frontgf is False
+        rec = _Recorder()
+        pipe.gwd_fn = rec
+        _run_step(grid, pipe)
+        assert rec.kwargs is not None
+        assert "frontgf_col" not in rec.kwargs

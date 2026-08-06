@@ -72,8 +72,18 @@ def _driver_key_sets():
     candidates = _candidate_keys()
     omip_keys = _routable_keys(omip_build(omip_args(["--grid", "latlon"])),
                                candidates)
-    lmip_keys = _routable_keys(lmip_build(lmip_args(["--lat", "0.0"])),
-                               candidates)
+    # run_lmip coverage is the UNION over the user-selectable land-surface
+    # schemes: --land-surface-scheme {simple_seb (default), two_leaf, clm_ml}
+    # each constructs a DIFFERENT nested surface *Config (SimpleSEBConfig /
+    # TwoLeafCanopyConfig / CLMMLConfig) BEFORE --params is spliced, so a param
+    # in TwoLeafCanopyConfig/CLMMLConfig is reachable under its scheme even
+    # though the default simple_seb config does not carry it.
+    lmip_keys: set = set()
+    for _scheme in ("simple_seb", "two_leaf", "clm_ml"):
+        lmip_keys |= _routable_keys(
+            lmip_build(lmip_args(
+                ["--lat", "0.0", "--land-surface-scheme", _scheme])),
+            candidates)
 
     # run_coupled --params bundle: the PRODUCTION routing bundle main()
     # applies (scripts/run/run_coupled.py::build_params_bundle — the coupled

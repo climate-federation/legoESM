@@ -87,9 +87,9 @@ rejects a wrong file/flag combination loudly.
 ### Production physics defaults
 
 The deck pins a faithful, validated stack (override any with the matching
-flag): **RRTMG** radiation, **Morrison** double-moment microphysics
-(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **SBM**
-convection, **Louis** PBL, with **aerosol→CCN** coupling (Andreae 2009) and
+flag): **RRTMG correlated-k** radiation, **Morrison double-moment** microphysics
+(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **Bechthold (mass flux)**
+convection, **Louis (first order)** PBL, **McFarlane (orographic)** GWD, **Hines (non-orographic)** GWD, with **aerosol→CCN** coupling (Andreae 2009) and
 **zenith-dependent ocean albedo** (Briegleb 1992) on the pipeline grids.
 `--dt-auto` picks each grid's stability-ladder timestep (C36→150 s,
 latlon72→75 s, T47→150 s, voronoi→300 s) so long runs cannot blow up.
@@ -148,7 +148,7 @@ The AMIP driver (`scripts/run/run_amip.py`) couples:
 - **Large-scale condensation**: Saturation adjustment with latent heating
 - **Clouds**: Diagnostic cloud fraction (`--clouds {none,sundqvist,xu_randall}`) coupled to RRTMG radiation
 - **Microphysics**: Selectable via `--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson}` (deck default: `morrison`)
-- **Ozone**: Selectable via `--ozone-source {standard,analytical,none}`
+- **Ozone**: Selectable via `--ozone-source {standard,analytical,mls,none}`
 - **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
   albedo, and emissivity
@@ -197,7 +197,7 @@ JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
 | CO2 | **Active, prescribed** | CLI `--co2-ppmv` | Default 415 ppmv; uniform in space and time |
 | CH4 | **Active, prescribed** | CLI `--ch4-ppbv` | Default 1900 ppbv; uniform |
 | N2O | **Active, prescribed** | CLI `--n2o-ppbv` | Default 332 ppbv; uniform |
-| O3 | **Active, prescribed** | `--ozone-source` | `standard` (US Std Atm), `analytical` (lat-dependent Gaussian), or `none` |
+| O3 | **Active, prescribed** | `--ozone-source` | `standard` (US Std Atm), `analytical` (lat-dependent Gaussian), `mls` (SAM RCEMIP MLS climatology), or `none` |
 | CFCs | Not included | — | Not in current gas optics files |
 | Clouds | **Active (optional)** | `--clouds` | `none` (clear-sky), `sundqvist`, or `xu_randall`; coupled to RRTMG cloud optics |
 | Aerosols | **Not included** | — | Clear-sky; no aerosol optical depth |
@@ -398,7 +398,7 @@ path given by `--output`) containing:
 | Diurnal cycle | **Active** | Instantaneous cos(SZA) per column; `--diurnal-cycle` |
 | Cloud-radiation coupling | **Active** | Sundqvist or Xu-Randall cloud fraction → RRTMG optics |
 | Microphysics | **Active** | Kessler warm-rain or Sundqvist; `--microphysics` |
-| Ozone | **Active** | Standard (US Std Atm) or analytical (lat-dependent); `--ozone-source` |
+| Ozone | **Active** | Standard (US Std Atm), analytical (lat-dependent), or MLS climatology; `--ozone-source` |
 | Dynamic albedo | **Active** | Temperature/zenith-dependent ice+snow albedo; `--dynamic-albedo` |
 | Energy budget | **Active** | Online column energy, TOA balance, residual tracking |
 | Monthly means | **Active** | Zonal-mean and global-mean monthly accumulation; `--monthly-means` |
@@ -453,7 +453,7 @@ are available but not yet validated for AMIP-length runs.
 --co2-ppmv FLOAT                  CO2 concentration [ppmv] for RRTMG (default: 415)
 --ch4-ppbv FLOAT                  CH4 concentration [ppbv] for RRTMG (default: 1900)
 --n2o-ppbv FLOAT                  N2O concentration [ppbv] for RRTMG (default: 332)
---ozone-source {standard,analytical,none}  Ozone profile (default: standard)
+--ozone-source {standard,analytical,mls,none}  Ozone profile (default: standard)
 --clouds {none,sundqvist,xu_randall}       Cloud fraction scheme (default: none)
 
 # Physics

@@ -523,6 +523,7 @@ def create_mercator_grid(
     *,
     equator_on_tpoint: bool = False,
     n_lat: int | None = None,
+    metric_convention: str = "exact",
 ) -> LatLonGrid:
     """Mercator (isotropic) latitude-longitude grid.
 
@@ -533,6 +534,28 @@ def create_mercator_grid(
     scaling of the first baroclinic deformation radius (Hallberg 2013),
     and the placement used by NEMO's DINO ocean test case (Kamm et al.
     2025, GMD).
+
+    ``metric_convention`` (#1226) selects how the T/u-face metrics
+    ``dy``/``area`` are computed from the (unchanged) cell/face
+    *latitude placement*:
+
+    * ``"exact"`` (default, BIT-IDENTICAL to every existing caller) —
+      ``dy`` is the true finite difference of face latitudes and
+      ``area`` the exact spherical-cap integral (see below).
+    * ``"nemo_isotropic"`` — reproduces NEMO's ``usr_def_hgr.F90``
+      DINO closed form verbatim: ``pe1t = pe2t = ra * rad *
+      cos(rad*phi_T) * rn_e1_deg`` (usr_def_hgr.F90, DINO
+      ``vopikamm/DINO@v0.2.0``, the ``ppglam``/isotropic branch) —
+      i.e. NEMO sets the meridional cell height EQUAL to the zonal
+      cell width at every row (``dy(j) := dx_single(j)``) instead of
+      the true ``R·Δφ(j)``, and ``area := dx_single(j)²``.  This is a
+      DELIBERATE closed-form approximation NEMO makes, not a more
+      exact grid — legoESM's ``"exact"`` default is geometrically
+      MORE correct.  Only the cell latitudes/faces (``lat``,
+      ``lat_v``, and therefore ``cos_lat_v``/``f``) are shared between
+      both conventions; ``"nemo_isotropic"`` does NOT touch them, so
+      the #516 v-face metric (``vface_zonal_cos_lat``, derived from
+      cell-center latitudes) is unaffected by this flag.
 
     Placement formula
     -----------------
@@ -579,6 +602,10 @@ def create_mercator_grid(
     dtype : optional
         Storage dtype for the JAX arrays. Defaults to the current
         precision policy.
+    metric_convention : {"exact", "nemo_isotropic"}, optional
+        T/u-face metric convention (see above). Default ``"exact"``
+        keeps every existing caller BIT-IDENTICAL. Raises
+        ``ValueError`` on any other value.
 
     Returns
     -------
@@ -607,6 +634,11 @@ def create_mercator_grid(
         raise ValueError(
             f"lon_east_deg ({lon_east_deg}) must exceed "
             f"lon_west_deg ({lon_west_deg})"
+        )
+    if metric_convention not in ("exact", "nemo_isotropic"):
+        raise ValueError(
+            f"metric_convention must be 'exact' or 'nemo_isotropic', "
+            f"got {metric_convention!r}"
         )
 
     if dtype is None:
@@ -680,20 +712,36 @@ def create_mercator_grid(
 
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, n_lon))
 
-    # dy(j) = 2 · R · (lat_face[j+1] - lat_face[j])  — "2-cell distance".
-    # For Mercator this varies per row (decreases poleward).
-    dy_cell = radius * (lat_face[1:] - lat_face[:-1])           # (n_lat,)
-    dy = 2.0 * dy_cell
-
     # dx(j, i) = 2 · R · cos(lat_c(j)) · dlon (2-cell convention).
     dx = radius * 2.0 * dlon * cos_lat[:, None] * jnp.ones((1, n_lon))
 
-    # Cell area: R² · dlon · |sin(lat_face[j+1]) - sin(lat_face[j])|.
-    # Equivalent to ∫∫ R² cos(φ) dφ dλ — exact for any orthogonal
-    # spherical grid, not assuming uniform dlat.
-    sin_face = jnp.sin(lat_face)
-    area_lat = radius**2 * dlon * jnp.abs(sin_face[1:] - sin_face[:-1])  # (n_lat,)
-    area = area_lat[:, None] * jnp.ones((1, n_lon))
+    if metric_convention == "nemo_isotropic":
+        # NEMO usr_def_hgr.F90 (DINO, vopikamm/DINO@v0.2.0, the
+        # isotropic-Mercator branch): pe1t = pe2t = ra * rad *
+        # cos(rad*phi_T) * rn_e1_deg, i.e. the meridional cell height
+        # is SET EQUAL to the zonal cell width at every T-row (a
+        # deliberate closed-form approximation, not a re-derivation of
+        # the true finite-difference dy — #1226). Single-cell dy(j) :=
+        # single-cell dx(j); "2-cell" dy/area below follow the same
+        # 2-cell-span / area convention as the "exact" branch so the
+        # rest of the C-grid stack (which reads dy/area, never lat_v
+        # directly for these) is unaffected in shape/units.
+        dx_single = radius * dlon * cos_lat                      # (n_lat,)
+        dy = 2.0 * dx_single                                     # (n_lat,) "2-cell" span
+        area_lat = dx_single**2                                  # (n_lat,)
+        area = area_lat[:, None] * jnp.ones((1, n_lon))
+    else:
+        # dy(j) = 2 · R · (lat_face[j+1] - lat_face[j])  — "2-cell distance".
+        # For Mercator this varies per row (decreases poleward).
+        dy_cell = radius * (lat_face[1:] - lat_face[:-1])           # (n_lat,)
+        dy = 2.0 * dy_cell
+
+        # Cell area: R² · dlon · |sin(lat_face[j+1]) - sin(lat_face[j])|.
+        # Equivalent to ∫∫ R² cos(φ) dφ dλ — exact for any orthogonal
+        # spherical grid, not assuming uniform dlat.
+        sin_face = jnp.sin(lat_face)
+        area_lat = radius**2 * dlon * jnp.abs(sin_face[1:] - sin_face[:-1])  # (n_lat,)
+        area = area_lat[:, None] * jnp.ones((1, n_lon))
     total_area = jnp.sum(area)
 
     # Representative dlat — smallest cell-row dlat. Mercator cell-row
@@ -972,6 +1020,8 @@ def create_stretched_latlon_grid(
 def ensure_geometry(
     grid,
     omega: float | None = None,
+    *,
+    metric_convention: str = "exact",
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
 
@@ -994,6 +1044,13 @@ def ensure_geometry(
         through the conversion — the previous ``constants.Omega``
         default silently re-rotated it (#521, codex 2026-07-03
         round-4 HIGH).
+    metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
+        Forwarded to :func:`create_latlon_geometry` when converting
+        from a ``LatLonGrid`` (a no-op when *grid* is already a
+        ``LatLonCGridGeometry`` — the duck-type/isinstance early
+        returns above skip conversion entirely, so an already-built
+        geometry's convention cannot be changed here). Default
+        ``"exact"`` is BIT-IDENTICAL to every existing caller.
 
     Returns
     -------
@@ -1029,6 +1086,7 @@ def ensure_geometry(
         # grids never consult the faces (scalar-dlat branch), so their
         # geometries are bit-unchanged.
         lat_face_1d=getattr(grid, "lat_v", None),
+        metric_convention=metric_convention,
     )
 
 
@@ -1146,6 +1204,12 @@ class LatLonCGridGeometry(NamedTuple):
     cos_lat, sin_lat : jax.Array
         Legacy 1D arrays (n_lat,) for backward compatibility with
         operators that have not yet been migrated to per-cell metrics.
+    cos_lat_v : jax.Array
+        Legacy 1D array (n_lat+1,) of ``|cos(lat_v)|`` at the TRUE v-face
+        latitudes, matching ``LatLonGrid.cos_lat_v``.  On a stretched grid
+        the true faces are NOT the midpoints of ``lat`` (NEMO DINO: 2.5e-4
+        relative), so a consumer needing ``cos(gphiv)`` -- e.g. NEMO's
+        independently-evaluated ``ahtv`` -- must read this, not rebuild it.
     lat, lon : jax.Array
         Legacy 1D arrays (n_lat,) and (n_lon,).
     dlon, dlat : float
@@ -1195,6 +1259,7 @@ class LatLonCGridGeometry(NamedTuple):
     # Legacy compatibility fields
     cos_lat: jax.Array  # (n_lat,) clamped cos(lat) at cell centers
     sin_lat: jax.Array  # (n_lat,) sin(lat) at cell centers
+    cos_lat_v: jax.Array  # (n_lat+1,) clamped |cos(lat_v)| at v-faces
     lat: jax.Array      # (n_lat,) 1D cell-center latitudes [rad]
     lon: jax.Array      # (n_lon,) 1D cell-center longitudes [rad]
     dlon: float         # scalar longitude spacing (0.0 sentinel for tripole)
@@ -1318,6 +1383,7 @@ def create_latlon_geometry(
     lat_1d: jax.Array | None = None,
     lon_1d: jax.Array | None = None,
     lat_face_1d: jax.Array | None = None,
+    metric_convention: str = "exact",
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
 
@@ -1359,11 +1425,37 @@ def create_latlon_geometry(
         u-centred stretched placement's interior but not at its wall
         rows, and only approximate on Mercator.  Ignored on
         uniform-dlat grids (scalar-dlat branch).
+    metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
+        T/u-face metric convention for ``dy_T``/``dy_u``/``area_T`` on
+        a variable-dlat (Mercator) grid, mirroring
+        :func:`create_mercator_grid`'s parameter of the same name.
+        Default ``"exact"`` (the true finite-difference ``dy_T = R·Δφ``
+        and exact spherical-cap ``area_T``) is BIT-IDENTICAL to every
+        existing caller. ``"nemo_isotropic"`` reproduces NEMO's
+        ``usr_def_hgr.F90`` DINO closed form (``pe1t = pe2t``, see
+        :func:`create_mercator_grid`'s docstring for the full citation)
+        for ``dy_T``/``dy_u``/``area_T`` ONLY.  The v-face metrics
+        (``dx_v``, ``dy_v``, ``cos_lat_v``) and the vertex area
+        (``area_q``) are the #516 single-source v-face invariant
+        (:func:`legoesm.ocean.dynamics.latlon_cgrid_operators.
+        vface_zonal_cos_lat`, tested by
+        ``tests/ocean/unit/test_vface_metric_consistency_mercator.py``)
+        and are DELIBERATELY left on the exact finite-difference
+        convention regardless of this flag — do not extend
+        ``metric_convention`` to touch them without re-reading that
+        test file. Raises ``ValueError`` on any other value. Ignored
+        on uniform-dlat grids (scalar-dlat branch has no ``dlat_1d``
+        to override).
 
     Returns
     -------
     LatLonCGridGeometry
     """
+    if metric_convention not in ("exact", "nemo_isotropic"):
+        raise ValueError(
+            f"metric_convention must be 'exact' or 'nemo_isotropic', "
+            f"got {metric_convention!r}"
+        )
     if n_lon is None:
         n_lon = 2 * n_lat
 
@@ -1468,9 +1560,15 @@ def create_latlon_geometry(
         area_legacy = area_lat_1d[:, None] * jnp.ones((1, n_lon))
     else:
         dlat_1d = None  # uniform — use scalar dlat everywhere
+        lat_face = (lat_face_1d if lat_face_1d is not None
+                    else compute_v_face_coords(lat_1d, dlat)[0])
         area_legacy = _exact_uniform_cell_area_lat(
             radius, lat_1d, dlat, dlon, n_lon
         )
+    # TRUE v-face cos, same clamp as compute_v_face_coords so this agrees
+    # with the bridged LatLonGrid to storage-dtype roundoff (not bit-exact:
+    # the grid casts lat_v then cos's, this cos's the faces then casts).
+    cos_lat_v_1d = jnp.maximum(jnp.abs(jnp.cos(lat_face)), 1e-10)
 
     total_area = jnp.sum(area_legacy)
 
@@ -1485,14 +1583,34 @@ def create_latlon_geometry(
     # ------- T-point metrics -------
     # Single-cell zonal width: R * dlon * cos(lat)
     dx_T = radius * dlon * cos_lat_s[:, jnp.newaxis] * jnp.ones((1, n_lon))
-    # Single-cell meridional height
-    if dlat_1d is not None:
-        # Variable dlat (Mercator): per-row cell height
-        dy_T = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon))
+
+    if metric_convention == "nemo_isotropic":
+        # NEMO usr_def_hgr.F90 (DINO): pe1t = pe2t (see
+        # create_mercator_grid's docstring for the full citation). This
+        # OVERRIDES the T/u-face row height only -- NOT dlat_1d itself,
+        # which dy_v below still consumes unmodified, so the #516
+        # v-face metric is untouched by this flag (see the parameter
+        # docstring above).
+        dx_single_T = radius * dlon * cos_lat_s          # (n_lat,)
+        dy_row = dx_single_T                             # (n_lat,) := dx row
+        dy_T = dy_row[:, jnp.newaxis] * jnp.ones((1, n_lon))
+        area_T = (dy_row**2)[:, jnp.newaxis] * jnp.ones((1, n_lon))
+        dy_u = dy_row[:, jnp.newaxis] * jnp.ones((1, n_lon + 1))
     else:
-        dy_T = jnp.full((n_lat, n_lon), float(radius * dlat), dtype=dtype)
-    # Cell area — use exact spherical area for variable-dlat grids
-    area_T = _c(area_legacy)
+        # Single-cell meridional height
+        if dlat_1d is not None:
+            # Variable dlat (Mercator): per-row cell height
+            dy_T = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon))
+        else:
+            dy_T = jnp.full((n_lat, n_lon), float(radius * dlat), dtype=dtype)
+        # Cell area — use exact spherical area for variable-dlat grids
+        area_T = _c(area_legacy)
+
+        # dy_u = meridional extent of the u-face
+        if dlat_1d is not None:
+            dy_u = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon + 1))
+        else:
+            dy_u = jnp.full((n_lat, n_lon + 1), float(radius * dlat), dtype=dtype)
 
     # ------- u-point metrics (n_lat, n_lon+1) -------
     # dx_u = R * dlon * cos(lat) — same as gradient_x_cgrid uses.
@@ -1500,11 +1618,17 @@ def create_latlon_geometry(
         radius * dlon * cos_lat_s[:, jnp.newaxis]
         * jnp.ones((1, n_lon + 1))
     )
-    # dy_u = meridional extent of the u-face
-    if dlat_1d is not None:
-        dy_u = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon + 1))
-    else:
-        dy_u = jnp.full((n_lat, n_lon + 1), float(radius * dlat), dtype=dtype)
+
+    if metric_convention == "nemo_isotropic":
+        # total_area must track area_T's convention here (area_legacy /
+        # the pre-branch `total_area` above is always the exact-convention
+        # area). "exact" leaves the pre-branch `total_area` (summed from
+        # area_legacy BEFORE the storage-dtype cast) untouched -- summing
+        # the already-cast area_T here instead would silently change its
+        # accumulation dtype/order and shift bit-identical callers by
+        # float32 roundoff (caught by test_latlon_geometry.py::
+        # TestLatLonGridParity::test_area_parity).
+        total_area = jnp.sum(area_T)
 
     # ------- v-point metrics (n_lat+1, n_lon) -------
     # v-face latitudes: midpoints between cell centers, with poles at
@@ -1535,6 +1659,25 @@ def create_latlon_geometry(
         dy_v = dy_v_1d[:, jnp.newaxis] * jnp.ones((1, n_lon))
     else:
         dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
+    if metric_convention == "nemo_isotropic":
+        # NEMO usrdef_hgr.F90:117 -- pe2v = ra*rad*COS(rad*gphiv)*rn_e1_deg,
+        # the SAME expression as pe1v.  Under the isotropic convention the
+        # meridional v-point scale factor IS the zonal one, evaluated at the
+        # TRUE v-face latitude (cos_lat_v, NOT the pole-zeroed #516 transport
+        # metric).  legoESM's "exact" dy_v is the true finite-difference
+        # spacing instead, differing from NEMO's e2v by median 2.798e-05 /
+        # max 8.241e-03 -- which lands directly in ldf_slp's vslp, whose
+        # divisor is e2v (#1226; substituting NEMO's own e2v collapses vslp
+        # 1.609e-06 -> 3.807e-10, while the same substitution with e1u moves
+        # uslp 0.0%).
+        #
+        # This does NOT touch the #516 invariant: that governs dx_v (the
+        # ZONAL length of a v-face) via vface_zonal_cos_lat, and the
+        # strain/stress adjoint pair + divergence/advection mass consistency
+        # hold because every operator SHARES that metric, not because of its
+        # value.  dy_v is a different field and does not appear in either.
+        dy_v = (radius * dlon) * cos_lat_v_1d[:, jnp.newaxis] \
+            * jnp.ones((1, n_lon))
 
     # ------- Vertex (q-point) area (n_lat+1, n_lon+1) -------
     # Matches curl_vertex_cgrid: A_q(i) = R^2 * dlon * |sin(lat[i]) - sin(lat[i-1])|
@@ -1589,6 +1732,7 @@ def create_latlon_geometry(
         fold=fold,
         cos_lat=_c(cos_lat_1d),
         sin_lat=_c(sin_lat_1d),
+        cos_lat_v=_c(cos_lat_v_1d),
         lat=_c(lat_1d),
         lon=_c(lon_1d),
         dlon=float(dlon),
@@ -1777,6 +1921,7 @@ def create_beta_plane_cgrid_geometry(
         fold=_inactive_fold(n_lon),
         cos_lat=jnp.ones((n_lat,), dtype=dtype),
         sin_lat=jnp.zeros((n_lat,), dtype=dtype),
+        cos_lat_v=jnp.ones((n_lat + 1,), dtype=dtype),
         lat=_c(lat_1d),
         lon=_c(lon_1d),
         dlon=float(dx_m / radius),

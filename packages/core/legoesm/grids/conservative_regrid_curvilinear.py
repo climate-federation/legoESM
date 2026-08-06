@@ -62,11 +62,8 @@ scalar-only by construction.
 
 from __future__ import annotations
 
-import numpy as np
-from scipy.spatial import cKDTree
-
 import jax.numpy as jnp
-
+import numpy as np
 from legoesm.grids.conservative_regrid import (
     ConservativeRegridWeights,
     cell_edges_1d,
@@ -75,6 +72,7 @@ from legoesm.grids.conservative_regrid_unstructured import (
     triangle_subcells,
     unit_vector,
 )
+from scipy.spatial import cKDTree
 
 # Default per-cell sub-division.  ``n_sub**2`` sub-triangles per fan triangle
 # (2 fan triangles per lat-lon quad).  6 -> 72 sub-triangles/regular-cell, a
@@ -264,7 +262,8 @@ def make_regular_to_curvilinear_weights(
 
 
 def make_curvilinear_to_regular_weights(
-        trip_grid, reg_grid, *, n_sub: int = _DEFAULT_N_SUB) -> ConservativeRegridWeights:
+        trip_grid, reg_grid, *, n_sub: int = _DEFAULT_N_SUB,
+        src_wet=None) -> ConservativeRegridWeights:
     """Conservative remap weights ``tripole -> regular`` (ocean SST/currents ->
     atm).
 
@@ -276,6 +275,26 @@ def make_curvilinear_to_regular_weights(
     overlap, reg_shape, trip_shape = _overlap_regular_tripole(
         reg_grid, trip_grid, n_sub)
     n_reg = reg_shape[0] * reg_shape[1]
+    if src_wet is not None:
+        # H4: EXCLUDE ocean-grid LAND source cells -- their fill SST / zero
+        # currents must not bleed into coastal atm cells.  Drop every overlap
+        # pair whose TRIPOLE SOURCE cell is land (wet <= 0.5); the per-target
+        # partition-of-unity normalisation below then renormalises each atm cell
+        # over its surviving WET sources, so a coastal atm cell averages ONLY real
+        # ocean (a constant ocean field is still preserved exactly).  An atm cell
+        # with NO wet overlap (continental interior) keeps ZERO pairs -> its
+        # remapped value is 0 (finite, never the land fill); it is gated out
+        # downstream by the atm ocean fraction f_ocean == 0, so the 0 is unused.
+        # Baking the mask into the STATIC weights keeps the traced apply a pure
+        # segment_sum (AD unchanged).
+        n_trip = trip_shape[0] * trip_shape[1]
+        wet = np.asarray(src_wet, dtype=np.float64).reshape(-1)
+        if wet.size != n_trip:
+            raise ValueError(
+                f"src_wet size {wet.size} != tripole cells {n_trip} "
+                f"(shape {trip_shape}); the wet mask must be on the tripole "
+                "SOURCE grid, row-major.")
+        overlap = {k: a for k, a in overlap.items() if wet[k[0]] > 0.5}
     # Quadrature target-cell (regular) area = sum over all tripole source cells.
     dst_area = np.zeros(n_reg, dtype=np.float64)
     for (_t, r), a in overlap.items():
@@ -283,3 +302,11 @@ def make_curvilinear_to_regular_weights(
     # src = tripole (trip_cell), dst = regular (reg_cell).
     pairs = [(t, r, a) for (t, r), a in overlap.items()]
     return _assemble_weights(pairs, dst_area, trip_shape, reg_shape)
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet): the
+# cubed-sphere conservative regridder reuses the lat-lon tiling + point-location
+# quadrature core, so expose public aliases (definitions keep the underscore
+# name for in-module callers).
+tile_regular_grid = _tile_regular_grid
+locate_in_regular = _locate_in_regular

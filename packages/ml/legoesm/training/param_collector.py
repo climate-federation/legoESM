@@ -10,8 +10,9 @@ containing exactly the parameters selected by a tier threshold (and/or explicit
 include/exclude), with **per-parameterization sizes** resolved from the active
 config (e.g. a per-PFT field becomes an ``(n_pft,)`` array). Trained values are
 spliced back into the owning ``*Config`` NamedTuples via
-:func:`apply_param_overrides` inside the loss, so the leaves are *traced* (the
-SegmentForcing doctrine) while production keeps static Python-float leaves.
+:func:`legoesm.core.param_overrides.apply_param_overrides` inside the loss, so
+the leaves are *traced* (the SegmentForcing doctrine) while production keeps
+static Python-float leaves.
 
 Design notes:
   * The registry is an explicit list of spec-carrying modules (``SPEC_MODULES``),
@@ -47,18 +48,22 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.bottom_drag.config",
     "legoesm.ice.config",
     "legoesm.coupler.config",
+    "legoesm.coupler.coupled_latlon_band",
     "legoesm.coupler.lake.config",
     "legoesm.land.canopy.config",
+    "legoesm.land.canopy.interception",
     "legoesm.land.canopy.sif",
     "legoesm.land.carbon.config",
     "legoesm.land.stomata",
     "legoesm.land.config",
     "legoesm.land.global_surface_data",
+    "legoesm.land.land_use_change",
     "legoesm.land.pedotransfer",
     "legoesm.land.richards",
     "legoesm.land.soil_albedo",
     "legoesm.land.soil_grid",
     "legoesm.land.soil_hydraulics",
+    "legoesm.land.surface_scheme.patch_mosaic",
     "legoesm.land.topmodel_runoff",
     "legoesm.ocean.physics.convection.config",
     "legoesm.ocean.physics.ice_shelf",
@@ -83,6 +88,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.microphysics.arg_activation",
     "legoesm.atmosphere.physics.microphysics.prognostic_aerosol",
     "legoesm.atmosphere.physics.turbulence.config",
+    "legoesm.atmosphere.physics.turbulence.clubb",
     "legoesm.atmosphere.physics.turbulence.pbl_height",
     "legoesm.atmosphere.physics.radiation.config",
     "legoesm.atmosphere.physics.ml_parameterization",
@@ -326,23 +332,3 @@ def build_trainable_params(
             )
         )
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)
-
-
-def apply_param_overrides(config_obj, field_values: dict[str, jax.Array]):
-    """Return ``config_obj`` with ``field_values`` spliced in via ``_replace``.
-
-    ``config_obj`` is the scheme's ``*Config`` NamedTuple; ``field_values`` is one
-    scheme's slice of :meth:`TrainablePhysicsParams.to_overrides`. Unknown fields
-    raise ``ValueError`` (never a silent no-op). Applied inside the training loss
-    so the substituted leaves are traced."""
-    if not field_values:
-        return config_obj
-    fields = getattr(config_obj, "_fields", None)
-    if fields is None:
-        raise ValueError(f"{type(config_obj).__name__} is not a NamedTuple config")
-    bad = [k for k in field_values if k not in fields]
-    if bad:
-        raise ValueError(
-            f"{type(config_obj).__name__} has no field(s) {bad}; known: {list(fields)}"
-        )
-    return config_obj._replace(**field_values)

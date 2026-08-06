@@ -85,6 +85,10 @@ class SurfaceFluxOutput(NamedTuple):
     # ``LE_soil`` = LE_Soil; etc.  Useful for offline diagnostic drivers
     # that want to inspect the canopy internal partitioning.
     LE_canopy: jax.Array | None = None
+    # Wet-leaf evaporation part of ``LE_canopy`` [W/m^2] — the interception-loss
+    # flux sourced from the canopy-water store (two-leaf interception path).
+    # ``None`` when interception is off.
+    LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None

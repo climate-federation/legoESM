@@ -51,6 +51,16 @@
 # download in clm_surface_map.download_clm_surfdata() FAILS (SSL) — this file
 # MUST be staged locally and passed via --clm-surfdata-path (staged 2026-07-02).
 : "${CLM_SURFDATA:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+# Land-sea mask (sftlf, fraction) built from the SAME CLM surfdata by
+# scripts/data/build_sftlf_from_surfdata.py (2026-07-22). Without it f_land is
+# derived from ETOPO elevation>0, and ETOPO's inland-sea BATHYMETRY (Caspian
+# -28 m, Aral) classifies those basins as OCEAN -> prescribed nearest-neighbour
+# SST -> uncapped potential evaporation (the 2000 W/m^2 hfls / 177 mm prw
+# central-Asia hotspots in the 2-yr pilot). The CLM mask keeps the surface
+# tiling consistent with the land model's own footprint (Caspian/Aral = land).
+# Opt back to the legacy elevation mask with AMIP_LAND_MASK="" (deliberate
+# reproduction runs only).
+: "${AMIP_LAND_MASK:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc}"
 
 # --- The machine-specific PATH flags (everything else is in the YAML) ---------
 AMIP_PATH_FLAGS=(
@@ -65,3 +75,10 @@ AMIP_PATH_FLAGS=(
   --topography "${ETOPO}"
   --clm-surfdata-path "${CLM_SURFDATA}"
 )
+# CLM-derived land mask (see AMIP_LAND_MASK above). Side-effect scope audited
+# 2026-07-22: with use_multilayer_land=true the ONLY climate-relevant change is
+# f_land itself (the forced slab_land_active is shadowed by the multilayer tile
+# branch; surfdata albedo needs --surfdata, which this launcher never passes).
+if [[ -n "${AMIP_LAND_MASK}" ]]; then
+  AMIP_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
+fi

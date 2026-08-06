@@ -1,7 +1,7 @@
 """Land atmospheric-forcing readers (TRENDY / LMIP).
 
 Currently: CRU-JRA (CLM datm format) for forced land-only runs.  See
-``docs/land/lmip_s3_scope.md`` for the workplan.
+``docs/land/lmip_biophys_runbook.md`` for the operational runbook.
 """
 
 from legoesm.land.forcing.cru_jra import (

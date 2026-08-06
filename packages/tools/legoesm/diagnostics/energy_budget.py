@@ -104,6 +104,8 @@ def column_moist_static_energy(
     p_s: jax.Array,
     dsigma: jax.Array,
     sigma_full: jax.Array,
+    dp: jax.Array | None = None,
+    p_full: jax.Array | None = None,
 ) -> jax.Array:
     """Compute column-integrated moist static energy.
 
@@ -162,8 +164,15 @@ def column_moist_static_energy(
     # For sigma coords: dln(p) = dσ/σ at each level
     # Simpler approach: integrate from bottom
     nlev = T.shape[-1]
-    dp = p_s[..., None] * dsigma  # (..., nlev)
-    p_full = p_s[..., None] * sigma_full  # (..., nlev)
+    # HYBRID-aware layer mass and level pressure. ``p_s*dsigma`` and
+    # ``p_s*sigma_full`` are correct ONLY for a pure-sigma column; on the
+    # (default) hybrid coordinate the truth is ``dA*p_ref + dB*p_s`` and
+    # ``A*p_ref + B*p_s``. Callers pass the coordinate's own values; the
+    # fallbacks keep the pure-sigma path byte-identical.
+    if dp is None:
+        dp = p_s[..., None] * dsigma  # (..., nlev)
+    if p_full is None:
+        p_full = p_s[..., None] * sigma_full  # (..., nlev)
 
     # Geopotential via hydrostatic integration (bottom to top)
     # Φ(k) = phis + R_d * sum_{j=nlev-1..k+1} T_j * dp_j / p_j + R_d * T_k * dp_k / (2*p_k)
@@ -176,7 +185,10 @@ def column_moist_static_energy(
     # Build geopotential at full levels, bottom to top
     # Start with bottom level: Φ_bottom = phis + R_d * T_bottom * ln(σ_sfc / σ_bottom)
     # Approximate: phis + R_d * T_bottom * dσ_bottom / (2 * σ_bottom)
-    Phi_bottom = phis + R_d * T[..., -1] * dsigma[-1] / (2.0 * sigma_full[-1])
+    # dp/p at the bottom level: identical to dsigma[-1]/sigma_full[-1] for
+    # pure sigma, and correct on hybrid where that ratio is not.
+    Phi_bottom = phis + R_d * T[..., -1] * (
+        dp[..., -1] / (2.0 * p_full[..., -1]))
 
     def _scan_fn(Phi_below, k_from_bot):
         # k_from_bot: 0 = second-from-bottom, 1 = third-from-bottom, etc.
@@ -184,7 +196,19 @@ def column_moist_static_energy(
         j_below = j + 1  # the level below (already computed)
         # Phi_j = Phi_{j+1} + R_d * (T_j + T_{j+1}) / 2 * ln(σ_{j+1}/σ_j)
         T_mean = 0.5 * (T[..., j] + T[..., j_below])
-        Phi_here = Phi_below + R_d * T_mean * jnp.log(sigma_full[j_below] / sigma_full[j])
+        # p_full is COLUMN-DEPENDENT on hybrid (it was a 1-D sigma before) and
+        # ``j`` is traced inside the scan, so index with take() along the last
+        # axis. The result carries the spatial shape and broadcasts against the
+        # spatial-shaped carry exactly as the scalar ratio did. For pure sigma
+        # log(p_k/p_{k-1}) == log(sigma_k/sigma_{k-1}), so this is unchanged.
+        # mode="clip" is LOAD-BEARING: at the first scan step j = nlev-1 so
+        # j_below = nlev is OUT OF BOUNDS, and the original ``sigma_full[j_below]``
+        # relied on JAX's __getitem__ CLAMPING to make that step a no-op
+        # (log(1) = 0).  jnp.take defaults to mode="fill", which returns NaN and
+        # poisons the whole column.
+        Phi_here = Phi_below + R_d * T_mean * jnp.log(
+            jnp.take(p_full, j_below, axis=-1, mode="clip")
+            / jnp.take(p_full, j, axis=-1, mode="clip"))
         return Phi_here, Phi_here
 
     # Scan over levels from bottom-1 upward
@@ -222,6 +246,8 @@ def column_dry_static_energy(
     p_s: jax.Array,
     dsigma: jax.Array,
     sigma_full: jax.Array,
+    dp: jax.Array | None = None,
+    p_full: jax.Array | None = None,
 ) -> jax.Array:
     """Compute column-integrated dry static energy (c_p·T + Φ) dp/g.
 
@@ -239,16 +265,34 @@ def column_dry_static_energy(
     c_p = jnp.asarray(constants.c_pd, dtype=_acc_d)
     R_d = jnp.asarray(constants.R_d, dtype=_acc_d)
 
-    dp = p_s[..., None] * dsigma
+    if dp is None:
+        dp = p_s[..., None] * dsigma
+    if p_full is None:
+        p_full = p_s[..., None] * sigma_full
     nlev = T.shape[-1]
 
-    Phi_bottom = phis + R_d * T[..., -1] * dsigma[-1] / (2.0 * sigma_full[-1])
+    # dp/p at the bottom level: identical to dsigma[-1]/sigma_full[-1] for
+    # pure sigma, and correct on hybrid where that ratio is not.
+    Phi_bottom = phis + R_d * T[..., -1] * (
+        dp[..., -1] / (2.0 * p_full[..., -1]))
 
     def _scan_fn(Phi_below, k_from_bot):
         j = nlev - 1 - k_from_bot
         j_below = j + 1
         T_mean = 0.5 * (T[..., j] + T[..., j_below])
-        Phi_here = Phi_below + R_d * T_mean * jnp.log(sigma_full[j_below] / sigma_full[j])
+        # p_full is COLUMN-DEPENDENT on hybrid (it was a 1-D sigma before) and
+        # ``j`` is traced inside the scan, so index with take() along the last
+        # axis. The result carries the spatial shape and broadcasts against the
+        # spatial-shaped carry exactly as the scalar ratio did. For pure sigma
+        # log(p_k/p_{k-1}) == log(sigma_k/sigma_{k-1}), so this is unchanged.
+        # mode="clip" is LOAD-BEARING: at the first scan step j = nlev-1 so
+        # j_below = nlev is OUT OF BOUNDS, and the original ``sigma_full[j_below]``
+        # relied on JAX's __getitem__ CLAMPING to make that step a no-op
+        # (log(1) = 0).  jnp.take defaults to mode="fill", which returns NaN and
+        # poisons the whole column.
+        Phi_here = Phi_below + R_d * T_mean * jnp.log(
+            jnp.take(p_full, j_below, axis=-1, mode="clip")
+            / jnp.take(p_full, j, axis=-1, mode="clip"))
         return Phi_here, Phi_here
 
     if nlev > 1:
@@ -385,6 +429,8 @@ class EnergyBudgetTracker:
         lw_net_sfc: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
+        dp: jax.Array | None = None,
+        p_full: jax.Array | None = None,
     ) -> EnergyBudget:
         """Compute and record energy budget at current time.
 
@@ -422,6 +468,7 @@ class EnergyBudgetTracker:
         # check.
         E = column_moist_static_energy(
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            dp=dp, p_full=p_full,
         )
         _h = np.asarray(jnp.stack([
             area_weighted_mean(E, area_weights),
@@ -549,20 +596,31 @@ class MoistureBudget(NamedTuple):
     column_water: float      # column-integrated water vapor [kg/m²]
     dW_dt: float             # water vapor tendency [kg/m²/s]
     precip_rate: float       # precipitation rate [mm/day]
-    residual: float          # dW/dt + P [mm/day]
+    evap_rate: float         # surface evaporation rate [mm/day]
+    residual: float          # E − P − dW/dt [mm/day] (0 = closed column)
 
 
 class MoistureBudgetTracker:
     """Track moisture budget evolution over a simulation.
 
     Tracks column-integrated water vapor and its tendency, precipitation,
-    and the moisture budget residual.  For a well-conserving model,
-    the annual-mean residual should be < 0.01 mm/day.
+    surface evaporation, and the moisture budget CLOSURE residual
+    E − P − dW/dt.  For a well-conserving model, the annual-mean residual
+    should be < 0.01 mm/day.
+
+    Sign convention: E (evaporation, from the latent heat flux) is
+    positive UPWARD = a vapor source for the atmospheric column; P
+    (surface precipitation) is positive = a column sink; dW/dt is the
+    column vapor storage tendency.  A closed column satisfies
+    E − P − dW/dt = 0.  (The pre-2026-07-22 residual was dW/dt + P — the
+    net apparent source — which never ingested E and equals ~P in steady
+    state, so it could NOT detect a vapor-destroying process; the 2-yr
+    AMIP pilot's 1.4 mm/day E−P non-closure sailed through it.)
 
     Usage
     -----
     tracker = MoistureBudgetTracker()
-    tracker.update(q_v, p_s, dsigma, precip, elapsed_seconds)
+    tracker.update(q_v, p_s, dsigma, precip, lhflx, elapsed_seconds)
     print(tracker.summary())
     """
 
@@ -570,6 +628,7 @@ class MoistureBudgetTracker:
         self.times: list[float] = []
         self.column_water: list[float] = []
         self.precip_rate: list[float] = []
+        self.evap_rate: list[float] = []
         self.dW_dt: list[float] = []
         self.residual: list[float] = []
         self._prev_water: float | None = None
@@ -581,8 +640,10 @@ class MoistureBudgetTracker:
         p_s: jax.Array,
         dsigma: jax.Array,
         precip: jax.Array,
+        lhflx: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
+        dp: jax.Array | None = None,
     ) -> MoistureBudget:
         """Compute and record moisture budget at current time.
 
@@ -593,25 +654,43 @@ class MoistureBudgetTracker:
         p_s : array, shape (...)
             Surface pressure [Pa].
         dsigma : array, shape (nlev,)
-            Sigma layer thicknesses.
+            Sigma layer thicknesses.  Used only when *dp* is None, where the
+            layer mass is ``p_s * dsigma`` — correct ONLY for a pure-sigma
+            column.
         precip : array, shape (...)
-            Precipitation rate [kg/m²/s].
+            Precipitation rate [kg/m²/s], positive = column sink.
+        lhflx : array, shape (...)
+            Surface latent heat flux [W/m²], positive upward — converted
+            to the evaporation vapor source E = lhflx / L_v.  Pass the
+            SAME field reported as CMOR ``hfls`` so the closure check and
+            the output diagnostics share one flux definition.
         elapsed_seconds : float
             Time since simulation start [s].
+        dp : array, shape (..., nlev), optional
+            Layer pressure thickness [Pa].  REQUIRED for a correct budget on a
+            HYBRID grid, where ``dp = dA*p_ref + dB*p_s`` and the ``p_s*dsigma``
+            form is wrong by ``dA*(p_s - p_ref)``.  The error is a vertical
+            REDISTRIBUTION (the column total is ``p_s - p_top`` either way), so
+            it cancels for a uniform tracer and is exactly zero at
+            ``p_s = p_ref`` — but q_v is BOTTOM-HEAVY, giving a real column-water
+            error over terrain.  ``VerticalCoordProtocol.layer_thickness_dp``
+            supplies it for either coordinate.
 
         Returns
         -------
         MoistureBudget
         """
-        W = column_water_vapor(q_v, p_s, dsigma)
-        # Fuse the column-water-vapor + precipitation means into one
+        W = column_water_vapor(q_v, p_s, dsigma, dp=dp)
+        # Fuse the column-water-vapor + precip + evap means into one
         # host transfer.
         _h = np.asarray(jnp.stack([
             area_weighted_mean(W, area_weights),
             area_weighted_mean(precip, area_weights),
+            area_weighted_mean(lhflx, area_weights),
         ]))
         mean_W = float(_h[0])
-        mean_P = float(_h[1]) * 86400.0  # kg/m²/s → mm/day
+        mean_P = float(_h[1]) * 86400.0                  # kg/m²/s → mm/day
+        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:
@@ -620,11 +699,13 @@ class MoistureBudgetTracker:
                 dW_dt = (mean_W - self._prev_water) / dt
             else:
                 dW_dt = 0.0
-            # Residual: dW/dt + P ≈ E (evaporation)
-            # Residual = dW/dt + P - E; without explicit E, residual = dW/dt + P
-            # For a closed system: dW/dt = E - P → residual = dW/dt + P - E = 0
-            # We compute dW/dt + P as the "net source" — should be ~0 if E ≈ P over time
-            residual_mm_day = dW_dt * 86400.0 + mean_P
+            # CLOSURE residual: E − P − dW/dt = 0 for a conserving column
+            # (E positive-up source, P positive sink — see class docstring).
+            # A POSITIVE residual = water destroyed inside the atmosphere
+            # (vapor entered via E but reached neither storage nor precip);
+            # negative = spurious source.  The 2-yr AMIP pilot's signature
+            # is residual ≈ +1.4 mm/day.
+            residual_mm_day = mean_E - mean_P - dW_dt * 86400.0
         else:
             dW_dt = 0.0
             residual_mm_day = 0.0
@@ -636,12 +717,14 @@ class MoistureBudgetTracker:
             column_water=mean_W,
             dW_dt=dW_dt,
             precip_rate=mean_P,
+            evap_rate=mean_E,
             residual=residual_mm_day,
         )
 
         self.times.append(elapsed_seconds)
         self.column_water.append(mean_W)
         self.precip_rate.append(mean_P)
+        self.evap_rate.append(mean_E)
         self.dW_dt.append(dW_dt)
         self.residual.append(residual_mm_day)
 
@@ -653,12 +736,14 @@ class MoistureBudgetTracker:
             "times": self.times,
             "column_water": self.column_water,
             "precip_rate": self.precip_rate,
+            "evap_rate": self.evap_rate,
             "dW_dt": self.dW_dt,
             "residual": self.residual,
         }
         self.times = []
         self.column_water = []
         self.precip_rate = []
+        self.evap_rate = []
         self.dW_dt = []
         self.residual = []
         return data
@@ -672,6 +757,7 @@ class MoistureBudgetTracker:
         res = np.array(self.residual[1:])
         W = np.array(self.column_water[1:])
         P = np.array(self.precip_rate[1:])
+        E = np.array(self.evap_rate[1:])
 
         lines = [
             "Moisture Budget Summary",
@@ -679,7 +765,8 @@ class MoistureBudgetTracker:
             f"  Samples:           {len(res)}",
             f"  <CWV>:             {np.mean(W):.2f} kg/m²",
             f"  <Precip>:          {np.mean(P):.2f} mm/day",
-            f"  <dW/dt + P>:       {np.mean(res):+.4f} mm/day",
+            f"  <Evap>:            {np.mean(E):.2f} mm/day",
+            f"  <E - P - dW/dt>:   {np.mean(res):+.4f} mm/day",
             f"  |Residual| max:    {np.max(np.abs(res)):.4f} mm/day",
         ]
         status = "PASS" if np.max(np.abs(res)) < 0.1 else "CHECK"

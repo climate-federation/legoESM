@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.util
 
 import jax
 import jax.numpy as jnp
@@ -1155,6 +1156,10 @@ def pad_halo_vector_4d(
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
     duogrid=None,
+    cos_theta: jax.Array | None = None,
+    sin_theta: jax.Array | None = None,
+    cos_theta_padded: jax.Array | None = None,
+    sin_theta_padded: jax.Array | None = None,
     monotone_clip: bool = False,
     monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
@@ -1164,10 +1169,27 @@ def pad_halo_vector_4d(
     Inputs are (6, n, n, nlev); rotation angles are (6, n, n) and get
     broadcast over the trailing level axis.
 
+    ``cos_theta``/``sin_theta`` (2026-08-04): COVARIANT components on
+    non-orthogonal cells, same semantics as :func:`pad_halo_vector`.  The
+    4D covariant branch requires ``cos_theta_padded``/``sin_theta_padded``
+    (the faithful signed metric halo, e.g. from
+    ``legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d``) — there is
+    no legacy sign-blind fallback here, deliberately.
+
     Returns
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector_4d: pass BOTH cos_theta and sin_theta or "
+            "neither; one alone silently selects the orthogonal rotation.")
+    covariant = cos_theta is not None and sin_theta is not None
+    if covariant and (cos_theta_padded is None or sin_theta_padded is None):
+        raise ValueError(
+            "pad_halo_vector_4d covariant branch requires "
+            "cos_theta_padded/sin_theta_padded (signed metric halo); "
+            "pass them from pad_halo_dgrid_cell_scalar_4d.")
     # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
     # non-square guard.  Vector halo also assumes square (n, n) per
     # face — all internal kernels and the SPMD/MPI dispatches share
@@ -1184,6 +1206,11 @@ def pad_halo_vector_4d(
         )
     # SPMD dispatch: pack both components into a single collective.
     if _halo_backend == "spmd" and _spmd_mesh is not None and halo == 1:
+        if covariant:
+            raise NotImplementedError(
+                "pad_halo_vector_4d covariant branch is not wired into the "
+                "SPMD halo=1 fast path; it would silently run the "
+                "orthogonal rotation.")
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
@@ -1207,8 +1234,17 @@ def pad_halo_vector_4d(
     ca = cos_angle[..., None]
     sa = sin_angle[..., None]
     # Step 1: convert to geographic
-    u_east = ca * u_data - sa * v_data
-    v_north = sa * u_data + ca * v_data
+    if covariant:
+        # Covariant components on non-orthogonal cells (mirror of the 2D
+        # pad_halo_vector branch): V.x_hat = u, V.y_hat = (v - ct*u)/st.
+        _eps32 = float(jnp.finfo(jnp.float32).eps)
+        ct = cos_theta[..., None]
+        st = jnp.maximum(sin_theta, _eps32)[..., None]
+        u_east = ca * u_data + sa * (u_data * ct - v_data) / st
+        v_north = sa * u_data + ca * (v_data - u_data * ct) / st
+    else:
+        u_east = ca * u_data - sa * v_data
+        v_north = sa * u_data + ca * v_data
     # Step 2: pad as scalars.
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
@@ -1255,8 +1291,21 @@ def pad_halo_vector_4d(
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
-    u_padded = cap * u_east_padded + sap * v_north_padded
-    v_padded = -sap * u_east_padded + cap * v_north_padded
+    if covariant:
+        # Reconstruct COVARIANT components in the halo using the SIGNED
+        # padded non-orthogonality metrics (cos-type flips across
+        # quarter-turn seams — see pad_halo_dgrid_cell_scalar_4d).
+        ct_pad = cos_theta_padded[..., None] \
+            if cos_theta_padded.ndim == 3 else cos_theta_padded
+        st_pad = sin_theta_padded[..., None] \
+            if sin_theta_padded.ndim == 3 else sin_theta_padded
+        cos_beta = cap * ct_pad - sap * st_pad
+        sin_beta = sap * ct_pad + cap * st_pad
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = cos_beta * u_east_padded + sin_beta * v_north_padded
+    else:
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = -sap * u_east_padded + cap * v_north_padded
     return u_padded, v_padded
 
 
@@ -2031,6 +2080,8 @@ def pad_halo_vector(
     duogrid=None,
     cos_theta: jax.Array | None = None,
     sin_theta: jax.Array | None = None,
+    cos_theta_padded: jax.Array | None = None,
+    sin_theta_padded: jax.Array | None = None,
     monotone_clip: bool = False,
     monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
@@ -2097,6 +2148,11 @@ def pad_halo_vector(
             f"pad_halo_vector, got {halo}")
 
     _EPS = float(jnp.finfo(jnp.float32).eps)
+
+    if (cos_theta is None) != (sin_theta is None):
+        raise ValueError(
+            "pad_halo_vector: pass BOTH cos_theta and sin_theta or neither; "
+            "one alone silently selects the orthogonal rotation (codex r18).")
 
     if cos_theta is not None and sin_theta is not None:
         # Non-orthogonal rotation (exact for cubed-sphere grids).
@@ -2172,16 +2228,27 @@ def pad_halo_vector(
         # Iter-838 (Codex stop-time review): replace `mode='edge'` padding
         # of `cos_theta`/`sin_theta` (same-face extension, loses cross-
         # face metric values at panel boundaries) with proper cross-face
-        # halo exchange via `pad_halo`.  The non-orthogonality metrics
-        # are scalar cell-centre fields, continuous across panel seams,
-        # but their numerical values on face F's halo at a seam with
-        # face G should come from G's metric, not a copy of F's.  Matches
-        # Fortran's halo-exchanged `gridstruct%sin_sg(:,:,5)` /
-        # `cos_sg(:,:,5)` semantics at panel boundaries.
-        ct_pad = pad_halo(cos_theta, halo=halo, interp_offsets=interp_offsets,
-                          duogrid=duogrid)
-        st_pad = pad_halo(sin_theta, halo=halo, interp_offsets=interp_offsets,
-                          duogrid=duogrid)
+        # halo exchange via `pad_halo`.
+        # 2026-08-04 CAVEAT on the iter-838 exchange: cos_theta is a
+        # COS-TYPE quantity (transforms like e_i.e_j) — across the eight
+        # quarter-turn seams the local-basis value is MINUS the
+        # neighbour's, and the sign-blind scalar `pad_halo` below misses
+        # that flip (its "matches Fortran cos_sg(:,:,5) semantics" claim
+        # was prose, never certified).  Callers wanting the faithful
+        # signed halo pass `cos_theta_padded`/`sin_theta_padded`
+        # (e.g. from legoesm.grids.dgrid_halo.pad_halo_dgrid_cell_scalar_4d)
+        # which take precedence; the legacy exchange remains the default
+        # for byte-compatibility.
+        if cos_theta_padded is not None and sin_theta_padded is not None:
+            ct_pad = cos_theta_padded
+            st_pad = sin_theta_padded
+        else:
+            ct_pad = pad_halo(cos_theta, halo=halo,
+                              interp_offsets=interp_offsets,
+                              duogrid=duogrid)
+            st_pad = pad_halo(sin_theta, halo=halo,
+                              interp_offsets=interp_offsets,
+                              duogrid=duogrid)
         cos_beta = cap * ct_pad - sap * st_pad
         sin_beta = sap * ct_pad + cap * st_pad
         u_padded = cap * u_east_padded + sap * v_north_padded
@@ -2853,7 +2920,10 @@ def _swap_module_attr(target: str, new_value):
     swapped on enter and restored on exit.  Raises the same exceptions
     the callers already guard: ``ModuleNotFoundError`` when no module
     prefix imports and ``AttributeError`` when an intermediate or final
-    attribute is absent.
+    attribute is absent.  Deciding which of those means "optional
+    component not installed" (skip) versus "patch target drifted"
+    (fail loudly) is the CALLER's policy — see
+    ``monotone_halo_clip_context``.
     """
     parent_path, _, attr = target.rpartition(".")
     parts = parent_path.split(".")
@@ -2880,7 +2950,7 @@ def _swap_module_attr(target: str, new_value):
 
 
 def monotone_halo_clip_context(slack: float = 0.5):
-    """FV3_3D iter 505: context manager that monkey-patches 15
+    """FV3_3D iter 505: context manager that monkey-patches 13
     known halo import aliases in NH/PE/SW dycore + operator
     modules to use ``monotone_clip=True`` with the given ``slack``.
 
@@ -2922,14 +2992,24 @@ def monotone_halo_clip_context(slack: float = 0.5):
 
     Notes
     -----
-    Implementation: ``_swap_module_attr`` rebinds these targets:
-    * scalar halo: 3 sites (compressible_euler_cdgrid,
-      operators_3d, operators_cdgrid).
-    * vector halo: 2 sites (operators_cdgrid, operators_3d).
+    Implementation: ``_swap_module_attr`` rebinds 13 targets:
+    * scalar 4D halo: 4 (compressible_euler_cdgrid, operators_3d,
+      operators_cdgrid, primitive_eq_cdgrid).
+    * vector 4D halo: 3 (operators_cdgrid, operators_3d,
+      primitive_eq_cdgrid).
+    * scalar 3D ``pad_halo``: 3 (operators_cdgrid, fv_tp_2d, fv3_sw_core).
+    * ``pad_halo_pair_h2``: 1 (fv_tp_2d).
+    * vector 3D ``pad_halo_vector``: 2 (fv3_sw_core, primitive_eq_cdgrid).
 
     May not catch every halo call site in the dycore (e.g.,
-    SPMD ``packed_pad_halo_4d`` is not patched); the 6 sites
-    cover the dominant single-rank paths.
+    SPMD ``packed_pad_halo_4d`` is not patched); these cover the
+    dominant single-rank paths.
+
+    A target whose MODULE is absent is skipped (partial federation install —
+    e.g. legoesm-core without legoesm-atmosphere).  A target whose module
+    imports but whose ATTRIBUTE is gone raises: that is patch-target drift
+    (a rename/move), and swallowing it would silently leave a halo call
+    unclamped while the callers still believe the clip is active.
     """
     import functools
 
@@ -2938,9 +3018,11 @@ def monotone_halo_clip_context(slack: float = 0.5):
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
-        # FV3_3D iter 527: PE-side import aliases.
-        "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
-        "_pad_halo_4d",
+        # FV3_3D iter 527: PE-side import alias.  Only the module-level
+        # ``_pad_halo_4d_module`` is patchable — ``_pad_halo_4d`` is a
+        # function-LOCAL alias bound inside ``fv3_hydrostatic_tendencies``
+        # (primitive_eq_cdgrid.py:875) from this same module global, so
+        # patching the global already reaches it.
         "legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid."
         "_pad_halo_4d_module",
     ]
@@ -2997,32 +3079,50 @@ def monotone_halo_clip_context(slack: float = 0.5):
         monotone_clip_slack=slack,
     )
 
+    def _optional_component_absent(target: str) -> bool:
+        """True only when *target*'s top-level component is not installed.
+
+        The substrate (``legoesm.core``/``legoesm.grids``) always ships with
+        this module, so a resolution failure there is drift, never a partial
+        install.  Everything else (``legoesm.atmosphere``, ...) is an optional
+        federation member: absent => legitimately skip the patch.
+        """
+        root = ".".join(target.split(".")[:2])
+        if root in ("legoesm.core", "legoesm.grids"):
+            return False
+        try:
+            return importlib.util.find_spec(root) is None
+        except (ImportError, ValueError):
+            return True
+
     stack = contextlib.ExitStack()
-    for tgt in scalar_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_scalar))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in vector_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_vector))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pad_halo_3d_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_3d))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pair_h2_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pair_h2))
-        except (AttributeError, ModuleNotFoundError):
-            pass
-    for tgt in pad_halo_vector_3d_targets:
-        try:
-            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_vector_3d))
-        except (AttributeError, ModuleNotFoundError):
-            pass
+    patch_groups = (
+        (scalar_targets, clipped_scalar),
+        (vector_targets, clipped_vector),
+        (pad_halo_3d_targets, clipped_pad_halo_3d),
+        (pair_h2_targets, clipped_pair_h2),
+        (pad_halo_vector_3d_targets, clipped_pad_halo_vector_3d),
+    )
+    try:
+        for targets, replacement in patch_groups:
+            for tgt in targets:
+                try:
+                    stack.enter_context(_swap_module_attr(tgt, replacement))
+                except (ModuleNotFoundError, AttributeError):
+                    # Skip ONLY when the optional component is not installed.
+                    # Anything else (renamed symbol, missing class in a
+                    # ``module.Class.attr`` target, a broken transitive import)
+                    # is patch-target drift and must be loud — swallowing it
+                    # leaves a halo call site silently unclipped while callers
+                    # believe the clip is active.
+                    if not _optional_component_absent(tgt):
+                        raise
+    except BaseException:
+        # Patch-target drift (AttributeError) or anything else: undo the swaps
+        # already applied before propagating, so a partial failure cannot leave
+        # the process with half the halo call sites permanently clipped.
+        stack.close()
+        raise
     return stack
 
 

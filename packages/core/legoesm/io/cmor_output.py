@@ -58,6 +58,7 @@ References
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -65,6 +66,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import jax
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # Standard CMIP6 license text (Creative Commons Attribution 4.0 International)
@@ -1668,10 +1671,53 @@ class CFWriter:
             # Append by extending the time dimension in place.
             # This avoids reading + concatenating + rewriting the
             # entire file, which is O(n²) over a multi-year run.
+            # Guard BOTH write paths (netCDF4 append and the xarray-concat
+            # fallback): a chained restart can re-flush a window it already
+            # wrote, and neither path checked for it.
+            _xr_guard = _import_xarray()
+            _existing_t = None
+            if _xr_guard is not None:
+                _chk = _xr_guard.open_dataset(out_path, decode_times=False)
+                _existing_t = np.asarray(_chk["time"].values, dtype=np.float64)
+                _chk.close()
+            if _existing_t is not None and _existing_t.size:
+                _t = float(time)
+                # Tolerance: far below any real output spacing (1 day for
+                # `day`, ~30 for `mon`) and far above float64 round-trip error
+                # at century times. Times are stored float64 (verified in a
+                # real Amon file), so this is an equality test, not a bin.
+                if np.any(np.abs(_existing_t - _t) < 1.0e-3):
+                    logger.warning(
+                        "CMOR %s/%s: time %.4f is ALREADY on disk — skipping "
+                        "the duplicate write (a chained restart re-flushed a "
+                        "window it had already written). The FIRST value is "
+                        "kept: the re-flush is a PARTIAL re-accumulation of "
+                        "the window, verified on a real century arm where the "
+                        "repeat's rsdt fell between the true month and the "
+                        "next one.",
+                        table_id, var_name, _t,
+                    )
+                    return out_path
+                if _t < float(_existing_t.max()):
+                    raise ValueError(
+                        f"CMOR {table_id}/{var_name}: refusing to append time "
+                        f"{_t} before the last written time "
+                        f"{float(_existing_t.max())} — the time axis must be "
+                        "monotonically increasing"
+                    )
             nc4 = _import_netcdf4()
             if nc4 is not None:
                 with nc4.Dataset(str(out_path), "a") as ncf:
                     t_idx = len(ncf.dimensions["time"])
+                    # A CHAINED run re-flushes a window it already wrote when a
+                    # link restarts inside that window, and a blind append then
+                    # writes a SECOND row for the same time.  Observed in a real
+                    # century arm: two t=105 rows with different rsut, which
+                    # made a matched-window comparison ambiguous (-6.8% vs
+                    # -5.7% depending on which row was picked).  Skip the
+                    # repeat and say so LOUDLY -- overwriting would risk
+                    # replacing a COMPLETE month with a partial re-accumulation
+                    # after a mid-window restart.
                     ncf.variables["time"][t_idx] = float(time)
                     ncf.variables["time_bnds"][t_idx, :] = [
                         time_bounds[0], time_bounds[1],
@@ -2006,6 +2052,7 @@ class CFWriter:
         daily_data: Dict[str, Any],
         lat: Any,
         lon: Any,
+        extra_attrs_by_var: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> List[Path]:
         """Write daily-mean data from a ``SpatialDailyAccumulator`` to NetCDF.
 
@@ -2025,6 +2072,10 @@ class CFWriter:
             Output of ``SpatialDailyAccumulator.finalize()``.
         lat, lon : array-like
             1-D latitude / longitude of the output grid.
+        extra_attrs_by_var : dict, optional
+            Per-variable attribute overrides, ``{var_name: {attr: value}}``
+            (e.g. an honest ``cell_methods`` for snapshot-sampled fields —
+            issue #1353).  Variables not in the dict keep table defaults.
 
         Returns
         -------
@@ -2076,6 +2127,7 @@ class CFWriter:
                     lat=lat,
                     lon=lon,
                     table="day",
+                    extra_attrs=(extra_attrs_by_var or {}).get(var_name),
                 )
             if out_path is not None and out_path not in seen:
                 written.append(out_path)

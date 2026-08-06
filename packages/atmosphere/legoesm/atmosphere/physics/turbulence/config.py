@@ -51,13 +51,6 @@ __param_spec__ = {
     "CLUBBLiteConfig": {
         "scheme_key": "atm.turb.CLUBBLiteConfig",
         "excluded": {
-            # C1/C4/C5 are the full-CLUBB pressure-covariance coefficients;
-            # this reduced "lite" surrogate dropped the higher-moment block
-            # that consumed them (see clubb_lite.py iter-172 note), so they
-            # are NOT read by the body — excluded as dead in this scheme.
-            "C1": "unused in CLUBB-lite: higher-moment closure block removed",
-            "C4": "unused in CLUBB-lite: higher-moment closure block removed",
-            "C5": "unused in CLUBB-lite: higher-moment closure block removed",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
@@ -104,6 +97,7 @@ __param_spec__ = {
         "scheme_key": "atm.turb.LouisConfig",
         "excluded": {
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "cloudtop_entrainment_efficiency": "opt-in marine-Sc cloud-top entrainment lever, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Louis (1979) bulk-Ri PBL-height criterion", "shape": None},
@@ -112,7 +106,7 @@ __param_spec__ = {
             "c_louis": {"units": "1", "bounds": (5.0, 49.8), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) unstable-branch coefficient c (Holtslag & De Bruin 1988)", "shape": None},
             "d_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stable-branch sqrt coefficient d", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
-            "cloudtop_entrainment_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "marine-Sc cloud-top entrainment efficiency A (flux-matched K_ent = A·W_REF·dz·(drying·inverted·cloudy_below), W_REF=0.02 m/s); 0 = off", "shape": None},
+            # (cloudtop_entrainment_efficiency: excluded — default 0.0 (off) on the bound.)
         },
     },
     "MYNN25Config": {
@@ -154,6 +148,9 @@ __param_spec__ = {
             "Cd_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral drag coefficient (Large & Yeager 2004 range)", "shape": None},
             "Ch_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral heat-transfer coefficient (Large & Yeager 2004 range)", "shape": None},
             "z0": {"units": "m", "bounds": (1e-05, 1e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "surface-layer aerodynamic roughness length", "shape": None},  # 2-decade range (default 1e-4); wider spans lose float32 sigmoid precision near the floor
+            "most_unstable_gamma": {"units": "1", "bounds": (8.0, 28.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Businger-Dyer (1971) / Dyer (1974) MOST unstable-branch stability-function coefficient gamma (phi=(1-gamma*zeta)^-1/4); only used by a stability-dependent bulk_scheme", "shape": None},
+            "most_stable_beta": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Dyer (1974) MOST stable-branch linear stability-function coefficient beta (psi=-beta*zeta); only used by the dyer1974 stability_scheme of a stability-dependent bulk_scheme", "shape": None},
+            "z0h_z0_ratio": {"units": "1", "bounds": (0.01, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "roughness", "reference": "Garratt (1992) thermal/momentum roughness ratio z0h/z0", "shape": None},
             "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
         },
     },
@@ -172,11 +169,6 @@ __param_spec__ = {
     "TurbulentEDMFConfig": {
         "scheme_key": "atm.turb.TurbulentEDMFConfig",
         "excluded": {
-            # The simplified-EDMF updraft scan implements lateral entrainment
-            # only (edmf.py:215); there is no detrainment term, so
-            # detrainment_rate is not read by the body — a dead (zero-gradient)
-            # knob until detrainment is implemented. Excluded, not tunable.
-            "detrainment_rate": "unused in simplified EDMF: no detrainment term in the updraft scan",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "updraft_deactivation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
@@ -240,6 +232,29 @@ class SurfaceLayerConfig(NamedTuple):
         Reference height for MOST bulk formulas [m] (default 10.0).
     bulk_n_iter : int
         Number of MOST iterations (default 5).
+    most_unstable_gamma : float
+        Businger-Dyer / Dyer (1974) UNSTABLE-branch MOST stability-function
+        coefficient gamma (phi_m = (1 - gamma*zeta)^{-1/4}); default 16.  ONLY
+        consumed on the stability-dependent MOST path (``compute_surface_fluxes``
+        with ``bulk_scheme`` in {``coare3``, ``large_yeager``}, or the tiled
+        ``_single_tile_flux`` land ``most`` path) AND when
+        ``stability_scheme="dyer1974"``; the constant-coefficient default path,
+        the non-linear stable schemes, and COARE 3.0's own unstable form ignore
+        it.  A larger gamma => stronger unstable fluxes.
+    most_stable_beta : float
+        Dyer (1974) STABLE-branch linear MOST coefficient beta
+        (psi = -beta*zeta); default 5.  ONLY consumed on the stability-dependent
+        MOST path AND when ``stability_scheme="dyer1974"``.  A larger beta =>
+        weaker fluxes under stable stratification.
+    z0h_z0_ratio : float
+        Thermal/momentum roughness ratio z0h/z0 (default 0.1).  On the
+        fixed-roughness MOST path the scalar roughness is z0_t = z0_q =
+        z0 * z0h_z0_ratio.  ONLY consumed on the stability-dependent
+        ``compute_most_fluxes`` paths, and of those only the constant/most
+        fixed-roughness branch reads it (COARE 3.0 / large_yeager compute their
+        own scalar roughness).  A LARGER ratio => larger z0_t => smaller
+        ln(z_t/z0_t) => larger heat exchange coefficient => STRONGER sensible/
+        latent flux (Garratt 1992; Zilitinkevich kB^-1 range).
     """
     z0: float = 1e-4
     Cd_neutral: float = 1.5e-3
@@ -259,11 +274,37 @@ class SurfaceLayerConfig(NamedTuple):
     # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
-    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
-    # Threaded together with the coupler ocean tile by run_coupled so the
-    # interface cannot split; unknown -> ValueError at dispatch.
+    # bulk schemes: "dyer1974" (default; historical -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the SENTINEL for the
+    # byte-identical COARE-native stable form on coare3 — which is itself the
+    # BH91 fit with rounded constants, see bulk_flux.psi_m_coare) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".  On
+    # coare3 only the STABLE branch swaps (the Fairall unstable blend is
+    # COARE-defining).  Threaded together with the coupler ocean tile by
+    # run_coupled so the interface cannot split; unknown -> ValueError at
+    # dispatch.
     stability_scheme: str = "dyer1974"
+    # Businger-Dyer / Dyer (1974) MOST stability-function coefficients, trainable
+    # for the AIMIP classical curriculum. Defaults reproduce the historical
+    # values (gamma=16 unstable, beta=5 dyer1974 stable) so a config with these
+    # omitted is byte-identical. Only read on a stability-dependent bulk_scheme
+    # AND (for beta / the unstable gamma) stability_scheme="dyer1974"; the
+    # constant path and the non-linear stable schemes never touch them.
+    # APPENDED LAST so existing positional SurfaceLayerConfig(...) calls and
+    # tree_deserialise_leaves field ordering are unchanged.
+    most_unstable_gamma: float = 16.0
+    most_stable_beta: float = 5.0
+    # Thermal/momentum roughness ratio z0h/z0 (Garratt 1992; Zilitinkevich
+    # kB^-1 = ln(z0/z0h) family) for the FIXED-roughness MOST path: z0_t = z0_q
+    # = z0 * z0h_z0_ratio.  Default 0.1 reproduces the historical hardcoded
+    # ``z0 * 0.1`` byte-for-byte.  Consumed ONLY on the stability-dependent
+    # ``compute_most_fluxes`` paths (bulk_scheme in {most, coare3,
+    # large_yeager}) — and, of those, ONLY the fixed-roughness constant/most
+    # branch actually uses it (COARE 3.0 / large_yeager compute their own
+    # scalar roughness).  A larger ratio => larger z0_t => stronger heat/
+    # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
+    # tree_deserialise_leaves field ordering are unchanged.
+    z0h_z0_ratio: float = 0.1
 
 
 class SmagorinskyConfig(NamedTuple):
@@ -464,12 +505,6 @@ class CLUBBLiteConfig(NamedTuple):
 
     Fields
     ------
-    C1 : float
-        Pressure scrambling / return-to-isotropy coeff for w'² (default 4.0).
-    C4 : float
-        Pressure scrambling for flux moments w'θ_l', w'r_t' (default 3.0).
-    C5 : float
-        Scalar variance dissipation rate (default 3.0).
     C_eps : float
         TKE dissipation coefficient (default 0.19).
     C_K : float
@@ -483,9 +518,6 @@ class CLUBBLiteConfig(NamedTuple):
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
-    C1: float = 4.0
-    C4: float = 3.0
-    C5: float = 3.0
     C_eps: float = 0.19
     C_K: float = 0.4
     Pr_t: float = 0.33
@@ -721,8 +753,6 @@ class TurbulentEDMFConfig(NamedTuple):
         Minimum updraft velocity [m/s] (default 0.1).
     entrainment_rate : float
         Lateral entrainment rate [1/m] (default 1e-3).
-    detrainment_rate : float
-        Lateral detrainment rate [1/m] (default 2e-3).
     parcel_dT : float
         Initial updraft potential-temperature perturbation [K]
         (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
@@ -746,7 +776,6 @@ class TurbulentEDMFConfig(NamedTuple):
     a_updraft: float = 0.1
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
-    detrainment_rate: float = 2e-3
     parcel_dT: float = 0.5
     updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()

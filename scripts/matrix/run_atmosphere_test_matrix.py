@@ -572,10 +572,13 @@ KNOWN_FAILURES: dict[tuple[str, str, str], dict[str, Any]] = {
     # 27700 (~day 96), physics-free reproducer of the AMIP latlon topography
     # instability. Reproduces only in a full-length run (the 2-day --quick lane
     # never reaches the blow-up step and legitimately passes).
-    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge,
-    # calibrated to the sibling cube PE rest-sponge's on-grid top-level rate so it
-    # is never stronger than the accepted sibling (avoids an over-damped false
-    # PASS). Entry KEPT until a 200-day A100 run confirms the sponge arrests the
+    # MITIGATION WIRED (#1029): the topo run now enables the #836 top sponge at
+    # its frozen 2026-06 calibration envelope (_TOPO_MIT_REF_*; historically
+    # derived from the then-current cube rest-sponge default, kept at that
+    # strength after #1028 retuned the live cube default — see the mitigation
+    # block), with a tripwire bounding it to that envelope (avoids an
+    # over-damped false PASS; this XPASS alarm is the second guard). Entry KEPT
+    # until a 200-day A100 run confirms the sponge arrests the
     # blow-up WITHOUT over-damping the resolved jet (controlled comparison vs the
     # flat-topo HS climate): if it passes, this reports XPASS (loud) -> remove the
     # entry; if it only delays the blow-up it stays XFAIL and the GENERATOR fix is
@@ -797,12 +800,22 @@ def _fb_cube_sw_model(n: int, test_num: int, *, fv3_native_grid: bool = False,
         from legoesm import constants
         grid = create_fv3_native_cubed_sphere(
             n, omega=(0.0 if test_num == 8 else constants.Omega),
-            use_duogrid=True, k2e_nord=4)
+            use_duogrid=True, k2e_nord=2)
     else:
         grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
                 if test_num == 8 else create_cubed_sphere(n, use_duogrid=True))
-    return FV3FBShallowWaterModel(grid, fb_m1_preset_config(),
-                                  fv3_native_angles=fv3_native_angles)
+    # FB-preset damping overrides (2026-07-19 modon cross-face-halo
+    # tuning): the M1 preset (d4_bg=0.16, dddmp=0.2, damp_v=0.02) is
+    # calibrated for W2; the ED-grid modon collision, once its seam
+    # blowup is cured by LEGOESM_SW_FB_CROSS_FACE_HALO=1, needs a
+    # post-collision damping sweep to stay stable without dispersing.
+    _fb_d4 = float(os.environ.get("LEGOESM_SW_FB_D4_BG", "0.16"))
+    _fb_dd = float(os.environ.get("LEGOESM_SW_FB_DDDMP", "0.2"))
+    _fb_dv = float(os.environ.get("LEGOESM_SW_FB_DAMP_V", "0.02"))
+    return FV3FBShallowWaterModel(
+        grid, fb_m1_preset_config(d4_bg=_fb_d4, dddmp=_fb_dd,
+                                  damp_v=_fb_dv),
+        fv3_native_angles=fv3_native_angles)
 
 
 def _modon_hyperdiff_coeff(n: int) -> float:
@@ -1074,10 +1087,45 @@ def _resolve_dt_cube(
     return dt
 
 
+def _hs_hd_scale_from_env(env_value: str | None) -> float:
+    """Parse the ``LEGOESM_HS_HD_SCALE`` probe knob (#1028).
+
+    Scales the cube Held-Suarez del-4 hyperdiffusion; mirrors the
+    ``LEGOESM_AH_SCALE`` semantics for unset/empty (→ 1.0, unchanged) and
+    rejects non-positive / non-finite values loudly.
+    """
+    import math
+    if env_value is None or env_value.strip() == "":
+        return 1.0
+    scale = float(env_value)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise SystemExit(
+            f"LEGOESM_HS_HD_SCALE must be a finite positive float, "
+            f"got {env_value!r}")
+    return scale
+
+
+# --- #1028: Held-Suarez low-resolution A_h reduction (2026-07-19/20) ---
+# At C36 the un-scaled Laplacian (A_h = 4.08e6 m^2/s) e-folds 2000-km modes
+# in ~0.29 d — faster than baroclinic growth (1-2 d) — and was measured to be
+# the dominant suppressor of the HS jet spin-up (200-d factorial: A_h x1 ->
+# 7.9 m/s, x0.1 -> 13.0, x0.03 -> 13.6, x0.01 -> 13.8 (saturated); del-4
+# x0.1 an exact null).  x0.1 takes most of the recovery at the largest
+# stability margin, and the full HS ladder at x0.1 is 200-d validated at C36
+# (sigma + hybrid + topo, topo PASS, mass ~1e-15).  Applies ONLY to the
+# n < 48 auto bucket of the HELD-SUAREZ path: the C48 (x2, iter-37) and
+# C72+ (x10, iter-33) buckets are STABILITY-driven — C72 NaN'd at the old x1
+# level, so cutting there is not backed by evidence — and the baroclinic
+# path keeps x1.0 (untested at reduced A_h).  Explicit LEGOESM_AH_SCALE
+# still overrides everything.
+_HS_AH_1028_SCALE: float = 0.1
+
+
 def _auto_ah_scale(
     n: int,
     env_value: str | None = None,
     auto_disable: bool = False,
+    low_res_scale: float = 1.0,
 ) -> tuple[float, str | None]:
     """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
 
@@ -1086,7 +1134,9 @@ def _auto_ah_scale(
 
     Auto-apply rules (when ``env_value`` is None or empty string AND
     ``auto_disable`` is False):
-    -   n  <  48  → scale=1.0 (no change, iter-19 default)
+    -   n  <  48  → scale=``low_res_scale`` (1.0 default; the Held-Suarez
+        path passes ``_HS_AH_1028_SCALE`` = 0.1 — see the #1028 block
+        above)
     -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
         from C48 stability data — C60 is inferred, not directly
         validated; codex iter-45 review caveat)
@@ -1132,6 +1182,12 @@ def _auto_ah_scale(
             f"[FV3_3D iter 43 auto] At C{n} auto-applying "
             f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set env var "
             f"to override."
+        )
+    if low_res_scale != 1.0:
+        return low_res_scale, (
+            f"[#1028 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE={low_res_scale:g} (Held-Suarez low-res A_h "
+            f"reduction; 200-d validated at C36).  Set env var to override."
         )
     return 1.0, None
 
@@ -1274,7 +1330,7 @@ _RUNTIME_RRTMGP_OVERRIDES: dict[str, float | str | None] = {
     # internal field is still ``p_peak_hPa`` (mixed-case unit
     # suffix); the override dict layer stays lower-case so
     # ``results.txt`` columns are consistent.
-    "ozone_source": None,    # "standard" | "analytical" | "none"
+    "ozone_source": None,    # "standard" | "analytical" | "mls" | "none"
     "ozone_peak_hpa": None,  # float (analytical-source only)
     "ozone_max_vmr": None,   # float (analytical-source only); 0 < vmr <= 1
 }
@@ -1522,6 +1578,22 @@ def _run_timeloop(
                              f"threshold {float(blowup_threshold):.1f}"
                     ),
                 }
+                # codex r2 P1: capture the diagnostic scalars AT the
+                # blow-up state itself.  The loop breaks here, before
+                # the ``step % diag_every`` block, so without this the
+                # series (and any argmax localisation it carries) stops
+                # at the last clean checkpoint and never records the
+                # event it exists to localise.  Stored separately from
+                # the clean series so a reader cannot mistake a
+                # blown-up sample for a healthy one.
+                try:
+                    diag["_blowup_info"]["scalars_at_blowup"] = {
+                        k: (float(v) if np.isfinite(v) else None)
+                        for k, v in scalar_fn(state).items()
+                        if isinstance(v, (int, float, np.floating))
+                    }
+                except Exception as _exc:      # diagnostics must never mask the blow-up
+                    diag["_blowup_info"]["scalars_at_blowup_error"] = repr(_exc)
                 blown_up = True
                 break
 
@@ -1882,6 +1954,23 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
             f"(day {blowup_info.get('day', 0):.2f}), "
             f"reason: {blowup_info['reason']}"
         )
+        # codex r3 P2: surface the scalars captured AT the blow-up state.
+        # They were being recorded and then discarded -- the CSV writer
+        # skips private keys, so the postmortem data never reached a
+        # reader.  Emit the extrema (and any argmax localisation the
+        # scalars carry) into the notes line, sorted for stable output.
+        _at = blowup_info.get("scalars_at_blowup")
+        if _at:
+            blowup_str += "; at blowup: " + ", ".join(
+                f"{k}={v:.4g}" for k, v in sorted(_at.items())
+                if v is not None)
+            _none = sorted(k for k, v in _at.items() if v is None)
+            if _none:
+                blowup_str += f"; non-finite at blowup: {','.join(_none)}"
+        elif blowup_info.get("scalars_at_blowup_error"):
+            blowup_str += (
+                "; at-blowup scalars UNAVAILABLE: "
+                f"{blowup_info['scalars_at_blowup_error']}")
         if original_notes:
             rows = {**rows, "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
@@ -2680,7 +2769,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from legoesm import constants
             grid = create_fv3_native_cubed_sphere(
                 n, omega=(0.0 if test_num == 8 else constants.Omega),
-                use_duogrid=True, k2e_nord=4)
+                use_duogrid=True, k2e_nord=2)
         else:
             # LEGOESM_SW_MODON_K2E_NORD (modons only): duo halo Lagrange
             # order on the LEGACY equiangular grid — isolates halo order
@@ -2706,6 +2795,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
+        if test_num == 8:
+            # modon dt override (2026-07-19 CFL-vs-geometry discriminator
+            # for the FB cross-face-halo poleward-phase blowup)
+            dt = float(os.environ.get("LEGOESM_SW_MODON_DT", str(dt)))
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
         # (sw_core.F90:1948-1999) instead of the scalar bilaplacian on
         # geographic wind components.  del6_vt_flux damps relative
@@ -4061,16 +4154,25 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
+        # #1028 probe knob: scale the cube HS del-4 hyperdiffusion (mirrors
+        # LEGOESM_AH_SCALE; default 1.0 = unchanged). At C36 the default hd
+        # e-folds 2000-km modes in ~3.8 d — comparable to baroclinic growth —
+        # so the dead-jet factorial needs this axis too.  (Factorial verdict:
+        # hd x0.1 was an exact null on the 200-d HS jet — the knob stays for
+        # probing, the default stays 1.0.)
+        hd = hd * _hs_hd_scale_from_env(os.environ.get("LEGOESM_HS_HD_SCALE"))
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         # FV3_3D iter 33/34: scale A_h via env var.  matrix default
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
-        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
-        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # A_h but stable at 10x).  Set LEGOESM_AH_SCALE=10.0 at C72.
         # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
         # scale via _auto_ah_scale helper.  Explicit env var overrides;
         # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
         # (iter-46 codex backwards-compat opt-out).
+        # #1028: the n<48 HS bucket auto-applies _HS_AH_1028_SCALE (0.1) —
+        # the old x1 Laplacian was the dominant suppressor of HS jet
+        # spin-up (see the constant's provenance block).
         _ah_auto_disable = (
             os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
             in ("1", "true", "yes", "on")
@@ -4078,6 +4180,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
             auto_disable=_ah_auto_disable,
+            low_res_scale=_HS_AH_1028_SCALE,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
@@ -4088,8 +4191,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # _cfl_safe_dt_cube for the full calibration story.
         dt = _resolve_dt_cube(n, label="HS")
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
-        # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
-        # aggressive than the FV3 Fortran reference
+        # The PRE-#1028 default ``sponge_tau_sec = 3600`` (1 hour) was FAR
+        # more aggressive than the FV3 Fortran reference
         # (``../FV3/atmos_cubed_sphere-symmetryclean/model/dyn_core.F90``,
         # subroutine ``Ray_fast`` line 2922-2985) which uses ``tau``
         # in DAYS — typical production setting is 5-10 days, i.e.
@@ -4102,18 +4205,21 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         #   - τ = 1 h (default): cube-vs-latlon mean_T gap  -5.0 K
         #   - τ = 7 d (FV3-like):                          -10.8 K
         #   - τ = ∞ (sponge OFF, iter-13):                 -11.3 K
-        # The aggressive 1-h sponge produces the BEST cross-grid
-        # agreement on this metric, despite being non-canonical for
-        # HS.  Suspected cause: the cubed-sphere hyperdiffusion +
-        # sponge combination is empirically tuned to roughly match
-        # the effective dissipation that lat-lon's Laplacian
-        # viscosity provides; a weaker sponge under-damps the
-        # cubed-sphere upper troposphere and the climatology drifts
-        # further from the lat-lon / icosahedral / spectral cluster.
-        # NOT yet established for HYBRID coord, RRTMGP radiation,
-        # or 200-day spin-up — those may have different optimal τ.
-        # Keep the 1-h default for this HS test until a more
-        # principled retuning is done.
+        # The aggressive 1-h sponge produced the BEST cross-grid
+        # agreement on that metric — but #1028 (2026-07-19) showed the
+        # mean_T tuning was CONFOUNDED: it was evaluated while no
+        # jet-strength gate existed, and the 1-h sponge is the dominant
+        # global KE sink (-1.0/day on a balanced jet, fp64 budget closed
+        # to 4e-16; 99% of all KE loss on an eddying state).  It capped
+        # the HS jet and drains any ERA5-initialised/AMIP circulation.
+        # The config default is now tau = 5 d (FV3 Ray_fast-like;
+        # primitive_eq_cdgrid.py) — 200-d validated: HS sigma/hybrid
+        # neutral-positive (7.3->7.9 / 6.9->7.3), cube topo PASS, and
+        # the -1/day drain on resolved jets gone (6-d JW decay A/B:
+        # tau=1h leaves 30% KE vs 61% at days-scale/off).  The
+        # cross-grid mean_T calibration is OWED a redo with the #1049
+        # jet floor active (tracked in #1028); expect the -10.8 K-class
+        # gap numbers above until then.
         # FV3_3D iter 13: optional FV3-faithful post-step vorticity
         # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
         # opt in (~17 % mid-level cube-imprint reduction at C36).
@@ -4181,16 +4287,57 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
+        # --- #1028 persistent-D option (2026-08-03) ---------------------
+        # LEGOESM_HS_PERSISTENT_D=1 keeps the prognostic state in FV3 D
+        # staggering BETWEEN steps, instead of the default cc -> corner ->
+        # cc round trip every step.  Measured motivation (frozen-threshold
+        # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
+        # projection costs a factor 2.63 in banded EKE and 1.9x in poleward
+        # u'v' -- a MATERIAL eddy suppressor and the leading measured
+        # candidate for the #1028 dead jet.  PRECISION (codex pd-review
+        # MEDIUM): this keeps the state persistent-D BETWEEN MACRO STEPS;
+        # the existing physics adapter still converts D -> cc at every RK
+        # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
+        # :1613/:1045), so the inner conversions remain.  Matrix
+        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
+        # bit-identical (the state never converts, _cc is the identity).
+        # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
+        # sqrt(u^2+v^2) at centres -- the same operator either way, since
+        # the legacy wrapper also exits through fv3_to_hydrostatic.
+        _hs_persistent_d = (
+            os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        if _hs_persistent_d:
+            from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+                fv3_to_hydrostatic as _f2h,
+                hydrostatic_to_fv3 as _h2f,
+            )
+            from legoesm.grids.cubed_sphere_cdgrid import (
+                create_cubed_sphere_cdgrid as _mk_cdgrid)
+            _hs_cdgrid = _mk_cdgrid(grid)
+            state = _h2f(state, _hs_cdgrid)          # convert ONCE
+            print("  #1028 persistent-D: prognostic state stays in D "
+                  "staggering between steps (LEGOESM_HS_PERSISTENT_D=1)")
+
+            def _cc(s):
+                """D -> cc for diagnostics only (diagnostic cadence)."""
+                return _f2h(s, _hs_cdgrid) if hasattr(s, "u_d") else s
+        else:
+            def _cc(s):
+                return s
+
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(global_integral(s.p_s, grid))
+        mass_fn = lambda s: float(global_integral(_cc(s).p_s, grid))
 
         def check_fn(s):
+            s = _cc(s)
             return (check_finite({"T": s.T.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
         def scalar_fn(s):
+            s = _cc(s)
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(
@@ -4200,8 +4347,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
         _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
         _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
-        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
-        key_array_fn = lambda s: s.T.data
+        extract_fn = lambda s: _extract_hydro_cube_latlon(_cc(s), _cos_a, _sin_a)
+        key_array_fn = lambda s: s.T.data   # T exists on BOTH state types
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -4239,35 +4386,38 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # PGF correction discretely consistent with Phi(p_s) (implicates A_half;
         # #1078), owed with W2 visual validation -- NOT this sponge.
         #
-        # CALIBRATE the sponge to the sibling cube PE rest-sponge so it is never
-        # STRONGER than the accepted sibling on the resolved grid (an over-strong
-        # sponge could turn a 200-day PASS into an over-damped FALSE success --
-        # codex R1). The cube damps u/v with rate ((s0-sigma)/s0)^2 / tau per level
-        # (primitive_eq_cdgrid.py: sponge_sigma s0=0.15, sponge_tau_sec tau=3600),
-        # whose top FULL level only samples a FRACTION of the 1/tau lid peak. The
-        # lat-lon #836 sponge peaks at its own top full level, so pin its coeff to
-        # the cube's on-grid rate AT that level. At THIS case's FIXED resolution
-        # (nlev=DEFAULT_NLEV=40) the lat-lon profile is then <= the cube at every
-        # resolved level -- but that is NOT grid-general (sin2-in-log-p vs cube
-        # quadratic-in-sigma shapes differ). The tripwire below VERIFIES the actual
-        # <=-cube property AND that the sponge is active, on whatever grid is in
-        # use, and fails LOUDLY otherwise (a future DEFAULT_NLEV change could
-        # silently disable it or over-damp at a mid level). Under-damping is the
-        # SAFE failure (stays XFAIL, honest); over-damping is the false-pass we
-        # design out. Flat-topo HS is untouched (sponge_coeff=0 -> byte-identical).
-        _CUBE_SPONGE_SIGMA, _CUBE_SPONGE_TAU_S = 0.15, 3600.0  # primitive_eq_cdgrid.py
+        # MITIGATION STRENGTH: frozen at its 2026-06 calibration envelope —
+        # rate ((s0-sigma)/s0)^2 / tau with s0=0.15, tau=3600 s, evaluated at
+        # the top full level.  That envelope was ORIGINALLY derived from the
+        # then-current cube PE rest-sponge default; #1028 (2026-07-19) showed
+        # that 1-h cube default was itself a jet-killing mis-calibration and
+        # the cube config default is now 5 d — but THIS mitigation's measured
+        # behaviour (holds the topo case to its tracked XFAIL trajectory;
+        # insufficient to prevent the lid-wave blowup, #1029) was established
+        # AT the frozen strength, so the strength is kept and the constants
+        # below now carry their own provenance instead of referencing the
+        # live cube config.  The tripwire below verifies (a) the sponge is
+        # ACTIVE (a DEFAULT_NLEV change could silently disable it) and
+        # (b) the on-grid profile never EXCEEDS the frozen envelope (an
+        # accidentally-strengthened sponge could over-damp the case into a
+        # false 200-day PASS; the KNOWN_FAILURES registry's loud XPASS alarm
+        # is the second line of defence).  Under-damping is the SAFE failure
+        # (stays XFAIL, honest).  Flat-topo HS is untouched (sponge_coeff=0
+        # -> byte-identical).
+        _TOPO_MIT_REF_SIGMA, _TOPO_MIT_REF_TAU_S = 0.15, 3600.0  # frozen 2026-06 envelope (#1029/#1086)
         # #836 lat-lon sponge geometry -- set EXPLICITLY (not left to the config
         # defaults) so the tripwire below verifies the SAME profile the model runs.
         _SPONGE_WIDTH_M, _SPONGE_SCALE_H_M, _SPONGE_SHAPE = 10000.0, 7500.0, "sin2"
-        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: cube ref + reporting
-        _cube_top_frac = max(
-            (_CUBE_SPONGE_SIGMA - float(_sig[0])) / _CUBE_SPONGE_SIGMA, 0.0)
-        _sponge_coeff = _cube_top_frac**2 / _CUBE_SPONGE_TAU_S if _topo else 0.0
+        _sig = np.asarray(sigma.sigma_full, dtype=np.float64)  # fp64 view: envelope + reporting
+        _mit_top_frac = max(
+            (_TOPO_MIT_REF_SIGMA - float(_sig[0])) / _TOPO_MIT_REF_SIGMA, 0.0)
+        _sponge_coeff = _mit_top_frac**2 / _TOPO_MIT_REF_TAU_S if _topo else 0.0
         if _topo:
-            # Tripwire (dispatch-hardening / mechanical invariant): the calibrated
-            # lat-lon sponge must be (a) ACTIVE and (b) <= the accepted cube
-            # sibling at EVERY resolved level. Verify the real profiles; raise on
-            # violation rather than ship a silently-disabled or over-damping run.
+            # Tripwire (dispatch-hardening / mechanical invariant): the
+            # mitigation sponge must be (a) ACTIVE and (b) <= its frozen
+            # 2026-06 envelope at EVERY resolved level. Verify the real
+            # profiles; raise on violation rather than ship a
+            # silently-disabled or accidentally-strengthened run.
             from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
                 sponge_profile as _sponge_profile)
             # Evaluate the lat-lon profile EXACTLY as the tendency does (codex R4):
@@ -4277,28 +4427,30 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             _ll = np.asarray(_sponge_profile(
                 _z, _z[0], _SPONGE_WIDTH_M, _sponge_coeff, shape=_SPONGE_SHAPE),
                 dtype=np.float64)   # to numpy fp64 ONLY for the comparison
-            _cube = (np.clip((_CUBE_SPONGE_SIGMA - _sig) / _CUBE_SPONGE_SIGMA,
-                             0.0, 1.0) ** 2) / _CUBE_SPONGE_TAU_S
-            if _cube_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
+            _env = (np.clip((_TOPO_MIT_REF_SIGMA - _sig) / _TOPO_MIT_REF_SIGMA,
+                            0.0, 1.0) ** 2) / _TOPO_MIT_REF_TAU_S
+            if _mit_top_frac <= 0.0 or float(_ll.max()) <= 0.0:
                 raise SystemExit(
                     f"#1029 held_suarez_topo top-sponge is DISABLED at "
-                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs cube "
-                    f"sponge_sigma {_CUBE_SPONGE_SIGMA}); re-calibrate before "
+                    f"nlev={nlev} (sigma_full[0]={float(_sig[0]):.4f} vs envelope "
+                    f"sigma {_TOPO_MIT_REF_SIGMA}); re-calibrate before "
                     f"running -- never ship the topo case with no mitigation.")
-            # RELATIVE tolerance: the calibrated top level EQUALS the cube rate by
-            # construction, and _ll comes from the jnp sponge_profile (policy dtype
-            # -- often fp32), so an absolute tol would false-fire on ~1e-5 fp32
-            # round-off at the equal top level. 0.1% cleanly separates round-off
-            # from a real crossover (the L20 case is ~271% over).
-            _viol = np.where(_ll > _cube * 1.001 + 1e-15)[0]
+            # RELATIVE tolerance: the calibrated top level EQUALS the envelope
+            # rate by construction, and _ll comes from the jnp sponge_profile
+            # (policy dtype -- often fp32), so an absolute tol would false-fire
+            # on ~1e-5 fp32 round-off at the equal top level. 0.1% cleanly
+            # separates round-off from a real crossover (the L20 case is ~271%
+            # over).
+            _viol = np.where(_ll > _env * 1.001 + 1e-15)[0]
             if _viol.size:
-                _k = int(_viol[int(np.argmax((_ll - _cube)[_viol]))])
+                _k = int(_viol[int(np.argmax((_ll - _env)[_viol]))])
                 raise SystemExit(
-                    f"#1029 held_suarez_topo top-sponge OVER-DAMPS vs the cube "
-                    f"sibling at level {_k} (sigma={float(_sig[_k]):.4f}, "
-                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > cube "
-                    f"{float(_cube[_k]):.3e} 1/s. The sin2/cube shapes only align "
-                    f"at L40; re-calibrate the sponge width/shape for this grid.")
+                    f"#1029 held_suarez_topo top-sponge EXCEEDS its frozen "
+                    f"envelope at level {_k} (sigma={float(_sig[_k]):.4f}, "
+                    f"nlev={nlev}): latlon {float(_ll[_k]):.3e} > envelope "
+                    f"{float(_env[_k]):.3e} 1/s. The sin2/envelope shapes only "
+                    f"align at L40; re-calibrate the sponge width/shape for "
+                    f"this grid.")
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
@@ -5823,6 +5975,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         hd = _hyperdiff_cube(n)
 
+        # --- NH cube blow-up attribution knobs (2026-07-30) ---
+        # One env var per candidate, each DEFAULTING to the shipped value,
+        # so these knobs alone change nothing when unset.  (That is NOT a
+        # claim that the whole branch is unchanged: the corner-damp gate
+        # fix and the TC3 rotation change DO alter TC1/TC2/TC3 results —
+        # codex r2 P1.)  Mirrors the LEGOESM_CDD_* precedent used by the
+        # HS / baroclinic branches.
+        #   LEGOESM_NH_COMPACT_OUTER=1  compact outer del^2 => the
+        #       biharmonic actually damps 2*dx (default path has an exact
+        #       2*dx null; see CDGridCompressibleEulerConfig).
+        #   LEGOESM_NH_CDD_D4BG=<float> corner-divergence del-4
+        #       coefficient; 0 deactivates the corner-damp block entirely
+        #       (reproduces the pre-2026-07-29 dead-gate behaviour).
+        #   LEGOESM_NH_DAMP_W=<float>   FV3 del-n damping on w
+        #       (sw_core.F90:1078 del6_vt_flux), off by default.
+        _nh_compact_outer = (
+            os.environ.get("LEGOESM_NH_COMPACT_OUTER", "0").strip().lower()
+            in ("1", "true", "yes", "on"))
+        _nh_cdd_d4bg = float(os.environ.get("LEGOESM_NH_CDD_D4BG", "0.16"))
+        _nh_damp_w = float(os.environ.get("LEGOESM_NH_DAMP_W", "0.0"))
+
         if test_case == "tc1":
             from tests.test_cases.dcmip2025 import dcmip25_tc1_init
             state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=nlev)
@@ -5891,7 +6064,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-17: corner-div damping del-4
                 # background pair (factory defaults).
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -5983,7 +6158,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -6054,7 +6231,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # damping that the matrix had remained at d4_bg=0
                 # (effectively off) for.
                 corner_div_damp_nord=1,
-                corner_div_damp_d4_bg=0.16)
+                corner_div_damp_d4_bg=_nh_cdd_d4bg,
+                hyperdiff_compact_outer=_nh_compact_outer,
+                damp_w=_nh_damp_w)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
@@ -6083,8 +6262,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # iter-7: report total dry mass alongside |w|_max so mass
             # drift becomes visible in mean_timeseries.csv (cubed-sphere
             # NH supports anchored mass via fix_mass + compute_nh_dry_mass).
+            #
+            # 2026-07-30: ``max_abs_u`` and the argmax LOCATION of both
+            # |u| and |w| are logged too.  The blow-up trip metric in
+            # ``check_fn`` is max|u| (not |w|), and until now the series
+            # held only |w| — so a run could trip at |u| = 5069 m/s while
+            # the only logged field read a benign 9.8 m/s, with no record
+            # of WHERE either maximum sat.  face/i/j/k localise the burst
+            # (cube vertices are the 4 corners of every face).
             from legoesm.core.conservation import compute_nh_dry_mass
+            _u_abs = jnp.abs(s.u.data)
+            _w_abs = jnp.abs(s.w.data)
+            _u_at = jnp.unravel_index(jnp.argmax(_u_abs), _u_abs.shape)
+            _w_at = jnp.unravel_index(jnp.argmax(_w_abs), _w_abs.shape)
             return {
+                "max_abs_u": float(jnp.max(_u_abs)),
+                "u_argmax_face": float(_u_at[0]), "u_argmax_i": float(_u_at[1]),
+                "u_argmax_j": float(_u_at[2]), "u_argmax_k": float(_u_at[3]),
+                "w_argmax_face": float(_w_at[0]), "w_argmax_i": float(_w_at[1]),
+                "w_argmax_j": float(_w_at[2]), "w_argmax_k": float(_w_at[3]),
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),
@@ -6291,15 +6487,27 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             raise NotImplementedError(
                 f"Spectral NH: unsupported test case {test_case}")
 
-        # Small-Earth factor and sponge config per test case
+        # Small-Earth factor and sponge config per test case.
+        # ``rotating`` comes from the SAME case parameter dicts the cube and
+        # MPAS arms read, so all three grids agree on Coriolis: TC2 rotates
+        # (radius/X, f*X, the DCMIP small-planet convention), TC3 does not
+        # (the squall-line spec has no Coriolis).  Previously the spectral
+        # model scaled f by X unconditionally, so its TC3 arm ran at f*60
+        # against f=0 on cube and MPAS (codex r3 P1).
+        from legoesm.atmosphere.dynamics.gcm.dcmip2025_ic import (
+            TC2_PARAMS as _TC2_P, TC3_PARAMS as _TC3_P,
+        )
         if test_case == "tc2a":
             sef = 20.0
+            _rotating = bool(_TC2_P.get("rotating", True))
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
             sef = 60.0
+            _rotating = bool(_TC3_P.get("rotating", True))
             sponge_w, sponge_c = 8000.0, 0.15
         else:
             sef = 1.0
+            _rotating = True
             sponge_w, sponge_c = 10000.0, 0.05
 
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
@@ -6323,6 +6531,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_coeff=sponge_c,
             hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
+            rotating=_rotating,
             # iter-9: opt into anchored mass fixer (parallel to cube/ico
             # NH in iter-7/8).
             fix_mass=True, anchor_mass_to_initial=True,
@@ -8093,11 +8302,12 @@ def build_parser() -> argparse.ArgumentParser:
     # stratospheric ozone amplitude on tropospheric circulation.
     p.add_argument(
         "--ozone-source", type=str, default=None,
-        choices=["standard", "analytical", "none"],
+        choices=["standard", "analytical", "mls", "none"],
         help="Override RRTMGP ozone profile source.  Default: "
              "``standard`` (US-Standard-1976, no latitude dependence). "
              "``analytical`` enables the latitude-dependent Gaussian "
-             "profile.  ``none`` disables ozone absorption entirely. "
+             "profile.  ``mls`` uses the SAM RCEMIP MLS climatology. "
+             "``none`` disables ozone absorption entirely. "
              "Only takes effect with ``--radiation rrtmgp``.")
     p.add_argument(
         "--ozone-peak-hpa", type=float, default=None,
@@ -8287,7 +8497,7 @@ def main():
                 "(0 < vmr <= 1); for 8 ppmv use 8e-6.  Got "
                 f"{args.ozone_max_vmr}"
             )
-    if args.ozone_source in ("standard", "none") and (
+    if args.ozone_source in ("standard", "mls", "none") and (
         args.ozone_peak_hpa is not None or args.ozone_max_vmr is not None
     ):
         parser.error(

@@ -38,7 +38,7 @@ views, ``Bounds``).
 from __future__ import annotations
 
 import numpy as np
-from legoesm.core.fv3_native_sw_core import Bounds, _fa
+from legoesm.core.fv3_native_sw_core import Bounds, fa_flux as _fa
 from legoesm.grids.fv3_native_gridstruct import fort
 
 # --- d2a2c 4th-order interpolation coefficients (sw_core.F90:53-54) ---
@@ -254,7 +254,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     mutated on plain; untouched on duo) delp/pt/w, and the accumulated
     cx/cy/xflux/yflux.
     """
-    from legoesm.core.fv3_native_d_sw import _fl, fv_tp_2d
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, fv_tp_2d
 
     if not duogrid:
         raise NotImplementedError(
@@ -661,7 +661,7 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
     lane only.  Returns dict(ubbtemp, vbbtemp, ubb, vbb) on the B-grid
     compute ring (is:ie+1, js:je+1).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, xtp_u, ytp_v
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, xtp_u, ytp_v
 
     if not duogrid:
         raise NotImplementedError(
@@ -822,11 +822,12 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
     Returns dict(delpc, divg_d, wk, ke, vortfluxx, vortfluxy, uc, vc,
     ptc, ub, vb).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, a2b_ord4, fv_tp_2d
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, a2b_ord4, fv_tp_2d
 
-    if not hydrostatic or d_con > 1.0e-5 or nord != 1:
+    if not hydrostatic or d_con > 1.0e-5 or nord not in (1, 2):
         raise NotImplementedError(
-            "d_sw5_duo: oracle lane only (hydrostatic, d_con=0, nord=1)")
+            "d_sw5_duo: oracle lane only (hydrostatic, d_con=0, "
+            "nord in {1, 2}; nord <= ng-1)")
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
@@ -903,20 +904,28 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         for i in range(is_, ie + 1 + 1):
             delpc[i, j] = divg_d[i, j]
 
-    nt = 0  # n-loop: n=1..nord with nord=1; fill_c false (duo-excluded)
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - 1 - nt, ie + 1 + nt + 1):
-            vc[i, j] = (divg_d[i + 1, j] - divg_d[i, j]) * DIVG_U[i, j]
-    for j in range(js - 1 - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            uc[i, j] = (divg_d[i, j + 1] - divg_d[i, j]) * DIVG_V[i, j]
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            divg_d[i, j] = uc[i, j - 1] - uc[i, j] + vc[i - 1, j] - vc[i, j]
-    # duo: corner-term removal SKIPPED (auth 1771 guard .not.duogrid)
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            divg_d[i, j] = divg_d[i, j] * RAREA_C[i, j]
+    # n-loop (auth 1738-1788): n = 1..nord, nt = nord-n; fill_c is
+    # FALSE on the duo lane (guard `.not.(bounded .or. duogrid)`), the
+    # corner-term removal is duo-SKIPPED (auth 1771), and the rarea_c
+    # scaling runs unconditionally (not stretched).  nt=nord-1 ranges
+    # reach ng deep — nord <= ng-1 (=2 at ng=3), same as upstream.
+    for n_it in range(1, nord + 1):
+        nt = nord - n_it
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - 1 - nt, ie + 1 + nt + 1):
+                vc[i, j] = ((divg_d[i + 1, j] - divg_d[i, j])
+                            * DIVG_U[i, j])
+        for j in range(js - 1 - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                uc[i, j] = ((divg_d[i, j + 1] - divg_d[i, j])
+                            * DIVG_V[i, j])
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                divg_d[i, j] = (uc[i, j - 1] - uc[i, j]
+                                + vc[i - 1, j] - vc[i, j])
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                divg_d[i, j] = divg_d[i, j] * RAREA_C[i, j]
 
     # ---- Smagorinsky vort (auth 1790-1806; dddmp >= 1e-5) ----
     vort = _fl(isd, ied, jsd, jed)
@@ -985,7 +994,7 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
     (halo strips keep the inputs — dumped and compared full-domain).
     Returns dict(u, v, ut, vt, ub, vb, heat_source).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, del6_vt_flux
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, del6_vt_flux
 
     if d_con > 1.0e-5:
         raise NotImplementedError("d_sw6_duo: d_con=0 oracle lane only")
