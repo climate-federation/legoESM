@@ -16,6 +16,9 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    hard_saturation_drain,
+)
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsMLEmulatorConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -68,7 +71,12 @@ __physics_contract__ = {
         "scheme (dT_dt latent heating, precipitation >= 0 via a softplus head). "
         "Being a LEARNED surrogate it enforces NO hard conservation -- no "
         "contract-level conservation is claimed; positivity of precip is "
-        "structural, other outputs are unconstrained."
+        "structural, other outputs are unconstrained. The OPT-IN hard "
+        "saturation-adjustment guard (config.hard_saturation_adjustment, "
+        "default False) is the ONE structurally-conserving correction: it "
+        "drains post-step super-saturation with -dq_v = +dq_c and "
+        "dT = (L_v/c_pd)*dq_c, conserving total water and c_pd*T + L_v*q_v "
+        "for the drained mass."
     ),
     "conserves": ["none"],
     "differentiable": True,
@@ -144,6 +152,40 @@ def ml_microphysics(
 
     # Surface precipitation from lowest level output
     precipitation = jax.nn.softplus(precip_raw[:, -1]) * _PRECIP_SCALE
+
+    # --- OPT-IN hard (iterated) saturation-adjustment guard -----------------
+    # A learned surrogate emits UNCONSTRAINED tendencies, so it can leave the
+    # column super-saturated (its own contract claims ``conserves: none``).
+    # The guard is the SAME shared implementation the bulk schemes use, but at
+    # the POST-STEP placement the validated MPAS driver hook uses, because the
+    # emulator exposes no internal condensation rate to blend into: evaluate
+    # the state the emulator's tendencies WILL produce and drain whatever
+    # super-saturation remains there.
+    #
+    # Sign convention: ``rate >= 0`` is a DRAIN of vapour into cloud water
+    # (positive = condensation).  Applying it as
+    #     q_v -= rate*dt ;  q_c += rate*dt ;  T += (L_v/c_pd)*rate*dt
+    # moves water (no source/sink of total water: -dq_v = +dq_c) and conserves
+    # the moist enthalpy c_pd*T + L_v*q_v exactly, matching the identity every
+    # other scheme's adjustment satisfies.  ``hard_saturation_drain`` rate-
+    # limits against the POST-step q_v it is handed, so the corrected
+    # q_v_post - rate*dt is >= 0 by construction even when the emulator's raw
+    # prediction is aggressive.
+    #
+    # STATIC Python ``if`` on a compile-time bool (CLAUDE.md feature-gating
+    # exception): default False => not traced, byte-identical to the raw
+    # emulator output.
+    if config.hard_saturation_adjustment:
+        T_post = T + dT_dt * dt
+        q_v_post = q_v + dq_v_dt * dt
+        rate = hard_saturation_drain(
+            T_post, q_v_post, p_full, dt,
+            config.hard_sat_adjust_threshold,
+            config.hard_sat_max_heating_K,
+        )
+        dq_v_dt = dq_v_dt - rate
+        dq_c_dt = dq_c_dt + rate
+        dT_dt = dT_dt + (constants.L_v / constants.c_pd) * rate
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.

@@ -2228,14 +2228,22 @@ class ExperimentConfig(NamedTuple):
         # would do nothing.  Reject it at config time (codex F3) rather than let
         # it silently no-op.  Same scheme set as the fail-loud runtime raise in
         # microphysics/config.apply_microphysics_experiment_flags.
-        _warm_rain_micro = (
-            "kessler", "seifert_beheng", "morrison", "thompson", "p3")
+        # Single source of truth (never re-listed here): the schemes that carry
+        # the guard live in microphysics/config.HARD_SAT_GUARD_SCHEMES, with the
+        # verified exemption reasons in HARD_SAT_GUARD_EXEMPT.  A hardcoded copy
+        # of the tuple silently drifted out of date when sundqvist/ml_emulator
+        # gained the guard.
+        from legoesm.atmosphere.physics.microphysics.config import (
+            HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES,
+        )
         if (self.hard_saturation_adjustment
-                and self.microphysics not in _warm_rain_micro):
+                and self.microphysics not in HARD_SAT_GUARD_SCHEMES):
+            _why = HARD_SAT_GUARD_EXEMPT.get(self.microphysics, "")
             errors.append(
-                "hard_saturation_adjustment requires a warm-rain microphysics "
-                f"scheme {_warm_rain_micro}; got microphysics="
-                f"{self.microphysics!r} (the guard would be silently inert)."
+                "hard_saturation_adjustment requires a microphysics scheme "
+                f"carrying the guard {HARD_SAT_GUARD_SCHEMES}; got "
+                f"microphysics={self.microphysics!r} (the guard would be "
+                f"silently inert). {_why}".rstrip()
             )
         # gs_max is a physical conductance [mol/m2/s]: must be finite and
         # strictly positive (nan/<=0 would zero or NaN the whole land latent
