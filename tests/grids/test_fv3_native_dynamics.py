@@ -234,15 +234,51 @@ def test_the_remap_puts_delp_back_on_the_reference_coordinate(ctx, eta):
     thickness at that column's OWN new surface pressure -- a property the
     acoustic loop alone cannot produce, since it advects delp freely.
     """
+    from legoesm.core.fv3_native_acoustic_3d import acoustic_loop_3d
+    from legoesm.core.fv3_native_dynamics import pt_to_theta_v
+
     ak, bk, ptop, _ = eta
+    w = (slice(NG, NG + N), slice(NG, NG + N))
+
+    # NON-VACUITY, PART 1. The assertion below holds for the INITIAL delp
+    # by construction (_state builds it on the reference coordinate), so
+    # a full step that did nothing at all would pass it. Run the acoustic
+    # loop ALONE on an identical state first and require that it has
+    # actually taken delp OFF the coordinate -- otherwise there is nothing
+    # for the remap to undo and the test proves nothing.
+    st0 = _state(ak, bk, ptop, seed=3)
+    pr0 = _press(st0, ptop)
+    for t in range(6):
+        pt_to_theta_v(st0[t]["pt"], pr0[t]["pkz"], n=N, ng=NG)
+    acoustic_loop_3d(ctx, st0, 60.0, KM, n_split=2, ptop=ptop, akap=AKAP,
+                     cp_air=CP, remap_follows=True)
+    off = 0.0
+    for t in range(6):
+        for k in range(KM):
+            want_k = ((ak[k + 1] - ak[k])
+                      + (bk[k + 1] - bk[k]) * pr0[t]["ps"][w])
+            off = max(off, float(np.abs(st0[t]["delp"][w][:, :, k]
+                                        - want_k).max()))
+    assert off > 1e-6, (
+        f"the acoustic loop left delp within {off:g} Pa of the reference "
+        f"coordinate, so the remap has nothing to undo and the check below "
+        f"cannot fail")
+
     st = _state(ak, bk, ptop, seed=3)
     pr = _press(st, ptop)
+    ic_pt = [np.array(f["pt"][w], copy=True) for f in st]
     out = fv_dynamics_step(ctx, st, pr, bdt=60.0, km=KM, k_split=1,
                            n_split=2, ptop=ptop, ak=ak, bk=bk, akap=AKAP,
                            cp_air=CP, kord_mt=9, kord_tm=-9, kord_tr=9,
                            q=_tracers())
     assert out["pt_units"] == "K"
-    w = (slice(NG, NG + N), slice(NG, NG + N))
+    # NON-VACUITY, PART 2. pt must have MOVED. A driver that skipped both
+    # the loop and the remap would return the IC with a "K" label.
+    moved = max(float(np.abs(st[t]["pt"][w] - ic_pt[t]).max())
+                for t in range(6))
+    assert moved > 1e-6, (
+        f"pt is within {moved:g} K of the initial condition -- the step did "
+        f"not run, and every assertion below is vacuous")
     for t in range(6):
         ps = pr[t]["ps"][w]
         delp = st[t]["delp"][w]

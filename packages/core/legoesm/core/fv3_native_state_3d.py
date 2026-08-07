@@ -120,6 +120,14 @@ def require_no_remap_needed(km: int, *, remap_follows: bool = False) -> None:
     """
     if not isinstance(km, (int, np.integer)) or km < 1:
         raise ValueError(f"km must be a positive integer, got {km!r}")
+    if not isinstance(remap_follows, bool):
+        # Any truthy value would bypass the guard, so a typo'd kwarg or a
+        # string sentinel would silently license a deformed-delp state.
+        raise TypeError(
+            f"remap_follows must be a bool, got {type(remap_follows).__name__}"
+            f" ({remap_follows!r}). It is a promise that "
+            f"fv3_native_mapz.lagrangian_to_eulerian runs on this state, "
+            f"not a flag to be set loosely.")
     if remap_follows:
         return
     if km > MAX_KM_WITHOUT_REMAP:
@@ -154,6 +162,12 @@ def field_shape(name: str, n: int, ng: int, km: int) -> tuple[int, ...]:
         return (n, km + 1, n)             # (i, k, j) -- load-bearing
     if name == "pkz":
         return (n, n, km)
+    if name == "ps":
+        # init_hydro.F90:62 declares ps(ifirst-ng:ilast+ng, jfirst-ng:
+        # jlast+ng), i.e. the full padded plane. It was allocated at the
+        # call site instead of here, which is exactly the "undeclared
+        # shape at a call site" this function exists to stop.
+        return (n + 2 * ng, n + 2 * ng)
     raise KeyError(
         f"unknown field {name!r}; add it to field_shape rather than "
         f"allocating an undeclared shape at a call site")

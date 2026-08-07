@@ -153,7 +153,7 @@ def p_var_hydrostatic(delp: np.ndarray, *, ptop: float, akap: float,
     pe = np.zeros(field_shape("pe", n, ng, km), dtype=np.float64)
     peln = np.zeros(field_shape("peln", n, ng, km), dtype=np.float64)
     pkz = np.zeros(field_shape("pkz", n, ng, km), dtype=np.float64)
-    ps = np.zeros((n + 2 * ng, n + 2 * ng), dtype=np.float64)
+    ps = np.zeros(field_shape("ps", n, ng, km), dtype=np.float64)
 
     # :80-83  pe(i,1,j) = ptop ; pk(i,j,1) = ptop**cappa
     pek = ptop ** akap
@@ -289,6 +289,21 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             # :568 gates the remap on npz > 4 and the oracle leaves pt in
             # theta_v below it. Say so instead of returning a state whose
             # pt silently means something else than the docstring claims.
+            #
+            # BUT dyn_core still WROTE pe/peln/pkz through its dummies and
+            # copied pk over the compute window (:1401, :1511-1519), and
+            # the oracle keeps all of that. Discarding it here left the
+            # carried bundle byte-identical to entry -- so a +1 Pa change
+            # in level-1 delp would not move pe(:,:,2), and the NEXT
+            # call's pt -> theta_v would divide by a stale pkz.
+            for t in range(6):
+                g = press_out[t]
+                press[t]["pe"][:] = g["pe"]
+                press[t]["peln"][:] = g["peln"]
+                press[t]["pkz"][:] = g["pkz"]
+                if "pk_remap" in g:
+                    press[t]["pk"][ng:ng + n, ng:ng + n, :] = \
+                        g["pk_remap"][ng:ng + n, ng:ng + n, :]
             continue
 
         for t in range(6):
