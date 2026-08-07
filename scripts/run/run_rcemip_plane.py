@@ -131,6 +131,24 @@ def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0,
     ``WING_T_V0`` is now calibrated against the gSAM sounding — see the
     constant's note — and the SST enters only through ``--T-sfc``.
     """
+    # SCOPE WARNING (#1507 codex P1): WING_T_V0 / WING_GAMMA / WING_Q_SFC_DEFAULT
+    # are calibrated against the gSAM **RCE300** sounding, and they are MODULE
+    # DEFAULTS -- every defaulted caller gets them, including the SCM campaign
+    # and the RCE295 / RCE305 cases. Discarding T_sfc here is right (the SST is
+    # a boundary condition, not the IC), but it means a non-300 K run silently
+    # receives RCE300-calibrated ATMOSPHERIC coefficients. Say so once, loudly,
+    # rather than let the calibration travel unannounced; pass explicit
+    # T_v0/Gamma/q_sfc, or use --sounding, for the other SSTs.
+    if abs(float(T_sfc) - 300.0) > 0.5:
+        import warnings
+        warnings.warn(
+            f"RCEMIP analytic IC: T_sfc={float(T_sfc):.1f} K but the profile "
+            f"coefficients (T_v0={WING_T_V0}, Gamma={WING_GAMMA}, "
+            f"q_sfc={WING_Q_SFC_DEFAULT}) are calibrated against the gSAM "
+            f"RCE300 sounding. The atmospheric profile is therefore RCE300's, "
+            f"not this SST's. Pass explicit coefficients or --sounding for "
+            f"RCE295/RCE305 (#1507).",
+            stacklevel=2)
     del T_sfc  # documented above: the SST is a boundary condition, not the IC
     return make_wing2018_theta_ref_fn(q_sfc=float(q_sfc))(z)
 

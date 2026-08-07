@@ -21,7 +21,7 @@
 > The SST-derived 303.4 K alternative is *also* wrong (it virtualises the sea
 > surface temperature, but the oracle's surface AIR is ~3 K cooler than the
 > SST). Corrected on branch `feat/rcemip-gsam-oracle-sounding`:
-> `T_v0 = 300.444`, `Gamma = 0.0074034`, `q_sfc = 0.0142014`, plus a
+> `T_v0 = 299.274`, `Gamma = 0.0069901`  (the ENDPOINT fit that ships; an earlier least-squares fit giving 300.444 / 0.0074034 was RETRACTED -- see the `fit_method` field in tests/oracle_baselines/gsam_rcemip300_snd.json), `q_sfc = 0.0142014`, plus a
 > `--sounding` path that reads the tabulated deck directly — gSAM's
 > stratosphere WARMS with height, which no two-piece analytic profile can
 > represent. Gate: `tests/unit/test_rcemip_gsam_oracle_ic.py`.
