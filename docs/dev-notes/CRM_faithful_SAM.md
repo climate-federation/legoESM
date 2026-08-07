@@ -1,5 +1,47 @@
 # CRM Faithfulness vs gSAM (SAM Oracle)
 
+> ## 2026-08-06 — gSAM 1.8.8 IS NOW ON DISK. Item (4) below is RETRACTED.
+>
+> The constraint this document was written under ("no compiler, no binary, no
+> reference output ⇒ faithfulness vs SAM SOURCE FORMULAS") no longer holds:
+> gSAM 1.8.8 is unpacked at `/burg/glab/users/pg2328/gsam_oracle/gSAM1.8.8`
+> (`http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz`). Claims made without
+> it were re-checked against the source.
+>
+> **RETRACTED — item (4), the Wing-IC `T_v0` change.** It reads "SST-derived
+> 303 K → **fixed 295 K** (RCEMIP Wing-2018 Tab 1)". gSAM's `CASES/RCEMIP1/`
+> ships **three** soundings, `snd_rcemip_{295,300,305}s6.11.2`, so the premise
+> that RCEMIP prescribes one profile for all SSTs is contradicted by SAM's own
+> deck. Measured against `snd_rcemip_300s6.11.2` (job 9331613, 74 levels, x64):
+> gSAM's RCE300 surface is **296.917 K at 74.5 % RH**, while `T_v0 = 295` with
+> `q_sfc = 0.01865` gives **291.5 K at 139.6 % RH** — the shipped IC was
+> supersaturated. Two further errors in the same triple that nobody had
+> flagged: `q_0` was 31 % too high (18.65 g/kg ≈ `q_sat(300 K)`, i.e. the
+> SATURATION value, vs 14.20) and `Gamma` 10 % too weak (6.700 vs 7.474 K/km).
+> The SST-derived 303.4 K alternative is *also* wrong (it virtualises the sea
+> surface temperature, but the oracle's surface AIR is ~3 K cooler than the
+> SST). Corrected on branch `feat/rcemip-gsam-oracle-sounding`:
+> `T_v0 = 299.274`, `Gamma = 0.0069901`  (the ENDPOINT fit that ships; an earlier least-squares fit giving 300.444 / 0.0074034 was RETRACTED -- see the `fit_method` field in tests/oracle_baselines/gsam_rcemip300_snd.json), `q_sfc = 0.0142014`, plus a
+> `--sounding` path that reads the tabulated deck directly — gSAM's
+> stratosphere WARMS with height, which no two-piece analytic profile can
+> represent. Gate: `tests/unit/test_rcemip_gsam_oracle_ic.py`.
+>
+> **SPOT-CHECKED AND CONFIRMED against the Fortran** (2026-08-06), so items
+> (1), (6) and (7) stand:
+> * (6) `clice_fall_b = 0.865` — `SRC/MICRO_M2005/micro_params.f90:62`, labelled
+>   "gSAM MK tune"; wired to `BI` at `module_mp_graupel.f90:430`.
+> * (7) ice density correction `(RHOSU/RHO(K))**0.35` — `module_mp_graupel.f90:1542`
+>   (`AIN`, commented "Ikawa and Saito 1991 air-density correction") and the
+>   fall-speed caps at `:4268-4269`; rain/snow/graupel keep `**0.54` (`:1537`,
+>   `:4263`), exactly the ice-vs-rest split the item claims.
+> * (1) `delta_max = 1000.` — `SRC/SGS_TKE.HOR/sgs.f90:90` (also in the
+>   `SGS_TKE` namelist), used at `tke_full.f90:45` as
+>   `coef(j)=min(delta_max,dx*mu(j))*min(delta_max,dy*ady(j))` feeding
+>   `grd=(dz*adz(k)*coef(j))**0.33333` at `:71` — the formula quoted verbatim.
+>
+> Items (2), (3), (5), (8), (9), (10) have NOT been re-checked against the
+> source and should be treated as unverified until they are.
+
 Goal: **legoESM double-periodic f-plane CRM ≈ gSAM** (anomaly magnitudes + vertical
 profiles, NOT snapshots) on deep convection (GATE, LBA, RCE) with SAM production
 physics: **RRTM radiation, Morrison (M2005) microphysics, Smagorinsky SGS**.

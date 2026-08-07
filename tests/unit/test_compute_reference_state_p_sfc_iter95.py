@@ -37,17 +37,39 @@ from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
 from legoesm.grids.vertical import compute_reference_state
 
 
+# This module tests the compute_reference_state BOUNDARY CONDITION (top-down vs
+# bottom-up p_sfc), not the RCEMIP case calibration.  Its anchors (307.29 /
+# 293.36 / 13.93 K) are properties of a FIXED synthetic profile, so the profile
+# parameters are pinned here rather than imported: recalibrating WING_GAMMA /
+# WING_Q_SFC_DEFAULT against the gSAM oracle must not silently move a BC anchor
+# and make this test look like a BC regression.  The imported WING_* constants
+# are still exercised — by `test_wing_profile_params_are_the_shipped_defaults`
+# below, which is where a calibration change is *supposed* to be visible.
+_BC_PROFILE_GAMMA = 0.0067      # coeff-ok: frozen BC-test profile, not a case value
+_BC_PROFILE_Q_SFC = 0.01865     # coeff-ok: frozen BC-test profile, not a case value
+_BC_PROFILE_T_V0 = 300.0        # coeff-ok: frozen BC-test profile, not a case value
+
+
 def _wing_theta_fn():
-    # Near-equilibrium 300 K profile (matches the RCE smoke drivers, which set
-    # T_v0 = SST = 300 K; strict-RCEMIP T_v0=295 is exercised elsewhere). The
-    # surface-temp param was renamed T_sfc -> T_v0; anchors below are for this
-    # T_v0=300 profile.
+    """A FROZEN near-equilibrium RCE-like profile for the BC anchors."""
     return make_wing2018_theta_ref_fn(
-        T_v0=300.0,
-        q_sfc=WING_Q_SFC_DEFAULT,
+        T_v0=_BC_PROFILE_T_V0,
+        q_sfc=_BC_PROFILE_Q_SFC,
         z_t=WING_Z_T,
-        Gamma=WING_GAMMA,
+        Gamma=_BC_PROFILE_GAMMA,
     )
+
+
+def test_wing_profile_params_are_the_shipped_defaults():
+    """The frozen BC profile is documented as a DEVIATION from the shipped
+    RCE300 calibration, so record what the shipped values actually are.
+
+    Kept deliberately loose (physical plausibility, not a pinned number) — the
+    tight oracle gate lives in ``test_rcemip_gsam_oracle_ic.py``.
+    """
+    assert 0.005 < WING_GAMMA < 0.010, WING_GAMMA
+    assert 0.008 < WING_Q_SFC_DEFAULT < 0.025, WING_Q_SFC_DEFAULT
+    assert WING_Z_T == 15_000.0
 
 
 def _build_z_topdown(n_levels=30, H=33_000.0):
@@ -118,7 +140,7 @@ def test_p_sfc_mode_matches_wing_spec():
     T_expected = 293.36
     assert abs(T_lowest - T_expected) < 0.5, (
         f"p_sfc mode T_lowest expected within 0.5 K of the canonical "
-        f"T_v0=295 profile value {T_expected:.2f} K at z={z_lowest:.1f} m; "
+        f"frozen BC profile value {T_expected:.2f} K at z={z_lowest:.1f} m; "
         f"got {T_lowest:.2f} K."
     )
 

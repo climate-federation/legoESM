@@ -116,15 +116,40 @@ def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0,
     ~9 sim-hours (vs laminar ~0.05 m/s with the buggy profile), mass-conserving with
     fix_mass=True (production). De-duplicates per the no-duplicate-numerics rule.
 
-    ``q_sfc`` (codex iter-61 [MED]): the Wing θ is built on a *virtual*-T
-    hydrostatic base ``T_v0 = T_sfc·(1+0.608·q_sfc)``, so it MUST use the SAME
-    surface humidity as :func:`_rcemip_qv_profile`. Threaded as an explicit arg
-    (not the library default) so a single ``q_sfc`` drives both θ and q_v from
-    one source — guards against a silent hydrostatic/moist desync if a caller
-    ever passes a non-300 K ``q_sfc``.
+    ``q_sfc``: the Wing θ is built on a *virtual*-T hydrostatic base, so it
+    MUST use the SAME surface humidity as :func:`_rcemip_qv_profile`. Threaded
+    as an explicit arg (not the library default) so a single ``q_sfc`` drives
+    both θ and q_v from one source.
+
+    ``T_sfc`` IS NOT USED and is retained only because callers pass it: it is
+    the prescribed SEA-surface temperature (the flux boundary condition), and
+    ``T_v0`` is the surface AIR virtual temperature, which gSAM's RCE300
+    sounding puts ~3 K BELOW the SST.  Deriving one from the other
+    (``T_v0 = T_sfc·(1+0.608·q_sfc)``, as an earlier revision of this docstring
+    claimed) overshoots the oracle by ~2.7 K; pinning ``T_v0`` to a fixed 295 K
+    for every SST undershoots it by ~5 K and made the column supersaturated.
+    ``WING_T_V0`` is now calibrated against the gSAM sounding — see the
+    constant's note — and the SST enters only through ``--T-sfc``.
     """
-    # RCEMIP T_v0 is FIXED at 295 K (Wing 2018 Tab 1), NOT the SST — the SST
-    # (`T_sfc`) only sets q_sfc + the surface BC. Use the library default T_v0.
+    # SCOPE WARNING (#1507 codex P1): WING_T_V0 / WING_GAMMA / WING_Q_SFC_DEFAULT
+    # are calibrated against the gSAM **RCE300** sounding, and they are MODULE
+    # DEFAULTS -- every defaulted caller gets them, including the SCM campaign
+    # and the RCE295 / RCE305 cases. Discarding T_sfc here is right (the SST is
+    # a boundary condition, not the IC), but it means a non-300 K run silently
+    # receives RCE300-calibrated ATMOSPHERIC coefficients. Say so once, loudly,
+    # rather than let the calibration travel unannounced; pass explicit
+    # T_v0/Gamma/q_sfc, or use --sounding, for the other SSTs.
+    if abs(float(T_sfc) - 300.0) > 0.5:
+        import warnings
+        warnings.warn(
+            f"RCEMIP analytic IC: T_sfc={float(T_sfc):.1f} K but the profile "
+            f"coefficients (T_v0={WING_T_V0}, Gamma={WING_GAMMA}, "
+            f"q_sfc={WING_Q_SFC_DEFAULT}) are calibrated against the gSAM "
+            f"RCE300 sounding. The atmospheric profile is therefore RCE300's, "
+            f"not this SST's. Pass explicit coefficients or --sounding for "
+            f"RCE295/RCE305 (#1507).",
+            stacklevel=2)
+    del T_sfc  # documented above: the SST is a boundary condition, not the IC
     return make_wing2018_theta_ref_fn(q_sfc=float(q_sfc))(z)
 
 
@@ -671,6 +696,118 @@ from legoesm.atmosphere.dynamics.crm.sam_case_setup import (  # noqa: E402
 )
 
 
+# Minimum vertical levels for the --sounding path. The gSAM tropopause cold
+# point is a KINK, and linear reconstruction error at a kink is FIRST order in
+# dz: 1.08 K at nlev=48 over H=20 km (job 9331622), acceptable at nlev=96. The
+# driver default (--nlev 30) would ship a tropopause warm by kelvin, so the
+# sounding path refuses it rather than quietly producing a bad column.
+_SOUNDING_MIN_NLEV = 64
+
+
+def build_sounding_height_coord(args, p_sfc_rcemip, dtype=jnp.float64):
+    """Read a TABULATED SAM sounding and build the RCEMIP1 vertical column.
+
+    gSAM's own RCEMIP1 deck ships one sounding per SST
+    (``CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2``; ``snd`` is the 300 K
+    one), and that file is NOT the Wing analytic profile — its tropospheric
+    lapse is steeper and its stratosphere WARMS with height where the analytic
+    form caps isothermally.  No choice of analytic constants can represent the
+    second difference, so the faithful RCEMIP1 IC has to read the table, as
+    BOMEX/RICO/DYCOMS/GATE already do.
+
+    Everything here routes through the SHARED reader + setup — no second
+    parser, no second IC builder — so the theta (potential temperature) and
+    q [g/kg -> kg/kg] conventions are handled in exactly one place for every
+    SAM-deck case::
+
+        read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
+
+    Module-level (rather than inline in ``main``) so the guards below are
+    directly testable: a CLI round-trip only proves argparse stores a string.
+
+    Returns ``(snd, height_coord)``; the sounding is returned already extended
+    to cover the model top so the caller can build the IC from the SAME object.
+    """
+    from legoesm.atmosphere.dynamics.crm.sam_case_setup import (
+        build_sam_case_height_coord,
+    )
+    from legoesm.atmosphere.forcing.sam_case_forcing import (
+        extend_sounding_to_top,
+        read_sam_snd,
+    )
+    snd_path = Path(args.sounding)
+    if not snd_path.is_file():
+        raise SystemExit(
+            f"--sounding {snd_path}: file not found. gSAM's RCEMIP1 deck "
+            "lives at $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/ (e.g. "
+            "snd_rcemip_300s6.11.2 for the RCE300 case).")
+    # build_sam_case_height_coord only builds a STRETCHED column — the
+    # SAM-faithful grid.  Refuse rather than silently ignore a requested
+    # uniform grid, so the vertical grid a run used is never a surprise
+    # (dispatch-hardening: no silent coercion).
+    if not args.stretched_vertical:
+        raise SystemExit(
+            "--sounding requires --stretched-vertical: the tabulated-sounding "
+            "path builds the SAM-faithful stretched column, and silently "
+            "overriding a requested uniform grid would hide which grid a run "
+            "used.")
+    # The gSAM cold point is a sharp V at ~14.5 km.  Reconstruction error at a
+    # kink is FIRST order in dz, so a coarse column moves the tropopause
+    # temperature by whole kelvin — measured 1.08 K at nlev=48 over H=20 km.
+    # The driver default is 30, which would silently ship a warm tropopause.
+    if args.nlev < _SOUNDING_MIN_NLEV:
+        raise SystemExit(
+            f"--sounding with --nlev {args.nlev}: too coarse. The gSAM "
+            f"tropopause cold point is a kink whose interpolation error is "
+            f"first order in dz (measured 1.08 K at nlev=48, H=20 km), so a "
+            f"column below {_SOUNDING_MIN_NLEV} levels misplaces it by "
+            f"kelvin. Use --nlev {_SOUNDING_MIN_NLEV} or more.")
+    snd = read_sam_snd(snd_path)
+    # Cover the model top so theta_ref does not clamp constant (dry-neutral)
+    # aloft; SAM extrapolates on the US-standard-atmosphere T ratio and
+    # extend_sounding_to_top replicates that.
+    snd = extend_sounding_to_top(snd, float(args.H))
+    # The sounding carries its OWN surface pressure (RCEMIP1: 1014.8 mb,
+    # identical to WING_P_SFC).  Assert rather than assume, so a deck with a
+    # different p_sfc cannot silently disagree with the flux/radiation code
+    # that still uses p_sfc_rcemip.
+    p_sfc_snd = float(snd.pres0) * 100.0
+    if abs(p_sfc_snd - p_sfc_rcemip) > 1.0:
+        raise SystemExit(
+            f"--sounding {snd_path}: surface pressure {p_sfc_snd:.1f} Pa "
+            f"disagrees with the RCEMIP1 p_sfc {p_sfc_rcemip:.1f} Pa used "
+            "by the surface-flux and radiation paths.")
+    hc = build_sam_case_height_coord(
+        snd, nlev=args.nlev, H=args.H, p_sfc_pa=p_sfc_snd,
+        dz_sfc=args.dz_sfc, dtype=dtype,
+    )
+    print(f"  SOUNDING IC: {snd_path} "
+          f"({np.asarray(snd.z).size} levels after top-extension, "
+          f"p_sfc={p_sfc_snd/100.0:.1f} mb)")
+    return snd, hc
+
+
+def build_sounding_initial_state(snd, grid, hc, args, n_tracers,
+                                 dtype=jnp.float64):
+    """Plane IC from a tabulated sounding via the shared SAM-deck builder.
+
+    ``band_noise`` is this driver's name for the builder's ``band_random``
+    seed — the SAME band-limited generator (``run_rcemip_plane`` imports
+    ``band_limited_seed_pattern`` from ``sam_case_setup``), just a different
+    label on the CLI.
+    """
+    from legoesm.atmosphere.dynamics.crm.sam_case_setup import (
+        build_sam_case_initial_state,
+    )
+    return build_sam_case_initial_state(
+        snd, grid, hc, n_tracers=n_tracers,
+        seed_amp=args.theta_noise_amp,
+        seed_kind=("band_random" if args.seed_kind == "band_noise"
+                   else args.seed_kind),
+        seed_kmax=args.seed_kmax, dtype=dtype,
+    )
+
+
 def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
                                 theta_noise_amp=0.1, n_seed_lev=4,
                                 n_tracers=3, seed_kind="smooth_k1",
@@ -961,7 +1098,10 @@ def cfl_guard(dt, dx, dz_min, n_acoustic_substeps=6, c_s=350.0, label="run"):
             f"acoustic CFL (dt≲{0.04 * dz_min:.1f} s) — reduce dt.", stacklevel=3)
 
 
-def parse_args():
+def parse_args(argv=None):
+    """Parse the driver CLI. ``argv=None`` reads ``sys.argv`` (production);
+    passing a list is what the CLI round-trip tests use — same convention as
+    ``run_omip.parse_args`` / ``run_amip.parse_args``."""
     p = argparse.ArgumentParser(description="RCEMIP1 plane NH harness.")
     p.add_argument("--nx", type=int, default=16)
     p.add_argument("--ny", type=int, default=16)
@@ -1212,6 +1352,24 @@ def parse_args():
     p.add_argument("--dz-sfc", type=float, default=50.0,
                    help="Surface-layer thickness [m] for stretched vertical "
                         "coordinate. RCEMIP1 standard = 50 m.")
+    p.add_argument("--sounding", type=str, default=None,
+                   help="Initialise from a TABULATED SAM-format sounding "
+                        "(gSAM CASES/RCEMIP1/snd_rcemip_300s6.11.2 for RCE300) "
+                        "instead of the analytic Wing 2018 profile. Read via "
+                        "the shared read_sam_snd + sam_case_setup path used by "
+                        "BOMEX/RICO/DYCOMS/GATE. gSAM's own sounding is NOT the "
+                        "Wing analytic form (lapse 7.47 vs 6.70 K/km, and a "
+                        "WARMING rather than isothermal stratosphere), so this "
+                        "is the faithful RCEMIP1 IC. Requires "
+                        "--stretched-vertical. Default (unset) = analytic.")
+    # NO --sounding-grd. It was drafted to take gSAM's exact grd levels, but
+    # CASES/RCEMIP1/grd is a 25-line ONE-column list topping out at 8500 m,
+    # while read_sam_grd expects the 3-column "z idx spacing" form that
+    # GATE_IDEAL/grd uses — so the flag would have raised ValueError on exactly
+    # the file its own help text named, and the CLI round-trip test would not
+    # have caught it (argparse strings round-trip fine). Shipping a flag that
+    # cannot work is worse than not shipping it; supporting the 1-column form
+    # belongs in the shared reader with its own test, not here.
     p.add_argument("--snapshot-days", type=float, default=0.0,
                    help="Save surface + 4-level-field npz every N SIM-DAYS "
                         "(precip, CWV, column-max w, condensate/w/qv/MSE at 4 "
@@ -1267,7 +1425,7 @@ def parse_args():
     p.add_argument("--vortex-seed-ztop", type=float, default=12.0e3,
                    help="Vertical extent of the seed vortex [m]; wind tapers "
                         "cos² from full at surface to 0 at ZTOP (default 12 km).")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main():
@@ -1372,18 +1530,36 @@ def main():
     # Single surface humidity drives BOTH the θ hydrostatic (virtual-T) base
     # and the q_v IC (codex iter-61 [MED] — keep them from desyncing).
     q_sfc_rce = WING_Q_SFC_DEFAULT
-    def theta_ref_fn(z):
-        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
-    if args.stretched_vertical:
-        hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
+    # --sounding: initialise from a TABULATED SAM sounding instead of the
+    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
+    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
+    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
+    # tropospheric lapse and a stratosphere that WARMS with height, where the
+    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
+    # choice can represent the second difference, so the faithful RCEMIP1 IC has
+    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
+    #
+    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
+    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
+    #                                          -> build_sam_case_initial_state
+    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
+    # are handled in exactly one place for every SAM-deck case.
+    snd = None
+    if args.sounding is not None:
+        snd, hc = build_sounding_height_coord(args, p_sfc_rcemip, dtype)
     else:
-        hc = create_height_coordinate(
-            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
+        def theta_ref_fn(z):
+            return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
+        if args.stretched_vertical:
+            hc = create_stretched_height_coordinate(
+                args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
+                theta_ref_fn=theta_ref_fn,
+            )
+        else:
+            hc = create_height_coordinate(
+                args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+                theta_ref_fn=theta_ref_fn,
+            )
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
@@ -1518,11 +1694,19 @@ def main():
         n_tracers = 9
     else:
         n_tracers = 3
-    state = _build_rcemip_initial_state(
-        grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
-        n_tracers=n_tracers, seed_kind=args.seed_kind, seed_kmax=args.seed_kmax,
-        q_sfc=q_sfc_rce,
-    )
+    if snd is not None:
+        # Shared SAM-deck IC builder: u/v/q_v interpolated from the sounding,
+        # θ' = θ_snd − θ_ref (≈0, θ_ref IS the sounding) + the same bottom-level
+        # symmetry-breaking seed, and the same DRY hydrostatic ρ' closure the
+        # analytic path uses.
+        state = build_sounding_initial_state(
+            snd, grid, hc, args, n_tracers, dtype=dtype)
+    else:
+        state = _build_rcemip_initial_state(
+            grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
+            n_tracers=n_tracers, seed_kind=args.seed_kind,
+            seed_kmax=args.seed_kmax, q_sfc=q_sfc_rce,
+        )
     # Optional restart from a checkpoint (resume long runs after a crash/fix).
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import rce_checkpoint  # noqa: E402
