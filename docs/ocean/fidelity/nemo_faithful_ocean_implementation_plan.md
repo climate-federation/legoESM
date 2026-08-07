@@ -36,6 +36,16 @@ the deficit lives (mid-depth density heave at the sill flank):
   `stp_dump_state_and_bt` dumps write `uu/vv(Naa)` both pre- and post-`mlf_baro_corr`; diff them
   at the bottom level near the sill flank. If the AFTER-solve correction moves the bottom velocity
   ~0, this demotes. If not, it is a candidate fix (reorder lego to reconcile after the solve).
+- **W1a — RESOLVED 2026-08-06: IMMATERIAL for this recipe, suspect ELIMINATED (CONFIRMED, test-backed).**
+  NEMO's `mlf_baro_corr` corrects depth-mean shifts that `dyn_zdf` injects (wind stress
+  `dynzdf.F90:354-360`, implicit drag `:305-313`). legoESM's solve has NONE of those inside it
+  under the kamm card: `surface_stress_implicit=False` (`dino.py:211`, never overridden), drag
+  folded onto the depth-mean directly (`zdf_drag_in_matrix`), and `test_baroclinic_only_round_
+  trip_conservative_at_zero_Av` PROVES the solve is depth-mean-exact. Nothing for a post-solve
+  reconciliation to correct ⇒ the ordering DIFF is a tested no-op here. GAP row closed:
+  `mlf_baro_corr_probe.py` committed; correction is a uniform-with-depth shift (per-column std
+  6e-19), 30-39% of RMS velocity globally. (Config-scoped: revisit if a card ever sets
+  `surface_stress_implicit=True` outside `explicit_substep` — already guarded by a raise.)
 - **W1b — `fix_eta_drift` compensator (CONFIRMED, quantified).** An always-on volume-drift
   projector with NO NEMO analogue, masking the barotropic solver's own ~2.5e-7 volume
   non-conservation (`dino.py:1397-1403`). It sits in the ssh/e3-commit path. Test: with/without,
