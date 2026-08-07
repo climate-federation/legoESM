@@ -345,3 +345,36 @@ Exonerated: 6 operators at same-state · 4 momentum sinks · 3 join suspects · 
 - **the honest alternative**: no single row owns it, and the deficit is emergent from the
   accumulated 1e-4..1e-6 across many rows — in which case the only path is W4, grinding them all
   to the class bars, and re-testing.
+
+## zdftke: THE 7% SURVIVES EXACT TRANSCRIPTION (2026-08-07) — escalation, not a gap
+
+Step-0 evidence inventory (made mandatory after the traadv lane found a week-old answer) fired
+its escape clause. **CONFIRMED by git ancestry against the measurement commits**: every stage the
+campaign ever identified as a candidate for the composite's 7% is ALREADY exact-transcribed and
+ALREADY LIVE on the card that produced the number —
+- `tke_buoyancy_sink="nemo_explicit"` (zdftke.F90:495) — card default, `dino.py:1069`
+- `tke_dissipation="nemo_1p5_split"` (zdftke.F90:241-242,414,419, incl. the zzd_up/zzd_lw
+  tridiagonal assembly) — card default, `dino.py:1063`
+- `tke_mxl_choice=3` (lup/ldown envelopes) — independently oracle-verified against a
+  from-Fortran NumPy transcription at rtol=1e-12, 7/7 tests
+all wired in `775cb72fb`, confirmed an ancestor of both `e0fac585e` (the composite measurement)
+and `1b1738352` (the sh2-elimination measurement).
+
+**sh2 is exonerated as the driver** (`1b1738352`): substituting NEMO's OWN dumped sh2 moves corr
+only 0.9633→0.9656 and moves the ratio AWAY from 1.0. (sh2's own 3-way probe disagreement remains
+open but is known not to explain the composite.) The MXL thread closed separately 2026-08-04
+(true `tke_dump_rn2` re-walk, 0.00992→0.00069).
+
+⇒ **This is THE RULE's escalation condition one level up: the exact NEMO match was already made,
+for every identified stage, and the row still does not clear.** The lane correctly REFUSED to
+invent a new "transcription" of already-faithful code to force the number down.
+
+**One stage was never audited line-by-line: the surface/bottom TKE boundary conditions**
+(surface injection/`rn_ebb`, the `nn_htau=1` latitude penetration profile the card sets, bottom
+BC, `en_min` floors). Walk launched, with the CHEAP DISCRIMINATOR FIRST: decompose the existing
+7% by level — a BC defect must be surface-concentrated (k=0-2). If it is not, the block is
+exonerated without any transcription work.
+
+**If the BC block is clean, the campaign's own alternative hypothesis stands**: no single row owns
+the deficit; it is emergent from accumulated 1e-4..1e-6 across many rows, and the only path is
+W4 — grind every DEBT row to its class bar and re-test.
