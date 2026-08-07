@@ -308,3 +308,40 @@ join suspects, and now the step composition. Remaining candidates: **the 26 DEBT
 **Most suspicious family: `traadv_fct` (5 rows, ~1e-4..1e-5, CONFIRMED LOCAL to the FCT/Zalesak
 chain)** — tracer advection over steep topography at the sill flank is exactly where a limiter
 would diverge, and it is the largest DEBT family sitting in the density-transport path.
+
+## traadv_fct EXONERATED 2026-08-07 (zero compute — the evidence already existed)
+
+Launched as the post-P4b prime suspect; the lane found the investigation had **already been run
+on this branch a week earlier** (commit `0fe45672d`, #1455) and reported it rather than
+re-running. Twice-exonerated:
+1. **Not inherited**: ww-substitution (NEMO's own `wzv_dump_ww_call2` into lego's FCT w_half)
+   DEGRADES all 5 rows by 3-5 orders (tendency-T corr 0.999991 -> 0.251229) ⇒ the residual is
+   LOCAL to lego's Zalesak chain.
+2. **Not co-located with the heave**: the clip-status-shift census (107 wet-to-wet faces) puts
+   only **4.7%** in the k=8-14 band, with the note stating explicitly the differing cells are
+   "NOT dominated by that band or by topo steps specifically" — a direct negative on the
+   spatial-co-location test.
+3. **The scheme is not the lever at all**: "the FCT limiter is the climate lever" was RETRACTED
+   (2026-07-27) — swapping in CENTERED (unlimited) advection reproduces the FCT run to 4 decimal
+   places over 5 years, **ACC identical**.
+
+CAVEAT kept: the full-scheme ablation was a 5-year ACC comparison, not the y15-20 F_topo window —
+suggestive, not byte-matched. Closing that gap costs a 20-yr centered-advection arm and is judged
+not worth it against a twice-exonerated family. The 603-vs-662 clip-count remains UNRECONCILED
+debt but is explicitly not topography-tracking.
+
+### PROCESS LESSON (mine)
+I launched this lane without first checking whether the campaign had already measured it. With
+~2 months of artifacts, **"has this already been measured?" must precede "let's measure it."**
+The lane caught it; the cost was one agent instead of a 20-year GPU run.
+
+### The elimination ledger is now nearly total
+Exonerated: 6 operators at same-state · 4 momentum sinks · 3 join suspects · the step composition
+(P4b) · the entire tracer-advection scheme. What remains for the flank heave:
+- **`zdftke composite avt/avm` — corr 0.966 / ratio 1.071, by far the LARGEST gate residual**
+  (~7%, vs everything else at 1e-4..1e-6). Note vertmix was exonerated for deep-box HEAT DELIVERY
+  by the twin budget, which does NOT exonerate a 7% avt/avm error from shaping flank density.
+- the barotropic/`dyn_spg_ts` rows, `dyn_vor EEN`, `dom_qco_r3c`, `dyn_cor_2d`, `dyn_drg_init`
+- **the honest alternative**: no single row owns it, and the deficit is emergent from the
+  accumulated 1e-4..1e-6 across many rows — in which case the only path is W4, grinding them all
+  to the class bars, and re-testing.
