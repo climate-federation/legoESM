@@ -68,6 +68,8 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import jax
+import warnings
+
 import numpy as np
 
 from legoesm.io.cmor_table_loader import (
@@ -330,6 +332,9 @@ CMIP6_PLEV19 = np.array(
 # =========================================================================
 # Helper: look up CMOR metadata for a variable name
 # =========================================================================
+
+# Names already reported by the bulk writers (#1501): warn once, not per step.
+_WARNED_UNKNOWN_CMOR_VARS: set = set()
 
 def lookup_cmor_entry(
     var_name: str,
@@ -1647,7 +1652,21 @@ class CFWriter:
             try:
                 table_id, entry = lookup_cmor_entry(var_name)
             except KeyError:
-                # Not a standard CMOR variable — skip silently
+                # Not a standard CMOR variable. Skipping is right -- this is a
+                # bulk writer fed whatever the run produced -- but doing it
+                # SILENTLY means a variable can vanish from the archive with no
+                # signal, and the writer that raises (write_field) is the one a
+                # user is least likely to call (codex, #1501). Warn once per
+                # name so the omission is visible without spamming per step.
+                if var_name not in _WARNED_UNKNOWN_CMOR_VARS:
+                    _WARNED_UNKNOWN_CMOR_VARS.add(var_name)
+                    warnings.warn(
+                        f"CMOR bulk write: {var_name!r} is not in the vendored "
+                        f"CMIP6 tables, so it is NOT being written. If it "
+                        f"should be archived, add it to the table subset "
+                        f"(scripts/data/build_cmor_table_subset.py); if not, "
+                        f"this is expected.",
+                        stacklevel=2)
                 continue
 
             declared_dims = entry["dimensions"]
