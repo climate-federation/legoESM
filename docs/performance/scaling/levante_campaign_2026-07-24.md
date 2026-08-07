@@ -2505,3 +2505,52 @@ test jobs (they run `tests/unit/` and selected paths), so neither these
 tests nor any other test in `tests/bench/` is CI-enforced. Repo-wide and
 pre-existing; Actions have been disabled repo-wide since 2026-05-27 in any
 case, so a targeted wiring change here would be inert.
+
+## The nsys collective census on the MPAS lane is UNRELIABLE (2026-08-07)
+
+Do not build another MPAS attribution on an Nsight Systems capture until this
+is resolved. The traces silently omit the very kernels being measured, with no
+error and no missing-data marker.
+
+Evidence, three independent captures:
+
+| capture | rank / arm | total kernels | SendRecv kernels |
+|---|---|---|---|
+| 26680051 (single-rank) | rank 0, physics=none | — | 288 |
+| 26772084 (skew, 4 ranks) | rank 0 | 187,606 | 96 |
+| 26772084 | rank 2 | 188,312 | 317 |
+| 26772084 | rank 1 | 187,247 | **0** |
+| 26772084 | rank 3 | 187,316 | **0** |
+| 26772734 (payload A/B) | dry, physics=none | 187,247 | **0** |
+| 26772734 | wet, physics=kessler | 276,656 | 124 |
+
+The zero rows are not runs without collectives: the dry arm's own receipt
+records `halo_strategy_effective: ppermute` and a 9.74 ms step, i.e. the
+halo exchange ran. Note also that the dry arm and skew rank 1 report the
+IDENTICAL total of 187,247 kernels — the same systematic omission, not
+random loss.
+
+What survives and what does not:
+
+* The DURATION median is robust — 216.2 / 212.4 / 213.5 us across three
+  captures on different jobs. Quote it.
+* Any COUNT from these traces is not. The 288-call structure that recovered
+  the traced run's `--reorder-for 128` provenance happened to be
+  self-consistent (8 rounds x 3 fills x 12 steps), but that consistency was
+  luck, not a guarantee, and it cannot be relied on again.
+
+CONSEQUENCE for the open payload-vs-wait question: it is NOT answerable by
+more nsys jobs. Two arms were run at a fixed schedule with the packed cell
+record changed from 28 to 106 values (`--physics none` vs `kessler`, mesh /
+device count / partition / reorder target identical); the wet arm captured
+124 collectives and the dry arm none, so there is nothing to compare. The
+next instrument should be an HLO-level collective census or the XLA profiler,
+both of which count what the compiled executable contains rather than what a
+sampling profiler happened to record.
+
+Also fixed along the way, and both would silently corrupt any future capture:
+`ncclDevKernel_SendRecv` is recorded under `shortName`, NOT `demangledName`,
+in some of these traces (querying the wrong column reads as "no collectives");
+and nsys sets `QUADD_INJECTION_PROXY`, which JAX treats as distributed
+coordinator configuration and hangs on — since only the PROFILED ranks get it,
+they diverge from the rest and the whole job deadlocks in init.
