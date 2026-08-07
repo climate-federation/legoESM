@@ -232,3 +232,40 @@ The composition is faithful (no leak) and live (materially different state) — 
 it is more accurate, because at a 1-day horizon the fidelity difference is inside noise on every
 path. **P4's 10-year climate run is therefore the sole decider** for whether the form-stress
 deficit is compositional.
+
+## P4 RESULTS (2026-08-07) — rung (d) real gain; rung (e) HAD NO POWER (design error, corrected)
+
+### Rung (d) — 90-day acceptance gate: NO REGRESSION, material gain (CONFIRMED)
+Tally `PASS 1 | FAIL 4 | level 5x` in all three arms; self-checks + non-vacuity passed.
+
+| metric (floor units) | control | +divisor only | nemo_mlf |
+|---|---|---|---|
+| ACC | 16.9 | 17.8 | **10.2** |
+| S-band sigma MAX | 32.9 | 33.2 | **16.4** |
+| deep contrast | 4.6 PASS | 4.9 PASS | 4.6 PASS |
+
+**Three-arm design solved the composition/divisor conflation**: the divisor-only arm is
+flat-to-adverse, so the gain is the COMPOSITION's.
+
+### Rung (e) — 10-year climate: NO DISCRIMINATING POWER BY CONSTRUCTION
+**This was a design error in the brief (mine).** The deficit ONSETS y11-13 and reaches 0.9590 at
+y15-20; at y6-10 the CONTROL ITSELF sits at 1.0020 — healthy. Both arms are healthy through y10,
+so the experiment could not distinguish them on the phenomenon it was built to test. "The window
+cannot show full closure" was written as a caveat when it was fatal to the test's power.
+
+Readouts at y6-10 (for the record, none decisive): ACC window err 0.198 -> 0.066 Sv but paired
+t=-1.00 (PLAUSIBLE, not significant, driven by y10 alone); F_topo 1.0020 -> 1.0010, t=-1.39
+(NULL, 0.3 sd); contrast NULL; heave MIXED — east improves +1.3 m but **west and mid move AWAY**
+(-0.5, +0.6 m), and west is the 53%-concentration flank.
+
+**Divisor CONFIRMED NULL at the climate horizon** (paired t=-0.01) — which calibrates the test
+(not insensitive) and makes composition attribution clean.
+
+The lane independently reproduced the single-year trap the brief warned of: y10 F_topo readings
+(control 1.0049, divisor-only 1.0002) look favourable and collapse on the window mean.
+
+### ⇒ P4b: extend nemo_mlf y11->y20 (running)
+The only readout that can answer the question. Control at y15-20: F_topo 0.9590 (sd 0.0034),
+heave -37 m (y15) / -67 m (y20) west. If the west flank stays wrong-signed there, the composition
+is NOT the cause and the answer lies in the kernels — which is the evidence that would justify a
+full NEMO-JAX kernel port.
