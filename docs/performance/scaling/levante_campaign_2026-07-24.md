@@ -2422,3 +2422,86 @@ than attempted: the cheap, safe part (geometry hoist, 2.5 %) is a
 clean follow-up if wanted; the risky part is not worth ~3.7 % on a
 lane already at ratio 1.83-1.96. Consistent with the campaign's
 standing conclusion that the remaining distance is structural.
+
+## Recolouring the MPAS halo schedule is capped by Vizing — measured offline (2026-08-07)
+
+Both independent consults (codex + GLM-5.2, transcripts in
+`.physics-validator/scaling_campaign/codex_consult_hundreds_2026-08-07.md`)
+ranked the MPAS GPU lane as the top remaining structural lever: it is the
+worst-scaling lane we have (measured/modelled-bound 3.16x at s8@16 to
+4.47x at s9@64), and one halo fill costs 12-14 SEQUENTIAL ppermute rounds.
+Codex priced a new partition objective that minimizes round depth at
+300-800 LOC and 7-14 days, with an optimistic ceiling of 14.4% at s10@128
+(12 fewer SendRecv calls/step x 218 us) and a hardware-only floor of
+0.356 ms (12 x 29.7 us). That spread is why it must be measured.
+
+**Before spending any of that, the cheap question is whether recolouring is
+already exhausted** — and it is answerable offline, with no GPU, from the
+colourer's own lower bound. `_build_ppermute_schedule` produces a proper
+EDGE colouring of the device communication graph (one colour = one round,
+properness asserted), and the `max_degree` it returns is that same graph's
+maximum vertex degree. VIZING therefore bounds the chromatic index:
+`Delta <= chi' <= Delta + 1`. So `coloring_gap = n_rounds - max_degree`
+reads as:
+
+* `gap == 0` -> `n_rounds == Delta`; no proper edge colouring can beat
+  `Delta`. PROVABLY OPTIMAL, recolouring headroom exactly zero.
+* `gap == 1` -> INCONCLUSIVE. A Class 2 graph genuinely needs `Delta + 1`,
+  and Class 1 vs Class 2 is NP-complete.
+* `gap >= 2` -> recolouring removes at least `gap - 1` rounds, at most `gap`.
+
+MEASURED so far (`bench_voronoi_partition_methods.py --schedule-cost`, the
+existing partition-quality bench extended to call the production
+`spmd_schedule_cost` rather than its own 1-ring proxy):
+
+| mesh | n_dev | geometric | sfc | metis | gap | strategy |
+|---|---|---|---|---|---|---|
+| L2/L3/L4 | 2-16 | rounds = n_dev-1 mostly | same | - | 0 everywhere | allgather (COUNTERFACTUAL) |
+| L6 lloyd=0 | 8 | 7 | 7 | 6 | 0 | ppermute (5,121 cells/dev) |
+| L6 lloyd=0 | 16 | 13 | 10 | 10 | 0 | ppermute (2,561 cells/dev) |
+| L8 lloyd=0 | 64 | 16 | - | - | 0 | ppermute |
+
+Two scope notes that must travel with these numbers:
+
+* The small-mesh rows are COUNTERFACTUAL: every one auto-selects the
+  ALLGATHER strategy (cells/device below the threshold), so production runs
+  no ppermute schedule there. Only L6@16 upward are real. L6@8's
+  `rounds == n_dev - 1` is complete-graph saturation and says nothing.
+* `gap == 0` rules out a better UNDIRECTED edge colouring of THIS graph and
+  nothing more. `_build_ppermute_schedule` enters a device pair into
+  `comm_pairs` when EITHER direction has a halo dependency and then emits
+  BOTH ppermute directions, even where one send map is empty — so a
+  redesigned DIRECTED schedule exploiting one-way exchanges is not bounded
+  by `Delta` at all. This is a THIRD path, not a two-way choice between
+  colouring and ownership.
+
+The neighbour fan-out that the bench's first layer already reported is NOT
+a stand-in for any of this: at L6@16 it reads 8/8/7 for
+geometric/sfc/metis while the real schedule reads 13/10/10.
+
+Job 26770026 (CPU `shared`, 24 h, zero GPU hours) scores the production
+working points s8/s9 @64,128 and s10@128. Arms 1-2 are a MECHANICAL
+instrument check via `--expect-rounds` against the reference census in
+`spmd_schedule_cost`'s docstring (s8 sfc 12/14, metis 13/19, geometric
+16/21; s9 sfc 11/13, metis 14/18, geometric 14/18); arm 3's unknown s10
+number is only produced if both pass, because an instrument that misses the
+known answer cannot be trusted on the unknown one. The first production row
+to land, s8 geometric@64 = 16 rounds, reproduces the census exactly — a
+spot check, not yet the validation, which is the full six-row gate.
+
+Eight codex adversarial rounds on this change (transcripts
+`codex_review_schedule_cost{,_r2..r8}_2026-08-07.md`); round 8 SHIP. The
+defects it caught are worth recording because most were in the INSTRUMENT,
+not the model: a headroom figure documented backwards (`gap-1` is the
+GUARANTEED reduction, not the maximum); a launcher that filed a scan with
+no results as COMPLETED; an artifact guard that passed on
+`{"rows": {"n_ranks": 1}}` because iterating a dict yields its keys; a
+`--expect-rounds` gate bypassable by whitespace or a duplicate key; and a
+first-draft test that was VACUOUS — hardcoding `coloring_gap = 0` passed
+every fast fixture, because the true gap is 0 on all of them.
+
+KNOWN GAP, reported not fixed: `tests/bench/` is not executed by the CI
+test jobs (they run `tests/unit/` and selected paths), so neither these
+tests nor any other test in `tests/bench/` is CI-enforced. Repo-wide and
+pre-existing; Actions have been disabled repo-wide since 2026-05-27 in any
+case, so a targeted wiring change here would be inert.
