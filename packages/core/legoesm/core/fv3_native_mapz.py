@@ -717,7 +717,7 @@ CONSV_MIN = 0.001                                # fv_mapz.F90:43
 def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
                           fill: bool, kord_tm: int, do_sat_adj: bool,
                           do_inline_mp: bool, do_adiabatic_init: bool,
-                          nq: int) -> None:
+                          nq: int, last_step: bool) -> None:
     """Reject every configuration whose ``fv_mapz`` branch is not ported.
 
     Each of these is a REAL oracle branch that this port does not carry.
@@ -732,15 +732,21 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
             "ported, and this port's acoustic loop is hydrostatic "
             "throughout (geopk is called with hydrostatic=.true. at "
             "dyn_core.F90:1401). Port those blocks before flipping this.")
-    if consv > CONSV_MIN or consv < -CONSV_MIN:
+    # The energy fixer is inside `if (last_step .and. ...)` at :628, so a
+    # non-last_step call never reaches it whatever consv says. Refusing it
+    # there would be stricter than the oracle, not safer.
+    if last_step and (consv > CONSV_MIN or consv < -CONSV_MIN):
         raise NotImplementedError(
-            f"consv={consv}: the total-energy fixer (fv_mapz.F90:630-747) "
-            f"is NOT ported. The reference deck pins consv_te=0.0, which "
-            f"leaves dtmp exactly 0. |consv| must be <= {CONSV_MIN}.")
-    if fill:
+            f"consv={consv} at last_step: the total-energy fixer "
+            f"(fv_mapz.F90:628-747) is NOT ported. The reference deck pins "
+            f"consv_te=0.0, which leaves dtmp exactly 0. |consv| must be "
+            f"<= {CONSV_MIN}.")
+    # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
+    # opened at :330 -- with no tracers it is unreachable.
+    if fill and nq > 0:
         raise NotImplementedError(
-            "fill=True: fillz (fv_mapz.F90:336) is NOT ported; the "
-            "reference deck pins fill=.F.")
+            "fill=True with tracers: fillz (fv_mapz.F90:336) is NOT ported; "
+            "the reference deck pins fill=.F.")
     if int(kord_tm) >= 0:
         raise NotImplementedError(
             f"kord_tm={kord_tm} >= 0: the positive-kord_tm lane is a "
@@ -764,11 +770,11 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            ak, bk, ptop, akap, cp, r_vir,
                            km, n, ng,
                            kord_mt, kord_tm, kord_tr,
-                           q=None, omga=None, sphum_index=None,
+                           q, omga=None, sphum_index=None,
                            last_step=True,
                            hydrostatic=True, adiabatic=True, consv=0.0,
                            fill=False, do_sat_adj=False, do_inline_mp=False,
-                           do_adiabatic_init=False, qmin_tracer=0.0):
+                           do_adiabatic_init=False):
     """``Lagrangian_to_Eulerian`` for ONE face, in place (fv_mapz.F90:62).
 
     Arrays follow ``fv3_native_state_3d``'s layout contract, 0-based
@@ -783,8 +789,18 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
         pkz           (n, n, km)                    [is, js, 1]
 
     with ``m_a = n + 2*ng``, ``m_b = m_a + 1``, ``is = js = 1``,
-    ``ie = je = n``.  ``q`` is an optional list of tracer arrays shaped
-    like ``delp``; ``omga`` likewise.
+    ``ie = je = n``.
+
+    ``q`` is REQUIRED and has no default: it is the list of tracer arrays
+    (each shaped like ``delp``), and ``[]`` means "this configuration has
+    none". The pinned deck has nr = 2 (ncnst=3, dnats=1), so the oracle
+    makes two passes through ``fv_mapz.F90:330-342``; a defaulted
+    ``q=None`` would let a caller skip both and still get a plausible
+    ``pt``/``delp``. Make the choice visible at the call site.
+
+    There is deliberately no ``qmin`` knob for the tracer remap: the
+    oracle passes the literal ``0.`` at ``:335``, so exposing it would be
+    an answer-changing option with no upstream counterpart.
 
     PRECONDITION THAT IS NOT CHECKABLE HERE: ``pe``'s one-cell halo ring
     must be current.  The u/v remap reads ``pe(i,k,j-1)``
@@ -799,11 +815,19 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
     ``pt`` enters as virtual POTENTIAL temperature and leaves as ``T``
     (``last_step``) or back as ``theta_v`` (``fv_mapz.F90:994-1002``).
     """
-    nq = 0 if q is None else len(q)
+    if q is None or isinstance(q, np.ndarray):
+        raise TypeError(
+            "q must be a list of tracer arrays ([] for none), not "
+            f"{type(q).__name__}. It has no default so that skipping "
+            "the tracer remap is always a visible choice: the pinned "
+            "deck has nr=2 and the oracle makes two passes through "
+            "fv_mapz.F90:330-342.")
+    nq = len(q)
     _refuse_unported_lane(hydrostatic=hydrostatic, adiabatic=adiabatic,
                           consv=consv, fill=fill, kord_tm=kord_tm,
                           do_sat_adj=do_sat_adj, do_inline_mp=do_inline_mp,
-                          do_adiabatic_init=do_adiabatic_init, nq=nq)
+                          do_adiabatic_init=do_adiabatic_init, nq=nq,
+                          last_step=last_step)
     ppm_profile_is_unported(kord_mt)
     ppm_profile_is_unported(abs(int(kord_tm)))
     kords_tr = ([int(kord_tr)] * nq if np.isscalar(kord_tr)
@@ -813,11 +837,14 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                          f"tracers")
     for kt in kords_tr:
         ppm_profile_is_unported(kt)
-    if r_vir != 0.0:
+    if r_vir != 0.0 and last_step:
         # fv_mapz.F90:975 divides by (1 + r_vir*q(...,sphum)) using the
-        # EXPLICIT sphum index it was passed; sphum is not tracer 0 in
-        # general (get_tracer_index, :169-176). Guessing it would silently
-        # divide by the wrong tracer.
+        # EXPLICIT `sphum` DUMMY ARGUMENT declared at :80 -- NOT a
+        # get_tracer_index lookup (:169-176 fetch liq_wat/ice_wat/rainwat/
+        # snowwat/graupel/cld_amt/ccn/cin, never sphum). Guessing tracer 0
+        # would silently divide by the wrong species. The conversion lives
+        # inside the `if (last_step)` block at :964, so a non-last_step
+        # call never reads sphum and must not be refused for lacking it.
         if q is None:
             raise ValueError(
                 "r_vir != 0 needs the tracers for the closing T_v -> T "
@@ -921,7 +948,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             for iq in range(nq):
                 q[iq][ia:ia + n, jd, :] = unpad1(map1_q2(
                     pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km, km,
-                    0, kords_tr[iq], qmin_tracer))
+                    0, kords_tr[iq], 0.0))   # :335 -- literal 0.
 
             # :424-428 -- update pk
             pk[ia:ia + n, jd, :] = unpad1(pk2)

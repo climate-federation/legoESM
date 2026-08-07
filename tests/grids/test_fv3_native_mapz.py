@@ -493,7 +493,7 @@ def test_driver_puts_delp_on_the_eulerian_coordinate():
     ak, bk, ptop = face["ak"], face["bk"], face["ptop"]
     before = face["delp"][ng:ng + n, ng:ng + n, :].copy()
 
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
 
     ia = ng
     ps = face["ps"][ia:ia + n, ia:ia + n]
@@ -523,7 +523,7 @@ def test_driver_conserves_the_column_heat_integral():
     dlnp0 = (pln0[:, 1:, :] - pln0[:, :-1, :]).transpose(0, 2, 1)
     src = (tv0 * dlnp0).sum(axis=2)
 
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
 
     pln1 = face["peln"]
     dlnp1 = (pln1[:, 1:, :] - pln1[:, :-1, :]).transpose(0, 2, 1)
@@ -536,7 +536,7 @@ def test_driver_leaves_pt_as_temperature_at_last_step():
     face, _ = _face()
     n, ng = face["n"], face["ng"]
     ia = ng
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
     t = face["pt"][ia:ia + n, ia:ia + n, :]
     assert 180.0 < t.min() and t.max() < 350.0, \
         f"pt looks like theta, not T: [{t.min()}, {t.max()}]"
@@ -553,8 +553,8 @@ def test_driver_returns_theta_when_not_last_step():
     ia = ng
     a, _ = _face()
     b, _ = _face()
-    lagrangian_to_eulerian(**a)                       # last_step=True -> T
-    lagrangian_to_eulerian(**b, last_step=False)      # -> theta_v
+    lagrangian_to_eulerian(**a, q=[])                       # last_step=True -> T
+    lagrangian_to_eulerian(**b, q=[], last_step=False)      # -> theta_v
     assert np.allclose(a["pkz"], b["pkz"], rtol=0.0, atol=0.0)
     assert np.allclose(b["pt"][ia:ia + n, ia:ia + n, :],
                        a["pt"][ia:ia + n, ia:ia + n, :] / a["pkz"],
@@ -567,7 +567,7 @@ def test_driver_updates_pe_peln_pk_consistently():
     face, _ = _face()
     n, ng, km = face["n"], face["ng"], face["km"]
     ia = ng
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
     pe_int = face["pe"][1:n + 1, :, 1:n + 1]              # (i, k, j)
     assert np.allclose(np.exp(face["peln"]), pe_int, rtol=1e-13)
     assert np.allclose(face["pk"][ia:ia + n, ia:ia + n, :],
@@ -581,7 +581,7 @@ def test_driver_remaps_the_winds():
     ia = ng
     u0 = face["u"][ia:ia + n, ia:ia + n + 1, :].copy()
     v0 = face["v"][ia:ia + n + 1, ia:ia + n, :].copy()
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
     assert np.max(np.abs(face["u"][ia:ia + n, ia:ia + n + 1, :] - u0)) > 1e-6
     assert np.max(np.abs(face["v"][ia:ia + n + 1, ia:ia + n, :] - v0)) > 1e-6
 
@@ -622,7 +622,7 @@ def test_driver_remaps_omega_onto_the_new_cell_centres():
     n, ng = face["n"], face["ng"]
     ia = ng
     before = face["omga"][ia:ia + n, ia:ia + n, :].copy()
-    lagrangian_to_eulerian(**face)
+    lagrangian_to_eulerian(**face, q=[])
     after = face["omga"][ia:ia + n, ia:ia + n, :]
     assert np.max(np.abs(after - before)) > 1e-6, "omega was not remapped"
     # The interpolation is a convex combination of the OLD column, so it
@@ -635,7 +635,7 @@ def test_driver_requires_omga_at_last_step():
     face, _ = _face()
     face.pop("omga")
     with pytest.raises(ValueError, match="omga"):
-        lagrangian_to_eulerian(**face)
+        lagrangian_to_eulerian(**face, q=[])
 
 
 def test_driver_uses_the_declared_sphum_index_not_tracer_zero():
@@ -669,25 +669,32 @@ def test_driver_uses_the_declared_sphum_index_not_tracer_zero():
         lagrangian_to_eulerian(**bad, q=_tracers())
 
 
-@pytest.mark.parametrize("override, needle", [
-    (dict(hydrostatic=False), "hydrostatic"),
-    (dict(consv=1.0), "consv"),
-    (dict(fill=True), "fillz"),
-    (dict(kord_tm=9), "kord_tm"),
-    (dict(do_sat_adj=True), "do_sat_adj"),
+@pytest.mark.parametrize("override, needle, ntracer", [
+    (dict(hydrostatic=False), "hydrostatic", 0),
+    (dict(consv=1.0), "consv", 0),
+    # fillz sits INSIDE the `elseif (nq > 0)` arm (fv_mapz.F90:330-336), so
+    # fill=True is only refusable when there are tracers -- with none it is
+    # unreachable upstream and must NOT raise (asserted separately in
+    # test_driver_guards_do_not_over_refuse_a_non_last_step_call).
+    (dict(fill=True), "fillz", 1),
+    (dict(kord_tm=9), "kord_tm", 0),
+    (dict(do_sat_adj=True), "do_sat_adj", 0),
 ])
-def test_driver_refuses_every_unported_lane(override, needle):
+def test_driver_refuses_every_unported_lane(override, needle, ntracer):
     face, _ = _face()
     face.update(override)
+    m_a = face["n"] + 2 * face["ng"]
+    tr = [np.zeros((m_a, m_a, face["km"]), dtype=np.float64)
+          for _ in range(ntracer)]
     with pytest.raises(NotImplementedError, match=needle):
-        lagrangian_to_eulerian(**face)
+        lagrangian_to_eulerian(**face, q=tr)
 
 
 def test_driver_refuses_a_moist_lane_without_any_tracers():
     face, _ = _face()
     face["r_vir"] = 0.6077
     with pytest.raises(ValueError, match="r_vir"):
-        lagrangian_to_eulerian(**face)
+        lagrangian_to_eulerian(**face, q=[])
 
 
 def test_iv_minus3_is_refused_rather_than_invented():
@@ -712,3 +719,258 @@ def test_pad_roundtrip():
     a = np.arange(12, dtype=np.float64).reshape(3, 4)
     assert np.array_equal(unpad1(pad1(a)), a)
     assert np.array_equal(pad1(a)[:, 0], np.zeros(3))
+
+
+# ---------------------------------------------------------------------- #
+# driver wiring: recompute each output from the ported kernels directly
+#
+# SCOPE, stated plainly: these pin the DRIVER'S WIRING -- which kernel it
+# calls, with which iv/kord/coordinate/divisor -- not the kernel maths.
+# They kill the mutation class the adversarial reviewer demonstrated
+# (map_scalar <-> map1_ppm, iv=0 <-> iv=1, iv=-1 <-> iv=1, kord 9 <-> 12,
+# a doubled pkz, omega read at the interface instead of the midpoint), all
+# of which previously stayed green. Anchoring the kernel MATHS needs a
+# Fortran-produced golden and is tracked separately.
+# ---------------------------------------------------------------------- #
+
+def _pn2_for_row(face, j, n, ak, bk):
+    """Rebuild the Eulerian ln(p) target for row j, as the driver does.
+
+    Endpoints are COPIED from peln (fv_mapz.F90:297-298), not recomputed
+    from ptop/ps -- reproducing that here is what makes the comparison
+    exact rather than approximate.
+    """
+    km = face["km"]
+    peln0 = face["_peln0"]
+    pe0 = face["_pe0"]
+    pn2 = np.zeros((n, km + 2), dtype=np.float64)
+    pn2[:, 1] = peln0[:, 0, j - 1]
+    pn2[:, km + 1] = peln0[:, km, j - 1]
+    for k in range(2, km + 1):
+        pn2[:, k] = np.log(ak[k - 1] + bk[k - 1] * pe0[1:n + 1, km, j])
+    return pn2
+
+
+def _face_with_snapshots():
+    face, _ = _face()
+    face["_pe0"] = face["pe"].copy()
+    face["_peln0"] = face["peln"].copy()
+    face["_pk0"] = face["pk"].copy()
+    face["_pt0"] = face["pt"].copy()
+    face["_u0"] = face["u"].copy()
+    face["_v0"] = face["v"].copy()
+    face["_omga0"] = face["omga"].copy()
+    return face
+
+
+def _call(face, **kw):
+    """Invoke the driver with the snapshot keys stripped out."""
+    args = {k: v for k, v in face.items() if not k.startswith("_")}
+    return lagrangian_to_eulerian(**args, **kw)
+
+
+def test_driver_pt_equals_a_direct_map_scalar_call():
+    """kord_tm<0 selects map_scalar in ln(p) -- not map1_ppm in p.
+
+    Both conserve their own integral, so the heat-integral test alone
+    cannot tell them apart (reviewer's counterexample: 182.01792793 vs
+    181.60677638 on a cold column).
+    """
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia, akap = ng, face["akap"]
+    ak, bk = face["ak"], face["bk"]
+    _call(face, q=[])
+
+    j = 3
+    pk0 = face["_pk0"][ia:ia + n, ia + j - 1, :]
+    pln0 = face["_peln0"][:, :, j - 1]
+    lag_pkz = (pk0[:, 1:] - pk0[:, :-1]) / (akap * (pln0[:, 1:] - pln0[:, :-1]))
+    tv = face["_pt0"][ia:ia + n, ia + j - 1, :] * lag_pkz
+    want = unpad1(map_scalar(pad1(pln0), pad1(tv),
+                             _pn2_for_row(face, j, n, ak, bk),
+                             km, km, 1, abs(face["kord_tm"]), T_MIN))
+    got = face["pt"][ia:ia + n, ia + j - 1, :]
+    assert np.array_equal(got, want), \
+        f"driver pt != map_scalar(iv=1, ln p): max |d| = {np.abs(got-want).max()}"
+
+
+def test_driver_u_equals_a_direct_map1_ppm_call_including_the_je_plus_1_row():
+    """The u remap runs for j = js..je+1 (fv_mapz.F90:195, :547).
+
+    The north row is the whole reason the j-loop extends one past je, and
+    it is remapped against the deliberately OLD pe(...,j-1). Ending the
+    loop at je leaves it untouched and every previous wind test still
+    passed.
+    """
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    ak, bk = face["ak"], face["bk"]
+    pe0, u0 = face["_pe0"], face["_u0"]
+    _call(face, q=[])
+
+    for j in (2, n + 1):                       # an interior row and je+1
+        jd, jpe = ia + j - 1, j
+        pe1 = pad1(pe0[1:n + 1, :, jpe])
+        pe0_u = np.zeros((n, km + 2), dtype=np.float64)
+        pe3_u = np.zeros((n, km + 2), dtype=np.float64)
+        pe0_u[:, 1] = pe0[1:n + 1, 0, jpe]
+        for k in range(2, km + 2):
+            pe0_u[:, k] = 0.5 * (pe0[1:n + 1, k - 1, jpe - 1] + pe1[:, k])
+        for k in range(1, km + 2):
+            bkh = 0.5 * bk[k - 1]
+            pe3_u[:, k] = ak[k - 1] + bkh * (pe0[1:n + 1, km, jpe - 1]
+                                             + pe1[:, km + 1])
+        want = unpad1(map1_ppm(pe0_u, pad1(u0[ia:ia + n, jd, :]), pe3_u,
+                               km, km, -1, face["kord_mt"]))
+        got = face["u"][ia:ia + n, jd, :]
+        assert np.array_equal(got, want), f"u row j={j} mismatch"
+
+    assert not np.array_equal(face["u"][ia:ia + n, ia + n, :],
+                              u0[ia:ia + n, ia + n, :]), \
+        "the j=je+1 u row was never remapped -- the loop stopped at je"
+
+
+def test_driver_v_equals_a_direct_map1_ppm_call_over_is_to_ie_plus_1():
+    """v spans i = is..ie+1 and is skipped at j = je+1 (:551-570)."""
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia, npv = ng, n + 1
+    ak, bk = face["ak"], face["bk"]
+    pe0, v0 = face["_pe0"], face["_v0"]
+    _call(face, q=[])
+
+    j, jd, jpe = 3, ia + 2, 3
+    pe0_v = np.zeros((npv, km + 2), dtype=np.float64)
+    pe3_v = np.zeros((npv, km + 2), dtype=np.float64)
+    pe0_v[:, 1] = pe0[1:1 + npv, 0, jpe]
+    pe3_v[:, 1] = ak[0]
+    for k in range(2, km + 2):
+        bkh = 0.5 * bk[k - 1]
+        pe0_v[:, k] = 0.5 * (pe0[0:npv, k - 1, jpe] + pe0[1:1 + npv, k - 1, jpe])
+        pe3_v[:, k] = ak[k - 1] + bkh * (pe0[0:npv, km, jpe]
+                                         + pe0[1:1 + npv, km, jpe])
+    want = unpad1(map1_ppm(pe0_v, pad1(v0[ia:ia + npv, jd, :]), pe3_v,
+                           km, km, -1, face["kord_mt"]))
+    assert np.array_equal(face["v"][ia:ia + npv, jd, :], want)
+    # v is NOT remapped on the j=je+1 pass
+    assert np.array_equal(face["v"][ia:ia + npv, ia + n, :],
+                          v0[ia:ia + npv, ia + n, :]), \
+        "v was remapped at j=je+1, but :551 guards it with `if (j < je+1)`"
+
+
+def test_driver_tracer_equals_a_direct_map1_q2_call_with_iv0():
+    """The tracer lane is map1_q2(iv=0, qmin=0.) with the driver's dp2.
+
+    iv=1 conserves too, so the conservation test could not see it; on the
+    reviewer's spiky column the iv=1 mutant reaches -3.5e-3.
+    """
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    ak, bk = face["ak"], face["bk"]
+    m_a = n + 2 * ng
+    qv = np.zeros((m_a, m_a, km), dtype=np.float64)
+    qv[ia:ia + n, ia:ia + n, :] = np.array(
+        [1e-6, 8e-3, 2e-5, 9e-3, 1e-7])[None, None, :]
+    q0 = qv.copy()
+    pe0 = face["_pe0"]
+    _call(face, q=[qv])
+
+    j, jd, jpe = 3, ia + 2, 3
+    pe1 = pad1(pe0[1:n + 1, :, jpe])
+    pe2 = np.zeros((n, km + 2), dtype=np.float64)
+    pe2[:, 1] = face["ptop"]
+    pe2[:, km + 1] = pe0[1:n + 1, km, jpe]
+    for k in range(2, km + 1):
+        pe2[:, k] = ak[k - 1] + bk[k - 1] * pe0[1:n + 1, km, jpe]
+    dp2 = np.zeros((n, km + 1), dtype=np.float64)
+    for k in range(1, km + 1):
+        dp2[:, k] = pe2[:, k + 1] - pe2[:, k]
+    want = unpad1(map1_q2(pe1, pad1(q0[ia:ia + n, jd, :]), pe2, dp2,
+                          km, km, 0, face["kord_tr"], 0.0))
+    assert np.array_equal(qv[ia:ia + n, jd, :], want)
+    assert np.all(qv[ia:ia + n, ia:ia + n, :] >= 0.0), \
+        "tracer went negative -- the driver is not passing iv=0"
+
+
+def test_driver_pkz_matches_its_interface_formula_exactly():
+    """pkz = (pk2(k+1)-pk2(k)) / (akap*(peln_new(k+1)-peln_new(k))).
+
+    A doubled pkz left every earlier assertion green, because the only
+    other test that touched pkz checked a self-consistent RATIO.
+    """
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia, akap = ng, face["akap"]
+    _call(face, q=[])
+    pkc = face["pk"][ia:ia + n, ia:ia + n, :]
+    pln = face["peln"]
+    want = ((pkc[:, :, 1:] - pkc[:, :, :-1])
+            / (akap * (pln[:, 1:, :] - pln[:, :-1, :]).transpose(0, 2, 1)))
+    assert np.array_equal(face["pkz"], want)
+    # ...and it is a real number, not a leftover zero fill.
+    assert face["pkz"].min() > 1.0
+
+
+def test_driver_omega_interpolates_at_the_new_logp_midpoints():
+    """fv_mapz.F90:507 uses 0.5*(peln_new(k)+peln_new(k+1)).
+
+    Reading the top interface instead stays inside the convex range, so
+    the range check could not see it (reviewer: max error 0.186).
+    """
+    face = _face_with_snapshots()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    pe0_old_all = face["_peln0"]
+    om0 = face["_omga0"]
+    _call(face, q=[])
+
+    j, jd = 3, ng + 2
+    pln_new = face["peln"][:, :, j - 1]
+    mid = 0.5 * (pln_new[:, :-1] + pln_new[:, 1:])
+    pe0_old = pe0_old_all[:, :, j - 1]
+    pe3 = np.zeros((n, km + 2), dtype=np.float64)
+    for k in range(2, km + 2):
+        pe3[:, k] = om0[ia:ia + n, jd, k - 2]
+
+    want = np.zeros((n, km), dtype=np.float64)
+    for i in range(n):
+        k_next = 1
+        for nn in range(1, km + 1):
+            for k in range(k_next, km + 1):
+                if (mid[i, nn - 1] <= pe0_old[i, k]
+                        and mid[i, nn - 1] >= pe0_old[i, k - 1]):
+                    want[i, nn - 1] = (
+                        pe3[i, k] + (pe3[i, k + 1] - pe3[i, k])
+                        * (mid[i, nn - 1] - pe0_old[i, k - 1])
+                        / (pe0_old[i, k] - pe0_old[i, k - 1]))
+                    k_next = k
+                    break
+    assert np.array_equal(face["omga"][ia:ia + n, jd, :], want)
+
+
+def test_driver_requires_q_explicitly():
+    """No default: skipping the nr=2 tracer lane must be a visible choice."""
+    face, _ = _face()
+    with pytest.raises(TypeError):
+        lagrangian_to_eulerian(**face)
+
+
+def test_driver_guards_do_not_over_refuse_a_non_last_step_call():
+    """consv and sphum are read ONLY inside `if (last_step)` (:628, :964).
+
+    Refusing them on a non-last_step call would be stricter than the
+    oracle -- a guard that fires where upstream does nothing is as much a
+    divergence as one that fails to fire.
+    """
+    a, _ = _face()
+    lagrangian_to_eulerian(**a, q=[], last_step=False, consv=1.0)
+    b, _ = _face()
+    b["r_vir"] = 1.0
+    m_a = b["n"] + 2 * b["ng"]
+    tr = [np.zeros((m_a, m_a, b["km"]), dtype=np.float64) for _ in range(2)]
+    lagrangian_to_eulerian(**b, q=tr, last_step=False)
+    c, _ = _face()
+    lagrangian_to_eulerian(**c, q=[], fill=True)     # fillz needs nq > 0
