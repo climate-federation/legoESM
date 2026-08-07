@@ -839,6 +839,16 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
                 params, jax.tree_util.tree_map(lambda x: x * scale, updates))
             _assert_strict_bounds(cand)
             cand_loss = float(loss_fn(cand))
+            # A candidate at or above the penalty contains a NON-FINITE case:
+            # score_against_les maps any non-finite rollout to exactly
+            # NONFINITE_PENALTY. Testing only `cand_loss < loss_val` accepted
+            # such a candidate whenever the CURRENT loss was legitimately
+            # larger -- a near-uniform reference divided by the spread floor
+            # produces a finite score above 1000 -- so a blown-up parameter set
+            # was adopted as an "improvement". A blow-up is never an
+            # improvement, whatever the current loss is.
+            if cand_loss >= NONFINITE_PENALTY:
+                continue
             if np.isfinite(cand_loss) and cand_loss < loss_val:
                 params, opt_state = cand, opt_next
                 loss_history.append(cand_loss)
@@ -862,6 +872,13 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
     result.components_tuned = {
         k: {kk: float(vv) for kk, vv in c.items()}
         for k, c in per_comp.items()}
+    # The TUNED evaluation's non-finite flag was dropped on the floor, so an
+    # arm whose tuned parameters blow up kept the clean flag from its DEFAULT
+    # evaluation and stayed rankable -- possibly first. Union the two: an arm
+    # is penalised if EITHER evaluation went non-finite.
+    result.nonfinite_cases = sorted(
+        set(result.nonfinite_cases or [])
+        | set(getattr(joint_score, "last_nonfinite", set())))
 
     meta = {f"{m.scheme_key}.{m.field}": m for m in build_registry()}
     phys, allphys = params.as_dict(), params_all.as_dict()

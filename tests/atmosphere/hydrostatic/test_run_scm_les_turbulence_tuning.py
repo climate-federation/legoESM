@@ -597,10 +597,51 @@ def test_only_arms_with_a_valid_score_are_ranked():
     for status in ("ok", "tuned", "no_reducing_step", "no_active_gradient",
                    "no_tunable_params"):
         assert status in rankable, f"{status} has a valid score; rank it"
-    for status in ("failed", "tune_failed", "nonfinite"):
+    # The status production actually assigns to a blown-up arm is
+    # "nonfinite_rollout" (_write_outputs rewrites the status when
+    # _penalised(r) is true). Asserting on "nonfinite" tested a string the
+    # code never produces, so adding the REAL status to _RANKABLE would have
+    # let blown-up arms rank while this test still passed.
+    import inspect
+    assigned = inspect.getsource(drv._write_outputs)
+    assert '"nonfinite_rollout"' in assigned, (
+        "the penalised status was renamed; update this test to the new name")
+    for status in ("failed", "tune_failed", "nonfinite_rollout"):
         assert status not in rankable, (
             f"{status} has no valid score; ranking it can put a blown-up "
             "arm first")
+
+
+def test_a_penalty_valued_candidate_is_never_accepted():
+    """A non-finite candidate must lose even when the current loss is larger.
+
+    score_against_les maps a non-finite rollout to exactly NONFINITE_PENALTY.
+    A near-uniform reference divided by the spread floor gives a legitimately
+    FINITE score above that, so a bare `cand_loss < loss_val` test adopted a
+    blown-up parameter set as an improvement. Guards the >= penalty reject.
+    """
+    import inspect
+    src = inspect.getsource(drv.tune_scheme_multicase)
+    i = src.index("cand_loss = float(loss_fn(cand))")
+    window = src[i:i + 700]
+    assert "cand_loss >= NONFINITE_PENALTY" in window, (
+        "the line search must reject a candidate at or above the penalty "
+        "BEFORE the improvement test; otherwise a NaN rollout is accepted "
+        "whenever the current loss exceeds the sentinel")
+
+
+def test_tuned_nonfinite_flag_reaches_the_result():
+    """An arm whose TUNED parameters blow up must not stay rankable.
+
+    nonfinite_cases was written only after the DEFAULT evaluation, so a tuned
+    blow-up kept the clean default flag and _penalised() never fired.
+    """
+    import inspect
+    src = inspect.getsource(drv.tune_scheme_multicase)
+    assert "result.nonfinite_cases" in src, (
+        "the tuned evaluation must record its own non-finite flag")
+    assert "last_nonfinite" in src.split("result.components_tuned")[1][:600], (
+        "the tuned flag must come from the tuned joint_score call")
 
 
 @pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")

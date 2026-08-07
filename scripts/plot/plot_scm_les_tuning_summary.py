@@ -107,11 +107,16 @@ def main(argv=None) -> int:
     arms.sort(key=lambda s: s["score_tuned"])
     names = [s["scheme"] for s in arms]
 
-    scored = list(payload["protocol"]["scored_variables"])
+    # Panels are the JOINT score plus one per CASE, read from
+    # per_case_default / per_case_tuned. Not one per scored variable: the
+    # multi-case driver scores different variables in different cases
+    # (ekman scores u,v; cbl scores theta only), so a per-variable panel is
+    # ragged and half empty. The case is also the unit the joint averages
+    # over, which is what "one parameter set across all cases" is about.
+    cases = list(payload["protocol"]["cases"])
     panels = [("combined", None, None)] + [
-        (v, "components_default", "components_tuned") for v in scored
+        (c, "per_case_default", "per_case_tuned") for c in cases
     ]
-
     fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.6))
     axes = np.atleast_1d(axes)
     fig.patch.set_facecolor(SURFACE)
@@ -127,22 +132,26 @@ def main(argv=None) -> int:
         else:
             before = [(s.get(kd) or {}).get(label, np.nan) for s in arms]
             after = [(s.get(kt) or {}).get(label, np.nan) for s in arms]
-            title = {"theta": r"$\theta$", "qv": r"$q_v$"}.get(label, label)
+            title = label
             ylabel = None
         medians[label] = _panel(ax, names, before, after, title, ylabel)
 
     mb, ma = medians["combined"]
-    win = payload["les_reference"]["window_hours"]
+    # Each case carries its OWN LES averaging window; there is no single
+    # top-level window to quote.
+    wins = "  ".join(f"{c['case']} {c['window_hours'][0]:.1f}-"
+                     f"{c['window_hours'][1]:.1f} h"
+                     for c in payload["cases"])
     fig.suptitle(
-        f"{args.indir.name}: SCM turbulence closures before and after tuning "
-        f"against LES  —  median {mb:.4f} → {ma:.4f} "
+        f"SCM turbulence closures before and after joint tuning against LES "
+        f"—  median {mb:.4f} → {ma:.4f} "
         f"({100.0 * (ma - mb) / mb:+.1f}%)",
         fontsize=12.5, color=INK, y=0.975,
     )
     fig.text(0.5, 0.925,
-             f"{len(arms)} schemes, each measured twice; segments join a "
-             f"scheme's own pair.  LES time-mean {win[0]:.2f}-{win[1]:.2f} h, "
-             "same window both sides.",
+             f"{len(arms)} schemes x {len(cases)} cases, ONE parameter set per "
+             f"scheme across all cases; segments join a scheme's own pair.  "
+             f"LES time-mean windows: {wins} (same window both sides).",
              ha="center", fontsize=9.5, color=INK_2)
     fig.tight_layout(rect=(0, 0, 1, 0.90))
     out = args.out or (args.indir / "tuning_before_after.png")

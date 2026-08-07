@@ -87,8 +87,12 @@ G="--nx 96 --ny 96 --nz 192 --Lx 3360 --Ly 3360 --Lz 1500 --dt 0.5"
 #     DEFAULT and --sgs-model still defaulted to vreman. So it varied only
 #     --static, and was a dynamic-vs-static test mislabelled as a Cs test.
 # Each arm below differs from the one named in its comment by ONE flag.
-arm R_baseline    $G                                     # dynamic Vreman (default)
-arm R_static_vre  $G --static                            # vs baseline: dynamic -> static
+# NB --dynamic selects LASD and IGNORES --sgs-model (run_dycoms_les.py:339
+# prints sgs='LASD' if args.dynamic else args.sgs_model). So the default is not
+# "dynamic Vreman": --sgs-model has NO effect until --static is passed, and
+# --static therefore swaps the closure LASD -> Vreman as a single consequence.
+arm R_baseline    $G                                     # LASD (dynamic; --sgs-model inert here)
+arm R_static_vre  $G --static                            # vs baseline: LASD -> static Vreman
 arm R_static_smag $G --static --sgs-model smagorinsky    # vs R_static_vre: Vreman -> Smagorinsky
 arm R_smag_cs10   $G --static --sgs-model smagorinsky --cs 0.10  # vs R_static_smag: Cs 0.18 -> 0.10
 arm R_weno5       $G --scalar-advection weno5
