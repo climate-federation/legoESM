@@ -2779,13 +2779,23 @@ def main(argv: list[str] | None = None):
             build_atm_scalar_param_map,
             load_params_config,
         )
+        # #1509: capture what --params actually applied. Class-routed values
+        # land on nested scheme configs that resolved_config does not reach, so
+        # without this the manifest records only the params FILE PATH and a
+        # reader months later cannot tell which values produced the run.
+        _params_applied: dict = {}
         config = apply_params_to_config(
             config, load_params_config(args.params), driver="run_amip",
-            scalar_param_map=build_atm_scalar_param_map())
+            scalar_param_map=build_atm_scalar_param_map(),
+            record=_params_applied)
 
     from legoesm.driver.model_driver import ModelDriver
 
     driver = ModelDriver(config)
+    # Threaded onto the driver rather than through its constructor so no other
+    # caller's signature changes; the manifest writer reads it if present.
+    if "_params_applied" in dir():
+        driver._params_applied = _params_applied
     print("Setup...")
     driver.setup()
 
