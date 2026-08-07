@@ -193,3 +193,79 @@ def test_ak_bk_length_is_checked():
     kw = dict(constants=C, do_pert=False, great_circle_dist=_gcdr)
     with pytest.raises(ValueError, match="km"):
         dcmip16_bc_face(corners, centres, ak[:-1], bk[:-1], KM, **kw)
+
+
+# ---------------------------------------------------------------------- #
+# the oracle's constants -- the confound that outranks every other one
+# ---------------------------------------------------------------------- #
+
+def test_fv3_pinned_constants_are_the_gfs_set_not_gfdl_and_not_legoesm():
+    """FMS ships two constant sets and DEFAULTS to GFDL when neither is
+    defined (fmsconstants.F90:67-68). The oracle binary this port is
+    scored against is GFS-linked, so every pinned value must match
+    ``fms-src/constants/gfs_constants.h`` and NOT legoESM's own.
+
+    ``FV3_KAPPA`` is the one that bites hardest: it enters ``ptop**akap``
+    and every ``pk = exp(akap*log(p))``, and the idealised 2/7 differs
+    from the oracle's RDGAS/CP_AIR by 7.5e-5 relative -- nine orders
+    above the ~1e-14 parity floor.
+    """
+    from legoesm import constants as legoesm_constants
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_CP_AIR,
+        FV3_GRAV,
+        FV3_KAPPA,
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        FV3_RDGAS,
+        FV3_RVGAS,
+    )
+
+    # gfs_constants.h:33,34,35-36,42,43,47
+    assert FV3_RADIUS_M == 6.3712e6      # const-ok: gfs_constants.h:33
+    assert FV3_OMEGA == 7.2921e-5        # const-ok: gfs_constants.h:34
+    assert FV3_GRAV == 9.80665           # const-ok: gfs_constants.h:35-36
+    assert FV3_RDGAS == 287.05           # const-ok: gfs_constants.h:42
+    assert FV3_RVGAS == 461.50           # const-ok: gfs_constants.h:43
+    assert FV3_CP_AIR == 1004.6          # const-ok: gfs_constants.h:47
+    # :53 -- derived, never written out independently
+    assert FV3_KAPPA == FV3_RDGAS / FV3_CP_AIR
+
+    # Which of these differ from legoESM's own is MEASURED here, not
+    # asserted from memory: an earlier version of this test claimed RDGAS
+    # differed and went red, because it does not.
+    assert FV3_RDGAS == float(legoesm_constants.R_d), \
+        "RDGAS no longer coincides with legoESM R_d -- update the comment"
+    for name, pinned, ours in (
+            ("cp_air", FV3_CP_AIR, legoesm_constants.c_pd),
+            ("radius", FV3_RADIUS_M, legoesm_constants.R_earth),
+            ("omega", FV3_OMEGA, legoesm_constants.Omega),
+            ("grav", FV3_GRAV, legoesm_constants.g),
+            ("rvgas", FV3_RVGAS, legoesm_constants.R_v)):
+        assert pinned != float(ours), (
+            f"{name}: pinned {pinned} now equals legoESM {float(ours)} -- "
+            f"if that is real, say so; until then it means the oracle pin "
+            f"was silently replaced by the model's own constant")
+
+    # RDGAS coinciding is the trap: the two SETS still disagree, because
+    # cp_air does. Substituting legoESM's pair shifts kappa.
+    ours_kappa = float(legoesm_constants.R_d) / float(legoesm_constants.c_pd)
+    assert FV3_KAPPA != ours_kappa
+
+    # And the idealised 2/7 is NOT the oracle's kappa either.
+    assert FV3_KAPPA != 2.0 / 7.0
+    assert abs(FV3_KAPPA - 2.0 / 7.0) / FV3_KAPPA > 1e-5
+
+
+def test_fv3_kappa_error_would_dwarf_the_parity_floor():
+    """Non-vacuity for the test above, in the units that matter.
+
+    Quantifies WHY the constant matters rather than merely asserting it:
+    at a typical 1e5 Pa the 2/7 slip moves ``p**kappa`` by ~1e-3
+    relative, versus the ~1e-14 quad-geometry floor the IC achieves.
+    """
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+
+    p = 1.0e5
+    rel = abs(p ** FV3_KAPPA - p ** (2.0 / 7.0)) / p ** FV3_KAPPA
+    assert rel > 1e-4, f"pk sensitivity to kappa is only {rel}"
