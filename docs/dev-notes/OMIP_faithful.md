@@ -161,6 +161,84 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
 
 ## Iteration log
 
+- **2026-08-07 (THREE-WAY SCORECARD + freshwater A/B + a contaminated-mask retraction):**
+  New committed instrument `scripts/validate/ocean_fidelity/compare_three_way_nemo.py`
+  (+13 unit tests, `tests/validate/test_compare_three_way_nemo.py`; codex rounds 1-2).
+  It puts tripole, MPAS and NEMO on ONE target grid and scores all three pairs on the
+  cells resolved on all three, with ARCTIC (>=60N) and NEAR-LAND sub-domains, the
+  near-land one split into its Arctic and non-Arctic parts.
+
+  **★ RETRACTION — the pre-existing scorecards' ocean mask scores LAND.**
+  `regrid_curv_to_latlon` returns a *distance-to-wet-data* flag (coverage=1 within
+  `max_deg`=2.5 of any wet source cell), NOT a land/sea classification, so a target
+  cell that is land keeps coverage=1 and is filled by extrapolation from offshore —
+  preferentially at coastlines, i.e. exactly inside the near-land domain. Measured on
+  the day-30 matched pair: **7133 of 49358 scored cells (14.4%) are land**. Effect
+  (same runs, same protocol, only the classification changed, tripole SSS):
+  global RMSE 0.817→**0.632**, near-land RMSE 1.621→**1.109**, near-land-Arctic bias
+  +1.768→**+1.279**; SST near-land-Arctic bias -0.780→**-0.329** (RMSE 1.349→0.726).
+  Roughly a third of the "coastal error" was the instrument. `--mask-mode nearest`
+  (default) classifies a target wet iff the NEAREST cell of every source is wet;
+  `coverage` reproduces the old behaviour and is kept only for that.
+  **`compare_omip_nemo.py` still uses the coverage flag — every near-coast number in
+  the entries above this one is contaminated and must be re-scored before reuse.**
+
+  **★ THERE IS NO GENERIC COASTLINE DEFECT.** With the corrected mask the near-land
+  split reads: non-Arctic coasts SSS bias **+0.245** / RMSE 0.944; Arctic coasts
+  **+1.279** / 1.941. "Near-land" was the Arctic problem seen through a coastal mask.
+
+  **Cross-grid agreement (matched pair, d30 vs NEMO Jan, corrected mask).** SST:
+  trp -0.192/0.852, mpas -0.185/0.857, trp-mpas 0.245. SSS: trp +0.147/0.632,
+  mpas +0.155/0.643, trp-mpas 0.162. **The two grids agree with each other 3.5-3.9x
+  better than either agrees with NEMO** => the residual is SHARED physics, not
+  discretisation; grid-specific work cannot close it. Instrument control: rerunning at
+  2 deg (coarser than every source, so the k=4 IDW stencil cannot favour the two
+  ORCA1-scale fields) moves nothing (SSS global 0.632 vs 0.618, Arctic 1.980 vs 1.969),
+  refuting the review's concern that the regrid flatters tripole-vs-NEMO.
+
+  **★ FRESHWATER A/B — CONTROLLED (`nemolev_trp_gwcorr_d90` vs `nemolev_trp_fwreal_d90`,
+  manifests differ by exactly `--freshwater-closure real_freshwater`), d90 vs NEMO m3.**
+  | metric | VSF control | real freshwater |
+  |---|---|---|
+  | SST RMSE | 0.820 | 0.826 (neutral) |
+  | SSS RMSE | **1.102 (poor)** | **0.816 (good)** |
+  | SSS corr | 0.919 | 0.951 |
+  | Arctic MLD bias / median | +70.9 m / **+21.8 m** | +129.7 m / **+14.5 m** |
+  | Arctic columns deeper than 500 m | 3.72 % | 6.08 % (NEMO **0.80 %**) |
+
+  The fix validates on salinity AND on the TYPICAL Arctic column (median MLD bias
+  +21.8→+14.5 m). **The mean/RMSE MLD degradation is entirely a deep tail**: runaway
+  columns 3.7%→6.1% against NEMO's 0.8%. A first reading of the mean alone said
+  "fixes SSS, breaks MLD" — wrong, and it is exactly why `_tail` (median + deep
+  fraction) is in the scorer. NOTE the control ALREADY has 4.6x NEMO's runaway count:
+  **Arctic deep convection is a pre-existing defect that real-freshwater amplifies**,
+  and it is now the largest single remaining term.
+
+  **Best config per grid (d90 vs NEMO m3).** tripole+realFW beats MPAS on salinity
+  everywhere (global SSS RMSE 0.523 vs 0.605; Arctic bias +0.904 vs +1.363); MPAS wins
+  Arctic SST (0.757 vs 1.008) and Arctic MLD (RMSE 162 vs 464) because it has no
+  real-FW closure and so gets neither the SSS benefit nor the convection amplification.
+
+  **NULL RESULT — the TKE mixing-length choice does not move the Arctic.** d30 vs
+  NEMO m1, four arms (`mxl4` / `mxl3ctl` / `nnmxl2` / `icemelt70`): SSS RMSE
+  0.856 / 0.858 / 0.865 / 0.859, Arctic bias +0.77 / +0.78 / +0.78 / +0.78. ORCA1's
+  actual `nn_mxl=2` is reachable now (`--tke-mxl-choice 4`) and is a null lever here.
+
+  **CIRCULATION IS NOT SCOREABLE AT THIS WINDOW.** The only archived NEMO
+  `grid_U`/`grid_V` are ANNUAL means (AMOC@26.5N 17.74 Sv, ACC@Drake 159.26 Sv); our
+  arms are day-30/90 snapshots with AMOC ~0.0 Sv, which is what a 90-day spin-up from
+  rest gives. Differing windows is a confound, not a result — a matched AMOC verdict
+  needs multi-year arms or monthly NEMO grid_V output, neither of which exists.
+
+  **SSH DEMOTED.** `zos`-vs-`eta` datum, inverse-barometer treatment and free-surface
+  diagnostic are unreconciled; removing the area-weighted mean fixes a spatially
+  uniform offset only. Now opt-in (`--ssh`), informational, never a verdict.
+
+  Instrument defects caught by the gates rather than by review: `_mld_area` used before
+  assignment; `rc=$?` inside an echo containing `$(basename ...)` reporting basename's
+  status, so a crashed scorer logged rc=0; `_demean` returning all-NaN because
+  `0.0 * nan` is `nan` (a zero AREA weight does not exclude a NaN CELL).
+
 - **iter 1:** Oriented. No prior OMIP/NEMO work. Verified env/slurm/singularity/codex,
   asset inventory, container URI, grid mapping, real ORCA1 repo (deploy.sh: COREv2-ftp
   + Zenodo rec/14041098 inputs + GH ice/weights; `makenemo -m ORCA1_GCC -j3`; default
