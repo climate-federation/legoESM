@@ -187,3 +187,48 @@ Each item: **mechanism** | **keep/transcribe decision** | **why**.
 3. §6-1: whether lego needs an explicit `finalize_lbc`-equivalent commit point or can rely on provably-idempotent continuous masking.
 4. §6-4: hard-require `nemo_kmm` divisor when `outer_integrator="nemo_mlf"`, or leave it a free-standing orthogonal option (recommended: hard-require, stated as a recommendation not a unilateral choice).
 5. §5c: pull the exact numeric budget-closure tolerance from the last `budget_fullframe.py` run rather than eyeballing a bar.
+---
+
+## P3 RESULTS (2026-08-07)
+
+### Rung (b) — replay vs NEMO per-step restarts: DIFFERENT BUT EQUALLY ACCURATE
+Both arms `8 passed` on the real RUN_TWIN_STEP1 tiles, fp64. The transcription is CONFIRMED
+live and materially different from step 1 — lockstepped in ONE process from ONE bridged IC,
+arrays diffed directly: max|du| 2.8e-3 at k=1 growing to 9.4e-3 at k=32; max|dT| 1.3e-3 -> 7.1e-2.
+**But its error magnitude vs NEMO is statistically indistinguishable from the two-pass path
+(slope ratio 1.0000).** Correct phrasing: "different but equally accurate", NOT "more faithful".
+- Rows 17/28 (ldf-at-Nbb): an apparent T improvement was **DOWNGRADED CONFIRMED -> PLAUSIBLE**
+  — the margin (4.8e-3) is ~7% of the arm-to-arm divergence (7.1e-2) and the sign flips at k=17-19.
+- Rows 22/29 (divisor): different state, equal accuracy.
+- Row 30 (`mlf_baro_corr`): EQUAL at fp-noise (max|de3t| 1e-9), consistent with W1a's no-op.
+
+**RETRACTION recorded (the lane's own, caught by peer challenge):** an initial "bit-identical"
+claim was a rounded ratio of SUMMARY STATISTICS, not an array diff — refuted by its own printed
+endpoints. It also compared max|A−N| vs max|B−N| when the two maxima sit at DIFFERENT CELLS,
+hiding a 2.8e-3 m/s momentum difference. Both are canonical CLAUDE.md failure modes; fixed by
+lockstep array diffing.
+
+### Rung (c) — budget closure: COMPOSITION-NEUTRAL, no new leak
+Bar PULLED from the recorded artifact (resolved decision 5), not eyeballed. Harness self-check
+passed (injected leak 5.0 -> detected 5.000000); the control reproduced the pre-existing recorded
+artifact BIT-IDENTICALLY on state integrals, proving the env-knob edit is a no-op.
+
+| quantity | recorded bar | leapfrog | nemo_mlf | ratio |
+|---|---|---|---|---|
+| volume | 2.5253e-16 | 2.5253e-16 | 2.5253e-16 | 1.0000 |
+| heat | 5.3983e-06 | 5.3983e-06 | 5.3984e-06 | 1.0000 |
+| salt | 1.4320e-09 | 1.4320e-09 | 1.4323e-09 | 1.0002 |
+
+Notably the divisor change (`e3w(Kaa)`->`e3w(Kmm)`, the highest-stakes risk-register item) is
+**budget-neutral to 4 s.f.** — it changes the implicit-solve matrix semantics without breaking
+the fold's flux-form conservation.
+**GAP (lane-flagged, rerun queued):** this used `applied_now`, whose known placement defect
+leaves a ~5.4e-06 heat residual in BOTH arms — a background 3+ orders above where a composition
+leak would live, so the test had little power. The NEMO-faithful config is `nemo_mlf` +
+`leapfrog_rhs` (~1e-9 background). Rerun in flight.
+
+### What P3 means for P4
+The composition is faithful (no leak) and live (materially different state) — but P3 CANNOT show
+it is more accurate, because at a 1-day horizon the fidelity difference is inside noise on every
+path. **P4's 10-year climate run is therefore the sole decider** for whether the form-stress
+deficit is compositional.
