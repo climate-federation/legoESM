@@ -3574,6 +3574,10 @@ class ModelDriver:
                 exclusive=True,
                 rng_seeds={"master": self._input_config.seed},
                 dataset_provenance=datasets,
+                # #1509: the --params values this run actually applied, so the
+                # manifest does not depend on the referenced file surviving
+                # unmodified. Absent (-> {}) when no --params were given.
+                params_applied=getattr(self, "_params_applied", None),
             )
             return
         except FileExistsError:

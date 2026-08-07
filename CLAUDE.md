@@ -200,6 +200,64 @@ explicitly that you did not. "I was careful" is not compliance.
   claim PLAUSIBLE; an honest "cause unknown" is cheap, a confident wrong cause
   buys a code change and a relaunch.
 
+## Implementation Discipline — the CODE and its PROSE are both claims
+User, 2026-08-06: *"Be much more conscientious and careful when implementing.
+Be systematic, check, do not be sloppy or too fast."* Every rule below is from
+a defect shipped in the ONE session that prompted it, and every one was caught
+by the adversarial reviewer rather than by me — i.e. each was avoidable by
+reading two more lines before typing. Slow down at these exact points.
+
+- **A DOCSTRING/COMMENT THAT DESCRIBES BEHAVIOUR IS A TESTABLE CLAIM. Trace the
+  data flow before writing it.** FAILURE: wrote "dropping this call now makes
+  the test fail" about the `divg_d` exchange — false, because unit 4 hands only
+  `uc`/`vc` to `d_sw1` and `divg_d` is not consumed until `d_sw5`. The sentence
+  was written from intent, not from the call chain. Before asserting "X is
+  covered by this test", name the consumer of X and confirm it executes inside
+  the test's span.
+- **NEVER WRITE "this removes the question entirely" ABOUT AN API YOU HAVE NOT
+  READ.** FAILURE: claimed `np.ascontiguousarray` gives an unconditional copy;
+  it is copy-IF-NEEDED, so it aliased at km=1 and copied at km>1 — one line of
+  code with two aliasing behaviours, asserted as safe. Extends *Never infer an
+  API* to the STRENGTH of a guarantee, not just the signature.
+- **SCOPE WORDS — "both", "all", "every", "cannot", "unified", "always" — GET
+  A GREP BEFORE THEY GET TYPED.** FAILURE: "both lanes now route through one
+  helper" while `csw_step_sixface` still called the interim helpers directly.
+  It went into a COMMIT MESSAGE, which cannot be edited afterwards. Weaken to
+  what you verified ("the post-p_grad_c site") or run the grep.
+- **RE-READ A BOOLEAN IMPLICATION IN THE SOURCE BEFORE RESTATING IT; ONE-WAY
+  IS NOT TWO-WAY.** FAILURE: `bounded_domain = regional .or. nested .or.
+  duogrid` means duogrid⇒bounded, and I wrote that the converse pair was
+  "unreachable" — inverting it and mislabelling a legitimate regional/nested
+  category as impossible. Quote the line next to the restatement so the
+  direction is checkable.
+- **A CONTROL THAT PERTURBS A ZERO IS NOT A CONTROL. Print the baseline value
+  the perturbation multiplies BEFORE trusting the result.** FAILURE: the
+  divg-corner probe scaled `divg_d(1,1)` by 3 where that cell is exactly 0.0,
+  so the control was a no-op and proved nothing; the claim actually rested on a
+  predicted==actual identity. Say which check carried the claim.
+- **AN A/B MUST DIFFER IN ONE FIELD OF THE CONSTRUCTOR, AND YOU MUST DIFF THE
+  CONSTRUCTOR ARGS TO KNOW.** FAILURE: compared two contexts that differed in
+  grid conventions AND in whether the ext bundle existed, while asserting it
+  isolated the exchange. Applies to fixtures, not just runs — the controlled-
+  comparison rule covers `pytest` fixtures too.
+- **A NEW TEST/FIXTURE IS PART OF THE DIFF: RUN THE SUITE THAT CONSUMES IT,
+  NOT ONLY THE TEST YOU WROTE.** A fixture edit is a change to every test in
+  the module.
+- **SHELL COMMANDS THAT CAN PROMPT WILL SILENTLY NOT RUN.** Use `git checkout
+  --`/`git restore`, `cp -f`, `rm -f`; never bare `cp`/`mv` for a revert.
+  FAILURE: a bare `cp` hit an interactive overwrite prompt and the "revert"
+  never applied — one `git status` short of reporting a clean tree that was
+  not clean. VERIFY EVERY REVERT with `git status --porcelain`.
+- **A LOG-SCRAPING GUARD MUST EXCLUDE THE PROMPT/COMMAND IT ECHOES.** FAILURE:
+  a review wrapper grepped its whole log for a failure token that its own
+  prompt contained, so it "retried" every time and never printed its exit
+  status. Same class as a test that cannot fail.
+- **BUDGET THE REVIEW LOOP INTO THE WORK.** The adversarial reviewer found real
+  defects in EACH of three rounds here; rounds 2 and 3 were not ceremony. Do
+  not present a first-round implementation as finished, and do not treat
+  "tests pass" as the terminal condition — the round-1 diff passed 401 tests
+  while still containing a silent fallback and a false docstring.
+
 ## Compute Discipline — speculation costs GPU-hours, not just credibility
 User, 2026-07-30 (THIRD callout in five days): *"You keep making very
 speculative assumptions... be much more precise so we do not waste time with
@@ -242,6 +300,79 @@ pure waste, and it also costs the WALL-CLOCK of the queue slot it occupied.
   the run directory for a scorecard/manifest/diagnostic that answers the
   question, and `scripts/validate/` for a validator. Reading an existing
   artifact costs seconds; a new probe costs an hour and needs its own controls.
+
+## Diagnosis Discipline — one session, ~10 GPU arms, 5 of them wasted
+2026-08-05/06, FESOM2-match OMIP blowup. Every rule is mechanical and comes
+from a specific failure in that one session. The root cause turned out to be a
+one-line IC defect findable offline in seconds; the arms bought nothing.
+
+- **SANITY-CHECK EVERY PROBE NUMBER AGAINST A PHYSICAL RANGE BEFORE BUILDING
+  ON IT — one line of arithmetic, before the conclusion.** Convert it to a
+  quantity whose plausible span you know and compare. FAILURE: a PGF probe
+  returned 0.02 m/s^2 and I built a whole attribution on it; that value implies
+  a ~14 kg/m^3 density difference between ADJACENT 1-degree cells when the
+  entire ocean spans ~6 kg/m^3. The check takes seconds, the number sat unused
+  for hours, and running it immediately would have exposed the real defect
+  (cells initialised to T=0/S=0) before a single GPU arm.
+
+- **A FAILURE STEP OR LOCATION IS NOT A SIGNATURE UNTIL THE DIAGNOSTIC IS SHOWN
+  TO RESOLVE IT.** State the instrument's resolution and confirm the reported
+  step is not merely its first sample. FAILURE: five one-variable arms all
+  reported "BLOWUP at step 36" and I read that config-invariance as physics.
+  `run_omip` sets `block_size = max(1, diag_every)` and only tests at block
+  boundaries, so 36 was the FIRST LOOK. At `--diag-every 1` the answer was
+  step 1. Corollary: arms run at coarse diagnostic stride prove only "this
+  setting alone does not fix it", NEVER "this setting has no effect".
+
+- **REFUTE WITH STATES, NOT EXIT CODES OR FAILURE STEPS.** Two runs failing at
+  the same step can be failing for different reasons. FAILURE: declared the
+  open North Pole "refuted" because capping did not move the blowup step; the
+  states showed capping HAD removed that mode (|u|max 19.27 -> 0.0137 m/s) and
+  merely uncovered a second, unrelated one at the same step number.
+
+- **A PROBE IS PRODUCTION CODE FOR THE "NEVER INFER AN API" RULE, AND ITS FIRST
+  OUTPUT IS UNTRUSTED.** Read the signature of every function a probe calls,
+  including this repo's own. FAILURE: called
+  `build_runoff_map(lat, lon, mask, area)` when the signature is
+  `(ocean_mask, cell_area, lat_rad, lon_rad)`, so `cell_area` received
+  `deg2rad(lon)` — exactly 0 at lon 0 — and I reported a NaN "conservation
+  defect" in shipped code that did not exist.
+
+- **A PLAUSIBLE-LOOKING VALUE IS MORE DANGEROUS THAN A NaN, IN CODE AND IN
+  TESTS.** A sentinel that is a valid number of the right dtype passes every
+  finite/NaN guard downstream. FAILURE: `_interp_profile_to_z_coord` returned
+  `0.0` for a no-data column; `0.0` is not NaN, so the caller's
+  `where(isnan, fill, x)` never fired and 39032 wet cells entered the model as
+  fresh water at 0 degC. TWO COMMITTED TESTS ASSERTED THAT BEHAVIOUR, one
+  calling it a "documented degenerate fallback" and one commenting "still no
+  NaN leaks" — the exact inversion of the truth. When a degenerate branch must
+  return something, return NaN (or raise) so the guard downstream can see it,
+  and treat any test that asserts a magic sentinel as suspect.
+
+- **BUDGET CLOSURE BEFORE HYPOTHESES.** For any conservation-relevant blowup or
+  drift, run the closure/redistribution check FIRST — it names the operator
+  class instead of ranking guesses. Canonical probe:
+  `scripts/validate/ocean_fidelity/omip_conservation_closure.py`. On first
+  deployment it refuted the hypothesis I was about to spend a GPU arm on (a
+  dipole whose two-cell sum GREW is not a diffusion instability) and localised
+  a config-invariant source to a single column. See
+  `docs/ocean/fidelity/fidelity_to_fesom2jax_level_plan.md` (#1492) Phase 0.1.
+
+- **A THROWAWAY PROBE'S NUMBER IS UNMEASURED. COMMIT THE PROBE.** Per #1492
+  Phase 0.3: one committed probe per row, locked conventions, provenance
+  (git SHA + inputs + flags) stamped on every run. Inline heredoc probes are
+  not citable, cannot be re-run against a changed model, and hide their own
+  bugs — both defects above came from uncommitted ones, and committing the
+  closure probe immediately surfaced two more inside it.
+
+- **DAMAGE-FIELD CORRELATIONS ARE NOT MECHANISMS.** In a blown-up field,
+  "worst cells are coastal / shallow / polar" describes where damage LANDED,
+  which is usually downstream of a single upstream defect. FAILURE: measured
+  P(bad|coastal)=33% vs 0.67% interior, a real 50x enrichment, and treated it
+  as a coastal process; those were simply the columns the IC defect had
+  corrupted. Before citing a spatial pattern, confirm the snapshot is the
+  ORIGIN state (`snapshot_final.npz` stamps `_step = n_steps` regardless of
+  when the run stopped — verify with a dedicated 1-step run).
 
 ## Epistemic rules (non-negotiable)
 
@@ -361,7 +492,7 @@ prefer a small verified diff over a large plausible one.
 - **Visual-regression gate (cube imprint)**: `scripts/validate/visual_regression.py --check` numericises the W2 v-wind cube-imprint check (SSIM + per-panel perceptual hash + edge-artifact ratio vs tiny committed ref in `tests/visual_baselines/`). Deterministic metric math gated in CI (`tests/test_visual_regression_metrics.py`); full cube-SW `--check` runs as a NIGHTLY non-blocking CI job until tolerances are calibrated across CI hardware. Tiny numeric baselines (.npy+json) ARE tracked — the one carve-out to "no tracked visual baselines".
 - **CRITICAL — VALIDATE THE INSTRUMENT BEFORE QUOTING ITS NUMBER (2026-07-25 duogrid lesson: 8 confident claims, all retracted).** A diagnostic script is UNTRUSTED CODE until it passes its own controls. Never state a finding — never write "measured", "confirmed", "proven", "VERDICT" — from a probe's first output. **Before quoting any diagnostic number, run these five checks and say in the message that you ran them:**
   1. **Right conserved/invariant quantity?** Budget what the SYSTEM conserves, not a convenient proxy. (Failed: reported "vertex creates energy" from **KE alone** — KE is NOT conserved in shallow water, it trades with PE. Total `E=∫area(½h|V|²+½gh²)` reversed the sign of the conclusion.)
-  2. **Same transform / units / staggering on BOTH sides?** Two "A-grid winds" from different operators are DIFFERENT QUANTITIES. (Failed: ours `c2l_ord2` vs oracle `C2L_ORD=4` — the SAME raw state gave 1.96e-2 vs 5.79e-2, a 3× swing that WAS the reported effect. Also: never budget across a stage boundary where the state changes representation — mid-step FV3 winds are in circulation form, which produced ±5.6e10 garbage.)
+  2. **Same transform / units / staggering on BOTH sides?** Two "A-grid winds" from different operators are DIFFERENT QUANTITIES. (Failed: ours `c2l_ord2` vs oracle `C2L_ORD=4` — the SAME raw state gave 1.96e-2 vs 5.79e-2, a 3× swing that WAS the reported effect. Also: never budget across a stage boundary where the state changes representation — mid-step FV3 winds are in circulation form, which produced ±5.6e10 garbage. REPEAT OFFENCE 2026-08-05, this time SHIPPED and then retracted: paired a predicted face velocity (41.87 m/s) against the model's `max_speed` timeseries diagnostic (21.95 m/s), which is a CELL-CENTRE average of the same field whose face maximum was 42.30 — the apparent "1.2 % agreement" was an artifact of comparing across the staggering, and it went into a merged PR before the 1-step run exposed it. Name the staggering AND the reduction of both sides in the sentence that quotes them.)
   3. **Same time, resolution, config?** Index by MATCHED TIME, not frame number. (Failed: mapped day→frame as `round(day)-1` against an HOURLY file, comparing our day-1 to their hour-1; and quoted a **C12** wedge gain (~300×) as the mechanism for a **C48** instability, where it is ~124×.)
   4. **Is the metric measuring what its name says?** Prove it on a synthetic case with a KNOWN answer before use. (Failed: called `mean|f−4-neighbour-mean|` a "2Δx grid-scale" measure — it is a high-pass/curvature residual that a merely sharper SMOOTH feature reproduces. Failed: a "gain" probe that re-filled a FIXED source, which is trivially 1.0000 by construction.)
   5. **Can the reduction support the claim?** `max` over tiles/corners/components taken independently per run can peak at DIFFERENT physical locations; a max-of-per-tile-means is not a global mean. Keep argmax metadata and map to a common physical location before claiming "localized".
@@ -486,6 +617,11 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 Precise+concrete. Explicit assumptions. Numerics change → explain effect on stability, accuracy, conservation, differentiability. No guesses as facts. **No Read images** unless user asks; report path.
+
+**TERSE. Caveman register (user, 2026-08-06: "You speak too much... no need to waste tokens").** Fragments OK. Drop articles/filler/hedging/pleasantries. No narrating what you are about to do, no restating the request, no re-explaining a finding already stated. Prose is for FINDINGS, not for process.
+- **ALWAYS end with a findings summary** — table or bullets: what was measured, the number, CONFIRMED vs PLAUSIBLE, what is still open. That summary is the deliverable; the rest is scaffolding.
+- Long verbatim tool output → quote only the DECISIVE line (`N passed`, the failing assert, the peak value).
+- Commits/PRs/code comments/security warnings stay full English.
 
 # iterate-with-codex agent
 1. Implement change

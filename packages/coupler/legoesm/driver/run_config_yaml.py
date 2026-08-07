@@ -231,18 +231,24 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
-    # NOTE: cloud_partial_coverage_optics / cloud_vertical_overlap_optics /
-    # cloud_n_subcolumns were REMOVED 2026-08-02 for the same reason as
-    # cloud_inhomogeneity_factor above, one step earlier in the chain: they are
-    # str/int SCHEME SELECTORS, so they are not ``:float``-annotated and are
-    # therefore not spec-eligible — no ``__param_spec__`` entry, hence no
-    # registry qualified name.  ``apply_params_to_config`` looks the key up in
-    # the registry BEFORE consulting this map and raises SystemExit on a miss,
-    # so these three keys were unusable through --params while breaking the
-    # map's own drift guards (test_build_atm_scalar_param_map_is_valid_and_
-    # nonempty + the over/under-claim scans, red on this branch since #1398 and
-    # #1411 added them).  The flat ExperimentConfig scalars remain settable via
-    # --config / their CLI flags, which is the correct route for a selector.
+    # REMOVED 2026-08-07: cloud_partial_coverage_optics /
+    # cloud_vertical_overlap_optics / cloud_n_subcolumns are NOT registry
+    # parameters -- the first two are string SELECTORS and the third an int, so
+    # none is `:float`-annotated and none is spec-eligible. A map key absent
+    # from the registry breaks the --params loader contract, which is why
+    # test_build_atm_scalar_param_map_is_valid_and_nonempty,
+    # test_atm_scalar_map_is_pipeline_threaded and
+    # test_atm_scalar_map_has_no_under_claim were all RED on main.
+    #
+    # This is the same #1280 exclusion drift that took
+    # cloud_inhomogeneity_factor out of this map above. I re-introduced it by
+    # resolving the PR #1477 conflict in main's favour on this hunk: the other
+    # side had already deleted these three for exactly this reason, and I kept
+    # main's version because the review I ran checked symbol survival and ABI
+    # but could not execute the tests. Restoring the correct side.
+    #
+    # The flat ExperimentConfig scalars remain settable via --config and their
+    # own CLI flags; only the --params registry route is affected.
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -362,6 +368,7 @@ def _route_overrides_by_class(node, by_key: dict, *, applied: set):
 
 
 def apply_params_to_config(config, params: dict, *, driver: str = "run",
+                           record: dict | None = None,
                            scalar_param_map: dict | None = None):
     """Return ``config`` with calibration ``params`` (qualified_name: value)
     spliced into the matching nested ``*Config`` NamedTuples.
@@ -439,8 +446,33 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
                 "not match this driver's config."
             )
         config = config._replace(**flat)
+        if record is not None:
+            # Flattened scalars DO reach resolved_config; recorded
+            # anyway so one manifest field carries every --params
+            # value a run used, routed or not (#1509).
+            record.update(flat)
     applied: set = set()
     config = _route_overrides_by_class(config, by_key, applied=applied)
+    # #1509: the class router mutates NESTED scheme configs, which
+    # _serialize_config does not reach -- so a manifest reader saw
+    # turbulence_override=None and none of the applied values, and the run's
+    # provenance depended on the referenced --params FILE still existing
+    # unmodified. Record what was actually applied, keyed by the qualified
+    # name the user wrote, so the manifest can be self-contained.
+    if record is not None:
+        for key in applied:
+            # by_key[key] is the per-CLASS dict {field: value}; flatten it to
+            # 'scheme_key.field -> value' so the manifest reads like the
+            # --params file the user wrote, not like the router's internals.
+            # key_to_qname holds ONE qualified name per router key, so with
+            # two fields of the same class it matches only one of them.  Take
+            # its scheme prefix and re-append each field, so every entry comes
+            # back in the 'scheme_key.field' form the user wrote.
+            _qname = key_to_qname.get(key)
+            _prefix = (_qname.rsplit(".", 1)[0] if _qname
+                       else (key[1] if isinstance(key, tuple) else str(key)))
+            for _field, _val in by_key[key].items():
+                record[f"{_prefix}.{_field}"] = _val
     missing = set(by_key) - applied
     if missing:
         examples = ", ".join(sorted(key_to_qname[k] for k in missing))
