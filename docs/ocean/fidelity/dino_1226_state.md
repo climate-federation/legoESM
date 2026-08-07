@@ -1,3 +1,41 @@
+# DISTORTION CHARACTERISED 2026-08-06 — isopycnal HEAVE at the flank; slope-clipping REFUTED
+
+Instruments re-validated first (reproduced F_topo ratios 1.0049/0.9543 and the mid-band
+collapse 0.9818→0.6863; census self-check with a synthetic-violation control).
+
+**It is predominantly HEAVE, not a water-mass change (CONFIRMED):**
+- West flank (cols 10-15), mid-depth k=12-23: armB colder/denser at FIXED DEPTH, growing
+  smoothly ~0 at y6 → dT ≈ −0.28 degC, drho ≈ +0.030 kg/m3 at y20 (salinity slightly fresh,
+  opposing, small — temperature dominates).
+- The 1027.0 isopycnal sits at the SAME depth in both models during y6-10 (+1.7, −2.2 m) then
+  **shoals in armB by −37 m (y15) and −67 m (y20)**. Mid-channel (cols 25-30) shows NO trend
+  (<=10 m through y20); the EAST flank (47-51) shows the same magnitude with **OPPOSITE SIGN**,
+  matching its opposite bathymetric slope ⇒ genuinely flank-localized and topography-correlated,
+  not basin drift.
+- Discriminator: T ON the isopycnal differs only −0.05..−0.10 degC at y20 vs −0.28 at fixed
+  depth (3-4x smaller) — non-zero and growing, so a **smaller genuine water-mass/diapycnal
+  component rides along**. Census total wet volume matches 1.0000 exactly every year; normalized
+  census TV-distance grows 0.005 (y6) → 0.057 (y20).
+
+**CORRECTION — "onset y11-13" was an ARTIFACT (third phantom step-change caught today).** The
+underlying dT / drho / isopycnal-depth series grow SMOOTHLY and MONOTONICALLY from y6; y11-13 is
+merely where a continuously-growing bias crosses the F_topo ratio's noise floor. armB's flank
+mean-flow speed is likewise smooth (spin-up curve), no discontinuity. There is no discrete
+regime change to hunt.
+
+**Slope clipping (`rn_slpmax`/`S_max`=0.01) REFUTED as the cause (CONFIRMED):** measured on
+armB's ACTUAL production chain (`nemo_native` slopes) at cols 10-15, k=12-23 — clip-hit fraction
+<=0.6% in y6-9 and **exactly 0.000% every year y10-y20**, i.e. zero clipping across the whole
+window in which the deficit grows. (This settles the hard CLIP only; the near-bottom TAPER is a
+separate, unmeasured question.)
+
+**NEXT — the cheapest decisive test, no new instrumentation needed:** compare `wslpi`/`wslpj`
+VALUE-FOR-VALUE at cols 10-15, k=12-23 against NEMO's own dumps (`RUN_GDB/eiv_dump_wslpi.bin`,
+`wslpj.bin`, already on disk). That tests whether armB's slope MAGNITUDE/SHAPE differs from
+NEMO's at the flank — which would explain the heave — rather than only whether the cap binds.
+NB the `ldf_slp` rows are CEILING'd, but that is a per-step SAME-STATE verdict and has now
+failed to predict state-dependent behaviour twice today (GM, PGF); it cannot close this.
+
 # PGF REFUTED / DEFICIT LOCALIZED 2026-08-06 — mid-depth density distortion at the sill flank
 
 **PGF hypothesis REFUTED (CONFIRMED).** DINO's NEMO runs `ln_zco_nam=.true.` /
