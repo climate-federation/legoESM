@@ -1240,67 +1240,161 @@ def _close_halo_under_cellsOnEdge(
         halo_cells_set.update(new_cells.tolist())
 
 
-def spmd_schedule_cost(global_mesh, n_dev, *, method="auto", halo_depth=3):
-    """Collective-permute cost of the SPMD halo schedule, computed OFFLINE.
+#: Halo depth the SPMD Voronoi partition infra is built at.  ONE definition
+#: consumed by both the production step factory and ``spmd_schedule_cost``:
+#: a score computed at a different depth describes a different comm graph, and
+#: two independently hardcoded 3s let production drift unnoticed.
+SPMD_HALO_DEPTH = 3
 
-    The quantity that binds MPAS strong scaling above ~64 devices is the
-    number of ppermute ROUNDS per halo fill: the rounds are the colours of
-    the inter-device comm graph, the multi-start colouring already reaches
-    that graph's ``max_degree`` lower bound, so rounds can only fall if the
-    OWNERSHIP produces a lower-degree graph.  This exposes that number
-    without a GPU, an MPI launcher, or a benchmark job, so an ownership
-    choice can be scored before it costs an allocation.
 
-    Public because it is the objective an ownership optimizer must minimize,
-    and because scoring it from a bench would otherwise mean importing the
-    private builders across modules (forbidden).  It runs the SAME builders
-    production runs on, at the SAME default ``halo_depth=3``: a re-derived
-    lookalike (e.g. 1-ring ``cellsOnEdge`` adjacency) answers a DIFFERENT
-    question and understates the degree — it reports 8 rounds where the real
-    depth-3-plus-closure graph reports 12-14.
+def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
+                       already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
+                       ppermute_cells_per_device_threshold=2_000):
+    """How much halo communication one ownership choice costs, computed offline.
+
+    Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
+    ROUNDS one halo exchange needs -- the sequential collective launches that
+    dominate MPAS strong scaling above ~64 devices.  Runs on a laptop: no GPU,
+    no MPI, no benchmark job, so a split can be compared before it costs an
+    allocation.
+
+    It calls the SAME builders production calls
+    (:func:`_build_voronoi_partition_infra` then
+    :func:`_build_ppermute_schedule`).  A re-derived lookalike answers a
+    different question: a 1-ring ``cellsOnEdge`` adjacency graph reports 8
+    rounds where the real depth-3-plus-closure graph reports 12-14.
+
+    WHAT THE NUMBER IS NOT
+    ----------------------
+    * ``n_rounds`` is per HALO FILL, not per model step.  A step costs
+      ``n_rounds`` x (tendency evaluations per step), which depends on the
+      configured integrator -- SSP-RK3 evaluates 3 times, but the MPAS default
+      is ``ssp_rk54_scan``.  Multiply with the integrator you actually run.
+    * ``n_rounds`` is NOT proven equal to the comm graph's ``max_degree``.
+      ``_build_ppermute_schedule`` tries a finite set of greedy orders and
+      keeps the best; equality is MEASURED (compare the returned
+      ``max_degree``), never assumed.  Do not claim "the colouring is already
+      optimal so only ownership can help" from this function.
+    * It scores the ppermute strategy.  Production auto-selects ALLGATHER when
+      cells/device is below ``ppermute_cells_per_device_threshold``, in which
+      case there is no ppermute schedule and this number is counterfactual --
+      see the returned ``production_strategy``.
+
+    MESH STATE -- the one thing that silently invalidates the score
+    --------------------------------------------------------------
+    Production does NOT reorder inside ``make_voronoi_sharded_step``; it
+    consumes an already-reordered ``model.mesh``.  The scaling bench reorders
+    ONCE for a ``reorder_target`` device count and then runs at a possibly
+    DIFFERENT device count.  So pass what you actually have:
+
+    * raw mesh, scoring a run at ``n_dev``: defaults are right.
+    * raw mesh, but the run reorders for a different target: pass
+      ``reorder_target=<that target>``; the split is built for the target and
+      scored at ``n_dev``.
+    * already-reordered mesh (what production holds): pass
+      ``already_reordered=True``; ``method`` is then ignored and reported as
+      ``"pre-reordered"``, because the ownership is already baked in.
 
     Parameters
     ----------
-    global_mesh : VoronoiMesh
-        Un-reordered global mesh; this reorders it internally.
+    mesh : VoronoiMesh
     n_dev : int
-        Device count to score.
+        Device count the run uses.  Must be >= 1.
     method : str
-        Ownership passed to :func:`reorder_voronoi_for_sharding`.
+        Ownership for the reorder; ignored when *already_reordered*.
+    reorder_target : int | None
+        Device count the reorder targets, when it differs from *n_dev*.
+    already_reordered : bool
     halo_depth : int
-        Must match production (3) for the number to be meaningful.
+        Must match production (3) or the graph is a different graph.
+    ppermute_cells_per_device_threshold : int
+        Mirror of the production auto-select threshold, only used to report
+        ``production_strategy``.
 
     Returns
     -------
     dict
-        ``n_rounds`` (the cost), ``n_rounds_greedy`` (legacy sorted-greedy,
-        for regression), ``coloring_method``, ``max_local_cells``,
-        ``max_local_edges``, plus the echoed ``method``/``n_dev``.
+        ``n_rounds`` (the cost), ``max_degree`` (the lower bound to compare
+        it against), ``n_rounds_greedy``, ``coloring_method``,
+        ``resolved_method`` (concrete, never ``"auto"``),
+        ``production_strategy`` (``"ppermute"`` or ``"allgather"``),
+        ``max_local_cells``, ``max_local_edges``, and the echoed inputs.
 
-    Reference numbers on the unrelaxed mesh (subdiv-8 / subdiv-9), which any
-    change here must still reproduce: sfc 12/14 and 11/13 rounds at 64/128
-    devices, metis 13/19 and 14/18, geometric 16/21 and 14/18.
+    Reference census on the unrelaxed mesh, which any change here must still
+    reproduce: subdiv-8 sfc 12/14 rounds at 64/128 devices, metis 13/19,
+    geometric 16/21; subdiv-9 sfc 11/13, metis 14/18, geometric 14/18.
     """
-    from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
+    from legoesm.parallel.voronoi_partition import (
+        reorder_voronoi_for_sharding, resolve_sharding_partition_method,
+    )
 
-    reordered = reorder_voronoi_for_sharding(global_mesh, n_dev,
-                                             method=method)
+    if int(n_dev) != n_dev or int(n_dev) < 1:
+        # int() would silently truncate 3.9 -> 3 and score the wrong split.
+        raise ValueError(
+            f"spmd_schedule_cost: n_dev must be an integer >= 1, got {n_dev!r}")
+    n_dev = int(n_dev)
+
+    if already_reordered:
+        if reorder_target is not None:
+            raise ValueError(
+                "spmd_schedule_cost: reorder_target is meaningless with "
+                "already_reordered=True — the ownership is already baked into "
+                "the mesh.")
+        prepared, resolved = mesh, "pre-reordered"
+    else:
+        target = n_dev if reorder_target is None else int(reorder_target)
+        prepared = reorder_voronoi_for_sharding(mesh, target, method=method)
+        # Report the CONCRETE ownership: "auto" hides which partitioner ran.
+        # Uses the SAME resolver the reorder used, so the label cannot drift
+        # from the policy.
+        resolved = resolve_sharding_partition_method(method)
+
+    # The builder assigns residual entities to the LAST owner but excludes them
+    # from every owned contiguous block, so schedule send indices can exceed a
+    # device's shard length -- a number that looks fine and is not.  Reachable
+    # via reorder_target: a mesh padded for 3 devices is not divisible by 4.
+    # The scaling bench rejects that pairing; so does this.
+    n_cells, n_edges = int(prepared.nCells), int(prepared.nEdges)
+    if n_cells % n_dev or n_edges % n_dev:
+        raise ValueError(
+            f"spmd_schedule_cost: prepared mesh has nCells={n_cells}, "
+            f"nEdges={n_edges}, neither divisible by n_dev={n_dev}. The mesh "
+            f"is padded for its reorder target"
+            f"{'' if already_reordered else f' ({target})'}, so scoring it at "
+            f"a device count that does not divide it silently mis-slices the "
+            f"owned blocks. Score at a device count that divides the prepared "
+            f"mesh.")
     (
         _stacked, _gc, _ge, _noc, _noe, max_lc, max_le, partitions, cell_owner,
-    ) = _build_voronoi_partition_infra(reordered, n_dev,
-                                       halo_depth=halo_depth)
-    cells_per = int(reordered.nCells) // n_dev
-    edges_per = int(reordered.nEdges) // n_dev
+    ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
+    cells_per = n_cells // n_dev
+    edges_per = n_edges // n_dev
     sched = _build_ppermute_schedule(
         partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
     )
     return {
         "method": method,
+        "resolved_method": resolved,
         "n_dev": n_dev,
+        # Unknown for a pre-reordered mesh: the ownership is baked in and the
+        # target that produced it is not recoverable from the mesh. Reporting
+        # n_dev there would assert something we did not verify.
+        "reorder_target": (None if already_reordered else
+                           (n_dev if reorder_target is None
+                            else int(reorder_target))),
+        "already_reordered": bool(already_reordered),
         "halo_depth": halo_depth,
         "n_rounds": int(sched["n_rounds"]),
         "n_rounds_greedy": int(sched["n_rounds_greedy"]),
+        "max_degree": int(sched.get("max_degree", -1)),
         "coloring_method": sched["coloring_method"],
+        # Production returns before selecting a strategy at n_dev==1, and a
+        # caller may force halo_strategy; this reports what AUTO would pick.
+        "production_strategy": (
+            None if n_dev == 1 else
+            ("allgather" if cells_per < ppermute_cells_per_device_threshold
+             else "ppermute")),
+        "cells_per_device": cells_per,
         "max_local_cells": int(max_lc),
         "max_local_edges": int(max_le),
     }
@@ -2200,7 +2294,8 @@ def make_voronoi_sharded_step(
         max_le,
         partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
         cell_owner_out,   # np.ndarray (nCells,) cell ownership
-    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=3)
+    ) = _build_voronoi_partition_infra(global_mesh, n_dev,
+                                       halo_depth=SPMD_HALO_DEPTH)
     logger.info(
         "  partition setup done in %.2fs  "
         "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",

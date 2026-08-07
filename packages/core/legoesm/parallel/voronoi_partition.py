@@ -1010,6 +1010,20 @@ def _pad_voronoi_for_sharding(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
 # Mesh reordering for JAX SPMD sharding
 # ============================================================================
 
+def resolve_sharding_partition_method(method: str) -> str:
+    """Concrete ownership for the SPMD/ppermute path (``auto`` -> ``sfc``).
+
+    Separate from :func:`resolve_partition_method`, whose ``auto`` prefers
+    METIS: METIS minimizes edge CUT, while this path is bound by the number of
+    sequential halo exchanges, and measured they move oppositely (subdiv-8 at
+    128 devices: sfc 14 rounds, metis 19).  ONE definition, so a scorer that
+    reports which ownership ran cannot drift from what the reorder does.
+    """
+    if method == "auto":
+        return "sfc"
+    return resolve_partition_method(method)
+
+
 def reorder_voronoi_for_sharding(
     mesh: VoronoiMesh,
     n_devices: int,
@@ -1066,10 +1080,9 @@ def reorder_voronoi_for_sharding(
     # SCOPE: only this function.  ``initialize_voronoi_mpi`` (route-A MPI)
     # and ``partition_voronoi_mesh`` keep the global policy -- their halo
     # exchange is not this ppermute schedule and no census was run for them.
-    if method == "auto":
-        method = "sfc"
     # Validate at entry (CLAUDE.md: fail early) BEFORE the single-device shortcut,
     # so an unknown method raises even when no partitioning happens.
+    method = resolve_sharding_partition_method(method)
     method = resolve_partition_method(method)
     if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
