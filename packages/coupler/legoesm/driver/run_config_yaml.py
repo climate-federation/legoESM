@@ -212,11 +212,24 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
-    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
-        "cloud_partial_coverage_optics",
-    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
-        "cloud_vertical_overlap_optics",
-    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
+    # REMOVED 2026-08-07: cloud_partial_coverage_optics /
+    # cloud_vertical_overlap_optics / cloud_n_subcolumns are NOT registry
+    # parameters -- the first two are string SELECTORS and the third an int, so
+    # none is `:float`-annotated and none is spec-eligible. A map key absent
+    # from the registry breaks the --params loader contract, which is why
+    # test_build_atm_scalar_param_map_is_valid_and_nonempty,
+    # test_atm_scalar_map_is_pipeline_threaded and
+    # test_atm_scalar_map_has_no_under_claim were all RED on main.
+    #
+    # This is the same #1280 exclusion drift that took
+    # cloud_inhomogeneity_factor out of this map above. I re-introduced it by
+    # resolving the PR #1477 conflict in main's favour on this hunk: the other
+    # side had already deleted these three for exactly this reason, and I kept
+    # main's version because the review I ran checked symbol survival and ABI
+    # but could not execute the tests. Restoring the correct side.
+    #
+    # The flat ExperimentConfig scalars remain settable via --config and their
+    # own CLI flags; only the --params registry route is affected.
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
