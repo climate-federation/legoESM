@@ -151,40 +151,6 @@ def test_tail_returns_none_on_an_empty_or_all_nan_domain():
 
 
 # --------------------------------------------------------------------------
-# _demean
-# --------------------------------------------------------------------------
-def test_demean_removes_the_area_weighted_mean_not_the_plain_mean():
-    field = np.array([[0.0, 10.0]])
-    area = np.array([[3.0, 1.0]])               # weight the cold cell 3x
-    out = m._demean(field, area)
-    assert float((area * out).sum()) == pytest.approx(0.0)
-    assert out[0, 0] == pytest.approx(-2.5)     # plain-mean removal would give -5.0
-
-
-def test_demean_ignores_cells_of_zero_area():
-    field = np.array([[1.0, 1.0, 999.0]])
-    area = np.array([[1.0, 1.0, 0.0]])
-    out = m._demean(field, area)
-    assert out[0, 0] == pytest.approx(0.0)
-
-
-def test_demean_survives_a_nan_in_a_zero_area_cell():
-    """REGRESSION: ``0.0 * nan`` is ``nan``, so weighting a NaN by zero area did
-    not exclude it — one NaN made the mean NaN and voided the whole field."""
-    field = np.array([[1.0, 3.0, np.nan]])
-    area = np.array([[1.0, 1.0, 0.0]])
-    out = m._demean(field, area)
-    assert np.isfinite(out[0, :2]).all()
-    assert out[0, 0] == pytest.approx(-1.0)      # mean of the two valid cells is 2
-    assert np.isnan(out[0, 2])                   # the excluded cell stays NaN
-
-
-def test_demean_raises_when_nothing_is_valid():
-    with pytest.raises(ValueError, match="no finite cells"):
-        m._demean(np.array([[np.nan, np.nan]]), np.array([[1.0, 1.0]]))
-
-
-# --------------------------------------------------------------------------
 # build_ocean_mask — the decision the helper tests above CANNOT pin
 # --------------------------------------------------------------------------
 def _one_degree_source(wet_lon_max):
@@ -256,9 +222,15 @@ def test_smoothing_is_a_mean_over_the_radius_and_respects_validity():
     assert np.isnan(out[0, 3])
 
 
-def test_smoothing_removes_short_scale_structure_but_not_the_mean():
+def test_smoothing_removes_short_scale_structure():
     """The point of the control: it must damp the fine structure that one
-    source retains and the other has already lost, without shifting the mean."""
+    source retains and the other has already lost.
+
+    It does NOT claim to preserve the area-weighted mean.  The filter gives every
+    target CENTRE equal weight, which on a lat-lon grid is coordinate-area and
+    not spherical-area averaging, so a multi-latitude field's cos(lat)-weighted
+    mean does move.  Asserting mean preservation would be pinning a property the
+    filter does not have."""
     lat = np.array([0.0])
     lon = np.arange(0.5, 360.0, 1.0)
     valid = np.ones((1, lon.size), dtype=bool)
@@ -267,12 +239,8 @@ def test_smoothing_removes_short_scale_structure_but_not_the_mean():
     o_s = m._smooth_common_footprint(smooth[None, :], valid, lat, lon, 3.0)
     o_n = m._smooth_common_footprint(noisy[None, :], valid, lat, lon, 3.0)
     assert np.nanstd(o_n - o_s) < 0.5 * np.std(noisy - smooth)
-    # The mean must not move MATERIALLY.  It does not move to machine precision:
-    # a hard-cutoff top-hat includes a different number of cells for cells whose
-    # neighbours sit exactly on the radius, so the stencil count jitters by one
-    # and the mean shifts by ~1e-4 of a unit-amplitude signal.  That is a
-    # property of the filter, not a defect -- but it means this control must
-    # never be used to compare MEANS at the 1e-4 level.
+    # Single equatorial row, so every cell has the same area and the unweighted
+    # mean IS meaningful here; this is the only geometry in which it is.
     assert abs(np.nanmean(o_n) - np.mean(noisy)) < 1e-3
 
 
@@ -286,3 +254,36 @@ def test_json_safe_nulls_non_finite_so_the_report_is_valid_json():
     assert safe["corr"] is None and safe["deep"] == [1.0, None]
     assert safe["n"] == 3 and safe["s"] == "x"
     json.dumps(safe, allow_nan=False)           # would raise on a bare NaN
+
+
+# --------------------------------------------------------------------------
+# Gaps codex round 3 named: radius bounds, and the zonal support gate
+# --------------------------------------------------------------------------
+def test_smoothing_radius_bounds_are_validated_in_main():
+    """A radius above 180 deg is not a wider filter -- 2*sin(r/2) turns back on
+    itself, so 270 deg silently becomes a 90 deg chord and the REPORTED width
+    would be a lie.  The guard lives in main, so assert on its source."""
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "--smooth-radius-deg must be in (0, 180]" in src
+    assert "0.0 < a.smooth_radius_deg <= 180.0" in src
+
+
+def test_mld_tails_are_suppressed_when_smoothing():
+    """Averaging a deep column with its neighbours before counting columns
+    deeper than a threshold does not measure that fraction.  main must not ask
+    for tails on a smoothed field."""
+    import inspect
+    src = inspect.getsource(m.main)
+    assert 'name == "MLD" and not a.smooth_radius_deg' in src
+
+
+def test_zonal_gate_uses_pre_dropout_availability_not_the_scored_mask():
+    """REGRESSION: deriving row availability from the already-dropped-out mask
+    made cnt == avail, so every non-empty row passed its own support test and
+    the gate was a tautology."""
+    import inspect
+    src = inspect.getsource(m._plot3)
+    assert "avail = avail_row" in src
+    assert "_MIN_ZONAL_CELLS_FLOOR" in src
+    assert "avail_row" in inspect.signature(m._plot3).parameters

@@ -20,7 +20,11 @@ and only cells resolved on ALL THREE are scored.  A target cell counts as ocean
 only if the nearest cell of EVERY source is wet (``--mask-mode nearest``): the
 regridder's own coverage flag is a distance-to-wet-data flag that keeps land
 cells within 2.5 deg of ocean and fills them by extrapolation, which would
-contaminate the near-land sub-domain most of all.  Reported per field
+contaminate the near-land sub-domain most of all.  That fixes the bulk error but
+NOT the coastline: nearest-centre classification cannot resolve a strait
+narrower than a target cell, and the IDW values can still cross a land barrier,
+so the ``near_land*`` numbers are SCREENING figures and a coastline-resolved
+verdict needs a topology-aware remapper.  Reported per field
 (SST, SSS, MLD):
 
   * global + per-latitude-band area-weighted bias / RMSE / pattern correlation
@@ -100,6 +104,9 @@ _ARCTIC_LAT_N = 60.0
 # is 3% of a 1-degree row and 6% of a 2-degree one, and a polar row has far
 # fewer ocean cells to begin with); a fraction of the available support is.
 _MIN_ZONAL_SUPPORT_FRAC = 0.25
+# ...and never fewer than this many cells outright: 100 % of one cell is not a
+# zonal mean, however good its support fraction looks.
+_MIN_ZONAL_CELLS_FLOOR = 5
 
 
 def _manifest_summary(snapshot_path):
@@ -136,9 +143,10 @@ def _nn_wet_mask(src_lat_deg, src_lon_deg, src_wet, tgt_lat_deg, tgt_lon_deg):
     coastlines -- i.e. exactly inside the near-land sub-domain this scorecard
     exists to measure.
 
-    Nearest-neighbour over ALL source cells (wet and dry alike) gives a real
-    classification: the target is wet iff the source cell physically closest to
-    it is wet.
+    Nearest-neighbour over ALL source cells (wet and dry alike) is a BETTER
+    classification -- the target is wet iff the source cell physically closest to
+    it is wet -- but it is not an exact one: it has no cell polygons and no ocean
+    connectivity.  See ``build_ocean_mask`` for what that costs at straits.
     """
     from scipy.spatial import cKDTree
     lat = np.asarray(src_lat_deg, dtype=np.float64).ravel()
@@ -272,21 +280,6 @@ def _lego_mld(L):
                                         bottom_depth=Hb))
 
 
-def _demean(field, area):
-    """Remove the area-weighted mean over the finite, positive-area cells.
-
-    ``0.0 * nan`` is ``nan``, so weighting a NaN cell by zero area does NOT
-    exclude it: a single NaN anywhere in the array made the mean NaN and
-    returned an all-NaN field, silently voiding every statistic downstream.
-    Select the contributing cells explicitly instead of relying on the weight.
-    """
-    w = np.asarray(area, dtype=np.float64)
-    sel = (w > 0) & np.isfinite(field)
-    if not sel.any():
-        raise ValueError("_demean: no finite cells with positive area")
-    return field - float((w[sel] * np.asarray(field)[sel]).sum() / w[sel].sum())
-
-
 def _tail(a, b, m, deep_m):
     """Distribution of the difference, and of the two fields' deep tails.
 
@@ -328,7 +321,11 @@ def _scored(a, b, area, tgt_lat, sub, deep_m=None):
 
 def _json_safe(obj):
     """Recursively replace non-finite floats with None so the report is valid
-    JSON.  An undefined correlation is genuinely absent, not a number."""
+    JSON.  An undefined correlation is genuinely absent, not a number.
+
+    NOTE this nulls EVERY non-finite float, so it cannot distinguish an
+    undefined correlation from an unexpected NaN; the per-field finite gate
+    upstream is what makes an unexpected one unlikely, not this function."""
     if isinstance(obj, dict):
         return {k: _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -470,7 +467,7 @@ def main() -> int:
     }
 
     plot_fields = {}          # name -> (Tg, Mg, Ng, unit)
-    # Each entry carries its OWN scoring area: MLD and SSH are resolved on
+    # Each entry carries its OWN scoring area: MLD is resolved on
     # a smaller domain than SST/SSS, and reusing the SST area would score cells
     # where it does not exist on all three sources.
     fields = [("SST", sstT, sstM, sstN, "degC", area),
@@ -510,10 +507,22 @@ def main() -> int:
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
         fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area))
     if a.smooth_radius_deg:
+        if not np.isfinite(a.smooth_radius_deg) or not (
+                0.0 < a.smooth_radius_deg <= 180.0):
+            raise SystemExit(
+                f"--smooth-radius-deg must be in (0, 180], got "
+                f"{a.smooth_radius_deg}: the chord conversion 2*sin(r/2) is only "
+                "monotone there, so a larger value silently becomes a SMALLER "
+                "effective radius and the reported filter width would be false.")
         print(f"[smooth] common-footprint control ON: top-hat mean over "
               f"{a.smooth_radius_deg} deg great-circle radius, applied "
               "IDENTICALLY to all three sources")
+        print("[smooth] MLD tail statistics are SUPPRESSED under smoothing: "
+              "averaging a deep convective column with its neighbours before "
+              "counting columns deeper than a threshold does not measure that "
+              "fraction any more.")
         report["smooth_radius_deg"] = a.smooth_radius_deg
+        report["mld_tails_suppressed_under_smoothing"] = True
         fields = [(n, *(_smooth_common_footprint(f, ar > 0, tgt_lat, tgt_lon,
                                                  a.smooth_radius_deg)
                         for f in (Tg, Mg, Ng)), u, ar)
@@ -535,7 +544,10 @@ def main() -> int:
             raise SystemExit(f"FATAL: {name} has no finite cells on all three sources")
         report.setdefault("n_finite_cells", {})[name] = int((ar > 0).sum())
         sb = {k: (v & (ar > 0)) for k, v in sub.items()}
-        deep = a.deep_mld_m if name == "MLD" else None
+        # Tails are a COLUMN-COUNT statistic; a smoothed field cannot support
+        # one (see the [smooth] note above).
+        deep = (a.deep_mld_m if (name == "MLD" and not a.smooth_radius_deg)
+                else None)
         rec = {
             "unit": unit,
             "tripole_vs_nemo": _scored(Tg, Ng, ar, tgt_lat, sb, deep),
@@ -569,7 +581,10 @@ def main() -> int:
                       f"   |  rmse trp {bt['rmse']:6.3f} mpas {bm['rmse']:6.3f}")
         plot_fields[name] = (Tg, Mg, Ng, unit, (ar > 0))
 
-    _plot3(out, tgt_lat, tgt_lon, plot_fields, a.label_tripole, a.label_mpas)
+    # Row availability from the common OCEAN mask, before any per-field
+    # finite dropout, so the zonal gate measures real loss of support.
+    _plot3(out, tgt_lat, tgt_lon, plot_fields, a.label_tripole,
+           a.label_mpas, ocean.sum(axis=1))
 
     # allow_nan=False: bare NaN is not valid JSON and reads like a number to a
     # downstream parser.  _wstats returns a NaN correlation for a constant or
@@ -580,7 +595,7 @@ def main() -> int:
     return 0
 
 
-def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m):
+def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
     """Per field: 5-panel maps (trp | MPAS | NEMO | trp-NEMO | MPAS-NEMO) and a
     combined 3-way zonal-mean + zonal-bias figure."""
     import matplotlib
@@ -627,8 +642,13 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m):
         # the SAME cells or their difference is not a bias.
         rowok = ok & np.isfinite(Tg) & np.isfinite(Mg) & np.isfinite(Ng)
         cnt = rowok.sum(axis=1)
-        avail = ok.sum(axis=1)
-        good = (avail > 0) & (cnt >= _MIN_ZONAL_SUPPORT_FRAC * avail) & (cnt > 0)
+        # Availability MUST come from the pre-dropout ocean mask.  Deriving it
+        # from `ok` made the gate a tautology: `ar` is already zeroed wherever a
+        # source is non-finite, so cnt == avail and every non-empty row passed
+        # its own 25% test.
+        avail = avail_row
+        good = ((avail > 0) & (cnt >= _MIN_ZONAL_SUPPORT_FRAC * avail)
+                & (cnt >= _MIN_ZONAL_CELLS_FLOOR))
 
         def zm(f):
             z = np.full(f.shape[0], np.nan)
