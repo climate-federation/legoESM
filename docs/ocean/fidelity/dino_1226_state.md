@@ -1,3 +1,37 @@
+# SLOPE FIELD EXONERATED 2026-08-06 — and the METHODOLOGICAL boundary this session reached
+
+Flank slope comparison (same-state, NEMO's own restart to both; instrument control reproduced
+the domain-wide ceiling first): at cols 10-15 / 47-51, k=12-23, wslpi/wslpj err_norm medians
+4.5e-12..1.6e-11 — **as good as or better than domain-wide (1.1e-11)**, and flank p99/max are
+1-2 ORDERS TIGHTER than the domain max. **The slope field is not worse at the flank.**
+
+**Correction worth keeping:** NEMO's non-triad `ldf_slp` (the path armB ports) has **NO
+seafloor-indexed taper** — verified at `ldfslp.F90:285-297`; the only ramp is the MIXED-LAYER
+anchor (`zfk`/`zmlk`, keyed on `nmln`, not `mbkt`). At these mid-depths only 8.0% (west) /
+12.8% (east) of wet w-points even use it, and where it fires the values agree (median ~0,
+p99 ~1e-7). No taper-specific mismatch exists to find.
+
+## THE PATTERN — six same-state exonerations in a row
+
+vertical mixing · bolus · Redi · GM · PGF · isoneutral slopes+taper — **every per-term formula
+matches at the same state**, while the trajectories diverge into a localized, physical,
+correctly-signed form-stress deficit (flank isopycnal heave, −67 m by y20, opposite-signed on
+the two flanks). Same-state tests have now ALSO failed to predict divergent behaviour twice
+(GM's x1.5 sensitivity came out wrong-signed; PGF was identical yet the deficit persists).
+
+⇒ **The remaining defect is in ACCUMULATION, not in any single operator's formula, and
+same-state instruments cannot see it by construction.** The three untested candidates (vertical
+advection over the steep slope, the FCT limiter over topography, bolus vertical structure) would
+very likely exonerate the same way — testing them the same way is predicted to be uninformative.
+
+**What a next instrument must do:** compare how a term's error ACCUMULATES along a trajectory,
+not whether it is right at an instant. The twin protocol goes NEMO→lego only (no reverse
+bridge), so "run NEMO from armB's diverged state" is unavailable. Candidate designs: (a) per-term
+error-growth rates over a multi-year twin (the replay suite's growth curves, but per-operator and
+with the arm-comparison discriminator that lane already flagged as its own missing piece);
+(b) budget the flank column's density tendency term-by-term over years, both models, and find
+which term's TIME-INTEGRAL diverges even though its instantaneous value matches.
+
 # DISTORTION CHARACTERISED 2026-08-06 — isopycnal HEAVE at the flank; slope-clipping REFUTED
 
 Instruments re-validated first (reproduced F_topo ratios 1.0049/0.9543 and the mid-band
