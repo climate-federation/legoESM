@@ -258,24 +258,19 @@ def test_tke_mxl_choice_argparse_and_builder_agree():
     for v in sorted(advertised):
         cfg = r.orca1_zdftke_config(mxl_choice=v)         # must not raise
         assert cfg.tke_mxl_choice == v
-    # SET EQUALITY, not just one direction (codex 2026-08-07 #4: probing a
-    # fixed {0,1,5,9} would pass if the builder newly accepted 6, or if argparse
-    # shrank to [4] while the builder still took 2/3).  Sweep a range that
-    # BRACKETS the advertised set and require accepted == advertised exactly.
-    accepted = set()
-    for v in range(-2, 10):
-        try:
-            r.orca1_zdftke_config(mxl_choice=v)
-        except ValueError:
-            continue
-        accepted.add(v)
-    assert accepted == advertised, (
-        f"builder accepts {sorted(accepted)} but argparse advertises "
-        f"{sorted(advertised)} -- the two layers have diverged")
-    # non-integers must NOT be silently truncated: int(4.9) == 4 would sneak
-    # through and run choice-4 physics under a nonsense value (codex #5).
-    with pytest.raises(ValueError, match="mxl_choice"):
-        r.orca1_zdftke_config(mxl_choice=4.9)
+    # NOT a finite sweep (codex 2026-08-07 #4: -2..9 is a nearby-mutation test,
+    # not set equality -- it passes if the builder also accepts 10). Both layers
+    # now read ONE shared constant, so assert on THAT: divergence is impossible
+    # by construction rather than policed by sampling.
+    assert advertised == set(r.TKE_MXL_CHOICES), (
+        "argparse choices must come from the shared TKE_MXL_CHOICES constant")
+    for v in sorted(r.TKE_MXL_CHOICES):
+        assert r.orca1_zdftke_config(mxl_choice=v).tke_mxl_choice == v
+    # and the guard must reject the categories codex enumerated (#5):
+    #   non-integral floats, float-valued ints, bool (True == 1), and strings.
+    for bad in (4.9, 4.0, 2.0, True, False, "4", 10, -1):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
 
 
 def test_builder_tke_mxl_choice_threads():

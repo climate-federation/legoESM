@@ -379,6 +379,14 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     return zc, H_snapped, lm_out
 
 
+# Single source of truth for --tke-mxl-choice, consumed by BOTH argparse
+# (choices=) and orca1_zdftke_config's guard.  Codex 2026-08-07 #4: a finite
+# -2..9 sweep in the test is a nearby-mutation check, NOT set equality -- it
+# still passes if the builder accepts 10 while argparse does not.  Sharing one
+# constant makes divergence impossible by construction instead of policed.
+TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
+
+
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
                         mxl_choice: int | None = None,
                         prognostic: bool | None = None):
@@ -513,22 +521,29 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # (tke.py:764-785): choice 3 uses l_eps = sqrt(lup*ldn), choice 4 uses
     # l_eps = l_k = min(lup,ldn).  Since min <= sqrt(product), choice 4
     # dissipates MORE (eps = c_eps*e^{3/2}/l_eps).
-    # NOTE (codex 2026-08-07, correcting an earlier claim of mine): the
-    # DIFFUSIVITY IS **NOT** IDENTICAL between the two.  Only the LENGTH l_k
-    # is shared; the shorter l_eps raises the dissipation rate, which lowers
-    # the updated TKE, and K is recomputed from that updated TKE
-    # (tke.py:1007, 2114, 2153).  So this is a genuine perturbation of K,
-    # not a length-only relabelling.  Until 2026-08-06 argparse accepted 4 while this
+    # NOTE (codex 2026-08-07 r1+r2, correcting an earlier claim of mine):
+    # do NOT say the diffusivity is identical.  Only the LENGTH l_k is
+    # shared.  A shorter l_eps raises the dissipation coefficient at fixed
+    # positive TKE (tke.py:1007), and K is recomputed from the updated TKE
+    # (tke.py:2153), so choice 4 CAN reduce TKE and alter K.  It need not:
+    # the two lengths can be equal, later trajectories differ in l_k too,
+    # and K can coincide at the floors/ceilings (tke.py:1530).  'Can alter',
+    # never 'must'.  Until 2026-08-06 argparse accepted 4 while this
     # builder raised on it, so `--tke-mxl-choice 4` crashed the run.
     if mxl_choice is not None:
         # int(4.9) would silently truncate to 4; argparse blocks that via
         # type=int but a PROGRAMMATIC caller does not (codex 2026-08-07 #5).
-        if int(mxl_choice) != mxl_choice or int(mxl_choice) not in (2, 3, 4):
+        # Reject non-integral numerics (int(4.9)->4 would run choice-4 physics
+        # under a nonsense value) and anything outside the SHARED set.  bool is
+        # excluded explicitly: True == 1 would otherwise sneak through int().
+        if (isinstance(mxl_choice, bool)
+                or not isinstance(mxl_choice, (int, np.integer))
+                or int(mxl_choice) not in TKE_MXL_CHOICES):
             raise ValueError(
-                f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; "
-                "expected 2 (Veros Bougeault-Lacarrere), 3 (NEMO nn_mxl=3 "
-                "+ ln_mxl0 anchor) or 4 (NEMO nn_mxl=2 + ln_mxl0 anchor, "
-                "the value ORCA1's namelist_cfg actually runs).")
+                f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; expected "
+                f"an int in {TKE_MXL_CHOICES} (2=Veros Bougeault-Lacarrere, "
+                "3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2 -- the value ORCA1's "
+                "namelist_cfg actually runs).")
         _cfg = _cfg._replace(tke_mxl_choice=int(mxl_choice))
     # Prognostic vs diagnostic TKE (``--tke-prognostic``).  DEFAULT keeps the
     # card value (False = the DINO-validated quasi-steady Mode-B diagnostic, 3
@@ -4281,7 +4296,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
     p.add_argument("--tke-mxl-choice", type=int, default=None,
-                   choices=[2, 3, 4],
+                   choices=list(TKE_MXL_CHOICES),
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
                         "None (default) keeps the card value (3 since #1326 = "
                         "NEMO nn_mxl=3: lup/ldown |dl/dz|<=e3t sweeps WITH the "
