@@ -6,7 +6,11 @@
 #SBATCH --job-name=les_tuneall
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+# 72 h = the Ginsburg maximum. MEASURED cost: 9331231 reached only 5.7 of 9
+# schemes in 17h43 (~3.1 h/scheme), and _write_outputs runs ONCE after the
+# last scheme -- so a timeout loses every hour spent. Size from the measured
+# rate and take the partition max whenever the only artifact lands at the end.
+#SBATCH --time=72:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/les_tuneall_%j.out
 set +e
 # ONE parameter set per scheme, fitted jointly to every usable LES case:
