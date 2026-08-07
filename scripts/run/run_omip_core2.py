@@ -3979,10 +3979,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(VERTICAL spread).")
     p.add_argument("--river-mouth-restoring-gate", action="store_true",
                    help="Disable SSS restoring at river-mouth cells (runoff > "
-                        "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
-                        "mask — otherwise the restoring fights the river plume "
-                        "toward the coarse WOA climatology. Requires --runoff "
-                        "+ --sss-restore.")
+                        "threshold) so the restoring does not fight the river "
+                        "plume toward the coarse WOA climatology. NOTE this is "
+                        "a legoESM DEVIATION, not NEMO parity: sbcssr's "
+                        "(1-2*rnfmsk) mask is INACTIVE in the ORCA1 deck "
+                        "(ln_rnf_mouth defaults .false., so rnfmsk==0 and the "
+                        "factor is 1) — NEMO restores FULLY at river mouths "
+                        "there. Requires --runoff + --sss-restore.")
     p.add_argument("--ew-cyclic-overlap", action="store_true",
                    help="TRIPOLE ONLY: reconnect the ORCA east-west cyclic seam "
                         "(lon ~72.5E on eORCA1). The eORCA1 mesh marks the 2 cyclic "

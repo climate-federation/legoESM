@@ -313,10 +313,24 @@ def compute_sss_restoring_flux(
 
     inv_tau_eff = inv_tau_eff * ice_factor
 
-    # River-mouth gate (NEMO sbcssr (1-2*rnfmsk): NO restoring at river
-    # mouths so the relaxation does not fight the river plume toward the
-    # coarse WOA climatology).  Hard gate at the threshold — river-mouth
-    # cells carry runoff orders of magnitude above it.
+    # River-mouth gate: NO restoring at river mouths, so the relaxation does
+    # not fight the river plume toward the coarse WOA climatology.  Hard gate
+    # at the threshold — river-mouth cells carry runoff orders of magnitude
+    # above it.
+    #
+    # ⚠ THIS IS A legoESM DEVIATION, NOT NEMO PARITY (corrected 2026-08-07).
+    # An earlier version of this comment cited "NEMO sbcssr (1-2*rnfmsk)".
+    # That term exists (sbcssr.F90:119) but is INACTIVE in the ORCA1 deck we
+    # match: sbcrnf.F90 populates rnfmsk from sn_cnf ('socoefr') only inside
+    # `IF( ln_rnf_mouth )`, and its ELSE branch sets rnfmsk = 0 everywhere.
+    # RUN_GATEWAY never sets ln_rnf_mouth, so the namelist_ref default .false.
+    # applies, rnfmsk == 0, and (1-2*rnfmsk) == 1 -- i.e. NEMO applies FULL SSS
+    # restoring at river mouths there, while this gate zeroes it.
+    # Measured consequence on the Barents/Kara shelf (job 9335176): vertical S
+    # range 0.188 vs NEMO 1.266, column-mean S 33.408 vs 34.508 (-1.10 psu),
+    # with the T range nearly correct -- a salinity-only signature.  Compounds
+    # with legoESM's horizontal runoff spread passes (NEMO has none), which
+    # push more cells above this gate's threshold.
     if river_runoff is not None:
         river_factor = jnp.where(
             jnp.asarray(river_runoff) > config.river_gate_threshold_kg_m2_s,
