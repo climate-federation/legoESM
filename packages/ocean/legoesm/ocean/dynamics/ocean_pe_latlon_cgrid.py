@@ -3905,6 +3905,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     momentum_only: bool = False,
     precomputed_geom_density=None,
     skip_lateral_viscosity: bool = False,
+    ldf_state=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -3935,6 +3936,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         ``tendencies.surface_tracer_forcing`` for the implicit (backward-Euler)
         application in the model step.  ``None`` (default) ⇒ surface forcing is
         applied explicitly (bit-identical legacy path).
+    ldf_state : (T_ldf, S_ldf, u_ldf, v_ldf) tuple, optional
+        Private, ``nemo_mlf`` single-pass transcription only (#1226 P1;
+        ``stpmlf.F90:275`` ``dyn_ldf(Kbb,Kmm,...)`` / ``:437`` ``tra_ldf(Kbb,
+        Kmm,...)``): when given, ONLY the lateral-friction (``dyn_ldf`` /
+        ``_bc_horizontal_viscosity``) and lateral tracer-diffusion (``tra_ldf``
+        / ``_bc_tracer_tendencies``) calls read these arrays instead of the
+        step's own ``u, v, T, S`` — every OTHER term in this function
+        (advection, vorticity, HPG, GM/Redi bolus, physics, forcing) keeps
+        reading the step's own state.  This is the ONE local-argument swap
+        NEMO's single tendency pass performs; nothing else may be widened to
+        read this tuple (Rule 1d: reading Nbb for MORE terms than dyn_ldf/
+        tra_ldf silently changes other terms' time level).  ``None`` (default,
+        every existing caller) ⇒ ``u_ldf=u``/``T_ldf=T`` etc. ⇒ bit-identical.
 
     Returns
     -------
@@ -4159,7 +4173,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dT_dt = jnp.zeros_like(T)
         dS_dt = jnp.zeros_like(S)
     else:
-        dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+        # ``ldf_state`` (nemo_mlf row 28 ``tra_ldf(Kbb)``): the lateral
+        # tracer-diffusion tendency ALONE reads the swapped-in tracers; every
+        # other consumer of ``T``/``S`` in this function is untouched. ``None``
+        # -> T_ldf_local is T -> bit-identical.
+        _T_ldf_local = T if ldf_state is None else ldf_state[0]
+        _S_ldf_local = S if ldf_state is None else ldf_state[1]
+        dT_dt, dS_dt = _bc_tracer_tendencies(
+            _T_ldf_local, _S_ldf_local, config, grid, mask, J, z_coord)
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
@@ -4194,11 +4215,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             _zu, _zv, _zu, _zv, _zu, _zv, _zu, _zv)
         kdiss_h_cell = None
     else:
+        # ``ldf_state`` (nemo_mlf row 17 ``dyn_ldf(Kbb)``): the lateral-friction
+        # tendency ALONE reads the swapped-in velocity; ``du_dt``/``dv_dt``
+        # (the accumulator this ADDS to) and every other consumer of ``u``/
+        # ``v`` in this function stay on the step's own state. ``None`` ->
+        # u_ldf_local is u -> bit-identical.
+        _u_ldf_local = u if ldf_state is None else ldf_state[2]
+        _v_ldf_local = v if ldf_state is None else ldf_state[3]
         (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
          diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
          diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
-            du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord,
-            H_bathy, dt,
+            du_dt, dv_dt, _u_ldf_local, _v_ldf_local, grid, mask, u_mask,
+            v_mask, config, z_coord, H_bathy, dt,
             rho_prime=rho_prime, h_k=h_k,
             vertex_mask=vertex_mask,
         )
