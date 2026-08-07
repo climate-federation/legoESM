@@ -10,8 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from legoesm.ocean.init_woa import interp_column_to_depths
 from scripts.data.build_woce_ic_latlon import (
-    _xyz_unit_sphere, regrid_curv_to_latlon, vertical_interp_to_woa,
+    _xyz_unit_sphere, regrid_curv_to_latlon,
 )
 
 
@@ -78,7 +79,7 @@ def test_vertical_interp_below_bottom_holds_edge():
     # WOA depths deeper than the deepest valid native level hold the deepest value
     src_z = np.array([0.0, 100.0, 500.0])
     col = np.array([18.0, 12.0, 6.0])
-    out = vertical_interp_to_woa(col, src_z, np.array([500.0, 1000.0, 5000.0]))
+    out = interp_column_to_depths(col, src_z, np.array([500.0, 1000.0, 5000.0]))
     assert np.isclose(out[0], 6.0)
     assert np.isclose(out[1], 6.0) and np.isclose(out[2], 6.0)   # edge-held
 
@@ -87,7 +88,7 @@ def test_vertical_interp_linear_column():
     src_z = np.array([0.0, 100.0, 1000.0])
     col = np.array([20.0, 10.0, 4.0])                # piecewise-linear in z
     woa = np.array([0.0, 50.0, 100.0, 500.0])
-    out = vertical_interp_to_woa(col, src_z, woa)
+    out = interp_column_to_depths(col, src_z, woa)
     assert np.isclose(out[0], 20.0)
     assert np.isclose(out[1], 15.0)                  # midway 0-100 m
     assert np.isclose(out[2], 10.0)
@@ -97,5 +98,5 @@ def test_vertical_interp_linear_column():
 def test_vertical_interp_degenerate_is_nan():
     src_z = np.array([0.0, 100.0, 1000.0])
     col = np.array([np.nan, np.nan, 4.0])            # <2 valid
-    out = vertical_interp_to_woa(col, src_z, np.array([0.0, 50.0]))
+    out = interp_column_to_depths(col, src_z, np.array([0.0, 50.0]))
     assert np.isnan(out).all()

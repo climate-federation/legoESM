@@ -333,6 +333,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(\'crushing the midlatitude eddy-driven "
                              "jets\'). 0 relies on the scale-selective "
                              "4th-order hyperdiff alone.")
+    parser.add_argument("--k-h-scale", dest="k_h_scale", type=float,
+                        default=None,
+                        help="Separate scale for horizontal THERMAL diffusivity "
+                             "K_h (None = follow --a-h-scale, byte-identical). "
+                             "Lets momentum viscosity be reduced for the "
+                             "eddy-driven-jet response while keeping the "
+                             "thermal smoothing that suppresses vertical "
+                             "computational modes.")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -639,6 +647,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Matches ExperimentConfig.validate_strict — 'most' is "
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
+    parser.add_argument("--surface-stability-scheme", type=str,
+                        dest="surface_stability_scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        help="Stable-branch (zeta>0) Monin-Obukhov similarity "
+                             "functions for the surface layer (bulk_flux psi_m/"
+                             "psi_h). dyer1974 (default) is byte-identical: "
+                             "the short-tail -5*zeta on most/large_yeager, but "
+                             "on coare3 (the AMIP surface scheme) the "
+                             "COARE-native stable form, which is already the "
+                             "long-tail BH91 fit — so beljaars_holtslag1991 is "
+                             "a rounding-level change on coare3, and the "
+                             "genuinely different strong-stable tails there "
+                             "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
+                        default=None,
+                        help="Free-atmosphere diffusivity floor override "
+                             "[m^2/s] for turbulence schemes carrying kvf_min "
+                             "(holtslag_boville; scheme default 0.01). "
+                             "Causality probe for the polar-night stable-"
+                             "transport runaway; None keeps the scheme "
+                             "default byte-identically.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -1160,6 +1190,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Land roughness length z0 [m] for the tiled land MOST "
                              "scheme (only used with --surface-tiled). Default "
                              f"{_EXPERIMENT_DEFAULTS.surface_z0_land}.")
+    parser.add_argument("--land-interface-flux", dest="land_interface_flux",
+                        choices=["legacy_dual", "unified"],
+                        default=_EXPERIMENT_DEFAULTS.land_interface_flux,
+                        help="Flux law the slab-land SEB debits at the "
+                             "land-air interface. 'legacy_dual' (default, "
+                             "byte-identical): the slab uses its own constant-"
+                             "C_H/C_E no-stability bulk law while the "
+                             "atmosphere debits the turbulence scheme's "
+                             "stability-dependent surface fluxes — two laws, "
+                             "measured same-state mismatch +75..+152 W/m2. "
+                             "'unified': the slab consumes the SAME surface-"
+                             "layer law the atmosphere applies (ONE flux law "
+                             "at the interface; the semi-implicit "
+                             "max(dF/dT,0)*dT_skin discretization term "
+                             "remains and is only small at a short "
+                             "--rad-update-steps cadence). Requires an "
+                             "active --turbulence scheme and an active slab "
+                             "land tile.")
+    parser.add_argument("--c-land", dest="C_land", type=float,
+                        default=_EXPERIMENT_DEFAULTS.C_land,
+                        help="Slab-land effective heat capacity [J/m2/K] "
+                             "(validate_strict bounds [1e4, 1e8]). Default "
+                             f"{_EXPERIMENT_DEFAULTS.C_land:.1e} (~0.15 m "
+                             "active soil layer).")
     parser.add_argument("--land-soil-bucket", action="store_true", default=False,
                         dest="land_soil_bucket",
                         help="Prognostic soil-water bucket (Manabe) on the slab-land "
@@ -1689,6 +1743,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
+        k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
@@ -1819,7 +1874,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gravity_wave_drag=args.gravity_wave_drag,
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        hb_kvf_min=args.hb_kvf_min,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
@@ -1854,6 +1911,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
         slab_land_active=args.slab_land_active,
+        land_interface_flux=args.land_interface_flux,
+        C_land=args.C_land,
         surface_tiled=args.surface_tiled,
         surface_z0_land=args.surface_z0_land,
         land_soil_bucket=args.land_soil_bucket,
@@ -2500,7 +2559,8 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     return louis_config._replace(
         surface=louis_config.surface._replace(
             bulk_scheme=prev_surf.bulk_scheme,
-            gustiness_w_zi=prev_surf.gustiness_w_zi))
+            gustiness_w_zi=prev_surf.gustiness_w_zi,
+            stability_scheme=prev_surf.stability_scheme))
 
 
 def _apply_sundqvist_overrides(micro_config, args):
@@ -2719,13 +2779,23 @@ def main(argv: list[str] | None = None):
             build_atm_scalar_param_map,
             load_params_config,
         )
+        # #1509: capture what --params actually applied. Class-routed values
+        # land on nested scheme configs that resolved_config does not reach, so
+        # without this the manifest records only the params FILE PATH and a
+        # reader months later cannot tell which values produced the run.
+        _params_applied: dict = {}
         config = apply_params_to_config(
             config, load_params_config(args.params), driver="run_amip",
-            scalar_param_map=build_atm_scalar_param_map())
+            scalar_param_map=build_atm_scalar_param_map(),
+            record=_params_applied)
 
     from legoesm.driver.model_driver import ModelDriver
 
     driver = ModelDriver(config)
+    # Threaded onto the driver rather than through its constructor so no other
+    # caller's signature changes; the manifest writer reads it if present.
+    if "_params_applied" in dir():
+        driver._params_applied = _params_applied
     print("Setup...")
     driver.setup()
 

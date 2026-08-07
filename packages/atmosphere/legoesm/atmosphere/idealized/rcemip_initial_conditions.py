@@ -9,21 +9,36 @@ Wing 2018 analytical profiles
 * Surface state: ``p_sfc = 1014.8 hPa``, ``T_sfc`` set per
   RCE300/RCE295/RCE305 case (default 300 K).
 * Tropopause height: ``z_t = 15 km``.
-* Lapse rate: ``Γ = 0.0067 K/m`` below the tropopause; isothermal
-  above.
-* Surface specific humidity: ``q_sfc = 0.01865 kg/kg`` (RCE300).
+* Lapse rate: ``Γ`` below the tropopause; isothermal above.
 * Moisture profile (z ≤ z_t)::
 
       q_v(z) = q_sfc · exp(-z/z_q1) · exp(-(z/z_q2)²)
 
   with ``z_q1 = 4 km``, ``z_q2 = 7.5 km``. Above z_t: ``q_v = q_t =
   10⁻¹¹`` (essentially dry stratosphere).
-* Virtual surface temperature ``T_v0 = T_sfc · (1 + 0.608 · q_sfc)``
-  defines the virtual-temperature reference for the hydrostatic
-  pressure integral.
+* Virtual surface temperature ``T_v0`` sets the virtual-temperature
+  reference for the hydrostatic pressure integral.
 * Pressure: integrated hydrostatically from ``p_sfc`` using the
   virtual temperature profile; potential temperature follows
   ``θ = T · (p_ref/p)^κ`` (Poisson).
+
+Which numbers come from where
+-----------------------------
+The *functional form* above is Wing 2018 Tab A1.  The three free
+constants ``(T_v0, Γ, q_sfc)`` are **calibrated against the gSAM
+oracle** — gSAM 1.8.8 ``CASES/RCEMIP1/snd_rcemip_300s6.11.2``, the
+sounding SAM itself starts RCEMIP1 from.  Each constant records its
+estimator and the spread of an independent second estimator below.
+
+The oracle also shows the analytic form's **structural limit**: gSAM's
+stratosphere WARMS with height (194.4 K at the 14.5 km cold point →
+207.5 K at 20 km → 231.2 K at 33 km), which a two-piece
+lapse-then-isothermal profile cannot represent at any ``(T_v0, Γ)``.
+For a faithful RCEMIP1 column use the tabulated sounding —
+``scripts/run/run_rcemip_plane.py --sounding <gSAM snd>`` — which goes
+through the same ``read_sam_snd`` + ``sam_case_setup`` path as
+BOMEX/RICO/DYCOMS/GATE.  These analytic profiles remain the default and
+are the right tool for a cheap, smooth, differentiable idealised column.
 
 Returned types
 --------------
@@ -45,21 +60,103 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
-# Wing 2018 Tab A1 canonical constants.
-WING_GAMMA = 0.0067         # K/m, lapse rate below tropopause
+# --- Wing 2018 Tab A1 analytic-FORM constants (not case calibration) ---
+# These define the shape of the two-piece profile and are unchanged.
 WING_Z_T = 15_000.0         # m, tropopause height
-WING_T_V0 = 295.0           # K, surface VIRTUAL temperature — RCEMIP (Wing 2018
-                            # Tab 1) PRESCRIBES this FIXED for ALL SST cases
-                            # (295/300/305 K); only q_v0 and the surface BC vary
-                            # with SST. Deriving it from the SST instead made the
-                            # whole profile (incl. the tropopause cold point
-                            # T_v0-Γ·z_t) ~8 K too warm at SST=300.
 WING_Z_Q1 = 4_000.0         # m, q_v lower-troposphere e-folding scale
 WING_Z_Q2 = 7_500.0         # m, q_v upper-troposphere Gaussian scale
 WING_Q_T = 1.0e-11          # kg/kg, stratospheric humidity floor
 WING_P_SFC = 101_480.0      # Pa (1014.8 hPa per Wing Tab A1)
-WING_T_SFC_DEFAULT = 300.0  # K (RCE300 case)
-WING_Q_SFC_DEFAULT = 0.01865  # kg/kg (RCE300 case)
+WING_T_SFC_DEFAULT = 300.0  # K, prescribed RCE300 SEA-SURFACE temperature. This
+                            # is the surface BOUNDARY CONDITION for the flux
+                            # code, NOT the initial surface AIR temperature —
+                            # gSAM's RCE300 sounding starts the air at 296.92 K
+                            # at z=37 m, ~3 K below the SST (air-sea
+                            # disequilibrium).  Do NOT re-derive T_v0 from it;
+                            # see the note on WING_T_V0.
+
+# --- RCE300 case calibration, measured against the gSAM oracle ---------------
+# Oracle: gSAM 1.8.8 CASES/RCEMIP1/snd_rcemip_300s6.11.2
+#   sha256 973d50a113b18f2da6f3eeba51494af771ce868d68af035c2b3899eb3734341b
+#   (`snd` in that deck is a byte-identical copy; the deck also ships
+#    snd_rcemip_295s6.11.2 and snd_rcemip_305s6.11.2, so gSAM uses a DIFFERENT
+#    sounding per SST rather than one profile across cases).
+# Measured 2026-08-06, SLURM job 9331613, 74 native levels, x64.  Every value
+# below carries the estimator that produced it AND the spread of an independent
+# second estimator, so no constant rests on a single unchecked fit.
+#
+# Oracle surface state (z = 37 m): T = 296.917 K, q_v = 14.0703 g/kg,
+# RH = 0.7545; max RH over the column = 0.8892 at z = 667 m; cold point
+# 194.42 K at 14.5 km.
+#
+# K/m, tropospheric lapse rate, and K, surface VIRTUAL temperature.
+#
+# ENDPOINT-CONSTRAINED fit (scripts/data/extract_gsam_rcemip_baseline.py
+# ::calibrate_wing_constants, estimator "endpoints"): the straight line through
+# the back-extrapolated surface T_v(0) and the oracle's COLD POINT.
+#
+# RETRACTED, and why it matters — the first version of this calibration used a
+# LEAST-SQUARES fit of T_v over z <= z_t, giving T_v0 = 300.444 K and
+# Gamma = 0.0074034 K/m (R^2 = 0.99567). That estimator minimises the mean
+# tropospheric residual and therefore misses BOTH endpoints, because gSAM's
+# lapse is not constant — it is steeper in the densely-sampled lower
+# troposphere. Measured cost: it put the analytic tropopause 5.030 K BELOW the
+# oracle's cold point, on the quantity that sets OLR, cirrus and CAPE. That is
+# ~60x worse than the value it replaced, against the very oracle being fitted.
+# It was nearly shipped, with the resulting regression absorbed by widening a
+# test band from 193-196 K to 187-192 K — the exact failure mode of "fix the
+# test until it is green".
+#
+# The endpoint estimator costs 0.225 K of tropospheric mean error (2.226 vs
+# 2.001 K) and reduces the cold-point error from -5.030 K to +0.000 K.
+# Both estimators are computed and recorded in the tracked baseline's
+# "wing_calibration" block, so the choice is auditable rather than asserted.
+WING_GAMMA = 0.0069901
+#
+# Two previous values, both now disproven directly against gSAM's sounding
+# rather than by argument:
+#   295.0  — on the reading that RCEMIP prescribes one fixed T_v0 for all SSTs.
+#            Paired with q_sfc it put the initial column at RH = 1.396 at the
+#            surface; gSAM's is 0.7545.  The three per-SST soundings gSAM ships
+#            also contradict the "one profile for all cases" premise.
+#   303.4  — from T_v0 = T_sfc*(1 + 0.608*q_sfc), i.e. virtualising the SST.
+#            That conflates the SEA-surface temperature with the surface AIR
+#            virtual temperature; the oracle's air is ~3 K cooler than the SST,
+#            so this overshoots by ~2.7 K.  T_v0 is therefore NOT derived from
+#            T_sfc here — deriving it is precisely the error.
+WING_T_V0 = 299.274
+# kg/kg, surface (z=0) water-vapour mixing ratio.  The oracle's 37 m value
+# 14.0703 g/kg extrapolated to z=0 through the Wing shape function
+# exp(-z/z_q1)*exp(-(z/z_q2)^2), which reproduces the 37 m level EXACTLY.
+# A least-squares fit of q_0 over the whole troposphere gives 14.7729 g/kg
+# (a 4.0 % spread) — larger than the other two constants' spreads because
+# gSAM's moisture profile is not exactly the Wing shape; the surface-anchored
+# estimator is used since the surface state is what the gate asserts.
+# Was 0.01865: 31 % too moist, and ~= q_sat(300 K) — the SATURATION value had
+# been used where the case calls for a subsaturated ~14.2 g/kg.
+#
+# CONVENTION: gSAM's `q` column is a MIXING RATIO, and so is this value.  The
+# SAM-deck path already feeds mixing ratios straight into the model's q_v
+# tracer for every case (read_sam_snd -> build_sam_case_initial_state), so the
+# two agree.  Docstrings in this module have historically said "specific
+# humidity"; the difference is q = r/(1+r), i.e. ~1.4 % here, below the
+# calibration's own estimator spread but NOT zero — do not treat the two labels
+# as interchangeable when tightening any tolerance below ~1 %.
+WING_Q_SFC_DEFAULT = 0.0142014
+
+# CONSUMERS THAT MOVED WITH THIS RECALIBRATION (they call the wing2018_*
+# functions with MODULE DEFAULTS, so their reference column changed):
+#   * scripts/run/run_scm_rce_campaign.py — the SCM-RCE sigma coordinate and
+#     wing_initial_profiles. It feeds results/scm_rce_campaign/
+#     tuned_parameters.json, which is the init for train_scm_rce_params.py, so
+#     any previously tuned parameters were tuned against the OLD column and
+#     should be regenerated before being compared to new ones.
+#   * scripts/data/build_rcemip1_small_reference.py — any existing
+#     results/rcemip1_small_wing_ocean bundle is now stale w.r.t. the code that
+#     reads it; regenerate rather than mixing vintages.
+# Callers that pass T_v0/Gamma/q_sfc EXPLICITLY (run_rce_mpi_long.py,
+# run_rce_mpi_experiment.py, run_rce_smoke_stretched.py, the plane-CRM dt and
+# CFL benchmarks) are unaffected.
 
 # Virtual-temperature factor: T_v = T · (1 + VIRTUAL_FACTOR · q_v).
 # Derived from the molecular-weight ratio so the value stays in sync
@@ -78,10 +175,13 @@ def wing2018_virtual_temperature_profile(
     """Wing 2018 *virtual* temperature ``T_v(z)``.
 
     Below the tropopause: linear lapse from the surface virtual temperature
-    ``T_v0`` (RCEMIP-prescribed FIXED 295 K, Wing 2018 Tab 1 — NOT derived from
-    the SST: the earlier ``T_v0 = T_sfc·(1+0.608·q_sfc)`` made the profile, incl.
-    the tropopause cold point, ~8 K too warm at SST=300). Above: isothermal cap
-    at ``T_v0 - Γ · z_t``. Wing 2018 Tab A1 prescribes
+    ``T_v0`` (the gSAM-oracle least-squares intercept — NOT derived from the
+    SST; see the ``WING_T_V0`` note, where both the fixed-295 K and the
+    SST-virtualised readings are disproven against gSAM's own sounding).
+    Above: isothermal cap at ``T_v0 - Γ · z_t``.  gSAM's stratosphere in fact
+    WARMS with height, which this two-piece form cannot represent — use
+    ``--sounding`` when stratospheric structure matters.  Wing 2018 Tab A1
+    prescribes
     this analytic profile on **virtual** T so the hydrostatic
     integral remains closed-form (the moist-air gas constant
     ``R = R_d · (1 + 0.608 q_v)`` absorbs into the virtual T,
@@ -101,7 +201,8 @@ def wing2018_virtual_temperature_profile(
     z_t : float
         Tropopause height [m]. Default 15 km.
     Gamma : float
-        Tropospheric virtual-T lapse rate [K/m]. Default 0.0067 K/m.
+        Tropospheric virtual-T lapse rate [K/m]. Default ``WING_GAMMA``
+        (oracle-fitted; see the constant's note).
     """
     T_v_below = T_v0 - Gamma * z
     T_v_top = T_v0 - Gamma * z_t

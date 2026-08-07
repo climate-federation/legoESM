@@ -175,8 +175,11 @@ class TestWOAMonthlyAndBathymetry:
     def test_load_woa18_annual(self, tmp_path):
         from legoesm.ocean.init_woa import load_woa18
         T_path, S_path, lat, lon, depth = _write_synthetic_woa(tmp_path)
-        T, S, lat_w, lon_w = load_woa18(T_path, S_path)
+        T, S, lat_w, lon_w, depth_w = load_woa18(T_path, S_path)
         assert T.shape == (lat.size, lon.size, depth.size)
+        # The file's OWN depth axis must come back, not WOA_DEPTHS:
+        # that is what lets a non-WOA climatology be read correctly.
+        assert np.allclose(depth_w, depth)
         assert S.shape == (lat.size, lon.size, depth.size)
         assert np.allclose(lat_w, lat)
         assert np.allclose(lon_w, lon)
@@ -186,8 +189,8 @@ class TestWOAMonthlyAndBathymetry:
         T_path, S_path, *_ = _write_synthetic_woa(
             tmp_path, t_time=12, s_time=12,
         )
-        T_jan, _, _, _ = load_woa18(T_path, S_path, month=1)
-        T_jul, _, _, _ = load_woa18(T_path, S_path, month=7)
+        T_jan, _, _, _, _ = load_woa18(T_path, S_path, month=1)
+        T_jul, _, _, _, _ = load_woa18(T_path, S_path, month=7)
         # Monthly drift built into synthetic data: t=0 vs t=6 → +3 K
         assert float(np.mean(T_jul - T_jan)) == pytest.approx(3.0, rel=1e-10)
 
@@ -196,7 +199,7 @@ class TestWOAMonthlyAndBathymetry:
         target month; loader reads index 0 with ``month=None``."""
         from legoesm.ocean.init_woa import load_woa18
         T_path, S_path, *_ = _write_synthetic_woa(tmp_path, t_time=1)
-        T_data, _, _, _ = load_woa18(
+        T_data, _, _, _, _ = load_woa18(
             T_path, S_path,
             monthly_layout="single_file_per_month",
             month=None,
@@ -280,6 +283,65 @@ class TestWOAMonthlyAndBathymetry:
         # Linear field: T(0, 45) = 0 + 4.5 = 4.5
         assert float(out[0]) == pytest.approx(4.5, abs=0.5)
 
+    def test_init_ocean_uses_the_files_own_depth_axis(self, tmp_path):
+        """A climatology on NON-WOA levels must be read at ITS depths.
+
+        The loader used to take the source depth axis from
+        ``WOA_DEPTHS[:n_depth]`` regardless of what the file said, so a file
+        on e.g. PHC3's 33 levels had its abyssal values read as if they sat in
+        the top few hundred metres — a silently wrong ocean, never an error.
+
+        The discriminator here is a source whose levels are FAR from
+        ``WOA_DEPTHS[:5]`` (0, 5, 10, 15, 20 m): a two-level file at 0 m and
+        3000 m, warm on top and cold at the bottom.  Read correctly, the model
+        column is warm through the upper ocean and only cools towards 3000 m.
+        Read against ``WOA_DEPTHS``, the whole column below 20 m would be the
+        3000 m value.
+        """
+        from legoesm.ocean.init_woa import WOA_DEPTHS, init_ocean_from_woa
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        lat = np.linspace(-45.0, 45.0, 4)
+        lon = np.linspace(0.0, 270.0, 4)
+        depth = np.array([0.0, 3000.0])
+        T = np.zeros((1, depth.size, lat.size, lon.size))
+        T[0, 0] = 20.0          # surface
+        T[0, 1] = 0.0           # 3000 m
+        S = np.full((1, depth.size, lat.size, lon.size), 35.0)
+        coords = {"time": np.array([0.0]), "depth": depth,
+                  "lat": lat, "lon": lon}
+        T_path = tmp_path / "src_T.nc"
+        S_path = tmp_path / "src_S.nc"
+        xr.Dataset({"t_an": (("time", "depth", "lat", "lon"), T)},
+                   coords=coords).to_netcdf(T_path)
+        xr.Dataset({"s_an": (("time", "depth", "lat", "lon"), S)},
+                   coords=coords).to_netcdf(S_path)
+
+        # Sanity: the discriminator only works if the file's axis and the
+        # WOA prefix really disagree.
+        assert not np.allclose(depth, WOA_DEPTHS[:depth.size])
+
+        z_coord = create_ocean_z_star(n_levels=20, H_max=3000.0)
+
+        class _G:
+            lat = np.radians(np.array([[0.0, 0.0], [10.0, 10.0]]))
+            lon = np.radians(np.array([[10.0, 20.0], [10.0, 20.0]]))
+
+        T_out, _ = init_ocean_from_woa(_G(), z_coord, T_path, S_path,
+                                       interp="bilinear")
+        col = np.asarray(T_out)[0, 0]
+        model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+
+        # Linear in depth between the two source levels, so the model level
+        # nearest 1500 m must sit near 10 degC — the old behaviour put it at 0.
+        k_mid = int(np.argmin(np.abs(model_depths - 1500.0)))
+        expected = 20.0 * (1.0 - model_depths[k_mid] / 3000.0)
+        assert abs(col[k_mid] - expected) < 0.5, (
+            f"depth {model_depths[k_mid]:.0f} m -> {col[k_mid]:.3f} degC, "
+            f"expected ~{expected:.3f}")
+        # And the top of the column must still be the surface value.
+        assert abs(col[0] - 20.0) < 0.5
+
     def test_init_ocean_bathymetry_mask(self, tmp_path):
         """Cells deeper than bathymetry get the named-constant fill."""
         from legoesm import constants
@@ -356,8 +418,8 @@ class TestCMORTablesOMIP2:
         assert not missing, f"SImon missing vars: {missing}"
 
     def test_simon_realm_is_seaice(self):
-        from legoesm.io.cmor_output import _TABLE_REALM
-        assert _TABLE_REALM["SImon"] == "seaIce"
+        from legoesm.io.cmor_output import table_realm
+        assert table_realm("SImon") == "seaIce"
 
     def test_lookup_cmor_entry_finds_thetao(self):
         from legoesm.io.cmor_output import lookup_cmor_entry
@@ -437,3 +499,43 @@ class TestCFWriterOmonThetao:
             assert ds["thetao"].shape == (1, nlev, nlat, nlon)
         finally:
             ds.close()
+
+
+class TestClimatologyDepthAxis:
+    """Codex round-4: the SALINITY file's depth axis must be checked too."""
+
+    @staticmethod
+    def _write(tmp_path, t_depth, s_depth):
+        lat = np.linspace(-45.0, 45.0, 3)
+        lon = np.linspace(0.0, 240.0, 3)
+
+        def _one(path, var, depth):
+            data = np.zeros((1, depth.size, lat.size, lon.size))
+            xr.Dataset(
+                {var: (("time", "depth", "lat", "lon"), data)},
+                coords={"time": np.array([0.0]), "depth": depth,
+                        "lat": lat, "lon": lon},
+            ).to_netcdf(path)
+
+        tp, sp = tmp_path / "t.nc", tmp_path / "s.nc"
+        _one(tp, "t_an", t_depth)
+        _one(sp, "s_an", s_depth)
+        return tp, sp
+
+    def test_mismatched_t_and_s_depth_axes_raise(self, tmp_path):
+        """Equal level COUNTS with different depths would place salinity at
+        the temperature file's depths without a word."""
+        from legoesm.ocean.init_woa import load_woa18
+
+        tp, sp = self._write(tmp_path, np.array([0.0, 100.0, 1000.0]),
+                             np.array([0.0, 200.0, 3000.0]))
+        with pytest.raises(ValueError, match="DIFFERENT"):
+            load_woa18(tp, sp)
+
+    def test_matching_axes_are_accepted(self, tmp_path):
+        from legoesm.ocean.init_woa import load_woa18
+
+        depth = np.array([0.0, 100.0, 1000.0])
+        tp, sp = self._write(tmp_path, depth, depth)
+        *_, depth_w = load_woa18(tp, sp)
+        assert np.allclose(depth_w, depth)

@@ -1,0 +1,172 @@
+{
+  "_comment": "TINY tracked oracle baseline \u2014 a ~15-level distillation of gSAM 1.8.8's RCEMIP1 RCE300 sounding. The gSAM tree itself is external and NOT committed; this is the visual-regression 'tiny numeric baseline' carve-out. Regenerate with the command in 'provenance.command'.",
+  "provenance": {
+    "upstream_url": "http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz",
+    "upstream_member": "gSAM1.8.8/CASES/RCEMIP1/snd_rcemip_300s6.11.2",
+    "source_sha256": "973d50a113b18f2da6f3eeba51494af771ce868d68af035c2b3899eb3734341b",
+    "source_bytes": 8442,
+    "source_n_levels": 74,
+    "source_block": "first time block (day 0); the file holds two identical blocks (day 0 and day 1000)",
+    "reader": "legoesm.atmosphere.forcing.sam_case_forcing.read_sam_snd",
+    "extraction_script": "scripts/data/extract_gsam_rcemip_baseline.py",
+    "command": "python scripts/data/extract_gsam_rcemip_baseline.py --snd $LEGOESM_GSAM_ROOT/CASES/RCEMIP1/snd_rcemip_300s6.11.2 --out tests/oracle_baselines/gsam_rcemip300_snd.json --n-levels 15",
+    "written_to": "tests/oracle_baselines/gsam_rcemip300_snd.json",
+    "level_indices": [
+      0,
+      6,
+      12,
+      18,
+      24,
+      30,
+      36,
+      42,
+      48,
+      54,
+      60,
+      66,
+      73
+    ]
+  },
+  "units": {
+    "z": "m",
+    "p": "mb",
+    "theta": "K",
+    "q_v": "kg/kg",
+    "T": "K (derived: theta*(p/p_ref)^kappa)",
+    "rh": "dimensionless (derived: q_v / legoesm.thermo.saturation_mixing_ratio(T, p); a MIXING-RATIO ratio, matching SAM's q column convention)"
+  },
+  "wing_calibration": {
+    "q_sfc": 0.014201399706623258,
+    "q_sfc_lstsq": 0.014772872599549349,
+    "lstsq": {
+      "T_v0": 300.44375169077017,
+      "Gamma": 0.00740335466489675,
+      "r2": 0.9956730671677896,
+      "trop_Tv_mae": 2.00117013784423,
+      "cold_point_err": -5.029578609992825
+    },
+    "endpoints": {
+      "T_v0": 299.2739969013271,
+      "Gamma": 0.006990065771601023,
+      "trop_Tv_mae": 2.2258655172665556,
+      "cold_point_err": 0.0
+    },
+    "oracle_cold_point_T_v": 194.42301032731177,
+    "oracle_cold_point_z": 14500.0,
+    "n_trop_levels": 38
+  },
+  "pres0_mb": 1014.8,
+  "oracle_is": [
+    "z",
+    "p",
+    "theta",
+    "q_v",
+    "pres0_mb"
+  ],
+  "derived_by_legoesm_thermo": [
+    "T",
+    "rh"
+  ],
+  "z": [
+    37.0,
+    667.0,
+    2505.0,
+    5500.0,
+    8500.0,
+    11500.0,
+    14500.0,
+    17500.0,
+    20500.0,
+    23500.0,
+    26500.0,
+    29500.0,
+    33000.0
+  ],
+  "p": [
+    1010.5292,
+    939.8348,
+    755.6168,
+    519.105,
+    345.4065,
+    219.6157,
+    131.9052,
+    78.4095,
+    47.4315,
+    29.4538,
+    18.6283,
+    11.9144,
+    7.1165
+  ],
+  "theta": [
+    296.0293,
+    296.7386,
+    304.1225,
+    316.1821,
+    324.6976,
+    328.0501,
+    346.8246,
+    412.5267,
+    500.6341,
+    599.61,
+    708.6989,
+    818.2868,
+    949.8063
+  ],
+  "q_v": [
+    0.014070299999999999,
+    0.0127119,
+    0.00736,
+    0.0022392,
+    0.0003019,
+    1.9800000000000004e-05,
+    1e-06,
+    1.3e-06,
+    4.0000000000000003e-07,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "T": [
+    296.91655971396744,
+    291.5239299795906,
+    280.72194909929595,
+    262.1674631103179,
+    239.64529866908632,
+    212.73426420558496,
+    194.42289216316698,
+    199.317942690209,
+    209.52731021554155,
+    219.01075325320852,
+    227.095390116207,
+    230.77711043300908,
+    231.1934424704343
+  ],
+  "rh": [
+    0.7544960624123995,
+    0.8892041420738676,
+    0.8467531021724131,
+    0.7008575498105701,
+    0.45936462293171787,
+    0.3896385557374162,
+    0.1610163761200823,
+    0.05857607648768529,
+    0.0025843474140346896,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "full_column_summary": {
+    "z_min": 37.0,
+    "z_max": 33000.0,
+    "T_surface": 296.91655971396744,
+    "q_v_surface": 0.014070299999999999,
+    "rh_surface": 0.7544960624123995,
+    "rh_max": 0.8892041420738676,
+    "rh_max_z": 667.0,
+    "T_cold_point": 194.42289216316698,
+    "T_cold_point_z": 14500.0,
+    "T_top": 231.1934424704343
+  }
+}
