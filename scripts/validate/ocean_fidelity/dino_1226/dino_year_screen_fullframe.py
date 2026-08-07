@@ -120,6 +120,19 @@ if INIT_RESTART:
     from kamm_twin_90d import verify_day0_matches_restart
     verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
+    # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
+    # 219-220 e3w(...,Kmm), the NOW/pre-solve thickness) vs legoESM's default
+    # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field (not a
+    # DINOConfig field, unlike the ablations above), set on mc post-
+    # construction. Opt-in measurement knob only -- NOT a recipe/kamm default.
+    _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
+    if _v not in ("0", "1"):
+        raise SystemExit(
+            f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
+    # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
+    mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
+    print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore external-tau block

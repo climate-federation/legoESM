@@ -298,6 +298,18 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
               f"0..{en_restart.shape[-1]-2})  max|d_en|={d_en:.3e}", flush=True)
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+    if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
+        # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
+        # 219-220 e3w(...,Kmm), NOW/pre-solve thickness) vs legoESM's default
+        # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field, set on
+        # mc post-construction (same pattern as dino_year_screen_fullframe.py).
+        _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
+        if _v not in ("0", "1"):
+            raise SystemExit(
+                f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
+        # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
+        mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
+        print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
     print(f"barotropic_diffusion_alpha={mc.barotropic.barotropic_diffusion_alpha} "
           f"barotropic_face_depth={mc.barotropic.barotropic_face_depth} "
           f"zdf_drag_in_matrix={mc.zdf_drag_in_matrix} "
