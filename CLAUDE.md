@@ -686,6 +686,26 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 
+### RULE 0 — SUCCINCT, CLEAR, TO THE POINT. STANDING ORDER, ALL SESSIONS.
+User, 2026-08-07, after repeated callouts in a single session ("you are too
+verbose", "I have no idea what you are saying", "just laser-focused summary"):
+**"Make being succinct, clear and to the point a strict rule for all future
+sessions."** This outranks every other formatting instinct.
+
+Mechanical test before sending — if a line fails, cut it:
+- Would the user act differently without this line? No → delete.
+- Is it method, process, or what I tried? → delete. Tool calls are visible.
+- Is it a caveat nobody would act on? → delete (put it in the commit).
+- Is it re-explaining something already said once? → delete.
+
+Shape: **verdict first**, then only the evidence that changes the verdict,
+then ONE question with numbered options if a decision is needed. Default
+length is a few lines. A long reply must earn it by being asked for (a
+report, a walkthrough, per-phase notes).
+
+Jargon is banned unless the sentence also says what it means in plain words.
+Say "how much communication the split costs", not "the ppermute round count".
+
 ### PLAIN LANGUAGE FIRST — the rule that finally worked (2026-08-07)
 THIRD callout: *"I really don't understand when you talk to me. Things are
 incredibly unclear."* Brevity alone did NOT fix it — the earlier rules were
