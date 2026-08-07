@@ -32,6 +32,7 @@ from legoesm.grids.fv3_native_gridstruct import (
     build_fv3_native_gridstruct,
     exchange_bgrid_scalar_halos,
     exchange_cgrid_vector_halos,
+    fort,
 )
 
 # Vertex-instability diagnostic mode (codex vertex-kill C3), frozen at
@@ -254,6 +255,41 @@ def build_six_face_duo_context(n: int, ng: int = 3,
             )
 
             ext_scalar_sixface(hs6, "A", ectx)
+
+    # f0 (Coriolis at cell centres) gets the SAME treatment as phis, and it
+    # was the one static field that never got it. test_cases.F90:787-801
+    # evaluates f0 analytically over the FULL data domain (isd..ied,
+    # jsd..jed) and then OVERWRITES the halo:
+    #
+    #     if (.not. gridstruct%dg%is_initialized) then
+    #        call mpp_update_domains( f0, domain )
+    #     else
+    #        call ext_scalar(f0, gridstruct%dg, bd, domain, 0, 0)
+    #     endif
+    #     if (cubed_sphere) call fill_corners(f0, npx, npy, YDir)
+    #
+    # so on the duo lane the halo carries the k2e-remapped value, not the
+    # raw analytic one. d_sw5 reads f0 full-domain as `vort = wk + f0`
+    # (sw_core.F90:1837-1862), so those halo slots are consumed, not
+    # decorative. The two differ by the remap's own truncation -- the port
+    # was using the EXACT value where the oracle uses an approximate one,
+    # which is still a divergence.
+    #
+    # fill_corners(..., YDir) runs unconditionally under `cubed_sphere`, so
+    # it is ported here too rather than left to ext_scalar's Lagrange
+    # corner-region fill, which is a different operation.
+    if use_ext_bundle and "f0" not in ext_exclude:
+        from legoesm.grids.fv3_native_gridstruct import (
+            fill_corners_agrid_y,
+        )
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+
+        f0_6 = [np.array(gs["f0"], dtype=np.float64, copy=True)
+                for gs in gs6]
+        ext_scalar_sixface(f0_6, "A", ectx)
+        for t in range(6):
+            fill_corners_agrid_y(fort(f0_6[t], 1 - ng, 1 - ng), n + 1, ng)
+            gs6[t] = {**gs6[t], "f0": f0_6[t]}
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,

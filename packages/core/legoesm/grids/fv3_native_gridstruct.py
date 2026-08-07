@@ -1736,3 +1736,4 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
 # so importers use the sanctioned public name (definitions keep the
 # original underscore name for in-module callers).
 fill_corners_agrid_x = _fill_corners_agrid_x
+fill_corners_agrid_y = _fill_corners_agrid_y
