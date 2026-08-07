@@ -42,13 +42,26 @@ if in_list "$SLURM_PROCID"; then
     # NO --delay/--duration: this run is ~7.3 s of compile plus 12 steps of
     # ~10 ms, so any delay long enough to skip compile also skips the entire
     # steady state.  Capture everything; the analysis drops warmup cycles.
+    # NO `--` separator before the application: nsys 2023.2.3 parses a bare
+    # `--` as an ambiguous long-option abbreviation and aborts with "option
+    # is ambiguous and matches ..." (verified — it killed job 26771842's four
+    # profiled ranks). The application simply follows the flags.
+    # `env -u QUADD_INJECTION_PROXY` is REQUIRED, not hygiene. nsys sets that
+    # variable for its injection library, and JAX treats any *_PROXY env var
+    # as distributed-coordinator proxy configuration -- it prints "JAX
+    # detected proxy variable(s) ... may cause a hang of
+    # distributed.initialize" and then does exactly that. Only the PROFILED
+    # ranks get the variable, so they diverge from the other 60 and the whole
+    # job deadlocks in init (observed: job 26771961 hung with precisely four
+    # such warnings, one per profiled rank, and produced nothing).
+    # Unsetting it here is safe: nsys's injection is already active via
+    # LD_PRELOAD by the time this exec runs, so the variable has done its job.
     exec "$NSYS_BIN" profile \
         --trace=cuda,nvtx \
         --output="$out" \
         --force-overwrite=true \
         --export=sqlite \
-        -- \
-        "$PY_BIN" "$@"
+        env -u QUADD_INJECTION_PROXY "$PY_BIN" "$@"
 else
     exec "$PY_BIN" "$@"
 fi
