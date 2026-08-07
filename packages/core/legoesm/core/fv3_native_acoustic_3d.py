@@ -61,12 +61,51 @@ def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
 
     `dyn_core.F90:470/471` exchanges delp and pt (it == 1 only);
     `:504` exchanges the D winds every sub-step.
+
+    THE D-WIND EXCHANGE IS ``ext_vector``, NOT THE INDEX-COPY HELPER.
+    ``dyn_core.F90:504`` reads
+
+        if (duogrid) call ext_vector(u, v, gridstruct%dg, bd, domain,
+                                     gridstruct, flagstruct, 0,1,1,0)
+
+    i.e. the k2e Lagrange duo exchange, which replaces the WHOLE padded
+    array including the corner-diagonal regions.  This function used to
+    call ``exchange_dgrid_vector_halos``, the interim mpp-analog whose
+    own docstring says the corner diagonals are left untouched, and the
+    km=1 lane has used the authoritative one since the ext bundle
+    existed (``fv3_native_duo_stepper`` at the same oracle site).
+
+    That gap was NOT visible in the km=1 certified corpus because its
+    fixtures come from ``analytic_swcore_state``, which evaluates the
+    halos analytically at the kinked lattice, so the interim exchange had
+    almost nothing to correct.  With a real IC whose halos start at zero
+    it is the dominant error: MEASURED at C48/npz=5 on the J&W IC, one
+    240 s sub-step produced a spurious increment of 3.34 m/s in u and v
+    whose every cell above 10% of peak sat within 3 cells of a panel
+    boundary (90 of 90, 298 of 298, ... on the six faces), growing
+    linearly to 26 m/s over the 8 sub-steps of one dt_atmos, against an
+    oracle tendency of 0.03-0.2 m/s.
+
+    It FAILS CLOSED: a context without the ext bundle must say so with
+    ``ext_exclude=('dvec',)`` rather than get the interim exchange
+    silently, for the same reason ``exchange_post_pgrad_sixface`` does.
     """
     from legoesm.grids.fv3_native_gridstruct import (
         exchange_agrid_scalar_halos,
         exchange_dgrid_vector_halos,
     )
     n, ng = ctx["n"], ctx["ng"]
+    use_ext = bool(ctx.get("use_ext_bundle")) and ctx.get("ectx") is not None
+    dvec_excluded = "dvec" in tuple(ctx.get("ext_exclude", ()))
+    if winds and not use_ext and not dvec_excluded:
+        raise ValueError(
+            "exchange_state_halos_3d: dyn_core.F90:504 exchanges the D "
+            "winds with ext_vector on the duo lane, and this context has "
+            "no ext bundle. Substituting exchange_dgrid_vector_halos "
+            "leaves the corner diagonals stale and puts a spurious "
+            "~3 m/s per sub-step forcing on every panel boundary. Build "
+            "the context with use_ext_bundle=True, or declare the "
+            "substitution with ext_exclude=('dvec',).")
     for k in range(km):
         if scalars:
             for name in ("delp", "pt"):
@@ -75,28 +114,65 @@ def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
         if winds:
             u6 = [state[t]["u"][:, :, k] for t in range(6)]
             v6 = [state[t]["v"][:, :, k] for t in range(6)]
-            for t in range(1, 7):
-                exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+            if use_ext and not dvec_excluded:
+                from legoesm.grids.fv3_native_ext_vector import (
+                    ext_vector_dgrid_sixface,
+                )
+                ext_vector_dgrid_sixface(u6, v6, ctx["ectx"])
+            else:
+                for t in range(1, 7):
+                    exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+            # ext_vector_dgrid_sixface may replace the level arrays
+            # rather than writing through the views, so copy back.
+            for t in range(6):
+                state[t]["u"][:, :, k] = u6[t]
+                state[t]["v"][:, :, k] = v6[t]
 
 
 def _pad_scalars_6(f6, ctx, n, ng, fallback) -> None:
     """A-grid scalar halo fill for one level, all six faces.
 
-    Prefers ``duo_pad_scalars`` -- the certified k2e Lagrange halo remap
-    (``pad_halo`` with the real ``DuoGridData``), i.e. the faithful
-    ``ext_scalar`` analog. It replaces the WHOLE padded array, so the
-    corner-diagonal regions get filled.
+    ``dyn_core.F90:470-471`` is ``ext_scalar(delp, dg, bd, domain, 0,0)``
+    and the same for ``pt``, so the authoritative analog is
+    ``ext_scalar_sixface(f6, "A", ectx)``: mpp exchange, then
+    ``k2e_remap_halo_rings``, then the Lagrange corner-region fill.  That
+    is what the km=1 lane calls at this site.
 
-    ``exchange_agrid_scalar_halos`` is the interim index-copy exchange: it
-    fills the four edge halos but leaves the corner diagonals at their
-    sentinel, and PPM stencils reach into those corners. That is the
-    suspected source of the sub-step-2 blow-up, so the interim path is only
-    a fallback for a context built without the ext bundle, and it says so.
+    IT IS NOT ``duo_pad_scalars``.  That is the LEGACY jax duo pad, and
+    ``fv3_native_duo_stepper._check_exchange_flags`` refuses to let it
+    coexist with the ext bundle precisely because "the legacy pad would
+    shadow the required ext_scalar refreshes" (codex ext r1 P1-2).  This
+    function called it unconditionally whenever ``ctx["dg"]`` existed --
+    which is every duo context -- so the 3-D lane has been shadowing its
+    own ext_scalar since it was written.
+
+    MEASURED, C48/npz=5, the J&W IC, entry exchanges only
+    (``scripts/validate/fv3_native/halo_vs_analytic_probe.py``): with the
+    legacy pad, ``pt`` in the four EDGE halo bands (576 cells per face,
+    where the analytic reference is well defined) missed the analytic
+    value by **36.7 K, 12% relative, on all six faces**, while the D
+    winds -- which go through ``ext_vector`` -- were within 0.2% and
+    ``delp`` within 1.8e-16.  ``delp`` agreeing proves nothing here: it
+    is exactly 10000 Pa everywhere on this IC, so any exchange
+    reproduces it.  The 37 K halo is what drives ``geopk``'s ``gz`` at
+    ``ifirst = is-2 .. ie+2``, and hence the panel-boundary pressure
+    gradient that put 3.34 m/s per sub-step on every seam.
+
+    Fails closed for the same reason the wind exchange does: a context
+    without the bundle must declare the substitution.
     """
-    from legoesm.core.fv3_native_duo_stepper import duo_pad_scalars
-    if ctx.get("dg") is not None:
-        duo_pad_scalars(f6, ctx)
+    use_ext = bool(ctx.get("use_ext_bundle")) and ctx.get("ectx") is not None
+    excluded = "ascalar" in tuple(ctx.get("ext_exclude", ()))
+    if use_ext and not excluded:
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+        ext_scalar_sixface(f6, "A", ctx["ectx"])
         return
+    if not use_ext and not excluded:
+        raise ValueError(
+            "_pad_scalars_6: dyn_core.F90:470-471 fills the delp/pt halos "
+            "with ext_scalar on the duo lane, and this context has no ext "
+            "bundle. Build it with use_ext_bundle=True, or declare the "
+            "substitution with ext_exclude=('ascalar',).")
     for t in range(1, 7):
         fallback(f6, t, n, ng)
 
@@ -106,24 +182,37 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                         ptop: float, akap: float, cp_air: float,
                         cfg: dict | None = None,
                         a2b_ord: int = 4,
-                        exchange: bool = True) -> list:
+                        exchange: bool = True,
+                        remap_step: bool = False,
+                        remap_follows: bool = False,
+                        press_out: list | None = None) -> list:
     """One `it` of `do it=1,n_split`. Returns the updated six-face state.
 
     `state` is mutated in place for delp/pt/u/v (matching the Fortran's
     intent(inout) dummies) and also returned for convenience.
+
+    `remap_step` is `dyn_core.F90:344-348` (true on `it == n_split`); it
+    makes the D-grid geopk snapshot `pk` before `one_grad_p` destroys it.
+    `press_out`, when given, is filled in place with the six per-face
+    geopk bundles (`pe`, `peln`, `pk`, `pkz`, `gz`, plus `pk_remap` on a
+    remap step) that `Lagrangian_to_Eulerian` consumes.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     dt2 = 0.5 * dt
 
     if exchange:
         exchange_state_halos_3d(ctx, state, km,
                                 scalars=first_substep, winds=True)
 
-    csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2)
+    csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2,
+                       remap_follows=remap_follows)
     cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2, ptop=ptop, akap=akap,
-                            cp_air=cp_air, a2b_ord=a2b_ord)
-    dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg)
-    tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg)
+                            cp_air=cp_air, a2b_ord=a2b_ord,
+                            remap_follows=remap_follows)
+    dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg,
+                                 remap_follows=remap_follows)
+    tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
+                             remap_follows=remap_follows)
 
     # POST-d_sw scalar exchange, BEFORE the D-grid geopk.
     # dyn_core.F90:1336-1337 -- ext_scalar(delp,...,0,0) and
@@ -143,8 +232,12 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                 _pad_scalars_6(f6, ctx, n_, ng_,
                                exchange_agrid_scalar_halos)
 
-    dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt, ptop=ptop,
-                            akap=akap, cp_air=cp_air, a2b_ord=a2b_ord)
+    press = dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt, ptop=ptop,
+                                    akap=akap, cp_air=cp_air,
+                                    a2b_ord=a2b_ord, remap_step=remap_step,
+                                    remap_follows=remap_follows)
+    if press_out is not None:
+        press_out[:] = press
 
     # Write the prognostic fields back. delp/pt come from d_sw2 (unit 4);
     # u/v from d_sw6 as updated in place by one_grad_p (unit 5).
@@ -158,25 +251,36 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
 
 def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      n_split: int, ptop: float, akap: float, cp_air: float,
-                     cfg: dict | None = None, validate: bool = True) -> list:
+                     cfg: dict | None = None, validate: bool = True,
+                     remap_follows: bool = False,
+                     press_out: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
 
     `dt = bdt/n_split` (`dyn_core.F90:249`). The shipped duo decks run
     `k_split = 1`, so one call of this is one `dt_atmos`.
+
+    `press_out`, when given, receives the pressure bundle of the FINAL
+    sub-step -- the one `dyn_core.F90:344-348` marks `remap_step` and the
+    one `Lagrangian_to_Eulerian` reads.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
     dt = dt_atmos / float(n_split)
     n, ng = ctx["n"], ctx["ng"]
     for it in range(1, n_split + 1):
+        remap_step = (it == n_split)
         acoustic_substep_3d(ctx, state, dt, km, first_substep=(it == 1),
-                            ptop=ptop, akap=akap, cp_air=cp_air, cfg=cfg)
+                            ptop=ptop, akap=akap, cp_air=cp_air, cfg=cfg,
+                            remap_step=remap_step,
+                            remap_follows=remap_follows,
+                            press_out=(press_out if remap_step else None))
         if validate:
             # Fail at the sub-step that broke, not many steps later with a
             # field of NaN and no idea which stage produced it.
             try:
-                validate_state_3d(state, n, ng, km, require_finite=False)
+                validate_state_3d(state, n, ng, km, require_finite=False,
+                                  remap_follows=remap_follows)
             except Exception as exc:
                 raise RuntimeError(
                     f"state invalid after acoustic sub-step {it}/{n_split}: "

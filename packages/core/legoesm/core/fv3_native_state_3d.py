@@ -101,16 +101,27 @@ WIND_FIELDS = ("u", "v")
 STATE_FIELDS = SCALAR_FIELDS + WIND_FIELDS
 
 
-def require_no_remap_needed(km: int) -> None:
-    """Refuse a km the oracle would have remapped.
+def require_no_remap_needed(km: int, *, remap_follows: bool = False) -> None:
+    """Refuse a km the oracle would have remapped, unless one follows.
 
     Silently skipping ``Lagrangian_to_Eulerian`` does not degrade
     gracefully: ``delp`` stays a deformed Lagrangian thickness while
     ``pt`` stays in theta_v, and interfaces drift off the reference
     coordinate until some ``delp`` goes non-positive.
+
+    ``remap_follows=True`` is the CALLER'S PROMISE that
+    ``fv3_native_mapz.lagrangian_to_eulerian`` runs on this state before
+    the next outer step -- i.e. the caller is
+    ``fv3_native_dynamics.fv_dynamics_step``, which owns the
+    ``fv_dynamics.F90:568`` ``npz > 4`` block.  It is deliberately a
+    keyword the acoustic stages FORWARD rather than infer: a stage cannot
+    see its own caller, and inferring "someone will remap" from ``km``
+    alone is exactly the silent skip this guard exists to stop.
     """
     if not isinstance(km, (int, np.integer)) or km < 1:
         raise ValueError(f"km must be a positive integer, got {km!r}")
+    if remap_follows:
+        return
     if km > MAX_KM_WITHOUT_REMAP:
         raise ValueError(
             f"km={km} > {MAX_KM_WITHOUT_REMAP}: fv_dynamics.F90:568 gates "
@@ -148,14 +159,15 @@ def field_shape(name: str, n: int, ng: int, km: int) -> tuple[int, ...]:
         f"allocating an undeclared shape at a call site")
 
 
-def build_state_3d(n: int, ng: int, km: int, *, fill: float = 0.0) -> list:
+def build_state_3d(n: int, ng: int, km: int, *, fill: float = 0.0,
+                   remap_follows: bool = False) -> list:
     """Six per-face dicts of km-general fp64 arrays.
 
     fp64 throughout: Lane A is the fp64 reference the JAX stage is
     verified against, so a float32 array here would silently cap the
     achievable agreement at ~1e-7.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     if n < 1 or ng < 1:
         raise ValueError(f"n and ng must be >= 1, got n={n}, ng={ng}")
     return [
@@ -166,7 +178,8 @@ def build_state_3d(n: int, ng: int, km: int, *, fill: float = 0.0) -> list:
 
 
 def validate_state_3d(state: list, n: int, ng: int, km: int, *,
-                      require_finite: bool = True) -> None:
+                      require_finite: bool = True,
+                      remap_follows: bool = False) -> None:
     """Fail loudly on anything the stage kernels would accept silently.
 
     The motivating hazard: ``fort.__getitem__`` splits its subscript as
@@ -174,7 +187,7 @@ def validate_state_3d(state: list, n: int, ng: int, km: int, *,
     column and BROADCASTS. A rank or extent slip therefore produces
     numbers rather than an exception unless something checks first.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     if not isinstance(state, (list, tuple)) or len(state) != 6:
         raise ValueError(
             f"state must be 6 per-face dicts, got "

@@ -99,7 +99,8 @@ def _exchange_post_pgrad(ctx: dict, csw_outs: list, km: int, *,
 def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
                            dt: float, km: int, *,
                            cfg: dict | None = None,
-                           nq: int = 1) -> list:
+                           nq: int = 1,
+                           remap_follows: bool = False) -> list:
     """``d_sw1`` (per k) -> BARRIER 1 (per k) -> ``d_sw2`` (per k).
 
     Returns per-face dicts carrying the averaged allflux stacks and the
@@ -108,7 +109,7 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
     ``state`` is read for the D winds; ``csw_outs`` supplies ``uc``/``vc``
     as updated in place by ``p_grad_c`` in the C-grid phase.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo, d_sw2_duo
     from legoesm.grids.fv3_native_gridstruct import (
         average_allflux_shared_edges,

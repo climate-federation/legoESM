@@ -39,15 +39,29 @@ checks that the same field in the two conventions differences to zero,
 and that a real half-globe phase error does not).  Read this column to
 claim agreement.
 
-CALIBRATION -- the oracle supplies its own noise floor
-------------------------------------------------------
-The ``oracle plain`` row of the distance table is the oracle differing
-from ITSELF under the only other configuration it ships, so it is the
-scale on which "close" means something.  An arm at or below that row is
-indistinguishable from the duo reference at that day.  Note the floor
-GROWS: by day 9 a baroclinic wave has decorrelated and duo-vs-plain
-reach 2.19 hPa against a 2.38 hPa signal, so a late-time RMSE measures
-phase divergence rather than fidelity.  Judge the early days.
+WHAT THE ``oracle plain`` ROW IS, AND IS NOT
+-------------------------------------------
+It is the oracle differing from ITSELF under the only other configuration
+it ships -- one deterministic alternate numerics, on the same model, the
+same resolution and the same vertical coordinate.  It is a useful SCALE
+BAR for reading the distance column.
+
+It is NOT a noise floor and NOT an uncertainty distribution, so "below
+the plain row" does NOT license a claim of statistical
+indistinguishability -- an arm of ours differs from duo in model,
+resolution, vertical coordinate AND numerics all at once, which is not
+commensurable with a numerics-only difference.  An earlier version of
+this file made that claim, and made it while the day-1 arithmetic
+contradicted it (plain 0.0196 vs our lat-lon 0.0315 -- 1.61x ABOVE, not
+below).  Report the hPa distances; do not convert them into a verdict
+the comparison cannot support.
+
+The plain-vs-duo separation also GROWS as the wave decorrelates, which
+makes any threshold scaled to it LESS discriminating exactly when it
+loosens.  Phase accuracy is part of fidelity for a deterministic
+benchmark, so a large late-time RMSE is a real disagreement, not an
+artefact to be explained away.  Judge early days because they are
+cleaner, not because late days do not count.
 
 Maps are drawn on each dataset's OWN longitude axis mapped into
 [0, 360), never by assuming a roll.
@@ -69,12 +83,18 @@ Usage:
                            [--json out.json]
 
 Exit status is 0 whenever the comparison itself ran; this is an
-instrument first.  ``--max-rms-ratio R`` turns it into a gate, which
-fails if ANY of these hold: no ``--ours`` arm was supplied (an empty
-comparison used to exit PASS), the gate day is not day 1 (it used to
-gate ``days[0]`` while advertising day 1), an arm is TRUNCATED
-(previously printed as a warning the gate ignored), or an arm's day-1
-amplitude exceeds R times the duo oracle's.
+instrument first.  ``--max-rmse-hpa X`` turns it into an oracle-fidelity
+gate on the ACTUAL distance ``ours - oracle``.  ``--max-rms-ratio R`` is
+an additional, weaker amplitude/blow-up check and is NOT sufficient on
+its own -- gating on amplitude alone passes ``ours = duo + 5000 Pa``,
+which is a 50 hPa mass bias.  Supplying only ``--max-rms-ratio`` is
+therefore an error.
+
+The gate fails if ANY of these hold: no ``--ours`` arm was supplied; the
+gate day is not day 1; an arm is TRUNCATED; an arm's day-1 RMSE exceeds
+X; or (when given) an arm's day-1 amplitude exceeds R times the duo
+oracle's.  Non-finite thresholds are rejected -- ``--max-rms-ratio nan``
+used to bypass the gate entirely because ``r > nan`` is always False.
 """
 from __future__ import annotations
 
@@ -191,6 +211,17 @@ def load_ours(path: str):
         raise ValueError(
             f"{path}: axes {(len(t), len(lat), len(lon))} do not match "
             f"p_s{ps.shape}")
+    # The oracle loader refuses to guess a calendar; do the same here
+    # rather than trusting a key NAMED times_days. An hourly vector
+    # 0,1,2,...,216 stored under that key would select hour 1 as "day 1".
+    if not np.all(np.isfinite(t)):
+        raise ValueError(f"{path}: times_days contains non-finite values")
+    if t.size > 1 and not np.all(np.diff(t) > 0):
+        raise ValueError(
+            f"{path}: times_days is not strictly increasing "
+            f"{t[:5]}...; refusing to index frames by time")
+    if float(t[0]) < 0.0:
+        raise ValueError(f"{path}: times_days starts at {t[0]}, expected >= 0")
     if not (5.0e4 < float(np.nanmedian(ps)) < 1.5e5):
         raise ValueError(
             f"{path}: median p_s = {np.nanmedian(ps):.4g}, which is not Pa. "
@@ -213,11 +244,12 @@ def require_same_grid(lat_a, lon_a, lat_b, lon_b, what: str,
         raise ValueError(
             f"{what}: grid size mismatch -- ours {len(lat_a)}x{len(lon_a)} "
             f"vs oracle {len(lat_b)}x{len(lon_b)}")
-    if not np.allclose(lat_a, lat_b, atol=tol):
+    if not np.allclose(lat_a, lat_b, rtol=0.0, atol=tol):
         raise ValueError(
             f"{what}: latitude axes differ (max |d| = "
             f"{np.abs(np.asarray(lat_a) - np.asarray(lat_b)).max():.3g} deg)")
-    if not np.allclose(np.sort(lon_a), np.sort(lon_b), atol=tol):
+    if not np.allclose(np.sort(lon_a), np.sort(lon_b), rtol=0.0,
+                       atol=tol):
         raise ValueError(
             f"{what}: longitude axes differ as sets after mapping to "
             f"[0,360) -- not a convention difference, a different grid")
@@ -235,6 +267,16 @@ def ps_rmse(ours_ps, ours_lon, oracle_ps, oracle_lon, lat) -> dict:
     Longitudes are aligned by sorting each side's own axis into [0, 360) --
     no roll is assumed anywhere.
     """
+    ours_lon = np.asarray(ours_lon, dtype=np.float64) % 360.0
+    oracle_lon = np.asarray(oracle_lon, dtype=np.float64) % 360.0
+    for name, v in (("ours", ours_lon), ("oracle", oracle_lon)):
+        if len(np.unique(v)) != len(v):
+            raise ValueError(f"{name} longitude axis has duplicates")
+    if not np.allclose(np.sort(ours_lon), np.sort(oracle_lon),
+                       rtol=0.0, atol=1e-6):
+        raise ValueError(
+            "ps_rmse: longitude axes are not the same physical centres; "
+            "sorting cannot align two different grids")
     oa = np.argsort(oracle_lon)
     ma = np.argsort(ours_lon)
     # Index the LAST axis. Fields arrive as (..., nlat, nlon); using axis 1
@@ -245,8 +287,12 @@ def ps_rmse(ours_ps, ours_lon, oracle_ps, oracle_lon, lat) -> dict:
             f"latitude axis {diff.shape[-2]} does not match lat of "
             f"length {len(lat)}")
     w = area_weights(lat, diff.shape[-1])
-    rmse = float(np.sqrt((w * diff ** 2).sum()))
-    bias = float((w * diff).sum())
+    # w sums to 1 over ONE frame, so a stack of nf frames must be divided
+    # by nf or the "rms" grows as sqrt(nf). Right for the 1-frame call
+    # path, wrong as advertised -- so make the advertised shape correct.
+    nf = int(np.prod(diff.shape[:-2])) or 1
+    rmse = float(np.sqrt((w * diff ** 2).sum() / nf))
+    bias = float((w * diff).sum() / nf)
     return {"rmse_hPa": rmse / 100.0,
             "bias_hPa": bias / 100.0,
             "max_abs_diff_hPa": float(np.abs(diff).max()) / 100.0}
@@ -256,6 +302,11 @@ def at_day(times: np.ndarray, day: float, tol: float = 0.02):
     """Index of the frame at ``day``.  Fails loudly rather than snapping to
     a far-away frame -- a silent nearest-frame match is how a day-0/day-1
     lens error gets reported as physics."""
+    times = np.asarray(times, dtype=np.float64)
+    if not np.all(np.isfinite(times)):
+        raise ValueError("time axis contains non-finite values; "
+                         "abs(nan - day) > tol is False, so a NaN would "
+                         "silently satisfy the frame check")
     i = int(np.argmin(np.abs(times - day)))
     if abs(float(times[i]) - day) > tol:
         raise ValueError(
@@ -422,9 +473,17 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="map PNG")
     ap.add_argument("--out-curves", default=None, help="growth-curve PNG")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--max-rmse-hpa", type=float, default=None,
+                    help="ORACLE-FIDELITY GATE: exit 1 if any arm's day-1 "
+                         "area-weighted RMS of (ours - oracle duo) exceeds "
+                         "this many hPa. This is the gate that actually "
+                         "compares against the oracle.")
     ap.add_argument("--max-rms-ratio", type=float, default=None,
-                    help="gate: exit 1 if any arm's day-1 rms' exceeds this "
-                         "multiple of the duo oracle's")
+                    help="additional amplitude/blow-up check: exit 1 if any "
+                         "arm's day-1 rms' exceeds this multiple of the duo "
+                         "oracle's. NOT sufficient alone -- amplitude-only "
+                         "gating passes ours = duo + 5000 Pa -- so it may "
+                         "only be used together with --max-rmse-hpa.")
     args = ap.parse_args(argv)
 
     if len(args.label) not in (0, len(args.ours)):
@@ -461,12 +520,13 @@ def main(argv=None):
     print("DISTANCE to the duo oracle: area-weighted RMS of (ours - oracle), "
           "hPa. A large amplitude ratio proves disagreement; only THIS "
           "proves agreement.")
-    print("  READ THE 'oracle plain' ROW AS THE NOISE FLOOR: it is the "
-          "oracle differing from ITSELF under its only other shipped "
-          "configuration, so any arm at or below it is indistinguishable "
-          "from the duo reference at that day. By day 9 a baroclinic wave "
-          "has decorrelated and the floor approaches the signal, so a late "
-          "RMSE measures phase divergence, not fidelity -- judge early days.")
+    print("  The 'oracle plain' row is a SCALE BAR, not a noise floor: the "
+          "oracle vs ITSELF under one alternate numerics, same model, same "
+          "resolution, same vertical coordinate. An arm of ours differs in "
+          "model, resolution, vertical coordinate AND numerics, so being "
+          "below that row does NOT make it indistinguishable from duo. The "
+          "separation also grows as the wave decorrelates, so a threshold "
+          "scaled to it loosens exactly when it should not.")
     print(hdr)
     print("-" * len(hdr))
     for key, per_day in curves.items():
@@ -507,6 +567,8 @@ def main(argv=None):
                 "curves": {_disp(k): {str(d): v for d, v in per.items()}
                            for k, per in curves.items()},
                 "gate_day_amplitude_ratio_vs_duo": ratios,
+                "max_rmse_hpa": args.max_rmse_hpa,
+                "max_rms_ratio": args.max_rms_ratio,
             }, fh, indent=2)
         print("wrote", args.json)
     if args.out:
@@ -524,13 +586,22 @@ def main(argv=None):
         plot_curves({_disp(k): v for k, v in curves.items()}, days,
                     args.out_curves)
 
-    if args.max_rms_ratio is not None:
-        # A gate that can PASS without comparing anything is worse than no
-        # gate. Three ways this used to happen: no --ours at all (empty
-        # `bad`), a TRUNCATED arm that printed a warning and passed, and
-        # "day 1" silently becoming days[0] after the common-window
-        # intersection dropped day 1.
+    if args.max_rms_ratio is not None and args.max_rmse_hpa is None:
+        print("\nJW_DUO_GATE: FAIL\n  - --max-rms-ratio was given without "
+              "--max-rmse-hpa. Amplitude-only gating passes "
+              "ours = duo + 5000 Pa (ratio 1.0, RMSE 50 hPa), so it cannot "
+              "stand alone as an oracle-fidelity gate.")
+        return 1
+
+    if args.max_rmse_hpa is not None:
         fails = []
+        # A non-finite threshold silently disables every comparison,
+        # because `x > nan` is always False. Reject it outright.
+        for nm, v in (("--max-rmse-hpa", args.max_rmse_hpa),
+                      ("--max-rms-ratio", args.max_rms_ratio)):
+            if v is not None and not np.isfinite(v):
+                fails.append(f"{nm}={v!r} is not finite; that would disable "
+                             f"the comparison rather than tighten it")
         if not arms:
             fails.append("no --ours arm was supplied, so nothing was scored")
         if gate_day is None or abs(gate_day - 1.0) > 1e-9:
@@ -543,21 +614,33 @@ def main(argv=None):
                 fails.append(
                     f"{_disp(key)!r} is TRUNCATED (ended at "
                     f"{spans[key][1]:g} d, reference window {ref_hi:g} d)")
-        for key, per_day in curves.items():
-            if key[0] != "ours":
-                continue
-            r = per_day[gate_day]["rms_prime_hPa"] / \
-                curves[("oracle", "duo")][gate_day]["rms_prime_hPa"]
-            if r > args.max_rms_ratio:
-                fails.append(f"{_disp(key)!r} amplitude {r:.1f}x > "
-                             f"{args.max_rms_ratio:g}x")
+        if gate_day is not None and np.isfinite(args.max_rmse_hpa):
+            for key, per_day in curves.items():
+                if key[0] != "ours":
+                    continue
+                st = per_day[gate_day]
+                # THE oracle-fidelity criterion: the actual distance.
+                if st["rmse_hPa"] > args.max_rmse_hpa:
+                    fails.append(
+                        f"{_disp(key)!r} day-{gate_day:g} RMSE vs duo = "
+                        f"{st['rmse_hPa']:.4f} hPa > {args.max_rmse_hpa:g} "
+                        f"(bias {st['bias_hPa']:+.4f}, max|d| "
+                        f"{st['max_abs_diff_hPa']:.4f})")
+                if (args.max_rms_ratio is not None
+                        and np.isfinite(args.max_rms_ratio)):
+                    r = (st["rms_prime_hPa"]
+                         / curves[("oracle", "duo")][gate_day]["rms_prime_hPa"])
+                    if r > args.max_rms_ratio:
+                        fails.append(f"{_disp(key)!r} amplitude {r:.1f}x > "
+                                     f"{args.max_rms_ratio:g}x")
         if fails:
             print("\nJW_DUO_GATE: FAIL")
             for f in fails:
                 print(f"  - {f}")
             return 1
-        print(f"\nJW_DUO_GATE: PASS (all arms <= {args.max_rms_ratio:g}x "
-              f"amplitude at day {gate_day:g}, none truncated)")
+        print(f"\nJW_DUO_GATE: PASS (every arm within "
+              f"{args.max_rmse_hpa:g} hPa RMSE of the duo oracle at day "
+              f"{gate_day:g}, none truncated)")
     return 0
 
 

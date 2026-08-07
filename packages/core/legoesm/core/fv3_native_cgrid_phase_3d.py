@@ -53,7 +53,8 @@ CSW_OUT_2D = ("delpc", "ptc", "uc", "vc", "ua", "va", "ut", "vt", "divg_d")
 
 
 def csw_phase_3d(ctx: dict, state: list, dt2: float, km: int, *,
-                 nord: int = 2, duogrid: bool = True) -> list:
+                 nord: int = 2, duogrid: bool = True,
+                 remap_follows: bool = False) -> list:
     """Per-level ``c_sw`` on all six faces; returns 3-D C-grid outputs.
 
     ``dt2`` is the half step (``dyn_core.F90`` passes ``dt2`` to c_sw).
@@ -62,7 +63,7 @@ def csw_phase_3d(ctx: dict, state: list, dt2: float, km: int, *,
     (``dyn_core.F90:652`` gates it on ``nord > 0``; :706 is the
     ``flagstruct%regional`` branch and never runs on the duo lane).
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_sw_core import c_sw
 
     n, ng, bd = ctx["n"], ctx["ng"], ctx["bd"]
@@ -106,7 +107,8 @@ def _out_like(name: str) -> str:
 def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
                             dt2: float, ptop: float, akap: float,
                             cp_air: float, a2b_ord: int = 4,
-                            hydrostatic: bool = True) -> list:
+                            hydrostatic: bool = True,
+                            remap_follows: bool = False) -> list:
     """C-grid ``geopk`` then ``p_grad_c``, once per face over the column.
 
     ``dyn_core.F90:533`` calls geopk with ``CG = .true.``; ``:629`` then
@@ -121,7 +123,7 @@ def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
     is the shallow-water degenerate case and NOT what a 3-D hydrostatic
     column wants.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     if not hydrostatic:
         raise NotImplementedError(
             "cgrid_pressure_phase_3d: only the hydrostatic branch is "

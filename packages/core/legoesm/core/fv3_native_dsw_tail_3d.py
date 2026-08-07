@@ -47,13 +47,14 @@ DUO_TAIL_CFG = {
 
 def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                       dsw_outs: list, dt: float, km: int, *,
-                      cfg: dict | None = None) -> list:
+                      cfg: dict | None = None,
+                      remap_follows: bool = False) -> list:
     """``d_sw3`` -> BARRIER 2 -> ``d_sw4/5/6``, per level, all six faces.
 
     Returns per-face dicts with the updated D winds ``u``/``v`` at every
     level plus the ``d_sw5`` diagnostics later stages read.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_duo_sw_core import (
         d_sw3_duo, d_sw4_duo, d_sw5_duo, d_sw6_duo,
     )
@@ -149,7 +150,9 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
 def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
                             km: int, *, dt: float, ptop: float, akap: float,
                             cp_air: float, a2b_ord: int = 4,
-                            d_ext: float = 0.0) -> list:
+                            d_ext: float = 0.0,
+                            remap_step: bool = False,
+                            remap_follows: bool = False) -> list:
     """D-grid ``geopk`` (``:1401``) then ``one_grad_p`` (``:1531``).
 
     ``one_grad_p`` mutates ``u``, ``v``, AND ``pk``/``gz`` in place --
@@ -160,8 +163,19 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
     (``D_EXT = 0.000000000000000E+000``). At ``d_ext = 0`` the oracle sets
     ``divg2(:,:) = 0.`` and skips the ``a2b_ord2``/mass-weighted branch
     entirely, so passing zero is faithful, not a simplification.
+
+    ``remap_step`` is ``dyn_core.F90:344-348``'s flag (true on
+    ``it == n_split``).  At ``:1511-1519`` the oracle copies
+    ``pk(i,j,k) = pkc(i,j,k)`` over the COMPUTE WINDOW **before**
+    ``one_grad_p`` at ``:1531`` overwrites ``pkc`` with B-grid corner
+    values (``a2b_ord4`` is called with ``replace=.true.``).  That
+    saved ``pk`` is the array ``Lagrangian_to_Eulerian`` then reads, so
+    this snapshot is not a convenience: taking ``pk`` after
+    ``one_grad_p`` would feed the remap a corner-staggered field.  It is
+    returned as ``pk_remap`` and is present ONLY when ``remap_step`` is
+    true, so a caller cannot silently pick up a stale one.
     """
-    require_no_remap_needed(km)
+    require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_pgrad import geopk, one_grad_p
 
     bd = ctx["bd"]
@@ -176,6 +190,9 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
                     cg=False, duogrid=True, computehalo=False,
                     npx=bd.ie + 1, npy=bd.je + 1, a2b_ord=a2b_ord,
                     bounded_domain=False, sw_dynamics=False)
+        if remap_step:
+            # dyn_core.F90:1511-1519, taken BEFORE :1531 one_grad_p.
+            got["pk_remap"] = np.array(got["pk"], copy=True)
         divg2 = np.zeros((n + 2 * ng + 1, n + 2 * ng + 1), dtype=np.float64)
         one_grad_p(tail_outs[t]["u"], tail_outs[t]["v"],
                    got["pk"], got["gz"], divg2, dsw_outs[t]["delp"],
