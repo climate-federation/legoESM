@@ -258,11 +258,24 @@ def test_tke_mxl_choice_argparse_and_builder_agree():
     for v in sorted(advertised):
         cfg = r.orca1_zdftke_config(mxl_choice=v)         # must not raise
         assert cfg.tke_mxl_choice == v
-    # and the builder must still REJECT anything not advertised (dispatch
-    # hardening -- a silently-accepted unknown would run different physics).
-    for bad in sorted({0, 1, 5, 9} - advertised):
-        with pytest.raises(ValueError, match="mxl_choice"):
-            r.orca1_zdftke_config(mxl_choice=bad)
+    # SET EQUALITY, not just one direction (codex 2026-08-07 #4: probing a
+    # fixed {0,1,5,9} would pass if the builder newly accepted 6, or if argparse
+    # shrank to [4] while the builder still took 2/3).  Sweep a range that
+    # BRACKETS the advertised set and require accepted == advertised exactly.
+    accepted = set()
+    for v in range(-2, 10):
+        try:
+            r.orca1_zdftke_config(mxl_choice=v)
+        except ValueError:
+            continue
+        accepted.add(v)
+    assert accepted == advertised, (
+        f"builder accepts {sorted(accepted)} but argparse advertises "
+        f"{sorted(advertised)} -- the two layers have diverged")
+    # non-integers must NOT be silently truncated: int(4.9) == 4 would sneak
+    # through and run choice-4 physics under a nonsense value (codex #5).
+    with pytest.raises(ValueError, match="mxl_choice"):
+        r.orca1_zdftke_config(mxl_choice=4.9)
 
 
 def test_builder_tke_mxl_choice_threads():

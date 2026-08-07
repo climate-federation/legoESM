@@ -815,7 +815,8 @@ def compute_mixing_lengths(
         l_eps = l_k
     else:
         raise ValueError(
-            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2."
+            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2 "
+            f"(Veros), 3 (NEMO nn_mxl=3) or 4 (NEMO nn_mxl=2)."
         )
     return l_k, l_eps
 

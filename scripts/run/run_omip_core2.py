@@ -400,7 +400,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                           1/ri_cri, ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/9
                           (zdftke.F90:772,399: Pr = clamp(Ri/ri_cri, 1, 10) ==
                           clamp(4.5·Ri, 1, 10) — exactly _prandtl_number's form)
-      nn_mxl   = 2     -> tke_mxl_choice=2 (closest construction; see gaps)
+      nn_mxl   = 2     -> tke_mxl_choice=4 (NOT 2: the choice numbering is
+                          Veros-derived, so choice 2 is Veros Bougeault-
+                          Lacarrere and choice 4 is NEMO nn_mxl=2)
       ln_lc    = T     -> lc=True
       rn_lc    = 0.25  -> lc_coeff       (namelist_cfg override of 0.15)
       nn_etau  = 1     -> etau_mode="below_ml"
@@ -506,15 +508,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # k_profiles path already threads dz_ref/jacobian/taum so choice 3 is live.
     # 4 selects NEMO nn_mxl=2 — the value ORCA1's namelist_cfg ACTUALLY sets
     # (`nn_mxl = 2`, verified in RUN_GATEWAY/namelist_cfg).  Choices 3 and 4
-    # share the lup/ldown sweeps and the same eddy-coefficient length
-    # l_k = min(lup,ldn); they differ ONLY in the dissipation length
+    # share the lup/ldown sweeps and the same eddy-coefficient LENGTH
+    # l_k = min(lup,ldn); they differ only in the dissipation length
     # (tke.py:764-785): choice 3 uses l_eps = sqrt(lup*ldn), choice 4 uses
     # l_eps = l_k = min(lup,ldn).  Since min <= sqrt(product), choice 4
-    # dissipates MORE (eps = c_eps*e^{3/2}/l_eps), so it retains stratification
-    # that choice 3 mixes away.  Until 2026-08-06 argparse accepted 4 while this
+    # dissipates MORE (eps = c_eps*e^{3/2}/l_eps).
+    # NOTE (codex 2026-08-07, correcting an earlier claim of mine): the
+    # DIFFUSIVITY IS **NOT** IDENTICAL between the two.  Only the LENGTH l_k
+    # is shared; the shorter l_eps raises the dissipation rate, which lowers
+    # the updated TKE, and K is recomputed from that updated TKE
+    # (tke.py:1007, 2114, 2153).  So this is a genuine perturbation of K,
+    # not a length-only relabelling.  Until 2026-08-06 argparse accepted 4 while this
     # builder raised on it, so `--tke-mxl-choice 4` crashed the run.
     if mxl_choice is not None:
-        if int(mxl_choice) not in (2, 3, 4):
+        # int(4.9) would silently truncate to 4; argparse blocks that via
+        # type=int but a PROGRAMMATIC caller does not (codex 2026-08-07 #5).
+        if int(mxl_choice) != mxl_choice or int(mxl_choice) not in (2, 3, 4):
             raise ValueError(
                 f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; "
                 "expected 2 (Veros Bougeault-Lacarrere), 3 (NEMO nn_mxl=3 "
