@@ -268,15 +268,28 @@ def nemo_bottom_tke_dirichlet(
     with ``r_bot`` the NEMO non-linear/log-layer bottom-drag rate at the
     TRACER point (``+Cd·|U|``, legoESM's positive convention — see
     :func:`legoesm.ocean.dynamics.ocean_tendency_common.nemo_effective_bottom_drag_r`;
-    single-owner doctrine, no re-derived drag coefficient) and ``u_bot``/
-    ``v_bot`` the bottom-cell T-point velocity components. ``rn_emin`` is
+    single-owner doctrine, no re-derived drag coefficient). ``rn_emin`` is
     ``cfg.tke_background`` (legoESM's interior TKE floor — same value as
     NEMO's namelist default 1e-6 m²/s²).
+
+    CAUTION — ``u_bot``/``v_bot`` are NOT the plain T-point average that
+    ``nemo_effective_bottom_drag_r`` takes. zdftke uses its own velocity
+    convention: the WET-ONLY SUM ``zmsku*( uu(ji) + uu(ji-1) )`` with
+    ``zmsku = 2 - umask(ji-1)*umask(ji)`` and NO ``0.5``
+    (zdftke.F90:282-287; contrast zdfgls.F90:196-197, which writes the same
+    mask expression WITH the ``0.5``). That missing ``0.5`` cancels the one
+    inside the ``0.001875`` prefactor (``= (rn_ebb0/rho0)*0.5``,
+    zdftke.F90:284), leaving ``en_bot = (rn_ebb0/rho0)*Cd|U|^2``, i.e.
+    proportional to ``u_*^2`` exactly like the surface BC at :266 — so the
+    factor 2 is structural, not a NEMO slip. The caller
+    (``_tke_bottom_dirichlet``) masks the faces explicitly and supplies that
+    form; do not pass a plain average here.
 
     Parameters
     ----------
     r_bottom_drag : (...,) — bottom-drag rate at T-points [m/s], >= 0.
-    u_bot, v_bot : (...,) — T-point bottom-cell velocity components [m/s].
+    u_bot, v_bot : (...,) — ``zmsk``-weighted wet-only velocity SUM at the
+        bottom T-point [m/s] (see CAUTION above), not the plain average.
     cfg : TKEConfig (uses ``tke_background`` as the ``rn_emin`` floor).
 
     Returns

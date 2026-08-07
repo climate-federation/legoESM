@@ -4792,7 +4792,7 @@ class LatLonCGridOceanModel:
             )
         return (entry_state.T_before.data, entry_state.S_before.data)
 
-    def _tke_bottom_dirichlet(self, cc_state):
+    def _tke_bottom_dirichlet(self, state):
         """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
 
         Static Python predicate: returns the Dirichlet TKE value when
@@ -4803,13 +4803,13 @@ class LatLonCGridOceanModel:
         machinery as ``zdf_drag_in_matrix``
         (:func:`nemo_bottom_drag_rate_faces`'s T-point building blocks,
         :func:`nemo_effective_bottom_drag_r`) — single-owner doctrine, no
-        re-derived drag coefficient. ``cc_state`` normally already carries
-        CELL-CENTRED ``u``/``v`` (the caller's ``cc_state``); under
-        ``tke_shear_production="nemo_face_native"`` the caller instead
-        passes the RAW (uncollapsed) face state (so ``_vmix_K_profiles`` can
-        reconstruct zdfsh2.F90's face-native shear) — this helper collapses
-        u/v to the T-point itself in that case, exactly like every other
-        caller of ``_vmix_K_profiles`` already does before this stage.
+        re-derived drag coefficient.
+
+        Takes the RAW face-staggered ``state`` (never the caller's collapsed
+        ``cc_state``): zdftke's wet-only face masking cannot be reconstructed
+        once u/v have been averaged to the T-point. The plain T-point average
+        the drag rate needs is re-formed here with the SAME expression the
+        caller uses, so the drag path stays bit-identical.
         """
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
@@ -4837,10 +4837,21 @@ class LatLonCGridOceanModel:
         h_k = self.z_coord.h_partial
         _bl = jnp.maximum(self.z_coord.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_cc, v_cc = cc_state.u.data, cc_state.v.data
-        if u_cc.shape[1] != h_k.shape[1]:
-            u_cc = 0.5 * (u_cc[:, :-1, :] + u_cc[:, 1:, :])
-            v_cc = 0.5 * (v_cc[:-1, :, :] + v_cc[1:, :, :])
+        u_f, v_f = state.u.data, state.v.data
+        if (u_f.shape[1] != h_k.shape[1] + 1
+                or v_f.shape[0] != h_k.shape[0] + 1):
+            raise ValueError(
+                "_tke_bottom_dirichlet needs the RAW face-staggered state "
+                "(u (n_lat, n_lon+1, nlev), v (n_lat+1, n_lon, nlev)) — the "
+                "wet-only face masking below cannot be reconstructed from an "
+                f"already-collapsed T-point field. Got u{u_f.shape} "
+                f"v{v_f.shape} against T-shape {h_k.shape}.")
+        # zdfdrg.F90:174-181 forms zut = uu(ji)+uu(ji-1) and then
+        # SQRT(0.25*(zut^2+zvt^2)+ke0) — i.e. the PLAIN T-point average, with
+        # no wet-only masking of its own (NEMO's uu is already umask'ed at
+        # every level, dynzdf.F90:121-150).
+        u_cc = 0.5 * (u_f[:, :-1, :] + u_f[:, 1:, :])
+        v_cc = 0.5 * (v_f[:-1, :, :] + v_f[1:, :, :])
         u_bot = jnp.take_along_axis(u_cc, _bl_idx, axis=-1)[..., 0]
         v_bot = jnp.take_along_axis(v_cc, _bl_idx, axis=-1)[..., 0]
         h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
@@ -4856,7 +4867,49 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.physics.vertical_mixing.tke import (
             nemo_bottom_tke_dirichlet,
         )
-        return nemo_bottom_tke_dirichlet(r_t, u_bot, v_bot, vmix.tke)
+        # zdftke's velocity convention is NOT zdfdrg's.  The drag rate above
+        # takes the plain T-point average; the TKE bottom BC instead uses the
+        # WET-ONLY SUM  zmsku*( uu(ji) + uu(ji-1) )  with
+        # zmsku = 2 - umask(ji-1,jj,mbkt)*umask(ji,jj,mbkt)  and NO 0.5
+        # (zdftke.F90:282-287; contrast zdfgls.F90:196-197, which writes the
+        # same mask expression WITH the 0.5).  The missing 0.5 is structural,
+        # not a NEMO slip: it cancels the 0.5 already inside the 0.001875
+        # prefactor (= (rn_ebb0/rho0)*0.5, zdftke.F90:284), leaving
+        # en_bot = (rn_ebb0/rho0)*Cd|U|^2 ∝ u_*^2 — the same form as the
+        # surface BC en(1) = zbbrau*taum (:266).
+        #
+        # The faces are masked EXPLICITLY here.  NEMO's uu is umask'ed at
+        # every level (dynzdf.F90:121-150) so its bare sum is already
+        # wet-only; legoESM's prognostic u carries only the 2-D column mask,
+        # and the barotropic correction adds a uniform-in-k increment, so a
+        # sub-seafloor face holds a small NON-ZERO velocity.  Reusing the
+        # canonical `compute_face_masks_3d` (rather than re-deriving the
+        # geometry) also inherits its seam-wall and meridional-periodicity
+        # exclusions, which a hand-rolled tmask product would silently drop.
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d,
+        )
+        um3, vm3 = compute_face_masks_3d(self.z_coord.is_active, self.grid)
+        um3 = um3.astype(h_k.dtype)
+        vm3 = vm3.astype(h_k.dtype)
+
+        def _at_bottom(a):
+            return jnp.take_along_axis(a, _bl_idx, axis=-1)[..., 0]
+
+        # u-face i is the WEST face of T-cell i, face i+1 the EAST face
+        # (latlon_cgrid_operators.py:3573) — NEMO's umask(ji-1) / umask(ji).
+        m_uw, m_ue = _at_bottom(um3[:, :-1, :]), _at_bottom(um3[:, 1:, :])
+        m_vs, m_vn = _at_bottom(vm3[:-1, :, :]), _at_bottom(vm3[1:, :, :])
+        u_sum = (2.0 - m_uw * m_ue) * (
+            _at_bottom(u_f[:, :-1, :]) * m_uw + _at_bottom(u_f[:, 1:, :]) * m_ue)
+        v_sum = (2.0 - m_vs * m_vn) * (
+            _at_bottom(v_f[:-1, :, :]) * m_vs + _at_bottom(v_f[1:, :, :]) * m_vn)
+        # NEMO closes the line with  * ssmask(ji,jj)  (zdftke.F90:288): a dry
+        # column gets 0, not rn_emin.  `_bl` is clamped to >= 0 there, so
+        # without this the reduction's "centre cell wet at its own mbkt"
+        # premise would not hold on land either.
+        ssmask = _at_bottom(self.z_coord.is_active.astype(h_k.dtype))
+        return ssmask * nemo_bottom_tke_dirichlet(r_t, u_sum, v_sum, vmix.tke)
 
     def _tke_bottom_level(self):
         """Per-column T-point bottom-cell index for the T15-exact bottom TKE
@@ -5617,7 +5670,7 @@ class LatLonCGridOceanModel:
                     lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
-                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(cc_state),
+                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(state),
                     tke_bottom_level=self._tke_bottom_level(),
                     n2_tracers_before=n2_tracers_before,
                 )

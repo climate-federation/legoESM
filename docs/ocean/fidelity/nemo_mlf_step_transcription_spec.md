@@ -378,3 +378,145 @@ exonerated without any transcription work.
 **If the BC block is clean, the campaign's own alternative hypothesis stands**: no single row owns
 the deficit; it is emergent from accumulated 1e-4..1e-6 across many rows, and the only path is
 W4 — grind every DEBT row to its class bar and re-test.
+
+## zdftke bottom BC: one REAL transcription bug found — and it is INERT in DINO (2026-08-07)
+
+Follow-up to the escalation above. The one un-audited zdftke stage (surface/bottom
+BCs) was walked line-by-line. Result: **a genuine transcription defect, plus a
+retraction of the attribution that led to it.**
+
+### The bug (CONFIRMED — code, both sides)
+
+`zdftke.F90:282-287` does NOT use the plain T-point average that the drag rate
+uses. It uses the **wet-only SUM**
+
+```fortran
+zmsku = ( 2. - umask(ji-1,jj,mbkt) * umask(ji,jj,mbkt) )
+zebot = - 0.001875 * rCdU_bot * SQRT( (zmsku*(uu(ji)+uu(ji-1)))**2 + ... )
+```
+
+with **no `0.5`** — contrast `zdfgls.F90:203`, which writes the same mask
+expression *with* the `0.5`, and `zdfdrg.F90:174-181`, which forms
+`zut = uu(ji)+uu(ji-1)` and then divides it back out via `SQRT(0.25*(zut²+zvt²))`.
+So zdftke's bottom velocity is **twice the wet-only average**.
+
+legoESM passed the plain average → **2× low in the flat interior, 4× low at a
+bathymetry step** (20.7% of the 9920 wet columns, measured).
+
+The missing `0.5` is **structural, not a NEMO slip**: it cancels the `0.5`
+already inside the `0.001875` prefactor (`= (rn_ebb0/rho0)*0.5`,
+zdftke.F90:284), leaving `en_bot = (rn_ebb0/rho0)·Cd|U|²  ∝ u_*²` — the same
+form as the surface BC `en(1) = zbbrau*taum` (:266). (Surfaced by the
+adversarial review; it is the argument that closes the "maybe NEMO forgot the
+0.5" objection, which the code-diff alone does not.)
+
+Fixed at `ocean_model_latlon_cgrid.py::_tke_bottom_dirichlet`, which now takes
+the **RAW face-staggered state** and masks the faces with the canonical
+`compute_face_masks_3d` before summing (raising, never silently degrading, if
+handed an already-collapsed T-point field). NEMO's `* ssmask` (:288) is now
+ported too. Tests: `TestNemoBottomTkeVelocityConvention` — three cases against
+a numpy re-derivation of the F90 line on a staircase bathymetry, **verified
+non-vacuous** by reverting the production line and confirming both numeric
+tests go red.
+
+**Review-caught defect in my first attempt (worth recording).** I initially
+derived the masked sum as `2*zmsku*<u>_plain`, justified by "a dry face carries
+u == 0 exactly". That is true in NEMO (`dynzdf.F90:121-150` umasks `puu` at
+every level) and **FALSE in legoESM**: the prognostic `u` carries only the 2-D
+column mask, and the barotropic correction adds a uniform-in-k increment, so
+sub-seafloor faces hold a small non-zero velocity (measured: 40/648 columns,
+max |u| 1.48e-2 m/s, zero vertical spread — the uniform add is the source).
+The shortcut would have been exact in 570/648 columns and *worse than the
+pre-fix code* in the 78 step columns it was meant to fix. It also hand-rolled
+geometry that `compute_face_masks_3d` already owns, silently dropping that
+function's seam-wall and meridional-periodicity exclusions — the
+port-the-formula-but-not-its-exclusions failure mode.
+
+### RETRACTION — this bug does NOT own the dist=0 residual
+
+The walk reported the plain average as "a large, plausible driver of the
+concentrated dist=0 corr degradation (0.887-0.896)". **That is refuted.**
+
+Index-convention-free check (`_nemo_zebot_floor.py`, evaluates NEMO's own
+`zebot` from its dumped `rCdU_bot` and restart `ub`/`vb`, so no dump-level
+indexing enters):
+
+```
+rCdU_bot            min -1.1397e-04   max -5.0000e-05
+zmsk-weighted |U|   max  3.0633e-01   mean 1.1879e-02
+zebot               max  5.2233e-08     vs rn_emin = 1.0e-06
+FLOOR BINDS for 1.0000 of 9920 wet columns   (headroom 19.1x)
+```
+
+NEMO's bottom TKE Dirichlet is **floor-bound in every wet column with 19×
+headroom**. legoESM's is likewise uniformly `1e-06` (instrumented through the
+production path: `_nemo_bottom_wet_only_doubling` fires twice, `zmsku ∈ {1,2}`
+with 20.7% doubled, Dirichlet min=max=1e-06). A 4× amplitude error is still 5×
+under the floor. Re-running `zdftke_bottom_bc_isolate.py` with the fix
+reproduces the pre-fix numbers to 4 decimals (dist=0 corr 0.8872/0.8956) —
+as it must.
+
+**⇒ the bottom TKE BC row was already AT BAR by construction, and is
+climate-inert in DINO.** The fix ships because it is faithful and matters for
+any card with stronger bottom flow, not because it moves this campaign.
+
+### Where the dist=0 residual actually lives — FOUND (2026-08-07)
+
+**The `nn_mxl=3` ldown (bottom-up) mixing-length sweep owns it. CONFIRMED.**
+Same root cause class as the review defect above: *legoESM does not zero below
+the seafloor where NEMO does.*
+
+Discriminator at dist=0 (n=9920, fp64, `LEGOESM_NEMO_E3T=both`, recipe
+`nemo_dino_kamm_mlf`, all dumps registered in `time_levels.py`):
+
+| quantity @dist=0 | corr | ratio | verdict |
+|---|---|---|---|
+| `en` vs `tke_dump_en.bin` | 0.99950 | 1.0000 | input clean |
+| `rn2` vs `tke_dump_rn2.bin` | 1.00000 | 1.0000 | input clean |
+| **`zmxlm` vs `tke_dump_zmxlm.bin`** | **0.8743** | **1.0763** | **owner** |
+| `zmxld` | 0.9841 | 1.0333 | ≈ √1.0763 |
+| avt / avm | 0.8872 / 0.8956 | 1.0743 / 1.0764 | tracks `zmxlm` exactly |
+
+`l_eps = √(lup·ldn)` being off by exactly the square root of `l_k = min(lup,ldn)`
+says ONE sweep is long and the other is right.
+
+Mechanism, with the oracle's lines. `zdftke.F90:469`
+`en = MAX(en, rn_emin) * wmask` ⇒ **`en == 0` at every dry sub-seafloor
+w-point**; `:651` `zmxlm = MAX(rmxl_min, SQRT(2·en/zrn2))` has no `wmask`, so
+dry rows sit at exactly `rmxl_min = 0.01 m`; the CASE-3 ldown sweep
+(`:696-699`) then runs *through* them, giving at each column's deepest wet
+interface `ldn(mbkt) = MIN(rmxl_min + e3t(mbkt+1), l_int(mbkt))`. That
+prediction reproduces NEMO's dumped `zmxlm@dist0` with `rel_med = 0.0`
+(99.01% of columns within rtol 1e-6).
+
+legoESM computes `l_int` from the **carried** `e`, which below the seafloor is
+`tke_background = 1.0e-6`, **not 0** (measured: legoESM `e@dist=-2` = 1.0e-06,
+NEMO `en@dist=-2` = 0.0 exactly). With `N2 = 0` there, `l_int ≈ 1414 m`, so
+each dry row re-widens the ldown carry (measured `l_k` at sub-seafloor rows:
+506 m / 634 m vs NEMO's 0.01 m) and the bottom limitation is destroyed before
+it reaches the seafloor. Structural root: `compute_mixing_lengths`
+(`tke.py:632-642`) takes **no wet mask** — it cannot know where the seafloor is.
+
+The bottom limit binds in **390/9920 = 3.93%** of columns; on that subset
+legoESM's `zmxlm` ratio is **2.94** with corr **0.024** (uncorrelated), on the
+other 9530 it is **0.999969**. `0.0393 × 1.94 = 0.076` — those 390 columns are
+the ENTIRE 1.0763 dist=0 ratio, which is essentially the whole `zdftke
+composite` gate row (1.0708).
+
+Projection (correcting `zmxlm` at dist=0 only, everything else byte-identical;
+a LOWER bound, since dist=1/2 stay uncorrected):
+
+| row | as-is | projected |
+|---|---|---|
+| avt @dist=0 | corr 0.8872, ratio 1.0743 | corr 0.9897, ratio 1.0012 |
+| avm @dist=0 | corr 0.8956, ratio 1.0764 | corr 0.9980, ratio 1.0032 |
+
+Fix (not yet written — needs its own adversarial review): force `l_int` (or
+`e`) to `cfg.mxl_min` on dry w-interfaces before both sweeps, which means
+plumbing a wet mask into the shared `compute_mixing_lengths`.
+
+Separate, lower-leverage, and MASKED by the above once fixed (record as DEBT,
+PLAUSIBLE): `zdftke.F90:650` floors `rn2` at `rsmall = 0.5·EPSILON(1_wp) =
+1.11e-16` (NEMO built with promoted reals — reconstruction matches 96.05% in
+double vs 17.66% in single); legoESM uses `max(N2, 1.0e-12)` (`tke.py:691`), a
+1e4 difference affecting the 3.79% of dist=0 cells with `rn2 < 1e-12`.
