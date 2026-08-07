@@ -2554,3 +2554,47 @@ in some of these traces (querying the wrong column reads as "no collectives");
 and nsys sets `QUADD_INJECTION_PROXY`, which JAX treats as distributed
 coordinator configuration and hangs on — since only the PROFILED ranks get it,
 they diverge from the rest and the whole job deadlocks in init.
+
+## Cube lane: a measurement that does NOT reconcile (2026-08-07)
+
+RETRACTED, same day it was said: I reported that a fresh 24->54 GPU
+measurement "kills the cube scales at 1.04 picture". It does not. The 1.04
+came from `6->24` on the cs-spmd row (job 26453782); mine is
+`bench_cube_tiled_step_scaling.py` at 24->54. Different benches, different
+rungs — comparing them is the confound this campaign has a standing rule
+against, and I made it.
+
+What was actually measured (job 26772775, BOTH rungs in ONE job on ONE node
+set, so this part is internally controlled):
+
+| rung | ms/step | ppermutes/step |
+|---|---|---|
+| C768/L60 kt=2, 24 GPUs | 67.54 | 123 |
+| C768/L60 kt=3, 54 GPUs | 52.85 |  99 |
+
+24->54 = 1.278x on 2.25x devices = **efficiency 0.568**. Not tile-floor
+limited: C768 leaves 147.5k columns/GPU at 24 and 65.6k at 54, both far above
+the ~30k floor.
+
+THE UNRECONCILED NUMBER, which blocks any cube optimisation: the campaign's
+own row records C768/L60 at 24 A100 as **14.09 ms/step**; this bench reports
+**67.54 ms** for a nominally identical resolution, level count and device
+count — 4.8x apart. Either they are different code paths (likely: face-sharded
+cs-spmd vs the tiled `6*kt^2` lane) or one of them is mismeasured. Until that
+is settled, no cube number here can be compared to the campaign's, and the
+0.568 cannot be called a regression or a limit.
+
+AND THE LEVER DOES NOT PAY ON THIS EVIDENCE. The exchange structure is real
+and was censused from the compiled module: 396 collective-permutes on a CPU
+24-device proxy fall into just 12 distinct directions (the documented schedule
+— 4 edge strips + 4 guard slivers + 4 corner rounds), so the step CALLS the
+exchange ~33 times, once per field, exactly the shape lat-lon fixed with a
+packed multi-field pad. `packed_pad_halo_4d` already implements that idea but
+requires the face-sharded `(6, n, n)` prefix, so the TILED lane has no packed
+variant. Tempting — but price it first: 123 collectives x 29.7 us = 3.65 ms,
+which is **5.4 % of the measured 67.54 ms step**. Even removing EVERY
+collective cannot pay for the work. The cube's time is not in its halo on this
+lane, and the 4.8x reconciliation is the thing to chase instead.
+
+(GPU combines collective-permutes ~3.2x: the CPU proxy shows 396 where the GPU
+executable holds 123. Use the proxy for STRUCTURE, never for the count.)
