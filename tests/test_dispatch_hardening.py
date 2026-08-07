@@ -287,6 +287,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
+        # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
+        # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
+        # silently fall through to _step_impl (the else branch) instead of
+        # raising -- lock the guard so it can't be silently deleted.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_step_jitted"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),

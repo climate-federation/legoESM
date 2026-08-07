@@ -310,6 +310,28 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
         mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
         print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+    # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
+    # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
+    # legacy (outer_integrator="leapfrog", unchanged); "nemo_mlf" routes to
+    # the single-pass stpmlf.F90 transcription via the REAL dispatch. Opt-in
+    # measurement knob only -- NOT a recipe/kamm default (same pattern as
+    # dino_year_screen_fullframe.py). Unknown value raises.
+    _OI = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+    if _OI:
+        if _OI not in ("leapfrog", "nemo_mlf"):
+            raise SystemExit(
+                f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
+                "'leapfrog' or 'nemo_mlf'")
+        # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
+        # (spec resolved decision 4) -- auto-force it so the env knob alone
+        # is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+        mc = mc._replace(
+            outer_integrator=_OI,
+            implicit_vmix_e3t_now_divisor=(
+                True if _OI == "nemo_mlf"
+                else mc.implicit_vmix_e3t_now_divisor))
+        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
     print(f"barotropic_diffusion_alpha={mc.barotropic.barotropic_diffusion_alpha} "
           f"barotropic_face_depth={mc.barotropic.barotropic_face_depth} "
           f"zdf_drag_in_matrix={mc.zdf_drag_in_matrix} "

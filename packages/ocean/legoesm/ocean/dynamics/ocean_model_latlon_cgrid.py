@@ -1811,21 +1811,23 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
-        # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the MLF
-        # leap-frog, which supplies the ×2 substep scale + Nbb before-level seed
-        # that make the boxcar 2*nn_e-wide and centred at Naa (dynspg_ts.F90:1061,
-        # 494-503). Pairing it with forward_euler would give a flt=1-width window
-        # + AB3 + ts_bck_interp — a non-NEMO hybrid — so reject it (only
-        # nemo_dino_kamm_mlf selects it).
+        # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the
+        # MLF leap-frog family (_leapfrog_step OR nemo_mlf's _nemo_mlf_step --
+        # both supply the SAME ×2 substep scale + Nbb before-level seed, per
+        # _nemo_mlf_step's docstring "barotropic-before seeding ... IDENTICAL
+        # to _leapfrog_step"), which make the boxcar 2*nn_e-wide and centred at
+        # Naa (dynspg_ts.F90:1061, 494-503). Pairing it with forward_euler
+        # would give a flt=1-width window + AB3 + ts_bck_interp — a non-NEMO
+        # hybrid — so reject it (only the leapfrog-family cards select it).
         if (config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
                 and getattr(config, "outer_integrator", "forward_euler")
-                != "leapfrog"):
+                not in ("leapfrog", "nemo_mlf")):
             raise ValueError(
                 'barotropic_time_filter="nemo_boxcar_ab3" (NEMO nn_bt_flt=2 AB3 '
-                "+ ts_bck_interp dissipation) requires outer_integrator="
-                '"leapfrog" (the MLF supplies the ×2 substep scale + before-level '
-                "seed that make the boxcar the faithful 2*nn_e window centred at "
-                "Naa); got outer_integrator="
+                "+ ts_bck_interp dissipation) requires outer_integrator in "
+                '("leapfrog", "nemo_mlf") (the MLF family supplies the ×2 '
+                "substep scale + before-level seed that make the boxcar the "
+                "faithful 2*nn_e window centred at Naa); got outer_integrator="
                 f"{getattr(config, 'outer_integrator', 'forward_euler')!r}. Use "
                 'barotropic_time_filter="nemo_boxcar_centred" for the '
                 "forward-frame boxcar.")
@@ -1951,18 +1953,32 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
                 f"got {config.tracer_advection!r}")
-        _valid_outer_int = {"forward_euler", "ab2", "leapfrog"}
+        _valid_outer_int = {"forward_euler", "ab2", "leapfrog", "nemo_mlf"}
         _outer_int = getattr(config, "outer_integrator", "forward_euler")
         if _outer_int not in _valid_outer_int:
             raise ValueError(
                 f"outer_integrator must be one of {sorted(_valid_outer_int)}, "
                 f"got {_outer_int!r}")
+        # "leapfrog" (_leapfrog_step, two-pass) and "nemo_mlf" (_nemo_mlf_step,
+        # P2 single-pass transcription, docs/ocean/fidelity/
+        # nemo_mlf_step_transcription_spec.md) are the SAME leap-frog-family
+        # composition (rdt=2dt, Asselin filter, _ab2_scope_override="advective",
+        # centred-forcing carry, barotropic-before seed -- see _nemo_mlf_step's
+        # docstring: "IDENTICAL to _leapfrog_step" for everything except the
+        # dissipative-term composition mechanism). Every guard below was audited
+        # PER GUARD (spec §4): none of the leapfrog-specific requirements are
+        # moot for nemo_mlf -- _nemo_mlf_step reads config.ab2_scope through the
+        # SAME collision path (still always passes _ab2_scope_override=
+        # "advective"), calls the SAME _seed_centred_forcing_carry, and has no
+        # prescribed_flow re-pinning either -- so every one of these raises is
+        # extended to the pair, not blanket-copied without re-checking.
+        _leapfrog_family = ("leapfrog", "nemo_mlf")
         # NEMO Modified-Leap-Frog (stpmlf.F90) requirements. The leapfrog carries
         # the Coriolis in the explicit RHS (via vorticity_scheme="een_total") and
         # applies the vertical friction/mixing implicitly over 2dt (dyn_zdf), so
         # it needs coriolis_scheme="explicit_ab2" (Matsuno off) + implicit vertical
         # mixing. Reject silent misconfiguration rather than run a non-NEMO scheme.
-        if _outer_int == "leapfrog":
+        if _outer_int in _leapfrog_family:
             _asg = getattr(config, "asselin_gamma", 0.1)
             if not (0.0 <= _asg <= 1.0):
                 raise ValueError(
@@ -1970,7 +1986,7 @@ class LatLonCGridOceanModel:
                     f"must be in [0, 1]; got {_asg!r}")
             if getattr(config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
                 raise ValueError(
-                    'outer_integrator="leapfrog" (NEMO stp_MLF) requires '
+                    f'outer_integrator={_outer_int!r} (NEMO stp_MLF) requires '
                     'coriolis_scheme="explicit_ab2": the leapfrog carries the '
                     "Coriolis in the explicit RHS (Matsuno rotation OFF). Use it "
                     'with vorticity_scheme="een_total" (NEMO ln_dynvor_een, f in '
@@ -1978,60 +1994,101 @@ class LatLonCGridOceanModel:
                     f'{getattr(config, "coriolis_scheme", "matsuno_split")!r}.')
             if not config.implicit_vertical_mixing:
                 raise ValueError(
-                    'outer_integrator="leapfrog" requires '
+                    f'outer_integrator={_outer_int!r} requires '
                     "implicit_vertical_mixing=True: NEMO dyn_zdf applies the "
                     "vertical friction/diffusion as a backward-Euler solve over "
                     "rDt=2dt on the leapfrog after-state.")
             if getattr(config, "ab2_scope", "total") != "total":
                 raise ValueError(
-                    'outer_integrator="leapfrog" requires ab2_scope="total" '
-                    "(the leapfrog applies every explicit tendency at the same "
-                    "2dt weight; the advective/dissipative split is AB2-only).")
+                    f'outer_integrator={_outer_int!r} requires ab2_scope="total" '
+                    "(the leapfrog-family step applies every explicit tendency "
+                    "at the same 2dt weight via its OWN internal "
+                    '_ab2_scope_override="advective" -- the config-level '
+                    "advective/dissipative split is AB2-only).")
             if getattr(config, "prescribed_flow", None) is not None:
                 raise ValueError(
-                    'outer_integrator="leapfrog" does not support the '
-                    "prescribed_flow lever (the _leapfrog_step does not re-pin "
-                    "the flow after the barotropic/implicit solves, unlike "
-                    "_step_impl/_ab2_step). Use forward_euler or ab2 with "
-                    "prescribed_flow.")
+                    f'outer_integrator={_outer_int!r} does not support the '
+                    "prescribed_flow lever (neither _leapfrog_step nor "
+                    "_nemo_mlf_step re-pins the flow after the barotropic/"
+                    "implicit solves, unlike _step_impl/_ab2_step). Use "
+                    "forward_euler or ab2 with prescribed_flow.")
+        if _outer_int == "nemo_mlf":
+            # Resolved decision 4 (spec §6-4/§7 P2): a transcription that still
+            # permits a non-NEMO implicit-solve divisor stops being a
+            # transcription at that row (stpmlf.F90 row 22/29, trazdf.F90:
+            # 219-220 e3w(Kmm)) -- the standalone-A/B NULL result
+            # (DINO_NEMO_KMM_DIVISOR measured no climate effect on the EXISTING
+            # leapfrog card) governs only whether to flip that card's default;
+            # it does not transfer to nemo_mlf, which changes the surrounding
+            # composition the divisor sits inside.
+            if not getattr(config, "implicit_vmix_e3t_now_divisor", False):
+                raise ValueError(
+                    'outer_integrator="nemo_mlf" requires '
+                    "implicit_vmix_e3t_now_divisor=True: nemo_mlf is a literal "
+                    "transcription of stpmlf.F90's dyn_zdf/tra_zdf calls, whose "
+                    "implicit-solve gradient divisor is e3w(Kmm) (trazdf.F90:"
+                    "219-220), not legoESM's default after-solve midpoint slot. "
+                    "Set implicit_vmix_e3t_now_divisor=True.")
+            # mlf_baro_corr (stpmlf.F90 row 30) is WAIVED inside _nemo_mlf_step
+            # citing W1a -- PROVABLY a no-op only because no depth-mean source
+            # exists under surface_stress_implicit=False (see the method's own
+            # docstring). A future card flipping surface_stress_implicit=True
+            # together with nemo_mlf would silently make that waiver WRONG (a
+            # real depth-mean source would then need the corrector call this
+            # method does not build) -- reject rather than let the waiver rot.
+            if getattr(config, "surface_stress_implicit", False):
+                raise ValueError(
+                    'outer_integrator="nemo_mlf" does not support '
+                    "surface_stress_implicit=True: _nemo_mlf_step WAIVES the "
+                    "mlf_baro_corr call (stpmlf.F90 row 30) citing W1a -- "
+                    "provably a no-op ONLY when surface_stress_implicit=False "
+                    "(no depth-mean source exists in lego's solve to "
+                    "reconcile). Enabling surface_stress_implicit would create "
+                    "a real depth-mean source with no corrector to remove it. "
+                    "Build the mlf_baro_corr kernel (spec §2/§6-5) before "
+                    "lifting this guard.")
         if (getattr(config, "barotropic_forcing_centred", False)
-                and _outer_int != "leapfrog"):
+                and _outer_int not in _leapfrog_family):
             raise ValueError(
-                'barotropic_forcing_centred=True requires '
-                'outer_integrator="leapfrog": the ½(before+now) forcing '
+                'barotropic_forcing_centred=True requires outer_integrator in '
+                '("leapfrog", "nemo_mlf"): the ½(before+now) forcing '
                 "average (NEMO ln_bt_fw=.FALSE., dynspg_ts.F90:392-421) and "
                 "the drag-residual BEFORE level (:1623-1636) both read the "
                 "state's u_before/v_before/tau_x_prev/tau_y_prev/"
                 "freshwater_eta_prev carry fields, which only exist under "
-                "the leapfrog (NEMO Modified-Leap-Frog) time integrator. "
+                "the leapfrog-family (NEMO Modified-Leap-Frog) time integrator. "
                 f"Got outer_integrator={_outer_int!r}.")
-        # TKE closure axes that read the leap-frog BEFORE (Nbb) state
+        # TKE closure axes that read the leap-frog-family BEFORE (Nbb) state
         # (T4 Burchard shear, T8/T13 rn2b Prandtl/Langmuir; Phase-2 #1317):
-        # both need state.u_before/v_before/T_before/S_before, which only
-        # exist under outer_integrator="leapfrog". Construction-time raise
+        # both need state.u_before/v_before/T_before/S_before, which exist
+        # under EITHER outer_integrator="leapfrog" OR "nemo_mlf" (same Nbb
+        # carry mechanism -- _nemo_mlf_step's Asselin-filter tail populates
+        # them identically to _leapfrog_step's, per its docstring). Not moot
+        # for nemo_mlf: audited, not blanket-copied. Construction-time raise
         # (dispatch hardening) rather than a silent no-op at model-step time.
         _vmix_cfg_ctor = getattr(getattr(config, "physics", None),
                                  "vertical_mixing", None)
         if _vmix_cfg_ctor is not None and _vmix_cfg_ctor.scheme == "tke":
             _tke_cfg_ctor = _vmix_cfg_ctor.tke
             if (getattr(_tke_cfg_ctor, "tke_n2_time_level", "step_entry")
-                    == "nemo_before" and _outer_int != "leapfrog"):
+                    == "nemo_before" and _outer_int not in _leapfrog_family):
                 raise ValueError(
                     'vertical_mixing.tke.tke_n2_time_level="nemo_before" '
-                    'requires outer_integrator="leapfrog": the true rn2b '
-                    "(Nbb) tracers only exist as state.T_before/S_before "
-                    "under the leap-frog (NEMO Modified-Leap-Frog) time "
-                    f"integrator. Got outer_integrator={_outer_int!r}.")
+                    'requires outer_integrator in ("leapfrog", "nemo_mlf"): '
+                    "the true rn2b (Nbb) tracers only exist as "
+                    "state.T_before/S_before under the leap-frog-family "
+                    f"(NEMO Modified-Leap-Frog) time integrator. Got "
+                    f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
-                    and _outer_int != "leapfrog"):
+                    and _outer_int not in _leapfrog_family):
                 raise ValueError(
                     f'vertical_mixing.tke.tke_shear_production='
-                    f'{_tke_shear_ctor!r} requires outer_integrator='
-                    '"leapfrog": both the Burchard now×before cross term '
-                    "and its face-native extension only exist as "
-                    "state.u_before/v_before under the leap-frog (NEMO "
+                    f'{_tke_shear_ctor!r} requires outer_integrator in '
+                    '("leapfrog", "nemo_mlf"): both the Burchard now×before '
+                    "cross term and its face-native extension only exist as "
+                    "state.u_before/v_before under the leap-frog-family (NEMO "
                     f"Modified-Leap-Frog) time integrator. Got "
                     f"outer_integrator={_outer_int!r}.")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
@@ -2319,19 +2376,20 @@ class LatLonCGridOceanModel:
             # RK3 PGF stages — it keeps PGF and Coriolis COUPLED inside the stages,
             # holding geostrophic balance (the fix for the O(dt^2) split-growth of
             # the GYRE forced current). Forward-Euler alone is unstable (|G|>1).
-            if config.outer_integrator not in ("ab2", "leapfrog") and getattr(
+            if config.outer_integrator not in (
+                    "ab2", "leapfrog", "nemo_mlf") and getattr(
                     config, "momentum_time_integrator",
                     "euler") not in ("rk3", "rk3_ws"):
                 raise ValueError(
                     'coriolis_scheme="explicit_ab2" requires '
-                    'outer_integrator in ("ab2","leapfrog") OR '
+                    'outer_integrator in ("ab2","leapfrog","nemo_mlf") OR '
                     'momentum_time_integrator in ("rk3", "rk3_ws"): '
                     "an explicit forward-Euler Coriolis at weight 1.0 is "
                     "unconditionally UNSTABLE for pure rotation "
-                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps), leapfrog (neutral, "
-                    "|G|=1 for f·dt<1, computational mode damped by the "
-                    "Robert-Asselin filter) or SSP-RK3 have a stable rotation "
-                    "region. Got outer_integrator="
+                    "(|G|=sqrt(1+(f·dt)²)>1); AB2(-eps), leapfrog/nemo_mlf "
+                    "(neutral, |G|=1 for f·dt<1, computational mode damped by "
+                    "the Robert-Asselin filter) or SSP-RK3 have a stable "
+                    "rotation region. Got outer_integrator="
                     f"{config.outer_integrator!r}, momentum_time_integrator="
                     f"{getattr(config, 'momentum_time_integrator', 'euler')!r}.")
             if config.barotropic.barotropic_solver not in (
@@ -3423,7 +3481,7 @@ class LatLonCGridOceanModel:
                         "the wide-halo barotropic path (the before eta/u/v would "
                         "need the extended-band widening); use the standard "
                         "split-explicit path (barotropic_wide_halo=False) with "
-                        "outer_integrator='leapfrog'.")
+                        "outer_integrator in ('leapfrog', 'nemo_mlf').")
                 _baro_fn = barotropic_substeps_wide_halo_latlon_cgrid
                 _baro_seed = {}
             else:
@@ -4690,8 +4748,10 @@ class LatLonCGridOceanModel:
 
         ``entry_state`` MUST be the step-entry state (before rebinding to
         ``state_new``), matching ``_n2_before_advection_tracers``'s
-        convention. Construction guarantees ``outer_integrator="leapfrog"``
-        (the fields EXIST as NamedTuple slots) but NOT that they are
+        convention. Construction guarantees ``outer_integrator`` in
+        ``("leapfrog", "nemo_mlf")`` (the fields EXIST as NamedTuple slots,
+        populated identically by either step method's Asselin-filter tail;
+        P2) but NOT that they are
         POPULATED on every possible caller: ``_leapfrog_step``'s Euler-start
         branch (#1317 fix) now seeds a LOCAL before:=now copy before its
         first ``_step_impl`` call — matching NEMO's own cold-start
@@ -6113,11 +6173,12 @@ class LatLonCGridOceanModel:
 
         ``external_tracer_rate`` (optional ``(dT_dt, dS_dt)`` array pair,
         full-column, masked, units degC/s and PSU/s): summed into the
-        EXPLICIT tracer RHS on the leap-frog Nnn advective pass ONLY (#1492
-        DINO ``surface_tendency_placement="leapfrog_rhs"`` — see
+        EXPLICIT tracer RHS on the leap-frog-family Nnn advective pass ONLY
+        (#1492 DINO ``surface_tendency_placement="leapfrog_rhs"`` — see
         ``DINOConfig`` docstring + ``_step_impl``'s ``_external_tracer_rate``).
-        Requires ``outer_integrator="leapfrog"``; ``None`` (default, every
-        other outer integrator) ⇒ bit-identical, no-op elsewhere.
+        Requires ``outer_integrator`` in ``("leapfrog", "nemo_mlf")`` (P2:
+        ``_nemo_mlf_step`` threads it to the SAME kwarg); ``None`` (default,
+        every other outer integrator) ⇒ bit-identical, no-op elsewhere.
 
         Eager Python shim over the JIT-compiled ``_step_jitted``: fills
         the build-once vertex-mask cache from CONCRETE state BEFORE the
@@ -6187,10 +6248,13 @@ class LatLonCGridOceanModel:
             )
         if (external_tracer_rate is not None
                 and getattr(self.config, "outer_integrator", "forward_euler")
-                != "leapfrog"):
+                not in ("leapfrog", "nemo_mlf")):
             raise ValueError(
-                "external_tracer_rate is only consumed by the leap-frog "
-                "Nnn advective pass (config.outer_integrator='leapfrog'); "
+                "external_tracer_rate is only consumed by the leap-frog-"
+                "family Nnn advective pass (config.outer_integrator="
+                "'leapfrog' or 'nemo_mlf' -- _nemo_mlf_step threads it to "
+                "the SAME _external_tracer_rate kwarg, per nemo_mlf_step_"
+                "transcription_spec.md §2 'already conformant' row 24); "
                 f"got outer_integrator={self.config.outer_integrator!r}. "
                 "Passing it under another integrator would be a silent "
                 "no-op.")
@@ -6214,10 +6278,11 @@ class LatLonCGridOceanModel:
         single-device path) and are threaded into ``_ab2_step`` /
         ``_step_impl`` / ``_apply_polar_filter``."""
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
-        if _oi not in ("forward_euler", "ab2", "leapfrog"):
+        _valid_oi_jitted = ("forward_euler", "ab2", "leapfrog", "nemo_mlf")
+        if _oi not in _valid_oi_jitted:
             raise ValueError(
-                "config.outer_integrator must be 'forward_euler', 'ab2', or "
-                f"'leapfrog', got {_oi!r}")
+                f"config.outer_integrator must be one of {_valid_oi_jitted}, "
+                f"got {_oi!r}")
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
@@ -6252,6 +6317,17 @@ class LatLonCGridOceanModel:
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
         elif _oi == "leapfrog":
             new_state = self._leapfrog_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                external_tracer_rate=external_tracer_rate)
+        elif _oi == "nemo_mlf":
+            # P2 (docs/ocean/fidelity/nemo_mlf_step_transcription_spec.md §4/§7):
+            # wire the P1 single-pass transcription (stpmlf.F90) behind its own
+            # outer_integrator value. "leapfrog" (the two-pass _leapfrog_step)
+            # is UNCHANGED and stays the default for every existing card -- this
+            # is a NEW, separate branch, not a replacement.
+            new_state = self._nemo_mlf_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
@@ -8085,16 +8161,19 @@ class LatLonCGridOceanModel:
                                   dims=state.v.dims, units=state.v.units),
             )
 
-        # Leapfrog outer integrator (NEMO stp_MLF): seed the before-state Nbb
-        # Fields (= copies of the now-fields) so the scan carry keeps a CONSTANT
-        # pytree — _leapfrog_step writes {u,v,T,S,eta}_before every step, and the
-        # eager first-step None sentinel (the l_1st_euler Euler-dt start) would be
+        # Leapfrog-family outer integrator (NEMO stp_MLF: "leapfrog"
+        # _leapfrog_step OR "nemo_mlf" _nemo_mlf_step, P2 -- both write the
+        # SAME {u,v,T,S,eta}_before Fields every step, per _nemo_mlf_step's
+        # docstring): seed the before-state Nbb Fields (= copies of the
+        # now-fields) so the scan carry keeps a CONSTANT pytree -- the eager
+        # first-step None sentinel (the l_1st_euler Euler-dt start) would be
         # a None->Field transition that crashes lax.scan.  With Nbb seeded = Nnn,
         # the scan's first step is a 2dt leapfrog from Nbb=Nnn (a stable forward
         # start; the eager run_dino loop keeps the exact NEMO Euler-dt start via
-        # the None sentinel).  No-op when leapfrog is off or already seeded.
+        # the None sentinel).  No-op when the leapfrog family is off or already
+        # seeded.
         if (getattr(self.config, "outer_integrator", "forward_euler")
-                == "leapfrog" and state.u_before is None):
+                in ("leapfrog", "nemo_mlf") and state.u_before is None):
             # Seed with the source Fields directly (name 'u'/'v'/…) so the carry
             # treedef EXACTLY matches what _leapfrog_step writes each step
             # (u_before=state.u.replace(data=…), i.e. name 'u') — a name mismatch

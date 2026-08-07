@@ -68,10 +68,11 @@ def _channel(n_lat=8, n_lon=16, **cfg_kw):
     cfg_kw.setdefault("coriolis_scheme", "explicit_ab2")
     cfg_kw.setdefault("vorticity_scheme", "een_total")
     cfg_kw.setdefault("A_h", 2.0e4)
+    cfg_kw.setdefault("outer_integrator", "leapfrog")
     cfg = LatLonCGridOceanConfig.from_flat(
         bottom_drag_r=1.0e-3,
         n_barotropic_substeps=8, enable_runtime_checks=False,
-        outer_integrator="leapfrog", **cfg_kw)
+        **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)
 
 
@@ -502,3 +503,234 @@ def test_finalize_lbc_masking_is_idempotent():
     # (excluding the periodic-lon wrap column, which is a copy not a mask op)
     np.testing.assert_array_equal((u * umask) * umask, u * umask)
     np.testing.assert_array_equal((v * vmask) * vmask, v * vmask)
+
+
+# ---------------------------------------------------------------------------
+# P2: config surface -- dispatch + construction-time raises
+# (docs/ocean/fidelity/nemo_mlf_step_transcription_spec.md §4/§7 P2)
+# ---------------------------------------------------------------------------
+
+def _nemo_mlf_channel(n_lat=8, n_lon=16, **cfg_kw):
+    """Same IC/grid as ``_channel`` but wired to the REAL dispatch
+    (``outer_integrator="nemo_mlf"``, requiring the NEMO divisor per the
+    construction-time hard-require) -- exercises ``model.step()``/
+    ``_step_jitted``, not the private method directly."""
+    cfg_kw.setdefault("implicit_vmix_e3t_now_divisor", True)
+    cfg_kw["outer_integrator"] = "nemo_mlf"
+    return _channel(n_lat=n_lat, n_lon=n_lon, **cfg_kw)
+
+
+def test_step_jitted_rejects_unknown_outer_integrator():
+    """Dispatch-hardening, both layers: an unrecognised ``outer_integrator``
+    is rejected at CONSTRUCTION time by ``_validate_config`` (the reachable
+    path through the public API) -- and ``_step_jitted`` (grown in
+    ``test_dispatch_hardening.py::BASELINE_DISPATCHERS`` this same PR) keeps
+    an identical defense-in-depth guard for any path that mutates
+    ``self.config`` post-construction and skips ``_validate_config``, proven
+    directly here so that guard can't silently rot into a no-op."""
+    state, model = _channel(K_h=2.0e4, A_h=2.0e4)
+    with pytest.raises(ValueError, match="outer_integrator"):
+        _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="not_a_real_integrator")
+    # _step_jitted's OWN guard (unreachable via normal construction since
+    # _validate_config already rejects the same value first) -- mutate
+    # config post-construction (bypassing __init__/_validate_config, a plain
+    # mutable attribute) to prove the second guard is real, not dead code.
+    model.config = model.config._replace(
+        outer_integrator="not_a_real_integrator")
+    with pytest.raises(ValueError, match="outer_integrator"):
+        model._step_jitted(state, _DT)
+
+
+def test_nemo_mlf_requires_nemo_kmm_divisor():
+    """Resolved decision 4: ``outer_integrator="nemo_mlf"`` construction-time
+    HARD-REQUIRES ``implicit_vmix_e3t_now_divisor=True`` -- a transcription
+    that still permits a non-NEMO implicit-solve divisor stops being a
+    transcription at that row (stpmlf.F90 row 22/29). The standalone-A/B NULL
+    result governs only the EXISTING leapfrog card; it does not waive the
+    requirement here."""
+    with pytest.raises(ValueError, match="implicit_vmix_e3t_now_divisor"):
+        _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
+                 implicit_vmix_e3t_now_divisor=False)
+
+
+def test_nemo_mlf_rejects_surface_stress_implicit():
+    """The mlf_baro_corr WAIVER (spec §2/§6-5, citing W1a) is provably a
+    no-op ONLY when ``surface_stress_implicit=False`` (no depth-mean source
+    exists to reconcile). A card that also sets ``surface_stress_implicit=
+    True`` would silently make the waiver WRONG -- construction must reject
+    it rather than run an un-transcribed row 30."""
+    with pytest.raises(ValueError, match="surface_stress_implicit"):
+        _channel(K_h=2.0e4, A_h=2.0e4, outer_integrator="nemo_mlf",
+                 implicit_vmix_e3t_now_divisor=True,
+                 surface_stress_implicit=True)
+
+
+def test_nemo_mlf_dispatch_matches_private_method():
+    """``model.step()`` under ``outer_integrator="nemo_mlf"`` must go through
+    the REAL ``_step_jitted`` dispatch and reproduce ``_nemo_mlf_step`` called
+    directly on the SAME state/config -- proves the dispatch wiring (P2)
+    doesn't silently diverge from the already-tested private method (P1).
+
+    Tolerance: ``model.step()`` runs through the ``jax.jit``-wrapped
+    ``_step_jitted``; ``_nemo_mlf_step`` called bare is unjitted -- different
+    XLA fusion of the SAME mathematically-zero expression, not a composition
+    difference (identical ~1e-17-absolute/~1e-12-relative ULP noise pattern
+    to ``test_nemo_mlf_matches_leapfrog_without_gm_redi``'s documented
+    JIT-fusion floor, isolated there via a spy-wrapped A/B). Same tolerance
+    reused, not re-derived."""
+    state, model = _nemo_mlf_channel(K_h=2.0e4, A_h=2.0e4)
+    s1 = model.step(state, _DT)          # Euler start, through real dispatch
+    s1_direct = model._nemo_mlf_step(state, _DT)
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(s1, name).data),
+            np.asarray(getattr(s1_direct, name).data),
+            rtol=1e-8, atol=3e-5, err_msg=name)
+
+    s2 = model.step(s1, _DT)
+    s2_direct = model._nemo_mlf_step(s1_direct, _DT)
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(s2, name).data),
+            np.asarray(getattr(s2_direct, name).data),
+            rtol=1e-8, atol=3e-5, err_msg=name)
+
+
+def test_existing_leapfrog_cards_still_dispatch_to_leapfrog_byte_identical():
+    """The new ``nemo_mlf`` branch must NOT perturb the existing
+    ``outer_integrator="leapfrog"`` path -- ``model.step()`` on a leapfrog
+    card must reproduce the (unchanged) private ``_leapfrog_step`` call
+    directly, at the SAME JIT-vs-unjitted floating-point-noise floor as
+    ``test_nemo_mlf_dispatch_matches_private_method`` (jitted ``model.step()``
+    vs a bare Python call is a different XLA fusion of the SAME
+    mathematically-zero expression, not a composition difference -- see that
+    test's docstring). This is a pure wiring-safety check that this PR's
+    ``_step_jitted``/``_validate_config`` edits changed no leapfrog numerics:
+    run the same two-step sequence through the public dispatch and compare."""
+    state, model = _channel(K_h=2.0e4, A_h=2.0e4)
+    assert model.config.outer_integrator == "leapfrog"
+    s1 = model.step(state, _DT)
+    s1_direct = model._leapfrog_step(state, _DT)
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(s1, name).data),
+            np.asarray(getattr(s1_direct, name).data),
+            rtol=1e-8, atol=3e-5, err_msg=name)
+
+    s2 = model.step(s1, _DT)
+    s2_direct = model._leapfrog_step(s1_direct, _DT)
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(s2, name).data),
+            np.asarray(getattr(s2_direct, name).data),
+            rtol=1e-8, atol=3e-5, err_msg=name)
+
+
+def test_forward_euler_and_ab2_cards_unaffected_by_nemo_mlf_addition():
+    """Every OTHER existing ``outer_integrator`` value (the default
+    ``forward_euler`` and ``ab2``) must still resolve through their own
+    unchanged branches -- the new ``elif _oi == "nemo_mlf"`` arm must not
+    shadow or reorder the existing dispatch."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid = create_latlon_grid(8, 16)
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
+    for oi in ("forward_euler", "ab2"):
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=2.0e4, K_h=2.0e4, bottom_drag_r=1.0e-3,
+            n_barotropic_substeps=8, enable_runtime_checks=False,
+            outer_integrator=oi)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        s1 = model.step(state, _DT)
+        assert np.all(np.isfinite(np.asarray(s1.T.data))), oi
+
+
+def test_dino_outer_integrator_env_knob_roundtrips(monkeypatch, tmp_path):
+    """A/B mechanism (resolved decision 2, spec §4): the env-gated driver
+    override ``DINO_OUTER_INTEGRATOR`` (dino_year_screen_fullframe.py /
+    kamm_twin_90d.py, following the DINO_SURFACE_PLACEMENT/
+    DINO_NEMO_KMM_DIVISOR inline-per-script precedent) must round-trip --
+    unset/default leaves the card's own ``outer_integrator`` untouched,
+    "nemo_mlf" flips it (and auto-forces the NEMO divisor so the
+    construction-time hard-require doesn't fire), and an unknown value
+    raises SystemExit. Both driver scripts share the identical inline block
+    (matching DINO_NEMO_KMM_DIVISOR's own copy-pasted-not-shared precedent);
+    exercise it via ``runpy`` snippet execution rather than importing either
+    heavyweight driver module (both do NEMO-restart I/O at import time)."""
+    import runpy
+    import textwrap
+    snippet = textwrap.dedent("""
+        import os
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        mc = LatLonCGridOceanConfig.from_flat(
+            outer_integrator="leapfrog", implicit_vertical_mixing=True,
+            coriolis_scheme="explicit_ab2", vorticity_scheme="een_total")
+        # #1492 P2: NEMO-faithful step-composition A/B (nemo_mlf_step_
+        # transcription_spec.md resolved decision 2). Default "" = legacy,
+        # bit-identical to every prior screen; unknown value raises
+        # (dispatch hardening, matches DINO_SURFACE_PLACEMENT's own guard).
+        _OI = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+        if _OI:
+            if _OI not in ("leapfrog", "nemo_mlf"):
+                raise SystemExit(
+                    f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
+                    "'leapfrog' or 'nemo_mlf'")
+            # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
+            # (spec resolved decision 4) -- auto-force it so the env knob
+            # alone is sufficient, matching how the recipe would set both
+            # fields together on a real named-recipe A/B variant (P5).
+            mc = mc._replace(
+                outer_integrator=_OI,
+                implicit_vmix_e3t_now_divisor=(
+                    True if _OI == "nemo_mlf"
+                    else mc.implicit_vmix_e3t_now_divisor))
+        RESULT_OUTER_INTEGRATOR = mc.outer_integrator
+        RESULT_DIVISOR = mc.implicit_vmix_e3t_now_divisor
+        """)
+    script = tmp_path / "_snippet.py"
+    script.write_text(snippet)
+
+    monkeypatch.delenv("DINO_OUTER_INTEGRATOR", raising=False)
+    ns = runpy.run_path(str(script))
+    assert ns["RESULT_OUTER_INTEGRATOR"] == "leapfrog"
+
+    monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "nemo_mlf")
+    ns = runpy.run_path(str(script))
+    assert ns["RESULT_OUTER_INTEGRATOR"] == "nemo_mlf"
+    assert ns["RESULT_DIVISOR"] is True
+
+    monkeypatch.setenv("DINO_OUTER_INTEGRATOR", "bogus")
+    with pytest.raises(SystemExit, match="DINO_OUTER_INTEGRATOR"):
+        runpy.run_path(str(script))
+
+
+def test_seed_scan_carry_seeds_before_state_under_nemo_mlf():
+    """``seed_scan_carry`` (used by ``integrate_scan``'s ``lax.scan`` carry
+    prep) must seed ``{u,v,T,S,eta}_before`` = now under ``outer_integrator=
+    "nemo_mlf"`` too, not just ``"leapfrog"`` -- found during the P2 per-guard
+    audit (spec §4): this seeding predicate was still gated on the bare
+    ``== "leapfrog"`` string literal after the dispatch/``_validate_config``
+    changes, which would leave ``state.u_before`` as ``None`` going into a
+    ``lax.scan`` under nemo_mlf and crash on the first None->Field pytree
+    transition (or silently skip the seed on a non-scan first call).
+    ``_nemo_mlf_step`` writes the identical ``{u,v,T,S,eta}_before`` Fields
+    (see its Euler-start branch), so the seed must be identical too."""
+    state, model = _nemo_mlf_channel(K_h=2.0e4, A_h=2.0e4)
+    assert state.u_before is None
+    seeded = model.seed_scan_carry(state, _DT)
+    assert seeded.u_before is not None
+    for name in ("u", "v", "T", "S", "eta"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(seeded, f"{name}_before").data),
+            np.asarray(getattr(seeded, name).data), err_msg=name)
+    # no-op when already seeded
+    reseeded = model.seed_scan_carry(seeded, _DT)
+    np.testing.assert_array_equal(
+        np.asarray(reseeded.u_before.data), np.asarray(seeded.u_before.data))
