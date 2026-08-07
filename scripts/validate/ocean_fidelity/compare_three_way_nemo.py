@@ -21,7 +21,7 @@ only if the nearest cell of EVERY source is wet (``--mask-mode nearest``): the
 regridder's own coverage flag is a distance-to-wet-data flag that keeps land
 cells within 2.5 deg of ocean and fills them by extrapolation, which would
 contaminate the near-land sub-domain most of all.  Reported per field
-(SST, SSS, MLD, SSH):
+(SST, SSS, MLD):
 
   * global + per-latitude-band area-weighted bias / RMSE / pattern correlation
     of tripole-vs-NEMO, MPAS-vs-NEMO, and tripole-vs-MPAS;
@@ -38,12 +38,14 @@ contaminate the near-land sub-domain most of all.  Reported per field
 MLD is the de Boyer Montegut / Treguier density-threshold diagnostic at
 delta_sigma = 0.01 to MATCH NEMO ``mldr10_1`` (the same convention
 ``compare_omip_nemo`` uses -- a larger threshold biases the model deep).
-SSH is OPT-IN (``--ssh``) and INFORMATIONAL ONLY.  Each field is de-meaned over
-its own scored domain, which reconciles a spatially UNIFORM offset between
-NEMO's ``zos`` and our ``eta`` -- but not a spatial inverse-barometer term, a
-different free-surface diagnostic, or a genuine volume drift, none of which
-have been matched between the two models.  Do not quote an SSH number as a
-fidelity verdict.
+SSH IS DELIBERATELY ABSENT.  An earlier version scored ``zos`` against our
+``eta`` after removing each field's area-weighted mean, which reconciles a
+spatially UNIFORM offset and nothing else -- not a spatial inverse-barometer
+term, not a different free-surface diagnostic, not a datum difference, none of
+which have been matched between the two models.  Putting such a field through
+the same bias/RMSE/correlation machinery as the fidelity fields presents it as
+a verdict it cannot support, so it is removed rather than caveated.  Reinstate
+it only once the two diagnostics' conventions are reconciled explicitly.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -54,7 +56,8 @@ deliberately dropped every flag MPAS hard-errors on (--dm2dc, --isf, --bbl-adv,
 the annual-WOA IC, so BOTH are degraded from the NEMO-faithful tripole
 configuration, equally.  The tripole-vs-NEMO numbers from such a pair are
 therefore a floor, not the tripole's best fidelity; the run_manifest of each
-arm is copied into the report so the caveat travels with the numbers.
+arm is SUMMARISED into the report (command line, git-dirty flag, version)
+so the caveat travels with the numbers.
 
 Usage:
     python scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
@@ -91,9 +94,12 @@ from compare_omip_nemo import (  # noqa: E402
 # the two regions this campaign keeps failing in.
 _ARCTIC_LAT_N = 60.0
 
-# A zonal-mean row drawn from fewer cells than this is dropped rather than
-# plotted next to a row averaged over a full latitude circle.
-_MIN_ZONAL_CELLS = 10
+# A zonal-mean row is drawn only where the three sources jointly resolve at
+# least this FRACTION of the cells the common ocean mask offers in that row.
+# A bare cell count is not comparable across resolutions or latitudes (10 cells
+# is 3% of a 1-degree row and 6% of a 2-degree one, and a polar row has far
+# fewer ocean cells to begin with); a fraction of the available support is.
+_MIN_ZONAL_SUPPORT_FRAC = 0.25
 
 
 def _manifest_summary(snapshot_path):
@@ -152,6 +158,65 @@ def _xyz_deg(lat_deg, lon_deg):
     return np.stack([cl * np.cos(lo), cl * np.sin(lo), np.sin(la)], axis=-1)
 
 
+def build_ocean_mask(coverage, sources, tgt_lat, tgt_lon, mode):
+    """The set of target cells that may be scored.
+
+    ``coverage`` is the intersection of the regridder's own validity flags and
+    is kept in the conjunction even in 'nearest' mode -- it is NOT redundant:
+    nearest-wet classification has no distance limit, while coverage refuses a
+    cell whose nearest wet datum is farther than the regridder's 2.5 deg
+    validity radius.
+
+    LIMITATION (do not overstate this mask).  Nearest-CENTRE classification has
+    no cell polygons and no ocean connectivity, so where a strait or a land
+    barrier is narrower than the ~111 km target cell -- the Canadian
+    Archipelago, the Danish straits -- a cell can still be misclassified, and
+    the value regridder can still interpolate across a barrier because it picks
+    its four wet neighbours geometrically.  There is no error bound here.  The
+    near-land sub-domain is a screening diagnostic, not a coastline-resolved
+    one; that needs a topology-aware remapper.
+    """
+    if mode == "coverage":
+        return coverage
+    if mode != "nearest":
+        raise ValueError(f"unknown mask mode {mode!r}")
+    wet = np.logical_and.reduce([
+        _nn_wet_mask(S["lat"], S["lon"], S["mask"], tgt_lat, tgt_lon)
+        for S in sources])
+    return coverage & wet
+
+
+def _smooth_common_footprint(field, valid, tgt_lat, tgt_lon, radius_deg):
+    """Great-circle top-hat smoothing of a target-grid field, ONE physical
+    radius for every source.
+
+    The IDW regridder takes a fixed k=4 source neighbours, whose PHYSICAL
+    footprint therefore differs per mesh: a ~60 km MPAS cell keeps short-scale
+    structure that a ~111 km ORCA1 cell has already smoothed away.  Because
+    NEMO is itself ORCA1, that asymmetry can flatter tripole-vs-NEMO purely as
+    a regridding artifact.  Changing the target RESOLUTION does not test this
+    -- it moves the sample points but leaves each source's own k=4 footprint
+    untouched -- so the control has to impose one common physical low-pass on
+    all three fields after regridding.  If the ranking survives this, it is not
+    a regrid artifact.
+    """
+    from scipy.spatial import cKDTree
+    lon2d, lat2d = np.meshgrid(tgt_lon, tgt_lat)
+    pts = _xyz_deg(lat2d.ravel(), lon2d.ravel())
+    v = valid.ravel()
+    tree = cKDTree(pts[v])
+    vals = np.asarray(field, dtype=np.float64).ravel()[v]
+    # Chord length of the great-circle radius on the unit sphere.
+    chord = 2.0 * np.sin(np.deg2rad(radius_deg) / 2.0)
+    out = np.full(vals.shape, np.nan)
+    for i, nb in enumerate(tree.query_ball_point(pts[v], r=chord)):
+        if nb:
+            out[i] = float(np.mean(vals[nb]))
+    full = np.full(field.shape, np.nan).ravel()
+    full[v] = out
+    return full.reshape(field.shape)
+
+
 def _coastal_mask(ocean, n_cells):
     """Ocean cells within ``n_cells`` cells (Chebyshev) of a LAND cell.
 
@@ -207,47 +272,12 @@ def _lego_mld(L):
                                         bottom_depth=Hb))
 
 
-def _lego_ssh(path):
-    """Sea-surface height (eta) from a legoESM snapshot, or None if absent."""
-    s = np.load(path)
-    return np.asarray(s["eta"], dtype=np.float64) if "eta" in s.files else None
-
-
-def _nemo_ssh(path, tidx, month):
-    """NEMO ``zos`` selected with the SAME record/month rule as _load_nemo.
-
-    Re-uses ``_load_nemo``'s month decoding by asking it for the field set and
-    then reading zos with the identical selection, rather than re-deriving the
-    calendar-month logic (which is where a silent seasonal mismatch would enter).
-    """
-    import xarray as xr
-    ds = xr.open_dataset(path, decode_times=False)
-    if "zos" not in ds.variables:
-        return None
-    tdim = "time_counter" if "time_counter" in ds["zos"].dims else None
-    if month is not None:
-        from compare_omip_nemo import _nemo_record_months
-        nt = int(ds.sizes[tdim])
-        rec = _nemo_record_months(ds, tdim, nt)
-        if rec is None:
-            if nt % 12 != 0:
-                raise ValueError("zos: undecodable time and n_time not whole years")
-            midx = list(range(month - 1, nt, 12))
-        else:
-            midx = [i for i in range(nt) if rec[i] == month]
-        if not midx:
-            raise ValueError(f"zos: no records for month {month}")
-        return np.asarray(ds["zos"].isel({tdim: midx}).mean(dim=tdim))
-    return (np.asarray(ds["zos"].isel({tdim: tidx})) if tdim
-            else np.asarray(ds["zos"]))
-
-
 def _demean(field, area):
     """Remove the area-weighted mean over the finite, positive-area cells.
 
     ``0.0 * nan`` is ``nan``, so weighting a NaN cell by zero area does NOT
     exclude it: a single NaN anywhere in the array made the mean NaN and
-    returned an all-NaN field, silently voiding every SSH statistic downstream.
+    returned an all-NaN field, silently voiding every statistic downstream.
     Select the contributing cells explicitly instead of relying on the weight.
     """
     w = np.asarray(area, dtype=np.float64)
@@ -296,6 +326,18 @@ def _scored(a, b, area, tgt_lat, sub, deep_m=None):
     return out
 
 
+def _json_safe(obj):
+    """Recursively replace non-finite floats with None so the report is valid
+    JSON.  An undefined correlation is genuinely absent, not a number."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return None
+    return obj
+
+
 def _fmt(s):
     return (f"bias {s['bias']:+8.3f}  rmse {s['rmse']:7.3f}  corr {s['corr']:6.3f}"
             if s else "  (no cells)")
@@ -324,15 +366,14 @@ def main() -> int:
     p.add_argument("--coast-cells", type=int, default=2,
                    help="Near-land sub-domain width in target cells (default 2 "
                         "= within ~2 deg of the coast of the COMMON mask).")
-    p.add_argument("--ssh", action="store_true",
-                   help="Also score SSH. OFF by default: NEMO 'zos' and our "
-                        "'eta' have not been reconciled for datum, "
-                        "inverse-barometer treatment or free-surface "
-                        "diagnostic, so removing the area-weighted mean makes "
-                        "the two comparable ONLY if the remaining convention "
-                        "difference is spatially uniform, which is unverified. "
-                        "Treat any SSH number from this script as "
-                        "informational, never as a fidelity verdict.")
+    p.add_argument("--smooth-radius-deg", type=float, default=None,
+                   help="Instrument control: after regridding, replace every "
+                        "field by its mean over this great-circle radius, the "
+                        "SAME physical radius for all three sources. Use it to "
+                        "test whether a ranking is a regrid artifact -- the IDW "
+                        "stencil's k=4 neighbours span a different physical "
+                        "distance on a ~60 km MPAS cell than on a ~111 km "
+                        "ORCA1 cell. Changing --res-deg does NOT test this.")
     p.add_argument("--mask-mode", choices=("nearest", "coverage"), default="nearest",
                    help="How a target cell is classified ocean.  'nearest' "
                         "(default) requires the nearest SOURCE cell of every "
@@ -357,6 +398,8 @@ def main() -> int:
     # Cell CENTRES of a global grid of spacing res_deg.  The previous
     # hard-coded -89.5/0.5 offsets are the centres only at 1 degree; at 2 they
     # gave -89.5..88.5, which is neither centred nor global.
+    if not np.isfinite(a.res_deg) or a.res_deg <= 0:
+        raise SystemExit(f"--res-deg must be finite and positive, got {a.res_deg}")
     if not (180.0 / a.res_deg).is_integer() or not (360.0 / a.res_deg).is_integer():
         raise SystemExit(f"--res-deg {a.res_deg} does not divide the globe evenly")
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
@@ -381,12 +424,7 @@ def main() -> int:
     sssN, _ = rg(N, N["sss"])
 
     coverage = (ocT > 0.5) & (ocM > 0.5) & (ocN > 0.5)
-    if a.mask_mode == "nearest":
-        ocean = coverage & np.logical_and.reduce([
-            _nn_wet_mask(S["lat"], S["lon"], S["mask"], tgt_lat, tgt_lon)
-            for S in (T, M, N)])
-    else:
-        ocean = coverage
+    ocean = build_ocean_mask(coverage, (T, M, N), tgt_lat, tgt_lon, a.mask_mode)
     print(f"[mask] mode={a.mask_mode}: coverage-only would keep "
           f"{int(coverage.sum())} cells, scoring {int(ocean.sum())} "
           f"({int(coverage.sum() - ocean.sum())} dropped as land under the "
@@ -433,8 +471,8 @@ def main() -> int:
 
     plot_fields = {}          # name -> (Tg, Mg, Ng, unit)
     # Each entry carries its OWN scoring area: MLD and SSH are resolved on
-    # smaller domains than SST/SSS, and reusing the SST area would score cells
-    # where those fields do not exist on all three sources.
+    # a smaller domain than SST/SSS, and reusing the SST area would score cells
+    # where it does not exist on all three sources.
     fields = [("SST", sstT, sstM, sstN, "degC", area),
               ("SSS", sssT, sssM, sssN, "psu", area)]
 
@@ -471,41 +509,15 @@ def main() -> int:
         _mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
         fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area))
-    # --- SSH anomaly ---------------------------------------------------------
-    sshT_raw = sshM_raw = sshN_raw = None
-    if a.ssh:
-        sshT_raw, sshM_raw = _lego_ssh(a.tripole), _lego_ssh(a.mpas)
-        sshN_raw = _nemo_ssh(a.nemo_gridt, a.nemo_time_idx, a.nemo_month)
-    else:
-        print("[SSH] OFF (pass --ssh to enable; the zos-vs-eta datum, "
-              "inverse-barometer treatment and free-surface diagnostic are NOT "
-              "reconciled, so it is not a fidelity verdict)")
-    if sshT_raw is None or sshM_raw is None or sshN_raw is None:
-        if a.ssh:
-            missing = [n for n, v in (("tripole eta", sshT_raw),
-                                      ("MPAS eta", sshM_raw),
-                                      ("NEMO zos", sshN_raw)) if v is None]
-            print(f"[SSH] SKIPPED: missing {missing}")
-    else:
-        # Each SSH source carries its OWN coverage flag; scoring a cell that is
-        # covered for SST but not for SSH would compare an extrapolation.
-        sshT, ocTs = rg(T, sshT_raw)
-        sshM, ocMs = rg(M, sshM_raw)
-        sshN, ocNs = regrid_curv_to_latlon(np.nan_to_num(sshN_raw, nan=0.0),
-                                           N["lat"], N["lon"],
-                                           np.isfinite(sshN_raw).astype(np.float64),
-                                           tgt_lat, tgt_lon)
-        ssh_ok = ocean & (ocTs > 0.5) & (ocMs > 0.5) & (ocNs > 0.5)
-        if not ssh_ok.any():
-            raise SystemExit("FATAL: SSH has no cells resolved on all three sources")
-        _ssh_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
-                     * np.ones_like(tgt_lon)[None, :]) * ssh_ok
-        report["n_ssh_cells"] = int(ssh_ok.sum())
-        # The gauge is removed on the cells SSH is actually scored on, not on
-        # the SST/SSS common set, so the anomaly is centred on its own domain.
-        sshT, sshM, sshN = (_demean(sshT, _ssh_area), _demean(sshM, _ssh_area),
-                            _demean(sshN, _ssh_area))
-        fields.append(("SSH_anom", sshT, sshM, sshN, "m", _ssh_area))
+    if a.smooth_radius_deg:
+        print(f"[smooth] common-footprint control ON: top-hat mean over "
+              f"{a.smooth_radius_deg} deg great-circle radius, applied "
+              "IDENTICALLY to all three sources")
+        report["smooth_radius_deg"] = a.smooth_radius_deg
+        fields = [(n, *(_smooth_common_footprint(f, ar > 0, tgt_lat, tgt_lon,
+                                                 a.smooth_radius_deg)
+                        for f in (Tg, Mg, Ng)), u, ar)
+                  for n, Tg, Mg, Ng, u, ar in fields]
 
     for name, Tg, Mg, Ng, unit, ar in fields:
         # PER-FIELD finite intersection.  Geometric coverage is not finiteness:
@@ -559,7 +571,11 @@ def main() -> int:
 
     _plot3(out, tgt_lat, tgt_lon, plot_fields, a.label_tripole, a.label_mpas)
 
-    (out / "report.json").write_text(json.dumps(report, indent=2))
+    # allow_nan=False: bare NaN is not valid JSON and reads like a number to a
+    # downstream parser.  _wstats returns a NaN correlation for a constant or
+    # single-cell domain, so scrub those to null and fail loudly on any other.
+    (out / "report.json").write_text(json.dumps(_json_safe(report), indent=2,
+                                                allow_nan=False))
     print(f"\n[report] {out / 'report.json'}")
     return 0
 
@@ -611,7 +627,8 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m):
         # the SAME cells or their difference is not a bias.
         rowok = ok & np.isfinite(Tg) & np.isfinite(Mg) & np.isfinite(Ng)
         cnt = rowok.sum(axis=1)
-        good = cnt >= _MIN_ZONAL_CELLS
+        avail = ok.sum(axis=1)
+        good = (avail > 0) & (cnt >= _MIN_ZONAL_SUPPORT_FRAC * avail) & (cnt > 0)
 
         def zm(f):
             z = np.full(f.shape[0], np.nan)

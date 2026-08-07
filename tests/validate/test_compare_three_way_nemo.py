@@ -182,3 +182,107 @@ def test_demean_survives_a_nan_in_a_zero_area_cell():
 def test_demean_raises_when_nothing_is_valid():
     with pytest.raises(ValueError, match="no finite cells"):
         m._demean(np.array([[np.nan, np.nan]]), np.array([[1.0, 1.0]]))
+
+
+# --------------------------------------------------------------------------
+# build_ocean_mask — the decision the helper tests above CANNOT pin
+# --------------------------------------------------------------------------
+def _one_degree_source(wet_lon_max):
+    """A 1-degree equatorial source band, wet west of ``wet_lon_max``."""
+    lon = np.arange(0.5, 360.0, 1.0)
+    return {"lat": np.zeros_like(lon), "lon": lon,
+            "mask": (lon < wet_lon_max).astype(float)}
+
+
+def test_build_ocean_mask_nearest_excludes_land_that_coverage_admits():
+    """The R1-RED-1 regression at the level that MATTERS.
+
+    The per-helper tests would all still pass if ``main`` reverted to
+    ``ocean = coverage`` and left ``_nn_wet_mask`` unused, so this pins the
+    selection itself: the two modes must disagree, and 'nearest' must be the
+    one that drops the land cells.
+    """
+    tgt_lat = np.array([0.0])
+    tgt_lon = np.array([90.0, 179.6, 180.4, 270.0])
+    sources = [_one_degree_source(180.0) for _ in range(3)]
+    coverage = np.ones((1, 4), dtype=bool)     # regridder says "data is near"
+    cov = m.build_ocean_mask(coverage, sources, tgt_lat, tgt_lon, "coverage")
+    near = m.build_ocean_mask(coverage, sources, tgt_lat, tgt_lon, "nearest")
+    assert cov.all()                            # coverage keeps the land cells
+    assert near.tolist() == [[True, True, False, False]]
+    assert near.sum() < cov.sum()               # the modes MUST differ
+
+
+def test_build_ocean_mask_keeps_coverage_in_the_conjunction():
+    """Coverage is not redundant: nearest-wet has no distance limit, so a cell
+    far outside the regridder's validity radius must still be refused."""
+    tgt_lat = np.array([0.0])
+    tgt_lon = np.array([90.0, 100.0])
+    sources = [_one_degree_source(180.0) for _ in range(3)]
+    coverage = np.array([[True, False]])        # second cell out of range
+    near = m.build_ocean_mask(coverage, sources, tgt_lat, tgt_lon, "nearest")
+    assert near.tolist() == [[True, False]]
+
+
+def test_build_ocean_mask_rejects_an_unknown_mode():
+    with pytest.raises(ValueError, match="unknown mask mode"):
+        m.build_ocean_mask(np.ones((1, 1), dtype=bool), [_one_degree_source(180.0)],
+                           np.array([0.0]), np.array([90.0]), "nearset")
+
+
+def test_build_ocean_mask_requires_every_source_to_be_wet():
+    """One source calling a cell land is enough to drop it — the fields are
+    only comparable where all three actually have ocean."""
+    tgt_lat = np.array([0.0])
+    tgt_lon = np.array([90.0])
+    coverage = np.ones((1, 1), dtype=bool)
+    sources = [_one_degree_source(180.0), _one_degree_source(180.0),
+               _one_degree_source(50.0)]        # third is land at lon 90
+    assert not m.build_ocean_mask(coverage, sources, tgt_lat, tgt_lon, "nearest").any()
+
+
+# --------------------------------------------------------------------------
+# _smooth_common_footprint — the control for the regrid-asymmetry concern
+# --------------------------------------------------------------------------
+def test_smoothing_is_a_mean_over_the_radius_and_respects_validity():
+    lat = np.array([0.0])
+    lon = np.array([0.0, 1.0, 2.0, 180.0])
+    field = np.array([[0.0, 10.0, 20.0, 999.0]])
+    valid = np.array([[True, True, True, False]])
+    out = m._smooth_common_footprint(field, valid, lat, lon, radius_deg=1.5)
+    # cell 1 (lon 1) averages lon 0,1,2 -> 10; the far cell is excluded entirely
+    assert out[0, 1] == pytest.approx(10.0)
+    assert out[0, 0] == pytest.approx(5.0)      # averages lon 0,1
+    assert np.isnan(out[0, 3])
+
+
+def test_smoothing_removes_short_scale_structure_but_not_the_mean():
+    """The point of the control: it must damp the fine structure that one
+    source retains and the other has already lost, without shifting the mean."""
+    lat = np.array([0.0])
+    lon = np.arange(0.5, 360.0, 1.0)
+    valid = np.ones((1, lon.size), dtype=bool)
+    smooth = np.sin(np.deg2rad(lon))                       # resolved everywhere
+    noisy = smooth + 0.5 * (-1.0) ** np.arange(lon.size)   # 2-cell wiggle
+    o_s = m._smooth_common_footprint(smooth[None, :], valid, lat, lon, 3.0)
+    o_n = m._smooth_common_footprint(noisy[None, :], valid, lat, lon, 3.0)
+    assert np.nanstd(o_n - o_s) < 0.5 * np.std(noisy - smooth)
+    # The mean must not move MATERIALLY.  It does not move to machine precision:
+    # a hard-cutoff top-hat includes a different number of cells for cells whose
+    # neighbours sit exactly on the radius, so the stencil count jitters by one
+    # and the mean shifts by ~1e-4 of a unit-amplitude signal.  That is a
+    # property of the filter, not a defect -- but it means this control must
+    # never be used to compare MEANS at the 1e-4 level.
+    assert abs(np.nanmean(o_n) - np.mean(noisy)) < 1e-3
+
+
+# --------------------------------------------------------------------------
+# _json_safe
+# --------------------------------------------------------------------------
+def test_json_safe_nulls_non_finite_so_the_report_is_valid_json():
+    import json
+    r = {"corr": float("nan"), "deep": [1.0, float("inf")], "n": 3, "s": "x"}
+    safe = m._json_safe(r)
+    assert safe["corr"] is None and safe["deep"] == [1.0, None]
+    assert safe["n"] == 3 and safe["s"] == "x"
+    json.dumps(safe, allow_nan=False)           # would raise on a bare NaN

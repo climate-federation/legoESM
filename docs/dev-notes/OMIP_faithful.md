@@ -191,10 +191,27 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   trp -0.192/0.852, mpas -0.185/0.857, trp-mpas 0.245. SSS: trp +0.147/0.632,
   mpas +0.155/0.643, trp-mpas 0.162. **The two grids agree with each other 3.5-3.9x
   better than either agrees with NEMO** => the residual is SHARED physics, not
-  discretisation; grid-specific work cannot close it. Instrument control: rerunning at
-  2 deg (coarser than every source, so the k=4 IDW stencil cannot favour the two
-  ORCA1-scale fields) moves nothing (SSS global 0.632 vs 0.618, Arctic 1.980 vs 1.969),
-  refuting the review's concern that the regrid flatters tripole-vs-NEMO.
+  discretisation; grid-specific work cannot close it.
+
+  **Instrument control for that ratio — and a retracted first attempt.** I first
+  re-ran at 2 deg and called the artifact refuted. WRONG, and codex round 2 caught it:
+  `--res-deg` moves the target sample points but leaves the IDW regridder taking k=4
+  source neighbours, whose PHYSICAL footprint still differs per mesh (~60 km MPAS ico7
+  vs ~111 km ORCA1), so a 2-deg rerun can look stable whether or not the artifact
+  exists. The real control (`--smooth-radius-deg`) imposes ONE great-circle top-hat on
+  all three fields AFTER regridding. Global RMSE vs filter radius:
+  | radius | trp-NEMO | mpas-NEMO | trp-mpas | ratio |
+  |---|---|---|---|---|
+  | none | SST 0.8518 / SSS 0.6319 | 0.8566 / 0.6433 | 0.2448 / 0.1616 | 3.49 / 3.95 |
+  | 2 deg | 0.7993 / 0.5908 | 0.8013 / 0.6028 | 0.1751 / 0.1080 | 4.57 / 5.52 |
+  | 4 deg | 0.7362 / 0.5383 | 0.7345 / 0.5544 | 0.1297 / 0.0661 | 5.67 / 8.26 |
+  The artifact is REFUTED, on the prediction stated before the run: if the stencil
+  flattered tripole-vs-NEMO, tripole would degrade RELATIVE to MPAS as the common
+  filter widens. It does not — the two stay within 1-3% of each other at every radius
+  (4 deg: 0.5383 vs 0.5544). Second, unforced result: the cross-grid difference is
+  SMALL-SCALE (0.162 -> 0.066 under filtering) while the NEMO gap is LARGE-SCALE and
+  survives => the shared residual is a systematic large-scale physics/forcing
+  difference, not grid-scale noise.
 
   **★ FRESHWATER A/B — CONTROLLED (`nemolev_trp_gwcorr_d90` vs `nemolev_trp_fwreal_d90`,
   manifests differ by exactly `--freshwater-closure real_freshwater`), d90 vs NEMO m3.**
