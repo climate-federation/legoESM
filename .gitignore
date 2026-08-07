@@ -20,7 +20,7 @@ tasks/
 *.out
 *.toc
 *.synctex.gz
-
+.claude/**
 # Data and results artifacts
 *.zarr
 *.zarr/
@@ -103,7 +103,9 @@ validation_output/
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
-ralph/
+ralph/**
+.ralph/**
+claude/**
 .claude/ralph-loop.local.md
 .claude/scheduled_tasks.lock
 # Local-only Claude Code project instructions (never push to main)
@@ -180,3 +182,4 @@ data/*
 !data/les_cases/**
 e3sm-source/
 data/bathymetry/etopo_1deg_clean.nc
+.claude/settings.json

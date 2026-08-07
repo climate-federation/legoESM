@@ -150,9 +150,23 @@ PATTERN_FIELDS = (
     ("rlut", "observation_CERES-EBAF", "rlut", 1.0, "W/m2", "climatology", None),
     ("rsut", "observation_CERES-EBAF", "rsut", 1.0, "W/m2", "climatology", None),
     ("prw", "reanalysis_ERA5", "prw", 1.0, "kg/m2", "match", None),
+    # PROXY, pending switch-over: compares model psl against ERA5 *ps* on
+    # model-derived near-sea-level cells.  A real ERA5 `psl` reference is now
+    # staged (mon/psl, ECMWF param 151) and resolves through _open_ref, so
+    # this row becomes
+    #     ("psl", "reanalysis_ERA5", "psl", 0.01, "hPa", "match", None),
+    # once the in-flight comparison that depends on the proxy has finished.
+    # It is a REPLACEMENT, not an addition: `metrics` is keyed by the CMOR
+    # variable name, so a second "psl" row would silently overwrite the first.
     ("psl", "reanalysis_ERA5", "ps", 0.01, "hPa", "match", "lowelev"),
 )
-ZONAL3D_FIELDS = (("ta", "K", 1.0), ("ua", "m/s", 1.0), ("hus", "g/kg", 1000.0))
+# 3-D fields compared as zonal-mean pressure-latitude sections against ERA5.
+# `wap` (omega) is the circulation diagnostic: it shows WHERE the model lifts
+# air, which is the direct question behind a cloud-placement defect.  The
+# staged reference is on CMIP6 plev19 — the same axis the model's CMOR output
+# uses — so the plev interpolation in the section below is an identity.
+ZONAL3D_FIELDS = (("ta", "K", 1.0), ("ua", "m/s", 1.0), ("hus", "g/kg", 1000.0),
+                  ("wap", "Pa/s", 1.0))
 
 
 def parse_months(spec):
