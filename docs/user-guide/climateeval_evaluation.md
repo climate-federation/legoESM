@@ -95,18 +95,86 @@ what the run emits:
   (no reference data needed).
 - **`Tier1_consistency_checks`** — mass/water conservation (annual; needs
   a multi-year run to be meaningful).
-- **`Tier2_atmosphere_monthly`** — ERA5 spatial-skill (Map, ZonalLine,
-  ZonalProfile + leaderboard).
+- **`Tier2_atmosphere_monthly`** — spatial skill (Map, ZonalLine,
+  ZonalProfile + leaderboard) against each variable's own reference.
 - **`Tier2_ocean_monthly` / `Tier2_sea_ice_monthly`** — need `Omon` /
   `SImon` output (the runner loads the full `cmor/` tree so these score).
 - **`Tier3_*`** (subdaily / dynamics / ecs) — usually skipped for a short
   AMIP run (need sub-daily output, long integrations, or extra experiments).
 
-The runner forces every variable in each suite to reference ERA5
-specifically (stripping any other-model/other-reference entries), since
-the point of `--evaluate` is "how far off is legoESM from ERA5," not a
-multi-model intercomparison. Restrict with e.g.
-`--evaluation-suite Tier2_atmosphere_monthly` for a single suite.
+### Which reference each variable is scored against
+
+Each variable is scored against **its own suite-designated reference**
+when that reference is staged in `--data-root-dir`, and falls back to ERA5
+only when it is not (`--reference-policy designated`, the default). So
+`rsut`/`rlut`/`rtnt`/`swcre`/`lwcre` score against CERES-EBAF,
+`hfls`/`hfss` against MERRA2, `pr` against GPCP and `tas` against HadCRUT5
+if those are present; `clivi`/`clt`/`lwp` fall back to ERA5 when
+ESACCI-CLOUD is not staged. A variable that neither its designated
+reference nor ERA5 provides (e.g. `clwvi`) is reported as having no
+reference and skipped, rather than being scored against something that
+does not contain the quantity. The run prints its per-variable reference
+decisions, so the log says exactly which reference produced which number.
+
+This replaced an earlier blanket rewrite that forced **every** reference
+to ERA5. Because the staged ERA5 has no `rsut`, `rlut`, `hfls`, `hfss` or
+`clwvi`, that rewrite silently deleted every TOA-radiation and
+surface-flux metric the suites would otherwise have produced (8 of 19
+variables x 4 diagnostics in `Tier2_atmosphere_monthly` alone). Pass
+`--reference-policy era5-only` to reproduce the old ERA5-only scorecard;
+note that `pr` and `tas` change reference between the two policies, so
+those numbers are **not** comparable across them.
+
+`other_data` (CMIP6 multi-model intercomparison) entries are still
+stripped by default — the point of `--evaluate` is model-vs-observations —
+but unlike the reference rewrite this discards no observational metric.
+Pass `--keep-other-data` to keep them. Restrict to one suite with e.g.
+`--evaluation-suite Tier2_atmosphere_monthly`.
+
+### Output frequency and suite selection
+
+Model cubes are loaded per **frequency group**: ClimateEval selects a
+model cube by `var_name` alone, with no frequency filter, so the runner
+loads only the CMOR tables matching the frequency each diagnostic asks for
+(`Amon`/`Omon`/... for `mon`, `day`/`CFday`/... for `day`) plus the fixed
+fields. A suite mixing frequencies — `Tier3_dynamics` has a daily
+Hovmoller and a monthly QBO — is run as two groups into the same `.ddb`.
+If the run wrote no output at a requested frequency (e.g. no `1hr` tables
+for `Tier3_atmosphere_subdaily`), those diagnostics are skipped **and
+reported** rather than being silently served monthly means.
+
+`climateeval check` runs before each benchmark group: it validates
+presence, coordinates, units, timerange coverage and levels from metadata
+only, so a reference-window mismatch (`Tier3_dynamics` pins Hovmoller to
+`20000101/20021231` and QBO to `19900101/20091231`) is reported before the
+expensive reference load rather than after it.
+
+### Groups that cannot produce a metric are skipped
+
+If that check finds **no usable model variable at all** for a group, no
+metric is possible, so the group is skipped and reported instead of run.
+On an atmosphere-only AMIP tree this skips `Tier2_ocean_monthly` (0/6
+required variables: amoc, chl, mlotst, phcint, so, tos) and
+`Tier2_sea_ice_monthly` (0/1: siconc).
+
+This is a large saving, measured not estimated: the same evaluation of the
+same run took **4 h 25 m** before and **25 m** after (10.4x), because
+`Tier2_ocean_monthly` alone spent ~4 h loading ORAS5 and area-weight-
+regridding its irregular grid for three `mlotst` variables the model never
+wrote. A controlled re-run confirmed **zero metric rows lost** (75 before,
+75 after) and every non-skipped suite's row counts unchanged.
+
+The decision is taken from **model** data only. It never consults the
+reference-availability probe, so a reference that probe cannot see —
+`ORAS5` and `RAPID` read from outside `--data-root-dir` — can never cause
+a scoreable group to be dropped. An empty check result (the check itself
+failed, or the suite needs no model input) never skips: the rule fails
+open on ignorance.
+
+What the default costs is reference-only rows: the observed RAPID AMOC
+series and the ORAS5 mixed-layer-depth annual cycle, curves with no model
+to compare against (33 rows here). Pass `--run-unscoreable-groups` to keep
+them, at the ~4 h price.
 
 ### Short runs and per-variable metric failures
 

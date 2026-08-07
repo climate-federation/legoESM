@@ -182,19 +182,56 @@ def parse_months(spec):
     return sorted(out)
 
 
-def _open_cmor(run_dir: Path, var: str, months=None):
-    """Open a CMOR variable, optionally restricted to calendar ``months``.
+def parse_years(spec):
+    """Parse a ``--years`` spec ("1979", "1979-1983", "1979,1981") -> sorted list.
 
-    The month filter is applied HERE so every consumer (pattern maps, zonal
+    Returns None for an empty spec (= use every year the run wrote).  Raises on
+    a reversed range or a non-integer rather than silently dropping it: pinning
+    the year is precisely the guard against a sampling confound, so a typo that
+    quietly widened the window would defeat the purpose.
+    """
+    if not spec:
+        return None
+    out = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part[1:]:
+            a, b = part.split("-", 1)
+            lo, hi = int(a), int(b)
+            if lo > hi:
+                raise ValueError(f"--years range {part!r} is reversed")
+            out.update(range(lo, hi + 1))
+        else:
+            out.add(int(part))
+    if not out:
+        raise ValueError(f"--years {spec!r} selected no year")
+    return sorted(out)
+
+
+def _open_cmor(run_dir: Path, var: str, months=None, years=None):
+    """Open a CMOR variable, optionally restricted to calendar ``months``/``years``.
+
+    Both filters are applied HERE so every consumer (pattern maps, zonal
     sections, the TOA/Bowen table) shares one window — comparing two runs
     whose CMOR archives have different lengths requires pinning the window on
     both, else the difference is a sampling confound rather than a result.
+
+    ``years`` matters whenever the two runs span different numbers of YEARS: a
+    1-year run and a 10-year run both asked for "months 1-3" select 3 and 3N
+    records respectively, so the comparison silently averages different
+    samples.  Pin the year when comparing a short run against a long one.
     """
     import xarray as xr
     hits = sorted(glob.glob(str(run_dir / "cmor" / "Amon" / f"{var}_*.nc")))
     if not hits:
         return None
     da = xr.open_mfdataset(hits, combine="by_coords")[var]
+    if years is not None:
+        da = da.sel(time=da["time"].dt.year.isin(years))
+        if da.sizes.get("time", 0) == 0:
+            return None
     if months is not None:
         da = da.sel(time=da["time"].dt.month.isin(months))
         if da.sizes.get("time", 0) == 0:
@@ -278,8 +315,21 @@ def main() -> int:
                          "calendar months (e.g. '1-8' or '1,2,12'); "
                          "default = every month the run wrote. Pin this "
                          "when comparing runs of different length.")
+    ap.add_argument("--years", default="",
+                    help="restrict the MODEL to these calendar years (e.g. "
+                         "'1979' or '1979-1983'); default = every year the run "
+                         "wrote. PIN THIS when comparing a short run against a "
+                         "longer one — otherwise 'months 1-3' selects 3 records "
+                         "from a 1-year run and 3N from an N-year run, and the "
+                         "difference is a sampling confound, not a result.")
+    ap.add_argument("--json", default="", metavar="PATH",
+                    help="also write the metrics table as JSON (same numbers "
+                         "as _metrics.txt, machine-readable). Consumers: "
+                         "legoesm.training.amip_scorecard / "
+                         "scripts/validate/amip_scorecard.py.")
     args = ap.parse_args()
     months = parse_months(args.months)
+    years = parse_years(args.years)
     run = args.run_dir
     label = args.label or run.name
     out_prefix = args.out or str(run / "pattern_eval")
@@ -291,7 +341,7 @@ def main() -> int:
     fig, axes = plt.subplots(nf, 3, figsize=(16, 3.1 * nf))
     for i, (var, refset, refvar, scale, unit, epoch, mask_kind) \
             in enumerate(PATTERN_FIELDS):
-        da = _open_cmor(run, var, months)
+        da = _open_cmor(run, var, months, years)
         if da is None:
             for ax in axes[i]:
                 ax.set_axis_off()
@@ -312,7 +362,7 @@ def main() -> int:
         mv = np.asarray(model.values)
         rv = np.asarray(ref_i.values)
         if mask_kind == "lowelev":
-            ps_da = _open_cmor(run, "ps", months)
+            ps_da = _open_cmor(run, "ps", months, years)
             if ps_da is None:
                 for ax in axes[i]:
                     ax.set_axis_off()
@@ -353,7 +403,7 @@ def main() -> int:
     fig2, axes2 = plt.subplots(len(ZONAL3D_FIELDS), 3,
                                figsize=(15, 4.2 * len(ZONAL3D_FIELDS)))
     for i, (var, unit, scale) in enumerate(ZONAL3D_FIELDS):
-        da = _open_cmor(run, var, months)
+        da = _open_cmor(run, var, months, years)
         ref_da = _open_ref(args.ref_root, "reanalysis_ERA5", var)
         if da is None or ref_da is None:
             for ax in axes2[i]:
@@ -404,7 +454,7 @@ def main() -> int:
     # are ~ +9 / -10 x 1e10 kg/s; NH positive / SH negative in this sign
     # convention, see meridional_streamfunction).
     hadley_lines = []
-    va_da = _open_cmor(run, "va", months)
+    va_da = _open_cmor(run, "va", months, years)
     if va_da is None:
         hadley_lines.append("hadley: no va in CMOR output — panel skipped")
     else:
@@ -459,7 +509,7 @@ def main() -> int:
     # TOA budget + E-P closure from the model's own CMOR output
     extras = {}
     for v in ("rsdt", "rsut", "rlut", "pr", "evspsbl", "hfls", "hfss"):
-        da = _open_cmor(run, v, months)
+        da = _open_cmor(run, v, months, years)
         if da is not None:
             extras[v] = weighted_global_mean(
                 np.asarray(da.mean("time").values), da["lat"].values)
@@ -480,6 +530,23 @@ def main() -> int:
     print(report)
     with open(f"{out_prefix}_metrics.txt", "w") as fh:
         fh.write(report + "\n")
+    # Machine-readable twin of the text report.  Same `metrics` dict, so the
+    # JSON can never disagree with the .txt a human reads -- the numbers are
+    # not recomputed here.
+    if args.json:
+        import json
+        payload = {
+            "label": label,
+            "run_dir": str(run),
+            "months": months,
+            "years": years,
+            "ref_root": str(args.ref_root),
+            "fields": {k: dict(v) for k, v in metrics.items()},
+            "global_means": {k: float(v) for k, v in extras.items()},
+        }
+        with open(args.json, "w") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        print(f"wrote {args.json}")
     print(f"\nwrote {out_prefix}_maps.png / _zonal.png / _hadley.png / "
           "_metrics.txt")
     return 0

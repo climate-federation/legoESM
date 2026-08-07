@@ -7,6 +7,7 @@ cases so a silent weighting or centering slip cannot grade a run wrong.
 
 from __future__ import annotations
 
+import re
 import importlib.util
 from pathlib import Path
 
@@ -180,3 +181,40 @@ def test_low_elevation_mask_polarity_and_nan():
     # sea-level cell kept, mountain cell (63 hPa apart) dropped, exact kept,
     # NaN dropped
     np.testing.assert_array_equal(mask, [[True, False, True, False]])
+
+
+# --------------------------------------------------------------------------
+# --years window pin (guards the short-run vs long-run sampling confound)
+# --------------------------------------------------------------------------
+
+def test_parse_years_single_range_and_list():
+    parse_years = _mod.parse_years
+    assert parse_years("1979") == [1979]
+    assert parse_years("1979-1981") == [1979, 1980, 1981]
+    assert parse_years("1979,1981") == [1979, 1981]
+    assert parse_years("") is None
+    assert parse_years(None) is None
+
+
+def test_parse_years_rejects_reversed_range():
+    parse_years = _mod.parse_years
+    with pytest.raises(ValueError, match="reversed"):
+        parse_years("1983-1979")
+
+
+def test_parse_years_rejects_non_integer():
+    parse_years = _mod.parse_years
+    with pytest.raises(ValueError):
+        parse_years("nineteen-seventy-nine")
+
+
+def test_open_cmor_accepts_years_argument():
+    """The year filter must be threaded to every consumer, not just one."""
+    import inspect
+    m = _mod
+    assert "years" in inspect.signature(m._open_cmor).parameters
+    src = inspect.getsource(m.main)
+    assert "parse_years(args.years)" in src
+    # every _open_cmor call inside main must pass the year window through
+    for call in re.findall(r"_open_cmor\([^)]*\)", src):
+        assert "years" in call, f"year window not threaded: {call}"
