@@ -83,6 +83,17 @@ if SURF_PLACEMENT not in ("applied_now", "leapfrog_rhs"):
                       "expected 'applied_now' or 'leapfrog_rhs'")
 cfg = dataclasses.replace(cfg, surface_tendency_placement=SURF_PLACEMENT)
 print(f"surface_tendency_placement={SURF_PLACEMENT}")
+if os.environ.get("DINO_FIX_ETA_DRIFT") is not None:
+    # W1b: fix_eta_drift (state.py) is a global uniform-eta projection
+    # applied post-barotropic-solve (ocean_model_latlon_cgrid.py:3432-3469)
+    # with no NEMO analogue. Testing whether this compensator masks part of
+    # the armB topographic form-stress deficit -- ablation, not a recipe
+    # default change.
+    _v = os.environ["DINO_FIX_ETA_DRIFT"]
+    if _v not in ("0", "1"):
+        raise SystemExit(f"Unknown DINO_FIX_ETA_DRIFT={_v!r}: expected '0' or '1'")
+    cfg = dataclasses.replace(cfg, fix_eta_drift=(_v == "1"))
+    print(f"ABLATION: fix_eta_drift={cfg.fix_eta_drift}")
 USE_RHS = SURF_PLACEMENT == "leapfrog_rhs"
 if INIT_RESTART:
     st = br.state          # the bridged NEMO state itself, NOT the analytic rest IC
