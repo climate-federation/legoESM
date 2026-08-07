@@ -2749,11 +2749,20 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "the SAME coefficients feed both sides and the comparison isolates "
         "the SOLVER only."),
     "dyn_zdf (momentum implicit vertical solve)": (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
-        "(coverage_rows_measure.py): stp_dump_state_and_bt('dynspg') "
-        "(pre, stpmlf.F90:293) and stp_dump_state_and_bt('dynzdf') (post, "
-        "stpmlf.F90:312) DO bracket the call, but dynzdf.F90:148-171 folds "
+        "GAP confirmed 2026-08-06 (#1492 W3, dyn_zdf_probe.py): the intended "
+        "bracket is BROKEN AT THE NEMO-DUMP LEVEL, not probe-fixable. "
+        "stpmlf.F90:478-481 swaps Naa/Nrhs to the SAME array slot in the step "
+        "body, and MLF dyn_spg_ts (dynspg_ts.F90:1168-1170) writes its "
+        "velocity correction into Kmm, never Kaa -- so the stage-7 'pre' dump "
+        "is the Krhs tendency accumulator (~1e-6..1e-7 m/s2), NOT a velocity "
+        "state (5+ orders below the ~0.01-0.5 m/s stage-8 scale). End-to-end "
+        "(NOT solver-isolated) lego-vs-NEMO stage-8: u corr 0.9450/ratio "
+        "1.153, v 0.9412/1.229 -- reported honestly as non-isolating. "
+        "Closing needs a NEW NEMO dump (Krhs AFTER dyn_spg's corrections, "
+        "BEFORE dyn_zdf) or porting dyn_spg's Krhs-correction. Still "
+        "enumerated by stpmlf_call_coverage.py (call-graph coverage), still "
+        "UNMEASURED. Legacy note below (bottom-drag fold) still applies as a "
+        "second gap: dynzdf.F90:148-171 folds "
         "in an IMPLICIT BOTTOM-DRAG term (ln_drgimp.AND.ln_dynspg_ts, both "
         "True for DINO) directly into the tridiagonal matrix -- a term "
         "implicit_vertical_diffusion_ocean's plain zero-flux-BC solver "
@@ -2808,19 +2817,19 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "or porting compute_ocean_jacobian's caller to accept a per-column "
         "LOCAL r3u/r3v-style stretch as an alternative to the GLOBAL J, "
         "then bracketing the two the same way the tra_sbc fix did."),
-    "traldf_iso_lap tendency":       (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
-        "(coverage_rows_measure.py): no MY_SRC override of "
-        "traldf.F90/traldf_iso.F90 exists at all (grep across "
-        "cfgs/DINO/MY_SRC/*.F90 for 'ldftra_dump'/'ldf_dump' finds only "
-        "the ahtu/ahtv COEFFICIENT dumps in ldftra.F90 and the "
-        "momentum-side ahmt/ahmf in dynldf.F90 -- nothing brackets "
-        "traldf_iso_lap's own Krhs increment). REQUIRES INSTRUMENTATION: "
-        "a stp_dump_krhs-style bracket around stpmlf.F90:428 "
-        "`CALL tra_ldf(...)` (before/after ts(Nrhs) snapshot, same pattern "
-        "as dyn_ldf's existing ll_ldf_dump block in dynldf.F90) at the "
-        "next NEMO rebuild."),
+    "traldf_iso_lap tendency":       (0.999987, 0.999466,
+        "MEASURED 2026-08-06 (#1492 W3, traldf_iso_lap_probe.py, fp64, "
+        "LEGOESM_NEMO_E3T=both). The 2026-07-30 'REQUIRES INSTRUMENTATION "
+        "at next rebuild' note was STALE: the dumps DO exist -- "
+        "stp_dump_22_before_traldf / stp_dump_23_after_traldf genuinely "
+        "bracket tra_ldf's own Nrhs increment (stpmlf.F90:429-435's own "
+        "comment confirms nothing else writes Nrhs between them). Spied "
+        "nemo_iso_lap_tracer_tendency_latlon_cgrid on a real model.step (Nbb "
+        "pass, input tracer bit-identical to state.T_before/S_before on the "
+        "wet mask). tem corr=0.999987/|x|ratio=0.999466/median err_norm "
+        "5.35e-5/p99 1.73e-2; sal corr=0.999974/0.999256/median 3.33e-5. "
+        "Sharp (0,0,0) alignment (no misalignment artifact). DEBT-tier, "
+        "close match; slopes upstream are DEBT/NEAR-CLASS so this inherits."),
     "ldf_dyn coefficient":           (1.0, 1.00001399,
         "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
         "fp64, LEGOESM_NEMO_E3T=both). ldf_dump_ahmt.bin/ldf_dump_ahmf.bin "
@@ -3367,8 +3376,8 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct (SALINITY)": "traadv_fct_probe.py",
     "wzv (vertical velocity)": "wzv_row_measure.py",  # RE-MEASURED #1455: coverage_rows_measure.py's own claim ("ww never dumped") was stale; supersedes it
     "tra_zdf (tracer implicit vertical solve)": "coverage_rows_measure.py",
-    "dyn_zdf (momentum implicit vertical solve)": "coverage_rows_measure.py",
-    "traldf_iso_lap tendency": "coverage_rows_measure.py",
+    "dyn_zdf (momentum implicit vertical solve)": "dyn_zdf_probe.py",
+    "traldf_iso_lap tendency": "traldf_iso_lap_probe.py",
     "ldf_dyn coefficient": "coverage_rows_measure.py",
     "tra_qsr (shortwave penetration)": "coverage_rows_measure.py",
     "ssh_atf": "coverage_rows_measure.py",

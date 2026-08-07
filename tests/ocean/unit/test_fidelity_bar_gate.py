@@ -160,8 +160,14 @@ def test_nine_uncovered_routines_are_unmeasured_rows():
     mod = _load_module()
     still_unmeasured = {
         "tra_zdf (tracer implicit vertical solve)",
+        # dyn_zdf: probed 2026-08-06 (#1492 W3) but the NEMO dump bracket is
+        # broken at the source level (Naa/Nrhs slot-alias in MLF), so no
+        # solver-isolated number exists -- genuinely still UNMEASURED, needs
+        # a new NEMO dump, not a probe.
         "dyn_zdf (momentum implicit vertical solve)",
-        "traldf_iso_lap tendency",
+        # traldf_iso_lap MOVED OUT: measured 2026-08-06 (#1492 W3,
+        # traldf_iso_lap_probe.py) once its "needs instrumentation" note was
+        # found STALE (stp_dump_22/23_*_traldf dumps exist) -- now DEBT.
     }
     now_measured = {
         "ldf_dyn coefficient",
@@ -169,6 +175,12 @@ def test_nine_uncovered_routines_are_unmeasured_rows():
         "ssh_atf",
         "tra_sbc",
     }
+    # traldf_iso_lap uses its own probe, not coverage_rows_measure.py, so it
+    # is checked separately below rather than in the now_measured loop.
+    corr_t, ratio_t, note_t = mod.MEASUREMENTS["traldf_iso_lap tendency"]
+    assert corr_t is not None and ratio_t is not None
+    assert mod.classify(corr_t, ratio_t, name="traldf_iso_lap tendency") in ("AT BAR", "DEBT")
+    assert "traldf_iso_lap_probe.py" in note_t
     assert still_unmeasured.issubset(mod.MEASUREMENTS.keys())
     assert now_measured.issubset(mod.MEASUREMENTS.keys())
     for term in still_unmeasured:
