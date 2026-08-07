@@ -1249,7 +1249,8 @@ SPMD_HALO_DEPTH = 3
 
 def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
                        already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
-                       ppermute_cells_per_device_threshold=2_000):
+                       ppermute_cells_per_device_threshold=2_000,
+                       round_profile_for_device=None):
     """How much halo communication one ownership choice costs, computed offline.
 
     Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
@@ -1310,6 +1311,27 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
     ppermute_cells_per_device_threshold : int
         Mirror of the production auto-select threshold, only used to report
         ``production_strategy``.
+    round_profile_for_device : int | None
+        When set to a device id, also return ``round_profile``: the per-round
+        payload THAT DEVICE exchanges, in schedule order, restricted to the
+        rounds it actually participates in.
+
+        This exists to make a profiler trace interpretable.  An ``nsys``
+        capture is per RANK, and a rank appears only in the colour classes
+        that touch it -- at s9/np64 rank 0 shows 8 ``SendRecv`` per halo fill
+        while the graph's ``max_degree`` is 11 -- so the k-th observed
+        collective is the k-th round CONTAINING THAT DEVICE, not the k-th
+        round.  Pairing measured durations against all rounds would silently
+        misalign them.
+
+        Each entry gives ``round`` (index in the full schedule), ``partner``
+        and ``halo_cells``/``halo_edges`` -- the schedule's per-round PADDED
+        extents, which are what goes on the wire: the index arrays are
+        ``(n_dev, max_c)`` and ``ppermute`` moves the whole padded buffer, so
+        a pair's own send count does not set its cost.  Sizes are ENTITY
+        COUNTS, not bytes; converting needs the packed cell width from
+        :func:`_pack_cell_state` (``nlev*(1+n_tracers)+2``) for cells and
+        ``nlev`` for edges.
 
     Returns
     -------
@@ -1397,7 +1419,46 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
         "cells_per_device": cells_per,
         "max_local_cells": int(max_lc),
         "max_local_edges": int(max_le),
+        **(
+            {} if round_profile_for_device is None else
+            {"round_profile": _round_profile(sched, round_profile_for_device,
+                                             n_dev)}
+        ),
     }
+
+
+def _round_profile(sched, device, n_dev):
+    """Per-round payload for ONE device, in the order it observes them.
+
+    See ``spmd_schedule_cost``'s ``round_profile_for_device``.  Only rounds
+    whose colour class touches *device* are returned, because those are the
+    only ones on which it issues a collective.
+    """
+    # Strict, like the n_dev check: int() would coerce 0.9 to 0 and silently
+    # profile a different device than the caller named.
+    if int(device) != device or not 0 <= device < n_dev:
+        raise ValueError(
+            f"round_profile_for_device must be an integer in [0, {n_dev}), "
+            f"got {device!r}")
+    device = int(device)
+    out = []
+    for r, perm in enumerate(sched["ppermute_perms"]):
+        partner = next((dst for src, dst in perm if src == device), None)
+        if partner is None:
+            continue
+        # halo_cells_per_round is the round's PADDED extent, and that is the
+        # right payload measure rather than a per-pair count: the index
+        # arrays are (n_dev, max_c) and ppermute moves the padded buffer, so
+        # every pair in the round puts max_c entities on the wire.  (The
+        # per-pair send maps cannot be recovered from those arrays anyway --
+        # they are zero-padded and 0 is a valid index.)
+        out.append({
+            "round": r,
+            "partner": int(partner),
+            "halo_cells": int(sched["halo_cells_per_round"][r]),
+            "halo_edges": int(sched["halo_edges_per_round"][r]),
+        })
+    return out
 
 
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
