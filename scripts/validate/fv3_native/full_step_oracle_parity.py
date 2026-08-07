@@ -210,6 +210,27 @@ DIHEDRAL = {"id": lambda a: a,
             "fj": lambda a: a[:, ::-1, ...],
             "r180": lambda a: a[::-1, ::-1, ...]}
 
+# THE WIND SIGNS ARE DERIVED, NOT SEARCHED. `u` is the D-grid component
+# along i and `v` the one along j, so a reflection negates the component
+# ALONG the reversed axis and leaves the other alone. That is a property
+# of the dihedral, not a free parameter:
+DIHEDRAL_SIGNS = {"id": (1.0, 1.0), "fi": (-1.0, 1.0),
+                  "fj": (1.0, -1.0), "r180": (-1.0, -1.0)}
+# Searching the two signs independently -- which this script did until the
+# residuals below forced the question -- lets the search pick a signed
+# permutation that is not a rigid relabelling at all (an identity map that
+# flips only u), and it WILL pick one whenever a component is numerically
+# zero on that face and its sign is therefore unconstrained. Measured: on
+# the J&W IC, port faces 2, 4 and 5 each have one wind component at ~1e-13,
+# the free search chose arbitrarily on all three, and those are EXACTLY the
+# three faces whose one-step residual came out at 2-4e-3 while the other
+# three sat at 1e-6..1e-8. Face 2's v residual was 0.0851 against an oracle
+# tendency of 0.0385 -- twice the signal, the signature of a flipped sign.
+# The derived rule reproduces the search's answer on every face where the
+# signs ARE constrained (face 1 transpose fj -> (+,-), face 3 direct r180
+# -> (-,-), face 6 direct id -> (+,+)), which is the evidence that the rule
+# is right rather than merely tidier.
+
 
 def oracle_ij(arr, transposed: bool):
     """Oracle array (k, j, i) -> port orientation (i, j, k).
@@ -241,6 +262,11 @@ def rel(a, b, scale: float | None = None) -> float:
     both sides.  A zero component is then judged against the wind speed
     that is actually present, which is what "these agree" has to mean.
     """
+    # A NaN anywhere must be INFINITE, not NaN: `max(0.0, nan)` is 0.0 in
+    # Python, so a single NaN in an otherwise exact step would sail through
+    # a `worst > threshold` gate. Return inf so it can only ever fail.
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return float("inf")
     if scale is None:
         scale = max(float(np.abs(a).max()), float(np.abs(b).max()))
     if scale == 0.0:
@@ -299,15 +325,13 @@ def score_pair(port, orc) -> tuple:
             # evaluate it once and let it floor the score.
             r_pt = rel(f(port["pt"]), opt)
             r_dp = rel(f(port["delp"]), odp)
-            for su in (1.0, -1.0):
-                for sv in (1.0, -1.0):
-                    r_u = rel(su * fu, pu_o, ws)
-                    r_v = rel(sv * fv, pv_o, ws)
-                    r = max(r_u, r_v, r_pt, r_dp)
-                    if r < best[0]:
-                        best = (r, transposed, nm, su, sv,
-                                {"u": r_u, "v": r_v, "pt": r_pt,
-                                 "delp": r_dp})
+            su, sv = DIHEDRAL_SIGNS[nm]
+            r_u = rel(su * fu, pu_o, ws)
+            r_v = rel(sv * fv, pv_o, ws)
+            r = max(r_u, r_v, r_pt, r_dp)
+            if r < best[0]:
+                best = (r, transposed, nm, su, sv,
+                        {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp})
     return best
 
 
@@ -330,11 +354,10 @@ def score_pair_winds_only(port, orc) -> tuple:
             continue
         for nm, f in DIHEDRAL.items():
             fu, fv = f(port["u"]), f(port["v"])
-            for su in (1.0, -1.0):
-                for sv in (1.0, -1.0):
-                    r = max(rel(su * fu, pu_o, ws), rel(sv * fv, pv_o, ws))
-                    if r < best[0]:
-                        best = (r, transposed, nm, su, sv)
+            su, sv = DIHEDRAL_SIGNS[nm]
+            r = max(rel(su * fu, pu_o, ws), rel(sv * fv, pv_o, ws))
+            if r < best[0]:
+                best = (r, transposed, nm, su, sv)
     return best
 
 
@@ -649,6 +672,26 @@ def main(argv=None):
                       "frac_of_tendency": (absd / tend[f][ot]
                                            if tend[f][ot] else float("nan"))}
             worst_step = max(worst_step, r)
+        # WHERE the residual lives, on the same terms as the sub-step
+        # trace: a panel-boundary-concentrated remainder is a halo/edge
+        # defect, a spread one is a discrete-balance difference. Reporting
+        # only the peak cannot tell them apart.
+        for f in ("u", "v", "pt", "delp"):
+            a_, b_ = pairs[f]
+            d = np.abs(a_ - b_)
+            pk_ = float(d.max())
+            if pk_ == 0.0:
+                continue
+            big = d > 0.1 * pk_
+            ni, nj = d.shape[0], d.shape[1]
+            ii, jj = np.nonzero(big.any(axis=2))
+            nedge = int(np.count_nonzero((ii < 3) | (ii >= ni - 3) |
+                                         (jj < 3) | (jj >= nj - 3)))
+            row[f]["cells_over_10pct"] = int(len(ii))
+            row[f]["of_which_within_3_of_boundary"] = nedge
+            row[f]["argmax_ijk"] = [int(x) for x in
+                                    np.unravel_index(int(np.argmax(d)),
+                                                     d.shape)]
         res[f"face{pf+1}->tile{ot+1}"] = row
         print(f"  face {pf+1} -> tile {ot+1}:")
         for f in ("u", "v", "pt", "delp"):
@@ -656,7 +699,11 @@ def main(argv=None):
             print(f"      {f:5s} rel={d['rel']:9.3e}  "
                   f"|d|max={d['max_abs_diff']:11.5g}  "
                   f"tendency={d['oracle_tendency']:11.5g}  "
-                  f"|d|/tend={d['frac_of_tendency']:9.3e}")
+                  f"|d|/tend={d['frac_of_tendency']:9.3e}  "
+                  f"at={d.get('argmax_ijk')}  "
+                  f"cells>10%={d.get('cells_over_10pct')} "
+                  f"({d.get('of_which_within_3_of_boundary')} at a "
+                  f"boundary)")
 
     print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
     print(f"IC control (same harness, same map): {worst:.4e}")
