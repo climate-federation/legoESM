@@ -1,3 +1,36 @@
+# PGF REFUTED / DEFICIT LOCALIZED 2026-08-06 — mid-depth density distortion at the sill flank
+
+**PGF hypothesis REFUTED (CONFIRMED).** DINO's NEMO runs `ln_zco_nam=.true.` /
+`ln_zps_nam=.false.` (FULL-STEP z, NO partial cells) with `ln_hpg_sco=.true.`
+(`RUN_20Y/namelist_cfg:70-72,342-346`; `dynhpg.F90:305-393`, guarded by the `ioptio/=1`
+ctl_stop at :197). armB's card selects `pgf_scheme="nemo_sco"` + `nemo_trapezoid` +
+`masked_zco` (`dino.py:1033-1035`) — a line-cited transcription of the same `zhpi`/`zuap`
+terms (`ocean_pe_latlon_cgrid.py:1620-1696`). **No scheme or coordinate DIFF exists; there is
+no faithful knob left to flip.** (`dyn_hpg (dv)`'s 0.999987 is the deferred v-face metric
+convention, unrelated.)
+
+**LOCALIZATION — overturns the parent lane's "distributed sub-percent" read (CONFIRMED,
+2 new exactness controls C6/C7: per-longitude and per-depth partitions each sum EXACTLY to the
+parent probe's scalar, all three years; parent's 5 controls re-passed):**
+- **Geographically CONCENTRATED**: at y20 columns **11+12 alone = 30%** of the total
+  |lego−NEMO| difference — the steep WESTERN sill flank where |dH/dx| peaks ~2x the surroundings;
+  top-5 columns (10,11,12,13,15) = **53%**. Secondary concentration on the eastern flank (47-51).
+- **Vertically SPECIFIC**: F_topo is a small residual between large opposing upper/lower
+  contributions (each ~300-460% of the net). The **MID-DEPTH band (178-913 m) ratio collapses
+  from ~1.00 (y6-10 control) to 0.62-0.69 (y14-20)** while upper and lower bands OVERSHOOT
+  (1.4-1.7). Onset y11-13 — matching the scalar step exactly.
+
+⇒ **armB is not mis-computing the pressure force; it is feeding an EXACT formula a distorted
+MID-DEPTH DENSITY FIELD over the steep sill flank.** Thermocline-depth water at precisely where
+isopycnals intersect topography.
+
+**NEXT (the narrowed question):** what distorts mid-depth density at a steep flank? Leading
+candidates, all state-dependent and all per-step-exact so the gate cannot see them: isoneutral
+slope treatment where isopycnals meet topography (the `rn_slpmax=0.01` clipping; the CEILING'd
+`ldf_slp` family; note the fixed #1226 sub-seafloor slope leak was this same family), the
+near-bottom slope taper, and spurious diapycnal mixing from advection over the steep slope.
+Compare the DENSITY FIELD itself — armB vs NEMO, columns 10-15, mid-depth, across years.
+
 # FORM STRESS = THE MISSING ARREST 2026-08-06 — and the 1.5x GM claim is RETRACTED
 
 **RETRACTION FIRST (mine, recorded earlier today as CONFIRMED):** "NEMO's kappa_gm is 1.5x
