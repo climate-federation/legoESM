@@ -161,6 +161,68 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
 
 ## Iteration log
 
+- **2026-08-07b (ARCTIC SPLIT INTO TWO DEFECTS; native-cell comparison unlocked):**
+  New committed probe `scripts/validate/ocean_fidelity/arctic_deep_convection_columns.py`.
+
+  **★ THE MESHES ARE IDENTICAL — STOP REGRIDDING TRIPOLE vs NEMO.** Our tripole runs
+  on eORCA1 and so does the NEMO oracle. Verified offset `j0=0, i0=1` with
+  **max|dlat| = 1.4e-14 deg** (the probe SEARCHES for the offset and refuses to run
+  unless it verifies). Every tripole-vs-NEMO number can therefore be computed
+  cell-for-cell with ZERO interpolation, removing the largest standing source of
+  doubt. TRAP, cost one failed run: the first attempt reported an 84-degree
+  mismatch, which was entirely NEMO grid_T's fill row (`nav_lat = -1.0` against a
+  real -84.2) dominating a max reduction. Match on NEMO's OCEAN cells only.
+
+  **★ INSTRUMENT FIRST: a deep MLD is often a SATURATED DIAGNOSTIC.**
+  `diagnostics.mixed_layer_depth` ends `mld = where(has_crossing, mld_cross, bottom)`,
+  so a column with no density crossing returns its bottom depth EXACTLY. Day 90 vs
+  NEMO March, of 6225 Arctic (>=60N) columns:
+  | | VSF control | real FW | NEMO |
+  |---|---|---|---|
+  | deeper than 500 m | 302 | 466 | 89 |
+  | no crossing at all | 26 | **168** | - |
+  | **genuine deep** | **271** | **291** | **84** |
+  **RETRACTS the 2026-08-07a reading** that real freshwater roughly doubles Arctic
+  deep convection. The genuine count moves 271->291 (+7%); the apparent +54% is
+  the diagnostic saturating. The ~3.4x excess over NEMO is present in BOTH arms and
+  is NOT caused by the freshwater closure.
+
+  **★ THE ARCTIC IS TWO SEPARATE DEFECTS, ANTI-COLOCATED.** Genuine-deep columns vs
+  the rest of the Arctic: median H_bathy 2152 m vs 286 m, ice fraction **0.19 vs
+  0.87**, median dSSS vs NEMO **+0.08 vs +0.80**, all statically unstable vs 32%.
+  So the salinity bias lives on ice-covered shelves and the convection defect lives
+  in ice-free deep basins. By position the worst columns are the
+  **Greenland/Norwegian Seas** (75-78N, 355-3E) and, in the real-FW arm, the
+  **Labrador Sea** (60N, 300-302E), reaching **1800-2600 m where NEMO holds
+  20-160 m**. Stop reporting these as one "Arctic problem".
+
+  **LEVER (config gap CONFIRMED, causation PLAUSIBLE).** NEMO ORCA1
+  `EXP00/namelist_cfg` sets `ln_mle = .true.` (namtra_mle) and `ln_zdfevd = .true.,
+  rn_evd = 100`. Every arm scored in this campaign ran `MLE=off`, `convection=none`.
+  We HAVE `mle_latlon_cgrid.py` + `--mle` (tripole-wired, threaded at
+  run_omip_core2.py:875/888) and its `MLEConfig` defaults already mirror ORCA1
+  (ce=0.06, lat_ref 20, rho_c 0.01, mld_uv "min"). MLE restratifies exactly these
+  basins. A/B LAUNCHED (`_ab_mle_fwreal_d90.sbatch`, job 9337800): fwreal command
+  verbatim + `--mle`, same pinned worktree, token-diffed against the control's
+  manifest. Pre-registered: CONFIRMS if genuine-deep falls from 291 toward 84 and
+  the Greenland/Labrador medians drop to O(100 m); REFUTES if it stays >250 or the
+  columns merely move. Falling BELOW ~84 is over-restratification, also a failure.
+  Watch the global and Antarctic MLD bands — trading an Arctic error for a Southern
+  Ocean one is not a fix.
+
+  **RETRACTION on the regrid control (codex r3).** 2026-08-07a said the
+  common-footprint radius sweep REFUTED the IDW-asymmetry artifact. It does not: a
+  common large-scale legoESM-vs-NEMO bias plus independent grid-scale errors on
+  each grid gives the same table, and a post-filter cannot undo aliasing or a
+  footprint bias surviving past 4 deg. Supported claim: **no differential advantage
+  to tripole is detectable at any radius** — the grids were already equidistant
+  from NEMO at radius 0 (SST 0.8518 vs 0.8566). Also from r3: the zonal support
+  gate was a TAUTOLOGY (availability derived from the already-dropped-out mask);
+  smoothing corrupted the MLD tail statistics (now suppressed under smoothing —
+  no published number affected, the quoted tails are from unsmoothed runs and the
+  native-cell probe). `near_land*` remain SCREENING figures: nearest-centre
+  classification cannot resolve a strait narrower than a target cell.
+
 - **2026-08-07 (THREE-WAY SCORECARD + freshwater A/B + a contaminated-mask retraction):**
   New committed instrument `scripts/validate/ocean_fidelity/compare_three_way_nemo.py`
   (+13 unit tests, `tests/validate/test_compare_three_way_nemo.py`; codex rounds 1-2).
