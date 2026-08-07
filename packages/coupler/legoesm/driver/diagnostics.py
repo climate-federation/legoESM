@@ -26,15 +26,44 @@ from legoesm.io.cmor_output import CMIP6_PLEV19
 
 class _StructuredRegridWeights:
     """Precomputed bilinear interpolation weights for structured grids."""
-    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
+    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon',
+                 'lat_cent', 'lon_cent')
 
-    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon):
+    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon,
+                 lat_cent=None, lon_cent=None):
         self.i_lo = i_lo
         self.j_lo = j_lo
         self.wi = wi
         self.wj = wj
         self.src_nlat = src_nlat
         self.src_nlon = src_nlon
+        # Target axes actually interpolated to [degrees] — carried so the
+        # coordinate-consistency gate can compare all three lanes uniformly
+        # against the CMOR writer's axis.
+        self.lat_cent = lat_cent
+        self.lon_cent = lon_cent
+
+
+def cmip_target_latlon(n_lat: int, n_lon: int) -> tuple[np.ndarray, np.ndarray]:
+    """THE definition of the CMIP/CMOR output grid: **cell centres** [degrees].
+
+    ``lat = -90+dlat/2 .. 90-dlat/2`` (spacing ``180/n_lat``),
+    ``lon = dlon/2 .. 360-dlon/2`` (spacing ``360/n_lon``).
+
+    Single source of truth: the NetCDF ``lat``/``lon`` axes, the ``areacella``
+    cell-edge bands, AND every regridder that fills those files derive their
+    target grid from here.  They previously did not — the unstructured
+    (Voronoi/cubed-sphere) regridders defaulted to a **pole-inclusive**
+    ``linspace(-90, 90, n_lat)`` while the writer labelled the result with
+    cell centres, displacing every row poleward by up to ``dlat/2`` and
+    reading the MPAS AMIP ``rsdt`` 3.15 W/m^2 (0.94%) low.  Route new
+    consumers through this function rather than re-deriving the axis.
+    """
+    dlat = 180.0 / n_lat
+    dlon = 360.0 / n_lon
+    lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, n_lat)
+    lon = np.linspace(dlon / 2, 360.0 - dlon / 2, n_lon)
+    return lat, lon
 
 
 def _build_structured_regrid_weights(
@@ -55,10 +84,7 @@ def _build_structured_regrid_weights(
     src_lat = np.degrees(src_lat_rad)  # S→N
     src_lon = np.degrees(src_lon_rad)  # [0, 360)
 
-    dlat = 180.0 / tgt_nlat
-    dlon = 360.0 / tgt_nlon
-    tgt_lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
-    tgt_lon = np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
+    tgt_lat, tgt_lon = cmip_target_latlon(tgt_nlat, tgt_nlon)
 
     # For each target lat, find bracketing source lat indices + weight
     i_lo = np.searchsorted(src_lat, tgt_lat) - 1
@@ -77,6 +103,7 @@ def _build_structured_regrid_weights(
     return _StructuredRegridWeights(
         i_lo=i_lo, j_lo=j_lo, wi=wi, wj=wj,
         src_nlat=len(src_lat), src_nlon=len(src_lon),
+        lat_cent=tgt_lat, lon_cent=tgt_lon,
     )
 
 
@@ -441,6 +468,13 @@ class DiagnosticCollector:
         if self._spatial_monthly is None:
             return
 
+        # The CMOR file's own latitude axis (cell centres).  Handed to the
+        # unstructured regridders so the grid they SAMPLE is the grid the
+        # writer LABELS — the two derive from one definition and cannot
+        # drift apart again (the pole-inclusive default displaced every row
+        # poleward and read MPAS rsdt 3.15 W/m^2 low).
+        _tgt_lat, _ = cmip_target_latlon(self._cmip_nlat, self._cmip_nlon)
+
         if grid_type == "cubed_sphere" and grid is not None:
             from legoesm.grids.regridding import (
                 get_cubedsphere_to_latlon_weights,
@@ -448,6 +482,7 @@ class DiagnosticCollector:
             n = grid.n
             self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
                 n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_tgt_lat,
             )
         elif grid_type in ("latlon", "gaussian") and grid is not None:
             # For structured grids, store native 1-D coordinates (degrees)
@@ -478,6 +513,7 @@ class DiagnosticCollector:
             self._voronoi_regrid_weights = compute_voronoi_to_latlon_weights(
                 np.asarray(grid.latCell), np.asarray(grid.lonCell),
                 n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_tgt_lat,
             )
 
     def set_fixed_fields(
@@ -2453,15 +2489,7 @@ class DiagnosticCollector:
 
     def _cmip_target_latlon(self) -> tuple[np.ndarray, np.ndarray]:
         """Return (lat, lon) 1-D arrays for the CMIP target grid."""
-        dlat = 180.0 / self._cmip_nlat
-        dlon = 360.0 / self._cmip_nlon
-        lat = np.linspace(
-            -90.0 + dlat / 2, 90.0 - dlat / 2, self._cmip_nlat,
-        )
-        lon = np.linspace(
-            dlon / 2, 360.0 - dlon / 2, self._cmip_nlon,
-        )
-        return lat, lon
+        return cmip_target_latlon(self._cmip_nlat, self._cmip_nlon)
 
     def _snapshot_phase_text(self) -> str:
         """Human text for the snapshot sampling phase (#1353 codex-10).
@@ -2631,10 +2659,7 @@ class DiagnosticCollector:
         if not months:
             return
 
-        dlat = 180.0 / self._cmip_nlat
-        dlon = 360.0 / self._cmip_nlon
-        lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, self._cmip_nlat)
-        lon = np.linspace(dlon / 2, 360.0 - dlon / 2, self._cmip_nlon)
+        lat, lon = self._cmip_target_latlon()
 
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 

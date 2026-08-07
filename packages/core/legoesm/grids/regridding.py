@@ -489,10 +489,60 @@ class CubedSphereToLatLonWeights(NamedTuple):
     lat_cent: np.ndarray
 
 
+def _resolve_target_lat_cent(
+    n_lat: int, lat_cent: np.ndarray | None,
+) -> np.ndarray:
+    """Resolve the target latitude centres [degrees] for an output regridder.
+
+    ``lat_cent=None`` keeps the historical **pole-inclusive** default
+    ``linspace(-90, 90, n_lat)`` (spacing ``180/(n_lat-1)``, first/last row
+    exactly ON the poles).  That is the right grid for the ``n_lat=181``
+    1-degree plotting/matrix callers, which label their output with the same
+    linspace.
+
+    It is the WRONG grid for a CMIP/CMOR file, whose ``lat`` axis is
+    **cell centres** ``-90+dlat/2 .. 90-dlat/2`` (spacing ``180/n_lat``).
+    Sampling on the pole-inclusive grid and writing under cell-centre labels
+    displaces every row poleward by ``lat/(n_lat-1)`` degrees — for a field
+    that falls off toward the poles (insolation) this reads systematically
+    LOW: -3.15 W/m^2 in the MPAS AMIP ``rsdt`` at n_lat=36 (2.5 deg at the
+    poles, 0 at the equator, peak error at +-60).  Callers that write CMOR
+    output MUST pass their own axis explicitly so the two cannot disagree.
+
+    Parameters
+    ----------
+    n_lat : int
+        Number of target latitude rows.
+    lat_cent : array (n_lat,) or None
+        Explicit latitude centres [degrees], S->N.  ``None`` ⇒ pole-inclusive
+        default.
+
+    Raises
+    ------
+    ValueError
+        If ``lat_cent`` is given but its length disagrees with ``n_lat``, or
+        it is not 1-D / not increasing.  Fail loud rather than silently
+        regrid onto a grid the caller did not ask for.
+    """
+    if lat_cent is None:
+        return np.linspace(-90.0, 90.0, n_lat)
+    arr = np.asarray(lat_cent, dtype=np.float64)
+    if arr.ndim != 1:
+        raise ValueError(f"lat_cent must be 1-D, got shape {arr.shape}")
+    if arr.shape[0] != n_lat:
+        raise ValueError(
+            f"lat_cent has {arr.shape[0]} entries but n_lat={n_lat}; the "
+            "target latitude axis and the row count must agree.")
+    if arr.shape[0] > 1 and not np.all(np.diff(arr) > 0):
+        raise ValueError("lat_cent must be strictly increasing (S->N).")
+    return arr
+
+
 def compute_cubedsphere_to_latlon_weights(
     n: int,
     n_lon: int = 360,
     n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
     """Precompute face-aware bilinear weights for CS → lat-lon.
 
@@ -511,6 +561,10 @@ def compute_cubedsphere_to_latlon_weights(
         Cubed-sphere tile size (cells per face edge).
     n_lon, n_lat : int
         Output regular lat-lon grid dimensions.
+    lat_cent : array (n_lat,) or None
+        Explicit target latitude centres [degrees], S->N.  ``None`` keeps the
+        pole-inclusive default; CMOR writers MUST pass their own file axis
+        (see :func:`_resolve_target_lat_cent`).
 
     Returns
     -------
@@ -518,7 +572,7 @@ def compute_cubedsphere_to_latlon_weights(
     """
     # Target grid
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _resolve_target_lat_cent(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     lon_r = np.deg2rad(lon2d.ravel())
@@ -590,17 +644,29 @@ def compute_cubedsphere_to_latlon_weights(
     )
 
 
-_cs_weights_cache: dict[tuple[int, int, int], CubedSphereToLatLonWeights] = {}
+_cs_weights_cache: dict[
+    tuple[int, int, int, bytes | None], CubedSphereToLatLonWeights
+] = {}
 
 
 def get_cubedsphere_to_latlon_weights(
     n: int, n_lon: int = 360, n_lat: int = 181,
+    lat_cent: np.ndarray | None = None,
 ) -> CubedSphereToLatLonWeights:
-    """Cached version of :func:`compute_cubedsphere_to_latlon_weights`."""
-    key = (n, n_lat, n_lon)
+    """Cached version of :func:`compute_cubedsphere_to_latlon_weights`.
+
+    ``lat_cent`` participates in the cache key (by value), so two callers
+    asking for the same ``(n, n_lat, n_lon)`` on DIFFERENT target latitude
+    axes cannot be served each other's weights.
+    """
+    key = (
+        n, n_lat, n_lon,
+        None if lat_cent is None
+        else np.ascontiguousarray(lat_cent, dtype=np.float64).tobytes(),
+    )
     if key not in _cs_weights_cache:
         _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
+            n, n_lon=n_lon, n_lat=n_lat, lat_cent=lat_cent)
     return _cs_weights_cache[key]
 
 
@@ -770,6 +836,7 @@ def compute_voronoi_to_latlon_weights(
     n_lon: int = 360,
     n_lat: int = 181,
     k: int = 3,
+    lat_cent: np.ndarray | None = None,
 ) -> VoronoiToLatLonWeights:
     """Precompute IDW k-nearest weights from Voronoi cell centres to lat-lon.
 
@@ -782,11 +849,15 @@ def compute_voronoi_to_latlon_weights(
         Output regular lat-lon grid dimensions.
     k : int
         Number of nearest source cells per target point (clamped to nCells).
+    lat_cent : array (n_lat,) or None
+        Explicit target latitude centres [degrees], S->N.  ``None`` keeps the
+        pole-inclusive default; CMOR writers MUST pass their own file axis
+        (see :func:`_resolve_target_lat_cent`).
     """
     from scipy.spatial import cKDTree
 
     lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lat_cent = _resolve_target_lat_cent(n_lat, lat_cent)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
     src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
