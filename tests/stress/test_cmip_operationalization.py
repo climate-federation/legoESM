@@ -366,12 +366,31 @@ class TestIncrementalCMIPWrite:
             lat=lat, lon=lon,
         )
 
-        # Both should point to the same file
-        assert p1 == p2
+        # ONE file, appended -- not a new file per step.  The path itself is
+        # NOT stable any more: a CMIP6 DRS filename ends in the time range it
+        # covers, so the file is renamed after every append as its range
+        # grows (185001-185001 -> 185001-185003 here).  Assert the invariant
+        # that actually matters -- a single growing file -- rather than the
+        # pre-time-range assumption that the path never changes.
+        tas_files = sorted(tmp_path.rglob("tas_*.nc"))
+        assert len(tas_files) == 1, (
+            f"expected exactly one appended tas file, got "
+            f"{[f.name for f in tas_files]}"
+        )
+        assert tas_files[0] == p2, (
+            f"write_field must return the CURRENT path; got {p2.name}, "
+            f"on disk {tas_files[0].name}"
+        )
+        assert not p1.exists(), (
+            f"{p1.name} should have been renamed as the time range grew"
+        )
+        assert p1 != p2, (
+            "filename must encode the time range, so it changes on append"
+        )
 
         # File should have 2 time steps
         import xarray as xr
-        ds = xr.open_dataset(p1)
+        ds = xr.open_dataset(p2)
         assert ds.sizes["time"] == 2, f"Expected 2 time steps, got {ds.sizes['time']}"
         assert ds["tas"].shape == (2, 4, 8)
         ds.close()
