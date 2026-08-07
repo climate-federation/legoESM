@@ -238,3 +238,77 @@ def test_hybrid_layer_pressures_are_monotonic_only_above_a_p_s_threshold():
                 "expected negative layer mass below the threshold; if this "
                 "now passes the coordinate was fixed -- update the note above")
             assert 6.0e4 < thresh < 7.0e4
+
+
+# ---------------------------------------------------------------------------
+# CMIP ``tas``: the 2 m similarity profile follows the experiment's
+# surface_stability_scheme (codex 2026-08-02: _tas_2m hardcoded the default,
+# so a grachev/gryanik coare3 run published a default-native tas while its
+# fluxes used the selected stable functions).
+# ---------------------------------------------------------------------------
+def _tas_stub_state(nlev):
+    """Minimal state stub for _tas_2m: strongly stable surface layer
+    (T_low = 300 K over a 220 K surface, 10 m/s wind)."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    ncol = 2
+    t3 = jnp.broadcast_to(jnp.linspace(250.0, 300.0, nlev), (ncol, nlev))
+    u3 = jnp.full((ncol, nlev), 10.0)
+    v3 = jnp.zeros((ncol, nlev))
+    p_s = jnp.full((ncol,), 1.0e5)
+    return SimpleNamespace(
+        T=SimpleNamespace(data=t3),
+        u=SimpleNamespace(data=u3),
+        v=SimpleNamespace(data=v3),
+        p_s=SimpleNamespace(data=p_s),
+    )
+
+
+def _tas_for(stability_scheme=None, bulk_scheme=None):
+    import jax.numpy as jnp
+
+    coord = create_sigma_coordinate(NLEV)
+    kw = {}
+    if stability_scheme is not None:
+        kw["surface_stability_scheme"] = stability_scheme
+    if bulk_scheme is not None:
+        kw["surface_bulk_scheme"] = bulk_scheme
+    dc = DiagnosticCollector(
+        nlev=NLEV, sigma_full=coord.sigma_full, dsigma=coord.dsigma,
+        vcoord=coord, **kw)
+    state = _tas_stub_state(NLEV)
+    q_v = jnp.full((2, NLEV), 2e-3)
+    sst = jnp.full((2,), 220.0)
+    sic = jnp.zeros((2,))
+    return np.asarray(dc._tas_2m(state, q_v, sst, sic, T_ice=271.35))
+
+
+def test_tas_2m_follows_surface_stability_scheme():
+    tas_default = _tas_for()                       # no kwargs: legacy path
+    tas_dyer = _tas_for("dyer1974")                # explicit default
+    tas_grachev = _tas_for("grachev2007_sheba")
+    # Default is byte-identical with and without the new kwarg.
+    np.testing.assert_array_equal(tas_default, tas_dyer)
+    # The selected SHEBA tail moves the stable 2 m temperature materially.
+    assert np.all(np.abs(tas_grachev - tas_default) > 0.5), (
+        tas_default, tas_grachev)
+    # Physical bracket: between the surface and the lowest-level temperature.
+    for tas in (tas_default, tas_grachev):
+        assert np.all(tas >= 220.0) and np.all(tas <= 300.0)
+
+
+def test_tas_2m_follows_surface_bulk_scheme():
+    """The tas profile uses the experiment's MOST bulk scheme; the non-MOST
+    default "constant" keeps the historical coare3 stand-in byte-identically
+    (so default runs are unchanged), while large_yeager (linear Dyer stable
+    branch) departs from the coare3 native (BH91-form) profile."""
+    tas_default = _tas_for()
+    tas_constant = _tas_for(bulk_scheme="constant")
+    tas_coare3 = _tas_for(bulk_scheme="coare3")
+    tas_ly = _tas_for(bulk_scheme="large_yeager")
+    np.testing.assert_array_equal(tas_default, tas_constant)
+    np.testing.assert_array_equal(tas_default, tas_coare3)
+    assert np.all(np.abs(tas_ly - tas_default) > 0.5), (tas_default, tas_ly)
+    assert np.all(tas_ly >= 220.0) and np.all(tas_ly <= 300.0)
