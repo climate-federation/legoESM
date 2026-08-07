@@ -28,7 +28,8 @@ USE
   2. ``python scripts/bench/census_xla_dump.py --dump-dir <dir>``
 
 WHICH MODULE. A run dumps hundreds of modules (jit_add, jit_where, ...); only
-the step matters. ``--module-re`` selects it, default ``jit__step``. If the
+the step matters. ``--module-re`` selects it, default ``jit_+step`` (cube emits jit_step,
+MPAS jit__step). If the
 pattern matches several distinct modules the script REFUSES rather than
 guessing or summing — two different compiled steps in one directory means the
 run compiled more than one thing and the caller must say which.
@@ -106,8 +107,10 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dump-dir", required=True, type=Path,
                    help="Directory given to --xla_dump_to")
-    p.add_argument("--module-re", default="jit__step",
-                   help="Regex selecting the step module (default jit__step)")
+    p.add_argument("--module-re", default="jit_+step",
+                   help="Regex selecting the step module. Default jit_+step "
+                        "matches both jit_step (cube) and jit__step (MPAS); "
+                        "lanes do not agree on the underscore count.")
     p.add_argument("--out", default=None, help="Optional JSON output path")
     args = p.parse_args()
 
