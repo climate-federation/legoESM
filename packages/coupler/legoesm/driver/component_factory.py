@@ -798,8 +798,22 @@ def create_atmosphere_dycore(
 
     if solver_name == "sfno_primitive_equations":
         _reject_unselectable_time_integrator("SFNO primitive equations")
-        from legoesm.atmosphere.dynamics.neural.sfno_pe import SFNOPrimitiveEquationModel
-        return SFNOPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import (
+            SFNOPrimitiveEquationConfig,
+            SFNOPrimitiveEquationModel,
+        )
+        # Do NOT take the bare config default here: it leaves
+        # spectral_filter_strength at 0.0, and an undamped state_update rollout
+        # is known-divergent (|u850| 33 -> 969 m/s by macro step 4, NaN by step
+        # 12 on a trained T63 checkpoint; measured 2026-07-28). A user picking
+        # this solver from a config must not get the divergent variant by
+        # default. 0.01 / order 8 are the dycore's own filter settings, verified
+        # to hold a 240 h rollout physical.
+        return SFNOPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma,
+            config=SFNOPrimitiveEquationConfig(
+                spectral_filter_strength=0.01, spectral_filter_order=8),
+        )
 
     # ----- U-Cast data-driven (convolutional U-Net emulator) -----
     if solver_name == "ucast_primitive_equations":

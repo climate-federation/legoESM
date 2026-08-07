@@ -19,6 +19,7 @@ must not re-implement it (CLAUDE.md: no duplicate utilities).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 
 def read_yaml_with_includes(path, _seen=None) -> dict:
@@ -230,6 +231,10 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     #
     # The flat ExperimentConfig scalars remain settable via --config and their
     # own CLI flags; only the --params registry route is affected.
+    #
+    # If any of these is meant to be tunable, give it a __param_spec__
+    # entry FIRST and then map it -- mapping without the spec is what
+    # breaks the loader (parallel session's note, kept).
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -296,6 +301,136 @@ def build_atm_scalar_param_map() -> dict[str, str]:
     (issue #691).  See :data:`_ATM_SCALAR_PARAM_MAP` for why this is a verified
     allowlist rather than a name-convention derivation."""
     return dict(_ATM_SCALAR_PARAM_MAP)
+
+
+# Pipeline attributes that hold live scheme *Config NamedTuples after
+# build_physics_pipeline.  These are the SAME attributes run_amip's
+# AIMIP-trained-params block mutates post-setup (captured at compile), so
+# routing --params overrides into them is the sanctioned mutation point.
+# cloud / radiation configs are NOT here: the pipeline builds those inline
+# from flat ExperimentConfig scalars and does not store them, so their
+# tunables stay on the scalar map / the reachability baseline.
+ATM_PIPELINE_BUNDLE_FIELDS = (
+    "convection_config",
+    "micro_config",
+    "turbulence_config",
+    "gwd_config",
+)
+
+
+class AtmPipelineParamsBundle(NamedTuple):
+    """Routing view over the built pipeline's scheme configs.
+
+    A real (static) NamedTuple so ``_route_overrides_by_class`` can walk it
+    exactly like a driver config tree; ``None`` fields (scheme not built /
+    config-less scheme) are simply never matched.
+    """
+    convection_config: object = None
+    micro_config: object = None
+    turbulence_config: object = None
+    gwd_config: object = None
+
+
+def build_atm_pipeline_bundle(physics) -> AtmPipelineParamsBundle:
+    """The production bundle the atm ``--params`` class-router routes into.
+
+    Exposed as a function (not inlined in :func:`apply_params_to_pipeline`)
+    so the reachability audit probes the SAME object construction production
+    uses — a re-implemented bundle in the test could drift.
+    """
+    return AtmPipelineParamsBundle(**{
+        f: getattr(physics, f, None) for f in ATM_PIPELINE_BUNDLE_FIELDS
+    })
+
+
+def apply_params_to_pipeline(physics, params: dict, *, driver: str = "run_amip"):
+    """Route qualified ``--params`` overrides into the BUILT physics pipeline.
+
+    The atmosphere ExperimentConfig flattens only a hand-verified subset of
+    scheme tunables to scalars (:func:`build_atm_scalar_param_map`); every
+    other atm ``__param_spec__`` parameter lives ONLY on the scheme ``*Config``
+    NamedTuples the pipeline holds (``convection_config`` /
+    ``turbulence_config`` / ``micro_config`` / ``gwd_config``).  This applies
+    those overrides the way run_omip / run_lmip do — through the shared
+    ``(module, class)`` router — against the pipeline's live configs,
+    POST-setup and PRE-run (the step function reads these attributes at
+    trace time; same mutation point as the AIMIP-trained-config injection).
+
+    CLUBB is the motivating case: all 48 ``CLUBBParams`` closure constants
+    (and every other turbulence/convection/microphysics/GWD tunable) become
+    settable from a calibration file without a per-parameter flat scalar.
+
+    Validation matches :func:`apply_params_to_config` exactly: unknown name,
+    non-numeric value, out-of-``__param_spec__``-bounds value, or a target
+    class absent from the BUILT pipeline (scheme not selected) all raise
+    ``SystemExit`` — a calibration file can never silently mis-set physics.
+
+    Soft limitation, SHARED with the nested class-router drivers (see the
+    same note on :func:`apply_params_to_config`): a union config that holds
+    an inactive sub-config (a composite GWD carrying both orographic and
+    non-orographic parts, E3SM's frontal/Beres sub-configs when only the
+    orographic source is driven) is still "present", so an override for the
+    inactive part is applied to that inert sub-config rather than raising —
+    it has no effect on the run.  Selecting the scheme activates the already-
+    set value.
+
+    Returns the set of applied qualified names.
+    """
+    if not params:
+        return set()
+    from legoesm.training.param_collector import build_registry
+    registry = {m.qualified_name: m for m in build_registry()}
+    by_key: dict[tuple, dict[str, float]] = {}
+    key_to_qnames: dict[tuple, list] = {}
+    for qname, value in params.items():
+        meta = registry.get(qname)
+        if meta is None:
+            raise SystemExit(
+                f"{driver} --params: unknown parameter {qname!r} (not in the "
+                "parameter registry)."
+            )
+        if meta.shape_key is None:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise SystemExit(
+                    f"{driver} --params: {qname} value {value!r} is not numeric."
+                )
+            lo, hi = meta.bounds
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                if not (lo <= value <= hi):
+                    raise SystemExit(
+                        f"{driver} --params: {qname}={value} is outside its "
+                        f"__param_spec__ bounds [{lo}, {hi}]."
+                    )
+        key = (meta.module, meta.config_class)
+        by_key.setdefault(key, {})[meta.field] = value
+        key_to_qnames.setdefault(key, []).append(qname)
+    bundle = build_atm_pipeline_bundle(physics)
+    applied: set = set()
+    new_bundle = _route_overrides_by_class(bundle, by_key, applied=applied)
+    missing = set(by_key) - applied
+    if missing:
+        examples = ", ".join(
+            q for k in sorted(missing) for q in key_to_qnames[k])
+        built = {
+            f: type(getattr(bundle, f)).__name__
+            for f in ATM_PIPELINE_BUNDLE_FIELDS
+            if getattr(bundle, f) is not None
+        }
+        raise SystemExit(
+            f"{driver} --params: parameter(s) {examples} target config "
+            f"class(es) {sorted(k[1] for k in missing)} that are not present "
+            f"in the BUILT physics pipeline (resolved scheme configs: {built}). "
+            "The scheme is not selected in this run — remove them or select it."
+        )
+    for f in ATM_PIPELINE_BUNDLE_FIELDS:
+        new_cfg = getattr(new_bundle, f)
+        if new_cfg is not getattr(physics, f, None):
+            setattr(physics, f, new_cfg)
+    # EVERY applied qualified name, not one per class — a 48-field CLUBB
+    # calibration must report 48 routed parameters (codex review 2026-08-02).
+    return {q for key in applied for q in key_to_qnames[key]}
 
 
 def _route_overrides_by_class(node, by_key: dict, *, applied: set):

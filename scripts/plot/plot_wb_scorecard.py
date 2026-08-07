@@ -71,6 +71,30 @@ FIELD_KEY_TO_SOTA: dict[str, tuple[str, int]] = {
     "wind_speed_10m": ("10m_wind_speed", 0),
 }
 
+# --- SOTA unit reconciliation (RMSE is unit-carrying; a mismatch is a silent
+# --- factor error on the most-quoted headline field) ---------------------------
+# WB2 publishes ``geopotential`` in m^2/s^2. Our ``z500`` is geopotential HEIGHT
+# in metres (``wb_forecast.diagnose_headline_fields`` calls
+# ``geopotential_height_at``, which already divides by g), so the SOTA series
+# must be divided by g before it shares an axis with ours. Every other mapped
+# field already agrees (K, m/s, kg/kg, Pa) and carries no factor.
+# Only relevant for RMSE/bias: ACC is dimensionless, so the factor is skipped.
+_SOTA_UNIT_DIVISOR_FIELDS = ("z500",)
+
+
+def sota_unit_divisor(field_key: str, metric: str = "rmse") -> float:
+    """Divisor putting a SOTA series into OUR units for ``field_key``.
+
+    ``1.0`` when the units already agree. ACC is dimensionless -> always 1.0.
+
+    ``legoesm.constants`` is imported function-scope (it pulls jax) so this
+    module's top level stays import-light, per the module docstring.
+    """
+    if str(metric).lower() == "acc" or field_key not in _SOTA_UNIT_DIVISOR_FIELDS:
+        return 1.0
+    from legoesm import constants
+    return float(constants.g)
+
 # Human-readable per-field axis labels + units (RMSE units in comments). Z500 is
 # geopotential HEIGHT in metres here (geopotential_height_at returns m), NOT
 # m^2/s^2 — the diagnostic already divides by g. Kept explicit so the y-axis is
@@ -140,20 +164,35 @@ def _series_from_section(section: dict, field_key: str, metric: str):
     return [leads[i] for i in order], [vals[i] for i in order]
 
 
-def _sota_series_for_field(sota: dict, model: str, field_key: str):
-    """``(sorted lead_hours, rmse values)`` for one SOTA model + field.
+def _sota_series_for_field(sota: dict, model: str, field_key: str,
+                           metric: str = "rmse"):
+    """``(sorted lead_hours, values)`` for one SOTA model + field, IN OUR UNITS.
 
     ``sota`` is ``{model: {(variable, level, lead_hours): rmse}}`` from
     ``load_sota_headline``. Unmapped field -> empty (caller warns once).
+    The series is divided by :func:`sota_unit_divisor` so it shares an axis
+    with ours (Z500: WB2 publishes m^2/s^2, we diagnose geopotential height
+    in m — plotting them raw is a silent factor-g error).
     """
     mapped = sota_key_for_field(field_key)
     if mapped is None:
         return [], []
     var, level = mapped
+    div = sota_unit_divisor(field_key, metric)
+    # Accept BOTH CSV schemas. The committed
+    # config/wb/sota/wb2_headline_rmse.csv keys rows by the WB2 long name
+    # ("geopotential"), but scripts/data/fetch_wb2_sota.py writes the legoESM
+    # headline key instead (HeadlineVar.csv_variable, i.e. "z500"). Matching
+    # only the long name meant a REGENERATED CSV silently produced an empty
+    # SOTA overlay — no warning, because the unmapped-field warning only fires
+    # for keys absent from FIELD_KEY_TO_SOTA (codex review 2026-07-28).
+    # Units are identical either way: both carry WB2's published RMSE, so the
+    # /g divisor applies unchanged.
+    accepted = {var, field_key}
     pts = []
     for (v, lev, lead), rmse_val in sota[model].items():
-        if v == var and int(lev) == level:
-            pts.append((int(lead), float(rmse_val)))
+        if v in accepted and int(lev) == level:
+            pts.append((int(lead), float(rmse_val) / div))
     pts.sort()
     return [p[0] for p in pts], [p[1] for p in pts]
 
@@ -247,6 +286,7 @@ def build_scorecard_figure(scorecards: dict, sota: dict | None = None, *,
 
     # Warn once per unmapped field for the SOTA overlay (RMSE only).
     warned_unmapped: set = set()
+    warned_empty: set = set()
 
     for idx, field_key in enumerate(field_keys):
         ax = flat_axes[idx]
@@ -287,8 +327,20 @@ def build_scorecard_figure(scorecards: dict, sota: dict | None = None, *,
                     warned_unmapped.add(field_key)
             else:
                 for si, model in enumerate(sorted(sota)):
-                    leads, vals = _sota_series_for_field(sota, model, field_key)
+                    leads, vals = _sota_series_for_field(
+                        sota, model, field_key, metric)
                     if not leads:
+                        # Mapped but zero matching rows: a schema mismatch or a
+                        # model that simply does not publish this field. Warn
+                        # once per field so an empty overlay is never mistaken
+                        # for "SOTA happens to be off-scale here".
+                        if field_key not in warned_empty:
+                            warnings.warn(
+                                f"plot_wb_scorecard: no SOTA rows for "
+                                f"{field_key!r} (looked for variable "
+                                f"{mapped[0]!r} or {field_key!r} at level "
+                                f"{mapped[1]}); overlay omitted for this panel.")
+                            warned_empty.add(field_key)
                         continue
                     ax.plot(leads, vals, linestyle="--",
                             color=_SOTA_COLORS[si % len(_SOTA_COLORS)],

@@ -35,8 +35,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import Mesh, PartitionSpec as P
-
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from legoesm.parallel.latlon_spmd import (
     make_latlon_band_wall_multi_pad_body,
     make_latlon_band_wall_pad_body,

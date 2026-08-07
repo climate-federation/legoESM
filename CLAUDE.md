@@ -685,7 +685,34 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
-**SECOND callout, same day (2026-08-06), because the rule below was written and
+
+### PLAIN LANGUAGE FIRST — the rule that finally worked (2026-08-07)
+THIRD callout: *"I really don't understand when you talk to me. Things are
+incredibly unclear."* Brevity alone did NOT fix it — the earlier rules were
+being followed. The real defect was **unexplained jargon** and leaving the
+user to infer the decision. What worked, and is now the required shape:
+
+- **Write for a colleague, not a reviewer.** Short sentences. Ordinary words.
+- **NO unexplained domain jargon.** Terms like *ppermute, max_degree,
+  halo fill, production-exact, VJP, chromatic bound* are banned unless the
+  sentence also says what they mean in plain words. Prefer the plain phrase
+  outright: "how much communication the split costs", not "the round count of
+  the comm graph".
+- **Use short LABELLED blocks**, bolded, 1-3 lines each:
+  **What I built / What broke / What I was wrong about / What's safe /
+  What I need from you.** Labels do the navigating so the user does not.
+- **End with ONE explicit question and numbered options** when a decision is
+  needed. Say which you would pick and the single deciding factor.
+- **When asked to compare options, answer the comparison** — what each buys,
+  what it costs, and the question that decides it. Do not re-describe the
+  options.
+- **Own errors in one plain sentence, at the top.** "I was wrong earlier: X
+  is not guaranteed." No narration of how it was discovered.
+- **No tables, no file:line, no job ids in the reply** unless asked. Those go
+  in the commit message. A reply is for the decision.
+
+### Earlier callouts (same session) — still in force
+**SECOND callout (2026-08-06), because the rule below was written and
 then ignored: _"stop being verbose. It is really hard to understand. be more
 direct, to the point, clear about issues. Bullets summarizing."_ Plus: _"aren't
 you using caveman?"_ — the terse mode was ACTIVE and I was still writing essays.**

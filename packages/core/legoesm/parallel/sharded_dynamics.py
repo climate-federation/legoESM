@@ -1240,6 +1240,72 @@ def _close_halo_under_cellsOnEdge(
         halo_cells_set.update(new_cells.tolist())
 
 
+def spmd_schedule_cost(global_mesh, n_dev, *, method="auto", halo_depth=3):
+    """Collective-permute cost of the SPMD halo schedule, computed OFFLINE.
+
+    The quantity that binds MPAS strong scaling above ~64 devices is the
+    number of ppermute ROUNDS per halo fill: the rounds are the colours of
+    the inter-device comm graph, the multi-start colouring already reaches
+    that graph's ``max_degree`` lower bound, so rounds can only fall if the
+    OWNERSHIP produces a lower-degree graph.  This exposes that number
+    without a GPU, an MPI launcher, or a benchmark job, so an ownership
+    choice can be scored before it costs an allocation.
+
+    Public because it is the objective an ownership optimizer must minimize,
+    and because scoring it from a bench would otherwise mean importing the
+    private builders across modules (forbidden).  It runs the SAME builders
+    production runs on, at the SAME default ``halo_depth=3``: a re-derived
+    lookalike (e.g. 1-ring ``cellsOnEdge`` adjacency) answers a DIFFERENT
+    question and understates the degree — it reports 8 rounds where the real
+    depth-3-plus-closure graph reports 12-14.
+
+    Parameters
+    ----------
+    global_mesh : VoronoiMesh
+        Un-reordered global mesh; this reorders it internally.
+    n_dev : int
+        Device count to score.
+    method : str
+        Ownership passed to :func:`reorder_voronoi_for_sharding`.
+    halo_depth : int
+        Must match production (3) for the number to be meaningful.
+
+    Returns
+    -------
+    dict
+        ``n_rounds`` (the cost), ``n_rounds_greedy`` (legacy sorted-greedy,
+        for regression), ``coloring_method``, ``max_local_cells``,
+        ``max_local_edges``, plus the echoed ``method``/``n_dev``.
+
+    Reference numbers on the unrelaxed mesh (subdiv-8 / subdiv-9), which any
+    change here must still reproduce: sfc 12/14 and 11/13 rounds at 64/128
+    devices, metis 13/19 and 14/18, geometric 16/21 and 14/18.
+    """
+    from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
+
+    reordered = reorder_voronoi_for_sharding(global_mesh, n_dev,
+                                             method=method)
+    (
+        _stacked, _gc, _ge, _noc, _noe, max_lc, max_le, partitions, cell_owner,
+    ) = _build_voronoi_partition_infra(reordered, n_dev,
+                                       halo_depth=halo_depth)
+    cells_per = int(reordered.nCells) // n_dev
+    edges_per = int(reordered.nEdges) // n_dev
+    sched = _build_ppermute_schedule(
+        partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+    )
+    return {
+        "method": method,
+        "n_dev": n_dev,
+        "halo_depth": halo_depth,
+        "n_rounds": int(sched["n_rounds"]),
+        "n_rounds_greedy": int(sched["n_rounds_greedy"]),
+        "coloring_method": sched["coloring_method"],
+        "max_local_cells": int(max_lc),
+        "max_local_edges": int(max_le),
+    }
+
+
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
