@@ -269,3 +269,42 @@ The only readout that can answer the question. Control at y15-20: F_topo 0.9590 
 heave -37 m (y15) / -67 m (y20) west. If the west flank stays wrong-signed there, the composition
 is NOT the cause and the answer lies in the kernels — which is the evidence that would justify a
 full NEMO-JAX kernel port.
+
+## P4b VERDICT (2026-08-07) — THE COMPOSITION IS **NOT** THE CAUSE. CONFIRMED.
+
+20-year nemo_mlf arm (all STABLE, fp64, census exact; y1-y10 **bit-identical** to the 10-year
+arm — determinism confirmed). Instrument controls all reproduced exactly before any number
+(armB y10 F_topo 1.0049; NEMO y10 ACC 121.07; control window 0.9590 sd 0.0034; control west
+heave -36.9/-67.3 m).
+
+| readout, y15-20 window | control | nemo_mlf | direction |
+|---|---|---|---|
+| **F_topo ratio** | **0.9590** (sd .0034) | **0.9577** (sd .0043) | AWAY (-0.0013, sub-floor; paired-t -2.76 only because the arms are near-identical) |
+| ACC window err | +6.003 Sv (66.0 floors) | +6.154 Sv (67.6) | AWAY, +1.7 floors, n.s. (t=+1.13) |
+| West heave y15/y20 | -36.9 / -67.3 m | -37.8 / -68.2 m | AWAY; **anomaly PERSISTS and grows, rate unchanged** |
+| Upper contrast err y20 | +0.029936 | +0.030181 | marginally adverse |
+
+**The pre-registered criterion fired**: the west-flank sign anomaly (the 53%-concentration flank)
+was to decide this, and it persists and slightly amplifies. The two arms are climate-inert
+relative to each other — ACC within 0.5 Sv, F_topo within 0.003, heave within 1.1 m over 20 years.
+
+**What P4b supports**: a DIRECTION test — nemo_mlf does not bend the trend toward NEMO.
+**What it does NOT support**: any claim about the deficit's equilibrium magnitude (neither arm is
+equilibrated at y20 — control F_topo 1.0020 at y6-10 -> 0.9590 at y15-20, no plateau; ACC
+overshoot still growing 1.02 -> 1.05), nor ruling out a late-onset effect beyond y20.
+
+### What the transcription IS worth (kept — it is not a failure)
+Faithful (budget-neutral at full sensitivity, heat ratio 0.9914), live (max|du| 2.8e-3 from step
+1), a real 90-day gate gain attributable to the composition (ACC 16.9 -> 10.2 floors, sigma-max
+32.9 -> 16.4, with the divisor-only arm flat), ~2.7x faster, and it exposed TWO latent bugs in
+existing code (K33 time-level mix; scan-carry seeding) plus a harness wiring gap. It stays as a
+selectable, verified integrator.
+
+### ⇒ Where the deficit must now live: THE KERNELS
+Exonerated so far: every operator at same-state (6 exonerations), all four momentum sinks, three
+join suspects, and now the step composition. Remaining candidates: **the 26 DEBT rows at
+1e-4..1e-6**, whose "climate-inert individually" status rests on acceptance runs that PREDATE the
+0.091 Sv noise floor. A systematic 1e-4 over ~230k steps (20 yr x 11520) is not small.
+**Most suspicious family: `traadv_fct` (5 rows, ~1e-4..1e-5, CONFIRMED LOCAL to the FCT/Zalesak
+chain)** — tracer advection over steep topography at the sill flank is exactly where a limiter
+would diverge, and it is the largest DEBT family sitting in the density-transport path.
