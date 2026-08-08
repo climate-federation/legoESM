@@ -1630,3 +1630,48 @@ Correction to the round-3 report: `residual_prediction=False` in the sfno_full
 arch (`neural_gcm_spectral.py:3996`), so codex's residual-skip defect never
 affected THIS arm. The channel-order fix still stands — the class is a generic
 API and `residual_prediction` defaults True elsewhere.
+
+## column_nn's FIRST-STEP ERROR IS SURFACE PRESSURE (2026-08-08)
+
+Derived from measurements already in hand — the anchored column_nn scorecard at
+lead 6 h and the representation floor — with the floor removed in quadrature:
+
+| field | total @6 h | floor | model-only |
+|---|---|---|---|
+| z500 | 82.27 m | 5.97 | **82.05 m** |
+| mslp | 1044 Pa | 260 | **1011 Pa** |
+| t850 | 1.608 K | 1.00 | 1.258 K |
+| u850 | 2.98 m/s | 1.72 | 2.44 |
+| v850 | 3.09 m/s | 1.60 | 2.64 |
+
+The eval diagnoses z500 hydrostatically, so a surface-pressure error displaces
+it by ``(R_d T / g)(dp/p)``. Putting the model-only mslp error through that:
+
+* 1011 Pa -> **82.9 m** of z500 displacement
+* measured model-only z500 error: **82.1 m**
+
+The temperature route is refuted: reproducing 82 m from thickness alone needs a
+column-mean T error of **4.04 K**, and the measured model-only t850 error is
+**1.26 K** — three times too small.
+
+**So essentially the whole first-step z500 error is the surface-pressure error.**
+Not temperature, not the winds (2.4-2.6 m/s model error, in family with
+sfno_full).
+
+Labelled honestly: the ratio is CONFIRMED to dominate, PLAUSIBLE at exactly
+100 %. The relation is not a coincidence — it is the same hydrostatic dependence
+the evaluator uses to produce z500 — but RMSEs do not combine as a strict linear
+propagation, and the displacement is nominal-T dependent (74 m at 250 K, 89 m at
+300 K), so "consistent within the temperature uncertainty" is the correct claim.
+
+### Why the mass anchor did NOT help at 6 h, and what the real target is
+
+The anchor restores the GLOBAL MEAN of ``int p_s dA``. The 6 h error is a
+SPATIAL PATTERN error in p_s — the anchored and unanchored arms score the same
+82 m at 6 h while diverging by 24 % at 240 h. Both facts are consistent: a
+secular global drift is what the anchor removes, and it is a long-lead term.
+
+So the target for the dycore arms is now specific: **the spatial surface-pressure
+error the dycore develops within its first 6 hours.** That is a different
+question from anything tried today (optimizer, capacity, data volume, physics
+package, mass anchor), and it is the one worth the next GPU-hours.
