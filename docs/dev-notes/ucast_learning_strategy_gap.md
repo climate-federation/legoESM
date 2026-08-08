@@ -1764,3 +1764,71 @@ matters most.** CONFIRMED by code read, not inferred.
 
 A cleaner check would compare p_s directly instead of mslp; p_s is not in the
 WB2 headline set, which is why the reduction is being scored in the first place.
+
+# THE ANSWER: THE FIRST-STEP ERROR IS PHYSICS-INDEPENDENT (2026-08-09)
+
+Job 26807330. Two arms, SAME spectral dycore, SAME ERA5 initial states, SAME
+evaluator and protocol (2017, 8 inits, 24 h stride), COMPLETELY different
+physics:
+
+* **classical** — RRTMGP radiation, Bechtold convection, CLUBB turbulence,
+  McFarlane gravity-wave drag, Sundqvist microphysics, 124 tuned parameters
+* **column_nn** — a 216k-parameter per-column MLP and nothing else
+
+Model-only error at lead 6 h (representation floor removed in quadrature):
+
+| | classical | column_nn | ratio |
+|---|---|---|---|
+| mslp | 967 Pa | 1011 Pa | **0.96** |
+| z500 | 82.7 m | 82.1 m | **1.01** |
+
+**They agree to 1-4 %.** Replacing the entire physics package — every scheme,
+every tuned constant — changes the first-step error by essentially nothing.
+
+## This explains every null result of the campaign
+
+| lever tried | effect |
+|---|---|
+| optimizer AdamW -> Muon @ 10:1 | +0.2 to +0.9 % (worse) |
+| capacity 216k -> 6.3M (29x) | <0.3 % |
+| physics package, total replacement | 1-4 % at 6 h |
+
+All three act on PHYSICS, and physics does not set this error. They were not
+weak levers badly applied; they were levers on the wrong term.
+
+## But physics DOES matter at long lead
+
+The arms diverge exactly where they should:
+
+| lead | 6 h | 24 h | 120 h | 240 h |
+|---|---|---|---|---|
+| mslp classical | 1001 | 1059 | 1291 | **1393** |
+| mslp column_nn | 1044 | 1147 | 1594 | **1902** |
+| t850 classical | 1.51 | 2.66 | 6.61 | **8.55** |
+| t850 column_nn | 1.61 | 3.03 | 5.40 | **6.75** |
+
+Identical at step 1, then separating — and in opposite directions by field
+(classical better on pressure, column_nn better on temperature). So the
+campaign has two distinct problems, not one:
+
+1. **A first-step error owned by the dycore / initialisation path.** ~1000 Pa of
+   surface pressure, physics-independent, and via the hydrostatic diagnosis it
+   is the ENTIRE 82 m z500 error. Worse than the annual-mean climatology
+   (811 Pa) and 2.7x worse than not forecasting (366 Pa).
+2. **Long-lead behaviour, which physics and the mass anchor both move.** The
+   anchor is worth -25 to -30 % at 120 h on both arms; physics choice is worth
+   tens of percent at 240 h.
+
+Claim: **CONFIRMED**. Controlled — one variable (the physics package), everything
+else held, with the predicted outcome. Caveat stated: classical was scored at
+epoch 9 and column_nn at its final epoch, so the two are not at identical
+training maturity; the agreement to 1-4 % DESPITE that strengthens the result
+rather than weakening it.
+
+## Where the next GPU-hours go
+
+Not into physics. Into the first 6 hours of the dycore's surface pressure:
+initial-condition balance, the ERA5 -> spectral p_s reconciliation over
+topography, and the dycore's continuity/filter treatment of `lnps`. Vertical
+levels remain the resolution lever (worth ~2x the horizontal truncation, and the
+apparent mslp penalty is a reduction artifact, not a field degradation).
