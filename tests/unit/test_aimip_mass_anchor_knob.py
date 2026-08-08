@@ -108,3 +108,35 @@ def test_the_ab_suite_pair_differs_only_in_the_anchor(run_aimip):
     pe_on = _pe_config(run_aimip, ab_ov, variant="column_nn")
     assert (pe_off.fix_mass, pe_off.anchor_mass_to_initial) == (False, False)
     assert (pe_on.fix_mass, pe_on.anchor_mass_to_initial) == (True, True)
+
+
+def test_aimip_grid_refuses_a_grid_run_aimip_cannot_build(run_aimip):
+    """``aimip_grid`` was declared by every config and read by nothing.
+
+    The grid is hardcoded ``create_gaussian_grid`` at two sites, so a suite
+    asking for "mpas" or "latlon" silently got a Gaussian spectral grid — the
+    same class of trap as a config flag that reaches a code path the run never
+    executes. It now refuses rather than advertising a choice that does not
+    exist.
+    """
+    import pytest
+
+    base = run_aimip._load_yaml(_ROOT / "config" / "aimip" / "aimip_era5.yaml")
+
+    # The declared default still works.
+    ok = run_aimip._merge(base, {"aimip_grid": "gaussian"})
+    ok["aimip_variant"] = "column_nn"
+    assert run_aimip._build_spectral_config(ok) is not None
+
+    for bad in ("mpas", "latlon", "cubed_sphere"):
+        cfg = run_aimip._merge(base, {"aimip_grid": bad})
+        cfg["aimip_variant"] = "column_nn"
+        with pytest.raises(SystemExit, match="aimip_grid"):
+            run_aimip._build_spectral_config(cfg)
+
+    # Absent key keeps the historical behaviour (gaussian), so no existing
+    # suite changes.
+    cfg = dict(base)
+    cfg.pop("aimip_grid", None)
+    cfg["aimip_variant"] = "column_nn"
+    assert run_aimip._build_spectral_config(cfg) is not None

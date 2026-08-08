@@ -232,6 +232,23 @@ def _build_spectral_config(cfg: dict[str, Any]):
             "aimip_variant=sfno_full or remove the knob."
         )
 
+    # ``aimip_grid`` was a DEAD KEY: every AIMIP config declares it, nothing
+    # read it, and the grid is hardcoded ``create_gaussian_grid`` at two sites
+    # below. A suite asking for "mpas" or "latlon" silently got a Gaussian
+    # spectral grid — the same silent-wrong-config trap that had `fix_mass`
+    # reaching a code path the forecast never executes. Refuse instead of
+    # advertising a choice that does not exist. (The lat-lon and MPAS AIMIP
+    # lanes live in run_aimip_latlon.py, which builds its own grid.)
+    _grid = str(cfg.get("aimip_grid", "gaussian"))
+    if _grid != "gaussian":
+        raise SystemExit(
+            f"aimip_grid={_grid!r} is not supported by run_aimip.py, which "
+            "builds a Gaussian spectral grid unconditionally. This key was "
+            "silently ignored before, so a suite could ask for another grid "
+            "and get Gaussian anyway. Use scripts/run/run_aimip_latlon.py for "
+            "the lat-lon C-grid lane, or set aimip_grid: gaussian."
+        )
+
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
         # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
