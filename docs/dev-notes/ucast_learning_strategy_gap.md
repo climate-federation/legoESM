@@ -1832,3 +1832,51 @@ initial-condition balance, the ERA5 -> spectral p_s reconciliation over
 topography, and the dycore's continuity/filter treatment of `lnps`. Vertical
 levels remain the resolution lever (worth ~2x the horizontal truncation, and the
 apparent mslp penalty is a reduction artifact, not a field degradation).
+
+## IT IS AN INITIALISATION SHOCK, NOT ACCUMULATING ERROR (2026-08-09)
+
+Growth rate of the mslp error, per HOUR of forecast (same scorecards):
+
+| | first 6 h | 6-12 h | 12-24 h | 24-72 h | 72-120 h | 120-240 h |
+|---|---|---|---|---|---|---|
+| classical | **166.8** | 1.3 | 4.2 | 3.0 | 1.8 | 0.9 |
+| column_nn | **174.0** | 1.0 | 8.1 | 5.3 | 4.0 | 2.6 |
+
+**The error accumulates 130-170x faster in the first six hours than in the next
+six** — and both arms do it at the same rate, within 4 %.
+
+That is not model error accruing. It is a STEP: the model jumps to a state
+displaced from the ERA5 analysis by ~10 hPa RMS almost immediately, then evolves
+at an ordinary rate from there. The displacement does not recover — the error
+stays near 1000 Pa for a full day (1001 -> 1009 -> 1059 Pa at 6/12/24 h).
+
+Combined with the lead-0 floor of 260 Pa, the sequence is unambiguous:
+
+* t=0: the ERA5-derived initial state is GOOD (260 Pa, near the representation
+  floor).
+* within 6 h: the dycore has moved p_s ~1000 Pa away from it, physics-
+  independently.
+* thereafter: normal slow growth.
+
+This is the classic NWP initialisation-shock signature — the analysis is not
+balanced with respect to THIS model's dynamics, so fast modes adjust it onto the
+model's own attractor in the first hours. And because z500 is diagnosed
+hydrostatically, that single displacement IS the entire 82 m z500 error.
+
+### What follows
+
+The standard remedy is to balance the initial state against the model before
+integrating — digital-filter initialisation or normal-mode initialisation — so
+the fast adjustment happens BEFORE t=0 rather than being scored as forecast
+error. That is the concrete next implementation, and it is squarely a
+dycore/initialisation task, not a physics or training-recipe one.
+
+Two cheaper things worth measuring first, both of which sharpen the target:
+* a high-cadence (per-model-step) time series of area-weighted RMS
+  `p_s(t) - p_s(0)` through the first 6 h, to see whether the adjustment is
+  monotonic or an oscillation that settles — this distinguishes a balance
+  problem from a systematic orography/mass mismatch;
+* the same split over ocean vs land, since the phis reconciliation
+  (`p_s * exp(delta_phis/(R_d T_sfc))`) only acts where topography was smoothed.
+
+Neither needs a training run.
