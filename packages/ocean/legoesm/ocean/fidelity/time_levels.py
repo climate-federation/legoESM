@@ -317,6 +317,45 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
         "quantity/citation as eiv_dump_rn2b.bin above (rn2b = bn2(ts(..., "
         "Nbb), rab_b, Nnn)); re-dumped at the annual cadence for the same "
         "offline bolus reconstruction as the other eivdiag_* entries."),
+
+    # --- dyn_cor_2D (#1226 item 5): the barotropic EEN Coriolis, substep 1 ---
+    # WRITE block at MY_SRC dynspg_ts.F90:794-806, guarded by
+    # "ll_spg_dump .AND. jn == 1", immediately after CALL dyn_cor_2D(ua_e,
+    # va_e, zu_trd, zv_trd) at :783 and BEFORE the tidal / bottom-stress
+    # additions overwrite zu_trd/zv_trd in place.
+    #
+    # The dumped ua_e/va_e are the BEFORE-level barotropic transport, proved
+    # by the config's own switches (RUN_GDB/namelist_cfg: ln_bt_fw=.false.,
+    # nn_bt_flt=2), not assumed:
+    #   1. nn_bt_flt /= 3          => ll_bt_av = .TRUE.   (:202-203)
+    #   2. ll_init  = ll_bt_av     => ll_init  = .TRUE.   (:208)
+    #   3. ln_bt_fw=.F.            => CENTRED branch: un_e = puu_b(:,:,Kbb),
+    #                                 vn_e = pvv_b(:,:,Kbb)              (:570-571)
+    #   4. ll_init                 => ub_e = ubb_e = vb_e = vbb_e = 0    (:546-553)
+    #   5. jn=1 and (jn<3).AND.ll_init => za1=1, za2=za3=0               (:630-632)
+    #   6. ua_e = za1*un_e + za2*ub_e + za3*ubb_e                        (:645)
+    #      => ua_e == un_e == puu_b(Kbb) exactly at jn=1.
+    # Independently confirmed by measurement: max|ua_e - un_e_init| = 0.000e+00
+    # against spg_dump_un_e_init.bin (which is itself puu_b(Kbb), :570).
+    # zu_trd/zv_trd are dyn_cor_2D OF that before-level transport, so they
+    # carry the same level (registered by their governing input, exactly as
+    # dump_nmln/dump_hmlp are registered by their rn2b integrand).
+    "cor2d_dump_ua_e_in_substep1.bin": ("before", "dynspg_ts.F90:804 WRITE(8975) "
+        "ua_e at jn=1; ua_e == un_e == puu_b(:,:,Kbb) there via :202-203 "
+        "(ll_bt_av) -> :208 (ll_init) -> :570 (ln_bt_fw=.F. CENTRED seed) -> "
+        ":546-553 (ub_e=ubb_e=0) -> :630-632 (za1=1,za2=za3=0) -> :645."),
+    "cor2d_dump_va_e_in_substep1.bin": ("before", "dynspg_ts.F90:805 WRITE(8976) "
+        "va_e at jn=1; v twin of cor2d_dump_ua_e_in_substep1.bin, same proof "
+        "chain via :571 (vn_e = pvv_b(:,:,Kbb)) and :648."),
+    "cor2d_dump_zu_trd_substep1.bin": ("before", "dynspg_ts.F90:802 WRITE(8973) "
+        "zu_trd at jn=1, the OUTPUT of CALL dyn_cor_2D(ua_e, va_e, ...) at "
+        ":783 (pre tidal/bottom-stress overwrite). No leapfrog index of its "
+        "own; registered by its governing input ua_e/va_e = puu_b/pvv_b(Kbb) "
+        "(see cor2d_dump_ua_e_in_substep1.bin)."),
+    "cor2d_dump_zv_trd_substep1.bin": ("before", "dynspg_ts.F90:803 WRITE(8974) "
+        "zv_trd at jn=1; v twin of cor2d_dump_zu_trd_substep1.bin, same "
+        "dyn_cor_2D call at :783 and same governing before-level input "
+        "(pvv_b(:,:,Kbb))."),
 }
 _EIVDIAG_SOURCE_AEIU = _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_AEIV = _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"][1]

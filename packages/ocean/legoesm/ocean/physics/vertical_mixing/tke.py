@@ -1421,7 +1421,11 @@ def _prandtl_number(
       ``enable_Prandtl_tke=False`` fallback, default 10).
     - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8, fixed #1226 item 11;
       sign-condition transcription fixed #1226 zdftke_chain_walk STAGE 2):
-      NEMO's EXACT nn_pdl=1 form (zdftke.F90:459-476, see the inline
+      NEMO's EXACT nn_pdl=1 form (cfgs/DINO/MY_SRC/zdftke.F90:477-497
+      — the copy DINO actually builds, ``IF(nn_pdl==1)`` at :477 through
+      its ``ENDIF`` at :497 inclusive, verified by reading the file;
+      upstream src/OCE/ZDF/zdftke.F90 is the same block at :381-401 —
+      see the inline
       comment below for the full 3-way branch — ``rn2b<=0 -> zri=0``;
       ``zdiv==0`` exact-zero guard; else ``zri = rn2b·p_avm / zdiv`` taken
       AS-IS including its sign): ``pdlr = max(0.1, ri_cri/max(ri_cri,
@@ -1438,11 +1442,16 @@ def _prandtl_number(
       the ``P_s = K_M_old·shear_sq`` shear-production term already computed
       at the call site). legoESM's single per-interface ``K_M`` (vs NEMO's
       separate u-/v-point avm face-averaged onto the T-point, zdfsh2.F90:
-      80-94) has no face-averaging analog — same documented simplification
-      as :func:`legoesm.ocean.physics.vertical_mixing._shared.
-      vertical_shear_burchard` — so the faithful transcription forms
-      ``p_sh2 ≈ kappaM·shear_sq`` (the AVM-WEIGHTED shear, matching units
-      [m²/s³]) before adding ``bshear_floor`` (now in the SAME m²/s³ units
+      80-94) is bridged EITHER by the ``p_sh2_override`` argument (the
+      exact face-averaged transcription, ``_shared.
+      avm_weighted_shear_production``, selected by
+      ``tke_shear_avm_weighting="nemo_face"``) OR, when no override is
+      given, by the T-collapsed ``p_sh2 ≈ kappaM·shear_sq`` (the
+      AVM-WEIGHTED shear, matching units [m²/s³]) — correctly normalised
+      since the 2026-08 ``vertical_shear_face_native`` prefactor fix, and
+      the same documented simplification as :func:`legoesm.ocean.physics.
+      vertical_mixing._shared.vertical_shear_burchard`. Either way,
+      ``bshear_floor`` is added (now in the SAME m²/s³ units
       as NEMO's ``rn_bshear``, not ``shear_sq``'s 1/s²). Caller passes
       ``cfg.prandtl_ri_coeff = 1/ri_cri`` (unchanged meaning).
 

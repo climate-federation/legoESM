@@ -543,6 +543,11 @@ class DINOConfig:
     # fidelity ceiling — no before-velocity state, same class as this
     # card's other FE-frame notes).
     tke_shear_production: str = "squared_centered"  # "nemo_face_native" = MLF-only
+    # #1455 — avm INSIDE the zdfsh2 face sum (``p_avm(ji+1)+p_avm(ji)``,
+    # zdfsh2.F90:80) rather than factored out and multiplied at the T-point.
+    # Only meaningful with tke_shear_production="nemo_face_native" (dispatch
+    # raises otherwise) ⇒ MLF-only. Default "tpoint" = BIT-IDENTICAL.
+    tke_shear_avm_weighting: str = "tpoint"        # "nemo_face" = MLF-only
     # T8/T13 — rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri + Langmuir PE.
     # Requires outer_integrator="leapfrog" (construction raises otherwise).
     tke_n2_time_level: str = "step_entry"          # "nemo_before" = MLF-only
@@ -1467,6 +1472,26 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # outer_integrator="leapfrog" (construction raises otherwise) and a
     # per-level wet mask (z_coord.is_active) -- both hold on this card.
     "tke_shear_production": "nemo_face_native",  # zdfsh2 face-native shear
+    # #1455 sh2 avm-weighting: "tpoint" (the default this card used to
+    # inherit) factors K_M OUT of the face sum -- NEMO's zsh2u carries the
+    # avm SUM ``p_avm(ji+1)+p_avm(ji)`` = 2*mi(avm) (zdfsh2.F90:80), so the
+    # 0.25 at :93 nets out to mi[mi(avm)*S], NOT 0.25*K*sum(S). Measured:
+    # legoESM's Z = p_avm/(p_sh2+rn_bshear) ran a FLAT median 2.0114x
+    # NEMO's, and selecting "nemo_face" drove that to 1.0057.
+    # (2026-08: that 2x has since ALSO been fixed AT SOURCE --
+    # vertical_shear_face_native's prefactor is now 0.5, so "tpoint" is no
+    # longer a half.  NOT RE-MEASURED post-fix: on the numbers above,
+    # post-fix "tpoint" would land at 2.0114/2 = 1.0057, i.e. the SAME
+    # place as "nemo_face" at that spy point -- so the residual 0.57% is
+    # NOT attributable to the spatially-varying-avm term there, and no
+    # causal claim is made for keeping "nemo_face" beyond its being the
+    # literal transcription.  Re-measure both post-fix before quoting a
+    # difference.)  "nemo_face" keeps avm INSIDE the face sum
+    # (_shared.avm_weighted_shear_production) and is the literal
+    # zdfsh2.F90:80-94 transcription. Requires tke_shear_production=
+    # "nemo_face_native" (tke.py:2110/2314 dispatch raises otherwise) ->
+    # MLF-only, same class as the two axes above.
+    "tke_shear_avm_weighting": "nemo_face",   # zdfsh2 avm INSIDE the face sum
     "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
 }
 
@@ -2622,6 +2647,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
+            tke_shear_avm_weighting=cfg.tke_shear_avm_weighting,
             tke_n2_time_level=cfg.tke_n2_time_level,
         )
         if cfg.tke_alpha is not None:
@@ -2982,6 +3008,15 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         g=cfg.g,
         omega=cfg.omega,
+        # The card's specific heat is named c_p; the ConstantsConfig field it
+        # routes into is c_sw.  That ALIAS is why it was missed: the card set
+        # NEMO's exact rcp (eosbn2.F90:1899) while every ConstantsConfig
+        # consumer kept the legoesm.constants default -- a 5.3e-4 relative gap,
+        # 10x the g one.  Inert on the current DINO gate (nothing in the
+        # scheme="tke" k_profiles body reads c_sw when physics surface_forcing
+        # is "none"), live the moment the surface-buoyancy-flux path is
+        # enabled (k_profiles.py:431 / ocean_pe_latlon_cgrid.py's c_sw import).
+        c_sw=cfg.c_p,
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
@@ -3043,7 +3078,13 @@ def dino_lat_lon_model_config(
         eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
         eos_depth=cfg.eos_depth,       # "insitu" (default) | "geometric" (nemo_paper)
     )
-    return model_cfg, physics_cfg
+    # Return the config's OWN physics block, not the pre-routing local: the
+    # flat g=/rho_0=/omega= kwargs above land in model_cfg.constants and
+    # from_flat propagates that single set into model_cfg.physics. Returning
+    # `physics_cfg` here would hand callers a pipeline still carrying the
+    # ConstantsConfig DEFAULTS -- the exact silent divergence (the card's g
+    # never reaching compute_N2 / KPP / TKE) this routing removes.
+    return model_cfg, model_cfg.physics
 
 
 def dino_mpas_state(

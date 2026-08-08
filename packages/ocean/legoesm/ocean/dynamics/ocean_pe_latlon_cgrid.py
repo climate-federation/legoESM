@@ -1835,7 +1835,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
-def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
+def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
     over latitude in the SAME fused halo exchange (MPI audit lever O4).
 
@@ -1858,7 +1858,21 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
     ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
     halo-padded fields ``_bc_pv_flux`` uses downstream to build ``Fu_at_v``.
+
+    ``Fu``/``u`` may both be ``None`` for a thickness-only caller (the
+    barotropic ``_build_een_barotropic_inputs``, which needs the SAME two
+    ``een_e3f_scheme`` rules but no padded velocity); the returned
+    ``Fu_ext``/``u_ext`` are then ``None`` and they are left out of the
+    fused pad entirely, so no extra halo traffic is exchanged.  The
+    ``h_vtx`` result is bit-identical either way (the pad is per-field).
     """
+    if (Fu is None) != (u is None):
+        raise ValueError(
+            "een_e3f_h_vtx: Fu and u must both be arrays or both be None "
+            f"(got Fu={type(Fu).__name__}, u={type(u).__name__}).")
+    _extra = () if Fu is None else (Fu, u)
+    _extra_fill = () if Fu is None else (0.0, 0.0)
+    _n_extra = len(_extra)
     BIG_H = 1.0e30
     h_sw = jnp.roll(h_k, 1, axis=1)
     h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
@@ -1867,12 +1881,14 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     t_sw = (h_sw > 0.0).astype(h_sw.dtype)
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     if een_e3f_scheme == "nemo_avg":
-        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
-         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        _p = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active) + _extra + (h_k, h_sw, t_k, t_sw), halo=1,
+            south_values=(BIG_H, BIG_H) + _extra_fill + (0.0, 0.0, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H) + _extra_fill + (0.0, 0.0, 0.0, 0.0),
         )
+        h_k_pad, h_sw_pad = _p[0], _p[1]
+        Fu_ext, u_ext = (_p[2], _p[3]) if _n_extra else (None, None)
+        h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad = _p[2 + _n_extra:]
         e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
         wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
         # Fully-dry vertex (wet_count == 0) fallback.  NEMO's compiled path
@@ -1905,11 +1921,13 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
             wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), dry_fallback,
         )
     else:  # "min" (validated at caller entry)
-        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0),
+        _p = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active) + _extra, halo=1,
+            south_values=(BIG_H, BIG_H) + _extra_fill,
+            north_values=(BIG_H, BIG_H) + _extra_fill,
         )
+        h_k_pad, h_sw_pad = _p[0], _p[1]
+        Fu_ext, u_ext = (_p[2], _p[3]) if _n_extra else (None, None)
         h_vtx = jnp.minimum(
             jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
             jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
@@ -1965,7 +1983,7 @@ def _bc_pv_flux(
 
     ``dz_ref`` : array, shape (nlev,), or None
         Per-level reference thickness (``z_coord.dz_ref``), forwarded to
-        ``_een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
+        ``een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
         (#1226 item 10, final piece). ``None`` (default) keeps the legacy
         ``BIG_H``-everywhere dry-vertex behaviour bit-identical.
     """
@@ -2052,7 +2070,7 @@ def _bc_pv_flux(
     #     e3f_0(:,:,:)``), so ``q = zeta/e3f_0vor`` is FINITE, not zero, there
     #     (the surrounding face masks already zero ``zeta`` at those points,
     #     so this never changes the tendency where NEMO integrates from —
-    #     only how the intermediate q is computed). ``_een_e3f_h_vtx``
+    #     only how the intermediate q is computed). ``een_e3f_h_vtx``
     #     reproduces this with ``dz_ref[k]`` (== NEMO's per-level-uniform
     #     ``e3f_0``, see that helper's docstring) instead of the plain
     #     ``BIG_H`` sentinel when ``dz_ref`` is supplied; ``dz_ref=None``
@@ -2065,10 +2083,10 @@ def _bc_pv_flux(
     Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
     # h_vtx construction (both een_e3f_scheme rules + fold overwrite) and the
     # matching fused Fu/u halo pad live in the single shared helper
-    # ``_een_e3f_h_vtx`` — the production code path, also called directly by
+    # ``een_e3f_h_vtx`` — the production code path, also called directly by
     # the ground-truth test (test_al81_budget.py) so no formula is
     # re-derived in the test.
-    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
+    h_vtx, Fu_ext, u_ext = een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
 
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)

@@ -49,6 +49,7 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
     LatLonCGridOceanConfig,
+    constants_equal,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
@@ -1368,6 +1369,33 @@ class LatLonCGridOceanModel:
         for name, value in nonnegative.items():
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+        # ``config.constants`` and ``config.physics.constants`` are ONE set.
+        # ``from_flat`` / ``replace_flat`` propagate ``config.constants`` into
+        # the physics pipeline automatically; a config built through the RAW
+        # NamedTuple constructor bypasses that routing, so catch the divergence
+        # here rather than silently running the momentum path on one g and
+        # compute_N2 / KPP / TKE on another (the #1226 N^2 residual).
+        # SCOPE: this pairing only. ``FluxFeedbackConfig`` deliberately owns a
+        # SEPARATE c_sw/rho_0 (the Veros surface-forcing cp_0, documented on
+        # that config) and nothing propagates ``constants`` into it -- do not
+        # read this check as "the model has exactly one c_sw".
+        # ``constants_equal(...) is False`` (a PROVEN difference), never a bare
+        # ``!=``: a traced constant would otherwise raise
+        # TracerBoolConversionError here instead of this domain error -- the
+        # same defect the from_flat/replace_flat routing had.
+        _phys = config.physics
+        if (_phys is not None and getattr(_phys, "constants", None) is not None
+                and constants_equal(_phys.constants, config.constants) is False):
+            raise ValueError(
+                "ocean physical constants disagree between the model config "
+                f"({config.constants}) and its physics pipeline "
+                f"({_phys.constants}). Build the config with "
+                "LatLonCGridOceanConfig.from_flat(...) (which routes the flat "
+                "g=/rho_0=/omega=/c_sw=/R_earth= kwargs into config.constants "
+                "and propagates them to physics) instead of the raw "
+                "constructor, or pass matching ConstantsConfig values."
+            )
 
         # #1226: T/u-face metric convention dispatch -- raise on an unknown
         # value rather than silently falling through to create_latlon_geometry's
@@ -3441,7 +3469,18 @@ class LatLonCGridOceanModel:
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
                         state.v_mask.data, _min_wc, F_slow_u.dtype,
-                        metric_complete=(_bt_cor_split == "een_metric"))
+                        metric_complete=(_bt_cor_split == "een_metric"),
+                        # Same EEN q-boundary / e3f rules as the 3-D EEN and
+                        # as the substep loop's own _build_een_barotropic_inputs
+                        # — otherwise this subtraction uses a DIFFERENT operator
+                        # than the live term it is meant to cancel.
+                        een_q_boundary=getattr(
+                            self.config, "een_q_boundary", "neumann_fill"),
+                        een_e3f_scheme=getattr(
+                            self.config, "een_e3f_scheme", "min"),
+                        # ...and the SAME dz_ref, or the fully-dry-vertex e3f
+                        # differs from the live substep term this cancels.
+                        dz_ref=getattr(self.z_coord, "dz_ref", None))
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
                     _add_bt_cor = True

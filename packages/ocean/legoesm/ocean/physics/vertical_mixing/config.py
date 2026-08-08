@@ -519,34 +519,49 @@ class TKEConfig(NamedTuple):
     #   SUPERSEDES "nemo_burchard" when selected — requires the SAME
     #   leap-frog before-velocities (``outer_integrator="leapfrog"``,
     #   construction raises otherwise) PLUS the raw (uncollapsed) C-grid
-    #   face state, threaded by the caller. Two scope limits carried over
-    #   from "nemo_burchard"/``nemo_ri`` (see :func:`_shared.
-    #   vertical_shear_face_native` docstring): the viscosity stays the
-    #   caller's single per-interface ``K_M`` (NEMO face-averages ``avm``
-    #   before combining; not transcribed) and the vertical metric stays the
-    #   static reference ``dz_half`` (NEMO's live QCO-stretched
-    #   ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO by the walk's
-    #   Candidate B, corr 1.000/ratio 0.9999).
+    #   face state, threaded by the caller.
+    #   NORMALISATION (fixed 2026-08 — the note that stood here claimed the
+    #   dropped avm face-average was "without changing the dominant effect";
+    #   that was FALSE by exactly 2x): this option returned HALF of
+    #   ``(du/dz)²+(dv/dz)²`` because it kept NEMO's literal 0.25 T-point
+    #   prefactor while ALSO dropping the ``avm(i+1)+avm(i)`` face SUM that
+    #   the 0.25 is paired with (zdfsh2.F90:80 vs :93). The prefactor is now
+    #   0.5, so this form is normalised IDENTICALLY to "squared_centered" /
+    #   "nemo_burchard" and to NEMO's own ``p_sh2/avm``. The pre-fix halving
+    #   hit BOTH consumers (the TKE source ``P_s`` and the ``prandtl_mode=
+    #   "nemo_ri"`` denominator ``zdiv``); no shipped card selected the
+    #   affected combination, so nothing in production moved.
+    #   Remaining scope limits (see :func:`_shared.
+    #   vertical_shear_face_native` docstring): the viscosity is the
+    #   caller's single per-interface ``K_M``, which cannot carry a
+    #   spatially VARYING ``avm`` inside the face sum — set
+    #   ``tke_shear_avm_weighting="nemo_face"`` below for that; and the
+    #   vertical metric stays the static reference ``dz_half`` (NEMO's live
+    #   QCO-stretched ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO
+    #   by the walk's Candidate B, corr 1.000/ratio 0.9999).
     tke_shear_production: str = "squared_centered"
     # ----- avm face-averaging inside p_sh2 (#1455 sh2 chain-walk, unpark) -----
-    # "nemo_face_native"'s own docstring/comment above documents avm
-    # face-averaging as a scope limit ("no face-averaging analog... not
-    # transcribed") — this axis is that transcription, gated SEPARATELY so
-    # the shear-geometry fix (above) and the avm-weighting fix (this field)
-    # can be measured/enabled independently.
+    # "nemo_face_native"'s remaining scope limit is that a SINGLE external
+    # K_M cannot carry a spatially VARYING avm inside the face sum — this
+    # axis is that transcription, gated SEPARATELY so the shear-geometry fix
+    # (above) and the avm-weighting fix (this field) can be measured/enabled
+    # independently.
     # ``"tpoint"`` (default, BIT-IDENTICAL legacy): ``p_sh2 = K_M * shear_sq``
     #   with a single per-interface T-point ``K_M`` multiplying the
     #   (already T-collapsed) ``shear_sq`` — the existing production path.
     # ``"nemo_face"``: NEMO's literal ``zdfsh2.F90:80-94`` — ``K_M`` is
-    #   face-averaged (summed, NOT meaned: NEMO's own comment reads "2 x
-    #   shear production... energy conserving form") separately at each
+    #   face-SUMMED (``avm(i+1)+avm(i)``, NOT meaned) separately at each
     #   u-/v-face via array rolls on the existing 3-D ``K_M`` (no new
     #   staggered state), multiplied into the per-face shear BEFORE the
     #   0.25 T-point coast-doubled combine
-    #   (:func:`_shared.avm_weighted_shear_production`). For spatially
-    #   UNIFORM K_M this returns EXACTLY ``2 * K_M * shear_sq_tpoint`` (a
-    #   verified algebraic identity, NOT a bug — NEMO's own "2x" form), so
-    #   it is NOT bit-identical to "tpoint" even in the uniform-K_M limit.
+    #   (:func:`_shared.avm_weighted_shear_production`).
+    #   CORRECTED 2026-08 (the note here claimed "EXACTLY 2 * K_M *
+    #   shear_sq_tpoint ... NOT bit-identical to tpoint even in the
+    #   uniform-K_M limit"): that 2x was the "nemo_face_native" halving,
+    #   not a property of this option. With that prefactor fixed, uniform
+    #   K_M now gives EXACTLY ``K_M * shear_sq_tpoint`` — this option IS
+    #   bit-identical to "tpoint" in the uniform-K_M limit, and differs
+    #   only where K_M varies horizontally (which is the whole point).
     #   Requires ``tke_shear_production="nemo_face_native"`` (the avm
     #   weighting is only meaningful with the matching face-native shear
     #   geometry; construction raises otherwise) and the same raw C-grid

@@ -178,15 +178,38 @@ def vertical_shear_face_native(
 
     * ``avm`` is NOT face-averaged — this function does not carry a
       viscosity at all (mirrors :func:`vertical_shear_squared`'s contract:
-      it returns a bare shear-production-EQUIVALENT quantity that the caller
+      it returns a bare shear-squared-EQUIVALENT [1/s²] that the caller
       multiplies by its own single per-interface ``K_M``, exactly as
-      ``P_s = K_M · shear_sq`` already does downstream). NEMO's own
-      face-averaged-``avm`` complicates unit tracking without changing the
-      dominant effect the #1226 walk isolated (Candidate B: static-vs-live
-      metric was negligible; the avm face-averaging was never isolated as
-      its own candidate because ``_vertical_shear_squared`` already shares
-      the single-``K_M`` simplification with every other scheme on this
-      C-grid).
+      ``P_s = K_M · shear_sq`` already does downstream).
+
+      **Prefactor (corrected 2026-08; the earlier claim that dropping the
+      face-average is "without changing the dominant effect" was FALSE by
+      exactly 2×).** NEMO's ``zsh2u`` carries the avm *SUM*
+      ``avm(ji+1)+avm(ji) = 2·mi(avm)`` (zdfsh2.F90:80), and the T-point
+      combine at :93 applies ``0.25`` to a pair of faces per direction, so
+      the net is ``p_sh2 = mi_u[mi(avm)·S_u] + mi_v[mi(avm)·S_v]`` — the two
+      DIRECTIONS ADD, they are not averaged together (zdfsh2.F90:48-49).
+      Factoring a single ``K_M`` out of that leaves a prefactor of **0.5**,
+      not NEMO's literal 0.25: with 0.25 this function returned exactly HALF
+      of ``(du/dz)² + (dv/dz)²``, i.e. half of what its two siblings in the
+      SAME ``tke_shear_production`` dispatch
+      (:func:`vertical_shear_squared`, :func:`vertical_shear_burchard`)
+      return, and half of NEMO's own ``p_sh2``/``K_M``. That fed BOTH the
+      TKE shear source (``P_s = K_M·shear_sq``) and the ``prandtl_mode=
+      "nemo_ri"`` denominator ``zdiv``. Pinned by
+      ``test_tke_nemo_identity.py::TestFaceNativeShear::
+      test_uniform_shear_normalisation_matches_siblings`` (analytic linear
+      profile ⇒ all three forms must return ``(du/dz)²+(dv/dz)²`` exactly)
+      and by the uniform-``K_M`` identity against
+      :func:`avm_weighted_shear_production`. Corroborated on the oracle:
+      NEMO's dumped ``sh2`` was a FLAT median 2.0114× legoESM's
+      ``kappaM·shear_sq`` at the DINO spy point (#1455).
+
+      The remaining, genuine scope limit is that a single ``K_M`` cannot
+      reproduce a spatially VARYING ``avm`` inside the face sum — for that,
+      select ``tke_shear_avm_weighting="nemo_face"``
+      (:func:`avm_weighted_shear_production`), which is the literal
+      transcription. The two agree exactly in the uniform-``K_M`` limit.
     * The vertical metric ``dz_half`` is the caller's STATIC reference
       spacing (T-point ``dz_half_ref·J``), not NEMO's LIVE
       ``e3uw(Kmm)·e3uw(Kbb)`` QCO-stretched product — Candidate B measured
@@ -271,7 +294,14 @@ def vertical_shear_face_native(
     # T-point combination: T(i) is bracketed by faces i (west) and i+1
     # (east) under legoESM's convention (the mirror of NEMO's (i-1, i)
     # east-face-of-T(i) pairing — see docstring).
-    p_sh2 = 0.25 * (
+    #
+    # Prefactor 0.5, NOT NEMO's literal 0.25: NEMO's zsh2u already carries
+    # the avm SUM (= 2*mi(avm), zdfsh2.F90:80), which this K_M-free form
+    # factors out.  0.5*(pair-sum) is the MEAN over the two faces bracketing
+    # T(i), so a uniform du/dz gives exactly (du/dz)^2 + (dv/dz)^2 — the same
+    # normalisation as vertical_shear_squared / vertical_shear_burchard.
+    # (Was 0.25 = half of NEMO; see the docstring's "Prefactor" note.)
+    p_sh2 = 0.5 * (
         (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
         + (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v
     )
@@ -303,18 +333,29 @@ def avm_weighted_shear_production(
         p_sh2(ji,jj,jk) = 0.25 * ( (zsh2u(ji-1,jj)+zsh2u(ji,jj))*(2-umask*umask)
                                   + (zsh2v(ji,jj-1)+zsh2v(ji,jj))*(2-vmask*vmask) )
 
-    NB (verified by the synthetic self-consistency control, #1455 step 2):
-    NEMO's own comment at :79 reads "2 x shear production ... (energy
-    conserving form)" — ``avm(ji+1)+avm(ji)`` is a face SUM, not an average,
-    so for spatially UNIFORM ``kappaM_T = K0`` this function returns EXACTLY
-    ``2 * K0 * shear_sq_tpoint`` (``shear_sq_tpoint`` = the T-collapsed
-    output of :func:`vertical_shear_face_native`), NOT
-    ``K0 * shear_sq_tpoint``. This is NOT a bug — it is NEMO's own
-    documented "energy conserving form" convention (verified against the
-    literal Fortran, not inferred) — so this function returns the full
-    ``p_sh2`` PRODUCT directly rather than a ``shear_sq`` the caller
-    multiplies by a bare ``K_M``, precisely because that external multiply
-    cannot reproduce the avm-INSIDE-the-face-sum structure.
+    Walking the Fortran: NEMO's ``zsh2u`` carries the avm SUM
+    ``p_avm(ji+1)+p_avm(ji) = 2*mi(avm)`` (zdfsh2.F90:80 — this, not the net
+    term, is what the "2 x shear production" comment at :79 names), and the
+    T-point combine at :93 sums TWO faces per direction under a 0.25
+    prefactor, so the net is ``p_sh2 = mi_u[mi(avm)·S_u] + mi_v[mi(avm)·S_v]``
+    exactly as the routine's own header comment at :48-49 states.
+
+    NB (2026-08, supersedes the "2x" NB that stood here): for spatially
+    UNIFORM ``kappaM_T = K0`` this function now returns EXACTLY
+    ``K0 * shear_sq_tpoint``, where ``shear_sq_tpoint`` is the output of
+    :func:`vertical_shear_face_native`.  That helper carried NEMO's literal
+    0.25 while ALSO dropping the avm sum, i.e. it applied the halving twice
+    and returned half of NEMO; its prefactor is now 0.5 and the two forms
+    agree in the uniform-``K_M`` limit (pinned by
+    ``test_tke_nemo_identity.py::TestAvmWeightedShearProduction::
+    test_uniform_kappaM_matches_tpoint_exactly``).  CONFIRMED against the
+    oracle, not inferred: at the DINO production spy point NEMO's dumped
+    ``sh2`` was a FLAT median 2.0114x legoESM's pre-fix
+    ``kappaM*shear_sq``, and selecting this function drove that to 1.0057
+    (#1455).  This function still returns the full ``p_sh2`` PRODUCT rather
+    than a ``shear_sq`` the caller multiplies by a bare ``K_M``, because a
+    single external ``K_M`` cannot reproduce a spatially VARYING avm inside
+    the face sum — that, and only that, is what remains selectable here.
 
     Parameters
     ----------

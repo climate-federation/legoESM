@@ -316,7 +316,8 @@ def compute_vertical_K_profiles(
             )
         K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
                                                eos_fn=eos_fn,
-                                               before_tracers=n2_tracers)
+                                               before_tracers=n2_tracers,
+                                               cc=physics_config.constants)
         # Convection enhances tracer diffusivity (convective_κz). Under
         # nemo_max_floor the EVD stable-branch background (K_bg) folds into
         # the SAME max as every other background (a no-op once K_v_total
@@ -1009,7 +1010,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
-                          eos_fn=None, before_tracers=None):
+                          eos_fn=None, before_tracers=None,
+                          cc: ConstantsConfig = ConstantsConfig()):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -1041,7 +1043,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         ed_h_actual = maybe_partial_h_actual(state, z_coord)
         ed_p_cell = compute_hydrostatic_pressure(
             rho, state.eta.data, z_coord.dz_ref, J,
-            ConstantsConfig().rho_0, h_actual=ed_h_actual,
+            cc.rho_0, h_actual=ed_h_actual,
         )
     # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
     # (gdept / interior gdepw); ignored by every other n2_mode.  gdept(Kmm)
@@ -1061,6 +1063,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
         t_depth=ed_t_depth, w_depth=ed_w_depth,
+        g=cc.g, rho_ref=cc.rho_0,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
         # NEMO zdfevd MIN(rn2, rn2b): evaluate the trigger on the BEFORE
@@ -1080,12 +1083,13 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             ed_h_b = maybe_partial_h_actual(state_b, z_coord)
             ed_p_cell_b = compute_hydrostatic_pressure(
                 rho_b, state_b.eta.data, z_coord.dz_ref, J,
-                ConstantsConfig().rho_0, h_actual=ed_h_b,
+                cc.rho_0, h_actual=ed_h_b,
             )
         K_b, A_b, _ = convective_K_A_flag(
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
             t_depth=ed_t_depth, w_depth=ed_w_depth,
+            g=cc.g, rho_ref=cc.rho_0,
         )
         K = jnp.maximum(K, K_b)
         A = jnp.maximum(A, A_b)
