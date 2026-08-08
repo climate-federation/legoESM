@@ -1675,3 +1675,39 @@ So the target for the dycore arms is now specific: **the spatial surface-pressur
 error the dycore develops within its first 6 hours.** That is a different
 question from anything tried today (optimizer, capacity, data volume, physics
 package, mass anchor), and it is the one worth the next GPU-hours.
+
+### How large the first-step pressure error is: worse than CLIMATOLOGY
+
+Same anchored column_nn scorecard, mslp RMSE [Pa]:
+
+| | 6 h | 12 h | 24 h | 72 h | 120 h | 240 h |
+|---|---|---|---|---|---|---|
+| model | **1044** | 1050 | 1147 | 1402 | 1594 | 1902 |
+| persistence | 366 | 463 | 674 | 923 | 1029 | 1104 |
+| ERA5 climatology | **811** | 793 | 790 | 798 | 819 | 892 |
+
+**After ONE 6-hour step the dycore's surface-pressure field is worse than the
+annual-mean climatology (1044 vs 811 Pa), and 2.9x worse than not forecasting at
+all (366 Pa).** For scale: persistence's 366 Pa is close to the 260 Pa
+representation floor, i.e. the real 6 h change in the field is only ~257 Pa,
+while the model injects ~1011 Pa on top of it.
+
+That is not a tuning-scale error. One macro step puts more error into p_s than
+the field's entire climatological spread, and — via the hydrostatic z500
+diagnosis — that single quantity accounts for the whole 82 m z500 error.
+
+### The next measurement, and it is already queued
+
+The anchored CLASSICAL arm (job 26794956) will be the first loadable classical
+checkpoint on current code. Scoring it at leads 6/12/24/72/120/240 tests
+directly whether the 6 h pressure error is physics-INDEPENDENT: classical and
+column_nn share the dycore and the ERA5 initial state but have completely
+different physics (RRTMGP + Bechtold + CLUBB + 124 tuned knobs vs a 216k MLP).
+
+* both ~1000 Pa at 6 h -> the dycore / initialisation path owns it, and no
+  physics work of any kind will move it;
+* materially different -> physics drives the first step after all, and the
+  three null results from today (optimizer, capacity, data) need re-reading.
+
+No new compute is needed to set this up — the arm is already training, and the
+scorecard just needs the short leads included.
