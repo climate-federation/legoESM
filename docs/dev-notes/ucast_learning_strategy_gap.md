@@ -1711,3 +1711,31 @@ different physics (RRTMGP + Bechtold + CLUBB + 124 tuned knobs vs a 216k MLP).
 
 No new compute is needed to set this up — the arm is already training, and the
 scorecard just needs the short leads included.
+
+## MASS ANCHOR IN TRAINING: -25 to -30 % AT 5 DAYS, ON BOTH ARMS
+
+Matched epoch AND lead, one flag changed, both dycore arms (jobs 26794955 /
+26794956):
+
+| arm / lead / epoch | baseline | anchored | delta |
+|---|---|---|---|
+| **classical @120 h ep9** | 65.33 | **45.46** | **-30.4 %** |
+| column_nn @120 h ep9 | 85.02 | 63.38 | -25.5 % |
+| column_nn @120 h ep10 | 83.25 | 61.67 | -25.9 % |
+| classical @72 h ep7 | 43.08 | 35.84 | -16.8 % |
+| column_nn @72 h ep8 | 55.18 | 47.49 | -13.9 % |
+
+Provenance for the classical baseline: its scorecard's
+`train_loss_history` is `[65.28289942933154]`, matching the epoch-10 line in its
+log exactly, which fixes 65.326233 as its epoch 9 — the row above.
+
+Two completely different physics packages — RRTMGP + Bechtold + CLUBB with 124
+tuned knobs, and a 216k-parameter MLP — improve by the same 25-30 % from the
+same one-line constraint, with the gain growing with lead (14-17 % at 72 h,
+25-30 % at 120 h). That lead-dependence is the signature of removing a SECULAR
+drift, and it is the strongest confirmation of the mechanism so far: the effect
+is a property of the shared dycore, not of either physics package.
+
+This is the largest single improvement of the campaign, and unlike every other
+lever tried today it came from a conservation defect rather than a
+hyperparameter.
