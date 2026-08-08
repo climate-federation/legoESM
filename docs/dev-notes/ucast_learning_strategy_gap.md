@@ -1880,3 +1880,49 @@ Two cheaper things worth measuring first, both of which sharpen the target:
   (`p_s * exp(delta_phis/(R_d T_sfc))`) only acts where topography was smoothed.
 
 Neither needs a training run.
+
+## RETRACTION: my spin-up probe measures EVOLUTION, not error
+
+I built `scripts/validate/aimip_pressure_spinup.py` to test whether the ~1000 Pa
+6 h pressure error is a purely dynamical initialisation shock. **It does not
+answer that, and I designed it wrong.**
+
+It records the area-weighted RMS of `p_s(t) - p_s(0)` in a zero-physics run.
+That is displacement from the initial state — which the real atmosphere also
+does. The true 6 h change is ~258 Pa (persistence error at 6 h, floor removed),
+and the zero-physics dycore moves **313 Pa** in 6 h. Same order. The probe
+therefore cannot separate correct evolution from wrong evolution; only a
+comparison against the ERA5 verification can, and that is what the scorecard
+already does.
+
+This is the "is the metric measuring what its name says" gate, failed by me
+after writing the gate into the probe's own docstring.
+
+### What the run DOES establish, and these stand
+
+* **No land/ocean asymmetry: 311.9 Pa land vs 314.6 Pa ocean at 6 h**, and equal
+  at every step from 10 minutes on. The `p_s * exp(delta_phis/(R_d T_sfc))`
+  reconciliation to smoothed topography acts ONLY where topography was smoothed,
+  so it cannot produce a signal that is identical over ocean. **That mechanism
+  is REFUTED** — which is a real result, just not the one I was after.
+* **Global-mean p_s is conserved to +0.15 Pa over 6 h** in a free run,
+  independently confirming the dry-mass anchor works outside the training loop.
+* **The evolution is not anomalously large** — 313 Pa of dynamical motion
+  against a true change of ~258 Pa. The dycore is not flinging the state around,
+  so gross over-activity is not the explanation either.
+* The curve is **monotonic**, not a ringing oscillation that settles: still
+  climbing 25 Pa/h at hour 6. A classic gravity-wave adjustment would have rung
+  and decayed within an hour or two, so the simple Lamb-wave-shock story does
+  not fit what the dycore actually does.
+
+### Where that leaves the diagnosis
+
+The initialisation-shock reading rested on the 130-170x growth-rate step in the
+SCORECARD, and that measurement is untouched — it compares against ERA5 at each
+lead. What is now refuted is one candidate MECHANISM (orography reconciliation)
+and weakened is another (ringing gravity-wave adjustment).
+
+The next probe must compare the 6 h forecast against the ERA5 verification and
+split the error into amplitude versus phase/pattern, rather than measuring
+displacement from t=0. That is a different, more careful instrument, and it is
+the honest next step rather than another guess at the mechanism.
