@@ -111,6 +111,39 @@ hard_saturation_adjustment: true
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
 cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+
+# --- Cloud-optics corrections (#1519) -----------------------------------------
+# WITHOUT these two the radiation solver sees ONE homogeneous overcast column at
+# the grid-mean water path: `to_rrtmg_kwargs` (clouds/cloud_fraction.py:145)
+# omits `cloud_fraction`, so it computes R(cf*tau_ic) instead of the
+# independent-column cf*R(tau_ic) + (1-cf)*R(0).  R is concave in optical depth,
+# so the single-column form is ALWAYS brighter — the function's own docstring
+# says so.  Measured on this mesh: radiation treats 86-91% of columns and
+# 30-41% of layers as overcast slabs against a true cover of 60% and a mean
+# layer cloud fraction of 8.5%; in-cloud layer water 60.7 g/m2 vs grid-mean 19.3.
+#
+# This file previously set NEITHER, so it fell through to the code defaults
+# ("none"/"constant") and the "production" configuration was the UNCORRECTED
+# one.  Measured cost, two 365-day AMIP runs identical in every other respect
+# (same pinned tree, forcing deck, ERA5 IC and diffusion bundle):
+#     rsut  +59.33 -> +36.60  (-22.7 W/m2)      rlut  -36.55 -> -23.66
+#     prw   +1.85  ->  +0.24                    TOA net -24.83 -> -12.92
+# Both TOA components move toward observations TOGETHER, so this is a structural
+# correction, not compensating-error tuning.
+#
+# cloud_fsd is the width parameter the two_region optic consumes and is INERT
+# under "constant" — the three keys are one lever, not three.
+#
+# NOT set here: cloud_vertical_overlap_optics.  "max_random" is MUTUALLY
+# EXCLUSIVE with two_column (config.py:1799 refuses the pair) — they are two
+# complete alternative treatments of the same degree of freedom, not composable
+# corrections.  Measured on a matched 30-day window: max_random rsut 140.98 vs
+# two_column 145.70 (control 168.57), i.e. 4.7 W/m2 better but short of the
+# 8 W/m2 pre-registered as materially better, and it re-solves each column as 8
+# subcolumns.  two_column is the cheaper choice at equal skill.
+cloud_partial_coverage_optics: two_column
+cloud_optics_inhomogeneity: two_region
+cloud_fsd: 1.0
 convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
                             # (raises pr, drains column moisture). The bechtold
                             # rain-split scheme is on this branch (#929), so the
