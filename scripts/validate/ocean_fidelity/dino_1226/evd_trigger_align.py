@@ -179,6 +179,16 @@ def section2(s1):
     run_dir = s1["run_dir"]
     require_explicit_e3t_mode(context="evd_trigger_align")
     dcfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+    # --- #1317 S17 A/B: EVD trigger time levels, ONE variable.
+    # LEGOESM_EVD_TL={card|solver_state|nemo_now_before}; "card" (default)
+    # leaves DINO_RECIPES["nemo_dino_kamm_mlf"] untouched.
+    _evd_tl = os.environ.get("LEGOESM_EVD_TL", "card")
+    if _evd_tl != "card":
+        dcfg = dataclasses.replace(dcfg,
+                                   convection_evd_n2_time_level=_evd_tl)
+    print(f"[A/B] LEGOESM_EVD_TL={_evd_tl} -> "
+          f"convection_evd_n2_time_level="
+          f"{dcfg.convection_evd_n2_time_level!r}")
     g = read_nemo_mesh_mask(os.path.join(run_dir, "mesh_mask.nc"), nn_hls=0)
     now = read_nemo_restart(os.path.join(run_dir, RESTART), nn_hls=0)
     bef = read_nemo_restart_before(os.path.join(run_dir, RESTART), nn_hls=0)
@@ -259,13 +269,32 @@ def section2(s1):
         raise SystemExit(f"tmask {tm.shape} vs T {T_nn.shape}")
     def dw(a, b):
         return float(np.abs(a - b)[tm].max())
-    print(f"[control] arm-identification on WET cells (n={int(tm.sum())}):")
-    print(f"            max|T_arm0 - T_Nnn| = {dw(arms[0]['T'], T_nn):.6e}")
+    # The arms' identity is a FUNCTION of the realized card value -- never a
+    # hardcoded annotation.  Under "solver_state" arm0 is the post-explicit
+    # Kaa state and arm1 is n2_tracers (= Nnn); under "nemo_now_before" arm0
+    # is Nnn and arm1 is Nbb (k_profiles.py, the `_evd_tl` block).  A control
+    # annotation that goes stale under the very switch being measured reads as
+    # FAILED when it passed -- this session has already caught two such probes.
+    _tl = mc.physics.convection.enhanced_diffusion.evd_n2_time_level
+    if _tl == "nemo_now_before":
+        _s0, _arm0 = "Nnn", "Nnn (n2_tracers)"
+        _s1, _arm1 = "Nbb", "Nbb (n2_tracers_before)"
+        _zero = "arm0"                    # the arm that must equal T_Nnn
+    else:
+        _s0, _arm0 = "Kaa", "Kaa (post-explicit solver state)"
+        _s1, _arm1 = "Nnn", "Nnn (n2_tracers)"
+        _zero = "arm1"
+    print(f"[control] arm-identification on WET cells (n={int(tm.sum())}); "
+          f"realized evd_n2_time_level={_tl!r} -> arm0={_arm0}, arm1={_arm1}")
+    print(f"            max|T_arm0 - T_Nnn| = {dw(arms[0]['T'], T_nn):.6e}"
+          + ("   <- expect 0.0" if _zero == "arm0" else ""))
     print(f"            max|T_arm1 - T_Nnn| = {dw(arms[1]['T'], T_nn):.6e}"
-          "   <- expect 0.0 (arm1 IS the Nnn step-entry state)")
+          + ("   <- expect 0.0" if _zero == "arm1" else ""))
     print(f"            max|T_Nnn  - T_Nbb| = {dw(T_nn, T_bb):.6e}")
     print(f"            max|T_arm0 - T_Nbb| = {dw(arms[0]['T'], T_bb):.6e}"
-          "   (arm0 is neither: it is the post-explicit Kaa state)")
+          f"   (arm0 is {_arm0})")
+    print(f"            max|T_arm1 - T_Nbb| = {dw(arms[1]['T'], T_bb):.6e}"
+          + ("   <- expect 0.0" if _tl == "nemo_now_before" else ""))
 
     # ---- counterfactual arms, evaluated on NEMO's OWN two levels.
     conv = pc.convection
@@ -289,11 +318,13 @@ def section2(s1):
             raise SystemExit(f"horizontal shape mismatch {a.shape} vs {W.shape}")
         return a[..., :n]                  # lego iface j <-> NEMO level j+1
 
+    # Same rule as the control block: every label below names the arm the
+    # REALIZED card actually built, not the one the default happens to build.
     masks = {
-        "PRODUCTION  A_v_total        (arm0=Kaa OR arm1=Nnn)":
+        f"PRODUCTION  A_v_total        (arm0={_s0} OR arm1={_s1})":
             to_nemo(np.asarray(cap["A"])) > fire,
-        "arm0 alone  N2(Kaa post-expl)": to_nemo(arms[0]["A"]) > fire,
-        "arm1 alone  N2(Nnn)":           to_nemo(arms[1]["A"]) > fire,
+        f"arm0 alone  N2({_arm0})": to_nemo(arms[0]["A"]) > fire,
+        f"arm1 alone  N2({_arm1})": to_nemo(arms[1]["A"]) > fire,
         "lego N2(Nnn) only            (single level)": to_nemo(A_nn) > fire,
         "lego OR(N2(Nnn),N2(Nbb))     [NEMO's levels]": to_nemo(A_faith) > fire,
     }

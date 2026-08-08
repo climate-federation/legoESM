@@ -124,6 +124,7 @@ def compute_vertical_K_profiles(
     tke_bottom_dirichlet=None,
     tke_bottom_level=None,
     n2_tracers_before=None,
+    eta_now=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -200,6 +201,26 @@ def compute_vertical_K_profiles(
         (default, BIT-IDENTICAL) ⇒ those consumers fall back to the SAME
         N² as the mixing length / buoyancy sink (the historical
         relabelling), matching every other scheme.
+    eta_now
+        NOW-level (Nnn) free surface, i.e. the eta the oracle's geometry index
+        refers to. Consulted ONLY by
+        ``EnhancedDiffusionConfig.evd_n2_time_level="nemo_now_before"`` (the
+        zdfevd trigger arms); ignored — and therefore BIT-IDENTICAL — for
+        every other selection. Needed because under a leap-frog the ``state``
+        handed to this function is the AFTER (Kaa) one, whose eta gives Kaa
+        ``gdept``/z*-jacobian, while NEMO evaluates BOTH ``bn2`` arms at Nnn
+        (stpmlf.F90:186-187).
+
+        DIFFERENTIABILITY — stated because this option is easy to misread as
+        an AD improvement: the shipped ``nemo_dino_kamm_mlf`` card runs
+        ``EnhancedDiffusionConfig.smooth_transition=False``, i.e. the HARD
+        ``where(N² <= thr, K_conv, K_bg)`` branch, so ``dK/d eta_now`` — and
+        every other EVD trigger gradient — is identically zero almost
+        everywhere. The whole ``eta_now``/EVD path is GRADIENT-DEAD in
+        production. That is PRE-EXISTING hard-branch behaviour, not
+        introduced here; ``smooth_transition=True`` restores a usable
+        gradient and is what ``test_evd_n2_time_level_consumes_eta_now``
+        runs on.
     """
     T = state.T.data
     nlev = T.shape[-1]
@@ -314,9 +335,71 @@ def compute_vertical_K_profiles(
                 "KPP own convective momentum, or choose a non-KPP "
                 "vertical_mixing scheme."
             )
-        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
+        # ---- Time levels of the two EVD trigger arms (zdfevd MIN(rn2,rn2b)).
+        # EnhancedDiffusionConfig.evd_n2_time_level; dispatch-hardened here,
+        # this being its only consumption site.
+        _evd_tl = getattr(_ed, "evd_n2_time_level", "solver_state")
+        if _evd_tl not in ("solver_state", "nemo_now_before"):
+            raise ValueError(
+                "Unknown EnhancedDiffusionConfig.evd_n2_time_level: must be "
+                "one of ('solver_state', 'nemo_now_before'), got "
+                f"{_evd_tl!r}.")
+        if _evd_tl == "nemo_now_before":
+            # NEMO (MY_SRC/stpmlf.F90:186-187) evaluates rn2 on the NOW (Nnn)
+            # tracers and rn2b on the BEFORE (Nbb) tracers, both with the Nnn
+            # geometry index. The ``state`` reaching here under the leap-frog
+            # implicit solve is the post-explicit AFTER (Kaa) state, so BOTH
+            # its tracers AND its eta (-> gdept / z* jacobian) are wrong for
+            # this trigger; substitute all three. Fail loudly if the caller
+            # has not threaded them — a silent fallback to the solver state is
+            # exactly the defect this option exists to remove.
+            if not getattr(_ed, "two_level_trigger", False):
+                raise ValueError(
+                    'EnhancedDiffusionConfig.evd_n2_time_level='
+                    '"nemo_now_before" selects NEMO\'s two-arm '
+                    "MIN(rn2, rn2b) trigger and requires "
+                    "two_level_trigger=True; with it False the Nbb arm would "
+                    "be silently dropped.")
+            _missing = [nm for nm, v in (("n2_tracers", n2_tracers),
+                                         ("n2_tracers_before",
+                                          n2_tracers_before),
+                                         ("eta_now", eta_now)) if v is None]
+            if _missing:
+                raise ValueError(
+                    'EnhancedDiffusionConfig.evd_n2_time_level='
+                    '"nemo_now_before" needs the NOW tracers, the BEFORE '
+                    "(Nbb) tracers and the NOW eta threaded to "
+                    f"compute_vertical_K_profiles, but {_missing} are None. "
+                    "On the lat-lon implicit path these come from "
+                    "TKEConfig.n2_before_advection=True and "
+                    'TKEConfig.tke_n2_time_level="nemo_before".')
+            _T_bb, _S_bb = n2_tracers_before
+            if _is_active is not None:
+                # Symmetry with the sub-seafloor extrapolation the NOW arm
+                # already got above (#1226), so the two arms of one MIN() are
+                # built from the same sub-seafloor convention.
+                # SCOPE, MEASURED (fp64, the production DINO topo bridge
+                # 199x52x36, 30394 dry cells): this changes ZERO wet
+                # interfaces (max|dA_v| = 0.0, fired-mask XOR = 0). Interior
+                # interface j is wet iff T-cell j+1 is active
+                # (_wet_interface_mask), so a wet interface's N² only ever
+                # reads active cells and the rock fill cannot reach it. This
+                # is defence-in-depth on that masking invariant, NOT a
+                # trigger fix — do not cite it as one.
+                from legoesm.ocean.vertical import extrapolate_below_seafloor
+                _T_bb = extrapolate_below_seafloor(_T_bb, z_coord)
+                _S_bb = extrapolate_below_seafloor(_S_bb, z_coord)
+            _evd_state = state._replace(
+                T=state.T.replace(data=n2_tracers[0]),
+                S=state.S.replace(data=n2_tracers[1]),
+                eta=state.eta.replace(data=eta_now),
+            )
+            _evd_before = (_T_bb, _S_bb)
+        else:
+            _evd_state, _evd_before = state, n2_tracers
+        K_conv, A_conv = _enhanced_diffusion_K(_evd_state, z_coord, conv,
                                                eos_fn=eos_fn,
-                                               before_tracers=n2_tracers,
+                                               before_tracers=_evd_before,
                                                cc=physics_config.constants)
         # Convection enhances tracer diffusivity (convective_κz). Under
         # nemo_max_floor the EVD stable-branch background (K_bg) folds into

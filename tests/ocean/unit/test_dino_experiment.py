@@ -96,6 +96,27 @@ class TestDINOConfig:
         mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
         assert mc2.equatorial_visc_boost == pytest.approx(12.0)
 
+    def test_mpas_builder_rejects_latlon_only_evd_time_level(self):
+        """#1317 S17: ``convection_evd_n2_time_level="nemo_now_before"`` is a
+        lat-lon-C-grid-only block — the MPAS vmix bridge threads neither the
+        Nnn/Nbb tracers nor the Nnn eta the zdfevd trigger arms need, so the
+        MPAS builder must RAISE rather than silently run the solver-state
+        trigger (dispatch hardening; locked in
+        ``test_dispatch_hardening.BASELINE_DISPATCHERS``).
+        """
+        import dataclasses
+        from types import SimpleNamespace
+
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))
+        cfg = dataclasses.replace(
+            DINOConfig(), convection_evd_n2_time_level="nemo_now_before")
+        with pytest.raises(ValueError, match="convection_evd_n2_time_level"):
+            dino.dino_mpas_model_config(mesh, cfg, physics=True)
+        # The default value is accepted (guard is not a blanket reject).
+        assert DINOConfig().convection_evd_n2_time_level == "solver_state"
+        mc, phys = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=True)
+        assert phys is not None
+
     def test_mpas_physics_is_wired_into_model_config(self):
         """The MPAS model gates KPP/GM-Redi/convection on
         ``config.physics is not None``; dino_mpas_model_config MUST wire the

@@ -5712,6 +5712,10 @@ class LatLonCGridOceanModel:
                     tke_bottom_dirichlet=self._tke_bottom_dirichlet(state),
                     tke_bottom_level=self._tke_bottom_level(),
                     n2_tracers_before=n2_tracers_before,
+                    # NOW (Nnn) eta for the zdfevd trigger geometry
+                    # (EnhancedDiffusionConfig.evd_n2_time_level=
+                    # "nemo_now_before"); ignored by every other selection.
+                    eta_now=eta_now,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -5729,6 +5733,7 @@ class LatLonCGridOceanModel:
                     iwm_fields=self._iwm_forcing,
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,
+                    eta_now=eta_now,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched

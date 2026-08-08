@@ -146,6 +146,16 @@ def _install_hooks():
 def main() -> int:
     require_explicit_e3t_mode(context="s17_coeff_arms")
     dcfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+    # --- #1317 S17 A/B: EVD trigger time levels, ONE variable.
+    # LEGOESM_EVD_TL={card|solver_state|nemo_now_before}; "card" (default)
+    # leaves DINO_RECIPES["nemo_dino_kamm_mlf"] untouched.
+    _evd_tl = os.environ.get("LEGOESM_EVD_TL", "card")
+    if _evd_tl != "card":
+        dcfg = dataclasses.replace(dcfg,
+                                   convection_evd_n2_time_level=_evd_tl)
+    print(f"[A/B] LEGOESM_EVD_TL={_evd_tl} -> "
+          f"convection_evd_n2_time_level="
+          f"{dcfg.convection_evd_n2_time_level!r}")
     print(f"card: surface_stress_implicit={dcfg.surface_stress_implicit} "
           f"zdf_baroclinic_only={dcfg.zdf_baroclinic_only} "
           f"zdf_drag_in_matrix={dcfg.zdf_drag_in_matrix} "

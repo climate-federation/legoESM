@@ -499,6 +499,14 @@ class DINOConfig:
     # n2_before_advection=True to give the "before" state genuine content
     # (otherwise before==after and the flag is a no-op).
     convection_two_level_trigger: bool = False   # True = NEMO MIN(rn2,rn2b)
+    # Time levels the two MIN(rn2, rn2b) arms are evaluated at. NEMO builds
+    # BOTH from the Nnn geometry — rn2b from the Nbb tracers, rn2 from the Nnn
+    # tracers (MY_SRC/stpmlf.F90:186-187) — whereas legoESM's leap-frog hands
+    # the mixing coefficients the post-explicit Kaa state (Kaa tracers AND Kaa
+    # eta). "nemo_now_before" restores NEMO's pair; only the MLF card (which
+    # carries a genuine Nbb level) sets it. Default keeps every other recipe
+    # BIT-IDENTICAL.
+    convection_evd_n2_time_level: str = "solver_state"
     # ----- Phase-2 #1317 Tier C: small faithful items -----
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
@@ -1505,6 +1513,13 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # MLF-only, same class as the two axes above.
     "tke_shear_avm_weighting": "nemo_face",   # zdfsh2 avm INSIDE the face sum
     "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
+    # zdfevd trigger arms at NEMO's own time levels: rn2 on Nnn tracers, rn2b
+    # on Nbb tracers, BOTH on Nnn geometry (MY_SRC/stpmlf.F90:186-187 ->
+    # zdfevd.F90:93-94/:119-120). Without this the leap-frog's arm 1 is the
+    # POST-EXPLICIT Kaa state (and carries Kaa eta, hence Kaa gdept), which
+    # fires EVD on cells NEMO leaves alone. MLF-only: it consumes the genuine
+    # Nbb level that "tke_n2_time_level": "nemo_before" above threads.
+    "convection_evd_n2_time_level": "nemo_now_before",
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2960,6 +2975,9 @@ def dino_lat_lon_model_config(
                     # the single-level trigger when n2_before_advection=True
                     # gives the "before" state real content.
                     two_level_trigger=cfg.convection_two_level_trigger,
+                    # NEMO's rn2/rn2b time levels (stpmlf.F90:186-187) —
+                    # both arms on the Nnn geometry.
+                    evd_n2_time_level=cfg.convection_evd_n2_time_level,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -3280,6 +3298,14 @@ def dino_mpas_model_config(
             f"DINOConfig.gm_kappa_scheme={cfg.gm_kappa_scheme!r} is not "
             "supported on the MPAS grid (Treguier adaptive kappa is lat-lon "
             "C-grid only); use gm_kappa_scheme='visbeck' or --grid latlon.")
+    if cfg.convection_evd_n2_time_level != "solver_state":
+        raise ValueError(
+            "DINOConfig.convection_evd_n2_time_level="
+            f"{cfg.convection_evd_n2_time_level!r} is lat-lon C-grid only: "
+            "the MPAS vmix bridge does not thread the Nnn/Nbb tracers and the "
+            "Nnn eta that NEMO's zdfevd trigger arms need, so honouring it "
+            "here would silently run the solver-state trigger; use --grid "
+            "latlon or convection_evd_n2_time_level='solver_state'.")
     physics_config = OceanPhysicsConfig(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(

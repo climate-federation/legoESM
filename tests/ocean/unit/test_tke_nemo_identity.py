@@ -311,6 +311,26 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
     # "tpoint", 1.0000x under "nemo_face".
     assert fe.tke_shear_avm_weighting == "tpoint"
     assert mlf.tke_shear_avm_weighting == "nemo_face"
+    # #1317 S17 -- zdfevd trigger arms at NEMO's own time levels (rn2 on Nnn
+    # tracers, rn2b on Nbb tracers, BOTH on Nnn geometry: zdfevd.F90:93-94 /
+    # :119-120 fed by MY_SRC/stpmlf.F90:186-187). MLF-only (it consumes the
+    # genuine Nbb level that tke_n2_time_level="nemo_before" threads), and
+    # asserted on the ASSEMBLED EnhancedDiffusionConfig, not the card dict.
+    from legoesm.ocean.experiments.dino import (
+        dino_lat_lon_grid, dino_lat_lon_model_config,
+    )
+
+    def _ed_of(card):
+        c = dino_config_for_recipe(card)
+        _, phys = dino_lat_lon_model_config(dino_lat_lon_grid(c, n_lon=8), c)
+        return phys.convection.enhanced_diffusion
+
+    assert _ed_of("nemo_dino_kamm_mlf").evd_n2_time_level == "nemo_now_before"
+    assert _ed_of("nemo_dino_kamm_mlf").two_level_trigger is True
+    assert _ed_of("nemo_dino_kamm").evd_n2_time_level == "solver_state"
+    for card in set(DINO_RECIPES) - {"nemo_dino_kamm_mlf"}:
+        assert dino_config_for_recipe(card).convection_evd_n2_time_level == \
+            "solver_state", card
     for card in set(DINO_RECIPES) - {"nemo_dino_kamm", "nemo_dino_kamm_mlf"}:
         vm = _dino_vertical_mixing_config(dino_config_for_recipe(card))
         if getattr(vm, "tke", None) is None:
