@@ -565,15 +565,26 @@ def _smoke_check_vmix_scheme_override():
     assert base.use_gm_redi is True, "override must not mutate the original cfg"
     print("OK: --use-gm-redi override changes cfg.use_gm_redi (True -> False)")
 
-    assert base.surface_tendency_placement == "applied_now", (
-        f"expected nemo_dino_kamm_mlf default surface_tendency_placement="
-        f"'applied_now', got {base.surface_tendency_placement!r}")
-    rhs = dataclasses.replace(base, surface_tendency_placement="leapfrog_rhs")
-    assert rhs.surface_tendency_placement == "leapfrog_rhs"
-    assert base.surface_tendency_placement == "applied_now", (
+    # Base-AGNOSTIC by design: this self-check proves the OVERRIDE MECHANISM
+    # works; it must not pin the card's default.  It previously asserted
+    # 'applied_now' and therefore went RED the moment the card was CORRECTED
+    # to 'leapfrog_rhs' (#1492 -- 'applied_now' under the leap-frog discards
+    # ~56% of every applied surface flux, retention (1-2g)/(2(1-g)) = 4/9 at
+    # g=0.1; the recorded 10-yr A/B closes 98.7% of the ACC gap and takes
+    # sigma>1.6 dense water from 0.000x to 1.031x NEMO).  A harness self-check
+    # that fails BECAUSE the model was fixed is a broken tripwire.
+    _placements = ("applied_now", "leapfrog_rhs")
+    assert base.surface_tendency_placement in _placements, (
+        f"unknown surface_tendency_placement "
+        f"{base.surface_tendency_placement!r} on nemo_dino_kamm_mlf")
+    _other = _placements[1 - _placements.index(base.surface_tendency_placement)]
+    flipped = dataclasses.replace(base, surface_tendency_placement=_other)
+    assert flipped.surface_tendency_placement == _other
+    assert base.surface_tendency_placement != _other, (
         "override must not mutate the original cfg")
-    print("OK: --surface-tendency-placement override changes cfg.surface_tendency_placement "
-          "(applied_now -> leapfrog_rhs)")
+    print("OK: --surface-tendency-placement override changes "
+          f"cfg.surface_tendency_placement "
+          f"({base.surface_tendency_placement} -> {_other})")
 
 
 def main(argv=None):

@@ -575,23 +575,6 @@ def main():
         cfg = dataclasses.replace(cfg, coriolis_scheme=args.coriolis_scheme)
     if args.outer_integrator is not None:
         cfg = dataclasses.replace(cfg, outer_integrator=args.outer_integrator)
-        # #1492 footgun guard: leapfrog + the post-step ("applied_now")
-        # surface applier discards ~56% of every applied surface flux (the
-        # increment cancels in the leap-frog combine; retention 4/9 at
-        # gamma=0.1, measured twice on independent grids).  No shipped card
-        # hits this -- nemo_dino_kamm_mlf is the only leapfrog recipe and it
-        # selects "leapfrog_rhs" -- but the two knobs are independent CLI
-        # flags, so the combination is user-reachable.  Fail loudly.
-        if (args.outer_integrator == "leapfrog"
-                and getattr(cfg, "surface_tendency_placement", "applied_now")
-                == "applied_now"):
-            raise SystemExit(
-                "--outer-integrator leapfrog with "
-                "surface_tendency_placement='applied_now' discards ~56% of "
-                "the applied surface flux (#1492). Use a card that sets "
-                "surface_tendency_placement='leapfrog_rhs' (e.g. "
-                "nemo_dino_kamm_mlf), or choose forward_euler/ab2 (both "
-                "retain 1.000000).")
     if args.vorticity_scheme is not None:
         cfg = dataclasses.replace(cfg, vorticity_scheme=args.vorticity_scheme)
     if args.asselin_gamma is not None:
@@ -613,6 +596,30 @@ def main():
         # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
         # whatever recipe/overrides preceded it (must not be clobbered after).
         cfg = nemo_faithful_dino_config(base=cfg)
+
+    # #1492 footgun guard, evaluated on the RESOLVED config (NOT on args):
+    # leapfrog + the post-step ("applied_now") surface applier discards ~56%
+    # of every applied surface flux (the increment cancels in the leap-frog
+    # combine; retention (1-2*gamma)/(2*(1-gamma)) = 4/9 at gamma=0.1,
+    # measured twice on independent grids).  Both knobs have a recipe-card
+    # source as well as (for the integrator) a CLI flag, so this MUST read
+    # cfg -- an earlier version sat inside `if args.outer_integrator is not
+    # None:` and could only fire when --outer-integrator was passed
+    # EXPLICITLY, which meant a card-only run (`--recipe nemo_dino_kamm_mlf`,
+    # which sets outer_integrator="leapfrog" internally) sailed straight past
+    # it.  Placed after every cfg mutation above so no later override can
+    # reintroduce the combination.
+    if (cfg.outer_integrator == "leapfrog"
+            and getattr(cfg, "surface_tendency_placement", "applied_now")
+            == "applied_now"):
+        raise SystemExit(
+            "outer_integrator='leapfrog' with "
+            "surface_tendency_placement='applied_now' discards ~56% of "
+            "the applied surface flux (#1492). Use a card that sets "
+            "surface_tendency_placement='leapfrog_rhs' (e.g. "
+            "nemo_dino_kamm_mlf), or choose forward_euler/ab2 (both "
+            "retain 1.000000).")
+
     dt = cfg.dt
     grid_kind = args.grid
 

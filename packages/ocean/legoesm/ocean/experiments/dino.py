@@ -1414,6 +1414,18 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # integrated heat over 200 forcing-free steps where NEMO drifts +3.4e-16
     # (#1226).
     "tracer_combine": "thickness_weighted",
+    # #1492: NEMO applies the surface tracer flux as a TENDENCY on the Nrhs
+    # RHS (tra_sbc.F90 -> tra_nxt/trazdf), not as a post-step mutation of the
+    # NOW state.  Under the leap-frog the post-step form ("applied_now",
+    # the DINOConfig default) is largely CANCELLED by the Asselin combine --
+    # retention (1-2*gamma)/(2*(1-gamma)) = 4/9 at rn_atfp=0.1, i.e. ~56% of
+    # every applied surface flux is thrown away.  MLF-only (the FE
+    # nemo_dino_kamm card has no combine to cancel against and retains
+    # 1.000000 either way), so it lands on THIS card.  Requires the run
+    # driver's return_rate=True route (_check_surface_tendency_placement
+    # raises on a mismatch) and --grid latlon (the MPAS applicator has no
+    # return_rate= mode).
+    "surface_tendency_placement": "leapfrog_rhs",
     # fix_eta_drift is left ON (measured 2026-07-26): NEMO has no analogue
     # (ssh_nxt is conservative by construction), and switching it OFF does
     # improve flux-form constancy 3.279e-05 -> 2.313e-05 because its uniform

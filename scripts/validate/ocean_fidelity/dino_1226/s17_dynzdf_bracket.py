@@ -93,7 +93,9 @@ from legoesm.ocean.fidelity.precision_gate import (
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask, read_nemo_restart, read_nemo_restart_before,
 )
-from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
+from legoesm.ocean.fidelity.nemo_state_bridge import (
+    bridge_before_state_topo, bridge_nemo_to_legoesm_topo,
+)
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (
     dino_config_for_recipe, dino_lat_lon_model_config,
@@ -198,6 +200,24 @@ def main() -> int:
     bef = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, now, periodic_i=True, full_step=True,
                                      omega=dcfg.omega)
+    # --- MANDATORY: seed the leap-frog BEFORE level -----------------------
+    # RETRACTION R4 (see header): ``bridge_nemo_to_legoesm_topo`` leaves
+    # ``u_before=None``, which sends ``model.step`` down the FORWARD-EULER
+    # first-step branch (ocean_model_latlon_cgrid.py:7218 ``if
+    # state.u_before is None:``) at dt = 2700 s.  NEMO's RUN_GDB step at
+    # kt=57601 is a LEAP-FROG step at rDt = 5400 s (ocean.output:249, :259
+    # ln_1st_euler = F).  Comparing those two is a factor-2 on every tendency
+    # and a different before-level.  ``bridge_before_state_topo`` (the same
+    # public helper multistep_replay.py:218 uses) fixes it.
+    if br.state.u_before is not None:
+        raise SystemExit("bridge already carries a before level -- re-check R4")
+    br = br._replace(state=bridge_before_state_topo(br, g, bef,
+                                                    periodic_i=True))
+    print(f"  before-level seeded: u_before "
+          f"{'MISSING' if br.state.u_before is None else 'present'} "
+          f"dtype={None if br.state.u_before is None else br.state.u_before.data.dtype}")
+    if br.state.u_before is None:
+        raise SystemExit("before-level seed FAILED -- Euler branch would run")
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0,
                               sill_lon_m_deg=1.0)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
@@ -394,6 +414,34 @@ def main() -> int:
           "level-1 stress deposit in)")
     _report("fed_ws post_u", crop_u(results["fed_ws"]["post_u"]), st8_u, um, wu)
     _report("fed_ws post_v", crop_v(results["fed_ws"]["post_v"]), st8_v, vm, wv)
+    # --- per-level + bottom-cell profile of the S17-isolated residual ----
+    # Confirmation target for the two DIFFs the transcription pass named:
+    #   DIFF-A  implicit bottom drag 2x too strong (bottom cell only)
+    #   DIFF-B  e3uw vs midpoint dz_half (every interface, ~0.4%)
+    print("\n  per-level err_norm(fed_ws post_u vs stage-8), and the same "
+          "restricted to each column's BOTTOM wet cell:")
+    fpu = crop_u(results["fed_ws"]["post_u"])
+    kk = np.arange(nk)[None, None, :]
+    nbot = um.sum(-1)[..., None]
+    botm = um & (kk == nbot - 1)
+    intm = um & (kk < nbot - 1)
+    for k in (0, 1, 2, 5, 10, 20, 28, 30, 33):
+        e, rn, rl, mx, cc = _en(fpu[..., k:k+1], st8_u[..., k:k+1],
+                                um[..., k:k+1])
+        print(f"      k={k:2d}  err_norm={e:.4e}  RMS(nemo)={rn:.4e}")
+    for nm, mk in (("BOTTOM wet cell", botm), ("all NON-bottom", intm)):
+        e, rn, rl, mx, cc = _en(fpu, st8_u, mk)
+        print(f"      {nm:<16s} n={int(mk.sum()):7d}  err_norm={e:.4e}  "
+              f"RMS(nemo)={rn:.4e}  max|d|={mx:.4e}")
+    fpv = crop_v(results["fed_ws"]["post_v"])
+    nbotv = vm.sum(-1)[..., None]
+    botv = vm & (kk == nbotv - 1)
+    intv = vm & (kk < nbotv - 1)
+    for nm, mk in (("v BOTTOM wet cell", botv), ("v all NON-bottom", intv)):
+        e, rn, rl, mx, cc = _en(fpv, st8_v, mk)
+        print(f"      {nm:<16s} n={int(mk.sum()):7d}  err_norm={e:.4e}  "
+              f"RMS(nemo)={rn:.4e}  max|d|={mx:.4e}")
+
     print("  reference: naa_B itself vs stage-8 (= 'no solve at all')")
     _report("naa_B (no solve) u", naaB_u, st8_u, um, wu)
     _report("naa_B (no solve) v", naaB_v, st8_v, vm, wv)
