@@ -686,7 +686,12 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 
-### RULE 0 — SUCCINCT, CLEAR, TO THE POINT. STANDING ORDER, ALL SESSIONS.
+### RULE 0 — HARD CAP ~60 WORDS. ANSWER FIRST. STANDING ORDER, ALL SESSIONS.
+Five callouts in two days (2026-08-07/08). Not a style preference — a cap.
+Lead with the result. 3-5 bullets. Then stop. Job IDs, caveats, file:line and
+reasoning go in the COMMIT, never the reply. A retraction is ONE sentence plus
+the corrected fact. Long replies only when a report is explicitly requested.
+
 User, 2026-08-07, after repeated callouts in a single session ("you are too
 verbose", "I have no idea what you are saying", "just laser-focused summary"):
 **"Make being succinct, clear and to the point a strict rule for all future
