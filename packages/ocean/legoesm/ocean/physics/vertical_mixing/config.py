@@ -249,6 +249,23 @@ class TKEConfig(NamedTuple):
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
     mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
+    # NEMO dry-w-point TKE.  NEMO closes tke_tke with
+    #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
+    # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
+    # src/OCE/ZDF/zdftke.F90:469), i.e. en is EXACTLY 0 below the seafloor.
+    # legoESM transcribed the MAX and DROPPED the `* wmask`, so its post-solve
+    # en at the dry sub-seafloor w-rows is `tke_background` (>0) instead.
+    # That matters one routine later: tke_avn's buoyancy length (:759 / :651)
+    # carries NO wmask, so NEMO's dry rows sit at exactly `rmxl_min` while
+    # legoESM's are O(10^3 m) (sqrt(2e)/N with N -> 0) -- and the nn_mxl
+    # lup/ldown sweeps (:799-812 / :691-704) run THROUGH those rows, so every
+    # dry row re-widens the ldown carry and the bottom limitation
+    # `ldn(mbkt) = MIN(rmxl_min + e3t(mbkt+1,Kmm), l_int(mbkt))` never reaches
+    # each column's own seafloor.  True (needs a wet mask threaded from the
+    # caller) restores NEMO's line; False (default) is BIT-IDENTICAL.
+    # Requires positivity="floor" (the Veros positivity branch returns before
+    # the `MAX(en,rn_emin)` this mask rides on).
+    tke_dry_wmask: bool = False
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5

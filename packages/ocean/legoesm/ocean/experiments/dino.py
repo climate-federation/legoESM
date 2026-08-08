@@ -511,6 +511,18 @@ class DINOConfig:
     # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
     tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
     tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T18b — DRY-w-point TKE: NEMO closes tke_tke with
+    # `en = MAX(en,rn_emin) * wmask` (cfgs/DINO/MY_SRC/zdftke.F90:565 =
+    # upstream src/OCE/ZDF/zdftke.F90:469), so en is EXACTLY 0 below the
+    # seafloor. legoESM kept the MAX and DROPPED the `* wmask`, so its
+    # post-solve en there is tke_background (>0). tke_avn's buoyancy-length
+    # line (:759 / :651) carries no wmask, so NEMO's dry w-rows sit at exactly
+    # rmxl_min (l_int ~ 10^3 m in legoESM) while the nn_mxl=3 ldown sweep
+    # (:799-812 / :691-704) runs THROUGH them — which is what delivers
+    # `ldn(mbkt)=MIN(rmxl_min+e3t(mbkt+1,Kmm), l_int(mbkt))` at each column's
+    # own seafloor. Without the mask every dry row re-widens the ldown carry
+    # and the bottom limitation never arrives.
+    tke_dry_wmask: bool = False                  # True = NEMO wmask'd en
     # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
     # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
@@ -1074,6 +1086,9 @@ DINO_RECIPES: dict[str, dict] = {
         #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
         "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
         "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
+        # `en = MAX(en,rn_emin)*wmask` (MY_SRC/zdftke.F90:565 = upstream
+        # :469) -> en==0 below the seafloor -> zmxlm==rmxl_min (:759 / :651)
+        "tke_dry_wmask": True,
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
@@ -2604,6 +2619,7 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
             mxl0_min_m=cfg.tke_mxl0_min_m,
+            tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
             tke_n2_time_level=cfg.tke_n2_time_level,

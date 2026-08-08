@@ -84,6 +84,27 @@ __physics_contract__ = {
 }
 
 
+def _wet_interface_mask(z_coord, dtype=None):
+    """NEMO's ``wmask`` at the interior w-interfaces, or None.
+
+    THE alignment convention, in one place (it was written out twice and the
+    second copy is exactly where an off-by-one would hide): interior interface
+    ``k`` sits between T-cells ``k`` and ``k+1``, so it is wet iff T-cell
+    ``k+1`` is active — i.e. ``is_active[..., 1:]``. This is NEMO's
+    ``wmask(jk) = tmask(jk)*tmask(jk-1)`` shifted onto legoESM's
+    surface-and-bottom-dropped interior interface axis.
+
+    Returns None for a pure z-star coordinate (no ``is_active``), i.e. a
+    flat-bottom column with no sub-seafloor row at all.
+    """
+    is_active = getattr(z_coord, "is_active", None)
+    if is_active is None:
+        return None
+    arr = jnp.asarray(is_active) if dtype is None else jnp.asarray(
+        is_active, dtype=dtype)
+    return arr[..., 1:]
+
+
 def compute_vertical_K_profiles(
     state,
     z_coord: "OceanZStarCoordinate",
@@ -217,8 +238,7 @@ def compute_vertical_K_profiles(
             _v_f = extrapolate_below_seafloor(state.v.data, z_coord)
             state = state._replace(u=state.u.replace(data=_u_f),
                                    v=state.v.replace(data=_v_f))
-        # Interface k sits between cells k and k+1: wet iff cell k+1 active.
-        _wet_if = jnp.asarray(_is_active, dtype=dtype)[..., 1:]
+        _wet_if = _wet_interface_mask(z_coord, dtype)
     else:
         _wet_if = None
 
@@ -602,6 +622,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     "for this option to transcribe)."
                 )
             _face_masks_3d = compute_face_masks_3d(_is_active)
+        # NEMO dry-w-point TKE (TKEConfig.tke_dry_wmask): the `* wmask` that
+        # closes tke_tke (MY_SRC/zdftke.F90:565 = upstream :469) and that
+        # legoESM's post-solve floor dropped. Forwarded to the TKE solve; the
+        # mixing lengths then fall out at rmxl_min on their own.
+        # None (default) ⇒ BIT-IDENTICAL. The buoyancy_timing=
+        # "post_mixing_veros" combination raises in tke.py's own
+        # _validate_post_mixing_cfg (the single owner of that guard family),
+        # which every post-mixing entry point already calls.
+        _dry_wmask = None
+        if getattr(vmix_cfg.tke, "tke_dry_wmask", False):
+            _dry_wmask = _wet_interface_mask(z_coord)
+            if _dry_wmask is None:
+                raise ValueError(
+                    "TKEConfig.tke_dry_wmask=True requires a per-level wet "
+                    "mask (z_coord.is_active, e.g. "
+                    "OceanPartialCellCoordinate) to locate the dry "
+                    "sub-seafloor w-interfaces -- got a z_coord with no "
+                    "is_active (a pure z-star column has no sub-seafloor row "
+                    "for this option to act on).")
         # Before-advection (Nnow) T/S for the diffusivity-stage N²
         # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
         # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
@@ -803,6 +842,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 u_face_now=u_face_now, v_face_now=v_face_now,
                 u_face_before=u_face_before, v_face_before=v_face_before,
                 face_masks_3d=_face_masks_3d,
+                w_active=_dry_wmask,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -851,6 +891,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             u_face_now=u_face_now, v_face_now=v_face_now,
             u_face_before=u_face_before, v_face_before=v_face_before,
             face_masks_3d=_face_masks_3d,
+            w_active=_dry_wmask,
         )
         return tke_out.K_H, tke_out.K_M, None
 

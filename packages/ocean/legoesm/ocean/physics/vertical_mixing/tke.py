@@ -661,6 +661,14 @@ def compute_mixing_lengths(
     Only consulted on the ``signed_n2`` buoyancy-length branch; ``None``
     (default) is BIT-IDENTICAL legacy.
 
+    NOTE on sub-seafloor rows: NEMO gets ``zmxlm == rmxl_min`` there for free
+    because ``en`` is EXACTLY 0 below the seafloor
+    (``en = MAX(en,rn_emin)*wmask``, DINO ``MY_SRC/zdftke.F90:565`` = upstream
+    ``src/OCE/ZDF/zdftke.F90:469``) while the buoyancy-length line
+    (``:759`` / ``:651``) carries no wmask. legoESM reproduces that by masking
+    ``e`` itself in :func:`_solve_tke_backward_euler`
+    (``TKEConfig.tke_dry_wmask``) — NOT by special-casing the length here.
+
     Returns
     -------
     l_k, l_eps : (..., nlev-1) — for use in K = c_k·l_k·sqrt(2e) and
@@ -874,6 +882,7 @@ def _solve_tke_backward_euler(
     bottom_dirichlet: jnp.ndarray | None = None,
     K_M_surface: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
+    w_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -975,6 +984,21 @@ def _solve_tke_backward_euler(
         interfaces) so a dry/degenerate column cannot index out of bounds.
         ``None`` (default) ⇒ BIT-IDENTICAL (the ``[..., -1]`` pin above).
 
+    w_active : (..., nlev-1) or None — NEMO's ``wmask`` at the interior
+        w-interfaces (1 = wet, 0 = below the seafloor), selecting
+        ``TKEConfig.tke_dry_wmask``. NEMO closes ``tke_tke`` with
+        ``en = MAX( en, rn_emin ) * wmask`` (DINO
+        ``cfgs/DINO/MY_SRC/zdftke.F90:565`` = upstream
+        ``src/OCE/ZDF/zdftke.F90:469``); legoESM transcribed the ``MAX`` and
+        DROPPED the ``* wmask``, so the solve re-inflates every dry
+        sub-seafloor row to ``tke_background`` instead of leaving it at 0.
+        That matters because ``tke_avn``'s buoyancy length
+        (``:759`` / ``:651``) carries NO wmask — with ``en == 0`` the dry rows
+        are EXACTLY ``rmxl_min``, which is what makes the ``nn_mxl=3`` ldown
+        sweep (``:799-812`` / ``:691-704``), running THROUGH them, deliver
+        ``ldn(mbkt) = MIN(rmxl_min + e3t(mbkt+1,Kmm), l_int(mbkt))`` at each
+        column's own seafloor. ``None`` (default) ⇒ BIT-IDENTICAL legacy.
+
     Returns
     -------
     e_new : (..., nlev-1)
@@ -1006,6 +1030,16 @@ def _solve_tke_backward_euler(
             f"or 'veros_surface_correction'."
         )
     veros_positivity = positivity == "veros_surface_correction"
+    if w_active is not None and veros_positivity:
+        # Dispatch hardening: the Veros positivity branch RETURNS before the
+        # `MAX(en, rn_emin)` floor this mask rides on, so accepting the mask
+        # here would be a silent no-op. Veros has no wmask'd `en` anyway.
+        raise ValueError(
+            "_solve_tke_backward_euler: w_active (TKEConfig.tke_dry_wmask) "
+            "transcribes NEMO's `en = MAX(en,rn_emin)*wmask` "
+            "(MY_SRC/zdftke.F90:565) and requires TKEConfig.positivity="
+            "'floor'; got positivity='veros_surface_correction' (the Veros "
+            "branch has no such floor, so the mask would silently no-op).")
     if veros_positivity:
         # Veros linearisation point: sqrttke = sqrt(max(0, e)) (tke.py:30)
         # — zero where the carried TKE is negative (energy debt), so the
@@ -1334,11 +1368,22 @@ def _solve_tke_backward_euler(
         return e_new
 
     # Floor at background; clamp away from negative.
+    # NEMO: `en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)`
+    # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
+    # src/OCE/ZDF/zdftke.F90:469). legoESM historically kept the MAX and
+    # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask) restores
+    # it. None ⇒ BIT-IDENTICAL legacy.
     e_new = jnp.maximum(e_new, cfg.tke_background)
     # Floor at surface_min on the topmost interface only.
     e_new = e_new.at[..., 0].set(
         jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
     )
+    if w_active is not None:
+        # LAST statement, exactly as at :565 (the `* wmask` closes tke_tke);
+        # this also masks interface 0 (NEMO's jk=2) on a wholly-dry column,
+        # which the legoESM-only tke_surface_min floor above would otherwise
+        # re-inflate.
+        e_new = e_new * jnp.asarray(w_active, dtype=e_new.dtype)
     return e_new
 
 
@@ -1780,6 +1825,7 @@ def tke_vertical_mixing(
     u_face_before: jnp.ndarray | None = None,
     v_face_before: jnp.ndarray | None = None,
     face_masks_3d: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    w_active: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1855,6 +1901,15 @@ def tke_vertical_mixing(
     - surface injection over ``0.5·dzw_top`` (tke.py:225).
 
     Default False ⇒ every path BIT-IDENTICAL legacy.
+
+    ``w_active`` ((..., nlev-1) or None, ``TKEConfig.tke_dry_wmask``) is
+    NEMO's ``wmask`` at the interior w-interfaces, forwarded UNCHANGED to
+    :func:`_solve_tke_backward_euler` — the one line that transcribes
+    ``en = MAX( en, rn_emin ) * wmask``
+    (``cfgs/DINO/MY_SRC/zdftke.F90:565`` = upstream
+    ``src/OCE/ZDF/zdftke.F90:469``). The mixing lengths are NOT special-cased:
+    with ``e == 0`` below the seafloor they fall out at ``rmxl_min`` on their
+    own, exactly as in ``tke_avn``. ``None`` (default) ⇒ BIT-IDENTICAL legacy.
 
     Returns
     -------
@@ -2196,6 +2251,7 @@ def tke_vertical_mixing(
             bottom_dirichlet=bottom_dirichlet,
             K_M_surface=_K_M_surface,
             bottom_level=bottom_level,
+            w_active=w_active,
         )
 
     if _etau_on:
@@ -2331,6 +2387,16 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 "mixing does not accept bottom_dirichlet and would silently "
                 "keep the natural no-flux bottom row. Disable "
                 "bottom_tke_bc or use the standard pre_mixing path.")
+        if getattr(cfg, "tke_dry_wmask", False):
+            raise ValueError(
+                "TKEConfig.tke_dry_wmask=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — the `* wmask` it "
+                "transcribes rides on the `MAX(en, rn_emin)` post-solve floor "
+                "(MY_SRC/zdftke.F90:565), and tke_integrate_post_mixing is "
+                "the VEROS integrate_tke form, which leaves the interior "
+                "UNFLOORED and never sees this axis, so it would silently "
+                "no-op. Disable tke_dry_wmask or use the standard "
+                "pre_mixing path.")
     elif shear == "realized_veros":
         raise ValueError(
             "TKEConfig.shear_production='realized_veros' requires "
