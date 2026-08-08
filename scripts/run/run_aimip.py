@@ -250,11 +250,24 @@ def _build_spectral_config(cfg: dict[str, Any]):
             spectral_filter_strength=float(
                 cfg.get("spectral_filter_strength", 0.01)),
             spectral_filter_order=int(cfg.get("spectral_filter_order", 8)),
+            # Dry-mass anchor, OFF by default (SpectralPEConfig's own default),
+            # so every existing arm is byte-identical. Reachable from a suite
+            # because the dycore arms drift: the 8-init 2017 scorecards give an
+            # area-weighted mslp bias of -202 Pa at 24 h growing to -1.64e3 Pa
+            # at 240 h for BOTH classical and column_nn, while sfno_full — no
+            # dycore, and its SFNO physics projects the global mean out of
+            # dlnps/dt — sits at -56 / -84 Pa. 65% of classical's day-10 z500
+            # MSE is that bias. The anchor is the dycore's existing answer to
+            # exactly this drift and had no way to be switched on from AIMIP.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
         sfno_mlp_expansion=sfno_mlp_expansion,
         sfno_dropout=sfno_dropout,
+        sfno_history_steps=int(cfg.get("sfno_history_steps", 0)),
         crps_finetune_epochs=crps_ft_epochs,
         crps_ensemble_size=crps_ensemble_size,
         muon_lr_scale=float(cfg.get("muon_lr_scale", 1.0)),

@@ -162,6 +162,12 @@ def main():
         pe_config=SpectralPEConfig(
             hyperdiff_coeff=2.5e15, hyperdiff_order=2, time_integrator="ssp_rk3",
             spectral_filter_strength=0.01, spectral_filter_order=8,
+            # Forwarded so a suite's dry-mass anchor is not silently
+            # ignored on the prescribed-SST lane; default False keeps
+            # every existing AMIP run byte-identical.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
         ),
         n_epochs=1, n_train_days=1, start_year=args.first_year,
         loss_config=LossConfig(),

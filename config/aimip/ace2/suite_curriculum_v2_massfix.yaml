@@ -1,0 +1,63 @@
+# COLUMN_NN, EVAL-ONLY A/B: does the dycore's dry-mass anchor remove the drift?
+#
+# NOT a training arm. Identical to suite_curriculum_v2.yaml except two dycore
+# flags, and it is scored against the SAME checkpoint
+# (results/aimip_ace2curr_v2/column_nn/params.eqx) that the v2 row uses, so the
+# only difference between the two scorecards is whether the forecast rollout
+# re-anchors global dry mass.
+#
+#     fix_mass: false -> true
+#     anchor_mass_to_initial: false -> true
+#
+# WHAT THIS TESTS. Measured on the 8-init 2017 scorecards, area-weighted mslp
+# bias at 24 h / 240 h:
+#     classical  -202 Pa -> -1.64e3 Pa
+#     column_nn  -227 Pa -> -1.63e3 Pa
+#     sfno_full   -56 Pa ->   -84 Pa
+# The two arms that share the spectral dycore lose ~16 hPa of mean sea-level
+# pressure in ten days; the arm with no dycore does not. sfno_full's SFNO
+# physics explicitly projects the (l=0,m=0) coefficient out of its dlnps/dt
+# ("DRY-MASS constraint", neural_gcm_spectral.py), which is the same defect
+# handled at a different layer. run_aimip has never set SpectralPEConfig's
+# fix_mass, so it has been False on every AIMIP arm ever trained or scored.
+#
+# WHY IT MATTERS MORE THAN ANY TUNING KNOB: 65% of classical's day-10 z500 MSE
+# is the bias term (-216 m of -267 m RMSE), and a -16 hPa surface-pressure
+# drop alone shifts z500 by roughly (16.4/1013)x5500 ~ 90 m.
+#
+#   CONFIRMS: mslp bias at 240 h collapses toward sfno_full's -84 Pa, and z500
+#             RMSE at 240 h falls well below 215 m.
+#   REFUTES:  mslp bias unchanged -> the drift is not a global-mass mode, and
+#             the -16 hPa is a spatial-pattern artifact of the mslp reduction
+#             rather than lost air. Then measure area-weighted p_s directly
+#             before proposing anything else.
+#
+# NOTE the anchor is a diagnosis instrument first. Anchoring the FORECAST while
+# the model was TRAINED without it is a train/eval mismatch; if this confirms,
+# the fix belongs in training too, not just at eval.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  # 6h+12h short-lead phases (sharpen) + 24/72/120 (stability), 120h x2
+  # consolidation. dt=600s: 6h=36, 12h=72, 24h=144, 72h=432, 120h=720 steps.
+  # Total epochs = 2+3+2+2+2 = 11.
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+# Distinct from v2's dir ON PURPOSE. This suite is only ever fed to
+# run_aimip_wb2_eval.py with an explicit --checkpoint, but run_aimip would
+# TRAIN first and then write params.eqx into whatever output_dir says, so
+# sharing v2's directory put the baseline checkpoint one stray command away
+# from being overwritten (codex 2026-08-08).
+output_dir: results/aimip_ace2curr_v2_massfix_evalonly

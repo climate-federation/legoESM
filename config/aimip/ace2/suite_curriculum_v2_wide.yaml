@@ -1,0 +1,52 @@
+# COLUMN_NN ARM C: capacity, and nothing else.
+#
+# Controlled against config/aimip/ace2/suite_curriculum_v2.yaml (z500 24 h
+# 90.9 m), changing the column MLP's size and nothing else:
+#
+#     nn_hidden_dim: 256 -> 1024
+#     nn_n_layers:     4 -> 6
+#     216,614 params -> ~6.3M
+#
+# WHY. The v2 baseline's TRAINING loss is stuck, which is underfitting, not
+# overfitting. Matched epoch-for-epoch and lead-for-lead against the
+# muonlr arm (logs/wb2/wb2_cnn_26505703.out vs uni_train_26792703.out), v2 goes
+# 24.18 / 24.10 / 25.50 / 25.37 / 25.36 / 29.32 across the 6h->24h phases: each
+# curriculum phase plateaus within 2 epochs and then oscillates (85.02 ->
+# 83.25 -> 84.12 at 120 h). A model that cannot drive its own training loss
+# down is short of capacity or badly optimized; it is not short of held-out
+# data.
+#
+# SCALE CONTEXT. column_nn carries 216k parameters against sfno_full's 68.3M —
+# 315x fewer — and the two are being asked to land in the same place on the
+# scorecard. This arm closes an order of magnitude of that.
+#
+# COST: near-free. Each training step is dominated by the spectral dycore
+# rollout plus RRTMGP, not by a per-column MLP, so 29x the parameters is a few
+# percent of wall clock. Best capacity-per-GPU-hour lever available here.
+#
+#   CONFIRMS: training loss at matched epoch/lead falls below v2's, AND z500
+#             24 h drops below 90.9 m on the SAME 8-init protocol.
+#   REFUTES:  training loss unchanged -> the plateau is an OPTIMIZATION
+#             failure (LR / epochs-per-phase), not capacity, and the next arm
+#             is epochs-per-phase rather than a still-wider net.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  nn_hidden_dim: 1024
+  nn_n_layers: 6
+  # 6h+12h short-lead phases (sharpen) + 24/72/120 (stability), 120h x2
+  # consolidation. dt=600s: 6h=36, 12h=72, 24h=144, 72h=432, 120h=720 steps.
+  # Total epochs = 2+3+2+2+2 = 11.
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+output_dir: results/aimip_cnn_wide

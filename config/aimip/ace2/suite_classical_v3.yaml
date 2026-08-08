@@ -1,0 +1,35 @@
+# CLASSICAL, RETRAINED ON THE CURRENT CHECKOUT.
+#
+# Byte-identical recipe to suite_curriculum_most_long.yaml. The ONLY change is
+# output_dir, and it is not a scientific choice: the 2026-07 checkpoint in
+# results/aimip_ace2curr_most_long/ NO LONGER LOADS. The eval skeleton the
+# current code builds wants
+#   spatial_surface.fields['Cd_neutral'].coeffs  shape (13,)
+# and the checkpoint on disk holds a scalar () there -- the spatial-surface
+# field went from one number to a 13-coefficient basis after that arm trained,
+# so equinox refuses the deserialise (job 26792652, 2026-08-08). Resuming INTO
+# the old directory would hand the trainer the same unloadable checkpoint, so
+# this arm needs a clean dir; the old one stays as the provenance for the
+# published 95.78 m z500 row.
+#
+# NOT a new experiment: no expectation that the number moves. This exists to
+# put a LOADABLE classical checkpoint on the current code so classical can
+# appear in the one-protocol 3-arm table at all.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  # ~1.5x epochs/phase vs suite_curriculum_most (2/2/2/1 -> 3/3/3/2 = 11).
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_classical_v3

@@ -137,6 +137,20 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     # this; see the class docstring for the measured divergence it prevents.
     spectral_filter_strength: float = 0.0
     spectral_filter_order: int = 8
+    # Number of PAST states fed alongside the current one. 0 = the historical
+    # single-snapshot input (every existing arm); 1 = the U-Cast / GraphCast
+    # convention of two inputs, which lets the network read a finite-difference
+    # tendency instead of inferring d/dt from spatial structure alone.
+    #
+    # WHY IT IS HERE: measured 2026-08-08, the muonlr arm's z500 error is
+    # 11.6 m after ONE 6-hour step and 20.5 m at 24 h, i.e. 57 % of the day-1
+    # error is made in the first step, and that single step already costs 2.9x
+    # GraphCast's entire 24 h forecast (4.06 m). The binding constraint is
+    # single-step accuracy, not error accumulation.
+    #
+    # ``sfno_config.in_channels`` must be (1 + history_steps) x the packed
+    # channel count; __init__ checks it rather than silently mis-slicing.
+    history_steps: int = 0
 
 
 class SFNOPrimitiveEquationModel:
@@ -178,6 +192,27 @@ class SFNOPrimitiveEquationModel:
         # per-step filter build. Once per WRAPPER construction — training
         # rebuilds the wrapper inside the JIT trace, so this is once per trace,
         # not once per scan iteration. ``None`` = disabled.
+        # History input: refuse a config whose in_channels does not match the
+        # declared history, rather than mis-slicing a packed tensor silently.
+        # ``PE3DChannelSpec`` is 4*nlev+2, so the check is exact.
+        _hist = int(self.config.history_steps)
+        if _hist < 0:
+            raise ValueError(
+                f"history_steps must be >= 0, got {_hist!r} (0 = the "
+                "single-snapshot input; 1 = U-Cast/GraphCast's two inputs)."
+            )
+        if _hist:
+            _n_state = 4 * sigma_coord.n_levels + 2
+            _want = _n_state * (1 + _hist)
+            _have = int(self.config.sfno_config.in_channels)
+            if _have != _want:
+                raise ValueError(
+                    f"history_steps={_hist} needs sfno_config.in_channels="
+                    f"{_want} ({1 + _hist} x {_n_state} packed channels), got "
+                    f"{_have}. A mismatched width would either fail deep inside "
+                    "the network or silently read the wrong channels."
+                )
+
         if not 0.0 <= self.config.spectral_filter_strength < 1.0:
             raise ValueError(
                 "spectral_filter_strength is the filter VALUE at n_max and "
@@ -364,6 +399,7 @@ class SFNOPrimitiveEquationModel:
         dt: float,
         *,
         key: jax.Array | None = None,
+        prev_states: tuple[SpectralHydrostaticState, ...] = (),
     ) -> SpectralHydrostaticState:
         """Advance one time step.
 
@@ -374,6 +410,10 @@ class SFNOPrimitiveEquationModel:
         dt : float
             Time step [s].  In ``state_update`` mode this MUST equal
             ``config.dt_sfno`` (the network's trained macro step).
+        prev_states : tuple of SpectralHydrostaticState, optional
+            Past states, OLDEST FIRST, exactly ``config.history_steps`` of
+            them. Empty (default) is the historical single-snapshot input.
+            ``state_update`` mode only.
         key : jax.random.PRNGKey, optional
             MC-Dropout key for ``state_update`` mode.  ``None`` (default) is
             the deterministic step.  A stochastic ROLLOUT wants a FRESH key per
@@ -390,8 +430,17 @@ class SFNOPrimitiveEquationModel:
         """
         if self.config.mode == "state_update":
             self._check_state_update_dt(dt)
-            new_state = self._step_state_update(state, key=key)
+            new_state = self._step_state_update(
+                state, key=key, prev_states=prev_states)
         elif self.config.mode == "hybrid_tendencies":
+            if prev_states:
+                raise ValueError(
+                    "step(prev_states=...) is only supported in "
+                    "mode='state_update'. hybrid_tendencies evaluates the "
+                    "network at RK STAGE states, which have no history — "
+                    "silently reusing the macro-step history at every stage "
+                    "would make the integrator inconsistent."
+                )
             if key is not None:
                 raise ValueError(
                     "step(key=...) is only supported in mode='state_update'; "
@@ -564,19 +613,59 @@ class SFNOPrimitiveEquationModel:
         self,
         state: SpectralHydrostaticState,
         key: jax.Array | None = None,
+        prev_states: tuple[SpectralHydrostaticState, ...] = (),
     ) -> SpectralHydrostaticState:
         """Direct state update: SFNO(state_t) → state_{t+1}.
 
         ``key`` is forwarded to the network's dropout: ``None`` → deterministic
         (inference dropout); a key → one MC-Dropout sample.
+
+        ``prev_states`` is the history, OLDEST FIRST, and must hold exactly
+        ``config.history_steps`` entries. Each is packed with the SAME
+        ``pack_pe_state`` and normalised with the SAME per-channel statistics as
+        the current state. The CURRENT state occupies the FIRST channel block
+        and the history follows it, because SFNO's residual skip adds
+        ``x_in[..., :out_channels]``; putting the past first would make a
+        residual net predict from a 6 h-stale baseline. Sharing the statistics is
+        deliberate: the two halves are the same physical variables at different
+        times, so one set of moments keeps them on a common scale and a finite
+        difference between corresponding channels stays meaningful.
         """
+        if len(prev_states) != int(self.config.history_steps):
+            raise ValueError(
+                f"history_steps={self.config.history_steps} requires that many "
+                f"prev_states (oldest first), got {len(prev_states)}."
+            )
         x = pack_pe_state(state, self.grid, self.sigma_coord)
+        if prev_states:
+            # CURRENT STATE FIRST, history after — the order is load-bearing,
+            # not cosmetic. SFNO's ACE-style residual skip adds
+            # ``x_in[..., :out_channels]`` (ml/sfno.py), i.e. the FIRST
+            # out_channels block of the input. With the past packed first a
+            # residual state-update network would predict
+            # ``past_state + correction`` instead of ``current + correction`` —
+            # a 6 h-stale baseline, silently, on the default configuration
+            # (``residual_prediction`` defaults True). Chronological order would
+            # read better; correctness wins.
+            x = jnp.concatenate(
+                [x] + [pack_pe_state(p, self.grid, self.sigma_coord)
+                       for p in prev_states],
+                axis=-1,
+            )
         x = x.astype(jnp.float32)
 
         # ``norm_stats`` is guaranteed present when use_normalization=True
-        # (validated in __init__), so this never silently skips.
+        # (validated in __init__), so this never silently skips. With history
+        # the stats are TILED, not recomputed: same variables, same scale.
         if self.config.use_normalization:
-            x = normalize(x, self.norm_stats)
+            stats = self.norm_stats
+            if prev_states:
+                stats = jax.tree.map(
+                    lambda a: jnp.concatenate([a] * (1 + len(prev_states)),
+                                              axis=-1),
+                    stats,
+                )
+            x = normalize(x, stats)
 
         y = self.sfno(x, self.grid, key=key)
 
