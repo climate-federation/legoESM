@@ -11,40 +11,41 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=cube_bound.%j.log
 # ===========================================================================
-# Price the CUBED-SPHERE lane. It is the one atmosphere grid with strong
-# receipts and NO distance-to-limit number: C768 6->24 GPUs came out at
-# efficiency 1.04 and 15.1 GC/s (job 26453782), which says it scales, not how
-# much is left. The lat-lon and MPAS lanes both carry measured/bound ratios
-# (1.83-1.96 and 3.16-4.47); the cube carries none, so "close to the
-# theoretical limit on each grid" is currently unanswerable here.
+# Price the TILED cubed-sphere lane -- the only cube path that goes past 6
+# GPUs -- on the PRODUCTION assembly.
 #
-# WHAT A BOUND NEEDS, and what is missing. The lat-lon bench takes a
-# single-device same-tile step time plus the measured fabric constants and
-# reports measured/bound. The cube bench has no such flags, so the anchor is
-# produced here and the ratio is computed from it:
+# WHY THIS IS A RERUN. The first attempt (job 26772775) omitted --closed-loop
+# and so measured the single-shot adapter lane: dynamics-only, state
+# re-materialised from pristine input every step. It reported C768/L60 @24 =
+# 67.54 ms against the campaign's 14.09 ms for a nominally identical case, a
+# 4.8x gap that is a LANE difference, not a regression. --closed-loop is the
+# np>6 production assembly (state stays tile-sharded across steps,
+# make_tiled_cc_loop, in-stage telescoping mass fixer). Every arm here sets it.
 #
-#   bound = compute(same tile, 1 GPU) + comm(census x fabric)
+# ARM 0 IS A KNOWN-ANSWER CHECK, and it gates the rest. The tiled bench's own
+# receipt is C384/L60 kt=2 @24 = 9.01 ms/step (job 26450938). Reproduce that
+# before quoting any new cube number: the previous run's headline was wrong
+# precisely because nothing checked the harness against a value already known.
 #
-# ARM 1 is that anchor: C768 at kt=1 on 6 GPUs is the face-sharded lane with
-# ONE tile per face -- the smallest same-path configuration -- and its step
-# time at a matched per-device tile is the compute term, because a face-local
-# step still pays its own halo but no tiling exchange.
-# ARM 2 is the 24-GPU tiled rung (kt=2) that the 1.04 receipt came from, rerun
-# here so both numbers come from ONE job on ONE node set: the campaign's own
-# lesson is that a ratio built from two jobs weeks apart is a confound.
+# ARMS 1-2 then measure C768/L60 at kt=2 (24 GPUs) and kt=3 (54 GPUs) in the
+# SAME job on the SAME node set, so the 24->54 ratio is internally controlled
+# -- a ladder assembled from jobs weeks apart is this campaign's documented
+# confound.
 #
-# (a) NUMBER: ms/step for both rungs, from the same executable and allocation.
-# (b) CONFIRMS the cube is near its limit if the 24-GPU step is within ~1.5x
-#     of (anchor/4 + the known 6.65 ms halo term); REFUTES it if the gap is
-#     >2.5x, which would put the cube in MPAS territory and make it the next
-#     target rather than lat-lon.
-# (c) WHY NOT CHEAPER: the compute term is a GPU step time at a real tile.
-#     There is no offline substitute; the mesh geometry and the fused step are
-#     what set it.
+# (a) NUMBER: ms/step for all three arms, one executable, one allocation.
+# (b) CONFIRMS the harness if arm 0 lands near 9.01 ms; anything far from it
+#     means the lane is still wrong and arms 1-2 must not be quoted.
+# (c) WHY NOT CHEAPER: these are GPU step times on the production assembly.
+#     No offline proxy exists -- and the CPU proxy is known to differ, since
+#     GPU XLA combines collective-permutes ~3.2x.
 #
-# 14 nodes = 56 GPUs, enough for the 24-GPU rung with room; kt is validated
-# only for {2,3} (#1360 guard), so kt=2 is the tiled rung and 6-GPU face
-# sharding is the anchor.
+# ALSO SETTLED BEFORE SUBMITTING, so it is not this job's question: the halo
+# is NOT where this lane's time goes. The compiled module holds 123
+# collective-permutes at kt=2; x 29.7 us = 3.65 ms, a few percent of the step.
+# Removing every collective could not pay for the work.
+#
+# 14 nodes = 56 GPUs, enough for the 54-GPU rung; kt is validated only for
+# {2,3} (#1360 guard).
 #
 # SUBMIT:  sbatch scripts/cluster/scaling_levante/cube_bound_anchor.sbatch
 # ===========================================================================
@@ -59,20 +60,32 @@ OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/cube_bound_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 rc=0
 
-echo "=== [cube] arm 1/2: kt=2 tiled, 24 GPUs (the 1.04-efficiency rung) ==="
+echo "=== [cube] arm 0/3: KNOWN-ANSWER CHECK — C384/L60 kt=2 @24, closed loop ==="
+# The tiled lane's OWN receipt is 9.01 ms/step here (job 26450938). Reproduce
+# it before any new cube number is quoted: the first version of this job
+# omitted --closed-loop and measured the single-shot adapter lane instead of
+# the np>6 production assembly, which is a 4.8x different path.
+JAX_ENABLE_X64=0 srun --ntasks=24 --distribution=block:block \
+  --cpu-bind=cores --kill-on-bad-exit=1 \
+  "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt 2 --resolution 384 --nlev 60 --steps 12 --warmup 3 \
+    --closed-loop --multicontroller --out "$OUTDIR/c384_kt2_np24_check.jsonl" \
+  || { echo "[cube] known-answer check FAILED"; rc=1; }
+
+echo "=== [cube] arm 1/3: kt=2 tiled, 24 GPUs, CLOSED LOOP ==="
 JAX_ENABLE_X64=0 srun --ntasks=24 --distribution=block:block \
   --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt 2 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
-    --multicontroller --out "$OUTDIR/c768_kt2_np24.jsonl" \
+    --closed-loop --multicontroller --out "$OUTDIR/c768_kt2_np24.jsonl" \
   || { echo "[cube] kt2 FAILED"; rc=1; }
 
-echo "=== [cube] arm 2/2: kt=3 tiled, 54 GPUs (the tile-floor rung) ==="
+echo "=== [cube] arm 2/3: kt=3 tiled, 54 GPUs, CLOSED LOOP ==="
 JAX_ENABLE_X64=0 srun --ntasks=54 --distribution=block:block \
   --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt 3 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
-    --multicontroller --out "$OUTDIR/c768_kt3_np54.jsonl" \
+    --closed-loop --multicontroller --out "$OUTDIR/c768_kt3_np54.jsonl" \
   || { echo "[cube] kt3 FAILED"; rc=1; }
 
 echo "=== [cube] receipts ==="
@@ -91,6 +104,7 @@ for path in sorted(glob.glob(os.path.join(base, "*.jsonl"))):
     rows.append((os.path.basename(path), ms, d.get("n_devices")))
     print(f"{os.path.basename(path):28s} nd={d.get('n_devices')} "
           f"{ms:8.3f} ms/step")
+rows = [r for r in rows if "check" not in r[0]]
 if len(rows) == 2:
     (n1, m1, d1), (n2, m2, d2) = rows
     print(f"\nscale {d1}->{d2}: {m1/m2:.3f}x on {d2/d1:.2f}x devices "
