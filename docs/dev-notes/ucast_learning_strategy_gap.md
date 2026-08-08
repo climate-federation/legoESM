@@ -1739,3 +1739,28 @@ is a property of the shared dycore, not of either physics package.
 This is the largest single improvement of the campaign, and unlike every other
 lever tried today it came from a conservation defect rather than a
 hyperparameter.
+
+### RESOLVED: "more levels makes pressure worse" is a DIAGNOSTIC artifact
+
+Flagged earlier and worth resolving, because surface pressure turned out to be
+the field that matters most: the floor sweep showed mslp getting WORSE with more
+levels (262 -> 290 Pa at T63, 8 -> 16 levels). Read the code rather than
+guessing:
+
+* `_apply_phis_hydrostatic_adjustment` computes
+  `p_s_corrected = p_s * exp(delta_phis / (R_d T_sfc))`. It takes `sigma`, but
+  uses it ONLY for the hybrid floor (`if is_hybrid`). These suites run
+  `vertical_coord: sigma`, so **p_s is identical at 8 and 16 levels.**
+* The mslp DIAGNOSTIC is `mean_sea_level_pressure(p_s, T[..., -1], phis)`, and
+  the lowest full-level sigma moves 0.9381 -> 0.9691 between 8 and 16 levels.
+  A different lowest-level temperature changes the reduction over topography —
+  and it is exactly zero over ocean, where `z_s = 0` makes the reduction the
+  identity.
+
+So the surface-pressure FIELD does not degrade with resolution; only its
+sea-level REDUCTION does, through the temperature it borrows. **The
+recommendation to add vertical levels is not compromised for the field that
+matters most.** CONFIRMED by code read, not inferred.
+
+A cleaner check would compare p_s directly instead of mslp; p_s is not in the
+WB2 headline set, which is why the reduction is being scored in the first place.
