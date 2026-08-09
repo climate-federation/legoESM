@@ -546,8 +546,14 @@ class SFNOPrimitiveEquationModel:
           with both, and is placed last so nothing can reintroduce a negative.
         """
         if self._spectral_filter is not None:
+            # Legacy lnps filtering, kept for BOTH modes routed through this
+            # postprocess (state_update and hybrid_tendencies): shipped
+            # sfno_full checkpoints were trained and scored with lnps
+            # filtered, and the filter -> correct_mass ordering contract
+            # above depends on it. The spectral dycore arms use the new
+            # default (lnps unfiltered — see apply_spectral_filter_to_state).
             new_state = apply_spectral_filter_to_state(
-                new_state, self._spectral_filter)
+                new_state, self._spectral_filter, filter_lnps=True)
 
         if self.config.correct_mass:
             new_state = self._apply_conservation(new_state, old_state)

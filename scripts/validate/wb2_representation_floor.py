@@ -103,7 +103,10 @@ def main(argv=None):
     spec_cfg = ra._build_spectral_config(cfg)
 
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
-    sigma = create_sigma_coordinate(spec_cfg.n_levels)
+    # sigma_top from the config: training/eval run 0.05, the factory default
+    # is 0.01 — the floor must be measured on the SAME vertical coordinate.
+    sigma = create_sigma_coordinate(
+        spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
 
     # The SHORTEST lead the store supports, purely so build_forecast_cases has
     # something to verify against; we score the lead-0 verification, which the

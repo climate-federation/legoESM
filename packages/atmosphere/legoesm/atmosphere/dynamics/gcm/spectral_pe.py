@@ -1052,23 +1052,42 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     )
 
 
-def apply_spectral_filter_to_state(state, spectral_filter):
-    """Apply exponential spectral filter to all prognostic fields.
+def apply_spectral_filter_to_state(state, spectral_filter, *,
+                                   filter_lnps: bool = False):
+    """Apply exponential spectral filter to the prognostic fields.
+
+    ``lnps`` is NOT filtered by default. Filtering it damps the
+    high-wavenumber surface pressure every step while the static orography
+    ``phis_hat`` keeps its full truncation sharpness, so the terrain-locked
+    fine structure hydrostatic balance requires is destroyed within hours:
+    measured on the T63L8 AIMIP configuration, 36 steps of the 0.01-strength
+    filter turn a 213 Pa fixed p_s offset (unfiltered) into 1108 Pa,
+    land-concentrated (1595 Pa land / 736 Pa ocean), physics-independent.
+    The vor/div cascade this filter exists for does not involve lnps. If a
+    long-rollout lnps spectral tail ever needs damping, add a WEAK dedicated
+    term (or co-truncate phis to match) rather than re-enabling this one —
+    at 0.01/step it is ~1e-72 at degree 63 after 6 h.
 
     Parameters
     ----------
     state : SpectralHydrostaticState
     spectral_filter : jax.Array, shape (n_sh,)
         Multiplicative filter per spectral coefficient.
+    filter_lnps : bool
+        Also filter ``lnps_hat`` (legacy behaviour). Only the SFNO
+        state-update path keeps this on, because its shipped checkpoints were
+        trained and scored under it.
     """
     sf_3d = spectral_filter[:, None]  # (n_sh, 1) for 3D fields
     sf_2d = spectral_filter           # (n_sh,) for 2D fields
 
+    new_lnps = (state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d)
+                if filter_lnps else state.lnps_hat)
     return state._replace(
         vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf_3d),
         div_hat=state.div_hat.replace(data=state.div_hat.data * sf_3d),
         T_hat=state.T_hat.replace(data=state.T_hat.data * sf_3d),
-        lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d),
+        lnps_hat=new_lnps,
     )
 
 
