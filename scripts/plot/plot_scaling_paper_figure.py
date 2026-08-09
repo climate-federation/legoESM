@@ -35,6 +35,7 @@ SOURCES = {
                   "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
+                "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076, s10@128 26677812",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
@@ -71,8 +72,9 @@ PANELS = [
                 ("float32 (subdiv-9)", [(32, 12.47), (64, 9.60), (128, 11.48)]),
                 ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
                 ("f32 (s10 lloyd-0)", [(128, 18.20)]),
+                ("f32 s8@16+s9@32 ragged", [(16, 4.86), (32, 9.78)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="s10@128 = 15.0 GC/s (record);\nweak 4x-cost decelerates 1.90→1.46",
+        note="ragged halo −31% @16 (A/B, #1534);\nscale-banded: loss ≥64 (zero-slice cost)",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -126,6 +128,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
           "f32 LL2304 fused": "#000000",
+          "f32 s8@16+s9@32 ragged": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -139,6 +142,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
            "f32 LL2304 fused": "*",
+           "f32 s8@16+s9@32 ragged": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 

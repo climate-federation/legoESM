@@ -143,3 +143,18 @@ def test_offsets_are_int32():
     for ent in ("cells", "edges"):
         for key in ("in_off", "send_sz", "out_off", "recv_sz"):
             assert sched[ent][key].dtype == np.int32, (ent, key)
+
+
+def test_resolve_ragged_halo_dispatch():
+    from legoesm.parallel.sharded_dynamics import (
+        _RAGGED_AUTO_MAX_NDEV,
+        _resolve_ragged_halo,
+    )
+
+    assert _resolve_ragged_halo("0", 4) is False
+    assert _resolve_ragged_halo("", 4) is False
+    assert _resolve_ragged_halo("1", 128) is True
+    assert _resolve_ragged_halo("auto", _RAGGED_AUTO_MAX_NDEV) is True
+    assert _resolve_ragged_halo("auto", _RAGGED_AUTO_MAX_NDEV + 1) is False
+    with pytest.raises(ValueError, match="RAGGED_HALO"):
+        _resolve_ragged_halo("yes", 4)
