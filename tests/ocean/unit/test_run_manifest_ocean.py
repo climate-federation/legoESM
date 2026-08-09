@@ -249,13 +249,17 @@ def test_numpy_scalar_config_leaf_encoding_unchanged():
     arrays stay byte-identical and rebuild exactly (codex)."""
     import numpy as np
 
-    cfg = _latlon_cfg()._replace(rho_0=np.float64(1026.5))
+    # ``rho_0`` lives in the single ``constants: ConstantsConfig`` storage, so
+    # it is set through ``replace_flat``; ``_replace(rho_0=...)`` is a LOUD
+    # TypeError by design (it used to write a SECOND, divergent surface).
+    cfg = _latlon_cfg().replace_flat(rho_0=np.float64(1026.5))
     d = ocean_config_to_dict(cfg)
-    assert d["rho_0"] == 1026.5 and not isinstance(d["rho_0"], dict)
+    enc = d["constants"]["rho_0"]
+    assert enc == 1026.5 and not isinstance(enc, dict)
     rebuilt = ocean_config_from_dict(d)
     assert float(rebuilt.rho_0) == 1026.5
     assert (compute_config_hash(cfg, "ocean")
-            == compute_config_hash(cfg._replace(rho_0=1026.5), "ocean"))
+            == compute_config_hash(cfg.replace_flat(rho_0=1026.5), "ocean"))
 
 
 def test_array_summary_hash_is_content_sensitive():

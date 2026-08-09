@@ -235,29 +235,30 @@ def main() -> int:
     results["PRANDTL (pdlr formula)"] = r_pdlr
     print(f"\n[STAGE 2] PRANDTL: legoESM._prandtl_number(nemo_ri) fed NEMO's "
           f"own sh2/rn2b/avm_in vs tke_dump_pdlr.bin -> {r_pdlr}")
-    print("    TRANSCRIPTION FINDING (all 11 n_above_1e9 cells traced): "
-          "NEMO zdftke.F90:469-474 divides zri = rn2b*p_avm/zdiv with "
-          "zdiv = p_sh2 + rn_bshear taken AS-IS (no positivity clamp -- "
-          "only an exact-zero special-case at :470-471); a genuinely "
-          "negative zdiv (p_sh2 a tiny negative float-noise value from "
-          "zdfsh2.F90, |p_sh2| ~ 1e-12..1e-13, exceeding rn_bshear=1e-20) "
-          "yields zri<0, and NEMO's clamp p_pdlr=MAX(0.1, ri_cri/MAX(ri_cri,"
-          "zri)) then correctly gives pdlr=1.0 (Pr=1). legoESM's "
-          "_prandtl_number 'nemo_ri' branch (tke.py:1324) instead computes "
-          "zri = N2*kappaM / jnp.maximum(p_sh2+bshear, 1e-30) -- the "
-          "jnp.maximum FLIPS a negative zdiv to a tiny POSITIVE floor, "
-          "making zri hugely POSITIVE instead of negative, which saturates "
-          "the SAME downstream clamp (tke.py:1325, verified algebraically "
-          "equivalent to NEMO's for zri of the RIGHT sign) at the OPPOSITE "
-          "end: pdlr=0.1 (Pr=10) vs NEMO's 1.0 (Pr=1) -- exactly the 11 "
-          "cells above, all with sh2<0. All 11 confirmed by direct "
-          "inspection (j,i,k / sh2 / rn2b / avm_in / lego_pdlr=0.1 / "
-          "nemo_pdlr=1.0). Root cause: the maximum(...,1e-30) belongs on "
-          "the FORMULA's zero-special-case only (mirroring NEMO's "
-          "IF(zdiv==0)-> divide by rn_bshear, which preserves the intended "
-          "sign since rn_bshear>0), not as a blanket floor on a "
-          "possibly-negative denominator. NOT fixed here (READ-ONLY on "
-          "packages/) -- escalate with a synthetic sh2<0 unit test.")
+    if r_pdlr["n_above_1e9"] == 0:
+        print("    STAGE 2 IS AT BAR on NEMO's own inputs (0 cells above "
+              "1e-9). The historical sh2<0 sign-flip finding below was FIXED "
+              "by e0fac585e and is retained only as provenance -- it is NOT "
+              "a live defect. Re-verified 2026-08-07 at HEAD 832a1b0c3: "
+              "err_norm 1.175e-17, max_diff 4.44e-16.")
+    else:
+        print(f"    TRANSCRIPTION FINDING LIVE AGAIN: "
+              f"{r_pdlr['n_above_1e9']} cells above 1e-9 -- the sh2<0 "
+              "sign-flip described below was believed FIXED by e0fac585e. "
+              "Treat as a REGRESSION and re-open before trusting any "
+              "downstream zdftke row.")
+    # HISTORICAL (fixed by e0fac585e; kept for provenance only -- the branch
+    # above decides whether it is live).  NEMO MY_SRC/zdftke.F90:487-491
+    # divides zri = rn2b*p_avm/zdiv with zdiv = p_sh2 + rn_bshear taken AS-IS
+    # (no positivity clamp -- only an exact-zero special-case at :488-489); a
+    # genuinely negative zdiv (p_sh2 a tiny negative float-noise value from
+    # zdfsh2.F90, |p_sh2| ~ 1e-12..1e-13, exceeding rn_bshear=1e-20) yields
+    # zri<0, and NEMO's clamp p_pdlr = MAX(0.1, ri_cri/MAX(ri_cri,zri)) then
+    # correctly gives pdlr=1.0 (Pr=1).  legoESM's _prandtl_number "nemo_ri"
+    # branch used to floor the denominator with
+    # jnp.maximum(p_sh2 + bshear, 1e-30), flipping a negative zdiv to a tiny
+    # POSITIVE value and saturating the SAME clamp at the OPPOSITE end
+    # (pdlr=0.1, Pr=10) in 11 cells, all with sh2<0.
 
     # self-check D: manual (Python double loop, no numpy broadcasting) vs the
     # vectorized err_norm() reduction above, on a small subset -- catches an

@@ -200,6 +200,23 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "stp_dump_23_after_traldf_sal.bin": ("now", "salinity twin of stp_dump_23_"
                                                  "after_traldf_tem.bin (same "
                                                  "WRITE, MY_SRC stpmlf.F90:438)."),
+    # mlf_baro_corr before/after (W3/W1a, #388 nemo_faithful_ocean_implementation_
+    # plan.md): full 3-D u/v captured at kt==nit000 only, BEFORE (stpmlf.F90:592-
+    # 604, zu_bc_before snapshot of puu(:,:,:,Kaa) as it arrives POST-dyn_zdf) and
+    # AFTER (stpmlf.F90:621-632, puu(:,:,:,Kaa) once the depth-mean replacement at
+    # :616-619 has run) the barotropic/baroclinic reconciliation. Both dumps are
+    # the Kaa ("after") time level -- mlf_baro_corr never touches Kbb/Kmm here
+    # (the ln_bt_fw=F Kmm branch at :634-643 is a SEPARATE array section, not
+    # dumped). Full haloed jpi x jpj, jk=1..jpkm1 (35 levels), no A2D restriction
+    # in the Fortran WRITE loop.
+    "baro_dump_u_before.bin": ("after", "stpmlf.F90:592-604 zu_bc_before = "
+                                         "puu(:,:,:,Kaa) pre-correction snapshot"),
+    "baro_dump_v_before.bin": ("after", "stpmlf.F90:592-604 zv_bc_before = "
+                                         "pvv(:,:,:,Kaa) pre-correction snapshot"),
+    "baro_dump_u_after.bin": ("after", "stpmlf.F90:621-632 puu(:,:,:,Kaa) after "
+                                        "the depth-mean replacement (:616-619)"),
+    "baro_dump_v_after.bin": ("after", "stpmlf.F90:621-632 pvv(:,:,:,Kaa) after "
+                                        "the depth-mean replacement (:616-619)"),
     "zdf_dump_u1_prestress.bin": ("after", "puu(:,:,1,Kaa) captured per j-slab at "
                                             "MY_SRC dynzdf.F90:350, immediately "
                                             "BEFORE the MLF surface-stress add "
@@ -265,7 +282,104 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                             "restart.F90:187 -> MY_SRC/trddump.F90 trddump_write"),
     "strd_ldf": ("before", "salinity twin of ttrd_ldf (same traldf_iso_lap "
                             "Kbb read, trddump_tra ptrdy)"),
+
+    # --- #1492 EIV-DIAG task (2026-08-06): additive annual dump of the
+    # Treguier eddy-induced-velocity coefficient (aeiu/aeiv) plus its
+    # isoneutral-slope/N^2 inputs, for RUN_EIV_DIAG (y10->y20 continuation)
+    # in MY_SRC/ldftra.F90. WRITE block inserted at ldftra.F90 end of
+    # ldf_tra (after the existing aeiu_3d/aeiv_3d iom_put calls), gated
+    # MOD(kt,11520)==0 .AND. kt>=nit000 (11520 steps/year at rn_rdt=2700s).
+    # Registered "before": aeiu/aeiv are ldf_eiv's OWN output (ldftra.F90:
+    # 668-768), and ldf_eiv's zah/zn accumulation reads rn2b (before-level
+    # N^2, ldftra.F90:699/713) and wslpi/wslpj (also before-level per the
+    # existing "eiv_dump_wslpi.bin"/"eiv_dump_wslpj.bin"/"eiv_dump_rn2b.bin"
+    # entries above, ldfslp.F90 uses rn2b/rab_b) -- aeiu/aeiv inherit the
+    # SAME before-level dependency as their own governing inputs, exactly as
+    # dump_nmln.bin/dump_hmlp.bin above are registered by their rn2b
+    # integrand rather than by their own (non-existent) leapfrog index.
+    "eivdiag_aeiu_yNN_rankRR.bin": ("before", "ldftra.F90:668-768 ldf_eiv "
+        "aeiu output; zah/zn accumulation (:699-723) reads rn2b (before, "
+        "same dependency as eiv_dump_rn2b.bin above). WRITE at ldftra.F90 "
+        "end of ldf_tra (new block), gated MOD(kt,11520)==0, year index = "
+        "kt/11520."),
+    "eivdiag_aeiv_yNN_rankRR.bin": ("before", "v twin of eivdiag_aeiu (same "
+        "WRITE block, same ldf_eiv aeiv output)."),
+    "eivdiag_wslpi_yNN_rankRR.bin": ("before", "ldfslp.F90 wslpi, same "
+        "before-level slope as eiv_dump_wslpi.bin (uses rn2b/rab_b); "
+        "re-dumped alongside aeiu/aeiv at the annual cadence so the bolus "
+        "streamfunction psi_uw = -1/4*e2u*(wslpi_k+wslpi_k+1)*(aeiu_k+"
+        "aeiu_k+1) (ldftra.F90:828-829) can be reconstructed offline at "
+        "matched years."),
+    "eivdiag_wslpj_yNN_rankRR.bin": ("before", "v twin of eivdiag_wslpi "
+        "(ldfslp.F90 wslpj, same before-level dependency as "
+        "eiv_dump_wslpj.bin)."),
+    "eivdiag_rn2b_yNN_rankRR.bin": ("before", "before-level N^2, identical "
+        "quantity/citation as eiv_dump_rn2b.bin above (rn2b = bn2(ts(..., "
+        "Nbb), rab_b, Nnn)); re-dumped at the annual cadence for the same "
+        "offline bolus reconstruction as the other eivdiag_* entries."),
+
+    # --- dyn_cor_2D (#1226 item 5): the barotropic EEN Coriolis, substep 1 ---
+    # WRITE block at MY_SRC dynspg_ts.F90:794-806, guarded by
+    # "ll_spg_dump .AND. jn == 1", immediately after CALL dyn_cor_2D(ua_e,
+    # va_e, zu_trd, zv_trd) at :783 and BEFORE the tidal / bottom-stress
+    # additions overwrite zu_trd/zv_trd in place.
+    #
+    # The dumped ua_e/va_e are the BEFORE-level barotropic transport, proved
+    # by the config's own switches (RUN_GDB/namelist_cfg: ln_bt_fw=.false.,
+    # nn_bt_flt=2), not assumed:
+    #   1. nn_bt_flt /= 3          => ll_bt_av = .TRUE.   (:202-203)
+    #   2. ll_init  = ll_bt_av     => ll_init  = .TRUE.   (:208)
+    #   3. ln_bt_fw=.F.            => CENTRED branch: un_e = puu_b(:,:,Kbb),
+    #                                 vn_e = pvv_b(:,:,Kbb)              (:570-571)
+    #   4. ll_init                 => ub_e = ubb_e = vb_e = vbb_e = 0    (:546-553)
+    #   5. jn=1 and (jn<3).AND.ll_init => za1=1, za2=za3=0               (:630-632)
+    #   6. ua_e = za1*un_e + za2*ub_e + za3*ubb_e                        (:645)
+    #      => ua_e == un_e == puu_b(Kbb) exactly at jn=1.
+    # Independently confirmed by measurement: max|ua_e - un_e_init| = 0.000e+00
+    # against spg_dump_un_e_init.bin (which is itself puu_b(Kbb), :570).
+    # zu_trd/zv_trd are dyn_cor_2D OF that before-level transport, so they
+    # carry the same level (registered by their governing input, exactly as
+    # dump_nmln/dump_hmlp are registered by their rn2b integrand).
+    "cor2d_dump_ua_e_in_substep1.bin": ("before", "dynspg_ts.F90:804 WRITE(8975) "
+        "ua_e at jn=1; ua_e == un_e == puu_b(:,:,Kbb) there via :202-203 "
+        "(ll_bt_av) -> :208 (ll_init) -> :570 (ln_bt_fw=.F. CENTRED seed) -> "
+        ":546-553 (ub_e=ubb_e=0) -> :630-632 (za1=1,za2=za3=0) -> :645."),
+    "cor2d_dump_va_e_in_substep1.bin": ("before", "dynspg_ts.F90:805 WRITE(8976) "
+        "va_e at jn=1; v twin of cor2d_dump_ua_e_in_substep1.bin, same proof "
+        "chain via :571 (vn_e = pvv_b(:,:,Kbb)) and :648."),
+    "cor2d_dump_zu_trd_substep1.bin": ("before", "dynspg_ts.F90:802 WRITE(8973) "
+        "zu_trd at jn=1, the OUTPUT of CALL dyn_cor_2D(ua_e, va_e, ...) at "
+        ":783 (pre tidal/bottom-stress overwrite). No leapfrog index of its "
+        "own; registered by its governing input ua_e/va_e = puu_b/pvv_b(Kbb) "
+        "(see cor2d_dump_ua_e_in_substep1.bin)."),
+    "cor2d_dump_zv_trd_substep1.bin": ("before", "dynspg_ts.F90:803 WRITE(8974) "
+        "zv_trd at jn=1; v twin of cor2d_dump_zu_trd_substep1.bin, same "
+        "dyn_cor_2D call at :783 and same governing before-level input "
+        "(pvv_b(:,:,Kbb))."),
 }
+_EIVDIAG_SOURCE_AEIU = _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"][1]
+_EIVDIAG_SOURCE_AEIV = _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"][1]
+_EIVDIAG_SOURCE_WSLPI = _DUMP_TIME_LEVEL["eivdiag_wslpi_yNN_rankRR.bin"][1]
+_EIVDIAG_SOURCE_WSLPJ = _DUMP_TIME_LEVEL["eivdiag_wslpj_yNN_rankRR.bin"][1]
+_EIVDIAG_SOURCE_RN2B = _DUMP_TIME_LEVEL["eivdiag_rn2b_yNN_rankRR.bin"][1]
+del _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"]
+del _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"]
+del _DUMP_TIME_LEVEL["eivdiag_wslpi_yNN_rankRR.bin"]
+del _DUMP_TIME_LEVEL["eivdiag_wslpj_yNN_rankRR.bin"]
+del _DUMP_TIME_LEVEL["eivdiag_rn2b_yNN_rankRR.bin"]
+# RUN_EIV_DIAG covers years 11-20 (kt/11520 = 11..20), 16 MPI ranks (jpni=2
+# x jpnj=8, same tiling as RUN_20Y/RUN_ENS_M*).
+for _yr in range(11, 21):
+    _yy = f"{_yr:02d}"
+    for _rank in range(16):
+        _rr = f"{_rank:02d}"
+        _DUMP_TIME_LEVEL[f"eivdiag_aeiu_y{_yy}_rank{_rr}.bin"] = ("before", _EIVDIAG_SOURCE_AEIU)
+        _DUMP_TIME_LEVEL[f"eivdiag_aeiv_y{_yy}_rank{_rr}.bin"] = ("before", _EIVDIAG_SOURCE_AEIV)
+        _DUMP_TIME_LEVEL[f"eivdiag_wslpi_y{_yy}_rank{_rr}.bin"] = ("before", _EIVDIAG_SOURCE_WSLPI)
+        _DUMP_TIME_LEVEL[f"eivdiag_wslpj_y{_yy}_rank{_rr}.bin"] = ("before", _EIVDIAG_SOURCE_WSLPJ)
+        _DUMP_TIME_LEVEL[f"eivdiag_rn2b_y{_yy}_rank{_rr}.bin"] = ("before", _EIVDIAG_SOURCE_RN2B)
+del _yr, _yy, _rank, _rr
+
 
 _FACE10_WZV_SOURCE = (
     "Per-day twin of wzv_dump_ww_call1/2.bin: SAME post-wzv_MLF pww (bottom "

@@ -11,6 +11,7 @@ from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
     compute_ocean_rho_and_pressure as _compute_rho_and_pressure,
 )
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -24,6 +25,7 @@ def make_convection_physics(
     apply_diffusion: bool = True,
     emit_momentum_viscosity: bool = True,
     eos_fn: Callable | None = None,
+    constants_config: ConstantsConfig = ConstantsConfig(),
 ) -> Callable:
     """Create an ocean convection physics function.
 
@@ -59,7 +61,7 @@ def make_convection_physics(
         return _make_enhanced_diffusion(
             config, apply_diffusion=apply_diffusion,
             emit_momentum_viscosity=emit_momentum_viscosity,
-            eos_fn=eos_fn,
+            eos_fn=eos_fn, constants_config=constants_config,
         )
     elif scheme == "plume":
         return _make_plume(config, eos_fn=eos_fn)
@@ -67,10 +69,12 @@ def make_convection_physics(
         raise ValueError(f"Unknown ocean convection scheme: {scheme!r}")
 
 
-def _make_enhanced_diffusion(config: OceanConvectionConfig,
-                             apply_diffusion: bool = True,
-                             emit_momentum_viscosity: bool = True,
-                             eos_fn: Callable | None = None) -> Callable:
+def _make_enhanced_diffusion(
+        config: OceanConvectionConfig,
+        apply_diffusion: bool = True,
+        emit_momentum_viscosity: bool = True,
+        eos_fn: Callable | None = None,
+        constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
     cfg = config.enhanced_diffusion
 
     # Fail closed at construction: suppression (emit_momentum_viscosity=False)
@@ -145,6 +149,9 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
             u=u_in, v=v_in,
             p_cell=p_cell, eos_fn=eos_fn,
             eta=state.eta.data, H_bathy=state.H_bathy.data,
+            # Recipe-pinned constants (the N^2 trigger's g / reference
+            # density); defaults reproduce legoesm.constants exactly.
+            g=constants_config.g, rho_ref=constants_config.rho_0,
         )
         du = out.du_dt if out.du_dt is not None else None
         dv = out.dv_dt if out.dv_dt is not None else None
