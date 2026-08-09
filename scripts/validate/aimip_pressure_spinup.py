@@ -147,11 +147,36 @@ def main(argv=None):
         mean_pat = np.nanmean(E, axis=0)         # case-invariant component
         resid = E - mean_pat[None]
         # Variance split, over cells valid in every case.
+        # LAND/OCEAN SPLIT OF THE FIXED PATTERN. This is the test that
+        # implicates or clears the orography reconciliation
+        # (``p_s * exp(delta_phis/(R_d T_sfc))``), which acts ONLY where
+        # topography was smoothed. An earlier version of this analysis "refuted"
+        # that mechanism using the land/ocean symmetry of p_s(t) - p_s(0) — the
+        # WRONG QUANTITY, because the reconciliation happens AT t=0 and so
+        # cancels out of a displacement from t=0 entirely. The ERA5-referenced
+        # error is where its signature lives.
         ok = np.all(np.isfinite(E), axis=0)
         v_tot = float(np.nanmean(E[:, ok] ** 2))
         v_fix = float(np.nanmean(np.repeat(mean_pat[ok][None], len(E), 0) ** 2))
         v_res = float(np.nanmean(resid[:, ok] ** 2))
+        # Model orography regridded to the WB2 grid, so land can be masked on
+        # the same grid the error lives on.
+        phis_g = np.asarray(sh_synthesis(grid, cases[0].init_state.phis_hat.data))
+        from evaluations.wb_regrid import regrid_to_wb2 as _rg
+        phis_wb2 = np.asarray(_rg(
+            jnp.asarray(phis_g),
+            np.rad2deg(np.asarray(grid.lat)),
+            np.rad2deg(np.asarray(grid.lon)),
+            resolution_deg=1.5))
+        land_m = (phis_wb2 > 1.0) & ok
+        sea_m = (phis_wb2 <= 1.0) & ok
+        fix_land = float(np.sqrt(np.mean(mean_pat[land_m] ** 2))) if land_m.any() else None
+        fix_sea = float(np.sqrt(np.mean(mean_pat[sea_m] ** 2))) if sea_m.any() else None
+
         out = {
+            "mslp_fixed_pattern_land_pa": fix_land,
+            "mslp_fixed_pattern_ocean_pa": fix_sea,
+            "land_cells": int(land_m.sum()), "ocean_cells": int(sea_m.sum()),
             "meta": {
                 "what": "6 h ZERO-PHYSICS forecast vs ERA5: mslp error split "
                         "into a case-invariant pattern and a per-case "

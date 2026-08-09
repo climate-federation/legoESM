@@ -2164,3 +2164,30 @@ hydrostatic balance between the smoothed `phis` and the temperature profile);
 confirm the fraction with a TRAINED checkpoint rather than zero physics; and
 report a bias-corrected mass score alongside the raw one, with the correction
 estimated on training years only.
+
+## RETRACTION: my refutation of the orography mechanism tested the WRONG QUANTITY
+
+Earlier I wrote that the `p_s * exp(delta_phis/(R_d T_sfc))` reconciliation to
+smoothed topography was REFUTED, on the grounds that the zero-physics probe
+showed land/ocean symmetry (311.9 vs 314.6 Pa).
+
+**That refutation is invalid.** The probe measured `p_s(t) - p_s(0)` — a
+displacement from the initial state. The reconciliation happens AT t=0: it
+modifies the initial p_s itself. Its contribution therefore cancels out of a
+displacement from t=0 exactly, and the symmetry I observed says nothing about
+it. I tested a quantity the mechanism cannot appear in and read the null as a
+refutation.
+
+The signature lives in the ERA5-REFERENCED error, and specifically in whether
+the FIXED PATTERN is concentrated over land. That test is now in the probe
+(`--vs-era5` reports `mslp_fixed_pattern_land_pa` / `_ocean_pa`, with the model
+orography regridded onto the WB2 grid so the mask lives on the same grid as the
+error).
+
+What the lead-0 floor does bound: mslp at t=0 is 260 Pa TOTAL, including
+regridding and truncation, so the reconciliation cannot cost more than that at
+t=0 — against a fixed pattern of 432 Pa at 6 h. So it can be a contributor but
+not the whole story. That much is sound; the "refuted" was not.
+
+Running now at 6 h, 6 cases. Land-heavy fixed pattern implicates the
+orography treatment; ocean-comparable clears it properly this time.
