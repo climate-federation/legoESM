@@ -489,6 +489,54 @@ def test_feed_gate_serial_mpi_singlerank(mesh):
     assert ModelDriver._mpas_cmip_feed_enabled(serial, dc_off) == (False, False)
 
 
+def test_multirank_cmor_contract_raises():
+    """#1517: an explicitly requested CMOR output that the multi-rank
+    cell-partition feed cannot produce must FAIL AT STARTUP on every rank —
+    never complete with an empty cmor/ dir indistinguishable from success."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    multi = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=1)
+    with pytest.raises(RuntimeError, match="UNSUPPORTED under cell-partition"):
+        ModelDriver._enforce_multirank_cmor_contract(
+            multi, wants_cmip=True, feed_on=False)
+
+
+def test_multirank_cmor_contract_escape_env(monkeypatch):
+    """LEGOESM_ALLOW_EMPTY_MULTIRANK_CMOR=1 downgrades the #1517 refusal to
+    the historical warning (consciously accepted no-CMOR run)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.setenv("LEGOESM_ALLOW_EMPTY_MULTIRANK_CMOR", "1")
+    multi = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=0)
+    ModelDriver._enforce_multirank_cmor_contract(
+        multi, wants_cmip=True, feed_on=False)  # must not raise
+
+
+def test_multirank_cmor_contract_wired_into_run_mpas():
+    """The contract must be invoked by the lane that runs (#1517).
+    ``_run_mpas`` is the MPAS production loop — an unwired guard passes its
+    own unit tests while proving nothing (the delegating-wrapper trap)."""
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    src = inspect.getsource(ModelDriver._run_mpas)
+    assert "_enforce_multirank_cmor_contract(" in src
+
+
+def test_multirank_cmor_contract_noop_when_ok(monkeypatch):
+    """Feed on, or no CMOR requested: the #1517 contract never fires."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.delenv("LEGOESM_ALLOW_EMPTY_MULTIRANK_CMOR", raising=False)
+    serial = types.SimpleNamespace(_mpi_world_size=1, _mpi_rank=0)
+    ModelDriver._enforce_multirank_cmor_contract(
+        serial, wants_cmip=True, feed_on=True)
+    multi = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=0)
+    ModelDriver._enforce_multirank_cmor_contract(
+        multi, wants_cmip=False, feed_on=False)
+
+
 def test_driver_helper_computes_2m_tas(mesh):
     """With prescribed sst warmer than the lowest air level, the driver helper
     publishes a 2 m MOST `tas` distinct from (warmer than) the lowest level."""
