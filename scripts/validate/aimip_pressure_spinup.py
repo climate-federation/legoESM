@@ -84,6 +84,16 @@ def build_parser():
              "(min -1801 m2/s2 at T63) and bilinear regridding spreads it, so "
              "a >0 test calls 68%% of the AREA land against a true ~29%%. "
              "1000 m2/s2 (~100 m) reproduces 0.298 area-weighted.")
+    p.add_argument(
+        "--vs-reconciled", action="store_true", dest="vs_reconciled",
+        help="Compare the forecast p_s DIRECTLY against the ERA5 state AFTER "
+             "the same phis reconciliation the initial condition went through "
+             "(case k+1's init_state, one cadence later). No sea-level "
+             "reduction is involved, so this separates a real p_s base-state "
+             "offset from amplification by the mslp diagnostic — and because "
+             "the reconciliation is present on BOTH sides it cancels, so a "
+             "fixed offset that VANISHES here is caused by the reconciliation "
+             "while one that PERSISTS is the dycore's own.")
     p.add_argument("--out", default=None)
     return p
 
@@ -136,6 +146,52 @@ def main(argv=None):
     def _rms(d, mask=None):
         w = area if mask is None else area * mask
         return float(jnp.sqrt(jnp.sum(w * d ** 2) / jnp.maximum(jnp.sum(w), 1e-30)))
+
+    if args.vs_reconciled:
+        # Consecutive inits one cadence apart: case k+1's init_state IS the
+        # ERA5 truth at case k's verification time, carried through the SAME
+        # ERA5 -> spectral path (including the phis reconciliation) as the IC.
+        cases_c = build_forecast_cases(
+            TrainingERA5Config(dt_hours=cadence), grid, sigma,
+            leads_hours=(cadence,), eval_year=args.eval_year,
+            n_inits=args.n_cases + 1, init_stride_hours=cadence,
+            resolution_deg=1.5)
+        errs = []
+        for k in range(len(cases_c) - 1):
+            fc = spectral_rollout(
+                cases_c[k].init_state, zero_physics, grid, sigma,
+                spec_cfg.pe_config, dt, n_steps, None, None)
+            e = np.asarray(_ps(fc)) - np.asarray(_ps(cases_c[k + 1].init_state))
+            errs.append(e)
+        E = np.stack(errs)
+        mean_pat = E.mean(axis=0)
+        v_tot = float(np.mean(E ** 2))
+        v_fix = float(np.mean(np.repeat(mean_pat[None], len(E), 0) ** 2))
+        phis_g = np.asarray(sh_synthesis(grid, cases_c[0].init_state.phis_hat.data))
+        thr = float(args.land_phis_threshold)
+        land = phis_g > thr
+        out = {
+            "meta": {
+                "what": "6 h zero-physics forecast p_s vs the RECONCILED ERA5 "
+                        "p_s one cadence later (case k+1's init state). No "
+                        "sea-level reduction; the reconciliation is on both "
+                        "sides and cancels.",
+                "suite": args.suite, "variant": args.variant,
+                "eval_year": args.eval_year, "n_cases": len(errs),
+                "hours": args.hours, "land_phis_threshold": thr,
+            },
+            "ps_rms_total_pa": float(np.sqrt(v_tot)),
+            "ps_rms_fixed_pattern_pa": float(np.sqrt(v_fix)),
+            "ps_rms_residual_pa": float(np.sqrt(np.mean((E - mean_pat) ** 2))),
+            "fixed_fraction_of_variance": v_fix / max(v_tot, 1e-30),
+            "ps_fixed_land_pa": float(np.sqrt(np.mean(mean_pat[land] ** 2))),
+            "ps_fixed_ocean_pa": float(np.sqrt(np.mean(mean_pat[~land] ** 2))),
+        }
+        print(json.dumps(out, indent=2))
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(out, indent=2))
+        return 0
 
     if args.vs_era5:
         from evaluations.wb_forecast import diagnose_and_regrid

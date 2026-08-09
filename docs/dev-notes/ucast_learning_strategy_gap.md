@@ -2244,3 +2244,51 @@ The 6 h mass scores are dominated by a fixed, land-concentrated pattern. Whether
 its origin is the reconciliation or the reduction, it is a systematic offset and
 not forecast skill — so the raw WB2 mass numbers understate all three arms, and
 a bias-corrected score (estimated on training years only) belongs alongside them.
+
+# ATTRIBUTED: 76 % OF THE FIXED OFFSET IS THE OROGRAPHY RECONCILIATION
+
+Same 6 h zero-physics forecasts, two references. The second compares `p_s`
+DIRECTLY — no sea-level reduction — against the ERA5 state one cadence later
+carried through the SAME phis reconciliation as the initial condition, so the
+reconciliation sits on both sides and cancels.
+
+| reference | fixed | land | ocean | ratio |
+|---|---|---|---|---|
+| raw ERA5 mslp (the WB2 metric) | 437.8 Pa | 689.0 | 199.1 | **3.46** |
+| reconciled ERA5 `p_s`, no reduction | 213.4 Pa | 223.4 | 208.0 | **1.07** |
+
+**The land/ocean contrast collapses from 3.46 to 1.07** — it was entirely the
+reconciliation and the mslp reduction, not the dycore. And the fixed pattern
+halves, 438 -> 213 Pa.
+
+Attribution: the reconciliation plus reduction account for
+`sqrt(438^2 - 213^2) = 382 Pa`, i.e. **76.2 % of the fixed-pattern variance**.
+The remainder is a **213 Pa, spatially UNIFORM** dycore base-state offset.
+
+## What this means for the campaign
+
+The WB2 mass scores penalise the arms for a deliberate coordinate choice. The
+ERA5 orography is SMOOTHED to be representable at T63 and `p_s` is hydrostatically
+reconciled to it (`p_s * exp(delta_phis/(R_d T_sfc))`) — a necessary step, not a
+bug. But the verification is raw ERA5 mslp on the true orography, so three
+quarters of the fixed offset is the model being scored against a surface it was
+never given.
+
+So the ranking of what to do changes again:
+
+1. **Report mass scores against a reconciled reference, or bias-correct them.**
+   Three quarters of the fixed offset is a known transform, and quoting the raw
+   number as forecast error has been misattributing it all along.
+2. **The genuine dycore base-state offset is 213 Pa and uniform** — five times
+   smaller than the 1000 Pa the raw scorecard suggested, and with no orographic
+   signature, so the remaining candidates are the global balance of the initial
+   state rather than anything topographic.
+3. Everything already established stands: the dry-mass anchor is worth
+   -25 to -30 % at 5 days, training-recipe levers are null on these arms, and
+   the winds and temperature beat persistence.
+
+**Caveat, stated because it matters:** the reconciled reference is NOT truth. It
+is ERA5 passed through our own transform, so the 236 Pa total is a
+self-consistency measure — "does the model stay on its own manifold" — not a
+forecast error. That is exactly what isolates the base state, and exactly why
+the number must not be quoted as skill.
