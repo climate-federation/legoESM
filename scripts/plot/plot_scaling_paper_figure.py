@@ -39,7 +39,7 @@ SOURCES = {
                 "s8-lloyd0 26628076, s10@128 26677812",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
-    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039",
+    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
     "oc_tripole": "26493837/26493648",
     "oc_mpas": "26494036 (f64), 26494908 (f32)",
 }
@@ -92,8 +92,9 @@ PANELS = [
         series=[("float32", [(1, 36.45), (2, 22.48), (4, 12.84), (8, 11.04), (16, 8.71)]),
                 ("float64", [(1, 64.81), (2, 41.63), (4, 22.09)]),
                 ("mixed (f64 store)", [(1, 52.80), (4, 19.13)]),
-                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)])],
-        note="LL2304@128 = 13.0 GC/s\n(post-fix hundreds receipts)",
+                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)]),
+                ("f32 LL2304 fused", [(128, 15.807)])],
+        note="fused halo @128 = 15.81 ms\n= 13.4 GC/s (\u22124.9 %; overlap null)",
     ),
     dict(
         key="oc_tripole", title="tripole (ORCA fold)", sub="576×1152 L20 · A100 NCCL",
@@ -124,6 +125,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
+          "f32 LL2304 fused": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -136,6 +138,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
+           "f32 LL2304 fused": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 
