@@ -898,13 +898,52 @@ def compute_cloud_properties(
         # bound is imposed here. (NB: legoESM's RRTMGP omits SAM's
         # ``ρ_ci/917`` solid-ice density rescale that its RRTM ice table
         # needs — an accepted RRTMG↔RRTMGP generation difference.)
+        #
+        # PAIR LIKE WITH LIKE (#1520): ``n_ice`` is the PROGNOSTIC (tracer)
+        # ice number, so the M2005 PSD is meaningful only for the PROGNOSTIC
+        # ice mass.  The ``q_i`` at this point additionally carries the
+        # DIAGNOSTIC sub-grid condensate floor (``cf·q_c_diagnostic·f_ice``
+        # + convective-anvil floor, :768-831), which has NO number of its
+        # own.  Pairing that floor mass with the tracer ``N_i`` produced PSD
+        # radii of metres wherever the floor dominates and ``N_i`` is
+        # 0/tiny — on the #1520 production checkpoint ~34% of the radiative
+        # IWP was pinned at the RRTMGP ice-LUT 180 µm diameter ceiling
+        # (92% of that pinned mass floor-injected), leaving the ice ~3x
+        # optically too thin.  Mirror of the liquid branch's dead-``N_c``
+        # ``Nc_default`` fallback: the PSD radius applies to the TRACER
+        # mass only, the floor-injected mass carries the configured
+        # constant ``r_eff_ice`` (its own calibration knob), and the two
+        # populations combine by EXTINCTION (τ ∝ IWP/r_eff ⇒ mass-weighted
+        # HARMONIC mean):
+        #   r_eff = (m_psd + m_flr) / (m_psd/r_psd + m_flr/r_const).
+        # A cell with no floor mass (``m_flr = 0``: any 'resolved'-scheme
+        # cell, or a cell whose prognostic condensate already exceeds the
+        # floor) keeps the PSD radius EXACTLY (the ``jnp.where`` selects
+        # the unblended value, so pre-#1520 behaviour is bit-preserved
+        # there).
         cons12 = config.rho_cloud_ice * jnp.pi
-        q_i_pos = jnp.maximum(jnp.clip(q_i, 0.0), 1.0e-15)
+        q_i_trc = (jnp.maximum(q_ice, 0.0) if q_ice is not None
+                   else jnp.zeros_like(T))
+        q_i_pos = jnp.maximum(q_i_trc, 1.0e-15)
         n_i_pos = jnp.maximum(jnp.clip(n_ice, 0.0), 1.0e-15)
         lami = (cons12 * n_i_pos / q_i_pos) ** (1.0 / 3.0)
         r_eff_ice_psd = _R_EFF_ICE_PSD_COEFF / jnp.clip(lami, 1.0e-30)
+        has_trc_ice = q_i_trc > 1.0e-14                   # SAM QSMALL
+        m_psd = jnp.where(has_trc_ice, q_i_trc, 0.0)
+        m_flr = jnp.maximum(q_i - m_psd, 0.0)
+        r_const = jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype)
+        # Extinction sum: both denominators are strictly positive by the
+        # clips above (r_psd ≥ 1.5e-30 via the lami clip; r_const a config
+        # float), so the untaken ``where`` branch stays finite (AD-safe).
+        _ext = (m_psd / jnp.maximum(r_eff_ice_psd, 1.0e-30)
+                + m_flr / jnp.maximum(r_const, 1.0e-30))
+        r_eff_ice_blend = jnp.where(
+            m_flr > 0.0,
+            (m_psd + m_flr) / jnp.maximum(_ext, 1.0e-30),
+            r_eff_ice_psd,
+        )
         has_ice = jnp.clip(q_i, 0.0) > 1.0e-14            # SAM QSMALL
-        r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, _R_EFF_ICE_DEFAULT_M)
+        r_eff_ice = jnp.where(has_ice, r_eff_ice_blend, _R_EFF_ICE_DEFAULT_M)
     else:
         r_eff_ice = jnp.broadcast_to(
             jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
