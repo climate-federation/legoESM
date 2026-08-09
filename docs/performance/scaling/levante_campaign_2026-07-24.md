@@ -2763,3 +2763,29 @@ collective cost by the single-shot 67.54 ms step; against the CLOSED
 loop's 18.93 ms it is **~19% at 24 devices** — the packed multi-field
 pad for the tiled lane (packed_pad_halo_4d exists face-sharded only) is
 back on the table as the next cube lever.
+
+### Cube fused wave-A halo: REFUTED on GPU — XLA already does it (2026-08-09 night)
+
+Implemented (dtype-grouped multi-pad, 8->3 exchange calls/stage,
+bit-identical on CPU + >=1.5x CPU CP cut enforced by test, codex SHIP)
+and A/B'd at the banked C768@24 closed-loop protocol (job 26828313):
+
+| arm | ms/step | HLO CPs |
+|---|---|---|
+| off (A/A2) | 19.26 / 19.03 | 101 |
+| fused (B) | 20.28 | 96 |
+
+ratio 1.066, drift 1.2% — **REFUTED by the pre-registered gate, with
+the mechanism on the receipt**: the GPU module holds 101 CPs where the
+CPU proxy holds 384 — XLA's collective-permute COMBINER had already
+fused the per-field exchanges on GPU; source-level fusion saved 5 CPs
+and added concat/split traffic. (Same lesson class as consult #3, the
+2-D pencil fused pad: a lever confirmed on one lane/compiler path does
+not transfer by analogy — and here the CPU census was the misleading
+proxy; GPU counts are the only ones that price GPU levers.)
+Code REVERTED same-day (delete-before-adding); the receipts + launcher
+diff live in this branch's history. The cube deficit (eff 0.553)
+therefore is NOT collective-count-bound at 24 devices — remaining
+candidates: per-CP latency floors x 101, launch-bound compute (the
+MPAS nsys story), or skew; next instrument = nsys on the closed-loop
+C768 step.
