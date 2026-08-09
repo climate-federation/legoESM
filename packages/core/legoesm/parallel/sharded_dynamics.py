@@ -2186,6 +2186,31 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
     return cell_local[:max_lc], u_local[:max_le]
 
 
+# Device-count ceiling for LEGOESM_MPAS_RAGGED_HALO=auto. Production A/B
+# receipts (drift-controlled): ratio ragged/coloured 0.686 @16 devices
+# (jobs 26822138/26824483), 0.735 @32 (26825520), 1.220 @64 (26824688);
+# the inversion is the unpruned zero-size-slice cost (~12 us/slice,
+# confirmed at fixed degree+payload by job 26825475). Raise only with a
+# new production A/B receipt above the current edge.
+_RAGGED_AUTO_MAX_NDEV = 32
+
+
+def _resolve_ragged_halo(env_value: str, n_dev: int) -> bool:
+    """Resolve LEGOESM_MPAS_RAGGED_HALO: '1' force-on, '0'/'' off,
+    'auto' = on iff ``n_dev <= _RAGGED_AUTO_MAX_NDEV`` (the receipted
+    win band). Unknown values raise (dispatch-hardening: a typo must
+    not silently pick a halo strategy)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    if env_value == "auto":
+        return n_dev <= _RAGGED_AUTO_MAX_NDEV
+    raise ValueError(
+        f"LEGOESM_MPAS_RAGGED_HALO={env_value!r}: must be one of "
+        f"'0', '1', 'auto' (empty = off)")
+
+
 def _build_ragged_halo_schedule(partitions, cell_owner, n_dev, cells_per,
                                 edges_per, max_lc, max_le):
     """One-collective halo schedule for ``jax.lax.ragged_all_to_all``.
@@ -2543,15 +2568,16 @@ def make_voronoi_sharded_step(
     use_ppermute = halo_strategy == "ppermute"
     # Grouped-P2P variant of the ppermute strategy: ONE ragged_all_to_all
     # per entity class instead of max_degree sequential coloured rounds.
-    # Explicit "1" opt-in (resolver: anything else is OFF) — receipted
-    # 0.475x per-fill vs the coloured schedule at 16 GPUs and improving
-    # with scale (bench_halo_collectives, job 26818265), but the
-    # production-lane A/B + parity gate are the acceptance criteria.
+    # SCALE-BANDED (production A/B receipts, campaign doc 2026-08-09):
+    # ratio ragged/coloured 0.686 @16 devices, 0.735 @32, 1.220 @64 —
+    # the ragged collective pays ~12 us per ZERO-SIZE slice (unpruned
+    # no-op sends grow with device count at fixed traffic). Hence
+    # "auto" = ragged only up to _RAGGED_AUTO_MAX_NDEV.
     # GPU-only: XLA:CPU has no ragged-all-to-all thunk.
     import os as _os_ragged
-    use_ragged = (
-        use_ppermute
-        and _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0") == "1")
+    use_ragged = _resolve_ragged_halo(
+        _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0"),
+        n_dev) and use_ppermute
 
     if use_ragged:
         t1 = time.time()
