@@ -1559,46 +1559,6 @@ def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
     return _pad_body
 
 
-def make_tiled_pad_multi_body(scalar_body):
-    """Multi-field tiled pad: ONE exchange per DTYPE GROUP instead of one
-    per field — the lat-lon fused-pad trick
-    (:func:`legoesm.parallel.latlon_spmd.make_latlon_band_wall_multi_pad_body`)
-    on the tiled cube lane.
-
-    ``scalar_body`` is an ``ndim=4`` :func:`make_tiled_pad_body` result;
-    the returned ``_multi(tiles, offsets)`` takes a tuple of per-device
-    ``(n_loc, n_loc, C_i)`` tiles, concatenates same-dtype fields on the
-    trailing axis (static widths), performs one ``scalar_body`` call per
-    dtype group, and splits back — bit-identical per field because the
-    ``ndim=4`` body is channel-wise identical to per-field pads
-    (``test_ndim4_body_matches_ndim3_per_level``) and mixing dtypes in
-    one concat would change the Lagrange-interp arithmetic
-    (``_interp_strip_guarded`` casts to the buffer dtype), which is
-    exactly why grouping is BY dtype.
-    """
-    import numpy as _np
-
-    def _multi(tiles, offsets):
-        groups: dict = {}
-        for i, t in enumerate(tiles):
-            groups.setdefault(_np.dtype(t.dtype), []).append(i)
-        out = [None] * len(tiles)
-        for idxs in groups.values():
-            if len(idxs) == 1:
-                i = idxs[0]
-                out[i] = scalar_body(tiles[i], offsets)
-                continue
-            widths = [int(tiles[i].shape[-1]) for i in idxs]
-            cuts = _np.cumsum(widths[:-1]).tolist()
-            stacked = jnp.concatenate([tiles[i] for i in idxs], axis=-1)
-            padded = scalar_body(stacked, offsets)
-            for i, piece in zip(idxs, jnp.split(padded, cuts, axis=-1)):
-                out[i] = piece
-        return tuple(out)
-
-    return _multi
-
-
 def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
     """Tiled VECTOR halo pad for use inside the tiled tendency stage.
 
