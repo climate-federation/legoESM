@@ -167,6 +167,165 @@ def _pals_local_device_ids() -> list[int]:
     return [0]
 
 
+def _nvidia_gpu_count() -> int:
+    """Number of NVIDIA GPUs physically present on THIS host (0 = none).
+
+    Reads the kernel driver's ``/proc/driver/nvidia/gpus`` listing — a pure
+    filesystem probe that never initialises CUDA/XLA (this module's contract:
+    cheap, pre-backend).  NOT ``nvidia-smi``: process-level tooling is
+    forbidden here, and device LISTINGS ignore ``CUDA_VISIBLE_DEVICES``
+    anyway (#1516's vacuous-guard trap).
+    """
+    try:
+        return len(os.listdir("/proc/driver/nvidia/gpus"))
+    except OSError:
+        return 0
+
+
+def _nvml_accessible_gpus() -> tuple[int, list[str] | None]:
+    """(count, UUIDs) of GPUs THIS process can actually reach, or
+    ``(-1, None)`` when NVML is unavailable.
+
+    NVML is cgroup-aware — under SLURM ``ConstrainDevices=yes`` it
+    enumerates exactly the devices the task's cgroup admits (measured on
+    Levante, job 26815351: ``--gpus-per-task=1`` -> count 1 with a DISTINCT
+    UUID per rank; job-level constraint only -> count 2 on every rank) —
+    and it never initialises CUDA/XLA (management library; safe under this
+    module's pre-backend contract).  It IGNORES ``CUDA_VISIBLE_DEVICES``,
+    which is exactly what a binding decision needs: the accessible set,
+    not the advertised one.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        n = int(pynvml.nvmlDeviceGetCount())
+        uuids = []
+        for i in range(n):
+            u = pynvml.nvmlDeviceGetUUID(
+                pynvml.nvmlDeviceGetHandleByIndex(i))
+            uuids.append(u.decode() if isinstance(u, bytes) else u)
+        return n, uuids
+    except Exception:
+        return -1, None
+
+
+def _pin_local_rank_gpu_visibility() -> bool:
+    """Per-rank GPU binding for a single-node multi-rank launch (#1516).
+
+    The multi-NODE path binds ranks to devices inside
+    ``jax.distributed.initialize(local_device_ids=_pals_local_device_ids())``;
+    the single-node path skips that call entirely (jax.distributed is not
+    needed), so NOTHING assigns rank -> device and every local rank boots
+    on default GPU 0 — a silent 1-GPU run wearing an N-GPU costume that
+    measures as a believable ~1.0x "speedup" (#1516).
+
+    Binding decision (measured launcher contract, Levante job 26815351):
+
+    - ``CUDA_VISIBLE_DEVICES`` multi-entry (plain ``srun -nN``: every task
+      gets the full list ``0,1``): index the list by the launcher's
+      node-local rank (:func:`_launcher_local_rank`, the same helper the
+      multi-node path indexes with).
+    - ``CUDA_VISIBLE_DEVICES`` single-entry or unset: trust it ONLY when
+      the cgroup really isolates this task (NVML accessible count <= 1 —
+      the ``--gpus-per-task=1`` / ``--gpu-bind=single:1`` / #693-shim
+      shapes, where each task's ``0`` maps to a DIFFERENT physical GPU).
+      When NVML sees MORE THAN ONE accessible device, an identical
+      single-entry CVD on every rank is the collision itself (Levante
+      ``--gpu-bind=none`` hands every task ``CVD=0`` while the job cgroup
+      admits both GPUs — both ranks then compute on one physical device,
+      measured twice: jobs 26806063 and 26815351) -> repin THIS rank to
+      the NVML UUID at its node-local rank.  UUIDs, not indices: under a
+      cgroup the accessible set need not start at physical index 0.
+
+    No-ops (returns False) when: ``LEGOESM_NO_LOCAL_GPU_PIN=1``; an explicit
+    non-GPU ``JAX_PLATFORMS``/``JAX_PLATFORM_NAME`` selection; an empty or
+    disabled (``-1``/``NoDevFiles``) ``CUDA_VISIBLE_DEVICES``; a genuinely
+    isolated / single-GPU task; a host with no NVIDIA GPUs (CPU MPI runs);
+    or a single-entry CVD that cannot be cross-checked (no NVML).
+
+    Raises RuntimeError — never a silent unpinned run — when GPUs are
+    present but the rank cannot be bound: no launcher local-rank variable,
+    or more local ranks than devices (mirrors ``_pals_local_device_ids``).
+    """
+    if os.environ.get("LEGOESM_NO_LOCAL_GPU_PIN") == "1":
+        return False
+    # Explicit non-GPU platform selection: nothing to pin (keeps CPU-backend
+    # MPI test runs on GPU nodes working, e.g. JAX_PLATFORMS=cpu).
+    plats = os.environ.get(
+        "JAX_PLATFORMS", os.environ.get("JAX_PLATFORM_NAME", ""))
+    if plats and not any(
+            p.strip().lower() in ("cuda", "gpu")
+            for p in plats.split(",")):
+        return False
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    visible = (
+        [x.strip() for x in cvd.split(",") if x.strip()]
+        if cvd is not None else None)
+    if visible is not None and (
+            not visible or visible[0] in ("-1", "NoDevFiles")):
+        # Explicitly emptied or disabled: CUDA hides all GPUs itself.
+        return False
+
+    n_acc, acc_uuids = _nvml_accessible_gpus()
+    if n_acc == 0:
+        return False  # CPU-only host: nothing to pin.
+    if visible is not None and len(visible) == 1:
+        if 0 <= n_acc <= 1 or acc_uuids is None:
+            # cgroup really isolates this task (gpus-per-task/#693 shim:
+            # every rank's '0' is a DIFFERENT physical GPU), or no NVML to
+            # tell — respect the external decision.
+            return False
+        # NVML sees >1 accessible device behind an identical single-entry
+        # CVD: the measured Levante collision shape — repin below.
+    if visible is None and n_acc < 0:
+        # No CVD and no NVML: fall back to the physical /proc count
+        # (workstation case, no cgroup to bias it).
+        n_acc = _nvidia_gpu_count()
+        if n_acc == 0:
+            return False
+
+    n_devices = (
+        len(visible) if visible is not None and len(visible) > 1 else n_acc)
+    local = _launcher_local_rank()
+    if local is None:
+        raise RuntimeError(
+            f"single-node multi-rank launch with {n_devices} GPU(s) "
+            "visible but no launcher node-local rank variable "
+            "(PALS_LOCAL_RANKID / OMPI_COMM_WORLD_LOCAL_RANK / "
+            "MV2_COMM_WORLD_LOCAL_RANK / SLURM_LOCALID): cannot bind "
+            "ranks to distinct GPUs, and unpinned every rank boots on "
+            "default GPU 0 (#1516: a silent 1-GPU run measured as an "
+            "N-GPU result). Pin per rank before python starts (export "
+            "CUDA_VISIBLE_DEVICES=$SLURM_LOCALID, the #693 shim) or set "
+            "LEGOESM_NO_LOCAL_GPU_PIN=1 to accept unpinned devices.")
+    var, val = local
+    idx = int(val)
+    if idx >= n_devices:
+        # Mirrors _pals_local_device_ids: clamping would silently
+        # oversubscribe the last GPU.
+        where = ("in CUDA_VISIBLE_DEVICES"
+                 if visible is not None and len(visible) > 1
+                 else "accessible to this task")
+        raise RuntimeError(
+            f"{var}={idx} but only {n_devices} GPU(s) {where}: "
+            "more local ranks than GPUs. Fix the launcher ppn / "
+            "CUDA_VISIBLE_DEVICES shim (one rank per GPU) or set "
+            "LEGOESM_NO_LOCAL_GPU_PIN=1 to accept unpinned devices.")
+    if visible is not None and len(visible) > 1:
+        pinned = visible[idx]
+    elif acc_uuids is not None:
+        pinned = acc_uuids[idx]
+    else:
+        pinned = str(idx)
+    os.environ["CUDA_VISIBLE_DEVICES"] = pinned
+    print(
+        f"[early_init] single-node multi-rank: pinned "
+        f"CUDA_VISIBLE_DEVICES={pinned} ({var}={idx}; #1516)",
+        flush=True)
+    return True
+
+
 def nccl_transport_report() -> dict:
     """Best-effort NCCL transport facts for run metadata (route-B analog of
     the mpi4jax GPU-direct preflight).
@@ -394,8 +553,11 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     Detects the MPI world size from the environment (SLURM_NTASKS /
     PMI_SIZE / OMPI_COMM_WORLD_SIZE).  When >1 rank and the ranks span
     more than one hostname, calls ``jax.distributed.initialize()`` with
-    rank-0's hostname as coordinator.  On single-node MPI or serial runs,
-    does nothing.
+    rank-0's hostname as coordinator.  On single-node multi-rank MPI it
+    skips ``jax.distributed`` but still applies the per-rank GPU binding
+    (:func:`_pin_local_rank_gpu_visibility`, #1516) — without it every
+    local rank silently boots on default GPU 0.  On serial runs, does
+    nothing.
 
     Returns True if ``jax.distributed.initialize()`` was called, False
     otherwise.  Safe to call multiple times — idempotency is tracked via a
@@ -417,6 +579,17 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if ntasks <= 1:
         return False
 
+    # Per-rank GPU binding MUST happen BEFORE the mpi4py import below:
+    # a CUDA-aware MPI stack (Levante: Open MPI/UCX) initialises the CUDA
+    # driver during MPI_Init, and the driver snapshots CUDA_VISIBLE_DEVICES
+    # at first initialisation — a pin applied after the import is silently
+    # ignored (measured, job 26829100: post-pin CVD='0'/'1' per rank, yet
+    # every rank still enumerated BOTH GPUs and computed on device 0).
+    # The pin needs only launcher env + NVML, no communicator.  On the
+    # multi-NODE lane the result equals the #693 shim convention
+    # (_pals_local_device_ids then resolves the one visible device to [0]).
+    _pin_local_rank_gpu_visibility()
+
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -424,7 +597,10 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
 
     hosts = comm.allgather(socket.gethostname())
     if len(set(hosts)) <= 1:
-        # Single-node MPI: JAX distributed not needed.
+        # Single-node MPI: JAX distributed is not needed — the per-rank
+        # GPU binding was already applied above (#1516); unpinned, every
+        # local rank boots on default GPU 0 and the job completes with
+        # most of the hardware idle.
         return False
 
     import jax
