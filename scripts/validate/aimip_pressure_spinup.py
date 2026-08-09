@@ -76,6 +76,14 @@ def build_parser():
              "CASE-INVARIANT pattern and per-case residual. A large invariant "
              "fraction means a systematic base-state offset (correctable); a "
              "small one means genuine per-case forecast error.")
+    p.add_argument(
+        "--land-phis-threshold", type=float, default=1000.0,
+        dest="land_phis_threshold",
+        help="Surface geopotential [m2/s2] above which a WB2 cell counts as "
+             "LAND. NOT 0: the spectral state's phis rings under truncation "
+             "(min -1801 m2/s2 at T63) and bilinear regridding spreads it, so "
+             "a >0 test calls 68%% of the AREA land against a true ~29%%. "
+             "1000 m2/s2 (~100 m) reproduces 0.298 area-weighted.")
     p.add_argument("--out", default=None)
     return p
 
@@ -163,13 +171,19 @@ def main(argv=None):
         # the same grid the error lives on.
         phis_g = np.asarray(sh_synthesis(grid, cases[0].init_state.phis_hat.data))
         from evaluations.wb_regrid import regrid_to_wb2 as _rg
-        phis_wb2 = np.asarray(_rg(
+        # regrid_to_wb2 returns (field, tgt_lat, tgt_lon) — a 3-tuple, not an
+        # array — and takes 1-D source coordinates in DEGREES while grid.lat /
+        # grid.lon are in RADIANS. Both read from the source, after np.asarray
+        # on the tuple raised "inhomogeneous shape (3,)".
+        phis_wb2, _tlat, _tlon = _rg(
             jnp.asarray(phis_g),
             np.rad2deg(np.asarray(grid.lat)),
             np.rad2deg(np.asarray(grid.lon)),
-            resolution_deg=1.5))
-        land_m = (phis_wb2 > 1.0) & ok
-        sea_m = (phis_wb2 <= 1.0) & ok
+            resolution_deg=1.5)
+        phis_wb2 = np.asarray(phis_wb2)
+        _thr = float(args.land_phis_threshold)
+        land_m = (phis_wb2 > _thr) & ok
+        sea_m = (phis_wb2 <= _thr) & ok
         fix_land = float(np.sqrt(np.mean(mean_pat[land_m] ** 2))) if land_m.any() else None
         fix_sea = float(np.sqrt(np.mean(mean_pat[sea_m] ** 2))) if sea_m.any() else None
 
@@ -177,6 +191,7 @@ def main(argv=None):
             "mslp_fixed_pattern_land_pa": fix_land,
             "mslp_fixed_pattern_ocean_pa": fix_sea,
             "land_cells": int(land_m.sum()), "ocean_cells": int(sea_m.sum()),
+            "land_phis_threshold": float(args.land_phis_threshold),
             "meta": {
                 "what": "6 h ZERO-PHYSICS forecast vs ERA5: mslp error split "
                         "into a case-invariant pattern and a per-case "

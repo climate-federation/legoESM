@@ -2191,3 +2191,56 @@ not the whole story. That much is sound; the "refuted" was not.
 
 Running now at 6 h, 6 cases. Land-heavy fixed pattern implicates the
 orography treatment; ocean-comparable clears it properly this time.
+
+# THE BASE-STATE OFFSET IS LAND-CONCENTRATED (2026-08-09)
+
+Fixed pattern of the 6 h zero-physics mslp error, 6 cases, split by surface
+geopotential on the WB2 grid:
+
+| mask | land | ocean | ratio | land-cell fraction |
+|---|---|---|---|---|
+| `phis > 1` (BAD) | 504.8 Pa | 193.9 Pa | 2.60 | 0.709 |
+| **`phis > 1000` (correct)** | **689.0 Pa** | **199.1 Pa** | **3.46** | **0.349** |
+
+**87 % of the fixed-pattern variance sits over land.**
+
+### The mask flaw, and why the first number was wrong
+
+`phis > 0` called 71 % of cells land against a true ~29 %. The spectral
+orography RINGS under T63 truncation — its minimum on the WB2 grid is
+**-1801 m^2/s^2**, i.e. negative "elevation" over ocean — and bilinear
+regridding smears it further. A 1000 m^2/s^2 (~100 m) threshold reproduces the
+correct 0.298 area-weighted land fraction and is now the documented default.
+
+The contaminated mask mixed ocean cells INTO the land set, so it had to
+UNDERSTATE the contrast — and it did, 2.60 against the corrected 3.46. The
+predicted direction of the bias held, which is the check worth having before
+trusting a corrected number.
+
+### What this implicates — and the alternative I cannot yet exclude
+
+Land is exactly where the `p_s * exp(delta_phis/(R_d T_sfc))` reconciliation to
+SMOOTHED topography acts. This is the mechanism I wrongly "refuted" two
+iterations ago using a quantity it cannot appear in; tested properly, it is
+**implicated**.
+
+But there is a second explanation I cannot separate with this metric: the mslp
+sea-level REDUCTION itself amplifies over terrain, by 1.06x at 500 m, 1.20x at
+1500 m and 1.43x at 3000 m. That is smaller than the observed 3.46x contrast, so
+amplification alone does not account for it — but mslp is `p_s` times that
+factor, so part of the land signal is the diagnostic rather than the field.
+
+**Labelled honestly:** CONFIRMED that the fixed offset is land-concentrated in
+MSLP (3.46x, 87 % of variance). PLAUSIBLE that it reflects a genuine `p_s`
+base-state offset from the orography reconciliation rather than reduction
+amplification. The clean discriminator is to compare `p_s` DIRECTLY instead of
+mslp — `p_s` is not in the WB2 headline set, which is precisely why the
+reduction is being scored in the first place, and adding it to the probe is the
+next step.
+
+### Practical consequence either way
+
+The 6 h mass scores are dominated by a fixed, land-concentrated pattern. Whether
+its origin is the reconciliation or the reduction, it is a systematic offset and
+not forecast skill — so the raw WB2 mass numbers understate all three arms, and
+a bias-corrected score (estimated on training years only) belongs alongside them.
