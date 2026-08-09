@@ -1303,10 +1303,14 @@ class TestCloudCmorFeed:
         # dsigma sums to 1 -> sum(dp) = p_s exactly (pure-sigma collector).
         expect_clivi = 1.0e-4 * p_s / constants.g
         expect_clwvi = 3.0e-4 * p_s / constants.g
+        # rtol is float32-safe: the path integral runs through JAX float32
+        # reductions under the default precision policy (observed rel err
+        # ~1.5e-9 at x64, ~1e-7 at float32); this is a SEMANTIC mass-path
+        # test, not a bit-precision contract.
         np.testing.assert_allclose(out["field_2d_clivi"], expect_clivi,
-                                   rtol=1e-9)
+                                   rtol=1e-6)
         np.testing.assert_allclose(out["field_2d_clwvi"], expect_clwvi,
-                                   rtol=1e-9)
+                                   rtol=1e-6)
         # cf=0 everywhere -> clt = 0 (max-random of a clear column).
         np.testing.assert_allclose(out["field_2d_clt"], 0.0, atol=1e-9)
 
@@ -1335,10 +1339,11 @@ class TestCloudCmorFeed:
             q_c=np.full((n, NLEV), 2.0e-4),
             q_i=np.full((n, NLEV), 1.0e-4))
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        # float32-safe rtol; see test_explicit_condensate_paths_exact.
         np.testing.assert_allclose(
-            out["field_2d_clivi"], 1.0e-4 * 1.0e5 / constants.g, rtol=1e-9)
+            out["field_2d_clivi"], 1.0e-4 * 1.0e5 / constants.g, rtol=1e-6)
         np.testing.assert_allclose(
-            out["field_2d_clwvi"], 3.0e-4 * 1.0e5 / constants.g, rtol=1e-9)
+            out["field_2d_clwvi"], 3.0e-4 * 1.0e5 / constants.g, rtol=1e-6)
 
     def test_water_path_note_written_without_snapshot_vars(self, mesh):
         """The "WHICH water path" note is a SEMANTICS statement, not a
