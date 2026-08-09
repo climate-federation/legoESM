@@ -2711,3 +2711,20 @@ OFF; band edge (32 devices) receipt = job 26825520; if it wins, the
 follow-up is an auto dispatch (ragged <= band, coloured above), and the
 structural fix beyond that is upstream zero-slice pruning in XLA's
 ragged thunk.
+
+### RETRACTION: the cube 13.19 was PLACEMENT, not the dirty tree (2026-08-09 evening)
+
+Job 26825926 (clean main) reproduced **13.47 ms** on the same
+known-answer arm that read 8.97 this morning — the "dirty-state
+artifact" conclusion is RETRACTED. The real confound across all four
+runs: launchers that pin `--nodes=6 --ntasks-per-node=4` read ~9 ms
+(26452632, 26823000); launchers whose srun lines omit placement under a
+14-node allocation spread 24 tasks wide and read 13.2-13.5 ms
+(26804520 "dirty", 26825926 clean). Same lane, ~1.5x from node
+placement alone. cube_bound_anchor now pins both 24-rank arms.
+Additionally the C768 kt=3 @54 arm dies on HOST OOM — the tiled cube
+bench still builds global state per rank (the #1370 residency wall,
+fixed for the ocean lane, never ported here) — arm disabled with the
+blocker named; kt=2 C768 @24 rerun = job 26826088.
+Lesson (controlled-comparison rule, again): a discriminator job whose
+placement differs from the runs it arbitrates arbitrates NOTHING.
