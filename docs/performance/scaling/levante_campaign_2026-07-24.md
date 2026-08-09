@@ -2692,3 +2692,22 @@ Ops debris burned on the way (all fixed in-branch): census KeyError
 killing multicontroller arms post-timing; ~50 min/arm s8@16 host
 reorder forcing banked-arm job structure; XLA sharded-autotune cache
 desync from a shared persistent cache (per-job cache now); l50100.
+
+### Ragged halo at scale: a SCALE-BANDED lever (2026-08-09 evening)
+
+| receipt | ppermute | ragged | ratio |
+|---|---|---|---|
+| production s8@16 (26822138/26824483) | 7.08/7.21 ms | 4.86 | **0.686 WIN** |
+| production s9@64 (26824688, drift 1.5%) | 10.35/10.19 | 12.43 | **1.220 LOSS** |
+| synthetic fixed degree-10/payload (26825475 + 26818265) | 1008 / 1484 / 1471 us @16/32/64 | 478 / 647 / **1103** | 0.475 / 0.436 / 0.750 |
+
+The ragged collective's own cost GROWS with rank count at fixed traffic:
++625 us from nd16->nd64 ~= 49 extra zero-size slices x ~12 us — the
+unpruned-no-op cost GLM-5.2 flagged as make-or-break, CONFIRMED by the
+pre-registered discriminator. Production flips to a loss earlier than
+the synthetic (bigger buffers + the s_max-padded gather:
+int32[64,2,149795] stacked metadata at s9@64). Feature stays opt-in
+OFF; band edge (32 devices) receipt = job 26825520; if it wins, the
+follow-up is an auto dispatch (ragged <= band, coloured above), and the
+structural fix beyond that is upstream zero-slice pruning in XLA's
+ragged thunk.
