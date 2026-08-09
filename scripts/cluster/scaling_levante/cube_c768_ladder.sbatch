@@ -40,7 +40,7 @@ echo "=== C768 kt=2 @24 closed loop (12 nodes x 2 rpn) ==="
 JAX_ENABLE_X64=0 srun --nodes=12 --ntasks=24 --ntasks-per-node=2 \
     --distribution=block:block --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt 2 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
+    --kt 2 --resolution 768 --nlev 60 --dt 30 --steps 12 --warmup 3 \
     --closed-loop --multicontroller \
     --out "$OUTDIR/c768_kt2_np24.jsonl" || { echo "kt2 FAILED"; rc=1; }
 
@@ -48,7 +48,7 @@ echo "=== C768 kt=3 @54 closed loop (27 nodes x 2 rpn) ==="
 JAX_ENABLE_X64=0 srun --nodes=27 --ntasks=54 --ntasks-per-node=2 \
     --distribution=block:block --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt 3 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
+    --kt 3 --resolution 768 --nlev 60 --dt 30 --steps 12 --warmup 3 \
     --closed-loop --multicontroller \
     --out "$OUTDIR/c768_kt3_np54.jsonl" || { echo "kt3 FAILED"; rc=1; }
 
