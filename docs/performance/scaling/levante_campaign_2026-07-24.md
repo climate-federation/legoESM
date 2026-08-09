@@ -2598,3 +2598,28 @@ lane, and the 4.8x reconciliation is the thing to chase instead.
 
 (GPU combines collective-permutes ~3.2x: the CPU proxy shows 396 where the GPU
 executable holds 123. Use the proxy for STRUCTURE, never for the count.)
+
+## Cube known-answer check came back OFF, on a dirty tree (2026-08-09 recovery)
+
+The rerun designed above (`cube_bound_anchor.sbatch`, job 26804520,
+2026-08-08) was left unanalysed by a session drop. Its own gate says the
+result may not be quoted:
+
+| arm | result |
+|---|---|
+| 0: C384/L60 kt2 @24 closed (known answer 9.01 ms, job 26452632) | **13.19 ms** — 1.46x off, GATE FAILED |
+| 1: C768 kt2 @24 closed | CRASHED (coordination SetError) |
+| 2: C768 kt3 @54 closed | CRASHED (coordination SetError) |
+
+Two facts about arm 0's provenance decide nothing yet but scope the causes:
+it ran on git sha `6fc6be9ea-dirty` — the dropped session's UNCOMMITTED
+state — and two weeks of merges separate it from the 9.01 anchor
+(clean `9051c5126`, 2026-07-24). So either (a) a real ~46% regression
+merged into the tiled lane since 07-24, or (b) the dirty working tree
+slowed it. Discriminator submitted: `cube_c384_anchor_recheck.sbatch`
+(job 26818796) — same arm on CLEAN current main, refuses to run on a
+dirty tree. ~9 ms => (b), close; ~13 ms => (a), bisect the window.
+
+The C768 arms' 24->54 ratio therefore still has no valid closed-loop
+measurement; do not quote 0.568 (that was the single-shot lane) nor any
+number from 26804520 past arm 0.
