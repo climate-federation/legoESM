@@ -69,6 +69,13 @@ def build_parser():
     p.add_argument("--eval-year", type=int, default=2017, dest="eval_year")
     p.add_argument("--n-cases", type=int, default=2, dest="n_cases")
     p.add_argument("--hours", type=float, default=6.0)
+    p.add_argument(
+        "--vs-era5", action="store_true", dest="vs_era5",
+        help="Instead of displacement from t=0, compare the 6 h forecast "
+             "against the ERA5 verification and split the mslp error into a "
+             "CASE-INVARIANT pattern and per-case residual. A large invariant "
+             "fraction means a systematic base-state offset (correctable); a "
+             "small one means genuine per-case forecast error.")
     p.add_argument("--out", default=None)
     return p
 
@@ -121,6 +128,50 @@ def main(argv=None):
     def _rms(d, mask=None):
         w = area if mask is None else area * mask
         return float(jnp.sqrt(jnp.sum(w * d ** 2) / jnp.maximum(jnp.sum(w), 1e-30)))
+
+    if args.vs_era5:
+        from evaluations.wb_forecast import diagnose_and_regrid
+
+        errs = []
+        for case in cases:
+            state = spectral_rollout(
+                case.init_state, zero_physics, grid, sigma,
+                spec_cfg.pe_config, dt, n_steps, None, None)
+            fields, valid, _lat, _lon = diagnose_and_regrid(
+                state, grid, sigma, resolution_deg=1.5)
+            verif = case.verif_by_lead[cadence]
+            e = np.asarray(fields["mslp"]) - np.asarray(verif["fields"]["mslp"])
+            m = np.asarray(valid["mslp"]).astype(bool)
+            errs.append(np.where(m, e, np.nan))
+        E = np.stack(errs)                       # (n_cases, n_lat, n_lon)
+        mean_pat = np.nanmean(E, axis=0)         # case-invariant component
+        resid = E - mean_pat[None]
+        # Variance split, over cells valid in every case.
+        ok = np.all(np.isfinite(E), axis=0)
+        v_tot = float(np.nanmean(E[:, ok] ** 2))
+        v_fix = float(np.nanmean(np.repeat(mean_pat[ok][None], len(E), 0) ** 2))
+        v_res = float(np.nanmean(resid[:, ok] ** 2))
+        out = {
+            "meta": {
+                "what": "6 h ZERO-PHYSICS forecast vs ERA5: mslp error split "
+                        "into a case-invariant pattern and a per-case "
+                        "residual. High invariant fraction = systematic "
+                        "base-state offset, not a skill failure.",
+                "suite": args.suite, "variant": args.variant,
+                "eval_year": args.eval_year, "n_cases": len(errs),
+                "hours": args.hours, "n_max": int(spec_cfg.n_max),
+                "n_levels": int(spec_cfg.n_levels),
+            },
+            "mslp_rms_total_pa": float(np.sqrt(v_tot)),
+            "mslp_rms_fixed_pattern_pa": float(np.sqrt(v_fix)),
+            "mslp_rms_residual_pa": float(np.sqrt(v_res)),
+            "fixed_fraction_of_variance": v_fix / max(v_tot, 1e-30),
+        }
+        print(json.dumps(out, indent=2))
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(out, indent=2))
+        return 0
 
     series = []
     for case in cases:

@@ -2027,3 +2027,66 @@ cases and measure what fraction of its variance is explained by the case-mean
 error pattern. A high fraction means a fixed offset; a low fraction means
 genuine per-case forecast error. That is the next probe, and unlike the last one
 it compares against ERA5 rather than against t=0.
+
+# CONFIRMED: 89 % OF THE 6 h PRESSURE ERROR IS A FIXED SPATIAL OFFSET
+
+`scripts/validate/aimip_pressure_spinup.py --vs-era5`, 5 cases, ZERO physics,
+6 h forecast against the ERA5 verification, mslp error split into a
+case-invariant pattern and a per-case residual:
+
+| | Pa |
+|---|---|
+| total RMS | 457.4 |
+| **case-invariant pattern** | **436.1** |
+| per-case residual | 138.0 |
+| measured fixed fraction of variance | 0.909 |
+| pure-random floor at N=5 | 0.200 |
+| **bias-corrected fixed fraction** | **0.886** |
+
+The finite-sample correction matters and is applied: with N cases the case-mean
+absorbs `sigma^2/N` of a purely RANDOM error, so a completely random field would
+already score 0.20 "fixed" at N=5. Solving `measured = f + (1-f)/N` gives
+**f = 0.886**. Still overwhelming.
+
+**The dycore's 6-hour surface-pressure error is ~89 % a FIXED spatial pattern —
+the model's own preferred base state — and only ~11 % genuine per-case forecast
+error.**
+
+This is the single explanation that fits every observation of the campaign:
+
+* winds and temperature beat persistence (no base-state offset in those fields);
+* the mass ACC collapses (an anomaly correlation against ERA5's climatology is
+  destroyed by a constant offset);
+* the error appears within 6 h and then barely grows (a relaxation that
+  saturates, not accumulation);
+* it is physics-independent to 1-4 % (the base state belongs to the dycore);
+* it is land/ocean symmetric (not the orography reconciliation);
+* the lead-0 floor is small (at t=0 p_s is still ERA5's own).
+
+## What this changes
+
+**The WB2 mass scores have been measuring a systematic offset, not forecast
+skill.** classical and column_nn are far better forecast models than their z500
+and mslp numbers suggest — the numbers are dominated by a term that a single
+subtraction would remove.
+
+Ranked consequences:
+
+1. **Report a bias-corrected mass score alongside the raw one.** Removing a
+   case-invariant pattern estimated on a TRAINING period (never on the 2017 test
+   year — that would be leakage) is standard practice and honest, provided both
+   numbers are shown.
+2. **Find what sets the base state.** It is not the orography reconciliation and
+   not the continuity term (both refuted above). Remaining candidates worth a
+   code read: the hyperdiffusion/spectral-filter treatment of `lnps` over many
+   steps, and the initial hydrostatic balance between the smoothed `phis` and
+   the temperature profile.
+3. **Stop attributing this to training.** No optimizer, capacity, data volume or
+   physics package can move a dycore base state, which is exactly what the three
+   null results showed.
+
+Caveats stated: 5 cases, zero physics, one season sample, and the zero-physics
+total (457 Pa) is lower than the trained model's 6 h error (~1011 Pa), so the
+fixed FRACTION is established for the bare dycore and is PLAUSIBLE rather than
+measured for the full trained arms. Re-running `--vs-era5` with a trained
+checkpoint and more cases is the obvious confirmation, and it is cheap.
