@@ -2655,3 +2655,17 @@ allreduces/step (n_iter 3 x 2 sites x 10 substeps; E3SM avoids global
 reductions inside barotropic substepping entirely), (2) fuse the 3
 per-substep exchanges into 1 (30 -> 10 epochs). Both touch production
 numerics -> physics-validator + codex chain when picked up.
+
+### Cube known-answer RESOLVED (2026-08-09, job 26823000)
+
+CLEAN main reproduces the anchor: C384/L60 kt2 @24 closed-loop =
+**8.97 ms/step** (anchor 9.01, job 26452632). The 13.19 ms from job
+26804520 was a DIRTY-TREE artifact (sha 6fc6be9ea-dirty), not a merged
+regression — no bisect needed. Two operational causes burned first:
+26818796 refused on the shared worktree being mid-iteration dirty (the
+guard working as designed — submit from a clean tree), and 26821454
+timed out with l50100 (the phase-7 sick node) in its allocation; the
+exclusion is now baked into the launcher. Cube lane state: tiled-lane
+anchor healthy; the halo lever remains DEAD there (5.4% ceiling); the
+open cube item is only the C768 24->54 closed-loop ladder (arms crashed
+in 26804520 on coordination errors — rerun when worth a slot).
