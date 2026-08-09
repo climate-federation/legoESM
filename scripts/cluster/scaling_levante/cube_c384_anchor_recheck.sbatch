@@ -10,6 +10,7 @@
 #SBATCH --mem=120G
 #SBATCH --time=00:40:00
 #SBATCH --output=cube_recheck.%j.log
+#SBATCH --exclude=l50100
 # Cube tiled-lane known-answer DISCRIMINATOR. History:
 #   2026-07-24 job 26452632 (clean 9051c5126):  C384/L60 kt2 @24 closed = 9.01 ms
 #   2026-08-08 job 26804520 (DIRTY 6fc6be9ea): same protocol           = 13.19 ms
