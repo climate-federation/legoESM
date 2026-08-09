@@ -493,3 +493,52 @@ def test_adapter_loop_envelope_refusals():
     model = CDGridPrimitiveEquationModel(grid, coord, cfg)
     with pytest.raises(NotImplementedError, match="Ray_fast"):
         make_tiled_cc_loop(model, mesh, kt=KT, dt=DT)
+
+
+def test_fused_halo_bit_identical_and_fewer_collectives(monkeypatch):
+    """LEGOESM_CUBE_TILED_FUSED_HALO=1 (one wave-A exchange per dtype
+    group) must be BIT-IDENTICAL to the per-field pads and must compile
+    to strictly fewer collective-permutes. Env resolved at BUILD time,
+    so each arm builds its own step."""
+    mesh = _mesh()
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    coord = create_sigma_coordinate(NLEV)
+    u_d, v_d, T, p_s, phis = _inputs(N, NLEV)
+    ub = expand_corners_to_blocks(u_d, KT, NL)
+    vb = expand_corners_to_blocks(v_d, KT, NL)
+
+    def build(env):
+        monkeypatch.setenv("LEGOESM_CUBE_TILED_FUSED_HALO", env)
+        return make_tiled_fv3_hydrostatic_step_blocked_2d(
+            mesh, cdgrid, coord, N, KT, NLEV,
+            p_floor=1.0, dt=DT, fix_mass=True)
+
+    def run(step):
+        f = jax.jit(lambda u, v, t, ps: step(u, v, t, ps, phis))
+        low = f.lower(ub, vb, T, p_s)
+        comp = low.compile()
+        n_cp = comp.as_text().count(" collective-permute(")
+        s = (ub, vb, T, p_s)
+        for _ in range(2):
+            s = f(*s)
+        return n_cp, s
+
+    cp_off, out_off = run(build("0"))
+    cp_on, out_on = run(build("1"))
+    for a, b, nm in zip(out_off, out_on, ("u", "v", "T", "p_s")):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b),
+                                      err_msg=f"{nm} differs fused vs off")
+    assert cp_on < cp_off, (cp_on, cp_off)
+    # dry sigma: 8 -> 3 exchange calls/stage predicts ~2.7x fewer; demand
+    # at least a 1.5x cut so combiner variance cannot fake a pass.
+    assert cp_on * 3 <= cp_off * 2, (cp_on, cp_off)
+
+
+def test_fused_halo_env_typo_raises(monkeypatch):
+    monkeypatch.setenv("LEGOESM_CUBE_TILED_FUSED_HALO", "yes")
+    with pytest.raises(ValueError, match="FUSED_HALO"):
+        make_tiled_fv3_hydrostatic_step_blocked_2d(
+            _mesh(), create_cubed_sphere_cdgrid(create_cubed_sphere(N)),
+            create_sigma_coordinate(NLEV), N, KT, NLEV,
+            p_floor=1.0, dt=DT, fix_mass=True)

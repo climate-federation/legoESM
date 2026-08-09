@@ -1621,6 +1621,24 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
     _geo = compute_geopotential_hybrid if _hybrid else compute_geopotential
     _sigma_range = None if _hybrid else 1.0 - float(coord.sigma_half[0])
 
+    # Fused in-stage halo (LEGOESM_CUBE_TILED_FUSED_HALO=1, receipted lever:
+    # the closed-loop C768 step spends ~19% in its 24 per-field exchanges;
+    # this folds the wave-A scalar pads into ONE exchange per dtype group).
+    # Resolved STATICALLY at build time; unknown values raise
+    # (dispatch-hardening).
+    import os as _os_fh
+    _fh_env = _os_fh.environ.get("LEGOESM_CUBE_TILED_FUSED_HALO", "0")
+    if _fh_env not in ("0", "", "1"):
+        raise ValueError(
+            f"LEGOESM_CUBE_TILED_FUSED_HALO={_fh_env!r}: must be '0', '1' "
+            f"or empty")
+    _fused_halo = _fh_env == "1"
+    if _fused_halo:
+        from legoesm.parallel.cubesphere_exchange import (
+            make_tiled_pad_multi_body,
+        )
+        _multi_body = make_tiled_pad_multi_body(scalar_body)
+
     def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
                        cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
                        dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs,
@@ -1644,7 +1662,48 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
             dp_t = dp_from_hybrid(coord, p_s_t)     # (1, nl, nl, nlev)
         else:
             dp_t = p_s_t[..., None] * coord.dsigma.astype(p_s_t.dtype)
-        dp_pad = scalar_body(dp_t[0], offs)[None]   # (1, nl+2, nl+2, nlev)
+        # ---- wave-A fields (all stage-entry): computed BEFORE the pads so
+        #      the fused variant can exchange them in ONE call per dtype
+        #      group (pure code motion when fused halo is OFF). ----
+        if _hybrid:
+            p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
+        else:
+            p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
+        p_adiab = jnp.maximum(p_full, _p_floor)
+        ln_ps = jnp.log(p_s_t)
+        _pg_dt = jnp.result_type(
+            ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
+        ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]              # (1, nl, nl, 1)
+        Phi = _geo(T_t, p_s_t, coord, phis_t)
+        B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
+        zeta = dgrid_vorticity_core(
+            u_d_t, v_d_t, cosa_c_t, dxe_t, dye_t, ar_t)
+        inv_T = 1.0 / T_t
+        if _hybrid:
+            p_full_c = pressure_from_hybrid(coord, p_s_t)
+            hf = coord.B_full * p_s_t[..., None] / p_full_c
+
+        # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64:
+        # the _pg_dt cast is a no-op, so this padded ln_ps == both standalone
+        # halos).  Fused: one exchange per dtype group (ln_ps_3d may sit in
+        # its own _pg_dt group; grouping is by dtype so per-field arithmetic
+        # is bit-identical).
+        if _fused_halo:
+            _wave_a = (dp_t[0], B[0], zeta[0], inv_T[0], ln_ps_3d[0],
+                       T_t[0]) + ((hf[0],) if _hybrid else ())
+            _pads = _multi_body(_wave_a, offs)
+            dp_pad, B_pad, zeta_pad, invT_pad, lnps_pad, T_pad = (
+                _pads[0][None], _pads[1][None], _pads[2][None],
+                _pads[3][None], _pads[4][None], _pads[5][None])
+            hf_pad = _pads[6][None] if _hybrid else None
+        else:
+            dp_pad = scalar_body(dp_t[0], offs)[None]   # (1, nl+2, nl+2, nlev)
+            B_pad = scalar_body(B[0], offs)[None]
+            zeta_pad = scalar_body(zeta[0], offs)[None]
+            invT_pad = scalar_body(inv_T[0], offs)[None]
+            lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]     # (1, nl+2, nl+2, 1)
+            T_pad = scalar_body(T_t[0], offs)[None]             # (1, nl+2, nl+2, nlev)
+            hf_pad = (scalar_body(hf[0], offs)[None] if _hybrid else None)
         dp_u, dp_v = cgrid_interp_cc_to_faces_local(dp_pad)
         div_dp = cgrid_divergence_local(
             dp_u * u_c, dp_v * v_c, dye_t, dxe_t, ar_t)  # (1, nl, nl, nlev)
@@ -1675,31 +1734,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         vert_adv_u_cc, vert_adv_v_cc, vert_adv_T = (
             _vadv_uvT[0], _vadv_uvT[1], _vadv_uvT[2])
 
-        # ---- p_adiab + ln_ps (cc-local) ----
-        if _hybrid:
-            p_full = pressure_from_hybrid(coord, p_s_t)         # (1, nl, nl, nlev)
-        else:
-            p_full = pressure_from_sigma(coord.sigma_full, p_s_t)
-        p_adiab = jnp.maximum(p_full, _p_floor)
-        ln_ps = jnp.log(p_s_t)
-        _pg_dt = jnp.result_type(
-            ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
-        ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]              # (1, nl, nl, 1)
-
-        # ---- MOMENTUM (eq 307-479): B=KE+Phi ; zeta ; scalar halos ----
-        Phi = _geo(T_t, p_s_t, coord, phis_t)
-        B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
-        zeta = dgrid_vorticity_core(
-            u_d_t, v_d_t, cosa_c_t, dxe_t, dye_t, ar_t)
-        inv_T = 1.0 / T_t
-
-        # In-stage SCALAR halos.  ln_ps SHARED by momentum PGF + thermo (x64: the
-        # _pg_dt cast is a no-op, so this padded ln_ps == both standalone halos).
-        B_pad = scalar_body(B[0], offs)[None]
-        zeta_pad = scalar_body(zeta[0], offs)[None]
-        invT_pad = scalar_body(inv_T[0], offs)[None]
-        lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
-        T_pad = scalar_body(T_t[0], offs)[None]                # (1, nl+2, nl+2, nlev)
+        # ---- MOMENTUM (eq 307-479): B=KE+Phi ; zeta — fields + pads hoisted
+        #      to the wave-A block above. ----
 
         zeta_corner = (interp_center_to_corner(zeta_pad, cdgrid, padded=zeta_pad)
                        + fco_t[..., None])
@@ -1710,9 +1746,7 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         pg_corr_x = (R_d * T_corner_hi * dln_dx_hi).astype(u_d_t.dtype)
         pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi).astype(v_d_t.dtype)
         if _hybrid:
-            p_full_c = pressure_from_hybrid(coord, p_s_t)
-            hf = coord.B_full * p_s_t[..., None] / p_full_c
-            hf_pad = scalar_body(hf[0], offs)[None]
+            # hf + its pad hoisted to the wave-A block above.
             hf_corner = interp_center_to_corner(hf_pad, cdgrid, padded=hf_pad)
             pg_corr_x = pg_corr_x * hf_corner
             pg_corr_y_perp = pg_corr_y_perp * hf_corner
