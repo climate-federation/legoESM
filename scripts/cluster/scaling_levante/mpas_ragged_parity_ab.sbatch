@@ -38,6 +38,12 @@ source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/mpas_ragged_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
+# Fresh per-job jit/autotune cache: job 26824291 died in BOTH arms on
+# "Autotuning failed ... No configuration found in cache after
+# synchronizing results across all shards" — the shared persistent
+# cache (poisoned by the timed-out 26822138?) desyncs XLA's sharded
+# autotuning. Isolate.
+export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
 rc=0
 
 # ARM 1 (parity) BANKED GREEN in job 26821453: u/T/p_s parity OK
