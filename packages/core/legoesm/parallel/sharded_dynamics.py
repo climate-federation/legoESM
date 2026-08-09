@@ -2575,6 +2575,12 @@ def make_voronoi_sharded_step(
     # "auto" = ragged only up to _RAGGED_AUTO_MAX_NDEV.
     # GPU-only: XLA:CPU has no ragged-all-to-all thunk.
     import os as _os_ragged
+    # VALIDATION IS DELIBERATELY UNCONDITIONAL (breaking contract,
+    # accepted 2026-08-09, env var is one day old): an invalid value
+    # raises even when the resolved strategy is allgather and ragged is
+    # unreachable — a typo must never silently pick a halo strategy on
+    # the NEXT run where ppermute IS selected. (Single-device runs
+    # early-return above and never see this; they have no halo.)
     use_ragged = _resolve_ragged_halo(
         _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0"),
         n_dev) and use_ppermute
