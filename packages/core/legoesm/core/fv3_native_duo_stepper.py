@@ -32,6 +32,7 @@ from legoesm.grids.fv3_native_gridstruct import (
     build_fv3_native_gridstruct,
     exchange_bgrid_scalar_halos,
     exchange_cgrid_vector_halos,
+    fort,
 )
 
 # Vertex-instability diagnostic mode (codex vertex-kill C3), frozen at
@@ -89,6 +90,15 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         FV3_RADIUS_M,
         build_fv3_native_gridstruct_bounded,
     )
+
+    # Validated for EVERY context, not just bundle ones: ext_exclude is
+    # now also how a NON-bundle caller declares that it accepts the
+    # interim post-p_grad_c exchange (exchange_post_pgrad_sixface refuses
+    # to substitute it silently). A typo there would otherwise re-arm the
+    # very silent fallback the opt-in exists to make explicit.
+    bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
+    if bad:
+        raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
 
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
@@ -203,9 +213,6 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
-        bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
-        if bad:
-            raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
                                  vector_corner=vector_corner,
                                  k2e_nord=k2e_nord)
@@ -248,6 +255,41 @@ def build_six_face_duo_context(n: int, ng: int = 3,
             )
 
             ext_scalar_sixface(hs6, "A", ectx)
+
+    # f0 (Coriolis at cell centres) gets the SAME treatment as phis, and it
+    # was the one static field that never got it. test_cases.F90:787-801
+    # evaluates f0 analytically over the FULL data domain (isd..ied,
+    # jsd..jed) and then OVERWRITES the halo:
+    #
+    #     if (.not. gridstruct%dg%is_initialized) then
+    #        call mpp_update_domains( f0, domain )
+    #     else
+    #        call ext_scalar(f0, gridstruct%dg, bd, domain, 0, 0)
+    #     endif
+    #     if (cubed_sphere) call fill_corners(f0, npx, npy, YDir)
+    #
+    # so on the duo lane the halo carries the k2e-remapped value, not the
+    # raw analytic one. d_sw5 reads f0 full-domain as `vort = wk + f0`
+    # (sw_core.F90:1837-1862), so those halo slots are consumed, not
+    # decorative. The two differ by the remap's own truncation -- the port
+    # was using the EXACT value where the oracle uses an approximate one,
+    # which is still a divergence.
+    #
+    # fill_corners(..., YDir) runs unconditionally under `cubed_sphere`, so
+    # it is ported here too rather than left to ext_scalar's Lagrange
+    # corner-region fill, which is a different operation.
+    if use_ext_bundle and "f0" not in ext_exclude:
+        from legoesm.grids.fv3_native_gridstruct import (
+            fill_corners_agrid_y,
+        )
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+
+        f0_6 = [np.array(gs["f0"], dtype=np.float64, copy=True)
+                for gs in gs6]
+        ext_scalar_sixface(f0_6, "A", ectx)
+        for t in range(6):
+            fill_corners_agrid_y(fort(f0_6[t], 1 - ng, 1 - ng), n + 1, ng)
+            gs6[t] = {**gs6[t], "f0": f0_6[t]}
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
@@ -381,6 +423,143 @@ def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
                  gs, bd, npz=1, hydrostatic=True)
 
 
+def exchange_post_pgrad_sixface(ctx: dict, divgd6: list, uc6: list,
+                                vc6: list, *, nord: int) -> None:
+    """The post-``p_grad_c`` duo exchanges, shared by every lane.
+
+    ``dyn_core.F90:652``  ``if (duogrid .and. nord > 0) ext_scalar(divgd, dg, bd, domain, 1,1)``
+    ``dyn_core.F90:655``  ``if (duogrid) ext_vector(uc, vc, dg, bd, domain,
+                          gridstruct, flagstruct, 1,0,0,1)``
+
+    (``:653`` is BLANK and ``:654`` is the ``.not. duogrid`` group-halo
+    completion; the vector call is ``:655``. ``:706``/``:709`` are the
+    ``flagstruct%regional`` branch -- ``regional_boundary_update`` -- and
+    are NOT on the duo lane at all, though they were cited as the anchor
+    for months.)
+
+    THE GATE IS ``nord``, the DIVERGENCE-damping order that ``d_sw5``
+    runs, not ``nord_v``, the vorticity-damping order. Upstream seeds
+    ``nord_k = flagstruct%nord`` (``dyn_core.F90:749``) and only later
+    derives the per-level ``nord_v(k) = min(2, flagstruct%nord)``
+    (``:757``); the exchange is gated on the GLOBAL flag, so a sponge
+    level driving ``nord_k`` to zero must not retract it. The shipped
+    decks set both to 2, so gating on the wrong one is invisible there.
+
+    WHY THIS IS ONE FUNCTION. The interim index-copy helpers
+    (``exchange_bgrid_scalar_halos`` / ``exchange_cgrid_vector_halos``)
+    fill the four edge STRIPS and leave the CORNER-DIAGONAL halo at
+    whatever ``c_sw`` left there; upstream ``ext_scalar``/``ext_vector``
+    are the k2e Lagrange fills that cover those regions
+    (``fv_duogrid.F90:523-566``: ``mpp_update_domains(NORTH+EAST)`` on the
+    ``k2e_*_b`` B tables, then ``cube_rmp`` ->
+    ``fill_corners_domain_decomp`` -> ``fill_corner_region``). ``d_sw5``'s
+    divergence-damping n-loop reads ``divg_d(i+1,j)`` over
+    ``i = is-1-nt .. ie+1+nt`` (``sw_core.F90:1748-1750``) and
+    ``divg_d(i,j+1)`` over ``j = js-1-nt .. je+1+nt`` (``:1756-1758``), so
+    at ``nord=2`` (first iteration ``nt=1``) the operand reach is
+    ``is-2 .. ie+3`` / ``js-2 .. je+3`` -- well inside the corner
+    diagonal -- and the damping weight
+    ``dd8 = (da_min_c*d4_bg)**(nord+1)`` is ~1e32. The difference between
+    the two paths is not cosmetic, it is 16 orders of magnitude.
+
+    FAILS CLOSED. Upstream has NO fallback: on the duo lane it always
+    calls ``ext_scalar``. A context without the ext bundle therefore
+    cannot run ``nord > 0`` faithfully, and silently returning interim
+    numbers there is exactly the wrong-number path that produced a 1e11 D
+    wind. Taking the interim divgd path now requires saying so via
+    ``ext_exclude=("divgd", ...)``, which is already the documented
+    non-faithful measurement opt-in.
+
+    SCOPE -- this is the POST-``p_grad_c`` site only. It is NOT "the one
+    exchange entry point": ``csw_step_sixface(exchange=True)`` still calls
+    the interim helpers directly, unguarded by ``use_ext_bundle`` or
+    ``ext_exclude``. That is deliberately not routed here, because it is a
+    different point in the cadence -- and upstream has no duo exchange
+    there at all (after ``c_sw`` at ``dyn_core.F90:489`` it only STARTS a
+    non-duo group update at ``:501``; the duo exchanges are these two,
+    after ``p_grad_c`` at ``:629``). So that call site is a separate open
+    question about whether it should exist, not a second caller of this
+    helper. Do not describe the two as unified until that is settled.
+
+    All three arrays are mutated in place.
+    """
+    if len(divgd6) != 6 or len(uc6) != 6 or len(vc6) != 6:
+        raise ValueError(
+            "exchange_post_pgrad_sixface expects six faces per array, got "
+            f"{len(divgd6)}/{len(uc6)}/{len(vc6)} -- a short list would "
+            "silently exchange a subset of the cube")
+    # nord is a damping ORDER: integral by construction. The deck dicts mix
+    # ints and floats, so a caller reads out as float and int() would round
+    # 2.7 to 2 without a word -- reject instead. (mypy flagged the float;
+    # the silent-truncation hazard is the reason not to just cast.)
+    if nord != int(nord):
+        raise ValueError(
+            f"nord must be an integral damping order, got {nord!r}")
+    nord = int(nord)
+    n, ng = ctx["n"], ctx["ng"]
+    exclude = tuple(ctx.get("ext_exclude", ()))
+
+    def _interim_divgd():
+        for t in range(1, 7):
+            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+
+    def _interim_cvec():
+        for t in range(1, 7):
+            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+
+    if not ctx.get("use_ext_bundle"):
+        if nord > 0 and "divgd" not in exclude:
+            raise ValueError(
+                f"post-p_grad_c divgd exchange with nord={nord} needs the "
+                "ext bundle: dyn_core.F90:652 calls ext_scalar(divgd,1,1), "
+                "whose k2e Lagrange fill covers the corner-diagonal halo, "
+                "and d_sw5's n-loop reads that region (sw_core.F90:1748-"
+                "1758, reach is-2..ie+3 at nord=2) before scaling it by "
+                "dd8=(da_min_c*d4_bg)**(nord+1) ~ 1e32. The interim "
+                "index-copy helper leaves those cells at whatever c_sw "
+                "wrote, which is how face-1 u reached 1.17534e+11. Build "
+                "the context with use_ext_bundle=True, or state the "
+                "non-faithful choice with ext_exclude=('divgd',).")
+        # The C-vector exchange fails closed too. dyn_core.F90:655 is
+        # NOT gated on nord, so `nord == 0` does not excuse it, and an
+        # interim uc/vc exchange is no more faithful than an interim
+        # divgd one -- it was simply less catastrophic, because
+        # exchange_cgrid_vector_halos does fill its corner diagonals
+        # (with the plain-mpp vector fill, not the duo k2e Lagrange one).
+        # Gating only divgd here would have left exactly one silent
+        # substitution behind, which is the defect this guard exists for.
+        if "cvec" not in exclude:
+            raise ValueError(
+                "post-p_grad_c uc/vc exchange needs the ext bundle: "
+                "dyn_core.F90:655 calls ext_vector(uc,vc,...,1,0,0,1) "
+                "unconditionally on the duo lane (the enclosing "
+                "`test_case > 1` at :649 is inside #ifdef SW_DYNAMICS and "
+                "is not compiled for the 3-D build). The interim helper "
+                "substitutes the plain-mpp vector corner fill for the duo "
+                "k2e Lagrange one. Build the context with "
+                "use_ext_bundle=True, or state the non-faithful choice "
+                "with ext_exclude=('cvec',).")
+        if nord > 0:
+            _interim_divgd()
+        _interim_cvec()
+        return
+
+    from legoesm.grids.fv3_native_ext_vector import (
+        ext_scalar_sixface,
+        ext_vector_cgrid_sixface,
+    )
+
+    if nord > 0:
+        if "divgd" in exclude:
+            _interim_divgd()
+        else:
+            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
+    if "cvec" in exclude:
+        _interim_cvec()
+    else:
+        ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
+
+
 def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
                        dt: float, sw_cfg: dict | None = None) -> list:
     """SB2: geopk(SW,1-lev) + p_grad_c per face, the post-PG duo
@@ -395,10 +574,13 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     Workspace choice: d_sw1's ut/vt workspaces enter as ZEROS
     (workspace_sentinel=0.0) — the defined analog of upstream's
     uninitialized stack (benign via near-zero panel-edge cosa).
-    INTERIM (documented): the post-PG uc/vc + divgd exchanges use the
-    mpp-analog index-copy helpers; the authoritative duo lane uses the
-    ext_scalar/ext_vector k2e machinery (dyn_core 652-655) — swap
-    staged with SB3 before the W2 gate.
+    The post-PG uc/vc + divgd exchanges go through
+    ``exchange_post_pgrad_sixface``: the ext_scalar/ext_vector k2e
+    machinery (dyn_core.F90:652 and :655) when the context carries the ext
+    bundle, the mpp-analog index-copy helpers otherwise or per
+    ``ext_exclude``.  (This docstring previously said the interim helpers
+    were the only path; that had not been true since the ext bundle
+    landed.)
 
     Returns per-face dicts: d_sw1 outputs + averaged allflux + the
     d_sw2-updated delp/pt.
@@ -429,37 +611,16 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         for t in range(6):
             sd(203, t, "uc", uc6[t])
             sd(203, t, "vc", vc6[t])
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     divgd6 = [o["divg_d"] for o in csw_outs]
-    if ctx.get("use_ext_bundle"):
-        # authoritative post-p_grad_c duo exchanges (dyn_core.F90:652-655):
-        # ext_scalar(divgd, 1,1) + ext_vector(uc, vc, 1,0,0,1)
-        from legoesm.grids.fv3_native_ext_vector import (
-            ext_scalar_sixface,
-            ext_vector_cgrid_sixface,
-        )
-
-        if "divgd" in ctx.get("ext_exclude", ()):
-            for t in range(1, 7):
-                exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-        else:
-            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
-        if "cvec" in ctx.get("ext_exclude", ()):
-            for t in range(1, 7):
-                exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
-        else:
-            ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
-    else:
-        for t in range(1, 7):
-            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    exchange_post_pgrad_sixface(ctx, divgd6, uc6, vc6, nord=int(cfg["nord"]))
     if sd:
         for t in range(6):
             sd(204, t, "uc", uc6[t])
             sd(204, t, "vc", vc6[t])
             sd(204, t, "divgd", divgd6[t])
 
-    cfg = dict(_SW_CFG_DEFAULT)
-    cfg.update(sw_cfg or {})
     s1 = []
     for t in range(1, 7):
         st = states[t - 1]
