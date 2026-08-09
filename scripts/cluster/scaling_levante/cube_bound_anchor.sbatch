@@ -10,6 +10,7 @@
 #SBATCH --mem=120G
 #SBATCH --time=02:00:00
 #SBATCH --output=cube_bound.%j.log
+#SBATCH --exclude=l50100
 # ===========================================================================
 # Price the TILED cubed-sphere lane -- the only cube path that goes past 6
 # GPUs -- on the PRODUCTION assembly.
