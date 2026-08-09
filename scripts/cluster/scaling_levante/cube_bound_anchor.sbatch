@@ -66,29 +66,25 @@ echo "=== [cube] arm 0/3: KNOWN-ANSWER CHECK — C384/L60 kt=2 @24, closed loop 
 # it before any new cube number is quoted: the first version of this job
 # omitted --closed-loop and measured the single-shot adapter lane instead of
 # the np>6 production assembly, which is a 4.8x different path.
-JAX_ENABLE_X64=0 srun --ntasks=24 --distribution=block:block \
-  --cpu-bind=cores --kill-on-bad-exit=1 \
+JAX_ENABLE_X64=0 srun --nodes=6 --ntasks=24 --ntasks-per-node=4 \
+  --distribution=block:block --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt 2 --resolution 384 --nlev 60 --steps 12 --warmup 3 \
     --closed-loop --multicontroller --out "$OUTDIR/c384_kt2_np24_check.jsonl" \
   || { echo "[cube] known-answer check FAILED"; rc=1; }
 
 echo "=== [cube] arm 1/3: kt=2 tiled, 24 GPUs, CLOSED LOOP ==="
-JAX_ENABLE_X64=0 srun --ntasks=24 --distribution=block:block \
-  --cpu-bind=cores --kill-on-bad-exit=1 \
+JAX_ENABLE_X64=0 srun --nodes=6 --ntasks=24 --ntasks-per-node=4 \
+  --distribution=block:block --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt 2 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
     --closed-loop --multicontroller --out "$OUTDIR/c768_kt2_np24.jsonl" \
   || { echo "[cube] kt2 FAILED"; rc=1; }
 
-echo "=== [cube] arm 2/3: kt=3 tiled, 54 GPUs, CLOSED LOOP ==="
-JAX_ENABLE_X64=0 srun --ntasks=54 --distribution=block:block \
-  --cpu-bind=cores --kill-on-bad-exit=1 \
-  "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
-    --kt 3 --resolution 768 --nlev 60 --steps 12 --warmup 3 \
-    --closed-loop --multicontroller --out "$OUTDIR/c768_kt3_np54.jsonl" \
-  || { echo "[cube] kt3 FAILED"; rc=1; }
-
+# ARM 2 (kt=3 @54, C768) DISABLED 2026-08-09: host OOM — the bench
+# builds global C768 state per rank (the #1370-class residency wall,
+# fixed for the ocean lane, NOT ported to the cube tiled bench).
+# Re-enable after a cube-side jax.default_device(cpu)/sharded-build fix.
 echo "=== [cube] receipts ==="
 "$PY" - "$OUTDIR" <<'PYEOF'
 import glob, json, os, sys
