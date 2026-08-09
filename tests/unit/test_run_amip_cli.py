@@ -3445,3 +3445,38 @@ def test_inplume_conversion_responds_to_rprcon():
     base = total_precip(1.4e-3, 3.0e-4)
     assert total_precip(5.6e-3, 3.0e-4) > base * 1.05
     assert total_precip(1.4e-3, 1.0e-4) > base
+
+
+def test_mpas_vert_advection_scheme_flag_flows_to_config():
+    """--mpas-vert-advection-scheme round-trips into DycoreConfig and is
+    rejected outside the MPAS sigma lane rather than running silently inert.
+
+    Default "upwind" = the first-order donor-cell path, bit-identical to
+    before; "van_leer" is the monotone 2nd-order TVD option that removes the
+    K_sigma = |sigma_dot|*dsigma/2 implicit diffusion measured at +0.822 K/day
+    at the tropical UTLS (91.4 hPa, cldF_fsd, N=37)."""
+    parser = build_arg_parser()
+    mpas = ["--dataset", "analytical", "--grid-type", "voronoi",
+            "--discretization", "mpas", "--vertical-coord", "sigma"]
+
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(mpas), parser))
+    assert cfg_default.dycore.mpas_vert_advection_scheme == "upwind"
+    cfg_default.validate_strict()
+
+    cfg_vl = build_config_from_args(_postprocess_args(parser.parse_args(
+        mpas + ["--mpas-vert-advection-scheme", "van_leer"]), parser))
+    assert cfg_vl.dycore.mpas_vert_advection_scheme == "van_leer"
+    cfg_vl.validate_strict()
+
+    # argparse choices reject a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(mpas + ["--mpas-vert-advection-scheme", "vanleer"])
+
+    # hybrid coordinate -> the operator is not wired there -> refuse.
+    cfg_hyb = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--vertical-coord", "hybrid",
+         "--mpas-vert-advection-scheme", "van_leer"]), parser))
+    with pytest.raises(ValueError, match="sigma vertical coordinate only"):
+        cfg_hyb.validate_strict()

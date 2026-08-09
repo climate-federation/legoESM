@@ -67,6 +67,7 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     compute_sigma_dot_from_cumsum,
     compute_mass_flux_from_cumsum,
+    VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
     vertical_advection_theta,
@@ -152,8 +153,31 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
     # ``nu_del4`` "off by default, set in production" convention); the
-    # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
+    # coupled/AMIP path sets a small value.
     nu_vert4_T: float = 0.0
+    # Vertical advection scheme for the SIGMA lane (``vertical_coord="sigma"``),
+    # applied to the θ thermodynamic transport, the tracers and the edge winds
+    # — one selector for the one shared operator they all call.
+    # "upwind" (default) is first-order donor cell; its leading truncation
+    # error is a diffusion K_σ = |σ̇|·Δσ/2, measured at +0.822 K/day at the
+    # tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd N=37 checkpoints) —
+    # larger than the entire production temperature tendency there.
+    # "van_leer" is the 2nd-order TVD reconstruction, which removes that term
+    # where the profile is smooth.  Its face values are unconditionally bounded
+    # by the two adjacent cells; the UPDATE is monotone only under a Courant
+    # condition.  That condition (~ nu_k + nu_{k+1} <= 1) is DERIVED for a
+    # uniform grid only; on a stretched grid or with a varying sigma_dot there
+    # is regression evidence, not a guarantee (see the kernel docstring).
+    # Measured global max of that pair on the target run (raw interface
+    # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
+    # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
+    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
+    # there RAISES rather than running silently inert.
+    # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
+    # existing callers, not full tuple ABI (exact unpacking / len() / _make
+    # with a short tuple still break; no such caller exists in-repo).
+    vert_advection_scheme: str = "upwind"
 
 
 # ============================================================================
@@ -275,6 +299,26 @@ def mpas_hydrostatic_tendencies(
     MPASHydrostaticTendencies
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Fail-early dispatch guard on the STATIC config value (never on a tracer):
+    # an unknown scheme must raise, and a scheme the hybrid lane cannot honour
+    # must raise rather than run silently inert (cf. the ``conservative_tracer_
+    # clamp`` MPI regression).  ``vertical_advection`` raises on unknown too —
+    # this catches it before any tracing work, and catches the hybrid gap that
+    # the shared operator cannot see.
+    _vert_scheme = config.vert_advection_scheme
+    if _vert_scheme not in VERTICAL_ADVECTION_SCHEMES:
+        raise ValueError(
+            f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
+            f"{VERTICAL_ADVECTION_SCHEMES}"
+        )
+    if _hybrid and _vert_scheme != "upwind":
+        raise ValueError(
+            f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
+            "sigma vertical coordinate only; the hybrid lane advects with "
+            "vertical_advection_hybrid, where it would be silently inert. "
+            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+        )
 
     u_3d = state.u.data        # (nEdges, nlev)
     T_3d = state.T.data        # (nCells, nlev)
@@ -547,7 +591,7 @@ def mpas_hydrostatic_tendencies(
         # BEFORE discretization.  σ-convention (index 0 top, σ̇>0 downward)
         # is inherited verbatim from the reused ``vertical_advection``.
         vert_thermo_T = vertical_advection_theta(
-            T_3d, sigma_dot, p_s, sigma_coord)
+            T_3d, sigma_dot, p_s, sigma_coord, scheme=_vert_scheme)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = σ·dp_s/dt + p_s·σ̇  ⇒  ω_ps = σ·dp_s/dt.  The σ̇ part
         # κ·T·σ̇/σ is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -563,7 +607,9 @@ def mpas_hydrostatic_tendencies(
     if _hybrid:
         vert_adv_u = _vertical_advection_edge(u_3d, mass_flux, sigma_coord, mesh, hybrid=True, p_s=p_s)
     else:
-        vert_adv_u = _vertical_advection_edge(u_3d, sigma_dot, sigma_coord, mesh, hybrid=False)
+        vert_adv_u = _vertical_advection_edge(
+            u_3d, sigma_dot, sigma_coord, mesh, hybrid=False,
+            scheme=_vert_scheme)
 
     du_dt_3d = du_dt_3d + vert_adv_u
 
@@ -637,7 +683,8 @@ def mpas_hydrostatic_tendencies(
                 in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
+                lambda qk: vertical_advection(
+                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
                 in_axes=-1, out_axes=-1)(q)
         # #930 vertical checkerboard damper on TRACERS (same operator + rate
         # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
@@ -682,6 +729,7 @@ def mpas_hydrostatic_tendencies(
 
 def _vertical_advection_edge(
     u_3d, vert_vel, sigma_coord, mesh, hybrid=False, p_s=None,
+    scheme="upwind",
 ):
     """Vertical advection of edge-based velocity.
 
@@ -699,7 +747,8 @@ def _vertical_advection_edge(
     else:
         # sigma_dot is (nCells, nlev+1), average to edges
         sigma_dot_edge = 0.5 * (vert_vel[c1] + vert_vel[c2])
-        return vertical_advection(u_3d, sigma_dot_edge, sigma_coord)
+        return vertical_advection(
+            u_3d, sigma_dot_edge, sigma_coord, scheme=scheme)
 
 
 # ============================================================================
