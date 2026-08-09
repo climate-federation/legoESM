@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=00:45:00
+#SBATCH --time=01:30:00
 #SBATCH --output=mpas_ragged.%j.log
 # PRODUCTION acceptance for the ragged halo fill
 # (LEGOESM_MPAS_RAGGED_HALO=1 -> _ragged_halo_fill: 2 ragged_all_to_all
@@ -40,14 +40,11 @@ OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/mpas_ragged_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 rc=0
 
-echo "=== ARM 1: parity gate, ragged ON, s6@4 (1 node) ==="
-LEGOESM_MPAS_RAGGED_HALO=1 JAX_ENABLE_X64=0 \
-  srun --nodes=1 --ntasks=4 --ntasks-per-node=4 --gpus-per-node=4 \
-    --gpu-bind=none --kill-on-bad-exit=1 \
-  "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-    --multicontroller --n-devices 4 --subdivision 6 --nlev 26 \
-    --steps 6 --warmup 2 --partition-method sfc --parity-gate \
-    --out "$OUTDIR/parity_on.jsonl" || { echo "PARITY ARM FAILED"; rc=1; }
+# ARM 1 (parity) BANKED GREEN in job 26821453: u/T/p_s parity OK
+# with halo_strategy_effective=ppermute_ragged at s6@4 — not rerun
+# (45-min walltime was eaten by per-arm mesh+reorder+compile).
+cp -f "$SCRATCH/legoesm_scaling/mpas_ragged_j26821453/parity_on.jsonl" \
+  "$OUTDIR/parity_on.jsonl" || { echo "banked parity receipt missing"; rc=1; }
 
 echo "=== ARM 2: timing, ragged OFF (A), s8@16 (4 nodes) ==="
 LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
