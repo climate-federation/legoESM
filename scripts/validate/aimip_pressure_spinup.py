@@ -194,6 +194,15 @@ def main(argv=None):
             "fixed_fraction_of_variance": v_fix / max(v_tot, 1e-30),
             "ps_fixed_land_pa": float(np.sqrt(np.mean(mean_pat[land] ** 2))),
             "ps_fixed_ocean_pa": float(np.sqrt(np.mean(mean_pat[~land] ** 2))),
+            # Is the fixed pattern a CONSTANT offset or a structured field?
+            # |mean| ~ RMS means a uniform shift; |mean| << RMS means structure.
+            # Area-weighted, because an unweighted mean on a Gaussian grid
+            # over-counts the poles.
+            "ps_fixed_area_mean_pa": float(
+                jnp.sum(area * jnp.asarray(mean_pat)) / jnp.sum(area)),
+            "ps_fixed_zonal_profile_pa": [
+                float(v) for v in np.sqrt(np.mean(mean_pat ** 2, axis=1))],
+            "lat_deg": [float(v) for v in np.rad2deg(np.asarray(grid.lat))],
         }
         print(json.dumps(out, indent=2))
         if args.out:

@@ -2346,3 +2346,70 @@ Standing: the genuine dycore offset is 213 Pa and uniform; the raw WB2 mass
 scores are dominated by a diagnostic artifact; the dry-mass anchor is worth
 -25 to -30 % at 5 days; training-recipe levers are null on these arms; and winds
 and temperature beat persistence at every lead.
+
+# CONSOLIDATION (2026-08-09) — where the campaign stands
+
+## The residual 213 Pa is structured and has NO simple geography
+
+Area-weighted mean **+0.57 Pa** against an RMS of 213.4 (|mean|/RMS = 0.0027),
+so it is a STRUCTURED field, not a uniform shift — and the near-zero mean
+independently confirms the dry-mass anchor holds. Area-weighted share of its
+variance by latitude band:
+
+| band | share |
+|---|---|
+| -90..-60 | 10.9 % |
+| -60..-30 | 9.1 % |
+| -30..0 | 27.7 % |
+| 0..+30 | 19.4 % |
+| +30..+60 | 19.7 % |
+| +60..+90 | 13.2 % |
+
+Spread across every band, tropics slightly heaviest, no single latitude
+dominating. **I have no mechanism for it and am not going to invent one.** It is
+global, structured, non-orographic, mass-conserving, and physics-independent —
+which rules out the candidates tested but does not name a cause.
+
+## The three arms, one protocol
+
+z500 RMSE [m], 2017, 8 inits (sfno row at its 60-init protocol, noted):
+
+| row | 24 h | 72 h | 120 h | 240 h |
+|---|---|---|---|---|
+| GraphCast (WB2, /g) | 4.06 | 12.66 | 27.97 | 74.64 |
+| IFS-HRES (WB2, /g) | 4.81 | 13.99 | 31.15 | 81.86 |
+| sfno_full muonlr (60-init) | 16.4 | 39.6 | 65.8 | 100.2 |
+| persistence | 63.5 | 92.3 | 106.4 | 119.5 |
+| column_nn anchored | 90.8 | 127.3 | 157.4 | 205.6 |
+| classical anchored (final) | 91.6 | 127.3 | 151.1 | **182.1** |
+
+classical's day-10 improves 266.8 -> 182.1 m against its unanchored baseline
+(-32 %), and the two dycore arms are now within 1 % of each other at 24 h and
+identical at 72 h.
+
+**But these raw mass numbers are not skill.** ~76 % of the fixed 6 h offset is
+the mslp sea-level reduction, a diagnostic; the arms beat persistence on every
+wind component and on temperature.
+
+## What was actually achieved
+
+| result | status |
+|---|---|
+| Dry-mass anchor, in training | **-25 to -30 %** at 5 days, BOTH arms |
+| lat-lon training restored | 4 defects, both variants train again |
+| WB2 mass scores are dominated by a diagnostic artifact | CONFIRMED |
+| Arms beat persistence on winds + temperature | CONFIRMED |
+| Checkpoint selection on validation | ~20 % of z500, free |
+| Representation floor measured (5.97 m z500) | leaderboard gaps were confounded |
+| Optimizer / capacity / data levers | all NULL, and now explained |
+
+## What is open, in order
+
+1. The **213 Pa structured offset** — needs a dycore numerics investigation, not
+   another training run.
+2. **Bias-corrected mass scores** reported alongside raw ones, correction fit on
+   training years only.
+3. **Two-snapshot SFNO input** — model side landed and gated; the loss functions
+   and sample loop still need threading.
+4. **MPAS** — refused with its three blockers named; needs its own carry,
+   forcing and eval path.
