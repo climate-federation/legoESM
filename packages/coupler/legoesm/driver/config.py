@@ -552,7 +552,8 @@ class ExperimentConfig(NamedTuple):
     #                          cloud (lower albedo).  Bounds (0.5, 0.99).
     #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
     #                          optically THINNER cloud (lower albedo, still
-    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
+    #                          was widened from 5e-5; see validate_strict.
     #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
@@ -2457,11 +2458,38 @@ class ExperimentConfig(NamedTuple):
                 f"morrison_flavor={self.morrison_flavor!r} requires "
                 f"microphysics='morrison' (got {self.microphysics!r}); on any "
                 "other scheme the flavor would be silently inert.")
-        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # Optional cloud-tuning override bounds (track CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        # NOT a byte-for-byte mirror: __param_spec__ additionally seeds the
+        # TRAINING sigmoid re-parameterisation (param_collector._seed_raw), so a
+        # bound only the forward driver needs is widened HERE alone.
         for _f, _lo, _hi in (
             ("cloud_rh_crit", 0.5, 0.99),
-            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            # Lower bound 5.0e-5 -> 1.0e-6.  The radiative condensate floor
+            # enters additively as ``cf_strat * q_liq_incloud`` /
+            # ``cf_strat * q_c_diagnostic`` (cloud_fraction.py ``q_floor_liq`` /
+            # ``q_floor_ice``; under diagnostic_condensate_scheme='adiabatic' the
+            # LIQUID part is depth-derived and CAPPED at q_c_diagnostic instead).
+            # It is never itself a denominator, and the downstream quotients that
+            # see the resulting condensate are floor-protected far below 1e-6
+            # (PSD radius ``q_c_pos`` at 1e-15, cloud_fraction.py:872; the
+            # adiabatic liquid split at 1e-30, cloud_fraction.py:824).  So any
+            # strictly positive value is numerically safe, and >0 keeps this a
+            # floor rather than "off".
+            # The old 5.0e-5 was the *floor of the tuning range*, not a physical
+            # limit.  The MPAS AMIP campaign ran exactly ON it while carrying a
+            # ~+32 W/m2 reflected-shortwave excess that an offline
+            # production-fidelity RRTMGP factorial attributes almost entirely to
+            # this knob (5e-5 -> 0 is -35.6 W/m2, ~103% of the gap; the ladder
+            # rungs 2e-5/1e-5/5e-6 give -8.8/-15.6/-22.4).  Testing those rungs
+            # coupled requires the bound to admit them.  Evidence is in the run
+            # directory, not the repo: report ``floor_attribution_hifi.md``.
+            # NOT widened alongside it: CloudConfig.__param_spec__ keeps
+            # (5.0e-5, 1.5e-3), because those bounds ALSO seed the training
+            # sigmoid re-parameterisation (param_collector._seed_raw), where a
+            # widening is NOT inert.  Sub-5e-5 therefore reaches the model via
+            # ``--q-c-diagnostic`` or a ``--config`` YAML, but NOT via ``--params``.
+            ("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),

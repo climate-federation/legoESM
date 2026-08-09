@@ -456,7 +456,8 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_net_sfc=None, lw_net_sfc=None,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
-                                 sw_down_sfc=None, lw_down_sfc=None):
+                                 sw_down_sfc=None, lw_down_sfc=None,
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -535,6 +536,10 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         sw_down_toa=_toa_field(sw_down_toa, "sw_down_toa_rad"),
         sw_down_sfc=swd_field,
         lw_down_sfc=lwd_field,
+        # Clear-sky TOA up-fluxes (#843 lean-lane port; same +up CMOR sign as
+        # sw_up_toa/lw_up_toa above).  None (the default) => leaf absent.
+        sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
+        lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
     )
 
 
@@ -918,6 +923,20 @@ def make_radiation_physics(
             " cloud_fraction_override) before enabling CLUBB-cf routing there."
         )
 
+    # Clear-sky TOA diagnostic (#843 lean-lane port): the clouds-off second
+    # pass is wired in ``_make_hydrostatic_radiation`` only (serves the lean
+    # cube/lat-lon AND MPAS paths).  Refuse LOUDLY elsewhere — a silently
+    # ignored clear_sky_diag is exactly the #1385 flag-drop class this port
+    # kills (rsutcs/rlutcs absent with no error).
+    if radiation_config.clear_sky_diag and model_type not in (
+            "hydrostatic", "mpas"):
+        raise NotImplementedError(
+            "RadiationConfig.clear_sky_diag (clouds-off second pass for CMOR "
+            "rsutcs/rlutcs) is only wired for model_type 'hydrostatic'/'mpas', "
+            f"got {model_type!r}.  Extend the corresponding _make_*_radiation "
+            "builder before enabling the clear-sky diagnostic there."
+        )
+
     # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
     # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
     # per-g-point optics; falls back to gray optics if the tables are absent).
@@ -1040,6 +1059,20 @@ def _make_hydrostatic_radiation(
         and bool(getattr(radiation_config.cloud_config,
                          "convective_cloud", False))
     )
+    # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
+    # config variant for the second radiation pass.  ``cloud_scheme="none"``
+    # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
+    # ``has_clouds`` gate is False -> clear-sky solve); aerosols/ozone/GHG
+    # stay ON (CMIP "assuming clear sky" removes clouds only).  The SAME
+    # pre-built ``rrtmgp_solver`` is reused — cloud optics tables are simply
+    # not exercised.  For gray radiation (no cloud interaction at all) the
+    # second pass returns the all-sky fluxes, which IS the correct clear-sky
+    # value there.  Static Python gate (feature-gating exception: ``if`` on a
+    # compile-time bool, never jnp.where) — ``clear_sky_diag=False`` (default)
+    # traces no extra ops, byte-identical.
+    _clr_sky_cfg = (
+        radiation_config._replace(cloud_scheme="none", cloud_config=None)
+        if radiation_config.clear_sky_diag else None)
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
@@ -1289,6 +1322,47 @@ def _make_hydrostatic_radiation(
             solar_spectral_fraction=_ssf_ext,
         )
 
+        # #843 lean-lane clear-sky second pass: SAME column state and
+        # forcings, clouds OFF (``_clr_sky_cfg`` has cloud_scheme="none" and
+        # no condensate/number/cf inputs are passed).  Its heating is
+        # DISCARDED — only the TOA up-fluxes are kept for CMOR
+        # rsutcs/rlutcs, so the model trajectory is identical with the
+        # diagnostic on or off.  Static Python gate; off (default) adds no
+        # ops.  Cost when on: one extra radiation solve per radiation step
+        # (the held/no-rad sub-cycle variant contains no radiation at all).
+        sw_up_toa_clr = None
+        lw_up_toa_clr = None
+        if _clr_sky_cfg is not None:
+            rad_out_clr = _call_radiation_backend(
+                radiation_config=_clr_sky_cfg,
+                eccf=eccf,
+                T=T_col,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                sfc_temperature=T_sfc_col,
+                lat=lat_col,
+                q_v=q_v_col,
+                insolation=insol_col,
+                cos_sza=cos_sza_col,
+                q_cloud=None,
+                q_ice=None,
+                n_cloud=None,
+                n_ice=None,
+                f_day=f_day_col,
+                rrtmgp_solver=rrtmgp_solver,
+                lon=lon_col,
+                ml_ozone_coefs=ml_ozone_coefs,
+                o3_vmr_override=_o3_ext,
+                aerosol_od=_aer_ext,
+                aerosol_lw_od=_aer_lw_ext,
+                ghg_vmr_override=_ghg_ext,
+                cloud_fraction_override=None,
+                conv_precip=None,
+                solar_spectral_fraction=_ssf_ext,
+            )
+            sw_up_toa_clr = rad_out_clr.sw_flux_up[:, 0]
+            lw_up_toa_clr = rad_out_clr.lw_flux_up[:, 0]
+
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
         # Surface net radiative fluxes [W/m^2, +into surface], carried so the
         # lean MPAS coupled loop can export them to the coupler. Surface is the
@@ -1316,7 +1390,9 @@ def _make_hydrostatic_radiation(
                          if rad_out.toa_insolation is not None
                          else rad_out.sw_flux_down[:, 0]),
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
-            lw_down_sfc=rad_out.lw_flux_down[:, -1])
+            lw_down_sfc=rad_out.lw_flux_down[:, -1],
+            sw_up_toa_clr=sw_up_toa_clr,
+            lw_up_toa_clr=lw_up_toa_clr)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

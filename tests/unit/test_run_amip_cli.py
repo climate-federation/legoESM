@@ -1633,16 +1633,23 @@ def test_gustiness_zi_threads_to_config():
     assert cfg.surface_gustiness_zi == 300.0
 
 
-def test_q_c_diagnostic_threads_to_config():
-    """--q-c-diagnostic must reach ExperimentConfig.cloud_q_c_diagnostic."""
+@pytest.mark.parametrize("value", ["3e-4", "1e-5"])
+def test_q_c_diagnostic_threads_to_config(value: str):
+    """--q-c-diagnostic must reach ExperimentConfig.cloud_q_c_diagnostic.
+
+    ``1e-5`` is the sub-production condensate-floor rung the AMIP campaign needs
+    to test coupled: it exercises the whole CLI route (parse -> postprocess ->
+    build -> validate_strict), not just the bound tuple.
+    """
     parser = build_arg_parser()
     args = parser.parse_args([
         "--dataset", "analytical",
-        "--q-c-diagnostic", "3e-4",
+        "--q-c-diagnostic", value,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(float(value))
+    cfg.validate_strict()
 
 
 def test_gustiness_defaults_scheme_native():

@@ -36,7 +36,11 @@ from legoesm.core.conservation import (
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
-from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
 from legoesm.core.operators_voronoi import (
     # 2D operators used for surface-pressure-only fields (ln_ps, p_s).
     divergence_cell,
@@ -945,17 +949,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
             # CMOR-feed diagnostic extras: TOA fluxes (radiation steps only)
-            # + surface turbulent fluxes (every step). Slot ORDER is the
-            # sfc_diag tuple contract shared with the driver feed:
-            # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
-            #  shflx, lhflx, sw_down_sfc, lw_down_sfc).
-            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
-            # interactive multilayer land forcing (AtmToSurface.sw_down/
-            # lw_down; model_driver._marshal_land_forcing reads these slots).
-            _extras = tuple(getattr(_pt, _k, None) for _k in (
-                "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc",
-                "sw_down_sfc", "lw_down_sfc"))
+            # + surface turbulent fluxes (every step).  Slot ORDER comes from
+            # the SHARED ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract in core.state,
+            # which the MPI producer (parallel/voronoi_mpi._step) and the
+            # driver consumer read too — see that constant for the slot map
+            # and for why it is shared rather than hand-copied.  A key the
+            # tendency does not carry (clear-sky pair with
+            # RadiationConfig.clear_sky_diag off; TOA trio on a
+            # held-radiation sub-step) is None and never reaches the
+            # accumulator.
+            _extras = tuple(getattr(_pt, _k, None)
+                            for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

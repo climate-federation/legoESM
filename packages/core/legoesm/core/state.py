@@ -166,6 +166,46 @@ class HydrostaticTendencies(NamedTuple):
     # None (default) = ledger off, byte-identical; appended at the end so every
     # existing (incl. positional) constructor is unaffected.
     ledger_rows: object | None = None
+    # CLEAR-SKY TOA up-fluxes [W/m^2, positive UP/outgoing — same CMOR sign as
+    # sw_up_toa/lw_up_toa], from the second clouds-off radiation pass
+    # (``RadiationConfig.clear_sky_diag``, #843 lean-lane port) for the CMOR
+    # rsutcs/rlutcs feed.  None whenever the diagnostic is off (the default) —
+    # appended AFTER ``ledger_rows`` (which main added in the meantime) with
+    # None defaults, so every existing (incl. positional) constructor of either
+    # field set is unaffected.
+    sw_up_toa_clr: Field | None = None
+    lw_up_toa_clr: Field | None = None
+
+
+# Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
+# producers — the serial ``MPASPrimitiveEquationModel._step_jit`` and the MPI
+# ``parallel.voronoi_mpi._step`` — and by the consumer
+# ``ModelDriver._feed_mpas_cmip_accumulators`` / ``_marshal_land_forcing``.
+# The tuple is ``(sw_net_sfc, lw_net_sfc, precip) + extras``, so extras key *i*
+# is tuple slot *i + 3*: 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls, 8/9 the surface
+# DOWNWELLING pair the interactive land needs, 10/11 the clear-sky TOA pair for
+# CMOR rsutcs/rlutcs.
+#
+# It lives HERE, imported by both producers, because the two hand-maintained
+# copies DID drift: the MPI producer stopped at slot 7 while the consumer read
+# slots 10/11, so a ONE-rank Voronoi MPI run — which
+# ``_mpas_cmip_feed_enabled`` explicitly enables the CMOR feed for — accepted
+# ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.  A shared
+# constant makes that class of drift impossible instead of merely tested-for.
+MPAS_SFC_DIAG_EXTRA_KEYS = (
+    "lw_up_toa", "sw_up_toa", "sw_down_toa",
+    "shflx_sfc", "lhflx_sfc",
+    "sw_down_sfc", "lw_down_sfc",
+    "sw_up_toa_clr", "lw_up_toa_clr",
+)
+
+# Extras the MPI producer deliberately leaves EMPTY (published as None at their
+# contract slot, so every other slot keeps its index).  The surface
+# downwelling pair drives the interactive multilayer land tile; the MPI lane
+# has never fed it, and populating it here would silently switch land forcing
+# on for one-rank Voronoi MPI runs — a behaviour change that belongs in its own
+# change, not in the CMOR-diagnostic port.
+MPAS_SFC_DIAG_MPI_UNPUBLISHED = ("sw_down_sfc", "lw_down_sfc")
 
 
 class FV3HydrostaticState(NamedTuple):

@@ -118,6 +118,28 @@ def test_cloud_tuning_override_bounds(field: str, bad: float, good: float) -> No
     ExperimentConfig(**{field: None}).validate_strict()
 
 
+@pytest.mark.parametrize("value", [1.0e-5, 5.0e-6, 1.0e-6])
+def test_q_c_diagnostic_accepts_sub_production_floor(value: float) -> None:
+    """The condensate floor must reach BELOW the running campaign's value.
+
+    No tracked file pins 5e-5: ``amip_production.yaml`` ships 1.0e-4 and the
+    chain launcher carries no q-c override.  The value comes from the launcher's
+    run-time ``EXTRA`` environment variable, and the MPAS AMIP campaign has been
+    running ``--q-c-diagnostic 5e-5`` -- EXACTLY the old lower bound -- for its
+    whole length.  An offline production-fidelity RRTMGP factorial attributes
+    ~all of that campaign's reflected-shortwave excess to this knob, and the
+    ladder rungs worth testing coupled (2e-5 / 1e-5 / 5e-6) all sit underneath.
+    """
+    ExperimentConfig(cloud_q_c_diagnostic=value).validate_strict()
+
+
+def test_q_c_diagnostic_below_bound_still_rejected() -> None:
+    """Widening is not removal: under 1e-6 (and <= 0) still fails early."""
+    for bad in (9.9e-7, 0.0, -1.0e-5):
+        with pytest.raises(ValueError, match="cloud_q_c_diagnostic"):
+            ExperimentConfig(cloud_q_c_diagnostic=bad).validate_strict()
+
+
 def test_non_constant_surface_bulk_requires_turbulence() -> None:
     # A MOST surface scheme upgrades the atmosphere surface layer via the
     # turbulence config; turbulence='none' would leave the atmosphere on its
