@@ -104,6 +104,84 @@ def _driver_key_sets():
     return omip_keys, lmip_keys, coupled_keys
 
 
+def _atm_pipeline_keys() -> set:
+    """(module, class) keys reachable via run_amip's post-setup class router.
+
+    Probes the PRODUCTION pair (``build_atm_pipeline_bundle`` +
+    ``_route_overrides_by_class``) against pipelines built by the PRODUCTION
+    ``build_physics_pipeline``, unioned over every registered scheme in each
+    family (mirrors the lmip union-over-schemes pattern): a param on
+    CLUBBParams is reachable under ``turbulence=clubb`` even though the
+    default pipeline builds Louis.  Scheme lists come from the kernel
+    registries / VALID_* tuples, so a NEW scheme is audited automatically.
+    """
+    from legoesm.driver.config import (
+        VALID_GWD,
+        VALID_TURBULENCE,
+        ExperimentConfig,
+    )
+    from legoesm.driver.kernel_registry import (
+        CONVECTION_REGISTRY,
+        MICROPHYSICS_REGISTRY,
+    )
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.driver.run_config_yaml import (
+        _route_overrides_by_class,
+        build_atm_pipeline_bundle,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_latlon_grid(8, 16)
+    sigma = create_sigma_coordinate(8)
+    candidates = _candidate_keys()
+
+    selections = [dict()]
+    selections += [{"convection": s} for s in sorted(CONVECTION_REGISTRY)]
+    selections += [{"microphysics": s} for s in sorted(MICROPHYSICS_REGISTRY)]
+    selections += [{"turbulence": s} for s in VALID_TURBULENCE]
+    # '+'-composed GWD sources are combinations of the atoms; auditing the
+    # atoms covers every composed config's classes.
+    selections += [{"gravity_wave_drag": s}
+                   for s in VALID_GWD if "+" not in s]
+
+    reachable: set = set()
+    built = 0
+    for sel in selections:
+        try:
+            pipeline = build_physics_pipeline(
+                grid, sigma, ExperimentConfig(**sel))
+        except Exception:
+            # A selection some OTHER constraint rejects (e.g. a convection
+            # scheme that requires prognostic microphysics) contributes no
+            # coverage — its classes stay unreachable unless another
+            # selection builds them.  Never let one bad combination kill
+            # the audit — but see the floor assert below, which stops this
+            # except from silently absorbing a MASS build regression and
+            # reporting everything unreachable (codex review 2026-08-02).
+            continue
+        built += 1
+        bundle = build_atm_pipeline_bundle(pipeline)
+        for key in candidates:
+            if key in reachable:
+                continue
+            applied: set = set()
+            try:
+                _route_overrides_by_class(bundle, {key: {}}, applied=applied)
+            except SystemExit:
+                continue  # AMBIGUOUS in this bundle
+            if key in applied:
+                reachable.add(key)
+    # Floor: the default + the bulk of single-scheme selections must build.
+    # If build_physics_pipeline regresses wholesale, every selection lands in
+    # the except above and the audit would quietly report the whole atm
+    # component unreachable; this makes that failure LOUD instead.
+    assert built >= 15, (
+        f"only {built} scheme selections built a pipeline — "
+        "build_physics_pipeline is likely broken, not the params routing")
+    return reachable
+
+
 def _compute_uncovered() -> set[str]:
     """Uncovered tunables, honoring run_coupled's clobber-refusal contract.
 
@@ -118,6 +196,7 @@ def _compute_uncovered() -> set[str]:
       counts (conditional reachability, documented in the guard's error).
     """
     omip_keys, lmip_keys, coupled_keys = _driver_key_sets()
+    atm_pipeline_keys = _atm_pipeline_keys()
     amap = set(build_atm_scalar_param_map())
     uncovered: set[str] = set()
     for m in build_registry():
@@ -126,7 +205,12 @@ def _compute_uncovered() -> set[str]:
         key = (m.module, m.config_class)
         comp = m.qualified_name.split(".")[0]
         if comp == "atm":
-            covered = m.qualified_name in amap
+            # Two routes: the flat ExperimentConfig scalar map (pre-setup),
+            # or the post-setup class router into the built pipeline's
+            # scheme configs (apply_params_to_pipeline — the CLUBB-style
+            # any-closure-constant path).
+            covered = (m.qualified_name in amap
+                       or key in atm_pipeline_keys)
         elif comp == "ocean":
             # run_coupled refuses ALL ocean.* (--params clobber guard), so
             # only run_omip counts.

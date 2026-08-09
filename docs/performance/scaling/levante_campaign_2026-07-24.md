@@ -2422,3 +2422,179 @@ than attempted: the cheap, safe part (geometry hoist, 2.5 %) is a
 clean follow-up if wanted; the risky part is not worth ~3.7 % on a
 lane already at ratio 1.83-1.96. Consistent with the campaign's
 standing conclusion that the remaining distance is structural.
+
+## Recolouring the MPAS halo schedule is capped by Vizing — measured offline (2026-08-07)
+
+Both independent consults (codex + GLM-5.2, transcripts in
+`.physics-validator/scaling_campaign/codex_consult_hundreds_2026-08-07.md`)
+ranked the MPAS GPU lane as the top remaining structural lever: it is the
+worst-scaling lane we have (measured/modelled-bound 3.16x at s8@16 to
+4.47x at s9@64), and one halo fill costs 12-14 SEQUENTIAL ppermute rounds.
+Codex priced a new partition objective that minimizes round depth at
+300-800 LOC and 7-14 days, with an optimistic ceiling of 14.4% at s10@128
+(12 fewer SendRecv calls/step x 218 us) and a hardware-only floor of
+0.356 ms (12 x 29.7 us). That spread is why it must be measured.
+
+**Before spending any of that, the cheap question is whether recolouring is
+already exhausted** — and it is answerable offline, with no GPU, from the
+colourer's own lower bound. `_build_ppermute_schedule` produces a proper
+EDGE colouring of the device communication graph (one colour = one round,
+properness asserted), and the `max_degree` it returns is that same graph's
+maximum vertex degree. VIZING therefore bounds the chromatic index:
+`Delta <= chi' <= Delta + 1`. So `coloring_gap = n_rounds - max_degree`
+reads as:
+
+* `gap == 0` -> `n_rounds == Delta`; no proper edge colouring can beat
+  `Delta`. PROVABLY OPTIMAL, recolouring headroom exactly zero.
+* `gap == 1` -> INCONCLUSIVE. A Class 2 graph genuinely needs `Delta + 1`,
+  and Class 1 vs Class 2 is NP-complete.
+* `gap >= 2` -> recolouring removes at least `gap - 1` rounds, at most `gap`.
+
+MEASURED so far (`bench_voronoi_partition_methods.py --schedule-cost`, the
+existing partition-quality bench extended to call the production
+`spmd_schedule_cost` rather than its own 1-ring proxy):
+
+| mesh | n_dev | geometric | sfc | metis | gap | strategy |
+|---|---|---|---|---|---|---|
+| L2/L3/L4 | 2-16 | rounds = n_dev-1 mostly | same | - | 0 everywhere | allgather (COUNTERFACTUAL) |
+| L6 lloyd=0 | 8 | 7 | 7 | 6 | 0 | ppermute (5,121 cells/dev) |
+| L6 lloyd=0 | 16 | 13 | 10 | 10 | 0 | ppermute (2,561 cells/dev) |
+| L8 lloyd=0 | 64 | 16 | - | - | 0 | ppermute |
+
+Two scope notes that must travel with these numbers:
+
+* The small-mesh rows are COUNTERFACTUAL: every one auto-selects the
+  ALLGATHER strategy (cells/device below the threshold), so production runs
+  no ppermute schedule there. Only L6@16 upward are real. L6@8's
+  `rounds == n_dev - 1` is complete-graph saturation and says nothing.
+* `gap == 0` rules out a better UNDIRECTED edge colouring of THIS graph and
+  nothing more. `_build_ppermute_schedule` enters a device pair into
+  `comm_pairs` when EITHER direction has a halo dependency and then emits
+  BOTH ppermute directions, even where one send map is empty — so a
+  redesigned DIRECTED schedule exploiting one-way exchanges is not bounded
+  by `Delta` at all. This is a THIRD path, not a two-way choice between
+  colouring and ownership.
+
+The neighbour fan-out that the bench's first layer already reported is NOT
+a stand-in for any of this: at L6@16 it reads 8/8/7 for
+geometric/sfc/metis while the real schedule reads 13/10/10.
+
+Job 26770026 (CPU `shared`, 24 h, zero GPU hours) scores the production
+working points s8/s9 @64,128 and s10@128. Arms 1-2 are a MECHANICAL
+instrument check via `--expect-rounds` against the reference census in
+`spmd_schedule_cost`'s docstring (s8 sfc 12/14, metis 13/19, geometric
+16/21; s9 sfc 11/13, metis 14/18, geometric 14/18); arm 3's unknown s10
+number is only produced if both pass, because an instrument that misses the
+known answer cannot be trusted on the unknown one. The first production row
+to land, s8 geometric@64 = 16 rounds, reproduces the census exactly — a
+spot check, not yet the validation, which is the full six-row gate.
+
+Eight codex adversarial rounds on this change (transcripts
+`codex_review_schedule_cost{,_r2..r8}_2026-08-07.md`); round 8 SHIP. The
+defects it caught are worth recording because most were in the INSTRUMENT,
+not the model: a headroom figure documented backwards (`gap-1` is the
+GUARANTEED reduction, not the maximum); a launcher that filed a scan with
+no results as COMPLETED; an artifact guard that passed on
+`{"rows": {"n_ranks": 1}}` because iterating a dict yields its keys; a
+`--expect-rounds` gate bypassable by whitespace or a duplicate key; and a
+first-draft test that was VACUOUS — hardcoding `coloring_gap = 0` passed
+every fast fixture, because the true gap is 0 on all of them.
+
+KNOWN GAP, reported not fixed: `tests/bench/` is not executed by the CI
+test jobs (they run `tests/unit/` and selected paths), so neither these
+tests nor any other test in `tests/bench/` is CI-enforced. Repo-wide and
+pre-existing; Actions have been disabled repo-wide since 2026-05-27 in any
+case, so a targeted wiring change here would be inert.
+
+## The nsys collective census on the MPAS lane is UNRELIABLE (2026-08-07)
+
+Do not build another MPAS attribution on an Nsight Systems capture until this
+is resolved. The traces silently omit the very kernels being measured, with no
+error and no missing-data marker.
+
+Evidence, three independent captures:
+
+| capture | rank / arm | total kernels | SendRecv kernels |
+|---|---|---|---|
+| 26680051 (single-rank) | rank 0, physics=none | — | 288 |
+| 26772084 (skew, 4 ranks) | rank 0 | 187,606 | 96 |
+| 26772084 | rank 2 | 188,312 | 317 |
+| 26772084 | rank 1 | 187,247 | **0** |
+| 26772084 | rank 3 | 187,316 | **0** |
+| 26772734 (payload A/B) | dry, physics=none | 187,247 | **0** |
+| 26772734 | wet, physics=kessler | 276,656 | 124 |
+
+The zero rows are not runs without collectives: the dry arm's own receipt
+records `halo_strategy_effective: ppermute` and a 9.74 ms step, i.e. the
+halo exchange ran. Note also that the dry arm and skew rank 1 report the
+IDENTICAL total of 187,247 kernels — the same systematic omission, not
+random loss.
+
+What survives and what does not:
+
+* The DURATION median is robust — 216.2 / 212.4 / 213.5 us across three
+  captures on different jobs. Quote it.
+* Any COUNT from these traces is not. The 288-call structure that recovered
+  the traced run's `--reorder-for 128` provenance happened to be
+  self-consistent (8 rounds x 3 fills x 12 steps), but that consistency was
+  luck, not a guarantee, and it cannot be relied on again.
+
+CONSEQUENCE for the open payload-vs-wait question: it is NOT answerable by
+more nsys jobs. Two arms were run at a fixed schedule with the packed cell
+record changed from 28 to 106 values (`--physics none` vs `kessler`, mesh /
+device count / partition / reorder target identical); the wet arm captured
+124 collectives and the dry arm none, so there is nothing to compare. The
+next instrument should be an HLO-level collective census or the XLA profiler,
+both of which count what the compiled executable contains rather than what a
+sampling profiler happened to record.
+
+Also fixed along the way, and both would silently corrupt any future capture:
+`ncclDevKernel_SendRecv` is recorded under `shortName`, NOT `demangledName`,
+in some of these traces (querying the wrong column reads as "no collectives");
+and nsys sets `QUADD_INJECTION_PROXY`, which JAX treats as distributed
+coordinator configuration and hangs on — since only the PROFILED ranks get it,
+they diverge from the rest and the whole job deadlocks in init.
+
+## Cube lane: a measurement that does NOT reconcile (2026-08-07)
+
+RETRACTED, same day it was said: I reported that a fresh 24->54 GPU
+measurement "kills the cube scales at 1.04 picture". It does not. The 1.04
+came from `6->24` on the cs-spmd row (job 26453782); mine is
+`bench_cube_tiled_step_scaling.py` at 24->54. Different benches, different
+rungs — comparing them is the confound this campaign has a standing rule
+against, and I made it.
+
+What was actually measured (job 26772775, BOTH rungs in ONE job on ONE node
+set, so this part is internally controlled):
+
+| rung | ms/step | ppermutes/step |
+|---|---|---|
+| C768/L60 kt=2, 24 GPUs | 67.54 | 123 |
+| C768/L60 kt=3, 54 GPUs | 52.85 |  99 |
+
+24->54 = 1.278x on 2.25x devices = **efficiency 0.568**. Not tile-floor
+limited: C768 leaves 147.5k columns/GPU at 24 and 65.6k at 54, both far above
+the ~30k floor.
+
+THE UNRECONCILED NUMBER, which blocks any cube optimisation: the campaign's
+own row records C768/L60 at 24 A100 as **14.09 ms/step**; this bench reports
+**67.54 ms** for a nominally identical resolution, level count and device
+count — 4.8x apart. Either they are different code paths (likely: face-sharded
+cs-spmd vs the tiled `6*kt^2` lane) or one of them is mismeasured. Until that
+is settled, no cube number here can be compared to the campaign's, and the
+0.568 cannot be called a regression or a limit.
+
+AND THE LEVER DOES NOT PAY ON THIS EVIDENCE. The exchange structure is real
+and was censused from the compiled module: 396 collective-permutes on a CPU
+24-device proxy fall into just 12 distinct directions (the documented schedule
+— 4 edge strips + 4 guard slivers + 4 corner rounds), so the step CALLS the
+exchange ~33 times, once per field, exactly the shape lat-lon fixed with a
+packed multi-field pad. `packed_pad_halo_4d` already implements that idea but
+requires the face-sharded `(6, n, n)` prefix, so the TILED lane has no packed
+variant. Tempting — but price it first: 123 collectives x 29.7 us = 3.65 ms,
+which is **5.4 % of the measured 67.54 ms step**. Even removing EVERY
+collective cannot pay for the work. The cube's time is not in its halo on this
+lane, and the 4.8x reconciliation is the thing to chase instead.
+
+(GPU combines collective-permutes ~3.2x: the CPU proxy shows 396 where the GPU
+executable holds 123. Use the proxy for STRUCTURE, never for the count.)

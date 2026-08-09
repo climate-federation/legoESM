@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=uni_train
 #SBATCH --partition=gpu
+# The T106 configs are sized for an 80 GB card (base_t106_allyears.yaml says so
+# explicitly). Levante's gpu partition mixes 59 a100_80 nodes with 4 a100_40
+# nodes and hands out whichever is free, so an unconstrained job dies with
+# RESOURCE_EXHAUSTED on the 1-in-16 chance it lands on a 40 GB card — that is
+# exactly how the column_nn arm (26721035, l40369) died. Constraining costs
+# nothing: it excludes 4 of 63 nodes.
+#SBATCH --constraint=a100_80
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=200G
@@ -44,7 +51,51 @@ resubmit_self() {
   export CAMPAIGN SUITE VARIANT OUT CHAIN_MAX
   export CHAIN=$((CHAIN+1))
   export RESUME=1
-  sbatch --export=ALL "$REPO/scripts/cluster/unified_training/train_levante.slurm"
+  # This script carries NO ``#SBATCH --account`` (see the header: the account
+  # is a submit-time argument), and Levante REJECTS an account-less job. A bare
+  # ``sbatch`` here therefore fails at submit while _chain_body.sh has already
+  # logged "chaining link N" — the chain dies silently and the run just stops
+  # mid-curriculum. Observed 2026-07-28 on the classical arm: link 0 exhausted
+  # its budget at epoch 9/11, printed "not complete -> chaining link 1/6", and
+  # no job was ever queued.
+  #
+  # ``SBATCH_ACCOUNT`` / ``SBATCH_CONSTRAINT`` are sbatch's own environment
+  # fallbacks, so exporting them is enough — no extra flags to keep in sync.
+  # SLURM_JOB_ACCOUNT is set by the running job, which covers the common case
+  # of a first submit that passed -A on the command line (that does NOT put
+  # SBATCH_ACCOUNT in the job environment).
+  export SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-${SLURM_JOB_ACCOUNT:-}}"
+  if [ -z "$SBATCH_ACCOUNT" ]; then
+    echo "[unified-train] REFUSING to chain: no account resolvable from " \
+         "SBATCH_ACCOUNT or SLURM_JOB_ACCOUNT, and Levante rejects an " \
+         "account-less job. Resubmit by hand with -A <proj>." >&2
+    return 1
+  fi
+  # Memory-class constraint and GPU COUNT must ride along too. SBATCH_* are
+  # sbatch INPUT options, not a record of what the CLI asked for: an initial
+  # `sbatch -C a100_80 --gpus=4 ...` sets NEITHER, so a naive resubmit silently
+  # drops to the script's `#SBATCH --gpus=1` (disabling the pmap path) and loses
+  # the 80 GB constraint (OOM on a 40 GB card). Recover them from what SLURM
+  # reports for the RUNNING job, then fall back to the explicit CHAIN_* knobs.
+  # (codex review 2026-07-30)
+  # Only export when non-empty: an exported EMPTY SBATCH_CONSTRAINT is still a
+  # set sbatch input option and would override this script's
+  # ``#SBATCH --constraint=a100_80``, silently putting the next link back on a
+  # 40 GB card.
+  local _constraint="${SBATCH_CONSTRAINT:-${CHAIN_CONSTRAINT:-${SLURM_JOB_CONSTRAINT:-}}}"
+  if [ -n "$_constraint" ]; then
+    export SBATCH_CONSTRAINT="$_constraint"
+  fi
+  local _gpus="${CHAIN_GPUS:-}"
+  if [ -z "$_gpus" ] && [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then
+    _gpus="$SLURM_GPUS_ON_NODE"
+  fi
+  local _args=()
+  [ -n "$_gpus" ] && _args+=(--gpus="$_gpus")
+  echo "[unified-train] chaining with account=$SBATCH_ACCOUNT " \
+       "constraint=${_constraint:-<script default>} gpus=${_gpus:-<script default>}"
+  sbatch "${_args[@]}" --export=ALL \
+    "$REPO/scripts/cluster/unified_training/train_levante.slurm"
 }
 
 source "$REPO/scripts/cluster/unified_training/_chain_body.sh"
