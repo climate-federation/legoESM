@@ -61,7 +61,7 @@ srun --nodes=4 --ntasks=16 --ntasks-per-node=4 --gpus-per-node=4 \
 # a validator that accepts any row validates nothing).
 check_leg() {  # file leg nd offsets
   "$PY" - "$1" "$2" "$3" "$4" <<'EOF' || return 1
-import json, sys
+import json, math, sys
 path, leg, nd, offs = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 want_offsets = [int(t) for t in offs.split(",")]
 try:
@@ -76,7 +76,8 @@ if len(rows) != 3:
 for r in rows:
     ok = (r["component"] == "halo_collectives_microbench"
           and r["n_devices"] == nd and r["offsets"] == want_offsets
-          and r["verified_exact"] is True and r["per_fill_us"] > 0
+          and r["verified_exact"] is True
+          and math.isfinite(r["per_fill_us"]) and r["per_fill_us"] > 0
           and r["env_overlap"] == "0")
     if not ok:
         print(f"{leg}: row fails binding: {r}"); sys.exit(1)

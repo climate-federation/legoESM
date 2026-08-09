@@ -25,10 +25,15 @@ Production-faithfulness of the control (codex round-1 findings):
   garbage-slot staging buffer (mirroring ``cell_local.at[rc].set`` with
   the ``max_lc`` pad target). Devices without a partner in a round
   still execute the collective, like production.
-* the ``ragged`` arm performs the SAME index-gather (one fused gather
-  for all rounds) and the same garbage-slot scatter, so the two arms
-  differ in collective STRUCTURE only (k sequential rounds vs one
-  grouped call), which is the variable under test.
+* the ``ragged`` arm performs ONE fused index-gather for all blocks and
+  receives contiguously into the staging buffer (no garbage slot — the
+  grouped collective fills it exactly). NOTE (codex round-2): the arms
+  therefore differ in BOTH collective structure (k sequential rounds vs
+  one grouped call) AND local-op fusion (k gathers+scatters vs one
+  gather) — deliberately, because that is precisely the pair of designs
+  the production refactor chooses between. Each arm's ``per_fill_us``
+  is its design's FULL fill cost; the ratio is the shippable win, not
+  an isolated collective-latency effect.
 * round payloads here are uniform across pairs, so production's
   pad-to-round-max is a no-op in this instrument; the real schedule's
   padding waste is NOT modelled (stated limitation).
