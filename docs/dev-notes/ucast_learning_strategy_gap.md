@@ -2413,3 +2413,54 @@ wind component and on temperature.
    and sample loop still need threading.
 4. **MPAS** — refused with its three blockers named; needs its own carry,
    forcing and eval path.
+
+# FOUND: THE SPECTRAL FILTER ON lnps WAS THE BASE-STATE OFFSET (2026-08-09)
+
+Codex located it by reading the code; the perturbation test confirmed it in
+one round. `apply_spectral_filter_to_state` damped `lnps_hat` every 600 s
+step (0.01 retention at degree 63 => ~1e-72 over 6 h) while `phis_hat` is
+static and never filtered — so the terrain-locked fine structure of p_s that
+hydrostatic balance requires is annihilated within hours. Probe
+(`--vs-reconciled`, direct p_s, area-weighted, sigma_top=0.05, 6 cases, 6 h):
+
+| configuration | fixed p_s pattern | per-case residual |
+|---|---|---|
+| zero physics, lnps NOT filtered | **237 Pa** | 92 Pa |
+| zero physics, legacy lnps filter | 1108 Pa | 100 Pa |
+| trained column_nn, legacy filter | **1147 Pa (99% of variance)** | 108 Pa |
+| trained column_nn, filter fix, same checkpoint | 352 Pa | 101 Pa |
+| zero physics, filter fix | 243 Pa | 93 Pa |
+
+## Retractions this forces, stated loudly
+
+* **"Physics DOUBLES the 6 h error" — RETRACTED.** A filter-on/filter-off
+  confound: the trained arms were always scored WITH the lnps filter, the
+  bare-dycore probe WITHOUT it. Physics adds ~40 Pa, not ~500.
+* **The "213 Pa structured residual with no mechanism" numbers were measured
+  on the WRONG VERTICAL COORDINATE** (probe built sigma_top=0.01 vs the
+  arms' 0.05; codex round-2). Corrected bare-dycore fixed offset: 237 Pa.
+  The A/B directions all survive (both sides shared the defect).
+* The mslp-reduction attribution (76%) applies to the BARE arm only; for the
+  trained arms the offset was in the p_s FIELD itself, via the filter.
+
+## Why every training lever was null, finally
+
+Optimizer, capacity, data volume, physics package — all acted on physics.
+The binding error was injected by the filter chain after every step, so no
+training recipe could remove it (the MLP partially learned to compensate:
+its checkpoint scores 352 Pa under the fixed filter vs 243 zero-physics —
+that learned compensation is now a train/eval mismatch the retrain removes).
+
+## Status
+
+* Fix: `filter_lnps=False` default (commit 0048e8a5a); SFNO state-update
+  path keeps legacy True (checkpoints trained under it; ordering contract).
+* 120 h trained rollout with unfiltered lnps: FINITE, normal magnitude
+  (GLM-5.2's stability concern; weak dedicated lnps damping is the
+  documented fallback if long training rollouts ever need it).
+* Retrains under the fix: jobs 26819278 (column_nn) / 26819279 (classical),
+  one variable vs the anchored baselines. Expected: 6 h mslp fixed pattern
+  in the few-hundred-Pa class (persistence 366 Pa, floor 260 Pa) and z500
+  24 h moving from ~91 m toward the sfno band; per-case residual ~100 Pa
+  says the genuine short-lead forecast error is small.
+* PR #1531.
