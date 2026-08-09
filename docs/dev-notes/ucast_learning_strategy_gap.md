@@ -2090,3 +2090,21 @@ total (457 Pa) is lower than the trained model's 6 h error (~1011 Pa), so the
 fixed FRACTION is established for the bare dycore and is PLAUSIBLE rather than
 measured for the full trained arms. Re-running `--vs-era5` with a trained
 checkpoint and more cases is the obvious confirmation, and it is cheap.
+
+### Anchored classical COMPLETED — the -30 % holds to the final epoch
+
+Job 26794956, COMPLETED in 11:15:11, all 11 epochs, `params.eqx` written.
+
+| epoch (120 h lead) | baseline | anchored | delta |
+|---|---|---|---|
+| 9 | 65.33 | 45.46 | **-30.4 %** |
+| 10 (final) | 65.28 | 45.46 | **-30.4 %** |
+
+Identical at both epochs, so this is a converged difference and not a snapshot
+of a noisy trajectory. The classical arm's headline: **the dry-mass anchor is
+worth -30.4 % of its 5-day training loss**, matching column_nn's -25.9 % from
+the same one-line change.
+
+Final-checkpoint WB2 scorecard submitted (job 26812046) at leads
+6/12/24/72/120/240 so the anchored classical row is directly comparable to the
+epoch-9 row already in hand.
