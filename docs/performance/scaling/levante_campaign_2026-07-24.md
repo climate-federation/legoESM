@@ -2789,3 +2789,30 @@ therefore is NOT collective-count-bound at 24 devices — remaining
 candidates: per-CP latency floors x 101, launch-bound compute (the
 MPAS nsys story), or skew; next instrument = nsys on the closed-loop
 C768 step.
+
+### Cube deficit ATTRIBUTED: 81% of the step is non-kernel wall (2026-08-09 night, job 26829838)
+
+nsys capture of the closed-loop C768@24 step (19.46 ms with profiler ~=
+19.0 unprofiled; ranks 0/1 co-located; analyzer
+scripts/bench/analyze_nsys_kernel_mix.py, loop burst located by kernel
+density — the naive tail window reads setup all-gathers instead):
+
+| bucket | per step | share of wall |
+|---|---|---|
+| ncclDevKernel_SendRecv | ~2.9 ms (median 62 us) | 15% |
+| other NCCL | ~0.4 ms | 2% |
+| compute kernels | ~0.35 ms (n~28, median 1.7 us) | 1.8% |
+| **gaps (no kernel)** | **~15.7 ms** | **~81%** |
+
+With 101 collective-permutes per compiled step, the gap works out to
+~155 us of effective host/launch/sync overhead per sequential
+collective — the SoL-class launch floor, the same regime the lat-lon
+bound analysis inferred (ratio 2.35-3.2 "per-CP effective overhead").
+MEASURED: the kernel shares above. PLAUSIBLE: the gaps are host
+dispatch/sync rather than inter-rank wait (single-rank view; the
+rank-0/1 pair skew analysis would split it). Fix class: fewer
+SEQUENTIAL collective epochs — stage-graph restructuring or upstream
+XLA/NCCL (device-side collective launch) — consistent with every lane's
+measured ceiling. Cheap source-level levers on this lane are now
+exhausted with receipts: count (fused halo, refuted — XLA combines),
+payload (62 us median vs 30 us wire — modest), compute (1.8%).
