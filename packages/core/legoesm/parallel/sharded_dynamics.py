@@ -1718,7 +1718,7 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     )
 
 
-def _greedy_edge_coloring_ordered(comm_pairs, order):
+def greedy_edge_coloring_ordered(comm_pairs, order):
     """First-fit edge coloring visiting ``order`` (a list of normalized
     ``(min,max)`` pairs). Always a PROPER coloring; the color count depends
     on the visitation order.
@@ -1738,15 +1738,15 @@ def _greedy_edge_coloring_ordered(comm_pairs, order):
     return edge_colors
 
 
-def _greedy_edge_coloring(comm_pairs):
+def greedy_edge_coloring(comm_pairs):
     """Legacy first-fit coloring on sorted pairs (the reference/never-regress
-    baseline for :func:`_multi_ordering_edge_coloring`). Worst case
+    baseline for :func:`multi_ordering_edge_coloring`). Worst case
     ``2*max_degree - 1`` colors — each color is one ppermute ROUND, and the
     route-B MPAS lane is round-latency-bound (#1113), so excess colors are
     pure wall-clock.
     """
     edges = sorted({(min(u, v), max(u, v)) for u, v in comm_pairs})
-    return _greedy_edge_coloring_ordered(comm_pairs, edges)
+    return greedy_edge_coloring_ordered(comm_pairs, edges)
 
 
 def _check_proper_edge_coloring(edge_colors, comm_pairs):
@@ -1772,7 +1772,7 @@ def _check_proper_edge_coloring(edge_colors, comm_pairs):
 _COLORING_SHUFFLE_SEEDS = tuple(range(16))
 
 
-def _multi_ordering_edge_coloring(comm_pairs):
+def multi_ordering_edge_coloring(comm_pairs):
     """Proper edge coloring via multi-start first-fit; returns the coloring
     using the FEWEST colors (= ppermute rounds) across several deterministic
     visitation orders.
@@ -1811,7 +1811,7 @@ def _multi_ordering_edge_coloring(comm_pairs):
     best_colors: dict[tuple[int, int], int] | None = None
     best_rounds = None
     for order in orders:
-        ec = _greedy_edge_coloring_ordered(comm_pairs, order)
+        ec = greedy_edge_coloring_ordered(comm_pairs, order)
         rounds = max(ec.values(), default=-1) + 1
         if best_rounds is None or rounds < best_rounds:
             best_rounds, best_colors = rounds, ec
@@ -1907,9 +1907,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     #    devices). It can never regress: the legacy sorted order is one of
     #    its candidates and it takes the min. Both are verified proper.
     # ------------------------------------------------------------------
-    greedy_colors = _greedy_edge_coloring(comm_pairs)
+    greedy_colors = greedy_edge_coloring(comm_pairs)
     n_rounds_greedy = max(greedy_colors.values()) + 1
-    multi_colors, max_degree = _multi_ordering_edge_coloring(comm_pairs)
+    multi_colors, max_degree = multi_ordering_edge_coloring(comm_pairs)
     n_rounds_multi = max(multi_colors.values()) + 1
     # Adopt the multi-start coloring ONLY when it STRICTLY reduces rounds;
     # on a tie keep the exact legacy sorted-greedy coloring so the produced

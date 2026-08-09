@@ -11,14 +11,35 @@ zero-size slices for non-neighbours; JVP+transpose rules registered in
 jax 0.10.0).
 
 This microbenchmark de-risks that swap BEFORE any schedule-builder
-refactor, on a SYNTHETIC ring-offset graph matching the production
-degree (8-13 of 64-128):
+refactor, on a SYNTHETIC ring-offset graph at production degree
+(8-13 of 64-128 devices).
 
-* ``ppermute``  — one rotation ppermute per directed offset, sequential
-  (same collective count as the production coloured schedule at gap 0).
-* ``ragged``    — ONE ``ragged_all_to_all`` carrying every neighbour
-  block; non-neighbours get zero-size slices.
-* ``uniform``   — ``jax.lax.all_to_all`` (tiled): the ICON "pad to
+Production-faithfulness of the control (codex round-1 findings):
+
+* the ``ppermute`` arm colours the SAME graph with the PRODUCTION
+  colourers (``greedy_edge_coloring`` / ``multi_ordering_edge_coloring``
+  from ``legoesm.parallel``, selected exactly like
+  ``_build_ppermute_schedule``) into bidirectional pair-matching rounds,
+  gathers each round's rows from the operand through an index array
+  (mirroring ``cell_pack[sc]``), and scatters receives through a
+  garbage-slot staging buffer (mirroring ``cell_local.at[rc].set`` with
+  the ``max_lc`` pad target). Devices without a partner in a round
+  still execute the collective, like production.
+* the ``ragged`` arm performs the SAME index-gather (one fused gather
+  for all rounds) and the same garbage-slot scatter, so the two arms
+  differ in collective STRUCTURE only (k sequential rounds vs one
+  grouped call), which is the variable under test.
+* round payloads here are uniform across pairs, so production's
+  pad-to-round-max is a no-op in this instrument; the real schedule's
+  padding waste is NOT modelled (stated limitation).
+* like production (``_ppermute_halo_fill``: every round's send gathers
+  from ``cell_pack``, not from prior rounds' output), rounds carry NO
+  data dependence on each other — serialization, if observed, comes
+  from the runtime/stream schedule, which is precisely what is being
+  measured. ``LEGOESM_XLA_OVERLAP`` must be pinned by the launcher;
+  the effective value is recorded in every JSONL row.
+
+* ``uniform`` — ``jax.lax.all_to_all`` (tiled): the ICON "pad to
   uniform" fallback; sends the pair payload to ALL n-1 peers. Its
   timing loop chains the raw all_to_all WITHOUT the staging gather
   (shape mismatch would break the carry), which biases IN FAVOUR of
@@ -30,23 +51,25 @@ opcode `ragged-all-to-all` is not supported by XLA:CPU ThunkEmitter"),
 so semantics CANNOT be pre-checked on CPU. The instrument therefore
 verifies itself in the SAME process before timing: every strategy's
 received staging buffer must equal the analytic expectation exactly
-(pattern payload, ``np.array_equal``) or the run aborts — no timing row
-is emitted from an unverified exchange.
+(pattern payload, per-addressable-shard comparison) or the run aborts —
+no timing row is emitted from an unverified exchange.
 
 Usage
 -----
-    # intra-node, 4 local GPUs
-    python scripts/bench/bench_halo_collectives.py --n-devices 4
+    # intra-node, 4 local GPUs (offsets must not alias mod n_dev)
+    python scripts/bench/bench_halo_collectives.py \
+        --n-devices 4 --offsets 1,-1,2
 
     # inter-node (one process per GPU)
     srun --ntasks=8 --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none \
         python scripts/bench/bench_halo_collectives.py \
-        --multicontroller --n-devices 8
+        --multicontroller --n-devices 8 --offsets 1,-1,2,-2,3,-3
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import time
@@ -60,24 +83,34 @@ AXIS = "dev"
 _UNIFORM_MAX_NDEV = 32
 
 
-def build_offset_graph_metadata(n_dev: int, offsets: list[int], rows: int):
-    """Ragged-a2a metadata for the ring-offset graph, host-side numpy.
+def build_offset_graph_metadata(n_dev: int, offsets: list[int], rows: int,
+                                seed: int | None = 0):
+    """Ragged-a2a + coloured-round metadata for the ring-offset graph.
 
     Graph: device ``d`` exchanges with ``(d + o) % n_dev`` for each
     ``o`` in ``offsets`` (directed; pass both signs for a symmetric
-    halo). Send-buffer layout on ``d``: block ``j`` (j-th offset) holds
-    the ``rows`` rows for destination ``(d + offsets[j])``. Receive
-    staging layout: blocks ordered by SOURCE RANK ascending —
-    ``ragged_all_to_all`` delivers at sender-chosen ``output_offsets``,
-    and every strategy in this bench is mapped to this same layout so
-    the verify stage can compare them byte-for-byte.
+    halo). Operand layout on ``d``: ``deg*rows`` owned rows; the rows
+    SENT to destination block ``j`` (j-th offset) are
+    ``send_row_idx[d, j*rows:(j+1)*rows]`` — a seeded shuffled index so
+    both arms pay a real (non-iota) gather, mirroring production's
+    ``cell_pack[sc]``. Receive staging layout: blocks ordered by SOURCE
+    RANK ascending; strategy arms scatter through a garbage-slot buffer
+    (production's ``max_lc`` pad-target pattern).
 
-    Returns dict of (n_dev, n_dev) int32 arrays ``send_sizes``,
-    ``input_offsets``, ``output_offsets``, ``recv_sizes`` plus the
-    per-device ``recv_src_order`` (n_dev, degree) int32 (ascending
-    sources), consistent with the ragged_all_to_all contract
-    ``send_sizes == all_to_all(recv_sizes)`` (asserted here).
+    Also colours the undirected pair graph with the PRODUCTION
+    colourers, selected exactly like ``_build_ppermute_schedule``
+    (multi-ordering only on a strict round win).
+
+    Returns a dict with the ragged_all_to_all arrays (``send_sizes``,
+    ``input_offsets``, ``output_offsets``, ``recv_sizes`` — all
+    (n_dev, n_dev) int32, contract ``send_sizes == recv_sizes.T``
+    asserted), ``recv_src_order`` (n_dev, deg), ``send_row_idx``
+    (n_dev, deg*rows), and the coloured ``rounds`` (list of pair
+    lists) + ``n_rounds`` + ``coloring_method``.
     """
+    from legoesm.parallel import (greedy_edge_coloring,
+                                  multi_ordering_edge_coloring)
+
     if len(set(offsets)) != len(offsets):
         raise ValueError(f"duplicate offsets: {offsets}")
     if any(o % n_dev == 0 for o in offsets):
@@ -88,6 +121,11 @@ def build_offset_graph_metadata(n_dev: int, offsets: list[int], rows: int):
         raise ValueError(
             f"offsets {offsets} alias mod n_dev={n_dev}; degree would "
             f"shrink and blocks would overlap")
+    # The coloured control pairs each round bidirectionally; that needs
+    # the neighbour set to be symmetric (o and -o both present mod n).
+    if set(dsts) != {(-o) % n_dev for o in offsets}:
+        raise ValueError(f"offsets {offsets} not symmetric mod {n_dev}; "
+                         f"the halo exchange is bidirectional")
 
     deg = len(offsets)
     send_sizes = np.zeros((n_dev, n_dev), np.int32)
@@ -95,6 +133,14 @@ def build_offset_graph_metadata(n_dev: int, offsets: list[int], rows: int):
     output_offsets = np.zeros((n_dev, n_dev), np.int32)
     recv_sizes = np.zeros((n_dev, n_dev), np.int32)
     recv_src_order = np.zeros((n_dev, deg), np.int32)
+
+    if seed is None:      # identity gather — hand-checkable test cases
+        send_row_idx = np.tile(np.arange(deg * rows, dtype=np.int32),
+                               (n_dev, 1))
+    else:
+        rng = np.random.default_rng(seed)
+        send_row_idx = np.stack([rng.permutation(deg * rows)
+                                 for _ in range(n_dev)]).astype(np.int32)
 
     for d in range(n_dev):
         for j, o in enumerate(offsets):
@@ -113,45 +159,77 @@ def build_offset_graph_metadata(n_dev: int, offsets: list[int], rows: int):
                 output_offsets[d, dst] = srcs.index(d) * rows
 
     assert np.array_equal(send_sizes, recv_sizes.T), "size invariant broken"
+
+    # Production colouring + production selection rule (strict win only).
+    comm_pairs = set()
+    for d in range(n_dev):
+        for o in offsets:
+            dst = (d + o) % n_dev
+            comm_pairs.add((min(d, dst), max(d, dst)))
+    greedy = greedy_edge_coloring(comm_pairs)
+    n_greedy = max(greedy.values()) + 1
+    multi, _max_deg = multi_ordering_edge_coloring(comm_pairs)
+    n_multi = max(multi.values()) + 1
+    if n_multi < n_greedy:
+        colors, n_rounds, method = multi, n_multi, "multi_greedy"
+    else:
+        colors, n_rounds, method = greedy, n_greedy, "greedy"
+    rounds: list[list[tuple[int, int]]] = [[] for _ in range(n_rounds)]
+    for (u, v), c in colors.items():
+        rounds[c].append((u, v))
+
     return {
         "send_sizes": send_sizes,
         "input_offsets": input_offsets,
         "output_offsets": output_offsets,
         "recv_sizes": recv_sizes,
         "recv_src_order": recv_src_order,
+        "send_row_idx": send_row_idx,
+        "rounds": rounds,
+        "n_rounds": n_rounds,
+        "coloring_method": method,
     }
 
 
 def expected_staging(x: np.ndarray, meta: dict, rows: int) -> np.ndarray:
-    """Analytic post-exchange staging buffer (the verify oracle)."""
+    """Analytic post-exchange staging buffer (the verify oracle).
+
+    Device ``d``, staging block ``k`` (source ``s = recv_src_order[d,k]``)
+    holds the rows source ``s`` gathered for destination ``d``:
+    ``x[s, send_row_idx[s, j*rows:(j+1)*rows]]`` where ``j`` is the
+    offset-block index of ``d`` on ``s`` (``input_offsets[s, d]/rows``).
+    """
     n_dev = x.shape[0]
     exp = np.empty_like(x)
     for d in range(n_dev):
         for k, s in enumerate(meta["recv_src_order"][d]):
             off = meta["input_offsets"][s, d]
-            exp[d, k * rows:(k + 1) * rows] = x[s, off:off + rows]
+            idx = meta["send_row_idx"][s, off:off + rows]
+            exp[d, k * rows:(k + 1) * rows] = x[s, idx]
     return exp
 
 
 def pattern_payload(n_dev: int, deg: int, rows: int, width: int) -> np.ndarray:
-    """Distinct value per (device, row) so misrouted blocks cannot match."""
+    """Globally unique value per (device, row): d*deg*rows + j — no two
+    rows anywhere share a value, so a misrouted block cannot match."""
     x = np.zeros((n_dev, deg * rows, width), np.float32)
     for d in range(n_dev):
-        x[d] = (d * 100_000 + np.arange(deg * rows))[:, None]
+        x[d] = (np.float64(d) * deg * rows + np.arange(deg * rows))[:, None]
     return x
 
 
-def uniform_operand(x_np: np.ndarray, n_dev: int, offsets: list[int],
-                    rows: int, width: int) -> np.ndarray:
-    """Map the canonical per-offset payload into the uniform-a2a layout:
-    per device, block i of n_dev = payload for peer i (zeros for
-    non-neighbours)."""
+def uniform_operand(x_np: np.ndarray, meta: dict, n_dev: int,
+                    offsets: list[int], rows: int, width: int) -> np.ndarray:
+    """Map the (gathered) per-offset payload into the uniform-a2a
+    layout: per device, block i of n_dev = payload for peer i (zeros
+    for non-neighbours). Gather applied host-side so the uniform arm
+    exchanges the same block contents."""
     xu = np.zeros((n_dev, n_dev * rows, width), np.float32)
     for d in range(n_dev):
         for j, o in enumerate(offsets):
             dst = (d + o) % n_dev
-            xu[d, dst * rows:(dst + 1) * rows] = \
-                x_np[d, j * rows:(j + 1) * rows]
+            idx = meta["send_row_idx"][d, j * rows:(j + 1) * rows]
+            xu[d, dst * rows:(dst + 1) * rows] = x_np[d, idx]
     return xu
 
 
@@ -165,41 +243,56 @@ def make_strategies(mesh, n_dev, offsets, rows, width, meta, shard_map, P):
     import jax.numpy as jnp
 
     deg = len(offsets)
-    # ppermute arm: per directed offset o, ONE rotation ppermute
-    # (everyone sends its o-block to d+o, receives from d-o), placed at
-    # the staging slot of source d-o. deg sequential collectives == the
-    # production coloured schedule's collective count at Vizing gap 0.
-    perms = [
-        [(d, (d + o) % n_dev) for d in range(n_dev)] for o in offsets
-    ]
-    # staging slot (block index) of source (d - o) on device d, per
-    # offset j — device-dependent, precomputed (n_dev, deg).
-    slot_of_offset = np.zeros((n_dev, deg), np.int32)
+    n_stage = deg * rows
+
+    # --- coloured bidirectional pair rounds (production structure) ----
+    # Per round r and device d: partner (or -1), the offset-block j
+    # sent to that partner, and the staging slot receiving from it
+    # (garbage slot n_stage when no partner — production's max_lc pad).
+    n_rounds = meta["n_rounds"]
+    perms = []
+    r_send_block = np.zeros((n_dev, n_rounds), np.int32)
+    r_recv_slot = np.full((n_dev, n_rounds), deg, np.int32)  # deg=garbage blk
+    dst_block = {}
     for d in range(n_dev):
-        order = list(meta["recv_src_order"][d])
         for j, o in enumerate(offsets):
-            slot_of_offset[d, j] = order.index((d - o) % n_dev)
+            dst_block[(d, (d + o) % n_dev)] = j
+    for r, pairs in enumerate(meta["rounds"]):
+        perm = []
+        for u, v in pairs:
+            perm.append((u, v))
+            perm.append((v, u))
+            for a, b in ((u, v), (v, u)):
+                r_send_block[a, r] = dst_block[(a, b)]
+                order = list(meta["recv_src_order"][a])
+                r_recv_slot[a, r] = order.index(b)
+        perms.append(perm)
 
-    def ppermute_body(xl, slots):
-        buf = jnp.zeros_like(xl[0])
-        for j in range(deg):
-            block = jax.lax.dynamic_slice_in_dim(xl[0], j * rows, rows)
-            recv = jax.lax.ppermute(block, AXIS, perm=perms[j])
-            buf = jax.lax.dynamic_update_slice_in_dim(
-                buf, recv, slots[0, j] * rows, axis=0)
-        return buf[None]
+    def ppermute_body(xl, sri, sblk, rslot):
+        # staging with one garbage BLOCK at the end (production's
+        # garbage-slot scatter target), trimmed on return.
+        stag = jnp.zeros((n_stage + rows, width), xl.dtype)
+        for r in range(n_rounds):
+            off = sblk[0, r] * rows
+            idx = jax.lax.dynamic_slice_in_dim(sri[0], off, rows)
+            block = xl[0][idx]                      # real gather
+            recv = jax.lax.ppermute(block, AXIS, perm=perms[r])
+            stag = jax.lax.dynamic_update_slice_in_dim(
+                stag, recv, rslot[0, r] * rows, axis=0)
+        return stag[:n_stage][None]
 
-    def ragged_body(xl, ssl, iol, ool, rsl):
-        out = jnp.zeros_like(xl[0])
+    def ragged_body(xl, sri, ssl, iol, ool, rsl):
+        sendbuf = xl[0][sri[0]]                     # ONE fused gather
+        out = jnp.zeros((n_stage, width), xl.dtype)
         r = jax.lax.ragged_all_to_all(
-            xl[0], out, iol[0], ssl[0], ool[0], rsl[0], axis_name=AXIS)
+            sendbuf, out, iol[0], ssl[0], ool[0], rsl[0], axis_name=AXIS)
         return r[None]
 
     def uniform_verify_body(xl, gather_idx):
         r = jax.lax.all_to_all(xl[0], AXIS, split_axis=0, concat_axis=0,
                                tiled=True)
         stag = r.reshape(n_dev, rows, width)[gather_idx[0]]
-        return stag.reshape(deg * rows, width)[None]
+        return stag.reshape(n_stage, width)[None]
 
     def uniform_time_body(xl, gather_idx):
         # raw exchange only; carry keeps the (n_dev*rows, width) shape
@@ -222,16 +315,17 @@ def make_strategies(mesh, n_dev, offsets, rows, width, meta, shard_map, P):
 
     return {
         "ppermute": {
-            "verify_fn": wrap(ppermute_body, 2),
-            "time_fn": wrap(ppermute_body, 2),
-            "meta_np": (slot_of_offset,),
-            "n_collectives": deg,
+            "verify_fn": wrap(ppermute_body, 4),
+            "time_fn": wrap(ppermute_body, 4),
+            "meta_np": (meta["send_row_idx"], r_send_block, r_recv_slot),
+            "n_collectives": n_rounds,
         },
         "ragged": {
-            "verify_fn": wrap(ragged_body, 5),
-            "time_fn": wrap(ragged_body, 5),
-            "meta_np": (meta["send_sizes"], meta["input_offsets"],
-                        meta["output_offsets"], meta["recv_sizes"]),
+            "verify_fn": wrap(ragged_body, 6),
+            "time_fn": wrap(ragged_body, 6),
+            "meta_np": (meta["send_row_idx"], meta["send_sizes"],
+                        meta["input_offsets"], meta["output_offsets"],
+                        meta["recv_sizes"]),
             "n_collectives": 1,
         },
         "uniform": {
@@ -242,6 +336,26 @@ def make_strategies(mesh, n_dev, offsets, rows, width, meta, shard_map, P):
             "operand_layout": "uniform",
         },
     }
+
+
+def verify_addressable(got_arr, exp: np.ndarray, name: str) -> None:
+    """Compare only THIS process's addressable shards (a global fetch of
+    a P(dev)-sharded array raises in multicontroller — codex round 1).
+    Any mismatch exits non-zero; with --kill-on-bad-exit the job dies."""
+    n_checked = 0
+    for shard in got_arr.addressable_shards:
+        local = np.asarray(shard.data)
+        want = exp[shard.index]
+        if not np.array_equal(local, want):
+            bad = int((local != want).sum())
+            raise SystemExit(
+                f"VERIFY FAILED for {name} on shard {shard.index}: "
+                f"{bad}/{want.size} elements differ — refusing to time "
+                f"an unverified exchange")
+        n_checked += local.size
+    if n_checked == 0:
+        raise SystemExit(f"VERIFY FAILED for {name}: no addressable "
+                         f"shards on this process")
 
 
 def median_us(fn, args, n_warmup, n_iters):
@@ -266,11 +380,12 @@ def main() -> int:
     p.add_argument("--n-devices", type=int, default=0)
     p.add_argument("--multicontroller", action="store_true")
     p.add_argument("--coordinator", default=None)
-    p.add_argument("--offsets", default="1,-1,2,-2,5,-5,9,-9,13,-13",
-                   help="Directed ring offsets (both signs for a "
-                        "symmetric halo); degree = count. Default "
-                        "degree 10 ~ the measured MPAS partition "
-                        "neighbour count at 64-128 devices.")
+    p.add_argument("--offsets", default="1,-1,2,-2,5,-5,7,-7,6,-6",
+                   help="Directed ring offsets; must be symmetric and "
+                        "alias-free mod n_devices; degree = count. "
+                        "Default degree 10 ~ the measured MPAS "
+                        "partition neighbour count at 64-128 devices "
+                        "(valid for n_devices >= 15).")
     p.add_argument("--rows", type=int, default=700,
                    help="Rows per neighbour block (~the s9 per-pair "
                         "halo cell count).")
@@ -325,6 +440,10 @@ def main() -> int:
                   f"(operand O(n_dev^2); arm receipted at small n_dev)")
         wanted = [w for w in wanted if w != "uniform"]
 
+    if is_root:
+        print(f"coloured control: {meta['n_rounds']} rounds "
+              f"({meta['coloring_method']}), degree {deg}", flush=True)
+
     # Sharded device arrays for every input (multicontroller-safe put —
     # never a whole-array device_put of a to-be-sharded arg).
     x_np = pattern_payload(n_dev, deg, rows, width)
@@ -332,29 +451,24 @@ def main() -> int:
     x_dev = addressable_shard_put(x_np, shard)
     xu_dev = None
     if "uniform" in wanted:
-        xu_np = uniform_operand(x_np, n_dev, offsets, rows, width)
+        xu_np = uniform_operand(x_np, meta, n_dev, offsets, rows, width)
         xu_dev = addressable_shard_put(xu_np, shard)
     for s in strategies.values():
         s["meta_dev"] = tuple(
             addressable_shard_put(m, shard) for m in s["meta_np"])
 
     # ------------------------------------------------------------------
-    # VERIFY stage — every strategy against the analytic oracle, exact.
-    # No timing row without this passing (instrument-validation rule).
+    # VERIFY stage — every strategy against the analytic oracle, exact,
+    # per-addressable-shard. No timing row without this passing
+    # (instrument-validation rule).
     # ------------------------------------------------------------------
     for name in wanted:
         s = strategies[name]
         operand = xu_dev if s.get("operand_layout") == "uniform" else x_dev
         got_arr = jax.jit(s["verify_fn"])(operand, *s["meta_dev"])
-        got = np.array(jax.device_get(got_arr))
-        if not np.array_equal(got, exp):
-            bad = int((got != exp).sum())
-            raise SystemExit(
-                f"VERIFY FAILED for {name}: {bad}/{exp.size} elements "
-                f"differ — refusing to time an unverified exchange")
+        verify_addressable(got_arr, exp, name)
         if is_root:
-            print(f"verify {name}: OK ({exp.size} elements exact)",
-                  flush=True)
+            print(f"verify {name}: OK (exact, per-shard)", flush=True)
 
     # ------------------------------------------------------------------
     # TIME stage — chained reps, dispatch-subtracted
@@ -398,12 +512,15 @@ def main() -> int:
             "width": width,
             "pair_bytes": pair_bytes,
             "n_collectives_per_fill": s["n_collectives"],
+            "coloring_method": meta["coloring_method"],
             "per_fill_us": round(per, 2),
             "single_call_us": round(t1, 2),
             "n_reps": args.n_reps,
             "n_iters": args.n_iters,
             "backend": jax.default_backend(),
             "git_sha": sha,
+            "env_overlap": os.environ.get("LEGOESM_XLA_OVERLAP", ""),
+            "env_xla_flags": os.environ.get("XLA_FLAGS", ""),
             "verified_exact": True,
         }
         rows_out.append(rec)
@@ -417,7 +534,6 @@ def main() -> int:
         for rec in rows_out:
             print(json.dumps(rec))
         if args.out:
-            import os
             os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
             with open(args.out, "a") as f:
                 for rec in rows_out:
