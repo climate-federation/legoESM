@@ -334,14 +334,24 @@ def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K,
         condensation > 0.0, jnp.minimum(condensation, cond_cap), condensation)
 
 
-def _hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
-                           hard_threshold, hard_max_heating_K):
+def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
+                          hard_threshold, hard_max_heating_K):
     """Blend the on-curve hard adjustment into ``condensation`` + rate-limit.
 
     The ONE place the reviewed hard-adjustment logic lives, shared by
     :func:`saturation_adjustment` (in-scheme: ``condensation`` is the smooth
     condensation rate) and :func:`hard_saturation_drain` (driver post-step:
-    ``condensation = 0`` -> a pure activation-gated drain).  Steps:
+    ``condensation = 0`` -> a pure activation-gated drain).
+
+    PUBLIC entry point for a scheme that computes its OWN smooth condensation
+    rate and therefore cannot route through :func:`saturation_adjustment` --
+    e.g. Sundqvist diagnostic large-scale condensation, whose published
+    RH_crit-gated closure is a DIFFERENT smooth form.  Such a scheme passes its
+    own rate in and gets EXACTLY the guard the five bulk warm-rain schemes get
+    (same on-curve solve, same activation ramp, same no-overshoot cap, same
+    per-step heating + mass rate limit) -- there is no second implementation.
+
+    Steps:
 
     1. Solve the bracketed-bisection on-curve root ``cond_hard`` (fp64 when
        available; extreme pools drive large trial-T excursions).
@@ -570,8 +580,8 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
         # Iterated hard saturation adjustment, blended in smoothly where
         # q_v > hard_threshold * q_sat, with the per-step latent-heating rate
         # limit.  The reviewed core is shared with the driver post-step hook
-        # (:func:`hard_saturation_drain`) via :func:`_hard_saturation_blend`.
-        condensation = _hard_saturation_blend(
+        # (:func:`hard_saturation_drain`) via :func:`hard_saturation_blend`.
+        condensation = hard_saturation_blend(
             condensation, T, q_v, p_full, dt, q_sat,
             hard_threshold, hard_max_heating_K)
     if q_c is not None:

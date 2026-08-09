@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import copy
 import shlex
+import warnings
 from typing import Any, NamedTuple
 
 import yaml
@@ -779,6 +780,135 @@ def _resolve_config_type(tag: str):
     return obj
 
 
+class LegacyOceanConstantsWarning(UserWarning):
+    """A decoded ocean config carried BOTH constant spellings and was reconciled.
+
+    Its own class (not a bare ``UserWarning``) because it is the ONLY signal
+    that the rebuilt config is not byte-identical to what was recorded: a caller
+    reproducing a run can escalate it (``warnings.simplefilter("error",
+    LegacyOceanConstantsWarning)``) or silence it deliberately.
+    """
+
+
+def _reconcile_recorded_constants(fields: dict) -> None:
+    """Collapse a PRE-FIX ocean manifest's TWO recorded constant surfaces into one.
+
+    Before the single-surface refactor, ``LatLonCGridOceanConfig`` carried
+    ``g``/``rho_0``/``omega`` as NamedTuple fields IN ADDITION to
+    ``constants: ConstantsConfig``, so ``_encode_config`` (which walks
+    ``_asdict()``) wrote BOTH spellings into every ``run_manifest.json``.  Every
+    such manifest would now hit ``from_flat``'s conflict raise on load --
+    ``legoesm reproduce``, manifest validation and every restart-chain link on an
+    existing ocean run directory -- because the two surfaces genuinely disagreed.
+    That disagreement WAS the #1226 bug; the manifest is its fossil record.
+
+    RESOLUTION RULE: **the pinned (non-default) value wins, per constant.**  NOT
+    a blanket "flat wins" -- the two surfaces diverged in BOTH directions and a
+    blanket rule silently corrupts one family of cards (measured on genuine
+    pre-fix encodings produced by the pre-refactor encoder):
+
+      * the DINO/NEMO cards pinned the FLAT spelling and left ``constants`` on
+        the defaults (``nemo_dino_kamm_mlf`` flat = NEMO's standard gravity /
+        rho0 / omega, ``constants`` = the ``legoesm.constants`` defaults)
+        -> the flat value is the author's intent;
+      * ``veros_acc`` pinned ``constants=VEROS_CONSTANTS_CONFIG`` and left the
+        flat ``omega`` on the ``LatLonCGridOceanConfig`` DEFAULT (constants
+        carries Veros' full-precision Omega, flat carries the rounded legoESM
+        one) -> here the SUB-CONFIG value is the intent, and "flat wins" would
+        silently downgrade Veros' Omega.
+
+    Under the non-default-wins rule all four measured pre-fix cards reconstruct
+    to exactly the constants their POST-fix card produces.  A constant where
+    BOTH surfaces are non-default and disagree has no defensible resolution and
+    still raises.
+
+    PROVENANCE SEMANTICS (deliberate, not an accident): the rebuilt config is a
+    RUNNABLE config, not a bit-record of the historical run.  A pre-fix run
+    really did use two different values in two different code paths; there is no
+    single config that reproduces that, and preserving the recorded
+    ``physics.constants=ConstantsConfig()`` alongside a pinned model-level set
+    would produce a config that ``LatLonCGridOceanModel._validate_config``
+    rejects -- i.e. an unloadable manifest again.  ``from_flat`` therefore
+    propagates the resolved set into ``physics``, and the reconstructed config
+    can differ from the recorded one on the physics block.  The raw JSON remains
+    the provenance record; the :class:`LegacyOceanConstantsWarning` below marks
+    every such rebuild (its own class so a caller can escalate it to an error).
+
+    WHAT THIS DOES *NOT* FIX -- measured, do not over-claim it:
+    ``validate_run_manifest`` (``driver/restart.py:623-628``) DECODES here and
+    then calls ``config_hash_matches`` on the rebuilt config.  The refactor
+    REMOVED three top-level keys from the encoding, and that function's
+    tolerance covers schema GROWTH only (``restart.py``: ``if not new_keys:
+    return False``), so a pre-fix ocean manifest's recorded ``config_hash`` no
+    longer matches and validation still fails -- now with the honest provenance
+    error instead of a bogus "conflicting ocean constants". That is inherent to
+    changing the encoding; closing it needs either a shrink case in
+    ``config_hash_matches`` or a one-shot manifest migration, neither of which
+    belongs in the codec.  Pinned by
+    ``test_pre_fix_manifest_decodes_but_its_recorded_hash_no_longer_matches``.
+    """
+    from legoesm.ocean.constants_config import ConstantsConfig
+    from legoesm.ocean.state import CONSTANTS_FLAT_ALIASES
+
+    # ``isinstance``, NOT "any NamedTuple with a `constants` field": this helper
+    # runs on EVERY tagged NamedTuple in the manifest (it sits inside the
+    # ``_decode_config`` recursion) and everything below assumes a
+    # ``ConstantsConfig`` -- ``getattr(default, "Omega")``, the alias table.  No
+    # other ocean config carries BOTH a ``constants`` field and a flat-alias
+    # field today, but that is an accident of the current schema, not an
+    # invariant; a future one would be silently mangled.  Pin it here.
+    cc = fields.get("constants")
+    if not isinstance(cc, ConstantsConfig):
+        return
+
+    present = [(flat, name) for flat, name in CONSTANTS_FLAT_ALIASES.items()
+               if flat in fields]
+    if not present:
+        return
+    default = type(cc)()
+    winners, resolved, ambiguous = {}, [], []
+    for flat, name in present:
+        rec_flat = fields.pop(flat)
+        rec_sub = getattr(cc, name)
+        if rec_flat == rec_sub:
+            continue                                    # redundant, not a bug
+        dflt = getattr(default, name)
+        if rec_sub == dflt:                             # only FLAT was pinned
+            winners[name] = rec_flat
+            resolved.append(f"{name}: kept flat {rec_flat!r} over "
+                            f"default constants {rec_sub!r}")
+        elif rec_flat == dflt:                          # only the SUB was pinned
+            resolved.append(f"{name}: kept constants {rec_sub!r} over "
+                            f"default flat {rec_flat!r}")
+        else:
+            ambiguous.append((name, rec_sub, rec_flat))
+    if ambiguous:
+        raise ValueError(
+            "ocean run manifest records two DIFFERENT pinned values for "
+            + ", ".join(f"{n} (constants={a!r}, flat={b!r})"
+                        for n, a, b in sorted(ambiguous))
+            + ". Both are non-default, so neither can be shown to be the "
+            "intended one -- edit the manifest to keep a single value."
+        )
+    if resolved:
+        if winners:
+            fields["constants"] = cc._replace(**winners)
+        warnings.warn(
+            "ocean config dict records BOTH the flat g/rho_0/omega and a "
+            "`constants` block (the shape every pre-single-surface run manifest "
+            "has; also reachable by hand-editing a current one). Reconciled by "
+            "keeping the pinned (non-default) value of each -- "
+            + "; ".join(resolved)
+            + ". The rebuilt config also propagates the resolved constants into "
+            "`physics`, so it may differ from what was recorded there.",
+            LegacyOceanConstantsWarning,
+            # stacklevel stays 1: `_decode_config` is RECURSIVE, so any fixed
+            # level points at another frame of this module rather than at the
+            # caller -- a wrong location is worse than this one.
+            stacklevel=1,
+        )
+
+
 def _decode_config(obj):
     if isinstance(obj, dict) and "__type__" in obj:
         cls = _resolve_config_type(obj["__type__"])
@@ -794,6 +924,7 @@ def _decode_config(obj):
             for k, v in obj.items()
             if k != "__type__" and k in known
         }
+        _reconcile_recorded_constants(fields)
         if hasattr(cls, "from_flat"):
             return cls.from_flat(**fields)
         return cls(**fields)

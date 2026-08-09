@@ -110,6 +110,22 @@ One change at a time. Do not refactor adjacent code, rename things, or "improve"
 code I didn't ask about. Long unbroken generations drift into invention — prefer
 a small verified diff over a large plausible one.
 
+**DO NOT EXTRAPOLATE. Do only what was asked** (user directive 2026-08-06).
+The ask is the deliverable, not a starting point to reason outward from.
+
+- A related-looking problem you notice is a ONE-LINE report, not a work item.
+  Name it and stop; do not start it.
+- Do not widen scope because a fix "would only be complete if" something
+  adjacent were also done. Ship the ask; state the boundary.
+- New artifacts (scripts, benches, plots, panels, public APIs, config knobs)
+  only when asked or genuinely required to finish the ask. If unsure whether
+  it is required, it is not — ask in one line.
+- Do not propose or launch compute the user did not ask for.
+- FAILURES 2026-08-05/06: scoped a 128-GPU coupled ladder nobody requested off
+  a question about existing plots; added a coupled panel to a figure when asked
+  to assess the figure; wrote probes and helper scripts for questions that were
+  never posed. Each cost a round-trip and buried the actual answer.
+
 ## Attribution Gates — MANDATORY, each from a real 2026-07 failure
 Model is near operational. Every rule below is mechanical: satisfy it or state
 explicitly that you did not. "I was careful" is not compliance.
@@ -257,6 +273,59 @@ reading two more lines before typing. Slow down at these exact points.
   not present a first-round implementation as finished, and do not treat
   "tests pass" as the terminal condition — the round-1 diff passed 401 tests
   while still containing a silent fallback and a false docstring.
+
+## Assumption Gates — from six wrong assumptions in ONE session (2026-08-05/06)
+User callout: *"you keep making a lot of assumptions that prove to be wrong."*
+The gates above stop wrong CLAIMS about the model; these stop the cheaper,
+more frequent error — being wrong about the CODE AND DATA IN FRONT OF YOU.
+Every rule below is mechanical and each cost a full round-trip.
+
+- **AN ARRAY'S LAYOUT IS AN API — READ IT, INCLUDING AXIS ORDER.** The
+  "never infer an API" rule covers signatures; it also covers array SHAPE,
+  AXIS ORDER, index base, and padding convention. Before the first index of
+  any mesh/state field, print its `.shape`. FAILURE: indexed
+  `mesh.cellsOnCell[c, k]` assuming `(nCells, 6)`; it is `(6, nCells)`, so
+  the probe raised `IndexError` on every method. `cellsOnEdge` is `(2,
+  nEdges)` — one unambiguous pair per edge, usually the better handle.
+- **A PROXY IS NOT THE QUANTITY. If the real number is produced by a specific
+  code path, GET IT BY CALLING THAT PATH.** Re-deriving a lookalike from
+  first principles silently answers a different question. FAILURE: computed
+  `max_degree` from 1-ring `cellsOnEdge` adjacency and reported it as the
+  "ppermute round count" — the real exchange is halo-depth-aware, so the
+  proxy said 8 rounds for every method/rank count while the real schedule
+  said 12→14. The proxy could not even reproduce the known answer, which is
+  the tell: **run the proxy against a case whose real value you already know
+  BEFORE using it on the unknown one.**
+- **AN OPTIMIZER ONLY HELPS IF ITS OBJECTIVE IS THE BINDING TERM — state
+  which quantity it minimizes, and confirm that quantity is the measured
+  bottleneck.** FAILURE: assumed METIS would cut MPAS ppermute rounds; METIS
+  minimizes EDGE CUT, the bottleneck is MAX_DEGREE, and measured they move
+  OPPOSITELY (metis 19 rounds @64 vs sfc 14, while metis has the lower cut).
+  "Better partitioner" is not a mechanism.
+- **A TABLE YOU PARSED IS NOT DATA UNTIL YOU SPOT-CHECK IT.** Any derived
+  summary quoted to a human, or fed to a review agent, needs ≥2 rows verified
+  by eye against the raw source first. FAILURE: a regex over multi-line
+  series lists attached subdiv-9's `9.60/11.48 ms` to the `s8` label, and
+  that mislabelled pair went into a codex prompt as fact.
+- **PRE-IMPL GREP COVERS TESTS, NOT JUST FUNCTIONS.** Before writing a test,
+  grep for one that already asserts the same invariant. FAILURE: added two
+  tests counting PCG reduction sites that duplicated the existing
+  `test_reduction_count_halved`; codex had to point it out.
+- **WHEN A TEST FAILS, DECIDE WHETHER THE EXPECTATION OR THE CODE IS WRONG,
+  AND SAY WHICH.** The assertion you just wrote is a claim with no more
+  standing than the code. FAILURE: asserted `LEGOESM_..._FUSED_HALO=""` meant
+  OFF; the resolver is `!= "0"`, so `""` means ON — the test was wrong, not
+  the default.
+- **BEFORE PROPOSING COMPUTE, CHECK THE PATH IS BUILT — grep the driver for
+  the decomposition/sharding the run would need.** FAILURE: scoped a
+  128-GPU coupled ladder before finding that `CoupledESM` contains three
+  occurrences of "shard", all in comments — the coupled ocean is replicated,
+  so the ladder would have measured an unbuilt path.
+- **WHEN TWO MECHANISMS COULD EXPLAIN A NUMBER, NAME THE MEASUREMENT THAT
+  DISCRIMINATES THEM AND RUN IT BEFORE REPORTING EITHER.** FAILURE: reported
+  a serial-vs-SPMD gap as a "cadence PHASE disagreement"; the predicates
+  agree with ZERO offset and the real cause was a serial short-tail fallback.
+  One `grep` of the two predicates would have settled it.
 
 ## Compute Discipline — speculation costs GPU-hours, not just credibility
 User, 2026-07-30 (THIRD callout in five days): *"You keep making very
@@ -616,7 +685,98 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
-Precise+concrete. Explicit assumptions. Numerics change → explain effect on stability, accuracy, conservation, differentiability. No guesses as facts. **No Read images** unless user asks; report path.
+
+### RULE 0 — HARD CAP ~60 WORDS. ANSWER FIRST. STANDING ORDER, ALL SESSIONS.
+Five callouts in two days (2026-08-07/08). Not a style preference — a cap.
+Lead with the result. 3-5 bullets. Then stop. Job IDs, caveats, file:line and
+reasoning go in the COMMIT, never the reply. A retraction is ONE sentence plus
+the corrected fact. Long replies only when a report is explicitly requested.
+
+User, 2026-08-07, after repeated callouts in a single session ("you are too
+verbose", "I have no idea what you are saying", "just laser-focused summary"):
+**"Make being succinct, clear and to the point a strict rule for all future
+sessions."** This outranks every other formatting instinct.
+
+Mechanical test before sending — if a line fails, cut it:
+- Would the user act differently without this line? No → delete.
+- Is it method, process, or what I tried? → delete. Tool calls are visible.
+- Is it a caveat nobody would act on? → delete (put it in the commit).
+- Is it re-explaining something already said once? → delete.
+
+Shape: **verdict first**, then only the evidence that changes the verdict,
+then ONE question with numbered options if a decision is needed. Default
+length is a few lines. A long reply must earn it by being asked for (a
+report, a walkthrough, per-phase notes).
+
+Jargon is banned unless the sentence also says what it means in plain words.
+Say "how much communication the split costs", not "the ppermute round count".
+
+### PLAIN LANGUAGE FIRST — the rule that finally worked (2026-08-07)
+THIRD callout: *"I really don't understand when you talk to me. Things are
+incredibly unclear."* Brevity alone did NOT fix it — the earlier rules were
+being followed. The real defect was **unexplained jargon** and leaving the
+user to infer the decision. What worked, and is now the required shape:
+
+- **Write for a colleague, not a reviewer.** Short sentences. Ordinary words.
+- **NO unexplained domain jargon.** Terms like *ppermute, max_degree,
+  halo fill, production-exact, VJP, chromatic bound* are banned unless the
+  sentence also says what they mean in plain words. Prefer the plain phrase
+  outright: "how much communication the split costs", not "the round count of
+  the comm graph".
+- **Use short LABELLED blocks**, bolded, 1-3 lines each:
+  **What I built / What broke / What I was wrong about / What's safe /
+  What I need from you.** Labels do the navigating so the user does not.
+- **End with ONE explicit question and numbered options** when a decision is
+  needed. Say which you would pick and the single deciding factor.
+- **When asked to compare options, answer the comparison** — what each buys,
+  what it costs, and the question that decides it. Do not re-describe the
+  options.
+- **Own errors in one plain sentence, at the top.** "I was wrong earlier: X
+  is not guaranteed." No narration of how it was discovered.
+- **No tables, no file:line, no job ids in the reply** unless asked. Those go
+  in the commit message. A reply is for the decision.
+
+### Earlier callouts (same session) — still in force
+**SECOND callout (2026-08-06), because the rule below was written and
+then ignored: _"stop being verbose. It is really hard to understand. be more
+direct, to the point, clear about issues. Bullets summarizing."_ Plus: _"aren't
+you using caveman?"_ — the terse mode was ACTIVE and I was still writing essays.**
+- **BULLETS BY DEFAULT.** Prose paragraphs are the failure mode. One line per fact.
+- **Lead with the issue.** Not how it was found.
+- **Delete every sentence that does not change what the user does next.**
+- **Never re-explain a caveat already stated once.**
+- **No near-miss stories.** "I almost got X wrong" is not a finding. State the
+  corrected number and move on.
+- If a terse mode (caveman/ponytail) is active, IT APPLIES TO THE WHOLE REPLY —
+  including findings, status, and caveats. Length is not a substitute for rigor.
+
+User callout 2026-08-06 (earlier): *"you are quite unclear... provide more succinct,
+clear summary, clear choice, do not make many but targeted and verified
+assumptions."* Evidence the reader has to assemble into a conclusion is not a
+report. Structure, in this order, and stop:
+
+1. **VERDICT first, <=2 lines.** What is true / what happened. Never open with
+   method, caveats, or a narration of what was run.
+2. **THE DECISION, if any: ONE recommendation.** Name the option you would
+   take and why, in one line. A menu of options with balanced caveats pushes
+   the work back onto the user — only list alternatives when they genuinely
+   must choose, and even then say which you'd pick.
+3. **EVIDENCE: only what changes the verdict.** The decisive number, file:line,
+   or measurement. Not everything checked.
+
+- **AT MOST ONE unverified claim per response, explicitly labelled PLAUSIBLE.**
+  Everything else is verified before it is stated. Do not enumerate candidate
+  causes — pick the one you tested and report it. Untested hypotheses are
+  clutter that reads as findings.
+- **Do not narrate the process.** Tool calls are already visible. Report the
+  outcome, not the itinerary.
+- **Table only for >=3 things compared on >=2 axes.** Otherwise a sentence.
+- **Retract in one line and move on.** No re-litigating a superseded claim.
+- **Caveats: only those that change what the user should DO.** A limitation
+  nobody would act on belongs in the commit message, not the reply.
+- Numerics change -> state effect on stability, accuracy, conservation,
+  differentiability. No guesses as facts.
+- **No Read images** unless user asks; report path.
 
 **TERSE. Caveman register (user, 2026-08-06: "You speak too much... no need to waste tokens").** Fragments OK. Drop articles/filler/hedging/pleasantries. No narrating what you are about to do, no restating the request, no re-explaining a finding already stated. Prose is for FINDINGS, not for process.
 - **ALWAYS end with a findings summary** — table or bullets: what was measured, the number, CONFIRMED vs PLAUSIBLE, what is still open. That summary is the deliverable; the rest is scaffolding.

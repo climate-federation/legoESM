@@ -243,6 +243,42 @@ class DINOConfig:
     # Only the ``nemo_dino_kamm``/``nemo_dino_kamm_mlf``-family exactness
     # presets set "nemo_live". Unknown value raises (dispatch hardening).
     shortwave_penetration_ladder: str = "static"
+    # NEMO trasbc.F90 surface-flux TIME-LEVEL PLACEMENT (#1492): NEMO's
+    # tra_sbc writes sbc_tsc into the tracer RHS accumulator ts(Krhs) at Nnn
+    # (stpmlf.F90:342 ``CALL tra_sbc(kstp, Nnn, ts, Nrhs)``), which then enters
+    # the leap-frog combine ``pt(Kaa) = e3t(Kbb)*pt(Kbb) + 2dt*e3t(Kmm)*pt(Krhs)``
+    # (trazdf.F90:272-273) alongside advection/diffusion -- i.e. the surface
+    # flux is folded into the SAME 2dt-weighted RHS as everything else, based
+    # off Kbb.  legoESM's ``apply_dino_lat_lon_surface_forcing`` instead writes
+    # its increment directly onto the "now" state OUTSIDE model.step, before
+    # ``_leapfrog_step`` ever runs -- so it lands on BOTH sides of the
+    # explicit combine's ``(state_expl.T - state.T)`` difference and cancels
+    # there, entering the trajectory only through the Asselin filter's "now"
+    # weight.  Global-closure audit (#1492 0.1): this retains only
+    # ~0.444 (= 4/9 at gamma=0.1) of the applied flux per step.  CLOSED FORM
+    # (derived independently in the #1492 review, eigen-decomposition of the
+    # 2-state [T_before, T_now] Asselin/leapfrog recursion, eigenvalues 1 and
+    # 2*gamma-1):
+    #     retention(gamma) = (1 - 2*gamma) / (2 * (1 - gamma))
+    # -> 4/9 at gamma=0.1, 1/2 as gamma->0.  NOTE: an earlier revision of this
+    # comment labelled it "1/(1+2*gamma)" -- that is WRONG (0.833 at
+    # gamma=0.1); the measured value is 4/9 = 0.4445 (residual
+    # coefficient -0.556, R2 0.9998, same for heat AND salt -- confirmed by
+    # closed-form recursion match in the 0.1 follow-up, see
+    # global_closure_audit.py).
+    # "applied_now" (DEFAULT, bit-identical legacy): apply_dino_lat_lon_
+    # surface_forcing mutates T/S directly, called by the driver before
+    # model.step() -- every existing DINO run/twin/card is unaffected.
+    # "leapfrog_rhs" (NEW, faithful): apply_dino_lat_lon_surface_forcing
+    # returns the surface tendency RATE instead of a mutated state; the
+    # driver passes it to model.step(..., external_tracer_rate=(dT_dt,dS_dt))
+    # so it is summed into the EXPLICIT tendency (tend.dT_dt/dS_dt) on the
+    # Nnn advective pass ONLY (_step_impl's ``_external_tracer_rate`` kwarg,
+    # matching tra_sbc's Nnn-only call) -- i.e. it becomes part of the SAME
+    # 2dt*RHS the leap-frog combine already applies, exactly like NEMO.
+    # Requires outer_integrator="leapfrog"; unknown value raises (dispatch
+    # hardening).
+    surface_tendency_placement: str = "applied_now"
     # NEMO dynzdf composition (#1226): see LatLonCGridOceanConfig.zdf_drag_in_matrix
     # / zdf_baroclinic_only docstrings for the full transcription. Threaded
     # 1:1 (same field names) to the model config. Default False on both =
@@ -463,6 +499,14 @@ class DINOConfig:
     # n2_before_advection=True to give the "before" state genuine content
     # (otherwise before==after and the flag is a no-op).
     convection_two_level_trigger: bool = False   # True = NEMO MIN(rn2,rn2b)
+    # Time levels the two MIN(rn2, rn2b) arms are evaluated at. NEMO builds
+    # BOTH from the Nnn geometry — rn2b from the Nbb tracers, rn2 from the Nnn
+    # tracers (MY_SRC/stpmlf.F90:186-187) — whereas legoESM's leap-frog hands
+    # the mixing coefficients the post-explicit Kaa state (Kaa tracers AND Kaa
+    # eta). "nemo_now_before" restores NEMO's pair; only the MLF card (which
+    # carries a genuine Nbb level) sets it. Default keeps every other recipe
+    # BIT-IDENTICAL.
+    convection_evd_n2_time_level: str = "solver_state"
     # ----- Phase-2 #1317 Tier C: small faithful items -----
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
@@ -475,6 +519,18 @@ class DINOConfig:
     # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
     tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
     tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T18b — DRY-w-point TKE: NEMO closes tke_tke with
+    # `en = MAX(en,rn_emin) * wmask` (cfgs/DINO/MY_SRC/zdftke.F90:565 =
+    # upstream src/OCE/ZDF/zdftke.F90:469), so en is EXACTLY 0 below the
+    # seafloor. legoESM kept the MAX and DROPPED the `* wmask`, so its
+    # post-solve en there is tke_background (>0). tke_avn's buoyancy-length
+    # line (:759 / :651) carries no wmask, so NEMO's dry w-rows sit at exactly
+    # rmxl_min (l_int ~ 10^3 m in legoESM) while the nn_mxl=3 ldown sweep
+    # (:799-812 / :691-704) runs THROUGH them — which is what delivers
+    # `ldn(mbkt)=MIN(rmxl_min+e3t(mbkt+1,Kmm), l_int(mbkt))` at each column's
+    # own seafloor. Without the mask every dry row re-widens the ldown carry
+    # and the bottom limitation never arrives.
+    tke_dry_wmask: bool = False                  # True = NEMO wmask'd en
     # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
     # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
@@ -495,6 +551,11 @@ class DINOConfig:
     # fidelity ceiling — no before-velocity state, same class as this
     # card's other FE-frame notes).
     tke_shear_production: str = "squared_centered"  # "nemo_face_native" = MLF-only
+    # #1455 — avm INSIDE the zdfsh2 face sum (``p_avm(ji+1)+p_avm(ji)``,
+    # zdfsh2.F90:80) rather than factored out and multiplied at the T-point.
+    # Only meaningful with tke_shear_production="nemo_face_native" (dispatch
+    # raises otherwise) ⇒ MLF-only. Default "tpoint" = BIT-IDENTICAL.
+    tke_shear_avm_weighting: str = "tpoint"        # "nemo_face" = MLF-only
     # T8/T13 — rn2b (true leap-frog BEFORE/Nbb) for Prandtl zri + Langmuir PE.
     # Requires outer_integrator="leapfrog" (construction raises otherwise).
     tke_n2_time_level: str = "step_entry"          # "nemo_before" = MLF-only
@@ -1038,6 +1099,9 @@ DINO_RECIPES: dict[str, dict] = {
         #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
         "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
         "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
+        # `en = MAX(en,rn_emin)*wmask` (MY_SRC/zdftke.F90:565 = upstream
+        # :469) -> en==0 below the seafloor -> zmxlm==rmxl_min (:759 / :651)
+        "tke_dry_wmask": True,
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
@@ -1358,6 +1422,18 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # integrated heat over 200 forcing-free steps where NEMO drifts +3.4e-16
     # (#1226).
     "tracer_combine": "thickness_weighted",
+    # #1492: NEMO applies the surface tracer flux as a TENDENCY on the Nrhs
+    # RHS (tra_sbc.F90 -> tra_nxt/trazdf), not as a post-step mutation of the
+    # NOW state.  Under the leap-frog the post-step form ("applied_now",
+    # the DINOConfig default) is largely CANCELLED by the Asselin combine --
+    # retention (1-2*gamma)/(2*(1-gamma)) = 4/9 at rn_atfp=0.1, i.e. ~56% of
+    # every applied surface flux is thrown away.  MLF-only (the FE
+    # nemo_dino_kamm card has no combine to cancel against and retains
+    # 1.000000 either way), so it lands on THIS card.  Requires the run
+    # driver's return_rate=True route (_check_surface_tendency_placement
+    # raises on a mismatch) and --grid latlon (the MPAS applicator has no
+    # return_rate= mode).
+    "surface_tendency_placement": "leapfrog_rhs",
     # fix_eta_drift is left ON (measured 2026-07-26): NEMO has no analogue
     # (ssh_nxt is conservative by construction), and switching it OFF does
     # improve flux-form constancy 3.279e-05 -> 2.313e-05 because its uniform
@@ -1416,7 +1492,34 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # outer_integrator="leapfrog" (construction raises otherwise) and a
     # per-level wet mask (z_coord.is_active) -- both hold on this card.
     "tke_shear_production": "nemo_face_native",  # zdfsh2 face-native shear
+    # #1455 sh2 avm-weighting: "tpoint" (the default this card used to
+    # inherit) factors K_M OUT of the face sum -- NEMO's zsh2u carries the
+    # avm SUM ``p_avm(ji+1)+p_avm(ji)`` = 2*mi(avm) (zdfsh2.F90:80), so the
+    # 0.25 at :93 nets out to mi[mi(avm)*S], NOT 0.25*K*sum(S). Measured:
+    # legoESM's Z = p_avm/(p_sh2+rn_bshear) ran a FLAT median 2.0114x
+    # NEMO's, and selecting "nemo_face" drove that to 1.0057.
+    # (2026-08: that 2x has since ALSO been fixed AT SOURCE --
+    # vertical_shear_face_native's prefactor is now 0.5, so "tpoint" is no
+    # longer a half.  NOT RE-MEASURED post-fix: on the numbers above,
+    # post-fix "tpoint" would land at 2.0114/2 = 1.0057, i.e. the SAME
+    # place as "nemo_face" at that spy point -- so the residual 0.57% is
+    # NOT attributable to the spatially-varying-avm term there, and no
+    # causal claim is made for keeping "nemo_face" beyond its being the
+    # literal transcription.  Re-measure both post-fix before quoting a
+    # difference.)  "nemo_face" keeps avm INSIDE the face sum
+    # (_shared.avm_weighted_shear_production) and is the literal
+    # zdfsh2.F90:80-94 transcription. Requires tke_shear_production=
+    # "nemo_face_native" (tke.py:2110/2314 dispatch raises otherwise) ->
+    # MLF-only, same class as the two axes above.
+    "tke_shear_avm_weighting": "nemo_face",   # zdfsh2 avm INSIDE the face sum
     "tke_n2_time_level": "nemo_before",       # true rn2b for Prandtl/Langmuir
+    # zdfevd trigger arms at NEMO's own time levels: rn2 on Nnn tracers, rn2b
+    # on Nbb tracers, BOTH on Nnn geometry (MY_SRC/stpmlf.F90:186-187 ->
+    # zdfevd.F90:93-94/:119-120). Without this the leap-frog's arm 1 is the
+    # POST-EXPLICIT Kaa state (and carries Kaa eta, hence Kaa gdept), which
+    # fires EVD on cells NEMO leaves alone. MLF-only: it consumes the genuine
+    # Nbb level that "tke_n2_time_level": "nemo_before" above threads.
+    "convection_evd_n2_time_level": "nemo_now_before",
 }
 
 # L2 cards select lat-lon-C-grid-only blocks (flux-form / WENO momentum, AB2
@@ -2568,8 +2671,10 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
             mxl0_min_m=cfg.tke_mxl0_min_m,
+            tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
+            tke_shear_avm_weighting=cfg.tke_shear_avm_weighting,
             tke_n2_time_level=cfg.tke_n2_time_level,
         )
         if cfg.tke_alpha is not None:
@@ -2870,6 +2975,9 @@ def dino_lat_lon_model_config(
                     # the single-level trigger when n2_before_advection=True
                     # gives the "before" state real content.
                     two_level_trigger=cfg.convection_two_level_trigger,
+                    # NEMO's rn2/rn2b time levels (stpmlf.F90:186-187) —
+                    # both arms on the Nnn geometry.
+                    evd_n2_time_level=cfg.convection_evd_n2_time_level,
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
@@ -2930,6 +3038,15 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         g=cfg.g,
         omega=cfg.omega,
+        # The card's specific heat is named c_p; the ConstantsConfig field it
+        # routes into is c_sw.  That ALIAS is why it was missed: the card set
+        # NEMO's exact rcp (eosbn2.F90:1899) while every ConstantsConfig
+        # consumer kept the legoesm.constants default -- a 5.3e-4 relative gap,
+        # 10x the g one.  Inert on the current DINO gate (nothing in the
+        # scheme="tke" k_profiles body reads c_sw when physics surface_forcing
+        # is "none"), live the moment the surface-buoyancy-flux path is
+        # enabled (k_profiles.py:431 / ocean_pe_latlon_cgrid.py's c_sw import).
+        c_sw=cfg.c_p,
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
@@ -2991,7 +3108,13 @@ def dino_lat_lon_model_config(
         eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
         eos_depth=cfg.eos_depth,       # "insitu" (default) | "geometric" (nemo_paper)
     )
-    return model_cfg, physics_cfg
+    # Return the config's OWN physics block, not the pre-routing local: the
+    # flat g=/rho_0=/omega= kwargs above land in model_cfg.constants and
+    # from_flat propagates that single set into model_cfg.physics. Returning
+    # `physics_cfg` here would hand callers a pipeline still carrying the
+    # ConstantsConfig DEFAULTS -- the exact silent divergence (the card's g
+    # never reaching compute_N2 / KPP / TKE) this routing removes.
+    return model_cfg, model_cfg.physics
 
 
 def dino_mpas_state(
@@ -3175,6 +3298,14 @@ def dino_mpas_model_config(
             f"DINOConfig.gm_kappa_scheme={cfg.gm_kappa_scheme!r} is not "
             "supported on the MPAS grid (Treguier adaptive kappa is lat-lon "
             "C-grid only); use gm_kappa_scheme='visbeck' or --grid latlon.")
+    if cfg.convection_evd_n2_time_level != "solver_state":
+        raise ValueError(
+            "DINOConfig.convection_evd_n2_time_level="
+            f"{cfg.convection_evd_n2_time_level!r} is lat-lon C-grid only: "
+            "the MPAS vmix bridge does not thread the Nnn/Nbb tracers and the "
+            "Nnn eta that NEMO's zdfevd trigger arms need, so honouring it "
+            "here would silently run the solver-state trigger; use --grid "
+            "latlon or convection_evd_n2_time_level='solver_state'.")
     physics_config = OceanPhysicsConfig(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(
@@ -3413,8 +3544,37 @@ def dino_step_surface_forcing(forcing):
     )
 
 
+def _check_surface_tendency_placement(cfg, return_rate: bool) -> None:
+    """Couple ``cfg.surface_tendency_placement`` to the ``return_rate`` route.
+
+    #1492 review C2: the config field was DECORATIVE -- three call sites each
+    derived their own ``return_rate`` boolean and separately stamped the field
+    onto ``cfg``, so a caller that set ``surface_tendency_placement=
+    "leapfrog_rhs"`` but forgot ``return_rate=True`` silently got the LEGACY
+    placement, which discards ~56% of every applied surface flux (retention
+    (1-2*gamma)/(2*(1-gamma)) = 4/9 at gamma=0.1).  A config field that lies
+    about what will happen is exactly the silent-dispatch class the repo's
+    hardening doctrine exists to close, so make it load-bearing: any
+    disagreement between the declared placement and the actual route raises.
+    """
+    placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if placement not in ("applied_now", "leapfrog_rhs"):
+        raise ValueError(
+            f"Unknown DINOConfig.surface_tendency_placement {placement!r}: "
+            "expected 'applied_now' or 'leapfrog_rhs'.")
+    if (placement == "leapfrog_rhs") != bool(return_rate):
+        raise ValueError(
+            f"surface_tendency_placement={placement!r} disagrees with "
+            f"return_rate={return_rate!r}: 'leapfrog_rhs' REQUIRES "
+            "return_rate=True (the rate is threaded into the Nnn leapfrog "
+            "RHS via model.step(external_tracer_rate=...)), and "
+            "'applied_now' REQUIRES return_rate=False (post-step state "
+            "mutation). Mixing them silently reverts to legacy placement "
+            "(#1492).")
+
+
 def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
-                                        t_seconds=None):
+                                        t_seconds=None, return_rate=False):
     """Apply DINO surface forcing on the lat-lon Mercator grid.
 
     Components (paper eqs 7-10):
@@ -3427,8 +3587,26 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
       eq 9  — A_S(S*-S) salinity restoring at top layer (also implicit)
       eq 10 — Jerlov type I column-distributed Q_sr through all levels
 
-    Returns a new state (immutable update of T, S, u).
+    ``return_rate`` (#1492, ``DINOConfig.surface_tendency_placement=
+    "leapfrog_rhs"``): when True, T/S are NOT mutated here — instead this
+    returns ``(state, (dT_dt, dS_dt))`` where ``state`` is UNCHANGED (u still
+    gets its wind kick, unless ``wind_through_step``) and ``(dT_dt, dS_dt)``
+    is the SAME full-column tendency the default path would have applied
+    (``dT_dt_restoring``/``dS_dt_col`` below), for the caller to thread into
+    ``model.step(..., external_tracer_rate=(dT_dt, dS_dt))`` so it is summed
+    into the EXPLICIT tendency on the Nnn pass — matching NEMO's
+    ``tra_sbc(Nnn, ts, Nrhs)`` placement (see DINOConfig.
+    surface_tendency_placement docstring). Default False = legacy state-
+    mutation path, bit-identical.
+
+    Returns a new state (immutable update of T, S, u) when
+    ``return_rate=False``; ``(state, (dT_dt, dS_dt))`` otherwise.
     """
+    # #1492 C2: make cfg.surface_tendency_placement load-bearing (was
+    # decorative -- a caller could declare "leapfrog_rhs" and silently get
+    # the legacy 4/9-retention placement).
+    _check_surface_tendency_placement(cfg, return_rate)
+
     from legoesm.ocean.physics.surface_forcing.config import (
         RestoringConfig, tau_from_flux_coefficient,
     )
@@ -3551,10 +3729,8 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # Jerlov penetration, independently gated by shortwave_penetration_ladder
     # (traqsr.F90 is a separate NEMO routine from trasbc.F90/surface_flux_divisor).
     mask3 = cell_mask[..., None]
-    dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top)
-    dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top)
-    new_T = state.T.data + dt * dT_dt_restoring * mask3
-    new_S = state.S.data + dt * dS_dt_col * mask3
+    dT_dt_restoring = dT_dt_sw.at[..., 0].add(dT_dt_top) * mask3
+    dS_dt_col = rest_out.dS_dt.at[..., 0].set(dS_dt_top) * mask3
 
     # u tendency at u-faces (eq 7) — SKIPPED when the wind goes through
     # model.step(surface_forcing=...) (wind_through_step: the dynamics-core
@@ -3568,10 +3744,17 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         new_u_top = u_top + dt * du_dt_top * u_face_mask
         new_u = state.u.data.at[..., 0].set(new_u_top)
 
-    return state._replace(
+    state_u = state._replace(
+        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
+    )
+    if return_rate:
+        return state_u, (dT_dt_restoring, dS_dt_col)
+
+    new_T = state.T.data + dt * dT_dt_restoring
+    new_S = state.S.data + dt * dS_dt_col
+    return state_u._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
-        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
     )
 
 

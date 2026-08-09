@@ -185,6 +185,25 @@ class TrainingConfig(NamedTuple):
     checkpoint_dir: str = "checkpoints"
     checkpoint_every: int = 1000
     optimizer: str = "adamw"
+    # --- muon_partitioned: PER-GROUP learning rate / weight decay ----------
+    # U-Cast (arXiv:2604.09041) does not run one LR for both branches: Muon
+    # takes peak 3e-3 with weight decay 0.1, while the AdamW group that owns
+    # the 1-D parameters takes 3e-4 / 0.03 — a 10x LR ratio.  Expressed as
+    # MULTIPLIERS on ``lr`` / ``weight_decay`` so the existing single-knob
+    # suites keep their exact behaviour at the defaults (1.0 = no split), and
+    # so an LR sweep still moves both groups coherently from one field.
+    # Ignored unless optimizer == 'muon_partitioned'.
+    muon_lr_scale: float = 1.0
+    adamw_lr_scale: float = 1.0
+    # DEFAULT 0.0, NOT 1.0, and that asymmetry is load-bearing: the pre-split
+    # build called ``muon(learning_rate=schedule)`` with no weight_decay, so
+    # optax's own default of 0 applied and the MUON branch trained WITHOUT
+    # decay. Defaulting this scale to 1.0 would silently start decaying every
+    # 2-D weight matrix in every existing suite — a behaviour change disguised
+    # as a no-op (codex review 2026-08-03). U-Cast DOES decay the Muon branch
+    # (wd 0.1), so an arm that wants the paper's recipe sets this explicitly.
+    muon_weight_decay_scale: float = 0.0
+    adamw_weight_decay_scale: float = 1.0
 
 
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
@@ -269,6 +288,10 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
         core = _muon_partitioned_optimizer(
             schedule=schedule,
             weight_decay=config.weight_decay,
+            muon_lr_scale=config.muon_lr_scale,
+            adamw_lr_scale=config.adamw_lr_scale,
+            muon_wd_scale=config.muon_weight_decay_scale,
+            adamw_wd_scale=config.adamw_weight_decay_scale,
         )
     else:
         raise ValueError(
@@ -292,6 +315,8 @@ _MUON_MIN_DIM_DEFAULT = 32
 
 def _muon_partitioned_optimizer(
     schedule, weight_decay: float, min_dim: int = _MUON_MIN_DIM_DEFAULT,
+    muon_lr_scale: float = 1.0, adamw_lr_scale: float = 1.0,
+    muon_wd_scale: float = 1.0, adamw_wd_scale: float = 1.0,
 ) -> optax.GradientTransformation:
     """Build a multi-transform optimizer routing MUON / AdamW per leaf.
 
@@ -303,12 +328,36 @@ def _muon_partitioned_optimizer(
     Jordan et al. (2024) recipe -- applying Newton-Schulz to small or
     1-D leaves is what broke the AIMIP suite (silent epoch-1 NaN
     under MUON-on-all-leaves).
+
+    The ``*_scale`` factors multiply the shared schedule / weight decay per
+    BRANCH.  U-Cast runs Muon at peak 3e-3 / wd 0.1 against AdamW at 3e-4 /
+    wd 0.03 for the 1-D group -- a 10x LR ratio that a single shared value
+    cannot express.  All default to 1.0, so an existing suite is byte-
+    identical; scaling the SCHEDULE (rather than taking absolute LRs) keeps
+    the warmup/cosine shape shared, so one ``lr`` field still moves both
+    groups coherently.
     """
     from optax.contrib import muon
     import jax
 
-    muon_tx = muon(learning_rate=schedule)
-    adam_tx = optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
+    def _scaled(sched, factor):
+        f = float(factor)
+        if f == 1.0:
+            return sched
+        return lambda count: sched(count) * f
+
+    # ``optax.contrib.muon`` takes weight_decay natively (verified against the
+    # installed signature, which also carries ns_coeffs/ns_steps/beta/...), so
+    # the decay goes through the transform rather than a bolted-on
+    # add_decayed_weights leg that would apply at a different point.
+    muon_tx = muon(
+        learning_rate=_scaled(schedule, muon_lr_scale),
+        weight_decay=weight_decay * float(muon_wd_scale),
+    )
+    adam_tx = optax.adamw(
+        learning_rate=_scaled(schedule, adamw_lr_scale),
+        weight_decay=weight_decay * float(adamw_wd_scale),
+    )
 
     def _label(params):
         def _classify(leaf):

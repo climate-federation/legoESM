@@ -72,30 +72,86 @@ _AVG_B_ENDPOINTS_LOCAL = (
 BIG_NUMBER = 1.0e8       # fv_grid_utils big_number
 TINY_NUMBER = 1.0e-8     # fv_grid_utils tiny_number (rsin floors + sin_sg ghost)
 
-# --- FV3/FMS physical constants for oracle pinning (FMS constants_mod,
-#     GFDL flavour); legoESM production paths use legoesm.constants ---
-# Pinned to the Zenodo duo run log (fms.out: "Radius is 6371200.0,
-# omega is 7.2921e-5"); both differ from legoESM's R_earth/Omega.
-# const-ok: oracle pins upstream's constants, not legoESM's
-FV3_RADIUS_M = 6371.2e3
-# const-ok: FMS OMEGA (7.2921e-5) != legoESM Omega (7.292e-5)
-FV3_OMEGA = 7.2921e-5
+# --- FV3/FMS physical constants for oracle pinning ---------------------
+# FMS constants_mod, **GFS** flavour (fms-src/constants/gfs_constants.h).
+# The comment here used to say "GFDL flavour" while carrying GFS numbers;
+# that mislabel is exactly the confound it was meant to prevent, since FMS
+# ships BOTH sets and DEFAULTS to GFDL when neither is defined
+# (fmsconstants.F90:67-68). Verify against the run's OWN log, never the
+# build intent: `grep FMSConstants logfile.000000.out` and
+# `grep "Radius is" run_out.txt` must both say GFS. A GFDL-linked oracle
+# shifts radius by 3.1e-5 RELATIVE -- ten orders above the ~1e-14 parity
+# floor -- and reads as a physics defect.
+#
+# legoESM production paths use legoesm.constants; these exist ONLY to
+# reproduce the oracle binary and must never be substituted for it.
+# Five of these six DIFFER from legoESM's own constants. RDGAS is the one
+# that COINCIDES, which is exactly why it must still be pinned here
+# rather than imported: a reader who spot-checks that one and concludes
+# "the two sets agree" would then substitute c_pd and shift kappa. The
+# per-constant comparison is asserted in
+# tests/grids/test_fv3_native_dcmip16_ic.py rather than restated here, so
+# it cannot go stale.
+FV3_RADIUS_M = 6371.2e3    # const-ok: gfs_constants.h:33, != legoESM R_earth
+FV3_OMEGA = 7.2921e-5      # const-ok: gfs_constants.h:34, != legoESM Omega
+FV3_RDGAS = 287.05         # const-ok: gfs_constants.h:42; == legoESM R_d
+FV3_CP_AIR = 1004.6        # const-ok: gfs_constants.h:47, != legoESM c_pd
+FV3_RVGAS = 461.50         # const-ok: gfs_constants.h:43, != legoESM R_v
+FV3_GRAV = 9.80665         # const-ok: gfs_constants.h:35-36, != legoESM g
+
+# gfs_constants.h:53 -- KAPPA = RDGAS/CP_AIR. Computed from the pair above
+# so it can never drift from them.
+#
+# THIS IS NOT 2/7. The idealised 0.2857142857 differs from the oracle's
+# 0.2857356162 by 7.5e-5 RELATIVE, and akap enters `ptop**akap` and every
+# `pk = exp(akap*log(p))` (fv3_native_pgrad.py:211, :246) -- so scoring
+# this oracle with 2/7 manufactures a discrepancy nine orders above the
+# floor. geopk/one_grad_p deliberately take akap and cp_air as ARGUMENTS
+# (fv3_native_pgrad.py:61-73); these are what a parity driver must pass.
+FV3_KAPPA = FV3_RDGAS / FV3_CP_AIR
 
 
 class fort:
-    """Fortran-indexed 2-D/3-D view over a numpy array (lo bounds given)."""
+    """Fortran-indexed 2-D/3-D view over a numpy array (lo bounds given).
 
-    def __init__(self, a: np.ndarray, ilo: int, jlo: int):
+    ``strict_rank`` closes a silent-wrong-number trap that matters as soon
+    as the six-face stepper grows a vertical axis.  ``__getitem__`` splits
+    the subscript as ``i, j, *k``, so reading ``f[i, j]`` from a 3-D array
+    leaves ``k == []`` and returns the WHOLE COLUMN, which then broadcasts
+    through the 2-D stage kernels without raising.  A 3-D state fed into a
+    routine that expects one level would therefore produce numbers rather
+    than an error.
+
+    The default stays ``False`` so every existing bit-exact-certified call
+    site keeps its current behaviour; the km-general driver builds its
+    views with ``strict_rank=True`` so a rank slip is fatal there.
+    """
+
+    __slots__ = ("a", "ilo", "jlo", "strict_rank")
+
+    def __init__(self, a: np.ndarray, ilo: int, jlo: int, *,
+                 strict_rank: bool = False):
         self.a = a
         self.ilo = ilo
         self.jlo = jlo
+        self.strict_rank = strict_rank
+
+    def _check(self, idx, k):
+        if self.strict_rank and (2 + len(k)) != self.a.ndim:
+            raise IndexError(
+                f"fort(strict_rank=True): {2 + len(k)} subscripts {idx!r} "
+                f"on a {self.a.ndim}-D array of shape {self.a.shape}. A "
+                f"2-subscript read of a 3-D array returns the whole column "
+                f"and broadcasts silently -- pass the level explicitly.")
 
     def __getitem__(self, idx):
         i, j, *k = idx
+        self._check(idx, k)
         return self.a[(i - self.ilo, j - self.jlo, *k)]
 
     def __setitem__(self, idx, v):
         i, j, *k = idx
+        self._check(idx, k)
         self.a[(i - self.ilo, j - self.jlo, *k)] = v
 
 
@@ -1680,3 +1736,4 @@ def analytic_swcore_state(gs: dict, *, u0: float = 40.0,
 # so importers use the sanctioned public name (definitions keep the
 # original underscore name for in-module callers).
 fill_corners_agrid_x = _fill_corners_agrid_x
+fill_corners_agrid_y = _fill_corners_agrid_y

@@ -251,6 +251,23 @@ class DycoreConfig(NamedTuple):
     # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
     # to preserve the positional ABI (codex review).
     k_h_scale: float | None = None
+    # Vertical advection scheme on the MPAS SIGMA lane ("upwind" | "van_leer").
+    # First-order upwind's implicit diffusion K_σ = |σ̇|·Δσ/2 is +0.822 K/day at
+    # the tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd, N=37) — larger
+    # than the whole production temperature tendency there and 2.1x the
+    # radiative cooling.  "van_leer" is the 2nd-order TVD alternative: bounded
+    # face reconstruction, monotone update under a Courant condition
+    # ~ nu_k + nu_{k+1} <= 1 DERIVED FOR A UNIFORM GRID (stretched grids and
+    # varying sigma_dot have regression evidence only — see the kernel
+    # docstring).  Measured global max of that pair on that run: 0.0642, 15.6x
+    # inside the uniform-grid bound, from 37 checkpoint snapshots.
+    # Requires nlev >= 4.
+    # WIRED ONLY into the MPAS sigma lane; validate_strict refuses it on other
+    # discretizations / vertical coordinates rather than let it run silently
+    # inert.  Default "upwind" keeps every existing result bit-identical.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
+    # callers, not full tuple ABI (exact unpacking / len() still break).
+    mpas_vert_advection_scheme: str = "upwind"
 
 
 class EvaluationConfig(NamedTuple):
@@ -639,8 +656,9 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Hard (iterated) saturation-adjustment guard for the warm-rain schemes
-    # (kessler/seifert_beheng/morrison/thompson/p3): where q_v exceeds the
+    # Hard (iterated) saturation-adjustment guard, carried by EVERY guarded
+    # scheme (microphysics/config.HARD_SAT_GUARD_SCHEMES: the five bulk
+    # warm-rain ones plus sundqvist and ml_emulator): where q_v exceeds the
     # scheme's hard_sat_adjust_threshold * q_sat, an iterated saturation
     # adjustment drains q_v ONTO the liquid saturation curve (conserving
     # c_pd*T + L_v*q_v exactly), rate-limited to hard_sat_max_heating_K per step,
@@ -2229,14 +2247,22 @@ class ExperimentConfig(NamedTuple):
         # would do nothing.  Reject it at config time (codex F3) rather than let
         # it silently no-op.  Same scheme set as the fail-loud runtime raise in
         # microphysics/config.apply_microphysics_experiment_flags.
-        _warm_rain_micro = (
-            "kessler", "seifert_beheng", "morrison", "thompson", "p3")
+        # Single source of truth (never re-listed here): the schemes that carry
+        # the guard live in microphysics/config.HARD_SAT_GUARD_SCHEMES, with the
+        # verified exemption reasons in HARD_SAT_GUARD_EXEMPT.  A hardcoded copy
+        # of the tuple silently drifted out of date when sundqvist/ml_emulator
+        # gained the guard.
+        from legoesm.atmosphere.physics.microphysics.config import (
+            HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES,
+        )
         if (self.hard_saturation_adjustment
-                and self.microphysics not in _warm_rain_micro):
+                and self.microphysics not in HARD_SAT_GUARD_SCHEMES):
+            _why = HARD_SAT_GUARD_EXEMPT.get(self.microphysics, "")
             errors.append(
-                "hard_saturation_adjustment requires a warm-rain microphysics "
-                f"scheme {_warm_rain_micro}; got microphysics="
-                f"{self.microphysics!r} (the guard would be silently inert)."
+                "hard_saturation_adjustment requires a microphysics scheme "
+                f"carrying the guard {HARD_SAT_GUARD_SCHEMES}; got "
+                f"microphysics={self.microphysics!r} (the guard would be "
+                f"silently inert). {_why}".rstrip()
             )
         # gs_max is a physical conductance [mol/m2/s]: must be finite and
         # strictly positive (nan/<=0 would zero or NaN the whole land latent
@@ -2269,6 +2295,34 @@ class ExperimentConfig(NamedTuple):
                     "diffusion path; on discretization="
                     f"{d.discretization!r} it would be silently inert. "
                     "Unset it or use the MPAS lane.")
+        # Vertical advection scheme: membership first, then the same
+        # silently-inert refusal as k_h_scale (MPAS + sigma only).
+        _vert_adv_options = ("upwind", "van_leer")
+        if d.mpas_vert_advection_scheme not in _vert_adv_options:
+            errors.append(
+                f"dycore.mpas_vert_advection_scheme must be one of "
+                f"{_vert_adv_options}, got {d.mpas_vert_advection_scheme!r}")
+        elif d.mpas_vert_advection_scheme != "upwind":
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is only wired into the "
+                    "MPAS dycore; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use the MPAS lane.")
+            if g.vertical_coord != "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is implemented for the "
+                    "sigma vertical coordinate only; on vertical_coord="
+                    f"{g.vertical_coord!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use vertical_coord='sigma'.")
+            # The van-Leer stencil is 4 cells wide.  Reject here rather than
+            # deep inside the traced kernel (codex round 3).
+            if g.nlev < 4:
+                errors.append(
+                    f"dycore.mpas_vert_advection_scheme="
+                    f"{d.mpas_vert_advection_scheme!r} needs at least 4 "
+                    f"vertical levels for its 4-cell stencil; grid.nlev="
+                    f"{g.nlev}.")
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
         if self.hb_kvf_min is not None and (

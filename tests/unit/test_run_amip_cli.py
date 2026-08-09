@@ -3322,19 +3322,49 @@ def test_hard_sat_override_bounds_enforced():
             cfg.validate_strict()
 
 
-def test_hard_saturation_adjustment_requires_warm_rain_scheme():
-    """--hard-saturation-adjustment with a non-warm-rain microphysics scheme
-    (default sundqvist, or none) is silently inert at runtime
-    (_resolve_microphysics / the MPAS post-step drain early-return before the
-    flag is read) — validate_strict must refuse it (codex F3)."""
+def test_hard_saturation_adjustment_requires_a_guarded_scheme():
+    """--hard-saturation-adjustment with a scheme that does NOT carry the guard
+    is silently inert at runtime (_resolve_microphysics / the MPAS post-step
+    drain early-return before the flag is read) — validate_strict must refuse
+    it (codex F3).
+
+    The negative set is now sdm / fast_sbm / none, NOT sundqvist: the guard was
+    made uniform, so Sundqvist and the ML emulator carry it. sdm and fast_sbm
+    are exempt on purpose (they integrate the super-saturation relaxation /
+    droplet growth law explicitly — see config.HARD_SAT_GUARD_EXEMPT), and
+    'none' has no scheme function at all."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_EXEMPT,
+    )
     parser = build_arg_parser()
-    for micro in ("sundqvist", "none"):
+    assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none"}
+    for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
             "--hard-saturation-adjustment",
         ]), parser))
-        with pytest.raises(ValueError, match="warm-rain microphysics"):
+        with pytest.raises(ValueError, match="carrying the guard"):
             cfg.validate_strict()
+
+
+def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
+    """The complement, so the test above cannot pass vacuously by
+    validate_strict rejecting everything: --hard-saturation-adjustment must be
+    ACCEPTED for every guarded scheme run_amip exposes."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_SCHEMES,
+    )
+    parser = build_arg_parser()
+    exposed = [s for s in HARD_SAT_GUARD_SCHEMES
+               if s in {"kessler", "sundqvist", "seifert_beheng", "morrison",
+                        "thompson", "p3"}]
+    assert len(exposed) == 6, exposed
+    for micro in exposed:
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", micro,
+            "--hard-saturation-adjustment",
+        ]), parser))
+        cfg.validate_strict()   # must NOT raise
 
 
 def test_morrison_flavor_round_trips():
@@ -3415,3 +3445,38 @@ def test_inplume_conversion_responds_to_rprcon():
     base = total_precip(1.4e-3, 3.0e-4)
     assert total_precip(5.6e-3, 3.0e-4) > base * 1.05
     assert total_precip(1.4e-3, 1.0e-4) > base
+
+
+def test_mpas_vert_advection_scheme_flag_flows_to_config():
+    """--mpas-vert-advection-scheme round-trips into DycoreConfig and is
+    rejected outside the MPAS sigma lane rather than running silently inert.
+
+    Default "upwind" = the first-order donor-cell path, bit-identical to
+    before; "van_leer" is the monotone 2nd-order TVD option that removes the
+    K_sigma = |sigma_dot|*dsigma/2 implicit diffusion measured at +0.822 K/day
+    at the tropical UTLS (91.4 hPa, cldF_fsd, N=37)."""
+    parser = build_arg_parser()
+    mpas = ["--dataset", "analytical", "--grid-type", "voronoi",
+            "--discretization", "mpas", "--vertical-coord", "sigma"]
+
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(mpas), parser))
+    assert cfg_default.dycore.mpas_vert_advection_scheme == "upwind"
+    cfg_default.validate_strict()
+
+    cfg_vl = build_config_from_args(_postprocess_args(parser.parse_args(
+        mpas + ["--mpas-vert-advection-scheme", "van_leer"]), parser))
+    assert cfg_vl.dycore.mpas_vert_advection_scheme == "van_leer"
+    cfg_vl.validate_strict()
+
+    # argparse choices reject a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(mpas + ["--mpas-vert-advection-scheme", "vanleer"])
+
+    # hybrid coordinate -> the operator is not wired there -> refuse.
+    cfg_hyb = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--vertical-coord", "hybrid",
+         "--mpas-vert-advection-scheme", "van_leer"]), parser))
+    with pytest.raises(ValueError, match="sigma vertical coordinate only"):
+        cfg_hyb.validate_strict()

@@ -33,6 +33,45 @@ Run::
     cd /home/dbalwada/legoESM && CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu \\
       JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both .venv/bin/python -m \\
       scripts.validate.ocean_fidelity.dino_1226.probe_dyn_cor_2d
+
+SPLIT-ARM ATTRIBUTION (2026-08, this probe, ONE variable per arm)
+-----------------------------------------------------------------
+The 2026-08 improvement on this row flipped THREE things at once (the AL81
+triad<->mass-flux pairing fix in ``pv_flux_al81_partial_cell``; threading
+``een_q_boundary`` into the barotropic path; threading ``een_e3f_scheme``),
+so no row was attributable.  Re-run split, six arms, all in ONE tree epoch,
+same restart / same dumps / same env (fp64, ``LEGOESM_NEMO_E3T=both``,
+RUN_GDB); the pairing variable switched by restoring
+``latlon_cgrid_operators.py`` from git and back (md5-verified).  FULL-interior
+numbers, ``n=9758`` (u) / ``9868`` (v)::
+
+  arm                pairing  q_boundary     e3f       u err_norm  u ratio   v err_norm  v ratio
+  A0  (baseline)     pre-fix  neumann_fill   min       4.3712e-04  1.000038  3.1837e-04  0.999945
+  A0b               pre-fix  nemo_live      min       3.8618e-04  1.000033  1.6556e-04  1.000024
+  A1  +pairing       fixed    neumann_fill   min       2.2384e-04  1.000025  3.1924e-04  0.999947
+  A2  +pairing+qb    fixed    nemo_live      min       1.6092e-04  1.000018  1.6564e-04  1.000024
+  A2b +pairing+e3f   fixed    neumann_fill   nemo_avg  2.2230e-04  1.000005  3.1966e-04  0.999931
+  A3  all three      fixed    nemo_live      nemo_avg  1.5983e-04  1.000000  1.6062e-04  1.000009
+
+Single-variable attribution (each read off the arm pair that differs in that
+one field only) -- the three act NEARLY ADDITIVELY on ``err_norm`` (A1 plus
+the isolated qb and e3f deltas predicts u 1.594e-04 vs 1.598e-04 measured,
+v 1.661e-04 vs 1.606e-04):
+
+* ``err_norm`` and ``ratio`` attribute to DIFFERENT variables -- do not quote
+  one and imply the other.
+* u ``err_norm``: the PAIRING owns it (A0->A1, -48.8%); qb adds -28.1%
+  (A1->A2); e3f is inert (-0.7%).
+* v ``err_norm``: ``een_q_boundary`` owns it (A1->A2, -48.1%); the pairing is
+  INERT on v (A0->A1, +0.3%, i.e. marginally worse); e3f -3.0% (A2->A3).
+* u ``|ratio-1|``: ``een_e3f_scheme`` owns it (A1->A2b, 2.5e-5 -> 5e-6, -80%;
+  A2->A3, 1.8e-5 -> 1e-6), the variable that is inert on u ``err_norm``.
+* v ``|ratio-1|``: qb then e3f (5.3e-5 -> 2.4e-5 -> 9e-6); e3f WITHOUT qb
+  makes it worse (5.3e-5 -> 6.9e-5), so those two are not independent on v.
+
+NOT AT BAR: every arm, including A3, prints DEBT.  The best v ratio (1.000009)
+misses the |ratio-1| <= 1e-6 bar by 9x.  This block attributes an improvement;
+it does not clear the row.
 """
 from __future__ import annotations
 
@@ -147,10 +186,26 @@ def main() -> int:
         min_water_column_m=model.config.min_water_column_m)
     _min_wc = jnp.asarray(model.config.min_water_column_m, dtype=U_Nnn.dtype)
 
+    # Mirror the PRODUCTION call site exactly (ocean_model_latlon_cgrid.py,
+    # the barotropic_coriolis_een_pre_step call under barotropic_coriolis_
+    # split="live"): it forwards the card's een_q_boundary/een_e3f_scheme --
+    # NEMO's dyn_cor_2D_init reads the SAME raw ff_f/e3f_vor as vor_een
+    # (dynspg_ts.F90:1517-1531), so the barotropic EEN must use the same two
+    # rules the 3-D EEN does.  Taking them from the RESOLVED model config
+    # (mc), not the raw DINOConfig, for the same reason metric_complete does.
+    print(f"een_q_boundary={mc.een_q_boundary!r}  "
+          f"een_e3f_scheme={mc.een_e3f_scheme!r}")
     cor_u_sub, cor_v_sub = barotropic_coriolis_een_pre_step(
         U_Nnn, V_Nnn, h_k_pre, br.geometry,
         st.land_mask.data, st.u_mask.data, st.v_mask.data, _min_wc,
-        U_Nnn.dtype, metric_complete=metric_complete)
+        U_Nnn.dtype, metric_complete=metric_complete,
+        een_q_boundary=mc.een_q_boundary,
+        een_e3f_scheme=mc.een_e3f_scheme,
+        # ...including dz_ref, which the production call site also forwards
+        # and which is LIVE on this card's een_e3f_scheme="nemo_avg" branch
+        # (fully-dry-vertex e3f_0 fallback).  Measured inert on the
+        # tendency, but "mirror exactly" has to mean exactly.
+        dz_ref=model.z_coord.dz_ref)
     cor_u_sub = np.asarray(cor_u_sub)
     cor_v_sub = np.asarray(cor_v_sub)
 

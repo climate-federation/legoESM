@@ -818,11 +818,14 @@ def make_sharded_ocean_step(model, mesh):
         # ppermutes of ALL staggered carriers (v + v_mask) into one
         # collective per dtype group — value-identical (a bit-copy
         # exchange; the flag flip re-keys the sharded_step cache below so
-        # a reused step object rebuilds).  Default OFF = the historical
-        # per-field ppermutes, byte-identical.
+        # a reused step object rebuilds).  Default ON -- receipt for THIS
+        # lane: ocean LL2304@128, job 26692291, fused -4.9 % (A/A2 off-arm
+        # drift 0.06 %); see halo_latlon.py for the full contract note.
+        # Set LEGOESM_LATLON_SPMD_FUSED_HALO=0 for the historical
+        # per-field ppermutes (byte-identical, just more collectives).
         import os as _os
         _fused_v = _os.environ.get(
-            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
         present = [name for name in _V_STAGGERED_STATE_FIELDS
                    if getattr(state_local, name) is not None]
         if _fused_v and len(present) > 1:
@@ -938,8 +941,11 @@ def make_sharded_ocean_step(model, mesh):
         # (codex, audit item 7).
         import os as _os
 
+        # Default ON (job 26692291, ocean LL2304@128 fused -4.9 %); the
+        # cache key below still carries the resolved value, so flipping the
+        # env var mid-process rebuilds rather than reusing a stale jaxpr.
         _fused_halo = _os.environ.get(
-            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
         key = (jax.tree.structure(state), jax.tree.structure(forcing),
                forcing_ndims, _fused_halo)
         fn = _cache.get(key)

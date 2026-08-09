@@ -267,6 +267,7 @@ def make_ocean_physics(
                 apply_diffusion=apply_vertical_diffusion,
                 emit_momentum_viscosity=(
                     config.vertical_mixing.scheme != "kpp"),
+                constants_config=config.constants,
             ))
         # else: TKE/CATKE K profiles are computed INSIDE the implicit
         # solve's compute_vertical_K_profiles fallback (their pipeline

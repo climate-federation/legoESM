@@ -666,9 +666,16 @@ def test_verify_manifest_rejects_tampering(tmp_path):
         pytest.skip("no git checkout to verify repo_sha against")
     work = str(tmp_path)
     km = 2
+    # ORDER IS LOAD-BEARING. verify_manifest refuses an output that
+    # predates the executable or its input, so the fixture has to write
+    # them in that order -- writing `drv` last made the check a race that
+    # only passed when all three landed in the same clock tick, and it
+    # lost the race here (exe 1786117722.5693974 vs output
+    # 1786117722.5683975, a 1 ms gap). The test is about TAMPERING, so a
+    # baseline that fails on filesystem timestamp resolution is noise.
+    (tmp_path / "drv").write_bytes(b"\x7fELF-not-really")
     (tmp_path / "geopk_pgrad_input.txt").write_bytes(b"# res 12\n")
     (tmp_path / f"geopk_pgrad_output_km{km}.txt").write_bytes(b"X 1 1 1 0\n")
-    (tmp_path / "drv").write_bytes(b"\x7fELF-not-really")
 
     def _sha_path(p):
         return _h.sha256(open(p, "rb").read()).hexdigest()
