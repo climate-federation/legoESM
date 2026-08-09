@@ -3322,19 +3322,49 @@ def test_hard_sat_override_bounds_enforced():
             cfg.validate_strict()
 
 
-def test_hard_saturation_adjustment_requires_warm_rain_scheme():
-    """--hard-saturation-adjustment with a non-warm-rain microphysics scheme
-    (default sundqvist, or none) is silently inert at runtime
-    (_resolve_microphysics / the MPAS post-step drain early-return before the
-    flag is read) — validate_strict must refuse it (codex F3)."""
+def test_hard_saturation_adjustment_requires_a_guarded_scheme():
+    """--hard-saturation-adjustment with a scheme that does NOT carry the guard
+    is silently inert at runtime (_resolve_microphysics / the MPAS post-step
+    drain early-return before the flag is read) — validate_strict must refuse
+    it (codex F3).
+
+    The negative set is now sdm / fast_sbm / none, NOT sundqvist: the guard was
+    made uniform, so Sundqvist and the ML emulator carry it. sdm and fast_sbm
+    are exempt on purpose (they integrate the super-saturation relaxation /
+    droplet growth law explicitly — see config.HARD_SAT_GUARD_EXEMPT), and
+    'none' has no scheme function at all."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_EXEMPT,
+    )
     parser = build_arg_parser()
-    for micro in ("sundqvist", "none"):
+    assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none"}
+    for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
             "--hard-saturation-adjustment",
         ]), parser))
-        with pytest.raises(ValueError, match="warm-rain microphysics"):
+        with pytest.raises(ValueError, match="carrying the guard"):
             cfg.validate_strict()
+
+
+def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
+    """The complement, so the test above cannot pass vacuously by
+    validate_strict rejecting everything: --hard-saturation-adjustment must be
+    ACCEPTED for every guarded scheme run_amip exposes."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_SCHEMES,
+    )
+    parser = build_arg_parser()
+    exposed = [s for s in HARD_SAT_GUARD_SCHEMES
+               if s in {"kessler", "sundqvist", "seifert_beheng", "morrison",
+                        "thompson", "p3"}]
+    assert len(exposed) == 6, exposed
+    for micro in exposed:
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--microphysics", micro,
+            "--hard-saturation-adjustment",
+        ]), parser))
+        cfg.validate_strict()   # must NOT raise
 
 
 def test_morrison_flavor_round_trips():

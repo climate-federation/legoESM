@@ -253,8 +253,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
-    # One flat scalar serves all five warm-rain schemes (only the active
-    # scheme's sub-config is built).
+    # One flat scalar serves ALL SEVEN guarded schemes -- the five bulk
+    # warm-rain ones plus the Sundqvist diagnostic scheme and the ML emulator,
+    # which gained the same guard when it was made uniform (only the active
+    # scheme's sub-config is built, so one scalar is unambiguous). Keep this
+    # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
     "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
@@ -265,6 +268,10 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.SundqvistConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.SundqvistConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
     # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
     # upstream excluded it from the __param_spec__ registry (default 0.0 = off
