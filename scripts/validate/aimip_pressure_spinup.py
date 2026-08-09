@@ -320,7 +320,12 @@ def main(argv=None):
         def _wms(field2d, mask=None):
             ww = w if mask is None else w * mask
             s = ww.sum()
-            return float((ww * field2d ** 2).sum() / max(s, 1e-30))
+            if s <= 0.0:
+                raise SystemExit(
+                    "empty weight mask in p_s statistics (bad "
+                    "--land-phis-threshold?) — a zero-weight mean would "
+                    "print 0 Pa and read as a perfect forecast.")
+            return float((ww * field2d ** 2).sum() / s)
 
         v_tot = float(np.mean([_wms(e) for e in E]))
         v_fix = _wms(mean_pat)
@@ -402,14 +407,24 @@ def main(argv=None):
         # cos(lat) weights on the WB2 lat-lon grid (CLAUDE.md area-weights
         # gate; matches the WB2 scorecard's own weighting). Weight zero where
         # any case is invalid so every statistic runs over the same cells.
+        if not ok.any():
+            raise SystemExit(
+                "every mslp cell is invalid in at least one case — refusing "
+                "to report statistics over an empty domain (a zero-weight "
+                "mean would print 0 Pa and read as a perfect forecast).")
         w2 = np.cos(np.deg2rad(np.asarray(_tlat)))[:, None] * np.ones_like(phis_wb2)
         w2 = np.where(ok, w2, 0.0)
-        w2 = w2 / max(w2.sum(), 1e-30)
+        w2 = w2 / w2.sum()
 
         def _wms2(field2d, mask=None):
             ww = w2 if mask is None else w2 * mask
             s = ww.sum()
-            return float(np.nansum(ww * field2d ** 2) / max(s, 1e-30))
+            if s <= 0.0:
+                raise SystemExit(
+                    "empty weight mask in mslp statistics (bad "
+                    "--land-phis-threshold?) — a zero-weight mean would "
+                    "print 0 Pa and read as a perfect forecast.")
+            return float(np.nansum(ww * field2d ** 2) / s)
 
         v_tot = float(np.mean([_wms2(np.where(ok, e, 0.0)) for e in E]))
         v_fix = _wms2(np.where(ok, mean_pat, 0.0))
