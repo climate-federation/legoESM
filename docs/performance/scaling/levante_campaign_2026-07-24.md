@@ -2816,3 +2816,24 @@ XLA/NCCL (device-side collective launch) — consistent with every lane's
 measured ceiling. Cheap source-level levers on this lane are now
 exhausted with receipts: count (fused halo, refuted — XLA combines),
 payload (62 us median vs 30 us wire — modest), compute (1.8%).
+
+### Eta-floor reductions REFUTED as a term; deferred surgery CANCELLED (2026-08-09 night, job 26830468)
+
+--eta-floor-iters 3->1 (60 -> 20 batched allreduces/step, epochs
+unchanged): s8@128 132.35 -> 131.91 ms, D(1)/D(3) = 1.004. The scan's
+share of the rank-count delta is entirely its HALO EPOCHS; the batched
+allreduces are effectively free on this stack. Per the pre-registered
+gate, the E3SM-style deferred-redistribution surgery is CANCELLED —
+a 4-arm minutes-scale CPU job saved the full numerics + physics-review
+chain. Epoch-count reduction here means wide-halo, which is ALREADY the
+receipted f32 recommendation (1.76x at nd16, config decision table).
+The eta_floor_clamp_iters knob ships (default 3 = production
+unchanged) as the instrument of record.
+
+CAMPAIGN STATE after this: every named in-repo lever on all three
+grids is measured, landed, or refuted with receipts. Landed today:
+ragged halo (-31% @16 / -27% @32, auto band dispatch). Structural
+remainder (upstream/redesign class): device-side collective launch
+(cube 155 us/collective floor, MPAS microkernel storm), XLA ragged
+zero-slice pruning (>32-device band), mpi4jax callback cost + BSP
+jitter (ocean CPU), stage-graph restructuring.
