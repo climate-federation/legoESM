@@ -2464,3 +2464,27 @@ that learned compensation is now a train/eval mismatch the retrain removes).
   24 h moving from ~91 m toward the sfno band; per-case residual ~100 Pa
   says the genuine short-lead forecast error is small.
 * PR #1531.
+
+## RETRAIN CONFIRMS THE FIX (2026-08-09, job 26820916 + scorecard 26828338)
+
+column_nn retrained under filter_lnps=False, ONE variable vs the anchored
+baseline, identical eval protocol (2017, 8 inits, 24 h stride):
+
+| field/lead | anchored | lnpsfix | persistence |
+|---|---|---|---|
+| z500 6 h | 82.3 | **24.0** | 25.4 |
+| z500 24 h | 90.8 | **48.1** | 63.5 |
+| z500 240 h | 205.6 | **190** | 119.5 |
+| mslp 6 h | 1044 | **509** | 366 |
+| mslp 24 h | 1147 | **712** | 674 |
+| t850 24 h | 3.03 | 3.30 | 3.06 |
+| u850 24 h | 4.71 | 4.78 | 5.65 |
+
+The mass fields collapse (-71% z500 at 6 h, now below persistence; -47% at
+24 h) while winds and temperature are unchanged — exactly the signature the
+attribution predicted. Training loss at matched epoch+lead was already
+telling the same story (72 h ep8 47.5 -> 36.4, 120 h ep10 61.7 -> 51.6).
+Gap to sfno_full (muonlr, z500 24 h 20.5 m) narrows from 4.4x to 2.3x; the
+remaining 6 h mslp (509 Pa vs floor 260) still contains the sea-level
+reduction diagnostic artifact and the ~240 Pa bare-dycore base state.
+classical retrain (26820917) still running; same scorecard follows.

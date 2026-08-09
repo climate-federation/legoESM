@@ -69,6 +69,10 @@ declare -A ENTRY=(
   # at matched epoch/lead: 120 h 85.02 -> 63.38 and 83.25 -> 61.67 (-26%).
   [column_nn_anchored]="config/aimip/ace2/suite_curriculum_v2_anchored.yaml|results/aimip_cnn_anchored/column_nn|column_nn"
   [sfno_full_muonlr]="config/aimip/scale/suite_sfno_full_ucast_muonlr.yaml|results/aimip_ucast_muonlr_sfno_full_t63/sfno_full|sfno_full"
+  # Retrained under the lnps-filter fix (jobs 26820916/17): one variable (the
+  # filter_lnps=False code default) vs the anchored rows above.
+  [column_nn_lnpsfix]="config/aimip/ace2/suite_curriculum_v2_anchored_lnpsfix.yaml|results/aimip_cnn_anchored_lnpsfix/column_nn|column_nn"
+  [classical_lnpsfix]="config/aimip/ace2/suite_classical_anchored_lnpsfix.yaml|results/aimip_classical_anchored_lnpsfix/classical|classical"
 )
 # The two sfno_full arms ARE a controlled pair (identical except training-set
 # size); the classical / column_nn arms are not controlled against them.
