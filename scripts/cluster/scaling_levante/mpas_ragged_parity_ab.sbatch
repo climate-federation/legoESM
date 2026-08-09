@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=02:30:00
 #SBATCH --output=mpas_ragged.%j.log
 # PRODUCTION acceptance for the ragged halo fill
 # (LEGOESM_MPAS_RAGGED_HALO=1 -> _ragged_halo_fill: 2 ragged_all_to_all
@@ -46,14 +46,11 @@ rc=0
 cp -f "$SCRATCH/legoesm_scaling/mpas_ragged_j26821453/parity_on.jsonl" \
   "$OUTDIR/parity_on.jsonl" || { echo "banked parity receipt missing"; rc=1; }
 
-echo "=== ARM 2: timing, ragged OFF (A), s8@16 (4 nodes) ==="
-LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
-  srun --nodes=4 --ntasks=16 --ntasks-per-node=4 --gpus-per-node=4 \
-    --gpu-bind=none --kill-on-bad-exit=1 \
-  "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-    --multicontroller --n-devices 16 --subdivision 8 --nlev 26 \
-    --steps 12 --warmup 3 --partition-method sfc --reorder-for 16 \
-    --out "$OUTDIR/timing_off_a.jsonl" || { echo "A FAILED"; rc=1; }
+# ARM 2 (ppermute baseline A) BANKED from job 26822138: 7.08 ms
+# steady_median at s8@16 (each s8@16 arm costs ~50 min, dominated
+# by the host-side reorder — 3 arms do not fit 90 min).
+cp -f "$SCRATCH/legoesm_scaling/mpas_ragged_j26822138/timing_off_a.jsonl" \
+  "$OUTDIR/timing_off_a.jsonl" || { echo "banked A receipt missing"; rc=1; }
 
 echo "=== ARM 3: timing, ragged ON (B), s8@16 ==="
 LEGOESM_MPAS_RAGGED_HALO=1 JAX_ENABLE_X64=0 \
