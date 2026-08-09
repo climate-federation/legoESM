@@ -19,8 +19,10 @@ Wing 2018 analytical profiles
   with ``z_q1 = 4 km``, ``z_q2 = 7.5 km``. Above z_t: ``q_v = q_t =
   10⁻¹¹`` (essentially dry stratosphere).
 * Virtual surface temperature ``T_v0 = T_sfc · (1 + 0.608 · q_sfc)``
-  defines the virtual-temperature reference for the hydrostatic
-  pressure integral.
+  (Eq. 3, with ``T_sfc`` the case SST) defines the virtual-temperature
+  reference for the hydrostatic pressure integral.  ``q_sfc`` is
+  case-specific — 12 / 18.65 / 24 g/kg at 295 / 300 / 305 K — "adjusted
+  so that the relative humidity is near 80 % in the lower atmosphere".
 * Pressure: integrated hydrostatically from ``p_sfc`` using the
   virtual temperature profile; potential temperature follows
   ``θ = T · (p_ref/p)^κ`` (Poisson).
@@ -48,18 +50,12 @@ from legoesm import constants
 # Wing 2018 Tab A1 canonical constants.
 WING_GAMMA = 0.0067         # K/m, lapse rate below tropopause
 WING_Z_T = 15_000.0         # m, tropopause height
-WING_T_V0 = 295.0           # K, surface VIRTUAL temperature — RCEMIP (Wing 2018
-                            # Tab 1) PRESCRIBES this FIXED for ALL SST cases
-                            # (295/300/305 K); only q_v0 and the surface BC vary
-                            # with SST. Deriving it from the SST instead made the
-                            # whole profile (incl. the tropopause cold point
-                            # T_v0-Γ·z_t) ~8 K too warm at SST=300.
+WING_T_SFC_DEFAULT = 300.0  # K (RCE300 case)
+WING_Q_SFC_DEFAULT = 0.01865  # kg/kg (RCE300 case)
 WING_Z_Q1 = 4_000.0         # m, q_v lower-troposphere e-folding scale
 WING_Z_Q2 = 7_500.0         # m, q_v upper-troposphere Gaussian scale
 WING_Q_T = 1.0e-11          # kg/kg, stratospheric humidity floor
 WING_P_SFC = 101_480.0      # Pa (1014.8 hPa per Wing Tab A1)
-WING_T_SFC_DEFAULT = 300.0  # K (RCE300 case)
-WING_Q_SFC_DEFAULT = 0.01865  # kg/kg (RCE300 case)
 
 # Virtual-temperature factor: T_v = T · (1 + VIRTUAL_FACTOR · q_v).
 # Derived from the molecular-weight ratio so the value stays in sync
@@ -67,6 +63,52 @@ WING_Q_SFC_DEFAULT = 0.01865  # kg/kg (RCE300 case)
 # raw 0.608 is the standard ε-derived value (1/ε - 1 = R_v/R_d - 1 ≈
 # 0.608 for ε = R_d/R_v ≈ 0.622) — anchor it to the central constant.
 _VIRTUAL_T_FACTOR = 1.0 / constants.epsilon - 1.0
+
+# Surface VIRTUAL temperature. Wing et al. (2018) Eq. (3): Tv0 = T0·(1+0.608·q0)
+# with T0 the SST of the case (295/300/305 K) and q0 the matching surface
+# specific humidity (12 / 18.65 / 24 g/kg, "adjusted so that the relative
+# humidity is near 80 % in the lower atmosphere for each SST value").
+#
+# It is NOT fixed at 295 K for all SSTs. A previous revision pinned 295 K,
+# reasoning from the equilibrium cold point that the SST-derived profile was
+# "~8 K too warm" — but the ~194-198 K cold point is the 100-day EQUILIBRIUM
+# state, not the analytic IC, whose Tvt = Tv0 - Γ·z_t is ~203 K at 300 K SST.
+# Pinning 295 K made the initial column ~8 K TOO COLD, which drove the near-
+# surface saturation ratio to S = 1.39 — the IC is specified to sit near 80 %
+# RH, so the run started 40 % supersaturated and condensed the excess away in
+# the first steps. Use `wing2018_T_v0()` for the 295 K / 305 K cases.
+WING_T_V0 = WING_T_SFC_DEFAULT * (1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT)
+
+
+def wing2018_T_v0(T_sfc: float = WING_T_SFC_DEFAULT,
+                  q_sfc: float = WING_Q_SFC_DEFAULT) -> float:
+    """Wing 2018 Eq. (3) surface virtual temperature ``T0·(1 + 0.608·q0)``."""
+    return T_sfc * (1.0 + _VIRTUAL_T_FACTOR * q_sfc)
+
+
+# Wing 2018: "q0 ... 12 g/kg for the simulation at 295 K, 18.65 g/kg for the
+# simulation at 300 K, and 24 g/kg for the simulation at 305 K. The values of q0
+# have been adjusted so that the relative humidity is near 80 % in the lower
+# atmosphere for each SST value." q0 is therefore CASE data, not a constant —
+# reusing the 300 K value at another SST reproduces the ~139 % RH IC bug that
+# the fixed T_v0 was introduced to remove.
+WING_Q_SFC_BY_SST = {295.0: 0.01200, 300.0: 0.01865, 305.0: 0.02400}
+
+
+def wing2018_q_sfc(T_sfc: float = WING_T_SFC_DEFAULT) -> float:
+    """RCEMIP surface specific humidity ``q0`` for the case SST [kg/kg].
+
+    Only the three published SSTs are defined. Interpolating between them
+    would invent an unpublished profile and silently mis-set the near-surface
+    RH, so an unlisted SST raises instead.
+    """
+    key = float(T_sfc)
+    if key not in WING_Q_SFC_BY_SST:
+        raise ValueError(
+            f"RCEMIP q0 is published only for SST 295/300/305 K, got "
+            f"{key} K. Pass q_sfc explicitly if you intend a non-RCEMIP SST."
+        )
+    return WING_Q_SFC_BY_SST[key]
 
 
 def wing2018_virtual_temperature_profile(
