@@ -2728,3 +2728,18 @@ fixed for the ocean lane, never ported here) — arm disabled with the
 blocker named; kt=2 C768 @24 rerun = job 26826088.
 Lesson (controlled-comparison rule, again): a discriminator job whose
 placement differs from the runs it arbitrates arbitrates NOTHING.
+
+### Cube placement split CONFIRMED; C768 ladder blocked on the bench residency wall (2026-08-09)
+
+Pinned rerun (job 26826088): known-answer arm = **8.91 ms** — the
+placement split now has four points: pinned-6-node 9.01/8.97/8.91 vs
+spread-14-node 13.19/13.47. Placement is the whole story; tree state
+never mattered.
+C768 @24 kt2 ALSO host-OOMs when pinned (4 ranks/node x per-rank global
+C768 build) — both C768 arms are blocked on the SAME wall: the tiled
+cube bench builds the global model/state on every rank
+(the #1370 residency issue; the ocean lane's fix — global build under
+jax.default_device(cpu) + addressable shard puts, commit e1b502000 —
+was never ported to bench_cube_tiled_step_scaling.py). NAMED NEXT ITEM
+for the cube lane; the C768 24->54 closed-loop ratio stays unmeasured
+until it lands.
