@@ -2108,3 +2108,59 @@ the same one-line change.
 Final-checkpoint WB2 scorecard submitted (job 26812046) at leads
 6/12/24/72/120/240 so the anchored classical row is directly comparable to the
 epoch-9 row already in hand.
+
+## PREDICTION TESTED AND CONFIRMED: the offset is lead-INDEPENDENT
+
+Same probe, 10 cases, at two leads. The base-state hypothesis predicts the fixed
+pattern should be roughly constant while genuine forecast error accumulates on
+top of it — so the FRACTION should fall with lead even though the offset does
+not shrink.
+
+| component | 6 h | 24 h | growth |
+|---|---|---|---|
+| **fixed pattern** | **432.1 Pa** | **519.2 Pa** | **x1.20** |
+| per-case residual | 166.6 Pa | 703.0 Pa | **x4.22** |
+| total | 463.1 Pa | 874.0 Pa | x1.89 |
+| corrected fixed fraction | 0.856 | 0.281 | — |
+
+**Exactly as predicted.** The offset grows 20 % between 6 h and 24 h while the
+random part grows 4.2x. The fraction collapses from 0.86 to 0.28 purely because
+the denominator grows — the offset itself is essentially lead-independent. And
+the 6 h number reproduces across sample sizes (0.886 at N=5, 0.856 at N=10).
+
+What removing the fixed pattern would buy: **463 -> 167 Pa at 6 h (2.8x)** and
+874 -> 703 Pa at 24 h (1.24x). So the short-lead mass scores are dominated by a
+removable offset; by day 1 genuine forecast error has taken over.
+
+### An honest complication: physics ADDS error at 6 h
+
+The bare dycore's 6 h mslp error is **463 Pa**. The trained arms' model-only 6 h
+errors are **967 Pa (classical)** and **1011 Pa (column_nn)**. So both physics
+packages roughly DOUBLE the short-lead pressure error relative to running no
+physics at all.
+
+That does not contradict the physics-independence result, and the distinction
+matters: that result says the two PACKAGES agree with each other to 1-4 %, not
+that physics contributes nothing. Both add a similar amount of error. Stated
+plainly rather than glossed, because it is the one observation today that points
+back at physics — though at short lead only, and it is a separate, smaller term
+than the base-state offset it sits on top of.
+
+### Where this leaves the campaign
+
+CONFIRMED, with a tested prediction behind it:
+1. The dycore has a **lead-independent surface-pressure base-state offset** of
+   ~430-520 Pa. It dominates the 6 h mass scores and is removable in principle.
+2. The dycore's **forecast skill is real** — winds and temperature beat
+   persistence at every lead.
+3. The **dry-mass anchor is worth -25 to -30 %** of the 5-day training loss on
+   both arms, the campaign's largest single win.
+4. Training-recipe levers (optimizer, capacity, data) are **null** on these arms
+   because they act on a term that is not binding.
+
+The open items, in order: find what sets the base state (orography reconciliation
+and the continuity term are both refuted; the remaining candidate is the initial
+hydrostatic balance between the smoothed `phis` and the temperature profile);
+confirm the fraction with a TRAINED checkpoint rather than zero physics; and
+report a bias-corrected mass score alongside the raw one, with the correction
+estimated on training years only.
