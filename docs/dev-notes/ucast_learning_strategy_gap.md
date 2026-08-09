@@ -1926,3 +1926,48 @@ The next probe must compare the 6 h forecast against the ERA5 verification and
 split the error into amplitude versus phase/pattern, rather than measuring
 displacement from t=0. That is a different, more careful instrument, and it is
 the honest next step rather than another guess at the mechanism.
+
+## THE DAMAGE IS TO THE PRESSURE FIELD'S PATTERN, AND ONLY IT
+
+Anomaly correlation (1.0 = perfect pattern) at lead 6 h, same scorecards, same
+cases — no new run, the metric was already there:
+
+| field | classical | column_nn | persistence |
+|---|---|---|---|
+| t850 | 0.971 | 0.966 | 0.969 |
+| z500 | 0.828 | 0.831 | 0.978 |
+| **mslp** | **0.564** | **0.547** | **0.898** |
+
+Read down the column: after ONE 6-hour step the model's TEMPERATURE pattern is
+as good as persistence (0.971 vs 0.969), while its SURFACE-PRESSURE pattern has
+collapsed from 0.898 to 0.56. z500 sits in between, exactly as it must, being
+diagnosed hydrostatically from both.
+
+So the 6 h error is not an amplitude error and not a uniform shock: **the
+spatial pattern of p_s is being destroyed while temperature and winds keep
+theirs.** (Winds were already shown to be in family with sfno_full —
+2.4-2.6 m/s model-only at 6 h.)
+
+### This narrows the mechanism sharply
+
+A generic unbalanced initial condition radiates gravity waves, which corrupt
+winds AND pressure together. The winds are fine. So "the analysis is unbalanced"
+in its simple form does not fit either — consistent with the zero-physics probe,
+where the adjustment was monotonic rather than a ringing wave.
+
+What can corrupt p_s specifically while leaving T and u/v intact is the
+**surface-pressure tendency itself** — the continuity term
+`dlnps/dt = -int (div(V) + V . grad lnps) dsigma`. An error in that vertical
+integral, its weights, or the divergence it consumes would produce exactly this
+signature: prognostic winds and temperatures evolve correctly, and the single
+diagnostic they feed develops a wrong pattern.
+
+Labelled **PLAUSIBLE** — this is a localisation from a signature, not a
+measurement of the term. The next step is to read `spectral_pe_tendencies`'
+`dlnps_dt_grid` construction and check the sigma-integration weights against the
+continuity equation, then verify with a manufactured solution where the exact
+`dlnps/dt` is known. That is a code-plus-unit-test task, not a GPU one.
+
+What is CONFIRMED here: the 6 h damage is a pattern failure localised to p_s,
+temperature and winds are unaffected, and persistence beats the model on that
+pattern by 0.90 vs 0.56.
