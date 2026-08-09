@@ -2655,3 +2655,40 @@ allreduces/step (n_iter 3 x 2 sites x 10 substeps; E3SM avoids global
 reductions inside barotropic substepping entirely), (2) fuse the 3
 per-substep exchanges into 1 (30 -> 10 epochs). Both touch production
 numerics -> physics-validator + codex chain when picked up.
+
+### Cube known-answer RESOLVED (2026-08-09, job 26823000)
+
+CLEAN main reproduces the anchor: C384/L60 kt2 @24 closed-loop =
+**8.97 ms/step** (anchor 9.01, job 26452632). The 13.19 ms from job
+26804520 was a DIRTY-TREE artifact (sha 6fc6be9ea-dirty), not a merged
+regression — no bisect needed. Two operational causes burned first:
+26818796 refused on the shared worktree being mid-iteration dirty (the
+guard working as designed — submit from a clean tree), and 26821454
+timed out with l50100 (the phase-7 sick node) in its allocation; the
+exclusion is now baked into the launcher. Cube lane state: tiled-lane
+anchor healthy; the halo lever remains DEAD there (5.4% ceiling); the
+open cube item is only the C768 24->54 closed-loop ladder (arms crashed
+in 26804520 on coordination errors — rerun when worth a slot).
+
+## RAGGED HALO FILL — the MPAS structural lever LANDS (2026-08-09)
+
+PR #1512 closed recolouring (Vizing gap 0 — the coloured schedule was
+optimal); the remaining lever was the ROUND STRUCTURE itself. jax 0.10
+exposes ragged_all_to_all (grouped P2P, one collective for all
+neighbours — the MPAS-A/ICON-GPU concurrent-isend pattern; JVP+transpose
+registered; XLA:CPU has NO thunk, so every gate is a GPU job).
+
+| stage | receipt |
+|---|---|
+| synthetic microbench (26818265, in-job exact verify) | per-fill ratio ragged/coloured: 1.27@nd4 (loses intra-node), 0.746@nd8, **0.475@nd16** — advantage grows with scale; uniform a2a competitive small-n but O(n_dev) inflated |
+| schedule row-identity | tests/parallel/test_ragged_halo_schedule.py: transfer-set equality with the ppermute schedule (shared _build_halo_send_maps) |
+| GPU parity (26821453) | u/T/p_s vs serial reference OK at s6@4, halo_strategy_effective=ppermute_ragged bound in the receipt |
+| production A/B/A2 (26822138+26824483) | s8@16: ppermute 7.08/7.21 ms, **ragged 4.86 ms — ratio 0.686 (-31% FULL STEP)**, drift 1.8%, pre-registered gate CONFIRMED |
+
+Opt-in: LEGOESM_MPAS_RAGGED_HALO=1 (explicit '1'; auto-allgather tiles
+unaffected; ppermute default untouched). Open: AD unexercised on this
+path; scale receipts s9/s10@64-128; default-on decision after those.
+Ops debris burned on the way (all fixed in-branch): census KeyError
+killing multicontroller arms post-timing; ~50 min/arm s8@16 host
+reorder forcing banked-arm job structure; XLA sharded-autotune cache
+desync from a shared persistent cache (per-job cache now); l50100.
