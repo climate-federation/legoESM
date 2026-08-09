@@ -170,7 +170,8 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
 
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
                          barotropic_solver: str = "explicit_substep",
-                         pcg_variant: str = "standard"):
+                         pcg_variant: str = "standard",
+                         n_barotropic_substeps: int = 10):
     """Global mesh + z-coordinate + config + perturbed global IC.
 
     Deterministic and mesh-cache-backed, so every rank derives the
@@ -188,7 +189,7 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
         n_levels=nlev, H_max=4000.0, dz_surface=20.0, dz_deep=400.0)
     config = MPASOceanConfig(
         A_h=1e3, K_h=1e2, A_v=1e-3, K_v=1e-4,
-        n_barotropic_substeps=10,
+        n_barotropic_substeps=n_barotropic_substeps,
         # implicit_cn at n_ranks > 1 dispatches to the DISTRIBUTED fixed-M
         # PCG (halo-composed A_op + owned-masked dots) when the layout is
         # armed — the OMIP production barotropic path.  The model ctor
@@ -342,6 +343,17 @@ def main() -> int:
                         "the initialization, and only the reduction term is "
                         "removed. Requires n_ranks>1, implicit_cn and f64; "
                         "refused otherwise rather than silently ignored.")
+    p.add_argument("--n-substeps", type=int, default=10,
+                   help="Barotropic explicit_substep subcycle count "
+                        "(config n_barotropic_substeps). The 10-substep "
+                        "scan holds 30 of the step's 35 halo epochs and "
+                        "60 of its 65 global reductions (2026-08-09 "
+                        "census), so this is the rank-count-term "
+                        "discriminator knob: halving it should halve the "
+                        "32->128-rank cost delta IF the term is "
+                        "barotropic-comm-bound. Physics validity of the "
+                        "subcycle is NOT asserted off 10 — scaling "
+                        "instrument only.")
     p.add_argument("--barotropic-solver",
                    choices=["explicit_substep", "implicit_cn"],
                    default="explicit_substep",
@@ -517,7 +529,8 @@ def main() -> int:
                 "run it under mpirun/srun.")
     mesh, z_coord, config, state_global = build_global_problem(
         subdivision, args.nlev, barotropic_solver=args.barotropic_solver,
-        pcg_variant=args.pcg_variant)
+        pcg_variant=args.pcg_variant,
+        n_barotropic_substeps=args.n_substeps)
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
@@ -873,6 +886,7 @@ def main() -> int:
             "halo_refresh": halo_refresh,
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
+            "n_barotropic_substeps": args.n_substeps,
             "block_steps": args.block_steps,
             "blocks": args.blocks,
             "probe_steps": args.probe_steps,

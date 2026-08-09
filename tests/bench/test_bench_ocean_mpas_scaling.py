@@ -82,11 +82,21 @@ def test_m1_lane_flags_exist():
     src = _BENCH.read_text()
     for flag in ("--barotropic-solver", "--halo-refresh", "--block-steps",
                  "--blocks", "--probe-steps", "--parity-gate",
-                 "--check-conservation"):
+                 "--check-conservation", "--n-substeps"):
         assert flag in src, flag
     # Unknown solver literals must be rejected by argparse choices.
     import argparse  # noqa: F401  (documents the surface under test)
     assert 'choices=["explicit_substep", "implicit_cn"]' in src
+
+
+def test_n_substeps_reaches_config():
+    """--n-substeps must land in MPASOceanConfig.n_barotropic_substeps
+    (the rank-count-term discriminator knob), not just parse."""
+    cfg = mod.build_global_problem(3, 4, n_barotropic_substeps=4)[2]
+    assert cfg.n_barotropic_substeps == 4
+    # default unchanged
+    cfg10 = mod.build_global_problem(3, 4)[2]
+    assert cfg10.n_barotropic_substeps == 10
 
 
 class _FakeMultiRankComm:
