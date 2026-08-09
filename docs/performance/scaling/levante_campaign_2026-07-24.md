@@ -2743,3 +2743,23 @@ jax.default_device(cpu) + addressable shard puts, commit e1b502000 —
 was never ported to bench_cube_tiled_step_scaling.py). NAMED NEXT ITEM
 for the cube lane; the C768 24->54 closed-loop ratio stays unmeasured
 until it lands.
+
+### C768 closed-loop ladder MEASURED; the cube halo lever REPRICED ALIVE (2026-08-09)
+
+Job 26826851 (both rungs one job, 2 rpn matched, dt=30 — the 26826706
+failure was CFL non-finite at dt=60, not memory; the OOM fix was 2
+ranks/node, closed-loop C768 = 46.5 GB host/task):
+
+| rung | ms/step |
+|---|---|
+| C768/L60 kt2 @24 closed | 18.93 |
+| C768/L60 kt3 @54 closed | 15.22 |
+
+24->54 = 1.244x on 2.25x devices = **eff 0.553** at 147k->65k cols/GPU
+(far above the tile floor) — the single-shot lane's 0.568 REPRODUCES on
+the production assembly: a real cube scale-out deficit.
+REPRICE: the halo-lever "5.4%, does not pay" verdict divided the 3.65 ms
+collective cost by the single-shot 67.54 ms step; against the CLOSED
+loop's 18.93 ms it is **~19% at 24 devices** — the packed multi-field
+pad for the tiled lane (packed_pad_halo_4d exists face-sharded only) is
+back on the table as the next cube lever.
