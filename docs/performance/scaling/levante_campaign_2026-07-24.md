@@ -2623,3 +2623,35 @@ dirty tree. ~9 ms => (b), close; ~13 ms => (a), bisect the window.
 The C768 arms' 24->54 ratio therefore still has no valid closed-loop
 measurement; do not quote 0.568 (that was the single-shot lane) nor any
 number from 26804520 past arm 0.
+
+## Ocean-MPAS CPU rank-count term ATTRIBUTED (2026-08-09, jobs 26819741/26819928/26820126/26820412)
+
+The 1.65x-at-matched-tile mystery (s7@32 vs s8@128, 5120 cells/rank) is
+now a measured decomposition, not a label. Current-code delta D = 42-44
+ms (ratio 1.47-1.48, three replicates; the 1.65 was July code). Census
+first (call-path confirmed): one ocean step = 35 halo epochs + 65
+allreduces = ~100 sync points; the 10-substep barotropic scan holds 30
+epochs + 60 reductions (eta-floor clamp = 3 allreduces x 2 sites x 10
+substeps). The atm lane: 3 epochs + 1 reduction — no term, as measured.
+
+| discriminator | receipt | verdict |
+|---|---|---|
+| substeps 10->5, D(5)/D(10) | 0.795 / 0.851 (2 passes) | scan carries only 30-41% of D; per-SYNC-POINT-uniform cost REFUTED (scan = 90/100 sync points) |
+| s7@32 spread 4 nodes vs packed | 0.947 (faster) | fabric/placement REFUTED |
+| conservation fixer OFF (removes all 5 non-scan reductions) | D_off 54.0 > D_on 44.5 | non-scan reductions REFUTED; fixer-off SLOWED np128 by 8 ms (PLAUSIBLE: longer fused segments = more jitter exposure; single run) |
+| JAX-free spin+barrier probe, 2.5 ms segments | amp 1.033@32 -> 1.094@128 | OS/BSP jitter contributes ~15 ms (~1/3 of D) — real, not sufficient |
+| s8 same-mesh ladder 32/64/128 | 400.7/232.7/132.5 ms (1.72/1.76 per doubling) | no wall; splits D into mesh-size ~10 ms + rank-growth ~32 ms |
+
+Segment-length-proportional stalling (the GLM-5.2 BSP tail-latency
+model) fits the 30-41% scan share (scan segments are short); the ~17 ms
+rank-growth remainder above the pure-MPI jitter floor is PLAUSIBLY the
+mpi4jax host-callback sync cost itself (unmeasured directly — the
+rotted per-epoch micro was dropped; VoronoiHaloExchange.exchange_cell_field
+still references the removed layout.cell_comm, reported not fixed).
+
+PRODUCTION LEVER, mechanism-independent: every sync point carries
+rank-growing cost, so cut sync points — (1) the eta-floor clamp's 60
+allreduces/step (n_iter 3 x 2 sites x 10 substeps; E3SM avoids global
+reductions inside barotropic substepping entirely), (2) fuse the 3
+per-substep exchanges into 1 (30 -> 10 epochs). Both touch production
+numerics -> physics-validator + codex chain when picked up.
