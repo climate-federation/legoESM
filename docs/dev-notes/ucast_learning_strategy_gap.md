@@ -1971,3 +1971,59 @@ continuity equation, then verify with a manufactured solution where the exact
 What is CONFIRMED here: the 6 h damage is a pattern failure localised to p_s,
 temperature and winds are unaffected, and persistence beats the model on that
 pattern by 0.90 vs 0.56.
+
+## THE MODEL BEATS PERSISTENCE ON WINDS AND TEMPERATURE — AND ONLY MASS IS BROKEN
+
+Anomaly correlation, anchored classical vs persistence, leads 6/12/24/72 h:
+
+| field | model | persistence |
+|---|---|---|
+| v850 | 0.869 / 0.814 / 0.691 / 0.327 | 0.840 / 0.641 / 0.345 / 0.205 |
+| v500 | 0.937 / 0.901 / 0.816 / 0.358 | 0.867 / 0.686 / 0.393 / 0.217 |
+| u250 | 0.952 / 0.940 / 0.900 / 0.594 | 0.944 / 0.865 / 0.723 / 0.537 |
+| t850 | 0.971 / 0.948 / 0.919 / 0.726 | 0.969 / 0.931 / 0.878 / 0.771 |
+| **mslp** | **0.564** / 0.539 / 0.484 / 0.326 | **0.898** / 0.834 / 0.647 / 0.348 |
+| **z500** | **0.828** / 0.822 / 0.791 / 0.636 | **0.978** / 0.946 / 0.865 / 0.720 |
+
+**The dycore beats persistence on every wind component at nearly every lead —
+v500 at 24 h is 0.816 against 0.393, more than double.** It matches or beats
+persistence on temperature. It is a working forecast model.
+
+It is uniquely, badly worse on the two MASS fields. That reverses the earlier
+gloomy reading: the problem is not a broken dycore, it is something specific to
+surface pressure and the geopotential diagnosed from it.
+
+### Three mechanisms tested and REFUTED
+
+1. **Orography reconciliation** (`p_s * exp(delta_phis/(R_d T_sfc))`) — refuted
+   by the zero-physics probe's land/ocean symmetry (311.9 vs 314.6 Pa).
+2. **The continuity term.** Read against the equation: sigma-coordinate
+   continuity integrates to `dlnps/dt = -int(D + V.grad lnps) dsigma / (1-sigma_top)`,
+   and the code computes exactly that (`_compute_sigma_dot_gaussian` returns
+   `sum(div_3d * dsigma)`, divided by `sigma_range`). Checked the one place a
+   quiet factor error could hide — `sum(dsigma)` vs `1 - sigma_half[0]` — and
+   the ratio is 1.000000000000 at both 8 and 16 levels. **Correct.**
+3. **Orography decaying during the rollout.** `apply_spectral_filter_to_state`
+   touches `vor_hat`, `div_hat`, `T_hat`, `lnps_hat` — not `phis_hat`. Verified
+   by a 36-step zero-physics rollout with a perturbed orography: RMS change 0,
+   arrays bit-identical. **Refuted.**
+
+### The hypothesis that now fits everything — PLAUSIBLE, untested
+
+ACC is an anomaly correlation against CLIMATOLOGY, and the scorecard's
+climatology is ERA5's. If the model's own preferred p_s base state differs from
+ERA5's by a fixed spatial pattern, then:
+
+* mslp/z500 ACC collapses (the anomaly is contaminated by a constant offset),
+* winds and temperature are untouched (no such base-state offset),
+* the error appears within 6 h and then barely grows (1001 -> 1009 -> 1059 Pa),
+* the lead-0 floor is small, because at t=0 p_s is still ERA5's own.
+
+That is a systematic BASE-STATE offset, not a forecast-skill failure — and it
+would be correctable rather than fundamental.
+
+**The test is cheap and specific:** compute the 6 h mslp error FIELD for several
+cases and measure what fraction of its variance is explained by the case-mean
+error pattern. A high fraction means a fixed offset; a low fraction means
+genuine per-case forecast error. That is the next probe, and unlike the last one
+it compares against ERA5 rather than against t=0.
