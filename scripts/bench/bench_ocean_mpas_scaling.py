@@ -171,7 +171,8 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
                          barotropic_solver: str = "explicit_substep",
                          pcg_variant: str = "standard",
-                         n_barotropic_substeps: int = 10):
+                         n_barotropic_substeps: int = 10,
+                         conservation_fixer: bool = True):
     """Global mesh + z-coordinate + config + perturbed global IC.
 
     Deterministic and mesh-cache-backed, so every rank derives the
@@ -207,8 +208,9 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
         # subcycle's raw volume drift (~1e-4 over a smoke window) would
         # trip the gate — and their global reductions are exactly the
         # collective cost a scaling row should include.
-        use_conservation_fixer=True,
-        fix_volume=True, fix_heat=True, fix_salt=True,
+        use_conservation_fixer=conservation_fixer,
+        fix_volume=conservation_fixer, fix_heat=conservation_fixer,
+        fix_salt=conservation_fixer,
     )
     state = rest_state_mpas_ocean(
         mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
@@ -343,6 +345,15 @@ def main() -> int:
                         "the initialization, and only the reduction term is "
                         "removed. Requires n_ranks>1, implicit_cn and f64; "
                         "refused otherwise rather than silently ignored.")
+    p.add_argument("--conservation-fixer", choices=["on", "off"],
+                   default="on",
+                   help="off removes ALL non-scan global reductions (3 "
+                        "fixer reductions + the 2 fixer-gated unbatched "
+                        "dHeat/dSalt sums, ocean_model_mpas.py:1026) — "
+                        "the rank-count-term attribution knob for the "
+                        "non-barotropic 60-70%% of the 32->128 delta. "
+                        "Scaling instrument only; conservation gates "
+                        "obviously void when off.")
     p.add_argument("--n-substeps", type=int, default=10,
                    help="Barotropic explicit_substep subcycle count "
                         "(config n_barotropic_substeps). The 10-substep "
@@ -527,10 +538,14 @@ def main() -> int:
                 "distributed fixed-M PCG, so the variant would do nothing "
                 "while the row claimed it. This flag is a >=256-rank lever; "
                 "run it under mpirun/srun.")
+    if args.check_conservation and args.conservation_fixer == "off":
+        raise SystemExit("--check-conservation with --conservation-fixer off "
+                         "cannot pass (the fixer IS the closure); refusing")
     mesh, z_coord, config, state_global = build_global_problem(
         subdivision, args.nlev, barotropic_solver=args.barotropic_solver,
         pcg_variant=args.pcg_variant,
-        n_barotropic_substeps=args.n_substeps)
+        n_barotropic_substeps=args.n_substeps,
+        conservation_fixer=(args.conservation_fixer == "on"))
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
@@ -887,6 +902,7 @@ def main() -> int:
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
             "n_barotropic_substeps": args.n_substeps,
+            "conservation_fixer": args.conservation_fixer,
             "block_steps": args.block_steps,
             "blocks": args.blocks,
             "probe_steps": args.probe_steps,

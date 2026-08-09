@@ -82,11 +82,20 @@ def test_m1_lane_flags_exist():
     src = _BENCH.read_text()
     for flag in ("--barotropic-solver", "--halo-refresh", "--block-steps",
                  "--blocks", "--probe-steps", "--parity-gate",
-                 "--check-conservation", "--n-substeps"):
+                 "--check-conservation", "--n-substeps",
+                 "--conservation-fixer"):
         assert flag in src, flag
     # Unknown solver literals must be rejected by argparse choices.
     import argparse  # noqa: F401  (documents the surface under test)
     assert 'choices=["explicit_substep", "implicit_cn"]' in src
+
+
+def test_conservation_fixer_off_reaches_config():
+    cfg = mod.build_global_problem(3, 4, conservation_fixer=False)[2]
+    assert cfg.use_conservation_fixer is False
+    assert cfg.fix_volume is False and cfg.fix_heat is False
+    cfg_on = mod.build_global_problem(3, 4)[2]
+    assert cfg_on.use_conservation_fixer is True
 
 
 def test_n_substeps_reaches_config():
