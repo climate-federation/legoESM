@@ -6162,6 +6162,71 @@ class ModelDriver:
         )
         return (feed_safe and wants_cmip, wants_cmip)
 
+    def _require_mpas_cmip_feed_supported(self, feed_on: bool,
+                                          wants_cmip: bool) -> None:
+        """Refuse a run that would write EMPTY CMOR output (#1517).
+
+        A multi-rank MPAS/Voronoi run with ``cmip_output``/``monthly_means`` on
+        cannot feed the CMOR accumulators (see
+        :meth:`_mpas_cmip_feed_enabled`), so it completes normally and writes
+        CMOR files containing nothing.  That used to be a rank-0 log warning —
+        one line in a long log — so the cost was discovered only after the
+        GPU-hours were spent.  A request for output the lane cannot produce is
+        a launch error, not a note.
+
+        Raised on EVERY rank, deliberately NOT rank-0-gated: ``feed_on`` and
+        ``wants_cmip`` are config/layout-derived and identical everywhere, so a
+        rank-0-only raise would kill rank 0 and hang the rest at the next
+        collective.
+
+        ``LEGOESM_ALLOW_EMPTY_CMOR=1`` (exact value, matching the repo's other
+        ``LEGOESM_ALLOW_*`` escape hatches) downgrades it to the old warning.
+        The environment is the ONE input here that is genuinely per-process —
+        an MPMD launcher can export it to some ranks and not others — so it is
+        bcast from rank 0 before anyone acts on it (the repo's established
+        status-bcast idiom).  Without that, a split environment sends some
+        ranks onward and raises on the others: a hang, which is strictly worse
+        than the empty output this replaces (pre-merge codex).
+
+        This closes the trap only.  The feed itself still needs the owned-cell
+        gather plus global regrid weights on rank 0 (#1517 work items); until
+        that lands, multi-rank MPAS runs CMOR-less.
+        """
+        if not wants_cmip or feed_on:
+            return
+        world = getattr(self, "_mpi_world_size", 1)
+        allow = os.environ.get("LEGOESM_ALLOW_EMPTY_CMOR") == "1"
+        # ``COMM_WORLD``/``root=0`` matches the driver's established
+        # status-bcast (the check_stability error bcast).  The gate is precise
+        # rather than merely sufficient: reaching this line at all requires
+        # ``feed_on`` False, which per _mpas_cmip_feed_enabled means a Voronoi
+        # layout AND world > 1 — i.e. a genuine MPI cell partition, the only
+        # multi-GPU lane this grid has.
+        if getattr(self, "_mpi_rank", None) is not None and world > 1:
+            from mpi4py import MPI
+            allow = MPI.COMM_WORLD.bcast(allow, root=0)
+        if allow:
+            if getattr(self, "_mpi_rank", 0) == 0:
+                logger.warning(
+                    "  CMOR output requested on a %d-rank MPAS/Voronoi run "
+                    "and LEGOESM_ALLOW_EMPTY_CMOR=1 is set: the monthly/daily "
+                    "CMOR accumulators WILL STAY EMPTY. The run continues "
+                    "because you asked it to.", world)
+            return
+        raise NotImplementedError(
+            f"CMOR output was requested (cmip_output / monthly_means on) but "
+            f"this is a {world}-rank MPAS/Voronoi run, and the per-interval "
+            f"spatial/zonal CMOR feed is UNSUPPORTED under cell-partition "
+            f"MPI: each rank holds only its own cells and its own regrid "
+            f"weights, so feeding it would bin one rank's subdomain into the "
+            f"global lat-lon boxes. The run would otherwise finish and write "
+            f"CMOR files containing NOTHING (#1517).\n"
+            f"  Options, in order of preference: (1) run single-rank for CMOR "
+            f"spatial output; (2) turn CMOR output off "
+            f"(cmip_output/monthly_means) if you only want checkpoints and "
+            f"log diagnostics; (3) set LEGOESM_ALLOW_EMPTY_CMOR=1 to proceed "
+            f"anyway and accept empty CMOR files.")
+
     def _feed_mpas_cmip_accumulators(self, day: float) -> None:
         """Feed the CMOR monthly/daily/zonal accumulators from the current
         MPAS (Voronoi) state at a diagnostic interval.
@@ -6549,19 +6614,8 @@ class ModelDriver:
         _diag = getattr(self, "diagnostics", None)
         self._mpas_cmip_feed_on, _diag_wants_cmip = (
             self._mpas_cmip_feed_enabled(_diag))
-        # Make the unsupported multi-rank case LOUD (rank 0 only) rather than
-        # silently reproducing the empty-accumulator symptom this fix targets.
-        if (_diag_wants_cmip and not self._mpas_cmip_feed_on
-                and getattr(self, "_mpi_rank", 0) == 0):
-            logger.warning(
-                "  CMOR output requested (cmip_output/monthly_means on) but "
-                "this is a %d-rank MPAS/Voronoi run — the per-interval "
-                "spatial/zonal CMOR feed is UNSUPPORTED under cell-partition "
-                "MPI (rank-local cells + local regrid weights). The "
-                "monthly/daily CMOR accumulators will stay EMPTY; run "
-                "single-rank for CMOR spatial output. (Follow-up: owned-cell "
-                "gather + global weights on rank 0.)",
-                getattr(self, "_mpi_world_size", 1))
+        self._require_mpas_cmip_feed_supported(
+            self._mpas_cmip_feed_on, _diag_wants_cmip)
 
         # --clear-sky-diag DEGRADES LOUDLY, NEVER SILENTLY (#843): skip the
         # second radiation pass in the configurations that cannot publish it,
