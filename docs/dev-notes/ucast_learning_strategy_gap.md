@@ -2292,3 +2292,57 @@ is ERA5 passed through our own transform, so the 236 Pa total is a
 self-consistency measure — "does the model stay on its own manifold" — not a
 forecast error. That is exactly what isolates the base state, and exactly why
 the number must not be quoted as skill.
+
+# RETRACTION: it is the MSLP REDUCTION, not the orography reconciliation
+
+The previous section attributed 76 % of the fixed offset to the
+`p_s * exp(delta_phis/(R_d T_sfc))` reconciliation. **That is wrong**, and the
+perturbation test I should have run first says so.
+
+Sweeping the orography smoothing (fixed pattern of the 6 h mslp error, 4 cases):
+
+| passes | total | FIXED | land | ocean | L/O |
+|---|---|---|---|---|---|
+| 0 | 468.6 | 448.9 | 714.9 | 203.3 | 3.52 |
+| 2 | 459.1 | 439.1 | 693.0 | 199.0 | 3.48 |
+| 4 (default) | 457.3 | 437.2 | 688.1 | 198.6 | 3.46 |
+| 8 | 456.9 | 436.7 | 687.0 | 198.6 | 3.46 |
+
+**At 0 passes the smoothed orography IS the raw orography, so `delta_phis = 0`
+and the reconciliation is the exact identity.** The fixed offset moves by
+**+2.7 %** — and in the WRONG DIRECTION. Turning the mechanism completely off
+does not remove the effect. REFUTED.
+
+So what produced the 438 -> 213 Pa halving in the reconciled-reference test? That
+comparison changed TWO things at once, and I emphasised the wrong one: it
+replaced raw ERA5 **mslp** with reconciled ERA5 **`p_s`**. Since the
+reconciliation is now shown to contribute ~nothing, the entire effect is the
+other change — **dropping the sea-level reduction**:
+
+* mslp -> `p_s`: fixed pattern 436.7 -> 213.4 Pa
+* land/ocean ratio: 3.46 -> 1.07
+
+**The land-heavy fixed offset is the MSLP SEA-LEVEL REDUCTION — a property of the
+DIAGNOSTIC, not of the model.** `mslp = p_s * (1 + Gamma z_s/T0)^(g/R Gamma)`
+amplifies over terrain and injects its own dependence on the lowest-level
+temperature, and that is what the WB2 mslp column has been scoring.
+
+## Corrected attribution
+
+| component | size | what it is |
+|---|---|---|
+| mslp sea-level reduction | ~382 Pa (76 % of variance) | **diagnostic artifact** |
+| orography reconciliation | ~12 Pa (2.7 %, wrong sign) | negligible |
+| genuine `p_s` base-state offset | **213 Pa, spatially uniform** | real, and the actual target |
+
+## The lesson, recorded because I paid for it twice today
+
+The reconciled-reference test changed two variables at once and I read the result
+onto the one I had a story for. The A/B rule — change ONE field — applies to
+choosing a REFERENCE just as much as to a config. The smoothing sweep cost four
+short CPU runs and overturned a headline conclusion I had already committed.
+
+Standing: the genuine dycore offset is 213 Pa and uniform; the raw WB2 mass
+scores are dominated by a diagnostic artifact; the dry-mass anchor is worth
+-25 to -30 % at 5 days; training-recipe levers are null on these arms; and winds
+and temperature beat persistence at every lead.

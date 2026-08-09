@@ -94,6 +94,13 @@ def build_parser():
              "the reconciliation is present on BOTH sides it cancels, so a "
              "fixed offset that VANISHES here is caused by the reconciliation "
              "while one that PERSISTS is the dycore's own.")
+    p.add_argument("--smoothing-passes", type=int, default=4,
+                   dest="smoothing_passes",
+                   help="ERA5 orography smoothing passes (default 4). Sweeping "
+                        "this is the perturbation test for the reconciliation "
+                        "attribution: fewer passes = smaller delta_phis = "
+                        "smaller p_s reconciliation, so the fixed offset "
+                        "against raw ERA5 should shrink if that is the cause.")
     p.add_argument("--out", default=None)
     return p
 
@@ -130,6 +137,7 @@ def main(argv=None):
         TrainingERA5Config(dt_hours=cadence), grid, sigma,
         leads_hours=(cadence,), eval_year=args.eval_year,
         n_inits=args.n_cases, init_stride_hours=24, resolution_deg=1.5,
+        smoothing_passes=args.smoothing_passes,
     )
 
     def zero_physics(state, grid_, sigma_, **_kw):
