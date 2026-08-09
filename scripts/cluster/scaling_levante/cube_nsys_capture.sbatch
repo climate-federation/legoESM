@@ -42,7 +42,9 @@ cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/cube_nsys_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
-export NSYS_BIN="$(command -v nsys || echo /usr/local/bin/nsys)"
+NSYS_BIN="${NSYS_BIN:-/sw/spack-levante/cuda-12.2.0-2ttufp/nsight-systems-2023.2.3/target-linux-x64/nsys}"
+[ -x "$NSYS_BIN" ] || { echo "nsys not executable: $NSYS_BIN"; exit 2; }
+export NSYS_BIN
 export NSYS_OUTDIR="$OUTDIR"
 export PROFILE_RANKS="0,1"
 export PY_BIN="$PY"
