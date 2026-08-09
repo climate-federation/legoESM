@@ -132,6 +132,33 @@ def _gather_flat_columns(local_arr, layout, n_tile, root_only=False):
     return glob.reshape((6 * n_tile * n_tile,) + trailing)
 
 
+def _scatter_voronoi_columns(arr, partition):
+    """Scatter a global per-column array ``(nCells_global, ...)`` to this
+    rank's LOCAL cells (owned + halo), in the same order the rank-local MPAS
+    physics columns use (#1321).
+
+    The Voronoi analogue of :func:`_scatter_flat_columns`.  Halo columns are
+    included, not trimmed, so every per-column land array keeps the same
+    leading length as the rank-local atmospheric state and no consumer needs a
+    special case.  Integrating them is redundant but not wrong: the land step
+    is column-local (no lateral soil coupling) and a halo column sees the same
+    exchanged atmospheric forcing as its owner, so it tracks the owner exactly.
+    ``gather_voronoi_field`` keeps only the owned prefix on the way out.
+    """
+    from legoesm.parallel.voronoi_partition import scatter_to_local
+    return scatter_to_local(arr, partition, "cell")
+
+
+def _scatter_1based_voronoi_columns(arr, partition):
+    """CLM 1-based ``(nCells_global + 1, ...)`` -> ``(n_local_cells + 1, ...)``.
+
+    Same strip / scatter / re-prepend composition as
+    :func:`_scatter_1based_columns`, over the Voronoi cell partition.
+    """
+    body = _scatter_voronoi_columns(arr[1:], partition)
+    return jnp.concatenate([arr[:1], body], axis=0)
+
+
 def _map_flat_column_leaves(tree, n_tile, global_ncol, fn):
     """Apply ``fn(leaf, n_tile)`` to every array leaf of ``tree`` whose leading
     axis equals ``global_ncol`` (a per-column field); leave all other leaves
@@ -1116,9 +1143,29 @@ class ModelDriver:
                 f"unexpected={sorted(got - expected)}. Refusing to build a "
                 "mixed restart state (the missing prognostic columns would "
                 "silently stay at cold-start values).")
+        # Under MPAS cell-partition MPI the checkpoint holds the GLOBAL
+        # columns (save_checkpoint gathers them) while ``template`` is already
+        # rank-local, so cut each restored field to this rank before the shape
+        # check — otherwise every resumed distributed multilayer run fails the
+        # comparison below (#1321).
+        # ``getattr``: several tests drive this method with a SimpleNamespace
+        # fake that carries only the carry_aux + land fields.
+        _vl = getattr(self, "_voronoi_layout", None)
+        _part = _vl.partition if _vl is not None else None
+
+        def _to_local(arr):
+            if _part is None or not hasattr(arr, "shape") or arr.ndim < 1:
+                return arr
+            n_global = int(_part.nCells_global)
+            if int(arr.shape[0]) == n_global:
+                return _scatter_voronoi_columns(arr, _part)
+            if int(arr.shape[0]) == n_global + 1:          # CLM 1-based
+                return _scatter_1based_voronoi_columns(arr, _part)
+            return arr
+
         fields = {}
         for name, val in popped.items():
-            arr = jnp.asarray(val)
+            arr = _to_local(jnp.asarray(val))
             ref = getattr(template, name)
             if arr.shape != ref.shape:
                 raise ValueError(
@@ -4682,6 +4729,7 @@ class ModelDriver:
             # so the restart chain reads a single canonical global checkpoint
             # (mirrors the lat-lon band gather).  All ranks must participate in
             # each gather (collective); non-root ranks then bail before I/O.
+            _land_ml_save = None      # set to the GLOBAL gather under MPI
             if self._voronoi_layout is not None:
                 from legoesm.parallel.voronoi_mpi import gather_voronoi_field
                 part = self._voronoi_layout.partition
@@ -4726,6 +4774,28 @@ class ModelDriver:
                         else:
                             ps_d_carry[_name] = gather_voronoi_field(
                                 _val, part, "cell")
+                # Multilayer-land columns are per-cell too (#1321).  Gathered
+                # HERE, with the other collectives and BEFORE the rank-0 bail
+                # below: the save site is rank-0-only, so gathering there would
+                # hang every other rank.  The pytree structure is identical on
+                # every rank (same config), so each rank issues the same
+                # gathers in the same order.
+                if self._land_ml_state is not None:
+                    _nloc = int(part.n_local_cells)
+
+                    def _g(x, _n=_nloc, _p=part):
+                        if not hasattr(x, "shape") or getattr(x, "ndim", 0) < 1:
+                            return x
+                        if int(x.shape[0]) == _n:
+                            return gather_voronoi_field(x, _p, "cell")
+                        if int(x.shape[0]) == _n + 1:       # CLM 1-based
+                            return jnp.concatenate(
+                                [x[:1], gather_voronoi_field(x[1:], _p, "cell")],
+                                axis=0)
+                        return x
+
+                    _land_ml_save = jax.tree_util.tree_map(
+                        _g, self._land_ml_state)
                 if self._mpi_rank != 0:
                     return
             else:
@@ -4804,7 +4874,12 @@ class ModelDriver:
             # fail-loud restore (#730 contract).  None fields are skipped on
             # save; restore validates the field-set exactly.
             if self._land_ml_state is not None:
-                for _f, _v in self._land_ml_state._asdict().items():
+                # Under MPAS MPI this is the GLOBAL gather assembled above, so
+                # the restart chain reads one canonical checkpoint rather than
+                # a rank-local fragment (#1321).
+                _lm_out = (_land_ml_save if _land_ml_save is not None
+                           else self._land_ml_state)
+                for _f, _v in _lm_out._asdict().items():
                     if _v is not None:
                         _save[f"land_ml_{_f}"] = np.asarray(_v)
             # Prognostic ice skin (mpas_ice_skin_prognostic): persist so a
@@ -5452,17 +5527,14 @@ class ModelDriver:
                 })
             # Multilayer (Richards) land columns (MPAS port): stage the
             # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
-            # fail-loud restore (#730 exact-field-set contract).  Single-
-            # process only (matches the run-side phase-1 guard): under MPI the
-            # writer's columns are the full mesh and cannot be band-scattered.
+            # fail-loud restore (#730 exact-field-set contract).  Under MPI the
+            # checkpoint holds the GLOBAL columns (``save_checkpoint`` gathers
+            # them with the other collectives) and
+            # ``_restore_land_ml_from_carry_aux`` cuts each field to this rank
+            # before its shape check, so the distributed restart round-trips
+            # (#1321).  It used to refuse here.
             _lml_keys = [k for k in d.files if k.startswith("land_ml_")]
             if _lml_keys:
-                if _mpi:
-                    raise ValueError(
-                        "Checkpoint carries multilayer-land (land_ml_*) "
-                        "columns, which cannot be scattered under MPI "
-                        "(multilayer land is single-process only on the "
-                        "MPAS lane); restart single-process.")
                 if not isinstance(self._carry_aux, dict):
                     self._carry_aux = {}
                 for _k in _lml_keys:
@@ -7395,14 +7467,18 @@ class ModelDriver:
                     "use_multilayer_land on the MPAS lane requires a land "
                     "fraction (--topography / --land-mask-file); none was "
                     "loaded — the land tile would be silently inert.")
-            if (self._device_config is not None
-                    and self._device_config.is_distributed):
-                # Land columns are rank-local under MPI while the setup built
-                # them on the full mesh — scatter wiring is the follow-up
-                # (multilayer land is single-rank-only on every lane, #769).
-                raise ValueError(
-                    "use_multilayer_land on the MPAS lane is single-process "
-                    "only (phase 1); run without MPI or drop the flag.")
+            # Distributed is supported (#1321).  No column scatter is needed:
+            # ``_create_grid`` installs the rank-local mesh BEFORE
+            # ``_create_physics`` runs, and ``_setup_multilayer_land`` sizes
+            # its columns from ``self.grid.latCell``, so the soil columns are
+            # built rank-local already.  (The guard that used to sit here said
+            # the opposite — "the setup built them on the full mesh" — which
+            # stopped being true when grid creation moved ahead of physics.)
+            # What WAS missing is the downwelling-radiation slots the land
+            # forcing reads; ``make_voronoi_mpi_step`` now publishes the full
+            # 10-slot contract, and this asserts it rather than letting
+            # ``_marshal_land_forcing`` return None and the soil silently
+            # never advance.
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
             from legoesm.grids.voronoi import reconstruct_cell_velocity
