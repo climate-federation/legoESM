@@ -121,7 +121,12 @@ def main():
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=20,
                    help="evenly-spaced frames (snapshots + profiles); 0 disables.")
-    p.add_argument("--case-label", type=str, default="wangara")
+    p.add_argument("--case-label", type=str, default="cbl",
+                   help="This driver integrates Nieuwstadt CBL_N91, NOT "
+                        "Wangara Day 33 (which is moist, rotating and "
+                        "diurnally forced). It was labelled \"wangara\" for "
+                        "years; the label is corrected here so a reference "
+                        "cannot be mistaken for the other case.")
     p.add_argument("--output", type=Path, default=Path("results/spectral_cbl"))
     args = p.parse_args()
     dtype = jnp.float32 if args.f32 else jnp.float64

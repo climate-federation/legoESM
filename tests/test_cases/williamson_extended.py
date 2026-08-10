@@ -23,16 +23,18 @@ from legoesm.core.state import (
     MPASShallowWaterState,
     ShallowWaterState,
 )
+from legoesm.core.williamson_sw_analytic import (
+    RH4_MEAN_DEPTH_M,
+    rossby_haurwitz_4_geopotential,
+    rossby_haurwitz_4_winds,
+)
 
 
 # ---------------------------------------------------------------------------
 # Williamson Test 6 — Rossby-Haurwitz wave 4
 # ---------------------------------------------------------------------------
 
-# Standard W6 parameters (Williamson 1992, Eq. 144-147)
-_W6_K = 7.848e-6     # angular frequency [s^-1]
-_W6_R_VAL = 4         # azimuthal wavenumber
-_W6_H0 = 8000.0       # mean depth [m]
+_W6_H0 = RH4_MEAN_DEPTH_M       # mean depth [m], Williamson 1992
 
 
 def _w6_height(
@@ -40,38 +42,20 @@ def _w6_height(
     lat: jnp.ndarray,
     radius: float,
 ) -> jnp.ndarray:
-    """Analytic Rossby-Haurwitz height field h(lon, lat).
+    """Analytic Rossby-Haurwitz height field h(lon, lat) [m].
 
-    Williamson 1992 Eq. 145.
+    Thin adapter over the one shared analytic definition in
+    :mod:`legoesm.core.williamson_sw_analytic`, which returns the
+    geopotential ``g*h``; this file's callers want a depth, so divide.
+
+    NOTE: the shared version has ``B ~ cos^R``, where the copy this
+    replaced had ``cos^(R-1)``.  Williamson Eq. 145 and the FV3 duo
+    oracle (``test_cases.F90:1226``) both say ``cos^R``, so W6 initial
+    heights move slightly at every latitude off the equator.
     """
-    Omega = constants.Omega
-    g = constants.g
-    K = _W6_K
-    R_val = _W6_R_VAL
-
-    cos_lat = jnp.cos(lat)
-    eps = 1e-30  # protect against cos_lat=0 at the poles
-
-    A = (
-        0.5 * K * (2.0 * Omega + K) * cos_lat ** 2
-        + 0.25 * K ** 2 * cos_lat ** (2 * R_val)
-        * ((R_val + 1) * cos_lat ** 2
-           + (2 * R_val ** 2 - R_val - 2)
-           - 2.0 * R_val ** 2 / (cos_lat ** 2 + eps))
-    )
-    B = (
-        2.0 * (Omega + K) * K
-        * cos_lat ** (R_val - 1)
-        * ((R_val ** 2 + 2 * R_val + 2) - (R_val + 1) ** 2 * cos_lat ** 2)
-    ) / ((R_val + 1) * (R_val + 2) + eps)
-    C = (
-        0.25 * K ** 2 * cos_lat ** (2 * R_val)
-        * ((R_val + 1) * cos_lat ** 2 - (R_val + 2))
-    )
-
-    return _W6_H0 + (radius ** 2 / g) * (
-        A + B * jnp.cos(R_val * lon) + C * jnp.cos(2 * R_val * lon)
-    )
+    return rossby_haurwitz_4_geopotential(
+        lon, lat, radius=radius, omega=constants.Omega,
+        gh0=_W6_H0 * constants.g, xp=jnp) / constants.g
 
 
 def _w6_winds_geo(
@@ -81,25 +65,8 @@ def _w6_winds_geo(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Analytic Rossby-Haurwitz wind field (u_east, v_north) [m/s].
 
-    Williamson 1992 Eq. 146-147.
-    """
-    K = _W6_K
-    R_val = _W6_R_VAL
-    cos_lat = jnp.cos(lat)
-    sin_lat = jnp.sin(lat)
-    cos_R_lon = jnp.cos(R_val * lon)
-    sin_R_lon = jnp.sin(R_val * lon)
-
-    u_east = (
-        radius * cos_lat * K
-        + radius * K * cos_lat ** (R_val - 1)
-        * (R_val * sin_lat ** 2 - cos_lat ** 2) * cos_R_lon
-    )
-    v_north = (
-        -radius * K * R_val * cos_lat ** (R_val - 1)
-        * sin_lat * sin_R_lon
-    )
-    return u_east, v_north
+    Williamson 1992 Eq. 146-147, via the shared definition."""
+    return rossby_haurwitz_4_winds(lon, lat, radius=radius, xp=jnp)
 
 
 # ---------------------------------------------------------------------------

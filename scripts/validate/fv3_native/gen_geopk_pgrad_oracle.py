@@ -56,15 +56,23 @@ NPROBE = 64
 # oracle and the python port read the SAME number and the certificate is
 # INSENSITIVE to their true production values.
 #
-# UNCERTAIN U1: dyn_core.F90:24 imports rdgas/radius/cp_air/pi from FMS
-# ``constants_mod`` and NO constants*.F90 exists anywhere under the
-# Zenodo 8327578 symmetryclean tree, so the production cp_air/akap are
-# NOT verifiable from the sources.  ``AKAP = 2/7`` is the FMS-convention
-# TEST value; note that it is deliberately NOT
-# ``legoesm.constants.kappa`` (this repo's R_d/c_pd ratio differs from
-# 2/7 in the 5th decimal), i.e. the repo's thermodynamic pair is not the
-# FMS pair and silently substituting it would change what the
-# certificate is about.
+# U1 -- RESOLVED 2026-08-07, and the resolution matters elsewhere.
+# dyn_core.F90:24 imports rdgas/radius/cp_air/pi from FMS
+# ``constants_mod``, and no constants*.F90 exists under the Zenodo
+# 8327578 symmetryclean tree -- but FMS ITSELF is on disk, so the values
+# ARE verifiable: ``fms-src/constants/gfs_constants.h:42,47,53``.  They
+# are pinned as ``fv3_native_gridstruct.FV3_RDGAS`` / ``FV3_CP_AIR`` /
+# ``FV3_KAPPA`` (= RDGAS/CP_AIR); read them from there rather than
+# repeating the numerals here.
+#
+# ``AKAP = 2/7`` BELOW STAYS AS IS, deliberately: this fixture passes the
+# scalar through the input HEADER, so the Fortran oracle and the port
+# read the SAME number and the certificate is insensitive to its true
+# production value.  It is NOT ``legoesm.constants.kappa`` either.
+#
+# WHAT DOES DEPEND ON IT: any harness comparing against a REAL oracle run
+# (the 1-step restart) must pass ``FV3_KAPPA``, not 2/7 -- they differ by
+# 7.5e-5 relative, nine orders above the ~1e-14 parity floor.
 # UNCERTAIN U6: PTOP/DT/DT2/D_EXT are DISCRIMINATION choices, not the
 # Zenodo duo run's namelist values (which were not read).  Re-pin and
 # regenerate before citing this fixture as production fidelity.

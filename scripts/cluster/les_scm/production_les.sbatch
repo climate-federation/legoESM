@@ -82,6 +82,16 @@ case "$LES_CASE" in
       --hours 4 --dt 0.5 --record-frames 24 --print-every 5000 \
       --output $OUT
     ;;
+  ekman)
+    # Neutral Ekman layer: 2 km x 2 km x 1 km, f = 1e-4 (inertial period
+    # 17.5 h), geostrophic 10 m/s. Run 6 h so the spiral is established --
+    # the driver's 1.5 h default is a smoke length, not a reference.
+    $PY scripts/run/run_spectral_les.py \
+      --nx 96 --ny 96 --nz 96 --Lx 2000 --Ly 2000 --Lz 1000 \
+      --ekman --Ug 10 --fcor 1.0e-4 --z0 0.1 \
+      --hours 6 --dt 0.4 --record-frames 36 --print-every 10000 \
+      --case-label ekman --output $OUT
+    ;;
   rico)
     # van Zanten et al. 2011 precipitating trade cumulus, 24 h. Expensive.
     $PY scripts/run/run_rico_les.py \

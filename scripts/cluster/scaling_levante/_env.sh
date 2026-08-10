@@ -18,7 +18,23 @@
 export LEGOESM_SLURM_ACCOUNT="${LEGOESM_SLURM_ACCOUNT:-bd1083_gpu}"
 
 # --- (2) Repo location on Levante -- EDIT to where you cloned legoESM ---------
+# The default is a GUESS at a per-user clone path. When it is wrong the job
+# does not fail here — it fails ~60 lines later with a bare
+# "cd: <path>: No such file or directory" plus "_chain_body.sh: No such file",
+# 7 seconds in, which reads like a broken launcher rather than an unset
+# variable (three U-Cast arms lost this way, 2026-08-01). Say it plainly.
 REPO="${LEGOESM_REPO:-/work/bd1083/$USER/legoESM}"
+if [ ! -d "$REPO" ]; then
+  echo "[_env.sh] REPO='$REPO' does not exist." >&2
+  if [ -z "${LEGOESM_REPO:-}" ]; then
+    echo "[_env.sh] LEGOESM_REPO is unset, so this is the per-user DEFAULT" >&2
+    echo "[_env.sh] guess, not a configured path. Submit with" >&2
+    echo "[_env.sh]   sbatch --export=ALL,LEGOESM_REPO=\$PWD,... " >&2
+    echo "[_env.sh] (--export=ALL alone does NOT carry it if your shell" >&2
+    echo "[_env.sh]  never exported it)." >&2
+  fi
+  exit 1
+fi
 export REPO
 
 # --- (3) Conda env with a CUDA jaxlib AND a CUDA-aware mpi4jax (see README) ---
@@ -41,8 +57,22 @@ module load cuda    2>/dev/null || true       # EDIT: matching cuda toolkit
 if command -v conda >/dev/null 2>&1; then
   conda activate "$CONDA_ENV" 2>/dev/null || true
 fi
+# Prefer the repo's own uv venv when it exists — that is the interpreter every
+# dev/test workflow uses, and the bare `python` on a Levante compute node has
+# no jax (three U-Cast arms died at `import jax` inside 7 s, 2026-08-02).
+if [ -z "${LEGOESM_PYTHON:-}" ] && [ -x "$REPO/.venv/bin/python" ]; then
+  LEGOESM_PYTHON="$REPO/.venv/bin/python"
+fi
 PY="${LEGOESM_PYTHON:-$(command -v python)}"
 export PY
+# Fail at source time, not 4 GPU-hours in: the launcher's first real work is
+# `$PY scripts/run/run_aimip.py`, which imports jax immediately.
+if ! "$PY" -c "import jax" >/dev/null 2>&1; then
+  echo "[_env.sh] PY='$PY' cannot import jax." >&2
+  echo "[_env.sh] Set LEGOESM_PYTHON=<repo>/.venv/bin/python (uv venv) or" >&2
+  echo "[_env.sh] LEGOESM_CONDA_ENV=<env with a CUDA jaxlib>." >&2
+  exit 1
+fi
 
 # --- JAX / runtime knobs -----------------------------------------------------
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"

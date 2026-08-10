@@ -38,6 +38,7 @@ from .wb_regrid import regrid_to_wb2, wb2_grid
 __all__ = [
     "build_forecast_cases",
     "climatology_from_cases",
+    "climatology_from_era5",
     "climatology_scorecard",
 ]
 
@@ -133,7 +134,7 @@ def _build_verification(ds, time_idx, resolution_deg):
 
 def build_forecast_cases(
     era5_cfg, grid, sigma, *, leads_hours, eval_year, n_inits,
-    init_stride_hours, resolution_deg, ds=None,
+    init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -208,7 +209,14 @@ def build_forecast_cases(
                 f"(n_times={n_times}); reduce --n-inits or --init-stride-hours.")
 
         ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds)
-        init_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
+        # ``smoothing_passes`` is exposed (default 4 = unchanged) so the
+        # orography treatment can be SWEPT. The ERA5 phis is smoothed to be
+        # representable at the model truncation and ``p_s`` is hydrostatically
+        # reconciled to it, and that reconciliation was measured to account for
+        # 76% of the fixed 6 h surface-pressure offset — so varying it is the
+        # perturbation test for that attribution.
+        init_carry = era5_to_spectral_carry(
+            ic_slice, grid, sigma, smoothing_passes=smoothing_passes)
         init_state = carry_to_spectral_state(init_carry, grid)
 
         # Prescribed-SST forcing on the Gaussian grid (flat ncol), 1-based
@@ -240,8 +248,114 @@ def build_forecast_cases(
     return cases
 
 
+def climatology_from_era5(era5_cfg, *, eval_year, n_samples=73,
+                          resolution_deg, ds=None):
+    """Annual-mean climatology sampled EVENLY across ``eval_year``.
+
+    Use this, not :func:`climatology_from_cases`, whenever the number is going
+    to be reported. The window-mean alternative is only self-consistent when the
+    inits already span a year.
+
+    WHY (measured 2026-07-28, `scripts/tmp/diag_wb2_persistence_selfcheck.py`):
+    with the default scorecard sampling of 8 consecutive inits from 01-01, the
+    eval-window mean is a local 8-day mean, so it lands *below* the persistence
+    floor — z500 24 h climatology 58.7 m vs persistence 63.9 m, which is
+    physically impossible for a real climatology at day 1. Sampled evenly across
+    the year instead, the same quantity is 107.8 m and window-mean and year-mean
+    converge (107.6 vs 107.8). The old floor was ~1.8x too low and made every
+    arm look closer to climatology than it is.
+
+    Still NOT the published WB2 reference, which is a 1990-2019 day-of-year
+    climatology (that removes the seasonal cycle, so it scores lower — 83.6 m
+    for z500 after the /g conversion). This one retains the seasonal cycle
+    because it is a single annual mean. Comparable across our own arms under
+    identical sampling; quote the published number when comparing to the
+    leaderboard.
+
+    Only verification snapshots are built (no spectral initial conditions), so
+    the cost is ``n_samples`` ERA5 reads.
+
+    Parameters
+    ----------
+    era5_cfg : TrainingERA5Config
+    eval_year : int
+    n_samples : int
+        Snapshots spread over the year (73 ~ every 5 days).
+    resolution_deg : float
+        WB2 target grid, identical to the scorecard's.
+    ds : xarray.Dataset, optional
+        Pre-opened ERA5 (network-free tests).
+
+    Returns
+    -------
+    dict[str, array] — same keys/grid as ``climatology_from_cases``.
+    """
+    from legoesm.training.era5_to_state import open_era5_zarr
+
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be >= 1, got {n_samples}")
+    if ds is None:
+        ds = open_era5_zarr(era5_cfg.zarr_store)
+    times = np.asarray(ds.time.values, dtype="datetime64[ns]")
+    n_times = len(times)
+    cadence = int(era5_cfg.dt_hours)
+
+    base = int(np.searchsorted(times, np.datetime64(f"{eval_year}-01-01")))
+    if base >= n_times:
+        raise ValueError(
+            f"eval_year {eval_year} starts beyond the ERA5 store (last time "
+            f"{times[-1]}).")
+    # Bound the sample set by TIMESTAMP, not by an assumed regular stride.
+    # An index stride silently (a) walks into the NEXT year on a truncated or
+    # gappy store, mixing years into a "2017 annual" mean, (b) mis-strides a
+    # leap year, and (c) returns a partial-year mean with no error at all
+    # (codex review 2026-07-30). Selecting on the real time axis makes all
+    # three impossible, and a short year is reported rather than hidden.
+    year_end = np.datetime64(f"{int(eval_year) + 1:04d}-01-01")
+    stop = int(np.searchsorted(times, year_end))
+    in_year = stop - base
+    if in_year <= 0:
+        raise ValueError(
+            f"climatology_from_era5: the store holds no snapshots inside "
+            f"{eval_year} (base={base}, next-year index={stop}).")
+    stride = max(1, in_year // n_samples)
+
+    accum, n = {}, 0
+    for k in range(n_samples):
+        i = base + k * stride
+        if i >= stop:          # never cross into the following year
+            break
+        fields_wb2, _valid = _build_verification(ds, i, resolution_deg)
+        for key, field in fields_wb2.items():
+            f = np.asarray(field, dtype=np.float64)
+            accum[key] = f if key not in accum else accum[key] + f
+        n += 1
+    if n == 0:
+        raise ValueError(
+            "climatology_from_era5: no snapshots inside the ERA5 store for "
+            f"eval_year={eval_year}.")
+    # Coverage is part of the result: a mean built from a third of the year is
+    # a seasonal mean wearing an annual label. Report it rather than let the
+    # caller assume full coverage.
+    span_days = float(
+        (times[min(base + (n - 1) * stride, stop - 1)] - times[base])
+        / np.timedelta64(1, "D"))
+    if n < n_samples or span_days < 300.0:
+        import warnings
+
+        warnings.warn(
+            f"climatology_from_era5({eval_year}): {n}/{n_samples} snapshots "
+            f"spanning {span_days:.0f} days — this is NOT a full-year mean; "
+            "treat it as a seasonal reference.")
+    return {key: accum[key] / float(n) for key in accum}
+
+
 def climatology_from_cases(cases):
     """Eval-window sample-mean climatology over all verification snapshots (v1).
+
+    PREFER :func:`climatology_from_era5` for any reported number — with inits
+    that do not span a year this mean is a LOCAL mean and scores below the
+    persistence floor (see that function's docstring for the measured numbers).
 
     ``clim[key] = mean_over_(case, lead) verif["fields"][key]``. Self-consistent
     for ranking checkpoints under identical sampling, but NOT comparable to the

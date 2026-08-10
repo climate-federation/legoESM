@@ -117,6 +117,26 @@ class EnhancedDiffusionConfig(NamedTuple):
     # Requires the before-advection tracers (n2_tracers) to be threaded (the
     # TKE n2_before_advection machinery); silently single-level when absent.
     two_level_trigger: bool = False
+    # ----- Time levels the two EVD trigger arms are evaluated at -----
+    # NEMO zdfevd fires on MIN(rn2, rn2b) (src/OCE/ZDF/zdfevd.F90:93-94 for
+    # avt, :119-120 for avm), and the DINO driver builds that pair at
+    # cfgs/DINO/MY_SRC/stpmlf.F90:186-187:
+    #   CALL bn2( ts(:,:,:,:,Nbb), rab_b, rn2b, Nnn )  ! BEFORE T/S, NOW geom
+    #   CALL bn2( ts(:,:,:,:,Nnn), rab_n, rn2 , Nnn )  ! NOW    T/S, NOW geom
+    # -- note the geometry index is Nnn for BOTH arms.
+    #
+    # "solver_state" (default, BIT-IDENTICAL legacy): both arms are built from
+    #   whatever state the caller hands to the mixing coefficients. Under the
+    #   leap-frog implicit solve that state is the POST-EXPLICIT (Kaa) one, so
+    #   arm A is N²(Kaa) and the geometry (eta -> gdept / z* jacobian) is Kaa
+    #   for BOTH arms.
+    # "nemo_now_before": NEMO's own pair — arm A on the NOW (Nnn) tracers, arm
+    #   B on the BEFORE (Nbb) tracers, BOTH on NOW (Nnn) geometry. Requires
+    #   ``two_level_trigger=True`` (the name promises both arms) and a caller
+    #   that threads the Nnn tracers, the Nbb tracers AND the Nnn eta;
+    #   k_profiles.compute_vertical_K_profiles raises if any is missing rather
+    #   than silently falling back to the solver state.
+    evd_n2_time_level: str = "solver_state"
 
 
 class PlumeConfig(NamedTuple):

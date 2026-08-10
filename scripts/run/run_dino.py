@@ -596,6 +596,30 @@ def main():
         # Applied LAST: co-sets the bathymetry lon frame + sill anchor onto
         # whatever recipe/overrides preceded it (must not be clobbered after).
         cfg = nemo_faithful_dino_config(base=cfg)
+
+    # #1492 footgun guard, evaluated on the RESOLVED config (NOT on args):
+    # leapfrog + the post-step ("applied_now") surface applier discards ~56%
+    # of every applied surface flux (the increment cancels in the leap-frog
+    # combine; retention (1-2*gamma)/(2*(1-gamma)) = 4/9 at gamma=0.1,
+    # measured twice on independent grids).  Both knobs have a recipe-card
+    # source as well as (for the integrator) a CLI flag, so this MUST read
+    # cfg -- an earlier version sat inside `if args.outer_integrator is not
+    # None:` and could only fire when --outer-integrator was passed
+    # EXPLICITLY, which meant a card-only run (`--recipe nemo_dino_kamm_mlf`,
+    # which sets outer_integrator="leapfrog" internally) sailed straight past
+    # it.  Placed after every cfg mutation above so no later override can
+    # reintroduce the combination.
+    if (cfg.outer_integrator == "leapfrog"
+            and getattr(cfg, "surface_tendency_placement", "applied_now")
+            == "applied_now"):
+        raise SystemExit(
+            "outer_integrator='leapfrog' with "
+            "surface_tendency_placement='applied_now' discards ~56% of "
+            "the applied surface flux (#1492). Use a card that sets "
+            "surface_tendency_placement='leapfrog_rhs' (e.g. "
+            "nemo_dino_kamm_mlf), or choose forward_euler/ab2 (both "
+            "retain 1.000000).")
+
     dt = cfg.dt
     grid_kind = args.grid
 
@@ -707,17 +731,40 @@ def main():
     snapshot_idx = 0
     _save_snapshot(state, 0.0, snapshot_dir, snapshot_idx, grid_kind)
 
+    # #1492: NEMO-faithful surface-tracer-tendency placement (lat-lon only —
+    # the MPAS applicator has no return_rate= mode / model.step has no
+    # external_tracer_rate hook there). "applied_now" (default) keeps the
+    # legacy pre-step state mutation; "leapfrog_rhs" folds the tendency into
+    # the leap-frog Nnn RHS instead (see DINOConfig.surface_tendency_placement).
+    _sf_placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if _sf_placement not in ("applied_now", "leapfrog_rhs"):
+        raise SystemExit(
+            f"Unknown DINOConfig.surface_tendency_placement {_sf_placement!r}: "
+            "expected 'applied_now' or 'leapfrog_rhs'.")
+    if _sf_placement == "leapfrog_rhs" and grid_kind != "latlon":
+        raise SystemExit(
+            "surface_tendency_placement='leapfrog_rhs' is only wired for "
+            "--grid latlon (apply_dino_mpas_surface_forcing has no "
+            "return_rate= mode).")
+
     for k in range(n_steps_total):
+        _ext_rate = None
         if forcing is not None:
             # NEMO time convention: step k (0-based) ends at t=(k+1)*dt —
             # drives the seasonal forcing phases when forcing_annual_cycle.
-            state = apply_forcing(state, forcing, z, cfg, dt,
-                                  t_seconds=(k + 1) * dt)
+            if _sf_placement == "leapfrog_rhs":
+                state, _ext_rate = apply_forcing(
+                    state, forcing, z, cfg, dt, t_seconds=(k + 1) * dt,
+                    return_rate=True)
+            else:
+                state = apply_forcing(state, forcing, z, cfg, dt,
+                                      t_seconds=(k + 1) * dt)
 
         state = model.step(
             state, dt=dt,
             surface_forcing=(sf_step if getattr(cfg, "wind_through_step",
-                                                False) else None))
+                                                False) else None),
+            external_tracer_rate=_ext_rate)
 
         is_last = (k == n_steps_total - 1)
         if (k + 1) % snapshot_every_steps == 0 or is_last:

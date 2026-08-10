@@ -45,6 +45,13 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_lon_cgrid,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
+from legoesm.core.williamson_sw_analytic import (
+    W5_H0_M,
+    W5_UBAR_MS,
+    solid_body_geopotential,
+    solid_body_winds,
+    williamson_5_mountain_height,
+)
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
@@ -715,34 +722,27 @@ def williamson_test5_cgrid(
 ) -> CGridLatLonShallowWaterState:
     """Williamson Test 5: Zonal flow over isolated mountain on C-grid."""
     R = grid.radius
-    Omega = constants.Omega
     g = constants.g
 
-    u_0 = 20.0  # m/s
-    gh_0 = 5960.0 * g
-
+    u_0 = W5_UBAR_MS
     lat = grid.lat2d
     lon = grid.lon2d
     n_lat, n_lon = grid.n_lat, grid.n_lon
 
-    # Velocity (solid body rotation)
-    u_cell = u_0 * jnp.cos(lat)
+    # Analytic fields: ONE shared definition (williamson_sw_analytic).
+    u_cell, _ = solid_body_winds(lon, lat, u0=u_0, xp=jnp)
 
-    # Mountain topography
-    lon_c = 3.0 * jnp.pi / 2.0
-    lat_c = jnp.pi / 6.0
-    R_m = jnp.pi / 9.0
-    h_s0 = 2000.0
-
-    r = jnp.arccos(jnp.clip(
-        jnp.sin(lat_c) * jnp.sin(lat)
-        + jnp.cos(lat_c) * jnp.cos(lat) * jnp.cos(lon - lon_c),
-        -1.0, 1.0,
-    ))
-    h_s = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
+    # ★ CHANGED: this used a GREAT-CIRCLE radius.  Williamson et al.
+    # (1992) case 5 and test_cases.F90:1185 both specify the clipped
+    # PLANAR (lon, lat) radius; the two differ by up to 295.3 m of
+    # mountain height (codex r1, numerically maximised), so this lane
+    # was not running the same case as its cubed-sphere sibling.
+    h_s = williamson_5_mountain_height(lon, lat, xp=jnp)
 
     # Height: h = h_free - h_s
-    h_free = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
+    h_free = solid_body_geopotential(lon, lat, radius=R,
+                                     omega=constants.Omega, u0=u_0,
+                                     gh0=W5_H0_M * g, xp=jnp) / g
     h = h_free - h_s
 
     # C-grid winds

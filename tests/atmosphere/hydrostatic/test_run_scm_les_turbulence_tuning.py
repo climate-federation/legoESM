@@ -205,7 +205,12 @@ def test_scored_variables_default_excludes_the_wind():
     so tuning against u/v would absorb a surface-drag mismatch into the
     turbulence parameters. Heat and moisture fluxes ARE matched."""
     args = drv.parse_args(["--case", "bomex", "--les-dir", "x"])
-    assert args.score_variables == "theta,qv"
+    # "" means PER-CASE: a dry case has no q_v and a neutral case has no usable
+    # theta, so a single global pair cannot be right for every case.
+    assert args.score_variables == ""
+    assert drv.case_scored("bomex", None) == ("theta", "qv")
+    assert drv.case_scored("ekman", None) == ("u", "v")
+    assert drv.case_scored("cbl", None) == ("theta",)
 
 
 def test_unknown_scored_variable_is_a_hard_error():
@@ -232,13 +237,21 @@ def test_mismatched_hours_is_refused_as_a_window_confound(tmp_path, monkeypatch)
         scored_variables=lambda: ("theta", "qv"),
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
-    monkeypatch.setattr(drv, "load_sam_scm_case",
+    monkeypatch.setattr(drv, "load_case",
                         lambda *a, **k: types.SimpleNamespace(
-                            nlev=4, p_s=1.0e5, sigma_top=0.7,
+                            nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+                            spec=types.SimpleNamespace(
+                                les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
                             z_full=__import__("numpy").linspace(3000, 20, 4),
+                            p_full=__import__("numpy").linspace(7e4, 1e5, 4),
                             les_domain_top_m=3000.0,
                             forcing=types.SimpleNamespace(prescribe="fluxes")))
-    with pytest.raises(SystemExit, match="different times"):
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
+    with pytest.raises(SystemExit, match="different windows"):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--hours", "6"])
 
@@ -495,7 +508,8 @@ def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
         window_label="4.00-6.00 h (13 frames)",
     )
     fake_case = types.SimpleNamespace(
-        nlev=4, p_s=1.0e5, sigma_top=0.7, spec=types.SimpleNamespace(
+        nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+        spec=types.SimpleNamespace(
             les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
         z_full=_np.linspace(3000.0, 20.0, 4),
         p_full=_np.linspace(7e4, 1e5, 4),
@@ -504,14 +518,19 @@ def test_main_exits_nonzero_when_an_arm_fails(tmp_path, monkeypatch):
         forcing=types.SimpleNamespace(prescribe="fluxes"),
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
-    monkeypatch.setattr(drv, "load_sam_scm_case", lambda *a, **k: fake_case)
+    monkeypatch.setattr(drv, "load_case", lambda *a, **k: fake_case)
     monkeypatch.setattr(drv, "_half_pressures",
                         lambda case: _np.linspace(7e4, 1e5, 5))
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
 
     def _boom(*_a, **_k):
         raise RuntimeError("simulated CUDA fault")
 
-    monkeypatch.setattr(drv, "evaluate_scheme", _boom)
+    monkeypatch.setattr(drv, "joint_score", _boom)
 
     rc = drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                    "--outdir", str(tmp_path / "out"),
@@ -561,14 +580,68 @@ def test_no_inline_exner_or_virtual_temperature_in_this_stack():
 
 # --- round-3 review fixes ---------------------------------------------------
 
-def test_gradient_dead_arms_are_not_ranked():
-    """A closure whose parameters are disconnected from the loss must not be
-    ranked -- possibly first -- on its untouched default score."""
+def test_only_arms_with_a_valid_score_are_ranked():
+    """An arm is rankable exactly when its score is a real measurement.
+
+    Asserts on the SET, not on a source string: an inspect.getsource() check
+    passes while proving nothing about what the code does.
+
+    "no_reducing_step" and friends ARE ranked -- their default score is a
+    genuine measurement and the status column says it was not improved.
+    Excluding them deleted closures whose default was good but which the fixed
+    line-search scales could not move. What must never rank is an arm that
+    RAISED or whose rollout went non-finite: safe_sqrt(NaN) is 0.0, the
+    perfect score, so such an arm would rank FIRST.
+    """
+    rankable = drv._RANKABLE
+    for status in ("ok", "tuned", "no_reducing_step", "no_active_gradient",
+                   "no_tunable_params"):
+        assert status in rankable, f"{status} has a valid score; rank it"
+    # The status production actually assigns to a blown-up arm is
+    # "nonfinite_rollout" (_write_outputs rewrites the status when
+    # _penalised(r) is true). Asserting on "nonfinite" tested a string the
+    # code never produces, so adding the REAL status to _RANKABLE would have
+    # let blown-up arms rank while this test still passed.
     import inspect
-    src = inspect.getsource(drv._write_outputs)
-    assert '_RANKABLE = {"ok", "tuned"}' in src, (
-        "no_active_gradient / no_tunable_params must NOT be rankable")
-    assert "no_active_gradient" not in src.split("_RANKABLE")[1][:120]
+    assigned = inspect.getsource(drv._write_outputs)
+    assert '"nonfinite_rollout"' in assigned, (
+        "the penalised status was renamed; update this test to the new name")
+    for status in ("failed", "tune_failed", "nonfinite_rollout"):
+        assert status not in rankable, (
+            f"{status} has no valid score; ranking it can put a blown-up "
+            "arm first")
+
+
+def test_a_penalty_valued_candidate_is_never_accepted():
+    """A non-finite candidate must lose even when the current loss is larger.
+
+    score_against_les maps a non-finite rollout to exactly NONFINITE_PENALTY.
+    A near-uniform reference divided by the spread floor gives a legitimately
+    FINITE score above that, so a bare `cand_loss < loss_val` test adopted a
+    blown-up parameter set as an improvement. Guards the >= penalty reject.
+    """
+    import inspect
+    src = inspect.getsource(drv.tune_scheme_multicase)
+    i = src.index("cand_loss = float(loss_fn(cand))")
+    window = src[i:i + 700]
+    assert "cand_loss >= NONFINITE_PENALTY" in window, (
+        "the line search must reject a candidate at or above the penalty "
+        "BEFORE the improvement test; otherwise a NaN rollout is accepted "
+        "whenever the current loss exceeds the sentinel")
+
+
+def test_tuned_nonfinite_flag_reaches_the_result():
+    """An arm whose TUNED parameters blow up must not stay rankable.
+
+    nonfinite_cases was written only after the DEFAULT evaluation, so a tuned
+    blow-up kept the clean default flag and _penalised() never fired.
+    """
+    import inspect
+    src = inspect.getsource(drv.tune_scheme_multicase)
+    assert "result.nonfinite_cases" in src, (
+        "the tuned evaluation must record its own non-finite flag")
+    assert "last_nonfinite" in src.split("result.components_tuned")[1][:600], (
+        "the tuned flag must come from the tuned joint_score call")
 
 
 @pytest.mark.skipif(not _bomex_available(), reason="BOMEX gSAM deck not cached")
@@ -612,15 +685,78 @@ def test_dt_must_divide_the_analysis_window(tmp_path, monkeypatch):
     fake_ref = types.SimpleNamespace(
         source_dir=str(tmp_path), window_hours=(4.0, 6.0), n_frames=13,
         mask=_np.ones(4, dtype=bool), weights=_np.full(4, 0.25),
-        z_les=_np.linspace(20.0, 3000.0, 8), profiles={}, profiles_les={},
-        scored_variables=lambda: ("theta", "qv"),
+        z_les=_np.linspace(20.0, 3000.0, 8),
+        profiles={"theta": _np.linspace(300.0, 303.0, 4),
+                  "qv": _np.full(4, 1e-2)},
+        profiles_les={}, scored_variables=lambda: ("theta", "qv"),
         window_label="4.00-6.00 h",
     )
     monkeypatch.setattr(drv, "load_les_reference", lambda *a, **k: fake_ref)
     monkeypatch.setattr(drv, "_half_pressures",
-                        lambda case: _np.linspace(7e4, 1e5, 17))
-    # 2 h window, dt = 7000 s does not divide 7200 s
-    with pytest.raises(SystemExit, match="does not divide"):
+                        lambda case: _np.linspace(7e4, 1e5, 5))
+    monkeypatch.setattr(drv, "load_case", lambda *a, **k: types.SimpleNamespace(
+        nlev=4, dt=60.0, p_s=1.0e5, sigma_top=0.7,
+        spec=types.SimpleNamespace(les_z0_m=1e-4, bulk_ch=None, bulk_ce=None),
+        z_full=_np.linspace(3000.0, 20.0, 4),
+        p_full=_np.linspace(7e4, 1e5, 4),
+        u_profile=_np.full(4, -8.0), v_profile=_np.zeros(4),
+        les_domain_top_m=3000.0,
+        forcing=types.SimpleNamespace(prescribe="fluxes")))
+    monkeypatch.setattr(
+        drv, "build_surface_config",
+        lambda c, **k: types.SimpleNamespace(
+            z0=1e-4, z_ref=20.0, Cd_neutral=1.07e-3, Ch_neutral=0.0,
+            bulk_scheme="constant"))
+    # a 7000 s step cannot land on a 2 h window within half a step
+    with pytest.raises(SystemExit, match="cannot"):
         drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--outdir", str(tmp_path / "o"), "--dt", "7000",
                   "--nlev", "16", "--schemes", "louis", "--skip-tuning"])
+
+
+# --- a blown-up rollout must score WORST, not best -------------------------
+
+def test_nonfinite_prediction_scores_worst_not_best():
+    """safe_sqrt(NaN) is 0.0 and 0 is the PERFECT score, so a scheme that blows
+    up would rank first. Observed live: an mynn25 CBL arm went non-finite and
+    scored 0.000 against louis's 1.938.
+    """
+    import types
+    import jax.numpy as jnp
+    import numpy as _np
+
+    nlev = 6
+    ref = types.SimpleNamespace(
+        mask=_np.ones(nlev, dtype=bool),
+        weights=_np.full(nlev, 1.0 / nlev),
+        profiles={"theta": _np.linspace(300.0, 303.0, nlev)},
+        scored_variables=lambda: ("theta",),
+    )
+    p_full = _np.linspace(9.0e4, 1.0e5, nlev)
+
+    good = {"T": jnp.asarray(_np.linspace(300.0, 303.0, nlev)),
+            "qv": jnp.zeros(nlev), "u": jnp.zeros(nlev), "v": jnp.zeros(nlev)}
+    bad = {**good, "T": jnp.full(nlev, jnp.nan)}
+
+    _c, s_good, bad_good = drv.score_against_les(
+        good, reference=ref, p_full=p_full, scored=("theta",))
+    _c, s_bad, bad_bad = drv.score_against_les(
+        bad, reference=ref, p_full=p_full, scored=("theta",))
+    # The FLAG is the contract, not the magnitude: a near-uniform reference
+    # over the spread floor makes a legitimately huge finite score.
+    assert not bool(bad_good) and bool(bad_bad)
+    s_good, s_bad = float(s_good), float(s_bad)
+    assert _np.isfinite(s_bad), "penalty must be finite so the line search works"
+    assert s_bad >= drv.NONFINITE_PENALTY * 0.99, s_bad
+    assert s_bad > s_good, (
+        f"a non-finite rollout scored {s_bad} against a good {s_good}; "
+        "it must lose, not win")
+
+
+def test_safe_sqrt_still_returns_zero_for_nan():
+    """Documents WHY the penalty lives at the scoring boundary: safe_sqrt's
+    NaN->0 behaviour is deliberate (finite gradient at a perfect fit) and is
+    shared with the RCE campaign, so it is not changed here."""
+    import jax.numpy as jnp
+    from legoesm.training.scm_rce_metrics import safe_sqrt
+    assert float(safe_sqrt(jnp.asarray(float("nan")))) == 0.0

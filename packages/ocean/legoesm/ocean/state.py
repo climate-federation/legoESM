@@ -21,6 +21,117 @@ from legoesm.ocean.eos import FreezingPointConfig
 # this module-level value instead.  = 271.35 - 273.15 = -1.8 C (no literal).
 _T_FREEZE_OCEAN_C: float = constants.T_freeze_ocean - constants.T_freeze
 
+# FLAT kwarg name -> ``ConstantsConfig`` field, for the #501-style routing that
+# ``LatLonCGridOceanConfig.from_flat`` / ``replace_flat`` apply.  Within
+# ``LatLonCGridOceanConfig`` (and the physics pipeline it propagates into) the
+# ocean constants have exactly ONE storage -- ``LatLonCGridOceanConfig.constants``
+# -- and these are the historical flat spellings that route into it (``omega``
+# keeps its lower-case flat name while the storage field is ``Omega``).
+#
+# SCOPE, precisely (do not over-quote this as "the model has one c_sw"):
+# ``FluxFeedbackConfig`` (physics/surface_forcing/config.py) DELIBERATELY carries
+# its own ``c_sw``/``rho_0`` -- the Veros surface-forcing block owns ``cp_0``
+# there, documented in its own docstring -- and nothing propagates ``constants``
+# into it.  The single-surface guarantee here is about the dynamics/vertical-
+# mixing read path (``compute_N2``, KPP/TKE, GM/Redi, PGF, barotropic), which is
+# where the #1226 divergence lived.
+CONSTANTS_FLAT_ALIASES: dict[str, str] = {
+    "g": "g", "rho_0": "rho_0", "c_sw": "c_sw",
+    "omega": "Omega", "R_earth": "R_earth",
+}
+
+
+def constants_equal(a, b) -> bool | None:
+    """``a == b``, or ``None`` when a JAX tracer makes it undecidable.
+
+    ``constants_config`` advertises ``g``/``rho_0``/``c_sw`` as differentiable
+    pytree leaves, and the trainable-override doctrine (CLAUDE.md) applies
+    overrides INSIDE the loss, so a pinned constant can legitimately be a
+    tracer.  A plain Python ``if a != b`` on one raises
+    ``TracerBoolConversionError`` (a ``TypeError`` subclass) and would make
+    ``from_flat``/``replace_flat`` un-jittable -- they were tracer-safe before
+    the single-surface refactor and must stay so.
+
+    THE ONE RULE for the ``None`` (undecidable) case, applied at EVERY call
+    site: **undecidable never discards a value the caller supplied.**  So:
+
+      * "may I raise a conflict?"        -> ``is False``    (PROVEN to differ)
+      * "may I skip work / keep a value?"-> ``is True``     (PROVEN equal)
+      * "must I take the caller's value?"-> ``is not True`` (not proven equal)
+
+    Never the bare truthiness.  Getting this backwards is a silent
+    wrong-number: an earlier revision used ``is not False`` to decide "the
+    physics block is on the defaults, adopt the model set", which under ``jit``
+    threw away an explicitly pinned traced ``g`` and returned a different
+    number with no error.
+    """
+    try:
+        return bool(a == b)
+    except TypeError:                       # TracerBoolConversionError et al.
+        return None
+
+
+def _reject_constant_conflicts(cc_explicit: ConstantsConfig,
+                               flat_vals: dict, where: str) -> None:
+    """Raise when an explicit ``constants=`` and flat kwargs PROVABLY disagree.
+
+    ONE contract shared by ``from_flat`` and ``replace_flat`` (they used to have
+    two: ``replace_flat`` rejected the mere PRESENCE of both spellings while
+    ``from_flat`` rejected only a disagreement).  Two spellings that agree are
+    redundant, not a bug; two that disagree are the silent-divergence bug, and
+    are never resolved by a precedence rule.
+    """
+    bad = {n: (getattr(cc_explicit, n), v) for n, v in flat_vals.items()
+           if constants_equal(getattr(cc_explicit, n), v) is False}
+    if bad:
+        raise ValueError(
+            f"conflicting ocean constants passed to "
+            f"LatLonCGridOceanConfig.{where}: flat kwarg vs constants= "
+            "disagree on "
+            + ", ".join(f"{n} (constants={a!r}, flat={b!r})"
+                        for n, (a, b) in sorted(bad.items()))
+            + ". Pass the value once."
+        )
+
+
+def _physics_with_constants(physics, cc: ConstantsConfig):
+    """Return ``physics`` carrying the model-level ``cc`` constants.
+
+    ``OceanPhysicsConfig`` mirrors ``ConstantsConfig`` so the physics factories
+    (KPP/TKE ``compute_N2``, the convection N^2 trigger) can read recipe-pinned
+    constants.  The MODEL-level ``constants`` is authoritative -- a card that
+    pins ``g`` on the model must not leave the physics pipeline on the default,
+    which is exactly the divergence this routing exists to make impossible.
+
+    A physics config that carries an explicitly-pinned, *different* set is a
+    genuine contradiction (two constant systems in one model) and raises.  A
+    physics config PROVABLY still on the ``ConstantsConfig()`` defaults is NOT a
+    pin, so it is overwritten with ``cc``.
+
+    UNDECIDABLE (traced) ``physics.constants`` is left ALONE -- see
+    :func:`constants_equal`.  It reaches here only when the caller pinned it,
+    and ``from_flat``/``replace_flat`` have already adopted that same object as
+    the model-level ``cc``, so the identity short-circuit above normally fires;
+    overwriting instead would silently substitute a different ``g`` under
+    ``jit`` (and zero its gradient) with no error.
+    """
+    if physics is None or getattr(physics, "constants", None) is None:
+        return physics
+    if physics.constants is cc:
+        return physics
+    if constants_equal(physics.constants, ConstantsConfig()) is True:
+        return physics._replace(constants=cc)      # provably on defaults
+    if constants_equal(physics.constants, cc) is False:
+        raise ValueError(
+            "conflicting ocean constants: the model config carries "
+            f"{cc} but its physics pipeline was pinned to "
+            f"{physics.constants}. One model has ONE set of physical "
+            "constants -- pass them once (model-level `constants=` or the "
+            "flat g=/rho_0=/omega=/c_sw=/R_earth= kwargs) and let them "
+            "propagate."
+        )
+    return physics                                  # already pinned to cc
+
 
 # ==============================================================================
 # FV Ocean State (cubed-sphere)
@@ -1455,17 +1566,25 @@ class LatLonCGridOceanConfig(NamedTuple):
     physical field order.
     """
 
-    # --- Physical constants (defaults reference legoesm.constants; pin via
-    #     ConstantsConfig for a reference-model recipe) ---
-    g: float = constants.g
-    rho_0: float = constants.rho_ocean
-    # Earth rotation rate [rad/s], feeds the GM/Redi Treguier ldf_eiv f20
-    # tropical-taper reference (gm_redi_tracer_tendency_latlon's ``omega``
-    # kwarg) -- MUST equal the value that built ``grid.f``/``f_coriolis``,
-    # same reasoning as ``g`` above (#1226: legoESM's canonical rounded
-    # constants.Omega vs NEMO's full-precision value was the entire ldf_eiv
-    # kappa amplitude residual, ratio 1.000608 at corr=1.0).
-    omega: float = constants.Omega
+    # --- Physical constants ---
+    # There is exactly ONE storage for them: the ``constants: ConstantsConfig``
+    # field declared further down.  ``g`` / ``rho_0`` / ``omega`` are READ-ONLY
+    # PROPERTIES over it (see below), and ``from_flat`` ROUTES the flat kwargs
+    # ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` into it exactly like
+    # every other #501 grouped sub-config.
+    #
+    # They used to be separate NamedTuple fields, which made two independent
+    # constant surfaces that silently disagreed: the NEMO/DINO oracle cards set
+    # the flat ``g`` = NEMO's standard gravity and it reached the momentum path,
+    # while every consumer of ``config.constants.g`` (compute_N2, the GM/Redi
+    # slope and ldf_eiv kappa builders, KPP/TKE) kept the ``legoesm.constants.g``
+    # default -- a 5.0e-5 relative gap that WAS the entire production N^2
+    # residual against NEMO's own dumped rn2b.  A card could set ``g`` and have
+    # it silently not apply.  Single storage makes that divergence structurally
+    # impossible: there is no second number to forget, and ``_replace(g=...)`` /
+    # a positional ``LatLonCGridOceanConfig(g=...)`` now fail LOUDLY instead of
+    # half-applying.  ``omega`` feeds the GM/Redi Treguier ldf_eiv f20 taper and
+    # MUST equal the value that built ``grid.f`` (#1226).
 
     # T/u-face horizontal metric convention (#1226) fed to
     # ``legoesm.grids.latlon.ensure_geometry`` at model construction.
@@ -1775,10 +1894,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
 
-    # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
-    # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
-    # pins these to a reference model (e.g. Veros) via the public config API.
-    # Read-through wiring (de-mirroring) is G-C2+. NOTE: no field whose default
+    # Ocean-scoped physical constants (Phase G, G-C1) -- the SINGLE storage for
+    # g / rho_0 / omega / c_sw / R_earth (see the "Physical constants" block at
+    # the top of the class). Defaults reference legoesm.constants (canonical
+    # Earth). A recipe pins these to a reference model (e.g. Veros, NEMO) either
+    # by passing ``constants=<ConstantsConfig>`` or by passing the flat
+    # ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs to
+    # :meth:`from_flat`, which routes them here.
+    # NOTE: no field whose default
     # READS the `constants` module may be declared after this one — the default
     # here assigns the class-body name `constants` to a ConstantsConfig
     # instance, shadowing the module. Fields with literal defaults (e.g.
@@ -2178,6 +2301,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
     implicit_vmix_dzw_slot: bool = False
+    # --- NEMO-faithful implicit-solve gradient divisor (#1226 W1) ---
+    # NEMO (trazdf.F90:219-220) builds the SAME gradient divisor from
+    # ``e3w(...,Kmm)`` — called from stpmlf.F90:370 as
+    # ``tra_zdf(kstp, Nbb, Nnn, Nrhs, ts, Naa)``, whose dummy arg ``Kmm`` binds
+    # to ``Nnn``, NEMO's NOW time level.  legoESM's default divisor
+    # (``implicit_vmix_dzw_slot=False``) is the midpoint of the AFTER-solve
+    # thickness (``build_dz_half(dz_cell)``, ``dz_cell`` built from the
+    # barotropic-updated ``state_corr.eta``); this option instead builds the
+    # center-to-center divisor from the NOW-level (Nnn/Kmm) thickness,
+    # threaded to ``_apply_implicit_vertical_mixing`` via its ``eta_now``
+    # kwarg by every call site that passes a post-update AFTER state
+    # (_leapfrog_step — the DINO kamm_mlf production path — plus
+    # _unsplit_ab2_step, _ab2_step, _step_impl); the momentum-only friction
+    # call passes the step-entry NOW state directly (fallback correct).
+    # Mutually exclusive with ``implicit_vmix_dzw_slot`` (both pick the same
+    # divisor SLOT — Veros dzw vs NEMO e3w(Kmm) — selecting both is a config
+    # error, not a fallback). Requires ``implicit_vertical_mixing=True`` (same
+    # guard as ``implicit_vmix_dzw_slot``). Default False ⇒ BIT-IDENTICAL for
+    # every existing config. OPT-IN measurement knob only — NOT wired into any
+    # recipe/kamm card (measurement decides).
+    implicit_vmix_e3t_now_divisor: bool = False
     # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
     # When True, every meridional DIFFERENCE operator returns 0 — the faithful
     # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension
@@ -2410,8 +2554,52 @@ class LatLonCGridOceanConfig(NamedTuple):
         field raises (NamedTuple validates the residual kwargs) — typos stay
         loud.  Passing a sub-config object directly (``bottom_drag=...``) is
         also accepted (it falls through unchanged).
+
+        The physical constants are routed the same way: the flat
+        ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs land in the
+        single ``constants: ConstantsConfig`` storage, and the resolved set is
+        propagated into ``physics`` (see :func:`_physics_with_constants`).
+        Passing BOTH a flat scalar and a ``constants=`` that disagrees with it
+        raises -- that combination is the silent-divergence bug this routing
+        removes, so it is never resolved by a precedence rule.
         """
         nested = {}
+        _cc_explicit = flat.pop("constants", None)
+        _cc = {CONSTANTS_FLAT_ALIASES[k]: flat.pop(k)
+               for k in list(CONSTANTS_FLAT_ALIASES) if k in flat}
+        if _cc_explicit is not None and _cc:
+            _reject_constant_conflicts(_cc_explicit, _cc, "from_flat")
+        _cc_final = (_cc_explicit if _cc_explicit is not None
+                     else ConstantsConfig())
+        _cc_given = _cc_explicit is not None or bool(_cc)
+        # ``_replace`` only when it actually changes something: with an
+        # explicit ``constants=`` the flat kwargs are usually already known to
+        # AGREE (the conflict check above raised otherwise), so rebuilding
+        # would return an equal-but-not-identical object and break the recipes'
+        # ``cfg.constants is VEROS_CONSTANTS_CONFIG`` self-pin assertions.
+        # ``is not True`` (not ``!=``) so an UNDECIDABLE comparison -- a traced
+        # flat value under jit -- rebuilds rather than silently dropping it.
+        if _cc and any(constants_equal(getattr(_cc_final, n), v) is not True
+                       for n, v in _cc.items()):
+            _cc_final = _cc_final._replace(**_cc)
+        # Neither a model-level ``constants=`` nor any flat spelling was given,
+        # but the physics pipeline carries an explicit pin: ADOPT it as the
+        # model-level set.  The caller DID pass the constants once (on physics),
+        # so raising "pass them once" against a ``ConstantsConfig()`` default
+        # nobody asked for was wrong -- and leaving the model on the default
+        # would recreate the very two-surface divergence this routing removes.
+        # ``is not True``: a traced pin is UNDECIDABLE, and NOT adopting it here
+        # would leave the model-level constants on the default while the physics
+        # block keeps the pin -- the exact two-surface divergence, recreated
+        # under jit only.
+        if not _cc_given:
+            _pc = getattr(flat.get("physics"), "constants", None)
+            if _pc is not None and constants_equal(_pc, ConstantsConfig()) is not True:
+                _cc_final, _cc_given = _pc, True
+        if _cc_given:
+            nested["constants"] = _cc_final
+        if "physics" in flat:
+            flat["physics"] = _physics_with_constants(flat["physics"], _cc_final)
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
@@ -2444,6 +2632,9 @@ class LatLonCGridOceanConfig(NamedTuple):
         names |= set(RuntimeChecksConfig._fields)
         names |= set(LateralViscosityConfig._fields)
         names |= set(PolarFilterConfig._fields)
+        # ``constants`` stays accepted as a whole sub-config AND by its flat
+        # member spellings (g / rho_0 / omega / c_sw / R_earth).
+        names |= set(CONSTANTS_FLAT_ALIASES)
         return frozenset(names)
 
     def flat_get(self, name: str):
@@ -2463,6 +2654,8 @@ class LatLonCGridOceanConfig(NamedTuple):
             return getattr(self.lateral_viscosity, name)
         if name in PolarFilterConfig._fields:
             return getattr(self.polar_filter, name)
+        if name in CONSTANTS_FLAT_ALIASES:
+            return getattr(self.constants, CONSTANTS_FLAT_ALIASES[name])
         return getattr(self, name)
 
     def replace_flat(self, **overrides) -> "LatLonCGridOceanConfig":
@@ -2482,4 +2675,63 @@ class LatLonCGridOceanConfig(NamedTuple):
                        if k in sub_cls._fields}
             if members:
                 nested[sub_name] = getattr(self, sub_name)._replace(**members)
+        # Physical constants: same single-storage routing as from_flat, so
+        # ``cfg.replace_flat(g=...)`` can never leave the physics pipeline (or
+        # any ``config.constants.g`` consumer) on the old value.
+        _cc = {CONSTANTS_FLAT_ALIASES[k]: overrides.pop(k)
+               for k in list(CONSTANTS_FLAT_ALIASES) if k in overrides}
+        # ``in`` + ``pop``, never ``get``: an explicit ``constants=None`` is a
+        # caller error, and reading it with ``get`` left the key in BOTH
+        # ``nested`` and ``overrides`` -> "_replace() got multiple values".
+        _cc_explicit = overrides.pop("constants") if "constants" in overrides else None
+        _cc_given = _cc_explicit is not None or bool(_cc)
+        if _cc:
+            if _cc_explicit is None:
+                _cc_explicit = self.constants
+            else:
+                # EXACTLY the from_flat contract (they used to differ: this
+                # branch rejected the mere PRESENCE of both spellings): two
+                # ways of saying it, one of which would silently win, is the
+                # bug -- but two that AGREE are merely redundant.
+                _reject_constant_conflicts(_cc_explicit, _cc, "replace_flat")
+            if any(constants_equal(getattr(_cc_explicit, n), v) is not True
+                   for n, v in _cc.items()):
+                _cc_explicit = _cc_explicit._replace(**_cc)
+        _cc_final = _cc_explicit if _cc_given else self.constants
+        _phys = overrides["physics"] if "physics" in overrides else self.physics
+        # Same physics-only-pin adoption as from_flat (they must not disagree on
+        # this either): a NEW physics block carrying a pin, with no constants=
+        # or flat spelling in this call and the model still on the defaults, IS
+        # the caller passing the constants once.
+        if not _cc_given and constants_equal(_cc_final, ConstantsConfig()) is True:
+            _pc = getattr(_phys, "constants", None)
+            if _pc is not None and constants_equal(_pc, ConstantsConfig()) is not True:
+                _cc_final, _cc_given = _pc, True
+        if _cc_given:
+            nested["constants"] = _cc_final
+        _phys_new = _physics_with_constants(_phys, _cc_final)
+        if _phys_new is not _phys:
+            overrides["physics"] = _phys_new
         return self._replace(**nested, **overrides)
+
+    # ------------------------------------------------------------------
+    # Single-surface read-through for the physical constants.  ``constants``
+    # is the ONLY storage (see the "Physical constants" block at the top of
+    # the class); these read-only properties keep the ~100 existing
+    # ``config.g`` / ``config.rho_0`` / ``config.omega`` call sites working
+    # while making a divergent second value impossible to create.
+    # ------------------------------------------------------------------
+    @property
+    def g(self) -> float:
+        """Gravitational acceleration [m/s^2] -- ``self.constants.g``."""
+        return self.constants.g
+
+    @property
+    def rho_0(self) -> float:
+        """Boussinesq reference density [kg/m^3] -- ``self.constants.rho_0``."""
+        return self.constants.rho_0
+
+    @property
+    def omega(self) -> float:
+        """Earth rotation rate [rad/s] -- ``self.constants.Omega``."""
+        return self.constants.Omega

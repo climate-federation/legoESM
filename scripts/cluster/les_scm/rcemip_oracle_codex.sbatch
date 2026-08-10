@@ -36,8 +36,8 @@ analytic Wing-2018 profile whose three case constants were wrong. gSAM 1.8.8's
 own RCEMIP1 sounding (CASES/RCEMIP1/snd_rcemip_300s6.11.2) is now available as
 an oracle. This change (a) adds --sounding to scripts/run/run_rcemip_plane.py
 to initialise from the tabulated SAM sounding via the EXISTING shared
-read_sam_snd + sam_case_setup path, (b) recalibrates WING_T_V0 295 -> 300.444,
-WING_GAMMA 0.0067 -> 0.0074034, WING_Q_SFC_DEFAULT 0.01865 -> 0.0142014 against
+read_sam_snd + sam_case_setup path, (b) recalibrates WING_T_V0 295 -> 299.274,
+WING_GAMMA 0.0067 -> 0.0069901, WING_Q_SFC_DEFAULT 0.01865 -> 0.0142014 against
 that oracle, (c) adds tests/unit/test_rcemip_gsam_oracle_ic.py plus a tiny
 vendored baseline tests/oracle_baselines/gsam_rcemip300_snd.json.
 

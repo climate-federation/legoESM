@@ -13,13 +13,18 @@ import pytest
 from legoesm.io.cmor_output import (
     CMOR_TABLES,
     lookup_cmor_entry,
-    _TABLE_REALM,
-    _OMON_VARIABLES,
-    _OYR_VARIABLES,
-    _OFX_VARIABLES,
-    _SIMON_VARIABLES,
-    _SIYR_VARIABLES,
+    table_realm,
 )
+
+# The per-table dicts are no longer module-private globals: the metadata
+# is read from the vendored official CMOR tables and exposed through the
+# public ``CMOR_TABLES`` registry.  (Importing ``_``-prefixed symbols
+# across modules is banned in this repo anyway.)
+_OMON_VARIABLES = CMOR_TABLES["Omon"]
+_OYR_VARIABLES = CMOR_TABLES["Oyr"]
+_OFX_VARIABLES = CMOR_TABLES["Ofx"]
+_SIMON_VARIABLES = CMOR_TABLES["SImon"]
+_SIYR_VARIABLES = CMOR_TABLES["SIyr"]
 
 
 # ==============================================================================
@@ -33,11 +38,11 @@ class TestNewTablesRegistered:
             assert tbl in CMOR_TABLES, f"missing table: {tbl}"
 
     def test_omip_tables_route_to_correct_realm(self):
-        assert _TABLE_REALM["Omon"] == "ocean"
-        assert _TABLE_REALM["Oyr"] == "ocean"
-        assert _TABLE_REALM["Ofx"] == "ocean"
-        assert _TABLE_REALM["SImon"] == "seaIce"
-        assert _TABLE_REALM["SIyr"] == "seaIce"
+        assert table_realm("Omon") == "ocean"
+        assert table_realm("Oyr") == "ocean"
+        assert table_realm("Ofx") == "ocean"
+        assert table_realm("SImon") == "seaIce"
+        assert table_realm("SIyr") == "seaIce"
 
 
 # ==============================================================================

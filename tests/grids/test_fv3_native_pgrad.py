@@ -124,14 +124,59 @@ def test_geopk_unknown_a2b_ord_and_km_raise(bd):
               **{**kw, "km": 0, "a2b_ord": 4})
 
 
-def test_p_grad_c_nonhydrostatic_raises(bd):
+def test_p_grad_c_nonhydrostatic_branch(bd):
+    """The NH branch differs from hydrostatic ONLY in the denominator
+    weight (dyn_core.F90:2103-2113: wk = delpc vs wk = pkc-diff).
+
+    Certified by an identity control plus a linearity control:
+    (a) feeding delpc == the pkc interface difference makes the two
+        branches BITWISE identical -- the momentum expressions are
+        shared, so any divergence is a branch bug;
+    (b) doubling delpc exactly halves the NH increment (the weight is
+        the only place delpc enters).
+    An earlier test asserted this branch raises NotImplementedError;
+    it is implemented now (NH port unit 4).
+    """
     from legoesm.core.fv3_native_pgrad import p_grad_c
 
-    st = _synthetic(2)
-    z = np.zeros((M_A, M_A, 3))
-    with pytest.raises(NotImplementedError, match="non-hydrostatic"):
-        p_grad_c(1.0, st["delp"], z, z, st["uc"], st["vc"], {}, bd,
-                 npz=2, hydrostatic=False)
+    km = 2
+    st = _synthetic(km)
+    gs = _gs()
+    rng = np.random.default_rng(17)
+    pkc = np.cumsum(
+        np.abs(rng.standard_normal((M_A, M_A, km + 1))) + 1.0, axis=2)
+    gz = np.cumsum(
+        np.abs(rng.standard_normal((M_A, M_A, km + 1))) + 5.0, axis=2)[:, :, ::-1].copy()
+
+    # (a) identity control
+    dpk = pkc[:, :, 1:] - pkc[:, :, :-1]
+    uc_h = np.array(st["uc"]); vc_h = np.array(st["vc"])
+    uc_n = np.array(st["uc"]); vc_n = np.array(st["vc"])
+    p_grad_c(1.0, st["delp"], pkc, gz, uc_h, vc_h, gs, bd,
+             npz=km, hydrostatic=True)
+    p_grad_c(1.0, dpk, pkc, gz, uc_n, vc_n, gs, bd,
+             npz=km, hydrostatic=False)
+    assert np.array_equal(uc_h, uc_n)
+    assert np.array_equal(vc_h, vc_n)
+    # non-vacuity: the update moved the winds
+    assert np.abs(uc_h - st["uc"]).max() > 0.0
+
+    # (b) linearity control (denominator ~ 1/delpc).  Run it from
+    # uc = vc = 0 so the increment IS the output -- extracting it by
+    # subtracting a large uc loses ~eps*|uc| to cancellation, which at
+    # small increments swamps a 1e-12 ratio tolerance (that was this
+    # test's own first bug).  Doubling delpc doubles the fp-exact
+    # denominator, and x/(2y) == (x/y)/2 exactly in binary fp.
+    uc_a = np.zeros_like(st["uc"]); vc_a = np.zeros_like(st["vc"])
+    uc_b = np.zeros_like(st["uc"]); vc_b = np.zeros_like(st["vc"])
+    p_grad_c(1.0, dpk, pkc, gz, uc_a, vc_a, gs, bd,
+             npz=km, hydrostatic=False)
+    p_grad_c(1.0, 2.0 * dpk, pkc, gz, uc_b, vc_b, gs, bd,
+             npz=km, hydrostatic=False)
+    nz = np.abs(uc_a) > 0.0
+    assert nz.any()
+    ratio = uc_b[nz] / uc_a[nz]
+    assert np.abs(ratio - 0.5).max() < 1e-14
 
 
 def test_one_grad_p_guards_raise(bd):
@@ -666,9 +711,16 @@ def test_verify_manifest_rejects_tampering(tmp_path):
         pytest.skip("no git checkout to verify repo_sha against")
     work = str(tmp_path)
     km = 2
+    # ORDER IS LOAD-BEARING. verify_manifest refuses an output that
+    # predates the executable or its input, so the fixture has to write
+    # them in that order -- writing `drv` last made the check a race that
+    # only passed when all three landed in the same clock tick, and it
+    # lost the race here (exe 1786117722.5693974 vs output
+    # 1786117722.5683975, a 1 ms gap). The test is about TAMPERING, so a
+    # baseline that fails on filesystem timestamp resolution is noise.
+    (tmp_path / "drv").write_bytes(b"\x7fELF-not-really")
     (tmp_path / "geopk_pgrad_input.txt").write_bytes(b"# res 12\n")
     (tmp_path / f"geopk_pgrad_output_km{km}.txt").write_bytes(b"X 1 1 1 0\n")
-    (tmp_path / "drv").write_bytes(b"\x7fELF-not-really")
 
     def _sha_path(p):
         return _h.sha256(open(p, "rb").read()).hexdigest()

@@ -48,7 +48,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args(argv)
 
-    data = np.load(args.indir / "profiles.npz", allow_pickle=True)
+    data = np.load(next((q for q in (args.indir / "profiles.npz", *sorted(args.indir.glob("profiles_*.npz"))) if q.exists()), args.indir / "profiles.npz"), allow_pickle=True)
     mask = data["mask"].astype(bool)
     z = data["z_scm"][mask]
     order = _read_ranking(args.indir / "ranking.csv")

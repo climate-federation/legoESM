@@ -22,10 +22,37 @@ shear-production-EQUIVALENT that the caller multiplies by a single
 per-interface K_M). NEMO's raw ``p_sh2`` output DOES have avm baked in via
 face-averaging (``avm(i+1,j,jk)+avm(i,j,jk)``). To compare like-for-like
 without re-deriving avm face-averaging as a NEW candidate, this probe feeds
-a SPATIALLY-UNIFORM avm (so face-averaging is a no-op: avm(i+1)+avm(i) =
-2*avm_uniform), then multiplies legoESM's ``shear_sq_equivalent`` output by
-that same avm_uniform before comparing -- exactly reconstructing the
-documented ``P_s = K_M * shear_sq_equivalent`` contract instead of guessing.
+a SPATIALLY-UNIFORM avm (so the face-average is a no-op), then multiplies
+legoESM's ``shear_sq_equivalent`` output by that same avm_uniform before
+comparing -- exactly reconstructing the documented
+``P_s = K_M * shear_sq_equivalent`` contract instead of guessing.
+
+*** ALL RATIOS PREVIOUSLY RECORDED BY THIS SCRIPT ARE RETRACTED (2026-08). ***
+It multiplied by ``2.0 * AVM_UNIFORM``, which exactly cancelled a factor-2
+defect in ``vertical_shear_face_native`` (it kept NEMO's literal 0.25
+T-point prefactor while dropping the ``avm(ji+1)+avm(ji)`` face SUM that
+0.25 is paired with, and so returned half of ``(du/dz)^2+(dv/dz)^2``).  The
+helper is fixed (prefactor 0.5) and the multiplier here is now
+``AVM_UNIFORM``; see the retraction comment at the reconstruction line.
+The ``0.9036`` quoted below is one of the retracted figures.
+
+RE-RUN 2026-08 against the compiled Fortran
+(``--rundir .../cfgs/DINO/RUN_GDB``), which makes THIS the oracle-side anchor
+for the prefactor -- the scale is now pinned against NEMO, not against a
+sibling legoESM function::
+
+  fixed helper (0.5) + AVM_UNIFORM        UNRESTRICTED corr=0.777054 ratio=0.999748
+  fixed helper (0.5) + 2.0*AVM_UNIFORM    UNRESTRICTED corr=1.999496 -> ratio=1.999496
+
+i.e. the reconstruction lands on NEMO's own ``p_sh2`` to 2.5e-4 in RMS ratio,
+and the old ``2.0*`` multiplier is now exactly 2x off.  Controlled: only the
+multiplier changed between those two lines, same run dir, same seed.
+
+CAVEAT, pre-existing and NOT addressed here: ``corr`` is only 0.78/0.69 and
+NEMO's dumped ``p_sh2`` spans ``min=-9.99e+02`` -- a ``-999.0`` sentinel that
+this probe does not mask out.  The RATIO is the scale anchor above; the
+CORRELATION from this probe is not trustworthy until that sentinel is
+excluded.  Do not quote the corr as a fidelity number.
 """
 from __future__ import annotations
 
@@ -181,15 +208,30 @@ def main() -> int:
         )
     )
     shear_eq = np.transpose(shear_eq_l, (1, 0, 2))   # back to (i,j,k)
-    # reconstruct P_s = K_M * shear_sq_equivalent with the SAME uniform avm
-    # NEMO's face-averaging collapsed to. NEMO's own zsh2u/zsh2v carry
-    # (avm(i+1,j,jk)+avm(i,j,jk)) = 2*AVM_UNIFORM here (uniform avm), so the
-    # reconstruction needs 2*AVM_UNIFORM, not AVM_UNIFORM alone -- an
-    # earlier version of this script used AVM_UNIFORM and got an exact 2x
-    # ratio (0.499945), the SAME class of bug as dyn_zad's earlier 2x
-    # w_area_half mistake -- caught the same way, by the exact-power-of-2
-    # signature.
-    p_sh2_lego = (2.0 * AVM_UNIFORM) * shear_eq
+    # Reconstruct the documented contract P_s = K_M * shear_sq_equivalent
+    # with the SAME uniform avm NEMO's face-averaging collapsed to.
+    #
+    # RETRACTION 2026-08 (Rule 11), read before touching this line.  This
+    # multiplier was ``2.0 * AVM_UNIFORM``, justified by a comment that
+    # recorded an "earlier version used AVM_UNIFORM and got an exact 2x
+    # ratio (0.499945) ... caught by the exact-power-of-2 signature".  THAT
+    # DIAGNOSIS WAS BACKWARDS.  The earlier version was measuring the true
+    # contract; the 0.499945 was a REAL DEFECT in
+    # ``vertical_shear_face_native``, which carried NEMO's literal 0.25
+    # T-point prefactor (zdfsh2.F90:93) while ALSO dropping the
+    # ``avm(ji+1)+avm(ji)`` face SUM (:80) the 0.25 is paired with -- i.e.
+    # it applied the halving twice and returned half of
+    # ``(du/dz)^2+(dv/dz)^2``.  The ``2.0*`` here CANCELLED that defect
+    # inside this instrument, which is how ``ratio 0.975`` could be recorded
+    # while production ran at half.  The helper's prefactor is now 0.5, so
+    # the correct reconstruction is AVM_UNIFORM alone (NEMO's own header
+    # formula, zdfsh2.F90:48-49: ``sh2 = mi[mi(avm)*S_u] + mj[mj(avm)*S_v]``
+    # -- a MEAN of avm, no factor 2 in the net term).
+    #
+    # STALE: every ratio this script has printed was taken with the 2.0*
+    # compensation against the halved helper.  Those numbers are RETRACTED,
+    # not merely superseded; re-run before quoting one.
+    p_sh2_lego = AVM_UNIFORM * shear_eq
 
     # p_sh2_lego has shape (...,nlev-1) at interfaces k=0..nlev-2 (between
     # T-levels k,k+1); NEMO's p_sh2 is (...,jpk) w-point, written for
@@ -224,7 +266,10 @@ def main() -> int:
         ratio_r = np.sqrt(np.mean(ar**2)) / np.sqrt(np.mean(br**2))
         print(f"RESTRICTED-TO-SIGNAL (|nemo|>=1e-9, n={signal_mask.sum()} of {signal_mask.size}): "
               f"corr={corr_r:.6f} ratio={ratio_r:.6f}")
-        print("For reference (quiescent-restart method, ESCALATION 1): restricted-to-signal ratio 0.9036")
+        print("For reference (quiescent-restart method, ESCALATION 1): "
+              "restricted-to-signal ratio 0.9036 -- RETRACTED 2026-08, "
+              "measured with the 2.0*AVM_UNIFORM compensation against the "
+              "then-halved vertical_shear_face_native; do not quote it.")
     return 0
 
 

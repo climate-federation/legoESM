@@ -306,13 +306,21 @@ def main() -> int:
                         "tagged grid=tripole. Incompatible with "
                         "--wide-halo (fold refused at construction).")
     p.add_argument("--fused-halo", action="store_true",
-                   help="Opt-in SPMD halo message aggregation "
+                   help="Force SPMD halo message aggregation ON "
                         "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
                         "pair per direction per dtype group at every "
                         "pad_multi site instead of one per field — "
                         "measured 25%% fewer static collective-permutes on "
-                        "this step, bit-identical results. A/B against "
-                        "the default run.")
+                        "this step, bit-identical results. REDUNDANT since "
+                        "the runtime default became ON (job 26692291, "
+                        "-4.9%%); kept so a row can pin the value "
+                        "explicitly.")
+    p.add_argument("--no-fused-halo", action="store_true",
+                   help="Force SPMD halo message aggregation OFF "
+                        "(LEGOESM_LATLON_SPMD_FUSED_HALO=0) — the per-field "
+                        "ppermutes. This is the A/B CONTROL arm: the "
+                        "runtime default is ON, so without this flag an "
+                        "'off' arm would silently be a fused run.")
     p.add_argument("--wide-halo", action="store_true",
                    help="Opt-in wide-halo split-explicit barotropic: one "
                         "fused wide lat-halo exchange per chunk of substeps "
@@ -429,8 +437,14 @@ def main() -> int:
             f"with steps); --steps {args.steps} > {SPMD_PARITY_MAX_STEPS} "
             f"cap.")
 
-    if args.fused_halo:
-        # Trace-time switch — set BEFORE the sharded step is built/jitted.
+    # Trace-time switch — set BEFORE the sharded step is built/jitted.
+    # BOTH directions are explicit: the runtime default is now ON (receipt
+    # job 26692291, ocean LL2304@128 fused -4.9 %), so an A/B needs a way to
+    # force OFF.  Without --no-fused-halo the "off" arm would silently be a
+    # fused run, and every unset row would be mislabelled (codex review).
+    if args.no_fused_halo:
+        os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "0"
+    elif args.fused_halo:
         os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
     # #1370 fix stage (i), codex round-18: build the GLOBAL model/state on
@@ -827,8 +841,13 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            # Default MUST match the runtime resolver (halo_latlon.py,
+            # sharded_ocean_step.py), which defaults ON.  It read "0" here
+            # while the runtime read "1", so an unset run was fused but
+            # recorded fused_halo=false — a falsely-labelled baseline row
+            # (codex review).
             "fused_halo": os.environ.get(
-                "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0",
+                "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0",
             # Route-B transport facts (socket-fallback flag): a
             # multi-node row without an NCCL net plugin is
             # falsifiable from the record alone.

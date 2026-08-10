@@ -293,6 +293,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
+        # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
+        # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
+        # silently fall through to _step_impl (the else branch) instead of
+        # raising -- lock the guard so it can't be silently deleted.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_step_jitted"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),
@@ -313,6 +318,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # lateral_tracer_mixing, gm_redi_mld_criterion) with fn-entry raises;
         # lock so the gm_redi_mld_criterion N2-integral guard can't be dropped.
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_lat_lon_model_config"),
+        # MPAS DINO builder rejects the lat-lon-C-grid-only scheme fields
+        # (gm_kappa_scheme=treguier, convection_evd_n2_time_level=
+        # nemo_now_before). The MPAS vmix bridge threads neither the Nnn/Nbb
+        # tracers nor the Nnn eta the zdfevd trigger arms need, so honouring
+        # the field there would silently run the solver-state trigger (#1317).
+        ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_mpas_model_config"),
         # make_bottom_drag_physics entry removed 2026-07-19: the dead
         # physics-level bottom-drag factory was deleted on main (c5f88d325);
         # the canonical guard is validate_bottom_drag_scheme above.
@@ -332,6 +343,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py", "bulk_formula_surface_forcing"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", "make_surface_forcing_physics"),
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", "make_vertical_mixing_physics"),
+        # K-profile composition + EVD trigger time-level dispatch
+        # (vmix_background_mode: additive | nemo_max_floor;
+        # EnhancedDiffusionConfig.evd_n2_time_level: solver_state |
+        # nemo_now_before, #1317). Both are nested scheme-Config fields that
+        # validate_strict never sees, so this fn-entry raise is the only
+        # defence — a typo would silently pick a different composition or run
+        # the trigger on the post-explicit Kaa state.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", "compute_vertical_K_profiles"),
         # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
         # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
         # typo would silently run the Veros flux BC, a ~60x different surface

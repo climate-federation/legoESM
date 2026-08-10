@@ -131,6 +131,24 @@ def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0,
     ``WING_T_V0`` is now calibrated against the gSAM sounding — see the
     constant's note — and the SST enters only through ``--T-sfc``.
     """
+    # SCOPE WARNING (#1507 codex P1): WING_T_V0 / WING_GAMMA / WING_Q_SFC_DEFAULT
+    # are calibrated against the gSAM **RCE300** sounding, and they are MODULE
+    # DEFAULTS -- every defaulted caller gets them, including the SCM campaign
+    # and the RCE295 / RCE305 cases. Discarding T_sfc here is right (the SST is
+    # a boundary condition, not the IC), but it means a non-300 K run silently
+    # receives RCE300-calibrated ATMOSPHERIC coefficients. Say so once, loudly,
+    # rather than let the calibration travel unannounced; pass explicit
+    # T_v0/Gamma/q_sfc, or use --sounding, for the other SSTs.
+    if abs(float(T_sfc) - 300.0) > 0.5:
+        import warnings
+        warnings.warn(
+            f"RCEMIP analytic IC: T_sfc={float(T_sfc):.1f} K but the profile "
+            f"coefficients (T_v0={WING_T_V0}, Gamma={WING_GAMMA}, "
+            f"q_sfc={WING_Q_SFC_DEFAULT}) are calibrated against the gSAM "
+            f"RCE300 sounding. The atmospheric profile is therefore RCE300's, "
+            f"not this SST's. Pass explicit coefficients or --sounding for "
+            f"RCE295/RCE305 (#1507).",
+            stacklevel=2)
     del T_sfc  # documented above: the SST is a boundary condition, not the IC
     return make_wing2018_theta_ref_fn(q_sfc=float(q_sfc))(z)
 
@@ -1020,6 +1038,9 @@ def _build_radiation_config(
 
 def _build_microphysics_config(
     scheme: str, homogeneous_ice_nucleation: bool = False,
+    hard_saturation_adjustment: bool = False,
+    hard_sat_adjust_threshold: float | None = None,
+    hard_sat_max_heating_K: float | None = None,
 ) -> MicrophysicsConfig | None:
     if scheme == "none":
         return None
@@ -1038,14 +1059,55 @@ def _build_microphysics_config(
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
-        return MicrophysicsConfig(
+        cfg = MicrophysicsConfig(
             scheme=scheme,
             morrison=MorrisonConfig(
                 morrison_flavor="sam",
                 homogeneous_ice_nucleation=homogeneous_ice_nucleation,
             ),
         )
-    return MicrophysicsConfig(scheme=scheme)
+    else:
+        cfg = MicrophysicsConfig(scheme=scheme)
+
+    # Hard (iterated) saturation-adjustment guard.  This driver is the RCE/CRM
+    # lane, i.e. exactly where a super-saturated initial sounding can occur, so
+    # the guard needs a CLI route here -- it previously had none for ANY
+    # scheme, which is why a ~140 %-RH RCEMIP sounding could not be run with
+    # the guard on without editing code.
+    #
+    # Threading goes through the SHARED
+    # ``apply_microphysics_experiment_flags`` (never a private copy of the
+    # dispatch): it applies the flags to the ACTIVE sub-config only and raises
+    # LOUDLY for a scheme that does not carry the guard (sdm / fast_sbm), so a
+    # silently-inert flag is impossible.  Wrapped in a Python ``if`` so the
+    # all-defaults path returns the exact object it always did.
+    if (hard_saturation_adjustment
+            or hard_sat_adjust_threshold is not None
+            or hard_sat_max_heating_K is not None):
+        # A float override without the boolean gate would be SILENTLY INERT
+        # (the schemes branch on a static ``if config.hard_saturation_
+        # adjustment``), so refuse it rather than let a user believe they
+        # tuned something. Mirrors ExperimentConfig.validate_strict, which
+        # this driver does not go through.
+        if not hard_saturation_adjustment:
+            _set = [n for n, v in
+                    (("--hard-sat-adjust-threshold", hard_sat_adjust_threshold),
+                     ("--hard-sat-max-heating-k", hard_sat_max_heating_K))
+                    if v is not None]
+            raise ValueError(
+                f"{', '.join(_set)} requires --hard-saturation-adjustment "
+                "(the override would be silently inert without it)."
+            )
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        cfg = cfg._replace(**{scheme: apply_microphysics_experiment_flags(
+            getattr(cfg, scheme), scheme,
+            hard_saturation_adjustment=hard_saturation_adjustment,
+            hard_sat_adjust_threshold=hard_sat_adjust_threshold,
+            hard_sat_max_heating_K=hard_sat_max_heating_K,
+        )})
+    return cfg
 
 
 def dx_aware_hyperdiff(dx, base=1.0e8, dx_ref=1000.0):
@@ -1112,7 +1174,17 @@ def parse_args(argv=None):
     p.add_argument("--land-T-init", type=float, default=None,
                    help="Initial LAND slab surface temperature [K]. Default: "
                         "use --T-sfc.")
-    p.add_argument("--hyperdiff", type=float, default=1.0e6)
+    p.add_argument("--hyperdiff", type=float, default=None,
+                   help="Biharmonic hyperdiffusion coefficient [m^4/s]. "
+                        "Default None auto-scales as dx_aware_hyperdiff(dx) = "
+                        "1e8*(dx/1000)^4, matching run_gate_plane.py and "
+                        "run_lba_plane.py. The biharmonic CFL AND the 2*dx "
+                        "damping rate both go as K/dx^4, so a FIXED "
+                        "coefficient is wrong at any dx but one — the previous "
+                        "fixed 1.0e6 default was ~4 orders too weak at "
+                        "dx=4 km, and iter-62-66 measured that too little "
+                        "grad^4 leaves the domain laminar. Pass an explicit "
+                        "value to override.")
     p.add_argument("--smag-cs", type=float, default=0.19,
                    help="Smagorinsky Cs; SAM default 0.19 (dosmagor).")
     p.add_argument("--turbulence-closure",
@@ -1313,6 +1385,33 @@ def parse_args(argv=None):
                             "fast_sbm", "ml_emulator", "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
+    # --- Hard (iterated) saturation-adjustment guard -----------------------
+    # This is the RCE/CRM lane, where a super-saturated initial sounding is a
+    # real configuration (a ~140 %-RH RCEMIP sounding produced a persistent
+    # column-water drift). The guard had NO CLI route in this driver for any
+    # scheme, so it could only be enabled by editing code.
+    p.add_argument("--hard-saturation-adjustment",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Enable the iterated (bracketed-bisection) saturation "
+                        "adjustment: wherever q_v exceeds "
+                        "--hard-sat-adjust-threshold * q_sat, condensation is "
+                        "blended toward the enthalpy-conserving on-curve "
+                        "value instead of the slower smooth-sigmoid rate, "
+                        "rate-limited by --hard-sat-max-heating-k. Default off "
+                        "=> byte-identical to the historical smooth path. "
+                        "Carried by kessler/sundqvist/seifert_beheng/morrison/"
+                        "thompson/p3/ml_emulator; sdm and fast_sbm resolve "
+                        "super-saturation explicitly and REJECT the flag.")
+    p.add_argument("--hard-sat-adjust-threshold", type=float, default=None,
+                   help="RH trigger for the hard saturation adjustment "
+                        "(default: the scheme's 1.1). Requires "
+                        "--hard-saturation-adjustment.")
+    p.add_argument("--hard-sat-max-heating-k", type=float, default=None,
+                   help="Per-step latent-heating cap [K] for the hard "
+                        "saturation adjustment (default: the scheme's 5.0), so "
+                        "a large super-saturation pool drains onto the curve "
+                        "over MANY steps rather than releasing its full latent "
+                        "heat at once. Requires --hard-saturation-adjustment.")
     p.add_argument("--homogeneous-ice-nucleation",
                    action=argparse.BooleanOptionalAction, default=False,
                    help="Morrison M2005 ONLY: enable Koop-2000 homogeneous ice "
@@ -1412,6 +1511,14 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
+    # dx-aware biharmonic coefficient (single source of truth shared with the
+    # GATE/LBA drivers). Resolved here so every downstream consumer, the config
+    # echo and the run metadata all see the same number.
+    _hyperdiff_auto = args.hyperdiff is None
+    if _hyperdiff_auto:
+        args.hyperdiff = dx_aware_hyperdiff(args.dx)
+    if args.hyperdiff < 0.0:
+        raise SystemExit("--hyperdiff must be non-negative.")
     if args.land:
         if args.land_heat_capacity <= 0.0:
             raise SystemExit("--land-heat-capacity must be positive.")
@@ -1426,7 +1533,9 @@ def main():
     print(f"RCEMIP1 plane: nx={args.nx} ny={args.ny} nlev={args.nlev}")
     print(f"  dx={args.dx} m, Lz={args.H} m, dt={args.dt} s, "
           f"{args.steps} steps -> t_final={args.steps * args.dt:.1f} s")
-    print(f"  T_sfc={args.T_sfc} K, hyperdiff={args.hyperdiff:.2e}, "
+    print(f"  T_sfc={args.T_sfc} K, "
+          f"hyperdiff={args.hyperdiff:.2e}"
+          f"{' (dx-aware auto)' if _hyperdiff_auto else ' (explicit)'}, "
           f"smag_cs={args.smag_cs}, closure={args.turbulence_closure}"
           + (f" (DNS: nu={args.molecular_viscosity:.2e} m^2/s)"
              if args.turbulence_closure == "molecular" else ""))
@@ -1441,6 +1550,19 @@ def main():
     print(f"  semi_implicit={args.semi_implicit}, substep_horizontal_acoustic="
           f"{args.substep_horizontal_acoustic}, si_w_filter_nu={args.si_w_filter_nu}, "
           f"seed_kind={args.seed_kind}, sgs_vertical={args.sgs_vertical}")
+    # CONV-TRIGGER #83 preflight. theta_noise_amp defaults to 0, which leaves
+    # the rest state horizontally uniform — and a uniform state STAYS uniform,
+    # so the run produces a laminar radiative-equilibrium column while exiting
+    # 0. Say so up front; the end-of-run verdict confirms it either way.
+    if args.theta_noise_amp <= 0.0:
+        print("  *** NO IC PERTURBATION (--theta-noise-amp 0): this run cannot "
+              "convect — it will stay a horizontally uniform column.")
+        print("  *** For RCE use: --theta-noise-amp 0.1 --seed-kind band_noise "
+              "--seed-kmax 8   (see docs/user-guide/rcemip1_crm.md)")
+    elif args.seed_kind == "smooth_k1":
+        print("  *** seed_kind=smooth_k1 puts all seed energy in ONE k=1 "
+              "cosine: expect a single domain-filling circulation, not a "
+              "convective-cell population. Use --seed-kind band_noise for RCE.")
     # codex iter-63 [LOW]: record whether --radiation was DEFAULTED (vs
     # explicit) so logs are self-describing — the gray→rrtmgp default flip
     # (#85) silently changes the experiment when the flag is omitted.
@@ -1597,7 +1719,10 @@ def main():
             radiation_config, args.land_albedo,
         )
     microphysics_config = _build_microphysics_config(
-        args.microphysics, args.homogeneous_ice_nucleation)
+        args.microphysics, args.homogeneous_ice_nucleation,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=args.hard_sat_max_heating_k)
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
@@ -1744,6 +1869,12 @@ def main():
               f"({args.snapshot_days} d); 3D dumps at steps "
               f"{sorted(_snap3d_steps)} (days {args.snapshot3d_days})")
 
+    _run_max_w = 0.0
+    _diag_samples = 0
+    _went_non_finite = False
+    # Second half of whatever step range this invocation actually integrates
+    # (respects --restart, where the loop starts at the checkpoint step).
+    _diag_window_start = _start_step + (args.steps - _start_step) // 2
     if args.land:
         print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
               "max(q_v)   d(mass)    T_s[min/mean/max] Qs SH LH")
@@ -1868,6 +1999,16 @@ def main():
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
+            # Track peak |w| so a run that never convected can SAY SO at the end
+            # (CONV-TRIGGER #83): an un-seeded RCE otherwise exits 0 with a clean
+            # mass budget and no indication that nothing ever happened.
+            # Only the SECOND HALF counts. The rest state's initial hydrostatic
+            # adjustment transient is ~0.8 m/s at step 1 even when the domain is
+            # perfectly uniform and stays that way, so a whole-run peak would
+            # clear any sane convective threshold and the check would never fire.
+            if np.isfinite(max_w) and (i + 1) >= _diag_window_start:
+                _run_max_w = max(_run_max_w, max_w)
+                _diag_samples += 1
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
             max_qv = float(jnp.max(state.tracers.data[..., 0]))
@@ -1899,6 +2040,7 @@ def main():
             if bad or badtr:
                 print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
                       f"— aborting.")
+                _went_non_finite = True
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
@@ -1930,6 +2072,49 @@ def main():
         _render_profile_evolution_png(
             snap_dir, args.output / "profile_evolution.png",
         )
+
+    # CONV-TRIGGER #83 verdict. A convecting RCE reaches several m/s; a run that
+    # never broke symmetry sits at ~1e-4 m/s while still exiting 0 with a clean
+    # mass budget, which is exactly how a laminar run gets mistaken for a
+    # successful one. Report it rather than leaving the reader to notice.
+    _LAMINAR_MAX_W = 0.1  # m/s
+    if _went_non_finite:
+        # The run crashed. Reporting a peak |w| here would read as a health
+        # statistic for an integration that did not finish.
+        print(f"\n  *** RUN ABORTED NON-FINITE — the peak |w| of "
+              f"{_run_max_w:.3e} m/s is from the steps BEFORE the blow-up and "
+              f"says nothing about the intended integration.")
+    elif _diag_samples == 0:
+        # |w| is only sampled on print steps. If --print-every is coarse enough
+        # that none landed in the window, _run_max_w is still 0.0 and calling
+        # that "laminar" would libel a perfectly good convecting run.
+        print("\n  (no |w| samples in the second half of the run — "
+              "--print-every is too coarse to judge whether it convected; "
+              "no verdict)")
+    elif _run_max_w < _LAMINAR_MAX_W:
+        print(f"\n  *** LAMINAR RUN: peak |w| over the second half of the "
+              f"integration was {_run_max_w:.3e} m/s "
+              f"(< {_LAMINAR_MAX_W} m/s).")
+        print("  *** The domain never convected — it stayed a horizontally "
+              "uniform column.")
+        if args.radiation == "none" or args.turbulence_closure == "molecular":
+            # Not every use of this driver WANTS convection: DNS/LES closure
+            # probes and no-radiation dycore smokes are legitimately laminar,
+            # so state the fact without prescribing an RCE fix.
+            print("  *** (expected for a DNS/LES closure probe or a "
+                  "no-radiation dycore smoke — not a problem there.)")
+        elif args.theta_noise_amp <= 0.0:
+            print("  *** Cause: --theta-noise-amp is 0, so the initial state "
+                  "has NO perturbation to break symmetry.")
+            print("  *** Fix: --theta-noise-amp 0.1 --seed-kind band_noise "
+                  "--seed-kmax 8 (see docs/user-guide/rcemip1_crm.md).")
+        else:
+            print(f"  *** --theta-noise-amp is {args.theta_noise_amp}, so the "
+                  "seed was applied but did not grow; check the seed spectrum "
+                  "(--seed-kind/--seed-kmax) and the run length.")
+    else:
+        print(f"\n  peak |w| over the second half of the run: "
+              f"{_run_max_w:.2f} m/s")
 
     print(f"\nOutput: {args.output}")
 
