@@ -286,18 +286,23 @@ def p_grad_c(dt2, delpc, pkc, gz, uc, vc, gs: dict, bd, *, npz,
     never read by re-running the Fortran with ``delpc = -9.e9`` and
     requiring a BITWISE identical result.
 
+    NON-HYDROSTATIC branch (:2109-2113): the ONLY difference is the
+    denominator weight — ``wk = delpc(:,:,k)`` instead of the ``pkc``
+    interface difference; the two momentum expressions are shared
+    verbatim.  On that branch ``pkc`` is FULL interface pressure (the
+    header comment at :2079-2081 and ``Riem_Solver_c``'s
+    ``pef = pe2 + pem``), not ``pe**cappa`` — the CALLER owns handing the
+    right quantity; this routine cannot tell them apart.
+
     There is NO inter-k coupling (:2100): the only vertical reads are the
     bracketing interfaces ``k`` and ``k+1``.
     """
-    if not hydrostatic:
-        raise NotImplementedError(
-            "p_grad_c: the non-hydrostatic branch (wk = delpc, "
-            "dyn_core.F90:2109-2113) is not certified by any fixture; "
-            "refusing to silently run the hydrostatic formulas")
-
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
-    del delpc  # hydrostatic branch never reads it (see docstring)
+    if hydrostatic:
+        del delpc  # hydrostatic branch never reads it (see docstring)
+    else:
+        delpc = np.asarray(delpc, dtype=np.float64)
 
     rdxc = np.asarray(gs["rdxc"], dtype=np.float64)
     rdyc = np.asarray(gs["rdyc"], dtype=np.float64)
@@ -324,7 +329,10 @@ def p_grad_c(dt2, delpc, pkc, gz, uc, vc, gs: dict, bd, *, npz,
     vw_jm1 = _w(wlo_j, js - 1, je)
 
     for k in range(npz):
-        wk = pkc[wk_i, wk_j, k + 1] - pkc[wk_i, wk_j, k]
+        if hydrostatic:
+            wk = pkc[wk_i, wk_j, k + 1] - pkc[wk_i, wk_j, k]     # :2104-2108
+        else:
+            wk = delpc[wk_i, wk_j, k]                            # :2109-2113
         # Grouping copied EXACTLY (:2118-2120): dt2*rdxc/(wk+wk)*(...).
         # Regrouping to dt2*(rdxc/(wk+wk))*(...) changes the last bit.
         uc[u_i, u_j, k] = uc[u_i, u_j, k] + dt2 * rdxc[u_i, u_j] / (

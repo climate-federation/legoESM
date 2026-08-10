@@ -1040,6 +1040,141 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     return states
 
 
+def case6_six_face_state(ctx: dict) -> list:
+    """Williamson case-6 (Rossby-Haurwitz wave 4) six-face SW state,
+    ported literally from the pinned oracle's ``tools/test_cases.F90``
+    ``case(6)`` block, :1213-1270.
+
+    Height (:1222-1231), with ``phis = 0`` at :1219 so the ``- phis``
+    at :1231 is an exact no-op::
+
+        A = 0.5 w (2 Om + w) cos^2 p
+          + 0.25 K^2 cos^{2R} p [ (R+1) cos^2 p + (2R^2-R-2)
+                                  - 2 R^2 cos^{-2} p ]
+        B = 2 (Om + w) K / ((R+1)(R+2)) cos^R p
+                                [ (R^2+2R+2) - ((R+1) cos p)^2 ]
+        C = 0.25 K^2 cos^{2R} p [ (R+1) cos^2 p - (R+2) ]
+        gh = gh0 + a^2 (A + B cos(R L) + C cos(2 R L))
+
+    Winds at the D-grid edge midpoints (:1241-1243 for ``v``,
+    :1254-1256 for ``u`` -- the SAME two expressions, evaluated on the
+    two different edge midpoints)::
+
+        u_east  = a w cos p + a K cos^{R-1} p (R sin^2 p - cos^2 p) cos(R L)
+        v_north = -a K R sin p sin(R L) cos^{R-1} p
+
+    and projected onto the covariant edge tangents by the same certified
+    ``analytic_swcore_state`` construction the case-2 builder uses --
+    ``mid_pt_sphere`` + ``get_unit_vect2`` + ``get_latlon_vector`` +
+    ``inner_prod``, i.e. :1237-1240 / :1250-1253 verbatim.
+
+    The two analytic fields themselves are NOT written here: they live in
+    :mod:`legoesm.core.williamson_sw_analytic`, shared with the lat-lon,
+    MPAS and spectral W6 test cases (which previously each carried their
+    own copy, all three with ``cos^(R-1)`` in ``B`` where the oracle and
+    Williamson Eq. 145 both have ``cos^R``).  This function supplies the
+    oracle's GFS constants and the D-grid projection; it owns no numerics.
+
+    SW convention here is the production one (``pt == 1``,
+    ``delp == g h``), so ``delp`` IS the ``gh`` above -- upstream stores
+    the same quantity in ``delp(i,j,1)``.
+
+    ``gh0 = 8.e3 * Grav`` (:1215) uses the oracle's GFS ``Grav``
+    (``FV3_GRAV``), NOT ``legoesm.constants.g``: unlike case 2 -- where
+    ``delp = g h`` and ``h = (gh0 - c S^2)/g`` cancel the constant
+    exactly -- here ``gh0`` enters ``delp`` directly, so the flavour of
+    the gravity constant is observable at 5e-5 relative.
+
+    THE COMPUTE-WINDOW DIFFERENCE, stated rather than hidden: upstream
+    fills ``delp``/``u``/``v`` over the COMPUTE domain only (``do j=js,je``
+    at :1220/:1233/:1246) and then obtains the wind halos from
+    ``ext_vector`` + ``dtoa``/``atoc`` (:1264-1269) and the scalar halos
+    from ``ext_scalar`` (:1577).  This builder evaluates the same
+    analytic fields directly on the kinked halo lattice, exactly as
+    ``w2_six_face_state`` does -- the same physical locations, so the
+    values agree with what the exchange delivers only up to the
+    exchange's own remap order (measured ~1e4 m^2/s^2 at C12 corner
+    diagonals, codex r1 #4).
+
+    SCOPE OF THE MITIGATION (codex r2 #1, verified EXPERIMENTALLY by the
+    reviewer: poisoned corner halos gave bit-identical full-step
+    outputs): the entry exchanges that make this deviation harmless run
+    inside ``acoustic_step_sixface`` / ``full_acoustic_step_sixface``.
+    Calling the STAGE functions directly (``csw_step_sixface``,
+    ``dsw12_step_sixface``) BYPASSES them -- ``d_sw1_duo``'s
+    ``fv_tp_2d(delp)`` then reads whatever halos this builder wrote.
+    PRECONDITION, stated not enforced: a caller entering at stage level
+    on an ext-bundle context owns the entry exchange itself.
+
+    NUMERICAL NOTE: ``A`` is evaluated in the oracle's literal factored
+    form ``cos^{2R} * cos^{-2}`` (not the equal ``cos^{2R-2}``) so the
+    rounding matches.  Both forms are finite everywhere including the
+    representable pole -- see the retraction in
+    ``williamson_sw_analytic.rossby_haurwitz_4_geopotential``; an
+    earlier version of this docstring claimed a NaN there, which is
+    false in float64.
+    """
+    from legoesm.core.williamson_sw_analytic import (
+        RH4_MEAN_DEPTH_M,
+        rossby_haurwitz_4_geopotential,
+        rossby_haurwitz_4_winds,
+    )
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_GRAV,
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+    )
+
+    a_r = FV3_RADIUS_M
+    gh0 = RH4_MEAN_DEPTH_M * FV3_GRAV        # :1215  gh0 = 8.E3*Grav
+
+    def wind_fn(ll):
+        return rossby_haurwitz_4_winds(ll[..., 0], ll[..., 1], radius=a_r)
+
+    def scalars_fn(ll):
+        delp = rossby_haurwitz_4_geopotential(ll[..., 0], ll[..., 1],
+                                              radius=a_r, omega=FV3_OMEGA,
+                                              gh0=gh0)
+        return delp, np.ones_like(delp)
+
+    states = []
+    for gs in ctx["gs6"]:
+        st = dict(analytic_swcore_state(gs, wind_fn=wind_fn,
+                                        scalars_fn=scalars_fn))
+        # delp/pt are re-evaluated on the FULL lattice, corner diagonals
+        # included, exactly as w2_six_face_state does.  analytic_swcore_state
+        # masks scalars with cell_ok and leaves BIG_NUMBER (1.0e8) in the four
+        # corner-diagonal blocks; MEASURED against the PRE-FIX constructor
+        # (job 9341394, scripts/tmp/_probe_case6_mass.py, two arms differing
+        # only in this): leaving them costs 3.105e-03 of the total mass in a
+        # single d_sw1/d_sw2 pair, while refilling conserves it EXACTLY
+        # (0.000e+00, same as case 2).  The committed regression for this is
+        # test_fv3_native_case6_state.test_state_advances_one_step_conserving_
+        # mass, which fails at 3.1e-3 if this refill is removed.  The d_sw PPM
+        # halo-row stencils reach those blocks, so a 1e8 sentinel is not inert
+        # there -- the sentinel convention is right for the D winds, which the
+        # d2a2c corner fixes overwrite before any consumed read, and wrong for
+        # the A-grid scalars, which nothing overwrites before d_sw1.
+        #
+        # KNOWN DEVIATION from the oracle IC path (codex r1 #4): upstream
+        # fills the compute window only and obtains halos from ext_scalar
+        # (delp, test_cases.F90:1577) / ext_vector (winds, :1264).  The
+        # analytic halo values here differ from exchange-delivered ones by up
+        # to ~1.1e4 m^2/s^2 in the corner-diagonal region at C12
+        # (w2_six_face_state shares this).  On ext-bundle contexts the entry
+        # exchanges of the FIRST acoustic step overwrite the delp/pt and wind
+        # halos before any stage consumes them (dyn_core.F90:432-439,
+        # :468-472), so the deviation is confined to interim-exchange
+        # contexts and to diagnostics that read halos before stepping.
+        st["delp"] = rossby_haurwitz_4_geopotential(
+            gs["agrid_lon"], gs["agrid_lat"], radius=a_r, omega=FV3_OMEGA,
+            gh0=gh0)
+        st["pt"] = np.ones_like(st["delp"])
+        st["w"] = np.zeros_like(st["delp"])
+        states.append(st)
+    return states
+
+
 def run_duo_sw(ctx: dict, states: list, dt: float, nsteps: int,
                d_ext: float = 0.02) -> list:
     """SB5 time loop: nsteps full acoustic steps."""
