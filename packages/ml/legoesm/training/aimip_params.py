@@ -747,6 +747,18 @@ def aimip_scheme_keys_for(
         from legoesm.training.param_collector import build_registry
         keys |= {m.scheme_key for m in build_registry()
                  if m.scheme_key.startswith("atm.clouds.")}
+    # Ozone is a SIBLING field of RadiationConfig (``.ozone``), not the
+    # scheme sub-config the family walk resolves (``.rrtmgp``), so the walk
+    # never reaches it — same blind spot clouds had. It matters here because
+    # RRTMGPConfig itself exposes ZERO trainable interior parameters (every
+    # gas/aerosol field is a Python optics-cache key, tier 0), leaving surface
+    # albedo/emissivity as the arm's only radiative levers. The ozone profile
+    # (peak pressure, max VMR, width) sets stratospheric heating: a
+    # TEMPERATURE-only control with no moisture coupling.
+    if radiation == "rrtmgp":
+        from legoesm.training.param_collector import build_registry
+        keys |= {m.scheme_key for m in build_registry()
+                 if m.scheme_key == "atm.rad.OzoneProfileConfig"}
     return keys
 
 
