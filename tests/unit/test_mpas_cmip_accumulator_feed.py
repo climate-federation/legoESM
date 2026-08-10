@@ -489,6 +489,43 @@ def test_feed_gate_serial_mpi_singlerank(mesh):
     assert ModelDriver._mpas_cmip_feed_enabled(serial, dc_off) == (False, False)
 
 
+def test_cmor_contract_positional_arg_order_is_pinned():
+    """#1517 ARGUMENT-ORDER GATE: ``(feed_on, wants_cmip)``, in that order.
+
+    Both parameters are ``bool``, so swapping them type-checks and silently
+    inverts the guard: the refusal would then fire on healthy serial runs and
+    stay silent on the multi-rank runs it exists to stop.
+
+    Every OTHER test in this file calls the guard with KEYWORDS, which bind by
+    name and therefore survive a reordering of the ``def`` untouched — while
+    the production call site in ``_run_mpas`` passes POSITIONALLY:
+
+        self._require_mpas_cmip_feed_supported(
+            self._mpas_cmip_feed_on, _diag_wants_cmip)
+
+    so a swap of the signature would silently mis-wire production with the
+    whole suite still green. This test is the one that goes red instead: it
+    pins the declared parameter order AND the operand order at the call site.
+    """
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    params = list(inspect.signature(
+        ModelDriver._require_mpas_cmip_feed_supported).parameters)
+    assert params == ["self", "feed_on", "wants_cmip"], (
+        "the #1517 guard's parameter order changed; the positional call in "
+        "_run_mpas now passes feed_on/wants_cmip swapped")
+
+    # ...and the call site still passes the feed flag FIRST.
+    src = inspect.getsource(ModelDriver._run_mpas)
+    call = src.split("_require_mpas_cmip_feed_supported(", 1)[1]
+    first_arg = call.split(",", 1)[0].strip()
+    assert first_arg.endswith("_mpas_cmip_feed_on"), (
+        f"_run_mpas passes {first_arg!r} as the first (feed_on) argument; "
+        "expected self._mpas_cmip_feed_on")
+
+
 def test_driver_helper_computes_2m_tas(mesh):
     """With prescribed sst warmer than the lowest air level, the driver helper
     publishes a 2 m MOST `tas` distinct from (warmer than) the lowest level."""

@@ -565,6 +565,18 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if ntasks <= 1:
         return False
 
+    # KNOWN GAP (#1516 follow-up, carried over from the #1541 investigation):
+    # the per-rank pin below happens AFTER this mpi4py import, and on a
+    # CUDA-aware MPI stack (Levante: Open MPI/UCX) MPI_Init initialises the
+    # CUDA driver, which snapshots CUDA_VISIBLE_DEVICES at first
+    # initialisation — so a pin applied afterwards can be silently ignored
+    # (measured on that branch, job 26829100: post-pin CVD='0'/'1' per rank,
+    # yet every rank still enumerated BOTH GPUs and computed on device 0).
+    # Pinning earlier is not a comment-move: `n_local` is derived from MPI's
+    # own shared-memory split below, and the raise is deliberately COLLECTIVE.
+    # Tracked by the strict-xfail ordering gate
+    # tests/unit/test_early_init.py::test_maybe_init_pins_before_mpi_import,
+    # which flips to a hard failure the moment the ordering is fixed.
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -663,7 +675,10 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
               f"{pinned} (CUDA_VISIBLE_DEVICES={pinned}; JAX will call it "
               f"local device 0)", flush=True)
     if len(set(hosts)) <= 1:
-        # Single-node MPI: JAX distributed not needed.
+        # Single-node MPI: JAX distributed is not needed — the per-rank
+        # GPU binding was already applied above (#1516); unpinned, every
+        # local rank boots on default GPU 0 and the job completes with
+        # most of the hardware idle.
         return False
 
     import jax

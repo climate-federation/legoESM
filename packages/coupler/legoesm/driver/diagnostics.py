@@ -2420,6 +2420,23 @@ class DiagnosticCollector:
                 merged[prefix + key] = arr
         if not merged:
             return
+        # #1517: a sidecar whose accumulators hold NO data payloads (every
+        # entry is a bare ``__manifest__`` with empty call_counts — the
+        # never-fed state) is a misleading on-disk artifact: it looks like
+        # a healthy CMOR run.  Behaviour-equivalent on restart (an absent
+        # sidecar resumes with the same empty accumulators), so skip the
+        # write and say why.  All three accumulator ``get_state`` payloads
+        # are keyed ``arr_<n>`` (see monthly_means.py ``_put``).
+        has_payload = any(
+            k.split(".", 1)[1].startswith("arr_") for k in merged)
+        if not has_payload:
+            print(
+                f"[diagnostics] NOT writing CMOR accumulator sidecar "
+                f"{path}: all accumulators are EMPTY (never fed — e.g. the "
+                "multi-rank MPAS feed gate, #1517). An empty sidecar would "
+                "be indistinguishable from a healthy run's artifact.",
+                flush=True)
+            return
         path = Path(path)
         tmp_path = path.parent / (path.name + ".tmp")
         try:
