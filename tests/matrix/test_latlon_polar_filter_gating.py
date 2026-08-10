@@ -33,6 +33,9 @@ _LATLON_HYDRO_CASES = {
     "held_suarez": True,
     "held_suarez_topo": True,
     "baroclinic": True,
+    "baroclinic_steady": True,   # no "rotated" in the name -> filter ON, same
+                                 # as its perturbed partner, so the pair stays
+                                 # one-variable (same filter, same dt).
     "rotated_baroclinic": False,
     "rotated_steady": False,
     "rest_state_topo": True,
