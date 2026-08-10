@@ -41,14 +41,50 @@ def _read_ranking(path: Path) -> list[str]:
                 if row.get("score_default")]
 
 
+def _resolve_profiles(indir: Path, case: str | None) -> tuple[Path, str]:
+    """Pick the ONE profiles file to plot, or fail loudly.
+
+    A multi-case campaign writes ``profiles_<case>.npz`` per case. Silently
+    taking the first glob match plotted BOMEX five times under five different
+    per-case filenames (all five bytewise identical), so an ambiguous
+    directory is an error here rather than an arbitrary choice.
+    """
+    per_case = sorted(indir.glob("profiles_*.npz"))
+    available = [q.stem[len("profiles_"):] for q in per_case]
+    if case is not None:
+        want = indir / f"profiles_{case}.npz"
+        if not want.exists():
+            raise SystemExit(
+                f"no profiles for case {case!r} in {indir}; "
+                f"available: {available or '(none)'}"
+            )
+        return want, case
+    single = indir / "profiles.npz"
+    if single.exists():
+        return single, indir.name
+    if len(per_case) == 1:
+        return per_case[0], available[0]
+    if not per_case:
+        raise SystemExit(f"no profiles*.npz in {indir}")
+    raise SystemExit(
+        f"{indir} holds {len(per_case)} per-case profile files "
+        f"({available}); pass --case to say which one to plot."
+    )
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("indir", type=Path,
                    help="results/scm_les_turbulence/<case>")
+    p.add_argument("--case", default=None,
+                   help="which case to plot from a multi-case campaign "
+                        "directory (reads profiles_<case>.npz). Required when "
+                        "the directory holds more than one.")
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args(argv)
 
-    data = np.load(next((q for q in (args.indir / "profiles.npz", *sorted(args.indir.glob("profiles_*.npz"))) if q.exists()), args.indir / "profiles.npz"), allow_pickle=True)
+    npz, case_label = _resolve_profiles(args.indir, args.case)
+    data = np.load(npz, allow_pickle=True)
     mask = data["mask"].astype(bool)
     z = data["z_scm"][mask]
     order = _read_ranking(args.indir / "ranking.csv")
@@ -85,12 +121,12 @@ def main(argv=None) -> int:
     axes[0].set_ylabel("height [m]")
     axes[0].legend(fontsize=7.5, loc="best")
     fig.suptitle(
-        f"{args.indir.name}: SCM turbulence closures vs LES  "
+        f"{case_label}: SCM turbulence closures vs LES  "
         f"(time-mean {window[0]:.2f}-{window[1]:.2f} h, same window both sides)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    out = args.out or (args.indir / "profiles_vs_les.png")
+    out = args.out or (args.indir / f"profiles_vs_les_{case_label}.png")
     fig.savefig(out, dpi=145)
     print(f"wrote {out}")
     return 0
