@@ -83,3 +83,44 @@ MPAS's larger (still tiny) mixing is the tvd-vs-FCT scheme difference, not
 a defect. History of how these gates were earned (explicit-split
 inconsistency, FCT h_new certification bug, TVD corner overshoot):
 `docs/dev-notes/fesom_lockexchange_session_state.md`.
+
+## The rest of the standard ocean-grid suite
+
+Lock exchange is one case in a family. The other standard cases and the
+grids they cover (`sbatch --array=0-6
+scripts/cluster/ocean_grid_benchmark_suite.sbatch`, results 2026-08-10,
+job 26850849):
+
+| Case | latlon | mpas | fesom | tripole |
+|---|---|---|---|---|
+| rest_state_stratified_with_land | PASS | PASS | PASS | PASS |
+| rest_state_uniform_with_land | PASS | PASS | PASS | PASS |
+| rest_state_stratified_no_land | PASS | PASS | —¹ | —² |
+| rest_state_uniform_no_land | PASS | PASS | —¹ | —² |
+| geostrophic_adjustment | PASS | PASS | —³ | PASS |
+| phillips_two_layer | PASS | PASS | —³ | —⁴ |
+| inertia_gravity_wave | FAIL⁵ | FAIL⁵ | —³ | —⁴ |
+| lock_exchange | PASS | PASS | PASS | PASS |
+
+Rest-state drifts are at machine precision on every arm (eta 0 to 1e-31,
+T ≤ 1.5e-14, S ≤ 7.6e-15); geostrophic adjustment settles to
+max|u| = 0.014 (latlon) / 0.027 (mpas) / 0.446 m/s (tripole, the
+continental-boundary arm) against a 1 m/s gate.
+
+1. The FESOM mesh is built with the same 80° land threshold as the
+   with-land arms (190 of 3140 nodes dry), and the setup exposes no 90°
+   variant — so FESOM belongs to the WITH-LAND rows only. (An earlier
+   version of this table registered it as "no land"; that was a
+   mislabel, caught in review.)
+2. The tripole basin is defined by the NEMO tmask, so a no-land tripole
+   variant does not exist.
+3. FESOM has IC builders for the rest state and the lock exchange only;
+   the perturbation cases would each need a node-based analytic IC.
+4. The IC writes the analytic u/v EDGE fields from 1-D `grid.lat`/`grid.lon`
+   and a uniform `dlon`/`dlat` — rectilinear-only; on the curvilinear
+   eORCA1 mesh both now raise `NotImplementedError` naming the gap
+   (previously a bare shape mismatch). Needs a curvilinear edge IC.
+5. Pre-existing failure on every grid (analytic L2 0.91 latlon / 1.01 mpas
+   / 0.23 cubed_sphere vs a 0.1 gate) — an unresolved case, not an arm
+   problem. `cubed_sphere` also fails geostrophic_adjustment (2.05 m/s)
+   and phillips (eta_growth 26.4).

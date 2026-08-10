@@ -257,20 +257,28 @@ def _build_test_matrix() -> list[TestCase]:
     res = GRID_RESOLUTIONS
 
     # --- Rest state adjustment (with land): all grids except spectral ---
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10 for the cross-grid benchmark family.
+    # fesom belongs in the WITH-LAND variants: _create_ocean_setup builds its
+    # mesh with LockExchangeConfig().land_lat_threshold = 80.0, the SAME
+    # threshold the latlon/mpas with-land rest states use (190 of 3140 nodes
+    # are dry). Registering it as "no_land" was mislabelled (codex
+    # 2026-08-10) -- the FESOM setup has no 90-degree variant to select.
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         if g == "spectral":
             continue
         matrix.append(TestCase(
             "rest_state_stratified_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state with uniform T/S (with land): isolates barotropic PGF ---
-    for g in GRID_TYPES:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         if g == "spectral":
             continue
         matrix.append(TestCase(
             "rest_state_uniform_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state adjustment without land: all grids ---
+    # NOT fesom: its mesh carries the 80-degree land threshold (see the
+    # with-land block above), so a "no land" fesom case would be a lie.
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "rest_state_stratified_no_land", g, res[g], 1.0, 0.1))
@@ -330,17 +338,29 @@ def _build_test_matrix() -> list[TestCase]:
             "global_barotropic_wind_1lev", g, res[g], 60.0, 5.0,
             run_kwargs={"nlev": 1}))
 
-    # --- Geostrophic adjustment: all grids ---
-    for g in GRID_TYPES:
+    # --- Geostrophic adjustment: all grids + tripole ---
+    for g in GRID_TYPES + ["tripole"]:
         matrix.append(TestCase(
             "geostrophic_adjustment", g, res[g], 10.0, 1.0))
 
     # --- Phillips two-layer baroclinic: all grids ---
+    # NOT tripole, same reason as inertia_gravity_wave below: the shear IC
+    # writes the analytic u/v EDGE fields from 1-D grid.lat/grid.lon and a
+    # uniform dlon/dlat, which is rectilinear-only and raises on the
+    # curvilinear eORCA1 mesh ("could not broadcast (332,362) into
+    # (332,363)", measured 2026-08-10). Needs a curvilinear edge IC.
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "phillips_two_layer", g, res[g], 10.0, 1.0))
 
     # --- Inertia-Gravity Wave (Bishnu et al. 2024): all grids ---
+    # NOT tripole: _init_inertia_gravity_wave's lat-lon branch builds the
+    # analytic u/v EDGE perturbation from 1-D grid.lat/grid.lon plus a
+    # uniform dlon/dlat -- rectilinear-only. On the curvilinear eORCA1 mesh
+    # (2-D lat_T/lon_T) it raises on shape (measured 2026-08-10: "could not
+    # broadcast (332,362) into (332,363)"). A curvilinear IGW IC is real
+    # work and the case currently FAILS its analytic L2 gate on latlon
+    # (0.91) and mpas (1.01) anyway, so there is nothing to compare against.
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
@@ -2655,52 +2675,14 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=H_max, land_lat_threshold=90.0,
         )
+    elif tc.grid_type == "fesom":
+        # The FESOM mesh already carries the 80-degree land threshold from
+        # _create_ocean_setup, i.e. the SAME land the latlon/mpas with-land
+        # rest states use; there is no separate mask to apply here.
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        return create_rest_state(grid.mesh, z_coord)
     elif tc.grid_type == "tripole":
-        # create_tripole_grid returns a LatLonCGridGeometry, so the lat-lon
-        # C-grid rest state applies unchanged. The DEPTH is the same flat
-        # H_max as every arm (NEMO bathymetry not used), but the HORIZONTAL
-        # land mask is the latitude threshold INTERSECTED with the NEMO
-        # surface tmask (below) -- i.e. the tripole arm keeps Earth's
-        # continents (0.534 wet on the native 332x362 mesh; 0.607 on the
-        # regridded 1-deg artifact; 0.889 for the pure latitude mask). That is
-        # a DOCUMENTED per-arm geometry difference, not a bug: the
-        # NEMO-closed cells carry degenerate metrics and cannot be opened
-        # (see the tmask comment below). RPE_rel is normalised per-arm by
-        # |RPE_0|, so the mixing metric remains comparable in magnitude.
-        #
-        # EXCEPT row j=0: NEMO requires a SOLID southern wall there (the real
-        # eORCA1 tmask has row 0 all-zero) -- there is no southern neighbour
-        # for the C-grid stencil, and the north fold only closes the top.
-        # The curvilinear row 0 spans latitudes on both sides of -80 deg, so
-        # the plain latitude threshold left part of it OCEAN; the stencil then
-        # read past the array edge and the run went non-finite at ~step 100
-        # of a 1-day run (first bad cells [0,40..44], measured 2026-08-09).
-        # Use land_mask_override at CONSTRUCTION so u_mask/v_mask stay
-        # consistent (never _replace(land_mask=...) post-hoc).
-        import jax.numpy as _jnp
-        import netCDF4 as _nc
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        lat_t = np.degrees(np.asarray(grid.lat_T))
-        base = (np.abs(lat_t) <= 80.0).astype(np.float64)
-        # Intersect with the NEMO surface tmask. The plain latitude threshold
-        # opened cells NEMO itself closes -- the Antarctic wedge rows carry
-        # tmask=0 and degenerate metrics (e2t down to ~4.6 km vs >=23 km for
-        # every real NEMO-ocean cell); treating them as ocean sent the 1-day
-        # run non-finite at row 1 cols 40-44 (measured 2026-08-09). This also
-        # walls row j=0 (all-zero in tmask, the NEMO southern wall). The
-        # Dhruv-era tripole runs respected tmask, which is why they worked.
-        _mesh_file = _parse_resolution(tc)["grid_file"]
-        with _nc.Dataset(_mesh_file) as _ds:
-            tmask0 = np.asarray(_ds.variables["tmask"][0, 0], dtype=np.float64)
-        if tmask0.shape != base.shape:
-            raise ValueError(
-                f"tmask shape {tmask0.shape} != grid shape {base.shape} for "
-                f"{_mesh_file!r}."
-            )
-        base = base * tmask0
-        return rest_state_latlon_cgrid_ocean(
-            grid, z_coord, H_max=H_max,
-            land_mask_override=_jnp.asarray(base))
+        return _tripole_rest_state(tc, grid, z_coord, H_max)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
@@ -2717,6 +2699,57 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+def _tripole_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX,
+                        **_ts_kwargs):
+    """Tripole (eORCA1) rest state — shared by the stratified and uniform-T
+    builders so the BASIN is defined in exactly ONE place. ``_ts_kwargs``
+    carries the T/S profile (uniform-T control vs the stratified default).
+
+    create_tripole_grid returns a LatLonCGridGeometry, so the lat-lon C-grid
+    rest state applies unchanged. The DEPTH is the same flat H_max as every
+    arm (NEMO bathymetry not used), but the HORIZONTAL land mask is the
+    latitude threshold INTERSECTED with the NEMO surface tmask -- i.e. the
+    tripole arm keeps Earth's continents (0.534 wet on the native 332x362
+    mesh; 0.607 on the regridded 1-deg artifact; 0.889 for the pure latitude
+    mask). That is a DOCUMENTED per-arm geometry difference, not a bug: the
+    NEMO-closed cells carry degenerate metrics and cannot be opened.
+    Per-arm-normalised diagnostics (RPE_rel) stay comparable in magnitude.
+
+    EXCEPT row j=0: NEMO requires a SOLID southern wall there (the real
+    eORCA1 tmask has row 0 all-zero) -- there is no southern neighbour for
+    the C-grid stencil, and the north fold only closes the top. The
+    curvilinear row 0 spans latitudes on both sides of -80 deg, so the plain
+    latitude threshold left part of it OCEAN; the stencil then read past the
+    array edge and the run went non-finite at ~step 100 of a 1-day run
+    (first bad cells [0,40..44], measured 2026-08-09). Use
+    land_mask_override at CONSTRUCTION so u_mask/v_mask stay consistent
+    (never _replace(land_mask=...) post-hoc).
+
+    The tmask intersection also removes the Antarctic wedge rows, whose
+    metrics are degenerate (e2t down to ~4.6 km vs >=23 km for every real
+    NEMO-ocean cell); treating them as ocean sent the 1-day run non-finite
+    at row 1 cols 40-44. The Dhruv-era tripole runs respected tmask, which
+    is why they worked.
+    """
+    import jax.numpy as _jnp
+    import netCDF4 as _nc
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    lat_t = np.degrees(np.asarray(grid.lat_T))
+    base = (np.abs(lat_t) <= 80.0).astype(np.float64)
+    _mesh_file = _parse_resolution(tc)["grid_file"]
+    with _nc.Dataset(_mesh_file) as _ds:
+        tmask0 = np.asarray(_ds.variables["tmask"][0, 0], dtype=np.float64)
+    if tmask0.shape != base.shape:
+        raise ValueError(
+            f"tmask shape {tmask0.shape} != grid shape {base.shape} for "
+            f"{_mesh_file!r}."
+        )
+    base = base * tmask0
+    return rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=H_max, land_mask_override=_jnp.asarray(base),
+        **_ts_kwargs)
+
+
 def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     """Create rest-state with uniform T/S (no stratification) + land."""
     if tc.grid_type == "cubed_sphere":
@@ -2728,6 +2761,15 @@ def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_M
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0)
+    elif tc.grid_type == "fesom":
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        return create_rest_state(grid.mesh, z_coord, T_water_init_C=10.0,
+                                 T_deep=10.0, stratified=False)
+    elif tc.grid_type == "tripole":
+        # Same NEMO-tmask basin as the stratified tripole rest state (see
+        # _create_rest_state); only the T profile differs.
+        return _tripole_rest_state(tc, grid, z_coord, H_max,
+                                   T_water_init_C=10.0, T_deep=10.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -4693,11 +4735,21 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             u_data[..., 0] = u_jet_2d
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet_2d
-        else:  # cubed_sphere
+        elif grid_type == "cubed_sphere":
             u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
             u_data[..., 0] = u_jet
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet
+        else:
+            # Dispatch hardening (codex 2026-08-10): the lat-lon branch above
+            # builds the jet on 1-D grid.lat/grid.lon with a uniform
+            # dlat -- rectilinear-only. A curvilinear grid (tripole) fell
+            # through to the cube branch and died on a shape mismatch
+            # instead of saying what was missing.
+            raise NotImplementedError(
+                f"phillips_two_layer: no shear IC for grid_type="
+                f"{grid_type!r}; the lat-lon jet is rectilinear-only and a "
+                f"curvilinear grid needs its own edge IC.")
 
         # Target temperatures
         T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad_bc) ** 2) * mask
@@ -5091,7 +5143,7 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             u=Field(jnp.array(u_data)),
             v=Field(jnp.array(v_data)))
 
-    else:  # cubed_sphere
+    elif grid_type == "cubed_sphere":
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
         u_data[..., 0] = u_pert
@@ -5100,6 +5152,12 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             eta=Field(jnp.array(eta_pert)),
             u=Field(jnp.array(u_data)),
             v=Field(jnp.array(v_data)))
+    raise NotImplementedError(
+        f"_init_inertia_gravity_wave: no IC for grid_type={grid_type!r}. "
+        f"The lat-lon branch builds the analytic u/v EDGE fields from 1-D "
+        f"grid.lat/grid.lon and a uniform dlon/dlat, so it is "
+        f"rectilinear-only; a curvilinear grid (tripole) needs its own "
+        f"edge IC rather than a silent fall-through to the cube branch.")
 
 
 def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float

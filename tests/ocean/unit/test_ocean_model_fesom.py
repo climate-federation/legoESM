@@ -1702,3 +1702,54 @@ class TestR9FacadeBasics:
         T = state.T
         assert T.dims == ("cell", "nlev")
         assert T.data.shape[1] == state.nlev
+
+
+# =============================================================================
+# create_rest_state (the rest-state benchmark family)
+# =============================================================================
+
+class TestCreateRestState:
+    """``create_rest_state`` feeds the rest_state_* matrix cases on the FESOM
+    arm. Its stratified profile must match the structured/MPAS rest states
+    (the same exponential in ``legoesm.ocean.eos.scale_depth``), or the
+    cross-grid comparison is a confound rather than a result."""
+
+    @pytest.fixture
+    def z20(self, lock_config):
+        from legoesm.ocean.vertical import create_ocean_z_star
+        return create_ocean_z_star(n_levels=lock_config.nlev,
+                                   H_max=lock_config.H_max)
+
+    def test_uniform_is_flat_and_at_rest(self, flat_mesh, z20):
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        st = create_rest_state(flat_mesh, z20, T_water_init_C=10.0,
+                               T_deep=10.0, stratified=False)
+        T = np.asarray(st.T.data)
+        assert np.allclose(T, 10.0)
+        assert np.allclose(np.asarray(st.uv_node), 0.0)
+        assert np.allclose(np.asarray(st.eta.data), 0.0)
+
+    def test_stratified_matches_the_shared_exponential_profile(
+            self, flat_mesh, z20):
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        from legoesm.ocean.eos import scale_depth
+        st = create_rest_state(flat_mesh, z20, T_water_init_C=20.0,
+                               T_deep=2.0)
+        # float64 reference: z_full_ref is fp32, and evaluating the
+        # profile in fp32 here (not the code) was the first version's
+        # 1e-7 "mismatch".
+        expected = 2.0 + 18.0 * np.exp(
+            np.asarray(z20.z_full_ref, dtype=np.float64) / scale_depth)
+        T = np.asarray(st.T.data)          # facade drops the pad level
+        # Same profile in EVERY column (horizontally uniform rest state).
+        assert T.shape[1] == expected.shape[0]
+        assert np.allclose(T, expected[None, :], rtol=0, atol=1e-12)
+        assert T[0, 0] > T[0, -1], "T must decrease with depth"
+
+    def test_level_mismatch_raises(self, flat_mesh, lock_config):
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        from legoesm.ocean.vertical import create_ocean_z_star
+        z_wrong = create_ocean_z_star(n_levels=lock_config.nlev + 3,
+                                      H_max=lock_config.H_max)
+        with pytest.raises(ValueError, match="levels but the FESOM"):
+            create_rest_state(flat_mesh, z_wrong)

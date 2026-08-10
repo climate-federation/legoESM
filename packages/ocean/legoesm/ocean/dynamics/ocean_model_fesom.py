@@ -504,6 +504,62 @@ def build_flat_bottom_mesh(
 # Initial condition
 # =============================================================================
 
+def create_rest_state(
+    mesh: "Mesh",
+    z_coord,
+    *,
+    T_water_init_C: float = 20.0,
+    T_deep: float = 2.0,
+    S_uniform: float = 35.0,
+    stratified: bool = True,
+) -> FesomOceanState:
+    """Rest state on *mesh*: zero velocity, flat free surface, uniform S.
+
+    ``stratified=True`` applies the SAME exponential profile the structured
+    and MPAS rest states use --
+    ``T(z) = T_deep + (T_water_init_C - T_deep) * exp(z / scale_depth)``
+    evaluated at ``z_coord.z_full_ref`` (``legoesm.ocean.eos.scale_depth``) --
+    so a cross-grid rest-state comparison differs only in the grid.
+    ``stratified=False`` gives the uniform-T control (``T_water_init_C``
+    everywhere), the barotropic-PGF isolation case.
+
+    FESOM has no land in these idealized meshes (the flat-bottom mesh is
+    all-wet), so there is no land-mask argument: the ``*_no_land`` and
+    ``*_with_land`` matrix variants collapse to the same FESOM state.
+
+    ``mesh`` MUST be the flattened flat-bottom mesh from
+    :func:`build_flat_bottom_mesh`.
+    """
+    _require_fesom_jax()
+    from fesom_jax.state import State
+    from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
+
+    state = State.rest(mesh, T0=float(T_water_init_C), S0=float(S_uniform))
+    if stratified:
+        z_full = jnp.asarray(z_coord.z_full_ref, dtype=jnp.float64)
+        T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
+            z_full / _SCALE_DEPTH)
+        # fesom_jax carries ONE padding level below the last wet layer
+        # (FesomOceanState.T drops it), so the inner array is nlev+1 deep.
+        # Repeat the bottom value into the pad rather than silently
+        # broadcasting a wrong-length profile.
+        n_inner = state.T.shape[1]
+        if n_inner not in (T_profile.shape[0], T_profile.shape[0] + 1):
+            raise ValueError(
+                f"z_coord has {T_profile.shape[0]} levels but the FESOM "
+                f"state column is {n_inner} deep (expected that or +1 for "
+                f"the pad); the rest state would be built on a different "
+                f"column than the model integrates."
+            )
+        if n_inner == T_profile.shape[0] + 1:
+            T_profile = jnp.concatenate([T_profile, T_profile[-1:]])
+        T_field = jnp.broadcast_to(T_profile[None, :], state.T.shape)
+        state = dataclasses.replace(state, T=T_field, T_old=T_field)
+
+    facade = FesomOceanState.from_fesom(state, mesh)
+    return dataclasses.replace(facade, uv_node=jnp.zeros_like(facade.uv_node))
+
+
 def create_lock_exchange_state(mesh: "Mesh", config: Any) -> FesomOceanState:
     """Build the lock-exchange IC on *mesh* and wrap it as a
     :class:`FesomOceanState`.
