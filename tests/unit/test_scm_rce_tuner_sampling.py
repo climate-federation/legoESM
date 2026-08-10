@@ -187,3 +187,13 @@ def test_a_non_finite_trial_is_never_accepted(camp, monkeypatch):
     )
     assert tuned.score == pytest.approx(2.0), (
         "a -inf score was accepted as the best run")
+
+
+def test_interp_never_escapes_the_bounds(camp):
+    """The tuner asserts every candidate is inside [lo, hi] and aborts the
+    scheme otherwise, so a one-ULP overshoot at the endpoints is a lost arm."""
+    for lo, hi in ((1.0e-8, 1.0e-2), (0.1, 0.9), (1.0e-30, 1.0), (2.0, 3.0)):
+        c = _c("x", lo, hi)
+        for frac in (0.0, 1.0e-12, 0.25, 0.5, 0.75, 1.0 - 1.0e-15, 1.0):
+            v = camp._interp(c, frac)
+            assert lo <= v <= hi, (lo, hi, frac, v)

@@ -1863,12 +1863,20 @@ def _sample_scale(constraint) -> str:
 
 
 def _interp(constraint, frac: float) -> float:
-    """Value at fraction ``frac`` of the range, in the parameter's own scale."""
+    """Value at fraction ``frac`` of the range, in the parameter's own scale.
+
+    Clamped to the bounds: ``lo * (hi/lo)**frac`` is not exactly ``hi`` at
+    ``frac == 1`` in floating point, and the tuner asserts every candidate is
+    inside ``[lo, hi]`` — a one-ULP overshoot would abort a whole scheme's arm
+    hours in.
+    """
     lo = float(constraint.min_val)
     hi = float(constraint.max_val)
     if _sample_scale(constraint) == "log":
-        return float(lo * (hi / lo) ** frac)
-    return float(lo + frac * (hi - lo))
+        value = lo * (hi / lo) ** frac
+    else:
+        value = lo + frac * (hi - lo)
+    return float(min(max(value, lo), hi))
 
 
 def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed: int):
