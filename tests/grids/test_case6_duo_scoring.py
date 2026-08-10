@@ -127,10 +127,17 @@ def test_runner_deck_constants_pin_the_resolved_echo():
 # ---------------------------------------------------------------------
 
 def _toy(run_gh, ref_gh, run_u, ref_u, run_v, ref_v):
-    run = {"gh": np.asarray(run_gh, float),
-           "u": np.asarray(run_u, float), "v": np.asarray(run_v, float)}
-    ref = {"gh": np.asarray(ref_gh, float),
-           "u": np.asarray(ref_u, float), "v": np.asarray(ref_v, float)}
+    # np.array (unconditional COPY), not np.asarray: callers pass the
+    # SAME array for run and ref in the zero-diff case, and asarray
+    # would alias them -- a later in-place perturbation of run would
+    # then silently change ref too and the non-vacuity check would
+    # assert on a diff of exactly 0 (caught live by job 9356452).
+    run = {"gh": np.array(run_gh, dtype=float),
+           "u": np.array(run_u, dtype=float),
+           "v": np.array(run_v, dtype=float)}
+    ref = {"gh": np.array(ref_gh, dtype=float),
+           "u": np.array(ref_u, dtype=float),
+           "v": np.array(ref_v, dtype=float)}
     return run, ref
 
 
