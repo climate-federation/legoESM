@@ -666,9 +666,17 @@ _SW_CFG_DEFAULT = {
 
 SW_CFG_CASE8 = {
     # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml:
-    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8
+    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8.
+    # nord_v: the oracle DERIVES it, dyn_core.F90:757
+    # ``nord_v(k) = min(2, flagstruct%nord)`` -> 2 for the deck's
+    # NORD=2 (was 1 here; codex c6 r1 #9).  Numerically DORMANT while
+    # damp_v == 0: both consumers are gated on the coefficient
+    # (fv3_native_duo_sw_core.py:1041 ``damp_v > 1.0e-5`` before
+    # del6_vt_flux; fv_tp_2d.py:1180 ``damp_c > 1e-4`` before
+    # _deln_flux), so this corrects the recorded configuration, not
+    # any number the case-8/case-6 decks produce.
     "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
-    "hord_mt": 8, "nord_v": 1, "damp_v": 0.0,
+    "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
     "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
 }
 
