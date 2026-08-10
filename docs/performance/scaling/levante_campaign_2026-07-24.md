@@ -2908,3 +2908,36 @@ ppermute schedule (round -> partner map from spmd_schedule_cost);
 until then the skew reading rests on the indirect evidence (in-kernel
 215 us vs 30 us wire + the wide-halo drain-conservation null), which
 is PLAUSIBLE, not CONFIRMED.
+
+## THE LEVER LANDS: size-aware halo colouring — s9@64 10.2 -> 8.11 ms (2026-08-10 night)
+
+The padding audit (26855933/26856854) measured the coloured schedule
+shipping 2.926x the needed wire bytes (padded 512 MB vs actual 175 MB
+per fill; every pair sends the round maximum because the ppermute index
+arrays are shape-uniform). On a node-NIC-saturated lane (~13.5
+GB/s/node effective, HDR200 practical) that inflation IS the step: the
+padded-byte lens retro-explains the wide-halo null (byte-conserving),
+the graphs/overlap/scan nulls, and ragged's small-scale win
+(exact-sized sends).
+
+Fix: regroup pairs by payload size at the SAME round count — seed
+colourings + a round-preserving local search minimizing the padded
+weight in true entity widths (nlev+2 vs nlev). Offline: padded bytes
+-26% (inflation 2.926 -> 2.162, job 26856854 after the worktree-import
+fix). Production A/B/A2 (26857404, drift 1.7%, parity u 7e-5):
+**ratio 0.803 — 10.10/10.27 vs 8.11 ms/step**, matching the model's
+-17% prediction. Landed DEFAULT ON (bit-identical results; escape
+LEGOESM_MPAS_SIZE_COLORING=0); determinism hardened with full sort
+tie-breaks (multicontroller processes derive schedules independently);
+codex round-2 findings all fixed (true-width proxy, determinism +
+bidirectional tests, stale legacy assertion). Known pre-existing:
+test_schedule_reaches_floor_on_real_mesh fails 15<15 with the diff
+stashed — fixture drift, not this change.
+
+Remaining MPAS headroom, receipts-backed: inflation floor 2.16 at
+fixed rounds (+1-round colouring variants untried); per-rank
+participation balancing (partner-aware skew receipts show the
+critical path = the max-participation rank's chain: rank0-rank2
+arrival offsets up to 931 us median); exact-size transport (upstream
+ragged zero-slice fix, openxla/xla#46982). Ragged auto-band (<=32)
+needs re-arbitration against the faster size-coloured baseline.
