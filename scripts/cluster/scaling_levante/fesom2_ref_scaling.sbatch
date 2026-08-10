@@ -43,6 +43,10 @@ make_rundir () {  # np days -> prints rundir
   local D="$BASE/np${NP}_d${DAYS}"
   mkdir -p "$D/out"
   cp "$FESOM_SRC"/config/namelist.* "$D/" 2>/dev/null
+  # The generic namelist.forcing ships '<add path>' placeholders for
+  # runoff (aborts at step 1, job 26850973); the .JRA variant carries
+  # the complete JRA55-do + CORE2_runoff + PHC2 paths.
+  cp -f "$FESOM_SRC/config/namelist.forcing.JRA" "$D/namelist.forcing"
   # Patch ONLY: ResultPath, run length (days), restarts off.
   python3 - "$D" "$DAYS" <<'PYEOF'
 import re, sys
