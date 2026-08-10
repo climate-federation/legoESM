@@ -53,6 +53,15 @@ deliberate, none silent:
    whatever it calls cloud condensate. Both stratocumulus decks are warm, so
    the two agree for every case currently driven by this module.
 
+VALIDITY: this is a boundary-layer fit, not a column radiation solver. The
+clear-sky term grows as ``(z - z_i)^(4/3)``, so on a deep column it reaches
+values with no physical meaning -- a synthetic 200-1000 hPa column returns a
+net upward flux of ~440 W/m^2 at its top. That is not the configuration it is
+used in: the stratocumulus cases span only their LES domain (1.5-2.5 km), and
+the tendency, being a flux DIVERGENCE, stays small and smooth aloft either
+way. Do not apply this scheme to a full atmospheric column and read its
+absolute fluxes.
+
 Constants are case-INDEPENDENT in the oracle: ``rad_simple`` hardcodes
 ``coef``, ``coef1``, ``f0`` and ``xk`` and applies them to every deck that
 selects it, so ASTEX209 legitimately runs the RF01 numbers. They are exposed
