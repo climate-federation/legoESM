@@ -3547,9 +3547,30 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
     # CAM l_min_xp2_from_corr_wx = True (fixed): variance floors from the
     # maximum-correlation bound.
+    #
+    # The denominator is floored at w_tol^2, which is what the reference gets
+    # for free from its CALL ORDER: advance_wp2_wp3 floors wp2 at w_tol^2 and
+    # runs BEFORE this solve in the Fortran, so the Fortran never divides by a
+    # smaller wp2. This port runs the scalar-variance solve first, so on the
+    # very first step it saw the seeded wp2 = tke_min = 1e-6 -- 400x below the
+    # floor -- and turned a perfectly ordinary surface flux into an absurd
+    # variance that nothing afterwards lowered.
+    #
+    # It stayed invisible for as long as the surface flux was zero, because the
+    # numerator is wpthlp^2: 0/1e-6 is 0. The moment a prescribed-flux case
+    # actually delivered its surface flux to the closure, the dry convective
+    # column got thr_thlp2 = 0.0601^2 / (1e-6 * 0.99^2) = 3685 K^2 -- a 61 K RMS
+    # temperature fluctuation -- which drove a CONSTANT spurious tendency and a
+    # LINEAR temperature drift of 4.5 K per step. See #1508.
+    #
+    # The same ratio is already floored this way in nrmlzd_corr_wx (the
+    # skewness helper), so this makes the two treatments agree. Note the
+    # numerator is SQUARED, so the sign of the surface flux is irrelevant: a
+    # stable, cooling case is hit exactly as hard as a convective one.
     max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
-    thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
-    thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
+    wp2_denom = jnp.maximum(wp2, w_tol_sqd) * max_corr2
+    thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / wp2_denom)
+    thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / wp2_denom)
     thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
     rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
 
@@ -5314,22 +5335,34 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
     velocity variances start at ``tke_min``, scalar variances at their
     tolerance-squared floors, all fluxes and ``wp3`` zero.
 
-    .. warning::
+    .. note::
 
-       ``tke_min`` (1e-6) is NOT the floor the prognostic core itself enforces:
-       ``advance_wp2_wp3`` floors ``wp2`` at ``w_tol**2`` (4e-4), 400x higher,
-       from its first advance.  The scalar variance solve runs BEFORE that
-       advance, so on step 1 the maximum-correlation floor
-       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divides by 1e-6 and writes an
-       unphysical surface ``thlp2`` (929 K^2 — a 30 K RMS fluctuation — on the
-       production column), which nothing subsequently lowers.  See #1508; this
-       docstring previously described the mismatch as intentional.
+       ``wp2``/``up2``/``vp2`` are seeded at ``max(tke_min, w_tol**2)``, NOT at
+       ``tke_min`` alone.  ``tke_min`` (1e-6) is 400x below the floor the
+       prognostic core itself enforces (``advance_wp2_wp3`` floors ``wp2`` at
+       ``w_tol**2`` = 4e-4 from its first advance), and the scalar variance
+       solve runs BEFORE that advance.  With the smaller seed, the
+       maximum-correlation floor ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)``
+       divided by 1e-6 on step 1 and wrote an unphysical surface ``thlp2``
+       that nothing subsequently lowered.
+
+       That was harmless only while the surface flux was zero, because the
+       numerator is ``wpthlp**2``.  As soon as a prescribed-flux case delivered
+       its surface flux to the closure, the dry convective column got
+       ``thlp2 = 3685 K^2`` (a 61 K RMS fluctuation) and drifted linearly by
+       4.5 K per step.  See #1508.  The divide is ALSO floored at its own site
+       in :func:`advance_xp2_xpyp`, so neither the seed nor a genuinely
+       quiescent mid-run column can reproduce it.
     ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
     """
     nzm = nlev + 1
     zt = jnp.zeros((ncol, nlev), dtype=dtype)
     zm0 = jnp.zeros((ncol, nzm), dtype=dtype)
-    wtol2 = jnp.full((ncol, nzm), config.tke_min, dtype=dtype)
+    # See the note above: the seed must not sit below the floor the
+    # prognostic core enforces from its first advance.
+    wtol2 = jnp.full((ncol, nzm),
+                     max(float(config.tke_min), float(config.w_tol) ** 2),
+                     dtype=dtype)
     return CLUBBMomentState(
         rtm=zt, thlm=zt, um=zt, vm=zt,
         wp2=wtol2, wp3=zt, up2=wtol2, vp2=wtol2,
