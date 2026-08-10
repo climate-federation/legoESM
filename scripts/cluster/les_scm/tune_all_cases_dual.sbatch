@@ -24,6 +24,12 @@ set +e
 #     flag was dropped so a blown-up arm stayed rankable.
 #  2. It ran 8 steps and 6 of 9 schemes were still descending at step 8.
 #
+# --surface-flux-to-closure is ON in BOTH arms. Without it every closure
+# computes a surface heat flux of exactly zero on a prescribed-flux case,
+# which disables the defining pathway of every flux-driven nonlocal scheme;
+# fitting parameters against that would be tuning around a harness defect.
+# Its size is measured separately by ab_surface_flux_to_closure.sbatch.
+#
 # AGGREGATION is the variable under test and the ONLY difference between the
 # two arms below. 'mean' weights every regime's absolute normalized error
 # equally, which measured 43% of the joint loss on ekman against 3.1% on
@@ -50,7 +56,7 @@ run_arm () {          # $1 = aggregation
   # or a traceback would report rc=0 and a green Slurm job.
   $PY scripts/run/run_scm_les_turbulence_tuning.py \
       --cases "$CASES" --outdir "$out" --nlev 48 --steps $STEPS \
-      --joint-aggregation "$agg" 2>&1 | tail -400
+      --joint-aggregation "$agg" --surface-flux-to-closure 2>&1 | tail -400
   local rc=${PIPESTATUS[0]}
   echo "ARM $agg rc=$rc wall=$((SECONDS - t0))s"
   [ "$rc" -ne 0 ] && { echo "ARM $agg FAILED -- do not cite this arm"; return; }
