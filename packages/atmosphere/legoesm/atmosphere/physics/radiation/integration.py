@@ -624,6 +624,12 @@ def _call_radiation_backend(
             q_v=q_v,
             insolation=insolation,
             config=scheme_config,
+            # Honour a per-column surface albedo here too (``None`` ->
+            # ``GrayRadiationConfig.sfc_albedo``, byte-identical).  This used
+            # to be dropped silently, so a tile-blended land albedo was
+            # discarded on every gray hydrostatic/MPAS run — the same class of
+            # defect as the RRTMGP path below.
+            sfc_albedo=sfc_albedo_override,
         )
 
     # RRTMGP: use actual cos_sza if available (diurnal cycle), else derive
@@ -1118,6 +1124,21 @@ def _make_hydrostatic_radiation(
             forcing.get("aerosol_lw_od") if forcing is not None else None
         )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
+        # Tile-blended SURFACE SHORTWAVE ALBEDO as a per-step TRACED forcing
+        # (same channel as T_sfc / o3 / ghg above, so the JIT'd step never
+        # retraces when the daily ocean/ice/land blend changes).
+        #
+        # Without this the MPAS/hydrostatic lane had NO way to supply a
+        # per-column albedo: ``_call_radiation_backend`` was called with no
+        # ``sfc_albedo_override``, so every column fell back to the SCALAR
+        # ``RRTMGPConfig.sfc_albedo`` (default 0.06 — the OPEN-OCEAN value)
+        # and all land reflected like open ocean.  Confirmed in three
+        # completed AMIP runs whose published rsus/rsds implied an albedo of
+        # exactly 0.0600 at both the global min and max over a globe that is
+        # 35.6% land.  (The FV/lat-lon lane forms its blend inside
+        # ``physics_pipeline.compute_radiation_core``, which this path never
+        # calls.)  Absent key -> None -> the config scalar, byte-identical.
+        _alb_ext = forcing.get("sfc_albedo") if forcing is not None else None
 
         # Calendar time: prefer per-step TRACED forcing values (the MPAS
         # AMIP loop) over the static ``set_time`` closure.  The closure
@@ -1167,6 +1188,22 @@ def _make_hydrostatic_radiation(
         lon_col = lon.reshape(ncol)
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
+
+        # Per-column surface albedo (None -> the scalar config value).  A
+        # scalar / 0-D forcing is passed through untouched so a uniform-albedo
+        # caller keeps the legacy behaviour exactly.
+        _alb_col = None
+        if _alb_ext is not None:
+            _alb_col = jnp.asarray(_alb_ext)
+            if _alb_col.ndim > 0:
+                if _alb_col.size != ncol:
+                    raise ValueError(
+                        f"forcing['sfc_albedo'] has {_alb_col.size} values "
+                        f"but this grid has ncol={ncol} columns — refusing to "
+                        f"broadcast a mismatched surface albedo into the "
+                        f"radiation solve."
+                    )
+                _alb_col = _alb_col.reshape(ncol)
 
         q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
             _extract_tracer_columns(state, ncol, nlev)
@@ -1271,6 +1308,10 @@ def _make_hydrostatic_radiation(
             insol_col = shard_columns(insol_col, column_mesh)
             if cos_sza_col is not None:
                 cos_sza_col = shard_columns(cos_sza_col, column_mesh)
+            # Shard the per-column albedo alongside its columns; a 0-D
+            # (uniform) albedo has no column axis and stays replicated.
+            if _alb_col is not None and _alb_col.ndim > 0:
+                _alb_col = shard_columns(_alb_col, column_mesh)
             if q_v_col is not None:
                 q_v_col = shard_columns(q_v_col, column_mesh)
             if q_cloud_col is not None:
@@ -1305,6 +1346,7 @@ def _make_hydrostatic_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            sfc_albedo_override=_alb_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             n_cloud=n_cloud_col,
@@ -1344,6 +1386,9 @@ def _make_hydrostatic_radiation(
                 q_v=q_v_col,
                 insolation=insol_col,
                 cos_sza=cos_sza_col,
+                # SAME surface as the all-sky solve: CMIP6 clear-sky removes
+                # CLOUDS only, never the surface boundary condition.
+                sfc_albedo_override=_alb_col,
                 q_cloud=None,
                 q_ice=None,
                 n_cloud=None,
