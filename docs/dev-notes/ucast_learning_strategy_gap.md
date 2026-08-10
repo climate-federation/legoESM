@@ -2488,3 +2488,31 @@ Gap to sfno_full (muonlr, z500 24 h 20.5 m) narrows from 4.4x to 2.3x; the
 remaining 6 h mslp (509 Pa vs floor 260) still contains the sea-level
 reduction diagnostic artifact and the ~240 Pa bare-dycore base state.
 classical retrain (26820917) still running; same scorecard follows.
+
+## Classical retrain confirms too (job 26834270 chain, scorecard 26838798)
+
+Same one-variable protocol as the column_nn row:
+
+| field/lead | anchored | lnpsfix | persistence |
+|---|---|---|---|
+| z500 6 h | 82.9 | **26.4** | 25.4 |
+| z500 24 h | 91.6 | **49.7** | 63.5 |
+| mslp 6 h | 1001 | **403** | 366 |
+| mslp 24 h | 1059 | **521** | 674 |
+| t850 24 h | 2.66 | 2.87 | 3.06 |
+| u850 24 h | 4.84 | 4.84 | 5.65 |
+
+Both dycore arms now beat persistence on BOTH mass fields at 24 h; the two
+arms sit within 3% of each other, and the sfno gap at z500 24 h is ~2.4x
+(49.7 vs 20.5) instead of 4.5x. Winds and temperature untouched, as the
+attribution predicted.
+
+## Trainability audit follow-up (2026-08-10, commit 5bf36b55e)
+
+Production bias breakdown now logged: classical's stuck bias term is
+**99% temperature** (bias_T 0.528 of 0.532 at 12 h) — the levers that move
+it (EDMF, cloud extras, Sundqvist qc_crit) are exactly the ones the
+field-level ownership change makes trainable. Six retune/swap arms
+(extended tier + bechtold/tiedtke/clubb/hines/sundqvist-cloud one-variable
+swaps) were submitted (26838111-16) and CANCELLED BY THE USER'S ACCOUNT at
+~11:05 — resubmit awaits an explicit go.
