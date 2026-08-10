@@ -1,0 +1,9 @@
+# Scheme-swap arm: convection edmf -> bechtold; everything else = the
+# winning base combo (see ace2/variant_classical.yaml).
+aimip_variant: "classical"
+aimip_convection: "bechtold"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+aimip_radiation: "rrtmgp"

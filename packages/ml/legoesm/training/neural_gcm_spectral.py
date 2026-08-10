@@ -1929,12 +1929,18 @@ def _spectral_state_loss_components(
         coeffs = sh_analysis_3d(grid, field_grid.astype(jnp.float64))
         return jnp.mean(jnp.abs(coeffs)).astype(jnp.float32)
 
+    # Per-variable bias contributions, recorded so the logged aggregate is
+    # attributable (the classical arm's stuck bias=5.6 could not be assigned
+    # to a variable from the aggregate alone — codex audit 2026-08-10).
+    bias_terms = {}
+
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
     mse_loss = mse_loss + config.w_T * _area_weighted_mean_3d(dT ** 2) / T_norm
     if config.w_bias_T > 0.0:
         bias_T = _area_weighted_mean_3d(dT)
-        bias_loss = bias_loss + config.w_bias_T * bias_T ** 2 / T_norm
+        bias_terms['bias_T'] = config.w_bias_T * bias_T ** 2 / T_norm
+        bias_loss = bias_loss + bias_terms['bias_T']
 
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
@@ -1943,10 +1949,12 @@ def _spectral_state_loss_components(
     mse_loss = mse_loss + config.w_v * _area_weighted_mean_3d(dv ** 2) / wind_norm
     if config.w_bias_u > 0.0:
         bias_u = _area_weighted_mean_3d(du)
-        bias_loss = bias_loss + config.w_bias_u * bias_u ** 2 / wind_norm
+        bias_terms['bias_u'] = config.w_bias_u * bias_u ** 2 / wind_norm
+        bias_loss = bias_loss + bias_terms['bias_u']
     if config.w_bias_v > 0.0:
         bias_v = _area_weighted_mean_3d(dv)
-        bias_loss = bias_loss + config.w_bias_v * bias_v ** 2 / wind_norm
+        bias_terms['bias_v'] = config.w_bias_v * bias_v ** 2 / wind_norm
+        bias_loss = bias_loss + bias_terms['bias_v']
 
     # Grid-space CRPS contribution (deterministic = MAE).  The fair-CRPS
     # for a single-member forecast (M=1) reduces to area-weighted |pred -
@@ -2003,7 +2011,8 @@ def _spectral_state_loss_components(
         crps_loss = crps_loss + config.w_crps_ps * _area_weighted_mean_2d(jnp.abs(dp)) / ps_scale
     if config.w_bias_ps > 0.0:
         bias_ps = _area_weighted_mean_2d(dp)
-        bias_loss = bias_loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
+        bias_terms['bias_ps'] = config.w_bias_ps * bias_ps ** 2 / ps_norm
+        bias_loss = bias_loss + bias_terms['bias_ps']
 
     # Specific humidity (q_v): contribute to the loss only when the
     # predicted state actually carries a ``q_v`` tracer (i.e., the
@@ -2054,6 +2063,7 @@ def _spectral_state_loss_components(
         "bias": bias_loss,
         "crps": crps_loss,
         "spec_crps": spec_crps_loss,
+        **bias_terms,
     }
 
 
@@ -3190,12 +3200,7 @@ def _train_spectral_loop(
         if segment_steps:
             state = ic_spectral
             total = jnp.float32(0.0)
-            comp_total = {
-                "mse": jnp.float32(0.0),
-                "bias": jnp.float32(0.0),
-                "crps": jnp.float32(0.0),
-                "spec_crps": jnp.float32(0.0),
-            }
+            comp_total: dict = {}
             t_offset = 0.0
             for k, n_seg in enumerate(segment_steps):
                 state = _rollout_one_segment(
@@ -3207,8 +3212,14 @@ def _train_spectral_loop(
                     sigma_full, loss_cfg_train,
                 )
                 total = total + ms_weights[k] * seg_loss
-                for key in comp_total:
-                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                # Accumulate over the LOSS's keys (not a fixed template) so
+                # optional per-variable terms (bias_T/u/v/ps) survive; the key
+                # set is config-static, so the pytree structure is stable
+                # across segments and steps.
+                for key, v in seg_comp.items():
+                    comp_total[key] = (
+                        comp_total.get(key, jnp.float32(0.0))
+                        + ms_weights[k] * v)
                 t_offset = t_offset + float(n_seg) * config.dt
             inv = 1.0 / ms_weight_sum
             return total * inv, {k: v * inv for k, v in comp_total.items()}
@@ -3410,8 +3421,11 @@ def _train_spectral_loop(
                     )
 
                 epoch_loss += loss_val
-                for key in epoch_components:
-                    epoch_components[key] += float(components[key])
+                # Iterate the COMPONENTS (not the init keys) so optional
+                # per-variable terms (bias_T/u/v/ps) accumulate too.
+                for key in components:
+                    epoch_components[key] = (
+                        epoch_components.get(key, 0.0) + float(components[key]))
 
             # --- mid-epoch (per-chunk) checkpoint (#942) ---------------------
             # After EACH chunk on the chunked all-years path, atomically save
@@ -3450,7 +3464,10 @@ def _train_spectral_loop(
             # — balanced shards guarantee equal per-rank step counts — so it can
             # never deadlock; the shared avg_loss also keeps any early-stop
             # decision identical on every rank.
-            _keys = ("mse", "bias", "crps", "spec_crps")
+            # Deterministic order over the ACTUAL keys (per-variable bias terms
+            # included); identical on every rank for a fixed config, so the
+            # collective shape is consistent.
+            _keys = tuple(sorted(epoch_components))
             _acc = _global_sum_mpi(
                 jnp.asarray(
                     [epoch_loss] + [epoch_components[k] for k in _keys]
@@ -3473,12 +3490,17 @@ def _train_spectral_loop(
             elapsed = time.time() - t0
             _lead_tag = (f" [lead={phase_spec[0]}h]"
                          if phase_spec[0] is not None else "")
+            _extra = " ".join(
+                f"{k}={avg_components[k]:.4f}"
+                for k in sorted(avg_components)
+                if k not in ("mse", "bias", "crps", "spec_crps"))
             logger.info(
                 f"Epoch {epoch:4d}{_lead_tag}: loss={avg_loss:.6f} "
                 f"(mse={avg_components['mse']:.4f} "
                 f"bias={avg_components['bias']:.4f} "
                 f"crps={avg_components['crps']:.4f} "
-                f"spec_crps={avg_components['spec_crps']:.4f}), "
+                f"spec_crps={avg_components['spec_crps']:.4f}"
+                + (f" {_extra}" if _extra else "") + "), "
                 f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
             )
 
@@ -4539,12 +4561,7 @@ def _train_sfno_full_loop(
         wrapper = _build_wrapper(m)
         state = ic_spectral
         total = jnp.float32(0.0)
-        comp_total = {
-            "mse": jnp.float32(0.0),
-            "bias": jnp.float32(0.0),
-            "crps": jnp.float32(0.0),
-            "spec_crps": jnp.float32(0.0),
-        }
+        comp_total: dict = {}
         for k, n_seg in enumerate(segment_steps):
             state = _rollout_segment(
                 state, wrapper, n_seg,
@@ -4564,8 +4581,11 @@ def _train_sfno_full_loop(
                     sigma_full, loss_cfg_train,
                 )
             total = total + ms_weights[k] * seg_loss
-            for key in comp_total:
-                comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+            # Key-general (mirrors the classical loop): optional per-variable
+            # bias terms survive; the key set is config-static.
+            for key, v in seg_comp.items():
+                comp_total[key] = (
+                    comp_total.get(key, jnp.float32(0.0)) + ms_weights[k] * v)
         inv = 1.0 / ms_weight_sum
         return total * inv, {k: v * inv for k, v in comp_total.items()}
 
@@ -5044,8 +5064,11 @@ def _train_sfno_full_loop(
             # reduction, which is weighted by n_samples) is off by n_dev.
             _w = n_dev if pmap_on else 1
             epoch_loss += loss_val * _w
-            for key in epoch_components:
-                epoch_components[key] += float(components[key]) * _w
+            # Iterate the COMPONENTS (not the init keys) so optional
+            # per-variable terms (bias_T/u/v/ps) accumulate too.
+            for key in components:
+                epoch_components[key] = (
+                    epoch_components.get(key, 0.0) + float(components[key]) * _w)
 
         # Under pmap one iteration consumed n_dev samples; count SAMPLES (not
         # updates) so avg_loss stays a per-sample mean comparable across
@@ -5058,7 +5081,10 @@ def _train_sfno_full_loop(
             # every rank takes the same early-stop branch — a rank-local
             # decision would desynchronise control flow and hang the next
             # allreduce. Balanced shards guarantee lockstep entry here.
-            _keys = ("mse", "bias", "crps", "spec_crps")
+            # Deterministic order over the ACTUAL keys (per-variable bias terms
+            # included); identical on every rank for a fixed config, so the
+            # collective shape is consistent.
+            _keys = tuple(sorted(epoch_components))
             _acc = _global_sum_mpi(
                 jnp.asarray(
                     [epoch_loss] + [epoch_components[k] for k in _keys]
@@ -5078,12 +5104,17 @@ def _train_sfno_full_loop(
 
         if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
             elapsed = time.time() - t0
+            _extra = " ".join(
+                f"{k}={avg_components[k]:.4f}"
+                for k in sorted(avg_components)
+                if k not in ("mse", "bias", "crps", "spec_crps"))
             logger.info(
                 f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
                 f"(mse={avg_components['mse']:.4f} "
                 f"bias={avg_components['bias']:.4f} "
                 f"crps={avg_components['crps']:.4f} "
-                f"spec_crps={avg_components['spec_crps']:.4f}), "
+                f"spec_crps={avg_components['spec_crps']:.4f}"
+                + (f" {_extra}" if _extra else "") + "), "
                 f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
             )
 

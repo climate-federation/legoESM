@@ -557,7 +557,7 @@ def _train_aimip_classical(
     if _scheme_tier:
         from legoesm.training.aimip_params import (
             AIMIPTrainableBundle,
-            aimip_legacy_owned_scheme_keys,
+            aimip_legacy_owned_fields,
             aimip_scheme_keys_for,
         )
         from legoesm.training.param_collector import build_trainable_params
@@ -565,28 +565,33 @@ def _train_aimip_classical(
         _active = aimip_scheme_keys_for(
             convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
             microphysics=micro_scheme, radiation=radiation,
+            cloud=cloud_scheme,
         )
-        _legacy = aimip_legacy_owned_scheme_keys()
-        _keys = _active - _legacy
-        if not _keys:
+        # FIELD-level ownership (was class-level, which suppressed spec-only
+        # fields of legacy-touched classes — Sundqvist qc_crit, McFarlane
+        # fcrit2, most of CloudConfig — so they trained nowhere): exclude only
+        # the fields the legacy to_*_config methods actually write, since
+        # _splice_scheme_overrides would overwrite exactly those.
+        _owned = aimip_legacy_owned_fields(cloud_scheme=cloud_scheme)
+        _scheme_params = build_trainable_params(
+            active_scheme_keys=_active,
+            tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
+            exclude=tuple(sorted(_owned)),
+        )
+        _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
+        if _n_scheme == 0:
             raise SystemExit(
                 f"aimip_trainable_schemes={_scheme_tier!r} but no active "
                 f"scheme (conv={conv_scheme} turb={turb_scheme} "
-                f"gwd={gwd_scheme} micro={micro_scheme} rad={radiation}) "
-                "adds a spec-declared parameter beyond what the legacy "
-                f"AIMIPClassicalParams already trains ({sorted(_active & _legacy)}) "
-                "— the knob would train nothing new."
+                f"gwd={gwd_scheme} micro={micro_scheme} rad={radiation} "
+                f"cloud={cloud_scheme}) adds a spec-declared parameter beyond "
+                "the legacy-owned fields — the knob would train nothing new."
             )
-        _scheme_params = build_trainable_params(
-            active_scheme_keys=_keys,
-            tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
-        )
-        _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
         params = AIMIPTrainableBundle(classical=params, schemes=_scheme_params)
         logger.info(
             "AIMIP classical: %d spec-driven scheme parameter(s) trainable "
-            "(tier=%s) across %s; %s left to the legacy leaves",
-            _n_scheme, _scheme_tier, sorted(_keys), sorted(_active & _legacy))
+            "(tier=%s) across %s; %d legacy-owned field(s) excluded",
+            _n_scheme, _scheme_tier, sorted(_active), len(_owned))
 
     # Resume AFTER the bundle wrap: Equinox accepts a PREFIX template, so
     # deserialising a bundle checkpoint into a bare AIMIPClassicalParams

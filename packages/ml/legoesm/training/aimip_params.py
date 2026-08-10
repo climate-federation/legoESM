@@ -691,6 +691,7 @@ def aimip_active_scheme_keys(physics_config) -> set[str]:
 def aimip_scheme_keys_for(
     *, convection: str = "none", turbulence: str = "none",
     gwd: str = "none", microphysics: str = "none", radiation: str = "none",
+    cloud: str = "none",
 ) -> set[str]:
     """``aimip_active_scheme_keys`` from SCHEME NAMES rather than a built tree.
 
@@ -735,7 +736,18 @@ def aimip_scheme_keys_for(
         microphysics=MicrophysicsConfig(scheme=microphysics),
         gravity_wave_drag=GravityWaveDragConfig(scheme=gwd),
     )
-    return aimip_active_scheme_keys(probe)
+    keys = aimip_active_scheme_keys(probe)
+    # Cloud fraction is not a PhysicsConfig family — the factory places the
+    # (single, scheme-shared) CloudConfig under RadiationConfig.cloud_config,
+    # and ONLY on the rrtmgp path (gray radiation carries no CloudConfig in
+    # its tree, so a cloud override there raises 'matched no config' — caught
+    # by the six-suite smoke, 2026-08-10). Route it explicitly so cloud spec
+    # parameters are collectable whenever they have somewhere to land.
+    if cloud not in ("none", "") and radiation == "rrtmgp":
+        from legoesm.training.param_collector import build_registry
+        keys |= {m.scheme_key for m in build_registry()
+                 if m.scheme_key.startswith("atm.clouds.")}
+    return keys
 
 
 def aimip_legacy_owned_scheme_keys() -> set[str]:
@@ -769,6 +781,85 @@ def aimip_legacy_owned_scheme_keys() -> set[str]:
     }
     return {m.scheme_key for m in build_registry()
             if m.config_class in owned_classes}
+
+
+def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
+    """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
+
+    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    class-level subtraction excluded EVERY spec parameter of a class the
+    legacy route touches, which suppressed spec-only fields the legacy never
+    writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of
+    ``CloudConfig``) — they trained nowhere. The one-trainer ownership rule
+    only requires excluding the FIELDS the legacy ``to_*_config`` methods
+    populate, because ``_splice_scheme_overrides`` runs after them and would
+    overwrite exactly those.
+
+    Derived mechanically (no hardcoded list to rot): every raw leaf is
+    perturbed in unconstrained space and each ``to_*_config`` output is
+    diffed field-by-field against the unperturbed build. A field that moves
+    is legacy-written; one that stays at its default is free for the spec
+    route. Monotonicity alone does not survive float32 (GLM review): a
+    deeply saturated logit could absorb the perturbation below
+    representation. ``from_defaults`` interiorizes every leaf to >=5% of its
+    sigmoid range (|raw| <= logit(0.95) ~ 2.94), where +0.37 moves the
+    constrained value by >~1% of the range — far above float32 resolution —
+    and the assertion below turns any future saturated default into a loud
+    failure instead of a silent misclassification.
+    """
+    import numpy as np
+
+    from legoesm.training.param_collector import build_registry
+
+    probe = AIMIPClassicalParams.from_defaults()
+    for k, v in probe.raw_values.items():
+        if float(jnp.max(jnp.abs(v))) > 6.0:   # sigmoid slope ~2.5e-3 there
+            raise AssertionError(
+                f"raw leaf {k!r} is saturated (|raw|>6); the perturb-and-diff "
+                "ownership derivation would silently misclassify it — "
+                "interiorize the default (see from_defaults sigmoid_margin).")
+    perturbed = eqx.tree_at(
+        lambda p: p.raw_values, probe,
+        {k: v + 0.37 for k, v in probe.raw_values.items()},
+    )
+    registry = build_registry()
+    known = {m.qualified_name for m in registry}
+    key_by_class: dict[str, list[str]] = {}
+    for m in registry:
+        key_by_class.setdefault(m.config_class, []).append(m.scheme_key)
+
+    owned: set[str] = set()
+    for name in dir(type(probe)):
+        if not (name.startswith("to_") and name.endswith("_config")):
+            continue
+        # The factory routes to_cloud_config's leaves ONLY under
+        # cloud_scheme == "xu_randall"; every other cloud scheme starts from
+        # CloudConfig defaults, so its spec fields (rh_crit above all) must
+        # stay collectable there (codex: the sundqvist-cloud arm would
+        # otherwise lose its primary control). The other conditional routes
+        # (tiedtke/sbm conv, gray radiation, louis/mcfarlane/sundqvist-micro)
+        # have their class active only when they are also legacy-routed, so
+        # an unconditional exclusion is harmless for them.
+        if name == "to_cloud_config" and cloud_scheme != "xu_randall":
+            continue
+        cfg_a = getattr(probe, name)()
+        cfg_b = getattr(perturbed, name)()
+        for field in cfg_a._fields:
+            va, vb = getattr(cfg_a, field), getattr(cfg_b, field)
+            try:
+                same = bool(np.array_equal(np.asarray(va), np.asarray(vb)))
+            except (TypeError, ValueError):
+                same = va == vb
+            if not same:
+                for scheme_key in key_by_class.get(type(cfg_a).__name__, []):
+                    q = f"{scheme_key}.{field}"
+                    # Only registry-known names: a legacy-written field with
+                    # no __param_spec__ entry cannot collide with the spec
+                    # route, and build_trainable_params(exclude=...) raises
+                    # on unknown names.
+                    if q in known:
+                        owned.add(q)
+    return owned
 
 
 class AIMIPTrainableBundle(eqx.Module):
