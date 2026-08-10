@@ -218,6 +218,15 @@ def main() -> int:
                         "avoiding), whole RK body inside shard_map. "
                         "Effective mode + depth recorded in the JSONL "
                         "row.")
+    p.add_argument("--timed-scan", action="store_true",
+                   help="Time the steady window as ONE jit(lax.scan) of "
+                        "(steps - warmup) steps with a single device sync, "
+                        "instead of the per-step Python loop with a "
+                        "block_until_ready every step. Discriminates "
+                        "host-dispatch/per-step-sync share: the per-step "
+                        "loop both pays a host round-trip per step and "
+                        "forbids cross-step pipelining. Warmup steps still "
+                        "run the Python loop (compile + steady check).")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -411,7 +420,8 @@ def main() -> int:
     # Per-step timing: step 0 includes compile; record each step so re-trace
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
-    for _ in range(args.steps):
+    scan_median_ms = None
+    for _ in range(args.warmup + 1 if args.timed_scan else args.steps):
         t0 = time.perf_counter()
         if physics_fn is not None:
             s = step(s, dt, physics_fn=physics_fn)
@@ -419,6 +429,33 @@ def main() -> int:
             s = step(s, dt)
         _block(s)
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+
+    if args.timed_scan:
+        # ONE jit(scan) over the steady window, ONE sync at the end —
+        # the same execution shape as the test suite's outer_scan mirror
+        # of run_levante_gpu_scaling._build_timed_scan_runner.
+        n_scan = args.steps - args.warmup
+        _phys = physics_fn
+        if _phys is not None:
+            _wrapped = lambda st, d: step(st, d, physics_fn=_phys)  # noqa: E731
+        else:
+            _wrapped = step
+        dt_const = float(dt)
+
+        @jax.jit
+        def _runner(st):
+            def _body(carry, _):
+                return _wrapped(carry, dt_const), None
+            return jax.lax.scan(_body, st, None, length=n_scan)[0]
+
+        s = _runner(s)          # compile + first run (not timed)
+        _block(s)
+        t0 = time.perf_counter()
+        s = _runner(s)
+        _block(s)
+        scan_median_ms = (time.perf_counter() - t0) * 1e3 / n_scan
+        # Fill per_step_ms so the steady slice below stays meaningful.
+        per_step_ms += [scan_median_ms] * n_scan
 
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
@@ -522,6 +559,9 @@ def main() -> int:
             step, "_halo_strategy_effective", "serial"),
         wide_halo=bool(getattr(step, "_wide_halo_effective", False)),
         halo_depth=int(getattr(step, "_halo_depth_effective", 3)),
+        timed_scan=bool(args.timed_scan),
+        scan_median_ms=(round(scan_median_ms, 3)
+                        if scan_median_ms is not None else None),
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
