@@ -1888,6 +1888,41 @@ def _build_halo_send_maps(partitions, cell_owner, n_dev, cells_per,
         edge_recv_map
 
 
+def _resolve_size_coloring(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_SIZE_COLORING: '1' on, '0'/'' off (default).
+
+    Size-aware colouring keeps the SAME round count but groups
+    similar-payload pairs into the same round, cutting the padded/actual
+    byte inflation (measured 2.926x at s9@64, job 26855933 — every pair
+    in a round ships the round MAXIMUM because the ppermute index
+    arrays are shape-uniform across devices). Transfers and results are
+    bit-identical (unpack scatters write disjoint rows); only the wire
+    grouping changes. Unknown values raise (dispatch hardening)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_SIZE_COLORING={env_value!r}: must be '0' or '1' "
+        f"(empty = off)")
+
+
+def _padded_weight(edge_colors, pair_w):
+    """Total padded wire weight of a colouring: per round, every pair
+    ships the round max (cells and edges tracked with equal weight —
+    their per-entity widths are nlev+2 vs nlev, near-equal)."""
+    from collections import defaultdict
+    rounds_c = defaultdict(int)
+    rounds_e = defaultdict(int)
+    counts = defaultdict(int)
+    for pair, color in edge_colors.items():
+        wc, we = pair_w[pair]
+        rounds_c[color] = max(rounds_c[color], wc)
+        rounds_e[color] = max(rounds_e[color], we)
+        counts[color] += 1
+    return sum(counts[r] * (rounds_c[r] + rounds_e[r]) for r in counts)
+
+
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                              edges_per, max_lc, max_le):
     """Build a ppermute-based halo exchange schedule.
@@ -1965,6 +2000,55 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     else:
         edge_colors, n_rounds, coloring_method = (
             greedy_colors, n_rounds_greedy, "greedy")
+
+    # SIZE-AWARE colouring (opt-in): same round count, pairs grouped by
+    # payload size so the per-round max padding shrinks. Candidates =
+    # weight-descending first-fit + a few weight-jittered restarts;
+    # adopted only when the round count DOES NOT regress and the padded
+    # wire weight strictly improves.
+    import os as _os_sc
+    if _resolve_size_coloring(
+            _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "0")):
+        import random as _random_sc
+        pair_w = {}
+        for (u, v) in comm_pairs:
+            wc = max(len(cell_send_map.get((u, v), [])),
+                     len(cell_send_map.get((v, u), [])))
+            we = max(len(edge_send_map.get((u, v), [])),
+                     len(edge_send_map.get((v, u), [])))
+            pair_w[(u, v)] = (wc, we)
+        base_w = _padded_weight(edge_colors, pair_w)
+        edges_by_size = sorted(
+            comm_pairs, key=lambda p: -(pair_w[p][0] + pair_w[p][1]))
+        candidates = [edges_by_size]
+        for seed in (1, 2, 3):
+            jit = edges_by_size[:]
+            # jitter within near-equal-size neighbourhoods only
+            rng = _random_sc.Random(seed)
+            for i in range(0, len(jit) - 1, 2):
+                if rng.random() < 0.5:
+                    jit[i], jit[i + 1] = jit[i + 1], jit[i]
+            candidates.append(jit)
+        best_w, best_ec = base_w, None
+        for order in candidates:
+            ec = greedy_edge_coloring_ordered(comm_pairs, order)
+            if max(ec.values(), default=-1) + 1 > n_rounds:
+                continue
+            w = _padded_weight(ec, pair_w)
+            if w < best_w:
+                best_w, best_ec = w, ec
+        if best_ec is not None:
+            edge_colors = best_ec
+            n_rounds = max(edge_colors.values()) + 1
+            coloring_method = "size_aware"
+            logger.info(
+                "  size-aware colouring adopted: padded weight %d -> %d "
+                "(-%.0f%%), rounds %d", base_w, best_w,
+                100 * (1 - best_w / max(base_w, 1)), n_rounds)
+        else:
+            logger.info(
+                "  size-aware colouring found no improvement "
+                "(padded weight %d)", base_w)
     assert _check_proper_edge_coloring(edge_colors, comm_pairs), (
         "improper ppermute edge coloring — two same-round exchanges "
         "would collide at a device")

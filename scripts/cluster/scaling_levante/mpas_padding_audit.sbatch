@@ -70,6 +70,28 @@ if padded / actual > 1.15:
 else:
     print("VERDICT: inflation below the 1.15 bar — lever refuted offline")
 
+# SIZE-AWARE COLOURING offline verdict: rebuild the same schedule with
+# LEGOESM_MPAS_SIZE_COLORING=1 and reprice the inflation.
+import os
+os.environ["LEGOESM_MPAS_SIZE_COLORING"] = "1"
+sched_sa = _build_ppermute_schedule(parts, owner, n_dev, cells_per,
+                                    edges_per, max_lc, max_le)
+os.environ["LEGOESM_MPAS_SIZE_COLORING"] = "0"
+padded_sa = 0
+for r in range(sched_sa["n_rounds"]):
+    n_pairs_r = sum(1 for (a, b) in sched_sa["ppermute_perms"][r] if a != b)
+    padded_sa += n_pairs_r * (sched_sa["halo_cells_per_round"][r] * cell_w
+                              + sched_sa["halo_edges_per_round"][r] * edge_w)
+print(f"SIZE-AWARE: rounds={sched_sa['n_rounds']} "
+      f"method={sched_sa['coloring_method']} "
+      f"padded={padded_sa/1e6:.2f} MB  INFLATION={padded_sa/actual:.3f} "
+      f"(baseline {padded/actual:.3f})")
+if padded_sa < 0.7 * padded and sched_sa["n_rounds"] <= n_rounds:
+    print("SIZE-AWARE VERDICT: CONFIRMED offline — submit the GPU A/B")
+else:
+    print("SIZE-AWARE VERDICT: insufficient offline win — rework the "
+          "colouring objective before any GPU job")
+
 # Partner map for the trace analyzer's partner-aware matching (the
 # retracted cross-rank spread needs round -> partner, per rank): for
 # ranks 0..3, the ordered list of (round, partner) they participate in.
