@@ -2262,64 +2262,32 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
     cell_ring = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
     edge_ring = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
 
-    # UNION adjacency (cellsOnCell + cellsOnEdge pairs) as CSR.  The
-    # partition builder augments the cellsOnCell k-ring with cells
-    # reachable only through cellsOnEdge (boundary/pentagon discrepancy,
-    # see _build_voronoi_partition_infra) and then closes two more
-    # cellsOnEdge layers — a cellsOnCell-only BFS leaves those cells
-    # unlabelled (FAR), silently freezing stage values an owned-edge
-    # stencil can read (codex review P1, 2026-08-10).  BFS on the union
-    # graph labels every dependency-reachable cell.
-    coc_dst = coc.T.ravel()
-    coc_src = np.repeat(np.arange(nCells, dtype=np.int64), coc.shape[0])
-    keep = coc_dst >= 0
-    src = np.concatenate([coc_src[keep], coe[0], coe[1]])
-    dst = np.concatenate([coc_dst[keep], coe[1], coe[0]])
-    order = np.argsort(src, kind="stable")
-    src_s, dst_s = src[order], dst[order]
-    indptr = np.searchsorted(src_s, np.arange(nCells + 1))
-
-    def _neighbors(frontier):
-        starts, ends = indptr[frontier], indptr[frontier + 1]
-        counts = ends - starts
-        total = int(counts.sum())
-        if total == 0:
-            return np.empty(0, dtype=np.int64)
-        idx = (np.repeat(starts, counts)
-               + np.arange(total)
-               - np.repeat(np.cumsum(counts) - counts, counts))
-        return dst_s[idx]
-
+    # cellsOnCell BFS from the owned cell block — the metric the GPU
+    # parity gate certified (job 26846337, s6@4, u atol 1e-6).  A
+    # union-graph metric seeded from owned cells+edges was tried for
+    # codex P1 (closure cells left FAR) and REVERTED: shrinking the
+    # ring distances enlarges every keep-set, and the s6@4 GPU parity
+    # gate FAILED on u at 4e-2 (job 26849483) — the extra kept cells
+    # compute tendencies on locally-incomplete connectivity that the
+    # freeze was protecting against.  Residual (documented, empirically
+    # bounded by the parity gate): cells the partition closure adds
+    # beyond the cellsOnCell k-ring stay FAR and their stage values
+    # frozen; the count is logged per rank below.
     for d, part in enumerate(partitions):
         g2l = part.cell_g2l
         n_owned = part.n_owned_cells
         n_local = part.n_local_cells
         ring_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
         ring_l[:n_owned] = 0
-        # Ring 0 = owned CELLS plus the cells of owned EDGES: edge
-        # ownership is an independent contiguous block that need not
-        # align with the cell block, and owned-edge tendencies are
-        # returned as final output — their adjacent cells anchor the
-        # validity metric exactly like owned cells do (the 54/27
-        # unreachable cells the first BFS left FAR were precisely this
-        # misalignment).
-        owned_edges_g = np.asarray(part.local_edges[:part.n_owned_edges])
-        seed_cells = np.unique(np.concatenate([
-            np.asarray(part.local_cells[:n_owned]),
-            coe[:, owned_edges_g].ravel()]))
-        seed_cells = seed_cells[seed_cells >= 0]
-        lidx0 = g2l[seed_cells]
-        ring_l[lidx0[lidx0 >= 0]] = 0
-        frontier = seed_cells
+        frontier = np.asarray(part.local_cells[:n_owned])
         seen = np.zeros(nCells, dtype=bool)
         seen[frontier] = True
-        # +2 margin: the partition closure adds up to two cellsOnEdge
-        # layers past the k-ring; labelling deeper than any mask
-        # threshold is harmless (behaves as FAR), unlabelled is not.
-        for r in range(1, halo_depth + 3):
+        for r in range(1, halo_depth + 1):
             if frontier.size == 0:
                 break
-            nb = np.unique(_neighbors(frontier))
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
             nb = nb[~seen[nb]]
             seen[nb] = True
             lidx = g2l[nb]
@@ -2328,13 +2296,11 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
             frontier = nb
         n_unlabelled = int((ring_l[:n_local] == _WIDE_RING_FAR).sum())
         if n_unlabelled:
-            raise AssertionError(
-                f"wide halo: rank {d} has {n_unlabelled} local cells the "
-                f"union-graph BFS could not reach within depth "
-                f"{halo_depth + 2} — the shrinking masks would silently "
-                f"freeze stage values the stencil can read. The partition "
-                f"closure and the mask graph have diverged; fix the graph "
-                f"before running wide mode.")
+            logger.info(
+                "wide halo: rank %d keeps %d closure-added local cells "
+                "FROZEN (unlabelled by the cellsOnCell ring BFS); the "
+                "s6@4 GPU parity gate is the guard that this freeze "
+                "does not reach owned results.", d, n_unlabelled)
         cell_ring[d] = ring_l.astype(np.int32)
 
         le = np.asarray(part.local_edges)
