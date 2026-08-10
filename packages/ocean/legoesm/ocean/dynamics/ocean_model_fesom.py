@@ -86,6 +86,16 @@ class FesomOceanConfig(NamedTuple):
     dt: Optional[float] = None
     k_ver: Optional[float] = None
     a_ver: Optional[float] = None
+    # Vertical coordinate / free-surface mode. "linfs" (default, and
+    # fesom_jax's own default) keeps layer thicknesses FIXED and carries
+    # the free-surface volume change as a surface concentration/dilution
+    # term -- tracer CONTENT is then conserved only to that
+    # approximation (measured: volume-weighted heat drifts ~1e-6 relative
+    # over 2 days of geostrophic adjustment, against ~1e-15 for the
+    # z-star arms). "zstar" selects fesom_jax's ALE z-star coordinate, in
+    # which thicknesses move with eta and content is conserved.
+    # Static Python string (selects a compile-time branch), NOT a leaf.
+    vertical_coordinate: str = "linfs"
 
 
 # =============================================================================
@@ -504,6 +514,25 @@ def build_flat_bottom_mesh(
 # Initial condition
 # =============================================================================
 
+def resolve_ale_cfg(vertical_coordinate: str):
+    """``AleConfig`` for *vertical_coordinate*, or ``None`` for linfs.
+
+    RAISES on an unknown mode -- a silent fall-through to linfs would run
+    a different vertical coordinate than the caller asked for (the repo's
+    dispatch-hardening rule).
+    """
+    if vertical_coordinate == "linfs":
+        return None
+    if vertical_coordinate == "zstar":
+        _require_fesom_jax()
+        from fesom_jax.ale import AleConfig
+        return AleConfig()
+    raise ValueError(
+        f"FesomOceanConfig.vertical_coordinate={vertical_coordinate!r} is "
+        f"not supported; expected 'linfs' (fixed thicknesses) or 'zstar' "
+        f"(ALE moving thicknesses).")
+
+
 def element_centroid_lat_lon(mesh: "Mesh") -> tuple[jax.Array, jax.Array]:
     """GEOGRAPHIC (lat, lon) of every element centroid, radians.
 
@@ -678,6 +707,7 @@ def create_rest_state(
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     stratified: bool = True,
+    vertical_coordinate: str = "linfs",
 ) -> FesomOceanState:
     """Rest state on *mesh*: zero velocity, flat free surface, uniform S.
 
@@ -700,7 +730,8 @@ def create_rest_state(
     from fesom_jax.state import State
     from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
-    state = State.rest(mesh, T0=float(T_water_init_C), S0=float(S_uniform))
+    state = State.rest(mesh, T0=float(T_water_init_C), S0=float(S_uniform),
+                       ale_cfg=resolve_ale_cfg(vertical_coordinate))
     if stratified:
         z_full = jnp.asarray(z_coord.z_full_ref, dtype=jnp.float64)
         T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
@@ -823,6 +854,11 @@ class FesomOceanModel:
             else float(fconfig.A_VER)
         )
 
+        # None => linfs (fesom_jax's default); an AleConfig => z-star.
+        # Static: it selects a compile-time branch inside step_jit.
+        self._ale_cfg = resolve_ale_cfg(
+            getattr(config, "vertical_coordinate", "linfs")
+            if config is not None else "linfs")
         self._ssh_op = fssh.build_ssh_operator(mesh, dt=self._dt)
         self._stress_surf = jnp.zeros((int(mesh.elem2D), 2), dtype=jnp.float64)
         self._params = Params(
@@ -869,6 +905,7 @@ class FesomOceanModel:
             self._params,
             dt=self._dt,
             is_first_step=state.is_first_step,
+            ale_cfg=self._ale_cfg,
         )
 
         # Materialise the per-step node velocity ONCE.  ``u`` / ``v``

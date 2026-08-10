@@ -3265,6 +3265,97 @@ def _key_array_fn(state, grid_type: str):
 # Barotropic wave perturbation
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Modelling-mode stratification for conservation gates
+# ---------------------------------------------------------------------------
+# A conservation gate must never be keyed on the ARM NAME -- that turns a
+# benchmark into a per-model exemption list. It is keyed on the MODELLING
+# MODE the arm runs in, which is a property of the vertical coordinate /
+# free-surface formulation and is the same number for any model in that
+# mode. The PASS/FAIL table then reads as a scientific statement
+# ("fixed-thickness linear-free-surface arms conserve tracer content to
+# ~1e-6/day; moving-thickness arms to machine precision") rather than as
+# a special case (GLM-5.2 review, 2026-08-10).
+
+#: Tracer-content conservation tolerance per modelling mode, PER DAY of
+#: simulated time [relative/day]. Per-day, not absolute: this suite runs
+#: cases from 1 to 10 days, and an absolute tolerance would let a 1-day
+#: run hide a leak that a 10-day run of the same model fails on (GLM-5.2
+#: review, 2026-08-10 -- the earlier absolute form was set before this
+#: was measured).
+_MODE_TRACER_DRIFT_TOL_PER_DAY = {
+    # Moving control volumes (z-star / ALE): the flux-form update conserves
+    # content discretely, so only round-off accumulates. MEASURED on
+    # lat-lon z-star: 1.2e-15 over 2 days, i.e. seven decades of headroom.
+    "moving_thickness": 1e-8,
+    # Fixed thicknesses + surface concentration/dilution (NEMO key_linssh,
+    # FESOM linfs): content is conserved only to that approximation.
+    # MEASURED (geostrophic adjustment, 2 days, volume-weighted heat):
+    # FESOM linfs 2.6e-6, i.e. 1.3e-6/day. Gate set ~4x above that.
+    "fixed_thickness": 5e-6,
+}
+
+# WHY THE FESOM RESIDUAL IS NOT (YET) A CONSERVATION DEFECT
+# --------------------------------------------------------
+# Decomposing the drift by the exact identity
+#     dH = sum[(T(t)-T(0))*V(t)]   +   sum[T(0)*(V(t)-V(0))]
+#          \___ A: tracer ___/         \___ B: thickness ___/
+# MEASURED 2026-08-10 (2 days, geostrophic adjustment):
+#     lat-lon z-star : A = -1.925e-07, B = +1.925e-07  -> cancel to 1.2e-15
+#     FESOM zstar    : A = -2.366e-07, B = +6.812e-07  -> residual 4.4e-07
+#     FESOM linfs    : A = -3.288e-06, B = +6.815e-07  -> residual 2.6e-06
+# Term B is IDENTICAL to 3 digits between the two FESOM modes even though
+# one moves its layer thicknesses and the other does not -- which can only
+# happen if B is computed from eta by THIS DIAGNOSTIC rather than from the
+# model's own thicknesses (FESOM carries hnode; the diagnostic applies
+# legoESM's z-star formula). So the leading candidate for the residual is
+# a DIAGNOSTIC-vs-MODEL volume mismatch on the FESOM arm, not FESOM
+# non-conservation. RETRACTED: the earlier claim that FESOM "genuinely
+# does not conserve heat" was not supported -- it rested on a volume
+# weight the model never used. Next step is to read hnode from the FESOM
+# state in the diagnostic and re-measure (GLM-5.2 review).
+
+
+def _modelling_mode(grid_type: str, config=None, z_coord=None) -> str:
+    """Which conservation regime this (grid, config) runs in.
+
+    Returns a key of :data:`_MODE_TRACER_DRIFT_TOL`. Raises on an unknown
+    grid rather than defaulting -- a silently-assumed mode would apply the
+    wrong tolerance (dispatch-hardening rule).
+    """
+    if grid_type == "fesom":
+        vc = getattr(config, "vertical_coordinate", "linfs")
+        if vc == "zstar":
+            return "moving_thickness"
+        if vc == "linfs":
+            return "fixed_thickness"
+        raise ValueError(
+            f"_modelling_mode: unknown FESOM vertical_coordinate {vc!r}.")
+    if grid_type in ("cubed_sphere", "latlon", "latlon_regional",
+                     "latlon_channel", "mpas", "mpas_regional",
+                     "mpas_channel", "tripole", "spectral"):
+        # legoESM's own dycores integrate on the z-star moving coordinate.
+        # ``linear_free_surface`` is a Z-COORDINATE flag, not an ocean-config
+        # one (codex 2026-08-10: reading it off ``config`` silently
+        # classified every key_linssh run as moving-thickness).
+        if getattr(z_coord, "linear_free_surface", False):
+            return "fixed_thickness"
+        return "moving_thickness"
+    raise ValueError(f"_modelling_mode: unknown grid_type {grid_type!r}.")
+
+
+def _tracer_drift_tolerance(grid_type: str, config=None, z_coord=None,
+                            days: float = 1.0) -> tuple[float, str]:
+    """(tolerance, mode) for a tracer-content conservation gate.
+
+    The tolerance scales with the run length, so the same model is held to
+    the same PER-DAY leak rate whether the case runs 1 day or 10.
+    """
+    mode = _modelling_mode(grid_type, config, z_coord)
+    return (_MODE_TRACER_DRIFT_TOL_PER_DAY[mode] * max(float(days), 1.0),
+            mode)
+
+
 def _cgrid_face_lat_lon(grid):
     """(lat_u, lon_u, lat_v, lon_v) in RADIANS at the C-grid face points.
 
@@ -3547,9 +3638,10 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
+    _tol_T, _mode_T = _tracer_drift_tolerance(tc.grid_type, config, z_coord, days)
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
-        label="T", n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, _tol_T,
+        label=f"T[{_mode_T}]", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
     ok, notes = _apply_drift_tolerance(
@@ -3638,9 +3730,10 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
+    _tol_T, _mode_T = _tracer_drift_tolerance(tc.grid_type, config, z_coord, days)
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
-        label="T", n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, _tol_T,
+        label=f"T[{_mode_T}]", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
     ok, notes = _apply_drift_tolerance(
@@ -3722,9 +3815,10 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
+    _tol_T, _mode_T = _tracer_drift_tolerance(tc.grid_type, config, z_coord, days)
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
-        label="T", n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, _tol_T,
+        label=f"T[{_mode_T}]", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
     ok, notes = _apply_drift_tolerance(
@@ -3801,9 +3895,10 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     ok, notes = _apply_drift_tolerance(
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
+    _tol_T, _mode_T = _tracer_drift_tolerance(tc.grid_type, config, z_coord, days)
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
-        label="T", n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, _tol_T,
+        label=f"T[{_mode_T}]", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
     ok, notes = _apply_drift_tolerance(
@@ -4686,9 +4781,10 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # iter-124 (codex iter-123-followup MEDIUM-1):
     # geostrophic_adjustment has no T forcing → T should be
     # conserved.  Apply 1e-8 relative T-drift tolerance.
+    _tol_T, _mode_T = _tracer_drift_tolerance(tc.grid_type, config, z_coord, days)
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
-        label="T", n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, _tol_T,
+        label=f"T[{_mode_T}]", n_samples=len(diag.get("mean_T", [])))
     ok, notes = _apply_value_threshold(
         ok, notes, max_speed_final, 1.0,
         label="max_speed_final", op="lt", units="m/s",
@@ -5428,27 +5524,44 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     # mode (>= 1 day), 2.0 for quick mode (< 1 day).
     # The amplitude_ratio gate stays unchanged — it remains
     # a meaningful sanity check for both modes.
-    l2_threshold = 0.1 if days >= 1.0 else 2.0
-    # iter-140 (iter-139 follow-up MPAS finding): the doc
-    # amp_ratio range [0.8, 1.2] is for FULL mode where the
-    # wave reaches steady state.  Quick-mode coarse-grid runs
-    # (ico3, ~5° resolution, 0.2 days) show legitimate
-    # numerical damping (amp_ratio ~ 0.5-0.85 on cube/MPAS).
-    # Use the same pattern as L2: doc threshold for full
-    # mode, relaxed [0.5, 1.5] for quick.
-    amp_lower = 0.8 if days >= 1.0 else 0.5
-    amp_upper = 1.2 if days >= 1.0 else 1.5
+    # ------------------------------------------------------------------
+    # THE ANALYTIC COMPARISON IS INVALID ON A GLOBAL SPHERE (2026-08-10).
+    # ``eta_exact`` above is an f-PLANE PLANE WAVE:
+    #   * it uses a CONSTANT f0 = 1e-4 s^-1 (an f-plane at 43.3 deg), while
+    #     every arm integrates the full sphere with f = 2*Omega*sin(lat)
+    #     spanning -1.46e-4 .. +1.46e-4;
+    #   * its zonal wavenumber is k = kx/a, which is the true wavenumber
+    #     only at the equator (it is 2x too small at 60 deg, where the true
+    #     value is kx/(a cos lat)).
+    # So the "exact" field is not a solution of the equations any arm is
+    # solving, and the L2 gate is unpassable BY CONSTRUCTION -- measured
+    # L2 ~ 1.0 on latlon, mpas, tripole and fesom alike. (The previously
+    # reported "omega matches on every grid" was not evidence of anything:
+    # ``omega`` is computed by THIS function from the same formula on every
+    # arm and never read from the model.)
+    # Until the case is rebuilt where a Poincare wave is actually defined
+    # -- an f-plane channel, not a global sphere -- the L2/amplitude
+    # numbers are reported as UNGATED DIAGNOSTICS and the case gates only
+    # on what remains meaningful: the run stayed finite and bounded. A gate
+    # that every arm fails for a harness reason discredits the whole
+    # matrix (GLM-5.2 review).
+    notes += " [L2/amp UNGATED: analytic is an f-plane plane wave, "
+    notes += "invalid on the sphere -- see run_inertia_gravity_wave]"
+    # Stability gate that IS meaningful: the wave must not blow up at ANY
+    # sampled time. Using only the FINAL max|eta| would pass a run whose
+    # transient excursion decayed before the last sample, and the
+    # timeloop's own blow-up check is a coarse 100 m / every-100-steps
+    # backstop (codex 2026-08-10).
+    _eta_series = diag.get("max_abs_eta", [])
+    max_eta_run = float(np.max(_eta_series)) if _eta_series else max_eta
+    # CALIBRATED, not guessed (GLM-5.2: an uncalibrated gate is theatre).
+    # MEASURED peak|eta| / IC amplitude over a 2-day run: latlon 1.001,
+    # mpas 1.000, fesom 1.000, tripole 3.428. Gate at 5x -- ~1.5x above
+    # the loosest arm, and far below the runaway growth it exists to catch.
     ok, notes = _apply_value_threshold(
-        ok, notes, l2_err, l2_threshold,
-        label="IGW L2 vs analytical", op="lt")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_lower,
-        label="IGW amplitude_ratio_lower", op="ge")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_upper,
-        label="IGW amplitude_ratio_upper", op="le")
-
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+        ok, notes, max_eta_run, 5.0 * max(max_eta_init, 1e-12),
+        label="IGW max|eta| over run vs IC", op="le", units="m",
+        n_samples=len(_eta_series))
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "H_max": H_max,

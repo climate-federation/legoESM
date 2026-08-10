@@ -2786,18 +2786,27 @@ class TestIter123OceanDriftTolerance:
         code = "\n".join(
             line for line in body.splitlines()
             if not line.lstrip().startswith("#"))
-        # L2 error gate uses days-aware threshold.
-        assert 'label="IGW L2 vs analytical"' in code
-        assert "l2_threshold = 0.1 if days >= 1.0 else 2.0" in code
-        assert "l2_err, l2_threshold" in code
-        # amplitude_ratio range gate, days-aware per iter-140.
-        assert 'label="IGW amplitude_ratio_lower"' in code
-        assert "amp_lower = 0.8 if days >= 1.0 else 0.5" in code
-        assert "amplitude_ratio, amp_lower" in code
-        assert 'op="ge"' in code
-        assert 'label="IGW amplitude_ratio_upper"' in code
-        assert "amp_upper = 1.2 if days >= 1.0 else 1.5" in code
-        assert "amplitude_ratio, amp_upper" in code
+        # 2026-08-10: the L2 / amplitude gates were REMOVED. ``eta_exact``
+        # is an f-plane plane wave (constant f0 = 1e-4, k = kx/a) while
+        # every arm integrates the full sphere (f = 2*Omega*sin(lat), true
+        # k = kx/(a cos lat)), so the comparison is unpassable BY
+        # CONSTRUCTION -- measured L2 ~ 1.0 on latlon, mpas, tripole and
+        # fesom alike. A gate no arm can pass discredits the matrix, so
+        # L2/amplitude are now UNGATED DIAGNOSTICS and the case gates on
+        # stability instead. This test pins that decision: it fails if the
+        # invalid gate is reintroduced without rebuilding the case on an
+        # f-plane channel where a Poincare wave is defined.
+        assert 'label="IGW L2 vs analytical"' not in code, (
+            "the f-plane L2 gate is invalid on a global sphere; rebuild "
+            "the case on an f-plane channel before re-gating it")
+        assert "l2_threshold" not in code
+        # The stability gate that replaced it must be present and must
+        # look at the WHOLE run, not just the final sample.
+        assert 'label="IGW max|eta| over run vs IC"' in code
+        assert "max_eta_run" in code
+        # L2 is still REPORTED (as a diagnostic) so the regression is
+        # visible when the case is eventually fixed.
+        assert "l2_err" in code
 
     def test_iter132_igw_has_l2_and_amplitude_gates_modular(self):
         """iter-132 codex iter-131-followup HIGH-1: modular
@@ -3137,13 +3146,18 @@ class TestIter123OceanDriftTolerance:
         )
         assert m is not None
         body = m.group(0)
-        # Must have a dedicated latlon branch (separate from cube).
-        assert 'elif grid_type == "latlon"' in body, (
-            "iter-138: Phillips IC must dispatch latlon "
+        # 2026-08-10: latlon SHARES this branch with tripole -- the u-face
+        # latitudes now come from _cgrid_face_lat_lon, which serves the
+        # rectilinear and the curvilinear mesh alike. The invariant the
+        # test guards is unchanged: the C-grid arms must NOT fall through
+        # to the cube branch, because their u has shape (n_lat, n_lon+1).
+        assert 'elif grid_type in ("latlon", "tripole")' in body, (
+            "iter-138: Phillips IC must dispatch the C-grid arms "
             "separately to handle u-shape (n_lat, n_lon+1).")
-        # Must broadcast u_jet_1d to (n_lat, n_u_lon).
-        assert "n_u_lon" in body
-        assert "u_jet_1d" in body
+        # The jet must be evaluated at the U-FACE positions (shape
+        # (n_lat, n_lon+1)), which is what the shared helper returns.
+        assert "_cgrid_face_lat_lon(grid)" in body
+        assert "u_jet_2d" in body
 
     def test_iter138_igw_latlon_u_v_edge_fix(self):
         """iter-138 (iter-137 ERROR-2): IGW IC must compute u/v
@@ -3161,10 +3175,14 @@ class TestIter123OceanDriftTolerance:
         )
         assert m is not None
         body = m.group(0)
-        # Must have dedicated latlon branch (separate from cube).
-        assert 'elif grid_type == "latlon"' in body
-        # Must compute lon_u (u-edge longitudes) and lat_v
-        # (v-edge latitudes).
+        # Must have a dedicated C-grid branch (separate from cube).
+        # 2026-08-10: latlon and tripole SHARE it -- the face coordinates
+        # now come from _cgrid_face_lat_lon, which serves both the
+        # rectilinear and the curvilinear mesh.
+        assert 'elif grid_type in ("latlon", "tripole")' in body
+        # Must place u/v perturbations at the FACE positions (now via
+        # the shared helper, which returns lat_u/lon_u/lat_v/lon_v).
+        assert "_cgrid_face_lat_lon(grid)" in body
         assert "lon_u" in body
         assert "lat_v" in body
 
