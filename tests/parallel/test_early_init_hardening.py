@@ -24,6 +24,9 @@ _ALL_ENV = (
     "LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI",
     "LEGOESM_HOST_CUDA_VISIBLE_DEVICES", "LEGOESM_ALLOW_SHARED_GPU",
     "CUDA_DEVICE_ORDER",
+    # Platform selection gates the post-MPI-pin escalation; the suite itself
+    # often runs under JAX_PLATFORMS=cpu, which must not leak into tests.
+    "JAX_PLATFORMS", "JAX_PLATFORM_NAME",
 )
 
 
@@ -31,6 +34,11 @@ _ALL_ENV = (
 def _clean_env(monkeypatch):
     for v in _ALL_ENV:
         monkeypatch.delenv(v, raising=False)
+    # The escalation probe reads /proc/self/fd of the PYTEST process, which
+    # may legitimately hold nvidia fds on a GPU dev box; default it to the
+    # no-driver answer so tests are deterministic.  Escalation tests
+    # re-patch it to True explicitly.
+    monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: False)
     yield
 
 
@@ -457,6 +465,96 @@ def test_shared_gpu_flag_permits_oversubscription(monkeypatch):
     assert ei.pin_local_gpu(local_rank=2, n_local=4) == "0"
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     assert ei.pin_local_gpu(local_rank=3, n_local=4) == "1"
+
+
+# --- #1516 follow-up: the pin must precede MPI_Init (jobs 26829100/26846811,
+# both measured on Levante: a pin applied after `from mpi4py import MPI` is
+# silently ignored by the already-initialised CUDA driver while
+# CUDA_VISIBLE_DEVICES reads as correctly narrowed per rank).  The ordering
+# gate itself lives in tests/unit/test_early_init.py::
+# test_maybe_init_pins_before_mpi_import; here: the n_local=None early-pin
+# contract, the deferred-collective failure, and the fd escalation.
+
+
+def test_pin_local_gpu_unknown_n_local_narrows(monkeypatch):
+    """Pre-MPI early pin: n_local=None narrows by launcher local rank, and
+    rank 0 must NOT hit the single-process no-op (the caller has already
+    established a multi-rank launch)."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert ei.pin_local_gpu(local_rank=0, n_local=None) == "0"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert ei.pin_local_gpu(local_rank=1, n_local=None) == "1"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_pin_local_gpu_unknown_n_local_oversubscription(monkeypatch):
+    """n_local=None: the rank index is the oversubscription witness — local
+    rank i implies >= i+1 ranks on this host."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    with pytest.raises(RuntimeError, match="more local ranks than GPUs"):
+        ei.pin_local_gpu(local_rank=2, n_local=None)
+    # The shared-GPU opt-in spreads round-robin instead (same as n_local>n).
+    monkeypatch.setenv("LEGOESM_ALLOW_SHARED_GPU", "1")
+    assert ei.pin_local_gpu(local_rank=2, n_local=None) == "0"
+
+
+def test_early_pin_failure_defers_to_the_collective_raise(monkeypatch):
+    """A stale SLURM_LOCALID fails the PRE-MPI pin; the raise must still ride
+    the collective gather (lockstep abort), never fire before MPI_Init."""
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("SLURM_LOCALID", "5")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"])
+    with pytest.raises(RuntimeError, match="aborting every rank together"):
+        ei.maybe_init_jax_distributed()
+    # The failed early pin must not have half-narrowed the visibility.
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
+
+
+def test_post_mpi_pin_with_live_cuda_driver_is_refused(monkeypatch):
+    """No launcher local-rank var -> the pin falls back to after MPI_Init.
+    When the process already holds /dev/nvidia* fds the driver has
+    snapshotted the pre-pin CUDA_VISIBLE_DEVICES and the narrowing would be
+    silently ignored (#1516, jobs 26829100/26846811): refuse loudly, in
+    lockstep."""
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: True)
+    _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"])
+    with pytest.raises(RuntimeError, match="AFTER MPI_Init"):
+        ei.maybe_init_jax_distributed()
+
+
+def test_post_mpi_pin_cpu_platform_is_not_refused(monkeypatch):
+    """JAX_PLATFORMS=cpu: no CUDA backend will ever be created, so the
+    post-MPI fallback pin must stay a working no-risk narrowing even with
+    nvidia fds open (a CPU MPI test run on a GPU node)."""
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: True)
+    _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
+    assert ei.maybe_init_jax_distributed() is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_early_pin_applies_before_the_post_mpi_machinery(monkeypatch):
+    """With a launcher local-rank var the pin happens pre-MPI; the post-MPI
+    pin then sees a single visible device and no-ops, and the fd escalation
+    must NOT fire (the early pin preceded any driver snapshot)."""
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    # Driver fds "open": irrelevant, the early pin came first.
+    monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: True)
+    _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
+    assert ei.maybe_init_jax_distributed() is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+    assert os.environ["LEGOESM_HOST_CUDA_VISIBLE_DEVICES"] == "0,1"
 
 
 def test_hostname_undergrouping_falls_back_to_the_shm_split(monkeypatch):

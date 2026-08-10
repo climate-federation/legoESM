@@ -239,7 +239,47 @@ def _openable(path: str) -> bool:
     return True
 
 
-def pin_local_gpu(local_rank: int, n_local: int) -> str | None:
+def _non_gpu_platform_selected() -> bool:
+    """Explicit non-GPU JAX platform selection (``JAX_PLATFORMS=cpu`` etc.).
+
+    Used to scope GPU-binding refusals: a run that will never create a CUDA
+    backend must not die for want of a GPU pin.  An unset/empty selection
+    counts as GPU-possible (JAX defaults to CUDA when it is available).
+    """
+    plats = os.environ.get(
+        "JAX_PLATFORMS", os.environ.get("JAX_PLATFORM_NAME", ""))
+    return bool(plats) and not any(
+        p.strip().lower() in ("cuda", "gpu") for p in plats.split(","))
+
+
+def _cuda_driver_fds_open() -> bool:
+    """Does THIS process already hold open ``/dev/nvidia*`` descriptors?
+
+    A CUDA-aware MPI (Open MPI/UCX) initialises the CUDA driver during
+    ``MPI_Init`` and the driver keeps its device nodes open for the process
+    lifetime — so open ``/dev/nvidia*`` fds after ``MPI_Init`` mean the
+    driver has ALREADY snapshotted ``CUDA_VISIBLE_DEVICES`` and a narrowing
+    applied now will be silently ignored (measured: Levante jobs 26829100 /
+    26846811 — post-pin CVD read '0'/'1' per rank while every rank still
+    enumerated and computed on BOTH GPUs).  Pure ``/proc`` scan; never
+    initialises CUDA itself.  :func:`_openable`'s probe closes its fd
+    immediately, so it cannot trip this.
+    """
+    try:
+        fds = os.listdir("/proc/self/fd")
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("/dev/nvidia"):
+            return True
+    return False
+
+
+def pin_local_gpu(local_rank: int, n_local: int | None) -> str | None:
     """Bind this process to ONE GPU by narrowing ``CUDA_VISIBLE_DEVICES``.
 
     The #693 convention is that the job shim pins one device per rank before
@@ -248,11 +288,20 @@ def pin_local_gpu(local_rank: int, n_local: int) -> str | None:
     the rest of the allocation idles — no error, ~1.0x "speedup", a result
     that reads as a clean refutation of multi-GPU scaling (#1516).
 
-    Must be called before any JAX call that initialises the XLA backend.
+    Must be called before any JAX call that initialises the XLA backend, AND
+    — on a CUDA-aware MPI stack — before ``MPI_Init``: the driver snapshots
+    ``CUDA_VISIBLE_DEVICES`` at first initialisation, so a later narrowing is
+    silently ignored (measured, Levante jobs 26829100 / 26846811).
 
     Args:
         local_rank: this process's rank among the processes on THIS host.
-        n_local: how many processes share this host.
+        n_local: how many processes share this host, or ``None`` when that is
+            not yet knowable (the pre-``MPI_Init`` early pin, which has only
+            the launcher environment).  With ``None`` the rank index itself
+            is the oversubscription witness — a launcher-reported node-local
+            rank ``i`` implies at least ``i+1`` ranks on this host — and the
+            single-process no-op is skipped (the caller has already
+            established a multi-rank launch and a launcher local-rank var).
 
     Returns the ``CUDA_VISIBLE_DEVICES`` value it set, or ``None`` when
     nothing needed changing (already pinned to a single device, single
@@ -272,10 +321,12 @@ def pin_local_gpu(local_rank: int, n_local: int) -> str | None:
             :func:`maybe_init_jax_distributed`.
     """
     visible = _host_visible_gpus()
-    if n_local <= 1 or len(visible) <= 1:
+    if (n_local is not None and n_local <= 1) or len(visible) <= 1:
         # Single process per host, already shim-pinned, or CPU-only host.
         return None
-    if n_local > len(visible):
+    oversubscribed = (n_local > len(visible) if n_local is not None
+                      else local_rank >= len(visible))
+    if oversubscribed:
         if os.environ.get("LEGOESM_ALLOW_SHARED_GPU") == "1":
             # Deliberate oversubscription (MPS): spread round-robin instead of
             # refusing.  Without this the flag would be a lie — it gated only
@@ -286,6 +337,18 @@ def pin_local_gpu(local_rank: int, n_local: int) -> str | None:
             os.environ["CUDA_VISIBLE_DEVICES"] = visible[
                 local_rank % len(visible)]
             return os.environ["CUDA_VISIBLE_DEVICES"]
+        if n_local is None:
+            # Pre-MPI_Init early pin: the launcher local-rank index already
+            # exceeds the visible devices.  Either genuinely more local ranks
+            # than GPUs, or a stale *_LOCAL_RANK/SLURM_LOCALID inherited from
+            # an outer allocation — pre-MPI the two are indistinguishable.
+            raise RuntimeError(
+                f"launcher node-local rank {local_rank} but only "
+                f"{len(visible)} GPU(s) visible: more local ranks than GPUs "
+                f"(or a stale SLURM_LOCALID/*_LOCAL_RANK from an outer "
+                f"allocation). Fix the launcher tasks-per-node, pin "
+                f"CUDA_VISIBLE_DEVICES yourself (one rank per GPU), or set "
+                f"LEGOESM_ALLOW_SHARED_GPU=1 to share deliberately.")
         raise RuntimeError(
             f"{n_local} ranks share this host but only {len(visible)} GPU(s) "
             f"are visible: more local ranks than GPUs. Fix the launcher "
@@ -565,18 +628,32 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if ntasks <= 1:
         return False
 
-    # KNOWN GAP (#1516 follow-up, carried over from the #1541 investigation):
-    # the per-rank pin below happens AFTER this mpi4py import, and on a
-    # CUDA-aware MPI stack (Levante: Open MPI/UCX) MPI_Init initialises the
-    # CUDA driver, which snapshots CUDA_VISIBLE_DEVICES at first
-    # initialisation — so a pin applied afterwards can be silently ignored
-    # (measured on that branch, job 26829100: post-pin CVD='0'/'1' per rank,
-    # yet every rank still enumerated BOTH GPUs and computed on device 0).
-    # Pinning earlier is not a comment-move: `n_local` is derived from MPI's
-    # own shared-memory split below, and the raise is deliberately COLLECTIVE.
-    # Tracked by the strict-xfail ordering gate
-    # tests/unit/test_early_init.py::test_maybe_init_pins_before_mpi_import,
-    # which flips to a hard failure the moment the ordering is fixed.
+    # Per-rank GPU pin BEFORE the mpi4py import (#1516 follow-up): a
+    # CUDA-aware MPI stack (Levante: Open MPI/UCX) initialises the CUDA
+    # driver during MPI_Init, and the driver snapshots CUDA_VISIBLE_DEVICES
+    # at first initialisation — a pin applied after the import is silently
+    # IGNORED while the env var reads correctly per rank (measured twice:
+    # job 26829100 on the #1541 branch and job 26846811 on the merged tree —
+    # post-pin CVD='0'/'1', yet both ranks enumerated BOTH GPUs and NVML
+    # placed both PIDs on both devices).  The early pin needs only the
+    # launcher environment: node-local rank from _launcher_local_rank();
+    # n_local is unknowable pre-MPI, so pin_local_gpu(n_local=None) uses the
+    # rank index itself as the oversubscription witness.  Failures are
+    # DEFERRED as strings and raised through the COLLECTIVE gather below —
+    # a per-rank raise before MPI_Init can leave healthy peers blocked
+    # forever in the rendezvous (the GLM-5.2 lockstep-abort guarantee).
+    # Launchers exporting no local-rank var fall through to the post-MPI pin
+    # below, guarded by the _cuda_driver_fds_open() escalation.
+    early_err: str | None = None
+    early_pinned: str | None = None
+    _lr_early = _launcher_local_rank()
+    if _lr_early is not None:
+        try:
+            early_pinned = pin_local_gpu(
+                local_rank=int(_lr_early[1]), n_local=None)
+        except RuntimeError as exc:
+            early_err = str(exc)
+
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -617,15 +694,51 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     # around (GLM-5.2).
     _lr = _launcher_local_rank()
     local_rank = int(_lr[1]) if _lr is not None else node_rank
-    try:
-        pinned = pin_local_gpu(local_rank=local_rank, n_local=n_local)
-        # Resolved HERE, not at the `initialize()` call below, so that its
-        # own "more local ranks than visible GPUs" raise also rides the
-        # collective gather — otherwise one rank with a stale SLURM_LOCALID
-        # dies while the rest block in the rendezvous (codex).
-        device_ids, pin_err = _pals_local_device_ids(), None
-    except RuntimeError as exc:
-        pinned, device_ids, pin_err = None, None, str(exc)
+    if early_err is not None:
+        # The pre-MPI pin already failed for THIS rank; carry that into the
+        # collective gather below instead of re-attempting a pin whose
+        # narrowing the CUDA driver may no longer honour.
+        pinned, device_ids, pin_err = None, None, early_err
+    else:
+        try:
+            # No-op when the early pin already narrowed CVD to one device;
+            # otherwise (no launcher local-rank var) this is the post-MPI
+            # fallback pin, validated against the reconciled n_local.
+            pinned = pin_local_gpu(local_rank=local_rank, n_local=n_local)
+            # Resolved HERE, not at the `initialize()` call below, so that
+            # its own "more local ranks than visible GPUs" raise also rides
+            # the collective gather — otherwise one rank with a stale
+            # SLURM_LOCALID dies while the rest block in the rendezvous
+            # (codex).
+            device_ids, pin_err = _pals_local_device_ids(), None
+        except RuntimeError as exc:
+            pinned, device_ids, pin_err = None, None, str(exc)
+        if (pinned is not None and early_pinned is None
+                and not _non_gpu_platform_selected()
+                and os.environ.get("LEGOESM_ALLOW_SHARED_GPU") != "1"
+                and _cuda_driver_fds_open()):
+            # The narrowing was applied only NOW, after MPI_Init (no launcher
+            # local-rank variable was available for the early pin), and this
+            # process already holds open /dev/nvidia* fds: a CUDA-aware MPI
+            # initialised the driver during MPI_Init, the driver snapshotted
+            # the PRE-pin CUDA_VISIBLE_DEVICES, and the pin above will be
+            # silently ignored — every local rank then computes on GPU 0
+            # while the env var reads as correctly pinned (#1516, measured:
+            # jobs 26829100 / 26846811).  Refusing loudly here is the
+            # documented alternative to silently restoring that defect.
+            pin_err = (
+                f"CUDA_VISIBLE_DEVICES was narrowed to {pinned!r} only "
+                f"AFTER MPI_Init, and this process already holds open "
+                f"/dev/nvidia* file descriptors — a CUDA-aware MPI has "
+                f"initialised the CUDA driver, which snapshots "
+                f"CUDA_VISIBLE_DEVICES at first initialisation, so the pin "
+                f"would be silently ignored and the local ranks would share "
+                f"one GPU (#1516). Launch with a launcher that exports a "
+                f"node-local rank (srun: SLURM_LOCALID; Open MPI mpirun: "
+                f"OMPI_COMM_WORLD_LOCAL_RANK), pre-pin CUDA_VISIBLE_DEVICES "
+                f"per rank before python starts, or set "
+                f"LEGOESM_ALLOW_SHARED_GPU=1 if sharing is intended.")
+            pinned = None
     # Duplicate-binding tripwire.  Two silent ways to end up with two ranks on
     # one GPU survive everything above, because from a single rank's
     # environment they are INDISTINGUISHABLE from correct pinning (codex):
@@ -667,13 +780,16 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
         raise RuntimeError(
             "GPU pinning failed, aborting every rank together: "
             + "; ".join(f"rank {r}: {e}" for r, e in pin_errs))
-    if pinned is not None:
+    effective_pin = early_pinned if early_pinned is not None else pinned
+    if effective_pin is not None:
         # Name both indices: after the mask JAX numbers the pinned device 0,
         # so a reader correlating this line with `jax.devices()[0].id == 0`
         # would otherwise read a successful pin as a failed one (GLM-5.2).
+        when = "pre-MPI_Init" if early_pinned is not None else "post-MPI_Init"
         print(f"[early_init] rank {rank} on {hosts[rank]}: pinned to host GPU "
-              f"{pinned} (CUDA_VISIBLE_DEVICES={pinned}; JAX will call it "
-              f"local device 0)", flush=True)
+              f"{effective_pin} ({when}; CUDA_VISIBLE_DEVICES="
+              f"{effective_pin}; JAX will call it local device 0)",
+              flush=True)
     if len(set(hosts)) <= 1:
         # Single-node MPI: JAX distributed is not needed — the per-rank
         # GPU binding was already applied above (#1516); unpinned, every
