@@ -202,8 +202,11 @@ def check_deck_record(record: dict) -> list[str]:
         if not same:
             problems.append(f"{key}: npz has {got!r}, deck is {want!r}")
     sha = record.get("git_sha")
-    if not (isinstance(sha, str) and len(sha) >= 40
-            and all(ch in "0123456789abcdef" for ch in sha[:40])):
+    # exactly 40 hex chars — the runner emits plain `rev-parse HEAD`
+    # (never a -dirty suffix), so a longer string is malformed, not a
+    # variant (codex c6 r4 #2)
+    if not (isinstance(sha, str) and len(sha) == 40
+            and all(ch in "0123456789abcdef" for ch in sha)):
         # well-formedness only — a 40-hex SHA can still be copied into
         # a forged npz; the SELF-ATTESTATION limitation above stands
         problems.append(

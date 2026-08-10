@@ -433,7 +433,9 @@ def test_deck_record_rejects_type_impersonation(key, val):
 
 
 @pytest.mark.parametrize("sha", ["", "unknown", "abc123", None,
-                                 "g" * 40, 12345])
+                                 "g" * 40, 12345,
+                                 "a" * 40 + "-junk",     # suffix (r4 #2)
+                                 "a" * 41])
 def test_deck_record_rejects_malformed_git_sha(sha):
     rec = {k: v for k, v in gate.DECK_RECORD.items()}
     if sha is not None:
