@@ -232,6 +232,23 @@ def _build_spectral_config(cfg: dict[str, Any]):
             "aimip_variant=sfno_full or remove the knob."
         )
 
+    # ``aimip_grid`` was a DEAD KEY: every AIMIP config declares it, nothing
+    # read it, and the grid is hardcoded ``create_gaussian_grid`` at two sites
+    # below. A suite asking for "mpas" or "latlon" silently got a Gaussian
+    # spectral grid — the same silent-wrong-config trap that had `fix_mass`
+    # reaching a code path the forecast never executes. Refuse instead of
+    # advertising a choice that does not exist. (The lat-lon and MPAS AIMIP
+    # lanes live in run_aimip_latlon.py, which builds its own grid.)
+    _grid = str(cfg.get("aimip_grid", "gaussian"))
+    if _grid != "gaussian":
+        raise SystemExit(
+            f"aimip_grid={_grid!r} is not supported by run_aimip.py, which "
+            "builds a Gaussian spectral grid unconditionally. This key was "
+            "silently ignored before, so a suite could ask for another grid "
+            "and get Gaussian anyway. Use scripts/run/run_aimip_latlon.py for "
+            "the lat-lon C-grid lane, or set aimip_grid: gaussian."
+        )
+
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
         # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
@@ -250,11 +267,24 @@ def _build_spectral_config(cfg: dict[str, Any]):
             spectral_filter_strength=float(
                 cfg.get("spectral_filter_strength", 0.01)),
             spectral_filter_order=int(cfg.get("spectral_filter_order", 8)),
+            # Dry-mass anchor, OFF by default (SpectralPEConfig's own default),
+            # so every existing arm is byte-identical. Reachable from a suite
+            # because the dycore arms drift: the 8-init 2017 scorecards give an
+            # area-weighted mslp bias of -202 Pa at 24 h growing to -1.64e3 Pa
+            # at 240 h for BOTH classical and column_nn, while sfno_full — no
+            # dycore, and its SFNO physics projects the global mean out of
+            # dlnps/dt — sits at -56 / -84 Pa. 65% of classical's day-10 z500
+            # MSE is that bias. The anchor is the dycore's existing answer to
+            # exactly this drift and had no way to be switched on from AIMIP.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
         sfno_mlp_expansion=sfno_mlp_expansion,
         sfno_dropout=sfno_dropout,
+        sfno_history_steps=int(cfg.get("sfno_history_steps", 0)),
         crps_finetune_epochs=crps_ft_epochs,
         crps_ensemble_size=crps_ensemble_size,
         muon_lr_scale=float(cfg.get("muon_lr_scale", 1.0)),
@@ -527,7 +557,7 @@ def _train_aimip_classical(
     if _scheme_tier:
         from legoesm.training.aimip_params import (
             AIMIPTrainableBundle,
-            aimip_legacy_owned_scheme_keys,
+            aimip_legacy_owned_fields,
             aimip_scheme_keys_for,
         )
         from legoesm.training.param_collector import build_trainable_params
@@ -535,28 +565,33 @@ def _train_aimip_classical(
         _active = aimip_scheme_keys_for(
             convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
             microphysics=micro_scheme, radiation=radiation,
+            cloud=cloud_scheme,
         )
-        _legacy = aimip_legacy_owned_scheme_keys()
-        _keys = _active - _legacy
-        if not _keys:
+        # FIELD-level ownership (was class-level, which suppressed spec-only
+        # fields of legacy-touched classes — Sundqvist qc_crit, McFarlane
+        # fcrit2, most of CloudConfig — so they trained nowhere): exclude only
+        # the fields the legacy to_*_config methods actually write, since
+        # _splice_scheme_overrides would overwrite exactly those.
+        _owned = aimip_legacy_owned_fields(cloud_scheme=cloud_scheme)
+        _scheme_params = build_trainable_params(
+            active_scheme_keys=_active,
+            tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
+            exclude=tuple(sorted(_owned)),
+        )
+        _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
+        if _n_scheme == 0:
             raise SystemExit(
                 f"aimip_trainable_schemes={_scheme_tier!r} but no active "
                 f"scheme (conv={conv_scheme} turb={turb_scheme} "
-                f"gwd={gwd_scheme} micro={micro_scheme} rad={radiation}) "
-                "adds a spec-declared parameter beyond what the legacy "
-                f"AIMIPClassicalParams already trains ({sorted(_active & _legacy)}) "
-                "— the knob would train nothing new."
+                f"gwd={gwd_scheme} micro={micro_scheme} rad={radiation} "
+                f"cloud={cloud_scheme}) adds a spec-declared parameter beyond "
+                "the legacy-owned fields — the knob would train nothing new."
             )
-        _scheme_params = build_trainable_params(
-            active_scheme_keys=_keys,
-            tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
-        )
-        _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
         params = AIMIPTrainableBundle(classical=params, schemes=_scheme_params)
         logger.info(
             "AIMIP classical: %d spec-driven scheme parameter(s) trainable "
-            "(tier=%s) across %s; %s left to the legacy leaves",
-            _n_scheme, _scheme_tier, sorted(_keys), sorted(_active & _legacy))
+            "(tier=%s) across %s; %d legacy-owned field(s) excluded",
+            _n_scheme, _scheme_tier, sorted(_active), len(_owned))
 
     # Resume AFTER the bundle wrap: Equinox accepts a PREFIX template, so
     # deserialising a bundle checkpoint into a bare AIMIPClassicalParams

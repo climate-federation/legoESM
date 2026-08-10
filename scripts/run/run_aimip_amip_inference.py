@@ -86,6 +86,12 @@ def _build_spec_cfg(cfg: dict):
             hyperdiff_coeff=2.5e15, hyperdiff_order=2,
             time_integrator="ssp_rk3",
             spectral_filter_strength=0.01, spectral_filter_order=8,
+            # Forwarded so a suite's dry-mass anchor is not silently
+            # ignored on the prescribed-SST lane; default False keeps
+            # every existing AMIP run byte-identical.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
         ),
         n_epochs=1, lr=float(cfg.get("aimip_lr", 3.0e-4)),
         weight_decay=float(cfg.get("aimip_weight_decay", 1.0e-5)),

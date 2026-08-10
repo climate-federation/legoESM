@@ -1,0 +1,42 @@
+# CLASSICAL, TRAINED WITH THE DRY-MASS ANCHOR ON.
+#
+# One field against its baseline (suite_classical_v3.yaml):
+#     fix_mass: false -> true
+#     anchor_mass_to_initial: false -> true
+#
+# NOT speculative. The eval-only A/B (job 26793199) ran the SAME column_nn
+# checkpoint through the SAME 8-init 2017 protocol with the anchor off and on
+# and CONFIRMED the mechanism -- area-weighted mslp bias at 240 h went
+# -1.63e3 Pa -> -41.9 Pa, a 39x reduction, and flat with lead instead of
+# secular. RMSE followed: mslp 240 h 2.46e3 -> 1.87e3 Pa (-24%), z500 240 h
+# 215 -> 202 m (-6.1%), t850 240 h 6.80 -> 6.50 K. Winds and t2m unchanged, as
+# expected from a correction that only touches the lnps global mean.
+#
+# WHY TRAIN WITH IT rather than only anchor at eval: the A/B anchored a model
+# TRAINED unanchored, which is a train/eval mismatch -- the physics learned to
+# live with a drifting p_s. Training under the same constraint removes that
+# mismatch and is the version that should ship.
+#
+#   CONFIRMS: z500 / mslp at 120-240 h below the eval-only-anchored numbers.
+#   REFUTES:  no better than eval-only anchoring -> the constraint adds nothing
+#             during learning and belongs only in inference.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  # ~1.5x epochs/phase vs suite_curriculum_most (2/2/2/1 -> 3/3/3/2 = 11).
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_classical_anchored

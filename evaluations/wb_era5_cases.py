@@ -134,7 +134,7 @@ def _build_verification(ds, time_idx, resolution_deg):
 
 def build_forecast_cases(
     era5_cfg, grid, sigma, *, leads_hours, eval_year, n_inits,
-    init_stride_hours, resolution_deg, ds=None,
+    init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -209,7 +209,14 @@ def build_forecast_cases(
                 f"(n_times={n_times}); reduce --n-inits or --init-stride-hours.")
 
         ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds)
-        init_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
+        # ``smoothing_passes`` is exposed (default 4 = unchanged) so the
+        # orography treatment can be SWEPT. The ERA5 phis is smoothed to be
+        # representable at the model truncation and ``p_s`` is hydrostatically
+        # reconciled to it, and that reconciliation was measured to account for
+        # 76% of the fixed 6 h surface-pressure offset — so varying it is the
+        # perturbation test for that attribution.
+        init_carry = era5_to_spectral_carry(
+            ic_slice, grid, sigma, smoothing_passes=smoothing_passes)
         init_state = carry_to_spectral_state(init_carry, grid)
 
         # Prescribed-SST forcing on the Gaussian grid (flat ncol), 1-based

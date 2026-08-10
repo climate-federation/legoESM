@@ -974,9 +974,13 @@ class TestTrainingDriver:
         # _training_loop control flow (filter_jit, value_and_grad, optimiser
         # update) without the heavy dycore.
         monkeypatch.setattr(td, "build_segment_fn", counting_build)
+        # ``hours=`` is now passed by the trainer: the supervision horizon must
+        # match the lead the targets were loaded at, so the fake has to accept
+        # it or it hides the very forwarding this file exercises.
         monkeypatch.setattr(
             td, "single_day_rollout",
-            lambda ic, forcing, run_seg_fn, dt: run_seg_fn(ic, 1, forcing),
+            lambda ic, forcing, run_seg_fn, dt, hours=24.0: run_seg_fn(
+                ic, 1, forcing),
         )
         monkeypatch.setattr(
             td, "combined_loss",
@@ -991,11 +995,17 @@ class TestTrainingDriver:
                 **trainable.to_segment_kwargs(),
             )
 
+        from legoesm.training.losses import LossConfig
+
         params = TrainablePhysicsParams.from_defaults()
         optimizer = optax.adam(1e-3)
+        # A REAL LossConfig, not None: the trainer routes through
+        # ``multi_step_rollout_loss``, which reads ``multi_step_hours`` off it.
+        # ``None`` only worked while the trainer inlined its own single-horizon
+        # rollout and never looked at the config.
         train_step = td._build_train_step(
             make_run_seg, optimizer,
-            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, None,
+            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, LossConfig(),
         )
 
         ics = [jnp.asarray(1.0), jnp.asarray(2.0)]

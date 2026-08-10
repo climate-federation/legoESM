@@ -1,0 +1,40 @@
+# COLUMN_NN ARM A: the U-Cast optimizer, and nothing else.
+#
+# Controlled against config/aimip/ace2/suite_curriculum_v2.yaml (the arm that
+# produced results/bench_wb2_v2/column_nn_v2_scorecard.json, z500 24 h 90.9 m),
+# changing exactly two fields that together are ONE knob -- the optimizer:
+#
+#     aimip_optimizer: adamw -> muon_partitioned
+#     muon_lr_scale:   1.0   -> 10.0   (the 10:1 Muon/AdamW ratio)
+#
+# On sfno_full this pair was worth -24.7 % on z500 at 24 h (21.72 -> 16.35 m),
+# the largest non-data win of the U-Cast campaign. column_nn's physics is a
+# per-column MLP, i.e. 2-D weight matrices, which is exactly the leaf class
+# Muon's orthogonalised update is for -- so the transfer is plausible here in
+# a way it is NOT for the classical arm (124 SCALAR knobs, which
+# muon_partitioned routes to the AdamW branch, making muon_lr_scale a no-op).
+#
+#   CONFIRMS: z500 24 h below 90.9 m on the SAME 8-init eval protocol.
+#   REFUTES:  no better, or NaN -> Muon's gain is architecture-specific to
+#             SFNO and does not transfer to the hybrid dycore+MLP arm.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  aimip_optimizer: muon_partitioned
+  muon_lr_scale: 10.0
+  # 6h+12h short-lead phases (sharpen) + 24/72/120 (stability), 120h x2
+  # consolidation. dt=600s: 6h=36, 12h=72, 24h=144, 72h=432, 120h=720 steps.
+  # Total epochs = 2+3+2+2+2 = 11.
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+output_dir: results/aimip_cnn_muonlr

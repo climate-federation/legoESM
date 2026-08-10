@@ -398,11 +398,44 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
         from legoesm.training.aimip_params import AIMIPClassicalParams
         # Matches _train_aimip_classical: spatial_surface + init_std + seed all
         # read from the SAME cfg keys with the SAME defaults.
-        return AIMIPClassicalParams.from_defaults(
+        skeleton = AIMIPClassicalParams.from_defaults(
             spatial_surface=bool(cfg.get("aimip_spatial_surface", False)),
             spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
             spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
         )
+        # aimip_trainable_schemes wraps the checkpoint in an
+        # AIMIPTrainableBundle (legacy leaves + spec-driven scheme params);
+        # deserialising such a checkpoint into a bare AIMIPClassicalParams
+        # fails on leaf mismatch. Mirror run_aimip's construction exactly
+        # (same cfg keys, same field-level ownership exclusion) so the eval
+        # skeleton matches what was trained.
+        if cfg.get("aimip_trainable_schemes"):
+            from legoesm.training.aimip_params import (
+                AIMIPTrainableBundle,
+                aimip_legacy_owned_fields,
+                aimip_scheme_keys_for,
+            )
+            from legoesm.training.param_collector import (
+                build_trainable_params,
+            )
+            _tier = cfg.get("aimip_trainable_schemes")
+            _keys = aimip_scheme_keys_for(
+                convection=str(cfg.get("aimip_convection", "tiedtke")),
+                turbulence=str(cfg.get("aimip_turbulence", "louis")),
+                gwd=str(cfg.get("aimip_gwd", "mcfarlane")),
+                microphysics=str(cfg.get("aimip_microphysics", "none")),
+                radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
+                cloud=str(cfg.get("aimip_cloud", "xu_randall")),
+            )
+            schemes = build_trainable_params(
+                active_scheme_keys=_keys,
+                tier=(_tier if isinstance(_tier, str) else "extended"),
+                exclude=tuple(sorted(aimip_legacy_owned_fields(
+                    cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall"))))),
+            )
+            skeleton = AIMIPTrainableBundle(
+                classical=skeleton, schemes=schemes)
+        return skeleton
 
     if variant == "column_nn":
         from legoesm.atmosphere.physics.neural_physics import (

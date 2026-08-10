@@ -1,0 +1,38 @@
+# COLUMN_NN, anchored curriculum, retrained under the lnps-filter fix.
+#
+# ONE variable against suite_curriculum_v2_anchored.yaml (jobs 26794955 /
+# 26801540): the post-step spectral filter no longer damps lnps
+# (apply_spectral_filter_to_state default filter_lnps=False). Config is
+# otherwise byte-identical; only output_dir differs.
+#
+# WHY. Measured 2026-08-09 (scripts/validate/aimip_pressure_spinup.py
+# --vs-reconciled, 6 cases, 6 h, T63L8): filtering lnps at strength 0.01
+# every 600 s step while static phis keeps full truncation sharpness turns a
+# 213 Pa fixed direct-p_s offset into 1108 Pa with zero physics (1147 Pa with
+# the trained MLP; land 1623 / ocean 794 Pa), 99% of the arm's 6 h p_s error
+# variance. The per-case residual is only ~108 Pa, so removing the offset is
+# expected to take the 6 h mslp score from ~1200 Pa to the few-hundred-Pa
+# class and the z500 24 h score toward the sfno_full band.
+#
+#   CONFIRMS: 6 h mslp fixed-pattern < ~400 Pa on the WB2 scorecard and z500
+#             24 h well below the 90.8 m anchored baseline.
+#   REFUTES:  scores unchanged -> the offset re-emerges through training and
+#             the filter attribution does not transfer to the trained arm.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+output_dir: results/aimip_cnn_anchored_lnpsfix

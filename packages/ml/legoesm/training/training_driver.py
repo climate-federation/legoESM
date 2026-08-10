@@ -97,6 +97,22 @@ def build_training_segment(model, step_unified, grid, sigma, dt,
     sigma_full = jnp.asarray(sigma.sigma_full)
     if fric_decay is None:
         fric_decay = jnp.ones(sigma_full.shape[0])
+    # DEFAULTS, not hardcodes. These four used to be passed positionally-by-name
+    # alongside ``**extra_kwargs``, so ANY caller supplying one of them —
+    # ``microphysics`` is the common case — died with
+    #   TypeError: build_segment_fn() got multiple values for keyword argument
+    # which is how the classical lat-lon AIMIP variant kept failing. Worse than
+    # the crash is what the hardcodes meant when nobody passed them: every
+    # carry-based training rollout ran with NO microphysics and NO mass fixer
+    # regardless of the experiment's configuration, so the tuned model was not
+    # the configured model. Caller values now win.
+    seg_defaults = dict(
+        rad_update_steps=1,
+        microphysics="none",
+        fix_moisture=False,
+        fix_mass=False,
+    )
+    seg_defaults.update(extra_kwargs)
     return build_segment_fn(
         model=model,
         step_unified=step_unified,
@@ -104,10 +120,6 @@ def build_training_segment(model, step_unified, grid, sigma, dt,
         sigma_full=sigma_full,
         dsigma=jnp.asarray(sigma.dsigma),
         dt=dt,
-        rad_update_steps=1,
-        microphysics="none",
-        fix_moisture=False,
-        fix_mass=False,
         fric_decay=jnp.asarray(fric_decay),
         # Kept 0.0 on every grid: finalize_split_step's q_v smoothing calls the
         # cube ``hyperdiffusion_3d`` (reads cube-only ``grid.halo_interp_offsets``)
@@ -123,11 +135,12 @@ def build_training_segment(model, step_unified, grid, sigma, dt,
         lon=getattr(grid, "lon2d", grid.lon),
         start_day=0.0,
         gradient_checkpoint=True,
-        **extra_kwargs,
+        **seg_defaults,
     )
 
 
-def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config):
+def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+                      rollout_hours: float = 24.0):
     """Build the ONCE-jitted differentiable train step shared by all modes.
 
     This is the core of the OOM/recompile fix.  The previous driver built
@@ -175,9 +188,24 @@ def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config
             # donation conflicts with reverse-mode AD, so it MUST stay
             # inside ``filter_value_and_grad`` (do not swap for a donating
             # variant).
-            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-            return combined_loss(
-                pred, target, sigma_full, grid=grid, config=loss_config,
+            #
+            # Route through the SHARED rollout+loss instead of an inline
+            # ``single_day_rollout`` + ``combined_loss``. Two reasons:
+            #
+            # * the horizon MUST match the lead the targets were loaded at —
+            #   ``single_day_rollout`` defaults to 24 h, and the lat-lon driver
+            #   loads 6 h targets, a mismatch that trains without error and
+            #   forecasts badly;
+            # * ``multi_step_rollout_loss`` is documented as "shared by every
+            #   AIMIP trainer so the rollout+loss is defined ONCE", but nothing
+            #   in production called it — its only caller was its own unit test.
+            #   So ``loss_config.multi_step_hours`` was SILENTLY IGNORED: the
+            #   lat-lon driver built tuple-of-lead targets and passed them to a
+            #   loss that only ever did one rollout.
+            return multi_step_rollout_loss(
+                ic, forcing, run_seg.raw, dt=dt,
+                rollout_hours=rollout_hours, target=target,
+                sigma_full=sigma_full, grid=grid, loss_config=loss_config,
             )
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
@@ -375,6 +403,7 @@ def train_physics_params(
     target_carries,
     forcings,
     *,
+    rollout_hours: float = 24.0,
     n_epochs: int = 100,
     lr: float = 1e-3,
     dt: float = 600.0,
@@ -382,6 +411,8 @@ def train_physics_params(
     warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
+    rad_stop_gradient: bool = False,
+    **segment_kwargs,
 ):
     """Train physics parameters via gradient descent through the dycore.
 
@@ -395,6 +426,17 @@ def train_physics_params(
     target_carries : list of SegmentCarry — targets from ERA5
     forcings : list of SegmentForcing — SST/SIC forcing per sample
     n_epochs, lr, dt, loss_config, log_every : training config
+    rollout_hours : float
+        Supervision horizon [h]. MUST equal the lead the ``target_carries``
+        were loaded at — ``single_day_rollout`` defaults to 24 h, so leaving
+        it implicit silently scores a 24 h forecast against a 6 h target.
+    rad_stop_gradient : bool
+        Treat radiation as a forcing (no gradient through it).
+    **segment_kwargs
+        Physics configuration of the rollout, forwarded verbatim to
+        ``build_training_segment`` (``microphysics``, ``rad_update_steps``,
+        ...). Not decoration: a rollout built without the caller's settings
+        is a different model from the one being tuned.
 
     Returns
     -------
@@ -404,16 +446,24 @@ def train_physics_params(
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
     params = TrainablePhysicsParams.from_defaults()
-    step_unified = physics_pipeline.build_step_unified()
+    step_unified = physics_pipeline.build_step_unified(
+        rad_stop_gradient=rad_stop_gradient)
     sigma_full = jnp.asarray(sigma.sigma_full)
 
     def make_run_seg(trainable):
         # ``step_unified`` is param-independent (built once above); only the
         # segment kwargs carry the (traced) trainable values, so the gradient
         # path to ``trainable`` runs through ``build_segment_fn``.
+        # MERGE, do not double-splat: ``to_segment_kwargs()`` and the caller's
+        # ``segment_kwargs`` overlap (both carry ``microphysics``), and two
+        # ``**`` of the same key is a TypeError at the call — which is how the
+        # classical lat-lon variant died even after the signature was restored.
+        # The TRAINED value wins: it is the quantity being optimised, and
+        # letting the caller's static default override it would silently zero
+        # that parameter's gradient contribution to the rollout.
+        seg_kw = {**segment_kwargs, **trainable.to_segment_kwargs()}
         return build_training_segment(
-            model, step_unified, grid, sigma, dt,
-            **trainable.to_segment_kwargs(),
+            model, step_unified, grid, sigma, dt, **seg_kw,
         )
 
     optimizer = _make_driver_optimizer(
@@ -422,6 +472,7 @@ def train_physics_params(
     )
     train_step = _build_train_step(
         make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+        rollout_hours=rollout_hours,
     )
     return _training_loop(
         train_step, params, optimizer,
@@ -443,6 +494,7 @@ def train_neural_gcm(
     target_carries,
     forcings,
     *,
+    rollout_hours: float = 24.0,
     n_epochs: int = 100,
     lr: float = 1e-4,
     dt: float = 600.0,
@@ -451,6 +503,7 @@ def train_neural_gcm(
     warmup_steps: int = _DRIVER_WARMUP_STEPS,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
+    **segment_kwargs,
 ):
     """Train a neural physics network coupled to the dycore.
 
@@ -473,7 +526,8 @@ def train_neural_gcm(
 
     def make_run_seg(nn_phys):
         step_unified = make_neural_step_unified(nn_phys, adapter)
-        return build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(
+            model, step_unified, grid, sigma, dt, **segment_kwargs)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),
@@ -482,6 +536,7 @@ def train_neural_gcm(
     )
     train_step = _build_train_step(
         make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
+        rollout_hours=rollout_hours,
     )
     return _training_loop(
         train_step, neural_physics, optimizer,
