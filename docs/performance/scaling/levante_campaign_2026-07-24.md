@@ -2889,3 +2889,22 @@ failing job; node-set/cache/dump hypotheses all retracted against
 receipts). Excluded in all launchers until DKRZ resolves. Also: the
 XLA profiler's 1M-event cap silently fills with compile-phase host
 events if the trace spans compile — trace steady steps only.
+
+### RETRACTION (same evening): the cross-rank start-spread numbers are invalid
+
+The "median START spread 89 us / p90 360 us, calibration passed" claim
+is RETRACTED. Two instrument defects, found by self-check + codex
+review of the analyzer: (1) jax trace timestamps are RELATIVE to each
+process's own start_trace call (first event ~1.4 ms on every rank), so
+raw cross-rank deltas carry the per-process trace-start offset — itself
+a skew-class quantity; (2) after END-anchored offset correction the END
+spread does NOT collapse (64 us residual), which exposes the deeper
+flaw: overlap-based matching pairs collectives of CONCURRENT rounds
+whose ranks are NOT partners, and non-partner ends have no coincidence
+property to calibrate on. The per-rank attribution (7.1 ms
+in-collective / 2.4 ms compute / 1.2 ms gaps per step) is single-clock
+and STANDS. A quotable spread needs PARTNER-AWARE matching against the
+ppermute schedule (round -> partner map from spmd_schedule_cost);
+until then the skew reading rests on the indirect evidence (in-kernel
+215 us vs 30 us wire + the wide-halo drain-conservation null), which
+is PLAUSIBLE, not CONFIRMED.

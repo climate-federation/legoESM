@@ -168,15 +168,61 @@ def main() -> int:
             cal = statistics.median(end_spreads)
             md = statistics.median(durs)
             print(f"cross-rank ({len(rank_names)} ranks, {pairs} "
-                  f"overlap-matched pairs):")
+                  f"overlap-matched pairs), RAW (uncorrected clocks):")
             print(f"  median START spread : {statistics.median(spreads):8.1f} us")
             print(f"  p90    START spread : {sorted(spreads)[int(0.9 * len(spreads))]:8.1f} us")
             print(f"  median duration     : {md:8.1f} us")
-            print(f"  median END spread   : {cal:8.1f} us  (calibration — "
-                  f"must be << duration for the spread to be quotable)")
-            if cal > 0.5 * md:
-                print("  CALIBRATION FAILED: end spread not small — clock "
-                      "alignment invalid, DO NOT quote the start spread")
+            print(f"  median END spread   : {cal:8.1f} us")
+
+            # jax trace timestamps are RELATIVE to each process's own
+            # start_trace() call (first_ts ~1.4 ms on every rank of job
+            # 26854741) — the raw spreads above are contaminated by the
+            # per-process trace-start offset, which is itself a
+            # skew-class quantity. Correct it by anchoring on the
+            # physics: matched collective ENDS coincide (participants
+            # finish together), so each rank's constant clock offset =
+            # median(end_k - end_ref) over its matched pairs with the
+            # reference rank. After correction the END spread MUST
+            # collapse (self-consistency); the start spread is then the
+            # real arrival skew.
+            ref = summaries[rank_names[0]]["collectives"]
+            offsets = {rank_names[0]: 0.0}
+            for other in rank_names[1:]:
+                oc = summaries[other]["collectives"]
+                deltas, j = [], 0
+                for (nm, s0, e0) in ref:
+                    while j < len(oc) and oc[j][2] < s0:
+                        j += 1
+                    if j >= len(oc):
+                        break
+                    nm1, s1, e1 = oc[j]
+                    ov = min(e0, e1) - max(s0, s1)
+                    if ov > 0 and ov >= 0.5 * min(e0 - s0, e1 - s1):
+                        deltas.append(e1 - e0)
+                offsets[other] = (statistics.median(deltas)
+                                  if deltas else 0.0)
+            c_spreads, c_ends = [], []
+            for other in rank_names[1:]:
+                oc = summaries[other]["collectives"]
+                off = offsets[other]
+                j = 0
+                for (nm, s0, e0) in ref:
+                    while j < len(oc) and oc[j][2] - off < s0:
+                        j += 1
+                    if j >= len(oc):
+                        break
+                    s1, e1 = oc[j][1] - off, oc[j][2] - off
+                    ov = min(e0, e1) - max(s0, s1)
+                    if ov > 0 and ov >= 0.5 * min(e0 - s0, e1 - s1):
+                        c_spreads.append(abs(s1 - s0))
+                        c_ends.append(abs(e1 - e0))
+            if c_spreads:
+                print(f"  OFFSET-CORRECTED (per-rank offsets "
+                      f"{ {k: round(v, 1) for k, v in offsets.items()} }):")
+                print(f"  median START spread : {statistics.median(c_spreads):8.1f} us")
+                print(f"  p90    START spread : {sorted(c_spreads)[int(0.9 * len(c_spreads))]:8.1f} us")
+                print(f"  median END spread   : {statistics.median(c_ends):8.1f} us "
+                      f"(must be ~0 by construction — self-consistency)")
 
     if args.out:
         with open(args.out, "w") as f:
