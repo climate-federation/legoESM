@@ -118,6 +118,11 @@ LIQUID_NOOP_RH = 0.80
 # that ignores the flag cannot produce a difference below the qci gate AND
 # bit-identical output above it.
 MIN_RELATIVE_EFFECT_LIQUID = 0.01
+# Section 2b bound per scheme, from the measurement in that function's
+# docstring.  morrison and thompson reduce EXACTLY to a deposition-target
+# multiplier (0.000 %), so they are pinned there with only round-off slack;
+# p3 does not, for a reason not yet identified, so it keeps the gross bound.
+_TARGET_ISOLATION_BOUND = {"morrison": 1.0e-9, "thompson": 1.0e-9}
 
 
 def _gsam_rh_homo(T: np.ndarray, q_ice: np.ndarray | None = None) -> np.ndarray:
@@ -349,9 +354,22 @@ def section_2b_target_isolation() -> list[str]:
     whole extra nucleation sink.  Holding "everything else identical" requires
     silencing that source, not just holding T and p.
 
-    REPORTED, NOT TIGHTLY ASSERTED: the residual is printed per scheme and only
-    a gross disagreement fails.  A tight tolerance would be a number chosen to
-    be green; the printed residual is what earns one later.
+    MEASURED 2026-08-10 (job 9356775), with nucleation silenced:
+
+        morrison  0.000 %      thompson  0.000 %      p3  35.415 %
+
+    morrison and thompson reduce EXACTLY to a deposition-target multiplier, so
+    they are held to that: a nonzero residual there is a regression, and the
+    bound is the measurement rather than a round number.
+
+    p3 does NOT reduce to it, and that is an OPEN measured fact rather than a
+    tolerance to widen.  Silencing Cooper removed morrison's 237748 % residual
+    entirely but left p3's 35 % untouched, so p3 carries a second
+    q_v-dependent term at this cell that the allowance does not pass through.
+    Its absolute deposition is also ~6x smaller than the other two
+    (3.59e-12 vs 2.25e-11 kg/kg/s), i.e. a different capacitance/PSD path.
+    Attributing it needs p3's per-process tendencies instrumented; until then
+    the cause is UNKNOWN, not "small", and p3 is held only to the gross bound.
     """
     failures: list[str] = []
     q_sat_i = float(thermo.saturation_mixing_ratio_ice(
@@ -379,11 +397,14 @@ def section_2b_target_isolation() -> list[str]:
         resid = abs(a - b) / max(abs(b), 1.0e-30)
         print(f"    {scheme:10s} ON(S)={a:+.6e}  OFF(S')={b:+.6e}  "
               f"|residual| = {100 * resid:8.3f} % of OFF(S')")
-        if resid > 1.0:
+        # Per-scheme bound: exact for the two schemes measured at 0, gross for
+        # the one with an unexplained residual (see the docstring).
+        bound = _TARGET_ISOLATION_BOUND.get(scheme, 1.0)
+        if resid > bound:
             failures.append(
                 f"{scheme}: the allowance does not behave as a pure "
-                f"deposition-target multiplier (residual {100 * resid:.1f} % "
-                "of the equivalent no-allowance cell)")
+                f"deposition-target multiplier (residual {100 * resid:.4f} % "
+                f"of the equivalent no-allowance cell, bound {100 * bound:.4f} %)")
     return failures
 
 

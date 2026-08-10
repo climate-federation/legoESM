@@ -558,6 +558,40 @@ with no exposed parameters is a property of the scheme's config surface, and
 the `#params` / `#evals` columns are in the table so that is visible in the
 same row as the number.
 
+### 8.2c Where the cap is applied — MEASURED per scheme
+
+Reaching the scheme and being correctly gated does not prove the allowance is
+applied to the *deposition target*, which is what gSAM does. Section 2b of the
+probe pins that with an equivalence: if the only effect is
+`q_sat_i -> rh_homo*q_sat_i` in the deposition driving term, a cell at
+`q_v = S*q_sat_i` **with** the allowance carries the same driving
+supersaturation as one at `q_v = (S - rh_homo + 1)*q_sat_i` **without** it.
+
+| scheme | residual, nucleation live | residual, `N_i0 = 0` |
+|---|---:|---:|
+| morrison | 237 748 % | **0.000 %** |
+| thompson | 0.000 % | **0.000 %** |
+| p3 | 35.670 % | **35.415 %** |
+
+Two things follow, and the first is about the instrument. Morrison's enormous
+first-column residual was the *construction*, not the physics: moving `q_v` to
+the deposition-equivalent `S'` also moves the nucleation source, which is
+gated on ice supersaturation (p3 names its gate: `cooper_supi_min = 0.05`,
+sigmoid sharpness 200, and `S' - 1 = 0.0516` sits on it). The numbers say so
+without inference — morrison's `OFF(S')` equalled thompson's answer *exactly*,
+so with nucleation quiet the two schemes agree and the extra 5.35e-8 was
+entirely the nucleation sink.
+
+**CONFIRMED:** morrison and thompson reduce exactly to a deposition-target
+multiplier, and are now pinned there with round-off slack only.
+
+**OPEN:** p3's 35 % residual survives silencing Cooper, so p3 carries a second
+`q_v`-dependent term at this cell that the allowance does not pass through.
+Its absolute deposition is also ~6x smaller than the other two
+(3.59e-12 vs 2.25e-11 kg/kg/s), i.e. a different capacitance/PSD path.
+Attributing it needs p3's per-process tendencies instrumented; the cause is
+UNKNOWN, not "small". p3 is therefore held only to a gross bound.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
