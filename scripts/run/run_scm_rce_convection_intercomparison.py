@@ -126,6 +126,11 @@ _SIGNATURE_FIELDS = (
     "scm_microphysics_substeps", "scm_convection_substeps",
     "subsidence_solve",
     "reference_dir", "last_reference_files",
+    # The column's saturation treatment is part of the experiment: the ice
+    # super-saturation allowance only exists in the ice-capable schemes, and
+    # the in-scheme liquid guard changes the condensation rate every step.  A
+    # checkpoint from one setting must not be reused under another.
+    "microphysics", "hard_saturation_adjustment",
 )
 
 
@@ -212,6 +217,8 @@ def evaluate_scheme(
     radiation: str,
     radiation_update_interval_steps: int,
     subsidence_solve: str = "as_shipped",
+    microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
+    hard_saturation_adjustment: bool = False,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -230,6 +237,8 @@ def evaluate_scheme(
         radiation=radiation,
         radiation_update_interval_steps=radiation_update_interval_steps,
         convection=scheme,
+        microphysics=microphysics,
+        hard_saturation_adjustment=hard_saturation_adjustment,
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
@@ -631,6 +640,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--radiation-update-interval-steps", type=int, default=None)
+    parser.add_argument(
+        "--microphysics", default=camp.BASELINE_SCHEMES["microphysics"],
+        choices=camp.SCHEME_SWEEPS["microphysics"],
+        help=(
+            "SCM microphysics, held FIXED across every convection scheme. The "
+            "default `kessler` is WARM-RAIN ONLY: it carries no ice, so the "
+            "IFS/SAM homogeneous-freezing ice-super-saturation allowance is "
+            "inert and the upper troposphere is biased for every scheme "
+            "alike. Use `morrison` (SAM M2005 flavor) to score the cold point "
+            "against an ice-carrying CRM reference."
+        ),
+    )
+    parser.add_argument(
+        "--hard-saturation-adjustment", action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable the in-scheme iterated saturation adjustment (the IFS "
+            "'no liquid super-saturation' half) for the selected microphysics. "
+            "Default off = the smooth-sigmoid path, which leaves a few percent "
+            "standing super-saturation. sdm/fast_sbm reject the flag."
+        ),
+    )
     parser.add_argument("--schemes", default=None,
                         help="comma-separated convection scheme subset")
     parser.add_argument("--scm-microphysics-substeps", type=int,
@@ -727,6 +758,10 @@ def main(argv: list[str] | None = None) -> int:
         last_reference_files=args.last_reference_files,
         reference_dir=str(args.reference_dir),
         subsidence_solve=args.subsidence_solve,
+        microphysics=args.microphysics,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
+        scm_microphysics_substeps=args.scm_microphysics_substeps,
+        scm_convection_substeps=args.scm_convection_substeps,
     )
     if args.merge_only and saved_meta:
         meta = {**meta, **saved_meta}
@@ -754,6 +789,8 @@ def main(argv: list[str] | None = None) -> int:
                 radiation=args.radiation,
                 radiation_update_interval_steps=args.radiation_update_interval_steps,
                 subsidence_solve=args.subsidence_solve,
+                microphysics=args.microphysics,
+                hard_saturation_adjustment=args.hard_saturation_adjustment,
             )
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
             plot_scheme(args.outdir / f"profiles_{scheme}.png", ref, res)

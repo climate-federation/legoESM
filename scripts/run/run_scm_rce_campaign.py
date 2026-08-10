@@ -598,6 +598,9 @@ def make_physics_config(
     prognostic_spectral_gwd_thermal_tendency: bool = (
         SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY
     ),
+    hard_saturation_adjustment: bool = False,
+    hard_sat_adjust_threshold: float | None = None,
+    hard_sat_max_heating_K: float | None = None,
 ) -> PhysicsConfig:
     cfg = base if base is not None else PhysicsConfig()
     radiation_update_interval_steps = max(1, int(radiation_update_interval_steps))
@@ -641,6 +644,37 @@ def make_physics_config(
             f"Unknown campaign radiation scheme: {radiation!r}; "
             "choose from 'gray' or 'rrtmgp'."
         )
+    # IN-SCHEME liquid super-saturation guard (the IFS/SAM "no liquid
+    # super-saturation" half; the ice half is the Koop/Kärcher homogeneous-
+    # freezing allowance, which lives inside morrison/thompson/p3 and needs no
+    # switch here).  Threaded through the SHARED
+    # ``apply_microphysics_experiment_flags`` so a scheme that cannot carry the
+    # flag raises instead of silently ignoring it — never a private copy of
+    # that dispatch.
+    micro_cfg = cfg.microphysics._replace(scheme=microphysics)
+    if (hard_saturation_adjustment
+            or hard_sat_adjust_threshold is not None
+            or hard_sat_max_heating_K is not None):
+        if not hard_saturation_adjustment:
+            # A float override without the boolean gate is SILENTLY INERT (the
+            # schemes branch on a static ``if config.hard_saturation_
+            # adjustment``), so refuse it rather than let a caller believe the
+            # threshold took effect.  Mirrors ExperimentConfig.validate_strict.
+            raise ValueError(
+                "hard_sat_adjust_threshold / hard_sat_max_heating_K require "
+                "hard_saturation_adjustment=True (the override would be "
+                "silently inert without it)."
+            )
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        micro_cfg = micro_cfg._replace(**{microphysics: (
+            apply_microphysics_experiment_flags(
+                getattr(micro_cfg, microphysics), microphysics,
+                hard_saturation_adjustment=hard_saturation_adjustment,
+                hard_sat_adjust_threshold=hard_sat_adjust_threshold,
+                hard_sat_max_heating_K=hard_sat_max_heating_K,
+            ))})
     gwd_cfg = cfg.gravity_wave_drag._replace(scheme=gravity_wave_drag)
     if gravity_wave_drag == "prognostic_spectral":
         gwd_cfg = gwd_cfg._replace(
@@ -652,7 +686,7 @@ def make_physics_config(
         radiation=radiation_cfg,
         convection=cfg.convection._replace(scheme=convection),
         turbulence=cfg.turbulence._replace(scheme=turbulence),
-        microphysics=cfg.microphysics._replace(scheme=microphysics),
+        microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
 
@@ -1452,6 +1486,17 @@ def run_cached(
         large_scale_forcing,
     )
     if key not in cache:
+        # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
+        # PhysicsConfig, so ``run_scm_rce`` builds a fresh jitted closure and
+        # XLA emits a fresh executable — nothing is ever reused between evals.
+        # Retaining them is therefore pure cost, and it is not a small one:
+        # the RRTMGP k-distribution tables are baked into each executable as
+        # literals, so a 48-eval tune accumulated enough that XLA:CPU's LLVM
+        # JIT could no longer mmap a section and aborted the process
+        # ("LLVM ERROR: Unable to allocate section memory", jobs 9331806/7,
+        # rc=134, 8 of 10 schemes lost).  Dropping the caches before each new
+        # compile bounds the footprint at roughly one executable.
+        jax.clear_caches()
         cache[key] = run_scm_rce(
             cfg,
             ref,

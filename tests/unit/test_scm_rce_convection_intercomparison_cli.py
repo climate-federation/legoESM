@@ -238,3 +238,80 @@ def test_summary_flags_a_mixed_arm_table_as_confounded(tmp_path):
     text = path.read_text()
     assert "CONFOUNDED" in text
     assert "MIXED(" in text
+
+
+# --------------------------------------------------------------------------- #
+# Saturation treatment: --microphysics / --hard-saturation-adjustment
+#
+# The column's saturation treatment is an EXPERIMENT variable, not a cosmetic
+# one: the IFS/SAM homogeneous-freezing ice allowance exists only inside the
+# ice-carrying schemes (morrison/thompson/p3), and the in-scheme liquid guard
+# changes the condensation rate on every step.  These gates assert (a) both
+# reach the config the SCM actually runs, and (b) both invalidate a checkpoint,
+# so a kessler run can never be merged into a morrison table.
+# --------------------------------------------------------------------------- #
+
+def test_microphysics_defaults_to_the_campaign_baseline():
+    assert _args().microphysics == driver.camp.BASELINE_SCHEMES["microphysics"]
+    assert _args().hard_saturation_adjustment is False
+
+
+def test_microphysics_accepts_an_ice_scheme_and_rejects_an_unknown_one():
+    assert _args("--microphysics", "morrison").microphysics == "morrison"
+    with pytest.raises(SystemExit):
+        _args("--microphysics", "not_a_scheme")
+
+
+def test_hard_saturation_adjustment_round_trips_both_ways():
+    assert _args("--hard-saturation-adjustment").hard_saturation_adjustment is True
+    assert (_args("--hard-saturation-adjustment",
+                  "--no-hard-saturation-adjustment")
+            .hard_saturation_adjustment is False)
+
+
+@pytest.mark.parametrize("field", ["microphysics", "hard_saturation_adjustment"])
+def test_saturation_treatment_is_a_signature_field(field):
+    assert field in driver._SIGNATURE_FIELDS
+
+
+def test_run_signature_differs_between_microphysics_choices():
+    a = driver._run_signature(_args("--microphysics", "kessler"))
+    b = driver._run_signature(_args("--microphysics", "morrison"))
+    assert a != b
+    assert {k: v for k, v in a.items() if k != "microphysics"} == \
+           {k: v for k, v in b.items() if k != "microphysics"}
+
+
+def test_run_signature_differs_when_the_liquid_guard_is_on():
+    a = driver._run_signature(_args())
+    b = driver._run_signature(_args("--hard-saturation-adjustment"))
+    assert a != b
+    assert {k: v for k, v in a.items() if k != "hard_saturation_adjustment"} == \
+           {k: v for k, v in b.items() if k != "hard_saturation_adjustment"}
+
+
+def test_make_physics_config_threads_the_scheme_and_the_liquid_guard():
+    """The flags must reach the sub-config the scheme reads, not just the args."""
+    camp = driver.camp
+    cfg = camp.make_physics_config(microphysics="morrison")
+    assert cfg.microphysics.scheme == "morrison"
+    assert cfg.microphysics.morrison.hard_saturation_adjustment is False
+    on = camp.make_physics_config(
+        microphysics="morrison", hard_saturation_adjustment=True)
+    assert on.microphysics.morrison.hard_saturation_adjustment is True
+
+
+def test_make_physics_config_refuses_a_silently_inert_threshold():
+    camp = driver.camp
+    with pytest.raises(ValueError, match="silently inert"):
+        camp.make_physics_config(microphysics="kessler",
+                                 hard_sat_adjust_threshold=1.05)
+
+
+def test_make_physics_config_raises_for_a_scheme_without_the_guard():
+    """sdm resolves super-saturation explicitly and has no guard field; asking
+    for it must fail loudly rather than run un-guarded."""
+    camp = driver.camp
+    with pytest.raises(ValueError):
+        camp.make_physics_config(microphysics="sdm",
+                                 hard_saturation_adjustment=True)
