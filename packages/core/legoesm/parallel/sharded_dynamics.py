@@ -2030,8 +2030,13 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         # reorder blew past 11 rounds and the guard rejected them all,
         # job 26856688) — so ALWAYS follow with a round-PRESERVING local
         # search that moves pairs between existing rounds.
+        # FULL tie-break key (weight, then the pair itself): every
+        # multicontroller process must derive the IDENTICAL colouring
+        # independently, and a weight-only key leaves equal-weight order
+        # to set-iteration order.
         edges_by_size = sorted(
-            comm_pairs, key=lambda p: -(pair_w[p][0] + pair_w[p][1]))
+            comm_pairs,
+            key=lambda p: (-(pair_w[p][0] + pair_w[p][1]), p))
         candidates = [edges_by_size]
         for seed in (1, 2, 3):
             jit = edges_by_size[:]
@@ -2062,7 +2067,7 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                 improved = False
                 w_now = _padded_weight(colors, pair_w)
                 for p in sorted(colors, key=lambda q:
-                                -(pair_w[q][0] + pair_w[q][1])):
+                                (-(pair_w[q][0] + pair_w[q][1]), q)):
                     c0 = colors[p]
                     for c1 in range(n_r):
                         if c1 == c0 or (occupied[c1] & set(p)):
