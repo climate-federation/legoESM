@@ -24,6 +24,13 @@
 # method needs no assumptions about FESOM's log format.
 # ===========================================================================
 set -uo pipefail
+# Intel-Fortran automatic arrays live on the stack: the PHC3 IC
+# interpolation (g_ic3d getcoeffld) segfaulted at the default 8 MB
+# stack on every rung (job 26850789). Same class as DKRZ's own FESOM
+# runbooks: unlimited stack + one OMP thread per rank.
+ulimit -s unlimited
+export OMP_NUM_THREADS=1
+export OMPI_MCA_opal_common_ucx_opal_mem_hooks=1
 FESOM_SRC=/work/ab0995/a270301/fesom2
 BIN=$FESOM_SRC/bin/fesom.x
 BASE=/scratch/b/b381103/legoesm_scaling/fesom2_ref_j${SLURM_JOB_ID}
