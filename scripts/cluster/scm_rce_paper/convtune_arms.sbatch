@@ -2,8 +2,8 @@
 #SBATCH --account=glab
 #SBATCH --partition=burst
 #SBATCH --job-name=convtune_arm
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=120G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=24G
 #SBATCH --time=48:00:00
 #SBATCH --array=0-9%5
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/convtune_arm_%A_%a.out
@@ -26,6 +26,13 @@ set +e
 #                                  troposphere is biased for every scheme.
 #   --hard-saturation-adjustment   the liquid half: no standing liquid
 #                                  super-saturation.
+#
+# RESOURCES, from the cost probe (jobs 9356449_0/_1) rather than from caution:
+# peak RSS 2.41 GB and 169 % CPU for a bechtold + morrison + RRTMGP run.  The
+# first submission asked for 120 G and 8 cores; on a busy burst partition that
+# is why 9 of 10 array tasks sat in "Nodes required for job are DOWN, DRAINED
+# or reserved", so an over-request costs QUEUE TIME, not just accounting.
+# 24 G is 10x the measured peak.
 #
 # TUNE-BUDGET.  The sampler spends its first 1 + 2*n_params evaluations on a
 # deterministic one-at-a-time sweep and the rest on joint random draws
