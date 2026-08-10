@@ -2657,10 +2657,16 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         )
     elif tc.grid_type == "tripole":
         # create_tripole_grid returns a LatLonCGridGeometry, so the lat-lon
-        # C-grid rest state applies unchanged. H_max + land_lat_threshold give
-        # the SAME flat 20 m / land-above-80 basin as the latlon and fesom
-        # arms -- the NEMO bathymetry is deliberately NOT used, so the only
-        # difference across arms stays the grid itself.
+        # C-grid rest state applies unchanged. The DEPTH is the same flat
+        # H_max as every arm (NEMO bathymetry not used), but the HORIZONTAL
+        # land mask is the latitude threshold INTERSECTED with the NEMO
+        # surface tmask (below) -- i.e. the tripole arm keeps Earth's
+        # continents (0.534 wet on the native 332x362 mesh; 0.607 on the
+        # regridded 1-deg artifact; 0.889 for the pure latitude mask). That is
+        # a DOCUMENTED per-arm geometry difference, not a bug: the
+        # NEMO-closed cells carry degenerate metrics and cannot be opened
+        # (see the tmask comment below). RPE_rel is normalised per-arm by
+        # |RPE_0|, so the mixing metric remains comparable in magnitude.
         #
         # EXCEPT row j=0: NEMO requires a SOLID southern wall there (the real
         # eORCA1 tmask has row 0 all-zero) -- there is no southern neighbour
