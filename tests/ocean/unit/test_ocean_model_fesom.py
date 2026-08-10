@@ -117,6 +117,14 @@ def grid(flat_mesh):
     return FesomOceanGrid(flat_mesh)
 
 
+@pytest.fixture
+def z20_or_none(lock_config):
+    """The benchmark z-star coordinate (20 levels over 20 m)."""
+    from legoesm.ocean.vertical import create_ocean_z_star
+    return create_ocean_z_star(n_levels=lock_config.nlev,
+                               H_max=lock_config.H_max)
+
+
 # =============================================================================
 # F3 — module imports cleanly without fesom_jax at module scope
 # =============================================================================
@@ -1753,3 +1761,131 @@ class TestCreateRestState:
                                       H_max=lock_config.H_max)
         with pytest.raises(ValueError, match="levels but the FESOM"):
             create_rest_state(flat_mesh, z_wrong)
+
+
+# =============================================================================
+# element_centroid_lat_lon + with_fields (the analytic-IC primitives)
+# =============================================================================
+
+class TestAnalyticICPrimitives:
+    """``element_centroid_lat_lon`` and ``with_fields`` are what let the
+    perturbation matrix cases (barotropic wave, geostrophic adjustment,
+    Phillips, inertia-gravity wave) build a FESOM initial condition."""
+
+    def test_centroid_lies_inside_its_element(self, flat_mesh):
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon)
+        lat_e, lon_e = element_centroid_lat_lon(flat_mesh)
+        geo = np.asarray(flat_mesh.geo_coord_nod2D)
+        nodes = np.asarray(flat_mesh.elem_nodes)
+        lat_e = np.asarray(lat_e)
+        assert lat_e.shape == (int(flat_mesh.elem2D),)
+        # Latitude is wrap-free, so the centroid must sit within the
+        # element's own latitude span (longitude cannot be checked this
+        # way across the dateline -- that is what the next test is for).
+        lat_nodes = geo[nodes, 1]
+        assert np.all(lat_e >= lat_nodes.min(axis=1) - 1e-12)
+        assert np.all(lat_e <= lat_nodes.max(axis=1) + 1e-12)
+        assert np.all(np.asarray(lon_e) >= 0.0)
+        assert np.all(np.asarray(lon_e) <= 2 * np.pi + 1e-12)
+
+    def test_centroid_is_wrap_safe(self, flat_mesh):
+        """An element straddling the longitude SEAM must land on the seam,
+        not halfway around the globe -- the failure mode of a plain
+        arithmetic mean of longitudes.
+
+        The check is the 3-D ANGULAR distance from the centroid to each of
+        its nodes, not a longitude difference: near the pole longitude is
+        degenerate (a polar element legitimately spans ~360 deg of
+        longitude), so a longitude-space tolerance fails on correct output.
+        """
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon)
+        geo = np.asarray(flat_mesh.geo_coord_nod2D)
+        nodes = np.asarray(flat_mesh.elem_nodes)
+        lon_nodes = np.degrees(geo[nodes, 0])
+        straddles = (lon_nodes.max(axis=1) - lon_nodes.min(axis=1)) > 180.0
+        if not straddles.any():
+            pytest.skip("no seam-straddling element on this mesh")
+        lat_e, lon_e = element_centroid_lat_lon(flat_mesh)
+
+        def _xyz(lat, lon):
+            return np.stack([np.cos(lat) * np.cos(lon),
+                             np.cos(lat) * np.sin(lon),
+                             np.sin(lat)], axis=-1)
+
+        c = _xyz(np.asarray(lat_e), np.asarray(lon_e))[straddles]
+        n = _xyz(geo[nodes, 1], geo[nodes, 0])[straddles]
+        ang = np.degrees(np.arccos(np.clip(
+            np.einsum("ek,enk->en", c, n), -1.0, 1.0)))
+        assert ang.max() < 10.0, (
+            f"centroid escaped its element by {ang.max():.1f} deg")
+
+        # ... and the naive longitude mean, the bug this guards, lands far
+        # away on the non-polar straddlers (where longitude is meaningful).
+        non_polar = np.abs(np.degrees(geo[nodes, 1])[straddles]).max(axis=1) < 60.0
+        if non_polar.any():
+            lon_deg = np.degrees(np.asarray(lon_e))[straddles][non_polar]
+            naive = lon_nodes[straddles][non_polar].mean(axis=1)
+            assert np.abs(
+                (lon_deg - naive + 180.0) % 360.0 - 180.0).max() > 30.0
+
+    def test_with_fields_sets_T_eta_and_velocity(self, flat_mesh, z20_or_none):
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_rest_state, with_fields)
+        st = create_rest_state(flat_mesh, z20_or_none, stratified=False)
+        n_node = int(flat_mesh.nod2D)
+        n_elem = int(flat_mesh.elem2D)
+        eta = np.linspace(-0.5, 0.5, n_node)
+        uv = np.zeros((n_elem, 2))
+        uv[:, 0] = 0.3
+        new = with_fields(st, flat_mesh, T=np.full(n_node, 7.0),
+                          eta=eta, uv_elem=uv)
+        assert np.allclose(np.asarray(new.T.data), 7.0)
+        assert np.allclose(np.asarray(new.eta.data), eta)
+        # uv_node is the element->node interpolation of the new element
+        # velocity, so a uniform eastward element field must give a
+        # non-zero, finite node velocity (never the stale zeros).
+        u_node = np.asarray(new.u.data)
+        assert np.all(np.isfinite(u_node))
+        assert np.abs(u_node).max() > 0.0
+
+    def test_with_fields_rejects_transposed_and_wrong_shapes(
+            self, flat_mesh, z20_or_none):
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_rest_state, with_fields)
+        st = create_rest_state(flat_mesh, z20_or_none, stratified=False)
+        n_node = int(flat_mesh.nod2D)
+        with pytest.raises(ValueError, match="entries but the mesh"):
+            with_fields(st, flat_mesh, T=np.zeros(n_node + 5))
+        with pytest.raises(ValueError, match="eta shape"):
+            with_fields(st, flat_mesh, eta=np.zeros(n_node + 1))
+        with pytest.raises(ValueError, match="uv_elem shape"):
+            with_fields(st, flat_mesh,
+                        uv_elem=np.zeros((int(flat_mesh.elem2D) + 3, 2)))
+
+    def test_with_fields_no_args_is_identity(self, flat_mesh, z20_or_none):
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_rest_state, with_fields)
+        st = create_rest_state(flat_mesh, z20_or_none, stratified=False)
+        assert with_fields(st, flat_mesh) is st
+
+    def test_vector_rotation_preserves_magnitude(self, flat_mesh):
+        """geographic->rotated is a FRAME change: it must preserve the
+        vector magnitude at every element (and it must not be a no-op on
+        a rotated mesh, or the analytic velocity ICs point the wrong way)."""
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            geographic_to_rotated_vector)
+        n_elem = int(flat_mesh.elem2D)
+        rng = np.random.default_rng(0)
+        u = rng.normal(size=n_elem)
+        v = rng.normal(size=n_elem)
+        u_r, v_r = geographic_to_rotated_vector(flat_mesh, u, v)
+        u_r, v_r = np.asarray(u_r), np.asarray(v_r)
+        assert np.allclose(np.hypot(u_r, v_r), np.hypot(u, v), rtol=1e-10)
+        rot = np.asarray(flat_mesh.coord_nod2D)
+        geo = np.asarray(flat_mesh.geo_coord_nod2D)
+        if not np.allclose(rot, geo):
+            # This mesh IS rotated, so the transform must actually rotate.
+            assert not np.allclose(u_r, u, atol=1e-6), (
+                "rotation was a no-op on a rotated mesh")

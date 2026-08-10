@@ -3,7 +3,7 @@
 # that case supports (latlon / mpas / fesom / tripole and the legacy
 # cubed_sphere / spectral where registered).
 #
-# Submit:  sbatch --array=0-6 scripts/cluster/ocean_grid_benchmark_suite.sbatch
+# Submit:  sbatch --array=0-8 scripts/cluster/ocean_grid_benchmark_suite.sbatch
 #SBATCH --job-name=ocn-bench
 #SBATCH --account=bd1083_gpu
 #SBATCH --partition=gpu
@@ -19,7 +19,8 @@ REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
 cd "$REPO"; mkdir -p logs
 CASES=(rest_state_stratified_with_land rest_state_uniform_with_land \
        rest_state_stratified_no_land rest_state_uniform_no_land \
-       geostrophic_adjustment phillips_two_layer inertia_gravity_wave)
+       geostrophic_adjustment phillips_two_layer inertia_gravity_wave \
+       barotropic_wave lock_exchange)
 CASE=${CASES[${SLURM_ARRAY_TASK_ID:-0}]}
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1

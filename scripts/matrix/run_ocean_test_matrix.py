@@ -293,9 +293,9 @@ def _build_test_matrix() -> list[TestCase]:
     # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
     bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
                  "mpas": "ico4", "spectral": "T21"}
-    for g in GRID_TYPES:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
-            "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
+            "barotropic_wave", g, bwave_res.get(g, res[g]), 2.0, 0.2))
 
     # --- Wind-driven regional barotropic double gyre: regional grids ---
     # cs_regional excluded: ocean init assumes 6-face arrays (TODO: adapt)
@@ -338,30 +338,25 @@ def _build_test_matrix() -> list[TestCase]:
             "global_barotropic_wind_1lev", g, res[g], 60.0, 5.0,
             run_kwargs={"nlev": 1}))
 
-    # --- Geostrophic adjustment: all grids + tripole ---
-    for g in GRID_TYPES + ["tripole"]:
+    # --- Geostrophic adjustment: all grids + tripole + fesom ---
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "geostrophic_adjustment", g, res[g], 10.0, 1.0))
 
     # --- Phillips two-layer baroclinic: all grids ---
-    # NOT tripole, same reason as inertia_gravity_wave below: the shear IC
-    # writes the analytic u/v EDGE fields from 1-D grid.lat/grid.lon and a
-    # uniform dlon/dlat, which is rectilinear-only and raises on the
-    # curvilinear eORCA1 mesh ("could not broadcast (332,362) into
-    # (332,363)", measured 2026-08-10). Needs a curvilinear edge IC.
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10: the shear IC no longer assumes a
+    # rectilinear mesh (u-face latitudes come from _cgrid_face_lat_lon,
+    # and FESOM gets a node/element branch).
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "phillips_two_layer", g, res[g], 10.0, 1.0))
 
     # --- Inertia-Gravity Wave (Bishnu et al. 2024): all grids ---
-    # NOT tripole: _init_inertia_gravity_wave's lat-lon branch builds the
-    # analytic u/v EDGE perturbation from 1-D grid.lat/grid.lon plus a
-    # uniform dlon/dlat -- rectilinear-only. On the curvilinear eORCA1 mesh
-    # (2-D lat_T/lon_T) it raises on shape (measured 2026-08-10: "could not
-    # broadcast (332,362) into (332,363)"). A curvilinear IGW IC is real
-    # work and the case currently FAILS its analytic L2 gate on latlon
-    # (0.91) and mpas (1.01) anyway, so there is nothing to compare against.
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10 (curvilinear face coordinates via
+    # _cgrid_face_lat_lon; FESOM node/element branch). NOTE the case FAILS
+    # its analytic L2 gate on every grid -- a pre-existing case defect,
+    # tracked separately from arm coverage.
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
 
@@ -3256,6 +3251,67 @@ def _key_array_fn(state, grid_type: str):
 # Barotropic wave perturbation
 # ===========================================================================
 
+def _cgrid_face_lat_lon(grid):
+    """(lat_u, lon_u, lat_v, lon_v) in RADIANS at the C-grid face points.
+
+    Shapes: u-faces ``(n_lat, n_lon+1)``, v-faces ``(n_lat+1, n_lon)`` --
+    the shapes ``state.u``/``state.v`` carry, so an analytic IC can be
+    written straight into them.
+
+    Works for BOTH grid families, which is the point: the rectilinear
+    branches used to build face positions as ``lat[i] +/- dlat/2`` from the
+    1-D axes, so every case that wrote an analytic edge field (Phillips,
+    inertia-gravity wave) was rectilinear-only and raised a bare shape
+    error on the curvilinear tripole mesh.
+
+    BIT-COMPATIBILITY WITH THE OLD RECTILINEAR CONVENTION (codex
+    2026-08-10 P1: an earlier version used a great-circle midpoint, which
+    bulges the u-face poleward -- 45.0273 deg instead of 45.0 at 5-deg
+    spacing -- and clamped the end v-faces to the tracer row instead of the
+    poles; both silently changed existing lat-lon Phillips/IGW results):
+      * u-face latitude is the ARITHMETIC mean of the two adjacent tracer
+        latitudes, which on a rectilinear grid is exactly ``lat[i]``;
+      * u-face longitude is a wrap-aware mean, i.e. ``lon[j] - dlon/2``;
+      * v-face latitude is the arithmetic mean of the rows, i.e.
+        ``lat[i] - dlat/2``, with the two END faces LINEARLY EXTRAPOLATED
+        (half a row beyond the edge), which on a rectilinear grid lands on
+        the poles exactly as ``latlon.py``'s ``lat_v`` does.
+    """
+    lat_T = getattr(grid, "lat_T", None)
+    lon_T = getattr(grid, "lon_T", None)
+    if lat_T is None or lon_T is None:
+        lat_T, lon_T = grid.lat, grid.lon
+    lat_T = np.asarray(lat_T, dtype=np.float64)
+    lon_T = np.asarray(lon_T, dtype=np.float64)
+    if lat_T.ndim == 1:            # rectilinear: build the 2-D T-point mesh
+        lat_T, lon_T = np.meshgrid(lat_T, lon_T, indexing="ij")
+
+    def _lon_mean(a, b):
+        """Wrap-aware mean of two longitudes [radians]."""
+        return np.mod(a + 0.5 * ((b - a + np.pi) % (2.0 * np.pi) - np.pi),
+                      2.0 * np.pi)
+
+    # u-faces sit between columns j-1 and j; longitude is periodic, so the
+    # first u-face pairs the last column with the first, and face n_lon
+    # repeats face 0 (the wrap).
+    lat_u_int = 0.5 * (np.roll(lat_T, 1, axis=1) + lat_T)
+    lon_u_int = _lon_mean(np.roll(lon_T, 1, axis=1), lon_T)
+    lat_u = np.concatenate([lat_u_int, lat_u_int[:, :1]], axis=1)
+    lon_u = np.concatenate([lon_u_int, lon_u_int[:, :1]], axis=1)
+
+    # v-faces sit between rows i-1 and i; latitude is NOT periodic, so the
+    # two end faces are extrapolated half a row beyond the edge (== the
+    # poles on a rectilinear grid).
+    lat_v_int = 0.5 * (lat_T[:-1] + lat_T[1:])
+    lon_v_int = _lon_mean(lon_T[:-1], lon_T[1:])
+    lat_v = np.concatenate([
+        1.5 * lat_T[:1] - 0.5 * lat_T[1:2],
+        lat_v_int,
+        1.5 * lat_T[-1:] - 0.5 * lat_T[-2:-1]], axis=0)
+    lon_v = np.concatenate([lon_T[:1], lon_v_int, lon_T[-1:]], axis=0)
+    return lat_u, lon_u, lat_v, lon_v
+
+
 def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
     """Add a Gaussian SSH perturbation to the rest state.
 
@@ -3298,6 +3354,23 @@ def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
         lon = np.asarray(grid.lonCell, dtype=np.float64)
         lat = np.asarray(grid.latCell, dtype=np.float64)
         perturb = _great_circle_perturbation(lon, lat)
+        new_eta = state.eta.data + jnp.array(perturb)
+        return state._replace(eta=Field(new_eta))
+
+    elif grid_type == "fesom":
+        # Node-centred scalar: same great-circle formula, node coords.
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        perturb = _great_circle_perturbation(geo[:, 0], geo[:, 1])
+        return with_fields(state, grid.mesh,
+                           eta=np.asarray(state.eta.data) + perturb)
+
+    elif grid_type == "tripole":
+        # Curvilinear: the 2-D tracer-point coordinates, NOT the 1-D
+        # lat/lon summaries the rectilinear branch meshgrids.
+        lon2 = np.asarray(grid.lon_T, dtype=np.float64)
+        lat2 = np.asarray(grid.lat_T, dtype=np.float64)
+        perturb = _great_circle_perturbation(lon2, lat2)
         new_eta = state.eta.data + jnp.array(perturb)
         return state._replace(eta=Field(new_eta))
 
@@ -3373,8 +3446,22 @@ def _add_baroclinic_perturbation(state, grid_type: str, grid, z_coord):
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
         return state._replace(T_hat=Field(new_T_hat))
 
+    elif grid_type == "fesom":
+        # Node-centred T perturbation. SAME amplitude 5*cos(lat) and SAME
+        # level-index decay exp(-k / max(nlev/3, 1)) as the FV branch
+        # below -- a depth-based decay here would make the cross-grid
+        # comparison a confound.
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64)
+        nlev = T_data.shape[-1]
+        T_pert = 5.0 * np.cos(geo[:, 1])          # geo lat already radians
+        for k in range(nlev):
+            T_data[:, k] += T_pert * np.exp(-k / max(nlev / 3, 1))
+        return with_fields(state, grid.mesh, T=T_data)
+
     else:
-        # FV grids (cube, latlon, mpas)
+        # FV grids (cube, latlon, mpas, tripole)
         if grid_type == "mpas":
             lat = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
         else:
@@ -4677,12 +4764,63 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             T_hat=Field(new_T_hat),
             eta_hat=Field(eta_hat))
 
+    elif grid_type == "fesom":
+        # Unstructured: T + SSH seed at NODES, the zonal jet at ELEMENT
+        # centroids (FESOM's velocity home). Same formulas as the FV block
+        # below -- jet 0.30*exp(-((lat-45)/14)^2) with -0.20x in layer 2,
+        # T = 16 - 10 sin^2(lat) / 8 - 4 sin^2(lat), SSH seed
+        # 0.05 sin(3 lon) cos(2 lat) with its area-weighted mean removed.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon, with_fields)
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        lon_n, lat_n = geo[:, 0], geo[:, 1]
+        mask_n = np.asarray(state.land_mask.data, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
+        nlev = T_data.shape[-1]
+        T_data[:, 0] = (16.0 - 10.0 * np.sin(lat_n) ** 2) * mask_n
+        if nlev > 1:
+            T_data[:, 1] = (8.0 - 4.0 * np.sin(lat_n) ** 2) * mask_n
+        # Node control-volume area for the mean removal (mesh.area is the
+        # per-level scalar CV area; level 0 is the surface CV).
+        area_n = np.asarray(grid.mesh.area, dtype=np.float64)[:, 0]
+        eta_seed = (0.05 * np.sin(3.0 * lon_n) * np.cos(2.0 * lat_n)
+                    * mask_n)
+        area_w = mask_n * area_n
+        eta_seed -= np.sum(eta_seed * area_w) / np.maximum(np.sum(area_w), 1.0)
+        lat_e, _lon_e = element_centroid_lat_lon(grid.mesh)
+        lat_e_deg = np.degrees(np.asarray(lat_e, dtype=np.float64))
+        u_jet = 0.30 * np.exp(-((lat_e_deg - 45.0) / 14.0) ** 2)
+        # EASTWARD jet -> model frame (the mesh is rotated; writing the
+        # geographic component straight in would tilt the jet).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            geographic_to_rotated_vector)
+        u_r0, v_r0 = geographic_to_rotated_vector(
+            grid.mesh, u_jet, np.zeros_like(u_jet))
+        n_elem = int(grid.mesh.elem2D)
+        uv = np.zeros((n_elem, nlev, 2), dtype=np.float64)
+        uv[:, 0, 0] = np.asarray(u_r0)
+        uv[:, 0, 1] = np.asarray(v_r0)
+        if nlev > 1:
+            uv[:, 1, 0] = -0.20 * np.asarray(u_r0)
+            uv[:, 1, 1] = -0.20 * np.asarray(v_r0)
+        return with_fields(state, grid.mesh, T=T_data,
+                           eta=np.asarray(state.eta.data) + eta_seed,
+                           uv_elem=uv)
+
     else:
-        # FV grids (cube, latlon, mpas)
+        # FV grids (cube, latlon, mpas, tripole)
         if grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
             lon_rad = np.asarray(grid.lonCell, dtype=np.float64)
             area = np.asarray(grid.areaCell, dtype=np.float64)
+        elif grid_type == "tripole":
+            # Curvilinear: the 2-D tracer coordinates. grid.lat/grid.lon
+            # are row/column SUMMARIES on this mesh (lat_1d is a row mean),
+            # so broadcasting them would place the jet and the SSH seed at
+            # the wrong cells.
+            lat_rad = np.asarray(grid.lat_T, dtype=np.float64)
+            lon_rad = np.asarray(grid.lon_T, dtype=np.float64)
+            area = np.asarray(grid.area, dtype=np.float64)
         else:
             lat_rad = np.asarray(grid.lat, dtype=np.float64)
             lon_rad = np.asarray(grid.lon, dtype=np.float64)
@@ -4718,20 +4856,13 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             u_data[..., 0] = u_jet_edge
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet_edge
-        elif grid_type == "latlon":
-            # iter-138 (iter-137 production finding ERROR-1): on
-            # latlon C-grid, u lives on east-west edges with shape
-            # (n_lat, n_lon+1, nlev) — NOT cell-center shape
-            # (n_lat, n_lon).  The iter-prior code broadcast a
-            # cell-center u_jet to the u-shape and crashed at the
-            # 36x72 → 36x73 mismatch.  Phillips zonal jet depends
-            # only on latitude (no lon dependence), so we can
-            # broadcast from a 1D u_jet(lat) to the full u shape.
-            n_u_lon = u_data.shape[1]
-            lat_1d_deg = np.asarray(lat_rad, dtype=np.float64) * 180 / np.pi
-            u_jet_1d = 0.30 * np.exp(-((lat_1d_deg - 45.0) / 14.0) ** 2)
-            u_jet_2d = np.broadcast_to(
-                u_jet_1d[:, None], (lat_1d_deg.size, n_u_lon))
+        elif grid_type in ("latlon", "tripole"):
+            # u-face latitudes from the SHARED helper: on the curvilinear
+            # tripole mesh the 1-D grid.lat is a row summary, so the old
+            # 1-D broadcast both mislocated the jet and raised on shape.
+            lat_u_2d, _lon_u, _lat_v, _lon_v = _cgrid_face_lat_lon(grid)
+            u_jet_2d = 0.30 * np.exp(
+                -((np.degrees(lat_u_2d) - 45.0) / 14.0) ** 2)
             u_data[..., 0] = u_jet_2d
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet_2d
@@ -4821,6 +4952,16 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     else:
         if tc.grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
+        elif tc.grid_type == "fesom":
+            # Node latitudes (geographic radians).
+            lat_rad = np.asarray(grid.mesh.geo_coord_nod2D,
+                                 dtype=np.float64)[:, 1]
+        elif tc.grid_type == "tripole":
+            # Curvilinear: the 2-D tracer latitudes. Broadcasting the 1-D
+            # row summary (the latlon branch below) both mislocates the
+            # relaxation target and raises on shape at the first forcing
+            # call -- "(332, 362) vs (1, 332)", measured 2026-08-10.
+            lat_rad = np.asarray(grid.lat_T, dtype=np.float64)
         elif tc.grid_type == "latlon":
             # lat is 1D (n_lat,) — broadcast to (n_lat, n_lon)
             lat_1d = np.asarray(grid.lat, dtype=np.float64)
@@ -4834,7 +4975,13 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
 
         _is_mpas = (tc.grid_type == "mpas")
-        _is_latlon = (tc.grid_type == "latlon")
+        # tripole IS a lat-lon C-grid (same state layout, u/v on faces with
+        # their own masks) -- treating it as "other" applied the CELL mask
+        # to face-shaped arrays and raised on broadcast (measured
+        # 2026-08-10: "(332, 362) vs (1, 332)").
+        _is_latlon = tc.grid_type in ("latlon", "tripole")
+        _is_fesom = (tc.grid_type == "fesom")
+        _fesom_mesh = grid.mesh if _is_fesom else None
 
         def forcing_fn(s, dt_):
             from legoesm.core.field import Field
@@ -4866,6 +5013,16 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
                     T=Field(T_new),
                     u=Field(u_new),
                     v=Field(v_new))
+            if _is_fesom:
+                # FESOM state is not a NamedTuple (no _replace) and its
+                # velocity lives at ELEMENT centres, so the node mask does
+                # not apply to it; drag scales the element velocity and the
+                # relaxed T goes back through the field setter.
+                from legoesm.ocean.dynamics.ocean_model_fesom import (
+                    with_fields)
+                return with_fields(
+                    s, _fesom_mesh, T=T_new,
+                    uv_elem=s.uv_elem.data * drag_factor)
             mask_3d = mask[..., jnp.newaxis]
             u_new = u_new * mask_3d
             v_new = s.v.data * drag_factor * mask_3d
@@ -5099,7 +5256,36 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             eta=Field(jnp.array(eta_cell)),
             u=Field(jnp.array(u_data)))
 
-    elif grid_type == "latlon":
+    elif grid_type == "fesom":
+        # Node-centred eta; element-centred (u, v) -- FESOM carries
+        # velocity at element centres, so the analytic wave is evaluated
+        # at the element centroids (geographic, dateline-safe).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon, with_fields)
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        eta_node = eta_amp * np.cos(kx * geo[:, 0] + ky * geo[:, 1])
+        lat_e, lon_e = element_centroid_lat_lon(grid.mesh)
+        lat_e = np.asarray(lat_e, dtype=np.float64)
+        lon_e = np.asarray(lon_e, dtype=np.float64)
+        phase_e = kx * lon_e + ky * lat_e
+        u_e = (_G_EARTH / denom) * (
+            omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
+        v_e = (_G_EARTH / denom) * (
+            omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
+        # Rotate (east, north) into the mesh's model frame, then write
+        # LEVEL 0 ONLY -- every structured arm perturbs only the surface
+        # layer, and a 2-D uv would have been broadcast down the whole
+        # column (codex 2026-08-10: both were confounds).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            geographic_to_rotated_vector)
+        u_rot, v_rot = geographic_to_rotated_vector(grid.mesh, u_e, v_e)
+        nlev_f = np.asarray(state.T.data).shape[-1]
+        uv = np.zeros((int(grid.mesh.elem2D), nlev_f, 2), dtype=np.float64)
+        uv[:, 0, 0] = np.asarray(u_rot)
+        uv[:, 0, 1] = np.asarray(v_rot)
+        return with_fields(state, grid.mesh, eta=eta_node, uv_elem=uv)
+
+    elif grid_type in ("latlon", "tripole"):
         # iter-138 (iter-137 production finding ERROR-2): on
         # latlon C-grid, u has shape (n_lat, n_lon+1, nlev) at
         # east-west edges and v has shape (n_lat+1, n_lon, nlev)
@@ -5110,29 +5296,16 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         # cell centers but lat shifted by -dlat/2 (south edges).
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-        n_lat = u_data.shape[0]
-        n_u_lon = u_data.shape[1]  # = n_lon + 1
-        n_v_lat = v_data.shape[0]  # = n_lat + 1
-        n_lon_v = v_data.shape[1]  # = n_lon
-        dlon = float(grid.dlon)
-        dlat = float(grid.dlat)
-        lat_1d = np.asarray(grid.lat, dtype=np.float64)   # cell-center lat
-        lon_1d = np.asarray(grid.lon, dtype=np.float64)   # cell-center lon
-        # u-edge lon: extend by one column on the right (assumes
-        # uniform spacing); shift entire array by -dlon/2 to put
-        # u-edges at west cell faces.
-        lon_u = np.concatenate([lon_1d - dlon / 2.0,
-                                lon_1d[-1:] + dlon / 2.0])
-        lat_u_2d, lon_u_2d = np.meshgrid(lat_1d, lon_u, indexing='ij')
+        # Face positions from the SHARED helper, so this branch is not
+        # rectilinear-only: on a curvilinear mesh (tripole) it evaluates
+        # the analytic wave at the true face midpoints instead of raising
+        # on a 1-D-axis shape mismatch.
+        lat_u_2d, lon_u_2d, lat_v_2d, lon_v_2d = _cgrid_face_lat_lon(grid)
         phase_u = kx * lon_u_2d + ky * lat_u_2d
         u_pert_edge = (_G_EARTH / denom) * (
             omega * k_phys * np.cos(phase_u)
             - f0 * l_phys * np.sin(phase_u))
         u_data[..., 0] = u_pert_edge
-        # v-edge lat: extend by one row on top.
-        lat_v = np.concatenate([lat_1d - dlat / 2.0,
-                                lat_1d[-1:] + dlat / 2.0])
-        lat_v_2d, lon_v_2d = np.meshgrid(lat_v, lon_1d, indexing='ij')
         phase_v = kx * lon_v_2d + ky * lat_v_2d
         v_pert_edge = (_G_EARTH / denom) * (
             omega * l_phys * np.cos(phase_v)

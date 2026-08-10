@@ -504,6 +504,172 @@ def build_flat_bottom_mesh(
 # Initial condition
 # =============================================================================
 
+def element_centroid_lat_lon(mesh: "Mesh") -> tuple[jax.Array, jax.Array]:
+    """GEOGRAPHIC (lat, lon) of every element centroid, radians.
+
+    FESOM stores velocity at element centres, so any analytic velocity IC
+    needs element coordinates. ``mesh.elem_center_x/y`` are ROTATED
+    radians (the pi mesh's rotation is not guaranteed to be the identity),
+    so the centroid is built from the three nodes' GEOGRAPHIC coordinates
+    via a unit-vector mean -- rotation-independent and dateline-safe (a
+    plain longitude average puts an element straddling 180 deg at 0 deg).
+    """
+    _require_fesom_jax()
+    geo = jnp.asarray(mesh.geo_coord_nod2D, dtype=jnp.float64)
+    lon_n, lat_n = geo[:, 0], geo[:, 1]
+    xyz = jnp.stack([jnp.cos(lat_n) * jnp.cos(lon_n),
+                     jnp.cos(lat_n) * jnp.sin(lon_n),
+                     jnp.sin(lat_n)], axis=-1)          # (nod2D, 3)
+    v = jnp.mean(xyz[mesh.elem_nodes], axis=1)          # (elem2D, 3)
+    lat_e = jnp.arctan2(v[:, 2], jnp.hypot(v[:, 0], v[:, 1]))
+    lon_e = jnp.mod(jnp.arctan2(v[:, 1], v[:, 0]), 2.0 * jnp.pi)
+    return lat_e, lon_e
+
+
+def geographic_to_rotated_vector(mesh: "Mesh", u_geo, v_geo):
+    """Rotate an (east, north) GEOGRAPHIC vector into the mesh's ROTATED
+    frame, per element. Returns ``(u_rot, v_rot)``.
+
+    FESOM integrates velocity in the mesh's rotated frame
+    (``coord_nod2D``), which on the packaged meshes is NOT the geographic
+    frame (``geo_coord_nod2D``) -- they differ by up to 500 deg of
+    longitude on the pi mesh. Writing east/north components straight into
+    ``uv`` would therefore point an analytic IC in the wrong direction, by
+    an amount that varies across the mesh (codex 2026-08-10).
+
+    The local frame angle is measured FROM THE MESH: take the direction
+    from the element's first node to its second, express it as an azimuth
+    in each frame, and difference. That needs no Euler matrix and no
+    private import from fesom_jax, and it degenerates to the identity on
+    an unrotated mesh.
+    """
+    _require_fesom_jax()
+
+    def _azimuth(coord):
+        c = jnp.asarray(coord, dtype=jnp.float64)
+        lon, lat = c[:, 0], c[:, 1]
+        a = mesh.elem_nodes[:, 0]
+        b = mesh.elem_nodes[:, 1]
+        dlon = (lon[b] - lon[a] + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
+        # Local tangent-plane components of the a->b direction.
+        east = dlon * jnp.cos(0.5 * (lat[a] + lat[b]))
+        north = lat[b] - lat[a]
+        return jnp.arctan2(east, north)
+
+    alpha = _azimuth(mesh.coord_nod2D) - _azimuth(mesh.geo_coord_nod2D)
+    ca, sa = jnp.cos(alpha), jnp.sin(alpha)
+    u_geo = jnp.asarray(u_geo, dtype=jnp.float64)
+    v_geo = jnp.asarray(v_geo, dtype=jnp.float64)
+    # Rotating the FRAME by alpha rotates the components by -alpha.
+    return (ca * u_geo + sa * v_geo, -sa * u_geo + ca * v_geo)
+
+
+def with_fields(
+    state: "FesomOceanState",
+    mesh: "Mesh",
+    *,
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    eta: jnp.ndarray | None = None,
+    uv_elem: jnp.ndarray | None = None,
+) -> "FesomOceanState":
+    """Return *state* with the given fields replaced (analytic-IC setter).
+
+    ``T``/``S`` are node fields ``(nod2D, nlev)`` or ``(nod2D,)`` (a single
+    column value broadcast down); ``eta`` is ``(nod2D,)``; ``uv_elem`` is
+    ``(elem2D, nlev, 2)`` or ``(elem2D, 2)`` (broadcast down the column).
+    Shapes are checked against the mesh rather than broadcast blindly -- a
+    silently transposed IC is the failure mode this guards.
+
+    The pad column (fesom_jax carries ``nl`` = ``nlev + 1`` slots) is
+    filled by repeating the deepest value, and ``T_old``/``uv`` time levels
+    are set together so the IC is self-consistent at step 0. ``uv_node`` is
+    recomputed from the new element velocity, never carried stale.
+    """
+    _require_fesom_jax()
+    from fesom_jax.pp import compute_vel_nodes
+
+    inner = state.inner
+    nlev = state.nlev
+    n_node = int(mesh.nod2D)
+    n_elem = int(mesh.elem2D)
+    repl: dict[str, Any] = {}
+
+    def _to_column(arr, name, n_expected, n_pad_slots):
+        a = jnp.asarray(arr, dtype=jnp.float64)
+        if a.ndim not in (1, 2):
+            raise ValueError(
+                f"with_fields: {name} must be rank 1 ({n_expected},) or rank "
+                f"2 ({n_expected}, nlev); got shape {a.shape}.")
+        if a.ndim == 1:
+            if a.shape[0] != n_expected:
+                raise ValueError(
+                    f"with_fields: {name} has {a.shape[0]} entries but the "
+                    f"mesh has {n_expected}.")
+            a = jnp.broadcast_to(a[:, None], (n_expected, n_pad_slots))
+            return a
+        if a.shape[0] != n_expected:
+            raise ValueError(
+                f"with_fields: {name} leading dim {a.shape[0]} != mesh "
+                f"{n_expected} (transposed IC?).")
+        if a.shape[1] == n_pad_slots:
+            return a
+        if a.shape[1] != nlev:
+            raise ValueError(
+                f"with_fields: {name} has {a.shape[1]} levels; expected "
+                f"{nlev} (or {n_pad_slots} including the pad slot).")
+        return jnp.concatenate([a, a[:, -1:]], axis=1)
+
+    n_slots = inner.T.shape[1]
+    if T is not None:
+        Tf = _to_column(T, "T", n_node, n_slots)
+        repl.update(T=Tf, T_old=Tf)
+    if S is not None:
+        Sf = _to_column(S, "S", n_node, n_slots)
+        repl.update(S=Sf, S_old=Sf)
+    if eta is not None:
+        e = jnp.asarray(eta, dtype=jnp.float64)
+        if e.shape != (n_node,):
+            raise ValueError(
+                f"with_fields: eta shape {e.shape} != ({n_node},).")
+        repl.update(eta_n=e)
+    if uv_elem is not None:
+        uv = jnp.asarray(uv_elem, dtype=jnp.float64)
+        if uv.ndim not in (2, 3):
+            raise ValueError(
+                f"with_fields: uv_elem must be rank 2 ({n_elem}, 2) or rank "
+                f"3 ({n_elem}, nlev, 2); got shape {uv.shape}.")
+        if uv.ndim == 3 and uv.shape[1] not in (nlev, inner.uv.shape[1]):
+            raise ValueError(
+                f"with_fields: uv_elem has {uv.shape[1]} levels; expected "
+                f"{nlev} (or {inner.uv.shape[1]} including the pad slot).")
+        if uv.ndim == 2:
+            if uv.shape != (n_elem, 2):
+                raise ValueError(
+                    f"with_fields: uv_elem shape {uv.shape} != "
+                    f"({n_elem}, 2).")
+            uv = jnp.broadcast_to(uv[:, None, :],
+                                  (n_elem, inner.uv.shape[1], 2))
+        elif uv.shape[0] != n_elem or uv.shape[-1] != 2:
+            raise ValueError(
+                f"with_fields: uv_elem shape {uv.shape} != "
+                f"({n_elem}, nlev, 2).")
+        elif uv.shape[1] == nlev:
+            uv = jnp.concatenate([uv, uv[:, -1:, :]], axis=1)
+        repl.update(uv=uv)
+
+    if not repl:
+        return state
+    new_inner = dataclasses.replace(inner, **repl)
+    facade = FesomOceanState.from_fesom(new_inner, mesh)
+    return dataclasses.replace(
+        facade,
+        uv_node=jnp.asarray(compute_vel_nodes(mesh, new_inner.uv),
+                            dtype=jnp.float64),
+        is_first_step=state.is_first_step,
+    )
+
+
 def create_rest_state(
     mesh: "Mesh",
     z_coord,
