@@ -431,7 +431,11 @@ def main() -> int:
     # ONE compile → full per-family census; the CP scalar (the #1113 round-count
     # wall) is the collective_permute member, so no second compile for it.
     hlo_census = hlo_collective_census(_census_fn, s)
-    hlo_cp = hlo_census["collective_permute"] if hlo_census else None
+    # .get: census can return {"_error": ...} (never-silent contract) — a
+    # failed census must not KeyError the bench after the timed loop
+    # (it killed every multicontroller arm of job 26820846).
+    hlo_cp = (hlo_census.get("collective_permute")
+              if hlo_census else None)
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:

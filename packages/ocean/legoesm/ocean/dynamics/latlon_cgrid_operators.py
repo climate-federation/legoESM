@@ -1402,16 +1402,19 @@ def min_cell_to_vertex(h_k: jnp.ndarray, grid: LatLonGrid) -> jnp.ndarray:
 
     Vertex value = min of the 4 surrounding T-cells (SW, SE, NW, NE), the
     same convention as :func:`min_cell_to_uface`/:func:`min_cell_to_vface`
-    extended to the corner stagger — the "min" branch of ``_een_e3f_h_vtx``
+    extended to the corner stagger — the "min" branch of ``een_e3f_h_vtx``
     (``ocean_pe_latlon_cgrid.py``, NEMO ``e3f`` at a vorticity vertex), factored
-    here as a standalone helper (that function also threads an unrelated
-    Fu/u pair through the same halo pad for the EEN vorticity flux, so it
-    cannot be called for a thickness-only need without dummy args).
+    here as a standalone helper.  NOTE the two differ in their POLE BC:
+    ``een_e3f_h_vtx`` pads with the ``BIG_H`` dry sentinel (giving the
+    deepest wet neighbour at a pole row), this one pads with ZERO (giving
+    an all-dry pole row, matching ``min_cell_to_vface``) -- so they are not
+    interchangeable even though ``een_e3f_h_vtx`` now takes ``Fu=u=None``
+    for a thickness-only call.
 
     Wall BC: south/north physical poles get an all-dry (zero) row via the
     zero-padded cell field, matching ``min_cell_to_vface``. Tripolar fold:
     the north row is the min over the local pair AND the fold-partner pair
-    (same convention as ``_een_e3f_h_vtx``'s "min" branch).
+    (same convention as ``een_e3f_h_vtx``'s "min" branch).
 
     Parameters
     ----------
@@ -4169,22 +4172,33 @@ def pv_flux_al81_partial_cell(
     For u-face ``u[j, i]`` (between west cell ``(j, i-1)`` and east
     cell ``(j, i)``), the AL81 PV-flux contribution is::
 
-        +F_u[j,i] = + SE_triad(west_cell) * V[j+1, i-1]
-                    + SW_triad(east_cell) * V[j+1, i  ]
-                    + NE_triad(west_cell) * V[j  , i-1]
-                    + NW_triad(east_cell) * V[j  , i  ]
+        +F_u[j,i] = + NE_triad(west_cell) * V[j+1, i-1]
+                    + NW_triad(east_cell) * V[j+1, i  ]
+                    + SE_triad(west_cell) * V[j  , i-1]
+                    + SW_triad(east_cell) * V[j  , i  ]
 
     where ``V = h_v · v`` is the meridional mass flux at v-faces.
 
     For v-face ``v[j, i]`` (between south cell ``(j-1, i)`` and
     north cell ``(j, i)``)::
 
-        -F_v[j,i] = + NW_triad(south_cell) * U[j-1, i+1]
-                    + NE_triad(south_cell) * U[j-1, i  ]
-                    + SW_triad(north_cell) * U[j  , i+1]
-                    + SE_triad(north_cell) * U[j  , i  ]
+        -F_v[j,i] = + NW_triad(south_cell) * U[j-1, i  ]
+                    + NE_triad(south_cell) * U[j-1, i+1]
+                    + SW_triad(north_cell) * U[j  , i  ]
+                    + SE_triad(north_cell) * U[j  , i+1]
 
     where ``U = h_u · u`` is the zonal mass flux at u-faces.
+
+    The triad↔flux pairing above is the ENERGY-CONSERVING one: the
+    coefficient multiplying ``V[jv,iv]`` in ``du/dt`` at ``u[ju,iu]``
+    is the SAME triad as the coefficient multiplying ``U[ju,iu]`` in
+    ``dv/dt`` at ``v[jv,iv]``, so the domain-summed work
+    ``Σ U·F_u + Σ V·F_v`` telescopes to exactly zero.  It is NEMO's
+    ``vor_een`` pairing verbatim (``dynvor.F90:838-844``: the NORTH
+    v-flux ``zwy(ji,jj)`` carries the NORTH-side triad ``ztne(ji,jj)``),
+    and it is reproduced identically by NEMO's barotropic
+    ``dyn_cor_2D_init`` (``dynspg_ts.F90:1517-1531``: ``zpvo_nw =
+    ff_f(ji-1,jj)+ff_f(ji,jj)+ff_f(ji,jj-1)`` multiplies ``pvnb(ji,jj)``).
 
     On a uniform-h, fully-wet grid this stencil reduces to a 9-point
     average of q (the symmetric AL81 "energy-enstrophy compromise"),
@@ -4339,10 +4353,10 @@ def pv_flux_al81_partial_cell(
     # u-face u[j, i] is between west cell (j, i-1) and east cell
     # (j, i).  AL81 form (NEMO dyn_vor_een, translated to our index
     # convention):
-    #   +F_pv_u[j, i] = + t_SE(west_cell)  * F_v[j+1, i-1]
-    #                   + t_SW(east_cell)  * F_v[j+1, i  ]
-    #                   + t_NE(west_cell)  * F_v[j  , i-1]
-    #                   + t_NW(east_cell)  * F_v[j  , i  ]
+    #   +F_pv_u[j, i] = + t_NE(west_cell)  * F_v[j+1, i-1]
+    #                   + t_NW(east_cell)  * F_v[j+1, i  ]
+    #                   + t_SE(west_cell)  * F_v[j  , i-1]
+    #                   + t_SW(east_cell)  * F_v[j  , i  ]
     #
     # We need the west-cell triads (cell at (j, i-1)) at u-face index
     # i; this is ``t_*`` rolled +1 in axis 1.  East-cell triads at
@@ -4401,20 +4415,22 @@ def pv_flux_al81_partial_cell(
     F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
 
     # AL81 contribution at u-faces.
+    # NEMO dynvor.F90:840-843 (ztne(ji,jj)*zwy(ji,jj) etc.) in lego indices:
+    # the NORTH v-flux carries the NORTH-side triad.
     diag_vortcor_u = (
-        t_SE_W * F_v_N_W       # west-cell SE × NW V
-        + t_SW_E * F_v_N_E     # east-cell SW × NE V
-        + t_NE_W * F_v_S_W     # west-cell NE × SW V
-        + t_NW_E * F_v_S_E     # east-cell NW × SE V
+        t_NE_W * F_v_N_W       # west-cell NE × NW V   (NEMO ztne(ji  ,jj)·zwy(ji  ,jj  ))
+        + t_NW_E * F_v_N_E     # east-cell NW × NE V   (NEMO ztnw(ji+1,jj)·zwy(ji+1,jj  ))
+        + t_SE_W * F_v_S_W     # west-cell SE × SW V   (NEMO ztse(ji  ,jj)·zwy(ji  ,jj-1))
+        + t_SW_E * F_v_S_E     # east-cell SW × SE V   (NEMO ztsw(ji+1,jj)·zwy(ji+1,jj-1))
     )
 
     # --- 5. AL81 PV flux at v-faces --------------------------------
     # v-face v[j, i] is between south cell (j-1, i) and north cell
     # (j, i).  AL81 form:
-    #   -F_pv_v[j, i] = + t_NW(south_cell) * F_u[j-1, i+1]
-    #                   + t_NE(south_cell) * F_u[j-1, i  ]
-    #                   + t_SW(north_cell) * F_u[j  , i+1]
-    #                   + t_SE(north_cell) * F_u[j  , i  ]
+    #   -F_pv_v[j, i] = + t_NW(south_cell) * F_u[j-1, i  ]
+    #                   + t_NE(south_cell) * F_u[j-1, i+1]
+    #                   + t_SW(north_cell) * F_u[j  , i  ]
+    #                   + t_SE(north_cell) * F_u[j  , i+1]
     # The v-tendency is the negative of this (since q × u with the
     # cross-product sign convention is q × F_u for v).
     #
@@ -4484,11 +4500,13 @@ def pv_flux_al81_partial_cell(
 
     # v-tendency from PV (negative sign per the cross-product
     # convention used by the simple Sadourny call site).
+    # NEMO dynvor.F90:842-843 (ztsw(ji,jj+1)*zwx(ji-1,jj+1) etc.) in lego
+    # indices: the WEST u-flux carries the WEST-side triad.
     diag_vortcor_v = -(
-        t_NW_S * F_u_S_E       # south-cell NW × SE U
-        + t_NE_S * F_u_S_W     # south-cell NE × SW U
-        + t_SW_N * F_u_N_E     # north-cell SW × NE U
-        + t_SE_N * F_u_N_W     # north-cell SE × NW U
+        t_NW_S * F_u_S_W       # south-cell NW × SW U  (NEMO ztnw(ji,jj  )·zwx(ji-1,jj  ))
+        + t_NE_S * F_u_S_E     # south-cell NE × SE U  (NEMO ztne(ji,jj  )·zwx(ji  ,jj  ))
+        + t_SW_N * F_u_N_W     # north-cell SW × NW U  (NEMO ztsw(ji,jj+1)·zwx(ji-1,jj+1))
+        + t_SE_N * F_u_N_E     # north-cell SE × NE U  (NEMO ztse(ji,jj+1)·zwx(ji  ,jj+1))
     )
 
     return diag_vortcor_u, diag_vortcor_v

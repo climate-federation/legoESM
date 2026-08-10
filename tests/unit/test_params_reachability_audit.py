@@ -304,3 +304,120 @@ def test_every_ice_and_coupler_param_reachable():
     uncovered = _compute_uncovered()
     leaked = {q for q in uncovered if q.split(".")[0] in ("ice", "coupler")}
     assert not leaked, f"ice/coupler tunables regressed to unreachable: {sorted(leaked)}"
+
+
+# ---------------------------------------------------------------------------
+# tier-0 calibration gate (#1518): the never-train partition is UNREACHABLE
+# through --params in every driver.
+# ---------------------------------------------------------------------------
+# ``tunable_tier 0`` is the __param_spec__ partition for values a calibration
+# must NEVER move (numerics floors, iteration-coupled knobs, measurement
+# conventions, AD-unreachable triggers).  ``build_trainable_params`` refuses
+# them even via ``include=``; ``apply_params_to_config`` — the single --params
+# loader all four production drivers share — must refuse them too, else an
+# optimiser-written params YAML can silently set forbidden physics (the
+# #1518 hole: atm.conv.BechtoldConfig.cape_threshold via the atm scalar map,
+# and every land.canopy.clm_ml.* tier-0 default via run_lmip's class router).
+#
+# There is deliberately NO baseline/allowlist here: an allowlisted tier-0
+# calibration target is a contradiction in terms.  If a parameter genuinely
+# should be calibratable, change its tunable_tier in the owning
+# __param_spec__ (a reviewed scientific decision), not this gate.
+
+def _mid_bounds(meta) -> float:
+    lo, hi = meta.bounds
+    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+        return (float(lo) + float(hi)) / 2.0
+    return 1.0
+
+
+def test_no_tier0_param_is_calibratable():
+    """CLASS GATE: every tunable_tier-0 registry parameter is refused by
+    ``apply_params_to_config`` with the tier named in the error — on ANY
+    config object, because the refusal must precede routing (a tier-0 value
+    may never be applied anywhere, reachable today or not)."""
+    import pytest
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+
+    tier0 = [m for m in build_registry() if m.tunable_tier == 0]
+    # Vacuity guard: the registry currently declares tier-0 parameters; if
+    # this ever becomes empty the gate tests nothing — revisit it.
+    assert tier0, "no tier-0 parameters in the registry — gate is vacuous"
+
+    from typing import NamedTuple
+
+    class _Empty(NamedTuple):
+        placeholder: float = 0.0
+
+    for meta in tier0:
+        with pytest.raises(SystemExit, match="tunable_tier 0"):
+            apply_params_to_config(
+                _Empty(), {meta.qualified_name: _mid_bounds(meta)},
+                driver="tier0-gate",
+                scalar_param_map=build_atm_scalar_param_map())
+
+
+def test_tier0_refused_on_the_real_routes():
+    """The two production surfaces where #1518 was live go RED without the
+    guard: the atm scalar map (run_amip/run_coupled) accepted
+    ``BechtoldConfig.cape_threshold``, and run_lmip's nested class router
+    accepted every ``land.canopy.clm_ml.*`` tier-0 default."""
+    import pytest
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+
+    reg = {m.qualified_name: m for m in build_registry()}
+
+    # atm scalar-map route (the exact call run_amip.main makes).
+    atm_cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        convection="bechtold")
+    qname = "atm.conv.BechtoldConfig.cape_threshold"
+    assert qname in build_atm_scalar_param_map(), (
+        "map entry vanished — update this test to another mapped tier-0 param")
+    with pytest.raises(SystemExit, match="tunable_tier 0"):
+        apply_params_to_config(
+            atm_cfg, {qname: _mid_bounds(reg[qname])}, driver="run_amip",
+            scalar_param_map=build_atm_scalar_param_map())
+
+    # run_lmip nested class-router route.
+    from scripts.run.run_lmip import _parse_args as lmip_args
+    from scripts.run.run_lmip import build_config_from_args as lmip_build
+    lmip_cfg = lmip_build(lmip_args(
+        ["--lat", "0.0", "--land-surface-scheme", "clm_ml"]))
+    qname = "land.canopy.clm_ml.o2ref"
+    with pytest.raises(SystemExit, match="tunable_tier 0"):
+        apply_params_to_config(
+            lmip_cfg, {qname: _mid_bounds(reg[qname])}, driver="run_lmip")
+
+
+def test_tier0_gate_is_not_vacuous():
+    """Synthetic-violation self-test (guardrail doctrine): the refusal is
+    TIER-conditional, not a blanket raise — a tier-1 parameter on the same
+    two routes still applies cleanly."""
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+
+    atm_cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        cloud_scheme="sundqvist")
+    out = apply_params_to_config(
+        atm_cfg, {"atm.clouds.CloudConfig.q_c_diagnostic": 3.0e-4},
+        driver="tier0-gate", scalar_param_map=build_atm_scalar_param_map())
+    assert out.cloud_q_c_diagnostic == 3.0e-4
+
+    from scripts.run.run_lmip import _parse_args as lmip_args
+    from scripts.run.run_lmip import build_config_from_args as lmip_build
+    lmip_cfg = lmip_build(lmip_args(
+        ["--lat", "0.0", "--land-surface-scheme", "clm_ml"]))
+    # a tier-1/2 clm_ml neighbour must still route (field value mid-bounds).
+    reg = [m for m in build_registry()
+           if m.scheme_key == "land.canopy.clm_ml" and m.tunable_tier in (1, 2)
+           and m.shape_key is None]
+    assert reg, "no tier-1/2 scalar clm_ml params left — pick another control"
+    meta = reg[0]
+    out = apply_params_to_config(
+        lmip_cfg, {meta.qualified_name: _mid_bounds(meta)}, driver="tier0-gate")
+    assert out is not lmip_cfg

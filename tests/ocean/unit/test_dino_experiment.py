@@ -16,6 +16,7 @@ the slopbuster-mandated direct-coverage entry point.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -94,6 +95,27 @@ class TestDINOConfig:
         cfg2 = dataclasses.replace(cfg, mpas_equatorial_visc_boost=12.0)
         mc2, _ = dino.dino_mpas_model_config(mesh, cfg2, physics=False)
         assert mc2.equatorial_visc_boost == pytest.approx(12.0)
+
+    def test_mpas_builder_rejects_latlon_only_evd_time_level(self):
+        """#1317 S17: ``convection_evd_n2_time_level="nemo_now_before"`` is a
+        lat-lon-C-grid-only block — the MPAS vmix bridge threads neither the
+        Nnn/Nbb tracers nor the Nnn eta the zdfevd trigger arms need, so the
+        MPAS builder must RAISE rather than silently run the solver-state
+        trigger (dispatch hardening; locked in
+        ``test_dispatch_hardening.BASELINE_DISPATCHERS``).
+        """
+        import dataclasses
+        from types import SimpleNamespace
+
+        mesh = SimpleNamespace(areaCell=jnp.full((64,), 1.0e10))
+        cfg = dataclasses.replace(
+            DINOConfig(), convection_evd_n2_time_level="nemo_now_before")
+        with pytest.raises(ValueError, match="convection_evd_n2_time_level"):
+            dino.dino_mpas_model_config(mesh, cfg, physics=True)
+        # The default value is accepted (guard is not a blanket reject).
+        assert DINOConfig().convection_evd_n2_time_level == "solver_state"
+        mc, phys = dino.dino_mpas_model_config(mesh, DINOConfig(), physics=True)
+        assert phys is not None
 
     def test_mpas_physics_is_wired_into_model_config(self):
         """The MPAS model gates KPP/GM-Redi/convection on
@@ -1429,6 +1451,170 @@ class TestWindThroughStep:
         expect = tau_row * cfg.dt / (cfg.rho_0 * float(z.dz_ref[0]))
         assert got > 0.0
         assert 0.5 * expect < got < 1.1 * expect, (got, expect)
+
+
+# ---------------------------------------------------------------------
+# #1492 surface_tendency_placement="leapfrog_rhs" (NEMO tra_sbc Nnn-RHS
+# placement vs the legacy "applied_now" pre-step state mutation)
+# ---------------------------------------------------------------------
+
+class TestSurfaceTendencyPlacement:
+    """Global-closure audit (#1492 0.1) found the legacy placement retains
+    only ~0.44 of the applied surface flux per step (the increment lands on
+    BOTH sides of the leap-frog combine's ``state_expl.T - state.T`` and
+    cancels there, entering only via the Asselin filter's "now" weight;
+    closed-form MLF/Asselin recursion match: retention numerically 0.4444
+    = 4/9 for gamma=0.1, see mlf_retention_algebra.py. NOTE the label
+    "1/(1+2*gamma)" used in an earlier revision is WRONG -- it evaluates to
+    0.833 at gamma=0.1; only the NUMBER 4/9 is right, reproduced twice by
+    independent instruments on different grids). NEMO's
+    ``trasbc.F90`` instead writes into the RHS accumulator BEFORE the
+    ``tra_zdf``/leap-frog combine (stpmlf.F90:342 ``tra_sbc(kstp, Nnn, ts,
+    Nrhs)``). These tests pin the new "leapfrog_rhs" placement end-to-end
+    on the real DINO MLF card.
+    """
+
+    def test_default_is_applied_now(self):
+        assert DINOConfig().surface_tendency_placement == "applied_now"
+
+    def test_return_rate_does_not_mutate_tracers_and_matches_legacy_delta(self):
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_surface_forcing_arrays, dino_config_for_recipe,
+        )
+        cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        dt = cfg.dt
+
+        # #1492 C2: the placement field is load-bearing, so each route is
+        # called with the cfg that DECLARES it. The point of the test is
+        # unchanged: the two routes must compute the SAME tendency and differ
+        # only in where it is consumed.
+        cfg_legacy = dataclasses.replace(
+            cfg, surface_tendency_placement="applied_now")
+        cfg_rhs = dataclasses.replace(
+            cfg, surface_tendency_placement="leapfrog_rhs")
+        st_legacy = dino.apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg_legacy, dt, t_seconds=dt)
+        st_rate, (dT_dt, dS_dt) = dino.apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg_rhs, dt, t_seconds=dt, return_rate=True)
+        # T/S UNCHANGED in return_rate mode (only u still gets its wind kick).
+        np.testing.assert_array_equal(np.asarray(st_rate.T.data),
+                                      np.asarray(st.T.data))
+        np.testing.assert_array_equal(np.asarray(st_rate.S.data),
+                                      np.asarray(st.S.data))
+        # The returned RATE, applied over dt, reproduces the legacy delta
+        # to machine precision (same tendency, different consumption site).
+        expect_dT = (np.asarray(st_legacy.T.data) - np.asarray(st.T.data)) / dt
+        expect_dS = (np.asarray(st_legacy.S.data) - np.asarray(st.S.data)) / dt
+        assert float(np.max(np.abs(np.asarray(dT_dt) - expect_dT))) < 1e-10
+        assert float(np.max(np.abs(np.asarray(dS_dt) - expect_dS))) < 1e-10
+
+    def test_external_tracer_rate_requires_leapfrog(self):
+        """Dispatch hardening: passing external_tracer_rate under any outer
+        integrator except leap-frog would be a SILENT no-op (only the MLF
+        Nnn pass reads ``_external_tracer_rate``) -- must raise instead."""
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.experiments.dino import (
+            create_dino_z_star, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_model_config, dino_lat_lon_surface_forcing_arrays,
+            dino_config_for_recipe,
+        )
+        cfg = dino_config_for_recipe("nemo_dino_kamm")  # forward-Euler card
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.outer_integrator == "forward_euler"
+        model = LatLonCGridOceanModel(g, z, mc)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        # #1492 C2: obtaining a rate requires the cfg to DECLARE the rhs
+        # route (the applier now raises on a placement/return_rate mismatch);
+        # the point under test is the SEPARATE guard that rejects that rate
+        # when the model's outer integrator is not leap-frog.
+        cfg_rhs = dataclasses.replace(
+            cfg, surface_tendency_placement="leapfrog_rhs")
+        _, rate = dino.apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg_rhs, cfg.dt, t_seconds=cfg.dt, return_rate=True)
+        with pytest.raises(ValueError, match="leap-frog"):
+            model.step(st, dt=cfg.dt, external_tracer_rate=rate)
+
+    def test_retention_synthetic_violation_both_directions(self):
+        """The decisive check (#1492 STEP 2/3): run the SAME few-step DINO
+        MLF trajectory under both placements with a real (non-zero)
+        restoring tendency injected every step, and confirm:
+          - "applied_now" (legacy): retains well BELOW half the applied
+            surface heat increment in the global-mean top-layer T (matches
+            the 0.1 audit's measured ~0.44 coefficient, well under 0.6).
+          - "leapfrog_rhs" (new): retains well ABOVE half -- most of the
+            RHS-injected tendency survives into the trajectory, as NEMO's
+            placement does.
+        A regression here (retention collapsing back toward the legacy
+        value under "leapfrog_rhs") means the RHS injection silently
+        stopped reaching the leap-frog combine.
+        """
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_vertical, dino_lat_lon_state,
+            dino_lat_lon_model_config, dino_lat_lon_surface_forcing_arrays,
+            dino_config_for_recipe,
+        )
+        cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        g = dino_lat_lon_grid(cfg, n_lon=10)
+        z = dino_lat_lon_vertical(g, cfg)  # MLF card needs its matching
+                                           # partial-cell/masked-zco coord,
+                                           # not the bare z* helper.
+        st0 = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        model = LatLonCGridOceanModel(g, z, mc)
+        dt = cfg.dt
+        mean_mask = np.asarray(st0.land_mask.data) > 0.5
+        n_steps = 6
+
+        def run(placement):
+            # #1492 C2: the config field is now LOAD-BEARING -- the applier
+            # raises if cfg.surface_tendency_placement disagrees with the
+            # return_rate route, so each direction must carry its own cfg.
+            cfg_p = dataclasses.replace(cfg,
+                                        surface_tendency_placement=placement)
+            s = st0
+            applied_total = 0.0
+            for k in range(n_steps):
+                t_next = (k + 1) * dt
+                if placement == "leapfrog_rhs":
+                    s, (rT, rS) = dino.apply_dino_lat_lon_surface_forcing(
+                        s, frc, z, cfg_p, dt, t_seconds=t_next, return_rate=True)
+                    applied_total += float(np.mean(
+                        np.asarray(rT)[..., 0][mean_mask])) * dt
+                    s = model.step(s, dt=dt, external_tracer_rate=(rT, rS))
+                else:
+                    s_before = s
+                    s = dino.apply_dino_lat_lon_surface_forcing(
+                        s, frc, z, cfg_p, dt, t_seconds=t_next)
+                    applied_total += float(np.mean(
+                        (np.asarray(s.T.data) - np.asarray(s_before.T.data)
+                         )[..., 0][mean_mask]))
+                    s = model.step(s, dt=dt)
+            return s, applied_total
+
+        s_now, applied_now = run("applied_now")
+        s_rhs, applied_rhs = run("leapfrog_rhs")
+        t0_mean = float(np.mean(np.asarray(st0.T.data)[..., 0][mean_mask]))
+        d_now = float(np.mean(np.asarray(s_now.T.data)[..., 0][mean_mask])) - t0_mean
+        d_rhs = float(np.mean(np.asarray(s_rhs.T.data)[..., 0][mean_mask])) - t0_mean
+        assert applied_now > 0.0 and applied_rhs > 0.0
+        retention_now = d_now / applied_now
+        retention_rhs = d_rhs / applied_rhs
+        assert retention_now < 0.6, retention_now
+        assert retention_rhs > 0.6, retention_rhs
 
 
 def test_S_star_boundary_targets_match_oracle():

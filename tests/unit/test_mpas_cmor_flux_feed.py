@@ -27,7 +27,7 @@ def mesh():
     return create_grid("mpas", 2, lloyd_iterations=10)
 
 
-def _make_collector(mesh):
+def _make_collector(mesh, cloud_config=None):
     sigma_full = np.linspace(0.05, 0.98, NLEV)
     dsigma = np.full(NLEV, 1.0 / NLEV)
     dc = DiagnosticCollector(
@@ -35,6 +35,7 @@ def _make_collector(mesh):
         experiment_id="amip", monthly_means=True,
         cmip_output=True, n_days=30, output_dir=None,
         cmip_resolution_deg=10.0, start_year=1979,
+        cloud_config=cloud_config,
     )
     dc.set_cmip_grid_info(grid_type="mpas", grid=mesh, start_year=1979)
     return dc, sigma_full
@@ -49,7 +50,10 @@ def _base_fields(mesh, sigma_full):
         phis=np.zeros(n))
 
 
-FLUXES = dict(rlut=238.0, rsut=99.0, rsdt=340.0, hfss=17.0, hfls=88.0)
+FLUXES = dict(rlut=238.0, rsut=99.0, rsdt=340.0, hfss=17.0, hfls=88.0,
+              # Clear-sky pair (#843): physically rsutcs <= rsut (clear sky
+              # reflects LESS) and rlutcs >= rlut (clear sky emits MORE).
+              rsutcs=77.0, rlutcs=262.0)
 
 
 class TestFeed:
@@ -118,6 +122,9 @@ class TestRadiationPacker:
         assert t.sw_up_toa is None
         assert t.lw_up_toa is None
         assert t.sw_down_toa is None
+        # Clear-sky pair (#843): default None => leaf absent, byte-identical.
+        assert t.sw_up_toa_clr is None
+        assert t.lw_up_toa_clr is None
 
     def test_toa_fields_packed_with_values(self, mesh):
         import jax.numpy as jnp
@@ -126,11 +133,16 @@ class TestRadiationPacker:
             mesh,
             sw_up_toa=jnp.full(n, 99.0),
             lw_up_toa=jnp.full(n, 238.0),
-            sw_down_toa=jnp.full(n, 340.0))
+            sw_down_toa=jnp.full(n, 340.0),
+            sw_up_toa_clr=jnp.full(n, 77.0),
+            lw_up_toa_clr=jnp.full(n, 262.0))
         np.testing.assert_allclose(np.asarray(t.sw_up_toa.data), 99.0)
         np.testing.assert_allclose(np.asarray(t.lw_up_toa.data), 238.0)
         np.testing.assert_allclose(np.asarray(t.sw_down_toa.data), 340.0)
+        np.testing.assert_allclose(np.asarray(t.sw_up_toa_clr.data), 77.0)
+        np.testing.assert_allclose(np.asarray(t.lw_up_toa_clr.data), 262.0)
         assert t.lw_up_toa.units == "W/m^2"
+        assert t.lw_up_toa_clr.units == "W/m^2"
 
 
 def _tend_with_extras():
@@ -148,39 +160,181 @@ def _tend_with_extras():
         precip=_f("precip", 3.0),
         lw_up_toa=_f("lw_up_toa", 4.0), sw_up_toa=_f("sw_up_toa", 5.0),
         sw_down_toa=_f("sw_down_toa", 6.0),
-        shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0))
+        shflx_sfc=_f("shflx", 7.0), lhflx_sfc=_f("lhflx", 8.0),
+        sw_down_sfc=_f("sw_down_sfc", 9.0), lw_down_sfc=_f("lw_down_sfc", 10.0),
+        sw_up_toa_clr=_f("sw_up_toa_clr", 11.0),
+        lw_up_toa_clr=_f("lw_up_toa_clr", 12.0))
 
 
-# Producer extraction shared VERBATIM by primitive_eq_mpas.step() and
-# voronoi_mpi._step; a drift here silently swaps rlut/rsut/rsdt or drops a field.
-_EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa", "shflx_sfc", "lhflx_sfc")
+# The ONE slot contract both producers build from (core.state).  Spelled out
+# here so a silent edit to the shared constant still has to face the explicit
+# slot map below; a drift swaps rlut/rsut/rsdt, misindexes the land-forcing
+# slots 8/9, or drops the clear-sky pair.
+_EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
+                "shflx_sfc", "lhflx_sfc",
+                "sw_down_sfc", "lw_down_sfc",
+                "sw_up_toa_clr", "lw_up_toa_clr")
 
 
 class TestSfcDiagContract:
-    """Lock the 8-slot sfc_diag tuple contract shared by BOTH producers
-    (serial + MPI-voronoi) and the driver consumer's slot 3-7 mapping."""
+    """Lock the 12-slot sfc_diag tuple contract of BOTH producers (serial
+    primitive_eq_mpas._step_jit and MPI parallel.voronoi_mpi._step) and the
+    driver consumer's slot mapping (3-7 all-sky fluxes, 8/9 land-forcing
+    downwelling, 10/11 clear-sky)."""
+
+    def test_shared_contract_is_the_one_both_producers_import(self):
+        """Both producers must build ``_extras`` from the SAME constant — the
+        drift that hand-maintained copies actually suffered: the MPI producer
+        stopped at slot 7 while the consumer read slots 10/11, so a ONE-rank
+        Voronoi MPI run (which _mpas_cmip_feed_enabled turns the feed ON for)
+        accepted --clear-sky-diag and published no rsutcs/rlutcs."""
+        from legoesm.core.state import (
+            MPAS_SFC_DIAG_EXTRA_KEYS,
+            MPAS_SFC_DIAG_MPI_UNPUBLISHED,
+        )
+        assert MPAS_SFC_DIAG_EXTRA_KEYS == _EXTRA_ORDER
+        # Both modules must reference the shared name, not a literal copy.
+        for mod, sym in (
+            ("legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas",
+             "MPAS_SFC_DIAG_EXTRA_KEYS"),
+            ("legoesm.parallel.voronoi_mpi", "MPAS_SFC_DIAG_EXTRA_KEYS"),
+            ("legoesm.parallel.voronoi_mpi", "MPAS_SFC_DIAG_MPI_UNPUBLISHED"),
+        ):
+            m = __import__(mod, fromlist=[sym])
+            assert getattr(m, sym) is (
+                MPAS_SFC_DIAG_EXTRA_KEYS
+                if sym == "MPAS_SFC_DIAG_EXTRA_KEYS"
+                else MPAS_SFC_DIAG_MPI_UNPUBLISHED), f"{mod}.{sym}"
+        # The MPI lane may leave slots EMPTY but never SHORTEN the tuple: a
+        # key it does not publish must still be a member of the contract.
+        for _k in MPAS_SFC_DIAG_MPI_UNPUBLISHED:
+            assert _k in MPAS_SFC_DIAG_EXTRA_KEYS
+        # ...and it must NOT drop the clear-sky pair (the blocker above).
+        assert "sw_up_toa_clr" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+        assert "lw_up_toa_clr" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+        # #1321: the surface downwelling pair is PUBLISHED on the MPI lane —
+        # withholding it made _marshal_land_forcing return None every step, so
+        # the interactive multilayer land silently never advanced.
+        assert "sw_down_sfc" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+        assert "lw_down_sfc" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+
+    def test_mpi_producer_publishes_clear_sky_at_contract_slots(self):
+        """Rebuild the MPI producer's extras expression on a tendency that
+        carries every field: it must be 12 slots long with the clear-sky pair
+        at 10/11 (an 8-slot tuple is the defect this locks out)."""
+        from legoesm.core.state import (
+            MPAS_SFC_DIAG_EXTRA_KEYS,
+            MPAS_SFC_DIAG_MPI_UNPUBLISHED,
+        )
+        _pt = _tend_with_extras()
+        _extras = tuple(
+            None if _k in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+            else getattr(_pt, _k, None)
+            for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
+        sfc = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
+        assert len(sfc) == 12
+        assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
+        assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
+        # #1321: the land downwelling pair is now PUBLISHED at slots 8/9.
+        # While it was withheld, ``_marshal_land_forcing``'s ``_sd[8] is None``
+        # guard declined every step and the Richards soil never advanced.
+        assert sfc[8].name == "sw_down_sfc"
+        assert sfc[9].name == "lw_down_sfc"
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 8
+        assert len(sfc_diag) == 12
         # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
-        # 5->rsdt, 6->hfss, 7->hfls.
+        # 5->rsdt, 6->hfss, 7->hfls, 10->rsutcs, 11->rlutcs; slots 8/9 are
+        # the _marshal_land_forcing downwelling pair.
         assert sfc_diag[3].name == "lw_up_toa"    # rlut
         assert sfc_diag[4].name == "sw_up_toa"    # rsut
         assert sfc_diag[5].name == "sw_down_toa"  # rsdt
         assert sfc_diag[6].name == "shflx"        # hfss
         assert sfc_diag[7].name == "lhflx"        # hfls
+        assert sfc_diag[8].name == "sw_down_sfc"  # land forcing
+        assert sfc_diag[9].name == "lw_down_sfc"  # land forcing
+        assert sfc_diag[10].name == "sw_up_toa_clr"  # rsutcs
+        assert sfc_diag[11].name == "lw_up_toa_clr"  # rlutcs
+
+    def test_both_producers_build_extras_from_the_shared_contract(self):
+        """Assert against the symbols that RUN — the serial
+        ``MPASPrimitiveEquationModel._step_jit`` and the MPI
+        ``make_voronoi_mpi_step`` — that neither re-introduces a hand-written
+        key list.  Checked on the AST of the ``_extras`` assignment, NOT on
+        the source text: a text match is satisfied by a passing mention in a
+        COMMENT (verified — a text-matching version of this test passed
+        against a deliberately regressed 8-slot MPI producer)."""
+        import ast
+        import inspect
+        import textwrap
+
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+        )
+        from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
+
+        for fn, tag in ((MPASPrimitiveEquationModel._step_jit,
+                         "primitive_eq_mpas._step_jit"),
+                        (make_voronoi_mpi_step,
+                         "voronoi_mpi.make_voronoi_mpi_step")):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            rhs = [n.value for n in ast.walk(tree)
+                   if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "_extras"
+                           for t in n.targets)]
+            assert len(rhs) == 1, f"{tag}: expected one _extras assignment"
+            names = {n.id for n in ast.walk(rhs[0])
+                     if isinstance(n, ast.Name)}
+            assert "MPAS_SFC_DIAG_EXTRA_KEYS" in names, (
+                f"{tag} no longer builds sfc_diag extras from the shared "
+                "contract in core.state — a hand-copied key list is exactly "
+                "the drift that dropped rsutcs/rlutcs on the one-rank MPI "
+                "lane.")
+            strs = {n.value for n in ast.walk(rhs[0])
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            assert not strs, (
+                f"{tag} hard-codes contract keys {sorted(strs)} again; every "
+                "key must come from MPAS_SFC_DIAG_EXTRA_KEYS.")
+            # ...and consumes the WHOLE contract: `KEYS[:5]` would satisfy the
+            # two checks above while re-creating the short-tuple defect.
+            assert not any(isinstance(n, ast.Subscript)
+                           for n in ast.walk(rhs[0])), (
+                f"{tag} slices MPAS_SFC_DIAG_EXTRA_KEYS; the producer must "
+                "publish EVERY contract slot (leave one empty via "
+                "MPAS_SFC_DIAG_MPI_UNPUBLISHED, never truncate).")
+            # ...and the published tuple is actually built from `_extras`,
+            # not from some other expression while `_extras` is computed and
+            # dropped.
+            concat = [n for n in ast.walk(tree)
+                      if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)
+                      and isinstance(n.right, ast.Name)
+                      and n.right.id == "_extras"]
+            assert concat, (
+                f"{tag} computes _extras but never concatenates it onto the "
+                "published sfc_diag tuple.")
+            # ...and the concatenation is not truncated afterwards:
+            # ``((base) + _extras)[:8]`` would satisfy every check above.
+            for sub in (n for n in ast.walk(tree)
+                        if isinstance(n, ast.Subscript)):
+                assert not any(isinstance(x, ast.Name) and x.id == "_extras"
+                               for x in ast.walk(sub)), (
+                    f"{tag} slices a tuple built from _extras; the published "
+                    "sfc_diag must carry EVERY contract slot.")
 
     def test_replace_preserves_cmor_diagnostics(self):
         """The HS wrapper repacks via ``_replace`` of the 4 dynamics fields
-        only; every diagnostic (sw/lw net, precip, TOA trio, turb fluxes) must
-        survive — the invariant that fix relies on."""
+        only; every diagnostic (sw/lw net, precip, TOA trio, turb fluxes,
+        downwelling pair, clear-sky pair) must survive — the invariant that
+        fix relies on."""
         _pt = _tend_with_extras()
         summed = _pt._replace(dT_dt=_pt.dT_dt.replace(data=np.ones(3)))
         for _k in ("sw_net_sfc", "lw_net_sfc", "precip", "lw_up_toa",
-                   "sw_up_toa", "sw_down_toa", "shflx_sfc", "lhflx_sfc"):
+                   "sw_up_toa", "sw_down_toa", "shflx_sfc", "lhflx_sfc",
+                   "sw_down_sfc", "lw_down_sfc",
+                   "sw_up_toa_clr", "lw_up_toa_clr"):
             assert getattr(summed, _k) is not None, _k
         np.testing.assert_allclose(np.asarray(summed.dT_dt.data), 1.0)
 
@@ -1063,7 +1217,9 @@ class TestDriftingCadenceHonesty:
         """On a restart exactly on a cadence boundary the next sample is a
         FULL interval ahead, not the current position."""
         import inspect
+
         from legoesm.driver.model_driver import ModelDriver
+
         src = inspect.getsource(ModelDriver._run_mpas)
         assert "_rem = DIAG_INTERVAL - (DIAG_PHASE % DIAG_INTERVAL)" in src
         # arithmetic: on-boundary start_step -> a full interval, never 0
@@ -1113,3 +1269,494 @@ class TestDriftingCadenceHonesty:
         dc.cmip_snapshot_phase_frac = self._phase_frac(
             0.0, 2.5, 10, 8, 21600.0)
         assert "12:00 UTC" in dc._daily_snapshot_attrs()["tas"]["comment"]
+
+
+# ---------------------------------------------------------------------------
+# #843 lean-lane port: cloud CMOR trio (clt / clwvi / clivi) + clear-sky pair
+# ---------------------------------------------------------------------------
+
+
+def _cloud_collector(mesh):
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    return _make_collector(
+        mesh, cloud_config=build_cloud_config("sundqvist",
+                                              convective_cloud=False))
+
+
+class TestCloudCmorFeed:
+    """clwvi/clivi/clt derived by ``feed_cmip_accumulators_native`` from the
+    cloud tracers: the RADIATIVE water path (grid-mean lwp/iwp as fed to the
+    cloud optics, incl. the cf*q_c_diagnostic floor) and the max-random
+    stratiform total cover."""
+
+    def test_explicit_condensate_paths_exact(self, mesh):
+        """Synthetic column with a bone-dry RH (cf=0 -> no diagnostic floor)
+        and uniform explicit q_c/q_i: the radiative path reduces EXACTLY to
+        the prognostic column integral sum(q * dp / g) = q * p_s / g."""
+        from legoesm import constants
+
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        q_c = np.full((n, NLEV), 2.0e-4)
+        q_i = np.full((n, NLEV), 1.0e-4)
+        # RH ~ 0 everywhere -> sundqvist cf = 0 -> floor contributes nothing.
+        q_v = np.full((n, NLEV), 1.0e-10)
+        fed = dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=q_v, q_c=q_c, q_i=q_i)
+        assert fed is True
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        p_s = 1.0e5
+        # dsigma sums to 1 -> sum(dp) = p_s exactly (pure-sigma collector).
+        expect_clivi = 1.0e-4 * p_s / constants.g
+        expect_clwvi = 3.0e-4 * p_s / constants.g
+        # rtol is float32-safe: the path integral runs through JAX float32
+        # reductions under the default precision policy (observed rel err
+        # ~1.5e-9 at x64, ~1e-7 at float32); this is a SEMANTIC mass-path
+        # test, not a bit-precision contract.
+        np.testing.assert_allclose(out["field_2d_clivi"], expect_clivi,
+                                   rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_clwvi"], expect_clwvi,
+                                   rtol=1e-6)
+        # cf=0 everywhere -> clt = 0 (max-random of a clear column).
+        np.testing.assert_allclose(out["field_2d_clt"], 0.0, atol=1e-9)
+
+    def test_paths_are_mass_not_optics_thinned(self, mesh):
+        """clwvi/clivi are a MASS content (CMIP6
+        ``atmosphere_mass_content_of_cloud_condensed_water``), so the
+        cloud-OPTICS sub-grid inhomogeneity and partial-coverage factors —
+        which ``compute_cloud_properties`` applies to lwp/iwp before
+        returning them — must NOT thin the published path.  With chi = 0.4
+        and two_column coverage on the collector's cloud config the answer
+        must stay the same exact column integral as
+        ``test_explicit_condensate_paths_exact``."""
+        from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+
+        thinned = build_cloud_config(
+            "sundqvist", convective_cloud=False)._replace(
+                cloud_optics_inhomogeneity="constant",
+                cloud_inhomogeneity_factor=0.4,
+                cloud_partial_coverage_optics="two_column")
+        dc, sigma_full = _make_collector(mesh, cloud_config=thinned)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f,
+            q_v=np.full((n, NLEV), 1.0e-10),
+            q_c=np.full((n, NLEV), 2.0e-4),
+            q_i=np.full((n, NLEV), 1.0e-4))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        # float32-safe rtol; see test_explicit_condensate_paths_exact.
+        np.testing.assert_allclose(
+            out["field_2d_clivi"], 1.0e-4 * 1.0e5 / constants.g, rtol=1e-6)
+        np.testing.assert_allclose(
+            out["field_2d_clwvi"], 3.0e-4 * 1.0e5 / constants.g, rtol=1e-6)
+
+    def test_water_path_note_written_without_snapshot_vars(self, mesh):
+        """The "WHICH water path" note is a SEMANTICS statement, not a
+        sampling one: a sub-daily MPAS cadence sets no ``cmip_snapshot_vars``
+        and must still carry it.  The cube lane (prognostic clwvi, flag never
+        set) must not."""
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=np.full((n, NLEV), 1.0e-10),
+            q_c=np.full((n, NLEV), 2.0e-4))
+        assert dc._cloud_paths_radiative is True
+
+        captured = {}
+
+        class _W:
+            def write_field(self, *, var_name, extra_attrs=None, **kw):
+                captured[var_name] = extra_attrs
+
+            def __getattr__(self, _name):     # any other writer call: no-op
+                return lambda *a, **k: None
+
+        dc.cf_writer = _W()
+        dc.cmip_snapshot_vars = set()        # sub-daily cadence: no snap label
+        dc._write_cmip_data(
+            {"months": [(0, 1)],
+             "field_2d_clwvi": [np.zeros((dc._cmip_nlat, dc._cmip_nlon))],
+             "field_2d_rsut": [np.zeros((dc._cmip_nlat, dc._cmip_nlon))]})
+        _c = captured["clwvi"]["comment"]
+        assert "DIAGNOSTIC condensed-water path" in _c
+        # It must disclose all three ways a reader would misread it: it is
+        # not the prognostic mass (the floor is included), not an optical
+        # path (the optics thinning is excluded), and not a record of what
+        # radiation actually solved with (stratiform-only, no CLUBB cf).
+        assert "NOT the prognostic condensed water mass" in _c
+        assert "not an optical path" in _c
+        assert "NOT necessarily what the radiation solved with" in _c
+        assert captured["rsut"] is None      # untouched fields keep table attrs
+
+    def test_radiative_floor_visible_with_zero_prognostic_condensate(
+            self, mesh):
+        """THE radiative-path property: a saturated column with ZERO
+        prognostic condensate still has a positive water path (the
+        cf*q_c_diagnostic in-cloud floor the radiation actually saw) and a
+        positive cloud cover.  The prognostic-only definition would report
+        exactly 0 here."""
+        from legoesm.thermo import saturation_mixing_ratio
+
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        # RH = 0.97 > rh_crit on every layer, via the shared saturation
+        # helper on the collector's own p_full (no re-derived Tetens).
+        p_full = np.asarray(dc._p_full(f["p_s"]))
+        q_sat = np.asarray(saturation_mixing_ratio(
+            np.asarray(f["T"], dtype=np.float64), p_full))
+        q_v = 0.97 * q_sat
+        q_c = np.zeros((n, NLEV))
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=q_v, q_c=q_c, q_i=None)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert np.all(out["field_2d_clwvi"] > 0.0), (
+            "radiative clwvi must include the diagnostic condensate floor")
+        assert np.all(out["field_2d_clt"] > 0.0)
+        assert np.all(out["field_2d_clt"] <= 100.0)
+
+    def test_clt_bounds_and_units_percent(self, mesh):
+        """clt is in CMIP % units: a fully saturated column -> ~100, and
+        always within [0, 100]."""
+        from legoesm.thermo import saturation_mixing_ratio
+
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        p_full = np.asarray(dc._p_full(f["p_s"]))
+        q_sat = np.asarray(saturation_mixing_ratio(
+            np.asarray(f["T"], dtype=np.float64), p_full))
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=1.0 * q_sat, q_c=np.zeros((n, NLEV)))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_clt"], 100.0, atol=1e-6)
+
+    def test_no_cloud_fields_without_q_c_or_cloud_config(self, mesh):
+        """Default feed (no q_c) and a cloud-config-less collector both emit
+        NO cloud fields — the byte-identical-off contract."""
+        from legoesm.thermo import saturation_mixing_ratio
+
+        # (a) cloud config present, q_c absent.
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        dc.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=np.full((f["p_s"].shape[0], NLEV), 1e-3))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k in ("clt", "clwvi", "clivi"):
+            assert f"field_2d_{k}" not in out
+        # (b) q_c present, collector has no cloud config (cloud_scheme none).
+        dc2, _ = _make_collector(mesh)
+        n = f["p_s"].shape[0]
+        p_full = np.asarray(dc2._p_full(f["p_s"]))
+        q_sat = np.asarray(saturation_mixing_ratio(
+            np.asarray(f["T"], dtype=np.float64), p_full))
+        dc2.feed_cmip_accumulators_native(
+            day=15.0, **f, q_v=0.9 * q_sat,
+            q_c=np.full((n, NLEV), 1e-4))
+        out2 = dc2._spatial_monthly.finalize(min_sample_fraction=0)
+        for k in ("clt", "clwvi", "clivi"):
+            assert f"field_2d_{k}" not in out2
+
+    def test_bad_q_c_shape_raises_and_commits_nothing(self, mesh):
+        dc, sigma_full = _cloud_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="q_c"):
+            dc.feed_cmip_accumulators_native(
+                day=15.0, **f, q_v=np.full((n, NLEV), 1e-3),
+                q_c=np.full(n, 1e-4))     # (n,) not (n, nlev)
+        assert dc._spatial_monthly._max_count_ever == 0
+
+
+class TestClearSkyDriverFeed:
+    """The driver glue (`_feed_mpas_cmip_accumulators`): slots 10/11 ->
+    rsutcs/rlutcs, cloud tracers -> clt/clwvi/clivi — all gated by
+    ``config.output.clear_sky_diag`` (default OFF = byte-identical feed)."""
+
+    def _fake(self, mesh, dc, clear_sky_on, with_cs_slots):
+        import types
+
+        _, sigma_full = None, None
+        sigma_full = np.linspace(0.05, 0.98, NLEV)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        sfc = [None] * 12
+        sfc[2] = _field(np.full(n, 2.0e-5))       # precip
+        sfc[4] = _field(np.full(n, 99.0))         # rsut
+        sfc[3] = _field(np.full(n, 238.0))        # rlut
+        if with_cs_slots:
+            sfc[10] = _field(np.full(n, 77.0))    # rsutcs
+            sfc[11] = _field(np.full(n, 262.0))   # rlutcs
+        u_edge = np.zeros((int(mesh.nEdges), NLEV))
+        q_v = np.full((n, NLEV), 5.0e-3)
+        q_c = np.full((n, NLEV), 2.0e-4)
+        q_i = np.full((n, NLEV), 1.0e-4)
+        return types.SimpleNamespace(
+            diagnostics=dc,
+            grid=mesh,
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(clear_sky_diag=clear_sky_on)),
+            state=types.SimpleNamespace(
+                u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]),
+                tracers={"q_v": _field(q_v), "q_c": _field(q_c),
+                         "q_i": _field(q_i)},
+            ),
+            model=types.SimpleNamespace(_sfc_diag=tuple(sfc)),
+        )
+
+    def test_flag_on_feeds_all_five_new_fields(self, mesh):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _cloud_collector(mesh)
+        fake = self._fake(mesh, dc, clear_sky_on=True, with_cs_slots=True)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_rsutcs"], 77.0, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_rlutcs"], 262.0, rtol=1e-9)
+        for k in ("clt", "clwvi", "clivi"):
+            assert f"field_2d_{k}" in out, k
+        # Clear-sky inequalities on the uniform synthetic fluxes.
+        assert np.all(out["field_2d_rsutcs"] <= out["field_2d_rsut"] + 1e-9)
+        assert np.all(out["field_2d_rlutcs"] >= out["field_2d_rlut"] - 1e-9)
+
+    def test_flag_off_feeds_none_of_the_new_fields(self, mesh):
+        """Default OFF: slots 10/11 are never produced upstream AND the
+        cloud tracers are not forwarded — none of the five new fields may
+        appear even though q_c/q_i sit in the state."""
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _cloud_collector(mesh)
+        fake = self._fake(mesh, dc, clear_sky_on=False, with_cs_slots=False)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k in ("rsutcs", "rlutcs", "clt", "clwvi", "clivi"):
+            assert f"field_2d_{k}" not in out, k
+        # ...while the pre-existing fields still flow (the feed itself ran).
+        assert "field_2d_rsut" in out
+
+
+class TestClearSkyPassEffective:
+    """``--clear-sky-diag`` must WORK or REFUSE AUDIBLY, never silently cost
+    2x radiation and publish nothing (#843 / the #1385 silent-drop class)."""
+
+    def _f(self, **kw):
+        from legoesm.driver.model_driver import clear_sky_pass_effective
+        base = dict(clear_sky_diag=True, radiation="rrtmgp",
+                    spatial_feed_on=True)
+        return clear_sky_pass_effective(**{**base, **kw})
+
+    def test_flag_off_is_silent_and_skips_the_pass(self):
+        assert self._f(clear_sky_diag=False) == (False, None)
+
+    def test_publishable_config_runs_the_pass_without_warning(self):
+        assert self._f() == (True, None)
+
+    def test_no_radiation_skips_with_a_reason(self):
+        run, why = self._f(radiation="none")
+        assert run is False
+        assert why is not None and "radiation='none'" in why
+        # ...and it must NOT claim the cloud trio is lost: that path needs no
+        # radiation at all and is still published.
+        assert "clt/clwvi/clivi is unaffected" in why
+
+    def test_unreached_diag_boundary_skips_with_a_reason(self):
+        """--days 1 --diag-days 5: the feed loop never fires, so the second
+        pass would be paid on every radiation step for a file nobody writes."""
+        run, why = self._f(feed_steps_reached=False)
+        assert run is False
+        assert why is not None and "diagnostic boundary" in why
+
+    def test_spatial_feed_off_skips_with_a_reason_naming_the_missing_flag(self):
+        """monthly_means alone feeds only the ZONAL accumulator, which holds
+        none of the five new fields — so the pass must be skipped there too,
+        not merely when all CMOR output is off."""
+        run, why = self._f(spatial_feed_on=False)
+        assert run is False
+        assert why is not None and "--cmip-output" in why
+        assert "zonal" in why
+
+    def test_run_mpas_uses_the_helper_for_the_radiation_config(self):
+        """The gate must reach the RadiationConfig the MPAS lane BUILDS —
+        passing the raw flag there is the defect this helper exists to stop.
+        Asserted on the AST of the symbol that runs (_run_mpas)."""
+        import ast
+        import inspect
+        import textwrap
+
+        from legoesm.driver.model_driver import ModelDriver
+
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(ModelDriver._run_mpas)))
+        kw = [k for n in ast.walk(tree) if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Name)
+              and n.func.id == "RadiationConfig"
+              for k in (n.keywords or []) if k.arg == "clear_sky_diag"]
+        assert len(kw) == 1, (
+            "expected exactly one RadiationConfig(clear_sky_diag=...) in "
+            "_run_mpas")
+        names = {n.attr for n in ast.walk(kw[0].value)
+                 if isinstance(n, ast.Attribute)}
+        assert "_mpas_clear_sky_effective" in names, (
+            "_run_mpas passes the RAW flag into RadiationConfig; it must pass "
+            "the publishability-checked value from clear_sky_pass_effective.")
+        assert "clear_sky_diag" not in names
+
+
+class TestClearSkyRadiationFactory:
+    """RadiationConfig.clear_sky_diag on the lean hydrostatic/MPAS factory:
+    the clouds-off second pass attaches sw_up_toa_clr/lw_up_toa_clr; off
+    (default) leaves them None; unsupported model types refuse loudly."""
+
+    @pytest.fixture(scope="class")
+    def mpas_setup(self):
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
+            held_suarez_init_mpas,
+        )
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.grids.voronoi import create_voronoi_mesh
+
+        mesh = create_voronoi_mesh(subdivision_level=1, lloyd_iterations=2)
+        sig = create_sigma_coordinate(NLEV, sigma_top=0.05)
+        state = held_suarez_init_mpas(mesh, sig, T_init=285.0,
+                                      perturbation_amplitude=0.0)
+        return mesh, sig, state
+
+    def _fn(self, clear_sky_diag):
+        from legoesm.atmosphere.physics.radiation.config import (
+            RadiationConfig,
+        )
+        from legoesm.atmosphere.physics.radiation.integration import (
+            make_radiation_physics,
+        )
+        cfg = RadiationConfig(scheme="gray", clear_sky_diag=clear_sky_diag)
+        return make_radiation_physics(cfg, model_type="mpas")
+
+    def test_flag_off_leaves_clear_sky_fields_none(self, mpas_setup):
+        mesh, sig, state = mpas_setup
+        t = self._fn(False)(state, mesh, sig)
+        assert t.sw_up_toa_clr is None
+        assert t.lw_up_toa_clr is None
+        assert t.sw_up_toa is not None    # all-sky diagnostics unaffected
+
+    def test_flag_on_attaches_clear_sky_toa(self, mpas_setup):
+        """Gray radiation has no cloud interaction, so the clouds-off second
+        pass must reproduce the all-sky TOA fluxes exactly — a plumbing
+        check that is also the correct clear-sky value for gray."""
+        mesh, sig, state = mpas_setup
+        t = self._fn(True)(state, mesh, sig)
+        assert t.sw_up_toa_clr is not None
+        assert t.lw_up_toa_clr is not None
+        sw = np.asarray(t.sw_up_toa.data)
+        sw_clr = np.asarray(t.sw_up_toa_clr.data)
+        lw = np.asarray(t.lw_up_toa.data)
+        lw_clr = np.asarray(t.lw_up_toa_clr.data)
+        assert np.all(np.isfinite(sw_clr)) and np.all(np.isfinite(lw_clr))
+        np.testing.assert_allclose(sw_clr, sw, rtol=1e-12)
+        np.testing.assert_allclose(lw_clr, lw, rtol=1e-12)
+        # The heating that drives the model comes from the ALL-SKY pass
+        # only: with the flag toggled the tendency must be identical.
+        t_off = self._fn(False)(state, mesh, sig)
+        np.testing.assert_allclose(np.asarray(t.dT_dt.data),
+                                   np.asarray(t_off.dT_dt.data), rtol=0,
+                                   atol=0)
+
+    def test_unwired_model_type_refuses_loudly(self):
+        from legoesm.atmosphere.physics.radiation.config import (
+            RadiationConfig,
+        )
+        from legoesm.atmosphere.physics.radiation.integration import (
+            make_radiation_physics,
+        )
+        cfg = RadiationConfig(scheme="gray", clear_sky_diag=True)
+        with pytest.raises(NotImplementedError, match="clear_sky_diag"):
+            make_radiation_physics(cfg, model_type="spectral_pe")
+
+    def test_rrtmgp_clear_sky_inequalities(self, mpas_setup):
+        """The PHYSICS of rsutcs/rlutcs, on the real RRTMGP cloud optics
+        (the gray test above can only check plumbing — gray radiation has no
+        cloud interaction, so its clear sky is trivially the all-sky value).
+        Removing the clouds must reflect LESS shortwave (rsutcs <= rsut) and
+        emit MORE longwave (rlutcs >= rlut), STRICTLY and pointwise, in the
+        same +up CMOR sign convention as rsut/rlut.  The all-sky heating —
+        the only thing that reaches the state — must be bit-identical with
+        the diagnostic on or off.
+
+        NOTE on the state: the shared ``mpas_setup`` fixture is ISOTHERMAL,
+        and a positive LW cloud radiative effect needs cloud tops COLDER
+        than the surface.  On the isothermal column the two passes differ by
+        only ~0.2 W/m2 of spectral/surface-emissivity residual and the sign
+        of ``rlutcs - rlut`` is meaningless (measured: -0.23 W/m2).  So this
+        test imposes a standard-troposphere lapse rate first — the LW
+        inequality is a property of a stratified atmosphere, not an
+        identity."""
+        from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+        from legoesm.atmosphere.physics.radiation.config import (
+            RRTMGPConfig,
+            RadiationConfig,
+        )
+        from legoesm.atmosphere.physics.radiation.integration import (
+            make_radiation_physics,
+        )
+        from legoesm.thermo import saturation_mixing_ratio
+
+        mesh, sig, state = mpas_setup
+        p_full = sig.pressure_at_full(state.p_s.data)
+        # T = T_s (p/p_s)^(R_d*Gamma/g), Gamma = 6.5 K/km (ICAO troposphere),
+        # floored at a 200 K stratosphere -> cold cloud tops over a warm
+        # surface (T_sfc = T[..., -1] in the radiation physics_fn).
+        _expo = constants.R_d * 6.5e-3 / constants.g
+        t_lapse_k = np.maximum(
+            np.asarray(state.T.data)
+            * np.asarray(p_full / state.p_s.data[..., None]) ** _expo,
+            200.0)
+        state = state._replace(T=state.T.replace(data=t_lapse_k))
+        # Near-saturated column so the sundqvist fraction + its in-cloud
+        # condensate floor give radiatively ACTIVE cloud (a dry column would
+        # make both passes identical and the test vacuous).
+        q_sat = saturation_mixing_ratio(t_lapse_k, p_full)
+        _z = q_sat * 0.0
+
+        def _f(name, d):
+            return Field(data=d, name=name, dims=("nCells", "nlev"),
+                         units="kg/kg")
+
+        moist = state._replace(tracers={
+            "q_v": _f("q_v", 0.95 * q_sat),
+            "q_c": _f("q_c", _z), "q_i": _f("q_i", _z)})
+
+        def _run(clear_sky):
+            cfg = RadiationConfig(
+                scheme="rrtmgp", cloud_scheme="sundqvist",
+                rrtmgp=RRTMGPConfig(include_clouds=True),
+                cloud_config=build_cloud_config("sundqvist",
+                                                convective_cloud=False),
+                clear_sky_diag=clear_sky)
+            return make_radiation_physics(cfg, model_type="mpas")(
+                moist, mesh, sig)
+
+        t = _run(True)
+        sw, sw_c = (np.asarray(t.sw_up_toa.data),
+                    np.asarray(t.sw_up_toa_clr.data))
+        lw, lw_c = (np.asarray(t.lw_up_toa.data),
+                    np.asarray(t.lw_up_toa_clr.data))
+        assert np.all(np.isfinite(sw_c)) and np.all(np.isfinite(lw_c))
+        # STRICT: a >= that also passes when the second pass silently
+        # returned the all-sky fluxes would prove nothing.
+        assert np.all(sw_c < sw), f"min SW CRE {np.min(sw - sw_c)}"
+        assert np.all(lw_c > lw), f"min LW CRE {np.min(lw_c - lw)}"
+        # ...and on the AREA mean (the form the CMOR budget is judged on).
+        w = np.asarray(mesh.areaCell)
+        w = w / w.sum()
+        assert float(sw_c @ w) < float(sw @ w)
+        assert float(lw_c @ w) > float(lw @ w)
+        # Trajectory neutrality under the real optics.
+        np.testing.assert_array_equal(np.asarray(t.dT_dt.data),
+                                      np.asarray(_run(False).dT_dt.data))

@@ -8,11 +8,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
     compute_buoyancy_frequency_adiabatic,
     compute_buoyancy_frequency_nemo_bn2,
-    rho_0,
+    rho_0 as _RHO_0_DEFAULT,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing._shared import vmap_vertical_diffusion
@@ -74,6 +75,8 @@ def convective_K_A_flag(
     eos_fn=None,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    g: float = constants.g,
+    rho_ref: float = _RHO_0_DEFAULT,
 ):
     """Convective tracer diffusivity, momentum viscosity, and flag.
 
@@ -139,6 +142,7 @@ def convective_K_A_flag(
             )
         N2 = compute_buoyancy_frequency_adiabatic(
             T, S, p_cell, dz_ref, jacobian_safe, eos_fn=eos_fn,
+            rho_ref=rho_ref, g=g,
         )
     elif cfg.n2_mode == "nemo_bn2":
         # NEMO eosbn2 bn2 (S-EOS): local alpha,beta at each cell's gdept
@@ -154,12 +158,13 @@ def convective_K_A_flag(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
-        N2 = compute_buoyancy_frequency_nemo_bn2(T, S, t_depth, w_depth)
+        N2 = compute_buoyancy_frequency_nemo_bn2(T, S, t_depth, w_depth, g=g)
     else:
         # In-situ density N² (SIGNED); reference density on dry columns keeps
         # the numerator finite too (BIT-IDENTICAL legacy path).
-        rho_safe = jnp.where(dry_col[..., jnp.newaxis], rho_0, rho)
-        N2 = compute_buoyancy_frequency(rho_safe, dz_ref, jacobian_safe)
+        rho_safe = jnp.where(dry_col[..., jnp.newaxis], rho_ref, rho)
+        N2 = compute_buoyancy_frequency(rho_safe, dz_ref, jacobian_safe,
+                                        rho_ref=rho_ref, g=g)
 
     if cfg.smooth_transition:
         sig = jax.nn.sigmoid(-N2 * cfg.sigmoid_sharpness)
@@ -196,6 +201,8 @@ def enhanced_diffusion_convection(
     eos_fn=None,
     eta: jnp.ndarray | None = None,
     H_bathy: jnp.ndarray | None = None,
+    g: float = constants.g,
+    rho_ref: float = _RHO_0_DEFAULT,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
 
@@ -268,6 +275,7 @@ def enhanced_diffusion_convection(
         rho, z_coord.dz_ref, jacobian, cfg,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
         t_depth=_t_depth, w_depth=_w_depth,
+        g=g, rho_ref=rho_ref,
     )
 
     # CFL safety cap on the EXPLICIT branch.  Backward-Euler (implicit)

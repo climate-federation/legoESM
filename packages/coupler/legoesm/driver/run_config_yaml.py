@@ -141,9 +141,10 @@ def require_config(config_value, *, driver: str = "run") -> None:
 # ``atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4``).  Applied to the built
 # config AFTER ``--config``/CLI so a trained ``recommended_defaults`` drops in
 # unchanged.  Every key is validated against the scheme's ``__param_spec__``
-# (existence + bounds) and routed to the matching nested ``*Config`` NamedTuple
-# by class name — a typo'd / out-of-bounds / absent-in-this-run parameter is a
-# hard error, never a silent mis-set of physics.
+# (existence + tier + bounds) and routed to the matching nested ``*Config``
+# NamedTuple by class name — a typo'd / tier-0 / out-of-bounds /
+# absent-in-this-run parameter is a hard error, never a silent mis-set of
+# physics.
 
 
 def load_params_config(path) -> dict:
@@ -199,6 +200,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
+    # The two cape_threshold entries are tunable_tier 0 (AD-unreachable
+    # trigger, #1417): they stay in this map because the map's contract is
+    # "what the pipeline actually threads", but the tier gate in
+    # apply_params_to_config REFUSES them on the --params route (#1518) —
+    # settable only via the explicit --config/CLI scalars.
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
@@ -247,8 +253,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
-    # One flat scalar serves all five warm-rain schemes (only the active
-    # scheme's sub-config is built).
+    # One flat scalar serves ALL SEVEN guarded schemes -- the five bulk
+    # warm-rain ones plus the Sundqvist diagnostic scheme and the ML emulator,
+    # which gained the same guard when it was made uniform (only the active
+    # scheme's sub-config is built, so one scalar is unambiguous). Keep this
+    # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
     "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
@@ -259,6 +268,10 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.SundqvistConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.SundqvistConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
+    "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
+    "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     # NOTE: LouisConfig.cloudtop_entrainment_efficiency was REMOVED 2026-07-23
     # for the same #1280 semantic conflict as cloud_inhomogeneity_factor above:
     # upstream excluded it from the __param_spec__ registry (default 0.0 = off
@@ -482,12 +495,13 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
     unmapped parameters use the nested class-router below.
 
     Each key is validated against ``param_collector.build_registry`` (must be a
-    known parameter and, for scalar params, within its ``__param_spec__``
-    bounds) and routed to the config of its declared ``(module, config_class)``.
-    Raises ``SystemExit`` on an unknown parameter, a non-numeric or out-of-bounds
-    value, or a target config that is absent from / ambiguous in this run's
-    config tree — a ``--params`` file can never silently mis-set physics.  A
-    no-op for empty ``params``.
+    known parameter, must NOT be ``tunable_tier 0`` — the never-calibratable
+    partition, #1518 — and, for scalar params, must be within its
+    ``__param_spec__`` bounds) and routed to the config of its declared
+    ``(module, config_class)``.  Raises ``SystemExit`` on an unknown or tier-0
+    parameter, a non-numeric or out-of-bounds value, or a target config that is
+    absent from / ambiguous in this run's config tree — a ``--params`` file can
+    never silently mis-set physics.  A no-op for empty ``params``.
 
     Note (soft limitation): a union config that holds ALL of a family's scheme
     sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
@@ -512,6 +526,24 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
                 f"{driver} --params: unknown parameter {qname!r} (not in the "
                 "parameter registry).  Keys must be a param_collector qualified "
                 "name 'scheme_key.field' (see config/cmip/params_tuned.yaml)."
+            )
+        # Tier gate (#1518): tunable_tier 0 is the __param_spec__ partition for
+        # values a calibration must NEVER move (numerics floors, iteration-
+        # coupled knobs, measurement conventions, AD-unreachable triggers).
+        # ``build_trainable_params`` refuses them even via ``include=``; this
+        # loader is the other door into the config pytree, so it refuses them
+        # too — BEFORE routing, so no tier-0 value is ever applied, whether it
+        # arrives via the scalar map or the nested class-router.  A tier-0
+        # value that must genuinely change for a run is an operator decision:
+        # set the driver's --config/CLI field explicitly.
+        if meta.tunable_tier == 0:
+            raise SystemExit(
+                f"{driver} --params: {qname} is tunable_tier 0 — fixed, never "
+                f"calibratable (spec reference: {meta.reference!r}).  The "
+                "--params route exists for calibration output and refuses "
+                "tier-0 parameters (#1518); if this run genuinely needs a "
+                "different value, set the corresponding --config/CLI field "
+                "explicitly instead."
             )
         # Scalar params (shape_key None) are numeric — coerce (YAML may quote
         # the value) and range-check against __param_spec__ bounds.  Array params

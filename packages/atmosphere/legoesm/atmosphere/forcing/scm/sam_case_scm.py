@@ -115,6 +115,13 @@ class SAMSCMCaseSpec:
     # Aerodynamic roughness the case's LES wall model uses (its --z0). The SCM
     # derives its neutral drag from this so both models see the same log law.
     les_z0_m: float
+    # The LES driver's OWN Coriolis parameter. Deriving it from latitude gave
+    # DYCOMS 2*Omega*sin(31.5) = 7.62e-5 against the driver's hardcoded
+    # 3.76e-5 -- a 2.03x error the tuner would have charged to turbulence.
+    les_f_c: float
+    # Fraction of Lz above which the LES sponges. Scoring stops there; the
+    # column still spans the full domain.
+    les_sponge_frac: float
     note: str
 
 
@@ -126,6 +133,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         gsam_dir="BOMEX", latitude_deg=15.0, les_domain_top_m=3000.0,
         default_dt_s=60.0, surface_mode="fluxes",
         bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
+        les_f_c=0.376e-4, les_sponge_frac=0.75,
         note="Siebesma et al. 2003 shallow non-precipitating trade cumulus; "
              "prescribed surface fluxes.",
     ),
@@ -134,6 +142,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         default_dt_s=60.0, surface_mode="T_s",
         # run_rico_les.py _C_H / _C_Q (van Zanten et al. 2011, at 20 m).
         bulk_ch=0.001094, bulk_ce=0.001133, les_z0_m=1.0e-4,
+        les_f_c=0.451e-4, les_sponge_frac=0.75,
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
@@ -141,6 +150,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
         default_dt_s=30.0, surface_mode="fluxes",
         bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
+        les_f_c=0.376e-4, les_sponge_frac=0.85,
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
     ),
@@ -220,6 +230,58 @@ def _interp_scalar_fn(days_s: np.ndarray, values: np.ndarray):
     return lambda t: jnp.interp(jnp.asarray(t, dtype=v_arr.dtype), t_arr, v_arr)
 
 
+def hydrostatic_pressure_from_theta(z_m, theta_K, p_s_pa: float, *,
+                                    n_aux: int = _AUX_LEVELS):
+    """``(z, p)`` top-to-bottom for an arbitrary theta(z), integrated
+    hydrostatically from ``p_s_pa``.
+
+    Shared by the deck bridge and the analytic-case bridge so the two cannot
+    grow different vertical mappings. The integration itself is NOT written
+    here: an auxiliary :class:`HeightCoordinate` is built with ``theta_ref_fn``
+    set to the supplied profile -- the same integrator
+    ``build_sam_case_height_coord`` gives the LES -- and its Exner reference is
+    inverted with the shared :func:`exner_to_pressure`.
+
+    ``theta_K`` should be the VIRTUAL potential temperature where moisture is
+    present; for a dry case theta_v == theta.
+    """
+    z_arr = np.asarray(z_m, dtype=np.float64)
+    th_arr = np.asarray(theta_K, dtype=np.float64)
+    z_top = float(np.max(z_arr))
+    z_j = jnp.asarray(z_arr)
+    th_j = jnp.asarray(th_arr)
+
+    def theta_ref_fn(z):
+        return jnp.interp(z, z_j, th_j)
+
+    hc = create_stretched_height_coordinate(
+        n_aux, H=z_top, dz_sfc=0.5 * z_top / n_aux,
+        theta_ref_fn=theta_ref_fn, p_sfc=float(p_s_pa),
+    )
+    # Interfaces, not cell centres: interpolating a target lid against centres
+    # clamps to the topmost CENTRE, which put a nominal 1600 m lid at ~1589 m.
+    z_aux = np.asarray(hc.z_half, dtype=np.float64)
+    p_aux = np.asarray(
+        exner_to_pressure(getattr(hc, "exner_ref_half", hc.exner_ref)),
+        dtype=np.float64)
+    if z_aux.shape != p_aux.shape:      # no half-level Exner on this coord
+        z_aux = np.asarray(hc.z_full, dtype=np.float64)
+        p_aux = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    if np.any(np.diff(z_aux) >= 0.0):
+        raise ValueError("auxiliary height coordinate is not top-to-bottom.")
+    if np.any(np.diff(p_aux) <= 0.0):
+        raise ValueError(
+            "hydrostatic pressure must increase downward; got a non-monotonic "
+            "p(z) from the supplied theta profile."
+        )
+    return z_aux, p_aux
+
+
+def heights_from_pressure(z_aux, p_aux, p_full_pa: np.ndarray) -> np.ndarray:
+    """Public alias of the p->z inversion, for the analytic-case bridge."""
+    return _heights_from_pressure(z_aux, p_aux, p_full_pa)
+
+
 def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
     """Hydrostatic ``p(z)`` for a deck whose ``p`` column is the ``-999`` sentinel.
 
@@ -260,8 +322,15 @@ def _deck_pressure_profile(snd, p_s_pa: float, *, n_aux: int = _AUX_LEVELS):
         n_aux, H=z_top, dz_sfc=0.5 * z_top / n_aux,
         theta_ref_fn=theta_ref_fn, p_sfc=float(p_s_pa),
     )
-    z_aux = np.asarray(hc.z_full, dtype=np.float64)
-    p_aux = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
+    # Interfaces, not cell centres: interpolating a target lid against centres
+    # clamps to the topmost CENTRE, which put a nominal 1600 m lid at ~1589 m.
+    z_aux = np.asarray(hc.z_half, dtype=np.float64)
+    p_aux = np.asarray(
+        exner_to_pressure(getattr(hc, "exner_ref_half", hc.exner_ref)),
+        dtype=np.float64)
+    if z_aux.shape != p_aux.shape:      # no half-level Exner on this coord
+        z_aux = np.asarray(hc.z_full, dtype=np.float64)
+        p_aux = np.asarray(exner_to_pressure(hc.exner_ref), dtype=np.float64)
     if np.any(np.diff(z_aux) >= 0.0):
         raise ValueError("auxiliary height coordinate is not top-to-bottom.")
     if np.any(np.diff(p_aux) <= 0.0):
@@ -324,6 +393,12 @@ class SAMSCMCase:
     def les_domain_top_m(self) -> float:
         return self.spec.les_domain_top_m
 
+    @property
+    def les_score_top_m(self) -> float:
+        """Where SCORING stops: the LES sponge base. The column still spans
+        the full domain, so the lid is not moved."""
+        return self.spec.les_sponge_frac * self.spec.les_domain_top_m
+
     def les_mask(self) -> np.ndarray:
         """Boolean ``(nlev,)``: SCM levels inside the LES domain.
 
@@ -331,7 +406,7 @@ class SAMSCMCase:
         actually has a domain; above its top the LES has a sponge and a lid and
         represents nothing.
         """
-        return np.asarray(self.z_full) <= self.les_domain_top_m
+        return np.asarray(self.z_full) <= self.les_score_top_m
 
     def scm_kwargs(self) -> dict[str, Any]:
         return dict(
@@ -523,8 +598,8 @@ def load_sam_scm_case(
             w_qv_s=_interp_scalar_fn(sfc_days_s, w_q),
         )
 
-    f_c = (2.0 * constants.Omega * float(np.sin(np.deg2rad(spec.latitude_deg)))
-           if coriolis else 0.0)
+    # The LES driver's value, NOT 2*Omega*sin(lat): the cases hardcode f.
+    f_c = float(spec.les_f_c) if coriolis else 0.0
 
     forcing = SCMForcing(
         f_c=f_c,

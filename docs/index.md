@@ -130,6 +130,7 @@ architecture/composability
 
 user-guide/scm
 user-guide/amip
+user-guide/rcemip1_crm
 science/ml_physics_parameterization
 ```
 

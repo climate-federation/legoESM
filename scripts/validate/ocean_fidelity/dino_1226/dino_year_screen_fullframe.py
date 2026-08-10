@@ -9,12 +9,29 @@ Everything else byte-identical to kamm_run180.py.
 Usage: kamm_run180_v2.py <nsteps> <out.npz>   (nsteps=5760 for full 180d)
 """
 import os, sys, dataclasses, numpy as np, jax, jax.numpy as jnp
+from legoesm.core.precision import PrecisionPolicy, set_policy
+# #1492: fp64 policy EXPLICIT (JAX_ENABLE_X64 alone does not change the
+# legoESM precision policy -- see nemo_state_bridge.py's own warning). Must
+# run before any geometry/state construction below.
+set_policy(PrecisionPolicy.fp64())
 from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask, read_nemo_restart
 from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
+from legoesm.ocean.fidelity.precision_gate import require_explicit_e3t_mode
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (dino_config_for_recipe, dino_lat_lon_model_config,
     dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays, apply_dino_lat_lon_surface_forcing,
     dino_step_surface_forcing)
+
+_e3t_mode = require_explicit_e3t_mode(context="dino_year_screen_fullframe")
+print(f"LEGOESM_NEMO_E3T={_e3t_mode}  JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')}  "
+      f"x64_enabled={jax.config.jax_enable_x64}")
+# #1492 C1: results/ is gitignored, so the LOG is the only surviving provenance.
+# The env line above was recoverable; the recipe, year count and output path were
+# NOT (they arrive as argv and were never echoed), which is the gap the review hit.
+print(f"ARGV={' '.join(sys.argv)}")
+print(f"DINO_YEARS={os.environ.get('DINO_YEARS')}  "
+      f"DINO_SURFACE_PLACEMENT={os.environ.get('DINO_SURFACE_PLACEMENT')}  "
+      f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
 RECIPE = sys.argv[1]; OUT = sys.argv[2]; DT = 2700.0
 NSTEPS = 11520; ACC0 = 0  # 1-year screen: full year-1 mean (matched to NEMO annual mean)
@@ -56,6 +73,28 @@ if os.environ.get("DINO_NO_GM"):
     # discriminating power and only the multi-year curve can be trusted.
     cfg = dataclasses.replace(cfg, use_gm_redi=False)
     print("ABLATION: use_gm_redi=False")
+# #1492: NEMO-faithful surface-flux placement A/B (see DINOConfig.
+# surface_tendency_placement docstring). Default "applied_now" = legacy,
+# bit-identical to every prior from-rest screen; unknown value raises
+# (dispatch hardening, matches twin_y20_box_budget.py's own guard).
+SURF_PLACEMENT = os.environ.get("DINO_SURFACE_PLACEMENT", "applied_now")
+if SURF_PLACEMENT not in ("applied_now", "leapfrog_rhs"):
+    raise SystemExit(f"Unknown DINO_SURFACE_PLACEMENT={SURF_PLACEMENT!r}: "
+                      "expected 'applied_now' or 'leapfrog_rhs'")
+cfg = dataclasses.replace(cfg, surface_tendency_placement=SURF_PLACEMENT)
+print(f"surface_tendency_placement={SURF_PLACEMENT}")
+if os.environ.get("DINO_FIX_ETA_DRIFT") is not None:
+    # W1b: fix_eta_drift (state.py) is a global uniform-eta projection
+    # applied post-barotropic-solve (ocean_model_latlon_cgrid.py:3432-3469)
+    # with no NEMO analogue. Testing whether this compensator masks part of
+    # the armB topographic form-stress deficit -- ablation, not a recipe
+    # default change.
+    _v = os.environ["DINO_FIX_ETA_DRIFT"]
+    if _v not in ("0", "1"):
+        raise SystemExit(f"Unknown DINO_FIX_ETA_DRIFT={_v!r}: expected '0' or '1'")
+    cfg = dataclasses.replace(cfg, fix_eta_drift=(_v == "1"))
+    print(f"ABLATION: fix_eta_drift={cfg.fix_eta_drift}")
+USE_RHS = SURF_PLACEMENT == "leapfrog_rhs"
 if INIT_RESTART:
     st = br.state          # the bridged NEMO state itself, NOT the analytic rest IC
     print(f"INIT from developed NEMO restart: {INIT_RESTART}")
@@ -81,13 +120,54 @@ if INIT_RESTART:
     from kamm_twin_90d import verify_day0_matches_restart
     verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
+    # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
+    # 219-220 e3w(...,Kmm), the NOW/pre-solve thickness) vs legoESM's default
+    # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field (not a
+    # DINOConfig field, unlike the ablations above), set on mc post-
+    # construction. Opt-in measurement knob only -- NOT a recipe/kamm default.
+    _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
+    if _v not in ("0", "1"):
+        raise SystemExit(
+            f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
+    # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
+    mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
+    print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+# #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
+# nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
+# legacy (outer_integrator="leapfrog", i.e. _leapfrog_step, unchanged from
+# every prior screen); "nemo_mlf" routes to the single-pass stpmlf.F90
+# transcription (_nemo_mlf_step) via the REAL outer_integrator dispatch.
+# Opt-in measurement knob only -- NOT a recipe/kamm default (no named recipe
+# variant yet; that is P5). Unknown value raises (dispatch hardening,
+# matches DINO_SURFACE_PLACEMENT's own guard above).
+_OI = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+if _OI:
+    if _OI not in ("leapfrog", "nemo_mlf"):
+        raise SystemExit(
+            f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
+            "'leapfrog' or 'nemo_mlf'")
+    # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction (spec
+    # resolved decision 4: a transcription that permits a non-NEMO divisor
+    # stops being a transcription at that row) -- auto-force it here so the
+    # env knob alone is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+    mc = mc._replace(
+        outer_integrator=_OI,
+        implicit_vmix_e3t_now_divisor=(
+            True if _OI == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+    print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+          f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore external-tau block
 print(f"slope_scheme={mc.gm_redi.slope_scheme} kappa_GM_max={float(jnp.max(jnp.abs(mc.gm_redi.kappa_GM))):.1f}")
 print(f"tau_x[Pa] min/max = {float(jnp.min(sf.tau_x)):.3f}/{float(jnp.max(sf.tau_x)):.3f}")
 
-dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))  # sf constant (annual tau)
+if USE_RHS:
+    dyn = jax.jit(lambda st, rate: model.step(
+        st, DT, surface_forcing=sf, external_tracer_rate=rate))
+else:
+    dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))  # sf constant (annual tau)
 
 # DINO_YEARS>1 runs consecutive years and writes ONE annual mean per year
 # (suffix _y2, _y3, ...), so a multi-year run reproduces exactly what NEMO's
@@ -99,9 +179,15 @@ for year in range(1, YEARS + 1):
     acc = {k: jnp.zeros_like(getattr(st, k).data) for k in ("T", "S", "eta", "u", "v")}
     for k in range(NSTEPS):
         kglob += 1
-        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                t_seconds=kglob * DT)
-        st = dyn(st)
+        if USE_RHS:
+            st, ext_rate = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=kglob * DT,
+                return_rate=True)
+            st = dyn(st, ext_rate)
+        else:
+            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
+                                                    t_seconds=kglob * DT)
+            st = dyn(st)
         if k >= ACC0:
             for f in acc: acc[f] = acc[f] + getattr(st, f).data
         if (k + 1) % 960 == 0:

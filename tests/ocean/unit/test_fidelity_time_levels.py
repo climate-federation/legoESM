@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from legoesm.ocean.fidelity.time_levels import (
+    _DUMP_TIME_LEVEL,   # white-box: the citation string is part of the contract
     register_dump,
     select_ts,
     time_level_for_dump,
@@ -81,3 +82,24 @@ def test_register_dump_rejects_a_bogus_level():
 def test_register_dump_round_trips():
     register_dump("dump_unit_test.bin", "now", "unit_test.F90:1")
     assert time_level_for_dump("dump_unit_test.bin") == "now"
+
+
+def test_cor2d_substep1_dumps_are_before_level():
+    """The four dyn_cor_2D substep-1 dumps (dynspg_ts.F90:794-806) are
+    BEFORE-level: with DINO's ln_bt_fw=.false. + nn_bt_flt=2 the substep loop
+    is seeded from puu_b(Kbb) and the jn=1 AB3 extrapolation is the identity
+    (za1=1, za2=za3=0), so ua_e == un_e == puu_b(Kbb).
+
+    Before this registration ``time_level_for_dump`` RAISED on all four (the
+    registry fails closed), so any harness comparing them was picking a level
+    by hand -- exactly the Rule-1d failure mode.
+    """
+    for name in ("cor2d_dump_ua_e_in_substep1.bin",
+                 "cor2d_dump_va_e_in_substep1.bin",
+                 "cor2d_dump_zu_trd_substep1.bin",
+                 "cor2d_dump_zv_trd_substep1.bin"):
+        assert time_level_for_dump(name) == "before", name
+        # Rule 1d: an unsourced entry is a guess -- the citation must name the
+        # dumping WRITE and the proof chain, not just the file.
+        src = _DUMP_TIME_LEVEL[name][1]
+        assert "dynspg_ts.F90:" in src and "Kbb" in src, src

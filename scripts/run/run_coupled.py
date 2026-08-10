@@ -736,7 +736,7 @@ def build_parser():
                         help="Override diagnostic in-cloud condensate [kg/kg] "
                              "(CloudConfig.q_c_diagnostic). LOWER => optically "
                              "THINNER cloud => lower albedo, still LW-active. "
-                             "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+                             "Range [1e-6, 1e-3]. Default: CloudConfig default.")
     parser.add_argument("--diagnostic-condensate-scheme",
                         dest="cloud_diagnostic_condensate_scheme",
                         choices=["constant", "adiabatic"], default="constant",

@@ -2195,5 +2195,52 @@ def test_clubb_prognostic_rejects_surface_flux_and_explicit_sfc_together():
             sfc_wpthlp=jnp.zeros((ncol,)), surface_flux=sf)
 
 
+# --- #1508: the surface variance boundary condition is MISSING -------------
+#
+# CLUBB sets the zm level-0 (surface) values of wp2/up2/vp2/thlp2/rtp2 from
+# ustar and the surface fluxes (its `sfc_varnce` module).  The prognostic
+# bridge sets only the FLUX BCs (wprtp/wpthlp/upwp/vpwp, clubb.py:5696-5699).
+# Nothing applies the PHYSICAL surface-variance BC — the lower solver row
+# carries the previous value and clip_variance imposes only a correlation-
+# derived LOWER bound — and `CLUBBParams.a_const` /
+# `CLUBBParams.up2_sfc_coef` — the two coefficients that BC uses — are read
+# by no numerical code (only their own defaults and __param_spec__ entries).
+#
+# On the synthetic L24 fixture below the surface value is 209 / 591 K^2.  On
+# a production-shaped L30 / dt 75 s column it is 9.29e+02 K^2 (a 30 K RMS
+# theta_l fluctuation) from the first step and the column reaches non-finite T
+# in 92 steps; pinning just those level-0 variances runs the full simulated
+# day.  This test is a broad guard on the defect, NOT a reproducer of that
+# production case.
+# Reproducer: scripts/validate/clubb_prognostic_stability.py --mode production
+
+
+@pytest.mark.xfail(strict=True, reason="#1508: CLUBB sfc_varnce not ported")
+def test_prognostic_surface_theta_l_variance_is_physical():
+    """theta_l variance at the surface must be a plausible atmospheric value.
+
+    Deliberately loose: 100 K^2 is a 10 K RMS fluctuation, already far beyond
+    anything a surface layer produces.  The measured value is ~9.3e2 K^2, so
+    the gate does not depend on where a defensible bound is drawn.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        pack_clubb_moments,
+        unpack_clubb_moments,
+    )
+
+    col = _column(ncol=2, nlev=24)
+    cfg = CLUBBConfig(prognostic=True)
+    moments = pack_clubb_moments(
+        init_clubb_moments(2, 24, cfg, dtype=col["T"].dtype))
+    _, m_new = clubb_turbulence_prognostic(
+        col["u"], col["v"], col["T"], col["q_v"], moments, col["p_full"],
+        col["p_half"], col["z_full"], col["z_half"], col["T_sfc"],
+        col["q_sfc"], col["rho"], 75.0, cfg)
+    thlp2_sfc = np.asarray(unpack_clubb_moments(m_new).thlp2)[:, 0]
+    assert np.all(thlp2_sfc < 100.0), (
+        f"theta_l variance at the surface is {thlp2_sfc} K^2; CLUBB's "
+        f"sfc_varnce BC is not applied (#1508)")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

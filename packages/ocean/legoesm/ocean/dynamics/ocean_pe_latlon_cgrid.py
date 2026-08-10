@@ -1835,7 +1835,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     return dT_dt, dS_dt
 
 
-def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
+def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     """EEN F-point (vertex) thickness ``h_vtx``, plus the Fu/u fields padded
     over latitude in the SAME fused halo exchange (MPI audit lever O4).
 
@@ -1858,7 +1858,21 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     Returns ``(h_vtx, Fu_ext, u_ext)`` — ``h_vtx`` is
     ``(n_lat+1, n_lon+1, nlev)``; ``Fu_ext``/``u_ext`` are the same
     halo-padded fields ``_bc_pv_flux`` uses downstream to build ``Fu_at_v``.
+
+    ``Fu``/``u`` may both be ``None`` for a thickness-only caller (the
+    barotropic ``_build_een_barotropic_inputs``, which needs the SAME two
+    ``een_e3f_scheme`` rules but no padded velocity); the returned
+    ``Fu_ext``/``u_ext`` are then ``None`` and they are left out of the
+    fused pad entirely, so no extra halo traffic is exchanged.  The
+    ``h_vtx`` result is bit-identical either way (the pad is per-field).
     """
+    if (Fu is None) != (u is None):
+        raise ValueError(
+            "een_e3f_h_vtx: Fu and u must both be arrays or both be None "
+            f"(got Fu={type(Fu).__name__}, u={type(u).__name__}).")
+    _extra = () if Fu is None else (Fu, u)
+    _extra_fill = () if Fu is None else (0.0, 0.0)
+    _n_extra = len(_extra)
     BIG_H = 1.0e30
     h_sw = jnp.roll(h_k, 1, axis=1)
     h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
@@ -1867,12 +1881,14 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     t_sw = (h_sw > 0.0).astype(h_sw.dtype)
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     if een_e3f_scheme == "nemo_avg":
-        (h_k_pad, h_sw_pad, Fu_ext, u_ext,
-         h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad) = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u, h_k, h_sw, t_k, t_sw), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        _p = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active) + _extra + (h_k, h_sw, t_k, t_sw), halo=1,
+            south_values=(BIG_H, BIG_H) + _extra_fill + (0.0, 0.0, 0.0, 0.0),
+            north_values=(BIG_H, BIG_H) + _extra_fill + (0.0, 0.0, 0.0, 0.0),
         )
+        h_k_pad, h_sw_pad = _p[0], _p[1]
+        Fu_ext, u_ext = (_p[2], _p[3]) if _n_extra else (None, None)
+        h_k_sum_pad, h_sw_sum_pad, t_k_pad, t_sw_pad = _p[2 + _n_extra:]
         e3f_sum = h_k_sum_pad[:-1] + h_k_sum_pad[1:] + h_sw_sum_pad[:-1] + h_sw_sum_pad[1:]
         wet_count = t_k_pad[:-1] + t_k_pad[1:] + t_sw_pad[:-1] + t_sw_pad[1:]
         # Fully-dry vertex (wet_count == 0) fallback.  NEMO's compiled path
@@ -1905,11 +1921,13 @@ def _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
             wet_count > 0.0, e3f_sum / jnp.maximum(wet_count, 1.0), dry_fallback,
         )
     else:  # "min" (validated at caller entry)
-        h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
-            (h_k_active, h_sw_active, Fu, u), halo=1,
-            south_values=(BIG_H, BIG_H, 0.0, 0.0),
-            north_values=(BIG_H, BIG_H, 0.0, 0.0),
+        _p = pad_with_pole_bc_lat_multi(
+            (h_k_active, h_sw_active) + _extra, halo=1,
+            south_values=(BIG_H, BIG_H) + _extra_fill,
+            north_values=(BIG_H, BIG_H) + _extra_fill,
         )
+        h_k_pad, h_sw_pad = _p[0], _p[1]
+        Fu_ext, u_ext = (_p[2], _p[3]) if _n_extra else (None, None)
         h_vtx = jnp.minimum(
             jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
             jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
@@ -1965,7 +1983,7 @@ def _bc_pv_flux(
 
     ``dz_ref`` : array, shape (nlev,), or None
         Per-level reference thickness (``z_coord.dz_ref``), forwarded to
-        ``_een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
+        ``een_e3f_h_vtx`` for the ``"nemo_avg"`` fully-dry-vertex fallback
         (#1226 item 10, final piece). ``None`` (default) keeps the legacy
         ``BIG_H``-everywhere dry-vertex behaviour bit-identical.
     """
@@ -2052,7 +2070,7 @@ def _bc_pv_flux(
     #     e3f_0(:,:,:)``), so ``q = zeta/e3f_0vor`` is FINITE, not zero, there
     #     (the surrounding face masks already zero ``zeta`` at those points,
     #     so this never changes the tendency where NEMO integrates from —
-    #     only how the intermediate q is computed). ``_een_e3f_h_vtx``
+    #     only how the intermediate q is computed). ``een_e3f_h_vtx``
     #     reproduces this with ``dz_ref[k]`` (== NEMO's per-level-uniform
     #     ``e3f_0``, see that helper's docstring) instead of the plain
     #     ``BIG_H`` sentinel when ``dz_ref`` is supplied; ``dz_ref=None``
@@ -2065,10 +2083,10 @@ def _bc_pv_flux(
     Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
     # h_vtx construction (both een_e3f_scheme rules + fold overwrite) and the
     # matching fused Fu/u halo pad live in the single shared helper
-    # ``_een_e3f_h_vtx`` — the production code path, also called directly by
+    # ``een_e3f_h_vtx`` — the production code path, also called directly by
     # the ground-truth test (test_al81_budget.py) so no formula is
     # re-derived in the test.
-    h_vtx, Fu_ext, u_ext = _een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
+    h_vtx, Fu_ext, u_ext = een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=dz_ref)
 
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)
@@ -3905,6 +3923,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     momentum_only: bool = False,
     precomputed_geom_density=None,
     skip_lateral_viscosity: bool = False,
+    ldf_state=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -3935,6 +3954,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         ``tendencies.surface_tracer_forcing`` for the implicit (backward-Euler)
         application in the model step.  ``None`` (default) ⇒ surface forcing is
         applied explicitly (bit-identical legacy path).
+    ldf_state : (T_ldf, S_ldf, u_ldf, v_ldf) tuple, optional
+        Private, ``nemo_mlf`` single-pass transcription only (#1226 P1;
+        ``stpmlf.F90:275`` ``dyn_ldf(Kbb,Kmm,...)`` / ``:437`` ``tra_ldf(Kbb,
+        Kmm,...)``): when given, ONLY the lateral-friction (``dyn_ldf`` /
+        ``_bc_horizontal_viscosity``) and lateral tracer-diffusion (``tra_ldf``
+        / ``_bc_tracer_tendencies``) calls read these arrays instead of the
+        step's own ``u, v, T, S`` — every OTHER term in this function
+        (advection, vorticity, HPG, GM/Redi bolus, physics, forcing) keeps
+        reading the step's own state.  This is the ONE local-argument swap
+        NEMO's single tendency pass performs; nothing else may be widened to
+        read this tuple (Rule 1d: reading Nbb for MORE terms than dyn_ldf/
+        tra_ldf silently changes other terms' time level).  ``None`` (default,
+        every existing caller) ⇒ ``u_ldf=u``/``T_ldf=T`` etc. ⇒ bit-identical.
 
     Returns
     -------
@@ -4159,7 +4191,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dT_dt = jnp.zeros_like(T)
         dS_dt = jnp.zeros_like(S)
     else:
-        dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+        # ``ldf_state`` (nemo_mlf row 28 ``tra_ldf(Kbb)``): the lateral
+        # tracer-diffusion tendency ALONE reads the swapped-in tracers; every
+        # other consumer of ``T``/``S`` in this function is untouched. ``None``
+        # -> T_ldf_local is T -> bit-identical.
+        _T_ldf_local = T if ldf_state is None else ldf_state[0]
+        _S_ldf_local = S if ldf_state is None else ldf_state[1]
+        dT_dt, dS_dt = _bc_tracer_tendencies(
+            _T_ldf_local, _S_ldf_local, config, grid, mask, J, z_coord)
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
@@ -4194,11 +4233,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             _zu, _zv, _zu, _zv, _zu, _zv, _zu, _zv)
         kdiss_h_cell = None
     else:
+        # ``ldf_state`` (nemo_mlf row 17 ``dyn_ldf(Kbb)``): the lateral-friction
+        # tendency ALONE reads the swapped-in velocity; ``du_dt``/``dv_dt``
+        # (the accumulator this ADDS to) and every other consumer of ``u``/
+        # ``v`` in this function stay on the step's own state. ``None`` ->
+        # u_ldf_local is u -> bit-identical.
+        _u_ldf_local = u if ldf_state is None else ldf_state[2]
+        _v_ldf_local = v if ldf_state is None else ldf_state[3]
         (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
          diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
          diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
-            du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord,
-            H_bathy, dt,
+            du_dt, dv_dt, _u_ldf_local, _v_ldf_local, grid, mask, u_mask,
+            v_mask, config, z_coord, H_bathy, dt,
             rho_prime=rho_prime, h_k=h_k,
             vertex_mask=vertex_mask,
         )
