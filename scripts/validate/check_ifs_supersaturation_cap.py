@@ -335,16 +335,23 @@ def section_2b_target_isolation() -> list[str]:
     If the only effect is ``q_sat_i -> rh_homo * q_sat_i`` in the deposition
     driving term, then a cell at ``q_v = S * q_sat_i`` WITH the allowance has
     the same deposition driving supersaturation as a cell at
-    ``q_v = (S - rh_homo + 1) * q_sat_i`` WITHOUT it.  Everything else is held
-    identical, and Cooper nucleation in the SAM flavour depends on T and the
-    existing crystal number rather than on q_v, so the two calls should agree
-    to round-off.
+    ``q_v = (S - rh_homo + 1) * q_sat_i`` WITHOUT it.
 
-    REPORTED, NOT ASSERTED (yet): the residual is printed and only a gross
-    disagreement is failed.  Other q_v-dependent terms exist in these schemes
-    and their size at this cell has not been measured, so a tight tolerance
-    here would be a number chosen to be green rather than a bound derived from
-    the physics.
+    NUCLEATION IS TURNED OFF (``N_i0 = 0``, so the Cooper target is zero),
+    and it has to be.  MEASURED without it: thompson matched to 0.000 %, but
+    morrison came out 237748 % apart and p3 35.7 %.  That is not a mis-targeted
+    allowance — it is the construction's own flaw.  Moving q_v from S = 1.60 to
+    S' = 1.052 also moves the nucleation SOURCE, which is gated on ice
+    supersaturation (p3 states the gate explicitly: ``cooper_supi_min`` = 0.05,
+    smoothed with sharpness 200 — S' sits right on it).  The two morrison
+    numbers say so directly: its OFF(S') equalled thompson's answer exactly,
+    i.e. with nucleation quiet the schemes agree, and its ON(S) carried the
+    whole extra nucleation sink.  Holding "everything else identical" requires
+    silencing that source, not just holding T and p.
+
+    REPORTED, NOT TIGHTLY ASSERTED: the residual is printed per scheme and only
+    a gross disagreement fails.  A tight tolerance would be a number chosen to
+    be green; the printed residual is what earns one later.
     """
     failures: list[str] = []
     q_sat_i = float(thermo.saturation_mixing_ratio_ice(
@@ -352,6 +359,7 @@ def section_2b_target_isolation() -> list[str]:
     ramp = float(thermo.homogeneous_freezing_rh_factor(jnp.asarray(COLD_T_K)))
     s_on = COLD_RH_ICE
     s_off = COLD_RH_ICE - ramp + 1.0
+    print(f"  nucleation silenced (N_i0 = 0) so the only q_v sink is deposition")
     print(f"  equivalence: ON at RH_ice={s_on:.4f} vs OFF at "
           f"RH_ice={s_off:.4f} (both carry the same deposition driving "
           f"supersaturation {(s_on - ramp) * q_sat_i:.4e} kg/kg)")
@@ -361,10 +369,13 @@ def section_2b_target_isolation() -> list[str]:
                                   q_i=COLD_Q_ICE)
         q_v_off, rest_off = _column(COLD_T_K, COLD_P_PA, s_off * q_sat_i,
                                     q_i=COLD_Q_ICE)
+        # N_i0 = 0 => Cooper target = 0 => no nucleation source; the only
+        # remaining q_v sink at this cold, liquid-free, snow-free cell is
+        # deposition onto the pre-existing crystals.
         a = float(fn(*(rest_on[0], q_v_on, *rest_on[1:]), DT_S,
-                     cfg(**{ICE_FIELD: True})).dq_v_dt[0, 0])
+                     cfg(**{ICE_FIELD: True, "N_i0": 0.0})).dq_v_dt[0, 0])
         b = float(fn(*(rest_off[0], q_v_off, *rest_off[1:]), DT_S,
-                     cfg(**{ICE_FIELD: False})).dq_v_dt[0, 0])
+                     cfg(**{ICE_FIELD: False, "N_i0": 0.0})).dq_v_dt[0, 0])
         resid = abs(a - b) / max(abs(b), 1.0e-30)
         print(f"    {scheme:10s} ON(S)={a:+.6e}  OFF(S')={b:+.6e}  "
               f"|residual| = {100 * resid:8.3f} % of OFF(S')")
