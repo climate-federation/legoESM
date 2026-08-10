@@ -225,3 +225,43 @@ def test_section_3_fails_when_a_lane_turns_the_ice_allowance_off(checker):
         checker.LANES = real_lanes
     assert failures, "a lane with the ice allowance disabled passed"
     assert all(checker.ICE_FIELD in f for f in failures), failures
+
+
+def test_section_2b_reports_the_target_isolation_residual(checker, capsys):
+    """Runs, prints a residual per scheme, and fails only on gross
+    disagreement.  The tolerance is deliberately loose: it bounds "acts on
+    something else entirely", not "acts on the deposition target to within
+    x %", because the size of the other q_v-dependent terms at this cell has
+    not been measured."""
+    failures = checker.section_2b_target_isolation()
+    out = capsys.readouterr().out
+    for scheme in checker.ICE_SCHEMES:
+        assert scheme in out, out
+    assert "residual" in out
+    assert failures == [], failures
+
+
+def test_section_2b_fails_when_the_allowance_is_not_a_target_multiplier(
+        checker, monkeypatch):
+    """SYNTHETIC VIOLATION: an implementation whose ON branch bears no relation
+    to the equivalent no-allowance cell."""
+    real = checker._scheme_fn_and_config
+
+    def _skewed(scheme):
+        fn, cfg = real(scheme)
+
+        def _fn(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            enabled = getattr(args[-1] if args else None, checker.ICE_FIELD,
+                              None)
+            cfg_obj = kwargs.get("config", args[-1] if args else None)
+            enabled = getattr(cfg_obj, checker.ICE_FIELD, False)
+            if enabled:
+                return out._replace(dq_v_dt=out.dq_v_dt * 10.0)
+            return out
+        return _fn, cfg
+
+    monkeypatch.setattr(checker, "_scheme_fn_and_config", _skewed)
+    failures = checker.section_2b_target_isolation()
+    assert failures, "a 10x-off ON branch passed the equivalence"
+    assert all("deposition-target multiplier" in f for f in failures), failures

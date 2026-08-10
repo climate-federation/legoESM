@@ -324,6 +324,58 @@ def section_2_load_bearing() -> list[str]:
     return failures
 
 
+def section_2b_target_isolation() -> list[str]:
+    """Does the allowance act on the DEPOSITION TARGET ALONE?
+
+    Sections 1-2 prove the ramp is right, the flag is reachable, and it is
+    correctly gated.  They do NOT prove it is applied to the intended term: an
+    implementation that scaled a different gated ice quantity would satisfy
+    all of them.  This is the equivalence that pins the target.
+
+    If the only effect is ``q_sat_i -> rh_homo * q_sat_i`` in the deposition
+    driving term, then a cell at ``q_v = S * q_sat_i`` WITH the allowance has
+    the same deposition driving supersaturation as a cell at
+    ``q_v = (S - rh_homo + 1) * q_sat_i`` WITHOUT it.  Everything else is held
+    identical, and Cooper nucleation in the SAM flavour depends on T and the
+    existing crystal number rather than on q_v, so the two calls should agree
+    to round-off.
+
+    REPORTED, NOT ASSERTED (yet): the residual is printed and only a gross
+    disagreement is failed.  Other q_v-dependent terms exist in these schemes
+    and their size at this cell has not been measured, so a tight tolerance
+    here would be a number chosen to be green rather than a bound derived from
+    the physics.
+    """
+    failures: list[str] = []
+    q_sat_i = float(thermo.saturation_mixing_ratio_ice(
+        jnp.asarray(COLD_T_K), jnp.asarray(COLD_P_PA)))
+    ramp = float(thermo.homogeneous_freezing_rh_factor(jnp.asarray(COLD_T_K)))
+    s_on = COLD_RH_ICE
+    s_off = COLD_RH_ICE - ramp + 1.0
+    print(f"  equivalence: ON at RH_ice={s_on:.4f} vs OFF at "
+          f"RH_ice={s_off:.4f} (both carry the same deposition driving "
+          f"supersaturation {(s_on - ramp) * q_sat_i:.4e} kg/kg)")
+    for scheme in ICE_SCHEMES:
+        fn, cfg = _scheme_fn_and_config(scheme)
+        q_v_on, rest_on = _column(COLD_T_K, COLD_P_PA, s_on * q_sat_i,
+                                  q_i=COLD_Q_ICE)
+        q_v_off, rest_off = _column(COLD_T_K, COLD_P_PA, s_off * q_sat_i,
+                                    q_i=COLD_Q_ICE)
+        a = float(fn(*(rest_on[0], q_v_on, *rest_on[1:]), DT_S,
+                     cfg(**{ICE_FIELD: True})).dq_v_dt[0, 0])
+        b = float(fn(*(rest_off[0], q_v_off, *rest_off[1:]), DT_S,
+                     cfg(**{ICE_FIELD: False})).dq_v_dt[0, 0])
+        resid = abs(a - b) / max(abs(b), 1.0e-30)
+        print(f"    {scheme:10s} ON(S)={a:+.6e}  OFF(S')={b:+.6e}  "
+              f"|residual| = {100 * resid:8.3f} % of OFF(S')")
+        if resid > 1.0:
+            failures.append(
+                f"{scheme}: the allowance does not behave as a pure "
+                f"deposition-target multiplier (residual {100 * resid:.1f} % "
+                "of the equivalent no-allowance cell)")
+    return failures
+
+
 def _lane_crm(scheme: str, *, guard: bool = False):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -424,6 +476,8 @@ def main() -> int:
     failures += section_1_formula()
     print("\n[2] LOAD-BEARING — ON vs OFF through the real scheme")
     failures += section_2_load_bearing()
+    print("\n[2b] TARGET ISOLATION — is it the deposition target alone?")
+    failures += section_2b_target_isolation()
     print("\n[3] REACHABLE — the sub-config each lane builds")
     failures += section_3_reachable()
 
