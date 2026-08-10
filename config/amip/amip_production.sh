@@ -77,6 +77,18 @@
 # download in clm_surface_map.download_clm_surfdata() FAILS (SSL) — this file
 # MUST be staged locally and passed via --clm-surfdata-path (staged 2026-07-02).
 : "${CLM_SURFDATA:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+# Subgrid-orography stddev (SSO) for the orographic GWD launch (#1514). With
+# gravity_wave_drag=mcfarlane+hines and NO SSO file, McFarlane falls back to
+# the scalar h_topo=500 m on EVERY column — a fictional 500-m mountain over
+# the open ocean, measured at -0.29 Pa column drag over 40-60S (2x the entire
+# observed surface stress): it removed the eddy-driven westerly belt within a
+# week of the ERA5 IC and suppressed the storm tracks in BOTH hemispheres.
+# File built by scripts/data/prep_subgrid_orography.py from etopo_1deg_clean
+# (--fine-res-deg 1.0 --block-deg 2.0; Southern-Ocean mean sgh 500 -> 3.6 m).
+# ADOPTING THIS CHANGES THE MODEL CLIMATE (validated 90-d + 274-d restart
+# arms, issue #1514): any comparison spanning it is confounded. Opt OUT with
+# AMIP_SSO="" (pre-fix reproduction runs only).
+: "${AMIP_SSO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg.nc}"
 # Land-sea mask (sftlf, fraction) built from the SAME CLM surfdata by
 # scripts/data/build_sftlf_from_surfdata.py (2026-07-22). Without it f_land is
 # derived from ETOPO elevation>0, and ETOPO's inland-sea BATHYMETRY (Caspian
@@ -119,4 +131,10 @@ fi
 # branch; surfdata albedo needs --surfdata, which this launcher never passes).
 if [[ -n "${AMIP_LAND_MASK}" ]]; then
   AMIP_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
+fi
+# Subgrid orography for the orographic GWD launch (see AMIP_SSO above, #1514).
+# Without this flag the run trips the loud scalar-fallback warning (PR #1540)
+# and reproduces the pseudo-mountain climate. Opt-out is DELIBERATE only.
+if [[ -n "${AMIP_SSO}" ]]; then
+  AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
