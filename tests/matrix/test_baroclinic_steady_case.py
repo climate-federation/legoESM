@@ -77,10 +77,51 @@ def test_runner_dispatch_resolves_the_case(matrix_mod):
 
 
 def test_exact_case_selector_matches_it(matrix_mod):
-    """`--test =baroclinic_steady` must select something, not silently nothing."""
-    exact = [t for t in matrix_mod._build_test_matrix()
-             if t.case == "baroclinic_steady"]
-    assert len(exact) == len(matrix_mod.GRID_TYPES)
+    """`--test =baroclinic_steady` must select something, not silently nothing.
+
+    Goes through the REAL parser and the REAL `filter_tests`, so breaking the
+    exact-match branch fails this test; a list comprehension over the catalog
+    would not (codex review).  Also checks the exact form does not drag in the
+    perturbed sibling the way the legacy substring form would.
+    """
+    parser = matrix_mod.build_parser()
+    args = parser.parse_args(["--only", "hydro", "--test", "=baroclinic_steady"])
+    picked = matrix_mod.filter_tests(matrix_mod.TEST_MATRIX, args)
+    assert picked, "the exact selector matched nothing"
+    assert {t.case for t in picked} == {"baroclinic_steady"}
+    assert len(picked) == len(matrix_mod.GRID_TYPES)
+
+    # The substring form is deliberately wider; pin the difference so a future
+    # change to either branch is visible here.
+    loose = matrix_mod.filter_tests(
+        matrix_mod.TEST_MATRIX,
+        parser.parse_args(["--only", "hydro", "--test", "baroclinic"]))
+    assert {t.case for t in loose} >= {"baroclinic", "baroclinic_steady"}
+
+
+def test_runner_forwards_the_perturbed_flag_to_every_grid(matrix_mod):
+    """The IC test proves the initializer honours `perturbed`; this proves the
+    RUNNER hands it over.
+
+    Dropping `perturbed=_perturbed` from the four branches would silently fall
+    back to each initializer's `perturbed=True` default and the control would
+    quietly become a duplicate of the perturbed case, with every other test in
+    this file still green (codex review).  The symbol inspected is the one the
+    dispatch actually calls, asserted above.
+    """
+    import inspect
+
+    src = inspect.getsource(matrix_mod.RUNNERS["baroclinic_steady"])
+    # One forwarding site per grid: cube, lat-lon, icosahedral, spectral.
+    assert src.count("perturbed=_perturbed") == 4, src.count(
+        "perturbed=_perturbed")
+    # ... and no un-rotated initializer may hardcode the flag any more.
+    for init in ("baroclinic_wave_init(", "baroclinic_wave_init_latlon(",
+                 "baroclinic_wave_init_mpas(", "baroclinic_wave_init_spectral("):
+        call = src.split(init, 1)[1].split(")", 1)[0]
+        assert "perturbed=True" not in call, init
+    # The rotated family keeps its own independent flag.
+    assert "_rot_perturbed" in src
 
 
 def test_perturbed_false_really_changes_the_initial_condition():
