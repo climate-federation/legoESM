@@ -177,6 +177,14 @@ def test_p_grad_c_nonhydrostatic_branch(bd):
     assert nz.any()
     ratio = uc_b[nz] / uc_a[nz]
     assert np.abs(ratio - 0.5).max() < 1e-14
+    # codex NH r2 #4: a mutant using the HYDROSTATIC weight only for vc
+    # passes the identity control and the uc halving -- vc must respond
+    # to delpc too.  dpk is level- and (i,j)-random, so a k-shift in the
+    # vc weight also fails here.
+    nzv = np.abs(vc_a) > 0.0
+    assert nzv.any()
+    ratio_v = vc_b[nzv] / vc_a[nzv]
+    assert np.abs(ratio_v - 0.5).max() < 1e-14
 
 
 def test_one_grad_p_guards_raise(bd):
