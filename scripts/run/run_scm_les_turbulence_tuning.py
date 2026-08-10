@@ -697,6 +697,9 @@ class SchemeResult:
     nonfinite_cases: list[str] | None = None
     per_case_default: dict[str, float] | None = None
     per_case_tuned: dict[str, float] | None = None
+    # mean of s_i(tuned)/s_i(default); 1.0 = no net change. None when
+    # the scheme was never tuned.
+    score_relative_tuned: float | None = None
 
 
 def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
@@ -734,13 +737,28 @@ def _arm_score(scheme: str, arm: "CaseArm", args, params=None,
     return means, drift, components, combined, bad
 
 
-def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
+def joint_score(scheme: str, arms: list, args, params=None, cfgs=None,
+                case_norm: dict[str, float] | None = None):
     """Aggregate across cases.
 
-    Each arm's score is already normalised by that case's OWN reference spread,
-    so the arms are commensurable and a plain mean weights every regime
-    equally. That is the point of the multi-case fit: a parameter set that wins
-    on trade cumulus by wrecking the stable boundary layer must not score well.
+    Each arm's score is normalised by that case's OWN reference spread, which
+    makes the arms dimensionless. It does NOT make them the same size, and the
+    difference decides what the optimizer actually fits.
+
+    ``case_norm=None`` is the plain mean of those scores. It weights every
+    regime's ABSOLUTE normalized error equally, so a case every scheme fits
+    badly contributes proportionally more gradient than a case every scheme
+    already fits. Measured on the five-case run, that put 43% of the joint
+    loss on ekman (70% for tke) against 3.1% on bomex -- i.e. the "joint" fit
+    was largely an ekman fit, which is not what a generalization fit means.
+
+    ``case_norm`` supplies each case's score at DEFAULT parameters, making the
+    loss the mean of ``s_i(p)/s_i(p_default)`` -- the fraction of each
+    regime's own default error that remains. Every regime then enters with
+    equal improvement HEADROOM regardless of how hard it is in absolute terms.
+    The normalisers are constants captured before tuning; recomputing them
+    from the traced parameters would make the loss scale-invariant and
+    meaningless.
     """
     per_case, per_components, drifts, means_out = {}, {}, {}, []
     nonfinite = set()
@@ -750,6 +768,8 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
         _m, _drift, comp, combined, bad = _arm_score(
             scheme, arm, args, params=params, base_cfg=cfg)
         means_out.append(_m)
+        # per_case reports the RAW score in every mode, so the per-case table
+        # means the same thing whichever aggregation produced the fit.
         per_case[arm.name] = combined
         per_components[arm.name] = comp
         if _drift is not None:
@@ -759,7 +779,16 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
         # the only path that reports a non-finite arm anyway.
         if params is None and bool(bad):
             nonfinite.add(arm.name)
-        total = combined if total is None else total + combined
+        contribution = combined
+        if case_norm is not None:
+            # Floor the divisor: a case already fitted to well inside the
+            # reference's own spread has no headroom left, and dividing by it
+            # would turn its remaining noise into the dominant gradient --
+            # the exact pathology this aggregation exists to remove, merely
+            # moved to the other end.
+            contribution = combined / max(
+                float(case_norm[arm.name]), args.relative_norm_floor)
+        total = contribution if total is None else total + contribution
     joint = total / float(len(arms))
     joint_score.last_ps_drift_pa = drifts
     joint_score.last_nonfinite = nonfinite
@@ -767,8 +796,34 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
     return joint, per_case, per_components
 
 
-def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
-    """Tune ONE parameter set per scheme against ALL cases at once."""
+def relative_joint(per_case: dict[str, float],
+                   case_norm: dict[str, float] | None,
+                   floor: float) -> float | None:
+    """Mean of ``s_i / s_i^0`` -- the fraction of each regime's DEFAULT error
+    that survives tuning.
+
+    1.0 is "no net change", below 1.0 is "improved on average headroom". It is
+    reported for every run, including runs fitted with the plain mean, because
+    it is the number that says whether one parameter set helped every regime
+    or bought one regime at another's expense. Costs no extra rollouts: the
+    per-case scores are already raw.
+    """
+    if not case_norm:
+        return None
+    return float(np.mean([
+        per_case[c] / max(float(case_norm[c]), floor) for c in per_case
+    ]))
+
+
+def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
+                          case_norm: dict[str, float] | None = None,
+                          ) -> SchemeResult:
+    """Tune ONE parameter set per scheme against ALL cases at once.
+
+    ``case_norm`` selects the aggregation: ``None`` is the plain mean of
+    the per-case scores, a dict of per-case DEFAULT scores makes the loss
+    the mean of ``s_i/s_i^0``. See :func:`joint_score`.
+    """
     result = SchemeResult(scheme=scheme, status="tuned")
     t0 = time.time()
 
@@ -780,7 +835,7 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
 
     def loss_fn(params: TrainablePhysicsParams):
         joint, _pc, _comp = joint_score(scheme, arms, args, params=params,
-                                        cfgs=cfgs)
+                                        cfgs=cfgs, case_norm=case_norm)
         return joint
 
     preflight_loss, preflight_grads = eqx.filter_value_and_grad(loss_fn)(
@@ -865,9 +920,16 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
     result.loss_history = loss_history
     tuned_cfgs = [_materialize_static(_apply_trainable_params(c, params))
                   for c in cfgs]
+    # Scored with case_norm=None on purpose: score_tuned must be the SAME
+    # metric as score_default whichever aggregation drove the fit, or the
+    # headline default-vs-tuned comparison silently changes units. The
+    # aggregation actually minimised is reported alongside it.
     joint, per_case, per_comp = joint_score(scheme, arms, args, params=None,
                                             cfgs=tuned_cfgs)
     result.score_tuned = float(joint)
+    result.score_relative_tuned = relative_joint(
+        {k: float(v) for k, v in per_case.items()}, case_norm,
+        args.relative_norm_floor)
     result.per_case_tuned = {k: float(v) for k, v in per_case.items()}
     result.components_tuned = {
         k: {kk: float(vv) for kk, vv in c.items()}
@@ -972,6 +1034,23 @@ def parse_args(argv=None):
                         "'none' means the SCM cannot condense, so its cloud "
                         "layer is supersaturated vapour where the LES "
                         "condenses.")
+    p.add_argument("--joint-aggregation", default="mean",
+                   choices=["mean", "default_relative"],
+                   help="How the per-case scores become ONE number for the "
+                        "optimizer. 'mean' is the plain mean of the "
+                        "spread-normalized scores; it weights every regime's "
+                        "ABSOLUTE error equally, which on the five-case run "
+                        "put 43%% of the loss on ekman and 3%% on bomex. "
+                        "'default_relative' minimizes the mean of "
+                        "s_i/s_i(default), so every regime enters with equal "
+                        "improvement HEADROOM. Both numbers are reported "
+                        "whichever is chosen.")
+    p.add_argument("--relative-norm-floor", type=float, default=0.05,
+                   help="Floor on the per-case divisor under "
+                        "--joint-aggregation default_relative. A case already "
+                        "fitted well inside the LES reference's own spread has "
+                        "no headroom left, and dividing by it would promote "
+                        "its residual noise to the dominant gradient.")
     p.add_argument("--skip-tuning", action="store_true")
     p.add_argument("--allow-radiation-mismatch", action="store_true",
                    help="run a case whose LES radiation the SCM cannot match; "
@@ -1210,9 +1289,16 @@ def main(argv=None) -> int:
                 continue
             print(f"\n[tune] {res.scheme}", flush=True)
             try:
+                # The normalizers are this scheme's own per-case scores
+                # at DEFAULT parameters, captured before any step is
+                # taken. Recomputing them from traced parameters would
+                # make the loss scale-invariant.
+                case_norm = (dict(res.per_case_default or {})
+                             if args.joint_aggregation == "default_relative"
+                             else None)
                 tuned = tune_scheme_multicase(
                     res.scheme, arms=arms, args=args,
-                    cfgs=configs[res.scheme])
+                    cfgs=configs[res.scheme], case_norm=case_norm)
             except Exception as exc:                  # noqa: BLE001
                 res.status = "tune_failed"
                 res.error = f"{type(exc).__name__}: {exc}"
@@ -1220,13 +1306,16 @@ def main(argv=None) -> int:
                 continue
             for f in ("status", "score_tuned", "components_tuned", "n_trained",
                       "frozen", "parameters", "loss_history",
-                      "per_case_tuned"):
+                      "per_case_tuned", "score_relative_tuned"):
                 setattr(res, f, getattr(tuned, f))
             if tuned.error:
                 res.error = tuned.error
             if res.score_tuned is not None:
+                rel = ("" if res.score_relative_tuned is None else
+                       f"  rel={res.score_relative_tuned:.4f}")
                 print(f"    joint {res.score_default:.6g} -> "
-                      f"{res.score_tuned:.6g} ({res.n_trained} trained)   "
+                      f"{res.score_tuned:.6g} ({res.n_trained} trained)"
+                      f"{rel}   "
                       + "  ".join(f"{k}={v:.4g}"
                                   for k, v in (res.per_case_tuned or {}).items()))
             jax.clear_caches()
@@ -1337,6 +1426,12 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             "cases": [a.name for a in arms],
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
             "steps": args.steps,
+            # WHICH number the optimizer minimized. 'mean' weights every
+            # regime's absolute normalized error equally and is therefore
+            # dominated by whichever regime every scheme fits worst;
+            # 'default_relative' gives every regime equal improvement headroom.
+            "joint_aggregation": args.joint_aggregation,
+            "relative_norm_floor": args.relative_norm_floor,
                         "radiation": "none", "convection": "none",
             "microphysics": args.microphysics,
             "scored_variables_per_case": {a.name: list(a.scored) for a in arms},

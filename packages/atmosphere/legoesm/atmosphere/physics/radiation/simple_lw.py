@@ -98,11 +98,13 @@ __physics_contract__ = {
         "Cloud-top cooling is therefore negative dT/dt just below the "
         "inversion, which is the scheme's entire purpose."
     ),
-    # A prescribed-flux fit conserves nothing on its own; what it does hold
-    # exactly is that the column-integrated heating equals the net flux
-    # difference across the column, because the tendency is a telescoping
-    # flux difference (asserted in test_simple_lw.py).
-    "conserves": ["column_energy_flux_difference"],
+    # Nothing: this is a prescribed-flux fit, not a solver, and it is a net
+    # source/sink of column energy by design -- cloud-top cooling is the
+    # point. What it does hold EXACTLY is that the column-integrated heating
+    # equals the net flux difference across the column, because the tendency
+    # is a telescoping flux difference; that identity is asserted in
+    # test_simple_lw.py::test_column_heating_telescopes_to_the_flux_difference.
+    "conserves": ["none"],
     # Differentiable in the empirical coefficients and, through the optical
     # depth, in the state. The inversion INDEX is an integer threshold
     # crossing and carries no gradient -- the oracle defines it that way.

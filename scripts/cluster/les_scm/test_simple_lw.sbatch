@@ -31,3 +31,7 @@ $PY -m pytest -q \
     tests/test_no_hardcoded_constants.py 2>&1 | tail -30
 echo "gates rc=${PIPESTATUS[0]}"
 echo "DONE $(date +%T)"
+
+echo "=============== joint-aggregation tests ==============="
+$PY -m pytest -q tests/unit/test_scm_les_joint_aggregation.py 2>&1 | tail -20
+echo "aggregation rc=${PIPESTATUS[0]}"
