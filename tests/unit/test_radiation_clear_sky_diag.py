@@ -4,7 +4,7 @@ Covers ``RadiationConfig.clear_sky_diag`` and the cloud-free second radiation
 pass in ``_make_hydrostatic_radiation`` (the factory MPAS uses:
 ``_make_mpas_radiation`` is an ALIAS of it, asserted below), i.e. the
 ``HydrostaticTendencies.{sw_up_toa,lw_up_toa,sw_down_sfc,lw_down_sfc}
-_clearsky`` channel that feeds ``_sfc_diag`` slots 12-15 — the CMIP6 clear-sky
+_clr`` channel that feeds ``_sfc_diag`` slots 10-13 — the CMIP6 clear-sky
 QUARTET rsutcs/rlutcs (TOA outgoing) + rsdscs/rldscs (surface downwelling).
 All four come from ONE cloud-free solve.
 
@@ -45,13 +45,13 @@ NLEV = 10
 
 # The clear-sky quartet in _sfc_diag slot order (12, 13, 14, 15) and its
 # all-sky partner per slot — the pairing every sign assertion rests on.
-CLEARSKY_FIELDS = ("sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                   "sw_down_sfc_clearsky", "lw_down_sfc_clearsky")
+CLEARSKY_FIELDS = ("sw_up_toa_clr", "lw_up_toa_clr",
+                   "sw_down_sfc_clr", "lw_down_sfc_clr")
 CLEARSKY_ALLSKY_PARTNER = {
-    "sw_up_toa_clearsky": "sw_up_toa",      # rsutcs <-> rsut   (+up)
-    "lw_up_toa_clearsky": "lw_up_toa",      # rlutcs <-> rlut   (+up)
-    "sw_down_sfc_clearsky": "sw_down_sfc",  # rsdscs <-> rsds   (+down)
-    "lw_down_sfc_clearsky": "lw_down_sfc",  # rldscs <-> rlds   (+down)
+    "sw_up_toa_clr": "sw_up_toa",      # rsutcs <-> rsut   (+up)
+    "lw_up_toa_clr": "lw_up_toa",      # rlutcs <-> rlut   (+up)
+    "sw_down_sfc_clr": "sw_down_sfc",  # rsdscs <-> rsds   (+down)
+    "lw_down_sfc_clr": "lw_down_sfc",  # rldscs <-> rlds   (+down)
 }
 
 
@@ -143,9 +143,9 @@ def test_tendency_carries_the_clear_sky_slots_last():
     # invariant this test protects is "the clear-sky fields are trailing
     # optionals with None defaults", not that they are physically last.
     assert HydrostaticTendencies._fields[-6:-1] == (
-        CLEARSKY_FIELDS + ("sw_up_sfc_clearsky",))
+        CLEARSKY_FIELDS + ("sw_up_sfc_clr",))
     assert HydrostaticTendencies._fields[-1] == "precip_solid"
-    for _k in CLEARSKY_FIELDS + ("sw_up_sfc_clearsky", "precip_solid"):
+    for _k in CLEARSKY_FIELDS + ("sw_up_sfc_clr", "precip_solid"):
         assert HydrostaticTendencies._field_defaults[_k] is None, _k
 
 
@@ -255,7 +255,7 @@ def test_clear_sky_shortwave_is_less_reflective_than_all_sky(cloudy_pair):
     SW_CRE = rsut - rsutcs must be POSITIVE."""
     _off, on = cloudy_pair
     rsut = np.asarray(on.sw_up_toa.data)
-    rsutcs = np.asarray(on.sw_up_toa_clearsky.data)
+    rsutcs = np.asarray(on.sw_up_toa_clr.data)
     assert np.all(np.isfinite(rsutcs))
     assert np.all(rsutcs >= 0.0), "outgoing SW cannot be negative"
     assert np.all(rsutcs < rsut), (
@@ -268,7 +268,7 @@ def test_clear_sky_longwave_emits_more_than_all_sky(cloudy_pair):
     greenhouse trapping.  LW_CRE = rlutcs - rlut must be POSITIVE."""
     _off, on = cloudy_pair
     rlut = np.asarray(on.lw_up_toa.data)
-    rlutcs = np.asarray(on.lw_up_toa_clearsky.data)
+    rlutcs = np.asarray(on.lw_up_toa_clr.data)
     assert np.all(np.isfinite(rlutcs))
     assert np.all(rlutcs > 0.0)
     assert np.all(rlutcs > rlut), (
@@ -281,7 +281,7 @@ def test_clear_sky_surface_shortwave_is_brighter_than_all_sky(cloudy_pair):
     DOWN — the same orientation as its all-sky partner ``sw_down_sfc``."""
     _off, on = cloudy_pair
     rsds = np.asarray(on.sw_down_sfc.data)
-    rsdscs = np.asarray(on.sw_down_sfc_clearsky.data)
+    rsdscs = np.asarray(on.sw_down_sfc_clr.data)
     assert np.all(np.isfinite(rsdscs))
     assert np.all(rsdscs >= 0.0), "downwelling SW cannot be negative"
     assert np.all(rsdscs > rsds), (
@@ -295,7 +295,7 @@ def test_clear_sky_surface_longwave_is_dimmer_than_all_sky(cloudy_pair):
     shortwave, which is exactly why the sign is worth pinning."""
     _off, on = cloudy_pair
     rlds = np.asarray(on.lw_down_sfc.data)
-    rldscs = np.asarray(on.lw_down_sfc_clearsky.data)
+    rldscs = np.asarray(on.lw_down_sfc_clr.data)
     assert np.all(np.isfinite(rldscs))
     assert np.all(rldscs > 0.0)
     assert np.all(rldscs < rlds), (

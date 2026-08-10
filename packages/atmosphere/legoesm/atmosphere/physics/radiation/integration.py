@@ -457,11 +457,9 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
                                  sw_up_toa=None, lw_up_toa=None,
                                  sw_down_toa=None,
                                  sw_down_sfc=None, lw_down_sfc=None,
-                                 sw_up_toa_clearsky=None,
-                                 lw_up_toa_clearsky=None,
-                                 sw_down_sfc_clearsky=None,
-                                 lw_down_sfc_clearsky=None,
-                                 sw_up_sfc_clearsky=None):
+                                 sw_up_toa_clr=None, lw_up_toa_clr=None,
+                                 sw_down_sfc_clr=None, lw_down_sfc_clr=None,
+                                 sw_up_sfc_clr=None):
     """Pack column heating rate into a HydrostaticTendencies.
 
     Returns a HydrostaticTendencies with only dT_dt non-zero.
@@ -540,31 +538,27 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
         sw_down_toa=_toa_field(sw_down_toa, "sw_down_toa_rad"),
         sw_down_sfc=swd_field,
         lw_down_sfc=lwd_field,
-        # Clear-sky TOA outgoing (CMOR rsutcs/rlutcs).  SAME positive-UPWARD
-        # orientation as the all-sky pair above — both come from the solver's
-        # ``*_flux_up[:, 0]``, so no sign flip here or downstream.
-        sw_up_toa_clearsky=_toa_field(sw_up_toa_clearsky,
-                                      "sw_up_toa_clearsky_rad"),
-        lw_up_toa_clearsky=_toa_field(lw_up_toa_clearsky,
-                                      "lw_up_toa_clearsky_rad"),
+        # Clear-sky TOA up-fluxes (#843 lean-lane port; CMOR rsutcs/rlutcs).
+        # SAME positive-UPWARD orientation as the all-sky sw_up_toa/lw_up_toa
+        # above — both come from the solver's ``*_flux_up[:, 0]``, so no sign
+        # flip here or downstream.  None (the default) => leaf absent.
+        sw_up_toa_clr=_toa_field(sw_up_toa_clr, "sw_up_toa_clr_rad"),
+        lw_up_toa_clr=_toa_field(lw_up_toa_clr, "lw_up_toa_clr_rad"),
         # Clear-sky SURFACE downwelling (CMOR rsdscs/rldscs).  SAME
         # positive-DOWN orientation as sw_down_sfc / lw_down_sfc above — both
         # come from the solver's ``*_flux_down[:, -1]`` (the surface is the
         # LAST half level), so again no sign flip anywhere.  ``_toa_field`` is
         # a plain (ncol,)->2D Field packer despite the name; reused so the
         # dtype/dims/units handling is defined in exactly one place.
-        sw_down_sfc_clearsky=_toa_field(sw_down_sfc_clearsky,
-                                        "sw_down_sfc_clearsky_rad"),
-        lw_down_sfc_clearsky=_toa_field(lw_down_sfc_clearsky,
-                                        "lw_down_sfc_clearsky_rad"),
+        sw_down_sfc_clr=_toa_field(sw_down_sfc_clr, "sw_down_sfc_clr_rad"),
+        lw_down_sfc_clr=_toa_field(lw_down_sfc_clr, "lw_down_sfc_clr_rad"),
         # Clear-sky SURFACE UPWELLING shortwave (CMOR rsuscs, which the
         # table declares positive="up").  Orientation matches the all-sky
         # rsus the collector derives (down - net): both are radiation
         # LEAVING the surface, and this one comes straight from the
         # solver's ``sw_flux_up[:, -1]``, so no sign flip here or
         # downstream.
-        sw_up_sfc_clearsky=_toa_field(sw_up_sfc_clearsky,
-                                      "sw_up_sfc_clearsky_rad"),
+        sw_up_sfc_clr=_toa_field(sw_up_sfc_clr, "sw_up_sfc_clr_rad"),
     )
 
 
@@ -954,6 +948,20 @@ def make_radiation_physics(
             " cloud_fraction_override) before enabling CLUBB-cf routing there."
         )
 
+    # Clear-sky TOA diagnostic (#843 lean-lane port): the clouds-off second
+    # pass is wired in ``_make_hydrostatic_radiation`` only (serves the lean
+    # cube/lat-lon AND MPAS paths).  Refuse LOUDLY elsewhere — a silently
+    # ignored clear_sky_diag is exactly the #1385 flag-drop class this port
+    # kills (rsutcs/rlutcs absent with no error).
+    if radiation_config.clear_sky_diag and model_type not in (
+            "hydrostatic", "mpas"):
+        raise NotImplementedError(
+            "RadiationConfig.clear_sky_diag (clouds-off second pass for CMOR "
+            "rsutcs/rlutcs) is only wired for model_type 'hydrostatic'/'mpas', "
+            f"got {model_type!r}.  Extend the corresponding _make_*_radiation "
+            "builder before enabling the clear-sky diagnostic there."
+        )
+
     # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
     # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
     # per-g-point optics; falls back to gray optics if the tables are absent).
@@ -1076,7 +1084,6 @@ def _make_hydrostatic_radiation(
         and bool(getattr(radiation_config.cloud_config,
                          "convective_cloud", False))
     )
-
     # --- Clear-sky TOA diagnostic (CMOR rsutcs/rlutcs) build-time gate ---
     # STATIC Python bools resolved once here, never a traced ``jnp.where``:
     # ``clear_sky_diag=False`` (the default) compiles no extra radiation HLO
@@ -1482,11 +1489,11 @@ def _make_hydrostatic_radiation(
                          else rad_out.sw_flux_down[:, 0]),
             sw_down_sfc=rad_out.sw_flux_down[:, -1],
             lw_down_sfc=rad_out.lw_flux_down[:, -1],
-            sw_up_toa_clearsky=_sw_up_toa_clr,
-            lw_up_toa_clearsky=_lw_up_toa_clr,
-            sw_down_sfc_clearsky=_sw_down_sfc_clr,
-            lw_down_sfc_clearsky=_lw_down_sfc_clr,
-            sw_up_sfc_clearsky=_sw_up_sfc_clr)
+            sw_up_toa_clr=_sw_up_toa_clr,
+            lw_up_toa_clr=_lw_up_toa_clr,
+            sw_down_sfc_clr=_sw_down_sfc_clr,
+            lw_down_sfc_clr=_lw_down_sfc_clr,
+            sw_up_sfc_clr=_sw_up_sfc_clr)
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override

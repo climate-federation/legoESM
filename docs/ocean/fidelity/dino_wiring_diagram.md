@@ -1,5 +1,7 @@
 # DINO NEMO→legoESM complete wiring diagram
 
+> **SUPERSEDED (2026-08-08) by [`dino_step_wiring_generated.md`](dino_step_wiring_generated.md)** — generated from the oracle Fortran, `fidelity_bar_gate.py` and `git ls-files` by `scripts/validate/ocean_fidelity/dino_1226/gen_step_wiring.py`, and CI-gated against drift. The hand-maintained table below is kept for its prose and history but is stale in several rows; prefer the generated doc for the ordered call chain and per-term status.
+
 **Purpose.** The oracle (NEMO 5.0.2) is exposed as source *precisely so we trace the
 complete per-timestep call chain and match it EXACTLY* — not approximate-reconstruct
 from the paper. "Matched" means the WHOLE ordered chain below matches; a node marked

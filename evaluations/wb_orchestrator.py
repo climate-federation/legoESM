@@ -16,13 +16,16 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .wb_forecast import diagnose_and_regrid, score_forecast
+from .wb_forecast import (
+    diagnose_and_regrid,
+    score_ensemble_forecast,
+    score_forecast,
+)
 from .wb_regrid import wb2_grid
 
 __all__ = ["ForecastCase", "run_wb_forecast_eval"]
 
 _SECONDS_PER_HOUR = 3600.0
-_METRICS = ("rmse", "acc", "bias")
 
 
 class ForecastCase(NamedTuple):
@@ -107,21 +110,69 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
                 rolled = rollout_fn(
                     case.init_state, physics_fn, grid, sigma_coord, pe_config,
                     dt, n_steps)
-            pred_fields, pred_valid, _, _ = diagnose_and_regrid(
-                rolled, grid, sigma_coord, resolution_deg=resolution_deg)
+            # A rollout_fn may return ONE state (deterministic) or a LIST of
+            # member states (ensemble). Diagnosing each member and averaging
+            # the FIELDS — rather than averaging the spectral state and
+            # diagnosing once — also removes the mean-then-diagnose error that
+            # z500/mslp carry (both are nonlinear functions of the state).
+            #
+            # The list check must NOT accept a tuple: a spectral state is a
+            # NamedTuple, i.e. itself a tuple, so ``isinstance(rolled, tuple)``
+            # silently unpacks one state into its FIELDS and calls them
+            # members. An ensemble must be a list.
+            members = rolled if isinstance(rolled, list) else [rolled]
+            diagnosed = [
+                diagnose_and_regrid(
+                    mem, grid, sigma_coord, resolution_deg=resolution_deg)
+                for mem in members
+            ]
+            member_fields = [d[0] for d in diagnosed]
             verif = case.verif_by_lead[int(lead)]
-            # a cell is scorable only where it is above ground in BOTH pred and verif
-            combined_valid = {
-                k: (pred_valid[k] & np.asarray(verif["valid"][k])) for k in pred_fields
-            }
+            # a cell is scorable only where it is above ground in BOTH pred and
+            # verif — and, for an ensemble, in EVERY member (a cell one member
+            # calls below-ground is not scorable for the ensemble as a whole).
+            combined_valid = {}
+            for k in member_fields[0]:
+                v = np.asarray(verif["valid"][k])
+                for d in diagnosed:
+                    v = v & d[1][k]
+                combined_valid[k] = v
+            pred_fields = (
+                member_fields[0] if len(member_fields) == 1
+                else {k: np.mean([mf[k] for mf in member_fields], axis=0)
+                      for k in member_fields[0]}
+            )
             case_scores = score_forecast(
                 pred_fields, verif["fields"], clim_fields_wb2, wb2_lat, valid=combined_valid)
+            if len(member_fields) > 1:
+                ens_scores = score_ensemble_forecast(
+                    member_fields, verif["fields"], wb2_lat,
+                    valid=combined_valid)
+                for key, metrics in ens_scores.items():
+                    case_scores[key].update(metrics)
             for key, metrics in case_scores.items():
                 accum.setdefault((key, int(lead)), []).append(metrics)
 
     scorecard: dict = {}
     for key_lead, per_case in accum.items():
+        # Average over whatever metrics the cases carry: rmse/acc/bias always,
+        # plus crps/spread/spread_skill when the rollout returned an ensemble.
+        # A fixed metric tuple would have silently DROPPED the probabilistic
+        # columns instead of reporting them.
+        #
+        # Every case must carry the SAME metrics: a rollout_fn that returned an
+        # ensemble for some cases and a single state for others would otherwise
+        # average a probabilistic column over a subset of cases (or KeyError,
+        # depending on which case came first) — an order-dependent scorecard.
+        metric_keys = set(per_case[0])
+        for d in per_case[1:]:
+            if set(d) != metric_keys:
+                raise ValueError(
+                    f"inconsistent metrics across cases for {key_lead}: "
+                    f"{sorted(metric_keys)} vs {sorted(d)}. The rollout must "
+                    f"return an ensemble for every case or for none."
+                )
         scorecard[key_lead] = {
-            m: float(np.mean([d[m] for d in per_case])) for m in _METRICS
+            m: float(np.mean([d[m] for d in per_case])) for m in metric_keys
         }
     return scorecard

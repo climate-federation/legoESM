@@ -67,6 +67,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "discretization",  # nested dycore.discretization
         "pgf_scheme",  # nested dycore.pgf_scheme (#1029 momentum PGF selector)
         "bechtold_subsidence_solve",  # Bechtold vertical solve (day-65 bisect)
+        # nested dycore.mpas_vert_advection_scheme — sigma-lane vertical
+        # advection ("upwind" | "van_leer"); membership + silently-inert refusal.
+        "mpas_vert_advection_scheme",
         # External-forcing source selectors (2026-07-21 AMIP/CMIP audit):
         # the driver gates each channel with an equality test, so a typo
         # silently deactivated the channel before these membership checks.
@@ -262,7 +265,9 @@ def test_default_config_is_valid() -> None:
     "field",
     sorted(
         EXPECTED_VALIDATED
-        - {"model_type", "discretization", "pgf_scheme"}  # nested; tested separately
+        # nested DycoreConfig fields; tested separately below
+        - {"model_type", "discretization", "pgf_scheme",
+           "mpas_vert_advection_scheme"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -278,6 +283,7 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
     assert _bogus_raises(dycore=DycoreConfig(model_type=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(discretization=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(pgf_scheme=_BOGUS))
+    assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
 
 
 # ---------------------------------------------------------------------------

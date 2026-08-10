@@ -300,6 +300,11 @@ class DiagnosticCollector:
         # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
         # 'none') => ``clt`` is not published.
         self._cloud_config = cloud_config
+        # Set by ``feed_cmip_accumulators_native`` (MPAS lane) when it derives
+        # clwvi/clivi from the RADIATION cloud diagnosis (floor included).
+        # The cube lane's :meth:`collect` integrates the PROGNOSTIC condensate
+        # instead, so the two need different file-level comments.
+        self._cloud_paths_radiative = False
 
         # Per-cell horizontal area weights for global-mean diagnostics.
         # ``None`` => unweighted ``jnp.mean`` (legacy behaviour); the driver
@@ -1617,6 +1622,46 @@ class DiagnosticCollector:
             2 m air temperature [K] (MOST similarity, computed by the caller
             from sst/sic + surface-layer winds).  Falls back to the lowest
             model level when ``None`` so the field is never dropped.
+        rsutcs, rlutcs : array, shape ``(nCells,)``, optional
+            CLEAR-SKY TOA outgoing SW / LW flux [W/m2, positive up — the same
+            CMOR sign as rsut/rlut] from the clouds-off second radiation pass
+            (``--clear-sky-diag``, #843).  Interval means like the other flux
+            fields; absent (None) keeps the output byte-identical.
+        q_c, q_i : array, shape ``(nCells, nlev)``, optional
+            CLOUD liquid / CLOUD ice mixing ratio [kg/kg] (the tracers the
+            radiation's cloud diagnosis consumes — NOT the precipitating
+            q_s/q_g).  When supplied together with *q_v* and a collector
+            ``cloud_config``, three cloud CMOR fields are derived:
+
+            * ``clt`` — stratiform total cloud cover [%] via the model's own
+              layer cloud fraction reduced by MAXIMUM-RANDOM overlap (the
+              shared ``compute_cloud_properties`` + ``maximum_random_overlap``
+              pair the cube-lane :meth:`collect` uses).
+            * ``clwvi`` / ``clivi`` — the DIAGNOSTIC condensed-water / ice
+              water path [kg/m2]: column sums of the per-layer grid-mean
+              lwp/iwp that ``compute_cloud_properties`` builds from this
+              collector's own ``cloud_config``, i.e. INCLUDING that scheme's
+              sub-grid in-cloud condensate floor (the diagnostic-fraction
+              schemes sundqvist / xu_randall; ``resolved`` has no floor) and
+              EXCLUDING precipitating snow/graupel.  Reported in mass units,
+              so the cloud-optics sub-grid inhomogeneity and partial-coverage
+              thinning factors (radiative-transfer corrections, not mass) are
+              pinned off.
+
+              This is the condensate-floor-inclusive path the albedo/CRE
+              investigation needs — the prognostic-only path (the cube-lane
+              :meth:`collect` clwvi/clivi, which integrate q_c+q_i+q_s+q_g)
+              reads ~0 wherever the coarse grid-mean never saturates.  It is
+              NOT a faithful record of what radiation solved with, in exactly
+              two respects: this config is stratiform-only
+              (``convective_cloud=False``, #689) and carries no CLUBB
+              cloud-fraction override.  Every other cloud knob radiation uses
+              (rh_crit, q_c_diagnostic, Xu-Randall p/alpha, the
+              diagnostic-condensate scheme and its adiabatic rate) IS threaded
+              here by ModelDriver._create_diagnostics, so the floor formula
+              matches.  Closing the two gaps needs radiation to export its own
+              ``CloudProperties``; the NetCDF ``comment`` states the
+              limitation.
 
         Returns
         -------
@@ -2714,6 +2759,73 @@ class DiagnosticCollector:
                         f"time mean."),
                 }
 
+            # Semantics notes for the MPAS-lane cloud trio.  The collector
+            # recomputes the cloud from its OWN ``_cloud_config``, which
+            # ModelDriver._create_diagnostics builds from the same
+            # ExperimentConfig cloud fields as radiation EXCEPT: it forces
+            # convective_cloud=False (#689) and plumbs no CLUBB
+            # cloud-fraction override.  (rh_crit, q_c_diagnostic, p_xr,
+            # alpha_xr, diagnostic_condensate_scheme and adiabatic_lwc_rate
+            # ARE threaded, so the floor formula matches radiation's.)  Those
+            # two divergences are what the comment discloses; closing them
+            # needs radiation to export its own CloudProperties, a separate
+            # change.  Keyed on
+            # ``_cloud_paths_radiative`` — the flag the NATIVE feed sets when
+            # it derives the trio from the radiation cloud diagnosis — NOT on
+            # ``snap_vars``: the sampling label and the water-path definition
+            # are independent, and a sub-daily MPAS cadence (which sets no
+            # cmip_snapshot_vars) must still say WHICH water path it reports.
+            #
+            # MERGE STATE (2026-08-10): NOTHING sets the flag today.  Both
+            # lanes now go through ``_condensate_paths`` — the PROGNOSTIC
+            # q_c + radiatively-active q_i integral (#1443: snow/graupel
+            # excluded because this model's radiation reads ``q_i`` only) —
+            # so neither publishes the floored radiation-diagnosis variant
+            # these notes describe, and the bare table attrs are the honest
+            # label.  The machinery is kept, not deleted, because it is the
+            # disclosure a future radiative-condensate feed must re-enable
+            # by setting the flag at its own call site.
+            _cloud_notes = {
+                "clwvi": ("DIAGNOSTIC condensed-water path: column integral "
+                          "of the grid-mean liquid+ice condensate from the "
+                          "model's own cloud scheme, INCLUDING that scheme's "
+                          "sub-grid in-cloud condensate floor where it has "
+                          "one (the diagnostic-fraction schemes sundqvist / "
+                          "xu_randall; cloud_scheme='resolved' has no floor "
+                          "and reports the explicit condensate).  So it is "
+                          "NOT the prognostic condensed water mass -- the "
+                          "floor is not carried by the water budget.  It is "
+                          "also NOT necessarily what the radiation solved "
+                          "with: this diagnostic is stratiform-only and gets "
+                          "no CLUBB cloud-fraction override, so a run using "
+                          "the convective cloud add-on or a CLUBB cloud "
+                          "fraction in radiation will see those in "
+                          "rsut/rsutcs but not here.  Precipitating "
+                          "snow/graupel are excluded.  A condensate loading "
+                          "in kg m-2, not an optical path -- the cloud-optics "
+                          "sub-grid inhomogeneity and partial-coverage "
+                          "thinning factors are excluded."),
+                "clivi": ("DIAGNOSTIC ice water path: the cloud-ice share of "
+                          "the clwvi column integral above, with the same "
+                          "inclusions and exclusions."),
+                "clt": ("Stratiform layer cloud fraction (model's own "
+                        "diagnostic scheme, convective add-on excluded) "
+                        "reduced by maximum-random vertical overlap."),
+            }
+            _notes_on = getattr(self, "_cloud_paths_radiative", False)
+
+            def _attrs_for(var_name):
+                _base = _snap_attrs if var_name in snap_vars else None
+                _note = _cloud_notes.get(var_name) if _notes_on else None
+                if _note is None:
+                    return _base
+                if _base is None:
+                    return {"comment": _note}
+                _a = dict(_base)
+                _a["comment"] = (_a["comment"] + " " + _note
+                                 if "comment" in _a else _note)
+                return _a
+
             for key, arr in data.items():
                 if not key.startswith("field_2d_"):
                     continue
@@ -2729,8 +2841,7 @@ class DiagnosticCollector:
                         time_bounds=time_bounds,
                         lat=lat,
                         lon=lon,
-                        extra_attrs=(
-                            _snap_attrs if var_name in snap_vars else None),
+                        extra_attrs=_attrs_for(var_name),
                     )
                 except (KeyError, ValueError):
                     pass

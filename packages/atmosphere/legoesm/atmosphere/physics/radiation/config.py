@@ -439,7 +439,7 @@ class RadiationConfig(NamedTuple):
     # physics_fn additionally exports all four computed with CLOUDS REMOVED
     # (gases + ozone + aerosol unchanged — the CMIP6 clear-sky definition), on
     # ``HydrostaticTendencies.{sw_up_toa,lw_up_toa,sw_down_sfc,lw_down_sfc}
-    # _clearsky``.  All four come from ONE cloud-free solve, so the surface
+    # _clr``.  All four come from ONE cloud-free solve, so the surface
     # pair is free once the TOA pair is paid for.
     #
     # COST: clear-sky is NOT a by-product of the all-sky solve — RRTMGP's

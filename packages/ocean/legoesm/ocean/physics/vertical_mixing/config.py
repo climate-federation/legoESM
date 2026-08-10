@@ -249,6 +249,23 @@ class TKEConfig(NamedTuple):
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
     mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
+    # NEMO dry-w-point TKE.  NEMO closes tke_tke with
+    #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
+    # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
+    # src/OCE/ZDF/zdftke.F90:469), i.e. en is EXACTLY 0 below the seafloor.
+    # legoESM transcribed the MAX and DROPPED the `* wmask`, so its post-solve
+    # en at the dry sub-seafloor w-rows is `tke_background` (>0) instead.
+    # That matters one routine later: tke_avn's buoyancy length (:759 / :651)
+    # carries NO wmask, so NEMO's dry rows sit at exactly `rmxl_min` while
+    # legoESM's are O(10^3 m) (sqrt(2e)/N with N -> 0) -- and the nn_mxl
+    # lup/ldown sweeps (:799-812 / :691-704) run THROUGH those rows, so every
+    # dry row re-widens the ldown carry and the bottom limitation
+    # `ldn(mbkt) = MIN(rmxl_min + e3t(mbkt+1,Kmm), l_int(mbkt))` never reaches
+    # each column's own seafloor.  True (needs a wet mask threaded from the
+    # caller) restores NEMO's line; False (default) is BIT-IDENTICAL.
+    # Requires positivity="floor" (the Veros positivity branch returns before
+    # the `MAX(en,rn_emin)` this mask rides on).
+    tke_dry_wmask: bool = False
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -502,15 +519,54 @@ class TKEConfig(NamedTuple):
     #   SUPERSEDES "nemo_burchard" when selected — requires the SAME
     #   leap-frog before-velocities (``outer_integrator="leapfrog"``,
     #   construction raises otherwise) PLUS the raw (uncollapsed) C-grid
-    #   face state, threaded by the caller. Two scope limits carried over
-    #   from "nemo_burchard"/``nemo_ri`` (see :func:`_shared.
-    #   vertical_shear_face_native` docstring): the viscosity stays the
-    #   caller's single per-interface ``K_M`` (NEMO face-averages ``avm``
-    #   before combining; not transcribed) and the vertical metric stays the
-    #   static reference ``dz_half`` (NEMO's live QCO-stretched
-    #   ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO by the walk's
-    #   Candidate B, corr 1.000/ratio 0.9999).
+    #   face state, threaded by the caller.
+    #   NORMALISATION (fixed 2026-08 — the note that stood here claimed the
+    #   dropped avm face-average was "without changing the dominant effect";
+    #   that was FALSE by exactly 2x): this option returned HALF of
+    #   ``(du/dz)²+(dv/dz)²`` because it kept NEMO's literal 0.25 T-point
+    #   prefactor while ALSO dropping the ``avm(i+1)+avm(i)`` face SUM that
+    #   the 0.25 is paired with (zdfsh2.F90:80 vs :93). The prefactor is now
+    #   0.5, so this form is normalised IDENTICALLY to "squared_centered" /
+    #   "nemo_burchard" and to NEMO's own ``p_sh2/avm``. The pre-fix halving
+    #   hit BOTH consumers (the TKE source ``P_s`` and the ``prandtl_mode=
+    #   "nemo_ri"`` denominator ``zdiv``); no shipped card selected the
+    #   affected combination, so nothing in production moved.
+    #   Remaining scope limits (see :func:`_shared.
+    #   vertical_shear_face_native` docstring): the viscosity is the
+    #   caller's single per-interface ``K_M``, which cannot carry a
+    #   spatially VARYING ``avm`` inside the face sum — set
+    #   ``tke_shear_avm_weighting="nemo_face"`` below for that; and the
+    #   vertical metric stays the static reference ``dz_half`` (NEMO's live
+    #   QCO-stretched ``e3uw(Kmm)·e3uw(Kbb)``; measured negligible for DINO
+    #   by the walk's Candidate B, corr 1.000/ratio 0.9999).
     tke_shear_production: str = "squared_centered"
+    # ----- avm face-averaging inside p_sh2 (#1455 sh2 chain-walk, unpark) -----
+    # "nemo_face_native"'s remaining scope limit is that a SINGLE external
+    # K_M cannot carry a spatially VARYING avm inside the face sum — this
+    # axis is that transcription, gated SEPARATELY so the shear-geometry fix
+    # (above) and the avm-weighting fix (this field) can be measured/enabled
+    # independently.
+    # ``"tpoint"`` (default, BIT-IDENTICAL legacy): ``p_sh2 = K_M * shear_sq``
+    #   with a single per-interface T-point ``K_M`` multiplying the
+    #   (already T-collapsed) ``shear_sq`` — the existing production path.
+    # ``"nemo_face"``: NEMO's literal ``zdfsh2.F90:80-94`` — ``K_M`` is
+    #   face-SUMMED (``avm(i+1)+avm(i)``, NOT meaned) separately at each
+    #   u-/v-face via array rolls on the existing 3-D ``K_M`` (no new
+    #   staggered state), multiplied into the per-face shear BEFORE the
+    #   0.25 T-point coast-doubled combine
+    #   (:func:`_shared.avm_weighted_shear_production`).
+    #   CORRECTED 2026-08 (the note here claimed "EXACTLY 2 * K_M *
+    #   shear_sq_tpoint ... NOT bit-identical to tpoint even in the
+    #   uniform-K_M limit"): that 2x was the "nemo_face_native" halving,
+    #   not a property of this option. With that prefactor fixed, uniform
+    #   K_M now gives EXACTLY ``K_M * shear_sq_tpoint`` — this option IS
+    #   bit-identical to "tpoint" in the uniform-K_M limit, and differs
+    #   only where K_M varies horizontally (which is the whole point).
+    #   Requires ``tke_shear_production="nemo_face_native"`` (the avm
+    #   weighting is only meaningful with the matching face-native shear
+    #   geometry; construction raises otherwise) and the same raw C-grid
+    #   face state that mode already requires.
+    tke_shear_avm_weighting: str = "tpoint"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

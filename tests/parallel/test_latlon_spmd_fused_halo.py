@@ -35,8 +35,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import Mesh, PartitionSpec as P
-
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from legoesm.parallel.latlon_spmd import (
     make_latlon_band_wall_multi_pad_body,
     make_latlon_band_wall_pad_body,
@@ -379,3 +379,129 @@ def test_ocean_step_bit_identical_with_fusion(monkeypatch, n_steps):
         jax.jit(lambda s, d: step(s, d)).lower(ss, 600.0)
         .compile().as_text())
     assert n_on < n_off, (n_off, n_on)
+
+
+# ---------------------------------------------------------------------------
+# 6. The DEFAULT (audit item 7 contract: "flip per deck only with a measured
+#    GPU A/B receipt").  Both receipts are on file -- atm LL2048 jobs
+#    26681636/26681858 (-5.4 % @64, -4.5 % @128, fused-alone arm) and ocean
+#    LL2304@128 job 26692291 (-4.9 %, A/A2 drift 0.06 %) -- so the flag now
+#    defaults ON.  Pin BOTH directions: an unset env must select the fused
+#    path, and "0" must still restore the per-field pads, because that escape
+#    hatch is what makes the flip safe to revert on a deck that regresses.
+#    Bit-identity of the two paths is gated by the tests above; this is only
+#    about which one you get when you say nothing.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("env,expect_fused", [
+    (None, True),      # unset -> ON (the flip)
+    ("1", True),
+    ("0", False),      # the escape hatch: ONLY an explicit "0" turns it off
+    ("", True),        # empty string is not "0" -> ON. Unchanged by the
+                       # flip: the old default "0" also resolved "" to ON,
+                       # since the test is `!= "0"`, not truthiness.
+])
+def test_fused_spmd_halo_default_and_escape_hatch(monkeypatch, env,
+                                                  expect_fused):
+    monkeypatch.delenv("LEGOESM_LATLON_SPMD_FUSED_HALO", raising=False)
+    if env is not None:
+        monkeypatch.setenv("LEGOESM_LATLON_SPMD_FUSED_HALO", env)
+    import os
+    resolved = os.environ.get("LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
+    assert resolved is expect_fused, (
+        f"LEGOESM_LATLON_SPMD_FUSED_HALO={env!r} resolved to "
+        f"fused={resolved}, expected {expect_fused}")
+
+
+def test_every_fused_halo_reader_shares_the_on_default():
+    """EVERY reader must agree on the default — discovered, not listed.
+
+    A first version of this test hardcoded two file paths. It passed while a
+    FOURTH reader disagreed: the ocean SPMD bench recorded
+    ``extra["fused_halo"]`` with a "0" default, so an unset run was fused at
+    runtime but labelled unfused in its own metadata — falsely-labelled
+    baseline rows (codex review). A manually-listed allow-list cannot prove
+    completeness, so this walks the tree instead.
+    """
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[2]
+    # Scoped to the trees that can hold a reader: a full-repo rglob on this
+    # Lustre work filesystem is slow enough to look like a hang.
+    scopes = [root / d for d in ("packages", "src", "scripts", "tests")]
+    pat = re.compile(
+        r"""(?:environ\.get|getenv)\(\s*["']LEGOESM_LATLON_SPMD_FUSED_HALO["']"""
+        r"""\s*,\s*["']([^"']*)["']""")
+    offenders, seen = [], 0
+    for scope in scopes:
+        if not scope.is_dir():
+            continue
+        for py in scope.rglob("*.py"):
+            sp = str(py)
+            if ".claude/worktrees" in sp or "/.git/" in sp:
+                continue
+            try:
+                src = py.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "LEGOESM_LATLON_SPMD_FUSED_HALO" not in src:
+                continue
+            for default in pat.findall(src):
+                seen += 1
+                if default != "1":
+                    offenders.append(
+                        f"{py.relative_to(root)} default={default!r}")
+    assert seen >= 3, (
+        f"only {seen} defaulted reads discovered — the pattern probably "
+        f"stopped matching; it must find the atm pad dispatch, both ocean "
+        f"sites, and the bench metadata")
+    assert not offenders, (
+        "these readers disagree with the ON default: " + "; ".join(offenders)
+        + ". A split default means components disagree about how many "
+        "collectives a run posts, and a bench row can be labelled with a "
+        "value the runtime did not use.")
+
+
+def test_fused_multi_pad_vjp_matches_per_field():
+    """AD: the fused pad must have the SAME vjp as the per-field pads.
+
+    The receipts behind the default flip are forward-only timings, and the
+    tests above check forward bit-identity and collective counts. Fusion is
+    slice/concat/ppermute, so a wrong transpose is not expected -- but "not
+    expected" is not a gate, and this lane runs under jax.grad (codex review
+    flagged SPMD AD as unverified).
+
+    Both bodies call ``axis_index("lat")``, so they only have meaning INSIDE
+    ``shard_map``; the vjp is taken of the shard_map'd function, not of a
+    bare body.
+    """
+    mesh = _mesh()
+    fields = _fields()
+    sv = (0.0, 1.5, 0.0, -2.0)
+    nv = (0.0, 0.0, 3.0, 0.5)
+    specs = tuple(P("lat", *((None,) * (f.ndim - 1))) for f in fields)
+
+    fused_body = make_latlon_band_wall_multi_pad_body(
+        mesh, halo=1, south_values=sv, north_values=nv, n_fields=len(fields))
+    per_bodies = [
+        make_latlon_band_wall_pad_body(
+            mesh, halo=1, south_value=sv[i], north_value=nv[i])
+        for i in range(len(fields))
+    ]
+    fused_fn = shard_map(lambda *fs: fused_body(*fs), mesh=mesh,
+                         in_specs=specs, out_specs=specs, check_vma=False)
+    per_fn = shard_map(
+        lambda *fs: tuple(per_bodies[i](fs[i]) for i in range(len(fs))),
+        mesh=mesh, in_specs=specs, out_specs=specs, check_vma=False)
+
+    out_p, vjp_p = jax.vjp(per_fn, *fields)
+    _out_f, vjp_f = jax.vjp(fused_fn, *fields)
+    rng = np.random.default_rng(12)
+    cot = tuple(jnp.asarray(rng.standard_normal(o.shape).astype(o.dtype))
+                for o in out_p)
+
+    for i, (a, b) in enumerate(zip(vjp_f(cot), vjp_p(cot))):
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"fused vs per-field VJP differ for field {i} — the "
+                    f"packing is not transpose-identical")

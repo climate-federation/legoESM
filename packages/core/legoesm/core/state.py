@@ -177,51 +177,97 @@ class HydrostaticTendencies(NamedTuple):
     # None (default) = ledger off, byte-identical; appended at the end so every
     # existing (incl. positional) constructor is unaffected.
     ledger_rows: object | None = None
-    # CLEAR-SKY radiative fluxes for the CMIP6 clear-sky quartet, carried on
-    # the radiation tendency so the lean MPAS loop can feed the CMOR
-    # ``rsutcs``/``rlutcs``/``rsdscs``/``rldscs`` accumulators (the compiled
-    # cube/lat-lon path carries the TOA pair through its ``held_*_toa_clr``
-    # carry).  "Clear-sky" = CLOUDS removed from the radiative transfer,
+    # CLEAR-SKY radiative diagnostics [W/m^2] from ONE clouds-off radiation
+    # solve (``RadiationConfig.clear_sky_diag``), for the CMIP6 clear-sky
+    # variables.  "Clear-sky" = CLOUDS removed from the radiative transfer,
     # everything else (gases, ozone, AEROSOL) identical — the CMIP6
-    # definition; the producer therefore re-solves radiation with
-    # ``cloud_scheme='none'`` rather than stripping aerosol too.  All four
-    # come from that ONE cloud-free solve.
+    # definition; the producer re-solves with ``cloud_scheme='none'`` rather
+    # than stripping aerosol too.  All of these come from that ONE solve, so
+    # the surface set is free once the TOA pair is paid for.
+    #
+    # NAMING: ``_clr`` (main's #1525/#843 convention), not ``_clearsky``.
     #
     # Signs mirror their all-sky partners EXACTLY, so nothing downstream
     # flips anything:
-    #   ``*_up_toa_clearsky``   [W/m^2, positive UPWARD / outgoing]  (rsutcs,
-    #                            rlutcs) — same as ``sw_up_toa``/``lw_up_toa``
-    #   ``*_down_sfc_clearsky`` [W/m^2, positive DOWN]               (rsdscs,
-    #                            rldscs) — same as ``sw_down_sfc``/
-    #                            ``lw_down_sfc``
+    #   ``*_up_toa_clr``   [+UP / outgoing]  rsutcs, rlutcs — as sw_up_toa
+    #   ``*_down_sfc_clr`` [+DOWN]           rsdscs, rldscs — as sw_down_sfc
+    #   ``sw_up_sfc_clr``  [+UP]             rsuscs — read at the LAST half
+    #        level, i.e. the albedo-reflected clear-sky downwelling; same
+    #        UPWARD orientation as sw_up_toa_clr, OPPOSITE to the +DOWN
+    #        sw_down_sfc_clr it pairs with.
     #
     # ``None`` on non-radiation tendencies, on held-radiation sub-steps, and
-    # whenever the clear-sky diagnostic is off (default) — trailing optionals,
-    # so every existing constructor (including positional ones) is unaffected.
-    sw_up_toa_clearsky: Field | None = None
-    lw_up_toa_clearsky: Field | None = None
-    sw_down_sfc_clearsky: Field | None = None
-    lw_down_sfc_clearsky: Field | None = None
-    # Clear-sky SURFACE UPWELLING shortwave [W/m^2, positive UP] for CMOR
-    # ``rsuscs`` (the table declares positive="up") — the SAME cloud-free
-    # solve as the four above, read at the LAST half level, i.e. the
-    # albedo-reflected clear-sky downwelling.  Same UPWARD orientation as
-    # ``sw_up_toa``/``sw_up_toa_clearsky``, opposite to the +DOWN
-    # ``sw_down_sfc_clearsky`` it pairs with; nothing flips it downstream.
-    # ``None`` under the same conditions as the quartet (clear-sky
-    # diagnostic off, non-radiation tendency, held-radiation sub-step);
-    # trailing optional, so every existing constructor is unaffected.
-    sw_up_sfc_clearsky: Field | None = None
+    # whenever the clear-sky diagnostic is off (the default) — trailing
+    # optionals, so every existing (incl. positional) constructor is
+    # unaffected.
+    sw_up_toa_clr: Field | None = None
+    lw_up_toa_clr: Field | None = None
+    sw_down_sfc_clr: Field | None = None
+    lw_down_sfc_clr: Field | None = None
+    sw_up_sfc_clr: Field | None = None
     # SOLID-PHASE surface precipitation [kg/m^2/s, SAME +into-surface sense
-    # as ``precip``] for CMOR ``prsn`` -- ice + snow + graupel sedimentation.
+    # as ``precip``] for CMOR ``prsn`` — ice + snow + graupel sedimentation.
     # A SUBSET of ``precip`` (both are sums of the same per-species
     # dt-limited surface fluxes), so 0 <= precip_solid <= precip.
     # ``None`` when microphysics is inactive or the active scheme does not
-    # resolve frozen precipitation separately (warm-rain / bulk schemes) --
+    # resolve frozen precipitation separately (warm-rain / bulk schemes) —
     # left None rather than zeroed, since a zero is the claim "it never
-    # snows", not an absence.  Trailing optional; every existing
-    # constructor is unaffected.
+    # snows", not an absence.  Trailing optional.
     precip_solid: Field | None = None
+
+
+# Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
+# producers — the serial ``MPASPrimitiveEquationModel._step_jit`` and the MPI
+# ``parallel.voronoi_mpi._step`` — and by the consumer
+# ``ModelDriver._feed_mpas_cmip_accumulators`` / ``_marshal_land_forcing``.
+# The tuple is ``(sw_net_sfc, lw_net_sfc, precip) + extras``, so extras key *i*
+# is tuple slot *i + 3*: 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls, 8/9 the surface
+# DOWNWELLING pair the interactive land needs, 10/11 the clear-sky TOA pair for
+# CMOR rsutcs/rlutcs, 12/13/14 the clear-sky surface trio for rsdscs/rldscs/
+# rsuscs, 15 solid precipitation for prsn, 16/17 the surface wind-stress pair
+# for tauu/tauv.
+#
+# It lives HERE, imported by both producers, because the two hand-maintained
+# copies DID drift: the MPI producer stopped at slot 7 while the consumer read
+# slots 10/11, so a ONE-rank Voronoi MPI run — which
+# ``_mpas_cmip_feed_enabled`` explicitly enables the CMOR feed for — accepted
+# ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.  A shared
+# constant makes that class of drift impossible instead of merely tested-for.
+#
+# APPEND-ONLY: a new extra goes at the END, because inserting one renumbers
+# every slot after it in both producers and the consumer at once.
+MPAS_SFC_DIAG_EXTRA_KEYS = (
+    "lw_up_toa", "sw_up_toa", "sw_down_toa",
+    "shflx_sfc", "lhflx_sfc",
+    "sw_down_sfc", "lw_down_sfc",
+    "sw_up_toa_clr", "lw_up_toa_clr",
+    "sw_down_sfc_clr", "lw_down_sfc_clr", "sw_up_sfc_clr",
+    "precip_solid",
+    # Surface wind stress in the MODEL convention (tau = -rho C_d |V| u,
+    # [Pa], opposing the wind = stress ON the atmosphere).  CMOR tauu/tauv
+    # are the surface DOWNWARD momentum flux, so the consumer flips the
+    # sign; see ``ModelDriver._feed_mpas_cmip_accumulators``.
+    # APPENDED (not inserted): keeping them at the END leaves slots 0-15
+    # byte-identical to the contract the clear-sky work fixed, so no other
+    # slot renumbers.
+    "tau_x_sfc", "tau_y_sfc",
+)
+
+# Extras the MPI producer deliberately leaves EMPTY (published as None at their
+# contract slot, so every other slot keeps its index).
+#
+# EMPTY since #1321.  This used to hold the surface downwelling pair
+# ("sw_down_sfc", "lw_down_sfc"), which drives the interactive multilayer land
+# tile: the MPI lane published them as None, ``_marshal_land_forcing`` requires
+# both, so it returned None every step and the Richards soil silently never
+# advanced — no skin temperature, no beta_land.  Filling them was deferred out
+# of the CMOR-diagnostic port as "a behaviour change that belongs in its own
+# change"; #1321 IS that change, so the pair is now published.
+#
+# The machinery stays: a future extra that one producer cannot fill belongs
+# here rather than being dropped from the tuple, because a SHORTER tuple is
+# what misindexes every slot after it.
+MPAS_SFC_DIAG_MPI_UNPUBLISHED: tuple[str, ...] = ()
 
 
 class FV3HydrostaticState(NamedTuple):

@@ -496,3 +496,65 @@ def test_tke_prandtl_ri_default_none_and_rejects_bad(monkeypatch):
                         ["run_dino", "--tke-prandtl-ri", "bogus"])
     with pytest.raises(SystemExit):
         rd._parse_args()
+
+
+# ---------------------------------------------------------------------
+# #1492: leapfrog + "applied_now" surface placement discards ~56% of the
+# applied surface flux (retention (1-2*gamma)/(2*(1-gamma)) = 4/9 at
+# rn_atfp=0.1).  Two independent things must hold: the shipped leapfrog
+# card(s) must resolve to "leapfrog_rhs", and the driver guard must fire
+# for a CARD-ONLY run (the guard used to sit inside
+# `if args.outer_integrator is not None:` and could only fire when the
+# flag was passed EXPLICITLY, so `--recipe nemo_dino_kamm_mlf` -- which
+# sets outer_integrator="leapfrog" internally -- sailed past it).
+# ---------------------------------------------------------------------
+
+def test_leapfrog_cards_resolve_to_leapfrog_rhs():
+    from legoesm.ocean.experiments.dino import (
+        DINO_RECIPES, dino_config_for_recipe)
+    leapfrog = {name: dino_config_for_recipe(name)
+                for name in DINO_RECIPES
+                if dino_config_for_recipe(name).outer_integrator == "leapfrog"}
+    assert leapfrog, "no leapfrog DINO card found -- census drifted"
+    for name, cfg in leapfrog.items():
+        assert cfg.surface_tendency_placement == "leapfrog_rhs", (
+            f"card {name!r} runs the leap-frog but resolves "
+            f"surface_tendency_placement={cfg.surface_tendency_placement!r} "
+            "-- ~56% of every surface flux would be discarded (#1492)")
+
+
+def test_card_only_leapfrog_applied_now_raises(monkeypatch):
+    """The guard must fire WITHOUT --outer-integrator on the command line."""
+    from legoesm.ocean.experiments import dino
+    monkeypatch.setitem(dino.DINO_RECIPES["nemo_dino_kamm_mlf"],
+                        "surface_tendency_placement", "applied_now")
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--recipe", "nemo_dino_kamm_mlf",
+                         "--grid", "latlon"])
+
+    # Tripwire: grid construction is the first thing main() does AFTER the
+    # guard.  Reaching it means the guard did not fire -- fail fast and
+    # loudly instead of launching a real DINO integration (which is what a
+    # guard keyed off args.* silently did for a card-only run).
+    def _not_reached(*a, **k):
+        raise RuntimeError("#1492 guard did not fire on a card-only run")
+    monkeypatch.setattr(rd, "dino_lat_lon_grid", _not_reached)
+    monkeypatch.setattr(rd, "create_regional_voronoi_mesh", _not_reached)
+
+    with pytest.raises(SystemExit, match="#1492"):
+        rd.main()
+
+
+def test_cli_leapfrog_on_applied_now_card_still_raises(monkeypatch):
+    """The original CLI-flag case must survive the move onto the resolved cfg."""
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--outer-integrator", "leapfrog",
+                         "--grid", "latlon"])       # bare DINOConfig default
+
+    def _not_reached(*a, **k):
+        raise RuntimeError("#1492 guard did not fire on the CLI path")
+    monkeypatch.setattr(rd, "dino_lat_lon_grid", _not_reached)
+    monkeypatch.setattr(rd, "create_regional_voronoi_mesh", _not_reached)
+
+    with pytest.raises(SystemExit, match="#1492"):
+        rd.main()

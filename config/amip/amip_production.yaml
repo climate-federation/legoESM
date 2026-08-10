@@ -118,7 +118,8 @@ cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
 # omits `cloud_fraction`, so it computes R(cf*tau_ic) instead of the
 # independent-column cf*R(tau_ic) + (1-cf)*R(0).  R is concave in optical depth,
 # so the single-column form is ALWAYS brighter — the function's own docstring
-# says so.  Measured on this mesh: radiation treats 86-91% of columns and
+# says so.  Measured on this mesh: radiation treats 86-91% of columns and  The sign of the error is
+# therefore grid-independent; only its magnitude depends on the cloud field.
 # 30-41% of layers as overcast slabs against a true cover of 60% and a mean
 # layer cloud fraction of 8.5%; in-cloud layer water 60.7 g/m2 vs grid-mean 19.3.
 #

@@ -103,7 +103,7 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -268,15 +268,28 @@ def nemo_bottom_tke_dirichlet(
     with ``r_bot`` the NEMO non-linear/log-layer bottom-drag rate at the
     TRACER point (``+Cd·|U|``, legoESM's positive convention — see
     :func:`legoesm.ocean.dynamics.ocean_tendency_common.nemo_effective_bottom_drag_r`;
-    single-owner doctrine, no re-derived drag coefficient) and ``u_bot``/
-    ``v_bot`` the bottom-cell T-point velocity components. ``rn_emin`` is
+    single-owner doctrine, no re-derived drag coefficient). ``rn_emin`` is
     ``cfg.tke_background`` (legoESM's interior TKE floor — same value as
     NEMO's namelist default 1e-6 m²/s²).
+
+    CAUTION — ``u_bot``/``v_bot`` are NOT the plain T-point average that
+    ``nemo_effective_bottom_drag_r`` takes. zdftke uses its own velocity
+    convention: the WET-ONLY SUM ``zmsku*( uu(ji) + uu(ji-1) )`` with
+    ``zmsku = 2 - umask(ji-1)*umask(ji)`` and NO ``0.5``
+    (zdftke.F90:282-287; contrast zdfgls.F90:196-197, which writes the same
+    mask expression WITH the ``0.5``). That missing ``0.5`` cancels the one
+    inside the ``0.001875`` prefactor (``= (rn_ebb0/rho0)*0.5``,
+    zdftke.F90:284), leaving ``en_bot = (rn_ebb0/rho0)*Cd|U|^2``, i.e.
+    proportional to ``u_*^2`` exactly like the surface BC at :266 — so the
+    factor 2 is structural, not a NEMO slip. The caller
+    (``_tke_bottom_dirichlet``) masks the faces explicitly and supplies that
+    form; do not pass a plain average here.
 
     Parameters
     ----------
     r_bottom_drag : (...,) — bottom-drag rate at T-points [m/s], >= 0.
-    u_bot, v_bot : (...,) — T-point bottom-cell velocity components [m/s].
+    u_bot, v_bot : (...,) — ``zmsk``-weighted wet-only velocity SUM at the
+        bottom T-point [m/s] (see CAUTION above), not the plain average.
     cfg : TKEConfig (uses ``tke_background`` as the ``rn_emin`` floor).
 
     Returns
@@ -648,6 +661,14 @@ def compute_mixing_lengths(
     Only consulted on the ``signed_n2`` buoyancy-length branch; ``None``
     (default) is BIT-IDENTICAL legacy.
 
+    NOTE on sub-seafloor rows: NEMO gets ``zmxlm == rmxl_min`` there for free
+    because ``en`` is EXACTLY 0 below the seafloor
+    (``en = MAX(en,rn_emin)*wmask``, DINO ``MY_SRC/zdftke.F90:565`` = upstream
+    ``src/OCE/ZDF/zdftke.F90:469``) while the buoyancy-length line
+    (``:759`` / ``:651``) carries no wmask. legoESM reproduces that by masking
+    ``e`` itself in :func:`_solve_tke_backward_euler`
+    (``TKEConfig.tke_dry_wmask``) — NOT by special-casing the length here.
+
     Returns
     -------
     l_k, l_eps : (..., nlev-1) — for use in K = c_k·l_k·sqrt(2e) and
@@ -861,6 +882,7 @@ def _solve_tke_backward_euler(
     bottom_dirichlet: jnp.ndarray | None = None,
     K_M_surface: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
+    w_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -962,6 +984,21 @@ def _solve_tke_backward_euler(
         interfaces) so a dry/degenerate column cannot index out of bounds.
         ``None`` (default) ⇒ BIT-IDENTICAL (the ``[..., -1]`` pin above).
 
+    w_active : (..., nlev-1) or None — NEMO's ``wmask`` at the interior
+        w-interfaces (1 = wet, 0 = below the seafloor), selecting
+        ``TKEConfig.tke_dry_wmask``. NEMO closes ``tke_tke`` with
+        ``en = MAX( en, rn_emin ) * wmask`` (DINO
+        ``cfgs/DINO/MY_SRC/zdftke.F90:565`` = upstream
+        ``src/OCE/ZDF/zdftke.F90:469``); legoESM transcribed the ``MAX`` and
+        DROPPED the ``* wmask``, so the solve re-inflates every dry
+        sub-seafloor row to ``tke_background`` instead of leaving it at 0.
+        That matters because ``tke_avn``'s buoyancy length
+        (``:759`` / ``:651``) carries NO wmask — with ``en == 0`` the dry rows
+        are EXACTLY ``rmxl_min``, which is what makes the ``nn_mxl=3`` ldown
+        sweep (``:799-812`` / ``:691-704``), running THROUGH them, deliver
+        ``ldn(mbkt) = MIN(rmxl_min + e3t(mbkt+1,Kmm), l_int(mbkt))`` at each
+        column's own seafloor. ``None`` (default) ⇒ BIT-IDENTICAL legacy.
+
     Returns
     -------
     e_new : (..., nlev-1)
@@ -993,6 +1030,16 @@ def _solve_tke_backward_euler(
             f"or 'veros_surface_correction'."
         )
     veros_positivity = positivity == "veros_surface_correction"
+    if w_active is not None and veros_positivity:
+        # Dispatch hardening: the Veros positivity branch RETURNS before the
+        # `MAX(en, rn_emin)` floor this mask rides on, so accepting the mask
+        # here would be a silent no-op. Veros has no wmask'd `en` anyway.
+        raise ValueError(
+            "_solve_tke_backward_euler: w_active (TKEConfig.tke_dry_wmask) "
+            "transcribes NEMO's `en = MAX(en,rn_emin)*wmask` "
+            "(MY_SRC/zdftke.F90:565) and requires TKEConfig.positivity="
+            "'floor'; got positivity='veros_surface_correction' (the Veros "
+            "branch has no such floor, so the mask would silently no-op).")
     if veros_positivity:
         # Veros linearisation point: sqrttke = sqrt(max(0, e)) (tke.py:30)
         # — zero where the carried TKE is negative (energy debt), so the
@@ -1321,11 +1368,22 @@ def _solve_tke_backward_euler(
         return e_new
 
     # Floor at background; clamp away from negative.
+    # NEMO: `en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)`
+    # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
+    # src/OCE/ZDF/zdftke.F90:469). legoESM historically kept the MAX and
+    # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask) restores
+    # it. None ⇒ BIT-IDENTICAL legacy.
     e_new = jnp.maximum(e_new, cfg.tke_background)
     # Floor at surface_min on the topmost interface only.
     e_new = e_new.at[..., 0].set(
         jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
     )
+    if w_active is not None:
+        # LAST statement, exactly as at :565 (the `* wmask` closes tke_tke);
+        # this also masks interface 0 (NEMO's jk=2) on a wholly-dry column,
+        # which the legoESM-only tke_surface_min floor above would otherwise
+        # re-inflate.
+        e_new = e_new * jnp.asarray(w_active, dtype=e_new.dtype)
     return e_new
 
 
@@ -1339,8 +1397,16 @@ def _prandtl_number(
     shear_sq: jnp.ndarray,
     kappaM: jnp.ndarray,
     cfg: TKEConfig,
+    p_sh2_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Turbulent Prandtl number for the K_H = K_M / Pr relation.
+
+    ``p_sh2_override``, when given (``tke_shear_avm_weighting="nemo_face"``),
+    replaces the internally-formed ``p_sh2 = kappaM * shear_sq`` with the
+    caller's avm-face-weighted ``p_sh2``
+    (:func:`_shared.avm_weighted_shear_production`) — the #1455 sh2
+    chain-walk avm-weighting fix. ``None`` (default) is BIT-IDENTICAL to the
+    prior behaviour.
 
     Mirrors ``veros/core/tke.py:74-90``:
 
@@ -1355,7 +1421,11 @@ def _prandtl_number(
       ``enable_Prandtl_tke=False`` fallback, default 10).
     - ``prandtl_mode="nemo_ri"`` (Phase-2 #1317 T8, fixed #1226 item 11;
       sign-condition transcription fixed #1226 zdftke_chain_walk STAGE 2):
-      NEMO's EXACT nn_pdl=1 form (zdftke.F90:459-476, see the inline
+      NEMO's EXACT nn_pdl=1 form (cfgs/DINO/MY_SRC/zdftke.F90:477-497
+      — the copy DINO actually builds, ``IF(nn_pdl==1)`` at :477 through
+      its ``ENDIF`` at :497 inclusive, verified by reading the file;
+      upstream src/OCE/ZDF/zdftke.F90 is the same block at :381-401 —
+      see the inline
       comment below for the full 3-way branch — ``rn2b<=0 -> zri=0``;
       ``zdiv==0`` exact-zero guard; else ``zri = rn2b·p_avm / zdiv`` taken
       AS-IS including its sign): ``pdlr = max(0.1, ri_cri/max(ri_cri,
@@ -1372,11 +1442,16 @@ def _prandtl_number(
       the ``P_s = K_M_old·shear_sq`` shear-production term already computed
       at the call site). legoESM's single per-interface ``K_M`` (vs NEMO's
       separate u-/v-point avm face-averaged onto the T-point, zdfsh2.F90:
-      80-94) has no face-averaging analog — same documented simplification
-      as :func:`legoesm.ocean.physics.vertical_mixing._shared.
-      vertical_shear_burchard` — so the faithful transcription forms
-      ``p_sh2 ≈ kappaM·shear_sq`` (the AVM-WEIGHTED shear, matching units
-      [m²/s³]) before adding ``bshear_floor`` (now in the SAME m²/s³ units
+      80-94) is bridged EITHER by the ``p_sh2_override`` argument (the
+      exact face-averaged transcription, ``_shared.
+      avm_weighted_shear_production``, selected by
+      ``tke_shear_avm_weighting="nemo_face"``) OR, when no override is
+      given, by the T-collapsed ``p_sh2 ≈ kappaM·shear_sq`` (the
+      AVM-WEIGHTED shear, matching units [m²/s³]) — correctly normalised
+      since the 2026-08 ``vertical_shear_face_native`` prefactor fix, and
+      the same documented simplification as :func:`legoesm.ocean.physics.
+      vertical_mixing._shared.vertical_shear_burchard`. Either way,
+      ``bshear_floor`` is added (now in the SAME m²/s³ units
       as NEMO's ``rn_bshear``, not ``shear_sq``'s 1/s²). Caller passes
       ``cfg.prandtl_ri_coeff = 1/ri_cri`` (unchanged meaning).
 
@@ -1392,11 +1467,14 @@ def _prandtl_number(
         bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
                              dtype=N2.dtype)
         # p_sh2 (avm-weighted shear production, [m^2/s^3]) — zdfsh2.F90:80-94
-        # face-averages OLD avm onto the shear product; legoESM's single
-        # per-interface K_M has no face-avg analog, so kappaM*shear_sq is
-        # the faithful cell-centred transcription (== P_s_curr at the
-        # call site, tke.py:1932).
-        p_sh2 = kappaM * shear_sq
+        # face-averages OLD avm onto the shear product. Default (p_sh2_
+        # override=None, BIT-IDENTICAL): legoESM's single per-interface
+        # K_M has no face-avg analog, so kappaM*shear_sq is the T-collapsed
+        # approximation (== P_s_curr at the call site, tke.py:1932).
+        # tke_shear_avm_weighting="nemo_face" (#1455): the caller supplies
+        # the exact face-averaged p_sh2 instead (_shared.
+        # avm_weighted_shear_production).
+        p_sh2 = kappaM * shear_sq if p_sh2_override is None else p_sh2_override
         # NB with NEMO's default rn_bshear = 1e-20 the kappaM factors cancel
         # almost everywhere (bshear is ~9 decades below kappaM*shear_sq in any
         # realistic regime), so zri ~= N2/shear_sq: nemo_ri is then
@@ -1479,6 +1557,7 @@ def compute_K_from_tke(
     shear_sq: jnp.ndarray | None = None,
     z_interface: jnp.ndarray | None = None,
     N2_prandtl: jnp.ndarray | None = None,
+    p_sh2_override: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""Compute K_M and K_H from TKE and the mixing length.
 
@@ -1556,7 +1635,8 @@ def compute_K_from_tke(
                 f"shear_sq for the Prandtl-number computation."
             )
         _N2_pr = N2 if N2_prandtl is None else N2_prandtl
-        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg)
+        _p_sh2_pr = None if p_sh2_override is None else p_sh2_override(K_M)
+        Pr = _prandtl_number(_N2_pr, shear_sq, K_M, cfg, _p_sh2_pr)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
         # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
@@ -1754,6 +1834,7 @@ def tke_vertical_mixing(
     u_face_before: jnp.ndarray | None = None,
     v_face_before: jnp.ndarray | None = None,
     face_masks_3d: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    w_active: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1829,6 +1910,15 @@ def tke_vertical_mixing(
     - surface injection over ``0.5·dzw_top`` (tke.py:225).
 
     Default False ⇒ every path BIT-IDENTICAL legacy.
+
+    ``w_active`` ((..., nlev-1) or None, ``TKEConfig.tke_dry_wmask``) is
+    NEMO's ``wmask`` at the interior w-interfaces, forwarded UNCHANGED to
+    :func:`_solve_tke_backward_euler` — the one line that transcribes
+    ``en = MAX( en, rn_emin ) * wmask``
+    (``cfgs/DINO/MY_SRC/zdftke.F90:565`` = upstream
+    ``src/OCE/ZDF/zdftke.F90:469``). The mixing lengths are NOT special-cased:
+    with ``e == 0`` below the seafloor they fall out at ``rmxl_min`` on their
+    own, exactly as in ``tke_avn``. ``None`` (default) ⇒ BIT-IDENTICAL legacy.
 
     Returns
     -------
@@ -2010,6 +2100,38 @@ def tke_vertical_mixing(
                 "them (silent-no-op guard).")
         shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
 
+    # avm face-averaging inside p_sh2 (#1455 sh2 chain-walk avm-weighting
+    # gap, unpark attempt): "tpoint" (default, BIT-IDENTICAL) keeps the
+    # existing K_M*shear_sq external multiply; "nemo_face" instead computes
+    # the full zdfsh2.F90:80-94 p_sh2 (avm face-averaged INSIDE the face
+    # sum) per sub-iteration from K_M_curr, via
+    # _shared.avm_weighted_shear_production. Only meaningful paired with
+    # tke_shear_production="nemo_face_native" (same face-native geometry;
+    # avm-weighting a T-collapsed shear_sq would double-apply the T-point
+    # combine) — raise otherwise (dispatch hardening).
+    _avm_weighting = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_weighting not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting: must be one of "
+            f"('tpoint', 'nemo_face'), got {_avm_weighting!r}.")
+    _p_sh2_face_fn = None
+    if _avm_weighting == "nemo_face":
+        if _shear_disc != "nemo_face_native":
+            raise ValueError(
+                "TKEConfig.tke_shear_avm_weighting='nemo_face' requires "
+                "tke_shear_production='nemo_face_native' (the avm "
+                f"face-averaging is only meaningful with the matching "
+                f"face-native shear geometry), got tke_shear_production="
+                f"{_shear_disc!r}.")
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production as _avm_weighted_shear_production,
+        )
+
+        def _p_sh2_face_fn(kappaM_T):
+            return _avm_weighted_shear_production(
+                u_face_now, v_face_now, u_face_before, v_face_before,
+                dz_half, u_mask_3d, v_mask_3d, kappaM_T)
+
     # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
     # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
     # displacement form that lets the TKE convect (N^2 < 0).
@@ -2117,8 +2239,10 @@ def tke_vertical_mixing(
             l_surface_anchor=_l_anchor)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
-            z_interface=z_interface, N2_prandtl=N2b)
-        P_s_curr = K_M_curr * shear_sq
+            z_interface=z_interface, N2_prandtl=N2b,
+            p_sh2_override=_p_sh2_face_fn)
+        P_s_curr = (K_M_curr * shear_sq if _p_sh2_face_fn is None
+                    else _p_sh2_face_fn(K_M_curr))
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=K_M_curr, K_H_old=K_H_curr,
@@ -2136,6 +2260,7 @@ def tke_vertical_mixing(
             bottom_dirichlet=bottom_dirichlet,
             K_M_surface=_K_M_surface,
             bottom_level=bottom_level,
+            w_active=w_active,
         )
 
     if _etau_on:
@@ -2156,7 +2281,8 @@ def tke_vertical_mixing(
         l_surface_anchor=_l_anchor)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
-        z_interface=z_interface, N2_prandtl=N2b)
+        z_interface=z_interface, N2_prandtl=N2b,
+        p_sh2_override=_p_sh2_face_fn)
 
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
 
@@ -2187,6 +2313,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
             "Unknown TKEConfig.tke_shear_production shear-discretization: "
             "must be one of ('squared_centered', 'nemo_burchard', "
             f"'nemo_face_native'), got {_tke_shear!r}.")
+    _avm_w = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_w not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting: must be one of "
+            f"('tpoint', 'nemo_face'), got {_avm_w!r}.")
+    if timing == "post_mixing_veros" and _avm_w == "nemo_face":
+        raise ValueError(
+            "TKEConfig.tke_shear_avm_weighting='nemo_face' is not supported "
+            "with buoyancy_timing='post_mixing_veros' — tke_set_diffusivities "
+            "never assembles the face-weighted p_sh2 and would silently keep "
+            "the tpoint weighting. Use the standard pre_mixing path.")
     if timing == "post_mixing_veros" and _tke_shear in (
             "nemo_burchard", "nemo_face_native"):
         raise ValueError(
@@ -2259,6 +2396,16 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 "mixing does not accept bottom_dirichlet and would silently "
                 "keep the natural no-flux bottom row. Disable "
                 "bottom_tke_bc or use the standard pre_mixing path.")
+        if getattr(cfg, "tke_dry_wmask", False):
+            raise ValueError(
+                "TKEConfig.tke_dry_wmask=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — the `* wmask` it "
+                "transcribes rides on the `MAX(en, rn_emin)` post-solve floor "
+                "(MY_SRC/zdftke.F90:565), and tke_integrate_post_mixing is "
+                "the VEROS integrate_tke form, which leaves the interior "
+                "UNFLOORED and never sees this axis, so it would silently "
+                "no-op. Disable tke_dry_wmask or use the standard "
+                "pre_mixing path.")
     elif shear == "realized_veros":
         raise ValueError(
             "TKEConfig.shear_production='realized_veros' requires "

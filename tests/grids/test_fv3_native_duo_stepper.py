@@ -31,7 +31,13 @@ NPX = N + 1
 
 @pytest.fixture(scope="module")
 def ctx():
-    return build_six_face_duo_context(N, NG)
+    # These km=1 stepper certificates were established on the interim
+    # index-copy exchange, so they keep it -- but they now SAY so.
+    # exchange_post_pgrad_sixface refuses to substitute the interim divgd
+    # exchange for dyn_core.F90:652's ext_scalar at nord > 0 unless the
+    # non-faithful choice is named, because doing it silently is what
+    # produced a 1e11 D wind in the 3-D lane.
+    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"))
 
 
 @pytest.fixture(scope="module")

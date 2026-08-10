@@ -54,6 +54,10 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from jax import lax  # noqa: E402
+from legoesm.atmosphere.forcing.scm.analytic_scm_case import (  # noqa: E402
+    ANALYTIC_SCM_CASES,
+    load_analytic_scm_case,
+)
 from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
     SAM_SCM_CASES,
     load_sam_scm_case,
@@ -106,6 +110,50 @@ _RADIATION_MISMATCH = {
     ),
 }
 
+ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
+    sorted(ANALYTIC_SCM_CASES))
+
+
+def load_case(name: str, *, nlev: int, dt: float | None):
+    """Load a case from whichever registry owns it."""
+    if name in SAM_SCM_CASES:
+        return load_sam_scm_case(name, nlev=nlev, dt=dt)
+    if name in ANALYTIC_SCM_CASES:
+        return load_analytic_scm_case(name, nlev=nlev, dt=dt)
+    raise ValueError(f"Unknown case {name!r}; choose from {list(ALL_CASES)}")
+
+
+def case_scored(name: str, override: tuple[str, ...] | None):
+    """Variables this CASE is scored on.
+
+    Per-case, not global: a neutral Ekman layer has no theta signal to speak of
+    (constant by construction, so normalising by its own spread divides by the
+    floor), a dry case has no q_v at all, and CBL has neither rotation nor a
+    geostrophic wind so its winds stay ~0.
+    """
+    if override:
+        return tuple(override)
+    if name in ANALYTIC_SCM_CASES:
+        return tuple(ANALYTIC_SCM_CASES[name].scored)
+    return ("theta", "qv")
+
+
+@dataclass
+class CaseArm:
+    """One case in a multi-case campaign, with everything it needs."""
+    name: str
+    case: Any
+    reference: Any
+    scored: tuple[str, ...]
+    hours: float
+    analysis_hours: float
+    dt: float
+    chunk_steps: int
+    surface: Any
+    prescribed_fluxes: bool
+    les_dir: str
+
+
 DEFAULT_OUTDIR = Path("results/scm_les_turbulence")
 DEFAULT_NLEV = 64
 DEFAULT_DT_S = 60.0
@@ -117,6 +165,24 @@ GRAD_NONZERO_TOL = 1.0e-14
 # Floor on the reference's own spread, so a nearly-uniform profile (u, v in a
 # case with weak shear) cannot divide the score by ~0.
 PROFILE_FLOOR = 1.0e-8
+# Score assigned to a non-finite rollout. Large enough to lose every
+# comparison, finite so gradients and the line search still work.
+NONFINITE_PENALTY = 1.0e3
+
+# Rank on any arm whose score is a VALID measurement, and let the status
+# column say how it was obtained. Excluding "no_reducing_step" dropped
+# closures whose DEFAULT score was genuinely good but which the fixed
+# line-search scales could not improve -- a scheme scoring 0.2 vanished
+# while a worse, marginally tunable one won. Only arms that raised, or
+# whose rollout went non-finite, are unrankable.
+_RANKABLE = {"ok", "tuned", "no_reducing_step", "no_active_gradient",
+             "no_tunable_params"}
+# The SCM's window may miss the LES window by at most this fraction of the
+# window itself. Not a fraction of the timestep: rounding already bounds that
+# residual by half a step, so a step-based test is vacuous. 1% of a 2 h window
+# is 72 s, far below the LES frame cadence, while GABLS1's real 0.1 s endpoint
+# overshoot is 0.0014% and passes.
+_WINDOW_TOL_FRAC = 0.01
 _LINE_SEARCH_SCALES = (1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01, 0.005, 0.001)
 # Registry namespace for the ATMOSPHERIC turbulence configs. Class names alone
 # collide across components (the ocean also registers a TKEConfig).
@@ -444,6 +510,16 @@ def score_against_les(means, *, reference, p_full, scored):
         "u": means["u"],
         "v": means["v"],
     }
+    # Check EVERY predicted field, not just the scored ones: CBL scores theta
+    # alone, so a NaN u/v/qv rollout would otherwise pass with a finite score.
+    any_bad = jnp.any(jnp.stack([
+        jnp.any(~jnp.isfinite(jnp.asarray(v))) for v in predicted.values()]))
+    # Double-where: sanitise BEFORE the arithmetic so no NaN enters the graph.
+    # A forward-only where still lets a NaN poison the reverse-mode VJP, which
+    # then shows up as a bogus "non-finite gradient" freeze instead of a
+    # rejected rollout.
+    predicted = {k: jnp.where(jnp.isfinite(v), v, 0.0)
+                 for k, v in predicted.items()}
     components = {}
     for name in scored:
         ref_profile = jnp.asarray(
@@ -455,7 +531,26 @@ def score_against_les(means, *, reference, p_full, scored):
         )
     stacked = jnp.stack([components[k] for k in sorted(components)])
     combined = safe_sqrt(jnp.mean(stacked ** 2))
-    return components, combined
+    # A non-finite rollout must score WORST, never best. safe_sqrt returns 0
+    # for a NaN input (NaN > 0 is False), and 0 is the perfect score, so a
+    # scheme that blows up would otherwise rank FIRST -- which is exactly what
+    # happened: an mynn25 CBL arm that went non-finite scored 0.000 against
+    # louis's 1.938. Map any non-finite component to a large finite penalty
+    # (finite so the gradient stays usable and the line search can still
+    # reject the step).
+    # Check the (nlev,) predictions and the (n_scored,) component scores
+    # SEPARATELY -- stacking them together is a shape error.
+    any_bad = any_bad | jnp.any(~jnp.isfinite(stacked))
+    combined = jnp.where(any_bad, NONFINITE_PENALTY, combined)
+    # Every COMPONENT is penalised too. Otherwise a NaN rollout still reports
+    # per-variable zeros -- "perfect" -- while only the aggregate is large.
+    components = {k: jnp.where(any_bad, NONFINITE_PENALTY, v)
+                  for k, v in components.items()}
+    # any_bad is returned so no caller ever has to INFER "was this rollout
+    # non-finite?" from the score magnitude. A near-uniform reference divided
+    # by the 1e-8 spread floor produces a legitimately huge FINITE score, which
+    # a >= NONFINITE_PENALTY test misclassifies as a blow-up.
+    return components, combined, any_bad
 
 
 # --------------------------------------------------------------------------
@@ -599,28 +694,81 @@ class SchemeResult:
     error: str | None = None
     wall_s: float = 0.0
     ps_drift_pa: float | None = None
+    nonfinite_cases: list[str] | None = None
+    per_case_default: dict[str, float] | None = None
+    per_case_tuned: dict[str, float] | None = None
 
 
-def evaluate_scheme(scheme: str, *, case, reference, args) -> tuple:
-    cfg = build_physics_config(
-        scheme, prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
+def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
+    return build_physics_config(
+        scheme, prescribed_fluxes=arm.prescribed_fluxes,
         microphysics=args.microphysics,
-        bulk_ch=case.spec.bulk_ch, bulk_ce=case.spec.bulk_ce,
-        surface=args.surface_config,
-        clubb_prognostic=args.clubb_prognostic,
+        bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
+        surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
     )
+
+
+def _arm_score(scheme: str, arm: "CaseArm", args, params=None,
+               base_cfg=None):
+    """Score one arm. ``params`` traced => differentiable."""
+    cfg = base_cfg if base_cfg is not None else _arm_config(scheme, arm, args)
     means, ps_hist = _rollout_means(
-        None, base_cfg=cfg, case=case, dt=args.dt, hours=args.hours,
-        analysis_hours=args.analysis_hours, chunk_steps=args.chunk_steps,
+        params, base_cfg=cfg, case=arm.case, dt=arm.dt, hours=arm.hours,
+        analysis_hours=arm.analysis_hours, chunk_steps=arm.chunk_steps,
     )
-    drift = _assert_surface_pressure_static(ps_hist, case.p_s)
-    components, combined = score_against_les(
-        means, reference=reference, p_full=case.p_full, scored=args.scored,
+    # theta = T/Exner uses the case's FIXED p_full, which is only valid while
+    # p_s is static. Discarding ps_hist left this check permanently
+    # unexecuted while the output still advertised it.
+    #
+    # ONLY on the untraced path: the assert concretizes with float(), so
+    # calling it inside the differentiated loss would raise
+    # TracerArrayConversionError. params is None exactly on the evaluation
+    # path, which is where a drift would show up anyway -- the tuned
+    # parameters cannot change p_s, only the physics can.
+    drift = (None if params is not None
+             else _assert_surface_pressure_static(ps_hist, arm.case.p_s))
+    components, combined, bad = score_against_les(
+        means, reference=arm.reference, p_full=arm.case.p_full,
+        scored=arm.scored,
     )
-    return cfg, means, components, combined, drift
+    return means, drift, components, combined, bad
 
 
-def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult:
+def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
+    """Aggregate across cases.
+
+    Each arm's score is already normalised by that case's OWN reference spread,
+    so the arms are commensurable and a plain mean weights every regime
+    equally. That is the point of the multi-case fit: a parameter set that wins
+    on trade cumulus by wrecking the stable boundary layer must not score well.
+    """
+    per_case, per_components, drifts, means_out = {}, {}, {}, []
+    nonfinite = set()
+    total = None
+    for i, arm in enumerate(arms):
+        cfg = None if cfgs is None else cfgs[i]
+        _m, _drift, comp, combined, bad = _arm_score(
+            scheme, arm, args, params=params, base_cfg=cfg)
+        means_out.append(_m)
+        per_case[arm.name] = combined
+        per_components[arm.name] = comp
+        if _drift is not None:
+            drifts[arm.name] = float(_drift)
+        # The FLAG, not the magnitude. `bad` is traced when params is not
+        # None, so it is only concretized on the evaluation path -- which is
+        # the only path that reports a non-finite arm anyway.
+        if params is None and bool(bad):
+            nonfinite.add(arm.name)
+        total = combined if total is None else total + combined
+    joint = total / float(len(arms))
+    joint_score.last_ps_drift_pa = drifts
+    joint_score.last_nonfinite = nonfinite
+    joint_score.last_means = means_out
+    return joint, per_case, per_components
+
+
+def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
+    """Tune ONE parameter set per scheme against ALL cases at once."""
     result = SchemeResult(scheme=scheme, status="tuned")
     t0 = time.time()
 
@@ -631,19 +779,12 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
         return result
 
     def loss_fn(params: TrainablePhysicsParams):
-        means, _ps = _rollout_means(
-            params, base_cfg=base_cfg, case=case, dt=args.dt, hours=args.hours,
-            analysis_hours=args.analysis_hours, chunk_steps=args.chunk_steps,
-        )
-        _components, combined = score_against_les(
-            means, reference=reference, p_full=case.p_full, scored=args.scored,
-        )
-        return combined
+        joint, _pc, _comp = joint_score(scheme, arms, args, params=params,
+                                        cfgs=cfgs)
+        return joint
 
-    # Preflight: permanently freeze any parameter the loss does not depend on,
-    # recording why. A dead gradient here is information about the scheme, not
-    # a reason to stop.
-    preflight_loss, preflight_grads = eqx.filter_value_and_grad(loss_fn)(params_all)
+    preflight_loss, preflight_grads = eqx.filter_value_and_grad(loss_fn)(
+        params_all)
     if not np.isfinite(float(preflight_loss)):
         result.status = "failed"
         result.error = f"preflight loss non-finite: {float(preflight_loss)}"
@@ -651,28 +792,17 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
         return result
     stats = _grad_stats(preflight_grads, args.grad_nonzero_tol)
 
-    def _freeze_reason(name: str, stat: dict) -> str:
+    def _reason(name, stat):
         if not stat["finite"]:
             return "non-finite gradient"
-        # Distinguish "this parameter has no implementation" from "this
-        # parameter simply does not matter here". Reporting both as one number
-        # would hide that a chunk of the CLUBB registry has no consumer at all.
         field = name.rsplit(".", 1)[-1]
         if scheme == "clubb" and field in CLUBB_UNIMPLEMENTED_PARAMS:
-            return ("UNIMPLEMENTED: no consumer anywhere in clubb.py on either "
-                    "the diagnostic or the prognostic path, so its gradient is "
-                    "structurally zero and it can never be tuned")
+            return ("UNIMPLEMENTED: no consumer anywhere in clubb.py on "
+                    "either path")
         return f"|grad| <= {args.grad_nonzero_tol:g} in preflight"
 
-    frozen = {
-        name: _freeze_reason(name, st)
-        for name, st in stats.items() if not st["nonzero"]
-    }
-    n_unimpl = sum(1 for r in frozen.values() if r.startswith("UNIMPLEMENTED"))
-    if n_unimpl:
-        print(f"    {n_unimpl} parameter(s) have NO implementation and can "
-              "never be tuned (see frozen_reason in the JSON)")
-    keep = {name for name, s in stats.items() if s["nonzero"]}
+    frozen = {n: _reason(n, st) for n, st in stats.items() if not st["nonzero"]}
+    keep = {n for n, st in stats.items() if st["nonzero"]}
     result.frozen = frozen
     if not keep:
         result.status = "no_active_gradient"
@@ -686,80 +816,82 @@ def tune_scheme(scheme: str, *, case, reference, args, base_cfg) -> SchemeResult
     optimizer = create_optimizer(TrainingConfig(
         lr=args.lr, warmup_steps=args.warmup_steps,
         total_steps=max(args.steps, 1), grad_clip_norm=args.grad_clip_norm,
-        optimizer=args.optimizer,
-    ))
+        optimizer=args.optimizer))
     opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
     loss_history = [float(preflight_loss)]
 
     for step in range(1, args.steps + 1):
         loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
         loss_val = float(loss)
-        step_stats = _grad_stats(grads, args.grad_nonzero_tol)
-        bad = {n: s for n, s in step_stats.items()
-               if not s["finite"] or not s["nonzero"]}
+        bad = {n: st for n, st in _grad_stats(
+            grads, args.grad_nonzero_tol).items()
+            if not st["finite"] or not st["nonzero"]}
         if bad:
             result.error = f"gradient gate failed at step {step}: {bad}"
             result.status = "failed"
             break
-        updates, opt_state_candidate = optimizer.update(
+        updates, opt_next = optimizer.update(
             eqx.filter(grads, eqx.is_array), opt_state,
-            eqx.filter(params, eqx.is_array),
-        )
+            eqx.filter(params, eqx.is_array))
         accepted = False
         for scale in _LINE_SEARCH_SCALES:
-            candidate = eqx.apply_updates(
-                params, jax.tree_util.tree_map(lambda x: x * scale, updates),
-            )
-            _assert_strict_bounds(candidate)
-            candidate_loss = float(loss_fn(candidate))
-            if np.isfinite(candidate_loss) and candidate_loss < loss_val:
-                params, opt_state = candidate, opt_state_candidate
-                loss_history.append(candidate_loss)
+            cand = eqx.apply_updates(
+                params, jax.tree_util.tree_map(lambda x: x * scale, updates))
+            _assert_strict_bounds(cand)
+            cand_loss = float(loss_fn(cand))
+            # A candidate at or above the penalty contains a NON-FINITE case:
+            # score_against_les maps any non-finite rollout to exactly
+            # NONFINITE_PENALTY. Testing only `cand_loss < loss_val` accepted
+            # such a candidate whenever the CURRENT loss was legitimately
+            # larger -- a near-uniform reference divided by the spread floor
+            # produces a finite score above 1000 -- so a blown-up parameter set
+            # was adopted as an "improvement". A blow-up is never an
+            # improvement, whatever the current loss is.
+            if cand_loss >= NONFINITE_PENALTY:
+                continue
+            if np.isfinite(cand_loss) and cand_loss < loss_val:
+                params, opt_state = cand, opt_next
+                loss_history.append(cand_loss)
                 accepted = True
                 break
-        print(f"    [{scheme}] step {step}/{args.steps} loss={loss_val:.6g} "
+        print(f"    [{scheme}] step {step}/{args.steps} joint={loss_val:.6g} "
               f"{'accepted' if accepted else 'no reducing step -> stop'}",
               flush=True)
         if not accepted:
             if step == 1:
-                # Nothing was ever accepted: the reported score is the default,
-                # so calling this arm "tuned" would overstate it.
                 result.status = "no_reducing_step"
             break
 
     result.loss_history = loss_history
-    tuned_cfg = _apply_trainable_params(base_cfg, params)
-    means, ps_hist = _rollout_means(
-        None, base_cfg=_materialize_static(tuned_cfg), case=case, dt=args.dt,
-        hours=args.hours, analysis_hours=args.analysis_hours,
-        chunk_steps=args.chunk_steps,
-    )
-    result.ps_drift_pa = _assert_surface_pressure_static(ps_hist, case.p_s)
-    components, combined = score_against_les(
-        means, reference=reference, p_full=case.p_full, scored=args.scored,
-    )
-    result.score_tuned = float(combined)
-    result.components_tuned = {k: float(v) for k, v in components.items()}
+    tuned_cfgs = [_materialize_static(_apply_trainable_params(c, params))
+                  for c in cfgs]
+    joint, per_case, per_comp = joint_score(scheme, arms, args, params=None,
+                                            cfgs=tuned_cfgs)
+    result.score_tuned = float(joint)
+    result.per_case_tuned = {k: float(v) for k, v in per_case.items()}
+    result.components_tuned = {
+        k: {kk: float(vv) for kk, vv in c.items()}
+        for k, c in per_comp.items()}
+    # The TUNED evaluation's non-finite flag was dropped on the floor, so an
+    # arm whose tuned parameters blow up kept the clean flag from its DEFAULT
+    # evaluation and stayed rankable -- possibly first. Union the two: an arm
+    # is penalised if EITHER evaluation went non-finite.
+    result.nonfinite_cases = sorted(
+        set(result.nonfinite_cases or [])
+        | set(getattr(joint_score, "last_nonfinite", set())))
 
-    meta_by_name = {f"{m.scheme_key}.{m.field}": m for m in build_registry()}
-    physical = params.as_dict()
-    all_physical = params_all.as_dict()
-    rows = []
-    for constraint in params_all.constraints:
-        meta = meta_by_name.get(constraint.name)
-        trained = constraint.name in {c.name for c in params.constraints}
-        rows.append({
-            "name": constraint.name,
-            "units": getattr(meta, "units", None),
-            "default": float(np.asarray(all_physical[constraint.name])),
-            "tuned": (float(np.asarray(physical[constraint.name])) if trained
-                      else None),
-            "lower": constraint.min_val,
-            "upper": constraint.max_val,
-            "trained": trained,
-            "frozen_reason": frozen.get(constraint.name),
-        })
-    result.parameters = rows
+    meta = {f"{m.scheme_key}.{m.field}": m for m in build_registry()}
+    phys, allphys = params.as_dict(), params_all.as_dict()
+    trained_names = {c.name for c in params.constraints}
+    result.parameters = [{
+        "name": c.name, "units": getattr(meta.get(c.name), "units", None),
+        "default": float(np.asarray(allphys[c.name])),
+        "tuned": (float(np.asarray(phys[c.name]))
+                  if c.name in trained_names else None),
+        "lower": c.min_val, "upper": c.max_val,
+        "trained": c.name in trained_names,
+        "frozen_reason": frozen.get(c.name),
+    } for c in params_all.constraints]
     result.wall_s = time.time() - t0
     return result
 
@@ -781,14 +913,25 @@ def parse_args(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--case", required=True, choices=sorted(SAM_SCM_CASES))
-    p.add_argument("--les-dir", required=True, type=Path,
-                   help="LES output directory containing profiles/")
+    p.add_argument("--case", choices=list(ALL_CASES),
+                   help="single case (shorthand for --cases NAME:DIR)")
+    p.add_argument("--les-dir", type=Path,
+                   help="LES output directory for --case")
+    p.add_argument("--cases", default=None,
+                   help="comma-separated NAME:LES_DIR pairs. ONE parameter set "
+                        "per scheme is fitted to all of them jointly, so a "
+                        "setting that wins on one regime by wrecking another "
+                        "cannot score well. Choices: "
+                        + ",".join(ALL_CASES))
     p.add_argument("--outdir", type=Path, default=None)
     p.add_argument("--schemes", default="all",
                    help="comma-separated subset, or 'all'")
     p.add_argument("--nlev", type=int, default=DEFAULT_NLEV)
-    p.add_argument("--dt", type=float, default=DEFAULT_DT_S)
+    p.add_argument("--dt", type=float, default=None,
+                   help="physics timestep, ALL cases. Default: each case's own "
+                        "spec value (60 s for the cumulus decks, 10 s for the "
+                        "dry PBL cases). A single 60 s step blew mynn25 up on "
+                        "CBL, whose convective eddy turnover is ~850 s.")
     p.add_argument("--hours", type=float, default=None,
                    help="SCM run length; defaults to the LES record length")
     p.add_argument("--analysis-hours", type=float,
@@ -803,7 +946,8 @@ def parse_args(argv=None):
     p.add_argument("--optimizer", default="muon",
                    choices=("muon", "muon_partitioned", "adam", "adamw"))
     p.add_argument("--grad-nonzero-tol", type=float, default=GRAD_NONZERO_TOL)
-    p.add_argument("--score-variables", default="theta,qv",
+    p.add_argument("--score-variables", default="",
+                   dest="score_variables",
                    help="comma-separated scored profiles. Default excludes u "
                         "and v: the SCM uses a constant-Cd surface drag while "
                         "the LES uses a z0 log-law wall model, so the momentum "
@@ -835,25 +979,145 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
+    """Resolve every case into a CaseArm, with its own window and surface.
+
+    Per-case, because the regimes differ: each case has its own LES record
+    length, its own analysis window, its own scored variables and its own
+    roughness. Only the SCHEME is held constant across arms.
+    """
+    arms = []
+    for name in case_names:
+        case = load_case(name, nlev=args.nlev, dt=args.dt)
+        dt = float(args.dt) if args.dt is not None else float(case.dt)
+        scored = case_scored(name, args.scored_override)
+        ref = load_les_reference(
+            les_dirs[name], case=name, z_scm=case.z_full,
+            p_half=_half_pressures(case),
+            domain_top_m=case.les_domain_top_m,
+            analysis_hours=args.analysis_hours, scored=scored,
+        )
+        # The SCM must land on the LES endpoint to within its OWN time
+        # resolution. Demanding bit-exactness is wrong: a real LES ends at
+        # whatever `while t < T` overshoots to (GABLS1's record is 9.0000278 h,
+        # 0.1 s past 9 h, because its dt is 0.1 s), and no dt divides that.
+        # Half a step is the finest the SCM can resolve, so a residual below
+        # it is not a window mismatch -- it is rounding, and it is reported.
+        les_end = float(ref.window_hours[1])
+        if args.hours is not None:
+            # Honour it, but only where it still lands on the reference: the
+            # whole point of the guard below is that both sides average the
+            # same window. Silently ignoring the flag was worse than either
+            # obeying or refusing it.
+            if abs(float(args.hours) - les_end) > 0.5 * dt / 3600.0:
+                raise SystemExit(
+                    f"{name}: --hours {args.hours} does not match the LES "
+                    f"reference end {les_end:.6f} h, so the two sides would "
+                    "average different windows. Omit --hours to follow the "
+                    "reference.")
+            les_end = float(args.hours)
+        nsteps = max(1, int(round(les_end * 3600.0 / dt)))
+        # Tolerance is a fraction of the WINDOW, not of the step. n =
+        # round(T/dt) makes the residual <= dt/2 BY CONSTRUCTION, so a
+        # "half a step" test can never fire -- it was vacuous. What matters is
+        # whether the two sides average materially different intervals, which
+        # is a fraction of the window.
+        end_residual_s = abs(nsteps * dt - les_end * 3600.0)
+        if end_residual_s > _WINDOW_TOL_FRAC * les_end * 3600.0:
+            raise SystemExit(
+                f"{name}: --dt {dt} s cannot land on the LES record end "
+                f"{les_end:.6f} h: {nsteps} steps miss it by "
+                f"{end_residual_s:.3f} s, over {_WINDOW_TOL_FRAC:.0%} of it, so the SCM "
+                "would not end where the reference does."
+            )
+        span = les_end - float(ref.window_hours[0])
+        n_an = max(1, int(round(span * 3600.0 / dt)))
+        span_residual_s = abs(n_an * dt - span * 3600.0)
+        if span_residual_s > _WINDOW_TOL_FRAC * span * 3600.0:
+            raise SystemExit(
+                f"{name}: --dt {dt} s cannot cover the retained analysis "
+                f"window {span:.6f} h: {n_an} steps miss it by "
+                f"{span_residual_s:.3f} s, over {_WINDOW_TOL_FRAC:.0%} of it, so the two "
+                "sides would average different spans."
+            )
+        if max(end_residual_s, span_residual_s) > 1.0e-6:
+            print(f"  NOTE {name}: SCM lands within "
+                  f"{max(end_residual_s, span_residual_s):.3f} s of the LES "
+                  f"endpoint/window (dt = {dt:g} s); the residual is "
+                  "below one SCM step.")
+        # Round the window START, not the span, so the endpoint and the start
+        # are snapped on the SAME grid. Rounding both endpoint and span
+        # independently lets each sit within half a step while their DIFFERENCE
+        # moves the window start by nearly a full step.
+        n_start = nsteps - n_an
+        start_residual_s = abs(
+            n_start * dt - float(ref.window_hours[0]) * 3600.0)
+        if start_residual_s > _WINDOW_TOL_FRAC * span * 3600.0:
+            raise SystemExit(
+                f"{name}: with --dt {dt} s the analysis window would "
+                f"start {start_residual_s:.3f} s from the LES window start, "
+                "more than half a step.")
+        les_end = nsteps * dt / 3600.0
+        span = (nsteps - n_start) * dt / 3600.0
+        surface = build_surface_config(
+            case, bulk_scheme=args.surface_bulk_scheme)
+        arms.append(CaseArm(
+            name=name, case=case, reference=ref, scored=scored,
+            hours=les_end, analysis_hours=span, dt=dt,
+            chunk_steps=args.chunk_steps, surface=surface,
+            prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
+            les_dir=str(les_dirs[name]),
+        ))
+    return arms
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("JAX_ENABLE_X64=1 is required for this driver.")
 
-    args.radiation_confound = (
-        _RADIATION_MISMATCH[args.case]
-        if (args.case in _RADIATION_MISMATCH and args.allow_radiation_mismatch)
-        else None
-    )
-    if args.case in _RADIATION_MISMATCH and not args.allow_radiation_mismatch:
-        raise SystemExit(
-            f"refusing to tune {args.case!r}: {_RADIATION_MISMATCH[args.case]}\n"
-            "Pass --allow-radiation-mismatch to override; the output will be "
-            "labelled a confound."
-        )
+    if bool(args.cases) == bool(args.case):
+        raise SystemExit("give exactly one of --case/--les-dir or --cases")
+    if args.cases:
+        case_names, les_dirs = [], {}
+        for tok in args.cases.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if ":" not in tok:
+                raise SystemExit(f"--cases entry {tok!r} is not NAME:LES_DIR")
+            n, d = tok.split(":", 1)
+            n = n.strip()
+            if n not in ALL_CASES:
+                raise SystemExit(
+                    f"unknown case {n!r}; choose from {list(ALL_CASES)}")
+            if n in les_dirs:
+                raise SystemExit(
+                    f"--cases lists {n!r} more than once. Duplicates would "
+                    "double-weight that case in the joint loss and overwrite "
+                    "its per-case entry in the report, so only one directory "
+                    "would actually be read.")
+            case_names.append(n)
+            les_dirs[n] = Path(d.strip())
+    else:
+        if args.les_dir is None:
+            raise SystemExit("--case requires --les-dir")
+        case_names, les_dirs = [args.case], {args.case: args.les_dir}
+    for n in case_names:
+        if n in _RADIATION_MISMATCH and not args.allow_radiation_mismatch:
+            raise SystemExit(
+                f"refusing to tune {n!r}: {_RADIATION_MISMATCH[n]}\n"
+                "Pass --allow-radiation-mismatch to override; the output will "
+                "be labelled a confound.")
 
-    args.scored = tuple(v.strip() for v in args.score_variables.split(",")
-                        if v.strip())
+    if args.score_variables:
+        args.scored_override = tuple(
+            v.strip() for v in args.score_variables.split(",") if v.strip())
+        if not args.scored_override:
+            raise SystemExit("--score-variables selected nothing")
+    else:
+        args.scored_override = None      # "" => per-case defaults
+    args.scored = args.scored_override or ("theta", "qv")
     bad_scored = [v for v in args.scored if v not in SCORED_VARIABLES]
     if bad_scored:
         raise SystemExit(
@@ -863,6 +1127,11 @@ def main(argv=None) -> int:
     if not args.scored:
         raise SystemExit("--score-variables selected nothing")
 
+    args.radiation_confound = {
+        n: _RADIATION_MISMATCH[n] for n in case_names
+        if n in _RADIATION_MISMATCH
+    } or None
+
     schemes = (list(TURBULENCE_SCHEMES) if args.schemes == "all"
                else [s.strip() for s in args.schemes.split(",") if s.strip()])
     unknown = [s for s in schemes if s not in TURBULENCE_SCHEMES]
@@ -871,130 +1140,69 @@ def main(argv=None) -> int:
             f"unknown scheme(s) {unknown}; choose from {list(TURBULENCE_SCHEMES)}"
         )
 
-    outdir = args.outdir or (DEFAULT_OUTDIR / args.case)
+    outdir = args.outdir or (DEFAULT_OUTDIR / ("+".join(case_names)
+                                                if len(case_names) > 1
+                                                else case_names[0]))
     outdir.mkdir(parents=True, exist_ok=True)
 
-    case = load_sam_scm_case(args.case, nlev=args.nlev, dt=args.dt)
-    hours = args.hours
-    reference = load_les_reference(
-        args.les_dir, case=args.case, z_scm=case.z_full,
-        p_half=_half_pressures(case),
-        domain_top_m=case.les_domain_top_m,
-        analysis_hours=args.analysis_hours,
-    )
-    if hours is None:
-        hours = reference.window_hours[1]
-    # The SCM averages its trailing --analysis-hours, the LES averages its own
-    # trailing window ending at its last frame. Those are the SAME interval
-    # only if the SCM ends when the LES reference ends. A user-supplied --hours
-    # can silently compare SCM hours 4-6 against LES hours 21-23.
-    les_end = float(reference.window_hours[1])
-    # Check the SIMULATED endpoint, not the requested scalar: nsteps is a
-    # rounded integer, so e.g. --hours 1 --dt 70 integrates 51*70 = 3570 s
-    # while passing a check on the nominal 1.0.
-    _nsteps = max(1, int(round(float(hours) * 3600.0 / args.dt)))
-    simulated_h = _nsteps * args.dt / 3600.0
-    if abs(simulated_h - float(hours)) > 1.0e-6:
-        raise SystemExit(
-            f"--dt {args.dt} does not divide {hours} h: {_nsteps} steps "
-            f"integrate {simulated_h:.6f} h, so the SCM would not end where "
-            "the LES reference does. Pick a dt that divides the run."
-        )
-    if abs(float(hours) - les_end) > 1.0e-6:
-        raise SystemExit(
-            f"--hours {hours} would end the SCM at {hours} h while the LES "
-            f"reference ends at {les_end} h, so the two analysis windows would "
-            f"cover different times and the comparison would be a confound. "
-            f"Omit --hours to match the reference, or regenerate the reference."
-        )
-    args.hours = hours
-    # The SCM must average the window the LES ACTUALLY averaged, which is
-    # [first retained frame, last frame] -- not the requested --analysis-hours.
-    # With sparse frames the loader may retain a shorter span, and averaging
-    # the requested span on the SCM side would compare different intervals.
-    actual_analysis_h = les_end - float(reference.window_hours[0])
-    if abs(actual_analysis_h - args.analysis_hours) > 1.0e-6:
-        print(f"  NOTE: LES retained frames span {actual_analysis_h:.4f} h, "
-              f"not the requested {args.analysis_hours:.4f} h; the SCM will "
-              "average the LES's actual window so both sides match.")
-    if actual_analysis_h <= 0.0:
-        raise SystemExit("LES analysis window has zero span.")
-    n_analysis = int(round(actual_analysis_h * 3600.0 / args.dt))
-    if abs(n_analysis * args.dt / 3600.0 - actual_analysis_h) > 1.0e-9:
-        raise SystemExit(
-            f"--dt {args.dt} s does not divide the LES analysis window "
-            f"({actual_analysis_h:.6f} h = {actual_analysis_h * 3600.0:.1f} s): "
-            f"{n_analysis} steps cover {n_analysis * args.dt / 3600.0:.6f} h, so "
-            "the two sides would average different spans while the report "
-            "claimed one window. Pick a dt that divides it."
-        )
-    args.analysis_hours = actual_analysis_h
+    arms = _build_arms(args, case_names, les_dirs)
+    print(f"cases: {', '.join(a.name for a in arms)}   "
+          f"(one parameter set per scheme, fitted to ALL of them)")
+    for a in arms:
+        sc = a.surface
+        print(f"  {a.name:8s} nlev={a.case.nlev} dt={a.dt:g}s hours={a.hours:g} "
+              f"window={a.reference.window_label} "
+              f"levels={int(a.reference.mask.sum())}/{a.case.nlev} "
+              f"scored={list(a.scored)} prescribe={a.case.forcing.prescribe}")
+        print(f"           z0={sc.z0:.2e} z_ref={sc.z_ref:.1f} m "
+              f"Cd={sc.Cd_neutral:.4e} Ch={sc.Ch_neutral:.4e}")
 
-    print(f"case={args.case} nlev={args.nlev} dt={args.dt}s hours={hours} "
-          f"analysis={args.analysis_hours}h")
-    print(f"LES reference: {reference.source_dir}")
-    print(f"  window={reference.window_label} levels_in_domain="
-          f"{int(reference.mask.sum())}/{case.nlev}")
-    missing = [v for v in args.scored
-               if v not in reference.scored_variables()]
-    if missing:
-        raise SystemExit(
-            f"LES reference has no {missing}; available: "
-            f"{list(reference.scored_variables())}"
-        )
-    print(f"  scored variables: {list(args.scored)}")
-    args.surface_config = build_surface_config(
-        case, bulk_scheme=args.surface_bulk_scheme,
-    )
-    sc = args.surface_config
-    _u_ref = float(np.hypot(case.u_profile[-1], case.v_profile[-1]))
-    print(f"  surface: prescribe={case.forcing.prescribe} "
-          f"bulk={sc.bulk_scheme} z0={sc.z0:.2e} m z_ref={sc.z_ref:.1f} m")
-    print(f"           Cd={sc.Cd_neutral:.4e} Ch={sc.Ch_neutral:.4e} "
-          f"-> u*={(sc.Cd_neutral ** 0.5) * _u_ref:.3f} m/s at |U|="
-          f"{_u_ref:.2f} m/s (SAME config on every arm)")
-
-    configs = {}
-    profiles_default: dict[str, dict[str, np.ndarray]] = {}
+    configs: dict[str, list] = {}
+    profiles: dict[str, list] = {}
     results: list[SchemeResult] = []
     for scheme in schemes:
         print(f"\n[eval] {scheme}", flush=True)
         res = SchemeResult(scheme=scheme, status="ok")
         t0 = time.time()
         try:
-            cfg, means, components, combined, drift = evaluate_scheme(
-                scheme, case=case, reference=reference, args=args,
-            )
-            configs[scheme] = cfg
-            profiles_default[scheme] = {
-                "theta": np.asarray(_theta_from_T(means["T"], case.p_full)),
-                "qv": np.asarray(means["qv"]),
-                "u": np.asarray(means["u"]),
-                "v": np.asarray(means["v"]),
-            }
-            res.score_default = float(combined)
-            res.components_default = {k: float(v) for k, v in components.items()}
-            res.ps_drift_pa = drift
-            print(f"    score={res.score_default:.6g} "
-                  + " ".join(f"{k}={v:.4g}"
-                             for k, v in res.components_default.items()))
+            cfgs = [_arm_config(scheme, a, args) for a in arms]
+            joint, per_case, per_comp = joint_score(
+                scheme, arms, args, params=None, cfgs=cfgs)
+            configs[scheme] = cfgs
+            profiles[scheme] = [
+                {"theta": np.asarray(_theta_from_T(mm["T"], a.case.p_full)),
+                 "qv": np.asarray(mm["qv"]), "u": np.asarray(mm["u"]),
+                 "v": np.asarray(mm["v"])}
+                for a, mm in zip(arms, joint_score.last_means)
+            ]
+            res.score_default = float(joint)
+            res.per_case_default = {k: float(v) for k, v in per_case.items()}
+            res.ps_drift_pa = max(
+                getattr(joint_score, "last_ps_drift_pa", {}).values(),
+                default=None)
+            res.nonfinite_cases = sorted(
+                getattr(joint_score, "last_nonfinite", set()))
+            res.components_default = {
+                k: {kk: float(vv) for kk, vv in c.items()}
+                for k, c in per_comp.items()}
+            print(f"    joint={res.score_default:.6g}   " + "  ".join(
+                f"{k}={v:.4g}" for k, v in res.per_case_default.items()))
         except Exception as exc:                      # noqa: BLE001
             res.status = "failed"
             res.error = f"{type(exc).__name__}: {exc}"
             print(f"    FAILED {res.error}", flush=True)
         res.wall_s = time.time() - t0
         results.append(res)
-        # Each arm rebuilds the SCM inside its loss and compiles fresh graphs,
-        # so executables and buffers accumulate across the nine arms. Drop them
-        # between arms: on a 32 GB card the campaign died with
-        # CUDA_ERROR_ILLEGAL_ADDRESS partway through, while the same arms pass
-        # in isolation and on a 48 GB card.
         jax.clear_caches()
 
     if configs:
-        _assert_arms_differ_only_in_turbulence(configs)
-        print("\n[control] arms verified identical outside "
-              "PhysicsConfig.turbulence")
+        # The control is per CASE: within a case every scheme must differ only
+        # in PhysicsConfig.turbulence.
+        for i, a in enumerate(arms):
+            _assert_arms_differ_only_in_turbulence(
+                {s: c[i] for s, c in configs.items()})
+        print("\n[control] within every case, arms verified identical "
+              "outside PhysicsConfig.turbulence")
 
     if not args.skip_tuning:
         for res in results:
@@ -1002,32 +1210,32 @@ def main(argv=None) -> int:
                 continue
             print(f"\n[tune] {res.scheme}", flush=True)
             try:
-                tuned = tune_scheme(
-                    res.scheme, case=case, reference=reference, args=args,
-                    base_cfg=configs[res.scheme],
-                )
+                tuned = tune_scheme_multicase(
+                    res.scheme, arms=arms, args=args,
+                    cfgs=configs[res.scheme])
             except Exception as exc:                  # noqa: BLE001
                 res.status = "tune_failed"
                 res.error = f"{type(exc).__name__}: {exc}"
                 print(f"    FAILED {res.error}", flush=True)
                 continue
-            res.status = tuned.status
-            res.score_tuned = tuned.score_tuned
-            res.components_tuned = tuned.components_tuned
-            res.n_trained = tuned.n_trained
-            res.frozen = tuned.frozen
-            res.parameters = tuned.parameters
-            res.loss_history = tuned.loss_history
+            for f in ("status", "score_tuned", "components_tuned", "n_trained",
+                      "frozen", "parameters", "loss_history",
+                      "per_case_tuned"):
+                setattr(res, f, getattr(tuned, f))
             if tuned.error:
                 res.error = tuned.error
             if res.score_tuned is not None:
-                print(f"    default={res.score_default:.6g} -> "
-                      f"tuned={res.score_tuned:.6g} "
-                      f"({res.n_trained} params trained)")
+                print(f"    joint {res.score_default:.6g} -> "
+                      f"{res.score_tuned:.6g} ({res.n_trained} trained)   "
+                      + "  ".join(f"{k}={v:.4g}"
+                                  for k, v in (res.per_case_tuned or {}).items()))
             jax.clear_caches()
 
-    _write_outputs(outdir, args, case, reference, results)
-    _write_profiles(outdir, case, reference, profiles_default)
+    _write_outputs(outdir, args, arms, results)
+    for i, a in enumerate(arms):
+        _write_case_profiles(outdir, a, {s_: p_[i]
+                                         for s_, p_ in profiles.items()
+                                         if p_[i] is not None})
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1042,31 +1250,6 @@ def main(argv=None) -> int:
     return 0
 
 
-def _write_profiles(outdir: Path, case, reference,
-                    profiles_default: dict[str, dict]) -> None:
-    """Save the LES reference and every arm's mean profiles for plotting.
-
-    Saved on the SCM levels with the LES-domain mask alongside, so a plot
-    cannot silently draw the extrapolated region.
-    """
-    payload = {
-        "z_scm": np.asarray(case.z_full),
-        "p_full": np.asarray(case.p_full),
-        "mask": np.asarray(reference.mask),
-        "weights": np.asarray(reference.weights),
-        "z_les": np.asarray(reference.z_les),
-        "window_hours": np.asarray(reference.window_hours),
-    }
-    for name, profile in reference.profiles.items():
-        payload[f"les_scmlev_{name}"] = np.asarray(profile)
-    for name, profile in reference.profiles_les.items():
-        payload[f"les_native_{name}"] = np.asarray(profile)
-    for scheme, prof in profiles_default.items():
-        for name, values in prof.items():
-            payload[f"scm_{scheme}_{name}"] = np.asarray(values)
-    np.savez(outdir / "profiles.npz", **payload)
-
-
 def _half_pressures(case) -> np.ndarray:
     """SCM half-level pressures [Pa] from the case's sigma column."""
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -1076,14 +1259,37 @@ def _half_pressures(case) -> np.ndarray:
     return np.asarray(sigma.sigma_half, dtype=np.float64) * case.p_s
 
 
-def _write_outputs(outdir: Path, args, case, reference, results) -> None:
+def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
+    """One profiles npz PER CASE, so the plot keeps working and a successful
+    run does not silently lose its profile-level audit trail."""
+    payload = {
+        "z_scm": np.asarray(arm.case.z_full),
+        "p_full": np.asarray(arm.case.p_full),
+        "mask": np.asarray(arm.reference.mask),
+        "weights": np.asarray(arm.reference.weights),
+        "z_les": np.asarray(arm.reference.z_les),
+        "window_hours": np.asarray(arm.reference.window_hours),
+        "scored": np.asarray(list(arm.scored)),
+    }
+    for name, prof in arm.reference.profiles.items():
+        payload[f"les_scmlev_{name}"] = np.asarray(prof)
+    for name, prof in arm.reference.profiles_les.items():
+        payload[f"les_native_{name}"] = np.asarray(prof)
+    for scheme, prof in per_scheme.items():
+        for name, values in prof.items():
+            payload[f"scm_{scheme}_{name}"] = np.asarray(values)
+    out = outdir / (f"profiles_{arm.name}.npz" if outdir.name != arm.name
+                    else "profiles.npz")
+    np.savez(out, **payload)
+
+
+def _write_outputs(outdir: Path, args, arms, results) -> None:
     # A failed or gradient-dead arm must NOT be ranked: one that fails after a
     # single favourable update would otherwise be reported as the winner.
     # An arm is RANKED only if its score reflects a genuine optimisation.
     # "no_active_gradient" was previously included, which let a closure whose
     # parameters are disconnected from the loss be ranked -- possibly FIRST --
     # on its untouched default score against genuinely tuned arms.
-    _RANKABLE = {"ok", "tuned"}
 
     def _score_of(r):
         if r.score_tuned is not None:
@@ -1092,6 +1298,17 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             return r.score_default
         return float("inf")
 
+    def _penalised(r) -> bool:
+        # Uses the flag recorded during evaluation, not the score magnitude.
+        return bool(getattr(r, "nonfinite_cases", None))
+
+    for r in results:
+        if r.status in _RANKABLE and _penalised(r):
+            r.status = "nonfinite_rollout"
+            r.error = (r.error or "") + (
+                " non-finite rollout on "
+                f"{', '.join(r.nonfinite_cases or ['?'])}; excluded from the "
+                "ranking")
     rankable = [r for r in results
                 if r.status in _RANKABLE and r.score_default is not None]
     excluded = [r for r in results if r not in rankable]
@@ -1115,14 +1332,14 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         # case whose LES radiation the SCM cannot reproduce.
         "RADIATION_CONFOUND": args.radiation_confound,
         "protocol": {
-            "nlev": args.nlev, "dt_s": args.dt, "hours": args.hours,
-            "analysis_hours": args.analysis_hours,
+            "nlev": args.nlev,
+            "dt_s": {a.name: a.dt for a in arms},
+            "cases": [a.name for a in arms],
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
             "steps": args.steps,
-            "surface_prescribe": case.forcing.prescribe,
-            "radiation": "none", "convection": "none",
+                        "radiation": "none", "convection": "none",
             "microphysics": args.microphysics,
-            "scored_variables": list(args.scored),
+            "scored_variables_per_case": {a.name: list(a.scored) for a in arms},
             "note": (
                 "All arms share one column and forcing built from the same "
                 "gSAM deck as the LES; only PhysicsConfig.turbulence differs, "
@@ -1133,19 +1350,20 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
             # Stated, not buried. Each of these is identical across arms, so
             # the ranking stays controlled, but each degrades the absolute
             # LES-match and could be absorbed into a tuned parameter.
-            "single_surface_exchange_coefficient": (
-                None if case.spec.bulk_ce is None
-                or case.spec.bulk_ch is None
-                or case.forcing.prescribe == "fluxes"
-                else {
-                    "les_C_H": case.spec.bulk_ch,
-                    "les_C_Q": case.spec.bulk_ce,
-                    "scm_Ch_neutral_applied_to_both": case.spec.bulk_ch,
+            "single_surface_exchange_coefficient": {
+                a.name: {
+                    "les_C_H": a.case.spec.bulk_ch,
+                    "les_C_Q": a.case.spec.bulk_ce,
+                    "scm_Ch_neutral_applied_to_both": a.case.spec.bulk_ch,
                     "latent_flux_error_pct": 100.0
-                    * (case.spec.bulk_ce - case.spec.bulk_ch)
-                    / case.spec.bulk_ch,
+                    * (a.case.spec.bulk_ce - a.case.spec.bulk_ch)
+                    / a.case.spec.bulk_ch,
                 }
-            ),
+                for a in arms
+                if a.case.spec.bulk_ce is not None
+                and a.case.spec.bulk_ch is not None
+                and not a.prescribed_fluxes
+            } or None,
             "known_scm_les_differences": [
                 "Surface momentum: the SCM uses a constant-Cd bulk drag while "
                 "the LES uses a z0 log-law wall model. This is why u and v are "
@@ -1157,20 +1375,41 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
                 "Resolved vs parameterized: the LES resolves the large eddies "
                 "the SCM closure must represent — that difference IS the "
                 "quantity being tuned, not an error.",
+                "Fixed comparison heights: the LES target is interpolated ONCE "
+                "onto the initial hydrostatic heights, while the SCM's own "
+                "level heights drift with temperature (a 5 K warming moves a "
+                "mid-column level ~18 m). The reported error therefore mixes "
+                "thermal expansion with turbulence error. Re-interpolating the "
+                "target each step would make the reference a function of the "
+                "scheme being scored, which is worse; the effect is identical "
+                "across arms, so the RANKING is unaffected.",
             ],
         },
-        "les_reference": {
-            "source_dir": reference.source_dir,
-            "window_hours": list(reference.window_hours),
-            "n_frames": reference.n_frames,
-            "levels_in_domain": int(reference.mask.sum()),
-        },
+        "cases": [
+            {
+                "case": a.name,
+                "les_dir": a.les_dir,
+                "window_hours": list(a.reference.window_hours),
+                "n_frames": a.reference.n_frames,
+                "levels_in_domain": int(a.reference.mask.sum()),
+                "nlev": a.case.nlev,
+                "scored": list(a.scored),
+                "surface_prescribe": a.case.forcing.prescribe,
+                "Cd_neutral": float(a.surface.Cd_neutral),
+                "Ch_neutral": float(a.surface.Ch_neutral),
+                "z0_m": float(a.surface.z0),
+                "z_ref_m": float(a.surface.z_ref),
+            }
+            for a in arms
+        ],
         "schemes": [
             {
                 "scheme": r.scheme, "status": r.status,
                 "score_default": r.score_default, "score_tuned": r.score_tuned,
                 "components_default": r.components_default,
                 "components_tuned": r.components_tuned,
+                "per_case_default": r.per_case_default,
+                "per_case_tuned": r.per_case_tuned,
                 "n_trained": r.n_trained, "frozen": r.frozen,
                 "parameters": r.parameters, "loss_history": r.loss_history,
                 "surface_pressure_drift_pa": r.ps_drift_pa,
@@ -1187,26 +1426,24 @@ def _write_outputs(outdir: Path, args, case, reference, results) -> None:
         f"# SCM turbulence closures vs LES — {args.case}", "",
     ]
     if args.radiation_confound:
-        lines += [
-            "> **THIS IS NOT A TURBULENCE RANKING.** "
-            "`--allow-radiation-mismatch` was used: "
-            + args.radiation_confound, "",
-        ]
+        lines += ["> **THIS IS NOT A TURBULENCE RANKING.** "
+                  "`--allow-radiation-mismatch` was used:", ""]
+        lines += [f"> - **{k}**: {v}" for k, v in
+                  args.radiation_confound.items()] + [""]
     lines += [
-        f"LES reference: `{reference.source_dir}`, window "
-        f"{reference.window_label}, {int(reference.mask.sum())} of "
-        f"{case.nlev} SCM levels inside the LES domain.", "",
-        f"SCM: nlev={args.nlev}, dt={args.dt} s, {args.hours} h, "
-        f"trailing {args.analysis_hours} h averaged (same window as the LES).",
+        "\n".join(
+            f"- **{a.name}**: `{a.les_dir}`, window {a.reference.window_label}, "
+            f"{int(a.reference.mask.sum())} of {a.case.nlev} SCM levels inside "
+            f"the LES domain, scored on {', '.join(a.scored)}"
+            for a in arms),
         "",
-        "Every arm shares one initial column, one large-scale forcing and one "
-        "surface boundary condition, all built from the same gSAM deck the LES "
-        "read; only `PhysicsConfig.turbulence` differs, and that is checked "
-        "mechanically rather than assumed. Scored on "
-        f"{', '.join(args.scored)} — normalized by the LES "
-        "profile's own mass-weighted spread, combined in quadrature. Lower is "
-        "better.", "",
-        "| rank | scheme | status | score (default) | score (tuned) | "
+        f"SCM: per-case dt, one parameter set per scheme fitted to ALL "
+        f"{len(arms)} case(s) jointly; the joint score is the mean of the "
+        "per-case normalized scores.", "",
+        "Within every case, all arms share one initial column, one forcing and "
+        "one surface boundary condition; only `PhysicsConfig.turbulence` "
+        "differs, checked mechanically. Lower is better.", "",
+        "| rank | scheme | status | joint (default) | joint (tuned) | "
         "trained | frozen |",
         "|---|---|---|---|---|---|---|",
     ]

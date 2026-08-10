@@ -445,6 +445,107 @@ def _mid_pt3(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
     return e / np.linalg.norm(e, axis=-1, keepdims=True)
 
 
+# --------------------------------------------------------------------------
+# Vector primitives the DCMIP16_BC wind assembly needs
+# (fv_grid_utils.F90: vect_cross :1781, get_unit_vect2 :1848,
+#  normalize_vect :1880, inner_prod :984, get_latlon_vector :3326)
+#
+# WHERE UPSTREAM USES QUAD, THIS USES longdouble, matching the convention
+# already established by _cos_angle_ld above. `f_p = selected_real_kind(20)`
+# whenever NO_QUAD_PRECISION is undefined (fv_grid_utils.F90:43-49), which is
+# the case for both the Zenodo duo build and the reference build here.
+# x86 longdouble is 80-bit, NOT the 128-bit quad gfortran uses, so this
+# NARROWS the gap without closing it -- the residual is the parity floor
+# (~1e-16 relative in the unit vectors, propagating linearly into u/v).
+# --------------------------------------------------------------------------
+
+def _vect_cross(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
+    """vect_cross (fv_grid_utils.F90:1781-1791) -- e = P1 x P2.
+
+    Plain R_GRID (f64) upstream: this is the ONE primitive in this group with
+    no f_p promotion, so it stays float64 deliberately.
+    """
+    return np.cross(np.asarray(p1, dtype=np.float64),
+                    np.asarray(p2, dtype=np.float64))
+
+
+def _normalize_vect(e: np.ndarray) -> np.ndarray:
+    """normalize_vect (:1880-1893). ``pdot`` is f_p upstream."""
+    e_ld = np.asarray(e, dtype=np.longdouble)
+    pdot = np.sqrt(np.einsum("...i,...i", e_ld, e_ld))
+    return np.asarray(e_ld / pdot[..., None], dtype=np.float64)
+
+
+def _inner_prod(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
+    """inner_prod (:984-996).
+
+    Upstream copies BOTH operands into f_p, forms the sum of products in
+    f_p, and assigns back to a default real. Reproduced with longdouble.
+    """
+    a = np.asarray(v1, dtype=np.longdouble)
+    b = np.asarray(v2, dtype=np.longdouble)
+    return np.asarray(np.einsum("...i,...i", a, b), dtype=np.float64)
+
+
+def _get_latlon_vector(pp: np.ndarray) -> tuple:
+    """get_latlon_vector (:3326-3340) -> (elon, elat), the local east/north
+    unit vectors at the lon/lat point ``pp``.
+
+    RIGHT_HAND system: ``elat(3) = +cos(lat)``. The left-hand variant is
+    present upstream but COMMENTED OUT (:3338); using it flips the meridional
+    component's sign, so the choice is load-bearing rather than cosmetic.
+    """
+    pp = np.asarray(pp, dtype=np.float64)
+    lon, lat = pp[..., 0], pp[..., 1]
+    zero = np.zeros_like(lon)
+    elon = np.stack([-np.sin(lon), np.cos(lon), zero], axis=-1)
+    elat = np.stack([-np.sin(lat) * np.cos(lon),
+                     -np.sin(lat) * np.sin(lon),
+                     np.cos(lat)], axis=-1)
+    return elon, elat
+
+
+def _get_unit_vect2(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    """get_unit_vect2 (:1848-1863) -- unit tangent pointing e1 --> e2.
+
+    Note the ORDER of the first cross product: ``vect_cross(p3, p2, p1)`` is
+    p2 x p1, not p1 x p2. Swapping it reverses the tangent, which would flip
+    the sign of every wind projected onto it -- and a sign-flipped wind field
+    still looks entirely plausible.
+    """
+    p1 = _latlon2xyz(np.asarray(e1, dtype=np.float64))
+    p2 = _latlon2xyz(np.asarray(e2, dtype=np.float64))
+    pc = _mid_pt3(p1, p2)              # mid_pt3_cart
+    p3 = _vect_cross(p2, p1)           # :1859  p2 x p1  (this order)
+    uc = _vect_cross(pc, p3)           # :1860
+    return _normalize_vect(uc)         # :1861
+
+
+def vect_cross(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``vect_cross`` port."""
+    return _vect_cross(p1, p2)
+
+
+def normalize_vect(e: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``normalize_vect`` port."""
+    return _normalize_vect(e)
+
+
+def inner_prod(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``inner_prod`` port."""
+    return _inner_prod(v1, v2)
+
+
+def get_latlon_vector(pp: np.ndarray) -> tuple:
+    """Public wrapper over the certified ``get_latlon_vector`` port."""
+    return _get_latlon_vector(pp)
+
+
+def get_unit_vect2(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    """Public wrapper over the certified ``get_unit_vect2`` port."""
+    return _get_unit_vect2(e1, e2)
+
+
 def sg_window_fields(X: np.ndarray, ctr: np.ndarray):
     """cos_sg/sin_sg over a cell window (grid_utils_init "No averaging").
 

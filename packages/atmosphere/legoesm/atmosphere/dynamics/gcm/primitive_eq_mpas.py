@@ -36,7 +36,11 @@ from legoesm.core.conservation import (
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
-from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
 from legoesm.core.operators_voronoi import (
     # 2D operators used for surface-pressure-only fields (ln_ps, p_s).
     divergence_cell,
@@ -64,6 +68,7 @@ from legoesm.grids.vertical import (
     compute_sigma_dot_from_cumsum,
     compute_mass_flux_from_cumsum,
     compute_omega_total,
+    VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
     vertical_advection_theta,
@@ -149,7 +154,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
     # ``nu_del4`` "off by default, set in production" convention); the
-    # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
+    # coupled/AMIP path sets a small value.
     nu_vert4_T: float = 0.0
     # Shapiro-form (per-STEP) application of the SAME conservative vertical
     # del4 operator: remove this FRACTION of the 2Δσ mode per step
@@ -186,8 +191,8 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     #
     # 0/False (default) reproduces the pre-#1354 dycore bit-for-bit: the whole
     # new path is behind a Python ``if`` on this STATIC bool, so with it off
-    # not one operation in the tracer block changes.  Last field to preserve
-    # positional ABI.
+    # not one operation in the tracer block changes.  Appended at the tuple END
+    # so existing POSITIONAL construction keeps working.
     moisture_flux_form: bool = False
     # #1354 second mode: HORIZONTAL biharmonic hyperdiffusion of T [m⁴/s] —
     # ``dT/dt -= nu_del4_T · ∇²(∇²T)`` — the scalar analogue of the momentum
@@ -208,8 +213,32 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ``div(grad T)`` the ``K_h`` batch already builds when both are on, so the
     # incremental cost is one gradient + one divergence per RHS evaluation.
     # 0.0 (default) is an exact no-op — the whole term is behind a Python
-    # ``if`` on this STATIC float.  Last field to preserve positional ABI.
+    # ``if`` on this STATIC float.  Appended at the tuple END so existing
+    # POSITIONAL construction keeps working.
     nu_del4_T: float = 0.0
+    # Vertical advection scheme for the SIGMA lane (``vertical_coord="sigma"``),
+    # applied to the θ thermodynamic transport, the tracers and the edge winds
+    # — one selector for the one shared operator they all call.
+    # "upwind" (default) is first-order donor cell; its leading truncation
+    # error is a diffusion K_σ = |σ̇|·Δσ/2, measured at +0.822 K/day at the
+    # tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd N=37 checkpoints) —
+    # larger than the entire production temperature tendency there.
+    # "van_leer" is the 2nd-order TVD reconstruction, which removes that term
+    # where the profile is smooth.  Its face values are unconditionally bounded
+    # by the two adjacent cells; the UPDATE is monotone only under a Courant
+    # condition.  That condition (~ nu_k + nu_{k+1} <= 1) is DERIVED for a
+    # uniform grid only; on a stretched grid or with a varying sigma_dot there
+    # is regression evidence, not a guarantee (see the kernel docstring).
+    # Measured global max of that pair on the target run (raw interface
+    # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
+    # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
+    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
+    # there RAISES rather than running silently inert.
+    # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
+    # existing callers, not full tuple ABI (exact unpacking / len() / _make
+    # with a short tuple still break; no such caller exists in-repo).
+    vert_advection_scheme: str = "upwind"
 
 
 # ============================================================================
@@ -349,6 +378,39 @@ def mpas_hydrostatic_tendencies(
         POSITIVE DOWNWARD (the CMIP6 ``wap`` convention).
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Fail-early dispatch guard on the STATIC config value (never on a tracer):
+    # an unknown scheme must raise, and a scheme the hybrid lane cannot honour
+    # must raise rather than run silently inert (cf. the ``conservative_tracer_
+    # clamp`` MPI regression).  ``vertical_advection`` raises on unknown too —
+    # this catches it before any tracing work, and catches the hybrid gap that
+    # the shared operator cannot see.
+    _vert_scheme = config.vert_advection_scheme
+    if _vert_scheme not in VERTICAL_ADVECTION_SCHEMES:
+        raise ValueError(
+            f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
+            f"{VERTICAL_ADVECTION_SCHEMES}"
+        )
+    if _hybrid and _vert_scheme != "upwind":
+        raise ValueError(
+            f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
+            "sigma vertical coordinate only; the hybrid lane advects with "
+            "vertical_advection_hybrid, where it would be silently inert. "
+            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+        )
+    # Same silently-inert class for the #1354 flux-form tracer lane: the
+    # per-MASS tracers routed through ``tracer_flux_form_tendency`` carry
+    # their own conservative vertical flux divergence and never call
+    # ``vertical_advection``, so a van-Leer selection would apply to T and
+    # the edge winds but NOT to the water species the user asked about.
+    if config.moisture_flux_form and _vert_scheme != "upwind":
+        raise ValueError(
+            f"vert_advection_scheme={_vert_scheme!r} is not honoured by the "
+            "flux-form tracer transport (moisture_flux_form=True): the "
+            "per-mass tracers use tracer_flux_form_tendency's own vertical "
+            "flux divergence, where the scheme would be silently inert. "
+            "Pick one of the two."
+        )
 
     u_3d = state.u.data        # (nEdges, nlev)
     T_3d = state.T.data        # (nCells, nlev)
@@ -652,7 +714,7 @@ def mpas_hydrostatic_tendencies(
         # BEFORE discretization.  σ-convention (index 0 top, σ̇>0 downward)
         # is inherited verbatim from the reused ``vertical_advection``.
         vert_thermo_T = vertical_advection_theta(
-            T_3d, sigma_dot, p_s, sigma_coord)
+            T_3d, sigma_dot, p_s, sigma_coord, scheme=_vert_scheme)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = σ·dp_s/dt + p_s·σ̇  ⇒  ω_ps = σ·dp_s/dt.  The σ̇ part
         # κ·T·σ̇/σ is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -686,7 +748,9 @@ def mpas_hydrostatic_tendencies(
     if _hybrid:
         vert_adv_u = _vertical_advection_edge(u_3d, mass_flux, sigma_coord, mesh, hybrid=True, p_s=p_s)
     else:
-        vert_adv_u = _vertical_advection_edge(u_3d, sigma_dot, sigma_coord, mesh, hybrid=False)
+        vert_adv_u = _vertical_advection_edge(
+            u_3d, sigma_dot, sigma_coord, mesh, hybrid=False,
+            scheme=_vert_scheme)
 
     du_dt_3d = du_dt_3d + vert_adv_u
 
@@ -823,7 +887,8 @@ def mpas_hydrostatic_tendencies(
                         qk, mass_flux, p_s, sigma_coord),
                     in_axes=-1, out_axes=-1)(q_sub)
             return _d + jax.vmap(
-                lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
+                lambda qk: vertical_advection(
+                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
                 in_axes=-1, out_axes=-1)(q_sub)
 
         if not _flux_idx:
@@ -907,6 +972,7 @@ def mpas_hydrostatic_tendencies(
 
 def _vertical_advection_edge(
     u_3d, vert_vel, sigma_coord, mesh, hybrid=False, p_s=None,
+    scheme="upwind",
 ):
     """Vertical advection of edge-based velocity.
 
@@ -924,7 +990,8 @@ def _vertical_advection_edge(
     else:
         # sigma_dot is (nCells, nlev+1), average to edges
         sigma_dot_edge = 0.5 * (vert_vel[c1] + vert_vel[c2])
-        return vertical_advection(u_3d, sigma_dot_edge, sigma_coord)
+        return vertical_advection(
+            u_3d, sigma_dot_edge, sigma_coord, scheme=scheme)
 
 
 # ============================================================================
@@ -1242,45 +1309,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
             # CMOR-feed diagnostic extras: TOA fluxes (radiation steps only)
-            # + surface turbulent fluxes (every step). Slot ORDER is the
-            # sfc_diag tuple contract shared with the driver feed:
-            # (sw_net, lw_net, precip, lw_up_toa, sw_up_toa, sw_down_toa,
-            #  shflx, lhflx, sw_down_sfc, lw_down_sfc, tau_x_sfc, tau_y_sfc,
-            #  sw_up_toa_clearsky, lw_up_toa_clearsky,
-            #  sw_down_sfc_clearsky, lw_down_sfc_clearsky).
-            # ...appended (slots 8/9): surface DOWNWELLING sw/lw — the
-            # interactive multilayer land forcing (AtmToSurface.sw_down/
-            # lw_down; model_driver._marshal_land_forcing reads these slots).
-            # ...appended (slots 10/11): surface wind stress [Pa, MODEL
-            # opposes-the-wind sign] — the CMOR feed flips it to the CMOR
-            # downward-positive tauu/tauv.
-            # ...appended (slots 12-15): the CLEAR-SKY quartet — 12/13 TOA
-            # outgoing SW/LW [W/m^2, positive UP, SAME orientation as slots
-            # 3/4] for CMOR rsutcs/rlutcs, 14/15 SURFACE downwelling SW/LW
-            # [W/m^2, positive DOWN, SAME orientation as slots 8/9] for CMOR
-            # rsdscs/rldscs.  No flip anywhere downstream.  All four are None
-            # unless RadiationConfig.clear_sky_diag is on, and None on
-            # held-radiation sub-steps (held slot-wise like slots 3/4/5).
-            # ...appended (slot 16): clear-sky SURFACE UPWELLING SW
-            # [W/m^2, positive UP] for CMOR rsuscs — the OPPOSITE
-            # orientation to its slot-14 partner rsdscs (+DOWN), read off
-            # the same cloud-free solve's ``sw_flux_up[:, -1]``.  No flip
-            # anywhere downstream.  None under the same conditions as
-            # slots 12-15.
-            # ...appended (slot 17): SOLID-phase surface precipitation
-            # [kg/m^2/s, SAME +into-surface sense as slot 2's total precip,
-            # of which it is a SUBSET] for CMOR prsn.  Refreshed every step
-            # with slot 2 (microphysics runs on held-radiation sub-steps
-            # too).  None when the active microphysics does not resolve the
-            # frozen split.
-            _extras = tuple(getattr(_pt, _k, None) for _k in (
-                "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc",
-                "sw_down_sfc", "lw_down_sfc",
-                "tau_x_sfc", "tau_y_sfc",
-                "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
-                "sw_up_sfc_clearsky", "precip_solid"))
+            # + surface turbulent fluxes (every step).  Slot ORDER comes from
+            # the SHARED ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract in core.state,
+            # which the MPI producer (parallel/voronoi_mpi._step) and the
+            # driver consumer read too — see that constant for the slot map
+            # and for why it is shared rather than hand-copied.  A key the
+            # tendency does not carry (clear-sky pair with
+            # RadiationConfig.clear_sky_diag off; TOA trio on a
+            # held-radiation sub-step) is None and never reaches the
+            # accumulator.
+            _extras = tuple(getattr(_pt, _k, None)
+                            for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would

@@ -16,8 +16,11 @@
 # Falsifiability, written BEFORE submit:
 #   COMPOUNDING scale-out law (each 4x costs 1.5-1.9x): 18.7-23.6 ms
 #   SATURATING (cost flattens past 32 devices):          ~12.5 ms
-# Either outcome discriminates; protocol byte-matched to the s9 ladder
-# (f32, sfc, --reorder-for 128, steps 12 / warmup 3).
+# Either outcome discriminates; protocol matched to the s9 ladder
+# (f32, sfc, steps 12 / warmup 3). --reorder-for MUST equal the device
+# count here: job 26692292 FAILED in 47 s on the guard
+# "--reorder-for (128) must be >= --n-devices (192)" — the mesh cache is
+# shared (reorder happens in-process), only the partition target changes.
 set -uo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 export JAX_PLATFORMS=cuda,cpu
@@ -34,7 +37,7 @@ JAX_ENABLE_X64=0 srun --ntasks=192 --ntasks-per-node=4 \
   "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
     --multicontroller --n-devices 192 \
     --subdivision 10 --nlev 26 --steps 12 --warmup 3 --lloyd 0 \
-    --partition-method sfc --reorder-for 128 \
+    --partition-method sfc --reorder-for 192 \
     --out "$OUTDIR/np192.jsonl" || { echo "np192 FAILED"; rc=1; }
 "$PY" -c "
 import json,math,sys

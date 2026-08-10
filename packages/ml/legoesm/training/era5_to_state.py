@@ -462,11 +462,55 @@ def ensure_local_cache(
     # --- Atomic write: build to a tmp store, mark complete, then swap in. -----
     # A kill mid-``to_zarr`` leaves only ``tmp_path`` (no marker at the final
     # path), so the next call rebuilds instead of reading a torn store.
-    tmp_path = Path(cache_dir) / (_CACHE_STORE_NAME + ".building")
+    # PER-PROCESS tmp dir. A FIXED ``.building`` path is not actually atomic
+    # when two processes build the same cache key concurrently: both write into
+    # the one temp dir, and the loser's os.replace dies with
+    # "OSError: [Errno 39] Directory not empty: ...zarr.building" while the
+    # other can see its store vanish mid-read (zarr FileNotFoundError on a
+    # group node). Both failures were observed 2026-08-05 when three AIMIP
+    # variants sharing base_t106_allyears started within minutes of each other
+    # — they request different SUBSETS but hash to the SAME window key, so the
+    # differing snapshot counts hid the collision.
+    #
+    # The PID suffix makes each builder's temp dir private; the final
+    # ``os.replace`` onto the shared path stays atomic, so a late finisher
+    # simply replaces an equivalent complete store. Stale dirs from a killed
+    # job are swept below (own-PID only is not enough — a dead PID's dir would
+    # leak), guarded to this process's own prefix so a CONCURRENT builder's
+    # live temp dir is never deleted.
+    import os as _os
+
+    tmp_path = Path(cache_dir) / f"{_CACHE_STORE_NAME}.building.{_os.getpid()}"
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
     if tmp_path.exists():
         shutil.rmtree(tmp_path)
-    ds.to_zarr(str(tmp_path), mode="w")
+    # CHUNKED WRITE. A single ``to_zarr`` over a fancy multi-thousand-index
+    # ``isel`` did not stream: the .building store sat at 12 KB (metadata only)
+    # for 11 minutes while xarray/dask built one enormous graph, which is why
+    # the window cache was abandoned and the data lever capped at ~1,400
+    # snapshots (2026-07-27). Writing the time axis in blocks keeps each graph
+    # small, streams to disk, and shows progress — which is what lets the
+    # training set grow past that cap.
+    # Drop the SOURCE encoding before writing. The remote store carries zarr-v2
+    # numcodecs compressors (Blosc); handing those to a zarr-v3 writer raises
+    # "Expected a BytesBytesCodec. Got <class 'numcodecs.blosc.Blosc'>". Letting
+    # the writer choose its own codecs is correct here — we are re-encoding a
+    # subset, not preserving byte layout.
+    ds = ds.copy()
+    for _v in list(ds.variables):
+        ds[_v].encoding = {}
+    _tdim = "time" if "time" in ds.dims else None
+    _n_t = int(ds.sizes.get(_tdim, 0)) if _tdim else 0
+    _block = 64
+    if _tdim is None or _n_t <= _block:
+        ds.to_zarr(str(tmp_path), mode="w")
+    else:
+        ds.isel({_tdim: slice(0, _block)}).to_zarr(str(tmp_path), mode="w")
+        for _s in range(_block, _n_t, _block):
+            _e = min(_s + _block, _n_t)
+            ds.isel({_tdim: slice(_s, _e)}).to_zarr(
+                str(tmp_path), mode="a", append_dim=_tdim)
+            logger.info("  cached %d/%d snapshots", _e, _n_t)
     n_time = int(ds.sizes.get("time", 0))
     # Marker LAST, inside the tmp store, so it is present iff the write finished.
     (tmp_path / _CACHE_MARKER_NAME).write_text(

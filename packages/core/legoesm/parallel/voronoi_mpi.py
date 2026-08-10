@@ -40,7 +40,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.precision import cast_pytree
-from legoesm.core.state import MPASHydrostaticState
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPAS_SFC_DIAG_MPI_UNPUBLISHED,
+    MPASHydrostaticState,
+)
 # NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
 # shared-substrate ``parallel`` package).  Importing them here would make
 # legoesm-core depend on legoesm-atmosphere (a cycle), so — exactly as
@@ -1049,8 +1053,9 @@ def make_voronoi_mpi_step(
         # sigma from ``cellsOnEdge``); column-local AMIP physics is unaffected
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
-        # Surface-flux diagnostic (12-slot contract: sw_net_sfc, lw_net_sfc,
-        # precip, then the CMOR TOA/turbulent-flux/stress extras) the coupler reads
+        # Surface-flux diagnostic (shared slot contract: sw_net_sfc, lw_net_sfc,
+        # precip, then ``MPAS_SFC_DIAG_EXTRA_KEYS`` — the CMOR TOA /
+        # turbulent-flux / clear-sky / stress extras) the coupler reads
         # from ``_carry_aux`` for the daily ocean/land forcing.  Mirrors
         # the serial ``primitive_eq_mpas._step_jit``: extract it from the physics
         # tendency and publish it (rank-local, matching the rank-local state the
@@ -1077,24 +1082,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
-            # CMOR TOA + surface flux extras — mirror the serial producer's
-            # 18-slot contract (primitive_eq_mpas.step) EXACTLY so the
-            # one-rank MPI-voronoi coupled lane exports the same fields.
-            # Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
-            # sw_down_toa, shflx, lhflx, sw_down_sfc, lw_down_sfc,
-            # tau_x_sfc, tau_y_sfc, sw_up_toa_clearsky, lw_up_toa_clearsky,
-            # sw_down_sfc_clearsky, lw_down_sfc_clearsky,
-            # sw_up_sfc_clearsky, precip_solid) — the consumer
-            # (model_driver._feed_mpas_cmip_accumulators) reads slots by
-            # this order; _marshal_land_forcing reads 8/9.
-            _extras = tuple(getattr(_pt, _k, None) for _k in (
-                "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc",
-                "sw_down_sfc", "lw_down_sfc",
-                "tau_x_sfc", "tau_y_sfc",
-                "sw_up_toa_clearsky", "lw_up_toa_clearsky",
-                "sw_down_sfc_clearsky", "lw_down_sfc_clearsky",
-                "sw_up_sfc_clearsky", "precip_solid"))
+            # CMOR TOA + surface turbulent-flux extras.  Built from the SHARED
+            # ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract (core.state) so this
+            # producer can no longer drift from the serial one and from the
+            # consumer's slot map: a ONE-rank Voronoi MPI run is exactly the
+            # case ``ModelDriver._mpas_cmip_feed_enabled`` turns the CMOR feed
+            # ON for, and while this tuple stopped at slot 7 that run accepted
+            # ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.
+            # ``MPAS_SFC_DIAG_MPI_UNPUBLISHED`` keys stay None AT THEIR SLOT
+            # (never shortened — a shorter tuple is what misindexes).
+            _extras = tuple(
+                None if _k in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+                else getattr(_pt, _k, None)
+                for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):
