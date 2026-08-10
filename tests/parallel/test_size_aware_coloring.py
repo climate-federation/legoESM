@@ -71,6 +71,30 @@ class TestSizeAwareColoring:
         assert _padded(on) < _padded(off), (
             "padded weight did not improve although size_aware was adopted")
 
+    def test_deterministic_across_rebuilds(self, monkeypatch):
+        """Two independent builds produce the IDENTICAL colouring —
+        every multicontroller process derives the schedule on its own,
+        so any order nondeterminism is a cross-rank deadlock (codex
+        review of 9ff0d5892)."""
+        a = _schedules(monkeypatch)["1"]
+        b = _schedules(monkeypatch)["1"]
+        assert a["ppermute_perms"] == b["ppermute_perms"]
+        assert a["halo_cells_per_round"] == b["halo_cells_per_round"]
+        assert a["halo_edges_per_round"] == b["halo_edges_per_round"]
+
+    def test_bidirectional_entries_survive(self, monkeypatch):
+        """Every undirected pair contributes exactly TWO directed
+        entries in its round's perm — the pair-set test alone would not
+        catch one dropped direction (codex review)."""
+        on = _schedules(monkeypatch)["1"]
+        for perm in on["ppermute_perms"]:
+            directed = [(a, b) for (a, b) in perm if a != b]
+            assert len(directed) % 2 == 0
+            as_set = set(directed)
+            for (a, b) in directed:
+                assert (b, a) in as_set, (
+                    f"direction ({b},{a}) missing for pair ({a},{b})")
+
     def test_default_is_on_and_escape_works(self, monkeypatch):
         from legoesm.parallel.sharded_dynamics import _resolve_size_coloring
         assert _resolve_size_coloring("") is True

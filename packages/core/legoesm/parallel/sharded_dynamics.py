@@ -1931,7 +1931,8 @@ def _padded_weight(edge_colors, pair_w):
 
 
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
-                             edges_per, max_lc, max_le):
+                             edges_per, max_lc, max_le,
+                             cell_width: int = 1, edge_width: int = 1):
     """Build a ppermute-based halo exchange schedule.
 
     Instead of all-gathering the full state (O(N) communication),
@@ -2017,13 +2018,18 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     if _resolve_size_coloring(
             _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "")):
         import random as _random_sc
+        # Pair weights in TRUE relative units (codex review: an
+        # equal-weight proxy can rate a cell/edge trade as improving
+        # while actual bytes worsen — the packed widths are nlev+2 vs
+        # nlev). The factory threads the real widths; the default 1:1
+        # is the estimator's unit-free score.
         pair_w = {}
         for (u, v) in comm_pairs:
             wc = max(len(cell_send_map.get((u, v), [])),
                      len(cell_send_map.get((v, u), [])))
             we = max(len(edge_send_map.get((u, v), [])),
                      len(edge_send_map.get((v, u), [])))
-            pair_w[(u, v)] = (wc, we)
+            pair_w[(u, v)] = (wc * cell_width, we * edge_width)
         base_w = _padded_weight(edge_colors, pair_w)
         # Seed candidates: payload-descending first-fit + jitters. These
         # often overshoot the round budget on dense graphs (s9@64: every
@@ -2928,6 +2934,7 @@ def make_voronoi_sharded_step(
         pp_sched = _build_ppermute_schedule(
             partitions_out, cell_owner_out, n_dev,
             cells_per, edges_per, max_lc, max_le,
+            cell_width=nlev + 2, edge_width=nlev,
         )
         n_rounds = pp_sched['n_rounds']
         ppermute_perms = pp_sched['ppermute_perms']
