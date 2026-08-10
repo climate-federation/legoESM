@@ -331,17 +331,47 @@ CSV_FIELDS = (
     "score_improvement_pct", "crm_precip_mm_day", "n_tuned_params",
     "tuned_drift_T_K", "tuned_madiab_mean_K", "tuned_cold_point_T_K",
     "tuned_cold_point_z_km",
+    # PHYSICAL-unit RMSE (K, g/kg).  The scores above are normalised by the
+    # reference's mass-weighted standard deviation — commensurable for the
+    # optimiser, uninterpretable in a figure caption.  Column names match what
+    # scripts/plot/plot_scm_rce_convection_paper.py reads.
+    "apriori_T_rmse_K", "tuned_T_rmse_K",
+    "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
+    "apriori_qcond_rmse_g_kg", "tuned_qcond_rmse_g_kg",
 )
 
+KG_KG_TO_G_KG = 1_000.0
 
-def _row(res: SchemeResult) -> dict:
+
+def _row(res: SchemeResult, ref=None) -> dict:
     p, t = res.prior, res.tuned
     impr = (
         100.0 * (p.score - t.score) / p.score
         if np.isfinite(p.score) and p.score > 0 and np.isfinite(t.score)
         else float("nan")
     )
+    if ref is None:
+        # No reference in scope (unit tests of the row shape): the physical
+        # columns are NaN rather than absent, so the CSV header never changes
+        # shape between call sites.
+        nan = float("nan")
+        phys = {k: nan for k in (
+            "apriori_T_rmse_K", "tuned_T_rmse_K",
+            "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
+            "apriori_qcond_rmse_g_kg", "tuned_qcond_rmse_g_kg")}
+    else:
+        pr = camp.physical_profile_rmse(ref, p)
+        tr = camp.physical_profile_rmse(ref, t)
+        phys = {
+            "apriori_T_rmse_K": pr["T_rmse_K"],
+            "tuned_T_rmse_K": tr["T_rmse_K"],
+            "apriori_qv_rmse_g_kg": pr["qv_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "tuned_qv_rmse_g_kg": tr["qv_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "apriori_qcond_rmse_g_kg": pr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "tuned_qcond_rmse_g_kg": tr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
+        }
     return {
+        **phys,
         "scheme": res.scheme,
         "subsidence_solve": res.subsidence_solve,
         "subsidence_solve_status": res.subsidence_solve_status,
@@ -362,12 +392,18 @@ def _row(res: SchemeResult) -> dict:
     }
 
 
-def write_csv(path: Path, results: list[SchemeResult]) -> None:
+def write_csv(path: Path, results: list[SchemeResult], ref=None) -> None:
+    """Machine-readable per-scheme metrics.
+
+    ``ref`` is what turns the physical-unit columns from NaN into numbers, so
+    the merge stage passes it; a caller that only wants the normalised scores
+    may omit it.
+    """
     with path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for res in sorted(results, key=lambda r: r.tuned.score):
-            writer.writerow(_row(res))
+            writer.writerow(_row(res, ref))
 
 
 def _finite_or_none(x: float):
@@ -478,7 +514,7 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|")
     for i, res in enumerate(ordered, 1):
         p, t = res.prior, res.tuned
-        row = _row(res)
+        row = _row(res, ref)
         lines.append(
             f"| {i} | {res.scheme} "
             f"| {res.subsidence_solve_status or res.subsidence_solve} "
@@ -809,7 +845,10 @@ def main(argv: list[str] | None = None) -> int:
     results = load_all_scheme_results(args.outdir, CONVECTION_SCHEMES)
     if not results:
         raise SystemExit(f"No scheme_*.json checkpoints found in {args.outdir}")
-    write_csv(args.outdir / "intercomparison.csv", results)
+    write_csv(args.outdir / "intercomparison.csv", results, ref)
+    # Second copy under the name the paper figure script reads, so the
+    # figures are built from THIS table rather than a hand-copied one.
+    write_csv(args.outdir / "summary_table.csv", results, ref)
     write_tuned_parameters(args.outdir / "tuned_parameters.json", results)
     write_summary(args.outdir / "summary.md", ref, results, meta)
     plot_all(args.outdir / "profiles_all_convection.png", ref, results)

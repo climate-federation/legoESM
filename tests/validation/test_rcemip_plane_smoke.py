@@ -140,15 +140,21 @@ def test_nondefault_q_sfc_flows_consistently_to_theta_and_qv():
     assertion."""
     from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
         make_wing2018_theta_ref_fn,
+        wing2018_T_v0,
         wing2018_qv_profile,
     )
 
     z = jnp.array([0.0, 4_000.0, 15_000.0])
-    q_hot = 0.024  # RCE305-like, deliberately != WING_Q_SFC_DEFAULT (0.0142014)
+    q_hot = 0.024  # the RCE305 q0, deliberately != the RCE300 default
 
     # (a) driver wrappers must equal the library evaluated at the SAME q_sfc
     theta_drv = _rcemip_theta_profile(z, T_sfc=300.0, q_sfc=q_hot)
-    theta_lib = make_wing2018_theta_ref_fn(q_sfc=q_hot)(z)  # default T_v0 (oracle-fit)
+    # T_v0 must be derived from the SAME q_sfc the driver used (Wing Eq. 3);
+    # passing q_sfc alone would leave the library on the default-q0 T_v0 and
+    # build a THIRD, mixed column, so this comparison would then be measuring
+    # that inconsistency rather than the threading it exists to check.
+    theta_lib = make_wing2018_theta_ref_fn(
+        T_v0=wing2018_T_v0(300.0, q_hot), q_sfc=q_hot)(z)
     qv_drv = _rcemip_qv_profile(z, q_sfc=q_hot)
     qv_lib = wing2018_qv_profile(z, q_sfc=q_hot)
     for k in range(z.shape[0]):

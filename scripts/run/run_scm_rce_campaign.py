@@ -1521,6 +1521,38 @@ def run_cached(
     )
 
 
+def physical_profile_rmse(
+    ref: ReferenceProfiles,
+    run: RunDiagnostics,
+) -> dict[str, float]:
+    """Mass-weighted profile RMSE in PHYSICAL units (K, kg/kg) vs the CRM.
+
+    The campaign's own ``score`` normalises each component by the reference's
+    mass-weighted standard deviation, which makes the four terms commensurable
+    for the optimiser but is not a quantity a reader can interpret.  Reports
+    and figures need K and kg/kg, so both tuning drivers call THIS helper —
+    same weights, same reference arrays, one implementation.
+
+    A crashed run (empty ``T_profile``) yields NaNs rather than a zero RMSE,
+    so a failure cannot masquerade as a perfect fit in a table.
+    """
+    if not run.T_profile:
+        return {
+            "T_rmse_K": float("nan"),
+            "qv_rmse_kg_kg": float("nan"),
+            "qcond_rmse_kg_kg": float("nan"),
+        }
+    w = jnp.asarray(ref.mass_weights)
+    return {
+        "T_rmse_K": float(weighted_rmse_jax(
+            jnp.asarray(run.T_profile) - jnp.asarray(ref.T_ref), w)),
+        "qv_rmse_kg_kg": float(weighted_rmse_jax(
+            jnp.asarray(run.qv_profile) - jnp.asarray(ref.qv_ref), w)),
+        "qcond_rmse_kg_kg": float(weighted_rmse_jax(
+            jnp.asarray(run.qcond_profile) - jnp.asarray(ref.qcond_ref), w)),
+    }
+
+
 def _sort_category_results(category: str, results: list[RunDiagnostics]) -> list[RunDiagnostics]:
     status_rank = {"ok": 0, "failed": 1, "crashed": 2}
     scheme_order = {s: i for i, s in enumerate(SCHEME_SWEEPS[category])}

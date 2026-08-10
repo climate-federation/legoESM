@@ -62,6 +62,10 @@ from legoesm.atmosphere.physics.microphysics.config import (
 from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
+from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
+from legoesm.atmosphere.physics.microphysics.thompson import (
+    thompson_microphysics,
+)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
 # gSAM cloud.f90 ramp, written out independently of the shipped helper so the
@@ -80,11 +84,23 @@ LIQUID_FIELD = "hard_saturation_adjustment"
 COLD_T_K = 215.0
 COLD_P_PA = 20_000.0
 COLD_RH_ICE = 1.60          # above rh_homo(215 K) = 1.548, below nothing
+# A trace of cloud ice BELOW the qci gate (1e-8 kg/kg): the allowance still
+# applies, but the crystals give deposition a surface to act on, so the ON/OFF
+# contrast is carried by the process the allowance actually modifies.  With
+# q_i exactly 0 the difference is real but ~0.3 % of the tendency, which is too
+# close to "any nonzero number" to serve as a non-vacuity check.
+COLD_Q_ICE = 5.0e-9
 # Warm boundary-layer cell: 300 K at 1000 hPa, 10 % liquid super-saturated.
 WARM_T_K = 300.0
 WARM_P_PA = 100_000.0
 WARM_RH_LIQ = 1.10
 DT_S = 60.0
+# Minimum |ON - OFF| that counts as load-bearing, as a FRACTION of the OFF
+# tendency.  A merely-nonzero difference can be floating-point noise from a
+# reordered expression; the allowance changes the deposition driving
+# supersaturation by ~90 % in this cell, so anything below a percent means the
+# flag is not reaching the process it is supposed to govern.
+MIN_RELATIVE_EFFECT = 0.01
 
 
 def _gsam_rh_homo(T: np.ndarray, q_ice: np.ndarray | None = None) -> np.ndarray:
@@ -151,124 +167,171 @@ def _column(T_K: float, p_Pa: float, q_v: float, q_i: float = 0.0):
     return jnp.full((1, 1), q_v), (T, hyd, p_full, p_half, rho, dz)
 
 
-def section_2_load_bearing() -> list[str]:
-    """ON vs OFF through the real scheme — proves the flags are not inert."""
-    failures: list[str] = []
-    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+def _scheme_fn_and_config(scheme: str):
+    """(tendency function, config factory) for one ice-carrying scheme."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, P3Config, ThompsonConfig,
+    )
+    if scheme == "morrison":
+        # SAM M2005 flavor: the plane CRM's oracle-matching configuration.
+        return morrison_microphysics, (
+            lambda **kw: MorrisonConfig(morrison_flavor="sam", **kw))
+    if scheme == "thompson":
+        return thompson_microphysics, (lambda **kw: ThompsonConfig(**kw))
+    if scheme == "p3":
+        return p3_microphysics, (lambda **kw: P3Config(**kw))
+    raise ValueError(f"no ice-scheme entry point for {scheme!r}")
 
-    # --- ICE half -----------------------------------------------------------
+
+def _on_off(scheme: str, field: str, q_v, rest) -> tuple[float, float]:
+    """Vapour tendency with ``field`` True and False, same column."""
+    fn, cfg = _scheme_fn_and_config(scheme)
+    T, hyd, p_full, p_half, rho, dz = rest
+    out = {}
+    for on in (True, False):
+        res = fn(T, q_v, hyd, p_full, p_half, rho, dz, DT_S, cfg(**{field: on}))
+        out[on] = float(res.dq_v_dt[0, 0])
+    return out[True], out[False]
+
+
+def _report_effect(label: str, on: float, off: float, *, expect_retains: bool,
+                   failures: list[str]) -> None:
+    """Print an ON/OFF pair and judge only its MECHANICAL properties."""
+    delta = on - off
+    rel = abs(delta) / max(abs(off), 1.0e-30)
+    print(f"    {label:34s} ON={on:+.6e}  OFF={off:+.6e}  "
+          f"delta={delta:+.6e} ({100 * rel:6.2f} % of OFF)")
+    if rel < MIN_RELATIVE_EFFECT:
+        failures.append(
+            f"{label}: |ON-OFF| is {100 * rel:.3f} % of the tendency, below the "
+            f"{100 * MIN_RELATIVE_EFFECT:.0f} % floor — the flag is not reaching "
+            "the process it governs (or this column is the wrong regime)")
+        return
+    if expect_retains and delta <= 0.0:
+        failures.append(
+            f"{label}: enabling the ice allowance removed MORE vapour "
+            f"(delta={delta:+.3e}); it must RETAIN vapour")
+    if (not expect_retains) and delta >= 0.0:
+        failures.append(
+            f"{label}: enabling the liquid guard removed LESS vapour "
+            f"(delta={delta:+.3e}); it must condense the excess faster")
+
+
+def section_2_load_bearing() -> list[str]:
+    """ON vs OFF through the real schemes — proves the flags are not inert.
+
+    Every ice-carrying scheme is exercised, not just one: a table of default-
+    True config fields (section 3) says nothing about a scheme whose
+    implementation ignores the field.
+    """
+    failures: list[str] = []
+
+    # --- ICE half: one cold cell, all three ice schemes ----------------------
     q_sat_i = float(thermo.saturation_mixing_ratio_ice(
         jnp.asarray(COLD_T_K), jnp.asarray(COLD_P_PA)))
-    q_v, rest = _column(COLD_T_K, COLD_P_PA, COLD_RH_ICE * q_sat_i)
-    T, hyd, p_full, p_half, rho, dz = rest
+    q_v, rest = _column(COLD_T_K, COLD_P_PA, COLD_RH_ICE * q_sat_i,
+                        q_i=COLD_Q_ICE)
     ramp = float(thermo.homogeneous_freezing_rh_factor(jnp.asarray(COLD_T_K)))
-    print(f"  cold cell: T={COLD_T_K} K, p={COLD_P_PA/100:.0f} hPa, "
+    print(f"  cold cell: T={COLD_T_K} K, p={COLD_P_PA / 100:.0f} hPa, "
           f"q_sat_ice={q_sat_i:.3e} kg/kg, RH_ice={COLD_RH_ICE:.2f}, "
-          f"rh_homo={ramp:.4f}, ice-free")
-    dqv = {}
-    for on in (True, False):
-        out = morrison_microphysics(
-            T, q_v, hyd, p_full, p_half, rho, dz, DT_S,
-            MorrisonConfig(morrison_flavor="sam",
-                           **{ICE_FIELD: on}),
-        )
-        dqv[on] = float(out.dq_v_dt[0, 0])
-        print(f"    {ICE_FIELD}={str(on):5s} -> dq_v/dt = {dqv[on]:+.6e} kg/kg/s")
-    delta = dqv[True] - dqv[False]
-    print(f"    difference (ON - OFF)        = {delta:+.6e} kg/kg/s")
-    if delta == 0.0:
-        failures.append(
-            f"{ICE_FIELD} is INERT on the cold cell — the reachability table "
-            "below would prove nothing")
-    elif delta <= 0.0:
-        failures.append(
-            f"{ICE_FIELD}=True removed MORE vapour than OFF (delta={delta:+.3e}); "
-            "the allowance must retain vapour, not deposit it")
+          f"rh_homo={ramp:.4f}, q_ice={COLD_Q_ICE:.1e} kg/kg (below the "
+          f"{GSAM_QCI_GATE:.0e} gate, so the allowance still applies)")
+    for scheme in ICE_SCHEMES:
+        on, off = _on_off(scheme, ICE_FIELD, q_v, rest)
+        _report_effect(f"{scheme}: {ICE_FIELD}", on, off,
+                       expect_retains=True, failures=failures)
 
-    # --- LIQUID half --------------------------------------------------------
+    # --- LIQUID half: one warm cell, every scheme that carries the guard -----
     q_sat_l = float(thermo.saturation_mixing_ratio(
         jnp.asarray(WARM_T_K), jnp.asarray(WARM_P_PA)))
     q_vw, restw = _column(WARM_T_K, WARM_P_PA, WARM_RH_LIQ * q_sat_l)
-    Tw, hydw, p_fullw, p_halfw, rhow, dzw = restw
-    print(f"  warm cell: T={WARM_T_K} K, p={WARM_P_PA/100:.0f} hPa, "
+    print(f"  warm cell: T={WARM_T_K} K, p={WARM_P_PA / 100:.0f} hPa, "
           f"q_sat_liq={q_sat_l:.3e} kg/kg, RH_liq={WARM_RH_LIQ:.2f}")
-    dqw = {}
-    for on in (True, False):
-        out = morrison_microphysics(
-            Tw, q_vw, hydw, p_fullw, p_halfw, rhow, dzw, DT_S,
-            MorrisonConfig(morrison_flavor="sam", **{LIQUID_FIELD: on}),
-        )
-        dqw[on] = float(out.dq_v_dt[0, 0])
-        print(f"    {LIQUID_FIELD}={str(on):5s} -> dq_v/dt = {dqw[on]:+.6e} kg/kg/s")
-    dlt = dqw[True] - dqw[False]
-    print(f"    difference (ON - OFF)        = {dlt:+.6e} kg/kg/s")
-    if dlt == 0.0:
-        failures.append(f"{LIQUID_FIELD} is INERT on the warm super-saturated cell")
-    elif dlt > 0.0:
-        failures.append(
-            f"{LIQUID_FIELD}=True removed LESS vapour than OFF (delta={dlt:+.3e}); "
-            "the guard must condense the excess faster, not slower")
+    for scheme in ICE_SCHEMES:
+        on, off = _on_off(scheme, LIQUID_FIELD, q_vw, restw)
+        _report_effect(f"{scheme}: {LIQUID_FIELD}", on, off,
+                       expect_retains=False, failures=failures)
     return failures
 
 
-def _lane_crm(scheme: str):
+def _lane_crm(scheme: str, *, guard: bool = False):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "_rcp_lane", REPO_ROOT / "scripts" / "run" / "run_rcemip_plane.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    cfg = mod._build_microphysics_config(scheme)
+    cfg = mod._build_microphysics_config(
+        scheme, hard_saturation_adjustment=guard)
     return getattr(cfg, scheme)
 
 
-def _lane_scm(scheme: str):
+def _lane_scm(scheme: str, *, guard: bool = False):
     from scripts.run import run_scm_rce_campaign as camp
-    return getattr(camp.make_physics_config(microphysics=scheme).microphysics,
-                   scheme)
+    cfg = camp.make_physics_config(
+        microphysics=scheme, hard_saturation_adjustment=guard)
+    return getattr(cfg.microphysics, scheme)
 
 
-def _lane_gcm(scheme: str):
+def _lane_gcm(scheme: str, *, guard: bool = False):
     # The global lane resolves its sub-config inside physics_pipeline; there is
     # no public wrapper that returns it without building a whole pipeline, so
     # the checker reaches for the resolver directly.  This is the resolver the
     # coupled driver calls (kernel_registry documents it as such).
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_microphysics
-    cfg = ExperimentConfig(microphysics=scheme)
+    cfg = ExperimentConfig(microphysics=scheme,
+                           hard_saturation_adjustment=guard)
     _fn, micro_cfg = _resolve_microphysics(cfg)
     return micro_cfg
 
 
+LANES = (("CRM  (run_rcemip_plane)", _lane_crm),
+         ("SCM  (run_scm_rce_campaign)", _lane_scm),
+         ("GCM  (driver.physics_pipeline)", _lane_gcm))
+
+
 def section_3_reachable() -> list[str]:
-    """The config each lane actually hands to the scheme."""
+    """The config each lane actually hands to the scheme.
+
+    Two questions, not one: the ICE allowance must be ON by default (it ships
+    on), and the LIQUID guard must be REACHABLE — i.e. a lane asked to enable
+    it must return a sub-config with it enabled.  Checking only that the field
+    exists would pass a lane that accepts the flag and drops it.
+    """
     failures: list[str] = []
-    lanes = (("CRM  (run_rcemip_plane)", _lane_crm),
-             ("SCM  (run_scm_rce_campaign)", _lane_scm),
-             ("GCM  (driver.physics_pipeline)", _lane_gcm))
-    print(f"  {'lane':32s} {'scheme':10s} {ICE_FIELD:34s} {LIQUID_FIELD}")
-    for label, fn in lanes:
+    print(f"  {'lane':32s} {'scheme':10s} {'ice(default)':14s} "
+          f"{'liquid(default)':16s} liquid(requested ON)")
+    for label, fn in LANES:
         for scheme in ICE_SCHEMES:
             try:
                 sub = fn(scheme)
+                sub_on = fn(scheme, guard=True)
             except Exception as exc:                      # noqa: BLE001
                 failures.append(f"{label} could not build {scheme}: {exc!r}")
                 print(f"  {label:32s} {scheme:10s} ERROR: {exc!r}")
                 continue
             ice = getattr(sub, ICE_FIELD, "<absent>")
             liq = getattr(sub, LIQUID_FIELD, "<absent>")
-            print(f"  {label:32s} {scheme:10s} {str(ice):34s} {liq}")
+            liq_on = getattr(sub_on, LIQUID_FIELD, "<absent>")
+            print(f"  {label:32s} {scheme:10s} {str(ice):14s} "
+                  f"{str(liq):16s} {liq_on}")
             if ice is not True:
                 failures.append(
                     f"{label}/{scheme}: {ICE_FIELD} is {ice!r}, expected True "
                     "(the ice allowance ships ON)")
-            if liq == "<absent>":
+            if liq is not False:
                 failures.append(
-                    f"{label}/{scheme}: no {LIQUID_FIELD} field — the liquid "
-                    "guard cannot be enabled in this lane")
-    # The liquid guard is opt-in, so its default is False everywhere; what must
-    # hold is that every FACTORY-REACHABLE scheme can carry it or is a declared
-    # exemption.  That is enforced by tests/test_microphysics_supersaturation_
-    # guard.py; here we only report the SCM campaign's own scheme list.
+                    f"{label}/{scheme}: {LIQUID_FIELD} defaults to {liq!r}; it "
+                    "is an opt-in and must default False")
+            if liq_on is not True:
+                failures.append(
+                    f"{label}/{scheme}: asked for {LIQUID_FIELD}=True and the "
+                    f"lane returned {liq_on!r} — the flag is dropped somewhere "
+                    "between the lane's entry point and the scheme's config")
+    # Every FACTORY-REACHABLE scheme must either carry the guard or be a
+    # declared exemption (enforced as a ratchet in
+    # tests/test_microphysics_supersaturation_guard.py; repeated here so the
+    # operator sees the partition next to the lane table).
     from legoesm.atmosphere.physics.microphysics.config import (
         HARD_SAT_GUARD_SCHEMES, HARD_SAT_GUARD_EXEMPT,
     )

@@ -98,5 +98,99 @@ def test_section_2_reports_both_flags_as_load_bearing(checker):
     assert checker.section_2_load_bearing() == []
 
 
+def test_section_2_covers_every_ice_scheme(checker):
+    """A cap that reaches morrison and nothing else must not pass: section 3
+    only reads config fields, so an ignored flag in thompson or p3 would be
+    invisible without this."""
+    assert set(checker.ICE_SCHEMES) == {"morrison", "thompson", "p3"}
+    seen = []
+    real = checker._on_off
+
+    def _spy(scheme, field, q_v, rest):
+        seen.append((scheme, field))
+        return real(scheme, field, q_v, rest)
+
+    checker._on_off = _spy
+    try:
+        checker.section_2_load_bearing()
+    finally:
+        checker._on_off = real
+    for scheme in checker.ICE_SCHEMES:
+        assert (scheme, checker.ICE_FIELD) in seen, (scheme, seen)
+        assert (scheme, checker.LIQUID_FIELD) in seen, (scheme, seen)
+
+
+def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
+    """SYNTHETIC VIOLATION: a scheme whose ON and OFF tendencies are identical
+    is exactly the 'flag declared but never read' defect section 2 exists to
+    catch."""
+    real = checker._on_off
+
+    def _inert(scheme, field, q_v, rest):
+        on, off = real(scheme, field, q_v, rest)
+        return (off, off) if scheme == "p3" else (on, off)
+
+    checker._on_off = _inert
+    try:
+        failures = checker.section_2_load_bearing()
+    finally:
+        checker._on_off = real
+    assert any("p3" in f for f in failures), failures
+
+
+def test_section_2_fails_on_a_barely_nonzero_effect(checker):
+    """A difference of one ULP is not evidence the flag reaches the physics."""
+    real = checker._on_off
+
+    def _noise(scheme, field, q_v, rest):
+        on, off = real(scheme, field, q_v, rest)
+        return off * (1.0 + 1.0e-9), off
+
+    checker._on_off = _noise
+    try:
+        failures = checker.section_2_load_bearing()
+    finally:
+        checker._on_off = real
+    assert failures, "a 1e-9 relative difference was accepted as load-bearing"
+    assert all("floor" in f for f in failures), failures
+
+
 def test_section_3_finds_the_cap_live_in_all_three_lanes(checker):
     assert checker.section_3_reachable() == []
+
+
+def test_section_3_fails_when_a_lane_drops_the_requested_guard(checker):
+    """SYNTHETIC VIOLATION: a lane that accepts --hard-saturation-adjustment
+    and hands the scheme a config with it still False."""
+    real_lanes = checker.LANES
+    label, fn = real_lanes[1]          # the SCM lane
+
+    def _drops_guard(scheme, *, guard=False):
+        return fn(scheme, guard=False)
+
+    checker.LANES = (real_lanes[0], (label, _drops_guard), real_lanes[2])
+    try:
+        failures = checker.section_3_reachable()
+    finally:
+        checker.LANES = real_lanes
+    assert failures, "a lane that silently dropped the guard passed"
+    assert all("flag is dropped" in f for f in failures), failures
+
+
+def test_section_3_fails_when_a_lane_turns_the_ice_allowance_off(checker):
+    """SYNTHETIC VIOLATION: the ice allowance ships ON; a lane that disables it
+    changes the physics of every cold cloud and must be reported."""
+    real_lanes = checker.LANES
+    label, fn = real_lanes[0]          # the CRM lane
+
+    def _ice_off(scheme, *, guard=False):
+        sub = fn(scheme, guard=guard)
+        return sub._replace(**{checker.ICE_FIELD: False})
+
+    checker.LANES = ((label, _ice_off),) + real_lanes[1:]
+    try:
+        failures = checker.section_3_reachable()
+    finally:
+        checker.LANES = real_lanes
+    assert failures, "a lane with the ice allowance disabled passed"
+    assert all(checker.ICE_FIELD in f for f in failures), failures

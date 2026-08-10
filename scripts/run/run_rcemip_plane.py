@@ -739,6 +739,16 @@ def build_sounding_height_coord(args, p_sfc_rcemip, dtype=jnp.float64):
             "path builds the SAM-faithful stretched column, and silently "
             "overriding a requested uniform grid would hide which grid a run "
             "used.")
+    # Same rule for the other tabulated-grid flag: --sam-grd asks for the
+    # oracle's EXACT levels, which this path does not build (it stretches to
+    # its own column), so a run given both would advertise the grd levels in
+    # its command line and run something else.  Refuse instead of picking one.
+    if getattr(args, "sam_grd", None):
+        raise SystemExit(
+            "--sounding and --sam-grd are mutually exclusive: the sounding "
+            "path builds its own stretched column, so the --sam-grd levels "
+            "would be silently ignored. Choose the tabulated SOUNDING "
+            "(thermodynamics) or the tabulated GRID (levels).")
     # The gSAM cold point is a sharp V at ~14.5 km.  Reconstruction error at a
     # kink is FIRST order in dz, so a coarse column moves the tropopause
     # temperature by whole kelvin — measured 1.08 K at nlev=48 over H=20 km.

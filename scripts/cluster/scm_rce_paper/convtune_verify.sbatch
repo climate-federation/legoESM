@@ -76,6 +76,27 @@ echo; echo "############ 2. IFS cap reachability in all three lanes ############
 JAX_ENABLE_X64=1 $PY $WT/scripts/validate/check_ifs_supersaturation_cap.py 2>&1 | tail -60
 echo "CAP_RC=${PIPESTATUS[0]}"
 
+echo; echo "############ 2b. RCEMIP protocol IC anchors (for the smoke-test pins) ############"
+# The plane-smoke test pins four theta values and two q_v values. They were
+# measured under the gSAM-sounding calibration; the module now defaults to the
+# published protocol, so they have to be RE-MEASURED rather than adjusted by
+# hand. Printed here, from the library, so the pin has a provenance line.
+JAX_ENABLE_X64=1 $PY - <<'PYEOF' 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
+import jax.numpy as jnp
+from scripts.run.run_rcemip_plane import _rcemip_theta_profile, _rcemip_qv_profile
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+    WING_GAMMA, WING_Q_SFC_DEFAULT, WING_T_V0, WING_Z_T,
+)
+z = jnp.array([0.0, 4_000.0, 15_000.0, 20_000.0])
+th = _rcemip_theta_profile(z, T_sfc=300.0)
+qv = _rcemip_qv_profile(z, q_sfc=0.018)
+print(f"  T_v0={WING_T_V0:.6f} K  Gamma={WING_GAMMA}  q0={WING_Q_SFC_DEFAULT}")
+print(f"  isothermal cap T_v0-Gamma*z_t = {WING_T_V0 - WING_GAMMA * WING_Z_T:.4f} K")
+print("  theta(z=0,4k,15k,20k) = " + ", ".join(f"{float(v):.4f}" for v in th))
+print("  q_v (q_sfc=0.018) at 0,4k,20k = "
+      + ", ".join(f"{float(qv[i]):.6e}" for i in (0, 1, 3)))
+PYEOF
+
 echo; echo "############ 3. cost probe: 1 scheme, short SCM, morrison + guard ############"
 mkdir -p $OUT
 /usr/bin/time -v env JAX_ENABLE_X64=1 $PY \
