@@ -592,6 +592,45 @@ Its absolute deposition is also ~6x smaller than the other two
 Attributing it needs p3's per-process tendencies instrumented; the cause is
 UNKNOWN, not "small". p3 is therefore held only to a gross bound.
 
+### 8.2d What the objective is actually minimising — MEASURED, and it is not T and q_v
+
+The first four arms (job 9356595) expose two properties of the score that have
+to be read with any ranking from it.
+
+| scheme | prior | tuned | T | q_v | condensate | precip | precip [mm/d] |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| sbm | 11.446 | 1.698 | ~0.42 | 1.065 | **3.096** | 0.798 | 3.0e-05 |
+| mass_flux | 4.561 | 2.385 | — | 0.570 | **4.664** | 0.798 | 2.4e-18 |
+| kuo | 4.936 | 4.936 | — | 0.373 | **9.828** | 0.798 | 6.3e-18 |
+| dca | 9.459 | 9.459 | — | 0.364 | **18.897** | 0.798 | 4.2e-18 |
+
+**1. The precipitation term is inert.** Every scheme scores exactly 0.798,
+which is `2.395 / 3` — the CRM reference divided by the normalisation — i.e.
+the SCM precipitates nothing (1e-18 to 3e-5 mm/day against the CRM's 2.395).
+A term identical across every scheme and every tuning candidate cannot
+discriminate; it adds a constant to every score. The column is nevertheless in
+steady state (`drift_qv` 1e-7 to 4e-5), so water is not accumulating either —
+what the campaign scores as "precipitation" is the microphysics diagnostic
+alone: `run_scm_rce_campaign.py` zeroes the convective contribution whenever
+convection is sub-stepped and microphysics is not `none`, to avoid
+double-counting detrained condensate that the microphysics is expected to
+sediment. Under the SCM's morrison configuration that sedimentation does not
+reach the surface. **Cause not yet attributed** — the diagnostic, the
+detrainment, and the sedimentation are all candidates.
+
+**2. The score is dominated by CONDENSATE, not by T and q_v.** Each profile
+term is normalised by the reference's own mass-weighted standard deviation,
+and the CRM's condensate spread is small, so a condensate mismatch is worth
+3-19 sigma while q_v is worth 0.4-1.1 and T less. The tuner is therefore
+optimising the condensate profile with T and q_v as minor terms.
+
+That matters for how a ranking is read: the deliverable ranks schemes on
+temperature and humidity RMSE in physical units, but the tuning minimised a
+combined score in which those two are the SMALL terms. The two need not agree,
+and any "after tuning" T/q_v improvement is a by-product rather than the
+target. The CSV carries all four components for both arms, so the
+decomposition is checkable per scheme rather than taken on trust.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
