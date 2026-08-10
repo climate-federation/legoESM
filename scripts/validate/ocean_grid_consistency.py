@@ -49,13 +49,22 @@ _REPO = Path(__file__).resolve().parents[2]
 CONSISTENCY_GRIDS = ["cubed_sphere", "latlon", "mpas", "fesom"]
 ALL_GRIDS = CONSISTENCY_GRIDS + ["tripole"]
 
-#: Arm-to-arm agreement threshold in the FIELD'S OWN UNITS. Set from the
-#: physics, not from the spread: two ocean dycores that agree on SST to
-#: 1e-3 degC or on SSH to 1e-3 m are the same answer for every purpose
-#: this suite serves. A case-relative threshold cannot be used here --
-#: for a uniform rest state the field's own variability IS round-off, so
-#: any relative test either passes everything or fails everything.
-AGREE_TOL = {"SST": 1.0e-3, "eta": 1.0e-3}
+#: Arm-to-arm agreement threshold, in the FIELD'S OWN UNITS, set from the
+#: INTRINSIC DISCRETISATION ERROR rather than by hand.
+#:
+#: Two different dycores cannot agree more closely than one dycore agrees
+#: with ITSELF across a resolution change of the size that separates the
+#: arms. That self-difference is the achievable floor, so it is the
+#: standard. MEASURED 2026-08-10 (lat-lon C-grid, 36x72 vs 72x144, ocean
+#: cells only, same IC and dt):
+#:     geostrophic_adjustment  SST  8.20e-2 degC
+#:     barotropic_wave         eta  2.34e-2 m
+#: The thresholds below are those numbers rounded up. An earlier revision
+#: used a hand-picked 1e-3 in both fields, which no pair of independent
+#: discretisations can meet and which therefore reported "DISAGREE" for
+#: everything -- a threshold set before the measurement, the exact habit
+#: the reviewers flagged twice in this campaign.
+AGREE_TOL = {"SST": 1.0e-1, "eta": 2.5e-2}
 
 #: field used for the cross-grid comparison, per case
 CASE_FIELD = {
@@ -71,10 +80,52 @@ CASE_FIELD = {
 }
 
 
+def _registered_resolution(case: str, grid: str) -> str | None:
+    """Resolution the CURRENT matrix registers for THIS (case, grid).
+
+    Read from ``_build_test_matrix()`` itself, not from GRID_RESOLUTIONS:
+    several cases override the per-grid default (barotropic_wave runs
+    latlon at 48x72), so the global table is not the authority.
+    """
+    import importlib.util
+    import sys
+    if "_rm_reg" not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            "_rm_reg", _REPO / "scripts" / "matrix" / "run_ocean_test_matrix.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["_rm_reg"] = mod
+        spec.loader.exec_module(mod)
+    rm = sys.modules["_rm_reg"]
+    if not hasattr(rm, "_REGISTERED_RES"):
+        rm._REGISTERED_RES = {(tc.case, tc.grid_type): tc.resolution
+                              for tc in rm._build_test_matrix()}
+    return rm._REGISTERED_RES.get((case, grid))
+
+
 def _find(root: Path, case: str, grid: str) -> Path | None:
+    """Locate an arm's snapshot, REFUSING artifacts from a stale run.
+
+    results/ is written in place: a suite rerun overwrites only the arms it
+    ran, so directories from earlier configurations survive (mpas/ico3 after
+    the move to ico4; fesom no-land runs after that pair was unregistered).
+    Reading those silently mixes runs -- it made an earlier revision of this
+    script report six pairs for cases that now have three, and quote an
+    ico3 number as if it were the current arm (codex 2026-08-10). Only the
+    resolution the matrix registers TODAY is accepted; anything else is
+    reported so it can be deleted rather than used.
+    """
+    want = _registered_resolution(case, grid)
     hits = [h for h in root.glob(f"{case}/**/{grid}/*/snapshots_latlon.npz")
             if h.parent.parent.name == grid]
-    return hits[0] if hits else None
+    if not hits:
+        return None
+    fresh = [h for h in hits if want is not None and h.parent.name == want]
+    if not fresh:
+        stale = sorted({h.parent.name for h in hits})
+        print(f"    [stale artifact ignored] {case}/{grid}: found {stale}, "
+              f"current registry says {want!r} -- rerun or delete")
+        return None
+    return fresh[0]
 
 
 def _load(npz: Path, field: str):
@@ -156,6 +207,18 @@ def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
         A, mA = got[a_name]
         B, mB = got[b_name]
         both = mA & mB & np.isfinite(A) & np.isfinite(B)
+        # ERODE the common wet mask by one cell. Arms disagree about what
+        # a LAND cell holds -- the lat-lon C-grid pins land tracers at 0
+        # while MPAS Neumann-fills them with an ocean-neighbour average --
+        # so a single land cell leaking through nearest-neighbour sampling
+        # contributes a ~20 degC difference and swamps the real interior
+        # signal. MEASURED 2026-08-10: without erosion the geostrophic
+        # adjustment latlon|mpas difference reads 2.98 degC and is ENTIRELY
+        # the two polar (>80 deg, land) bins; the interior bins agree to
+        # 0.003-0.05 degC.
+        both = (both
+                & np.roll(both, 1, 0) & np.roll(both, -1, 0)
+                & np.roll(both, 1, 1) & np.roll(both, -1, 1))
         if not both.any():
             out[f"{a_name}|{b_name}"] = dict(rms_abs=float("nan"),
                                              rms_shifted=float("nan"),

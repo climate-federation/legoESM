@@ -61,19 +61,6 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-
-# FESOM lives in an out-of-tree package (`fesom_jax`) that is NOT a declared
-# dependency of this repo, so its matrix arms are registered ONLY when it is
-# importable.  Registering them unconditionally made `run_ocean_test_matrix.py
-# --quick` record an ERROR per fesom case and exit 1 on every normal
-# installation -- the arms are optional, the matrix is not.
-def _fesom_available() -> bool:
-    import importlib.util
-    return importlib.util.find_spec("fesom_jax") is not None
-
-
-_OPTIONAL_GRIDS = ["tripole"] + (["fesom"] if _fesom_available() else [])
-
 from pathlib import Path
 from typing import Any, Callable
 
@@ -125,7 +112,14 @@ import matplotlib.pyplot as plt
 GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
-    "mpas": "ico3",
+    # ico4 (2562 cells, 446 km effective), NOT ico3 (642 cells, 891 km).
+    # RESOLUTION-MATCHED to latlon 36x72 (444 km), cube C24 (384 km) and
+    # fesom pi (403 km) to within 0.6%. At ico3 the MPAS arm was 2.3x
+    # coarser than every other arm, so a cross-grid comparison measured
+    # the resolution gap rather than the dycores: matching it halved the
+    # barotropic-wave latlon|mpas difference (1.79e-2 -> 7.80e-3 m,
+    # measured 2026-08-10).
+    "mpas": "ico4",
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
     "cs_regional": "C24",
@@ -276,14 +270,14 @@ def _build_test_matrix() -> list[TestCase]:
     # threshold the latlon/mpas with-land rest states use (190 of 3140 nodes
     # are dry). Registering it as "no_land" was mislabelled (codex
     # 2026-08-10) -- the FESOM setup has no 90-degree variant to select.
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         if g == "spectral":
             continue
         matrix.append(TestCase(
             "rest_state_stratified_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state with uniform T/S (with land): isolates barotropic PGF ---
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         if g == "spectral":
             continue
         matrix.append(TestCase(
@@ -306,7 +300,7 @@ def _build_test_matrix() -> list[TestCase]:
     # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
     bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
                  "mpas": "ico4", "spectral": "T21"}
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "barotropic_wave", g, bwave_res.get(g, res[g]), 2.0, 0.2))
 
@@ -352,7 +346,7 @@ def _build_test_matrix() -> list[TestCase]:
             run_kwargs={"nlev": 1}))
 
     # --- Geostrophic adjustment: all grids + tripole + fesom ---
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "geostrophic_adjustment", g, res[g], 10.0, 1.0))
 
@@ -360,7 +354,7 @@ def _build_test_matrix() -> list[TestCase]:
     # tripole + fesom added 2026-08-10: the shear IC no longer assumes a
     # rectilinear mesh (u-face latitudes come from _cgrid_face_lat_lon,
     # and FESOM gets a node/element branch).
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "phillips_two_layer", g, res[g], 10.0, 1.0))
 
@@ -369,7 +363,7 @@ def _build_test_matrix() -> list[TestCase]:
     # _cgrid_face_lat_lon; FESOM node/element branch). NOTE the case FAILS
     # its analytic L2 gate on every grid -- a pre-existing case defect,
     # tracked separately from arm coverage.
-    for g in GRID_TYPES + _OPTIONAL_GRIDS:
+    for g in GRID_TYPES + ["tripole", "fesom"]:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
 
@@ -382,8 +376,7 @@ def _build_test_matrix() -> list[TestCase]:
     # mpas + fesom added 2026-08-08 for the three-way dycore comparison
     # (unstructured triangles vs Voronoi vs structured C-grid). cubed_sphere
     # stays excluded for the reason above.
-    for g in ["latlon", "mpas", "tripole"] + (
-            ["fesom"] if _fesom_available() else []):
+    for g in ["latlon", "mpas", "fesom", "tripole"]:
         matrix.append(TestCase(
             "lock_exchange", g, res[g], 1.0, 0.1))
 
