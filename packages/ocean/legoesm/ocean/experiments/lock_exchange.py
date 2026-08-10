@@ -166,6 +166,14 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             land_lat_threshold=config.spectral_land_lat_threshold
         )
 
+    elif grid_type == "fesom":
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_lock_exchange_state)
+        # The FESOM IC applies the front itself (it needs the mesh's geographic
+        # node coordinates), so return DIRECTLY -- falling through to
+        # _add_temperature_front would apply the front a second time.
+        return create_lock_exchange_state(grid.mesh, config)
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
 
