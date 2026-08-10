@@ -47,9 +47,15 @@ fregrid remap.
 
 ENFORCEMENT (codex c6 r1 #1/#2/#4/#5): report-only by default.
 ``--enforce`` additionally requires
-* EXPLICIT ``--max-gh``/``--max-wind`` bounds (finite, positive) — there
-  are deliberately no defaults until a calibration lands here with its
-  job id: bounds nobody measured are a gate that cannot mean anything;
+* EXPLICIT ``--max-gh``/``--max-wind`` bounds (finite, positive) — no
+  baked-in defaults: bounds nobody measured are a gate that cannot
+  mean anything.  MEASURED CALIBRATION (jobs 9356453 + 9356856,
+  2026-08-10, C48 deck config, IC + days 1..5; the two runs — code
+  ebf475383 and 2033b1f87 — produced BIT-IDENTICAL frames): worst
+  rel_l2 over all days was gh 2.304e-3 / wind 2.850e-2, time-flat at
+  the remap-protocol floor (IC gh 2.190e-3).  Recommended bounds at
+  ~2x the worst measured day: ``--max-gh 5e-3 --max-wind 6e-2`` — a
+  regression that doubles the day-5 error trips, remap noise does not;
 * the npz to carry the runner's config record MATCHING the reference
   deck (C48, dt_atmos=1200, n_split=7, d_ext=0, d4_bg=0, oracle
   conventions, no ext exclusions) — a diagnostic variant scores fine in
