@@ -217,11 +217,16 @@ def test_runner_threads_deck_config_to_stepper(tmp_path, monkeypatch):
 
     # the stub must mirror the REAL signature, or a stepper signature
     # drift would break production while this test stays green (codex
-    # c6 r2 #4): pin the real parameter list first.
-    real_params = list(inspect.signature(
-        stepper_mod.advance_duo_outer_step).parameters)
-    assert real_params == ["ctx", "states", "dt_atmos", "n_split",
-                           "d_ext", "sw_cfg"]
+    # c6 r2 #4): pin the real parameter NAMES, ORDER and KINDS — the
+    # runner calls d_ext/sw_cfg by keyword, so a positional-only drift
+    # would raise in production while a name-only pin stayed green
+    # (codex c6 r3 #3).
+    sig = inspect.signature(stepper_mod.advance_duo_outer_step)
+    assert list(sig.parameters) == ["ctx", "states", "dt_atmos",
+                                    "n_split", "d_ext", "sw_cfg"]
+    for p in sig.parameters.values():
+        assert p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, (
+            p.name, p.kind)
 
     seen = []
 
@@ -358,7 +363,7 @@ def _write_npz(tmp_path, **over):
                 d4_bg=np.array(0.0), k2e_nord=np.array(2),
                 ext_exclude=np.array(""),
                 oracle_conventions=np.array(True),
-                git_sha=np.array("testsha"),
+                git_sha=np.array("ab" * 20),      # well-formed 40-hex
                 requested_days=np.array(1))
     base.update(over)
     path = tmp_path / "run.npz"
@@ -389,9 +394,12 @@ def test_contract_rejects_polar_sentinel(tmp_path):
         gate.load_run(_write_npz(tmp_path, u=u))
 
 
+_GOOD_SHA = "0123456789abcdef" * 2 + "01234567"     # 40 hex chars
+
+
 def test_deck_record_mismatch_and_missing():
     rec = {key: val for key, val in gate.DECK_RECORD.items()}
-    rec["git_sha"] = "abc123"
+    rec["git_sha"] = _GOOD_SHA
     assert gate.check_deck_record(rec) == []
     bad = dict(rec)
     bad["dt_atmos"] = 450.0
@@ -400,16 +408,38 @@ def test_deck_record_mismatch_and_missing():
     del bad["dt_atmos"]
     problems = gate.check_deck_record(bad)
     assert len(problems) == 1 and "not recorded" in problems[0]
-    nosha = dict(rec)
-    del nosha["git_sha"]
-    problems = gate.check_deck_record(nosha)
-    assert len(problems) == 1 and "git_sha" in problems[0]
     # type-normalised comparison: numpy scalars == python values
     npish = {"n": np.int64(48).item(), "dt_atmos": np.float64(1200.0),
              "n_split": 7, "d_ext": 0.0, "d4_bg": 0.0, "k2e_nord": 2,
              "oracle_conventions": np.bool_(True),
-             "ext_exclude": "", "git_sha": "abc"}
+             "ext_exclude": "", "git_sha": _GOOD_SHA}
     assert gate.check_deck_record(npish) == []
+
+
+@pytest.mark.parametrize("key, val", [
+    # coercion impersonations (codex c6 r3 #4): each is a WRONG-TYPE
+    # value that a coercing comparison accepted as the deck value
+    ("oracle_conventions", "False"),     # nonempty str -> bool(...) True
+    ("d_ext", False),                    # bool impersonating 0.0
+    ("d4_bg", "0"),                      # str impersonating 0.0
+    ("ext_exclude", 0),                  # non-str
+])
+def test_deck_record_rejects_type_impersonation(key, val):
+    rec = {k: v for k, v in gate.DECK_RECORD.items()}
+    rec["git_sha"] = _GOOD_SHA
+    rec[key] = val
+    problems = gate.check_deck_record(rec)
+    assert len(problems) == 1 and key in problems[0], (key, val, problems)
+
+
+@pytest.mark.parametrize("sha", ["", "unknown", "abc123", None,
+                                 "g" * 40, 12345])
+def test_deck_record_rejects_malformed_git_sha(sha):
+    rec = {k: v for k, v in gate.DECK_RECORD.items()}
+    if sha is not None:
+        rec["git_sha"] = sha
+    problems = gate.check_deck_record(rec)
+    assert len(problems) == 1 and "git_sha" in problems[0]
 
 
 def test_coverage_rules():
@@ -493,7 +523,10 @@ def test_contract_rejects_historical_canvas(tmp_path):
 
 
 @pytest.mark.parametrize("mutate, match", [
-    (dict(times_days=np.array([1.0, 2.0])), "must be 0.0"),
+    (dict(times_days=np.array([1.0, 2.0])), "exactly 0.0"),
+    # 1e-9 slipped the old tolerance yet was dropped by the whole-day
+    # scorer — an enforced run then never scored its IC (codex c6 r3 #1)
+    (dict(times_days=np.array([1e-9, 1.0])), "exactly 0.0"),
     (dict(times_days=np.array([0.0, 0.0])), "strictly increasing"),
     (dict(lat=np.linspace(-89.0, 89.0, 181)), "linspace"),
     (dict(gh=np.full((2, 181, 360), np.nan)), "non-finite"),

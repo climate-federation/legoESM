@@ -114,8 +114,13 @@ def load_run(npz_path: str) -> dict:
     t = np.asarray(z["times_days"], dtype=np.float64)
     if t.ndim != 1 or t.size == 0 or not np.isfinite(t).all():
         raise ContractError("times_days must be 1-D, non-empty, finite")
-    if abs(float(t[0])) > 1e-9:
-        raise ContractError("times_days[0] must be 0.0 (the IC frame)")
+    # EXACT zero: the runner writes 0.0 bit-for-bit; a tolerance here
+    # opened a window (t[0]=1e-9 passed as IC yet was dropped by the
+    # whole-day scorer, so an enforced run never scored its IC —
+    # codex c6 r3 #1)
+    if float(t[0]) != 0.0:
+        raise ContractError("times_days[0] must be exactly 0.0 (the IC "
+                            "frame)")
     if t.size > 1 and np.any(np.diff(t) <= 0):
         raise ContractError("times_days must be strictly increasing")
     lat_c, lon_c = _canvas()
@@ -180,17 +185,31 @@ def check_deck_record(record: dict) -> list[str]:
             problems.append(f"{key}: not recorded in npz")
             continue
         got = record[key]
+        # TYPE gate first, value second: coercion alone let
+        # oracle_conventions="False" pass bool(...) and d_ext=False /
+        # d4_bg="0" impersonate numeric zeros (codex c6 r3 #4)
         if isinstance(want, bool):
-            same = bool(got) is want
+            same = (isinstance(got, (bool, np.bool_))
+                    and bool(got) is want)
         elif isinstance(want, (int, float)):
-            same = (np.isfinite(float(got))
+            same = (isinstance(got, (int, float, np.integer,
+                                     np.floating))
+                    and not isinstance(got, (bool, np.bool_))
+                    and np.isfinite(float(got))
                     and float(got) == float(want))
         else:
-            same = str(got) == str(want)
+            same = isinstance(got, str) and got == want
         if not same:
             problems.append(f"{key}: npz has {got!r}, deck is {want!r}")
-    if "git_sha" not in record:
-        problems.append("git_sha: not recorded in npz (no audit hook)")
+    sha = record.get("git_sha")
+    if not (isinstance(sha, str) and len(sha) >= 40
+            and all(ch in "0123456789abcdef" for ch in sha[:40])):
+        # well-formedness only — a 40-hex SHA can still be copied into
+        # a forged npz; the SELF-ATTESTATION limitation above stands
+        problems.append(
+            f"git_sha: {sha!r} is not a 40-hex commit id (runner "
+            "emits 'unknown' when git fails — such an npz cannot be "
+            "enforced)")
     return problems
 
 
@@ -205,11 +224,11 @@ def check_coverage(times: np.ndarray, record: dict,
             "completeness (report-only npz)")
     req = record["requested_days"]
     want = np.arange(0.0, float(req) + 0.5)
-    # rtol=0: allclose's default RELATIVE tolerance would admit
-    # times like 4.99995 that the whole-day scorer then silently
-    # drops (codex c6 r2 P0 note)
-    if times.size != want.size or not np.allclose(times, want,
-                                                  rtol=0.0, atol=1e-9):
+    # EXACT equality: the runner writes float(day) from Python ints,
+    # which is exact.  Any tolerance here re-opens the near-integer
+    # window where coverage certifies a frame the whole-day scorer
+    # silently drops (codex c6 r2 P0, r3 #1).
+    if not np.array_equal(times, want):
         raise ContractError(
             f"times_days {times.tolist()} != contiguous 0..{req} — "
             "truncated or sparse run cannot be enforced")
