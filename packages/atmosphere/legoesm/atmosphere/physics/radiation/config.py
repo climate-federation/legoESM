@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
+from legoesm.atmosphere.physics.radiation.simple_lw import (
+    SimpleLWConfig,
+)
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
@@ -366,7 +369,7 @@ class RadiationConfig(NamedTuple):
     Fields
     ------
     scheme : str
-        Active radiation scheme: "gray" or "rrtmgp".
+        Active radiation scheme: "gray", "rrtmgp", "mc3d" or "simple_lw".
     gray : GrayRadiationConfig
         Configuration for gray radiation.
     rrtmgp : RRTMGPConfig
@@ -397,6 +400,10 @@ class RadiationConfig(NamedTuple):
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
+    # Stevens (2005) DYCOMS-II simple longwave -- the cloud-top radiative
+    # cooling the marine-stratocumulus decks (DYCOMS_RF01, ASTEX209) are
+    # driven by. Longwave only; see radiation/simple_lw.py.
+    simple_lw: SimpleLWConfig = SimpleLWConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
     # "mc3d": 3D Monte-Carlo ray-traced shortwave (plane LES/CRM only) + gray
     # longwave. See docs/specs/mc3d_raytracer.md. mc3d holds MC numerics.

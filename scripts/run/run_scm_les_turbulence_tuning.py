@@ -100,16 +100,17 @@ TURBULENCE_SCHEMES: tuple[str, ...] = (
 
 # Cases whose LES applies a radiative forcing the SCM cannot reproduce. Scoring
 # these would compare two different problems; see the module docstring.
-_RADIATION_MISMATCH = {
-    "dycoms": (
-        "the DYCOMS LES applies a parameterized Stevens (2005) longwave "
-        "cooling (run_dycoms_les.py make_stevens_lw) that the SCM has no "
-        "equivalent for. Without cloud-top radiative cooling the SCM "
-        "stratocumulus is a different problem and any score would be a "
-        "radiation confound, not a turbulence result. Port that forcing to "
-        "the SCM side before tuning this case."
-    ),
-}
+# RESOLVED for the stratocumulus cases: the Stevens (2005) longwave the LES
+# applies is now a shared kernel the SCM selects with
+# RadiationConfig(scheme="simple_lw"), so DYCOMS and ASTEX are matched rather
+# than confounded. The dict is kept because the NEXT case whose LES applies a
+# forcing the SCM cannot reproduce must be refused the same way, not scored.
+_RADIATION_MISMATCH: dict[str, str] = {}
+
+# Cases whose LES is driven by the gSAM `doradsimple` longwave. The SCM arm
+# selects the SAME kernel, so cloud-top radiative cooling is present on both
+# sides. Both decks set `dolongwave = .true., doradsimple = .true.`.
+_SIMPLE_LW_CASES = frozenset({"dycoms", "astex"})
 
 ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
     sorted(ANALYTIC_SCM_CASES))
@@ -321,7 +322,8 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          bulk_ch: float | None = None,
                          bulk_ce: float | None = None,
                          surface=None,
-                         clubb_prognostic: bool = True) -> PhysicsConfig:
+                         clubb_prognostic: bool = True,
+                         simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
@@ -363,7 +365,12 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
     base = PhysicsConfig()
     return PhysicsConfig(
         turbulence=turb,
-        radiation=_scheme_none(base.radiation),
+        # The stratocumulus decks run the gSAM doradsimple longwave, so the
+        # SCM runs the SAME kernel; every other case has radiation off on
+        # both sides. It is IDENTICAL across arms either way, so the
+        # across-scheme comparison stays controlled.
+        radiation=(base.radiation._replace(scheme="simple_lw")
+                   if simple_lw else _scheme_none(base.radiation)),
         convection=_scheme_none(base.convection),
         # Held identical across arms either way. "none" means the SCM has no
         # condensation, so the cloud layer carries supersaturated vapour where
@@ -743,6 +750,7 @@ def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
     return build_physics_config(
         scheme, prescribed_fluxes=arm.prescribed_fluxes,
         microphysics=args.microphysics,
+        simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
     )
