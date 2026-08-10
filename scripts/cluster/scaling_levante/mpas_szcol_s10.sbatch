@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=szcol_ladder
+#SBATCH --job-name=szcol_s10
 #SBATCH --account=bd1083_gpu
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=02:30:00
+#SBATCH --time=01:30:00
 #SBATCH --exclude=l50100,l50000
 #SBATCH --output=szcol_ladder.%j.log
 # ===========================================================================
@@ -47,9 +47,6 @@ rung () {  # subdiv nlev nd nodes tag
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
 }
 
-rung 9 26 16 4 s9_np16
-rung 9 26 32 8 s9_np32
-rung 9 26 64 16 s9_np64
 rung 10 26 128 32 s10_np128
 
 echo "=== ROWS ==="
