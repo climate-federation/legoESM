@@ -16,6 +16,7 @@ _needs_x64 = pytest.mark.skipif(
 def test_global_grid_types() -> None:
     assert GLOBAL_GRID_TYPES == (
         "cubed_sphere",
+        "fesom",
         "gaussian",
         "latlon",
         "mpas",

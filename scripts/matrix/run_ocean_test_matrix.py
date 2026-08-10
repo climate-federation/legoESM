@@ -117,6 +117,10 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "latlon_regional": "24x48",
     "cs_regional": "C24",
     "spectral": "T21",
+    # tripole is mesh-file-backed (NEMO eORCA1 mesh_mask, 462 MB, Zenodo).
+    "tripole": "eorca1",
+    # FESOM is mesh-file-backed: "pi" is the only packaged mesh.
+    "fesom": "pi",
 }
 
 # Standard grid types for the full test matrix.
@@ -127,6 +131,29 @@ REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
+
+# --- Matched numerics for the cross-dycore lock-exchange comparison ---
+# A_v/K_v are the ONLY numerical parameters all four ocean dycores expose:
+# FesomOceanConfig has just (dt, k_ver, a_ver); MPAS and LatLon/tripole both
+# have (A_v, K_v). Values are FESOM's own defaults (config.A_VER / K_VER),
+# which coincide with the production ORCA1 tripole settings.
+# tracer_advection is matched across the THREE legoESM dycores (FESOM's
+# advection is internal to fesom_jax and cannot be selected from here).
+# Everything else -- barotropic solver, KE-gradient scheme, PGF scheme,
+# lateral viscosity -- exists on some dycores and not others, so it is set
+# per grid for stability and is reported as a per-grid difference.
+MATCHED_A_V = 1.0e-4        # background vertical viscosity  [m2/s]
+MATCHED_K_V = 1.0e-5        # background vertical diffusivity [m2/s]
+MATCHED_TRACER_ADV = "tvd"  # limited scheme: no dispersive over/undershoot
+# Lock-exchange C-grid arms (latlon, tripole) use Zalesak FCT instead:
+# dim-split TVD is not multi-D monotone -- at the front x land-wall corner
+# on distorted eORCA1 cells it grows +2.1e-4 K by day 5 (dt-independent,
+# upwind-clean; jobs 26837567/96/658/659) -- while fct2 is certified
+# bounded after the 2026-08-10 h_new fix in ocean/advection.py, and it
+# MATCHES FESOM's internal scheme class (Zalesak FCT), so 3 of 4 arms share
+# the advection family. MPAS keeps tvd (no FCT in the port; bounded to
+# 3e-12/day at ico3 resolution) -- documented per-grid difference.
+LOCKEX_CGRID_TRACER_ADV = "fct2"
 
 # Physical constants for idealized ocean test cases — use canonical values.
 from legoesm import constants as _C
@@ -324,7 +351,10 @@ def _build_test_matrix() -> list[TestCase]:
     # PGF or the FC-Gram backend; Petersen's diagnostic is a
     # channel-scale test, not a global one. The latlon_regional 4x64
     # case below provides faithful Petersen-geometry coverage.)
-    for g in ["latlon"]:
+    # mpas + fesom added 2026-08-08 for the three-way dycore comparison
+    # (unstructured triangles vs Voronoi vs structured C-grid). cubed_sphere
+    # stays excluded for the reason above.
+    for g in ["latlon", "mpas", "fesom", "tripole"]:
         matrix.append(TestCase(
             "lock_exchange", g, res[g], 1.0, 0.1))
 
@@ -753,7 +783,11 @@ def _run_timeloop(
                 blown_up = True
                 break
 
-        if step % diag_every == 0:
+        # ALWAYS sample the final step: gates that take extremes over the
+        # diag series (lock-exchange front bounds, RPE sign) would otherwise
+        # never see the end state when n_steps % diag_every != 0
+        # (codex 2026-08-10).
+        if step % diag_every == 0 or step == n_steps:
             day = step * dt / 86400.0
             scalars = scalar_fn(state)
             diag["times"].append(day)
@@ -2276,6 +2310,22 @@ def _parse_resolution(tc: TestCase):
         return {"n": int(tc.resolution[1:])}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
+    elif tc.grid_type == "tripole":
+        # NEMO tripolar grid: mesh-file-backed, not sized by an integer.
+        if tc.resolution != "eorca1":
+            raise ValueError(
+                f"tripole resolution {tc.resolution!r} is not supported; only "
+                f"'eorca1' (data/grids/eORCA1.2_mesh_mask.nc) is available."
+            )
+        return {"grid_file": "data/grids/eORCA1.2_mesh_mask.nc"}
+    elif tc.grid_type == "fesom":
+        # FESOM is mesh-file-backed, not sized by a resolution integer.
+        if tc.resolution != "pi":
+            raise ValueError(
+                f"FESOM resolution {tc.resolution!r} is not supported; FESOM "
+                f"is mesh-file-backed and only the packaged 'pi' mesh ships."
+            )
+        return {"mesh_dir": None}
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -2360,6 +2410,23 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_v"] = A_v
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
+        # matched across all four arms (see MATCHED_* near DEFAULT_DT)
+        kw.setdefault("A_v", MATCHED_A_V)
+        kw.setdefault("K_v", MATCHED_K_V)
+        if tc.case == "lock_exchange":
+            kw.setdefault("tracer_advection", LOCKEX_CGRID_TRACER_ADV)
+        kw.setdefault("tracer_advection", MATCHED_TRACER_ADV)
+        if tc.case == "lock_exchange":
+            # The explicit split barotropic's eta is consistent with the
+            # tracer-advecting div(h*u) only to ~4 significant figures
+            # (ocean_model_latlon_cgrid.py #1226 note); that residual breaks
+            # flux-form constancy preservation, and any limiter then
+            # over/undershoots at the front. MEASURED (uniform-T=15 probe,
+            # scripts/validate/lockex_rpe_trace.py --uniform-t, 1 day, dt=300):
+            # explicit_substep drifts T to [14.954, 15.046]; implicit_cn (the
+            # tripole arm's solver) holds 15 +/- 4e-9. Scheme swaps
+            # (tvd->fct2/upwind) changed nothing -- solver, not limiter.
+            kw.setdefault("barotropic_solver", "implicit_cn")
         config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
@@ -2374,6 +2441,20 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
         mesh = create_voronoi_mesh(params["level"])
         kw = dict(n_barotropic_substeps=30, physics=physics)
+        # matched across all four arms (see MATCHED_* near DEFAULT_DT).
+        kw["A_v"] = MATCHED_A_V
+        kw["K_v"] = MATCHED_K_V
+        kw["tracer_advection"] = MATCHED_TRACER_ADV
+        if tc.case == "lock_exchange":
+            # Same explicit-split constancy defect as the latlon arm (see the
+            # latlon branch comment): uniform-T=15 probe drifts to
+            # [14.963, 15.039] in 1 day under explicit_substep, and the
+            # tvd->upwind swap changed the lock-exchange bounds violation at
+            # the 7th digit only. implicit_cn is the matched consistent solver.
+            kw["barotropic_solver"] = "implicit_cn"
+            # n_barotropic_substeps stays at its default: inert under
+            # implicit_cn and no warning fires for it (only
+            # barotropic_time_filter has a loud no-op guard).
         if A_h is not None:
             kw["A_h"] = A_h
         if A_v is not None:
@@ -2386,6 +2467,88 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         return mesh, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "tripole":
+        # NEMO tripolar C-grid (eORCA1). create_tripole_grid returns a
+        # LatLonCGridGeometry, so it reuses the lat-lon C-grid ocean model --
+        # the SAME dycore as the `latlon` arm, differing only in the grid
+        # (curvilinear + north fold). That is exactly the variable under test.
+        from legoesm.grids.tripole import create_tripole_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel)
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        grid = create_tripole_grid(params["grid_file"])
+        # Tripole-specific NUMERICS (not physics): the curvilinear mesh with a
+        # north fold and strongly varying dx is unstable under the bare
+        # rectilinear defaults -- it NaNs by step 100 even at dt=30. These are
+        # the settings the production ORCA1 runs use
+        # (scripts/global_overturning/run_tripole_20yr.py): an implicit
+        # barotropic solver instead of explicit substepping, the Hollingsworth
+        # KE-gradient fix (a C-grid curvilinear instability), the Adcroft
+        # pressure-gradient scheme, and a non-zero lateral viscosity.
+        kw = dict(
+            barotropic_solver="implicit_cn",
+            ke_gradient_scheme="hollingsworth",
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            A_h=1e5, C_smag_lap=0.33, A_h_floor=1000.0,
+            A_v=MATCHED_A_V, K_v=MATCHED_K_V,
+            tracer_advection=(LOCKEX_CGRID_TRACER_ADV
+                              if tc.case == "lock_exchange"
+                              else MATCHED_TRACER_ADV),
+            physics=physics,
+        )
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = LatLonCGridOceanConfig.from_flat(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+        coord_kind = "tripole"
+        # Tripolar tracer points are genuinely 2-D (curvilinear).
+        lon_deg = np.asarray(grid.lon_T, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat_T, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "fesom":
+        # FESOM2 unstructured triangular dycore (the fesom_jax package).
+        from legoesm.grids.factory import create_grid
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            FesomOceanConfig, FesomOceanModel)
+        from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+
+        # No FESOM equivalent for these knobs -- dropping them silently would
+        # confound the latlon/mpas/fesom comparison, so refuse loudly.
+        _unsupported = {k: v for k, v in
+                        (("A_h", A_h), ("A_v", A_v),
+                         ("bottom_drag_r", bottom_drag_r), ("physics", physics))
+                        if v is not None}
+        if _unsupported:
+            raise NotImplementedError(
+                "FESOM has no equivalent for these physics kwargs (dropping "
+                "them silently would confound the model comparison): "
+                + ", ".join(f"{k}={v!r}" for k, v in _unsupported.items()))
+
+        # land_lat_threshold MUST match the latlon/mpas arms (80.0), or the
+        # three-way comparison is a confound rather than a result.
+        grid = create_grid(
+            "fesom", mesh_dir=params["mesh_dir"], H_max=H_max, nlev=nlev,
+            land_lat_threshold=LockExchangeConfig().land_lat_threshold,
+            # SAME interfaces as the other arms. Without this FESOM runs a
+            # uniform 1 m column while _compute_rpe weights it with the
+            # stretched z-star dz (0.095..1.905 m) -> misweighted PE and
+            # unmatched vertical resolution.
+            zbar=np.asarray(z_coord.z_half_ref, dtype=np.float64))
+        # FesomOceanModel.step raises on a dt mismatch, so cfg.dt must equal
+        # the timestep the matrix timeloop calls it with.
+        config = FesomOceanConfig(dt=DEFAULT_DT, k_ver=MATCHED_K_V,
+                                  a_ver=MATCHED_A_V)
+        model = FesomOceanModel(grid.mesh, z_coord, config)
+        coord_kind = "fesom"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
 
     elif tc.grid_type == "mpas_regional":
         from legoesm.grids.voronoi import create_regional_voronoi_mesh
@@ -2492,6 +2655,46 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=H_max, land_lat_threshold=90.0,
         )
+    elif tc.grid_type == "tripole":
+        # create_tripole_grid returns a LatLonCGridGeometry, so the lat-lon
+        # C-grid rest state applies unchanged. H_max + land_lat_threshold give
+        # the SAME flat 20 m / land-above-80 basin as the latlon and fesom
+        # arms -- the NEMO bathymetry is deliberately NOT used, so the only
+        # difference across arms stays the grid itself.
+        #
+        # EXCEPT row j=0: NEMO requires a SOLID southern wall there (the real
+        # eORCA1 tmask has row 0 all-zero) -- there is no southern neighbour
+        # for the C-grid stencil, and the north fold only closes the top.
+        # The curvilinear row 0 spans latitudes on both sides of -80 deg, so
+        # the plain latitude threshold left part of it OCEAN; the stencil then
+        # read past the array edge and the run went non-finite at ~step 100
+        # of a 1-day run (first bad cells [0,40..44], measured 2026-08-09).
+        # Use land_mask_override at CONSTRUCTION so u_mask/v_mask stay
+        # consistent (never _replace(land_mask=...) post-hoc).
+        import jax.numpy as _jnp
+        import netCDF4 as _nc
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        lat_t = np.degrees(np.asarray(grid.lat_T))
+        base = (np.abs(lat_t) <= 80.0).astype(np.float64)
+        # Intersect with the NEMO surface tmask. The plain latitude threshold
+        # opened cells NEMO itself closes -- the Antarctic wedge rows carry
+        # tmask=0 and degenerate metrics (e2t down to ~4.6 km vs >=23 km for
+        # every real NEMO-ocean cell); treating them as ocean sent the 1-day
+        # run non-finite at row 1 cols 40-44 (measured 2026-08-09). This also
+        # walls row j=0 (all-zero in tmask, the NEMO southern wall). The
+        # Dhruv-era tripole runs respected tmask, which is why they worked.
+        _mesh_file = _parse_resolution(tc)["grid_file"]
+        with _nc.Dataset(_mesh_file) as _ds:
+            tmask0 = np.asarray(_ds.variables["tmask"][0, 0], dtype=np.float64)
+        if tmask0.shape != base.shape:
+            raise ValueError(
+                f"tmask shape {tmask0.shape} != grid shape {base.shape} for "
+                f"{_mesh_file!r}."
+            )
+        base = base * tmask0
+        return rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=H_max,
+            land_mask_override=_jnp.asarray(base))
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
@@ -4728,6 +4931,13 @@ def _get_cell_latlon_rad(grid_type, grid):
     if grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         return (np.asarray(grid.latCell, dtype=np.float64),
                 np.asarray(grid.lonCell, dtype=np.float64))
+    elif grid_type == "tripole":
+        # Curvilinear: tracer points are genuinely 2-D. grid.lat/.lon are
+        # 1-D ROW/COLUMN MEANS on this geometry -- using them would place the
+        # front on a fictitious rectilinear grid and silently misplace it
+        # near the fold.
+        return (np.asarray(grid.lat_T, dtype=np.float64),
+                np.asarray(grid.lon_T, dtype=np.float64))
     elif grid_type in ("latlon", "latlon_regional", "latlon_channel", "spectral"):
         lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_1d = np.asarray(grid.lon, dtype=np.float64)
@@ -5034,18 +5244,37 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
       - Salinity: uniform 35 PSU
       - Velocity: zero (lock released at t=0)
 
-    Front position is the median of the grid's longitude coordinate so the
-    initial split is robust to both [0, 2pi] and [-pi, pi] lon conventions
-    (legoESM lat-lon grids use [0, 2pi], an earlier copy of this helper
-    assumed [-pi, pi] and silently initialized every cell to T_warm).
+    Front position is ``LockExchangeConfig.front_longitude`` with the same
+    wrapping-aware west-of-front predicate as
+    ``lock_exchange._add_temperature_front`` (the FESOM IC), so every arm
+    starts from the same state. (An earlier version used the median grid
+    longitude, which put legoESM arms on a different IC from FESOM.)
     """
     from legoesm.core.field import Field
+    from legoesm.ocean.experiments.lock_exchange import (
+        LockExchangeConfig as _LXC0)
 
-    T_cold = 5.0    # degC (dense side, matches Petersen 2015)
-    T_warm = 30.0   # degC (light side, matches Petersen 2015)
+    # SINGLE SOURCE with the FESOM arm's IC and the T_min/T_max_front gates
+    # (codex 2026-08-10: hardcoded 5/30 here would silently diverge from the
+    # gates' LockExchangeConfig bounds on a config change).
+    T_cold = float(_LXC0().T_cold_C)   # degC (dense side, Petersen 2015)
+    T_warm = float(_LXC0().T_warm_C)   # degC (light side, Petersen 2015)
 
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    lon_front = float(np.median(np.asarray(lon)))
+    # _get_cell_latlon_rad returns RADIANS; LockExchangeConfig.front_longitude
+    # is in DEGREES. Convert explicitly -- a radian/degree mix would move the
+    # front by a factor of 57.
+    lat, lon_rad = _get_cell_latlon_rad(grid_type, grid)
+    lon = np.degrees(np.asarray(lon_rad))                       # degrees
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    lon_front = float(LockExchangeConfig().front_longitude)     # degrees
+    # Wrapping-aware "west of front", IDENTICAL to
+    # lock_exchange._add_temperature_front, so every arm (including FESOM,
+    # which is initialised through that helper) starts from the same state.
+    # The previous median-longitude + non-wrapping "<" put the legoESM arms on
+    # a different initial condition from FESOM, and mis-classified points
+    # across the dateline.
+    dlon = (lon - lon_front + 180.0) % 360.0 - 180.0             # degrees
+    west_of_front = dlon < 0.0
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
@@ -5054,7 +5283,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        T_field = np.where(lon[..., None] < lon_front, T_cold, T_warm) * mask[..., None]
+        T_field = np.where(west_of_front[..., None], T_cold, T_warm) * mask[..., None]
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
         return state._replace(T_hat=Field(new_T_hat))
 
@@ -5070,40 +5299,246 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
             # cell width). Preserves the asymptotic +/- 12.5 K contrast.
             T_mid = 0.5 * (T_cold + T_warm)
             T_amp = 0.5 * (T_warm - T_cold)
-            width_rad = np.deg2rad(6.0)
-            T_front = T_mid + T_amp * np.tanh((np.asarray(lon) - lon_front)
-                                              / width_rad)
+            width_deg = 6.0
+            # Same front longitude AND same wrapping-aware argument as the
+            # sharp branch, in degrees.
+            T_front = T_mid + T_amp * np.tanh(dlon / width_deg)
             for k in range(nlev):
                 T_data[..., k] = T_front * mask
         else:
             for k in range(nlev):
-                T_data[..., k] = np.where(lon < lon_front, T_cold, T_warm) * mask
+                T_data[..., k] = np.where(west_of_front, T_cold, T_warm) * mask
         return state._replace(T=Field(jnp.array(T_data)))
 
 
-def _compute_rpe(state, grid_type, grid, z_coord):
-    """Compute Reference Potential Energy (Ilicak et al. 2012).
+def _rpe_extract(state, grid_type, grid, z_coord):
+    """Shared extraction for the two energy diagnostics.
 
-    RPE = g * sum(rho_sorted * z_ref * dz * area)
-    Approximation: sort density profile at each column and compute
-    domain-integrated rho * z.
+    Returns ``(T, S, area_bc, mask_bc, z_full, dz)`` with ``area_bc``/``mask_bc``
+    already reshaped to the tracer's spatial shape. Factored out so
+    ``_compute_rpe`` (plain PE) and ``_compute_sorted_rpe`` (mixing metric) can
+    never disagree about masking, areas or density inputs.
     """
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis_3d
         T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
         S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
+        # GaussianGrid exposes grid_area, NOT area (codex 2026-08-08).
+        area = np.asarray(getattr(grid, "grid_area", None), dtype=np.float64)
+        mask_attr = "land_mask_grid"
     elif grid_type == "mpas":
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.areaCell, dtype=np.float64)
+        mask_attr = "land_mask"
     else:
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.area, dtype=np.float64)
+        mask_attr = "land_mask"
 
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+    _MISSING = object()
+    mask_obj = getattr(state, mask_attr, _MISSING)
+    if mask_obj is _MISSING:
+        raise ValueError(
+            f"state for grid_type={grid_type!r} has no attribute "
+            f"state.{mask_attr}; cannot compute a land-masked energy integral. "
+            f"Refusing to fall back to an unmasked sum."
+        )
+    mask_raw = np.asarray(mask_obj.data, dtype=np.float64)
+
+    spatial_shape = T.shape[:-1]
+    if area.size != int(np.prod(spatial_shape)):
+        raise ValueError(
+            f"area has {area.size} entries but the tracer spatial shape is "
+            f"{spatial_shape} for grid_type={grid_type!r}."
+        )
+    if mask_raw.size != int(np.prod(spatial_shape)):
+        raise ValueError(
+            f"land mask has {mask_raw.size} entries but the tracer spatial "
+            f"shape is {spatial_shape} for grid_type={grid_type!r}."
+        )
+    # MOVING control volumes, not reference ones. Under z-star the true layer
+    # thickness is dz_ref*(eta+H_bathy)/H_max; using dz_ref alone gives every
+    # parcel a fixed volume, which breaks the sorted-RPE invariance premise and
+    # produces either-sign drift in a free-surface run (codex 2026-08-08).
+    from legoesm.ocean.vertical import compute_layer_thickness
+    if grid_type == "spectral":
+        # Spectral state carries eta/H_bathy spectrally; fall back to the
+        # reference thickness and say so rather than silently mixing bases.
+        h = np.broadcast_to(
+            np.asarray(z_coord.dz_ref, dtype=np.float64), T.shape).copy()
+    else:
+        h = np.asarray(
+            compute_layer_thickness(jnp.asarray(state.eta.data),
+                                    jnp.asarray(state.H_bathy.data), z_coord),
+            dtype=np.float64)
+        if h.shape != T.shape:
+            raise ValueError(
+                f"layer thickness shape {h.shape} != tracer shape {T.shape} "
+                f"for grid_type={grid_type!r}."
+            )
+    # Cell-centre depth from the ACTUAL thicknesses: z_centre[k] is the mid-point
+    # of layer k measured down from the free surface eta.
+    h_cum = np.cumsum(h, axis=-1)
+    z_centre = (np.asarray(state.eta.data, dtype=np.float64)[..., np.newaxis]
+                - (h_cum - 0.5 * h)) if grid_type != "spectral" else \
+        np.broadcast_to(np.asarray(z_coord.z_full_ref, dtype=np.float64),
+                        T.shape).copy()
+    return (T, S,
+            area.reshape(spatial_shape),
+            mask_raw.reshape(spatial_shape),
+            z_centre, h)
+
+
+def _compute_sorted_rpe(state, grid_type, grid, z_coord):
+    """Sorted Reference Potential Energy (Ilicak 2012; Petersen et al. 2015).
+
+    Redistribute every OCEAN cell into the minimum-energy state by sorting on
+    density and packing densest-first from the bottom up, then integrate
+    ``g * rho_sorted * z * dV``.
+
+    Why this and not ``_compute_rpe``: plain PE also changes through the
+    PHYSICAL PE->KE conversion of the gravity current, so its drift is not a
+    mixing measurement. Only irreversible (spurious) mixing moves the SORTED
+    RPE; reversible sloshing leaves it invariant. That invariance is the whole
+    point of the metric. NOTE: there is no committed test for it yet -- the
+    property was checked interactively (homogenising two layers of a stably
+    stratified column raised the sorted RPE by +8.2e+14, while a reversed sort
+    would lower it). A level-swap-invariance check alone is NOT sufficient: a
+    reversed sort, a wrong H, or a constant-returning implementation all pass
+    that one.
+
+    FLAT-BOTTOM ASSUMPTION: with constant area-at-depth, a sorted parcel of
+    volume ``v_i`` occupies a slab of thickness ``v_i / total_area`` whose
+    centre, in this code's convention (z=0 surface, negative downward), is
+
+        z_i = -H_max + (c_prev_i + v_i / 2) / total_area
+
+    with ``c_prev_i`` the volume already placed BELOW parcel i. Densest parcel
+    lands at the BOTTOM. Raises if the arm is not flat-bottomed rather than
+    silently returning a wrong number.
+    """
+    if grid_type == "spectral":
+        # Spectral states carry eta/H spectrally: _rpe_extract falls back to
+        # reference thicknesses, which makes BOTH the moving volumes and the
+        # flat-bottom tripwire below vacuous (codex 2026-08-10). No spectral
+        # arm runs lock_exchange; refuse rather than return a fake number.
+        raise NotImplementedError(
+            "_compute_sorted_rpe: spectral states are not supported (their "
+            "moving volumes and bathymetry are not grid-point fields here).")
+    T, S, area_bc, mask_bc, z_centre, h = _rpe_extract(state, grid_type, grid,
+                                                       z_coord)
+    from legoesm.ocean.eos import linear_eos
+    rho = np.asarray(linear_eos(
+        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
+        rho_ref=_C.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+    ), dtype=np.float64)
+
+    # MOVING volumes (area * h(eta)), densest packed at bottom -- RPE_mov.
+    # The earlier fixed-reference-volume variant (dz_ref) was RETRACTED
+    # 2026-08-10: on the two arms with a bounded front and exact conservation
+    # (FESOM FCT, tripole implicit_cn) RPE on FIXED volumes still drifted
+    # NEGATIVE (-1.0e14 / -1.3e14 over 1 day) while MOVING volumes drifted
+    # POSITIVE (+3.0e12 / +2.1e12, the physical sign of spurious mixing).
+    # Traces: results/lockex_rpe_trace/rpe_trace_{fesom,tripole}.csv.
+    #
+    # DELIBERATE for the FESOM arm too, although its linfs coordinate keeps
+    # model-internal thicknesses FIXED (fesom_jax step.py: ale_cfg=None =>
+    # linfs): h(eta) here is the PHYSICAL water column (eta + H), and the
+    # metric evaluates the implied physical fluid, not the model's
+    # bookkeeping. Under linfs the surface concentration/dilution term makes
+    # fixed-volume heat/RPE drift REVERSIBLY with eta (that is the -1.0e14
+    # above, monotone all day while T stays in [5,30] to 1e-9); weighting
+    # columns with eta+H removes exactly that term.
+    vol = area_bc[..., np.newaxis] * h
+    ocean3 = np.broadcast_to(mask_bc[..., np.newaxis] > 0.5, rho.shape)
+    rho_o = rho[ocean3]
+    vol_o = np.broadcast_to(vol, rho.shape)[ocean3]
+    if rho_o.size == 0:
+        raise ValueError(
+            f"_compute_sorted_rpe: no ocean cells for grid_type={grid_type!r}."
+        )
+    if not (np.all(np.isfinite(rho_o)) and np.all(np.isfinite(vol_o))):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-finite density or volume for "
+            f"grid_type={grid_type!r}."
+        )
+    if not np.all(vol_o > 0.0):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-positive moving volume for "
+            f"grid_type={grid_type!r} (min={vol_o.min():.3e}); eta below "
+            f"-H_bathy would corrupt the packing (finite but wrong)."
+        )
+
+    # Flat-bottom check: every wet column must span the full level count.
+    wet_per_col = (mask_bc > 0.5)
+    total_area = float(np.sum(area_bc[wet_per_col]))
+    if not total_area > 0.0:
+        raise ValueError(
+            f"_compute_sorted_rpe: zero wet area for grid_type={grid_type!r}."
+        )
+    # REAL flat-bottom tripwire (codex 2026-08-10: the wet-area sum above
+    # never looked at bathymetry). Spread of BATHYMETRY, not eta+H, so a
+    # large but legitimate free-surface amplitude cannot trip the geometry
+    # check (GLM 2026-08-10). Spectral states carry H spectrally; there the
+    # reference column sum stands in (its eta contribution is zero anyway).
+    _MISSING_H = object()
+    H_obj = getattr(state, "H_bathy", _MISSING_H)
+    if H_obj is not _MISSING_H:
+        col_depth = np.asarray(H_obj.data, dtype=np.float64).reshape(
+            mask_bc.shape)[wet_per_col]
+    else:
+        col_depth = np.sum(h, axis=-1)[wet_per_col]
+    depth_spread = float(col_depth.max() - col_depth.min())
+    if depth_spread > 0.05 * float(col_depth.mean()):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-flat bottom for grid_type={grid_type!r}"
+            f" (wet column depths span {col_depth.min():.2f}.."
+            f"{col_depth.max():.2f} m); the constant-area sorted packing "
+            f"needs hypsometry there. Refusing to return a wrong number."
+        )
+    # Basin depth of the SORTED column: total wet volume / total wet area, so
+    # H is consistent with the moving thicknesses actually being packed.
+    H = float(np.sum(vol_o) / total_area)
+
+    return _pack_sorted_rpe(rho_o, vol_o, total_area)
+
+
+def _pack_sorted_rpe(rho_o, vol_o, total_area):
+    """Sorted-RPE packing (densest at bottom) — delegates to the ONE
+    production kernel ``legoesm.ocean.rpe.pack_sorted_rpe`` so the gate,
+    the trace and ``compute_rpe`` can never diverge (codex 2026-08-10)."""
+    from legoesm.ocean.rpe import pack_sorted_rpe
+    return pack_sorted_rpe(rho_o, vol_o, total_area, g_val=_G_EARTH)
+
+
+def _compute_rpe(state, grid_type, grid, z_coord):
+    """Volume-integrated potential energy over OCEAN cells only.
+
+    PE = g * sum_k( rho(T,S)[k] * z_full[k] * dz[k] * area * ocean_mask )
+
+    NOT the sorted Reference Potential Energy of Ilicak et al. (2012):
+    there is no per-column density sort here. The old docstring claimed
+    ``rho_sorted`` while nothing sorted -- corrected 2026-08-08. The name
+    is kept because five call sites and the emitted diagnostic key
+    ``PE``/``PE_rel`` depend on it; a sorted sibling would be a separate
+    function.
+
+    Land cells are EXCLUDED. They must be: MPAS fills its land cells with
+    an ocean-neighbour average as a Neumann BC
+    (``fill_land_cells_mpas``), so land there holds real ocean-like
+    values, while the lat-lon C-grid pins land tracers at 0. Summing both
+    as ocean made MPAS's lock-exchange PE drift read +6.5e-05 against
+    ~-1e-07 elsewhere -- an artifact of the diagnostic, not of the dycore
+    (measured 2026-08-08: MPAS land T went 0 -> [5, 30] over 0.1 day
+    while lat-lon land stayed at 0).
+
+    A missing mask attribute raises: falling back to an unmasked integral
+    is exactly the defect being fixed.
+    """
+    T, S, area_bc, mask_bc, z_centre, h = _rpe_extract(state, grid_type, grid,
+                                                       z_coord)
 
     # Compute density at each point using linearized EOS
     from legoesm.ocean.eos import linear_eos
@@ -5114,11 +5549,23 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 
     # Potential energy: PE = g * sum(rho * z * dz * area)
     # For RPE, we'd sort density globally, but as approximation compute PE
-    spatial_shape = T.shape[:-1]
-    area_bc = area.reshape(spatial_shape)
     pe = 0.0
-    for k in range(len(z_full)):
-        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
+    for k in range(z_centre.shape[-1]):
+        # z_centre and h are the MOVING (z-star) cell centre and thickness.
+        cell = rho[..., k] * z_centre[..., k] * h[..., k] * area_bc
+        # np.where, NOT cell * mask: 0.0 * NaN is NaN, so a degenerate land
+        # value would contaminate the finite check below. Land contributes
+        # exactly zero.
+        weighted = np.where(mask_bc > 0.5, cell, 0.0)
+        # np.sum, NOT np.nansum: nansum silently swallows a blown-up run and
+        # reports a plausible finite PE.
+        if not np.all(np.isfinite(weighted)):
+            bad = np.argwhere(~np.isfinite(weighted))[:5].tolist()
+            raise ValueError(
+                f"Non-finite PE summand at grid_type={grid_type!r}, level "
+                f"k={k}; first bad index(es): {bad}."
+            )
+        pe += float(np.sum(weighted))
     return _G_EARTH * pe
 
 
@@ -5679,6 +6126,13 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # default lat-lon viscosity / bottom drag.
     run_kw = tc.run_kwargs or {}
     dt_override = run_kw.get("dt")
+    if tc.grid_type == "fesom" and dt_override is not None:
+        # FesomOceanModel's SSH operator is built for DEFAULT_DT in
+        # _create_ocean_setup and step() raises on a mismatch -- fail here
+        # with the reason instead of mid-run (codex 2026-08-10).
+        raise NotImplementedError(
+            f"run_kwargs['dt']={dt_override} unsupported on the FESOM arm: "
+            f"the SSH operator is dt-specific and built for {DEFAULT_DT}.")
     A_h_override = run_kw.get("A_h")
     A_v_override = run_kw.get("A_v")
     bottom_drag_override = run_kw.get("bottom_drag_r")
@@ -5737,11 +6191,24 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
             )
         config = config.replace_flat(**replace_kwargs)
         model = LatLonCGridOceanModel(grid, z_coord, config)
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+    if tc.grid_type == "fesom":
+        # FESOM builds rest state + T front in ONE call (it needs the mesh's
+        # geographic node coords for the front), so it does not go through
+        # _create_rest_state / _init_lock_exchange.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_lock_exchange_state)
+        from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+        state = create_lock_exchange_state(grid.mesh, LockExchangeConfig())
+    else:
+        state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
+        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
 
-    # Compute initial PE
+    # Compute initial PE (dynamic, blow-up detector) AND sorted RPE (the
+    # actual spurious-mixing metric -- plain PE also moves through the
+    # PHYSICAL PE->KE conversion of the gravity current, so its drift is not
+    # a mixing measurement; see _compute_sorted_rpe).
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
+    rpe_init = _compute_sorted_rpe(state, tc.grid_type, grid, z_coord)
 
     dt = float(dt_override) if dt_override is not None else DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -5761,6 +6228,25 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
             scalars["PE_rel"] = (pe - pe_init) / abs(pe_init)
         else:
             scalars["PE_rel"] = 0.0
+        rpe = _compute_sorted_rpe(s, tc.grid_type, grid, z_coord)
+        scalars["RPE"] = rpe
+        if abs(rpe_init) > 1e-30:
+            scalars["RPE_rel"] = (rpe - rpe_init) / abs(rpe_init)
+        else:
+            scalars["RPE_rel"] = 0.0
+        # Ocean-masked tracer bounds PER SAMPLE, so the front gates below see
+        # the whole run's extremes -- a transient overshoot that later
+        # diffuses away must still FAIL (codex 2026-08-10).
+        T_s, _, area_s, mask_s, _, h_s = _rpe_extract(
+            s, tc.grid_type, grid, z_coord)
+        wet_s = np.broadcast_to((mask_s > 0.5)[..., np.newaxis], T_s.shape)
+        scalars["T_min"] = float(T_s[wet_s].min())
+        scalars["T_max"] = float(T_s[wet_s].max())
+        # Heat content on the physical (moving) volumes [K m3]: the unforced
+        # lock exchange conserves it, so drift = a flux leak or clipping bug
+        # the bounds/RPE gates cannot see (GLM 2026-08-10).
+        vol_s = area_s[..., np.newaxis] * h_s
+        scalars["heat"] = float(np.sum((T_s * vol_s)[wet_s]))
         return scalars
 
     state, snapshots, diag, wall, ok = _run_timeloop(
@@ -5777,11 +6263,20 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # check.  The runtime blowup_threshold uses max|eta| not
     # T, so an out-of-range temperature blowup could still
     # PASS.  Compute T_min/T_max from the final state.
-    T_data = np.asarray(state.T.data, dtype=np.float64)
-    T_min_final, T_max_final = (
-        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
-        if T_data.size else (float("nan"), float("nan")))
-    notes = (f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
+    # OCEAN-masked (2026-08-10): lat-lon/tripole pin land tracers at 0 C, so
+    # the unmasked min printed "T range=[0.00,..]" that read as a front
+    # undershoot. WHOLE-RUN extremes from the per-sample diag series (same
+    # _rpe_extract mask as the energy diagnostics), so a transient excursion
+    # cannot pass by diffusing away before the final state.
+    T_min_final = (float(np.min(diag["T_min"])) if diag.get("T_min")
+                   else float("nan"))
+    T_max_final = (float(np.max(diag["T_max"])) if diag.get("T_max")
+                   else float("nan"))
+    # RPE_rel is the MIXING metric (sorted, Ilicak 2012); PE_rel is dynamic
+    # and also moves through the physical PE->KE conversion.
+    rpe_rel_final = diag["RPE_rel"][-1] if diag.get("RPE_rel") else float("nan")
+    notes = (f"RPE_rel={rpe_rel_final:.3e} (mixing), "
+             f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
              f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
@@ -5801,6 +6296,42 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_value_threshold(
         ok, notes, T_max_final, 200.0,
         label="T_max_final", op="le", units="C")
+    # BOUNDED FRONT + PHYSICAL MIXING SIGN (2026-08-10). The IC is exactly
+    # T in [T_cold, T_warm]; unforced advection-diffusion cannot leave it, so
+    # any excursion is scheme over/undershoot or advecting-flux/thickness
+    # inconsistency (both fixed: FCT / implicit_cn arms hold bounds to ~1e-9
+    # over 1 day -- scripts/validate/lockex_rpe_trace.py). Tolerance 1e-6 K:
+    # 3 decades above measured clean-arm noise, 3 below the smallest defect
+    # this gate exists to catch (0.002 K, tripole pre-fix). Sorted RPE_mov
+    # can only RISE under spurious mixing; negative RPE_rel means the metric
+    # or the dycore is wrong, never "less mixing".
+    from legoesm.ocean.experiments.lock_exchange import (
+        LockExchangeConfig as _LXC)
+    ok, notes = _apply_value_threshold(
+        ok, notes, T_min_final, float(_LXC().T_cold_C) - 1e-6,
+        label="T_min_front", op="ge", units="C")
+    ok, notes = _apply_value_threshold(
+        ok, notes, T_max_final, float(_LXC().T_warm_C) + 1e-6,
+        label="T_max_front", op="le", units="C")
+    # Deadband -1e-12 (codex 2026-08-10): a genuinely zero-mixing short run
+    # sits at the metric's host-summation/sorting noise floor (~1e-16..1e-13
+    # relative); the defect this gate catches was -4e-7 .. -3e-4.
+    ok, notes = _apply_value_threshold(
+        ok, notes, rpe_rel_final, -1e-12,
+        label="RPE_rel_mixing_sign", op="ge", units="")
+    # HEAT CONSERVATION (GLM 2026-08-10): unforced run, so wet heat content
+    # on moving volumes is invariant. Tolerance 1e-6 relative: legoESM arms
+    # conserve to machine eps; FESOM linfs legitimately drifts ~9e-8/day
+    # (its concentration/dilution approximation), i.e. 4.5e-7 over 5 days
+    # -- inside the gate, while a genuine flux leak or clip is orders above.
+    heat_series = diag.get("heat", [])
+    if heat_series and abs(heat_series[0]) > 0.0:
+        heat_rel_drift = abs(heat_series[-1] / heat_series[0] - 1.0)
+    else:
+        heat_rel_drift = float("nan")
+    ok, notes = _apply_value_threshold(
+        ok, notes, heat_rel_drift, 1e-6,
+        label="heat_rel_drift", op="le", units="")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -5899,10 +6430,13 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # documented ``Temperature within [-200, 200] C`` blowup
     # check (see "Overflow" Validation Thresholds in
     # ocean_experiments_reference.md).
-    T_data = np.asarray(state.T.data, dtype=np.float64)
+    # OCEAN-masked, same as run_lock_exchange (2026-08-10): unmasked min
+    # printed land-pinned 0 C as an apparent undershoot on lat-lon arms.
+    T_o, _, _, mask_o, _, _ = _rpe_extract(state, tc.grid_type, grid, z_coord)
+    T_wet = T_o[np.broadcast_to((mask_o > 0.5)[..., np.newaxis], T_o.shape)]
     T_min_final, T_max_final = (
-        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
-        if T_data.size else (float("nan"), float("nan")))
+        (float(T_wet.min()), float(T_wet.max()))
+        if T_wet.size else (float("nan"), float("nan")))
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}, "
              f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
@@ -6248,7 +6782,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["cubed_sphere", "latlon", "mpas",
                  "mpas_regional", "latlon_regional", "cs_regional",
                  "latlon_channel", "mpas_channel",
-                 "spectral",
+                 "spectral", "fesom", "tripole",
                  "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(

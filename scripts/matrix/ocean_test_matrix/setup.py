@@ -16,6 +16,14 @@ def _parse_resolution(tc):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "mpas":
         return {"level": int(tc.resolution.replace("ico", ""))}
+    elif tc.grid_type == "fesom":
+        # FESOM is mesh-file-backed, not sized by a resolution integer.
+        if tc.resolution != "pi":
+            raise ValueError(
+                f"FESOM resolution {tc.resolution!r} is not supported; FESOM "
+                f"is mesh-file-backed and only the packaged 'pi' mesh ships."
+            )
+        return {"mesh_dir": None}
     elif tc.grid_type == "mpas_regional":
         return {"resolution_km": int(tc.resolution.replace("km", ""))}
     elif tc.grid_type == "latlon_regional":
@@ -271,6 +279,59 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "fesom":
+        # FESOM2 unstructured triangular dycore (the fesom_jax package).
+        from legoesm.grids.factory import create_grid
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            FesomOceanConfig, FesomOceanModel)
+        from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+
+        # These scalar physics knobs have NO FESOM equivalent. Dropping any of
+        # them silently would confound the cubed_sphere/latlon/fesom
+        # comparison, so reject them loudly instead.
+        _no_fesom_equivalent = {
+            "A_h": A_h, "B_h": B_h, "C_smag": C_smag, "K_h": K_h,
+            "K_bih": K_bih, "bottom_drag_r": bottom_drag_r, "A_v": A_v,
+            "K_v": K_v, "eos": eos, "eos_linear": eos_linear,
+            "tracer_advection": tracer_advection, "pv_scheme": pv_scheme,
+            "apvm_dt": apvm_dt, "pv_alpha": pv_alpha,
+            "K_zeta_bih": K_zeta_bih, "C_leith": C_leith,
+            "C_leith_modified": C_leith_modified,
+            "momentum_advection": momentum_advection,
+            "weno_d_term": weno_d_term, "barotropic_solver": barotropic_solver,
+            "barotropic_diffusion_alpha": barotropic_diffusion_alpha,
+            "barotropic_div_damp": barotropic_div_damp,
+            "gm_redi": gm_redi, "physics": physics,
+        }
+        unsupported = {k: v for k, v in _no_fesom_equivalent.items()
+                       if v is not None}
+        if unsupported:
+            raise NotImplementedError(
+                "FESOM has no equivalent for these physics kwargs (silently "
+                "dropping them would confound the model comparison): "
+                + ", ".join(f"{k}={v!r}" for k, v in unsupported.items())
+            )
+
+        # `_create_ocean_setup` never sees the experiment config, so take the
+        # LockExchangeConfig default for land_lat_threshold. It MUST match the
+        # cubed_sphere/latlon arms (80.0) -- a different land mask would make
+        # the three-way comparison a confound, not a result.
+        grid = create_grid(
+            "fesom",
+            mesh_dir=params["mesh_dir"],
+            H_max=H_max,
+            nlev=nlev,
+            land_lat_threshold=LockExchangeConfig().land_lat_threshold,
+        )
+        # FesomOceanModel.step raises on a dt mismatch, so the config dt must
+        # equal the timestep the matrix timeloop will call it with.
+        cfg = FesomOceanConfig(dt=config.DEFAULT_DT)
+        model = FesomOceanModel(grid.mesh, z_coord, cfg)
+        coord_kind = "fesom"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
 
     elif tc.grid_type == "mpas_regional":
         from legoesm.grids.voronoi import create_regional_voronoi_mesh

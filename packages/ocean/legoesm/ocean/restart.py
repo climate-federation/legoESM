@@ -166,6 +166,12 @@ def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
         # Voronoi cell centres: 1-D (nCells,); the scorer flattens any source.
         return (np.rad2deg(np.asarray(grid.latCell)),
                 np.rad2deg(np.asarray(grid.lonCell)))
+    if grid_type == "fesom":
+        # FESOM2 unstructured triangular mesh: one lat/lon per NODE, 1-D
+        # (nod2D,) -- the same convention as the MPAS branch above (one value
+        # per cell). FesomOceanGrid.lat/.lon are geographic radians.
+        return (np.rad2deg(np.asarray(grid.lat)),
+                np.rad2deg(np.asarray(grid.lon)))
     if grid_type == "tripole":
         # Curvilinear tracer points are genuinely 2-D.
         return (np.rad2deg(np.asarray(grid.lat_T)),
@@ -177,7 +183,7 @@ def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
         return lat2d, lon2d
     raise ValueError(
         f"grid_lat2d_lon2d_deg: unknown grid_type {grid_type!r} "
-        "(expected one of: latlon, tripole, cubed_sphere, mpas)")
+        "(expected one of: latlon, tripole, cubed_sphere, mpas, fesom)")
 
 
 def save_mld_snapshot(state, path: str | Path, *,
