@@ -51,6 +51,10 @@ from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
+from legoesm.atmosphere.physics.radiation.simple_lw import (  # noqa: E402
+    SimpleLWConfig,
+    simple_lw_temperature_tendency,
+)
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
@@ -72,13 +76,13 @@ from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # 
 # resolve_sam_case_dir.
 _DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
 _FCOR = 0.376e-4
-# Stevens et al. 2005 RF01 radiation + subsidence parameters.
-_KAPPA_RAD = 85.0          # LW absorption [m²/kg]
-_F0 = 70.0                 # cloud-top jump [W/m²]
-_F1 = 22.0                 # cloud-base jump [W/m²]
-_DIV = 3.75e-6             # large-scale divergence D [1/s]
-_A_RAD = 1.0               # the 'a' coefficient of the 3rd term [m^-4/3]
-_QT_INV = 8.0e-3           # z_i: q_t isoline [kg/kg] (RF01 spec)
+# Stevens et al. 2005 RF01 radiation + subsidence parameters. The LW fit now
+# lives in legoesm.atmosphere.physics.radiation.simple_lw, which the SCM calls
+# too; _SIMPLE_LW holds this case's instance of it. _DIV is still needed here
+# on its own for the subsidence w_ls = -D z, which is a forcing, not radiation.
+_SIMPLE_LW = SimpleLWConfig()
+_DIV = _SIMPLE_LW.divergence_s     # large-scale divergence D [1/s]
+_QT_INV = _SIMPLE_LW.qt_inversion_kg_kg   # z_i: q_t isoline [kg/kg]
 _NC_RF01 = 140.0e6         # droplet concentration [1/m³]
 
 
@@ -225,42 +229,34 @@ def build(args, dtype):
 
 
 def make_stevens_lw(g, ref, dtype):
-    """Stevens et al. (2005) RF01 parameterized LW: per-column F(z) on faces →
-    θ tendency. All on the LES (bottom-up) grid; jitted with the step."""
+    """Stevens et al. (2005) RF01 parameterized LW as a θ tendency.
+
+    The flux fit itself is shared with the SCM
+    (:mod:`legoesm.atmosphere.physics.radiation.simple_lw`) so the two sides
+    of an SCM-vs-LES comparison cannot drift apart. What stays here is the
+    LES-specific part: the tracer-slot layout, and the conversion of the
+    kernel's TEMPERATURE tendency to the θ tendency this dycore prognoses,
+    which is a division by the reference Exner function.
+
+    ``g.z_c`` is passed explicitly rather than re-derived from ``g.z_f``: the
+    two agree mathematically on this uniform grid but need not agree in the
+    last bit, and the difference would reach the clear-sky term.
+    """
     rho = jnp.asarray(ref.rho_c, dtype)            # (nz,)
     exner = jnp.asarray(ref.exner_c, dtype)
     z_c = g.z_c; z_f = g.z_f; dz = g.dz
-    cp = constants.c_pd
+    cp = _SIMPLE_LW.cp_j_kg_k
 
     def lw_theta_tendency(tracers):
         # CLOUD liquid only — Stevens/gSAM rad_simple excludes rain from the
-        # LW optical depth (codex (c); RF01 is non-drizzling anyway).
+        # LW optical depth (codex (c); RF01 is non-drizzling anyway). Slot 0
+        # is q_v, so q_t is the sum.
         q_l = tracers[..., 1]
-        # Q(z1,z2) = κ ∫ ρ q_l dz — cumulative from bottom on faces.
-        dq = _KAPPA_RAD * rho * q_l * dz           # per-layer increment
-        Q_from_bot = jnp.cumsum(dq, axis=-1)       # at TOP face of each layer
-        Q_bot_f = jnp.pad(Q_from_bot, ((0, 0), (0, 0), (1, 0)))   # (.., nz+1)
-        Q_tot = Q_bot_f[..., -1:]
-        Q_from_top_f = Q_tot - Q_bot_f
-        # z_i: the FACE above the highest cell with q_t ≥ 8 g/kg (gSAM
-        # rad_simple convention, codex (c,f)); all-dry column ⇒ z_i = 0 (term3
-        # then applies its weak clear-sky divergence from the surface).
         q_t = tracers[..., 0] + q_l
-        below = q_t >= _QT_INV
-        k_top = jnp.max(jnp.where(
-            below, jnp.arange(below.shape[-1])[None, None, :], -1), axis=-1)
-        z_i = z_f[k_top + 1][..., None]            # face above; k_top=-1 ⇒ z_f[0]=0
-        rho_i = jnp.interp(z_i[..., 0], z_c, rho)[..., None]
-        # F on faces (nz+1):
-        zf3 = z_f[None, None, :]
-        dz_i = jnp.clip(zf3 - z_i, 0.0, None)
-        term3 = (_A_RAD * rho_i * cp * _DIV
-                 * (0.25 * dz_i ** (4.0 / 3.0)
-                    + z_i * dz_i ** (1.0 / 3.0)))
-        F = (_F0 * jnp.exp(-Q_from_top_f) + _F1 * jnp.exp(-Q_bot_f) + term3)
-        # dT/dt = −(1/ρ c_p) ∂F/∂z (centres) → θ via reference Exner.
-        dF = (F[..., 1:] - F[..., :-1]) / dz
-        return -dF / (rho * cp * exner)[None, None, :]
+        dT_dt = simple_lw_temperature_tendency(
+            q_l, q_t, rho, dz, z_f, _SIMPLE_LW, z_full=z_c)
+        # θ = T/Exner, and the reference Exner is time-invariant here.
+        return dT_dt / exner[None, None, :]
 
     return lw_theta_tendency
 

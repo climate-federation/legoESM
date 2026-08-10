@@ -92,24 +92,21 @@ __physics_contract__ = {
         "net_upward_flux": "W/m^2 (positive UP, at half levels)",
         "temperature_tendency": "K/s (at full levels)",
     },
-    "signs": (
+    "sign_convention": (
         "z is positive UP and the flux is NET UPWARD, so dT/dt = "
         "-(1/(rho cp)) dF/dz: a flux increasing with height is a COOLING. "
         "Cloud-top cooling is therefore negative dT/dt just below the "
         "inversion, which is the scheme's entire purpose."
     ),
-    "conserves": (
-        "Nothing by construction -- this is a prescribed-flux parameterization, "
-        "not a solver. The column-integrated heating equals the net flux "
-        "difference across the column over cp, exactly, because the tendency "
-        "is a telescoping flux difference."
-    ),
-    "differentiable": (
-        "Yes in the empirical coefficients and in the state through the "
-        "optical depth. The inversion index is an argmax-like integer "
-        "selection and is NOT differentiable; it is a threshold crossing, and "
-        "the oracle defines it that way."
-    ),
+    # A prescribed-flux fit conserves nothing on its own; what it does hold
+    # exactly is that the column-integrated heating equals the net flux
+    # difference across the column, because the tendency is a telescoping
+    # flux difference (asserted in test_simple_lw.py).
+    "conserves": ["column_energy_flux_difference"],
+    # Differentiable in the empirical coefficients and, through the optical
+    # depth, in the state. The inversion INDEX is an integer threshold
+    # crossing and carries no gradient -- the oracle defines it that way.
+    "differentiable": True,
     "reference": (
         "Stevens et al. (2005), Mon. Wea. Rev. 133, 1443-1462 (DYCOMS-II RF01 "
         "intercomparison); gSAM 1.8.8 SRC/rad_simple.f90."
@@ -124,8 +121,8 @@ __physics_contract__ = {
 
 __param_spec__ = {
     "SimpleLWConfig": {
-        "scheme_key": "atm.rad.SimpleLWConfig",
-        "fields": {
+        "scheme_key": "atm.rad.simple_lw",
+        "params": {
             "f0_w_m2": {
                 "units": "W/m^2", "bounds": (0.0, 200.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "longwave",
@@ -150,24 +147,18 @@ __param_spec__ = {
                 "reference": "Stevens et al. 2005 RF01 large-scale divergence D",
                 "shape": None,
             },
-            "qt_inversion_kg_kg": {
-                "units": "kg/kg", "bounds": (1.0e-3, 2.0e-2),
-                "tunable_tier": 0, "transform": "none", "category": "longwave",
-                "reference": (
-                    "RF01 spec inversion definition; a measurement convention "
-                    "that selects a level, not a calibratable closure."
-                ),
-                "shape": None,
-            },
-            "cp_j_kg_k": {
-                "units": "J/kg/K", "bounds": (900.0, 1100.0),
-                "tunable_tier": 0, "transform": "none", "category": "longwave",
-                "reference": (
-                    "thermodynamic constant, not a closure: constants.c_pd "
-                    "here, the DycomsII intercomparison value in the spec."
-                ),
-                "shape": None,
-            },
+        },
+        "excluded": {
+            "qt_inversion_kg_kg": (
+                "measurement convention, not a closure: the RF01 spec DEFINES "
+                "the inversion as the 8 g/kg q_t isoline, and it enters through "
+                "an integer level selection that carries no gradient anyway."
+            ),
+            "cp_j_kg_k": (
+                "thermodynamic constant, not a closure: constants.c_pd here, "
+                "the DycomsII intercomparison's own value when reproducing "
+                "gSAM. Tuning it would be tuning c_p."
+            ),
         },
     },
 }
@@ -224,7 +215,8 @@ def simple_lw_inversion_height(q_total, z_half, config: SimpleLWConfig):
 
 
 def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
-                              config: SimpleLWConfig = SimpleLWConfig()):
+                              config: SimpleLWConfig = SimpleLWConfig(),
+                              *, z_full=None):
     """Net UPWARD longwave flux at half levels [W/m^2], positive up.
 
     Parameters
@@ -234,12 +226,21 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
         oracle and must be excluded by the caller.
     q_total : array (..., nlev)
         Vapour + cloud condensate [kg/kg], for the inversion isoline.
-    rho, dz : array (nlev,)
-        Layer density [kg/m^3] and thickness [m]. These are reference-state
-        profiles in the LES and column profiles in the SCM; both are
-        one-dimensional in the vertical and broadcast against ``q_cond``.
+    rho : array (nlev,)
+        Layer density [kg/m^3]. A reference-state profile in the LES, a
+        column profile in the SCM; one-dimensional in the vertical and
+        broadcast against ``q_cond``.
+    dz : array (nlev,) or scalar
+        Layer thickness [m]; scalar for a uniform grid.
     z_half : array (nlev+1,)
         Half-level heights [m], surface = 0.
+    z_full : array (nlev,), optional
+        Full-level heights, used ONLY to interpolate the density at the
+        inversion. Defaults to the midpoints of ``z_half``. A caller whose
+        grid already carries its own cell centres should pass them: on a
+        uniform grid ``(k + 0.5) dz`` and ``0.5 (z_k + z_{k+1})`` are equal
+        mathematically but can differ in the last bit, and that bit reaches
+        the clear-sky term through the interpolation.
 
     All profile axes are ordered BOTTOM-UP (index 0 nearest the surface),
     which is the orientation the cumulative optical depths are defined in.
@@ -257,8 +258,9 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
     # there exactly as gSAM's `k = itop+1, nzm` loop bound does.
     dz_i = jnp.clip(z_half - z_i, 0.0, None)
     if config.density_at_inversion:
-        z_full = 0.5 * (z_half[:-1] + z_half[1:])
-        rho_ref = jnp.interp(z_i[..., 0], z_full, rho)[..., None]
+        centres = (0.5 * (z_half[:-1] + z_half[1:]) if z_full is None
+                   else z_full)
+        rho_ref = jnp.interp(z_i[..., 0], centres, rho)[..., None]
     else:
         # gSAM's local density, held at the layer below each face; the top
         # face reuses the topmost layer (gSAM's flux(nz) uses rhow(nz)).
@@ -271,7 +273,8 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
 
 
 def simple_lw_temperature_tendency(q_cond, q_total, rho, dz, z_half,
-                                   config: SimpleLWConfig = SimpleLWConfig()):
+                                   config: SimpleLWConfig = SimpleLWConfig(),
+                                   *, z_full=None):
     """Radiative TEMPERATURE tendency [K/s] at full levels, bottom-up.
 
     ``dT/dt = -(1/(rho cp)) dF/dz`` with ``F`` the net UPWARD flux and ``z``
@@ -283,6 +286,7 @@ def simple_lw_temperature_tendency(q_cond, q_total, rho, dz, z_half,
     here would silently apply an Exner factor to the single-column model,
     which prognoses T.
     """
-    flux = simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half, config)
+    flux = simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half, config,
+                                     z_full=z_full)
     d_flux = flux[..., 1:] - flux[..., :-1]
     return -d_flux / (rho * config.cp_j_kg_k * dz)
