@@ -395,8 +395,11 @@ def section_2b_target_isolation() -> list[str]:
         b = float(fn(*(rest_off[0], q_v_off, *rest_off[1:]), DT_S,
                      cfg(**{ICE_FIELD: False, "N_i0": 0.0})).dq_v_dt[0, 0])
         resid = abs(a - b) / max(abs(b), 1.0e-30)
+        # SCIENTIFIC notation, not %8.3f: the bound below is 1e-9 relative and
+        # a fixed-point "0.000 %" only resolves 5e-6, so the printout has to be
+        # finer than the bound it is used to justify.
         print(f"    {scheme:10s} ON(S)={a:+.6e}  OFF(S')={b:+.6e}  "
-              f"|residual| = {100 * resid:8.3f} % of OFF(S')")
+              f"|residual| = {resid:.3e} rel  ({100 * resid:.4f} % of OFF(S'))")
         # Per-scheme bound: exact for the two schemes measured at 0, gross for
         # the one with an unexplained residual (see the docstring).
         bound = _TARGET_ISOLATION_BOUND.get(scheme, 1.0)
