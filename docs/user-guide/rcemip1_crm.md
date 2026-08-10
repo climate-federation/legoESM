@@ -36,7 +36,7 @@ What matches the oracle, and what does not:
 
 | setting | gSAM `prm_rect` / `grd` / `Build` | here |
 | --- | --- | --- |
-| vertical grid | 74 levels, 37 m first centre → 500 m aloft, 33 km top | identical (`--sam-grd` reads the oracle file) |
+| vertical grid | 74 levels, 37 m first centre → 500 m aloft, 33 km top | `--sam-grd` reads the oracle file: INTERFACES identical; cell centres differ because legoESM defines the centre as the midpoint of its interfaces and SAM's scalar level is not. Interior levels are off by a quarter of the levels' second difference (~1.5 m where it stretches, 0 where uniform); the surface centre is off by `(z1-3*z0)/4` even on a uniform column, and the top lands exactly |
 | radiation | RRTM, `nrad=30` × dt 12 s = 360 s | RRTMGP, 360 s |
 | insolation | `solar_constant=551.58`, `zenith_angle=42.05`, perpetual | identical (`--insolation rcemip`) |
 | SST / surface | `OCEAN`, `tabs_s=300`, interactive fluxes | identical |

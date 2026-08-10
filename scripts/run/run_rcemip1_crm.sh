@@ -63,7 +63,12 @@ PY=${PY:-.venv/bin/python}
 SPINUP_OUT=${SPINUP_OUT:-results/rcemip300_60day}
 VALIDATE=${VALIDATE:-1}
 # Extra run_rcemip_plane.py flags, appended verbatim to both phases (e.g.
-# DRIVER_FLAGS="--hard-saturation-adjustment --hard-sat-threshold 1.0").
+# DRIVER_FLAGS="--hard-saturation-adjustment --hard-sat-adjust-threshold 1.0").
+# The threshold flag is --hard-sat-adjust-threshold: --hard-sat-threshold, the
+# name this example used to carry, is not a flag any more and argparse rejects
+# it. The IN-SCHEME adjustment above is the preferred mechanism; the post-step
+# hook is the separate --poststep-saturation-drain family (#1559 renamed it out
+# of the collision), and the driver refuses both at once.
 DRIVER_FLAGS=${DRIVER_FLAGS:-}
 
 # RRTMGP everywhere, including the spin-up. Gray radiation is cheaper but it
