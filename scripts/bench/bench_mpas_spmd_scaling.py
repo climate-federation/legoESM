@@ -431,27 +431,21 @@ def main() -> int:
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
 
     if args.timed_scan:
-        # ONE jit(scan) over the steady window, ONE sync at the end —
-        # the same execution shape as the test suite's outer_scan mirror
-        # of run_levante_gpu_scaling._build_timed_scan_runner.
+        # ASYNC WINDOW: dispatch (steps - warmup) steps with NO per-step
+        # block_until_ready, ONE sync at the end.  Removes the per-step
+        # host round-trip and lets XLA pipeline across steps — the same
+        # discriminator an outer jit(lax.scan) would give, WITHOUT a new
+        # outer jit: wrapping the step in one closes over its sharded
+        # closure constants (stacked meshes / halo schedules), which
+        # multicontroller forbids (this killed the first scan_b arm,
+        # job 26851745).
         n_scan = args.steps - args.warmup
-        _phys = physics_fn
-        if _phys is not None:
-            _wrapped = lambda st, d: step(st, d, physics_fn=_phys)  # noqa: E731
-        else:
-            _wrapped = step
-        dt_const = float(dt)
-
-        @jax.jit
-        def _runner(st):
-            def _body(carry, _):
-                return _wrapped(carry, dt_const), None
-            return jax.lax.scan(_body, st, None, length=n_scan)[0]
-
-        s = _runner(s)          # compile + first run (not timed)
-        _block(s)
         t0 = time.perf_counter()
-        s = _runner(s)
+        for _ in range(n_scan):
+            if physics_fn is not None:
+                s = step(s, dt, physics_fn=physics_fn)
+            else:
+                s = step(s, dt)
         _block(s)
         scan_median_ms = (time.perf_counter() - t0) * 1e3 / n_scan
         # Fill per_step_ms so the steady slice below stays meaningful.
