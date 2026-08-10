@@ -21,7 +21,10 @@ set +e
 # Nothing here is a production measurement; it sizes the production arms.
 # ---------------------------------------------------------------------------
 WT=/burg-archive/glab/users/pg2328/_wt_convtune_pin
-PIN=52a4db2679f995b4fd91bfb18e0cefde16b8096e
+# PIN is exported by the launch command (sbatch --export=ALL,PIN=<sha>), not
+# hardcoded: the SHA of a commit cannot be known inside the commit itself,
+# and a self-derived $(git rev-parse HEAD) would make the check vacuous.
+PIN=${PIN:?export PIN=<sha> so the job asserts the tree it was reviewed at}
 REPO=/burg-archive/glab/users/pg2328/legoESM
 REF=$REPO/results/rcemip_ref_sam300
 OUT=$REPO/results/scm_rce_convtune/_verify
@@ -67,11 +70,11 @@ JAX_ENABLE_X64=1 $PY -m pytest -q -p no:cacheprovider \
   tests/unit/test_supersaturation_guard_behaviour.py \
   tests/unit/test_check_ifs_supersaturation_cap.py \
   2>&1 | tail -25
-echo "GATES_RC=$?"
+echo "GATES_RC=${PIPESTATUS[0]}"
 
 echo; echo "############ 2. IFS cap reachability in all three lanes ############"
 JAX_ENABLE_X64=1 $PY $WT/scripts/validate/check_ifs_supersaturation_cap.py 2>&1 | tail -60
-echo "CAP_RC=$?"
+echo "CAP_RC=${PIPESTATUS[0]}"
 
 echo; echo "############ 3. cost probe: 1 scheme, short SCM, morrison + guard ############"
 mkdir -p $OUT
@@ -92,5 +95,5 @@ mkdir -p $OUT
   --tune-seed 20260810 \
   --force \
   --no-merge 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader" | tail -40
-echo "COST_RC=$?"
+echo "COST_RC=${PIPESTATUS[0]}"
 echo ALLDONE
