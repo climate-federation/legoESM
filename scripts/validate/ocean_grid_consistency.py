@@ -1,0 +1,489 @@
+"""Cross-grid consistency + theory check for the ocean benchmark suite.
+
+PASS/FAIL says a run stayed inside its own gates. It does NOT say the
+dycores agree with EACH OTHER, nor that any of them reproduces the
+analytic answer. This script asks those two questions of the artifacts
+the matrix already writes:
+
+  CONSISTENCY  every arm's field is regridded by the matrix onto the SAME
+               1-degree lat-lon mesh, so arms are compared cell-by-cell:
+               pairwise RMS difference normalised by the field's own RMS.
+               The tripole arm is EXCLUDED by default -- it keeps NEMO's
+               continents (wet fraction 0.53 native vs 0.89), so a
+               cell-by-cell comparison against the land-free arms measures
+               the land mask, not the dycore.
+
+  THEORY       where the case has a closed-form answer, the measured
+               number is printed next to it:
+                 * barotropic_wave       phase speed  c = sqrt(g H)
+                 * lock_exchange         front speed vs Benjamin (1968)
+                                         c = 0.5 sqrt(g' H) -- reported,
+                                         with a refinement study
+                                         (--convergence) showing the
+                                         deficit shrinking but NOT a
+                                         demonstrated limit; the shipped
+                                         global config is far too coarse
+                 * rest_state_*          exact: |u| = 0, d(eta) = 0
+               Cases WITHOUT a defensible closed form on this geometry
+               (geostrophic_adjustment, phillips_two_layer,
+               inertia_gravity_wave) are reported as consistency-only and
+               say so, rather than being compared to a formula that does
+               not apply -- the mistake the IGW gate made.
+
+Run AFTER the suite; reads only saved artifacts (no model runs).
+"""
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+from pathlib import Path
+
+import numpy as np
+
+from legoesm import constants as C
+
+_REPO = Path(__file__).resolve().parents[2]
+
+#: Arms compared cell-by-cell. tripole excluded -- different basin.
+CONSISTENCY_GRIDS = ["cubed_sphere", "latlon", "mpas", "fesom"]
+ALL_GRIDS = CONSISTENCY_GRIDS + ["tripole"]
+
+#: Arm-to-arm agreement threshold in the FIELD'S OWN UNITS. Set from the
+#: physics, not from the spread: two ocean dycores that agree on SST to
+#: 1e-3 degC or on SSH to 1e-3 m are the same answer for every purpose
+#: this suite serves. A case-relative threshold cannot be used here --
+#: for a uniform rest state the field's own variability IS round-off, so
+#: any relative test either passes everything or fails everything.
+AGREE_TOL = {"SST": 1.0e-3, "eta": 1.0e-3}
+
+#: field used for the cross-grid comparison, per case
+CASE_FIELD = {
+    "rest_state_stratified_with_land": "SST",
+    "rest_state_uniform_with_land": "SST",
+    "rest_state_stratified_no_land": "SST",
+    "rest_state_uniform_no_land": "SST",
+    "barotropic_wave": "eta",
+    "geostrophic_adjustment": "SST",
+    "phillips_two_layer": "eta",
+    "inertia_gravity_wave": "eta",
+    "lock_exchange": "SST",
+}
+
+
+def _find(root: Path, case: str, grid: str) -> Path | None:
+    hits = [h for h in root.glob(f"{case}/**/{grid}/*/snapshots_latlon.npz")
+            if h.parent.parent.name == grid]
+    return hits[0] if hits else None
+
+
+def _load(npz: Path, field: str):
+    z = np.load(npz)
+    a = np.asarray(z[field], dtype=np.float64)
+    m = np.asarray(z["land_mask"], dtype=np.float64)
+    m = m[-1] if m.ndim == 3 else m
+    return (np.asarray(z["lat"]), np.asarray(z["lon"]),
+            a, m, np.asarray(z["times_days"], dtype=np.float64))
+
+
+def _to_common_mesh(lat, lon, a, m, nlat=91, nlon=180):
+    """Bilinear-interpolate (a, mask) onto a fixed lat-lon mesh.
+
+    The matrix leaves an arm on its NATIVE mesh when that mesh is already
+    lat-lon (latlon stays 36x72) and regrids the unstructured arms to
+    181x360, so the saved artifacts are NOT co-located. Interpolating both
+    onto one coarse mesh (2 deg by default) is what makes a cell-by-cell
+    comparison meaningful; it is coarser than every arm, so it smooths
+    rather than invents.
+    """
+    lat_t = np.linspace(-89.0, 89.0, nlat)
+    lon_t = np.linspace(0.0, 358.0, nlon)
+    # Nearest-neighbour in each axis is enough at this coarsening and
+    # cannot manufacture values outside the field's own range.
+    lat_src = np.asarray(lat, dtype=np.float64)
+    lon_src = np.mod(np.asarray(lon, dtype=np.float64), 360.0)
+    ji = np.abs(lat_t[:, None] - lat_src[None, :]).argmin(axis=1)
+    ii = np.abs(((lon_t[:, None] - lon_src[None, :] + 180.0) % 360.0)
+                - 180.0).argmin(axis=1)
+    return (lat_t, lon_t, a[np.ix_(ji, ii)], m[np.ix_(ji, ii)])
+
+
+def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
+    """Arm-to-arm difference of the final field, in the field's own units.
+
+    Reported per pair:
+      rms_abs        area-weighted RMS difference on the COMMON wet cells
+      rms_shifted    the same after removing the best zonal shift, and
+      shift_deg      that shift. A dispersive wave that two arms propagate
+                     at slightly different speeds shows a large rms_abs and
+                     a much smaller rms_shifted: that is a PHASE difference,
+                     not different physics. Equal values mean the fields
+                     genuinely differ (GLM-5.2).
+      overlap_frac   fraction of the mesh both arms call ocean -- pairs with
+                     different overlap are NOT directly comparable, so the
+                     number is printed rather than hidden.
+
+    A case-level reference amplitude (independent of any pair) is returned
+    separately so the differences can be read against one fixed scale.
+    """
+    field = CASE_FIELD[case]
+    got = {}
+    for g in grids:
+        p = _find(root, case, g)
+        if p is None:
+            continue
+        lat, lon, a, m, t = _load(p, field)
+        lat_t, lon_t, A, M = _to_common_mesh(lat, lon, a[-1], m)
+        got[g] = (A, M > 0.5)
+    if not got:
+        return {}, float("nan")
+    # ONE case-level reference: the area-weighted anomaly RMS of the arm
+    # with the largest wet area, chosen without reference to any pair.
+    w_lat = np.cos(np.radians(np.linspace(-89.0, 89.0, 91)))[:, None]
+    ref_name = max(got, key=lambda g: got[g][1].sum())
+    Aref, Mref = got[ref_name]
+    wr = np.where(Mref & np.isfinite(Aref), w_lat, 0.0)
+    mean_ref = float(np.sum(np.where(wr > 0, Aref, 0.0) * wr) / max(wr.sum(), 1e-30))
+    case_ref = float(np.sqrt(np.sum(wr * (np.where(wr > 0, Aref, mean_ref)
+                                          - mean_ref) ** 2)
+                             / max(wr.sum(), 1e-30)))
+
+    def _wrms(d, w):
+        return float(np.sqrt(np.sum(w * d ** 2) / max(w.sum(), 1e-30)))
+
+    out = {}
+    for a_name, b_name in itertools.combinations(sorted(got), 2):
+        A, mA = got[a_name]
+        B, mB = got[b_name]
+        both = mA & mB & np.isfinite(A) & np.isfinite(B)
+        if not both.any():
+            out[f"{a_name}|{b_name}"] = dict(rms_abs=float("nan"),
+                                             rms_shifted=float("nan"),
+                                             shift_deg=float("nan"),
+                                             overlap_frac=0.0)
+            continue
+        w = np.where(both, np.broadcast_to(w_lat, A.shape), 0.0)
+        rms = _wrms(np.where(both, A - B, 0.0), w)
+        # Cheapest phase/physics discriminator: minimise over a rigid
+        # zonal shift (one roll per candidate; the mesh is 2 deg).
+        best, best_shift = rms, 0.0
+        n_lon = A.shape[1]
+        for k in range(1, n_lon):
+            Bk = np.roll(B, k, axis=1)
+            mk = mA & np.roll(mB, k, axis=1) & np.isfinite(A) & np.isfinite(Bk)
+            if not mk.any():
+                continue
+            wk = np.where(mk, np.broadcast_to(w_lat, A.shape), 0.0)
+            r = _wrms(np.where(mk, A - Bk, 0.0), wk)
+            if r < best:
+                best, best_shift = r, (k if k <= n_lon // 2 else k - n_lon) * 2.0
+        out[f"{a_name}|{b_name}"] = dict(
+            rms_abs=rms, rms_shifted=best, shift_deg=best_shift,
+            overlap_frac=float(both.sum() / both.size))
+    return out, case_ref
+
+
+def theory_lock_exchange(root: Path, grids=ALL_GRIDS):
+    """Gravity-current front speed vs Benjamin (1968) c = 0.5 sqrt(g' H).
+
+    The front is tracked as the longitude where the equatorial SST crosses
+    the mid-temperature, measured from its initial position.
+    """
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    cfg = LockExchangeConfig()
+    g_prime = C.g * 2.0e-4 * (cfg.T_warm_C - cfg.T_cold_C)   # linear EOS
+    c_theory = 0.5 * np.sqrt(g_prime * cfg.H_max)
+    rows = {}
+    for grid in grids:
+        p = _find(root, "lock_exchange", grid)
+        if p is None:
+            continue
+        lat, lon, a, m, t = _load(p, "SST")
+        j = int(np.argmin(np.abs(lat)))            # equatorial row
+        T_mid = 0.5 * (cfg.T_cold_C + cfg.T_warm_C)
+        def _front(k):
+            """Longitude where the equatorial SST crosses T_mid, with
+            LINEAR SUB-CELL interpolation. Cell-index precision is not
+            enough: theory predicts ~1.9 deg of travel in 5 days against a
+            1-2 deg output mesh, so a nearest-cell front reports exactly
+            zero motion on every arm (measured -- that was this probe's
+            first, wrong, answer)."""
+            row = np.where(m[j, :] > 0.5, a[k, j, :], np.nan)
+            if np.isfinite(row).sum() < 4:
+                return np.nan
+            d = row - T_mid
+            # Descending (warm -> cold) crossings, the front of interest.
+            idx = [i for i in range(len(d) - 1)
+                   if np.isfinite(d[i]) and np.isfinite(d[i + 1])
+                   and d[i] > 0 >= d[i + 1]]
+            if not idx:
+                return np.nan
+            i = idx[0]
+            w = d[i] / (d[i] - d[i + 1])          # 0..1 between the cells
+            return float(lon[i] + w * (lon[i + 1] - lon[i]))
+        x0, x1 = _front(0), _front(len(t) - 1)
+        dt_s = (t[-1] - t[0]) * 86400.0
+        dx_deg = abs(((x1 - x0 + 180.0) % 360.0) - 180.0)
+        speed = dx_deg * (np.pi / 180.0) * C.R_earth / dt_s if dt_s else np.nan
+        rows[grid] = dict(front_deg_moved=dx_deg, speed_m_s=speed,
+                          ratio_to_theory=speed / c_theory)
+    return dict(theory_c_m_s=c_theory, g_prime=g_prime, arms=rows)
+
+
+def theory_rest_state(root: Path, case: str, grids=ALL_GRIDS):
+    """Exact expectation: a rest state stays at rest."""
+    rows = {}
+    for grid in grids:
+        p = _find(root, case, grid)
+        if p is None:
+            continue
+        z = np.load(p)
+        m = np.asarray(z["land_mask"], dtype=np.float64)
+        m = m[-1] if m.ndim == 3 else m
+        wet = m > 0.5
+        # u_sfc can be FACE-staggered (n_lon+1 on a C-grid), so it does
+        # not accept the cell mask; compare shapes before indexing rather
+        # than assuming (it raised IndexError on latlon's 73 columns).
+        if "u_sfc" not in z:
+            # Not every arm's extractor saves a surface velocity; say so
+            # instead of dying or silently reporting 0.
+            rows[grid] = dict(max_abs_u_final=float("nan"),
+                              u_is_cell_shaped=False,
+                              max_abs_eta_final=float(np.nanmax(np.abs(
+                                  np.asarray(z["eta"],
+                                             dtype=np.float64)[-1][wet]))))
+            continue
+        u = np.asarray(z["u_sfc"], dtype=np.float64)[-1]
+        u_wet = u[wet] if u.shape == wet.shape else u[np.isfinite(u)]
+        if u_wet.size == 0:      # all-NaN face field: say so, not "nan"
+            u_wet = np.array([np.nan])
+        eta = np.asarray(z["eta"], dtype=np.float64)
+        rows[grid] = dict(
+            max_abs_u_final=float(np.nanmax(np.abs(u_wet))),
+            u_is_cell_shaped=bool(u.shape == wet.shape),
+            max_abs_eta_final=float(np.nanmax(np.abs(eta[-1][wet]))))
+    return dict(theory="|u| = 0, |eta| = 0 exactly", arms=rows)
+
+
+def theory_barotropic_wave(root: Path, grids=ALL_GRIDS):
+    """Shallow-water phase speed c = sqrt(g H) [reported, not gated].
+
+    The suite's barotropic wave is a Gaussian bump on a GLOBAL basin, so
+    the crest disperses and wraps; a single propagation distance is not a
+    clean speed measurement. The theoretical speed is printed so the
+    scale is on the page, and the arm-to-arm spread of peak |eta| is the
+    part that is actually comparable.
+    """
+    H = 5500.0
+    rows = {}
+    for grid in grids:
+        p = _find(root, "barotropic_wave", grid)
+        if p is None:
+            continue
+        lat, lon, a, m, t = _load(p, "eta")
+        wet = m > 0.5
+        rows[grid] = dict(peak_eta_final=float(np.nanmax(np.abs(a[-1][wet]))),
+                          peak_eta_initial=float(np.nanmax(np.abs(a[0][wet]))))
+    return dict(theory_c_m_s=float(np.sqrt(C.g * H)),
+                note="global basin: dispersive + wrapping, speed not gated",
+                arms=rows)
+
+
+def theory_lock_exchange_convergence(resolutions=("36x72", "72x144",
+                                                   "144x288"), days=5.0):
+    """Does the front speed CONVERGE to Benjamin under refinement?
+
+    This is the check that turns the lock exchange from "the front barely
+    moves, so something is broken" into a result. It RUNS the model (the
+    only part of this script that does), because convergence cannot be
+    read off a single saved run.
+
+    MEASURED 2026-08-10 on lat-lon (5 days):
+        dx 556 km -> 0.041 m/s (0.082 x Benjamin)
+        dx 278 km -> 0.110 m/s (0.222 x)
+        dx 139 km -> 0.247 m/s (0.499 x)
+    The deficit shrinks with dx and the trend is toward 0.5*sqrt(g'H),
+    but this is NOT a demonstrated convergence: three points, the finest
+    still 2x below theory, and none of them asymptotic (the finest cell,
+    139 km, is still ~14x the deformation radius). The honest statement
+    is "the front-speed deficit decreases under refinement, limit not
+    demonstrated"; settling it needs a run at dx of order the
+    deformation radius (~10 km), which the global configuration cannot
+    reach (codex + GLM-5.2 both refused the stronger claim).
+    The global suite configuration is ~4 orders of
+    magnitude too coarse to resolve a 20 m-deep gravity-current head
+    (dx/H ~ 2.8e4), so the shipped case does NOT reproduce Benjamin and
+    is not expected to -- its value is the RPE mixing metric, not front
+    dynamics.
+
+    REFUTED on the way: the arrest is not ROTATIONAL. Rerunning with
+    f = 0 gave a front speed identical to 4 significant figures, so the
+    ~10 km deformation radius is not what limits the current.
+    """
+    import importlib.util
+    import sys
+    from types import SimpleNamespace
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+
+    sys.path.insert(0, str(_REPO / "scripts" / "matrix"))
+    spec = importlib.util.spec_from_file_location(
+        "_rm_conv", _REPO / "scripts" / "matrix" / "run_ocean_test_matrix.py")
+    rm = importlib.util.module_from_spec(spec)
+    sys.modules["_rm_conv"] = rm
+    spec.loader.exec_module(rm)
+
+    cfg = LockExchangeConfig()
+    g_prime = C.g * 2.0e-4 * (cfg.T_warm_C - cfg.T_cold_C)
+    c_theory = 0.5 * np.sqrt(g_prime * cfg.H_max)
+    T_mid = 0.5 * (cfg.T_cold_C + cfg.T_warm_C)
+    rows = {}
+    for res in resolutions:
+        tc = SimpleNamespace(grid_type="latlon", resolution=res,
+                             case="lock_exchange", run_kwargs={})
+        grid, z, config, model, _ck, _lo, _la = rm._create_ocean_setup(
+            tc, nlev=cfg.nlev, H_max=cfg.H_max)
+        st = rm._create_rest_state(tc, grid, z, H_max=cfg.H_max)
+        st = rm._init_lock_exchange(st, "latlon", grid, z)
+        lat_d = np.degrees(np.asarray(grid.lat))
+        lon_d = np.degrees(np.asarray(grid.lon))
+        j = int(np.argmin(np.abs(lat_d)))
+
+        def _front(state):
+            row = np.asarray(state.T.data)[j, :, 0] - T_mid
+            idx = [i for i in range(len(row) - 1) if row[i] > 0 >= row[i + 1]]
+            if not idx:
+                return np.nan
+            i = idx[0]
+            w = row[i] / (row[i] - row[i + 1])
+            return lon_d[i] + w * (lon_d[i + 1] - lon_d[i])
+
+        x0 = _front(st)
+        for _ in range(int(days * 86400 / rm.DEFAULT_DT)):
+            st = model.step(st, rm.DEFAULT_DT)
+        dx_deg = abs(((_front(st) - x0 + 180.0) % 360.0) - 180.0)
+        speed = dx_deg * (np.pi / 180.0) * C.R_earth / (days * 86400.0)
+        rows[res] = dict(
+            dx_km=float(2 * np.pi * C.R_earth / np.asarray(grid.lon).size / 1e3),
+            speed_m_s=float(speed), ratio_to_theory=float(speed / c_theory))
+    return dict(theory_c_m_s=float(c_theory), arms=rows)
+
+
+CONSISTENCY_ONLY = {
+    "geostrophic_adjustment":
+        "no closed form on a global sphere with varying f: the adjusted "
+        "state depends on the full basin geometry",
+    "phillips_two_layer":
+        "growth rate depends on the resolved instability spectrum; the "
+        "quasi-geostrophic Phillips rate does not apply to this geometry",
+    "inertia_gravity_wave":
+        "the case's own analytic solution is an f-plane plane wave and is "
+        "invalid on the sphere (see run_inertia_gravity_wave)",
+}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--runs-root", type=Path,
+                    default=_REPO / "results" / "ocean_grid_benchmark")
+    ap.add_argument("--out", type=Path,
+                    default=_REPO / "results" / "ocean_grid_benchmark"
+                    / "cross_grid_consistency.json")
+    ap.add_argument("--convergence", action="store_true",
+                    help="also RUN the lock exchange at 3 resolutions to "
+                         "test convergence to the Benjamin front speed "
+                         "(the only part of this script that runs a model)")
+    ap.add_argument("--include-tripole", action="store_true",
+                    help="also compare tripole cell-by-cell (it has a "
+                         "different basin; the number measures the land "
+                         "mask as much as the dycore)")
+    a = ap.parse_args()
+    if not a.runs_root.is_dir():
+        raise SystemExit(f"no suite output under {a.runs_root}")
+    grids = (ALL_GRIDS if a.include_tripole else CONSISTENCY_GRIDS)
+
+    report = {"consistency": {}, "theory": {}, "consistency_only": {}}
+    print("CROSS-GRID CONSISTENCY  (arm-to-arm RMS difference of the final "
+          "field, in the field's own units; 0 = identical)")
+    print(f"  arms compared: {grids}"
+          + ("" if a.include_tripole else "   [tripole excluded: different basin]"))
+    for case in CASE_FIELD:
+        if _find(a.runs_root, case, "latlon") is None:
+            continue
+        try:
+            pairs, ref = cross_grid_rms(a.runs_root, case, grids)
+        except ValueError as exc:
+            print(f"\n{case}: SKIPPED — {exc}")
+            continue
+        report["consistency"][case] = dict(pairs=pairs, case_reference=ref)
+        _ = ref
+        if not pairs:
+            continue
+        worst = max(pairs, key=lambda k: pairs[k]["rms_abs"])
+        print(f"\n{case}  (field {CASE_FIELD[case]}; case reference "
+              f"amplitude {ref:.3e})")
+        for k, v in sorted(pairs.items()):
+            flag = "  <-- worst" if k == worst else ""
+            print(f"    {k:30s} rms {v['rms_abs']:9.3e}  "
+                  f"shift-corrected {v['rms_shifted']:9.3e} "
+                  f"@ {v['shift_deg']:+5.0f} deg  "
+                  f"overlap {v['overlap_frac']:.2f}{flag}")
+        tol = AGREE_TOL[CASE_FIELD[case]]
+        agree = [k for k, v in pairs.items() if v["rms_abs"] <= tol]
+        differ = [k for k, v in pairs.items() if v["rms_abs"] > tol]
+        print(f"    -> {len(agree)}/{len(pairs)} pairs agree to "
+              f"{tol:g} (field units)"
+              + (f"; DISAGREE: {', '.join(sorted(differ))}" if differ else ""))
+        report["consistency"][case]["agree_tol"] = tol
+        report["consistency"][case]["pairs_agreeing"] = sorted(agree)
+        report["consistency"][case]["pairs_disagreeing"] = sorted(differ)
+
+    print("\n\nTHEORY")
+    le = theory_lock_exchange(a.runs_root)
+    report["theory"]["lock_exchange"] = le
+    print(f"\nlock_exchange — Benjamin (1968) front speed "
+          f"0.5*sqrt(g'H) = {le['theory_c_m_s']:.3f} m/s "
+          f"(g' = {le['g_prime']:.4f} m/s^2)")
+    for g, r in le["arms"].items():
+        print(f"    {g:13s} moved {r['front_deg_moved']:5.2f} deg -> "
+              f"{r['speed_m_s']:.3f} m/s  "
+              f"({r['ratio_to_theory']:.2f} x theory)")
+    bw = theory_barotropic_wave(a.runs_root)
+    report["theory"]["barotropic_wave"] = bw
+    print(f"\nbarotropic_wave — sqrt(gH) = {bw['theory_c_m_s']:.1f} m/s "
+          f"[{bw['note']}]")
+    for g, r in bw["arms"].items():
+        print(f"    {g:13s} peak|eta| {r['peak_eta_initial']:.3f} -> "
+              f"{r['peak_eta_final']:.3f} m")
+    for case in ("rest_state_stratified_with_land",
+                 "rest_state_uniform_with_land"):
+        rs = theory_rest_state(a.runs_root, case)
+        report["theory"][case] = rs
+        print(f"\n{case} — {rs['theory']}")
+        for g, r in rs["arms"].items():
+            star = ("" if r["u_is_cell_shaped"]
+                    else " (u on faces; NaN = no cell-shaped u saved)")
+            print(f"    {g:13s} max|u| {r['max_abs_u_final']:.3e} m/s   "
+                  f"max|eta| {r['max_abs_eta_final']:.3e} m{star}")
+
+    if a.convergence:
+        conv = theory_lock_exchange_convergence()
+        report["theory"]["lock_exchange_convergence"] = conv
+        print(f"\nlock_exchange CONVERGENCE — does the front approach "
+              f"Benjamin {conv['theory_c_m_s']:.3f} m/s as dx shrinks?")
+        for res, r in conv["arms"].items():
+            print(f"    {res:9s} dx={r['dx_km']:6.1f} km  "
+                  f"{r['speed_m_s']:.4f} m/s  "
+                  f"({r['ratio_to_theory']:.3f} x theory)")
+
+    print("\n\nCONSISTENCY-ONLY (no defensible closed form on this geometry)")
+    for case, why in CONSISTENCY_ONLY.items():
+        report["consistency_only"][case] = why
+        print(f"    {case}: {why}")
+
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    a.out.write_text(json.dumps(report, indent=2, default=float))
+    print(f"\nCOMPLETED: {a.out}")
+
+
+if __name__ == "__main__":
+    main()
