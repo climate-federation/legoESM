@@ -2799,6 +2799,7 @@ def _build_none_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
@@ -2850,11 +2851,13 @@ def _build_gray_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
+        del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
@@ -2949,6 +2952,7 @@ def _build_rrtmgp_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
@@ -3020,6 +3024,8 @@ def _build_rrtmgp_radiation_fn(config):
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
             cloud_path_ice=cloud_path_ice,
+            cloud_path_liq_lw=cloud_path_liq_lw,
+            cloud_path_ice_lw=cloud_path_ice_lw,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,

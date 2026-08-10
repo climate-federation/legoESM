@@ -295,7 +295,10 @@ def test_end_to_end_gradient_is_finite():
 
     def total(q_c):
         kw = dict(inp, q_cloud=q_c)
-        return jnp.sum(compute_cloud_properties(config=cfg, **kw).lwp)
+        props = compute_cloud_properties(config=cfg, **kw)
+        # BOTH streams' radiative paths: the LW emissivity-space inversion
+        # must be as AD-clean as the SW reflectance one.
+        return jnp.sum(props.lwp) + jnp.sum(props.lwp_lw)
 
     g = np.asarray(jax.grad(total)(inp["q_cloud"]))
     assert np.all(np.isfinite(g)) and np.any(g != 0.0)
@@ -384,3 +387,187 @@ def test_validate_strict_rejects_unknown():
     cfg = ExperimentConfig(cloud_partial_coverage_optics="nope")
     with pytest.raises((ValueError, SystemExit), match="partial_coverage"):
         cfg.validate_strict()
+
+
+# --------------------------------------- LONGWAVE emissivity-space inversion
+# The SW factor above inverts the ICA answer in REFLECTANCE space; applied to
+# the LW path it OVER-TRAPS OLR (thick limit: eps(gamma0*cf/(1-cf)) >> cf).
+# Measured on the AMIP day-365 state: ~+13.8 W/m2 of OLR released by the
+# subcolumn-ICA treatment vs two_column, concentrated in the small-cf/thick
+# tropical anvil (#1521).  ``_partial_coverage_factor_lw`` is the separate
+# emissivity-space inversion; ``compute_cloud_properties`` routes it through
+# CloudProperties.lwp_lw / iwp_lw so ONLY the LW stream sees it.
+
+def _chi_lw(tau_ic, cf):
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        _partial_coverage_factor_lw,
+    )
+    return float(_partial_coverage_factor_lw(
+        jnp.asarray(float(tau_ic)), jnp.asarray(float(cf))))
+
+
+def _abs_ratio():
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        _LW_ABS_TO_EXT_RATIO,
+    )
+    return _LW_ABS_TO_EXT_RATIO
+
+
+def test_lw_factor_reproduces_the_ica_emissivity_it_inverts():
+    """Defining identity, in ABSORPTION space (tau_abs = ratio * tau_ext):
+    1-e^{-chi_lw*cf*tau_abs} == cf*(1-e^{-tau_abs})."""
+    r = _abs_ratio()
+    for cf in (0.05, 0.15, 0.3, 0.5, 0.75, 0.9):
+        for tau_ic in (0.1, 1.0, 6.25, 12.5, 25.0, 100.0):
+            t_abs = r * tau_ic
+            e_eff = 1.0 - np.exp(-_chi_lw(tau_ic, cf) * cf * t_abs)
+            e_ica = cf * (1.0 - np.exp(-t_abs))
+            assert e_eff == pytest.approx(e_ica, rel=1e-9)
+
+
+def test_lw_factor_limits_and_sign():
+    # overcast: chi_lw = 1 exactly (nothing to correct)
+    assert _chi_lw(5.0, 1.0) == pytest.approx(1.0, abs=1e-12)
+    # thin: chi_lw -> 1 (emissivity already linear in tau)
+    assert _chi_lw(1.0e-10, 0.4) == pytest.approx(1.0, abs=1e-9)
+    # thick: effective emissivity -> cf EXACTLY -- the physical bound a sky
+    # only fraction cf cloudy cannot exceed; the SW-space surrogate violates
+    # this outright (its capped tau_eff = gamma0*cf/(1-cf) is LW-black).
+    cf = 0.08
+    e_eff = 1.0 - np.exp(-_chi_lw(1.0e6, cf) * cf * _abs_ratio() * 1.0e6)
+    assert e_eff == pytest.approx(cf, abs=1e-9)
+    # one-way: the factor only DIMS (tau_eff <= cf*tau_ic by concavity)
+    for cf in (0.01, 0.1, 0.5, 0.9, 0.999, 1.0):
+        for tau in (0.01, 0.1, 1.0, 10.0, 100.0, 1.0e4):
+            assert _chi_lw(tau, cf) <= 1.0 + 1e-12
+    # underflow guard: overcast + tau beyond expm1 resolution stays finite
+    assert np.isfinite(_chi_lw(1.0e4, 1.0))
+
+
+def test_lw_factor_differentiable():
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        _partial_coverage_factor_lw,
+    )
+    g_tau = jax.grad(
+        lambda t: _partial_coverage_factor_lw(t, jnp.asarray(0.4)))
+    for tau in (0.0, 1.0, 50.0, 1.0e4):
+        assert np.isfinite(float(g_tau(jnp.asarray(tau))))
+    g_cf = jax.grad(
+        lambda c: _partial_coverage_factor_lw(jnp.asarray(3.0), c))
+    for cf in (0.0, 0.3, 0.999, 1.0):
+        assert np.isfinite(float(g_cf(jnp.asarray(cf))))
+
+
+def test_two_column_emits_separate_lw_paths():
+    """CloudProperties carries LW-stream paths ONLY under two_column.
+
+    Red on revert: without the fix the fields do not exist / stay None and
+    the LW kwargs never reach the solver.
+    """
+    on, off = _column("two_column"), _column("none")
+    assert on.lwp_lw is not None and on.iwp_lw is not None
+    assert off.lwp_lw is None and off.iwp_lw is None
+    kw_on, kw_off = on.to_rrtmg_kwargs(), off.to_rrtmg_kwargs()
+    assert "cloud_path_liq_lw" in kw_on and "cloud_path_ice_lw" in kw_on
+    assert "cloud_path_liq_lw" not in kw_off, (
+        "schemes without a separate LW path must emit byte-identical kwargs")
+    # the LW inversion differs from the SW one wherever there is real cover
+    m = np.asarray(on.cloud_fraction) > 1.0e-3
+    assert m.any()
+    assert np.any(np.abs(np.asarray(on.lwp_lw)[m]
+                         - np.asarray(on.lwp)[m]) > 0.0), (
+        "LW and SW effective paths must differ (different inversions)")
+    # and both are dimming-only vs the uncorrected path
+    base = _column("none")
+    assert np.all(np.asarray(on.lwp_lw) <= np.asarray(base.lwp) + 1e-30)
+    assert np.all(np.asarray(on.iwp_lw) <= np.asarray(base.iwp) + 1e-30)
+
+
+def test_rrtmgp_single_layer_lw_moves_to_ica():
+    """Solver-level: the separate LW path takes OLR to the ICA answer.
+
+    Mirror of ``test_rrtmgp_single_layer_moves_toward_ica`` for the LW
+    stream: a single thick cloudy layer at small cf.  The ICA reference is
+    ``cf * OLR(in-cloud overcast) + (1-cf) * OLR(clear)``.  The OLD behaviour
+    (SW-scaled path fed to the LW solve) sits far BELOW that reference
+    (over-trapped); with the emissivity-space LW path the OLR must land
+    strictly closer to ICA and recover most of the gap.  Red on revert: if
+    ``cloud_path_liq_lw`` is dropped anywhere along
+    compute_cloud_properties -> to_rrtmg_kwargs -> solve_columns -> solve_lw,
+    the corrected row degenerates to the old one and the gap assertion fails.
+    """
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        _partial_coverage_factor_lw,
+    )
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+        rrtmgp_radiation,
+    )
+
+    nlev, k, cf, r_eff = 20, 6, 0.1, 12.0e-6
+    lwp_ic = 0.30                      # 300 g/m2 in-cloud: optically THICK
+    tau_ic = _TAU_GEOMETRIC_COEFF * lwp_ic / (constants.rho_water * r_eff)
+    chi_sw = _chi_ic(tau_ic, cf)
+    chi_lw = float(_partial_coverage_factor_lw(
+        jnp.asarray(tau_ic), jnp.asarray(cf)))
+    # rows: clear / in-cloud overcast / grid-mean*chi_sw (OLD lw input) --
+    # the 4th solve passes BOTH paths (SW-scaled + LW-scaled) like production.
+    paths_sw = [0.0, lwp_ic, cf * lwp_ic * chi_sw, cf * lwp_ic * chi_sw]
+    paths_lw = [0.0, lwp_ic, cf * lwp_ic * chi_sw, cf * lwp_ic * chi_lw]
+
+    sh = np.linspace(0.005, 1.0, nlev + 1)
+    ds = np.diff(sh)
+    sig = np.cumsum(ds) - 0.5 * ds
+    n = len(paths_sw)
+    lwp_sw = np.zeros((n, nlev))
+    lwp_lw = np.zeros((n, nlev))
+    lwp_sw[:, k] = paths_sw
+    lwp_lw[:, k] = paths_lw
+    t_prof = np.linspace(220.0, 288.0, nlev)
+    out = rrtmgp_radiation(
+        jnp.asarray(np.repeat(t_prof[None, :], n, 0)),
+        jnp.asarray(np.repeat((sig * 1.0e5)[None, :], n, 0)),
+        jnp.asarray(np.repeat((sh * 1.0e5)[None, :], n, 0)),
+        jnp.full(n, 288.0), jnp.full((n, nlev), 3.0e-3), jnp.full(n, 0.6),
+        RRTMGPConfig(include_clouds=True, sfc_albedo=0.06),
+        cloud_path_liq=jnp.asarray(lwp_sw),
+        cloud_path_ice=jnp.zeros((n, nlev)),
+        cloud_path_liq_lw=jnp.asarray(lwp_lw),
+        cloud_path_ice_lw=jnp.zeros((n, nlev)),
+        cloud_r_eff_liq=jnp.full((n, nlev), r_eff),
+        cloud_r_eff_ice=jnp.full((n, nlev), 3.0e-5))
+    olr = np.asarray(out.lw_flux_up[:, 0], dtype=np.float64)
+    olr_clear, olr_ic, olr_old, olr_new = olr
+
+    olr_ica = cf * olr_ic + (1.0 - cf) * olr_clear
+    assert olr_old < olr_ica, (
+        f"premise: SW-scaled LW path must over-trap (old {olr_old:.2f} "
+        f"must sit below ICA {olr_ica:.2f})")
+    assert olr_old < olr_new <= olr_ica + 0.5, (
+        f"corrected OLR {olr_new:.2f} must move up toward ICA {olr_ica:.2f} "
+        f"from the over-trapped {olr_old:.2f}")
+    # and it must close most of the gap, not a token amount
+    assert (olr_new - olr_old) > 0.5 * (olr_ica - olr_old)
+
+
+def test_lw_paths_never_coexist_with_subcolumns():
+    """max_random (subcolumn ICA) needs no LW inversion -- and must not get
+    one: the mutual-exclusion guard keeps two_column (the only lwp_lw
+    producer) out, so the subcolumn path's kwargs stay byte-identical."""
+    cfg = build_cloud_config(
+        "sundqvist",
+        cloud_partial_coverage_optics="none",
+        cloud_vertical_overlap_optics="max_random",
+    )
+    props = compute_cloud_properties(config=cfg, **_inputs())
+    assert props.lwp_lw is None and props.iwp_lw is None
+    assert "cloud_path_liq_lw" not in props.to_rrtmg_kwargs()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        compute_cloud_properties(
+            config=build_cloud_config(
+                "sundqvist",
+                cloud_partial_coverage_optics="two_column",
+                cloud_vertical_overlap_optics="max_random",
+            ),
+            **_inputs(),
+        )
