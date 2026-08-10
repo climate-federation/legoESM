@@ -34,7 +34,7 @@ set +e
 # not needed to prove the pipeline. It gets submitted once the tuning campaign
 # has run end-to-end on the cheaper cases.
 # ---------------------------------------------------------------------------
-WT=/burg/glab/users/pg2328/les_scm_wt
+WT=${LES_WT:-/burg/glab/users/pg2328/les_scm_wt}
 cd $WT || exit 1
 echo "PINNED sha: $(git rev-parse HEAD)"
 echo "host: $(hostname)"; nvidia-smi -L
@@ -75,11 +75,41 @@ case "$LES_CASE" in
       --hours 9 --dt 0.1 --record-frames 36 --print-every 20000 \
       --output $OUT
     ;;
-  wangara)
-    # Convective BL (Wangara day 33): 3.2 km x 3.2 km x 1.6 km, 4 h.
+  cbl)
+    # Nieuwstadt CBL_N91 dry convective BL: 3.2 km x 3.2 km x 1.6 km, 4 h,
+    # constant +0.06 K m/s surface flux, no Coriolis, theta0 = 300 K.
+    #
+    # THIS CASE WAS LABELLED "wangara" AND IT IS NOT WANGARA. run_spectral_cbl.py
+    # is run at its DEFAULTS here, which are the Nieuwstadt profile; Wangara
+    # Day 33 has theta ~ 277 K, a cosine surface flux peaking at 13:00 local,
+    # and a height-dependent easterly geostrophic wind, none of which this
+    # driver can express. The mislabel produced results/les_ref/wangara/, whose
+    # contents are byte-for-byte the CBL run (Q0 = 0.06, theta 301.07-306.21 K).
+    # Scoring an SCM "Wangara" case against it would have compared two
+    # different problems under a name that hid the fact.
     $PY scripts/run/run_spectral_cbl.py \
       --nx 96 --ny 96 --nz 96 --Lx 3200 --Ly 3200 --Lz 1600 \
       --hours 4 --dt 0.5 --record-frames 24 --print-every 5000 \
+      --output $OUT
+    ;;
+  wangara)
+    echo "REFUSED: run_spectral_cbl.py cannot express Wangara Day 33 (cosine"
+    echo "surface flux peaking at 13:00 local, height-dependent easterly"
+    echo "geostrophic wind, theta ~ 277 K). Running it here at its defaults"
+    echo "produces the Nieuwstadt CBL under a Wangara label -- which is exactly"
+    echo "what results/les_ref/wangara/ already contains. Use LES_CASE=cbl for"
+    echo "that case, and land the Wangara forcing in the driver first."
+    exit 2 ;;
+  astex)
+    # ASTEX flight 209 stratocumulus. Same simple-LW engine as DYCOMS (both
+    # decks set doradsimple), but no Coriolis, a stronger subsidence
+    # divergence read off its lsf, and a deeper domain: its sounding runs to
+    # 1637 m against DYCOMS's 840 m inversion. Lz = 2000 m clears it at
+    # dz = 10.4 m, which still resolves the 612-637 m inversion.
+    # The deck is a 6 h run (prm: nstop = 7200 at dt = 3 s).
+    $PY scripts/run/run_dycoms_les.py --case astex \
+      --nx 96 --ny 96 --nz 192 --Lx 4800 --Ly 4800 --Lz 2000 \
+      --hours 6 --dt 0.5 --record-frames 36 --print-every 4000 \
       --output $OUT
     ;;
   ekman)
