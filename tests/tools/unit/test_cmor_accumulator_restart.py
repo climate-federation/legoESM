@@ -381,6 +381,19 @@ def test_flush_then_save_yields_drained_sidecar(tmp_path):
     assert (year, 2) in out["months"]
 
 
+def test_empty_sidecar_not_written(tmp_path, capsys):
+    """#1517: a NEVER-FED collector (e.g. the multi-rank MPAS feed gate)
+    must not leave a sidecar on disk — an empty ``cmor_accum_day_*.npz``
+    is indistinguishable from a healthy run's artifact.  Skipping is
+    behaviour-equivalent on restart (absent sidecar -> same empty
+    accumulators) and says why on stdout."""
+    diag = _make_diag(tmp_path / "run")  # constructed, never fed
+    sidecar = tmp_path / "cmor_accum_day_0001.npz"
+    diag.save_cmor_accumulators(sidecar)
+    assert not sidecar.exists()
+    assert "NOT writing CMOR accumulator sidecar" in capsys.readouterr().out
+
+
 def test_save_cmor_accumulators_atomic(tmp_path):
     """MED #3: the sidecar write is atomic — the target is always a complete
     file and no ``.tmp`` scratch is left behind, including on overwrite."""

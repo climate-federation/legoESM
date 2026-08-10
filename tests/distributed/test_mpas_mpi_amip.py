@@ -127,6 +127,33 @@ def test_mpas_mpi_amip_matches_serial_owned_cells():
               f"dT={dT:.3e}K dps={dps:.3e}Pa du={du:.3e}m/s")
 
 
+def test_multirank_cmor_request_refuses_loudly():
+    """#1517: a multi-rank MPAS run with CMOR output explicitly requested
+    must REFUSE AT STARTUP (RuntimeError on every rank) — historically it
+    completed "successfully" with an empty ``cmor/`` directory and an
+    empty accumulator sidecar, artifacts indistinguishable from a healthy
+    run (the cell-partition feed is unimplemented)."""
+    import tempfile
+
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() < 2:
+        pytest.skip("needs mpirun -n >= 2 (1-rank layouts feed fine)")
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
+                        vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=DT),
+        output=OutputConfig(output_dir="", diag_days=1, cmip_output=True),
+        days=NDAYS, dataset="analytical", radiation="gray",
+        convection="none", turbulence="none", precision="fp64",
+        distributed=True,
+    )
+    d = ModelDriver(cfg, output_dir=tempfile.mkdtemp())
+    d.setup()
+    with pytest.raises(RuntimeError, match="UNSUPPORTED under cell-partition"):
+        d.run()
+
+
 if __name__ == "__main__":
     test_mpas_mpi_amip_matches_serial_owned_cells()
     if MPI.COMM_WORLD.Get_rank() == 0:

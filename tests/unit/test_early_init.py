@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import legoesm.parallel.early_init as early_init
 
-
 _TASK_ENV_VARS = ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE")
 
 
@@ -66,6 +65,236 @@ def test_already_initialized_is_noop_without_jax_probe(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _guarded_import)
     assert early_init.maybe_init_jax_distributed() is False
+
+
+# ---------------------------------------------------------------------------
+# _pin_local_rank_gpu_visibility (#1516): a single-node multi-rank launch
+# must bind each local rank to a DISTINCT GPU — the multi-node path does this
+# inside jax.distributed.initialize(local_device_ids=...), which the
+# single-node early return skips; unpinned, every rank boots default GPU 0
+# and the job silently runs on one device.  Decision logic tested with NO
+# GPUs: physical-device discovery is monkeypatched, and binding is asserted
+# from the env JAX will consume — never from a device listing (nvidia-smi
+# ignores CUDA_VISIBLE_DEVICES, the #1516 vacuous-guard trap).
+# ---------------------------------------------------------------------------
+
+_PIN_ENV_VARS = (
+    "CUDA_VISIBLE_DEVICES", "JAX_PLATFORMS", "JAX_PLATFORM_NAME",
+    "LEGOESM_NO_LOCAL_GPU_PIN",
+    "PALS_LOCAL_RANKID", "OMPI_COMM_WORLD_LOCAL_RANK",
+    "MV2_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID",
+    "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+)
+
+
+def _clear_pin_env(monkeypatch, n_physical_gpus=2, nvml="derive"):
+    """nvml="derive" -> NVML sees n_physical_gpus with synthetic UUIDs;
+    otherwise pass an explicit (count, uuids) pair, e.g. (-1, None) for
+    "NVML unavailable"."""
+    import os
+
+    for var in _PIN_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    if nvml == "derive":
+        nvml = (n_physical_gpus,
+                [f"GPU-fake-{i}" for i in range(n_physical_gpus)])
+    monkeypatch.setattr(early_init, "_nvml_accessible_gpus", lambda: nvml)
+    monkeypatch.setattr(
+        early_init, "_nvidia_gpu_count", lambda: n_physical_gpus)
+    return os
+
+
+def test_pin_unset_cvd_pins_nvml_uuid(monkeypatch):
+    # The defect scenario: no shim, no CVD, 2 ranks sharing a 2-GPU node.
+    # Pin by NVML UUID — under a cgroup the accessible set need not start
+    # at physical index 0 (Levante job 26815351: job GPUs were 0 and 2).
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is True
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-fake-1"
+
+
+def test_pin_unset_cvd_no_nvml_falls_back_to_index(monkeypatch):
+    # Workstation case: no CVD, no NVML — index into the /proc device range.
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2, nvml=(-1, None))
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is True
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_pin_multi_device_cvd_indexes_visible_list(monkeypatch):
+    # SLURM exports the full allocation list to every task: index by the
+    # guarded SLURM_LOCALID within it.
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.setenv("SLURM_LOCALID", "2")
+    assert early_init._pin_local_rank_gpu_visibility() is True
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+def test_pin_preserves_uuid_style_entries(monkeypatch):
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-aaa,GPU-bbb")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is True
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-bbb"
+
+
+def test_pin_respects_real_task_isolation(monkeypatch):
+    # gpus-per-task / gpu-bind=single:1 / #693 shim: the task's cgroup
+    # admits exactly ONE device (NVML count 1) — its CVD single entry maps
+    # to a DIFFERENT physical GPU per rank (measured, Levante job
+    # 26815351).  The external decision wins.
+    os = _clear_pin_env(monkeypatch, nvml=(1, ["GPU-fake-0"]))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+def test_pin_levante_identical_single_entry_repins(monkeypatch):
+    # THE measured Levante collision (jobs 26806063 + 26815351): srun
+    # --gpu-bind=none hands EVERY task CVD='0' while the job cgroup admits
+    # both GPUs (NVML count 2) — both ranks then compute on one physical
+    # device.  A single-entry CVD contradicted by NVML is the collision
+    # itself, not a shim: repin THIS rank to the NVML UUID at its
+    # node-local rank.
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("SLURM_LOCALID", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is True
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-fake-1"
+
+
+def test_pin_single_entry_without_nvml_trusts_shim(monkeypatch):
+    # Single-entry CVD but NVML unavailable: cannot cross-check, so the
+    # possible external shim must be trusted (repinning blind could break
+    # a correct #693 launch).
+    os = _clear_pin_env(monkeypatch, nvml=(-1, None))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+def test_pin_respects_disabled_cvd(monkeypatch):
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    for disabled in ("", "-1", "NoDevFiles"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", disabled)
+        assert early_init._pin_local_rank_gpu_visibility() is False
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == disabled
+
+
+def test_pin_noop_on_cpu_only_host(monkeypatch):
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=0)
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is False
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+def test_pin_noop_on_explicit_cpu_platform(monkeypatch):
+    # CPU-backend MPI test runs on GPU nodes must keep working.
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is False
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+def test_pin_escape_hatch(monkeypatch):
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("LEGOESM_NO_LOCAL_GPU_PIN", "1")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init._pin_local_rank_gpu_visibility() is False
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+def test_pin_no_local_rank_raises(monkeypatch):
+    # GPUs present, multi-rank, but no way to bind -> refuse loudly:
+    # a silent 1-GPU run in an N-GPU costume is worse than a hard failure.
+    import pytest
+
+    _clear_pin_env(monkeypatch)
+    with pytest.raises(RuntimeError, match="no launcher node-local rank"):
+        early_init._pin_local_rank_gpu_visibility()
+
+
+def test_pin_more_ranks_than_gpus_raises(monkeypatch):
+    import pytest
+
+    _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "2")
+    with pytest.raises(RuntimeError, match="more local ranks than GPUs"):
+        early_init._pin_local_rank_gpu_visibility()
+
+
+def _fake_single_node_mpi(monkeypatch, size=2, rank=1):
+    """Stub mpi4py so maybe_init_jax_distributed sees a single-node
+    multi-rank world without a real launcher."""
+    import sys
+    import types
+
+    comm = types.SimpleNamespace(
+        Get_rank=lambda: rank,
+        Get_size=lambda: size,
+        allgather=lambda x: [x] * size,  # every rank on THIS host
+    )
+    fake = types.ModuleType("mpi4py")
+    fake.MPI = types.SimpleNamespace(COMM_WORLD=comm)
+    monkeypatch.setitem(sys.modules, "mpi4py", fake)
+
+
+def test_maybe_init_single_node_multirank_pins_gpu(monkeypatch):
+    # THE WIRING GATE for #1516, asserted against the symbol that runs
+    # (maybe_init_jax_distributed itself, run_amip's import-time call):
+    # the single-node early return must apply the per-rank binding it
+    # used to skip.  Removing the fix turns this red.
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setattr(early_init, "_INITIALIZED", False)
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "2")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    _fake_single_node_mpi(monkeypatch, size=2, rank=1)
+    # Still returns False (jax.distributed NOT initialized) ...
+    assert early_init.maybe_init_jax_distributed() is False
+    # ... but this rank is now bound to its own GPU (by NVML UUID).
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-fake-1"
+
+
+def test_maybe_init_pins_before_mpi_import(monkeypatch):
+    # ORDERING GATE (job 26829100): a CUDA-aware MPI stack (Open MPI/UCX)
+    # initialises the CUDA driver during MPI_Init, and the driver snapshots
+    # CUDA_VISIBLE_DEVICES at first initialisation — a pin applied after
+    # `from mpi4py import MPI` is silently IGNORED (measured: post-pin
+    # CVD='0'/'1' per rank, yet every rank enumerated BOTH GPUs and
+    # computed on device 0).  Prove the order by making the mpi4py import
+    # explode: the pin must ALREADY have been applied.
+    import sys
+
+    import pytest
+
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setattr(early_init, "_INITIALIZED", False)
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "2")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    monkeypatch.setitem(sys.modules, "mpi4py", None)  # import -> ImportError
+    with pytest.raises(ImportError):
+        early_init.maybe_init_jax_distributed()
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-fake-1"
+
+
+def test_maybe_init_single_rank_never_pins(monkeypatch):
+    # A single process may legitimately drive multiple GPUs (documented
+    # eff=0.5 hazard): the serial path must stay pin-free.
+    os = _clear_pin_env(monkeypatch, n_physical_gpus=2)
+    monkeypatch.setattr(early_init, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "1")
+    monkeypatch.setenv("SLURM_LOCALID", "0")
+    assert early_init.maybe_init_jax_distributed() is False
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
 # ---------------------------------------------------------------------------
