@@ -158,9 +158,24 @@ def test_ysu_convective_pathway_switches_on_with_the_flux():
     out_on = ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
                             T_sfc, q_sfc, rho, 10.0, on)
 
-    assert np.allclose(np.asarray(out_off.dT_dt), 0.0, atol=1e-12), (
-        "with Ch=0 and no prescribed flux the convective case has no surface "
-        "forcing at all -- this is the defect being repaired")
-    assert np.max(np.abs(np.asarray(out_on.dT_dt))) > 1e-8, (
-        "the prescribed surface flux must drive a temperature tendency")
+    assert float(out_off.shflx[0]) == pytest.approx(0.0), (
+        "Ch=0 with no prescription gives the closure a zero surface flux -- "
+        "this is the defect being repaired")
     assert float(out_on.shflx[0]) == pytest.approx(deck_shf)
+
+    # h_pbl is the sharp discriminator: YSU's convective branch grows the PBL
+    # from the surface buoyancy flux, so with no flux it sits at its floor.
+    # (dT_dt is NOT exactly zero without the flux -- residual background
+    # diffusion acts on the initial profile at ~1e-7 K/s -- so asserting an
+    # exact zero there would be asserting the wrong thing.)
+    h_off = float(out_off.h_pbl[0])
+    h_on = float(out_on.h_pbl[0])
+    assert h_on > h_off, (
+        f"the prescribed surface flux must deepen the convective PBL: "
+        f"h_pbl {h_off:.1f} -> {h_on:.1f} m")
+
+    amp_off = float(np.max(np.abs(np.asarray(out_off.dT_dt))))
+    amp_on = float(np.max(np.abs(np.asarray(out_on.dT_dt))))
+    assert amp_on > 100.0 * amp_off, (
+        f"the flux-driven tendency must dominate the residual background "
+        f"diffusion: {amp_on:.3e} vs {amp_off:.3e} K/s")

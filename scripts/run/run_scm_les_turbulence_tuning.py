@@ -854,6 +854,7 @@ def relative_joint(per_case: dict[str, float],
 
 def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
                           case_norm: dict[str, float] | None = None,
+                          default_per_case: dict[str, float] | None = None,
                           ) -> SchemeResult:
     """Tune ONE parameter set per scheme against ALL cases at once.
 
@@ -930,16 +931,19 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
             cand = eqx.apply_updates(
                 params, jax.tree_util.tree_map(lambda x: x * scale, updates))
             _assert_strict_bounds(cand)
-            cand_loss = float(loss_fn(cand))
-            # A candidate at or above the penalty contains a NON-FINITE case:
-            # score_against_les maps any non-finite rollout to exactly
-            # NONFINITE_PENALTY. Testing only `cand_loss < loss_val` accepted
-            # such a candidate whenever the CURRENT loss was legitimately
-            # larger -- a near-uniform reference divided by the spread floor
-            # produces a finite score above 1000 -- so a blown-up parameter set
-            # was adopted as an "improvement". A blow-up is never an
-            # improvement, whatever the current loss is.
-            if cand_loss >= NONFINITE_PENALTY:
+            # Score the candidate PER CASE, not just as the aggregate. A
+            # non-finite rollout is mapped to exactly NONFINITE_PENALTY in the
+            # case that blew up, but the objective is a MEAN over cases, so one
+            # blown case among five contributes only ~200 -- far under the
+            # penalty. Testing the aggregate therefore did not reliably reject
+            # a blown-up candidate, and could not reject one at all under an
+            # aggregation that divides each case by a normalizer above 1.
+            cand_joint, cand_per_case, _ = joint_score(
+                scheme, arms, args, params=cand, cfgs=cfgs,
+                case_norm=case_norm)
+            cand_loss = float(cand_joint)
+            if any(float(v) >= NONFINITE_PENALTY
+                   for v in cand_per_case.values()):
                 continue
             if np.isfinite(cand_loss) and cand_loss < loss_val:
                 params, opt_state = cand, opt_next
@@ -964,8 +968,13 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     joint, per_case, per_comp = joint_score(scheme, arms, args, params=None,
                                             cfgs=tuned_cfgs)
     result.score_tuned = float(joint)
+    # Normalised by the DEFAULT scores, not by case_norm: the headroom
+    # number is reported in BOTH aggregations, and case_norm is None in
+    # 'mean' mode. Reporting it only when it happened to drive the fit is
+    # what made the --joint-aggregation help text ('both are reported')
+    # false.
     result.score_relative_tuned = relative_joint(
-        {k: float(v) for k, v in per_case.items()}, case_norm,
+        {k: float(v) for k, v in per_case.items()}, default_per_case,
         args.relative_norm_floor)
     result.per_case_tuned = {k: float(v) for k, v in per_case.items()}
     result.components_tuned = {
@@ -1363,7 +1372,8 @@ def main(argv=None) -> int:
                              else None)
                 tuned = tune_scheme_multicase(
                     res.scheme, arms=arms, args=args,
-                    cfgs=configs[res.scheme], case_norm=case_norm)
+                    cfgs=configs[res.scheme], case_norm=case_norm,
+                    default_per_case=dict(res.per_case_default or {}))
             except Exception as exc:                  # noqa: BLE001
                 res.status = "tune_failed"
                 res.error = f"{type(exc).__name__}: {exc}"
@@ -1470,13 +1480,21 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         excluded, key=lambda r: r.scheme)
     with (outdir / "ranking.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
+        # n_accepted_steps, not just n_trained: a scheme whose FIRST line
+        # search found no reducing step is still reported as "tuned" with a
+        # non-zero n_trained and a score_tuned equal to its default, which
+        # reads as a successful fit. The count of accepted updates is the
+        # number that says how much optimisation actually happened.
         w.writerow(["rank", "scheme", "status", "score_default",
-                    "score_tuned", "n_trained", "n_frozen", "wall_s", "error"])
+                    "score_tuned", "score_relative_tuned", "n_trained",
+                    "n_accepted_steps", "n_frozen", "wall_s", "error"])
         for i, r in enumerate(ranked):
             rankable = r.status in _RANKABLE and r.score_default is not None
+            n_acc = max(0, len(r.loss_history or []) - 1)
             w.writerow([(i + 1) if rankable else "EXCLUDED",
                         r.scheme, r.status, r.score_default, r.score_tuned,
-                        r.n_trained, len(r.frozen or {}),
+                        r.score_relative_tuned,
+                        r.n_trained, n_acc, len(r.frozen or {}),
                         f"{r.wall_s:.1f}", r.error or ""])
 
     payload = {
@@ -1570,6 +1588,7 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                 "components_tuned": r.components_tuned,
                 "per_case_default": r.per_case_default,
                 "per_case_tuned": r.per_case_tuned,
+                "score_relative_tuned": r.score_relative_tuned,
                 "n_trained": r.n_trained, "frozen": r.frozen,
                 "parameters": r.parameters, "loss_history": r.loss_history,
                 "surface_pressure_drift_pa": r.ps_drift_pa,

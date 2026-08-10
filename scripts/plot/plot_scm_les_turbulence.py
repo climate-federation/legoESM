@@ -34,11 +34,18 @@ _FLUX_PANELS = (
 
 
 def _read_ranking(path: Path) -> list[str]:
+    """Schemes to draw, in ranked order, EXCLUDING unrankable ones.
+
+    Filtering on ``score_default`` alone kept a scheme that was excluded from
+    the ranking -- a non-finite rollout still records a default score -- so a
+    blown-up arm was drawn alongside the ranked ones with nothing to say so.
+    """
     if not path.exists():
         return []
     with path.open() as fh:
         return [row["scheme"] for row in csv.DictReader(fh)
-                if row.get("score_default")]
+                if row.get("score_default")
+                and str(row.get("rank", "")).strip().upper() != "EXCLUDED"]
 
 
 def _resolve_profiles(indir: Path, case: str | None) -> tuple[Path, str]:
@@ -120,12 +127,20 @@ def main(argv=None) -> int:
 
     axes[0].set_ylabel("height [m]")
     axes[0].legend(fontsize=7.5, loc="best")
+    # The profiles in the npz are captured at DEFAULT parameters, before any
+    # tuning, while the legend order comes from the TUNED ranking. Saying so on
+    # the figure stops it being read as tuned profiles validating a tuned
+    # ranking.
     fig.suptitle(
         f"{case_label}: SCM turbulence closures vs LES  "
         f"(time-mean {window[0]:.2f}-{window[1]:.2f} h, same window both sides)",
         fontsize=12,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.text(0.5, 0.935,
+             "profiles are at DEFAULT parameters; legend order is the TUNED "
+             "ranking. Schemes excluded from the ranking are not drawn.",
+             ha="center", fontsize=9, color="0.35")
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     out = args.out or (args.indir / f"profiles_vs_les_{case_label}.png")
     fig.savefig(out, dpi=145)
     print(f"wrote {out}")
