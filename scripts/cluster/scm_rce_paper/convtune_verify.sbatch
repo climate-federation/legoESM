@@ -20,7 +20,7 @@ set +e
 #
 # Nothing here is a production measurement; it sizes the production arms.
 # ---------------------------------------------------------------------------
-WT=/burg-archive/glab/users/pg2328/_wt_convtune_pin
+WT=${WT:?export WT=<pinned worktree> (a tree nothing is editing)}
 # PIN is exported by the launch command (sbatch --export=ALL,PIN=<sha>), not
 # hardcoded: the SHA of a commit cannot be known inside the commit itself,
 # and a self-derived $(git rev-parse HEAD) would make the check vacuous.
