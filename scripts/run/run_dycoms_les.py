@@ -1,5 +1,13 @@
-"""DYCOMS-II RF01 nocturnal stratocumulus on the spectral TRUE-LES core +
-swappable microphysics (Morrison/M2005 default; non-drizzling RF01).
+"""Marine stratocumulus on the spectral TRUE-LES core + swappable microphysics
+(Morrison/M2005 default; non-drizzling RF01).
+
+Two decks, selected with ``--case``: DYCOMS-II RF01 (default, described below)
+and ASTEX flight 209. Both set ``dolongwave = .true., doradsimple = .true.``,
+so both are driven by the SAME Stevens (2005) simple longwave with the same
+constants -- gSAM's rad_simple hardcodes them and applies them to every deck
+that selects it. They differ in Coriolis (ASTEX has none), subsidence
+divergence, domain depth and droplet concentration; see
+``_STRATOCUMULUS_CASES``.
 
 DYCOMS-II RF01 (Stevens et al. 2005, MWR 133; gSAM ``CASES/DYCOMS_RF01``):
 
@@ -75,20 +83,62 @@ from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # 
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
 # resolve_sam_case_dir.
 _DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
-_FCOR = 0.376e-4
-# Stevens et al. 2005 RF01 radiation + subsidence parameters. The LW fit now
-# lives in legoesm.atmosphere.physics.radiation.simple_lw, which the SCM calls
-# too; _SIMPLE_LW holds this case's instance of it. _DIV is still needed here
-# on its own for the subsidence w_ls = -D z, which is a forcing, not radiation.
+# The two marine-stratocumulus decks this driver can run. Both set
+# `dolongwave = .true., doradsimple = .true.` in their prm, i.e. both are
+# driven by the SAME Stevens (2005) simple longwave with the SAME constants --
+# gSAM's rad_simple hardcodes them and applies them to every deck that selects
+# it, so ASTEX legitimately runs the RF01 numbers.
+#
+# What DOES differ is per case, and each entry is read off that deck rather
+# than inherited from DYCOMS:
+#   f_cor        ASTEX209 sets `docoriolis = .false.`, so its LES has none.
+#   subsidence_divergence_s   DYCOMS subsides as w = -D z with D = 3.75e-6.
+#                ASTEX's lsf gives w = -0.010 m/s at 2000 m, i.e. D = 5.0e-6.
+#                This is NOT the longwave's D: gSAM's rad_simple hardcodes
+#                f0 = 3.75e-6 in its clear-sky term for every deck, and the
+#                subsidence comes from the lsf file. The two coincide for
+#                DYCOMS and differ for ASTEX, so they are separate here --
+#                reusing one for the other is a silent wrong forcing.
+#   lz_m         ASTEX's inversion sits near 637 m but its sounding runs to
+#                1637 m, so the domain has to clear it.
+# The DYCOMS entry reproduces the historical hardcoded values exactly.
+_STRATOCUMULUS_CASES = {
+    "dycoms": {
+        "gsam_dir": "DYCOMS_RF01",
+        "f_cor": 0.376e-4,   # the RF01 driver's own value
+        "subsidence_divergence_s": 3.75e-6,
+        "lz_m": 1500.0,
+        "n_c_m3": 140.0e6,
+        "note": "Stevens et al. 2005 RF01 nocturnal stratocumulus.",
+    },
+    "astex": {
+        "gsam_dir": "ASTEX209",
+        "f_cor": 0.0,                 # prm: docoriolis = .false.
+        "subsidence_divergence_s": 5.0e-6,   # lsf: w=-0.010 m/s at 2000 m
+        "lz_m": 2500.0,
+        "n_c_m3": 100.0e6,            # ASTEX intercomparison N_c
+        "note": "ASTEX flight 209 stratocumulus (Sc-to-Cu transition deck).",
+    },
+}
+# The longwave fit lives in legoesm.atmosphere.physics.radiation.simple_lw,
+# which the single-column model calls too. Its constants -- including its own
+# divergence -- are hardcoded in gSAM's rad_simple for EVERY deck that selects
+# it, so this one instance serves both cases. The SUBSIDENCE divergence is per
+# case and comes from _STRATOCUMULUS_CASES; do not substitute one for the other.
 _SIMPLE_LW = SimpleLWConfig()
-_DIV = _SIMPLE_LW.divergence_s     # large-scale divergence D [1/s]
 _QT_INV = _SIMPLE_LW.qt_inversion_kg_kg   # z_i: q_t isoline [kg/kg]
-_NC_RF01 = 140.0e6         # droplet concentration [1/m³]
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--case-dir", default=_DEFAULT_CASE)
+    p.add_argument("--case", choices=sorted(_STRATOCUMULUS_CASES),
+                   default="dycoms",
+                   help="which marine-stratocumulus deck to run. Both are "
+                        "driven by the same Stevens (2005) simple longwave; "
+                        "they differ in Coriolis, subsidence divergence, "
+                        "domain depth and droplet concentration.")
+    p.add_argument("--case-dir", default=None,
+                   help="override the deck directory --case resolves to.")
     p.add_argument("--nx", type=int, default=96)
     p.add_argument("--ny", type=int, default=96)
     p.add_argument("--nz", type=int, default=192,
@@ -96,7 +146,8 @@ def parse_args():
                         "beyond the projection's nz≲200 compile cliff).")
     p.add_argument("--Lx", type=float, default=3360.0)
     p.add_argument("--Ly", type=float, default=3360.0)
-    p.add_argument("--Lz", type=float, default=1500.0)
+    p.add_argument("--Lz", type=float, default=None,
+                   help="domain depth [m]; defaults to the case's own.")
     p.add_argument("--z0", type=float, default=1.0e-4)
     p.add_argument("--hours", type=float, default=4.0)
     p.add_argument("--dt", type=float, default=0.5)
@@ -131,7 +182,20 @@ def parse_args():
     p.add_argument("--record-frames", type=int, default=8)
     p.add_argument("--case-label", type=str, default="dycoms")
     p.add_argument("--output", type=Path, default=Path("results/les_dycoms"))
-    return p.parse_args()
+    args = p.parse_args()
+    # Resolve the case's own defaults, letting an explicit flag win. argparse
+    # cannot tell "given" from "equal to the default", so the overridable
+    # fields default to None and are filled in here.
+    spec = _STRATOCUMULUS_CASES[args.case]
+    args.case_spec = spec
+    if args.case_dir is None:
+        args.case_dir = resolve_sam_case_dir(spec["gsam_dir"])
+    if args.Lz is None:
+        args.Lz = spec["lz_m"]
+    args.f_cor = spec["f_cor"]
+    args.subsidence_divergence_s = spec["subsidence_divergence_s"]
+    args.n_c_m3 = spec["n_c_m3"]
+    return args
 
 
 def saturation_adjust(theta_l, q_t, exner, p, n_iter=40):
@@ -212,7 +276,7 @@ def build(args, dtype):
     tr = jnp.zeros((ny, nx, nz, args.n_tracers), dtype)
     tr = tr.at[..., 0].set(qv_col[None, None, :])
     tr = tr.at[..., 1].set(qc_col[None, None, :])
-    tr = tr.at[..., 6].set(jnp.where(qc_col > 0.0, _NC_RF01, 0.0)
+    tr = tr.at[..., 6].set(jnp.where(qc_col > 0.0, args.n_c_m3, 0.0)
                            [None, None, :])
     st = sl.SpectralLESState(
         u=u3, v=v3, w=w3, rhs_u_prev=jnp.zeros_like(u3),
@@ -271,7 +335,7 @@ def main():
     # alone would be ignored (codex (h)). Nc_0 = 140 cm⁻³ per the RF01 spec.
     micro_cfg = (MicrophysicsConfig(
         scheme="morrison",
-        morrison=MorrisonConfig(morrison_flavor="sam", Nc_0=_NC_RF01))
+        morrison=MorrisonConfig(morrison_flavor="sam", Nc_0=args.n_c_m3))
         if args.microphysics == "morrison"
         else MicrophysicsConfig(scheme=args.microphysics))
     dt0 = float(args.dt)
@@ -280,7 +344,9 @@ def main():
     lw_tend = make_stevens_lw(g, ref, dtype)
 
     # Subsidence w_ls = −D·z on θ and q_t (slots 0 + 1); upwind in z.
-    w_ls = (-_DIV * g.z_c).astype(dtype)
+    # The case's SUBSIDENCE divergence, which is not the longwave's -- see
+    # _STRATOCUMULUS_CASES.
+    w_ls = (-args.subsidence_divergence_s * g.z_c).astype(dtype)
     dz = g.dz
 
     def ddz_up(f):
@@ -297,7 +363,7 @@ def main():
     @partial(jax.jit, static_argnames=("first", "do_micro", "do_rad"))
     def step(state, dt, first=False, do_micro=True, do_rad=True):
         state, us = sl.step(state, g=g, dt=dt,
-                            u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
+                            u_geo=(forc["ug"], forc["vg"]), f_cor=args.f_cor,
                             first=first, force=(0.0, 0.0),
                             sfc_theta_flux=forc["th_flux"],
                             sfc_qv_flux=forc["qv_flux"])
