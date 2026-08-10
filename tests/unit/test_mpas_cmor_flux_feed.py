@@ -212,6 +212,11 @@ class TestSfcDiagContract:
         # ...and it must NOT drop the clear-sky pair (the blocker above).
         assert "sw_up_toa_clr" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
         assert "lw_up_toa_clr" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+        # #1321: the surface downwelling pair is PUBLISHED on the MPI lane —
+        # withholding it made _marshal_land_forcing return None every step, so
+        # the interactive multilayer land silently never advanced.
+        assert "sw_down_sfc" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+        assert "lw_down_sfc" not in MPAS_SFC_DIAG_MPI_UNPUBLISHED
 
     def test_mpi_producer_publishes_clear_sky_at_contract_slots(self):
         """Rebuild the MPI producer's extras expression on a tendency that
@@ -230,9 +235,11 @@ class TestSfcDiagContract:
         assert len(sfc) == 12
         assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
         assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
-        # Unpublished land slots are EMPTY but present, so _marshal_land_forcing
-        # still declines (its `_sd[8] is None` guard) exactly as before.
-        assert sfc[8] is None and sfc[9] is None
+        # #1321: the land downwelling pair is now PUBLISHED at slots 8/9.
+        # While it was withheld, ``_marshal_land_forcing``'s ``_sd[8] is None``
+        # guard declined every step and the Richards soil never advanced.
+        assert sfc[8].name == "sw_down_sfc"
+        assert sfc[9].name == "lw_down_sfc"
 
     def test_producer_slot_order_matches_consumer(self):
         _pt = _tend_with_extras()

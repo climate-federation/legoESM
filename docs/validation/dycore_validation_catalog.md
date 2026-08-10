@@ -41,6 +41,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 | ID | Test | Grids | Status | Module |
 | --- | --- | --- | --- | --- |
 | JW06-BW | Classic Jablonowski-Williamson baroclinic wave | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
+| JW06-BS | Un-rotated JW **base-state control** (`baroclinic_steady`, σ, perturbation OFF) — diagnostic control for #1028: any jet decay here is the dycore failing to hold the balanced state, since no wave exists to consume it | all | ✅ | `tests/test_cases/baroclinic_wave.py` |
 | JW06-RS | Rotated JW steady-state (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
 | JW06-RB | Rotated JW baroclinic wave (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
 | DCMIP12-2-0-0 | Atmospheric rest state with steep hydrostatic topography | all | ✅ M1 | `tests/test_cases/dcmip2012/rest_state_topography.py` |

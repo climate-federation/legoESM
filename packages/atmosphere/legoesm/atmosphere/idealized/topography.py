@@ -24,6 +24,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.williamson_sw_analytic import williamson_5_mountain_height
 
 
 def great_circle_distance(
@@ -68,15 +69,17 @@ def williamson5_cone(
 ) -> jnp.ndarray:
     """Williamson Test 5 conical mountain (planar lon/lat-plane radius).
 
-    Returns surface height ``z_s`` [m].  Uses the Williamson 1992 / FV3
-    test_cases.F90 planar formula (clipped lon/lat-plane radius rather
-    than great-circle distance) so this function reproduces the existing
-    legoESM Williamson-5 convention.
+    Returns surface height ``z_s`` [m].  Thin adapter over the one shared
+    definition in :mod:`legoesm.core.williamson_sw_analytic`, which
+    applies the Williamson 1992 / ``test_cases.F90:1185`` clipped planar
+    radius.
+
+    This body previously wrote ``min(R, sqrt(...))``; the oracle writes
+    ``sqrt(min(R^2, ...))``.  Algebraically the same, different rounding
+    -- the shared helper carries the oracle's order.
     """
-    dlon = jnp.mod(lon - lon_c + jnp.pi, 2.0 * jnp.pi) - jnp.pi
-    dlat = lat - lat_c
-    r = jnp.minimum(R_m, jnp.sqrt(dlon ** 2 + dlat ** 2))
-    return h_0 * (1.0 - r / R_m)
+    return williamson_5_mountain_height(lon, lat, center=(lon_c, lat_c),
+                                        r0=R_m, h_s0=h_0, xp=jnp)
 
 
 # ---------------------------------------------------------------------------

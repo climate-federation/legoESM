@@ -538,6 +538,11 @@ def _compute_advection_flux_div(
             # the NEMO nonosc per-point bound at dry cells (see
             # fct_tracer_advection's active_mask docstring).
             active_mask=recon_fill_mask,
+            # key_linssh: thickness is FIXED (the eta volume change is a
+            # separate top concentration/dilution flux added after
+            # limiting), so the limiter's after-thickness must not move
+            # (codex 2026-08-10 on the h_new certification fix).
+            fixed_thickness=linssh_top_flux,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -7881,6 +7886,14 @@ class LatLonCGridOceanModel:
             # (state_expl.T − state.T)), so the FCT bounds must be Kbb-based
             # (NEMO nonosc(Kbb), p2dt=2dt) — else the FE-certified (Nnn,dt)
             # bounds admit cold undershoot at high-lat wall fronts under 2dt.
+            # KNOWN GAP (2026-08-10 h_new certification fix): the thickness
+            # FCT certifies against is the Nnn-eta h_k threaded through
+            # ``_step_impl``, and the applied update is this pass's increment
+            # RE-BASED onto Nbb by the combine below — no single-step
+            # certificate covers that composition, so leapfrog FCT bounds
+            # are APPROXIMATE (O(dη) slack; NEMO-exact needs e3t(Kbb)
+            # content + e3t(Kaa) division threaded into the tracer step).
+            # The euler path is exactly certified.
             _fct_tracer_before=(
                 state.T_before.data, state.S_before.data),
             # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the

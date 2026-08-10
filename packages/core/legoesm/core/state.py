@@ -200,12 +200,20 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their
-# contract slot, so every other slot keeps its index).  The surface
-# downwelling pair drives the interactive multilayer land tile; the MPI lane
-# has never fed it, and populating it here would silently switch land forcing
-# on for one-rank Voronoi MPI runs — a behaviour change that belongs in its own
-# change, not in the CMOR-diagnostic port.
-MPAS_SFC_DIAG_MPI_UNPUBLISHED = ("sw_down_sfc", "lw_down_sfc")
+# contract slot, so every other slot keeps its index).
+#
+# EMPTY since #1321.  This used to hold the surface downwelling pair
+# ("sw_down_sfc", "lw_down_sfc"), which drives the interactive multilayer land
+# tile: the MPI lane published them as None, ``_marshal_land_forcing`` requires
+# both, so it returned None every step and the Richards soil silently never
+# advanced — no skin temperature, no beta_land.  Filling them was deferred out
+# of the CMOR-diagnostic port as "a behaviour change that belongs in its own
+# change"; #1321 IS that change, so the pair is now published.
+#
+# The machinery stays: a future extra that one producer cannot fill belongs
+# here rather than being dropped from the tuple, because a SHORTER tuple is
+# what misindexes every slot after it.
+MPAS_SFC_DIAG_MPI_UNPUBLISHED: tuple[str, ...] = ()
 
 
 class FV3HydrostaticState(NamedTuple):

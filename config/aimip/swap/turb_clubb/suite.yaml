@@ -1,0 +1,24 @@
+# Scheme-swap sweep arm 'turb_clubb': ONE scheme changed vs the lnpsfix+extended
+# classical base (see variant_classical.yaml in this directory). Everything
+# else — anchored curriculum, lnps fix, extended spec tier, MOST + spatial
+# surface — identical to ace2/suite_classical_anchored_lnpsfix_ext.yaml.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  aimip_trainable_schemes: extended
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_swap_turb_clubb

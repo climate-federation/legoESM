@@ -132,6 +132,33 @@ def _gather_flat_columns(local_arr, layout, n_tile, root_only=False):
     return glob.reshape((6 * n_tile * n_tile,) + trailing)
 
 
+def _scatter_voronoi_columns(arr, partition):
+    """Scatter a global per-column array ``(nCells_global, ...)`` to this
+    rank's LOCAL cells (owned + halo), in the same order the rank-local MPAS
+    physics columns use (#1321).
+
+    The Voronoi analogue of :func:`_scatter_flat_columns`.  Halo columns are
+    included, not trimmed, so every per-column land array keeps the same
+    leading length as the rank-local atmospheric state and no consumer needs a
+    special case.  Integrating them is redundant but not wrong: the land step
+    is column-local (no lateral soil coupling) and a halo column sees the same
+    exchanged atmospheric forcing as its owner, so it tracks the owner exactly.
+    ``gather_voronoi_field`` keeps only the owned prefix on the way out.
+    """
+    from legoesm.parallel.voronoi_partition import scatter_to_local
+    return scatter_to_local(arr, partition, "cell")
+
+
+def _scatter_1based_voronoi_columns(arr, partition):
+    """CLM 1-based ``(nCells_global + 1, ...)`` -> ``(n_local_cells + 1, ...)``.
+
+    Same strip / scatter / re-prepend composition as
+    :func:`_scatter_1based_columns`, over the Voronoi cell partition.
+    """
+    body = _scatter_voronoi_columns(arr[1:], partition)
+    return jnp.concatenate([arr[:1], body], axis=0)
+
+
 def _map_flat_column_leaves(tree, n_tile, global_ncol, fn):
     """Apply ``fn(leaf, n_tile)`` to every array leaf of ``tree`` whose leading
     axis equals ``global_ncol`` (a per-column field); leave all other leaves
@@ -1116,9 +1143,29 @@ class ModelDriver:
                 f"unexpected={sorted(got - expected)}. Refusing to build a "
                 "mixed restart state (the missing prognostic columns would "
                 "silently stay at cold-start values).")
+        # Under MPAS cell-partition MPI the checkpoint holds the GLOBAL
+        # columns (save_checkpoint gathers them) while ``template`` is already
+        # rank-local, so cut each restored field to this rank before the shape
+        # check — otherwise every resumed distributed multilayer run fails the
+        # comparison below (#1321).
+        # ``getattr``: several tests drive this method with a SimpleNamespace
+        # fake that carries only the carry_aux + land fields.
+        _vl = getattr(self, "_voronoi_layout", None)
+        _part = _vl.partition if _vl is not None else None
+
+        def _to_local(arr):
+            if _part is None or not hasattr(arr, "shape") or arr.ndim < 1:
+                return arr
+            n_global = int(_part.nCells_global)
+            if int(arr.shape[0]) == n_global:
+                return _scatter_voronoi_columns(arr, _part)
+            if int(arr.shape[0]) == n_global + 1:          # CLM 1-based
+                return _scatter_1based_voronoi_columns(arr, _part)
+            return arr
+
         fields = {}
         for name, val in popped.items():
-            arr = jnp.asarray(val)
+            arr = _to_local(jnp.asarray(val))
             ref = getattr(template, name)
             if arr.shape != ref.shape:
                 raise ValueError(
@@ -2210,6 +2257,35 @@ class ModelDriver:
                 self.physics.albedo_land = self._surfdata_land_albedo(
                     surfdata_path, lat_albedo
                 ).astype(_sd)
+            elif getattr(self.config, "clm_surfdata_path", ""):
+                # ERA5-TUNED per-column land albedo (the LMIP calibration):
+                # PFT-weighted _TUNED_PFT_ALBEDO_MULTILAYER + soil-colour blend
+                # + glacier override (0.7178), the exact product run_lmip.py and
+                # the coupled driver already use.  Before this branch an AMIP
+                # run passing only --clm-surfdata-path fell through to the
+                # LATITUDE-vegetation fallback, so the calibrated map never
+                # reached radiation on the MPAS lane.
+                from legoesm.land.clm_surface_map import clm_surface_provider
+                _lat_deg = np.degrees(np.asarray(self.grid.grid_lat)).reshape(-1)
+                _lon_deg = np.degrees(np.asarray(self.grid.grid_lon)).reshape(-1)
+                _lp = clm_surface_provider(
+                    _lat_deg, _lon_deg,
+                    surfdata_path=self.config.clm_surfdata_path,
+                    variant="multilayer")()
+                _alb = jnp.asarray(_lp.albedo_veg).reshape(
+                    jnp.asarray(self.grid.grid_lat).shape)
+                # Defensive only: the provider floors/normalises PFT cover, so
+                # cells WITHOUT source land data come back as finite bare-soil
+                # values, NOT NaN — this where() does not gate them (codex).
+                # Ocean cells are irrelevant (radiation blends by f_land);
+                # coastal model-land cells nearest to an ocean source cell get
+                # the bare-soil template, an accepted nearest-neighbour limit.
+                _alb = jnp.where(jnp.isfinite(_alb), _alb, lat_albedo)
+                self.physics.albedo_land = _alb.astype(_sd)
+                logger.info(
+                    "  Land albedo: ERA5-tuned CLM multilayer map "
+                    f"(mean={float(jnp.mean(_alb)):.3f}, "
+                    f"max={float(jnp.max(_alb)):.3f})")
             else:
                 self.physics.albedo_land = lat_albedo.astype(_sd)
             # Tiled (mosaic) surface fluxes + the radiation cadence apply to ANY
@@ -4682,6 +4758,7 @@ class ModelDriver:
             # so the restart chain reads a single canonical global checkpoint
             # (mirrors the lat-lon band gather).  All ranks must participate in
             # each gather (collective); non-root ranks then bail before I/O.
+            _land_ml_save = None      # set to the GLOBAL gather under MPI
             if self._voronoi_layout is not None:
                 from legoesm.parallel.voronoi_mpi import gather_voronoi_field
                 part = self._voronoi_layout.partition
@@ -4726,6 +4803,28 @@ class ModelDriver:
                         else:
                             ps_d_carry[_name] = gather_voronoi_field(
                                 _val, part, "cell")
+                # Multilayer-land columns are per-cell too (#1321).  Gathered
+                # HERE, with the other collectives and BEFORE the rank-0 bail
+                # below: the save site is rank-0-only, so gathering there would
+                # hang every other rank.  The pytree structure is identical on
+                # every rank (same config), so each rank issues the same
+                # gathers in the same order.
+                if self._land_ml_state is not None:
+                    _nloc = int(part.n_local_cells)
+
+                    def _g(x, _n=_nloc, _p=part):
+                        if not hasattr(x, "shape") or getattr(x, "ndim", 0) < 1:
+                            return x
+                        if int(x.shape[0]) == _n:
+                            return gather_voronoi_field(x, _p, "cell")
+                        if int(x.shape[0]) == _n + 1:       # CLM 1-based
+                            return jnp.concatenate(
+                                [x[:1], gather_voronoi_field(x[1:], _p, "cell")],
+                                axis=0)
+                        return x
+
+                    _land_ml_save = jax.tree_util.tree_map(
+                        _g, self._land_ml_state)
                 if self._mpi_rank != 0:
                     return
             else:
@@ -4804,7 +4903,12 @@ class ModelDriver:
             # fail-loud restore (#730 contract).  None fields are skipped on
             # save; restore validates the field-set exactly.
             if self._land_ml_state is not None:
-                for _f, _v in self._land_ml_state._asdict().items():
+                # Under MPAS MPI this is the GLOBAL gather assembled above, so
+                # the restart chain reads one canonical checkpoint rather than
+                # a rank-local fragment (#1321).
+                _lm_out = (_land_ml_save if _land_ml_save is not None
+                           else self._land_ml_state)
+                for _f, _v in _lm_out._asdict().items():
                     if _v is not None:
                         _save[f"land_ml_{_f}"] = np.asarray(_v)
             # Prognostic ice skin (mpas_ice_skin_prognostic): persist so a
@@ -5452,17 +5556,14 @@ class ModelDriver:
                 })
             # Multilayer (Richards) land columns (MPAS port): stage the
             # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
-            # fail-loud restore (#730 exact-field-set contract).  Single-
-            # process only (matches the run-side phase-1 guard): under MPI the
-            # writer's columns are the full mesh and cannot be band-scattered.
+            # fail-loud restore (#730 exact-field-set contract).  Under MPI the
+            # checkpoint holds the GLOBAL columns (``save_checkpoint`` gathers
+            # them with the other collectives) and
+            # ``_restore_land_ml_from_carry_aux`` cuts each field to this rank
+            # before its shape check, so the distributed restart round-trips
+            # (#1321).  It used to refuse here.
             _lml_keys = [k for k in d.files if k.startswith("land_ml_")]
             if _lml_keys:
-                if _mpi:
-                    raise ValueError(
-                        "Checkpoint carries multilayer-land (land_ml_*) "
-                        "columns, which cannot be scattered under MPI "
-                        "(multilayer land is single-process only on the "
-                        "MPAS lane); restart single-process.")
                 if not isinstance(self._carry_aux, dict):
                     self._carry_aux = {}
                 for _k in _lml_keys:
@@ -6162,6 +6263,71 @@ class ModelDriver:
         )
         return (feed_safe and wants_cmip, wants_cmip)
 
+    def _require_mpas_cmip_feed_supported(self, feed_on: bool,
+                                          wants_cmip: bool) -> None:
+        """Refuse a run that would write EMPTY CMOR output (#1517).
+
+        A multi-rank MPAS/Voronoi run with ``cmip_output``/``monthly_means`` on
+        cannot feed the CMOR accumulators (see
+        :meth:`_mpas_cmip_feed_enabled`), so it completes normally and writes
+        CMOR files containing nothing.  That used to be a rank-0 log warning —
+        one line in a long log — so the cost was discovered only after the
+        GPU-hours were spent.  A request for output the lane cannot produce is
+        a launch error, not a note.
+
+        Raised on EVERY rank, deliberately NOT rank-0-gated: ``feed_on`` and
+        ``wants_cmip`` are config/layout-derived and identical everywhere, so a
+        rank-0-only raise would kill rank 0 and hang the rest at the next
+        collective.
+
+        ``LEGOESM_ALLOW_EMPTY_CMOR=1`` (exact value, matching the repo's other
+        ``LEGOESM_ALLOW_*`` escape hatches) downgrades it to the old warning.
+        The environment is the ONE input here that is genuinely per-process —
+        an MPMD launcher can export it to some ranks and not others — so it is
+        bcast from rank 0 before anyone acts on it (the repo's established
+        status-bcast idiom).  Without that, a split environment sends some
+        ranks onward and raises on the others: a hang, which is strictly worse
+        than the empty output this replaces (pre-merge codex).
+
+        This closes the trap only.  The feed itself still needs the owned-cell
+        gather plus global regrid weights on rank 0 (#1517 work items); until
+        that lands, multi-rank MPAS runs CMOR-less.
+        """
+        if not wants_cmip or feed_on:
+            return
+        world = getattr(self, "_mpi_world_size", 1)
+        allow = os.environ.get("LEGOESM_ALLOW_EMPTY_CMOR") == "1"
+        # ``COMM_WORLD``/``root=0`` matches the driver's established
+        # status-bcast (the check_stability error bcast).  The gate is precise
+        # rather than merely sufficient: reaching this line at all requires
+        # ``feed_on`` False, which per _mpas_cmip_feed_enabled means a Voronoi
+        # layout AND world > 1 — i.e. a genuine MPI cell partition, the only
+        # multi-GPU lane this grid has.
+        if getattr(self, "_mpi_rank", None) is not None and world > 1:
+            from mpi4py import MPI
+            allow = MPI.COMM_WORLD.bcast(allow, root=0)
+        if allow:
+            if getattr(self, "_mpi_rank", 0) == 0:
+                logger.warning(
+                    "  CMOR output requested on a %d-rank MPAS/Voronoi run "
+                    "and LEGOESM_ALLOW_EMPTY_CMOR=1 is set: the monthly/daily "
+                    "CMOR accumulators WILL STAY EMPTY. The run continues "
+                    "because you asked it to.", world)
+            return
+        raise NotImplementedError(
+            f"CMOR output was requested (cmip_output / monthly_means on) but "
+            f"this is a {world}-rank MPAS/Voronoi run, and the per-interval "
+            f"spatial/zonal CMOR feed is UNSUPPORTED under cell-partition "
+            f"MPI: each rank holds only its own cells and its own regrid "
+            f"weights, so feeding it would bin one rank's subdomain into the "
+            f"global lat-lon boxes. The run would otherwise finish and write "
+            f"CMOR files containing NOTHING (#1517).\n"
+            f"  Options, in order of preference: (1) run single-rank for CMOR "
+            f"spatial output; (2) turn CMOR output off "
+            f"(cmip_output/monthly_means) if you only want checkpoints and "
+            f"log diagnostics; (3) set LEGOESM_ALLOW_EMPTY_CMOR=1 to proceed "
+            f"anyway and accept empty CMOR files.")
+
     def _feed_mpas_cmip_accumulators(self, day: float) -> None:
         """Feed the CMOR monthly/daily/zonal accumulators from the current
         MPAS (Voronoi) state at a diagnostic interval.
@@ -6549,19 +6715,8 @@ class ModelDriver:
         _diag = getattr(self, "diagnostics", None)
         self._mpas_cmip_feed_on, _diag_wants_cmip = (
             self._mpas_cmip_feed_enabled(_diag))
-        # Make the unsupported multi-rank case LOUD (rank 0 only) rather than
-        # silently reproducing the empty-accumulator symptom this fix targets.
-        if (_diag_wants_cmip and not self._mpas_cmip_feed_on
-                and getattr(self, "_mpi_rank", 0) == 0):
-            logger.warning(
-                "  CMOR output requested (cmip_output/monthly_means on) but "
-                "this is a %d-rank MPAS/Voronoi run — the per-interval "
-                "spatial/zonal CMOR feed is UNSUPPORTED under cell-partition "
-                "MPI (rank-local cells + local regrid weights). The "
-                "monthly/daily CMOR accumulators will stay EMPTY; run "
-                "single-rank for CMOR spatial output. (Follow-up: owned-cell "
-                "gather + global weights on rank 0.)",
-                getattr(self, "_mpi_world_size", 1))
+        self._require_mpas_cmip_feed_supported(
+            self._mpas_cmip_feed_on, _diag_wants_cmip)
 
         # --clear-sky-diag DEGRADES LOUDLY, NEVER SILENTLY (#843): skip the
         # second radiation pass in the configurations that cannot publish it,
@@ -7157,7 +7312,7 @@ class ModelDriver:
                 _qv_smooth_nu, _cfl,
             )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
-        _compute_T_sfc = None
+        _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
         if _ice_skin_on and not _sst_forcing:
             raise ValueError(
@@ -7237,7 +7392,7 @@ class ModelDriver:
             def _blend_T_sfc(_sst, _sic):
                 # Blend prescribed SST with the ice component (constant T_ice,
                 # or the per-cell prognostic skin READ AT CALL TIME) and apply
-                # the land-lapse correction.  Split out of _compute_T_sfc so
+                # the land-lapse correction.  Split out of the SST sampling so
                 # the per-step loop can RE-ANCHOR from the cached daily SST/SIC
                 # against the freshly advanced skin every model step — the
                 # physics must consume the CURRENT skin, not the day-start
@@ -7268,12 +7423,10 @@ class ModelDriver:
                         _lapse_z.astype(_ts.dtype), _land_lapse_K_m)
                 return _ts
 
-            def _compute_T_sfc(day):
-                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
-                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
-                # data), sea-ice-blended, as a (nCells,) surface temperature.
-                _sst, _sic = self.get_sst_sic(day)
-                return _blend_T_sfc(_sst, _sic)
+            # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
+            # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
+            # call site so the daily block can keep the sampled ``sic`` for the
+            # surface-albedo blend.)
 
             # Shape guard once, up front: a non-per-cell get_sst_sic would
             # otherwise surface as an opaque error deep inside the JIT trace.
@@ -7304,6 +7457,98 @@ class ModelDriver:
                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
             )
 
+        # ---- Surface shortwave albedo boundary condition -------------------
+        # Radiation on this lane takes its surface albedo from the traced
+        # ``forcing["sfc_albedo"]`` built below.  Before that channel existed
+        # every column — land included — was solved at the scalar
+        # ``RRTMGPConfig.sfc_albedo`` (0.06, OPEN OCEAN), so 35.6% of the globe
+        # reflected shortwave like seawater.  Confirmed in three completed runs
+        # whose published rsus/rsds implied an albedo of exactly 0.0600 at both
+        # the global min and max.
+        #
+        # ``_create_physics`` already resolved the static land albedo in
+        # precedence order (albedo_land_path -> surfdata -> latitude-vegetation
+        # default) into ``self.physics.albedo_land``; the MPAS lane simply
+        # never read it.  Reuse that field rather than re-deriving it.
+        from legoesm.forcing.surface_utils import (
+            blend_surface_property, blended_surface_albedo,
+        )
+        # dynamic_albedo is a REAL ExperimentConfig option that the FV lane
+        # honours (physics_pipeline applies a zenith-angle-dependent ocean
+        # albedo). The MPAS blend below is static, so selecting it here would
+        # do nothing, silently — the "unknown/unimplemented selection quietly
+        # does something else" failure the dispatch-hardening rule exists to
+        # stop. Raise until the zenith curve is shared with this lane.
+        if bool(getattr(cfg, "dynamic_albedo", False)):
+            raise NotImplementedError(
+                "dynamic_albedo=True is not implemented on the MPAS lane: "
+                "the surface albedo handed to radiation here is the static "
+                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
+                "ocean curve the FV lane applies would be silently ignored. "
+                "Run the FV lane, or leave dynamic_albedo=False.")
+        _albedo_ocean = float(cfg.albedo_ocean)
+        _albedo_ice = float(cfg.albedo_ice)
+        _albedo_land_static = None
+        # RANK-LOCAL land test, computed here rather than reusing ``_has_land``
+        # (which only exists inside the mpas_land_beta / lapse guard above and
+        # would be undefined for a default config).  Rank-local is the RIGHT
+        # scope for the albedo: each rank blends its own cells, and an
+        # ocean-only rank correctly needs no land albedo.  No collective here,
+        # so a per-rank verdict cannot deadlock.
+        _alb_has_land = (_f_land_cells is not None
+                         and bool(jnp.any(_f_land_cells > 0.0)))
+        # Land fraction used by the albedo blend: None when there is no land,
+        # so the helper's "land fraction without a land albedo" guard fires
+        # only on a genuine misconfiguration.
+        _alb_f_land = _f_land_cells if _alb_has_land else None
+        _sea_albedo_day = None   # (nCells,) ocean/ice albedo of the last day
+        _sfc_albedo_on = (cfg.radiation != "none")
+        if _sfc_albedo_on and _alb_has_land:
+            _alb_land = getattr(self.physics, "albedo_land", None)
+            if _alb_land is None:
+                # Fail loudly: silently reverting to the ocean albedo over land
+                # is the defect this block exists to prevent.
+                raise ValueError(
+                    "MPAS run has a land fraction (f_land > 0) but no land "
+                    "surface albedo was resolved. Refusing to apply the OCEAN "
+                    f"albedo ({_albedo_ocean:g}) to every land column — that "
+                    "under-reflects shortwave over 100% of the land surface. "
+                    "Pass --albedo-land-file (a static land-albedo NetCDF), "
+                    "or --surfdata, or ensure the latitude-vegetation default "
+                    "(legoesm.surface_albedo.land_vegetation_albedo) is built "
+                    "in ModelDriver._create_physics."
+                )
+            _albedo_land_static = jnp.asarray(_alb_land).reshape(-1)
+            if _albedo_land_static.shape != (_ncell_alb := int(
+                    self.state.T.data.shape[0]),):
+                raise ValueError(
+                    f"land albedo shape {tuple(_albedo_land_static.shape)} != "
+                    f"(nCells={_ncell_alb},) — the albedo map was not "
+                    f"regridded onto this MPAS mesh."
+                )
+            # A NaN or an out-of-range albedo would poison every sunlit column
+            # silently (as a heating error, not a crash); refuse it here.
+            if not bool(jnp.all(jnp.isfinite(_albedo_land_static))):
+                raise ValueError(
+                    "land surface albedo contains non-finite values — refusing "
+                    "to hand a NaN surface boundary condition to radiation.")
+            _alb_lo = float(jnp.min(_albedo_land_static))
+            _alb_hi = float(jnp.max(_albedo_land_static))
+            if not (0.0 <= _alb_lo and _alb_hi <= 1.0):
+                raise ValueError(
+                    f"land surface albedo out of physical range "
+                    f"[{_alb_lo:.3f}, {_alb_hi:.3f}] — must lie in [0, 1].")
+            logger.info(
+                "  Surface albedo: ocean=%.3f ice=%.3f land=[%.3f,%.3f] "
+                "mean=%.3f (f_land mean=%.3f)",
+                _albedo_ocean, _albedo_ice, _alb_lo, _alb_hi,
+                float(jnp.mean(_albedo_land_static)),
+                float(jnp.mean(_f_land_cells)))
+        elif _sfc_albedo_on:
+            logger.info(
+                "  Surface albedo: ocean=%.3f ice=%.3f (no land fraction)",
+                _albedo_ocean, _albedo_ice)
+
         # ---- Interactive multilayer (Richards) land tile — MPAS port -------
         # Phase-1 coupling contract (tasks/mpas_land_port.md): the land is
         # stepped OUTSIDE the jitted atmosphere step, once per dt, forced by
@@ -7327,6 +7572,7 @@ class ModelDriver:
             )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
+        _land_albedo_cells = None      # (nCells,) land albedo of the last step
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
         if _land_ml_on:
@@ -7341,14 +7587,18 @@ class ModelDriver:
                     "use_multilayer_land on the MPAS lane requires a land "
                     "fraction (--topography / --land-mask-file); none was "
                     "loaded — the land tile would be silently inert.")
-            if (self._device_config is not None
-                    and self._device_config.is_distributed):
-                # Land columns are rank-local under MPI while the setup built
-                # them on the full mesh — scatter wiring is the follow-up
-                # (multilayer land is single-rank-only on every lane, #769).
-                raise ValueError(
-                    "use_multilayer_land on the MPAS lane is single-process "
-                    "only (phase 1); run without MPI or drop the flag.")
+            # Distributed is supported (#1321).  No column scatter is needed:
+            # ``_create_grid`` installs the rank-local mesh BEFORE
+            # ``_create_physics`` runs, and ``_setup_multilayer_land`` sizes
+            # its columns from ``self.grid.latCell``, so the soil columns are
+            # built rank-local already.  (The guard that used to sit here said
+            # the opposite — "the setup built them on the full mesh" — which
+            # stopped being true when grid creation moved ahead of physics.)
+            # What WAS missing is the downwelling-radiation slots the land
+            # forcing reads; ``make_voronoi_mpi_step`` now publishes the full
+            # 10-slot contract, and this asserts it rather than letting
+            # ``_marshal_land_forcing`` return None and the soil silently
+            # never advance.
             from legoesm.land.multilayer_land import step_multilayer_land
             from legoesm.core.coupling_fields import AtmToSurface
             from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -7362,7 +7612,11 @@ class ModelDriver:
                 new_state, resp, _carbon = step_multilayer_land(
                     land_state, a2s, _lml_cfg, _lml_umin, DT,
                     lat=_lml_lat, doy=doy, land_params=_lml_params)
-                return new_state, resp.T_sfc
+                # resp.albedo is the END-OF-STEP land albedo, already
+                # snow-brightened by the tile (band_albedo / snow_albedo) and
+                # dry-soil-brightened.  It used to be discarded here, so the
+                # land tile's snow-albedo feedback never reached radiation.
+                return new_state, resp.T_sfc, resp.albedo
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -7846,7 +8100,7 @@ class ModelDriver:
                 if _fd_int != _last_force_day:
                     # Coupled ocean/land: step the coupler's (grid-agnostic) slab
                     # ocean + land for the elapsed day BEFORE re-sampling SST, so
-                    # the daily _compute_T_sfc below reads the just-updated ocean
+                    # the daily SST resample below reads the just-updated ocean
                     # SST (the coupled driver overrides get_sst_sic -> ocean SST).
                     # Daily coupling cadence, matching the SST-refresh cadence.
                     # step 0 has nothing to step yet (_last_force_day is None).
@@ -7923,16 +8177,34 @@ class ModelDriver:
                         #    double-count (codex-1 finding 2).
                         # SST is daily piecewise-constant (prescribed); only the
                         # ice fraction of T_sfc evolves sub-daily with the skin.
+                        # Sample SST/SIC ONCE and keep the ice fraction: the
+                        # surface-albedo blend below needs the same ``sic`` the
+                        # temperature blend used.  Identical to the previous
+                        # ``_compute_T_sfc(day)`` (which is exactly
+                        # ``_blend_T_sfc(*get_sst_sic(day))``) and to the
+                        # ice-skin branch, so T_sfc is byte-identical.
+                        _sst_now, _sic_now = self.get_sst_sic(
+                            _force_day_canonical)
+                        _sst_day = jnp.asarray(_sst_now).reshape(-1)
+                        _sic_day = jnp.asarray(_sic_now).reshape(-1)
                         if _ice_skin_on:
-                            _sst_now, _sic_now = self.get_sst_sic(
-                                _force_day_canonical)
-                            _ice_sst_cur = jnp.asarray(_sst_now).reshape(-1)
-                            _ice_sic_cur = jnp.asarray(_sic_now).reshape(-1)
-                            _forcing_daily["T_sfc"] = _blend_T_sfc(
-                                _ice_sst_cur, _ice_sic_cur)
-                        else:
-                            _forcing_daily["T_sfc"] = _compute_T_sfc(
-                                _force_day_canonical)
+                            _ice_sst_cur = _sst_day
+                            _ice_sic_cur = _sic_day
+                        _forcing_daily["T_sfc"] = _blend_T_sfc(
+                            _sst_day, _sic_day)
+                        # Tile-blended surface shortwave albedo.  ONE formula
+                        # (forcing.surface_utils.blended_surface_albedo) shared
+                        # with the FV lane's blend; ocean/ice first, then the
+                        # land fraction.  Without this key radiation falls back
+                        # to the scalar config albedo (0.06 = open ocean) for
+                        # EVERY column, land included.
+                        if _sfc_albedo_on:
+                            _sea_albedo_day = blend_surface_property(
+                                _sic_day, _albedo_ice, _albedo_ocean)
+                            _forcing_daily["sfc_albedo"] = (
+                                blended_surface_albedo(
+                                    _sic_day, _alb_f_land, _albedo_ice,
+                                    _albedo_ocean, _albedo_land_static))
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -7989,6 +8261,18 @@ class ModelDriver:
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
                         + _f_land_cells * _land_T_skin)
+                # Interactive land ALBEDO (same one-step lag as the skin T
+                # above): the multilayer tile's end-of-step albedo already
+                # carries the snow brightening and the dry-soil brightening, so
+                # this is how the snow-albedo feedback reaches radiation on
+                # this lane.  Re-blend against the day's ocean/ice albedo so
+                # only the land fraction is replaced.
+                if (_land_ml_on and _land_albedo_cells is not None
+                        and _sea_albedo_day is not None
+                        and "sfc_albedo" in _forcing):
+                    _forcing["sfc_albedo"] = (
+                        (1.0 - _f_land_cells) * _sea_albedo_day
+                        + _f_land_cells * _land_albedo_cells)
                 # Phase 2b (#1312): traced per-cell beta_soil (same one-step
                 # lag as the skin T above; seeded pre-loop so the key is
                 # structurally stable — no retrace).
@@ -8068,7 +8352,8 @@ class ModelDriver:
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
-                    self._land_ml_state, _land_T_skin = _land_step_fn(
+                    (self._land_ml_state, _land_T_skin,
+                     _land_albedo_cells) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     if _land_beta_fn is not None:

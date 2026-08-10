@@ -14,9 +14,10 @@
 # Provenance: derived from Pierre's tuned CMIP-realism config
 # config/cmip/cmip_ocean_slab.yaml (Morrison + Sundqvist + COARE3 +
 # gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. Land = the
-# SOTA multilayer Richards soil + CLM PFT/texture + prognostic snow, tiled
-# COARE3/MOST surface fluxes, stomatal-beta OFF (#741); Louis turbulence
-# (required by the tiled surface). Upgraded from the Manabe slab bucket 2026-07-07.
+# SOTA multilayer Richards soil + CLM PFT/texture + prognostic snow,
+# stomatal-beta OFF (#741); Louis turbulence. Upgraded from the Manabe slab
+# bucket 2026-07-07; grid lane switched cube -> MPAS 2026-07-24 (see grid
+# block).  On MPAS the surface is UNTILED (tiled port pending).
 #
 # Convection = BECHTOLD (mass-flux, IFS lineage; directive 2026-07-06): mass
 # flux is column-water-conserving BY CONSTRUCTION, unlike the SBM relaxation
@@ -31,18 +32,43 @@
 # Tracking: GitHub issues #636, #811.
 # =============================================================================
 
-# --- Grid + dycore: cubed-sphere C48 / L40, cd-grid, dt 150 s -----------------
-# Publication-grade AMIP resolution (restored from #821's C12/L20 dt450 screen,
-# which was for cheap land-switch turnaround only).
-# NOTE: bechtold convection at C48 REQUIRES precision fp64 (below) — fp32 overflows
-# in the cd-grid barotropic subcycle (XLA fusion) and blows up ~day 5; `mixed`
-# does NOT cover that subcycle (it promotes only the spectral-dycore kernels).
-grid_type: cubed_sphere
-resolution: 48
-nlev: 40
-discretization: cdgrid
-dt: 150.0
-precision: fp64             # bechtold @ C48/L40 needs full fp64 (see note above)
+# --- Grid + dycore: MPAS Voronoi SCVT level 5 (~2.2°) / L30 sigma, dt 75 s ----
+# MPAS is THE production AMIP lane (Pierre directive 2026-07-23: "we should not
+# work with the cubed sphere"; cube retired after the unresolved #1296 Antarctic
+# terrain instability).  This exact recipe (level 5 / L30 / sigma / dt 75) is
+# the PROVEN-stable stack: Pierre's climeval_bech 1-yr Bechtold run (day 247+)
+# and our slabrep/mllandrep replica chains all run it.  The lane is
+# RECIPE-SENSITIVE: L40 + hybrid + dt-auto NaN'd on day 1 (undiagnosed) — do
+# not change these five keys independently of a stability A/B.
+# History: the cube C48/L40 cd-grid dt150 lane (with its fp64-barotropic
+# requirement) lives on only in git history and issues #1294-#1296.
+grid_type: voronoi
+resolution: 5               # icosahedral SCVT level 5 = 10242 cells (~2.2°)
+nlev: 30
+discretization: mpas
+dt: 75.0
+vertical_coord: sigma
+precision: fp64             # dycore fp64; rrtmgp runs fp32 on the MPAS path
+                            # (mpas_rrtmgp_fp32 default, perf — validated)
+a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
+                            # * 3e-3 * dx_min^2/dt).  The default 1.0 gives
+                            # A_h ~ 1.4e6 m2/s on this mesh — tau ~ 0.8 d for
+                            # a 2000 km eddy, at baroclinic growth rate — and
+                            # KILLED the midlatitude storm tracks (2026-08
+                            # production year: synoptic psl std 5-10x low, psl
+                            # pattern r = -0.37; ERA5-inherited eddies dead by
+                            # week 3).  One-variable A/Bs: 0.25 sustains eddies
+                            # through 120 d (2-8 d bandpassed psl std, 40-70N,
+                            # d60-120: 0.58 hPa vs 0.05-0.10 at 1.0) with the
+                            # matched m1-4 scorecard IMPROVED (rlut bias -31.9
+                            # -> -18.4, rsut +35.4 -> +27.2, psl r -0.23 ->
+                            # -0.07); 0.5 still decays the NH track (0.29 by
+                            # d90-120); 0.0 sustains eddies but blows up day 37
+                            # (#1354 hot-bottom mode — the Laplacian partially
+                            # masks the vertical-solve instability, so do NOT
+                            # go below 0.25 until #1354 is fixed).  MESH-
+                            # SPECIFIC: the dx^2/dt scaling is resolution-
+                            # blind (see the a_h follow-up issue).
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
@@ -51,16 +77,35 @@ clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
-turbulence: louis           # Louis required by the tiled surface
+turbulence: louis           # directive turbulence (was also required by the
+                            # cube-era tiled surface; MPAS runs untiled)
 gravity_wave_drag: mcfarlane+hines  # orographic (McFarlane) + non-orographic
                             # (Hines) composite (directive 2026-07-15). The
                             # 2026-07-15 A/B: on latlon24 the +hines lid
                             # braking pushed the topo-wave blowup day 100->179
                             # (ll24_bech_gwd); on cube C12 it is metric-neutral
                             # (matched d31-60 vs mcfarlane-only) and 60 d clean.
+                            # REQUIRES a real SSO file (#1514): the orographic
+                            # member with subgrid_orography_path empty launches
+                            # from the scalar h_topo=500 m on every OCEAN
+                            # column (-0.29 Pa spurious 40-60S drag; westerly
+                            # belt + both storm tracks erased). The path is
+                            # machine-specific so it lives in the launcher:
+                            # amip_production.sh wires AMIP_SSO via
+                            # --subgrid-orography-file; tests/unit/
+                            # test_amip_production_subgrid_orography.py goes
+                            # red if that wiring is dropped.
 diurnal_cycle: true
 orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
                             # declination + (a/r)^2 eccentricity asymmetry
+# Hard saturation adjustment (post-step supersaturation drain, <=5 K/step,
+# loudly logged per interception): the MPAS-lane Bechtold stabilizer.  Both
+# 2026-07-23 chains WITHOUT it NaN'd (day 25/40); every healthy year-long
+# Bechtold-on-MPAS run (Pierre's climeval_bech day 247+, our replica chains)
+# runs WITH it.  Non-conservative by design — the drain is the documented,
+# validated exception to the no-silent-clip rule (it is neither silent nor
+# unvalidated).  Whether it stays campaign-permanent is tracked with Pierre.
+hard_saturation_adjustment: true
 
 # --- Cloud tuning (mass-flux over-bright-anvil fix — PROVISIONAL) --------------
 # The mass-flux schemes (bechtold/edmf/tiedtke) over-cloud the AMIP troposphere.
@@ -78,45 +123,51 @@ cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f37673
 cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
 
 # --- Cloud-optics corrections (#1519) -----------------------------------------
-# WITHOUT these the radiation solver sees ONE homogeneous overcast column at the
-# grid-mean water path: `to_rrtmg_kwargs` (clouds/cloud_fraction.py:145) omits
-# `cloud_fraction`, so it computes R(cf*tau_ic) instead of the
+# WITHOUT these two the radiation solver sees ONE homogeneous overcast column at
+# the grid-mean water path: `to_rrtmg_kwargs` (clouds/cloud_fraction.py:145)
+# omits `cloud_fraction`, so it computes R(cf*tau_ic) instead of the
 # independent-column cf*R(tau_ic) + (1-cf)*R(0).  R is concave in optical depth,
 # so the single-column form is ALWAYS brighter — the function's own docstring
-# says so.  The sign of the error is therefore grid-independent; only its
-# magnitude depends on the cloud field.
+# says so.  Measured on this mesh: radiation treats 86-91% of columns and  The sign of the error is
+# therefore grid-independent; only its magnitude depends on the cloud field.
+# 30-41% of layers as overcast slabs against a true cover of 60% and a mean
+# layer cloud fraction of 8.5%; in-cloud layer water 60.7 g/m2 vs grid-mean 19.3.
 #
-# This file set NEITHER key, so it fell through to the code defaults
+# This file previously set NEITHER, so it fell through to the code defaults
 # ("none"/"constant") and the "production" configuration was the UNCORRECTED
-# one.  Measured cost on the MPAS lane, two 365-day AMIP runs identical in every
-# other respect (same pinned tree, forcing deck, ERA5 IC, diffusion bundle):
+# one.  Measured cost, two 365-day AMIP runs identical in every other respect
+# (same pinned tree, forcing deck, ERA5 IC and diffusion bundle):
 #     rsut  +59.33 -> +36.60  (-22.7 W/m2)      rlut  -36.55 -> -23.66
 #     prw   +1.85  ->  +0.24                    TOA net -24.83 -> -12.92
-# Both TOA components move toward observations TOGETHER — a structural
-# correction, not compensating-error tuning.  On that lane radiation was
-# treating 86-91% of columns as overcast slabs against a true cover of 60%.
+# Both TOA components move toward observations TOGETHER, so this is a structural
+# correction, not compensating-error tuning.
 #
-# `cloud_fsd` is the width the two_region optic consumes and is INERT under
-# "constant": the three keys are ONE lever, not three.
+# cloud_fsd is the width parameter the two_region optic consumes and is INERT
+# under "constant" — the three keys are one lever, not three.
 #
-# NOT set: cloud_vertical_overlap_optics.  "max_random" is MUTUALLY EXCLUSIVE
-# with two_column (config.py refuses the pair) — two complete alternative
-# treatments of the same degree of freedom, not composable corrections.
-# Matched 30-day window: max_random rsut 140.98 vs two_column 145.70 (control
-# 168.57) — 4.7 W/m2 better, short of the 8 W/m2 pre-registered as materially
-# better, and it re-solves each column as 8 subcolumns.
+# NOT set here: cloud_vertical_overlap_optics.  "max_random" is MUTUALLY
+# EXCLUSIVE with two_column (config.py:1799 refuses the pair) — they are two
+# complete alternative treatments of the same degree of freedom, not composable
+# corrections.  Measured on a matched 30-day window: max_random rsut 140.98 vs
+# two_column 145.70 (control 168.57), i.e. 4.7 W/m2 better but short of the
+# 8 W/m2 pre-registered as materially better, and it re-solves each column as 8
+# subcolumns.  two_column is the cheaper choice at equal skill.
 cloud_partial_coverage_optics: two_column
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
-convective_precip_efficiency: 0.0  # detrained-condensate -> convective-rain split
-                            # (raises pr, drains column moisture). The intended
-                            # 0.5 REQUIRES the bechtold rain-split scheme code,
-                            # which is not on main yet — and run_amip's guard
-                            # hard-errors on >0 with a non-tiedtke scheme, so
-                            # 0.5 made EVERY run of this YAML die at argparse
-                            # (#932). Keep 0.0 until the bechtold rain-split
-                            # lands (tracked with the #929 bechtold campaign),
-                            # then restore 0.5 as #899 intended.
+convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
+                            # (raises pr, drains column moisture). The bechtold
+                            # rain-split scheme is on this branch (#929), so the
+                            # old #932 argparse hard-error no longer applies.
+                            # PINNED 0.8 from the 2026-07-14 C12/60d dose-response
+                            # (one-variable vs the 365d pilot control, identical
+                            # Jan+Feb protocol): 0 -> 0.5 -> 0.8 moves EVERY
+                            # hydro/TOA metric monotonically toward obs —
+                            # pr 0.60->1.09->1.40 mm/d, hfls 49.9->60.2->65.9,
+                            # prw 30.6->28.3->26.1 (obs 24), clivi 0.10->0.05->
+                            # 0.03 (=obs), rlut 175->179->187, rsut 231->223->219.
+                            # 0.0 = bit-exact legacy no-split (kept for A/Bs).
+                            # History: #899 intended 0.5; #932 blocked it pre-#929.
 # convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
 # canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
 # convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the
@@ -131,6 +182,13 @@ convective_precip_efficiency: 0.0  # detrained-condensate -> convective-rain spl
 #   tropical cold bias / SST drift); with SST pinned that lever is inert and only
 #   the radiative cost shows. AMIP thus EXPOSES conv-cloud as a coupled-mode
 #   SST-drift compensator. Kept ON here for parameter-identity with the tuned base.
+#   NOTE: the CMIP6 production science chain (scripts/cluster/amip/
+#   amip_cmip6_chain.sbatch) deliberately OVERRIDES this to false via an
+#   include-YAML (best prescribed-SST TOA, per the A/B above) — production
+#   science runs diverge from the tracked value in exactly this ONE knob.
+#   NOTE (MPAS lane): the standalone MPAS/spectral radiation path FORCES this
+#   OFF (loudly, at setup) — it does not thread conv_precip.  The value is
+#   kept true for FV-lane parity with the tuned base.
 convective_cloud: true
 
 # --- Tiled surface + interactive REAL land (multilayer Richards, SOTA) ---------
@@ -156,8 +214,16 @@ snow_albedo_feedback: true  # prognostic SWE snow-albedo feedback, threaded into
                             # the multilayer land (#715)
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
 surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
-surface_tiled: true
+surface_tiled: false        # MPAS standalone path has NO tiled surface (open
+                            # port, see the lane-gap list in #1309); the
+                            # cube-era tiled COARE3/MOST split returns if/when
+                            # tiling is ported.  FV lanes may re-enable via CLI.
 surface_z0_land: 0.1
+# MPAS passive/slab land-tile knobs (Pierre's f0efce5a4; used by BOTH arms of
+# the land A/B — with use_multilayer_land the beta still feeds turbulence
+# until #1312 threads the soil's per-cell beta_soil):
+mpas_land_lapse_K_per_km: 6.5
+mpas_land_beta: 0.6
 
 # --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
 # File PATHS are supplied at runtime (see amip_production.sh); these are the
@@ -184,7 +250,9 @@ aerosol_forcing: external
 start_year: 1979
 
 # --- Diagnostics / output (CMIP6-protocol CMOR) -------------------------------
-diag_days: 5
+diag_days: 1                # daily diag line (Pierre protocol): a blowup must
+                            # be localizable to <1 day — the day-25 NaN autopsy
+                            # under diag_days 5 captured only a fully-NaN state
 checkpoint_days: 30
 monthly_means: true
 cmip_output: true

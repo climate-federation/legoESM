@@ -302,8 +302,10 @@ class PhysicsPipeline:
         # byte-identical); set by build_physics_pipeline from ExperimentConfig.
         self._cloud_rh_crit = None
         self._cloud_q_c_diagnostic = None
+        self._cloud_conv_cloud_coeff = None
         self._cloud_conv_cloud_max = None
         self._cloud_conv_cloud_condensate = None
+        self._cloud_Nc_default = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
         self._cloud_partial_coverage_optics = None
@@ -2250,9 +2252,11 @@ class PhysicsPipeline:
                                   and conv_precip is not None),
                 rh_crit=getattr(self, "_cloud_rh_crit", None),
                 q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
+                conv_cloud_coeff=getattr(self, "_cloud_conv_cloud_coeff", None),
                 conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     self, "_cloud_conv_cloud_condensate", None),
+                Nc_default=getattr(self, "_cloud_Nc_default", None),
                 cloud_inhomogeneity_factor=getattr(
                     self, "_cloud_inhomogeneity_factor", None),
                 cloud_optics_inhomogeneity=getattr(
@@ -2795,6 +2799,7 @@ def _build_none_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
@@ -2846,11 +2851,13 @@ def _build_gray_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
+        del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
@@ -2945,6 +2952,7 @@ def _build_rrtmgp_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
@@ -3016,6 +3024,8 @@ def _build_rrtmgp_radiation_fn(config):
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
             cloud_path_ice=cloud_path_ice,
+            cloud_path_liq_lw=cloud_path_liq_lw,
+            cloud_path_ice_lw=cloud_path_ice_lw,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,
@@ -3170,10 +3180,20 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
+            # coefficients + the quasi-equilibrium heating-ceiling ratio
+            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
             # Vertical subsidence solve selector (day-65 blowup bisect,
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
+            cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
+            cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
+            cape_sink_heating_ratio=getattr(
+                config, 'bechtold_cape_sink_heating_ratio', 5.0),
+            cape_relaxation_sink=getattr(
+                config, 'bechtold_cape_relaxation_sink', False),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -4085,6 +4105,9 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)
+    pipeline._cloud_conv_cloud_coeff = getattr(
+        config, 'cloud_conv_cloud_coeff', None)
+    pipeline._cloud_Nc_default = getattr(config, 'cloud_Nc_default', None)
     pipeline._cloud_inhomogeneity_factor = getattr(
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(

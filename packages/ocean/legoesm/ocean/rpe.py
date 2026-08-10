@@ -48,6 +48,38 @@ from legoesm import constants
 from legoesm.ocean.eos import make_eos_fn
 
 
+def pack_sorted_rpe(rho: np.ndarray, vol: np.ndarray, total_area: float,
+                    g_val: float | None = None) -> float:
+    """Sorted-RPE packing kernel: densest parcel at the BOTTOM.
+
+    Stack the parcels into one notional column of cross-section
+    ``total_area``, densest first from the bottom
+    (``z = -H``, ``H = sum(vol)/total_area``), and integrate
+    ``g * rho * z * vol``.  Mixing (a mean-preserving contraction of the
+    density multiset) RAISES this value; that sign is what makes it a
+    spurious-mixing metric.
+
+    ONE home for the packing convention (2026-08-10): shared by
+    :func:`compute_rpe`, the ocean test matrix's ``_compute_sorted_rpe``
+    and ``scripts/validate/lockex_rpe_trace.py``.  ``compute_rpe``'s
+    previous inline packing stacked densest at the SURFACE — inverting
+    the mixing sign against its own docstring (mixing lowered it).
+
+    Tie order among equal densities is irrelevant to the sum: a block of
+    equal-``rho`` parcels occupies a fixed depth range whose mass moment
+    is permutation-invariant.
+    """
+    if g_val is None:
+        g_val = float(constants.g)
+    H = float(np.sum(vol) / total_area)
+    order = np.argsort(-np.asarray(rho), kind="stable")   # densest first
+    rho_s = np.asarray(rho)[order]
+    vol_s = np.asarray(vol)[order]
+    c_prev = np.concatenate([[0.0], np.cumsum(vol_s[:-1])])
+    z_i = -H + (c_prev + 0.5 * vol_s) / total_area
+    return float(g_val * np.sum(rho_s * z_i * vol_s))
+
+
 def compute_rpe(state, z_coord, *, grid_type: str, grid,
                 eos: str = "wright",
                 eos_linear: object = None,
@@ -149,20 +181,10 @@ def compute_rpe(state, z_coord, *, grid_type: str, grid,
     rho_w = rho_flat[wet]
     vol_w = vol_flat[wet]
 
-    # Sort by density (densest first).
-    order = np.argsort(-rho_w, kind="stable")
-    rho_sorted = rho_w[order]
-    vol_sorted = vol_w[order]
-
-    # Cumulative volume below each parcel in the sorted stack.
-    # ``cum_below_i`` = sum_{j < i} vol_j.
-    cum_below = np.concatenate([[0.0], np.cumsum(vol_sorted[:-1])])
-    # Centroid z (positive downward set to negative below surface).
-    z_top = -cum_below / A_total
-    z_centroid = z_top - 0.5 * vol_sorted / A_total
-
-    rpe = float(g_val * np.sum(rho_sorted * z_centroid * vol_sorted))
-    return rpe
+    # Densest-at-BOTTOM packing (shared kernel; the previous inline block
+    # packed densest at the surface -- fixed 2026-08-10, see
+    # pack_sorted_rpe's docstring).
+    return pack_sorted_rpe(rho_w, vol_w, A_total, g_val=g_val)
 
 
 def rpe_drift_rate_per_m2(rpe_t0: float, rpe_t1: float,
@@ -179,4 +201,4 @@ def rpe_drift_rate_per_m2(rpe_t0: float, rpe_t1: float,
     return (rpe_t1 - rpe_t0) / (delta_t_s * area_total_m2)
 
 
-__all__ = ["compute_rpe", "rpe_drift_rate_per_m2"]
+__all__ = ["compute_rpe", "pack_sorted_rpe", "rpe_drift_rate_per_m2"]

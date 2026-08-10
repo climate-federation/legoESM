@@ -21,6 +21,8 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "latlon_channel": "24x72",
     "mpas_channel": "300km",
     "spectral": "T21",
+    # FESOM is mesh-file-backed: "pi" is the only packaged mesh.
+    "fesom": "pi",
 }
 
 # Standard grid types for the full test matrix.

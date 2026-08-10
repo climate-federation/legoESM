@@ -62,6 +62,9 @@ PLATFORM=${PLATFORM:-cuda}
 PY=${PY:-.venv/bin/python}
 SPINUP_OUT=${SPINUP_OUT:-results/rcemip300_60day}
 VALIDATE=${VALIDATE:-1}
+# Extra run_rcemip_plane.py flags, appended verbatim to both phases (e.g.
+# DRIVER_FLAGS="--hard-saturation-adjustment --hard-sat-threshold 1.0").
+DRIVER_FLAGS=${DRIVER_FLAGS:-}
 
 # RRTMGP everywhere, including the spin-up. Gray radiation is cheaper but it
 # UNDER-DRIVES the circulation: docs/dev-notes/CRM_faithful_SAM.md #85 measured
@@ -116,13 +119,13 @@ spinup)
         --snapshot-days 1.0 --snapshot3d-days "15,30,45,60" \
         --snapshot-heights "1000,5000,9000,12000" \
         --checkpoint-every "$CKPT_EVERY" \
-        --restart latest \
-        --output "$OUT" 2>&1 | { grep -vE "$FILT" || true; } | tee "$OUT/run.log"
+        --restart latest $DRIVER_FLAGS \
+        --output "$OUT" 2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tee "$OUT/run.log"
 
     # Plots are a convenience, not the deliverable: a short run has too few
     # snapshots to render, and that must not fail the wrapper.
-    $PY scripts/plot/plot_rcemip_snapshots.py "$OUT" 2>&1 | { grep -vE "$FILT" || true; } | tail -3 || true
-    $PY scripts/plot/plot_rcemip_3d.py "$OUT" 2>&1 | { grep -vE "$FILT" || true; } | tail -3 || true
+    $PY scripts/plot/plot_rcemip_snapshots.py "$OUT" 2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tail -3 || true
+    $PY scripts/plot/plot_rcemip_3d.py "$OUT" 2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tail -3 || true
     ;;
 
 production)
@@ -165,15 +168,15 @@ print(int(re.search(r'ckpt_0*(\d+)\.npz','$CKPT').group(1)))
         scripts/run/run_rcemip_plane.py $(common_flags) \
         --radiation rrtmgp --clouds --microphysics "$MICRO" \
         --steps "$STEPS" --print-every 2400 --snapshot-every "$SNAP_EVERY" \
-        --restart "$CKPT" $EXTRA \
-        --output "$OUT" 2>&1 | { grep -vE "$FILT" || true; } | tee "$OUT/run.log"
+        --restart "$CKPT" $EXTRA $DRIVER_FLAGS \
+        --output "$OUT" 2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tee "$OUT/run.log"
 
     if [ "$VALIDATE" = "1" ]; then
         # Average only post-restart snapshots; the window starts at the
         # checkpoint step so none of the spin-up state leaks into the mean.
         $PY scripts/validate/compare_rce_vs_rcemip_sam.py "$OUT" \
             --window-start "$SPIN_STEPS" --no-plot \
-            2>&1 | { grep -vE "$FILT" || true; } | tee -a "$OUT/run.log"
+            2>&1 | { grep --line-buffered -vE "$FILT" || true; } | tee -a "$OUT/run.log"
     fi
     ;;
 
