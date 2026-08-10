@@ -668,11 +668,17 @@ def riem_solver_c(ms: int, dt: float, bd, km: int, akap: float, cp: float,
     gama = 1.0 / (1.0 - akap)
     rgrav = 1.0 / FV3_GRAV
 
-    if not (a_imp > 0.5):
+    # The threshold is 0.999, not 0.5: this module's own header records that
+    # the Fortran routes ``a_imp > 0.999`` to SIM1_solver, so every value in
+    # (0.5, 0.999] belongs to SIM_solver -- an arm that is NOT ported.  A 0.5
+    # guard let a_imp=0.8 run SIM1 silently in place of a different solver,
+    # which is the "unknown selection quietly does something else" failure the
+    # dispatch-hardening rule exists to stop.
+    if not (a_imp > 0.999):
         raise NotImplementedError(
             f"riem_solver_c: a_imp={a_imp} selects a dead arm on the "
-            f"pinned deck (a_imp=1. -> SIM1); SIM3p0/RIM_2D are not "
-            f"ported. nh_utils.F90:392-401.")
+            f"pinned deck (a_imp=1. -> SIM1); SIM3p0/SIM3/RIM_2D/SIM_solver "
+            f"are not ported. nh_utils.F90:392-401.")
 
     is1, ie1 = is_ - 1, ie + 1
     ni = ie1 - is1 + 1

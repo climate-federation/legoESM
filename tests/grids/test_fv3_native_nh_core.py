@@ -303,7 +303,13 @@ def test_riem_solver_c_contracts_and_balanced_rest():
     pt = 280.0 + 15.0 * rng.standard_normal((full, full, KM))
     w3 = np.zeros((full, full, KM))
     ws = np.zeros((full, full))
-    hs = 50.0 * rng.standard_normal((full, full)) * FV3_GRAV / FV3_GRAV
+    # NOTE: this fixture is INSENSITIVE to the g-scaling of hs — the
+    # rest state passes with or without a FV3_GRAV factor here, so it does
+    # NOT pin the height-vs-geopotential convention that the module header
+    # states ("gz enters riem_solver_c as height*grav-like geopotential").
+    # Whatever the caller settles on, one assertion tying a known hydrostatic
+    # layer to its dz2 belongs here so a later mismatch fails loudly.
+    hs = 50.0 * rng.standard_normal((full, full))
     gama = 1.0 / (1.0 - FV3_KAPPA)
 
     # Build gz from the exact hydrostatic dz of each column (as the
