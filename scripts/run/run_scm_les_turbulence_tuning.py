@@ -43,6 +43,7 @@ import math
 import os
 import sys
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -193,7 +194,37 @@ _ATM_TURB_NAMESPACE = "atm.turb."
 # configuration: identical across arms except turbulence
 # --------------------------------------------------------------------------
 
-def build_surface_config(case, *, bulk_scheme: str = "constant"):
+def deck_surface_scalar_fluxes(case) -> tuple[float, float] | None:
+    """The deck's PRESCRIBED surface (sensible, latent) heat flux [W/m^2, up].
+
+    ``None`` when the case does not prescribe its surface fluxes.
+
+    SAM decks carry SHF/LHF in W/m^2 directly. The dry analytic cases carry a
+    kinematic ABSOLUTE-temperature flux ``sfc_theta_flux_K_m_s``, which the SCM
+    adds to dT/dt with no Exner factor -- so it inverts exactly through
+    ``shf = w_T * rho_sfc * c_pd``, the same relation
+    ``sam_case_scm.surface_kinematic_temperature_flux`` applies forwards. They
+    are dry, so their latent flux is zero.
+    """
+    if case.forcing.prescribe != "fluxes":
+        return None
+    rho_sfc = float(case.rho_sfc)
+    surf = getattr(case, "surface", None)
+    if isinstance(surf, dict) and "shf" in surf and "lhf" in surf:
+        return float(surf["shf"]), float(surf["lhf"])
+    spec = getattr(case, "spec", None)
+    w_T = getattr(spec, "sfc_theta_flux_K_m_s", None)
+    if w_T is None:
+        raise ValueError(
+            f"case {case.name!r} prescribes surface fluxes but exposes neither "
+            "a SAM surface dict nor sfc_theta_flux_K_m_s, so the flux cannot "
+            "be handed to the closure."
+        )
+    return float(w_T) * rho_sfc * constants.c_pd, 0.0
+
+
+def build_surface_config(case, *, bulk_scheme: str = "constant",
+                         flux_to_closure: bool = False):
     """The ONE surface-layer config every arm uses, derived from case physics.
 
     The SCM default is a fixed ``Cd_neutral = 1.5e-3``, while every one of
@@ -257,10 +288,16 @@ def build_surface_config(case, *, bulk_scheme: str = "constant"):
             "scaling and ignores Ch_neutral, so the prescribed flux would be "
             "counted twice."
         )
+    shf = lhf = None
+    if flux_to_closure:
+        deck = deck_surface_scalar_fluxes(case)
+        if deck is not None:
+            shf, lhf = deck
     return SurfaceLayerConfig(
         z0=z0, z_ref=z_ref,
         Cd_neutral=cd_neutral, Ch_neutral=ch_neutral,
         bulk_scheme=bulk_scheme,
+        prescribed_shflx_w_m2=shf, prescribed_lhflx_w_m2=lhf,
     )
 
 
@@ -1034,6 +1071,19 @@ def parse_args(argv=None):
                         "'none' means the SCM cannot condense, so its cloud "
                         "layer is supersaturated vapour where the LES "
                         "condenses.")
+    p.add_argument("--surface-flux-to-closure",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Hand a case deck's PRESCRIBED surface heat/moisture "
+                        "flux to the turbulence closure as its lower boundary "
+                        "condition, instead of zeroing the exchange "
+                        "coefficient and injecting the flux as a separate "
+                        "column tendency afterwards. The old path left every "
+                        "closure computing a surface flux of exactly ZERO, "
+                        "which disables the defining pathway of every "
+                        "flux-driven nonlocal scheme (YSU's convective "
+                        "velocity scale, PBL depth, entrainment and "
+                        "countergradient all come from shflx). Default False "
+                        "reproduces the historical runs bit for bit.")
     p.add_argument("--joint-aggregation", default="mean",
                    choices=["mean", "default_relative"],
                    help="How the per-case scores become ONE number for the "
@@ -1139,12 +1189,27 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         les_end = nsteps * dt / 3600.0
         span = (nsteps - n_start) * dt / 3600.0
         surface = build_surface_config(
-            case, bulk_scheme=args.surface_bulk_scheme)
+            case, bulk_scheme=args.surface_bulk_scheme,
+            flux_to_closure=args.surface_flux_to_closure)
+        prescribed = case.forcing.prescribe == "fluxes"
+        if args.surface_flux_to_closure and prescribed:
+            # The closure now applies the deck flux as its lower boundary
+            # condition, so the forcing channel MUST be switched off: leaving
+            # both on would add the same flux to the column twice.
+            # SAMSCMCase / AnalyticSCMCase are frozen DATACLASSES, so they
+            # have no _replace; SCMForcing is a NamedTuple and does.
+            case = dataclasses.replace(case, forcing=case.forcing._replace(
+                prescribe="none", w_th_s=None, w_qv_s=None))
+            print(f"  {name}: surface flux -> closure "
+                  f"(SHF={surface.prescribed_shflx_w_m2:.4g} "
+                  f"LHF={surface.prescribed_lhflx_w_m2:.4g} W/m^2); "
+                  "the SCMForcing surface channel is OFF so it is not "
+                  "counted twice.")
         arms.append(CaseArm(
             name=name, case=case, reference=ref, scored=scored,
             hours=les_end, analysis_hours=span, dt=dt,
             chunk_steps=args.chunk_steps, surface=surface,
-            prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
+            prescribed_fluxes=prescribed,
             les_dir=str(les_dirs[name]),
         ))
     return arms

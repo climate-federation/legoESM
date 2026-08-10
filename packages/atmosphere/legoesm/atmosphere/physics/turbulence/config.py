@@ -305,6 +305,32 @@ class SurfaceLayerConfig(NamedTuple):
     # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
     # tree_deserialise_leaves field ordering are unchanged.
     z0h_z0_ratio: float = 0.1
+    # PRESCRIBED surface scalar fluxes [W/m^2, positive UP], overriding whatever
+    # the bulk formula computed. ``None`` (default) = off, byte-identical to a
+    # config without them.
+    #
+    # These exist because a case deck that PRESCRIBES its surface heat and
+    # moisture fluxes (SAM's SFC_FLX_FXD, and every dry analytic ABL case) had
+    # no way to hand them to the closure. The single-column driver zeroed
+    # ``Ch_neutral`` to avoid double-counting and then injected the deck flux as
+    # a separate tendency on the lowest cell AFTER turbulence had run -- so the
+    # closure computed its own surface flux as exactly zero. Local closures
+    # still see the resulting gradient, but every flux-driven nonlocal scheme
+    # loses its defining pathway: YSU derives its convective velocity scale,
+    # PBL depth, entrainment and countergradient from ``shflx`` (ysu.py, the
+    # ``wtheta_sfc = shflx / (rho c_pd)`` line), so a prescribed-flux convective
+    # case ran it with no convection at all.
+    #
+    # Set these INSTEAD of injecting the flux as a forcing tendency, never as
+    # well: the closure applies them as the diffusion's lower boundary
+    # condition, so doing both counts the flux twice. MOMENTUM is untouched --
+    # the decks that fix scalar fluxes leave the stress interactive
+    # (SFC_TAU_FXD = .false.), so tau still comes from Cd.
+    #
+    # Annotated ``float | None`` => not spec-eligible: a prescribed boundary
+    # condition read off a case deck is a measurement, not a tunable closure.
+    prescribed_shflx_w_m2: float | None = None
+    prescribed_lhflx_w_m2: float | None = None
 
 
 class SmagorinskyConfig(NamedTuple):
