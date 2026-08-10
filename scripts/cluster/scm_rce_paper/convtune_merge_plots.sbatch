@@ -24,7 +24,13 @@ PIN=${PIN:?export PIN=<sha> the worktree must be at}
 ARM=${ARM:-implicit_flux}
 REPO=/burg-archive/glab/users/pg2328/legoESM
 REF=$REPO/results/rcemip_ref_sam300
-OUT=$REPO/results/scm_rce_convtune/arm_${ARM}_morrison
+OUT=${OUT:-$REPO/results/scm_rce_convtune/arm_${ARM}_morrison}
+# ALLOW_PARTIAL=1 merges an INCOMPLETE set. Only for a pipe-cleaner into a
+# scratch OUT: it produces a table that is not a campaign ranking, so never
+# point it at the real arm directory, where the partial artifacts would sit
+# next to the checkpoints looking finished.
+PARTIAL_FLAG=""
+[ "${ALLOW_PARTIAL:-0}" = "1" ] && PARTIAL_FLAG="--allow-partial"
 
 cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD)
@@ -41,7 +47,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 echo; echo "############ merge ############"
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
-  --reference-dir $REF --outdir $OUT --merge-only 2>&1 \
+  --reference-dir $REF --outdir $OUT --merge-only $PARTIAL_FLAG 2>&1 \
   | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader" | tail -20
 MERGE_RC=${PIPESTATUS[0]}
 echo "MERGE_RC=$MERGE_RC"
