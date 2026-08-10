@@ -134,40 +134,49 @@ def main() -> int:
               f"{s['coll_dur_us_median'] and round(s['coll_dur_us_median'])} us "
               f"= {s['coll_ms']:.1f} ms, compute {s['comp_ms']:.1f} ms")
 
-    # Cross-rank start spread on matched collective occurrences: match by
-    # per-rank occurrence INDEX of the same op name (all ranks execute the
-    # same compiled sequence). Only valid intra-node.
-    names = None
-    for s in summaries.values():
-        seq = [c[0] for c in s["collectives"]]
-        names = seq if names is None else (
-            seq if seq == names else None)
-        if names is None:
-            break
-    if (names is None or not names or len(summaries) < 2):
-        print("cross-rank: collective sequences differ, empty, or <2 "
-              "ranks — spread not computed")
+    # Cross-rank matching by TIME OVERLAP (participation differs per rank
+    # — a coloured round runs a kernel only on its participants, so
+    # occurrence-index matching is invalid; job 26854741 showed 88 vs
+    # 136 events across one node's ranks).  Two collectives on two ranks
+    # that overlap in wall-clock (shared node clock) and overlap by
+    # >50% of the shorter one are treated as the same logical exchange.
+    rank_names = sorted(summaries)
+    if len(rank_names) < 2:
+        print("cross-rank: <2 ranks — spread not computed")
     else:
-        spreads, end_spreads, durs = [], [], []
-        per_rank = list(summaries.values())
-        for i in range(len(names)):
-            starts = [r["collectives"][i][1] for r in per_rank]
-            ends = [r["collectives"][i][2] for r in per_rank]
-            spreads.append(max(starts) - min(starts))
-            end_spreads.append(max(ends) - min(ends))
-            durs.append(statistics.median(
-                r["collectives"][i][2] - r["collectives"][i][1]
-                for r in per_rank))
-        cal = statistics.median(end_spreads)
-        print(f"cross-rank ({len(per_rank)} ranks, {len(names)} matched "
-              f"collectives):")
-        print(f"  median START spread : {statistics.median(spreads):8.1f} us")
-        print(f"  median duration     : {statistics.median(durs):8.1f} us")
-        print(f"  median END spread   : {cal:8.1f} us  (calibration — "
-              f"must be << duration for the spread to be quotable)")
-        if cal > 0.5 * statistics.median(durs):
-            print("  CALIBRATION FAILED: end spread not small — clock "
-                  "alignment invalid, DO NOT quote the start spread")
+        base = summaries[rank_names[0]]["collectives"]
+        spreads, end_spreads, durs, pairs = [], [], [], 0
+        for other in rank_names[1:]:
+            oc = summaries[other]["collectives"]
+            j = 0
+            for (nm, s0, e0) in base:
+                while j < len(oc) and oc[j][2] < s0:
+                    j += 1
+                if j >= len(oc):
+                    break
+                nm1, s1, e1 = oc[j]
+                ov = min(e0, e1) - max(s0, s1)
+                if ov <= 0 or ov < 0.5 * min(e0 - s0, e1 - s1):
+                    continue
+                spreads.append(abs(s1 - s0))
+                end_spreads.append(abs(e1 - e0))
+                durs.append(statistics.median([e0 - s0, e1 - s1]))
+                pairs += 1
+        if not pairs:
+            print("cross-rank: no overlapping collective pairs matched")
+        else:
+            cal = statistics.median(end_spreads)
+            md = statistics.median(durs)
+            print(f"cross-rank ({len(rank_names)} ranks, {pairs} "
+                  f"overlap-matched pairs):")
+            print(f"  median START spread : {statistics.median(spreads):8.1f} us")
+            print(f"  p90    START spread : {sorted(spreads)[int(0.9 * len(spreads))]:8.1f} us")
+            print(f"  median duration     : {md:8.1f} us")
+            print(f"  median END spread   : {cal:8.1f} us  (calibration — "
+                  f"must be << duration for the spread to be quotable)")
+            if cal > 0.5 * md:
+                print("  CALIBRATION FAILED: end spread not small — clock "
+                      "alignment invalid, DO NOT quote the start spread")
 
     if args.out:
         with open(args.out, "w") as f:
