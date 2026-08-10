@@ -42,7 +42,8 @@ SOURCES = {
                    "lat-lon 2-D r512 26628073",
     "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
     "oc_tripole": "26493837/26493648",
-    "oc_mpas": "26494036 (f64), 26494908 (f32)",
+    "oc_mpas": "26494036 (f64), 26494908 (f32), "
+               "FESOM2 native ref 26851736 (T4d-T2d)/72",
 }
 
 PANELS = [
@@ -111,8 +112,12 @@ PANELS = [
                                         (512, 63.83)]),
                 ("float64 (subdiv-8)", [(32, 861.25), (64, 494.89),
                                         (128, 309.05), (256, 254.41),
-                                        (512, 194.80)])],
-        note="32 ranks/node fixed",
+                                        (512, 194.80)]),
+                ("FESOM2 native (CORE2 ref)", [(32, 393.0), (64, 380.1),
+                                               (128, 170.7), (256, 84.1),
+                                               (512, 34.9)])],
+        note="32 ranks/node fixed;\nFESOM2 = Fortran ref, CORE2 127k tri "
+             "L47\n(np\u226432\u2013128 packed on one node)",
     ),
 ]
 
@@ -130,7 +135,8 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 LL2304 fused": "#000000",
           "f32 s8@16+s9@32 ragged": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
-          "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
+          "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00",
+          "FESOM2 native (CORE2 ref)": "#555555"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 · LL1536/2048 @64": "*",
            "float64 (packed)": "s",
@@ -144,7 +150,8 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 LL2304 fused": "*",
            "f32 s8@16+s9@32 ragged": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
-           "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
+           "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v",
+           "FESOM2 native (CORE2 ref)": "P"}
 
 
 def _style():
