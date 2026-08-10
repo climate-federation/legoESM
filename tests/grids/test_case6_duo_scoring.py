@@ -65,7 +65,29 @@ gate = _load("case6_duo_oracle_gate")
 # hand-computed analytic points
 # ---------------------------------------------------------------------
 
-def test_hand_computed_analytic_points():
+# Oracle literals, hard-coded ON PURPOSE (codex c6 r1 #8: importing the
+# module's own constants into its "hand" check is circular).  Sources:
+#   test_cases.F90:1215-1218 (gh0 = 8e3*Grav, R=4, omg=rk=7.848e-6)
+#   gfs_constants.h:33-36    (radius 6371.2e3, omega 7.2921e-5,
+#                             grav 9.80665)
+_A_ORACLE = 6371.2e3
+_OM_ORACLE = 7.2921e-5
+_W_ORACLE = 7.848e-6
+_K_ORACLE = 7.848e-6
+_GH0_ORACLE = 8.0e3 * 9.80665
+
+
+def test_oracle_literals_match_the_module_constants():
+    """If a shared constant drifts, the hand checks below would drift
+    WITH it — so pin the module constants to the F90 literals first."""
+    assert FV3_RADIUS_M == _A_ORACLE
+    assert FV3_OMEGA == _OM_ORACLE
+    assert RH4_OMEGA_WAVE_HZ == _W_ORACLE
+    assert RH4_K_HZ == _K_ORACLE
+    assert RH4_MEAN_DEPTH_M * FV3_GRAV == _GH0_ORACLE
+
+
+def test_hand_computed_analytic_points_equator():
     """At lat=0 (cos=1, sin=0) the case-6 coefficients reduce, BY HAND:
 
         A(0) = w(2 Om + w)/2 - k^2/4
@@ -76,12 +98,8 @@ def test_hand_computed_analytic_points():
         u(pi/4, 0)    = a w + a k            (cos(4 lon) = -1)
         v(lon, 0)     = 0                    (sin(lat) factor)
     """
-    a = FV3_RADIUS_M
-    om = FV3_OMEGA
-    w = RH4_OMEGA_WAVE_HZ
-    k = RH4_K_HZ
-    gh0 = RH4_MEAN_DEPTH_M * FV3_GRAV
-
+    a, om, w, k, gh0 = (_A_ORACLE, _OM_ORACLE, _W_ORACLE, _K_ORACLE,
+                        _GH0_ORACLE)
     gh_hand = gh0 + a * a * (0.5 * w * (2.0 * om + w) - 0.25 * k * k
                              + (om + w) * k / 15.0
                              - 0.25 * k * k)
@@ -99,6 +117,45 @@ def test_hand_computed_analytic_points():
     assert 99.0 < u1 < 101.0
 
 
+def test_hand_computed_analytic_point_off_equator():
+    """lat = pi/3, lon = pi/8 — the latitude powers are LIVE here, in a
+    DIFFERENT factoring from the module (cos^{2R} collapsed to explicit
+    products, the A bracket expanded to c^8 (5 c^2 + 26) - 32 c^6, the
+    B square expanded to 25 c^2), so a wrong exponent or coefficient in
+    either factoring diverges (codex c6 r1 #8: the equator points alone
+    leave every latitude power untested)."""
+    a, om, w, k, gh0 = (_A_ORACLE, _OM_ORACLE, _W_ORACLE, _K_ORACLE,
+                        _GH0_ORACLE)
+    lam, phi = np.pi / 8.0, np.pi / 3.0
+    c = np.cos(phi)
+    s = np.sin(phi)
+    c2 = c * c
+    c4 = c2 * c2
+    c6 = c4 * c2
+    c8 = c4 * c4
+    # A = w(2Om+w)/2 c^2 + k^2/4 [c^8 (5 c^2 + 26) - 32 c^6]
+    a_t = 0.5 * w * (2.0 * om + w) * c2 \
+        + 0.25 * k * k * (c8 * (5.0 * c2 + 26.0) - 32.0 * c6)
+    # B = 2(Om+w)k/30 c^4 [26 - 25 c^2]
+    b_t = (om + w) * k / 15.0 * c4 * (26.0 - 25.0 * c2)
+    # C = k^2/4 c^8 [5 c^2 - 6]
+    c_t = 0.25 * k * k * c8 * (5.0 * c2 - 6.0)
+    gh_hand = gh0 + a * a * (a_t + b_t * np.cos(4.0 * lam)
+                             + c_t * np.cos(8.0 * lam))
+    gh_mod = rossby_haurwitz_4_geopotential(lam, phi, radius=a, omega=om,
+                                            gh0=gh0)
+    assert gh_mod == pytest.approx(gh_hand, rel=1e-13)
+
+    # winds, independent factoring: c^{R-1} written as c*c*c
+    u_hand = a * w * c + a * k * (c * c2) * (4.0 * s * s - c2) \
+        * np.cos(4.0 * lam)
+    v_hand = -a * k * 4.0 * s * (c * c2) * np.sin(4.0 * lam)
+    u_mod, v_mod = rossby_haurwitz_4_winds(lam, phi, radius=a)
+    assert u_mod == pytest.approx(u_hand, rel=1e-13)
+    assert v_mod == pytest.approx(v_hand, rel=1e-13)
+    assert abs(v_hand) > 10.0      # the point actually exercises v
+
+
 def test_reference_canvas_matches_gate_contract():
     """Runner and gate must agree on the canvas, or the contract check
     rejects every legitimate npz."""
@@ -110,16 +167,62 @@ def test_reference_canvas_matches_gate_contract():
     assert lat_r[0] == -90.0 and lat_r[-1] == 90.0
 
 
+# The case-6 stage configuration the runner must hand the stepper,
+# written as LITERALS from the authorities — NOT from SW_CFG_CASE8, so
+# a drift in that shared block trips here (codex c6 r1 #7):
+#   C48.sw.case6.alpha0.duo.hord8/rundir/logfile.000000.out:365-369
+#     (hords all 8), :401-417 (DDDMP=D2_BG=D4_BG=KE_BG=0, NORD=2),
+#     input.nml do_vort_damp=.false. -> damp_v=0 (dyn_core.F90:761-765)
+#   dyn_core.F90:757  nord_v = min(2, NORD) = 2
+_CASE6_SW_CFG_LITERAL = {
+    "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
+    "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
+    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.0, "nord": 2,
+}
+
+
 def test_runner_deck_constants_pin_the_resolved_echo():
-    """The deck values this port claims to match (logfile echo)."""
+    """The deck values this port claims to match (logfile echo),
+    against literals — including the shared case-8 block, whose only
+    legitimate difference is d4_bg (0.12 there, 0 here)."""
     assert runner.CASE6_D4_BG == 0.0
     assert runner.CASE6_DT_ATMOS_S == 1200.0
     assert runner.CASE6_N_SPLIT == 7
-    cfg = {**SW_CFG_CASE8, "d4_bg": runner.CASE6_D4_BG}
-    diff = {key for key in cfg if cfg[key] != SW_CFG_CASE8[key]}
-    assert diff == {"d4_bg"}, (
-        "case-6 config must differ from the certified case-8 block in "
-        f"d4_bg ONLY, got extra diffs: {diff}")
+    assert {**SW_CFG_CASE8, "d4_bg": 0.0} == _CASE6_SW_CFG_LITERAL
+    assert SW_CFG_CASE8["d4_bg"] == 0.12       # the case-8 del-6 bg
+
+
+def test_runner_threads_deck_config_to_stepper(tmp_path, monkeypatch):
+    """Run the runner's main() at C12 with a RECORDING stub in place of
+    advance_duo_outer_step: proves the deck defaults actually ARRIVE at
+    the stepper call (dt_atmos, n_split, d_ext, every sw_cfg key), not
+    merely that constants exist (codex c6 r1 #7).  The stub returns the
+    states unchanged, so no acoustic step runs."""
+    import legoesm.core.fv3_native_duo_stepper as stepper_mod
+
+    seen = []
+
+    def _stub(ctx, states, dt_atmos, n_split, d_ext=None, sw_cfg=None):
+        seen.append({"dt_atmos": dt_atmos, "n_split": n_split,
+                     "d_ext": d_ext, "sw_cfg": dict(sw_cfg)})
+        return states
+
+    monkeypatch.setattr(stepper_mod, "advance_duo_outer_step", _stub)
+    out = tmp_path / "thread.npz"
+    monkeypatch.setattr("sys.argv", ["run_duo_stepper_case6.py",
+                                     "--n", "12", "--days", "1",
+                                     "--out", str(out)])
+    runner.main()
+    assert len(seen) == 72                     # 86400 / 1200 blocks
+    for call in seen:
+        assert call["dt_atmos"] == 1200.0
+        assert call["n_split"] == 7
+        assert call["d_ext"] == 0.0
+        assert call["sw_cfg"] == _CASE6_SW_CFG_LITERAL
+    z = np.load(out, allow_pickle=True)
+    assert int(z["requested_days"]) == 1
+    assert float(z["dt_atmos"]) == 1200.0
+    assert int(z["n_split"]) == 7
 
 
 # ---------------------------------------------------------------------
@@ -171,6 +274,23 @@ def test_score_day_hand_math():
         np.sqrt(4.5 / 112.5), rel=1e-12)
 
 
+def test_score_day_v_uses_the_vector_norm():
+    """||u_ref|| >> ||v_ref|| with a dv-only error: normalising v by its
+    OWN tiny norm would report ~1000x; the vector norm keeps it ~1e-2.
+    Pins the denominator choice (codex c6 r1 #8)."""
+    lat = np.array([0.0, 0.0])
+    ref_u = np.full((2, 3), 100.0)
+    ref_v = np.full((2, 3), 1.0e-3)
+    run, ref = _toy(np.full((2, 3), 2.0), np.full((2, 3), 2.0),
+                    ref_u, ref_u, ref_v + 1.0, ref_v)
+    s = gate.score_day(run, ref, lat)
+    # hand: sqrt(6*1) / sqrt(6*1e4 + 6*1e-6)
+    hand = np.sqrt(6.0) / np.sqrt(6.0e4 + 6.0e-6)
+    assert s["v"]["rel_l2"] == pytest.approx(hand, rel=1e-12)
+    assert s["v"]["rel_l2"] < 0.02          # NOT ~1000 (own-norm bug)
+    assert s["u"]["rel_l2"] == 0.0
+
+
 def test_score_day_zero_and_nonvacuous():
     lat = np.array([0.0, 45.0])
     f = np.arange(6.0).reshape(2, 3) + 5.0
@@ -208,7 +328,14 @@ def _write_npz(tmp_path, **over):
                 gh=np.full((nt, 181, 360), 7.8e4),
                 u=np.zeros((nt, 181, 360)),
                 v=np.zeros((nt, 181, 360)),
-                lat=lat, lon=lon)
+                lat=lat, lon=lon,
+                # the runner's config record, deck values
+                n=np.array(48), dt_atmos=np.array(1200.0),
+                n_split=np.array(7), d_ext=np.array(0.0),
+                d4_bg=np.array(0.0), k2e_nord=np.array(2),
+                ext_exclude=np.array(""),
+                oracle_conventions=np.array(True),
+                requested_days=np.array(1))
     base.update(over)
     path = tmp_path / "run.npz"
     np.savez_compressed(path, **base)
@@ -218,6 +345,70 @@ def _write_npz(tmp_path, **over):
 def test_contract_accepts_canonical(tmp_path):
     out = gate.load_run(_write_npz(tmp_path))
     assert out["gh"].shape == (2, 181, 360)
+    assert gate.check_deck_record(out["record"]) == []
+    gate.check_coverage(out["times_days"], out["record"])  # no raise
+
+
+def test_contract_rejects_polar_sentinel(tmp_path):
+    """The exact codex c6 r1 #3 scenario: a finite BIG_NUMBER-class
+    corruption confined to the two pole rows.  cos-lat weighting alone
+    would score it ~0; the plausibility band rejects the file before
+    any score is formed."""
+    gh = np.full((2, 181, 360), 7.8e4)
+    gh[:, 0, :] = 1.0e8
+    gh[:, -1, :] = 1.0e8
+    with pytest.raises(gate.ContractError, match="plausibility band"):
+        gate.load_run(_write_npz(tmp_path, gh=gh))
+    u = np.zeros((2, 181, 360))
+    u[:, 0, :] = 1.0e8
+    with pytest.raises(gate.ContractError, match="plausibility bound"):
+        gate.load_run(_write_npz(tmp_path, u=u))
+
+
+def test_deck_record_mismatch_and_missing():
+    rec = {key: val for key, val in gate.DECK_RECORD.items()}
+    assert gate.check_deck_record(rec) == []
+    bad = dict(rec)
+    bad["dt_atmos"] = 450.0
+    problems = gate.check_deck_record(bad)
+    assert len(problems) == 1 and "dt_atmos" in problems[0]
+    del bad["dt_atmos"]
+    problems = gate.check_deck_record(bad)
+    assert len(problems) == 1 and "not recorded" in problems[0]
+
+
+def test_coverage_rules():
+    rec = {"requested_days": 2}
+    gate.check_coverage(np.array([0.0, 1.0, 2.0]), rec)      # ok
+    with pytest.raises(gate.ContractError, match="truncated or sparse"):
+        gate.check_coverage(np.array([0.0, 1.0]), rec)       # timeout cut
+    with pytest.raises(gate.ContractError, match="truncated or sparse"):
+        gate.check_coverage(np.array([0.0, 2.0]), rec)       # sparse
+    with pytest.raises(gate.ContractError, match="requested_days"):
+        gate.check_coverage(np.array([0.0]), {})             # no record
+    ic = {"requested_days": 0}
+    with pytest.raises(gate.ContractError, match="allow-ic-only"):
+        gate.check_coverage(np.array([0.0]), ic)
+    gate.check_coverage(np.array([0.0]), ic, allow_ic_only=True)
+
+
+def test_verdict_closed_form():
+    """Enforcement is finite-AND-<=: NaN scores or exceeded bounds FAIL;
+    NaN/negative bounds refuse outright (codex c6 r1 #4/#5)."""
+    def _scores(gh=1e-3, u=1e-2, v=1e-2):
+        one = {"gh": {"rel_l2": gh, "rel_l2_cosw": gh, "max_abs": 1.0},
+               "u": {"rel_l2": u, "rel_l2_cosw": u, "max_abs": 1.0},
+               "v": {"rel_l2": v, "rel_l2_cosw": v, "max_abs": 1.0}}
+        return {0.0: one}
+
+    assert gate.verdict(_scores(), 2e-3, 5e-2) is True
+    assert gate.verdict(_scores(gh=3e-3), 2e-3, 5e-2) is False
+    assert gate.verdict(_scores(v=6e-2), 2e-3, 5e-2) is False
+    assert gate.verdict(_scores(gh=np.nan), 2e-3, 5e-2) is False
+    with pytest.raises(ValueError, match="finite and > 0"):
+        gate.verdict(_scores(), np.nan, 5e-2)
+    with pytest.raises(ValueError, match="finite and > 0"):
+        gate.verdict(_scores(), 2e-3, -1.0)
 
 
 def test_contract_rejects_historical_canvas(tmp_path):
@@ -283,6 +474,43 @@ def c12():
     _, lon_deg = runner.reference_canvas()
     nmap = w2.build_nearest_map(ctx, lon_deg=lon_deg)
     return ctx, states, nmap
+
+
+def test_nearest_map_honours_lon_offset_independently(c12):
+    """INDEPENDENT nearest-centre construction (codex c6 r1 #6: using
+    the map to build its own expectation is circular).  For a sample of
+    canvas points on the 0.5-based canvas, brute-force the nearest cube
+    centre from the raw context coordinates with test-local arithmetic
+    and require the SAME index; then require the 0.5-based map to
+    actually differ from the historical 0-based map somewhere."""
+    ctx, _, nmap = c12
+    n, ng = ctx["n"], ctx["ng"]
+    sl = slice(ng, ng + n)
+    lons = np.concatenate([np.asarray(ctx["gs6"][t]["agrid_lon"])[sl, sl]
+                           .ravel() for t in range(6)])
+    lats = np.concatenate([np.asarray(ctx["gs6"][t]["agrid_lat"])[sl, sl]
+                           .ravel() for t in range(6)])
+    cx = np.cos(lats) * np.cos(lons)
+    cy = np.cos(lats) * np.sin(lons)
+    cz = np.sin(lats)
+    lat_deg, lon_deg = runner.reference_canvas()
+    rng = np.random.default_rng(7)
+    for i, j in zip(rng.integers(1, 180, 12), rng.integers(0, 360, 12)):
+        la = np.deg2rad(lat_deg[i])
+        lo = np.deg2rad(lon_deg[j])
+        px = np.cos(la) * np.cos(lo)
+        py = np.cos(la) * np.sin(lo)
+        pz = np.sin(la)
+        dots = cx * px + cy * py + cz * pz
+        assert nmap[i, j] == int(np.argmax(dots)), (i, j)
+    w2 = _load("run_duo_stepper_w2")
+    nmap_hist = w2.build_nearest_map(ctx)           # 0..359 canvas
+    frac = float(np.mean(nmap != nmap_hist))
+    # a 0.5 deg shift moves points within 0.5 deg of a C12 Voronoi
+    # boundary (~0.5/7.5 of the canvas); an ignored lon_deg gives 0.0
+    assert frac > 0.02, (
+        f"0.5-based map differs from the 0-based map on only "
+        f"{frac:.3f} of the canvas — lon_deg is being ignored")
 
 
 def test_sampled_gh_bit_equals_analytic_at_selected_centres(c12):

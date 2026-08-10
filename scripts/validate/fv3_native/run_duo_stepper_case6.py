@@ -84,6 +84,27 @@ def _git_sha() -> str:
         return "unknown"
 
 
+# Plausibility bands, mirrored by the gate (sentinel detectors, not
+# physics gates): RH4 lives in gh ~ [7.8e4, 1.04e5] m^2/s^2, |V| <~ 100
+# m/s; the known failure mode (BIG_NUMBER = 1e8 corner sentinel leaking
+# through a sample window) sits orders of magnitude outside.
+GH_PLAUSIBLE = (1.0e4, 5.0e5)
+WIND_PLAUSIBLE_MAX = 500.0
+
+
+def frames_plausible(gh, u, v) -> str | None:
+    """None if within the sentinel bands, else a description."""
+    if not all(np.isfinite(f).all() for f in (gh, u, v)):
+        return "non-finite values"
+    if gh.min() < GH_PLAUSIBLE[0] or gh.max() > GH_PLAUSIBLE[1]:
+        return (f"gh [{gh.min():g}, {gh.max():g}] outside "
+                f"{GH_PLAUSIBLE} — sentinel leak?")
+    m = max(float(np.abs(u).max()), float(np.abs(v).max()))
+    if m > WIND_PLAUSIBLE_MAX:
+        return f"|wind| max {m:g} > {WIND_PLAUSIBLE_MAX:g} m/s"
+    return None
+
+
 def sample_fields(ctx, states, nmap):
     """(gh, u_east, v_north) 181x360 frames.
 
@@ -178,8 +199,9 @@ def main():
     times = [0.0]
     gh0f, u0f, v0f = sample_fields(ctx, states, nmap)
     ghf, uf, vf = [gh0f], [u0f], [v0f]
-    if not all(np.isfinite(f).all() for f in (gh0f, u0f, v0f)):
-        print("day 0: NaN in IC — aborting", flush=True)
+    bad = frames_plausible(gh0f, u0f, v0f)
+    if bad:
+        print(f"day 0: {bad} — aborting", flush=True)
         sys.exit(2)
     print(f"day 0: gh [{gh0f.min():.1f}, {gh0f.max():.1f}] "
           f"max|u| {np.abs(u0f).max():.3f} max|v| {np.abs(v0f).max():.3f}",
@@ -193,6 +215,7 @@ def main():
             n=np.array(int(args.n)),
             dt_atmos=np.array(float(args.dt_atmos)),
             n_split=np.array(int(args.n_split)),
+            requested_days=np.array(int(total_days)),
             d_ext=np.array(float(args.d_ext)),
             d4_bg=np.array(float(args.d4_bg)),
             k2e_nord=np.array(int(args.k2e_nord)),
@@ -218,8 +241,9 @@ def main():
                                             args.n_split, d_ext=args.d_ext,
                                             sw_cfg=sw_cfg)
         gh_d, u_d, v_d = sample_fields(ctx, states, nmap)
-        if not all(np.isfinite(f).all() for f in (gh_d, u_d, v_d)):
-            print(f"day {day}: NaN — aborting (partial npz kept)",
+        bad = frames_plausible(gh_d, u_d, v_d)
+        if bad:
+            print(f"day {day}: {bad} — aborting (partial npz kept)",
                   flush=True)
             sys.exit(2)
         times.append(float(day))

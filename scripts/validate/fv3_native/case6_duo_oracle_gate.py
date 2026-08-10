@@ -13,18 +13,23 @@ is ``.false.``):
 * daily ``delp``/``ucomp``/``vcomp`` at t = 1..100 d; ``delp`` IS gh
   (m^2/s^2) on the SW convention.
 
-SCORES (per field gh/u/v, both printed):
+SCORES (per field gh/u/v, all printed):
 * rel_l2      = ||run - ref||_2 / ||ref||_2, UNWEIGHTED canvas (matches
-                the w2 gate convention — both sides live on the same
-                storage canvas);
-* rel_l2_cosw = the same with cos(lat) area weights (the canvas is a
-                lat-lon grid, so the unweighted number over-counts the
-                poles; both are stated so neither hides the other);
+                the w2 gate convention; counts the duplicated pole rows
+                at full weight);
+* rel_l2_cosw = the same with cos(lat) area weights (the physically
+                meaningful global number on a lat-lon canvas);
 * max_abs     = max|run - ref| in field units.
+
+Enforcement checks BOTH L2 metrics: cos-weighting alone gives the two
+pole rows ~6e-17 weight, so a finite corruption confined there would be
+invisible to it (codex c6 r1 #3); the unweighted metric sees it, and a
+plausibility band on the loaded fields (below) rejects the known
+BIG_NUMBER-class sentinels outright.
 
 For the WIND scores the normalisation is the vector reference norm
 sqrt(||u_ref||^2 + ||v_ref||^2) per weighting, so a v-field that passes
-through zero cannot inflate its own relative error.
+through zero cannot inflate (or deflate) its own relative error.
 
 PROTOCOL FLOOR, stated not hidden: the run frames are nearest-cell
 samples of the native cube + a c2l_ord2 wind lens; the reference is
@@ -40,15 +45,20 @@ it isolates "is the reference initialised with the same formulas?", and
 its error is bounded by the reference's own C48 discretisation +
 fregrid remap.
 
-ENFORCEMENT: report-only by default (exit 0 with the table).
-``--enforce`` gates rel_l2_cosw per field against ``--max-gh``/
-``--max-wind`` (exit 1 beyond).  The shipped defaults are PROVISIONAL
-PLACEHOLDERS — no measurement has calibrated them yet; until the
-calibration note below carries a job id and measured numbers, run
-report-only or pass explicit bounds.  (Calibration protocol: ~2x the
-worst scored day of the first green C48 deck-config run, so a
-regression that doubles the error trips while remap-protocol noise
-does not.)
+ENFORCEMENT (codex c6 r1 #1/#2/#4/#5): report-only by default.
+``--enforce`` additionally requires
+* EXPLICIT ``--max-gh``/``--max-wind`` bounds (finite, positive) — there
+  are deliberately no defaults until a calibration lands here with its
+  job id: bounds nobody measured are a gate that cannot mean anything;
+* the npz to carry the runner's config record MATCHING the reference
+  deck (C48, dt_atmos=1200, n_split=7, d_ext=0, d4_bg=0, oracle
+  conventions, no ext exclusions) — a diagnostic variant scores fine in
+  report mode but can never PASS as the deck;
+* contiguous day coverage 0..requested_days with requested_days >= 1
+  (``--allow-ic-only`` relaxes the >= 1, for the pure IC gate) — a
+  timeout-truncated incremental npz cannot pass as a complete run;
+* every scored metric to be finite and <= its bound (a NaN score or
+  bound FAILS — comparisons are written closed, not open).
 """
 from __future__ import annotations
 
@@ -60,10 +70,28 @@ import numpy as np
 ZENODO_BASE = ("/burg-archive/glab/users/pg2328/Code/FV3/duogrid_zenodo/"
                "extracted/Code and simulations files")
 REF_CASE = "C48.sw.case6.alpha0.duo.hord8"
-# PROVISIONAL until the first green run calibrates them (module
-# docstring); order-of-magnitude guesses from the remap-protocol floor.
-DEFAULT_MAX_GH_REL = 6.0e-3
-DEFAULT_MAX_WIND_REL = 6.0e-2
+REF_MAX_DAY = 100.0            # atmos_daily.nc time axis is 1..100 d
+
+# The reference deck's resolved configuration (logfile.000000.out) — an
+# npz must record exactly this to be enforceable as a deck score.
+DECK_RECORD = {
+    "n": 48,
+    "dt_atmos": 1200.0,
+    "n_split": 7,
+    "d_ext": 0.0,
+    "d4_bg": 0.0,
+    "k2e_nord": 2,        # the authoritative live default (no nml knob)
+    "oracle_conventions": True,
+    "ext_exclude": "",
+}
+
+# Plausibility bands — SENTINEL DETECTORS, not physics gates: the RH4
+# state lives in gh ~ [7.8e4, 1.04e5] and |V| <= ~100 m/s; the known
+# failure modes (BIG_NUMBER = 1e8 corner sentinel, a NaN that became a
+# huge finite through arithmetic) sit orders of magnitude outside.  A
+# genuinely evolving solution never approaches these bounds.
+GH_PLAUSIBLE = (1.0e4, 5.0e5)          # m^2/s^2
+WIND_PLAUSIBLE_MAX = 500.0             # m/s
 
 
 class ContractError(ValueError):
@@ -76,7 +104,9 @@ def _canvas() -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_run(npz_path: str) -> dict:
-    """Load + contract-check the runner npz."""
+    """Load + contract-check the runner npz (arrays, canvas, times,
+    finiteness, plausibility band); carry the runner's config record
+    through for the enforcement manifest check."""
     z = np.load(npz_path, allow_pickle=True)
     for key in ("gh", "u", "v", "times_days", "lat", "lon"):
         if key not in z.files:
@@ -108,7 +138,62 @@ def load_run(npz_path: str) -> dict:
         if not np.isfinite(f).all():
             raise ContractError(f"{key} contains non-finite values")
         fields[key] = f
-    return {"times_days": t, **fields}
+    lo, hi = GH_PLAUSIBLE
+    if fields["gh"].min() < lo or fields["gh"].max() > hi:
+        raise ContractError(
+            f"gh outside the plausibility band [{lo:g}, {hi:g}] "
+            f"(got [{fields['gh'].min():g}, {fields['gh'].max():g}]) — "
+            "sentinel/corruption detector, poles included")
+    for key in ("u", "v"):
+        m = float(np.abs(fields[key]).max())
+        if m > WIND_PLAUSIBLE_MAX:
+            raise ContractError(
+                f"|{key}| max {m:g} exceeds the plausibility bound "
+                f"{WIND_PLAUSIBLE_MAX:g} m/s — sentinel/corruption "
+                "detector")
+    record = {}
+    for key in DECK_RECORD:
+        if key in z.files:
+            record[key] = np.asarray(z[key]).item()
+    if "requested_days" in z.files:
+        record["requested_days"] = int(np.asarray(
+            z["requested_days"]).item())
+    return {"times_days": t, "record": record, **fields}
+
+
+def check_deck_record(record: dict) -> list[str]:
+    """Mismatches between the npz's recorded config and the reference
+    deck; a MISSING key is a mismatch (an npz from before the record
+    was written cannot be enforced)."""
+    problems = []
+    for key, want in DECK_RECORD.items():
+        if key not in record:
+            problems.append(f"{key}: not recorded in npz")
+        elif record[key] != want:
+            problems.append(f"{key}: npz has {record[key]!r}, deck is "
+                            f"{want!r}")
+    return problems
+
+
+def check_coverage(times: np.ndarray, record: dict,
+                   allow_ic_only: bool = False) -> None:
+    """Enforceable runs carry contiguous whole-day frames 0..requested;
+    raises ContractError otherwise (truncated/sparse incremental saves
+    stay scoreable in report mode only)."""
+    if "requested_days" not in record:
+        raise ContractError(
+            "npz does not record requested_days — cannot certify "
+            "completeness (report-only npz)")
+    req = record["requested_days"]
+    want = np.arange(0.0, float(req) + 0.5)
+    if times.size != want.size or not np.allclose(times, want, atol=1e-9):
+        raise ContractError(
+            f"times_days {times.tolist()} != contiguous 0..{req} — "
+            "truncated or sparse run cannot be enforced")
+    if req < 1 and not allow_ic_only:
+        raise ContractError(
+            "IC-only npz (requested_days=0): pass --allow-ic-only to "
+            "enforce the IC score alone")
 
 
 def load_reference(day: float, case: str = REF_CASE) -> dict:
@@ -136,7 +221,13 @@ def load_reference(day: float, case: str = REF_CASE) -> dict:
             v = np.asarray(d.variables["vcomp"][idx, 0], dtype=np.float64)
     finally:
         d.close()
-    return {"gh": gh, "u": u, "v": v}
+    out = {"gh": gh, "u": u, "v": v}
+    for key, f in out.items():
+        if not np.isfinite(f).all():
+            raise ContractError(
+                f"reference {key} at day {day} contains non-finite "
+                "values — refusing to score against it")
+    return out
 
 
 def score_day(run: dict, ref: dict, lat_deg: np.ndarray) -> dict:
@@ -144,39 +235,55 @@ def score_day(run: dict, ref: dict, lat_deg: np.ndarray) -> dict:
 
     run/ref: {"gh","u","v"} 181x360.  Returns per-field rel_l2 (canvas),
     rel_l2_cosw (cos-lat weighted) and max_abs; wind fields are
-    normalised by the VECTOR reference norm.
+    normalised by the VECTOR reference norm (zero-norm refs raise).
     """
     w = np.cos(np.deg2rad(np.asarray(lat_deg, dtype=np.float64)))[:, None]
     w = np.broadcast_to(w, run["gh"].shape)
 
-    def _norms(diff, base, weights):
-        num = float(np.sqrt(np.sum(weights * diff ** 2)))
-        den = float(np.sqrt(np.sum(weights * base ** 2)))
+    def _rel(diff, den_sq):
+        den = float(np.sqrt(den_sq))
         if den == 0.0:
             raise ValueError("reference norm is zero — cannot form a "
                              "relative error")
-        return num / den
+        return float(np.sqrt(np.sum(diff)) / den)
 
     ones = np.ones_like(run["gh"])
     out = {}
     dgh = run["gh"] - ref["gh"]
-    out["gh"] = {"rel_l2": _norms(dgh, ref["gh"], ones),
-                 "rel_l2_cosw": _norms(dgh, ref["gh"], w),
-                 "max_abs": float(np.abs(dgh).max())}
-    du = run["u"] - ref["u"]
-    dv = run["v"] - ref["v"]
-    for key, diff in (("u", du), ("v", dv)):
+    out["gh"] = {
+        "rel_l2": _rel(ones * dgh ** 2, np.sum(ones * ref["gh"] ** 2)),
+        "rel_l2_cosw": _rel(w * dgh ** 2, np.sum(w * ref["gh"] ** 2)),
+        "max_abs": float(np.abs(dgh).max()),
+    }
+    for key in ("u", "v"):
+        diff = run[key] - ref[key]
         out[key] = {
-            "rel_l2": float(np.sqrt(np.sum(diff ** 2))
-                            / np.sqrt(np.sum(ref["u"] ** 2)
-                                      + np.sum(ref["v"] ** 2))),
-            "rel_l2_cosw": float(
-                np.sqrt(np.sum(w * diff ** 2))
-                / np.sqrt(np.sum(w * ref["u"] ** 2)
-                          + np.sum(w * ref["v"] ** 2))),
+            "rel_l2": _rel(ones * diff ** 2,
+                           np.sum(ref["u"] ** 2) + np.sum(ref["v"] ** 2)),
+            "rel_l2_cosw": _rel(w * diff ** 2,
+                                np.sum(w * ref["u"] ** 2)
+                                + np.sum(w * ref["v"] ** 2)),
             "max_abs": float(np.abs(diff).max()),
         }
     return out
+
+
+def verdict(scores_by_day: dict, max_gh: float, max_wind: float) -> bool:
+    """CLOSED-form enforcement: every scored day's gh and wind rel-L2
+    metrics (BOTH weightings) must be finite and <= their bound.  A NaN
+    anywhere is a FAIL, never a pass-through (codex c6 r1 #4)."""
+    for bound in (max_gh, max_wind):
+        if not (np.isfinite(bound) and bound > 0.0):
+            raise ValueError(
+                f"enforcement bound {bound!r} must be finite and > 0")
+    for s in scores_by_day.values():
+        for key, bound in (("gh", max_gh), ("u", max_wind),
+                           ("v", max_wind)):
+            for metric in ("rel_l2", "rel_l2_cosw"):
+                val = s[key][metric]
+                if not (np.isfinite(val) and val <= bound):
+                    return False
+    return True
 
 
 def analytic_ic_fields() -> dict:
@@ -225,15 +332,22 @@ def main() -> int:
                          "canvas points against ps_ic/ua_ic/va_ic "
                          "(formula-level check, stepper-independent)")
     ap.add_argument("--enforce", action="store_true",
-                    help="exit 1 if any scored day exceeds --max-gh/"
-                         "--max-wind on rel_l2_cosw")
-    ap.add_argument("--max-gh", type=float, default=DEFAULT_MAX_GH_REL,
-                    help="enforced gh rel_l2_cosw bound (calibrated ~2x "
-                         "the first green run's worst day)")
-    ap.add_argument("--max-wind", type=float, default=DEFAULT_MAX_WIND_REL,
-                    help="enforced u/v rel_l2_cosw bound (same "
-                         "calibration)")
+                    help="gate: deck-record + coverage checks, then "
+                         "rel_l2 AND rel_l2_cosw <= the explicit bounds")
+    ap.add_argument("--max-gh", type=float, default=None,
+                    help="gh rel-L2 bound (REQUIRED with --enforce; no "
+                         "default until a measured calibration lands "
+                         "here with its job id)")
+    ap.add_argument("--max-wind", type=float, default=None,
+                    help="u/v rel-L2 bound (REQUIRED with --enforce)")
+    ap.add_argument("--allow-ic-only", action="store_true",
+                    help="permit enforcing an npz with requested_days=0 "
+                         "(the pure IC gate)")
     args = ap.parse_args()
+
+    if args.enforce and (args.max_gh is None or args.max_wind is None):
+        ap.error("--enforce requires explicit --max-gh and --max-wind "
+                 "(there are deliberately no default bounds)")
 
     run = load_run(args.npz)
     t = run["times_days"]
@@ -244,6 +358,12 @@ def main() -> int:
         for d in days:
             if not np.any(np.abs(t - d) < 1e-9):
                 raise ContractError(f"run npz has no day {d} frame")
+    for d in days:                     # preflight vs the reference axis
+        if d != 0.0 and not (1.0 <= d <= REF_MAX_DAY
+                             and abs(d - round(d)) < 1e-9):
+            raise ContractError(
+                f"day {d} is outside the reference coverage "
+                f"(whole days 1..{REF_MAX_DAY:g}, plus 0 = IC)")
     lat_deg, _ = _canvas()
 
     print(f"reference: {REF_CASE}/rundir/atmos_daily.nc "
@@ -251,34 +371,45 @@ def main() -> int:
     print("protocol: run = nearest-cell + c2l_ord2 on the reference "
           "T-cell canvas; reference = fregrid + c2l_ord4 — scores are "
           "floored by the remap-protocol difference (envelope level)")
+    rec = run["record"]
+    print(f"run config record: {rec if rec else 'ABSENT (pre-record npz)'}")
 
-    ok = True
+    if args.enforce:
+        problems = check_deck_record(rec)
+        if problems:
+            print("CASE6_DUO_TARGET_GATE: FAIL (config record != deck): "
+                  + "; ".join(problems))
+            return 1
+        try:
+            check_coverage(t, rec, allow_ic_only=args.allow_ic_only)
+        except ContractError as e:
+            print(f"CASE6_DUO_TARGET_GATE: FAIL (coverage): {e}")
+            return 1
+
     if args.analytic:
         s = score_day(analytic_ic_fields(), load_reference(0.0), lat_deg)
         _print_table("ANALYTIC formulas vs reference IC "
                      "(stepper-independent)", s)
 
+    scores_by_day = {}
     for day in days:
         k = int(np.argmin(np.abs(t - day)))
         frame = {key: run[key][k] for key in ("gh", "u", "v")}
         s = score_day(frame, load_reference(day), lat_deg)
+        scores_by_day[day] = s
         label = ("IC (day 0) run vs reference *_ic" if day == 0.0
                  else f"day {day:g} run vs reference")
         _print_table(label, s)
-        if args.enforce:
-            if s["gh"]["rel_l2_cosw"] > args.max_gh:
-                ok = False
-            if (s["u"]["rel_l2_cosw"] > args.max_wind
-                    or s["v"]["rel_l2_cosw"] > args.max_wind):
-                ok = False
 
     if args.enforce:
+        ok = verdict(scores_by_day, args.max_gh, args.max_wind)
         print("CASE6_DUO_TARGET_GATE:",
               "PASS" if ok else
-              f"FAIL (rel_l2_cosw beyond gh<{args.max_gh:g} / "
-              f"wind<{args.max_wind:g})")
+              f"FAIL (a rel-L2 metric is not finite-and-<= gh<"
+              f"{args.max_gh:g} / wind<{args.max_wind:g})")
         return 0 if ok else 1
-    print("CASE6_DUO_TARGET_GATE: REPORT-ONLY (pass --enforce to gate)")
+    print("CASE6_DUO_TARGET_GATE: REPORT-ONLY (pass --enforce with "
+          "explicit bounds to gate)")
     return 0
 
 
