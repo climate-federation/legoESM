@@ -130,6 +130,7 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
         on, off = real(scheme, field, q_v, rest)
         return (off, off) if scheme == "p3" else (on, off)
 
+
     checker._on_off = _inert
     try:
         failures = checker.section_2_load_bearing()
@@ -138,13 +139,16 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
     assert any("p3" in f for f in failures), failures
 
 
-def test_section_2_fails_on_a_barely_nonzero_effect(checker):
-    """A difference of one ULP is not evidence the flag reaches the physics."""
+def test_section_2_fails_on_a_barely_nonzero_liquid_effect(checker):
+    """The LIQUID half keeps a relative floor (its effect is 36 % of the warm-
+    cell tendency), so a 1e-9 relative difference must be rejected."""
     real = checker._on_off
 
     def _noise(scheme, field, q_v, rest):
         on, off = real(scheme, field, q_v, rest)
-        return off * (1.0 + 1.0e-9), off
+        if field == checker.LIQUID_FIELD and off != 0.0:
+            return off * (1.0 - 1.0e-9), off
+        return on, off
 
     checker._on_off = _noise
     try:
@@ -153,6 +157,33 @@ def test_section_2_fails_on_a_barely_nonzero_effect(checker):
         checker._on_off = real
     assert failures, "a 1e-9 relative difference was accepted as load-bearing"
     assert all("floor" in f for f in failures), failures
+
+
+def test_section_2_fails_when_the_allowance_survives_its_own_gate(checker):
+    """SYNTHETIC VIOLATION and the reason the ice half needs no magnitude
+    threshold: an implementation that applies the ramp UNCONDITIONALLY still
+    produces a difference below the qci gate, and is caught only by the
+    controls above the gate and above 235 K."""
+    real = checker._on_off
+    calls = {"n": 0}
+
+    def _always_on(scheme, field, q_v, rest):
+        on, off = real(scheme, field, q_v, rest)
+        if field == checker.ICE_FIELD:
+            calls["n"] += 1
+            # every ice call, control or not, reports a difference
+            return off * 0.5, off
+        return on, off
+
+    checker._on_off = _always_on
+    try:
+        failures = checker.section_2_load_bearing()
+    finally:
+        checker._on_off = real
+    assert calls["n"] >= 3 * len(checker.ICE_SCHEMES), calls
+    assert failures, "an unconditional allowance passed the gate controls"
+    assert any("withdrawal gate" in f or "ramp cutoff" in f
+               for f in failures), failures
 
 
 def test_section_3_finds_the_cap_live_in_all_three_lanes(checker):

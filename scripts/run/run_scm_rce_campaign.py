@@ -1843,6 +1843,34 @@ def _raw_from_physical(value: float, constraint) -> jax.Array:
     return arr
 
 
+# A parameter whose bounds span this many decades is sampled LOG-uniformly.
+# Linear sampling of, say, [1e-6, 1e-2] puts ~90 % of the draws in the top
+# decade and never visits the bottom three, so the tuned value is biased high
+# by construction — for autoconversion / entrainment / rate coefficients that
+# is most of the plausible range.  Two decades is the threshold at which the
+# distortion (a factor ~100 in sampling density across the range) stops being
+# a detail.
+_LOG_SAMPLING_DECADES = 2.0
+
+
+def _sample_scale(constraint) -> str:
+    """``"log"`` for a strictly-positive range spanning >= 2 decades."""
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if lo > 0.0 and hi > lo and (math.log10(hi) - math.log10(lo)) >= _LOG_SAMPLING_DECADES:
+        return "log"
+    return "linear"
+
+
+def _interp(constraint, frac: float) -> float:
+    """Value at fraction ``frac`` of the range, in the parameter's own scale."""
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if _sample_scale(constraint) == "log":
+        return float(lo * (hi / lo) ** frac)
+    return float(lo + frac * (hi - lo))
+
+
 def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed: int):
     yield defaults
     if n_eval <= 1:
@@ -1854,18 +1882,17 @@ def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed
         for name, c in zip(names, constraints):
             if budget <= 0:
                 return
-            lo = float(c.min_val)
-            hi = float(c.max_val)
             cand = dict(defaults)
-            cand[name] = lo + frac * (hi - lo)
+            cand[name] = _interp(c, frac)
             budget -= 1
             yield cand
     while budget > 0:
         cand = {}
         for name, c in zip(names, constraints):
-            lo = float(c.min_val)
-            hi = float(c.max_val)
-            cand[name] = float(rng.uniform(lo, hi))
+            # ONE rng.uniform(0, 1) draw per parameter regardless of scale, so
+            # the random STREAM is identical for linear and log parameters and
+            # a longer budget stays a strict superset of a shorter one.
+            cand[name] = _interp(c, float(rng.uniform(0.0, 1.0)))
         budget -= 1
         yield cand
 
@@ -1927,6 +1954,14 @@ def tune_category_winner(
     best_cfg = base_cfg
     best_run = default_run
     best_values = defaults
+    # A non-finite incumbent score makes EVERY ``trial < best`` comparison
+    # False, so the tuner would report the defaults as "tuned" while silently
+    # discarding every trial.  The default run scores +inf when it fails
+    # (run_scm_rce), which compares correctly; NaN would not, so it is mapped
+    # to +inf here rather than trusted.
+    best_score = float(default_run.score)
+    if not math.isfinite(best_score):
+        best_score = float("inf")
     for i, values in enumerate(_candidate_values(defaults, constraints, tune_evals, seed)):
         raw_values = {
             c.name: _raw_from_physical(values[c.name], c) for c in constraints
@@ -1969,7 +2004,10 @@ def tune_category_winner(
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
         )
-        if trial_run.status == "ok" and trial_run.score < best_run.score:
+        if (trial_run.status == "ok"
+                and math.isfinite(trial_run.score)
+                and trial_run.score < best_score):
+            best_score = float(trial_run.score)
             best_cfg = trial_cfg
             best_run = trial_run
             best_values = {

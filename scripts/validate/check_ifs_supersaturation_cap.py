@@ -95,12 +95,29 @@ WARM_T_K = 300.0
 WARM_P_PA = 100_000.0
 WARM_RH_LIQ = 1.10
 DT_S = 60.0
-# Minimum |ON - OFF| that counts as load-bearing, as a FRACTION of the OFF
-# tendency.  A merely-nonzero difference can be floating-point noise from a
-# reordered expression; the allowance changes the deposition driving
-# supersaturation by ~90 % in this cell, so anything below a percent means the
-# flag is not reaching the process it is supposed to govern.
-MIN_RELATIVE_EFFECT = 0.01
+# Ice above the qci gate: the allowance must be WITHDRAWN here, which is the
+# internal control that makes the below-gate difference interpretable.
+COLD_Q_ICE_ABOVE_GATE = 1.0e-7
+# Warm control for the ICE half: above 235 K the ramp is 1.0, so the flag must
+# be a no-op no matter what else the cell is doing.
+ICE_NOOP_T_K = 260.0
+# Sub-saturated control for the LIQUID half: with q_v below q_sat there is no
+# excess to drain, so the guard must be a no-op.
+LIQUID_NOOP_RH = 0.80
+# Minimum |ON - OFF| relative to the OFF tendency for the LIQUID guard, whose
+# effect IS a large share of the warm-cell tendency (measured 36 %).
+#
+# The ICE half deliberately has NO relative-magnitude threshold. Measured on
+# the cold cell: the absolute effect is IDENTICAL in morrison and thompson
+# (2.389e-10 kg/kg/s), but it is 91 % of thompson's total vapour sink and
+# 0.44 % of morrison's, because morrison's single-step tendency at an ice-poor
+# 215 K cell is dominated by Cooper nucleation — which the allowance
+# deliberately does NOT gate (PR #1527: deposition target only). A relative
+# threshold would therefore fail morrison for having MORE physics, not for
+# ignoring the flag. The gate controls below replace it: an implementation
+# that ignores the flag cannot produce a difference below the qci gate AND
+# bit-identical output above it.
+MIN_RELATIVE_EFFECT_LIQUID = 0.01
 
 
 def _gsam_rh_homo(T: np.ndarray, q_ice: np.ndarray | None = None) -> np.ndarray:
@@ -115,7 +132,14 @@ def _gsam_rh_homo(T: np.ndarray, q_ice: np.ndarray | None = None) -> np.ndarray:
 def section_1_formula() -> list[str]:
     """Shipped factor vs the independent transcription."""
     failures: list[str] = []
-    T = np.linspace(180.0, 300.0, 241)
+    # The 235 K gate is piecewise; a 0.5 K-spaced sweep straddles it without
+    # landing on it, so a regression that shifted the gate by one grid step
+    # would pass. The boundary and its two neighbours are appended explicitly.
+    T = np.sort(np.concatenate([
+        np.linspace(180.0, 300.0, 241),
+        np.array([GSAM_RH_HOMO_T_MAX - 1.0e-9, GSAM_RH_HOMO_T_MAX,
+                  GSAM_RH_HOMO_T_MAX + 1.0e-9]),
+    ]))
     got = np.asarray(thermo.homogeneous_freezing_rh_factor(jnp.asarray(T)))
     want = _gsam_rh_homo(T)
     dev = float(np.max(np.abs(got - want)))
@@ -194,27 +218,13 @@ def _on_off(scheme: str, field: str, q_v, rest) -> tuple[float, float]:
     return out[True], out[False]
 
 
-def _report_effect(label: str, on: float, off: float, *, expect_retains: bool,
-                   failures: list[str]) -> None:
-    """Print an ON/OFF pair and judge only its MECHANICAL properties."""
+def _report(label: str, on: float, off: float) -> float:
+    """Print an ON/OFF pair; return the difference.  No judgement here."""
     delta = on - off
     rel = abs(delta) / max(abs(off), 1.0e-30)
-    print(f"    {label:34s} ON={on:+.6e}  OFF={off:+.6e}  "
+    print(f"    {label:52s} ON={on:+.6e}  OFF={off:+.6e}  "
           f"delta={delta:+.6e} ({100 * rel:6.2f} % of OFF)")
-    if rel < MIN_RELATIVE_EFFECT:
-        failures.append(
-            f"{label}: |ON-OFF| is {100 * rel:.3f} % of the tendency, below the "
-            f"{100 * MIN_RELATIVE_EFFECT:.0f} % floor — the flag is not reaching "
-            "the process it governs (or this column is the wrong regime)")
-        return
-    if expect_retains and delta <= 0.0:
-        failures.append(
-            f"{label}: enabling the ice allowance removed MORE vapour "
-            f"(delta={delta:+.3e}); it must RETAIN vapour")
-    if (not expect_retains) and delta >= 0.0:
-        failures.append(
-            f"{label}: enabling the liquid guard removed LESS vapour "
-            f"(delta={delta:+.3e}); it must condense the excess faster")
+    return delta
 
 
 def section_2_load_bearing() -> list[str]:
@@ -223,34 +233,94 @@ def section_2_load_bearing() -> list[str]:
     Every ice-carrying scheme is exercised, not just one: a table of default-
     True config fields (section 3) says nothing about a scheme whose
     implementation ignores the field.
+
+    Each half is checked against its own INTERNAL CONTROL — a cell where the
+    feature must do exactly nothing — rather than against a magnitude
+    threshold.  A control is stronger here: an implementation that ignores the
+    flag produces zero difference everywhere, and one that applies it
+    unconditionally produces a difference in the control too.  Both fail.
     """
     failures: list[str] = []
 
-    # --- ICE half: one cold cell, all three ice schemes ----------------------
+    # --- ICE half ------------------------------------------------------------
     q_sat_i = float(thermo.saturation_mixing_ratio_ice(
         jnp.asarray(COLD_T_K), jnp.asarray(COLD_P_PA)))
-    q_v, rest = _column(COLD_T_K, COLD_P_PA, COLD_RH_ICE * q_sat_i,
-                        q_i=COLD_Q_ICE)
     ramp = float(thermo.homogeneous_freezing_rh_factor(jnp.asarray(COLD_T_K)))
+    q_v_cold = COLD_RH_ICE * q_sat_i
     print(f"  cold cell: T={COLD_T_K} K, p={COLD_P_PA / 100:.0f} hPa, "
           f"q_sat_ice={q_sat_i:.3e} kg/kg, RH_ice={COLD_RH_ICE:.2f}, "
-          f"rh_homo={ramp:.4f}, q_ice={COLD_Q_ICE:.1e} kg/kg (below the "
-          f"{GSAM_QCI_GATE:.0e} gate, so the allowance still applies)")
+          f"rh_homo={ramp:.4f}")
+    print(f"  ICE: effect below the qci gate (q_ice={COLD_Q_ICE:.0e}), then the "
+          f"two controls that must be EXACT no-ops")
     for scheme in ICE_SCHEMES:
+        q_v, rest = _column(COLD_T_K, COLD_P_PA, q_v_cold, q_i=COLD_Q_ICE)
         on, off = _on_off(scheme, ICE_FIELD, q_v, rest)
-        _report_effect(f"{scheme}: {ICE_FIELD}", on, off,
-                       expect_retains=True, failures=failures)
+        delta = _report(f"{scheme}: below gate", on, off)
+        if delta == 0.0:
+            failures.append(
+                f"{scheme}: {ICE_FIELD} changes nothing below the qci gate — "
+                "the flag is not reaching the deposition target")
+        elif delta < 0.0:
+            failures.append(
+                f"{scheme}: enabling the ice allowance removed MORE vapour "
+                f"(delta={delta:+.3e}); it must RETAIN vapour")
 
-    # --- LIQUID half: one warm cell, every scheme that carries the guard -----
+        # CONTROL 1 — ice above the gate: gSAM withdraws the allowance, so the
+        # two configurations must agree BIT FOR BIT.
+        q_v2, rest2 = _column(COLD_T_K, COLD_P_PA, q_v_cold,
+                              q_i=COLD_Q_ICE_ABOVE_GATE)
+        on2, off2 = _on_off(scheme, ICE_FIELD, q_v2, rest2)
+        _report(f"{scheme}: CONTROL q_ice={COLD_Q_ICE_ABOVE_GATE:.0e} (expect 0)",
+                on2, off2)
+        if on2 != off2:
+            failures.append(
+                f"{scheme}: the allowance is still active at q_ice="
+                f"{COLD_Q_ICE_ABOVE_GATE:.0e} kg/kg, above the "
+                f"{GSAM_QCI_GATE:.0e} withdrawal gate (delta={on2 - off2:+.3e})")
+
+        # CONTROL 2 — warm: the ramp is 1.0 above 235 K, so likewise a no-op.
+        q_sat_i_warm = float(thermo.saturation_mixing_ratio_ice(
+            jnp.asarray(ICE_NOOP_T_K), jnp.asarray(COLD_P_PA)))
+        q_v3, rest3 = _column(ICE_NOOP_T_K, COLD_P_PA,
+                              COLD_RH_ICE * q_sat_i_warm, q_i=COLD_Q_ICE)
+        on3, off3 = _on_off(scheme, ICE_FIELD, q_v3, rest3)
+        _report(f"{scheme}: CONTROL T={ICE_NOOP_T_K:.0f} K (expect 0)", on3, off3)
+        if on3 != off3:
+            failures.append(
+                f"{scheme}: the allowance is active at {ICE_NOOP_T_K} K, above "
+                f"the {GSAM_RH_HOMO_T_MAX} K ramp cutoff "
+                f"(delta={on3 - off3:+.3e})")
+
+    # --- LIQUID half ---------------------------------------------------------
     q_sat_l = float(thermo.saturation_mixing_ratio(
         jnp.asarray(WARM_T_K), jnp.asarray(WARM_P_PA)))
-    q_vw, restw = _column(WARM_T_K, WARM_P_PA, WARM_RH_LIQ * q_sat_l)
     print(f"  warm cell: T={WARM_T_K} K, p={WARM_P_PA / 100:.0f} hPa, "
-          f"q_sat_liq={q_sat_l:.3e} kg/kg, RH_liq={WARM_RH_LIQ:.2f}")
+          f"q_sat_liq={q_sat_l:.3e} kg/kg, RH_liq={WARM_RH_LIQ:.2f}; "
+          f"control at RH_liq={LIQUID_NOOP_RH:.2f}")
     for scheme in ICE_SCHEMES:
+        q_vw, restw = _column(WARM_T_K, WARM_P_PA, WARM_RH_LIQ * q_sat_l)
         on, off = _on_off(scheme, LIQUID_FIELD, q_vw, restw)
-        _report_effect(f"{scheme}: {LIQUID_FIELD}", on, off,
-                       expect_retains=False, failures=failures)
+        delta = _report(f"{scheme}: super-saturated", on, off)
+        rel = abs(delta) / max(abs(off), 1.0e-30)
+        if rel < MIN_RELATIVE_EFFECT_LIQUID:
+            failures.append(
+                f"{scheme}: {LIQUID_FIELD} moves the tendency by "
+                f"{100 * rel:.3f} %, below the "
+                f"{100 * MIN_RELATIVE_EFFECT_LIQUID:.0f} % floor")
+        elif delta > 0.0:
+            failures.append(
+                f"{scheme}: enabling the liquid guard removed LESS vapour "
+                f"(delta={delta:+.3e}); it must condense the excess faster")
+
+        # CONTROL — sub-saturated: nothing to drain, so an exact no-op.
+        q_vs, rests = _column(WARM_T_K, WARM_P_PA, LIQUID_NOOP_RH * q_sat_l)
+        on_s, off_s = _on_off(scheme, LIQUID_FIELD, q_vs, rests)
+        _report(f"{scheme}: CONTROL RH_liq={LIQUID_NOOP_RH:.2f} (expect 0)",
+                on_s, off_s)
+        if on_s != off_s:
+            failures.append(
+                f"{scheme}: the liquid guard fires in SUB-saturated air "
+                f"(RH={LIQUID_NOOP_RH}, delta={on_s - off_s:+.3e})")
     return failures
 
 

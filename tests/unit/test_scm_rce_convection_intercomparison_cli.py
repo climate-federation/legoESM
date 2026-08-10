@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import types
 
+import numpy as np
 import pytest
 
 import scripts.run.run_scm_rce_convection_intercomparison as driver
@@ -62,6 +63,20 @@ def _result(scheme="tiedtke", *, arm="implicit_flux", status=None, score=1.0):
         subsidence_solve=arm,
         subsidence_solve_status=(
             status if status is not None else f"forced:{scheme}={arm}"),
+    )
+
+
+# A reference stub complete enough for the PHYSICAL-unit RMSE columns, which
+# the summary/CSV writers now compute.  Deliberately not a bare
+# SimpleNamespace(precip_ref_mm_day=...): the writers legitimately need the
+# reference profiles, and a stub that made them silently return NaN would let
+# a broken column pass its own test.  One level, so the mass-weighted RMSE of
+# the single-level _run() profiles is exactly |profile - ref|.
+def _ref_stub(precip_ref_mm_day: float = 7.16):
+    return types.SimpleNamespace(
+        precip_ref_mm_day=precip_ref_mm_day,
+        mass_weights=[1.0],
+        T_ref=[298.0], qv_ref=[0.012], qcond_ref=[1.0e-5],
     )
 
 
@@ -200,7 +215,7 @@ def test_summary_names_the_kernel_arm(tmp_path):
     """No table in summary.md may be readable without its arm."""
     path = tmp_path / "summary.md"
     driver.write_summary(
-        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        path, _ref_stub(),
         [_result("tiedtke", arm="implicit_flux"),
          _result("dca", arm="implicit_flux", status="not_applicable:dca", score=2.0)],
         meta=dict(_SUMMARY_META),
@@ -216,7 +231,7 @@ def test_summary_names_the_kernel_arm(tmp_path):
 def test_summary_labels_the_as_shipped_arm_as_secondary(tmp_path):
     path = tmp_path / "summary.md"
     driver.write_summary(
-        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        path, _ref_stub(),
         [_result("tiedtke", arm="as_shipped", status="as_shipped")],
         meta=dict(_SUMMARY_META),
     )
@@ -230,7 +245,7 @@ def test_summary_flags_a_mixed_arm_table_as_confounded(tmp_path):
     must say it is confounded rather than mislabel itself with one arm."""
     path = tmp_path / "summary.md"
     driver.write_summary(
-        path, types.SimpleNamespace(precip_ref_mm_day=7.16),
+        path, _ref_stub(),
         [_result("tiedtke", arm="implicit_flux"),
          _result("bechtold", arm="as_shipped", status="as_shipped", score=2.0)],
         meta=dict(_SUMMARY_META),
@@ -315,3 +330,39 @@ def test_make_physics_config_raises_for_a_scheme_without_the_guard():
     with pytest.raises(ValueError):
         camp.make_physics_config(microphysics="sdm",
                                  hard_saturation_adjustment=True)
+
+
+# --------------------------------------------------------------------------- #
+# Physical-unit RMSE columns (K, g/kg) — what the figures and the paper table
+# read.  The normalised scores above are divided by the reference's own
+# mass-weighted spread, which is right for the optimiser and meaningless in a
+# caption.
+# --------------------------------------------------------------------------- #
+
+def test_row_carries_physical_rmse_when_a_reference_is_supplied():
+    ref = _ref_stub()
+    row = driver._row(_result(score=1.0), ref)
+    # One level, unit weight => the mass-weighted RMSE is the plain difference.
+    assert row["tuned_T_rmse_K"] == pytest.approx(abs(300.0 - 298.0), rel=1e-9)
+    assert row["tuned_qv_rmse_g_kg"] == pytest.approx(
+        abs(0.01 - 0.012) * 1000.0, rel=1e-9)
+    assert row["tuned_qcond_rmse_g_kg"] == pytest.approx(
+        abs(0.0 - 1.0e-5) * 1000.0, rel=1e-9)
+    # a-priori and tuned use the SAME profiles in the stub, so they agree here;
+    # what matters is that both columns are present and finite.
+    assert np.isfinite(row["apriori_T_rmse_K"])
+
+
+def test_row_without_a_reference_is_nan_not_zero():
+    """A missing reference must not look like a perfect fit."""
+    row = driver._row(_result(score=1.0))
+    for key in ("apriori_T_rmse_K", "tuned_T_rmse_K",
+                "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg"):
+        assert np.isnan(row[key]), (key, row[key])
+
+
+def test_csv_header_matches_the_paper_figure_script():
+    """scripts/plot/plot_scm_rce_convection_paper.py reads these names."""
+    for name in ("apriori_T_rmse_K", "tuned_T_rmse_K",
+                 "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg"):
+        assert name in driver.CSV_FIELDS

@@ -69,7 +69,10 @@ JAX_ENABLE_X64=1 $PY -m pytest -q -p no:cacheprovider \
   tests/test_microphysics_supersaturation_guard.py \
   tests/unit/test_supersaturation_guard_behaviour.py \
   tests/unit/test_check_ifs_supersaturation_cap.py \
-  2>&1 | tail -25
+  tests/unit/test_scm_rce_tuner_sampling.py \
+  tests/validation/test_rcemip_plane_smoke.py \
+  tests/unit/test_rcemip_gsam_oracle_ic.py \
+  --tb=short 2>&1 | tail -60
 echo "GATES_RC=${PIPESTATUS[0]}"
 
 echo; echo "############ 2. IFS cap reachability in all three lanes ############"

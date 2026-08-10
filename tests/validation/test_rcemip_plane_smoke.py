@@ -106,21 +106,23 @@ def test_rcemip_profiles_match_wing_2018_values():
     z = jnp.array([0.0, 4_000.0, 15_000.0, 20_000.0])
     theta = _rcemip_theta_profile(z, T_sfc=300.0)
     q_v = _rcemip_qv_profile(z, q_sfc=0.018)
-    # Anchors RE-MEASURED 2026-08-06 (SLURM job 9331710, x64) after the RCE300
-    # constants were calibrated against the gSAM oracle sounding
-    # (T_v0 295->299.274 K, Gamma 0.0067->0.0069901, q_sfc 0.01865->0.0142014).
-    # The isothermal cap is T_v0-Γ·z_t = 194.42 K, which is gSAM's own cold
-    # point exactly — the calibration is endpoint-constrained through it. gSAM's
-    # stratosphere then WARMS, a structure this two-piece form cannot carry
-    # (use --sounding). Previous anchors under the disproven 295 K profile:
-    # 290.47 / 305.87 / 355.34 / 456.69; and under an intermediate,
-    # since-retracted least-squares calibration: 296.63 / 308.50 / 346.54 /
-    # 448.40 (that one put the cold point 5.03 K below the oracle).
-    assert float(theta[0]) == pytest.approx(295.4701, rel=1.0e-3)
-    assert float(theta[1]) == pytest.approx(309.0968, rel=1.0e-3)
-    assert float(theta[2]) == pytest.approx(353.5882, rel=1.0e-3)
-    # stratosphere is ISOTHERMAL ⇒ θ RISES (was the buggy constant cap)
-    assert float(theta[3]) == pytest.approx(454.4805, rel=1.0e-3)
+    # Anchors RE-MEASURED 2026-08-10 (SLURM job 9356398, x64, CPU) after the
+    # module default moved from the gSAM-sounding calibration back to the
+    # PUBLISHED RCEMIP protocol: T_v0 = T_sfc*(1+0.608*q0) = 303.400466 K
+    # (Wing Eq. 3), Gamma = 0.0067 K/m, q0 = 18.65 g/kg. The isothermal cap is
+    # T_v0 - Gamma*z_t = 202.90 K, which is the ANALYTIC IC's tropopause, NOT
+    # the ~194 K equilibrium cold point a 100-day run settles to — the two were
+    # conflated in an earlier revision.
+    #
+    # Superseded anchors, kept so a bisect can identify which column a run used:
+    #   295.4701 / 309.0968 / 353.5882 / 454.4805  gSAM-sounding calibration
+    #   296.63   / 308.50   / 346.54   / 448.40    retracted least-squares fit
+    #   290.47   / 305.87   / 355.34   / 456.69    the fixed-295 K profile
+    assert float(theta[0]) == pytest.approx(298.7433, rel=1.0e-3)
+    assert float(theta[1]) == pytest.approx(314.1819, rel=1.0e-3)
+    assert float(theta[2]) == pytest.approx(363.0943, rel=1.0e-3)
+    # stratosphere is ISOTHERMAL => theta RISES (was the buggy constant cap)
+    assert float(theta[3]) == pytest.approx(461.8296, rel=1.0e-3)
     assert float(theta[3]) > float(theta[2])
     # q_v: two-scale Wing decay; surface=0.018, 4 km ≈ 4.98e-3, strat floor 1e-11
     assert float(q_v[0]) == pytest.approx(0.018, rel=1.0e-6)
