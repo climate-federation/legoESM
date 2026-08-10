@@ -97,7 +97,8 @@ RHO0_NEMO, CP_NEMO = 1026.0, 3991.86795711963  # eosbn2.F90:1899, NEMO's own con
 # lego arm
 # =====================================================================
 
-def run_lego(recipe: str, out_path: str, n_days: int):
+def run_lego(recipe: str, out_path: str, n_days: int,
+             surface_tendency_placement: str = "applied_now"):
     # Rule 1c (oracle-fidelity skill): JAX_ENABLE_X64=1 only PERMITS f64; the
     # legoESM precision policy is a SEPARATE axis that defaults to float32
     # and must be set explicitly BEFORE any geometry/state is constructed.
@@ -130,18 +131,35 @@ def run_lego(recipe: str, out_path: str, n_days: int):
                 rho0=RHO0_NEMO, cp=CP_NEMO)
             for name, rows in ROW_BOXES.items()}
 
+    if surface_tendency_placement not in ("applied_now", "leapfrog_rhs"):
+        raise SystemExit(
+            f"Unknown surface_tendency_placement {surface_tendency_placement!r}: "
+            "expected 'applied_now' or 'leapfrog_rhs'.")
+    _use_rhs = surface_tendency_placement == "leapfrog_rhs"
+    print(f"surface_tendency_placement={surface_tendency_placement}")
+
     nsteps = STEPS_PER_DAY * n_days
-    dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
+    if _use_rhs:
+        dyn = jax.jit(lambda st, t, rate: model.step(
+            st, DT, surface_forcing=sf, t_seconds=t, external_tracer_rate=rate))
+    else:
+        dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
     sample_dt = STEPS_PER_DAY * DT
 
     t_seconds = 0.0
     for acc in accs.values():
         acc.sample(st, dt_step=sample_dt, t_seconds=t_seconds)
     for k in range(nsteps):
-        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                  t_seconds=(k + 1) * DT)
         t_seconds = (k + 1) * DT
-        st = dyn(st, jnp.asarray(t_seconds))
+        if _use_rhs:
+            st, ext_rate = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=t_seconds,
+                return_rate=True)
+            st = dyn(st, jnp.asarray(t_seconds), ext_rate)
+        else:
+            st = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=t_seconds)
+            st = dyn(st, jnp.asarray(t_seconds))
         if (k + 1) % STEPS_PER_DAY == 0:
             for acc in accs.values():
                 acc.sample(st, dt_step=sample_dt, t_seconds=t_seconds)
@@ -334,6 +352,12 @@ def _parse_args(argv=None):
     p_lego.add_argument("out")
     p_lego.add_argument("--recipe", default="nemo_dino_kamm_mlf")
     p_lego.add_argument("--days", type=int, default=90)
+    p_lego.add_argument("--surface-tendency-placement", default="applied_now",
+                         choices=("applied_now", "leapfrog_rhs"),
+                         help="#1492 STEP 3: 'leapfrog_rhs' folds the DINO "
+                              "surface tendency into the leap-frog Nnn RHS "
+                              "(NEMO tra_sbc placement) instead of the legacy "
+                              "pre-step state mutation")
 
     p_nemo = sub.add_parser("nemo")
     p_nemo.add_argument("out")
@@ -349,7 +373,8 @@ def _parse_args(argv=None):
 def main(argv=None):
     args = _parse_args(argv)
     if args.mode == "lego":
-        run_lego(args.recipe, args.out, args.days)
+        run_lego(args.recipe, args.out, args.days,
+                 surface_tendency_placement=args.surface_tendency_placement)
     elif args.mode == "nemo":
         n_dumps = (args.days * STEPS_PER_DAY) // 320
         if n_dumps == 0:

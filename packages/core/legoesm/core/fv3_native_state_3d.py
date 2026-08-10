@@ -162,6 +162,11 @@ def field_shape(name: str, n: int, ng: int, km: int) -> tuple[int, ...]:
         return (n, km + 1, n)             # (i, k, j) -- load-bearing
     if name == "pkz":
         return (n, n, km)
+    if name == "delz":
+        # fv_arrays allocates delz COMPUTE-ONLY (is:ie, js:je, npz) and the
+        # NH spec's trap #9 records it has NO halo exchange by design --
+        # padding it here would invite a non-oracle halo read.
+        return (n, n, km)
     if name == "ps":
         # init_hydro.F90:62 declares ps(ifirst-ng:ilast+ng, jfirst-ng:
         # jlast+ng), i.e. the full padded plane. It was allocated at the
@@ -174,19 +179,26 @@ def field_shape(name: str, n: int, ng: int, km: int) -> tuple[int, ...]:
 
 
 def build_state_3d(n: int, ng: int, km: int, *, fill: float = 0.0,
-                   remap_follows: bool = False) -> list:
+                   remap_follows: bool = False,
+                   hydrostatic: bool = True) -> list:
     """Six per-face dicts of km-general fp64 arrays.
 
     fp64 throughout: Lane A is the fp64 reference the JAX stage is
     verified against, so a float32 array here would silently cap the
     achievable agreement at ~1e-7.
+
+    ``hydrostatic=False`` adds the NH prognostic ``delz`` (compute-window
+    only -- see :func:`field_shape`).  ``w`` is carried on BOTH lanes
+    (the hydro lane simply never reads it), matching the oracle's
+    always-allocated ``w`` array.
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     if n < 1 or ng < 1:
         raise ValueError(f"n and ng must be >= 1, got n={n}, ng={ng}")
+    fields = STATE_FIELDS + (() if hydrostatic else ("delz",))
     return [
         {f: np.full(field_shape(f, n, ng, km), fill, dtype=np.float64)
-         for f in STATE_FIELDS}
+         for f in fields}
         for _ in range(6)
     ]
 

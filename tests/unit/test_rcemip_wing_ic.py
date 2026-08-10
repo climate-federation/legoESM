@@ -30,23 +30,28 @@ jax.config.update("jax_enable_x64", True)
 
 
 def test_virtual_T_at_surface_equals_T_v0():
-    """T_v(z=0) = T_v0 = WING_T_V0 (RCEMIP-prescribed FIXED 295 K, Wing 2018
-    Tab 1 — NOT derived from the SST)."""
+    """T_v(z=0) = T_v0 = WING_T_V0 (the gSAM-oracle least-squares intercept —
+    NOT derived from the SST; see the constant's note)."""
     T_v0 = float(wing2018_virtual_temperature_profile(jnp.asarray(0.0)))
     np.testing.assert_allclose(T_v0, WING_T_V0, rtol=1.0e-12)
 
 
 def test_actual_T_at_surface_is_devirtualized_T_v0():
-    """Actual (dry-bulb) T(z=0) = T_v0 / (1 + ε⁻¹·q_sfc) ≈ 291.7 K for RCE300
-    (the SST=300 K is the surface boundary, NOT the initial surface air T)."""
+    """Actual (dry-bulb) T(z=0) = T_v0 / (1 + ε⁻¹·q_sfc) ≈ 297.9 K for RCE300.
+
+    The SST=300 K is the surface BOUNDARY, not the initial surface air T:
+    gSAM's RCE300 sounding starts the air at 296.92 K at z=37 m."""
     T0 = float(wing2018_temperature_profile(jnp.asarray(0.0)))
     expected = WING_T_V0 / (1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT)
     np.testing.assert_allclose(T0, expected, rtol=1.0e-12)
 
 
 def test_T_tropopause_cap_above_z_t():
-    """T_v(z > z_t) = T_v(z_t) = WING_T_V0 - Γ·z_t (isothermal virtual cap ≈
-    194.5 K). Actual T above the tropopause ≈ T_v (q_t = 10⁻¹¹)."""
+    """T_v(z > z_t) = T_v(z_t) = WING_T_V0 - Γ·z_t (isothermal virtual cap).
+
+    gSAM's cold point is 194.4 K at 14.5 km; its stratosphere then WARMS,
+    which this isothermal cap cannot reproduce (use --sounding for that).
+    Actual T above the tropopause ≈ T_v (q_t = 10⁻¹¹)."""
     T_v_top = float(wing2018_virtual_temperature_profile(
         jnp.asarray(20_000.0),
     ))
@@ -147,10 +152,13 @@ def test_wing_theta_ref_fn_integrates_with_stretched_grid():
     # rho INCREASES with index).
     rho = np.asarray(hc.rho_ref)
     assert rho[-1] > rho[0]
-    # θ at surface ≈ T_actual(0)·(p_ref/p_sfc)^κ. RCEMIP T_v0=295 K ⇒
-    # T_actual(0)=T_v0/(1+0.608·q)≈291.7 K, p_ref/p_sfc≈0.985 → θ ≈ 290.5 K.
+    # θ at surface ≈ T_actual(0)·(p_ref/p_sfc)^κ. Oracle-calibrated
+    # T_v0=300.444 K ⇒ T_actual(0)=T_v0/(1+0.608·q)≈297.9 K, (p_ref/p_sfc)^κ
+    # ≈0.9958 → θ ≈ 296.6 K at the lowest level. The gSAM RCE300 sounding's own
+    # θ at z=37 m is 296.03 K, so the band brackets the ORACLE value; the
+    # pre-calibration 290.5 K sits outside it.
     theta_sfc = float(hc.theta_ref[-1])
-    assert 288.0 < theta_sfc < 293.0, (
+    assert 294.0 < theta_sfc < 299.0, (
         f"Wing IC surface θ unrealistic: {theta_sfc:.2f}"
     )
 

@@ -61,6 +61,28 @@ DZ_MIN = 2.0
 _R3 = 1.0 / 3.0
 
 
+def _require_f64(fname: str, arrays: dict) -> None:
+    """Loud dtype gate on every EXTERNAL operand of an NH entry point.
+
+    The oracle is compiled with ``-fdefault-real-8``: every real is f64.
+    A float32 operand here would be silently upcast by the wrappers'
+    ``np.array(..., dtype=np.float64)`` work copies (codex NH r2 #1: a
+    float32 km=5 riem_solver_c run differed by 0.208 in gz and 2.2e-3 in
+    pef from the f64-storage run while raising nothing), and float32
+    OUTPUT arrays truncate on in-place assignment.  So the guard runs at
+    entry, on the caller's own arrays, before any cast.
+    """
+    for name, a in arrays.items():
+        if a is None:
+            continue
+        arr = a.a if isinstance(a, fort) else np.asarray(a)
+        if arr.dtype != np.float64:
+            raise TypeError(
+                f"{fname}: {name} must be float64 (got {arr.dtype}); the "
+                f"oracle build is -fdefault-real-8 and a float32 operand "
+                f"silently degrades the solve (codex NH r2 #1)")
+
+
 def update_dz_c(bd, km: int, dt: float, dp0: np.ndarray,
                 zs: fort, area: fort, ut: np.ndarray, vt: np.ndarray,
                 gz: np.ndarray, ws: fort, npx: int, npy: int, *,
@@ -81,6 +103,9 @@ def update_dz_c(bd, km: int, dt: float, dp0: np.ndarray,
     from legoesm.core.fv3_native_sw_core import fill_4corners
 
     is_, ie, js, je, ng = bd.is_, bd.ie, bd.js, bd.je, bd.ng
+    _require_f64("update_dz_c", {
+        "dp0": dp0, "zs": zs, "area": area, "ut": ut, "vt": vt,
+        "gz": gz, "ws": ws})
     if dp0.shape != (km,):
         raise ValueError(f"update_dz_c: dp0 must be ({km},), got {dp0.shape}")
     if gz.shape[2] != km + 1:
@@ -247,8 +272,9 @@ def edge_profile(q1: np.ndarray, q2: np.ndarray, j_lo: int, km: int,
                          - qe2[:, k - 1]) / bet_v
             gam[:, k] = gk / bet_v
         # :1602-1609 -- gk here is the LAST loop value (Fortran leaves the
-        # do-variable's final value in scope; a fresh dp0(km)/dp0(km-1)
-        # would be the same number, but the reuse is the literal source).
+        # do-variable's final value in scope; a fresh dp0(km-1)/dp0(km)
+        # -- 1-based, the loop's k-1/k at k=km -- would be the same
+        # number, but the reuse is the literal source).
         a_bot = 1.0 + gk * (gk + 1.5)
         xt1 = 2.0 * gk * (gk + 1.0)
         xt2 = gk * (gk + 0.5) - a_bot * gam[:, km - 1]
@@ -309,6 +335,11 @@ def update_dz_d(ndif: np.ndarray, damp: np.ndarray, hord: int, bd, km: int,
     is_, ie, js, je, ng = bd.is_, bd.ie, bd.js, bd.je, bd.ng
     isd, ied = is_ - ng, ie + ng
     jsd, jed = js - ng, je + ng
+
+    _require_f64("update_dz_d", {
+        "damp": damp, "dp0": dp0, "zs": zs, "zh": zh, "crx": crx,
+        "cry": cry, "xfx": xfx, "yfx": yfx, "ws": ws, "area": area,
+        "rarea": rarea})
 
     if damp.shape != (km + 1,) or ndif.shape != (km + 1,):
         raise ValueError("update_dz_d: damp/ndif must have km+1 slots "
@@ -447,13 +478,12 @@ def sim1_solver(dt: float, is_: int, ie: int, km: int, rgas: float,
     Vectorised over i everywhere (every Fortran i-loop is independent);
     k-recurrences stay explicit.
     """
-    for name, a in (("pe", pe), ("w2", w2), ("dz2", dz2), ("dm2", dm2),
-                    ("pm2", pm2), ("pem", pem), ("pt2", pt2)):
-        if np.asarray(a).dtype != np.float64:
-            raise TypeError(
-                f"sim1_solver: {name} must be float64 (got "
-                f"{np.asarray(a).dtype}); a float32 column silently "
-                f"truncates the solve by ~1e-3 in dz2 (codex NH r1 #4)")
+    # ws included (codex NH r2 #1): the oracle reads ws in the bottom
+    # solve (nh_utils.F90:1287) and a float32 ws was the one operand the
+    # r1 guard missed.
+    _require_f64("sim1_solver", {
+        "pe": pe, "w2": w2, "dz2": dz2, "dm2": dm2, "pm2": pm2,
+        "pem": pem, "pt2": pt2, "ws": ws})
     t1g = gama * 2.0 * dt * dt          # :1211 (non-moist)
     rdt = 1.0 / dt
     capa1 = kappa - 1.0
@@ -574,6 +604,14 @@ def riem_solver3(ms: int, dt: float, bd, km: int, akap: float, cp: float,
     peln1 = float(np.log(ptop))
     ptk = float(np.exp(akap * peln1))
 
+    # Guard BEFORE the per-row f64 work copies launder anything; the
+    # in-place outputs (w, delz, zh, pe, ppe, pk3, pk, peln) truncate
+    # silently if float32 (codex NH r2 #1).
+    _require_f64("riem_solver3", {
+        "zs": zs, "w": w, "delz": delz, "pt": pt, "delp": delp,
+        "zh": zh, "pe": pe, "ppe": ppe, "pk3": pk3, "pk": pk,
+        "peln": peln, "ws": ws})
+
     if not (a_imp > 0.999):
         raise NotImplementedError(
             f"riem_solver3: a_imp={a_imp} selects a dead arm on the "
@@ -668,11 +706,24 @@ def riem_solver_c(ms: int, dt: float, bd, km: int, akap: float, cp: float,
     gama = 1.0 / (1.0 - akap)
     rgrav = 1.0 / FV3_GRAV
 
-    if not (a_imp > 0.5):
+    # Guard BEFORE the f64 work copies below launder anything, and
+    # including the in-place OUTPUTS (gz, pef, ws) -- a float32 output
+    # truncates on assignment without raising (codex NH r2 #1).
+    _require_f64("riem_solver_c", {
+        "hs": hs, "w3": w3, "pt": pt, "delp": delp, "gz": gz,
+        "pef": pef, "ws": ws})
+
+    # The threshold is 0.999, not 0.5: this module's own header records that
+    # the Fortran routes ``a_imp > 0.999`` to SIM1_solver, so every value in
+    # (0.5, 0.999] belongs to SIM_solver -- an arm that is NOT ported.  A 0.5
+    # guard let a_imp=0.8 run SIM1 silently in place of a different solver,
+    # which is the "unknown selection quietly does something else" failure the
+    # dispatch-hardening rule exists to stop.
+    if not (a_imp > 0.999):
         raise NotImplementedError(
             f"riem_solver_c: a_imp={a_imp} selects a dead arm on the "
-            f"pinned deck (a_imp=1. -> SIM1); SIM3p0/RIM_2D are not "
-            f"ported. nh_utils.F90:392-401.")
+            f"pinned deck (a_imp=1. -> SIM1); SIM3p0/SIM3/RIM_2D/SIM_solver "
+            f"are not ported. nh_utils.F90:392-401.")
 
     is1, ie1 = is_ - 1, ie + 1
     ni = ie1 - is1 + 1

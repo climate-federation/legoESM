@@ -274,10 +274,15 @@ class SurfaceLayerConfig(NamedTuple):
     # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
-    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
-    # Threaded together with the coupler ocean tile by run_coupled so the
-    # interface cannot split; unknown -> ValueError at dispatch.
+    # bulk schemes: "dyer1974" (default; historical -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the SENTINEL for the
+    # byte-identical COARE-native stable form on coare3 — which is itself the
+    # BH91 fit with rounded constants, see bulk_flux.psi_m_coare) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".  On
+    # coare3 only the STABLE branch swaps (the Fairall unstable blend is
+    # COARE-defining).  Threaded together with the coupler ocean tile by
+    # run_coupled so the interface cannot split; unknown -> ValueError at
+    # dispatch.
     stability_scheme: str = "dyer1974"
     # Businger-Dyer / Dyer (1974) MOST stability-function coefficients, trainable
     # for the AIMIP classical curriculum. Defaults reproduce the historical

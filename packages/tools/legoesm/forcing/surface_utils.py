@@ -108,6 +108,68 @@ def blend_surface_property(
     return sic * value_ice + (1.0 - sic) * value_ocean
 
 
+def blended_surface_albedo(
+    sic: jnp.ndarray,
+    f_land: "jnp.ndarray | None",
+    albedo_ice: "float | jnp.ndarray",
+    albedo_ocean: "float | jnp.ndarray",
+    albedo_land: "jnp.ndarray | None" = None,
+) -> jnp.ndarray:
+    """Tile-blended surface shortwave albedo (ocean/ice, then land).
+
+    The single place the ocean/ice/land albedo blend is formed for the
+    surface-albedo boundary condition handed to radiation::
+
+        alpha_sea  = sic * alpha_ice + (1 - sic) * alpha_ocean
+        alpha_sfc  = f_land * alpha_land + (1 - f_land) * alpha_sea
+
+    Both steps are linear area-weighted tile blends, so the result is the
+    area-mean albedo of the cell — the quantity a single-column radiation
+    solver needs to reproduce the cell-mean reflected shortwave.
+
+    ``albedo_land`` is REQUIRED whenever ``f_land`` is not None: falling back
+    to the ocean value over land is the defect this helper exists to prevent
+    (it silently applied ``albedo_ocean = 0.06`` to every land column on the
+    MPAS lane).  A land fraction with no land albedo therefore raises rather
+    than quietly returning an ocean-albedo field.
+
+    Parameters
+    ----------
+    sic : array
+        Sea-ice concentration [0, 1].
+    f_land : array or None
+        Land area fraction [0, 1].  ``None`` ⇒ pure ocean/ice surface.
+    albedo_ice, albedo_ocean : float or array
+        Ice / open-ocean shortwave albedo [0, 1].
+    albedo_land : array or None
+        Land shortwave albedo [0, 1] (snow-brightened by the caller when a
+        snow-albedo feedback is active).  Required when ``f_land`` is given.
+
+    Returns
+    -------
+    albedo : array
+        Area-blended surface shortwave albedo [0, 1].
+
+    Raises
+    ------
+    ValueError
+        If a land fraction is supplied without a land albedo.
+    """
+    albedo = blend_surface_property(sic, albedo_ice, albedo_ocean)
+    if f_land is None:
+        return albedo
+    if albedo_land is None:
+        raise ValueError(
+            "blended_surface_albedo: f_land was supplied without an "
+            "albedo_land field. Refusing to apply the OCEAN albedo over land "
+            "— that silently reflects far too little shortwave from every "
+            "land column. Provide a land albedo map (--albedo-land-file), a "
+            "surfdata-derived albedo, or the latitude-vegetation default "
+            "(legoesm.surface_albedo.land_vegetation_albedo)."
+        )
+    return f_land * albedo_land + (1.0 - f_land) * albedo
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,

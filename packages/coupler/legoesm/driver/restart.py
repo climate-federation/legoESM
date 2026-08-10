@@ -462,6 +462,7 @@ def build_run_manifest(
     model_weights_provenance=None,
     state_digest: str | None = None,
     config_kind: str | None = None,
+    params_applied: dict | None = None,
 ) -> dict:
     """Assemble the run-manifest dict (pure; does no I/O).
 
@@ -505,6 +506,12 @@ def build_run_manifest(
             "config_kind": kind,
             "resolved_config": _serialize_config(config, kind),
             "config_hash": compute_config_hash(config, kind),
+            # #1509: --params values routed by the CLASS ROUTER land on nested
+            # scheme configs that resolved_config does not reach, so without
+            # this a reader could not tell which parameter values produced the
+            # run -- only which FILE was passed, whose contents may since have
+            # changed. Empty dict when no --params were given.
+            "params_applied": dict(params_applied) if params_applied else {},
         },
         "result": {
             "state_digest": state_digest,

@@ -548,11 +548,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         precip_accum = (first.precip.data
                         if getattr(first, "precip", None) is not None else None)
         # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
-        # feed: each comes from exactly ONE module (TOA trio from radiation,
-        # shflx/lhflx from turbulence), so first-non-None across modules is
-        # the correct combine (no summing).
+        # feed: each comes from exactly ONE module (TOA trio + clear-sky TOA
+        # pair from radiation, shflx/lhflx from turbulence), so
+        # first-non-None across modules is the correct combine (no summing).
+        # The ``*_clr`` pair is None unless RadiationConfig.clear_sky_diag is
+        # on (#843 lean-lane port) — a None extra is never attached.
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
-                        "shflx_sfc", "lhflx_sfc")
+                        "shflx_sfc", "lhflx_sfc",
+                        "sw_up_toa_clr", "lw_up_toa_clr")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete

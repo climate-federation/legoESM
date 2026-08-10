@@ -107,10 +107,13 @@ class CouplerConfig(NamedTuple):
     # SurfaceLayerConfig.thermo_convention by run_coupled.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default,
-    # historical -5*zeta), "beljaars_holtslag1991", "grachev2007_sheba"
-    # (Arctic/SHEBA), "gryanik2020".  Unstable branch is Businger-Dyer for
-    # every choice; validated at dispatch (unknown -> ValueError).
+    # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default;
+    # historical -5*zeta on most/large_yeager, and on coare3 the SENTINEL for
+    # the byte-identical COARE-native stable form — itself BH91 with rounded
+    # constants, see bulk_flux.psi_m_coare), "beljaars_holtslag1991",
+    # "grachev2007_sheba" (Arctic/SHEBA), "gryanik2020".  Unstable branch is
+    # Businger-Dyer (Fairall blend on coare3) for every choice; validated at
+    # dispatch (unknown -> ValueError).
     stability_scheme: str = "dyer1974"
     z_ref: float = 10.0               # Wind reference height [m]
     # Air temperature / specific humidity reference heights. Default to

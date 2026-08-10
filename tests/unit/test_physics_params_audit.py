@@ -254,10 +254,23 @@ class TestAIMIPDefaultsInteriorization:
             AIMIPClassicalParams, _canonical_scheme_defaults)
         defaults = _canonical_scheme_defaults()
         vals = AIMIPClassicalParams.from_defaults().as_dict()
-        # tiedtke_cape_threshold canonical 70 in [10, 500] is mid-range:
-        # the clamp is a no-op and init must equal the canonical default.
-        name = "tiedtke_cape_threshold"
+        # A knob whose canonical default sits WELL INSIDE its bounds: the
+        # sigmoid clamp is then a no-op and init must reproduce the canonical
+        # value exactly.
+        #
+        # This used to pin tiedtke_cape_threshold (70 in [10, 500]). That
+        # parameter was removed from the AIMIP trainables in #1417 -- its
+        # trigger sigmoid saturates, so its gradient is exactly zero in both
+        # the convecting and the stable regime -- and the test was left
+        # KeyError-ing on main. Moved to cloud_p_xr (0.25 in [0.1, 1.0]),
+        # which preserves the property under test.
+        name = "cloud_p_xr"
+        assert name in vals, f"{name} is no longer a trainable; pick another"
+        assert name in defaults, f"{name} has no canonical default"
         assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
+        # Non-vacuity: the value must genuinely be interior, or a clamped
+        # parameter would pass this by coincidence.
+        assert 0.1 < defaults[name] < 1.0
 
     def test_to_rrtmgp_config_freezes_all_cache_key_fields(self):
         """EVERY RRTMGPConfig field that ``_instance_cache_key`` /

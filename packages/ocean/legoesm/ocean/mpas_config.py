@@ -128,6 +128,15 @@ class MPASOceanConfig(NamedTuple):
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
+    # eta-floor clamp redistribution refinements PER CALL (2 calls per
+    # barotropic substep; each iteration costs one batched global
+    # reduction, so the substep scan pays 2*n_substeps*iters messages
+    # per step — the measured ocean-CPU rank-count-term driver class).
+    # 3 = the historical exact-redistribution default; 1 = scaling
+    # experiment knob (positivity unaffected — the clamp's final
+    # maximum() holds regardless; the un-refined mass residual is
+    # absorbed by the step-level conservation fixer).
+    eta_floor_clamp_iters: int = 3
     # Default to enstrophy-conserving PV flux — avoids the ζ-checkerboard
     # null mode of the energy-conserving scheme (Ringler et al. 2010).
     # Use "energy" if total-KE conservation is required and the ζ null

@@ -100,6 +100,7 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
                            dt: float, km: int, *,
                            cfg: dict | None = None,
                            nq: int = 1,
+                           hydrostatic: bool = True,
                            remap_follows: bool = False) -> list:
     """``d_sw1`` (per k) -> BARRIER 1 (per k) -> ``d_sw2`` (per k).
 
@@ -108,6 +109,14 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
 
     ``state`` is read for the D winds; ``csw_outs`` supplies ``uc``/``vc``
     as updated in place by ``p_grad_c`` in the C-grid phase.
+
+    ``hydrostatic=False`` threads the NH w path: d_sw1's fv_tp_2d(w)
+    into allflux slot 2 (which the barrier deliberately does NOT
+    average -- dyn_core.F90:853-900 skips iq==2, NH-spec trap #12),
+    then d_sw2's del6 ``dw`` increment and the mass-weighted
+    ``w = delp*w + fluxdiv`` on the OLD delp.  The updated ``w`` and
+    ``dw`` ride the returned per-face dicts (``w`` stacked, ``dw`` in
+    the per-level stage dicts) for d_sw5's finalisation.
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_duo_sw_core import d_sw1_duo, d_sw2_duo
@@ -167,6 +176,7 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
                 hord_tm=c["hord_tm"], hord_dp=c["hord_dp"],
                 nord_v=c["nord_v"], nord_t=0,
                 damp_v=c["damp_v"], damp_t=0.0,
+                hydrostatic=hydrostatic,
                 workspace_sentinel=0.0))
         per_face_levels.append(levels)
 
@@ -186,16 +196,29 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
     for t in range(6):
         acc = {"delp": np.zeros((m_a, m_a, km), dtype=np.float64),
                "pt": np.zeros((m_a, m_a, km), dtype=np.float64)}
+        if not hydrostatic:
+            acc["w"] = np.zeros((m_a, m_a, km), dtype=np.float64)
         for k in range(km):
             s1 = per_face_levels[t][k]
             s2 = d_sw2_duo(s1["delp"], s1["pt"],
                            s1["allflux_x"], s1["allflux_y"],
-                           ctx["gs6"][t], bd)
+                           ctx["gs6"][t], bd,
+                           w=(None if hydrostatic else s1["w"]),
+                           npx=npx, npy=npx, dt=dt,
+                           kgb=float(c.get("kgb", 0.0)),
+                           nord_w=int(c.get("nord_w", c["nord_v"])),
+                           damp_w=float(c.get("damp_w", c["damp_v"])) if
+                           not hydrostatic else 0.0,
+                           hydrostatic=hydrostatic)
             for name in ("delp", "pt"):
                 if name not in s2:
                     raise KeyError(
                         f"d_sw2 returned no {name!r}; keys {sorted(s2)}")
                 acc[name][:, :, k] = s2[name]
+            if not hydrostatic:
+                acc["w"][:, :, k] = s2["w"]
+                # d_sw5 needs the del6 increment of THIS level.
+                s1["dw"] = s2["dw"]
         acc["allflux_x"] = np.stack(
             [per_face_levels[t][k]["allflux_x"] for k in range(km)], axis=2)
         acc["allflux_y"] = np.stack(

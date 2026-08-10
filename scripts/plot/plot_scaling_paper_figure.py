@@ -35,13 +35,16 @@ SOURCES = {
                   "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
+                "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
-                "s8-lloyd0 26628076, s10@128 26677812",
+                "s8-lloyd0 26628076, s10@128 26677812, "
+                "size-colouring A/B 26857404 (s9@64 8.11 ms)",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
-    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039",
+    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
     "oc_tripole": "26493837/26493648",
-    "oc_mpas": "26494036 (f64), 26494908 (f32)",
+    "oc_mpas": "26494036 (f64), 26494908 (f32), "
+               "FESOM2 native ref 26851736 (T4d-T2d)/72",
 }
 
 PANELS = [
@@ -71,8 +74,10 @@ PANELS = [
                 ("float32 (subdiv-9)", [(32, 12.47), (64, 9.60), (128, 11.48)]),
                 ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
                 ("f32 (s10 lloyd-0)", [(128, 18.20)]),
+                ("f32 s8@16+s9@32 ragged", [(16, 4.86), (32, 9.78)]),
+                ("f32 s9 size-colouring", [(64, 8.11)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="s10@128 = 15.0 GC/s (record);\nweak 4x-cost decelerates 1.90→1.46",
+        note="size-colouring: 10.2→8.11 ms @64\n(−20%, padded bytes −26%, bit-identical)",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -92,8 +97,9 @@ PANELS = [
         series=[("float32", [(1, 36.45), (2, 22.48), (4, 12.84), (8, 11.04), (16, 8.71)]),
                 ("float64", [(1, 64.81), (2, 41.63), (4, 22.09)]),
                 ("mixed (f64 store)", [(1, 52.80), (4, 19.13)]),
-                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)])],
-        note="LL2304@128 = 13.0 GC/s\n(post-fix hundreds receipts)",
+                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)]),
+                ("f32 LL2304 fused", [(128, 15.807)])],
+        note="fused halo @128 = 15.81 ms\n= 13.4 GC/s (\u22124.9 %; overlap null)",
     ),
     dict(
         key="oc_tripole", title="tripole (ORCA fold)", sub="576×1152 L20 · A100 NCCL",
@@ -108,8 +114,12 @@ PANELS = [
                                         (512, 63.83)]),
                 ("float64 (subdiv-8)", [(32, 861.25), (64, 494.89),
                                         (128, 309.05), (256, 254.41),
-                                        (512, 194.80)])],
-        note="32 ranks/node fixed",
+                                        (512, 194.80)]),
+                ("FESOM2 native (CORE2 ref)", [(32, 393.0), (64, 380.1),
+                                               (128, 170.7), (256, 84.1),
+                                               (512, 34.9)])],
+        note="32 ranks/node fixed;\nFESOM2 = Fortran ref, CORE2 127k tri "
+             "L47\n(np\u226432\u2013128 packed on one node)",
     ),
 ]
 
@@ -124,8 +134,12 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
+          "f32 LL2304 fused": "#000000",
+          "f32 s8@16+s9@32 ragged": "#000000",
+          "f32 s9 size-colouring": "#D62728",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
-          "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
+          "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00",
+          "FESOM2 native (CORE2 ref)": "#555555"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 · LL1536/2048 @64": "*",
            "float64 (packed)": "s",
@@ -136,8 +150,12 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
+           "f32 LL2304 fused": "*",
+           "f32 s8@16+s9@32 ragged": "*",
+           "f32 s9 size-colouring": "X",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
-           "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
+           "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v",
+           "FESOM2 native (CORE2 ref)": "P"}
 
 
 def _style():

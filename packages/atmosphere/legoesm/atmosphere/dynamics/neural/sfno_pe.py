@@ -33,7 +33,11 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
 )
 from legoesm.grids.vertical import SigmaCoordinate
-from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+    SpectralHydrostaticState,
+    apply_spectral_filter_to_state,
+    compute_spectral_filter,
+)
 from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.normalization import (
     NormalizationStats,
@@ -42,6 +46,7 @@ from legoesm.ml.normalization import (
 )
 from legoesm.ml.channel_packing import pack_pe_state, unpack_pe_output
 from legoesm.ml.conservation import (
+    clip_humidity,
     correct_dry_air_mass,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -70,8 +75,46 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
         correction and re-analysis).  Defaults to ``False`` so the config does
         not advertise a correction it does not perform.
     clip_q : bool
-        Clip negative humidity values.  NOT YET WIRED (see above); defaults
-        to ``False``.
+        Clamp negative specific humidity to zero after each state update
+        (``legoesm.ml.conservation.clip_humidity``), mirroring ACE2's
+        corrector step 1 ("moisture, precipitation rate and radiative fluxes
+        are all made to be positive by setting any negative values to zero",
+        arXiv:2411.11268 §4.3). Acts on the grid-space ``q_v`` tracer, before
+        the loss, so the optimizer never sees a state reachable only through
+        negative moisture. No-op when the state carries no ``q_v``.
+
+        NOT moisture-conserving, and deliberately so: ``max(q, 0)`` ADDS water
+        wherever the prediction was negative, and nothing downstream removes it
+        (``correct_moisture_budget`` is unimplemented, so ACE2's compensating
+        global precipitation rescale — its corrector steps 3-4 — is absent).
+        It also has zero derivative in the clamped cells, so the loss provides
+        no direct gradient pushing them back positive; the pressure to avoid
+        negative q comes only from the surrounding unclamped cells. Accepted
+        because unbounded negative q corrupts virtual temperature and hence the
+        whole column, which is strictly worse than a small moisture source.
+    spectral_filter_strength : float
+        Exponential-filter value at the truncation limit ``n_max``, applied to
+        the prognostic spectral fields once per macro step
+        (``spectral_pe.compute_spectral_filter`` +
+        ``apply_spectral_filter_to_state`` — the SAME pair the dycore rollout
+        uses every step). ``0.0`` disables it.
+
+        WHY THIS EXISTS: in ``state_update`` mode the network emits grid-space
+        ``u, v`` and ``unpack_pe_output`` rebuilds vorticity/divergence from
+        them by spectral differentiation, which multiplies each coefficient by
+        ~n. With no damping anywhere in ``step()`` the small-scale end of that
+        cascade grows without bound. Measured on a trained T63 checkpoint
+        (2026-07-28, ``scripts/tmp/diag_sfno_full_rollout.py``): |u850|max
+        33 -> 158 m/s by macro step 3 (18 h) -> 969 m/s at step 4 -> 1.3e4 at
+        step 7, |vor|max rising ~x2.5/step from step 3, with T, q and z500
+        leaving physical range only at steps 6-7 and global-mean p_s pinned
+        exactly by the mass corrector until step 9 — i.e. the wind cascade is
+        the source and everything else is downstream of it. First NaN at step
+        12 (72 h). The dycore path never showed this because
+        ``spectral_rollout`` filters every step.
+    spectral_filter_order : int
+        Order of that exponential filter (higher = sharper cutoff, less
+        damping of resolved scales).
     use_normalization : bool
         Whether to apply Z-score normalization.
 
@@ -87,9 +130,27 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     dt_sfno: float = 21600.0  # 6 hours default
     correct_mass: bool = True
     correct_moisture_budget: bool = False  # not yet wired in _apply_conservation
-    clip_q: bool = False  # not yet wired in _apply_conservation
+    clip_q: bool = False
     use_normalization: bool = False
     time_integrator: str = "ssp_rk3"
+    # 0.0 = legacy (no damping). Callers that roll autoregressively MUST set
+    # this; see the class docstring for the measured divergence it prevents.
+    spectral_filter_strength: float = 0.0
+    spectral_filter_order: int = 8
+    # Number of PAST states fed alongside the current one. 0 = the historical
+    # single-snapshot input (every existing arm); 1 = the U-Cast / GraphCast
+    # convention of two inputs, which lets the network read a finite-difference
+    # tendency instead of inferring d/dt from spatial structure alone.
+    #
+    # WHY IT IS HERE: measured 2026-08-08, the muonlr arm's z500 error is
+    # 11.6 m after ONE 6-hour step and 20.5 m at 24 h, i.e. 57 % of the day-1
+    # error is made in the first step, and that single step already costs 2.9x
+    # GraphCast's entire 24 h forecast (4.06 m). The binding constraint is
+    # single-step accuracy, not error accumulation.
+    #
+    # ``sfno_config.in_channels`` must be (1 + history_steps) x the packed
+    # channel count; __init__ checks it rather than silently mis-slicing.
+    history_steps: int = 0
 
 
 class SFNOPrimitiveEquationModel:
@@ -125,6 +186,53 @@ class SFNOPrimitiveEquationModel:
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.norm_stats = norm_stats
+
+        # Precompute the post-step exponential filter (pure function of the
+        # static grid) so ``step`` is a cheap pointwise multiply rather than a
+        # per-step filter build. Once per WRAPPER construction — training
+        # rebuilds the wrapper inside the JIT trace, so this is once per trace,
+        # not once per scan iteration. ``None`` = disabled.
+        # History input: refuse a config whose in_channels does not match the
+        # declared history, rather than mis-slicing a packed tensor silently.
+        # ``PE3DChannelSpec`` is 4*nlev+2, so the check is exact.
+        _hist = int(self.config.history_steps)
+        if _hist < 0:
+            raise ValueError(
+                f"history_steps must be >= 0, got {_hist!r} (0 = the "
+                "single-snapshot input; 1 = U-Cast/GraphCast's two inputs)."
+            )
+        if _hist:
+            _n_state = 4 * sigma_coord.n_levels + 2
+            _want = _n_state * (1 + _hist)
+            _have = int(self.config.sfno_config.in_channels)
+            if _have != _want:
+                raise ValueError(
+                    f"history_steps={_hist} needs sfno_config.in_channels="
+                    f"{_want} ({1 + _hist} x {_n_state} packed channels), got "
+                    f"{_have}. A mismatched width would either fail deep inside "
+                    "the network or silently read the wrong channels."
+                )
+
+        if not 0.0 <= self.config.spectral_filter_strength < 1.0:
+            raise ValueError(
+                "spectral_filter_strength is the filter VALUE at n_max and "
+                "must lie in [0, 1); 0 disables the filter. Got "
+                f"{self.config.spectral_filter_strength!r}."
+            )
+        if self.config.spectral_filter_order < 1:
+            raise ValueError(
+                "spectral_filter_order is the exponent in exp(-a (n/n_max)^p) "
+                f"and must be >= 1; got {self.config.spectral_filter_order!r}."
+            )
+        self._spectral_filter = (
+            compute_spectral_filter(
+                grid.ls, grid.n_max,
+                order=self.config.spectral_filter_order,
+                cutoff_fraction=self.config.spectral_filter_strength,
+            )
+            if self.config.spectral_filter_strength > 0.0
+            else None
+        )
 
         # Z-score denormalisation (``y*std + mean``) inverts a *state*
         # normalisation, so it is only meaningful when the network output is a
@@ -162,17 +270,26 @@ class SFNOPrimitiveEquationModel:
                 "state-predicting networks."
             )
 
-        # Mirror the U-Cast PE bridge guard: these flags are advertised but
-        # NOT wired in ``_apply_conservation`` (moisture is a spectral tracer
-        # that would need synthesis, clipping/correction and re-analysis, which
-        # reintroduces Gibbs ringing — left as a follow-up).  Refuse loudly
-        # rather than silently ignore a requested correction.
-        if self.config.correct_moisture_budget or self.config.clip_q:
+        # Mirror the U-Cast PE bridge guard: refuse loudly rather than silently
+        # ignore a requested correction that is not wired.
+        #
+        # ``clip_q`` IS wired now (see ``step``). The old guard also refused it
+        # on the grounds that "moisture is a spectral tracer needing synthesis,
+        # correction and re-analysis" — that reason does not hold for the
+        # clamp: ``SpectralHydrostaticState.tracers`` are GRID-space fields
+        # (n_lat, n_lon, nlev), so ``clip_humidity`` is a pointwise maximum with
+        # no SH round-trip and therefore no Gibbs ringing. It does still hold
+        # for ``correct_moisture_budget``, which needs a column-integrated
+        # E - P budget this state carries no precipitation/evaporation channel
+        # for; that one stays refused.
+        if self.config.correct_moisture_budget:
             raise NotImplementedError(
-                "correct_moisture_budget / clip_q are not yet wired in the "
-                "SFNO PE bridge (moisture is a spectral tracer needing "
-                "synthesis, correction and re-analysis). Leave both False; "
-                "correct_mass is applied."
+                "correct_moisture_budget is not yet wired in the SFNO PE "
+                "bridge: it needs the column-integrated E - P budget "
+                "(ACE2 arXiv:2411.11268 eq. 2), and SpectralHydrostaticState "
+                "carries no precipitation or evaporation channel. Leave it "
+                "False; correct_mass, clip_q and the post-step spectral "
+                "filter are applied."
             )
         # ``use_normalization`` without stats would silently skip (de)normalisation
         # (see ``_step_state_update`` / ``_sfno_tendency``), so a normalised
@@ -280,6 +397,9 @@ class SFNOPrimitiveEquationModel:
         self,
         state: SpectralHydrostaticState,
         dt: float,
+        *,
+        key: jax.Array | None = None,
+        prev_states: tuple[SpectralHydrostaticState, ...] = (),
     ) -> SpectralHydrostaticState:
         """Advance one time step.
 
@@ -290,6 +410,18 @@ class SFNOPrimitiveEquationModel:
         dt : float
             Time step [s].  In ``state_update`` mode this MUST equal
             ``config.dt_sfno`` (the network's trained macro step).
+        prev_states : tuple of SpectralHydrostaticState, optional
+            Past states, OLDEST FIRST, exactly ``config.history_steps`` of
+            them. Empty (default) is the historical single-snapshot input.
+            ``state_update`` mode only.
+        key : jax.random.PRNGKey, optional
+            MC-Dropout key for ``state_update`` mode.  ``None`` (default) is
+            the deterministic step.  A stochastic ROLLOUT wants a FRESH key per
+            macro step — reusing one key freezes the same dropout mask for the
+            whole trajectory, which under-disperses the ensemble.  Rejected in
+            ``hybrid_tendencies`` mode, where the network is used as a
+            deterministic tendency operator inside an RK integrator (a
+            per-stage random mask would make the integrator inconsistent).
 
         Returns
         -------
@@ -298,8 +430,23 @@ class SFNOPrimitiveEquationModel:
         """
         if self.config.mode == "state_update":
             self._check_state_update_dt(dt)
-            new_state = self._step_state_update(state)
+            new_state = self._step_state_update(
+                state, key=key, prev_states=prev_states)
         elif self.config.mode == "hybrid_tendencies":
+            if prev_states:
+                raise ValueError(
+                    "step(prev_states=...) is only supported in "
+                    "mode='state_update'. hybrid_tendencies evaluates the "
+                    "network at RK STAGE states, which have no history — "
+                    "silently reusing the macro-step history at every stage "
+                    "would make the integrator inconsistent."
+                )
+            if key is not None:
+                raise ValueError(
+                    "step(key=...) is only supported in mode='state_update'; "
+                    "the hybrid_tendencies path integrates the network as a "
+                    "deterministic tendency operator."
+                )
             new_state = self._step_hybrid(state, dt)
         else:
             raise ValueError(
@@ -307,11 +454,7 @@ class SFNOPrimitiveEquationModel:
                 f"Choose 'state_update' or 'hybrid_tendencies'."
             )
 
-        # Post-hoc conservation corrections
-        if self.config.correct_mass:
-            new_state = self._apply_conservation(new_state, state)
-
-        return new_state
+        return self._apply_postprocess(new_state, state)
 
     def step_with_physics(
         self,
@@ -372,25 +515,165 @@ class SFNOPrimitiveEquationModel:
                 f"Choose 'state_update' or 'hybrid_tendencies'."
             )
 
-        if self.config.correct_mass:
-            new_state = self._apply_conservation(new_state, state)
+        # SAME postprocessing as the uncoupled step: an unfiltered coupled
+        # rollout diverges exactly like the uncoupled one did.
+        return self._apply_postprocess(new_state, state)
 
+    def _apply_postprocess(
+        self,
+        new_state: SpectralHydrostaticState,
+        old_state: SpectralHydrostaticState,
+    ) -> SpectralHydrostaticState:
+        """Damping + conservation + positivity, in the ONE correct order.
+
+        Shared by :meth:`step` and :meth:`step_with_physics` so a coupled route
+        cannot silently keep the divergent legacy behaviour — that split is how
+        the physics path was left unguarded when the filter was first added
+        (codex review, 2026-07-28).
+
+        ORDER IS LOAD-BEARING — filter, THEN correct_mass, THEN clip:
+
+        * The filter must not be the last thing to touch ``lnps_hat``. It leaves
+          the n=0 coefficient at 1.0, so it preserves the global mean of
+          ``ln(p_s)`` — but the conserved quantity is the mean of
+          ``p_s = exp(lnps)``, and those are not the same functional. Changing
+          the spread of ``lnps`` therefore moves ``<exp(lnps)>`` and re-breaks
+          the correction (measured on the T8 unit fixture: ``<p_s>`` 1.0e5 ->
+          1.79e6 Pa in one step with the order reversed). Note this is a
+          "generally will", not an identity: for spatially uniform ``lnps`` the
+          filter is a no-op and the mean is untouched.
+        * The moisture clamp acts only on grid-space tracers, so it commutes
+          with both, and is placed last so nothing can reintroduce a negative.
+        """
+        if self._spectral_filter is not None:
+            # Legacy lnps filtering, kept for BOTH modes routed through this
+            # postprocess (state_update and hybrid_tendencies): shipped
+            # sfno_full checkpoints were trained and scored with lnps
+            # filtered, and the filter -> correct_mass ordering contract
+            # above depends on it. The spectral dycore arms use the new
+            # default (lnps unfiltered — see apply_spectral_filter_to_state).
+            new_state = apply_spectral_filter_to_state(
+                new_state, self._spectral_filter, filter_lnps=True)
+
+        if self.config.correct_mass:
+            new_state = self._apply_conservation(new_state, old_state)
+
+        if self.config.clip_q and new_state.tracers:
+            new_state = new_state._replace(
+                tracers={
+                    name: (
+                        t.replace(data=clip_humidity(t.data))
+                        if hasattr(t, "replace") else clip_humidity(t)
+                    )
+                    if name.startswith("q") else t
+                    for name, t in new_state.tracers.items()
+                }
+            )
         return new_state
+
+    def ensemble_step(
+        self,
+        state: SpectralHydrostaticState,
+        key: jax.Array,
+        n_members: int,
+    ) -> SpectralHydrostaticState:
+        """Advance one macro step as an MC-Dropout ensemble.
+
+        Runs ``n_members`` forward passes with **active** dropout (distinct
+        per-member keys), batched with ``jax.vmap``, and returns a state whose
+        leaves carry a leading ``n_members`` axis.  This is the U-Cast
+        stochasticity mechanism (arXiv:2604.09041) on the SFNO backbone: one
+        trained network, an unlimited number of members, no diffusion sampler
+        and no extra training runs.  Pair with ``area_weighted_afcrps`` for
+        probabilistic training/scoring.
+
+        Requires ``sfno_config.dropout > 0`` — with p=0 every member is the
+        same deterministic forecast and CRPS collapses to the MAE, which is a
+        silently-useless ensemble rather than an error, so it is refused.
+
+        Each member is post-processed through the SAME
+        :meth:`_apply_postprocess` chain (filter → mass → clip) as
+        :meth:`step`; skipping it would let the members diverge exactly the
+        way the unfiltered deterministic rollout did.
+        """
+        if self.config.mode != "state_update":
+            raise ValueError(
+                f"ensemble_step requires mode='state_update', got "
+                f"{self.config.mode!r}."
+            )
+        if float(self.config.sfno_config.dropout) <= 0.0:
+            raise ValueError(
+                "ensemble_step needs sfno_config.dropout > 0 — MC-Dropout is "
+                "the only stochasticity source, so at p=0 every member is "
+                "identical and the CRPS degenerates to the MAE."
+            )
+        member_keys = jax.random.split(key, n_members)
+
+        def one_member(member_key):
+            new_state = self._step_state_update(state, key=member_key)
+            return self._apply_postprocess(new_state, state)
+
+        return jax.vmap(one_member)(member_keys)
 
     def _step_state_update(
         self,
         state: SpectralHydrostaticState,
+        key: jax.Array | None = None,
+        prev_states: tuple[SpectralHydrostaticState, ...] = (),
     ) -> SpectralHydrostaticState:
-        """Direct state update: SFNO(state_t) → state_{t+1}."""
+        """Direct state update: SFNO(state_t) → state_{t+1}.
+
+        ``key`` is forwarded to the network's dropout: ``None`` → deterministic
+        (inference dropout); a key → one MC-Dropout sample.
+
+        ``prev_states`` is the history, OLDEST FIRST, and must hold exactly
+        ``config.history_steps`` entries. Each is packed with the SAME
+        ``pack_pe_state`` and normalised with the SAME per-channel statistics as
+        the current state. The CURRENT state occupies the FIRST channel block
+        and the history follows it, because SFNO's residual skip adds
+        ``x_in[..., :out_channels]``; putting the past first would make a
+        residual net predict from a 6 h-stale baseline. Sharing the statistics is
+        deliberate: the two halves are the same physical variables at different
+        times, so one set of moments keeps them on a common scale and a finite
+        difference between corresponding channels stays meaningful.
+        """
+        if len(prev_states) != int(self.config.history_steps):
+            raise ValueError(
+                f"history_steps={self.config.history_steps} requires that many "
+                f"prev_states (oldest first), got {len(prev_states)}."
+            )
         x = pack_pe_state(state, self.grid, self.sigma_coord)
+        if prev_states:
+            # CURRENT STATE FIRST, history after — the order is load-bearing,
+            # not cosmetic. SFNO's ACE-style residual skip adds
+            # ``x_in[..., :out_channels]`` (ml/sfno.py), i.e. the FIRST
+            # out_channels block of the input. With the past packed first a
+            # residual state-update network would predict
+            # ``past_state + correction`` instead of ``current + correction`` —
+            # a 6 h-stale baseline, silently, on the default configuration
+            # (``residual_prediction`` defaults True). Chronological order would
+            # read better; correctness wins.
+            x = jnp.concatenate(
+                [x] + [pack_pe_state(p, self.grid, self.sigma_coord)
+                       for p in prev_states],
+                axis=-1,
+            )
         x = x.astype(jnp.float32)
 
         # ``norm_stats`` is guaranteed present when use_normalization=True
-        # (validated in __init__), so this never silently skips.
+        # (validated in __init__), so this never silently skips. With history
+        # the stats are TILED, not recomputed: same variables, same scale.
         if self.config.use_normalization:
-            x = normalize(x, self.norm_stats)
+            stats = self.norm_stats
+            if prev_states:
+                stats = jax.tree.map(
+                    lambda a: jnp.concatenate([a] * (1 + len(prev_states)),
+                                              axis=-1),
+                    stats,
+                )
+            x = normalize(x, stats)
 
-        y = self.sfno(x, self.grid)
+        y = self.sfno(x, self.grid, key=key)
 
         if self.config.use_normalization:
             y = denormalize(y, self.norm_stats)
@@ -436,15 +719,21 @@ class SFNOPrimitiveEquationModel:
         new_state: SpectralHydrostaticState,
         old_state: SpectralHydrostaticState,
     ) -> SpectralHydrostaticState:
-        """Apply post-hoc conservation corrections.
+        """Global dry-air-mass correction (grid space, then back to spectral).
 
-        Currently corrects global dry air mass ONLY (in grid space, then
-        transforms back to spectral).  Moisture-budget correction and humidity
-        clipping are not yet wired here: ``correct_moisture`` / ``clip_humidity``
-        exist in ``legoesm.ml.conservation`` but moisture is carried as a
-        spectral tracer that would need synthesis, correction and re-analysis
-        — left as a follow-up.  ``correct_moisture_budget`` / ``clip_q`` default
-        to ``False`` so the configuration is truthful.
+        Scope note (kept accurate — an earlier version of this docstring said
+        humidity clipping was unwired and that moisture is a spectral tracer;
+        both were wrong): ``clip_q`` IS wired, in :meth:`_apply_postprocess`,
+        and tracers are GRID-space fields so the clamp needs no SH round-trip.
+        ``correct_moisture_budget`` remains unimplemented — it needs the
+        column-integrated E - P budget and this state carries no
+        precipitation/evaporation channel — and the constructor refuses it.
+
+        CAVEAT on the ``max(p_s, 1.0)`` floor below: it is lossy. Once the
+        prediction drives p_s negative somewhere, clamping breaks the very
+        conservation this function just imposed. It only fires in the diverged
+        regime the post-step spectral filter exists to prevent, so it is left
+        as a loud-but-unrepaired edge rather than silently rescaled.
         """
         if not self.config.correct_mass:
             return new_state

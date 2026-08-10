@@ -695,12 +695,17 @@ def build_parser():
                              "CONSISTENTLY to BOTH the atmosphere surface "
                              "layer (SurfaceLayerConfig) and the coupler "
                              "ocean tile (CouplerConfig) so the interface "
-                             "cannot split. 'dyer1974' (default) = the "
-                             "historical linear -5*zeta, byte-identical; "
+                             "cannot split. 'dyer1974' (default) is "
+                             "byte-identical: the historical linear -5*zeta "
+                             "on most/large_yeager, and on coare3 the "
+                             "COARE-native stable form (itself BH91 with "
+                             "rounded constants, so 'beljaars_holtslag1991' "
+                             "is a rounding-level change there); "
                              "'grachev2007_sheba'/'gryanik2020' = SHEBA-based "
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
-                             "collapse. Unstable branch stays Businger-Dyer.")
+                             "collapse of -5*zeta. Unstable branch stays "
+                             "Businger-Dyer (Fairall blend on coare3).")
     # `choices=` cannot express the '+'-joined composites validate_strict
     # accepts (#834), so this list silently made them unreachable here while
     # run_amip allowed them. The shared validator restores composites AND keeps
@@ -731,7 +736,7 @@ def build_parser():
                         help="Override diagnostic in-cloud condensate [kg/kg] "
                              "(CloudConfig.q_c_diagnostic). LOWER => optically "
                              "THINNER cloud => lower albedo, still LW-active. "
-                             "Range [5e-5, 1e-3]. Default: CloudConfig default.")
+                             "Range [1e-6, 1e-3]. Default: CloudConfig default.")
     parser.add_argument("--diagnostic-condensate-scheme",
                         dest="cloud_diagnostic_condensate_scheme",
                         choices=["constant", "adiabatic"], default="constant",

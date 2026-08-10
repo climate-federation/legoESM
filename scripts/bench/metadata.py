@@ -207,21 +207,41 @@ def hlo_collective_census(fn, *args) -> dict[str, int] | None:
 
     Superset of :func:`hlo_collective_permutes` — compiles (so combined /
     pipelined collectives are reflected as executed, not as emitted) and runs
-    :func:`count_collectives`.  Returns ``None`` (never raises) if
-    lowering/compilation is unsupported OR the backend's ``as_text()`` yields
-    no HLO, so a probe records "unknown" not a crash.
+    :func:`count_collectives`.  Never raises: a census must not kill a
+    benchmark.
 
     NOTE the count is device-count- and FLAG-dependent: the DEFAULT schedule is
     reproducible from a CPU virtual-device compile, but GPU-only XLA collective
     combining / pipelined-p2p (``--xla_gpu_collective_permute_combine_*``, lane
     T) can lower the optimized count — which is exactly why the cluster jobs run
-    this against the REAL on-device executable, not a CPU proxy."""
+    this against the REAL on-device executable, not a CPU proxy.
+
+    NEVER-SILENT CONTRACT (2026-08-07). This used to swallow every exception
+    and return ``None``, which the receipt recorded as "unknown". Every MPAS
+    row ever written carried ``hlo_collectives: null`` — not because the
+    census was unsupported, but because it was permanently broken and nothing
+    said so. A fail-open that cannot be distinguished from a legitimate
+    "not applicable" is indistinguishable from having no instrument at all.
+    So a failure now returns ``{"_error": "<type>: <msg>"}`` and warns on
+    stderr: the row still gets written (a census must never kill a
+    benchmark), but the reason is ON the receipt and a reader can tell
+    "unsupported" from "broken".
+    """
+    import sys
+
     import jax
     try:
         text = jax.jit(fn).lower(*args).compile().as_text()
-        return count_collectives(text) if text else None
-    except Exception:
-        return None
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        print(f"[hlo-census] compile/lower FAILED -> {msg}", file=sys.stderr,
+              flush=True)
+        return {"_error": msg}
+    if not text:
+        print("[hlo-census] as_text() returned nothing; backend exposes no HLO",
+              file=sys.stderr, flush=True)
+        return {"_error": "as_text() returned empty HLO"}
+    return count_collectives(text)
 
 
 def _is_empty(v: Any) -> bool:

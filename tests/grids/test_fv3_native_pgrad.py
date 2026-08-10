@@ -177,6 +177,14 @@ def test_p_grad_c_nonhydrostatic_branch(bd):
     assert nz.any()
     ratio = uc_b[nz] / uc_a[nz]
     assert np.abs(ratio - 0.5).max() < 1e-14
+    # codex NH r2 #4: a mutant using the HYDROSTATIC weight only for vc
+    # passes the identity control and the uc halving -- vc must respond
+    # to delpc too.  dpk is level- and (i,j)-random, so a k-shift in the
+    # vc weight also fails here.
+    nzv = np.abs(vc_a) > 0.0
+    assert nzv.any()
+    ratio_v = vc_b[nzv] / vc_a[nzv]
+    assert np.abs(ratio_v - 0.5).max() < 1e-14
 
 
 def test_one_grad_p_guards_raise(bd):
@@ -801,3 +809,234 @@ def test_gen_km_profiles_are_not_a_refinement():
         assert abs(sum(frac) - 1.0) < 1e-12, km
         assert len(set(frac)) == len(frac), f"km={km} has equal layers"
     assert abs(gen.KM_PROFILES[3][0] - gen.KM_PROFILES[2][0]) > 1e-3
+
+
+# ------------------------------------------------------- NH D pressure
+
+def _nh_pgrad_fields(km, seed=51):
+    rng = np.random.default_rng(seed)
+    delp = np.abs(1.0e4 + 300.0 * rng.standard_normal((M_A, M_A, km)))
+    pk3 = np.cumsum(
+        np.abs(rng.standard_normal((M_A, M_A, km + 1))) + 1.0, axis=2)
+    gz = np.cumsum(
+        np.abs(rng.standard_normal((M_A, M_A, km + 1))) + 5.0,
+        axis=2)[:, :, ::-1].copy() * 200.0
+    pp = 30.0 * rng.standard_normal((M_A, M_A, km + 1))
+    u = 10.0 * rng.standard_normal((M_A, M_B, km))
+    v = 10.0 * rng.standard_normal((M_B, M_A, km))
+    return delp, pk3, gz, pp, u, v
+
+
+def test_nh_p_grad_reduces_to_one_grad_p_at_zero_perturbation(bd):
+    """pp == 0 kills the NH term EXACTLY (finite + 0.0 is bitwise
+    identity), the k=1 seeds coincide (pp=0, pk3=ptop**akap) and the
+    hydrostatic du1 grouping is one_grad_p's own -- so the two routines
+    must agree BITWISE.  A wrong window, seed, weight or a2b cadence in
+    nh_p_grad breaks the equality."""
+    from legoesm.core.fv3_native_pgrad import nh_p_grad, one_grad_p
+
+    km = 2
+    gs = _gs()
+    delp, pk3, gz, _pp, u, v = _nh_pgrad_fields(km)
+    ptop, akap, dt = 100.0, 2.0 / 7.0, 30.0
+
+    u_o, v_o = np.array(u), np.array(v)
+    pk_o, gz_o = np.array(pk3), np.array(gz)
+    divg2 = np.zeros((M_B, M_B))
+    one_grad_p(u_o, v_o, pk_o, gz_o, divg2, np.array(delp), gs, bd,
+               npx=N + 1, npy=N + 1, npz=km, dt=dt, ptop=ptop, akap=akap,
+               hydrostatic=True, a2b_ord=4, d_ext=0.0, duogrid=True)
+
+    u_n, v_n = np.array(u), np.array(v)
+    pk_n, gz_n = np.array(pk3), np.array(gz)
+    pp0 = np.zeros((M_A, M_A, km + 1))
+    nh_p_grad(u_n, v_n, pp0, gz_n, np.array(delp), pk_n, gs, bd,
+              npx=N + 1, npy=N + 1, npz=km, dt=dt, ptop=ptop, akap=akap,
+              use_logp=False, duogrid=True)
+
+    assert np.array_equal(u_n, u_o)
+    assert np.array_equal(v_n, v_o)
+    assert np.array_equal(pk_n, pk_o)          # same a2b replace cadence
+    assert np.abs(u_n - u).max() > 0.0         # non-vacuity
+
+
+def test_nh_p_grad_perturbation_term_scales_as_inverse_delp(bd):
+    """The NH increment is linear in 1/wk1 (B-grid delp): doubling delp
+    exactly halves it (a2b is linear and x/(2y) == (x/y)/2 in binary
+    fp).  A mutant reading the hydrostatic weight for the NH term -- or
+    dropping the term -- fails the exact 0.5 ratio."""
+    from legoesm.core.fv3_native_pgrad import nh_p_grad
+
+    km = 2
+    gs = _gs()
+    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
+    ptop, akap, dt = 100.0, 2.0 / 7.0, 30.0
+
+    outs = {}
+    for tag, dp_fac, use_pp in (("base0", 1.0, False), ("base1", 1.0, True),
+                                ("dbl0", 2.0, False), ("dbl1", 2.0, True)):
+        u_x, v_x = np.array(u), np.array(v)
+        nh_p_grad(u_x, v_x,
+                  np.array(pp) if use_pp else np.zeros_like(pp),
+                  np.array(gz), dp_fac * delp, np.array(pk3), gs, bd,
+                  npx=N + 1, npy=N + 1, npz=km, dt=dt, ptop=ptop,
+                  akap=akap, use_logp=False, duogrid=True)
+        outs[tag] = (u_x, v_x)
+
+    # rdx multiplies the whole bracket, so the pp-increment in the OUTPUT
+    # is rdx*(NH term) and the delp-vs-2*delp ratio is 0.5 -- but the
+    # increment is EXTRACTED by subtracting two O(10 m/s) winds whose
+    # difference is O(1e-5), so ~eps*|u|/|du| ~ 1e-11 of cancellation
+    # noise rides the ratio (the same instrument hazard the p_grad_c
+    # test above documents).  1e-9 keeps two orders on the noise while
+    # still failing a hydrostatic-weight mutant (ratio 1.0) loudly.
+    du_a = outs["base1"][0] - outs["base0"][0]
+    du_b = outs["dbl1"][0] - outs["dbl0"][0]
+    nz = np.abs(du_a) > 0.0
+    assert nz.any()
+    assert np.abs(du_b[nz] / du_a[nz] - 0.5).max() < 1e-9
+    dv_a = outs["base1"][1] - outs["base0"][1]
+    dv_b = outs["dbl1"][1] - outs["dbl0"][1]
+    nzv = np.abs(dv_a) > 0.0
+    assert nzv.any()
+    assert np.abs(dv_b[nzv] / dv_a[nzv] - 0.5).max() < 1e-9
+
+
+def test_nh_p_grad_nonzero_pp_matches_an_independent_term_rebuild(bd):
+    """codex NH r3 #4: the pp==0 reduction is vacuous for the pp side
+    (every pp term is multiplied by zero).  Here the NH increment is
+    rebuilt in the TEST from the same a2b_ord4 primitive but with
+    independent plumbing (its own replace cadence, k=1 seed, windows and
+    weights), so a wrong-stencil pp read -- e.g. the A-grid value where
+    the B-grid one belongs, or the hydrostatic wk in place of wk1 --
+    breaks the equality.
+
+    TRUST CHAIN (codex NH r4 #2, accepted): both sides share the
+    production a2b_ord4/a2b_gridstruct_view, so a defect INSIDE a2b
+    itself is common-mode here -- by design.  a2b_ord4 carries its own
+    oracle certificates in the d_sw corpus; this test owns nh_p_grad's
+    PLUMBING of it, not the operator."""
+    from legoesm.core.fv3_native_d_sw import a2b_ord4
+    from legoesm.core.fv3_native_pgrad import (
+        a2b_gridstruct_view,
+        nh_p_grad,
+    )
+    from legoesm.grids.fv3_native_gridstruct import fort
+
+    km = 2
+    gs = _gs()
+    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km, seed=57)
+    ptop, akap, dt = 100.0, 2.0 / 7.0, 30.0
+    ngv = NG
+
+    u_full, v_full = np.array(u), np.array(v)
+    nh_p_grad(u_full, v_full, np.array(pp), np.array(gz), np.array(delp),
+              np.array(pk3), gs, bd, npx=N + 1, npy=N + 1, npz=km, dt=dt,
+              ptop=ptop, akap=akap, use_logp=False, duogrid=True)
+    u_zero, v_zero = np.array(u), np.array(v)
+    nh_p_grad(u_zero, v_zero, np.zeros_like(pp), np.array(gz),
+              np.array(delp), np.array(pk3), gs, bd, npx=N + 1, npy=N + 1,
+              npz=km, dt=dt, ptop=ptop, akap=akap, use_logp=False,
+              duogrid=True)
+
+    # ---- independent rebuild of the pp increment ----
+    isd = jsd = 1 - ngv
+    gsf = a2b_gridstruct_view(gs, bd)
+    scratch = np.full((M_A, M_A), np.nan)
+
+    ppb = np.array(pp, copy=True)
+    gzb = np.array(gz, copy=True)
+    for k in range(km + 1):
+        if k == 0:
+            ppb[ngv:ngv + N + 1, ngv:ngv + N + 1, 0] = 0.0
+        else:
+            a2b_ord4(fort(ppb[:, :, k], isd, jsd), fort(scratch, isd, jsd),
+                     gsf, N + 1, N + 1, 1, N, 1, N, ngv, replace=True,
+                     duogrid=True)
+        a2b_ord4(fort(gzb[:, :, k], isd, jsd), fort(scratch, isd, jsd),
+                 gsf, N + 1, N + 1, 1, N, 1, N, ngv, replace=True,
+                 duogrid=True)
+
+    rdx = np.asarray(gs["rdx"], dtype=np.float64)
+    rdy = np.asarray(gs["rdy"], dtype=np.float64)
+    ui = slice(ngv, ngv + N)
+    uip1 = slice(ngv + 1, ngv + N + 1)
+    uj = slice(ngv, ngv + N + 1)
+    vi = slice(ngv, ngv + N + 1)
+    vj = slice(ngv, ngv + N)
+    vjp1 = slice(ngv + 1, ngv + N + 1)
+
+    wk1 = np.full((M_A, M_A), np.nan)
+    for k in range(km):
+        a2b_ord4(fort(np.array(delp[:, :, k], copy=True), isd, jsd),
+                 fort(wk1, isd, jsd), gsf, N + 1, N + 1, 1, N, 1, N, ngv,
+                 replace=False, duogrid=True)
+        du_nh = dt / (wk1[ui, uj] + wk1[uip1, uj]) * (
+            (gzb[ui, uj, k + 1] - gzb[uip1, uj, k])
+            * (ppb[uip1, uj, k + 1] - ppb[ui, uj, k])
+            + (gzb[ui, uj, k] - gzb[uip1, uj, k + 1])
+            * (ppb[ui, uj, k + 1] - ppb[uip1, uj, k]))
+        want_u = u_zero[ui, uj, k] + du_nh * rdx[ui, uj]
+        d = np.abs(u_full[ui, uj, k] - want_u)
+        assert d.max() < 1e-11 * max(np.abs(want_u).max(), 1.0), (k, d.max())
+        dv_nh = dt / (wk1[vi, vj] + wk1[vi, vjp1]) * (
+            (gzb[vi, vj, k + 1] - gzb[vi, vjp1, k])
+            * (ppb[vi, vjp1, k + 1] - ppb[vi, vj, k])
+            + (gzb[vi, vj, k] - gzb[vi, vjp1, k + 1])
+            * (ppb[vi, vj, k + 1] - ppb[vi, vjp1, k]))
+        want_v = v_zero[vi, vj, k] + dv_nh * rdy[vi, vj]
+        d = np.abs(v_full[vi, vj, k] - want_v)
+        assert d.max() < 1e-11 * max(np.abs(want_v).max(), 1.0), (k, d.max())
+    # Non-vacuity: the pp increment is genuinely nonzero.
+    assert np.abs(u_full - u_zero).max() > 0.0
+
+
+def test_pk3_halo_and_pe_halo_footprints(bd):
+    """Sentinel layout: exactly the documented rings are rewritten, from
+    an independently recomputed hydrostatic column; everything else --
+    including the TOP interface of pk3, which pk3_halo never writes --
+    keeps its sentinel."""
+    from legoesm.core.fv3_native_pgrad import pe_halo, pk3_halo
+
+    km = 3
+    rng = np.random.default_rng(53)
+    delp = np.abs(1.0e4 + 200.0 * rng.standard_normal((M_A, M_A, km)))
+    ptop, akap = 100.0, 2.0 / 7.0
+    S = 4.4e30
+    pk3 = np.full((M_A, M_A, km + 1), S)
+    pk3_halo(pk3, delp, bd, npz=km, ptop=ptop, akap=akap)
+
+    lo = 1 - NG
+    xs = [1 - 2 - lo, 1 - 1 - lo, N + 1 - lo, N + 2 - lo]
+    written = np.zeros((M_A, M_A), dtype=bool)
+    for jj in range(1 - lo, N - lo + 1):
+        for ii in xs:
+            written[ii, jj] = True
+    for ii in range(1 - 2 - lo, N + 2 - lo + 1):
+        for jj in [1 - 2 - lo, 1 - 1 - lo, N + 1 - lo, N + 2 - lo]:
+            written[ii, jj] = True
+    # independent recompute at every written column
+    for ii, jj in zip(*np.nonzero(written)):
+        pei = ptop
+        for k in range(km):
+            pei += delp[ii, jj, k]
+            want = np.exp(akap * np.log(pei))
+            assert pk3[ii, jj, k + 1] == want, (ii, jj, k)
+        assert pk3[ii, jj, 0] == S, (ii, jj)      # top never written
+    assert np.all(pk3[~written, :] == S)
+
+    pe = np.full((N + 2, km + 1, N + 2), S)
+    pe_halo(pe, delp, bd, npz=km, ptop=ptop)
+    ring = np.zeros((N + 2, N + 2), dtype=bool)
+    ring[0, 1:N + 1] = ring[N + 1, 1:N + 1] = True
+    ring[0:N + 2, 0] = ring[0:N + 2, N + 1] = True
+    for ii, jj in zip(*np.nonzero(ring)):
+        # pe's storage index IS the Fortran index (origin is-1 = 0);
+        # delp's padded storage sits NG-1 higher.
+        pei = ptop
+        assert pe[ii, 0, jj] == ptop, (ii, jj)
+        for k in range(km):
+            pei += delp[ii + NG - 1, jj + NG - 1, k]
+            assert pe[ii, k + 1, jj] == pei, (ii, jj, k)
+    # the ring is only the border; the whole interior keeps its sentinel
+    assert np.all(pe[1:N + 1, :, 1:N + 1] == S)

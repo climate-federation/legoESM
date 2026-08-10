@@ -168,9 +168,13 @@ class TestCMORCompleteness:
 
     def test_aday_variables(self):
         aday = CMOR_TABLES["Aday"]
-        required = {"tas", "pr", "psl", "rsut", "rlut"}
+        # ``rsut`` moved to ``CFday``: the CMIP6 ``day`` table has no
+        # ``rsut`` entry, so writing one there was unpublishable.
+        required = {"tas", "pr", "psl", "rlut"}
         missing = required - set(aday.keys())
         assert not missing, f"Aday missing required variables: {sorted(missing)}"
+        assert "rsut" not in aday
+        assert "rsut" in CMOR_TABLES["CFday"]
 
     def test_all_entries_have_required_fields(self):
         for table_name, table in CMOR_TABLES.items():
