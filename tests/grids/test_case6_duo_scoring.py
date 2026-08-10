@@ -118,15 +118,20 @@ def test_hand_computed_analytic_points_equator():
 
 
 def test_hand_computed_analytic_point_off_equator():
-    """lat = pi/3, lon = pi/8 — the latitude powers are LIVE here, in a
+    """lat = pi/3, lon = pi/6 — the latitude powers are LIVE here, in a
     DIFFERENT factoring from the module (cos^{2R} collapsed to explicit
     products, the A bracket expanded to c^8 (5 c^2 + 26) - 32 c^6, the
     B square expanded to 25 c^2), so a wrong exponent or coefficient in
     either factoring diverges (codex c6 r1 #8: the equator points alone
-    leave every latitude power untested)."""
+    leave every latitude power untested).
+
+    lon = pi/6 keeps EVERY harmonic active — cos(4 lam) = -1/2,
+    sin(4 lam) = +sqrt(3)/2, cos(8 lam) = -1/2 (codex c6 r2 #3: the
+    earlier pi/8 sat on cos(4 lam) ~ 0, silencing the B term and the
+    u wave part)."""
     a, om, w, k, gh0 = (_A_ORACLE, _OM_ORACLE, _W_ORACLE, _K_ORACLE,
                         _GH0_ORACLE)
-    lam, phi = np.pi / 8.0, np.pi / 3.0
+    lam, phi = np.pi / 6.0, np.pi / 3.0
     c = np.cos(phi)
     s = np.sin(phi)
     c2 = c * c
@@ -154,6 +159,14 @@ def test_hand_computed_analytic_point_off_equator():
     assert u_mod == pytest.approx(u_hand, rel=1e-13)
     assert v_mod == pytest.approx(v_hand, rel=1e-13)
     assert abs(v_hand) > 10.0      # the point actually exercises v
+    # every harmonic term is LIVE at this point: dropping B or C from
+    # the hand form must move the value far beyond the tolerance
+    b_contrib = a * a * b_t * np.cos(4.0 * lam)
+    c_contrib = a * a * c_t * np.cos(8.0 * lam)
+    assert abs(b_contrib) > 100.0     # ~ -1.06e3 m^2/s^2
+    assert abs(c_contrib) > 1.0       # ~ +5.8 m^2/s^2 (small but live)
+    # and the u WAVE part (the cos(4 lam) harmonic) is nonzero
+    assert abs(u_hand - a * w * c) > 1.0
 
 
 def test_reference_canvas_matches_gate_contract():
@@ -198,7 +211,17 @@ def test_runner_threads_deck_config_to_stepper(tmp_path, monkeypatch):
     the stepper call (dt_atmos, n_split, d_ext, every sw_cfg key), not
     merely that constants exist (codex c6 r1 #7).  The stub returns the
     states unchanged, so no acoustic step runs."""
+    import inspect
+
     import legoesm.core.fv3_native_duo_stepper as stepper_mod
+
+    # the stub must mirror the REAL signature, or a stepper signature
+    # drift would break production while this test stays green (codex
+    # c6 r2 #4): pin the real parameter list first.
+    real_params = list(inspect.signature(
+        stepper_mod.advance_duo_outer_step).parameters)
+    assert real_params == ["ctx", "states", "dt_atmos", "n_split",
+                           "d_ext", "sw_cfg"]
 
     seen = []
 
@@ -335,6 +358,7 @@ def _write_npz(tmp_path, **over):
                 d4_bg=np.array(0.0), k2e_nord=np.array(2),
                 ext_exclude=np.array(""),
                 oracle_conventions=np.array(True),
+                git_sha=np.array("testsha"),
                 requested_days=np.array(1))
     base.update(over)
     path = tmp_path / "run.npz"
@@ -367,6 +391,7 @@ def test_contract_rejects_polar_sentinel(tmp_path):
 
 def test_deck_record_mismatch_and_missing():
     rec = {key: val for key, val in gate.DECK_RECORD.items()}
+    rec["git_sha"] = "abc123"
     assert gate.check_deck_record(rec) == []
     bad = dict(rec)
     bad["dt_atmos"] = 450.0
@@ -375,6 +400,16 @@ def test_deck_record_mismatch_and_missing():
     del bad["dt_atmos"]
     problems = gate.check_deck_record(bad)
     assert len(problems) == 1 and "not recorded" in problems[0]
+    nosha = dict(rec)
+    del nosha["git_sha"]
+    problems = gate.check_deck_record(nosha)
+    assert len(problems) == 1 and "git_sha" in problems[0]
+    # type-normalised comparison: numpy scalars == python values
+    npish = {"n": np.int64(48).item(), "dt_atmos": np.float64(1200.0),
+             "n_split": 7, "d_ext": 0.0, "d4_bg": 0.0, "k2e_nord": 2,
+             "oracle_conventions": np.bool_(True),
+             "ext_exclude": "", "git_sha": "abc"}
+    assert gate.check_deck_record(npish) == []
 
 
 def test_coverage_rules():
@@ -409,6 +444,44 @@ def test_verdict_closed_form():
         gate.verdict(_scores(), np.nan, 5e-2)
     with pytest.raises(ValueError, match="finite and > 0"):
         gate.verdict(_scores(), 2e-3, -1.0)
+    with pytest.raises(ValueError, match="no scored days"):
+        gate.verdict({}, 2e-3, 5e-2)          # vacuous-PASS guard
+
+
+def test_verdict_unweighted_branch_is_live():
+    """rel_l2 over the bound while rel_l2_cosw is under it must FAIL —
+    isolates the unweighted condition, which is exactly the branch the
+    polar-corruption argument rests on (codex c6 r2 #6)."""
+    s = {0.0: {"gh": {"rel_l2": 5e-3, "rel_l2_cosw": 1e-4,
+                      "max_abs": 1.0},
+               "u": {"rel_l2": 1e-3, "rel_l2_cosw": 1e-3,
+                     "max_abs": 1.0},
+               "v": {"rel_l2": 1e-3, "rel_l2_cosw": 1e-3,
+                     "max_abs": 1.0}}}
+    assert gate.verdict(s, 2e-3, 5e-2) is False
+    # and the mirrored case: cosw over, unweighted under
+    s[0.0]["gh"] = {"rel_l2": 1e-4, "rel_l2_cosw": 5e-3, "max_abs": 1.0}
+    assert gate.verdict(s, 2e-3, 5e-2) is False
+
+
+def test_enforce_cli_guards(tmp_path, monkeypatch):
+    """--enforce without bounds, and --enforce with --days, both refuse
+    BEFORE touching any file (SystemExit from argparse) — the r2 P0
+    'score only the IC of a five-day artifact' path is closed at the
+    CLI."""
+    npz = str(tmp_path / "absent.npz")        # never opened
+    monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py", npz,
+                                     "--enforce"])
+    with pytest.raises(SystemExit) as e:
+        gate.main()
+    assert e.value.code == 2
+    monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py", npz,
+                                     "--enforce", "--max-gh", "1e-2",
+                                     "--max-wind", "1e-1",
+                                     "--days", "0"])
+    with pytest.raises(SystemExit) as e:
+        gate.main()
+    assert e.value.code == 2
 
 
 def test_contract_rejects_historical_canvas(tmp_path):

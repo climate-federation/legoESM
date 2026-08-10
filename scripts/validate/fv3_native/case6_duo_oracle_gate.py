@@ -152,7 +152,7 @@ def load_run(npz_path: str) -> dict:
                 f"{WIND_PLAUSIBLE_MAX:g} m/s — sentinel/corruption "
                 "detector")
     record = {}
-    for key in DECK_RECORD:
+    for key in (*DECK_RECORD, "git_sha"):
         if key in z.files:
             record[key] = np.asarray(z[key]).item()
     if "requested_days" in z.files:
@@ -164,14 +164,33 @@ def load_run(npz_path: str) -> dict:
 def check_deck_record(record: dict) -> list[str]:
     """Mismatches between the npz's recorded config and the reference
     deck; a MISSING key is a mismatch (an npz from before the record
-    was written cannot be enforced)."""
+    was written cannot be enforced).  Comparison is TYPE-NORMALISED
+    (numpy scalars arrive via ``.item()``; ints and floats compare by
+    value, strings as str, bools as bool) so a dtype change cannot
+    smuggle a mismatch through ``==`` (codex c6 r2 #5).
+
+    LIMITATION, stated: this is the runner's SELF-ATTESTATION — it
+    certifies what the npz says it ran, not what a process actually
+    executed.  The npz's ``git_sha`` (required present) is the audit
+    hook; byte-level provenance is out of scope for this gate.
+    """
     problems = []
     for key, want in DECK_RECORD.items():
         if key not in record:
             problems.append(f"{key}: not recorded in npz")
-        elif record[key] != want:
-            problems.append(f"{key}: npz has {record[key]!r}, deck is "
-                            f"{want!r}")
+            continue
+        got = record[key]
+        if isinstance(want, bool):
+            same = bool(got) is want
+        elif isinstance(want, (int, float)):
+            same = (np.isfinite(float(got))
+                    and float(got) == float(want))
+        else:
+            same = str(got) == str(want)
+        if not same:
+            problems.append(f"{key}: npz has {got!r}, deck is {want!r}")
+    if "git_sha" not in record:
+        problems.append("git_sha: not recorded in npz (no audit hook)")
     return problems
 
 
@@ -186,7 +205,11 @@ def check_coverage(times: np.ndarray, record: dict,
             "completeness (report-only npz)")
     req = record["requested_days"]
     want = np.arange(0.0, float(req) + 0.5)
-    if times.size != want.size or not np.allclose(times, want, atol=1e-9):
+    # rtol=0: allclose's default RELATIVE tolerance would admit
+    # times like 4.99995 that the whole-day scorer then silently
+    # drops (codex c6 r2 P0 note)
+    if times.size != want.size or not np.allclose(times, want,
+                                                  rtol=0.0, atol=1e-9):
         raise ContractError(
             f"times_days {times.tolist()} != contiguous 0..{req} — "
             "truncated or sparse run cannot be enforced")
@@ -271,7 +294,10 @@ def score_day(run: dict, ref: dict, lat_deg: np.ndarray) -> dict:
 def verdict(scores_by_day: dict, max_gh: float, max_wind: float) -> bool:
     """CLOSED-form enforcement: every scored day's gh and wind rel-L2
     metrics (BOTH weightings) must be finite and <= their bound.  A NaN
-    anywhere is a FAIL, never a pass-through (codex c6 r1 #4)."""
+    anywhere is a FAIL, never a pass-through (codex c6 r1 #4); an EMPTY
+    score set raises rather than passing vacuously (codex c6 r2 #6)."""
+    if not scores_by_day:
+        raise ValueError("no scored days — nothing to enforce")
     for bound in (max_gh, max_wind):
         if not (np.isfinite(bound) and bound > 0.0):
             raise ValueError(
@@ -348,6 +374,12 @@ def main() -> int:
     if args.enforce and (args.max_gh is None or args.max_wind is None):
         ap.error("--enforce requires explicit --max-gh and --max-wind "
                  "(there are deliberately no default bounds)")
+    if args.enforce and args.days is not None:
+        # codex c6 r2 P0: '--enforce --days 0' would score (and PASS)
+        # the IC alone while the coverage check certified a full run —
+        # enforcement always scores EVERY day the npz carries.
+        ap.error("--days cannot restrict an enforced score; enforcement "
+                 "covers every whole day in the npz")
 
     run = load_run(args.npz)
     t = run["times_days"]
