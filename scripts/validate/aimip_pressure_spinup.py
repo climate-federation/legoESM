@@ -166,6 +166,19 @@ def main(argv=None):
         spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
     dt = float(spec_cfg.dt)
     n_steps = int(round(args.hours * 3600.0 / dt))
+    # The integrated horizon must EQUAL the lead the verification uses, or the
+    # two sides of the comparison span different windows and the difference is
+    # a confound rather than a result.  dt=600 divides 6 h exactly; dt=700 does
+    # not (31 steps = 21 700 s reported as "6 h").  Refuse rather than label.
+    _achieved_s = n_steps * dt
+    _want_s = args.hours * 3600.0
+    if abs(_achieved_s - _want_s) > 1.0e-6 * max(_want_s, 1.0):
+        raise SystemExit(
+            f"--hours {args.hours} is not an integer number of dt={dt:g} s "
+            f"steps: {n_steps} steps = {_achieved_s:g} s, but the ERA5 "
+            f"verification is taken at {_want_s:g} s. Pick an --hours that "
+            f"divides evenly (dt={dt:g} s -> {dt / 3600.0:g} h granularity), "
+            "or the reported lead is not the lead that was integrated.")
 
     cadence = int(cfg.get("era5_cadence_hours", 6) or 6)
     # Verification must be fetched AT THE FORECAST LEAD: with a fixed
@@ -570,7 +583,12 @@ def main(argv=None):
                 "built and a whole-globe number alone would not discriminate "
                 "the orography-reconciliation mechanism.")
         phis = sh_synthesis(grid, s0.phis_hat.data)
-        land = (phis > 1.0).astype(jnp.float64)
+        # Use the FLAG, not a hardcoded 1.0: phis is synthesised from
+        # phis_hat, so spectral ringing puts small positive values over ocean
+        # and a fixed 1 m threshold misclassifies them as land — which is
+        # exactly what --land-phis-threshold exists to raise.  The two other
+        # call sites already honour it.
+        land = (phis > float(args.land_phis_threshold)).astype(jnp.float64)
         ocean = 1.0 - land
         p0 = _ps(s0)
         rows = []
