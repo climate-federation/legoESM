@@ -58,8 +58,17 @@ export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$WT
 export LEGOESM_JIT_CACHE_DIR=""
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
+# pytest's tmp_path factory defaults under /local, which is NODE-LOCAL scratch
+# and can be cleaned out from under a running job: round 7 lost 18 tests to
+# "FileNotFoundError: /local/pytest-of-pg2328/pytest-0" while every assertion
+# in them was fine. A job-scoped basetemp under /tmp removes the dependency on
+# whatever state /local happens to be in.
+export TMPDIR=/tmp/convtune_${SLURM_JOB_ID:-$$}
+mkdir -p $TMPDIR/pytest
+
 echo; echo "############ 1. unit gates ############"
 JAX_ENABLE_X64=1 $PY -m pytest -q -p no:cacheprovider \
+  --basetemp=$TMPDIR/pytest \
   tests/unit/test_rcemip_wing_ic.py \
   tests/unit/test_homogeneous_freezing_rh.py \
   tests/unit/test_rcemip_plane_hard_sat_drain.py \
