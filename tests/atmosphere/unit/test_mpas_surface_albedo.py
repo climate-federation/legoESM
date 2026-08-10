@@ -304,7 +304,31 @@ def test_clm_tuned_albedo_branch_reaches_physics(tmp_path, monkeypatch):
     alb = jnp.where(jnp.isfinite(alb), alb, lat_albedo)
     np.testing.assert_allclose(np.asarray(alb), sentinel)
     assert calls["variant"] == "multilayer"
-    # and the REAL driver source contains the branch wired to physics.albedo_land
-    import inspect
-    src = inspect.getsource(MD.ModelDriver)
-    assert "clm_surface_provider" in src and 'variant="multilayer"' in src
+    # AST check of the REAL driver branch (not a substring grep): inside the
+    # clm_surfdata_path elif, the value produced by clm_surface_provider must
+    # be assigned to self.physics.albedo_land.  Fails if the branch is removed,
+    # renamed, or stops writing the field radiation reads.
+    import ast, inspect, textwrap
+    src = textwrap.dedent(inspect.getsource(MD.ModelDriver))
+    tree = ast.parse(src)
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test_src = ast.unparse(node.test)
+        if "clm_surfdata_path" not in test_src:
+            continue
+        calls = {c.func.id for n in node.body for c in ast.walk(n)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assigns = {ast.unparse(t) for n in node.body for a in ast.walk(n)
+                   if isinstance(a, ast.Assign) for t in a.targets}
+        kwargs = {kw.value.value for n in node.body for c in ast.walk(n)
+                  if isinstance(c, ast.Call) for kw in c.keywords
+                  if kw.arg == "variant" and isinstance(kw.value, ast.Constant)}
+        if ("clm_surface_provider" in calls
+                and "multilayer" in kwargs
+                and "self.physics.albedo_land" in assigns):
+            found = True
+    assert found, ("no driver branch assigns self.physics.albedo_land from "
+                   "clm_surface_provider(variant='multilayer') under a "
+                   "clm_surfdata_path condition")

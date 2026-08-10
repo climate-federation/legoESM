@@ -928,8 +928,13 @@ class ExperimentConfig(NamedTuple):
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
-    # outbound internet, so stage the file and set this).  Ignored unless
-    # use_multilayer_land is True.
+    # outbound internet, so stage the file and set this).  The multilayer soil
+    # column reads it only when use_multilayer_land is True; ADDITIONALLY (and
+    # regardless of use_multilayer_land) a staged path supplies RADIATION's
+    # static land albedo via the ERA5-tuned CLM map when neither
+    # albedo_land_path nor surfdata_path is set — a slab/no-land-model AMIP run
+    # staging this file deliberately gets the calibrated albedo instead of the
+    # latitude fallback (2026-08-10; previously the fallback silently won).
     clm_surfdata_path: str = ""
 
     # Transient land-use/land-cover (LULC).  ``land_cover_surfdata`` is a harmonized

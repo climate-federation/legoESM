@@ -2274,7 +2274,12 @@ class ModelDriver:
                     variant="multilayer")()
                 _alb = jnp.asarray(_lp.albedo_veg).reshape(
                     jnp.asarray(self.grid.grid_lat).shape)
-                # Non-finite cells (surfdata gaps) keep the latitude fallback.
+                # Defensive only: the provider floors/normalises PFT cover, so
+                # cells WITHOUT source land data come back as finite bare-soil
+                # values, NOT NaN — this where() does not gate them (codex).
+                # Ocean cells are irrelevant (radiation blends by f_land);
+                # coastal model-land cells nearest to an ocean source cell get
+                # the bare-soil template, an accepted nearest-neighbour limit.
                 _alb = jnp.where(jnp.isfinite(_alb), _alb, lat_albedo)
                 self.physics.albedo_land = _alb.astype(_sd)
                 logger.info(
