@@ -51,6 +51,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -834,7 +835,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"-> tuned score={_fmt(res.tuned.score)} "
                   f"({len(res.records)} params) "
                   f"[kernel {res.subsidence_solve_status}]", flush=True)
-        meta_path.write_text(json.dumps(meta, indent=2))
+        # ATOMIC: the campaign runs one process per scheme against a shared
+        # --outdir, so several finish at once and write this same file. The
+        # bytes are identical (nothing scheme-specific is in `meta`), but two
+        # interleaved write_text calls can still leave a truncated file, and
+        # --merge-only reads it to rebuild the reference. Write-then-rename is
+        # atomic within a directory on POSIX.
+        _tmp = meta_path.with_suffix(f".json.{os.getpid()}.tmp")
+        _tmp.write_text(json.dumps(meta, indent=2))
+        _tmp.replace(meta_path)
 
     if args.no_merge:
         print(f"[done] ran {len(schemes)} scheme(s); merge skipped (--no-merge)")
