@@ -144,9 +144,9 @@ def main() -> int:
             seq if seq == names else None)
         if names is None:
             break
-    if names is None or len(summaries) < 2:
-        print("cross-rank: collective sequences differ (or <2 ranks) — "
-              "spread not computed")
+    if (names is None or not names or len(summaries) < 2):
+        print("cross-rank: collective sequences differ, empty, or <2 "
+              "ranks — spread not computed")
     else:
         spreads, end_spreads, durs = [], [], []
         per_rank = list(summaries.values())

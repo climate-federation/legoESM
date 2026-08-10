@@ -433,12 +433,23 @@ def main() -> int:
     scan_median_ms = None
     _profiling = (args.profile_dir is not None
                   and jax.process_index() < 4)
+    _prof_on = False
     if _profiling:
         import pathlib
         _pdir = pathlib.Path(args.profile_dir) / f"rank{jax.process_index()}"
         _pdir.mkdir(parents=True, exist_ok=True)
-        jax.profiler.start_trace(str(_pdir))
-    for _ in range(args.warmup + 1 if args.timed_scan else args.steps):
+    for _i in range(args.warmup + 1 if args.timed_scan else args.steps):
+        # Trace ONLY steps [warmup, warmup+4): tracing from step 0 fills
+        # the profiler's 1M-event cap with compile-phase HOST events and
+        # the device tracks arrive EMPTY (job 26854167: every X event on
+        # pid /host:CPU, zero on /device:GPU:*).
+        if _profiling and _i == args.warmup:
+            jax.profiler.start_trace(str(_pdir))
+            _prof_on = True
+        if _profiling and _prof_on and _i == min(
+                args.warmup + 4, args.steps - 1):
+            jax.profiler.stop_trace()
+            _prof_on = False
         t0 = time.perf_counter()
         if physics_fn is not None:
             s = step(s, dt, physics_fn=physics_fn)
@@ -468,7 +479,7 @@ def main() -> int:
         # Fill per_step_ms so the steady slice below stays meaningful.
         per_step_ms += [scan_median_ms] * n_scan
 
-    if _profiling:
+    if _profiling and _prof_on:
         jax.profiler.stop_trace()
 
     if jax.process_count() > 1:
