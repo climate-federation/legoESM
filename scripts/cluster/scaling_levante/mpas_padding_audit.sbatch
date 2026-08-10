@@ -21,6 +21,12 @@ export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
 export JAX_PLATFORMS=cpu
 PY=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python
 cd "$SUBMIT_DIR" || exit 2
+# WORKTREE-IMPORT TRAP (memory 2026-08): the venv's editable install
+# resolves legoesm.* to the MAIN checkout; without this PYTHONPATH the
+# job silently audits code this worktree does not have (job 26856451
+# evaluated "size-aware" colouring against a checkout where it does
+# not exist and reported method=greedy).
+export PYTHONPATH="$SUBMIT_DIR/src:$(ls -d "$SUBMIT_DIR"/packages/* | tr '\n' ':' | sed 's/:$//'):${PYTHONPATH:-}"
 
 "$PY" - <<'EOF'
 import numpy as np
