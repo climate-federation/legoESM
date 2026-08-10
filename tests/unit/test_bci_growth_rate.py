@@ -104,10 +104,21 @@ def test_area_weighting_is_applied():
     base = np.zeros((TIMES.size, LAT.size, LON.size))
     wave = np.sin(np.deg2rad(6.0 * LON))
     high, low = base.copy(), base.copy()
-    high[:, LAT >= 70.0, :] = wave
-    low[:, (LAT >= 20.0) & (LAT <= 40.0), :] = wave
-    assert (bci.eddy_ke(high, 0 * high, LAT, (20.0, 80.0))[0]
-            < bci.eddy_ke(low, 0 * low, LAT, (20.0, 80.0))[0])
+    # SAME number of rows in both bands (11 each): with equal row counts the
+    # only thing that can separate them is the cos(lat) weight, so deleting the
+    # weighting makes this test fail.
+    hi_rows = (LAT >= 70.0) & (LAT <= 80.0)
+    lo_rows = (LAT >= 25.0) & (LAT <= 35.0)
+    assert hi_rows.sum() == lo_rows.sum() == 11
+    high[:, hi_rows, :] = wave
+    low[:, lo_rows, :] = wave
+    e_high = bci.eddy_ke(high, 0 * high, LAT, (20.0, 80.0))[0]
+    e_low = bci.eddy_ke(low, 0 * low, LAT, (20.0, 80.0))[0]
+    assert e_high < e_low
+    # ... and by the ratio the weights predict, not merely "less".
+    assert e_high / e_low == pytest.approx(
+        np.cos(np.deg2rad(LAT[hi_rows])).sum()
+        / np.cos(np.deg2rad(LAT[lo_rows])).sum(), rel=1e-12)
 
 
 def test_curvature_shows_up_as_disagreeing_sub_window_rates():
@@ -239,7 +250,7 @@ def test_t_level_series_rejects_an_out_of_range_level(tmp_path):
     u, v = _growing_wave(0.5)
     t3 = np.ones((TIMES.size, LAT.size, LON.size, 8))
     arm = bci.load_arm(_write_arm(tmp_path, u, v, t_3d=t3))
-    with pytest.raises(IndexError):
+    with pytest.raises(IndexError, match="outside 0..7"):
         bci.t_level_series(arm, 99, arm["lat"], (20.0, 80.0))
 
 
@@ -329,3 +340,66 @@ def test_cli_rejects_duplicate_labels(tmp_path):
 
 def test_self_test_passes():
     bci.self_test()
+
+
+def test_additive_floor_is_not_quotable(tmp_path, capsys):
+    """codex round-2 #5a: EKE = floor + exp(sigma t) passes every range guard
+    and fits a slope far below the true rate with a plausible R^2 ~ 0.9.  The
+    quotability gate, not prose, has to catch it."""
+    t = np.arange(0.0, 11.0, 1.0)
+    series = 100.0 + np.exp(0.6 * (t - 2.0))
+    rate, r2, _ = bci.growth_rate(t, series, 2.0, 6.0)
+    assert rate < 0.1 and r2 < 0.95          # the trap, reproduced
+    assert not (r2 >= bci._QUOTABLE_R2
+                and rate > bci._QUOTABLE_RATE_PER_DAY)
+
+
+def test_cli_marks_a_floor_dominated_arm_unquotable(tmp_path, capsys):
+    amp = (100.0 + np.exp(0.6 * (TIMES - 2.0)))[:, None, None]
+    wave = np.sin(np.deg2rad(6.0 * LON))[None, None, :] * np.ones(
+        (1, LAT.size, 1))
+    _write_arm(tmp_path / "floor", np.sqrt(amp) * wave, np.sqrt(amp) * wave)
+    clean_u, clean_v = _growing_wave(0.6)
+    _write_arm(tmp_path / "clean", clean_u, clean_v)
+    assert bci.main([f"floor={tmp_path / 'floor'}", f"clean={tmp_path / 'clean'}",
+                     "--json-out", str(tmp_path / "o.json")]) == 0
+    data = json.loads((tmp_path / "o.json").read_text())
+    assert data["arms"]["clean"]["eke_early"]["quotable"] is True
+    assert data["arms"]["floor"]["eke_early"]["quotable"] is False
+    assert "quotable" in capsys.readouterr().out
+
+
+def test_cli_emits_the_late_window_and_the_second_field(tmp_path):
+    u, v = _growing_wave(0.5)
+    t3 = np.zeros((TIMES.size, LAT.size, LON.size, 40))
+    t3[..., 27] = (np.exp(0.25 * TIMES)[:, None, None]
+                   * np.sin(np.deg2rad(6.0 * LON))[None, None, :])
+    _write_arm(tmp_path / "a", u, v, t_3d=t3)
+    assert bci.main([f"a={tmp_path / 'a'}",
+                     "--json-out", str(tmp_path / "o.json")]) == 0
+    rec = json.loads((tmp_path / "o.json").read_text())["arms"]["a"]
+    for key in ("eke_early", "eke_late", "tvar_early", "tvar_late",
+                "psp_early", "psp_late", "eke_t_first", "t_first_days"):
+        assert key in rec, key
+    assert rec["tvar_early"]["rate_per_day"] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_hybrid_runs_do_not_get_a_pressure_label(tmp_path):
+    """A fixed INDEX is a fixed pressure only on the sigma ladder."""
+    u, v = _growing_wave(0.5)
+    t3 = np.ones((TIMES.size, LAT.size, LON.size, 40))
+    d = _write_arm(tmp_path, u, v, t_3d=t3)
+    np.savez(d / "snapshots_latlon.npz", u=u, v=v, lat=LAT, lon=LON,
+             times_days=TIMES, T_3d=t3,
+             p_s=np.full((TIMES.size, LAT.size, LON.size), 1.0e5))
+    arm = bci.load_arm(d)
+    assert bci.level_pressure_hpa(arm, 27, (20.0, 80.0), "sigma") is not None
+    assert bci.level_pressure_hpa(arm, 27, (20.0, 80.0), "hybrid") is None
+
+
+def test_temperature_on_a_different_canvas_is_fatal(tmp_path):
+    u, v = _growing_wave(0.5)
+    t3 = np.ones((TIMES.size, LAT.size, LON.size // 2, 40))
+    _write_arm(tmp_path, u, v, t_3d=t3)
+    with pytest.raises(ValueError, match="same"):
+        bci.load_arm(tmp_path)

@@ -92,6 +92,14 @@ _MIN_DYNAMIC_RANGE = 1.0e-3
 # ... and a series that barely moves is a constant, whose least-squares slope
 # is a rounding artifact rather than a growth rate.
 _MIN_VARIATION = 1.0e-6
+# Quotability gate, pre-registered in the launcher and enforced HERE rather
+# than in prose: an ADDITIVE floor (EKE = floor + exp(sigma t)) satisfies every
+# guard above and still returns a slope far below the true rate, with a
+# plausible R^2 ~ 0.9 (codex round-2 review).  A rate is only quotable when the
+# window is a clean exponential that actually grew.
+_QUOTABLE_R2 = 0.95
+_QUOTABLE_RATE_PER_DAY = 0.1
+_QUOTABLE_GROWTH_FACTOR = 10.0
 
 
 def _eddy_variance(field: np.ndarray, lat_deg: np.ndarray,
@@ -156,9 +164,10 @@ def growth_rate(times_days: np.ndarray, series: np.ndarray,
     # A run that stopped early must NOT be fitted over the part of the window
     # it reached and reported under the window that was asked for (codex
     # review, HIGH #5): both endpoints must be inside the sampled span.
-    # Tolerance is 2% of the window: it absorbs the sub-second rounding when
-    # dt does not divide the run length exactly, and still rejects a run that
-    # stopped days early.
+    # Tolerance is 2% of the window — 1.9 h on the default 4-day windows.  It
+    # absorbs the rounding when dt does not divide the run length exactly and
+    # rejects a run that stopped days early; it does NOT certify that the final
+    # sample sits exactly on day_hi.
     span_tol = 0.02 * (day_hi - day_lo)
     if t.min() > day_lo + span_tol or t.max() < day_hi - span_tol:
         raise ValueError(
@@ -220,6 +229,11 @@ def load_arm(run_dir: Path) -> dict:
         raise ValueError(
             f"{npz}: u canvas {arm['u'].shape[1:]} does not match its own "
             f"(lat, lon) axes ({arm['lat'].size}, {arm['lon'].size})")
+    if arm["T_3d"] is not None and (
+            arm["T_3d"].shape[:3] != arm["u"].shape[:3]):
+        raise ValueError(
+            f"{npz}: T_3d {arm['T_3d'].shape[:3]} is not on the same "
+            f"(time, lat, lon) canvas as u {arm['u'].shape[:3]}")
     if not (np.all(np.isfinite(arm["lat"])) and np.all(np.diff(arm["lat"]) > 0)):
         raise ValueError(f"{npz}: lat is not finite and strictly increasing — "
                          "a permuted or corrupted axis would silently "
@@ -298,8 +312,8 @@ def native_ps_perturbation(run_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return t, v
 
 
-def level_pressure_hpa(arm: dict, level: int, band: tuple[float, float]
-                       ) -> float | None:
+def level_pressure_hpa(arm: dict, level: int, band: tuple[float, float],
+                       vertical: str = "sigma") -> float | None:
     """Approximate pressure [hPa] of ``level`` from the model's OWN coordinate.
 
     Uses ``legoesm.grids.vertical.create_sigma_coordinate`` — the same factory
@@ -308,7 +322,10 @@ def level_pressure_hpa(arm: dict, level: int, band: tuple[float, float]
     the reader can confirm the fixed level index really is free troposphere and
     really is the same physical level on every arm (GLM-5.2 round-2 #4).
     """
-    if arm["T_3d"] is None or arm.get("p_s") is None:
+    # A FIXED INDEX is a fixed pressure only on the uniform-sigma ladder; on
+    # the hybrid coordinate the same index is a different level (codex round-2
+    # #2), so refuse to print a pressure there rather than print a wrong one.
+    if vertical != "sigma" or arm["T_3d"] is None or arm.get("p_s") is None:
         return None
     try:
         from legoesm.grids.vertical import create_sigma_coordinate
@@ -395,6 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--band", type=float, nargs=2, default=(20.0, 80.0),
                    metavar=("LAT_LO", "LAT_HI"),
                    help="latitude band [deg]; the J-W perturbation is at 40N")
+    p.add_argument("--vertical", type=str, default="sigma",
+                   choices=["sigma", "hybrid"],
+                   help="vertical coordinate of the runs being scored.  A "
+                        "fixed level INDEX is a fixed pressure only on the "
+                        "uniform-sigma ladder, so the printed level pressure "
+                        "is suppressed for 'hybrid'.")
     p.add_argument("--t-level", type=int, default=27,
                    help="level index (from the model top) for the eddy "
                         "temperature-variance cross-check.  All arms use the "
@@ -440,10 +463,12 @@ def main(argv: list[str] | None = None) -> int:
         rec = {"run_dir": a["run_dir"],
                "times_days": [float(x) for x in a["times"]],
                "eke": [float(x) for x in eke],
-               "eke_t0": float(eke[0]),
+               "eke_t_first": float(eke[0]),
+               "t_first_days": float(a["times"][0]),
                "eke_growth_factor": (float(eke[-1] / eke[0])
                                      if eke[0] > 0 else float("inf")),
-               "level_pressure_hpa": level_pressure_hpa(a, args.t_level, band)}
+               "level_pressure_hpa": level_pressure_hpa(
+                   a, args.t_level, band, args.vertical)}
         for name, series, times in (("eke", eke, a["times"]),
                                     ("tvar", tvar, a["times"]),
                                     ("psp", psp, psp_t)):
@@ -455,8 +480,25 @@ def main(argv: list[str] | None = None) -> int:
                 # the quadratic EKE / T-variance rates.
                 if name == "psp":
                     r *= 2.0
-                rec[f"{name}_{win}"] = {"rate_per_day": r, "r2": r2, "n": n,
-                                        "window_days": [lo, hi]}
+                w_sel = (times >= lo) & (times <= hi)
+                w_vals = np.asarray(series, dtype=np.float64)[w_sel]
+                # p_s' is an AMPLITUDE while EKE/TVAR are quadratic, so its
+                # in-window factor is SQUARED before the gate compares it with
+                # the same threshold — otherwise the doubled rate and the raw
+                # factor would be on different bases and a healthy arm could
+                # fail its own gate.
+                factor = float(w_vals[-1] / w_vals[0]) ** (2 if name == "psp"
+                                                           else 1)
+                # The gate is CODE, not prose: R^2, a positive rate, and real
+                # growth inside the window itself.  An additive regridding
+                # floor fails it (R^2 ~ 0.9) instead of printing 0.02 /day as
+                # if it were a growth rate.
+                rec[f"{name}_{win}"] = {
+                    "rate_per_day": r, "r2": r2, "n": n,
+                    "window_days": [lo, hi], "growth_factor_in_window": factor,
+                    "quotable": bool(r2 >= _QUOTABLE_R2
+                                     and r > _QUOTABLE_RATE_PER_DAY
+                                     and factor >= _QUOTABLE_GROWTH_FACTOR)}
         if tvar is not None:
             rec["tvar"] = [float(x) for x in tvar]
         out[label] = rec
@@ -467,11 +509,14 @@ def main(argv: list[str] | None = None) -> int:
     print("# quantity: lowest-level eddy KE per unit mass [m2/s2] and eddy T "
           "variance [K2] on the shared 181x360 canvas; rates are d ln(.)/dt")
     print("# psp = 2 x d ln(max|p_s - p_s(0)|)/dt from the NATIVE-grid "
-          "timeseries CSV (no regridding); factor = eke(t_end)/eke(t=0)")
+          "timeseries CSV (no regridding); factor = eke(t_end)/eke(t_1st)")
+    print(f"# quotable = the EARLY EKE window passed R2 >= {_QUOTABLE_R2}, "
+          f"rate > {_QUOTABLE_RATE_PER_DAY}/day and in-window growth "
+          f">= {_QUOTABLE_GROWTH_FACTOR}x")
     print(f"{'arm':<10} {'eke_early':>10} {'eke_late':>9} {'R2e':>6} "
           f"{'R2l':>6} {'tvar_early':>11} {'tvar_late':>10} "
-          f"{'psp_early':>10} {'psp_late':>9} {'eke(t=0)':>11} "
-          f"{'factor':>10} {'p_lev[hPa]':>11}")
+          f"{'psp_early':>10} {'psp_late':>9} {'eke(t_1st)':>11} "
+          f"{'factor':>10} {'p_lev[hPa]':>11} {'quotable':>9} {'t_1st':>6}")
     for label, r in out.items():
         def g(k, f):
             return r[k][f] if k in r else float("nan")
@@ -482,9 +527,11 @@ def main(argv: list[str] | None = None) -> int:
               f"{g('tvar_early','rate_per_day'):>11.4f} "
               f"{g('tvar_late','rate_per_day'):>10.4f} "
               f"{g('psp_early','rate_per_day'):>10.4f} "
-              f"{g('psp_late','rate_per_day'):>9.4f} {r['eke_t0']:>11.3e} "
+              f"{g('psp_late','rate_per_day'):>9.4f} {r['eke_t_first']:>11.3e} "
               f"{r['eke_growth_factor']:>10.3e} "
-              f"{(float('nan') if plev is None else plev):>11.1f}")
+              f"{(float('nan') if plev is None else plev):>11.1f} "
+              f"{str(g('eke_early','quotable')):>9} "
+              f"{r['t_first_days']:>6.2f}")
 
     if ref:
         # The ratio AS A FUNCTION OF TIME is the statistic that separates a

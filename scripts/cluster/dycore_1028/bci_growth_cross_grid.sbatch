@@ -105,7 +105,7 @@ PYTHONPATH="$(ls -d "${WT}"/packages/*/ | paste -sd:)":"${WT}/src":"${WT}"
 export PYTHONPATH
 export JAX_PLATFORMS=cuda
 
-echo "sha=$(git rev-parse --short HEAD)  host=$(hostname)  $(date -u)"
+echo "sha=$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain)" ] && echo -dirty)  host=$(hostname)  $(date -u)"
 nvidia-smi --query-gpu=name --format=csv,noheader || true
 "${PY}" -c "import jax; print('jax', jax.__version__, jax.devices())"
 
@@ -130,15 +130,15 @@ run_arm ico        icosahedral
 run_arm cube       cubed_sphere
 run_arm cube_ah01  cubed_sphere LEGOESM_AH_SCALE=0.1
 
-score () {             # $1 = vertical coordinate
-    local vert="$1"
-    "${PY}" -u scripts/validate/bci_growth_rate.py --self-test \
+score () {   # $1 = vertical coordinate, $2 = reference arm, $3.. = extra flags
+    local vert="$1" ref="$2"; shift 2
+    "${PY}" -u scripts/validate/bci_growth_rate.py --self-test "$@" \
         latlon="${OUT}/latlon/hydrostatic/baroclinic/latlon/72x144/${vert}" \
         ico="${OUT}/ico/hydrostatic/baroclinic/icosahedral/ico5/${vert}" \
         cube="${OUT}/cube/hydrostatic/baroclinic/cubed_sphere/C36/${vert}" \
         cube_ah01="${OUT}/cube_ah01/hydrostatic/baroclinic/cubed_sphere/C36/${vert}" \
-        --reference "${2:-ico}" \
-        --json-out "${OUT}/growth_rates_${vert}_ref${2:-ico}.json"
+        --reference "${ref}" \
+        --json-out "${OUT}/growth_rates_${vert}_ref${ref}.json"
 }
 
 # sigma carries the reading (the #1028 protocol coordinate) and must succeed.
@@ -154,5 +154,5 @@ score sigma latlon
 # hybrid is best-effort: its members NaN at ~day 10 on the negative-layer-mass
 # coordinate, so a failure here is expected and is NOT allowed to mask sigma.
 echo "=== growth rates (hybrid, best-effort) ==="
-score hybrid ico || echo "[hybrid] not scorable (expected — negative layer mass)"
+score hybrid ico --vertical hybrid || echo "[hybrid] not scorable (expected — negative layer mass)"
 echo "DONE $(date -u)"

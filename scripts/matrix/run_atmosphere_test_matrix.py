@@ -5092,10 +5092,19 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             return (check_finite({"T": s.T.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
+        ps_init_ico = np.array(state.p_s.data)
+
         def scalar_fn(s):
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                # Same J-W growth diagnostic the cube and lat-lon branches
+                # already emit (#1028/#1081): without it the icosahedral arm
+                # has no NATIVE-grid, regrid-free growth series, and the
+                # cross-grid growth comparison would rest on the regridded
+                # canvas alone.
+                "ps_perturbation": float(jnp.max(
+                    jnp.abs(s.p_s.data - ps_init_ico))),
             }
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
