@@ -211,6 +211,13 @@ def main() -> int:
                         "the neighbor-round schedule on small gate "
                         "meshes (the multicontroller selfspawn tests "
                         "do).  Recorded in the JSONL row.")
+    p.add_argument("--wide-halo", action="store_true",
+                   help="Set LEGOESM_MPAS_WIDE_HALO=1 before building "
+                        "the step: ONE halo fill per step at depth "
+                        "evals x SPMD_HALO_DEPTH (communication-"
+                        "avoiding), whole RK body inside shard_map. "
+                        "Effective mode + depth recorded in the JSONL "
+                        "row.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -388,6 +395,8 @@ def main() -> int:
     if args.check_conservation:
         mass_before = _global_dry_mass(s0_global, mesh)
 
+    if args.wide_halo:
+        os.environ["LEGOESM_MPAS_WIDE_HALO"] = "1"
     step = make_voronoi_sharded_step(
         model, dev_config, halo_strategy=args.halo_strategy)
     # Already in the sharded layout (partition-local build) for nd > 1;
@@ -511,6 +520,8 @@ def main() -> int:
         halo_strategy_requested=args.halo_strategy,
         halo_strategy_effective=getattr(
             step, "_halo_strategy_effective", "serial"),
+        wide_halo=bool(getattr(step, "_wide_halo_effective", False)),
+        halo_depth=int(getattr(step, "_halo_depth_effective", 3)),
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),

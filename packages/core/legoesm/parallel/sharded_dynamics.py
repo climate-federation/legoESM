@@ -2211,6 +2211,110 @@ def _resolve_ragged_halo(env_value: str, n_dev: int) -> bool:
         f"'0', '1', 'auto' (empty = off)")
 
 
+#: Tendency evaluations per step for each ``dispatch_integrator`` name.
+#: Consumed by the wide-halo (communication-avoiding) step: halo depth =
+#: evals x SPMD_HALO_DEPTH, because SSP/RK stage validity shrinks by one
+#: tendency reach per evaluation (Shu-Osher shrinking-region argument).
+#: Grow-only alongside ``timestepping.dispatch._INTEGRATORS``; a name
+#: missing here refuses wide mode rather than guessing a depth.
+_INTEGRATOR_TENDENCY_EVALS = {
+    "ssp_rk3": 3, "ssp3": 3, "rk3": 3,
+    "ssp_rk3_scan": 3, "ssp3_scan": 3, "rk3_scan": 3,
+    "ssp_rk34": 4, "ssp34": 4, "rk34": 4,
+    "ssp_rk54": 5, "ssp54": 5, "ssp45": 5, "rk54": 5,
+    "ssp_rk54_scan": 5, "ssp54_scan": 5, "rk54_scan": 5,
+    "rk4": 4, "runge_kutta_4": 4,
+}
+
+
+#: Sentinel ring distance for local rows that are padding or outside the
+#: wide region — always beyond any mask threshold.
+_WIDE_RING_FAR = np.iinfo(np.int32).max
+
+
+def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
+                           halo_depth):
+    """Per-device ring distances for the wide-halo shrinking masks.
+
+    Returns ``(cell_ring, edge_ring)`` int32 arrays of shape
+    ``(n_dev, max_lc)`` / ``(n_dev, max_le)``:
+
+    * ``cell_ring[d, i]`` — BFS ring of device *d*'s i-th local cell
+      from its owned block (0 = owned), ``_WIDE_RING_FAR`` for padding.
+    * ``edge_ring[d, j]`` — max of the two adjacent cells' rings
+      (an edge is in the depth-``r`` region iff BOTH its cells are —
+      the same AND filter ``_build_voronoi_partition_infra`` applies),
+      ``_WIDE_RING_FAR`` when a cell is absent or the row is padding.
+      Owned edges are overridden inside the kernel (first
+      ``edges_per`` rows), not here.
+
+    The eval-k mask keeps entities with ring <= ``(evals-k) *
+    SPMD_HALO_DEPTH`` (plus all owned rows): outside that region the
+    stage values are frozen (zero tendency) so every primal stays
+    finite — an unmasked wide step lets garbage outer-ring values turn
+    zero cotangents into NaN through the chain rule (0 * NaN), which
+    the fill transpose then scatter-adds into owned gradients.
+    """
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    n_dev = len(partitions)
+    cell_ring = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_ring = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    for d, part in enumerate(partitions):
+        g2l = part.cell_g2l
+        n_owned = part.n_owned_cells
+        ring_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
+        ring_l[:n_owned] = 0
+        frontier = np.asarray(part.local_cells[:n_owned])
+        seen = np.zeros(coc.shape[1], dtype=bool)
+        seen[frontier] = True
+        for r in range(1, halo_depth + 1):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~seen[nb]]
+            seen[nb] = True
+            lidx = g2l[nb]
+            nb_local = lidx[lidx >= 0]
+            ring_l[nb_local] = r
+            frontier = nb
+        cell_ring[d] = ring_l.astype(np.int32)
+
+        le = np.asarray(part.local_edges)
+        c12 = coe[:, le]                          # (2, n_local_edges)
+        r12 = np.full_like(c12, _WIDE_RING_FAR, dtype=np.int64)
+        for side in range(2):
+            cs = c12[side]
+            valid = cs >= 0
+            lidx = np.full(cs.shape, -1, dtype=np.int64)
+            lidx[valid] = g2l[cs[valid]]
+            present = lidx >= 0
+            r12[side, present] = ring_l[lidx[present]]
+        edge_ring[d, :le.shape[0]] = np.max(
+            r12, axis=0).astype(np.int32)
+
+    return cell_ring, edge_ring
+
+
+def _resolve_wide_halo(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
+
+    Wide halo = communication-avoiding step: ONE halo fill per model
+    step at depth ``evals x SPMD_HALO_DEPTH`` instead of one depth-3
+    fill per tendency evaluation.  Unknown values raise
+    (dispatch-hardening, same contract as LEGOESM_MPAS_RAGGED_HALO)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_WIDE_HALO={env_value!r}: must be '0' or '1' "
+        f"(empty = off)")
+
+
 def _build_ragged_halo_schedule(partitions, cell_owner, n_dev, cells_per,
                                 edges_per, max_lc, max_le):
     """One-collective halo schedule for ``jax.lax.ragged_all_to_all``.
@@ -2518,12 +2622,49 @@ def make_voronoi_sharded_step(
             )
 
     # ------------------------------------------------------------------
+    # Wide-halo (communication-avoiding) mode: ONE fill per step at
+    # depth evals x SPMD_HALO_DEPTH, whole RK body inside shard_map.
+    # Opt-in via LEGOESM_MPAS_WIDE_HALO=1; default OFF = every existing
+    # configuration byte-identical.  Motivation (campaign 2026-08-10):
+    # the lane is bound by sequential-collective count x ~155-310 us
+    # latency floor; s9@64 runs 11 coloured rounds x 3 RK3 fills = 33
+    # collectives/step, and the depth-9 comm graph colours to the SAME
+    # 11 rounds (job 26845329) with only +17% local extents — so one
+    # wide fill cuts 33 -> 11 sequential collectives at ~ +17% payload.
+    # ------------------------------------------------------------------
+    import os as _os_wide
+    use_wide_halo = _resolve_wide_halo(
+        _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO", "0"))
+    if use_wide_halo:
+        _integ_name = str(cfg.time_integrator).lower()
+        if _integ_name.endswith("_scan"):
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO=1: time_integrator="
+                f"{cfg.time_integrator!r} folds its stages into one "
+                f"lax.scan body, so the per-evaluation shrinking masks "
+                f"cannot be threaded by trace-time call order. Use the "
+                f"unrolled spelling (e.g. 'ssp_rk3') with wide halo.")
+        _wide_evals = _INTEGRATOR_TENDENCY_EVALS.get(_integ_name)
+        if _wide_evals is None:
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO=1: time_integrator="
+                f"{cfg.time_integrator!r} has no entry in "
+                f"_INTEGRATOR_TENDENCY_EVALS, so the required halo depth "
+                f"is unknown. Add the evals count (and its shrinking-"
+                f"region justification) before enabling wide halo.")
+        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_evals
+    else:
+        _wide_evals = None
+        _halo_depth_eff = SPMD_HALO_DEPTH
+
+    # ------------------------------------------------------------------
     # Setup: build per-device local meshes and gather indices
     # ------------------------------------------------------------------
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
-        "(nCells=%d, nEdges=%d, halo_depth=3, strategy=%s) ...",
-        n_dev, nCells, nEdges, halo_strategy,
+        "(nCells=%d, nEdges=%d, halo_depth=%d, strategy=%s%s) ...",
+        n_dev, nCells, nEdges, _halo_depth_eff, halo_strategy,
+        ", WIDE HALO (1 fill/step)" if use_wide_halo else "",
     )
     t0 = time.time()
     (
@@ -2537,7 +2678,7 @@ def make_voronoi_sharded_step(
         partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
         cell_owner_out,   # np.ndarray (nCells,) cell ownership
     ) = _build_voronoi_partition_infra(global_mesh, n_dev,
-                                       halo_depth=SPMD_HALO_DEPTH)
+                                       halo_depth=_halo_depth_eff)
     logger.info(
         "  partition setup done in %.2fs  "
         "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",
@@ -2558,6 +2699,19 @@ def make_voronoi_sharded_step(
         lambda x: multiprocess_safe_device_put(x, dev_sharding),
         stacked_meshes,
     )
+
+    # Wide-halo shrinking-mask ring distances (P("device")-sharded jit
+    # ARGUMENTS like the meshes/schedules — sharded closure constants
+    # raise under multi-controller).  Empty tuple when off.
+    if use_wide_halo:
+        _cr_np, _er_np = _build_wide_halo_rings(
+            global_mesh, partitions_out, max_lc, max_le, _halo_depth_eff)
+        wide_args = (
+            multiprocess_safe_device_put(_cr_np, dev_sharding),
+            multiprocess_safe_device_put(_er_np, dev_sharding),
+        )
+    else:
+        wide_args = ()
 
     nlev = model.sigma_coord.n_levels
 
@@ -2782,6 +2936,171 @@ def make_voronoi_sharded_step(
         return fn
 
     # ------------------------------------------------------------------
+    # WIDE-HALO kernel: ONE packed fill at depth evals x SPMD_HALO_DEPTH,
+    # then the whole RK body on the local region with no further
+    # exchange.  Validity shrinks by one tendency reach
+    # (SPMD_HALO_DEPTH rings) per evaluation — the Shu-Osher
+    # shrinking-region argument — so after the last of N evaluations the
+    # state is valid exactly on the owned cells this kernel returns.
+    # Outer rings hold progressively stale/garbage values that are
+    # sliced away; they cannot reach an owned cell because one tendency
+    # reads at most SPMD_HALO_DEPTH rings.  The stage arithmetic on
+    # owned cells is the SAME dispatch_integrator arithmetic the
+    # per-fill path runs outside shard_map, on bitwise-identical inputs
+    # (halo copies of the previous step's owner values).
+    # ------------------------------------------------------------------
+
+    def _make_local_wide_step(tkeys: tuple):
+
+        def _local_wide_step(u_shard, T_shard, ps_shard, phis_shard,
+                             q_shard, dt_val, mesh_sl, halo_sl, wide_sl):
+            cell_ring = wide_sl[0][0]     # (max_lc,) int32
+            edge_ring = wide_sl[1][0]     # (max_le,) int32
+            _owned_c = jnp.arange(max_lc) < cells_per
+            _owned_e = jnp.arange(max_le) < edges_per
+            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
+                                         q_shard)
+            if use_ragged:
+                cell_local, u_local = _ragged_halo_fill(
+                    cell_pack, u_shard, halo_sl, max_lc, max_le,
+                )
+            elif use_ppermute:
+                cell_local, u_local = _ppermute_halo_fill(
+                    cell_pack, u_shard, halo_sl, ppermute_perms,
+                    max_lc, max_le,
+                )
+            else:
+                cell_full = jax.lax.all_gather(
+                    cell_pack, "device", axis=0, tiled=True)
+                u_full = jax.lax.all_gather(
+                    u_shard, "device", axis=0, tiled=True)
+                gc, ge = halo_sl
+                cell_local = cell_full[gc[0]]
+                u_local = u_full[ge[0]]
+
+            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                cell_local, nlev)
+            my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
+
+            tracers_local = None
+            if tkeys:
+                tracers_local = {
+                    k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
+                             name=k, dims=("nCells", "nlev"),
+                             units="kg/kg", staggering="cell")
+                    for i, k in enumerate(tkeys)
+                }
+            local_state = MPASHydrostaticState(
+                u=Field(data=u_local, name="u",
+                        dims=("nEdges", "nlev"), units="m/s",
+                        long_name="normal velocity", staggering="edge"),
+                T=Field(data=T_local, name="T",
+                        dims=("nCells", "nlev"), units="K",
+                        long_name="temperature", staggering="cell"),
+                p_s=Field(data=ps_local, name="p_s",
+                          dims=("nCells",), units="Pa",
+                          long_name="surface pressure", staggering="cell"),
+                phis=Field(data=phis_local, name="phis",
+                           dims=("nCells",), units="m^2/s^2",
+                           long_name="surface geopotential",
+                           staggering="cell"),
+                tracers=tracers_local,
+            )
+
+            # Trace-time evaluation counter: the unrolled integrators
+            # call the tendency N times SEQUENTIALLY in Python during
+            # one trace, so the k-th call gets the k-th shrinking mask
+            # (the factory refuses *_scan integrators for exactly this
+            # reason).  Fresh per trace: the dict lives in this
+            # function's scope.
+            _eval_i = {"k": 0}
+
+            def _wide_tendency(s):
+                """Full-local-region tendencies, state-shaped (phis
+                rides a zero tendency; tracer ADVECTION under the same
+                keys) — the local-mesh mirror of ``dyn_tendency_fn``,
+                MASKED to the eval's shrinking valid region: entities
+                outside ring ``(evals - k) * SPMD_HALO_DEPTH`` get a
+                ZERO tendency, freezing their stage values at finite
+                fill values.  Their values are never read by a later
+                evaluation whose result reaches an owned cell (the
+                Shu-Osher shrinking-region argument), and the freeze
+                keeps every primal finite — unmasked garbage rings turn
+                zero cotangents into NaN (0 * NaN) which the fill
+                transpose scatter-adds into owned gradients."""
+                _eval_i["k"] += 1
+                thr = SPMD_HALO_DEPTH * (_wide_evals - _eval_i["k"])
+                keep_c = (_owned_c | (cell_ring <= thr))[:, None]
+                keep_e = (_owned_e | (edge_ring <= thr))[:, None]
+                tend = mpas_hydrostatic_tendencies(
+                    s, my_mesh, sigma, cfg, dt=dt_val,
+                )
+                tr_tend = None
+                if tkeys:
+                    tr_tend = {
+                        k: s.tracers[k].replace(
+                            data=jnp.where(
+                                keep_c,
+                                tend.tracer_tendencies[k].data, 0.0))
+                        for k in tkeys
+                    }
+                return MPASHydrostaticState(
+                    u=s.u.replace(
+                        data=jnp.where(keep_e, tend.du_dt.data, 0.0)),
+                    T=s.T.replace(
+                        data=jnp.where(keep_c, tend.dT_dt.data, 0.0)),
+                    p_s=s.p_s.replace(
+                        data=jnp.where(keep_c[:, 0],
+                                       tend.dp_s_dt.data, 0.0)),
+                    phis=s.phis.replace(
+                        data=jnp.zeros_like(s.phis.data)),
+                    v=s.v,
+                    tracers=tr_tend,
+                )
+
+            final = dispatch_integrator(
+                local_state, _wide_tendency, dt_val, cfg.time_integrator,
+            )
+            if _eval_i["k"] != _wide_evals:
+                raise AssertionError(
+                    f"wide halo: integrator {cfg.time_integrator!r} made "
+                    f"{_eval_i['k']} tendency evaluations, table says "
+                    f"{_wide_evals} — _INTEGRATOR_TENDENCY_EVALS is wrong "
+                    f"and the halo depth/masks with it.")
+
+            if tkeys:
+                q_owned = jnp.concatenate(
+                    [final.tracers[k].data for k in tkeys],
+                    axis=-1)[:cells_per]
+            else:
+                q_owned = jnp.zeros((cells_per, 0), dtype=T_shard.dtype)
+            return (final.u.data[:edges_per],
+                    final.T.data[:cells_per],
+                    final.p_s.data[:cells_per],
+                    q_owned)
+
+        return _local_wide_step
+
+    _shard_wide_cache: dict = {}
+
+    def _get_shard_wide_step(tkeys: tuple):
+        fn = _shard_wide_cache.get(tkeys)
+        if fn is None:
+            fn = shard_map(
+                _make_local_wide_step(tkeys),
+                mesh=jax_mesh,
+                in_specs=(P("device"), P("device"), P("device"),
+                          P("device"), P("device"), P(),
+                          mesh_in_specs, halo_in_specs,
+                          jax.tree.map(lambda _: P("device"), wide_args)),
+                out_specs=(P("device"), P("device"), P("device"),
+                           P("device")),
+                check_vma=False,
+            )
+            _shard_wide_cache[tkeys] = fn
+        return fn
+
+    # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
     if cfg.fix_mass:
@@ -2828,7 +3147,7 @@ def make_voronoi_sharded_step(
 
         @jax.jit
         def _step(state, dt, forcing, phys_state,
-                  mesh_arg, halo_arg, area_arg):
+                  mesh_arg, halo_arg, area_arg, wide_arg):
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
@@ -2888,9 +3207,34 @@ def make_voronoi_sharded_step(
             #        config.time_integrator via the SAME dispatch the
             #        serial step uses (the previous hard-coded SSP-RK3
             #        silently overrode e.g. the ssp_rk54_scan default).
-            state_new = dispatch_integrator(
-                state, dyn_tendency_fn, dt, cfg.time_integrator,
-            )
+            #        Wide-halo mode runs the SAME dispatch INSIDE
+            #        shard_map after one deep fill (see
+            #        _make_local_wide_step); default path unchanged.
+            if use_wide_halo:
+                u_new, T_new, ps_new, q_new = _get_shard_wide_step(tkeys)(
+                    state.u.data, state.T.data, state.p_s.data,
+                    state.phis.data, _pack_tracers(state), dt,
+                    mesh_arg, halo_arg, wide_arg,
+                )
+                tr_new = None
+                if state.tracers is not None:
+                    tr_new = {
+                        k: state.tracers[k].replace(
+                            data=q_new[..., i * nlev:(i + 1) * nlev])
+                        for i, k in enumerate(tkeys)
+                    }
+                state_new = MPASHydrostaticState(
+                    u=state.u.replace(data=u_new),
+                    T=state.T.replace(data=T_new),
+                    p_s=state.p_s.replace(data=ps_new),
+                    phis=state.phis,
+                    v=state.v,
+                    tracers=tr_new,
+                )
+            else:
+                state_new = dispatch_integrator(
+                    state, dyn_tendency_fn, dt, cfg.time_integrator,
+                )
 
             # --- 2. Operator-split physics (mirrors _step_jit): evaluate
             #     ONCE on the post-dynamics state and apply forward over
@@ -3025,7 +3369,7 @@ def make_voronoi_sharded_step(
             _step_cache[key] = fn
         state_new, phys_state_out = fn(
             state, dt, forcing, phys_state,
-            stacked_meshes, halo_args, _area_for_mass,
+            stacked_meshes, halo_args, _area_for_mass, wide_args,
         )
         if return_phys_state:
             return state_new, phys_state_out
@@ -3038,6 +3382,8 @@ def make_voronoi_sharded_step(
     # single-device early return above hands back ``model.step``.
     _voronoi_step._halo_strategy_effective = (
         "ppermute_ragged" if use_ragged else halo_strategy)
+    _voronoi_step._wide_halo_effective = use_wide_halo
+    _voronoi_step._halo_depth_effective = _halo_depth_eff
     return _voronoi_step
 
 
