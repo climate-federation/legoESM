@@ -2258,29 +2258,83 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
     coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
     coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
     n_dev = len(partitions)
+    nCells = coc.shape[1]
     cell_ring = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
     edge_ring = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    # UNION adjacency (cellsOnCell + cellsOnEdge pairs) as CSR.  The
+    # partition builder augments the cellsOnCell k-ring with cells
+    # reachable only through cellsOnEdge (boundary/pentagon discrepancy,
+    # see _build_voronoi_partition_infra) and then closes two more
+    # cellsOnEdge layers — a cellsOnCell-only BFS leaves those cells
+    # unlabelled (FAR), silently freezing stage values an owned-edge
+    # stencil can read (codex review P1, 2026-08-10).  BFS on the union
+    # graph labels every dependency-reachable cell.
+    coc_dst = coc.T.ravel()
+    coc_src = np.repeat(np.arange(nCells, dtype=np.int64), coc.shape[0])
+    keep = coc_dst >= 0
+    src = np.concatenate([coc_src[keep], coe[0], coe[1]])
+    dst = np.concatenate([coc_dst[keep], coe[1], coe[0]])
+    order = np.argsort(src, kind="stable")
+    src_s, dst_s = src[order], dst[order]
+    indptr = np.searchsorted(src_s, np.arange(nCells + 1))
+
+    def _neighbors(frontier):
+        starts, ends = indptr[frontier], indptr[frontier + 1]
+        counts = ends - starts
+        total = int(counts.sum())
+        if total == 0:
+            return np.empty(0, dtype=np.int64)
+        idx = (np.repeat(starts, counts)
+               + np.arange(total)
+               - np.repeat(np.cumsum(counts) - counts, counts))
+        return dst_s[idx]
 
     for d, part in enumerate(partitions):
         g2l = part.cell_g2l
         n_owned = part.n_owned_cells
+        n_local = part.n_local_cells
         ring_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
         ring_l[:n_owned] = 0
-        frontier = np.asarray(part.local_cells[:n_owned])
-        seen = np.zeros(coc.shape[1], dtype=bool)
+        # Ring 0 = owned CELLS plus the cells of owned EDGES: edge
+        # ownership is an independent contiguous block that need not
+        # align with the cell block, and owned-edge tendencies are
+        # returned as final output — their adjacent cells anchor the
+        # validity metric exactly like owned cells do (the 54/27
+        # unreachable cells the first BFS left FAR were precisely this
+        # misalignment).
+        owned_edges_g = np.asarray(part.local_edges[:part.n_owned_edges])
+        seed_cells = np.unique(np.concatenate([
+            np.asarray(part.local_cells[:n_owned]),
+            coe[:, owned_edges_g].ravel()]))
+        seed_cells = seed_cells[seed_cells >= 0]
+        lidx0 = g2l[seed_cells]
+        ring_l[lidx0[lidx0 >= 0]] = 0
+        frontier = seed_cells
+        seen = np.zeros(nCells, dtype=bool)
         seen[frontier] = True
-        for r in range(1, halo_depth + 1):
+        # +2 margin: the partition closure adds up to two cellsOnEdge
+        # layers past the k-ring; labelling deeper than any mask
+        # threshold is harmless (behaves as FAR), unlabelled is not.
+        for r in range(1, halo_depth + 3):
             if frontier.size == 0:
                 break
-            nb = coc[:, frontier].ravel()
-            nb = nb[nb >= 0]
-            nb = np.unique(nb)
+            nb = np.unique(_neighbors(frontier))
             nb = nb[~seen[nb]]
             seen[nb] = True
             lidx = g2l[nb]
             nb_local = lidx[lidx >= 0]
             ring_l[nb_local] = r
             frontier = nb
+        n_unlabelled = int((ring_l[:n_local] == _WIDE_RING_FAR).sum())
+        if n_unlabelled:
+            raise AssertionError(
+                f"wide halo: rank {d} has {n_unlabelled} local cells the "
+                f"union-graph BFS could not reach within depth "
+                f"{halo_depth + 2} — the shrinking masks would silently "
+                f"freeze stage values the stencil can read. The partition "
+                f"closure and the mask graph have diverged; fix the graph "
+                f"before running wide mode.")
         cell_ring[d] = ring_l.astype(np.int32)
 
         le = np.asarray(part.local_edges)

@@ -81,6 +81,10 @@ d9 = rows[1]
 print(f"KNOWN_ANSWER_OK (depth3=11). depth9: rounds={d9['n_rounds']} "
       f"degree={d9['max_degree']} — step model: 33 -> {d9['n_rounds']} "
       "sequential collectives", flush=True)
+if d9["n_rounds"] >= 25:
+    print("VERDICT: REFUTED — depth-9 graph inflates the round count",
+          flush=True)
+    sys.exit(3)
 EOF
 RC=$?
 echo "PROBE_EXIT=$RC"
