@@ -1346,8 +1346,8 @@ class CoupledESMDriver:
             return
 
         from legoesm.forcing.surface_utils import (
-            blend_surface_property,
             blend_surface_temperature,
+            snow_for_albedo_deblend,
             surface_temperature_for_lw_boundary,
         )
 
@@ -1365,11 +1365,29 @@ class CoupledESMDriver:
         def _seed_blend(day):
             # Same static blend the atmosphere radiation would use, as
             # grid-shaped arrays — used only until the first sfc_response.
+            #
+            # This seed is an OVERRIDE: compute_radiation_core REPLACES its own
+            # internal blend with it, so an ocean/ice-only albedo here does not
+            # merely mis-report, it makes radiation reflect ~0.06 instead of
+            # ~0.20 from every land column until the first coupler response
+            # lands (#1556).  Take the pipeline's own ocean/ice/land blend —
+            # the same single source of truth the emissivity seed below already
+            # uses.  Note this REPLACES radiation's internal blend, so under
+            # dynamic_albedo / a multilayer land tile the seed is the static
+            # approximation static_surface_albedo documents, for the segments
+            # before the first response.
             sst, sic = self._atm.get_sst_sic(day)
             acfg = self.atm_config
-            alb = blend_surface_property(
-                sic, acfg.albedo_ice, acfg.albedo_ocean,
-            )
+            _phys_seed = self._atm.physics
+            alb = _phys_seed.static_surface_albedo(
+                sic, land_active=_phys_seed.f_land is not None,
+                lat=self._atm._grid_lat,
+                # Empty before the first segment (there is no snow carry yet),
+                # which is exactly when the seed is in charge; present on later
+                # segments if the response is still absent.
+                snow=snow_for_albedo_deblend(
+                    getattr(self._atm, "_carry_aux", {}).get("snow"),
+                    getattr(self._atm, "_ensemble_size", 1)))
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
             if not _conservative_lw:
                 # Gray/none never take an emissivity override (eps=1); return
@@ -1542,6 +1560,7 @@ class CoupledESMDriver:
         from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.forcing.surface_utils import (
             blend_surface_temperature,
+            snow_for_albedo_deblend,
             surface_emissivity_for_lw_inversion,
             surface_temperature_for_lw_boundary,
         )
@@ -1625,7 +1644,6 @@ class CoupledESMDriver:
         # Reconstruct gross downward fluxes from net
         acfg = self.atm_config
         sst, sic = self._atm.get_sst_sic(day)
-        from legoesm.forcing.surface_utils import blend_surface_property
         # When the dynamic surface-radiation feedback is active, radiation
         # produced the held net fluxes using the coupler's blended albedo AND
         # skin temperature (the value _last_sfc_response held when this
@@ -1648,15 +1666,34 @@ class CoupledESMDriver:
         # temperature (sigma*T_bb^4 = LW_out) — NOT the aerodynamic/sensible-heat
         # T_sfc (the canopy air-space Tc over vegetated cells).
         _radiation = getattr(self.atm_config, "radiation", "gray")
+        _phys = self._atm.physics
         if _dyn_sfc:
             albedo_eff = _resp.albedo
             T_sfc = surface_temperature_for_lw_boundary(
                 _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
                 lw_up=_resp.lw_up)
         else:
-            albedo_eff = blend_surface_property(
-                sic, acfg.albedo_ice, acfg.albedo_ocean,
-            )
+            # The pipeline's own ocean/ice/land blend, not an ocean/ice
+            # approximation of it.  ``blend_surface_property(sic, ice, ocean)``
+            # carries NO land fraction, so over land this inverted
+            # sw_net/(1-alpha) with alpha ~ 0.06 instead of ~0.20 and handed
+            # the surface ~36 W/m^2 too little shortwave, with no error and a
+            # surface energy budget that did not close (#1556).  Same
+            # single-source-of-truth argument as the emissivity inversion
+            # immediately below.  See static_surface_albedo for the two terms
+            # it still cannot see (zenith ocean albedo, multilayer albedo_veg);
+            # this is the first-order land term, not an exact round trip.
+            # lat + the SNOW carry are passed, not defaulted: with
+            # snow_albedo_feedback on (the ERA5-calibrated land config sets it)
+            # radiation brightens the land albedo by snow cover, so a deblend
+            # that fell back to the bare vegetation albedo would re-open this
+            # same gap over every snow-covered column.
+            albedo_eff = _phys.static_surface_albedo(
+                sic, land_active=_phys.f_land is not None,
+                lat=self._atm._grid_lat,
+                snow=snow_for_albedo_deblend(
+                    aux.get("snow"),
+                    getattr(self._atm, "_ensemble_size", 1)))
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
         # Emissivity matching the emission:
@@ -1666,7 +1703,6 @@ class CoupledESMDriver:
         #     emissivity blend the radiation pipeline emitted with (configured
         #     emissivity_* values, not a constant ocean/ice approximation);
         #   * gray/none -> an idealized black surface (eps = 1.0).
-        _phys = self._atm.physics
         eps_sfc = surface_emissivity_for_lw_inversion(
             _radiation,
             dynamic_emissivity=(
