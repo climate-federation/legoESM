@@ -1,5 +1,44 @@
 # SCM-RCE convection-scheme intercomparison — protocol and findings
 
+> **2026-08-10 — THE PROTOCOL BELOW §1.1 IS SUPERSEDED for the current
+> campaign.** Three things changed, and none of the numbers in this document
+> predate all three, so nothing here may be compared against a new table
+> without re-reading this box.
+>
+> 1. **The reference is no longer our own CRM.** Every arm through 2026-08-06
+>    scored against `results/rcemip1_n128_ocean` — the artifact under
+>    investigation, whose column water vapour was 73-81 mm against RCEMIP's
+>    42.2 mm because its initial condition was supersaturated. The oracle is
+>    now `results/rcemip_ref_sam300`, SAM_CRM RCE_small300 from the published
+>    RCEMIP archive (Wing et al. 2018).
+> 2. **The IFS/SAM saturation treatment is live.** Ice: pristine air below
+>    235 K may hold ice supersaturation up to `rh_homo = 2.583 - T/207.8`,
+>    withdrawn where cloud ice already exists (`thermo.
+>    homogeneous_freezing_rh_factor`, on the deposition target of
+>    morrison/thompson/p3, ON by default). Liquid: the in-scheme iterated
+>    saturation adjustment, opt-in, now carried by every factory-reachable
+>    scheme. `scripts/validate/check_ifs_supersaturation_cap.py` verifies both
+>    in all three lanes (plane CRM, SCM campaign, global model).
+> 3. **Microphysics is `morrison` (SAM M2005 flavour), not `kessler`.**
+>    Kessler is warm-rain only, so the ice allowance is inert under it and the
+>    upper troposphere is biased for every scheme alike — and the optimiser can
+>    compensate for the missing ice phase by distorting convection parameters.
+>    `--microphysics` and `--hard-saturation-adjustment` are now campaign
+>    flags, and both are in the checkpoint signature, so a kessler run can
+>    never be merged into a morrison table.
+>
+> The RCEMIP1 analytic initial condition also moved back to the PUBLISHED
+> protocol (`T_v0 = T_sfc(1+0.608 q0) = 303.400466 K`, `Γ = 0.0067 K/m`,
+> `q0 = 18.65 g/kg` at SST 300 K). The alternative calibration fitted to
+> gSAM's own sounding is retained as `GSAM_SND_{T_V0,GAMMA,Q_SFC}` and must be
+> selected as a triple or not at all.
+>
+> **Measured cost** (jobs 9356449_0/_1, bechtold + morrison + RRTMGP, CPU):
+> ~139 s of compile per distinct config and ~2.2 ms/step, i.e. ~171 s per
+> 100-day evaluation and ~11.4 h for a 240-evaluation scheme; peak RSS 2.4 GB
+> flat across evaluations after `run_cached` began clearing the JIT caches.
+
+
 Ranking all 10 legoESM convection schemes (`sbm`, `dca`, `kuo`, `mass_flux`,
 `edmf`, `zhang_mcfarlane`, `kain_fritsch`, `emanuel`, `tiedtke`, `bechtold`)
 against a plane-CRM reference under single-column radiative-convective
@@ -438,3 +477,83 @@ python scripts/plot/plot_scm_rce_convection_paper.py
 > established so far is the *protocol*, the *instrument* (the kernel threading,
 > the conservation gates and the four defects they exposed), and the
 > *feasibility* audit — not the ranking.
+
+---
+
+## 8. The 2026-08-10 campaign — protocol, instrument, and what is still open
+
+### 8.1 What the arm runs
+
+`scripts/cluster/scm_rce_paper/convtune_arms.sbatch`, one array task per
+convection scheme, every flag pinned in the script:
+
+| item | value |
+|---|---|
+| reference | `results/rcemip_ref_sam300` (SAM_CRM RCE_small300, RCEMIP archive) |
+| length / step | 100 days, `dt` = 600 s, last 5 days analysed |
+| radiation | RRTMGP, `S_0` = 551.58 W/m², fixed cos(zenith) = 0.7425 |
+| microphysics | `morrison` (SAM M2005 flavour) + `--hard-saturation-adjustment` |
+| turbulence / GWD | Louis / none |
+| surface | fixed SST 300 K, prescribed 5 m/s wind |
+| large-scale forcing | **none** — no imposed subsidence; the column reaches RCE through radiation, convection and surface fluxes alone |
+| convective substeps | 10 (60 s effective), identical for every scheme |
+| transport kernel | `--subsidence-solve implicit_flux` (PRIMARY) |
+| tuning | derivative-free, `12 × n_params` evaluations clamped to [48, 240], seed 20260810 |
+| objective | `sqrt((T² + qv² + cloud² + precip²)/4)`, each profile term normalised by the reference's own mass-weighted standard deviation, precipitation by 3 mm/day |
+
+The tuning budget is **computed from the live parameter registry**, not a
+table. The reason is in the sampler: it spends its first `1 + 2·n_params`
+evaluations on a deterministic one-at-a-time sweep and the rest on joint
+random draws, so a flat 48 gives a 1-parameter scheme 45 joint draws and a
+19-parameter scheme 7 — the high-dimensional schemes would be ranked by
+optimiser under-convergence rather than by attainable fit. Acceptance is
+best-so-far with a fixed seed and one uniform draw per parameter, so a
+48-evaluation result is a strict prefix of a 240-evaluation one; the two
+budgets are comparable without re-running (gated by
+`tests/unit/test_scm_rce_tuner_sampling.py`).
+
+Parameters whose bounds are strictly positive and span ≥ 2 decades are sampled
+**geometrically**. Linear draws over, say, `[1e-6, 1e-2]` put ~90 % of the
+candidates in the top decade and never visit the bottom three, which biases
+every rate coefficient high by construction.
+
+### 8.2 Confounds that survive this design
+
+Both reviewers (Codex, GLM-5.2) were asked for these independently and agreed
+on the ordering; they are stated here rather than discovered later.
+
+1. **The matched kernel does not cover the whole field.** `sbm`, `dca`, `kuo`
+   and `emanuel` have no compensating-subsidence kernel at all, so even the
+   PRIMARY arm compares mass-flux schemes on `implicit_flux` against
+   adjustment/mixing operators. Forcing the conservative solve also moves
+   Tiedtke, Zhang-McFarlane and `mass_flux` off the kernel they ship with.
+2. **Louis turbulence is not neutral.** EDMF already represents plume
+   transport, so pairing it with Louis risks double-counting the boundary
+   layer; trigger-sensitive mass-flux schemes inherit a boundary layer they
+   were not calibrated against.
+3. **Equal wall-clock is not equal tuning opportunity** even with the scaled
+   budget: 240 evaluations in a 19-dimensional box is sparse, and the joint
+   draws are i.i.d. uniform rather than a space-filling design.
+4. **A single fixed convective substep count** (60 s) suits fast adjustment
+   closures and moves slower ones away from their intended call interval.
+5. **The realism/equilibrium gate is reported, not enforced**, so a scheme can
+   in principle win on RMSE from an unphysical or still-drifting column. Every
+   table therefore carries the drift, moist-adiabat and cold-point columns
+   next to the score.
+6. **One CRM, one SST.** The target imprints SAM's own microphysics, radiation
+   and numerics; a scheme that resembles SAM is favoured, and the ranking need
+   not generalise.
+
+### 8.3 The instrument
+
+`scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
+the saturation treatment. Its ice criterion is deliberately NOT a magnitude
+threshold: measured on a 215 K, 200 hPa, RH_ice = 1.60 cell, the absolute
+effect of the allowance is identical in morrison and thompson
+(2.389e-10 kg/kg/s) but is 91 % of thompson's total vapour tendency and 0.44 %
+of morrison's, because morrison's single-step tendency there is dominated by
+Cooper nucleation — which the allowance does not gate. A relative floor would
+have failed morrison for having more physics. The criterion is instead two
+internal controls that no correct implementation can fail and no ignoring (or
+unconditional) one can pass: above the `qci` gate, and above the 235 K ramp
+cutoff, the ON and OFF configurations must be **bit-identical**.
