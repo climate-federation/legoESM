@@ -122,6 +122,16 @@ def build_parser():
              "1108 Pa fixed offset (check out the pre-fix revision for "
              "that); it now serves as the post-fix control (measured "
              "228 Pa, vs 213 Pa unfiltered).")
+    p.add_argument(
+        "--global-t", action="store_true", dest="global_t",
+        help="Mass-weighted GLOBAL-MEAN TEMPERATURE drift of the forecast "
+             "against the ERA5 state at the SAME lead (both carried through "
+             "the same ERA5->spectral path, so the transform cancels). This "
+             "is the discriminator for a global-mean temperature drift: the "
+             "real atmosphere's global mean barely moves over days, so a "
+             "large model drift with ZERO physics implicates the dycore, "
+             "while a drift that appears only with physics implicates the "
+             "physics package. Reported per case and as a mean.")
     p.add_argument("--out", default=None)
     return p
 
@@ -283,6 +293,79 @@ def main(argv=None):
     def _rms(d, mask=None):
         w = area if mask is None else area * mask
         return float(jnp.sqrt(jnp.sum(w * d ** 2) / jnp.maximum(jnp.sum(w), 1e-30)))
+
+    if args.global_t:
+        from legoesm.grids.gaussian import sh_synthesis_3d
+
+        lead_strides = int(round(args.hours / cadence))
+        if abs(lead_strides * cadence - args.hours) > 1e-9 or lead_strides < 1:
+            raise SystemExit(
+                f"--hours {args.hours} must be a positive multiple of the "
+                f"ERA5 cadence ({cadence} h): the truth state is another init "
+                "state and only exists on the cadence grid.")
+        cases_t = build_forecast_cases(
+            TrainingERA5Config(dt_hours=cadence), grid, sigma,
+            leads_hours=(cadence,), eval_year=args.eval_year,
+            n_inits=args.n_cases + lead_strides, init_stride_hours=cadence,
+            resolution_deg=1.5, smoothing_passes=args.smoothing_passes)
+
+        dsig = np.asarray(sigma.dsigma if hasattr(sigma, "dsigma")
+                          else np.diff(np.asarray(sigma.sigma_half)))
+        w = np.asarray(area)
+        w = w / w.sum()
+
+        def _tbar(state):
+            """Mass-weighted global-mean temperature [K].
+
+            sigma-coordinate layer mass is p_s * dsigma / g, so the column
+            weight is p_s * dsigma; the horizontal weight is the Gaussian
+            cell area. Both are needed — an unweighted mean on this grid
+            over-counts the poles and ignores that thick low layers hold
+            most of the mass.
+            """
+            T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data))
+            ps = np.asarray(_ps(state))
+            m = ps[:, :, None] * dsig[None, None, :]
+            return float((w[:, :, None] * m * T).sum() / (w[:, :, None] * m).sum())
+
+        rows = []
+        for k in range(len(cases_t) - lead_strides):
+            s0 = cases_t[k].init_state
+            truth = cases_t[k + lead_strides].init_state
+            fc = _roll(s0, n_steps, getattr(cases_t[k], "forcing", None))
+            t0, tf, tt = _tbar(s0), _tbar(fc), _tbar(truth)
+            rows.append({
+                "case": k,
+                "T_mean_init_K": t0,
+                "T_mean_forecast_K": tf,
+                "T_mean_era5_at_lead_K": tt,
+                "model_drift_K": tf - t0,
+                "era5_change_K": tt - t0,
+                "error_vs_era5_K": tf - tt,
+            })
+        out = {
+            "meta": {
+                "what": "mass-weighted global-mean temperature: model drift "
+                        "vs the true ERA5 change over the same window. "
+                        "|model_drift| >> |era5_change| with zero physics "
+                        "implicates the dycore; only-with-physics implicates "
+                        "the physics package.",
+                "suite": args.suite, "variant": args.variant,
+                "eval_year": args.eval_year, "n_cases": len(rows),
+                "hours": args.hours, "checkpoint": args.checkpoint,
+                "sigma_top": float(spec_cfg.sigma_top),
+                "n_levels": int(spec_cfg.n_levels),
+            },
+            "cases": rows,
+            "mean_model_drift_K": float(np.mean([r["model_drift_K"] for r in rows])),
+            "mean_era5_change_K": float(np.mean([r["era5_change_K"] for r in rows])),
+            "mean_error_vs_era5_K": float(np.mean([r["error_vs_era5_K"] for r in rows])),
+        }
+        print(json.dumps(out, indent=2))
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(out, indent=2))
+        return 0
 
     if args.vs_reconciled:
         # Inits one cadence apart: case k+m's init_state IS the ERA5 truth at

@@ -747,18 +747,23 @@ def aimip_scheme_keys_for(
         from legoesm.training.param_collector import build_registry
         keys |= {m.scheme_key for m in build_registry()
                  if m.scheme_key.startswith("atm.clouds.")}
-    # Ozone is a SIBLING field of RadiationConfig (``.ozone``), not the
-    # scheme sub-config the family walk resolves (``.rrtmgp``), so the walk
-    # never reaches it — same blind spot clouds had. It matters here because
-    # RRTMGPConfig itself exposes ZERO trainable interior parameters (every
-    # gas/aerosol field is a Python optics-cache key, tier 0), leaving surface
-    # albedo/emissivity as the arm's only radiative levers. The ozone profile
-    # (peak pressure, max VMR, width) sets stratospheric heating: a
-    # TEMPERATURE-only control with no moisture coupling.
-    if radiation == "rrtmgp":
-        from legoesm.training.param_collector import build_registry
-        keys |= {m.scheme_key for m in build_registry()
-                 if m.scheme_key == "atm.rad.OzoneProfileConfig"}
+    # NOT ROUTED: atm.rad.OzoneProfileConfig. It was added here on 2026-08-10
+    # and REVERTED the same day, for two independent reasons — leave it out
+    # until BOTH are addressed:
+    #   1. INERT. The AIMIP factory builds RadiationConfig without setting an
+    #      ozone source, so it keeps OzoneProfileConfig(source="standard");
+    #      the analytic branch in radiation/integration.py returns None for
+    #      that source and RRTMGP falls back to its own built-in
+    #      climatological profile. Training p_peak_hPa / o3_max_vmr /
+    #      sigma_logp would have had ZERO forward effect — a parameter that
+    #      reaches the config but not the model. Routing it needs
+    #      source="analytical" wired first.
+    #   2. IMPLAUSIBLE AT THIS RESOLUTION. The 8-level sigma grid's highest
+    #      FULL level is ~109 hPa (top interface 50 hPa) while the spec's
+    #      p_peak_hPa bounds are (1, 100) hPa — the trainable ozone peak sits
+    #      above the model's entire domain, leaving only the tail of the
+    #      Gaussian inside. There is ~1 level of stratosphere to heat, and no
+    #      credible path from it to an 850 hPa temperature drift.
     return keys
 
 
