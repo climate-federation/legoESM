@@ -81,17 +81,18 @@ Two components, both fixed:
 Codex adversarial review: 2 rounds, all findings fixed
 (linssh, AB2/leapfrog wording, test numbers re-measured on 12x16).
 
+## Shipped as PR #1549 (2026-08-10, branch lockex-rpe-dycore-fixes off main)
+Caveats closed in the PR: compute_rpe packing fixed (shared
+pack_sorted_rpe kernel + analytic test), overflow runner ocean-masked
+bounds, heat-conservation gate (<=1e-6 rel; FESOM linfs 4.5e-7/5day
+inside), loud leapfrog-gap comment at the MLF call site.
+
 ## Open
-2. Modular `scripts/matrix/ocean_test_matrix/experiments.py` has a DIVERGENT
+1. Modular `scripts/matrix/ocean_test_matrix/experiments.py` has a DIVERGENT
    lock-exchange runner (no fesom/tripole, old fixed-volume metric, no
    gates) — pre-existing parallel refactor, not touched; needs a dedup PR.
-3. `legoesm.ocean.rpe.compute_rpe` (committed Phase-C) packs
-   densest-at-SURFACE while its docstring says bottom; trace logs it
-   side-by-side as RPE_committed. Needs its own fix + test.
-4. Overflow runner still uses unmasked T_min/T_max (same land-0 artifact).
-5. No heat-conservation gate in the matrix (GLM suggestion); trace's
-   heat_mov/vol_mov/Tbar columns cover it manually (all arms conserve to
-   machine eps except FESOM heat_mov -9e-8/day = linfs approximation).
+2. Exact leapfrog FCT certification (thread e3t(Kbb)/e3t(Kaa) through the
+   MLF tracer combine) — NEMO-oracle lane work.
 
 ## Protocol invariants (do not break)
 Same LockExchangeConfig (H_max=20, nlev=20, land_lat_threshold=80, T from
