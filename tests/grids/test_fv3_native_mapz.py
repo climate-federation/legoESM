@@ -994,15 +994,18 @@ def test_driver_guards_do_not_over_refuse_a_non_last_step_call():
 
 # ------------------------------------------------------------- NH remap
 
-def _nh_face(w_const=None, seed=59):
+def _nh_face(w_const=None, seed=59, deform=0.25):
     """The `_face` fixture plus make_nh delz, a w field and the ws BC.
 
     ``w_const`` fills w with one constant (the iv=-2 constant-
     preservation control); None gives it vertical structure.
+    ``deform=0`` makes the Lagrangian and Eulerian coordinates coincide,
+    so every remap is an identity -- the lens that isolates the
+    conversions from the rezone.
     """
     from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
 
-    face, ps2d = _face()
+    face, ps2d = _face(deform=deform)
     n, ng, km = face["n"], face["ng"], face["km"]
     ia = ng
     rng = np.random.default_rng(seed)
@@ -1053,6 +1056,70 @@ def test_driver_nh_conserves_delz_and_preserves_constant_w():
         rrg * face["delp"][ia:ia + n, ia:ia + n, :] / face["delz"]
         * face["pt"][ia:ia + n, ia:ia + n, :]))
     assert np.allclose(face["pkz"], want, rtol=1e-14, atol=0.0)
+
+
+def test_driver_nh_theta_conversion_uses_the_ideal_gas_pkz():
+    """codex NH r3 #1: the NH theta_v -> T_v conversion is
+    ``pt *= exp(k1k*log(rrg*delp/delz*pt))`` (fv_mapz.F90:231-232,
+    k1k = rdgas/cv_air), NOT the hydrostatic Dpk/(akap*Dpeln) form.
+    At deform=0 the remap is an identity and r_vir=0 makes :975 an
+    identity too, so the returned pt IS the converted value -- compared
+    here against a direct transcription on the captured inputs."""
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face = _nh_face(w_const=0.0, deform=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    pt_in = np.array(face["pt"][ia:ia + n, ia:ia + n, :], copy=True)
+    dp_in = np.array(face["delp"][ia:ia + n, ia:ia + n, :], copy=True)
+    dz_in = np.array(face["delz"], copy=True)
+    # The hydrostatic-form conversion, for the non-vacuity contrast.
+    pkc = face["pk"][ia:ia + n, ia:ia + n, :]
+    pln = face["peln"]
+    hydro_form = pt_in * ((pkc[:, :, 1:] - pkc[:, :, :-1])
+                          / (AKAP * np.diff(pln, axis=1).transpose(0, 2, 1)))
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    k1k = FV3_RDGAS / (face["cp"] - FV3_RDGAS)
+    rrg = -FV3_RDGAS / FV3_GRAV
+    want = pt_in * np.exp(k1k * np.log(rrg * dp_in / dz_in * pt_in))
+    got = face["pt"][ia:ia + n, ia:ia + n, :]
+    # 1e-11: at deform=0 the coordinates coincide ALGEBRAICALLY but the
+    # cumsum-built pe1 and the ak+bk*ps pe2 differ in the last bits, so
+    # the "identity" remap still moves pt by ~1e-12 relative.
+    assert np.allclose(got, want, rtol=1e-11, atol=0.0)
+    # The two conversion forms genuinely differ at this discretisation
+    # (~2.8e-4 relative on the thickest log-layer) -- the assert above
+    # is not satisfiable by the hydro form.
+    assert np.abs(want - hydro_form).max() > 1e-5 * np.abs(want).max()
+
+
+def test_driver_nh_w_limiter_top_escape_valve():
+    """codex NH r3 #5: a large bottom-layer violation cascades UP the
+    column and must hit the :408-416 top valve at exactly 2*w_max --
+    with the spilled momentum above that DISCARDED (the valve is the
+    one deliberately non-conserving branch)."""
+    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ
+
+    face = _nh_face(w_const=0.0, deform=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    # Bottom-layer monster: the up pass clamps k=km-1..1 and dumps the
+    # excess into k=0, where only the valve can stop it.
+    face["w"][ia + 1, ia + 1, km - 1] = 5.0e4
+    face["ws"][:] = 0.0
+    face["w_limiter"] = True
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    wcol = face["w"][ia + 1, ia + 1, :]
+    assert wcol[0] == 2.0 * W_MAX_MAPZ, wcol
+    assert np.all(wcol[1:] <= W_MAX_MAPZ + 1e-12), wcol
+    # Momentum was genuinely LOST at the valve (non-conservation is the
+    # documented intent of :408-416).
+    dp2 = face["delp"][ia + 1, ia + 1, :]
+    assert (wcol * dp2).sum() < 5.0e4 * dp2[km - 1] * 0.5
 
 
 def test_driver_nh_w_limiter_clamps_and_conserves_momentum():

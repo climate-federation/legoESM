@@ -210,6 +210,32 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
         pt[ia:ia + n, ia:ia + n, :] *= (1.0 + dp1) / pkz
 
 
+def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
+                         pt: np.ndarray, *, ptop: float, akap: float,
+                         n: int, ng: int, km: int) -> dict:
+    """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
+
+    ``init_hydro.F90:95-133`` builds ps/pe/peln/pk identically on both
+    lanes; only ``pkz`` differs -- the NH branch (:178-184, dry) is
+
+        pkz = exp( cappa * log( rdg*delp*pt/delz ) ),  rdg = -rdgas/grav
+
+    with ``pt`` still TEMPERATURE at this stage (the theta conversion
+    happens later in fv_dynamics).  Feeding the HYDROSTATIC kappa-mean
+    pkz into an NH run's pt -> theta_v conversion puts a uniform
+    ~kappa(1-kappa)/24 * dlnp^2 error on theta (largest in the thickest
+    log-layer), which surfaced in the first NH parity as a 0.408 m delz
+    residual on every column of every face.
+    """
+    out = p_var_hydrostatic(delp, ptop=ptop, akap=akap, n=n, ng=ng, km=km)
+    rdg = -_FV3_RDGAS / _FV3_GRAV
+    ia = ng
+    out["pkz"][:] = np.exp(akap * np.log(
+        rdg * delp[ia:ia + n, ia:ia + n, :]
+        * pt[ia:ia + n, ia:ia + n, :] / delz))
+    return out
+
+
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      bdt: float, km: int, k_split: int, n_split: int,
                      ptop: float, ak, bk, akap: float, cp_air: float,
@@ -221,7 +247,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      hydrostatic: bool = True,
                      p_fac: float = 0.05, a_imp: float = 1.0,
                      use_logp: bool = False, kord_wz: int = 9,
-                     w_limiter: bool = False,
+                     w_limiter: bool | None = None,
                      cfg: dict | None = None, a2b_ord: int = 4,
                      validate: bool = True) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
@@ -286,6 +312,14 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             raise ValueError(
                 "hydrostatic=False needs ctx['hs6'] (phis) for the NH "
                 "carry (zs = phis/grav, dyn_core.F90:262-278)")
+        if w_limiter is None:
+            # codex NH r3 #3: a silent w_limiter default on the NH lane
+            # contradicts the resolved deck (W_LIMITER=T) without an
+            # error -- an unclamped 200 m/s column is a different model.
+            raise ValueError(
+                "hydrostatic=False needs an explicit w_limiter (the "
+                "resolved NH deck runs W_LIMITER=T; fv_mapz.F90:368)")
+    w_limiter = bool(w_limiter) if w_limiter is not None else False
 
     # :413  mdt = bdt / k_split
     mdt = bdt / float(k_split)

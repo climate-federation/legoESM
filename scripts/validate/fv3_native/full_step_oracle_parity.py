@@ -575,9 +575,30 @@ def main(argv=None):
             f"port's initial condition no longer reproduces the oracle's, so "
             f"nothing this script could say about the one-step state would "
             f"mean anything. Refusing to print it.")
+    # FROZEN-MAP ASSERT (GLM-5.2 strategy review, 2026-08-10): the
+    # bijection requirement alone cannot catch a SELF-CONSISTENT
+    # relabelling drift -- a grid change that permutes two faces and an
+    # IC builder that permutes them back would still derive a valid map.
+    # The established map (ic_face_map_parity.py, 2026-08-07) is
+    # therefore frozen here and every run's derived map must match it.
+    # Faces 4/5 <-> tiles 1/2 stay a SET: those two oracle tiles are
+    # unperturbed and zonally symmetric, so they carry identical fields
+    # and either assignment is intrinsically valid (documented in
+    # STATE.md; asserting one of them would be inventing information).
+    _FROZEN_MAP = {0: {3}, 1: {4}, 2: {2}, 3: {0, 1}, 4: {0, 1}, 5: {5}}
+    drift = [(pf + 1, perm[pf] + 1) for pf in range(6)
+             if perm[pf] not in _FROZEN_MAP[pf]]
+    if drift:
+        raise SystemExit(
+            f"FACE-MAP DRIFT: derived assignment(s) {drift} (port face, "
+            f"oracle tile) differ from the frozen 2026-08-07 map. Either "
+            f"the grid/IC labelling changed -- find out which -- or the "
+            f"frozen map is stale; do not proceed on a silently different "
+            f"relabelling.")
+
     print(f"\nINSTRUMENT CONTROL PASSED (worst IC rel {worst:.3e} <= "
-          f"{IC_CONTROL_MAX_REL:.0e}). The map below is the one applied to "
-          f"the step.")
+          f"{IC_CONTROL_MAX_REL:.0e}; map matches the frozen 2026-08-07 "
+          f"bijection). The map below is the one applied to the step.")
 
     if args.nh:
         # SECOND instrument control, NH fields under the SAME map: the
@@ -606,12 +627,28 @@ def main(argv=None):
 
     # ---------------- the step ----------------
     # p_var is the ONLY producer of the pkz that fv_dynamics.F90:402
-    # divides by, so it must exist before either lane below.
-    press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
-                               n=n, ng=ng, km=KM) for f in state]
+    # divides by, so it must exist before either lane below.  The LANE
+    # MATTERS: init_hydro.F90's NH branch (:178-184) computes pkz from
+    # the ideal gas law on delp/pt/delz, NOT the hydrostatic kappa-mean.
+    # Feeding the hydro pkz into the NH theta conversion put a uniform
+    # 0.408 m delz error on every column in the first NH parity run.
+    if args.nh:
+        from legoesm.core.fv3_native_dynamics import p_var_nonhydrostatic
+        press = [p_var_nonhydrostatic(f["delp"], f["delz"], f["pt"],
+                                      ptop=ptop, akap=FV3_KAPPA,
+                                      n=n, ng=ng, km=KM) for f in state]
+    else:
+        press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
+                                   n=n, ng=ng, km=KM) for f in state]
     q = [[np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
           for _ in range(NR_TRACERS)] for _ in range(6)]
 
+    if args.trace_substeps and args.nh:
+        raise SystemExit(
+            "--trace-substeps is wired for the hydrostatic lane only "
+            "(its remap block reads the hydro pressure bundle); an NH "
+            "trace needs the NH carry threaded through -- extend it "
+            "rather than letting it KeyError mid-run.")
     if args.trace_substeps:
         # LOCALISE a wrong tendency in TIME before hunting it in space.
         # dyn_core.F90:337 is `do it=1,n_split`; running the loop one

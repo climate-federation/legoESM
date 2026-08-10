@@ -902,6 +902,89 @@ def test_nh_p_grad_perturbation_term_scales_as_inverse_delp(bd):
     assert np.abs(dv_b[nzv] / dv_a[nzv] - 0.5).max() < 1e-9
 
 
+def test_nh_p_grad_nonzero_pp_matches_an_independent_term_rebuild(bd):
+    """codex NH r3 #4: the pp==0 reduction is vacuous for the pp side
+    (every pp term is multiplied by zero).  Here the NH increment is
+    rebuilt in the TEST from the same a2b_ord4 primitive but with
+    independent plumbing (its own replace cadence, k=1 seed, windows and
+    weights), so a wrong-stencil pp read -- e.g. the A-grid value where
+    the B-grid one belongs, or the hydrostatic wk in place of wk1 --
+    breaks the equality."""
+    from legoesm.core.fv3_native_d_sw import a2b_ord4
+    from legoesm.core.fv3_native_pgrad import (
+        a2b_gridstruct_view,
+        nh_p_grad,
+    )
+    from legoesm.grids.fv3_native_gridstruct import fort
+
+    km = 2
+    gs = _gs()
+    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km, seed=57)
+    ptop, akap, dt = 100.0, 2.0 / 7.0, 30.0
+    ngv = NG
+
+    u_full, v_full = np.array(u), np.array(v)
+    nh_p_grad(u_full, v_full, np.array(pp), np.array(gz), np.array(delp),
+              np.array(pk3), gs, bd, npx=N + 1, npy=N + 1, npz=km, dt=dt,
+              ptop=ptop, akap=akap, use_logp=False, duogrid=True)
+    u_zero, v_zero = np.array(u), np.array(v)
+    nh_p_grad(u_zero, v_zero, np.zeros_like(pp), np.array(gz),
+              np.array(delp), np.array(pk3), gs, bd, npx=N + 1, npy=N + 1,
+              npz=km, dt=dt, ptop=ptop, akap=akap, use_logp=False,
+              duogrid=True)
+
+    # ---- independent rebuild of the pp increment ----
+    isd = jsd = 1 - ngv
+    gsf = a2b_gridstruct_view(gs, bd)
+    scratch = np.full((M_A, M_A), np.nan)
+
+    ppb = np.array(pp, copy=True)
+    gzb = np.array(gz, copy=True)
+    for k in range(km + 1):
+        if k == 0:
+            ppb[ngv:ngv + N + 1, ngv:ngv + N + 1, 0] = 0.0
+        else:
+            a2b_ord4(fort(ppb[:, :, k], isd, jsd), fort(scratch, isd, jsd),
+                     gsf, N + 1, N + 1, 1, N, 1, N, ngv, replace=True,
+                     duogrid=True)
+        a2b_ord4(fort(gzb[:, :, k], isd, jsd), fort(scratch, isd, jsd),
+                 gsf, N + 1, N + 1, 1, N, 1, N, ngv, replace=True,
+                 duogrid=True)
+
+    rdx = np.asarray(gs["rdx"], dtype=np.float64)
+    rdy = np.asarray(gs["rdy"], dtype=np.float64)
+    ui = slice(ngv, ngv + N)
+    uip1 = slice(ngv + 1, ngv + N + 1)
+    uj = slice(ngv, ngv + N + 1)
+    vi = slice(ngv, ngv + N + 1)
+    vj = slice(ngv, ngv + N)
+    vjp1 = slice(ngv + 1, ngv + N + 1)
+
+    wk1 = np.full((M_A, M_A), np.nan)
+    for k in range(km):
+        a2b_ord4(fort(np.array(delp[:, :, k], copy=True), isd, jsd),
+                 fort(wk1, isd, jsd), gsf, N + 1, N + 1, 1, N, 1, N, ngv,
+                 replace=False, duogrid=True)
+        du_nh = dt / (wk1[ui, uj] + wk1[uip1, uj]) * (
+            (gzb[ui, uj, k + 1] - gzb[uip1, uj, k])
+            * (ppb[uip1, uj, k + 1] - ppb[ui, uj, k])
+            + (gzb[ui, uj, k] - gzb[uip1, uj, k + 1])
+            * (ppb[ui, uj, k + 1] - ppb[uip1, uj, k]))
+        want_u = u_zero[ui, uj, k] + du_nh * rdx[ui, uj]
+        d = np.abs(u_full[ui, uj, k] - want_u)
+        assert d.max() < 1e-11 * max(np.abs(want_u).max(), 1.0), (k, d.max())
+        dv_nh = dt / (wk1[vi, vj] + wk1[vi, vjp1]) * (
+            (gzb[vi, vj, k + 1] - gzb[vi, vjp1, k])
+            * (ppb[vi, vjp1, k + 1] - ppb[vi, vj, k])
+            + (gzb[vi, vj, k] - gzb[vi, vjp1, k + 1])
+            * (ppb[vi, vj, k + 1] - ppb[vi, vjp1, k]))
+        want_v = v_zero[vi, vj, k] + dv_nh * rdy[vi, vj]
+        d = np.abs(v_full[vi, vj, k] - want_v)
+        assert d.max() < 1e-11 * max(np.abs(want_v).max(), 1.0), (k, d.max())
+    # Non-vacuity: the pp increment is genuinely nonzero.
+    assert np.abs(u_full - u_zero).max() > 0.0
+
+
 def test_pk3_halo_and_pe_halo_footprints(bd):
     """Sentinel layout: exactly the documented rings are rewritten, from
     an independently recomputed hydrostatic column; everything else --

@@ -924,13 +924,29 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
         if j != n + 1:                           # :208 if ( j /= (je+1) )
             jl = j - 1                           # [is..]/[js..] index
 
-            # :209-217 -- Theta_v -> T_v with the LAGRANGIAN pkz. peln is
-            # not overwritten with pn2 until :447, i.e. after the remap.
-            pkc = pk[ia:ia + n, jd, :]
-            pln = peln[:, :, jl]
-            pt[ia:ia + n, jd, :] *= (
-                (pkc[:, 1:] - pkc[:, :-1])
-                / (akap * (pln[:, 1:] - pln[:, :-1])))
+            if hydrostatic:
+                # :211-217 -- Theta_v -> T_v with the LAGRANGIAN
+                # hydrostatic pkz. peln is not overwritten with pn2
+                # until :447, i.e. after the remap.
+                pkc = pk[ia:ia + n, jd, :]
+                pln = peln[:, :, jl]
+                pt[ia:ia + n, jd, :] *= (
+                    (pkc[:, 1:] - pkc[:, :-1])
+                    / (akap * (pln[:, 1:] - pln[:, :-1])))
+            else:
+                # :218-237 (non-moist arm, :231-232) -- "density pt" to
+                # "density temp": pt *= exp(k1k*log(rrg*delp/delz*pt))
+                # with k1k = rdgas/cv_air (:164) and the PRE-conversion
+                # delz/delp (this precedes both :252-258 and :281).
+                # codex NH r3 #1: taking the hydrostatic Dpk/(akap
+                # Dpeln) form here instead put a uniform ~2.8e-4 theta
+                # error on every column -- the 0.408 m delz parity
+                # residual.
+                k1k = rdgas / (cp - rdgas)
+                rrg = -rdgas / grav
+                ptw = pt[ia:ia + n, jd, :]
+                pt[ia:ia + n, jd, :] = ptw * np.exp(k1k * np.log(
+                    rrg * delp[ia:ia + n, jd, :] / delz[:, jl, :] * ptw))
 
             # :252-258 -- NH: delz -> "specific volume"/grav on the OLD
             # delp, BEFORE :281 overwrites delp with the target dp2.

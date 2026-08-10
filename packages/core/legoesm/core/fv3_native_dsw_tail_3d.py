@@ -315,7 +315,12 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_nh_core import riem_solver3, update_dz_d
-    from legoesm.core.fv3_native_pgrad import nh_p_grad, pe_halo, pk3_halo
+    from legoesm.core.fv3_native_pgrad import (
+        nh_p_grad,
+        pe_halo,
+        pk3_halo,
+        pln_halo,
+    )
     from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
 
     c = dict(DUO_TAIL_CFG)
@@ -359,8 +364,15 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
         if remap_step:
             pe_halo(nh["pe6"][t], dsw_outs[t]["delp"], bd,
                     npz=km, ptop=ptop)
-        pk3_halo(nh["pk3_6"][t], dsw_outs[t]["delp"], bd,
-                 npz=km, ptop=ptop, akap=akap)
+        # dyn_core.F90:1444-1448: pln_halo under use_logp, pk3_halo
+        # otherwise (codex NH r3 #2 -- an unconditional pk3_halo would
+        # overwrite log(p) halos with p**akap on a use_logp deck).
+        if use_logp:
+            pln_halo(nh["pk3_6"][t], dsw_outs[t]["delp"], bd,
+                     npz=km, ptop=ptop)
+        else:
+            pk3_halo(nh["pk3_6"][t], dsw_outs[t]["delp"], bd,
+                     npz=km, ptop=ptop, akap=akap)
 
     # zh + pkc duo exchanges (:1482-1483), per interface level.
     for k in range(km + 1):
