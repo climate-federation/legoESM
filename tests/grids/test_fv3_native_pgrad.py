@@ -909,7 +909,13 @@ def test_nh_p_grad_nonzero_pp_matches_an_independent_term_rebuild(bd):
     independent plumbing (its own replace cadence, k=1 seed, windows and
     weights), so a wrong-stencil pp read -- e.g. the A-grid value where
     the B-grid one belongs, or the hydrostatic wk in place of wk1 --
-    breaks the equality."""
+    breaks the equality.
+
+    TRUST CHAIN (codex NH r4 #2, accepted): both sides share the
+    production a2b_ord4/a2b_gridstruct_view, so a defect INSIDE a2b
+    itself is common-mode here -- by design.  a2b_ord4 carries its own
+    oracle certificates in the d_sw corpus; this test owns nh_p_grad's
+    PLUMBING of it, not the operator."""
     from legoesm.core.fv3_native_d_sw import a2b_ord4
     from legoesm.core.fv3_native_pgrad import (
         a2b_gridstruct_view,

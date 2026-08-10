@@ -1095,31 +1095,96 @@ def test_driver_nh_theta_conversion_uses_the_ideal_gas_pkz():
     assert np.abs(want - hydro_form).max() > 1e-5 * np.abs(want).max()
 
 
-def test_driver_nh_w_limiter_top_escape_valve():
-    """codex NH r3 #5: a large bottom-layer violation cascades UP the
-    column and must hit the :408-416 top valve at exactly 2*w_max --
-    with the spilled momentum above that DISCARDED (the valve is the
-    one deliberately non-conserving branch)."""
-    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ
+def test_driver_nh_theta_conversion_reads_the_pre_update_delp():
+    """codex NH r4 #1: at deform=0 the source delp and the target dp2
+    coincide, so the identity test cannot distinguish fv_mapz.F90:231's
+    PRE-update delp/delz from a mutant that converts with dp2.  Here
+    deform=0.25 separates them, and one row's full pt pipeline --
+    conversion on SNAPSHOTTED inputs, then the ln(p) rezone with the
+    driver's own coordinate construction (:290-316) -- is replicated
+    against the returned pt.  map_scalar/pad1/unpad1 are shared
+    certified primitives; what this proves is the PLUMBING: which
+    delp/delz feed the conversion and which coordinates feed the remap.
+    """
+    from legoesm.core.fv3_native_mapz import T_MIN, map_scalar, pad1, unpad1
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face = _nh_face(w_const=0.0, deform=0.25)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    ak1 = pad1(np.asarray(face["ak"])[None, :])[0]
+    bk1 = pad1(np.asarray(face["bk"])[None, :])[0]
+    jl = 2
+    jd = jl + ng
+    jpe = jl + 1
+    pt_in = np.array(face["pt"][ia:ia + n, jd, :], copy=True)
+    dp_in = np.array(face["delp"][ia:ia + n, jd, :], copy=True)
+    dz_in = np.array(face["delz"][:, jl, :], copy=True)
+    pe_row = np.array(face["pe"][1:1 + n, :, jpe], copy=True)
+    peln_row = np.array(face["peln"][:, :, jl], copy=True)
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    k1k = FV3_RDGAS / (face["cp"] - FV3_RDGAS)
+    rrg = -FV3_RDGAS / FV3_GRAV
+    conv = pt_in * np.exp(k1k * np.log(rrg * dp_in / dz_in * pt_in))
+
+    # :267-276 target interfaces, :290-308 pn2 with endpoint COPIES.
+    pe2 = np.zeros((n, km + 2))
+    pe2[:, 1] = face["ptop"]
+    pe2[:, km + 1] = pe_row[:, km]
+    for k in range(2, km + 1):
+        pe2[:, k] = ak1[k] + bk1[k] * pe_row[:, km]
+    pn2 = np.zeros((n, km + 2))
+    pn2[:, 1] = peln_row[:, 0]
+    pn2[:, km + 1] = peln_row[:, km]
+    for k in range(2, km + 1):
+        pn2[:, k] = np.log(pe2[:, k])
+    want = unpad1(map_scalar(pad1(peln_row), pad1(conv), pn2, km, km,
+                             1, abs(int(face["kord_tm"])), T_MIN))
+    got = face["pt"][ia:ia + n, jd, :]
+    assert np.allclose(got, want, rtol=1e-13, atol=0.0)
+    # The discriminating contrast: converting with the TARGET dp2
+    # instead of the source delp gives a visibly different answer.
+    dp2 = np.diff(pe2[:, 1:], axis=1)
+    conv_mut = pt_in * np.exp(k1k * np.log(rrg * dp2 / dz_in * pt_in))
+    want_mut = unpad1(map_scalar(pad1(peln_row), pad1(conv_mut), pn2,
+                                 km, km, 1, abs(int(face["kord_tm"])),
+                                 T_MIN))
+    assert np.abs(want_mut - want).max() > 1e-8 * np.abs(want).max()
+
+
+@pytest.mark.parametrize("sign", [+1.0, -1.0])
+def test_driver_nh_w_limiter_top_escape_valve(sign):
+    """codex NH r3 #5 + r4 #3: a large bottom-layer violation cascades
+    UP the column and must hit the :408-416 top valve at exactly
+    2*w_max (positive monster) or 2*w_min (negative -- a mutant
+    dropping the :412-415 arm would pass the positive case alone), with
+    the spilled momentum beyond the valve DISCARDED."""
+    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ, W_MIN_MAPZ
 
     face = _nh_face(w_const=0.0, deform=0.0)
     n, ng, km = face["n"], face["ng"], face["km"]
     ia = ng
     # Bottom-layer monster: the up pass clamps k=km-1..1 and dumps the
     # excess into k=0, where only the valve can stop it.
-    face["w"][ia + 1, ia + 1, km - 1] = 5.0e4
+    face["w"][ia + 1, ia + 1, km - 1] = sign * 5.0e4
     face["ws"][:] = 0.0
     face["w_limiter"] = True
 
     lagrangian_to_eulerian(**face, q=[])
 
     wcol = face["w"][ia + 1, ia + 1, :]
-    assert wcol[0] == 2.0 * W_MAX_MAPZ, wcol
-    assert np.all(wcol[1:] <= W_MAX_MAPZ + 1e-12), wcol
+    if sign > 0:
+        assert wcol[0] == 2.0 * W_MAX_MAPZ, wcol
+        assert np.all(wcol[1:] <= W_MAX_MAPZ + 1e-12), wcol
+    else:
+        assert wcol[0] == 2.0 * W_MIN_MAPZ, wcol
+        assert np.all(wcol[1:] >= W_MIN_MAPZ - 1e-12), wcol
     # Momentum was genuinely LOST at the valve (non-conservation is the
     # documented intent of :408-416).
     dp2 = face["delp"][ia + 1, ia + 1, :]
-    assert (wcol * dp2).sum() < 5.0e4 * dp2[km - 1] * 0.5
+    assert abs((wcol * dp2).sum()) < 5.0e4 * dp2[km - 1] * 0.5
 
 
 def test_driver_nh_w_limiter_clamps_and_conserves_momentum():
