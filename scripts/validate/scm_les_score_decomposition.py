@@ -86,7 +86,24 @@ def decompose_case(npz_path: Path, scheme: str) -> dict[str, dict[str, float]]:
         # the LES domain and the weights are zero there, so the product is a
         # no-op -- but a raw NaN would still poison the sum.
         ref = np.nan_to_num(np.asarray(data[ref_key], dtype=np.float64), nan=0.0)
-        scm = np.where(mask, np.asarray(data[scm_key], dtype=np.float64), 0.0)
+        raw = np.asarray(data[scm_key], dtype=np.float64)
+        # A non-finite SCM profile must NOT be reported as a number. safe_sqrt
+        # (which weighted_rmse uses) returns 0 for a NaN argument, because
+        # `NaN > 0` is False -- and 0 is the PERFECT score. So a blown-up arm
+        # silently decomposed to "rmse_abs 0.000, score 0.000", the single most
+        # dangerous output this probe could produce. The tuner maps such an arm
+        # to NONFINITE_PENALTY instead; here it is flagged, never scored.
+        finite = bool(np.all(np.isfinite(raw[mask])))
+        if not finite:
+            out[name] = {
+                "sigma_ref": float(weighted_std(ref, weights)),
+                "rmse_abs": float("nan"),
+                "score": float("nan"),
+                "nonfinite": True,
+                "units": _UNITS.get(name, "?"),
+            }
+            continue
+        scm = np.where(mask, raw, 0.0)
         sigma = float(weighted_std(ref, weights))
         rmse_abs = float(weighted_rmse(scm - ref, weights))
         # The scorer floors sigma at PROFILE_FLOOR (1e-8); report the RAW sigma
@@ -97,6 +114,7 @@ def decompose_case(npz_path: Path, scheme: str) -> dict[str, dict[str, float]]:
             "sigma_ref": sigma,
             "rmse_abs": rmse_abs,
             "score": score,
+            "nonfinite": False,
             "units": _UNITS.get(name, "?"),
         }
     return out
@@ -156,6 +174,11 @@ def main(argv=None) -> int:
         print(hdr)
         for case, r in rows.items():
             for var, v in r["variables"].items():
+                if v.get("nonfinite"):
+                    print(f"{case:<9}{var:<7}{v['sigma_ref']:>13.4g}"
+                          f"{'NONFINITE':>13}{'--':>9}"
+                          f"{r['joint_share_pct']:>9.1f}  {v['units']}")
+                    continue
                 print(f"{case:<9}{var:<7}{v['sigma_ref']:>13.4g}"
                       f"{v['rmse_abs']:>13.4g}{v['score']:>9.3f}"
                       f"{r['joint_share_pct']:>9.1f}  {v['units']}")

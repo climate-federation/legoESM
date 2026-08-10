@@ -107,6 +107,47 @@ def test_low_structure_reference_shows_a_small_sigma_not_a_big_error(
         got["theta"]["sigma_ref"] / got["u"]["sigma_ref"], rel=1e-10)
 
 
+def test_nonfinite_profile_is_flagged_not_scored_as_perfect(tmp_path, mod):
+    """The probe's own worst failure mode, pinned.
+
+    ``weighted_rmse`` is built on ``safe_sqrt``, which returns 0 for a NaN
+    argument because ``NaN > 0`` is False -- and 0 is the PERFECT score. A
+    blown-up arm therefore decomposed to "rmse_abs 0.000, score 0.000", a
+    plausible number where an error belonged. It must come back flagged.
+    """
+    npz = tmp_path / "profiles_toy.npz"
+    mask, weights = _write_case(npz)
+    data = dict(np.load(npz, allow_pickle=True))
+    blown = data["scm_louis_theta"].copy()
+    blown[2] = np.nan
+    data["scm_louis_theta"] = blown
+    np.savez(npz, **data)
+
+    got = mod.decompose_case(npz, "louis")
+    assert got["theta"]["nonfinite"] is True
+    assert np.isnan(got["theta"]["score"])
+    assert np.isnan(got["theta"]["rmse_abs"])
+    # the clean variable in the same file is unaffected
+    assert got["u"]["nonfinite"] is False
+    assert got["u"]["rmse_abs"] == pytest.approx(0.5, rel=1e-10)
+
+
+def test_nonfinite_outside_the_mask_is_not_a_failure(tmp_path, mod):
+    """The reference is NaN outside the LES domain by construction, and the
+    SCM profile there is never scored, so only masked levels may veto."""
+    npz = tmp_path / "profiles_toy.npz"
+    _write_case(npz, nlev=8, n_in=6)
+    data = dict(np.load(npz, allow_pickle=True))
+    blown = data["scm_louis_theta"].copy()
+    blown[7] = np.nan            # outside the mask (n_in=6)
+    data["scm_louis_theta"] = blown
+    np.savez(npz, **data)
+
+    got = mod.decompose_case(npz, "louis")
+    assert got["theta"]["nonfinite"] is False
+    assert got["theta"]["rmse_abs"] == pytest.approx(0.5, rel=1e-10)
+
+
 def test_missing_per_case_profiles_is_a_hard_error(tmp_path, mod, capsys):
     """A missing case must fail loudly, never be silently skipped."""
     (tmp_path / "tuned_parameters.json").write_text(json.dumps({
