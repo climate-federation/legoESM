@@ -103,20 +103,8 @@ def _clear_pin_env(monkeypatch):
     return os
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN GAP (#1516 follow-up): maybe_init_jax_distributed pins at "
-        "pin_local_gpu() AFTER `from mpi4py import MPI`, because n_local is "
-        "derived from MPI's own shared-memory split and the raise is "
-        "deliberately collective. On a CUDA-aware MPI stack MPI_Init "
-        "initialises the CUDA driver, which snapshots CUDA_VISIBLE_DEVICES, "
-        "so the later pin can be silently ignored. strict=True: this flips "
-        "to a HARD FAILURE the moment the ordering is fixed, forcing the "
-        "marker off rather than letting the gate rot."),
-)
 def test_maybe_init_pins_before_mpi_import(monkeypatch):
-    """ORDERING GATE (job 26829100).
+    """ORDERING GATE (jobs 26829100 / 26846811, fixed and re-verified).
 
     A CUDA-aware MPI stack (Open MPI/UCX) initialises the CUDA driver during
     MPI_Init, and the driver snapshots CUDA_VISIBLE_DEVICES at that first

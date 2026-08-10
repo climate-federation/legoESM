@@ -35,9 +35,17 @@ Usage (inside an sbatch on a 2-GPU node; account/partition per site)::
     #   CUDA_VISIBLE_DEVICES=0 LEGOESM_ALLOW_SHARED_GPU=1 srun ... burn ...
     #   python .../check_gpu_binding_np2.py verdict OUT_DIR ARM_NAME unpinned
 
-Verified on Levante job 26829180 (node l50187): pinned arm -> ranks on
-GPU-9efe... / GPU-9c36... (PASS); unpinned control -> both ranks' compute
-on device 0 of a 2-device view (RED AS EXPECTED).
+Verified on Levante (all on the merged tree, same node l40369, one variable
+— the pre-MPI_Init pin — between the two jobs):
+
+* job 26846811 (PRE-fix): post-pin CVD='0'/'1' per rank yet every rank
+  enumerated BOTH GPUs and NVML placed both PIDs on both devices -> FAIL
+  (the #1516 defect shape; the post-MPI_Init pin is snapshot-ignored).
+* job 26846971 (fix): pinned arm -> ranks on GPU-7de0... / GPU-4505...,
+  n_local=1 each (PASS); control arm (--gpu-bind=map_gpu:0,0 +
+  LEGOESM_ALLOW_SHARED_GPU=1) -> both PIDs on ONE physical GPU
+  (RED AS EXPECTED — the gate discriminates on hardware).
+  Earlier same-shape run on the superseded #1541 branch: 26829100/26829180.
 """
 from __future__ import annotations
 
