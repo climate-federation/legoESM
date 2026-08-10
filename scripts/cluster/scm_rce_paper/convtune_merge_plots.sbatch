@@ -13,8 +13,11 @@ set +e
 # dashed, tuned solid) and the a-priori-vs-tuned RMSE bars in PHYSICAL units
 # (K and g/kg).
 #
-# The merge stage REFUSES to publish a ranking computed over a subset of the
-# schemes, so this is also the gate that says whether the arm is complete.
+# The merge stage refuses to publish a ranking over a SUBSET of the schemes,
+# or one mixing checkpoints written under different protocols, so this job is
+# also the completeness gate. (That guard lives in the DRIVER as of this
+# commit; before it, the equivalent check existed only in the older
+# merge_ab.sbatch and this job would have published whatever had finished.)
 # ---------------------------------------------------------------------------
 WT=${WT:?export WT=<pinned worktree>}
 PIN=${PIN:?export PIN=<sha> the worktree must be at}
@@ -40,13 +43,19 @@ echo; echo "############ merge ############"
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --reference-dir $REF --outdir $OUT --merge-only 2>&1 \
   | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader" | tail -20
-echo "MERGE_RC=${PIPESTATUS[0]}"
+MERGE_RC=${PIPESTATUS[0]}
+echo "MERGE_RC=$MERGE_RC"
+# Fail CLOSED: continuing past a refused merge would render figures from the
+# PREVIOUS run's CSV and exit 0, which is indistinguishable from success.
+[ $MERGE_RC -eq 0 ] || { echo "ABORT: merge refused or failed"; exit $MERGE_RC; }
 
 echo; echo "############ paper figures ############"
 JAX_ENABLE_X64=1 $PY $WT/scripts/plot/plot_scm_rce_convection_paper.py \
   --results-dir $OUT --reference-dir $REF --last-reference-files 5 2>&1 \
   | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader" | tail -20
-echo "FIG_RC=${PIPESTATUS[0]}"
+FIG_RC=${PIPESTATUS[0]}
+echo "FIG_RC=$FIG_RC"
+[ $FIG_RC -eq 0 ] || { echo "ABORT: figure rendering failed"; exit $FIG_RC; }
 
 echo; echo "############ ranking (physical units) ############"
 $PY - "$OUT/summary_table.csv" <<'PYEOF'

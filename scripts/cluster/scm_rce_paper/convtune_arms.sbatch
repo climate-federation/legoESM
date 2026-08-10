@@ -69,7 +69,10 @@ export LEGOESM_JIT_CACHE_DIR=""
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 # --- tuning budget from the LIVE registry ---------------------------------
-NPARAM=$(JAX_ENABLE_X64=1 $PY - "$SCHEME" <<'PYEOF' 2>/dev/null | tail -1
+# The snippet's EXIT STATUS matters, and `| tail -1` would hide it: a snippet
+# that prints a number and then dies still yields a plausible count.  Capture
+# the output, check the status separately, and require exactly one integer.
+NPARAM_RAW=$(JAX_ENABLE_X64=1 $PY - "$SCHEME" <<'PYEOF' 2>/dev/null
 import sys
 from scripts.run import run_scm_rce_campaign as camp
 cfg = camp.make_physics_config(convection=sys.argv[1])
@@ -82,7 +85,14 @@ p = build_trainable_params(active_scheme_keys={key}, tier="extended",
 print(len(p.constraints))
 PYEOF
 )
-case "$NPARAM" in ''|*[!0-9]*) echo "PREFLIGHT FAIL: could not count params for $SCHEME (got '$NPARAM')"; exit 96;; esac
+NPARAM_RC=$?
+[ $NPARAM_RC -eq 0 ] || { echo "PREFLIGHT FAIL: parameter count for $SCHEME exited $NPARAM_RC"; exit 96; }
+[ "$(printf '%s' "$NPARAM_RAW" | wc -l)" -le 1 ] || { echo "PREFLIGHT FAIL: parameter count printed more than one line: '$NPARAM_RAW'"; exit 96; }
+NPARAM=$(printf '%s' "$NPARAM_RAW" | tr -d '[:space:]')
+case "$NPARAM" in ''|*[!0-9]*) echo "PREFLIGHT FAIL: could not count params for $SCHEME (got '$NPARAM_RAW')"; exit 96;; esac
+# Zero tunables is not a tuning run: it would spend the whole budget
+# re-evaluating the defaults and report them as "tuned".
+[ "$NPARAM" -gt 0 ] || { echo "PREFLIGHT FAIL: $SCHEME reports 0 tunable parameters"; exit 97; }
 EVALS=$(( NPARAM * EVALS_PER_PARAM ))
 [ "$EVALS" -lt "$EVALS_MIN" ] && EVALS=$EVALS_MIN
 [ "$EVALS" -gt "$EVALS_MAX" ] && EVALS=$EVALS_MAX
@@ -111,3 +121,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
 RC=${PIPESTATUS[0]}
 echo "ARM_STATUS=$([ $RC -eq 0 ] && echo OK || echo FAILED) (scheme=$SCHEME arm=$ARM rc=$RC)"
 echo ALLDONE
+# PROPAGATE the failure: printing it while exiting 0 makes sacct report every
+# arm COMPLETED, which is the state the merge gate would then be the only
+# thing standing between a dead scheme and a published table.
+exit $RC

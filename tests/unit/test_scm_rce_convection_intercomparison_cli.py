@@ -366,3 +366,85 @@ def test_csv_header_matches_the_paper_figure_script():
     for name in ("apriori_T_rmse_K", "tuned_T_rmse_K",
                  "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg"):
         assert name in driver.CSV_FIELDS
+
+
+# --------------------------------------------------------------------------- #
+# Merge gate.  Before this existed, the driver aggregated whatever checkpoints
+# happened to be present: ONE surviving scheme was enough to produce a
+# "ranking" table and figures.  The guard that was supposed to prevent it lived
+# in an older sbatch, not in the driver.
+# --------------------------------------------------------------------------- #
+
+def _sig(**over):
+    base = driver._run_signature(_args())
+    base.update(over)
+    return base
+
+
+def _results_for(schemes, sig=None):
+    out = []
+    for s in schemes:
+        r = _result(s)
+        r.signature = dict(sig if sig is not None else _sig())
+        out.append(r)
+    return out
+
+
+def test_merge_refuses_a_subset_of_the_schemes():
+    partial = _results_for(list(driver.CONVECTION_SCHEMES)[:3])
+    with pytest.raises(SystemExit, match="MERGE REFUSED"):
+        driver._guard_merge_inputs(partial, _sig(), allow_partial=False)
+
+
+def test_merge_accepts_the_complete_set():
+    full = _results_for(driver.CONVECTION_SCHEMES)
+    driver._guard_merge_inputs(full, _sig(), allow_partial=False)
+
+
+def test_allow_partial_warns_instead_of_refusing(capsys):
+    partial = _results_for(list(driver.CONVECTION_SCHEMES)[:2])
+    driver._guard_merge_inputs(partial, _sig(), allow_partial=True)
+    assert "MERGE REFUSED" in capsys.readouterr().out
+
+
+def test_merge_refuses_a_checkpoint_from_another_reference():
+    """The physical-unit columns are computed at merge time against the CURRENT
+    reference, so a stale profile yields a believable wrong number, not NaN."""
+    full = _results_for(driver.CONVECTION_SCHEMES)
+    full[4].signature = _sig(reference_dir="/some/other/crm")
+    with pytest.raises(SystemExit, match="different protocol"):
+        driver._guard_merge_inputs(full, _sig(), allow_partial=False)
+
+
+def test_merge_refuses_an_unstamped_checkpoint():
+    full = _results_for(driver.CONVECTION_SCHEMES)
+    full[0].signature = {}
+    with pytest.raises(SystemExit, match="unstamped"):
+        driver._guard_merge_inputs(full, _sig(), allow_partial=False)
+
+
+def test_a_per_scheme_tuning_budget_is_not_a_mismatch():
+    """The budget scales with each scheme's parameter count BY DESIGN; treating
+    that as a protocol difference would refuse every real campaign."""
+    full = _results_for(driver.CONVECTION_SCHEMES)
+    for i, r in enumerate(full):
+        r.signature = _sig(tune_evals=48 + 12 * i)
+    driver._guard_merge_inputs(full, _sig(tune_evals=48), allow_partial=False)
+
+
+def test_the_row_reports_the_scheme_s_own_budget():
+    r = _result("bechtold")
+    r.signature = _sig(tune_evals=228)
+    r.records = [object()] * 19
+    row = driver._row(r, _ref_stub())
+    assert row["tune_evals"] == 228
+    assert row["evals_per_param"] == pytest.approx(12.0)
+
+
+def test_run_meta_carries_no_campaign_wide_tuning_budget():
+    """It varies per scheme, so a single value in the shared file would be the
+    last finisher's — and every scheme would be reported under it."""
+    src = (driver.Path(__file__).resolve().parents[2] / "scripts" / "run"
+           / "run_scm_rce_convection_intercomparison.py").read_text()
+    meta_block = src.split("    meta = dict(")[1].split(")\n")[0]
+    assert "tune_evals" not in meta_block

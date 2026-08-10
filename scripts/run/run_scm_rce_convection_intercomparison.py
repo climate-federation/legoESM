@@ -53,7 +53,7 @@ import importlib.util
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +94,13 @@ class SchemeResult:
     # a confound, not a result).
     subsidence_solve: str = "as_shipped"
     subsidence_solve_status: str = ""
+    # The run signature the checkpoint was written under.  Carried on the
+    # result (not just on disk) because the merge stage must be able to refuse
+    # a checkpoint produced against a DIFFERENT reference: the physical-unit
+    # RMSE columns are computed at merge time against the CURRENT reference,
+    # so a stale profile with the same level count yields a plausible, wrong
+    # number rather than a NaN.
+    signature: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,7 +193,64 @@ def load_scheme_result(path: Path) -> SchemeResult:
         # status distinguishes "never stamped" from a stamped "as_shipped".
         subsidence_solve=payload.get("subsidence_solve", "as_shipped"),
         subsidence_solve_status=payload.get("subsidence_solve_status", ""),
+        signature=payload.get("signature", {}) or {},
     )
+
+
+# Fields whose disagreement makes two checkpoints incomparable AT MERGE TIME.
+# Not the whole signature: `tune_evals` is deliberately per-scheme (the budget
+# scales with the scheme's parameter count), and a different tuning budget does
+# not make two rows incomparable — it is reported per row instead.
+_MERGE_CRITICAL_SIGNATURE_FIELDS = tuple(
+    f for f in _SIGNATURE_FIELDS if f != "tune_evals")
+
+
+def _guard_merge_inputs(results, run_sig: dict, *, allow_partial: bool) -> None:
+    """Refuse to publish a ranking that is partial or built from mixed runs.
+
+    Two failure modes, both silent without this:
+
+    * a ranking table and figures assembled from whichever schemes happened to
+      finish — one surviving checkpoint is enough to produce a plausible
+      "ranking" of one scheme; and
+    * a checkpoint written against a DIFFERENT reference or protocol merged in
+      beside current ones.  Since the physical-unit RMSE columns are computed
+      at merge time against the CURRENT reference, a stale profile with the
+      same level count produces a believable wrong number, not a NaN.
+
+    ``allow_partial`` is for debugging a subset and stamps nothing: it prints
+    what is missing and continues, so the operator has said out loud that the
+    artifacts are partial.
+    """
+    present = {r.scheme for r in results}
+    missing = [s for s in CONVECTION_SCHEMES if s not in present]
+    if missing:
+        msg = (f"MERGE REFUSED: {len(present)}/{len(CONVECTION_SCHEMES)} scheme "
+               f"checkpoints present; missing {missing}. A ranking over a "
+               "subset is not a ranking of the campaign. Re-run the missing "
+               "arms, or pass --allow-partial if you know the table is partial.")
+        if not allow_partial:
+            raise SystemExit(msg)
+        print(f"[warn] {msg}", flush=True)
+    mismatched = []
+    for r in results:
+        if not r.signature:
+            mismatched.append(f"{r.scheme}: unstamped (pre-signature checkpoint)")
+            continue
+        diffs = {k: (r.signature.get(k), run_sig.get(k))
+                 for k in _MERGE_CRITICAL_SIGNATURE_FIELDS
+                 if r.signature.get(k) != run_sig.get(k)}
+        if diffs:
+            mismatched.append(f"{r.scheme}: {diffs}")
+    if mismatched:
+        msg = ("MERGE REFUSED: checkpoint(s) written under a different protocol "
+               "than this invocation — the physical-unit RMSE columns are "
+               "computed against the CURRENT reference, so merging these would "
+               "produce believable wrong numbers:\n  "
+               + "\n  ".join(mismatched))
+        if not allow_partial:
+            raise SystemExit(msg)
+        print(f"[warn] {msg}", flush=True)
 
 
 def load_all_scheme_results(outdir: Path, schemes) -> list[SchemeResult]:
@@ -330,6 +394,10 @@ CSV_FIELDS = (
     "tuned_score", "tuned_T_rmse", "tuned_qv_rmse", "tuned_cloud_rmse",
     "tuned_precip_rmse", "tuned_precip_mm_day", "tuned_verdict",
     "score_improvement_pct", "crm_precip_mm_day", "n_tuned_params",
+    # The tuning budget is per-scheme (it scales with the parameter count), so
+    # it belongs on the ROW; a single campaign-wide number in the preamble
+    # would be the last finisher's value.
+    "tune_evals", "evals_per_param",
     "tuned_drift_T_K", "tuned_madiab_mean_K", "tuned_cold_point_T_K",
     "tuned_cold_point_z_km",
     # PHYSICAL-unit RMSE (K, g/kg).  The scores above are normalised by the
@@ -390,6 +458,10 @@ def _row(res: SchemeResult, ref=None) -> dict:
         "tuned_madiab_mean_K": t.moist_adiabat_mean_abs_K,
         "tuned_cold_point_T_K": t.cold_point_T_K,
         "tuned_cold_point_z_km": t.cold_point_z_km,
+        "tune_evals": res.signature.get("tune_evals", ""),
+        "evals_per_param": (
+            round(res.signature["tune_evals"] / len(res.records), 1)
+            if res.signature.get("tune_evals") and res.records else ""),
     }
 
 
@@ -473,9 +545,12 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         f"{meta['last_reference_files']} CRM 3-D daily volumes). Metrics are the "
         "std-normalized, mass-weighted profile RMSE (T, q_v, condensate) plus a "
         "surface-precip term; **score** is their combination (lower = closer to "
-        "CRM). *A priori* = scheme defaults; *tuned* = after "
-        f"{meta['tune_evals']}-evaluation derivative-free tuning of the scheme's "
-        "extended-tier parameters against the CRM profiles.\n"
+        "CRM). *A priori* = scheme defaults; *tuned* = after derivative-free "
+        "tuning of the scheme's extended-tier parameters against the CRM "
+        "profiles. The evaluation budget is PER SCHEME (it scales with the "
+        "scheme's parameter count, so a 1-parameter scheme is not compared "
+        "against a 19-parameter one at the same number of draws) and is "
+        "reported in the `#evals` column, not here.\n"
     )
     lines.append(
         f"SCM: radiation `{meta['radiation']}`, fixed SST 300 K, dt {meta['dt']:.0f} s, "
@@ -510,9 +585,9 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     lines.append(
         "| rank | scheme | kernel | score (prior→tuned) | T RMSE (p→t) | "
         "qv RMSE (p→t) | cloud RMSE (p→t) | precip mm/d (p→t) | Δscore % | "
-        "verdict (p→t) | cold-pt T,z (tuned) | #params |"
+        "verdict (p→t) | cold-pt T,z (tuned) | #params | #evals |"
     )
-    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|")
+    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|---:|")
     for i, res in enumerate(ordered, 1):
         p, t = res.prior, res.tuned
         row = _row(res, ref)
@@ -527,7 +602,8 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
             f"| {_fmt(row['score_improvement_pct'], '.1f')} "
             f"| {row['prior_verdict']}→{row['tuned_verdict']} "
             f"| {_fmt(t.cold_point_T_K, '.0f')} K, {_fmt(t.cold_point_z_km, '.1f')} km "
-            f"| {len(res.records)} |"
+            f"| {len(res.records)} "
+            f"| {row['tune_evals']} |"
         )
     lines.append(f"\nCRM reference surface precip: {ref.precip_ref_mm_day:.3g} mm/day.\n")
     lines.append(
@@ -719,6 +795,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-merge", action="store_true",
                         help="run schemes + write per-scheme json/png but skip the "
                              "aggregate summary/CSV/combined plot (for parallel workers)")
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help=(
+            "Merge even when scheme checkpoints are missing or were written "
+            "under a different protocol. Prints what is wrong and continues; "
+            "the resulting table is NOT a campaign ranking."
+        ),
+    )
     parser.add_argument("--force", action="store_true",
                         help="re-run schemes even if a scheme_*.json checkpoint exists")
     parser.add_argument(
@@ -789,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
 
     meta = dict(
         radiation=args.radiation, dt=args.dt, days=args.days,
-        analysis_days=args.analysis_days, tune_evals=args.tune_evals,
+        analysis_days=args.analysis_days,
         surface_wind_m_s=args.surface_wind_m_s,
         large_scale_forcing=args.large_scale_forcing,
         last_reference_files=args.last_reference_files,
@@ -829,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
                 microphysics=args.microphysics,
                 hard_saturation_adjustment=args.hard_saturation_adjustment,
             )
+            res.signature = run_sig
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
             plot_scheme(args.outdir / f"profiles_{scheme}.png", ref, res)
             print(f"    prior score={_fmt(res.prior.score)} "
@@ -836,11 +921,16 @@ def main(argv: list[str] | None = None) -> int:
                   f"({len(res.records)} params) "
                   f"[kernel {res.subsidence_solve_status}]", flush=True)
         # ATOMIC: the campaign runs one process per scheme against a shared
-        # --outdir, so several finish at once and write this same file. The
-        # bytes are identical (nothing scheme-specific is in `meta`), but two
-        # interleaved write_text calls can still leave a truncated file, and
+        # --outdir, so several finish at once and write this same file. Two
+        # interleaved write_text calls can leave a truncated file, and
         # --merge-only reads it to rebuild the reference. Write-then-rename is
         # atomic within a directory on POSIX.
+        #
+        # `meta` deliberately holds only PROTOCOL fields that are identical
+        # across schemes. The tuning budget is NOT one of them — it scales with
+        # each scheme's parameter count — so it lives on the per-scheme
+        # checkpoint signature and is reported per row. Putting it here would
+        # publish the last finisher's budget as if it were the campaign's.
         _tmp = meta_path.with_suffix(f".json.{os.getpid()}.tmp")
         _tmp.write_text(json.dumps(meta, indent=2))
         _tmp.replace(meta_path)
@@ -854,6 +944,7 @@ def main(argv: list[str] | None = None) -> int:
     results = load_all_scheme_results(args.outdir, CONVECTION_SCHEMES)
     if not results:
         raise SystemExit(f"No scheme_*.json checkpoints found in {args.outdir}")
+    _guard_merge_inputs(results, run_sig, allow_partial=args.allow_partial)
     write_csv(args.outdir / "intercomparison.csv", results, ref)
     # Second copy under the name the paper figure script reads, so the
     # figures are built from THIS table rather than a hand-copied one.
