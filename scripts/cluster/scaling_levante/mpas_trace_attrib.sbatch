@@ -53,8 +53,9 @@ srun --ntasks=16 --ntasks-per-node=1 --overlap bash -c '
   echo sampler up on $(hostname); sleep 120; kill %1 2>/dev/null' &
 SAMPLER_PID=$!
 
-echo "=== s9@64 default step, ranks 0-3 traced ==="
-LEGOESM_MPAS_WIDE_HALO=0 LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
+WIDE="${WIDE:-0}"
+echo "=== s9@64 wide=$WIDE step, ranks 0-3 traced ==="
+LEGOESM_MPAS_WIDE_HALO=$WIDE LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
   srun --nodes=16 --ntasks=64 --ntasks-per-node=4 --gpus-per-node=4 \
     --gpu-bind=none --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
