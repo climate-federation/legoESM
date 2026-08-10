@@ -133,14 +133,23 @@ def test_wind_matches_the_published_streamfunction(ctx, states):
     has three orders of headroom while a formula error still fails by
     O(1).
 
-    SCOPE (codex r1 #7): both sides run through the SAME
-    analytic_swcore_state covariant projection, so this certifies the
-    WIND FORMULA on top of that projection, and a defect INSIDE the
-    projection (e.g. a reversed edge tangent) would cancel here.  The
-    projection itself is certified independently and against a binary
-    oracle: the DCMIP16_BC IC built through these same helpers matches
-    the Fortran oracle's zero-step restart at ~1e-14 on all six faces
-    (ic_face_map_parity), which a reversed tangent could not survive.
+    SCOPE (codex r1 #7, narrowed by r2 #2): both sides run through the
+    SAME analytic_swcore_state covariant projection, so this certifies
+    the WIND FORMULA on top of that projection; a defect INSIDE the
+    projection (e.g. a reversed edge tangent) cancels here and is NOT
+    covered.  An earlier revision claimed the DCMIP16 IC parity
+    (~1e-14 vs the Fortran zero-step restart) certifies this projection
+    independently -- that is FALSE: the DCMIP16 builder uses the
+    canonical metrics helpers (fv3_native_dcmip16_ic.py imports from
+    fv3_native_metrics) while analytic_swcore_state uses gridstruct's
+    PRIVATE _get_unit_vect2/_latlon_vectors, which reverse both cross
+    products algebraically; only mid_pt_sphere is shared.  The dedup
+    audit (MERGE rank 7) already proposes unifying them onto the
+    metrics versions -- once that lands, the DCMIP parity citation
+    becomes sound; a dedicated case-6 projection oracle fixture is the
+    alternative.  Until one of those exists, the projection under this
+    test is certified only by the km=1 Fortran stage fixtures that
+    consume analytic_swcore_state's output.
     """
     worst = 0.0
     for t, gs in enumerate(ctx["gs6"]):

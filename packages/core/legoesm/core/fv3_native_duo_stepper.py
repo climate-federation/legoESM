@@ -1087,22 +1087,32 @@ def case6_six_face_state(ctx: dict) -> list:
 
     THE COMPUTE-WINDOW DIFFERENCE, stated rather than hidden: upstream
     fills ``delp``/``u``/``v`` over the COMPUTE domain only (``do j=js,je``
-    at :1220/:1233/:1246) and then obtains the halos from
-    ``ext_vector`` + ``dtoa``/``atoc`` (:1264-1269).  This builder
-    evaluates the same analytic fields directly on the kinked halo
-    lattice, exactly as ``w2_six_face_state`` does -- the same physical
-    locations, so the values agree with what the exchange delivers up to
-    the exchange's own remap order.  The corner diagonals are left as
-    ``BIG_NUMBER`` by ``analytic_swcore_state`` and are filled by the
-    step-entry exchanges.
+    at :1220/:1233/:1246) and then obtains the wind halos from
+    ``ext_vector`` + ``dtoa``/``atoc`` (:1264-1269) and the scalar halos
+    from ``ext_scalar`` (:1577).  This builder evaluates the same
+    analytic fields directly on the kinked halo lattice, exactly as
+    ``w2_six_face_state`` does -- the same physical locations, so the
+    values agree with what the exchange delivers only up to the
+    exchange's own remap order (measured ~1e4 m^2/s^2 at C12 corner
+    diagonals, codex r1 #4).
 
-    NUMERICAL NOTE: ``A`` contains ``cos^{2R} p * cos^{-2} p``, which is
-    ``0 * inf`` in IEEE arithmetic at a pole.  A cubed-sphere cell centre
-    is never exactly at a pole, so the expression is finite on every
-    lattice this runs on -- but it is evaluated in the oracle's literal
-    factored form (not the algebraically equivalent ``cos^{2R-2}``) so
-    that the rounding matches, and a lattice that did contain a pole
-    would produce NaN rather than a plausible number.
+    SCOPE OF THE MITIGATION (codex r2 #1, verified EXPERIMENTALLY by the
+    reviewer: poisoned corner halos gave bit-identical full-step
+    outputs): the entry exchanges that make this deviation harmless run
+    inside ``acoustic_step_sixface`` / ``full_acoustic_step_sixface``.
+    Calling the STAGE functions directly (``csw_step_sixface``,
+    ``dsw12_step_sixface``) BYPASSES them -- ``d_sw1_duo``'s
+    ``fv_tp_2d(delp)`` then reads whatever halos this builder wrote.
+    PRECONDITION, stated not enforced: a caller entering at stage level
+    on an ext-bundle context owns the entry exchange itself.
+
+    NUMERICAL NOTE: ``A`` is evaluated in the oracle's literal factored
+    form ``cos^{2R} * cos^{-2}`` (not the equal ``cos^{2R-2}``) so the
+    rounding matches.  Both forms are finite everywhere including the
+    representable pole -- see the retraction in
+    ``williamson_sw_analytic.rossby_haurwitz_4_geopotential``; an
+    earlier version of this docstring claimed a NaN there, which is
+    false in float64.
     """
     from legoesm.core.williamson_sw_analytic import (
         RH4_MEAN_DEPTH_M,
