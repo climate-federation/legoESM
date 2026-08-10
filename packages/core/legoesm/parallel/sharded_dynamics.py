@@ -2018,20 +2018,67 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                      len(edge_send_map.get((v, u), [])))
             pair_w[(u, v)] = (wc, we)
         base_w = _padded_weight(edge_colors, pair_w)
+        # Seed candidates: payload-descending first-fit + jitters. These
+        # often overshoot the round budget on dense graphs (s9@64: every
+        # reorder blew past 11 rounds and the guard rejected them all,
+        # job 26856688) — so ALWAYS follow with a round-PRESERVING local
+        # search that moves pairs between existing rounds.
         edges_by_size = sorted(
             comm_pairs, key=lambda p: -(pair_w[p][0] + pair_w[p][1]))
         candidates = [edges_by_size]
         for seed in (1, 2, 3):
             jit = edges_by_size[:]
-            # jitter within near-equal-size neighbourhoods only
             rng = _random_sc.Random(seed)
             for i in range(0, len(jit) - 1, 2):
                 if rng.random() < 0.5:
                     jit[i], jit[i + 1] = jit[i + 1], jit[i]
             candidates.append(jit)
-        best_w, best_ec = base_w, None
+        seeds = [dict(edge_colors)]
         for order in candidates:
             ec = greedy_edge_coloring_ordered(comm_pairs, order)
+            if max(ec.values(), default=-1) + 1 <= n_rounds:
+                seeds.append(ec)
+
+        def _local_search(ec):
+            """Move pairs between existing rounds (endpoint-conflict
+            free) while the padded weight strictly drops."""
+            from collections import defaultdict
+            colors = dict(ec)
+            n_r = max(colors.values()) + 1
+            occupied = defaultdict(set)   # round -> endpoint set
+            members = defaultdict(list)
+            for p, c in colors.items():
+                occupied[c].update(p)
+                members[c].append(p)
+            improved = True
+            while improved:
+                improved = False
+                w_now = _padded_weight(colors, pair_w)
+                for p in sorted(colors, key=lambda q:
+                                -(pair_w[q][0] + pair_w[q][1])):
+                    c0 = colors[p]
+                    for c1 in range(n_r):
+                        if c1 == c0 or (occupied[c1] & set(p)):
+                            continue
+                        colors[p] = c1
+                        w_try = _padded_weight(colors, pair_w)
+                        if w_try < w_now:
+                            occupied[c0] = set(
+                                x for q in members[c0] if q != p for x in q)
+                            members[c0].remove(p)
+                            members[c1].append(p)
+                            occupied[c1].update(p)
+                            w_now = w_try
+                            improved = True
+                            break
+                        colors[p] = c0
+            return colors
+
+        best_w, best_ec = base_w, None
+        for seed_ec in seeds:
+            ec = _local_search(seed_ec)
+            if not _check_proper_edge_coloring(ec, comm_pairs):
+                continue
             if max(ec.values(), default=-1) + 1 > n_rounds:
                 continue
             w = _padded_weight(ec, pair_w)
