@@ -5,9 +5,13 @@ dycores agree with EACH OTHER, nor that any of them reproduces the
 analytic answer. This script asks those two questions of the artifacts
 the matrix already writes:
 
-  CONSISTENCY  every arm's field is regridded by the matrix onto the SAME
-               1-degree lat-lon mesh, so arms are compared cell-by-cell:
-               pairwise RMS difference normalised by the field's own RMS.
+  CONSISTENCY  arms are NOT co-located as saved (the matrix leaves latlon
+               native and regrids unstructured arms), so each is
+               NEAREST-NEIGHBOUR sampled onto one common 2-degree mesh and
+               compared cell-by-cell: pairwise area-weighted RMS
+               difference in the FIELD'S OWN UNITS (no normalisation --
+               a normalised column was tried and removed, see
+               cross_grid_rms).
                The tripole arm is EXCLUDED by default -- it keeps NEMO's
                continents (wet fraction 0.53 native vs 0.89), so a
                cell-by-cell comparison against the land-free arms measures
@@ -65,6 +69,27 @@ ALL_GRIDS = CONSISTENCY_GRIDS + ["tripole"]
 #: everything -- a threshold set before the measurement, the exact habit
 #: the reviewers flagged twice in this campaign.
 AGREE_TOL = {"SST": 1.0e-1, "eta": 2.5e-2}
+
+#: PER-DYCORE self-error, same protocol (that arm against ITSELF at 2x
+#: resolution). The tolerance above is derived from LAT-LON and is only
+#: fair to an arm whose own self-error is comparable. MEASURED
+#: 2026-08-10:
+#:     latlon 36x72 vs 72x144   geostrophic SST 8.20e-2 | bwave eta 2.34e-2
+#:     cube   C24   vs C48      geostrophic SST 9.45e-1 | bwave eta 2.23e-2
+#: Cube's own self-error on geostrophic adjustment is 9.4x the lat-lon
+#: tolerance, so "cube disagrees with everyone" on that case is NOT
+#: supportable -- the standard is unfair to it. On the barotropic wave
+#: cube's self-error (2.23e-2) is inside the tolerance, so ITS cross-arm
+#: difference there is a genuine dycore difference. FESOM cannot be
+#: measured this way: only the "pi" mesh ships, so it has no 2x sibling.
+#: (GLM-5.2 review: without this, "failing" and "held to another arm's
+#: convergence rate" are indistinguishable.)
+SELF_ERROR = {
+    ("latlon", "geostrophic_adjustment"): 8.20e-2,
+    ("latlon", "barotropic_wave"): 2.34e-2,
+    ("cubed_sphere", "geostrophic_adjustment"): 9.45e-1,
+    ("cubed_sphere", "barotropic_wave"): 2.23e-2,
+}
 
 #: field used for the cross-grid comparison, per case
 CASE_FIELD = {
@@ -138,7 +163,13 @@ def _load(npz: Path, field: str):
 
 
 def _to_common_mesh(lat, lon, a, m, nlat=91, nlon=180):
-    """Bilinear-interpolate (a, mask) onto a fixed lat-lon mesh.
+    """NEAREST-NEIGHBOUR sample (a, mask) onto a fixed lat-lon mesh.
+
+    Nearest-neighbour, not bilinear: it cannot manufacture values outside
+    the field's own range, which matters because a land cell carries a
+    ~20 degC arm-dependent fill. The cost is that a land value can be
+    pulled up to half a source cell into the ocean, which is what _erode
+    then removes.
 
     The matrix leaves an arm on its NATIVE mesh when that mesh is already
     lat-lon (latlon stays 36x72) and regrids the unstructured arms to
@@ -157,6 +188,34 @@ def _to_common_mesh(lat, lon, a, m, nlat=91, nlon=180):
     ii = np.abs(((lon_t[:, None] - lon_src[None, :] + 180.0) % 360.0)
                 - 180.0).argmin(axis=1)
     return (lat_t, lon_t, a[np.ix_(ji, ii)], m[np.ix_(ji, ii)])
+
+
+def _erode(mask):
+    """Shrink a boolean mask by one cell in all EIGHT directions.
+
+    Arms disagree about what a LAND cell holds -- the lat-lon C-grid pins
+    land tracers at 0 degC while MPAS Neumann-fills them with an
+    ocean-neighbour average -- so one land cell leaking through the
+    regrid contributes a ~20 degC difference and swamps the interior
+    signal. MEASURED 2026-08-10: unmasked, the geostrophic-adjustment
+    latlon|mpas difference reads 2.98 degC and is ENTIRELY the two polar
+    (>80 deg, land) bins, while every interior bin agrees to
+    0.003-0.05 degC.
+
+    Longitude wraps, latitude does NOT: rolling across the north pole
+    into the south pole would erode with the wrong neighbour (codex
+    2026-08-10). Diagonals are included because nearest-neighbour
+    regridding can pull a land value across a corner.
+    """
+    m = np.asarray(mask)
+    pad = np.zeros((m.shape[0] + 2, m.shape[1]), dtype=bool)
+    pad[1:-1] = m                      # dry beyond the poles, never wrapped
+    pad = np.concatenate([pad[:, -1:], pad, pad[:, :1]], axis=1)  # lon wraps
+    out = np.ones_like(m, dtype=bool)
+    for di in (0, 1, 2):
+        for dj in (0, 1, 2):
+            out &= pad[di:di + m.shape[0], dj:dj + m.shape[1]]
+    return out
 
 
 def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
@@ -206,19 +265,8 @@ def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
     for a_name, b_name in itertools.combinations(sorted(got), 2):
         A, mA = got[a_name]
         B, mB = got[b_name]
-        both = mA & mB & np.isfinite(A) & np.isfinite(B)
-        # ERODE the common wet mask by one cell. Arms disagree about what
-        # a LAND cell holds -- the lat-lon C-grid pins land tracers at 0
-        # while MPAS Neumann-fills them with an ocean-neighbour average --
-        # so a single land cell leaking through nearest-neighbour sampling
-        # contributes a ~20 degC difference and swamps the real interior
-        # signal. MEASURED 2026-08-10: without erosion the geostrophic
-        # adjustment latlon|mpas difference reads 2.98 degC and is ENTIRELY
-        # the two polar (>80 deg, land) bins; the interior bins agree to
-        # 0.003-0.05 degC.
-        both = (both
-                & np.roll(both, 1, 0) & np.roll(both, -1, 0)
-                & np.roll(both, 1, 1) & np.roll(both, -1, 1))
+        both = _erode(mA & mB & np.isfinite(A) & np.isfinite(B))
+        # (see _erode)
         if not both.any():
             out[f"{a_name}|{b_name}"] = dict(rms_abs=float("nan"),
                                              rms_shifted=float("nan"),
@@ -233,7 +281,8 @@ def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
         n_lon = A.shape[1]
         for k in range(1, n_lon):
             Bk = np.roll(B, k, axis=1)
-            mk = mA & np.roll(mB, k, axis=1) & np.isfinite(A) & np.isfinite(Bk)
+            mk = _erode(mA & np.roll(mB, k, axis=1)
+                        & np.isfinite(A) & np.isfinite(Bk))
             if not mk.any():
                 continue
             wk = np.where(mk, np.broadcast_to(w_lat, A.shape), 0.0)
@@ -496,6 +545,15 @@ def main() -> None:
         print(f"    -> {len(agree)}/{len(pairs)} pairs agree to "
               f"{tol:g} (field units)"
               + (f"; DISAGREE: {', '.join(sorted(differ))}" if differ else ""))
+        # Name any arm whose OWN self-error exceeds this tolerance: its
+        # "disagreement" is not interpretable against this standard.
+        unfair = sorted({g for (g, c), e in SELF_ERROR.items()
+                         if c == case and e > tol
+                         and any(g in d for d in differ)})
+        if unfair:
+            print(f"       NOTE: {', '.join(unfair)} has a self-error at 2x "
+                  f"resolution ABOVE this tolerance -- its rows are not "
+                  f"interpretable here (the standard is another arm's)")
         report["consistency"][case]["agree_tol"] = tol
         report["consistency"][case]["pairs_agreeing"] = sorted(agree)
         report["consistency"][case]["pairs_disagreeing"] = sorted(differ)

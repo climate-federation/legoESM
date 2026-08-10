@@ -745,9 +745,12 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     gbw_config = GlobalBarotropicWindConfig()
     physics = gbw_forcings(tc.grid_type, None, gbw_config)
     nlev_override = tc.run_kwargs.get("nlev", None)
-    # MPAS ico3 needs higher viscosity than lat-lon at comparable
-    # resolution — the TRiSK discretization on irregular cells requires
-    # more dissipation to remain stable with correct bottom drag.
+    # MPAS needs higher viscosity than lat-lon at comparable resolution —
+    # the TRiSK discretization on irregular cells requires more
+    # dissipation to remain stable with correct bottom drag. The floor was
+    # TUNED AT ico3 and is unvalidated at other resolutions; the
+    # monolithic matrix now runs MPAS at ico4, so revalidate this floor
+    # before syncing that resolution here (2026-08-10).
     A_h = gbw_config.A_h
     if tc.grid_type == "mpas":
         A_h = max(A_h, 5e5)

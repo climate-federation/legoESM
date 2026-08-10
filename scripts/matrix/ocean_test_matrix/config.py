@@ -14,6 +14,15 @@ from legoesm import constants as _C
 GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
+    # DIVERGENCE, DELIBERATE (2026-08-10): the monolithic
+    # run_ocean_test_matrix.py moved MPAS to "ico4" so the cross-grid
+    # comparison is resolution-matched (ico3 = 891 km effective vs
+    # latlon 36x72 = 444 km, i.e. 2.3x coarser than every other arm).
+    # This modular copy stays at ico3 because its MPAS global-wind
+    # viscosity floor was tuned at ico3 (see experiments.py) and nothing
+    # here has been rerun at ico4 -- changing it blind could destabilise
+    # cases this PR does not exercise. Sync as part of the modular/
+    # monolithic dedup, not before.
     "mpas": "ico3",
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
