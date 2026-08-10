@@ -1889,7 +1889,14 @@ def _build_halo_send_maps(partitions, cell_owner, n_dev, cells_per,
 
 
 def _resolve_size_coloring(env_value: str) -> bool:
-    """Resolve LEGOESM_MPAS_SIZE_COLORING: '1' on, '0'/'' off (default).
+    """Resolve LEGOESM_MPAS_SIZE_COLORING: '1'/'' on (DEFAULT), '0' off.
+
+    DEFAULT ON since the s9@64 production A/B/A2 (job 26857404, drift
+    1.7%): ratio 0.803 — 10.2 -> 8.11 ms/step from the padded-byte cut
+    alone, matching the node-NIC-saturation model's prediction. Results
+    are bit-identical to the legacy colouring (transfers/scatters are
+    row-disjoint; only wire grouping changes), so the escape hatch '0'
+    exists for schedule-reproduction runs, not for numerics.
 
     Size-aware colouring keeps the SAME round count but groups
     similar-payload pairs into the same round, cutting the padded/actual
@@ -1898,13 +1905,13 @@ def _resolve_size_coloring(env_value: str) -> bool:
     arrays are shape-uniform across devices). Transfers and results are
     bit-identical (unpack scatters write disjoint rows); only the wire
     grouping changes. Unknown values raise (dispatch hardening)."""
-    if env_value in ("0", ""):
+    if env_value == "0":
         return False
-    if env_value == "1":
+    if env_value in ("1", ""):
         return True
     raise ValueError(
         f"LEGOESM_MPAS_SIZE_COLORING={env_value!r}: must be '0' or '1' "
-        f"(empty = off)")
+        f"(empty = ON — the receipted default)")
 
 
 def _padded_weight(edge_colors, pair_w):
@@ -2008,7 +2015,7 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     # wire weight strictly improves.
     import os as _os_sc
     if _resolve_size_coloring(
-            _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "0")):
+            _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "")):
         import random as _random_sc
         pair_w = {}
         for (u, v) in comm_pairs:
