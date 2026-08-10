@@ -64,6 +64,8 @@ from legoesm.atmosphere.idealized.land_rce import (
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     make_wing2018_theta_ref_fn,
     wing2018_qv_profile,
+    wing2018_T_v0,
+    wing2018_q_sfc,
     WING_Q_SFC_DEFAULT,
 )
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
@@ -121,18 +123,22 @@ def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0,
     as an explicit arg (not the library default) so a single ``q_sfc`` drives
     both θ and q_v from one source.
 
-    ``T_sfc`` IS NOT USED and is retained only because callers pass it: it is
-    the prescribed SEA-surface temperature (the flux boundary condition), and
-    ``T_v0`` is the surface AIR virtual temperature, which gSAM's RCE300
-    sounding puts ~3 K BELOW the SST.  Deriving one from the other
-    (``T_v0 = T_sfc·(1+0.608·q_sfc)``, as an earlier revision of this docstring
-    claimed) overshoots the oracle by ~2.7 K; pinning ``T_v0`` to a fixed 295 K
-    for every SST undershoots it by ~5 K and made the column supersaturated.
-    ``WING_T_V0`` is now calibrated against the gSAM sounding — see the
-    constant's note — and the SST enters only through ``--T-sfc``.
+    ``T_sfc`` IS the case SST and DOES enter the profile: RCEMIP prescribes
+    ``T_v0 = T_sfc·(1 + 0.608·q_sfc)`` (Wing 2018 Eq. 3), so the analytic IC's
+    surface AIR temperature equals the SST by construction.  Two earlier
+    revisions got this wrong in opposite directions and both are recorded on
+    the ``WING_T_V0`` constant: pinning ``T_v0 = 295 K`` for every SST made the
+    initial column ~8 K too cold and 39 % supersaturated, while fitting
+    ``T_v0`` to gSAM's own sounding (``GSAM_SND_T_V0 = 299.274``) reproduces
+    that model's ~3 K air-sea disequilibrium rather than the protocol.  Pass
+    ``T_v0``/``Gamma``/``q_sfc`` explicitly (all three, never one) to use the
+    gSAM calibration instead.
     """
-    del T_sfc  # documented above: the SST is a boundary condition, not the IC
-    return make_wing2018_theta_ref_fn(q_sfc=float(q_sfc))(z)
+    # Wing 2018 Eq. (3): T_v0 = T0·(1 + 0.608·q0) with T0 the case SST — the
+    # library derives it, so pass BOTH the SST and the matching q_sfc.
+    return make_wing2018_theta_ref_fn(
+        T_v0=wing2018_T_v0(float(T_sfc), float(q_sfc)), q_sfc=float(q_sfc),
+    )(z)
 
 
 def _rcemip_qv_profile(z: jax.Array,
@@ -1023,6 +1029,7 @@ def _build_microphysics_config(
     hard_saturation_adjustment: bool = False,
     hard_sat_adjust_threshold: float | None = None,
     hard_sat_max_heating_K: float | None = None,
+    saturation_sharpness: float | None = None,
 ) -> MicrophysicsConfig | None:
     if scheme == "none":
         return None
@@ -1041,15 +1048,31 @@ def _build_microphysics_config(
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
-        cfg = MicrophysicsConfig(
-            scheme=scheme,
-            morrison=MorrisonConfig(
-                morrison_flavor="sam",
-                homogeneous_ice_nucleation=homogeneous_ice_nucleation,
-            ),
+        sub = MorrisonConfig(
+            morrison_flavor="sam",
+            homogeneous_ice_nucleation=homogeneous_ice_nucleation,
         )
     else:
+        sub = getattr(MicrophysicsConfig(scheme=scheme), scheme, None)
+    if saturation_sharpness is not None and sub is not None:
+        # The shared smooth saturation adjustment condenses
+        # ``sigmoid(sharpness * (q_v - q_sat)) * (q_v - q_sat)`` per call. The
+        # 100.0 default is in units of 1/(kg/kg), so at a typical CRM excess of
+        # ~1e-3 kg/kg the sigmoid sits at 0.52 — barely half the excess is
+        # removed, which is exactly the standing super-saturation measured in
+        # RCE. Raising it drives cond_frac -> 1 (a hard adjustment) IN-SCHEME,
+        # where the latent heating is coupled through the physics tendency path
+        # instead of being injected into theta' behind the dycore's back.
+        if "saturation_sharpness" not in getattr(sub, "_fields", ()):
+            raise ValueError(
+                f"--saturation-sharpness is not supported by the {scheme!r} "
+                "scheme (no shared warm-rain saturation adjustment)."
+            )
+        sub = sub._replace(saturation_sharpness=saturation_sharpness)
+    if sub is None:
         cfg = MicrophysicsConfig(scheme=scheme)
+    else:
+        cfg = MicrophysicsConfig(**{"scheme": scheme, scheme: sub})
 
     # Hard (iterated) saturation-adjustment guard.  This driver is the RCE/CRM
     # lane, i.e. exactly where a super-saturated initial sounding can occur, so
@@ -1092,6 +1115,88 @@ def _build_microphysics_config(
     return cfg
 
 
+def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
+    """Post-step drain of liquid super-saturation onto the saturation curve.
+
+    SAM condenses the full excess every step; the shared in-scheme adjustment
+    is a smooth sigmoid that only drains part of it, leaving a few percent
+    standing in strong updrafts at dt = 6 s (measured: peak S_liq = 1.089 on a
+    32² RCEMIP probe).
+
+    Applied here as a POST-STEP hook on the final state — the same placement
+    and the same reviewed core (:func:`hard_saturation_drain`) the MPAS driver
+    uses.  It is the ALTERNATIVE to each scheme's own
+    ``hard_saturation_adjustment`` config field, which this driver also routes
+    (``--hard-saturation-adjustment``); the two are independent opt-ins and
+    both default OFF.
+
+    Which to use.  The in-scheme field is now carried by every factory-
+    reachable scheme except ``sdm``/``fast_sbm`` (which integrate the
+    super-saturation relaxation explicitly) — ``sundqvist`` and ``ml_emulator``
+    gained it with the uniform guard, so the "not every scheme has it"
+    argument for preferring the post-step hook NO LONGER HOLDS.  What still
+    differs is PLACEMENT: in-scheme couples the latent heating through the
+    physics tendency path, while this hook corrects the final state after the
+    dycore's vertical transport (the placement that proved stable on the MPAS
+    path).  Do not enable both in one run without saying so — they are two
+    corrections to the same excess.
+
+    Conserves ``c_pd·T + L_v·q_v`` exactly: the condensed vapour moves to cloud
+    water and its latent heat goes into θ' (divided by Exner, since the state
+    carries potential temperature).
+    """
+    from legoesm import constants
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        hard_saturation_drain,
+    )
+    exner = hc.exner_ref
+    T = (hc.theta_ref + state.theta_prime.data) * exner
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)
+    tr = state.tracers.data
+    if tr.shape[-1] < 2:
+        # Nowhere to put the condensate: a single-tracer (vapour-only) state
+        # has no cloud-water slot, so draining would DESTROY water rather than
+        # move it. Leave the state untouched.
+        return state
+    # WARM CELLS ONLY. Below freezing there is no liquid surface to condense
+    # on, so ice super-saturation is physical and belongs to the scheme's ice
+    # nucleation/deposition — draining it onto the LIQUID curve here would
+    # manufacture cloud water at 230 K and destroy exactly the ice behaviour
+    # the intercomparison is meant to measure.
+    # ``max_heating_K`` bounds the latent heating a single step may deposit.
+    # The 5.0 shared default is tuned for the dt=100 s MPAS hook; at dt=6 s it
+    # is the same heating per step over a 17x shorter step, so this driver
+    # defaults it to 0.5 K.
+    #
+    # MEASURED (128^2, 24000 steps from the IC, matched --print-every so the
+    # S_liq sampling is identical across arms):
+    #   no drain (control)          peak |w| 17.9 m/s, peak S_liq 3.36
+    #   drain thr 1.05, cap 0.5 K   peak |w| 17.9 m/s, peak S_liq 2.74
+    #   drain thr 1.0,  cap 0.5 K   peak |w| 21.6 m/s, peak S_liq 3.27
+    #   drain thr 1.0,  cap 0.1 K   peak |w| 19.9 m/s, peak S_liq 3.37
+    # i.e. roughly neutral-to-slightly-better, NOT the large win the first
+    # (32^2) probe suggested. Those peaks are all inside the convective onset
+    # transient, so they do NOT characterise the equilibrium RCE this campaign
+    # measures -- re-measure from a spun-up state before drawing conclusions.
+    dq = jnp.where(
+        T >= constants.T_freeze,
+        hard_saturation_drain(T, tr[..., 0], p, dt, hard_threshold=threshold,
+                              hard_max_heating_K=max_heating_K),
+        0.0,
+    ) * dt
+    # Slot 1 is cloud water in every layout this driver builds (q_v, q_c, q_r
+    # head; see _build_rcemip_initial_state / the microphysics slot contract).
+    tr = tr.at[..., 0].add(-dq).at[..., 1].add(dq)
+    theta_p = state.theta_prime.data + (constants.L_v / constants.c_pd) * dq / exner
+    # Field.replace (dataclass-style), state._replace (NamedTuple) — the two
+    # carry DIFFERENT APIs; mixing them up is an AttributeError at the first
+    # jit call, not at trace time.
+    return state._replace(
+        theta_prime=state.theta_prime.replace(data=theta_p),
+        tracers=state.tracers.replace(data=tr),
+    )
+
+
 def dx_aware_hyperdiff(dx, base=1.0e8, dx_ref=1000.0):
     """Biharmonic hyperdiff coefficient scaled ``K = base·(dx/dx_ref)⁴``.
 
@@ -1118,10 +1223,26 @@ def cfl_guard(dt, dx, dz_min, n_acoustic_substeps=6, c_s=350.0, label="run"):
             f"(c_s·dt/(n_sub·dx); dx={dx:.0f} m, dt={dt} s, n_sub="
             f"{n_acoustic_substeps}) > 0.5 — raise n_acoustic_substeps or reduce "
             f"dt; the run may go non-finite.", stacklevel=3)
-    if dt > 0.041 * dz_min:
+    # The 0.041 factor predates the 2026-08 stretched-grid fix to the SI
+    # tridiagonal metric (packages/.../gcm/compressible_euler.py: the coupling
+    # used dz_half^2 where the continuity feedback needs the LAYER thickness,
+    # leaving ~10 % of the vertical acoustic term explicit on stretched grids).
+    # MEASURED after that fix on the gSAM RCEMIP1 grd (dz_min=74.5 m), 32^2 and
+    # 128^2, run through convection onset: dt=6 s is ROBUST (every attempt);
+    # dt=12 s is MARGINAL — it went non-finite in 3 of 6 attempts and completed
+    # the other 3, with the same seed and flags. fp32 GPU non-determinism
+    # through a chaotic onset decides which. No single term reproduces it
+    # (theta van-Leer advection and the SI w-filter each survive in one arm and
+    # the filter arm blew up in another), so this is a marginal-stability
+    # boundary, not a specific broken operator.
+    #
+    # 0.08*dz_min therefore marks "expect trouble", not a sharp limit. Treat a
+    # config near it as unusable for a long run even if a short probe survives.
+    if dt > 0.08 * dz_min:
         warnings.warn(
-            f"{label}: dt={dt} s vs min_dz={dz_min:.0f} m exceeds the vertical "
-            f"acoustic CFL (dt≲{0.04 * dz_min:.1f} s) — reduce dt.", stacklevel=3)
+            f"{label}: dt={dt} s vs min_dz={dz_min:.0f} m exceeds the measured "
+            f"vertical stability limit (dt≲{0.08 * dz_min:.1f} s) — reduce dt.",
+            stacklevel=3)
 
 
 def parse_args(argv=None):
@@ -1156,7 +1277,17 @@ def parse_args(argv=None):
     p.add_argument("--land-T-init", type=float, default=None,
                    help="Initial LAND slab surface temperature [K]. Default: "
                         "use --T-sfc.")
-    p.add_argument("--hyperdiff", type=float, default=1.0e6)
+    p.add_argument("--hyperdiff", type=float, default=None,
+                   help="Biharmonic hyperdiffusion coefficient [m^4/s]. "
+                        "Default None auto-scales as dx_aware_hyperdiff(dx) = "
+                        "1e8*(dx/1000)^4, matching run_gate_plane.py and "
+                        "run_lba_plane.py. The biharmonic CFL AND the 2*dx "
+                        "damping rate both go as K/dx^4, so a FIXED "
+                        "coefficient is wrong at any dx but one — the previous "
+                        "fixed 1.0e6 default was ~4 orders too weak at "
+                        "dx=4 km, and iter-62-66 measured that too little "
+                        "grad^4 leaves the domain laminar. Pass an explicit "
+                        "value to override.")
     p.add_argument("--smag-cs", type=float, default=0.19,
                    help="Smagorinsky Cs; SAM default 0.19 (dosmagor).")
     p.add_argument("--turbulence-closure",
@@ -1393,10 +1524,51 @@ def parse_args(argv=None):
                         "S_hom — caps the unphysical >1000%% ice-supersaturation "
                         "the SAM-faithful Cooper-only path leaves in violent RCE "
                         "outflow. Default off = byte-identical Cooper-only.")
+    # NAME: this is the POST-STEP drain, deliberately NOT called
+    # --hard-saturation-adjustment — that name belongs to the IN-SCHEME config
+    # field of the same name (routed above).  The two are different
+    # interventions on the same excess (placement differs; see
+    # _apply_hard_saturation_drain), and giving them one flag name would make
+    # a run's saturation treatment unreadable from its command line.
+    p.add_argument("--hard-sat-drain",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Post-step drain of liquid super-saturation onto the "
+                        "saturation curve, applied IDENTICALLY for every "
+                        "microphysics scheme (SAM adjusts exactly; the shared "
+                        "smooth sigmoid leaves a few percent standing in strong "
+                        "updrafts at dt=6 s). Default off = byte-identical to "
+                        "the un-drained path. Distinct from the in-scheme "
+                        "--hard-saturation-adjustment; do not enable both "
+                        "without saying so.")
+    p.add_argument("--hard-sat-drain-threshold", type=float, default=None,
+                   help="RH trigger for --hard-sat-drain: the "
+                        "drain fires only where q_v > thr*q_sat, so thr is the "
+                        "SLIGHT super-saturation left standing between events. "
+                        "Default 1.05. thr=1.0 pins S=1 exactly, which is "
+                        "physically over-tight — real updrafts carry a few "
+                        "percent while droplets grow.")
+    p.add_argument("--saturation-sharpness", type=float, default=None,
+                   help="Sigmoid sharpness [1/(kg/kg)] of the shared in-scheme "
+                        "saturation adjustment, IDENTICAL for every scheme that "
+                        "uses it. Scheme default 100 removes only ~half the "
+                        "excess per call at CRM excesses (~1e-3 kg/kg), leaving "
+                        "standing super-saturation; ~1e4-1e5 approaches SAM's "
+                        "exact adjustment. Preferred over the post-step drain: "
+                        "the heating stays coupled to the dynamics.")
+    p.add_argument("--hard-sat-drain-max-heating-k", type=float, default=0.5,
+                   help="Per-step latent-heating cap [K] for the drain. The "
+                        "shared 5.0 default is for the dt=100 s MPAS hook; at "
+                        "dt=6 s that rate blew up a 128^2 spin-up at day 1.1.")
     p.add_argument("--print-every", type=int, default=10)
     p.add_argument("--snapshot-every", type=int, default=0,
                    help="Emit a surface-snapshot PNG every N steps "
                         "(0 = off). At dt=20s, 4320 steps = 1 sim day.")
+    p.add_argument("--sam-grd", type=str, default=None,
+                   help="Path to a gSAM CASES/<case>/grd file: use the EXACT "
+                        "oracle vertical levels (extended to --nlev by SAM's "
+                        "constant-spacing rule). For RCEMIP1 pass "
+                        "<gSAM>/CASES/RCEMIP1/grd with --nlev 74. Overrides "
+                        "--stretched-vertical/--dz-sfc/--H.")
     p.add_argument("--stretched-vertical", action="store_true",
                    help="Use create_stretched_height_coordinate (RCEMIP1: "
                         "nlev=74, geometric stretching from dz_sfc=50m near "
@@ -1483,6 +1655,14 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
+    # dx-aware biharmonic coefficient (single source of truth shared with the
+    # GATE/LBA drivers). Resolved here so every downstream consumer, the config
+    # echo and the run metadata all see the same number.
+    _hyperdiff_auto = args.hyperdiff is None
+    if _hyperdiff_auto:
+        args.hyperdiff = dx_aware_hyperdiff(args.dx)
+    if args.hyperdiff < 0.0:
+        raise SystemExit("--hyperdiff must be non-negative.")
     if args.land:
         if args.land_heat_capacity <= 0.0:
             raise SystemExit("--land-heat-capacity must be positive.")
@@ -1497,7 +1677,9 @@ def main():
     print(f"RCEMIP1 plane: nx={args.nx} ny={args.ny} nlev={args.nlev}")
     print(f"  dx={args.dx} m, Lz={args.H} m, dt={args.dt} s, "
           f"{args.steps} steps -> t_final={args.steps * args.dt:.1f} s")
-    print(f"  T_sfc={args.T_sfc} K, hyperdiff={args.hyperdiff:.2e}, "
+    print(f"  T_sfc={args.T_sfc} K, "
+          f"hyperdiff={args.hyperdiff:.2e}"
+          f"{' (dx-aware auto)' if _hyperdiff_auto else ' (explicit)'}, "
           f"smag_cs={args.smag_cs}, closure={args.turbulence_closure}"
           + (f" (DNS: nu={args.molecular_viscosity:.2e} m^2/s)"
              if args.turbulence_closure == "molecular" else ""))
@@ -1512,6 +1694,19 @@ def main():
     print(f"  semi_implicit={args.semi_implicit}, substep_horizontal_acoustic="
           f"{args.substep_horizontal_acoustic}, si_w_filter_nu={args.si_w_filter_nu}, "
           f"seed_kind={args.seed_kind}, sgs_vertical={args.sgs_vertical}")
+    # CONV-TRIGGER #83 preflight. theta_noise_amp defaults to 0, which leaves
+    # the rest state horizontally uniform — and a uniform state STAYS uniform,
+    # so the run produces a laminar radiative-equilibrium column while exiting
+    # 0. Say so up front; the end-of-run verdict confirms it either way.
+    if args.theta_noise_amp <= 0.0:
+        print("  *** NO IC PERTURBATION (--theta-noise-amp 0): this run cannot "
+              "convect — it will stay a horizontally uniform column.")
+        print("  *** For RCE use: --theta-noise-amp 0.1 --seed-kind band_noise "
+              "--seed-kmax 8   (see docs/user-guide/rcemip1_crm.md)")
+    elif args.seed_kind == "smooth_k1":
+        print("  *** seed_kind=smooth_k1 puts all seed energy in ONE k=1 "
+              "cosine: expect a single domain-filling circulation, not a "
+              "convective-cell population. Use --seed-kind band_noise for RCE.")
     # codex iter-63 [LOW]: record whether --radiation was DEFAULTED (vs
     # explicit) so logs are self-describing — the gray→rrtmgp default flip
     # (#85) silently changes the experiment when the flag is omitted.
@@ -1582,7 +1777,21 @@ def main():
     # at the actual RCEMIP sounding instead of an isentropic 300 K column.
     # Single surface humidity drives BOTH the θ hydrostatic (virtual-T) base
     # and the q_v IC (codex iter-61 [MED] — keep them from desyncing).
-    q_sfc_rce = WING_Q_SFC_DEFAULT
+    # q0 is CASE data (12 / 18.65 / 24 g/kg at SST 295 / 300 / 305 K,
+    # chosen so the lower atmosphere sits near 80 % RH). It must track
+    # --T-sfc: with the SST-derived T_v0 (Wing Eq. 3), pairing the 300 K
+    # q0 with a 295 K SST rebuilds the supersaturated-IC bug at the other
+    # two RCEMIP SSTs.
+    try:
+        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
+    except ValueError:
+        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
+        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
+        # the near-surface RH is then off-protocol.
+        q_sfc_rce = WING_Q_SFC_DEFAULT
+        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
+              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
+              f" near-surface RH is NOT the protocol's ~80 %.")
     # --sounding: initialise from a TABULATED SAM sounding instead of the
     # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
     # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
@@ -1603,7 +1812,26 @@ def main():
     else:
         def theta_ref_fn(z):
             return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
-        if args.stretched_vertical:
+        if args.sam_grd:
+            # FAITHFUL ORACLE GRID: the gSAM RCEMIP1 CASES/RCEMIP1/grd levels
+            # (13 stretched, 37 m first centre, then uniform 500 m to 33 km at
+            # nlev=74). A uniform 100-level grid over the same depth puts the
+            # first centre at 165 m -- 4.5x coarser than the oracle exactly
+            # where the surface fluxes and the sub-cloud layer live.
+            from legoesm.atmosphere.forcing.sam_case_forcing import read_sam_grd
+            from legoesm.grids.vertical import (
+                create_height_coordinate_from_z_half,
+            )
+            _grd = read_sam_grd(args.sam_grd, n_levels=args.nlev)
+            hc = create_height_coordinate_from_z_half(
+                jnp.asarray(_grd.z_half, dtype=dtype),
+                theta_ref_fn=theta_ref_fn, p_sfc=p_sfc_rcemip,
+            )
+            print(f"  SAM grd VERTICAL GRID: {args.sam_grd} -> "
+                  f"nlev={hc.n_levels}, "
+                  f"dz_sfc={float(_grd.z_half[-2] - _grd.z_half[-1]):.1f} m, "
+                  f"top={hc.H:.0f} m")
+        elif args.stretched_vertical:
             hc = create_stretched_height_coordinate(
                 args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
                 theta_ref_fn=theta_ref_fn,
@@ -1614,6 +1842,12 @@ def main():
                 theta_ref_fn=theta_ref_fn,
             )
     tm = make_flat_plane_terrain_metric(grid, hc)
+    # This driver DEFINES cfl_guard (run_gate_plane.py calls it as rcp.cfl_guard)
+    # but never called it on its own config. On the uniform dz=330 m grid that
+    # never mattered; on the gSAM RCEMIP1 grd (dz_min=74.5 m) it is the
+    # difference between a run and a day-1.5 blow-up, so wire it in here too.
+    cfl_guard(args.dt, args.dx, float(jnp.min(hc.dz)),
+              n_acoustic_substeps=args.n_acoustic_substeps, label="RCEMIP1")
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
         sponge_width=args.sponge_width,
@@ -1671,7 +1905,8 @@ def main():
         args.microphysics, args.homogeneous_ice_nucleation,
         hard_saturation_adjustment=args.hard_saturation_adjustment,
         hard_sat_adjust_threshold=args.hard_sat_adjust_threshold,
-        hard_sat_max_heating_K=args.hard_sat_max_heating_k)
+        hard_sat_max_heating_K=args.hard_sat_max_heating_k,
+        saturation_sharpness=args.saturation_sharpness)
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
@@ -1818,6 +2053,34 @@ def main():
               f"({args.snapshot_days} d); 3D dumps at steps "
               f"{sorted(_snap3d_steps)} (days {args.snapshot3d_days})")
 
+    # Same drain for EVERY microphysics scheme (see _apply_hard_saturation_drain).
+    if args.hard_sat_drain and args.microphysics != "none":
+        # 1.05, not 1.0: the drain fires only ABOVE the threshold, so this is
+        # the slight super-saturation left standing between events. Pinning
+        # S=1 exactly is over-tight physically (a real updraft carries a few
+        # percent while droplets grow) and it fires the drain in every
+        # marginally-saturated cell, which is what detonated the first 128^2
+        # spin-up at day 1.1.
+        _thr = (1.05 if args.hard_sat_drain_threshold is None
+                else args.hard_sat_drain_threshold)
+        _hard_sat_drain_jit = jax.jit(
+            lambda s: _apply_hard_saturation_drain(
+                s, hc, args.dt, _thr, args.hard_sat_drain_max_heating_k),
+        )
+        print(f"  HARD SATURATION DRAIN: post-step, q_v -> curve where "
+              f"q_v > {_thr}*q_sat (identical for all schemes), "
+              f"max {args.hard_sat_drain_max_heating_k} K heating/step")
+    else:
+        _hard_sat_drain_jit = None
+
+    _run_max_w = 0.0
+    _run_max_s_liq = 0.0
+    _run_max_s_ice = 0.0
+    _diag_samples = 0
+    _went_non_finite = False
+    # Second half of whatever step range this invocation actually integrates
+    # (respects --restart, where the loop starts at the checkpoint step).
+    _diag_window_start = _start_step + (args.steps - _start_step) // 2
     if args.land:
         print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
               "max(q_v)   d(mass)    T_s[min/mean/max] Qs SH LH")
@@ -1939,9 +2202,21 @@ def main():
         # ponytail: local clip, revisit a mass-conserving *local* limiter (per-
         # column borrow) if a long equilibrium run shows CWV drift.
         state = apply_positive_filter_state(state, mode="clip")
+        if _hard_sat_drain_jit is not None:
+            state = _hard_sat_drain_jit(state)
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
+            # Track peak |w| so a run that never convected can SAY SO at the end
+            # (CONV-TRIGGER #83): an un-seeded RCE otherwise exits 0 with a clean
+            # mass budget and no indication that nothing ever happened.
+            # Only the SECOND HALF counts. The rest state's initial hydrostatic
+            # adjustment transient is ~0.8 m/s at step 1 even when the domain is
+            # perfectly uniform and stays that way, so a whole-run peak would
+            # clear any sane convective threshold and the check would never fire.
+            if np.isfinite(max_w) and (i + 1) >= _diag_window_start:
+                _run_max_w = max(_run_max_w, max_w)
+                _diag_samples += 1
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
             max_qv = float(jnp.max(state.tracers.data[..., 0]))
@@ -1949,9 +2224,14 @@ def main():
             min_tr = float(jnp.min(state.tracers.data))
             mass = float(compute_dry_mass_plane(state, grid, hc, tm))
             rel = abs(mass - mass0) / abs(mass0)
+            s_liq, s_ice = _supersaturation_diag(state, hc)
+            if np.isfinite(s_liq) and (i + 1) >= _diag_window_start:
+                _run_max_s_liq = max(_run_max_s_liq, s_liq)
+                _run_max_s_ice = max(_run_max_s_ice, s_ice)
             line = (f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  "
                     f"{min_th:12.4e}  {max_th:12.4e}  {max_qv:9.3e}  "
-                    f"{rel:8.2e}  rho'={max_rhop:.2e} minTr={min_tr:.2e}")
+                    f"{rel:8.2e}  rho'={max_rhop:.2e} minTr={min_tr:.2e}"
+                    f" Smax={s_liq:.3f}/{s_ice:.3f}")
             if args.land:
                 Ts_min = float(jnp.min(land_T_sfc))
                 Ts_mean = float(jnp.mean(land_T_sfc))
@@ -1973,6 +2253,7 @@ def main():
             if bad or badtr:
                 print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
                       f"— aborting.")
+                _went_non_finite = True
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
@@ -2005,7 +2286,101 @@ def main():
             snap_dir, args.output / "profile_evolution.png",
         )
 
+    # CONV-TRIGGER #83 verdict. A convecting RCE reaches several m/s; a run that
+    # never broke symmetry sits at ~1e-4 m/s while still exiting 0 with a clean
+    # mass budget, which is exactly how a laminar run gets mistaken for a
+    # successful one. Report it rather than leaving the reader to notice.
+    _LAMINAR_MAX_W = 0.1  # m/s
+    if _went_non_finite:
+        # The run crashed. Reporting a peak |w| here would read as a health
+        # statistic for an integration that did not finish.
+        print(f"\n  *** RUN ABORTED NON-FINITE — the peak |w| of "
+              f"{_run_max_w:.3e} m/s is from the steps BEFORE the blow-up and "
+              f"says nothing about the intended integration.")
+    elif _diag_samples == 0:
+        # |w| is only sampled on print steps. If --print-every is coarse enough
+        # that none landed in the window, _run_max_w is still 0.0 and calling
+        # that "laminar" would libel a perfectly good convecting run.
+        print("\n  (no |w| samples in the second half of the run — "
+              "--print-every is too coarse to judge whether it convected; "
+              "no verdict)")
+    elif _run_max_w < _LAMINAR_MAX_W:
+        print(f"\n  *** LAMINAR RUN: peak |w| over the second half of the "
+              f"integration was {_run_max_w:.3e} m/s "
+              f"(< {_LAMINAR_MAX_W} m/s).")
+        print("  *** The domain never convected — it stayed a horizontally "
+              "uniform column.")
+        if args.radiation == "none" or args.turbulence_closure == "molecular":
+            # Not every use of this driver WANTS convection: DNS/LES closure
+            # probes and no-radiation dycore smokes are legitimately laminar,
+            # so state the fact without prescribing an RCE fix.
+            print("  *** (expected for a DNS/LES closure probe or a "
+                  "no-radiation dycore smoke — not a problem there.)")
+        elif args.theta_noise_amp <= 0.0:
+            print("  *** Cause: --theta-noise-amp is 0, so the initial state "
+                  "has NO perturbation to break symmetry.")
+            print("  *** Fix: --theta-noise-amp 0.1 --seed-kind band_noise "
+                  "--seed-kmax 8 (see docs/user-guide/rcemip1_crm.md).")
+        else:
+            print(f"  *** --theta-noise-amp is {args.theta_noise_amp}, so the "
+                  "seed was applied but did not grow; check the seed spectrum "
+                  "(--seed-kind/--seed-kmax) and the run length.")
+    else:
+        print(f"\n  peak |w| over the second half of the run: "
+              f"{_run_max_w:.2f} m/s")
+
+    # Supersaturation verdict. Warm-phase condensation is supposed to consume
+    # S_liq > 1 within a timestep; a sustained excess means the sink is too slow
+    # for dt (raise --microphysics-substeps). 2 % is the tolerance: seeing a few
+    # tenths of a percent on print steps is the normal condensation cycle.
+    _SUPERSAT_TOL = 1.02
+    if _diag_samples:
+        if _run_max_s_liq > _SUPERSAT_TOL:
+            print(f"  *** LIQUID SUPERSATURATION: peak S_liq = "
+                  f"{_run_max_s_liq:.3f} (> {_SUPERSAT_TOL}) over the second "
+                  f"half — condensation is not keeping up with dt; raise "
+                  f"--microphysics-substeps.")
+        else:
+            print(f"  peak S_liq = {_run_max_s_liq:.3f} (no liquid "
+                  f"supersaturation), peak S_ice = {_run_max_s_ice:.3f} "
+                  f"(ice supersaturation is physical)")
+
     print(f"\nOutput: {args.output}")
+
+
+def _supersaturation_diag(state, hc):
+    """Peak saturation ratio S = e/e_sat over the domain, liquid and ice.
+
+    Returned as ``(S_liq_max, S_ice_max)``. Liquid supersaturation is the
+    one that must not persist: the warm-phase microphysics is supposed to
+    remove it within a timestep, so a sustained ``S_liq >> 1`` means the
+    condensation sink is too slow for dt (see --microphysics-substeps).
+    Ice supersaturation IS physical (no liquid surface to condense on) and
+    is reported separately rather than flagged.
+
+    Reuses ``legoesm.thermo`` — no re-derived saturation numerics (#762).
+    """
+    from legoesm import constants
+    from legoesm.thermo import (
+        relative_humidity, saturation_vapor_pressure,
+        saturation_vapor_pressure_ice_flatau,
+    )
+    exner = hc.exner_ref                                       # (nlev,)
+    T = (hc.theta_ref + state.theta_prime.data) * exner        # (ny,nx,nlev)
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)     # (nlev,)
+    q_v = state.tracers.data[..., 0]
+    s = relative_humidity(T, p, q_v)
+    # Warm cells only for the liquid branch: below freezing there is no liquid
+    # surface to condense on, so S_liq > 1 there is not a model failure — it is
+    # the ice-supersaturated state, reported by s_ice.
+    s_liq = jnp.where(T >= constants.T_freeze, s, 0.0)
+    # S_ice = S * e_sat,liq / e_sat,ice, over the sub-freezing cells. Must be
+    # built from the UNMASKED ratio: masking s_liq first left s_ice ≡ 0 (the
+    # two masks are disjoint), i.e. a column that always read "no ice
+    # supersaturation" no matter what the run did.
+    ratio = saturation_vapor_pressure(T) / saturation_vapor_pressure_ice_flatau(T)
+    s_ice = jnp.where(T < constants.T_freeze, s * ratio, 0.0)
+    return float(jnp.max(s_liq)), float(jnp.max(s_ice))
 
 
 def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
@@ -2041,6 +2416,14 @@ def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
         updraft_mass_flux_plane, vertical_velocity_variance_plane,
     )
     cond = condensate_profile_plane(state, hc)
+    # Saturation ratio S = e/e_sat,liq per level: mean + domain max, so the
+    # supersaturation check is auditable from the saved profiles, not only
+    # from the stepwise log.
+    from legoesm import constants as _c
+    from legoesm.thermo import relative_humidity as _rh
+    S_liq = np.asarray(_rh(
+        T, _c.p_ref * pi_0 ** (1.0 / _c.kappa), q_v,
+    ))
     # Horizontal means over (ny, nx)
     np.savez(snap_dir / f"profile_step_{step:08d}.npz",
              step=step, t_s=t_s, z=np.asarray(hc.z_full),
@@ -2061,7 +2444,9 @@ def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
              q_precip_mean=np.asarray(cond.q_precip),
              cloud_fraction=np.asarray(
                  cloud_fraction_profile_plane(state, hc)),
-             rho_mean=(rho_0 + rho_p.mean(axis=(0, 1))))
+             rho_mean=(rho_0 + rho_p.mean(axis=(0, 1))),
+             S_liq_mean=S_liq.mean(axis=(0, 1)),
+             S_liq_max=S_liq.max(axis=(0, 1)))
 
 
 def _render_profile_evolution_png(snap_dir: Path, out: Path) -> None:
