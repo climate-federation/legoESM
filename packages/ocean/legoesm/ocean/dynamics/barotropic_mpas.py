@@ -295,6 +295,7 @@ def barotropic_substeps_mpas(
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
         eta_next = _clamp_redistribute(
             eta_next, eta_floor, mask, _area_cell,
+            n_iter=config.eta_floor_clamp_iters,
             owned_weight=_clamp_ow, force_global=_clamp_fg,
         )
 
@@ -394,6 +395,7 @@ def barotropic_substeps_mpas(
             ) * mask
             eta_next = _clamp_redistribute(
             eta_next, eta_floor, mask, _area_cell,
+            n_iter=config.eta_floor_clamp_iters,
             owned_weight=_clamp_ow, force_global=_clamp_fg,
         )
 

@@ -712,3 +712,113 @@ def test_driver_finalize_mpas_cmip_noop_without_writer(mesh):
     fake = types.SimpleNamespace(diagnostics=dc, _mpi_rank=None)
     ModelDriver._finalize_mpas_cmip(fake)          # must not raise
     assert getattr(fake, "_suppress_cmor_sidecar", False) is False
+
+
+def _stub_mpi_bcast(monkeypatch, value):
+    """Stub mpi4py so the guard's cross-rank agreement runs without a launcher.
+
+    `bcast` echoes ``value`` as rank 0's decision. Real mpi4py cannot be
+    imported in a bare pytest process on every machine (libmpi is not on the
+    loader path), and this test is about the AGREEMENT, not about MPI.
+    """
+    import sys
+
+    mpi = types.ModuleType("mpi4py.MPI")
+    mpi.COMM_WORLD = types.SimpleNamespace(bcast=lambda obj, root=0: value)
+    pkg = types.ModuleType("mpi4py")
+    pkg.MPI = mpi
+    monkeypatch.setitem(sys.modules, "mpi4py", pkg)
+    monkeypatch.setitem(sys.modules, "mpi4py.MPI", mpi)
+    return mpi
+
+
+def test_multi_rank_cmor_request_is_refused_not_warned(monkeypatch):
+    """#1517: asking for CMOR output on a lane that cannot produce it must
+    FAIL BEFORE ANY TIME STEPPING, not complete and write empty files hours
+    later. (Not at `setup()` — the call sits at the top of `_run_mpas`, before
+    its first collective and before the loop, which is what costs GPU-hours.)
+
+    The refusal must fire on EVERY rank: the inputs are config/layout-derived
+    and identical everywhere, so a rank-0-only raise would kill rank 0 and
+    hang the rest at the next collective.
+    """
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.delenv("LEGOESM_ALLOW_EMPTY_CMOR", raising=False)
+    _stub_mpi_bcast(monkeypatch, False)
+    for rank in (0, 1, 3):
+        drv = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=rank)
+        with pytest.raises(NotImplementedError, match="#1517"):
+            ModelDriver._require_mpas_cmip_feed_supported(
+                drv, feed_on=False, wants_cmip=True)
+
+
+def test_supported_and_uninterested_runs_are_untouched(monkeypatch):
+    """The guard must not fire when the feed works, nor when no CMOR output
+    was asked for — otherwise every serial run breaks."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.delenv("LEGOESM_ALLOW_EMPTY_CMOR", raising=False)
+    drv = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=0)
+    ModelDriver._require_mpas_cmip_feed_supported(
+        drv, feed_on=True, wants_cmip=True)      # serial / 1-rank: feeds
+    ModelDriver._require_mpas_cmip_feed_supported(
+        drv, feed_on=False, wants_cmip=False)    # no CMOR requested
+
+
+@pytest.mark.parametrize("value,should_raise", [("1", False), ("0", True),
+                                                ("yes", True)])
+def test_empty_cmor_override_requires_exact_1(monkeypatch, value, should_raise):
+    """Escape hatch matches the repo's other LEGOESM_ALLOW_* flags: exactly
+    "1". A launcher exporting =0 must NOT silently re-open the trap."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.setenv("LEGOESM_ALLOW_EMPTY_CMOR", value)
+    # Serial driver: exercises the env parsing itself, with no MPI in play
+    # (the cross-rank agreement has its own test below).
+    drv = types.SimpleNamespace(_mpi_world_size=2, _mpi_rank=None)
+    if should_raise:
+        with pytest.raises(NotImplementedError, match="#1517"):
+            ModelDriver._require_mpas_cmip_feed_supported(
+                drv, feed_on=False, wants_cmip=True)
+    else:
+        ModelDriver._require_mpas_cmip_feed_supported(
+            drv, feed_on=False, wants_cmip=True)
+
+
+def test_run_mpas_actually_calls_the_guard():
+    """Name the symbol that RUNS: the guard is worthless if `_run_mpas` stops
+    calling it. Fails if the call is deleted from the method that executes."""
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    src = inspect.getsource(ModelDriver._run_mpas)
+    assert "_require_mpas_cmip_feed_supported(" in src, (
+        "_run_mpas no longer invokes the #1517 empty-CMOR refusal")
+
+
+def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):
+    """The env var is the one genuinely PER-PROCESS input (codex).
+
+    An MPMD launcher exporting LEGOESM_ALLOW_EMPTY_CMOR to some ranks only
+    would otherwise send those onward while the rest raise — a hang, strictly
+    worse than the empty output being replaced. Rank 0's value must win
+    everywhere. Here rank 0 says "no override", so this non-root rank must
+    raise even though its OWN environment says otherwise.
+    """
+    from legoesm.driver.model_driver import ModelDriver
+
+    monkeypatch.setenv("LEGOESM_ALLOW_EMPTY_CMOR", "1")   # this rank only
+    mpi = _stub_mpi_bcast(monkeypatch, False)             # rank 0 says no
+    drv = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=2)
+    with pytest.raises(NotImplementedError, match="#1517"):
+        ModelDriver._require_mpas_cmip_feed_supported(
+            drv, feed_on=False, wants_cmip=True)
+
+    # ...and the converse: rank 0 allows it, so this rank proceeds even though
+    # its own environment never set the variable.
+    monkeypatch.delenv("LEGOESM_ALLOW_EMPTY_CMOR", raising=False)
+    mpi.COMM_WORLD = types.SimpleNamespace(bcast=lambda obj, root=0: True)
+    ModelDriver._require_mpas_cmip_feed_supported(
+        drv, feed_on=False, wants_cmip=True)

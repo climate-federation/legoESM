@@ -5311,8 +5311,19 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
     """Seed a fresh :class:`CLUBBMomentState` at rest (CAM-default floors).
 
     Means are zero (the bridge resets them from the live column each step);
-    velocity variances start at the floor ``tke_min`` (``w_tol^2`` scale), scalar
-    variances at their tolerance-squared floors, all fluxes and ``wp3`` zero.
+    velocity variances start at ``tke_min``, scalar variances at their
+    tolerance-squared floors, all fluxes and ``wp3`` zero.
+
+    .. warning::
+
+       ``tke_min`` (1e-6) is NOT the floor the prognostic core itself enforces:
+       ``advance_wp2_wp3`` floors ``wp2`` at ``w_tol**2`` (4e-4), 400x higher,
+       from its first advance.  The scalar variance solve runs BEFORE that
+       advance, so on step 1 the maximum-correlation floor
+       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divides by 1e-6 and writes an
+       unphysical surface ``thlp2`` (929 K^2 — a 30 K RMS fluctuation — on the
+       production column), which nothing subsequently lowers.  See #1508; this
+       docstring previously described the mismatch as intentional.
     ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
     """
     nzm = nlev + 1
