@@ -218,6 +218,16 @@ def main() -> int:
                         "avoiding), whole RK body inside shard_map. "
                         "Effective mode + depth recorded in the JSONL "
                         "row.")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Write a jax.profiler trace of the timed loop from "
+                        "ranks 0-3 (one node under block:block) into "
+                        "<dir>/rank<k>/. The chrome-format trace.json.gz "
+                        "gives per-thunk device spans — the gap/duration "
+                        "attribution nsys kept silently dropping collectives "
+                        "from (campaign 2026-08-07). Ranks 0-3 share a node "
+                        "clock, so cross-rank collective start-spread is "
+                        "measurable; collective END coincidence is the "
+                        "built-in calibration check.")
     p.add_argument("--timed-scan", action="store_true",
                    help="Time the steady window as ONE jit(lax.scan) of "
                         "(steps - warmup) steps with a single device sync, "
@@ -421,6 +431,13 @@ def main() -> int:
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
     scan_median_ms = None
+    _profiling = (args.profile_dir is not None
+                  and jax.process_index() < 4)
+    if _profiling:
+        import pathlib
+        _pdir = pathlib.Path(args.profile_dir) / f"rank{jax.process_index()}"
+        _pdir.mkdir(parents=True, exist_ok=True)
+        jax.profiler.start_trace(str(_pdir))
     for _ in range(args.warmup + 1 if args.timed_scan else args.steps):
         t0 = time.perf_counter()
         if physics_fn is not None:
@@ -450,6 +467,9 @@ def main() -> int:
         scan_median_ms = (time.perf_counter() - t0) * 1e3 / n_scan
         # Fill per_step_ms so the steady slice below stays meaningful.
         per_step_ms += [scan_median_ms] * n_scan
+
+    if _profiling:
+        jax.profiler.stop_trace()
 
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
