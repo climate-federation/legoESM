@@ -26,9 +26,9 @@ jnp = jax.numpy
 
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     _MAX_MAG_CORRELATION_FLUX,
+    CLUBBConfig,
     init_clubb_moments,
 )
-from legoesm.atmosphere.physics.turbulence.config import CLUBBConfig  # noqa: E402
 
 # The surface kinematic heat flux the dry convective deck delivers:
 # 70.03 W/m^2 / (rho c_pd exner) at the surface.
