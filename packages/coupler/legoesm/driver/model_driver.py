@@ -7473,6 +7473,19 @@ class ModelDriver:
         from legoesm.forcing.surface_utils import (
             blend_surface_property, blended_surface_albedo,
         )
+        # dynamic_albedo is a REAL ExperimentConfig option that the FV lane
+        # honours (physics_pipeline applies a zenith-angle-dependent ocean
+        # albedo). The MPAS blend below is static, so selecting it here would
+        # do nothing, silently — the "unknown/unimplemented selection quietly
+        # does something else" failure the dispatch-hardening rule exists to
+        # stop. Raise until the zenith curve is shared with this lane.
+        if bool(getattr(cfg, "dynamic_albedo", False)):
+            raise NotImplementedError(
+                "dynamic_albedo=True is not implemented on the MPAS lane: "
+                "the surface albedo handed to radiation here is the static "
+                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
+                "ocean curve the FV lane applies would be silently ignored. "
+                "Run the FV lane, or leave dynamic_albedo=False.")
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
         _albedo_land_static = None
