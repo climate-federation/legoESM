@@ -38,7 +38,7 @@ SOURCES = {
                 "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076, s10@128 26677812, "
-                "size-colouring A/B 26857404 (s9@64 8.11 ms)",
+                "size-colouring A/B 26857404 (s9@64 8.11 ms), ladder 26859802",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
     "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
@@ -75,7 +75,8 @@ PANELS = [
                 ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
                 ("f32 (s10 lloyd-0)", [(128, 18.20)]),
                 ("f32 s8@16+s9@32 ragged", [(16, 4.86), (32, 9.78)]),
-                ("f32 s9 size-colouring", [(64, 8.11)]),
+                ("f32 s9 size-colouring", [(16, 21.22), (32, 10.52), (64, 8.40)]),
+                ("f32 s10 size-colouring", [(128, 17.01)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
         note="size-colouring: 10.2→8.11 ms @64\n(−20%, padded bytes −26%, bit-identical)",
     ),
@@ -153,6 +154,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 LL2304 fused": "*",
            "f32 s8@16+s9@32 ragged": "*",
            "f32 s9 size-colouring": "X",
+           "f32 s10 size-colouring": "X",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v",
            "FESOM2 native (CORE2 ref)": "P"}

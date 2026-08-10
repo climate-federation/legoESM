@@ -2961,3 +2961,12 @@ remainder (upstream/redesign class): device-side collective launch
 (cube 155 us/collective floor, MPAS microkernel storm), XLA ragged
 zero-slice pruning (>32-device band), mpi4jax callback cost + BSP
 jitter (ocean CPU), stage-graph restructuring.
+
+### Post-landing ladder (jobs 26859802/26859803, size-colouring default)
+
+s9: 21.22 / 10.52 / 8.40 ms at 16/32/64 GPUs (-16% @32, -12.5% @64 vs
+the pre-colouring rows). **s10@128: 17.01 ms = 16.03 GC/s — new MPAS
+record** (previous 14.98 GC/s). Ragged auto-band check: ragged s9@32
+(9.78) still beats the new coloured 10.52 — the <=32 band stands, with
+the margin narrowed from 0.686 to 0.93; s8@16 re-arbitration deferred
+until that row is next refreshed.
