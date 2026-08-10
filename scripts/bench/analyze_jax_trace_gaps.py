@@ -113,9 +113,78 @@ def per_rank_summary(evs: list[dict]) -> dict:
     }
 
 
+def partner_aware_spread(summaries: dict, pm: dict, steps: int = 4,
+                         fills: int = 3) -> None:
+    """Cross-rank arrival spread using the SCHEDULE, not overlap.
+
+    ``pm`` = partner map: rank -> ordered [(round, partner), ...] it
+    participates in per fill. Per rank the traced event sequence is
+    (fills x participations + 1 allreduce) per step, so the k-th
+    participation of fill f of step s sits at a KNOWN index — no clock
+    needed for identification. For a pair (a, b) that are partners in
+    round r, the two paired SendRecv kernels END together (the transfer
+    completes on both sides), so per-pair end deltas estimate the
+    constant per-rank clock offset; the residual start delta after
+    removing it is the genuine arrival skew of that pair.
+    """
+    ranks = sorted(summaries)
+    part = {rk: pm["ranks"][rk.replace("rank", "")] for rk in ranks
+            if rk.replace("rank", "") in pm["ranks"]}
+
+    def idx(rank, step, fill, k):
+        p = len(part[rank])
+        return step * (fills * p + 1) + fill * p + k
+
+    for a_i in range(len(ranks)):
+        for b_i in range(a_i + 1, len(ranks)):
+            a, b = ranks[a_i], ranks[b_i]
+            if a not in part or b not in part:
+                continue
+            common = [(ka, kb, r)
+                      for ka, (r, pa) in enumerate(part[a])
+                      if pa == int(b.replace("rank", ""))
+                      for kb, (r2, pb) in enumerate(part[b]) if r2 == r]
+            if not common:
+                continue
+            ca, cb = summaries[a]["collectives"], summaries[b]["collectives"]
+            need_a = idx(a, steps - 1, fills - 1,
+                         max(k for k, _, _ in common)) + 1
+            need_b = idx(b, steps - 1, fills - 1,
+                         max(k for _, k, _ in common)) + 1
+            if len(ca) < need_a or len(cb) < need_b:
+                print(f"{a}-{b}: event count mismatch vs schedule "
+                      f"(a {len(ca)}<{need_a} or b {len(cb)}<{need_b}) — "
+                      f"sequence model wrong, NOT quotable")
+                continue
+            end_d, start_d, durs = [], [], []
+            for s in range(steps):
+                for f in range(fills):
+                    for ka, kb, r in common:
+                        _, sa, ea = ca[idx(a, s, f, ka)]
+                        _, sb, eb = cb[idx(b, s, f, kb)]
+                        end_d.append(eb - ea)
+                        start_d.append(sb - sa)
+                        durs.append(statistics.median([ea - sa, eb - sb]))
+            off = statistics.median(end_d)
+            resid_start = [abs(d - off) for d in start_d]
+            resid_end = [abs(d - off) for d in end_d]
+            print(f"{a}-{b}: {len(start_d)} partner pairs "
+                  f"(rounds {[r for _, _, r in common]}), clock offset "
+                  f"{off:+.1f} us")
+            print(f"    arrival skew  median {statistics.median(resid_start):7.1f}"
+                  f"  p90 {sorted(resid_start)[int(0.9 * len(resid_start))]:7.1f} us"
+                  f"   | end residual median {statistics.median(resid_end):5.1f} us"
+                  f"   | kernel median {statistics.median(durs):7.1f} us")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace-root", required=True, type=Path)
+    ap.add_argument("--partner-map", type=Path, default=None,
+                    help="JSON from the padding-audit job: schedule "
+                         "round->partner per rank. Enables partner-aware "
+                         "cross-rank arrival skew (the only quotable "
+                         "form — overlap matching pairs non-partners).")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -223,6 +292,11 @@ def main() -> int:
                 print(f"  p90    START spread : {sorted(c_spreads)[int(0.9 * len(c_spreads))]:8.1f} us")
                 print(f"  median END spread   : {statistics.median(c_ends):8.1f} us "
                       f"(must be ~0 by construction — self-consistency)")
+
+    if args.partner_map is not None:
+        pm = json.load(open(args.partner_map))
+        print("=== partner-aware arrival skew (schedule-matched) ===")
+        partner_aware_spread(summaries, pm)
 
     if args.out:
         with open(args.out, "w") as f:

@@ -1,10 +1,9 @@
 #!/bin/bash -l
 #SBATCH --job-name=mpas_pad_audit
 #SBATCH --account=bb1596
-#SBATCH --partition=shared
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --partition=compute
+#SBATCH --nodes=1
+#SBATCH --exclusive
 #SBATCH --time=02:00:00
 #SBATCH --output=mpas_pad_audit.%j.log
 # ===========================================================================
@@ -70,4 +69,33 @@ if padded / actual > 1.15:
     print("VERDICT: padding-aware recolouring is a REAL byte lever")
 else:
     print("VERDICT: inflation below the 1.15 bar — lever refuted offline")
+
+# Partner map for the trace analyzer's partner-aware matching (the
+# retracted cross-rank spread needs round -> partner, per rank): for
+# ranks 0..3, the ordered list of (round, partner) they participate in.
+# NB the TRACED runs use reorder_target=64 (bench --reorder-for 64),
+# NOT the 128 used for the padding numbers above — build BOTH.
+import json
+for tgt in (64, 128):
+    if tgt != 128:
+        mesh2 = create_voronoi_mesh(subdivision_level=9, lloyd_iterations=0)
+        mesh2 = reorder_voronoi_for_sharding(mesh2, tgt)
+        (_, _, _, _, _, mlc, mle, pts, own) = _build_voronoi_partition_infra(
+            mesh2, n_dev, halo_depth=SPMD_HALO_DEPTH)
+        sc = _build_ppermute_schedule(pts, own, n_dev, cells_per,
+                                      edges_per, mlc, mle)
+    else:
+        sc = sched
+    pm = {}
+    for rk in range(4):
+        seq = []
+        for r, perm in enumerate(sc["ppermute_perms"]):
+            partner = next((dst for src, dst in perm if src == rk), None)
+            if partner is not None:
+                seq.append([r, int(partner)])
+        pm[str(rk)] = seq
+    out = f"/scratch/b/b381103/legoesm_scaling/partner_map_s9_np64_rt{tgt}.json"
+    json.dump({"n_rounds": sc["n_rounds"], "ranks": pm}, open(out, "w"))
+    print(f"partner map (reorder_target={tgt}) -> {out}: "
+          f"rank0 participates in {len(pm['0'])} of {sc['n_rounds']} rounds")
 EOF
