@@ -246,10 +246,19 @@ def _non_gpu_platform_selected() -> bool:
     backend must not die for want of a GPU pin.  An unset/empty selection
     counts as GPU-possible (JAX defaults to CUDA when it is available).
     """
-    plats = os.environ.get(
-        "JAX_PLATFORMS", os.environ.get("JAX_PLATFORM_NAME", ""))
-    return bool(plats) and not any(
-        p.strip().lower() in ("cuda", "gpu") for p in plats.split(","))
+    # ``get(A, get(B))`` does NOT fall back when A is set-but-EMPTY: a stale
+    # ``export JAX_PLATFORMS=`` in the environment made an explicit
+    # ``JAX_PLATFORM_NAME=cpu`` invisible, so a CPU-only run could still hit
+    # the GPU-pin refusal.  Measured on Levante (job 26851115).
+    plats = (os.environ.get("JAX_PLATFORMS")
+             or os.environ.get("JAX_PLATFORM_NAME") or "")
+    # ``rocm`` is a GPU platform too (``expand_platform_alias`` maps ``gpu`` ->
+    # ``['cuda', 'rocm']``); classifying it as non-GPU would suppress the
+    # refusal on exactly the hardware it protects.  Empty entries from a
+    # trailing comma are dropped rather than counted as a non-GPU selection.
+    entries = [p.strip().lower() for p in plats.split(",") if p.strip()]
+    return bool(entries) and not any(
+        p in ("cuda", "rocm", "gpu") for p in entries)
 
 
 def _cuda_driver_fds_open() -> bool:

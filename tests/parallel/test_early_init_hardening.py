@@ -577,3 +577,47 @@ def test_hostname_undergrouping_falls_back_to_the_shm_split(monkeypatch):
     jax.distributed = types.SimpleNamespace(initialize=lambda **kw: None)
     assert ei.maybe_init_jax_distributed() is True
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+@pytest.mark.parametrize(
+    "jax_platforms, jax_platform_name, expect_non_gpu",
+    [
+        # A GPU selection, in every spelling JAX accepts.  `gpu` is an alias
+        # that expands to ['cuda', 'rocm'], and `rocm` IS a GPU platform:
+        # calling either "non-GPU" would suppress the pin refusal on exactly
+        # the hardware it protects (the dangerous direction).
+        ("cuda", None, False),
+        ("CUDA", None, False),
+        ("gpu", None, False),
+        ("rocm", None, False),
+        ("cuda,cpu", None, False),
+        ("cpu,cuda", None, False),
+        # A genuinely non-GPU selection.
+        ("cpu", None, True),
+        (" cpu ", None, True),
+        ("tpu", None, True),
+        # Unset / empty / punctuation-only: GPU is still possible, so the
+        # refusal must stay armed.  A bare "," used to read as a non-GPU
+        # selection and disarm it.
+        (None, None, False),
+        ("", None, False),
+        (",", None, False),
+        # The legacy singular variable is honoured when JAX_PLATFORMS is unset
+        # AND when it is set-but-empty -- `os.environ.get(A, get(B))` does not
+        # fall back on an empty string, which made a CPU-only run look like a
+        # GPU run and could fire the refusal on it.
+        (None, "cpu", True),
+        ("", "cpu", True),
+        ("", "cuda", False),
+    ],
+)
+def test_non_gpu_platform_selected_classifies_every_real_spelling(
+    monkeypatch, jax_platforms, jax_platform_name, expect_non_gpu
+):
+    for var, val in (("JAX_PLATFORMS", jax_platforms),
+                     ("JAX_PLATFORM_NAME", jax_platform_name)):
+        if val is None:
+            monkeypatch.delenv(var, raising=False)
+        else:
+            monkeypatch.setenv(var, val)
+    assert ei._non_gpu_platform_selected() is expect_non_gpu
