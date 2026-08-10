@@ -9,8 +9,9 @@ return ``False`` when the environment reports a single task.
 
 from __future__ import annotations
 
-import legoesm.parallel.early_init as early_init
+import pytest
 
+import legoesm.parallel.early_init as early_init
 
 _TASK_ENV_VARS = ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE")
 
@@ -66,6 +67,83 @@ def test_already_initialized_is_noop_without_jax_probe(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _guarded_import)
     assert early_init.maybe_init_jax_distributed() is False
+
+
+# ---------------------------------------------------------------------------
+# Per-rank GPU binding (#1516) on the SERIAL / early-return contract.
+#
+# The binding itself (``pin_local_gpu``) and the single-node multi-rank wiring
+# are covered in depth by ``tests/parallel/test_early_init_hardening.py``; this
+# file keeps only the two properties that belong to the serial-path contract
+# above: the pin must NOT fire for a single task, and it must happen BEFORE the
+# mpi4py import.
+#
+# Binding is always asserted from the env JAX will consume, never from a device
+# listing (nvidia-smi ignores CUDA_VISIBLE_DEVICES — the #1516 vacuous-guard
+# trap), so these run with no GPUs present.
+# ---------------------------------------------------------------------------
+
+_PIN_ENV_VARS = (
+    "CUDA_VISIBLE_DEVICES", "LEGOESM_HOST_CUDA_VISIBLE_DEVICES",
+    "LEGOESM_ALLOW_SHARED_GPU",
+    "PALS_LOCAL_RANKID", "OMPI_COMM_WORLD_LOCAL_RANK",
+    "MV2_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID",
+    "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+)
+
+
+def _clear_pin_env(monkeypatch):
+    """Clean launcher/visibility env; returns ``os`` for env assertions."""
+    import os
+
+    for var in _PIN_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(early_init, "_INITIALIZED", False)
+    return os
+
+
+def test_maybe_init_pins_before_mpi_import(monkeypatch):
+    """ORDERING GATE (jobs 26829100 / 26846811, fixed and re-verified).
+
+    A CUDA-aware MPI stack (Open MPI/UCX) initialises the CUDA driver during
+    MPI_Init, and the driver snapshots CUDA_VISIBLE_DEVICES at that first
+    initialisation — so a pin applied after ``from mpi4py import MPI`` is
+    silently IGNORED. The env var then reads correctly per rank while both
+    ranks sit on the SAME device, which is exactly the #1516 defect wearing
+    the costume of its own fix.
+
+    Proof by ordering: make the mpi4py import explode. Whatever the pin does,
+    it must ALREADY have happened by then. The launcher env alone
+    (SLURM_NTASKS + SLURM_LOCALID) carries enough to bind this rank, so an
+    implementation that pins early can satisfy this without a communicator.
+    """
+    import sys
+
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("SLURM_LOCALID", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setitem(sys.modules, "mpi4py", None)  # import -> ImportError
+
+    with pytest.raises(ImportError):
+        early_init.maybe_init_jax_distributed()
+
+    # Rank 1 of 2 must already be narrowed to the second visible device.
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_maybe_init_single_rank_never_pins(monkeypatch):
+    """A single process may legitimately drive MULTIPLE GPUs (the documented
+    eff=0.5 hazard): the serial path must stay pin-free and leave the
+    inherited visibility untouched."""
+    os = _clear_pin_env(monkeypatch)
+    monkeypatch.setenv("SLURM_NTASKS", "1")
+    monkeypatch.setenv("SLURM_LOCALID", "0")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+
+    assert early_init.maybe_init_jax_distributed() is False
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
 
 
 # ---------------------------------------------------------------------------

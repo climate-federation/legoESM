@@ -424,6 +424,24 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
         def extract_fn(s):
             return _extract_spectral_ocean(s, grid)
         return extract_fn
+    elif grid_type == "fesom":
+        # FESOM state is a 1-D NODE vector, structurally like MPAS's 1-D cell
+        # vector, so the MPAS extractor applies -- but only on the
+        # include_velocity_3d=False path. The True path calls
+        # reconstruct_cell_velocity(state.u, mesh), which reads MPAS edge
+        # connectivity that a FesomOceanGrid does not have.
+        if include_velocity_3d:
+            raise NotImplementedError(
+                "include_velocity_3d=True is not supported for grid_type "
+                "'fesom': the MPAS Perot reconstruction needs edge "
+                "connectivity the FESOM mesh does not expose. A dedicated "
+                "FESOM extractor is required."
+            )
+
+        def extract_fn(s):
+            return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=None,
+                                       include_velocity_3d=False)
+        return extract_fn
     elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         _mesh = grid if include_velocity_3d else None
         def extract_fn(s):

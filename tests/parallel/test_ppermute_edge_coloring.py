@@ -4,7 +4,7 @@ schedule (:func:`legoesm.parallel.sharded_dynamics._build_ppermute_schedule`).
 Each color is one bidirectional ppermute ROUND and the route-B lane is
 round-latency-bound (#1113), so the schedule builder picks the coloring
 with the fewest rounds across several deterministic first-fit orderings
-(``_multi_ordering_edge_coloring``). These tests pin:
+(``multi_ordering_edge_coloring``). These tests pin:
 
 - every candidate coloring is PROPER (no device sends/receives twice in a
   round) — a wrong coloring would collide two exchanges at a device;
@@ -21,8 +21,8 @@ import random
 import pytest
 from legoesm.parallel.sharded_dynamics import (
     _check_proper_edge_coloring,
-    _greedy_edge_coloring,
-    _multi_ordering_edge_coloring,
+    greedy_edge_coloring,
+    multi_ordering_edge_coloring,
 )
 
 
@@ -43,14 +43,14 @@ def test_multi_ordering_proper_and_no_regression(seed):
     pairs = _random_graph(rng, n, p)
     if not pairs:
         pytest.skip("empty graph")
-    colors, max_degree = _multi_ordering_edge_coloring(pairs)
+    colors, max_degree = multi_ordering_edge_coloring(pairs)
     # proper
     assert _check_proper_edge_coloring(colors, pairs)
     rounds = max(colors.values()) + 1
     # chromatic-index lower bound
     assert rounds >= max_degree
     # never worse than the legacy sorted greedy
-    greedy = _greedy_edge_coloring(pairs)
+    greedy = greedy_edge_coloring(pairs)
     assert rounds <= max(greedy.values()) + 1
 
 
@@ -63,7 +63,7 @@ def test_complete_graph_proper_and_bounded():
     invariants at high edge density."""
     for n in range(2, 12):
         pairs = {(i, j) for i in range(n) for j in range(i + 1, n)}
-        colors, max_degree = _multi_ordering_edge_coloring(pairs)
+        colors, max_degree = multi_ordering_edge_coloring(pairs)
         assert _check_proper_edge_coloring(colors, pairs)
         rounds = max(colors.values()) + 1
         assert max_degree <= rounds <= 2 * max_degree - 1
@@ -74,8 +74,8 @@ def test_deterministic_across_builds():
     build the same schedule)."""
     rng = random.Random(123)
     pairs = _random_graph(rng, 16, 0.5)
-    a, _ = _multi_ordering_edge_coloring(pairs)
-    b, _ = _multi_ordering_edge_coloring(pairs)
+    a, _ = multi_ordering_edge_coloring(pairs)
+    b, _ = multi_ordering_edge_coloring(pairs)
     assert a == b
 
 
@@ -86,7 +86,7 @@ def test_star_graph_single_round_floor():
     degree."""
     m = 10
     pairs = {(0, k) for k in range(1, m + 1)}
-    colors, max_degree = _multi_ordering_edge_coloring(pairs)
+    colors, max_degree = multi_ordering_edge_coloring(pairs)
     assert max_degree == m
     assert max(colors.values()) + 1 == m
     assert _check_proper_edge_coloring(colors, pairs)

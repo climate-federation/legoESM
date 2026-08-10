@@ -333,6 +333,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(\'crushing the midlatitude eddy-driven "
                              "jets\'). 0 relies on the scale-selective "
                              "4th-order hyperdiff alone.")
+    parser.add_argument("--k-h-scale", dest="k_h_scale", type=float,
+                        default=None,
+                        help="Separate scale for horizontal THERMAL diffusivity "
+                             "K_h (None = follow --a-h-scale, byte-identical). "
+                             "Lets momentum viscosity be reduced for the "
+                             "eddy-driven-jet response while keeping the "
+                             "thermal smoothing that suppresses vertical "
+                             "computational modes.")
     parser.add_argument("--mpas-nu-vert4-t", type=float,
                         default=_DYCORE_DEFAULTS.mpas_nu_vert4_T,
                         help="MPAS vertical biharmonic hyperdiffusion of T "
@@ -346,6 +354,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "max(q,0).  The naive clamp invents ~+30 kg/m2/yr "
                              "of water on a century AMIP run (measured); this "
                              "cuts that 10.4x.  Off = bit-identical to before.")
+    parser.add_argument("--mpas-vert-advection-scheme",
+                        choices=("upwind", "van_leer"),
+                        default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
+                        help="Vertical advection scheme on the MPAS sigma lane "
+                             "(theta, tracers, edge winds).  'upwind' (default) "
+                             "is first-order donor cell, whose implicit "
+                             "diffusion K_sigma=|sigma_dot|*dsigma/2 warms the "
+                             "tropical UTLS by +0.822 K/day (measured, 91.4 hPa). "
+                             "'van_leer' is the 2nd-order TVD alternative "
+                             "(bounded face reconstruction; monotone update "
+                             "under a Courant condition nu_k+nu_k+1<=1, "
+                             "derived for a UNIFORM grid -- measured max "
+                             "0.0642 on that run, 15.6x inside it; needs "
+                             "nlev>=4).  Default = bit-identical.")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -639,6 +661,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Matches ExperimentConfig.validate_strict — 'most' is "
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
+    parser.add_argument("--surface-stability-scheme", type=str,
+                        dest="surface_stability_scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        help="Stable-branch (zeta>0) Monin-Obukhov similarity "
+                             "functions for the surface layer (bulk_flux psi_m/"
+                             "psi_h). dyer1974 (default) is byte-identical: "
+                             "the short-tail -5*zeta on most/large_yeager, but "
+                             "on coare3 (the AMIP surface scheme) the "
+                             "COARE-native stable form, which is already the "
+                             "long-tail BH91 fit — so beljaars_holtslag1991 is "
+                             "a rounding-level change on coare3, and the "
+                             "genuinely different strong-stable tails there "
+                             "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
+                        default=None,
+                        help="Free-atmosphere diffusivity floor override "
+                             "[m^2/s] for turbulence schemes carrying kvf_min "
+                             "(holtslag_boville; scheme default 0.01). "
+                             "Causality probe for the polar-night stable-"
+                             "transport runaway; None keeps the scheme "
+                             "default byte-identically.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -1713,10 +1757,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         a_h_scale=args.a_h_scale,
+        k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
+        mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -1843,7 +1889,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gravity_wave_drag=args.gravity_wave_drag,
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
+        surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        hb_kvf_min=args.hb_kvf_min,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
@@ -2526,7 +2574,8 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
     return louis_config._replace(
         surface=louis_config.surface._replace(
             bulk_scheme=prev_surf.bulk_scheme,
-            gustiness_w_zi=prev_surf.gustiness_w_zi))
+            gustiness_w_zi=prev_surf.gustiness_w_zi,
+            stability_scheme=prev_surf.stability_scheme))
 
 
 def _apply_sundqvist_overrides(micro_config, args):
@@ -2737,21 +2786,47 @@ def main(argv: list[str] | None = None):
         pass
 
     config = build_config_from_args(args)
-    # Apply the --params calibration layer to the flattened atmosphere
-    # ExperimentConfig scalar fields (issue #691).
+    # Apply the --params calibration layer (issue #691) in two stages:
+    #   (1) parameters with a verified flat ExperimentConfig scalar go through
+    #       the scalar map PRE-setup (the pipeline builds their scheme configs
+    #       from those scalars);
+    #   (2) every other atm parameter routes into the BUILT pipeline's scheme
+    #       *Config NamedTuples POST-setup via apply_params_to_pipeline — the
+    #       CLUBB-style path that makes all spec'd closure constants settable
+    #       without a per-parameter scalar.  Deferred here, applied after
+    #       driver.setup() below.
+    _pipeline_params: dict = {}
     if getattr(args, "params", None):
         from legoesm.driver.run_config_yaml import (
             apply_params_to_config,
             build_atm_scalar_param_map,
             load_params_config,
         )
-        config = apply_params_to_config(
-            config, load_params_config(args.params), driver="run_amip",
-            scalar_param_map=build_atm_scalar_param_map())
+        # #1509: capture what --params actually applied. Class-routed
+        # values land on nested scheme configs that resolved_config does
+        # not reach, so without this the manifest records only the params
+        # FILE PATH and a reader months later cannot tell which values
+        # produced the run. Defined unconditionally so the driver
+        # threading below is well-defined even when nothing is mapped.
+        _params_applied: dict = {}
+        _all_params = load_params_config(args.params)
+        _scalar_map = build_atm_scalar_param_map()
+        _mapped = {q: v for q, v in _all_params.items() if q in _scalar_map}
+        _pipeline_params = {
+            q: v for q, v in _all_params.items() if q not in _scalar_map}
+        if _mapped:
+            config = apply_params_to_config(
+                config, _mapped, driver="run_amip",
+                scalar_param_map=_scalar_map,
+                record=_params_applied)
 
     from legoesm.driver.model_driver import ModelDriver
 
     driver = ModelDriver(config)
+    # Threaded onto the driver rather than through its constructor so no other
+    # caller's signature changes; the manifest writer reads it if present.
+    if "_params_applied" in dir():
+        driver._params_applied = _params_applied
     print("Setup...")
     driver.setup()
 
@@ -2801,6 +2876,48 @@ def main(argv: list[str] | None = None):
                 print(f"Sundqvist overrides: qc_crit={args.sundqvist_qc_crit} "
                       f"rh_crit={args.sundqvist_rh_crit} "
                       f"auto_rate={args.sundqvist_auto_rate}")
+
+    # Stage (2) of --params: class-routed overrides into the built pipeline's
+    # scheme configs.  Applied LAST — after the AIMIP-trained injection and the
+    # Sundqvist CLI overrides above — so an explicit calibration file wins over
+    # every other source (same precedence as the scalar-mapped stage, which
+    # wins over the ExperimentConfig defaults it replaces).
+    if _pipeline_params:
+        # LANE GUARD (mirrors the use_clubb_cloud_fraction guard in
+        # model_driver.run): the MPAS / spectral / lat-lon-SPMD / tiled-cube
+        # rollouts REBUILD their scheme configs from the flat ExperimentConfig
+        # (convection_config_for(cfg) etc.), not from driver.physics, so a
+        # post-setup override would be silently ignored there while this
+        # message claimed it was routed (codex review 2026-08-02). Refuse
+        # loudly; the scalar-mapped stage (1) still works in every lane.
+        _grid_t = config.grid.grid_type
+        _disc = config.dycore.discretization
+        _latlon_spmd = bool(getattr(config, "enable_latlon_spmd", False))
+        _devcfg = getattr(driver, "_device_config", None)
+        _tiled_cube = (
+            _grid_t == "cubed_sphere" and _devcfg is not None
+            and getattr(_devcfg, "mesh", None) is not None
+            and tuple(getattr(_devcfg, "tiling", (1, 1))) != (1, 1))
+        if _grid_t == "mpas" or _disc == "spectral" \
+                or _latlon_spmd or _tiled_cube:
+            raise SystemExit(
+                "--params: scheme-config parameter(s) "
+                f"{sorted(_pipeline_params)} route into the built pipeline's "
+                "config attributes, which the MPAS / spectral / lat-lon-SPMD "
+                "/ tiled-cube rollouts do not consume (they rebuild configs "
+                "from the flat ExperimentConfig). Got "
+                f"grid={_grid_t!r}, discretization={_disc!r}, "
+                f"latlon_spmd={_latlon_spmd}, tiled_cube={_tiled_cube}. "
+                "Use scalar-mapped parameters (build_atm_scalar_param_map) "
+                "in these lanes, or run the single-device per-step lane."
+            )
+        from legoesm.driver.run_config_yaml import apply_params_to_pipeline
+        _applied = apply_params_to_pipeline(
+            driver.physics, _pipeline_params, driver="run_amip")
+        if _is_root:
+            print(f"--params: routed {len(_applied)} scheme-config "
+                  f"parameter(s) into the built pipeline: "
+                  f"{', '.join(sorted(_applied))}")
 
     if _is_root:
         _print_forcing_activity(args)

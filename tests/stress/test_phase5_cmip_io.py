@@ -98,7 +98,10 @@ class TestCFWriterAmon:
         # Check a sample file
         ds = xr.open_dataset(nc_files[0])
         assert "Conventions" in ds.attrs
-        assert ds.attrs["Conventions"] == "CF-1.8"
+        # "CF-1.8" is REJECTED by the CMIP6 CV, whose Conventions regex is
+        # ^CF-1.7 CMIP-6.[0-2]( UGRID-1.0){0,}$ -- the value now comes from
+        # the vendored table Header instead of a hand-typed string.
+        assert ds.attrs["Conventions"] == "CF-1.7 CMIP-6.2"
         assert "experiment_id" in ds.attrs
         ds.close()
 
@@ -193,12 +196,24 @@ class TestCFWriterOmonAday:
         lon = np.linspace(0, 348.75, 16)
         data = np.random.randn(8, 16).astype(np.float32) + 280
 
-        for var_name in CMOR_TABLES["Aday"]:
-            path = writer.write_field(
-                var_name=var_name, data=data,
-                time=0.5, time_bounds=(0.0, 1.0),
-                lat=lat, lon=lon, table="Aday",
-            )
+        # ``Aday`` is the legacy alias for the CMIP6 ``day`` table.  Its
+        # ``ua``/``va`` are plev8 variables, so they need a pressure axis;
+        # ``rsut`` is no longer here at all (it is a ``CFday`` variable --
+        # it does not exist in the CMIP6 ``day`` table).
+        assert "rsut" not in CMOR_TABLES["Aday"]
+        for var_name, entry in CMOR_TABLES["Aday"].items():
+            if "plev" in entry["dimensions"]:
+                path = writer.write_field(
+                    var_name=var_name, data=data[np.newaxis, ...],
+                    time=0.5, time_bounds=(0.0, 1.0),
+                    lat=lat, lon=lon, plev=np.array([85000.0]), table="Aday",
+                )
+            else:
+                path = writer.write_field(
+                    var_name=var_name, data=data,
+                    time=0.5, time_bounds=(0.0, 1.0),
+                    lat=lat, lon=lon, table="Aday",
+                )
             assert path.exists(), f"Aday {var_name} not written"
 
 

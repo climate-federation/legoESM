@@ -1052,23 +1052,42 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     )
 
 
-def apply_spectral_filter_to_state(state, spectral_filter):
-    """Apply exponential spectral filter to all prognostic fields.
+def apply_spectral_filter_to_state(state, spectral_filter, *,
+                                   filter_lnps: bool = False):
+    """Apply exponential spectral filter to the prognostic fields.
+
+    ``lnps`` is NOT filtered by default. Filtering it damps the
+    high-wavenumber surface pressure every step while the static orography
+    ``phis_hat`` keeps its full truncation sharpness, so the terrain-locked
+    fine structure hydrostatic balance requires is destroyed within hours:
+    measured on the T63L8 AIMIP configuration, 36 steps of the 0.01-strength
+    filter turn a 213 Pa fixed p_s offset (unfiltered) into 1108 Pa,
+    land-concentrated (1595 Pa land / 736 Pa ocean), physics-independent.
+    The vor/div cascade this filter exists for does not involve lnps. If a
+    long-rollout lnps spectral tail ever needs damping, add a WEAK dedicated
+    term (or co-truncate phis to match) rather than re-enabling this one —
+    at 0.01/step it is ~1e-72 at degree 63 after 6 h.
 
     Parameters
     ----------
     state : SpectralHydrostaticState
     spectral_filter : jax.Array, shape (n_sh,)
         Multiplicative filter per spectral coefficient.
+    filter_lnps : bool
+        Also filter ``lnps_hat`` (legacy behaviour). Only the SFNO
+        state-update path keeps this on, because its shipped checkpoints were
+        trained and scored under it.
     """
     sf_3d = spectral_filter[:, None]  # (n_sh, 1) for 3D fields
     sf_2d = spectral_filter           # (n_sh,) for 2D fields
 
+    new_lnps = (state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d)
+                if filter_lnps else state.lnps_hat)
     return state._replace(
         vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf_3d),
         div_hat=state.div_hat.replace(data=state.div_hat.data * sf_3d),
         T_hat=state.T_hat.replace(data=state.T_hat.data * sf_3d),
-        lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d),
+        lnps_hat=new_lnps,
     )
 
 
@@ -1143,6 +1162,52 @@ def apply_filter_to_tracers(tracers, multiplicative_filter, grid):
         else:
             out[name] = out_data.astype(value.dtype)
     return out
+
+
+# =============================================================================
+# Global dry mass on sigma coordinates (free functions)
+#
+# The anchored-mass fixer used to live only as methods on
+# ``SpectralPrimitiveEquationModel``. The AIMIP / learned-physics lane does not
+# use that class — it integrates through the functional
+# ``legoesm.training.neural_gcm_spectral.spectral_rollout`` — so the fixer was
+# unreachable there, and both AIMIP dycore arms (classical, column_nn) drifted.
+# The math lives here once; the class methods below delegate.
+# =============================================================================
+
+def global_dry_mass(grid, lnps_hat) -> jnp.ndarray:
+    """Area integral ``∫ p_s dA`` [Pa m^2] from spectral ``lnps``.
+
+    Accumulated in float64 regardless of the state dtype: this is a global
+    reduction whose whole purpose is to resolve a slow secular drift, and an
+    fp32 sum over ~10^4 cells loses exactly the digits being measured.
+    """
+    p_s_grid = jnp.exp(sh_synthesis(grid, lnps_hat))
+    acc = jnp.float64
+    return jnp.sum(p_s_grid.astype(acc) * grid.grid_area.astype(acc))
+
+
+def anchor_lnps_to_mass(grid, state, target_mass):
+    """Rescale the ``lnps`` mean so ``∫ p_s dA`` returns to ``target_mass``.
+
+    With the ``(4π)``-normalised real-SH convention this module uses,
+    ``sh_analysis(ones)[0] = sqrt(4π)``, so adding a constant ``Δ`` to ``lnps``
+    in physical space is adding ``Δ·sqrt(4π)`` to ``lnps_hat[0]``. Solving
+    ``Δ = log(target/current)`` makes the correction MULTIPLICATIVE in ``p_s``,
+    which leaves every ``p_s`` gradient (and hence the pressure-gradient force)
+    exactly unchanged — the log-space twin of the additive uniform ``fix_ps_mass``
+    used on the cubed-sphere / lat-lon C-grid lanes.
+
+    Differentiable and jit-safe: ``target_mass`` is a traced argument, never
+    stored on an object.
+    """
+    mass_now = global_dry_mass(grid, state.lnps_hat.data)
+    log_scale = jnp.log(jnp.asarray(target_mass, dtype=jnp.float64) / mass_now)
+    sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=jnp.float64))
+    lnps_hat_new = state.lnps_hat.data.at[0].add(
+        (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
+    )
+    return state._replace(lnps_hat=state.lnps_hat.replace(data=lnps_hat_new))
 
 
 # =============================================================================
@@ -1564,22 +1629,7 @@ class SpectralPrimitiveEquationModel:
         """
         if target_mass is None:
             target_mass = self._target_mass
-        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
-        p_s_grid = jnp.exp(lnps_grid)
-        acc = jnp.float64
-        mass_now = jnp.sum(
-            p_s_grid.astype(acc) * self.grid.grid_area.astype(acc),
-        )
-        log_scale = jnp.log(target_mass / mass_now)
-        # sqrt(4π) is the (0,0) coefficient of a constant=1 field under
-        # the (4π)-normalised real-SH convention this module uses.
-        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
-        lnps_hat_new = state.lnps_hat.data.at[0].add(
-            (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
-        )
-        return state._replace(
-            lnps_hat=state.lnps_hat.replace(data=lnps_hat_new),
-        )
+        return anchor_lnps_to_mass(self.grid, state, target_mass)
 
     def _maybe_snapshot_target_mass(self, state) -> None:
         """First-call anchored-mass snapshot, shared by step()/integrate().
@@ -1604,12 +1654,7 @@ class SpectralPrimitiveEquationModel:
 
     def _compute_initial_mass(self, state):
         """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
-        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
-        p_s_grid = jnp.exp(lnps_grid)
-        return jnp.sum(
-            p_s_grid.astype(jnp.float64)
-            * self.grid.grid_area.astype(jnp.float64),
-        )
+        return global_dry_mass(self.grid, state.lnps_hat.data)
 
     def compute_mass(self, state) -> jax.Array:
         """Public alias of ``_compute_initial_mass`` (iter-22).

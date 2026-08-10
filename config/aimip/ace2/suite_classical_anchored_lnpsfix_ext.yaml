@@ -1,0 +1,38 @@
+# CLASSICAL, lnps-fix + anchored, with the EXTENDED spec-driven parameter
+# tier ON — one variable vs suite_classical_anchored_lnpsfix.yaml.
+#
+# Field-level ownership (2026-08-10) makes this add 22 NEW trainable leaves
+# on the base combo: 5 ConvectiveEDMF (the active convection previously
+# trained NOTHING), 10 CloudConfig, 5 Sundqvist (incl. qc_crit), McFarlane
+# fcrit2, Louis b_heat_ratio — on top of the 68 live legacy leaves.
+#
+# An ozone trio was briefly added here and REVERTED: those parameters are
+# inert in this factory (source="standard" makes RRTMGP use its own built-in
+# profile) and the trainable peak pressure lies above the model's highest
+# full level (~109 hPa). See aimip_scheme_keys_for.
+#
+#   CONFIRMS: startup log reports 22 spec-driven parameters; training loss
+#             at matched epoch+lead below the lnpsfix baseline, with the
+#             bias_T term (99% of the bias penalty) the one that moves.
+#   REFUTES:  no loss improvement -> the missing EDMF/cloud knobs were not
+#             the binding constraint on the classical arm.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  aimip_trainable_schemes: extended
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_classical_lnpsfix_ext

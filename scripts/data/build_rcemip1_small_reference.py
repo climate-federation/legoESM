@@ -17,8 +17,12 @@ Wing-2018 RCEMIP profiles.
 RCEMIP (Wing et al. 2018, GMD 11:793; results in Wing et al. 2020, JAMES) is
 designed so resolved CRMs relax *toward* this analytic mean state, so the Wing
 temperature and humidity profiles ARE the community RCEMIP1 reference for T and
-q_v.  The tropopause cold point is ``T_v0 - Gamma*z_t = 295 - 0.0067*15000 =
-194.5 K`` at 15 km, isothermal above — the proper RCEMIP1 tropopause.
+q_v.  The analytic tropopause cold point is ``T_v0 - Gamma*z_t`` with
+``T_v0 = T0*(1 + 0.608*q0) = 303.4 K`` (Wing Eq. 3) = 202.9 K at 15 km,
+isothermal above.  NOTE this is the ANALYTIC INITIAL state: resolved RCEMIP
+runs equilibrate to a colder cold point (~194-198 K) over 100 days, so scoring
+a cold-point temperature against this stand-in measures distance from the IC,
+not from the published equilibrium.
 
 Provenance and caveats (written into the bundle ``README``):
 - ``T``, ``q_v``: Wing-2018 analytic profiles (``rcemip_initial_conditions``),

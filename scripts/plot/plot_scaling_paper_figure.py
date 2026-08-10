@@ -35,11 +35,12 @@ SOURCES = {
                   "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
+                "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076, s10@128 26677812",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
-    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039",
+    "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
     "oc_tripole": "26493837/26493648",
     "oc_mpas": "26494036 (f64), 26494908 (f32)",
 }
@@ -71,8 +72,9 @@ PANELS = [
                 ("float32 (subdiv-9)", [(32, 12.47), (64, 9.60), (128, 11.48)]),
                 ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
                 ("f32 (s10 lloyd-0)", [(128, 18.20)]),
+                ("f32 s8@16+s9@32 ragged", [(16, 4.86), (32, 9.78)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="s10@128 = 15.0 GC/s (record);\nweak 4x-cost decelerates 1.90→1.46",
+        note="ragged halo −31% @16 (A/B, #1534);\nscale-banded: loss ≥64 (zero-slice cost)",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -92,8 +94,9 @@ PANELS = [
         series=[("float32", [(1, 36.45), (2, 22.48), (4, 12.84), (8, 11.04), (16, 8.71)]),
                 ("float64", [(1, 64.81), (2, 41.63), (4, 22.09)]),
                 ("mixed (f64 store)", [(1, 52.80), (4, 19.13)]),
-                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)])],
-        note="LL2304@128 = 13.0 GC/s\n(post-fix hundreds receipts)",
+                ("f32 (LL2304)", [(96, 18.25), (128, 16.33)]),
+                ("f32 LL2304 fused", [(128, 15.807)])],
+        note="fused halo @128 = 15.81 ms\n= 13.4 GC/s (\u22124.9 %; overlap null)",
     ),
     dict(
         key="oc_tripole", title="tripole (ORCA fold)", sub="576×1152 L20 · A100 NCCL",
@@ -124,6 +127,8 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
+          "f32 LL2304 fused": "#000000",
+          "f32 s8@16+s9@32 ragged": "#000000",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00"}
 MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
@@ -136,6 +141,8 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
+           "f32 LL2304 fused": "*",
+           "f32 s8@16+s9@32 ragged": "*",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v"}
 

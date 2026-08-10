@@ -433,3 +433,16 @@ class RadiationConfig(NamedTuple):
     # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
     # fraction (byte-identical).
     use_clubb_cloud_fraction: bool = False
+    # Clear-sky TOA diagnostic (#843, lean-lane port): run a SECOND clouds-off
+    # radiation pass per radiation step and attach ``sw_up_toa_clr`` /
+    # ``lw_up_toa_clr`` to the tendency bundle for the CMOR rsutcs/rlutcs feed
+    # (SW_CRE = rsut - rsutcs, LW_CRE = rlutcs - rlut).  Aerosols/ozone/GHG are
+    # KEPT, only the cloud optics are dropped (CMIP "assuming clear sky").
+    # Consumed by the LEAN hydrostatic/MPAS radiation factory
+    # (``_make_hydrostatic_radiation``); the compiled cube/lat-lon lane keeps
+    # its own gate (``PhysicsPipeline._clear_sky_diag``).  Drivers set it from
+    # ``OutputConfig.clear_sky_diag`` (the ``--clear-sky-diag`` CLI flag);
+    # ``make_radiation_physics`` raises on model types without the second-pass
+    # wiring rather than silently ignoring it.  Static Python bool (never
+    # traced); ``False`` (default) adds no ops — byte-identical.
+    clear_sky_diag: bool = False

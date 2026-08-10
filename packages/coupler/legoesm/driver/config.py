@@ -243,6 +243,31 @@ class DycoreConfig(NamedTuple):
     # sponge/polar-filter passthrough).  Appended last to preserve
     # positional ABI (codex #1029 r3 #2).
     sb81_omega_conversion: bool = False
+    # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
+    # a_h_scale exactly as before, byte-identical).  Decouples the circulation
+    # lever (momentum nu_del2) from the thermal smoothing that damps vertical
+    # computational modes.  WIRED ONLY into the MPAS thermal diffusion path;
+    # validate_strict refuses it on other discretizations (silently-inert
+    # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
+    # to preserve the positional ABI (codex review).
+    k_h_scale: float | None = None
+    # Vertical advection scheme on the MPAS SIGMA lane ("upwind" | "van_leer").
+    # First-order upwind's implicit diffusion K_σ = |σ̇|·Δσ/2 is +0.822 K/day at
+    # the tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd, N=37) — larger
+    # than the whole production temperature tendency there and 2.1x the
+    # radiative cooling.  "van_leer" is the 2nd-order TVD alternative: bounded
+    # face reconstruction, monotone update under a Courant condition
+    # ~ nu_k + nu_{k+1} <= 1 DERIVED FOR A UNIFORM GRID (stretched grids and
+    # varying sigma_dot have regression evidence only — see the kernel
+    # docstring).  Measured global max of that pair on that run: 0.0642, 15.6x
+    # inside the uniform-grid bound, from 37 checkpoint snapshots.
+    # Requires nlev >= 4.
+    # WIRED ONLY into the MPAS sigma lane; validate_strict refuses it on other
+    # discretizations / vertical coordinates rather than let it run silently
+    # inert.  Default "upwind" keeps every existing result bit-identical.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
+    # callers, not full tuple ABI (exact unpacking / len() still break).
+    mpas_vert_advection_scheme: str = "upwind"
 
 
 class EvaluationConfig(NamedTuple):
@@ -544,7 +569,8 @@ class ExperimentConfig(NamedTuple):
     #                          cloud (lower albedo).  Bounds (0.5, 0.99).
     #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
     #                          optically THINNER cloud (lower albedo, still
-    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
+    #                          was widened from 5e-5; see validate_strict.
     #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
@@ -630,8 +656,9 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Hard (iterated) saturation-adjustment guard for the warm-rain schemes
-    # (kessler/seifert_beheng/morrison/thompson/p3): where q_v exceeds the
+    # Hard (iterated) saturation-adjustment guard, carried by EVERY guarded
+    # scheme (microphysics/config.HARD_SAT_GUARD_SCHEMES: the five bulk
+    # warm-rain ones plus sundqvist and ml_emulator): where q_v exceeds the
     # scheme's hard_sat_adjust_threshold * q_sat, an iterated saturation
     # adjustment drains q_v ONTO the liquid saturation curve (conserving
     # c_pd*T + L_v*q_v exactly), rate-limited to hard_sat_max_heating_K per step,
@@ -733,9 +760,12 @@ class ExperimentConfig(NamedTuple):
     # surface bulk schemes.  Threaded into BOTH the atmosphere
     # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
     # run_coupled so the two sides of the interface always use the SAME
-    # stable functions ("dyer1974" default = byte-identical -5*zeta;
-    # "grachev2007_sheba"/"gryanik2020" = SHEBA Arctic forms;
-    # "beljaars_holtslag1991").
+    # stable functions ("dyer1974" default = byte-identical: -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the COARE-native
+    # stable form on coare3 — itself BH91 with rounded constants, so on
+    # coare3 selecting "beljaars_holtslag1991" is a rounding-level change and
+    # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
+    # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
@@ -898,8 +928,13 @@ class ExperimentConfig(NamedTuple):
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
-    # outbound internet, so stage the file and set this).  Ignored unless
-    # use_multilayer_land is True.
+    # outbound internet, so stage the file and set this).  The multilayer soil
+    # column reads it only when use_multilayer_land is True; ADDITIONALLY (and
+    # regardless of use_multilayer_land) a staged path supplies RADIATION's
+    # static land albedo via the ERA5-tuned CLM map when neither
+    # albedo_land_path nor surfdata_path is set — a slab/no-land-model AMIP run
+    # staging this file deliberately gets the calibrated albedo instead of the
+    # latitude fallback (2026-08-10; previously the fallback silently won).
     clm_surfdata_path: str = ""
 
     # Transient land-use/land-cover (LULC).  ``land_cover_surfdata`` is a harmonized
@@ -1383,6 +1418,15 @@ class ExperimentConfig(NamedTuple):
     # Appended at the tuple END to preserve the positional ABI.
     land_interface_flux: str = "legacy_dual"
 
+    # Free-atmosphere diffusivity floor override [m^2/s] for schemes carrying a
+    # ``kvf_min`` field (holtslag_boville).  None = scheme default (byte-
+    # identical).  CAUSALITY-PROBE knob for the polar-night stable-transport
+    # runaway (interior K floors at kvf_min under a surface inversion while the
+    # LW deficit is tens of W/m^2); the paper-grade remedy is an interior
+    # stable-tail selector, not this floor.  Appended at the tuple END to
+    # preserve the positional ABI.
+    hb_kvf_min: float | None = None
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -1832,10 +1876,49 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020")
+        # A tiled surface WITH REAL LAND is exempt from the second check
+        # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
+        # (physics_pipeline ~:701), so it INHERITS the injected
+        # stability_scheme and runs the land Monin-Obukhov law with it — real
+        # land fluxes move even though the top-level scheme is "constant"
+        # (codex R3 P2: the first form of that guard was too broad and would
+        # have rejected this working configuration).  "Real land" is the same
+        # predicate used elsewhere in this method: an explicit mask, or an
+        # active tile with a topography that actually derives f_land > 0 —
+        # topography="flat" gives f_land == 0 everywhere, so the tiled path
+        # never engages and the scheme would be diagnostic-only again
+        # (codex R4 P2).
+        _tiled_with_real_land = self.surface_tiled and bool(
+            self.land_mask_path
+            or ((self.slab_land_active or self.use_multilayer_land)
+                and self.topography != "flat"))
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
                 f"got {self.surface_stability_scheme!r}"
+            )
+        # The stability selector only acts on the STABLE branch of the
+        # iterative MOST solver, and surface_layer.compute_surface_fluxes
+        # routes ONLY ("most", "coare3", "large_yeager") through that solver —
+        # bulk_scheme="constant" takes the constant-Cd path and ignores
+        # stability entirely.  But the 2 m diagnostic (diagnostics.py) builds
+        # a COARE profile with the selected scheme regardless, so the pair
+        # would leave the physics untouched while MOVING the published tas.
+        # A knob that changes only the diagnostic is worse than an inert one
+        # (codex review P2) — reject it, unless _tiled_with_real_land above.
+        elif (self.surface_stability_scheme != "dyer1974"
+                and self.surface_bulk_scheme == "constant"
+                and not _tiled_with_real_land):
+            errors.append(
+                f"surface_stability_scheme="
+                f"{self.surface_stability_scheme!r} needs a "
+                f"stability-dependent surface_bulk_scheme ('coare3' or "
+                f"'large_yeager' — 'most' is a turbulence-config bulk_scheme, "
+                f"not an experiment-level one, and VALID_SURFACE_BULK "
+                f"rejects it), or surface_tiled=True whose land tile runs "
+                f"MOST; with 'constant' and untiled surfaces the fluxes "
+                f"ignore the stable branch entirely and only the 2 m "
+                f"diagnostic would move."
             )
         # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
         # (via _resolve_turbulence on the turbulence config).  With
@@ -2169,14 +2252,22 @@ class ExperimentConfig(NamedTuple):
         # would do nothing.  Reject it at config time (codex F3) rather than let
         # it silently no-op.  Same scheme set as the fail-loud runtime raise in
         # microphysics/config.apply_microphysics_experiment_flags.
-        _warm_rain_micro = (
-            "kessler", "seifert_beheng", "morrison", "thompson", "p3")
+        # Single source of truth (never re-listed here): the schemes that carry
+        # the guard live in microphysics/config.HARD_SAT_GUARD_SCHEMES, with the
+        # verified exemption reasons in HARD_SAT_GUARD_EXEMPT.  A hardcoded copy
+        # of the tuple silently drifted out of date when sundqvist/ml_emulator
+        # gained the guard.
+        from legoesm.atmosphere.physics.microphysics.config import (
+            HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES,
+        )
         if (self.hard_saturation_adjustment
-                and self.microphysics not in _warm_rain_micro):
+                and self.microphysics not in HARD_SAT_GUARD_SCHEMES):
+            _why = HARD_SAT_GUARD_EXEMPT.get(self.microphysics, "")
             errors.append(
-                "hard_saturation_adjustment requires a warm-rain microphysics "
-                f"scheme {_warm_rain_micro}; got microphysics="
-                f"{self.microphysics!r} (the guard would be silently inert)."
+                "hard_saturation_adjustment requires a microphysics scheme "
+                f"carrying the guard {HARD_SAT_GUARD_SCHEMES}; got "
+                f"microphysics={self.microphysics!r} (the guard would be "
+                f"silently inert). {_why}".rstrip()
             )
         # gs_max is a physical conductance [mol/m2/s]: must be finite and
         # strictly positive (nan/<=0 would zero or NaN the whole land latent
@@ -2194,6 +2285,69 @@ class ExperimentConfig(NamedTuple):
                 f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
                 f"entrainment A) must be finite and in [0, 1]; got "
                 f"{self.louis_cloudtop_entrainment_efficiency!r}."
+            )
+        # k_h_scale: negative is anti-diffusive (rejected); wired ONLY into
+        # the MPAS thermal diffusion — refuse elsewhere rather than run inert.
+        if d.k_h_scale is not None:
+            if not isinstance(d.k_h_scale, (int, float)) or not (
+                    0.0 <= float(d.k_h_scale) <= 100.0):
+                errors.append(
+                    f"dycore.k_h_scale must be None or finite in [0, 100]; "
+                    f"got {d.k_h_scale!r}.")
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.k_h_scale is only wired into the MPAS thermal "
+                    "diffusion path; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Unset it or use the MPAS lane.")
+        # Vertical advection scheme: membership first, then the same
+        # silently-inert refusal as k_h_scale (MPAS + sigma only).
+        _vert_adv_options = ("upwind", "van_leer")
+        if d.mpas_vert_advection_scheme not in _vert_adv_options:
+            errors.append(
+                f"dycore.mpas_vert_advection_scheme must be one of "
+                f"{_vert_adv_options}, got {d.mpas_vert_advection_scheme!r}")
+        elif d.mpas_vert_advection_scheme != "upwind":
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is only wired into the "
+                    "MPAS dycore; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use the MPAS lane.")
+            if g.vertical_coord != "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is implemented for the "
+                    "sigma vertical coordinate only; on vertical_coord="
+                    f"{g.vertical_coord!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use vertical_coord='sigma'.")
+            # The van-Leer stencil is 4 cells wide.  Reject here rather than
+            # deep inside the traced kernel (codex round 3).
+            if g.nlev < 4:
+                errors.append(
+                    f"dycore.mpas_vert_advection_scheme="
+                    f"{d.mpas_vert_advection_scheme!r} needs at least 4 "
+                    f"vertical levels for its 4-cell stencil; grid.nlev="
+                    f"{g.nlev}.")
+        # Free-atmosphere diffusivity-floor override: None, or finite in
+        # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
+        if self.hb_kvf_min is not None and (
+                not isinstance(self.hb_kvf_min, (int, float))
+                or not (0.0 < float(self.hb_kvf_min) <= 10.0)):
+            errors.append(
+                f"hb_kvf_min (free-atmosphere diffusivity floor [m^2/s]) must "
+                f"be None or finite in (0, 10]; got {self.hb_kvf_min!r}."
+            )
+        # ...and it is only consumed by a turbulence scheme whose nested
+        # config carries a ``kvf_min`` field (holtslag_boville).  On any other
+        # scheme _resolve_turbulence_config finds no field and the _replace
+        # never happens, so the run would proceed with the knob silently
+        # inert (codex review P2; same class as the k_h_scale lane guard).
+        elif self.hb_kvf_min is not None and self.turbulence != "holtslag_boville":
+            errors.append(
+                f"hb_kvf_min is consumed only by the holtslag_boville "
+                f"free-atmosphere diffusivity floor; with "
+                f"turbulence={self.turbulence!r} the override reaches no "
+                f"scheme field and would be silently inert."
             )
         # Slab-land interface flux law: membership + the unified law needs an
         # atmosphere-side surface-layer law to unify WITH.  turbulence="none"
@@ -2363,11 +2517,38 @@ class ExperimentConfig(NamedTuple):
                 f"morrison_flavor={self.morrison_flavor!r} requires "
                 f"microphysics='morrison' (got {self.microphysics!r}); on any "
                 "other scheme the flavor would be silently inert.")
-        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # Optional cloud-tuning override bounds (track CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        # NOT a byte-for-byte mirror: __param_spec__ additionally seeds the
+        # TRAINING sigmoid re-parameterisation (param_collector._seed_raw), so a
+        # bound only the forward driver needs is widened HERE alone.
         for _f, _lo, _hi in (
             ("cloud_rh_crit", 0.5, 0.99),
-            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            # Lower bound 5.0e-5 -> 1.0e-6.  The radiative condensate floor
+            # enters additively as ``cf_strat * q_liq_incloud`` /
+            # ``cf_strat * q_c_diagnostic`` (cloud_fraction.py ``q_floor_liq`` /
+            # ``q_floor_ice``; under diagnostic_condensate_scheme='adiabatic' the
+            # LIQUID part is depth-derived and CAPPED at q_c_diagnostic instead).
+            # It is never itself a denominator, and the downstream quotients that
+            # see the resulting condensate are floor-protected far below 1e-6
+            # (PSD radius ``q_c_pos`` at 1e-15, cloud_fraction.py:872; the
+            # adiabatic liquid split at 1e-30, cloud_fraction.py:824).  So any
+            # strictly positive value is numerically safe, and >0 keeps this a
+            # floor rather than "off".
+            # The old 5.0e-5 was the *floor of the tuning range*, not a physical
+            # limit.  The MPAS AMIP campaign ran exactly ON it while carrying a
+            # ~+32 W/m2 reflected-shortwave excess that an offline
+            # production-fidelity RRTMGP factorial attributes almost entirely to
+            # this knob (5e-5 -> 0 is -35.6 W/m2, ~103% of the gap; the ladder
+            # rungs 2e-5/1e-5/5e-6 give -8.8/-15.6/-22.4).  Testing those rungs
+            # coupled requires the bound to admit them.  Evidence is in the run
+            # directory, not the repo: report ``floor_attribution_hifi.md``.
+            # NOT widened alongside it: CloudConfig.__param_spec__ keeps
+            # (5.0e-5, 1.5e-3), because those bounds ALSO seed the training
+            # sigmoid re-parameterisation (param_collector._seed_raw), where a
+            # widening is NOT inert.  Sub-5e-5 therefore reaches the model via
+            # ``--q-c-diagnostic`` or a ``--config`` YAML, but NOT via ``--params``.
+            ("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),

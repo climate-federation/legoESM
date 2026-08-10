@@ -99,7 +99,7 @@ def _make_model(config: dict):
         nu_del2=diffusion.A_h,
         nu_del4=diffusion.hyperdiff,
         nu_del4_ps=diffusion.hyperdiff,
-        K_h=diffusion.A_h,
+        K_h=diffusion.K_h_A,
         fix_mass=dycore.fix_mass and dycore.conservation_fixer,
         anchor_mass_to_initial=dycore.fix_mass and dycore.conservation_fixer,
         time_integrator=MPASPrimitiveEquationConfig().time_integrator,

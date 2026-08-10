@@ -52,6 +52,12 @@ class SFNOConfig(NamedTuple):
         instead of storing them.  Trades ~30 % extra forward compute for
         roughly ``n_blocks`` × less peak training memory.  Default off:
         leave inference unaffected and let training drivers opt in.
+    dropout : float
+        Dropout probability inside every block's MLP.  Acts as a regulariser
+        during training and, at inference, as the sole stochasticity source
+        for **MC-Dropout** ensembling — the U-Cast recipe (arXiv:2604.09041,
+        10 %, flat across 5–15 %).  0.0 (default) is an exact no-op: the
+        network stays deterministic and needs no key.
     """
     in_channels: int = 4
     out_channels: int = 4
@@ -60,6 +66,7 @@ class SFNOConfig(NamedTuple):
     mlp_expansion: int = 4
     residual_prediction: bool = True
     gradient_checkpoint: bool = False
+    dropout: float = 0.0
 
 
 class SFNO(eqx.Module):
@@ -101,6 +108,7 @@ class SFNO(eqx.Module):
                 grid=grid,
                 embed_dim=config.embed_dim,
                 mlp_expansion=config.mlp_expansion,
+                dropout=config.dropout,
                 key=block_keys[i],
             )
             for i in range(config.n_blocks)
@@ -115,6 +123,8 @@ class SFNO(eqx.Module):
         self,
         x: jnp.ndarray,
         grid: GaussianGrid,
+        *,
+        key: jax.Array | None = None,
     ) -> jnp.ndarray:
         """Forward pass through the full SFNO.
 
@@ -124,6 +134,12 @@ class SFNO(eqx.Module):
             Input field on the Gaussian grid.
         grid : GaussianGrid
             Grid for SH transforms.
+        key : jax.random.PRNGKey, optional
+            MC-Dropout key.  ``None`` (default) is a deterministic forward
+            pass — dropout runs in inference mode, so a ``dropout > 0``
+            network still behaves as its own conditional mean.  Supplying a
+            key draws ONE stochastic member; distinct keys give distinct
+            members (that is the whole ensemble mechanism).
 
         Returns
         -------
@@ -143,13 +159,21 @@ class SFNO(eqx.Module):
         # peak-memory reduction at training time, ~30 % extra forward
         # FLOPs.  Inference (no AD) is unaffected because checkpoint
         # is a no-op outside of grad transforms.
-        for block in self.blocks:
+        # One dropout key per block; ``None`` propagates the deterministic
+        # path unchanged (and is an empty pytree, so it also passes cleanly
+        # through ``jax.checkpoint``).
+        block_keys = (
+            (None,) * len(self.blocks) if key is None
+            else tuple(jax.random.split(key, len(self.blocks)))
+        )
+        for block, block_key in zip(self.blocks, block_keys):
             if self.config.gradient_checkpoint:
                 x = jax.checkpoint(
-                    lambda x_, b=block: b(x_, grid), prevent_cse=False,
-                )(x)
+                    lambda x_, k_, b=block: b(x_, grid, key=k_),
+                    prevent_cse=False,
+                )(x, block_key)
             else:
-                x = block(x, grid)
+                x = block(x, grid, key=block_key)
 
         # Decoder: (n_lat, n_lon, embed_dim) → (n_lat, n_lon, out_channels)
         x = jax.vmap(jax.vmap(self.decoder))(x)
