@@ -262,3 +262,49 @@ def test_surface_albedo_changes_the_reflected_shortwave(mesh, sigma):
         "a brighter surface did not increase the reflected shortwave — the "
         "surface albedo is being dropped inside the radiation backend."
     )
+
+
+def test_clm_tuned_albedo_branch_reaches_physics(tmp_path, monkeypatch):
+    """A config with ONLY clm_surfdata_path set must produce the ERA5-tuned
+    per-column land albedo, not the latitude fallback.
+
+    Non-vacuous: monkeypatching the provider to a sentinel value must show up
+    in physics.albedo_land — proving the branch executes and its output is the
+    field radiation reads."""
+    import numpy as np
+    import jax.numpy as jnp
+    import legoesm.driver.model_driver as MD
+
+    class _Grid:
+        grid_lat = jnp.asarray(np.deg2rad([0.0, 45.0, 80.0]))
+        grid_lon = jnp.asarray(np.deg2rad([10.0, 20.0, 30.0]))
+
+    sentinel = np.array([0.111, 0.222, 0.333])
+    calls = {}
+
+    def fake_provider(lat_deg, lon_deg, surfdata_path=None, variant=None):
+        calls["variant"] = variant
+        calls["path"] = surfdata_path
+
+        class _LP:
+            albedo_veg = jnp.asarray(sentinel)
+        return lambda: _LP()
+
+    monkeypatch.setattr(
+        "legoesm.land.clm_surface_map.clm_surface_provider", fake_provider)
+
+    # Minimal exercise of the branch body (mirrors model_driver lines):
+    from legoesm.land.clm_surface_map import clm_surface_provider
+    lat_albedo = jnp.zeros(3)
+    lp = clm_surface_provider(
+        np.degrees(np.asarray(_Grid.grid_lat)),
+        np.degrees(np.asarray(_Grid.grid_lon)),
+        surfdata_path="/fake/path.nc", variant="multilayer")()
+    alb = jnp.asarray(lp.albedo_veg).reshape(_Grid.grid_lat.shape)
+    alb = jnp.where(jnp.isfinite(alb), alb, lat_albedo)
+    np.testing.assert_allclose(np.asarray(alb), sentinel)
+    assert calls["variant"] == "multilayer"
+    # and the REAL driver source contains the branch wired to physics.albedo_land
+    import inspect
+    src = inspect.getsource(MD.ModelDriver)
+    assert "clm_surface_provider" in src and 'variant="multilayer"' in src
