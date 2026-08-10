@@ -416,6 +416,34 @@ def test_merge_refuses_a_checkpoint_from_another_reference():
         driver._guard_merge_inputs(full, _sig(), allow_partial=False)
 
 
+def test_merge_only_compares_checkpoints_with_each_other():
+    """--merge-only has no meaningful current signature (the merge job does not
+    repeat the arm's twenty flags), so agreement is required AMONG the
+    checkpoints. Passing the arm's signature as the baseline instead would
+    refuse every real campaign."""
+    arm_sig = _sig(tune_seed=20260810, microphysics="morrison",
+                   subsidence_solve="implicit_flux")
+    full = _results_for(driver.CONVECTION_SCHEMES, sig=arm_sig)
+    driver._guard_merge_inputs(full, None, allow_partial=False)
+    # ... and one odd checkpoint out is still caught
+    full[7].signature = _sig(tune_seed=20260810, microphysics="kessler",
+                             subsidence_solve="implicit_flux")
+    with pytest.raises(SystemExit, match="different protocol"):
+        driver._guard_merge_inputs(full, None, allow_partial=False)
+
+
+def test_merge_only_still_requires_the_scored_reference_to_match():
+    """The one flag the merge job DOES supply is the reference, and it is the
+    one the physical-unit columns are computed against."""
+    arm_sig = _sig(reference_dir="/oracle/sam300")
+    full = _results_for(driver.CONVECTION_SCHEMES, sig=arm_sig)
+    driver._guard_merge_inputs(full, None, allow_partial=False,
+                               reference_dir="/oracle/sam300")
+    with pytest.raises(SystemExit, match="different reference"):
+        driver._guard_merge_inputs(full, None, allow_partial=False,
+                                   reference_dir="/oracle/somethingelse")
+
+
 def test_merge_refuses_an_unstamped_checkpoint():
     full = _results_for(driver.CONVECTION_SCHEMES)
     full[0].signature = {}

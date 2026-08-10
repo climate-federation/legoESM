@@ -205,7 +205,8 @@ _MERGE_CRITICAL_SIGNATURE_FIELDS = tuple(
     f for f in _SIGNATURE_FIELDS if f != "tune_evals")
 
 
-def _guard_merge_inputs(results, run_sig: dict, *, allow_partial: bool) -> None:
+def _guard_merge_inputs(results, run_sig: dict | None, *, allow_partial: bool,
+                        reference_dir=None) -> None:
     """Refuse to publish a ranking that is partial or built from mixed runs.
 
     Two failure modes, both silent without this:
@@ -213,44 +214,64 @@ def _guard_merge_inputs(results, run_sig: dict, *, allow_partial: bool) -> None:
     * a ranking table and figures assembled from whichever schemes happened to
       finish — one surviving checkpoint is enough to produce a plausible
       "ranking" of one scheme; and
-    * a checkpoint written against a DIFFERENT reference or protocol merged in
-      beside current ones.  Since the physical-unit RMSE columns are computed
-      at merge time against the CURRENT reference, a stale profile with the
-      same level count produces a believable wrong number, not a NaN.
+    * checkpoints written under DIFFERENT protocols merged into one table.
+      Since the physical-unit RMSE columns are computed at merge time against
+      the CURRENT reference, a stale profile with the same level count
+      produces a believable wrong number, not a NaN.
 
-    ``allow_partial`` is for debugging a subset and stamps nothing: it prints
-    what is missing and continues, so the operator has said out loud that the
-    artifacts are partial.
+    ``run_sig`` is the signature of THIS invocation, used as the baseline when
+    the merge happens inside a computing run.  In ``--merge-only`` there is no
+    meaningful current signature — the merge job legitimately does not repeat
+    the arm's twenty flags — so pass ``None`` and the checkpoints are required
+    to agree with EACH OTHER instead, plus with ``reference_dir``, which is the
+    one flag the merge really does supply and the one the physical-unit columns
+    are computed against.
+
+    ``allow_partial`` prints what is wrong and continues, so an operator
+    debugging a subset has said out loud that the artifacts are partial.
     """
+    def _fail(msg: str) -> None:
+        if not allow_partial:
+            raise SystemExit(msg)
+        print(f"[warn] {msg}", flush=True)
+
     present = {r.scheme for r in results}
     missing = [s for s in CONVECTION_SCHEMES if s not in present]
     if missing:
-        msg = (f"MERGE REFUSED: {len(present)}/{len(CONVECTION_SCHEMES)} scheme "
-               f"checkpoints present; missing {missing}. A ranking over a "
-               "subset is not a ranking of the campaign. Re-run the missing "
-               "arms, or pass --allow-partial if you know the table is partial.")
-        if not allow_partial:
-            raise SystemExit(msg)
-        print(f"[warn] {msg}", flush=True)
+        _fail(f"MERGE REFUSED: {len(present)}/{len(CONVECTION_SCHEMES)} scheme "
+              f"checkpoints present; missing {missing}. A ranking over a "
+              "subset is not a ranking of the campaign. Re-run the missing "
+              "arms, or pass --allow-partial if you know the table is partial.")
+
+    unstamped = [r.scheme for r in results if not r.signature]
+    if unstamped:
+        _fail("MERGE REFUSED: unstamped (pre-signature) checkpoint(s) "
+              f"{unstamped} — nothing records which protocol produced them.")
+
+    stamped = [r for r in results if r.signature]
+    baseline = run_sig if run_sig is not None else (
+        stamped[0].signature if stamped else {})
     mismatched = []
-    for r in results:
-        if not r.signature:
-            mismatched.append(f"{r.scheme}: unstamped (pre-signature checkpoint)")
-            continue
-        diffs = {k: (r.signature.get(k), run_sig.get(k))
+    for r in stamped:
+        diffs = {k: (r.signature.get(k), baseline.get(k))
                  for k in _MERGE_CRITICAL_SIGNATURE_FIELDS
-                 if r.signature.get(k) != run_sig.get(k)}
+                 if r.signature.get(k) != baseline.get(k)}
         if diffs:
             mismatched.append(f"{r.scheme}: {diffs}")
     if mismatched:
-        msg = ("MERGE REFUSED: checkpoint(s) written under a different protocol "
-               "than this invocation — the physical-unit RMSE columns are "
-               "computed against the CURRENT reference, so merging these would "
-               "produce believable wrong numbers:\n  "
-               + "\n  ".join(mismatched))
-        if not allow_partial:
-            raise SystemExit(msg)
-        print(f"[warn] {msg}", flush=True)
+        _fail("MERGE REFUSED: checkpoint(s) written under a different protocol "
+              "than the rest — the physical-unit RMSE columns are computed "
+              "against ONE reference, so merging these would produce "
+              "believable wrong numbers:\n  " + "\n  ".join(mismatched))
+
+    if reference_dir is not None:
+        wrong_ref = [f"{r.scheme}: {r.signature.get('reference_dir')}"
+                     for r in stamped
+                     if r.signature.get("reference_dir") != str(reference_dir)]
+        if wrong_ref:
+            _fail("MERGE REFUSED: checkpoint(s) were scored against a "
+                  f"different reference than {reference_dir}:\n  "
+                  + "\n  ".join(wrong_ref))
 
 
 def load_all_scheme_results(outdir: Path, schemes) -> list[SchemeResult]:
@@ -944,7 +965,13 @@ def main(argv: list[str] | None = None) -> int:
     results = load_all_scheme_results(args.outdir, CONVECTION_SCHEMES)
     if not results:
         raise SystemExit(f"No scheme_*.json checkpoints found in {args.outdir}")
-    _guard_merge_inputs(results, run_sig, allow_partial=args.allow_partial)
+    # In --merge-only the current args are NOT the arm's args (the merge job
+    # supplies only the outdir and the reference), so the checkpoints are
+    # required to agree with each other and with the reference being scored
+    # against, rather than with this invocation.
+    _guard_merge_inputs(
+        results, None if args.merge_only else run_sig,
+        allow_partial=args.allow_partial, reference_dir=args.reference_dir)
     write_csv(args.outdir / "intercomparison.csv", results, ref)
     # Second copy under the name the paper figure script reads, so the
     # figures are built from THIS table rather than a hand-copied one.
