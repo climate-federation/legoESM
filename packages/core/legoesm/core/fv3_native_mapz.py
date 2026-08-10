@@ -279,8 +279,8 @@ def _refuse_iv_m3(km: int) -> None:
         f"cs_profile(iv=-3, km={km}): fv_mapz.F90:2320-2339 leaves "
         f"gam(i,km) UNASSIGNED and :2358 reads it, so the oracle's answer "
         f"here depends on uninitialised stack. Refusing to invent one. "
-        f"The branch needs kord_wz<0 and nonhydrostatic, neither of which "
-        f"this lane has.")
+        f"The branch needs kord_wz<0; the pinned NH deck runs kord_wz=9 "
+        f"(iv=-2), so this arm stays dead there.")
 
 
 def _large_scale_constraints(q: np.ndarray, a4: np.ndarray, km: int,
@@ -712,6 +712,11 @@ def map1_q2(pe1: np.ndarray, q1: np.ndarray, pe2: np.ndarray,
 # ---------------------------------------------------------------------------
 
 CONSV_MIN = 0.001                                # fv_mapz.F90:43
+# fv_mapz.F90:51-52 -- MODULE PARAMETERS of the w_limiter, compile-time
+# fixed.  The deck's namelist W_MAX=75 is flagstruct%w_max, a DIFFERENT
+# variable this routine never reads.
+W_MAX_MAPZ = 90.0
+W_MIN_MAPZ = -60.0
 
 
 def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
@@ -725,13 +730,10 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
     a different flag would run different physics and still return
     plausible numbers.
     """
-    if not hydrostatic:
-        raise NotImplementedError(
-            "hydrostatic=False: fv_mapz.F90:345-419 (w/delz remap, "
-            "w_limiter) and :460-493 (the nonhydrostatic pkz) are NOT "
-            "ported, and this port's acoustic loop is hydrostatic "
-            "throughout (geopk is called with hydrostatic=.true. at "
-            "dyn_core.F90:1401). Port those blocks before flipping this.")
+    # hydrostatic=False is ported: fv_mapz.F90:252-258 (delz -> specific
+    # volume on the OLD delp), :345-419 (w/delz remap + w_limiter) and
+    # :460-493 (the NH pkz, non-moist kord_tm<0 arm).  Its argument
+    # requirements are enforced in lagrangian_to_eulerian itself.
     # The energy fixer is inside `if (last_step .and. ...)` at :628, so a
     # non-last_step call never reaches it whatever consv says. Refusing it
     # there would be stricter than the oracle, not safer.
@@ -773,6 +775,8 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            q, omga=None, sphum_index=None,
                            last_step=True,
                            hydrostatic=True, adiabatic=True, consv=0.0,
+                           w=None, delz=None, ws=None, kord_wz=9,
+                           w_limiter=False, rdgas=None, grav=None,
                            fill=False, do_sat_adj=False, do_inline_mp=False,
                            do_adiabatic_init=False):
     """``Lagrangian_to_Eulerian`` for ONE face, in place (fv_mapz.F90:62).
@@ -856,6 +860,23 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 f"fv_mapz.F90:975 uses the explicit sphum argument, and "
                 f"assuming tracer 0 divides by the wrong species. Got "
                 f"{sphum_index!r}.")
+    if not hydrostatic:
+        # fv_mapz.F90:345-419 needs the NH prognostics and the D-stage
+        # surface velocity; :460-493 needs rrg = -rdgas/grav (:167).
+        missing = [nm for nm, a in (("w", w), ("delz", delz), ("ws", ws),
+                                    ("rdgas", rdgas), ("grav", grav))
+                   if a is None]
+        if missing:
+            raise ValueError(
+                f"hydrostatic=False needs {missing}: the w/delz remap "
+                f"(fv_mapz.F90:345-365) reads w, delz and ws, and the NH "
+                f"pkz (:480) needs rrg = -rdgas/grav (:167)")
+        if int(kord_wz) < 0:
+            # kord_wz < 0 selects iv=-3 (fv_mapz.F90:347-351), whose
+            # cs_profile LBC branch reads uninitialised memory -- refused
+            # exactly as _refuse_iv_m3 documents.  The pinned deck has
+            # kord_wz = 9.
+            _refuse_iv_m3(km)
     if last_step and omga is None:
         # fv_mapz.F90:431-441 and :504-523 both run under `last_step`, and
         # the oracle ALWAYS has an omga to update. Skipping it silently
@@ -903,13 +924,35 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
         if j != n + 1:                           # :208 if ( j /= (je+1) )
             jl = j - 1                           # [is..]/[js..] index
 
-            # :209-217 -- Theta_v -> T_v with the LAGRANGIAN pkz. peln is
-            # not overwritten with pn2 until :447, i.e. after the remap.
-            pkc = pk[ia:ia + n, jd, :]
-            pln = peln[:, :, jl]
-            pt[ia:ia + n, jd, :] *= (
-                (pkc[:, 1:] - pkc[:, :-1])
-                / (akap * (pln[:, 1:] - pln[:, :-1])))
+            if hydrostatic:
+                # :211-217 -- Theta_v -> T_v with the LAGRANGIAN
+                # hydrostatic pkz. peln is not overwritten with pn2
+                # until :447, i.e. after the remap.
+                pkc = pk[ia:ia + n, jd, :]
+                pln = peln[:, :, jl]
+                pt[ia:ia + n, jd, :] *= (
+                    (pkc[:, 1:] - pkc[:, :-1])
+                    / (akap * (pln[:, 1:] - pln[:, :-1])))
+            else:
+                # :218-237 (non-moist arm, :231-232) -- "density pt" to
+                # "density temp": pt *= exp(k1k*log(rrg*delp/delz*pt))
+                # with k1k = rdgas/cv_air (:164) and the PRE-conversion
+                # delz/delp (this precedes both :252-258 and :281).
+                # codex NH r3 #1: taking the hydrostatic Dpk/(akap
+                # Dpeln) form here instead put a uniform ~2.8e-4 theta
+                # error on every column -- the 0.408 m delz parity
+                # residual.
+                k1k = rdgas / (cp - rdgas)
+                rrg = -rdgas / grav
+                ptw = pt[ia:ia + n, jd, :]
+                pt[ia:ia + n, jd, :] = ptw * np.exp(k1k * np.log(
+                    rrg * delp[ia:ia + n, jd, :] / delz[:, jl, :] * ptw))
+
+            # :252-258 -- NH: delz -> "specific volume"/grav on the OLD
+            # delp, BEFORE :281 overwrites delp with the target dp2.
+            if not hydrostatic:
+                delz[:, jl, :] = (-delz[:, jl, :]
+                                  / delp[ia:ia + n, jd, :])
 
             # :261-263
             ps[ia:ia + n, jd] = pe1[:, km + 1]
@@ -950,6 +993,56 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                     pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km, km,
                     0, kords_tr[iq], 0.0))   # :335 -- literal 0.
 
+            # :345-419 -- NH: remap w and delz, then the w_limiter.
+            if not hydrostatic:
+                # :347-355 -- w in LINEAR p; kord_wz=9 selects iv=-2,
+                # whose bottom BC is the D-stage surface velocity ws
+                # (NH-spec trap #2; the kord_wz<0/iv=-3 arm is refused
+                # at entry).
+                w[ia:ia + n, jd, :] = unpad1(map1_ppm(
+                    pe1, pad1(w[ia:ia + n, jd, :]), pe2, km, km,
+                    -2, abs(int(kord_wz)), qs=ws[:, jl]))
+                # :357-360 -- delz (specific volume) with iv=1, kord_tm;
+                # the oracle passes gz as a dummy qs the iv=1 branch
+                # never reads.
+                delz[:, jl, :] = unpad1(map1_ppm(
+                    pe1, pad1(delz[:, jl, :]), pe2, km, km,
+                    1, abs_kord_tm))
+                # :361-365 -- back to a (negative) thickness on dp2.
+                delz[:, jl, :] = -delz[:, jl, :] * unpad1(dp2)
+
+                if w_limiter:                    # :368-418
+                    # Momentum-conserving w clamp.  Bounds are the
+                    # MODULE PARAMETERS w_max=90/w_min=-60
+                    # (fv_mapz.F90:51-52); the deck's namelist W_MAX=75
+                    # is flagstruct's, a different variable.
+                    d2 = unpad1(dp2)
+                    w2 = np.array(w[ia:ia + n, jd, :], copy=True)
+                    for k in range(km - 1):      # :373-390 down pass
+                        spill = np.where(
+                            w2[:, k] > W_MAX_MAPZ,
+                            (w2[:, k] - W_MAX_MAPZ) * d2[:, k],
+                            np.where(w2[:, k] < W_MIN_MAPZ,
+                                     (w2[:, k] - W_MIN_MAPZ) * d2[:, k],
+                                     0.0))
+                        w2[:, k] = np.clip(w2[:, k], W_MIN_MAPZ,
+                                           W_MAX_MAPZ)
+                        w2[:, k + 1] = w2[:, k + 1] + spill / d2[:, k + 1]
+                    for k in range(km - 1, 0, -1):   # :391-407 up pass
+                        spill = np.where(
+                            w2[:, k] > W_MAX_MAPZ,
+                            (w2[:, k] - W_MAX_MAPZ) * d2[:, k],
+                            np.where(w2[:, k] < W_MIN_MAPZ,
+                                     (w2[:, k] - W_MIN_MAPZ) * d2[:, k],
+                                     0.0))
+                        w2[:, k] = np.clip(w2[:, k], W_MIN_MAPZ,
+                                           W_MAX_MAPZ)
+                        w2[:, k - 1] = w2[:, k - 1] + spill / d2[:, k - 1]
+                    # :408-416 -- top escape valve at 2x the bounds.
+                    w2[:, 0] = np.clip(w2[:, 0], 2.0 * W_MIN_MAPZ,
+                                       2.0 * W_MAX_MAPZ)
+                    w[ia:ia + n, jd, :] = w2
+
             # :424-428 -- update pk
             pk[ia:ia + n, jd, :] = unpad1(pk2)
 
@@ -962,10 +1055,21 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             pe0_old = pad1(peln[:, :, jl])
             peln[:, :, jl] = unpad1(pn2)
 
-            # :454-459 -- pkz from the EULERIAN pk2/peln
-            pln = peln[:, :, jl]
-            pkz[:, jl, :] = ((pk2[:, 2:km + 2] - pk2[:, 1:km + 1])
-                             / (akap * (pln[:, 1:] - pln[:, :-1])))
+            if hydrostatic:
+                # :454-459 -- pkz from the EULERIAN pk2/peln
+                pln = peln[:, :, jl]
+                pkz[:, jl, :] = ((pk2[:, 2:km + 2] - pk2[:, 1:km + 1])
+                                 / (akap * (pln[:, 1:] - pln[:, :-1])))
+            else:
+                # :479-481 -- NH pkz from the ideal gas law on the
+                # remapped delp/delz/T_v (non-moist, kord_tm<0 arm);
+                # rrg = -rdgas/grav (:167), and delz<0 keeps the log
+                # argument positive.
+                rrg = -rdgas / grav
+                pkz[:, jl, :] = np.exp(akap * np.log(
+                    rrg * delp[ia:ia + n, jd, :] / delz[:, jl, :]
+                    * pt[ia:ia + n, jd, :]))
+                pln = peln[:, :, jl]      # the omega block below reads it
 
             # :504-523 -- omega interpolated to the remapped cell centres
             if last_step:

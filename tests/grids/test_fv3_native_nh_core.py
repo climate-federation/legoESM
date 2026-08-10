@@ -47,6 +47,21 @@ class _BD:
         self.ng = ng
 
 
+class _BDR:
+    """Rectangular bounds with FREE origins (is != js, ie-is != je-js).
+
+    codex NH r2 #6: every earlier fixture hard-coded is == js == 1, so
+    the r1 origin bug (jlo derived from the i origin) had no committed
+    regression.  This shim is that regression's carrier."""
+
+    def __init__(self, is_, ie, js, je, ng):
+        self.is_ = is_
+        self.ie = ie
+        self.js = js
+        self.je = je
+        self.ng = ng
+
+
 def _balanced_column(rng, ni=NI, km=KM):
     """A hydrostatically consistent (dm, pm2, pem, dz2, pt2) set.
 
@@ -345,16 +360,130 @@ def test_riem_solver_c_contracts_and_balanced_rest():
         assert rel < 1e-9, (k, rel)
 
 
-def test_sim1_rejects_float32():
-    """codex NH r1 #4: a float32 column truncates dz2 by ~0.35 silently;
-    the guard must be loud."""
+@pytest.mark.parametrize("bad", ["pe", "dm2", "pm2", "pem", "w2", "dz2",
+                                 "pt2", "ws"])
+def test_sim1_rejects_float32_every_operand(bad):
+    """codex NH r1 #4 + r2 #1: a float32 column truncates dz2 by ~0.35
+    silently, and ``ws`` (read by the bottom solve, nh_utils.F90:1287)
+    was the operand the first guard missed.  Every operand, one at a
+    time."""
     rng = np.random.default_rng(7)
     _, _, dm, pm2, pem, pt2, dz2 = _balanced_column(rng)
     gama = 1.0 / (1.0 - FV3_KAPPA)
-    with pytest.raises(TypeError, match="float64"):
+    args = {"pe": np.zeros((NI, KM + 1)), "dm2": dm, "pm2": pm2,
+            "pem": pem, "w2": np.zeros((NI, KM)), "dz2": dz2,
+            "pt2": pt2, "ws": np.zeros(NI)}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
         sim1_solver(100.0, 0, NI - 1, KM, FV3_RDGAS, gama, FV3_KAPPA,
-                    np.zeros((NI, KM + 1)), dm.astype(np.float32), pm2,
-                    pem, np.zeros((NI, KM)), dz2, pt2, np.zeros(NI), 0.05)
+                    args["pe"], args["dm2"], args["pm2"], args["pem"],
+                    args["w2"], args["dz2"], args["pt2"], args["ws"],
+                    0.05)
+
+
+@pytest.mark.parametrize("bad", ["hs", "w3", "pt", "delp", "gz", "pef",
+                                 "ws"])
+def test_riem_solver_c_rejects_float32_every_operand(bad):
+    """codex NH r2 #1: the wrapper's f64 work copies laundered float32
+    inputs past the sim1 guard (measured: gz off 0.208, pef off 2.2e-3
+    at km=5), and float32 OUTPUTS (gz, pef, ws) truncate on assignment.
+    The entry guard must catch each operand before any cast."""
+    n, ng = 12, 3
+    bd = _BD(n, ng)
+    full = n + 2 * ng
+    args = {"hs": np.zeros((full, full)),
+            "w3": np.zeros((full, full, KM)),
+            "pt": np.full((full, full, KM), 280.0),
+            "delp": np.full((full, full, KM), 1.0e4),
+            "gz": np.zeros((full, full, KM + 1)),
+            "pef": np.zeros((full, full, KM + 1)),
+            "ws": np.zeros((full, full))}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        riem_solver_c(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, 100.0,
+                      args["hs"], args["w3"], args["pt"], args["delp"],
+                      args["gz"], args["pef"], args["ws"], 0.05, 1.0)
+
+
+@pytest.mark.parametrize("bad", ["zs", "w", "delz", "pt", "delp", "zh",
+                                 "pe", "ppe", "pk3", "pk", "peln", "ws"])
+def test_riem_solver3_rejects_float32_every_operand(bad):
+    from legoesm.core.fv3_native_nh_core import riem_solver3
+
+    bd = _BDR(4, 10, 9, 13, 3)
+    ni, nj, ng = 7, 5, 3
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    args = {"zs": np.zeros((fi, fj)),
+            "w": np.zeros((fi, fj, KM)),
+            "delz": np.zeros((ni, nj, KM)),
+            "pt": np.full((fi, fj, KM), 280.0),
+            "delp": np.full((fi, fj, KM), 1.0e4),
+            "zh": np.zeros((fi, fj, KM + 1)),
+            "pe": np.zeros((ni + 2, KM + 1, nj + 2)),
+            "ppe": np.zeros((fi, fj, KM + 1)),
+            "pk3": np.zeros((fi, fj, KM + 1)),
+            "pk": np.zeros((ni, nj, KM + 1)),
+            "peln": np.zeros((ni, KM + 1, nj)),
+            "ws": np.zeros((ni, nj))}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        riem_solver3(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, 100.0,
+                     args["zs"], args["w"], args["delz"], args["pt"],
+                     args["delp"], args["zh"], args["pe"], args["ppe"],
+                     args["pk3"], args["pk"], args["peln"], args["ws"],
+                     0.05, 1.0)
+
+
+@pytest.mark.parametrize("bad", ["dp0", "zs", "area", "ut", "vt", "gz",
+                                 "ws"])
+def test_update_dz_c_rejects_float32_every_operand(bad):
+    n, ng = 12, 3
+    bd = _BD(n, ng)
+    full = n + 2 * ng
+    args = {"dp0": np.full(KM, 1.0e4),
+            "zs": np.zeros((full, full)),
+            "area": np.full((full, full), 5.0e8),
+            "ut": np.zeros((full, full, KM)),
+            "vt": np.zeros((full, full, KM)),
+            "gz": np.zeros((full, full, KM + 1)),
+            "ws": np.zeros((full, full))}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        update_dz_c(bd, KM, 100.0, args["dp0"], args["zs"], args["area"],
+                    args["ut"], args["vt"], args["gz"], args["ws"],
+                    n + 1, n + 1, sw_corner=True, se_corner=True,
+                    ne_corner=True, nw_corner=True)
+
+
+@pytest.mark.parametrize("bad", ["damp", "dp0", "zs", "zh", "crx", "cry",
+                                 "xfx", "yfx", "ws", "area", "rarea"])
+def test_update_dz_d_rejects_float32_every_operand(bad):
+    from legoesm.core.fv3_native_nh_core import update_dz_d
+    from legoesm.core.fv3_native_sw_core import Bounds
+
+    n, ng = 12, 3
+    bd = Bounds.single_tile(n, ng)
+    full = n + 2 * ng
+    area = np.full((full, full), 4.0e11)
+    args = {"damp": np.zeros(KM + 1),
+            "dp0": np.full(KM, 1.0e4),
+            "zs": np.zeros((full, full)),
+            "zh": np.zeros((full, full, KM + 1)),
+            "crx": np.zeros((n + 1, full, KM)),
+            "cry": np.zeros((full, n + 1, KM)),
+            "xfx": np.zeros((n + 1, full, KM)),
+            "yfx": np.zeros((full, n + 1, KM)),
+            "ws": np.zeros((n, n)),
+            "area": area,
+            "rarea": 1.0 / area}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        update_dz_d(np.zeros(KM + 1, dtype=np.int64), args["damp"], 6,
+                    bd, KM, n + 1, n + 1, args["area"], args["rarea"],
+                    args["dp0"], args["zs"], args["zh"], args["crx"],
+                    args["cry"], args["xfx"], args["yfx"], args["ws"],
+                    1.0e-2, {"area": args["area"],
+                             "rarea": args["rarea"]}, lim_fac=1.0)
 
 
 def test_edge_profile_solves_its_tridiagonal_exactly():
@@ -643,3 +772,660 @@ def test_riem_solver_c_dead_arm_raises():
                       np.zeros((18, 18, KM + 1)),
                       np.zeros((18, 18, KM + 1)), np.zeros((18, 18)),
                       0.05, 0.4)
+
+
+# --------------------------------------------------------------------------
+# codex NH r2 #6: rectangular, non-equal-origin regression.  The r1 bug
+# derived jlo from the i origin; with is=4..7, js=10..12 that reads rows
+# ng+9 cells too high and IndexErrors (numpy raises on a too-large index;
+# it only WRAPS on negative ones, which is why a square origin could not
+# see this).  Equivariance form: origins are LABELS -- identical padded
+# storage under two different origins must produce bitwise-identical
+# results.  grid_type=3 skips fill_4corners for update_dz_c because its
+# corner indices are face-absolute (anchored at Fortran 0/npx), which is
+# a different concern from origin plumbing.
+# --------------------------------------------------------------------------
+
+def _rect_fields(ni, nj, ng, km, seed):
+    rng = np.random.default_rng(seed)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    # 1e10 (~2.5% of area 4e11): a 1e6 flux moves gz by only ~1e-2 m,
+    # under the >1.0 non-vacuity floor on a small rectangle.
+    ut = 1.0e10 * rng.standard_normal((fi, fj, km))
+    vt = 1.0e10 * rng.standard_normal((fi, fj, km))
+    area = np.abs(4.0e11 * (1.0 + 0.1 * rng.standard_normal((fi, fj))))
+    gz = np.cumsum(
+        np.abs(500.0 + 100.0 * rng.standard_normal((fi, fj, km + 1))),
+        axis=2)[:, :, ::-1].copy() * 3.0
+    zs = np.array(gz[:, :, km], copy=True)
+    dp0 = np.abs(1.0e4 + 3.0e3 * rng.standard_normal(km))
+    return ut, vt, area, gz, zs, dp0
+
+
+def test_update_dz_c_origin_is_a_pure_relabel():
+    ni, nj, ng = 4, 3, 3
+    ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, KM, 61)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+
+    out = {}
+    for tag, bd in (("o11", _BDR(1, ni, 1, nj, ng)),
+                    ("o4_10", _BDR(4, 3 + ni, 10, 9 + nj, ng))):
+        g = np.array(gz, copy=True)
+        w = np.zeros((fi, fj))
+        update_dz_c(bd, KM, 100.0, dp0, np.array(zs), np.array(area),
+                    np.array(ut), np.array(vt), g, w,
+                    ni + 1, nj + 1, sw_corner=True, se_corner=True,
+                    ne_corner=True, nw_corner=True, grid_type=3)
+        out[tag] = (g, w)
+
+    assert np.array_equal(out["o11"][0], out["o4_10"][0])
+    assert np.array_equal(out["o11"][1], out["o4_10"][1])
+    # Non-vacuity: the update moved gz somewhere.
+    assert np.abs(out["o11"][0] - gz).max() > 1.0
+
+
+def test_riem_solver_c_origin_is_a_pure_relabel():
+    ni, nj, ng = 4, 3, 3
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    rng = np.random.default_rng(67)
+    delp = np.abs(10000.0 + 300.0 * rng.standard_normal((fi, fj, KM)))
+    pt = 280.0 + 15.0 * rng.standard_normal((fi, fj, KM))
+    w3 = 0.5 * rng.standard_normal((fi, fj, KM))
+    hs = 50.0 * rng.standard_normal((fi, fj))
+    gama = 1.0 / (1.0 - FV3_KAPPA)
+    ptop = 100.0
+    pem = np.zeros((fi, fj, KM + 1))
+    pem[:, :, 0] = ptop
+    for k in range(KM):
+        pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
+    pm = delp / np.log(pem[:, :, 1:] / pem[:, :, :-1])
+    dzh = -(delp / FV3_GRAV) * FV3_RDGAS * pt / np.exp(np.log(pm) / gama)
+    dzh *= 1.05
+    gz0 = np.zeros((fi, fj, KM + 1))
+    gz0[:, :, KM] = hs
+    for k in range(KM - 1, -1, -1):
+        gz0[:, :, k] = gz0[:, :, k + 1] - dzh[:, :, k]
+
+    out = {}
+    for tag, bd in (("o11", _BDR(1, ni, 1, nj, ng)),
+                    ("o4_10", _BDR(4, 3 + ni, 10, 9 + nj, ng))):
+        g = np.array(gz0, copy=True)
+        pef = np.zeros((fi, fj, KM + 1))
+        w = np.array(w3, copy=True)
+        ws = np.zeros((fi, fj))
+        riem_solver_c(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, ptop,
+                      np.array(hs), w, np.array(pt), np.array(delp),
+                      g, pef, ws, 0.05, 1.0)
+        out[tag] = (g, pef)
+
+    assert np.array_equal(out["o11"][0], out["o4_10"][0])
+    assert np.array_equal(out["o11"][1], out["o4_10"][1])
+    assert np.abs(out["o11"][1]).max() > 0.0
+
+
+# --------------------------------------------------------------------------
+# codex NH r2 #5: the earlier reference shared the port's fill_4corners,
+# so a shared corner bug was invisible (a no-op fill_4corners moved this
+# seeded case by 2091.27 while port and reference still agreed).  Here
+# the corner treatment is transcribed INDEPENDENTLY from the oracle
+# (sw_core.F90:3856-3915, verified against the pinned tree), in raw
+# storage indices, with a rectangular domain and MIXED corner flags.
+# --------------------------------------------------------------------------
+
+def test_update_dz_c_rect_mixed_flags_vs_independent_corner_reference():
+    ni, nj, ng = 12, 9, 3
+    km = KM
+    npx, npy = ni + 1, nj + 1
+    flags = dict(sw=True, se=False, ne=True, nw=False)
+    bd = _BDR(1, ni, 1, nj, ng)
+    ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, km, 71)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+
+    gz_port = np.array(gz, copy=True)
+    ws_port = np.zeros((fi, fj))
+    dt = 100.0
+    update_dz_c(bd, km, dt, dp0, np.array(zs), np.array(area),
+                np.array(ut), np.array(vt), gz_port, ws_port,
+                npx, npy, sw_corner=flags["sw"], se_corner=flags["se"],
+                ne_corner=flags["ne"], nw_corner=flags["nw"])
+
+    # ---- independent reference (storage indices; s(f) = f + ng - 1) ----
+    def s(f):
+        return f + ng - 1
+
+    def corner_fill_ref(q, direction):
+        # sw_core.F90:3876-3893 (XDir) / :3895-3913 (YDir), one
+        # assignment per oracle line, honoring each flag separately.
+        if direction == 1:
+            if flags["sw"]:
+                q[s(-1), s(0)] = q[s(0), s(2)]
+                q[s(0), s(0)] = q[s(0), s(1)]
+            if flags["se"]:
+                q[s(npx + 1), s(0)] = q[s(npx), s(2)]
+                q[s(npx), s(0)] = q[s(npx), s(1)]
+            if flags["nw"]:
+                q[s(0), s(npy)] = q[s(0), s(npy - 1)]
+                q[s(-1), s(npy)] = q[s(0), s(npy - 2)]
+            if flags["ne"]:
+                q[s(npx), s(npy)] = q[s(npx), s(npy - 1)]
+                q[s(npx + 1), s(npy)] = q[s(npx), s(npy - 2)]
+        else:
+            if flags["sw"]:
+                q[s(0), s(0)] = q[s(1), s(0)]
+                q[s(0), s(-1)] = q[s(2), s(0)]
+            if flags["se"]:
+                q[s(npx), s(0)] = q[s(npx - 1), s(0)]
+                q[s(npx), s(-1)] = q[s(npx - 2), s(0)]
+            if flags["nw"]:
+                q[s(0), s(npy)] = q[s(1), s(npy)]
+                q[s(0), s(npy + 1)] = q[s(2), s(npy)]
+            if flags["ne"]:
+                q[s(npx), s(npy)] = q[s(npx - 1), s(npy)]
+                q[s(npx), s(npy + 1)] = q[s(npx - 2), s(npy)]
+
+    a0 = ng - 1                     # storage row of is-1 / col of js-1
+    nxi = ni + 2                    # is-1..ie+1
+    nxj = nj + 2                    # js-1..je+1
+    gz_ref = np.array(gz, copy=True)
+    for k1 in range(1, km + 2):
+        k = k1 - 1
+        if k1 == 1:
+            tr = dp0[0] / (dp0[0] + dp0[1])
+            xful = ut[:, :, 0] + (ut[:, :, 0] - ut[:, :, 1]) * tr
+            yful = vt[:, :, 0] + (vt[:, :, 0] - vt[:, :, 1]) * tr
+        elif k1 == km + 1:
+            br = dp0[km - 1] / (dp0[km - 2] + dp0[km - 1])
+            xful = ut[:, :, km - 1] + (ut[:, :, km - 1]
+                                       - ut[:, :, km - 2]) * br
+            yful = vt[:, :, km - 1] + (vt[:, :, km - 1]
+                                       - vt[:, :, km - 2]) * br
+        else:
+            ir = 1.0 / (dp0[k - 1] + dp0[k])
+            xful = (dp0[k] * ut[:, :, k - 1] + dp0[k - 1] * ut[:, :, k]) * ir
+            yful = (dp0[k] * vt[:, :, k - 1] + dp0[k - 1] * vt[:, :, k]) * ir
+        xw = xful[a0:a0 + nxi + 1, a0:a0 + nxj]
+        yw = yful[a0:a0 + nxi, a0:a0 + nxj + 1]
+
+        g2 = np.array(gz[:, :, k], copy=True)
+        corner_fill_ref(g2, 1)
+        fxv = xw * np.where(xw > 0.0,
+                            g2[a0 - 1:a0 + nxi, a0:a0 + nxj],
+                            g2[a0:a0 + nxi + 1, a0:a0 + nxj])
+        corner_fill_ref(g2, 2)
+        fyv = yw * np.where(yw > 0.0,
+                            g2[a0:a0 + nxi, a0 - 1:a0 + nxj],
+                            g2[a0:a0 + nxi, a0:a0 + nxj + 1])
+        aw = area[a0:a0 + nxi, a0:a0 + nxj]
+        num = (g2[a0:a0 + nxi, a0:a0 + nxj] * aw
+               + fxv[:-1, :] - fxv[1:, :] + fyv[:, :-1] - fyv[:, 1:])
+        den = (aw + xw[:-1, :] - xw[1:, :] + yw[:, :-1] - yw[:, 1:])
+        gz_ref[a0:a0 + nxi, a0:a0 + nxj, k] = num / den
+    ws_ref = np.zeros((fi, fj))
+    # * (1/dt), not / dt: the port multiplies by rdt and x*(1/dt) is not
+    # x/dt in the last ulp -- this comparison is array_equal-exact.
+    ws_ref[a0:a0 + nxi, a0:a0 + nxj] = (
+        zs[a0:a0 + nxi, a0:a0 + nxj]
+        - gz_ref[a0:a0 + nxi, a0:a0 + nxj, km]) * (1.0 / dt)
+    for k in range(km - 1, -1, -1):
+        gz_ref[a0:a0 + nxi, a0:a0 + nxj, k] = np.maximum(
+            gz_ref[a0:a0 + nxi, a0:a0 + nxj, k],
+            gz_ref[a0:a0 + nxi, a0:a0 + nxj, k + 1] + DZ_MIN)
+
+    assert np.array_equal(gz_port, gz_ref)
+    assert np.array_equal(ws_port, ws_ref)
+    # Non-vacuity.
+    assert np.abs(gz_port - gz).max() > 1.0
+    # A DIFFERENT flag set must change the answer (the flags are live,
+    # so a fill that ignored them -- or a no-op fill -- cannot pass both
+    # this and the reference equality above).
+    gz_alt = np.array(gz, copy=True)
+    ws_alt = np.zeros((fi, fj))
+    update_dz_c(bd, km, dt, dp0, np.array(zs), np.array(area),
+                np.array(ut), np.array(vt), gz_alt, ws_alt,
+                npx, npy, sw_corner=False, se_corner=True,
+                ne_corner=False, nw_corner=True)
+    assert np.abs(gz_alt - gz_port).max() > 0.0
+
+
+# --------------------------------------------------------------------------
+# codex NH r2 #2 (HIGH): riem_solver3 had no test instrument at all -- a
+# ppe = pe2 + pem mutant (top 100 Pa instead of the oracle-required
+# perturbation 0 Pa, nh_core.F90:173-185) passed the suite.  This is the
+# direct certificate: sentinel layout, non-square non-equal-origin
+# bounds, every flag branch, every written window, and an independent
+# per-column re-plumb of :87-202 feeding the SAME sim1_solver (which has
+# its own dense-solve certificate above).
+# --------------------------------------------------------------------------
+
+_SENT3 = 7.7e30
+
+
+def _riem3_fixture(bd, km=KM, seed=47):
+    is_, ie, js, je, ng = bd.is_, bd.ie, bd.js, bd.je, bd.ng
+    ni, nj = ie - is_ + 1, je - js + 1
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    rng = np.random.default_rng(seed)
+    delp = np.abs(10000.0 + 300.0 * rng.standard_normal((fi, fj, km)))
+    pt = 280.0 + 15.0 * rng.standard_normal((fi, fj, km))
+    w = 0.5 * rng.standard_normal((fi, fj, km))
+    ws = 0.1 * rng.standard_normal((ni, nj))
+    zs = 50.0 * np.abs(rng.standard_normal((fi, fj)))
+    dz = -(300.0 + 100.0 * np.abs(rng.standard_normal((fi, fj, km))))
+    zh = np.empty((fi, fj, km + 1))
+    zh[:, :, km] = zs
+    for k in range(km - 1, -1, -1):
+        zh[:, :, k] = zh[:, :, k + 1] - dz[:, :, k]
+    # Sentinel the halos of the padded in/out arrays so any stray
+    # read/write is loud (finite sentinel: a stray READ corrupts the
+    # certificate numbers, a stray WRITE overwrites the sentinel).
+    o = ng
+    halo = np.ones((fi, fj), dtype=bool)
+    halo[o:o + ni, o:o + nj] = False
+    for a in (w, zh):
+        a[halo, :] = _SENT3
+    ppe = np.full((fi, fj, km + 1), _SENT3)
+    pk3 = np.full((fi, fj, km + 1), _SENT3)
+    pe = np.full((ni + 2, km + 1, nj + 2), _SENT3)
+    peln = np.full((ni, km + 1, nj), _SENT3)
+    pk = np.full((ni, nj, km + 1), _SENT3)
+    delz = np.full((ni, nj, km), _SENT3)
+    return dict(delp=delp, pt=pt, w=w, ws=ws, zs=zs, zh=zh, ppe=ppe,
+                pk3=pk3, pe=pe, peln=peln, pk=pk, delz=delz,
+                ni=ni, nj=nj, o=o, halo=halo)
+
+
+@pytest.mark.parametrize("last_call,fp_out,use_logp",
+                         [(True, False, False),   # the pinned deck
+                          (False, True, True)])   # every flag flipped
+def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
+                                                      use_logp):
+    from legoesm.core.fv3_native_nh_core import riem_solver3
+
+    bd = _BDR(4, 10, 9, 13, 3)         # ni=7 != nj=5, is != js
+    km = KM
+    fx = _riem3_fixture(bd)
+    ni, nj, o = fx["ni"], fx["nj"], fx["o"]
+    ptop = 100.0
+    dt = 100.0
+    akap = FV3_KAPPA
+    gama = 1.0 / (1.0 - akap)
+
+    w_in = np.array(fx["w"], copy=True)
+    zh_in = np.array(fx["zh"], copy=True)
+
+    riem_solver3(1, dt, bd, km, akap, 1004.6, ptop, fx["zs"], fx["w"],
+                 fx["delz"], fx["pt"], fx["delp"], fx["zh"], fx["pe"],
+                 fx["ppe"], fx["pk3"], fx["pk"], fx["peln"], fx["ws"],
+                 0.05, 1.0, use_logp=use_logp, last_call=last_call,
+                 fp_out=fp_out)
+
+    # ---- independent per-column re-plumb (nh_core.F90:87-202) ----
+    peln1 = float(np.log(ptop))
+    ptk = float(np.exp(akap * peln1))
+    rgrav = 1.0 / FV3_GRAV
+    for jc in range(nj):
+        jj = o + jc
+        dm = np.array(fx["delp"][o:o + ni, jj, :km])
+        pem = np.zeros((ni, km + 1))
+        peln2 = np.zeros((ni, km + 1))
+        pem[:, 0] = ptop
+        peln2[:, 0] = peln1
+        for k in range(1, km + 1):
+            pem[:, k] = pem[:, k - 1] + dm[:, k - 1]
+            peln2[:, k] = np.log(pem[:, k])
+        pm2 = np.empty((ni, km))
+        dz2 = np.empty((ni, km))
+        w2 = np.empty((ni, km))
+        for k in range(km):
+            pm2[:, k] = dm[:, k] / (peln2[:, k + 1] - peln2[:, k])
+            dm[:, k] = dm[:, k] * rgrav
+            dz2[:, k] = zh_in[o:o + ni, jj, k + 1] - zh_in[o:o + ni, jj, k]
+            w2[:, k] = w_in[o:o + ni, jj, k]
+        pe2 = np.zeros((ni, km + 1))
+        sim1_solver(dt, 0, ni - 1, km, FV3_RDGAS, gama, akap, pe2, dm,
+                    pm2, pem, w2, dz2,
+                    np.array(fx["pt"][o:o + ni, jj, :km]),
+                    np.array(fx["ws"][:, jc]), 0.05)
+
+        # w and delz out
+        assert np.array_equal(fx["w"][o:o + ni, jj, :km], w2), jc
+        assert np.array_equal(fx["delz"][:, jc, :], dz2), jc
+        # ppe: PERTURBATION unless fp_out (the r2 mutant's kill line --
+        # top must be exactly 0, not ptop)
+        want_ppe = pe2 + pem if fp_out else pe2
+        assert np.array_equal(fx["ppe"][o:o + ni, jj, :], want_ppe), jc
+        if not fp_out:
+            assert np.all(fx["ppe"][o:o + ni, jj, 0] == 0.0)
+        # pk3: k=0 always ptk; interior exp(akap*peln2), overwritten to
+        # peln2 for k>=1 when use_logp
+        assert np.all(fx["pk3"][o:o + ni, jj, 0] == ptk)
+        for k in range(1, km + 1):
+            want = peln2[:, k] if use_logp else np.exp(akap * peln2[:, k])
+            assert np.array_equal(fx["pk3"][o:o + ni, jj, k], want), (jc, k)
+        # zh rebuilt from zs upward WITHOUT grav
+        assert np.array_equal(fx["zh"][o:o + ni, jj, km],
+                              fx["zs"][o:o + ni, jj]), jc
+        for k in range(km - 1, -1, -1):
+            assert np.array_equal(
+                fx["zh"][o:o + ni, jj, k],
+                fx["zh"][o:o + ni, jj, k + 1] - dz2[:, k]), (jc, k)
+        # last_call windows.  pk copies pk3 BEFORE any use_logp
+        # overwrite (:164-172 precedes :187-193), so pk always holds the
+        # EXP form -- asserted independently, not against pk3.
+        if last_call:
+            assert np.array_equal(fx["peln"][:, :, jc], peln2), jc
+            want_pk = np.empty((ni, km + 1))
+            want_pk[:, 0] = ptk
+            for k in range(1, km + 1):
+                want_pk[:, k] = np.exp(akap * peln2[:, k])
+            assert np.array_equal(fx["pk"][:, jc, :], want_pk), jc
+            assert np.array_equal(fx["pe"][1:1 + ni, :, jc + 1], pem), jc
+        # Non-vacuity per column: the solve moved w and pe2 is nonzero.
+        assert np.abs(pe2).max() > 1.0, jc
+
+    # ---- footprint: halos and unwritten windows keep their sentinel ----
+    halo = fx["halo"]
+    assert np.all(fx["w"][halo, :] == _SENT3)
+    assert np.all(fx["zh"][halo, :] == _SENT3)
+    assert np.all(fx["ppe"][halo, :] == _SENT3)
+    assert np.all(fx["pk3"][halo, :] == _SENT3)
+    if last_call:
+        # pe ring rows/slots are NEVER written (upstream pe_halo owns them)
+        assert np.all(fx["pe"][0, :, :] == _SENT3)
+        assert np.all(fx["pe"][ni + 1, :, :] == _SENT3)
+        assert np.all(fx["pe"][:, :, 0] == _SENT3)
+        assert np.all(fx["pe"][:, :, nj + 1] == _SENT3)
+    else:
+        assert np.all(fx["pe"] == _SENT3)
+        assert np.all(fx["peln"] == _SENT3)
+        assert np.all(fx["pk"] == _SENT3)
+    # ppe/pk3/delz compute windows were all written (sentinel gone)
+    assert np.all(fx["ppe"][o:o + ni, o:o + nj, :] != _SENT3)
+    assert np.all(fx["pk3"][o:o + ni, o:o + nj, :] != _SENT3)
+    assert np.all(fx["delz"] != _SENT3)
+
+
+def test_riem_solver3_dead_arm_raises():
+    from legoesm.core.fv3_native_nh_core import riem_solver3
+
+    bd = _BDR(4, 10, 9, 13, 3)
+    fx = _riem3_fixture(bd)
+    with pytest.raises(NotImplementedError, match="a_imp"):
+        riem_solver3(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, 100.0,
+                     fx["zs"], fx["w"], fx["delz"], fx["pt"], fx["delp"],
+                     fx["zh"], fx["pe"], fx["ppe"], fx["pk3"], fx["pk"],
+                     fx["peln"], fx["ws"], 0.05, 0.5)
+
+
+# --------------------------------------------------------------------------
+# codex NH r2 #3 (HIGH): the uniform-zh invariance test also passes for a
+# routine that RETURNS IMMEDIATELY.  This is the strong companion:
+# nonuniform zh, asymmetric per-row fluxes, an independent re-plumb of
+# nh_utils.F90:236-309 (sharing only the separately-certified primitives
+# fv_tp_2d / del6_vt_flux / edge_profile -- the same trust structure as
+# the update_dz_c reference), full-array equality including ghost cells,
+# and explicit damp/ndif km-slot mutation checks.
+# --------------------------------------------------------------------------
+
+def test_update_dz_d_nonuniform_vs_replumbed_reference():
+    from legoesm.core.fv3_native_d_sw import del6_vt_flux, fv_tp_2d
+    from legoesm.core.fv3_native_nh_core import edge_profile, update_dz_d
+    from legoesm.core.fv3_native_sw_core import Bounds
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct,
+        fort,
+    )
+
+    n, ng = 12, 3
+    bd = Bounds.single_tile(n, ng)
+    full = n + 2 * ng
+    km = KM
+    hord = 6
+    gs = dict(build_fv3_native_gridstruct(n, ng, tile=1,
+                                          radius=FV3_RADIUS_M,
+                                          omega=FV3_OMEGA))
+    gs.update(bounded_domain=False, grid_type=0, sw_corner=True,
+              se_corner=True, nw_corner=True, ne_corner=True)
+    rng = np.random.default_rng(83)
+    area = np.abs(4.0e11 * (1.0 + 0.05 * rng.standard_normal((full, full))))
+    rarea = 1.0 / area
+    gs["area"] = area
+    gs["rarea"] = rarea
+
+    crx = 0.2 * rng.standard_normal((n + 1, full, km))
+    # 1e10 (~2.5% of area): at 1e6 the flux-form update moves zh by only
+    # ~1e-2 m and the no-op-killer floor below would not bind.
+    xfx = 1.0e10 * rng.standard_normal((n + 1, full, km))
+    cry = 0.2 * rng.standard_normal((full, n + 1, km))
+    yfx = 1.0e10 * rng.standard_normal((full, n + 1, km))
+
+    levels = np.array([(km - k) * 3000.0 + 5000.0 for k in range(km + 1)])
+    zh0 = (np.broadcast_to(levels, (full, full, km + 1)).copy()
+           + 150.0 * rng.standard_normal((full, full, km + 1)))
+    zs = np.array(zh0[:, :, km], copy=True)
+    damp0 = np.array([1.0e6, 0.0, 1.0e6, 0.0, 1.0e6, 999.0])
+    ndif0 = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 999.0])
+    rdt = 1.0 / 100.0
+
+    zh_port = np.array(zh0, copy=True)
+    ws_port = np.zeros((n, n))
+    damp_port = np.array(damp0, copy=True)
+    ndif_port = np.array(ndif0, copy=True)
+    update_dz_d(ndif_port, damp_port, hord, bd, km, n + 1, n + 1, area,
+                rarea, np.full(km, 1.0e4), zs, zh_port, crx, cry, xfx,
+                yfx, ws_port, rdt, gs, lim_fac=1.0)
+
+    # damp/ndif km-slot mutation (:231-232)
+    assert damp_port[km] == damp0[km - 1]
+    assert ndif_port[km] == ndif0[km - 1]
+    assert np.array_equal(damp_port[:km], damp0[:km])
+
+    # ------------------- independent re-plumb -------------------
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = is_ - ng, js - ng
+    ied, jed = ie + ng, je + ng
+    njd = jed - jsd + 1
+    damp = np.array(damp0, copy=True)
+    ndif = np.array(ndif0, copy=True)
+    damp[km] = damp[km - 1]
+    ndif[km] = ndif[km - 1]
+    dp0 = np.full(km, 1.0e4)
+
+    ni_x = ie + 1 - is_ + 1
+    nj_y = je + 1 - js + 1
+    nid = ied - isd + 1
+    crx_adv = np.zeros((ni_x, njd, km + 1))
+    xfx_adv = np.zeros((ni_x, njd, km + 1))
+    cry_adv = np.zeros((nid, nj_y, km + 1))
+    yfx_adv = np.zeros((nid, nj_y, km + 1))
+    for jj in range(njd):
+        crx_adv[:, jj, :], xfx_adv[:, jj, :] = edge_profile(
+            crx[:, jj, :], xfx[:, jj, :], jsd + jj, km, dp0, False, 0)
+        j_f = jsd + jj
+        if js <= j_f <= je + 1:
+            j2 = j_f - js
+            cry_adv[:, j2, :], yfx_adv[:, j2, :] = edge_profile(
+                cry[:, j2, :], yfx[:, j2, :], j_f, km, dp0, False, 0)
+
+    gsf = dict(gs)
+    for key in ("area", "rarea", "dxa", "dya", "del6_u", "del6_v"):
+        if key in gsf and not isinstance(gsf[key], fort):
+            gsf[key] = fort(np.asarray(gsf[key]), isd, jsd)
+
+    zh_ref = np.array(zh0, copy=True)
+    afort = fort(area, isd, jsd)
+    rfort = fort(rarea, isd, jsd)
+    zhreff = fort(zh_ref, isd, jsd)
+    for k in range(km + 1):
+        ra_x = np.zeros((ie - is_ + 1, njd))
+        rax = fort(ra_x, is_, jsd)
+        for jj in range(njd):
+            j = jsd + jj
+            for i in range(is_, ie + 1):
+                rax[i, j] = (afort[i, j] + xfx_adv[i - is_, jj, k]
+                             - xfx_adv[i - is_ + 1, jj, k])
+        ra_y = np.zeros((nid, je - js + 1))
+        ray = fort(ra_y, isd, js)
+        for j in range(js, je + 1):
+            for i in range(isd, ied + 1):
+                ray[i, j] = (afort[i, j] + yfx_adv[i - isd, j - js, k]
+                             - yfx_adv[i - isd, j - js + 1, k])
+        crx_k = fort(np.ascontiguousarray(crx_adv[:, :, k]), is_, jsd)
+        xfx_k = fort(np.ascontiguousarray(xfx_adv[:, :, k]), is_, jsd)
+        cry_k = fort(np.ascontiguousarray(cry_adv[:, :, k]), isd, js)
+        yfx_k = fort(np.ascontiguousarray(yfx_adv[:, :, k]), isd, js)
+        fxk = fort(np.zeros((ni_x, je - js + 1)), is_, js)
+        fyk = fort(np.zeros((ie - is_ + 1, nj_y)), is_, js)
+        if damp[k] > 1.0e-5:
+            z2 = np.array(zh_ref[:, :, k], copy=True)
+            z2f = fort(z2, isd, jsd)
+            fv_tp_2d(z2f, crx_k, cry_k, n + 1, n + 1, hord, fxk, fyk,
+                     xfx_k, yfx_k, gsf, bd, rax, ray, 1.0)
+            wk2 = fort(np.zeros((nid, njd)), isd, jsd)
+            fx2 = fort(np.zeros((nid + 1, njd)), isd, jsd)
+            fy2 = fort(np.zeros((nid, njd + 1)), isd, jsd)
+            del6_vt_flux(int(ndif[k]), n + 1, n + 1, float(damp[k]), z2f,
+                         wk2, fx2, fy2, gsf, bd)
+            for j in range(js, je + 1):
+                for i in range(is_, ie + 1):
+                    zhreff[i, j, k] = (
+                        (z2f[i, j] * afort[i, j] + fxk[i, j] - fxk[i + 1, j]
+                         + fyk[i, j] - fyk[i, j + 1])
+                        / (rax[i, j] + ray[i, j] - afort[i, j])
+                        + (fx2[i, j] - fx2[i + 1, j] + fy2[i, j]
+                           - fy2[i, j + 1]) * rfort[i, j])
+        else:
+            z2f = fort(zh_ref[:, :, k], isd, jsd)
+            fv_tp_2d(z2f, crx_k, cry_k, n + 1, n + 1, hord, fxk, fyk,
+                     xfx_k, yfx_k, gsf, bd, rax, ray, 1.0)
+            for j in range(js, je + 1):
+                for i in range(is_, ie + 1):
+                    zhreff[i, j, k] = (
+                        (z2f[i, j] * afort[i, j] + fxk[i, j] - fxk[i + 1, j]
+                         + fyk[i, j] - fyk[i, j + 1])
+                        / (rax[i, j] + ray[i, j] - afort[i, j]))
+    ws_ref = np.zeros((n, n))
+    wsreff = fort(ws_ref, is_, js)
+    zsf = fort(zs, isd, jsd)
+    for j in range(js, je + 1):
+        for i in range(is_, ie + 1):
+            wsreff[i, j] = (zsf[i, j] - zhreff[i, j, km]) * rdt
+        for k in range(km - 1, -1, -1):
+            for i in range(is_, ie + 1):
+                zhreff[i, j, k] = max(zhreff[i, j, k],
+                                      zhreff[i, j, k + 1] + DZ_MIN)
+
+    # FULL-array equality: compute window AND ghost cells (the undamped
+    # branch aliases zh into fv_tp_2d, whose copy_corners mutates ghost
+    # corner blocks in place -- the reference reproduces exactly that).
+    assert np.array_equal(zh_port, zh_ref)
+    assert np.array_equal(ws_port, ws_ref)
+    # No-op mutant killer: the transport moved the interior.
+    sl = slice(ng, ng + n)
+    assert np.abs(zh_port[sl, sl, :] - zh0[sl, sl, :]).max() > 1.0
+    assert np.abs(ws_port).max() > 0.0
+    # Damped levels work on a COPY: their ghost cells are untouched.
+    halo = np.ones((full, full), dtype=bool)
+    halo[sl, sl] = False
+    for k in range(km + 1):
+        if damp[k] > 1.0e-5:
+            assert np.array_equal(zh_port[halo, k], zh0[halo, k]), k
+
+
+# --------------------------------------------------------------------------
+# codex NH r2 #7: edge_profile's uniform and limiter branches were
+# untested (and its bottom-ratio comment was reversed -- fixed in the
+# source).  Dense-solve certificate for the uniform branch; exact
+# zero-crossing semantics for the limiter.
+# --------------------------------------------------------------------------
+
+def test_edge_profile_uniform_branch_dense_solve():
+    """nh_utils.F90:1552-1581.  The recurrence is Thomas on
+      row 1:      3 qe(1) + 7 qe(2)              = 4 q(1) + 2 q(2)
+      rows 2..km: qe(k-1) + 4 qe(k) + qe(k+1)    = 3 (q(k-1) + q(k))
+      row km+1:   3.5 qe(km) + 1.5 qe(km+1)      = 4 q(km) + q(km-1)
+    (row-1/row-km+1 coefficients read off the eliminated forms:
+    gak(1) = 7/3 with rhs (4/3) q1 + (2/3) q2, and the bottom's
+    bet = 1/(1.5 - 3.5 gak(km)))."""
+    from legoesm.core.fv3_native_nh_core import edge_profile
+
+    rng = np.random.default_rng(97)
+    ni, km = 4, KM
+    q1 = 10.0 + rng.standard_normal((ni, km))
+    q2 = -3.0 + rng.standard_normal((ni, km))
+    dp0 = np.full(km, 4.0e3)     # ignored by the uniform branch
+
+    qe1, qe2 = edge_profile(q1, q2, 0, km, dp0, True, 0)
+
+    for i in range(ni):
+        for q, qe in ((q1, qe1), (q2, qe2)):
+            A = np.zeros((km + 1, km + 1))
+            d = np.zeros(km + 1)
+            A[0, 0] = 3.0
+            A[0, 1] = 7.0
+            d[0] = 4.0 * q[i, 0] + 2.0 * q[i, 1]
+            for k in range(1, km):
+                A[k, k - 1] = 1.0
+                A[k, k] = 4.0
+                A[k, k + 1] = 1.0
+                d[k] = 3.0 * (q[i, k - 1] + q[i, k])
+            A[km, km - 1] = 3.5
+            A[km, km] = 1.5
+            d[km] = 4.0 * q[i, km - 1] + q[i, km - 2]
+            want = np.linalg.solve(A, d)
+            r = np.abs(qe[i] - want).max() / np.abs(want).max()
+            assert r < 1e-12, (i, r)
+    # MEASURED ORACLE QUIRK, not a port bug: the uniform branch's TOP row
+    # (1.5 qe1 + 3.5 qe2 = 2 q1 + q2) does NOT preserve constants, while
+    # the nonuniform branch at g0=1 has rhs 4 q1 + q2 and does.  A
+    # constant input therefore comes back distorted at the top edge
+    # (7.5 -> -19.2 on this km).  The uniform branch is dead on the
+    # pinned deck (update_dz_d hardcodes uniform_grid=.false.); this
+    # certificate pins the literal transcription, quirk included.
+    qc = np.full((ni, km), 7.5)
+    e1, _ = edge_profile(qc, qc, 0, km, dp0, True, 0)
+    assert np.abs(e1[:, 0] - 7.5).max() > 1.0        # top row distorts
+    en, _ = edge_profile(qc, qc, 0, km, dp0, False, 0)
+    assert np.abs(en - 7.5).max() < 1e-12            # nonuniform doesn't
+
+
+def test_edge_profile_limiter_clamps_zero_crossings():
+    """nh_utils.F90:1623-1633: limiter != 0 zeroes an edge value whose
+    sign OPPOSES the adjacent interior value, at the top and bottom
+    edges only; interior edges are untouched."""
+    from legoesm.core.fv3_native_nh_core import edge_profile
+
+    rng = np.random.default_rng(101)
+    ni, km = 4, KM
+    dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
+    # The edge value's sign vs the adjacent cell's is set by the WHOLE
+    # column (back-substitution), so a sign-opposed top edge cannot be
+    # dialled in analytically -- search a small deterministic ladder of
+    # top-cell values and fail loudly if none opposes (q1 = -5 with a
+    # +10 interior gives qe1 = -29.8: SAME sign, no clamp -- measured).
+    q2 = 10.0 + np.abs(rng.standard_normal((ni, km)))     # never clamps
+    for q_top in (-0.01, -0.1, -1.0, 0.01, 0.1, 1.0):
+        q1 = 10.0 + rng.standard_normal((ni, km))
+        q1[:, 0] = q_top
+        base1, base2 = edge_profile(q1, q2, 0, km, dp0, False, 0)
+        if (q1[:, 0] * base1[:, 0] < 0.0).any():
+            break
+    else:
+        pytest.fail("no ladder value produced a sign-opposed top edge")
+    lim1, lim2 = edge_profile(q1, q2, 0, km, dp0, False, 1)
+
+    # Interior edges identical.
+    assert np.array_equal(lim1[:, 1:km], base1[:, 1:km])
+    assert np.array_equal(lim2[:, 1:km], base2[:, 1:km])
+    # Exact where-rule at the two boundary edges.
+    want_top1 = np.where(q1[:, 0] * base1[:, 0] < 0.0, 0.0, base1[:, 0])
+    want_bot1 = np.where(q1[:, km - 1] * base1[:, km] < 0.0, 0.0,
+                         base1[:, km])
+    assert np.array_equal(lim1[:, 0], want_top1)
+    assert np.array_equal(lim1[:, km], want_bot1)
+    assert np.array_equal(lim2[:, 0], base2[:, 0])
+    assert np.array_equal(lim2[:, km], base2[:, km])
+    # Non-vacuity: at least one column actually clamped.
+    assert np.any(lim1[:, 0] != base1[:, 0])
