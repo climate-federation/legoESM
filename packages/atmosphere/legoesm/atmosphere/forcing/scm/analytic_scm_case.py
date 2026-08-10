@@ -119,6 +119,29 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
              "+0.06 K m/s surface flux, no Coriolis, 4 h. NOT Wangara Day 33 "
              "despite the LES driver's --case-label.",
     ),
+    "wangara": AnalyticSCMCaseSpec(
+        les_driver="run_spectral_cbl.py --case wangara",
+        theta0_K=277.0, inversion_z_m=None, lapse_above_K_m=0.0,
+        inversion_width_m=0.0,
+        # DIURNAL in the real case: the constant here is the flux at the 09:00
+        # start, and the SCM arm overrides it with the shared time-dependent
+        # forcing (see wangara_day33). It is carried so the spec stays
+        # comparable with its siblings, not because the case is steady.
+        sfc_theta_flux_K_m_s=0.0897,
+        u_geo_m_s=-5.5, v_geo_m_s=0.0, f_c=-8.2634e-5,
+        les_z0_m=0.01, les_lz_m=2000.0, les_domain_top_m=1700.0,
+        default_dt_s=10.0,
+        # Dry: the LES driver carries no moisture, so scoring q_v would compare
+        # a moist SCM against a dry reference. theta plus the Ekman-like wind
+        # structure under the height-dependent geostrophic forcing is what this
+        # case constrains.
+        scored=("theta", "u", "v"),
+        note="Wangara Day 33 convective boundary layer (Clarke et al. 1971), "
+             "DRY: diurnal surface heat flux peaking at 13:00 local, "
+             "southern-hemisphere Coriolis, height-dependent easterly "
+             "geostrophic wind, 09:00 start. NOT the Nieuwstadt CBL_N91 case, "
+             "which is the separate 'cbl' entry.",
+    ),
     "ekman": AnalyticSCMCaseSpec(
         les_driver="run_spectral_les.py --ekman",
         theta0_K=290.0, inversion_z_m=None, lapse_above_K_m=0.0,

@@ -93,13 +93,21 @@ case "$LES_CASE" in
       --output $OUT
     ;;
   wangara)
-    echo "REFUSED: run_spectral_cbl.py cannot express Wangara Day 33 (cosine"
-    echo "surface flux peaking at 13:00 local, height-dependent easterly"
-    echo "geostrophic wind, theta ~ 277 K). Running it here at its defaults"
-    echo "produces the Nieuwstadt CBL under a Wangara label -- which is exactly"
-    echo "what results/les_ref/wangara/ already contains. Use LES_CASE=cbl for"
-    echo "that case, and land the Wangara forcing in the driver first."
-    exit 2 ;;
+    # Wangara Day 33 (Clarke et al. 1971), DRY: diurnal surface heat flux
+    # peaking at 13:00 local from a 09:00 start, southern-hemisphere Coriolis,
+    # and a height-dependent easterly geostrophic wind. The forcing comes from
+    # legoesm.atmosphere.forcing.wangara_day33, which the SCM case reads too,
+    # so the two sides cannot be driven differently.
+    #
+    # 8 h covers 09:00-17:00, i.e. the growth of the convective layer through
+    # the 13:00 flux maximum and into the afternoon decay. Lz = 2000 m clears
+    # the depth the layer reaches; the sponge sits above 1700 m, which is where
+    # the SCM case stops scoring.
+    $PY scripts/run/run_spectral_cbl.py --case wangara \
+      --nx 96 --ny 96 --nz 128 --Lx 4000 --Ly 4000 --Lz 2000 \
+      --z0 0.01 --hours 8 --dt 0.5 --record-frames 48 --print-every 5000 \
+      --output $OUT
+    ;;
   astex)
     # ASTEX flight 209 stratocumulus. Same simple-LW engine as DYCOMS (both
     # decks set doradsimple), but no Coriolis, a stronger subsidence
