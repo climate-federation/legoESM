@@ -544,6 +544,20 @@ on the ordering; they are stated here rather than discovered later.
    and numerics; a scheme that resembles SAM is favoured, and the ranking need
    not generalise.
 
+### 8.2b Two schemes have (almost) no tuning surface — MEASURED
+
+The per-scheme budget is computed from the live registry, and the first arms
+reported it: **`dca` has ZERO extended-tier tunable parameters** and `sbm` has
+**two** (job 9356595, tasks 0-1). §4 of this document claims `dca` has one
+(`cape_threshold`) and `kuo` two; the `dca` claim is stale.
+
+The consequence has to be read into any ranking rather than discovered from
+it: `dca`'s "tuned" column equals its "a priori" column **by construction**,
+not because tuning failed to help it. A ΔRMSE of exactly zero for a scheme
+with no exposed parameters is a property of the scheme's config surface, and
+the `#params` / `#evals` columns are in the table so that is visible in the
+same row as the number.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
