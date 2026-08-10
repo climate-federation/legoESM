@@ -51,7 +51,14 @@ cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/wh_cg_j${SLURM_JOB_ID}}"
 DUMP="$OUTDIR/dump_rank0"
 mkdir -p "$DUMP"; echo "outdir=$OUTDIR"
-export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
+# Persistent compile cache OFF for this job (LEGOESM_JIT_CACHE_DIR=""
+# = disabled, backend.py contract): two consecutive runs died at the
+# first init kernel with "Failed to load in-memory CUBIN" while 64
+# ranks raced a COLD per-job cache (26847346 pinned on l50003, 26848090
+# on a clean node set — not hardware). 26846337 survived the same cache
+# because its 4-rank parity arm prewarmed it. Bench arms recompile
+# (~7 s/arm) — noise against a 20-min arm.
+export LEGOESM_JIT_CACHE_DIR=""
 rc=0
 
 cat > "$OUTDIR/rank_wrapper.sh" <<'WRAP'
