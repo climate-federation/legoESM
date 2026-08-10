@@ -97,11 +97,24 @@ NPARAM_RC=$?
 [ "$(printf '%s' "$NPARAM_RAW" | wc -l)" -le 1 ] || { echo "PREFLIGHT FAIL: parameter count printed more than one line: '$NPARAM_RAW'"; exit 96; }
 NPARAM=$(printf '%s' "$NPARAM_RAW" | tr -d '[:space:]')
 case "$NPARAM" in ''|*[!0-9]*) echo "PREFLIGHT FAIL: could not count params for $SCHEME (got '$NPARAM_RAW')"; exit 96;; esac
-# Zero tunables is not a tuning run: it would spend the whole budget
-# re-evaluating the defaults and report them as "tuned".
-[ "$NPARAM" -gt 0 ] || { echo "PREFLIGHT FAIL: $SCHEME reports 0 tunable parameters"; exit 97; }
+# Zero tunables is a REAL state, not an error: MEASURED 2026-08-10, `dca`
+# reports 0 extended-tier parameters from the live registry (the campaign doc
+# claims 1, `cape_threshold` — that claim is stale). Refusing to run such a
+# scheme would drop it from the ranking and the merge gate would then refuse
+# the whole table, so the arm runs with a budget of 1: tune_category_winner
+# returns the defaults immediately when there are no constraints, so a larger
+# budget buys nothing. The row then shows tuned == a priori with #params 0,
+# which is the honest report of a scheme with no exposed tuning surface.
+if [ "$NPARAM" -eq 0 ]; then
+  echo "NOTE: $SCHEME has NO extended-tier tunable parameters; its tuned"
+  echo "      result is its a-priori result BY CONSTRUCTION, not by failure."
+fi
 EVALS=$(( NPARAM * EVALS_PER_PARAM ))
-[ "$EVALS" -lt "$EVALS_MIN" ] && EVALS=$EVALS_MIN
+if [ "$NPARAM" -eq 0 ]; then
+  EVALS=1
+else
+  [ "$EVALS" -lt "$EVALS_MIN" ] && EVALS=$EVALS_MIN
+fi
 [ "$EVALS" -gt "$EVALS_MAX" ] && EVALS=$EVALS_MAX
 
 echo "SCHEME=$SCHEME  KERNEL_ARM=$ARM  n_params=$NPARAM  tune_evals=$EVALS"
