@@ -670,7 +670,9 @@ def test_driver_uses_the_declared_sphum_index_not_tracer_zero():
 
 
 @pytest.mark.parametrize("override, needle, ntracer", [
-    (dict(hydrostatic=False), "hydrostatic", 0),
+    # hydrostatic=False is PORTED now (w/delz remap, w_limiter, NH pkz);
+    # its argument requirements are asserted in
+    # test_driver_nh_requires_its_arguments below.
     (dict(consv=1.0), "consv", 0),
     # fillz sits INSIDE the `elseif (nq > 0)` arm (fv_mapz.F90:330-336), so
     # fill=True is only refusable when there are tracers -- with none it is
@@ -688,6 +690,20 @@ def test_driver_refuses_every_unported_lane(override, needle, ntracer):
           for _ in range(ntracer)]
     with pytest.raises(NotImplementedError, match=needle):
         lagrangian_to_eulerian(**face, q=tr)
+
+
+def test_driver_nh_requires_its_arguments():
+    """The NH lane must not run on defaults: w/delz/ws/rdgas/grav are
+    all required (a silently-defaulted rdgas would be a wrong pkz, not
+    an error), and a negative kord_wz selects the refused iv=-3 arm."""
+    face, _ = _face()
+    face["hydrostatic"] = False
+    with pytest.raises(ValueError, match="hydrostatic=False needs"):
+        lagrangian_to_eulerian(**face, q=[])
+    nh = _nh_face()
+    nh["kord_wz"] = -9
+    with pytest.raises(NotImplementedError, match="iv"):
+        lagrangian_to_eulerian(**nh, q=[])
 
 
 def test_driver_refuses_a_moist_lane_without_any_tracers():
@@ -974,3 +990,99 @@ def test_driver_guards_do_not_over_refuse_a_non_last_step_call():
     lagrangian_to_eulerian(**b, q=tr, last_step=False)
     c, _ = _face()
     lagrangian_to_eulerian(**c, q=[], fill=True)     # fillz needs nq > 0
+
+
+# ------------------------------------------------------------- NH remap
+
+def _nh_face(w_const=None, seed=59):
+    """The `_face` fixture plus make_nh delz, a w field and the ws BC.
+
+    ``w_const`` fills w with one constant (the iv=-2 constant-
+    preservation control); None gives it vertical structure.
+    """
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face, ps2d = _face()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    rng = np.random.default_rng(seed)
+    m_a = n + 2 * ng
+
+    # T_v back from theta (pt = T_v/pkz in the fixture).
+    tv = face["pt"][ia:ia + n, ia:ia + n, :] * face["pkz"]
+    dpeln = np.diff(face["peln"], axis=1).transpose(0, 2, 1)
+    delz = -(FV3_RDGAS / FV3_GRAV) * tv * dpeln
+
+    w = np.zeros((m_a, m_a, km), dtype=np.float64)
+    if w_const is None:
+        w[ia:ia + n, ia:ia + n, :] = 0.3 * rng.standard_normal((n, n, km))
+    else:
+        w[ia:ia + n, ia:ia + n, :] = w_const
+    ws = (np.full((n, n), w_const) if w_const is not None
+          else 0.1 * rng.standard_normal((n, n)))
+    face.update(hydrostatic=False, w=w, delz=delz, ws=ws, kord_wz=9,
+                w_limiter=False, rdgas=FV3_RDGAS, grav=FV3_GRAV)
+    return face
+
+
+def test_driver_nh_conserves_delz_and_preserves_constant_w():
+    """Three NH facts in one integration: (a) the delz remap conserves
+    the column height integral EXACTLY (specific volume is remapped
+    mass-weighted over an unchanged column mass); (b) a CONSTANT w with
+    a matching ws bottom BC comes back as the same constant (the iv=-2
+    reconstruction of a constant is the constant); (c) the returned pkz
+    is the NH ideal-gas form of the RETURNED delp/delz/pt to the last
+    bit (r_vir=0 makes the :975 conversion an identity)."""
+    face = _nh_face(w_const=5.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    dz_before = face["delz"].sum(axis=2).copy()
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    dz_after = face["delz"].sum(axis=2)
+    assert np.abs(dz_after - dz_before).max() < 1e-9 * np.abs(
+        dz_before).max()
+    assert face["delz"].max() < 0.0
+    wwin = face["w"][ia:ia + n, ia:ia + n, :]
+    assert np.abs(wwin - 5.0).max() < 1e-11, np.abs(wwin - 5.0).max()
+
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+    rrg = -FV3_RDGAS / FV3_GRAV
+    want = np.exp(face["akap"] * np.log(
+        rrg * face["delp"][ia:ia + n, ia:ia + n, :] / face["delz"]
+        * face["pt"][ia:ia + n, ia:ia + n, :]))
+    assert np.allclose(face["pkz"], want, rtol=1e-14, atol=0.0)
+
+
+def test_driver_nh_w_limiter_clamps_and_conserves_momentum():
+    """An interior w = 200 violates w_max = 90 (fv_mapz.F90:51); the
+    limiter must clamp it and push the excess into the neighbours so
+    the column integral w*dp2 is unchanged (momentum-conserving by
+    construction; the top escape valve does not fire at these values)."""
+    face = _nh_face(w_const=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    face["w"][ia + 2, ia + 3, 2] = 200.0
+    face["ws"][:] = 0.0
+    face["w_limiter"] = True
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    wwin = face["w"][ia:ia + n, ia:ia + n, :]
+    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ
+    assert wwin.max() <= W_MAX_MAPZ + 1e-12, wwin.max()
+    # Momentum: recompute dp2 from the returned (Eulerian) delp.
+    dp2 = face["delp"][ia:ia + n, ia:ia + n, :]
+    col = (wwin * dp2).sum(axis=2)
+    # The un-limited run carries the same remap; only the limiter differs.
+    face2 = _nh_face(w_const=0.0)
+    face2["w"][ia + 2, ia + 3, 2] = 200.0
+    face2["ws"][:] = 0.0
+    lagrangian_to_eulerian(**face2, q=[])
+    w2 = face2["w"][ia:ia + n, ia:ia + n, :]
+    col2 = (w2 * face2["delp"][ia:ia + n, ia:ia + n, :]).sum(axis=2)
+    assert np.abs(col - col2).max() < 1e-9 * max(np.abs(col2).max(), 1.0)
+    # Non-vacuity: the limiter really fired.
+    assert w2.max() > W_MAX_MAPZ
+    assert not np.array_equal(wwin, w2)
