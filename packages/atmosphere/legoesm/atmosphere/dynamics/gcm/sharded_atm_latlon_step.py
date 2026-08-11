@@ -472,6 +472,42 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
         raw["__polar_mask_v"] = jnp.stack(
             [model._polar_mask_v[r * nl:r * nl + nl + 1] for r in range(n_dev)],
             axis=0)
+    # Precomputed stage-invariant 1-D geometry pads (packing plan bucket C):
+    # the three scalar-row pads the operators would otherwise re-emit as
+    # f32[1]/f64[1] ppermutes EVERY RK stage (grid.lat / grid.cos_lat are
+    # step-constant).  Built ONCE here by the SAME pad function on the GLOBAL
+    # arrays and sliced per band — a band's slice [r*nl : r*nl+nl+2] carries
+    # exactly what the in-body pad would deliver: the neighbour band's true
+    # edge row at interior cuts, the wall constant at the physical pole ends.
+    # GUARDED (codex 2026-08-11 MEDIUM): the slice==in-body-pad identity holds
+    # only when the build-time pad takes the LOCAL wall-constant branch, so
+    # precompute ONLY with the halo backend un-armed and meridional wrap off
+    # (an armed SPMD backend would ppermute outside shard_map and crash; an
+    # armed MPI backend would sendrecv the global array as if band-local;
+    # y-periodic wrap-pads while the armed SPMD body walls).  Otherwise the
+    # entries are simply omitted and the body falls back to the in-body pads
+    # (byte-identical, just unoptimized).  Bit-identity is gated by
+    # tests/parallel/test_atm_latlon_geom_pads.py.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_periodic, pad_with_pole_bc_lat)
+    import math
+    if (get_halo_backend() == "local" and get_spmd_mesh() is None
+            and not get_meridionally_periodic()):
+        _lat_g = jnp.asarray(grid.lat)
+        _geom_ext = {
+            "__lat_pad": pad_with_pole_bc_lat(
+                _lat_g, halo=1, south_value=0.0, north_value=0.0),
+            "__lat_pad_pole": pad_with_pole_bc_lat(
+                _lat_g, halo=1,
+                south_value=-math.pi / 2.0, north_value=math.pi / 2.0),
+            "__cos_lat_pad": pad_with_pole_bc_lat(
+                jnp.asarray(grid.cos_lat), halo=1,
+                south_value=0.0, north_value=0.0),
+        }
+        for _n, _ext in _geom_ext.items():
+            raw[_n] = jnp.stack(
+                [_ext[r * nl:r * nl + nl + 2] for r in range(n_dev)], axis=0)
     # #1362: the band geometry above is RECOMPUTED per process from the same
     # config, and per-process XLA autotuning on device-derived grid fields
     # makes the last ULPs differ at larger sizes -- which trips the
@@ -543,6 +579,13 @@ def _make_band_step_body(model, template, array_field_names, axis,
                  if "__polar_mask" in stacks_local else None)
         pmaskv = (stacks_local["__polar_mask_v"][gi]
                   if "__polar_mask_v" in stacks_local else None)
+        # Precomputed stage-invariant geometry pads (see
+        # _build_geometry_stacks): skip the per-stage f32[1] scalar-row
+        # ppermutes of grid.lat / grid.cos_lat inside the operators.
+        gpads = ((stacks_local["__lat_pad"][gi],
+                  stacks_local["__lat_pad_pole"][gi],
+                  stacks_local["__cos_lat_pad"][gi])
+                 if "__lat_pad" in stacks_local else None)
         # Reconstruct the band's nl+1 v-faces from v_lower (shared interface
         # row via ppermute), run the un-jitted band step, convert v back.
         v_full = reconstruct_vface_lower(state_local.v, axis, perm_north)
@@ -553,6 +596,7 @@ def _make_band_step_body(model, template, array_field_names, axis,
             grid=band_geom, sigma_coord=model.sigma_coord,
             polar_mask=pmask, polar_mask_v=pmaskv,
             pole_v_bc_masks=spmd_pole_end_masks(),
+            geom_pads=gpads,
         )
         return out._replace(v=to_vface_lower(out.v)), ps_out
 
