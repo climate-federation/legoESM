@@ -2999,3 +2999,22 @@ no per-step communicator init. No horizontal-fusion flag exists in
 this XLA build — the lever is SOURCE-LEVEL fusion (fewer, bigger
 fusions; kill the transposes; pack RK-stage axpys). Codex reading the
 step source for the transpose origin + smallest first slice.
+
+### Axis-0 PPM slice: NULL — the transposes are XLA layout artifacts (2026-08-11)
+
+The native axis-0 edge-value sweep landed (bit-parity + jaxpr
+transpose-absence tests) and the acceptance trace (26862943) shows
+input_transpose_fusion_12 UNCHANGED (8.94 -> 9.48 ms/24 steps; grand
+totals 143.7 vs 144.0 ms — noise). RETRACTION of the source
+attribution: the transpose family is inserted by XLA's LAYOUT
+ASSIGNMENT (operand layout vs preferred fusion layout), not by the
+source moveaxis pair — removing the source op does not stop XLA from
+materializing a transposed copy where it prefers a different
+minor-dimension order. The slice stays (harmless, coupled by tests);
+the codex static reading is falsified at the compiler level. Next
+instrument: HLO dump of the compiled lat-lon step — read
+input_transpose_fusion_12's operand/result LAYOUTS ({...} annotations)
+and its consumer, then decide between entry-layout forcing, array
+re-ordering at the state level ((lev, lat, lon) storage), or accepting
+the layout tax. Compute-fusion campaign continues only with
+layout-level evidence.
