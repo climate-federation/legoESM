@@ -316,13 +316,13 @@ def _smooth(lon, lat):
     return np.sin(lat) * 40.0 + 12.0 * np.cos(lon) * np.cos(lat)
 
 
-def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
+def _smooth_a_halo_worst(ectx_used, kinked_gs6):
     from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
 
     a_lon_e, a_lat_e = ext_parity_lonlat_ref(N, NG, "A")
     f6 = [_smooth(gs["agrid_lon"], gs["agrid_lat"]).copy()
           for gs in kinked_gs6]
-    ext_scalar_sixface(f6, "A", ectx)
+    ext_scalar_sixface(f6, "A", ectx_used)
     worst = 0.0
     for t in range(6):
         fe = _smooth(a_lon_e[t], a_lat_e[t])
@@ -333,7 +333,30 @@ def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
                 worst = max(worst, abs(
                     f6[t][i_f - 1 + NG, j_f - 1 + NG]
                     - fe[i_f - 1 + NG, j_f - 1 + NG]))
-    assert worst < 0.15, worst          # measured 0.064 (field ~41)
+    return worst
+
+
+def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
+    """Smooth-field halo accuracy at BOTH interpolation orders.
+
+    The default context now carries the RESOLVED runtime k2e_nord=2
+    (the pinned tree's own duogrid_init; the extchain oracle
+    certificate proves the nord=2 chain matches the oracle to <=2e-10),
+    so its accuracy on this n=12 kinked harness is the ORACLE's own:
+    measured 5.814 on a field ~41.  The historic 0.15 bound was a
+    nord=4 calibration -- kept below on an explicit nord=4 context, so
+    the order sensitivity itself stays pinned (2-vs-4 must differ by
+    ~90x here; a context that silently ignored k2e_nord would fail
+    one of the two).
+    """
+    worst2 = _smooth_a_halo_worst(ectx, kinked_gs6)
+    assert worst2 < 8.0, worst2          # measured 5.814 at nord=2
+
+    from legoesm.grids.fv3_native_ext_vector import build_ext_context
+    ectx4 = build_ext_context(N, NG, kinked_gs6, k2e_nord=4)
+    worst4 = _smooth_a_halo_worst(ectx4, kinked_gs6)
+    assert worst4 < 0.15, worst4         # measured 0.064 at nord=4
+    assert worst2 > 10.0 * worst4        # the order gap is real
 
 
 def test_corner_lagrange_smooth_scalar_dstag(ectx):
