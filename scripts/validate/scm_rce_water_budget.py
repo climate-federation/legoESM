@@ -82,8 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days-long", type=float, default=25.0)
     ap.add_argument("--dt", type=float, default=camp.DEFAULT_DT_S)
     ap.add_argument("--analysis-days", type=float, default=2.0)
-    ap.add_argument("--hard-saturation-adjustment", action="store_true",
-                    default=True)
+    # BooleanOptionalAction, NOT store_true: with store_true and default=True
+    # the flag could never be turned OFF, so the guard could not be A/B'd —
+    # and the guard is a candidate water sink, which makes an un-disableable
+    # flag exactly the wrong shape for this probe.
+    ap.add_argument("--hard-saturation-adjustment",
+                    action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--surface-wind-m-s", type=float,
                     default=camp.DEFAULT_SCM_RCE_SURFACE_WIND_M_S)
     args = ap.parse_args(argv)
