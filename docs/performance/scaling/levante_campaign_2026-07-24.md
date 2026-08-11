@@ -3033,3 +3033,21 @@ hand. By magnitude the next lat-lon lever is COLLECTIVE COLLAPSE:
 single-field PPM fold-halo exchange family (latlon_spmd.py:459) is NOT
 covered by the fused three-field wall pad — folding it in is the next
 slice (~1 ms/step class).
+
+### Collective-collapse slice DESIGNED (not yet implemented)
+
+Per stage the sigma PPM path runs TWO band exchanges: the fused
+entry pad (pad_with_pole_bc_lat_multi, wall-BC lat pad, 1 ppermute
+pair) and the PPM transport's own pad_halo_latlon_3d(T, halo=2)
+(pole-FOLD semantics, 1 pair) — 4 collectives/stage, 13/step. They
+cannot be merged by widening the wall-BC pad: boundary semantics
+differ at the pole bands (constant wall values vs fold). The correct
+surgery, anticipated by the helper's own docstring ("boundary
+handling is field-specific, while the interior-cut exchange this
+helper fuses is flag-independent"): factor ONE fused interior-cut
+exchange at halo=2 carrying T/u/dp(/p_s) + apply per-field boundary
+handling (wall constants vs fold) AFTER the exchange, then thread the
+fold-padded T into cgrid_fv_scalar_advection_latlon_3d's existing
+q_pad parameter. Saves 1 pair/stage = 6 of 13 collectives/step
+(~0.8-1.0 ms class). Gates: band-vs-serial bit-parity suites, sharded
+step tests, then the standard A/B/A2.
