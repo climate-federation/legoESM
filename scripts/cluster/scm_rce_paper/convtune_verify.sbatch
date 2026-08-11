@@ -88,6 +88,7 @@ JAX_ENABLE_X64=1 $PY -m pytest -q -p no:cacheprovider \
   tests/unit/test_scm_rce_tuner_sampling.py \
   tests/unit/test_scm_rce_water_budget.py \
   tests/unit/test_scm_rce_applied_precip.py \
+  tests/unit/test_turbulence_hydrostatic_surface_fluxes.py \
   tests/unit/test_plot_scm_rce_convection_paper.py \
   tests/validation/test_rcemip_plane_smoke.py \
   tests/unit/test_rcemip_gsam_oracle_ic.py \
