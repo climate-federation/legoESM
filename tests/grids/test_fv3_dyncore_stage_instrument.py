@@ -143,6 +143,65 @@ def test_map_stage_field_synthetic_known_answer():
     assert float(np.abs(p - o).max()) == 0.0
 
 
+def test_stage_rows_exchange_attribution_labels():
+    """codex r1 #1: the delp/pt and divgd exchange rows must be labelled
+    S01/S06 (the oracle stage that produced them), not the later hook
+    they are observed at."""
+    cmp_ = _load("compare_dyncore_stages")
+    rows = cmp_.stage_rows()
+    by_stage = {}
+    for stage, pkey, pf, od, op, kind, halo, note in rows:
+        by_stage.setdefault(stage, []).append((pf, note))
+    assert {f for f, _ in by_stage["S01_extdp"]} == {"delp", "pt"}
+    assert {f for f, _ in by_stage["S06_extdivgd"]} == {"divg_d"}
+    for _, note in by_stage["S01_extdp"] + by_stage["S06_extdivgd"]:
+        assert "observed post" in note
+    # S02/S07 keep only the fields their own exchange mutates
+    assert {f for f, _ in by_stage["S02_entryex"]} == {"u", "v"}
+    assert {f for f, _ in by_stage["S07_extucvc"]} == {"uc", "vc"}
+
+
+def test_flag_rule_binds_on_synthetic_boundary_jump():
+    """The boundary-jump rule must fire for an edge-concentrated diff
+    and stay silent for a uniform one (non-vacuity both ways)."""
+    cmp_ = _load("compare_dyncore_stages")
+    p = np.zeros((49, 49, 2))
+    o = np.zeros((49, 49, 2))
+    o[0, 10, 0] = 1e-3          # edge cell only
+    rm = cmp_.region_maxima(p, o)
+    assert rm["edge"] == 1e-3 and rm["interior"] == 0.0
+    boundary = max(rm["edge"], rm["corner"])
+    assert boundary > 1e-8 and boundary > 30 * max(rm["interior"], 1e-16)
+    # uniform difference must NOT satisfy the 30x concentration clause
+    o2 = np.full_like(o, 1e-3)
+    rm2 = cmp_.region_maxima(p, o2)
+    assert not (max(rm2["edge"], rm2["corner"])
+                > 30 * max(rm2["interior"], 1e-16))
+
+
+def test_receipt_gating(tmp_path):
+    """codex r1 #2: a clean run without valid receipts must not return
+    an authoritative exit code."""
+    import json
+    cmp_ = _load("compare_dyncore_stages")
+    # invalid receipt content is detected
+    bad = tmp_path / "r.json"
+    bad.write_text("not json")
+    dump = tmp_path / "dumps"
+    dump.mkdir()
+    with pytest.raises(SystemExit, match="receipts invalid"):
+        # exercise only the receipt-parsing prologue: dump dir has no
+        # manifests, but receipts are checked first
+        cmp_.main(["--dump-dir", str(dump), "--receipts", str(bad)])
+    # a matching receipt passes the prologue (then fails on missing
+    # dumps, which is the NEXT error -- proving order)
+    good = tmp_path / "g.json"
+    good.write_text(json.dumps({"pass": True,
+                                "dump_dir": str(dump)}))
+    with pytest.raises(SystemExit, match="missing stage dumps"):
+        cmp_.main(["--dump-dir", str(dump), "--receipts", str(good)])
+
+
 def test_stage_rows_reference_valid_kinds():
     cmp_ = _load("compare_dyncore_stages")
     rows = cmp_.stage_rows()

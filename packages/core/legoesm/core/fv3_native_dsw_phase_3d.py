@@ -199,7 +199,9 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
             {nm: np.stack([per_face_levels[t][k][nm] for k in range(km)],
                           axis=2)
              for nm in ("allflux_x", "allflux_y", "crx_adv", "cry_adv",
-                        "xfx_adv", "yfx_adv")}
+                        "xfx_adv", "yfx_adv", "xflux", "yflux",
+                        "cx", "cy", "ut", "vt", "ra_x", "ra_y")
+             if nm in per_face_levels[t][0]}
             for t in range(6)])
 
     # --- BARRIER 1: inter-panel flux average, one level at a time ----------

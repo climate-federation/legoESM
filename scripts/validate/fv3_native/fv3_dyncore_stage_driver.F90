@@ -86,9 +86,11 @@ program fv3_dyncore_stage_driver
   ! arm A finals
   real, allocatable, dimension(:, :, :) :: a_u, a_v, a_pt, a_delp, &
       a_pkz, a_omga, a_ua, a_va, a_uc, a_vc, a_mfx, a_mfy, a_cx, a_cy, &
-      a_pe, a_peln, a_pk
+      a_pe, a_peln, a_pk, a_w, a_delz, a_qcon, a_ze0
   real, allocatable :: a_q(:, :, :, :)
-  real, allocatable :: a_ps(:, :)
+  real, allocatable :: a_ps(:, :), a_phis(:, :)
+  real, allocatable :: s_ze0(:, :, :)
+  integer :: iq
 
   integer :: ntrace, ntprog, ntdiag, ntfamily
 
@@ -216,6 +218,7 @@ program fv3_dyncore_stage_driver
   s_cx = Atm(n)%cx;    s_cy = Atm(n)%cy
   s_qcon = Atm(n)%q_con
   s_delz = Atm(n)%delz
+  if (allocated(Atm(n)%ze0)) s_ze0 = Atm(n)%ze0
 
   ! ----- time bookkeeping exactly as atmosphere(Time) -----
   fv_time = Time + Time_step_atmos
@@ -235,12 +238,21 @@ program fv3_dyncore_stage_driver
   a_uc = Atm(n)%uc;    a_vc = Atm(n)%vc
   a_mfx = Atm(n)%mfx;  a_mfy = Atm(n)%mfy
   a_cx = Atm(n)%cx;    a_cy = Atm(n)%cy
+  a_w = Atm(n)%w;      a_delz = Atm(n)%delz
+  a_qcon = Atm(n)%q_con
+  a_phis = Atm(n)%phis
+  if (allocated(Atm(n)%ze0)) a_ze0 = Atm(n)%ze0
 
   call stage_dump3('FINA_u', a_u)
   call stage_dump3('FINA_v', a_v)
   call stage_dump3('FINA_pt', a_pt)
   call stage_dump3('FINA_delp', a_delp)
   call stage_dump2('FINA_ps', a_ps)
+  call stage_dump2('FINA_phis', a_phis)
+  do iq = 1, min(Atm(n)%ncnst, 9)
+    write (fname_dat, '(A,I1)') 'FINA_q', iq
+    call stage_dump3(trim(fname_dat), a_q(:, :, :, iq))
+  end do
 
   ! ----- restore the IC -----
   Atm(n)%u = s_u;      Atm(n)%v = s_v;       Atm(n)%w = s_w
@@ -254,6 +266,7 @@ program fv3_dyncore_stage_driver
   Atm(n)%cx = s_cx;    Atm(n)%cy = s_cy
   Atm(n)%q_con = s_qcon
   Atm(n)%delz = s_delz
+  if (allocated(Atm(n)%ze0)) Atm(n)%ze0 = s_ze0
   call mpp_sync()
 
   ! =================== arm B: the STAGED copies ======================
@@ -285,6 +298,14 @@ program fv3_dyncore_stage_driver
   call cert3('cy', a_cy, Atm(n)%cy)
   call cert4('q', a_q, Atm(n)%q)
   call cert2('ps', a_ps, Atm(n)%ps)
+  ! codex r1 #3: every intent(inout) actual of fv_dynamics, including
+  ! the ones expected inactive on this lane -- an inactive field that
+  ! moved is exactly the kind of surprise this rung exists to catch.
+  call cert3('w', a_w, Atm(n)%w)
+  call cert3('delz', a_delz, Atm(n)%delz)
+  call cert3('q_con', a_qcon, Atm(n)%q_con)
+  call cert2('phis', a_phis, Atm(n)%phis)
+  if (allocated(Atm(n)%ze0)) call cert3('ze0', a_ze0, Atm(n)%ze0)
 
   call stage_dump_close()
   call nullify_domain()

@@ -120,9 +120,18 @@ def require_certs(certs_by_tile: list) -> None:
 
 
 def external_control(dumps: list, step_run: str) -> None:
-    """Arm-A finals vs the pinned 1-step restart, bitwise."""
+    """Arm-A finals vs the pinned 1-step restart, bitwise.
+
+    codex r1 #5: covers every field the restart set carries -- u, v, T,
+    delp, phis (fv_core.res) and, when present, the tracer fields
+    (fv_tracer.res).  In-memory-only fields (pe/pk/peln/pkz/uc/vc/...)
+    have no restart representation; they are covered by the CERT rung
+    (staged==real) instead, which bounds an instrument error but not a
+    driver-init error in those fields -- stated, not hidden.
+    """
     import netCDF4 as nc
     worst = 0.0
+    n_fields = 0
     for t in range(6):
         p = os.path.join(step_run, "RESTART", f"fv_core.res.tile{t+1}.nc")
         d = nc.Dataset(p)
@@ -137,15 +146,35 @@ def external_control(dumps: list, step_run: str) -> None:
             ej = 48 + (1 if stag == "u" else 0)
             win = arr[NG:NG + ei, NG:NG + ej, :]
             worst = max(worst, float(np.abs(win - ref_f).max()))
+            n_fields += 1
+        if "phis" in d.variables and "FINA_phis" in dumps[t]:
+            ref2 = np.array(d["phis"][:])[0].T          # (i, j)
+            win2 = dumps[t]["FINA_phis"][NG:NG + 48, NG:NG + 48]
+            worst = max(worst, float(np.abs(win2 - ref2).max()))
+            n_fields += 1
         d.close()
+        ptr = os.path.join(step_run, "RESTART",
+                           f"fv_tracer.res.tile{t+1}.nc")
+        if os.path.exists(ptr) and f"FINA_q1" in dumps[t]:
+            dtr = nc.Dataset(ptr)
+            for iq, var in enumerate(dtr.variables):
+                key = f"FINA_q{iq+1}"
+                if dtr[var].ndim != 4 or key not in dumps[t]:
+                    continue
+                ref = np.array(dtr[var][:])[0]
+                ref_f = np.moveaxis(ref, 0, -1).transpose(1, 0, 2)
+                win = dumps[t][key][NG:NG + 48, NG:NG + 48, :]
+                worst = max(worst, float(np.abs(win - ref_f).max()))
+                n_fields += 1
+            dtr.close()
     if worst != 0.0:
         raise SystemExit(
             f"EXTERNAL CONTROL FAILED: the driver's arm-A final state "
             f"differs from {step_run}/RESTART by {worst:.3e} (must be "
             f"bitwise 0). The driver's init path does not reproduce the "
             f"production deck; nothing downstream is comparable.")
-    print("EXTERNAL CONTROL: arm-A final == pinned 1-step restart, "
-          "bitwise, all 6 tiles / 4 fields")
+    print(f"EXTERNAL CONTROL: arm-A final == pinned 1-step restart, "
+          f"bitwise ({n_fields} tile-fields)")
 
 
 # ----------------------------------------------------------------------
@@ -166,6 +195,9 @@ KINDS = {
     "bv":      ((49, 49), "bu", -1),
     "xflux":   ((49, 48), "yflux", +1),
     "yflux":   ((48, 49), "xflux", -1),
+    # positive scalar pair (area ratios): partner-swap, no sign.
+    "sx":      ((48, 48), "sy", 0),
+    "sy":      ((48, 48), "sx", 0),
 }
 
 
@@ -277,10 +309,13 @@ def stage_rows():
     def r(stage, pkey, pf, od, op, kind, halo=False, note=""):
         rows.append((stage, pkey, pf, od, op, kind, halo, note))
 
-    r("S02_entryex", "S02_entryex", "delp", "S01_extdp_delp",
-      "S01_extdp_delp", "ascalar", halo=True)
-    r("S02_entryex", "S02_entryex", "pt", "S01_extdp_pt",
-      "S01_extdp_pt", "ascalar", halo=True)
+    # codex r1 #1: the delp/pt rows are the S01 exchange even though the
+    # port observes them after the (delp/pt-non-mutating) wind exchange.
+    exnote = "observed post-wind-exchange (non-mutating)"
+    r("S01_extdp", "S02_entryex", "delp", "S01_extdp_delp",
+      "S01_extdp_delp", "ascalar", halo=True, note=exnote)
+    r("S01_extdp", "S02_entryex", "pt", "S01_extdp_pt",
+      "S01_extdp_pt", "ascalar", halo=True, note=exnote)
     r("S02_entryex", "S02_entryex", "u", "S02_extuv_u", "S02_extuv_v",
       "u", halo=True)
     r("S02_entryex", "S02_entryex", "v", "S02_extuv_v", "S02_extuv_u",
@@ -308,19 +343,33 @@ def stage_rows():
     r("S05_pgradc", "S05_pgradc", "vc", "S05_pgradc_vc", "S05_pgradc_uc",
       "vc")
 
+    # codex r1 #1: the divgd row is the S06 exchange (:652), observed
+    # after the (divgd-non-mutating) uc/vc exchange at :655.
+    r("S06_extdivgd", "S07_extucvc", "divg_d", "S06_extdivgd_divgd",
+      "S06_extdivgd_divgd", "bscalar", halo=True, note=exnote)
     r("S07_extucvc", "S07_extucvc", "uc", "S07_extucvc_uc",
       "S07_extucvc_vc", "uc", halo=True)
     r("S07_extucvc", "S07_extucvc", "vc", "S07_extucvc_vc",
       "S07_extucvc_uc", "vc", halo=True)
-    r("S07_extucvc", "S07_extucvc", "divg_d", "S06_extdivgd_divgd",
-      "S06_extdivgd_divgd", "bscalar", halo=True)
 
+    # codex r1 #4: also compare the flux capacitors / Courant
+    # accumulators / advected C winds / area ratios d_sw1 writes.
     for nm_p, nm_o, kind in (("crx_adv", "crx", "xflux"),
                              ("cry_adv", "cry", "yflux"),
                              ("xfx_adv", "xfx", "xflux"),
-                             ("yfx_adv", "yfx", "yflux")):
-        part = {"crx": "cry", "cry": "crx",
-                "xfx": "yfx", "yfx": "xfx"}[nm_o]
+                             ("yfx_adv", "yfx", "yflux"),
+                             ("xflux", "mfx", "xflux"),
+                             ("yflux", "mfy", "yflux"),
+                             ("cx", "cx", "xflux"),
+                             ("cy", "cy", "yflux"),
+                             ("ut", "utt", "uc"),
+                             ("vt", "vtt", "vc"),
+                             ("ra_x", "rax", "sx"),
+                             ("ra_y", "ray", "sy")):
+        part = {"crx": "cry", "cry": "crx", "xfx": "yfx", "yfx": "xfx",
+                "mfx": "mfy", "mfy": "mfx", "cx": "cy", "cy": "cx",
+                "utt": "vtt", "vtt": "utt", "rax": "ray",
+                "ray": "rax"}[nm_o]
         r("S08_dsw1", "S08_dsw1", nm_p, f"S08_dsw1_{nm_o}",
           f"S08_dsw1_{part}", kind)
     for slot in (0, 3):
@@ -342,15 +391,22 @@ def stage_rows():
       "S10_dsw23_delp", "ascalar")
     r("S10_dsw23", "S10_dsw23", "pt", "S10_dsw23_pt", "S10_dsw23_pt",
       "ascalar")
-    bnote = "direct-faces-authoritative"
-    r("S10_dsw23", "S10_dsw3", "ubb", "S10_dsw23_ubb", "S10_dsw23_vbb",
-      "bu", note=bnote)
-    r("S10_dsw23", "S10_dsw3", "vbb", "S10_dsw23_vbb", "S10_dsw23_ubb",
-      "bv", note=bnote)
-    r("S10_dsw23", "S10_dsw3", "ubbtemp", "S10_dsw23_ubbtemp",
+    # B-wind transpose pairing is UNITS-DERIVED (b2 partner probe,
+    # 2026-08-11): ubb/vbbtemp are the CIRCULATION-scale pair (~4.8e3)
+    # and ubbtemp/vbb the m/s pair (~20), and the oracle's own measured
+    # blend exchanges ubb<->vbbtemp across rotated contacts.  So under
+    # a transposed face ubb pairs with vbbtemp and ubbtemp with vbb.
+    # All faces compared; a wrong pairing would show as O(1), which is
+    # self-diagnosing.
+    bnote = "pairing-units-derived"
+    r("S10_dsw23", "S10_dsw3", "ubb", "S10_dsw23_ubb",
       "S10_dsw23_vbbtemp", "bu", note=bnote)
-    r("S10_dsw23", "S10_dsw3", "vbbtemp", "S10_dsw23_vbbtemp",
+    r("S10_dsw23", "S10_dsw3", "vbb", "S10_dsw23_vbb",
       "S10_dsw23_ubbtemp", "bv", note=bnote)
+    r("S10_dsw23", "S10_dsw3", "ubbtemp", "S10_dsw23_ubbtemp",
+      "S10_dsw23_vbb", "bu", note=bnote)
+    r("S10_dsw23", "S10_dsw3", "vbbtemp", "S10_dsw23_vbbtemp",
+      "S10_dsw23_ubb", "bv", note=bnote)
 
     r("S11_b2", "S11_b2", "ubb", "S11_b2_ubb", "S11_b2_vbbtemp", "bu",
       note=bnote)
@@ -421,8 +477,40 @@ def main(argv=None):
                     help="instrument-teeth control: no-op one port "
                          "barrier and confirm the matching stage is "
                          "flagged first (b2 -> S11, fluxavg -> S09)")
+    ap.add_argument("--write-receipt", default=None,
+                    help="mutation runs: write a PASS receipt here")
+    ap.add_argument("--receipts", default=None,
+                    help="clean runs: comma-separated mutation-control "
+                         "receipts (codex r1 #2 -- rung 4 is mandatory; "
+                         "without them the verdict exits 2 as NOT "
+                         "PROVEN)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
+
+    receipts_ok = False
+    if args.mutate is None:
+        if args.receipts:
+            import json as _json
+            missing = []
+            for rp in args.receipts.split(","):
+                try:
+                    rec = _json.load(open(rp))
+                    if not (rec.get("pass") and
+                            os.path.samefile(rec.get("dump_dir", ""),
+                                             args.dump_dir)):
+                        missing.append(rp)
+                except (OSError, ValueError):
+                    missing.append(rp)
+            if missing:
+                raise SystemExit(
+                    f"mutation-control receipts invalid/missing: "
+                    f"{missing}. Run --mutate fluxavg/b2 with "
+                    f"--write-receipt against THIS dump dir first.")
+            receipts_ok = True
+        else:
+            print("WARNING: no --receipts given -- the mutation "
+                  "controls are NOT proven for this dump dir; the "
+                  "verdict below is PROVISIONAL (exit 2).")
 
     dumps, certs_by_tile, notes0 = [], [], None
     for t in range(1, 7):
@@ -544,12 +632,11 @@ def main(argv=None):
         scale = 0.0
         skip_note = note
         per_face_used = 0
+        per_face_detail = []
         for pf in range(6):
             ot = perm[pf]
             m = meta[pf][ot]
             transposed = m[0]
-            if note == "direct-faces-authoritative" and transposed:
-                continue
             try:
                 p_arr = get_port_field(stages, pkey, pf_name, pf)
                 o_dir = get_oracle_field(dumps[ot], od_name)
@@ -564,8 +651,17 @@ def main(argv=None):
             per_face_used += 1
             scale = max(scale, float(np.abs(o).max()),
                         float(np.abs(p).max()))
-            for k, v in region_maxima(p, o).items():
+            rm = region_maxima(p, o)
+            for k, v in rm.items():
                 agg[k] = max(agg[k], v)
+            # per-edge-strip maxima (W/E/S/N, width 3) for localisation
+            d_ = np.abs(p - o)
+            ni_, nj_ = d_.shape[0], d_.shape[1]
+            strips = {"W": d_[:3, ...], "E": d_[ni_ - 3:, ...],
+                      "S": d_[:, :3, ...], "N": d_[:, nj_ - 3:, ...]}
+            per_face_detail.append(
+                (pf + 1, ot + 1, transposed, rm,
+                 {k: float(v.max()) for k, v in strips.items()}))
             if halo:
                 try:
                     hm = halo_maxima(p_arr, o_dir if not transposed
@@ -591,6 +687,20 @@ def main(argv=None):
               f"{rel['corner']:10.2e} {rel['halo_edge']:10.2e} "
               f"{rel['halo_corner']:10.2e} {scale:10.3g}  "
               f"{skip_note} {flag}")
+        if flag and scale:
+            # LOCALISE a flagged row: which faces, which edge strips.
+            for pf_, ot_, tr_, rm_, strips_ in per_face_detail:
+                worst_r = max(max(rm_.values()), max(strips_.values()))
+                if worst_r / scale < 1e-9:
+                    continue
+                print(f"    face{pf_}->tile{ot_}"
+                      f"{' (transposed)' if tr_ else '':13s} "
+                      + "  ".join(f"{k}={v/scale:9.2e}"
+                                  for k, v in rm_.items()
+                                  if k in ("interior", "edge", "corner"))
+                      + "   strips "
+                      + "  ".join(f"{k}={v/scale:9.2e}"
+                                  for k, v in strips_.items()))
         results.append({"stage": stage, "field": pf_name, "kind": kind,
                         "rel": rel, "scale": scale,
                         "faces_used": per_face_used, "note": skip_note,
@@ -610,6 +720,13 @@ def main(argv=None):
         ok = (got == want)
         print(f"\nMUTATION CONTROL: expected first flag {want}, got "
               f"{got} -> {'PASS' if ok else 'FAIL'}")
+        if ok and args.write_receipt:
+            import json as _json
+            with open(args.write_receipt, "w") as fh:
+                _json.dump({"pass": True, "mutate": args.mutate,
+                            "dump_dir": os.path.abspath(args.dump_dir)},
+                           fh)
+            print(f"wrote receipt {args.write_receipt}")
         return 0 if ok else 1
 
     if args.json:
@@ -623,7 +740,7 @@ def main(argv=None):
                                    for s, f, br, ir in flagged]},
                       fh, indent=2)
         print(f"wrote {args.json}")
-    return 0
+    return 0 if receipts_ok else 2
 
 
 if __name__ == "__main__":

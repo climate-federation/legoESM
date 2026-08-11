@@ -92,25 +92,30 @@ grep "^CERT" dyncore_stage_t1.mf | head -25
 ls -la dyncore_stage_t*.dat
 fi   # SKIP
 
-echo "=== stage comparison: clean run ==="
+# codex r1 #2: mutation controls run FIRST and write receipts; the
+# clean run refuses an authoritative verdict without them.
 cd $REPO
-$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
-    --dump-dir $R --json $OUT/stage_diffs.json
-RC_CLEAN=$?
-echo "COMPARE_CLEAN_RC=$RC_CLEAN"
-
 echo "=== mutation control 1: fluxavg (expect S09 flagged first) ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
-    --dump-dir $R --mutate fluxavg | tail -8
+    --dump-dir $R --mutate fluxavg \
+    --write-receipt $OUT/receipt_fluxavg.json | tail -6
 echo "MUTATE_FLUXAVG_RC=$?"
+
+echo "=== mutation control 2: b2 (expect S11 flagged first) ==="
+$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
+    --dump-dir $R --mutate b2 \
+    --write-receipt $OUT/receipt_b2.json | tail -6
+echo "MUTATE_B2_RC=$?"
+
+echo "=== stage comparison: clean run (receipt-gated) ==="
+$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
+    --dump-dir $R --json $OUT/stage_diffs.json \
+    --receipts $OUT/receipt_fluxavg.json,$OUT/receipt_b2.json
+RC_CLEAN=$?
+echo "COMPARE_CLEAN_RC=$RC_CLEAN"
 
 echo "=== pytest: instrument unit tests ==="
 $PY -m pytest tests/grids/test_fv3_dyncore_stage_instrument.py -q \
     --basetemp=/burg-archive/glab/users/pg2328/fv3_duo_gaps/pyt_${SLURM_JOB_ID} 2>&1 | tail -6
-
-echo "=== mutation control 2: b2 (expect S11 flagged first) ==="
-$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
-    --dump-dir $R --mutate b2 | tail -8
-echo "MUTATE_B2_RC=$?"
 
 echo DYNSTAGE_ALL_DONE
