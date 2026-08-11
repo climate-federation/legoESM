@@ -3071,3 +3071,22 @@ parked layout-boundary tax (8%), and the throughput reframes (ensemble
 axis, IMEX dt) that trade something the loop cannot decide
 unilaterally. Lat-lon at ~6.1 ms @64 (fused) sits near its practical
 stack limit under the current numerics.
+
+## Cube lane RE-ATTRIBUTED — the 81%-gap claim retracted (2026-08-11, job 26864960)
+
+XLA-profiler trace of the banked C768 kt2 @24 closed-loop protocol
+(ranks 0-3, 4 steady steps): 19.3 ms/step = **9.7 ms in-collective
+(50%; 87 collectives/step, median 71 us) + 8.3 ms compute (43%) +
+1.35 ms gaps (7%)**. RETRACTED: the nsys-based "81% no-kernel gaps ~
+155 us per sequential collective slot" and "compute 1.8%" attributions
+(job 26829838) — nsys silently dropped the kernels, the same pathology
+already documented on the MPAS lane. There is no launch floor on the
+cube either; the count-is-free law holds on ALL THREE GPU lanes.
+
+CAMPAIGN STATE, all lanes attributed with one validated instrument:
+- MPAS: padded-bytes-bound -> FIXED (size-aware colouring, -20%,
+  s10@128 record 16.03 GC/s).
+- Lat-lon: 53/43/4 — near practical limit; bounded leftovers are
+  precision/owner decisions (bf16 wire, layout tax, ensemble/IMEX).
+- Cube: 43/50/7 — near practical limit by the same law (uniform tile
+  payloads: no padding lever; collective share is bytes+wait).
