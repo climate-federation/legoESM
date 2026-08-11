@@ -32,6 +32,24 @@ FS=$R/fesom_core2_d30/snapshot_day0030.npz
 [ -r "$FS" ] || { echo "FATAL: FESOM day-30 snapshot missing"; exit 1; }
 [ -r "$GT" ] || { echo "FATAL: NEMO grid_T unreadable"; exit 1; }
 
+# REPAIR (idempotent): snapshots written before the writer sliced off the
+# fesom-jax padded bottom tracer slot carry 48 levels vs 47 z_center_ref
+# mids; slice tracers to the mid count so the (T, z) pairing is consistent.
+$PY - "$FS" <<'EOF'
+import sys
+import numpy as np
+p = sys.argv[1]
+z = dict(np.load(p))
+n = z["z_center_ref"].size
+if z["T"].shape[-1] != n:
+    print(f"[repair] {p}: tracers {z['T'].shape[-1]} levels -> {n}")
+    z["T"] = z["T"][..., :n]
+    z["S"] = z["S"][..., :n]
+    np.savez_compressed(p, **z)
+else:
+    print(f"[repair] {p}: already consistent ({n} levels)")
+EOF
+
 NFAIL=0
 run_stage () {
   local lab="$1"; shift

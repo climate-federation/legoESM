@@ -79,6 +79,12 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
         T3, S3 = T, S
     else:
         T3, S3 = T.T, S.T
+    # fesom-jax state tracers carry nl slots: nl-1 real levels plus a padded
+    # bottom slot (repeated bottom value).  mesh.Z has the nl-1 real
+    # midpoints; slice tracers to match or every downstream (T, z) pairing is
+    # off by one (measured: MLD diagnostic broadcast (1,47) vs (n,48)).
+    nreal = np.asarray(mesh.Z).size
+    T3, S3 = T3[:, :nreal], S3[:, :nreal]
     lon = np.degrees(np.asarray(mesh.geo_coord_nod2D[:, 0], dtype=np.float64))
     lat = np.degrees(np.asarray(mesh.geo_coord_nod2D[:, 1], dtype=np.float64))
     lon = np.where(lon > 180.0, lon - 360.0, lon)
