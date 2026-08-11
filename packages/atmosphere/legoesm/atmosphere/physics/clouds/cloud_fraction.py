@@ -196,9 +196,30 @@ def _ice_fraction(T: jnp.ndarray, config: CloudConfig) -> jnp.ndarray:
     return jnp.clip(frac, 0.0, 1.0)
 
 
+def _rh_crit_profile(config, sigma):
+    """Critical RH, ``rh_crit_bl`` below ``sigma_bl`` and ``rh_crit`` above.
+
+    ``sigma`` is ``p/p_s`` (``None`` => no profile information available, so
+    the scalar ``rh_crit`` is used unchanged).  The switch is a hard
+    ``where`` on a STATIC threshold, not a smooth ramp: ``sigma`` is a
+    coordinate, not a traced state, so this introduces no gradient
+    discontinuity in RH or in any tuned parameter (both branches are
+    differentiable in ``rh_crit``/``rh_crit_bl`` and the selector does not
+    depend on them).  ``sigma_bl >= 1.0`` (default) selects the free-
+    tropospheric value everywhere => bit-identical to the pre-split code.
+    """
+    rh_c = config.rh_crit
+    sigma_bl = getattr(config, "sigma_bl", 1.0)
+    if sigma is None or sigma_bl >= 1.0:
+        return jnp.asarray(rh_c)
+    return jnp.where(jnp.asarray(sigma) >= sigma_bl,
+                     getattr(config, "rh_crit_bl", rh_c), rh_c)
+
+
 def sundqvist_cloud_fraction(
     RH: jnp.ndarray,
     config: CloudConfig,
+    sigma: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Sundqvist (1989) cloud fraction from relative humidity.
 
@@ -226,7 +247,8 @@ def sundqvist_cloud_fraction(
     jnp.ndarray
         Cloud fraction [0, 1], same shape as RH.
     """
-    arg = (1.0 - RH) / jnp.maximum(1.0 - config.rh_crit, 1.0e-6)
+    rh_c = _rh_crit_profile(config, sigma)
+    arg = (1.0 - RH) / jnp.maximum(1.0 - rh_c, 1.0e-6)
     # Double-``where`` for the √-form: at RH ≥ 1 (arg ≤ 0) the cloud is
     # full so b = 1 *exactly*, while keeping ``√`` off zero so its
     # otherwise-infinite derivative cannot leak a NaN cotangent through
@@ -623,7 +645,15 @@ def compute_cloud_properties(
         q_condensate = q_c + q_i
         cf = xu_randall_cloud_fraction(RH, q_condensate, q_sat, config)
     elif config.scheme == "sundqvist":
-        cf = sundqvist_cloud_fraction(RH, config)
+        # sigma = p/p_s for the BL/free-troposphere rh_crit split.  p_s is not
+        # an argument of this function; the LOWEST full level's pressure is
+        # the best available proxy and is what every caller already holds.
+        # It slightly UNDER-estimates sigma (p_full[-1] < p_s), so the BL band
+        # is marginally thinner than sigma_bl literally implies — stated, not
+        # hidden.  sigma_bl >= 1.0 (default) skips this entirely.
+        _sigma = (p_full / jnp.maximum(p_full[..., -1:], 1.0)
+                  if getattr(config, "sigma_bl", 1.0) < 1.0 else None)
+        cf = sundqvist_cloud_fraction(RH, config, sigma=_sigma)
     elif config.scheme == "resolved":
         # Cloud-resolving cloud fraction: a grid cell is (smoothly) FULLY
         # cloudy where it holds resolved condensate — SAM's CRM convention

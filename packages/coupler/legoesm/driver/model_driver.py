@@ -259,6 +259,8 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cloud_scheme,
         convective_cloud=(_conv_cloud and allow_convective_cloud),
         rh_crit=getattr(cfg, "cloud_rh_crit", None),
+        rh_crit_bl=getattr(cfg, "cloud_rh_crit_bl", None),
+        sigma_bl=getattr(cfg, "cloud_sigma_bl", None),
         q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
         conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
         conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
@@ -3123,6 +3125,8 @@ class ModelDriver:
                 _cloud_scheme,
                 convective_cloud=False,  # stratiform-only clt (see above)
                 rh_crit=getattr(self.config, "cloud_rh_crit", None),
+                rh_crit_bl=getattr(self.config, "cloud_rh_crit_bl", None),
+                sigma_bl=getattr(self.config, "cloud_sigma_bl", None),
                 q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
                 # p_xr/alpha_xr set the Xu-Randall cloud FRACTION, so the clt
                 # diagnostic must thread them too or published clt drifts from

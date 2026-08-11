@@ -15,6 +15,13 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
+            # Vertical COORDINATE threshold (sigma = p/p_s) selecting where
+            # rh_crit_bl replaces rh_crit.  A region selector, not a closure
+            # coefficient: a gradient w.r.t. it is a gradient w.r.t. "which
+            # levels count as boundary layer", which is a discrete modelling
+            # choice.  The two rh_crit VALUES it selects between are the
+            # tunables.  Default 1.0 disables the split.
+            "sigma_bl": "vertical region selector (sigma), not a closure coefficient",
             # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
             # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet
             # spectral-width, not a tunable closure coefficient. Paired with
@@ -37,6 +44,7 @@ __param_spec__ = {
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
             "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "rh_crit_bl": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989); BL/free-troposphere split as in ECMWF IFS and ECHAM", "shape": None},
             # --- cloud_fraction: Xu-Randall (1996) cf = RH^p_xr * (1 - exp(-alpha*q_c/((1-RH)q_sat)^gamma)) ---
             "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
@@ -135,6 +143,23 @@ class CloudConfig(NamedTuple):
     # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
     # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
     rh_crit: float = 0.77
+    # Boundary-layer critical RH and the sigma level above which it applies
+    # (sigma = p/p_s, so sigma_bl=0.85 means "below ~1.5 km").  The BL is
+    # better-mixed than the free troposphere, so its sub-grid RH variance is
+    # SMALLER and cloud should form at a HIGHER RH there — every operational
+    # scheme uses a height-dependent rh_crit for this reason (ECMWF, ECHAM,
+    # CAM all ramp it).  ``rh_crit_bl`` REPLACES ``rh_crit`` below
+    # ``sigma_bl``; the default sigma_bl=1.0 disables the split entirely and
+    # keeps every existing result bit-identical.
+    #
+    # 2026-08-11: these two knobs existed on ExperimentConfig
+    # (cloud_rh_crit_bl / cloud_sigma_bl) and on the run_amip CLI since their
+    # introduction, but reached NO consumer — build_cloud_config never took
+    # them, so ``--cloud-rh-crit-bl``/``--cloud-sigma-bl`` were silent no-ops
+    # (an AMIP arm was run and scored believing they applied).  Wiring them
+    # here is that fix.
+    rh_crit_bl: float = 0.7
+    sigma_bl: float = 1.0
     alpha_xr: float = 100.0
     p_xr: float = 0.25
     gamma_xr: float = 0.49
@@ -309,6 +334,8 @@ def build_cloud_config(
     *,
     convective_cloud: bool = False,
     rh_crit: float | None = None,
+    rh_crit_bl: float | None = None,
+    sigma_bl: float | None = None,
     q_c_diagnostic: float | None = None,
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
@@ -338,6 +365,10 @@ def build_cloud_config(
     overrides: dict[str, float | str] = {}
     if rh_crit is not None:
         overrides["rh_crit"] = rh_crit
+    if rh_crit_bl is not None:
+        overrides["rh_crit_bl"] = rh_crit_bl
+    if sigma_bl is not None:
+        overrides["sigma_bl"] = sigma_bl
     if q_c_diagnostic is not None:
         overrides["q_c_diagnostic"] = q_c_diagnostic
     if conv_cloud_max is not None:
