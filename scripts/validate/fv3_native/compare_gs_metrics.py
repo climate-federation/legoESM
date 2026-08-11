@@ -143,9 +143,13 @@ def resolve_sign(orc2d, port2d, sent) -> tuple:
     """Global per-face sign: s minimizing masked max|o - s*p|.
 
     Returns (s, e_chosen, e_other, determined).  ``determined`` is
-    False when the two candidates are within 10x of each other (a
-    near-zero field cannot vote); such faces are excluded from the
-    sign-coherence check rather than failing it spuriously.
+    False when the two candidates are within 10x of each other OR the
+    rejected candidate's error is below 1e-13 -- a near-zero field
+    matches under BOTH signs to noise level and cannot vote (the
+    absolute floor is valid because the _ODD families are
+    dimensionless cosines, O(1) where real).  Indeterminate faces are
+    excluded from the sign-coherence check rather than failing it
+    spuriously.
     """
     live = ~sent
     if not live.any():
@@ -154,7 +158,8 @@ def resolve_sign(orc2d, port2d, sent) -> tuple:
     em = float(np.abs(orc2d + port2d)[live].max())
     s = 1.0 if ep <= em else -1.0
     e_chosen, e_other = (ep, em) if s > 0 else (em, ep)
-    determined = e_other >= 10.0 * max(e_chosen, 1.0e-300)
+    determined = (e_other >= 10.0 * max(e_chosen, 1.0e-300)
+                  and e_other > 1.0e-13)
     return s, e_chosen, e_other, determined
 
 
@@ -277,6 +282,23 @@ def main() -> int:
         if key not in kink6[0]:
             print(f"{fam:10s}  --  (port gs6 has no {key!r}; skipped)")
             continue
+        if fam == "f0":
+            # First deployment measured: the extchain driver's M_F0 is
+            # ALL ZEROS -- upstream f0 is assigned only by test_cases
+            # init_case (test_cases.F90:787-801), which this grid-init
+            # driver never runs, so the dump precedes initialization.
+            # Scoring |port_f0 - 0| would report a fake full-scale
+            # defect (first pass did: 1.46e-4 == 2*Omega).  If the dump
+            # is ever nonzero (a driver that runs the IC), score it.
+            if all(not np.asarray(orc[t]["arrays"]["M_F0"]).any()
+                   for t in range(6)):
+                print(f"{fam:10s}  --  ORACLE DUMP IS PRE-INIT (all "
+                      "zeros; test_cases.F90:787 assigns f0 during "
+                      "model IC, after this driver's dump point). "
+                      "Runtime f0 is NOT measurable from this driver; "
+                      "it is NOT scored rather than scored against "
+                      "zeros.")
+                continue
         rows = {}
         for lbl, gs6 in (("K", kink6), ("E", ext6), ("P", prod6)):
             per = {h: 0.0 for h in hdr}

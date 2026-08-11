@@ -559,14 +559,21 @@ def _pert_pattern(shape2, ng, eps):
 
 def _replace_where_held(gs, key, cand_old, cand_new, stats):
     """Refresh derived field gs[key] ONLY where the builder invariant
-    held pre-perturbation (rtol 1e-12); sentinel/override slots keep
-    their exact old values."""
+    held pre-perturbation (rtol 1e-12) AND the recomputed value
+    actually moved (cand_new != cand_old).  The second condition keeps
+    every untouched cell BIT-EXACT: without it, cells whose formula
+    output did not change were still overwritten by the recomputation,
+    re-rounding sentinel-derived values (1e30*1e30/1e30 != 1e30
+    bitwise) and any cell the builder computed through a different
+    expression path -- a fake "moved" count and an unintended
+    interior-noise perturbation (caught by
+    test_zero_cell_perturbation_is_refused)."""
     old = np.asarray(gs[key], dtype=np.float64)
     with np.errstate(invalid="ignore"):
         held = np.isclose(old, cand_old, rtol=1.0e-12, atol=0.0)
-    gs[key] = np.where(held, cand_new, old)
-    stats[key] = stats.get(key, 0) + int(
-        (held & (cand_new != old)).sum())
+    changed = held & (cand_new != cand_old)
+    gs[key] = np.where(changed, cand_new, old)
+    stats[key] = stats.get(key, 0) + int(changed.sum())
 
 
 def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
@@ -641,11 +648,12 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
             c1n = 1.0 / np.maximum(TINY_NUMBER, sn * sn)
             c2o = rsin_border_override(so)
             c2n = rsin_border_override(sn)
-            h1 = np.isclose(pristine, c1o, rtol=1.0e-12, atol=0.0)
-            h2 = np.isclose(pristine, c2o, rtol=1.0e-12, atol=0.0) & ~h1
+            h1 = (np.isclose(pristine, c1o, rtol=1.0e-12, atol=0.0)
+                  & (c1n != c1o))
+            h2 = (np.isclose(pristine, c2o, rtol=1.0e-12, atol=0.0)
+                  & (c2n != c2o) & ~h1)
             gs[dk] = np.where(h1, c1n, np.where(h2, c2n, pristine))
-            stats[dk] = stats.get(dk, 0) + int(
-                ((h1 & (c1n != pristine)) | (h2 & (c2n != pristine))).sum())
+            stats[dk] = stats.get(dk, 0) + int((h1 | h2).sum())
         _replace_where_held(
             gs, "rsin2",
             1.0 / np.maximum(TINY_NUMBER, old["sin_sg"][..., 4] ** 2),
