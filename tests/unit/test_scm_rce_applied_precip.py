@@ -168,3 +168,35 @@ def test_the_wrong_dt_diagnostic_is_no_longer_constructed(camp):
     comes back."""
     src = (REPO_ROOT / "scripts" / "run" / "run_scm_rce_campaign.py").read_text()
     assert "precip_diagnostic = _make_microphysics_precip_diagnostic" not in src
+
+
+def test_the_forcing_sum_keeps_the_surface_flux_diagnostics(camp):
+    """I documented that add_tendencies drops diagnostics, then read
+    evaporation off a summed tendency and measured E = 0.0000 on a column whose
+    own bulk formula gives 1.559 mm/day. fixed_sst_tendency now restores them.
+
+    Asserted on the SOURCE of the wrapper because the closure is not reachable
+    from outside run_scm_rce; the behavioural half is covered by
+    applied_evap_mm_day's own gates below.
+    """
+    src = (REPO_ROOT / "scripts" / "run" / "run_scm_rce_campaign.py").read_text()
+    body = src.split("def fixed_sst_tendency")[1].split("\n    def ")[0]
+    assert "lhflx_sfc=tend.lhflx_sfc" in body, body
+    assert "precip=" not in body, (
+        "precip must NOT be restored here: it is read from the microphysics "
+        "tendency at the point of application, and restoring it invites the "
+        "double count that was just removed")
+
+
+def test_evap_readout_converts_watts_to_mm_per_day(camp):
+    """E = LHF / L_v, then kg/m^2/s -> mm/day."""
+    from legoesm import constants
+    lhf = 45.578                       # W/m^2, the measured sbm value
+    tend = _tend(None)._replace(lhflx_sfc=_field("lhflx_sfc", lhf))
+    got = float(camp.applied_evap_mm_day(tend, _LikeState()))
+    assert got == pytest.approx(lhf / constants.L_v * 86_400.0, rel=1e-12)
+    assert got == pytest.approx(1.57, abs=0.02)     # matches the bulk formula
+
+
+def test_absent_surface_flux_reads_zero(camp):
+    assert float(camp.applied_evap_mm_day(_tend(None), _LikeState())) == 0.0

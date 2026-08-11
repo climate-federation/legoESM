@@ -1190,7 +1190,18 @@ def run_scm_rce(
         forcing_tend = compute_forcing_tendencies(
             state, sigma_coord, forcing, t,
         )
-        return add_tendencies(tend, forcing_tend), phys_out
+        summed = add_tendencies(tend, forcing_tend)
+        # RESTORE the surface-flux diagnostics the sum drops. add_tendencies
+        # rebuilds HydrostaticTendencies from six fields, so lhflx_sfc/
+        # shflx_sfc (and precip) are None on its result -- which is exactly how
+        # the evaporation readout first measured E = 0.0000 on a column whose
+        # own bulk formula gives 1.559 mm/day. The forcing tendency carries no
+        # surface fluxes, so taking the physics values is the whole answer.
+        # precip is deliberately NOT restored: it is read from the microphysics
+        # tendency at the point of application, and putting it here as well
+        # would invite exactly the double count that was just removed.
+        return summed._replace(
+            lhflx_sfc=tend.lhflx_sfc, shflx_sfc=tend.shflx_sfc), phys_out
 
     def apply_convection_substeps(state, phys_state):
         if not use_split_convection:
