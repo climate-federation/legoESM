@@ -1199,11 +1199,32 @@ def run_scm_rce(
         )
         return new_state, new_phys, precip_rate
 
+    def _applied_precip_mm_day(applied_tend, like):
+        """Surface precip [mm/day] from the tendency that was APPLIED.
+
+        ``HydrostaticTendencies.precip`` is the microphysics' own surface
+        sedimentation flux [kg/m^2/s, +into surface]; 1 kg/m^2 == 1 mm of
+        liquid water, so the conversion is a single factor.
+
+        This replaces a SECOND, diagnostic-only invocation of the microphysics
+        (``precip_diagnostic``), which was wrong twice over: it evaluated a
+        different call than the one whose tendencies advanced the column, and
+        its closure was built with the OUTER dt (600 s) while the applied
+        operator runs at dt/substeps (20 s).  Measured consequence: the
+        campaign reported 1e-18..3e-5 mm/day for every scheme while the column
+        was losing 1.45-1.79 mm/day of water (jobs 9361582/9361587).  The
+        global model reads the applied value (physics_pipeline.py:1473), which
+        is why it never showed this.
+        """
+        if applied_tend.precip is None:
+            return jnp.zeros((), dtype=like.T.data.dtype)
+        return jnp.reshape(applied_tend.precip.data, (-1,))[0] * SECONDS_PER_DAY
+
     def apply_split_microphysics_step(state, tend):
         if effective_microphysics_substeps <= 1:
             return (
                 apply_tendencies(state, tend, dt),
-                precip_diagnostic(state, grid, sigma_coord),
+                _applied_precip_mm_day(tend, state),
             )
         sub_dt = dt / effective_microphysics_substeps
         microphysics_fn = scm._microphysics_fn
@@ -1213,11 +1234,15 @@ def run_scm_rce(
         )
 
         def substep(sub_state, _i):
-            precip_rate = precip_diagnostic(sub_state, grid, sigma_coord)
             micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
             new_sub_state = apply_tendencies(
-                sub_state, add_tendencies(tend, micro_tend), sub_dt,
-            )
+                sub_state, add_tendencies(tend, micro_tend), sub_dt)
+            # Read precip from MICRO_TEND, not from the sum: add_tendencies
+            # rebuilds a HydrostaticTendencies from six fields only
+            # (du/dT/dp_s/dphis/dv/tracers) and DROPS every diagnostic field,
+            # precip included. Taking it from the sum would have silently
+            # reported None -> 0.0, i.e. reproduced the bug this fixes.
+            precip_rate = _applied_precip_mm_day(micro_tend, sub_state)
             return new_sub_state, sub_weight * precip_rate
 
         new_state, precip_rates = lax.scan(
