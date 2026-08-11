@@ -90,6 +90,8 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
+        "ttrd_tot": _fill(dsT.variables["ttrd_tot"][r1]),
+        "strd_tot": _fill(dsT.variables["strd_tot"][r1]),
         # XIOS one_file splits coords per grid: T fields on nav_*_grid_T,
         # avt/avm on the W grid (identical horizontal positions on eORCA1).
         "lat": _fill(dsT.variables["nav_lat_grid_T"][:]),
@@ -276,7 +278,32 @@ def run_stage_b(d):
     ttrd = cols(d["ttrd_zdf"])
     strd = cols(d["strd_zdf"])
     wet_c = cols(np.isfinite(T).astype(float)) > 0.5
-    return dT, dS, ttrd, strd, wet_c, (z, ny, nx)
+
+    # --- Stage B2: solve on the reconstructed PRE-ZDF state ----------------
+    # NEMO's implicit zdf acts on the RHS-UPDATED field (after the step's
+    # explicit trends: advection, ldf, sbc, qsr...), not on the saved r-1
+    # state -- in convecting columns the surface fluxes create the very
+    # gradients zdf then removes, so Stage B on the r-1 state systematically
+    # undershoots (measured f64: ours 2-10x smaller, corr ~0.1-0.6).  The
+    # trend file closes the budget: S(r) = S(r-1) + dt*strd_tot, and the zdf
+    # part is known, so the state the solve REALLY acted on is
+    #     S_pre = S(r-1) + dt*(strd_tot - strd_zdf)
+    # (exactly, because trazdf's trend is (S_after - S_pre)/dt and S_after =
+    # S(r)).  Our solve on S_pre vs strd_zdf is the exact-form operator test;
+    # remaining error = discretization difference (+ the K33-in-avt caveat).
+    ttot = cols(d["ttrd_tot"])
+    stot = cols(d["strd_tot"])
+    T_pre = np.where(np.isfinite(ttot), T_c + dt * (ttot - np.nan_to_num(ttrd)), T_c)
+    S_pre = np.where(np.isfinite(stot), S_c + dt * (stot - np.nan_to_num(strd)), S_c)
+    T2 = np.asarray(implicit_vertical_diffusion_ocean(
+        jnp.asarray(T_pre), jnp.asarray(K_t), jnp.asarray(dz_c),
+        jnp.asarray(dz_half), dt))
+    S2 = np.asarray(implicit_vertical_diffusion_ocean(
+        jnp.asarray(S_pre), jnp.asarray(K_s), jnp.asarray(dz_c),
+        jnp.asarray(dz_half), dt))
+    dT2 = (T2 - T_pre) / dt
+    dS2 = (S2 - S_pre) / dt
+    return dT, dS, ttrd, strd, wet_c, (z, ny, nx), dT2, dS2
 
 
 def d2_for_a2(d):
@@ -381,13 +408,19 @@ def main():
             "3600s en-step) K_H vs NEMO avt rec 0 [m2/s]",
             K_H2, avt_a2(d), wet_pair, lat_col, evd_cols=evd_cols)
 
-    dT, dS, ttrd, strd, wet_c, _ = run_stage_b(d)
+    dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
         "Stage B: operator dT_zdf (BE solve w/ NEMO avt) vs ttrd_zdf [K/s]",
         dT, ttrd, wet_c & np.isfinite(ttrd), lat_col, evd_cols=evd_cols)
     result["stage_b_S"] = region_report(
         "Stage B: operator dS_zdf vs strd_zdf [PSU/s]",
         dS, strd, wet_c & np.isfinite(strd), lat_col, evd_cols=evd_cols)
+    result["stage_b2_T"] = region_report(
+        "Stage B2: operator on PRE-ZDF state (tot-closure) dT vs ttrd_zdf [K/s]",
+        dT2, ttrd, wet_c & np.isfinite(ttrd), lat_col, evd_cols=evd_cols)
+    result["stage_b2_S"] = region_report(
+        "Stage B2: operator on PRE-ZDF state dS vs strd_zdf [PSU/s]",
+        dS2, strd, wet_c & np.isfinite(strd), lat_col, evd_cols=evd_cols)
 
     with open(out_dir / f"tendency_match_rec{args.rec}.json", "w") as f:
         json.dump(result, f, indent=1)

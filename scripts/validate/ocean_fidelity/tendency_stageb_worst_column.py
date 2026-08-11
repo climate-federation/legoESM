@@ -35,7 +35,7 @@ def main() -> int:
     a = p.parse_args()
 
     d = load_pair(a.tfile, a.ufile, a.vfile, a.rec)
-    dT, dS, ttrd, strd, wet_c, (z, ny, nx) = run_stage_b(d)
+    dT, dS, ttrd, strd, wet_c, (z, ny, nx), dT2, dS2 = run_stage_b(d)
 
     import netCDF4 as nc
     ds = nc.Dataset(a.tfile)
