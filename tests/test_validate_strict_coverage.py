@@ -51,6 +51,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "radiation",
         "cloud_scheme",
         "cloud_diagnostic_condensate_scheme",
+        # Cloud-fraction RH saturation curve ("liquid" | "mixed_phase"), the
+        # #1521 ice-saturation fix; membership-checked in validate_strict.
+        "cloud_saturation_scheme",
         "microphysics",
         "convection",
         "turbulence",

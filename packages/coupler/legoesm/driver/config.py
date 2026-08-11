@@ -659,6 +659,12 @@ class ExperimentConfig(NamedTuple):
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
+    # Saturation curve for the cloud-fraction RH (CloudConfig.saturation_scheme):
+    # "liquid" (legacy/byte-identical, liquid Tetens saturation at all T) or
+    # "mixed_phase" (RH against the ice-fraction-blended liquid/ice curve, IFS
+    # alpha(T) convention — ice-saturated TTL/anvil air then reads RH ~1 and
+    # the RH cloud schemes see the cirrus the model already carries, #1521).
+    cloud_saturation_scheme: str = "liquid"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1864,6 +1870,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"cloud_vertical_overlap_optics must be one of "
                 f"{_valid_overlap}, got {self.cloud_vertical_overlap_optics!r}"
+            )
+        _valid_sat = ("liquid", "mixed_phase")
+        if self.cloud_saturation_scheme not in _valid_sat:
+            errors.append(
+                f"cloud_saturation_scheme must be one of {_valid_sat}, "
+                f"got {self.cloud_saturation_scheme!r}"
             )
         if (self.cloud_partial_coverage_optics != "none"
                 and self.cloud_vertical_overlap_optics != "none"):

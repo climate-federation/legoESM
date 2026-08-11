@@ -302,6 +302,19 @@ class CloudConfig(NamedTuple):
     # with real subcolumns), so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
+    # --- Saturation curve for the cloud-fraction RH (appended at the END of
+    # the NamedTuple so positional / checkpoint callers keep their field
+    # order) ---
+    # "liquid" (legacy, byte-identical): RH measured against LIQUID (Tetens)
+    # saturation at every temperature.  Ice-saturated cold air (TTL/anvil,
+    # ~205-245 K) then reads RH ~0.55-0.75 < rh_crit and the RH schemes
+    # diagnose NO cloud where the model carries detrained ice (#1521).
+    # "mixed_phase": RH against the w(T)-blended liquid/ice curve, weighted by
+    # the scheme's OWN condensate ice-fraction ramp (T_freeze -> T_ice_only) so
+    # the RH criterion and the diagnosed condensate phase agree (IFS alpha(T)
+    # convention, Tiedtke 1993; equals the shared mixed_phase_saturation curve
+    # at the default T_ice_only = constants.T_hom_freeze).  Unknown => raise.
+    saturation_scheme: str = "liquid"
 
 
 def build_cloud_config(
@@ -326,6 +339,7 @@ def build_cloud_config(
     adiabatic_lwc_rate: float | None = None,
     clubb_cf_override_strength: float | None = None,
     clubb_cf_override_floor: float | None = None,
+    saturation_scheme: str | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -374,6 +388,8 @@ def build_cloud_config(
         overrides["clubb_cf_override_strength"] = clubb_cf_override_strength
     if clubb_cf_override_floor is not None:
         overrides["clubb_cf_override_floor"] = clubb_cf_override_floor
+    if saturation_scheme is not None:
+        overrides["saturation_scheme"] = saturation_scheme
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )
