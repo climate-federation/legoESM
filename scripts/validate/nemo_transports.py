@@ -47,6 +47,17 @@ def _sq3(a):
     return a
 
 
+def _tsel(da, time_idx):
+    """Select one time_counter record (matched-window comparisons against a
+    single-month spin-up state) or the mean over all records (time_idx None,
+    the prior behaviour)."""
+    if "time_counter" not in da.dims:
+        return da
+    if time_idx is None:
+        return da.mean("time_counter")
+    return da.isel(time_counter=int(time_idx))
+
+
 def amoc_core(voe3, e1v, gphiv, glamv, depthv, *, target_lat=26.5,
               lon_min=-75.0, lon_max=15.0):
     """Atlantic MOC strength [Sv] at ``target_lat`` from PURE arrays (no I/O).
@@ -147,7 +158,7 @@ def mht_core(voe3, theta_v, e1v, gphiv, *, rho0=_RHO0, cp=_CP):
             "sh_min_PW": sh_min, "sh_min_lat": sh_lat}
 
 
-def nemo_mht(grid_v_path, grid_t_path, domain_cfg_path):
+def nemo_mht(grid_v_path, grid_t_path, domain_cfg_path, *, time_idx=None):
     """Global meridional ocean heat transport [PW] from NEMO grid_V + grid_T."""
     import xarray as xr
     dV = xr.open_dataset(grid_v_path, decode_times=False)
@@ -160,19 +171,16 @@ def nemo_mht(grid_v_path, grid_t_path, domain_cfg_path):
     vo_da = dV[vname]
     if "e3v" in dV:
         voe3_da = vo_da * dV["e3v"]
-        if "time_counter" in voe3_da.dims:
-            voe3_da = voe3_da.mean("time_counter")
+        voe3_da = _tsel(voe3_da, time_idx)
         voe3 = _sq3(voe3_da.values)                        # (z, y, x) v-points
     else:
-        if "time_counter" in vo_da.dims:
-            vo_da = vo_da.mean("time_counter")
+        vo_da = _tsel(vo_da, time_idx)
         voe3 = _sq3(vo_da.values) * _sq3(dc["e3v_0"].values)
     tname = next((n for n in ("thetao", "toce", "votemper", "to") if n in dT), None)
     if tname is None:
         raise KeyError("grid_T has none of 'thetao'/'toce'/'votemper'/'to'")
     t_da = dT[tname]
-    if "time_counter" in t_da.dims:
-        t_da = t_da.mean("time_counter")
+    t_da = _tsel(t_da, time_idx)
     theta_t = _sq3(t_da.values)                            # (z, y, x) T-points
     e1v = _sq2(dc["e1v"].values)
     gphiv = _sq2(dc["gphiv"].values)
@@ -266,7 +274,7 @@ def acc_drake_core(uoe3, e2u, gphiu, glamu, *, drake_lon=-68.0,
             "max_lon_dev_deg": max_dev}
 
 
-def nemo_acc_drake(grid_u_path, domain_cfg_path, *, drake_lon=-68.0,
+def nemo_acc_drake(grid_u_path, domain_cfg_path, *, time_idx=None, drake_lon=-68.0,
                    lat_south=-65.0, lat_north=-45.0):
     """Drake-passage ACC transport [Sv] from NEMO grid_U + domain_cfg."""
     import xarray as xr
@@ -280,12 +288,10 @@ def nemo_acc_drake(grid_u_path, domain_cfg_path, *, drake_lon=-68.0,
     # Time-mean the TRANSPORT (uo*e3u), not uo and e3u separately (free surface).
     if "e3u" in dU:
         uoe3_da = uo_da * dU["e3u"]
-        if "time_counter" in uoe3_da.dims:
-            uoe3_da = uoe3_da.mean("time_counter")
+        uoe3_da = _tsel(uoe3_da, time_idx)
         uoe3 = _sq3(uoe3_da.values)
     else:                                                      # static e3u_0
-        if "time_counter" in uo_da.dims:
-            uo_da = uo_da.mean("time_counter")
+        uo_da = _tsel(uo_da, time_idx)
         uoe3 = _sq3(uo_da.values) * _sq3(dc["e3u_0"].values)
     e2u = _sq2(dc["e2u"].values)
     gphiu = _sq2(dc["gphiu"].values)
@@ -294,7 +300,7 @@ def nemo_acc_drake(grid_u_path, domain_cfg_path, *, drake_lon=-68.0,
                           lat_south=lat_south, lat_north=lat_north)
 
 
-def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
+def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, time_idx=None, target_lat=26.5,
                           lon_min=-75.0, lon_max=15.0):
     """Atlantic MOC strength [Sv] at ``target_lat`` from NEMO grid_V + domain_cfg."""
     import xarray as xr
@@ -309,12 +315,10 @@ def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
     # free surface e3v varies in time, so mean(vo)*mean(e3v) != mean(vo*e3v).
     if "e3v" in dV:
         voe3_da = vo_da * dV["e3v"]                        # aligned (t,z,y,x)
-        if "time_counter" in voe3_da.dims:
-            voe3_da = voe3_da.mean("time_counter")
+        voe3_da = _tsel(voe3_da, time_idx)
         voe3 = _sq3(voe3_da.values)                        # (z, y, x) = mean(vo*e3v)
     else:                                                  # static e3v_0
-        if "time_counter" in vo_da.dims:
-            vo_da = vo_da.mean("time_counter")
+        vo_da = _tsel(vo_da, time_idx)
         voe3 = _sq3(vo_da.values) * _sq3(dc["e3v_0"].values)
     e1v = _sq2(dc["e1v"].values)                          # (y, x)
     gphiv = _sq2(dc["gphiv"].values)                      # (y, x)
@@ -338,13 +342,20 @@ def main() -> int:
     p.add_argument("--drake-lon", type=float, default=-68.0)
     p.add_argument("--drake-lat-south", type=float, default=-65.0)
     p.add_argument("--drake-lat-north", type=float, default=-45.0)
+    p.add_argument("--time-idx", type=int, default=None,
+                   help="Single time_counter record to use (e.g. 2 = March of "
+                        "year 1 in a monthly Jan-first file) for matched-"
+                        "window spin-up comparisons; default = mean over all "
+                        "records (the prior behaviour).")
     a = p.parse_args()
-    r = nemo_amoc_at_latitude(a.grid_v, a.domain_cfg, target_lat=a.target_lat,
+    r = nemo_amoc_at_latitude(a.grid_v, a.domain_cfg, time_idx=a.time_idx,
+                              target_lat=a.target_lat,
                               lon_min=a.lon_min, lon_max=a.lon_max)
     print(f"[NEMO] AMOC@{a.target_lat}N (row lat {r['row_lat_deg']:.2f}, "
           f"j={r['j']}) = {r['amoc_Sv']:.2f} Sv  (RAPID obs ~17)")
     if a.grid_u is not None:
-        ac = nemo_acc_drake(a.grid_u, a.domain_cfg, drake_lon=a.drake_lon,
+        ac = nemo_acc_drake(a.grid_u, a.domain_cfg, time_idx=a.time_idx,
+                            drake_lon=a.drake_lon,
                             lat_south=a.drake_lat_south,
                             lat_north=a.drake_lat_north)
         print(f"[NEMO] ACC@Drake (section lon {ac['section_lon_deg']:.1f}, "
@@ -352,7 +363,7 @@ def main() -> int:
               f"lon-dev {ac['max_lon_dev_deg']:.2f} deg) = {ac['acc_Sv']:.2f} Sv "
               f"(eastward +; obs ~137)")
     if a.grid_t is not None:
-        mh = nemo_mht(a.grid_v, a.grid_t, a.domain_cfg)
+        mh = nemo_mht(a.grid_v, a.grid_t, a.domain_cfg, time_idx=a.time_idx)
         print(f"[NEMO] MHT NH peak = {mh['nh_peak_PW']:.2f} PW @ "
               f"{mh['nh_peak_lat']:.1f}N, SH min = {mh['sh_min_PW']:.2f} PW @ "
               f"{mh['sh_min_lat']:.1f}N  (NH obs ~1.8 PW)")
