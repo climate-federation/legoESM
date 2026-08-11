@@ -721,6 +721,48 @@ it would leave the published numbers describing code that no longer exists.
 It belongs with the re-run that also carries the precipitation fix, where it
 should be one labelled variable rather than a silent difference.
 
+### 8.2g RESULT — all ten schemes, a priori vs tuned (job 9356595, merge 9369383)
+
+Physical-unit, mass-weighted RMSE against SAM_CRM RCE_small300. Ordered by
+tuned temperature RMSE.
+
+| scheme | T [K] a->t | q_v [g/kg] a->t | #par | #ev | verdict |
+|---|---|---|---:|---:|---|
+| dca | 4.779 -> 4.779 | 1.656 -> 1.656 | 0 | 48 | unphysical |
+| zhang_mcfarlane | 10.683 -> **5.847** | 4.984 -> **3.421** | 5 | 60 | unphysical |
+| mass_flux | 10.158 -> **6.870** | 1.931 -> 2.592 | 5 | 60 | unphysical |
+| emanuel | 7.342 -> 7.678 | 1.629 -> 2.397 | 11 | 132 | physical |
+| edmf | 8.326 -> 8.305 | 1.648 -> 1.644 | 5 | 60 | unphysical |
+| kuo | 9.344 -> 9.344 | 1.697 -> 1.697 | 2 | 48 | unphysical |
+| bechtold | 15.415 -> **9.686** | 3.383 -> **2.174** | 19 | 228 | physical |
+| kain_fritsch | 11.814 -> 12.305 | 4.093 -> 3.927 | 12 | 144 | physical |
+| sbm | 15.003 -> 13.662 | 3.890 -> 4.847 | 2 | 48 | physical |
+| tiedtke | 13.693 -> 13.693 | 6.321 -> 6.321 | 16 | 192 | unphysical |
+
+Four readings that a ranking table alone would hide:
+
+1. **Tuning made four schemes WORSE on the reported quantity.** emanuel
+   7.34->7.68 K, kain_fritsch 11.81->12.31 K, sbm q_v 3.89->4.85, mass_flux
+   q_v 1.93->2.59. Not a defect: the tuner minimised the combined score, which
+   §8.2d shows is condensate-dominated, so it traded T and q_v away. This is
+   the objective-vs-deliverable mismatch, quantified.
+2. **`dca` leads on temperature with ZERO tunable parameters and is flagged
+   unphysical** — it does not convect (§8.2a). "Dry convective adjustment wins"
+   would be an artifact of scoring a non-convecting column.
+3. **`tiedtke`: 16 parameters, 192 evaluations, no improvement at all.** Its
+   optimum is its default under this objective, or the sampler cannot reach it.
+4. **Absolute errors are 4.8-13.7 K.** With the lowest level pinned to the SST
+   (§8.2f) and evaporation 30-60 % below the CRM's precipitation (§8.2e), these
+   columns are not close to the reference, and the ranking orders schemes
+   within a biased configuration rather than certifying any of them.
+
+Largest genuine gains: bechtold (-5.7 K, 19 params) and zhang_mcfarlane
+(-4.8 K, 5 params).
+
+**Every number here carries the two harness defects of §8.2e and §8.2f.** The
+precipitation column is invalid; the rankings stand because the diagnostic
+never entered the state, but the physics being ranked is not yet right.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
