@@ -420,8 +420,16 @@ class _CornerLagrange:
 
 def build_ext_context(n: int, ng: int, gs6: list, *,
                       vector_corner: str = "lagrange",
-                      k2e_nord: int = 4) -> dict:
+                      k2e_nord: int = 2) -> dict:
     """Precompute everything the ext exchanges need at resolution n.
+
+    ``k2e_nord`` defaults to 2 — the AUTHORITATIVE resolved runtime value
+    (the pinned tree's own ``duogrid_init`` manifest; confirmed by the
+    extchain oracle certificate, whose 4-vs-2 mutation control scores
+    0.6–93.7).  An earlier default of 4 here meant every caller that
+    omitted the kwarg exercised a non-deck interpolation order while the
+    production stepper explicitly passed 2 — a silent test/production
+    split.
 
     ``gs6`` MUST be the KINKED (pre-``extend_gridstruct``) mpp-state
     gridstructs — c2l and the a-matrices read the model's kinked
