@@ -103,15 +103,37 @@ def test_extract_blocks_are_verbatim():
             f"{name}: staged copy deviates beyond the documented lines"
 
 
-def test_extract_hook_lines_all_marked():
-    """Every dump call inside the extract bodies carries the marker —
-    an unmarked insertion would evade the verbatim check."""
+_HOOK_RE = re.compile(
+    r"^\s*call extchain_dump3\('S\d[a-z]*_'//trim\(tag\), "
+    r"(var|u_in|v_in|ull|vll|ullp1|vllp1|up1|vp1)\)"
+    r"\s+! EXTCHAIN-HOOK \(deviation D3\)$")
+_HOOK_ARG_RE = re.compile(
+    r"^\s*character\(len=\*\), intent\(in\) :: tag"
+    r"\s+! EXTCHAIN-HOOK arg \(deviation D2\)$")
+
+
+def test_extract_hook_lines_strict():
+    """Every EXTCHAIN-HOOK line must match the STRICT dump-call shape —
+    the verbatim check strips marked lines, so a marked line smuggling
+    anything else (e.g. dumping ``0*var``) would otherwise evade both
+    checks (codex extchain r1 #4).  Counts are pinned: 19 dump hooks
+    (3 scalar + 16 vector) + 2 tag-arg declarations."""
     body = EXTRACT.read_text()
     in_extract = body.split("module extchain_extract_mod", 1)[1]
+    n_dump, n_arg = 0, 0
     for ln in in_extract.splitlines():
-        if "extchain_dump3" in ln and "use extchain_dump_mod" not in ln \
+        if "EXTCHAIN-HOOK" in ln:
+            if _HOOK_RE.match(ln):
+                n_dump += 1
+            elif _HOOK_ARG_RE.match(ln):
+                n_arg += 1
+            else:
+                raise AssertionError(f"non-conforming hook line: {ln!r}")
+        elif "extchain_dump" in ln and "use extchain_dump_mod" not in ln \
                 and "only:" not in ln:
-            assert "EXTCHAIN-HOOK" in ln, ln
+            raise AssertionError(f"unmarked dump call: {ln!r}")
+    assert n_dump == 19, n_dump
+    assert n_arg == 2, n_arg
 
 
 # ---------------------------------------------------------------------------
@@ -130,14 +152,19 @@ def test_fixture_input_sha_enforced():
     assert h.hexdigest() == str(d["input_sha256"])
 
 
-def test_oracle_chain_certification_bitwise():
+def test_oracle_chain_certification_exact_zero():
+    """max|staged - composed| exactly 0.0 for EVERY family, variant AND
+    tile (4 x 2 x 6 = 48 records required — a partial set is a
+    failure).  Note: exact-zero max-abs, signed-zero-insensitive; the
+    9361670 C48 arrays were additionally spot-verified raw-word
+    identical in review."""
     d = _load()
     meta = json.loads(str(d["meta"]))
     certs = [ln for ln in meta["notes"] if ln.startswith("CERT")]
-    assert len(certs) >= 6 * 4 * 2      # 4 families x 2 variants x 6 tiles
+    assert len(certs) == 6 * 4 * 2      # 4 families x 2 variants x 6 tiles
     for ln in certs:
         vals = [float(x) for x in ln.split()[2:]]
-        assert all(v == 0.0 for v in vals), ln
+        assert vals and all(v == 0.0 for v in vals), ln
     assert meta["cert_ok"] is True
 
 

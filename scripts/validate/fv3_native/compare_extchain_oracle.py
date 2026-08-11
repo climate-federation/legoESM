@@ -87,15 +87,25 @@ def load_oracle(oracle_dir: Path) -> list:
     return [load_tile(oracle_dir, t) for t in range(1, 7)]
 
 
-def cert_values(notes: list) -> dict:
-    out = {}
+def cert_values(notes: list) -> tuple:
+    """(max value per (family, variant), record count per key).
+
+    The max is over ALL tiles (codex extchain r1 #1: overwriting per
+    tile silently trusted only the last rank), and the caller must
+    check the counts — an empty or partial CERT set is a failure, not
+    a pass."""
+    vals: dict = {}
+    counts: dict = {}
     for ln in notes:
         p = ln.split()
         if p[0] != "CERT":
             continue
         fam, var = p[1].split("_")
-        out[(fam, var)] = max(float(x) for x in p[2:])
-    return out
+        key = (fam, var)
+        vals[key] = max(vals.get(key, 0.0),
+                        max(float(x) for x in p[2:]))
+        counts[key] = counts.get(key, 0) + 1
+    return vals, counts
 
 
 def note_value(notes: list, key: str) -> list:
@@ -410,16 +420,24 @@ def main() -> int:
     orc = load_oracle(odir)
 
     notes = [ln for t in orc for ln in t["notes"]]
-    certs = cert_values(notes)
-    print("== oracle chain certification (max|staged-composed|) ==")
+    certs, cert_counts = cert_values(notes)
+    print("== oracle chain certification "
+          "(max over ALL tiles of max|staged-composed|) ==")
     for k in sorted(certs):
-        print(f"  CERT {k[0]} {k[1]}: {certs[k]:.17e}")
-    cert_ok = all(v == 0.0 for v in certs.values())
-    print(f"  staged dumps trusted: {cert_ok}")
+        print(f"  CERT {k[0]} {k[1]}: {certs[k]:.17e} "
+              f"({cert_counts[k]} tiles)")
+    cert_ok = (len(certs) == 8
+               and all(c == 6 for c in cert_counts.values())
+               and all(v == 0.0 for v in certs.values()))
+    print(f"  staged dumps trusted: {cert_ok} "
+          f"(requires 8 keys x 6 tiles, all exactly 0.0)")
 
-    print("== oracle sentinel-independence (max|FIN_v1-FIN_v2|) ==")
+    print("== oracle sentinel-independence "
+          "(max|v1-v2| over FIN and CFIN) ==")
     sentinel: dict = {}
-    for nm in ("FIN_A", "FIN_B", "FIN_DU", "FIN_DV", "FIN_CU", "FIN_CV"):
+    for nm in ("FIN_A", "FIN_B", "FIN_DU", "FIN_DV", "FIN_CU", "FIN_CV",
+               "CFIN_A", "CFIN_B", "CFIN_DU", "CFIN_DV", "CFIN_CU",
+               "CFIN_CV"):
         w = max(float(np.abs(orc[t]["arrays"][f"{nm}_v1"]
                              - orc[t]["arrays"][f"{nm}_v2"]).max())
                 for t in range(6))
@@ -514,23 +532,50 @@ def main() -> int:
             + np.cos(lat1) * np.cos(lat2) * np.cos(lon1 - lon2),
             -1.0, 1.0))
 
+    # sample points per tile; covers edges and interior of each strip
+    samples = ((1, 1), (n, n + 1), (n // 2, 2), (2, n // 2), (n - 1, n))
     for t in range(6):
         T = fm[t][1]
         inv = op_inverse(fm[t][2])
         olon = op_scalar(orc[T]["arrays"]["AG_LON"], inv)
         olat = op_scalar(orc[T]["arrays"]["AG_LAT"], inv)
+        blon = op_scalar(orc[T]["arrays"]["GR_LON"], inv)
+        blat = op_scalar(orc[T]["arrays"]["GR_LAT"], inv)
         sl = slice(ng, ng + n)
         # k=2 scalar level: lat itself
         worst_s = max(worst_s, float(np.abs(
             in_port["IN_A"][t][sl, sl, 1] - olat[sl, sl]).max()))
-        # D-u from psi differences on the mapped oracle centres, k=0
+        # ALL FOUR wind components (codex extchain r1 #2: D-u alone
+        # cannot catch a wrong sign/component on v or on the C family),
+        # from psi/psi_b differences on the mapped oracle lattices, k=0
         psi = psi_level(0, olon, olat, radius, c0)
-        for (i_f, j_f) in ((1, 1), (n, n + 1), (n // 2, 2)):
+        psib = psi_level(0, blon, blat, radius, c0)
+        for (i_f, j_f) in samples:
             r, c = i_f - lo, j_f - lo
+            # D-u = -dpsi/dyc  (centre pair along j)
             dyc = radius * _gcd(olon[r, c - 1], olat[r, c - 1],
                                 olon[r, c], olat[r, c])
             got = in_port["IN_DU"][t][r, c, 0]
             want = -(psi[r, c] - psi[r, c - 1]) / dyc
+            worst_u = max(worst_u, abs(float(got - want)))
+            # D-v = +dpsi/dxc  (centre pair along i); swap roles of r/c
+            r2, c2 = j_f - lo, i_f - lo
+            dxc = radius * _gcd(olon[r2 - 1, c2], olat[r2 - 1, c2],
+                                olon[r2, c2], olat[r2, c2])
+            got = in_port["IN_DV"][t][r2, c2, 0]
+            want = (psi[r2, c2] - psi[r2 - 1, c2]) / dxc
+            worst_u = max(worst_u, abs(float(got - want)))
+            # C-u = -dpsi_b/dy  (corner pair along j at an x-face)
+            dy = radius * _gcd(blon[r2, c2], blat[r2, c2],
+                               blon[r2, c2 + 1], blat[r2, c2 + 1])
+            got = in_port["IN_CU"][t][r2, c2, 0]
+            want = -(psib[r2, c2 + 1] - psib[r2, c2]) / dy
+            worst_u = max(worst_u, abs(float(got - want)))
+            # C-v = +dpsi_b/dx  (corner pair along i at a y-face)
+            dx = radius * _gcd(blon[r, c], blat[r, c],
+                               blon[r + 1, c], blat[r + 1, c])
+            got = in_port["IN_CV"][t][r, c, 0]
+            want = (psib[r + 1, c] - psib[r, c]) / dx
             worst_u = max(worst_u, abs(float(got - want)))
     # thresholds: a component-sign error gives ~2|u| (~77 m/s), a
     # placement error O(0.1-1); the known lib_grid-vs-constants radius
@@ -557,22 +602,32 @@ def main() -> int:
 
     rows = []
 
-    def compare(stage_label, oname, port_in_oracle, ish, jsh, lat_ng):
+    def compare(stage_label, oname, port_in_oracle, ish, jsh, lat_ng,
+                allow_mask=True):
         agg_edge: dict = {}
         agg_vert: dict = {}
         agg_int = 0.0
         ring_tab: dict = {}
+        n_masked = 0
+        n_total = 0
         for T in range(6):
             oa = orc[T]["arrays"][oname]
             pa = port_in_oracle[T]
-            if oa.shape != pa.shape:
-                oa = oa[:pa.shape[0], :pa.shape[1]]
-                if oa.shape != pa.shape:
-                    print(f"  SHAPE MISMATCH {oname}: {oa.shape} vs "
-                          f"{pa.shape} — skipped")
-                    return
+            # shapes MUST agree — silent truncation could hide missing
+            # boundary slots on a broken port output (codex r1 #3)
+            assert oa.shape == pa.shape, \
+                (stage_label, oname, oa.shape, pa.shape)
+            # mask only structurally-undefined slots (port NaN = never
+            # touched; oracle -99999 prefill / stack garbage); FINAL
+            # comparisons run with allow_mask=False and require ZERO
+            # masked slots
             undef = (~np.isfinite(pa)) | (~np.isfinite(oa)) \
                 | (np.abs(oa) > 1e12) | (oa == -99999.0)
+            n_masked += int(undef.sum())
+            n_total += int(undef.size)
+            if not allow_mask:
+                assert not undef.any(), \
+                    (stage_label, oname, T, int(undef.sum()))
             diff = np.where(undef, 0.0, pa - oa)
             reg = score_regions(diff, n, lat_ng, ish, jsh)
             for key, v in reg.items():
@@ -588,9 +643,10 @@ def main() -> int:
         emax = max(agg_edge.values()) if agg_edge else 0.0
         vmax = max(agg_vert.values()) if agg_vert else 0.0
         rings = {r: f"{v:.2e}" for r, v in sorted(ring_tab.items())}
+        mtag = (f" masked={n_masked}/{n_total}" if n_masked else "")
         print(f"  {stage_label:10s} interior={agg_int:.3e} "
               f"edges(max)={emax:.3e} vertices(max)={vmax:.3e} "
-              f"rings={rings}")
+              f"rings={rings}{mtag}")
         for eid in sorted(agg_edge):
             rows.append((stage_label, "edge", eid, agg_edge[eid]))
         for vid in sorted(agg_vert):
@@ -619,7 +675,8 @@ def main() -> int:
             oname = (f"{st}_{stag}_v1" if st != "FIN"
                      else f"CFIN_{stag}_v1")
             compare(f"{stag}:{st}", oname,
-                    to_oracle_scalar(port[f"{st}_{stag}"]), ish, jsh, ng)
+                    to_oracle_scalar(port[f"{st}_{stag}"]), ish, jsh, ng,
+                    allow_mask=(st != "FIN"))
 
     WSHIFT = {("D", "u"): (0, 1), ("D", "v"): (1, 0),
               ("C", "u"): (1, 0), ("C", "v"): (0, 1)}
@@ -654,9 +711,11 @@ def main() -> int:
         uv_u = "DU" if fam == "D" else "CU"
         uv_v = "DV" if fam == "D" else "CV"
         ish, jsh = WSHIFT[(fam, "u")]
-        compare(f"{fam}:FINu", f"CFIN_{uv_u}_v1", us, ish, jsh, ng)
+        compare(f"{fam}:FINu", f"CFIN_{uv_u}_v1", us, ish, jsh, ng,
+                allow_mask=False)
         ish, jsh = WSHIFT[(fam, "v")]
-        compare(f"{fam}:FINv", f"CFIN_{uv_v}_v1", vs, ish, jsh, ng)
+        compare(f"{fam}:FINv", f"CFIN_{uv_v}_v1", vs, ish, jsh, ng,
+                allow_mask=False)
 
     try:
         sha = subprocess.run(["git", "-C", str(REPO), "rev-parse",
@@ -664,8 +723,16 @@ def main() -> int:
                              timeout=10).stdout.strip()
     except Exception:
         sha = "unknown"
+    scope = (f"C{n} ng={ng} k2e_nord={k2e_nord} layout=1x1 grid_type=0 "
+             "do_schmidt(stretch=1,target=(0,-90)=identity) hydrostatic "
+             "deck; interporder=3/laginter=T are pinned module "
+             "constants.  NOT covered: layout>1 "
+             "(fill_corners_domain_decomp active) and nontrivially "
+             "stretched/rotated Schmidt grids.")
+    print(f"== scope of this certificate: {scope} ==")
     meta = {"n": n, "ng": ng, "git_sha": sha,
             "pinned_fv_duogrid_sha256": PIN_FVDUO_SHA,
+            "scope": scope,
             "oracle_dir": str(odir), "cert_ok": bool(cert_ok),
             "face_map": {str(t + 1): [fm[t][1] + 1, list(fm[t][2]),
                                       fm[t][0]] for t in range(6)},
