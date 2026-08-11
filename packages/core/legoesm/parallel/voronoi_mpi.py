@@ -553,6 +553,61 @@ def gather_voronoi_field(
     return jnp.array(global_field)
 
 
+def gather_owned_cells_to_root(
+    owned_fields: dict,
+    owned_indices: np.ndarray,
+    n_global: int,
+    root: int = 0,
+) -> dict | None:
+    """Assemble GLOBAL cell fields on ``root`` from ALREADY-HOST owned rows.
+
+    The host-side sibling of :func:`gather_voronoi_field`, for diagnostics.
+    Takes the WHOLE field dict at once and differs from it deliberately:
+
+    * **ONE collective for every field.**  A per-field loop would put N
+      ``gather`` calls in sequence with root-only reconstruct work between
+      them — and that work (a ``n_global`` allocation, the scatter-assign) can
+      fail on ROOT ALONE, leaving every peer blocked in the next field's
+      gather.  One ``gather`` means all root-only work happens AFTER the last
+      collective, so a root failure can never strand a peer.  It also stops
+      ``owned_indices`` being pickled once per field.
+    * Inputs are plain NumPy — the caller does the device->host copy and the
+      ``[:n_owned]`` slice BEFORE calling, so that failure-prone work also
+      happens outside the collective.
+    * ``gather`` to ``root``, not ``allgather``: non-root ranks hold nothing.
+    * Returns NumPy, so values never round-trip through ``jnp.array`` (which
+      silently demotes a float64 host array to float32 when x64 is off, and
+      would place a global copy on every rank's device).
+
+    Returns ``{name: (n_global,) + trailing}`` on ``root`` and ``None`` on
+    every other rank.
+
+    NOT differentiable (raw ``comm.gather``, like every diagnostic reduction
+    here) — never call it from a traced or ``jax.grad`` context.
+    """
+    require_mpi_stack()
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    # THE only collective.  Every rank contributes the same field names (the
+    # caller agrees them first), so the payload shape is rank-uniform.
+    chunks = comm.gather((owned_indices, owned_fields), root=root)
+    if comm.Get_rank() != root:
+        return None
+    out = {}
+    for name in owned_fields:
+        parts = [(idx, f[name]) for idx, f in chunks]
+        # Promote to the WIDEST contributed dtype: taking root's alone would
+        # let a peer's float64 chunk be silently downcast by the assignment.
+        dtype = np.result_type(*[np.asarray(a).dtype for _, a in parts])
+        trailing = tuple(np.shape(parts[0][1])[1:])
+        buf = np.zeros((int(n_global),) + trailing, dtype=dtype)
+        for idx_chunk, data_chunk in parts:
+            buf[idx_chunk] = data_chunk
+        out[name] = buf
+    return out
+
+
 def gather_state_voronoi(
     local_state: MPASHydrostaticState,
     partition: VoronoiPartition,
