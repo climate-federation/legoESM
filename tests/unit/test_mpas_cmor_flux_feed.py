@@ -24,6 +24,21 @@ from legoesm.grids.factory import create_grid
 NLEV = 6
 
 
+def _as_driver(ns):
+    """Bind the ``ModelDriver`` methods the CMOR feed calls on ``self``.
+
+    ``types.SimpleNamespace`` stand-ins cannot inherit them, and the feed
+    delegates its native-field construction to ``_mpas_cmip_native_kwargs``
+    (shared with the multi-rank gather path).
+    """
+    import functools
+    from legoesm.driver.model_driver import ModelDriver
+    ns._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, ns)
+    return ns
+
+
+
 @pytest.fixture(scope="module")
 def mesh():
     return create_grid("mpas", 2, lloyd_iterations=10)
@@ -217,8 +232,10 @@ class TestClearSkyFeed:
         slots 10-13 onto the four CMOR names and forward them to the feed."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
+        # Slot reads live in the shared field builder (#1572 split it out of
+        # _feed_mpas_cmip_accumulators, which is now a two-branch dispatcher).
         src = inspect.getsource(
-            ModelDriver._feed_mpas_cmip_accumulators)
+            ModelDriver._mpas_cmip_native_kwargs)
         for name, slot in (("rsutcs", 10), ("rlutcs", 11),
                            ("rsdscs", 12), ("rldscs", 13)):
             assert f"{name} = _sfc_slot({slot})" in src, (
@@ -609,6 +626,7 @@ class TestFeedUsesIntervalMeans:
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
+        _as_driver(fake)
         ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
 
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
@@ -643,6 +661,7 @@ class TestFeedUsesIntervalMeans:
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
+        _as_driver(fake)
         ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
         np.testing.assert_allclose(out["field_2d_pr"], 9.0e-5, rtol=1e-9)
@@ -838,8 +857,11 @@ class TestRound3:
         # _unchanged; this test pins the DRIVER gate expression.
         import inspect
         from legoesm.driver import model_driver
+        # The gate lives in _mpas_cmip_native_kwargs, the field-building
+        # helper _feed_mpas_cmip_accumulators delegates to (and which the
+        # multi-rank gather path shares) — inspect the symbol that RUNS.
         src = inspect.getsource(
-            model_driver.ModelDriver._feed_mpas_cmip_accumulators)
+            model_driver.ModelDriver._mpas_cmip_native_kwargs)
         assert "_win_days <= 1.0" in src and "round(_per_day)" in src, (
             "driver must gate flux_interval_days to windows that divide "
             "the day evenly (derived from the integer step count)")
@@ -1120,6 +1142,7 @@ class TestPartialWindowGate:
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
+        _as_driver(fake)
         ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
         assert "field_2d_pr" not in out, "partial-window flux must be withheld"
@@ -1154,6 +1177,7 @@ class TestPartialWindowGate:
             model=types.SimpleNamespace(
                 _sfc_diag=(None, None, _field(np.full(n, 9.0e-5)))),
         )
+        _as_driver(fake)
         ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
         out = dc._spatial_monthly.finalize(min_sample_fraction=0)
         np.testing.assert_allclose(out["field_2d_pr"], 3.0e-5, rtol=1e-6)
@@ -1277,8 +1301,7 @@ class TestBinningPhaseGate:
         1/N-day grid, else it can straddle midnight/month boundaries."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(
-            ModelDriver._feed_mpas_cmip_accumulators)
+        src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
         assert "_phase" in src and "round(_phase)" in src
 
     def test_driver_labels_true_sampling_cadence(self):
@@ -1340,7 +1363,7 @@ class TestDriftingCadenceHonesty:
         hour after a century; the gate must use an absolute day tolerance."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
         assert "_phase_err_days" in src and "1e-9" in src
         # And the arithmetic itself: an off-grid 1-day window at day 36500
         # must be rejected.
@@ -1913,7 +1936,8 @@ class TestRsuscs:
     def test_driver_reads_slot_14_and_forwards_it(self):
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        # The slot read lives in the shared field builder (#1572).
+        src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
         assert "rsuscs = _sfc_slot(14)" in src
         assert "rsuscs=rsuscs," in src
 
@@ -2066,7 +2090,8 @@ class TestPrsn:
     def test_driver_reads_slot_15_and_forwards_it(self):
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+        # The slot read lives in the shared field builder (#1572).
+        src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
         assert "prsn = _sfc_slot(15)" in src
         assert "prsn=prsn," in src
 
@@ -2269,7 +2294,7 @@ class TestClearSkyDriverFeed:
         q_v = np.full((n, NLEV), 5.0e-3)
         q_c = np.full((n, NLEV), 2.0e-4)
         q_i = np.full((n, NLEV), 1.0e-4)
-        return types.SimpleNamespace(
+        return _as_driver(types.SimpleNamespace(
             diagnostics=dc,
             grid=mesh,
             config=types.SimpleNamespace(
@@ -2281,7 +2306,7 @@ class TestClearSkyDriverFeed:
                          "q_i": _field(q_i)},
             ),
             model=types.SimpleNamespace(_sfc_diag=tuple(sfc)),
-        )
+        ))
 
     def test_flag_on_feeds_all_five_new_fields(self, mesh):
         from legoesm.driver.model_driver import ModelDriver

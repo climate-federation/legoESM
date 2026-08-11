@@ -271,24 +271,29 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # so on the duo lane the halo carries the k2e-remapped value, not the
     # raw analytic one. d_sw5 reads f0 full-domain as `vort = wk + f0`
     # (sw_core.F90:1837-1862), so those halo slots are consumed, not
-    # decorative. The two differ by the remap's own truncation -- the port
-    # was using the EXACT value where the oracle uses an approximate one,
-    # which is still a divergence.
+    # decorative.
     #
-    # fill_corners(..., YDir) runs unconditionally under `cubed_sphere`, so
-    # it is ported here too rather than left to ext_scalar's Lagrange
-    # corner-region fill, which is a different operation.
+    # THE :800 fill_corners(f0, npx, npy, YDir) IS A NO-OP IN THE ORACLE.
+    # fill_corners_2d_r8 (fv_mp_mod.F90:1032-1105) guards its ENTIRE body
+    # with `if (present(BGRID)) ... elseif (present(AGRID))`, and the f0
+    # call passes NEITHER optional -- the routine falls through and writes
+    # nothing, so the oracle's f0 corner-diagonal regions keep
+    # ext_scalar's Lagrange corner-region fill.  An earlier port round
+    # implemented the fill the source APPEARS to perform
+    # (fill_corners_agrid_y after the exchange), which overwrote the
+    # correct corner values by 7-14% relative; d_sw5's fv_tp_2d
+    # (vort = wk + f0) consumes exactly those slots at corner cells, and
+    # the ORACLE STAGE-STATE instrument measured the result as u/v
+    # corner-wedge residuals of ~1.6e-6 per substep on every face --
+    # the dominant term of the one-step 9.79e-06 panel-boundary floor
+    # (stage table: fv3_duo_gaps/dynstage, jobs 9369492/9369507/9369527).
     if use_ext_bundle and "f0" not in ext_exclude:
-        from legoesm.grids.fv3_native_gridstruct import (
-            fill_corners_agrid_y,
-        )
         from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
 
         f0_6 = [np.array(gs["f0"], dtype=np.float64, copy=True)
                 for gs in gs6]
         ext_scalar_sixface(f0_6, "A", ectx)
         for t in range(6):
-            fill_corners_agrid_y(fort(f0_6[t], 1 - ng, 1 - ng), n + 1, ng)
             gs6[t] = {**gs6[t], "f0": f0_6[t]}
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,

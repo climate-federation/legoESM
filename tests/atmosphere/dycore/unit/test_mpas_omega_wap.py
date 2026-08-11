@@ -218,7 +218,11 @@ def test_diagnose_omega_is_the_symbol_the_driver_calls(mesh, coord):
     from legoesm.driver import model_driver
     m = _model(mesh, coord)
     assert callable(getattr(m, "diagnose_omega", None))
-    src = inspect.getsource(model_driver.ModelDriver._feed_mpas_cmip_accumulators)
+    # The field construction lives in ``_mpas_cmip_native_kwargs`` (the helper
+    # ``_feed_mpas_cmip_accumulators`` dispatches to on BOTH the serial and the
+    # multi-rank lane, #1572) — inspect the symbol that actually runs, not the
+    # delegating caller.
+    src = inspect.getsource(model_driver.ModelDriver._mpas_cmip_native_kwargs)
     assert '"diagnose_omega"' in src, (
         "the MPAS CMOR feed no longer resolves the dycore omega export")
     assert "omega=omega" in src, "omega is not forwarded to the CMOR feed"

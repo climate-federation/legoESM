@@ -574,10 +574,14 @@ def test_daily_rsut_uses_flux_midpoint_binning(mesh):
 
 def test_tauu_tauv_sign_pinned_eastward_wind_gives_positive_tauu(mesh):
     """The MODEL exports tau = -rho C_d |V| u (opposes the wind), so an
-    eastward wind carries a NEGATIVE model tau_x in slot 10.  CMOR tauu is
+    eastward wind carries a NEGATIVE model tau_x in slot 16.  CMOR tauu is
     the DOWNWARD flux of eastward momentum (positive with the wind): the
-    driver must flip the sign.  Slot 10 = -0.08 Pa => published tauu =
-    +0.08 Pa.  An unflipped feed publishes -0.08 and goes red."""
+    driver must flip the sign.  Slot 16 = -0.08 Pa => published tauu =
+    +0.08 Pa.  An unflipped feed publishes -0.08 and goes red.
+
+    Slots 16/17 are ``tau_x_sfc``/``tau_y_sfc`` per the producer contract
+    ``core.state.MPAS_SFC_DIAG_EXTRA_KEYS`` (extras key *i* is slot *i+3*);
+    10-14 are the clear-sky quintet, so writing tau there tests nothing."""
     from legoesm.driver.model_driver import ModelDriver
     import types as _t
 
@@ -590,7 +594,8 @@ def test_tauu_tauv_sign_pinned_eastward_wind_gives_positive_tauu(mesh):
 
     sfc = (None, None, _t.SimpleNamespace(data=f["precip"]),
            None, None, None, None, None, None, None,
-           _fld(-0.08), _fld(0.03))     # slots 10/11: model tau_x/tau_y
+           None, None, None, None, None, None,
+           _fld(-0.08), _fld(0.03))     # slots 16/17: model tau_x/tau_y
     fake = _fake_driver(mesh, dc, f, sfc_diag=sfc)
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
@@ -806,7 +811,21 @@ def _fake_driver(mesh, dc, f, *, sfc_diag=None, tracers=None,
         sst = np.full(n, 290.0)
         sic = np.full(n, 0.5)
         drv.get_sst_sic = lambda day: (sst, sic)
-    return drv
+    return _as_driver(drv)
+
+
+def _as_driver(ns):
+    """Bind the ``ModelDriver`` methods the CMOR feed calls on ``self``.
+
+    ``types.SimpleNamespace`` stand-ins cannot inherit them, and the feed
+    delegates its native-field construction to ``_mpas_cmip_native_kwargs``
+    (shared with the multi-rank gather path, #1572).
+    """
+    import functools
+    from legoesm.driver.model_driver import ModelDriver
+    ns._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, ns)
+    return ns
 
 
 def test_driver_maps_slots_8_9_to_rsds_rlds_and_derives_rsus_rlus(mesh):

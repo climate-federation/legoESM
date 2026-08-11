@@ -127,6 +127,12 @@ def _fake_driver(mesh, dc, sigma_full, sweep, *, anchor=None):
     )
     if anchor is not None:
         fake._mpas_T_sfc_anchor = anchor
+    # Bind the ModelDriver method the feed delegates its native-field
+    # construction to (#1572 split it out of _feed_mpas_cmip_accumulators);
+    # a SimpleNamespace cannot inherit it.
+    import functools
+    fake._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, fake)
     return fake, rlds, rlus
 
 
@@ -234,5 +240,8 @@ def test_run_mpas_stashes_the_anchor_after_the_land_skin_blend():
 def test_feed_reads_the_stashed_anchor():
     """The consumer side names the same attribute (a stash nothing reads is
     dead code)."""
-    src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
+    # ``_mpas_cmip_native_kwargs`` is where the field construction lives after
+    # #1572 split it out of ``_feed_mpas_cmip_accumulators`` (which is now a
+    # two-branch dispatcher) — inspect the symbol that actually reads the stash.
+    src = inspect.getsource(ModelDriver._mpas_cmip_native_kwargs)
     assert "_mpas_T_sfc_anchor" in src

@@ -193,6 +193,21 @@ def test_wrong_shaped_condensate_raises_before_mutating(mesh):
 # driver glue on a lightweight stand-in, matching the sibling pattern in
 # test_mpas_cmip_accumulator_feed.py.
 
+def _as_driver(ns):
+    """Bind the ``ModelDriver`` methods the CMOR feed calls on ``self``.
+
+    ``types.SimpleNamespace`` stand-ins cannot inherit them, and the feed
+    delegates its native-field construction to ``_mpas_cmip_native_kwargs``
+    (shared with the multi-rank gather path).  Mirrors the binder in
+    ``test_mpas_cmip_accumulator_feed.py``.
+    """
+    import functools
+    from legoesm.driver.model_driver import ModelDriver
+    ns._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, ns)
+    return ns
+
+
 def _fake_driver(mesh, dc, f, *, tracers):
     import types
 
@@ -200,7 +215,7 @@ def _fake_driver(mesh, dc, f, *, tracers):
         return types.SimpleNamespace(data=np.asarray(a))
 
     n_edges = int(mesh.nEdges)
-    return types.SimpleNamespace(
+    return _as_driver(types.SimpleNamespace(
         diagnostics=dc, grid=mesh,
         state=types.SimpleNamespace(
             u=_field(np.full((n_edges, NLEV), 5.0)),
@@ -210,7 +225,7 @@ def _fake_driver(mesh, dc, f, *, tracers):
         model=types.SimpleNamespace(
             _sfc_diag=(None, None, _field(f["precip"])),
         ),
-    )
+    ))
 
 
 def test_driver_forwards_condensate_so_clt_is_published(mesh):

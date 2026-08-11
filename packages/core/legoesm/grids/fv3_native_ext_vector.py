@@ -420,8 +420,16 @@ class _CornerLagrange:
 
 def build_ext_context(n: int, ng: int, gs6: list, *,
                       vector_corner: str = "lagrange",
-                      k2e_nord: int = 4) -> dict:
+                      k2e_nord: int = 2) -> dict:
     """Precompute everything the ext exchanges need at resolution n.
+
+    ``k2e_nord`` defaults to 2 — the AUTHORITATIVE resolved runtime value
+    (the pinned tree's own ``duogrid_init`` manifest; confirmed by the
+    extchain oracle certificate, whose 4-vs-2 mutation control scores
+    0.6–93.7).  An earlier default of 4 here meant every caller that
+    omitted the kwarg exercised a non-deck interpolation order while the
+    production stepper explicitly passed 2 — a silent test/production
+    split.
 
     ``gs6`` MUST be the KINKED (pre-``extend_gridstruct``) mpp-state
     gridstructs — c2l and the a-matrices read the model's kinked
@@ -679,6 +687,9 @@ def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
             dump("S5", t, "up1", ud4)
             dump("S5", t, "vp1", vd4)
         _write_d_strips(u6[t], v6[t], ud4, vd4, n, ng)
+        if dump:
+            dump("S6pre", t, "uin", u6[t])
+            dump("S6pre", t, "vin", v6[t])
         if ectx.get("vector_corner", "lagrange") == "lagrange":
             ectx["corner_du3"][t].fill(u6[t])
             ectx["corner_dv3"][t].fill(v6[t])
@@ -716,22 +727,54 @@ def _write_c_strips(uc: np.ndarray, vc: np.ndarray, uc4: np.ndarray,
 
 
 def ext_vector_cgrid_sixface(uc6: list, vc6: list, ectx: dict):
-    """ext_vector(uc, vc, …, 1,0,0,1): C-grid covariant winds."""
+    """ext_vector(uc, vc, …, 1,0,0,1): C-grid covariant winds.
+
+    Supports the same optional ``ectx["stage_dump"]`` hook as the D-grid
+    variant (extchain oracle harness); ``None`` (default) is
+    byte-identical production behavior.
+    """
     n, ng = ectx["n"], ectx["ng"]
+    dump = ectx.get("stage_dump")
     for t in range(1, 7):
         exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if dump:
+        for t in range(6):
+            dump("S1", t, "uin", uc6[t])
+            dump("S1", t, "vin", vc6[t])
     ug6, vg6 = [], []
     for t in range(6):
         ua, va = c2l_ord2_cgrid_face(uc6[t], vc6[t], ectx["dx6"][t],
                                      ectx["dy6"][t], ectx["amat6"][t],
                                      n, ng)
+        if dump:
+            dump("S2", t, "ull", ua)
+            dump("S2", t, "vll", va)
         ug6.append(_pack_p1(ua, n, ng))
         vg6.append(_pack_p1(va, n, ng))
-    _geo_lattice_exchange(ug6, ectx)
-    _geo_lattice_exchange(vg6, ectx)
+    if dump:
+        ngp = _NG_P1
+        for g6, nm in ((ug6, "ullp1"), (vg6, "vllp1")):
+            g6x = [np.array(g, copy=True) for g in g6]
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(g6x, t, n, ngp)
+            for t in range(6):
+                dump("S3", t, nm, g6x[t])
+    _geo_lattice_exchange(ug6, ectx, dump=dump)
+    _geo_lattice_exchange(vg6, ectx, dump=dump,
+                          names=("S4_vllp1", "S5_vllp1"))
     for t in range(6):
         uc4, vc4 = _a2c_project(ug6[t], vg6[t], t, ectx)
+        if dump:
+            dump("S5", t, "up1", uc4)
+            dump("S5", t, "vp1", vc4)
         _write_c_strips(uc6[t], vc6[t], uc4, vc4, n, ng)
+        if dump:
+            dump("S6pre", t, "uin", uc6[t])
+            dump("S6pre", t, "vin", vc6[t])
         if ectx.get("vector_corner", "lagrange") == "lagrange":
             ectx["corner_dv3"][t].fill(uc6[t])     # C-u stagger = (1,0)
             ectx["corner_du3"][t].fill(vc6[t])     # C-v stagger = (0,1)
+    if dump:
+        for t in range(6):
+            dump("S6", t, "uin", uc6[t])
+            dump("S6", t, "vin", vc6[t])
