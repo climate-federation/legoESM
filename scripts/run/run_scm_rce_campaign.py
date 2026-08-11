@@ -1146,7 +1146,10 @@ def run_scm_rce(
     sigma_coord = scm.sigma_coord
     dt_arr = jnp.asarray(dt, dtype=jnp.float64)
     microphysics_scheme = cfg.microphysics.scheme
-    precip_diagnostic = _make_microphysics_precip_diagnostic(cfg, dt)
+    # _make_microphysics_precip_diagnostic is NOT built here any more: it was
+    # the wrong-dt second evaluation whose value the score used to report, and
+    # leaving a loaded closure around for someone to reach for again is how the
+    # defect would come back (codex review, 2026-08-11).
     convective_precip_diagnostic = _make_convective_precip_diagnostic(cfg, dt)
 
     def apply_surface_sst_anchor(state):
@@ -1265,16 +1268,21 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        if use_split_convection:
+        # WHETHER convection is sub-stepped is irrelevant to whether its
+        # condensate is double-counted; what matters is whether MICROPHYSICS
+        # will sediment it.  The rule used to branch on sub-stepping, so the
+        # non-sub-stepped path added a convective diagnostic on top of
+        # condensate that microphysics would later rain out and count again
+        # (codex review, 2026-08-11).  The default ten substeps hid it.
+        if microphysics_scheme == "none":
             convective_precip_for_score = (
-                convective_precip
-                if microphysics_scheme == "none"
-                else jnp.zeros((), dtype=new_state.T.data.dtype)
+                convective_precip if use_split_convection
+                else convective_precip_diagnostic(
+                    new_state, new_phys, grid, sigma_coord)
             )
         else:
-            convective_precip_for_score = convective_precip_diagnostic(
-                new_state, new_phys, grid, sigma_coord,
-            )
+            convective_precip_for_score = jnp.zeros(
+                (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
         out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
         return (new_state, new_phys), out
@@ -1307,16 +1315,21 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        if use_split_convection:
+        # WHETHER convection is sub-stepped is irrelevant to whether its
+        # condensate is double-counted; what matters is whether MICROPHYSICS
+        # will sediment it.  The rule used to branch on sub-stepping, so the
+        # non-sub-stepped path added a convective diagnostic on top of
+        # condensate that microphysics would later rain out and count again
+        # (codex review, 2026-08-11).  The default ten substeps hid it.
+        if microphysics_scheme == "none":
             convective_precip_for_score = (
-                convective_precip
-                if microphysics_scheme == "none"
-                else jnp.zeros((), dtype=new_state.T.data.dtype)
+                convective_precip if use_split_convection
+                else convective_precip_diagnostic(
+                    new_state, new_phys, grid, sigma_coord)
             )
         else:
-            convective_precip_for_score = convective_precip_diagnostic(
-                new_state, new_phys, grid, sigma_coord,
-            )
+            convective_precip_for_score = jnp.zeros(
+                (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
         out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
         return (new_state, new_phys, rad_tend), out

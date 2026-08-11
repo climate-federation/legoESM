@@ -133,3 +133,38 @@ def test_a_positive_flux_survives_the_substep_average(camp):
     rate = 1.0e-5
     per = float(camp.applied_precip_mm_day(_tend(rate), _LikeState()))
     assert sum([per / n] * n) == pytest.approx(per, rel=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# Counting semantics.  Codex round: the rule that zeroes the convective term
+# used to branch on SUB-STEPPING, but sub-stepping has nothing to do with
+# whether condensate gets counted twice -- what matters is whether microphysics
+# will sediment it. The non-sub-stepped path therefore added a convective
+# diagnostic on top of condensate microphysics would later rain out and count
+# again; the default ten substeps hid it.
+# --------------------------------------------------------------------------- #
+
+def test_the_convective_term_is_zeroed_whenever_microphysics_is_active(camp):
+    """Both branches, one criterion: active microphysics owns the surface."""
+    src = (REPO_ROOT / "scripts" / "run" / "run_scm_rce_campaign.py").read_text()
+    for body in src.split("convective_precip_for_score")[1:2]:
+        pass
+    # the guard must key off the microphysics scheme, not off sub-stepping
+    idx = src.index("if microphysics_scheme == \"none\":")
+    window = src[idx:idx + 700]
+    assert "convective_precip_for_score" in window
+    assert "use_split_convection" in window, (
+        "the sub-stepped/non-sub-stepped distinction still selects WHICH "
+        "convective diagnostic to use, which is fine; what must not return is "
+        "sub-stepping deciding WHETHER to count it")
+    # and the old shape -- branching on sub-stepping first -- must be gone
+    assert "if use_split_convection:\n            convective_precip_for_score" \
+        not in src
+
+
+def test_the_wrong_dt_diagnostic_is_no_longer_constructed(camp):
+    """Dead but loaded: the closure that caused the defect was still being
+    built with the outer dt after the fix. Leaving it there is how the bug
+    comes back."""
+    src = (REPO_ROOT / "scripts" / "run" / "run_scm_rce_campaign.py").read_text()
+    assert "precip_diagnostic = _make_microphysics_precip_diagnostic" not in src
