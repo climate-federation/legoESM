@@ -118,3 +118,16 @@ def test_native_slice_strips_ghost_row_and_overlap_columns():
     assert n.shape == (331, 360)
     assert n[0, 0] == a[0, 1]
     assert n[-1, -1] == a[330, 360]
+
+
+def test_native_3d_is_level_last_in_and_level_first_out():
+    """Snapshot 3-D arrays are (nj, ni, nlev) -- measured on the real npz
+    (T.shape == (332, 362, 75), job 9361671).  _native must transpose to
+    level-first to match the mesh metrics, and refuse any other layout."""
+    a = np.zeros((332, 362, 5))
+    a[10, 20, 3] = 7.0
+    n = m._native(a)
+    assert n.shape == (5, 331, 360)
+    assert n[3, 10, 19] == 7.0            # column shifted by the i-overlap
+    with pytest.raises(SystemExit):
+        m._native(np.zeros((5, 332, 362)))  # level-first input must be refused

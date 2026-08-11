@@ -92,7 +92,14 @@ def load_mesh_metrics(mesh_mask_path):
         ds.close()
     if e3t.ndim != 3 or tmask.ndim != 3:
         raise SystemExit(f"expected 3-D e3t_0/tmask, got {e3t.shape}/{tmask.shape}")
-    return e1t, e2t, e3t, tmask
+    # The mesh file carries the FULL (jpj=332, jpi=362) domain including the
+    # cyclic overlap columns and the north-fold ghost row; summing them would
+    # double-count.  Slice to the native frame here so every consumer sees
+    # only unique physical cells.
+    if e3t.shape[1:] != (332, 362):
+        raise SystemExit(f"expected eORCA1 (nlev, 332, 362) mesh, got {e3t.shape}")
+    return (e1t[_NATIVE_J, _NATIVE_I], e2t[_NATIVE_J, _NATIVE_I],
+            e3t[:, _NATIVE_J, _NATIVE_I], tmask[:, _NATIVE_J, _NATIVE_I])
 
 
 def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None):
@@ -135,12 +142,22 @@ def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None):
 
 
 def _native(a):
-    """Strip the snapshot's fold ghost row and cyclic overlap columns."""
+    """Strip the snapshot's fold ghost row and cyclic overlap columns, and put
+    the level axis FIRST.
+
+    Snapshot 3-D arrays are (nj=332, ni=362, nlev) -- level LAST (measured,
+    job 9361671: T.shape == (332, 362, 75)); the mesh metrics are level-first.
+    The shapes are asserted rather than inferred so a layout change fails
+    loudly instead of silently mis-slicing (the array's layout is an API)."""
     a = np.asarray(a, dtype=np.float64)
     if a.ndim == 2:
+        if a.shape != (332, 362):
+            raise SystemExit(f"expected 2-D snapshot (332, 362), got {a.shape}")
         return a[_NATIVE_J, _NATIVE_I]
     if a.ndim == 3:
-        return a[:, _NATIVE_J, _NATIVE_I]
+        if a.shape[:2] != (332, 362):
+            raise SystemExit(f"expected 3-D snapshot (332, 362, nlev), got {a.shape}")
+        return np.transpose(a[_NATIVE_J, _NATIVE_I, :], (2, 0, 1))
     raise SystemExit(f"expected 2-D or 3-D snapshot array, got shape {a.shape}")
 
 
