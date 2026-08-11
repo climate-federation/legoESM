@@ -595,6 +595,18 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         average_allflux_shared_edges,
     )
 
+    # Lane guard (codex km=1 r2 finding 1): this assembler runs ONLY duo
+    # kernels (d_sw1_duo/d_sw2_duo) and is publicly callable with
+    # fabricated csw_outs, i.e. WITHOUT passing through c_sw's guard —
+    # the same upstream implication applies (fv_arrays.F90:1512:
+    # duogrid forces bounded_domain=.true.).
+    for _gs in ctx["gs6"]:
+        if not _gs.get("bounded_domain", False):
+            raise ValueError(
+                "dsw12_step_sixface: duo kernels require "
+                "bounded_domain=True on every face (fv_arrays.F90:1512); "
+                "build the context with oracle_conventions=True")
+
     n, ng = ctx["n"], ctx["ng"]
     bd = ctx["bd"]
     npx = n + 1

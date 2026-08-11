@@ -38,7 +38,8 @@ SOURCES = {
                 "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076, s10@128 26677812, "
-                "size-colouring A/B 26857404 (s9@64 8.11 ms), ladder 26859802",
+                "size-colouring A/B 26857404 (s9@64 8.11 ms), ladder 26859802, "
+                "wide-halo A/B 26880593 (s9@64 6.98 ms, ratio 0.859)",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
     "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
@@ -78,8 +79,9 @@ PANELS = [
                 ("f32 s8+s9 size-colouring", [(16, 5.65)]),
                 ("f32 s9 size-colouring", [(16, 21.22), (32, 10.52), (64, 8.40)]),
                 ("f32 s10 size-colouring", [(128, 17.01)]),
+                ("f32 s9 wide-halo", [(64, 6.98)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="size-colouring: −12 to −20% everywhere;\nweak matched-tile 1.49×/4× (s8@16 5.65,\ns9@64 8.40); s10@128 rec 16.03 GC/s",
+        note="size-colouring: −12 to −20% everywhere;\nwide-halo s9@64 −14.1% (8.13→6.98,\n33→11 collectives/step, job 26880593)",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -139,6 +141,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 LL2304 fused": "#000000",
           "f32 s8@16+s9@32 ragged": "#000000",
           "f32 s9 size-colouring": "#D62728",
+          "f32 s9 wide-halo": "#9467BD",
           "f32 s8+s9 size-colouring": "#2CA02C",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00",
@@ -156,6 +159,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 LL2304 fused": "*",
            "f32 s8@16+s9@32 ragged": "*",
            "f32 s9 size-colouring": "X",
+           "f32 s9 wide-halo": "P",
            "f32 s8+s9 size-colouring": "X",
            "f32 s10 size-colouring": "X",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",

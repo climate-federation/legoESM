@@ -336,44 +336,90 @@ def test_update_dz_c_limiter_and_ws_sign():
     assert np.allclose(ws[sl, sl], 5.0 / dt, rtol=0, atol=0)
 
 
-def test_riem_solver_c_contracts_and_balanced_rest():
-    n, ng = 12, 3
-    bd = _BD(n, ng)
+def _run_native_riem_c(dt, bd, km, akap, ptop, hs, w3, pt, delp, gz, pef,
+                       ws, p_fac):
+    """Functional adapter over the in-place native riem_solver_c.
+
+    Shared driver signature for the impl-parameterized certificates
+    below (the JAX twin in test_fv3_nh_core.py plugs its own adapter in
+    here): returns (gz, pef) without mutating the caller's arrays."""
+    gz = np.array(gz)
+    pef = np.array(pef)
+    riem_solver_c(1, dt, bd, km, akap, 1004.6, ptop, hs, w3, pt, delp,
+                  gz, pef, ws, p_fac, 1.0)
+    return gz, pef
+
+
+def _riem_c_fixture(seed, n=12, ng=3, km=KM, w_amp=0.0, dz_scale=1.0):
+    """(ptop, hs, w3, pt, delp, gz, ws): a per-column hydrostatic gz
+    build (dz from the exact inverse of the solver's EOS at zero
+    perturbation), optionally squeezed by ``dz_scale`` and given w3
+    structure — shared by the contracts/balanced and unbalanced
+    certificates AND the JAX-lane equivalence fixtures."""
     full = n + 2 * ng
-    rng = np.random.default_rng(13)
+    rng = np.random.default_rng(seed)
     ptop = 100.0
-    delp = np.abs(10000.0 + 300.0 * rng.standard_normal((full, full, KM)))
-    pt = 280.0 + 15.0 * rng.standard_normal((full, full, KM))
-    w3 = np.zeros((full, full, KM))
+    delp = np.abs(10000.0 + 300.0 * rng.standard_normal((full, full, km)))
+    pt = 280.0 + 15.0 * rng.standard_normal((full, full, km))
+    w3 = w_amp * rng.standard_normal((full, full, km))
     ws = np.zeros((full, full))
-    # NOTE: this fixture is INSENSITIVE to the g-scaling of hs — the
-    # rest state passes with or without a FV3_GRAV factor here, so it does
-    # NOT pin the height-vs-geopotential convention that the module header
-    # states ("gz enters riem_solver_c as height*grav-like geopotential").
-    # Whatever the caller settles on, one assertion tying a known hydrostatic
-    # layer to its dz2 belongs here so a later mismatch fails loudly.
     hs = 50.0 * rng.standard_normal((full, full))
     gama = 1.0 / (1.0 - FV3_KAPPA)
-
-    # Build gz from the exact hydrostatic dz of each column (as the
-    # balanced-column helper does), so w stays at rest.
-    pem = np.zeros((full, full, KM + 1))
+    pem = np.zeros((full, full, km + 1))
     pem[:, :, 0] = ptop
-    for k in range(KM):
+    for k in range(km):
         pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
-    pm = np.empty((full, full, KM))
-    for k in range(KM):
+    pm = np.empty((full, full, km))
+    for k in range(km):
         pm[:, :, k] = delp[:, :, k] / np.log(pem[:, :, k + 1]
                                              / pem[:, :, k])
     dzh = -(delp / FV3_GRAV) * FV3_RDGAS * pt / np.exp(np.log(pm) / gama)
-    gz = np.zeros((full, full, KM + 1))
-    gz[:, :, KM] = hs
-    for k in range(KM - 1, -1, -1):
+    dzh = dzh * dz_scale
+    gz = np.zeros((full, full, km + 1))
+    gz[:, :, km] = hs
+    for k in range(km - 1, -1, -1):
         gz[:, :, k] = gz[:, :, k + 1] - dzh[:, :, k]
+    return ptop, hs, w3, pt, delp, gz, ws
 
-    pef = np.zeros((full, full, KM + 1))
-    riem_solver_c(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, ptop, hs, w3, pt,
-                  delp, gz, pef, ws, 0.05, 1.0)
+
+def _riem_c_halo_mask(n, ng):
+    """True outside riem_solver_c's write window (is-1..ie+1 square)."""
+    full = n + 2 * ng
+    halo = np.ones((full, full), dtype=bool)
+    halo[ng - 1:ng + n + 1, ng - 1:ng + n + 1] = False
+    return halo
+
+
+def riem_c_contracts_balanced_certificate(run_riem_c):
+    """Boundary contracts + balanced-rest, impl-parameterized.
+
+    NOTE: this fixture is INSENSITIVE to the g-scaling of hs — the
+    rest state passes with or without a FV3_GRAV factor here, so it does
+    NOT pin the height-vs-geopotential convention that the module header
+    states ("gz enters riem_solver_c as height*grav-like geopotential").
+    Whatever the caller settles on, one assertion tying a known
+    hydrostatic layer to its dz2 belongs here so a later mismatch fails
+    loudly."""
+    n, ng = 12, 3
+    bd = _BD(n, ng)
+    ptop, hs, w3, pt, delp, gz, ws = _riem_c_fixture(13)
+
+    pem = np.zeros(gz.shape)
+    pem[:, :, 0] = ptop
+    for k in range(KM):
+        pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
+
+    # Footprint guard (codex riem r1 #3): sentinel gz/pef OUTSIDE the
+    # (is-1..ie+1, js-1..je+1) window; the solver must carry them
+    # through bitwise (gz halo is never read on this fixture's window).
+    halo = _riem_c_halo_mask(n, ng)
+    gz[halo, :] = _SENT3
+    pef = np.zeros(gz.shape)
+    pef[halo, :] = _SENT3
+    gz, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop, hs, w3, pt,
+                         delp, gz, pef, ws, 0.05)
+    assert np.all(gz[halo, :] == _SENT3)
+    assert np.all(pef[halo, :] == _SENT3)
 
     sl = slice(ng - 1, ng + n + 1)
     # Contracts straight from the source:
@@ -386,6 +432,10 @@ def test_riem_solver_c_contracts_and_balanced_rest():
         rel = (np.abs(pef[sl, sl, k] - pem[sl, sl, k])
                / np.maximum(pem[sl, sl, k], 1.0)).max()
         assert rel < 1e-9, (k, rel)
+
+
+def test_riem_solver_c_contracts_and_balanced_rest():
+    riem_c_contracts_balanced_certificate(_run_native_riem_c)
 
 
 @pytest.mark.parametrize("bad", ["pe", "dm2", "pm2", "pem", "w2", "dz2",
@@ -721,44 +771,31 @@ def test_update_dz_c_nonuniform_vs_vectorised_reference():
     assert np.abs(gz_port[slw, slw, :] - gz[slw, slw, :]).max() > 1.0
 
 
-def test_riem_solver_c_unbalanced_column_matches_direct_sim1():
+def riem_c_unbalanced_certificate(run_riem_c):
     """codex NH r1 #3: the balanced fixture cannot distinguish
     pef = pe2 + pem from pef = pem.  Squeeze dz by 5% and give w3
     structure, then rebuild riem_solver_c's own column plumbing
-    (:347-385) independently and require pef == pe2_direct + pem."""
+    (:347-385) independently and require pef == pe2_direct + pem.
+    Impl-parameterized (the re-plumb reference stays the NATIVE
+    sim1_solver, which carries its own dense certificate)."""
     n, ng = 12, 3
     bd = _BD(n, ng)
-    full = n + 2 * ng
-    rng = np.random.default_rng(41)
-    ptop = 100.0
-    delp = np.abs(10000.0 + 300.0 * rng.standard_normal((full, full, KM)))
-    pt = 280.0 + 15.0 * rng.standard_normal((full, full, KM))
-    w3 = 0.5 * rng.standard_normal((full, full, KM))
-    ws = np.zeros((full, full))
-    hs = 50.0 * rng.standard_normal((full, full))
-    gama = 1.0 / (1.0 - FV3_KAPPA)
-
-    pem3 = np.zeros((full, full, KM + 1))
-    pem3[:, :, 0] = ptop
-    for k in range(KM):
-        pem3[:, :, k + 1] = pem3[:, :, k] + delp[:, :, k]
-    pm3 = np.empty((full, full, KM))
-    for k in range(KM):
-        pm3[:, :, k] = delp[:, :, k] / np.log(pem3[:, :, k + 1]
-                                              / pem3[:, :, k])
-    dzh = -(delp / FV3_GRAV) * FV3_RDGAS * pt / np.exp(np.log(pm3) / gama)
-    dzh = dzh * 1.05                    # UNBALANCED on purpose
-    gz = np.zeros((full, full, KM + 1))
-    gz[:, :, KM] = hs
-    for k in range(KM - 1, -1, -1):
-        gz[:, :, k] = gz[:, :, k + 1] - dzh[:, :, k]
+    ptop, hs, w3, pt, delp, gz, ws = _riem_c_fixture(
+        41, w_amp=0.5, dz_scale=1.05)   # UNBALANCED on purpose
+    # Footprint guard (codex riem r1 #3): sentinel outside the window.
+    halo = _riem_c_halo_mask(n, ng)
+    gz[halo, :] = _SENT3
     gz_in = np.array(gz, copy=True)
 
-    pef = np.zeros((full, full, KM + 1))
-    riem_solver_c(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, ptop, hs, w3, pt,
-                  delp, gz, pef, ws, 0.05, 1.0)
+    pef = np.zeros(gz.shape)
+    pef[halo, :] = _SENT3
+    gz, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop, hs, w3, pt,
+                         delp, gz, pef, ws, 0.05)
+    assert np.all(gz[halo, :] == _SENT3)
+    assert np.all(pef[halo, :] == _SENT3)
 
     # Independent column rebuild at a mid-domain j (no ring effects).
+    gama = 1.0 / (1.0 - FV3_KAPPA)
     j = ng + 4
     ni = n + 2
     o = ng - 1
@@ -789,6 +826,10 @@ def test_riem_solver_c_unbalanced_column_matches_direct_sim1():
     # differ from the input gz above it.
     assert np.array_equal(gz[o:o + ni, j, KM], hs[o:o + ni, j])
     assert np.abs(gz[o:o + ni, j, :KM] - gz_in[o:o + ni, j, :KM]).max() > 1.0
+
+
+def test_riem_solver_c_unbalanced_column_matches_direct_sim1():
+    riem_c_unbalanced_certificate(_run_native_riem_c)
 
 
 def test_riem_solver_c_dead_arm_raises():
@@ -852,7 +893,10 @@ def test_update_dz_c_origin_is_a_pure_relabel():
     assert np.abs(out["o11"][0] - gz).max() > 1.0
 
 
-def test_riem_solver_c_origin_is_a_pure_relabel():
+def riem_c_origin_relabel_certificate(run_riem_c):
+    """Origins are LABELS: identical padded storage under two different
+    (is, js) origins must produce bitwise-identical results (same impl,
+    deterministic — holds for the JAX lane too)."""
     ni, nj, ng = 4, 3, 3
     fi, fj = ni + 2 * ng, nj + 2 * ng
     rng = np.random.default_rng(67)
@@ -873,22 +917,32 @@ def test_riem_solver_c_origin_is_a_pure_relabel():
     gz0[:, :, KM] = hs
     for k in range(KM - 1, -1, -1):
         gz0[:, :, k] = gz0[:, :, k + 1] - dzh[:, :, k]
+    # Footprint guard (codex riem r1 #3): sentinel outside the window,
+    # so two impls with the SAME stray halo write cannot both pass.
+    halo = np.ones((fi, fj), dtype=bool)
+    halo[ng - 1:ng + ni + 1, ng - 1:ng + nj + 1] = False
+    gz0[halo, :] = _SENT3
 
     out = {}
     for tag, bd in (("o11", _BDR(1, ni, 1, nj, ng)),
                     ("o4_10", _BDR(4, 3 + ni, 10, 9 + nj, ng))):
-        g = np.array(gz0, copy=True)
-        pef = np.zeros((fi, fj, KM + 1))
-        w = np.array(w3, copy=True)
-        ws = np.zeros((fi, fj))
-        riem_solver_c(1, 100.0, bd, KM, FV3_KAPPA, 1004.6, ptop,
-                      np.array(hs), w, np.array(pt), np.array(delp),
-                      g, pef, ws, 0.05, 1.0)
+        pef0 = np.zeros((fi, fj, KM + 1))
+        pef0[halo, :] = _SENT3
+        g, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop,
+                            np.array(hs), np.array(w3), np.array(pt),
+                            np.array(delp), np.array(gz0, copy=True),
+                            pef0, np.zeros((fi, fj)), 0.05)
+        assert np.all(g[halo, :] == _SENT3), tag
+        assert np.all(pef[halo, :] == _SENT3), tag
         out[tag] = (g, pef)
 
     assert np.array_equal(out["o11"][0], out["o4_10"][0])
     assert np.array_equal(out["o11"][1], out["o4_10"][1])
-    assert np.abs(out["o11"][1]).max() > 0.0
+    assert np.abs(out["o11"][1][~halo, :]).max() > 0.0
+
+
+def test_riem_solver_c_origin_is_a_pure_relabel():
+    riem_c_origin_relabel_certificate(_run_native_riem_c)
 
 
 # --------------------------------------------------------------------------
@@ -1062,13 +1116,78 @@ def _riem3_fixture(bd, km=KM, seed=47):
                 ni=ni, nj=nj, o=o, halo=halo)
 
 
-@pytest.mark.parametrize("last_call,fp_out,use_logp",
-                         [(True, False, False),   # the pinned deck
-                          (False, True, True)])   # every flag flipped
-def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
-                                                      use_logp):
+def _riem3_balanced_fixture(bd, km=KM, seed=53):
+    """The sentinel fixture with zh rebuilt HYDROSTATIC (dz from the
+    exact inverse of the solver's EOS at zero perturbation, using the
+    D-stage's peln2-difference pm2) and w = ws = 0, so the implicit
+    solve returns w ~ 0 and ppe ~ roundoff.  Shared by the JAX-lane
+    balanced equivalence gate."""
+    fx = _riem3_fixture(bd, km=km, seed=seed)
+    ni, nj, o = fx["ni"], fx["nj"], fx["o"]
+    ptop = 100.0
+    gama = 1.0 / (1.0 - FV3_KAPPA)
+    delp = fx["delp"]
+    pt = fx["pt"]
+    fi, fj = delp.shape[0], delp.shape[1]
+    pem = np.zeros((fi, fj, km + 1))
+    pem[:, :, 0] = ptop
+    for k in range(km):
+        pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
+    peln2 = np.log(pem)
+    pm = delp / (peln2[:, :, 1:] - peln2[:, :, :-1])
+    dzh = -(delp / FV3_GRAV) * FV3_RDGAS * pt / np.exp(np.log(pm) / gama)
+    zh = np.empty((fi, fj, km + 1))
+    zh[:, :, km] = fx["zs"]
+    for k in range(km - 1, -1, -1):
+        zh[:, :, k] = zh[:, :, k + 1] - dzh[:, :, k]
+    zh[fx["halo"], :] = _SENT3
+    w = np.zeros((fi, fj, km))
+    w[fx["halo"], :] = _SENT3
+    fx["zh"] = zh
+    fx["w"] = w
+    fx["ws"] = np.zeros((ni, nj))
+    return fx
+
+
+def _run_native_riem3(dt, bd, km, akap, ptop, fx, p_fac, *, use_logp,
+                      last_call, fp_out):
+    """Functional adapter over the in-place native riem_solver3.
+
+    Shared driver signature for the impl-parameterized certificate (the
+    JAX twin in test_fv3_nh_core.py plugs its own adapter in here):
+    copies the 8 in/out arrays out of the fixture dict, runs the native
+    solver, and returns them as a dict without mutating ``fx``."""
     from legoesm.core.fv3_native_nh_core import riem_solver3
 
+    out = {k: np.array(fx[k], copy=True)
+           for k in ("w", "delz", "zh", "pe", "ppe", "pk3", "pk", "peln")}
+    riem_solver3(1, dt, bd, km, akap, 1004.6, ptop, fx["zs"], out["w"],
+                 out["delz"], fx["pt"], fx["delp"], out["zh"], out["pe"],
+                 out["ppe"], out["pk3"], out["pk"], out["peln"],
+                 fx["ws"], p_fac, 1.0, use_logp=use_logp,
+                 last_call=last_call, fp_out=fp_out)
+    return out
+
+
+def _match(got, want, tol, ctx):
+    """Bitwise when tol == 0 (the native lane IS the replumb's op
+    sequence); own-scale relative bound otherwise (the JAX lane differs
+    from the NumPy replumb by XLA exp/log/FMA ULPs)."""
+    if tol == 0.0:
+        assert np.array_equal(got, want), ctx
+    else:
+        d = np.abs(got - want).max() / max(np.abs(want).max(), 1e-30)
+        assert d <= tol, (ctx, d)
+
+
+def riem3_flags_footprint_certificate(run_riem3, last_call, fp_out,
+                                      use_logp, replumb_tol=0.0):
+    """Every flag branch, every written window, sentinel footprint, and
+    an independent per-column re-plumb of nh_core.F90:87-202 feeding the
+    NATIVE sim1_solver (which carries its own dense certificate).
+    Impl-parameterized; ``replumb_tol`` keeps the native lane bitwise
+    and gives the JAX lane a measured ULP-scale bound against the SAME
+    NumPy replumb."""
     bd = _BDR(4, 10, 9, 13, 3)         # ni=7 != nj=5, is != js
     km = KM
     fx = _riem3_fixture(bd)
@@ -1081,11 +1200,12 @@ def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
     w_in = np.array(fx["w"], copy=True)
     zh_in = np.array(fx["zh"], copy=True)
 
-    riem_solver3(1, dt, bd, km, akap, 1004.6, ptop, fx["zs"], fx["w"],
-                 fx["delz"], fx["pt"], fx["delp"], fx["zh"], fx["pe"],
-                 fx["ppe"], fx["pk3"], fx["pk"], fx["peln"], fx["ws"],
-                 0.05, 1.0, use_logp=use_logp, last_call=last_call,
-                 fp_out=fp_out)
+    fx = dict(fx)
+    out = run_riem3(dt, bd, km, akap, ptop, fx, 0.05,
+                    use_logp=use_logp, last_call=last_call,
+                    fp_out=fp_out)
+    for k in ("w", "delz", "zh", "pe", "ppe", "pk3", "pk", "peln"):
+        fx[k] = out[k]
 
     # ---- independent per-column re-plumb (nh_core.F90:87-202) ----
     peln1 = float(np.log(ptop))
@@ -1116,38 +1236,44 @@ def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
                     np.array(fx["ws"][:, jc]), 0.05)
 
         # w and delz out
-        assert np.array_equal(fx["w"][o:o + ni, jj, :km], w2), jc
-        assert np.array_equal(fx["delz"][:, jc, :], dz2), jc
+        _match(fx["w"][o:o + ni, jj, :km], w2, replumb_tol, ("w", jc))
+        _match(fx["delz"][:, jc, :], dz2, replumb_tol, ("delz", jc))
         # ppe: PERTURBATION unless fp_out (the r2 mutant's kill line --
         # top must be exactly 0, not ptop)
         want_ppe = pe2 + pem if fp_out else pe2
-        assert np.array_equal(fx["ppe"][o:o + ni, jj, :], want_ppe), jc
+        _match(fx["ppe"][o:o + ni, jj, :], want_ppe, replumb_tol,
+               ("ppe", jc))
         if not fp_out:
+            # Exact in BOTH lanes: pe2's top row is a hard zero.
             assert np.all(fx["ppe"][o:o + ni, jj, 0] == 0.0)
         # pk3: k=0 always ptk; interior exp(akap*peln2), overwritten to
         # peln2 for k>=1 when use_logp
         assert np.all(fx["pk3"][o:o + ni, jj, 0] == ptk)
         for k in range(1, km + 1):
             want = peln2[:, k] if use_logp else np.exp(akap * peln2[:, k])
-            assert np.array_equal(fx["pk3"][o:o + ni, jj, k], want), (jc, k)
-        # zh rebuilt from zs upward WITHOUT grav
+            _match(fx["pk3"][o:o + ni, jj, k], want, replumb_tol,
+                   ("pk3", jc, k))
+        # zh rebuilt from zs upward WITHOUT grav (bottom row is an exact
+        # copy of zs in both lanes)
         assert np.array_equal(fx["zh"][o:o + ni, jj, km],
                               fx["zs"][o:o + ni, jj]), jc
         for k in range(km - 1, -1, -1):
-            assert np.array_equal(
-                fx["zh"][o:o + ni, jj, k],
-                fx["zh"][o:o + ni, jj, k + 1] - dz2[:, k]), (jc, k)
+            _match(fx["zh"][o:o + ni, jj, k],
+                   fx["zh"][o:o + ni, jj, k + 1] - dz2[:, k],
+                   replumb_tol, ("zh", jc, k))
         # last_call windows.  pk copies pk3 BEFORE any use_logp
         # overwrite (:164-172 precedes :187-193), so pk always holds the
         # EXP form -- asserted independently, not against pk3.
         if last_call:
-            assert np.array_equal(fx["peln"][:, :, jc], peln2), jc
+            _match(fx["peln"][:, :, jc], peln2, replumb_tol,
+                   ("peln", jc))
             want_pk = np.empty((ni, km + 1))
             want_pk[:, 0] = ptk
             for k in range(1, km + 1):
                 want_pk[:, k] = np.exp(akap * peln2[:, k])
-            assert np.array_equal(fx["pk"][:, jc, :], want_pk), jc
-            assert np.array_equal(fx["pe"][1:1 + ni, :, jc + 1], pem), jc
+            _match(fx["pk"][:, jc, :], want_pk, replumb_tol, ("pk", jc))
+            _match(fx["pe"][1:1 + ni, :, jc + 1], pem, replumb_tol,
+                   ("pe", jc))
         # Non-vacuity per column: the solve moved w and pe2 is nonzero.
         assert np.abs(pe2).max() > 1.0, jc
 
@@ -1171,6 +1297,15 @@ def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
     assert np.all(fx["ppe"][o:o + ni, o:o + nj, :] != _SENT3)
     assert np.all(fx["pk3"][o:o + ni, o:o + nj, :] != _SENT3)
     assert np.all(fx["delz"] != _SENT3)
+
+
+@pytest.mark.parametrize("last_call,fp_out,use_logp",
+                         [(True, False, False),   # the pinned deck
+                          (False, True, True)])   # every flag flipped
+def test_riem_solver3_certificate_flags_and_footprint(last_call, fp_out,
+                                                      use_logp):
+    riem3_flags_footprint_certificate(_run_native_riem3, last_call,
+                                      fp_out, use_logp)
 
 
 def test_riem_solver3_dead_arm_raises():

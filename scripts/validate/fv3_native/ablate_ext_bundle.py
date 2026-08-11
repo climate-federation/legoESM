@@ -23,8 +23,14 @@ def run(n: int, ng: int, dt: float, ext_bundle: bool,
         w2_six_face_state,
     )
 
+    # oracle_conventions=True (km=1 corpus migration, 2026-08-11):
+    # c_sw refuses duogrid on unbounded metrics (fv_arrays.F90:1512).
+    # The docstring's prior numbers (edge du12 7.8 / interior 0.62)
+    # were measured on the pre-guard plain-conventions lane and are NOT
+    # comparable to runs of this script from here on.
     ctx = build_six_face_duo_context(n, ng, use_ext_bundle=ext_bundle,
-                                     vector_corner=vector_corner)
+                                     vector_corner=vector_corner,
+                                     oracle_conventions=True)
     states0 = w2_six_face_state(ctx)
     slu = (slice(ng, ng + n), slice(ng, ng + n + 1))
     sld = (slice(ng, ng + n), slice(ng, ng + n))
