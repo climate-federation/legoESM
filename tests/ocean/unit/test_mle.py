@@ -365,3 +365,21 @@ def test_uniform_salinity_untouched_by_thermal_front() -> None:
     )
     scale = float(np.max(np.abs(np.asarray(dT)))) + 1e-30
     assert float(np.max(np.abs(np.asarray(dS)))) < 1e-9 * scale
+
+
+def test_jit_matches_eager_on_front() -> None:
+    """C-grid jit parity (codex MLE-vertfix: only MPAS had one).  Norm-relative
+    comparison; dS uses a salted front so neither norm is a noise floor."""
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    lon_frac = jnp.linspace(0.0, 1.0, T.shape[1])
+    S = S + 1.5 * lon_frac[jnp.newaxis, :, jnp.newaxis]
+    args = (T, S, rho, N2, mask, u_mask, v_mask)
+    fn = jax.jit(lambda *a: mle_tracer_tendency_latlon_cgrid(
+        *a, z_coord, J, grid, cfg))
+    dT_j, dS_j = fn(*args)
+    dT_e, dS_e = mle_tracer_tendency_latlon_cgrid(
+        *args, z_coord, J, grid, cfg)
+    for j, e in ((dT_j, dT_e), (dS_j, dS_e)):
+        assert bool(jnp.all(jnp.isfinite(j)))
+        rel = float(jnp.linalg.norm(j - e) / (jnp.linalg.norm(e) + 1e-30))
+        assert rel < 1e-10, rel

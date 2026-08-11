@@ -8,6 +8,12 @@ the icosahedral/Voronoi grid, the MPAS analogue of
 ``mle.py`` — only the edge streamfunction assembly and the conservative bolus
 tracer-flux divergence are grid-specific and live here.
 
+SANCTIONED DEPARTURE FROM NEMO (codex MLE-vertfix review, 2026-08-11): NEMO
+hands the MLE transports to its tracer advection scheme (ORCA1: FCT) and
+inherits its limiter; this port applies a standalone centered-tracer flux —
+conservative and divergence-free per cell but non-monotone at sharp fronts.
+See the matching note in ``mle_latlon_cgrid.py``.
+
 Streamfunction (NEMO nn_mle=1), per Voronoi edge ``e`` between cells ``c1,c2``::
 
     psim_e = rc_f * H_e^2 * dvEdge_e * (bm[c2]-bm[c1])/dcEdge_e * min(111 km, dcEdge_e)
@@ -106,9 +112,12 @@ __physics_contract__ = {
     ),
     "idealized_test": (
         "tests/ocean/unit/test_mle_mpas.py: EXACT tracer conservation "
-        "sum(dT·area·dz)~0 on an ico buoyancy-front mesh; restratification "
-        "reduces the ML-mean-buoyancy horizontal variance; finite at the "
-        "equator (rn_lat=20 floor); convection gate zeroes MLE in a statically "
+        "sum(dT·area·dz)~0 on an ico buoyancy-front mesh; the closed cell "
+        "builds VERTICAL stratification (volume-weighted surface-minus-"
+        "lower-ML tendency > 0; the old horizontal-variance expectation "
+        "pinned the missing-vertical-branch bug); uniform tracers are "
+        "invariant (divergence-free transport); finite at the equator "
+        "(rn_lat=20 floor); convection gate zeroes MLE in a statically "
         "unstable column; partial-cell conservation; jit-stable."
     ),
 }

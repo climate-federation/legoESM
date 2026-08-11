@@ -8,6 +8,16 @@ isopycnals and shoaling the mixed-layer depth, especially in the subtropical-gyr
 mode-water regions south of the western boundary currents where coarse models
 lack the resolved eddies.
 
+SANCTIONED DEPARTURE FROM NEMO (codex MLE-vertfix review, 2026-08-11): NEMO
+adds the three MLE transport components to the ADVECTING transport and lets
+the tracer advection scheme (ORCA1: FCT) carry them, inheriting its
+anti-diffusive limiter.  This port applies a STANDALONE centered-tracer flux
+divergence instead: conservative and divergence-free per cell, but
+non-monotone — centered explicit advection can disperse and create local
+extrema at sharp fronts.  If plume-front overshoots appear in production with
+the vertical branch present, route the MLE transports through the advection
+scheme rather than bolting a limiter on here.
+
 This is the Arakawa C-grid adapter (regular lat-lon + ORCA tripole, array layout
 ``(n_lat, n_lon, nlev)``).  It reuses the grid-AGNOSTIC core in
 :mod:`legoesm.ocean.physics.lateral_mixing.mle` (``mle_coefficient``,
