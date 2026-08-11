@@ -14,7 +14,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+from legoesm.core.operators_fv import (ppm_edge_values,
+                                       ppm_edge_values_axis0,
+                                       ppm_limit)
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
     pad_halo_vector_latlon_3d,
@@ -72,10 +74,10 @@ def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
     # Strip longitude halo, keep latitude halo
     q = q_pad_h2[:, 2:-2, :]  # (n_lat+4, n_lon, nlev)
 
-    # Move lat axis (0) to axis -2 (1) so ppm_edge_values operates on it
-    q_moved = jnp.moveaxis(q, 0, 1)  # (n_lon, n_lat+4, nlev)
-    q_hat_moved = ppm_edge_values(q_moved)  # (n_lon, n_lat+3, nlev)
-    q_hat = jnp.moveaxis(q_hat_moved, 1, 0)  # (n_lat+3, n_lon, nlev)
+    # Native axis-0 sweep — the moveaxis round-trip here was the
+    # LL2048@64 trace's largest compute-kernel family
+    # (input_transpose_fusion, 370 us/step; codex consult 2026-08-11).
+    q_hat = ppm_edge_values_axis0(q)  # (n_lat+3, n_lon, nlev)
 
     a_L = q_hat[:-1, :, :]   # (n_lat+2, n_lon, nlev)
     a_R = q_hat[1:, :, :]

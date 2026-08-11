@@ -9,6 +9,8 @@ cfg_overrides:
   loss: {}
   fix_mass: true
   anchor_mass_to_initial: true
+  vertical_advection_scheme: sb_centered
+  frictional_heating: true
   aimip_surface_bulk_scheme: most
   aimip_spatial_surface: true
   aimip_trainable_schemes: extended

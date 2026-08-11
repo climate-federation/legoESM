@@ -2516,3 +2516,64 @@ field-level ownership change makes trainable. Six retune/swap arms
 (extended tier + bechtold/tiedtke/clubb/hines/sundqvist-cloud one-variable
 swaps) were submitted (26838111-16) and CANCELLED BY THE USER'S ACCOUNT at
 ~11:05 — resubmit awaits an explicit go.
+
+# ATTRIBUTED: THE DYCORE COOLS 0.48 K/DAY WITH ZERO PHYSICS (2026-08-10)
+
+`aimip_pressure_spinup.py --global-t` (mass-weighted global-mean T vs the
+ERA5 state at the same lead, both through the same transform):
+
+| configuration | lead | model drift | rate |
+|---|---|---|---|
+| zero physics + filter | 6 h | -0.125 K | -0.50 K/day |
+| zero physics + filter | 24 h | -0.533 K | -0.53 K/day |
+| zero physics + filter | 120 h | **-2.389 K** | -0.48 K/day |
+| zero physics, NO filter | 120 h | -2.099 K | -0.42 K/day |
+| true ERA5 change | 120 h | -0.16 K | — |
+
+Reproducible to 0.1% across independent January starts (-2.387/-2.389/
+-2.391). Energetically ~56 W/m2 of missing heating.
+
+## Attribution (codex + GLM-5.2 independent diagnoses, then perturbation-tested)
+
+* **Constant rate at 6/24/120 h** -> NOT a gravity-wave/spin-up adjustment
+  (would decay) and NOT KE-reservoir drainage (would saturate; the whole
+  KE reservoir is ~1.5e6 J/m2 ~ 10 h at this rate). Both oracles refuted
+  the KE route on magnitude alone: physical dissipation at T63 is
+  0.5-2 W/m2, 20-30x too small.
+* **Filter contributes 12%** (2.39 -> 2.10 K without it) via the ps-T
+  covariance of the mass weighting (the filter preserves l=0 of T but
+  damps the structure the weighting correlates with).
+* **The remaining 88% is the T equation's discrete budget** (codex, from
+  the code): vertical transport is pointwise advective upwind
+  `-sigma_dot * dT/dsigma` (spectral_pe.py:330,363,767), NOT a flux-form
+  divergence paired with continuity, so no discrete identity conserves
+  sum(ps*dsigma*T) under adiabatic flow; and hyperdiffusion/filter KE
+  removal has NO frictional-heating return anywhere in the chain. The
+  0.1% IC-invariance is the signature of a per-step deterministic
+  operator bias, exactly what a non-conservative discretization gives.
+* Exonerated by code read: sponge (sponge_tau=0, never built — and
+  sponge_sigma=0.1 would damp zero full levels at L8 anyway), dealiasing
+  (l=0 untouched), mass anchor (uniform lnps shift cancels in the
+  weighted mean), T floors (inactive).
+
+## Why this is the campaign's temperature story
+
+Both trained arms drift in t850 with lead (classical 2.87 -> 5.73 K vs
+persistence 3.06 -> 4.26) DESPITE completely different physics — because
+both sit on a dycore that cools half a kelvin per day and their physics
+must learn to fight it. The bias_T term that dominates the classical
+bias penalty is the optimizer's compensation war with this leak.
+
+## The fix (named, not started)
+
+Rewrite the thermodynamic vertical transport in flux form paired with the
+discrete continuity equation (Simmons-Burridge energy-conserving pairing)
+and return dissipated KE as frictional heating. Numerics change with
+conservation tests (adiabatic sum(ps*dsigma*T) invariance; manufactured
+solution), NOT a training-recipe item. Until then, physics tuning is
+partly calibrating against a known dycore leak.
+
+One-line adjacent finds (codex, not chased): `spectral_rollout` passes
+`grid.ms` where `apply_sponge_filter` now expects an (n_sh, nlev) T
+factor — any future sponge_tau>0 run on that path would fail loudly;
+tracer filter is applied even when only hyperdiff is on.
