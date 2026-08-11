@@ -84,9 +84,24 @@ def _cell_volume(mesh, z_coord, eta, H_bathy):
 # Tests
 # ============================================================================
 
+
+
+def _with_salt_front(mesh, S):
+    """Add a zonal salinity front so dS carries real signal.
+
+    With the closed-cell (vertical-branch) operator a UNIFORM salinity has
+    identically zero tendency, which collapses the |dS|-based normalisation
+    scale to roundoff noise and makes relative conservation residuals
+    meaningless (the 2026-08-11 failure mode).  S stays passive apart from its
+    (small) EOS contribution to the front."""
+    lon = jnp.asarray(mesh.lonCell)
+    return S + 1.5 * jnp.sin(lon)[:, jnp.newaxis]
+
+
 def test_exact_tracer_conservation(mesh, z_coord, cfg):
     """Sum(dT·vol) and Sum(dS·vol) vanish to roundoff — the must-pass."""
     T, S = _mixed_layer_front(mesh, z_coord)
+    S = _with_salt_front(mesh, S)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
@@ -105,22 +120,25 @@ def test_exact_tracer_conservation(mesh, z_coord, cfg):
     assert abs(netS) / scaleS < 1e-11, (netS, scaleS)
 
 
-def test_restratification_reduces_ml_temperature_variance(mesh, z_coord, cfg):
-    """One forward-Euler MLE step slumps the front: with uniform salinity,
-    buoyancy ∝ temperature, so restratification reduces the horizontal
-    variance of the mixed-layer (top-2-level mean) temperature."""
+def test_restratification_builds_vertical_stratification(mesh, z_coord, cfg):
+    """The closed FK cell converts the horizontal buoyancy gradient into
+    VERTICAL stratification: on average over the front, the surface tendency
+    exceeds the lower-mixed-layer tendency (surfaces warm/lighten, ML bases
+    cool).
+
+    RETIRED EXPECTATION (encoded the horizontal-only bug): 'one Euler step
+    reduces the horizontal ML-mean T variance'.  With centered face values
+    and a vertically uniform ML the closed cell leaves the ML-mean invariant
+    in the two-column limit (the surface and return branches exchange the
+    SAME face value), so the variance metric measured the spurious
+    T·div_h term the vertical branch removed."""
     T, S = _mixed_layer_front(mesh, z_coord)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
-
-    def _ml_T_var(Tf):
-        return float(jnp.var(jnp.mean(Tf[:, :2], axis=1)))   # ML-mean T spread
-
-    v0 = _ml_T_var(T)
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
-    dt = 3600.0
-    v1 = _ml_T_var(T + dt * dT)
-    assert v1 < v0, (v0, v1)
+    strat = float(jnp.mean(dT[:, 0] - dT[:, 1]))
+    assert float(jnp.max(jnp.abs(dT))) > 1e-9      # operator active, not vacuous
+    assert strat > 0.0, f"mean(surf - lower-ML) tendency should be > 0, got {strat}"
 
 
 def test_partial_cell_conservation(mesh, z_coord, cfg):
@@ -134,6 +152,7 @@ def test_partial_cell_conservation(mesh, z_coord, cfg):
     H = jnp.asarray(np.clip(H_np, 120.0, 600.0))
     z_pc = create_partial_cell_coordinate(z_coord, H)
     T, S = _mixed_layer_front(mesh, z_coord)
+    S = _with_salt_front(mesh, S)
     eta = jnp.zeros((mesh.nCells,))
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_pc, cfg, eos="wright")
     assert bool(jnp.all(jnp.isfinite(dT))) and bool(jnp.all(jnp.isfinite(dS)))
@@ -198,6 +217,7 @@ def test_jit_stable(mesh, z_coord, cfg):
     T, S = _mixed_layer_front(mesh, z_coord)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
+    S = _with_salt_front(mesh, S)
     fn = jax.jit(lambda T, S, eta, H: mle_tracer_tendency_mpas(
         T, S, eta, H, mesh, z_coord, cfg, eos="wright"))
     dT_j, dS_j = fn(T, S, eta, H)
