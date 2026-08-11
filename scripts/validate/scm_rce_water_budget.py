@@ -53,6 +53,7 @@ from legoesm import constants
 from scripts.run import run_scm_rce_campaign as camp
 
 MM_PER_M = 1_000.0
+SECONDS_PER_DAY_LOCAL = 86_400.0
 RHO_W = 1_000.0          # kg/m^3, for kg/m^2 -> mm of liquid water
 
 
@@ -83,7 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--analysis-days", type=float, default=2.0)
     ap.add_argument("--hard-saturation-adjustment", action="store_true",
                     default=True)
+    ap.add_argument("--surface-wind-m-s", type=float,
+                    default=camp.DEFAULT_SCM_RCE_SURFACE_WIND_M_S)
     args = ap.parse_args(argv)
+    args_wind = args.surface_wind_m_s
 
     ref = camp.build_reference_profiles(
         args.reference_dir, args.last_reference_files,
@@ -123,6 +127,41 @@ def main(argv: list[str] | None = None) -> int:
               f"CWV={cwv:8.3f} mm  CWC={cwc:8.4f} mm  "
               f"P={run.precip_mm_day:.6e} mm/day")
 
+    # ---- E measured from the MODEL's own bulk formula, not from arithmetic --
+    # The storage identity alone cannot separate "no evaporation" from
+    # "evaporation whose water leaves uncounted", because the P it uses is the
+    # quantity under suspicion.  Evaluating the shipped surface-flux routine on
+    # the equilibrium column the model actually reached breaks that circle.
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+    from legoesm.atmosphere.idealized.rcemip_initial_conditions import WING_P_SFC
+    from legoesm.thermo import saturation_mixing_ratio
+    import jax.numpy as jnp
+
+    surf_cfg = cfg.turbulence.surface
+    r_long = runs["long"][1]
+    T_a = float(np.asarray(r_long.T_profile)[-1])
+    q_a = float(np.asarray(r_long.qv_profile)[-1])
+    p_a = float(np.asarray(ref.sigma_full)[-1] * WING_P_SFC)
+    rho_a = p_a / (constants.R_d * T_a * (1.0 + 0.608 * q_a))
+    q_sfc = float(saturation_mixing_ratio(
+        jnp.asarray(camp.FIXED_SST_K), jnp.asarray(WING_P_SFC)))
+    one = jnp.ones((1,))
+    _tx, _ty, shflx, lhflx, _ustar = compute_surface_fluxes(
+        u=one * args_wind, v=one * 0.0, T=one * T_a, q_v=one * q_a,
+        T_sfc=one * camp.FIXED_SST_K, q_sfc=one * q_sfc, rho=one * rho_a,
+        config=surf_cfg,
+    )
+    lh = float(np.asarray(lhflx)[0])
+    e_bulk_mm_day = lh / constants.L_v * (SECONDS_PER_DAY_LOCAL / RHO_W) * MM_PER_M
+    print(f"  surface layer on the equilibrium column: T_a={T_a:.3f} K, "
+          f"q_a={q_a:.6f}, q_sat(SST)={q_sfc:.6f}, rho={rho_a:.4f} kg/m^3")
+    print(f"    bulk_scheme={getattr(surf_cfg, 'bulk_scheme', '?')}  "
+          f"Ch_neutral={getattr(surf_cfg, 'Ch_neutral', float('nan')):.3e}")
+    print(f"    SHF={float(np.asarray(shflx)[0]):8.3f} W/m^2   "
+          f"LHF={lh:8.3f} W/m^2   ->  E = {e_bulk_mm_day:.4f} mm/day")
+
     (d0, r0, cwv0, cwc0) = runs["short"]
     (d1, r1, cwv1, cwc1) = runs["long"]
     if d1 <= d0:
@@ -135,7 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  storage  d(CWV+CWC)/dt = {dstore:+.4f} mm/day "
           f"(over days {d0:.0f} -> {d1:.0f})")
     print(f"  reported P            = {p_mean:.6e} mm/day")
-    print(f"  IMPLIED E = dS/dt + P = {e_implied:+.4f} mm/day")
+    print(f"  IMPLIED E = dS/dt + P = {e_implied:+.4f} mm/day  "
+          f"(uses the REPORTED P, so it under-reads by any uncounted sink)")
+    print(f"  MEASURED E (bulk)     = {e_bulk_mm_day:+.4f} mm/day")
+    print(f"  => uncounted sink     = {e_bulk_mm_day - e_implied:+.4f} mm/day")
     print(f"  CRM reference P       = {ref.precip_ref_mm_day:.4f} mm/day")
     print("-" * 78)
     print("  Reading (the two branches this probe exists to separate):")
