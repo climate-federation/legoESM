@@ -230,3 +230,22 @@ def test_physics_contract_present():
     assert c["conserves"] == ["tracer"]
     assert c["outputs"] == {"dT_dt": "degC/s", "dS_dt": "PSU/s"}
     assert c["differentiable"] is True
+
+
+def test_uniform_salinity_untouched_by_thermal_front(mesh, z_coord, cfg):
+    """REGRESSION (2026-08-11): S is uniform in the front fixture, so dS must
+    vanish identically while dT carries the restratification.  The
+    horizontal-only flux divergence pumped uniform tracers at
+    transport-convergence cells (globally conservative, locally corrupting:
+    -54 psu river-plume extremes on the structured lane); the vertical
+    continuity branch (NEMO zw_mle, Voronoi form) closes the overturning
+    cell."""
+    T, S = _mixed_layer_front(mesh, z_coord)
+    eta = jnp.zeros((mesh.nCells,))
+    H = jnp.full((mesh.nCells,), 600.0)
+    dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
+    scale = float(jnp.max(jnp.abs(dT)))
+    assert scale > 1e-9, "front produced no tendency; test would be vacuous"
+    assert float(jnp.max(jnp.abs(dS))) < 1e-9 * scale, (
+        "uniform S gained a tendency: bolus transport not divergence-free "
+        "per cell (missing/broken vertical branch)")

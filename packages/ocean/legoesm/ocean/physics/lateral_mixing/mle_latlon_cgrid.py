@@ -97,12 +97,14 @@ __physics_contract__ = {
         "MLD). The tendency is the negative divergence of the centered bolus "
         "tracer flux over the live cell volume."
     ),
-    # The bolus transport is built at W-interfaces (zero at the surface and at
-    # the ML base) and the T-level transport is the adjacent-W difference, so
-    # the per-column vertical fluxes telescope; the horizontal transports carry
-    # the face cross-distance and vanish on land/at the poles, so the
-    # divergence of the centered flux is conservative: sum(dT·area·dz_live) = 0
-    # to roundoff (unit-tested on a front domain).
+    # The bolus transport is a CLOSED overturning cell: horizontal transports
+    # are adjacent-W differences of the streamfunction, and the VERTICAL
+    # transport is reconstructed from continuity (NEMO zw_mle =
+    # -di[psi_uw]-dj[psi_vw]), so the 3-D divergence vanishes per cell and a
+    # uniform tracer has EXACTLY zero tendency.  Global conservation
+    # (sum(dT·area·dz_live) = 0 to roundoff) follows; the horizontal-only
+    # variant satisfied the global sum while corrupting river-plume fronts
+    # (-54 psu in 30 d) and is the regression the uniform-tracer test locks.
     "conserves": ["tracer"],
     "differentiable": True,
     "reference": (
@@ -335,6 +337,35 @@ def mle_tracer_tendency_latlon_cgrid(
     FxS = utr_u * S_u
     FyS = vtr_v * S_v
 
+    # --- VERTICAL bolus transport from continuity (NEMO tramle.F90:
+    #        zw_mle = - di[ zpsi_uw ] - dj[ zpsi_vw ]
+    # applied to pFw).  The FK overturning is a CLOSED cell in the vertical
+    # plane: the horizontal branch alone is globally conservative but locally
+    # wrong -- a cell where the horizontal bolus transports converge
+    # accumulates tracer without the compensating vertical export, which
+    # measured as -54 psu / -31 degC extremes at equatorial river-plume fronts
+    # after 30 days (results/omip_nemo/mle_psi_diag_d30).  W is reconstructed
+    # from the MASKED horizontal transports so the 3-D divergence closes per
+    # cell: W(k) - W(k+1) = -div_h(k) with W = 0 at the sea floor, positive
+    # toward the surface.
+    div_h = ((utr_u[:, 1:, :] - utr_u[:, :-1, :])
+             + (vtr_v[1:, :, :] - vtr_v[:-1, :, :]))   # (n_lat, n_lon, nlev)
+    W_int = -jnp.flip(jnp.cumsum(jnp.flip(div_h, axis=-1), axis=-1), axis=-1)
+    zcol_c = jnp.zeros((*div_h.shape[:2], 1), dtype=div_h.dtype)
+    # Interfaces 0..nlev; the bottom is exactly 0 and the surface is zeroed
+    # (its residual is column-telescoping roundoff): tracer conservation is
+    # exact and the per-cell continuity error stays at roundoff.
+    W_w = jnp.concatenate([W_int, zcol_c], axis=-1)   # (n_lat, n_lon, nlev+1)
+    W_w = W_w.at[..., 0].set(0.0)
+    # Centered tracer at the interior W-interfaces (0.5(T_above + T_below));
+    # the end interfaces carry zero transport so their tracer value is inert.
+    T_w = jnp.concatenate(
+        [zcol_c, 0.5 * (T[..., :-1] + T[..., 1:]), zcol_c], axis=-1)
+    S_w = jnp.concatenate(
+        [zcol_c, 0.5 * (S[..., :-1] + S[..., 1:]), zcol_c], axis=-1)
+    FzT = W_w * T_w                                   # (n_lat, n_lon, nlev+1)
+    FzS = W_w * S_w
+
     # --- Conservative flux divergence over the LIVE cell volume ---
     # The transports already carry the face cross-distance (e2u/e1v), so the
     # divergence is the raw telescoping difference of face fluxes (NOT
@@ -343,15 +374,17 @@ def mle_tracer_tendency_latlon_cgrid(
     vol = area[:, :, jnp.newaxis] * dz_live           # (n_lat, n_lon, nlev)
     inv_vol = jnp.where(vol > 0.0, 1.0 / jnp.maximum(vol, _EPS_DIV), 0.0)
 
-    def _div(Fx_u, Fy_v):
-        # cell (i,j): east u-face j+1 minus west u-face j; north v-face i+1
-        # minus south v-face i.
+    def _div(Fx_u, Fy_v, Fz_w):
+        # cell (i,j,k): east u-face j+1 minus west u-face j; north v-face i+1
+        # minus south v-face i; top interface k (W positive toward the
+        # surface, so outflow through the top) minus bottom interface k+1.
         net_x = Fx_u[:, 1:, :] - Fx_u[:, :-1, :]      # (n_lat, n_lon, nlev)
         net_y = Fy_v[1:, :, :] - Fy_v[:-1, :, :]      # (n_lat, n_lon, nlev)
-        return net_x + net_y
+        net_z = Fz_w[..., :-1] - Fz_w[..., 1:]        # (n_lat, n_lon, nlev)
+        return net_x + net_y + net_z
 
-    dT_dt = -_div(FxT, FyT) * inv_vol
-    dS_dt = -_div(FxS, FyS) * inv_vol
+    dT_dt = -_div(FxT, FyT, FzT) * inv_vol
+    dS_dt = -_div(FxS, FyS, FzS) * inv_vol
 
     # Optional bolus vertical-Courant cap (cfg.bolus_cfl_cap > 0): NOT
     # implemented here because the physics_fn signature does not expose ``dt``

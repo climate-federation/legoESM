@@ -303,3 +303,49 @@ def test_restratifying_warms_dense_side_at_surface() -> None:
     # Restratification flattens the front: cool the warm side, warm the cold side.
     assert warm_west < 0.0, f"warm (west) surface cell should cool, got {warm_west}"
     assert cold_east > 0.0, f"cold (east) surface cell should warm, got {cold_east}"
+
+
+# ---------------------------------------------------------------------------
+# (f) CLOSED overturning cell: uniform tracers are invariant
+# ---------------------------------------------------------------------------
+def test_uniform_tracer_zero_tendency_with_active_front() -> None:
+    """REGRESSION (2026-08-11): a spatially UNIFORM tracer must have zero MLE
+    tendency even where the streamfunction is active.
+
+    The horizontal-only flux divergence conserved the GLOBAL sum while pumping
+    tracer at transport-convergence cells (measured as -54 psu / -31 degC
+    extremes at equatorial river-plume fronts after 30 days,
+    results/omip_nemo/mle_psi_diag_d30).  The vertical continuity branch
+    (NEMO zw_mle = -di[psi_uw] - dj[psi_vw]) closes the overturning cell, so a
+    uniform field sees a divergence-free transport and is exactly invariant.
+    """
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    # Control: the operator is ACTIVE on this front (else the test is vacuous).
+    dT_f, _ = mle_tracer_tendency_latlon_cgrid(
+        T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    scale = float(np.max(np.abs(np.asarray(dT_f))))
+    assert scale > 1e-12, "front produced no tendency; test would be vacuous"
+    # Uniform tracers against the SAME active rho front.
+    Tu = jnp.full_like(T, 12.0)
+    Su = jnp.full_like(S, 35.0)
+    dTu, dSu = mle_tracer_tendency_latlon_cgrid(
+        Tu, Su, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    assert float(np.max(np.abs(np.asarray(dTu)))) < 1e-9 * scale, (
+        "uniform T gained a tendency: the bolus transport is not "
+        "divergence-free per cell (missing/broken vertical branch)")
+    assert float(np.max(np.abs(np.asarray(dSu)))) < 1e-9 * scale
+
+
+def test_uniform_salinity_untouched_by_thermal_front() -> None:
+    """S is uniform in the front fixture, so dS must vanish identically while
+    dT carries the restratification -- the per-tracer face of the same
+    closed-cell property (this is exactly the field the horizontal-only bug
+    corrupted in production)."""
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    dT, dS = mle_tracer_tendency_latlon_cgrid(
+        T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    scale = float(np.max(np.abs(np.asarray(dT)))) + 1e-30
+    assert float(np.max(np.abs(np.asarray(dS)))) < 1e-9 * scale

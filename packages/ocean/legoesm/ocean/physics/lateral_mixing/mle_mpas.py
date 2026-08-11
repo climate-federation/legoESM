@@ -331,8 +331,32 @@ def mle_tracer_tendency_mpas(
 
     vol = mesh.areaCell[:, jnp.newaxis] * dz_live              # (nCells, nlev)
     inv_vol = jnp.where(vol > 0.0, 1.0 / jnp.maximum(vol, _EPS_DIV), 0.0)
-    dT_dt = -_bolus_divergence_cell(FxT, mesh) * inv_vol        # (nCells, nlev)
-    dS_dt = -_bolus_divergence_cell(FxS, mesh) * inv_vol
+
+    # --- VERTICAL bolus transport from continuity (NEMO tramle.F90 zw_mle =
+    # -di[psi_uw]-dj[psi_vw], Voronoi form).  The FK overturning is a CLOSED
+    # cell: without the vertical branch the operator conserves the global sum
+    # while corrupting fronts (the -54 psu river-plume extremes measured on
+    # the lat-lon lane, results/omip_nemo/mle_psi_diag_d30).  W is built from
+    # the MASKED edge transports so the 3-D divergence closes per cell:
+    # W(k) - W(k+1) = -div_h(k), W = 0 at the sea floor, positive toward the
+    # surface; the surface interface is zeroed (its residual is column
+    # roundoff) so tracer conservation stays exact.
+    div_h = _bolus_divergence_cell(utr_e, mesh)                # (nCells, nlev) [m^3/s]
+    W_int = -jnp.flip(jnp.cumsum(jnp.flip(div_h, axis=-1), axis=-1), axis=-1)
+    zcol_c = jnp.zeros((div_h.shape[0], 1), dtype=div_h.dtype)
+    W_w = jnp.concatenate([W_int, zcol_c], axis=-1)            # (nCells, nlev+1)
+    W_w = W_w.at[:, 0].set(0.0)
+    T_w = jnp.concatenate(
+        [zcol_c, 0.5 * (T_fill[:, :-1] + T_fill[:, 1:]), zcol_c], axis=-1)
+    S_w = jnp.concatenate(
+        [zcol_c, 0.5 * (S_fill[:, :-1] + S_fill[:, 1:]), zcol_c], axis=-1)
+    FzT = W_w * T_w                                            # (nCells, nlev+1)
+    FzS = W_w * S_w
+
+    dT_dt = -(_bolus_divergence_cell(FxT, mesh)
+              + FzT[:, :-1] - FzT[:, 1:]) * inv_vol            # (nCells, nlev)
+    dS_dt = -(_bolus_divergence_cell(FxS, mesh)
+              + FzS[:, :-1] - FzS[:, 1:]) * inv_vol
 
     # Tendency already vanishes on dry cells (inv_vol = 0); mask explicitly so a
     # sub-seafloor level carries exactly zero.
