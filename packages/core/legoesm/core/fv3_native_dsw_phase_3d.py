@@ -102,8 +102,13 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
                            nq: int = 1,
                            hydrostatic: bool = True,
                            remap_follows: bool = False,
+                           stage_hook=None,
                            flux_cap: list | None = None) -> list:
     """``d_sw1`` (per k) -> BARRIER 1 (per k) -> ``d_sw2`` (per k).
+
+    ``stage_hook(name, payload)`` observes the oracle stage boundaries
+    S07 (post divgd/uc/vc exchanges), S08 (post d_sw1), S09 (post
+    BARRIER 1) and S10 (post d_sw2); ``None`` changes nothing.
 
     ``flux_cap``, when given, is the six-face mfx/mfy/cx/cy capacitor
     bundle (``fv3_native_tracer2d.alloc_flux_capacitors``) that
@@ -168,6 +173,13 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
     # routed through the authoritative path; this is the same dispatch,
     # including the ext_exclude opt-outs, so the two lanes cannot drift.
     _exchange_post_pgrad(ctx, csw_outs, km, nord=int(c["nord"]))
+    if stage_hook is not None:
+        # S06 (:652 ext divgd) + S07 (:655 ext uc/vc): one hook point --
+        # the two exchanges touch disjoint arrays.
+        stage_hook("S07_extucvc", [{"uc": csw_outs[t]["uc"],
+                                    "vc": csw_outs[t]["vc"],
+                                    "divg_d": csw_outs[t]["divg_d"]}
+                                   for t in range(6)])
 
     # --- d_sw1 at every level, on every face -------------------------------
     # Held as [face][k] rather than merged: the barrier consumes one level
@@ -211,6 +223,18 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
             levels.append(s1)
         per_face_levels.append(levels)
 
+    if stage_hook is not None:
+        # S08 (:831/:848): d_sw1 fluxes BEFORE the barrier averages them
+        # in place -- the hook copies, so this is the pre-average state.
+        stage_hook("S08_dsw1", [
+            {nm: np.stack([per_face_levels[t][k][nm] for k in range(km)],
+                          axis=2)
+             for nm in ("allflux_x", "allflux_y", "crx_adv", "cry_adv",
+                        "xfx_adv", "yfx_adv", "xflux", "yflux",
+                        "cx", "cy", "ut", "vt", "ra_x", "ra_y")
+             if nm in per_face_levels[t][0]}
+            for t in range(6)])
+
     # --- BARRIER 1: inter-panel flux average, one level at a time ----------
     # dyn_core.F90:872. The certified km=1 routine is applied per level,
     # which is what the Fortran's internal do k=1,npz does. Averaging must
@@ -221,6 +245,14 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
         afx6 = [per_face_levels[t][k]["allflux_x"] for t in range(6)]
         afy6 = [per_face_levels[t][k]["allflux_y"] for t in range(6)]
         average_allflux_shared_edges(afx6, afy6, nq, n, ng)
+
+    if stage_hook is not None:
+        # S09 (:853-900): the barrier-averaged fluxes.
+        stage_hook("S09_fluxavg", [
+            {nm: np.stack([per_face_levels[t][k][nm] for k in range(km)],
+                          axis=2)
+             for nm in ("allflux_x", "allflux_y")}
+            for t in range(6)])
 
     # --- d_sw2 at every level, on the AVERAGED fluxes ----------------------
     outs = []
@@ -261,4 +293,9 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
         # only have to be re-sliced.
         acc["levels"] = per_face_levels[t]
         outs.append(acc)
+    if stage_hook is not None:
+        # S10 (:950-966): d_sw2's updated delp/pt (d_sw3 runs in the
+        # tail unit; at this boundary only delp/pt have moved).
+        stage_hook("S10_dsw23", [{"delp": outs[t]["delp"],
+                                  "pt": outs[t]["pt"]} for t in range(6)])
     return outs

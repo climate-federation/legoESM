@@ -200,8 +200,16 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                         dp0: np.ndarray | None = None,
                         use_logp: bool = False,
                         press_out: list | None = None,
+                        stage_hook=None,
                         flux_cap: list | None = None) -> list:
     """One `it` of `do it=1,n_split`. Returns the updated six-face state.
+
+    ``stage_hook``, when given, is called as ``stage_hook(name, payload)``
+    at the oracle's stage boundaries (payload = list of six per-face
+    dicts of arrays, live views -- the hook must copy).  Stage names
+    match the ORACLE STAGE-STATE instrument
+    (``gen_dyncore_stage_copy.py``).  Pure observation; ``None`` (the
+    default) is byte-identical to the pre-hook behaviour.
 
     ``flux_cap`` is the six-face tracer flux-capacitor bundle
     (``fv3_native_tracer2d.alloc_flux_capacitors``); ``d_sw1``
@@ -254,15 +262,25 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
         exchange_state_halos_3d(ctx, state, km,
                                 scalars=first_substep, winds=True,
                                 w_field=not hydrostatic)
+    if stage_hook is not None:
+        # dyn_core.F90:437-438 (S01, it==1) + :471 (S02): the entry
+        # exchanges. One hook point covers both oracle dumps -- the wind
+        # exchange does not touch delp/pt.
+        stage_hook("S02_entryex", [{k: state[t][k]
+                                    for k in ("u", "v", "delp", "pt")}
+                                   for t in range(6)])
 
     csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2,
                        hydrostatic=hydrostatic,
                        remap_follows=remap_follows)
+    if stage_hook is not None:
+        stage_hook("S03_csw", csw)
 
     if hydrostatic:
         cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2, ptop=ptop,
                                 akap=akap, cp_air=cp_air, a2b_ord=a2b_ord,
-                                remap_follows=remap_follows)
+                                remap_follows=remap_follows,
+                                stage_hook=stage_hook)
         csw_press = None
     else:
         from legoesm.core.fv3_native_cgrid_phase_3d import (
@@ -291,10 +309,12 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
     dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg,
                                  hydrostatic=hydrostatic,
                                  remap_follows=remap_follows,
+                                 stage_hook=stage_hook,
                                  flux_cap=flux_cap)
     tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
                              hydrostatic=hydrostatic,
-                             remap_follows=remap_follows)
+                             remap_follows=remap_follows,
+                             stage_hook=stage_hook)
 
     # POST-d_sw scalar exchange, BEFORE the D-grid geopk.
     # dyn_core.F90:1336-1337 -- ext_scalar(delp,...,0,0) and
@@ -313,13 +333,18 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                 f6 = [dsw[t][_nm][:, :, k] for t in range(6)]
                 _pad_scalars_6(f6, ctx, n_, ng_,
                                exchange_agrid_scalar_halos)
+    if stage_hook is not None:
+        # dyn_core.F90:1336-1337 (S15): post-d_sw delp/pt exchange.
+        stage_hook("S15_extdp2", [{k: dsw[t][k] for k in ("delp", "pt")}
+                                  for t in range(6)])
 
     if hydrostatic:
         press = dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt,
                                         ptop=ptop, akap=akap,
                                         cp_air=cp_air, a2b_ord=a2b_ord,
                                         remap_step=remap_step,
-                                        remap_follows=remap_follows)
+                                        remap_follows=remap_follows,
+                                        stage_hook=stage_hook)
     else:
         from legoesm.core.fv3_native_dsw_tail_3d import (
             dgrid_nh_pressure_phase_3d,
