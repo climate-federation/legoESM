@@ -116,6 +116,9 @@ def main() -> int:
     from fesom_jax import surface_forcing
     from fesom_jax.ssh import build_ssh_operator
     from fesom_jax.integrate import integrate
+    from fesom_jax.kpp import KppConfig
+    from fesom_jax.gm import GMConfig
+    from fesom_jax.ice import IceConfig
 
     mesh = load_mesh(args.mesh_dir)
     print(f"[mesh] nodes {mesh.nod2D:,} | triangles {mesh.elem2D:,} | "
@@ -156,10 +159,17 @@ def main() -> int:
                                                 day * steps_per_day)
         day_dates = dates[(day - 1) * steps_per_day: day * steps_per_day]
         step_forcings = forcing.stack(day_dates)
+        # The published CORE2 hindcast card: KPP + GM + the sea-ice model.
+        # Omitting ice_cfg DISABLES the ice model entirely -- the first run
+        # did, and ice-covered Arctic water relaxed to the JRA winter air
+        # temperature (SST median -18.6 C, min -26.7 C, measured on
+        # fesom_core2_d30 snapshot_day0030 before this fix).
         state = integrate(state, mesh, op, stress,
                           n_steps=steps_per_day, dt=args.dt,
                           step_forcings=step_forcings,
-                          forcing_static=forcing.static)
+                          forcing_static=forcing.static,
+                          kpp_cfg=KppConfig(), gm_cfg=GMConfig(),
+                          ice_cfg=IceConfig())
         sst = np.asarray(state.T[0] if state.T.shape[0] != mesh.nod2D
                          else state.T[:, 0])
         if not np.isfinite(sst[np.asarray(mesh.node_layer_mask[:, 0]) > 0]).all():
