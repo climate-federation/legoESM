@@ -105,6 +105,10 @@ $PY $REPO/scripts/validate/fv3_native/compare_extchain_oracle.py \
     --fixture-out $REPO/tests/grids/fixtures/fv3_extchain_oracle_c12.npz \
     --summary-out $OUT/extchain_summary_c12.npz \
   || { echo "COMPARE_C12_FAILED"; exit 1; }
+echo "=== mutation control C12 (port k2e_nord forced to 4; finals MUST diverge) ==="
+$PY $REPO/scripts/validate/fv3_native/compare_extchain_oracle.py \
+    --oracle-dir $OUT/run_c12 --n 12 --ng 3 --port-k2e-nord 4 \
+  || { echo "MUTATION_CONTROL_ERRORED"; exit 1; }
 echo "=== compare C48 ==="
 $PY $REPO/scripts/validate/fv3_native/compare_extchain_oracle.py \
     --oracle-dir $OUT/run_c48 --n 48 --ng 3 \

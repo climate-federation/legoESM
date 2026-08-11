@@ -399,6 +399,11 @@ def main() -> int:
     ap.add_argument("--ng", type=int, default=3)
     ap.add_argument("--fixture-out", default=None)
     ap.add_argument("--summary-out", default=None)
+    ap.add_argument("--port-k2e-nord", type=int, default=None,
+                    help="MUTATION CONTROL: force the port context's "
+                    "k2e_nord away from the oracle's resolved value — "
+                    "the finals MUST diverge, proving the instrument "
+                    "can fail")
     args = ap.parse_args()
     n, ng = args.n, args.ng
     odir = Path(args.oracle_dir)
@@ -423,19 +428,31 @@ def main() -> int:
 
     _selfcheck_transforms()
 
-    from legoesm.grids.fv3_native_ext_vector import build_ext_context
-    from legoesm.grids.fv3_native_gridstruct import (
-        build_fv3_native_gridstruct,
-    )
-
     # resolved runtime k2e_nord from the oracle manifest (the pinned
     # tree runs dg%k2e_nord = 2, NOT the 4 the ext tests default to —
     # exact runtime path, requirement of the diagnosis)
     k2e_nord = int(note_value(notes, "npx npz tile k2e_nord dgng")[3])
     print(f"== resolved oracle k2e_nord = {k2e_nord} "
           f"(port ext context built to match) ==")
-    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
-    ectx = build_ext_context(n, ng, gs6, k2e_nord=k2e_nord)
+    if args.port_k2e_nord is not None:
+        print(f"== MUTATION CONTROL: port k2e_nord OVERRIDDEN to "
+              f"{args.port_k2e_nord} (oracle runs {k2e_nord}) — the "
+              f"finals must diverge ==")
+        k2e_nord = args.port_k2e_nord
+    # PRODUCTION construction, not a bespoke one: the C48 parity runs
+    # use build_six_face_duo_context(use_ext_bundle=True,
+    # oracle_conventions=True), whose ext context is built from the
+    # BOUNDED gridstructs — mirror it exactly so the measured
+    # divergence is the production port's, not a harness variant's.
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+    )
+
+    ctx = build_six_face_duo_context(n, ng, use_ext_bundle=True,
+                                     oracle_conventions=True,
+                                     k2e_nord=k2e_nord)
+    gs6 = ctx["gs6"]
+    ectx = ctx["ectx"]
 
     # C1: searched face map (port face t -> oracle tile, forward op)
     fm = derive_face_map(orc, gs6, n, ng)
