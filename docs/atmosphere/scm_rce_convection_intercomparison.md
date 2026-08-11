@@ -688,6 +688,39 @@ into `q_c` because it "has no surface-precip accumulator", while the coupled
 here "a tracked follow-up". That is a genuine SCM-vs-global semantic
 difference for sbm/dca/kuo, separate from the defect fixed above.
 
+### 8.2f The lowest model level is PINNED to the SST — SHF is identically zero
+
+Found while measuring E for 8.2e: the surface-layer call returns
+`SHF = 0.000 W/m^2` exactly, in every configuration, because the lowest
+level's temperature is `T_a = 300.000 K` exactly — the prescribed SST.
+
+```python
+DEFAULT_SCM_RCE_BL_TOP_M = 0.0
+...
+z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
+bl_mask = z_above_lowest <= DEFAULT_SCM_RCE_BL_TOP_M     # 0 <= 0 is TRUE
+```
+
+A boundary-layer depth of **zero** reads as "anchor disabled", and with `<`
+it would be. With `<=` it anchors EXACTLY the lowest model level, which
+`apply_surface_sst_anchor` then resets to `300.0 - 6.5e-3 * 0 = 300.0 K` on
+every step, at both stepping bodies (`:1244`, `:1286`).
+
+Consequences, none of them small for an RCE column:
+
+* the sensible heat flux is **identically zero by construction** — it is
+  proportional to `(T_sfc - T_a)`, and that difference is pinned at 0;
+* the near-surface air temperature cannot respond to radiation, convection or
+  turbulence, so the sub-cloud lapse rate is prescribed rather than simulated;
+* `q_sat` at that level is therefore fixed, which constrains the near-surface
+  RH and hence the evaporation measured in 8.2e (0.9-1.6 mm/day against the
+  CRM's 2.23).
+
+NOT hot-patched: the eight completed arms ran with this anchor, and changing
+it would leave the published numbers describing code that no longer exists.
+It belongs with the re-run that also carries the precipitation fix, where it
+should be one labelled variable rather than a silent difference.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
