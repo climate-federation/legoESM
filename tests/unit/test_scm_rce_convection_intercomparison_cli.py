@@ -476,3 +476,39 @@ def test_run_meta_carries_no_campaign_wide_tuning_budget():
            / "run_scm_rce_convection_intercomparison.py").read_text()
     meta_block = src.split("    meta = dict(")[1].split(")\n")[0]
     assert "tune_evals" not in meta_block
+
+
+# --------------------------------------------------------------------------- #
+# The boundary-layer SST anchor.  BL_TOP_M = 0.0 reads as "disabled" but the
+# mask is `z_above_lowest <= BL_TOP_M` and z is exactly 0 at the lowest level,
+# so it anchors that level and the sensible heat flux is identically zero.
+# --------------------------------------------------------------------------- #
+
+def test_bl_anchor_defaults_to_the_shipped_value():
+    """Unchanged by default: the 2026-08-10 arms must stay reproducible."""
+    assert _args().bl_anchor_top_m == driver.camp.DEFAULT_SCM_RCE_BL_TOP_M
+    assert driver.camp.DEFAULT_SCM_RCE_BL_TOP_M == 0.0
+
+
+def test_a_negative_depth_disables_the_anchor():
+    assert _args("--bl-anchor-top-m", "-1").bl_anchor_top_m == -1.0
+
+
+def test_the_anchor_is_a_signature_field():
+    """A column with no sensible heat flux is a different experiment, so its
+    checkpoint must not merge into a table built without the anchor."""
+    assert "bl_anchor_top_m" in driver._SIGNATURE_FIELDS
+    a = driver._run_signature(_args())
+    b = driver._run_signature(_args("--bl-anchor-top-m", "-1"))
+    assert a != b
+    assert {k: v for k, v in a.items() if k != "bl_anchor_top_m"} == \
+           {k: v for k, v in b.items() if k != "bl_anchor_top_m"}
+
+
+def test_zero_depth_selects_the_lowest_level_and_negative_selects_none():
+    """The arithmetic the flag exists for, asserted directly: z_above_lowest is
+    0 at the lowest level, so `0 <= 0` anchors it and `0 <= -1` does not."""
+    import numpy as _np
+    z_above_lowest = _np.array([2000.0, 500.0, 0.0])   # top -> surface
+    assert (z_above_lowest <= 0.0).tolist() == [False, False, True]
+    assert (z_above_lowest <= -1.0).tolist() == [False, False, False]

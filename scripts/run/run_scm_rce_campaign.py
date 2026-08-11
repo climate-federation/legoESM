@@ -156,6 +156,19 @@ DEFAULT_ANALYSIS_DAYS = 5.0
 DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS = 72
 DEFAULT_SCM_RCE_SURFACE_WIND_M_S = 5.0
 DEFAULT_SCM_RCE_CORIOLIS_S_INV = 2.5e-5
+# Depth over which the boundary layer is anchored to an SST-rooted lapse-rate
+# profile.  0.0 READS as "anchor disabled" and was surely meant that way, but
+# the mask below is `z_above_lowest <= BL_TOP_M` and z_above_lowest is exactly
+# 0 at the lowest level, so 0.0 anchors EXACTLY that level: it is reset to
+# 300.000 K every step, T_a == T_sfc identically, and the sensible heat flux
+# is therefore IDENTICALLY ZERO by construction (measured: SHF = 0.000 W/m^2
+# in every configuration, jobs 9361582/9361587/9361599).  The near-surface air
+# then cannot respond to radiation, convection or turbulence, and q_sat there
+# is pinned, which constrains RH and hence evaporation.
+#
+# The default is UNCHANGED so the 2026-08-10 arms remain reproducible; use
+# `--bl-anchor-top-m -1` (any negative value) to disable the anchor entirely,
+# which is what a zero depth was meant to express.
 DEFAULT_SCM_RCE_BL_TOP_M = 0.0
 DEFAULT_SCM_RCE_BL_LAPSE_K_M = 6.5e-3
 DEFAULT_SCM_RCE_BL_MIN_T_K = 285.0
@@ -751,6 +764,7 @@ def _config_cache_key(
     surface_wind_m_s: float,
     coriolis_s_inv: float,
     large_scale_forcing: str,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -768,6 +782,7 @@ def _config_cache_key(
         "surface_wind_m_s": surface_wind_m_s,
         "coriolis_s_inv": coriolis_s_inv,
         "large_scale_forcing": large_scale_forcing,
+        "bl_anchor_top_m": bl_anchor_top_m,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1056,6 +1071,7 @@ def run_scm_rce(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> RunDiagnostics:
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
@@ -1121,7 +1137,10 @@ def run_scm_rce(
     forcing_dict = {"T_sfc": sst_col}
     z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
     z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
-    bl_mask = z_above_lowest <= DEFAULT_SCM_RCE_BL_TOP_M
+    # A NEGATIVE depth disables the anchor outright: no level satisfies
+    # `z >= 0 <= negative`.  `<=` is kept (not changed to `<`) so a zero depth
+    # keeps its historical meaning and the published arms stay reproducible.
+    bl_mask = z_above_lowest <= bl_anchor_top_m
     physics_fn = scm.physics_fn
     grid = scm.grid
     sigma_coord = scm.sigma_coord
@@ -1478,6 +1497,7 @@ def run_cached(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -1488,6 +1508,7 @@ def run_cached(
         surface_wind_m_s,
         coriolis_s_inv,
         large_scale_forcing,
+        bl_anchor_top_m,
     )
     if key not in cache:
         # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
@@ -1518,6 +1539,7 @@ def run_cached(
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
+            bl_anchor_top_m=bl_anchor_top_m,
         )
     cached = cache[key]
     return RunDiagnostics(

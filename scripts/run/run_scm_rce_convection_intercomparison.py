@@ -139,6 +139,9 @@ _SIGNATURE_FIELDS = (
     # the in-scheme liquid guard changes the condensation rate every step.  A
     # checkpoint from one setting must not be reused under another.
     "microphysics", "hard_saturation_adjustment",
+    # A column whose lowest level is pinned to the SST has no sensible heat
+    # flux; that is a different experiment, not a tuning detail.
+    "bl_anchor_top_m",
 )
 
 
@@ -305,6 +308,7 @@ def evaluate_scheme(
     subsidence_solve: str = "as_shipped",
     microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
     hard_saturation_adjustment: bool = False,
+    bl_anchor_top_m: float = camp.DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -342,6 +346,7 @@ def evaluate_scheme(
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        bl_anchor_top_m=bl_anchor_top_m,
     )
     prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
     _best_cfg, records, tuned = camp.tune_category_winner(
@@ -796,6 +801,18 @@ def build_parser() -> argparse.ArgumentParser:
             "standing super-saturation. sdm/fast_sbm reject the flag."
         ),
     )
+    parser.add_argument(
+        "--bl-anchor-top-m", type=float,
+        default=camp.DEFAULT_SCM_RCE_BL_TOP_M,
+        help=(
+            "Depth [m] over which the boundary layer is anchored to an "
+            "SST-rooted lapse profile. The shipped 0.0 anchors EXACTLY the "
+            "lowest level (the mask is <=, and z is 0 there), so T_a == SST "
+            "and the sensible heat flux is identically zero. Pass a NEGATIVE "
+            "value to disable the anchor entirely, which is what a zero depth "
+            "was meant to express."
+        ),
+    )
     parser.add_argument("--schemes", default=None,
                         help="comma-separated convection scheme subset")
     parser.add_argument("--scm-microphysics-substeps", type=int,
@@ -902,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
         subsidence_solve=args.subsidence_solve,
         microphysics=args.microphysics,
         hard_saturation_adjustment=args.hard_saturation_adjustment,
+        bl_anchor_top_m=args.bl_anchor_top_m,
         scm_microphysics_substeps=args.scm_microphysics_substeps,
         scm_convection_substeps=args.scm_convection_substeps,
     )
@@ -933,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
                 subsidence_solve=args.subsidence_solve,
                 microphysics=args.microphysics,
                 hard_saturation_adjustment=args.hard_saturation_adjustment,
+                bl_anchor_top_m=args.bl_anchor_top_m,
             )
             res.signature = run_sig
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
