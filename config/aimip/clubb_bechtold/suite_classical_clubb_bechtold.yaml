@@ -1,0 +1,33 @@
+# Classical arm with CLUBB + Bechtold, at the same T106 all-years base the
+# existing classical arm uses.
+#
+# READ THIS BEFORE SUBMITTING — the trained-parameter pathway does NOT cover
+# these two schemes. ``AIMIPClassicalParams`` (training/aimip_params.py) maps
+# its differentiable leaves onto tiedtke / louis / mcfarlane / cloud /
+# sundqvist / radiation; there is NO to_bechtold_config and NO
+# to_clubb_config. So in this configuration:
+#   * McFarlane GWD, Sundqvist microphysics, Xu-Randall cloud, RRTMGP and the
+#     surface layer are still TRAINED;
+#   * Bechtold convection and CLUBB turbulence run at their SCHEME DEFAULTS
+#     and receive no gradient.
+# Since convection and turbulence are the two largest physics levers, an
+# AIMIP training run on this suite tunes noticeably less than the existing
+# classical arm does. Two ways to close that, both deliberate:
+#   (a) extend AIMIPClassicalParams with to_bechtold_config / to_clubb_config
+#       so the leaves are trained end-to-end through the spectral rollout;
+#   (b) calibrate them OFFLINE through ``--params`` — as of 2026-08-02 every
+#       CLUBBParams closure constant (48) and every BechtoldConfig field are
+#       reachable via apply_params_to_pipeline, which they were not before.
+# (b) is available today and needs no new code.
+#
+# WHY THESE SCHEMES ARE STILL WORTH IT: CLUBB is a moist higher-order closure
+# that DIAGNOSES a sub-grid cloud fraction (combined.py routes it to the cloud
+# optics under radiation.use_clubb_cloud_fraction, which requires diagnostic
+# CLUBB — prognostic=False). That is a direct lever on the dominant tropical
+# albedo excess (0.44 vs 0.29 observed), which the RH-based grid-scale scheme
+# cannot address. Bechtold is the IFS operational mass-flux scheme with the
+# RCAPQADV closure.
+base: config/aimip/scale/base_t106_allyears.yaml
+variants:
+- classical
+output_dir: results/aimip_clubb_bechtold_t106/classical

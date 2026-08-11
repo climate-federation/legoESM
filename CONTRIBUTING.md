@@ -138,3 +138,43 @@ partners supplied by `PrescribedX` bricks. Register it for discovery, add it to
   (local research PDFs); cite by filename/DOI instead.
 - CI must be green: tests, `ruff`, version single-source check, and (from Stage B)
   import-linter.
+
+### Merging: one at a time, and verify it landed
+
+**`gh pr merge` reporting success is not evidence that the change is on
+`main`.** Squash merges that land within a few seconds of each other clobber
+one another: whichever merge updates the ref last wins, the others' squash
+commits are orphaned, and GitHub still shows those PRs `MERGED` with a
+`mergeCommit` OID that is **unfetchable** afterwards.
+
+Measured on 2026-08-10: seven PRs were lost this way — #1540 and #1541 in one
+pair at 05:00, and #1550/#1551/#1552/#1554/#1555 from a loop that merged the
+queue back to back. All were recovered (#1557), but only because the head
+branches still existed.
+
+So:
+
+1. **Never loop `gh pr merge`.** Merge one PR, then verify, then the next.
+2. **Always merge with `--delete-branch=false`.** Once the squash commit is
+   orphaned the head branch is the *only* recovery path.
+3. **Verify both ancestry and content** before starting the next merge:
+
+   ```bash
+   git fetch -q origin main
+   git merge-base --is-ancestor "$MERGE_COMMIT" origin/main   # ancestry
+   git show origin/main:path/to/changed_file | grep -c some_new_symbol  # content
+   ```
+
+If a merge did go missing, recover it by taking the PR's files from its own
+head branch, and only for files where `main` has not diverged since that PR's
+merge base:
+
+```bash
+base=$(git merge-base origin/main origin/<pr-branch>)
+git diff --quiet "$base" origin/main -- "$f" && git checkout origin/<pr-branch> -- "$f"
+```
+
+Do **not** merge the head branch wholesale (PR branches here are often stacked,
+so the merge drags in another PR's pre-squash history and can revert work that
+is already on `main`), and do **not** `git apply` the raw `gh pr diff` (it
+applies textually onto a moved `main` and leaves a tree that imports but fails).

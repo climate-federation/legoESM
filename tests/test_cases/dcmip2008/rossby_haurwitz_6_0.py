@@ -31,37 +31,23 @@ from legoesm.core.state import (
     HydrostaticState,
     MPASHydrostaticState,
 )
+from legoesm.core.williamson_sw_analytic import rossby_haurwitz_4_winds
 from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     SigmaCoordinate,
 )
 
 
-# Williamson 1992 W6 analytic constants (mirror williamson_extended.py)
-_K = 7.848e-6
-_R_VAL = 4
 _T0_RH = 300.0
 
 
 def _w6_winds_geo(lon, lat, radius):
-    """Williamson 1992 Eq. 146-147 surface winds."""
-    K = _K
-    R_val = _R_VAL
-    cos_lat = jnp.cos(lat)
-    sin_lat = jnp.sin(lat)
-    cos_R_lon = jnp.cos(R_val * lon)
-    sin_R_lon = jnp.sin(R_val * lon)
+    """Williamson 1992 Eq. 146-147 surface winds.
 
-    u_east = (
-        radius * cos_lat * K
-        + radius * K * cos_lat ** (R_val - 1)
-        * (R_val * sin_lat ** 2 - cos_lat ** 2) * cos_R_lon
-    )
-    v_north = (
-        -radius * K * R_val * cos_lat ** (R_val - 1)
-        * sin_lat * sin_R_lon
-    )
-    return u_east, v_north
+    Thin adapter over the one shared analytic definition in
+    :mod:`legoesm.core.williamson_sw_analytic` (this file used to carry
+    its own copy)."""
+    return rossby_haurwitz_4_winds(lon, lat, radius=radius, xp=jnp)
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -338,6 +339,14 @@ def morrison_microphysics(
     # Target number kc2 = min(N_i0·exp(cooper_a·(T_f−T)), N_i_nuc_max)/ρ
     # (canonical Cooper 0.005 L⁻¹ = N_i0=5 m⁻³ base; cap 500 L⁻¹).
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    # DEPOSITION target only. IFS/SAM homogeneous-freezing allowance: pristine
+    # air below 235 K may hold ice supersaturation up to rh_homo (gSAM
+    # cloud.f90), withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor). The NUCLEATION gates below
+    # (rh_ice, s_hom) keep using plain q_sat_i -- raising their denominator
+    # would suppress the crystal formation the allowance is about.
+    q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
+        T, q_i, enabled=config.homogeneous_ice_supersaturation,
+    )
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
             jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)
@@ -481,6 +490,11 @@ def morrison_microphysics(
         # (q_v − q_sat_i) < 0 ⇒ SUBLIMATION (negative). Tuned by the
         # dimensionless ``ice_deposition_efficiency``.
         dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p_full, 1.0)
+        # Clausius-Clapeyron on the PLAIN ice curve: ABI is the psychrometric
+        # correction for latent heating during deposition, a property of the
+        # saturation curve itself. The rh_homo allowance shifts the TARGET the
+        # vapour relaxes toward, not dq_sat/dT, and gSAM's M2005 likewise builds
+        # ABI from the unscaled qvi (module_mp_graupel.f90).
         dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
         abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
         epsi = (
@@ -491,7 +505,7 @@ def morrison_microphysics(
         )
         dep_raw = (
             config.ice_deposition_efficiency * epsi
-            * (q_v - q_sat_i) / abi
+            * (q_v - q_sat_i_dep) / abi
         )
         # DEPOSITION (positive) + SUBLIMATION (negative) are BOTH governed
         # by ice supersaturation + existing ice, NOT Cooper activation

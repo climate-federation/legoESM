@@ -296,19 +296,21 @@ class SpectralPEConfig(NamedTuple):
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
     # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
-    # hybrid): "upwind" (legacy; carries the measured -0.32..-0.47 K/day
-    # mass-weighted T sink — see _vertical_advection_sigma_sb) or
-    # "sb_centered" (Simmons-Burridge energy-conserving pairing; sigma via
-    # _vertical_advection_sigma_sb, hybrid via vertical_advection_hybrid_sb).
+    # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
+    # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
+    # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
+    # measured -0.48 K/day mass-weighted global-mean T leak at T63L8 and it
+    # destroys 62% of the atmosphere's vertical T structure in 5 days).
+    # Selecting "upwind" emits a RuntimeWarning at tendency-build time.
     # TRACERS keep upwind regardless: centered vertical advection overshoots
     # and would drive moisture negative — upwind's diffusivity is the
-    # positivity choice there, not an accident. Default keeps legacy
-    # numerics byte-identical.
-    vertical_advection_scheme: str = "upwind"
+    # positivity choice there, not an accident.
+    vertical_advection_scheme: str = "sb_centered"
     # Return the KE removed by explicit vor/div hyperdiffusion as local
     # frictional heating (standard GCM practice, ~0.5-2 W/m^2 at T63; the
-    # post-step filter's KE removal is a documented omission). Off = legacy.
-    frictional_heating: bool = False
+    # post-step filter's KE removal is a documented omission). DEFAULT ON —
+    # disabling it leaves the total-energy budget open, and warns.
+    frictional_heating: bool = True
 
 
 # =============================================================================
@@ -394,6 +396,52 @@ def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
+
+
+_WARNED_NON_CONSERVING: set[tuple[str, bool]] = set()
+
+
+def _warn_non_conserving_numerics(scheme: str, frictional_heating: bool):
+    """Warn ONCE per (scheme, heating) combination that the run is not on the
+    energy-conserving numerics.
+
+    Both defaults are now the conserving choice, so reaching this means a
+    caller opted OUT. Measured cost of opting out (T63L8, zero physics,
+    scripts/validate/aimip_pressure_spinup.py --global-t): the upwind
+    vertical transport leaks -0.48 K/day of mass-weighted global-mean
+    temperature (-2.39 K over 5 days against a true -0.16 K) and erases 62%
+    of the vertical temperature structure; dropping frictional heating
+    leaves the hyperdiffusion KE sink unreturned.
+
+    Deduplicated because ``spectral_pe_tendencies`` runs 3-5x per step: an
+    un-deduplicated warning would emit millions of lines per run and Python
+    filters only per (message, category, module, lineno) by default, which
+    a formatted message defeats.
+    """
+    import warnings
+
+    key = (scheme, bool(frictional_heating))
+    if key in _WARNED_NON_CONSERVING:
+        return
+    _WARNED_NON_CONSERVING.add(key)
+    reasons = []
+    if scheme != "sb_centered":
+        reasons.append(
+            f"vertical_advection_scheme={scheme!r} (not 'sb_centered'): the "
+            "advective upwind form has no discrete conservation pairing with "
+            "continuity — measured -0.48 K/day global-mean temperature leak "
+            "at T63L8")
+    if not frictional_heating:
+        reasons.append(
+            "frictional_heating=False: the kinetic energy removed by "
+            "hyperdiffusion is never returned as heat, so the total-energy "
+            "budget stays open")
+    warnings.warn(
+        "SpectralPEConfig is NOT on the energy-conserving numerics: "
+        + "; ".join(reasons)
+        + ". Defaults are sb_centered + frictional_heating=True; keep the "
+          "legacy settings only to reproduce a pre-2026-08-11 run.",
+        RuntimeWarning, stacklevel=3)
 
 
 def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
@@ -549,9 +597,13 @@ def spectral_pe_tendencies(
     # coordinates carry both schemes.
     _vadv_scheme = config.vertical_advection_scheme
     if _vadv_scheme == "upwind":
+        _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
         _vadv_sigma = _vertical_advection_sigma_gaussian
         _vadv_hybrid = vertical_advection_hybrid
     elif _vadv_scheme == "sb_centered":
+        if not config.frictional_heating:
+            _warn_non_conserving_numerics(
+                _vadv_scheme, config.frictional_heating)
         _vadv_sigma = _vertical_advection_sigma_sb
         from legoesm.grids.vertical import vertical_advection_hybrid_sb
         _vadv_hybrid = vertical_advection_hybrid_sb

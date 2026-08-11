@@ -246,6 +246,43 @@ def test_unknown_scheme_raises(grid, sigma):
         spectral_pe_tendencies(state, grid, sigma, cfg, None)
 
 
+def test_conserving_numerics_are_the_default():
+    cfg = SpectralPEConfig()
+    assert cfg.vertical_advection_scheme == "sb_centered"
+    assert cfg.frictional_heating is True
+
+
+@pytest.mark.parametrize("kw", [
+    {"vertical_advection_scheme": "upwind"},
+    {"frictional_heating": False},
+])
+def test_opting_out_of_conserving_numerics_warns(grid, sigma, kw):
+    """Legacy settings still RUN (reproducibility) but must announce
+    themselves — a silent opt-out is how the -0.48 K/day leak survived."""
+    import legoesm.atmosphere.dynamics.gcm.spectral_pe as spe
+
+    spe._WARNED_NON_CONSERVING.clear()   # the warning is once-per-combination
+    state = _balanced_state(grid, sigma)
+    cfg = SpectralPEConfig(hyperdiff_coeff=1e16, hyperdiff_order=2, **kw)
+    with pytest.warns(RuntimeWarning, match="energy-conserving numerics"):
+        spectral_pe_tendencies(state, grid, sigma, cfg, None)
+
+
+def test_default_config_does_not_warn(grid, sigma):
+    """Non-vacuity partner: the conserving default must be silent, or the
+    warning becomes noise everyone filters out."""
+    import warnings
+
+    import legoesm.atmosphere.dynamics.gcm.spectral_pe as spe
+
+    spe._WARNED_NON_CONSERVING.clear()
+    state = _balanced_state(grid, sigma)
+    cfg = SpectralPEConfig(hyperdiff_coeff=1e16, hyperdiff_order=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        spectral_pe_tendencies(state, grid, sigma, cfg, None)
+
+
 def test_hybrid_sb_telescoping_identity(grid):
     """Same conservation pairing on the HYBRID coordinate: for the hybrid SB
     form, sum_k dp_k * [adv_k - f_k * (d mdot/d p)_k] telescopes to the

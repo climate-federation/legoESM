@@ -12,9 +12,49 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.forcing.surface_utils import (
+    snow_for_albedo_deblend,
     surface_emissivity_for_lw_inversion,
     surface_temperature_for_lw_boundary,
 )
+
+
+class TestSnowForAlbedoDeblend:
+    """Which snow field the coupled drivers may hand the albedo blend (#1556).
+
+    The driver stashes the RAW segment carry. On an ensemble run the state and
+    the held fluxes are unpacked as the ensemble MEAN while that carry stays
+    member-shaped, so passing it would make the albedo member-shaped and
+    broadcast a 2-D ``sw_net_sfc`` up to 3-D.
+    """
+
+    def test_single_member_passes_the_snow_through(self):
+        snow = jnp.ones((4, 8)) * 12.0
+        assert snow_for_albedo_deblend(snow, 1) is snow
+
+    def test_ensemble_withholds_the_member_shaped_carry(self):
+        # (n_members, ny, nx) — the shape that would mis-broadcast.
+        snow = jnp.ones((3, 4, 8)) * 12.0
+        assert snow_for_albedo_deblend(snow, 3) is None
+
+    def test_absent_snow_stays_absent(self):
+        assert snow_for_albedo_deblend(None, 1) is None
+        assert snow_for_albedo_deblend(None, 4) is None
+
+    def test_degenerate_sizes_count_as_serial(self):
+        """``ModelDriver._create_ensemble`` returns early for ``<= 1``, so a
+        config carrying 0 leaves the carry single-member shaped. Gating on
+        ``== 1`` would suppress the snow term on a run that is serial."""
+        snow = jnp.ones((4, 8)) * 12.0
+        assert snow_for_albedo_deblend(snow, 0) is snow
+
+    def test_the_withheld_shape_really_would_mis_broadcast(self):
+        """Non-vacuous: show the failure the gate prevents, so the gate is not
+        just an unexplained conditional."""
+        sw_net = jnp.ones((4, 8)) * 240.0          # mean, 2-D
+        member_albedo = jnp.full((3, 4, 8), 0.2)   # what member snow produces
+        assert (sw_net / (1.0 - member_albedo)).ndim == 3
+        mean_albedo = jnp.full((4, 8), 0.2)
+        assert (sw_net / (1.0 - mean_albedo)).shape == sw_net.shape
 
 
 def _roundtrip_lw_down(eps_emit, eps_inv, lw_down, T):

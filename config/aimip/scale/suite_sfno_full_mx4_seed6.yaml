@@ -1,0 +1,191 @@
+# Multi-seed ensemble member 1/4 — ArchesWeather-Mx4 construct.
+#
+# "we train a small ensemble of our M models, called ArchesWeather-Mx4, by
+# independently training multiple models with different random seeds and
+# averaging their outputs at inference time. This helps remove modeling errors
+# due to initialization and better approximates the true ensemble mean"
+# (arXiv:2412.12971 sec. 3.2).
+#
+# Identical to config/aimip/scale/suite_sfno_full_t63_allyears_ace2.yaml in
+# EVERY respect except ``sfno_seed`` — same 288 train days, same architecture,
+# same ACE2 optimizer block, same post-step spectral filter, same eval
+# protocol. Seed is the only variable, which is what makes averaging the
+# members a variance-reduction rather than a confound.
+#
+# Score the ensemble with:
+#   scripts/validate/run_aimip_wb2_eval.py --variant sfno_full \
+#     --suite <this file> --checkpoint <seed0>/params_ema.eqx \
+#     --member <seed1>/params_ema.eqx --member <seed2>/params_ema.eqx ...
+# which averages the member FORECASTS at each lead (not the weights — averaging
+# weights across independently-initialised nets is meaningless).
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  loss_preset: ace2
+  loss: {}
+  aimip_optimizer: adamw
+  aimip_lr: 0.0001
+  aimip_weight_decay: 0.01
+  aimip_ema_decay: 0.999
+  aimip_n_epochs: 120
+  aimip_patience: 20
+  aimip_warmup: 200
+  train_windows:
+  - [1979, 0, 2]
+  - [1979, 91, 2]
+  - [1979, 182, 2]
+  - [1979, 274, 2]
+  - [1980, 0, 2]
+  - [1980, 91, 2]
+  - [1980, 182, 2]
+  - [1980, 274, 2]
+  - [1981, 0, 2]
+  - [1981, 91, 2]
+  - [1981, 182, 2]
+  - [1981, 274, 2]
+  - [1982, 0, 2]
+  - [1982, 91, 2]
+  - [1982, 182, 2]
+  - [1982, 274, 2]
+  - [1983, 0, 2]
+  - [1983, 91, 2]
+  - [1983, 182, 2]
+  - [1983, 274, 2]
+  - [1984, 0, 2]
+  - [1984, 91, 2]
+  - [1984, 182, 2]
+  - [1984, 274, 2]
+  - [1985, 0, 2]
+  - [1985, 91, 2]
+  - [1985, 182, 2]
+  - [1985, 274, 2]
+  - [1986, 0, 2]
+  - [1986, 91, 2]
+  - [1986, 182, 2]
+  - [1986, 274, 2]
+  - [1987, 0, 2]
+  - [1987, 91, 2]
+  - [1987, 182, 2]
+  - [1987, 274, 2]
+  - [1988, 0, 2]
+  - [1988, 91, 2]
+  - [1988, 182, 2]
+  - [1988, 274, 2]
+  - [1989, 0, 2]
+  - [1989, 91, 2]
+  - [1989, 182, 2]
+  - [1989, 274, 2]
+  - [1990, 0, 2]
+  - [1990, 91, 2]
+  - [1990, 182, 2]
+  - [1990, 274, 2]
+  - [1991, 0, 2]
+  - [1991, 91, 2]
+  - [1991, 182, 2]
+  - [1991, 274, 2]
+  - [1992, 0, 2]
+  - [1992, 91, 2]
+  - [1992, 182, 2]
+  - [1992, 274, 2]
+  - [1993, 0, 2]
+  - [1993, 91, 2]
+  - [1993, 182, 2]
+  - [1993, 274, 2]
+  - [1994, 0, 2]
+  - [1994, 91, 2]
+  - [1994, 182, 2]
+  - [1994, 274, 2]
+  - [1995, 0, 2]
+  - [1995, 91, 2]
+  - [1995, 182, 2]
+  - [1995, 274, 2]
+  - [1996, 0, 2]
+  - [1996, 91, 2]
+  - [1996, 182, 2]
+  - [1996, 274, 2]
+  - [1997, 0, 2]
+  - [1997, 91, 2]
+  - [1997, 182, 2]
+  - [1997, 274, 2]
+  - [1998, 0, 2]
+  - [1998, 91, 2]
+  - [1998, 182, 2]
+  - [1998, 274, 2]
+  - [1999, 0, 2]
+  - [1999, 91, 2]
+  - [1999, 182, 2]
+  - [1999, 274, 2]
+  - [2000, 0, 2]
+  - [2000, 91, 2]
+  - [2000, 182, 2]
+  - [2000, 274, 2]
+  - [2001, 0, 2]
+  - [2001, 91, 2]
+  - [2001, 182, 2]
+  - [2001, 274, 2]
+  - [2002, 0, 2]
+  - [2002, 91, 2]
+  - [2002, 182, 2]
+  - [2002, 274, 2]
+  - [2003, 0, 2]
+  - [2003, 91, 2]
+  - [2003, 182, 2]
+  - [2003, 274, 2]
+  - [2004, 0, 2]
+  - [2004, 91, 2]
+  - [2004, 182, 2]
+  - [2004, 274, 2]
+  - [2005, 0, 2]
+  - [2005, 91, 2]
+  - [2005, 182, 2]
+  - [2005, 274, 2]
+  - [2006, 0, 2]
+  - [2006, 91, 2]
+  - [2006, 182, 2]
+  - [2006, 274, 2]
+  - [2007, 0, 2]
+  - [2007, 91, 2]
+  - [2007, 182, 2]
+  - [2007, 274, 2]
+  - [2008, 0, 2]
+  - [2008, 91, 2]
+  - [2008, 182, 2]
+  - [2008, 274, 2]
+  - [2009, 0, 2]
+  - [2009, 91, 2]
+  - [2009, 182, 2]
+  - [2009, 274, 2]
+  - [2010, 0, 2]
+  - [2010, 91, 2]
+  - [2010, 182, 2]
+  - [2010, 274, 2]
+  - [2011, 0, 2]
+  - [2011, 91, 2]
+  - [2011, 182, 2]
+  - [2011, 274, 2]
+  - [2012, 0, 2]
+  - [2012, 91, 2]
+  - [2012, 182, 2]
+  - [2012, 274, 2]
+  - [2013, 0, 2]
+  - [2013, 91, 2]
+  - [2013, 182, 2]
+  - [2013, 274, 2]
+  - [2014, 0, 2]
+  - [2014, 91, 2]
+  - [2014, 182, 2]
+  - [2014, 274, 2]
+  eval_windows:
+  - [2015, 0, 2]
+  - [2015, 182, 2]
+  - [2016, 0, 2]
+  - [2016, 182, 2]
+  - [2017, 0, 2]
+  - [2017, 182, 2]
+  n_train_days: 288
+  n_eval_days: 12
+  train_year: 1979
+  eval_year: 2015
+  aimip_surface_forcing: true
+  sfno_seed: 6
+variants: [sfno_full]
+output_dir: results/aimip_mx4_sfno_full_t63_seed6

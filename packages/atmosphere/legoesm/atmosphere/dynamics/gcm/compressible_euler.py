@@ -851,12 +851,28 @@ def precompute_si_tridiag_bands(
     if nlev is None:
         nlev = int(theta_0.shape[-1])
 
-    alpha = dt_s ** 2 * cs2_half / (dz_inner * J[..., None]) ** 2
-    pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
-    a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
-    alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
-    b_tri = 1.0 + alpha + alpha_interior
-    c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+    # STRETCHED-GRID METRIC (2026-08 fix). The vertical acoustic coupling of
+    # interior interface k to its neighbours carries TWO different spacings:
+    # the implicit pressure gradient at the interface uses the CENTRE spacing
+    # ``dz_half[k]``, while the continuity divergence that feeds it back uses
+    # the LAYER THICKNESS of the level in between (``dz[k]`` above, ``dz[k+1]``
+    # below). The previous form squared the centre spacing (``dz_inner**2``,
+    # and ``dz_inner`` is identically ``dz_half``), which is correct ONLY where
+    # dz is uniform. On the gSAM RCEMIP1 grd the two differ by up to 12 %, so
+    # that fraction of the acoustic term stayed effectively EXPLICIT and
+    # reimposed a vertical sound-wave CFL (dt <= ~0.04*dz_min) on a scheme that
+    # is supposed to be unconditionally stable in the vertical.
+    alpha_above = dt_s ** 2 * cs2_half / (
+        dz_half * dz[:-1] * J[..., None] ** 2)
+    alpha_below = dt_s ** 2 * cs2_half / (
+        dz_half * dz[1:] * J[..., None] ** 2)
+    pad_axes_a = ((0, 0),) * (alpha_above.ndim - 1)
+    a_tri = jnp.pad(-alpha_above[..., 1:], (*pad_axes_a, (1, 0)))
+    # Both couplings stay on the DIAGONAL at the first/last interior interface:
+    # the rigid lid sets the neighbouring w to zero, which removes the
+    # OFF-diagonal entry but not the layer's own compression term.
+    b_tri = 1.0 + alpha_above + alpha_below
+    c_tri = jnp.pad(-alpha_below[..., :-1], (*pad_axes_a, (0, 1)))
 
     if implicit_buoyancy and nlev > 2:
         dz_centered = dz_half[:-1] + dz_half[1:]
@@ -964,12 +980,17 @@ def semi_implicit_acoustic_column_kernel(
     if precomputed_tridiag is not None:
         a_tri, b_tri, c_tri = precomputed_tridiag
     else:
-        alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
-        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
-        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
-        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
-        b_tri = 1.0 + alpha + alpha_interior
-        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+        # See precompute_si_tridiag_bands: dz_half for the pressure gradient,
+        # the LAYER thickness dz for the continuity feedback (equal only on a
+        # uniform grid).
+        alpha_above = dt_s**2 * cs2_half / (
+            dz_half * dz[:-1] * J[..., None]**2)
+        alpha_below = dt_s**2 * cs2_half / (
+            dz_half * dz[1:] * J[..., None]**2)
+        pad_axes_a = ((0, 0),) * (alpha_above.ndim - 1)
+        a_tri = jnp.pad(-alpha_above[..., 1:], (*pad_axes_a, (1, 0)))
+        b_tri = 1.0 + alpha_above + alpha_below
+        c_tri = jnp.pad(-alpha_below[..., :-1], (*pad_axes_a, (0, 1)))
 
         if implicit_buoyancy and nlev > 2:
             # Mean-state d(theta_ref)/dz at full levels (sign convention

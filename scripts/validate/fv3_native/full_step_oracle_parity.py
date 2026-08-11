@@ -120,7 +120,7 @@ def require_gfs_constants(run_dir: str) -> None:
                 f"{FV3_RADIUS_M:.1f}")
 
 
-def load_oracle(run_dir: str) -> list:
+def load_oracle(run_dir: str, nh: bool = False) -> list:
     """Six per-tile dicts, arrays AS STORED (j, i) with the time axis gone."""
     import netCDF4 as nc
     require_gfs_constants(run_dir)
@@ -135,6 +135,13 @@ def load_oracle(run_dir: str) -> list:
                "pt": np.array(d["T"][:])[0],       # (km, n,   n)
                "delp": np.array(d["delp"][:])[0],  # (km, n,   n)
                "phis": np.array(d["phis"][:])[0]}  # (n, n)
+        if nh:
+            for k, v in (("w", "W"), ("delz", "DZ")):
+                if v not in d.variables:
+                    raise SystemExit(
+                        f"{p}: no {v} variable -- is this an NH restart? "
+                        f"The hydrostatic decks do not write it.")
+                rec[k] = np.array(d[v][:])[0]      # (km, n, n)
         for k, v in rec.items():
             if not np.all(np.isfinite(v)):
                 raise SystemExit(f"{p}: {k} has non-finite values")
@@ -163,18 +170,27 @@ def require_flat_orography(tiles: list) -> None:
 # port side
 # ----------------------------------------------------------------------
 
-def build_port_ic(ctx, ak, bk):
-    """The test_case = -13 IC on all six faces, in state_3d layout."""
+def build_port_ic(ctx, ak, bk, nh: bool = False):
+    """The test_case = -13 IC on all six faces, in state_3d layout.
+
+    ``nh=True`` adds ``make_nh``'s initial state (``init_hydro.F90:
+    147-158``): ``w = 0`` and ``delz = -(rdgas/grav) * T * dpeln`` from
+    the IC's own hydrostatic column -- the exact arithmetic the oracle's
+    ``delz computed from hydrostatic state`` message announces (zvir = 0
+    on the adiabatic deck).
+    """
     from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
     from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_face
     from legoesm.core.fv3_native_state_3d import build_state_3d
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
     from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
 
     def gcdr(p1, p2, r):
         return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
 
     n, ng = ctx["n"], ctx["ng"]
-    st = build_state_3d(n, ng, KM, remap_follows=True)
+    st = build_state_3d(n, ng, KM, remap_follows=True,
+                        hydrostatic=not nh)
     cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
     for t in range(6):
         gs = ctx["gs6"][t]
@@ -188,6 +204,14 @@ def build_port_ic(ctx, ak, bk):
         st[t]["pt"][cs, cs, :] = o["pt"]
         st[t]["u"][cs, cc, :] = o["u"]
         st[t]["v"][cc, cs, :] = o["v"]
+        if nh:
+            pe = np.full((n, n), float(ak[0]))
+            for k in range(KM):
+                dp = st[t]["delp"][cs, cs, k]
+                dpeln = np.log(pe + dp) - np.log(pe)
+                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
+                                          * st[t]["pt"][cs, cs, k] * dpeln)
+                pe = pe + dp
     return st
 
 
@@ -195,10 +219,17 @@ def port_window(state, ctx) -> list:
     """Compute-window copies, port orientation (i, j, k)."""
     n, ng = ctx["n"], ctx["ng"]
     cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
-    return [{"u": np.array(f["u"][cs, cc, :]),
-             "v": np.array(f["v"][cc, cs, :]),
-             "pt": np.array(f["pt"][cs, cs, :]),
-             "delp": np.array(f["delp"][cs, cs, :])} for f in state]
+    out = []
+    for f in state:
+        rec = {"u": np.array(f["u"][cs, cc, :]),
+               "v": np.array(f["v"][cc, cs, :]),
+               "pt": np.array(f["pt"][cs, cs, :]),
+               "delp": np.array(f["delp"][cs, cs, :])}
+        if "delz" in f:
+            rec["w"] = np.array(f["w"][cs, cs, :])
+            rec["delz"] = np.array(f["delz"])
+        out.append(rec)
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -390,7 +421,12 @@ def derive_face_map(port, orc) -> tuple:
 
 
 def apply_map(port_face, orc_tile, meta_entry) -> dict:
-    """Port face and oracle tile, both in the port's orientation."""
+    """Port face and oracle tile, both in the port's orientation.
+
+    Scalars beyond pt/delp (NH: ``w``, ``delz``) ride the same dihedral
+    with factor +1 -- a transposed face swaps axes but a cell-centred
+    scalar carries no component to exchange.
+    """
     transposed, nm, su, sv = meta_entry
     f = DIHEDRAL[nm]
     ou = oracle_ij(orc_tile["u"], transposed)
@@ -403,6 +439,10 @@ def apply_map(port_face, orc_tile, meta_entry) -> dict:
     pairs["pt"] = (f(port_face["pt"]), oracle_ij(orc_tile["pt"], transposed))
     pairs["delp"] = (f(port_face["delp"]),
                      oracle_ij(orc_tile["delp"], transposed))
+    for extra in ("w", "delz"):
+        if extra in port_face and extra in orc_tile:
+            pairs[extra] = (f(port_face[extra]),
+                            oracle_ij(orc_tile[extra], transposed))
     return pairs, wind_scale(port_face, orc_tile)
 
 
@@ -423,7 +463,22 @@ def main(argv=None):
     ap.add_argument("--max-rel", type=float, default=None,
                     help="gate: exit 1 if any field's one-step rel exceeds "
                          "this")
+    ap.add_argument("--nh", action="store_true",
+                    help="non-hydrostatic gate: defaults the runs to "
+                         "run_nh_{zerostep,1step}_gfs, adds delz/w to the "
+                         "state (make_nh IC), drives fv_dynamics with "
+                         "hydrostatic=False (a_imp=1, p_fac=0.05, "
+                         "kord_wz=9, w_limiter per the deck), and scores "
+                         "W and DZ on their OWN scales (W is 0 at t=0 and "
+                         "~2e-4 m/s after one step -- judging it against "
+                         "the 20 m/s winds would be the delp-agreement "
+                         "trap again)")
     args = ap.parse_args(argv)
+    if args.nh:
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -445,16 +500,18 @@ def main(argv=None):
     ptop = float(ptop)
     print(f"grid n={n} ng={ng} km={KM} ptop={ptop} ks={ks}")
 
-    orc_ic = load_oracle(args.ic_run)
-    orc_1 = load_oracle(args.step_run)
+    orc_ic = load_oracle(args.ic_run, nh=args.nh)
+    orc_1 = load_oracle(args.step_run, nh=args.nh)
     require_flat_orography(orc_ic)
     require_flat_orography(orc_1)
+
+    fields = ("u", "v", "pt", "delp") + (("w", "delz") if args.nh else ())
 
     # How much did ONE step actually move the oracle? Without this the
     # residuals below have no scale and "small" means nothing.
     print("\noracle tendency over one step (max |1step - IC|, per tile):")
     tend = {}
-    for f in ("u", "v", "pt", "delp"):
+    for f in fields:
         per = [float(np.abs(orc_1[t][f] - orc_ic[t][f]).max())
                for t in range(6)]
         tend[f] = per
@@ -466,7 +523,7 @@ def main(argv=None):
             "vacuous. Check that minutes=32 == dt_atmos in the deck.")
 
     # ---------------- instrument control: the IC ----------------
-    state = build_port_ic(ctx, ak, bk)
+    state = build_port_ic(ctx, ak, bk, nh=args.nh)
     p_ic = port_window(state, ctx)
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
@@ -518,18 +575,80 @@ def main(argv=None):
             f"port's initial condition no longer reproduces the oracle's, so "
             f"nothing this script could say about the one-step state would "
             f"mean anything. Refusing to print it.")
+    # FROZEN-MAP ASSERT (GLM-5.2 strategy review, 2026-08-10): the
+    # bijection requirement alone cannot catch a SELF-CONSISTENT
+    # relabelling drift -- a grid change that permutes two faces and an
+    # IC builder that permutes them back would still derive a valid map.
+    # The established map (ic_face_map_parity.py, 2026-08-07) is
+    # therefore frozen here and every run's derived map must match it.
+    # Faces 4/5 <-> tiles 1/2 stay a SET: those two oracle tiles are
+    # unperturbed and zonally symmetric, so they carry identical fields
+    # and either assignment is intrinsically valid (documented in
+    # STATE.md; asserting one of them would be inventing information).
+    _FROZEN_MAP = {0: {3}, 1: {4}, 2: {2}, 3: {0, 1}, 4: {0, 1}, 5: {5}}
+    drift = [(pf + 1, perm[pf] + 1) for pf in range(6)
+             if perm[pf] not in _FROZEN_MAP[pf]]
+    if drift:
+        raise SystemExit(
+            f"FACE-MAP DRIFT: derived assignment(s) {drift} (port face, "
+            f"oracle tile) differ from the frozen 2026-08-07 map. Either "
+            f"the grid/IC labelling changed -- find out which -- or the "
+            f"frozen map is stale; do not proceed on a silently different "
+            f"relabelling.")
+
     print(f"\nINSTRUMENT CONTROL PASSED (worst IC rel {worst:.3e} <= "
-          f"{IC_CONTROL_MAX_REL:.0e}). The map below is the one applied to "
-          f"the step.")
+          f"{IC_CONTROL_MAX_REL:.0e}; map matches the frozen 2026-08-07 "
+          f"bijection). The map below is the one applied to the step.")
+
+    if args.nh:
+        # SECOND instrument control, NH fields under the SAME map: the
+        # port's make_nh delz against the oracle's DZ (a real field,
+        # ~1e3 m), and W == 0 EXACTLY on both sides at t=0.
+        worst_dz = 0.0
+        for pf in range(6):
+            ot = perm[pf]
+            pairs, _ = apply_map(p_ic[pf], orc_ic[ot], meta[pf][ot])
+            worst_dz = max(worst_dz, rel(*pairs["delz"]))
+            w_p, w_o = pairs["w"]
+            if float(np.abs(w_o).max()) != 0.0:
+                raise SystemExit(
+                    f"oracle IC W is not identically zero on tile {ot+1} "
+                    f"(max {np.abs(w_o).max():g}) -- not a t=0 restart?")
+            if float(np.abs(w_p).max()) != 0.0:
+                raise SystemExit(f"port IC w is not zero on face {pf+1}")
+        print(f"NH IC control: worst delz rel {worst_dz:.3e}; W == 0 "
+              f"exactly on both sides.")
+        if worst_dz > IC_CONTROL_MAX_REL:
+            raise SystemExit(
+                f"NH INSTRUMENT CONTROL FAILED: delz IC rel {worst_dz:.3e} "
+                f"exceeds {IC_CONTROL_MAX_REL:.0e}; the make_nh replication "
+                f"does not reproduce the oracle's delz, so the step "
+                f"comparison would start from a different state.")
 
     # ---------------- the step ----------------
     # p_var is the ONLY producer of the pkz that fv_dynamics.F90:402
-    # divides by, so it must exist before either lane below.
-    press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
-                               n=n, ng=ng, km=KM) for f in state]
+    # divides by, so it must exist before either lane below.  The LANE
+    # MATTERS: init_hydro.F90's NH branch (:178-184) computes pkz from
+    # the ideal gas law on delp/pt/delz, NOT the hydrostatic kappa-mean.
+    # Feeding the hydro pkz into the NH theta conversion put a uniform
+    # 0.408 m delz error on every column in the first NH parity run.
+    if args.nh:
+        from legoesm.core.fv3_native_dynamics import p_var_nonhydrostatic
+        press = [p_var_nonhydrostatic(f["delp"], f["delz"], f["pt"],
+                                      ptop=ptop, akap=FV3_KAPPA,
+                                      n=n, ng=ng, km=KM) for f in state]
+    else:
+        press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
+                                   n=n, ng=ng, km=KM) for f in state]
     q = [[np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
           for _ in range(NR_TRACERS)] for _ in range(6)]
 
+    if args.trace_substeps and args.nh:
+        raise SystemExit(
+            "--trace-substeps is wired for the hydrostatic lane only "
+            "(its remap block reads the hydro pressure bundle); an NH "
+            "trace needs the NH carry threaded through -- extend it "
+            "rather than letting it KeyError mid-run.")
     if args.trace_substeps:
         # LOCALISE a wrong tendency in TIME before hunting it in space.
         # dyn_core.F90:337 is `do it=1,n_split`; running the loop one
@@ -629,12 +748,21 @@ def main(argv=None):
         return 0
 
     print(f"\nintegrating one step: bdt={args.dt} k_split={args.k_split} "
-          f"n_split={args.n_split} ...", flush=True)
+          f"n_split={args.n_split} nh={args.nh} ...", flush=True)
+    if args.nh:
+        # phis == 0 (asserted above); the NH carry derives zs from it.
+        m_a = n + 2 * ng
+        ctx["hs6"] = [np.zeros((m_a, m_a), dtype=np.float64)
+                      for _ in range(6)]
     out = fv_dynamics_step(ctx, state, press, bdt=args.dt, km=KM,
                            k_split=args.k_split, n_split=args.n_split,
                            ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
                            cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
-                           kord_tm=KORD_TM, kord_tr=KORD_TR, q=q)
+                           kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
+                           hydrostatic=not args.nh,
+                           # deck: a_imp=1., p_fac=0.05, kord_wz=9,
+                           # use_logp=F, w_limiter=T (resolved namelist)
+                           w_limiter=args.nh)
     if out["pt_units"] != "K":
         raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)
@@ -648,7 +776,7 @@ def main(argv=None):
     # first.
     print("\nPORT's own one-step tendency (max |port_1step - port_IC|), "
           "against the ORACLE's on the mapped tile:")
-    for f in ("u", "v", "pt", "delp"):
+    for f in fields:
         row_p, row_o = [], []
         for pf in range(6):
             row_p.append(float(np.abs(p_1[pf][f] - p_ic[pf][f]).max()))
@@ -676,7 +804,7 @@ def main(argv=None):
         # trace: a panel-boundary-concentrated remainder is a halo/edge
         # defect, a spread one is a discrete-balance difference. Reporting
         # only the peak cannot tell them apart.
-        for f in ("u", "v", "pt", "delp"):
+        for f in fields:
             a_, b_ = pairs[f]
             d = np.abs(a_ - b_)
             pk_ = float(d.max())
@@ -694,7 +822,7 @@ def main(argv=None):
                                                      d.shape)]
         res[f"face{pf+1}->tile{ot+1}"] = row
         print(f"  face {pf+1} -> tile {ot+1}:")
-        for f in ("u", "v", "pt", "delp"):
+        for f in fields:
             d = row[f]
             print(f"      {f:5s} rel={d['rel']:9.3e}  "
                   f"|d|max={d['max_abs_diff']:11.5g}  "

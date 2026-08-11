@@ -836,6 +836,7 @@ def fct_tracer_advection(
     high_order: str = "ppm",
     tracer_before: jnp.ndarray | None = None,
     active_mask: jnp.ndarray | None = None,
+    fixed_thickness: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -895,6 +896,13 @@ def fct_tracer_advection(
         corr > 0.9999 pre-fix; only the boundedness of the LIMITER inputs
         at dry cells was unfaithful).  Passing the mask is a strict
         no-op away from dry/wet boundaries.
+    fixed_thickness : bool
+        Static Python bool.  True under key_linssh (fixed layer
+        thicknesses; the caller adds the surface concentration/dilution
+        flux separately after limiting): the limiter certifies against
+        ``h_k`` itself.  False (z-star default): the AFTER thickness
+        ``h_new = h_k - dt*div(mf)`` is derived in the body and the
+        Zalesak box is certified against it -- see the h_new block.
 
     Returns
     -------
@@ -981,20 +989,54 @@ def fct_tracer_advection(
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
 
-    # Total low-order tendency for the Zalesak bounds
-    dq_low = grad_safe_ratio(
-        -(div_h_low + vert_div_low),
-        jnp.maximum(h_k, eps),
-        h_k > ratio_grad_floor(tracer.dtype),
-    )
-
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
     ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
     ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
 
-    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+    # AFTER thickness from the SAME advecting fluxes: under z-star the
+    # caller's flux-form update divides by h_new = h_k - dt*div(mf), so the
+    # provisional low-order update and the Zalesak budgets MUST be
+    # normalised by h_new -- NEMO traadv_fct's ``zwi = (e3t(Kbb)*pt(Kbb) -
+    # p2dt*ztra) / e3t(Kaa)``.  Certifying the box against h_OLD (the
+    # pre-2026-08-10 behaviour) left the ACTUAL update outside the box by
+    # exactly T*dt*div(mf)/h under divergent flow: measured overshoot
+    # 1.18365e-3 == 30 * 3.945e-5 (= T*max|dt*div/h|) on the repro, and
+    # +0.12/-0.03 K per day at the lock-exchange front (eta and the front
+    # are correlated, so the mis-sizing is systematic, not noise).
+    # Solenoidal flow: h_new == h_k, bit-identical to the old behaviour.
+    #
+    # ``fixed_thickness`` (key_linssh, static Python bool): the coordinate
+    # keeps thicknesses FIXED and the caller adds the surface
+    # concentration/dilution flux separately AFTER limiting, so the
+    # after-thickness the update divides by IS h_k -- deriving h_new from
+    # the interior fluxes there would mis-certify (codex 2026-08-10).
+    #
+    # LEAPFROG CAVEAT: under the outer leapfrog (tracer_before set,
+    # dt = 2*rdt), the caller passes the NOW-eta thickness as h_k while
+    # NEMO's zwi uses e3t(Kbb) -> e3t(Kaa); the certification there is
+    # approximate (same class as the pre-fix behaviour on ALL paths).
+    # Exact leapfrog certification needs the BEFORE thickness threaded --
+    # flagged, not fixed here.  Only the EULER consumer is exactly
+    # certified; inner AB2 extrapolates this limited divergence with a
+    # history term before the thickness division, which no single-step
+    # certificate covers (the pre-existing AB2 limitation).
+    if fixed_thickness:
+        h_new = h_k
+    else:
+        div_mf_h = divergence_cgrid(mass_flux_u, mass_flux_v, grid)
+        w_full = jnp.pad(w_int, (*pad_axes_v, (1, 1)))
+        vert_div_mf = w_full[..., :-1] - w_full[..., 1:]
+        h_new = h_k - dt * (div_mf_h + vert_div_mf)
+    t_grad_h = ratio_grad_floor(tracer.dtype)
+
+    # Provisional low-order (upwind) update in AFTER-thickness form.
+    q_td = grad_safe_ratio(
+        h_k * base - dt * (div_h_low + vert_div_low),
+        jnp.maximum(h_new, eps),
+        h_new > t_grad_h,
+    )
 
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
@@ -1048,9 +1090,11 @@ def fct_tracer_advection(
         jnp.minimum(jnp.minimum(tr_north_do, tr_above_do), tr_below_do),
     )
 
+    # h_new, not h_k: the budgets Q/P are increments of the AFTER field,
+    # which the caller normalises by the AFTER thickness (see h_new above).
     alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
         ad_flux_u, ad_flux_v, ad_vert_int,
-        q_td, q_min, q_max, h_k, dt, grid, eps,
+        q_td, q_min, q_max, h_new, dt, grid, eps,
     )
 
     # --- Step 4: limited face fluxes (conservative by construction) ---
@@ -1372,7 +1416,10 @@ def _zalesak_signsplit_face_alphas(
         vertical interface flux (positive = upward).
     q_td : array (n_lat, n_lon, nlev) — provisional low-order update.
     q_min, q_max : array (n_lat, n_lon, nlev) — local stencil bounds.
-    h_k : array (n_lat, n_lon, nlev) — layer thickness.
+    h_k : array (n_lat, n_lon, nlev) — the thickness the caller's update
+        normalises by (the AFTER thickness ``h_new`` under z-star; equal to
+        the old thickness only for non-divergent flow — see the h_new block
+        in ``fct_tracer_advection``).
     dt : float — baroclinic time step.
     grid : LatLonGrid.
     eps : float — divide-by-zero guard for empty P+/P-.

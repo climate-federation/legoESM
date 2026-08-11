@@ -118,6 +118,40 @@ class TestMonotonicity:
         assert bool(jnp.all(new_tracer <= q_max + slack))
         assert bool(jnp.all(new_tracer >= q_min - slack))
 
+    def test_bounded_under_divergent_flow_zstar(self, grid_small):
+        """DIVERGENT flow + z-star after-thickness division (2026-08-10).
+
+        The pre-fix code certified the Zalesak box against h_OLD while the
+        z-star flux-form update divides by h_new = h - dt*div(mf); the
+        actual update then violated the global tracer bounds by exactly
+        T*dt*div/h (on THIS 12x16 setup: 1.762855e-3 == 30 * 5.875839e-5;
+        +0.12 K/day at the tripole lock-exchange front).  The uniform-flow
+        monotonicity test above CANNOT catch it (div(mf)=0).
+        Post-fix residual is ~6e-11 (arithmetic-order roundoff between the
+        separately evaluated budget and divergence expressions); the 1e-9
+        tolerance sits 6 decades below the defect this test pins.
+        """
+        n_lat, n_lon, nlev = grid_small.n_lat, grid_small.n_lon, 4
+        h = jnp.full((n_lat, n_lon, nlev), 10.0)
+        dt = 100.0
+        T = jnp.where((jnp.arange(n_lon) < n_lon // 2)[None, :, None],
+                      5.0, 30.0)
+        T = jnp.broadcast_to(T, (n_lat, n_lon, nlev)).astype(jnp.float64)
+        w_half = jnp.zeros((n_lat, n_lon, nlev + 1))
+        lon_idx = jnp.arange(n_lon + 1)
+        u = 0.5 + 0.5 * jnp.sin(2 * jnp.pi * lon_idx / n_lon)
+        mu = 10.0 * jnp.broadcast_to(u[None, :, None],
+                                     (n_lat, n_lon + 1, nlev))
+        mv = jnp.zeros((n_lat + 1, n_lon, nlev))
+        div_h, div_w = fct_tracer_advection(
+            T, mu, mv, w_half, h, grid_small, dt, high_order="centred2")
+        from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+        h_new = h - dt * divergence_cgrid(mu, mv, grid_small)
+        assert bool(jnp.all(h_new > 0.0))
+        T_new = (h * T - dt * (div_h + div_w)) / h_new
+        assert float(jnp.max(T_new)) <= 30.0 + 1e-9
+        assert float(jnp.min(T_new)) >= 5.0 - 1e-9
+
 
 class TestLeapfrogTimeLevel:
     """FCT under the modified leap-frog: the limited advective increment is

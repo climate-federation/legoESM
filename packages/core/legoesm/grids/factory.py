@@ -40,6 +40,7 @@ from typing import Any
 #: Global grids ocean and atmosphere share, instantiable via :func:`create_grid`.
 GLOBAL_GRID_TYPES: tuple[str, ...] = (
     "cubed_sphere",
+    "fesom",
     "gaussian",
     "latlon",
     "mpas",
@@ -91,6 +92,56 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
         from legoesm.grids.tripole import create_tripole_grid
 
         return create_tripole_grid(grid_file, **kwargs)
+
+    if grid_type == "fesom":
+        # FESOM2 unstructured triangular mesh (the fesom_jax dycore).  Like
+        # tripole it is mesh-file-backed, so it is NOT in _RESOLUTION_GRIDS.
+        if resolution is not None:
+            raise ValueError(
+                "fesom is a mesh-file-backed ocean grid: pass "
+                "mesh_dir=<FESOM mesh directory>, not a resolution."
+            )
+        mesh_dir = kwargs.pop("mesh_dir", None)  # None => packaged pi mesh
+        H_max = kwargs.pop("H_max", None)
+        nlev = kwargs.pop("nlev", None)
+        land_lat_threshold = kwargs.pop("land_lat_threshold", 90.0)
+        # Explicit interface depths, so FESOM can be built on the SAME vertical
+        # grid as the other dycores. Silently dropping this (the pre-2026-08-08
+        # behaviour) left FESOM on uniform 1 m layers while the caller's
+        # diagnostic weighted it with a stretched z-star dz.
+        zbar = kwargs.pop("zbar", None)
+        if H_max is None or nlev is None:
+            raise ValueError(
+                "fesom requires H_max and nlev (a FESOM mesh without a "
+                "vertical specification is meaningless here)."
+            )
+        # Function-scope imports: the core grids package must not import the
+        # ocean package or fesom_jax at module scope.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            FesomOceanGrid,
+            _require_fesom_jax,
+            build_flat_bottom_mesh,
+        )
+
+        # Raise a clear ImportError naming the package + install command
+        # rather than a raw ModuleNotFoundError from the line below.
+        _require_fesom_jax()
+        from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
+
+        mesh = load_mesh(DEFAULT_PI_MESH_DIR if mesh_dir is None else mesh_dir)
+        mesh = build_flat_bottom_mesh(
+            mesh,
+            H_max=H_max,
+            nlev=nlev,
+            land_lat_threshold=land_lat_threshold,
+            zbar=zbar,
+        )
+        if kwargs:
+            raise ValueError(
+                f"create_grid('fesom', ...) got unexpected keyword(s) "
+                f"{sorted(kwargs)}. Refusing to silently drop them."
+            )
+        return FesomOceanGrid(mesh)
 
     raise ValueError(
         f"Unknown grid_type {grid_type!r}. Available global grids: "

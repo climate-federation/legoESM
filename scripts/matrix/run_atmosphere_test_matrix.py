@@ -189,6 +189,7 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cube + latlon
     # Hydrostatic dry
     "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
+    "baroclinic_steady":  frozenset({"hydro"}),           # #1028 J-W, no perturbation
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
     "gravity_wave_3_1":   frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -320,6 +321,14 @@ def _build_test_matrix() -> list[TestCase]:
                 "hydrostatic", "held_suarez", g, res[g], vert, 200, 30))
             matrix.append(TestCase(
                 "hydrostatic", "baroclinic", g, res[g], vert, 10, 2))
+        # #1028 control: the SAME J-W state with the perturbation OFF.  Sigma
+        # only and un-rotated on purpose — it exists to be the one-variable
+        # partner of the `baroclinic` sigma case above, and `rotated_steady`
+        # cannot serve (hybrid coordinate + alpha=45 deg, and it is out of
+        # balance on every grid).
+        matrix.append(TestCase(
+            "hydrostatic", "baroclinic_steady", g, res[g], "sigma", 10, 2,
+            {"perturbed": False}))
         # DCMIP transport: sigma only
         for tn in [11, 12, 13]:
             matrix.append(TestCase(
@@ -4779,6 +4788,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     _rot_alpha = float(tc.run_kwargs.get("alpha", jnp.pi / 4.0)) if _rotated else 0.0
     _rot_perturbed = bool(tc.run_kwargs.get(
         "perturbed", tc.case == "rotated_baroclinic")) if _rotated else True
+    # Un-rotated J-W: `baroclinic` carries the perturbation, `baroclinic_steady`
+    # (#1028) is the SAME balanced initial state with it switched off.  A model
+    # that holds the base state leaves the zonal jet where it started; one that
+    # does not is losing the flow the eddies would have fed on, which is
+    # upstream of any eddy-growth measurement.
+    _perturbed = bool(tc.run_kwargs.get("perturbed", True))
     # DCMIP 2012 §2-0-0 rest-state-with-topography variant.  Replaces the
     # baroclinic init with a true rest state over a ridged cosine-bell
     # mountain.  The dycore should preserve rest indefinitely; spurious
@@ -4931,7 +4946,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         elif _dcmip2008_dry:
             state = _build_dcmip2008_state(tc.case, "cube", grid, sigma)
         else:
-            state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
+            state = baroclinic_wave_init(grid, sigma_for_init, perturbed=_perturbed)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -5005,7 +5020,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 tc.case, "latlon", grid, sigma)
         else:
             state_cc = baroclinic_wave_init_latlon(
-                grid, sigma_for_init, perturbed=True)
+                grid, sigma_for_init, perturbed=_perturbed)
         state = hydrostatic_to_cgrid(state_cc, grid)
 
         def step_fn(s, dt_):
@@ -5080,7 +5095,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
         else:
             state = baroclinic_wave_init_mpas(
-                mesh, sigma_for_init, perturbed=True)
+                mesh, sigma_for_init, perturbed=_perturbed)
         grid = mesh
 
         def step_fn(s, dt_):
@@ -5092,10 +5107,19 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             return (check_finite({"T": s.T.data, "u": s.u.data}),
                     float(jnp.max(jnp.abs(s.u.data))))
 
+        ps_init_ico = np.array(state.p_s.data)
+
         def scalar_fn(s):
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                # Same J-W growth diagnostic the cube and lat-lon branches
+                # already emit (#1028/#1081): without it the icosahedral arm
+                # has no NATIVE-grid, regrid-free growth series, and the
+                # cross-grid growth comparison would rest on the regridded
+                # canvas alone.
+                "ps_perturbation": float(jnp.max(
+                    jnp.abs(s.p_s.data - ps_init_ico))),
             }
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
@@ -5151,7 +5175,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 tc.case, "spectral", grid, sigma)
         else:
             state = baroclinic_wave_init_spectral(
-                grid, sigma_for_init, perturbed=True)
+                grid, sigma_for_init, perturbed=_perturbed)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -6696,6 +6720,7 @@ RUNNERS: dict[str, Callable] = {
     "held_suarez": run_held_suarez,
     "held_suarez_topo": run_held_suarez,             # M1.a (HS over topo)
     "baroclinic": run_baroclinic,
+    "baroclinic_steady": run_baroclinic,             # #1028 unperturbed control
     "rotated_baroclinic": run_baroclinic,            # M1.a (DCMIP 2008 §4-2 rotated)
     "rotated_steady": run_baroclinic,                # M1.a (DCMIP 2008 §4-1 rotated)
     "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
@@ -6794,6 +6819,11 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
         {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
     ],
+    "baroclinic_steady": [
+        {"field": "T_3d",       "vmin": 220,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
+        {"field": "u",          "vmin": -40,   "vmax": 80,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
+    ],
     "baroclinic": [
         {"field": "T_3d",       "vmin": 220,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
         {"field": "u",          "vmin": -40,   "vmax": 80,    "cmap": "RdBu_r",  "units": "m/s"},
@@ -6843,6 +6873,10 @@ ATMOSPHERE_ZONAL_MEAN_FIELDS: dict[str, list[dict]] = {
          "units": "K",   "longname": "Zonal-mean temperature"},
     ],
     "baroclinic": [
+        {"field": "T_3d", "vmin": 220,   "vmax": 310,  "cmap": "plasma",
+         "units": "K",   "longname": "Zonal-mean temperature"},
+    ],
+    "baroclinic_steady": [
         {"field": "T_3d", "vmin": 220,   "vmax": 310,  "cmap": "plasma",
          "units": "K",   "longname": "Zonal-mean temperature"},
     ],
