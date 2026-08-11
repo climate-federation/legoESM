@@ -486,6 +486,20 @@ def main(argv=None):
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
     args = ap.parse_args(argv)
+    if args.n_steps < 1:
+        raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
+    if args.n_steps != 1 and args.step_run in (
+            f"{ORACLE_ROOT}/run_hydro_1step_gfs", None):
+        # codex nstep review #3: comparing N port steps against the
+        # 1-step reference is a silent protocol mismatch that returns
+        # normally without --max-rel.  The N-step reference must be
+        # chosen EXPLICITLY.
+        raise SystemExit(
+            f"--n-steps {args.n_steps} requires an explicit --step-run "
+            f"pointing at an oracle run of exactly "
+            f"{args.n_steps} * dt_atmos (e.g. run_hydro_"
+            f"{args.n_steps * 32}min_gfs); the default is the 1-step "
+            f"reference.")
     if args.nh:
         if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
             args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
@@ -858,6 +872,8 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
+                       "n_steps": args.n_steps,
+                       "step_run": args.step_run,
                        "face_map": [{"port_face": pf + 1,
                                      "oracle_tile": perm[pf] + 1,
                                      "transposed": bool(meta[pf][perm[pf]][0]),
