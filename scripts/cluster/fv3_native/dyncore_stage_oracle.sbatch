@@ -15,6 +15,11 @@
 # (real arm / staged arm) on the C48 hydro parity deck, certify bitwise,
 # then run the port stage comparison (clean + two mutation controls).
 set -uo pipefail
+# /local tmp gets reaped mid-run on some nodes (gfortran assembler died
+# with "can't open /local/cc*.s"); keep every tmpfile on burg.
+export TMPDIR=/burg-archive/glab/users/pg2328/fv3_duo_gaps/tmp_${SLURM_JOB_ID:-manual}
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
 MPI=/burg/opt/openmpi-4.1.1_ucx_cuda_11.0.3_support
 export PATH=$MPI/bin:$PATH
 export LD_LIBRARY_PATH=$MPI/lib:/burg/opt/netcdf-fortran-4.6.2/lib:/burg/opt/netcdf-c-4.9.3/lib:${LD_LIBRARY_PATH:-}
