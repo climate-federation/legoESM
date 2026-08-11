@@ -655,6 +655,39 @@ def main(argv=None):
         raise SystemExit(f"FACE-MAP DRIFT {drift}: refuse to compare on a "
                          f"silently different relabelling.")
 
+    # ------- static-field control: f0 incl corner-diagonal blocks -----
+    # vortflux corner cells are the confirmed carrier; vort = wk + f0
+    # and wk is at floor, so f0's corner-diagonal region (the one part
+    # of vort the compute-window rows cannot see) is the prime suspect.
+    if "IC_f0" in dumps[0]:
+        print("\nf0 CONTROL (pseudo-scalar, full padded domain incl "
+              "corner-diagonal blocks):")
+        for pf in range(6):
+            ot = perm[pf]
+            m = meta[pf][ot]
+            p_f0 = np.asarray(ctx["gs6"][pf]["f0"], dtype=np.float64)
+            o_f0 = dumps[ot]["IC_f0"]
+            det = _map_det(m)
+            p_m = FSP.DIHEDRAL[m[1]](p_f0) * det
+            o_m = o_f0 if not m[0] else o_f0.T
+            if p_m.shape != o_m.shape:
+                print(f"  face{pf+1}: shape mismatch {p_m.shape} vs "
+                      f"{o_m.shape}")
+                continue
+            hm = {}
+            ni_, nj_ = p_m.shape
+            ci = np.zeros(ni_, bool)
+            cj = np.zeros(nj_, bool)
+            ci[NG:ni_ - NG] = True
+            cj[NG:nj_ - NG] = True
+            d = np.abs(p_m - o_m)
+            comp = d[np.ix_(ci, cj)].max()
+            he = max(d[np.ix_(ci, ~cj)].max(), d[np.ix_(~ci, cj)].max())
+            hc = d[np.ix_(~ci, ~cj)].max()
+            print(f"  face{pf+1}->tile{ot+1}: compute={comp:.3e} "
+                  f"halo_edge={he:.3e} halo_corner={hc:.3e} "
+                  f"(scale {np.abs(o_f0).max():.3g})")
+
     # ------- replay port substep 1 with the stage hook -------
     stages: dict = {}
 

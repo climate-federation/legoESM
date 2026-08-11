@@ -199,6 +199,10 @@ program fv3_dyncore_stage_driver
   call stage_dump2('GR_LAT', &
       real(Atm(n)%gridstruct%grid(isd:ied + 1, jsd:jed + 1, 2)))
 
+  ! the runtime Coriolis f0 (test_cases.F90:787-800: analytic +
+  ! ext_scalar + fill_corners YDir) -- the vort = wk + f0 input whose
+  ! corner-diagonal region d_sw5's fv_tp_2d consumes.
+  call stage_dump2('IC_f0', Atm(n)%gridstruct%f0(isd:ied, jsd:jed))
   call stage_dump3('IC_u', Atm(n)%u)
   call stage_dump3('IC_v', Atm(n)%v)
   call stage_dump3('IC_pt', Atm(n)%pt)
