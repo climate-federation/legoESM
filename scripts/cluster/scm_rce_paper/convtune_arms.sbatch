@@ -75,6 +75,16 @@ esac
 SCHEMES=(sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold)
 SCHEME=${SCHEMES[$SLURM_ARRAY_TASK_ID]}
 
+# Node-local scratch has broken this campaign four times now: /local cleaned
+# mid-run, /tmp cleaned mid-run, CODEX_HOME vanishing between mkdir and use,
+# and now a FULL /tmp on g008 -- "cannot create temp file for here-document:
+# No space left on device", which kills the parameter-count snippet before it
+# can print anything. Point TMPDIR at durable space so the shell's own
+# here-documents have somewhere to live.
+export TMPDIR=${SLURM_TMPDIR:-/burg-archive/glab/users/pg2328/_jobtmp/${SLURM_JOB_ID:-$$}}
+mkdir -p "$TMPDIR" || { echo "PREFLIGHT FAIL: cannot create TMPDIR $TMPDIR"; exit 89; }
+trap 'rm -rf /burg-archive/glab/users/pg2328/_jobtmp/${SLURM_JOB_ID:-$$}' EXIT
+
 export JAX_PLATFORMS=cpu
 export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$WT
 # See convtune_verify.sbatch: a persistent XLA:CPU cache shared across
