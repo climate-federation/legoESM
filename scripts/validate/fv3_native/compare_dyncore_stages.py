@@ -202,7 +202,22 @@ KINDS = {
     # sign are resolved EMPIRICALLY per face (best of 4 combos) --
     # see map_bm_best.
     "bm":      ((49, 49), "bm", 0),
+    # PSEUDO quantities: relative vorticity is a pseudoscalar, so it and
+    # its transport fluxes acquire an EXTRA sign on faces whose
+    # composite map has determinant -1 (pure transpose).  det =
+    # (transpose ? -1 : +1) * (dihedral in {id, r180} ? +1 : -1).
+    "pscalar": ((48, 48), "pscalar", 3),
+    "pxflux":  ((49, 48), "pyflux", +2),
+    "pyflux":  ((48, 49), "pxflux", -2),
 }
+
+
+def _map_det(meta) -> float:
+    transposed, nm, su, sv = meta
+    det = -1.0 if transposed else 1.0
+    if nm in ("fi", "fj"):
+        det = -det
+    return det
 
 
 def map_bm_best(port_arr, orc_direct, orc_partner, meta):
@@ -257,6 +272,12 @@ def map_stage_field(port_arr, orc_direct, orc_partner, kind, meta):
         p = p * su
     elif sgn_ix == -1:
         p = p * sv
+    elif sgn_ix == +2:
+        p = p * su * _map_det(meta)
+    elif sgn_ix == -2:
+        p = p * sv * _map_det(meta)
+    elif sgn_ix == 3:
+        p = p * _map_det(meta)
     if not transposed:
         o = window(np.asarray(orc_direct), kind)
     else:
@@ -446,13 +467,11 @@ def stage_rows():
     r("S13_dsw45", "S13_dsw45", "ke", "S13_dsw45_kee", "S13_dsw45_kee",
       "bscalar")
     r("S13_dsw45", "S13_dsw45", "wk", "S13_dsw45_wkk", "S13_dsw45_wkk",
-      "ascalar")
-    dnote = ("definition-mismatch suspected (downstream at floor; "
-             "row not authoritative)")
+      "pscalar", note="pseudo-scalar (vorticity)")
     r("S13_dsw45", "S13_dsw45", "vortfluxx", "S13_dsw45_vortfluxx",
-      "S13_dsw45_vortfluxy", "xflux", note=dnote)
+      "S13_dsw45_vortfluxy", "pxflux", note="pseudo-flux")
     r("S13_dsw45", "S13_dsw45", "vortfluxy", "S13_dsw45_vortfluxy",
-      "S13_dsw45_vortfluxx", "yflux", note=dnote)
+      "S13_dsw45_vortfluxx", "pyflux", note="pseudo-flux")
     # the pre-d_sw6 momentum carriers: names the term if u/v corner
     # wedges originate before d_sw6's vort-flux application.
     r("S13_dsw45", "S13_dsw45", "ut", "S13_dsw45_utt",
@@ -734,7 +753,8 @@ def main(argv=None):
               f"{rel['corner']:10.2e} {rel['halo_edge']:10.2e} "
               f"{rel['halo_corner']:10.2e} {scale:10.3g}  "
               f"{skip_note} {flag}")
-        if (flag or kind == "bm") and scale:
+        if (flag or kind in ("bm", "pxflux", "pyflux", "pscalar")) \
+                and scale:
             # LOCALISE a flagged row: which faces, which edge strips.
             for pf_, ot_, tr_, rm_, strips_, combo_ in per_face_detail:
                 worst_r = max(max(rm_.values()), max(strips_.values()))
