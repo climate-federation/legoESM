@@ -54,6 +54,8 @@ from legoesm.grids.gaussian import (
     sh_synthesis_H,
 )
 from legoesm.grids.vertical import (
+    # promoted SB kernel (one kernel, two lanes: spectral + MPAS sigma)
+    vertical_advection_sigma_sb as _vertical_advection_sigma_sb,
     SigmaCoordinate,
     HybridSigmaPressureCoordinate,
     pressure_from_hybrid,
@@ -394,40 +396,6 @@ def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
-
-
-def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
-    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
-
-        -sigma_dot * df/dsigma |_k
-            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
-                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
-
-    with sigma_dot = 0 at the top and bottom interfaces (the BCs
-    ``_compute_sigma_dot_gaussian`` already builds in). This is the standard
-    ECMWF/SB81 form: it is algebraically identical to a flux-form divergence
-    of the interface flux ``sigma_dot_{j} * (f_k + f_{k+1})/2`` minus
-    ``f_k * (d sigma_dot/d sigma)_k``, so the mass-weighted column integral
-    telescopes against the continuity equation and the discretization
-    supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
-
-    Measured motivation: the legacy first-order UPWIND advective form
-    (:func:`_vertical_advection_sigma_gaussian`) carries a systematic
-    -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
-    weighted temperature sink at T63L8 — the dominant term of the dycore's
-    measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
-    probe, scripts/validate/aimip_t_budget.py; closure FD vs budget 2%).
-
-    ``sigma_dot`` is on interfaces, shape (..., nlev+1); ``field`` is on
-    full levels (..., nlev).
-    """
-    df = jnp.diff(field, axis=-1)                 # (..., nlev-1) interior interfaces
-    sd_int = sigma_dot[..., 1:-1]                 # (..., nlev-1)
-    contrib = sd_int * df
-    pad_axes = ((0, 0),) * (contrib.ndim - 1)
-    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # sigma_dot_{k-1/2}(f_k - f_{k-1})
-    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # sigma_dot_{k+1/2}(f_{k+1} - f_k)
-    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
 
 
 def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):

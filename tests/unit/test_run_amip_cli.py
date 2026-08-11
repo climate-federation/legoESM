@@ -3480,3 +3480,43 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
          "--mpas-vert-advection-scheme", "van_leer"]), parser))
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
         cfg_hyb.validate_strict()
+
+
+@pytest.mark.parametrize("main,tracers", [
+    ("sb_centered", "van_leer"),
+    ("sb_centered", "upwind"),
+    ("van_leer", ""),
+])
+def test_vert_advection_scheme_split_threads_and_validates(main, tracers):
+    """--mpas-vert-advection-scheme(+-tracers) reach DycoreConfig and pass
+    validate_strict on the MPAS sigma lane (the whole CLI route, not just the
+    bound tuple)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--vertical-coord", "sigma",
+        "--mpas-vert-advection-scheme", main,
+        "--mpas-vert-advection-scheme-tracers", tracers,
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.mpas_vert_advection_scheme == main
+    assert cfg.dycore.mpas_vert_advection_scheme_tracers == tracers
+    cfg.validate_strict()
+
+
+def test_sb_centered_without_explicit_tracer_scheme_is_refused():
+    """sb_centered is centered (not positivity-safe for moisture): leaving the
+    tracer scheme to follow it must FAIL validate_strict, loudly."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--vertical-coord", "sigma",
+        "--mpas-vert-advection-scheme", "sb_centered",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="positivity-safe"):
+        cfg.validate_strict()

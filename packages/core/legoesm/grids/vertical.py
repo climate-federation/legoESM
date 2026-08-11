@@ -543,7 +543,43 @@ def _vertical_advection_upwind_sigma(
     return -sigma_dot_full * grad
 
 
-VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer", "sb_centered")
+
+
+def vertical_advection_sigma_sb(
+    field: jax.Array,
+    sigma_dot: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
+
+        -sigma_dot * df/dsigma |_k
+            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
+                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with ``sigma_dot = 0`` at the top and bottom interfaces (both σ̇ builders
+    in this repo construct those BCs).  Standard ECMWF/SB81 form: it is
+    algebraically a flux-form divergence of the interface flux
+    ``sigma_dot_j * (f_k + f_{k+1})/2`` minus ``f_k * (dσ̇/dσ)_k``, so the
+    mass-weighted column integral telescopes against continuity and
+    ``sum(p_s * dsigma * f)`` is conserved under adiabatic flow — the pairing
+    the first-order upwind advective form lacks (measured -0.32..-0.47 K/day
+    mass-weighted T sink at T63L8, scripts/validate/aimip_t_budget.py).
+
+    CENTERED => non-diffusive but dispersive: NOT for tracers (overshoots
+    would drive moisture negative); use "van_leer" there.  Shared by the
+    spectral-PE lane (which introduced it) and the MPAS sigma lane.
+
+    ``sigma_dot`` on interfaces ``(..., nlev+1)``; ``field`` on full levels
+    ``(..., nlev)``.
+    """
+    df = jnp.diff(field, axis=-1)                  # (..., nlev-1)
+    sd_int = sigma_dot[..., 1:-1]
+    contrib = sd_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # σ̇_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # σ̇_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
 
 
 def van_leer_face_values_sigma(
@@ -822,6 +858,8 @@ def vertical_advection(
     """
     if scheme == "van_leer":
         return _vertical_advection_van_leer_sigma(field, sigma_dot, sigma_coord)
+    if scheme == "sb_centered":
+        return vertical_advection_sigma_sb(field, sigma_dot, sigma_coord)
     if scheme != "upwind":
         raise ValueError(
             f"unknown vertical advection scheme {scheme!r}; expected one of "

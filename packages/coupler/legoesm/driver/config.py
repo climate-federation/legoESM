@@ -268,6 +268,13 @@ class DycoreConfig(NamedTuple):
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
     # callers, not full tuple ABI (exact unpacking / len() still break).
     mpas_vert_advection_scheme: str = "upwind"
+    # Tracer-specific vertical advection scheme.  "" (default) = follow
+    # mpas_vert_advection_scheme.  Exists because "sb_centered" (energy-
+    # conserving Simmons-Burridge pairing for θ/winds) is centered and NOT
+    # positivity-safe for moisture — a run selecting it MUST pick the tracer
+    # scheme explicitly ("upwind" or "van_leer"); validate_strict enforces.
+    # Appended at the tuple END (same positional-construction note as above).
+    mpas_vert_advection_scheme_tracers: str = ""
 
 
 class EvaluationConfig(NamedTuple):
@@ -2302,12 +2309,28 @@ class ExperimentConfig(NamedTuple):
                     "Unset it or use the MPAS lane.")
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
-        _vert_adv_options = ("upwind", "van_leer")
+        _vert_adv_options = ("upwind", "van_leer", "sb_centered")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
                 f"{_vert_adv_options}, got {d.mpas_vert_advection_scheme!r}")
-        elif d.mpas_vert_advection_scheme != "upwind":
+        _tracer_adv = (d.mpas_vert_advection_scheme_tracers
+                       or d.mpas_vert_advection_scheme)
+        if d.mpas_vert_advection_scheme_tracers not in ("",) + _vert_adv_options:
+            errors.append(
+                f"dycore.mpas_vert_advection_scheme_tracers must be '' or one "
+                f"of {_vert_adv_options}, got "
+                f"{d.mpas_vert_advection_scheme_tracers!r}")
+        elif _tracer_adv == "sb_centered":
+            errors.append(
+                "the centered SB pairing is not positivity-safe for tracers: "
+                "with mpas_vert_advection_scheme='sb_centered', set "
+                "mpas_vert_advection_scheme_tracers to 'upwind' or "
+                "'van_leer' explicitly")
+        if d.mpas_vert_advection_scheme not in _vert_adv_options:
+            pass  # membership error already recorded above
+        elif (d.mpas_vert_advection_scheme != "upwind"
+              or d.mpas_vert_advection_scheme_tracers not in ("", "upwind")):
             if d.discretization != "mpas":
                 errors.append(
                     "dycore.mpas_vert_advection_scheme is only wired into the "

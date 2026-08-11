@@ -150,7 +150,7 @@ def test_van_leer_raises_below_the_stencil_width(nlev):
 
 
 def test_scheme_tuple_is_the_dispatch_domain():
-    assert VERTICAL_ADVECTION_SCHEMES == ("upwind", "van_leer")
+    assert VERTICAL_ADVECTION_SCHEMES == ("upwind", "van_leer", "sb_centered")
 
 
 # ------------------------------------------------------------------ consistency
@@ -511,6 +511,11 @@ def test_stretched_grid_stays_exact_on_linear_and_monotone():
 # --------------------------------------------------------------- boundary + BC
 
 
+RECONSTRUCTION_SCHEMES = ("upwind", "van_leer")   # sb_centered: centered,
+# claims NEITHER the boundary-equality nor the positivity property below —
+# which is exactly why primitive_eq_mpas refuses it for tracers.
+
+
 def test_boundary_levels_are_the_first_order_tendency_under_both_schemes():
     """The boundary CONTRACT: at k=0 and k=nlev-1 van-Leer returns exactly the
     upwind tendency, for any σ̇ including a perturbed boundary interface.
@@ -525,7 +530,7 @@ def test_boundary_levels_are_the_first_order_tendency_under_both_schemes():
     sd = jnp.asarray(rng.normal(size=(4, NLEV + 1)) * 1e-5)
     sd0 = sd.at[..., 0].set(0.0).at[..., -1].set(0.0)
     sd1 = sd.at[..., 0].set(9.9e-4).at[..., -1].set(-9.9e-4)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in RECONSTRUCTION_SCHEMES:
         a = vertical_advection(f, sd0, coord, scheme=scheme)
         b = vertical_advection(f, sd1, coord, scheme=scheme)
         # Both schemes give the SAME boundary tendency (van_leer defers to the
@@ -549,7 +554,7 @@ def test_jit_parity_matches_eager():
     coord = _coord()
     f = _theta_smooth(coord.sigma_full)[None, :]
     sd = _sigma_dot(coord.sigma_half)[None, :]
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in RECONSTRUCTION_SCHEMES:
         eager = vertical_advection(f, sd, coord, scheme=scheme)
         jitted = jax.jit(vertical_advection, static_argnums=(3,))(
             f, sd, coord, scheme)
@@ -710,7 +715,7 @@ def test_tracer_blob_stays_positive_and_bounded_under_varying_sigma_dot():
     assert 2.0 <= cour / 0.0322 <= 2.5, (
         f"Courant {cour:.4f} is {cour/0.0322:.2f}x the production raw-face "
         f"maximum; the docstring claims ~2.1x")
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in RECONSTRUCTION_SCHEMES:
         q = q0
         lo = hi = None
         for _ in range(400):
@@ -729,7 +734,7 @@ def test_float32_and_float64_finite_including_uniform_columns(dtype):
     coord = create_sigma_coordinate(NLEV, sigma_top=SIGMA_TOP, dtype=dtype)
     f = jnp.asarray(_theta_smooth(coord.sigma_full)[None, :], dtype)
     sd = jnp.asarray(_sigma_dot(coord.sigma_half)[None, :], dtype)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in RECONSTRUCTION_SCHEMES:
         out = vertical_advection(f, sd, coord, scheme=scheme)
         assert out.dtype == dtype and bool(jnp.all(jnp.isfinite(out)))
 
@@ -880,7 +885,7 @@ def test_factory_forwards_the_scheme_to_the_built_mpas_model():
     mesh = create_voronoi_mesh(1)
     coord = _coord(6)
     base = dict(discretization="mpas", model_type="hydrostatic", dt=300.0)
-    for scheme in VERTICAL_ADVECTION_SCHEMES:
+    for scheme in RECONSTRUCTION_SCHEMES:
         cfg = ExperimentConfig(
             dycore=DycoreConfig(mpas_vert_advection_scheme=scheme, **base),
             grid=ExperimentConfig().grid._replace(grid_type="voronoi",
@@ -889,3 +894,30 @@ def test_factory_forwards_the_scheme_to_the_built_mpas_model():
         assert model.config.vert_advection_scheme == scheme, (
             f"factory dropped the scheme: asked {scheme!r}, model has "
             f"{model.config.vert_advection_scheme!r}")
+
+
+
+def test_sb_centered_is_not_positivity_safe_on_tracers():
+    """Documents WHY primitive_eq_mpas raises for tracer sb_centered: the
+    centered pairing genuinely produces negative values from a positive blob.
+    If this ever starts PASSING positivity, the guard should be revisited."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.grids.vertical import create_sigma_coordinate, vertical_advection
+
+    nlev = 30
+    vc = create_sigma_coordinate(nlev, dtype=jnp.float64)
+    k = jnp.arange(nlev, dtype=jnp.float64)
+    q = jnp.exp(-0.5 * ((k - 10.0) / 1.5) ** 2)[None, :]        # positive blob
+    sd = 0.05 * jnp.sin(jnp.linspace(0, 3 * np.pi, nlev + 1))[None, :]
+    dt = 300.0
+    x = q
+    went_negative = False
+    for _ in range(200):
+        x = x + dt * vertical_advection(x, sd, vc, scheme="sb_centered")
+        if float(x.min()) < -1e-12:
+            went_negative = True
+            break
+    assert went_negative, (
+        "sb_centered stayed positive on the adversarial blob; the tracer "
+        "positivity guard in primitive_eq_mpas may be over-strict — revisit.")

@@ -178,6 +178,15 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
     vert_advection_scheme: str = "upwind"
+    # Vertical advection scheme for the TRACERS specifically.  None (default)
+    # = follow ``vert_advection_scheme``.  Needed because "sb_centered"
+    # (Simmons-Burridge energy-conserving pairing for θ and winds, the
+    # 2026-08-11 spectral-lane fix promoted to the shared operator) is
+    # CENTERED and would overshoot moisture negative — the resolved tracer
+    # scheme must be "upwind" or "van_leer" and the tendency entry RAISES
+    # otherwise (never a silent fallback).  Appended at the tuple END:
+    # positional construction by existing callers is preserved.
+    vert_advection_scheme_tracers: str | None = None
 
 
 # ============================================================================
@@ -312,12 +321,32 @@ def mpas_hydrostatic_tendencies(
             f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
             f"{VERTICAL_ADVECTION_SCHEMES}"
         )
-    if _hybrid and _vert_scheme != "upwind":
+    # Tracer scheme: explicit field wins, else follow the main selector.
+    # Positivity guard at fn entry on the STATIC value: a centered scheme on
+    # moisture would overshoot negative, so it must never reach the tracer
+    # vmap — and it must fail HERE, not run silently as something else.
+    _tracer_scheme = config.vert_advection_scheme_tracers or _vert_scheme
+    if _tracer_scheme not in VERTICAL_ADVECTION_SCHEMES:
         raise ValueError(
-            f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
-            "sigma vertical coordinate only; the hybrid lane advects with "
-            "vertical_advection_hybrid, where it would be silently inert. "
-            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+            f"unknown vert_advection_scheme_tracers {_tracer_scheme!r}; "
+            f"expected one of {VERTICAL_ADVECTION_SCHEMES}"
+        )
+    if _tracer_scheme == "sb_centered":
+        raise ValueError(
+            "vert_advection_scheme_tracers resolved to 'sb_centered': the "
+            "centered SB pairing is not positivity-safe for tracers. With "
+            "vert_advection_scheme='sb_centered' set "
+            "vert_advection_scheme_tracers to 'upwind' or 'van_leer' "
+            "explicitly."
+        )
+    if _hybrid and (_vert_scheme != "upwind" or _tracer_scheme != "upwind"):
+        raise ValueError(
+            f"vert_advection_scheme={_vert_scheme!r} / "
+            f"vert_advection_scheme_tracers={_tracer_scheme!r}: non-upwind "
+            "schemes are implemented for the sigma vertical coordinate only; "
+            "the hybrid lane advects with vertical_advection_hybrid, where "
+            "they would be silently inert. Use vertical_coord='sigma' or "
+            "leave both at 'upwind'."
         )
 
     u_3d = state.u.data        # (nEdges, nlev)
@@ -684,7 +713,7 @@ def mpas_hydrostatic_tendencies(
         else:
             dq = dq + jax.vmap(
                 lambda qk: vertical_advection(
-                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
+                    qk, sigma_dot, sigma_coord, scheme=_tracer_scheme),
                 in_axes=-1, out_axes=-1)(q)
         # #930 vertical checkerboard damper on TRACERS (same operator + rate
         # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
