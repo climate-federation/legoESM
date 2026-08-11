@@ -45,8 +45,16 @@ sha256sum $SRC/tools/fv_duogrid.F90
 [ -f "$B/lib_grid_mod.mod" ] || { echo "NO lib_grid_mod.mod"; exit 1; }
 [ -f "$DECK/input.nml" ] || { echo "NO PARITY DECK"; exit 1; }
 
+# EXTCHAIN_SKIP_RUNS=1: reuse existing oracle dumps, run only the
+# comparison + pytest (compare-side iteration without re-running Fortran)
+SKIP=${EXTCHAIN_SKIP_RUNS:-0}
+
 # ---- build our two files in scratch, link pinned objects -------------
 W=$OUT/build
+if [ "$SKIP" = "1" ]; then
+  echo "SKIP_RUNS=1: reusing $OUT/run_c48 + run_c12"
+  [ -f $OUT/run_c48/extchain_t1.dat ] || { echo "NO EXISTING DUMPS"; exit 1; }
+else
 rm -rf $W && mkdir -p $W && cd $W
 FF="-O2 -fdefault-real-8 -fdefault-double-8 -fcray-pointer -ffree-line-length-none -fno-range-check -fdec -cpp"
 DEFS="-DSPMD -Duse_libMPI -Duse_netCDF -DINTERNAL_FILE_NML"
@@ -87,6 +95,7 @@ PY
 }
 run_one c48 49 || exit 1
 run_one c12 13 || exit 1
+fi   # SKIP
 
 # ---- comparison + fixture -------------------------------------------
 mkdir -p $REPO/tests/grids/fixtures

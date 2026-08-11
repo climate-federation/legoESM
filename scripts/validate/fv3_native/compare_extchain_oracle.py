@@ -9,26 +9,31 @@ ext_scalar_sixface / ext_vector_dgrid_sixface / ext_vector_cgrid_sixface
 per cube EDGE (12) and per cube VERTEX (8) — never averaged away.
 
 Instrument controls (all run before any number is reported):
-  C1 face map: the port tile-t A-grid lon/lat must match the oracle's
-     dumped agrid per tile (identity map) to < 1e-12 rad; otherwise the
-     script aborts — no silent relabelling.
+  C1 face map: the oracle mosaic is the port's reference ED cube
+     RELABELLED (perm x dihedral — the ic_face_map_parity lesson); the
+     map is SEARCHED per tile over all 6 x 8 candidates on the A-grid
+     coordinates and REQUIRED to be a bijection at the quad-geometry
+     floor (< 1e-9 rad).  A hard-coded map cannot fail, so it cannot
+     certify anything.
+  C1b transform validation: the inverse-mapped oracle VECTOR inputs
+     must reproduce the analytic streamfunction winds evaluated on the
+     PORT's own lattice (placement + orientation + SIGN check that does
+     not assume the transform it validates); scalars likewise via the
+     k=2 lat field.
   C2 oracle chain certification: the driver's CERT lines
-     (max|staged - composed| per family) must be exactly 0.0, else the
-     stage dumps are labelled UNTRUSTED and only composed finals are
-     compared.
-  C3 sentinel independence: oracle finals are compared across the two
-     halo-prefill variants; any differing slot depends on an
-     UNDEFINED-in-the-oracle halo location and is reported.
-  C4 interior identity: on compute-domain slots the final must equal
-     the input bitwise on both sides (the exchange never touches the
-     interior) — a nonzero here means the harness mis-mapped arrays.
+     (max|staged - composed|) must be exactly 0.0, else stage dumps are
+     UNTRUSTED and only composed finals are compared.
+  C3 sentinel independence: oracle finals compared across the two
+     halo-prefill variants; a differing slot depends on an
+     UNDEFINED-in-the-oracle halo location.
+  C4 interior identity: compute-domain slots of the final must equal
+     the input bitwise on both sides.
 
-No verdicts are printed by this tool — numbers only (validation-lesson:
-never let a probe print its own verdict).
+No verdicts are printed — numbers only.
 
 Usage:
   compare_extchain_oracle.py --oracle-dir DIR --n 48 --ng 3
-      [--fixture-out PATH] [--summary-out PATH] [--full-fixture]
+      [--fixture-out PATH] [--summary-out PATH]
 """
 from __future__ import annotations
 
@@ -47,13 +52,15 @@ sys.path.insert(0, str(REPO / "packages" / "core"))
 PIN_FVDUO_SHA = ("c3c745c4071581ef23d78291873b5ba92a6cfdfc5711e5e80ede0be1e"
                  "613795e")
 
+U0 = 38.61068276698372
+A45 = 0.7853981633974483
+
 
 # ---------------------------------------------------------------------------
 # oracle dump loading
 # ---------------------------------------------------------------------------
 
 def load_tile(oracle_dir: Path, tile: int) -> dict:
-    """Parse extchain_t<tile>.mf + .dat into {name: array}, Fortran order."""
     mf = oracle_dir / f"extchain_t{tile}.mf"
     dat = oracle_dir / f"extchain_t{tile}.dat"
     if not mf.exists() or not dat.exists():
@@ -81,26 +88,122 @@ def load_oracle(oracle_dir: Path) -> list:
 
 
 def cert_values(notes: list) -> dict:
-    """CERT <fam><variant> <val> [<val2>] -> {(fam, variant): max}."""
     out = {}
     for ln in notes:
         p = ln.split()
         if p[0] != "CERT":
             continue
-        fam_var = p[1]          # e.g. 'A_v1', 'D_v2'
-        fam, var = fam_var.split("_")
-        vals = [float(x) for x in p[2:]]
-        out[(fam, var)] = max(vals)
+        fam, var = p[1].split("_")
+        out[(fam, var)] = max(float(x) for x in p[2:])
     return out
+
+
+def note_value(notes: list, key: str) -> list:
+    for ln in notes:
+        if ln.startswith(f"NOTE {key} ="):
+            return [float(x) for x in ln.split("=")[1].split()]
+    raise KeyError(key)
+
+
+# ---------------------------------------------------------------------------
+# dihedral layout transforms (port <-> oracle tile orientation)
+# ---------------------------------------------------------------------------
+# forward op (swap, ri, rj): PORT-layout array -> ORACLE-layout array:
+#   q = a.swapaxes(0,1) if swap else a; then q = q[::-1] if ri;
+#   q = q[:, ::-1] if rj.
+# Both cell axes ([1-ng, n+ng]) and node axes ([1-ng, n+1+ng]) are
+# symmetric about the supergrid centre n+1, so numpy reversal equals the
+# Fortran index reversal for every stagger.
+OPS = [(sw, ri, rj) for sw in (False, True) for ri in (False, True)
+       for rj in (False, True)]
+
+
+def op_scalar(a: np.ndarray, op) -> np.ndarray:
+    sw, ri, rj = op
+    q = a.swapaxes(0, 1) if sw else a
+    if ri:
+        q = q[::-1]
+    if rj:
+        q = q[:, ::-1]
+    return np.ascontiguousarray(q)
+
+
+def op_vector(u: np.ndarray, v: np.ndarray, op):
+    """Covariant staggered pair, PORT layout -> ORACLE layout.
+
+    Under swap the x/y covariant components exchange arrays; a reversed
+    oracle axis anti-aligns with its source direction => sign flip on
+    that component (the mpp NE-vector convention the certified
+    exchanges use)."""
+    sw, ri, rj = op
+    if sw:
+        uo, vo = v.swapaxes(0, 1), u.swapaxes(0, 1)
+    else:
+        uo, vo = u, v
+    if ri:
+        uo, vo = uo[::-1], vo[::-1]
+    if rj:
+        uo, vo = uo[:, ::-1], vo[:, ::-1]
+    su = -1.0 if ri else 1.0
+    sv = -1.0 if rj else 1.0
+    return np.ascontiguousarray(su * uo), np.ascontiguousarray(sv * vo)
+
+
+def op_inverse(op):
+    """The unique member of OPS undoing ``op`` (searched, not derived)."""
+    m = 7
+    probe = np.arange(m * m, dtype=float).reshape(m, m)
+    fwd = op_scalar(probe, op)
+    for cand in OPS:
+        if np.array_equal(op_scalar(fwd, cand), probe):
+            return cand
+    raise AssertionError(f"no inverse for {op}")
+
+
+def _selfcheck_transforms():
+    rng = np.random.default_rng(0)
+    u = rng.normal(size=(6, 7))
+    v = rng.normal(size=(7, 6))
+    s = rng.normal(size=(6, 6))
+    for op in OPS:
+        inv = op_inverse(op)
+        assert np.array_equal(op_scalar(op_scalar(s, op), inv), s), op
+        uo, vo = op_vector(u, v, op)
+        ub, vb = op_vector(uo, vo, inv)
+        assert np.array_equal(ub, u) and np.array_equal(vb, v), op
+
+
+def _xyz(lon, lat):
+    return np.stack([np.cos(lat) * np.cos(lon),
+                     np.cos(lat) * np.sin(lon), np.sin(lat)], -1)
+
+
+def derive_face_map(orc, gs6, n, ng):
+    """For each PORT face t: (oracle tile T, forward op) minimizing the
+    compute-block A-coordinate mismatch.  Returns map + per-face floor."""
+    sl = slice(ng, ng + n)
+    pxyz = [_xyz(gs6[t]["agrid_lon"], gs6[t]["agrid_lat"])[sl, sl]
+            for t in range(6)]
+    oxyz = [_xyz(orc[T]["arrays"]["AG_LON"], orc[T]["arrays"]["AG_LAT"])
+            [sl, sl] for T in range(6)]
+    face_map = {}
+    for t in range(6):
+        best = (np.inf, None, None)
+        for T in range(6):
+            for op in OPS:
+                q = op_scalar(pxyz[t], op)
+                d = float(np.abs(q - oxyz[T]).max())
+                if d < best[0]:
+                    best = (d, T, op)
+        face_map[t] = best
+    return face_map
 
 
 # ---------------------------------------------------------------------------
 # region machinery
 # ---------------------------------------------------------------------------
 
-def region_label(i_f: int, j_f: int, n: int, ng: int,
-                 ish: int, jsh: int) -> tuple:
-    """('int',) | ('edge', side, ring) | ('corner', which, ring)."""
+def region_label(i_f, j_f, n, ng, ish, jsh):
     ihi, jhi = n + ish, n + jsh
     di = (1 - i_f) if i_f < 1 else (i_f - ihi if i_f > ihi else 0)
     dj = (1 - j_f) if j_f < 1 else (j_f - jhi if j_f > jhi else 0)
@@ -114,9 +217,7 @@ def region_label(i_f: int, j_f: int, n: int, ng: int,
     return ("edge", "S" if j_f < 1 else "N", dj)
 
 
-def score_regions(diff: np.ndarray, n: int, ng: int,
-                  ish: int, jsh: int) -> dict:
-    """max|diff| per region key; diff is (m, m2[, k]) Fortran-lo array."""
+def score_regions(diff, n, ng, ish, jsh):
     lo = 1 - ng
     out: dict = {}
     d = np.abs(diff)
@@ -134,13 +235,13 @@ def score_regions(diff: np.ndarray, n: int, ng: int,
 
 
 def vertex_ids(gr_lon6, gr_lat6, n, ng):
-    """Map (tile0, corner) -> global vertex id via corner-node xyz."""
     lo = 1 - ng
     ids: dict = {}
     seen: dict = {}
     for t in range(6):
         for which, (i_f, j_f) in (("SW", (1, 1)), ("SE", (n + 1, 1)),
-                                  ("NW", (1, n + 1)), ("NE", (n + 1, n + 1))):
+                                  ("NW", (1, n + 1)),
+                                  ("NE", (n + 1, n + 1))):
             lon = gr_lon6[t][i_f - lo, j_f - lo]
             lat = gr_lat6[t][i_f - lo, j_f - lo]
             xyz = (np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon),
@@ -152,8 +253,7 @@ def vertex_ids(gr_lon6, gr_lat6, n, ng):
     return ids
 
 
-def edge_ids(vids, n):
-    """Map (tile0, side) -> global edge id via its two endpoint vertices."""
+def edge_ids(vids):
     ends = {"W": ("SW", "NW"), "E": ("SE", "NE"),
             "S": ("SW", "SE"), "N": ("NW", "NE")}
     eids: dict = {}
@@ -168,80 +268,92 @@ def edge_ids(vids, n):
 
 
 # ---------------------------------------------------------------------------
-# port stage capture
+# analytic input formulas (mirror of the driver; C1b control)
 # ---------------------------------------------------------------------------
 
-def run_port(n: int, ng: int, orc: list, variant: str) -> dict:
-    """Run the port's ext machinery on the ORACLE'S dumped inputs."""
+def psi_level(k, lon, lat, radius, c0):
+    def gc(lon1, lat1):
+        return np.arccos(np.clip(
+            np.sin(lat1) * np.sin(c0[1])
+            + np.cos(lat1) * np.cos(c0[1]) * np.cos(lon1 - c0[0]),
+            -1.0, 1.0))
+    kk = (k % 5) + 1                           # 0-based level -> case 1..5
+    if kk == 1:
+        return -U0 * radius * np.sin(lat)
+    if kk == 2:
+        return -U0 * radius * (np.sin(lat) * np.cos(A45)
+                               - np.cos(lon) * np.cos(lat) * np.sin(A45))
+    if kk == 3:
+        return -60.0 * radius * np.sin(lat) ** 3
+    if kk == 4:
+        return 20.0 * radius * np.exp(-(gc(lon, lat) / 0.2) ** 2)
+    return -radius * (15.0 * np.sin(lat) + 5.0 * np.sin(2.0 * lat)
+                      + 4.0 * np.cos(lon) * np.cos(lat))
+
+
+# ---------------------------------------------------------------------------
+# port stage capture (inputs already in PORT layout)
+# ---------------------------------------------------------------------------
+
+def run_port(n, ng, in_port, nlev_of, ectx):
     from legoesm.grids.fv3_native_ext_vector import (
-        build_ext_context,
         ext_scalar_sixface,
         ext_vector_cgrid_sixface,
         ext_vector_dgrid_sixface,
     )
     from legoesm.grids.fv3_native_gridstruct import (
-        build_fv3_native_gridstruct,
         exchange_agrid_scalar_halos,
         exchange_bgrid_scalar_halos,
         k2e_remap_halo_rings,
     )
 
-    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
-    ectx = build_ext_context(n, ng, gs6)
-    out: dict = {"gs6": gs6}
-
-    def inputs(name):
-        return [np.array(orc[t]["arrays"][f"{name}_{variant}"], copy=True)
-                for t in range(6)]
-
-    # ---- scalars, staged by direct calls -----------------------------
+    out: dict = {}
     for stag, exch, corner_key in (("A", exchange_agrid_scalar_halos,
                                     "corner_a3"),
                                    ("B", exchange_bgrid_scalar_halos,
                                     "corner_b3")):
-        nlev = orc[0]["arrays"][f"IN_{stag}_{variant}"].shape[2]
-        s1 = [None] * 6
-        s2 = [None] * 6
-        fin = [None] * 6
+        nlev = nlev_of[stag]
+        s1 = [[] for _ in range(6)]
+        s2 = [[] for _ in range(6)]
+        fin = [[] for _ in range(6)]
         for k in range(nlev):
-            f6 = [inp[:, :, k].copy() for inp in inputs(f"IN_{stag}")]
+            f6 = [in_port[f"IN_{stag}"][t][:, :, k].copy()
+                  for t in range(6)]
             for t in range(1, 7):
                 exch(f6, t, n, ng)
             for t in range(6):
-                s1[t] = (f6[t][:, :, None] if s1[t] is None
-                         else np.concatenate([s1[t], f6[t][:, :, None]], 2))
-            f6b = [f.copy() for f in f6]
-            k2e_remap_halo_rings(f6b, stag, n, ng, k2e_nord=ectx["k2e_nord"])
+                s1[t].append(f6[t].copy())
+            k2e_remap_halo_rings(f6, stag, n, ng,
+                                 k2e_nord=ectx["k2e_nord"])
             for t in range(6):
-                s2[t] = (f6b[t][:, :, None] if s2[t] is None
-                         else np.concatenate([s2[t], f6b[t][:, :, None]], 2))
-            f6c = [f.copy() for f in f6b]
+                s2[t].append(f6[t].copy())
             for t in range(6):
-                ectx[corner_key][t].fill(f6c[t])
-            for t in range(6):
-                fin[t] = (f6c[t][:, :, None] if fin[t] is None
-                          else np.concatenate([fin[t], f6c[t][:, :, None]],
-                                              2))
-        out[f"S1_{stag}"] = s1
-        out[f"S2_{stag}"] = s2
-        out[f"FIN_{stag}"] = fin
-        # composed-call cross-check of the staged capture (level-stacked)
-        f6full = inputs(f"IN_{stag}")
-        f6l = [[f[:, :, k].copy() for f in f6full] for k in range(nlev)]
+                ectx[corner_key][t].fill(f6[t])
+                fin[t].append(f6[t].copy())
+        for nm, acc in ((f"S1_{stag}", s1), (f"S2_{stag}", s2),
+                        (f"FIN_{stag}", fin)):
+            out[nm] = [np.stack(acc[t], axis=2) for t in range(6)]
+        # cross-check the staged capture against the composed call
+        comp = [[] for _ in range(6)]
         for k in range(nlev):
-            ext_scalar_sixface(f6l[k], stag, ectx)
-        comp = [np.stack([f6l[k][t] for k in range(nlev)], axis=2)
-                for t in range(6)]
+            f6 = [in_port[f"IN_{stag}"][t][:, :, k].copy()
+                  for t in range(6)]
+            from legoesm.grids.fv3_native_ext_vector import (
+                ext_scalar_sixface as _es,
+            )
+            _es(f6, stag, ectx)
+            for t in range(6):
+                comp[t].append(f6[t].copy())
         out[f"portcert_{stag}"] = max(
-            float(np.abs(comp[t] - fin[t]).max()) for t in range(6))
+            float(np.abs(np.stack(comp[t], 2)
+                         - out[f"FIN_{stag}"][t]).max())
+            for t in range(6))
 
-    # ---- vectors, via the stage_dump hook ----------------------------
     for fam, runner, unames in (
             ("D", ext_vector_dgrid_sixface, ("DU", "DV")),
             ("C", ext_vector_cgrid_sixface, ("CU", "CV"))):
-        nlev = orc[0]["arrays"][f"IN_{unames[0]}_{variant}"].shape[2]
+        nlev = nlev_of[fam]
         stages: dict = {}
-
         for k in range(nlev):
             cap: dict = {}
 
@@ -250,44 +362,34 @@ def run_port(n: int, ng: int, orc: list, variant: str) -> dict:
                     np.array(arr, copy=True)
 
             ectx["stage_dump"] = dump
-            u6 = [np.array(orc[t]["arrays"][f"IN_{unames[0]}_{variant}"]
-                           [:, :, k], copy=True) for t in range(6)]
-            v6 = [np.array(orc[t]["arrays"][f"IN_{unames[1]}_{variant}"]
-                           [:, :, k], copy=True) for t in range(6)]
+            u6 = [in_port[f"IN_{unames[0]}"][t][:, :, k].copy()
+                  for t in range(6)]
+            v6 = [in_port[f"IN_{unames[1]}"][t][:, :, k].copy()
+                  for t in range(6)]
             runner(u6, v6, ectx)
             ectx.pop("stage_dump", None)
             cap[("FIN", "uin")] = u6
             cap[("FIN", "vin")] = v6
             for key, arrs in cap.items():
-                cur = stages.setdefault(key, [None] * 6)
+                cur = stages.setdefault(key, [[] for _ in range(6)])
                 for t in range(6):
-                    a = arrs[t][:, :, None]
-                    cur[t] = a if cur[t] is None else np.concatenate(
-                        [cur[t], a], 2)
-        out[f"stages_{fam}"] = stages
+                    cur[t].append(arrs[t])
+        out[f"stages_{fam}"] = {
+            key: [np.stack(acc[t], axis=2) for t in range(6)]
+            for key, acc in stages.items()}
     return out
 
 
-# ---------------------------------------------------------------------------
-# comparison
-# ---------------------------------------------------------------------------
-
-# vector stage table: oracle name pattern -> (port stage, port name)
+# oracle stage name -> (port stage, port name, kind)
+# kind: 'wind' = covariant staggered component, 'geo' = scalar-like
 VEC_STAGES = {
-    "S1u": ("S1", "uin"), "S1v": ("S1", "vin"),
-    "S2u": ("S2", "ull"), "S2v": ("S2", "vll"),
-    "S3u": ("S3", "ullp1"), "S3v": ("S3", "vllp1"),
-    "S4u": ("S4", "ullp1"), "S4v": ("S4", "vllp1"),
-    "S5u": ("S5", "ullp1"), "S5v": ("S5", "vllp1"),
-    "S6u": ("S6pre", "uin"), "S6v": ("S6pre", "vin"),
+    "S1u": ("S1", "uin", "wind"), "S1v": ("S1", "vin", "wind"),
+    "S2u": ("S2", "ull", "geo"), "S2v": ("S2", "vll", "geo"),
+    "S3u": ("S3", "ullp1", "geo"), "S3v": ("S3", "vllp1", "geo"),
+    "S4u": ("S4", "ullp1", "geo"), "S4v": ("S4", "vllp1", "geo"),
+    "S5u": ("S5", "ullp1", "geo"), "S5v": ("S5", "vllp1", "geo"),
+    "S6u": ("S6pre", "uin", "wind"), "S6v": ("S6pre", "vin", "wind"),
 }
-
-
-def crop_to(a: np.ndarray, shape2) -> np.ndarray:
-    """Center-crop/trim oracle array to the port array's 2-D shape,
-    assuming both share the same Fortran LOWER bound on each axis."""
-    return a[:shape2[0], :shape2[1]] if a.ndim == 2 else \
-        a[:shape2[0], :shape2[1], :]
 
 
 def main() -> int:
@@ -295,10 +397,8 @@ def main() -> int:
     ap.add_argument("--oracle-dir", required=True)
     ap.add_argument("--n", type=int, required=True)
     ap.add_argument("--ng", type=int, default=3)
-    ap.add_argument("--fixture-out", default=None,
-                    help="npz with full arrays (C12-sized runs)")
-    ap.add_argument("--summary-out", default=None,
-                    help="compact npz: region tables + certs only")
+    ap.add_argument("--fixture-out", default=None)
+    ap.add_argument("--summary-out", default=None)
     args = ap.parse_args()
     n, ng = args.n, args.ng
     odir = Path(args.oracle_dir)
@@ -312,7 +412,6 @@ def main() -> int:
     cert_ok = all(v == 0.0 for v in certs.values())
     print(f"  staged dumps trusted: {cert_ok}")
 
-    # C3: sentinel independence of the oracle finals
     print("== oracle sentinel-independence (max|FIN_v1-FIN_v2|) ==")
     sentinel: dict = {}
     for nm in ("FIN_A", "FIN_B", "FIN_DU", "FIN_DV", "FIN_CU", "FIN_CV"):
@@ -322,26 +421,93 @@ def main() -> int:
         sentinel[nm] = w
         print(f"  {nm}: {w:.3e}")
 
-    # ---- port run on variant v1 inputs -------------------------------
-    port = run_port(n, ng, orc, "v1")
-    gs6 = port["gs6"]
+    _selfcheck_transforms()
 
-    # C1 face-map instrument control
-    print("== face-map control (port tile t vs oracle tile t agrid) ==")
-    worst_map = 0.0
+    from legoesm.grids.fv3_native_ext_vector import build_ext_context
+    from legoesm.grids.fv3_native_gridstruct import (
+        build_fv3_native_gridstruct,
+    )
+
+    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
+    ectx = build_ext_context(n, ng, gs6)
+
+    # C1: searched face map (port face t -> oracle tile, forward op)
+    fm = derive_face_map(orc, gs6, n, ng)
+    print("== face map (port face -> oracle tile, op, xyz floor) ==")
+    used = set()
     for t in range(6):
-        dlon = np.abs(np.mod(gs6[t]["agrid_lon"]
-                             - orc[t]["arrays"]["AG_LON"] + np.pi,
-                             2 * np.pi) - np.pi)
-        dlat = np.abs(gs6[t]["agrid_lat"] - orc[t]["arrays"]["AG_LAT"])
-        w = float(max(dlon.max(), dlat.max()))
-        worst_map = max(worst_map, w)
-        print(f"  tile {t + 1}: {w:.3e} rad")
-    if worst_map > 1e-12:
-        print("FACE-MAP CONTROL FAILED — refusing to compare fields "
-              "(port face numbering does not identity-match the oracle "
-              "mosaic; derive the map before trusting any number)")
+        d, T, op = fm[t]
+        print(f"  port {t + 1} -> oracle {T + 1}  op(swap,ri,rj)={op}  "
+              f"floor={d:.3e}")
+        used.add(T)
+    if len(used) != 6 or any(fm[t][0] > 1e-9 for t in range(6)):
+        print("FACE-MAP CONTROL FAILED — not a bijection at the quad "
+              "floor; refusing to compare fields")
         return 2
+    # oracle tile T -> (port face, forward op)
+    face_of = {fm[t][1]: (t, fm[t][2]) for t in range(6)}
+
+    # ---- inverse-map oracle inputs into port layout ------------------
+    variant = "v1"
+    in_port: dict = {}
+    nlev_of: dict = {}
+    for fam in ("A", "B"):
+        arrs = [None] * 6
+        for T in range(6):
+            t, op = face_of[T]
+            arrs[t] = op_scalar(orc[T]["arrays"][f"IN_{fam}_{variant}"],
+                                op_inverse(op))
+        in_port[f"IN_{fam}"] = arrs
+        nlev_of[fam] = arrs[0].shape[2]
+    for fam, (nu, nv) in (("D", ("DU", "DV")), ("C", ("CU", "CV"))):
+        us = [None] * 6
+        vs = [None] * 6
+        for T in range(6):
+            t, op = face_of[T]
+            u, v = op_vector(orc[T]["arrays"][f"IN_{nu}_{variant}"],
+                             orc[T]["arrays"][f"IN_{nv}_{variant}"],
+                             op_inverse(op))
+            us[t], vs[t] = u, v
+        in_port[f"IN_{nu}"] = us
+        in_port[f"IN_{nv}"] = vs
+        nlev_of[fam] = us[0].shape[2]
+
+    # C1b: transform validation against the analytic winds on the PORT
+    # lattice (placement + orientation + sign; independent of the map)
+    radius = 6.3712e6            # lib_grid RADIUS (variant quirk)
+    c0 = note_value(notes, "vertex_c0")
+    lo = 1 - ng
+    worst_u = 0.0
+    worst_s = 0.0
+    for t in range(6):
+        gs = gs6[t]
+        # k=2 scalar level: lat itself
+        latf = gs["agrid_lat"]
+        sl = slice(ng, ng + n)
+        worst_s = max(worst_s, float(np.abs(
+            in_port["IN_A"][t][sl, sl, 1] - latf[sl, sl]).max()))
+        # D-u from psi differences on the port metric, level k=0
+        psi = psi_level(0, gs["agrid_lon"], gs["agrid_lat"], radius,
+                        c0)
+        dyc = gs["dyc"]
+        for (i_f, j_f) in ((1, 1), (n, n + 1), (n // 2, 2)):
+            got = in_port["IN_DU"][t][i_f - lo, j_f - lo, 0]
+            want = -(psi[i_f - lo, j_f - lo] - psi[i_f - lo, j_f - 1 - lo]) \
+                / dyc[i_f - lo, j_f - lo]
+            worst_u = max(worst_u, abs(float(got - want)))
+    # thresholds: a component-sign error gives ~2|u| (~77 m/s), a
+    # placement error O(0.1-1); the known lib_grid-vs-constants radius
+    # inconsistency inside the ORACLE's own input construction
+    # (psi at 6.3712e6 m over dyc at the model radius) contributes only
+    # <= ~2e-3 m/s and must NOT trip this control.
+    print(f"== C1b transform validation: scalar(lat)={worst_s:.3e}  "
+          f"D-u(analytic psi)={worst_u:.3e} m/s ==")
+    if worst_s > 1e-9 or worst_u > 0.05:
+        print("C1b TRANSFORM VALIDATION FAILED — the layout transform "
+              "mis-places or mis-signs fields; refusing to compare")
+        return 2
+
+    port = run_port(n, ng, in_port, nlev_of, ectx)
     print(f"  port scalar staged-vs-composed self-check: "
           f"A={port['portcert_A']:.3e} B={port['portcert_B']:.3e}")
 
@@ -349,56 +515,65 @@ def main() -> int:
                       [orc[t]["arrays"]["GR_LAT"] for t in range(6)],
                       n, ng)
     assert len(set(vids.values())) == 8, sorted(set(vids.values()))
-    eids = edge_ids(vids, n)
+    eids = edge_ids(vids)
     assert len(set(eids.values())) == 12
 
-    rows = []                       # (stage, region_kind, region, max)
+    rows = []
 
-    def compare(stage_label, oname, parr6, ish, jsh, lat_ng):
+    def compare(stage_label, oname, port_in_oracle, ish, jsh, lat_ng):
         agg_edge: dict = {}
         agg_vert: dict = {}
         agg_int = 0.0
         ring_tab: dict = {}
-        for t in range(6):
-            oa = orc[t]["arrays"][oname]
-            pa = parr6[t]
-            oa2 = crop_to(oa, pa.shape)
-            if oa2.shape != pa.shape:
-                print(f"  SHAPE MISMATCH {oname}: oracle {oa.shape} "
-                      f"port {pa.shape} — skipped")
-                return
-            # mask slots that are structurally undefined on EITHER side:
-            # port NaN (never touched) / oracle -99999-prefill or stack
-            # garbage (|v| > 1e12).  Divergence at oracle-undefined slots
-            # that actually matters propagates into S6/FIN, which are
-            # fully defined and never masked.
-            undef = (~np.isfinite(pa)) | (~np.isfinite(oa2)) \
-                | (np.abs(oa2) > 1e12) | (oa2 == -99999.0)
-            diff = np.where(undef, 0.0, pa - oa2)
+        for T in range(6):
+            oa = orc[T]["arrays"][oname]
+            pa = port_in_oracle[T]
+            if oa.shape != pa.shape:
+                oa = oa[:pa.shape[0], :pa.shape[1]]
+                if oa.shape != pa.shape:
+                    print(f"  SHAPE MISMATCH {oname}: {oa.shape} vs "
+                          f"{pa.shape} — skipped")
+                    return
+            undef = (~np.isfinite(pa)) | (~np.isfinite(oa)) \
+                | (np.abs(oa) > 1e12) | (oa == -99999.0)
+            diff = np.where(undef, 0.0, pa - oa)
             reg = score_regions(diff, n, lat_ng, ish, jsh)
             for key, v in reg.items():
                 if key[0] == "int":
                     agg_int = max(agg_int, v)
                 elif key[0] == "edge":
-                    eid = eids[(t, key[1])]
+                    eid = eids[(T, key[1])]
                     agg_edge[eid] = max(agg_edge.get(eid, 0.0), v)
                     ring_tab[key[2]] = max(ring_tab.get(key[2], 0.0), v)
                 else:
-                    vid = vids[(t, key[1])]
+                    vid = vids[(T, key[1])]
                     agg_vert[vid] = max(agg_vert.get(vid, 0.0), v)
         emax = max(agg_edge.values()) if agg_edge else 0.0
         vmax = max(agg_vert.values()) if agg_vert else 0.0
-        print(f"  {stage_label:18s} interior={agg_int:.3e} "
+        rings = {r: f"{v:.2e}" for r, v in sorted(ring_tab.items())}
+        print(f"  {stage_label:10s} interior={agg_int:.3e} "
               f"edges(max)={emax:.3e} vertices(max)={vmax:.3e} "
-              f"rings={ {r: f'{v:.2e}' for r, v in sorted(ring_tab.items())} }")
+              f"rings={rings}")
         for eid in sorted(agg_edge):
             rows.append((stage_label, "edge", eid, agg_edge[eid]))
         for vid in sorted(agg_vert):
             rows.append((stage_label, "vertex", vid, agg_vert[vid]))
         rows.append((stage_label, "interior", "-", agg_int))
 
-    print("== per-stage port-vs-oracle maxima "
-          "(variant v1; abs diff) ==")
+    def to_oracle_scalar(pkey_arrs):
+        return [op_scalar(pkey_arrs[face_of[T][0]], face_of[T][1])
+                for T in range(6)]
+
+    def to_oracle_vector(u_arrs, v_arrs):
+        us, vs = [], []
+        for T in range(6):
+            t, op = face_of[T]
+            u, v = op_vector(u_arrs[t], v_arrs[t], op)
+            us.append(u)
+            vs.append(v)
+        return us, vs
+
+    print("== per-stage port-vs-oracle maxima (variant v1, abs diff) ==")
     for stag in ("A", "B"):
         ish, jsh = (0, 0) if stag == "A" else (1, 1)
         for st in ("S1", "S2", "FIN"):
@@ -406,55 +581,63 @@ def main() -> int:
                 continue
             oname = (f"{st}_{stag}_v1" if st != "FIN"
                      else f"CFIN_{stag}_v1")
-            compare(f"{stag}:{st}", oname, port[f"{st}_{stag}"],
-                    ish, jsh, ng)
+            compare(f"{stag}:{st}", oname,
+                    to_oracle_scalar(port[f"{st}_{stag}"]), ish, jsh, ng)
 
-    # per-component wind staggers (ishift, jshift)
     WSHIFT = {("D", "u"): (0, 1), ("D", "v"): (1, 0),
               ("C", "u"): (1, 0), ("C", "v"): (0, 1)}
     for fam in ("D", "C"):
         stages = port[f"stages_{fam}"]
-        for okey, (pst, pnm) in VEC_STAGES.items():
-            if not cert_ok:
-                continue
-            if (pst, pnm) not in stages:
-                continue
-            comp = "u" if okey.endswith("u") else "v"
-            if okey[:2] in ("S1", "S6"):        # staggered wind arrays
-                ish, jsh = WSHIFT[(fam, comp)]
-                lng = ng
-            elif okey[:2] == "S2":              # ull/vll, stepper A lattice
-                ish, jsh, lng = 0, 0, ng
-            else:                               # geo ng=4 A lattice
-                ish, jsh, lng = 0, 0, 4
-            compare(f"{fam}:{okey}", f"{okey}_{fam}_v1",
-                    stages[(pst, pnm)], ish, jsh, lng)
-        # composed finals (always, cert-independent)
-        for comp in ("u", "v"):
-            uv = {"D": {"u": "DU", "v": "DV"},
-                  "C": {"u": "CU", "v": "CV"}}[fam][comp]
-            ish, jsh = WSHIFT[(fam, comp)]
-            compare(f"{fam}:FIN{comp}", f"CFIN_{uv}_v1",
-                    stages[("FIN", "uin" if comp == "u" else "vin")],
-                    ish, jsh, ng)
+        # wind stages: transform u/v pairs together
+        wind_pairs = [("S1u", "S1v", ("S1", "uin"), ("S1", "vin")),
+                      ("S6u", "S6v", ("S6pre", "uin"), ("S6pre", "vin"))]
+        if cert_ok:
+            for oku, okv, pku, pkv in wind_pairs:
+                if pku not in stages or pkv not in stages:
+                    continue
+                us, vs = to_oracle_vector(stages[pku], stages[pkv])
+                ish, jsh = WSHIFT[(fam, "u")]
+                compare(f"{fam}:{oku}", f"{oku}_{fam}_v1", us,
+                        ish, jsh, ng)
+                ish, jsh = WSHIFT[(fam, "v")]
+                compare(f"{fam}:{okv}", f"{okv}_{fam}_v1", vs,
+                        ish, jsh, ng)
+            for okey in ("S2u", "S2v", "S3u", "S3v", "S4u", "S4v",
+                         "S5u", "S5v"):
+                pst, pnm, _ = VEC_STAGES[okey]
+                if (pst, pnm) not in stages:
+                    continue
+                lat_ng = ng if okey.startswith("S2") else 4
+                compare(f"{fam}:{okey}", f"{okey}_{fam}_v1",
+                        to_oracle_scalar(stages[(pst, pnm)]),
+                        0, 0, lat_ng)
+        # composed finals, cert-independent
+        us, vs = to_oracle_vector(stages[("FIN", "uin")],
+                                  stages[("FIN", "vin")])
+        uv_u = "DU" if fam == "D" else "CU"
+        uv_v = "DV" if fam == "D" else "CV"
+        ish, jsh = WSHIFT[(fam, "u")]
+        compare(f"{fam}:FINu", f"CFIN_{uv_u}_v1", us, ish, jsh, ng)
+        ish, jsh = WSHIFT[(fam, "v")]
+        compare(f"{fam}:FINv", f"CFIN_{uv_v}_v1", vs, ish, jsh, ng)
 
-    # provenance
     try:
-        sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
-                             capture_output=True, text=True,
+        sha = subprocess.run(["git", "-C", str(REPO), "rev-parse",
+                              "HEAD"], capture_output=True, text=True,
                              timeout=10).stdout.strip()
     except Exception:
         sha = "unknown"
     meta = {"n": n, "ng": ng, "git_sha": sha,
             "pinned_fv_duogrid_sha256": PIN_FVDUO_SHA,
             "oracle_dir": str(odir), "cert_ok": bool(cert_ok),
+            "face_map": {str(t + 1): [fm[t][1] + 1, list(fm[t][2]),
+                                      fm[t][0]] for t in range(6)},
             "notes": notes}
 
     if args.summary_out:
         np.savez_compressed(
             args.summary_out,
-            rows=np.array([(a, b, c, d) for a, b, c, d in rows],
-                          dtype=object),
+            rows=np.array([(a, b, c, f"{d:.17e}") for a, b, c, d in rows]),
             meta=json.dumps(meta),
             sentinel=json.dumps(sentinel),
             certs=json.dumps({f"{k[0]}_{k[1]}": v
@@ -466,11 +649,11 @@ def main() -> int:
         sha_h = hashlib.sha256()
         for t in range(6):
             for nm, arr in sorted(orc[t]["arrays"].items()):
-                keep = (nm.startswith(("IN_", "AG_", "GR_", "CFIN_",
-                                       "FIN_", "S1_", "S2_"))
-                        or nm[:3] in ("S1u", "S1v", "S2u", "S2v", "S3u",
-                                      "S3v", "S4u", "S4v", "S5u", "S5v",
-                                      "S6u", "S6v"))
+                keep = nm.startswith(("IN_", "AG_", "GR_", "CFIN_",
+                                      "FIN_", "S1_", "S2_")) \
+                    or nm[:3] in ("S1u", "S1v", "S2u", "S2v", "S3u",
+                                  "S3v", "S4u", "S4v", "S5u", "S5v",
+                                  "S6u", "S6v")
                 if keep:
                     payload[f"t{t + 1}_{nm}"] = arr
                 if nm.startswith("IN_") and nm.endswith("_v1"):

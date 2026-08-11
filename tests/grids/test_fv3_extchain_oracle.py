@@ -183,19 +183,39 @@ def test_constant_field_preserved_both_sides():
         assert np.abs(f6[t] - 7.25).max() < 1e-12, t
 
 
-def test_face_map_is_identity():
-    """Instrument control C1, re-checked from the committed fixture."""
+def test_face_map_rederived_bijection():
+    """Instrument control C1, re-derived from the committed fixture:
+    the oracle mosaic must be the port reference cube RELABELLED — a
+    bijection over the 6 x 8 perm x dihedral candidates at the
+    quad-geometry floor.  Uses the compare script's own searched-map
+    machinery (a hard-coded map cannot fail)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "compare_extchain_oracle",
+        Path(__file__).parents[2] / "scripts" / "validate" / "fv3_native"
+        / "compare_extchain_oracle.py")
+    cmp_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cmp_mod)
     from legoesm.grids.fv3_native_gridstruct import (
         build_fv3_native_gridstruct,
     )
 
     d = _load()
     n, ng = int(d["n"]), int(d["ng"])
-    worst = 0.0
-    for t in range(1, 7):
-        gs = build_fv3_native_gridstruct(n, ng, tile=t)
-        dlon = np.abs(np.mod(gs["agrid_lon"] - d[f"t{t}_AG_LON"]
-                             + np.pi, 2 * np.pi) - np.pi).max()
-        dlat = np.abs(gs["agrid_lat"] - d[f"t{t}_AG_LAT"]).max()
-        worst = max(worst, float(dlon), float(dlat))
-    assert worst < 1e-12, worst
+    gs6 = [build_fv3_native_gridstruct(n, ng, tile=t)
+           for t in range(1, 7)]
+    orc = [{"arrays": {"AG_LON": d[f"t{t}_AG_LON"],
+                       "AG_LAT": d[f"t{t}_AG_LAT"]}}
+           for t in range(1, 7)]
+    fm = cmp_mod.derive_face_map(orc, gs6, n, ng)
+    tiles = {fm[t][1] for t in range(6)}
+    assert tiles == set(range(6)), fm
+    for t in range(6):
+        assert fm[t][0] < 1e-9, (t, fm[t])
+    # stored map must agree with the re-derivation
+    meta = json.loads(str(d["meta"]))
+    for t in range(6):
+        stored_T, stored_op, _ = meta["face_map"][str(t + 1)]
+        assert stored_T == fm[t][1] + 1, (t, stored_T, fm[t])
+        assert tuple(stored_op) == tuple(fm[t][2]), (t, stored_op, fm[t])
