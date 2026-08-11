@@ -46,6 +46,9 @@ program fv3_extchain_oracle_driver
   use duogrid_mod, only: ext_scalar, ext_vector
   use fv_grid_utils_mod, only: great_circle_dist
   use lib_grid_mod, only: R_GRID, RADIUS
+  use constants_mod, only: omega
+  use fv_mp_mod, only: fill_corners, YDir
+  use test_cases_mod, only: alpha
   use extchain_dump_mod, only: extchain_dump_open, extchain_dump_close, &
                                extchain_dump2, extchain_dump3, &
                                extchain_mf_note
@@ -57,7 +60,7 @@ program fv3_extchain_oracle_driver
   integer :: this_grid, p_split
   integer :: tile_id(1), tile
   integer :: is, ie, js, je, isd, ied, jsd, jed, ng, npz
-  integer :: iv
+  integer :: iv, i, j
   real :: sent
   character(len=8) :: vtag
   character(len=64) :: fname_dat, fname_mf
@@ -141,8 +144,10 @@ program fv3_extchain_oracle_driver
   ! the duo lane with every mpp/fill_corners/get_symmetry step
   ! skipped, so whatever init_grid_utils derived from it here IS what
   ! dyn_core's stencils consume at halo cells.  Bounds are the
-  ! fv_arrays.F90 allocations (:1330-1443).  rsina/cosa are
-  ! COMPUTE-B-only arrays (:1345-1346) and dumped at that extent.
+  ! fv_arrays.F90 allocations (:1311-1443).  rsina is the ONE
+  ! compute-B-only array (:1346, "Why is the size different?") and is
+  ! dumped at that extent; cosa AND sina are PADDED B-plane arrays
+  ! (:1347/:1344, isd:ied+1 x jsd:jed+1) and are dumped padded.
   call extchain_dump2('M_DX', &
       real(Atm(this_grid)%gridstruct%dx(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_DY', &
@@ -187,6 +192,57 @@ program fv3_extchain_oracle_driver
       real(Atm(this_grid)%gridstruct%del6_u(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_DEL6_V', &
       real(Atm(this_grid)%gridstruct%del6_v(isd:ied + 1, jsd:jed)))
+  ! reciprocal / remaining static families (codex retro-review 2026-08-11
+  ! finding 5: the dump set above was NOT "all runtime gridstruct metric
+  ! families" -- these are consumed directly, e.g. rdxc/rdyc in
+  ! p_grad_c, rdx/rdy in d_sw's KE ranges, rarea in vorticity, and f0
+  ! in d_sw5's absolute vorticity).  Bounds per fv_arrays.F90
+  ! :1313/:1317/:1321/:1324/:1328/:1331/:1335/:1338/:1344/:1399.
+  call extchain_dump2('M_RAREA', &
+      real(Atm(this_grid)%gridstruct%rarea(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RAREAC', &
+      real(Atm(this_grid)%gridstruct%rarea_c(isd:ied + 1, jsd:jed + 1)))
+  call extchain_dump2('M_RDX', &
+      real(Atm(this_grid)%gridstruct%rdx(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_RDY', &
+      real(Atm(this_grid)%gridstruct%rdy(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_RDXA', &
+      real(Atm(this_grid)%gridstruct%rdxa(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RDYA', &
+      real(Atm(this_grid)%gridstruct%rdya(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RDXC', &
+      real(Atm(this_grid)%gridstruct%rdxc(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_RDYC', &
+      real(Atm(this_grid)%gridstruct%rdyc(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_SINA', &
+      real(Atm(this_grid)%gridstruct%sina(isd:ied + 1, jsd:jed + 1)))
+  ! f0 is NOT set by grid init -- upstream assigns it in test_cases
+  ! init_case's unconditional pre-case block (test_cases.F90:787-800),
+  ! which this driver does not reach (first probe run measured the raw
+  ! dump == all zeros).  Run the SAME statements here before dumping:
+  ! the same formula (module alpha, read from the deck's test_case_nml
+  ! during fv_control_init; deck alpha = 0), the same duo ext_scalar
+  ! halo overwrite arm, and the same unconditional cubed-sphere
+  ! fill_corners(YDir).
+  do j = jsd, jed
+    do i = isd, ied
+      Atm(this_grid)%gridstruct%f0(i, j) = 2.*omega*( &
+          -1.*cos(Atm(this_grid)%gridstruct%agrid(i, j, 1)) &
+             *cos(Atm(this_grid)%gridstruct%agrid(i, j, 2))*sin(alpha) &
+          + sin(Atm(this_grid)%gridstruct%agrid(i, j, 2))*cos(alpha))
+    end do
+  end do
+  if (.not. Atm(this_grid)%gridstruct%dg%is_initialized) then
+    call mpp_error(FATAL, 'extchain driver expects the duo dg lane '// &
+        '(dg%is_initialized) for the f0 ext_scalar arm')
+  end if
+  call ext_scalar(Atm(this_grid)%gridstruct%f0, &
+                  Atm(this_grid)%gridstruct%dg, Atm(this_grid)%bd, &
+                  Atm(this_grid)%domain, 0, 0)
+  call fill_corners(Atm(this_grid)%gridstruct%f0, &
+                    Atm(this_grid)%npx, Atm(this_grid)%npy, YDir)
+  call extchain_dump2('M_F0', &
+      real(Atm(this_grid)%gridstruct%f0(isd:ied, jsd:jed)))
   call extchain_dump3('M_SIN_SG', &
       real(Atm(this_grid)%gridstruct%sin_sg(isd:ied, jsd:jed, 1:9)))
   call extchain_dump3('M_COS_SG', &
