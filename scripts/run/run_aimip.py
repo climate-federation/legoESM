@@ -279,6 +279,11 @@ def _build_spectral_config(cfg: dict[str, Any]):
             fix_mass=bool(cfg.get("fix_mass", False)),
             anchor_mass_to_initial=bool(
                 cfg.get("anchor_mass_to_initial", False)),
+            # Energy-conserving numerics, suite-selectable; defaults keep
+            # every existing arm byte-identical (see SpectralPEConfig).
+            vertical_advection_scheme=str(
+                cfg.get("vertical_advection_scheme", "upwind")),
+            frictional_heating=bool(cfg.get("frictional_heating", False)),
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
