@@ -1,4 +1,9 @@
-"""Land columns must receive a LAND albedo at the radiation call (MPAS lane).
+"""NOTE on tolerance: the blend runs at the default float32 precision, so
+these compare at rtol=1e-6, not 1e-12. At 1e-12 they passed only under
+JAX_ENABLE_X64=1 and failed a plain `pytest tests/` by 3.7e-8 relative — a
+float32-epsilon mismatch, i.e. the EXPECTATION was wrong, not the blend.
+
+Land columns must receive a LAND albedo at the radiation call (MPAS lane).
 
 Regression guard for the defect where the MPAS/hydrostatic radiation path
 applied ``RRTMGPConfig.sfc_albedo`` (default 0.06, the OPEN-OCEAN value) to
@@ -78,11 +83,11 @@ def test_blended_surface_albedo_land_and_ocean_columns():
     alb = blended_surface_albedo(
         sic, f_land, _ALBEDO_ICE, _ALBEDO_OCEAN, albedo_land)
 
-    np.testing.assert_allclose(alb[0], _ALBEDO_OCEAN, rtol=1e-12)
-    np.testing.assert_allclose(alb[1], _ALBEDO_LAND, rtol=1e-12)
+    np.testing.assert_allclose(alb[0], _ALBEDO_OCEAN, rtol=1e-6)
+    np.testing.assert_allclose(alb[1], _ALBEDO_LAND, rtol=1e-6)
     np.testing.assert_allclose(
-        alb[2], 0.5 * _ALBEDO_LAND + 0.5 * _ALBEDO_OCEAN, rtol=1e-12)
-    np.testing.assert_allclose(alb[3], _ALBEDO_ICE, rtol=1e-12)
+        alb[2], 0.5 * _ALBEDO_LAND + 0.5 * _ALBEDO_OCEAN, rtol=1e-6)
+    np.testing.assert_allclose(alb[3], _ALBEDO_ICE, rtol=1e-6)
 
     # The defect signature: a globe with land is NOT uniformly 0.06.
     assert float(jnp.max(alb)) > _ALBEDO_OCEAN + 1e-6
@@ -97,7 +102,7 @@ def test_blended_surface_albedo_no_land_is_pure_ocean_ice():
         np.array([_ALBEDO_OCEAN,
                   0.5 * _ALBEDO_ICE + 0.5 * _ALBEDO_OCEAN,
                   _ALBEDO_ICE]),
-        rtol=1e-12,
+        rtol=1e-6,
     )
 
 
@@ -209,7 +214,7 @@ def test_forcing_sfc_albedo_reaches_the_radiation_backend(
     )
     got = np.asarray(got).reshape(-1)
     assert got.shape == (n,)
-    np.testing.assert_allclose(got, np.asarray(alb), rtol=1e-12)
+    np.testing.assert_allclose(got, np.asarray(alb), rtol=1e-6)
     # Land columns must NOT be at the ocean value.
     assert got[: n // 2].min() == pytest.approx(_ALBEDO_LAND)
     assert got[n // 2:].max() == pytest.approx(_ALBEDO_OCEAN)
