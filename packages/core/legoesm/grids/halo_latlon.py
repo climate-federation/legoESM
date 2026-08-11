@@ -826,6 +826,40 @@ def pad_with_pole_bc_lat_multi(
     )
 
 
+def pad_latlon_entry_mixed(fields, outputs, halo: int = 2):
+    """One band exchange, heterogeneous boundary outputs (SPMD lane).
+
+    Dispatcher for
+    :func:`legoesm.parallel.latlon_spmd.make_latlon_band_mixed_pad_body`
+    — see its docstring for the ``outputs`` spec format. Under the armed
+    lat-band SPMD backend the interior-cut rows for EVERY output ride
+    ONE ppermute pair per dtype group (the lat-lon collective-collapse
+    slice, campaign 2026-08-11). Every other backend (serial, MPI band,
+    2-D pencil) falls back to the existing per-output pads —
+    value-identical, just the legacy exchange count.
+    """
+    fields = tuple(fields)
+    mesh = _spmd_lat_mesh()
+    if mesh is not None and "lon" not in tuple(mesh.axis_names):
+        from legoesm.parallel.latlon_spmd import (
+            make_latlon_band_mixed_pad_body,
+        )
+        return make_latlon_band_mixed_pad_body(
+            mesh, halo=halo, outputs=tuple(outputs))(*fields)
+    outs = []
+    for spec in outputs:
+        kind, i, oh = spec[0], spec[1], spec[2]
+        if kind == "wall":
+            outs.append(pad_with_pole_bc_lat(
+                fields[i], halo=oh,
+                south_value=spec[3], north_value=spec[4]))
+        else:
+            outs.append(pad_halo_latlon_3d(fields[i], halo=oh)
+                        if fields[i].ndim == 3 else
+                        pad_halo_latlon_local(fields[i], halo=oh))
+    return tuple(outs)
+
+
 # ============================================================================
 # Wide-halo band widening (opt-in wide-halo split-explicit barotropic)
 # ============================================================================
