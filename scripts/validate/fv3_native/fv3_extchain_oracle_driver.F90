@@ -134,6 +134,64 @@ program fv3_extchain_oracle_driver
   call extchain_dump2('GR_LAT', &
       real(Atm(this_grid)%gridstruct%grid(isd:ied + 1, jsd:jed + 1, 2)))
 
+  ! ------------------------------------------------------------------
+  ! RUNTIME GRIDSTRUCT METRIC FAMILIES over their full allocated
+  ! (padded) extents -- the per-family authority for the halo-metric
+  ! diagnosis.  fv_grid_tools.F90:749-835 builds grid FROM dg%b_pt on
+  ! the duo lane with every mpp/fill_corners/get_symmetry step
+  ! skipped, so whatever init_grid_utils derived from it here IS what
+  ! dyn_core's stencils consume at halo cells.  Bounds are the
+  ! fv_arrays.F90 allocations (:1330-1443).  rsina/cosa are
+  ! COMPUTE-B-only arrays (:1345-1346) and dumped at that extent.
+  call extchain_dump2('M_DX', &
+      real(Atm(this_grid)%gridstruct%dx(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_DY', &
+      real(Atm(this_grid)%gridstruct%dy(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_DXA', &
+      real(Atm(this_grid)%gridstruct%dxa(isd:ied, jsd:jed)))
+  call extchain_dump2('M_DYA', &
+      real(Atm(this_grid)%gridstruct%dya(isd:ied, jsd:jed)))
+  call extchain_dump2('M_DXC', &
+      real(Atm(this_grid)%gridstruct%dxc(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_DYC', &
+      real(Atm(this_grid)%gridstruct%dyc(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_AREA', &
+      real(Atm(this_grid)%gridstruct%area(isd:ied, jsd:jed)))
+  call extchain_dump2('M_AREAC', &
+      real(Atm(this_grid)%gridstruct%area_c(isd:ied + 1, jsd:jed + 1)))
+  call extchain_dump2('M_COSA_U', &
+      real(Atm(this_grid)%gridstruct%cosa_u(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_SINA_U', &
+      real(Atm(this_grid)%gridstruct%sina_u(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_RSIN_U', &
+      real(Atm(this_grid)%gridstruct%rsin_u(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_COSA_V', &
+      real(Atm(this_grid)%gridstruct%cosa_v(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_SINA_V', &
+      real(Atm(this_grid)%gridstruct%sina_v(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_RSIN_V', &
+      real(Atm(this_grid)%gridstruct%rsin_v(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_COSA_S', &
+      real(Atm(this_grid)%gridstruct%cosa_s(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RSIN2', &
+      real(Atm(this_grid)%gridstruct%rsin2(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RSINA', &
+      real(Atm(this_grid)%gridstruct%rsina(is:ie + 1, js:je + 1)))
+  call extchain_dump2('M_COSA', &
+      real(Atm(this_grid)%gridstruct%cosa(isd:ied + 1, jsd:jed + 1)))
+  call extchain_dump2('M_DIVG_U', &
+      real(Atm(this_grid)%gridstruct%divg_u(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_DIVG_V', &
+      real(Atm(this_grid)%gridstruct%divg_v(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_DEL6_U', &
+      real(Atm(this_grid)%gridstruct%del6_u(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_DEL6_V', &
+      real(Atm(this_grid)%gridstruct%del6_v(isd:ied + 1, jsd:jed)))
+  call extchain_dump3('M_SIN_SG', &
+      real(Atm(this_grid)%gridstruct%sin_sg(isd:ied, jsd:jed, 1:9)))
+  call extchain_dump3('M_COS_SG', &
+      real(Atm(this_grid)%gridstruct%cos_sg(isd:ied, jsd:jed, 1:9)))
+
   do iv = 1, 2
     sent = sentinels(iv)
     write (vtag, '(A,I1)') '_v', iv

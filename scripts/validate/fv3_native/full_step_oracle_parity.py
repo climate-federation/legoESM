@@ -463,6 +463,17 @@ def main(argv=None):
     ap.add_argument("--max-rel", type=float, default=None,
                     help="gate: exit 1 if any field's one-step rel exceeds "
                          "this")
+    ap.add_argument("--ext-metrics", action="store_true",
+                    help="build the six-face context with "
+                         "use_ext_metrics=True: halo/corner-wedge cells "
+                         "carry EXTENDED-lattice metrics instead of the "
+                         "kinked builder's. fv_grid_tools.F90:749-835 "
+                         "shows the duo oracle builds its model grid "
+                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "get_symmetry step skipped -- so the extended "
+                         "lattice is the FAITHFUL halo geometry and the "
+                         "kinked one is the port's residual suspect. "
+                         "This flag is the mechanism-scaling probe.")
     ap.add_argument("--nh", action="store_true",
                     help="non-hydrostatic gate: defaults the runs to "
                          "run_nh_{zerostep,1step}_gfs, adds delz/w to the "
@@ -494,6 +505,7 @@ def main(argv=None):
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     use_ext_metrics=args.ext_metrics,
                                      oracle_conventions=True)
     n, ng = ctx["n"], ctx["ng"]
     ak, bk, ptop, ks = set_eta_analytic(KM)
