@@ -198,7 +198,33 @@ KINDS = {
     # positive scalar pair (area ratios): partner-swap, no sign.
     "sx":      ((48, 48), "sy", 0),
     "sy":      ((48, 48), "sx", 0),
+    # B-grid m/s advected pair (ubbtemp/vbb): the transpose partner and
+    # sign are resolved EMPIRICALLY per face (best of 4 combos) --
+    # see map_bm_best.
+    "bm":      ((49, 49), "bm", 0),
 }
+
+
+def map_bm_best(port_arr, orc_direct, orc_partner, meta):
+    """Empirical mapping for the B-grid m/s pair: try {direct, partner-
+    transposed} x {+1, -1} and keep the combo with the smallest max
+    diff.  Self-diagnosing: a genuinely wrong pair leaves every combo
+    at O(1)."""
+    transposed, nm, su, sv = meta
+    p0 = FSP.DIHEDRAL[nm](window(np.asarray(port_arr), "bscalar"))
+    cands = [("direct", window(np.asarray(orc_direct), "bscalar"))]
+    cands.append(("partner^T",
+                  np.swapaxes(window(np.asarray(orc_partner), "bscalar"),
+                              0, 1)))
+    best = None
+    for tag, o in cands:
+        if o.shape != p0.shape:
+            continue
+        for s in (1.0, -1.0):
+            d = float(np.abs(p0 * s - o).max())
+            if best is None or d < best[0]:
+                best = (d, f"{tag}{'+' if s > 0 else '-'}", p0 * s, o)
+    return best
 
 
 def window(arr: np.ndarray, kind: str):
@@ -401,12 +427,13 @@ def stage_rows():
     bnote = "pairing-units-derived"
     r("S10_dsw23", "S10_dsw3", "ubb", "S10_dsw23_ubb",
       "S10_dsw23_vbbtemp", "bu", note=bnote)
-    r("S10_dsw23", "S10_dsw3", "vbb", "S10_dsw23_vbb",
-      "S10_dsw23_ubbtemp", "bv", note=bnote)
-    r("S10_dsw23", "S10_dsw3", "ubbtemp", "S10_dsw23_ubbtemp",
-      "S10_dsw23_vbb", "bu", note=bnote)
     r("S10_dsw23", "S10_dsw3", "vbbtemp", "S10_dsw23_vbbtemp",
       "S10_dsw23_ubb", "bv", note=bnote)
+    # the m/s advected pair: empirical best-of-4 mapping per face.
+    r("S10_dsw23", "S10_dsw3", "ubbtemp", "S10_dsw23_ubbtemp",
+      "S10_dsw23_vbb", "bm", note="empirical-map")
+    r("S10_dsw23", "S10_dsw3", "vbb", "S10_dsw23_vbb",
+      "S10_dsw23_ubbtemp", "bm", note="empirical-map")
 
     r("S11_b2", "S11_b2", "ubb", "S11_b2_ubb", "S11_b2_vbbtemp", "bu",
       note=bnote)
@@ -420,10 +447,18 @@ def stage_rows():
       "bscalar")
     r("S13_dsw45", "S13_dsw45", "wk", "S13_dsw45_wkk", "S13_dsw45_wkk",
       "ascalar")
+    dnote = ("definition-mismatch suspected (downstream at floor; "
+             "row not authoritative)")
     r("S13_dsw45", "S13_dsw45", "vortfluxx", "S13_dsw45_vortfluxx",
-      "S13_dsw45_vortfluxy", "xflux")
+      "S13_dsw45_vortfluxy", "xflux", note=dnote)
     r("S13_dsw45", "S13_dsw45", "vortfluxy", "S13_dsw45_vortfluxy",
-      "S13_dsw45_vortfluxx", "yflux")
+      "S13_dsw45_vortfluxx", "yflux", note=dnote)
+    # the pre-d_sw6 momentum carriers: names the term if u/v corner
+    # wedges originate before d_sw6's vort-flux application.
+    r("S13_dsw45", "S13_dsw45", "ut", "S13_dsw45_utt",
+      "S13_dsw45_vtt", "uc")
+    r("S13_dsw45", "S13_dsw45", "vt", "S13_dsw45_vtt",
+      "S13_dsw45_utt", "vc")
 
     r("S14_dsw6", "S14_dsw6", "u", "S14_dsw6_u", "S14_dsw6_v", "u")
     r("S14_dsw6", "S14_dsw6", "v", "S14_dsw6_v", "S14_dsw6_u", "v")
@@ -648,7 +683,15 @@ def main(argv=None):
             except KeyError as e:
                 skip_note = f"missing {e}"
                 break
-            p, o = map_stage_field(p_arr, o_dir, o_par, kind, m)
+            combo = ""
+            if kind == "bm":
+                got_bm = map_bm_best(p_arr, o_dir, o_par, m)
+                if got_bm is None:
+                    skip_note = "bm: no shape-compatible combo"
+                    break
+                _, combo, p, o = got_bm
+            else:
+                p, o = map_stage_field(p_arr, o_dir, o_par, kind, m)
             if (np.abs(o) > UNINIT).any() or (np.abs(p) > UNINIT).any():
                 skip_note = "UNAVAILABLE (uninitialised window)"
                 break
@@ -665,7 +708,7 @@ def main(argv=None):
                       "S": d_[:, :3, ...], "N": d_[:, nj_ - 3:, ...]}
             per_face_detail.append(
                 (pf + 1, ot + 1, transposed, rm,
-                 {k: float(v.max()) for k, v in strips.items()}))
+                 {k: float(v.max()) for k, v in strips.items()}, combo))
             if halo:
                 try:
                     hm = halo_maxima(p_arr, o_dir if not transposed
@@ -691,11 +734,11 @@ def main(argv=None):
               f"{rel['corner']:10.2e} {rel['halo_edge']:10.2e} "
               f"{rel['halo_corner']:10.2e} {scale:10.3g}  "
               f"{skip_note} {flag}")
-        if flag and scale:
+        if (flag or kind == "bm") and scale:
             # LOCALISE a flagged row: which faces, which edge strips.
-            for pf_, ot_, tr_, rm_, strips_ in per_face_detail:
+            for pf_, ot_, tr_, rm_, strips_, combo_ in per_face_detail:
                 worst_r = max(max(rm_.values()), max(strips_.values()))
-                if worst_r / scale < 1e-9:
+                if worst_r / scale < 1e-9 and not (kind == "bm" and tr_):
                     continue
                 print(f"    face{pf_}->tile{ot_}"
                       f"{' (transposed)' if tr_ else '':13s} "
@@ -704,7 +747,8 @@ def main(argv=None):
                                   if k in ("interior", "edge", "corner"))
                       + "   strips "
                       + "  ".join(f"{k}={v/scale:9.2e}"
-                                  for k, v in strips_.items()))
+                                  for k, v in strips_.items())
+                      + (f"   [{combo_}]" if combo_ else ""))
         results.append({"stage": stage, "field": pf_name, "kind": kind,
                         "rel": rel, "scale": scale,
                         "faces_used": per_face_used, "note": skip_note,

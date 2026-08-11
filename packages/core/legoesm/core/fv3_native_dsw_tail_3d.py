@@ -172,7 +172,7 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                 # consume them (copies -- d_sw6 may write in place).
                 s5diag[t].append({nm: np.array(s5[nm], copy=True)
                                   for nm in ("ke", "wk", "vortfluxx",
-                                             "vortfluxy")
+                                             "vortfluxy", "ut", "vt")
                                   if nm in s5})
             s6 = d_sw6_duo(lev["u"], lev["v"], s5["ut"], s5["vt"],
                            s5["ke"], s5["wk"], s5["vortfluxx"],

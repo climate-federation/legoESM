@@ -136,7 +136,8 @@ DYN_INSERTS = [
      _hooks3("S12_kee", ["kee"])),
     (1123, "enddo",
      _hooks3("S13_dsw45", ["u", "v", "vt", "kee", "wkk", "vortfluxx",
-                           "vortfluxy", "ua", "va", "divgd"])),
+                           "vortfluxy", "ua", "va", "divgd",
+                           "utt", "vtt"])),
     (1288, "    enddo           ! end openMP k-loop",
      _hooks3("S14_dsw6", ["u", "v"])),
     (1348, "                                       "
