@@ -2419,6 +2419,35 @@ class ModelDriver:
                 self.physics.albedo_land = self._surfdata_land_albedo(
                     surfdata_path, lat_albedo
                 ).astype(_sd)
+            elif getattr(self.config, "clm_surfdata_path", ""):
+                # ERA5-TUNED per-column land albedo (the LMIP calibration):
+                # PFT-weighted _TUNED_PFT_ALBEDO_MULTILAYER + soil-colour blend
+                # + glacier override (0.7178), the exact product run_lmip.py and
+                # the coupled driver already use.  Before this branch an AMIP
+                # run passing only --clm-surfdata-path fell through to the
+                # LATITUDE-vegetation fallback, so the calibrated map never
+                # reached radiation on the MPAS lane.
+                from legoesm.land.clm_surface_map import clm_surface_provider
+                _lat_deg = np.degrees(np.asarray(self.grid.grid_lat)).reshape(-1)
+                _lon_deg = np.degrees(np.asarray(self.grid.grid_lon)).reshape(-1)
+                _lp = clm_surface_provider(
+                    _lat_deg, _lon_deg,
+                    surfdata_path=self.config.clm_surfdata_path,
+                    variant="multilayer")()
+                _alb = jnp.asarray(_lp.albedo_veg).reshape(
+                    jnp.asarray(self.grid.grid_lat).shape)
+                # Defensive only: the provider floors/normalises PFT cover, so
+                # cells WITHOUT source land data come back as finite bare-soil
+                # values, NOT NaN — this where() does not gate them (codex).
+                # Ocean cells are irrelevant (radiation blends by f_land);
+                # coastal model-land cells nearest to an ocean source cell get
+                # the bare-soil template, an accepted nearest-neighbour limit.
+                _alb = jnp.where(jnp.isfinite(_alb), _alb, lat_albedo)
+                self.physics.albedo_land = _alb.astype(_sd)
+                logger.info(
+                    "  Land albedo: ERA5-tuned CLM multilayer map "
+                    f"(mean={float(jnp.mean(_alb)):.3f}, "
+                    f"max={float(jnp.max(_alb)):.3f})")
             else:
                 self.physics.albedo_land = lat_albedo.astype(_sd)
             # Tiled (mosaic) surface fluxes + the radiation cadence apply to ANY
@@ -7872,6 +7901,19 @@ class ModelDriver:
         from legoesm.forcing.surface_utils import (
             blend_surface_property, blended_surface_albedo,
         )
+        # dynamic_albedo is a REAL ExperimentConfig option that the FV lane
+        # honours (physics_pipeline applies a zenith-angle-dependent ocean
+        # albedo). The MPAS blend below is static, so selecting it here would
+        # do nothing, silently — the "unknown/unimplemented selection quietly
+        # does something else" failure the dispatch-hardening rule exists to
+        # stop. Raise until the zenith curve is shared with this lane.
+        if bool(getattr(cfg, "dynamic_albedo", False)):
+            raise NotImplementedError(
+                "dynamic_albedo=True is not implemented on the MPAS lane: "
+                "the surface albedo handed to radiation here is the static "
+                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
+                "ocean curve the FV lane applies would be silently ignored. "
+                "Run the FV lane, or leave dynamic_albedo=False.")
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
         _albedo_land_static = None

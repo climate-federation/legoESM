@@ -1,0 +1,17 @@
+# Probe suite for the energy-conserving dycore numerics (NOT a training
+# suite): sb_centered vertical transport + frictional heating, dry-mass
+# anchor on. Consumed by scripts/validate/aimip_pressure_spinup.py
+# --global-t and scripts/validate/aimip_t_budget.py as the acceptance
+# configuration for the -0.48 K/day zero-physics cooling fix.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  fix_mass: true
+  anchor_mass_to_initial: true
+  vertical_advection_scheme: sb_centered
+  frictional_heating: true
+
+variants:
+  - column_nn
+
+output_dir: results/_sb_probe

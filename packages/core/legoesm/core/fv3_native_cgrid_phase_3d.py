@@ -54,6 +54,7 @@ CSW_OUT_2D = ("delpc", "ptc", "uc", "vc", "ua", "va", "ut", "vt", "divg_d")
 
 def csw_phase_3d(ctx: dict, state: list, dt2: float, km: int, *,
                  nord: int = 2, duogrid: bool = True,
+                 hydrostatic: bool = True,
                  remap_follows: bool = False) -> list:
     """Per-level ``c_sw`` on all six faces; returns 3-D C-grid outputs.
 
@@ -62,24 +63,32 @@ def csw_phase_3d(ctx: dict, state: list, dt2: float, km: int, *,
     which is why the ``divgd`` exchange downstream is required at all
     (``dyn_core.F90:652`` gates it on ``nord > 0``; :706 is the
     ``flagstruct%regional`` branch and never runs on the duo lane).
+
+    ``hydrostatic=False`` selects c_sw's NH arm (``sw_core.F90:216-291``):
+    ``w`` rides the same upwind fluxes as delp/pt and the advected
+    cell-centre ``wc`` is collected -- it is the ``omga`` argument
+    ``Riem_Solver_c`` consumes (``dyn_core.F90:589-594``; intent(in)
+    there, so the C stage never writes it back).
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     from legoesm.core.fv3_native_sw_core import c_sw
 
     n, ng, bd = ctx["n"], ctx["ng"], ctx["bd"]
     npx = n + 1
+    names = CSW_OUT_2D + (() if hydrostatic else ("wc",))
     outs = []
     for t in range(6):
         face = state[t]
         acc = {name: np.zeros(field_shape(_out_like(name), n, ng, km),
                               dtype=np.float64)
-               for name in CSW_OUT_2D}
+               for name in names}
         for k in range(km):
             lev = level_slice(face, k, km)
             got = c_sw(lev["delp"], lev["pt"], lev["w"],
                        lev["u"], lev["v"], ctx["gs6"][t], bd,
-                       npx, npx, dt2, duogrid=duogrid, nord=nord)
-            for name in CSW_OUT_2D:
+                       npx, npx, dt2, duogrid=duogrid, nord=nord,
+                       hydrostatic=hydrostatic)
+            for name in names:
                 if name not in got:
                     raise KeyError(
                         f"c_sw returned no {name!r}; keys are "
@@ -101,7 +110,7 @@ def _out_like(name: str) -> str:
     """Map a c_sw output name onto the field whose shape it shares."""
     return {"divg_d": "divgd", "uc": "uc", "vc": "vc",
             "delpc": "delp", "ptc": "pt", "ua": "ua", "va": "va",
-            "ut": "ut", "vt": "vt"}[name]
+            "ut": "ut", "vt": "vt", "wc": "w"}[name]
 
 
 def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
@@ -167,4 +176,71 @@ def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
                  out["uc"], out["vc"], ctx["gs6"][t], bd,
                  npz=km, hydrostatic=True)
         press.append(got)
+    return press
+
+
+def cgrid_nh_pressure_phase_3d(ctx: dict, csw_outs: list, gz6: list,
+                               ws3_6: list, km: int, *, dt2: float,
+                               ptop: float, akap: float, cp_air: float,
+                               p_fac: float, a_imp: float,
+                               dp0: np.ndarray, hs6: list, zs6: list,
+                               remap_follows: bool = False) -> list:
+    """NH C-grid pressure stage: ``update_dz_c`` -> ``Riem_Solver_c`` ->
+    NH ``p_grad_c``, per face (``dyn_core.F90:583-594`` then ``:629``).
+
+    Replaces the hydrostatic ``geopk`` chain of
+    :func:`cgrid_pressure_phase_3d`.  The CALLER (the acoustic driver)
+    owns the gz/zh cadence around this: first substep seeds
+    ``gz[..,km] = zs`` padded, rebuilds ``gz`` from ``delz``, duo-
+    exchanges ``gz`` and copies it into ``zh``; later substeps restore
+    ``gz = zh`` (``dyn_core.F90:384-416, 535-581``).  ``gz6`` arrives
+    here in HEIGHT form and leaves as GEOPOTENTIAL (Riem_Solver_c's
+    rebuild from ``hs = phis`` -- NH-spec trap #7), which is exactly
+    what the NH ``p_grad_c`` consumes.
+
+    Corner flags are FALSE: duogrid forces ``bounded_domain=.true.`` and
+    ``fv_grid_utils.F90:219-229`` then leaves all four flags false
+    (trap #17) -- ``update_dz_c``'s ``fill_4corners`` calls are live but
+    no-ops, faithfully.
+
+    ``ws3_6`` are per-face PADDED 2-D arrays ``update_dz_c`` fills and
+    ``Riem_Solver_c`` reads (``ws3`` in dyn_core; intent(in) there).
+    ``wc`` (the c_sw advected w, dyn_core's ``omga``) is intent(in) to
+    the Riemann solve and never written back.
+
+    Returns per-face dicts with ``pkc`` (FULL C-stage interface
+    pressure, ``pe2 + pem``) -- ``delpc``/``ptc``/``uc``/``vc`` live on
+    in ``csw_outs`` (p_grad_c mutates uc/vc in place, the oracle's
+    contract).
+    """
+    require_no_remap_needed(km, remap_follows=remap_follows)
+    from legoesm.core.fv3_native_nh_core import riem_solver_c, update_dz_c
+    from legoesm.core.fv3_native_pgrad import p_grad_c
+
+    bd = ctx["bd"]
+    n, ng = ctx["n"], ctx["ng"]
+    m_a = n + 2 * ng
+    press = []
+    for t in range(6):
+        out = csw_outs[t]
+        if "wc" not in out:
+            raise KeyError(
+                "cgrid_nh_pressure_phase_3d: csw_outs has no 'wc' -- "
+                "csw_phase_3d must run with hydrostatic=False")
+        gs = ctx["gs6"][t]
+        update_dz_c(bd, km, dt2, dp0, zs6[t],
+                    np.asarray(gs["area"], dtype=np.float64),
+                    out["ut"], out["vt"], gz6[t], ws3_6[t],
+                    n + 1, n + 1,
+                    sw_corner=False, se_corner=False,
+                    ne_corner=False, nw_corner=False,
+                    grid_type=int(gs.get("grid_type", 0)))
+        pkc = np.zeros((m_a, m_a, km + 1), dtype=np.float64)
+        riem_solver_c(1, dt2, bd, km, akap, cp_air, ptop, hs6[t],
+                      out["wc"], out["ptc"], out["delpc"], gz6[t],
+                      pkc, ws3_6[t], p_fac, a_imp)
+        p_grad_c(dt2, out["delpc"], pkc, gz6[t],
+                 out["uc"], out["vc"], gs, bd,
+                 npz=km, hydrostatic=False)
+        press.append({"pkc": pkc})
     return press

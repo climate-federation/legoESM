@@ -670,7 +670,9 @@ def test_driver_uses_the_declared_sphum_index_not_tracer_zero():
 
 
 @pytest.mark.parametrize("override, needle, ntracer", [
-    (dict(hydrostatic=False), "hydrostatic", 0),
+    # hydrostatic=False is PORTED now (w/delz remap, w_limiter, NH pkz);
+    # its argument requirements are asserted in
+    # test_driver_nh_requires_its_arguments below.
     (dict(consv=1.0), "consv", 0),
     # fillz sits INSIDE the `elseif (nq > 0)` arm (fv_mapz.F90:330-336), so
     # fill=True is only refusable when there are tracers -- with none it is
@@ -688,6 +690,20 @@ def test_driver_refuses_every_unported_lane(override, needle, ntracer):
           for _ in range(ntracer)]
     with pytest.raises(NotImplementedError, match=needle):
         lagrangian_to_eulerian(**face, q=tr)
+
+
+def test_driver_nh_requires_its_arguments():
+    """The NH lane must not run on defaults: w/delz/ws/rdgas/grav are
+    all required (a silently-defaulted rdgas would be a wrong pkz, not
+    an error), and a negative kord_wz selects the refused iv=-3 arm."""
+    face, _ = _face()
+    face["hydrostatic"] = False
+    with pytest.raises(ValueError, match="hydrostatic=False needs"):
+        lagrangian_to_eulerian(**face, q=[])
+    nh = _nh_face()
+    nh["kord_wz"] = -9
+    with pytest.raises(NotImplementedError, match="iv"):
+        lagrangian_to_eulerian(**nh, q=[])
 
 
 def test_driver_refuses_a_moist_lane_without_any_tracers():
@@ -974,3 +990,231 @@ def test_driver_guards_do_not_over_refuse_a_non_last_step_call():
     lagrangian_to_eulerian(**b, q=tr, last_step=False)
     c, _ = _face()
     lagrangian_to_eulerian(**c, q=[], fill=True)     # fillz needs nq > 0
+
+
+# ------------------------------------------------------------- NH remap
+
+def _nh_face(w_const=None, seed=59, deform=0.25):
+    """The `_face` fixture plus make_nh delz, a w field and the ws BC.
+
+    ``w_const`` fills w with one constant (the iv=-2 constant-
+    preservation control); None gives it vertical structure.
+    ``deform=0`` makes the Lagrangian and Eulerian coordinates coincide,
+    so every remap is an identity -- the lens that isolates the
+    conversions from the rezone.
+    """
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face, ps2d = _face(deform=deform)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    rng = np.random.default_rng(seed)
+    m_a = n + 2 * ng
+
+    # T_v back from theta (pt = T_v/pkz in the fixture).
+    tv = face["pt"][ia:ia + n, ia:ia + n, :] * face["pkz"]
+    dpeln = np.diff(face["peln"], axis=1).transpose(0, 2, 1)
+    delz = -(FV3_RDGAS / FV3_GRAV) * tv * dpeln
+
+    w = np.zeros((m_a, m_a, km), dtype=np.float64)
+    if w_const is None:
+        w[ia:ia + n, ia:ia + n, :] = 0.3 * rng.standard_normal((n, n, km))
+    else:
+        w[ia:ia + n, ia:ia + n, :] = w_const
+    ws = (np.full((n, n), w_const) if w_const is not None
+          else 0.1 * rng.standard_normal((n, n)))
+    face.update(hydrostatic=False, w=w, delz=delz, ws=ws, kord_wz=9,
+                w_limiter=False, rdgas=FV3_RDGAS, grav=FV3_GRAV)
+    return face
+
+
+def test_driver_nh_conserves_delz_and_preserves_constant_w():
+    """Three NH facts in one integration: (a) the delz remap conserves
+    the column height integral EXACTLY (specific volume is remapped
+    mass-weighted over an unchanged column mass); (b) a CONSTANT w with
+    a matching ws bottom BC comes back as the same constant (the iv=-2
+    reconstruction of a constant is the constant); (c) the returned pkz
+    is the NH ideal-gas form of the RETURNED delp/delz/pt to the last
+    bit (r_vir=0 makes the :975 conversion an identity)."""
+    face = _nh_face(w_const=5.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    dz_before = face["delz"].sum(axis=2).copy()
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    dz_after = face["delz"].sum(axis=2)
+    assert np.abs(dz_after - dz_before).max() < 1e-9 * np.abs(
+        dz_before).max()
+    assert face["delz"].max() < 0.0
+    wwin = face["w"][ia:ia + n, ia:ia + n, :]
+    assert np.abs(wwin - 5.0).max() < 1e-11, np.abs(wwin - 5.0).max()
+
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+    rrg = -FV3_RDGAS / FV3_GRAV
+    want = np.exp(face["akap"] * np.log(
+        rrg * face["delp"][ia:ia + n, ia:ia + n, :] / face["delz"]
+        * face["pt"][ia:ia + n, ia:ia + n, :]))
+    assert np.allclose(face["pkz"], want, rtol=1e-14, atol=0.0)
+
+
+def test_driver_nh_theta_conversion_uses_the_ideal_gas_pkz():
+    """codex NH r3 #1: the NH theta_v -> T_v conversion is
+    ``pt *= exp(k1k*log(rrg*delp/delz*pt))`` (fv_mapz.F90:231-232,
+    k1k = rdgas/cv_air), NOT the hydrostatic Dpk/(akap*Dpeln) form.
+    At deform=0 the remap is an identity and r_vir=0 makes :975 an
+    identity too, so the returned pt IS the converted value -- compared
+    here against a direct transcription on the captured inputs."""
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face = _nh_face(w_const=0.0, deform=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    pt_in = np.array(face["pt"][ia:ia + n, ia:ia + n, :], copy=True)
+    dp_in = np.array(face["delp"][ia:ia + n, ia:ia + n, :], copy=True)
+    dz_in = np.array(face["delz"], copy=True)
+    # The hydrostatic-form conversion, for the non-vacuity contrast.
+    pkc = face["pk"][ia:ia + n, ia:ia + n, :]
+    pln = face["peln"]
+    hydro_form = pt_in * ((pkc[:, :, 1:] - pkc[:, :, :-1])
+                          / (AKAP * np.diff(pln, axis=1).transpose(0, 2, 1)))
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    k1k = FV3_RDGAS / (face["cp"] - FV3_RDGAS)
+    rrg = -FV3_RDGAS / FV3_GRAV
+    want = pt_in * np.exp(k1k * np.log(rrg * dp_in / dz_in * pt_in))
+    got = face["pt"][ia:ia + n, ia:ia + n, :]
+    # 1e-11: at deform=0 the coordinates coincide ALGEBRAICALLY but the
+    # cumsum-built pe1 and the ak+bk*ps pe2 differ in the last bits, so
+    # the "identity" remap still moves pt by ~1e-12 relative.
+    assert np.allclose(got, want, rtol=1e-11, atol=0.0)
+    # The two conversion forms genuinely differ at this discretisation
+    # (~2.8e-4 relative on the thickest log-layer) -- the assert above
+    # is not satisfiable by the hydro form.
+    assert np.abs(want - hydro_form).max() > 1e-5 * np.abs(want).max()
+
+
+def test_driver_nh_theta_conversion_reads_the_pre_update_delp():
+    """codex NH r4 #1: at deform=0 the source delp and the target dp2
+    coincide, so the identity test cannot distinguish fv_mapz.F90:231's
+    PRE-update delp/delz from a mutant that converts with dp2.  Here
+    deform=0.25 separates them, and one row's full pt pipeline --
+    conversion on SNAPSHOTTED inputs, then the ln(p) rezone with the
+    driver's own coordinate construction (:290-316) -- is replicated
+    against the returned pt.  map_scalar/pad1/unpad1 are shared
+    certified primitives; what this proves is the PLUMBING: which
+    delp/delz feed the conversion and which coordinates feed the remap.
+    """
+    from legoesm.core.fv3_native_mapz import T_MIN, map_scalar, pad1, unpad1
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+
+    face = _nh_face(w_const=0.0, deform=0.25)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    ak1 = pad1(np.asarray(face["ak"])[None, :])[0]
+    bk1 = pad1(np.asarray(face["bk"])[None, :])[0]
+    jl = 2
+    jd = jl + ng
+    jpe = jl + 1
+    pt_in = np.array(face["pt"][ia:ia + n, jd, :], copy=True)
+    dp_in = np.array(face["delp"][ia:ia + n, jd, :], copy=True)
+    dz_in = np.array(face["delz"][:, jl, :], copy=True)
+    pe_row = np.array(face["pe"][1:1 + n, :, jpe], copy=True)
+    peln_row = np.array(face["peln"][:, :, jl], copy=True)
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    k1k = FV3_RDGAS / (face["cp"] - FV3_RDGAS)
+    rrg = -FV3_RDGAS / FV3_GRAV
+    conv = pt_in * np.exp(k1k * np.log(rrg * dp_in / dz_in * pt_in))
+
+    # :267-276 target interfaces, :290-308 pn2 with endpoint COPIES.
+    pe2 = np.zeros((n, km + 2))
+    pe2[:, 1] = face["ptop"]
+    pe2[:, km + 1] = pe_row[:, km]
+    for k in range(2, km + 1):
+        pe2[:, k] = ak1[k] + bk1[k] * pe_row[:, km]
+    pn2 = np.zeros((n, km + 2))
+    pn2[:, 1] = peln_row[:, 0]
+    pn2[:, km + 1] = peln_row[:, km]
+    for k in range(2, km + 1):
+        pn2[:, k] = np.log(pe2[:, k])
+    want = unpad1(map_scalar(pad1(peln_row), pad1(conv), pn2, km, km,
+                             1, abs(int(face["kord_tm"])), T_MIN))
+    got = face["pt"][ia:ia + n, jd, :]
+    assert np.allclose(got, want, rtol=1e-13, atol=0.0)
+    # The discriminating contrast: converting with the TARGET dp2
+    # instead of the source delp gives a visibly different answer.
+    dp2 = np.diff(pe2[:, 1:], axis=1)
+    conv_mut = pt_in * np.exp(k1k * np.log(rrg * dp2 / dz_in * pt_in))
+    want_mut = unpad1(map_scalar(pad1(peln_row), pad1(conv_mut), pn2,
+                                 km, km, 1, abs(int(face["kord_tm"])),
+                                 T_MIN))
+    assert np.abs(want_mut - want).max() > 1e-8 * np.abs(want).max()
+
+
+@pytest.mark.parametrize("sign", [+1.0, -1.0])
+def test_driver_nh_w_limiter_top_escape_valve(sign):
+    """codex NH r3 #5 + r4 #3: a large bottom-layer violation cascades
+    UP the column and must hit the :408-416 top valve at exactly
+    2*w_max (positive monster) or 2*w_min (negative -- a mutant
+    dropping the :412-415 arm would pass the positive case alone), with
+    the spilled momentum beyond the valve DISCARDED."""
+    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ, W_MIN_MAPZ
+
+    face = _nh_face(w_const=0.0, deform=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    # Bottom-layer monster: the up pass clamps k=km-1..1 and dumps the
+    # excess into k=0, where only the valve can stop it.
+    face["w"][ia + 1, ia + 1, km - 1] = sign * 5.0e4
+    face["ws"][:] = 0.0
+    face["w_limiter"] = True
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    wcol = face["w"][ia + 1, ia + 1, :]
+    if sign > 0:
+        assert wcol[0] == 2.0 * W_MAX_MAPZ, wcol
+        assert np.all(wcol[1:] <= W_MAX_MAPZ + 1e-12), wcol
+    else:
+        assert wcol[0] == 2.0 * W_MIN_MAPZ, wcol
+        assert np.all(wcol[1:] >= W_MIN_MAPZ - 1e-12), wcol
+    # Momentum was genuinely LOST at the valve (non-conservation is the
+    # documented intent of :408-416).
+    dp2 = face["delp"][ia + 1, ia + 1, :]
+    assert abs((wcol * dp2).sum()) < 5.0e4 * dp2[km - 1] * 0.5
+
+
+def test_driver_nh_w_limiter_clamps_and_conserves_momentum():
+    """An interior w = 200 violates w_max = 90 (fv_mapz.F90:51); the
+    limiter must clamp it and push the excess into the neighbours so
+    the column integral w*dp2 is unchanged (momentum-conserving by
+    construction; the top escape valve does not fire at these values)."""
+    face = _nh_face(w_const=0.0)
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    face["w"][ia + 2, ia + 3, 2] = 200.0
+    face["ws"][:] = 0.0
+    face["w_limiter"] = True
+
+    lagrangian_to_eulerian(**face, q=[])
+
+    wwin = face["w"][ia:ia + n, ia:ia + n, :]
+    from legoesm.core.fv3_native_mapz import W_MAX_MAPZ
+    assert wwin.max() <= W_MAX_MAPZ + 1e-12, wwin.max()
+    # Momentum: recompute dp2 from the returned (Eulerian) delp.
+    dp2 = face["delp"][ia:ia + n, ia:ia + n, :]
+    col = (wwin * dp2).sum(axis=2)
+    # The un-limited run carries the same remap; only the limiter differs.
+    face2 = _nh_face(w_const=0.0)
+    face2["w"][ia + 2, ia + 3, 2] = 200.0
+    face2["ws"][:] = 0.0
+    lagrangian_to_eulerian(**face2, q=[])
+    w2 = face2["w"][ia:ia + n, ia:ia + n, :]
+    col2 = (w2 * face2["delp"][ia:ia + n, ia:ia + n, :]).sum(axis=2)
+    assert np.abs(col - col2).max() < 1e-9 * max(np.abs(col2).max(), 1.0)
+    # Non-vacuity: the limiter really fired.
+    assert w2.max() > W_MAX_MAPZ
+    assert not np.array_equal(wwin, w2)

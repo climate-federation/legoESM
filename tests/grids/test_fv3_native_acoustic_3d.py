@@ -171,3 +171,128 @@ def test_km_above_the_remap_window_is_refused(ctx):
     with pytest.raises(ValueError, match="fv_mapz"):
         acoustic_loop_3d(ctx, _state(4), dt_atmos=60.0, km=9, n_split=1,
                          ptop=PTOP, akap=AKAP, cp_air=CP)
+
+
+# ---------------------------------------------------------------------------
+# NH lane (units 7-9 wiring): update_dz_c/Riem_Solver_c/NH p_grad_c on the
+# C stage, the d_sw w arms, update_dz_d/Riem_Solver3/pk3_halo/nh_p_grad on
+# the D stage.  These are INTEGRATION smoke certificates (finiteness,
+# positivity, sane w, cadence non-vacuity) -- the numerics certificates
+# live per-kernel in test_fv3_native_nh_core / test_fv3_native_pgrad, and
+# the end gate is the full-step oracle parity run.
+# ---------------------------------------------------------------------------
+
+
+def _nh_state(km, seed=0):
+    """The quiescent column of ``_state``, converted to the NH acoustic
+    lane's own units, plus ``make_nh``'s ``delz`` and ``w = 0``.
+
+    TWO unit facts, both measured the expensive way (a raw-T fixture
+    made SIM1 answer with |w| = 391 m/s -- the CORRECT response to a
+    pressure field ~p^kappa out of balance, not a solver defect):
+
+    * dyn_core's ``pt`` is THETA_V in the p0=1 convention
+      (``fv_dynamics.F90:396-408``: pt = pt/pkz), so the EOS
+      ``(-dm/dz * rgas * pt)^gama`` lands back on the full pressure;
+    * ``delz`` must be the make_nh hydrostatic form
+      ``-(rgas/grav) * T * dpeln`` (``init_hydro.F90:147-158``), the
+      exact discrete balance the Riemann solve inverts.
+    """
+    from legoesm.core.fv3_native_state_3d import field_shape
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_GRAV,
+        FV3_KAPPA,
+        FV3_RDGAS,
+    )
+
+    st = _state(km, seed=seed)
+    for face in st:
+        face["delz"] = np.zeros(field_shape("delz", N, NG, km))
+        m_a = face["delp"].shape[0]
+        pe = np.full((m_a, m_a), PTOP)
+        for k in range(km):
+            dp = face["delp"][:, :, k]
+            tt = np.array(face["pt"][:, :, k], copy=True)   # T [K]
+            pe_top = pe
+            pe_bot = pe + dp
+            dpeln = np.log(pe_bot) - np.log(pe_top)
+            pkz = ((np.exp(FV3_KAPPA * np.log(pe_bot))
+                    - np.exp(FV3_KAPPA * np.log(pe_top)))
+                   / (FV3_KAPPA * dpeln))
+            face["pt"][:, :, k] = tt / pkz                  # theta_v, p0=1
+            win = slice(NG, NG + N)
+            face["delz"][:, :, k] = (
+                -(FV3_RDGAS / FV3_GRAV) * tt[win, win]
+                * dpeln[win, win])
+            pe = pe_bot
+    return st
+
+
+def _nh_kwargs(ctx, km):
+    from legoesm.core.fv3_native_acoustic_3d import build_nh_carry
+
+    m_a = N + 2 * NG
+    hs6 = [np.zeros((m_a, m_a)) for _ in range(6)]
+    return dict(hydrostatic=False,
+                nh=build_nh_carry(ctx, km, hs6),
+                dp0=np.full(km, (P_SFC - PTOP) / km))
+
+
+def test_nh_substep_runs_and_stays_sane(ctx):
+    st = _nh_state(KM)
+    before = state_signature(st)
+    acoustic_substep_3d(ctx, st, DT, KM, first_substep=True,
+                        ptop=PTOP, akap=AKAP, cp_air=CP,
+                        **_nh_kwargs(ctx, KM))
+    assert state_signature(st) != before, "the NH sub-step was a no-op"
+    bd = ctx["bd"]
+    i0, j0 = bd.is_ - bd.isd, bd.js - bd.jsd
+    for t in range(6):
+        for name in ("delp", "pt", "u", "v", "w"):
+            win = st[t][name][i0:i0 + N, j0:j0 + N, :]
+            assert np.all(np.isfinite(win)), (t, name)
+        assert st[t]["delp"][i0:i0 + N, j0:j0 + N, :].min() > 0.0, t
+        assert np.all(np.isfinite(st[t]["delz"])), t
+        assert st[t]["delz"].max() < 0.0, (
+            f"face {t + 1}: delz must stay strictly negative")
+        # A near-balanced rest column answers with a bounded acoustic
+        # transient, not tens of m/s.
+        wmax = np.abs(st[t]["w"][i0:i0 + N, j0:j0 + N, :]).max()
+        assert wmax < 50.0, (t, wmax)
+
+
+def test_nh_loop_two_substeps_and_carry_cadence(ctx):
+    st = _nh_state(KM, seed=3)
+    kw = _nh_kwargs(ctx, KM)
+    acoustic_loop_3d(ctx, st, dt_atmos=2 * DT, km=KM, n_split=2,
+                     ptop=PTOP, akap=AKAP, cp_air=CP, **kw)
+    bd = ctx["bd"]
+    i0, j0 = bd.is_ - bd.isd, bd.js - bd.jsd
+    for t in range(6):
+        win = st[t]["delp"][i0:i0 + N, j0:j0 + N, :]
+        assert np.all(np.isfinite(win)) and win.min() > 0.0, t
+        assert np.all(np.isfinite(st[t]["delz"])), t
+    # The carry did its job across substeps: zh evolved away from the
+    # first-substep gz seed and holds finite heights.
+    zh = kw["nh"]["zh6"][0]
+    assert np.all(np.isfinite(zh[i0:i0 + N, j0:j0 + N, :]))
+    assert np.abs(zh[i0:i0 + N, j0:j0 + N, 0]).max() > 1.0e3, (
+        "zh top should sit kilometres above a zs=0 surface")
+
+
+def test_nh_substep_requires_carry_and_dp0(ctx):
+    st = _nh_state(KM)
+    with pytest.raises(ValueError, match="nh carry"):
+        acoustic_substep_3d(ctx, st, DT, KM, first_substep=True,
+                            ptop=PTOP, akap=AKAP, cp_air=CP,
+                            hydrostatic=False)
+
+
+def test_nh_state_builder_carries_delz():
+    from legoesm.core.fv3_native_state_3d import validate_state_3d
+
+    st = build_state_3d(N, NG, KM, hydrostatic=False)
+    assert all("delz" in face for face in st)
+    validate_state_3d(st, N, NG, KM)
+    hy = build_state_3d(N, NG, KM)
+    assert all("delz" not in face for face in hy)

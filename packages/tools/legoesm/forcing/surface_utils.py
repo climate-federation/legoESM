@@ -259,6 +259,53 @@ def surface_emissivity_for_lw_inversion(
         return static_sfc_emissivity
     # gray / none: idealized black surface (emit with eps = 1.0).
     return 1.0
+
+
+def snow_for_albedo_deblend(
+    snow: "jnp.ndarray | None",
+    ensemble_size: int,
+) -> "jnp.ndarray | None":
+    """The snow field a coupled driver may pass to ``static_surface_albedo``.
+
+    Shortwave twin of the emissivity selector above, and the single place both
+    coupled drivers make this call, so they cannot drift apart.
+
+    The driver's ``_carry_aux["snow"]`` is the raw segment carry.  On an
+    ENSEMBLE run (``ensemble_size > 1``) the driver unpacks
+    ``ensemble_mean(carry)`` for the state and the held fluxes but stashes the
+    snow carry member-shaped — deliberately, since the next segment restarts
+    from the full ensemble.  Handing that member-shaped field to the albedo
+    blend would make ``albedo`` member-shaped too and broadcast the 2-D mean
+    ``sw_net_sfc`` up to 3-D, mis-shaping every downstream surface forcing
+    field.  So ensembles fall back to the bare vegetation albedo, matching the
+    existing gate that disables the multilayer land tile for ensembles.
+
+    Scope of that fallback, stated narrowly: ensembles lose only the SNOW
+    brightening.  They still gain the ocean/ice/land blend itself, which is the
+    first-order fix and the whole point — an ensemble run is NOT byte-identical
+    to the pre-fix behaviour, it is corrected without the snow term.
+
+    ``<= 1`` rather than ``== 1``, matching ``ModelDriver._create_ensemble``,
+    which treats any size at or below one as serial and leaves the carry
+    single-member shaped.
+
+    Parameters
+    ----------
+    snow : array or None
+        Snow water equivalent [kg/m^2] from the driver's carry, or ``None``.
+    ensemble_size : int
+        The atmosphere driver's ``_ensemble_size``.
+
+    Returns
+    -------
+    snow : array or None
+        ``snow`` on a single-member run; ``None`` otherwise.
+    """
+    if snow is None or int(ensemble_size) > 1:
+        return None
+    return snow
+
+
 def snow_fraction(
     T_low: jnp.ndarray,
     T_freeze: float,

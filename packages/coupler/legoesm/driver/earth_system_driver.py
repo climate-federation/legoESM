@@ -171,7 +171,7 @@ class EarthSystemDriver:
         cfg = self.config
         sst, sic = self._atm.get_sst_sic(day)
         from legoesm.forcing.surface_utils import (
-            blend_surface_property,
+            snow_for_albedo_deblend,
             surface_emissivity_for_lw_inversion,
             surface_temperature_for_lw_boundary,
         )
@@ -187,17 +187,30 @@ class EarthSystemDriver:
         # emitted with — NOT the aerodynamic/sensible-heat T_sfc (the canopy
         # air-space temp Tc over vegetated cells).
         _radiation = getattr(self.config, "radiation", "gray")
+        _phys = self._atm.physics
         if _dyn_sfc:
             albedo_eff = _resp.albedo
             T_sfc = surface_temperature_for_lw_boundary(
                 _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
                 lw_up=_resp.lw_up)
         else:
-            albedo_eff = blend_surface_property(
-                sic,
-                cfg.albedo_ice,
-                cfg.albedo_ocean,
-            )
+            # The pipeline's own ocean/ice/land blend — the same
+            # single-source-of-truth argument as the emissivity inversion
+            # below.  An ocean/ice-only blend carries NO land fraction, so over
+            # land this inverted with alpha ~ 0.06 instead of ~0.20 and handed
+            # the surface ~36 W/m^2 too little shortwave, silently (#1556).
+            # static_surface_albedo names the two terms it still cannot see
+            # (zenith ocean albedo, multilayer albedo_veg).
+            # lat + the SNOW carry, not defaults: with snow_albedo_feedback on
+            # radiation brightens the land albedo by snow cover, and a deblend
+            # falling back to the bare vegetation albedo would re-open this
+            # same gap over every snow-covered column.
+            albedo_eff = _phys.static_surface_albedo(
+                sic, land_active=_phys.f_land is not None,
+                lat=self._atm._grid_lat,
+                snow=snow_for_albedo_deblend(
+                    aux.get("snow"),
+                    getattr(self._atm, "_ensemble_size", 1)))
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
         # Emissivity matching the emission: RRTMGP/RRTMG + feedback -> the
@@ -205,7 +218,6 @@ class EarthSystemDriver:
         # emissivity blend the radiation pipeline emitted with (configured
         # emissivity_* values, not a constant ocean/ice approximation); gray/none
         # -> an idealized black surface (eps = 1.0).
-        _phys = self._atm.physics
         eps_sfc = surface_emissivity_for_lw_inversion(
             _radiation,
             dynamic_emissivity=(

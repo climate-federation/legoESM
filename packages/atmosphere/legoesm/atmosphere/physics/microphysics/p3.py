@@ -79,6 +79,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -260,8 +261,20 @@ def p3_microphysics(
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
     # Ice supersaturation (used by the nucleation gate and deposition below).
+    # PLAIN ice saturation — the nucleation gate must NOT see the
+    # homogeneous-freezing allowance: the oracle gate (supi >= 0.05 on plain
+    # q_sat_i) is what decides whether crystals appear at all, and raising its
+    # denominator by rh_homo suppressed nucleation outright (the gSAM Cooper-cap
+    # test collapsed from 6667 to 9e-24 /kg/s).
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+
+    # DEPOSITION target only: IFS/SAM homogeneous-freezing allowance lets
+    # pristine air below 235 K hold ice supersaturation up to rh_homo (gSAM
+    # cloud.f90); withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor).
+    q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
+        T, q_i, enabled=config.homogeneous_ice_supersaturation,
+    )
 
     # 1. Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics, smoothed).
     #
@@ -304,9 +317,13 @@ def p3_microphysics(
     # sublimation is a separate pathway not yet included, consistent with
     # Morrison which also omits explicit sublimation).
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
+    # Deposition is driven by the excess over the ALLOWED target: in pristine
+    # air below 235 K that is rh_homo*q_sat_i, so vapour accumulates to the
+    # homogeneous-freezing threshold instead of depositing immediately.
+    S_i_dep = q_v / jnp.clip(q_sat_i_dep, 1e-10) - 1.0
     dq_i_dep = (
         config.dep_coeff
-        * jnp.maximum(S_i, 0.0)
+        * jnp.maximum(S_i_dep, 0.0)
         * q_i_eff
         * safe_pow(N_i, 1.0 / 3.0)
         * f_ice

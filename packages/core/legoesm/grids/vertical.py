@@ -2751,6 +2751,39 @@ def vertical_advection_hybrid(
     return -F_full * grad
 
 
+def vertical_advection_hybrid_sb(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Simmons-Burridge centered vertical advection, hybrid coordinates.
+
+        -eta_dot dp/deta * df/dp |_k
+            = -(1/(2*dp_k)) * [ mdot_{k+1/2} * (f_{k+1} - f_k)
+                              + mdot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with ``mdot`` the interface mass flux from
+    :func:`compute_mass_flux_hybrid` (zero at top and surface) and ``dp_k``
+    the LAYER thickness (half-level differences) — the conservation weight.
+    Identical structure to the pure-sigma ``_vertical_advection_sigma_sb``:
+    ``adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2})/dp_k`` is a flux-form
+    divergence whose dp-weighted column sum telescopes to the (zero)
+    boundary fluxes, so ``sum(dp * f)`` is conserved in pairing with
+    continuity — the property the upwind advective form
+    (:func:`vertical_advection_hybrid`) lacks (measured -0.32..-0.47 K/day
+    mass-weighted T sink on the sigma path at T63L8).
+    """
+    dp = dp_from_hybrid(coord, p_s)                # (..., nlev), layer thickness
+    df = jnp.diff(field, axis=-1)                  # (..., nlev-1)
+    md_int = mass_flux[..., 1:-1]                  # interior interfaces
+    contrib = md_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # mdot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # mdot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
+
+
 def vertical_advection_theta_hybrid(
     T: jax.Array,
     mass_flux: jax.Array,

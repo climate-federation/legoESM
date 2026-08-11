@@ -6,6 +6,8 @@ on cubed-sphere, Gaussian, and lat-lon grids.
 from __future__ import annotations
 
 import logging
+import math
+
 import numpy as np
 
 from legoesm import constants
@@ -269,6 +271,7 @@ def cfl_check_and_adjust(
     verbose: bool = True,
     grid_type: str = "cubed_sphere",
     use_polar_filter: bool = False,
+    dx_min_override: float | None = None,
 ) -> float:
     """Check CFL condition and reduce dt if needed.
 
@@ -323,12 +326,36 @@ def cfl_check_and_adjust(
         dx_min = estimate_min_dx_icosahedral(n, radius)
     elif grid_type == "cubed_sphere":
         dx_min = estimate_min_dx_cubed_sphere(n, radius)
+    elif grid_type == "fesom":
+        # FESOM's minimum spacing is a property of the MESH FILE, not of any
+        # resolution integer, so it cannot be estimated from (n, radius).  The
+        # caller must pass dx_min_override=float(np.min(mesh.mesh_resolution)).
+        # Substituting a spherical estimate would give a wrong dt clamp -- a
+        # silent stability bug, exactly what the guard below prevents.
+        if dx_min_override is not None and (
+            not math.isfinite(dx_min_override) or dx_min_override <= 0.0
+        ):
+            # A non-finite or non-positive dx_min silently produces a zero,
+            # negative, or unadjusted timestep instead of an error.
+            raise ValueError(
+                f"cfl_check_and_adjust: dx_min_override must be finite and "
+                f"strictly positive [m]; got {dx_min_override!r}."
+            )
+        if dx_min_override is None:
+            raise ValueError(
+                "cfl_check_and_adjust: grid_type='fesom' requires the "
+                "mesh-derived dx_min_override "
+                "(float(np.min(mesh.mesh_resolution)) [m]); a spherical "
+                "estimate from (n, radius) cannot be used for an "
+                "unstructured mesh."
+            )
+        dx_min = float(dx_min_override)
     else:
         # Dispatch hardening: a typo'd grid_type must not silently take the
         # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run).
         raise ValueError(
             f"cfl_check_and_adjust: unknown grid_type {grid_type!r}; expected "
-            "latlon / gaussian / cubed_sphere / mpas (or a voronoi alias)."
+            "latlon / gaussian / cubed_sphere / mpas / fesom (or a voronoi alias)."
         )
 
     # Total wave speed = max(wind) + gravity_wave_speed

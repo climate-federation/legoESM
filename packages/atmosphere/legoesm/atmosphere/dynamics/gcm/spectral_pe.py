@@ -295,6 +295,22 @@ class SpectralPEConfig(NamedTuple):
     # numerics for tests that intentionally measure drift.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
+    # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
+    # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
+    # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
+    # measured -0.48 K/day mass-weighted global-mean T leak at T63L8 and it
+    # destroys 62% of the atmosphere's vertical T structure in 5 days).
+    # Selecting "upwind" emits a RuntimeWarning at tendency-build time.
+    # TRACERS keep upwind regardless: centered vertical advection overshoots
+    # and would drive moisture negative — upwind's diffusivity is the
+    # positivity choice there, not an accident.
+    vertical_advection_scheme: str = "sb_centered"
+    # Return the KE removed by explicit vor/div hyperdiffusion as local
+    # frictional heating (standard GCM practice, ~0.5-2 W/m^2 at T63; the
+    # post-step filter's KE removal is a documented omission). DEFAULT ON —
+    # disabling it leaves the total-energy budget open, and warns.
+    frictional_heating: bool = True
 
 
 # =============================================================================
@@ -380,6 +396,86 @@ def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
+
+
+_WARNED_NON_CONSERVING: set[tuple[str, bool]] = set()
+
+
+def _warn_non_conserving_numerics(scheme: str, frictional_heating: bool):
+    """Warn ONCE per (scheme, heating) combination that the run is not on the
+    energy-conserving numerics.
+
+    Both defaults are now the conserving choice, so reaching this means a
+    caller opted OUT. Measured cost of opting out (T63L8, zero physics,
+    scripts/validate/aimip_pressure_spinup.py --global-t): the upwind
+    vertical transport leaks -0.48 K/day of mass-weighted global-mean
+    temperature (-2.39 K over 5 days against a true -0.16 K) and erases 62%
+    of the vertical temperature structure; dropping frictional heating
+    leaves the hyperdiffusion KE sink unreturned.
+
+    Deduplicated because ``spectral_pe_tendencies`` runs 3-5x per step: an
+    un-deduplicated warning would emit millions of lines per run and Python
+    filters only per (message, category, module, lineno) by default, which
+    a formatted message defeats.
+    """
+    import warnings
+
+    key = (scheme, bool(frictional_heating))
+    if key in _WARNED_NON_CONSERVING:
+        return
+    _WARNED_NON_CONSERVING.add(key)
+    reasons = []
+    if scheme != "sb_centered":
+        reasons.append(
+            f"vertical_advection_scheme={scheme!r} (not 'sb_centered'): the "
+            "advective upwind form has no discrete conservation pairing with "
+            "continuity — measured -0.48 K/day global-mean temperature leak "
+            "at T63L8")
+    if not frictional_heating:
+        reasons.append(
+            "frictional_heating=False: the kinetic energy removed by "
+            "hyperdiffusion is never returned as heat, so the total-energy "
+            "budget stays open")
+    warnings.warn(
+        "SpectralPEConfig is NOT on the energy-conserving numerics: "
+        + "; ".join(reasons)
+        + ". Defaults are sb_centered + frictional_heating=True; keep the "
+          "legacy settings only to reproduce a pre-2026-08-11 run.",
+        RuntimeWarning, stacklevel=3)
+
+
+def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
+    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
+
+        -sigma_dot * df/dsigma |_k
+            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
+                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with sigma_dot = 0 at the top and bottom interfaces (the BCs
+    ``_compute_sigma_dot_gaussian`` already builds in). This is the standard
+    ECMWF/SB81 form: it is algebraically identical to a flux-form divergence
+    of the interface flux ``sigma_dot_{j} * (f_k + f_{k+1})/2`` minus
+    ``f_k * (d sigma_dot/d sigma)_k``, so the mass-weighted column integral
+    telescopes against the continuity equation and the discretization
+    supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
+
+    Measured motivation: the legacy first-order UPWIND advective form
+    (:func:`_vertical_advection_sigma_gaussian`) carries a systematic
+    -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
+    weighted temperature sink at T63L8 — the dominant term of the dycore's
+    measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
+    probe, scripts/validate/aimip_t_budget.py; closure FD vs budget 2%).
+
+    ``sigma_dot`` is on interfaces, shape (..., nlev+1); ``field`` is on
+    full levels (..., nlev).
+    """
+    df = jnp.diff(field, axis=-1)                 # (..., nlev-1) interior interfaces
+    sd_int = sigma_dot[..., 1:-1]                 # (..., nlev-1)
+    contrib = sd_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # sigma_dot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # sigma_dot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
 
 
 def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
@@ -494,6 +590,28 @@ def spectral_pe_tendencies(
     Returns tendencies in the same pytree structure as state (for SSP-RK3).
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Dispatch hardening on the STATIC config value: an unknown scheme must
+    # raise, not silently run different numerics (a typo here would change
+    # the model's conservation properties without an error). Both vertical
+    # coordinates carry both schemes.
+    _vadv_scheme = config.vertical_advection_scheme
+    if _vadv_scheme == "upwind":
+        _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
+        _vadv_sigma = _vertical_advection_sigma_gaussian
+        _vadv_hybrid = vertical_advection_hybrid
+    elif _vadv_scheme == "sb_centered":
+        if not config.frictional_heating:
+            _warn_non_conserving_numerics(
+                _vadv_scheme, config.frictional_heating)
+        _vadv_sigma = _vertical_advection_sigma_sb
+        from legoesm.grids.vertical import vertical_advection_hybrid_sb
+        _vadv_hybrid = vertical_advection_hybrid_sb
+    else:
+        raise ValueError(
+            f"Unknown vertical_advection_scheme "
+            f"{config.vertical_advection_scheme!r}; valid: 'upwind', "
+            f"'sb_centered'.")
 
     a = grid.radius
     R_d = constants.R_d
@@ -773,9 +891,9 @@ def spectral_pe_tendencies(
 
     # Vertical advection of T
     if _hybrid:
-        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        vert_adv_T = _vadv_hybrid(T, mass_flux, p_s, sigma_coord)
     else:
-        vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
+        vert_adv_T = _vadv_sigma(T, sigma_dot, sigma_coord)
 
     # Adiabatic heating: kappa * T * omega / p
     if _hybrid:
@@ -826,11 +944,11 @@ def spectral_pe_tendencies(
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
-        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
-        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+        vert_adv_u = _vadv_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = _vadv_hybrid(v, mass_flux, p_s, sigma_coord)
     else:
-        vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
-        vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
+        vert_adv_u = _vadv_sigma(u, sigma_dot, sigma_coord)
+        vert_adv_v = _vadv_sigma(v, sigma_dot, sigma_coord)
 
     # Convert to spectral vor/div contributions.  Same batching pattern
     # as the vorticity-flux SH analyses above: stack (vert_u_cos,
@@ -900,6 +1018,31 @@ def spectral_pe_tendencies(
         dvor_hat = dvor_hat + base_diff_stack[..., 0]
         ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
         dT_hat = dT_hat + base_diff_stack[..., 2]
+
+        if config.frictional_heating:
+            # Return the KE removed by the vor/div hyperdiffusion as LOCAL
+            # heating: dT_fric = -(u*du_hd + v*dv_hd)/c_p, with (du_hd,
+            # dv_hd) the velocity tendencies of the hyperdiffusion terms.
+            # Sign convention (heating positive into T): hyperdiff opposes
+            # the wind, so the term heats on average; its global integral
+            # equals the KE sink by construction (locked by
+            # tests/atmosphere/hydrostatic/test_spectral_pe_energy_conserving
+            # .py::test_frictional_heating_returns_exactly_the_hyperdiff_KE).
+            # Heat from the DELIVERED tendencies: the returned vor/div are
+            # dealiased below, so super-cutoff modes lose no KE — computing
+            # heat from the unmasked stack would manufacture energy (codex).
+            _hd_vor = base_diff_stack[..., 0]
+            _hd_div = base_diff_stack[..., 1]
+            if _dealias_3d is not None:
+                _hd_vor = _hd_vor * _dealias_3d
+                _hd_div = _hd_div * _dealias_3d
+            _hd_u_cos, _hd_v_cos = uv_from_vordiv_3d(grid, _hd_vor, _hd_div)
+            _fric_cos2 = -(u_cos * _hd_u_cos + v_cos * _hd_v_cos)
+            # (u*du + v*dv) built from cos-weighted fields carries cos^2:
+            # divide once (clipped like the velocity synthesis above).
+            _fric_heat = _fric_cos2 / (
+                constants.c_pd * cos_lat_3d * cos_lat_3d)
+            dT_hat = dT_hat + sh_analysis_3d(grid, _fric_heat)
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:
@@ -1052,23 +1195,42 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     )
 
 
-def apply_spectral_filter_to_state(state, spectral_filter):
-    """Apply exponential spectral filter to all prognostic fields.
+def apply_spectral_filter_to_state(state, spectral_filter, *,
+                                   filter_lnps: bool = False):
+    """Apply exponential spectral filter to the prognostic fields.
+
+    ``lnps`` is NOT filtered by default. Filtering it damps the
+    high-wavenumber surface pressure every step while the static orography
+    ``phis_hat`` keeps its full truncation sharpness, so the terrain-locked
+    fine structure hydrostatic balance requires is destroyed within hours:
+    measured on the T63L8 AIMIP configuration, 36 steps of the 0.01-strength
+    filter turn a 213 Pa fixed p_s offset (unfiltered) into 1108 Pa,
+    land-concentrated (1595 Pa land / 736 Pa ocean), physics-independent.
+    The vor/div cascade this filter exists for does not involve lnps. If a
+    long-rollout lnps spectral tail ever needs damping, add a WEAK dedicated
+    term (or co-truncate phis to match) rather than re-enabling this one —
+    at 0.01/step it is ~1e-72 at degree 63 after 6 h.
 
     Parameters
     ----------
     state : SpectralHydrostaticState
     spectral_filter : jax.Array, shape (n_sh,)
         Multiplicative filter per spectral coefficient.
+    filter_lnps : bool
+        Also filter ``lnps_hat`` (legacy behaviour). Only the SFNO
+        state-update path keeps this on, because its shipped checkpoints were
+        trained and scored under it.
     """
     sf_3d = spectral_filter[:, None]  # (n_sh, 1) for 3D fields
     sf_2d = spectral_filter           # (n_sh,) for 2D fields
 
+    new_lnps = (state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d)
+                if filter_lnps else state.lnps_hat)
     return state._replace(
         vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf_3d),
         div_hat=state.div_hat.replace(data=state.div_hat.data * sf_3d),
         T_hat=state.T_hat.replace(data=state.T_hat.data * sf_3d),
-        lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d),
+        lnps_hat=new_lnps,
     )
 
 
@@ -1143,6 +1305,52 @@ def apply_filter_to_tracers(tracers, multiplicative_filter, grid):
         else:
             out[name] = out_data.astype(value.dtype)
     return out
+
+
+# =============================================================================
+# Global dry mass on sigma coordinates (free functions)
+#
+# The anchored-mass fixer used to live only as methods on
+# ``SpectralPrimitiveEquationModel``. The AIMIP / learned-physics lane does not
+# use that class — it integrates through the functional
+# ``legoesm.training.neural_gcm_spectral.spectral_rollout`` — so the fixer was
+# unreachable there, and both AIMIP dycore arms (classical, column_nn) drifted.
+# The math lives here once; the class methods below delegate.
+# =============================================================================
+
+def global_dry_mass(grid, lnps_hat) -> jnp.ndarray:
+    """Area integral ``∫ p_s dA`` [Pa m^2] from spectral ``lnps``.
+
+    Accumulated in float64 regardless of the state dtype: this is a global
+    reduction whose whole purpose is to resolve a slow secular drift, and an
+    fp32 sum over ~10^4 cells loses exactly the digits being measured.
+    """
+    p_s_grid = jnp.exp(sh_synthesis(grid, lnps_hat))
+    acc = jnp.float64
+    return jnp.sum(p_s_grid.astype(acc) * grid.grid_area.astype(acc))
+
+
+def anchor_lnps_to_mass(grid, state, target_mass):
+    """Rescale the ``lnps`` mean so ``∫ p_s dA`` returns to ``target_mass``.
+
+    With the ``(4π)``-normalised real-SH convention this module uses,
+    ``sh_analysis(ones)[0] = sqrt(4π)``, so adding a constant ``Δ`` to ``lnps``
+    in physical space is adding ``Δ·sqrt(4π)`` to ``lnps_hat[0]``. Solving
+    ``Δ = log(target/current)`` makes the correction MULTIPLICATIVE in ``p_s``,
+    which leaves every ``p_s`` gradient (and hence the pressure-gradient force)
+    exactly unchanged — the log-space twin of the additive uniform ``fix_ps_mass``
+    used on the cubed-sphere / lat-lon C-grid lanes.
+
+    Differentiable and jit-safe: ``target_mass`` is a traced argument, never
+    stored on an object.
+    """
+    mass_now = global_dry_mass(grid, state.lnps_hat.data)
+    log_scale = jnp.log(jnp.asarray(target_mass, dtype=jnp.float64) / mass_now)
+    sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=jnp.float64))
+    lnps_hat_new = state.lnps_hat.data.at[0].add(
+        (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
+    )
+    return state._replace(lnps_hat=state.lnps_hat.replace(data=lnps_hat_new))
 
 
 # =============================================================================
@@ -1564,22 +1772,7 @@ class SpectralPrimitiveEquationModel:
         """
         if target_mass is None:
             target_mass = self._target_mass
-        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
-        p_s_grid = jnp.exp(lnps_grid)
-        acc = jnp.float64
-        mass_now = jnp.sum(
-            p_s_grid.astype(acc) * self.grid.grid_area.astype(acc),
-        )
-        log_scale = jnp.log(target_mass / mass_now)
-        # sqrt(4π) is the (0,0) coefficient of a constant=1 field under
-        # the (4π)-normalised real-SH convention this module uses.
-        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
-        lnps_hat_new = state.lnps_hat.data.at[0].add(
-            (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
-        )
-        return state._replace(
-            lnps_hat=state.lnps_hat.replace(data=lnps_hat_new),
-        )
+        return anchor_lnps_to_mass(self.grid, state, target_mass)
 
     def _maybe_snapshot_target_mass(self, state) -> None:
         """First-call anchored-mass snapshot, shared by step()/integrate().
@@ -1604,12 +1797,7 @@ class SpectralPrimitiveEquationModel:
 
     def _compute_initial_mass(self, state):
         """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
-        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
-        p_s_grid = jnp.exp(lnps_grid)
-        return jnp.sum(
-            p_s_grid.astype(jnp.float64)
-            * self.grid.grid_area.astype(jnp.float64),
-        )
+        return global_dry_mass(self.grid, state.lnps_hat.data)
 
     def compute_mass(self, state) -> jax.Array:
         """Public alias of ``_compute_initial_mass`` (iter-22).

@@ -22,6 +22,7 @@ from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import (
     blend_surface_property,
     blend_surface_temperature,
+    blended_surface_albedo,
 )
 from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
@@ -389,6 +390,89 @@ class PhysicsPipeline:
         if land_active and self.f_land is not None:
             emissivity = self._blend_land(emissivity, self.emissivity_land)
         return emissivity
+
+    def static_surface_albedo(self, sic, *, land_active, lat=None, snow=None):
+        """Surface SW albedo radiation uses absent a coupler override.
+
+        The shortwave twin of :meth:`static_surface_emissivity`, and for the
+        same reason: a coupled driver that holds only ``sw_net_sfc`` has to
+        divide by ``1 - albedo`` to recover the gross ``sw_down`` it hands the
+        surface, and it must divide by the albedo radiation actually USED.
+        Deblending an ocean/ice-only albedo while ``compute_radiation_core``
+        blended the land tile in loses ~36 W/m^2 over a land column at
+        ``albedo_land = 0.20`` — silently, with a surface energy budget that
+        does not close (#1556).
+
+        Mirrors the ocean/ice (+ optional land, + snow brightening) blend
+        formed in ``compute_radiation_core``.  ``lat``/``snow`` are optional in
+        the signature but NOT optional in practice: omitted, the land term
+        silently falls back to the bare vegetation albedo (via
+        :meth:`_land_albedo_eff`'s own ``None`` guard), which under
+        ``snow_albedo_feedback`` re-opens this defect over every snow-covered
+        column.  Both coupled drivers pass ``lat`` and the ``snow`` carry (via
+        ``snow_for_albedo_deblend``, which withholds it on ensembles, where it
+        is member-shaped).
+
+        That carry is the SEGMENT-END snow, so it is NOT the sample radiation
+        brightened with — and it is AHEAD of it, not behind: radiation receives
+        the snow at its refresh, then the physics step advances snow, and the
+        carry is written after the segment.  Under radiation subcycling the
+        held flux can be a refresh interval or more older still.  It is a small
+        correction on a correction and shares the segment-boundary staleness of
+        ``held_sw_net_sfc`` and ``_last_sfc_response``; the alternative,
+        dropping snow entirely, is a first-order error over every snow-covered
+        column.  The dynamic ``couple_surface_radiation`` path avoids the
+        question by deblending with the EXACT per-segment override it handed
+        radiation — one field per atmosphere segment, shared by every radiation
+        refresh inside it, not a per-refresh snapshot.
+
+        NOT the whole of that blend, and the gap is named rather than implied.
+        ``compute_radiation_core`` has two further terms this cannot see, both
+        matching the scope of the emissivity sibling (which likewise ignores
+        the multilayer tile's per-column ``emissivity``):
+
+          * ``dynamic_albedo`` — the zenith-dependent open-ocean albedo, which
+            needs the radiation solver's own cos(SZA) and the diurnal/orbital
+            state, none of which reach this call.
+          * the multilayer land tile's per-column ``albedo_veg``, used in place
+            of ``self.albedo_land`` whenever that tile is live.
+
+        So under either of those this returns a CLOSE blend, not the identical
+        one.  That is still strictly better than the ocean/ice-only expression
+        it replaces — it fixes the first-order land term, which is the tens of
+        W/m^2 — but a caller that needs the exact field should use the coupler's
+        dynamic path: with ``couple_surface_radiation`` on, the driver deblends
+        with ``_last_sfc_response.albedo``, the very field it fed radiation as
+        ``sfc_albedo_override``.  That holds for every segment AFTER a surface
+        response exists; the first segment (and any segment where the response
+        is still missing) seeds the override from this method, so it is on the
+        dynamic path too, just at the start of it.
+
+        Parameters
+        ----------
+        sic : array
+            Sea-ice concentration [0, 1].
+        land_active : bool
+            Whether the land tile contributes; matches
+            ``compute_radiation_core``'s gate.
+        lat, snow : array or None
+            Latitude and snow water equivalent for the snow-albedo feedback.
+            ``None`` ⇒ static vegetation albedo.
+
+        Raises
+        ------
+        ValueError
+            Via :func:`blended_surface_albedo`, when a land fraction is active
+            with no land albedo — rather than silently reflecting the OCEAN
+            albedo from every land column, which is the shape of the defect
+            this method exists to prevent.
+        """
+        _land = self.f_land if land_active else None
+        return blended_surface_albedo(
+            sic, _land, self.albedo_ice, self.albedo_ocean,
+            self._land_albedo_eff(lat, snow) if _land is not None else None,
+        )
+
     def _land_surface_bulk(self, T_low, u_low, v_low, p_s):
         """Lowest-level air density [kg/m^3] and wind speed [m/s] for the
         land surface bulk fluxes.
