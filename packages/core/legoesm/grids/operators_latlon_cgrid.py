@@ -664,6 +664,8 @@ def gradient_x_cgrid(
 def gradient_y_cgrid(
     f: jnp.ndarray,
     grid: LatLonGrid,
+    *,
+    f_padded: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Meridional gradient df/dy at v-points (lat interfaces).
 
@@ -676,6 +678,14 @@ def gradient_y_cgrid(
     f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
         Scalar field at cell centers.
     grid : LatLonGrid
+    f_padded : array, optional
+        Pre-padded ``f`` supplied by a caller that fused this exchange with
+        others (lat-lon packed-exchange epoch): must be EXACTLY the halo-1
+        fold-family pad of ``f`` — i.e. ``pad_halo_latlon(f, halo=1)`` /
+        ``pad_halo_latlon_3d(f, halo=1)`` output, including the lon halo
+        (which is stripped here, as for the internal pad).  ``None``
+        (default) keeps the in-operator backend-dispatched pad,
+        byte-identical.
 
     Returns
     -------
@@ -707,17 +717,29 @@ def gradient_y_cgrid(
         n_lat = f.shape[0]
         out_shape = (n_lat + 1,) + f.shape[1:]
         return jnp.zeros(out_shape, dtype=f.dtype)
-    if f.ndim == 2:
-        f_padded = pad_halo_latlon(f, halo=1)
-        # Strip the lon halo — gradient_y only needs the lat halo.
-        f_padded = f_padded[:, 1:-1]
-    elif f.ndim == 3:
-        f_padded = pad_halo_latlon_3d(f, halo=1)
-        f_padded = f_padded[:, 1:-1, :]
-    else:
+    if f.ndim not in (2, 3):
         raise ValueError(
             f"gradient_y_cgrid: f.ndim must be 2 or 3, got {f.ndim}"
         )
+    if f_padded is not None:
+        # Caller-fused exchange: validate the pre-pad shape (exactly the
+        # halo-1 fold pad: +2 rows, +2 lon cols), then strip the lon halo
+        # exactly as below.
+        expected = (f.shape[0] + 2, f.shape[1] + 2) + f.shape[2:]
+        if f_padded.shape != expected:
+            raise ValueError(
+                f"gradient_y_cgrid: f_padded must be the halo-1 fold pad "
+                f"of f — expected shape {expected}, got {f_padded.shape}"
+            )
+        f_padded = (f_padded[:, 1:-1] if f.ndim == 2
+                    else f_padded[:, 1:-1, :])
+    elif f.ndim == 2:
+        f_padded = pad_halo_latlon(f, halo=1)
+        # Strip the lon halo — gradient_y only needs the lat halo.
+        f_padded = f_padded[:, 1:-1]
+    else:  # f.ndim == 3 (validated above)
+        f_padded = pad_halo_latlon_3d(f, halo=1)
+        f_padded = f_padded[:, 1:-1, :]
 
     # Compact stencil on padded f — gradient at ALL v-faces of the
     # rank-local band, including the partition cuts.
