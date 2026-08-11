@@ -43,7 +43,7 @@ def main() -> int:
     def rec_cols(name, r):
         arr = ds.variables[name][r]
         arr = arr.filled(np.nan) if np.ma.isMaskedArray(arr) else np.asarray(arr)
-        return np.transpose(arr.reshape(z, ny * nx), (1, 0))
+        return np.transpose(arr.reshape(z, ny * nx), (1, 0)).astype(np.float64)
 
     avs = rec_cols("avs", a.rec)
     avt = rec_cols("avt", a.rec)

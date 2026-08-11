@@ -36,9 +36,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+
+# The Stage-B implicit solve MUST run in float64 (see _fill); set the JAX
+# flag before any jax import so jnp.asarray(float64) is not silently demoted.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 
 REGIONS = (
@@ -51,7 +57,17 @@ REGIONS = (
 
 
 def _fill(a):
-    return a.filled(np.nan) if np.ma.isMaskedArray(a) else np.asarray(a)
+    a = a.filled(np.nan) if np.ma.isMaskedArray(a) else np.asarray(a)
+    # FLOAT64 ALWAYS.  The netCDF variables are float32, and the Stage-B
+    # backward-Euler solve has diagonal terms dt*K/(dz*dz_half) ~ 3e5 in EVD
+    # columns (avs = 100, dz ~ 1 m); solving that system in float32 loses
+    # ~0.1 PSU to roundoff and FABRICATES |dS/dt| ~ 1e-4 PSU/s exactly where
+    # EVD fires.  Measured on the worst column (j=153, i=280, rec 1): f32
+    # gives +1.25e-4 PSU/s in an already-homogenised block (8000x the
+    # gradient-limited bound, max principle violated) while f64 gives -8e-8,
+    # the NEMO strd_zdf magnitude.  The '46x EVD-salt mismatch' of job
+    # 9208553 was this instrument bug, not a model defect.
+    return a.astype(np.float64)
 
 
 def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
