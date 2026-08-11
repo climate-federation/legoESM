@@ -327,6 +327,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     grid: LatLonGrid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     config: CGridLatLonPrimitiveEquationConfig = CGridLatLonPrimitiveEquationConfig(),
+    *,
+    geom_pads: tuple | None = None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
 
@@ -338,6 +340,16 @@ def cgrid_latlon_hydrostatic_tendencies(
     grid : LatLonGrid
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     config : CGridLatLonPrimitiveEquationConfig
+    geom_pads : tuple, optional
+        ``(lat_pad, lat_pad_pole, cos_lat_pad)`` — the three precomputed
+        stage-invariant 1-D geometry pads, exactly
+        ``pad_with_pole_bc_lat(grid.lat, 1, 0, 0)``,
+        ``pad_with_pole_bc_lat(grid.lat, 1, -pi/2, +pi/2)`` and
+        ``pad_with_pole_bc_lat(grid.cos_lat, 1, 0, 0)``.  Supplied by the
+        SPMD band step (built once from the GLOBAL grid, sliced per band)
+        so the per-stage scalar-row collective-permutes are skipped;
+        ``None`` (every other lane) keeps the in-operator pads
+        byte-identical.
 
     Returns
     -------
@@ -347,6 +359,9 @@ def cgrid_latlon_hydrostatic_tendencies(
     """
     u, v, T, p_s, phis = state.u, state.v, state.T, state.p_s, state.phis
     tracers = state.tracers
+
+    _lat_pad, _lat_pad_pole, _cos_lat_pad = (
+        geom_pads if geom_pads is not None else (None, None, None))
 
     R_d = constants.R_d
     kappa = constants.kappa
@@ -493,6 +508,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 8. Coriolis using absolute vorticity (ζ+f) ---
     cor_u, cor_v = absolute_vorticity_coriolis(
         u, v, grid, u_lat_pad=_u_lat_pad,
+        lat_pad=_lat_pad, lat_pad_pole=_lat_pad_pole,
+        cos_lat_pad=_cos_lat_pad,
     )
     du_dt = du_dt + cor_u
     dv_dt = dv_dt + cor_v
@@ -512,7 +529,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
             dp, f_pad=_dp_lat_pad)
-        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid,
+                                  lat_pad=_lat_pad)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_coord.B_range
@@ -525,7 +543,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
             dp, f_pad=_dp_lat_pad)
-        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid,
+                                  lat_pad=_lat_pad)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_range
@@ -990,8 +1009,14 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         polar_mask=None,
         polar_mask_v=None,
         pole_v_bc_masks=None,
+        geom_pads=None,
     ) -> tuple:
         """Advance one step on C-grid state (raw arrays). UN-jitted.
+
+        ``geom_pads``: optional ``(lat_pad, lat_pad_pole, cos_lat_pad)``
+        precomputed stage-invariant geometry pads for the band grid,
+        forwarded to :func:`cgrid_latlon_hydrostatic_tendencies` (SPMD
+        band step only; ``None`` everywhere else — byte-identical).
 
         Physics is evaluated inside each RK stage (matching the CDGrid
         PE contract), not as a post-step Euler update.  Every stage
@@ -1017,7 +1042,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         def tendency_fn(s):
             du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
-                s, grid, sigma_coord, self.config,
+                s, grid, sigma_coord, self.config, geom_pads=geom_pads,
             )
 
             # --- Physics coupling (inside RK stage) ---
