@@ -119,6 +119,7 @@ def main() -> int:
     from fesom_jax import surface_forcing
     from fesom_jax.ssh import build_ssh_operator
     from fesom_jax.integrate import integrate
+    from fesom_jax.step import step as fesom_step
     from fesom_jax.gm import GMConfig
     from fesom_jax.ice import IceConfig
     from fesom_jax.ale import AleConfig
@@ -157,41 +158,59 @@ def main() -> int:
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
-                               "single-integrate AB2-continuous"),
+                               "AB2-continuous day chunks (bootstrap once)"),
                    "protocol_note": ("JRA55-do year forcing + PHC3.0 winter "
                                      "cold start; NOT the xgrid matched-pair "
                                      "protocol -- three-model comparison")},
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    # ONE integrate() call for the whole run: integrate() bootstraps AB2 on
-    # its first step by design, so a day-chunked loop re-bootstrapped the
-    # momentum time-stepping every 48 steps (codex FESOM-arm review RED-1).
-    # The full-run stacked forcing is ~4 MB/step ~ 6 GB at 30 days -- fits
-    # device memory; snapshots between chunks would need the restart lane
-    # (fesom_jax.run.run_from_config) instead.
+    # AB2-CONTINUOUS DAY CHUNKS.  integrate() bootstraps AB2 on its first
+    # step by design, so calling it once per day re-bootstrapped the momentum
+    # time-stepping every 48 steps (codex FESOM-arm RED-1); but the full-run
+    # stacked forcing OOMs the GPU (measured: RESOURCE_EXHAUSTED at 30 days).
+    # So: bootstrap ONCE with the first step, then scan each day's forcing
+    # with is_first_step=False -- exactly integrate()'s own internal split
+    # (integrate.py:153-165), just re-entered per chunk so only one day of
+    # forcing is resident.
+    cfgs = dict(ale_cfg=AleConfig(), tke_cfg=TkeConfig(), gm_cfg=GMConfig(),
+                ice_cfg=IceConfig(whichEVP=1))
+
+    def _scan_day(state_in, sf_day):
+        def body(carry, sf):
+            return fesom_step(carry, mesh, op, stress, None, dt=args.dt,
+                              is_first_step=False, step_forcing=sf,
+                              forcing_static=forcing.static, **cfgs), None
+        out_state, _ = jax.lax.scan(body, state_in, sf_day)
+        return out_state
+
+    _scan_day_jit = jax.jit(_scan_day)
     n_steps = n_days * steps_per_day
-    dates = surface_forcing.dates_for_steps(args.year, args.dt, n_steps)
-    step_forcings = forcing.stack(dates)
+    all_dates = surface_forcing.dates_for_steps(args.year, args.dt, n_steps)
     t_start = time.time()
-    state = integrate(state, mesh, op, stress,
-                      n_steps=n_steps, dt=args.dt,
-                      step_forcings=step_forcings,
-                      forcing_static=forcing.static,
-                      ale_cfg=AleConfig(), tke_cfg=TkeConfig(),
-                      gm_cfg=GMConfig(), ice_cfg=IceConfig(whichEVP=1))
-    sst = np.asarray(state.T[:, 0])
     wetmask = np.asarray(mesh.node_layer_mask[:, 0]) > 0
-    if not np.isfinite(sst[wetmask]).all():
-        write_snapshot(out, f"day{n_days:04d}_NONFINITE", state, mesh)
-        raise SystemExit(f"FATAL: non-finite SST at day {n_days}")
-    rate = n_steps / (time.time() - t_start)
-    print(f"[day {n_days:3d}/{n_days}] unweighted wet-node mean SST "
-          f"{float(np.nanmean(np.where(wetmask, sst, np.nan))):.3f} C "
-          f"(liveness only, refinement-biased)  ({rate:.2f} steps/s)",
-          flush=True)
-    p_out = write_snapshot(out, f"day{n_days:04d}", state, mesh)
-    print(f"[snapshot] {p_out}", flush=True)
+    for day in range(1, n_days + 1):
+        day_dates = all_dates[(day - 1) * steps_per_day: day * steps_per_day]
+        sf_day = forcing.stack(day_dates)
+        if day == 1:
+            sf0 = jax.tree.map(lambda x: x[0], sf_day)
+            state = fesom_step(state, mesh, op, stress, None, dt=args.dt,
+                               is_first_step=True, step_forcing=sf0,
+                               forcing_static=forcing.static, **cfgs)
+            sf_day = jax.tree.map(lambda x: x[1:], sf_day)
+        state = _scan_day_jit(state, sf_day)
+        sst = np.asarray(state.T[:, 0])
+        if not np.isfinite(sst[wetmask]).all():
+            write_snapshot(out, f"day{day:04d}_NONFINITE", state, mesh)
+            raise SystemExit(f"FATAL: non-finite SST at day {day}")
+        rate = day * steps_per_day / (time.time() - t_start)
+        print(f"[day {day:3d}/{n_days}] unweighted wet-node mean SST "
+              f"{float(np.nanmean(np.where(wetmask, sst, np.nan))):.3f} C "
+              f"(liveness only, refinement-biased)  ({rate:.2f} steps/s)",
+              flush=True)
+        if day % max(1, int(round(args.snapshot_every_days))) == 0 or day == n_days:
+            p_out = write_snapshot(out, f"day{day:04d}", state, mesh)
+            print(f"[snapshot] {p_out}", flush=True)
 
     write_snapshot(out, "final", state, mesh)
     print("[done]", flush=True)
