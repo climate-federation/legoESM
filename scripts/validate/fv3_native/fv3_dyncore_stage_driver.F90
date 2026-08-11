@@ -32,7 +32,7 @@ program fv3_dyncore_stage_driver
                                 nullify_domain, file_exist
   use fms_io_mod,         only: fms_io_exit
   use mpp_mod,            only: mpp_pe, mpp_root_pe, mpp_npes, mpp_error, &
-                                mpp_sync, input_nml_file, NOTE
+                                mpp_sync, input_nml_file
   use mpp_domains_mod,    only: mpp_get_tile_id
   use time_manager_mod,   only: time_type, set_time, get_time, &
                                 set_calendar_type, NO_CALENDAR, operator(+)
@@ -63,7 +63,7 @@ program fv3_dyncore_stage_driver
   logical :: cold_start
   real :: zvir, time_total
   character(len=64) :: fname_dat, fname_mf
-  character(len=256) :: note
+  character(len=256) :: mfline
 
   ! main_nml (mirrors atmos_drivers/solo/atmos_model.F90)
   character(len=17) :: calendar = 'no_calendar      '
@@ -170,23 +170,23 @@ program fv3_dyncore_stage_driver
   write (fname_mf, '(A,I1,A)') 'dyncore_stage_t', tile, '.mf'
   call stage_dump_open(fname_dat, fname_mf)
 
-  write (note, '(A,7(1X,I6))') 'NOTE bounds is ie js je isd ied ng =', &
+  write (mfline, '(A,7(1X,I6))') 'NOTE bounds is ie js je isd ied ng =', &
       Atm(n)%bd%is, Atm(n)%bd%ie, Atm(n)%bd%js, Atm(n)%bd%je, &
       isd, ied, Atm(n)%bd%ng
-  call stage_mf_note(note)
-  write (note, '(A,6(1X,I6))') 'NOTE npx npz tile nsplit ksplit nord =', &
+  call stage_mf_note(mfline)
+  write (mfline, '(A,6(1X,I6))') 'NOTE npx npz tile nsplit ksplit nord =', &
       Atm(n)%flagstruct%npx, Atm(n)%flagstruct%npz, tile, &
       Atm(n)%flagstruct%n_split, Atm(n)%flagstruct%k_split, &
       Atm(n)%flagstruct%nord
-  call stage_mf_note(note)
-  write (note, '(A,4(1X,ES24.16E3))') &
+  call stage_mf_note(mfline)
+  write (mfline, '(A,4(1X,ES24.16E3))') &
       'NOTE dt_atmos consv_te d4_bg vtdm4 =', real(dt_atmos), &
       Atm(n)%flagstruct%consv_te, Atm(n)%flagstruct%d4_bg, &
       Atm(n)%flagstruct%vtdm4
-  call stage_mf_note(note)
-  write (note, '(A,3(1X,ES24.16E3))') 'NOTE kappa cp_air ptop =', &
+  call stage_mf_note(mfline)
+  write (mfline, '(A,3(1X,ES24.16E3))') 'NOTE kappa cp_air ptop =', &
       kappa, cp_air, Atm(n)%ptop
-  call stage_mf_note(note)
+  call stage_mf_note(mfline)
 
   call stage_dump2('AG_LON', &
       real(Atm(n)%gridstruct%agrid(isd:ied, jsd:jed, 1)))
