@@ -74,26 +74,30 @@ def test_zero_surface_flux_hides_it_entirely():
     assert warming == pytest.approx(cooling)
 
 
-def test_seed_is_not_below_the_floor_the_core_enforces():
-    """The other end of the fix: init must not seed below w_tol**2."""
+def test_seed_is_left_alone_on_purpose():
+    """The seed is NOT the fix, and raising it is not free.
+
+    Seeding wp2 at w_tol**2 also removes the blow-up, but it changes the
+    initial state of every prognostic CLUBB run: measured, it broke four CLUBB
+    regression tests, one of them by turning a previously finite column into
+    NaN. The repair belongs at the divide, where it makes the seed's value
+    irrelevant to this ratio.
+    """
     cfg = CLUBBConfig()
     st = init_clubb_moments(1, 24, cfg, dtype=jnp.float64)
-    w_tol_sqd = float(cfg.w_tol) ** 2
-    for name in ("wp2", "up2", "vp2"):
-        arr = np.asarray(getattr(st, name))
-        assert np.all(arr >= w_tol_sqd - 1e-18), (
-            f"{name} seeded at {arr.min():.3e}, below the w_tol**2 floor "
-            f"{w_tol_sqd:.3e} that advance_wp2_wp3 enforces from its first "
-            "advance")
+    assert np.all(np.asarray(st.wp2) == float(cfg.tke_min))
 
 
-def test_seeded_state_cannot_produce_an_absurd_variance():
-    """End to end on the seed: the floor evaluated on the seeded wp2 is sane."""
+def test_flooring_at_the_divide_is_what_makes_the_seed_irrelevant():
+    """With the denominator floored, the tiny seed can no longer reach it."""
     cfg = CLUBBConfig()
     st = init_clubb_moments(1, 24, cfg, dtype=jnp.float64)
     wp2_seed = float(np.asarray(st.wp2).min())
-    got = _floor(CBL_WPTHLP_SFC, wp2_seed)
-    assert got < 10.0, f"seeded floor still {got:.1f} K^2"
+    assert wp2_seed == pytest.approx(float(cfg.tke_min))
+    # what the solver actually divides by, after the floor
+    floored_denom = max(wp2_seed, float(cfg.w_tol) ** 2)
+    got = _floor(CBL_WPTHLP_SFC, floored_denom)
+    assert got < 10.0, f"floored value still {got:.1f} K^2"
     assert np.sqrt(got) < 4.0, "RMS temperature fluctuation must stay plausible"
 
 

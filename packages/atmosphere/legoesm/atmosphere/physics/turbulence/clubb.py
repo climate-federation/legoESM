@@ -5337,32 +5337,28 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
 
     .. note::
 
-       ``wp2``/``up2``/``vp2`` are seeded at ``max(tke_min, w_tol**2)``, NOT at
-       ``tke_min`` alone.  ``tke_min`` (1e-6) is 400x below the floor the
-       prognostic core itself enforces (``advance_wp2_wp3`` floors ``wp2`` at
-       ``w_tol**2`` = 4e-4 from its first advance), and the scalar variance
-       solve runs BEFORE that advance.  With the smaller seed, the
-       maximum-correlation floor ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)``
-       divided by 1e-6 on step 1 and wrote an unphysical surface ``thlp2``
-       that nothing subsequently lowered.
+       ``wp2`` is seeded at ``tke_min`` (1e-6), which is 400x below the floor
+       the prognostic core itself enforces (``advance_wp2_wp3`` floors ``wp2``
+       at ``w_tol**2`` = 4e-4 from its first advance), and the scalar variance
+       solve runs BEFORE that advance.  That let the maximum-correlation floor
+       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divide by 1e-6 on step 1 and
+       write an unphysical surface ``thlp2`` that nothing subsequently
+       lowered: with a prescribed surface flux actually delivered to the
+       closure, the dry convective column got ``thlp2 = 3685 K^2`` (a 61 K RMS
+       fluctuation) and drifted linearly by 4.5 K per step (#1508).
 
-       That was harmless only while the surface flux was zero, because the
-       numerator is ``wpthlp**2``.  As soon as a prescribed-flux case delivered
-       its surface flux to the closure, the dry convective column got
-       ``thlp2 = 3685 K^2`` (a 61 K RMS fluctuation) and drifted linearly by
-       4.5 K per step.  See #1508.  The divide is ALSO floored at its own site
-       in :func:`advance_xp2_xpyp`, so neither the seed nor a genuinely
-       quiescent mid-run column can reproduce it.
+       The repair is at the DIVIDE, in :func:`advance_xp2_xpyp`, which floors
+       the denominator at ``w_tol**2``.  The seed is deliberately left alone:
+       raising it here changes the initial state of every prognostic CLUBB run
+       and was measured to break four CLUBB regression tests, one of them by
+       turning a finite column into NaN.  Flooring the denominator is
+       sufficient, because it makes the seed's value irrelevant to that ratio.
     ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
     """
     nzm = nlev + 1
     zt = jnp.zeros((ncol, nlev), dtype=dtype)
     zm0 = jnp.zeros((ncol, nzm), dtype=dtype)
-    # See the note above: the seed must not sit below the floor the
-    # prognostic core enforces from its first advance.
-    wtol2 = jnp.full((ncol, nzm),
-                     max(float(config.tke_min), float(config.w_tol) ** 2),
-                     dtype=dtype)
+    wtol2 = jnp.full((ncol, nzm), config.tke_min, dtype=dtype)
     return CLUBBMomentState(
         rtm=zt, thlm=zt, um=zt, vm=zt,
         wp2=wtol2, wp3=zt, up2=wtol2, vp2=wtol2,
