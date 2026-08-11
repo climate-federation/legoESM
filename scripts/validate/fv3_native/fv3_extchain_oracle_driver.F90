@@ -141,8 +141,10 @@ program fv3_extchain_oracle_driver
   ! the duo lane with every mpp/fill_corners/get_symmetry step
   ! skipped, so whatever init_grid_utils derived from it here IS what
   ! dyn_core's stencils consume at halo cells.  Bounds are the
-  ! fv_arrays.F90 allocations (:1330-1443).  rsina/cosa are
-  ! COMPUTE-B-only arrays (:1345-1346) and dumped at that extent.
+  ! fv_arrays.F90 allocations (:1311-1443).  rsina is the ONE
+  ! compute-B-only array (:1346, "Why is the size different?") and is
+  ! dumped at that extent; cosa AND sina are PADDED B-plane arrays
+  ! (:1347/:1344, isd:ied+1 x jsd:jed+1) and are dumped padded.
   call extchain_dump2('M_DX', &
       real(Atm(this_grid)%gridstruct%dx(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_DY', &
@@ -187,6 +189,32 @@ program fv3_extchain_oracle_driver
       real(Atm(this_grid)%gridstruct%del6_u(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_DEL6_V', &
       real(Atm(this_grid)%gridstruct%del6_v(isd:ied + 1, jsd:jed)))
+  ! reciprocal / remaining static families (codex retro-review 2026-08-11
+  ! finding 5: the dump set above was NOT "all runtime gridstruct metric
+  ! families" -- these are consumed directly, e.g. rdxc/rdyc in
+  ! p_grad_c, rdx/rdy in d_sw's KE ranges, rarea in vorticity, and f0
+  ! in d_sw5's absolute vorticity).  Bounds per fv_arrays.F90
+  ! :1313/:1317/:1321/:1324/:1328/:1331/:1335/:1338/:1344/:1399.
+  call extchain_dump2('M_RAREA', &
+      real(Atm(this_grid)%gridstruct%rarea(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RAREAC', &
+      real(Atm(this_grid)%gridstruct%rarea_c(isd:ied + 1, jsd:jed + 1)))
+  call extchain_dump2('M_RDX', &
+      real(Atm(this_grid)%gridstruct%rdx(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_RDY', &
+      real(Atm(this_grid)%gridstruct%rdy(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_RDXA', &
+      real(Atm(this_grid)%gridstruct%rdxa(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RDYA', &
+      real(Atm(this_grid)%gridstruct%rdya(isd:ied, jsd:jed)))
+  call extchain_dump2('M_RDXC', &
+      real(Atm(this_grid)%gridstruct%rdxc(isd:ied + 1, jsd:jed)))
+  call extchain_dump2('M_RDYC', &
+      real(Atm(this_grid)%gridstruct%rdyc(isd:ied, jsd:jed + 1)))
+  call extchain_dump2('M_SINA', &
+      real(Atm(this_grid)%gridstruct%sina(isd:ied + 1, jsd:jed + 1)))
+  call extchain_dump2('M_F0', &
+      real(Atm(this_grid)%gridstruct%f0(isd:ied, jsd:jed)))
   call extchain_dump3('M_SIN_SG', &
       real(Atm(this_grid)%gridstruct%sin_sg(isd:ied, jsd:jed, 1:9)))
   call extchain_dump3('M_COS_SG', &

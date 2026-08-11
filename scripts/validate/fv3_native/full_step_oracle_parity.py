@@ -519,6 +519,182 @@ def apply_map(port_face, orc_tile, meta_entry) -> dict:
 
 
 # ----------------------------------------------------------------------
+# Coherent boundary-metric perturbation (codex retro-review findings
+# 2+3).  The old in-place perturbation (a) skipped directly consumed
+# derived families (rdx/rdy/rdxa/rdya/rdxc/rdyc feed p_grad_c and the
+# d_sw KE ranges, rarea_c the CD-vorticity, B-grid cosa/sina/rsina the
+# duo contravariant solves), (b) perturbed area AND rarea by the SAME
+# factor so area*rarea became fac^2 (invariant violated -- the response
+# then mixes the intended geometry mode with an unphysical one), and
+# (c) never refreshed the prebuilt ectx metric snapshots (dx6/dy6),
+# so the c2l path consumed UNPERTURBED lengths.  Here: perturb the
+# PRIMITIVES only, then recompute every derived reciprocal/composite
+# where the builder invariant held (sentinel/override slots preserved
+# bit-exactly), and refresh the ectx snapshots with the same factors.
+
+# primitive -> multiplicative class; angles get a coherent ROTATION
+# theta -> theta + eps*pat instead (multiplying cosa by (1+eps*pat)
+# perturbs a near-zero cosa by ~nothing -- the perturb-a-zero trap --
+# while a rotation moves cos and sin by O(eps) everywhere and keeps
+# cos^2+sin^2 = 1 exactly).
+_PERT_LENGTHS = ("dx", "dy", "dxa", "dya", "dxc", "dyc",
+                 "area", "area_c")
+_PERT_ANGLE_PAIRS = (("cosa_u", "sina_u"), ("cosa_v", "sina_v"),
+                     ("cosa", "sina"))
+_SENT_GUARD = 1.0e29     # never touch big_number convention slots
+_TRIG_GUARD = 1.0e6      # trig sentinel class (poisoned vertices)
+
+
+def _pert_pattern(shape2, ng, eps):
+    """eps*cos(3i+7j) on boundary cells (halo rings + outermost
+    compute ring), exactly 0 on the strict interior."""
+    mi, mj = shape2
+    pat = np.cos(3.0 * np.arange(mi)[:, None]
+                 + 7.0 * np.arange(mj)[None, :])
+    di = np.minimum(np.arange(mi), mi - 1 - np.arange(mi))
+    dj = np.minimum(np.arange(mj), mj - 1 - np.arange(mj))
+    strict = (di[:, None] > ng) & (dj[None, :] > ng)
+    return np.where(strict, 0.0, eps * pat)
+
+
+def _replace_where_held(gs, key, cand_old, cand_new, stats):
+    """Refresh derived field gs[key] ONLY where the builder invariant
+    held pre-perturbation (rtol 1e-12); sentinel/override slots keep
+    their exact old values."""
+    old = np.asarray(gs[key], dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        held = np.isclose(old, cand_old, rtol=1.0e-12, atol=0.0)
+    gs[key] = np.where(held, cand_new, old)
+    stats[key] = stats.get(key, 0) + int(
+        (held & (cand_new != old)).sum())
+
+
+def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
+    """Perturb primitive metrics at boundary cells, recompute derived
+    families, refresh ectx snapshots. Prints a per-class receipt."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        TINY_NUMBER,
+        rsin_border_override,
+    )
+
+    stats = {}
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        old = {}     # pre-perturbation primitives (fp64 copies)
+        for k in _PERT_LENGTHS + tuple(
+                x for pr in _PERT_ANGLE_PAIRS for x in pr) + (
+                "sin_sg", "cos_sg"):
+            old[k] = np.asarray(gs[k], dtype=np.float64).copy()
+        # snapshot derived-formula inputs BEFORE any write
+        for k in ("rdx", "rdy", "rdxa", "rdya", "rdxc", "rdyc",
+                  "rarea", "rarea_c", "rsina", "rsin_u", "rsin_v",
+                  "rsin2", "divg_u", "divg_v", "del6_u", "del6_v"):
+            old[k] = np.asarray(gs[k], dtype=np.float64).copy()
+
+        # 1) lengths/areas: multiplicative on non-sentinel boundary cells
+        for k in _PERT_LENGTHS:
+            a = old[k]
+            fac = 1.0 + _pert_pattern(a.shape, ng, eps)
+            gs[k] = np.where(np.abs(a) < _SENT_GUARD, a * fac, a)
+            stats[k] = stats.get(k, 0) + int(
+                ((np.abs(a) < _SENT_GUARD) & (fac != 1.0)).sum())
+        # 2) angle pairs: coherent rotation on real-trig boundary cells
+        for ck, sk in _PERT_ANGLE_PAIRS:
+            c, s = old[ck], old[sk]
+            real = (np.abs(c) < _TRIG_GUARD) & (np.abs(s) < _TRIG_GUARD)
+            th = np.arctan2(np.where(real, s, 1.0),
+                            np.where(real, c, 0.0))
+            dth = _pert_pattern(c.shape, ng, eps)
+            gs[ck] = np.where(real, np.cos(th + dth), c)
+            gs[sk] = np.where(real, np.sin(th + dth), s)
+            stats[ck] = stats.get(ck, 0) + int((real & (dth != 0.0)).sum())
+        # 3) sg families: slot-wise rotation where sin^2+cos^2=1 held
+        ssg, csg = old["sin_sg"], old["cos_sg"]
+        real = np.abs(ssg * ssg + csg * csg - 1.0) < 1.0e-12
+        th = np.arctan2(np.where(real, ssg, 1.0),
+                        np.where(real, csg, 0.0))
+        dth = _pert_pattern(ssg.shape[:2], ng, eps)[:, :, None]
+        gs["sin_sg"] = np.where(real, np.sin(th + dth), ssg)
+        gs["cos_sg"] = np.where(real, np.cos(th + dth), csg)
+        stats["sin_sg"] = stats.get("sin_sg", 0) + int(
+            (real & (dth != 0.0)).sum())
+
+        # 4) recompute EVERY derived family where its builder formula
+        # held (invariants restored: area*rarea == 1 again, etc.)
+        recips = (("rdx", "dx"), ("rdy", "dy"), ("rdxa", "dxa"),
+                  ("rdya", "dya"), ("rdxc", "dxc"), ("rdyc", "dyc"),
+                  ("rarea", "area"), ("rarea_c", "area_c"))
+        for dk, pk in recips:
+            _replace_where_held(gs, dk, 1.0 / old[pk],
+                                1.0 / np.asarray(gs[pk]), stats)
+        for dk, pk in (("rsina", "sina"), ("rsin_u", "sina_u"),
+                       ("rsin_v", "sina_v")):
+            so, sn = old[pk], np.asarray(gs[pk])
+            pristine = old[dk]
+            if pristine.shape != so.shape:
+                # rsina is COMPUTE-B in some lanes; skip on mismatch
+                continue
+            # two builder flavours: the plain 1/max(tiny, s^2) and the
+            # panel-border override 1/SIGN(max(tiny,|s|), s); each cell
+            # is refreshed by the flavour whose invariant it held.
+            c1o = 1.0 / np.maximum(TINY_NUMBER, so * so)
+            c1n = 1.0 / np.maximum(TINY_NUMBER, sn * sn)
+            c2o = rsin_border_override(so)
+            c2n = rsin_border_override(sn)
+            h1 = np.isclose(pristine, c1o, rtol=1.0e-12, atol=0.0)
+            h2 = np.isclose(pristine, c2o, rtol=1.0e-12, atol=0.0) & ~h1
+            gs[dk] = np.where(h1, c1n, np.where(h2, c2n, pristine))
+            stats[dk] = stats.get(dk, 0) + int(
+                ((h1 & (c1n != pristine)) | (h2 & (c2n != pristine))).sum())
+        _replace_where_held(
+            gs, "rsin2",
+            1.0 / np.maximum(TINY_NUMBER, old["sin_sg"][..., 4] ** 2),
+            1.0 / np.maximum(TINY_NUMBER,
+                             np.asarray(gs["sin_sg"])[..., 4] ** 2),
+            stats)
+        _replace_where_held(gs, "cosa_s", old["cos_sg"][..., 4],
+                            np.asarray(gs["cos_sg"])[..., 4], stats)
+        for dk, f in (
+                ("divg_u", lambda o: o[0] * o[1] / o[2]),
+                ("del6_u", lambda o: o[0] * o[2] / o[1])):
+            _replace_where_held(
+                gs, dk,
+                f((old["sina_v"], old["dyc"], old["dx"])),
+                f((np.asarray(gs["sina_v"]), np.asarray(gs["dyc"]),
+                   np.asarray(gs["dx"]))), stats)
+        for dk, f in (
+                ("divg_v", lambda o: o[0] * o[1] / o[2]),
+                ("del6_v", lambda o: o[0] * o[2] / o[1])):
+            _replace_where_held(
+                gs, dk,
+                f((old["sina_u"], old["dxc"], old["dy"])),
+                f((np.asarray(gs["sina_u"]), np.asarray(gs["dxc"]),
+                   np.asarray(gs["dy"]))), stats)
+
+        # 5) refresh the prebuilt ectx metric snapshots: c2l reads
+        # ectx["dx6"]/["dy6"], captured BEFORE this perturbation --
+        # apply the SAME factors so the consumed values actually move.
+        # (amat6 is built from grid_lon/grid_lat coordinates only --
+        # unaffected by a metric perturbation, no rebuild needed.)
+        if ctx.get("ectx") is not None:
+            for ek, pk in (("dx6", "dx"), ("dy6", "dy")):
+                a = np.asarray(ctx["ectx"][ek][t], dtype=np.float64)
+                fac = 1.0 + _pert_pattern(a.shape, ng, eps)
+                ctx["ectx"][ek][t] = np.where(
+                    np.abs(a) < _SENT_GUARD, a * fac, a)
+
+    total = sum(stats.values())
+    if total == 0:
+        raise SystemExit(
+            "PERTURBATION CONTROL FAILED: zero cells moved -- the "
+            "probe would be a no-op control (perturb-a-zero class)")
+    print(f"BOUNDARY METRICS PERTURBED COHERENTLY eps={eps:g}: "
+          f"primitives multiplicative (lengths/areas) + angle "
+          f"rotations; ALL derived reciprocals/composites recomputed; "
+          f"ectx dx6/dy6 snapshots refreshed")
+    print("  perturbed/refreshed cells per family: "
+          + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
@@ -559,15 +735,22 @@ def main(argv=None):
                          "This flag is the mechanism-scaling probe.")
     ap.add_argument("--perturb-boundary-metrics", type=float, default=0.0,
                     metavar="EPS",
-                    help="GLM discriminator (2026-08-11): multiply every "
-                         "stencil-consumed metric at BOUNDARY cells (halo "
-                         "rings + the outermost compute ring) by "
-                         "(1 + EPS*cos(3i+7j)). The production metrics "
-                         "match the oracle at ~1e-14; if the one-step "
-                         "residual scales ~linearly with EPS (e.g. x100 "
-                         "at 1e-12), the 9.8e-06 floor is amplified "
-                         "geometry seed; if it stays pinned, the floor "
-                         "is a composition/formulation difference.")
+                    help="seed discriminator, COHERENT protocol (codex "
+                         "retro 2026-08-11): perturb PRIMITIVE metrics "
+                         "at BOUNDARY cells (halo rings + outermost "
+                         "compute ring) -- lengths/areas by "
+                         "(1 + EPS*cos(3i+7j)), intersection angles by "
+                         "a rotation theta+EPS*pat -- then RECOMPUTE "
+                         "every derived reciprocal/composite "
+                         "(rdx=1/dx, rarea=1/area, rsina, divg/del6) "
+                         "so builder invariants hold, and refresh the "
+                         "prebuilt ectx dx6/dy6 snapshots. The "
+                         "production metrics match the oracle at "
+                         "~1e-14; if the one-step residual scales with "
+                         "EPS (pre-registered: 1e-12 and 1e-10), the "
+                         "9.8e-06 floor is amplified geometry seed; if "
+                         "it stays pinned, the floor is a composition/"
+                         "formulation difference.")
     ap.add_argument("--n-steps", type=int, default=1,
                     help="outer fv_dynamics calls to integrate before "
                          "comparing (the step reference must be an oracle "
@@ -628,32 +811,8 @@ def main(argv=None):
                                      use_ext_metrics=args.ext_metrics,
                                      oracle_conventions=True)
     if args.perturb_boundary_metrics:
-        eps = float(args.perturb_boundary_metrics)
-        m_a = N + 2 * NG
-        ii = np.arange(m_a)
-        keys = ("dx", "dy", "dxa", "dya", "dxc", "dyc", "area", "rarea",
-                "cosa_u", "cosa_v", "cosa_s", "sina_u", "sina_v",
-                "rsin_u", "rsin_v", "rsin2", "divg_u", "divg_v",
-                "del6_u", "del6_v", "sin_sg", "cos_sg")
-        for t in range(6):
-            gs = ctx["gs6"][t]
-            for k in keys:
-                if k not in gs:
-                    continue
-                a = np.asarray(gs[k], dtype=np.float64).copy()
-                mi, mj = a.shape[0], a.shape[1]
-                pat = np.cos(3.0 * np.arange(mi)[:, None]
-                             + 7.0 * np.arange(mj)[None, :])
-                # boundary = anything outside the STRICT interior of the
-                # compute box (halo rings + outermost compute ring).
-                di = np.minimum(np.arange(mi), mi - 1 - np.arange(mi))
-                dj = np.minimum(np.arange(mj), mj - 1 - np.arange(mj))
-                strict = (di[:, None] > NG) & (dj[None, :] > NG)
-                fac = np.where(strict, 1.0, 1.0 + eps * pat)
-                gs[k] = a * (fac if a.ndim == 2 else fac[:, :, None])
-        del ii
-        print(f"BOUNDARY METRICS PERTURBED by eps={eps:g} "
-              f"(deterministic cos pattern, strict interior untouched)")
+        perturb_boundary_metrics_coherent(
+            ctx, float(args.perturb_boundary_metrics), N, NG)
     n, ng = ctx["n"], ctx["ng"]
     ak, bk, ptop, ks = set_eta_analytic(KM)
     ptop = float(ptop)
@@ -1113,6 +1272,18 @@ def main(argv=None):
     print(f"IC control (same harness, same map): {worst:.4e}")
     print(f"amplification over one step: "
           f"{worst_step / max(worst, 1e-300):.3g}x")
+    if args.perturb_boundary_metrics:
+        # pre-registered decision rule (printed with the number so the
+        # log is self-contained): the unperturbed floor is 9.8e-06; a
+        # coherent boundary-metric seed that AMPLIFIES to the floor
+        # predicts the residual MOVES with eps (>=2x at eps=1e-10 vs
+        # 1e-12); a residual pinned at the floor across both eps
+        # refutes seed amplification and leaves a composition/
+        # formulation difference.
+        print(f"PERTURB DECISION RULE: eps={args.perturb_boundary_metrics:g} "
+              f"WORST={worst_step:.4e}; PINNED if within ~10% of the "
+              f"unperturbed floor at BOTH eps=1e-12 and 1e-10, MOVED "
+              f"otherwise")
 
     if args.json:
         with open(args.json, "w") as fh:
