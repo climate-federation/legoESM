@@ -3018,3 +3018,18 @@ and its consumer, then decide between entry-layout forcing, array
 re-ordering at the state level ((lev, lat, lon) storage), or accepting
 the layout tax. Compute-fusion campaign continues only with
 layout-level evidence.
+
+### Lat-lon layout census (job 26863320) + reprioritization
+
+HLO dump read: fused_transpose.12's operands are (lev, lat, lon)
+f32[26,32,4096]-class arrays and its outputs transpose(dimensions=
+{1,2,0}) back to the state's (lat, lon, lev) — XLA schedules the
+tendency pipeline lev-leading and pays a layout boundary back to the
+scan carry each stage. Fix classes (state storage flip; carry-level
+layout hoist) are deep for a BOUNDED prize: the whole transpose family
+is 0.5 ms/step = 8% of the 6.25 ms step. PARKED with the evidence in
+hand. By magnitude the next lat-lon lever is COLLECTIVE COLLAPSE:
+13 collectives/step (GLM category "collapse further"); codex found the
+single-field PPM fold-halo exchange family (latlon_spmd.py:459) is NOT
+covered by the fused three-field wall pad — folding it in is the next
+slice (~1 ms/step class).
