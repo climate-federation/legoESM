@@ -28,6 +28,7 @@ import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 
 from legoesm.core.fv3_nh_core import (  # noqa: E402
+    make_sim1_solver_jit,
     sim1_solver as sim1_jax,
     sim1_solver_jit,
 )
@@ -147,7 +148,9 @@ def test_sim1_jax_jit_eager_parity_and_no_retrace():
         traces["n"] += 1
         return sim1_jax(*a, **kw)
 
-    fn = jax.jit(_counted, static_argnums=(0, 1, 2, 3, 11))
+    # Built through the PRODUCTION jit factory (codex SIM1 r1 #2), so
+    # this measures the same static-argnums policy sim1_solver_jit uses.
+    fn = make_sim1_solver_jit(_counted)
 
     def _call(w2_, dz2_):
         return fn(100.0, FV3_RDGAS, GAMA, FV3_KAPPA,
@@ -181,25 +184,39 @@ def test_sim1_jax_check_grads_order2_away_from_floor():
     ws = 0.3 * np.ones(ni)
     p_fac = 0.05
 
-    # Floor-inactivity control: if any jnp.maximum had picked the floor
-    # branch, halving p_fac would change dz2; bitwise-identical dz2 at
-    # p_fac and p_fac/2 proves the floor is inactive on this fixture.
-    _, _, dz_a = _run_native_sim1(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm,
-                                  pm2, pem, w2, dz2, pt2, ws, p_fac)
-    _, _, dz_b = _run_native_sim1(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm,
-                                  pm2, pem, w2, dz2, pt2, ws, p_fac / 2)
+    # Floor-inactivity control THROUGH THE JAX LANE on the exact
+    # gradient fixture (codex SIM1 r1 #3): if any jnp.maximum had picked
+    # the floor branch, halving p_fac would change dz2; bitwise-identical
+    # dz2 proves the floor is inactive where the grads are taken.
+    _, _, dz_a = _run_jax_sim1(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm,
+                               pm2, pem, w2, dz2, pt2, ws, p_fac)
+    _, _, dz_b = _run_jax_sim1(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm,
+                               pm2, pem, w2, dz2, pt2, ws, p_fac / 2)
     assert np.array_equal(dz_a, dz_b), "p_fac floor ACTIVE on fixture"
 
-    def f(w2_, dz2_, pt2_):
-        pe, w2o, dz2o = sim1_jax(
-            100.0, FV3_RDGAS, GAMA, FV3_KAPPA, jnp.asarray(dm),
-            jnp.asarray(pm2), jnp.asarray(pem), w2_, dz2_, pt2_,
-            jnp.asarray(ws), p_fac)
+    def _loss(pe, w2o, dz2o):
         return (jnp.sum(pe * pe) + jnp.sum(w2o * w2o)
                 + jnp.sum(dz2o * dz2o) / 1e6)
 
+    def f(w2_, dz2_, pt2_):
+        return _loss(*sim1_jax(
+            100.0, FV3_RDGAS, GAMA, FV3_KAPPA, jnp.asarray(dm),
+            jnp.asarray(pm2), jnp.asarray(pem), w2_, dz2_, pt2_,
+            jnp.asarray(ws), p_fac))
+
     check_grads(f, (jnp.asarray(w2), jnp.asarray(dz2), jnp.asarray(pt2)),
                 order=2, modes=("fwd", "rev"))
+
+    # Remaining dynamic operands (codex SIM1 r1 #4): dm2/pm2/pem/ws —
+    # ws uniquely exercises the bottom-row sensitivity.
+    def g(dm_, pm_, pem_, ws_):
+        return _loss(*sim1_jax(
+            100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm_, pm_, pem_,
+            jnp.asarray(w2), jnp.asarray(dz2), jnp.asarray(pt2),
+            ws_, p_fac))
+
+    check_grads(g, (jnp.asarray(dm), jnp.asarray(pm2), jnp.asarray(pem),
+                    jnp.asarray(ws)), order=2, modes=("fwd", "rev"))
 
 
 # ------------------------------------------------------------ guards
@@ -214,9 +231,32 @@ def test_sim1_jax_rejects_float32():
 
 
 def test_sim1_jax_km_guard():
-    ni, km = 2, 2
+    """km=1 rejected (the oracle recurrence divides by bb[:,0]=0)."""
+    ni, km = 2, 1
     a = jnp.ones((ni, km), jnp.float64)
-    with pytest.raises(ValueError, match="km=2"):
+    with pytest.raises(ValueError, match="km=1"):
         sim1_jax(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, a, a,
                  jnp.ones((ni, km + 1), jnp.float64), a, -a, a,
                  jnp.ones(ni, jnp.float64), 0.05)
+
+
+def test_sim1_jax_km2_matches_numpy_lane():
+    """km=2 IS valid (codex SIM1 r1 #1): the w forward sweep is empty
+    (zero-length scan) and the bottom row reads w2[:, km-2] == w2[:, 0].
+    Parity vs the native lane on a perturbed km=2 column."""
+    ni, km = 5, 2
+    rng = np.random.default_rng(19)
+    _, _, dm, pm2, pem, pt2, dz0 = _balanced_column(rng, ni=ni, km=km)
+    dz2 = np.array(dz0) * (1.0 + 0.05 * np.sin(np.arange(km)))
+    w2 = 0.3 * rng.standard_normal((ni, km))
+    ws = 0.7 * np.ones(ni)
+    args = (100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm, pm2, pem, w2, dz2,
+            pt2, ws, 0.05)
+    pe_n, w_n, dz_n = _run_native_sim1(*args)
+    pe_j, w_j, dz_j = _run_jax_sim1(*args)
+    assert np.isfinite(pe_n).all() and np.isfinite(w_n).all()
+    assert _rel(dz_j, dz_n) <= 1e-15, _rel(dz_j, dz_n)
+    assert _rel(pe_j, pe_n) <= 1e-14, _rel(pe_j, pe_n)
+    assert _rel(w_j, w_n) <= 1e-14, _rel(w_j, w_n)
+    # Non-vacuity: the solve moved state.
+    assert np.abs(w_n - w2).max() > 1e-4

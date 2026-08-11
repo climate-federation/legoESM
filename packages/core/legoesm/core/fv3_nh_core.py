@@ -76,15 +76,20 @@ def sim1_solver(dt: float, rgas: float, gama: float, kappa: float,
 
     Returns ``(pe, w2, dz2)`` -- the three arrays the NumPy lane writes
     in place: ``pe`` is (ni, km+1), ``w2``/``dz2`` are (ni, km).
-    Requires ``km >= 3`` (as does the NumPy lane's loop structure).
+    Requires ``km >= 2`` (km=1 divides by zero in the oracle recurrence).
     """
     _require_f64_jax("sim1_solver", {
         "dm2": dm2, "pm2": pm2, "pem": pem, "w2": w2, "dz2": dz2,
         "pt2": pt2, "ws": ws})
     km = dm2.shape[1]
-    if km < 3:
-        raise ValueError(f"sim1_solver: km={km} < 3 unsupported (the "
-                         f"oracle loop structure reads w2[:, km-2])")
+    if km < 2:
+        # km=1 is invalid in the ORACLE algebra too: the NumPy lane's
+        # k-loop leaves bb[:, 0] == 0 when km-1 == 0, so pp[:, 1] =
+        # dd[:, 0] / bet divides by zero (codex SIM1 r1 #1: km=2 IS
+        # valid — the w forward sweep is simply empty — and is covered
+        # by a parity test).
+        raise ValueError(f"sim1_solver: km={km} < 2 unsupported (km=1 "
+                         f"divides by bb[:,0]=0 in the oracle recurrence)")
     t1g = gama * 2.0 * dt * dt          # :1211 (non-moist)
     rdt = 1.0 / dt
     capa1 = kappa - 1.0
@@ -209,8 +214,18 @@ def sim1_solver(dt: float, rgas: float, gama: float, kappa: float,
     return pe, w2_out, dz2_out
 
 
-sim1_solver_jit = jax.jit(sim1_solver, static_argnums=(0, 1, 2, 3, 11))
-"""Jitted entry point.  dt/rgas/gama/kappa/p_fac static: they are
-compile-time deck constants in this lane (matches the closure-constant
-doctrine -- they never vary per call within a run).  NOT donating any
-buffer (grad-path doctrine)."""
+def make_sim1_solver_jit(fn=sim1_solver):
+    """The ONE jit policy for SIM1 (codex SIM1 r1 #2: the retrace test
+    must exercise the production policy, not a shadow copy — both the
+    production entry point below and any instrumented test wrapper are
+    built HERE, so a policy drift cannot pass unnoticed).
+
+    dt/rgas/gama/kappa/p_fac static: compile-time deck constants in this
+    lane (closure-constant doctrine — they never vary per call within a
+    run; varying dt intentionally recompiles).  NOT donating any buffer
+    (grad-path doctrine).
+    """
+    return jax.jit(fn, static_argnums=(0, 1, 2, 3, 11))
+
+
+sim1_solver_jit = make_sim1_solver_jit()
