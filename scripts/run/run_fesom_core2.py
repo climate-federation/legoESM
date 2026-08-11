@@ -75,10 +75,13 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
     """
     T = np.asarray(state.T, dtype=np.float64)
     S = np.asarray(state.S, dtype=np.float64)
-    if T.shape[0] == mesh.nod2D:          # tolerate either orientation
-        T3, S3 = T, S
-    else:
-        T3, S3 = T.T, S.T
+    # fesom-jax State contract: tracers are NODE-first (nod2D, nl).  Require
+    # it rather than guessing from shapes (a mesh with nod2D == nl would make
+    # any heuristic silently transpose wrong -- codex FESOM-arm review).
+    if T.shape[0] != mesh.nod2D:
+        raise SystemExit(f"state.T is not node-first: {T.shape} vs "
+                         f"nod2D={mesh.nod2D}")
+    T3, S3 = T, S
     # fesom-jax state tracers carry nl slots: nl-1 real levels plus a padded
     # bottom slot (repeated bottom value).  mesh.Z has the nl-1 real
     # midpoints; slice tracers to match or every downstream (T, z) pairing is
@@ -116,16 +119,24 @@ def main() -> int:
     from fesom_jax import surface_forcing
     from fesom_jax.ssh import build_ssh_operator
     from fesom_jax.integrate import integrate
-    from fesom_jax.kpp import KppConfig
     from fesom_jax.gm import GMConfig
     from fesom_jax.ice import IceConfig
+    from fesom_jax.ale import AleConfig
+    from fesom_jax.tke import TkeConfig
 
     mesh = load_mesh(args.mesh_dir)
     print(f"[mesh] nodes {mesh.nod2D:,} | triangles {mesh.elem2D:,} | "
           f"levels {mesh.nl}", flush=True)
+    # Cavity nodes (ulevels > 1) would be misclassified as land by the
+    # snapshot writer's surface-layer mask; CORE2 has none -- assert it.
+    ul = np.asarray(mesh.ulevels_nod2D)
+    if int(ul.max(initial=1)) > 1:
+        raise SystemExit("FATAL: mesh has ice-shelf cavity nodes; the "
+                         "snapshot writer does not support them")
     state = cold_start_state(mesh, args.ic_dir)
-    sst0 = jnp.asarray(state.T[0] if state.T.shape[0] != mesh.nod2D
-                       else state.T[:, 0])
+    if np.asarray(state.T).shape[0] != mesh.nod2D:
+        raise SystemExit("cold_start_state returned non-node-first tracers")
+    sst0 = jnp.asarray(state.T[:, 0])
 
     t0 = time.time()
     forcing = surface_forcing.build_surface_forcing(mesh, args.year, sst_ic=sst0)
@@ -144,44 +155,43 @@ def main() -> int:
                             "fesom_jax": str(Path(
                                 sys.modules["fesom_jax"].__file__).parent)},
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
-                   "physics": "fesom-jax defaults (published CORE2 hindcast)",
+                   "physics": ("core2_full.yaml paper card: zstar ALE + "
+                               "prognostic TKE + GM + mEVP ice (whichEVP=1); "
+                               "single-integrate AB2-continuous"),
                    "protocol_note": ("JRA55-do year forcing + PHC3.0 winter "
                                      "cold start; NOT the xgrid matched-pair "
                                      "protocol -- three-model comparison")},
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    # Day-chunked integration: stacking all steps' forcing at once is ~6 GB
-    # at 30 days; one day (48 steps) at a time keeps it ~200 MB.
+    # ONE integrate() call for the whole run: integrate() bootstraps AB2 on
+    # its first step by design, so a day-chunked loop re-bootstrapped the
+    # momentum time-stepping every 48 steps (codex FESOM-arm review RED-1).
+    # The full-run stacked forcing is ~4 MB/step ~ 6 GB at 30 days -- fits
+    # device memory; snapshots between chunks would need the restart lane
+    # (fesom_jax.run.run_from_config) instead.
+    n_steps = n_days * steps_per_day
+    dates = surface_forcing.dates_for_steps(args.year, args.dt, n_steps)
+    step_forcings = forcing.stack(dates)
     t_start = time.time()
-    for day in range(1, n_days + 1):
-        dates = surface_forcing.dates_for_steps(args.year, args.dt,
-                                                day * steps_per_day)
-        day_dates = dates[(day - 1) * steps_per_day: day * steps_per_day]
-        step_forcings = forcing.stack(day_dates)
-        # The published CORE2 hindcast card: KPP + GM + the sea-ice model.
-        # Omitting ice_cfg DISABLES the ice model entirely -- the first run
-        # did, and ice-covered Arctic water relaxed to the JRA winter air
-        # temperature (SST median -18.6 C, min -26.7 C, measured on
-        # fesom_core2_d30 snapshot_day0030 before this fix).
-        state = integrate(state, mesh, op, stress,
-                          n_steps=steps_per_day, dt=args.dt,
-                          step_forcings=step_forcings,
-                          forcing_static=forcing.static,
-                          kpp_cfg=KppConfig(), gm_cfg=GMConfig(),
-                          ice_cfg=IceConfig())
-        sst = np.asarray(state.T[0] if state.T.shape[0] != mesh.nod2D
-                         else state.T[:, 0])
-        if not np.isfinite(sst[np.asarray(mesh.node_layer_mask[:, 0]) > 0]).all():
-            write_snapshot(out, f"day{day:04d}_NONFINITE", state, mesh)
-            raise SystemExit(f"FATAL: non-finite SST at day {day}")
-        rate = day * steps_per_day / (time.time() - t_start)
-        print(f"[day {day:3d}/{n_days}] mean SST "
-              f"{float(np.nanmean(np.where(np.asarray(mesh.node_layer_mask[:, 0]) > 0, sst, np.nan))):.3f} C"
-              f"  ({rate:.2f} steps/s)", flush=True)
-        if day % max(1, int(round(args.snapshot_every_days))) == 0 or day == n_days:
-            p = write_snapshot(out, f"day{day:04d}", state, mesh)
-            print(f"[snapshot] {p}", flush=True)
+    state = integrate(state, mesh, op, stress,
+                      n_steps=n_steps, dt=args.dt,
+                      step_forcings=step_forcings,
+                      forcing_static=forcing.static,
+                      ale_cfg=AleConfig(), tke_cfg=TkeConfig(),
+                      gm_cfg=GMConfig(), ice_cfg=IceConfig(whichEVP=1))
+    sst = np.asarray(state.T[:, 0])
+    wetmask = np.asarray(mesh.node_layer_mask[:, 0]) > 0
+    if not np.isfinite(sst[wetmask]).all():
+        write_snapshot(out, f"day{n_days:04d}_NONFINITE", state, mesh)
+        raise SystemExit(f"FATAL: non-finite SST at day {n_days}")
+    rate = n_steps / (time.time() - t_start)
+    print(f"[day {n_days:3d}/{n_days}] unweighted wet-node mean SST "
+          f"{float(np.nanmean(np.where(wetmask, sst, np.nan))):.3f} C "
+          f"(liveness only, refinement-biased)  ({rate:.2f} steps/s)",
+          flush=True)
+    p_out = write_snapshot(out, f"day{n_days:04d}", state, mesh)
+    print(f"[snapshot] {p_out}", flush=True)
 
     write_snapshot(out, "final", state, mesh)
     print("[done]", flush=True)
