@@ -103,35 +103,56 @@ def test_coherent_perturbation_keeps_builder_invariants():
             for k, v in gs.items() if isinstance(v, np.ndarray)}
            for gs in ctx["gs6"]]
     ref_dx6 = [np.array(a, copy=True) for a in ctx["ectx"]["dx6"]]
+    ref_dy6 = [np.array(a, copy=True) for a in ctx["ectx"]["dy6"]]
 
     perturb_boundary_metrics_coherent(ctx, eps, n, ng)
 
     moved_any = False
     for t in range(6):
         gs = ctx["gs6"][t]
-        area = np.asarray(gs["area"])
-        rarea = np.asarray(gs["rarea"])
-        live = np.abs(area) < 1.0e29
-        # the invariant the OLD perturbation broke (finding 3)
-        assert np.abs(area[live] * rarea[live] - 1.0).max() < 1.0e-14
-        dx = np.asarray(gs["dx"])
-        rdx = np.asarray(gs["rdx"])
-        livex = np.abs(dx) < 1.0e29
-        assert np.abs(dx[livex] * rdx[livex] - 1.0).max() < 1.0e-14
-        cu, su = np.asarray(gs["cosa_u"]), np.asarray(gs["sina_u"])
-        lu = (np.abs(cu) < 1.0e6) & (np.abs(su) < 1.0e6)
-        assert np.abs(cu[lu] ** 2 + su[lu] ** 2 - 1.0).max() < 1.0e-13
+        # reciprocal invariants -- the class the OLD perturbation broke
+        # (finding 3: area*rarea became fac^2), over EVERY recip pair
+        for pk, rk in (("area", "rarea"), ("area_c", "rarea_c"),
+                       ("dx", "rdx"), ("dy", "rdy"),
+                       ("dxa", "rdxa"), ("dya", "rdya"),
+                       ("dxc", "rdxc"), ("dyc", "rdyc")):
+            p = np.asarray(gs[pk])
+            r = np.asarray(gs[rk])
+            live = (np.abs(p) < 1.0e29) & (np.abs(r) > 1.0e-20)
+            assert np.abs(p[live] * r[live] - 1.0).max() < 1.0e-14, \
+                (pk, rk)
+        # angle coherence after rotation, ALL pairs (u, v, B-plane)
+        for ck, sk in (("cosa_u", "sina_u"), ("cosa_v", "sina_v"),
+                       ("cosa", "sina")):
+            c, s = np.asarray(gs[ck]), np.asarray(gs[sk])
+            lu = (np.abs(c) < 1.0e6) & (np.abs(s) < 1.0e6)
+            assert np.abs(c[lu] ** 2 + s[lu] ** 2 - 1.0).max() < 1.0e-13
+        # consumed metric summaries refreshed (codex instr r1 H2):
+        # the stored scalars must equal the extremum of the PERTURBED
+        # arrays over the builder's compute range
+        sl_c = slice(ng, ng + n)
+        assert float(gs["da_min"]) == float(
+            np.asarray(gs["area"])[sl_c, sl_c].min())
+        assert float(gs["da_min_c"]) == float(
+            np.asarray(gs["area_c"])[sl_c, sl_c].min())
         # the field actually moved at boundary cells (non-vacuous
         # control -- a perturbation of zero cells is a no-op probe)
         if not np.array_equal(np.asarray(gs["dx"]), ref[t]["dx"]):
             moved_any = True
-        # ectx snapshot refreshed (finding 2: c2l consumed stale dx6)
+        # BOTH ectx snapshots refreshed (finding 2: c2l consumed stale
+        # lengths)
         assert not np.array_equal(np.asarray(ctx["ectx"]["dx6"][t]),
                                   ref_dx6[t])
-        # strict interior untouched
+        assert not np.array_equal(np.asarray(ctx["ectx"]["dy6"][t]),
+                                  ref_dy6[t])
+        # strict interior BIT-EXACT, including the angle families the
+        # arctan2 round-trip could silently re-round (codex instr r1
+        # H1) and a derived family
         sl = slice(ng + 1, n + ng - 1)
-        assert np.array_equal(np.asarray(gs["dx"])[sl, sl],
-                              ref[t]["dx"][sl, sl])
+        for k in ("dx", "cosa_u", "sina_u", "cosa", "sina",
+                  "sin_sg", "cos_sg", "rsin_u", "divg_u", "rarea"):
+            assert np.array_equal(np.asarray(gs[k])[sl, sl],
+                                  ref[t][k][sl, sl]), k
     assert moved_any
 
 

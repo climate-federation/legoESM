@@ -283,22 +283,21 @@ def main() -> int:
             print(f"{fam:10s}  --  (port gs6 has no {key!r}; skipped)")
             continue
         if fam == "f0":
-            # First deployment measured: the extchain driver's M_F0 is
-            # ALL ZEROS -- upstream f0 is assigned only by test_cases
-            # init_case (test_cases.F90:787-801), which this grid-init
-            # driver never runs, so the dump precedes initialization.
-            # Scoring |port_f0 - 0| would report a fake full-scale
-            # defect (first pass did: 1.46e-4 == 2*Omega).  If the dump
-            # is ever nonzero (a driver that runs the IC), score it.
+            # Upstream assigns f0 only in test_cases init_case
+            # (test_cases.F90:787-800); the extchain driver replicates
+            # exactly those statements (formula + duo ext_scalar halo
+            # overwrite + fill_corners YDir) before dumping M_F0.  An
+            # all-zero dump means STALE dumps from a pre-replication
+            # driver build (first probe run scored |port_f0 - 0| as a
+            # fake full-scale 1.46e-4 == 2*Omega "defect") -- refuse
+            # loudly instead of scoring or silently skipping.
             if all(not np.asarray(orc[t]["arrays"]["M_F0"]).any()
                    for t in range(6)):
-                print(f"{fam:10s}  --  ORACLE DUMP IS PRE-INIT (all "
-                      "zeros; test_cases.F90:787 assigns f0 during "
-                      "model IC, after this driver's dump point). "
-                      "Runtime f0 is NOT measurable from this driver; "
-                      "it is NOT scored rather than scored against "
-                      "zeros.")
-                continue
+                raise SystemExit(
+                    "M_F0 dump is ALL ZEROS: stale oracle dumps from a "
+                    "driver build that predates the f0 init "
+                    "replication (test_cases.F90:787-800). Rebuild "
+                    "fv3_extchain_oracle_driver.F90 and regenerate.")
         rows = {}
         for lbl, gs6 in (("K", kink6), ("E", ext6), ("P", prod6)):
             per = {h: 0.0 for h in hdr}

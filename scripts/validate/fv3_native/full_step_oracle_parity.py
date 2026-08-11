@@ -605,26 +605,32 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
             gs[k] = np.where(np.abs(a) < _SENT_GUARD, a * fac, a)
             stats[k] = stats.get(k, 0) + int(
                 ((np.abs(a) < _SENT_GUARD) & (fac != 1.0)).sum())
-        # 2) angle pairs: coherent rotation on real-trig boundary cells
+        # 2) angle pairs: coherent rotation on real-trig boundary cells.
+        # The write is gated on dth != 0 as well: cos(arctan2(s,c)) is
+        # NOT bit-identical to c in general, so rewriting live cells
+        # with a zero rotation would silently re-round the strict
+        # interior (codex instr r1 H1).
         for ck, sk in _PERT_ANGLE_PAIRS:
             c, s = old[ck], old[sk]
             real = (np.abs(c) < _TRIG_GUARD) & (np.abs(s) < _TRIG_GUARD)
+            dth = _pert_pattern(c.shape, ng, eps)
+            rot = real & (dth != 0.0)
             th = np.arctan2(np.where(real, s, 1.0),
                             np.where(real, c, 0.0))
-            dth = _pert_pattern(c.shape, ng, eps)
-            gs[ck] = np.where(real, np.cos(th + dth), c)
-            gs[sk] = np.where(real, np.sin(th + dth), s)
-            stats[ck] = stats.get(ck, 0) + int((real & (dth != 0.0)).sum())
+            gs[ck] = np.where(rot, np.cos(th + dth), c)
+            gs[sk] = np.where(rot, np.sin(th + dth), s)
+            stats[ck] = stats.get(ck, 0) + int(rot.sum())
         # 3) sg families: slot-wise rotation where sin^2+cos^2=1 held
+        # (same dth != 0 gate -- untouched slots stay bit-exact)
         ssg, csg = old["sin_sg"], old["cos_sg"]
         real = np.abs(ssg * ssg + csg * csg - 1.0) < 1.0e-12
+        dth = _pert_pattern(ssg.shape[:2], ng, eps)[:, :, None]
+        rot = real & (dth != 0.0)
         th = np.arctan2(np.where(real, ssg, 1.0),
                         np.where(real, csg, 0.0))
-        dth = _pert_pattern(ssg.shape[:2], ng, eps)[:, :, None]
-        gs["sin_sg"] = np.where(real, np.sin(th + dth), ssg)
-        gs["cos_sg"] = np.where(real, np.cos(th + dth), csg)
-        stats["sin_sg"] = stats.get("sin_sg", 0) + int(
-            (real & (dth != 0.0)).sum())
+        gs["sin_sg"] = np.where(rot, np.sin(th + dth), ssg)
+        gs["cos_sg"] = np.where(rot, np.cos(th + dth), csg)
+        stats["sin_sg"] = stats.get("sin_sg", 0) + int(rot.sum())
 
         # 4) recompute EVERY derived family where its builder formula
         # held (invariants restored: area*rarea == 1 again, etc.)
@@ -678,6 +684,30 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
                 f((old["sina_u"], old["dxc"], old["dy"])),
                 f((np.asarray(gs["sina_u"]), np.asarray(gs["dxc"]),
                    np.asarray(gs["dy"]))), stats)
+
+        # 4b) consumed metric SUMMARIES (codex instr r1 H2): d_sw and
+        # the duo sw core read the scalars da_min/da_min_c, computed by
+        # the builder as min/max over the compute range (bounded lane:
+        # area[ng:ng+n, ng:ng+n], and area_c over the SAME range -- the
+        # upstream global_mx_c call range, NOT ie+1).  The perturbation
+        # covers the outermost compute ring, so the extremum can move
+        # while the stored scalar goes stale.  Where-held analog for
+        # scalars: refresh only if the stored value matches the formula
+        # on the pre-perturbation arrays.
+        sl = slice(ng, ng + n)
+        for sk2, pk2, red in (("da_min", "area", np.min),
+                              ("da_max", "area", np.max),
+                              ("da_min_c", "area_c", np.min),
+                              ("da_max_c", "area_c", np.max)):
+            if sk2 not in gs:
+                continue
+            cand_old = float(red(old[pk2][sl, sl]))
+            if np.isclose(float(gs[sk2]), cand_old,
+                          rtol=1.0e-12, atol=0.0):
+                cand_new = float(red(np.asarray(gs[pk2])[sl, sl]))
+                if cand_new != cand_old:
+                    gs[sk2] = cand_new
+                    stats[sk2] = stats.get(sk2, 0) + 1
 
         # 5) refresh the prebuilt ectx metric snapshots: c2l reads
         # ectx["dx6"]/["dy6"], captured BEFORE this perturbation --

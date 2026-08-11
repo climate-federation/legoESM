@@ -46,6 +46,9 @@ program fv3_extchain_oracle_driver
   use duogrid_mod, only: ext_scalar, ext_vector
   use fv_grid_utils_mod, only: great_circle_dist
   use lib_grid_mod, only: R_GRID, RADIUS
+  use constants_mod, only: omega
+  use fv_mp_mod, only: fill_corners, YDir
+  use test_cases_mod, only: alpha
   use extchain_dump_mod, only: extchain_dump_open, extchain_dump_close, &
                                extchain_dump2, extchain_dump3, &
                                extchain_mf_note
@@ -57,7 +60,7 @@ program fv3_extchain_oracle_driver
   integer :: this_grid, p_split
   integer :: tile_id(1), tile
   integer :: is, ie, js, je, isd, ied, jsd, jed, ng, npz
-  integer :: iv
+  integer :: iv, i, j
   real :: sent
   character(len=8) :: vtag
   character(len=64) :: fname_dat, fname_mf
@@ -213,6 +216,31 @@ program fv3_extchain_oracle_driver
       real(Atm(this_grid)%gridstruct%rdyc(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_SINA', &
       real(Atm(this_grid)%gridstruct%sina(isd:ied + 1, jsd:jed + 1)))
+  ! f0 is NOT set by grid init -- upstream assigns it in test_cases
+  ! init_case's unconditional pre-case block (test_cases.F90:787-800),
+  ! which this driver does not reach (first probe run measured the raw
+  ! dump == all zeros).  Run the SAME statements here before dumping:
+  ! the same formula (module alpha, read from the deck's test_case_nml
+  ! during fv_control_init; deck alpha = 0), the same duo ext_scalar
+  ! halo overwrite arm, and the same unconditional cubed-sphere
+  ! fill_corners(YDir).
+  do j = jsd, jed
+    do i = isd, ied
+      Atm(this_grid)%gridstruct%f0(i, j) = 2.*omega*( &
+          -1.*cos(Atm(this_grid)%gridstruct%agrid(i, j, 1)) &
+             *cos(Atm(this_grid)%gridstruct%agrid(i, j, 2))*sin(alpha) &
+          + sin(Atm(this_grid)%gridstruct%agrid(i, j, 2))*cos(alpha))
+    end do
+  end do
+  if (.not. Atm(this_grid)%gridstruct%dg%is_initialized) then
+    call mpp_error(FATAL, 'extchain driver expects the duo dg lane '// &
+        '(dg%is_initialized) for the f0 ext_scalar arm')
+  end if
+  call ext_scalar(Atm(this_grid)%gridstruct%f0, &
+                  Atm(this_grid)%gridstruct%dg, Atm(this_grid)%bd, &
+                  Atm(this_grid)%domain, 0, 0)
+  call fill_corners(Atm(this_grid)%gridstruct%f0, &
+                    Atm(this_grid)%npx, Atm(this_grid)%npy, YDir)
   call extchain_dump2('M_F0', &
       real(Atm(this_grid)%gridstruct%f0(isd:ied, jsd:jed)))
   call extchain_dump3('M_SIN_SG', &
