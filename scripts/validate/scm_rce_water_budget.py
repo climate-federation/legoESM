@@ -211,6 +211,15 @@ def main(argv: list[str] | None = None) -> int:
     p_mean = 0.5 * (r0.precip_mm_day + r1.precip_mm_day)
     e_implied = dstore + p_mean
 
+    # CO-SAMPLED budget: E and P both from the applied tendencies, averaged
+    # over the same analysis window inside the driver. This is the version
+    # neither reviewer would accept a residual from without believing it.
+    e_cos = 0.5 * (r0.evap_mm_day + r1.evap_mm_day)
+    p_cos = 0.5 * (r0.precip_mm_day + r1.precip_mm_day)
+    print("-" * 78)
+    print(f"  CO-SAMPLED (both from the applied tendencies, same window):")
+    print(f"    E = {e_cos:+.4f}   P = {p_cos:+.4f}   dS/dt = {dstore:+.4f}"
+          f"   residual E-P-dS/dt = {e_cos - p_cos - dstore:+.4f} mm/day")
     print("-" * 78)
     print(f"  storage  d(CWV+CWC)/dt = {dstore:+.4f} mm/day "
           f"(over days {d0:.0f} -> {d1:.0f})")

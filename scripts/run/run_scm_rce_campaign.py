@@ -286,6 +286,10 @@ class RunDiagnostics:
     drift_qv_rmse: float
     drift_qcond_rmse: float
     precip_mm_day: float = float("nan")
+    # Surface evaporation [mm/day], co-sampled with precip_mm_day over the same
+    # analysis window from the same applied tendency, so d(CWV+CWC)/dt = E - P
+    # can be checked without comparing quantities sampled differently.
+    evap_mm_day: float = float("nan")
     precip_ref_mm_day: float = float("nan")
     moist_adiabat_mean_abs_K: float = float("nan")
     moist_adiabat_max_abs_K: float = float("nan")
@@ -1284,7 +1288,11 @@ def run_scm_rce(
             convective_precip_for_score = jnp.zeros(
                 (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
+        # E recorded ALONGSIDE P, from the same applied tendency and with the
+        # same per-step weight, so the water budget can be closed with both
+        # terms sampled identically (see applied_evap_mm_day).
+        evap = applied_evap_mm_day(base_tend, new_state)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
         return (new_state, new_phys), out
 
     def cached_radiation_body(carry, k):
@@ -1331,7 +1339,8 @@ def run_scm_rce(
             convective_precip_for_score = jnp.zeros(
                 (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
+        evap = applied_evap_mm_day(nonrad_tend, new_state)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
         return (new_state, new_phys, rad_tend), out
 
     if use_cached_radiation:
@@ -1359,7 +1368,7 @@ def run_scm_rce(
     try:
         final_state, _final_phys, history = driver(scm.state, scm.phys_state)
         del final_state
-        T_hist, qv_hist, qcond_hist, precip_hist = (
+        T_hist, qv_hist, qcond_hist, precip_hist, evap_hist = (
             np.asarray(x, dtype=float) for x in history
         )
         last_steps = max(1, int(round(analysis_days * SECONDS_PER_DAY / dt)))
@@ -1368,6 +1377,7 @@ def run_scm_rce(
         qv_profile = qv_hist[-last_steps:].mean(axis=0)
         qcond_profile = np.maximum(qcond_hist[-last_steps:].mean(axis=0), 0.0)
         precip_mm_day = float(np.maximum(np.mean(precip_hist[-last_steps:]), 0.0))
+        evap_mm_day = float(np.mean(evap_hist[-last_steps:]))
 
         prev_end = nsteps - last_steps
         prev_start = max(0, prev_end - last_steps)
@@ -1459,6 +1469,7 @@ def run_scm_rce(
             drift_qv_rmse=float(drift_qv),
             drift_qcond_rmse=float(drift_qcond),
             precip_mm_day=precip_mm_day,
+            evap_mm_day=evap_mm_day,
             precip_ref_mm_day=float(ref.precip_ref_mm_day),
             moist_adiabat_mean_abs_K=float(realism.get("mean_abs_K", float("nan"))),
             moist_adiabat_max_abs_K=float(realism.get("max_abs_K", float("nan"))),
@@ -1596,6 +1607,32 @@ def applied_precip_mm_day(applied_tend, like) -> jax.Array:
             f"applied_precip_mm_day expects a single-column state, got "
             f"{flat.shape[0]} columns; this readout scores one column.")
     return flat[0] * SECONDS_PER_DAY
+
+
+def applied_evap_mm_day(applied_tend, like) -> jax.Array:
+    """Surface evaporation [mm/day] from the tendency that was APPLIED.
+
+    ``HydrostaticTendencies.lhflx_sfc`` is the turbulence scheme's own surface
+    latent-heat flux [W/m^2]; ``E = LHF / L_v`` in kg/m^2/s, and 1 kg/m^2 ==
+    1 mm of liquid water.  ``None`` when turbulence is off or the scheme
+    computes no surface fluxes.
+
+    Recorded per step ALONGSIDE the precipitation so the column's water budget
+    ``d(CWV+CWC)/dt = E - P`` can be closed with both terms sampled the SAME
+    way over the SAME window.  Both reviewers of the precipitation fix asked
+    for exactly this: without it, a residual can always be blamed on comparing
+    a snapshot E against a window-mean P, and never tested.  It is also what
+    would catch water lost to a downstream positivity clip, which the readout
+    tests cannot see.
+    """
+    if applied_tend.lhflx_sfc is None:
+        return jnp.zeros((), dtype=like.T.data.dtype)
+    flat = jnp.reshape(applied_tend.lhflx_sfc.data, (-1,))
+    if flat.shape[0] != 1:
+        raise ValueError(
+            f"applied_evap_mm_day expects a single-column state, got "
+            f"{flat.shape[0]} columns.")
+    return flat[0] / constants.L_v * SECONDS_PER_DAY
 
 
 def physical_profile_rmse(
