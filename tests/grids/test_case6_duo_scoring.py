@@ -31,6 +31,7 @@ from legoesm.core.fv3_native_duo_stepper import (
     SW_CFG_CASE8,
     build_six_face_duo_context,
     case6_six_face_state,
+    w2_six_face_state,
 )
 from legoesm.core.williamson_sw_analytic import (
     RH4_K_HZ,
@@ -38,6 +39,8 @@ from legoesm.core.williamson_sw_analytic import (
     RH4_OMEGA_WAVE_HZ,
     rossby_haurwitz_4_geopotential,
     rossby_haurwitz_4_winds,
+    solid_body_geopotential,
+    solid_body_winds,
 )
 from legoesm.grids.fv3_native_gridstruct import (
     FV3_GRAV,
@@ -205,6 +208,37 @@ def test_runner_deck_constants_pin_the_resolved_echo():
     assert SW_CFG_CASE8["d4_bg"] == 0.12       # the case-8 del-6 bg
 
 
+def test_case_deck_tables_pin_the_resolved_echoes():
+    """Runner CASE_DECKS + gate deck_record vs LITERALS from the two
+    decks' logfile.000000.out echoes (:184 DT_ATMOS, :358 N_SPLIT,
+    :403 D4_BG) — never from each other, so a drift in either trips."""
+    assert runner.CASE_DECKS[6]["dt_atmos"] == 1200.0
+    assert runner.CASE_DECKS[6]["n_split"] == 7
+    assert runner.CASE_DECKS[6]["d4_bg"] == 0.0
+    assert runner.CASE_DECKS[2]["dt_atmos"] == 3600.0
+    assert runner.CASE_DECKS[2]["n_split"] == 7
+    assert runner.CASE_DECKS[2]["d4_bg"] == 0.12
+    d6 = gate.deck_record(6, 0.0)
+    assert d6["dt_atmos"] == 1200.0 and d6["d4_bg"] == 0.0
+    assert d6["case"] == 6 and d6["alpha"] == 0.0
+    for al in (0.0, 45.0):
+        d2 = gate.deck_record(2, al)
+        assert d2["dt_atmos"] == 3600.0 and d2["d4_bg"] == 0.12
+        assert d2["case"] == 2 and d2["alpha"] == al
+    assert gate.ref_case_name(2, 45.0) == "C48.sw.case2.alpha45.duo.hord8"
+    assert gate.ref_case_name(2, 0.0) == "C48.sw.case2.alpha0.duo.hord8"
+    assert gate.ref_case_name(6, 0.0) == "C48.sw.case6.alpha0.duo.hord8"
+    assert gate.AVAILABLE_REFS == {(6, 0.0), (2, 0.0), (2, 45.0)}
+    # unavailable references are REFUSED, never fabricated: case-6 has
+    # no alpha45 deck; the case-8 "alpha45" deck is a Schmidt GRID
+    # rotation (target_lat -135), out of this gate's scope entirely
+    for case, al in ((6, 45.0), (8, 0.0), (8, 45.0), (2, 30.0)):
+        with pytest.raises(ValueError, match="no Zenodo"):
+            gate.deck_record(case, al)
+        with pytest.raises(ValueError, match="no Zenodo"):
+            gate.ref_case_name(case, al)
+
+
 def test_runner_threads_deck_config_to_stepper(tmp_path, monkeypatch):
     """Run the runner's main() at C12 with a RECORDING stub in place of
     advance_duo_outer_step: proves the deck defaults actually ARRIVE at
@@ -358,6 +392,7 @@ def _write_npz(tmp_path, **over):
                 v=np.zeros((nt, 181, 360)),
                 lat=lat, lon=lon,
                 # the runner's config record, deck values
+                case=np.array(6), alpha=np.array(0.0),
                 n=np.array(48), dt_atmos=np.array(1200.0),
                 n_split=np.array(7), d_ext=np.array(0.0),
                 d4_bg=np.array(0.0), k2e_nord=np.array(2),
@@ -398,7 +433,7 @@ _GOOD_SHA = "0123456789abcdef" * 2 + "01234567"     # 40 hex chars
 
 
 def test_deck_record_mismatch_and_missing():
-    rec = {key: val for key, val in gate.DECK_RECORD.items()}
+    rec = dict(gate.deck_record(6, 0.0))
     rec["git_sha"] = _GOOD_SHA
     assert gate.check_deck_record(rec) == []
     bad = dict(rec)
@@ -412,8 +447,29 @@ def test_deck_record_mismatch_and_missing():
     npish = {"n": np.int64(48).item(), "dt_atmos": np.float64(1200.0),
              "n_split": 7, "d_ext": 0.0, "d4_bg": 0.0, "k2e_nord": 2,
              "oracle_conventions": np.bool_(True),
+             "case": np.int64(6).item(), "alpha": np.float64(0.0),
              "ext_exclude": "", "git_sha": _GOOD_SHA}
     assert gate.check_deck_record(npish) == []
+
+
+def test_deck_record_cross_case_and_alpha_cannot_pass():
+    """A case-2 alpha45 npz record can NEVER pass the case-6 deck, nor
+    the case-2 alpha0 deck — the case/alpha keys are part of the
+    manifest, so enforcement is per-(case, alpha) fail-closed."""
+    rec = dict(gate.deck_record(2, 45.0))
+    rec["git_sha"] = _GOOD_SHA
+    assert gate.check_deck_record(rec, gate.deck_record(2, 45.0)) == []
+    p = gate.check_deck_record(rec, gate.deck_record(2, 0.0))
+    assert len(p) == 1 and "alpha" in p[0]
+    p = gate.check_deck_record(rec, gate.deck_record(6, 0.0))
+    assert any("case" in x for x in p)
+    assert any("dt_atmos" in x for x in p)      # deck dt differs too
+    # legacy pre-matrix npz (no case/alpha keys) cannot be enforced
+    legacy = {k: v for k, v in gate.deck_record(6, 0.0).items()
+              if k not in ("case", "alpha")}
+    legacy["git_sha"] = _GOOD_SHA
+    p = gate.check_deck_record(legacy)
+    assert sorted(x.split(":")[0] for x in p) == ["alpha", "case"]
 
 
 @pytest.mark.parametrize("key, val", [
@@ -425,7 +481,7 @@ def test_deck_record_mismatch_and_missing():
     ("ext_exclude", 0),                  # non-str
 ])
 def test_deck_record_rejects_type_impersonation(key, val):
-    rec = {k: v for k, v in gate.DECK_RECORD.items()}
+    rec = dict(gate.deck_record(6, 0.0))
     rec["git_sha"] = _GOOD_SHA
     rec[key] = val
     problems = gate.check_deck_record(rec)
@@ -437,7 +493,7 @@ def test_deck_record_rejects_type_impersonation(key, val):
                                  "a" * 40 + "-junk",     # suffix (r4 #2)
                                  "a" * 41])
 def test_deck_record_rejects_malformed_git_sha(sha):
-    rec = {k: v for k, v in gate.DECK_RECORD.items()}
+    rec = dict(gate.deck_record(6, 0.0))
     if sha is not None:
         rec["git_sha"] = sha
     problems = gate.check_deck_record(rec)
@@ -569,6 +625,125 @@ def test_analytic_ic_fields_shapes_and_values():
     assert 95.0 < np.abs(f["u"]).max() < 105.0
 
 
+# --- case-2 alpha = 45 RADIANS hand reduction -------------------------
+# ALPHA UNITS: the Zenodo test_case_nml value goes RAW into sin/cos
+# (test_cases.F90:783-790, :477-507; fv_control.F90:1105's alpha*pi is
+# commented out), so "alpha45" means 45 RADIANS.  Discriminated against
+# the reference itself: analytic gh at alpha=45 rad matches
+# C48.sw.case2.alpha45 ps_ic*Grav at rel-L2 1.12e-04; the pi/4 reading
+# is off by 1.11e-01 (three orders).  The trig literals below are
+# INDEPENDENT pins of sin/cos at 45 rad (not computed through the
+# module), so a silent deg2rad added anywhere in the chain trips here.
+_SIN_45RAD = 0.8509035245341184
+_COS_45RAD = 0.5253219888177297
+
+
+def test_hand_computed_case2_alpha45_point_off_axis():
+    """lam = 0.7, phi = 0.35, alpha = 45 rad — every term live (u has
+    both the cos-alpha and sin-alpha parts, v is nonzero, S mixes both
+    contributions).  Hand form composed with the pinned trig literals
+    and an independent association order."""
+    a, om = _A_ORACLE, _OM_ORACLE
+    lam, phi = 0.7, 0.35
+    u0 = 2.0 * np.pi * a / (12.0 * 86400.0)
+    assert u0 == pytest.approx(38.610561563563444, rel=1e-15)
+
+    u_hand = u0 * (np.cos(phi) * _COS_45RAD
+                   + np.sin(phi) * np.cos(lam) * _SIN_45RAD)
+    v_hand = -u0 * np.sin(lam) * _SIN_45RAD
+    u_mod, v_mod = solid_body_winds(lam, phi, u0=u0, alpha=45.0)
+    assert u_mod == pytest.approx(u_hand, rel=1e-13)
+    assert v_mod == pytest.approx(v_hand, rel=1e-13)
+    # regression pins (values recorded when the formulas scored
+    # 1.12e-04 against the reference IC): a unit change moves these
+    # by O(1), far beyond the tolerance
+    assert u_mod == pytest.approx(27.669618212104677, rel=1e-12)
+    assert v_mod == pytest.approx(-21.165039586294682, rel=1e-12)
+    assert abs(v_mod) > 10.0                  # v genuinely live
+
+    s_hand = (-np.cos(lam) * np.cos(phi) * _SIN_45RAD
+              + np.sin(phi) * _COS_45RAD)
+    coef = a * om * u0 + (u0 * u0) / 2.0
+    gh_hand = 2.94e4 - coef * s_hand * s_hand
+    gh_mod = solid_body_geopotential(lam, phi, radius=a, omega=om,
+                                     u0=u0, gh0=2.94e4, alpha=45.0)
+    assert gh_mod == pytest.approx(gh_hand, rel=1e-13)
+    assert gh_mod == pytest.approx(25925.789687631965, rel=1e-12)
+    # the pi/4 interpretation is FAR outside the tolerance here
+    gh_deg = solid_body_geopotential(lam, phi, radius=a, omega=om,
+                                     u0=u0, gh0=2.94e4,
+                                     alpha=np.pi / 4.0)
+    assert abs(gh_deg - gh_hand) > 100.0
+
+
+def test_analytic_ic_fields_case2():
+    f0 = gate.analytic_ic_fields(2, 0.0)
+    f45 = gate.analytic_ic_fields(2, 45.0)
+    lat, lon = runner.reference_canvas()
+    for f in (f0, f45):
+        for key in ("gh", "u", "v"):
+            assert f[key].shape == (181, 360)
+            assert np.isfinite(f[key]).all()
+    # alpha=0: v identically zero, u = u0 cos(lat)
+    assert np.abs(f0["v"]).max() == 0.0
+    assert f0["u"][90].max() == pytest.approx(38.610561563563444,
+                                              rel=1e-4)
+    # alpha=45 rad: rotated — v live, fields differ
+    assert np.abs(f45["v"]).max() > 20.0
+    assert np.abs(f45["gh"] - f0["gh"]).max() > 1e3
+    # spot check against the shared module at a canvas point
+    i, j = 110, 33
+    la, lo = np.deg2rad(lat[i]), np.deg2rad(lon[j])
+    u0 = 2.0 * np.pi * FV3_RADIUS_M / (12.0 * 86400.0)
+    u_pt, v_pt = solid_body_winds(lo, la, u0=u0, alpha=45.0)
+    assert f45["u"][i, j] == u_pt
+    assert f45["v"][i, j] == v_pt
+    # case 6 refuses a rotated request; unknown case refuses
+    with pytest.raises(ValueError, match="no alpha term"):
+        gate.analytic_ic_fields(6, 45.0)
+    with pytest.raises(ValueError, match="unknown case"):
+        gate.analytic_ic_fields(8, 0.0)
+
+
+def test_load_run_cross_case_rejection(tmp_path):
+    """Report mode too: a case-2 npz can never be scored as case 6 and
+    vice versa; a pre-matrix npz (no case key) is case-6 only."""
+    path = _write_npz(tmp_path, case=np.array(2), alpha=np.array(45.0),
+                      dt_atmos=np.array(3600.0), d4_bg=np.array(0.12))
+    with pytest.raises(gate.ContractError, match="cross-case"):
+        gate.load_run(path, case=6)
+    out = gate.load_run(path, case=2)
+    assert out["record"]["case"] == 2
+    assert out["record"]["alpha"] == 45.0
+    # pre-matrix npz: strip the case key entirely
+    lat, lon = runner.reference_canvas()
+    legacy = tmp_path / "legacy.npz"
+    np.savez_compressed(legacy, times_days=np.array([0.0]),
+                        gh=np.full((1, 181, 360), 7.8e4),
+                        u=np.zeros((1, 181, 360)),
+                        v=np.zeros((1, 181, 360)), lat=lat, lon=lon)
+    gate.load_run(str(legacy), case=6)          # accepted as case 6
+    with pytest.raises(gate.ContractError, match="case 6 only"):
+        gate.load_run(str(legacy), case=2)
+    with pytest.raises(ValueError, match="unknown case"):
+        gate.load_run(str(legacy), case=8)
+
+
+def test_load_run_per_case_plausibility_band(tmp_path):
+    """The case-2 steady state dips to gh ~ 1.07e4 — inside the case-2
+    band, and near the case-6 band's floor.  A gh below 1e4 must pass
+    for case 2 and FAIL for case 6 (the bands are genuinely per-case,
+    not a shared constant renamed)."""
+    gh = np.full((2, 181, 360), 9.0e3)          # < case-6 floor 1e4
+    path = _write_npz(tmp_path, gh=gh)
+    with pytest.raises(gate.ContractError, match="plausibility band"):
+        gate.load_run(path, case=6)
+    path2 = _write_npz(tmp_path, gh=gh, case=np.array(2),
+                       alpha=np.array(0.0))
+    out = gate.load_run(path2, case=2)          # case-2 floor is 5e3
+    assert out["gh"].min() == pytest.approx(9.0e3)
+
+
 # ---------------------------------------------------------------------
 # runner: sampling on a real C12 duo context
 # ---------------------------------------------------------------------
@@ -672,3 +847,141 @@ def test_sample_fields_finite_and_shaped(c12):
         assert np.isfinite(f).all()
     # gh is a depth * g: strictly positive, near 8e3 * g
     assert gh.min() > 5e4 and gh.max() < 1.2e5
+
+
+# ---------------------------------------------------------------------
+# case 2 / alpha: runner CLI, Coriolis threading, rotated IC
+# ---------------------------------------------------------------------
+
+def test_runner_alpha_guards(tmp_path, monkeypatch):
+    """--alpha is case-2-only; non-finite alpha refuses."""
+    out = tmp_path / "x.npz"
+    monkeypatch.setattr("sys.argv", ["run_duo_stepper_case6.py",
+                                     "--n", "12", "--days", "0",
+                                     "--alpha", "0.5",
+                                     "--out", str(out)])
+    with pytest.raises(SystemExit) as e:
+        runner.main()
+    assert e.value.code == 2
+    monkeypatch.setattr("sys.argv", ["run_duo_stepper_case6.py",
+                                     "--n", "12", "--days", "0",
+                                     "--case", "2", "--alpha", "nan",
+                                     "--out", str(out)])
+    with pytest.raises(SystemExit) as e:
+        runner.main()
+    assert e.value.code == 2
+
+
+def test_runner_case2_alpha45_threads_deck_and_rotation(
+        tmp_path, monkeypatch):
+    """--case 2 --alpha 45 at C12 with a recording stub: the case-2
+    deck defaults (dt 3600 -> 24 blocks/day, full SW_CFG_CASE8 with
+    d4_bg=0.12) must ARRIVE at the stepper; the context must carry
+    rotation_alpha=45 and its f0/fC must BE the rotated Coriolis
+    (test_cases.F90:783-790 formula, evaluated here with the pinned
+    trig literals); the npz must record case=2, alpha=45."""
+    import legoesm.core.fv3_native_duo_stepper as stepper_mod
+
+    seen = []
+
+    def _stub(ctx, states, dt_atmos, n_split, d_ext=None, sw_cfg=None):
+        seen.append({"ctx": ctx, "dt_atmos": dt_atmos,
+                     "n_split": n_split, "d_ext": d_ext,
+                     "sw_cfg": dict(sw_cfg)})
+        return states
+
+    monkeypatch.setattr(stepper_mod, "advance_duo_outer_step", _stub)
+    out = tmp_path / "c2a45.npz"
+    monkeypatch.setattr("sys.argv", ["run_duo_stepper_case6.py",
+                                     "--n", "12", "--days", "1",
+                                     "--case", "2", "--alpha", "45",
+                                     "--out", str(out)])
+    runner.main()
+    assert len(seen) == 24                     # 86400 / 3600 blocks
+    case2_cfg_literal = {
+        # C48.sw.case2.alpha45.duo.hord8 logfile echo :365-369, :401-417
+        "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
+        "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
+        "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
+    }
+    for call in seen:
+        assert call["dt_atmos"] == 3600.0
+        assert call["n_split"] == 7
+        assert call["d_ext"] == 0.0
+        assert call["sw_cfg"] == case2_cfg_literal
+    ctx = seen[0]["ctx"]
+    assert ctx["rotation_alpha"] == 45.0
+    # rotated Coriolis on the compute window of face 1, against the
+    # F90:789 formula with the INDEPENDENT trig pins
+    gs = ctx["gs6"][0]
+    n, ng = ctx["n"], ctx["ng"]
+    sl = slice(ng, ng + n)
+    lon = np.asarray(gs["agrid_lon"])[sl, sl]
+    lat = np.asarray(gs["agrid_lat"])[sl, sl]
+    f_expect = 2.0 * FV3_OMEGA * (
+        -np.cos(lon) * np.cos(lat) * _SIN_45RAD
+        + np.sin(lat) * _COS_45RAD)
+    np.testing.assert_allclose(np.asarray(gs["f0"])[sl, sl], f_expect,
+                               rtol=1e-12, atol=1e-18)
+    # and it genuinely differs from the unrotated field
+    assert np.abs(np.asarray(gs["f0"])[sl, sl]
+                  - 2.0 * FV3_OMEGA * np.sin(lat)).max() > 1e-5
+    # B-grid fC rotated too (F90:783, grid nodes)
+    glon = np.asarray(gs["grid_lon"])[sl, sl]
+    glat = np.asarray(gs["grid_lat"])[sl, sl]
+    fc_expect = 2.0 * FV3_OMEGA * (
+        -np.cos(glon) * np.cos(glat) * _SIN_45RAD
+        + np.sin(glat) * _COS_45RAD)
+    np.testing.assert_allclose(np.asarray(gs["fC"])[sl, sl], fc_expect,
+                               rtol=1e-12, atol=1e-18)
+    z = np.load(out, allow_pickle=True)
+    assert int(z["case"]) == 2
+    assert float(z["alpha"]) == 45.0
+    assert float(z["dt_atmos"]) == 3600.0
+    assert float(z["d4_bg"]) == 0.12
+    # the exported IC is the ROTATED state: v is live (alpha=0 gives
+    # |v| below the c2l_ord2 truncation of a zonal flow)
+    assert float(np.abs(z["v"]).max()) > 15.0
+
+
+def test_rotation_alpha_default_zero_is_unrotated(c12):
+    """The default context (the c12 fixture) carries rotation_alpha=0
+    and the classical 2 Om sin(lat) Coriolis — the case-6 lane is
+    byte-unchanged by the rotation plumbing."""
+    ctx, _, _ = c12
+    assert ctx["rotation_alpha"] == 0.0
+    gs = ctx["gs6"][2]
+    n, ng = ctx["n"], ctx["ng"]
+    sl = slice(ng, ng + n)
+    lat = np.asarray(gs["agrid_lat"])[sl, sl]
+    np.testing.assert_allclose(np.asarray(gs["f0"])[sl, sl],
+                               2.0 * FV3_OMEGA * np.sin(lat),
+                               rtol=1e-12, atol=1e-20)
+
+
+def test_rotation_refuses_unrotated_ext_metrics_lane():
+    with pytest.raises(ValueError, match="unrotated"):
+        build_six_face_duo_context(12, 3, use_ext_bundle=True,
+                                   use_ext_metrics=True,
+                                   rotation_alpha=45.0)
+
+
+def test_w2_state_alpha45_matches_balanced_formula(c12):
+    """w2_six_face_state(alpha=45) delp at compute cells equals the
+    case-2 balanced gh with the pinned trig literals (delp IS gh on
+    the SW convention; the builder's /g then *g round-trips at
+    ~1 ulp)."""
+    ctx, _, _ = c12
+    states = w2_six_face_state(ctx, alpha=45.0)
+    gs = ctx["gs6"][4]
+    n, ng = ctx["n"], ctx["ng"]
+    sl = slice(ng, ng + n)
+    lon = np.asarray(gs["agrid_lon"])[sl, sl]
+    lat = np.asarray(gs["agrid_lat"])[sl, sl]
+    u0 = 2.0 * np.pi * FV3_RADIUS_M / (12.0 * 86400.0)
+    coef = FV3_RADIUS_M * FV3_OMEGA * u0 + (u0 * u0) / 2.0
+    s = (-np.cos(lon) * np.cos(lat) * _SIN_45RAD
+         + np.sin(lat) * _COS_45RAD)
+    np.testing.assert_allclose(
+        np.asarray(states[4]["delp"])[sl, sl], 2.94e4 - coef * s * s,
+        rtol=1e-13)

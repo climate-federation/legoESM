@@ -63,8 +63,18 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                oracle_conventions: bool = False,
                                omega: float | None = None,
                                k2e_nord: int = 2,
-                               topo_fn=None) -> dict:
+                               topo_fn=None,
+                               rotation_alpha: float = 0.0) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``rotation_alpha`` is the Zenodo ``test_case_nml`` ``alpha``, passed
+    RAW to the gridstruct builders exactly as the pinned Fortran uses it
+    (``test_cases.F90:783-790`` feeds the namelist value straight into
+    ``sin``/``cos`` — the deck's ``alpha = 45`` is 45 RADIANS; the
+    historical ``alpha*pi`` conversion in ``fv_control.F90:1105`` is
+    commented out).  It rotates the Coriolis fields ``f0``/``fC`` only;
+    the rotated IC winds/height take the same value through their own
+    builders (``w2_six_face_state(alpha=...)``).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
     Zenodo duo runs actually execute (proven by the C48 fms.out
@@ -99,6 +109,18 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
     if bad:
         raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
+    if (rotation_alpha != 0.0 and use_ext_metrics
+            and "metrics" not in ext_exclude):
+        # extend_gridstruct rebuilds ext-halo f0/fC as the UNROTATED
+        # 2*Om*sin(lat) (fv3_native_gridstruct extend_gridstruct
+        # Coriolis block) — mixing a rotated interior with unrotated
+        # halos is a silent Coriolis seam defect, so this diagnostic
+        # lane refuses rotated decks until that builder learns
+        # rotation_alpha.
+        raise ValueError(
+            "use_ext_metrics=True is not supported with "
+            "rotation_alpha != 0 (extend_gridstruct halo f0/fC are "
+            "unrotated)")
 
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
@@ -110,13 +132,15 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     if omega is None:
         omega = FV3_OMEGA
     if oracle_conventions:
-        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t,
-                                                   omega=omega)
+        gs6 = [build_fv3_native_gridstruct_bounded(
+                   n, ng, tile=t, omega=omega,
+                   rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
                                            radius=FV3_RADIUS_M,
-                                           omega=omega)
+                                           omega=omega,
+                                           rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
@@ -295,6 +319,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
+            "rotation_alpha": float(rotation_alpha),
             "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
