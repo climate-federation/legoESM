@@ -67,9 +67,12 @@ def main() -> int:
     for snap in a.snapshot:
         z = np.load(snap)
         v = np.asarray(z["v"], dtype=np.float64)
-        if v.shape[:2] != (332, 362):
+        # v lives on the C-grid v-FACES: (n_lat+1, n_lon+2, nlev) = (333,
+        # 362, nlev).  Face j sits between T-rows j-1 and j; NEMO's v-point
+        # row j (native 0-based) sits NORTH of T-row j, i.e. our face j+1.
+        if v.shape[:2] != (333, 362):
             raise SystemExit(f"unexpected v shape {v.shape}")
-        v = np.transpose(v[_NATIVE_J, _NATIVE_I, :], (2, 0, 1))[:nlev]
+        v = np.transpose(v[1:332, _NATIVE_I, :], (2, 0, 1))[:nlev]
         eta = np.asarray(z["eta"], dtype=np.float64)[_NATIVE_J, _NATIVE_I]
         H = (e3v * vmask).sum(axis=0)
         dil = np.where(H > 0, (H + eta) / np.where(H > 0, H, 1.0), 0.0)
