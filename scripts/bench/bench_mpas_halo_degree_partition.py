@@ -1,4 +1,4 @@
-"""Offline measurement of the MPAS/Voronoi *degree-aware partitioner* lever.
+"""Offline measurement of MPAS/Voronoi *ownership* levers (degree, bytes).
 
 WHAT THIS IS
 ------------
@@ -26,6 +26,63 @@ Baseline = ``sfc`` at subdivision 9, 64 devices, halo depth 3.
   violated to get it.
 * Anything between 10 % and 25 %, or a win bought with a padding/balance
   cost: report the numbers and let a human decide.  Do NOT build.
+
+THE SECOND LEVER: PADDED BYTES (``--objective bytes``)
+------------------------------------------------------
+The degree gate above was REFUTED (rounds are already Vizing-optimal at
+s9@64), but its prototype cut PADDED BYTES 9.4 % as a side effect, and the
+lane is bytes-bound.  So the same machinery is re-pointed at the padding.
+
+WHERE THE PADDING COMES FROM -- it is PER-ROUND MAX, not per-device max and
+not a global max.  ``_build_ppermute_schedule`` walks the rounds one at a
+time (``sharded_dynamics.py:2151``) and for round *r* takes
+
+    max_c = max over BOTH directions of every pair in the round of
+            len(cell_send_map[(src, dst)])            (:2153-2158)
+
+then allocates the per-round index arrays at ``(n_dev, max_c)``
+(``sc``/``rc`` at :2175-2179) and ships them with one ``ppermute``.  The
+index arrays are shape-uniform across devices, so EVERY active pair in
+round *r* moves ``max_c`` cell records and ``max_e`` edge records -- its own
+count is irrelevant.  Hence
+
+    padded = sum over rounds r of  n_active_pairs(r) * (max_c(r)*CELL_BYTES
+                                                      + max_e(r)*EDGE_BYTES)
+
+which is exactly :func:`padded_bytes` here.  Production's size-aware
+colouring minimises the SAME SHAPE of quantity but not the same number
+(``_padded_weight``, :1917, counts each undirected pair once, works in
+element-width units rather than float32 bytes, and does not apply the
+schedule's ``max(..., 1)`` floor) -- normally a factor of 8 apart, and not
+even proportional for a round whose entity max is 0.  This byte model is
+also DRY-STATE: the cell record here is ``(nlev+2)`` float32 while production
+also packs ``nlev * n_tracers`` values into the same cell buffer
+(``q_flat``, :2288).  Tracer bytes do NOT cancel in a ratio, because a
+candidate ownership can shift the cell/edge padding MIX -- so every MB and
+every percentage in this probe is a DRY-STATE number, and a moist
+production ratio would differ by however much the mix moved.  It is quoted
+that way in the verdict and must be quoted that way in any report.
+Two consequences drive the objective below: a round costs its WORST pair,
+and a thin pair sharing a round with a fat one pays the fat one's price.
+An ownership pass therefore wins bytes by (a) deleting thin corner contacts
+-- each one is an extra pair paying the round max for almost no payload --
+and (b) narrowing the spread of per-pair halo counts.  It does NOT win by
+lowering total halo (that is ``actual_bytes``, the denominator).
+
+PRE-REGISTERED GATE -- BYTE LEVER (written before the first byte run; do
+not edit after).  Baseline = ``sfc`` at subdivision 9, 64 devices, depth 3.
+
+* CONFIRM (worth building in production): padded bytes cut >= 20 % vs sfc,
+  with the round count NOT increased, owned-cell counts inside the same
+  floor/ceil tolerance the degree gate uses, and ``n_components_scored`` no
+  worse than the sfc baseline's.
+* REFUTE: < 10 % byte cut, or any of those constraints violated to get it.
+* 10-20 %: report, do NOT build.
+
+The byte lever is scored ENTIRELY by the production builders, one scoring
+per trail step.  The first attempt used a cheap proxy padded weight and it
+FAILED its control -- see :func:`bytes_trail_pass` for the measurement that
+killed it and for what the proxy is still allowed to do.
 
 HEADROOM, and the one thing it does NOT prove
 ---------------------------------------------
@@ -102,7 +159,6 @@ import json
 import math
 import os
 import sys
-from collections import defaultdict
 
 import numpy as np
 
@@ -122,7 +178,9 @@ def score_prepared(prepared, n_dev, *, halo_depth=None, widths=None,
     """Score an ALREADY-REORDERED mesh with the production halo builders.
 
     Returns rounds, max/mean degree, the per-device degree histogram, the
-    actual and padded wire bytes of one halo fill, and the inflation factor.
+    DRY-STATE actual and padded wire bytes of one halo fill (cell record =
+    ``nlev+2`` float32; production adds ``nlev * n_tracers`` per cell, see
+    the module docstring), and the inflation factor.
 
     *widths* is the ``(cell_width, edge_width)`` pair fed to the size-aware
     colouring.  Default = what production threads (``nlev+2``, ``nlev``);
@@ -303,6 +361,24 @@ def proxy_degrees(m):
     return _proxy_graph(m).sum(axis=1)
 
 
+LEVERS = ("degree", "bytes")
+
+
+def thin_contacts_first(m, n_dev):
+    """Contacts of the proxy graph, THINNEST first.
+
+    Thin contacts are what both levers attack: a corner partner is a whole
+    extra comm pair for a handful of cells, and under the per-round-max
+    padding it pays its round's maximum regardless of how little it carries.
+    Ranking them is the ONE job the proxy is fit for -- see
+    :func:`bytes_trail_pass` for why it is not fit to SCORE the result.
+    """
+    pairs = [(d, e) for d in range(n_dev) for e in range(n_dev)
+             if d != e and (m[d, e] > 0 or m[e, d] > 0)]
+    pairs.sort(key=lambda p: (m[p[0], p[1]] + m[p[1], p[0]], p))
+    return pairs
+
+
 def proxy_pair_set(m):
     """Undirected pair set of the proxy graph, for comparison with the
     production ``comm_pairs``.  The production graph also carries EDGE-halo
@@ -313,7 +389,7 @@ def proxy_pair_set(m):
 
 
 # --------------------------------------------------------------------------
-# THROWAWAY prototype: greedy boundary reassignment that targets max degree
+# THROWAWAY prototype: greedy boundary reassignment against a chosen objective
 # --------------------------------------------------------------------------
 def greedy_degree_pass(adj, owner, n_dev, depth, *, max_iters=20,
                        max_move_frac=0.02, max_attempts=6, verbose=True):
@@ -373,6 +449,114 @@ def greedy_degree_pass(adj, owner, n_dev, depth, *, max_iters=20,
         if not moved:
             break
     return owner, history
+
+
+def bytes_trail_pass(mesh, adj, owner0, n_dev, depth, *, n_steps,
+                     max_move_frac=0.02, n_real_cells=None, verbose=True):
+    """ATTEMPT the thinnest contacts in turn; PRODUCTION-score every state.
+
+    "Attempt", not "dissolve": a move hands the cells that create a contact
+    to a third device and then rebalances, and the rebalance can hand some
+    back, so the targeted contact sometimes survives.  ``attempted`` is the
+    skip list, ``dissolved`` records only the contacts verified gone against
+    the recomputed contact matrix, and both are on every trail row.
+
+    WHY NO PROXY PRICES A ROW.  The first byte scorer was a
+    proxy padded weight (colour the proxy contact graph, charge each pair its
+    round maximum) and it FAILED its own control: it mis-ranked
+    sfc/metis/geometric, whose production padded bytes are receipted, at BOTH
+    s8@16 and s9@64.  The cause was isolated, not guessed -- with the TRUE
+    per-pair payloads from ``_build_halo_send_maps`` the same formula ranks
+    them correctly, so the formula is fine and the GRAPH is not: the cell-
+    reach proxy sees 206 of the 269 production comm pairs at s9@64 (49 of 76
+    for geometric at s8@16), because production's EDGE ownership is an
+    equal-block cut of the REORDERED edge array and an ownership-space proxy
+    cannot reproduce it.  Deepening the reach 3 -> 4 changed the pair set by
+    exactly zero, so this is structural.  The proxy is therefore demoted to
+    the one job it can do -- ranking contacts by thickness -- and every state
+    on the trail is priced by the production builders.
+
+    The proxy still CHOOSES which states get visited (ordering, move
+    construction, termination), so a refutation bounds THIS search; it just
+    cannot put a wrong number on a reported row.
+
+    Returns ``(trail, owners)``: parallel lists, one entry per scored state,
+    starting with the untouched *owner0*.  A TRAIL rather than a hill-climb
+    because a production score costs minutes: the curve of padded bytes vs
+    contacts attempted says whether the byte cut saturates or keeps going,
+    which one accept/reject decision would not.
+
+    ponytail: fixed attempt order, no backtracking, one production score
+    per step.  Ceiling: *n_steps* production scorings (minutes each at s9), so
+    it explores tens of moves out of hundreds of contacts.
+    """
+    n_real = int(mesh.nCells) if n_real_cells is None else int(n_real_cells)
+    owner = owner0.copy()
+    reach = reach_matrix(adj, owner, n_dev, depth)
+    m = contact_from_reach(owner, reach, n_dev)
+    cap = int(max_move_frac * owner.size / n_dev)
+
+    def _score(own, step, dissolved, attempted):
+        row = score_prepared(reorder_with_owner(mesh, n_dev, own), n_dev,
+                             n_real_cells=n_real)
+        row["owner_counts"] = owner_stats(own, n_dev,
+                                          padded_cells(n_real, n_dev))
+        row["owner_counts_at_target"] = row["owner_counts"]
+        row["reorder_target"] = n_dev
+        row["n_components"] = domain_components(adj, own, n_dev)
+        row["trail_step"] = step
+        row["dissolved_contacts"] = list(dissolved)
+        row["attempted_contacts"] = list(attempted)
+        if verbose:
+            print(f"  [trail {step:2d}] dissolved {len(dissolved):2d}/"
+                  f"{len(attempted):2d} attempted "
+                  f"contact(s): rounds={row['n_rounds']} "
+                  f"max_degree={row['max_degree']} "
+                  f"padded={row['padded_bytes']/1e6:.1f} MB "
+                  f"actual={row['actual_bytes']/1e6:.1f} MB "
+                  f"inflation={row['inflation']:.3f} "
+                  f"components={row['n_components']}/"
+                  f"{row['n_components_scored']} "
+                  f"counts={row['owner_counts']['min']}-"
+                  f"{row['owner_counts']['max']}", flush=True)
+        return row
+
+    # `attempted` lists the contacts a move was actually MADE on, and doubles
+    # as the skip list for those (retrying one livelocks the search); a
+    # contact _dissolve_contact REJECTS -- too thick to move within `cap`, no
+    # third device -- is not recorded and stays eligible on later steps, when
+    # a changed ownership may make it movable. `dissolved` records only the
+    # contacts verified GONE against the recomputed contact matrix: a
+    # rebalance can hand cells back and leave the contact standing, so
+    # conflating the two mislabels the trail.
+    dissolved, attempted = [], []
+    trail = [_score(owner, 0, dissolved, attempted)]
+    owners = [owner.copy()]
+    for step in range(1, n_steps + 1):
+        moved = None
+        for d, p in thin_contacts_first(m, n_dev):
+            if (d, p) in attempted or (p, d) in attempted:
+                continue
+            cand = _dissolve_contact(adj, owner, reach, n_dev, d, p, cap)
+            if cand is not None:
+                moved = (d, p, cand)
+                break
+        if moved is None:
+            if verbose:
+                print(f"  [trail {step:2d}] no dissolvable contact left; stop",
+                      flush=True)
+            break
+        d, p, cand = moved
+        dirty = set(np.unique(owner[owner != cand]).tolist())
+        dirty |= set(np.unique(cand[owner != cand]).tolist())
+        reach = reach_matrix(adj, cand, n_dev, depth, prev=reach, dirty=dirty)
+        owner, m = cand, contact_from_reach(cand, reach, n_dev)
+        attempted.append((int(d), int(p)))
+        if m[d, p] == 0 and m[p, d] == 0:
+            dissolved.append((int(d), int(p)))
+        trail.append(_score(owner, step, dissolved, attempted))
+        owners.append(owner.copy())
+    return trail, owners
 
 
 def _dissolve_contact(adj, owner, reach, n_dev, d, p, cap):
@@ -586,8 +770,14 @@ def main(argv=None):
                          "The receipted audit reorders for 128 and scores 64.")
     ap.add_argument("--methods", default="sfc")
     ap.add_argument("--greedy", action="store_true",
-                    help="also run the throwaway degree-aware prototype")
-    ap.add_argument("--greedy-iters", type=int, default=20)
+                    help="also run the throwaway ownership prototype")
+    ap.add_argument("--objective", default="degree", choices=sorted(LEVERS),
+                    help="which lever the prototype attacks: 'degree' (round "
+                         "count, proxy-scored hill climb, REFUTED) or 'bytes' "
+                         "(padded wire bytes, PRODUCTION-scored trail)")
+    ap.add_argument("--greedy-iters", type=int, default=20,
+                    help="degree lever: hill-climb iterations. bytes lever: "
+                         "trail steps, each costing one production scoring")
     ap.add_argument("--greedy-attempts", type=int, default=6,
                     help="candidate moves tried per iteration; each costs a "
                          "partial reach recompute")
@@ -618,6 +808,7 @@ def main(argv=None):
                     "metis": partition_cells_metis}
 
     rows = {}
+    owners_at_target = {}   # method -> ownership array (kept out of the JSON)
     for method in args.methods.split(","):
         method = method.strip()
         if method not in partitioners:
@@ -638,8 +829,10 @@ def main(argv=None):
         # scored device count (the receipt reorders for 128 and scores 64), so
         # the key says which one these counts describe.
         row["reorder_target"] = target
+        owners_at_target[method] = partitioners[method](
+            mesh, target).astype(np.int64)
         row["owner_counts_at_target"] = owner_stats(
-            partitioners[method](mesh, target), target,
+            owners_at_target[method], target,
             padded_cells(int(mesh.nCells), target))
         if target == args.n_dev:
             row["owner_counts"] = row["owner_counts_at_target"]
@@ -691,7 +884,7 @@ def main(argv=None):
         print("\n[greedy] building sparse adjacency + validating proxy...",
               flush=True)
         adj = cell_adjacency(mesh)
-        owner0 = partition_cells_sfc(mesh, target).astype(np.int64)
+        owner0 = owners_at_target["sfc"]
         # VALIDATE THE PROXY against the production comm graph on the
         # baseline before it is allowed to rank candidates: compare the PAIR
         # SETS, not just the degree summary, and carry the mismatch into the
@@ -714,6 +907,49 @@ def main(argv=None):
                           "n_spurious": len(spurious),
                           "proxy_degree_max": int(pdeg.max()),
                           "proxy_degree_mean": float(pdeg.mean())}
+
+        if args.objective == "bytes":
+            # PRODUCTION-SCORED TRAIL. The proxy never PRICES a state -- every
+            # number below comes from the production builders. It does still
+            # choose which states get visited (ordering, move construction,
+            # termination), so its measured blind spot bounds THIS SEARCH; it
+            # just cannot put a wrong number on a reported row.
+            trail, _owners = bytes_trail_pass(
+                mesh, adj, owner0, target, base["halo_depth"],
+                n_steps=args.greedy_iters, n_real_cells=int(mesh.nCells))
+            # Pick the best row that SATISFIES the constraints, not the
+            # lowest-byte row outright: an infeasible 25% row would otherwise
+            # hide a feasible 20% row further along and turn a CONFIRM into a
+            # constraint REFUTE.
+            lo_c, hi_c = balance_bounds(int(mesh.nCells), target)
+            best, feasible = select_best_feasible(trail, base, lo_c, hi_c)
+            rows["trail"] = [
+                {k: r[k] for k in ("trail_step", "n_rounds", "max_degree",
+                                   "padded_bytes", "actual_bytes", "inflation",
+                                   "n_components", "n_components_scored",
+                                   "owner_counts", "dissolved_contacts",
+                                   "attempted_contacts")}
+                for r in trail]
+            # NAMED for what it is: the fidelity of the proxy on the BASELINE
+            # ownership. The proxy never priced this row, but it did choose
+            # which states were visited, so a refutation bounds THIS search.
+            best["proxy_fidelity"] = proxy_fidelity
+            best["trail_steps_scored"] = len(trail)
+            best["trail_states_feasible"] = len(feasible)
+            rows["greedy"] = best
+            print(f"[greedy] best of {len(feasible)} feasible / {len(trail)} "
+                  f"production-scored trail states: step "
+                  f"{best['trail_step']}, padded "
+                  f"{best['padded_bytes']/1e6:.1f} MB vs baseline "
+                  f"{base['padded_bytes']/1e6:.1f} MB", flush=True)
+            verdict(rows, n_dev_owner=target, n_cells=int(mesh.nCells),
+                    lever="bytes",
+                    config=(args.subdivision, args.lloyd, args.n_dev,
+                            base["halo_depth"]))
+            if args.out:
+                _write(args, rows)
+            return 0
+
         owner1, hist = greedy_degree_pass(
             adj, owner0, target, base["halo_depth"],
             max_iters=args.greedy_iters, max_attempts=args.greedy_attempts)
@@ -753,20 +989,84 @@ def main(argv=None):
                   f"counts={row['owner_counts']['min']}-"
                   f"{row['owner_counts']['max']} "
                   f"components={comps} (want {target})", flush=True)
-        verdict(rows, n_dev_owner=target, n_cells=int(mesh.nCells))
+        verdict(rows, n_dev_owner=target, n_cells=int(mesh.nCells),
+                lever=args.objective)
 
     if args.out:
-        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        with open(args.out, "w") as f:
-            json.dump({"args": vars(args), "rows": rows}, f, indent=2,
-                      default=lambda o: (o.item() if hasattr(o, "item")
-                                         else str(o)))
-        print(f"wrote {args.out}")
+        _write(args, rows)
     return 0
 
 
-def verdict(rows, *, n_dev_owner, n_cells):
-    """Apply the pre-registered gate. Reports; never edits production."""
+def _write(args, rows):
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    # Stamp the byte model next to the bytes: `actual_bytes`/`padded_bytes`
+    # are DRY-STATE and a reader months later has no other way to know.
+    meta = {"byte_model": "dry-state", "nlev": NLEV, "n_tracers": 0,
+            "cell_bytes_per_entity": CELL_BYTES,
+            "edge_bytes_per_entity": EDGE_BYTES,
+            "note": "production also packs nlev*n_tracers cell values "
+                    "(sharded_dynamics.py q_flat), which do not cancel in a "
+                    "ratio when the cell/edge padding mix changes"}
+    with open(args.out, "w") as f:
+        json.dump({"args": vars(args), "byte_model": meta, "rows": rows},
+                  f, indent=2,
+                  default=lambda o: (o.item() if hasattr(o, "item")
+                                     else str(o)))
+    print(f"wrote {args.out}")
+
+
+# (subdivision, lloyd_iterations, n_devices, halo_depth). LLOYD IS PART OF
+# THE IDENTITY: it changes the mesh, so `--subdivision 9 --n-dev 64 --lloyd 1`
+# is a different measurement and must not print an unqualified CONFIRMED.
+PREREG_BYTE_CONFIG = (9, 0, 64, 3)
+
+
+def select_best_feasible(trail, base, lo, hi):
+    """Lowest-padded-bytes trail row that SATISFIES :func:`byte_constraints`.
+
+    Falls back to the whole trail when nothing is feasible, so the verdict
+    still gets a row and refutes it on the constraint it violates.  Picking
+    the global minimum first would let one infeasible 25 % row hide a
+    feasible 20 % row further along.
+    """
+    feasible = [r for r in trail
+                if all(byte_constraints(r, base, lo, hi).values())]
+    return min(feasible or trail, key=lambda r: r["padded_bytes"]), feasible
+
+
+def byte_constraints(cand, base, lo, hi):
+    """The byte gate's three hard constraints, as booleans.
+
+    Shared by the trail's BEST-ROW SELECTION and by :func:`verdict` so the row
+    the gate judges is the best row that actually SATISFIES the constraints.
+    Picking the lowest-byte row first and refuting it afterwards would let one
+    infeasible 25 % row hide a feasible 20 % row further along the trail.
+    """
+    return {
+        "counts_ok": (cand["owner_counts"]["min"] >= lo
+                      and cand["owner_counts"]["max"] <= hi),
+        "rounds_ok": cand["n_rounds"] <= base["n_rounds"],
+        # Pre-registration says n_components_scored (the blocks production
+        # runs) and nothing about the INTENDED ownership -- sfc's own
+        # intended ownership is 73 domains at s9@64, so the degree gate's
+        # "== n_dev" clause would refute the baseline against itself.
+        "conn_scored_ok": (cand["n_components_scored"]
+                           <= base["n_components_scored"]),
+    }
+
+
+def verdict(rows, *, n_dev_owner, n_cells, lever="degree", config=None):
+    """Apply the pre-registered gate for *lever*. Reports; never builds.
+
+    *config* is the ``(subdivision, lloyd_iterations, n_devices,
+    halo_depth)`` actually measured.  The byte thresholds were pre-registered
+    for :data:`PREREG_BYTE_CONFIG` only, so any other configuration gets an
+    ``(ADVISORY)`` suffix on WHATEVER the outcome is -- an off-registration
+    REFUTED is exactly as unquotable as an off-registration CONFIRMED.
+    """
+    if lever not in LEVERS:
+        raise ValueError(f"unknown lever {lever!r}; "
+                         f"choose from {sorted(LEVERS)}")
     base, cand = rows.get("sfc"), rows.get("greedy")
     if base is None or cand is None:
         raise ValueError("verdict needs both an 'sfc' baseline and a "
@@ -779,6 +1079,15 @@ def verdict(rows, *, n_dev_owner, n_cells):
                          f"baseline cannot produce a verdict")
     if "n_rounds" not in cand:
         fid = cand.get("proxy_fidelity", {})
+        if lever == "bytes":
+            print("\nGATE (bytes): REFUTED — the prototype produced no "
+                  f"candidate ({cand.get('status')}). Baseline padded "
+                  f"{base['padded_bytes']/1e6:.1f} MB over "
+                  f"{base['n_rounds']} rounds stands; this refutes the "
+                  "PROTOTYPE, not every conceivable partitioner. Search "
+                  f"proxy missed {fid.get('n_missed', '?')} of "
+                  f"{fid.get('n_prod_pairs', '?')} production comm pairs.")
+            return
         print("\nGATE: REFUTED — the prototype produced no candidate "
               f"({cand.get('status')}). Recolouring headroom on the baseline "
               f"graph is {base['max_degree'] - base['degree_floor_rounds']} "
@@ -796,27 +1105,33 @@ def verdict(rows, *, n_dev_owner, n_cells):
     lo, hi = balance_bounds(n_cells, n_dev_owner)
     cut = 1.0 - cand["n_rounds"] / base["n_rounds"]
     pad = cand["padded_bytes"] / base["padded_bytes"] - 1.0
-    counts_ok = (cand["owner_counts"]["min"] >= lo
-                 and cand["owner_counts"]["max"] <= hi)
+    con = byte_constraints(cand, base, lo, hi)
+    counts_ok = con["counts_ok"]
     # Gate on the SCORED blocks (what production runs), and require the
     # candidate to be no worse than the baseline -- sfc's own equal-block
     # re-cut is not guaranteed perfectly connected either, so demanding
     # n_dev exactly would hold the prototype to a bar the shipped
-    # partitioner does not clear.
-    conn_ok = (cand["n_components_scored"] <= base["n_components_scored"]
-               and cand["n_components"] == n_dev_owner)
+    # partitioner does not clear.  The DEGREE gate additionally demands the
+    # INTENDED ownership be exactly n_dev domains; the byte gate does not,
+    # because its pre-registration says "n_components_scored no worse than
+    # the sfc baseline's" and nothing more -- and sfc's own intended
+    # ownership is 73 domains at s9@64, so importing that clause would
+    # refute the baseline against itself.
+    conn_scored_ok = con["conn_scored_ok"]
+    conn_ok = conn_scored_ok and cand["n_components"] == n_dev_owner
     fid = cand.get("proxy_fidelity", {})
-    print(f"\nGATE: round cut {cut*100:.1f}% "
-          f"({base['n_rounds']} -> {cand['n_rounds']}), padded bytes "
-          f"{pad*100:+.1f}%, counts {cand['owner_counts']['min']}-"
-          f"{cand['owner_counts']['max']} (allowed {lo}-{hi}), "
-          f"domains connected: {conn_ok} (scored components "
-          f"{cand['n_components_scored']} vs baseline "
-          f"{base['n_components_scored']}, want {n_dev_owner}; intended "
-          f"ownership {cand['n_components']}), block_mismatch "
-          f"{cand['owner_counts'].get('block_mismatch', float('nan'))*100:.2f}%"
-          f" (baseline "
-          f"{base['owner_counts'].get('block_mismatch', float('nan'))*100:.2f}%)")
+    if lever != "bytes":
+        print(f"\nGATE: round cut {cut*100:.1f}% "
+              f"({base['n_rounds']} -> {cand['n_rounds']}), padded bytes "
+              f"{pad*100:+.1f}%, counts {cand['owner_counts']['min']}-"
+              f"{cand['owner_counts']['max']} (allowed {lo}-{hi}), "
+              f"domains connected: {conn_ok} (scored components "
+              f"{cand['n_components_scored']} vs baseline "
+              f"{base['n_components_scored']}, want {n_dev_owner}; intended "
+              f"ownership {cand['n_components']}), block_mismatch "
+              f"{cand['owner_counts'].get('block_mismatch', float('nan'))*100:.2f}%"
+              f" (baseline "
+              f"{base['owner_counts'].get('block_mismatch', float('nan'))*100:.2f}%)")
     if fid.get("n_missed"):
         # A search that cannot see part of the production graph can only under-
         # report what is reachable, so a NEGATIVE result carries this caveat
@@ -825,16 +1140,67 @@ def verdict(rows, *, n_dev_owner, n_cells):
               f"{fid['n_prod_pairs']} production comm pairs (edge-halo "
               f"contacts it does not model), so a negative result bounds THIS "
               f"search, not the lever.")
-    if not counts_ok or not conn_ok:
+    if lever == "bytes":
+        # BYTE GATE (docstring): >=20% padded-byte cut, rounds not increased,
+        # same balance/connectivity constraints. The win and the constraint
+        # swap roles vs the degree gate -- there rounds were the win and
+        # bytes the constraint.
+        # 1 - c/b, not -pad: -(0.0) prints as "-0.0%".
+        byte_cut = 1.0 - cand["padded_bytes"] / base["padded_bytes"]
+        rounds_ok = con["rounds_ok"]
+        off_prereg = config is not None and tuple(config) != PREREG_BYTE_CONFIG
+        print(f"\nGATE (bytes, DRY-STATE byte model — no tracers, see the "
+              f"module docstring): padded-byte cut {byte_cut*100:.1f}% "
+              f"({base['padded_bytes']/1e6:.1f} -> "
+              f"{cand['padded_bytes']/1e6:.1f} MB dry), rounds "
+              f"{base['n_rounds']} -> {cand['n_rounds']}, counts "
+              f"{cand['owner_counts']['min']}-{cand['owner_counts']['max']} "
+              f"(allowed {lo}-{hi}), scored components "
+              f"{cand['n_components_scored']} vs baseline "
+              f"{base['n_components_scored']}")
+        advisory = config is None or off_prereg
+        if config is None:
+            print("GATE: ADVISORY — configuration not supplied, so it cannot "
+                  "be checked against the pre-registered "
+                  f"{PREREG_BYTE_CONFIG}")
+        elif off_prereg:
+            print(f"GATE: ADVISORY — measured at {tuple(config)}, and the "
+                  f"byte thresholds were pre-registered for "
+                  f"{PREREG_BYTE_CONFIG} only")
+        # The suffix goes on EVERY outcome, not just CONFIRMED: an
+        # off-preregistration REFUTED is just as unquotable as an
+        # off-preregistration CONFIRMED.
+        sfx = " (ADVISORY)" if advisory else ""
+        # INTEGER ratio tests: 800/1000 is 0.19999999999999996 in float, so a
+        # float ">= 0.20" silently downgrades an exact 20% cut to
+        # INTERMEDIATE and an exact 10% cut to REFUTED.
+        c_b, b_b = int(cand["padded_bytes"]), int(base["padded_bytes"])
+        confirm = 5 * c_b <= 4 * b_b            # cut >= 20%
+        refute = 10 * c_b > 9 * b_b             # cut < 10%
+        if not counts_ok or not conn_scored_ok:
+            print("GATE: REFUTED — balance/connectivity constraint "
+                  f"violated{sfx}")
+        elif not rounds_ok:
+            print(f"GATE: REFUTED — round count increased{sfx}")
+        elif confirm:
+            print(f"GATE: CONFIRMED{sfx}")
+        elif refute:
+            print(f"GATE: REFUTED{sfx}")
+        else:
+            print(f"GATE: INTERMEDIATE — report, do not build{sfx}")
+    elif not counts_ok or not conn_ok:
         # Docstring: a win bought by breaking the balance constraint (or by
         # shattering domains, which is the same cheat one level down) is a
         # refutation however large the round cut is.
         print("GATE: REFUTED — balance/connectivity constraint violated")
-    elif pad > 0.10:
+    # Integer ratios here too: 1 - 9/12 is 0.25 exactly but 1 - 1100/1000 and
+    # 1 - 18/20 are not, so a float comparison can reject an exactly-at-
+    # threshold case (same defect the byte gate had).
+    elif 10 * int(cand["padded_bytes"]) > 11 * int(base["padded_bytes"]):
         print("GATE: REFUTED — padded bytes inflated more than 10%")
-    elif cut >= 0.25:
+    elif 4 * int(cand["n_rounds"]) <= 3 * int(base["n_rounds"]):
         print("GATE: CONFIRMED")
-    elif cut < 0.10:
+    elif 10 * int(cand["n_rounds"]) > 9 * int(base["n_rounds"]):
         print("GATE: REFUTED")
     else:
         print("GATE: INTERMEDIATE — report, do not build")
