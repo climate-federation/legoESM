@@ -841,12 +841,15 @@ def _edge_grad_fixture(ni=NI, km=KM):
     zero crossing) can sit on its switch -- which makes the finite
     differences inside ``check_grads`` meaningless there.  Here q1 is
     strictly positive and q2 strictly negative, each bounded away from
-    zero by >= 9.9 with only a 1 % ripple, so every end product
-    ``q * qe`` is O(1e2) and the clamp is inactive by a wide margin.
-    The profile is still NON-constant (the ripple varies in both i and
-    k), so the interpolation, and therefore the gradient, is nontrivial.
+    zero by >= 9.9 with only a 1 % ripple, and the profile is still
+    NON-constant (the ripple varies in both i and k) so the
+    interpolation, and therefore the gradient, is nontrivial.
 
-    The margin is ASSERTED at the call site rather than assumed -- the
+    A same-sign INPUT does NOT by itself guarantee a same-sign edge
+    value: ``test_fv3_native_nh_core.py:1614`` records the oracle quirk
+    where the uniform branch turns a constant 7.5 into -19.2 at the top
+    edge.  So the off-switch property is not argued here -- the call
+    site MEASURES all four end products and asserts the margin.  The
     limiter-ACTIVE certificate lives in the ``"limited"`` arm of
     ``test_edge_profile_jax_matches_numpy_lane``, which drives the clamp
     on purpose.
@@ -951,12 +954,21 @@ def test_edge_profile_jax_jit_eager_parity_and_no_retrace():
 
     # Bounds PINNED TO MEASUREMENT (probe job 9371848, x64 CPU, this
     # fixture): qe1 1.036e-15, qe2 1.022e-15.  Both sit just ABOVE the
-    # 1e-15 that was inherited from the SIM1 gate -- eager and jit run
-    # the same scan, so this is XLA FMA contraction, a few ULP on an
-    # O(10) field, not a tracer defect (the equivalence gate above
-    # measures the same class at 1.0e-15).  The old expectation was the
-    # wrong one; bound = measured x ~10.  NB qe2 was never reported as a
+    # 1e-15 inherited from the SIM1 gate, so the old expectation was the
+    # wrong one; bound = measured x ~10.  NB qe2 was never REPORTED as a
     # failure only because the loop asserts qe1 first.
+    #
+    # A raised budget could in principle hide a jit-ONLY regression, so
+    # that is measured, not argued (job 9371947): against the NumPy fp64
+    # lane -- the certification authority -- jit is no further away than
+    # eager, to every digit printed:
+    #   qe1  eager-vs-numpy 1.093817e-15   jit-vs-numpy 1.093817e-15
+    #   qe2  eager-vs-numpy 1.022090e-15   jit-vs-numpy 1.022090e-15
+    # A jit-only numerical regression would push jit-vs-numpy above
+    # eager-vs-numpy; it does not move at all.  The divergence is
+    # therefore reassociation-class.  Attributing it specifically to XLA
+    # FMA contraction remains PLAUSIBLE, not isolated -- that would need
+    # a non-contracted lowering (HLO/LLVM inspection) to confirm.
     for name, e, j in zip(("qe1", "qe2"), eager, jit1):
         r = _rel(np.asarray(j), e)
         assert r <= 1.1e-14, (name, r)
@@ -1173,7 +1185,11 @@ def test_udzc_jax_jit_eager_parity_and_no_retrace():
     #                  gz-scale quantities, so cancellation-amplified
     #                  relative to its own max)
     # Bound = measured x ~10, kept separate so a gz regression cannot
-    # hide behind ws's looser budget.
+    # hide behind ws's looser budget.  The same jit-only-regression
+    # check as the edge_profile gate applies (job 9371947): against the
+    # NumPy lane, jit sits no further away than eager, so the raised
+    # budget is not covering a jit defect.  The FMA-contraction
+    # attribution is PLAUSIBLE, not isolated.
     bounds = {"gz": 3.3e-15, "ws": 1.9e-14}
     for name, e, j in zip(("gz", "ws"), eager, jit1):
         r = np.abs(np.asarray(j) - e).max() / max(np.abs(e).max(), 1e-30)
@@ -1208,15 +1224,18 @@ def test_udzc_jax_check_grads_order2_away_from_switches():
     #
     # The winds are built DETERMINISTICALLY, not drawn until a seed
     # happens to work: sign is a function of (i, j) ONLY (constant down
-    # the column) with |w| in [8, 12], so every k-interpolation averages
-    # same-signed neighbours and cannot land on the upwind switch.
-    # Worst-case arithmetic, with tr, br strictly inside (0, 1):
-    #   |mid| = weighted mean of two values in [8, 12]        -> >= 8
-    #   |top| = |a(1 + tr) - b*tr|, a, b in [8, 12]           -> >  4
-    #   |bot| = same algebra on the bottom pair               -> >  4
+    # the column), so every k-interpolation averages same-signed
+    # neighbours and cannot land on the upwind switch.  The per-column
+    # sinusoidal jitter puts |w| in ~[7.6, 12.6] (NOT [8, 12] -- the
+    # +-5 % multiplier widens both ends), so the guarantee taken from
+    # the algebra alone is only |mid| >= 7.6 and |top|, |bot| > 0; the
+    # numbers that matter are MEASURED and asserted below.  On this dp0
+    # (seed 55) they are: top 6.66, bottom 12.13, interior 8.54.
     # The (i + j) checkerboard, with v in antiphase to u, makes BOTH
     # upwind branches fire (asserted below -- a one-sided fixture would
-    # leave half the jnp.where untested).
+    # leave half the jnp.where untested).  Fixing the sign down each
+    # column excludes only switch-CROSSING inputs; both upwind arms
+    # still fire at the top, interior and bottom interfaces.
     rng = np.random.default_rng(55)
     dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
     ii, jj = np.meshgrid(np.arange(full), np.arange(full), indexing="ij")
@@ -1280,9 +1299,13 @@ def test_udzc_jax_check_grads_order2_away_from_switches():
     check_grads(g, (jnp.asarray(zs), jnp.asarray(area),
                     jnp.asarray(ws0)), order=2, modes=("fwd", "rev"))
 
-    # Non-vacuity: the ws HALO passthrough gradient is nonzero (the
-    # write window covers is-1..ie+1; with ng=2 a one-cell ring
-    # remains).
+    # Non-vacuity, and the LIMIT of what the ws operand certifies: the
+    # ws INPUT only survives where update_dz_c does not overwrite it, so
+    # this asserts a HALO PASSTHROUGH gradient (the write window covers
+    # is-1..ie+1; with ng=2 a one-cell ring remains) -- nothing more.
+    # It does NOT certify the ws DIAGNOSIS; that is exercised through
+    # the gz, wind, area, zs and dp0 operands above, which do flow
+    # through the computed ws in the loss.
     halo = np.ones((full, full), dtype=bool)
     halo[w, w] = False
     assert halo.any()
