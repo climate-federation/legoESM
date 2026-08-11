@@ -63,8 +63,15 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 # "FileNotFoundError: /local/pytest-of-pg2328/pytest-0" while every assertion
 # in them was fine. A job-scoped basetemp under /tmp removes the dependency on
 # whatever state /local happens to be in.
-export TMPDIR=/tmp/convtune_${SLURM_JOB_ID:-$$}
-mkdir -p $TMPDIR/pytest
+# Node-local scratch is NOT durable here: /local was cleaned mid-run (job
+# 9356831, 18 tests), then /tmp was cleaned mid-run (job 9370442, and the same
+# volatility killed CODEX_HOME on g059). The same suite passes on other nodes,
+# so this is the filesystem, not the tests. Use SLURM's own scratch when it
+# exists, otherwise a job-scoped directory on the SHARED filesystem -- slower,
+# but it is still there when the test asks for it.
+export TMPDIR=${SLURM_TMPDIR:-/burg-archive/glab/users/pg2328/_pytest_tmp/${SLURM_JOB_ID:-$$}}
+mkdir -p $TMPDIR/pytest || { echo "FATAL: cannot create $TMPDIR/pytest"; exit 95; }
+trap 'rm -rf /burg-archive/glab/users/pg2328/_pytest_tmp/${SLURM_JOB_ID:-$$}' EXIT
 
 echo; echo "############ 1. unit gates ############"
 JAX_ENABLE_X64=1 $PY -m pytest -q -p no:cacheprovider \
