@@ -62,7 +62,11 @@ def main() -> int:
     nlev = e3v.shape[0]
     kidx = np.arange(nlev)[:, None, None]
     vmask = np.ones_like(e3v) if nbot is None else (kidx < nbot[None]).astype(float)
-    depthv = np.cumsum(e3v * vmask, axis=0)
+    # amoc_core wants a 1-D (z,) reference depth axis, positive down.
+    ds2 = nc.Dataset(a.domain_cfg)
+    depthv = np.cumsum(np.asarray(ds2.variables["e3w_1d"][:],
+                                  dtype=np.float64).squeeze())
+    ds2.close()
 
     for snap in a.snapshot:
         z = np.load(snap)
