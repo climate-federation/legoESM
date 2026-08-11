@@ -341,6 +341,15 @@ def main(argv=None):
             m = ps[:, :, None] * dsig[None, None, :]
             return float((w[:, :, None] * m * T).sum() / (w[:, :, None] * m).sum())
 
+        def _sawtooth(state):
+            """Area-mean vertical-curvature norm of T [K^2] — the 2-dsigma
+            computational-mode detector for the centered vertical advection
+            (GLM review): a growing value flags point-to-point vertical
+            noise that mass-weighted means and single-level RMS both miss."""
+            T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data))
+            curv = T[..., 2:] - 2.0 * T[..., 1:-1] + T[..., :-2]
+            return float((w[:, :, None] * curv ** 2).sum() / curv.shape[-1])
+
         rows = []
         for k in range(len(cases_t) - lead_strides):
             s0 = cases_t[k].init_state
@@ -355,6 +364,9 @@ def main(argv=None):
                 "model_drift_K": tf - t0,
                 "era5_change_K": tt - t0,
                 "error_vs_era5_K": tf - tt,
+                "T_sawtooth_init_K2": _sawtooth(s0),
+                "T_sawtooth_forecast_K2": _sawtooth(fc),
+                "T_sawtooth_era5_at_lead_K2": _sawtooth(truth),
             })
         out = {
             "meta": {

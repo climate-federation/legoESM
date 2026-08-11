@@ -1,0 +1,59 @@
+# OOD fine-tuning (ArchesWeatherGen phase 2), adapted to an IC-PERTURBATION
+# ensemble instead of a generative head.
+#
+# THE PROBLEM (arXiv:2412.12971 sec. "Overcoming difficulties arising from
+# residual modeling"): a deterministic model overfits its training years, so its
+# error — and hence the spread its ensemble must reproduce — is LARGER at test
+# time than at training time. An ensemble tuned on training-set behaviour comes
+# out UNDER-DISPERSED (spread-skill ratio < 1). ArchesWeather sees this from a
+# few percent of overfitting; we train 120 passes over 1,152 unique samples, so
+# ours is far worse and this correction matters more, not less.
+#
+# THE FIX, in two parts:
+#   1. THIS SUITE — fine-tune the model on years the base run never saw
+#      (2015-2016; the deterministic base trained on 1979-2014), at 0.3x the
+#      ACE2 learning rate for 15 epochs. Short adaptation, not a retrain.
+#      2017 is deliberately EXCLUDED: it is the eval year, and training on it
+#      would make every subsequent scorecard meaningless.
+#   2. NOISE SCALING at inference — `run_aimip_wb2_eval --ensemble-noise-scale`
+#      (their rho, 1.05, "roughly the percentage of overfitting"), which
+#      inflates the IC perturbation so member spread matches the true error.
+#
+# START FROM A PINNED CHECKPOINT, never a "latest" pointer: copy the base
+# run's params into this suite's output_dir before launching, so the fine-tune
+# has a fixed, reproducible starting point (CLAUDE.md run-target rule).
+#
+# eval_windows are narrowed to 2017 ONLY. The inherited 2015-2017 set
+# overlapped the OOD training years, so run_aimip's in-run evaluation
+# would have been in-sample (caught by
+# tests/unit/test_multiseed_ensemble_cli.py).
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  loss_preset: ace2
+  loss: {}
+  aimip_optimizer: adamw
+  aimip_lr: 3.0e-05
+  aimip_weight_decay: 0.01
+  aimip_ema_decay: 0.999
+  aimip_n_epochs: 15
+  aimip_patience: 5
+  aimip_warmup: 20
+  train_windows:
+  - [2015, 0, 5]
+  - [2015, 91, 5]
+  - [2015, 182, 5]
+  - [2015, 274, 5]
+  - [2016, 0, 5]
+  - [2016, 91, 5]
+  - [2016, 182, 5]
+  - [2016, 274, 5]
+  eval_windows:
+  - [2017, 0, 2]
+  - [2017, 182, 2]
+  n_train_days: 40
+  n_eval_days: 4
+  train_year: 2015
+  eval_year: 2017
+  aimip_surface_forcing: true
+variants: [sfno_full]
+output_dir: results/aimip_ood_sfno_full_t63
