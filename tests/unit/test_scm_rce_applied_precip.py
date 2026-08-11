@@ -91,12 +91,27 @@ def test_a_summed_tendency_would_report_zero(camp):
     raining = _tend(2.5e-5)
     other = _tend(None)
     summed = add_tendencies(other, raining)
-    assert summed.precip is None, (
-        "add_tendencies now propagates precip; the driver reads micro_tend "
-        "precisely because it did not, so re-check that comment")
-    assert float(camp.applied_precip_mm_day(summed, _LikeState())) == 0.0
+    # NOT asserted as a requirement: `add_tendencies` propagating diagnostics
+    # would be an IMPROVEMENT, and a gate demanding it keep dropping them would
+    # fail the day someone made that improvement, for the wrong reason (GLM
+    # review, 2026-08-11). What is asserted is the consequence that matters:
+    # IF it drops precip, reading the sum reports zero, which is why the driver
+    # reads micro_tend. The driver's own behaviour is gated separately.
+    if summed.precip is None:
+        assert float(camp.applied_precip_mm_day(summed, _LikeState())) == 0.0
     # ... while the un-summed microphysics tendency carries the real value.
     assert float(camp.applied_precip_mm_day(raining, _LikeState())) > 2.0
+
+
+def test_multi_column_input_is_refused(camp):
+    """[0] on a flattened field would silently score column 0 and call it the
+    column."""
+    tend = _tend(2.5e-5)
+    wide = tend._replace(precip=Field(
+        data=jnp.full((1, 2, 1), 2.5e-5), name="precip",
+        dims=("face", "x", "y")))
+    with pytest.raises(ValueError, match="single-column"):
+        camp.applied_precip_mm_day(wide, _LikeState())
 
 
 def test_the_driver_reads_the_applied_tendency_not_a_second_evaluation(camp):

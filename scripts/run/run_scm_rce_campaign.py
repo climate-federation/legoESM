@@ -1551,7 +1551,16 @@ def applied_precip_mm_day(applied_tend, like) -> jax.Array:
     """
     if applied_tend.precip is None:
         return jnp.zeros((), dtype=like.T.data.dtype)
-    return jnp.reshape(applied_tend.precip.data, (-1,))[0] * SECONDS_PER_DAY
+    flat = jnp.reshape(applied_tend.precip.data, (-1,))
+    if flat.shape[0] != 1:
+        # Taking [0] of a multi-column field would silently score column 0 and
+        # call it "the column".  This driver is single-column by construction;
+        # a multi-column state means the caller is not what this readout
+        # assumes, so refuse instead of reporting one column's rain.
+        raise ValueError(
+            f"applied_precip_mm_day expects a single-column state, got "
+            f"{flat.shape[0]} columns; this readout scores one column.")
+    return flat[0] * SECONDS_PER_DAY
 
 
 def physical_profile_rmse(

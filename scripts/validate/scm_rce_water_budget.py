@@ -149,11 +149,34 @@ def main(argv: list[str] | None = None) -> int:
     # 'TurbulenceConfig' object has no attribute 'surface' (job 9361582).
     _turb_sub = getattr(cfg.turbulence, cfg.turbulence.scheme, None)
     surf_cfg = getattr(_turb_sub, "surface", None)
+    # E must be sampled the SAME WAY as storage and P -- as a window mean, not
+    # a single snapshot at the end. With a snapshot, a residual can be blamed
+    # on the sampling mismatch and never tested. Both endpoints are available
+    # (the two runs), so the window mean is a trapezoid over the same interval
+    # the storage difference spans.
     if surf_cfg is None:
         raise SystemExit(
             f"turbulence scheme {cfg.turbulence.scheme!r} exposes no surface- "
             "layer config, so E cannot be measured from the shipped bulk "
             "formula for this configuration.")
+    def _E_of(run):
+        T_a = float(np.asarray(run.T_profile)[-1])
+        q_a = float(np.asarray(run.qv_profile)[-1])
+        p_a = float(np.asarray(ref.sigma_full)[-1] * WING_P_SFC)
+        rho_a = p_a / (constants.R_d * T_a * (1.0 + 0.608 * q_a))
+        q_s = float(saturation_mixing_ratio(
+            jnp.asarray(camp.FIXED_SST_K), jnp.asarray(WING_P_SFC)))
+        one_ = jnp.ones((1,))
+        _a, _b, sh, lh_, _c = compute_surface_fluxes(
+            u=one_ * args_wind, v=one_ * 0.0, T=one_ * T_a, q_v=one_ * q_a,
+            T_sfc=one_ * camp.FIXED_SST_K, q_sfc=one_ * q_s, rho=one_ * rho_a,
+            config=surf_cfg)
+        lh_v = float(np.asarray(lh_)[0])
+        return (T_a, q_a, float(np.asarray(sh)[0]), lh_v,
+                lh_v / constants.L_v * (SECONDS_PER_DAY_LOCAL / RHO_W) * MM_PER_M)
+
+    E_short = _E_of(runs["short"][1])
+    E_long = _E_of(runs["long"][1])
     r_long = runs["long"][1]
     T_a = float(np.asarray(r_long.T_profile)[-1])
     q_a = float(np.asarray(r_long.qv_profile)[-1])
@@ -174,7 +197,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    bulk_scheme={getattr(surf_cfg, 'bulk_scheme', '?')}  "
           f"Ch_neutral={getattr(surf_cfg, 'Ch_neutral', float('nan')):.3e}")
     print(f"    SHF={float(np.asarray(shflx)[0]):8.3f} W/m^2   "
-          f"LHF={lh:8.3f} W/m^2   ->  E = {e_bulk_mm_day:.4f} mm/day")
+          f"LHF={lh:8.3f} W/m^2   ->  E(end) = {e_bulk_mm_day:.4f} mm/day")
+    e_window = 0.5 * (E_short[4] + E_long[4])
+    print(f"    E(start)={E_short[4]:.4f}  E(end)={E_long[4]:.4f}  ->  "
+          f"E(window mean) = {e_window:.4f} mm/day")
+    e_bulk_mm_day = e_window
 
     (d0, r0, cwv0, cwc0) = runs["short"]
     (d1, r1, cwv1, cwc1) = runs["long"]
