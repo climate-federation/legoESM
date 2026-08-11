@@ -135,7 +135,7 @@ def test_km1_through_the_3d_path_matches_the_certified_2d_kernel(ctx):
 def test_duogrid_flag_is_actually_forwarded():
     """c_sw's `duogrid` DEFAULTS TO FALSE. This session already lost a
     measurement to an unpassed default, so prove the flag reaches the
-    kernel by showing the two settings differ.
+    kernel.
 
     Builds its OWN plain context instead of using the module fixture,
     because the fixture is bounded and `d2a2c_vect` has no bounded port.
@@ -151,22 +151,29 @@ def test_duogrid_flag_is_actually_forwarded():
     it with a literal .false. and routes bounded non-duo through
     divergence_corner_nest, sw_core.F90:150-160).
 
-    SCOPE, stated plainly: with a plain context the duogrid=True arm is
-    itself the upstream-impossible `duogrid=T, bounded=F` pair, so this
-    test proves the flag reaches the kernel and changes behaviour -- it
-    does NOT certify either arm's numbers. That is all its name should be
-    read as claiming.
+    km=1 corpus migration (2026-08-11): c_sw now REFUSES the
+    upstream-impossible `duogrid=T, bounded=F` pair, so the old
+    outputs-differ A/B can no longer run on a plain context.  The
+    forwarding proof is now the raise itself: it is ONE-VARIABLE (the
+    duogrid argument alone separates the arm that runs from the arm
+    that raises), and the guard sits inside c_sw, so it can only fire
+    if csw_phase_3d handed the flag down to c_sw.
+
+    SCOPE (GLM r1 finding 2): this certifies the 3-D ASSEMBLER ->
+    c_sw hop only — the hop this test was written for (an unpassed
+    default in csw_phase_3d).  Forwarding INSIDE c_sw to
+    d2a2c_vect_duo/divergence_corner_duo is certified separately by
+    test_duo_branch_engages (spy + consumption) and by the bit-exact
+    c_sw oracle.
     """
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     ctx = build_six_face_duo_context(N, NG)
     st = _seeded_state(KM, seed=5)
-    on = csw_phase_3d(ctx, st, dt2=10.0, km=KM, duogrid=True)
     off = csw_phase_3d(ctx, _seeded_state(KM, seed=5), dt2=10.0, km=KM,
                        duogrid=False)
-    diffs = [np.abs(_compute(ctx, on[t]["divg_d"])
-                    - _compute(ctx, off[t]["divg_d"])).max()
-             for t in range(6)]
-    assert max(diffs) > 0.0, "duogrid=True/False produced identical output"
+    assert np.all(np.isfinite(_compute(ctx, off[0]["delpc"])))
+    with pytest.raises(ValueError, match=r"fv_arrays\.F90:1512"):
+        csw_phase_3d(ctx, st, dt2=10.0, km=KM, duogrid=True)
 
 
 def test_km_above_the_remap_window_is_refused(ctx):

@@ -387,7 +387,11 @@ def test_the_interim_exchange_must_be_asked_for(ctx_interim):
         exchange_post_pgrad_sixface,
     )
 
-    plain = build_six_face_duo_context(N, NG)  # no bundle, no opt-out
+    # no bundle, no opt-out; oracle_conventions=True because c_sw
+    # refuses duogrid on unbounded metrics (fv_arrays.F90:1512) — the
+    # refusals under test here live in exchange_post_pgrad_sixface and
+    # are orthogonal to the metrics lane
+    plain = build_six_face_duo_context(N, NG, oracle_conventions=True)
     st = _state(1, seed=6)
     csw = csw_phase_3d(plain, st, dt2=0.5 * DT, km=1)
     args = ([csw[t]["divg_d"][:, :, 0] for t in range(6)],
@@ -407,7 +411,8 @@ def test_the_interim_exchange_must_be_asked_for(ctx_interim):
     from legoesm.core.fv3_native_duo_stepper import (
         build_six_face_duo_context as _bld,
     )
-    divgd_only = _bld(N, NG, ext_exclude=("divgd",))
+    divgd_only = _bld(N, NG, ext_exclude=("divgd",),
+                      oracle_conventions=True)
     csw3 = csw_phase_3d(divgd_only, st, dt2=0.5 * DT, km=1)
     with pytest.raises(ValueError, match="uc/vc exchange"):
         exchange_post_pgrad_sixface(
