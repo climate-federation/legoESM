@@ -122,11 +122,14 @@ def region_masks(n: int, ng: int, ish: int, jsh: int) -> dict:
     dj = np.maximum(np.maximum(ng - jj, jj - (ng + n - 1 + jsh)), 0)
     ring = np.maximum(di, dj)
     corner = (di > 0) & (dj > 0)
-    out = {"interior": ring == 0}
-    # compute EDGE cells (inside, touching the boundary of the box)
     inner = (ring == 0)
+    # compute EDGE cells (inside, touching the boundary of the box) --
+    # where the builders apply their panel-edge sg/metric SPECIALS, so
+    # they must never contaminate the interior row (first instrument
+    # pass scored "interior 0.49" that lived entirely on these rows).
     edge = inner & ((ii == ng) | (ii == ng + n - 1 + ish)
                     | (jj == ng) | (jj == ng + n - 1 + jsh))
+    out = {"interior": inner & ~edge}
     out["compute_edge"] = edge
     for r in range(1, ng + 1):
         out[f"ring{r}_side"] = (ring == r) & ~corner
@@ -170,6 +173,16 @@ def main() -> int:
              for t in range(1, 7)]
     ext6 = [extend_gridstruct(kink6[t], n, ng, tile=t + 1)
             for t in range(6)]
+    # P = the PRODUCTION parity lane's gridstructs: the
+    # oracle_conventions=True bounded context, exactly what the
+    # full-step gate integrates with (instrument iteration 5: the plain
+    # builder's K column scored edge-special conventions the parity
+    # never consumes).
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+    )
+    prod6 = build_six_face_duo_context(n, ng, use_ext_bundle=True,
+                                       oracle_conventions=True)["gs6"]
 
     # face map from the dumped coordinates.  derive_face_map returns
     # {port_face: (dist, oracle_tile, op)} with op mapping PORT layout
@@ -199,7 +212,7 @@ def main() -> int:
             print(f"{fam:10s}  --  (port gs6 has no {key!r}; skipped)")
             continue
         rows = {}
-        for lbl, gs6 in (("K", kink6), ("E", ext6)):
+        for lbl, gs6 in (("K", kink6), ("E", ext6), ("P", prod6)):
             per = {h: 0.0 for h in hdr}
             nsent = 0
             for pf in range(6):
