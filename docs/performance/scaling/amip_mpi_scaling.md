@@ -262,6 +262,9 @@ production GPU run via `ParallelRuntime.create()` and the GPU scaling harness
 `latency_hiding_scheduler`, `highest_priority_async_stream`,
 `cudnn_gemm_fusion_level=3`, `command_buffer=FUSION,CUSTOM_CALL,COLLECTIVES`
 (all accepted by current XLA — verified: gray_sbm GPU run now compiles + times).
+[2026-08-11 update: `COLLECTIVES` later measured +25% step time on the MPAS
+shard_map lane (job 26873637) and dropped from the default; opt back in with
+`LEGOESM_XLA_CMDBUF_COLLECTIVES=1`. See `backend.py`.]
 Codex-reviewed: removal is correct (current XLA makes collectives async by
 default; LHS handles compute/comm overlap → no serialization on multi-GPU). Repo
 grep: no other references to the removed flag strings. Direct probes (iters 4–5)

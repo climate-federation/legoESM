@@ -65,15 +65,20 @@ class LatLonCGridOperators:
             gradient_y_cgrid(scalar, self._grid),
         )
 
-    def vorticity(self, u: Any, v: Any, u_ext: Any = None) -> Any:
+    def vorticity(self, u: Any, v: Any, u_ext: Any = None,
+                  lat_pad_pole: Any = None, cos_lat_pad: Any = None) -> Any:
         """Relative vorticity (curl) of ``(u, v)`` at cell vertices.
 
         ``u_ext``: optional pre-padded ``u`` (one lat ghost row per
         side, ``pad_with_pole_bc_lat(u, halo=1, 0, 0)``) so a caller
         that already fused that exchange can share it — see
-        ``curl_vertex_cgrid``.
+        ``curl_vertex_cgrid``.  ``lat_pad_pole`` / ``cos_lat_pad``:
+        optional precomputed stage-invariant geometry pads, forwarded
+        verbatim (see ``curl_vertex_cgrid``).
         """
-        return curl_vertex_cgrid(u, v, self._grid, u_ext=u_ext)
+        return curl_vertex_cgrid(u, v, self._grid, u_ext=u_ext,
+                                 lat_pad_pole=lat_pad_pole,
+                                 cos_lat_pad=cos_lat_pad)
 
     def interpolate(self, field: Any, src_location: Any, dst_location: Any) -> Any:
         """Stagger interpolation of a cell-centre *field* to a face location.

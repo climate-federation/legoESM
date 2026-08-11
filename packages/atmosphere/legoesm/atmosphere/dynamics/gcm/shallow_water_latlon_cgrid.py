@@ -123,8 +123,17 @@ def absolute_vorticity_coriolis(
     grid: LatLonGrid,
     *,
     u_lat_pad: jnp.ndarray | None = None,
+    lat_pad: jnp.ndarray | None = None,
+    lat_pad_pole: jnp.ndarray | None = None,
+    cos_lat_pad: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Coriolis-like acceleration using absolute vorticity (ζ+f).
+
+    ``lat_pad`` (exactly ``pad_with_pole_bc_lat(grid.lat, halo=1, 0, 0)``),
+    ``lat_pad_pole`` / ``cos_lat_pad`` (see ``curl_vertex_cgrid``): optional
+    precomputed stage-invariant geometry pads (the SPMD band step's geometry
+    stacks) so the per-stage scalar-row exchanges are skipped; ``None`` keeps
+    the in-body backend-dispatched pads byte-identical.
 
     The vector-invariant momentum equation requires the full absolute
     vorticity η = ζ + f, not just the planetary vorticity f.  This
@@ -169,6 +178,7 @@ def absolute_vorticity_coriolis(
     # twice per RK stage).
     zeta = latlon_cgrid_operators(grid).vorticity(
         u, v, u_ext=u_lat_pad,
+        lat_pad_pole=lat_pad_pole, cos_lat_pad=cos_lat_pad,
     )  # (n_lat+1, n_lon+1[, nlev])
 
     # --- Planetary vorticity at vertices ---
@@ -204,9 +214,10 @@ def absolute_vorticity_coriolis(
         # Interior vertex rows evaluate the identical
         # ``2Ω·sin(0.5·(lat[j-1]+lat[j]))`` chain — bit-identical to serial.
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-        lat_pad = pad_with_pole_bc_lat(
-            lat, halo=1, south_value=0.0, north_value=0.0,
-        )
+        if lat_pad is None:
+            lat_pad = pad_with_pole_bc_lat(
+                lat, halo=1, south_value=0.0, north_value=0.0,
+            )
         lat_vert = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat_local+1,)
         f_vert = twoOmega * jnp.sin(lat_vert)
         if _spmd_pm is not None:
