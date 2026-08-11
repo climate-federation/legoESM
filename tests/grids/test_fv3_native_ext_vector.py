@@ -132,7 +132,7 @@ def test_ext_vector_halo_matches_analytic_projection(ctx, ectx):
     assert worst_u < 0.5, worst_u
 
 
-def test_ext_scalar_b_smooth_field_accuracy(ectx):
+def test_ext_scalar_b_smooth_field_accuracy(ectx, kinked_gs6):
     """B-scalar ext halos land near the smooth field at EXT B nodes."""
     from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
     from legoesm.grids.fv3_native_gridstruct import (
@@ -150,18 +150,35 @@ def test_ext_scalar_b_smooth_field_accuracy(ectx):
         with np.errstate(invalid="ignore"):
             fk = f(lon_k, lat_k)
         f6.append(fk)
-    ext_scalar_sixface(f6, "B", ectx)
-    worst = 0.0
-    for t in range(6):
-        fe = f(b_lon_e[t], b_lat_e[t])
-        for j_f in list(range(1 - NG, 1)) + list(range(N + 2, N + NG + 2)):
-            for i_f in range(1, N + 2):
-                got = f6[t][i_f - 1 + NG, j_f - 1 + NG]
-                worst = max(worst, abs(got - fe[i_f - 1 + NG, j_f - 1 + NG]))
-    # k2e Lagrange (4th order) at C12; the kinked-copy value differs
-    # from the ext value by the kink O(0.4·field-gradient) — the remap
-    # must land ~two orders below that.
-    assert worst < 5e-3, worst
+    def _worst(ectx_used, fields):
+        ext_scalar_sixface(fields, "B", ectx_used)
+        w = 0.0
+        for t in range(6):
+            fe = f(b_lon_e[t], b_lat_e[t])
+            for j_f in (list(range(1 - NG, 1))
+                        + list(range(N + 2, N + NG + 2))):
+                for i_f in range(1, N + 2):
+                    got = fields[t][i_f - 1 + NG, j_f - 1 + NG]
+                    w = max(w, abs(got - fe[i_f - 1 + NG, j_f - 1 + NG]))
+        return w
+
+    # RESOLVED runtime order (k2e_nord=2, the default context): measured
+    # 2.23e-3 at C12 -- and the extchain oracle certificate proves the
+    # nord=2 chain matches the oracle, so this accuracy is upstream's
+    # own.  The kinked-copy value differs from the ext value by the kink
+    # O(0.4*field-gradient); the remap still lands well below that.
+    worst2 = _worst(ectx, [np.array(a, copy=True) for a in f6])
+    assert worst2 < 5e-3, worst2         # measured 2.23e-3 at nord=2
+
+    # 4th-order calibration kept explicitly (codex nstep review #2: the
+    # old wording claimed 4th order while the shared fixture silently
+    # moved to 2 -- a ~310x weaker check).  The order gap doubles as a
+    # mutation control for a context that ignored k2e_nord.
+    from legoesm.grids.fv3_native_ext_vector import build_ext_context
+    ectx4 = build_ext_context(N, NG, kinked_gs6, k2e_nord=4)
+    worst4 = _worst(ectx4, f6)
+    assert worst4 < 5e-5, worst4         # measured 7.2e-6 at nord=4
+    assert worst2 > 10.0 * worst4        # the order gap is real
 
 
 def test_stepper_two_steps_bundle_mass_exact_and_bounded(ctx):
@@ -324,13 +341,13 @@ def _smooth(lon, lat):
     return np.sin(lat) * 40.0 + 12.0 * np.cos(lon) * np.cos(lat)
 
 
-def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
+def _smooth_a_halo_worst(ectx_used, kinked_gs6):
     from legoesm.grids.fv3_native_ext_vector import ext_parity_lonlat_ref
 
     a_lon_e, a_lat_e = ext_parity_lonlat_ref(N, NG, "A")
     f6 = [_smooth(gs["agrid_lon"], gs["agrid_lat"]).copy()
           for gs in kinked_gs6]
-    ext_scalar_sixface(f6, "A", ectx)
+    ext_scalar_sixface(f6, "A", ectx_used)
     worst = 0.0
     for t in range(6):
         fe = _smooth(a_lon_e[t], a_lat_e[t])
@@ -341,7 +358,30 @@ def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
                 worst = max(worst, abs(
                     f6[t][i_f - 1 + NG, j_f - 1 + NG]
                     - fe[i_f - 1 + NG, j_f - 1 + NG]))
-    assert worst < 0.15, worst          # measured 0.064 (field ~41)
+    return worst
+
+
+def test_corner_lagrange_smooth_scalar_a(ectx, kinked_gs6):
+    """Smooth-field halo accuracy at BOTH interpolation orders.
+
+    The default context now carries the RESOLVED runtime k2e_nord=2
+    (the pinned tree's own duogrid_init; the extchain oracle
+    certificate proves the nord=2 chain matches the oracle to <=2e-10),
+    so its accuracy on this n=12 kinked harness is the ORACLE's own:
+    measured 5.814 on a field ~41.  The historic 0.15 bound was a
+    nord=4 calibration -- kept below on an explicit nord=4 context, so
+    the order sensitivity itself stays pinned (2-vs-4 must differ by
+    ~90x here; a context that silently ignored k2e_nord would fail
+    one of the two).
+    """
+    worst2 = _smooth_a_halo_worst(ectx, kinked_gs6)
+    assert worst2 < 8.0, worst2          # measured 5.814 at nord=2
+
+    from legoesm.grids.fv3_native_ext_vector import build_ext_context
+    ectx4 = build_ext_context(N, NG, kinked_gs6, k2e_nord=4)
+    worst4 = _smooth_a_halo_worst(ectx4, kinked_gs6)
+    assert worst4 < 0.15, worst4         # measured 0.064 at nord=4
+    assert worst2 > 10.0 * worst4        # the order gap is real
 
 
 def test_corner_lagrange_smooth_scalar_dstag(ectx):

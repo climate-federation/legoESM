@@ -694,3 +694,36 @@ class TestGPUVendorDetection:
         """NVIDIA XLA flags contain cuDNN; AMD flags do not."""
         assert "xla_gpu_cudnn_gemm_fusion_level" in NVIDIA_GPU_XLA_FLAGS
         assert "xla_gpu_cudnn_gemm_fusion_level" not in AMD_GPU_XLA_FLAGS
+
+    @pytest.mark.parametrize("env_val,expect_collectives", [
+        (None, False),   # default: COLLECTIVES excluded
+        ("1", True),     # explicit opt-in restores capture
+    ])
+    def test_command_buffer_collectives_optin(self, env_val,
+                                              expect_collectives):
+        """COLLECTIVES capture is opt-in: measured +25% step time on the
+        MPAS shard_map lane (job 26873637) when collectives are frozen
+        into command buffers (kills dynamic compute/comm overlap).
+
+        Fresh interpreter per case with the env var explicitly absent /
+        set (import-time resolution; ambient env must not leak in —
+        codex review of the first version showed an env-dependent
+        assert is not a reversion guard)."""
+        import subprocess, sys
+        setup = ("import os; os.environ.pop("
+                 "'LEGOESM_XLA_CMDBUF_COLLECTIVES', None); "
+                 if env_val is None else
+                 f"import os; os.environ['LEGOESM_XLA_CMDBUF_COLLECTIVES']"
+                 f"='{env_val}'; ")
+        check = ("'COLLECTIVES' in v" if expect_collectives
+                 else "'COLLECTIVES' not in v and 'FUSION' in v "
+                      "and 'CUSTOM_CALL' in v")
+        code = (setup +
+                "from legoesm.runtime.backend import NVIDIA_GPU_XLA_FLAGS; "
+                "v=NVIDIA_GPU_XLA_FLAGS['xla_gpu_enable_command_buffer']; "
+                f"assert {check}, v; print('OK')")
+        env = {k: v for k, v in os.environ.items()
+               if k != "LEGOESM_XLA_CMDBUF_COLLECTIVES"}
+        out = subprocess.run([sys.executable, "-c", code], env=env,
+                             capture_output=True, text=True)
+        assert out.returncode == 0 and "OK" in out.stdout, out.stderr

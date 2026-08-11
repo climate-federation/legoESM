@@ -184,3 +184,68 @@ def dcmip16_bc_face(grid_corner_lonlat, agrid_lonlat, ak, bk, km, *,
                     great_circle_dist)
 
     return {"ps": ps, "delp": delp, "pt": pt, "gz": gz, "u": u, "v": v}
+
+
+# --- DCMIP16_BC moisture parameters (test_cases.F90:6497-6502) ---------
+Q0_BC = 0.018            # q0   -- surface specific-humidity amplitude
+QT_BC = 1.0e-12          # qt   -- stratospheric background
+PTROP_BC_PA = 1.0e4      # ptrop
+PW_BC_PA = 34000.0       # pW   -- vertical moisture decay pressure
+PHIW_BC_RAD = 2.0 * np.pi / 9.0   # phiW -- meridional moisture width
+
+
+def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
+    """``sphum`` on the DCMIP16_BC column -- test_cases.F90:6737-6744.
+
+    The oracle computes the layer pressure from its own hydrostatic
+    column (``ps == p0`` exactly on this IC)::
+
+        pe(1) = ptop = ak(1);       peln(1) = log(ptop)
+        pe(k) = ak(k) + p0*bk(k);   peln(k) = log(pe(k))     (:6540-6560)
+        p     = delp(k) / (peln(k+1) - peln(k))              (:6740)
+
+    and then ``DCMIP16_BC_sphum(p, ps, lat, lon)`` (:6840-6852)::
+
+        eta = p/ps
+        sphum = qt                                    if p <= ptrop
+              = q0 * exp(-(lat/phiW)**4)
+                   * exp(-(((eta-1)*p0/pW)**2))       otherwise
+
+    ``lon`` is dead in the Fortran function body; it is not taken here.
+    The oracle fills the COMPUTE window only and zeroes the halo
+    (:6728-6735; the ``mpp_update_domains(q)`` at :6749 is inside the
+    terminator-tracer branch, absent on this deck with no cl/cl2), so
+    the caller pads with zeros.
+
+    Returns ``(ni, nj, km)`` over whatever centre-latitude window
+    ``agrid_lat`` covers (radians).
+    """
+    ak = np.asarray(ak, dtype=np.float64)
+    bk = np.asarray(bk, dtype=np.float64)
+    lat = np.asarray(agrid_lat, dtype=np.float64)
+    if ak.shape != (km + 1,) or bk.shape != (km + 1,):
+        raise ValueError(
+            f"ak/bk must have km+1={km + 1} entries, got "
+            f"{ak.shape}/{bk.shape}")
+
+    # ps == p0 uniformly, so pe/peln/delp/p are scalars per level --
+    # same arithmetic as the Fortran, just not repeated per column.
+    pe = np.empty(km + 1, dtype=np.float64)
+    pe[0] = ak[0]                       # pe(i,1,j) = ptop  (:6540)
+    for k in range(1, km + 1):
+        pe[k] = ak[k] + P0_PA * bk[k]
+    peln = np.log(pe)
+    lat_term = np.exp(-((lat / PHIW_BC_RAD) ** 4))
+
+    out = np.empty(lat.shape + (km,), dtype=np.float64)
+    for k in range(km):
+        delp_k = (ak[k + 1] - ak[k]) + P0_PA * (bk[k + 1] - bk[k])
+        p = delp_k / (peln[k + 1] - peln[k])
+        if p > PTROP_BC_PA:
+            eta = p / P0_PA
+            out[..., k] = (Q0_BC * lat_term
+                           * np.exp(-(((eta - 1.0) * P0_PA / PW_BC_PA)
+                                      ** 2)))
+        else:
+            out[..., k] = QT_BC
+    return out
