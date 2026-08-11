@@ -382,6 +382,14 @@ def _riem_c_fixture(seed, n=12, ng=3, km=KM, w_amp=0.0, dz_scale=1.0):
     return ptop, hs, w3, pt, delp, gz, ws
 
 
+def _riem_c_halo_mask(n, ng):
+    """True outside riem_solver_c's write window (is-1..ie+1 square)."""
+    full = n + 2 * ng
+    halo = np.ones((full, full), dtype=bool)
+    halo[ng - 1:ng + n + 1, ng - 1:ng + n + 1] = False
+    return halo
+
+
 def riem_c_contracts_balanced_certificate(run_riem_c):
     """Boundary contracts + balanced-rest, impl-parameterized.
 
@@ -401,9 +409,17 @@ def riem_c_contracts_balanced_certificate(run_riem_c):
     for k in range(KM):
         pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
 
+    # Footprint guard (codex riem r1 #3): sentinel gz/pef OUTSIDE the
+    # (is-1..ie+1, js-1..je+1) window; the solver must carry them
+    # through bitwise (gz halo is never read on this fixture's window).
+    halo = _riem_c_halo_mask(n, ng)
+    gz[halo, :] = _SENT3
     pef = np.zeros(gz.shape)
+    pef[halo, :] = _SENT3
     gz, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop, hs, w3, pt,
                          delp, gz, pef, ws, 0.05)
+    assert np.all(gz[halo, :] == _SENT3)
+    assert np.all(pef[halo, :] == _SENT3)
 
     sl = slice(ng - 1, ng + n + 1)
     # Contracts straight from the source:
@@ -766,11 +782,17 @@ def riem_c_unbalanced_certificate(run_riem_c):
     bd = _BD(n, ng)
     ptop, hs, w3, pt, delp, gz, ws = _riem_c_fixture(
         41, w_amp=0.5, dz_scale=1.05)   # UNBALANCED on purpose
+    # Footprint guard (codex riem r1 #3): sentinel outside the window.
+    halo = _riem_c_halo_mask(n, ng)
+    gz[halo, :] = _SENT3
     gz_in = np.array(gz, copy=True)
 
     pef = np.zeros(gz.shape)
+    pef[halo, :] = _SENT3
     gz, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop, hs, w3, pt,
                          delp, gz, pef, ws, 0.05)
+    assert np.all(gz[halo, :] == _SENT3)
+    assert np.all(pef[halo, :] == _SENT3)
 
     # Independent column rebuild at a mid-domain j (no ring effects).
     gama = 1.0 / (1.0 - FV3_KAPPA)
@@ -895,20 +917,28 @@ def riem_c_origin_relabel_certificate(run_riem_c):
     gz0[:, :, KM] = hs
     for k in range(KM - 1, -1, -1):
         gz0[:, :, k] = gz0[:, :, k + 1] - dzh[:, :, k]
+    # Footprint guard (codex riem r1 #3): sentinel outside the window,
+    # so two impls with the SAME stray halo write cannot both pass.
+    halo = np.ones((fi, fj), dtype=bool)
+    halo[ng - 1:ng + ni + 1, ng - 1:ng + nj + 1] = False
+    gz0[halo, :] = _SENT3
 
     out = {}
     for tag, bd in (("o11", _BDR(1, ni, 1, nj, ng)),
                     ("o4_10", _BDR(4, 3 + ni, 10, 9 + nj, ng))):
+        pef0 = np.zeros((fi, fj, KM + 1))
+        pef0[halo, :] = _SENT3
         g, pef = run_riem_c(100.0, bd, KM, FV3_KAPPA, ptop,
                             np.array(hs), np.array(w3), np.array(pt),
                             np.array(delp), np.array(gz0, copy=True),
-                            np.zeros((fi, fj, KM + 1)),
-                            np.zeros((fi, fj)), 0.05)
+                            pef0, np.zeros((fi, fj)), 0.05)
+        assert np.all(g[halo, :] == _SENT3), tag
+        assert np.all(pef[halo, :] == _SENT3), tag
         out[tag] = (g, pef)
 
     assert np.array_equal(out["o11"][0], out["o4_10"][0])
     assert np.array_equal(out["o11"][1], out["o4_10"][1])
-    assert np.abs(out["o11"][1]).max() > 0.0
+    assert np.abs(out["o11"][1][~halo, :]).max() > 0.0
 
 
 def test_riem_solver_c_origin_is_a_pure_relabel():

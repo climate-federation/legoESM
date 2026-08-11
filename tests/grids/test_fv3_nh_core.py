@@ -397,16 +397,28 @@ def test_riem_c_jax_jit_eager_parity_and_no_retrace():
 # ---------------------------------------------------------------- gate 4
 def test_riem_c_jax_check_grads_order2_away_from_floor():
     """Order-2 fwd+rev grads over ALL seven dynamic operands on a small
-    (n=3, ng=1, km=4) domain, with the p_fac floor proven INACTIVE on
+    (n=3, ng=2, km=4) domain, with the p_fac floor proven INACTIVE on
     the fixture (halved-p_fac bitwise control + margin inversion through
-    the OUTPUT gz, same two-step proof as the SIM1 gate)."""
-    n, ng, km = 3, 1, 4
+    the OUTPUT gz, same two-step proof as the SIM1 gate).
+
+    ng=2 leaves a real halo ring outside the write window, and gz/pef
+    carry NONZERO halo values, so the passthrough gradients of gz and
+    pef are nonzero and actually checked (codex riem r1 #1: with ng=1
+    the window covered the whole array and d(loss)/d(pef) was
+    identically zero)."""
+    n, ng, km = 3, 2, 4
     ptop, hs, w3, pt, delp, gz, ws = _riem_c_fixture(
         5, n=n, ng=ng, km=km, w_amp=0.1, dz_scale=1.02)
     ws = 0.3 * np.ones_like(ws)   # nonzero: exercises the bottom -p1*ws
     bd = _BD(n, ng)
-    pef0 = np.zeros(gz.shape)
+    rng = np.random.default_rng(21)
+    pef0 = 100.0 * rng.standard_normal(gz.shape)   # nonzero passthrough
     p_fac = 0.05
+    # The write window (is-1..ie+1 square) and its halo ring:
+    win = slice(ng - 1, ng + n + 1)
+    halo2 = np.ones(gz.shape[:2], dtype=bool)
+    halo2[win, win] = False
+    assert halo2.any()   # the ring exists (the r1 #1 vacuity is gone)
 
     gz_a, pef_a = _run_jax_riem_c(100.0, bd, km, FV3_KAPPA, ptop, hs,
                                   w3, pt, delp, gz, pef0, ws, p_fac)
@@ -414,18 +426,20 @@ def test_riem_c_jax_check_grads_order2_away_from_floor():
                                   w3, pt, delp, gz, pef0, ws, p_fac / 2)
     assert np.array_equal(gz_a, gz_b) and np.array_equal(pef_a, pef_b), \
         "p_fac floor ACTIVE on the riem_c gradient fixture"
-    # Margin inversion: the rebuilt gz encodes the SELECTED dz
-    # (dz = (gz[k+1]-gz[k])/grav); invert dz = -dm*rgas*pt*P^(kappa-1)
-    # for P and require it strictly above the floor with an FD-safe 1%
-    # margin (the halved-p_fac control alone can false-pass on a tie).
-    dz_sel = (gz_a[:, :, 1:] - gz_a[:, :, :-1]) / FV3_GRAV
-    dm = delp / FV3_GRAV
+    # Margin inversion ON THE WRITE WINDOW: the rebuilt gz encodes the
+    # SELECTED dz (dz = (gz[k+1]-gz[k])/grav); invert
+    # dz = -dm*rgas*pt*P^(kappa-1) for P and require it strictly above
+    # the floor with an FD-safe 1% margin (the halved-p_fac control
+    # alone can false-pass on a tie).
+    dz_sel = (gz_a[win, win, 1:] - gz_a[win, win, :-1]) / FV3_GRAV
+    dm = delp[win, win, :] / FV3_GRAV
     pem = np.zeros(gz.shape)
     pem[:, :, 0] = ptop
     for k in range(km):
         pem[:, :, k + 1] = pem[:, :, k] + delp[:, :, k]
-    pm2 = delp / np.log(pem[:, :, 1:] / pem[:, :, :-1])
-    p_sel = np.exp(np.log(-dz_sel / (dm * FV3_RDGAS * pt))
+    pm2 = delp[win, win, :] / np.log(pem[win, win, 1:]
+                                     / pem[win, win, :-1])
+    p_sel = np.exp(np.log(-dz_sel / (dm * FV3_RDGAS * pt[win, win, :]))
                    / (FV3_KAPPA - 1.0))
     assert (p_sel > 1.01 * p_fac * pm2).all(), \
         "floor margin < 1% somewhere on the riem_c gradient fixture"
@@ -453,6 +467,17 @@ def test_riem_c_jax_check_grads_order2_away_from_floor():
     check_grads(g, (jnp.asarray(hs), jnp.asarray(delp),
                     jnp.asarray(ws), jnp.asarray(pef0)),
                 order=2, modes=("fwd", "rev"))
+
+    # Non-vacuity (codex riem r1 #1): the pef and gz passthrough
+    # gradients are NONZERO on the halo ring (2*value/scale from the
+    # squared loss), so a broken passthrough VJP cannot hide.
+    g_pef = jax.grad(lambda pef_: g(jnp.asarray(hs), jnp.asarray(delp),
+                                    jnp.asarray(ws), pef_))(
+        jnp.asarray(pef0))
+    assert np.abs(np.asarray(g_pef)[halo2, :]).max() > 0.0
+    g_gz = jax.grad(lambda gz_: f(jnp.asarray(w3), gz_,
+                                  jnp.asarray(pt)))(jnp.asarray(gz))
+    assert np.abs(np.asarray(g_gz)[halo2, :]).max() > 0.0
 
 
 # ------------------------------------------------------------ guards
@@ -654,12 +679,17 @@ def test_riem3_jax_check_grads_order2_away_from_floor():
     zh[:, :, km] = zs
     for k in range(km - 1, -1, -1):
         zh[:, :, k] = zh[:, :, k + 1] - dzh[:, :, k]
-    fx = dict(zs=zs, w=w, delz=np.zeros((ni, nj, km)), pt=pt, delp=delp,
-              zh=zh, pe=np.zeros((ni + 2, km + 1, nj + 2)),
-              ppe=np.zeros((fi, fj, km + 1)),
-              pk3=np.zeros((fi, fj, km + 1)),
-              pk=np.zeros((ni, nj, km + 1)),
-              peln=np.zeros((ni, km + 1, nj)), ws=ws)
+    # NONZERO in/out operands (codex riem r1 #2: zero seeds made every
+    # passthrough gradient identically zero, so the g-group check was
+    # vacuous).  With these seeds the pe ring and the ppe/pk3 halos
+    # contribute 2*value/scale to the loss gradient.
+    fx = dict(zs=zs, w=w, delz=rng.standard_normal((ni, nj, km)),
+              pt=pt, delp=delp, zh=zh,
+              pe=rng.standard_normal((ni + 2, km + 1, nj + 2)),
+              ppe=rng.standard_normal((fi, fj, km + 1)),
+              pk3=rng.standard_normal((fi, fj, km + 1)),
+              pk=rng.standard_normal((ni, nj, km + 1)),
+              peln=rng.standard_normal((ni, km + 1, nj)), ws=ws)
     kw = dict(use_logp=False, last_call=True, fp_out=False)
 
     out_a = _run_jax_riem3(100.0, bd, km, FV3_KAPPA, ptop, fx, p_fac,
@@ -701,16 +731,38 @@ def test_riem3_jax_check_grads_order2_away_from_floor():
                     jnp.asarray(delp), jnp.asarray(zh),
                     jnp.asarray(ws)), order=2, modes=("fwd", "rev"))
 
-    def g(delz_, pe_, ppe_, pk3_, pk_, peln_):
+    def g(delz_, pe_, ppe_, pk3_, pk_, peln_, flags=kw):
         return _loss(riem3_jax(
             1, 100.0, bounds, km, FV3_KAPPA, 1004.6, ptop,
             jnp.asarray(zs), jnp.asarray(w), delz_, jnp.asarray(pt),
             jnp.asarray(delp), jnp.asarray(zh), pe_, ppe_, pk3_, pk_,
-            peln_, jnp.asarray(ws), p_fac, 1.0, **kw))
+            peln_, jnp.asarray(ws), p_fac, 1.0, **flags))
 
-    check_grads(g, tuple(jnp.asarray(fx[k]) for k in
-                         ("delz", "pe", "ppe", "pk3", "pk", "peln")),
-                order=2, modes=("fwd", "rev"))
+    g_args = tuple(jnp.asarray(fx[k]) for k in
+                   ("delz", "pe", "ppe", "pk3", "pk", "peln"))
+    check_grads(g, g_args, order=2, modes=("fwd", "rev"))
+
+    # Non-vacuity (codex riem r1 #2): under the deck flags the pe ring
+    # and the ppe/pk3 halos DO reach the loss — their gradients must be
+    # nonzero.  delz/pk/peln are fully overwritten under last_call=True,
+    # so their true gradient is zero there; the flipped arm below gives
+    # pk/peln (and pe wholly) a real identity-passthrough gradient.
+    grads = jax.grad(g, argnums=(1, 2, 3))(*g_args)
+    for name, ga in zip(("pe", "ppe", "pk3"), grads):
+        assert np.abs(np.asarray(ga)).max() > 0.0, (name, "zero grad")
+
+    kw_flip = dict(use_logp=False, last_call=False, fp_out=False)
+    check_grads(lambda pe_, pk_, peln_: g(g_args[0], pe_, g_args[2],
+                                          g_args[3], pk_, peln_,
+                                          flags=kw_flip),
+                (g_args[1], g_args[4], g_args[5]), order=2,
+                modes=("fwd", "rev"))
+    grads_flip = jax.grad(
+        lambda pe_, pk_, peln_: g(g_args[0], pe_, g_args[2], g_args[3],
+                                  pk_, peln_, flags=kw_flip),
+        argnums=(0, 1, 2))(g_args[1], g_args[4], g_args[5])
+    for name, ga in zip(("pe", "pk", "peln"), grads_flip):
+        assert np.abs(np.asarray(ga)).max() > 0.0, (name, "zero grad")
 
 
 # ------------------------------------------------------------ guards
