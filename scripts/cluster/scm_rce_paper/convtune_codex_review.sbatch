@@ -20,10 +20,22 @@ WT=${WT:?export WT=<pinned worktree>}
 PIN=${PIN:?export PIN=<sha> the worktree must be at}
 # Codex needs a NODE-LOCAL CODEX_HOME: a shared-FS home has failed before, and
 # a bad CODEX_HOME exits 0 having reviewed NOTHING.
-export CODEX_HOME=/tmp/codex_home_$SLURM_JOB_ID
-mkdir -p $CODEX_HOME
-cp /burg-archive/home/pg2328/.codex/auth.json $CODEX_HOME/ 2>/dev/null || {
-  echo "FATAL: could not stage codex auth"; exit 90; }
+# CODEX_HOME must be node-local AND must still exist when codex reads it.
+# On g059 (job 9361561) the /tmp dir vanished between `cp` and codex start —
+# "Error finding codex home: ... that path does not exist" — so the location is
+# chosen by TESTING it, and codex's own exit status is checked rather than
+# assumed (a bad CODEX_HOME has historically exited 0 having reviewed nothing).
+for _CH in "${SLURM_TMPDIR:-}" "/tmp" "/burg-archive/glab/users/pg2328/_codexhome"; do
+  [ -n "$_CH" ] || continue
+  CANDIDATE="$_CH/codex_home_${SLURM_JOB_ID:-$$}"
+  mkdir -p "$CANDIDATE" 2>/dev/null || continue
+  cp /burg-archive/home/pg2328/.codex/auth.json "$CANDIDATE/" 2>/dev/null || continue
+  [ -f "$CANDIDATE/auth.json" ] || continue
+  export CODEX_HOME="$CANDIDATE"
+  break
+done
+[ -n "${CODEX_HOME:-}" ] || { echo "FATAL: no usable CODEX_HOME"; exit 90; }
+echo "CODEX_HOME=$CODEX_HOME (auth staged: $(ls -1 $CODEX_HOME/auth.json 2>/dev/null | wc -l))"
 export PATH=/burg-archive/home/pg2328/.nvm/versions/node/v24.16.0/bin:$PATH
 echo "host: $(hostname)"; echo "CODEX_HOME=$CODEX_HOME"; codex --version || exit 91
 
