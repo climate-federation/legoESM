@@ -49,7 +49,14 @@ PIN=${PIN:?export PIN=<sha> the worktree must be at}
 ARM=${ARM:-implicit_flux}
 REPO=/burg-archive/glab/users/pg2328/legoESM
 REF=$REPO/results/rcemip_ref_sam300
-OUT=$REPO/results/scm_rce_convtune/arm_${ARM}_morrison
+BL_ANCHOR=${BL_ANCHOR:-0.0}
+# Two labelled variables vs the 2026-08-10 arm, in ONE new baseline rather
+# than a comparison against it: the precipitation term is now live (it reports
+# the applied microphysics evaluation, so it discriminates between schemes
+# instead of adding a constant 0.798 to every score), and BL_ANCHOR=-1
+# disables the SST anchor so the sensible heat flux can be nonzero.
+OUTTAG=$(awk -v b="$BL_ANCHOR" 'BEGIN{print (b<0)?"_noanchor":""}')
+OUT=$REPO/results/scm_rce_convtune/arm_${ARM}_morrison${OUTTAG}
 EVALS_PER_PARAM=${EVALS_PER_PARAM:-12}
 EVALS_MIN=${EVALS_MIN:-48}
 EVALS_MAX=${EVALS_MAX:-240}
@@ -117,7 +124,7 @@ else
 fi
 [ "$EVALS" -gt "$EVALS_MAX" ] && EVALS=$EVALS_MAX
 
-echo "SCHEME=$SCHEME  KERNEL_ARM=$ARM  n_params=$NPARAM  tune_evals=$EVALS"
+echo "SCHEME=$SCHEME  KERNEL_ARM=$ARM  n_params=$NPARAM  tune_evals=$EVALS  bl_anchor_top_m=$BL_ANCHOR"
 echo "REFERENCE=$REF"
 echo "OUT=$OUT"
 
@@ -135,6 +142,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --radiation rrtmgp \
   --scm-convection-substeps 10 \
   --scm-microphysics-substeps 30 \
+  --bl-anchor-top-m $BL_ANCHOR \
   --tune-evals $EVALS \
   --tune-seed 20260810 \
   --no-merge 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
