@@ -9,10 +9,15 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/mlefix90_%j.out
 #
 # MLE A/B RELAUNCH on the FIXED operator (vertical bolus branch, commit
-# 465823b83).  Control = nemolev_trp_fwreal_d90 (already run + scored).  The
-# command is the control's manifest command + --mle --mle-ce 0.06 and a new
+# 465823b83).  Control = nemolev_trp_gwcorr_d90 (VSF closure; already run +
+# scored).  The fwreal control's command is NOT runnable at the fix SHA: the
+# current code rejects --freshwater-closure real_freshwater with
+# --sss-restore (the virtual-salt restoring is wrong under volume dilution,
+# #1484), a guard added after that control ran -- job 9361926 failed on it.
+# The command is the gwcorr manifest command + --mle --mle-ce 0.06 and a new
 # --output; the MLE code paths are INACTIVE in the control, so the pair
 # remains effectively one-variable even though the code revision differs.
+# Day-30 dSSS comparisons therefore use the GWCORR arm as control.
 #
 # Predecessor arm nemolev_trp_mle_d90 (job 9337800, PRE-fix code) REFUTED its
 # own prediction and corrupted the state (-54 psu river-plume extremes, global
