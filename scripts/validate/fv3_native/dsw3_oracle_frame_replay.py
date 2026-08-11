@@ -88,6 +88,22 @@ def main(argv=None):
                     help="extchain run dir (extchain_t*.mf/.dat with "
                          "the M_* metric families)")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--perturb", action="store_true",
+                    help="H-AMP mechanism test: rerun the replay with "
+                         "amplitude-matched roundoff noise (the measured "
+                         "port-lane input level) on u/v/uc/vc and report "
+                         "the OUTPUT diff vs the unperturbed replay, at "
+                         "1x and 0.1x noise plus a gate-free hord_mt=2 "
+                         "variant.  PREREGISTERED: a smooth mechanism "
+                         "scales the max diff linearly with the noise "
+                         "and survives hord 2; a discontinuous limiter-"
+                         "gate/donor flip keeps a ~1e-5-class max at "
+                         "0.1x and collapses at hord 2.")
+    ap.add_argument("--perturb-rel", type=float, default=3e-14,
+                    help="noise amplitude as a fraction of each field's "
+                         "max |value| (default: the measured S02/S07 "
+                         "port-lane relative level)")
+    ap.add_argument("--perturb-seed", type=int, default=20260811)
     args = ap.parse_args(argv)
 
     CMP = _load_cmp()
@@ -264,12 +280,70 @@ def main(argv=None):
                          "the instrument does not exercise the path "
                          "under test.")
 
+    # ---- SELECTOR-AMPLITUDE SWEEP -----------------------------------
+    # Discriminates the two mechanisms that both produce a large output
+    # difference from a tiny input difference.  They have DIFFERENT
+    # FUNCTIONAL FORMS, which is what is measured here, not magnitudes:
+    #
+    #   branch tie-break  the upwind selector is a numerical zero, so a
+    #                     perturbation that crosses it swaps the donor
+    #                     cell.  d|Out| SATURATES: once eps exceeds the
+    #                     selector magnitude the response stops growing
+    #                     with eps (it is the fixed donor gap).
+    #   stiff-but-smooth  d|Out| stays PROPORTIONAL to eps over every
+    #                     decade, with no plateau.
+    #
+    # Built-in control: tile 3 has ZERO near-zero selector cells in the
+    # census, so its strips MUST stay linear in eps whatever tile 1
+    # does.  A sweep where BOTH tiles saturate would indict the probe,
+    # not the physics.
+    #
+    # THE PERTURBATION MUST BE ADDITIVE.  A first version of this sweep
+    # used v *= (1 + eps), which is SIGN-PRESERVING: scaling can never
+    # move a selector across zero, so it cannot flip an upwind branch
+    # and the tie-break hypothesis was untestable by construction (both
+    # tiles came back perfectly linear, ratios flat over four decades --
+    # a test that could not fail).  An ADDITIVE shift of size
+    # eps * max|v| can cross zero once eps * max|v| exceeds the local
+    # selector magnitude, which on the flagged strips is ~1e-17..1e-19.
+    sweep = []
+    print("\nSELECTOR-AMPLITUDE SWEEP (max|d ubbtemp| on the W/E strips; "
+          "tile 1 = flagged by the census, tile 3 = unflagged control):")
+    print(f"{'eps':>10s} {'t1_flagged':>14s} {'t1/eps':>12s} "
+          f"{'t3_control':>14s} {'t3/eps':>12s}")
+    base = {}
+    for t_s in (0, 2):
+        base[t_s] = replay_tile(t_s)
+    for eps_s in (1e-20, 1e-18, 1e-16, 1e-14, 1e-12, 1e-10, 1e-8):
+        row = {"eps": eps_s}
+        for t_s, lbl in ((0, "t1"), (2, "t3")):
+            v_s = np.array(stage[t_s]["S02_extuv_v"][:, :, 0], copy=True)
+            vmax = float(np.abs(v_s).max())
+            if vmax == 0.0:
+                raise SystemExit(f"sweep would perturb an all-zero v on "
+                                 f"tile {t_s+1} -- control void")
+            v_s = v_s + eps_s * vmax   # ADDITIVE: can cross zero
+            out_s = replay_tile(t_s, v_override=v_s)
+            d_s = np.abs(out_s["ubbtemp"][:, :, 0]
+                         - base[t_s]["ubbtemp"][:, :, 0])
+            if np.isnan(d_s).any():
+                raise SystemExit(f"C3: NaN in swept ubbtemp tile {t_s+1}")
+            sm_s = edge_strip_maxima(d_s)
+            row[lbl] = max(sm_s["W"], sm_s["E"])
+        print(f"{eps_s:10.0e} {row['t1']:14.4e} "
+              f"{row['t1'] / eps_s:12.3e} {row['t3']:14.4e} "
+              f"{row['t3'] / eps_s:12.3e}")
+        sweep.append(row)
+    print("  (a FLAT response/eps column = saturation; a CONSTANT "
+          "response/eps ratio = linear. No verdict printed here.)")
+
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"rows": rows,
                        "worst_cells": worst_cells,
                        "c2_moved_north": moved["N"],
-                       "c2_predicted": predicted}, fh, indent=2)
+                       "c2_predicted": predicted,
+                       "sweep": sweep}, fh, indent=2)
         print(f"wrote {args.json}")
     return 0
 
