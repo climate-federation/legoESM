@@ -143,7 +143,17 @@ def main(argv: list[str] | None = None) -> int:
     from legoesm.thermo import saturation_mixing_ratio
     import jax.numpy as jnp
 
-    surf_cfg = cfg.turbulence.surface
+    # The surface-layer config hangs off the ACTIVE turbulence SCHEME, not off
+    # TurbulenceConfig itself (which carries only the scheme name and the
+    # per-scheme sub-configs).  Assuming the latter cost a run: AttributeError,
+    # 'TurbulenceConfig' object has no attribute 'surface' (job 9361582).
+    _turb_sub = getattr(cfg.turbulence, cfg.turbulence.scheme, None)
+    surf_cfg = getattr(_turb_sub, "surface", None)
+    if surf_cfg is None:
+        raise SystemExit(
+            f"turbulence scheme {cfg.turbulence.scheme!r} exposes no surface- "
+            "layer config, so E cannot be measured from the shipped bulk "
+            "formula for this configuration.")
     r_long = runs["long"][1]
     T_a = float(np.asarray(r_long.T_profile)[-1])
     q_a = float(np.asarray(r_long.qv_profile)[-1])
