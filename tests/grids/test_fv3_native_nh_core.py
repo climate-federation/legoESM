@@ -91,9 +91,30 @@ def _balanced_column(rng, ni=NI, km=KM):
     return ptop, dm_pa, dm, pm2, pem, pt2, dz2
 
 
-def test_sim1_tridiagonal_systems_solved_exactly():
+def _run_native_sim1(dt, rgas, gama, kappa, dm, pm2, pem, w2, dz2, pt2,
+                     ws, p_fac):
+    """Functional adapter over the in-place native solver.
+
+    Shared driver signature for the impl-parameterized certificates below
+    (the JAX twin in test_fv3_nh_core.py plugs its own adapter in here):
+    returns (pe, w2, dz2) without mutating the caller's arrays.
+    """
+    ni, km = dm.shape
+    pe = np.zeros((ni, km + 1))
+    w2 = np.array(w2)
+    dz2 = np.array(dz2)
+    sim1_solver(dt, 0, ni - 1, km, rgas, gama, kappa, pe, dm, pm2, pem,
+                w2, dz2, pt2, ws, p_fac)
+    return pe, w2, dz2
+
+
+def sim1_dense_certificate(run_sim1):
     """Rebuild BOTH tridiagonal systems from the INPUTS and verify the
-    solver's pp and w against a dense numpy.linalg.solve."""
+    solver's pp and w against a dense numpy.linalg.solve.
+
+    ``run_sim1`` is a functional driver with ``_run_native_sim1``'s
+    signature — the certificate is implementation-agnostic so the JAX
+    lane certifies against the SAME algebra (no duplicated numerics)."""
     rng = np.random.default_rng(7)
     ptop, dm_pa, dm, pm2, pem, pt2, dz0 = _balanced_column(rng)
     dt = 100.0
@@ -110,10 +131,9 @@ def test_sim1_tridiagonal_systems_solved_exactly():
     # sign mutant passes (codex NH r1 #2: ws=0.7 separates the two signs
     # by 1.3 in w2 bottom).
     ws = 0.7 * np.ones(NI)
-    pe = np.zeros((NI, KM + 1))
 
-    sim1_solver(dt, 0, NI - 1, KM, FV3_RDGAS, gama, FV3_KAPPA, pe, dm,
-                pm2, pem, w2, dz2, pt2, ws, p_fac)
+    pe, w2, dz2 = run_sim1(dt, FV3_RDGAS, gama, FV3_KAPPA, dm, pm2, pem,
+                           w2, dz2, pt2, ws, p_fac)
 
     # --- independent rebuild of system 1 (the pp tridiagonal) ---
     pe0 = np.exp(gama * np.log(-dm / dz_in * FV3_RDGAS * pt2)) - pm2
@@ -199,19 +219,27 @@ def test_sim1_tridiagonal_systems_solved_exactly():
     assert np.abs(dz2 - dz_in).max() > 1e-2
 
 
-def test_sim1_balanced_column_stays_at_rest():
+def test_sim1_tridiagonal_systems_solved_exactly():
+    sim1_dense_certificate(_run_native_sim1)
+
+
+def sim1_balanced_rest_certificate(run_sim1):
     """w=0 + exact hydrostatic dz => the implicit solve returns w ~ 0
-    and dz2 nearly unchanged (only the pe-integral rounding moves it)."""
+    and dz2 nearly unchanged (only the pe-integral rounding moves it).
+    Implementation-agnostic (same driver signature as the dense cert)."""
     rng = np.random.default_rng(11)
     ptop, dm_pa, dm, pm2, pem, pt2, dz2 = _balanced_column(rng)
     gama = 1.0 / (1.0 - FV3_KAPPA)
     w2 = np.zeros((NI, KM))
     dz_in = np.array(dz2)
-    pe = np.zeros((NI, KM + 1))
-    sim1_solver(1920.0, 0, NI - 1, KM, FV3_RDGAS, gama, FV3_KAPPA, pe, dm,
-                pm2, pem, w2, dz2, pt2, np.zeros(NI), 0.05)
+    pe, w2, dz2 = run_sim1(1920.0, FV3_RDGAS, gama, FV3_KAPPA, dm, pm2,
+                           pem, w2, dz2, pt2, np.zeros(NI), 0.05)
     assert np.abs(w2).max() < 1e-7, np.abs(w2).max()
     assert (np.abs(dz2 - dz_in) / np.abs(dz_in)).max() < 1e-9
+
+
+def test_sim1_balanced_column_stays_at_rest():
+    sim1_balanced_rest_certificate(_run_native_sim1)
 
 
 def test_update_dz_c_zero_wind_is_identity_plus_limiter():
