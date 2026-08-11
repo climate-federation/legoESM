@@ -1,11 +1,12 @@
 """FV3 non-hydrostatic core -- JAX lane (SIM1_solver, Riem_Solver_c,
-Riem_Solver3).
+Riem_Solver3, edge_profile, update_dz_c).
 
 Functional, jit-compatible mirror of the certified NumPy fp64 lane
 (``fv3_native_nh_core.py``, itself a loop-faithful port of the pinned
 oracle: ``nh_utils.F90:1193-1324`` SIM1, ``nh_utils.F90:313-420``
-Riem_Solver_c, ``nh_core.F90:42-206`` Riem_Solver3 — non-MOIST_CAPPA /
-non-USE_COND branches).  The NumPy lane stays the oracle-parity
+Riem_Solver_c, ``nh_core.F90:42-206`` Riem_Solver3,
+``nh_utils.F90:1535-1641`` edge_profile, ``nh_utils.F90:49-191``
+update_dz_c — non-MOIST_CAPPA / non-USE_COND branches, ``dz_min = 2.``).  The NumPy lane stays the oracle-parity
 reference; this module is the production/JAX twin and is certified
 AGAINST the NumPy lane, never against the Fortran directly (one
 authority per hop).
@@ -46,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np  # STATIC trace-time scalars only (peln1/ptk), never traced
 from jax import lax
 
+from legoesm.core.fv3_native_nh_core import DZ_MIN  # nh_utils.F90:40-44
 from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
 
 # nh_utils.F90:45 (math constant; mirrors the NumPy lane's module constant)
@@ -495,6 +497,332 @@ def make_riem_solver_c_jit(fn=riem_solver_c):
 riem_solver_c_jit = make_riem_solver_c_jit()
 
 
+def edge_profile(q1: jnp.ndarray, q2: jnp.ndarray, j_lo: int, km: int,
+                 dp0: jnp.ndarray, uniform_grid: bool, limiter: int):
+    """JAX twin of ``fv3_native_nh_core.edge_profile``
+    (nh_utils.F90:1535-1641).
+
+    Same row-pair shape as the NumPy lane: ``q1``/``q2`` are (ni, km) for
+    one j row, ``dp0`` is (km,), and the return is the pair of (ni, km+1)
+    edge profiles.  ``j_lo`` is unused arithmetic-wise (kept for call-site
+    readability against the oracle) and, like ``km``/``uniform_grid``/
+    ``limiter``, is STATIC — the two grid branches and the limiter are
+    Python ``if`` arms, never traced.
+
+    The interface tridiagonal is a sequential Thomas recurrence in k —
+    ``lax.scan``, NOT associative_scan (parity doctrine, module
+    docstring).  The k-recurrence coefficients (``gam``/``gak``) depend
+    only on ``dp0``, so they ride the scan carry as scalars; the NumPy
+    lane stores them as (ni,) vectors of identical entries, which is the
+    same elementwise arithmetic.
+
+    Differentiability: both grid branches are smooth (rational in dp0 and
+    linear in q).  The ``limiter != 0`` zero-crossing clamp is a
+    ``jnp.where`` on the sign of ``q*qe`` — C^0 at the crossing; grads
+    are exact wherever ``q1[:,0]*qe1[:,0]`` (and the three siblings) are
+    bounded away from 0 (the pinned deck runs ``limiter=0``, where the
+    branch does not exist in the trace at all).
+
+    Requires ``km >= 2``: at km=1 the top row reads ``q1[:, 1]`` (out of
+    bounds — the NumPy lane raises IndexError there) and the bottom row
+    reads ``q[:, km-2]``, which would silently WRAP to the last column in
+    both lanes.  The explicit guard turns both into one loud error.
+    """
+    del j_lo
+    _require_f64_jax("edge_profile", {"q1": q1, "q2": q2, "dp0": dp0})
+    q1 = jnp.asarray(q1)
+    q2 = jnp.asarray(q2)
+    dp0 = jnp.asarray(dp0)
+    if km < 2:
+        raise ValueError(
+            f"edge_profile: km={km} < 2 unsupported (the top row reads "
+            f"q[:, 1] and the bottom row reads q[:, km-2]; the NumPy lane "
+            f"raises IndexError at km=1)")
+    if q1.shape[1] != km or q2.shape[1] != km:
+        raise ValueError(f"edge_profile: q1/q2 must be (ni, {km}), got "
+                         f"{q1.shape}, {q2.shape}")
+    if dp0.shape != (km,):
+        raise ValueError(f"edge_profile: dp0 must be ({km},), got "
+                         f"{dp0.shape}")
+
+    if uniform_grid:                                   # :1552-1581
+        r2o3 = 2.0 / 3.0
+        r4o3 = 4.0 / 3.0
+        e1_0 = r4o3 * q1[:, 0] + r2o3 * q1[:, 1]
+        e2_0 = r4o3 * q2[:, 0] + r2o3 * q2[:, 1]
+        coef0 = jnp.asarray(7.0 / 3.0, dp0.dtype)      # gak(1)
+
+        def _fwd_u(carry, x):
+            gak_prev, e1p, e2p = carry
+            q1m, q1k, q2m, q2k = x
+            gak = 1.0 / (4.0 - gak_prev)
+            e1 = (3.0 * (q1m + q1k) - e1p) * gak
+            e2 = (3.0 * (q2m + q2k) - e2p) * gak
+            return (gak, e1, e2), (gak, e1, e2)
+
+        xs = (q1[:, :-1].T, q1[:, 1:].T, q2[:, :-1].T, q2[:, 1:].T)
+        ((gak_last, e1_last, e2_last),
+         (coef_tail, e1_tail, e2_tail)) = lax.scan(
+            _fwd_u, (coef0, e1_0, e2_0), xs)
+
+        bet = 1.0 / (1.5 - 3.5 * gak_last)             # :1571
+        e1_bot = (4.0 * q1[:, km - 1] + q1[:, km - 2]
+                  - 3.5 * e1_last) * bet
+        e2_bot = (4.0 * q2[:, km - 1] + q2[:, km - 2]
+                  - 3.5 * e2_last) * bet
+    else:                                              # :1583-1618
+        g_arr = dp0[:-1] / dp0[1:]                     # gk for k=1..km-1
+        g0 = dp0[1] / dp0[0]
+        xt1 = 2.0 * g0 * (g0 + 1.0)
+        bet0 = g0 * (g0 + 0.5)
+        e1_0 = (xt1 * q1[:, 0] + q1[:, 1]) / bet0
+        e2_0 = (xt1 * q2[:, 0] + q2[:, 1]) / bet0
+        coef0 = (1.0 + g0 * (g0 + 1.5)) / bet0         # gam(1)
+
+        def _fwd_n(carry, x):
+            gam_prev, e1p, e2p = carry
+            gk, q1m, q1k, q2m, q2k = x
+            bet_v = 2.0 + 2.0 * gk - gam_prev
+            e1 = (3.0 * (q1m + gk * q1k) - e1p) / bet_v
+            e2 = (3.0 * (q2m + gk * q2k) - e2p) / bet_v
+            gam = gk / bet_v
+            return (gam, e1, e2), (gam, e1, e2)
+
+        xs = (g_arr, q1[:, :-1].T, q1[:, 1:].T, q2[:, :-1].T,
+              q2[:, 1:].T)
+        ((gam_last, e1_last, e2_last),
+         (coef_tail, e1_tail, e2_tail)) = lax.scan(
+            _fwd_n, (coef0, e1_0, e2_0), xs)
+
+        # :1602-1609 — the Fortran reuses the LAST loop gk; g_arr[km-2]
+        # is the same division dp0(km-1)/dp0(km), bit-identical.
+        gk = g_arr[km - 2]
+        a_bot = 1.0 + gk * (gk + 1.5)
+        xt1b = 2.0 * gk * (gk + 1.0)
+        xt2 = gk * (gk + 0.5) - a_bot * gam_last
+        e1_bot = (xt1b * q1[:, km - 1] + q1[:, km - 2]
+                  - a_bot * e1_last) / xt2
+        e2_bot = (xt1b * q2[:, km - 1] + q2[:, km - 2]
+                  - a_bot * e2_last) / xt2
+
+    # Back-substitution k=km-1..0 (:1577-1580 / :1612-1617): the raw
+    # forward rows are e[k]=e_0..e_last; coef[k] is gak/gam for k=0..km-1.
+    e1_raw = jnp.concatenate([e1_0[:, None], e1_tail.T], axis=1)  # (ni,km)
+    e2_raw = jnp.concatenate([e2_0[:, None], e2_tail.T], axis=1)
+    coef = jnp.concatenate([coef0[None], coef_tail], axis=0)      # (km,)
+
+    def _bwd(carry, x):
+        e1n, e2n = carry
+        e1r, e2r, ck = x
+        e1 = e1r - ck * e1n
+        e2 = e2r - ck * e2n
+        return (e1, e2), (e1, e2)
+
+    (_, (e1_head_rev, e2_head_rev)) = lax.scan(
+        _bwd, (e1_bot, e2_bot), (e1_raw.T, e2_raw.T, coef),
+        reverse=True)
+    qe1 = jnp.concatenate([e1_head_rev.T, e1_bot[:, None]], axis=1)
+    qe2 = jnp.concatenate([e2_head_rev.T, e2_bot[:, None]], axis=1)
+
+    if limiter != 0:                                   # :1623-1633
+        qe1 = qe1.at[:, 0].set(
+            jnp.where(q1[:, 0] * qe1[:, 0] < 0.0, 0.0, qe1[:, 0]))
+        qe2 = qe2.at[:, 0].set(
+            jnp.where(q2[:, 0] * qe2[:, 0] < 0.0, 0.0, qe2[:, 0]))
+        qe1 = qe1.at[:, km].set(
+            jnp.where(q1[:, km - 1] * qe1[:, km] < 0.0, 0.0,
+                      qe1[:, km]))
+        qe2 = qe2.at[:, km].set(
+            jnp.where(q2[:, km - 1] * qe2[:, km] < 0.0, 0.0,
+                      qe2[:, km]))
+    return qe1, qe2
+
+
+def _fill_4corners_3d(q: jnp.ndarray, direction: int, npx: int, npy: int,
+                      ilo: int, jlo: int, sw: bool, se: bool, ne: bool,
+                      nw: bool) -> jnp.ndarray:
+    """Functional twin of ``fv3_native_sw_core.fill_4corners`` on a 3-D
+    (i, j, k) array (the fill is k-independent, applied to all levels).
+
+    All corner indices are STATIC Fortran indices mapped to storage via
+    the (ilo, jlo) origins, exactly as the NumPy lane's ``fort`` views.
+    The assignments run in the oracle's source order (sw_core.F90:
+    3876-3893 XDir / :3895-3913 YDir); within one direction no target is
+    a later source, so the sequential ``.at`` chain equals the in-place
+    loop.
+    """
+    if direction == 1:
+        pairs = []
+        if sw:
+            pairs += [((-1, 0), (0, 2)), ((0, 0), (0, 1))]
+        if se:
+            pairs += [((npx + 1, 0), (npx, 2)), ((npx, 0), (npx, 1))]
+        if nw:
+            pairs += [((0, npy), (0, npy - 1)), ((-1, npy), (0, npy - 2))]
+        if ne:
+            pairs += [((npx, npy), (npx, npy - 1)),
+                      ((npx + 1, npy), (npx, npy - 2))]
+    elif direction == 2:
+        pairs = []
+        if sw:
+            pairs += [((0, 0), (1, 0)), ((0, -1), (2, 0))]
+        if se:
+            pairs += [((npx, 0), (npx - 1, 0)), ((npx, -1), (npx - 2, 0))]
+        if nw:
+            pairs += [((0, npy), (1, npy)), ((0, npy + 1), (2, npy))]
+        if ne:
+            pairs += [((npx, npy), (npx - 1, npy)),
+                      ((npx, npy + 1), (npx - 2, npy))]
+    else:  # pragma: no cover - guard (mirrors the NumPy lane)
+        raise ValueError(f"_fill_4corners_3d: dir={direction}")
+    for (ti, tj), (si, sj) in pairs:
+        q = q.at[ti - ilo, tj - jlo].set(q[si - ilo, sj - jlo])
+    return q
+
+
+def update_dz_c(bounds, km: int, dt: float, dp0: jnp.ndarray,
+                zs: jnp.ndarray, area: jnp.ndarray, ut: jnp.ndarray,
+                vt: jnp.ndarray, gz: jnp.ndarray, ws: jnp.ndarray,
+                npx: int, npy: int, *, sw_corner: bool, se_corner: bool,
+                ne_corner: bool, nw_corner: bool, grid_type: int = 0):
+    """JAX twin of ``fv3_native_nh_core.update_dz_c``
+    (nh_utils.F90:49-191).
+
+    Functional: the NumPy lane updates ``gz``/``ws`` in place; this twin
+    RETURNS ``(gz, ws)`` with the write window (i = is-1..ie+1,
+    j = js-1..je+1, the oracle's :166-171 loop) rewritten and every halo
+    cell carried through unchanged.  ``bounds`` is the STATIC
+    ``(is_, ie, js, je, ng)`` int tuple (same doctrine as
+    :func:`riem_solver_c`); ``dt``/``npx``/``npy``/corner flags/
+    ``grid_type`` are static too (the corner fill and the level branches
+    are Python arms).
+
+    The km+1 interface levels are INDEPENDENT in the oracle's k loop
+    (each level reads only the input gz), so they are batched over a
+    trailing k axis here — FP-identical because every flux/update op is
+    elementwise per (i, j, k).  The two sequential pieces stay
+    ``lax.scan``: none in the flux update, and the bottom-up ``dz_min``
+    monotonicity limiter (:179-189), whose ``jnp.maximum`` floor is C^0
+    at its boundary (grads are exact where every level clears the floor
+    strictly — same caveat class as sim1's p_fac floor).  The upwind
+    flux select (:143-164) is a ``jnp.where`` on the sign of the
+    advective wind — C^0 in ut/vt at exactly 0 wind at a flux point.
+
+    Requires ``km >= 2`` (the top/bottom extrapolation ratios read
+    dp0[1]/dp0[km-2]; at km=1 the NumPy lane raises IndexError on
+    dp0[1]) and ``ng >= 2`` (the upwind stencil reads i = is-2 / j =
+    js-2; with ng=1 the NumPy lane's fort views silently WRAP — here it
+    is a loud error).
+    """
+    _require_f64_jax("update_dz_c", {
+        "dp0": dp0, "zs": zs, "area": area, "ut": ut, "vt": vt,
+        "gz": gz, "ws": ws})
+    is_, ie, js, je, ng = bounds
+    if km < 2:
+        raise ValueError(
+            f"update_dz_c: km={km} < 2 unsupported (top/bottom ratios "
+            f"read dp0[1] and dp0[km-2]; the NumPy lane raises "
+            f"IndexError at km=1)")
+    if ng < 2:
+        raise ValueError(
+            f"update_dz_c: ng={ng} < 2 unsupported (the upwind flux "
+            f"stencil reads i = is-2; the NumPy lane's fort views would "
+            f"silently wrap)")
+    dp0 = jnp.asarray(dp0)
+    gz = jnp.asarray(gz)
+    ws = jnp.asarray(ws)
+    if dp0.shape != (km,):
+        raise ValueError(f"update_dz_c: dp0 must be ({km},), got "
+                         f"{dp0.shape}")
+    if gz.shape[2] != km + 1:
+        raise ValueError(f"update_dz_c: gz needs {km + 1} interfaces, "
+                         f"got {gz.shape[2]}")
+
+    rdt = 1.0 / dt
+    top_ratio = dp0[0] / (dp0[0] + dp0[1])              # :75
+    bot_ratio = dp0[km - 1] / (dp0[km - 2] + dp0[km - 1])   # :76
+    ilo = is_ - ng
+    jlo = js - ng
+    a0 = ng - 1                       # storage row of i = is-1
+    b0 = ng - 1                       # storage col of j = js-1
+    ni_w = ie - is_ + 3               # write window is-1..ie+1
+    nj_w = je - js + 3
+
+    # --- advective interface winds, all km+1 levels at once ---
+    # :94-133 — top extrapolation / interior dp0-weighted mean / bottom
+    # extrapolation; elementwise per (i, j), so batching over k is
+    # FP-identical to the oracle's per-level loop.
+    w_lo = dp0[:-1]                   # dp0[k-1] for interior k=1..km-1
+    w_hi = dp0[1:]                    # dp0[k]
+    int_ratio = 1.0 / (w_lo + w_hi)                     # :123
+    x_top = ut[:, :, 0] + (ut[:, :, 0] - ut[:, :, 1]) * top_ratio
+    x_bot = (ut[:, :, km - 1]
+             + (ut[:, :, km - 1] - ut[:, :, km - 2]) * bot_ratio)
+    x_int = (w_hi * ut[:, :, :-1] + w_lo * ut[:, :, 1:]) * int_ratio
+    xful = jnp.concatenate(
+        [x_top[:, :, None], x_int, x_bot[:, :, None]], axis=2)
+    y_top = vt[:, :, 0] + (vt[:, :, 0] - vt[:, :, 1]) * top_ratio
+    y_bot = (vt[:, :, km - 1]
+             + (vt[:, :, km - 1] - vt[:, :, km - 2]) * bot_ratio)
+    y_int = (w_hi * vt[:, :, :-1] + w_lo * vt[:, :, 1:]) * int_ratio
+    yful = jnp.concatenate(
+        [y_top[:, :, None], y_int, y_bot[:, :, None]], axis=2)
+
+    # --- corner-filled upwind source fields (:136-164) ---
+    # The oracle fills a per-level COPY (gz itself keeps its halo
+    # corners): direction 1 before the x fluxes, direction 2 ON TOP of
+    # it before the y fluxes, and the flux-form numerator's center value
+    # reads the doubly-filled copy.
+    if grid_type < 3:
+        g2x = _fill_4corners_3d(gz, 1, npx, npy, ilo, jlo, sw_corner,
+                                se_corner, ne_corner, nw_corner)
+        g2y = _fill_4corners_3d(g2x, 2, npx, npy, ilo, jlo, sw_corner,
+                                se_corner, ne_corner, nw_corner)
+    else:
+        g2x = gz
+        g2y = gz
+
+    # Flux windows (:143-164): x on (is-1..ie+2, js-1..je+1), y on
+    # (is-1..ie+1, js-1..je+2).
+    xw = xful[a0:a0 + ni_w + 1, b0:b0 + nj_w, :]
+    yw = yful[a0:a0 + ni_w, b0:b0 + nj_w + 1, :]
+    fx = xw * jnp.where(xw > 0.0,
+                        g2x[a0 - 1:a0 + ni_w, b0:b0 + nj_w, :],
+                        g2x[a0:a0 + ni_w + 1, b0:b0 + nj_w, :])
+    fy = yw * jnp.where(yw > 0.0,
+                        g2y[a0:a0 + ni_w, b0 - 1:b0 + nj_w, :],
+                        g2y[a0:a0 + ni_w, b0:b0 + nj_w + 1, :])
+
+    # Flux-form update (:166-171).
+    aw = area[a0:a0 + ni_w, b0:b0 + nj_w][:, :, None]
+    center = g2y[a0:a0 + ni_w, b0:b0 + nj_w, :]
+    num = (center * aw + fx[:-1, :, :] - fx[1:, :, :]
+           + fy[:, :-1, :] - fy[:, 1:, :])
+    den = (aw + xw[:-1, :, :] - xw[1:, :, :]
+           + yw[:, :-1, :] - yw[:, 1:, :])
+    gz_win = num / den
+
+    # ws diagnosis (:173-178) — from the post-flux bottom interface,
+    # which the limiter below never touches (k runs km-1..0).
+    ws_win = (zs[a0:a0 + ni_w, b0:b0 + nj_w] - gz_win[:, :, km]) * rdt
+
+    # Bottom-up dz_min monotonicity limiter (:179-189): sequential in k
+    # (each level reads the LIMITED level below) — reverse lax.scan.
+    def _lim(gz_below, gz_k):
+        gz_new = jnp.maximum(gz_k, gz_below + DZ_MIN)
+        return gz_new, gz_new
+
+    _, lim_rev = lax.scan(_lim, gz_win[:, :, km],
+                          jnp.moveaxis(gz_win[:, :, :km], 2, 0),
+                          reverse=True)
+    gz_lim = jnp.concatenate(
+        [jnp.moveaxis(lim_rev, 0, 2), gz_win[:, :, km:km + 1]], axis=2)
+
+    gz_out = gz.at[a0:a0 + ni_w, b0:b0 + nj_w, :].set(gz_lim)
+    ws_out = ws.at[a0:a0 + ni_w, b0:b0 + nj_w].set(ws_win)
+    return gz_out, ws_out
+
+
 def make_riem_solver3_jit(fn=riem_solver3):
     """The ONE jit policy for the D-stage Riemann driver.
 
@@ -509,3 +837,35 @@ def make_riem_solver3_jit(fn=riem_solver3):
 
 
 riem_solver3_jit = make_riem_solver3_jit()
+
+
+def make_edge_profile_jit(fn=edge_profile):
+    """The ONE jit policy for edge_profile (same doctrine as
+    :func:`make_sim1_solver_jit`: production entry point and any
+    instrumented retrace-test wrapper are built HERE).
+
+    Static: j_lo/km (window labels), uniform_grid/limiter (Python branch
+    selectors — never traced).  q1/q2/dp0 dynamic.  No donated buffers
+    (grad-path doctrine).
+    """
+    return jax.jit(fn, static_argnums=(2, 3, 5, 6))
+
+
+edge_profile_jit = make_edge_profile_jit()
+
+
+def make_update_dz_c_jit(fn=update_dz_c):
+    """The ONE jit policy for the C-stage height update.
+
+    Static: bounds/km/dt/npx/npy positionally plus the corner flags and
+    grid_type as static_argnames — all deck constants or Python branch
+    selectors.  dp0/zs/area/ut/vt/gz/ws dynamic.  No donated buffers
+    (grad-path doctrine).
+    """
+    return jax.jit(
+        fn, static_argnums=(0, 1, 2, 10, 11),
+        static_argnames=("sw_corner", "se_corner", "ne_corner",
+                         "nw_corner", "grid_type"))
+
+
+update_dz_c_jit = make_update_dz_c_jit()
