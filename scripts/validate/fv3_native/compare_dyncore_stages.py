@@ -323,13 +323,14 @@ def stage_rows():
                 "xfx": "yfx", "yfx": "xfx"}[nm_o]
         r("S08_dsw1", "S08_dsw1", nm_p, f"S08_dsw1_{nm_o}",
           f"S08_dsw1_{part}", kind)
-    for slot, tag in ((0, "delp"), (3, "temp")):
+    for slot in (0, 3):
         r("S08_dsw1", "S08_dsw1", f"allflux_x[{slot}]",
           f"S08_dsw1_allflux_x[{slot}]", f"S08_dsw1_allflux_y[{slot}]",
           "xflux")
         r("S08_dsw1", "S08_dsw1", f"allflux_y[{slot}]",
           f"S08_dsw1_allflux_y[{slot}]", f"S08_dsw1_allflux_x[{slot}]",
           "yflux")
+    for slot in (0, 3):
         r("S09_fluxavg", "S09_fluxavg", f"allflux_x[{slot}]",
           f"S09_fluxavg_allflux_x[{slot}]",
           f"S09_fluxavg_allflux_y[{slot}]", "xflux")

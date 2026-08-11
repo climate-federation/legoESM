@@ -100,7 +100,8 @@ $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
 echo "MUTATE_FLUXAVG_RC=$?"
 
 echo "=== pytest: instrument unit tests ==="
-$PY -m pytest tests/grids/test_fv3_dyncore_stage_instrument.py -q 2>&1 | tail -6
+$PY -m pytest tests/grids/test_fv3_dyncore_stage_instrument.py -q \
+    --basetemp=/burg-archive/glab/users/pg2328/fv3_duo_gaps/pyt_${SLURM_JOB_ID} 2>&1 | tail -6
 
 echo "=== mutation control 2: b2 (expect S11 flagged first) ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \

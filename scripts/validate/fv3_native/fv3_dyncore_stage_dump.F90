@@ -38,10 +38,13 @@ contains
   end subroutine stage_dump_open
 
   subroutine stage_dump_close()
-    if (dump_unit >= 0) close (dump_unit)
-    if (mf_unit >= 0) close (mf_unit)
-    dump_unit = -1
-    mf_unit = -1
+    ! newunit= returns NEGATIVE unit numbers in gfortran, so the open
+    ! state is tracked by `active`, never by the unit's sign (a `< 0`
+    ! guard here silently dropped every NOTE/CERT line on first run).
+    if (active) then
+      close (dump_unit)
+      close (mf_unit)
+    end if
     active = .false.
   end subroutine stage_dump_close
 
@@ -76,7 +79,7 @@ contains
 
   subroutine stage_mf_note(text)
     character(len=*), intent(in) :: text
-    if (mf_unit < 0) return
+    if (.not. active) return
     write (mf_unit, '(A)') trim(text)
   end subroutine stage_mf_note
 end module stage_dump_mod
