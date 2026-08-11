@@ -250,6 +250,14 @@ def _build_spectral_config(cfg: dict[str, Any]):
             spectral_filter_strength=float(
                 cfg.get("spectral_filter_strength", 0.01)),
             spectral_filter_order=int(cfg.get("spectral_filter_order", 8)),
+            # Energy-conserving numerics, suite-selectable; defaults keep
+            # every existing arm byte-identical (see SpectralPEConfig).
+            # (fix_mass / anchor_mass_to_initial kwargs from the source
+            # branch are NOT carried here — that campaign lives on
+            # aimip-wb2-mass-anchor-and-latlon-fix.)
+            vertical_advection_scheme=str(
+                cfg.get("vertical_advection_scheme", "upwind")),
+            frictional_heating=bool(cfg.get("frictional_heating", False)),
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
