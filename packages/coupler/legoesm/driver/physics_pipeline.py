@@ -301,6 +301,8 @@ class PhysicsPipeline:
         # Optional cloud-tuning overrides (None => CloudConfig default =>
         # byte-identical); set by build_physics_pipeline from ExperimentConfig.
         self._cloud_rh_crit = None
+        self._cloud_rh_crit_bl = None
+        self._cloud_sigma_bl = None
         self._cloud_q_c_diagnostic = None
         self._cloud_conv_cloud_max = None
         self._cloud_conv_cloud_condensate = None
@@ -2249,6 +2251,8 @@ class PhysicsPipeline:
                 convective_cloud=(getattr(self, "_cloud_convective", False)
                                   and conv_precip is not None),
                 rh_crit=getattr(self, "_cloud_rh_crit", None),
+                rh_crit_bl=getattr(self, "_cloud_rh_crit_bl", None),
+                sigma_bl=getattr(self, "_cloud_sigma_bl", None),
                 q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
                 conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
@@ -4081,6 +4085,8 @@ def build_physics_pipeline(grid, sigma, config):
         getattr(getattr(config, 'output', None), 'budget_ledger', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
+    pipeline._cloud_rh_crit_bl = getattr(config, 'cloud_rh_crit_bl', None)
+    pipeline._cloud_sigma_bl = getattr(config, 'cloud_sigma_bl', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(

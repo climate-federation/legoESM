@@ -49,3 +49,33 @@ def test_knobs_reach_compute_cloud_properties():
     assert not np.allclose(np.asarray(a.cloud_fraction),
                            np.asarray(b.cloud_fraction)), \
         "rh_crit_bl/sigma_bl did not reach compute_cloud_properties"
+
+
+def test_bl_band_is_the_SURFACE_end_not_the_top():
+    """Pins the vertical ORIENTATION of the sigma proxy.
+
+    The end-to-end test only asserts "something changed", which a
+    top-normalised proxy (p_full[..., :1]) also satisfies — it passed under
+    that mutation.  This asserts WHICH levels move: with index -1 = surface
+    on every lane that calls compute_cloud_properties, a BL-only threshold
+    change must alter the LAST levels and leave the FIRST (model top)
+    untouched.  Fails if the normalisation is ever flipped to the top.
+    """
+    from legoesm.thermo import saturation_mixing_ratio
+    T = jnp.full((2, 12), 285.0)
+    p_full = jnp.linspace(2e4, 1.0e5, 12)[None, :] * jnp.ones((2, 1))
+    dp = jnp.full((2, 12), 6.5e3)
+    q_v = 0.93 * saturation_mixing_ratio(T, p_full)
+    kw = dict(T=T, p_full=p_full, q_v=q_v, dp=dp,
+              q_cloud=jnp.full((2, 12), 1e-5), q_ice=jnp.zeros((2, 12)))
+    a = compute_cloud_properties(config=build_cloud_config(
+        "sundqvist", rh_crit=0.85), **kw)
+    b = compute_cloud_properties(config=build_cloud_config(
+        "sundqvist", rh_crit=0.85, rh_crit_bl=0.99, sigma_bl=0.8), **kw)
+    d = np.abs(np.asarray(a.cloud_fraction) - np.asarray(b.cloud_fraction))[0]
+    changed = d > 1e-9
+    assert changed[-1], "surface level did not change: BL band is not at the surface end"
+    assert not changed[0], "model-top level changed: sigma proxy is normalised by the TOP"
+    # and the changed levels must be CONTIGUOUS from the surface upward
+    first_changed = int(np.argmax(changed))
+    assert changed[first_changed:].all(), "changed levels are not a surface-anchored band"

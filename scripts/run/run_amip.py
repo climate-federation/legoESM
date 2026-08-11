@@ -1006,10 +1006,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall"])
-    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.7,
-                        help="Critical RH for BL cloud onset (Sundqvist). "
-                             "Only active when --cloud-sigma-bl < 1.0. "
-                             "Recommended ~0.55 for AMIP. Default 0.7 (disabled).")
+    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.77,
+                        help="Critical RH in the boundary layer (SUNDQVIST "
+                             "ONLY; xu_randall ignores rh_crit entirely). "
+                             "Replaces --rh-crit at/below --cloud-sigma-bl, "
+                             "which must be < 1.0 to activate the split. "
+                             "LOWER than --rh-crit = MORE marine BL cloud "
+                             "(~0.55 was the marine-Sc recommendation); "
+                             "HIGHER = LESS. Default 0.77 equals the rh_crit "
+                             "default, i.e. NEUTRAL: enabling --cloud-sigma-bl "
+                             "alone changes nothing.")
     parser.add_argument("--cloud-sigma-bl", type=float, default=1.0,
                         help="Sigma level (p/p_s) above which rh_crit_bl applies. "
                              "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")

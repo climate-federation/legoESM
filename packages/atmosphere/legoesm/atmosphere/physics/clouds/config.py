@@ -43,8 +43,8 @@ __param_spec__ = {
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
-            "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
-            "rh_crit_bl": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989); BL/free-troposphere split as in ECMWF IFS and ECHAM", "shape": None},
+            "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989) [SUNDQVIST ONLY: xu_randall_cloud_fraction never reads rh_crit/rh_crit_bl, so both are inert under --clouds xu_randall, which is run_amip's DEFAULT]", "shape": None},
+            "rh_crit_bl": {"units": "1", "bounds": (0.4, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989); BL/free-troposphere split as in ECMWF IFS and ECHAM", "shape": None},
             # --- cloud_fraction: Xu-Randall (1996) cf = RH^p_xr * (1 - exp(-alpha*q_c/((1-RH)q_sat)^gamma)) ---
             "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
@@ -143,14 +143,26 @@ class CloudConfig(NamedTuple):
     # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
     # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
     rh_crit: float = 0.77
-    # Boundary-layer critical RH and the sigma level above which it applies
-    # (sigma = p/p_s, so sigma_bl=0.85 means "below ~1.5 km").  The BL is
-    # better-mixed than the free troposphere, so its sub-grid RH variance is
-    # SMALLER and cloud should form at a HIGHER RH there — every operational
-    # scheme uses a height-dependent rh_crit for this reason (ECMWF, ECHAM,
-    # CAM all ramp it).  ``rh_crit_bl`` REPLACES ``rh_crit`` below
-    # ``sigma_bl``; the default sigma_bl=1.0 disables the split entirely and
-    # keeps every existing result bit-identical.
+    # Boundary-layer critical RH and the sigma level at/below which it applies
+    # (sigma = p/p_s, so sigma_bl=0.85 means "below ~1.5 km").  ``rh_crit_bl``
+    # REPLACES ``rh_crit`` in the BL.
+    #
+    # DIRECTION IS THE USER'S CHOICE and the repo has BOTH readings on record:
+    #   * LOWER than rh_crit  => MORE marine BL cloud.  This is what
+    #     run_amip's ``--cloud-rh-crit-bl`` help and ml/tuning.py have always
+    #     recommended ("~0.55 for AMIP"), aimed at the missing marine
+    #     stratocumulus decks.
+    #   * HIGHER than rh_crit => LESS BL cloud.  The physical argument (a
+    #     well-mixed BL has SMALLER sub-grid RH variance, so cloud should
+    #     need a higher grid-mean RH) and what ECHAM/CAM do with their own
+    #     surface-vs-top critical-RH pair.
+    # Because both are legitimate, the DEFAULT is NEUTRAL: rh_crit_bl equals
+    # the rh_crit default, so switching sigma_bl on by itself changes NOTHING
+    # and any cloud change is a value the user actually asked for.  (Before
+    # 2026-08-11 the default was 0.7 against rh_crit 0.77 — enabling the
+    # split alone silently ADDED ~24% BL cloud, the opposite of the trades
+    # over-cloudiness this campaign is chasing.)
+    # sigma_bl = 1.0 (default) disables the split entirely: bit-identical.
     #
     # 2026-08-11: these two knobs existed on ExperimentConfig
     # (cloud_rh_crit_bl / cloud_sigma_bl) and on the run_amip CLI since their
@@ -158,7 +170,7 @@ class CloudConfig(NamedTuple):
     # them, so ``--cloud-rh-crit-bl``/``--cloud-sigma-bl`` were silent no-ops
     # (an AMIP arm was run and scored believing they applied).  Wiring them
     # here is that fix.
-    rh_crit_bl: float = 0.7
+    rh_crit_bl: float = 0.77      # == rh_crit default: neutral, see above
     sigma_bl: float = 1.0
     alpha_xr: float = 100.0
     p_xr: float = 0.25

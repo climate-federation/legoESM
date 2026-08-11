@@ -180,6 +180,7 @@ def load_params_config(path) -> dict:
 _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
+    "atm.clouds.CloudConfig.rh_crit_bl": "cloud_rh_crit_bl",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
     "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
     "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",

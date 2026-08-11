@@ -648,9 +648,14 @@ def compute_cloud_properties(
         # sigma = p/p_s for the BL/free-troposphere rh_crit split.  p_s is not
         # an argument of this function; the LOWEST full level's pressure is
         # the best available proxy and is what every caller already holds.
-        # It slightly UNDER-estimates sigma (p_full[-1] < p_s), so the BL band
-        # is marginally thinner than sigma_bl literally implies — stated, not
-        # hidden.  sigma_bl >= 1.0 (default) skips this entirely.
+        # Index -1 = SURFACE on every lane that calls this (hybrid B_half
+        # ends at 1.0; create_sigma_coordinate sigma_full ends ~0.98; MPAS
+        # reads sigma_half[0] as the top) — pinned by
+        # test_bl_band_is_the_SURFACE_end_not_the_top.
+        # Dividing by p_full[-1] < p_s makes the ratio LARGER than the true
+        # sigma, so the BL band is marginally THICKER than sigma_bl literally
+        # implies (sigma_bl=0.85 cuts at true sigma ~0.83 on L30) — stated,
+        # not hidden.  sigma_bl >= 1.0 (default) skips this entirely.
         _sigma = (p_full / jnp.maximum(p_full[..., -1:], 1.0)
                   if getattr(config, "sigma_bl", 1.0) < 1.0 else None)
         cf = sundqvist_cloud_fraction(RH, config, sigma=_sigma)

@@ -538,17 +538,21 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     # -- Cloud / BL cloud ---------------------------------------------------
     "rh_crit_bl": TuningParameter(
         name="rh_crit_bl",
-        default=0.7,
+        default=0.77,
         min_val=0.4,
-        max_val=0.85,
+        max_val=0.99,
         units="1",
         description="Critical RH for boundary-layer cloud onset (Sundqvist)",
         category="convection",
         sensitivity="high",
         notes=(
-            "Only active when cloud_sigma_bl < 1.0 (BL cloud enabled). "
-            "Lower = more marine BL cloud; AMIP recommended ~0.55. "
-            "Default 0.7 = same as free-troposphere rh_crit (disabled)."
+            "Only active when cloud_sigma_bl < 1.0 (BL cloud enabled), and "
+            "SUNDQVIST ONLY (xu_randall ignores rh_crit entirely). "
+            "Lower than rh_crit = more marine BL cloud (~0.55 was the "
+            "marine-Sc recommendation); higher = less. Default 0.77 EQUALS "
+            "the CloudConfig.rh_crit default, i.e. neutral: enabling "
+            "cloud_sigma_bl alone changes nothing. Bounds match "
+            "CloudConfig.__param_spec__ (0.4, 0.99)."
         ),
     ),
 
