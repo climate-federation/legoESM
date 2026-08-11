@@ -142,7 +142,11 @@ def main() -> int:
         tmask3 = np.transpose(v("tmask")[:, _NATIVE_J, _NATIVE_I], (1, 2, 0))
         gdepw_1d = v("gdepw_1d")
         gdept_1d = v("gdept_1d")
+        e3t_1d = v("e3t_1d")
         ds.close()
+        # NEMO's gdepw_1d has nlev entries (w-point at the TOP of each cell);
+        # the shared core wants all nlev+1 faces, so append the bottom face.
+        z_faces_1d = np.concatenate([gdepw_1d, [gdepw_1d[-1] + e3t_1d[-1]]])
     except Exception as exc:
         raise SystemExit(f"mesh metrics unreadable: {exc}")
 
@@ -170,7 +174,7 @@ def main() -> int:
     zmld, bm, _in_ml = mle_mld_and_buoyancy(
         jnp.asarray(rho_pot), jnp.asarray(dz_live),
         jnp.asarray(wet3.astype(np.float64)),
-        z_faces=jnp.asarray(gdepw_1d),
+        z_faces=jnp.asarray(z_faces_1d),
         z_centers_ref=jnp.asarray(gdept_1d),
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
