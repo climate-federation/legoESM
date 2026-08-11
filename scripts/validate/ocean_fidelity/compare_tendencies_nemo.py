@@ -90,8 +90,8 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
-        "ttrd_tot": _fill(dsT.variables["ttrd_tot"][r1]),
-        "strd_tot": _fill(dsT.variables["strd_tot"][r1]),
+        "T_r1": _fill(dsT.variables["votemper"][r1]),
+        "S_r1": _fill(dsT.variables["vosaline"][r1]),
         # XIOS one_file splits coords per grid: T fields on nav_*_grid_T,
         # avt/avm on the W grid (identical horizontal positions on eORCA1).
         "lat": _fill(dsT.variables["nav_lat_grid_T"][:]),
@@ -284,17 +284,20 @@ def run_stage_b(d):
     # explicit trends: advection, ldf, sbc, qsr...), not on the saved r-1
     # state -- in convecting columns the surface fluxes create the very
     # gradients zdf then removes, so Stage B on the r-1 state systematically
-    # undershoots (measured f64: ours 2-10x smaller, corr ~0.1-0.6).  The
-    # trend file closes the budget: S(r) = S(r-1) + dt*strd_tot, and the zdf
-    # part is known, so the state the solve REALLY acted on is
-    #     S_pre = S(r-1) + dt*(strd_tot - strd_zdf)
-    # (exactly, because trazdf's trend is (S_after - S_pre)/dt and S_after =
-    # S(r)).  Our solve on S_pre vs strd_zdf is the exact-form operator test;
-    # remaining error = discretization difference (+ the K33-in-avt caveat).
-    ttot = cols(d["ttrd_tot"])
-    stot = cols(d["strd_tot"])
-    T_pre = np.where(np.isfinite(ttot), T_c + dt * (ttot - np.nan_to_num(ttrd)), T_c)
-    S_pre = np.where(np.isfinite(stot), S_c + dt * (stot - np.nan_to_num(strd)), S_c)
+    # undershoots (measured f64: ours 2-10x smaller, corr ~0.1-0.6).
+    # ttrd_tot/strd_tot are enabled in the XIOS defs but EMPTY in every
+    # RUN_TRD file (finite count 0, measured 2026-08-11), so the budget
+    # cannot be closed through the total trend.  It does not need to be:
+    # trazdf is the LAST tracer operator of the step, so the field it acted
+    # on is exactly
+    #     S_pre = S(r) - dt*strd_zdf
+    # (its own trend definition, run backwards from the SAVED post-step
+    # state).  Our solve on S_pre vs strd_zdf is the exact-form operator
+    # test; remaining error = discretization difference (+ K33-in-avt).
+    T_r1 = np.nan_to_num(cols(d["T_r1"]), nan=0.0)
+    S_r1 = np.where(np.isfinite(cols(d["S_r1"])), cols(d["S_r1"]), 35.0)
+    T_pre = np.where(np.isfinite(ttrd), T_r1 - dt * np.nan_to_num(ttrd), T_c)
+    S_pre = np.where(np.isfinite(strd), S_r1 - dt * np.nan_to_num(strd), S_c)
     T2 = np.asarray(implicit_vertical_diffusion_ocean(
         jnp.asarray(T_pre), jnp.asarray(K_t), jnp.asarray(dz_c),
         jnp.asarray(dz_half), dt))
