@@ -28,8 +28,12 @@ $PY -m pytest tests/ocean/unit/test_mle.py tests/ocean/unit/test_mle_mpas.py -q
 rc=$?; echo "=== fixed suites rc=$rc"; [ $rc -eq 0 ] || NFAIL=$((NFAIL+1))
 
 echo; echo "########## pre-fix code: new regression tests must FAIL"
+# PINNED: parent of the vertical-branch fix commit 465823b83 -- NOT HEAD~1,
+# which drifts as test-only commits land on top (the first rerun of this gate
+# pointed HEAD~1 at the fix itself and reported the tests vacuous).
+PREFIX_SHA=d6e8a1063
 WT=$(mktemp -d /tmp/mle_prefix_XXXX)
-git worktree add --detach "$WT" "$FIXSHA~1" >/dev/null 2>&1 || { echo "FATAL: worktree"; exit 1; }
+git worktree add --detach "$WT" "$PREFIX_SHA" >/dev/null 2>&1 || { echo "FATAL: worktree"; exit 1; }
 cp tests/ocean/unit/test_mle.py tests/ocean/unit/test_mle_mpas.py "$WT/tests/ocean/unit/"
 ( cd "$WT" && \
   PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT" \
