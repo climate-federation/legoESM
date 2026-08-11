@@ -546,6 +546,40 @@ def main(argv=None):
                          "runtime), so their agreement is VACUOUS as a "
                          "transport test and is labelled so -- sphum "
                          "carries the signal.")
+    ap.add_argument("--ext-metrics", action="store_true",
+                    help="build the six-face context with "
+                         "use_ext_metrics=True: halo/corner-wedge cells "
+                         "carry EXTENDED-lattice metrics instead of the "
+                         "kinked builder's. fv_grid_tools.F90:749-835 "
+                         "shows the duo oracle builds its model grid "
+                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "get_symmetry step skipped -- so the extended "
+                         "lattice is the FAITHFUL halo geometry and the "
+                         "kinked one is the port's residual suspect. "
+                         "This flag is the mechanism-scaling probe.")
+    ap.add_argument("--perturb-boundary-metrics", type=float, default=0.0,
+                    metavar="EPS",
+                    help="GLM discriminator (2026-08-11): multiply every "
+                         "stencil-consumed metric at BOUNDARY cells (halo "
+                         "rings + the outermost compute ring) by "
+                         "(1 + EPS*cos(3i+7j)). The production metrics "
+                         "match the oracle at ~1e-14; if the one-step "
+                         "residual scales ~linearly with EPS (e.g. x100 "
+                         "at 1e-12), the 9.8e-06 floor is amplified "
+                         "geometry seed; if it stays pinned, the floor "
+                         "is a composition/formulation difference.")
+    ap.add_argument("--n-steps", type=int, default=1,
+                    help="outer fv_dynamics calls to integrate before "
+                         "comparing (the step reference must be an oracle "
+                         "run of n_steps*dt_atmos -- pass --step-run "
+                         "accordingly). A LINEAR-vs-EXPONENTIAL residual "
+                         "growth read across an N sweep (1, 3, 10) is the "
+                         "point: a compounding coefficient bug grows "
+                         "linearly-or-worse in N while chaos amplifies the "
+                         "1e-14 geometry seed exponentially but from far "
+                         "below the certified 1-step floor (GLM review "
+                         "2026-08-11: judge growth against the N=1 floor, "
+                         "never against state tendency).")
     ap.add_argument("--nh", action="store_true",
                     help="non-hydrostatic gate: defaults the runs to "
                          "run_nh_{zerostep,1step}_gfs, adds delz/w to the "
@@ -557,6 +591,20 @@ def main(argv=None):
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
     args = ap.parse_args(argv)
+    if args.n_steps < 1:
+        raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
+    if args.n_steps != 1 and args.step_run in (
+            f"{ORACLE_ROOT}/run_hydro_1step_gfs", None):
+        # codex nstep review #3: comparing N port steps against the
+        # 1-step reference is a silent protocol mismatch that returns
+        # normally without --max-rel.  The N-step reference must be
+        # chosen EXPLICITLY.
+        raise SystemExit(
+            f"--n-steps {args.n_steps} requires an explicit --step-run "
+            f"pointing at an oracle run of exactly "
+            f"{args.n_steps} * dt_atmos (e.g. run_hydro_"
+            f"{args.n_steps * 32}min_gfs); the default is the 1-step "
+            f"reference.")
     if args.nh:
         if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
             args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
@@ -577,7 +625,35 @@ def main(argv=None):
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     use_ext_metrics=args.ext_metrics,
                                      oracle_conventions=True)
+    if args.perturb_boundary_metrics:
+        eps = float(args.perturb_boundary_metrics)
+        m_a = N + 2 * NG
+        ii = np.arange(m_a)
+        keys = ("dx", "dy", "dxa", "dya", "dxc", "dyc", "area", "rarea",
+                "cosa_u", "cosa_v", "cosa_s", "sina_u", "sina_v",
+                "rsin_u", "rsin_v", "rsin2", "divg_u", "divg_v",
+                "del6_u", "del6_v", "sin_sg", "cos_sg")
+        for t in range(6):
+            gs = ctx["gs6"][t]
+            for k in keys:
+                if k not in gs:
+                    continue
+                a = np.asarray(gs[k], dtype=np.float64).copy()
+                mi, mj = a.shape[0], a.shape[1]
+                pat = np.cos(3.0 * np.arange(mi)[:, None]
+                             + 7.0 * np.arange(mj)[None, :])
+                # boundary = anything outside the STRICT interior of the
+                # compute box (halo rings + outermost compute ring).
+                di = np.minimum(np.arange(mi), mi - 1 - np.arange(mi))
+                dj = np.minimum(np.arange(mj), mj - 1 - np.arange(mj))
+                strict = (di[:, None] > NG) & (dj[None, :] > NG)
+                fac = np.where(strict, 1.0, 1.0 + eps * pat)
+                gs[k] = a * (fac if a.ndim == 2 else fac[:, :, None])
+        del ii
+        print(f"BOUNDARY METRICS PERTURBED by eps={eps:g} "
+              f"(deterministic cos pattern, strict interior untouched)")
     n, ng = ctx["n"], ctx["ng"]
     ak, bk, ptop, ks = set_eta_analytic(KM)
     ptop = float(ptop)
@@ -903,24 +979,29 @@ def main(argv=None):
               "raw difference there is the conversion, not a tendency)")
         return 0
 
-    print(f"\nintegrating one step: bdt={args.dt} k_split={args.k_split} "
-          f"n_split={args.n_split} nh={args.nh} ...", flush=True)
+    print(f"\nintegrating {args.n_steps} step(s): bdt={args.dt} "
+          f"k_split={args.k_split} n_split={args.n_split} nh={args.nh} ...",
+          flush=True)
     if args.nh:
         # phis == 0 (asserted above); the NH carry derives zs from it.
         m_a = n + 2 * ng
         ctx["hs6"] = [np.zeros((m_a, m_a), dtype=np.float64)
                       for _ in range(6)]
-    out = fv_dynamics_step(ctx, state, press, bdt=args.dt, km=KM,
-                           k_split=args.k_split, n_split=args.n_split,
-                           ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
-                           cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
-                           kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
-                           hydrostatic=not args.nh,
-                           # deck: a_imp=1., p_fac=0.05, kord_wz=9,
-                           # use_logp=F, w_limiter=T (resolved namelist)
-                           w_limiter=args.nh)
-    if out["pt_units"] != "K":
-        raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
+    # Each outer call owns one bdt exactly as the Fortran main loop calls
+    # fv_dynamics once per dt_atmos: state and press carry between calls
+    # (pt round-trips K -> theta_v -> K inside each call).
+    for _step in range(args.n_steps):
+        out = fv_dynamics_step(ctx, state, press, bdt=args.dt, km=KM,
+                               k_split=args.k_split, n_split=args.n_split,
+                               ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
+                               cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
+                               kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
+                               hydrostatic=not args.nh,
+                               # deck: a_imp=1., p_fac=0.05, kord_wz=9,
+                               # use_logp=F, w_limiter=T (resolved namelist)
+                               w_limiter=args.nh)
+        if out["pt_units"] != "K":
+            raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)
 
     # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
@@ -1036,6 +1117,8 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
+                       "n_steps": args.n_steps,
+                       "step_run": args.step_run,
                        "face_map": [{"port_face": pf + 1,
                                      "oracle_tile": perm[pf] + 1,
                                      "transposed": bool(meta[pf][perm[pf]][0]),
