@@ -57,6 +57,10 @@ def main() -> int:
     ds.close()
 
     evd_col = (np.nan_to_num(avt, nan=0.0) > 50.0).any(axis=1)
+    # Score the B2 (pre-zdf-state) solve -- the operative diagnostic; the
+    # legacy r-1-state dS carries the same-step explicit-trend confound.
+    dS = dS2
+    dT = dT2
     err = np.nan_to_num(np.abs(dS - strd), nan=0.0)
     err_col = np.where(wet_c, err, 0.0).sum(axis=1)
     err_col = np.where(evd_col, err_col, 0.0)

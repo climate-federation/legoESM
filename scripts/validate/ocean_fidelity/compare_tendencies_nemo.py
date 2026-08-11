@@ -41,10 +41,12 @@ from pathlib import Path
 
 import numpy as np
 
-# The Stage-B implicit solve MUST run in float64 (see _fill); set the JAX
-# flag before any jax import so jnp.asarray(float64) is not silently demoted.
+# The Stage-B implicit solve MUST run in float64 (see _fill); FORCE the JAX
+# flag before any jax import (codex: setdefault let a pre-existing
+# JAX_ENABLE_X64=0 silently demote jnp.asarray(float64) to f32 -- the exact
+# bug class this module just had).
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ["JAX_ENABLE_X64"] = "1"
 
 
 REGIONS = (
@@ -287,17 +289,43 @@ def run_stage_b(d):
     # undershoots (measured f64: ours 2-10x smaller, corr ~0.1-0.6).
     # ttrd_tot/strd_tot are enabled in the XIOS defs but EMPTY in every
     # RUN_TRD file (finite count 0, measured 2026-08-11), so the budget
-    # cannot be closed through the total trend.  It does not need to be:
-    # trazdf is the LAST tracer operator of the step, so the field it acted
-    # on is exactly
-    #     S_pre = S(r) - dt*strd_zdf
-    # (its own trend definition, run backwards from the SAVED post-step
-    # state).  Our solve on S_pre vs strd_zdf is the exact-form operator
-    # test; remaining error = discretization difference (+ K33-in-avt).
+    # cannot be closed through the total trend.  Instead the RHS field is
+    # reconstructed backwards from the saved post-step state:
+    #     S_pre = S(r) - dt*strd_zdf.
+    # HONEST SCOPE (codex tendency-instrument review, 2026-08-11): this is a
+    # CONDITIONAL RIGHT-INVERSE test, not an independent operator
+    # certification -- the input is built from the oracle target, then the
+    # candidate operator must map it back toward that target.  The
+    # counterfactual table shows it still discriminates: identity, explicit
+    # diffusion, and one-interface K shifts all fail badly (nrmse 1..5e5)
+    # while the BE operator scores 0.05-0.34.  Known non-exactness, all
+    # measured small at rec 1 but not zero: (a) the *_zdf fields advertise
+    # interval_operation = 7200 s vs 3600 s state fields -- the dt-scan
+    # below settles the pairing empirically; (b) key_qco variable-volume
+    # trends carry e3t stage weights (endpoint effect: rms 2.2e-6 relative,
+    # Antarctic EVD); (c) NEMO's tra_zdf_imp matrix also contains the
+    # ln_zad_Aimp implicit vertical-advection terms and the isoneutral MSC
+    # akz addition, which this pure-K solve does not model.  So residual !=
+    # pure discretization; it is 'operator + unmodelled matrix terms'.
     T_r1 = np.nan_to_num(cols(d["T_r1"]), nan=0.0)
     S_r1 = np.where(np.isfinite(cols(d["S_r1"])), cols(d["S_r1"]), 35.0)
     T_pre = np.where(np.isfinite(ttrd), T_r1 - dt * np.nan_to_num(ttrd), T_c)
     S_pre = np.where(np.isfinite(strd), S_r1 - dt * np.nan_to_num(strd), S_c)
+
+    # dt-PAIRING SCAN (codex RED 1): if the emitted trends were really
+    # 7200 s two-step diagnostics, reconstructing and solving at dt=3600
+    # would show a systematic ~2x mismatch.  Score the worst-region proxy at
+    # both dts and print; the better one is the operative pairing.
+    for dt_try in (3600.0, 7200.0):
+        Sp = np.where(np.isfinite(strd), S_r1 - dt_try * np.nan_to_num(strd), S_c)
+        S2t = np.asarray(implicit_vertical_diffusion_ocean(
+            jnp.asarray(Sp), jnp.asarray(K_s), jnp.asarray(dz_c),
+            jnp.asarray(dz_half), dt_try))
+        d2t = (S2t - Sp) / dt_try
+        m = wet_c & np.isfinite(strd)
+        err = float(np.sqrt(np.mean((d2t[m] - strd[m]) ** 2)))
+        ref = float(np.sqrt(np.mean(strd[m] ** 2)))
+        print(f"[dt-scan] dt={dt_try:.0f}s: global S nrmse {err / ref:.4f}")
     T2 = np.asarray(implicit_vertical_diffusion_ocean(
         jnp.asarray(T_pre), jnp.asarray(K_t), jnp.asarray(dz_c),
         jnp.asarray(dz_half), dt))
@@ -340,7 +368,8 @@ def region_report(name, ours, theirs, wet, lat_col, top_k=None,
     for tag0, lo, hi in REGIONS:
       for suff, colsel in subsets:
         tag = tag0 + suff
-        m = wet & np.isfinite(theirs) & (lat_col[:, None] >= lo) & (lat_col[:, None] < hi)
+        m = (wet & np.isfinite(theirs) & np.isfinite(ours)
+             & (lat_col[:, None] >= lo) & (lat_col[:, None] < hi))
         if colsel is not None:
             m = m & colsel[:, None]
         if top_k is not None:
