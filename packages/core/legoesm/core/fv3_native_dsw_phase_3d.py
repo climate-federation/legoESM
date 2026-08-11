@@ -101,8 +101,19 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
                            cfg: dict | None = None,
                            nq: int = 1,
                            hydrostatic: bool = True,
-                           remap_follows: bool = False) -> list:
+                           remap_follows: bool = False,
+                           flux_cap: list | None = None) -> list:
     """``d_sw1`` (per k) -> BARRIER 1 (per k) -> ``d_sw2`` (per k).
+
+    ``flux_cap``, when given, is the six-face mfx/mfy/cx/cy capacitor
+    bundle (``fv3_native_tracer2d.alloc_flux_capacitors``) that
+    ``d_sw1`` accumulates into every sub-step (sw_core.F90:903-920)
+    for ``tracer_2d``'s large-time-step transport.  The accumulation
+    happens BEFORE barrier 1 edits ``allflux`` -- the capacitors carry
+    the UN-averaged fluxes, exactly as the oracle's do (the averaging
+    block touches ``allflux_x/y``, never ``mfx``/``xflux``).  ``None``
+    keeps the previous discard-the-capacitors behaviour for callers
+    that advect no tracers.
 
     Returns per-face dicts carrying the averaged allflux stacks and the
     ``d_sw2``-updated ``delp``/``pt`` at every level.
@@ -166,18 +177,38 @@ def dsw_transport_phase_3d(ctx: dict, state: list, csw_outs: list,
         levels = []
         for k in range(km):
             lev = level_slice(state[t], k, km)
-            levels.append(d_sw1_duo(
+            if flux_cap is None:
+                xflux = np.zeros((npx, m_a))
+                yflux = np.zeros((m_a, npx))
+                cx = np.zeros((npx, m_a))
+                cy = np.zeros((m_a, npx))
+            else:
+                cap = flux_cap[t]
+                xflux = cap["mfx"][:, :, k]
+                yflux = cap["mfy"][:, :, k]
+                cx = cap["cx"][:, :, k]
+                cy = cap["cy"][:, :, k]
+            s1 = d_sw1_duo(
                 lev["delp"], lev["pt"], lev["w"],
                 csw_outs[t]["uc"][:, :, k], csw_outs[t]["vc"][:, :, k],
-                np.zeros((npx, m_a)), np.zeros((m_a, npx)),
-                np.zeros((npx, m_a)), np.zeros((m_a, npx)),
+                xflux, yflux, cx, cy,
                 ctx["gs6"][t], bd, npx, npx, dt=dt,
                 hord_tr=c["hord_tr"], hord_vt=c["hord_vt"],
                 hord_tm=c["hord_tm"], hord_dp=c["hord_dp"],
                 nord_v=c["nord_v"], nord_t=0,
                 damp_v=c["damp_v"], damp_t=0.0,
                 hydrostatic=hydrostatic,
-                workspace_sentinel=0.0))
+                workspace_sentinel=0.0)
+            if flux_cap is not None:
+                # d_sw1_duo copies its capacitor dummies (fort over
+                # np.array(copy=True)), so the accumulated values must
+                # be written back -- sw_core.F90's are intent(inout).
+                cap = flux_cap[t]
+                cap["mfx"][:, :, k] = s1["xflux"]
+                cap["mfy"][:, :, k] = s1["yflux"]
+                cap["cx"][:, :, k] = s1["cx"]
+                cap["cy"][:, :, k] = s1["cy"]
+            levels.append(s1)
         per_face_levels.append(levels)
 
     # --- BARRIER 1: inter-panel flux average, one level at a time ----------

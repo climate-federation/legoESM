@@ -199,8 +199,16 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                         p_fac: float = 0.05, a_imp: float = 1.0,
                         dp0: np.ndarray | None = None,
                         use_logp: bool = False,
-                        press_out: list | None = None) -> list:
+                        press_out: list | None = None,
+                        flux_cap: list | None = None) -> list:
     """One `it` of `do it=1,n_split`. Returns the updated six-face state.
+
+    ``flux_cap`` is the six-face tracer flux-capacitor bundle
+    (``fv3_native_tracer2d.alloc_flux_capacitors``); ``d_sw1``
+    accumulates into it every sub-step (sw_core.F90:903-920).  The
+    CALLER zeroes it once per acoustic loop -- dyn_core.F90:313-316
+    "Empty the flux capacitors" runs at dyn_core ENTRY, not per
+    sub-step.
 
     `state` is mutated in place for delp/pt/u/v (matching the Fortran's
     intent(inout) dummies) and also returned for convenience.
@@ -282,7 +290,8 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
 
     dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg,
                                  hydrostatic=hydrostatic,
-                                 remap_follows=remap_follows)
+                                 remap_follows=remap_follows,
+                                 flux_cap=flux_cap)
     tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
                              hydrostatic=hydrostatic,
                              remap_follows=remap_follows)
@@ -381,8 +390,13 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      p_fac: float = 0.05, a_imp: float = 1.0,
                      dp0: np.ndarray | None = None,
                      use_logp: bool = False,
-                     press_out: list | None = None) -> list:
+                     press_out: list | None = None,
+                     flux_cap: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
+
+    ``flux_cap``: six-face tracer flux capacitors, pre-zeroed by the
+    caller (one zeroing per dyn_core call, dyn_core.F90:313-316);
+    every sub-step's ``d_sw1`` accumulates into it.
 
     `dt = bdt/n_split` (`dyn_core.F90:249`). The shipped duo decks run
     `k_split = 1`, so one call of this is one `dt_atmos`.
@@ -415,7 +429,8 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             hydrostatic=hydrostatic, nh=nh,
                             p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                             use_logp=use_logp,
-                            press_out=(press_out if remap_step else None))
+                            press_out=(press_out if remap_step else None),
+                            flux_cap=flux_cap)
         if validate:
             # Fail at the sub-step that broke, not many steps later with a
             # field of NaN and no idea which stage produced it.
