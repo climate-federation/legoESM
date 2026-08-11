@@ -373,12 +373,18 @@ def test_jit_matches_eager_on_front() -> None:
     T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
     lon_frac = jnp.linspace(0.0, 1.0, T.shape[1])
     S = S + 1.5 * lon_frac[jnp.newaxis, :, jnp.newaxis]
+    # Precompute the geometry EAGERLY and pass it as the grid argument --
+    # the production pattern.  create_latlon_geometry runs float() checks on
+    # its metric arrays, which is untraceable, so building it inside a jit
+    # region is unsupported; ensure_geometry passes a ready geometry through.
+    from legoesm.grids.latlon import ensure_geometry
+    geom = ensure_geometry(grid)
     args = (T, S, rho, N2, mask, u_mask, v_mask)
     fn = jax.jit(lambda *a: mle_tracer_tendency_latlon_cgrid(
-        *a, z_coord, J, grid, cfg))
+        *a, z_coord, J, geom, cfg))
     dT_j, dS_j = fn(*args)
     dT_e, dS_e = mle_tracer_tendency_latlon_cgrid(
-        *args, z_coord, J, grid, cfg)
+        *args, z_coord, J, geom, cfg)
     for j, e in ((dT_j, dT_e), (dS_j, dS_e)):
         assert bool(jnp.all(jnp.isfinite(j)))
         rel = float(jnp.linalg.norm(j - e) / (jnp.linalg.norm(e) + 1e-30))
