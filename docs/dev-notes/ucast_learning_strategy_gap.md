@@ -2612,3 +2612,44 @@ Do NOT read this as "the fix does not matter": a dycore that cools 0.48
 K/day is wrong regardless of what RMSE says at day 1, and every future
 long/climate run rides on it. But it does retire the hypothesis that the
 leak explained the arms' distance to sfno_full.
+
+### RETRACTION + the real mechanism: the MLP had LEARNED to cancel the leak
+
+I framed the SB retrain as "the leak was real but not a leading term in WB2
+RMSE". **Both halves were wrong**, and the scorecards already contained the
+refutation (codex found it; verified here from the JSON `bias` fields).
+
+1. The metric is NOT blind to the leak. Hypsometrically a -0.48 K/day
+   column-mean cooling displaces z500 by -9.7 m at 24 h and -97 m at 240 h,
+   against RMSE levels of 46 and 194 m. A leading term by construction.
+2. Splitting each RMSE into bias and centred (pattern) parts:
+
+| field / lead | RMSE old -> new | BIAS old -> new | PATTERN old -> new |
+|---|---|---|---|
+| z500 24 h | 48.1 -> 46.0 | 12.1 -> **5.6** | 46.5 -> 45.7 |
+| z500 240 h | 190 -> 194 | 12.3 -> **+52.5** | 190.1 -> **186.4** |
+| t850 24 h | 3.30 -> 3.11 | 0.382 -> **0.038** | 3.28 -> 3.11 |
+| t850 240 h | 6.66 -> 7.11 | 0.245 -> **+2.84** | 6.66 -> **6.52** |
+
+**The PATTERN improves at every lead. The long-lead "degradation" is
+entirely a new WARM BIAS** (+2.84 K at 240 h, +52 m of z500).
+
+That is the compensation signature: the MLP was trained on a dycore that
+cooled 0.48 K/day and learned to heat against it. Run on a dycore that no
+longer cools, the same learned heating becomes a net warm drift. The fix
+did not fail — it exposed physics that had been tuned to a defect, and 11
+epochs on the corrected system were not enough to unlearn it.
+
+Consequences: (a) the leak WAS a leading term, transferred into learned
+physics rather than shown as forecast error; (b) the correct acceptance
+test is a longer/rebalanced retrain, not this one; (c) any tuned parameter
+set or checkpoint from before 2026-08-11 encodes the leak and must not be
+carried onto the fixed dycore as an initialisation.
+
+Cheapest confirmations (codex): cross-evaluate the two checkpoints under
+BOTH numerics with the flags explicitly pinned (2x2 fixed-weight table)
+to separate forward-numerics from training-trajectory effects, and split
+scheme vs frictional heating on one checkpoint. Also noted: scorecard
+metadata records suite/checkpoint but NOT the git SHA or resolved PE
+flags, so post-default-flip runs of an old suite are no longer
+reproducible as scored — the metadata needs the resolved flags.
