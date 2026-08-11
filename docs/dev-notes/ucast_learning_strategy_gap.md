@@ -2577,3 +2577,38 @@ One-line adjacent finds (codex, not chased): `spectral_rollout` passes
 `grid.ms` where `apply_sponge_filter` now expects an (n_sh, nlev) T
 factor — any future sponge_tau>0 run on that path would fail loudly;
 tracer filter is applied even when only hyperdiff is on.
+
+## THE SB DYCORE FIX: TRAINING BIAS COLLAPSES, WB2 SKILL BARELY MOVES (2026-08-11)
+
+column_nn retrained on the energy-conserving dycore (sb_centered +
+frictional_heating, now the default — PR #1569), ONE variable vs the
+lnpsfix row, identical eval protocol:
+
+| field / lead | lnpsfix | SB | note |
+|---|---|---|---|
+| z500 24 h | 48.1 | **46.0** (-4%) | 120/240 h +4/+2% |
+| t850 24 h | 3.30 | **3.11** (-6%) | 240 h +7% |
+| u250 24 h | 7.50 | **7.09** (-5%) | -1..-5% at all leads |
+| mslp 24 h | 712 | 699 (-2%) | 240 h +9% |
+| q700 | ~ | +1% | flat |
+
+TRAINING side, matched epoch+lead: classical ep0/12 h loss 10.19 -> 9.60
+and its bias term 0.534 -> 0.184 (-65%); ep3/24 h 14.22 -> 12.55, bias
+1.554 -> 0.441 (-72%). The stuck bias_T — 99% of the bias penalty, immune
+to every previous lever — collapsed the moment the dycore stopped leaking.
+
+**Honest reading.** The leak was real, is fixed, and its fingerprint
+(bias_T) is gone. But the WB2 SHORT-LEAD gain is only 4-6%, and long lead
+is mildly WORSE on the mass fields (240 h mslp +9%, u850 +10%). So the
+0.48 K/day global-mean leak was NOT a leading term in the WB2 RMSE at
+these leads — the training loss and the forecast metric disagreed, and the
+metric is what counts. Two candidates for the long-lead degradation, both
+untested: the centered scheme's dispersive overshoot (measured: vertical T
+curvature 32 -> 44 K^2 vs truth 32.5, i.e. mildly noisy where upwind was
+over-smooth), and the MLP having refit to a different dynamical system
+with the same 11-epoch budget.
+
+Do NOT read this as "the fix does not matter": a dycore that cools 0.48
+K/day is wrong regardless of what RMSE says at day 1, and every future
+long/climate run rides on it. But it does retire the hypothesis that the
+leak explained the arms' distance to sfno_full.
