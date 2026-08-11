@@ -763,6 +763,41 @@ Largest genuine gains: bechtold (-5.7 K, 19 params) and zhang_mcfarlane
 precipitation column is invalid; the rankings stand because the diagnostic
 never entered the state, but the physics being ranked is not yet right.
 
+### 8.2h THE BUDGET CLOSES — and a third defect, in shared code
+
+Co-sampled water budget, every term read from the APPLIED tendencies over the
+same window (jobs 9370465/9370478):
+
+| configuration | window | E | P | dS/dt | residual | % of E |
+|---|---|---:|---:|---:|---:|---:|
+| sbm | 20→25 | 1.202 | 1.125 | +0.072 | +0.005 | 0.4 % |
+| mass_flux | 20→25 | 0.683 | 0.971 | −0.301 | +0.013 | 1.8 % |
+| convection=none | 5→10 | 0.720 | 1.352 | −0.854 | +0.222 | 31 % |
+| convection=none | **20→25** | 1.618 | 1.757 | −0.110 | −0.029 | **1.8 %** |
+
+`d(CWV+CWC)/dt = E - P` closes to <= 1.8 % in every SETTLED configuration.
+The one 31 % row is the same control at an UNSETTLED window, and the last row
+is the controlled test of that: identical configuration, days 20→25 instead of
+5→10, residual 31 % → 1.8 %. E and P are averaged over the last 2 days of each
+run while dS/dt spans the whole interval, which is not the same window when
+storage drains at 0.85 mm/day.
+
+**The third defect, found by this measurement.** The budget read E = 0.0000 on
+a column whose bulk formula gives 1.5 mm/day, twice, through two of my own
+"fixes" that were downstream of the real problem: the HYDROSTATIC turbulence
+path built `HydrostaticTendencies` WITHOUT `shflx_sfc`/`lhflx_sfc`. Only the
+MPAS construction attached them — and its comment says they exist "for the
+CMOR hfss/hfls feed", so on the hydrostatic lane that feed had nothing to read
+and `evspsbl` (= lhflx / L_v) was unavailable for ANY hydrostatic run, not
+just this SCM. Now exported symmetrically, None-guarded, gated by an AST test
+over every construction in the module (a grep for `lhflx_sfc` passed
+throughout, because the field existed — on the other lane).
+
+**Revised, from measurement:** the earlier "evaporation 30-60 % below the CRM"
+came from bulk snapshots at unsettled windows. With the applied flux at a
+settled window, E = 1.62 against the CRM's 2.23 — a 27 % deficit. Still real,
+smaller than stated.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
