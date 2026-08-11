@@ -2987,3 +2987,15 @@ shaves the collective share. Lever candidates for the morning consult:
 bf16 wire on the pencil halo (bytes are the collective term), compute
 kernel work, and whether fused+overlap's 5.28 ms profile shifts the
 split further.
+
+### Lat-lon compute discriminators (2026-08-11 morning, offline on the fused trace)
+
+GLM-5.2's ranked test executed: compute side = 200 kernels/step,
+median 3.7 us, 120/step under 10 us — a microkernel storm; ~12% HBM
+utilization against ~0.4 ms of unavoidable traffic. Top kernel:
+input_transpose_fusion (370 us/step, 11% of compute — layout churn).
+Collectives 13/step (>6 — structural collapse also still available);
+no per-step communicator init. No horizontal-fusion flag exists in
+this XLA build — the lever is SOURCE-LEVEL fusion (fewer, bigger
+fusions; kill the transposes; pack RK-stage axpys). Codex reading the
+step source for the transpose origin + smallest first slice.
