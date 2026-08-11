@@ -43,15 +43,15 @@ def main() -> int:
     import netCDF4 as nc
     ds = nc.Dataset(a.domain_cfg)
 
+    # domain_cfg is ALREADY the native (331, 360) frame (measured: dims
+    # y=331, x=360) -- unlike the mesh_mask/snapshot (332, 362) halo frame.
     def v2(name):
-        return np.asarray(ds.variables[name][:], dtype=np.float64).squeeze()[
-            _NATIVE_J, _NATIVE_I]
+        return np.asarray(ds.variables[name][:], dtype=np.float64).squeeze()
 
     e1v = v2("e1v")
     gphiv = v2("gphiv")
     glamv = v2("glamv")
-    e3v = np.asarray(ds.variables["e3v_0"][:], dtype=np.float64).squeeze()[
-        :, _NATIVE_J, _NATIVE_I]
+    e3v = np.asarray(ds.variables["e3v_0"][:], dtype=np.float64).squeeze()
     # v-point wetness from e3v_0 > 0 is not reliable (reference thicknesses
     # fill land); use bottom_level when present.
     if "bottom_level" in ds.variables:
