@@ -104,27 +104,44 @@ def test_extract_blocks_are_verbatim():
 
 
 _HOOK_RE = re.compile(
-    r"^\s*call extchain_dump3\('S\d[a-z]*_'//trim\(tag\), "
+    r"^\s*call extchain_dump3\('(S\d[a-z]*_)'//trim\(tag\), "
     r"(var|u_in|v_in|ull|vll|ullp1|vllp1|up1|vp1)\)"
     r"\s+! EXTCHAIN-HOOK \(deviation D3\)$")
 _HOOK_ARG_RE = re.compile(
     r"^\s*character\(len=\*\), intent\(in\) :: tag"
     r"\s+! EXTCHAIN-HOOK arg \(deviation D2\)$")
 
+# the EXACT (stage prefix, dumped variable) multiset — a hook whose
+# stage tag or argument is swapped (S1_ -> S9_, u_in -> v_in) fails
+# even though it still matches the generic shape (codex extchain r2 #4)
+_EXPECTED_HOOKS = sorted([
+    ("S1_", "var"), ("S1_", "var"), ("S2_", "var"),
+    ("S1u_", "u_in"), ("S1v_", "v_in"),
+    ("S1u_", "u_in"), ("S1v_", "v_in"),
+    ("S2u_", "ull"), ("S2v_", "vll"),
+    ("S3u_", "ullp1"), ("S3v_", "vllp1"),
+    ("S4u_", "ullp1"), ("S4v_", "vllp1"),
+    ("S5u_", "ullp1"), ("S5v_", "vllp1"),
+    ("S5up_", "up1"), ("S5vp_", "vp1"),
+    ("S6u_", "u_in"), ("S6v_", "v_in"),
+])
+
 
 def test_extract_hook_lines_strict():
-    """Every EXTCHAIN-HOOK line must match the STRICT dump-call shape —
+    """Every EXTCHAIN-HOOK line must match the STRICT dump-call shape,
+    and the (stage, variable) pairs must equal the pinned multiset —
     the verbatim check strips marked lines, so a marked line smuggling
-    anything else (e.g. dumping ``0*var``) would otherwise evade both
-    checks (codex extchain r1 #4).  Counts are pinned: 19 dump hooks
-    (3 scalar + 16 vector) + 2 tag-arg declarations."""
+    anything else (``0*var``, a swapped component, a renamed stage)
+    would otherwise evade both checks (codex extchain r1 #4 / r2 #4)."""
     body = EXTRACT.read_text()
     in_extract = body.split("module extchain_extract_mod", 1)[1]
-    n_dump, n_arg = 0, 0
+    hooks = []
+    n_arg = 0
     for ln in in_extract.splitlines():
         if "EXTCHAIN-HOOK" in ln:
-            if _HOOK_RE.match(ln):
-                n_dump += 1
+            m = _HOOK_RE.match(ln)
+            if m:
+                hooks.append((m.group(1), m.group(2)))
             elif _HOOK_ARG_RE.match(ln):
                 n_arg += 1
             else:
@@ -132,7 +149,7 @@ def test_extract_hook_lines_strict():
         elif "extchain_dump" in ln and "use extchain_dump_mod" not in ln \
                 and "only:" not in ln:
             raise AssertionError(f"unmarked dump call: {ln!r}")
-    assert n_dump == 19, n_dump
+    assert sorted(hooks) == _EXPECTED_HOOKS, sorted(hooks)
     assert n_arg == 2, n_arg
 
 

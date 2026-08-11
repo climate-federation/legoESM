@@ -87,25 +87,48 @@ def load_oracle(oracle_dir: Path) -> list:
     return [load_tile(oracle_dir, t) for t in range(1, 7)]
 
 
-def cert_values(notes: list) -> tuple:
-    """(max value per (family, variant), record count per key).
+_CERT_KEYS = {(f, v) for f in "ABCD" for v in ("v1", "v2")}
+_CERT_NVALS = {"A": 1, "B": 1, "C": 2, "D": 2}
 
-    The max is over ALL tiles (codex extchain r1 #1: overwriting per
-    tile silently trusted only the last rank), and the caller must
-    check the counts — an empty or partial CERT set is a failure, not
-    a pass."""
-    vals: dict = {}
-    counts: dict = {}
-    for ln in notes:
-        p = ln.split()
-        if p[0] != "CERT":
-            continue
-        fam, var = p[1].split("_")
-        key = (fam, var)
-        vals[key] = max(vals.get(key, 0.0),
-                        max(float(x) for x in p[2:]))
-        counts[key] = counts.get(key, 0) + 1
-    return vals, counts
+
+def check_certs(orc: list) -> tuple:
+    """PER-TILE CERT schema validation (codex extchain r2 #1).
+
+    Each tile must carry exactly 8 CERT records (4 families x 2
+    variants) with the family's component count (A/B: 1 value, C/D: 2),
+    and EVERY value must be finite and exactly 0.0 — nan, negative and
+    missing/duplicated records all fail.  Returns (ok, per_key_worst)
+    where per_key_worst uses a nan-propagating reduction for display."""
+    ok = True
+    worst: dict = {}
+    for tile in orc:
+        recs: dict = {}
+        n_lines = 0
+        for ln in tile["notes"]:
+            p = ln.split()
+            if p[0] != "CERT":
+                continue
+            n_lines += 1
+            fam, var = p[1].split("_")
+            recs.setdefault((fam, var), []).append(
+                [float(x) for x in p[2:]])
+        if n_lines != 8 or set(recs) != _CERT_KEYS \
+                or any(len(v) != 1 for v in recs.values()):
+            ok = False
+        for (fam, var), occurrences in recs.items():
+            for vals in occurrences:
+                if len(vals) != _CERT_NVALS.get(fam, -1):
+                    ok = False
+                for x in vals:
+                    if not (np.isfinite(x) and x == 0.0):
+                        ok = False
+                key = (fam, var)
+                cur = worst.get(key, 0.0)
+                arr = np.array(vals + [cur])
+                worst[key] = float(np.max(arr))    # nan propagates
+    if set(worst) != _CERT_KEYS:
+        ok = False
+    return ok, worst
 
 
 def note_value(notes: list, key: str) -> list:
@@ -420,17 +443,14 @@ def main() -> int:
     orc = load_oracle(odir)
 
     notes = [ln for t in orc for ln in t["notes"]]
-    certs, cert_counts = cert_values(notes)
+    cert_ok, certs = check_certs(orc)
     print("== oracle chain certification "
           "(max over ALL tiles of max|staged-composed|) ==")
     for k in sorted(certs):
-        print(f"  CERT {k[0]} {k[1]}: {certs[k]:.17e} "
-              f"({cert_counts[k]} tiles)")
-    cert_ok = (len(certs) == 8
-               and all(c == 6 for c in cert_counts.values())
-               and all(v == 0.0 for v in certs.values()))
+        print(f"  CERT {k[0]} {k[1]}: {certs[k]:.17e}")
     print(f"  staged dumps trusted: {cert_ok} "
-          f"(requires 8 keys x 6 tiles, all exactly 0.0)")
+          f"(per-tile schema: 8 records, A/B 1 value + C/D 2, all "
+          f"finite and exactly 0.0)")
 
     print("== oracle sentinel-independence "
           "(max|v1-v2| over FIN and CFIN) ==")
@@ -449,12 +469,13 @@ def main() -> int:
     # resolved runtime k2e_nord from the oracle manifest (the pinned
     # tree runs dg%k2e_nord = 2, NOT the 4 the ext tests default to —
     # exact runtime path, requirement of the diagnosis)
-    k2e_nord = int(note_value(notes, "npx npz tile k2e_nord dgng")[3])
-    print(f"== resolved oracle k2e_nord = {k2e_nord} "
+    k2e_oracle = int(note_value(notes, "npx npz tile k2e_nord dgng")[3])
+    k2e_nord = k2e_oracle
+    print(f"== resolved oracle k2e_nord = {k2e_oracle} "
           f"(port ext context built to match) ==")
     if args.port_k2e_nord is not None:
         print(f"== MUTATION CONTROL: port k2e_nord OVERRIDDEN to "
-              f"{args.port_k2e_nord} (oracle runs {k2e_nord}) — the "
+              f"{args.port_k2e_nord} (oracle runs {k2e_oracle}) — the "
               f"finals must diverge ==")
         k2e_nord = args.port_k2e_nord
     # PRODUCTION construction, not a bespoke one: the C48 parity runs
@@ -614,9 +635,12 @@ def main() -> int:
             oa = orc[T]["arrays"][oname]
             pa = port_in_oracle[T]
             # shapes MUST agree — silent truncation could hide missing
-            # boundary slots on a broken port output (codex r1 #3)
-            assert oa.shape == pa.shape, \
-                (stage_label, oname, oa.shape, pa.shape)
+            # boundary slots on a broken port output (codex r1 #3);
+            # explicit raise, not assert (survives python -O, r2 #3)
+            if oa.shape != pa.shape:
+                raise RuntimeError(
+                    f"shape mismatch {stage_label} {oname}: "
+                    f"{oa.shape} vs {pa.shape}")
             # mask only structurally-undefined slots (port NaN = never
             # touched; oracle -99999 prefill / stack garbage); FINAL
             # comparisons run with allow_mask=False and require ZERO
@@ -625,9 +649,11 @@ def main() -> int:
                 | (np.abs(oa) > 1e12) | (oa == -99999.0)
             n_masked += int(undef.sum())
             n_total += int(undef.size)
-            if not allow_mask:
-                assert not undef.any(), \
-                    (stage_label, oname, T, int(undef.sum()))
+            if not allow_mask and undef.any():
+                raise RuntimeError(
+                    f"masked slots on a FINAL comparison "
+                    f"{stage_label} {oname} tile {T + 1}: "
+                    f"{int(undef.sum())}")
             diff = np.where(undef, 0.0, pa - oa)
             reg = score_regions(diff, n, lat_ng, ish, jsh)
             for key, v in reg.items():
@@ -643,7 +669,7 @@ def main() -> int:
         emax = max(agg_edge.values()) if agg_edge else 0.0
         vmax = max(agg_vert.values()) if agg_vert else 0.0
         rings = {r: f"{v:.2e}" for r, v in sorted(ring_tab.items())}
-        mtag = (f" masked={n_masked}/{n_total}" if n_masked else "")
+        mtag = f" masked={n_masked}/{n_total}"
         print(f"  {stage_label:10s} interior={agg_int:.3e} "
               f"edges(max)={emax:.3e} vertices(max)={vmax:.3e} "
               f"rings={rings}{mtag}")
@@ -723,7 +749,8 @@ def main() -> int:
                              timeout=10).stdout.strip()
     except Exception:
         sha = "unknown"
-    scope = (f"C{n} ng={ng} k2e_nord={k2e_nord} layout=1x1 grid_type=0 "
+    scope = (f"C{n} ng={ng} k2e_nord_oracle={k2e_oracle} "
+             f"k2e_nord_port={k2e_nord} layout=1x1 grid_type=0 "
              "do_schmidt(stretch=1,target=(0,-90)=identity) hydrostatic "
              "deck; interporder=3/laginter=T are pinned module "
              "constants.  NOT covered: layout>1 "
