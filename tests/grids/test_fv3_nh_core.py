@@ -958,20 +958,30 @@ def test_edge_profile_jax_jit_eager_parity_and_no_retrace():
     # wrong one; bound = measured x ~10.  NB qe2 was never REPORTED as a
     # failure only because the loop asserts qe1 first.
     #
-    # A raised budget could in principle hide a jit-ONLY regression, so
-    # that is measured, not argued (job 9371947): against the NumPy fp64
-    # lane -- the certification authority -- jit is no further away than
-    # eager, to every digit printed:
-    #   qe1  eager-vs-numpy 1.093817e-15   jit-vs-numpy 1.093817e-15
-    #   qe2  eager-vs-numpy 1.022090e-15   jit-vs-numpy 1.022090e-15
-    # A jit-only numerical regression would push jit-vs-numpy above
-    # eager-vs-numpy; it does not move at all.  The divergence is
-    # therefore reassociation-class.  Attributing it specifically to XLA
-    # FMA contraction remains PLAUSIBLE, not isolated -- that would need
-    # a non-contracted lowering (HLO/LLVM inspection) to confirm.
-    for name, e, j in zip(("qe1", "qe2"), eager, jit1):
+    # A raised jit-vs-eager budget could hide a jit-ONLY regression, so
+    # the jit lane is ALSO bound directly against the NumPy fp64 lane --
+    # the certification authority -- at the same tolerance the eager
+    # lane is held to.  Measured (job 9371947): eager-vs-numpy and
+    # jit-vs-numpy are 1.093817e-15 (qe1) and 1.022090e-15 (qe2), equal
+    # to every printed digit.
+    #
+    # What that establishes, precisely: under this max-norm on this
+    # fixture, jit is no further from the authority than eager.  It does
+    # NOT exclude a jit change that happens to cancel against eager's own
+    # lane error, a change confined to non-maximal elements, or a
+    # common-mode eager+jit regression -- and it does not identify the
+    # mechanism.  XLA FMA contraction remains a PLAUSIBLE explanation,
+    # not an isolated one; that needs a non-contracted lowering
+    # (HLO/LLVM inspection) to confirm.
+    native = _run_native_edge_profile(q1, q2, 0, KM, dp0, False, 0)
+    for name, e, j, n in zip(("qe1", "qe2"), eager, jit1, native):
         r = _rel(np.asarray(j), e)
         assert r <= 1.1e-14, (name, r)
+        r_en, r_jn = _rel(np.asarray(e), n), _rel(np.asarray(j), n)
+        assert r_jn <= 1.1e-14, (name, "jit-vs-numpy", r_jn)
+        # The jit lane may not drift away from the authority relative to
+        # eager by more than the eager-jit budget itself.
+        assert r_jn <= r_en + 1.1e-14, (name, r_jn, r_en)
 
 
 # ---------------------------------------------------------------- gate 4
@@ -1185,15 +1195,25 @@ def test_udzc_jax_jit_eager_parity_and_no_retrace():
     #                  gz-scale quantities, so cancellation-amplified
     #                  relative to its own max)
     # Bound = measured x ~10, kept separate so a gz regression cannot
-    # hide behind ws's looser budget.  The same jit-only-regression
-    # check as the edge_profile gate applies (job 9371947): against the
-    # NumPy lane, jit sits no further away than eager, so the raised
-    # budget is not covering a jit defect.  The FMA-contraction
-    # attribution is PLAUSIBLE, not isolated.
+    # hide behind ws's looser budget.  As in the edge_profile gate, the
+    # jit lane is ALSO bound directly against the NumPy fp64 lane so a
+    # jit-only regression cannot hide inside the raised jit-vs-eager
+    # budget; see that gate for exactly what this does and does not
+    # establish (it does not exclude cancellation against eager's own
+    # lane error, non-maximal-element changes, or a common-mode
+    # regression, and it identifies no mechanism).
     bounds = {"gz": 3.3e-15, "ws": 1.9e-14}
-    for name, e, j in zip(("gz", "ws"), eager, jit1):
-        r = np.abs(np.asarray(j) - e).max() / max(np.abs(e).max(), 1e-30)
+    native = _run_native_update_dz_c(bd, KM, 100.0, dp0, zs, area, ut,
+                                     vt, gz, ws0, npx, npy, **flags)
+    for name, e, j, n in zip(("gz", "ws"), eager, jit1, native):
+        scale = max(np.abs(e).max(), 1e-30)
+        r = np.abs(np.asarray(j) - e).max() / scale
         assert r <= bounds[name], (name, r)
+        n_scale = max(np.abs(n).max(), 1e-30)
+        r_en = np.abs(np.asarray(e) - n).max() / n_scale
+        r_jn = np.abs(np.asarray(j) - n).max() / n_scale
+        assert r_jn <= bounds[name], (name, "jit-vs-numpy", r_jn)
+        assert r_jn <= r_en + bounds[name], (name, r_jn, r_en)
 
 
 # ---------------------------------------------------------------- gate 4
