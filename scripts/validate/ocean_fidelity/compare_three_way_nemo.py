@@ -340,6 +340,31 @@ def _fmt(s):
             if s else "  (no cells)")
 
 
+def _validate_args(a):
+    """Fail-fast validation of every numeric CLI value, called immediately
+    after parsing and BEFORE any file is opened.
+
+    ``--smooth-radius-deg`` is compared with ``is not None`` everywhere
+    downstream, so 0 must be REJECTED here rather than silently meaning
+    "unsmoothed": a caller who passed 0 believed they were requesting a
+    filter, and the chord conversion 2*sin(r/2) is only monotone on
+    (0, 180], so anything outside that range would report a false filter
+    width."""
+    if not np.isfinite(a.res_deg) or a.res_deg <= 0:
+        raise SystemExit(f"--res-deg must be finite and positive, got {a.res_deg}")
+    if not (180.0 / a.res_deg).is_integer() or not (360.0 / a.res_deg).is_integer():
+        raise SystemExit(f"--res-deg {a.res_deg} does not divide the globe evenly")
+    if a.smooth_radius_deg is not None:
+        if not np.isfinite(a.smooth_radius_deg) or not (
+                0.0 < a.smooth_radius_deg <= 180.0):
+            raise SystemExit(
+                f"--smooth-radius-deg must be in (0, 180], got "
+                f"{a.smooth_radius_deg}: the chord conversion 2*sin(r/2) is only "
+                "monotone there, so a larger value silently becomes a SMALLER "
+                "effective radius and the reported filter width would be false; "
+                "omit the flag entirely for the unsmoothed scorecard.")
+
+
 def _git_sha(repo):
     try:
         return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -374,10 +399,13 @@ def main() -> int:
     p.add_argument("--mask-mode", choices=("nearest", "coverage"), default="nearest",
                    help="How a target cell is classified ocean.  'nearest' "
                         "(default) requires the nearest SOURCE cell of every "
-                        "source to be wet -- a real land/sea classification.  "
-                        "'coverage' keeps the regridder's distance-to-wet-data "
-                        "flag, which admits land cells within 2.5 deg of ocean "
-                        "and is retained only to reproduce older scorecards.")
+                        "source to be wet -- a nearest-CENTRE screening "
+                        "classification: it cannot resolve a strait or barrier "
+                        "narrower than a target cell, so near_land* numbers "
+                        "stay screening figures either way.  'coverage' keeps "
+                        "the regridder's distance-to-wet-data flag, which "
+                        "admits land cells within 2.5 deg of ocean and is "
+                        "retained only to reproduce older scorecards.")
     p.add_argument("--deep-mld-m", type=float, default=500.0,
                    help="MLD depth [m] above which a column counts as 'deep "
                         "convection' in the tail diagnostic (default 500).")
@@ -385,6 +413,7 @@ def main() -> int:
     p.add_argument("--label-tripole", default="tripole")
     p.add_argument("--label-mpas", default="MPAS")
     a = p.parse_args()
+    _validate_args(a)
 
     out = a.out_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -395,10 +424,6 @@ def main() -> int:
     # Cell CENTRES of a global grid of spacing res_deg.  The previous
     # hard-coded -89.5/0.5 offsets are the centres only at 1 degree; at 2 they
     # gave -89.5..88.5, which is neither centred nor global.
-    if not np.isfinite(a.res_deg) or a.res_deg <= 0:
-        raise SystemExit(f"--res-deg must be finite and positive, got {a.res_deg}")
-    if not (180.0 / a.res_deg).is_integer() or not (360.0 / a.res_deg).is_integer():
-        raise SystemExit(f"--res-deg {a.res_deg} does not divide the globe evenly")
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
     tgt_lon = a.res_deg / 2.0 + a.res_deg * np.arange(int(360.0 / a.res_deg))
 
@@ -463,6 +488,12 @@ def main() -> int:
         "caveat": ("Fidelity numbers inherit the RUN configuration; a matched "
                    "cross-grid pair is degraded from the NEMO-faithful tripole "
                    "config on both arms. See each arm's run_manifest.json."),
+        "near_land_caveat": (
+            "near_land* metrics are SCREENING figures: the ocean mask is a "
+            "nearest-centre classification with no cell polygons and no ocean "
+            "connectivity, so straits/barriers narrower than a target cell can "
+            "be misclassified and IDW values can cross a land barrier. A "
+            "coastline-resolved verdict needs a topology-aware remapper."),
         "fields": {},
     }
 
@@ -506,14 +537,7 @@ def main() -> int:
         _mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
         fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area))
-    if a.smooth_radius_deg:
-        if not np.isfinite(a.smooth_radius_deg) or not (
-                0.0 < a.smooth_radius_deg <= 180.0):
-            raise SystemExit(
-                f"--smooth-radius-deg must be in (0, 180], got "
-                f"{a.smooth_radius_deg}: the chord conversion 2*sin(r/2) is only "
-                "monotone there, so a larger value silently becomes a SMALLER "
-                "effective radius and the reported filter width would be false.")
+    if a.smooth_radius_deg is not None:
         print(f"[smooth] common-footprint control ON: top-hat mean over "
               f"{a.smooth_radius_deg} deg great-circle radius, applied "
               "IDENTICALLY to all three sources")
@@ -546,7 +570,7 @@ def main() -> int:
         sb = {k: (v & (ar > 0)) for k, v in sub.items()}
         # Tails are a COLUMN-COUNT statistic; a smoothed field cannot support
         # one (see the [smooth] note above).
-        deep = (a.deep_mld_m if (name == "MLD" and not a.smooth_radius_deg)
+        deep = (a.deep_mld_m if (name == "MLD" and a.smooth_radius_deg is None)
                 else None)
         rec = {
             "unit": unit,

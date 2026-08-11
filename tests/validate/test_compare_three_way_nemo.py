@@ -259,14 +259,54 @@ def test_json_safe_nulls_non_finite_so_the_report_is_valid_json():
 # --------------------------------------------------------------------------
 # Gaps codex round 3 named: radius bounds, and the zonal support gate
 # --------------------------------------------------------------------------
-def test_smoothing_radius_bounds_are_validated_in_main():
+def _args(**kw):
+    """A Namespace with valid defaults, overridden per test."""
+    import argparse
+    base = dict(res_deg=1.0, smooth_radius_deg=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_smoothing_radius_bounds_are_enforced_functionally():
     """A radius above 180 deg is not a wider filter -- 2*sin(r/2) turns back on
     itself, so 270 deg silently becomes a 90 deg chord and the REPORTED width
-    would be a lie.  The guard lives in main, so assert on its source."""
+    would be a lie.  0 must be rejected too: the caller who typed 0 believed
+    they requested a filter; 'unsmoothed' is spelled by omitting the flag.
+    These CALL the validator (codex r4: a source-text assertion passed while
+    the 0 case slipped through a truthiness check)."""
+    import pytest
+    m._validate_args(_args())                        # None = unsmoothed, OK
+    m._validate_args(_args(smooth_radius_deg=4.0))   # in range, OK
+    m._validate_args(_args(smooth_radius_deg=180.0)) # boundary, OK
+    for bad in (0.0, -5.0, 270.0, float("nan"), float("inf")):
+        with pytest.raises(SystemExit):
+            m._validate_args(_args(smooth_radius_deg=bad))
+
+
+def test_res_deg_bounds_are_enforced_functionally():
+    import pytest
+    m._validate_args(_args(res_deg=2.0))
+    for bad in (0.0, -1.0, 7.0, float("nan")):
+        with pytest.raises(SystemExit):
+            m._validate_args(_args(res_deg=bad))
+
+
+def test_main_validates_args_before_touching_any_input():
+    """main must call _validate_args right after parsing; reverting that call
+    (or the build_ocean_mask selection below) must fail this suite."""
     import inspect
     src = inspect.getsource(m.main)
-    assert "--smooth-radius-deg must be in (0, 180]" in src
-    assert "0.0 < a.smooth_radius_deg <= 180.0" in src
+    assert "_validate_args(a)" in src
+    assert src.index("_validate_args(a)") < src.index("mkdir")
+
+
+def test_main_selects_the_ocean_mask_through_build_ocean_mask():
+    """REGRESSION TRIPWIRE (codex r3/r4): reverting main to `ocean = coverage`
+    passed every helper test.  This string check fails on that exact revert;
+    it names the symbol that runs (main) and the call it must make."""
+    import inspect
+    src = inspect.getsource(m.main)
+    assert "ocean = build_ocean_mask(coverage" in src
 
 
 def test_mld_tails_are_suppressed_when_smoothing():
@@ -275,7 +315,7 @@ def test_mld_tails_are_suppressed_when_smoothing():
     for tails on a smoothed field."""
     import inspect
     src = inspect.getsource(m.main)
-    assert 'name == "MLD" and not a.smooth_radius_deg' in src
+    assert 'name == "MLD" and a.smooth_radius_deg is None' in src
 
 
 def test_zonal_gate_uses_pre_dropout_availability_not_the_scored_mask():
