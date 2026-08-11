@@ -92,26 +92,33 @@ grep "^CERT" dyncore_stage_t1.mf | head -25
 ls -la dyncore_stage_t*.dat
 fi   # SKIP
 
-# codex r1 #2: mutation controls run FIRST and write receipts; the
-# clean run refuses an authoritative verdict without them.
+# codex r1 #2 flow: provisional clean run -> mutation controls scored
+# 100x-over-baseline (a genuine upstream signal must not mask them) ->
+# receipt-gated authoritative rerun.
 cd $REPO
-echo "=== mutation control 1: fluxavg (expect S09 flagged first) ==="
+echo "=== stage comparison: provisional clean run ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
-    --dump-dir $R --mutate fluxavg \
-    --write-receipt $OUT/receipt_fluxavg.json | tail -6
+    --dump-dir $R --json $OUT/stage_diffs.json
+echo "COMPARE_PROVISIONAL_RC=$?"
+
+echo "=== mutation control 1: fluxavg (S09 must grow 100x) ==="
+$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
+    --dump-dir $R --mutate fluxavg --baseline-json $OUT/stage_diffs.json \
+    --write-receipt $OUT/receipt_fluxavg.json | tail -4
 echo "MUTATE_FLUXAVG_RC=$?"
 
-echo "=== mutation control 2: b2 (expect S11 flagged first) ==="
+echo "=== mutation control 2: b2 (S11 must grow 100x) ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
-    --dump-dir $R --mutate b2 \
-    --write-receipt $OUT/receipt_b2.json | tail -6
+    --dump-dir $R --mutate b2 --baseline-json $OUT/stage_diffs.json \
+    --write-receipt $OUT/receipt_b2.json | tail -4
 echo "MUTATE_B2_RC=$?"
 
-echo "=== stage comparison: clean run (receipt-gated) ==="
+echo "=== stage comparison: authoritative (receipt-gated) ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
     --dump-dir $R --json $OUT/stage_diffs.json \
-    --receipts $OUT/receipt_fluxavg.json,$OUT/receipt_b2.json
+    --receipts $OUT/receipt_fluxavg.json,$OUT/receipt_b2.json > $OUT/clean_final.txt
 RC_CLEAN=$?
+tail -35 $OUT/clean_final.txt
 echo "COMPARE_CLEAN_RC=$RC_CLEAN"
 
 echo "=== pytest: instrument unit tests ==="

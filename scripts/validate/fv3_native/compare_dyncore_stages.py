@@ -479,6 +479,10 @@ def main(argv=None):
                          "flagged first (b2 -> S11, fluxavg -> S09)")
     ap.add_argument("--write-receipt", default=None,
                     help="mutation runs: write a PASS receipt here")
+    ap.add_argument("--baseline-json", default=None,
+                    help="mutation runs: the clean run's --json output; "
+                         "PASS = target stage's boundary rel grew 100x "
+                         "over it")
     ap.add_argument("--receipts", default=None,
                     help="clean runs: comma-separated mutation-control "
                          "receipts (codex r1 #2 -- rung 4 is mandatory; "
@@ -715,11 +719,31 @@ def main(argv=None):
         print("  none -- no stage shows a boundary-concentrated jump")
 
     if args.mutate:
+        # PASS criterion: the TARGET stage's boundary rel must GROW by
+        # >= 100x versus the unmutated baseline run.  ("first flag ==
+        # target" was the original criterion; it is unsatisfiable once a
+        # GENUINE upstream signal exists in the clean run -- measured:
+        # the real S10 d_sw3 difference precedes S11 in ladder order, so
+        # the b2 control could never pass while correctly having teeth.)
         want = {"b2": "S11_b2", "fluxavg": "S09_fluxavg"}[args.mutate]
-        got = flagged[0][0] if flagged else None
-        ok = (got == want)
-        print(f"\nMUTATION CONTROL: expected first flag {want}, got "
-              f"{got} -> {'PASS' if ok else 'FAIL'}")
+        base_val = 0.0
+        if args.baseline_json:
+            import json as _json
+            base = _json.load(open(args.baseline_json))
+            base_val = max((r["rel"]["edge"] for r in base["rows"]
+                            if r["stage"] == want), default=0.0)
+        got_val = max((br for s, f, br, ir in flagged if s == want),
+                      default=0.0)
+        if args.baseline_json:
+            ok = got_val >= 100.0 * max(base_val, 1e-13)
+            print(f"\nMUTATION CONTROL: {want} boundary rel "
+                  f"{got_val:.3e} vs baseline {base_val:.3e} -> "
+                  f"{'PASS' if ok else 'FAIL'} (needs >= 100x)")
+        else:
+            got = flagged[0][0] if flagged else None
+            ok = (got == want)
+            print(f"\nMUTATION CONTROL: expected first flag {want}, got "
+                  f"{got} -> {'PASS' if ok else 'FAIL'}")
         if ok and args.write_receipt:
             import json as _json
             with open(args.write_receipt, "w") as fh:
