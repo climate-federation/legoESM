@@ -88,7 +88,18 @@ ENFORCEMENT (codex c6 r1 #1/#2/#4/#5): report-only by default.
   rel_l2 over all days was gh 2.304e-3 / wind 2.850e-2, time-flat at
   the remap-protocol floor (IC gh 2.190e-3).  Recommended bounds at
   ~2x the worst measured day: ``--max-gh 5e-3 --max-wind 6e-2`` — a
-  regression that doubles the day-5 error trips, remap noise does not;
+  regression that doubles the day-5 error trips, remap noise does not.
+  CASE-2 CALIBRATION (job 9369321, 2026-08-11, code 5e1a2549d, C48
+  deck config, IC + days 1..5, both time-flat):
+  * alpha0:  worst gh 5.433e-3 / wind 9.967e-3 (cosw 4.90e-3 /
+    6.32e-3) — recommended ``--max-gh 1.1e-2 --max-wind 2e-2``;
+  * alpha45: worst gh 5.523e-3 / wind 1.233e-1 (cosw 5.11e-3 /
+    1.719e-2) — recommended ``--max-gh 1.1e-2 --max-wind 2.5e-1``.
+    The alpha45 wind bound is POLE-ARTIFACT-LIMITED (see the floor
+    note above), and its cos-lat metric — enforced at the same bound —
+    is what actually constrains the rotated physics (~1.7e-2 measured
+    vs the 2.5e-1 ceiling; a physics regression an order below the
+    unweighted floor still trips nothing unweighted, by construction);
 * the npz to carry the runner's config record MATCHING the reference
   deck (C48, dt_atmos=1200, n_split=7, d_ext=0, d4_bg=0, oracle
   conventions, no ext exclusions) — a diagnostic variant scores fine in
