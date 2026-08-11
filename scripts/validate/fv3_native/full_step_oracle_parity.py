@@ -605,31 +605,38 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
             gs[k] = np.where(np.abs(a) < _SENT_GUARD, a * fac, a)
             stats[k] = stats.get(k, 0) + int(
                 ((np.abs(a) < _SENT_GUARD) & (fac != 1.0)).sum())
-        # 2) angle pairs: coherent rotation on real-trig boundary cells.
-        # The write is gated on dth != 0 as well: cos(arctan2(s,c)) is
-        # NOT bit-identical to c in general, so rewriting live cells
-        # with a zero rotation would silently re-round the strict
-        # interior (codex instr r1 H1).
+        # 2) angle pairs: coherent ROTATION-MATRIX perturbation on
+        # real-trig boundary cells: (c,s) -> (c cos(dth) - s sin(dth),
+        # s cos(dth) + c sin(dth)).  This moves both members by O(eps)
+        # everywhere (no perturb-a-zero hole at cosa ~ 0) and scales
+        # the pair's norm by exactly (1 + dth^2) ~ 1 + 1e-24 -- it
+        # PRESERVES whatever c^2+s^2 the builder produced.  The earlier
+        # cos/sin(arctan2(s,c)+dth) form silently NORMALIZED the pair,
+        # which at panel-edge B nodes -- where upstream's edge
+        # averaging leaves c^2+s^2-1 ~ 1e-8 -- injected a 1e-8 kick,
+        # four orders above eps (caught by the invariants test).
+        # The write is gated on dth != 0 so untouched cells stay
+        # bit-exact (codex instr r1 H1).
         for ck, sk in _PERT_ANGLE_PAIRS:
             c, s = old[ck], old[sk]
             real = (np.abs(c) < _TRIG_GUARD) & (np.abs(s) < _TRIG_GUARD)
             dth = _pert_pattern(c.shape, ng, eps)
             rot = real & (dth != 0.0)
-            th = np.arctan2(np.where(real, s, 1.0),
-                            np.where(real, c, 0.0))
-            gs[ck] = np.where(rot, np.cos(th + dth), c)
-            gs[sk] = np.where(rot, np.sin(th + dth), s)
+            gs[ck] = np.where(rot, c * np.cos(dth) - s * np.sin(dth), c)
+            gs[sk] = np.where(rot, s * np.cos(dth) + c * np.sin(dth), s)
             stats[ck] = stats.get(ck, 0) + int(rot.sum())
-        # 3) sg families: slot-wise rotation where sin^2+cos^2=1 held
-        # (same dth != 0 gate -- untouched slots stay bit-exact)
+        # 3) sg families: the same slot-wise pair rotation, gated to
+        # genuine unit-norm angle slots only -- ghost/transport-patch
+        # convention slots (tiny 1e-8 floors, corner patches) violate
+        # the unit norm and stay bit-exact
         ssg, csg = old["sin_sg"], old["cos_sg"]
         real = np.abs(ssg * ssg + csg * csg - 1.0) < 1.0e-12
         dth = _pert_pattern(ssg.shape[:2], ng, eps)[:, :, None]
         rot = real & (dth != 0.0)
-        th = np.arctan2(np.where(real, ssg, 1.0),
-                        np.where(real, csg, 0.0))
-        gs["sin_sg"] = np.where(rot, np.sin(th + dth), ssg)
-        gs["cos_sg"] = np.where(rot, np.cos(th + dth), csg)
+        gs["sin_sg"] = np.where(rot, ssg * np.cos(dth) + csg * np.sin(dth),
+                                ssg)
+        gs["cos_sg"] = np.where(rot, csg * np.cos(dth) - ssg * np.sin(dth),
+                                csg)
         stats["sin_sg"] = stats.get("sin_sg", 0) + int(rot.sum())
 
         # 4) recompute EVERY derived family where its builder formula

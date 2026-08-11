@@ -121,12 +121,27 @@ def test_coherent_perturbation_keeps_builder_invariants():
             live = (np.abs(p) < 1.0e29) & (np.abs(r) > 1.0e-20)
             assert np.abs(p[live] * r[live] - 1.0).max() < 1.0e-14, \
                 (pk, rk)
-        # angle coherence after rotation, ALL pairs (u, v, B-plane)
+        # angle coherence after rotation, ALL pairs (u, v, B-plane):
+        # the rotation-matrix perturbation preserves each pair's norm
+        # to (1 + eps^2), so the cos^2+sin^2-1 residual must NOT grow
+        # beyond the BUILDER's own residual (upstream edge averaging
+        # leaves ~1e-8 at panel-edge nodes -- a fixed 1e-13 tolerance
+        # was the wrong expectation, and the earlier arctan2 form
+        # failed this by silently renormalizing those cells).
         for ck, sk in (("cosa_u", "sina_u"), ("cosa_v", "sina_v"),
                        ("cosa", "sina")):
             c, s = np.asarray(gs[ck]), np.asarray(gs[sk])
+            c0, s0 = ref[t][ck], ref[t][sk]
             lu = (np.abs(c) < 1.0e6) & (np.abs(s) < 1.0e6)
-            assert np.abs(c[lu] ** 2 + s[lu] ** 2 - 1.0).max() < 1.0e-13
+            post = np.abs(c[lu] ** 2 + s[lu] ** 2 - 1.0).max()
+            pre = np.abs(c0[lu] ** 2 + s0[lu] ** 2 - 1.0).max()
+            assert post <= pre + 1.0e-12, (ck, sk, pre, post)
+            # and the kick is O(eps), not O(builder residual): the
+            # arctan2 renormalization bug injected a fixed ~1e-8 at
+            # edge-averaged nodes regardless of eps; the rotation form
+            # is bounded by eps * max|pair| ~ eps
+            dmax = np.abs(c[lu] - c0[lu]).max()
+            assert 0.0 < dmax <= 10.0 * eps, (ck, dmax)
         # consumed metric summaries refreshed (codex instr r1 H2):
         # the stored scalars must equal the extremum of the PERTURBED
         # arrays over the builder's compute range
