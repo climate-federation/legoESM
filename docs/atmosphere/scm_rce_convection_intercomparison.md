@@ -631,6 +631,63 @@ and any "after tuning" T/q_v improvement is a by-product rather than the
 target. The CSV carries all four components for both arms, so the
 decomposition is checkable per scheme rather than taken on trust.
 
+### 8.2e The precipitation was real; the DIAGNOSTIC was not — SOLVED
+
+The inert precipitation term of 8.2d is a harness defect, found by asking why
+the same physics package precipitates normally in the global model.
+
+**The defect.** `run_scm_rce_campaign.py` reported precipitation from a
+SECOND, diagnostic-only invocation of the microphysics — not the invocation
+whose tendencies advanced the column — and that closure was built with the
+OUTER timestep (600 s) while the applied operator runs at `dt/substeps`
+(20 s). The global model reads the value from the applied call
+(`physics_pipeline.py:1473`), which is exactly why it never showed this.
+Diagnosed by codex (job 9361578), confirmed by direct read.
+
+**The measurement that forced it.** Evaporation was measured by calling the
+shipped `compute_surface_fluxes` on the equilibrium column the model reached,
+so it is the model's own number rather than a hand estimate:
+
+| configuration | E | storage | P before | P after | residual |
+|---|---:|---:|---:|---:|---:|
+| sbm | 1.559 | +0.072 | 4.1e-18 | **1.125** | 0.362 |
+| mass_flux | 0.906 | −0.301 | 2.4e-18 | **0.971** | 0.236 |
+| convection = none | 0.933 | −0.854 | 1.0e-07 | **1.352** | 0.435 |
+
+76-80 % of the previously-unaccounted water is now reported, in every
+configuration INCLUDING convection switched off — which is what localised the
+defect to the microphysics diagnostic rather than to convective routing.
+
+**Two suspects killed by controls, not by argument:**
+
+* The in-scheme hard saturation adjustment. A one-variable A/B moved the sink
+  by 0.042 mm/day with convection off and **0.001** with sbm. Not the sink.
+  It was the leading hypothesis; it is retracted.
+* Frozen precipitation being excluded from the reported flux. Morrison's
+  `precipitation = precip_r + precip_i + precip_s + precip_g` — all four
+  species. Refuted by reading before claiming.
+
+**The residual (0.24-0.43 mm/day) is probably the probe, not the model.** E is
+a SNAPSHOT at the final state while storage and P are WINDOW MEANS; where the
+column is far from equilibrium those are not comparable, and the residual is
+largest exactly there (convection=none, days 5-10) and smallest for the most
+settled case. Tightening it needs E averaged over the window.
+
+**Consequence for the ten arms.** The diagnostic is read-only — it never
+entered the state — so no column's evolution was perturbed and the RANKINGS
+STAND. The precipitation column in those arms is invalid and is marked so. A
+re-run with the fix is not a cosmetic redo: a live precipitation term would
+discriminate between schemes and would therefore change what the tuner
+optimises.
+
+**Still open, in the same lane:** the standalone convection bridge
+(`convection/integration.py:670`) routes an ADJUSTMENT scheme's column drying
+into `q_c` because it "has no surface-precip accumulator", while the coupled
+`PhysicsPipeline` precipitates that vapour sink directly
+(`physics_pipeline.py:1568`). Its own comment calls a convective-precip path
+here "a tracked follow-up". That is a genuine SCM-vs-global semantic
+difference for sbm/dca/kuo, separate from the defect fixed above.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
