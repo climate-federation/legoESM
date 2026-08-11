@@ -3051,3 +3051,23 @@ fold-padded T into cgrid_fv_scalar_advection_latlon_3d's existing
 q_pad parameter. Saves 1 pair/stage = 6 of 13 collectives/step
 (~0.8-1.0 ms class). Gates: band-vs-serial bit-parity suites, sharded
 step tests, then the standard A/B/A2.
+
+### Mixed-pad slice: REFUTED and REVERTED (2026-08-11 morning)
+
+Production A/B/A2 (26864285, drift 0.0%): mixed/off = 0.983 — removing
+6 of 13 collectives/step bought 1.7%. Reverted same-day per the
+delete-before-adding precedent (implementation + bit-parity receipts
+live in this branch's history; the escape-hatch A/B protocol worked
+exactly as designed).
+
+**Cross-lane law, now receipted on BOTH lanes:** on this XLA/NCCL
+stack the sequential-collective COUNT is nearly free (~15 us marginal
+on MPAS, ~18 us here); collective wall time is BYTES and WAIT. MPAS
+had 2.9x padded bytes to cut (landed, -20%); lat-lon's uniform pencil
+payloads have no padding, so its 2.7 ms collective share is genuine
+bytes+wait, and its remaining receipted levers are bounded: bf16 wire
+(<=0.5 ms, halves bytes — a science-mode precision decision), the
+parked layout-boundary tax (8%), and the throughput reframes (ensemble
+axis, IMEX dt) that trade something the loop cannot decide
+unilaterally. Lat-lon at ~6.1 ms @64 (fused) sits near its practical
+stack limit under the current numerics.
