@@ -160,12 +160,16 @@ def test_coherent_perturbation_keeps_builder_invariants():
                                   ref_dx6[t])
         assert not np.array_equal(np.asarray(ctx["ectx"]["dy6"][t]),
                                   ref_dy6[t])
+        # f0 perturbed at boundary cells (codex instr r2 H1: it is a
+        # consumed static; additive so the equator line moves too)
+        assert not np.array_equal(np.asarray(gs["f0"]), ref[t]["f0"])
         # strict interior BIT-EXACT, including the angle families the
         # arctan2 round-trip could silently re-round (codex instr r1
         # H1) and a derived family
         sl = slice(ng + 1, n + ng - 1)
         for k in ("dx", "cosa_u", "sina_u", "cosa", "sina",
-                  "sin_sg", "cos_sg", "rsin_u", "divg_u", "rarea"):
+                  "sin_sg", "cos_sg", "rsin_u", "divg_u", "rarea",
+                  "f0"):
             assert np.array_equal(np.asarray(gs[k])[sl, sl],
                                   ref[t][k][sl, sl]), k
     assert moved_any
@@ -191,6 +195,7 @@ def test_zero_cell_perturbation_is_refused():
         "cosa": np.full((m_b, m_b), big),
         "sina": np.full((m_b, m_b), big),
         "cosa_s": np.full((m_a, m_a), big),
+        "f0": np.full((m_a, m_a), big),
         "sin_sg": np.full((m_a, m_a, 9), big),
         "cos_sg": np.full((m_a, m_a, 9), big),
         "rdx": np.full((m_a, m_b), big), "rdy": np.full((m_b, m_a), big),

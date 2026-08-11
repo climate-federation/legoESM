@@ -692,6 +692,20 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
                 f((np.asarray(gs["sina_u"]), np.asarray(gs["dxc"]),
                    np.asarray(gs["dy"]))), stats)
 
+        # 3b) f0 (codex instr r2 H1): a consumed coordinate-derived
+        # static (d_sw5 vort = wk + f0, full domain incl the corner
+        # wedges that carried the pre-#1585 defect).  ADDITIVE
+        # eps*2*Omega*pat at boundary cells -- multiplicative would be
+        # a no-op exactly on the equator line where f0 = 0 (the
+        # perturb-a-zero trap).  f0 has no derived fields and no ectx
+        # snapshot.
+        from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA
+        f0a = np.asarray(gs["f0"], dtype=np.float64).copy()
+        d_f0 = _pert_pattern(f0a.shape, ng, eps) * (2.0 * FV3_OMEGA)
+        okf = (np.abs(f0a) < _TRIG_GUARD) & (d_f0 != 0.0)
+        gs["f0"] = np.where(okf, f0a + d_f0, f0a)
+        stats["f0"] = stats.get("f0", 0) + int(okf.sum())
+
         # 4b) consumed metric SUMMARIES (codex instr r1 H2): d_sw and
         # the duo sw core read the scalars da_min/da_min_c, computed by
         # the builder as min/max over the compute range (bounded lane:
@@ -788,7 +802,8 @@ def main(argv=None):
                          "a rotation theta+EPS*pat -- then RECOMPUTE "
                          "every derived reciprocal/composite "
                          "(rdx=1/dx, rarea=1/area, rsina, divg/del6) "
-                         "so builder invariants hold, and refresh the "
+                         "so builder invariants hold, perturb f0 "
+                         "(additive eps*2*Omega), and refresh the "
                          "prebuilt ectx dx6/dy6 snapshots. The "
                          "production metrics match the oracle at "
                          "~1e-14; if the one-step residual scales with "
@@ -1319,16 +1334,30 @@ def main(argv=None):
           f"{worst_step / max(worst, 1e-300):.3g}x")
     if args.perturb_boundary_metrics:
         # pre-registered decision rule (printed with the number so the
-        # log is self-contained): the unperturbed floor is 9.8e-06; a
-        # coherent boundary-metric seed that AMPLIFIES to the floor
-        # predicts the residual MOVES with eps (>=2x at eps=1e-10 vs
-        # 1e-12); a residual pinned at the floor across both eps
-        # refutes seed amplification and leaves a composition/
-        # formulation difference.
+        # log is self-contained): a coherent boundary seed that
+        # AMPLIFIES to the floor predicts the residual MOVES with eps
+        # (>=2x at eps=1e-10 vs 1e-12); a residual pinned at the
+        # unperturbed floor across both eps refutes seed amplification
+        # FOR THE PERTURBED INPUTS.
         print(f"PERTURB DECISION RULE: eps={args.perturb_boundary_metrics:g} "
               f"WORST={worst_step:.4e}; PINNED if within ~10% of the "
               f"unperturbed floor at BOTH eps=1e-12 and 1e-10, MOVED "
               f"otherwise")
+        # SCOPE (codex instr r2 H1 -- do not overreach): PINNED here
+        # refutes amplification of seeds in the perturbed set only:
+        # every gridstruct metric family (primitives + recomputed
+        # deriveds + da_min scalars), f0, and the ectx dx6/dy6
+        # snapshots.  NOT perturbed: ectx amat6 and the ext-vector
+        # bases/corner operators (vlon4/vlat4/ew4/es4) -- those are
+        # COORDINATE-derived; their equality to the oracle is
+        # certified DIRECTLY (face-map coordinate control ~1e-16 here;
+        # extchain oracle battery certificates), which bounds the seed
+        # but not a hypothetical amplification of it.  A verdict of
+        # 'composition/formulation difference' additionally rests on
+        # those direct certificates.
+        print("PERTURB SCOPE: metrics+deriveds+da_min+f0+ectx(dx6,dy6) "
+              "perturbed; amat6/ext-vector bases coordinate-derived, "
+              "certified directly, NOT perturbed")
 
     if args.json:
         with open(args.json, "w") as fh:
