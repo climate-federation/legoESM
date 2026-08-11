@@ -42,7 +42,15 @@ U0 = 38.61068276698372
 
 @pytest.fixture(scope="module")
 def ctx():
-    return build_six_face_duo_context(N, NG, use_ext_bundle=True)
+    # oracle_conventions=True (km=1 corpus migration, 2026-08-11): the
+    # stepper test below runs c_sw(duogrid=True), which now refuses
+    # unbounded metrics (fv_arrays.F90:1512).  The exchange certs in
+    # this module compare against analytic references at fixed
+    # tolerances and all passed unchanged under the lane switch
+    # (suite job 9369320) — halo/vertex metrics DO differ between
+    # lanes; only the certs' measured errors stayed within bounds.
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                      oracle_conventions=True)
 
 
 @pytest.fixture(scope="module")

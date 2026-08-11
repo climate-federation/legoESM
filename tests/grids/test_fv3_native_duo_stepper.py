@@ -37,7 +37,12 @@ def ctx():
     # exchange for dyn_core.F90:652's ext_scalar at nord > 0 unless the
     # non-faithful choice is named, because doing it silently is what
     # produced a 1e11 D wind in the 3-D lane.
-    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"))
+    # oracle_conventions=True (km=1 corpus migration, 2026-08-11): the
+    # original certificates ran duogrid=True on PLAIN unbounded metrics,
+    # a pair fv_arrays.F90:1512 makes unreachable upstream; c_sw now
+    # refuses it.  Bounded conventions follow the 3-D units (70f822c58).
+    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"),
+                                      oracle_conventions=True)
 
 
 @pytest.fixture(scope="module")
@@ -187,8 +192,9 @@ def test_sb4_two_full_steps_stable(ctx):
 
 def test_sb5_w2_steadiness(ctx):
     """SB5a characterization gate: balanced Williamson-2 at C12,
-    dt=600 s.  Measured behavior this gate pins (2026-07-17 baseline):
-    interior wind departure stays SMALL (0.6 m/s at 2 h), the edge
+    dt=600 s.  Measured behavior this gate pins (bounded-lane baseline
+    2026-08-11, job 9369371; original plain-lane baseline 2026-07-17):
+    interior wind departure stays SMALL (0.44 m/s at 2 h), the edge
     departure saturates (decelerating growth — adjustment + the
     documented interim-exchange edge inconsistency, NOT an
     instability), and mass is exact.  The duo-target cleanliness at
@@ -215,20 +221,37 @@ def test_sb5_w2_steadiness(ctx):
     dui12 = max(float(np.abs((s12[t]["u"] - states0[t]["u"])
                              [NG + 2:NG + N - 2, NG + 2:NG + N - 1]).max())
                 for t in range(6))
-    assert du12 < 10.0, du12          # measured 7.8
-    assert dui12 < 1.0, dui12         # measured 0.62
+    # Expected values re-established on the BOUNDED lane (km=1 corpus
+    # migration, 2026-08-11; measurement job 9369371): plain-lane
+    # baseline (2026-07-17) was du12 7.8 / dui12 0.62; bounded-lane
+    # measured du12 9.0523 / dui12 0.4436 — edge departure grows (the
+    # d_sw4 corner-KE masking is gone), interior improves.  Bounds are
+    # UNCHANGED (10.0 / 1.0); du12 headroom is now ~10% (and du48/du12
+    # sits at 1.82 of 2.0).  The margins are deliberately tight: the
+    # computation is deterministic fp64 from an analytic IC (no RNG, no
+    # reductions across varying layouts), so a trip is a real
+    # regression signal, not node-to-node noise.  Values printed on
+    # every run so the calibration stays auditable.
+    print(f"sb5a bounded-lane measured: du12={du12:.4f} dui12={dui12:.4f}")
+    assert du12 < 10.0, du12          # bounded 9.0523; plain was 7.8
+    assert dui12 < 1.0, dui12         # bounded 0.4436; plain was 0.62
     s48 = run_duo_sw(ctx, s12, dt=600.0, nsteps=36)
     du48 = max(float(np.abs(s48[t]["u"][slu]
                             - states0[t]["u"][slu]).max())
                for t in range(6))
+    print(f"sb5a bounded-lane measured: du48={du48:.4f}")
     assert np.isfinite(du48)
+    # bounded-lane du48 16.4651, ratio 1.82 (job 9369371); still
+    # decelerating, same saturation criterion as the plain lane
     assert du48 < 2.0 * du12, (du12, du48)   # saturating, not secular
 
 
 def test_duo_rsina_is_inverse_sina_squared(ctx):
     """codex stepper-r1 P0 pin: the duo B-node override must satisfy
     rsina*max(tiny, sina**2) == 1 on every finite nonvertex node
-    (fv_grid_utils.F90:540); the four cube vertices stay poisoned."""
+    (fv_grid_utils.F90:540).  On the bounded ctx (km=1 migration) the
+    four cube vertices are REAL (rsina=4/3), not poisoned; they stay
+    excluded here so the pin is lane-independent."""
     for t in range(6):
         gs = ctx["gs6"][t]
         blk = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
