@@ -109,6 +109,28 @@ CASE_DECKS = {
 }
 
 
+# Diagnostic environment modes consumed (at import time) on this
+# runner's use_ext_bundle=True path — each changes physics without any
+# CLI flag, so each MUST enter the npz manifest or a diagnostic variant
+# could pass enforcement at the same git_sha (codex a45 r2 #1):
+#   LEGOESM_DUO_PG_BVERTEX      pressure-gradient B-vertex update
+#   LEGOESM_DUO_ENTRY_ASCALAR   scalar-exchange cadence
+#   LEGOESM_DUO_AVG_B_ENDPOINTS B-grid edge averaging
+#   LEGOESM_DUO_CORNER_MODE     ext-vector corner remap
+_DIAG_ENV_KNOBS = ("LEGOESM_DUO_AVG_B_ENDPOINTS",
+                   "LEGOESM_DUO_CORNER_MODE",
+                   "LEGOESM_DUO_ENTRY_ASCALAR",
+                   "LEGOESM_DUO_PG_BVERTEX")
+
+
+def diag_env_record() -> str:
+    """Comma list of the SET diagnostic env knobs ('' = deck-faithful).
+    Any set-but-unrecognised value still records (and so still fails
+    the deck check) — conservative by construction."""
+    return ",".join(f"{k}={os.environ[k]}" for k in _DIAG_ENV_KNOBS
+                    if os.environ.get(k))
+
+
 def reference_canvas() -> tuple[np.ndarray, np.ndarray]:
     """(lat_deg, lon_deg) of the Zenodo atmos_daily.nc T-cell canvas."""
     return (np.linspace(-90.0, 90.0, 181),
@@ -301,6 +323,7 @@ def main():
             k2e_nord=np.array(int(args.k2e_nord)),
             ext_exclude=np.array(args.ext_exclude),
             oracle_conventions=np.array(bool(oc)),
+            diag_env=np.array(diag_env_record()),
             git_sha=np.array(_git_sha()),
             protocol=(
                 f"six-face duo stepper, {ic_desc}; resolved Zenodo "

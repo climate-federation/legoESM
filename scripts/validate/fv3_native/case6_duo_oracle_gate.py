@@ -139,6 +139,11 @@ _DECK_COMMON = {
     "k2e_nord": 2,        # the authoritative live default (no nml knob)
     "oracle_conventions": True,
     "ext_exclude": "",
+    # LEGOESM_DUO_* diagnostic env modes change physics without a CLI
+    # flag (codex a45 r2 #1); a deck-faithful run records the empty
+    # string.  Enforcement therefore rejects any diagnostic-env variant
+    # AND any pre-record npz (missing key = mismatch, as everywhere).
+    "diag_env": "",
 }
 
 
@@ -271,8 +276,15 @@ def load_run(npz_path: str, case: int = 6) -> dict:
         if key in z.files:
             record[key] = np.asarray(z[key]).item()
     if "requested_days" in z.files:
-        record["requested_days"] = int(np.asarray(
-            z["requested_days"]).item())
+        rd = np.asarray(z["requested_days"]).item()
+        # int() truncation let a forged 0.9 certify as an IC-only run
+        # and 1.9 as one day (codex a45 r2 #3) — the runner writes a
+        # genuine integer, so anything else is refused, not rounded
+        if isinstance(rd, (bool, np.bool_)) or not isinstance(
+                rd, (int, np.integer)):
+            raise ContractError(
+                f"requested_days must be an integer scalar, got {rd!r}")
+        record["requested_days"] = int(rd)
     return {"times_days": t, "record": record, **fields}
 
 
@@ -553,18 +565,29 @@ def main() -> int:
     ref_max_day = REF_MAX_DAYS[args.case]
 
     run = load_run(args.npz, case=args.case)
+    # REPORT MODE TOO (GLM-carried r1 + codex a45 r2 #2): scoring an
+    # alpha0 npz against the alpha45 reference produces garbage numbers
+    # with no banner — cross-rotation is as meaningless as cross-case,
+    # so it is a contract error in every mode.  A MATRIX npz (has a
+    # 'case' key) must carry a NUMERIC alpha: a missing or
+    # string-impersonated alpha would otherwise bypass the refusal
+    # entirely.  (A true legacy npz — no case key at all — is
+    # case-6-only via load_run, and case 6 has only the alpha0
+    # reference.)
     rec_alpha = run["record"].get("alpha")
-    if rec_alpha is not None and float(rec_alpha) != float(args.ref_alpha):
-        # REPORT MODE TOO (GLM-carried review, alpha45 r1): scoring an
-        # alpha0 npz against the alpha45 reference produces garbage
-        # numbers with no banner — cross-rotation is as meaningless as
-        # cross-case, so it is a contract error in every mode.  (A
-        # legacy npz with no alpha key is case-6-only via load_run,
-        # and case 6 has only the alpha0 reference.)
-        raise ContractError(
-            f"npz records alpha {rec_alpha!r}, gate invoked for the "
-            f"alpha{args.ref_alpha:g} reference — refusing a "
-            "cross-rotation score (report mode included)")
+    if "case" in run["record"]:
+        if rec_alpha is None or isinstance(
+                rec_alpha, (bool, np.bool_)) or not isinstance(
+                rec_alpha, (int, float, np.integer, np.floating)):
+            raise ContractError(
+                f"matrix npz alpha record is {rec_alpha!r} — must be a "
+                "numeric scalar (missing/impersonated alpha cannot be "
+                "scored against any rotation)")
+        if float(rec_alpha) != float(args.ref_alpha):
+            raise ContractError(
+                f"npz records alpha {rec_alpha!r}, gate invoked for "
+                f"the alpha{args.ref_alpha:g} reference — refusing a "
+                "cross-rotation score (report mode included)")
     t = run["times_days"]
     if args.days is None:
         days = [float(d) for d in t if abs(d - round(d)) < 1e-9]

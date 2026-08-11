@@ -398,6 +398,7 @@ def _write_npz(tmp_path, **over):
                 d4_bg=np.array(0.0), k2e_nord=np.array(2),
                 ext_exclude=np.array(""),
                 oracle_conventions=np.array(True),
+                diag_env=np.array(""),
                 git_sha=np.array("ab" * 20),      # well-formed 40-hex
                 requested_days=np.array(1))
     base.update(over)
@@ -448,8 +449,35 @@ def test_deck_record_mismatch_and_missing():
              "n_split": 7, "d_ext": 0.0, "d4_bg": 0.0, "k2e_nord": 2,
              "oracle_conventions": np.bool_(True),
              "case": np.int64(6).item(), "alpha": np.float64(0.0),
-             "ext_exclude": "", "git_sha": _GOOD_SHA}
+             "ext_exclude": "", "diag_env": "", "git_sha": _GOOD_SHA}
     assert gate.check_deck_record(npish) == []
+
+
+def test_deck_record_rejects_diag_env_variant():
+    """A LEGOESM_DUO_* diagnostic run records a nonempty diag_env and
+    can never pass enforcement; a pre-record npz (missing key) fails
+    too (codex a45 r2 #1)."""
+    rec = dict(gate.deck_record(6, 0.0))
+    rec["git_sha"] = _GOOD_SHA
+    rec["diag_env"] = "LEGOESM_DUO_PG_BVERTEX=mean2"
+    p = gate.check_deck_record(rec)
+    assert len(p) == 1 and "diag_env" in p[0]
+    del rec["diag_env"]
+    p = gate.check_deck_record(rec)
+    assert len(p) == 1 and "diag_env" in p[0]
+
+
+def test_runner_diag_env_record(monkeypatch):
+    """diag_env_record() is '' when clean and lists any set knob —
+    including a set-but-unrecognised value (conservative)."""
+    for k in runner._DIAG_ENV_KNOBS:
+        monkeypatch.delenv(k, raising=False)
+    assert runner.diag_env_record() == ""
+    monkeypatch.setenv("LEGOESM_DUO_CORNER_MODE", "nearest")
+    monkeypatch.setenv("LEGOESM_DUO_ENTRY_ASCALAR", "bogus")
+    assert runner.diag_env_record() == (
+        "LEGOESM_DUO_CORNER_MODE=nearest,"
+        "LEGOESM_DUO_ENTRY_ASCALAR=bogus")
 
 
 def test_deck_record_cross_case_and_alpha_cannot_pass():
@@ -729,11 +757,11 @@ def test_load_run_cross_case_rejection(tmp_path):
         gate.load_run(str(legacy), case=8)
 
 
-def test_gate_report_mode_refuses_cross_alpha(tmp_path, monkeypatch,
-                                              capsys):
-    """GLM-carried review (alpha45 r1): report mode must refuse an
-    alpha0 npz scored against the alpha45 reference — cross-rotation is
-    as meaningless as cross-case, in EVERY mode."""
+def test_gate_report_mode_refuses_cross_alpha(tmp_path, monkeypatch):
+    """GLM-carried r1 + codex a45 r2 #2: report mode must refuse (a) a
+    recorded-alpha mismatch, (b) a matrix npz with NO alpha, (c) a
+    string-impersonated alpha — cross-rotation is as meaningless as
+    cross-case, in EVERY mode."""
     path = _write_npz(tmp_path, case=np.array(2), alpha=np.array(0.0),
                       dt_atmos=np.array(3600.0), d4_bg=np.array(0.12))
     monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py", path,
@@ -741,6 +769,40 @@ def test_gate_report_mode_refuses_cross_alpha(tmp_path, monkeypatch,
                                      "--days", "0"])
     with pytest.raises(gate.ContractError, match="cross-rotation"):
         gate.main()
+    # (b) matrix npz with the alpha key REMOVED entirely
+    lat, lon = runner.reference_canvas()
+    noalpha = tmp_path / "noalpha.npz"
+    np.savez_compressed(noalpha, times_days=np.array([0.0]),
+                        gh=np.full((1, 181, 360), 2.0e4),
+                        u=np.zeros((1, 181, 360)),
+                        v=np.zeros((1, 181, 360)), lat=lat, lon=lon,
+                        case=np.array(2))
+    monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py",
+                                     str(noalpha), "--case", "2",
+                                     "--ref-alpha", "45", "--days", "0"])
+    with pytest.raises(gate.ContractError, match="numeric scalar"):
+        gate.main()
+    # (c) string impersonation: alpha="45" must not float() its way in
+    stralpha = _write_npz(tmp_path, case=np.array(2),
+                          alpha=np.array("45"),
+                          dt_atmos=np.array(3600.0),
+                          d4_bg=np.array(0.12))
+    monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py",
+                                     stralpha, "--case", "2",
+                                     "--ref-alpha", "45", "--days", "0"])
+    with pytest.raises(gate.ContractError, match="numeric scalar"):
+        gate.main()
+
+
+def test_load_run_rejects_fractional_requested_days(tmp_path):
+    """int() truncation certified a forged requested_days=0.9 as an
+    IC-only run (codex a45 r2 #3) — non-integer scalars refuse."""
+    with pytest.raises(gate.ContractError, match="integer scalar"):
+        gate.load_run(_write_npz(tmp_path,
+                                 requested_days=np.array(0.9)))
+    with pytest.raises(gate.ContractError, match="integer scalar"):
+        gate.load_run(_write_npz(tmp_path,
+                                 requested_days=np.array(True)))
 
 
 def test_ref_case_name_refuses_fractional_tag():
@@ -993,10 +1055,13 @@ def test_rotation_refuses_unrotated_ext_metrics_lane():
 
 
 def test_w2_state_alpha45_matches_balanced_formula(c12):
-    """w2_six_face_state(alpha=45) delp at compute cells equals the
-    case-2 balanced gh with the pinned trig literals (delp IS gh on
-    the SW convention; the builder's /g then *g round-trips at
-    ~1 ulp)."""
+    """w2_six_face_state(alpha=45) delp at compute cells is
+    BIT-EQUAL to the shared solid_body_geopotential at the same
+    points: after codex a45 r2 #4 the builder uses the oracle
+    operation tree ((u0*u0)/2, S**2, no /g*g round trip), which is
+    exactly the shared module's tree — any re-divergence of the two
+    trees, or a units slip, breaks exact equality.  The trig-literal
+    hand check runs alongside at a loose tolerance."""
     ctx, _, _ = c12
     states = w2_six_face_state(ctx, alpha=45.0)
     gs = ctx["gs6"][4]
@@ -1005,9 +1070,13 @@ def test_w2_state_alpha45_matches_balanced_formula(c12):
     lon = np.asarray(gs["agrid_lon"])[sl, sl]
     lat = np.asarray(gs["agrid_lat"])[sl, sl]
     u0 = 2.0 * np.pi * FV3_RADIUS_M / (12.0 * 86400.0)
-    coef = FV3_RADIUS_M * FV3_OMEGA * u0 + (u0 * u0) / 2.0
+    expect = solid_body_geopotential(
+        lon, lat, radius=FV3_RADIUS_M, omega=FV3_OMEGA, u0=u0,
+        gh0=2.94e4, alpha=45.0)
+    got = np.asarray(states[4]["delp"])[sl, sl]
+    assert np.array_equal(got, expect)          # bit-equal, no tol
+    # independent trig-literal hand form (association-free check)
     s = (-np.cos(lon) * np.cos(lat) * _SIN_45RAD
          + np.sin(lat) * _COS_45RAD)
-    np.testing.assert_allclose(
-        np.asarray(states[4]["delp"])[sl, sl], 2.94e4 - coef * s * s,
-        rtol=1e-13)
+    coef = FV3_RADIUS_M * FV3_OMEGA * u0 + (u0 * u0) / 2.0
+    np.testing.assert_allclose(got, 2.94e4 - coef * s * s, rtol=1e-13)

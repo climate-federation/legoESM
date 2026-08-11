@@ -1036,10 +1036,11 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
                       u0: float | None = None,
                       gh0: float = 2.94e4) -> list:
     """Williamson case-2 BALANCED six-face state on the SW-via-
-    production convention (pt≡1, delp = g·h):
+    production convention (pt≡1, delp IS g·h, stored directly):
 
-        h = (gh0 - (a·Omega·u0 + u0^2/2) · S^2) / g,
+        delp = gh0 - (a·Omega·u0 + u0^2/2) · S^2      (oracle tree,
         S = -cos(lon)·cos(lat)·sin(alpha) + sin(lat)·cos(alpha)
+        test_cases.F90:1033-1036 — no gravity constant enters)
 
     Winds are the analytic solid-body projection (reuses
     analytic_swcore_state's certified D/C construction with ddelp=0),
@@ -1047,16 +1048,19 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     kinked-lattice cell centres (halos included; corner-diagonals are
     handled by the step-entry exchanges).
     """
-    from legoesm import constants
     from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
     a_r = FV3_RADIUS_M
     omega = FV3_OMEGA
-    g = constants.g                     # cancels: delp = g*h = gh0 - coef*S^2
     if u0 is None:
         # upstream test_cases case 2: Ubar = 2*pi*radius / (12 days)
         u0 = 2.0 * np.pi * a_r / (12.0 * 86400.0)
-    coef = (a_r * omega * u0 + 0.5 * u0 * u0)
+    # the oracle's operation tree, test_cases.F90:1033-1036:
+    # (Ubar*Ubar)/2. and S ** 2, assigned DIRECTLY to delp — no /g*g
+    # round trip (codex a45 r2 #4: the previous 0.5*u0*u0 / s*s / g*h
+    # form was ULP-off the oracle tree and off the shared
+    # solid_body_geopotential, breaking bit-comparability)
+    coef = (a_r * omega * u0 + (u0 * u0) / 2.0)
 
     states = []
     for gs in ctx["gs6"]:
@@ -1065,9 +1069,8 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
         lat = gs["agrid_lat"]
         s = (-np.cos(lon) * np.cos(lat) * np.sin(alpha)
              + np.sin(lat) * np.cos(alpha))
-        h = (gh0 - coef * s * s) / g
         st = dict(st)
-        st["delp"] = g * h
+        st["delp"] = gh0 - coef * s ** 2
         st["pt"] = np.ones_like(st["delp"])
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)
