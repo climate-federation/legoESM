@@ -193,6 +193,15 @@ def test_sim1_jax_check_grads_order2_away_from_floor():
     _, _, dz_b = _run_jax_sim1(100.0, FV3_RDGAS, GAMA, FV3_KAPPA, dm,
                                pm2, pem, w2, dz2, pt2, ws, p_fac / 2)
     assert np.array_equal(dz_a, dz_b), "p_fac floor ACTIVE on fixture"
+    # Margin check (codex SIM1 r2 #1: the halved-p_fac control alone can
+    # false-pass on an exact tie at the maximum's kink).  Invert the
+    # output equation dz = -dm*rgas*pt * P^(kappa-1) for the SELECTED
+    # pressure P and require it strictly above the floor with an
+    # FD-safe margin at every level:
+    p_sel = np.exp(np.log(-dz_a / (dm * FV3_RDGAS * pt2))
+                   / (FV3_KAPPA - 1.0))
+    assert (p_sel > 1.01 * p_fac * pm2).all(), \
+        "floor margin < 1% somewhere on the gradient fixture"
 
     def _loss(pe, w2o, dz2o):
         return (jnp.sum(pe * pe) + jnp.sum(w2o * w2o)
