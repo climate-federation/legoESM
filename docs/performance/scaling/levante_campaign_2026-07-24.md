@@ -2970,3 +2970,20 @@ record** (previous 14.98 GC/s). Ragged auto-band check: ragged s9@32
 (9.78) still beats the new coloured 10.52 — the <=32 band stands, with
 the margin narrowed from 0.686 to 0.93; s8@16 re-arbitration deferred
 until that row is next refreshed.
+
+## Lat-lon lane attribution (2026-08-11 early, job 26861205)
+
+Trace instrument ported (timed_scan_blocks trace_dir; timed blocks
+only). LL2048@64 DEFAULT lane, 24 traced steps: 6.25 ms/step =
+**53% compute (3.30 ms) + 43% in-collective (2.71 ms; ~13
+collectives/step, medians 178-240 us) + 4% gaps**. Contrast MPAS
+pre-fix (70% in-collective, deterministic chain skew): lat-lon is
+near-balanced — pencil halos are shape-uniform (no padding lever) and
+raw cross-rank spreads are ~60-95 us (small skew; overlap-matched, so
+indicative only). The remaining ratio-1.4 excess splits roughly evenly
+between collective latency (~2x wire) and compute; NOTE this arm ran
+the default flags — the fused+overlap receipt (5.278 ms) already
+shaves the collective share. Lever candidates for the morning consult:
+bf16 wire on the pencil halo (bytes are the collective term), compute
+kernel work, and whether fused+overlap's 5.28 ms profile shifts the
+split further.
