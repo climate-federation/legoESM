@@ -428,8 +428,14 @@ def main() -> int:
         build_fv3_native_gridstruct,
     )
 
+    # resolved runtime k2e_nord from the oracle manifest (the pinned
+    # tree runs dg%k2e_nord = 2, NOT the 4 the ext tests default to —
+    # exact runtime path, requirement of the diagnosis)
+    k2e_nord = int(note_value(notes, "npx npz tile k2e_nord dgng")[3])
+    print(f"== resolved oracle k2e_nord = {k2e_nord} "
+          f"(port ext context built to match) ==")
     gs6 = [build_fv3_native_gridstruct(n, ng, tile=t) for t in range(1, 7)]
-    ectx = build_ext_context(n, ng, gs6)
+    ectx = build_ext_context(n, ng, gs6, k2e_nord=k2e_nord)
 
     # C1: searched face map (port face t -> oracle tile, forward op)
     fm = derive_face_map(orc, gs6, n, ng)
@@ -472,28 +478,42 @@ def main() -> int:
         in_port[f"IN_{nv}"] = vs
         nlev_of[fam] = us[0].shape[2]
 
-    # C1b: transform validation against the analytic winds on the PORT
-    # lattice (placement + orientation + sign; independent of the map)
+    # C1b: transform validation — the inverse-mapped oracle inputs must
+    # reproduce the analytic fields at the inverse-mapped ORACLE
+    # coordinates (the ground truth of where the driver evaluated them).
+    # NOT the port gridstruct's own halo coords: those are a DIFFERENT
+    # lattice in the halo (measured 0.04-0.26 rad vs the oracle mpp
+    # halo at C12 rings 1-3) and that difference is part of what the
+    # stage comparison measures, not a harness input.
     radius = 6.3712e6            # lib_grid RADIUS (variant quirk)
     c0 = note_value(notes, "vertex_c0")
     lo = 1 - ng
     worst_u = 0.0
     worst_s = 0.0
+
+    def _gcd(lon1, lat1, lon2, lat2):
+        return np.arccos(np.clip(
+            np.sin(lat1) * np.sin(lat2)
+            + np.cos(lat1) * np.cos(lat2) * np.cos(lon1 - lon2),
+            -1.0, 1.0))
+
     for t in range(6):
-        gs = gs6[t]
-        # k=2 scalar level: lat itself
-        latf = gs["agrid_lat"]
+        T = fm[t][1]
+        inv = op_inverse(fm[t][2])
+        olon = op_scalar(orc[T]["arrays"]["AG_LON"], inv)
+        olat = op_scalar(orc[T]["arrays"]["AG_LAT"], inv)
         sl = slice(ng, ng + n)
+        # k=2 scalar level: lat itself
         worst_s = max(worst_s, float(np.abs(
-            in_port["IN_A"][t][sl, sl, 1] - latf[sl, sl]).max()))
-        # D-u from psi differences on the port metric, level k=0
-        psi = psi_level(0, gs["agrid_lon"], gs["agrid_lat"], radius,
-                        c0)
-        dyc = gs["dyc"]
+            in_port["IN_A"][t][sl, sl, 1] - olat[sl, sl]).max()))
+        # D-u from psi differences on the mapped oracle centres, k=0
+        psi = psi_level(0, olon, olat, radius, c0)
         for (i_f, j_f) in ((1, 1), (n, n + 1), (n // 2, 2)):
-            got = in_port["IN_DU"][t][i_f - lo, j_f - lo, 0]
-            want = -(psi[i_f - lo, j_f - lo] - psi[i_f - lo, j_f - 1 - lo]) \
-                / dyc[i_f - lo, j_f - lo]
+            r, c = i_f - lo, j_f - lo
+            dyc = radius * _gcd(olon[r, c - 1], olat[r, c - 1],
+                                olon[r, c], olat[r, c])
+            got = in_port["IN_DU"][t][r, c, 0]
+            want = -(psi[r, c] - psi[r, c - 1]) / dyc
             worst_u = max(worst_u, abs(float(got - want)))
     # thresholds: a component-sign error gives ~2|u| (~77 m/s), a
     # placement error O(0.1-1); the known lib_grid-vs-constants radius
