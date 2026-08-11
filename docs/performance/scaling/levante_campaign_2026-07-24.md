@@ -2970,3 +2970,104 @@ record** (previous 14.98 GC/s). Ragged auto-band check: ragged s9@32
 (9.78) still beats the new coloured 10.52 — the <=32 band stands, with
 the margin narrowed from 0.686 to 0.93; s8@16 re-arbitration deferred
 until that row is next refreshed.
+
+## Lat-lon lane attribution (2026-08-11 early, job 26861205)
+
+Trace instrument ported (timed_scan_blocks trace_dir; timed blocks
+only). LL2048@64 DEFAULT lane, 24 traced steps: 6.25 ms/step =
+**53% compute (3.30 ms) + 43% in-collective (2.71 ms; ~13
+collectives/step, medians 178-240 us) + 4% gaps**. Contrast MPAS
+pre-fix (70% in-collective, deterministic chain skew): lat-lon is
+near-balanced — pencil halos are shape-uniform (no padding lever) and
+raw cross-rank spreads are ~60-95 us (small skew; overlap-matched, so
+indicative only). The remaining ratio-1.4 excess splits roughly evenly
+between collective latency (~2x wire) and compute; NOTE this arm ran
+the default flags — the fused+overlap receipt (5.278 ms) already
+shaves the collective share. Lever candidates for the morning consult:
+bf16 wire on the pencil halo (bytes are the collective term), compute
+kernel work, and whether fused+overlap's 5.28 ms profile shifts the
+split further.
+
+### Lat-lon compute discriminators (2026-08-11 morning, offline on the fused trace)
+
+GLM-5.2's ranked test executed: compute side = 200 kernels/step,
+median 3.7 us, 120/step under 10 us — a microkernel storm; ~12% HBM
+utilization against ~0.4 ms of unavoidable traffic. Top kernel:
+input_transpose_fusion (370 us/step, 11% of compute — layout churn).
+Collectives 13/step (>6 — structural collapse also still available);
+no per-step communicator init. No horizontal-fusion flag exists in
+this XLA build — the lever is SOURCE-LEVEL fusion (fewer, bigger
+fusions; kill the transposes; pack RK-stage axpys). Codex reading the
+step source for the transpose origin + smallest first slice.
+
+### Axis-0 PPM slice: NULL — the transposes are XLA layout artifacts (2026-08-11)
+
+The native axis-0 edge-value sweep landed (bit-parity + jaxpr
+transpose-absence tests) and the acceptance trace (26862943) shows
+input_transpose_fusion_12 UNCHANGED (8.94 -> 9.48 ms/24 steps; grand
+totals 143.7 vs 144.0 ms — noise). RETRACTION of the source
+attribution: the transpose family is inserted by XLA's LAYOUT
+ASSIGNMENT (operand layout vs preferred fusion layout), not by the
+source moveaxis pair — removing the source op does not stop XLA from
+materializing a transposed copy where it prefers a different
+minor-dimension order. The slice stays (harmless, coupled by tests);
+the codex static reading is falsified at the compiler level. Next
+instrument: HLO dump of the compiled lat-lon step — read
+input_transpose_fusion_12's operand/result LAYOUTS ({...} annotations)
+and its consumer, then decide between entry-layout forcing, array
+re-ordering at the state level ((lev, lat, lon) storage), or accepting
+the layout tax. Compute-fusion campaign continues only with
+layout-level evidence.
+
+### Lat-lon layout census (job 26863320) + reprioritization
+
+HLO dump read: fused_transpose.12's operands are (lev, lat, lon)
+f32[26,32,4096]-class arrays and its outputs transpose(dimensions=
+{1,2,0}) back to the state's (lat, lon, lev) — XLA schedules the
+tendency pipeline lev-leading and pays a layout boundary back to the
+scan carry each stage. Fix classes (state storage flip; carry-level
+layout hoist) are deep for a BOUNDED prize: the whole transpose family
+is 0.5 ms/step = 8% of the 6.25 ms step. PARKED with the evidence in
+hand. By magnitude the next lat-lon lever is COLLECTIVE COLLAPSE:
+13 collectives/step (GLM category "collapse further"); codex found the
+single-field PPM fold-halo exchange family (latlon_spmd.py:459) is NOT
+covered by the fused three-field wall pad — folding it in is the next
+slice (~1 ms/step class).
+
+### Collective-collapse slice DESIGNED (not yet implemented)
+
+Per stage the sigma PPM path runs TWO band exchanges: the fused
+entry pad (pad_with_pole_bc_lat_multi, wall-BC lat pad, 1 ppermute
+pair) and the PPM transport's own pad_halo_latlon_3d(T, halo=2)
+(pole-FOLD semantics, 1 pair) — 4 collectives/stage, 13/step. They
+cannot be merged by widening the wall-BC pad: boundary semantics
+differ at the pole bands (constant wall values vs fold). The correct
+surgery, anticipated by the helper's own docstring ("boundary
+handling is field-specific, while the interior-cut exchange this
+helper fuses is flag-independent"): factor ONE fused interior-cut
+exchange at halo=2 carrying T/u/dp(/p_s) + apply per-field boundary
+handling (wall constants vs fold) AFTER the exchange, then thread the
+fold-padded T into cgrid_fv_scalar_advection_latlon_3d's existing
+q_pad parameter. Saves 1 pair/stage = 6 of 13 collectives/step
+(~0.8-1.0 ms class). Gates: band-vs-serial bit-parity suites, sharded
+step tests, then the standard A/B/A2.
+
+### Mixed-pad slice: REFUTED and REVERTED (2026-08-11 morning)
+
+Production A/B/A2 (26864285, drift 0.0%): mixed/off = 0.983 — removing
+6 of 13 collectives/step bought 1.7%. Reverted same-day per the
+delete-before-adding precedent (implementation + bit-parity receipts
+live in this branch's history; the escape-hatch A/B protocol worked
+exactly as designed).
+
+**Cross-lane law, now receipted on BOTH lanes:** on this XLA/NCCL
+stack the sequential-collective COUNT is nearly free (~15 us marginal
+on MPAS, ~18 us here); collective wall time is BYTES and WAIT. MPAS
+had 2.9x padded bytes to cut (landed, -20%); lat-lon's uniform pencil
+payloads have no padding, so its 2.7 ms collective share is genuine
+bytes+wait, and its remaining receipted levers are bounded: bf16 wire
+(<=0.5 ms, halves bytes — a science-mode precision decision), the
+parked layout-boundary tax (8%), and the throughput reframes (ensemble
+axis, IMEX dt) that trade something the loop cannot decide
+unilaterally. Lat-lon at ~6.1 ms @64 (fused) sits near its practical
+stack limit under the current numerics.
