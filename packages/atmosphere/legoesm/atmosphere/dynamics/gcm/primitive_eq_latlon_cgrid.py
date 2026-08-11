@@ -452,23 +452,9 @@ def cgrid_latlon_hydrostatic_tendencies(
         # ``hybrid_factor`` no longer exists on this lane and nothing of
         # it rides this pad.
         _ps3 = p_s[..., jnp.newaxis]
-        from legoesm.grids.halo_latlon import pad_latlon_entry_mixed
-        _specs = [("wall", 0, 1, 0.0, 0.0), ("wall", 1, 1, 0.0, 0.0),
-                  ("wall", 2, 1, 0.0, 0.0), ("wall", 3, 1, 0.0, 0.0)]
-        import os as _os_mx
-        _mx_on = _os_mx.environ.get(
-            "LEGOESM_LATLON_ENTRY_MIXED", "1") != "0"
-        if config.use_ppm_transport and _mx_on:
-            # PPM T transport's pole-FOLD pad rides the SAME exchange
-            # (collective-collapse slice, campaign 2026-08-11): one
-            # band exchange per stage instead of two.
-            _specs.append(("fold", 0, 2, False))
-        _mixed = pad_latlon_entry_mixed(
-            (T, u, dp, _ps3), _specs,
-            halo=2 if (config.use_ppm_transport and _mx_on) else 1)
-        (_T_lat_pad, _u_lat_pad, _dp_lat_pad, _ps_lat_pad) = _mixed[:4]
-        _T_ppm_pad = (_mixed[4]
-                      if (config.use_ppm_transport and _mx_on) else None)
+        (_T_lat_pad, _u_lat_pad, _dp_lat_pad,
+         _ps_lat_pad) = pad_with_pole_bc_lat_multi(
+            (T, u, dp, _ps3), halo=1)
     else:
         # Sigma-coord layer thickness, hoisted from the continuity
         # branch below so its ghost rows ride the entry exchange.
@@ -479,23 +465,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         # extra sendrecv pair per cut per stage.  astype is a no-op
         # when dtypes already match.
         dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
-        from legoesm.grids.halo_latlon import pad_latlon_entry_mixed
-        import os as _os_mx
-        # A/B escape (trace-time static): =0 restores the two-exchange
-        # path (entry wall pad + PPM's own fold pad).
-        _mx_on = _os_mx.environ.get(
-            "LEGOESM_LATLON_ENTRY_MIXED", "1") != "0"
-        _specs = [("wall", 0, 1, 0.0, 0.0), ("wall", 1, 1, 0.0, 0.0),
-                  ("wall", 2, 1, 0.0, 0.0)]
-        if config.use_ppm_transport and _mx_on:
-            # PPM T fold pad shares the exchange (collective collapse).
-            _specs.append(("fold", 0, 2, False))
-        _mixed = pad_latlon_entry_mixed(
-            (T, u, dp), _specs,
-            halo=2 if (config.use_ppm_transport and _mx_on) else 1)
-        _T_lat_pad, _u_lat_pad, _dp_lat_pad = _mixed[:3]
-        _T_ppm_pad = (_mixed[3]
-                      if (config.use_ppm_transport and _mx_on) else None)
+        _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
+            (T, u, dp), halo=1)
 
     T_u = interp_cell_to_uface(T)
     T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
@@ -612,12 +583,8 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # --- 11. Temperature equation ---
     if config.use_ppm_transport:
-        # C-grid PPM advection of T (4th-order, shared operator).
-        # q_pad threads the entry exchange's fold-padded T — without it
-        # the transport re-exchanges T every stage (the second band
-        # exchange the mixed entry pad exists to remove).
-        horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(
-            T, u, v, grid, q_pad=_T_ppm_pad)
+        # C-grid PPM advection of T (4th-order, shared operator)
+        horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(T, u, v, grid)
     else:
         # Cell-centered gradient advection (fallback) — 3D-native variants
         # share one halo pad + PPM reconstruction across all levels.
