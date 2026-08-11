@@ -347,15 +347,28 @@ def test_dcmip16_bc_sphum_matches_the_fortran_formula():
         else:
             assert np.all(out[..., k] == QT_BC)
 
-    # Both branches must actually be exercised by the km=5 column, or
-    # this test proves half the formula.
-    ptot = [( (ak[k + 1] - ak[k]) + P0_PA * (bk[k + 1] - bk[k]))
+    # MEASURED (job 9369407): the km=5 analytic column has NO level with
+    # p <= ptrop = 1e4 Pa -- every deck level takes the tropospheric
+    # branch, so the QT arm is dead on the parity deck. Assert that
+    # (so a coordinate change that revives the arm is noticed) ...
+    ptot = [((ak[k + 1] - ak[k]) + P0_PA * (bk[k + 1] - bk[k]))
             / (peln[k + 1] - peln[k]) for k in range(km)]
-    assert any(p <= PTROP_BC_PA for p in ptot), "no stratospheric level"
-    assert any(p > PTROP_BC_PA for p in ptot), "no tropospheric level"
+    assert all(p > PTROP_BC_PA for p in ptot), \
+        "deck column now reaches the stratospheric arm -- update the test"
+    # ... and exercise the QT arm on a synthetic column whose top level
+    # IS above the tropopause, so both branches of the ported formula
+    # are proven, not just the deck-live one.
+    ak_s = np.array([100.0, 5.0e3, 5.0e4, 1.0e5])
+    bk_s = np.zeros(4)
+    out_s = dcmip16_bc_sphum(ak_s, bk_s, lat, 3)
+    pe_s = ak_s.copy()
+    peln_s = np.log(pe_s)
+    p_top = (ak_s[1] - ak_s[0]) / (peln_s[1] - peln_s[0])
+    assert p_top <= PTROP_BC_PA, "synthetic column control failed"
+    assert np.all(out_s[..., 0] == QT_BC)
+    assert np.all(out_s[..., 2] > QT_BC)
     # Meridional structure: moisture decays away from the equator.
-    tropo = [k for k in range(km) if ptot[k] > PTROP_BC_PA][0]
-    col = out[:, :, tropo].ravel()
+    col = out[:, :, km - 1].ravel()
     lats = np.abs(lat.ravel())
     order = np.argsort(lats)
     assert np.all(np.diff(col[order]) <= 0.0)
