@@ -57,6 +57,19 @@ fregrid + c2l_ord4.  Field-to-field errors are therefore floored at the
 remap-protocol difference even for a perfect solver — this gate
 quantifies distance, it attributes nothing (w2-gate honesty note).
 
+ADDITIONAL FLOOR AT case-2 alpha45, MEASURED (job 9369321): the rotated
+flow has nonzero wind at the geographic poles, where the lat-lon (u, v)
+decomposition of the duplicated pole rows is degenerate — analytic
+winds vs the fregrid reference IC differ by max 33.4 m/s at rows 0/180
+(10.7 at row 1, 6.06 at row 2, 3.3e-3 at the equator), putting the
+UNWEIGHTED wind rel-L2 floor at ~8.2e-2 (cos-lat: ~5.0e-3) where the
+alpha0 floor is ~4e-3.  Enforcement keeps BOTH weightings (same metric
+family as case 6 — protocol held fixed), so alpha45 wind bounds are
+pole-artifact-limited, not physics-limited: a bound calibrated at ~2x
+the measured worst day constrains the rotated physics mostly through
+the cos-lat metric.  Stated here so nobody reads the alpha45 wind
+bound as a 10x-looser physics gate.
+
 ``--analytic`` scores the ANALYTIC RH4 fields (shared
 williamson_sw_analytic module, GFS constants), evaluated directly at
 the reference canvas points, against ``ps_ic``/``ua_ic``/``va_ic``.
@@ -139,14 +152,14 @@ def ref_case_name(case: int, ref_alpha: float) -> str:
         raise ValueError(
             f"no Zenodo duo hord8 reference for case {case} "
             f"alpha {ref_alpha:g}; available: {sorted(AVAILABLE_REFS)}")
+    if float(ref_alpha) != int(ref_alpha):
+        # int() would silently truncate a future fractional tag into a
+        # DIFFERENT deck's name (GLM-carried review, alpha45 r1)
+        raise ValueError(
+            f"non-integer reference alpha tag {ref_alpha!r} has no "
+            "name mapping")
     return f"C48.sw.case{case}.alpha{int(ref_alpha)}.duo.hord8"
 
-
-# Legacy single-deck record, kept as the case-6 view (tests + battery
-# scripts reference it):
-DECK_RECORD = {k: v for k, v in deck_record(6, 0.0).items()
-               if k not in ("case", "alpha")}
-REF_MAX_DAY = REF_MAX_DAYS[6]
 
 # Plausibility bands — SENTINEL DETECTORS, not physics gates: the RH4
 # state lives in gh ~ [7.8e4, 1.04e5] and |V| <= ~100 m/s; the known
@@ -156,7 +169,6 @@ REF_MAX_DAY = REF_MAX_DAYS[6]
 # case-2 steady state spans gh ~ [1.07e4, 2.94e4], so its band's lower
 # sentinel bound sits below 1e4 (mirrors the runner's CASE_DECKS).
 GH_PLAUSIBLE_BY_CASE = {6: (1.0e4, 5.0e5), 2: (5.0e3, 5.0e5)}
-GH_PLAUSIBLE = GH_PLAUSIBLE_BY_CASE[6]     # legacy case-6 name
 WIND_PLAUSIBLE_MAX = 500.0             # m/s
 
 
@@ -530,6 +542,18 @@ def main() -> int:
     ref_max_day = REF_MAX_DAYS[args.case]
 
     run = load_run(args.npz, case=args.case)
+    rec_alpha = run["record"].get("alpha")
+    if rec_alpha is not None and float(rec_alpha) != float(args.ref_alpha):
+        # REPORT MODE TOO (GLM-carried review, alpha45 r1): scoring an
+        # alpha0 npz against the alpha45 reference produces garbage
+        # numbers with no banner — cross-rotation is as meaningless as
+        # cross-case, so it is a contract error in every mode.  (A
+        # legacy npz with no alpha key is case-6-only via load_run,
+        # and case 6 has only the alpha0 reference.)
+        raise ContractError(
+            f"npz records alpha {rec_alpha!r}, gate invoked for the "
+            f"alpha{args.ref_alpha:g} reference — refusing a "
+            "cross-rotation score (report mode included)")
     t = run["times_days"]
     if args.days is None:
         days = [float(d) for d in t if abs(d - round(d)) < 1e-9]

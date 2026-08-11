@@ -729,6 +729,32 @@ def test_load_run_cross_case_rejection(tmp_path):
         gate.load_run(str(legacy), case=8)
 
 
+def test_gate_report_mode_refuses_cross_alpha(tmp_path, monkeypatch,
+                                              capsys):
+    """GLM-carried review (alpha45 r1): report mode must refuse an
+    alpha0 npz scored against the alpha45 reference — cross-rotation is
+    as meaningless as cross-case, in EVERY mode."""
+    path = _write_npz(tmp_path, case=np.array(2), alpha=np.array(0.0),
+                      dt_atmos=np.array(3600.0), d4_bg=np.array(0.12))
+    monkeypatch.setattr("sys.argv", ["case6_duo_oracle_gate.py", path,
+                                     "--case", "2", "--ref-alpha", "45",
+                                     "--days", "0"])
+    with pytest.raises(gate.ContractError, match="cross-rotation"):
+        gate.main()
+
+
+def test_ref_case_name_refuses_fractional_tag():
+    """int() truncation of a fractional alpha tag would emit a
+    DIFFERENT deck's name; the guard trips before formatting (needs an
+    AVAILABLE_REFS entry to reach — exercised via monkeypatching the
+    set, since every shipped tag is integral)."""
+    import unittest.mock as mock
+    with mock.patch.object(gate, "AVAILABLE_REFS",
+                           gate.AVAILABLE_REFS | {(2, 0.5)}):
+        with pytest.raises(ValueError, match="non-integer"):
+            gate.ref_case_name(2, 0.5)
+
+
 def test_load_run_per_case_plausibility_band(tmp_path):
     """The case-2 steady state dips to gh ~ 1.07e4 — inside the case-2
     band, and near the case-6 band's floor.  A gh below 1e4 must pass

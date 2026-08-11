@@ -119,8 +119,9 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         # rotation_alpha.
         raise ValueError(
             "use_ext_metrics=True is not supported with "
-            "rotation_alpha != 0 (extend_gridstruct halo f0/fC are "
-            "unrotated)")
+            "rotation_alpha != 0 unless 'metrics' is in ext_exclude "
+            "(extend_gridstruct halo f0/fC are unrotated; the "
+            "exclusion keeps that builder unreached)")
 
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
