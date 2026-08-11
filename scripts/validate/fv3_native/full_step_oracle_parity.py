@@ -463,6 +463,28 @@ def main(argv=None):
     ap.add_argument("--max-rel", type=float, default=None,
                     help="gate: exit 1 if any field's one-step rel exceeds "
                          "this")
+    ap.add_argument("--ext-metrics", action="store_true",
+                    help="build the six-face context with "
+                         "use_ext_metrics=True: halo/corner-wedge cells "
+                         "carry EXTENDED-lattice metrics instead of the "
+                         "kinked builder's. fv_grid_tools.F90:749-835 "
+                         "shows the duo oracle builds its model grid "
+                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "get_symmetry step skipped -- so the extended "
+                         "lattice is the FAITHFUL halo geometry and the "
+                         "kinked one is the port's residual suspect. "
+                         "This flag is the mechanism-scaling probe.")
+    ap.add_argument("--perturb-boundary-metrics", type=float, default=0.0,
+                    metavar="EPS",
+                    help="GLM discriminator (2026-08-11): multiply every "
+                         "stencil-consumed metric at BOUNDARY cells (halo "
+                         "rings + the outermost compute ring) by "
+                         "(1 + EPS*cos(3i+7j)). The production metrics "
+                         "match the oracle at ~1e-14; if the one-step "
+                         "residual scales ~linearly with EPS (e.g. x100 "
+                         "at 1e-12), the 9.8e-06 floor is amplified "
+                         "geometry seed; if it stays pinned, the floor "
+                         "is a composition/formulation difference.")
     ap.add_argument("--n-steps", type=int, default=1,
                     help="outer fv_dynamics calls to integrate before "
                          "comparing (the step reference must be an oracle "
@@ -520,7 +542,35 @@ def main(argv=None):
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     use_ext_metrics=args.ext_metrics,
                                      oracle_conventions=True)
+    if args.perturb_boundary_metrics:
+        eps = float(args.perturb_boundary_metrics)
+        m_a = N + 2 * NG
+        ii = np.arange(m_a)
+        keys = ("dx", "dy", "dxa", "dya", "dxc", "dyc", "area", "rarea",
+                "cosa_u", "cosa_v", "cosa_s", "sina_u", "sina_v",
+                "rsin_u", "rsin_v", "rsin2", "divg_u", "divg_v",
+                "del6_u", "del6_v", "sin_sg", "cos_sg")
+        for t in range(6):
+            gs = ctx["gs6"][t]
+            for k in keys:
+                if k not in gs:
+                    continue
+                a = np.asarray(gs[k], dtype=np.float64).copy()
+                mi, mj = a.shape[0], a.shape[1]
+                pat = np.cos(3.0 * np.arange(mi)[:, None]
+                             + 7.0 * np.arange(mj)[None, :])
+                # boundary = anything outside the STRICT interior of the
+                # compute box (halo rings + outermost compute ring).
+                di = np.minimum(np.arange(mi), mi - 1 - np.arange(mi))
+                dj = np.minimum(np.arange(mj), mj - 1 - np.arange(mj))
+                strict = (di[:, None] > NG) & (dj[None, :] > NG)
+                fac = np.where(strict, 1.0, 1.0 + eps * pat)
+                gs[k] = a * (fac if a.ndim == 2 else fac[:, :, None])
+        del ii
+        print(f"BOUNDARY METRICS PERTURBED by eps={eps:g} "
+              f"(deterministic cos pattern, strict interior untouched)")
     n, ng = ctx["n"], ctx["ng"]
     ak, bk, ptop, ks = set_eta_analytic(KM)
     ptop = float(ptop)
