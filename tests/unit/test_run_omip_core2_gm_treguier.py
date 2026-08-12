@@ -298,19 +298,60 @@ class TestGMOperatorFlags:
             build_tripole(*args, gm_bolus_advection="through_fct",
                           gm_slope_scheme="centered")
 
-    def test_the_pair_the_model_honors_is_the_pair_we_expose(self):
-        """The gate in the model is `nemo_iso_lap` + `through_fct` -- assert the
-        driver's allowed values contain exactly that pair's members, so a rename
-        on either side goes red here instead of silently disabling the lane."""
+    def test_the_pair_the_model_gates_on_is_the_pair_we_expose(self):
+        """DRIFT GUARD against the MODEL's own gate, not the driver's literals.
+
+        An earlier version of this test asserted only `"nemo_iso_lap" in
+        _GM_SLOPE_SCHEMES` plus field names -- all values owned by the driver,
+        so renaming the model-side comparison would have left it green
+        (codex 9382776, finding 6).  Read the model function that decides
+        whether the bolus is exported and require BOTH literals to appear in
+        the source that runs.
+        """
+        import inspect
+
+        from legoesm.ocean.dynamics import ocean_model_latlon_cgrid
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         from scripts.run.run_omip_core2 import (
             _GM_BOLUS_FORMS, _GM_SLOPE_SCHEMES,
         )
 
+        model_src = inspect.getsource(ocean_model_latlon_cgrid)
+        assert "_want_bolus" in model_src, (
+            "the bolus-export gate `_want_bolus` is gone or renamed; the "
+            "driver's --gm-bolus-advection may no longer reach anything.")
+        gate = model_src[model_src.index("_want_bolus = "):]
+        gate = gate[:gate.index(")\n")]
+        for literal in ('"through_fct"', '"nemo_iso_lap"'):
+            assert literal in gate, (
+                f"the model gate no longer compares against {literal}; the "
+                "driver still offers it, so the lane would silently no-op.")
+        # and the driver must still offer exactly those values
         assert "nemo_iso_lap" in _GM_SLOPE_SCHEMES
         assert "through_fct" in _GM_BOLUS_FORMS
-        # the config fields the driver overrides must still exist
-        assert "slope_scheme" in GMRediConfig._fields
-        assert "gm_bolus_advection" in GMRediConfig._fields
-        # and the defaults must be the departure we are making selectable
+        # the fields the driver overrides must still exist, with the defaults
+        # that make this a DEPARTURE worth exposing
         assert GMRediConfig().gm_bolus_advection == "centred"
+        assert GMRediConfig().msc_stabilize is False
+
+    def test_msc_is_a_separate_field_not_implied_by_nemo_iso_lap(self):
+        """The commit first claimed `nemo_iso_lap` "carries the akz
+        stabilization".  FALSE (codex 9382776, finding 1): akz is gated on the
+        SEPARATE `msc_stabilize` field, default False, so an ORCA1 operator
+        match (ln_traldf_msc=.true.) needs --gm-msc-stabilize as well.
+        """
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+        assert "msc_stabilize" in GMRediConfig._fields
+        assert GMRediConfig(slope_scheme="nemo_iso_lap").msc_stabilize is False
+
+    def test_msc_flag_round_trip_and_guards(self, monkeypatch):
+        a = _parse("--gm-msc-stabilize")
+        assert a.gm_msc_stabilize is True
+        assert _parse().gm_msc_stabilize is None
+        assert _parse("--no-gm-msc-stabilize").gm_msc_stabilize is False
+        main = self._main_with(
+            ["--grid", "mpas", "--mesh", "m.nc", "--gm-msc-stabilize"],
+            monkeypatch)
+        with pytest.raises(SystemExit, match="tripole only"):
+            main()

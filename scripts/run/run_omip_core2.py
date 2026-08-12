@@ -82,8 +82,10 @@ _GM_KAPPA_MIN_DEFAULT = 200.0
 # Method of Stabilizing Correction (ln_traldf_msc=.true.), and adds the eddy-
 # induced transport to the ADVECTING velocity (LDF/ldftra.F90 `ldf_eiv_trp`,
 # PUBLIC "called by traadv.F90") so the bolus rides the monotone FCT limiter.
-# "nemo_iso_lap" is that operator (it carries the akz stabilization);
-# "through_fct" is that bolus routing.  The OMIP default is "centered" slopes
+# "nemo_iso_lap" is that OPERATOR.  It does NOT by itself turn on the
+# stabilizing correction: `akz` is gated on the SEPARATE GMRediConfig field
+# `msc_stabilize` (default False), so matching ORCA1 needs it too --
+# hence --gm-msc-stabilize.  "through_fct" is the bolus routing.  The OMIP default is "centered" slopes
 # with an unlimited centred bolus flux -- a documented departure, now
 # selectable rather than hard-wired.
 _GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
@@ -701,6 +703,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
+                  gm_msc_stabilize=None,
                   store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
@@ -816,6 +819,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # raises); the tripole recipe already ships Visbeck OFF, so this only
         # turns the Treguier block on.
         _ovr["gm_redi"] = _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min)
+        print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
+              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
+              f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
     # NEMO-faithful lateral-mixing lane (opt-in).  Composes with whichever
     # kappa_GM scheme is active above: this touches ONLY the operator fields, so
     # `--gm-slope-scheme nemo_iso_lap` alone is a one-variable operator swap
@@ -831,15 +837,16 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             _gm_kw["slope_scheme"] = gm_slope_scheme
         if gm_bolus_advection is not None:
             _gm_kw["gm_bolus_advection"] = gm_bolus_advection
+        if gm_msc_stabilize is not None:
+            _gm_kw["msc_stabilize"] = bool(gm_msc_stabilize)
         _ovr["gm_redi"] = _gm_base._replace(**_gm_kw)
         print(f"[setup] tripole GM/Redi operator: "
               f"slope_scheme={_ovr['gm_redi'].slope_scheme}, "
-              f"gm_bolus_advection={_ovr['gm_redi'].gm_bolus_advection} "
-              f"(NEMO ORCA1: ln_traldf_iso + ln_traldf_msc, eiv added to the "
-              f"advecting velocity -> nemo_iso_lap + through_fct)")
-        print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
-              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
-              f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
+              f"gm_bolus_advection={_ovr['gm_redi'].gm_bolus_advection}, "
+              f"msc_stabilize={_ovr['gm_redi'].msc_stabilize} "
+              f"(NEMO ORCA1 = nemo_iso_lap + through_fct + msc_stabilize; "
+              f"NOTE the bolus then rides THIS run's tracer limiter, which is "
+              f"not necessarily NEMO's FCT)")
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -4431,6 +4438,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "--gm-slope-scheme nemo_iso_lap (the model gates on the "
                         "pair), so passing it alone raises rather than silently "
                         "keeping the centred flux.")
+    p.add_argument("--gm-msc-stabilize", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="NEMO ln_traldf_msc (Method of Stabilizing Correction) "
+                        "for the isoneutral operator (tripole only). Unset "
+                        "keeps the card value (GMRediConfig.msc_stabilize "
+                        "defaults False). ORCA1 runs ln_traldf_msc=.true., and "
+                        "--gm-slope-scheme nemo_iso_lap does NOT imply it: the "
+                        "akz split is gated on this SEPARATE field, so a NEMO "
+                        "operator match needs both.")
     p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
                         "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
@@ -4861,7 +4877,9 @@ def main() -> int:
     # build_tripole, so on any other grid they would be silently discarded.
     _gm_op_flags = [n for n, v in (("--gm-slope-scheme", args.gm_slope_scheme),
                                    ("--gm-bolus-advection",
-                                    args.gm_bolus_advection)) if v is not None]
+                                    args.gm_bolus_advection),
+                                   ("--gm-msc-stabilize",
+                                    args.gm_msc_stabilize)) if v is not None]
     if _gm_op_flags and args.grid != "tripole":
         raise SystemExit(
             f"{' and '.join(_gm_op_flags)} is wired for --grid tripole only "
@@ -5019,6 +5037,7 @@ def main() -> int:
             gm_kappa_min=args.gm_kappa_min,
             gm_slope_scheme=args.gm_slope_scheme,
             gm_bolus_advection=args.gm_bolus_advection,
+            gm_msc_stabilize=args.gm_msc_stabilize,
             store_mass_flux=bool(getattr(args, "gateway_transports",
                                          False)),
             store_salt_flux=bool(getattr(args, "gateway_transports",
