@@ -231,3 +231,35 @@ def test_the_wb_campaign_config_names_every_family():
             # tiedtke (Claude review).
             assert classical[family] == defaults[arg], (path, family)
         assert cfg.get("radiation", "rrtmgp") == "rrtmgp"
+
+
+def test_swapping_a_scheme_swaps_what_is_trained():
+    """Any family may use any scheme, and the TRAINABLE PARAMETERS follow.
+
+    The hand-written knob set covers one scheme per family, so an arm that
+    selects a different one used to run it at fixed defaults with no gradient.
+    Swapping convection must therefore change the trainable leaf count, not
+    just the physics.
+    """
+    from types import SimpleNamespace
+
+    import jax
+    import yaml as _yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    base = _yaml.safe_load(
+        (_REPO / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    counts = {}
+    for scheme in ("tiedtke", "bechtold"):
+        yml = dict(base)
+        yml["classical"] = dict(base.get("classical", {}), convection=scheme)
+        cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                              smoke=True, multi_step_hours=(6,), n_days=1)
+        *_, params, _mk, _loss, _dt = build_mode_components(cfg, yml)
+        counts[scheme] = len(
+            [x for x in jax.tree.leaves(params) if hasattr(x, "size")])
+
+    assert counts["tiedtke"] > 0
+    assert counts["bechtold"] != counts["tiedtke"], (
+        f"swapping convection did not change what is trainable: {counts}")

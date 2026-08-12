@@ -372,6 +372,43 @@ def _build_mode_components_spectral(cfg, yml):
         )
         _rad_interval = int(_cl.get("rad_update_interval_steps", 6))
 
+        # Any scheme in any family may be swapped, and the TRAINABLE
+        # PARAMETERS follow the swap: the hand-written knob set only covers
+        # one scheme per family, so an arm that selects e.g. bechtold or clubb
+        # would otherwise run it at fixed defaults with no gradient. This is
+        # the same spec-driven bundle run_aimip exposes as
+        # ``aimip_trainable_schemes``; WB reads it from ``classical.trainable_
+        # schemes`` and defaults to the same tier so the two campaigns train
+        # the same thing for the same selection.
+        _tier = _cl.get("trainable_schemes", "extended")
+        if _tier:
+            from legoesm.training.aimip_params import (
+                AIMIPTrainableBundle,
+                aimip_legacy_owned_fields,
+                aimip_scheme_keys_for,
+            )
+            from legoesm.training.param_collector import build_trainable_params
+
+            _active = aimip_scheme_keys_for(
+                convection=_schemes["convection_scheme"],
+                turbulence=_schemes["turbulence_scheme"],
+                gwd=_schemes["gwd_scheme"],
+                microphysics=_schemes["microphysics_scheme"],
+                radiation=_radiation,
+                cloud=_schemes["cloud_scheme"],
+            )
+            _scheme_params = build_trainable_params(
+                active_scheme_keys=_active,
+                tier=(_tier if isinstance(_tier, str) else "extended"),
+                # Only what the hand-written route cannot reach: the splice
+                # runs after it, so a doubly-covered field would silently zero
+                # the legacy leaf's gradient.
+                exclude=tuple(sorted(aimip_legacy_owned_fields(
+                    cloud_scheme=_schemes["cloud_scheme"]))),
+            )
+            params = AIMIPTrainableBundle(
+                classical=params, schemes=_scheme_params)
+
         # SPLIT radiation, as the AIMIP arm runs it: RRTMGP once every
         # `rad_update_interval_steps` scan steps instead of on every RK stage.
         # Without this the interval key is INERT and the SI SSP-RK3 step calls
