@@ -14,7 +14,7 @@ __param_spec__ = {
             "kappa_min": "numerics: stability floor on the equatorial taper, NOT a NEMO namelist parameter; default 0 = inactive (enable via config, not training)",
         },
         "params": {
-            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0 = zUfac*rn_Le**inn with zUfac=1/2*rn_Ue,inn=1 for the LAPLACIAN operator and 1/12*rn_Ue,inn=3 for the bilaplacian (ldftra.F90:290-293) -- NOT plain rn_Ue*rn_Le", "shape": None},
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0 = 1/2*rn_Ue*rn_Le (NEMO REJECTS bilaplacian EIV, so the laplacian prefactor is the only case) -- NOT plain rn_Ue*rn_Le; ORCA1 = 900", "shape": None},
         },
     },
     "HarmonicConfig": {
@@ -183,15 +183,15 @@ class TreguierConfig(NamedTuple):
     diagnostics; the GM/Redi dispatch raises if both are on).
     """
     enabled: bool = False
-    # κ cap [m²/s].  NEMO's own formula is OPERATOR-DEPENDENT
-    # (ldftra.F90:290-293): zUfac = 1/2*rn_Ue for the LAPLACIAN operator and
-    # 1/12*rn_Ue for the bilaplacian, i.e. the laplacian cap is
-    # 1/2*rn_Ue*rn_Le, NOT rn_Ue*rn_Le.  For ORCA1 (ln_traldf_lap) that is
+    # κ cap [m²/s].  NEMO's cap is 1/2*rn_Ue*rn_Le -- the 1/2 is the
+    # LAPLACIAN prefactor (ldftra.F90:290-293) and NEMO REJECTS bilaplacian
+    # EIV, so that is the only case; plain rn_Ue*rn_Le is wrong.  ORCA1 =
     # 0.5*0.018*100e3 = 900, confirmed by NEMO's emitted aeiu_2d (max exactly
-    # 900, measured 2026-08-12); run_omip_core2's --gm-aei0 default was
-    # corrected from 1800 to 900 for that reason.  This DINO default is left
-    # at its historical value because DINO's operator/namelist has not been
-    # re-checked here -- verify before reusing the number elsewhere.
+    # 900, measured 2026-08-12), which is why run_omip_core2's --gm-aei0
+    # default was corrected 1800 -> 900.
+    # THIS 3000 IS A LEGACY GENERIC DEFAULT, NOT "the DINO value": DINO passes
+    # its own DINOConfig.treguier_aei0 = 1500 (dino.py:578, wired at :2893),
+    # so no DINO run inherits this number (codex, 2026-08-12).
     aei0: float = 3000.0
     # Optional FLOOR on the returned κ_GM [m²/s], applied to WET columns only
     # (dry columns stay exactly 0).  The tropical taper ``min(1, |f/f_20|)``

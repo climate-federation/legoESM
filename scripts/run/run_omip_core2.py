@@ -60,7 +60,6 @@ _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
 # NEMO ldf_eiv (nn_aei_ijk_t=21) kappa_GM defaults, defined ONCE and shared by
 # `build_tripole`'s signature and the `--gm-aei0` / `--gm-kappa-min` argparse
 # defaults so the two can never drift.
-# aei0 = rn_Ue*rn_Le; ORCA1 namelist = 0.018 * 100e3.
 # NEMO ldftra.F90:290-293 -- for the LAPLACIAN operator (ORCA1:
 # ln_traldf_lap=.true.) the prefactor is zUfac = 1/2 * rn_Ud, so
 #     aei0 = 1/2 * rn_Ue * rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s,
@@ -741,8 +740,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # NEMO-faithful eddy-induced-velocity coefficient.  NEMO ORCA1 runs
         # &namtra_eiv with ln_ldfeiv=.true. and nn_aei_ijk_t=21 -> aeiu/aeiv =
         # F(growth rate of baroclinic instability), a 2-D time-varying field
-        # capped at aei0 = rn_Ue*rn_Le = 0.018 * 100e3 = 1800 m^2/s
-        # (ldftra.F90:386).  legoESM's TreguierConfig IS that scaling (already
+        # capped at aei0 = 1/2*rn_Ue*rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s
+        # (ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud for the laplacian, which
+        # ORCA1 runs; NEMO's emitted aeiu_2d maxes at exactly 900).  legoESM's TreguierConfig IS that scaling (already
         # used by the DINO oracle card).  The tripole default
         # (run_omip._DEFAULT_BATHY_GM_REDI) instead runs the VISBECK adaptive
         # coefficient (kappa_GM=800, alpha=0.015, kappa in [200,2000]) -- a
