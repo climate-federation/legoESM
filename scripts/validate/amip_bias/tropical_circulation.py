@@ -91,8 +91,22 @@ def itcz_metrics(pr, lat, lon):
             hi += 1
             acc += float(zm[hi] * w[hi])
     dlat = float(abs(lat[1] - lat[0]))
+    # CONTINUOUS width: the cos-lat-weighted second moment of the zonal-mean
+    # rain about its own centroid.  This is the width to quote.  The
+    # ``half_width`` above can only take multiples of the 5-degree grid
+    # spacing, so a "20 vs 15 degrees, 33 % too wide" reading is ONE CELL and
+    # is not resolvable -- measured that way the width also looked identical
+    # across three physics arms, which was quantisation, not invariance. On the
+    # continuous measure ref1979 is 14.27 vs GPCP 14.33, i.e. the meridional
+    # width is RIGHT and that claim was retracted.
+    band = np.abs(lat) <= 30.0
+    ww = np.cos(np.deg2rad(lat))[band] * zm[band]
+    y = lat[band]
+    centroid = float((ww * y).sum() / ww.sum())
+    width_sd = float(np.sqrt((ww * (y - centroid) ** 2).sum() / ww.sum()))
     return dict(peak=float(zm[i0]), peak_lat=float(lat[i0]),
-                half_width=float(hi - lo + 1) * dlat, zm=zm)
+                half_width=float(hi - lo + 1) * dlat,
+                centroid=centroid, width_sd=width_sd, zm=zm)
 
 
 def concentration(pr, lat, lon):
@@ -211,17 +225,30 @@ def main(argv=None):
     pr_o = rb._ref_clim("pr", months, lat, lon, src=GPCP) * SEC_PER_DAY
 
     im, io = itcz_metrics(pr_m, lat, lon), itcz_metrics(pr_o, lat, lon)
+    # COHERENCE of the rain band.  The width can be right while the band is
+    # broken into patches in the wrong places, which a zonal mean cannot see.
+    belt = np.abs(lat) <= 15.0
+    patt_r = float(np.corrcoef(pr_m[belt].ravel(), pr_o[belt].ravel())[0, 1])
+    zsd_m = float(np.mean(pr_m[belt].std(axis=1)
+                          / np.maximum(pr_m[belt].mean(axis=1), 1e-9)))
+    zsd_o = float(np.mean(pr_o[belt].std(axis=1)
+                          / np.maximum(pr_o[belt].mean(axis=1), 1e-9)))
     cm, co = concentration(pr_m, lat, lon), concentration(pr_o, lat, lon)
     print(f"\n=== {run}: tropical precipitation structure vs GPCP ===")
     print(f"{'':22}{'model':>10}{'GPCP':>10}")
     for k, lbl, f in [("peak", "ITCZ peak [mm/day]", "{:10.2f}"),
-                      ("peak_lat", "  at latitude", "{:10.1f}"),
-                      ("half_width", "  half-rain width [deg]", "{:10.1f}")]:
+                      ("centroid", "rain centroid [deg]", "{:10.2f}"),
+                      ("width_sd", "rain width, sd [deg]", "{:10.2f}"),
+                      ("peak_lat", "  peak latitude (5-deg grid)", "{:10.1f}"),
+                      ("half_width", "  half-rain width (QUANTISED)", "{:10.1f}")]:
         print(f"{lbl:22}" + f.format(im[k]) + f.format(io[k]))
     for k, lbl in [("mean", "tropical mean [mm/day]"),
                    ("top_decile", "share in wettest 10%"),
                    ("frac_heavy", f"area frac > {HEAVY:.0f} mm/day")]:
         print(f"{lbl:22}{cm[k]:10.3f}{co[k]:10.3f}")
+    print(f"{'pattern r vs GPCP':22}{patt_r:10.3f}{1.0:10.3f}")
+    print(f"{'zonal sd / mean':22}{zsd_m:10.3f}{zsd_o:10.3f}"
+          "   (how broken-up the band is along longitude)")
 
     # --- omega from the SAME estimator on both sides ------------------------
     mu, mv = rb._load_model(run, "ua"), rb._load_model(run, "va")
