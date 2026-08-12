@@ -93,8 +93,13 @@ def main() -> int:
     e3t = _fill(dsT.variables["e3t"][r])
     ttrd = _fill(dsT.variables["ttrd_totad"][r])
     strd = _fill(dsT.variables["strd_totad"][r])
-    uo = _fill(dsU.variables["uoce"][r])
-    vo = _fill(dsV.variables["voce"][r])
+    # EFFECTIVE transports: the m^3/s fields tra_adv actually advected with
+    # (codex Stage-C review).  Reconstructing them from uoce*e3t misses the
+    # barotropic/free-surface correction and NEMO's e3u mask/min-rule, which
+    # is why the first Stage-C attempt came out UNCORRELATED (0.02-0.09).
+    utr = _fill(dsU.variables["uocetr_eff"][r])   # (z, y, x) [m^3/s]
+    vtr = _fill(dsV.variables["vocetr_eff"][r])
+    wtr = _fill(dsT.variables["wocetr_eff"][r])
     lat = _fill(dsT.variables["nav_lat_grid_T"][:])
     dsT.close(); dsU.close(); dsV.close()
 
@@ -136,7 +141,7 @@ def main() -> int:
         return np.transpose(np.nan_to_num(x, nan=0.0), (1, 2, 0))
 
     T3, S3, h3 = lift(yxz(T)), lift(yxz(S)), lift(yxz(e3t))
-    u3, v3 = lift(yxz(uo)), lift(yxz(vo))
+    utr3, vtr3, wtr3 = lift(yxz(utr)), lift(yxz(vtr)), lift(yxz(wtr))
     h3 = np.where(h3 > 0, h3, 0.0)
 
     # STAGGERING (the array layout is an API): the C-grid operators want
@@ -150,29 +155,31 @@ def main() -> int:
     h_v = 0.5 * (h3 + np.roll(h3, -1, axis=0))
     e2u = 0.5 * (e2t + np.roll(e2t, -1, axis=1))
     e1v = 0.5 * (e1t + np.roll(e1t, -1, axis=0))
-    # UNITS (read from the model, not inferred): the driver builds
-    #     mass_flux_u = h_u_old * u          (ocean_model_latlon_cgrid.py:4250)
-    # i.e. a transport PER UNIT WIDTH [m^2/s] -- divergence_cgrid multiplies
-    # by the face length itself.  Multiplying by e2u here first overshot the
-    # tendency by ~1e5-1e6 (measured: rms 1.8 K/s vs NEMO 2e-6).
-    mf_u_c = h_u * u3                            # (ny, nx, z) at NEMO u-points
-    mf_v_c = h_v * v3                            # (ny, nx, z) at NEMO v-points
-    # x is periodic: face 0 == face nx.
-    mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c], axis=1)      # (ny, nx+1, z)
-    h_u_f = np.concatenate([h_u[:, -1:, :], h_u], axis=1)
-    # y is not periodic: the southern face carries no transport.
-    mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c], axis=0)  # (ny+1, nx, z)
-    h_v_f = np.concatenate([np.zeros_like(h_v[:1]), h_v], axis=0)
-    # Vertical transport from continuity.  w is a VELOCITY [m/s], so the
-    # horizontal divergence must be the VOLUME one: multiply the per-width
-    # transports by their face lengths, difference, and divide by cell area.
-    e2u_f = np.concatenate([e2u[:, -1:], e2u], axis=1)[:, :, None]
-    e1v_f = np.concatenate([np.zeros_like(e1v[:1]), e1v], axis=0)[:, :, None]
-    div_h = (((mf_u * e2u_f)[:, 1:, :] - (mf_u * e2u_f)[:, :-1, :])
-             + ((mf_v * e1v_f)[1:, :, :] - (mf_v * e1v_f)[:-1, :, :]))
+    # UNITS: NEMO's *ocetr_eff are VOLUME transports [m^3/s]; our operators
+    # take mass_flux per unit width [m^2/s] (driver: mass_flux_u = h_u * u,
+    # ocean_model_latlon_cgrid.py:4250) because divergence_cgrid applies the
+    # face length itself.  Divide the NEMO transport by its face length.
+    e2u_c = 0.5 * (e2t + np.roll(e2t, -1, axis=1))
+    e1v_c = 0.5 * (e1t + np.roll(e1t, -1, axis=0))
+    inv_e2u = np.where(e2u_c > 0, 1.0 / np.maximum(e2u_c, 1.0), 0.0)[:, :, None]
+    inv_e1v = np.where(e1v_c > 0, 1.0 / np.maximum(e1v_c, 1.0), 0.0)[:, :, None]
+    mf_u_c = utr3 * inv_e2u          # (NY, NX, z) [m^2/s]
+    mf_v_c = vtr3 * inv_e1v
+    # NEMO's u(i) is the face between T(i) and T(i+1); our face j is between
+    # T(j-1) and T(j), so shift by one with the periodic wrap in x and a
+    # closed southern row in y.
+    mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c[:, :-1, :]], axis=1)
+    mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c[:-1]], axis=0)
+    h_u_f = np.concatenate([h3[:, -1:, :], 0.5 * (h3[:, :-1, :] + h3[:, 1:, :])],
+                           axis=1)
+    h_v_f = np.concatenate([np.zeros_like(h3[:1]),
+                            0.5 * (h3[:-1] + h3[1:])], axis=0)
+    # w: NEMO's wocetr_eff is a VOLUME transport through the T-cell top face;
+    # our operators take a VELOCITY at interfaces, so divide by cell area.
     area = (e1t * e2t)[:, :, None]
-    w_int = -np.flip(np.cumsum(np.flip(div_h, axis=-1), axis=-1), axis=-1) / area
-    w_half = np.concatenate([np.zeros_like(w_int[..., :1]), w_int], axis=-1)[..., :z + 1]
+    inv_area = np.where(area > 0, 1.0 / np.maximum(area, 1.0), 0.0)
+    w_cell = wtr3 * inv_area                       # (NY, NX, z) at interfaces k
+    w_half = np.concatenate([w_cell, np.zeros_like(w_cell[..., :1])], axis=-1)
 
     lat_col = lat.reshape(ny * nx)
     result = {"rec": r, "schemes": {},
