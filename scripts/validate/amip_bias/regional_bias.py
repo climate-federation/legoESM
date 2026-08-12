@@ -113,9 +113,15 @@ def bin_to_model(arr, rlat, rlon, mlat, mlon, label="reference"):
     return (num / den).reshape(mlat.size, mlon.size)
 
 
-def _ref_clim(var, months, mlat, mlon):
-    """Reference monthly climatology BINNED onto the model grid, >=REF_MIN_YEAR."""
-    src = _SOURCE.get(var)
+def _ref_clim(var, months, mlat, mlon, src=None):
+    """Reference monthly climatology BINNED onto the model grid, >=REF_MIN_YEAR.
+
+    ``src`` overrides the default dataset directory for ``var`` (``_SOURCE``),
+    so a caller can score the SAME variable against a different observational
+    dataset -- e.g. ESACCI-CLOUD rather than ERA5 for ``clt`` -- without a
+    second copy of this loader.
+    """
+    src = _SOURCE.get(var) if src is None else src
     if src is None:
         return None
     fs = sorted(glob.glob(f"{src}/{var}/*.nc"))
