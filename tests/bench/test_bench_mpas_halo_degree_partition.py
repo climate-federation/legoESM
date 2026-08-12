@@ -1,4 +1,4 @@
-"""Unit test for the degree-aware-partition probe
+"""Unit test for the ownership-lever probe -- degree AND bytes
 (scripts/bench/bench_mpas_halo_degree_partition.py).
 
 The probe is an INSTRUMENT: it decides whether a production partitioner gets
@@ -47,16 +47,20 @@ def test_degree_vector_counts_distinct_partners():
 def test_padded_bytes_is_round_max_times_active_pairs():
     mod = _load()
     # Round 0: two active pairs, round max 10 cells / 4 edges.
-    # Round 1: one active pair, 3 cells / 0 edges.  Device 3 self-maps.
+    # Round 1: one active pair, 3 cells / 1 edge.  Both per-round maxima are
+    # >= 1 because the production builder floors them
+    # (sharded_dynamics.py:2159-2160), so a 0 can never reach padded_bytes.
+    # The (3, 3) self-map is NOT something a production schedule emits -- it
+    # is here only to exercise the a != b filter.
     sched = {
         "n_rounds": 2,
         "ppermute_perms": [[(0, 1), (1, 0), (2, 3), (3, 2)], [(0, 2), (2, 0),
                                                               (3, 3)]],
         "halo_cells_per_round": [10, 3],
-        "halo_edges_per_round": [4, 0],
+        "halo_edges_per_round": [4, 1],
     }
     expect = (4 * (10 * mod.CELL_BYTES + 4 * mod.EDGE_BYTES)
-              + 2 * (3 * mod.CELL_BYTES + 0 * mod.EDGE_BYTES))
+              + 2 * (3 * mod.CELL_BYTES + 1 * mod.EDGE_BYTES))
     assert mod.padded_bytes(sched) == expect
 
 
@@ -186,6 +190,98 @@ def test_greedy_pass_preserves_balance_and_never_worsens_max_degree():
     assert hist[-1] <= before
 
 
+def test_thin_contacts_first_orders_by_both_directions_summed():
+    """The byte lever dissolves contacts thinnest-first, and 'thin' must mean
+    the whole contact, not one direction of it: a pair carrying 1 cell each
+    way is thinner than one carrying 9 one way and 0 the other."""
+    mod = _load()
+    m = np.zeros((4, 4), dtype=np.int64)
+    m[0, 1] = 9                    # 9 one way, 0 back -> weight 9
+    m[1, 0] = 0
+    m[2, 3] = m[3, 2] = 1          # 1 each way -> weight 2
+    m[0, 2] = m[2, 0] = 20         # weight 40
+    order = mod.thin_contacts_first(m, 4)
+    # Directed listing: each contact appears twice (once per endpoint).
+    assert {tuple(sorted(p)) for p in order[:2]} == {(2, 3)}
+    assert {tuple(sorted(p)) for p in order[2:4]} == {(0, 1)}
+    assert {tuple(sorted(p)) for p in order[4:]} == {(0, 2)}
+
+
+def test_bytes_trail_scores_every_state_and_splits_dissolved_from_attempted(
+        monkeypatch):
+    """Two properties in one run, because they share the loop.
+
+    (1) EVERY state is priced by score_prepared -- the trail's whole point.
+    (2) A move that does NOT remove its target contact counts as ATTEMPTED
+        and NOT as dissolved; conflating them mislabels the trail.
+
+    The move generator is stubbed so the loop actually advances: with a real
+    _dissolve_contact on a chain there is no third device adjacent to a
+    boundary cell, so every move is rejected and the trail is one state long
+    -- a version of this test that let that happen proved nothing at all.
+    """
+    mod = _load()
+    adj = mod.cell_adjacency(_ChainMesh(24))
+    owner = np.repeat(np.arange(4), 6).astype(np.int64)
+    seen = []
+
+    def fake_score(prepared, n_dev, **kw):
+        seen.append(tuple(prepared))          # prepared is the owner array
+        return {"n_rounds": 3, "max_degree": 3, "padded_bytes": 900 - 10 *
+                len(seen), "actual_bytes": 500, "inflation": 1.5,
+                "n_components_scored": 4, "comm_pairs": []}
+
+    def fake_dissolve(adj_, own, reach, n_dev, d, p, cap):
+        # Swap one cell each way across the 0|1 boundary: counts unchanged,
+        # and the 0-1 contact SURVIVES, which is the case (2) under test.
+        cand = own.copy()
+        cand[5], cand[6] = own[6], own[5]
+        return cand
+
+    monkeypatch.setattr(mod, "score_prepared", fake_score)
+    monkeypatch.setattr(mod, "reorder_with_owner",
+                        lambda mesh, n, own: own.tolist())
+    monkeypatch.setattr(mod, "_dissolve_contact", fake_dissolve)
+    trail, owners = mod.bytes_trail_pass(
+        _ChainMesh(24), adj, owner, 4, 1, n_steps=3, n_real_cells=24,
+        verbose=False)
+    # The loop really advanced: 1 baseline + 3 moves, each separately scored.
+    assert len(trail) == len(owners) == len(seen) == 4
+    assert trail[0]["trail_step"] == 0 and trail[0]["dissolved_contacts"] == []
+    assert seen[0] == tuple(owner.tolist())   # step 0 IS the untouched sfc
+    for i, row in enumerate(trail):
+        assert row["trail_step"] == i
+        assert row["padded_bytes"] == 900 - 10 * (i + 1)   # from the scorer
+        assert "n_components" in row and "owner_counts" in row
+    # Every move was attempted; none of them actually dissolved its contact.
+    assert len(trail[-1]["attempted_contacts"]) == 3
+    assert trail[-1]["dissolved_contacts"] == []
+    # Balance is a hard constraint at every step, not just at the end.
+    for own in owners:
+        assert np.bincount(own, minlength=4).tolist() == [6, 6, 6, 6]
+
+
+def test_select_best_feasible_prefers_a_worse_but_legal_row():
+    """An infeasible 25% row must not hide a feasible 20% row: the trail is
+    scored blind to the constraints, so selection has to apply them."""
+    mod = _load()
+    base = {"n_rounds": 13, "padded_bytes": 1000, "n_components_scored": 79}
+
+    def row(step, padded, rounds=13, comps=79, counts=(40960, 40961)):
+        return {"trail_step": step, "n_rounds": rounds,
+                "padded_bytes": padded, "n_components_scored": comps,
+                "owner_counts": {"min": counts[0], "max": counts[1]}}
+
+    trail = [row(0, 1000), row(1, 750, rounds=14),   # 25% but +1 round
+             row(2, 800), row(3, 700, comps=99)]      # 20% legal; 30% broken
+    best, feasible = mod.select_best_feasible(trail, base, 40960, 40961)
+    assert best["trail_step"] == 2 and len(feasible) == 2
+    # Nothing feasible -> still return a row so the gate can refute it.
+    only_bad = [row(0, 900, rounds=14), row(1, 500, comps=99)]
+    best, feasible = mod.select_best_feasible(only_bad, base, 40960, 40961)
+    assert feasible == [] and best["trail_step"] == 1
+
+
 _GATE_KW = {"n_dev_owner": 4, "n_cells": 8}   # balanced counts are 2..2
 
 
@@ -237,6 +333,119 @@ def test_verdict_gate_thresholds(capsys):
     # ...as is one that inflates padded bytes past 10%, per the docstring.
     mod.verdict({"sfc": base, "greedy": _cand(6, padded=120)}, **_GATE_KW)
     assert "padded bytes inflated" in capsys.readouterr().out
+
+
+def test_verdict_byte_gate_thresholds(capsys):
+    """Byte lever: >=20% padded cut CONFIRMS, <10% REFUTES, and rounds are
+    now the CONSTRAINT rather than the win."""
+    mod = _load()
+    base = {"n_rounds": 13, "padded_bytes": 1000, "max_degree": 13,
+            "degree_floor_rounds": 9, "degree_mean": 8.41,
+            "n_components_scored": 4,
+            "owner_counts": {"block_mismatch": 0.0}}
+    kw = dict(_GATE_KW, lever="bytes", config=mod.PREREG_BYTE_CONFIG)
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=750)}, **kw)
+    assert "CONFIRMED" in capsys.readouterr().out
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=850)}, **kw)
+    assert "INTERMEDIATE" in capsys.readouterr().out
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=950)}, **kw)
+    assert "REFUTED" in capsys.readouterr().out
+    # EXACT boundaries: 800/1000 is a 20% cut and 900/1000 a 10% cut. In
+    # float, 1 - 800/1000 == 0.19999999999999996, so a float ">= 0.20" test
+    # downgrades an exact CONFIRM to INTERMEDIATE and an exact INTERMEDIATE
+    # to REFUTED. These two lines fail on the float form.
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=800)}, **kw)
+    assert "CONFIRMED" in capsys.readouterr().out
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=900)}, **kw)
+    assert "INTERMEDIATE" in capsys.readouterr().out
+    # A huge byte cut bought with an extra round is refuted, not confirmed.
+    mod.verdict({"sfc": base, "greedy": _cand(14, padded=500)}, **kw)
+    assert "round count increased" in capsys.readouterr().out
+    # ...as is one bought by shattering the SCORED blocks past the baseline.
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=500, comps=9)}, **kw)
+    assert "balance/connectivity" in capsys.readouterr().out
+
+
+def test_byte_gate_does_not_import_the_degree_gates_connectivity_clause(
+        capsys):
+    """The degree gate also demands the INTENDED ownership be exactly n_dev
+    domains. sfc's own intended ownership is 73 domains at s9@64 while its
+    scored blocks are 79, so importing that clause into the byte gate refutes
+    the baseline against itself -- which is exactly what the first s9@64 byte
+    run printed. The byte gate reads n_components_scored only.
+    """
+    mod = _load()
+    base = {"n_rounds": 13, "padded_bytes": 1000, "n_components_scored": 79,
+            "owner_counts": {"block_mismatch": 0.0}}
+    cand = _cand(13, padded=700, counts=(40960, 40961), comps=79)
+    cand["n_components"] = 73          # NOT n_dev_owner: legal for the bytes
+    mod.verdict({"sfc": base, "greedy": cand},
+                n_dev_owner=64, n_cells=2621442, lever="bytes",
+                config=mod.PREREG_BYTE_CONFIG)
+    out = capsys.readouterr().out
+    assert "CONFIRMED" in out and "balance/connectivity" not in out
+    # ...and the degree lever still enforces it, so the clause is not lost.
+    mod.verdict({"sfc": dict(base, max_degree=13, degree_floor_rounds=9,
+                             degree_mean=8.41),
+                 "greedy": dict(cand, n_rounds=9)},
+                n_dev_owner=64, n_cells=2621442, lever="degree")
+    assert "balance/connectivity" in capsys.readouterr().out
+
+
+def test_byte_gate_marks_an_off_preregistration_config_advisory(capsys):
+    """The 20/10% thresholds were pre-registered for s9@64 depth 3 only. A
+    CONFIRM at any other configuration -- or with no configuration supplied --
+    must be labelled ADVISORY, otherwise a cheap s8@16 run can be quoted as
+    the gate's verdict."""
+    mod = _load()
+    base = {"n_rounds": 13, "padded_bytes": 1000, "n_components_scored": 4,
+            "owner_counts": {"block_mismatch": 0.0}}
+    good = {"sfc": base, "greedy": _cand(13, padded=700)}
+    mod.verdict(good, lever="bytes", config=(8, 0, 16, 3), **_GATE_KW)
+    out = capsys.readouterr().out
+    assert "ADVISORY" in out and "CONFIRMED (ADVISORY)" in out
+    mod.verdict(good, lever="bytes", **_GATE_KW)          # config omitted
+    assert "ADVISORY" in capsys.readouterr().out
+    # LLOYD IS PART OF THE IDENTITY: it changes the mesh, so s9@64 with one
+    # Lloyd sweep is a different measurement and must not print an
+    # unqualified CONFIRMED (it did until the config tuple grew a lloyd slot).
+    assert mod.PREREG_BYTE_CONFIG == (9, 0, 64, 3)
+    mod.verdict(good, lever="bytes", config=(9, 1, 64, 3), **_GATE_KW)
+    assert "CONFIRMED (ADVISORY)" in capsys.readouterr().out
+    # The suffix goes on EVERY outcome: an off-registration REFUTED is just
+    # as unquotable as an off-registration CONFIRMED.
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=1000)},
+                lever="bytes", config=(8, 0, 16, 3), **_GATE_KW)
+    assert "REFUTED (ADVISORY)" in capsys.readouterr().out
+    mod.verdict({"sfc": base, "greedy": _cand(13, padded=850)},
+                lever="bytes", config=(8, 0, 16, 3), **_GATE_KW)
+    assert "do not build (ADVISORY)" in capsys.readouterr().out
+    mod.verdict(good, lever="bytes", config=mod.PREREG_BYTE_CONFIG,
+                **_GATE_KW)
+    out = capsys.readouterr().out
+    assert "CONFIRMED" in out and "ADVISORY" not in out
+
+
+def test_byte_constraints_are_the_shared_feasibility_predicate():
+    """The trail's best-row selection and the gate must apply the SAME three
+    constraints, or an infeasible low-byte row hides a feasible one."""
+    mod = _load()
+    base = {"n_rounds": 13, "padded_bytes": 1000, "n_components_scored": 79}
+    ok = mod.byte_constraints(
+        {"n_rounds": 13, "n_components_scored": 79,
+         "owner_counts": {"min": 40960, "max": 40961}}, base, 40960, 40961)
+    assert all(ok.values())
+    bad = mod.byte_constraints(
+        {"n_rounds": 14, "n_components_scored": 92,
+         "owner_counts": {"min": 40000, "max": 41999}}, base, 40960, 40961)
+    assert bad == {"counts_ok": False, "rounds_ok": False,
+                   "conn_scored_ok": False}
+
+
+def test_verdict_rejects_an_unknown_lever():
+    mod = _load()
+    with pytest.raises(ValueError, match="unknown lever"):
+        mod.verdict({}, lever="edge_cut", **_GATE_KW)
 
 
 def test_verdict_refuses_a_partial_candidate_row():
