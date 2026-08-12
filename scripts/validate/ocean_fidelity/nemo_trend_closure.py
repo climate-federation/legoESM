@@ -51,7 +51,23 @@ def main() -> int:
         if x0 is None or x1 is None:
             print(f"[{tag}] state variable missing")
             continue
-        dxdt = (x1 - x0) / a.dt
+        # key_qco VARIABLE-VOLUME form (trdtra.F90; codex tendency-instrument
+        # review RED-2): NEMO's reported trend is
+        #     (e3t_aa*X_aa - e3t_bb*X_bb) / (e3t_mm*dt),
+        # NOT the raw (X_aa - X_bb)/dt -- the free-surface thickness change
+        # rides in the trend.  Comparing the raw state change against the
+        # trends left a residual LARGER than the state change itself
+        # (measured 2026-08-12: ratio 2.8 for T).  Use the thickness-weighted
+        # form when e3t is available, and say which form was used.
+        e0, e1 = g("e3t", a.rec - 1), g("e3t", a.rec)
+        if e0 is not None and e1 is not None:
+            emid = 0.5 * (e0 + e1)
+            dxdt = np.where(emid > 0, (e1 * x1 - e0 * x0) / (np.where(emid > 0, emid, 1.0) * a.dt), np.nan)
+            form = "thickness-weighted (qco)"
+        else:
+            dxdt = (x1 - x0) / a.dt
+            form = "RAW state difference (no e3t in file)"
+        print(f"[{tag}] state-change form: {form}")
         avail, names = np.zeros_like(dxdt), []
         for tv in trends:
             v = g(tv, a.rec)
