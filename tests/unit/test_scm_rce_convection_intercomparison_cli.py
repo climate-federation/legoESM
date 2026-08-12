@@ -512,3 +512,29 @@ def test_zero_depth_selects_the_lowest_level_and_negative_selects_none():
     z_above_lowest = _np.array([2000.0, 500.0, 0.0])   # top -> surface
     assert (z_above_lowest <= 0.0).tolist() == [False, False, True]
     assert (z_above_lowest <= -1.0).tolist() == [False, False, False]
+
+
+def test_both_consumers_accept_every_shared_kwarg():
+    """evaluate_scheme builds ONE `common` dict and splats it into BOTH
+    run_cached and tune_category_winner. Adding a knob to one and not the other
+    is a TypeError that only appears once a real arm runs -- it cost ten array
+    tasks and eight minutes each (job 9371827,
+    "tune_category_winner() got an unexpected keyword argument
+    'bl_anchor_top_m'"), because no test exercised that path end to end.
+
+    The `common` keys are read from the DRIVER's source, so a knob added there
+    tomorrow is covered without editing this test.
+    """
+    import inspect
+    import re
+
+    src = (driver.Path(__file__).resolve().parents[2] / "scripts" / "run"
+           / "run_scm_rce_convection_intercomparison.py").read_text()
+    block = src.split("    common = dict(")[1].split("\n    )")[0]
+    keys = set(re.findall(r"^\s*(\w+)\s*=", block, flags=re.M))
+    assert "days" in keys and "bl_anchor_top_m" in keys, keys
+
+    for fn in (driver.camp.run_cached, driver.camp.tune_category_winner):
+        params = set(inspect.signature(fn).parameters)
+        missing = sorted(keys - params)
+        assert not missing, f"{fn.__name__} cannot accept {missing}"

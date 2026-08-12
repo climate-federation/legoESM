@@ -2051,6 +2051,7 @@ def tune_category_winner(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -2072,6 +2073,7 @@ def tune_category_winner(
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        bl_anchor_top_m=bl_anchor_top_m,
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
@@ -2136,6 +2138,7 @@ def tune_category_winner(
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
+            bl_anchor_top_m=bl_anchor_top_m,
         )
         if (trial_run.status == "ok"
                 and math.isfinite(trial_run.score)
