@@ -20,6 +20,23 @@ IMPLEMENTATION matches NEMO's, and ``superbee`` measures what the production
 scheme CHOICE costs against the oracle -- two different questions that must
 not be reported as one.
 
+★ STATUS 2026-08-12: THIS PROBE IS NOT YET A VALID INSTRUMENT — DO NOT QUOTE
+ITS NUMBERS.  After fixing three real defects (regular-lat-lon geometry ->
+tripolar metrics; native frame -> model halo frame; per-width mass flux) the
+magnitudes are now within 5-100x of NEMO's, but the CORRELATION is ~0.02-0.09,
+i.e. no relationship.  A correct operator on a correct state cannot be
+uncorrelated, so at least one input is still wrong.  Ranked candidates, none
+yet tested:
+  1. TRANSPORTS.  NEMO advects with the RK3 stage transports (zFu/zFv/zFw
+     from the dynamics, including the barotropic/free-surface correction),
+     not the raw diagnostic ``uoce``/``voce`` this probe reads.
+  2. TIME LEVEL.  ``tra_adv`` is called with ``Kbb`` (before), which under RK3
+     stage 3 is not the same field as the saved record r.
+  3. FACE THICKNESS.  ``e3u`` uses a MIN rule at bottom steps and a u-point
+     mask; the two-point mean used here leaks flux at every step face.
+  4. VERTICAL VELOCITY sign/placement in the reconstruction.
+The next step is to discriminate these, not to re-run.
+
 GEOMETRY APPROXIMATION (declared): NEMO's transports are ``e3u*u`` at u-faces;
 the trend file carries ``uoce``/``voce`` and ``e3t``, so face thicknesses are
 built by the two-point average of ``e3t`` (NEMO's own ``e3u`` uses the same
