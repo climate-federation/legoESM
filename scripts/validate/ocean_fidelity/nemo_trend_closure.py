@@ -45,8 +45,10 @@ def main() -> int:
 
     out = {}
     for tag, state_var, trends in (
-            ("T", "votemper", ("ttrd_totad", "ttrd_ldf", "ttrd_zdf")),
-            ("S", "vosaline", ("strd_totad", "strd_ldf", "strd_zdf"))):
+            ("T", "votemper", ("ttrd_totad", "ttrd_ldf", "ttrd_iso",
+                               "ttrd_zdf", "ttrd_bbl", "ttrd_qsr", "ttrd_qns")),
+            ("S", "vosaline", ("strd_totad", "strd_ldf", "strd_iso",
+                               "strd_zdf", "strd_bbl"))):
         x0, x1 = g(state_var, a.rec - 1), g(state_var, a.rec)
         if x0 is None or x1 is None:
             print(f"[{tag}] state variable missing")
