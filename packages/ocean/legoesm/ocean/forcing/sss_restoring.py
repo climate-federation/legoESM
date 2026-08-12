@@ -135,6 +135,18 @@ class SSSRestoringConfig(NamedTuple):
     ice_gate_softness: float = 0.1   # tanh width around threshold
     regions: tuple[RegionMaskSpec, ...] = DEFAULT_OMIP2_REGIONS
     S_floor: float = 1.0             # avoid division by zero in PSU
+    # Denominator of the salinity->freshwater conversion.
+    #   "s_target" (default, bit-identical to every run before 2026-08-12):
+    #       F_FW = -rho_0*z1*dS/dt / max(S_target, S_floor).
+    #   "live_s" — NEMO `sbcssr` nn_sssr=2 (sbcssr.F90:132-134), which ORCA1
+    #       runs: zerp = zsrp*coefice*(sss_m - sss_target)/MAX(sss_m, 1e-20),
+    #       i.e. divided by the LIVE surface salinity, not the target.  The
+    #       two differ wherever the model is far from the climatology --
+    #       exactly the Arctic cells that carry the +1.4 psu common-mode bias.
+    # NOTE the magnitudes already agree: z1_m/tau = 10 m / 45.5 d = 219.8
+    # mm/day against NEMO's rn_deds = -220 mm/day, and the OMIP deck's 4
+    # mm/day bound matches rn_sssr_bnd = 4.
+    normalization: str = "s_target"  # "s_target" | "live_s"
     # River-mouth gate (NEMO sbcssr: restoring damped by (1-2*rnfmsk) -> ZERO
     # at river mouths): when a per-cell ``river_runoff`` field is passed to
     # ``compute_sss_restoring_flux``, cells whose runoff exceeds this
@@ -341,10 +353,25 @@ def compute_sss_restoring_flux(
     # Salinity tendency in the surface layer [PSU/s] (pre-cap).
     dS_dt_top = -S_diff * inv_tau_eff
 
-    # Equivalent FW flux: derived from a virtual-salt convention.
-    # F_FW · S_target / (rho_0 · z1) = − dS/dt   →
-    # F_FW = − rho_0 · z1 · dS/dt / S_target
-    S_safe = jnp.maximum(S_target, config.S_floor)
+    # Equivalent FW flux.  With normalization="s_target" this is the
+    # virtual-salt convention:
+    #     F_FW · S_target / (rho_0 · z1) = − dS/dt  →
+    #     F_FW = − rho_0 · z1 · dS/dt / S_target
+    # With normalization="live_s" the denominator is the live surface
+    # salinity instead, reproducing NEMO sbcssr nn_sssr=2 -- a genuine
+    # water flux, which is what makes it compatible with the
+    # real_freshwater closure.
+    # Dispatch hardening: a typo must not silently run the legoESM form.
+    if config.normalization == "s_target":
+        S_norm = S_target
+    elif config.normalization == "live_s":
+        # NEMO sbcssr nn_sssr=2: divide by the LIVE surface salinity.
+        S_norm = S_model_top
+    else:
+        raise ValueError(
+            f"unknown SSSRestoringConfig.normalization "
+            f"{config.normalization!r}; expected 's_target' or 'live_s'.")
+    S_safe = jnp.maximum(S_norm, config.S_floor)
     rho_0 = constants.rho_ocean
     freshwater_flux = -rho_0 * config.z1_m * dS_dt_top / S_safe
     freshwater_flux = jnp.clip(

@@ -92,6 +92,40 @@ _GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
 _GM_BOLUS_FORMS = ("centred", "through_fct")
 
 
+def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
+                                       sss_restore_normalization):
+    """Return the refusal message for an incompatible pairing, else None.
+
+    ``--freshwater-closure real_freshwater`` drops the virtual-salt term, so a
+    restoring flux DERIVED as a virtual-salt equivalent (legoESM's historical
+    ``normalization="s_target"``: a fixed ``z1``, divided by ``S_target``)
+    would apply the wrong relaxation strength -- its realized effect under
+    volume-only dilution depends on the LIVE salinity and the ACTUAL top-cell
+    thickness.
+
+    ``normalization="live_s"`` is NEMO ``sbcssr`` nn_sssr=2 (sbcssr.F90:132-134,
+    ``zerp = zsrp*coefice*(sss_m - sss_target)/MAX(sss_m,1e-20)``), a genuine
+    WATER flux -- what ORCA1 runs alongside its variable-volume freshwater
+    budget -- so that pairing is allowed.
+
+    Split out of ``main`` so the rule is unit-testable: ``main`` applies it
+    only after the model is built, which no unit test can cheaply reach.
+    """
+    if freshwater_closure != "real_freshwater" or not sss_restore:
+        return None
+    if sss_restore_normalization == "live_s":
+        return None
+    return (
+        "--freshwater-closure real_freshwater is not compatible with "
+        "--sss-restore under the default SSS-restoring form: the restoring "
+        "flux is computed as a VIRTUAL-salt equivalent (S_target + a fixed "
+        "z1), so under volume-only dilution it applies the wrong relaxation "
+        "strength. Pass --sss-restore-normalization live_s (NEMO sbcssr "
+        "nn_sssr=2: the flux is divided by the LIVE surface salinity, making "
+        "it a genuine water flux), or drop --sss-restore, or keep the "
+        "virtual_salt_flux closure.")
+
+
 def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):
     """GM/Redi block for ``--gm-treguier`` on the eORCA1 tripole.
 
@@ -4157,6 +4191,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
                         "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
                         "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-normalization", default=None,
+                   choices=["s_target", "live_s"],
+                   help="Denominator of the SSS-restoring salinity->freshwater "
+                        "conversion. Unset keeps the card value ('s_target', "
+                        "bit-identical to earlier runs). 'live_s' is NEMO "
+                        "sbcssr nn_sssr=2 (sbcssr.F90:132-134), which ORCA1 "
+                        "runs: zerp = zsrp*coefice*(sss_m - sss_target)/"
+                        "MAX(sss_m,1e-20) -- divided by the LIVE surface "
+                        "salinity. Under 'live_s' the restoring is a genuine "
+                        "water flux, which is what makes it compatible with "
+                        "--freshwater-closure real_freshwater.")
     p.add_argument("--sss-restore-bound-mmday", type=float, default=None,
                    help="Bound |restoring FW flux| at this mm/day-equivalent "
                         "(NEMO ln_sssr_bnd: rn_sssr_bnd=4.0 in the ORCA1 "
@@ -5471,6 +5516,8 @@ def main() -> int:
         _cfg_kwargs = {}
         if args.sss_ice_gate_nemo:
             _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
+        if args.sss_restore_normalization is not None:
+            _cfg_kwargs["normalization"] = args.sss_restore_normalization
         if args.sss_restore_bound_mmday is not None:
             if not (float(args.sss_restore_bound_mmday) > 0.0):
                 raise ValueError("--sss-restore-bound-mmday must be > 0.")
@@ -5653,16 +5700,11 @@ def main() -> int:
         # this is where restoring is switched on -- rather than in the ocean
         # config, which has no restoring field to key off (the flux arrives
         # as FreshwaterForcing.restoring, a traced array).
-        if (args.freshwater_closure == "real_freshwater"
-                and getattr(args, "sss_restore", False)):
-            raise SystemExit(
-                "--freshwater-closure real_freshwater is not compatible with "
-                "--sss-restore: the restoring flux is computed as a "
-                "VIRTUAL-salt equivalent (S_target + a fixed z1), so under "
-                "volume-only dilution it applies the wrong relaxation "
-                "strength. Drop --sss-restore, or keep the virtual_salt_flux "
-                "closure, until the restoring is reformulated for real "
-                "freshwater (#1484).")
+        _fw_conflict = real_freshwater_restoring_conflict(
+            args.freshwater_closure, getattr(args, "sss_restore", False),
+            args.sss_restore_normalization)
+        if _fw_conflict is not None:
+            raise SystemExit(_fw_conflict)
     if args.no_normalize_freshwater:
         # EXPLICIT opt-out of the global-freshwater normalization.  The
         # CORE-II P-E+R integral is a real ~+0.65 Sv imbalance, so turning
