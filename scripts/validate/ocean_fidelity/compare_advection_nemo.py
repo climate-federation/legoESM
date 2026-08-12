@@ -53,7 +53,9 @@ def main() -> int:
     p.add_argument("--vfile", required=True)
     p.add_argument("--rec", type=int, default=1)
     p.add_argument("--dt", type=float, default=3600.0)
-    p.add_argument("--domain-cfg", required=True)
+    p.add_argument("--mesh-mask", required=True,
+                   help="eORCA1 mesh_mask.nc -- the tripolar metrics the model "
+                        "itself uses (a regular lat-lon geometry is WRONG here).")
     p.add_argument("--schemes", nargs="+", default=["fct2", "superbee"])
     p.add_argument("--output-dir", required=True)
     a = p.parse_args()
@@ -62,7 +64,7 @@ def main() -> int:
 
     import jax.numpy as jnp
     import netCDF4 as nc
-    from legoesm.grids.latlon import create_latlon_geometry
+    from legoesm.grids.tripole import create_tripole_grid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _compute_advection_flux_div,
     )
@@ -79,13 +81,29 @@ def main() -> int:
     lat = _fill(dsT.variables["nav_lat_grid_T"][:])
     dsT.close(); dsU.close(); dsV.close()
 
-    ds = nc.Dataset(a.domain_cfg)
-    e1t = np.asarray(ds.variables["e1t"][:], dtype=np.float64).squeeze()
-    e2t = np.asarray(ds.variables["e2t"][:], dtype=np.float64).squeeze()
-    ds.close()
+    # GEOMETRY: the eORCA1 tripolar metrics, NOT a regular lat-lon grid.
+    # Driving the C-grid operators with create_latlon_geometry(331, 360)
+    # produced advection tendencies ~1e6 too large (measured 2026-08-12:
+    # rms 1.3e-1 K/s vs NEMO 2.8e-7) because every cell length/area was the
+    # wrong mesh.  create_tripole_grid reads the mesh mask the model itself
+    # uses.
+    grid = create_tripole_grid(a.mesh_mask)
+    e1t_full = np.asarray(grid.dx_T, dtype=np.float64)
+    e2t_full = np.asarray(grid.dy_T, dtype=np.float64)
+    print(f"[grid] tripole metrics {e1t_full.shape}; trend arrays are the "
+          "native eORCA1 frame")
 
     z, ny, nx = T.shape
     wet = np.isfinite(T)
+    if e1t_full.shape == (ny, nx):
+        e1t, e2t = e1t_full, e2t_full
+    elif e1t_full.shape == (ny + 1, nx + 2):
+        # mesh-mask halo frame [0:ny, 1:nx+1] -- the native slice used by
+        # every other eORCA1 probe in this directory.
+        e1t, e2t = e1t_full[0:ny, 1:nx + 1], e2t_full[0:ny, 1:nx + 1]
+    else:
+        raise SystemExit(f"grid metrics {e1t_full.shape} do not match the "
+                         f"trend frame ({ny}, {nx})")
     # (z, y, x) -> (y, x, z): the C-grid operators take level-last.
     def yxz(x):
         return np.transpose(np.nan_to_num(x, nan=0.0), (1, 2, 0))
@@ -121,7 +139,6 @@ def main() -> int:
     w_int = -np.flip(np.cumsum(np.flip(div_h, axis=-1), axis=-1), axis=-1) / area
     w_half = np.concatenate([np.zeros_like(w_int[..., :1]), w_int], axis=-1)[..., :z + 1]
 
-    grid = create_latlon_geometry(n_lat=ny, n_lon=nx)
     lat_col = lat.reshape(ny * nx)
     result = {"rec": r, "schemes": {},
               "scheme_note": ("NEMO ORCA1 runs FCT with nn_fct_h=nn_fct_v=2; "
