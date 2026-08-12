@@ -168,12 +168,17 @@ def main() -> int:
     # NEMO's u(i) is the face between T(i) and T(i+1); our face j is between
     # T(j-1) and T(j), so shift by one with the periodic wrap in x and a
     # closed southern row in y.
-    mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c[:, :-1, :]], axis=1)
-    mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c[:-1]], axis=0)
-    h_u_f = np.concatenate([h3[:, -1:, :], 0.5 * (h3[:, :-1, :] + h3[:, 1:, :])],
-                           axis=1)
-    h_v_f = np.concatenate([np.zeros_like(h3[:1]),
-                            0.5 * (h3[:-1] + h3[1:])], axis=0)
+    # SHAPES (the operator's API): mass_flux_u is (n_lat, n_lon+1, nlev) and
+    # mass_flux_v is (n_lat+1, n_lon, nlev) -- faces INCLUDING both edges.
+    # Our face j lies between T(j-1) and T(j); NEMO's u at cell i is the face
+    # between T(i) and T(i+1) = our face i+1.  So prepend the periodic wrap
+    # (x) and a closed southern row (y), keeping the +1 face count.
+    mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c], axis=1)      # NX+1
+    mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c], axis=0)  # NY+1
+    h_u_mid = 0.5 * (h3 + np.roll(h3, -1, axis=1))
+    h_v_mid = 0.5 * (h3 + np.roll(h3, -1, axis=0))
+    h_u_f = np.concatenate([h_u_mid[:, -1:, :], h_u_mid], axis=1)
+    h_v_f = np.concatenate([np.zeros_like(h_v_mid[:1]), h_v_mid], axis=0)
     # w: NEMO's wocetr_eff is a VOLUME transport through the T-cell top face;
     # our operators take a VELOCITY at interfaces, so divide by cell area.
     area = (e1t * e2t)[:, :, None]
