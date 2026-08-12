@@ -76,6 +76,15 @@ def main() -> int:
             if v is None or not np.isfinite(v).any():
                 print(f"[{tag}] {tv}: absent/empty -- NOT in the sum")
                 continue
+            if v.ndim == dxdt.ndim - 1:
+                # SURFACE-ONLY term stored 2-D (ttrd_qns: non-solar heat flux
+                # + runoff).  Broadcasting it over the column added a 4.5e-5
+                # K/s interior signal and blew closure to 22 (measured
+                # 2026-08-12).  Apply it to level 0, where it acts.
+                pad = np.zeros_like(dxdt)
+                pad[0] = np.nan_to_num(v, nan=0.0)
+                v = pad
+                tv = tv + " (2-D, applied at level 0)"
             avail = avail + np.nan_to_num(v, nan=0.0)
             names.append(tv)
             # PER-TERM magnitude by band: a single term that is huge in the
