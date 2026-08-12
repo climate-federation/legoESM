@@ -705,6 +705,36 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 
+### RULE -1 — CLARITY IS THE HARD RULE. IF THE USER CANNOT FOLLOW IT, IT FAILED.
+User, 2026-08-12 (and 2026-08-07, 2026-08-11 — same complaint every time):
+*"Ensure you are clearer — I have no clue what you are saying most of the
+time."* This outranks brevity: a short reply nobody understands is worse than
+no reply. Brevity was already being followed when this was said; the defect is
+UNEXPLAINED INTERNAL DETAIL, not length.
+
+MECHANICAL TEST, apply to every sentence before sending: could a colleague who
+knows climate modelling but has never opened this repo act on it? If it needs a
+file name, a function name, a job id, or a flag to make sense — REWRITE IT.
+
+- Say the THING, not the SYMBOL. "the model runs radiation 18 times more often
+  than intended", not "split_rad=False makes rad_update_interval_steps inert".
+- NO identifiers in a reply: no file:line, no function names, no config keys,
+  no job ids, no PR numbers, unless the user asked for that exact thing. They
+  belong in the commit message. A number the user should act on is fine.
+- One idea per line. If a line has a clause explaining a clause, split it.
+- State the CONSEQUENCE first, the cause second, and stop. Not the mechanism,
+  not how it was found, not who found it.
+- Never write a sentence whose subject is a piece of code. The subject should
+  be the model, the run, the campaign, the number, or the user's decision.
+- When something is wrong, lead with what is now false and what to do. Not
+  with a narrative of the discovery.
+- A question to the user is numbered options in plain words, with your pick.
+
+FAILURE PATTERN, all three callouts: long autonomous stretches. Each status
+reply drifted back into repo-internal vocabulary ("the pin", "the waiver", "the
+factory", "the skeleton") that means nothing outside this session. Re-read this
+section whenever a session runs long, and before every status report.
+
 ### RULE 0 — HARD CAP ~60 WORDS. ANSWER FIRST. STANDING ORDER, ALL SESSIONS.
 Five callouts in two days (2026-08-07/08). Not a style preference — a cap.
 Lead with the result. 3-5 bullets. Then stop. Job IDs, caveats, file:line and

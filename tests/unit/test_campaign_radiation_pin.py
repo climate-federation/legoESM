@@ -177,3 +177,89 @@ def test_the_config_sweep_is_not_vacuous():
     seen = list(_campaign_yamls())
     assert len(seen) > 20
     assert any(k.endswith("radiation") for _, doc in seen for k in doc)
+
+
+# --------------------------------------------------------------------------
+# One classical model, both campaigns
+# --------------------------------------------------------------------------
+
+def test_wb_and_aimip_classical_are_the_same_model():
+    """The owner's matrix is {WB, AIMIP} x {classical, column_nn, sfno}: the
+    variant names a MODEL, so both campaigns must build the same one.
+
+    WB's classical used to be ``TrainablePhysicsParams`` — 6 knobs, gray
+    radiation, and only convection + radiation — while AIMIP's was the
+    50-knob six-family ``AIMIPClassicalParams``.
+    """
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    from legoesm.training.model_registry import build_variant
+
+    params = build_variant("classical", nlev=8)
+    assert isinstance(params, AIMIPClassicalParams)
+    assert len(params.raw_values) == 50
+
+
+def test_the_wb_campaign_config_names_every_family():
+    """Defaulted families are how two runs end up differing in more than the
+    variable under test."""
+    import yaml as _yaml
+
+    import inspect
+
+    from legoesm.training.aimip_params import (
+        make_aimip_classical_spectral_physics,
+    )
+
+    defaults = {
+        name: param.default
+        for name, param in inspect.signature(
+            make_aimip_classical_spectral_physics).parameters.items()
+    }
+    for path in ("spectral_t63.yaml", "spectral_t106.yaml", "spectral_smoke.yaml"):
+        cfg = _yaml.safe_load(
+            (_REPO / "config" / "wb" / "campaign" / path).read_text())
+        classical = cfg["classical"]
+        for family, arg in (("convection", "convection_scheme"),
+                            ("turbulence", "turbulence_scheme"),
+                            ("cloud", "cloud_scheme"),
+                            ("microphysics", "microphysics_scheme"),
+                            ("gwd", "gwd_scheme")):
+            assert classical[family] not in (None, "", "none"), (path, family)
+            # ... and it must be the scheme the AIMIP factory would pick, or
+            # "the same model" is only true of the container class. A test that
+            # merely asserted non-empty would pass with WB on edmf and AIMIP on
+            # tiedtke (Claude review).
+            assert classical[family] == defaults[arg], (path, family)
+        assert cfg.get("radiation", "rrtmgp") == "rrtmgp"
+
+
+def test_swapping_a_scheme_swaps_what_is_trained():
+    """Any family may use any scheme, and the TRAINABLE PARAMETERS follow.
+
+    The hand-written knob set covers one scheme per family, so an arm that
+    selects a different one used to run it at fixed defaults with no gradient.
+    Swapping convection must therefore change the trainable leaf count, not
+    just the physics.
+    """
+    from types import SimpleNamespace
+
+    import jax
+    import yaml as _yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    base = _yaml.safe_load(
+        (_REPO / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    counts = {}
+    for scheme in ("tiedtke", "bechtold"):
+        yml = dict(base)
+        yml["classical"] = dict(base.get("classical", {}), convection=scheme)
+        cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                              smoke=True, multi_step_hours=(6,), n_days=1)
+        *_, params, _mk, _loss, _dt = build_mode_components(cfg, yml)
+        counts[scheme] = len(
+            [x for x in jax.tree.leaves(params) if hasattr(x, "size")])
+
+    assert counts["tiedtke"] > 0
+    assert counts["bechtold"] != counts["tiedtke"], (
+        f"swapping convection did not change what is trainable: {counts}")
