@@ -74,119 +74,145 @@ class TestNemoBoxcarSubstepScale:
 # ---------------------------------------------------------------------------
 
 class TestComputeFilterWeights:
-    """Verify shape, sum, non-negativity, and formula for both filter modes."""
+    """Shape, sum, non-negativity and formula for both filter modes.
+
+    REBUILT 2026-08-12. These previously pinned a HALF window (``i = 0..n-1``
+    with the bell centred on ``i = n/2``), which averaged over ``[t, t+dt]``
+    and so returned a state representing ``t + dt/2`` as the state at
+    ``t + dt``. That halved the external gravity-wave speed -- measured
+    period 1.92x (box) / 1.86x (cosine) too long, worsening toward 2 as
+    substeps increased. The window now runs ``i+1 = 1..2n-1``, centred on
+    ``t + dt``. The centring itself is asserted in
+    ``tests/ocean/unit/test_barotropic_wave_speed.py`` along with the
+    end-to-end wave speed; this class covers the shape and the closed form.
+    """
 
     # -- box filter -----------------------------------------------------------
 
     def test_box_shape(self):
-        """Box filter returns (n_substeps,) weight vector and scalar total."""
-        w, w_tot, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
-        assert w.shape == (10,)
+        """Box filter returns (2n-1,) weights, a scalar total, and n_loop."""
+        w, w_tot, _, n_loop = compute_filter_weights(10, jnp.float64,
+                                                     use_cosine=False)
+        assert w.shape == (19,)
         assert w_tot.shape == ()
+        assert n_loop == 19
 
     def test_box_all_ones(self):
-        """Box filter weights are all 1.0."""
-        w, _, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
-        assert jnp.allclose(w, jnp.ones(10, dtype=jnp.float64))
+        """Box filter weights are all 1.0, across the extended window."""
+        w, _, _, _ = compute_filter_weights(10, jnp.float64, use_cosine=False)
+        assert jnp.allclose(w, jnp.ones(19, dtype=jnp.float64))
 
-    def test_box_total_equals_n(self):
-        """Box filter total equals n_substeps exactly."""
+    def test_box_total_equals_n_loop(self):
+        """Box total equals the number of substeps RUN (2n-1), not n."""
         n = 15
-        _, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=False)
-        assert jnp.allclose(w_tot, float(n))
+        _, w_tot, _, n_loop = compute_filter_weights(n, jnp.float64,
+                                                     use_cosine=False)
+        assert jnp.allclose(w_tot, float(n_loop))
+        assert n_loop == 2 * n - 1
 
     def test_box_n1(self):
-        """Box filter at n=1 returns w=[1.0], total=1.0 (no degenerate case)."""
-        w, w_tot, _ = compute_filter_weights(1, jnp.float64, use_cosine=False)
+        """n=1: the window degenerates to the single substep, w=[1]."""
+        w, w_tot, _, n_loop = compute_filter_weights(1, jnp.float64,
+                                                     use_cosine=False)
+        assert n_loop == 1
         assert jnp.allclose(w, jnp.array([1.0]))
         assert jnp.allclose(w_tot, 1.0)
 
     # -- cosine (Hanning) filter ---------------------------------------------
 
     def test_cosine_shape(self):
-        """Cosine filter returns (n_substeps,) weight vector and scalar total."""
-        w, w_tot, _ = compute_filter_weights(20, jnp.float64, use_cosine=True)
-        assert w.shape == (20,)
+        w, w_tot, _, n_loop = compute_filter_weights(20, jnp.float64,
+                                                     use_cosine=True)
+        assert w.shape == (39,)
         assert w_tot.shape == ()
+        assert n_loop == 39
 
-    def test_cosine_nonnegative(self):
-        """Hanning weights are non-negative for any n >= 2."""
-        for n in (2, 3, 5, 10, 20, 100):
-            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
-            assert jnp.all(w >= 0.0), f"negative weight at n={n}: {w}"
+    def test_cosine_strictly_positive(self):
+        """STRICTLY positive now, not merely non-negative.
+
+        The old half window opened with ``1 + cos(-pi) == 0`` -- a wasted
+        substep, and at n=1 an all-zero window that divided by zero
+        downstream and needed a special case. On the centred window the
+        smallest weight is ``1 - cos(pi/n) > 0``, so the degenerate case
+        cannot arise for any n.
+        """
+        for n in (1, 2, 3, 5, 10, 20, 100):
+            w, _, _, _ = compute_filter_weights(n, jnp.float64,
+                                                use_cosine=True)
+            assert jnp.all(w > 0.0), f"non-positive weight at n={n}: {w}"
 
     def test_cosine_total_positive(self):
-        """Total cosine weight is strictly positive (no divide-by-zero downstream)."""
         for n in (2, 3, 10, 50):
-            _, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            _, w_tot, _, _ = compute_filter_weights(n, jnp.float64,
+                                                    use_cosine=True)
             assert float(w_tot) > 0.0, f"w_total non-positive at n={n}"
 
     def test_cosine_total_equals_sum(self):
-        """Returned scalar total must equal sum of the weight array."""
         for n in (5, 12, 25):
-            w, w_tot, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
+            w, w_tot, _, _ = compute_filter_weights(n, jnp.float64,
+                                                    use_cosine=True)
             assert jnp.allclose(w_tot, jnp.sum(w)), (
                 f"w_total mismatch at n={n}: {w_tot} vs {jnp.sum(w)}")
 
     def test_cosine_n2_hand(self):
-        """n=2 cosine: w = [1+cos(-pi), 1+cos(pi)] = [0, 0].
-        Fallback NOT triggered here (n>=2), so both weights are zero and
-        w_total=0.  Downstream callers guard against this; verify the raw
-        formula produces the mathematically expected result.
-        """
-        # i in {0,1}, n=2: 1 + cos(2pi*(i-1)/2) = 1 + cos(pi*(2i-2)/2)
-        # i=0: 1 + cos(-pi) = 0  ; i=1: 1 + cos(0) = 2
-        w, w_tot, _ = compute_filter_weights(2, jnp.float64, use_cosine=True)
-        expected = jnp.array([0.0, 2.0])
-        assert jnp.allclose(w, expected, atol=1e-12), f"got {w}"
-        assert jnp.allclose(w_tot, 2.0, atol=1e-12)
+        """n=2: n_loop=3, tau = [-1, 0, 1], w = 1 + cos(pi*tau/2).
 
-    def test_cosine_n4_hand(self):
-        """n=4 cosine: verify all four weights against the closed formula.
-
-        i=0: 1+cos(2pi*(0-2)/4) = 1+cos(-pi)   = 0
-        i=1: 1+cos(2pi*(1-2)/4) = 1+cos(-pi/2) = 1
-        i=2: 1+cos(2pi*(2-2)/4) = 1+cos(0)     = 2
-        i=3: 1+cos(2pi*(3-2)/4) = 1+cos(pi/2)  = 1
-        total = 4
+        i+1=1: 1+cos(-pi/2) = 1 ; i+1=2: 1+cos(0) = 2 ; i+1=3: 1+cos(pi/2) = 1
         """
-        w, w_tot, _ = compute_filter_weights(4, jnp.float64, use_cosine=True)
-        expected = jnp.array([0.0, 1.0, 2.0, 1.0])
-        assert jnp.allclose(w, expected, atol=1e-12), f"got {w}"
+        w, w_tot, _, _ = compute_filter_weights(2, jnp.float64,
+                                                use_cosine=True)
+        assert jnp.allclose(w, jnp.array([1.0, 2.0, 1.0]), atol=1e-12), f"got {w}"
         assert jnp.allclose(w_tot, 4.0, atol=1e-12)
 
-    def test_cosine_n1_fallback_to_box(self):
-        """At n=1 the cosine would be 0 everywhere; the code falls back to box."""
-        w, w_tot, _ = compute_filter_weights(1, jnp.float64, use_cosine=True)
-        assert jnp.allclose(w, jnp.array([1.0])), f"fallback failed: {w}"
-        assert jnp.allclose(w_tot, 1.0)
+    def test_cosine_n4_hand(self):
+        """n=4: n_loop=7, tau = -3..3, w = 1 + cos(pi*tau/4), peak at tau=0."""
+        w, w_tot, _, _ = compute_filter_weights(4, jnp.float64,
+                                                use_cosine=True)
+        c = float(jnp.cos(jnp.pi / 4))
+        expected = jnp.array([1.0 - c, 1.0, 1.0 + c, 2.0,
+                              1.0 + c, 1.0, 1.0 - c])
+        assert jnp.allclose(w, expected, atol=1e-12), f"got {w}"
+        assert jnp.allclose(w_tot, 8.0, atol=1e-12)
 
-    def test_cosine_symmetry(self):
-        """Hanning window has circular symmetry: w[k] == w[n-k] for k=1..n-1.
+    def test_cosine_n1(self):
+        """n=1: a single substep at the centre of the bell, w=[2].
 
-        The formula 1+cos(2π*(i-n/2)/n) always starts at 0 (i=0 gives
-        cos(-π)=-1), so the filter is NOT element-reversed symmetric
-        (w[i] != w[n-1-i]).  The correct invariant is the periodic/circular
-        one: rotating the index by n gives the same value, hence
-        w[k] = w[n-k] for all interior indices.
+        The old code needed a box FALLBACK here because its formula gave 0.
+        The value 2 vs 1 is a pure scale that cancels in ``eta_sum/w_total``.
+        """
+        w, w_tot, _, n_loop = compute_filter_weights(1, jnp.float64,
+                                                     use_cosine=True)
+        assert n_loop == 1
+        assert jnp.allclose(w, jnp.array([2.0])), f"got {w}"
+        assert jnp.allclose(w_tot, 2.0)
+
+    def test_cosine_is_mirror_symmetric(self):
+        """The centred window is symmetric under ELEMENT REVERSAL.
+
+        The old half window was not -- it always opened at 0 and had only a
+        circular symmetry ``w[k] == w[n-k]``. Plain mirror symmetry about the
+        centre is the direct statement that the window is centred, and it is
+        what makes the weighted mean time land exactly on ``t + dt``.
         """
         for n in (5, 10, 20):
-            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
-            k = jnp.arange(1, n, dtype=jnp.int32)
-            assert jnp.allclose(w[k], w[n - k], atol=1e-12), (
-                f"circular symmetry broken at n={n}: {w}")
+            w, _, _, _ = compute_filter_weights(n, jnp.float64,
+                                                use_cosine=True)
+            assert jnp.allclose(w, w[::-1], atol=1e-12), (
+                f"window not symmetric about its centre at n={n}: {w}")
 
-    def test_cosine_monotone_to_midpoint(self):
-        """Hanning weights are non-decreasing from i=0 to the midpoint."""
+    def test_cosine_peaks_at_the_end_of_the_step(self):
+        """The maximum weight sits on the substep that lands on t+dt."""
         for n in (4, 6, 10, 20):
-            w, _, _ = compute_filter_weights(n, jnp.float64, use_cosine=True)
-            mid = n // 2 + 1
-            assert jnp.all(jnp.diff(w[:mid]) >= -1e-12), (
-                f"non-monotone ascent at n={n}: {w[:mid]}")
+            w, _, _, _ = compute_filter_weights(n, jnp.float64,
+                                                use_cosine=True)
+            assert int(jnp.argmax(w)) == n - 1, (
+                f"bell peaks at substep {int(jnp.argmax(w)) + 1}, not {n}")
+            assert jnp.all(jnp.diff(w[:n]) >= -1e-12), (
+                f"non-monotone ascent at n={n}: {w[:n]}")
 
     def test_dtype_float32(self):
-        """float32 dtype is propagated to the weight array."""
-        w, w_tot, _ = compute_filter_weights(8, jnp.float32, use_cosine=False)
+        w, w_tot, _, _ = compute_filter_weights(8, jnp.float32,
+                                                use_cosine=False)
         assert w.dtype == jnp.float32
         assert w_tot.dtype == jnp.float32
 
@@ -385,11 +411,16 @@ class TestMaxvelClip:
 
 
 class TestTransportWeightsContinuityConsistent:
-    """Finding #8: ``compute_filter_weights`` now returns continuity-consistent
-    SM2005 transport weights ``w_transport[j] = tail_j/(n*w_total)`` (tail_j =
-    sum_{i>=j} w_filter[i]) — NOT a flat 1/n.  This is the ONLY weighting that
-    makes the discrete barotropic continuity invariant
-    ``div(Hu_avg) == (eta_old - eta_avg)/dt`` hold for box AND cosine."""
+    """``w_transport[j] = tail_j/(n_substeps*w_total)`` (tail_j = sum_{i>=j}
+    w_filter[i]) -- NOT a flat 1/n. The ONLY weighting that makes the discrete
+    barotropic continuity invariant ``div(Hu_avg) == (eta_old - eta_avg)/dt``
+    hold for box AND cosine.
+
+    The denominator stays the PHYSICAL ``n_substeps`` even though the window
+    now runs ``2n-1`` substeps: ``dt = n_substeps*dt_s`` is the baroclinic
+    step continuity must close over, and it does not change because the
+    averaging window reaches past ``t+dt``.
+    """
 
     def _tail(self, w):
         # tail_j = sum_{i>=j} w[i]
@@ -397,37 +428,43 @@ class TestTransportWeightsContinuityConsistent:
 
     def test_box_transport_is_tail_sum_not_flat(self):
         n = 12
-        w, w_tot, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=False)
+        w, w_tot, w_tr, n_loop = compute_filter_weights(n, jnp.float64,
+                                                        use_cosine=False)
         expected = self._tail(w) / (n * w_tot)
         assert jnp.allclose(w_tr, expected, atol=1e-14)
-        # Box: w_tr[j] = (n-j)/n^2 — NOT the flat 1/n.
-        j = jnp.arange(n, dtype=jnp.float64)
-        assert jnp.allclose(w_tr, (n - j) / (n * n), atol=1e-14)
+        # Box over the extended window: w_tr[j] = (n_loop-j)/(n*n_loop).
+        j = jnp.arange(n_loop, dtype=jnp.float64)
+        assert jnp.allclose(w_tr, (n_loop - j) / (n * n_loop), atol=1e-14)
         assert not jnp.allclose(w_tr, 1.0 / n)
 
     def test_cosine_transport_is_tail_sum(self):
         n = 20
-        w, w_tot, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=True)
+        w, w_tot, w_tr, _ = compute_filter_weights(n, jnp.float64,
+                                                   use_cosine=True)
         expected = self._tail(w) / (n * w_tot)
         assert jnp.allclose(w_tr, expected, atol=1e-14)
 
     def test_transport_weight_first_entry_is_one_over_n(self):
-        # tail_0 == w_total, so w_tr[0] == 1/n for every filter.
+        # tail_0 == w_total, so w_tr[0] == 1/n_substeps for every filter --
+        # the PHYSICAL n, which is what makes the invariant close over dt.
         for use_cosine in (False, True):
             n = 16
-            _, _, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=use_cosine)
+            _, _, w_tr, _ = compute_filter_weights(n, jnp.float64,
+                                                   use_cosine=use_cosine)
             assert jnp.isclose(w_tr[0], 1.0 / n, atol=1e-14)
 
     def test_transport_weights_sum_box(self):
-        # Box sum_j w_tr[j] = sum_j (n-j)/n^2 = (n+1)/(2n).
+        # Box: sum_j w_tr[j] = sum_j (n_loop-j)/(n*n_loop) = (n_loop+1)/(2n).
         n = 10
-        _, _, w_tr = compute_filter_weights(n, jnp.float64, use_cosine=False)
-        assert jnp.isclose(jnp.sum(w_tr), (n + 1) / (2.0 * n), atol=1e-14)
+        _, _, w_tr, n_loop = compute_filter_weights(n, jnp.float64,
+                                                    use_cosine=False)
+        assert jnp.isclose(jnp.sum(w_tr), (n_loop + 1) / (2.0 * n),
+                           atol=1e-14)
 
     def test_n1_degenerate_safe(self):
-        # n=1 falls back to box; w_tr = [1].
         for use_cosine in (False, True):
-            _, w_tot, w_tr = compute_filter_weights(1, jnp.float64, use_cosine=use_cosine)
+            _, _w_tot, w_tr, _ = compute_filter_weights(
+                1, jnp.float64, use_cosine=use_cosine)
             assert w_tr.shape == (1,)
             assert jnp.isclose(w_tr[0], 1.0, atol=1e-14)
 
