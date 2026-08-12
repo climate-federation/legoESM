@@ -508,37 +508,17 @@ def compute_sigma_dot_and_total(
     return sigma_dot, D_total
 
 
-def vertical_advection(
+def _vertical_advection_upwind_sigma(
     field: jax.Array,
     sigma_dot: jax.Array,
     sigma_coord: SigmaCoordinate,
 ) -> jax.Array:
-    """Compute vertical advection using the advective form with upwind.
+    """First-order upwind (donor-cell) ``-σ̇·∂f/∂σ`` — the DEFAULT path.
 
-    Computes: -σ̇ · ∂f/∂σ
-
-    This is the **advective form**, appropriate for non-mass-weighted
-    variables (u, v, T). The flux form -∂(σ̇·f)/∂σ would add a spurious
-    term -f·∂σ̇/∂σ that causes exponential instability.
-
-    σ̇ is interpolated from half-levels to full levels, and the vertical
-    gradient uses upwind differencing:
-    - σ̇ > 0 (downward): ∂f/∂σ ≈ (f_k - f_{k-1}) / Δσ  (backward)
-    - σ̇ < 0 (upward):   ∂f/∂σ ≈ (f_{k+1} - f_k) / Δσ  (forward)
-
-    Parameters
-    ----------
-    field : jax.Array
-        Field to advect, shape (6, n, n, nlev).
-    sigma_dot : jax.Array
-        Sigma-dot at interfaces, shape (6, n, n, nlev+1).
-    sigma_coord : SigmaCoordinate
-        Vertical coordinate (provides sigma_full and dsigma).
-
-    Returns
-    -------
-    jax.Array
-        Vertical advection tendency, shape (6, n, n, nlev).
+    Factored verbatim out of :func:`vertical_advection` so the van-Leer variant
+    can reuse it at the two boundary levels without a second copy of the
+    stencil.  Byte-identical to the pre-factoring code (pinned by
+    ``test_default_is_bit_identical_to_legacy_upwind``).
     """
     # Interpolate σ̇ from half-levels to full levels
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])  # (6,n,n,nlev)
@@ -563,11 +543,299 @@ def vertical_advection(
     return -sigma_dot_full * grad
 
 
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+
+
+def van_leer_face_values_sigma(
+    field: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array]:
+    """Slope-limited interface values for the sigma grid, ``(q_pos, q_neg)``.
+
+    ``q_pos`` is the reconstruction from the cell ABOVE interface ``j`` (used
+    when σ̇ > 0, descent); ``q_neg`` from the cell BELOW.  Both have shape
+    ``(..., nlev+1)``.
+
+    Public so the boundedness property can be tested on THIS reconstruction —
+    including its stretched-grid weights and its clip — rather than on the
+    uniform-grid :func:`legoesm.core.flux_limiters.van_leer_face_values` it
+    reduces to (codex round 1, P2).  See
+    :func:`_vertical_advection_van_leer_sigma` for the derivation, the
+    boundary treatment and the monotonicity scope.
+    """
+    from legoesm.core.flux_limiters import (
+        grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
+    )
+
+    nlev = field.shape[-1]
+    if nlev < 4:
+        raise ValueError(
+            f"the van-Leer sigma reconstruction needs at least 4 vertical "
+            f"levels for its 4-cell stencil; got nlev={nlev}."
+        )
+    # Linear-extrapolation ghosts: f_{-1} = 2f_0 - f_1 places the ghost one
+    # CENTRE spacing beyond the edge, consistent with the edge-padded spacings
+    # below, so a linear profile keeps r = 1 at face 1.
+    f0, f1 = field[..., 0:1], field[..., 1:2]
+    fm1, fm2 = field[..., -1:], field[..., -2:-1]
+    fp = jnp.concatenate(
+        [3.0 * f0 - 2.0 * f1, 2.0 * f0 - f1, field,
+         2.0 * fm1 - fm2, 3.0 * fm1 - 2.0 * fm2], axis=-1)  # (..., nlev+4)
+    # Interface j (0..nlev) separates cell j-1 (above) from cell j (below);
+    # the 4-cell stencil is [j-2, j-1, j, j+1].
+    f_jm2 = fp[..., 0:nlev + 1]
+    f_jm1 = fp[..., 1:nlev + 2]
+    f_j = fp[..., 2:nlev + 3]
+    f_jp1 = fp[..., 3:nlev + 4]
+    # Centre-to-centre spacings, edge-padded: dc_up/dc_loc/dc_dn at face j are
+    # sigma_full[j-1]-sigma_full[j-2], [j]-[j-1], [j+1]-[j].
+    dcp = jnp.pad(sigma_coord.dsigma_full, (2, 2), mode="edge")  # (nlev+3,)
+    dc_up, dc_loc, dc_dn = dcp[0:nlev + 1], dcp[1:nlev + 2], dcp[2:nlev + 3]
+    # MUSCL face weights: donor half-thickness / centre-to-centre distance.
+    # Exactly 0.5 each on a uniform grid.
+    dsp = jnp.pad(sigma_coord.dsigma, (1, 1), mode="edge")  # (nlev+2,)
+    d_above, d_below = dsp[:-1], dsp[1:]                    # (nlev+1,)
+    d_sum = d_above + d_below
+
+    eps = 1e-30
+    t_grad = ratio_grad_floor(jnp.result_type(field))
+    delta = f_j - f_jm1
+    s_loc = delta / dc_loc
+    ok = jnp.abs(s_loc) > t_grad
+    den = jnp.where(jnp.abs(s_loc) > eps, s_loc, eps)
+    r_pos = grad_safe_ratio((f_jm1 - f_jm2) / dc_up, den, ok)
+    r_neg = grad_safe_ratio((f_jp1 - f_j) / dc_dn, den, ok)
+    q_pos = f_jm1 + (d_above / d_sum) * van_leer_limiter(r_pos) * delta
+    q_neg = f_j - (d_below / d_sum) * van_leer_limiter(r_neg) * delta
+    # Monotone bound (non-binding on a uniform grid; see the kernel docstring).
+    lo, hi = jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j)
+    return jnp.clip(q_pos, lo, hi), jnp.clip(q_neg, lo, hi)
+
+
+def _vertical_advection_van_leer_sigma(
+    field: jax.Array,
+    sigma_dot: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """Monotone (van-Leer TVD) sigma vertical advection ``-σ̇·∂f/∂σ``.
+
+    Sigma-coordinate counterpart of ``compressible_euler.
+    _theta_vert_advection_van_leer_kernel`` (height coordinate, iter-200) and of
+    the plane CRM's ``vertical_advection_van_leer_plane``.
+
+    RELATION TO THE SHARED LIMITER, stated precisely (codex round 2): this is a
+    METRIC-AWARE sigma-specific reconstruction
+    (:func:`van_leer_face_values_sigma`), NOT a call into
+    :func:`legoesm.core.flux_limiters.van_leer_face_values`.  It uses that
+    module's ``van_leer_limiter`` and ``grad_safe_ratio`` — the limiter shape
+    and the AD-safe ratio guard, which are the parts that carry numerics — but
+    forms its own SLOPE ratios and Δσ-weighted face positions, because the
+    shared helper assumes uniform spacing and cannot express them (with raw
+    difference ratios the scheme was measurably WORSE than upwind on a
+    stretched grid).  On a uniform grid the two are equal, and
+    ``test_uniform_grid_matches_the_shared_van_leer_face_values`` asserts
+    BOTH returned arrays element-by-element against the shared helper (not a
+    tendency inversion, which would only pin successive differences — codex
+    round 3) — so the HD-1 smoothness-ratio SIGN convention is pinned to the
+    shared implementation by test, not by call graph.
+
+    ADVECTIVE form, like the first-order sibling — the flux form
+    ``-∂(σ̇f)/∂σ`` would add the spurious ``-f·∂σ̇/∂σ``.  Written as the
+    *difference of face-minus-cell* increments::
+
+        -σ̇·∂f/∂σ|_k = -[ σ̇_{k+1}(q_{k+1} - f_k) - σ̇_k(q_k - f_k) ] / Δσ_k
+
+    which is algebraically the flux divergence minus ``f_k·∂σ̇/∂σ`` but forms
+    no large cancelling pair, and is exactly invariant to a constant offset in
+    ``f`` at every level including the boundaries.
+
+    ``q_j`` is the slope-limited face value at interface ``j`` (σ increases
+    DOWNWARD with index, so σ̇ > 0 = descent ⇒ the donor cell is ``j-1``,
+    above).  The two GHOST cells at each end are LINEAR EXTRAPOLATIONS, not an
+    ``edge`` (zero-gradient) pad: an edge pad zeroes the upwind slope seen by
+    faces 1 and ``nlev-1``, collapsing the limiter to donor cell there and
+    re-introducing first-order diffusion two levels deep into the interior —
+    measured on a linear profile (exact for this scheme) as a 50% tendency
+    error at level 1, i.e. right at the 40-100 hPa levels this exists to fix.
+
+    BOUNDARY LEVELS ``k=0`` and ``k=nlev-1`` KEEP THE FIRST-ORDER TENDENCY, and
+    that is a stability requirement, not a shortcut.  σ̇ vanishes at the lid and
+    the surface, so the boundary layer has only ONE interior face; for descent
+    at the top (σ̇ > 0) that face is DOWNWIND of the cell, and a downwind
+    difference is unconditionally unstable — the update becomes
+    ``f_0 <- (1+νθ)f_0 - νθ f_1``, an extrapolation whose coefficient on the
+    neighbour is negative.  Measured: 500 forward-Euler steps grew a random
+    column from 300 K to 360 K before this fallback was added.  The first-order
+    path's zero-gradient BC (gradient = 0 when the upstream cell is outside the
+    domain) is the stable choice, so the two boundary levels are byte-identical
+    to today under BOTH schemes.  The published diagnosis already excludes k=0
+    as a boundary-stencil artifact, and k=0 here is 26 hPa — six levels above
+    the 91.4 hPa maximum this option targets.
+
+    MONOTONICITY — what is and is NOT guaranteed (codex rounds 1-3, P1).  Two
+    separate statements; do not conflate them.
+
+    (a) The INTERIOR RECONSTRUCTION is bounded UNCONDITIONALLY: for faces
+    ``1..nlev-1`` ``q`` is clipped to the two adjacent REAL cell values, so a
+    face value never leaves the local range, on any grid, for any input.
+    Faces ``0`` and ``nlev`` are bounded against a GHOST and a real cell, but
+    they never enter a tendency — both boundary levels take the first-order
+    result (below).
+
+    (b) The UPDATE is monotone only under a Courant condition, and the
+    DERIVATION below holds for a UNIFORM grid.  One forward-Euler step of the
+    advective form with ``q_j = f_{j-1} + θ_j (f_j - f_{j-1})``,
+    ``θ_j in [0, 1]``, gives::
+
+        f_k^{n+1} = f_k + C⁻(f_{k-1} - f_k),
+        C⁻ = ν_k (1 - θ_k) + ν_{k+1} θ_{k+1} / r_{k+1},   ν = σ̇ dt / Δσ_k
+
+    and van Leer's ``phi(r)/r <= 2`` with the uniform weight ``w = 1/2``
+    bounds ``C⁻ <= ν_k + ν_{k+1}``, i.e. TVD while ``ν_k + ν_{k+1} <= 1``.
+
+    SCOPE of (b), stated because codex round 3 caught the over-reach: on a
+    STRETCHED grid the ``θ_{k+1}/r_{k+1}`` factor carries the neighbouring
+    layer's width ratio rather than this face's weight, so the constant in the
+    bound changes and ``ν_k + ν_{k+1} <= 1`` is NOT derived there; and with a
+    VARYING σ̇ the advective (non-conservative) form is not automatically TVD
+    at all — the anti-diffusive face term is uncompensated at the cell edge.
+    On both of those there is NO guarantee: what exists is REGRESSION
+    EVIDENCE from a small number of cases —
+    ``test_tracer_blob_stays_positive_and_bounded_under_varying_sigma_dot``
+    (two profiles, sign-changing σ̇, ~2.1x the production raw-face Courant) and
+    ``test_stretched_grid_stays_exact_on_linear_and_monotone`` (one random
+    column on ``refine=3``).  Examples, not a proof; a refined-grid production
+    arm should re-measure.
+
+    And it is genuinely NOT monotone above the bound: codex produced an
+    overshoot to ``-0.017 / 0.991`` from a ``[0, 1]`` Gaussian in one Euler
+    step at per-face Courant 0.75 (a top-hat does NOT trigger it; the first
+    overshoot appears near 0.6).  First-order upwind, by contrast, is monotone
+    for ``ν <= 1`` on any grid, so this scheme trades stability margin for
+    order.
+
+    MEASURED on the run this targets (``s9_courant.py``), in the RAW INTERFACE
+    velocities the update actually multiplies — NOT the half->full average the
+    first-order path uses, which cancels opposite-signed adjacent interfaces
+    (codex round 2): the global max of ``ν_k + ν_{k+1}`` over all cells, levels
+    and the 37 year-1 checkpoints is **0.0642** at dt = 75 s (per-checkpoint
+    mean 0.0537, median 0.0543; largest single raw face 0.0322), i.e. **15.6x**
+    inside the bound.  SCOPE: those are 10-day checkpoint SNAPSHOTS, so they
+    bound the sampled phase, not every RK stage of every step — treat the
+    margin as strong evidence, not a proof.  Do NOT read the "monotone" label
+    as unconditional.
+
+    Order and dissipation: for a smooth profile the van-Leer limiter tends to
+    ``phi = 1`` and ``q`` becomes the linear interpolant, i.e. the CENTRED
+    2nd-order operator — the ``K_σ = |σ̇|Δσ/2`` implicit diffusion of the
+    first-order upwind gradient is removed, not merely reduced.  At an extremum
+    ``phi -> 0`` and the scheme falls back to donor cell, which is what
+    suppresses a dispersive overshoot at a sharp tropopause (worse than the
+    diffusion it cures) — under the Courant condition of (b) above, not
+    unconditionally.  Note the model advects θ, not T: θ is monotone in a stably
+    stratified column, so the tropical cold point is NOT a θ extremum and the
+    limiter does not clip there.
+
+    NON-UNIFORM σ: the reconstruction uses true SLOPES (divided by the
+    centre-to-centre spacing) and a face weight
+    ``w = Δσ_donor / (Δσ_donor + Δσ_other)``, so the smooth limit is the exact
+    linear interpolant on ANY spacing.  Both reduce to the uniform-grid
+    ``0.5 * phi * Δf`` form when the spacing is constant, and
+    ``test_uniform_grid_matches_the_shared_van_leer_face_values`` asserts
+    equality with :func:`legoesm.core.flux_limiters.van_leer_face_values` there
+    — so the HD-1 smoothness-ratio sign convention is still pinned to the one
+    shared implementation.  Without this, a ``tropopause_refine > 1`` grid made
+    the scheme WORSE than upwind on a linear profile (9.2e-07 vs 1.3e-17),
+    because upwind's divided difference is exact on a linear field at any
+    spacing while a raw-difference ratio gives ``phi != 1``.  The extra
+    ``clip`` to the two adjacent cell values is what keeps the RETURNED face
+    value in range when ``w > 1/2`` — note it bounds ``q``, NOT the product
+    ``w * phi``, which is formed before the clip and can reach ``1.5`` at
+    ``w = 0.75, phi = 2`` (codex round 4).  The clip is provably non-binding on
+    a uniform grid, where ``w * phi <= 1`` already.
+    """
+    if field.shape[-1] < 4:
+        # FAIL LOUD rather than run inert: the 4-cell stencil is undefined and
+        # a silent fall-back to upwind is exactly the "selected but does
+        # nothing" failure this repo forbids (codex round 1, P2).
+        raise ValueError(
+            f"scheme='van_leer' needs at least 4 vertical levels for its "
+            f"4-cell stencil; got nlev={field.shape[-1]}. Use scheme='upwind'."
+        )
+    up = _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
+    q_pos, q_neg = van_leer_face_values_sigma(field, sigma_coord)
+    # σ̇ > 0 (descent) ⇒ donor is the cell ABOVE ⇒ the left-biased value.
+    q_face = jnp.where(sigma_dot > 0, q_pos, q_neg)  # (..., nlev+1)
+    inc_top = sigma_dot[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = sigma_dot[..., 1:] * (q_face[..., 1:] - field)
+    tend = -(inc_bot - inc_top) / sigma_coord.dsigma
+    # Boundary levels keep the first-order (stable, zero-gradient-BC) tendency.
+    return tend.at[..., 0].set(up[..., 0]).at[..., -1].set(up[..., -1])
+
+
+def vertical_advection(
+    field: jax.Array,
+    sigma_dot: jax.Array,
+    sigma_coord: SigmaCoordinate,
+    scheme: str = "upwind",
+) -> jax.Array:
+    """Compute vertical advection using the advective form with upwind.
+
+    Computes: -σ̇ · ∂f/∂σ
+
+    This is the **advective form**, appropriate for non-mass-weighted
+    variables (u, v, T). The flux form -∂(σ̇·f)/∂σ would add a spurious
+    term -f·∂σ̇/∂σ that causes exponential instability.
+
+    σ̇ is interpolated from half-levels to full levels, and the vertical
+    gradient uses upwind differencing:
+    - σ̇ > 0 (downward): ∂f/∂σ ≈ (f_k - f_{k-1}) / Δσ  (backward)
+    - σ̇ < 0 (upward):   ∂f/∂σ ≈ (f_{k+1} - f_k) / Δσ  (forward)
+
+    Parameters
+    ----------
+    field : jax.Array
+        Field to advect, shape (6, n, n, nlev).
+    sigma_dot : jax.Array
+        Sigma-dot at interfaces, shape (6, n, n, nlev+1).
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate (provides sigma_full and dsigma).
+    scheme : str
+        ``"upwind"`` (default) = the first-order donor-cell gradient
+        described above, whose leading truncation error is a diffusion
+        ``K_σ = |σ̇|·Δσ/2``.  ``"van_leer"`` = the 2nd-order TVD reconstruction
+        (:func:`_vertical_advection_van_leer_sigma`), which removes that
+        implicit diffusion where the profile is smooth; its face values are
+        unconditionally bounded and its update is monotone under a Courant
+        condition (see that docstring — NOT unconditionally).  Requires
+        ``nlev >= 4`` and raises below it.  Static Python string: the branch is
+        resolved at trace time, only one branch is traced, and the default path
+        is untouched (bit-identical).  Both branches are differentiable ALMOST
+        EVERYWHERE — the upwind ``where(σ̇>0, ...)``, the van-Leer ``abs`` kink
+        at ``r=0`` and the reconstruction ``clip`` are each non-smooth on a
+        measure-zero set, as in every limiter in this repo.
+
+    Returns
+    -------
+    jax.Array
+        Vertical advection tendency, shape (6, n, n, nlev).
+    """
+    if scheme == "van_leer":
+        return _vertical_advection_van_leer_sigma(field, sigma_dot, sigma_coord)
+    if scheme != "upwind":
+        raise ValueError(
+            f"unknown vertical advection scheme {scheme!r}; expected one of "
+            f"{VERTICAL_ADVECTION_SCHEMES}"
+        )
+    return _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
+
+
 def vertical_advection_theta(
     T: jax.Array,
     sigma_dot: jax.Array,
     p_s: jax.Array,
     sigma_coord: SigmaCoordinate,
+    scheme: str = "upwind",
 ) -> jax.Array:
     """Combined vertical advection + adiabatic σ̇ term for temperature.
 
@@ -590,6 +858,9 @@ def vertical_advection_theta(
         Surface pressure, shape (...).
     sigma_coord : SigmaCoordinate
         Vertical coordinate.
+    scheme : str
+        Vertical advection scheme for the θ transport, forwarded verbatim to
+        :func:`vertical_advection` (``"upwind"`` default = bit-identical).
 
     Returns
     -------
@@ -606,8 +877,8 @@ def vertical_advection_theta(
     # Potential temperature: θ = T · (p₀/p)^κ
     theta = T * (P_0 / jnp.maximum(p_full, 1.0)) ** kappa
 
-    # Advect θ: -σ̇ · ∂θ/∂σ  (using same upwind scheme)
-    adv_theta = vertical_advection(theta, sigma_dot, sigma_coord)
+    # Advect θ: -σ̇ · ∂θ/∂σ  (using the selected scheme)
+    adv_theta = vertical_advection(theta, sigma_dot, sigma_coord, scheme=scheme)
 
     # Convert back: tendency_T = (p/p₀)^κ · adv_θ
     exner = (p_full / P_0) ** kappa  # (p/p₀)^κ
@@ -2478,6 +2749,39 @@ def vertical_advection_hybrid(
     grad = jnp.where(F_full > 0, grad_bwd, grad_fwd)
 
     return -F_full * grad
+
+
+def vertical_advection_hybrid_sb(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Simmons-Burridge centered vertical advection, hybrid coordinates.
+
+        -eta_dot dp/deta * df/dp |_k
+            = -(1/(2*dp_k)) * [ mdot_{k+1/2} * (f_{k+1} - f_k)
+                              + mdot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with ``mdot`` the interface mass flux from
+    :func:`compute_mass_flux_hybrid` (zero at top and surface) and ``dp_k``
+    the LAYER thickness (half-level differences) — the conservation weight.
+    Identical structure to the pure-sigma ``_vertical_advection_sigma_sb``:
+    ``adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2})/dp_k`` is a flux-form
+    divergence whose dp-weighted column sum telescopes to the (zero)
+    boundary fluxes, so ``sum(dp * f)`` is conserved in pairing with
+    continuity — the property the upwind advective form
+    (:func:`vertical_advection_hybrid`) lacks (measured -0.32..-0.47 K/day
+    mass-weighted T sink on the sigma path at T63L8).
+    """
+    dp = dp_from_hybrid(coord, p_s)                # (..., nlev), layer thickness
+    df = jnp.diff(field, axis=-1)                  # (..., nlev-1)
+    md_int = mass_flux[..., 1:-1]                  # interior interfaces
+    contrib = md_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # mdot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # mdot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
 
 
 def vertical_advection_theta_hybrid(

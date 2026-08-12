@@ -251,6 +251,23 @@ class DycoreConfig(NamedTuple):
     # guard, same pattern as hard_sat_ice_curve).  Appended at the tuple END
     # to preserve the positional ABI (codex review).
     k_h_scale: float | None = None
+    # Vertical advection scheme on the MPAS SIGMA lane ("upwind" | "van_leer").
+    # First-order upwind's implicit diffusion K_σ = |σ̇|·Δσ/2 is +0.822 K/day at
+    # the tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd, N=37) — larger
+    # than the whole production temperature tendency there and 2.1x the
+    # radiative cooling.  "van_leer" is the 2nd-order TVD alternative: bounded
+    # face reconstruction, monotone update under a Courant condition
+    # ~ nu_k + nu_{k+1} <= 1 DERIVED FOR A UNIFORM GRID (stretched grids and
+    # varying sigma_dot have regression evidence only — see the kernel
+    # docstring).  Measured global max of that pair on that run: 0.0642, 15.6x
+    # inside the uniform-grid bound, from 37 checkpoint snapshots.
+    # Requires nlev >= 4.
+    # WIRED ONLY into the MPAS sigma lane; validate_strict refuses it on other
+    # discretizations / vertical coordinates rather than let it run silently
+    # inert.  Default "upwind" keeps every existing result bit-identical.
+    # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
+    # callers, not full tuple ABI (exact unpacking / len() still break).
+    mpas_vert_advection_scheme: str = "upwind"
 
 
 class EvaluationConfig(NamedTuple):
@@ -552,7 +569,8 @@ class ExperimentConfig(NamedTuple):
     #                          cloud (lower albedo).  Bounds (0.5, 0.99).
     #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
     #                          optically THINNER cloud (lower albedo, still
-    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
+    #                          was widened from 5e-5; see validate_strict.
     #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
@@ -585,6 +603,12 @@ class ExperimentConfig(NamedTuple):
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
+    # Saturation curve for the cloud-fraction RH (CloudConfig.saturation_scheme):
+    # "liquid" (legacy/byte-identical, liquid Tetens saturation at all T) or
+    # "mixed_phase" (RH against the ice-fraction-blended liquid/ice curve, IFS
+    # alpha(T) convention — ice-saturated TTL/anvil air then reads RH ~1 and
+    # the RH cloud schemes see the cirrus the model already carries, #1521).
+    cloud_saturation_scheme: str = "liquid"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -910,8 +934,13 @@ class ExperimentConfig(NamedTuple):
     land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
-    # outbound internet, so stage the file and set this).  Ignored unless
-    # use_multilayer_land is True.
+    # outbound internet, so stage the file and set this).  The multilayer soil
+    # column reads it only when use_multilayer_land is True; ADDITIONALLY (and
+    # regardless of use_multilayer_land) a staged path supplies RADIATION's
+    # static land albedo via the ERA5-tuned CLM map when neither
+    # albedo_land_path nor surfdata_path is set — a slab/no-land-model AMIP run
+    # staging this file deliberately gets the calibrated albedo instead of the
+    # latitude fallback (2026-08-10; previously the fallback silently won).
     clm_surfdata_path: str = ""
 
     # Transient land-use/land-cover (LULC).  ``land_cover_surfdata`` is a harmonized
@@ -1669,6 +1698,12 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_vertical_overlap_optics must be one of "
                 f"{_valid_overlap}, got {self.cloud_vertical_overlap_optics!r}"
             )
+        _valid_sat = ("liquid", "mixed_phase")
+        if self.cloud_saturation_scheme not in _valid_sat:
+            errors.append(
+                f"cloud_saturation_scheme must be one of {_valid_sat}, "
+                f"got {self.cloud_saturation_scheme!r}"
+            )
         if (self.cloud_partial_coverage_optics != "none"
                 and self.cloud_vertical_overlap_optics != "none"):
             # Caught here as well as at the scheme, so a bad config fails at
@@ -2277,6 +2312,34 @@ class ExperimentConfig(NamedTuple):
                     "diffusion path; on discretization="
                     f"{d.discretization!r} it would be silently inert. "
                     "Unset it or use the MPAS lane.")
+        # Vertical advection scheme: membership first, then the same
+        # silently-inert refusal as k_h_scale (MPAS + sigma only).
+        _vert_adv_options = ("upwind", "van_leer")
+        if d.mpas_vert_advection_scheme not in _vert_adv_options:
+            errors.append(
+                f"dycore.mpas_vert_advection_scheme must be one of "
+                f"{_vert_adv_options}, got {d.mpas_vert_advection_scheme!r}")
+        elif d.mpas_vert_advection_scheme != "upwind":
+            if d.discretization != "mpas":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is only wired into the "
+                    "MPAS dycore; on discretization="
+                    f"{d.discretization!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use the MPAS lane.")
+            if g.vertical_coord != "sigma":
+                errors.append(
+                    "dycore.mpas_vert_advection_scheme is implemented for the "
+                    "sigma vertical coordinate only; on vertical_coord="
+                    f"{g.vertical_coord!r} it would be silently inert. "
+                    "Leave it at 'upwind' or use vertical_coord='sigma'.")
+            # The van-Leer stencil is 4 cells wide.  Reject here rather than
+            # deep inside the traced kernel (codex round 3).
+            if g.nlev < 4:
+                errors.append(
+                    f"dycore.mpas_vert_advection_scheme="
+                    f"{d.mpas_vert_advection_scheme!r} needs at least 4 "
+                    f"vertical levels for its 4-cell stencil; grid.nlev="
+                    f"{g.nlev}.")
         # Free-atmosphere diffusivity-floor override: None, or finite in
         # (0, 10] m^2/s (the not(lo<x<=hi) form also rejects NaN/Inf).
         if self.hb_kvf_min is not None and (
@@ -2466,11 +2529,38 @@ class ExperimentConfig(NamedTuple):
                 f"morrison_flavor={self.morrison_flavor!r} requires "
                 f"microphysics='morrison' (got {self.microphysics!r}); on any "
                 "other scheme the flavor would be silently inert.")
-        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # Optional cloud-tuning override bounds (track CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        # NOT a byte-for-byte mirror: __param_spec__ additionally seeds the
+        # TRAINING sigmoid re-parameterisation (param_collector._seed_raw), so a
+        # bound only the forward driver needs is widened HERE alone.
         for _f, _lo, _hi in (
             ("cloud_rh_crit", 0.5, 0.99),
-            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            # Lower bound 5.0e-5 -> 1.0e-6.  The radiative condensate floor
+            # enters additively as ``cf_strat * q_liq_incloud`` /
+            # ``cf_strat * q_c_diagnostic`` (cloud_fraction.py ``q_floor_liq`` /
+            # ``q_floor_ice``; under diagnostic_condensate_scheme='adiabatic' the
+            # LIQUID part is depth-derived and CAPPED at q_c_diagnostic instead).
+            # It is never itself a denominator, and the downstream quotients that
+            # see the resulting condensate are floor-protected far below 1e-6
+            # (PSD radius ``q_c_pos`` at 1e-15, cloud_fraction.py:872; the
+            # adiabatic liquid split at 1e-30, cloud_fraction.py:824).  So any
+            # strictly positive value is numerically safe, and >0 keeps this a
+            # floor rather than "off".
+            # The old 5.0e-5 was the *floor of the tuning range*, not a physical
+            # limit.  The MPAS AMIP campaign ran exactly ON it while carrying a
+            # ~+32 W/m2 reflected-shortwave excess that an offline
+            # production-fidelity RRTMGP factorial attributes almost entirely to
+            # this knob (5e-5 -> 0 is -35.6 W/m2, ~103% of the gap; the ladder
+            # rungs 2e-5/1e-5/5e-6 give -8.8/-15.6/-22.4).  Testing those rungs
+            # coupled requires the bound to admit them.  Evidence is in the run
+            # directory, not the repo: report ``floor_attribution_hifi.md``.
+            # NOT widened alongside it: CloudConfig.__param_spec__ keeps
+            # (5.0e-5, 1.5e-3), because those bounds ALSO seed the training
+            # sigmoid re-parameterisation (param_collector._seed_raw), where a
+            # widening is NOT inert.  Sub-5e-5 therefore reaches the model via
+            # ``--q-c-diagnostic`` or a ``--config`` YAML, but NOT via ``--params``.
+            ("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),

@@ -41,6 +41,7 @@ __all__ = [
     "diagnose_headline_fields",
     "diagnose_and_regrid",
     "score_forecast",
+    "score_ensemble_forecast",
     "HeadlineDiagnosis",
     "HEADLINE_FIELD_KEYS",
 ]
@@ -254,5 +255,113 @@ def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid
             "rmse": float(rmse(pred, target, weights, mask=m)),
             "acc": float(acc(pred, target, clim, weights, mask=m)),
             "bias": float(bias(pred, target, weights, mask=m)),
+        }
+    return scores
+
+
+def score_ensemble_forecast(
+    member_fields, verif_fields, wb2_lat_deg, *, valid=None, alpha=0.95,
+):
+    """PROBABILISTIC scores for an ensemble of WB2 headline forecast fields.
+
+    The deterministic scorecard collapses an ensemble to its mean and reports
+    RMSE — which is blind to whether the spread is right, and therefore cannot
+    see what a CRPS-trained model buys.  This is the missing instrument: it
+    reports the score the U-Cast recipe (arXiv:2604.09041) actually optimises.
+
+    No new metric math: the pointwise CRPS comes from
+    :func:`legoesm.ml.loss.almost_fair_crps` (the same estimator the training
+    loss uses, so train and eval cannot drift), and the area weighting /
+    masking convention is copied from :func:`evaluations.metrics.rmse`
+    (``cos(lat)`` weights times the above-ground mask) so a CRPS and an RMSE
+    on the same row are integrated over exactly the same cells.
+
+    Parameters
+    ----------
+    member_fields : sequence of dict[str, (n_lat, n_lon) array]
+        One diagnosed+regridded field dict per ensemble member.
+    verif_fields : dict[str, (n_lat, n_lon) array]
+        ERA5 verification on the same WB2 grid.
+    wb2_lat_deg : array (n_lat,)
+        WB2 latitudes [deg].
+    valid : dict[str, (n_lat, n_lon) bool], optional
+        Above-ground mask, as in :func:`score_forecast`.
+    alpha : float, default 0.95
+        Almost-fair finite-ensemble adjustment (1.0 = fair CRPS).
+
+    Returns
+    -------
+    dict[str, dict]
+        ``{key: {"crps", "spread", "spread_skill"}}``.
+
+        * ``crps`` — area-weighted almost-fair CRPS [field units]. LOWER is
+          better; for a single member it degenerates to the MAE, which is why
+          a 1-member call is refused.
+        * ``spread`` — area-weighted RMS of the ensemble standard deviation
+          (unbiased, ``ddof=1``).
+        * ``spread_skill`` — ``spread / rmse(ensemble mean)`` times the
+          finite-ensemble factor ``sqrt((M+1)/M)``.  ~1 is calibrated, <1 is
+          UNDER-dispersed (the failure mode a deterministically-trained model
+          shows), >1 over-dispersed.
+    """
+    import numpy as np
+
+    from legoesm.ml.loss import almost_fair_crps
+
+    from .metrics import rmse
+
+    n_members = len(member_fields)
+    if n_members < 2:
+        raise ValueError(
+            f"score_ensemble_forecast needs >= 2 members, got {n_members}; "
+            "with one member the CRPS is just the MAE and the spread is 0."
+        )
+
+    weights = np.cos(np.deg2rad(np.asarray(wb2_lat_deg, dtype=np.float64)))
+    # Finite-ensemble inflation of the spread-skill ratio: an M-member sample
+    # standard deviation under-estimates the predictive spread that the
+    # ensemble-MEAN error is compared against (Fortin et al. 2014).
+    spread_factor = float(np.sqrt((n_members + 1.0) / n_members))
+
+    scores = {}
+    for key in member_fields[0]:
+        ens = jnp.stack([jnp.asarray(mf[key]) for mf in member_fields])
+        target = jnp.asarray(verif_fields[key])
+        m = None if valid is None else valid.get(key)
+
+        # Broadcast the (n_lat, 1) column of cos-lat weights against the full
+        # (n_lat, n_lon) field BEFORE summing — exactly ``metrics.rmse``'s
+        # ``jnp.sum(w * jnp.ones_like(sq_err))``. Summing the un-broadcast
+        # column instead inflates every score by n_lon (caught by the
+        # identical-members test, which must return the plain MAE).
+        w = jnp.broadcast_to(
+            jnp.asarray(weights)[:, None]
+            * (1.0 if m is None else jnp.asarray(m, dtype=jnp.float64)),
+            jnp.asarray(target).shape,
+        )
+        w_sum = float(jnp.sum(w))
+        if w_sum <= 0.0:
+            scores[key] = {
+                "crps": float("nan"), "spread": float("nan"),
+                "spread_skill": float("nan"),
+            }
+            continue
+
+        crps_field = almost_fair_crps(ens, target, alpha=alpha)
+        crps = float(jnp.sum(crps_field * w) / w_sum)
+
+        # ddof=1: the ensemble is a SAMPLE from the predictive distribution.
+        var = jnp.var(ens, axis=0, ddof=1)
+        spread = float(jnp.sqrt(jnp.sum(var * w) / w_sum))
+
+        ens_mean = jnp.mean(ens, axis=0)
+        skill = float(rmse(ens_mean, target, jnp.asarray(weights), mask=m))
+        scores[key] = {
+            "crps": crps,
+            "spread": spread,
+            "spread_skill": (
+                float(spread_factor * spread / skill) if skill > 0.0
+                else float("nan")
+            ),
         }
     return scores

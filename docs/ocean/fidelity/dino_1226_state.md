@@ -1,3 +1,515 @@
+# SLOPE FIELD EXONERATED 2026-08-06 — and the METHODOLOGICAL boundary this session reached
+
+Flank slope comparison (same-state, NEMO's own restart to both; instrument control reproduced
+the domain-wide ceiling first): at cols 10-15 / 47-51, k=12-23, wslpi/wslpj err_norm medians
+4.5e-12..1.6e-11 — **as good as or better than domain-wide (1.1e-11)**, and flank p99/max are
+1-2 ORDERS TIGHTER than the domain max. **The slope field is not worse at the flank.**
+
+**Correction worth keeping:** NEMO's non-triad `ldf_slp` (the path armB ports) has **NO
+seafloor-indexed taper** — verified at `ldfslp.F90:285-297`; the only ramp is the MIXED-LAYER
+anchor (`zfk`/`zmlk`, keyed on `nmln`, not `mbkt`). At these mid-depths only 8.0% (west) /
+12.8% (east) of wet w-points even use it, and where it fires the values agree (median ~0,
+p99 ~1e-7). No taper-specific mismatch exists to find.
+
+## THE PATTERN — six same-state exonerations in a row
+
+vertical mixing · bolus · Redi · GM · PGF · isoneutral slopes+taper — **every per-term formula
+matches at the same state**, while the trajectories diverge into a localized, physical,
+correctly-signed form-stress deficit (flank isopycnal heave, −67 m by y20, opposite-signed on
+the two flanks). Same-state tests have now ALSO failed to predict divergent behaviour twice
+(GM's x1.5 sensitivity came out wrong-signed; PGF was identical yet the deficit persists).
+
+⇒ **The remaining defect is in ACCUMULATION, not in any single operator's formula, and
+same-state instruments cannot see it by construction.** The three untested candidates (vertical
+advection over the steep slope, the FCT limiter over topography, bolus vertical structure) would
+very likely exonerate the same way — testing them the same way is predicted to be uninformative.
+
+**What a next instrument must do:** compare how a term's error ACCUMULATES along a trajectory,
+not whether it is right at an instant. The twin protocol goes NEMO→lego only (no reverse
+bridge), so "run NEMO from armB's diverged state" is unavailable. Candidate designs: (a) per-term
+error-growth rates over a multi-year twin (the replay suite's growth curves, but per-operator and
+with the arm-comparison discriminator that lane already flagged as its own missing piece);
+(b) budget the flank column's density tendency term-by-term over years, both models, and find
+which term's TIME-INTEGRAL diverges even though its instantaneous value matches.
+
+# DISTORTION CHARACTERISED 2026-08-06 — isopycnal HEAVE at the flank; slope-clipping REFUTED
+
+Instruments re-validated first (reproduced F_topo ratios 1.0049/0.9543 and the mid-band
+collapse 0.9818→0.6863; census self-check with a synthetic-violation control).
+
+**It is predominantly HEAVE, not a water-mass change (CONFIRMED):**
+- West flank (cols 10-15), mid-depth k=12-23: armB colder/denser at FIXED DEPTH, growing
+  smoothly ~0 at y6 → dT ≈ −0.28 degC, drho ≈ +0.030 kg/m3 at y20 (salinity slightly fresh,
+  opposing, small — temperature dominates).
+- The 1027.0 isopycnal sits at the SAME depth in both models during y6-10 (+1.7, −2.2 m) then
+  **shoals in armB by −37 m (y15) and −67 m (y20)**. Mid-channel (cols 25-30) shows NO trend
+  (<=10 m through y20); the EAST flank (47-51) shows the same magnitude with **OPPOSITE SIGN**,
+  matching its opposite bathymetric slope ⇒ genuinely flank-localized and topography-correlated,
+  not basin drift.
+- Discriminator: T ON the isopycnal differs only −0.05..−0.10 degC at y20 vs −0.28 at fixed
+  depth (3-4x smaller) — non-zero and growing, so a **smaller genuine water-mass/diapycnal
+  component rides along**. Census total wet volume matches 1.0000 exactly every year; normalized
+  census TV-distance grows 0.005 (y6) → 0.057 (y20).
+
+**CORRECTION — "onset y11-13" was an ARTIFACT (third phantom step-change caught today).** The
+underlying dT / drho / isopycnal-depth series grow SMOOTHLY and MONOTONICALLY from y6; y11-13 is
+merely where a continuously-growing bias crosses the F_topo ratio's noise floor. armB's flank
+mean-flow speed is likewise smooth (spin-up curve), no discontinuity. There is no discrete
+regime change to hunt.
+
+**Slope clipping (`rn_slpmax`/`S_max`=0.01) REFUTED as the cause (CONFIRMED):** measured on
+armB's ACTUAL production chain (`nemo_native` slopes) at cols 10-15, k=12-23 — clip-hit fraction
+<=0.6% in y6-9 and **exactly 0.000% every year y10-y20**, i.e. zero clipping across the whole
+window in which the deficit grows. (This settles the hard CLIP only; the near-bottom TAPER is a
+separate, unmeasured question.)
+
+**NEXT — the cheapest decisive test, no new instrumentation needed:** compare `wslpi`/`wslpj`
+VALUE-FOR-VALUE at cols 10-15, k=12-23 against NEMO's own dumps (`RUN_GDB/eiv_dump_wslpi.bin`,
+`wslpj.bin`, already on disk). That tests whether armB's slope MAGNITUDE/SHAPE differs from
+NEMO's at the flank — which would explain the heave — rather than only whether the cap binds.
+NB the `ldf_slp` rows are CEILING'd, but that is a per-step SAME-STATE verdict and has now
+failed to predict state-dependent behaviour twice today (GM, PGF); it cannot close this.
+
+# PGF REFUTED / DEFICIT LOCALIZED 2026-08-06 — mid-depth density distortion at the sill flank
+
+**PGF hypothesis REFUTED (CONFIRMED).** DINO's NEMO runs `ln_zco_nam=.true.` /
+`ln_zps_nam=.false.` (FULL-STEP z, NO partial cells) with `ln_hpg_sco=.true.`
+(`RUN_20Y/namelist_cfg:70-72,342-346`; `dynhpg.F90:305-393`, guarded by the `ioptio/=1`
+ctl_stop at :197). armB's card selects `pgf_scheme="nemo_sco"` + `nemo_trapezoid` +
+`masked_zco` (`dino.py:1033-1035`) — a line-cited transcription of the same `zhpi`/`zuap`
+terms (`ocean_pe_latlon_cgrid.py:1620-1696`). **No scheme or coordinate DIFF exists; there is
+no faithful knob left to flip.** (`dyn_hpg (dv)`'s 0.999987 is the deferred v-face metric
+convention, unrelated.)
+
+**LOCALIZATION — overturns the parent lane's "distributed sub-percent" read (CONFIRMED,
+2 new exactness controls C6/C7: per-longitude and per-depth partitions each sum EXACTLY to the
+parent probe's scalar, all three years; parent's 5 controls re-passed):**
+- **Geographically CONCENTRATED**: at y20 columns **11+12 alone = 30%** of the total
+  |lego−NEMO| difference — the steep WESTERN sill flank where |dH/dx| peaks ~2x the surroundings;
+  top-5 columns (10,11,12,13,15) = **53%**. Secondary concentration on the eastern flank (47-51).
+- **Vertically SPECIFIC**: F_topo is a small residual between large opposing upper/lower
+  contributions (each ~300-460% of the net). The **MID-DEPTH band (178-913 m) ratio collapses
+  from ~1.00 (y6-10 control) to 0.62-0.69 (y14-20)** while upper and lower bands OVERSHOOT
+  (1.4-1.7). Onset y11-13 — matching the scalar step exactly.
+
+⇒ **armB is not mis-computing the pressure force; it is feeding an EXACT formula a distorted
+MID-DEPTH DENSITY FIELD over the steep sill flank.** Thermocline-depth water at precisely where
+isopycnals intersect topography.
+
+**NEXT (the narrowed question):** what distorts mid-depth density at a steep flank? Leading
+candidates, all state-dependent and all per-step-exact so the gate cannot see them: isoneutral
+slope treatment where isopycnals meet topography (the `rn_slpmax=0.01` clipping; the CEILING'd
+`ldf_slp` family; note the fixed #1226 sub-seafloor slope leak was this same family), the
+near-bottom slope taper, and spurious diapycnal mixing from advection over the steep slope.
+Compare the DENSITY FIELD itself — armB vs NEMO, columns 10-15, mid-depth, across years.
+
+# FORM STRESS = THE MISSING ARREST 2026-08-06 — and the 1.5x GM claim is RETRACTED
+
+**RETRACTION FIRST (mine, recorded earlier today as CONFIRMED):** "NEMO's kappa_gm is 1.5x
+armB's ⇒ armB under-arrested by GM" is **WRONG**. The two lanes never differed by band mask —
+they ran DIFFERENT CHAINS. Chain A (generic lat-lon slopes, surface-referenced p=0) gives
+102.5/118.9/135.8; chain B — the chain armB ACTUALLY integrates (`gm_redi_slope_scheme=
+'nemo_iso_lap'`, `eos_depth='geometric'`) — gives 159.1/187.6/217.0 vs NEMO 161.2/186.2/205.3.
+**Corrected armB/NEMO kappa ratio = 0.987 / 1.008 / 1.057 — no GM deficit exists.** This also
+independently explains why the x1.5 kappa run came out wrong-signed.
+
+**THE FINDING — topographic form stress across the Drake sill, the sink the enumeration omitted:**
+
+| | |
+|---|---|
+| \|F_topo\|/F_wind (BOTH sides) | **0.83** ⇒ the DOMINANT sink |
+| bottom drag / F_wind | **0.002** ⇒ every enumerated sink was minor by construction |
+| armB/NEMO ratio, y6-y10 (control) | 1.0020 ± 0.0032 |
+| armB/NEMO ratio, y15-y20 | **0.9590 ± 0.0034** |
+| separation | **9.11 sigma**, clean step at y13, 8 sustained years |
+
+Equal in the control window, diverging after — the sink lane's own discriminator — correctly
+signed as the missing arrest (deficit ~3.7e10 N). Consistent with every surviving observation:
+too-barotropic, deeper-reaching, surface u LOWER at HIGHER transport.
+
+Sign convention derived and CHECKED (z up, floor z=−H): `F_topo = +∮ p_b (dH/dx) dx`, sink ⇔
+F_topo<0 while F_wind>0, asserted in code and independently re-derived in review. Five
+instrument controls passed BEFORE any number: NEMO y10 ACC 121.070; **flat bottom → exactly 0**;
+constant p_b → 1.5 N; rho0*g*H self-term → 1.25 N; sill real. A sign assertion FIRED mid-run —
+lego stores `tau_x` NEGATED vs NEMO's `sozotaux` (ratio exactly −1.0000); post-flip both give
+band-mean +0.11670 Pa, reproducing the earlier flat wind control. Conditioning: per-longitude
+~1e15 N cancelling to ~8e11 N, fp64 floor bracketed at 0.6-24 N ⇒ signal 1.5e9x above it.
+
+**WHAT IT CANNOT SUPPORT (kept):** the budget does NOT close — residual −0.16..−0.20 x F_wind on
+BOTH sides (lateral/eddy flux omitted; NEMO Coriolis unavailable from grid_U), and the lego−NEMO
+residual difference IS the form-stress difference ⇒ circular, so the budget cannot independently
+certify this. That 4.1% quantitatively owns the 1.27x excess is **PLAUSIBLE, not confirmed**.
+Note a naive F ∝ U² predicts MORE form stress at 27% higher transport, not less ⇒ this is an
+**efficiency deficit in the p_b/slope correlation**, not a transport-slaved response.
+Localization is weak: a distributed sub-percent modulation across the whole ridge.
+**Interfacial form stress NOT computed** (needs ⟨v'p'⟩ at matched times; both sides are annual
+means) — stated, not substituted. The BOTTOM term has no such gap: topography is static so
+⟨p_b dH/dx⟩ = ⟨p_b⟩ dH/dx exactly.
+
+Review (physics-validator): all six challenged items SOUND, incl. independent sign re-derivation
+and three-way rejection of the y13 step as an indexing artifact. One latent footgun found and
+fixed (unmasked surface rho); every headline number bit-unchanged.
+
+**NEXT:** an efficiency deficit in the bottom-pressure/slope correlation at a steep sill points
+at the **pressure-gradient-force scheme and partial-cell treatment at steep topography** — a
+known z-coordinate weak spot the campaign has already flagged elsewhere ("partial-cell DYNAMIC
+fidelity", the smc03/adcroft PGF options). Test whether the 4.1% traces to the PGF scheme.
+
+# GM EXONERATED 2026-08-06 — sensitivity test REFUTES it; the 1.5x gap is UNRECONCILED
+
+**Decisive test**: armB rerun with kappa_GM scaled x1.5 toward NEMO's measured value, 140
+config fields compared / 0 differ (sole variable is the kappa scale, applied by an env-gated
+monkeypatch in `scripts/tmp/`, no production code). Result — the overshoot got **WORSE**:
+
+| yr | NEMO | armB ctrl | armB x1.5 | ctrl−N | x1.5−N |
+|---|---|---|---|---|---|
+| 5 | 91.13 | 91.41 | 91.55 | +0.28 | +0.42 |
+| 10 | 121.07 | 121.58 | 122.02 | **+0.51** | **+0.95** |
+
++0.44 Sv AWAY from NEMO = 4.8x the floor, wrong-signed and resolvable. Slope dACC/d(deep
+contrast) moved 1.013x → 1.042x, i.e. further from 1.0. Density barely moved; only the momentum
+response did. **⇒ GM arrest does not own the excess. All four candidate sinks are now
+exonerated: wind, bottom drag, lateral viscosity (state symptom), GM.**
+
+### Three corrections
+1. **`kappa_GM_max=200.0` is NOT a cap** — a log artifact (`dino_year_screen_fullframe.py:115`)
+   printing a static placeholder (`dino.py:2784`) the Treguier diagnostic overrides at runtime.
+2. **The real cap is `TreguierConfig.aei0 = 1500.0`, and NEMO's is ALSO exactly 1500**
+   (`ldftra.F90:631-633`, `aei0 = 0.5*rn_Ue*rn_Le` = 0.5*0.03*1e5; namelist_cfg:301-302).
+   **CORRECTION: this digest's earlier "kappa_GM cap=3000" was the UN-HALVED product — wrong.**
+   No unfaithful config difference exists. Not binding either: 0.055% of cells, capped/uncapped
+   band-mean ratio 1.000.
+3. **The 1.5x kappa gap is UNRECONCILED and must not be built on.** This lane measures armB
+   band-mean kappa 159/188/217 at y11/15/20 against NEMO's 161/186/205 — essentially EQUAL. The
+   prior lane's armB values (102.5/118.9/135.8) used a different band mask. Rule 1e: reconcile
+   before either is quoted again. **The exoneration above does NOT depend on which is right** —
+   the sensitivity experiment tests the response directly.
+
+### What this leaves
+All four sinks the momentum lane enumerated are exonerated — but that list omitted the sink that
+DOMINATES an ACC-like channel: **TOPOGRAPHIC FORM STRESS across the Drake sill** (the pressure
+force on the ridge), which is NOT the same as quadratic bottom friction and was never measured.
+That is the leading untested candidate for the 1.27x transport-per-density excess.
+
+# NEMO GM DIAGNOSTICS 2026-08-06 — NEMO's kappa_gm is 1.5x armB's (state effect, NOT a formula defect)
+
+New NEMO run `RUN_EIV_DIAG/` (y10->y20 continuation, additive WRITE-only eiv dumps in
+`cfgs/DINO/MY_SRC/ldftra.F90` commit `158afdb` in the DINO config repo). **Bit-identity control
+PASSED before any number was used**: 1520 variable-tiles x 16 tiles exact fp64 equality vs
+RUN_20Y's own y11 restart ⇒ the dump block is physics-inert.
+
+Matched years, identical band/mask/contraction both sides, fp64:
+
+| year | kappa_gm NEMO | armB | ratio | bolus PE NEMO | armB | ratio |
+|---|---|---|---|---|---|---|
+| y11 | 161.15 | 102.48 | **1.573** | 6.33e-5 | 4.40e-5 | 1.437 |
+| y15 | 186.22 | 118.90 | **1.566** | 6.88e-5 | 5.05e-5 | 1.364 |
+| y20 | 205.27 | 135.77 | **1.512** | 6.13e-5 | 5.63e-5 | 1.088 |
+
+NEMO zonal-mean kappa peaks 446-454 m2/s (row 79, lat -19.6, subtropical) and runs **59-343
+m2/s inside the ACC band**.
+
+**⇒ armB is UNDER-ARRESTED by GM, correctly signed for the too-barotropic/high-transport
+signature. CONFIRMED.**
+
+**CRITICAL DISTINCTION — this is NOT a transcription defect.** The gate's `ldf_eiv kappa
+(aeiu)` row is CEILING at ~1e-6 per-element: our Treguier chain is essentially EXACT evaluated
+on the SAME state. The 1.5x above is each model's kappa on ITS OWN state ⇒ a state<->closure
+FEEDBACK, not an independent formula cause. Do not conflate the two.
+
+**Two complications against over-claiming (agent's own, kept):** the kappa ratio is FLAT
+(1.573→1.512) while the transport divergence GROWS; and the bolus ratio SHRINKS (1.437→1.088),
+plausibly armB's isopycnals steepening in partial compensation. A sufficient owner would more
+naturally show a growing deficit.
+
+**Agent self-retraction (caught pre-claim):** its first armB pass hardcoded `f_t = zeros`,
+collapsing the Treguier Rossby radius to kappa ≡ 0; fixed and locked with an assert. Those
+numbers are void; the table above is post-fix and reproduces the recorded v1 probe values
+(y15 118.8993, y20 135.7671).
+
+**NEXT (lane running):** (1) is our `kappa_GM_max=200.0` cap BINDING, when NEMO's in-band kappa
+reaches 343 and NEMO's own limit is ~3000? A binding cap would be a direct unfaithful config
+difference. (2) the decisive sensitivity run — armB with GM arrest raised toward NEMO's, does
+the 1.27x transport-per-density slope move toward 1.0?
+
+# RULE-8 LADDER PARADOX DISSOLVED 2026-08-06 — RETRACTED, it was an artifact of the surface defect
+
+Post-fix 10-yr A/B (both arms `leapfrog_rhs`, one env var differs, `git diff` over
+`packages/`+`src/` between the two arms' commits = EMPTY, census-gated both):
+
+| yr | NEMO | L-off | L-both | off−N | both−N |
+|---|---|---|---|---|---|
+| 5 | 91.13 | 94.30 | 91.41 | +3.17 | **+0.28** |
+| 10 | 121.07 | 126.36 | 121.58 | +5.29 | **+0.51** |
+
+At y10 `both` wins EVERY metric (deep-contrast error 1.6x floor vs off's 71x).
+
+**The ladder effect never changed sign.** Rescoring the surviving PRE-fix 40-yr npz through the
+same harness: `both−off` = −1.74 (y5) / −2.37 (y10) / −4.38 (y20) pre-fix vs −2.89 / −4.79
+post-fix. `both` is BELOW `off` in both eras, same sign, similar magnitude. What changed is
+where NEMO sits relative to the pair: pre-fix both arms undershot NEMO by 22-38 Sv so "lower"
+meant "worse"; post-fix `off` OVERSHOOTS and `both` lands on target, so "lower" means "onto
+the reference".
+
+⇒ **RETRACTED: "the true 3-D ladder tracks NEMO worse — something compensates for the wrong
+geometry."** The faithful geometry was never anti-correlated with fidelity; it was scored
+against a trajectory the surface-placement defect had displaced far below NEMO. A conclusion
+that shaped months of prioritisation, dissolved by fixing an unrelated defect.
+
+CAVEATS: no post-fix run passes y10, so the old "7.4 Sv at y40" has no protocol-matched
+counterpart (cross-era comparison labelled as such, Rule 7). `both`'s y10 residual (0.51 Sv) is
+still 5.6x the floor — the armB overshoot, ~10x smaller than `off`'s. y1-y2 marginally favour
+`off` (0.18/0.39 Sv) in the from-rest transient.
+
+# OVERSHOOT = H-DEFECT 2026-08-06 (opus analysis lane) — CONFIRMED structural, and LOCALIZED to the MOMENTUM side
+
+Three independent discriminators, all on existing data (armB y1-20 npz + NEMO y6-40; harness
+self-checks passed first):
+1. **No time shift collapses it** — per-metric best Δ spans −1.0..+0.5 yr (H-lag needs ~one Δ);
+   at the best joint Δ every metric's residual is still 23-137x the 0.091 Sv floor.
+2. **State-space departure**: armB sits ON NEMO's ACC-vs-deep-contrast curve through y10
+   (perpendicular departure floor-scale; slope ratio 1.02), then lifts OFF — +3.2 Sv at y11,
+   **+8.5 Sv at y20 at MATCHED deep contrast** (~95x floor).
+3. **dACC/d(deep contrast)**: armB −530 vs NEMO −418 Sv/(kg/m3) = **1.27x steeper** post-y10
+   (1.63x vs upper contrast).
+
+**⇒ The density field is RIGHT (deep contrast corr 0.998, dense classes within 1-4% at matched
+years); the ACC's dynamical response to it is TOO STRONG.** The excess lives in the MOMENTUM
+balance — for the same density forcing, armB is arrested less. Candidate sinks, now under a
+matched-year offline comparison (lane running): GM/eddy form stress (kappa response), bottom
+drag, lateral viscosity (note the open dyn_ldf e3-weighting escalation sits exactly here).
+The restoring-timescale lag story is dead: a density-side rate change moves you ALONG the
+curve, not off it.
+
+# MOMENTUM-SINK DISCRIMINATION 2026-08-06 — wind/drag RULED OUT; GM the last unfalsified sink
+
+Matched-year offline comparison, identical formulas/masks both sides (one v1 self-retraction:
+lego drag initially used MOM6's ke0=0.01 instead of the card's 2.5e-3 — corrected before
+propagating). Wind power: flat, ruled out. Bottom drag: control-window equal (1.032 at y10),
+non-monotonic after (1.034 at y20) — fails the divergence signature, ruled out. **Lateral
+viscous dissipation: THE signature** — 0.962 at y10 (control) rising monotonically to **1.358
+at y20** — but A_h and the operator are identical by construction, so this is a **state
+symptom**: armB retains horizontal/deep shear NEMO sheds post-y10. Corroborating: armB's
+SURFACE u at y20 is LOWER than NEMO's (0.0439 vs 0.0461) while its transport is HIGHER ⇒
+**too-barotropic, too-deep-reaching flow**. The sink that acts selectively on deep/barotropic
+flow — **GM/eddy form stress — is by elimination the only unfalsified owner of the 1.27x**.
+Cross-oracle echo: the Phase-G Veros campaign ended at the same signature ("too-barotropic,
+EKE overshoot") — this looks like a legoESM trait, not a DINO quirk. Missing datum = NEMO's
+own kappa_gm/bolus at matched years; RUN_EIV_DIAG lane launched (y10→y20 continuation with
+additive eiv dumps, bit-identity-gated).
+
+# NOISE FLOOR MEASURED 2026-08-06 (#1492 item 2.1) — the acceptance bar is now QUANTIFIED
+
+3-member NEMO micro-ensemble (1e-14-relative T perturbations to the y20 restart, every other
+variable bit-identical — verified per tile; 10 years each, model years 21-30; all clean, EXIT=0,
+divergence saturates by y3-y5). Harness gate passed on every invocation (NEMO y10 ACC = 121.07
+exactly). Runs: `RUN_ENS_M{1,2,3}/`; full per-year table in the ensemble lane transcript +
+`noise_floor_out.txt`.
+
+**The floor (max over branch-years 1-10, n=3 — treat as order-of-magnitude, ~50% sampling
+uncertainty on the std):**
+
+| metric | range (max) | std (max) |
+|---|---|---|
+| ACC | **0.091 Sv** (~0.06%) | 0.050 |
+| contrast <1400 m | 1.1e-4 kg/m3 | 5.7e-5 |
+| contrast >1400 m | 4.5e-5 kg/m3 | 2.3e-5 |
+| S-band surface sigma max | 9.5e-5 | 5.3e-5 |
+| census sigma>1.2 / 1.4 / 1.5 / 1.6 | rel 9.6e-5 / 2.5e-4 / 4.9e-4 / 1.1e-3 | — |
+
+**Consequences:**
+1. **Arm B's post-y10 ACC overshoot (1.021-1.052x) is OUTSIDE the floor by 35-85x — a real
+   structural residual**, not internal variability. (Caveat attached: floor measured on the
+   y20-branch state, overshoot on the from-rest trajectory; the two-orders margin survives any
+   plausible state dependence, but no finer statement is supported.) It joins the Rule-8 ladder
+   paradox at the top of the Phase-3 ranked list.
+2. **The 2.2 acceptance targets, staged 5x/2x/1x**: ACC 0.45 / 0.18 / 0.09 Sv; contrasts and
+   census scale from the table.
+3. **Retroactive**: every "null"/"climate-inert" call in this campaign predates this floor, and
+   every current lego-vs-NEMO residual sits far above it — nothing measured so far is
+   noise-limited. DINO's annual-mean statistics are dramatically less noisy than assumed.
+
+# ORACLE PROVENANCE GAP CLOSED 2026-08-06 (Phase 4 item) — `cfgs/DINO` is now version-controlled
+
+The gap that produced the 2026-07-31 scare (the binary behind `RUN_20Y` had been rebuilt over,
+recoverable only as *numerically* equivalent via a bit-identity control) is fixed. `cfgs/DINO`
+is now its OWN git repo at
+`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO` (commit `491ac8d`, 313 files:
+`MY_SRC/` ×24 `.F90`, namelists, arch, EXPREF). Runtime outputs / `BLD/` / binaries / `*.nc` /
+`*.bin` are gitignored.
+
+**Why its own repo, not a commit into the NEMO clone:** that clone's remote is
+`forge.nemo-ocean.eu` (upstream NEMO), and `cfgs/DINO` was untracked there — committing into it
+would pollute a clone of upstream and collide with any future `git pull`.
+
+`.binary_provenance.txt` records the md5 + mtime of the `nemo.exe` that produced every current
+reference run (`RUN_20Y(_REBUILD)`, `RUN_40Y(_REBUILD)`, `RUN_TWIN_*`, `RUN_GDB`, `RUN_ENS_M*`),
+together with the bit-identity control that certifies it (year 20 re-run from the y19 restart:
+all 1520 restart variables × 16 tiles bit-identical; ACC 142.8098167694 both sides).
+
+**Standing rule going forward:** a reference trajectory that cannot be tied to the source that
+produced it is not a reference. Commit `cfgs/DINO` before any run whose output will be cited.
+
+# C1 CLOSED 2026-08-06 — the climate result is REPRODUCIBLE and BIT-DETERMINISTIC
+
+Fresh independently-invoked arm A reproduced the original run **bit-for-bit over 4 consecutive
+model years** (all six saved fields, fp64, max|orig−repro| = **exactly 0.000e+00**; ACC diff
++0.00e+00 Sv at y1-y4). Determinism established ⇒ remaining years and arm B add no information.
+Headline re-scored through the validated harness from the recorded outputs: ACC y5 armA 67.06 /
+armB **91.41** / NEMO 91.13 = **+98.84%** gap closed; y10 83.03 / **121.58** / 121.07 =
+**+98.67%**.
+
+**QUALIFICATION to the dense-water claim (found in this lane, correcting what was posted):** at
+y5 armB's σ>1.6 volume is 0.00e0 — **but so is NEMO's**, so the "0.94-1.03x NEMO's volume" claim
+holds only **from y10 onward**, where NEMO itself first forms that class. At y10: σ>1.5 armA
+0.163x vs armB **0.997x**; σ>1.6 armA **0.000x** vs armB **1.031x**. "armA makes ZERO water
+denser than σ=1.6" is confirmed for every year in which NEMO makes any.
+
+**Correction to the adversarial review's C1**: it claimed the run "left no recoverable
+provenance". Partly wrong — `results/dino_1492_20y/arm{A,B}.log` were on disk throughout with
+the env line. The genuine gap was narrower: recipe / `DINO_YEARS` / output path arrive as argv
+and were never echoed. Fixed permanently — the harness now prints `ARGV=` and the run env.
+
+MANIFEST (results/ is gitignored, so this text is the record): git
+`0c92bd468a5e8926fcaaaa7e1300d881b0f85804` (branch feat/nemo-dino-topo-bridge);
+`CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both DINO_YEARS=10
+DINO_SURFACE_PLACEMENT=applied_now|leapfrog_rhs`; fp64 policy set in-script before geometry;
+recipe `nemo_dino_kamm_mlf`, DT=2700 s, 11520 steps/yr, ACC0=0; donor `RUN_TRAJ/mesh_mask.nc` +
+`DINO_00000320_restart.nc`, nn_hls=0, periodic_i, full_step; overrides lon_west=1.0,
+lon_east=49.0, sill_lon=1.0. **Config diff: 140 fields compared, exactly 1 differs**
+(`surface_tendency_placement`); `outer_integrator=leapfrog` on both.
+Harness gates (fatal, both PASS): NEMO y10 ACC **121.07 Sv**; band volume **2.694775e+16 m³**
+(rel 4.98e-8); topo census **342134 wet cells**, u/v face masks EXACT.
+
+# sh2 RECONCILED 2026-08-06 (#1492 item 0.3) — TWO RECORDED NUMBERS ARE UNSOURCED; STRIKE THEM
+
+Canonical probe `scripts/validate/ocean_fidelity/dino_1226/sh2_canonical.py` (3e1e9507d) locks
+every choice prior probes left free and asserts the live config selects the production path
+before trusting a number. Result of reconciling the three-way split:
+
+| historical number | status |
+|---|---|
+| **0.33-0.35** | **EXPLAINED — an ALIGNMENT BUG.** Same production code, vertical offset −2 instead of the established +1. Offset scan peaks sharply at +1. Not different physics. |
+| **0.934** | **STRUCK — no surviving source.** Appears in `sh2_walk.py`'s docstring as a TARGET, not a result. `fidelity_bar_gate.py` does not compute it. Re-running that walk's Candidates A-F tops out at 0.983. |
+| **0.995 ("Candidate G")** | **STRUCK — no surviving source.** `grep -rn "Candidate G"` hits ONLY the prose doc; no `.py` defines it. |
+
+⇒ **The only sh2 number with a reproducible probe behind it is corr 0.7318 / ratio 0.790**
+(production path, |ref|>1e-12 population = 21.3% of wet points, fp64, e3t printed, kt=57601
+via the registry). It is BELOW every historical claim. Do not quote 0.934 or 0.995 again.
+
+**DECISION: do NOT wire `tke_shear_avm_weighting="nemo_face"` to the kamm card.** On the
+canonical population it moves the sh2 ratio 0.790 → 1.129 — overshooting as far as the default
+undershoots — and the two weightings differ from EACH OTHER by less than either differs from
+the standing gate rows (Δcorr ≤ 0.0018; `pdlr` identical to 6 dp). The earlier "2x magnitude
+improvement" was measured on the UNRESTRICTED population where the ratio is 83x/166x and is
+dominated by near-zero/near-zero noise. The option stays available, default `tpoint`, unwired.
+
+**Lesson (the reason item 0.3 exists):** two numbers carried in this campaign's record for
+weeks had no reproducible probe behind them, and a third was a mis-aligned probe reading of
+the same code. A row without a canonical committed probe is UNMEASURED regardless of history.
+
+# DECISION 1 SETTLED 2026-08-04 (Dhruv) — CEILING category + the empirical envelope principle
+
+**CEILING is APPROVED** as a formal gate category (closed dict + evidence strings + non-vacuity
+test, WAIVED_ROWS pattern). **Gold-standard evidence = the EMPIRICAL NEMO-vs-NEMO envelope**:
+rebuild NEMO at -O0 (`arch-condadbg.fcm` exists from the port), re-dump the same per-step
+quantities, diff per row. Our residual <= NEMO(-O3)-vs-NEMO(-O0) ⇒ matched in the strongest
+sense that exists (you cannot be closer to NEMO than NEMO is to itself). Above the envelope ⇒
+the ceiling claim FAILS and real debt remains — the control has teeth. Mechanism proofs stay
+as silver standard until the -O0 run exists.
+
+**THE PRINCIPLE (Dhruv, verbatim intent): ceiling-level differences CANNOT be the cause of the
+~21% ACC deficit — otherwise NEMO would not be a trustworthy model.** NEMO's climate is robust
+to its own arithmetic noise (different builds/compilers ⇒ same climate); therefore any row
+whose residual sits at/below the empirical envelope is **climate-exonerated by construction**,
+and climate leverage can only live ABOVE the envelope: structural differences with real
+mechanisms (geometry, closures, forcing, eddy statistics), i.e. the attractor program. This
+formalizes why the sweep and the climate hunt are separate tracks.
+
+## #1455 Decision 1 implementation (2026-08-04) — CEILING shipped, Part A envelope run
+
+**Part A (empirical NEMO-vs-NEMO envelope).** Built a SEPARATE NEMO config `DINO_DBG`
+(own `cfgs/DINO_DBG/BLD`, never touching production `cfgs/DINO/BLD`) with a no-`fcheck=bounds`
+variant of `arch-condadbg.fcm` (`arch-condadbgnb.fcm`, O0 kept — `fcheck=bounds` trips an
+unrelated array-bound false positive in `usrdef_sbc.f90` under `-np 1`, orthogonal to this
+task; MY_SRC dump patches confirmed byte-identical between `DINO` and `DINO_DBG` via
+`diff -rq`). Ran the SAME restart+namelist as `RUN_GDB` in a sibling `RUN_GDB_O0`
+(164/164 main-run `.bin` dumps reproduced, matching filenames). New script
+`scripts/validate/ocean_fidelity/dino_1226/nemo_o0_o3_envelope.py` diffs the two dump sets
+(`err_norm=|O3-O0|/RMS(O3)`, same convention as the gate's own per-row probes).
+
+RESULT: **7 of 9 dumps covering the 4 target rows came back bit-identical (max\|O3-O0\|=0.0,
+degenerate, uninformative envelope)** — `eiv_dump_wslpi/wslpj/uslp/vslp.bin`,
+`sshnxt_dump_hdiv.bin`, `sshnxt_dump_ssh_after.bin`, `atf_dump_ssh_before.bin`. The remaining 2
+(`eiv_dump_aeiu.bin`, `atf_dump_ssh_after.bin`) are non-degenerate but sit at literal fp64
+roundoff (p99/max ~1e-16..1e-15) — 4-6 orders below the actual row residuals (1e-4..1e-6
+scale), so not directly commensurable as a numeric "below the envelope" threshold either way.
+Per the task's own explicit fallback: attempted a SECOND, independent envelope source
+(production `-m conda` binary, namelist-only `-np 4` instead of `-np 1`, changing
+`jpni×jpnj`/halo-exchange order) — this ATTEMPT FAILED to produce a usable envelope: the
+MY_SRC WRITE dumps under `-np 4` are per-rank LOCAL-domain arrays (1×4 tiling confirmed in
+`ocean.output`), not a global-gathered field, so they are not directly diffable against the
+`-np 1` global dump without a gather/stitch harness — out of scope for this task's budget,
+reported honestly rather than silently skipped (see the script's own printed caveat).
+
+**Verdict on Part A: genuinely degenerate/uninformative for all 4 candidate rows.** No row
+could be shown quantitatively BELOW a non-trivial envelope. Per the task's own instruction
+("if this happens broadly ... note it as such, do not force a verdict from it"), Part A does
+NOT independently confirm any of the 4 rows — CEILING classification for all 4 rests on their
+pre-existing, already-complete quantitative mechanism proofs (unchanged by this task), with the
+degenerate Part-A result reported honestly in each row's new CEILING_ROWS evidence string
+rather than glossed over.
+
+**Part B (gate implementation).** `CEILING_ROWS` (closed dict, term -> (decision, evidence)) +
+`_validate_ceiling()` (raises at import on empty decision/evidence, mirrors `_validate_waivers`)
+added to `fidelity_bar_gate.py`. `classify()` checks CEILING_ROWS right after WAIVED_ROWS
+(before BINARY_GATES/bar), returning `"CEILING"` unconditionally. `main()`'s tally line is now
+`AT BAR n | CEILING n | DEBT n | UNMEASURED n | WAIVED n | total n`; exit semantics unchanged
+(`return 1` iff any row is DEBT or UNMEASURED — CEILING and WAIVED are both legal pass-states).
+
+Populated with **all 4 candidate rows** (`ldf_slp uslp`, `ldf_slp vslp`,
+`ldf_eiv kappa (aeiu)`, `ssh_nxt / div_hor`, `ssh_atf` — 5 entries, `ssh_atf`'s residual is
+itself a 1:1 linear inheritance of `ssh_nxt / div_hor`'s, so both cite the same upstream
+mechanism). All 4 already carried complete quantitative mechanism proofs in their existing
+MEASUREMENTS notes (predicted-vs-measured numbers, not narrative) — verified by reading the
+FULL note text (not just grep snippets) before writing each `CEILING_ROWS` evidence string,
+and the numbers quoted are the row's own pre-existing numbers, not re-derived.
+`ldf_slp wslpi/wslpj` were NOT added — already AT BAR (closed 2026-08-03 by the hmlp fix),
+not ceiling candidates.
+
+**Tally: `AT BAR 18 | DEBT 30 | UNMEASURED 4 | WAIVED 1 | total 53` (pre-change, reconfirmed by
+running the gate before edits) → `AT BAR 18 | CEILING 5 | DEBT 25 | UNMEASURED 4 | WAIVED 1 |
+total 53` (post-change).** Gate still exits 1 (25 DEBT + 4 UNMEASURED rows remain outside the
+5 newly-ceilinged rows) — CEILING is not a blanket pass, only these 5 rows moved.
+
+Tests: `tests/ocean/unit/test_fidelity_bar_gate.py` extended with 6 new CEILING tests
+(unconditional classification, non-vacuity synthetic-violation, closed-dict/no-generic-flag,
+exact-5-row-membership, main() tally/section print). `pytest tests/ocean/unit/
+test_fidelity_bar_gate.py -q` → "15 passed"; `fidelity_bar_gate.py --self-test` →
+"self-test OK". Reviewed by a physics-validator subagent (codex CLI unavailable on this
+account, confirmed via `which codex`) scoped explicitly as a Python classification/scoring
+review, not ocean physics.
+
+---
+
+# DECISION 2 EXECUTED 2026-08-04 — sh2 unparked; face-avm option landed; measurement UNRECONCILED
+
+Chain walk: the face-native shear FORMULA is exact (baseline reproduces `tke_dump_sh2.bin` to
+2.15e-22); production multiplies by T-point K_M where NEMO uses face-summed avm + coast
+doubling (`zdfsh2.F90:80-94`). "Architectural blocker" claim CHALLENGED and REFUTED — NEMO
+face-averages T-point avm on the fly; so does the new option. Landed:
+`tke_shear_avm_weighting="tpoint"(default)|"nemo_face"` (B1 both call sites, B2 post-mixing
+guard, N1 periodic seam wrap + failing-under-edge-repeat test, 60/60 fp64, reviews SHIP).
+**Card NOT wired.** Measured: sh2 ratio 0.295→0.630 (2x closer), pdlr/avt corr improve, ~1.8%
+mean overshoot. Bonus: chain_walk STAGE 4 harness fix (feed true `tke_dump_rn2`, not rn2b):
+MXL isolation 0.00992→0.00069 — the parked MXL re-walk item is DONE.
+
+**UNRECONCILED — no further sh2 claims until resolved**: production-path sh2 corr measures
+0.33-0.35 in the newest probe vs 0.995 (Candidate G, same function) vs 0.934 (old record) —
+different populations (|ref|>1e-12 vs noise-floor-restricted) and input conventions; the old
+record's probe source is unfindable. NEXT: ONE canonical committed sh2 probe with locked
+population + input conventions; only then wire-or-not the card. Row stays DEBT.
+
 # PARKED 2026-08-03 — resume here (token budget; user call)
 
 **Where the grind stands** (issue #1455 = the living checklist; PR #1460 = the working PR):
@@ -1176,8 +1688,11 @@ that failed is a SUCCESS of the process.
   without the NEMO-side dump either. Recommend **pause**: ledger now provably complete, drag
   ruled out, wind is the one remaining untested line but requires new instrumentation: out of
   scope for the unit harness (emergent solver behaviour).
-- **`zdftke sh2`** — ESCALATION 1: exact transcription in, restricted-to-signal ratio 0.904.
-  Family measured **climate-inert**, so parking is defensible.
+- **`zdftke sh2`** — ESCALATION 1: exact transcription in, ~~restricted-to-signal ratio 0.904~~
+  **STRUCK 2026-08-06 (evidence audit): 0.904 is prose-only with no committed probe — the same
+  class as the struck 0.934/0.995, missed by the first sh2 sweep.** The only sh2 number with a
+  reproducible probe is **corr 0.7318 / ratio 0.790** (`sh2_canonical.py`, |ref|>1e-12
+  population). Family measured climate-inert, so parking is defensible.
 - **`ldf_slp` ×4** — CONDITIONING-LIMITED, all three stopping-rule conditions verified.
 
 ## Measured strategic result — read before prioritising
@@ -1238,11 +1753,20 @@ which is why the true-ladder instability is the campaign's critical path, not mo
   (2026-07-30: identical on both ladders, and structurally impossible — `nemo_eiv_bolus_transport`
   uses only `e2u`/`e1v`, no `e3` term), **abyssal slope-cap population** (flat, within ~10%).
   `use_gm_redi=False` (zeros κ_GM only, Redi untouched) still restores stability.
-  **THE OPEN CONTRADICTION and the next cheap check**: κ_GM, slopes and bolus divergence are all
-  ladder-insensitive, yet addendum 36 recorded the bolus entering the advecting flux **37% larger**
-  on the true grid. Since `psi = κ × slope`, those cannot all hold. **Reconcile the 37%: is it
-  real, and is it the same quantity?** (Five metric-identity incidents occurred on 2026-07-30 —
-  treat any un-reconciled cross-script figure as suspect.)
+  ~~**THE OPEN CONTRADICTION**: addendum 36 recorded the bolus entering the advecting flux 37%
+  larger on the true grid.~~ **RESOLVED / STRUCK 2026-08-06 (#1455 item B): THERE IS NO
+  CONTRADICTION — the 37% figure was RETRACTED BY ITS OWN AUTHOR in addendum 38, two addenda
+  later, and the retraction never propagated.** It was `np.abs(bolus_u).max()` over the WHOLE
+  array **including inactive sub-seafloor cells carrying garbage**; wet-masked it is **+3.8%**.
+  It was also **not a lego-vs-NEMO comparison at all** — it compared legoESM's own two vertical
+  grids (wrong-grid vs true-grid). No script computes it (one-off interactive). Both
+  `ldf_eiv_trp_MLF` (NEMO) and `nemo_eiv_bolus_transport` (lego) are thickness-independent by
+  construction, so a real +37% grid sensitivity was never algebraically possible. The genuine
+  issue in that thread was a **pattern correlation of 0.77**, root-caused to slopes/N² plus a
+  Shapiro periodic-seam bug and fixed to ~1.0 (addenda 41→59). **Standing validated number: the
+  y20 twin face-delivery match at 1-2%** (`RUN_TWIN_FACE10_DUMPS`, ψ→increment reconstruction,
+  three faces, all 10 days). Propagation vector fixed: `project_dino_nemo_oracle.md` re-cited
+  addendum 36 without 38.
 - **zdftke composite** — real residual (corr 0.966; ~5% signal-weighted ratio), **INDEPENDENT of
   sh2** (substituting NEMO's own sh2 moved corr 0.9633 → 0.9656). Candidates, all now unblocked by
   the rebuild: buoyancy sink `p_avt*rn2` (`zdftke.F90:495`), `zmxlm` (`:814-819`), tridiagonal

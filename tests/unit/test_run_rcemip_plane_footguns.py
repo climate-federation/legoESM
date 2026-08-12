@@ -134,14 +134,15 @@ def test_reported_peak_excludes_the_startup_transient(tmp_path):
     second_half = [w for s, w in rows.items() if s >= n_steps // 2]
     assert reported == pytest.approx(max(second_half), rel=1e-2), (
         f"reported {reported}, second-half peak {max(second_half)}")
-    # The step-1 transient used to be ~0.8 m/s here: the old IC pinned
-    # T_v0 = 295 K, which left the initial column 39 % supersaturated, and the
-    # microphysics condensing that excess on step 1 was what drove w. With the
-    # paper-faithful T_v0 = T0(1+0.608 q0) the IC sits near 80 % RH, so there is
-    # no condensation kick and the whole trace is ~1e-4 m/s. What this still
-    # pins is the windowing arithmetic (reported == second-half max), which is
-    # the actual masking bug; the size of the startup transient is not part of
-    # the contract.
+    # The step-1 transient is NOT part of the contract, and asserting that it
+    # dominates makes this test fail on a physically-fine configuration.
+    # Measured on clean main (dd4bf62a0): step-1 5.963e-05 m/s vs second-half
+    # peak 3.525e-04 — i.e. THIS ASSERTION IS RED ON MAIN TODAY. Both parents'
+    # ICs sit near 80 % RH, so neither produces the step-1 condensation kick the
+    # assertion assumed (that came from an older IC that pinned T_v0 = 295 K and
+    # left the column 39 % supersaturated). What this test exists to pin is the
+    # WINDOWING arithmetic — reported == second-half max — which the assertions
+    # above already cover.
     assert rows[1] > 0.0
 
 

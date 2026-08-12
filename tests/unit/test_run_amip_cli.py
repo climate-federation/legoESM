@@ -1633,16 +1633,23 @@ def test_gustiness_zi_threads_to_config():
     assert cfg.surface_gustiness_zi == 300.0
 
 
-def test_q_c_diagnostic_threads_to_config():
-    """--q-c-diagnostic must reach ExperimentConfig.cloud_q_c_diagnostic."""
+@pytest.mark.parametrize("value", ["3e-4", "1e-5"])
+def test_q_c_diagnostic_threads_to_config(value: str):
+    """--q-c-diagnostic must reach ExperimentConfig.cloud_q_c_diagnostic.
+
+    ``1e-5`` is the sub-production condensate-floor rung the AMIP campaign needs
+    to test coupled: it exercises the whole CLI route (parse -> postprocess ->
+    build -> validate_strict), not just the bound tuple.
+    """
     parser = build_arg_parser()
     args = parser.parse_args([
         "--dataset", "analytical",
-        "--q-c-diagnostic", "3e-4",
+        "--q-c-diagnostic", value,
     ])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(float(value))
+    cfg.validate_strict()
 
 
 def test_gustiness_defaults_scheme_native():
@@ -2606,6 +2613,36 @@ def test_cloud_optics_inhomogeneity_validate():
                      cloud_fsd=0.75).validate_strict()
 
 
+def test_cloud_saturation_scheme_round_trips_and_threads():
+    """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
+    into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
+    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--cloud-saturation-scheme", "mixed_phase",
+    ]), parser))
+    assert cfg.cloud_saturation_scheme == "mixed_phase"
+    cc = build_cloud_config(
+        cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
+    assert cc.saturation_scheme == "mixed_phase"
+    # default: 'liquid' => CloudConfig default (legacy path).
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_saturation_scheme == "liquid"
+    assert build_cloud_config(
+        d.cloud_scheme,
+        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+
+
+def test_cloud_saturation_scheme_validate():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_saturation_scheme"):
+        ExperimentConfig(cloud_saturation_scheme="bogus").validate_strict()
+    ExperimentConfig(cloud_saturation_scheme="mixed_phase").validate_strict()
+
+
 def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
     """--cloudtop-entrainment-efficiency round-trips (marine-Sc BL-top
     ventilation: thins excess Sc liquid cloud without an evap trade; the
@@ -3438,3 +3475,38 @@ def test_inplume_conversion_responds_to_rprcon():
     base = total_precip(1.4e-3, 3.0e-4)
     assert total_precip(5.6e-3, 3.0e-4) > base * 1.05
     assert total_precip(1.4e-3, 1.0e-4) > base
+
+
+def test_mpas_vert_advection_scheme_flag_flows_to_config():
+    """--mpas-vert-advection-scheme round-trips into DycoreConfig and is
+    rejected outside the MPAS sigma lane rather than running silently inert.
+
+    Default "upwind" = the first-order donor-cell path, bit-identical to
+    before; "van_leer" is the monotone 2nd-order TVD option that removes the
+    K_sigma = |sigma_dot|*dsigma/2 implicit diffusion measured at +0.822 K/day
+    at the tropical UTLS (91.4 hPa, cldF_fsd, N=37)."""
+    parser = build_arg_parser()
+    mpas = ["--dataset", "analytical", "--grid-type", "voronoi",
+            "--discretization", "mpas", "--vertical-coord", "sigma"]
+
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(mpas), parser))
+    assert cfg_default.dycore.mpas_vert_advection_scheme == "upwind"
+    cfg_default.validate_strict()
+
+    cfg_vl = build_config_from_args(_postprocess_args(parser.parse_args(
+        mpas + ["--mpas-vert-advection-scheme", "van_leer"]), parser))
+    assert cfg_vl.dycore.mpas_vert_advection_scheme == "van_leer"
+    cfg_vl.validate_strict()
+
+    # argparse choices reject a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(mpas + ["--mpas-vert-advection-scheme", "vanleer"])
+
+    # hybrid coordinate -> the operator is not wired there -> refuse.
+    cfg_hyb = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--discretization", "mpas", "--vertical-coord", "hybrid",
+         "--mpas-vert-advection-scheme", "van_leer"]), parser))
+    with pytest.raises(ValueError, match="sigma vertical coordinate only"):
+        cfg_hyb.validate_strict()

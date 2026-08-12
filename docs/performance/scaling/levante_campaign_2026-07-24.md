@@ -2422,3 +2422,671 @@ than attempted: the cheap, safe part (geometry hoist, 2.5 %) is a
 clean follow-up if wanted; the risky part is not worth ~3.7 % on a
 lane already at ratio 1.83-1.96. Consistent with the campaign's
 standing conclusion that the remaining distance is structural.
+
+## Recolouring the MPAS halo schedule is capped by Vizing — measured offline (2026-08-07)
+
+Both independent consults (codex + GLM-5.2, transcripts in
+`.physics-validator/scaling_campaign/codex_consult_hundreds_2026-08-07.md`)
+ranked the MPAS GPU lane as the top remaining structural lever: it is the
+worst-scaling lane we have (measured/modelled-bound 3.16x at s8@16 to
+4.47x at s9@64), and one halo fill costs 12-14 SEQUENTIAL ppermute rounds.
+Codex priced a new partition objective that minimizes round depth at
+300-800 LOC and 7-14 days, with an optimistic ceiling of 14.4% at s10@128
+(12 fewer SendRecv calls/step x 218 us) and a hardware-only floor of
+0.356 ms (12 x 29.7 us). That spread is why it must be measured.
+
+**Before spending any of that, the cheap question is whether recolouring is
+already exhausted** — and it is answerable offline, with no GPU, from the
+colourer's own lower bound. `_build_ppermute_schedule` produces a proper
+EDGE colouring of the device communication graph (one colour = one round,
+properness asserted), and the `max_degree` it returns is that same graph's
+maximum vertex degree. VIZING therefore bounds the chromatic index:
+`Delta <= chi' <= Delta + 1`. So `coloring_gap = n_rounds - max_degree`
+reads as:
+
+* `gap == 0` -> `n_rounds == Delta`; no proper edge colouring can beat
+  `Delta`. PROVABLY OPTIMAL, recolouring headroom exactly zero.
+* `gap == 1` -> INCONCLUSIVE. A Class 2 graph genuinely needs `Delta + 1`,
+  and Class 1 vs Class 2 is NP-complete.
+* `gap >= 2` -> recolouring removes at least `gap - 1` rounds, at most `gap`.
+
+MEASURED so far (`bench_voronoi_partition_methods.py --schedule-cost`, the
+existing partition-quality bench extended to call the production
+`spmd_schedule_cost` rather than its own 1-ring proxy):
+
+| mesh | n_dev | geometric | sfc | metis | gap | strategy |
+|---|---|---|---|---|---|---|
+| L2/L3/L4 | 2-16 | rounds = n_dev-1 mostly | same | - | 0 everywhere | allgather (COUNTERFACTUAL) |
+| L6 lloyd=0 | 8 | 7 | 7 | 6 | 0 | ppermute (5,121 cells/dev) |
+| L6 lloyd=0 | 16 | 13 | 10 | 10 | 0 | ppermute (2,561 cells/dev) |
+| L8 lloyd=0 | 64 | 16 | - | - | 0 | ppermute |
+
+Two scope notes that must travel with these numbers:
+
+* The small-mesh rows are COUNTERFACTUAL: every one auto-selects the
+  ALLGATHER strategy (cells/device below the threshold), so production runs
+  no ppermute schedule there. Only L6@16 upward are real. L6@8's
+  `rounds == n_dev - 1` is complete-graph saturation and says nothing.
+* `gap == 0` rules out a better UNDIRECTED edge colouring of THIS graph and
+  nothing more. `_build_ppermute_schedule` enters a device pair into
+  `comm_pairs` when EITHER direction has a halo dependency and then emits
+  BOTH ppermute directions, even where one send map is empty — so a
+  redesigned DIRECTED schedule exploiting one-way exchanges is not bounded
+  by `Delta` at all. This is a THIRD path, not a two-way choice between
+  colouring and ownership.
+
+The neighbour fan-out that the bench's first layer already reported is NOT
+a stand-in for any of this: at L6@16 it reads 8/8/7 for
+geometric/sfc/metis while the real schedule reads 13/10/10.
+
+Job 26770026 (CPU `shared`, 24 h, zero GPU hours) scores the production
+working points s8/s9 @64,128 and s10@128. Arms 1-2 are a MECHANICAL
+instrument check via `--expect-rounds` against the reference census in
+`spmd_schedule_cost`'s docstring (s8 sfc 12/14, metis 13/19, geometric
+16/21; s9 sfc 11/13, metis 14/18, geometric 14/18); arm 3's unknown s10
+number is only produced if both pass, because an instrument that misses the
+known answer cannot be trusted on the unknown one. The first production row
+to land, s8 geometric@64 = 16 rounds, reproduces the census exactly — a
+spot check, not yet the validation, which is the full six-row gate.
+
+Eight codex adversarial rounds on this change (transcripts
+`codex_review_schedule_cost{,_r2..r8}_2026-08-07.md`); round 8 SHIP. The
+defects it caught are worth recording because most were in the INSTRUMENT,
+not the model: a headroom figure documented backwards (`gap-1` is the
+GUARANTEED reduction, not the maximum); a launcher that filed a scan with
+no results as COMPLETED; an artifact guard that passed on
+`{"rows": {"n_ranks": 1}}` because iterating a dict yields its keys; a
+`--expect-rounds` gate bypassable by whitespace or a duplicate key; and a
+first-draft test that was VACUOUS — hardcoding `coloring_gap = 0` passed
+every fast fixture, because the true gap is 0 on all of them.
+
+KNOWN GAP, reported not fixed: `tests/bench/` is not executed by the CI
+test jobs (they run `tests/unit/` and selected paths), so neither these
+tests nor any other test in `tests/bench/` is CI-enforced. Repo-wide and
+pre-existing; Actions have been disabled repo-wide since 2026-05-27 in any
+case, so a targeted wiring change here would be inert.
+
+## The nsys collective census on the MPAS lane is UNRELIABLE (2026-08-07)
+
+Do not build another MPAS attribution on an Nsight Systems capture until this
+is resolved. The traces silently omit the very kernels being measured, with no
+error and no missing-data marker.
+
+Evidence, three independent captures:
+
+| capture | rank / arm | total kernels | SendRecv kernels |
+|---|---|---|---|
+| 26680051 (single-rank) | rank 0, physics=none | — | 288 |
+| 26772084 (skew, 4 ranks) | rank 0 | 187,606 | 96 |
+| 26772084 | rank 2 | 188,312 | 317 |
+| 26772084 | rank 1 | 187,247 | **0** |
+| 26772084 | rank 3 | 187,316 | **0** |
+| 26772734 (payload A/B) | dry, physics=none | 187,247 | **0** |
+| 26772734 | wet, physics=kessler | 276,656 | 124 |
+
+The zero rows are not runs without collectives: the dry arm's own receipt
+records `halo_strategy_effective: ppermute` and a 9.74 ms step, i.e. the
+halo exchange ran. Note also that the dry arm and skew rank 1 report the
+IDENTICAL total of 187,247 kernels — the same systematic omission, not
+random loss.
+
+What survives and what does not:
+
+* The DURATION median is robust — 216.2 / 212.4 / 213.5 us across three
+  captures on different jobs. Quote it.
+* Any COUNT from these traces is not. The 288-call structure that recovered
+  the traced run's `--reorder-for 128` provenance happened to be
+  self-consistent (8 rounds x 3 fills x 12 steps), but that consistency was
+  luck, not a guarantee, and it cannot be relied on again.
+
+CONSEQUENCE for the open payload-vs-wait question: it is NOT answerable by
+more nsys jobs. Two arms were run at a fixed schedule with the packed cell
+record changed from 28 to 106 values (`--physics none` vs `kessler`, mesh /
+device count / partition / reorder target identical); the wet arm captured
+124 collectives and the dry arm none, so there is nothing to compare. The
+next instrument should be an HLO-level collective census or the XLA profiler,
+both of which count what the compiled executable contains rather than what a
+sampling profiler happened to record.
+
+Also fixed along the way, and both would silently corrupt any future capture:
+`ncclDevKernel_SendRecv` is recorded under `shortName`, NOT `demangledName`,
+in some of these traces (querying the wrong column reads as "no collectives");
+and nsys sets `QUADD_INJECTION_PROXY`, which JAX treats as distributed
+coordinator configuration and hangs on — since only the PROFILED ranks get it,
+they diverge from the rest and the whole job deadlocks in init.
+
+## Cube lane: a measurement that does NOT reconcile (2026-08-07)
+
+RETRACTED, same day it was said: I reported that a fresh 24->54 GPU
+measurement "kills the cube scales at 1.04 picture". It does not. The 1.04
+came from `6->24` on the cs-spmd row (job 26453782); mine is
+`bench_cube_tiled_step_scaling.py` at 24->54. Different benches, different
+rungs — comparing them is the confound this campaign has a standing rule
+against, and I made it.
+
+What was actually measured (job 26772775, BOTH rungs in ONE job on ONE node
+set, so this part is internally controlled):
+
+| rung | ms/step | ppermutes/step |
+|---|---|---|
+| C768/L60 kt=2, 24 GPUs | 67.54 | 123 |
+| C768/L60 kt=3, 54 GPUs | 52.85 |  99 |
+
+24->54 = 1.278x on 2.25x devices = **efficiency 0.568**. Not tile-floor
+limited: C768 leaves 147.5k columns/GPU at 24 and 65.6k at 54, both far above
+the ~30k floor.
+
+THE UNRECONCILED NUMBER, which blocks any cube optimisation: the campaign's
+own row records C768/L60 at 24 A100 as **14.09 ms/step**; this bench reports
+**67.54 ms** for a nominally identical resolution, level count and device
+count — 4.8x apart. Either they are different code paths (likely: face-sharded
+cs-spmd vs the tiled `6*kt^2` lane) or one of them is mismeasured. Until that
+is settled, no cube number here can be compared to the campaign's, and the
+0.568 cannot be called a regression or a limit.
+
+AND THE LEVER DOES NOT PAY ON THIS EVIDENCE. The exchange structure is real
+and was censused from the compiled module: 396 collective-permutes on a CPU
+24-device proxy fall into just 12 distinct directions (the documented schedule
+— 4 edge strips + 4 guard slivers + 4 corner rounds), so the step CALLS the
+exchange ~33 times, once per field, exactly the shape lat-lon fixed with a
+packed multi-field pad. `packed_pad_halo_4d` already implements that idea but
+requires the face-sharded `(6, n, n)` prefix, so the TILED lane has no packed
+variant. Tempting — but price it first: 123 collectives x 29.7 us = 3.65 ms,
+which is **5.4 % of the measured 67.54 ms step**. Even removing EVERY
+collective cannot pay for the work. The cube's time is not in its halo on this
+lane, and the 4.8x reconciliation is the thing to chase instead.
+
+(GPU combines collective-permutes ~3.2x: the CPU proxy shows 396 where the GPU
+executable holds 123. Use the proxy for STRUCTURE, never for the count.)
+
+## Cube known-answer check came back OFF, on a dirty tree (2026-08-09 recovery)
+
+The rerun designed above (`cube_bound_anchor.sbatch`, job 26804520,
+2026-08-08) was left unanalysed by a session drop. Its own gate says the
+result may not be quoted:
+
+| arm | result |
+|---|---|
+| 0: C384/L60 kt2 @24 closed (known answer 9.01 ms, job 26452632) | **13.19 ms** — 1.46x off, GATE FAILED |
+| 1: C768 kt2 @24 closed | CRASHED (coordination SetError) |
+| 2: C768 kt3 @54 closed | CRASHED (coordination SetError) |
+
+Two facts about arm 0's provenance decide nothing yet but scope the causes:
+it ran on git sha `6fc6be9ea-dirty` — the dropped session's UNCOMMITTED
+state — and two weeks of merges separate it from the 9.01 anchor
+(clean `9051c5126`, 2026-07-24). So either (a) a real ~46% regression
+merged into the tiled lane since 07-24, or (b) the dirty working tree
+slowed it. Discriminator submitted: `cube_c384_anchor_recheck.sbatch`
+(job 26818796) — same arm on CLEAN current main, refuses to run on a
+dirty tree. ~9 ms => (b), close; ~13 ms => (a), bisect the window.
+
+The C768 arms' 24->54 ratio therefore still has no valid closed-loop
+measurement; do not quote 0.568 (that was the single-shot lane) nor any
+number from 26804520 past arm 0.
+
+## Ocean-MPAS CPU rank-count term ATTRIBUTED (2026-08-09, jobs 26819741/26819928/26820126/26820412)
+
+The 1.65x-at-matched-tile mystery (s7@32 vs s8@128, 5120 cells/rank) is
+now a measured decomposition, not a label. Current-code delta D = 42-44
+ms (ratio 1.47-1.48, three replicates; the 1.65 was July code). Census
+first (call-path confirmed): one ocean step = 35 halo epochs + 65
+allreduces = ~100 sync points; the 10-substep barotropic scan holds 30
+epochs + 60 reductions (eta-floor clamp = 3 allreduces x 2 sites x 10
+substeps). The atm lane: 3 epochs + 1 reduction — no term, as measured.
+
+| discriminator | receipt | verdict |
+|---|---|---|
+| substeps 10->5, D(5)/D(10) | 0.795 / 0.851 (2 passes) | scan carries only 30-41% of D; per-SYNC-POINT-uniform cost REFUTED (scan = 90/100 sync points) |
+| s7@32 spread 4 nodes vs packed | 0.947 (faster) | fabric/placement REFUTED |
+| conservation fixer OFF (removes all 5 non-scan reductions) | D_off 54.0 > D_on 44.5 | non-scan reductions REFUTED; fixer-off SLOWED np128 by 8 ms (PLAUSIBLE: longer fused segments = more jitter exposure; single run) |
+| JAX-free spin+barrier probe, 2.5 ms segments | amp 1.033@32 -> 1.094@128 | OS/BSP jitter contributes ~15 ms (~1/3 of D) — real, not sufficient |
+| s8 same-mesh ladder 32/64/128 | 400.7/232.7/132.5 ms (1.72/1.76 per doubling) | no wall; splits D into mesh-size ~10 ms + rank-growth ~32 ms |
+
+Segment-length-proportional stalling (the GLM-5.2 BSP tail-latency
+model) fits the 30-41% scan share (scan segments are short); the ~17 ms
+rank-growth remainder above the pure-MPI jitter floor is PLAUSIBLY the
+mpi4jax host-callback sync cost itself (unmeasured directly — the
+rotted per-epoch micro was dropped; VoronoiHaloExchange.exchange_cell_field
+still references the removed layout.cell_comm, reported not fixed).
+
+PRODUCTION LEVER, mechanism-independent: every sync point carries
+rank-growing cost, so cut sync points — (1) the eta-floor clamp's 60
+allreduces/step (n_iter 3 x 2 sites x 10 substeps; E3SM avoids global
+reductions inside barotropic substepping entirely), (2) fuse the 3
+per-substep exchanges into 1 (30 -> 10 epochs). Both touch production
+numerics -> physics-validator + codex chain when picked up.
+
+### Cube known-answer RESOLVED (2026-08-09, job 26823000)
+
+CLEAN main reproduces the anchor: C384/L60 kt2 @24 closed-loop =
+**8.97 ms/step** (anchor 9.01, job 26452632). The 13.19 ms from job
+26804520 was a DIRTY-TREE artifact (sha 6fc6be9ea-dirty), not a merged
+regression — no bisect needed. Two operational causes burned first:
+26818796 refused on the shared worktree being mid-iteration dirty (the
+guard working as designed — submit from a clean tree), and 26821454
+timed out with l50100 (the phase-7 sick node) in its allocation; the
+exclusion is now baked into the launcher. Cube lane state: tiled-lane
+anchor healthy; the halo lever remains DEAD there (5.4% ceiling); the
+open cube item is only the C768 24->54 closed-loop ladder (arms crashed
+in 26804520 on coordination errors — rerun when worth a slot).
+
+## RAGGED HALO FILL — the MPAS structural lever LANDS (2026-08-09)
+
+PR #1512 closed recolouring (Vizing gap 0 — the coloured schedule was
+optimal); the remaining lever was the ROUND STRUCTURE itself. jax 0.10
+exposes ragged_all_to_all (grouped P2P, one collective for all
+neighbours — the MPAS-A/ICON-GPU concurrent-isend pattern; JVP+transpose
+registered; XLA:CPU has NO thunk, so every gate is a GPU job).
+
+| stage | receipt |
+|---|---|
+| synthetic microbench (26818265, in-job exact verify) | per-fill ratio ragged/coloured: 1.27@nd4 (loses intra-node), 0.746@nd8, **0.475@nd16** — advantage grows with scale; uniform a2a competitive small-n but O(n_dev) inflated |
+| schedule row-identity | tests/parallel/test_ragged_halo_schedule.py: transfer-set equality with the ppermute schedule (shared _build_halo_send_maps) |
+| GPU parity (26821453) | u/T/p_s vs serial reference OK at s6@4, halo_strategy_effective=ppermute_ragged bound in the receipt |
+| production A/B/A2 (26822138+26824483) | s8@16: ppermute 7.08/7.21 ms, **ragged 4.86 ms — ratio 0.686 (-31% FULL STEP)**, drift 1.8%, pre-registered gate CONFIRMED |
+
+Opt-in: LEGOESM_MPAS_RAGGED_HALO=1 (explicit '1'; auto-allgather tiles
+unaffected; ppermute default untouched). Open: AD unexercised on this
+path; scale receipts s9/s10@64-128; default-on decision after those.
+Ops debris burned on the way (all fixed in-branch): census KeyError
+killing multicontroller arms post-timing; ~50 min/arm s8@16 host
+reorder forcing banked-arm job structure; XLA sharded-autotune cache
+desync from a shared persistent cache (per-job cache now); l50100.
+
+### Ragged halo at scale: a SCALE-BANDED lever (2026-08-09 evening)
+
+| receipt | ppermute | ragged | ratio |
+|---|---|---|---|
+| production s8@16 (26822138/26824483) | 7.08/7.21 ms | 4.86 | **0.686 WIN** |
+| production s9@64 (26824688, drift 1.5%) | 10.35/10.19 | 12.43 | **1.220 LOSS** |
+| synthetic fixed degree-10/payload (26825475 + 26818265) | 1008 / 1484 / 1471 us @16/32/64 | 478 / 647 / **1103** | 0.475 / 0.436 / 0.750 |
+
+The ragged collective's own cost GROWS with rank count at fixed traffic:
++625 us from nd16->nd64 ~= 49 extra zero-size slices x ~12 us — the
+unpruned-no-op cost GLM-5.2 flagged as make-or-break, CONFIRMED by the
+pre-registered discriminator. Production flips to a loss earlier than
+the synthetic (bigger buffers + the s_max-padded gather:
+int32[64,2,149795] stacked metadata at s9@64). Feature stays opt-in
+OFF; band edge (32 devices) receipt = job 26825520; if it wins, the
+follow-up is an auto dispatch (ragged <= band, coloured above), and the
+structural fix beyond that is upstream zero-slice pruning in XLA's
+ragged thunk.
+
+### RETRACTION: the cube 13.19 was PLACEMENT, not the dirty tree (2026-08-09 evening)
+
+Job 26825926 (clean main) reproduced **13.47 ms** on the same
+known-answer arm that read 8.97 this morning — the "dirty-state
+artifact" conclusion is RETRACTED. The real confound across all four
+runs: launchers that pin `--nodes=6 --ntasks-per-node=4` read ~9 ms
+(26452632, 26823000); launchers whose srun lines omit placement under a
+14-node allocation spread 24 tasks wide and read 13.2-13.5 ms
+(26804520 "dirty", 26825926 clean). Same lane, ~1.5x from node
+placement alone. cube_bound_anchor now pins both 24-rank arms.
+Additionally the C768 kt=3 @54 arm dies on HOST OOM — the tiled cube
+bench still builds global state per rank (the #1370 residency wall,
+fixed for the ocean lane, never ported here) — arm disabled with the
+blocker named; kt=2 C768 @24 rerun = job 26826088.
+Lesson (controlled-comparison rule, again): a discriminator job whose
+placement differs from the runs it arbitrates arbitrates NOTHING.
+
+### Cube placement split CONFIRMED; C768 ladder blocked on the bench residency wall (2026-08-09)
+
+Pinned rerun (job 26826088): known-answer arm = **8.91 ms** — the
+placement split now has four points: pinned-6-node 9.01/8.97/8.91 vs
+spread-14-node 13.19/13.47. Placement is the whole story; tree state
+never mattered.
+C768 @24 kt2 ALSO host-OOMs when pinned (4 ranks/node x per-rank global
+C768 build) — both C768 arms are blocked on the SAME wall: the tiled
+cube bench builds the global model/state on every rank
+(the #1370 residency issue; the ocean lane's fix — global build under
+jax.default_device(cpu) + addressable shard puts, commit e1b502000 —
+was never ported to bench_cube_tiled_step_scaling.py). NAMED NEXT ITEM
+for the cube lane; the C768 24->54 closed-loop ratio stays unmeasured
+until it lands.
+
+### C768 closed-loop ladder MEASURED; the cube halo lever REPRICED ALIVE (2026-08-09)
+
+Job 26826851 (both rungs one job, 2 rpn matched, dt=30 — the 26826706
+failure was CFL non-finite at dt=60, not memory; the OOM fix was 2
+ranks/node, closed-loop C768 = 46.5 GB host/task):
+
+| rung | ms/step |
+|---|---|
+| C768/L60 kt2 @24 closed | 18.93 |
+| C768/L60 kt3 @54 closed | 15.22 |
+
+24->54 = 1.244x on 2.25x devices = **eff 0.553** at 147k->65k cols/GPU
+(far above the tile floor) — the single-shot lane's 0.568 REPRODUCES on
+the production assembly: a real cube scale-out deficit.
+REPRICE: the halo-lever "5.4%, does not pay" verdict divided the 3.65 ms
+collective cost by the single-shot 67.54 ms step; against the CLOSED
+loop's 18.93 ms it is **~19% at 24 devices** — the packed multi-field
+pad for the tiled lane (packed_pad_halo_4d exists face-sharded only) is
+back on the table as the next cube lever.
+
+### Cube fused wave-A halo: REFUTED on GPU — XLA already does it (2026-08-09 night)
+
+Implemented (dtype-grouped multi-pad, 8->3 exchange calls/stage,
+bit-identical on CPU + >=1.5x CPU CP cut enforced by test, codex SHIP)
+and A/B'd at the banked C768@24 closed-loop protocol (job 26828313):
+
+| arm | ms/step | HLO CPs |
+|---|---|---|
+| off (A/A2) | 19.26 / 19.03 | 101 |
+| fused (B) | 20.28 | 96 |
+
+ratio 1.066, drift 1.2% — **REFUTED by the pre-registered gate, with
+the mechanism on the receipt**: the GPU module holds 101 CPs where the
+CPU proxy holds 384 — XLA's collective-permute COMBINER had already
+fused the per-field exchanges on GPU; source-level fusion saved 5 CPs
+and added concat/split traffic. (Same lesson class as consult #3, the
+2-D pencil fused pad: a lever confirmed on one lane/compiler path does
+not transfer by analogy — and here the CPU census was the misleading
+proxy; GPU counts are the only ones that price GPU levers.)
+Code REVERTED same-day (delete-before-adding); the receipts + launcher
+diff live in this branch's history. The cube deficit (eff 0.553)
+therefore is NOT collective-count-bound at 24 devices — remaining
+candidates: per-CP latency floors x 101, launch-bound compute (the
+MPAS nsys story), or skew; next instrument = nsys on the closed-loop
+C768 step.
+
+### Cube deficit ATTRIBUTED: 81% of the step is non-kernel wall (2026-08-09 night, job 26829838)
+
+nsys capture of the closed-loop C768@24 step (19.46 ms with profiler ~=
+19.0 unprofiled; ranks 0/1 co-located; analyzer
+scripts/bench/analyze_nsys_kernel_mix.py, loop burst located by kernel
+density — the naive tail window reads setup all-gathers instead):
+
+| bucket | per step | share of wall |
+|---|---|---|
+| ncclDevKernel_SendRecv | ~2.9 ms (median 62 us) | 15% |
+| other NCCL | ~0.4 ms | 2% |
+| compute kernels | ~0.35 ms (n~28, median 1.7 us) | 1.8% |
+| **gaps (no kernel)** | **~15.7 ms** | **~81%** |
+
+With 101 collective-permutes per compiled step, the gap works out to
+~155 us of effective host/launch/sync overhead per sequential
+collective — the SoL-class launch floor, the same regime the lat-lon
+bound analysis inferred (ratio 2.35-3.2 "per-CP effective overhead").
+MEASURED: the kernel shares above. PLAUSIBLE: the gaps are host
+dispatch/sync rather than inter-rank wait (single-rank view; the
+rank-0/1 pair skew analysis would split it). Fix class: fewer
+SEQUENTIAL collective epochs — stage-graph restructuring or upstream
+XLA/NCCL (device-side collective launch) — consistent with every lane's
+measured ceiling. Cheap source-level levers on this lane are now
+exhausted with receipts: count (fused halo, refuted — XLA combines),
+payload (62 us median vs 30 us wire — modest), compute (1.8%).
+
+## 2026-08-10: wide halo built+refuted, the latency-floor model falsified, and the step finally ATTRIBUTED
+
+Directive: continue toward theoretical limits, MPAS first, SOTA source
+as reference, consult codex + GLM-5.2 each round.
+
+**Wide halo (communication-avoiding step) — built, confirmed offline,
+refuted at scale.** Both consults ranked it #1 (the CA construction
+MPAS-A/ICON left on the table because their compute fraction rewards
+overlap; ours doesn't). Offline discriminator (job 26845329): depth-9
+comm graph colours to the SAME 11 rounds, extents +17%. Implementation
+(LEGOESM_MPAS_WIDE_HALO=1, default off): one depth-evals*3 fill/step,
+whole RK body inside shard_map, per-eval shrinking masks from a
+ring-BFS with a trace-time eval-counter assert; scan integrators
+refused. Codex review: 2 P1 + 1 P2 — the union-graph mask "fix" for P1
+then FAILED the s6@4 GPU parity gate (u 4e-2) and was reverted to the
+certified metric (the gate caught a regression the CPU tests missed —
+budget-the-review-loop, and budget-the-parity-gate). GPU A/B/A2
+(26846337, drift 0.2%): wide/off = 0.970. Census of the wide
+executable (26851745 dump): 13 collective-permutes vs 33 — the cut was
+real, the win was 3%. VERDICT: the per-collective latency-floor model
+of this lane is FALSIFIED (marginal collective ~15 us, not 155-310).
+
+**Also null this day, each with a receipt:** command buffers on the
+wide step's ~150-kernel collective-free segment (26848729: 10.05 vs
+10.00); per-step host sync/dispatch (async-dispatch window, 26852731:
+scan/loop 0.964). Every source-level lever moves the step ~3%.
+
+**The step is now ATTRIBUTED (XLA-profiler thunk timeline, ranks 0-3,
+job 26854741; instrument: bench --profile-dir +
+analyze_jax_trace_gaps.py — built because nsys silently drops
+ncclDevKernel rows on this lane):** per 10.6 ms step, 7.1 ms INSIDE
+collective kernels (median 163-309 us vs ~30 us wire), 2.4 ms compute
+(23% — the old "compute is 2%" number came from the broken nsys
+capture and is RETRACTED), 1.2 ms gaps (11% — launch-floor story dead
+on this lane). Cross-rank overlap-matched collective timing
+(END-coincidence calibration PASSED at 63 us): median START spread 89
+us, p90 360 us on 285 us durations — a large share of in-kernel time
+is ARRIVAL WAIT, and per-rank compute is balanced to ~1%, so the skew
+is generated by the sequential round chain itself (a rank's CPs
+execute in global round order; partner wavefronts couple the whole
+machine every round). Consistent with GLM-5.2's skew-conservation
+reading of the wide-null: total drained skew is invariant to
+sync-point count.
+
+**Consult union (codex + GLM-5.2, both transcripts in session logs)
+for what remains:** (1) ensemble/batch axis = the throughput story
+both engines rank first; (2) physical-time-per-wall (IMEX/HEVI atm,
+split-explicit ocean) — fewer steps, not faster steps; (3) system-tail
+isolation (GPU clock lock — the day's l50000 GPU3 failure class,
+throttle sampler now in the trace launcher; NCCL proxy NUMA pinning;
+IB adaptive-routing check); (4) per-shard compute rebalance (now
+DEPRIORITIZED: compute measured balanced); (5) true sparse pairwise
+NCCL transport via FFI (microbench-gated; psend/precv is NOT a drop-in
+— 2-cycles deadlock); (6) padding-aware colouring (offline audit
+queued); (7) bf16 wire (<=6% ceiling). Upstream: openxla/xla#46982
+filed (ragged zero-slice O(n_dev) cost, our microbench numbers).
+
+**FESOM2 native reference (user directive): LANDED on the paper
+figure** (oc_mpas panel). CORE2 mesh, prebuilt AWI binary, ladder
+32-512 ranks, init-free (T4d-T2d)/72 timing: 393/380/171/84/35
+ms/step (np<=128 packed on one node — labelled). Two ops potholes
+documented in the launcher: Intel automatic-array stack segfault in
+g_ic3d (ulimit -s unlimited) and '<add path>' runoff placeholders in
+the generic namelist.forcing (use .JRA). NAMED GAP: our ocean-MPAS
+f64 lane flattens 256->512 where FESOM2 keeps scaling.
+
+**Ops:** l50000 GPU3 died ~14:00 (recurring "Failed to load in-memory
+CUBIN" on device ordinal 3; first abort = task 3 on l50000 in every
+failing job; node-set/cache/dump hypotheses all retracted against
+receipts). Excluded in all launchers until DKRZ resolves. Also: the
+XLA profiler's 1M-event cap silently fills with compile-phase host
+events if the trace spans compile — trace steady steps only.
+
+### RETRACTION (same evening): the cross-rank start-spread numbers are invalid
+
+The "median START spread 89 us / p90 360 us, calibration passed" claim
+is RETRACTED. Two instrument defects, found by self-check + codex
+review of the analyzer: (1) jax trace timestamps are RELATIVE to each
+process's own start_trace call (first event ~1.4 ms on every rank), so
+raw cross-rank deltas carry the per-process trace-start offset — itself
+a skew-class quantity; (2) after END-anchored offset correction the END
+spread does NOT collapse (64 us residual), which exposes the deeper
+flaw: overlap-based matching pairs collectives of CONCURRENT rounds
+whose ranks are NOT partners, and non-partner ends have no coincidence
+property to calibrate on. The per-rank attribution (7.1 ms
+in-collective / 2.4 ms compute / 1.2 ms gaps per step) is single-clock
+and STANDS. A quotable spread needs PARTNER-AWARE matching against the
+ppermute schedule (round -> partner map from spmd_schedule_cost);
+until then the skew reading rests on the indirect evidence (in-kernel
+215 us vs 30 us wire + the wide-halo drain-conservation null), which
+is PLAUSIBLE, not CONFIRMED.
+
+## THE LEVER LANDS: size-aware halo colouring — s9@64 10.2 -> 8.11 ms (2026-08-10 night)
+
+The padding audit (26855933/26856854) measured the coloured schedule
+shipping 2.926x the needed wire bytes (padded 512 MB vs actual 175 MB
+per fill; every pair sends the round maximum because the ppermute index
+arrays are shape-uniform). On a node-NIC-saturated lane (~13.5
+GB/s/node effective, HDR200 practical) that inflation IS the step: the
+padded-byte lens retro-explains the wide-halo null (byte-conserving),
+the graphs/overlap/scan nulls, and ragged's small-scale win
+(exact-sized sends).
+
+Fix: regroup pairs by payload size at the SAME round count — seed
+colourings + a round-preserving local search minimizing the padded
+weight in true entity widths (nlev+2 vs nlev). Offline: padded bytes
+-26% (inflation 2.926 -> 2.162, job 26856854 after the worktree-import
+fix). Production A/B/A2 (26857404, drift 1.7%, parity u 7e-5):
+**ratio 0.803 — 10.10/10.27 vs 8.11 ms/step**, matching the model's
+-17% prediction. Landed DEFAULT ON (bit-identical results; escape
+LEGOESM_MPAS_SIZE_COLORING=0); determinism hardened with full sort
+tie-breaks (multicontroller processes derive schedules independently);
+codex round-2 findings all fixed (true-width proxy, determinism +
+bidirectional tests, stale legacy assertion). Known pre-existing:
+test_schedule_reaches_floor_on_real_mesh fails 15<15 with the diff
+stashed — fixture drift, not this change.
+
+Remaining MPAS headroom, receipts-backed: inflation floor 2.16 at
+fixed rounds (+1-round colouring variants untried); per-rank
+participation balancing (partner-aware skew receipts show the
+critical path = the max-participation rank's chain: rank0-rank2
+arrival offsets up to 931 us median); exact-size transport (upstream
+ragged zero-slice fix, openxla/xla#46982). Ragged auto-band (<=32)
+needs re-arbitration against the faster size-coloured baseline.
+### Eta-floor reductions REFUTED as a term; deferred surgery CANCELLED (2026-08-09 night, job 26830468)
+
+--eta-floor-iters 3->1 (60 -> 20 batched allreduces/step, epochs
+unchanged): s8@128 132.35 -> 131.91 ms, D(1)/D(3) = 1.004. The scan's
+share of the rank-count delta is entirely its HALO EPOCHS; the batched
+allreduces are effectively free on this stack. Per the pre-registered
+gate, the E3SM-style deferred-redistribution surgery is CANCELLED —
+a 4-arm minutes-scale CPU job saved the full numerics + physics-review
+chain. Epoch-count reduction here means wide-halo, which is ALREADY the
+receipted f32 recommendation (1.76x at nd16, config decision table).
+The eta_floor_clamp_iters knob ships (default 3 = production
+unchanged) as the instrument of record.
+
+CAMPAIGN STATE after this: every named in-repo lever on all three
+grids is measured, landed, or refuted with receipts. Landed today:
+ragged halo (-31% @16 / -27% @32, auto band dispatch). Structural
+remainder (upstream/redesign class): device-side collective launch
+(cube 155 us/collective floor, MPAS microkernel storm), XLA ragged
+zero-slice pruning (>32-device band), mpi4jax callback cost + BSP
+jitter (ocean CPU), stage-graph restructuring.
+
+### Post-landing ladder (jobs 26859802/26859803, size-colouring default)
+
+s9: 21.22 / 10.52 / 8.40 ms at 16/32/64 GPUs (-16% @32, -12.5% @64 vs
+the pre-colouring rows). **s10@128: 17.01 ms = 16.03 GC/s — new MPAS
+record** (previous 14.98 GC/s). Ragged auto-band check: ragged s9@32
+(9.78) still beats the new coloured 10.52 — the <=32 band stands, with
+the margin narrowed from 0.686 to 0.93; s8@16 re-arbitration deferred
+until that row is next refreshed.
+
+## Lat-lon lane attribution (2026-08-11 early, job 26861205)
+
+Trace instrument ported (timed_scan_blocks trace_dir; timed blocks
+only). LL2048@64 DEFAULT lane, 24 traced steps: 6.25 ms/step =
+**53% compute (3.30 ms) + 43% in-collective (2.71 ms; ~13
+collectives/step, medians 178-240 us) + 4% gaps**. Contrast MPAS
+pre-fix (70% in-collective, deterministic chain skew): lat-lon is
+near-balanced — pencil halos are shape-uniform (no padding lever) and
+raw cross-rank spreads are ~60-95 us (small skew; overlap-matched, so
+indicative only). The remaining ratio-1.4 excess splits roughly evenly
+between collective latency (~2x wire) and compute; NOTE this arm ran
+the default flags — the fused+overlap receipt (5.278 ms) already
+shaves the collective share. Lever candidates for the morning consult:
+bf16 wire on the pencil halo (bytes are the collective term), compute
+kernel work, and whether fused+overlap's 5.28 ms profile shifts the
+split further.
+
+### Lat-lon compute discriminators (2026-08-11 morning, offline on the fused trace)
+
+GLM-5.2's ranked test executed: compute side = 200 kernels/step,
+median 3.7 us, 120/step under 10 us — a microkernel storm; ~12% HBM
+utilization against ~0.4 ms of unavoidable traffic. Top kernel:
+input_transpose_fusion (370 us/step, 11% of compute — layout churn).
+Collectives 13/step (>6 — structural collapse also still available);
+no per-step communicator init. No horizontal-fusion flag exists in
+this XLA build — the lever is SOURCE-LEVEL fusion (fewer, bigger
+fusions; kill the transposes; pack RK-stage axpys). Codex reading the
+step source for the transpose origin + smallest first slice.
+
+### Axis-0 PPM slice: NULL — the transposes are XLA layout artifacts (2026-08-11)
+
+The native axis-0 edge-value sweep landed (bit-parity + jaxpr
+transpose-absence tests) and the acceptance trace (26862943) shows
+input_transpose_fusion_12 UNCHANGED (8.94 -> 9.48 ms/24 steps; grand
+totals 143.7 vs 144.0 ms — noise). RETRACTION of the source
+attribution: the transpose family is inserted by XLA's LAYOUT
+ASSIGNMENT (operand layout vs preferred fusion layout), not by the
+source moveaxis pair — removing the source op does not stop XLA from
+materializing a transposed copy where it prefers a different
+minor-dimension order. The slice stays (harmless, coupled by tests);
+the codex static reading is falsified at the compiler level. Next
+instrument: HLO dump of the compiled lat-lon step — read
+input_transpose_fusion_12's operand/result LAYOUTS ({...} annotations)
+and its consumer, then decide between entry-layout forcing, array
+re-ordering at the state level ((lev, lat, lon) storage), or accepting
+the layout tax. Compute-fusion campaign continues only with
+layout-level evidence.
+
+### Lat-lon layout census (job 26863320) + reprioritization
+
+HLO dump read: fused_transpose.12's operands are (lev, lat, lon)
+f32[26,32,4096]-class arrays and its outputs transpose(dimensions=
+{1,2,0}) back to the state's (lat, lon, lev) — XLA schedules the
+tendency pipeline lev-leading and pays a layout boundary back to the
+scan carry each stage. Fix classes (state storage flip; carry-level
+layout hoist) are deep for a BOUNDED prize: the whole transpose family
+is 0.5 ms/step = 8% of the 6.25 ms step. PARKED with the evidence in
+hand. By magnitude the next lat-lon lever is COLLECTIVE COLLAPSE:
+13 collectives/step (GLM category "collapse further"); codex found the
+single-field PPM fold-halo exchange family (latlon_spmd.py:459) is NOT
+covered by the fused three-field wall pad — folding it in is the next
+slice (~1 ms/step class).
+
+### Collective-collapse slice DESIGNED (not yet implemented)
+
+Per stage the sigma PPM path runs TWO band exchanges: the fused
+entry pad (pad_with_pole_bc_lat_multi, wall-BC lat pad, 1 ppermute
+pair) and the PPM transport's own pad_halo_latlon_3d(T, halo=2)
+(pole-FOLD semantics, 1 pair) — 4 collectives/stage, 13/step. They
+cannot be merged by widening the wall-BC pad: boundary semantics
+differ at the pole bands (constant wall values vs fold). The correct
+surgery, anticipated by the helper's own docstring ("boundary
+handling is field-specific, while the interior-cut exchange this
+helper fuses is flag-independent"): factor ONE fused interior-cut
+exchange at halo=2 carrying T/u/dp(/p_s) + apply per-field boundary
+handling (wall constants vs fold) AFTER the exchange, then thread the
+fold-padded T into cgrid_fv_scalar_advection_latlon_3d's existing
+q_pad parameter. Saves 1 pair/stage = 6 of 13 collectives/step
+(~0.8-1.0 ms class). Gates: band-vs-serial bit-parity suites, sharded
+step tests, then the standard A/B/A2.
+
+### Mixed-pad slice: REFUTED and REVERTED (2026-08-11 morning)
+
+Production A/B/A2 (26864285, drift 0.0%): mixed/off = 0.983 — removing
+6 of 13 collectives/step bought 1.7%. Reverted same-day per the
+delete-before-adding precedent (implementation + bit-parity receipts
+live in this branch's history; the escape-hatch A/B protocol worked
+exactly as designed).
+
+**Cross-lane law, now receipted on BOTH lanes:** on this XLA/NCCL
+stack the sequential-collective COUNT is nearly free (~15 us marginal
+on MPAS, ~18 us here); collective wall time is BYTES and WAIT. MPAS
+had 2.9x padded bytes to cut (landed, -20%); lat-lon's uniform pencil
+payloads have no padding, so its 2.7 ms collective share is genuine
+bytes+wait, and its remaining receipted levers are bounded: bf16 wire
+(<=0.5 ms, halves bytes — a science-mode precision decision), the
+parked layout-boundary tax (8%), and the throughput reframes (ensemble
+axis, IMEX dt) that trade something the loop cannot decide
+unilaterally. Lat-lon at ~6.1 ms @64 (fused) sits near its practical
+stack limit under the current numerics.
+
+## Cube lane RE-ATTRIBUTED — the 81%-gap claim retracted (2026-08-11, job 26864960)
+
+XLA-profiler trace of the banked C768 kt2 @24 closed-loop protocol
+(ranks 0-3, 4 steady steps): 19.3 ms/step = **9.7 ms in-collective
+(50%; 87 collectives/step, median 71 us) + 8.3 ms compute (43%) +
+1.35 ms gaps (7%)**. RETRACTED: the nsys-based "81% no-kernel gaps ~
+155 us per sequential collective slot" and "compute 1.8%" attributions
+(job 26829838) — nsys silently dropped the kernels, the same pathology
+already documented on the MPAS lane. There is no launch floor on the
+cube either; the count-is-free law holds on ALL THREE GPU lanes.
+
+CAMPAIGN STATE, all lanes attributed with one validated instrument:
+- MPAS: padded-bytes-bound -> FIXED (size-aware colouring, -20%,
+  s10@128 record 16.03 GC/s).
+- Lat-lon: 53/43/4 — near practical limit; bounded leftovers are
+  precision/owner decisions (bf16 wire, layout tax, ensemble/IMEX).
+- Cube: 43/50/7 — near practical limit by the same law (uniform tile
+  payloads: no padding lever; collective share is bytes+wait).

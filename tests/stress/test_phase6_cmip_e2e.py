@@ -88,7 +88,10 @@ class TestPiControl:
         # Files must have correct CMIP metadata
         import xarray as xr
         ds = xr.open_dataset(nc_files[0])
-        assert ds.attrs.get("Conventions") == "CF-1.8"
+        # "CF-1.8" is REJECTED by the CMIP6 CV, whose Conventions regex is
+        # ^CF-1.7 CMIP-6.[0-2]( UGRID-1.0){0,}$ -- the value now comes from
+        # the vendored table Header instead of a hand-typed string.
+        assert ds.attrs.get("Conventions") == "CF-1.7 CMIP-6.2"
         assert ds.attrs.get("experiment_id") == "piControl", (
             f"Wrong experiment_id: {ds.attrs.get('experiment_id')}"
         )

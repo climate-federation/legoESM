@@ -27,18 +27,33 @@ radiation: "none"
 sfno_embed_dim: 64
 sfno_n_blocks: 4
 sfno_mlp_expansion: 4
-sfno_seed: 0
+# sfno_seed intentionally NOT set here. The overlay merges LAST, so pinning the
+# seed in it would silently shadow any suite-level value — and the multi-seed
+# ensemble (ArchesWeather-Mx4: 4 independently-seeded models averaged at
+# inference) needs the SUITE to vary it. run_aimip defaults it to 0, so the
+# single-seed behaviour of existing suites is unchanged.
 
 # Macro time step of the emulator [s]: 6 h, the standard
 # SFNO/FourCastNet autoregressive cadence.
 dt_sfno: 21600.0
 
-# ``_train_sfno_full_loop`` supports NEITHER the rollout curriculum NOR
-# chunked streaming (it loads the full window set once and checkpoints
-# per-epoch only — no chunk_latest.eqx).  Neutralize the base keys here
-# so the config states what actually runs instead of being silently
-# ignored; training supervises the base loss multi_step_hours (6/12 h =
-# 1-2 SFNO macro steps), the standard SFNO training setup.
-aimip_rollout_curriculum: null
+# CHUNKED STREAMING is unsupported by ``_train_sfno_full_loop`` (it loads the
+# full window set once and checkpoints per-epoch only — no chunk_latest.eqx),
+# so those base keys are neutralized here to state what actually runs.
+#
+# THE ROLLOUT CURRICULUM IS SUPPORTED — this overlay used to null it out on the
+# same line, which was WRONG and silently disabled the single training lever
+# GraphCast and ArchesWeather both rely on (multi-day autoregressive
+# fine-tuning). Verified end-to-end 2026-07-28:
+#   * ``build_sfno_curriculum_epoch_plan`` (neural_gcm_spectral.py:3541) is
+#     called by ``_train_sfno_full_loop`` at :3715, with ``curriculum_on`` at
+#     :3721;
+#   * ``run_aimip._build_spectral_config`` forces
+#     ``loss_config.multi_step_hours`` to the sorted curriculum leads so a
+#     target is loaded for every phase.
+# Because the overlay merges LAST (base <- cfg_overrides <- variant_<v>.yaml),
+# leaving the null here also made any suite-level ``aimip_rollout_curriculum``
+# a dead key — a suite could set it and get the base 6/12 h schedule anyway.
+# Suites that want the fixed 2-step ACE2 schedule set it to null themselves.
 aimip_chunk_windows: 0
 aimip_chunk_prefetch: false

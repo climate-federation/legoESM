@@ -2,7 +2,9 @@
 #
 # One config drives all three families through the SHARED AIMIP spectral stack
 # (``legoesm.training.neural_gcm_spectral`` builders via ``scale_build``):
-#   * physics    -> differentiable trainable-physics params (gray-rad/SBM stack)
+#   * physics    -> differentiable trainable-physics params (SBM + surface
+#                   stack; gray radiation RUNS but is never trained since
+#                   2026-08-11)
 #   * neural_gcm -> per-column MLP physics (NeuralGCM-style)
 #   * sfno       -> SFNO replaces gridded physics (dycore retained)
 #

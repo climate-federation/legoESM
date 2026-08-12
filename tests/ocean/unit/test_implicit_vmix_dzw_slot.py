@@ -213,3 +213,132 @@ def test_differentiable():
     g = jax.grad(loss)(1.0)
     assert np.isfinite(float(g))
     assert abs(float(g)) > 0.0
+
+
+# --------------------------------------------------- NEMO e3w(Kmm) divisor
+# (#1226 W1): trazdf.F90:219-220 divides the implicit flux coefficient by
+# e3w(...,Kmm), called from stpmlf.F90:370 as tra_zdf(kstp,Nbb,Nnn,Nrhs,ts,Naa)
+# -- the dummy arg Kmm binds to Nnn, NEMO's NOW time level. legoESM's default
+# divisor uses the AFTER-solve (barotropic-updated) thickness; this option
+# uses the NOW (pre-solve) thickness instead, threaded via the ``eta_now``
+# kwarg exactly as production wires it in ``_unsplit_ab2_step`` (state_corr.eta
+# is AFTER/Naa; eta_now=state.eta.data is the true pre-solve NOW/Nnn).
+
+def test_rejects_e3t_now_without_implicit_vmix():
+    with pytest.raises(ValueError, match="implicit_vertical_mixing"):
+        _channel(implicit_vmix_e3t_now_divisor=True,
+                 implicit_vertical_mixing=False)
+
+
+def test_e3t_now_and_dzw_slot_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _channel(implicit_vmix_dzw_slot=True,
+                 implicit_vmix_e3t_now_divisor=True)
+
+
+def test_e3t_now_divisor_defaults_to_state_eta_when_unthreaded():
+    """Without an explicit eta_now (every call site except the unsplit-AB2
+    one), the option falls back to state.eta -- bit-identical to a run where
+    eta_now is passed but equals state.eta.data exactly (the NO eta-tendency
+    case). Confirms the fallback wiring, not just its absence of a crash."""
+    z = _midpoint_zstar()
+    state, model = _channel(z_coord=z, implicit_vertical_mixing=True,
+                            implicit_vmix_e3t_now_divisor=True)
+    implicit = model._apply_implicit_vertical_mixing(state, _DT, None)
+    explicit = model._apply_implicit_vertical_mixing(
+        state, _DT, None, eta_now=state.eta.data)
+    for k in ("T", "S", "u", "v"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(implicit, k).data),
+            np.asarray(getattr(explicit, k).data))
+
+
+def test_e3t_now_divisor_noop_when_eta_now_equals_state_eta():
+    """When eta_now == state.eta (no eta tendency between NOW and the AFTER
+    state the function's dz_cell is built from -- e.g. a rest-state
+    barotropic solve), the NEMO NOW-divisor and legoESM's default AFTER-
+    divisor read the SAME thickness -> bit-identical, fp64."""
+    z = _midpoint_zstar()
+    state, model = _channel(z_coord=z, implicit_vertical_mixing=True)
+    off = model._apply_implicit_vertical_mixing(state, _DT, None)
+    _, model_on = _channel(
+        z_coord=z, implicit_vertical_mixing=True,
+        implicit_vmix_e3t_now_divisor=True)
+    on = model_on._apply_implicit_vertical_mixing(
+        state, _DT, None, eta_now=state.eta.data)
+    for k in ("T", "S", "u", "v"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on, k).data), np.asarray(getattr(off, k).data))
+
+
+def test_e3t_now_flag_flips_via_namedtuple_replace():
+    """LatLonCGridOceanConfig is a NamedTuple: the flag is flipped with
+    ``._replace``, NOT ``dataclasses.replace`` (which raises TypeError on a
+    NamedTuple -- the exact footgun the physics-validator review caught in
+    the first driver wiring)."""
+    import dataclasses
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    cfg = LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True)
+    on = cfg._replace(implicit_vmix_e3t_now_divisor=True)
+    assert on.implicit_vmix_e3t_now_divisor is True
+    assert cfg.implicit_vmix_e3t_now_divisor is False
+    with pytest.raises(TypeError):
+        dataclasses.replace(cfg, implicit_vmix_e3t_now_divisor=True)
+
+
+def test_e3t_now_divisor_active_on_leapfrog_step():
+    """The leapfrog-MLF step (the DINO kamm_mlf production integrator) must
+    THREAD the NOW eta into the implicit solve: without the eta_now threading
+    at _leapfrog_step's call site, the flag's fallback would read
+    naa_expl.eta -- the SAME AFTER-level eta the default divisor is built
+    from -- making ON bit-identical to OFF on a midpoint z-star. So ON != OFF
+    after leapfrog steps with evolving eta proves the threading exists."""
+    z = _midpoint_zstar()
+    # leapfrog's own config validation requires explicit_ab2 Coriolis.
+    lf = dict(outer_integrator="leapfrog", coriolis_scheme="explicit_ab2",
+              implicit_vertical_mixing=True)
+    state_off, model_off = _channel(z_coord=z, **lf)
+    state_on, model_on = _channel(z_coord=z, implicit_vmix_e3t_now_divisor=True,
+                                  **lf)
+    for _ in range(5):
+        state_off = model_off.step(state_off, _DT)
+        state_on = model_on.step(state_on, _DT)
+    dT = float(np.max(np.abs(np.asarray(state_on.T.data)
+                             - np.asarray(state_off.T.data))))
+    assert dT > 0.0, ("leapfrog ON == OFF: eta_now is NOT threaded at the "
+                      "_leapfrog_step call site (fallback reads the AFTER eta)")
+
+
+def test_e3t_now_divisor_differs_with_eta_tendency():
+    """With a NONZERO eta tendency between NOW (eta_now) and AFTER
+    (state.eta, what the default dz_cell divisor is built from -- mimicking
+    state_corr.eta post-barotropic-solve), the NOW-divisor (this option) and
+    the default AFTER-divisor read DIFFERENT thicknesses, so the solved
+    T/S/u/v must differ.
+
+    Direction: the implicit solve's diagonal is
+    ``dz_cell - (zwi+zws)`` with zwi,zws ~ -p2dt*K/dz_half (a NEGATIVE
+    off-diagonal coupling term).  Here eta_now < state.eta (column was
+    SHALLOWER at NOW, EXPANDED by the barotropic solve to AFTER) so the
+    NOW-divisor dz_half is SMALLER than the default AFTER-divisor
+    everywhere -> |zwi|,|zws| LARGER under nemo_kmm -> a MORE dissipative
+    (stronger vertical coupling) solve than the default for this scenario.
+    This test asserts only that the two differ (a magnitude/sign difference
+    is the point); the qualitative diagonal-strength direction is documented
+    for this specific eta_now<state.eta construction, matching the existing
+    test_active_on_u_centered pattern for the sibling flag."""
+    z = _midpoint_zstar()
+    state, model = _channel(z_coord=z, implicit_vertical_mixing=True)
+    # eta_now UNIFORMLY 20% shallower than state.eta (an expanding column
+    # between NOW and AFTER) -- a controlled, nonzero eta tendency.
+    eta_now = state.eta.data - 0.2 * jnp.abs(state.eta.data + 10.0)
+    out_off = model._apply_implicit_vertical_mixing(state, _DT, None)
+    _, model_on = _channel(
+        z_coord=z, implicit_vertical_mixing=True,
+        implicit_vmix_e3t_now_divisor=True)
+    out_on = model_on._apply_implicit_vertical_mixing(
+        state, _DT, None, eta_now=eta_now)
+    for k in ("T", "S", "u", "v"):
+        a = np.asarray(getattr(out_off, k).data)
+        b = np.asarray(getattr(out_on, k).data)
+        assert np.max(np.abs(a - b)) > 0.0, f"{k} unchanged by e3t_now divisor"

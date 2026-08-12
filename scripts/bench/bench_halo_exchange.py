@@ -147,7 +147,8 @@ def _bench_voronoi(level: int, n_warmup: int, n_iters: int, use_mpi: bool):
 
         # Create local cell field
         key = jax.random.PRNGKey(rank)
-        local_n = layout.partition.n_owned_cells + layout.partition.n_halo_cells
+        # n_local_cells = owned + halo (the old n_halo_cells field is gone)
+        local_n = layout.partition.n_local_cells
         data = jax.random.normal(key, (local_n,), dtype=jnp.float64)
 
         for _ in range(n_warmup):

@@ -19,6 +19,7 @@ must not re-implement it (CLAUDE.md: no duplicate utilities).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 
 def read_yaml_with_includes(path, _seen=None) -> dict:
@@ -140,9 +141,10 @@ def require_config(config_value, *, driver: str = "run") -> None:
 # ``atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4``).  Applied to the built
 # config AFTER ``--config``/CLI so a trained ``recommended_defaults`` drops in
 # unchanged.  Every key is validated against the scheme's ``__param_spec__``
-# (existence + bounds) and routed to the matching nested ``*Config`` NamedTuple
-# by class name — a typo'd / out-of-bounds / absent-in-this-run parameter is a
-# hard error, never a silent mis-set of physics.
+# (existence + tier + bounds) and routed to the matching nested ``*Config``
+# NamedTuple by class name — a typo'd / tier-0 / out-of-bounds /
+# absent-in-this-run parameter is a hard error, never a silent mis-set of
+# physics.
 
 
 def load_params_config(path) -> dict:
@@ -198,6 +200,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
+    # The two cape_threshold entries are tunable_tier 0 (AD-unreachable
+    # trigger, #1417): they stay in this map because the map's contract is
+    # "what the pipeline actually threads", but the tier gate in
+    # apply_params_to_config REFUSES them on the --params route (#1518) —
+    # settable only via the explicit --config/CLI scalars.
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
@@ -212,11 +219,28 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # semantic conflict this branch inherited on merge).  The flat
     # ExperimentConfig scalar remains settable via --config / its CLI flag.
     "atm.clouds.CloudConfig.cloud_fsd": "cloud_fsd",
-    "atm.clouds.CloudConfig.cloud_partial_coverage_optics":
-        "cloud_partial_coverage_optics",
-    "atm.clouds.CloudConfig.cloud_vertical_overlap_optics":
-        "cloud_vertical_overlap_optics",
-    "atm.clouds.CloudConfig.cloud_n_subcolumns": "cloud_n_subcolumns",
+    # REMOVED 2026-08-07: cloud_partial_coverage_optics /
+    # cloud_vertical_overlap_optics / cloud_n_subcolumns are NOT registry
+    # parameters -- the first two are string SELECTORS and the third an int, so
+    # none is `:float`-annotated and none is spec-eligible. A map key absent
+    # from the registry breaks the --params loader contract, which is why
+    # test_build_atm_scalar_param_map_is_valid_and_nonempty,
+    # test_atm_scalar_map_is_pipeline_threaded and
+    # test_atm_scalar_map_has_no_under_claim were all RED on main.
+    #
+    # This is the same #1280 exclusion drift that took
+    # cloud_inhomogeneity_factor out of this map above. I re-introduced it by
+    # resolving the PR #1477 conflict in main's favour on this hunk: the other
+    # side had already deleted these three for exactly this reason, and I kept
+    # main's version because the review I ran checked symbol survival and ABI
+    # but could not execute the tests. Restoring the correct side.
+    #
+    # The flat ExperimentConfig scalars remain settable via --config and their
+    # own CLI flags; only the --params registry route is affected.
+    #
+    # If any of these is meant to be tunable, give it a __param_spec__
+    # entry FIRST and then map it -- mapping without the spec is what
+    # breaks the loader (parallel session's note, kept).
     "atm.conv.BechtoldConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.BechtoldConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # bechtold penetrative-downdraft closure knobs -> the dedicated
@@ -292,6 +316,136 @@ def build_atm_scalar_param_map() -> dict[str, str]:
     return dict(_ATM_SCALAR_PARAM_MAP)
 
 
+# Pipeline attributes that hold live scheme *Config NamedTuples after
+# build_physics_pipeline.  These are the SAME attributes run_amip's
+# AIMIP-trained-params block mutates post-setup (captured at compile), so
+# routing --params overrides into them is the sanctioned mutation point.
+# cloud / radiation configs are NOT here: the pipeline builds those inline
+# from flat ExperimentConfig scalars and does not store them, so their
+# tunables stay on the scalar map / the reachability baseline.
+ATM_PIPELINE_BUNDLE_FIELDS = (
+    "convection_config",
+    "micro_config",
+    "turbulence_config",
+    "gwd_config",
+)
+
+
+class AtmPipelineParamsBundle(NamedTuple):
+    """Routing view over the built pipeline's scheme configs.
+
+    A real (static) NamedTuple so ``_route_overrides_by_class`` can walk it
+    exactly like a driver config tree; ``None`` fields (scheme not built /
+    config-less scheme) are simply never matched.
+    """
+    convection_config: object = None
+    micro_config: object = None
+    turbulence_config: object = None
+    gwd_config: object = None
+
+
+def build_atm_pipeline_bundle(physics) -> AtmPipelineParamsBundle:
+    """The production bundle the atm ``--params`` class-router routes into.
+
+    Exposed as a function (not inlined in :func:`apply_params_to_pipeline`)
+    so the reachability audit probes the SAME object construction production
+    uses — a re-implemented bundle in the test could drift.
+    """
+    return AtmPipelineParamsBundle(**{
+        f: getattr(physics, f, None) for f in ATM_PIPELINE_BUNDLE_FIELDS
+    })
+
+
+def apply_params_to_pipeline(physics, params: dict, *, driver: str = "run_amip"):
+    """Route qualified ``--params`` overrides into the BUILT physics pipeline.
+
+    The atmosphere ExperimentConfig flattens only a hand-verified subset of
+    scheme tunables to scalars (:func:`build_atm_scalar_param_map`); every
+    other atm ``__param_spec__`` parameter lives ONLY on the scheme ``*Config``
+    NamedTuples the pipeline holds (``convection_config`` /
+    ``turbulence_config`` / ``micro_config`` / ``gwd_config``).  This applies
+    those overrides the way run_omip / run_lmip do — through the shared
+    ``(module, class)`` router — against the pipeline's live configs,
+    POST-setup and PRE-run (the step function reads these attributes at
+    trace time; same mutation point as the AIMIP-trained-config injection).
+
+    CLUBB is the motivating case: all 48 ``CLUBBParams`` closure constants
+    (and every other turbulence/convection/microphysics/GWD tunable) become
+    settable from a calibration file without a per-parameter flat scalar.
+
+    Validation matches :func:`apply_params_to_config` exactly: unknown name,
+    non-numeric value, out-of-``__param_spec__``-bounds value, or a target
+    class absent from the BUILT pipeline (scheme not selected) all raise
+    ``SystemExit`` — a calibration file can never silently mis-set physics.
+
+    Soft limitation, SHARED with the nested class-router drivers (see the
+    same note on :func:`apply_params_to_config`): a union config that holds
+    an inactive sub-config (a composite GWD carrying both orographic and
+    non-orographic parts, E3SM's frontal/Beres sub-configs when only the
+    orographic source is driven) is still "present", so an override for the
+    inactive part is applied to that inert sub-config rather than raising —
+    it has no effect on the run.  Selecting the scheme activates the already-
+    set value.
+
+    Returns the set of applied qualified names.
+    """
+    if not params:
+        return set()
+    from legoesm.training.param_collector import build_registry
+    registry = {m.qualified_name: m for m in build_registry()}
+    by_key: dict[tuple, dict[str, float]] = {}
+    key_to_qnames: dict[tuple, list] = {}
+    for qname, value in params.items():
+        meta = registry.get(qname)
+        if meta is None:
+            raise SystemExit(
+                f"{driver} --params: unknown parameter {qname!r} (not in the "
+                "parameter registry)."
+            )
+        if meta.shape_key is None:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise SystemExit(
+                    f"{driver} --params: {qname} value {value!r} is not numeric."
+                )
+            lo, hi = meta.bounds
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                if not (lo <= value <= hi):
+                    raise SystemExit(
+                        f"{driver} --params: {qname}={value} is outside its "
+                        f"__param_spec__ bounds [{lo}, {hi}]."
+                    )
+        key = (meta.module, meta.config_class)
+        by_key.setdefault(key, {})[meta.field] = value
+        key_to_qnames.setdefault(key, []).append(qname)
+    bundle = build_atm_pipeline_bundle(physics)
+    applied: set = set()
+    new_bundle = _route_overrides_by_class(bundle, by_key, applied=applied)
+    missing = set(by_key) - applied
+    if missing:
+        examples = ", ".join(
+            q for k in sorted(missing) for q in key_to_qnames[k])
+        built = {
+            f: type(getattr(bundle, f)).__name__
+            for f in ATM_PIPELINE_BUNDLE_FIELDS
+            if getattr(bundle, f) is not None
+        }
+        raise SystemExit(
+            f"{driver} --params: parameter(s) {examples} target config "
+            f"class(es) {sorted(k[1] for k in missing)} that are not present "
+            f"in the BUILT physics pipeline (resolved scheme configs: {built}). "
+            "The scheme is not selected in this run — remove them or select it."
+        )
+    for f in ATM_PIPELINE_BUNDLE_FIELDS:
+        new_cfg = getattr(new_bundle, f)
+        if new_cfg is not getattr(physics, f, None):
+            setattr(physics, f, new_cfg)
+    # EVERY applied qualified name, not one per class — a 48-field CLUBB
+    # calibration must report 48 routed parameters (codex review 2026-08-02).
+    return {q for key in applied for q in key_to_qnames[key]}
+
+
 def _route_overrides_by_class(node, by_key: dict, *, applied: set):
     """Recursively splice ``{(module, class_name): {field: value}}`` into a
     config NamedTuple tree (depth-first; child configs updated before parent).
@@ -328,6 +482,7 @@ def _route_overrides_by_class(node, by_key: dict, *, applied: set):
 
 
 def apply_params_to_config(config, params: dict, *, driver: str = "run",
+                           record: dict | None = None,
                            scalar_param_map: dict | None = None):
     """Return ``config`` with calibration ``params`` (qualified_name: value)
     spliced into the matching nested ``*Config`` NamedTuples.
@@ -340,12 +495,13 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
     unmapped parameters use the nested class-router below.
 
     Each key is validated against ``param_collector.build_registry`` (must be a
-    known parameter and, for scalar params, within its ``__param_spec__``
-    bounds) and routed to the config of its declared ``(module, config_class)``.
-    Raises ``SystemExit`` on an unknown parameter, a non-numeric or out-of-bounds
-    value, or a target config that is absent from / ambiguous in this run's
-    config tree — a ``--params`` file can never silently mis-set physics.  A
-    no-op for empty ``params``.
+    known parameter, must NOT be ``tunable_tier 0`` — the never-calibratable
+    partition, #1518 — and, for scalar params, must be within its
+    ``__param_spec__`` bounds) and routed to the config of its declared
+    ``(module, config_class)``.  Raises ``SystemExit`` on an unknown or tier-0
+    parameter, a non-numeric or out-of-bounds value, or a target config that is
+    absent from / ambiguous in this run's config tree — a ``--params`` file can
+    never silently mis-set physics.  A no-op for empty ``params``.
 
     Note (soft limitation): a union config that holds ALL of a family's scheme
     sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
@@ -370,6 +526,24 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
                 f"{driver} --params: unknown parameter {qname!r} (not in the "
                 "parameter registry).  Keys must be a param_collector qualified "
                 "name 'scheme_key.field' (see config/cmip/params_tuned.yaml)."
+            )
+        # Tier gate (#1518): tunable_tier 0 is the __param_spec__ partition for
+        # values a calibration must NEVER move (numerics floors, iteration-
+        # coupled knobs, measurement conventions, AD-unreachable triggers).
+        # ``build_trainable_params`` refuses them even via ``include=``; this
+        # loader is the other door into the config pytree, so it refuses them
+        # too — BEFORE routing, so no tier-0 value is ever applied, whether it
+        # arrives via the scalar map or the nested class-router.  A tier-0
+        # value that must genuinely change for a run is an operator decision:
+        # set the driver's --config/CLI field explicitly.
+        if meta.tunable_tier == 0:
+            raise SystemExit(
+                f"{driver} --params: {qname} is tunable_tier 0 — fixed, never "
+                f"calibratable (spec reference: {meta.reference!r}).  The "
+                "--params route exists for calibration output and refuses "
+                "tier-0 parameters (#1518); if this run genuinely needs a "
+                "different value, set the corresponding --config/CLI field "
+                "explicitly instead."
             )
         # Scalar params (shape_key None) are numeric — coerce (YAML may quote
         # the value) and range-check against __param_spec__ bounds.  Array params
@@ -405,8 +579,33 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
                 "not match this driver's config."
             )
         config = config._replace(**flat)
+        if record is not None:
+            # Flattened scalars DO reach resolved_config; recorded
+            # anyway so one manifest field carries every --params
+            # value a run used, routed or not (#1509).
+            record.update(flat)
     applied: set = set()
     config = _route_overrides_by_class(config, by_key, applied=applied)
+    # #1509: the class router mutates NESTED scheme configs, which
+    # _serialize_config does not reach -- so a manifest reader saw
+    # turbulence_override=None and none of the applied values, and the run's
+    # provenance depended on the referenced --params FILE still existing
+    # unmodified. Record what was actually applied, keyed by the qualified
+    # name the user wrote, so the manifest can be self-contained.
+    if record is not None:
+        for key in applied:
+            # by_key[key] is the per-CLASS dict {field: value}; flatten it to
+            # 'scheme_key.field -> value' so the manifest reads like the
+            # --params file the user wrote, not like the router's internals.
+            # key_to_qname holds ONE qualified name per router key, so with
+            # two fields of the same class it matches only one of them.  Take
+            # its scheme prefix and re-append each field, so every entry comes
+            # back in the 'scheme_key.field' form the user wrote.
+            _qname = key_to_qname.get(key)
+            _prefix = (_qname.rsplit(".", 1)[0] if _qname
+                       else (key[1] if isinstance(key, tuple) else str(key)))
+            for _field, _val in by_key[key].items():
+                record[f"{_prefix}.{_field}"] = _val
     missing = set(by_key) - applied
     if missing:
         examples = ", ".join(sorted(key_to_qname[k] for k in missing))

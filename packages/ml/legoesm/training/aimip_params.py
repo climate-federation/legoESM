@@ -130,10 +130,11 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),
 ]
 
-# Gray two-stream radiation knobs (Frierson et al. 2006).  The user
-# audit identified this as the biggest gap — radiation is the
-# dominant lever on the residual T bias.  ``tau_equator`` and
-# ``tau_pole`` were already exposed via ``_AIMIP_COMMON_TRAINABLE``.
+# Gray two-stream radiation knobs (Frierson et al. 2006) — HISTORICAL.
+# These were trained until 2026-08-11, when the directive "remove gray
+# radiation, we will never train it" retired the whole set (the seven gray_*
+# plus ``tau_equator``/``tau_pole``). Radiation is now trained through RRTMGP's
+# surface albedo/emissivity instead.
 #
 # v7 (2026-05-19): widened sfc_emissivity / sfc_albedo bounds.
 # v5+v6 produced a +1.07 K warm T bias that the optimizer could
@@ -145,15 +146,29 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
 # bias-penalty gradient can move the knobs.  Centering the defaults
 # inside the new range is left to a follow-up that adjusts
 # ``_canonical_scheme_defaults`` consistently.
-_GRAY_RAD_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("gray_linear_frac", 0.0, 0.6, "sigmoid"),
-    ParamConstraint("gray_tau_moist_coeff", 5.0e-3, 2.5e-2, "sigmoid"),
-    ParamConstraint("gray_lw_diff_factor", 1.2, 2.0, "sigmoid"),
-    ParamConstraint("gray_sfc_emissivity", 0.5, 1.0, "sigmoid"),
-    ParamConstraint("gray_sw_tau_0", 0.0, 0.5, "sigmoid"),
-    ParamConstraint("gray_sw_exponent", 1.0, 4.0, "sigmoid"),
-    ParamConstraint("gray_sfc_albedo", 0.03, 0.6, "sigmoid"),
-]
+# Gray radiation carries no trainable OPTICAL knob (user directive 2026-08-11:
+# "remove gray radiation, we will never train it"): no optical depth, moisture
+# coefficient, diffusivity factor or shortwave knob is trained. The SURFACE
+# albedo / emissivity remain trainable — they are properties of the surface,
+# not of the radiation scheme, and they are what the directive asked to keep
+# ("add surface albedo and emissivity in addition to surface roughness").
+# Precisely, under GRAY: no scalar gray leaf is trained (the AIMIP surface
+# scalars are RRTMGP-scoped, so the baselines fall back to
+# GrayRadiationConfig's defaults), but the learned SPATIAL field coefficients
+# do replace gray's sfc_emissivity / sfc_albedo, and the flat lat-lon set
+# (trainable_params.DEFAULT_TRAINABLE) still trains scalar albedo_ice /
+# albedo_ocean, which gray's shortwave consumes. Frozen means gray's OPTICAL
+# knobs, not every number the scheme reads. It stays available as
+# the cheap fixed backend for smokes, at its documented defaults;
+# the classical model trains RRTMGP instead, where the only trainable
+# radiative knobs are the surface albedo and emissivity below. The nine
+# former knobs (7 gray_* + tau_equator/tau_pole, which ARE gray optical
+# depths) sit at tunable_tier 0 in GrayRadiationConfig.__param_spec__, which
+# build_trainable_params never selects (it takes 1 <= tier <= level), so the
+# spec-driven collector cannot re-expose them either. Their BOUNDS stay, because
+# the LES feedback loop promotes gray_tau_* to per-column fields and clamps that
+# diagnosis to exactly those ranges.
+_GRAY_RAD_TRAINABLE: list[ParamConstraint] = []
 
 # Sundqvist large-scale condensation (now the AIMIP-winning
 # microphysics scheme; previously had zero trained knobs).
@@ -197,10 +212,7 @@ _RRTMGP_TRAINABLE: list[ParamConstraint] = [
 # ``make_aimip_classical_spectral_physics`` ever injected them (the
 # Mode-1 RRTMGP knob set in ``trainable_params.py`` is separate and
 # still carries live albedo knobs).
-_AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("tau_equator", 3.0, 12.0, "sigmoid"),
-    ParamConstraint("tau_pole", 0.5, 4.0, "sigmoid"),
-]
+_AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = []   # see _GRAY_RAD_TRAINABLE
 
 
 AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
@@ -459,25 +471,6 @@ class AIMIPClassicalParams(eqx.Module):
             # as_dict() and SBMConfig's published default stands.
         )
 
-    def to_gray_radiation_config(self):
-        """Build a GrayRadiationConfig with all 9 traced fields."""
-        from legoesm.atmosphere.physics.radiation.config import (
-            GrayRadiationConfig,
-        )
-        d = self.as_dict()
-        base = GrayRadiationConfig()
-        return base._replace(
-            tau_equator=d["tau_equator"],
-            tau_pole=d["tau_pole"],
-            linear_frac=d["gray_linear_frac"],
-            tau_moist_coeff=d["gray_tau_moist_coeff"],
-            lw_diff_factor=d["gray_lw_diff_factor"],
-            sfc_emissivity=d["gray_sfc_emissivity"],
-            sw_tau_0=d["gray_sw_tau_0"],
-            sw_exponent=d["gray_sw_exponent"],
-            sfc_albedo=d["gray_sfc_albedo"],
-        )
-
     def to_rrtmgp_config(self):
         """Build a RRTMGPConfig at the canonical defaults (no trained values).
 
@@ -511,7 +504,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     from legoesm.atmosphere.physics.convection.config import SBMConfig
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     from legoesm.atmosphere.physics.radiation.config import (
-        GrayRadiationConfig,
         RRTMGPConfig,
     )
 
@@ -520,7 +512,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     su = SurfaceLayerConfig()
     mc = McFarlaneConfig()
     cl = CloudConfig()
-    g = GrayRadiationConfig()
     sq = SundqvistConfig()
     sbm = SBMConfig()
     rr = RRTMGPConfig()
@@ -573,14 +564,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "cloud_q_c_diagnostic": float(cl.q_c_diagnostic),
         "cloud_r_eff_liq": float(cl.r_eff_liq),
         "cloud_r_eff_ice": float(cl.r_eff_ice),
-        # Gray radiation (the audit's biggest gap)
-        "gray_linear_frac": float(g.linear_frac),
-        "gray_tau_moist_coeff": float(g.tau_moist_coeff),
-        "gray_lw_diff_factor": float(g.lw_diff_factor),
-        "gray_sfc_emissivity": float(g.sfc_emissivity),
-        "gray_sw_tau_0": float(g.sw_tau_0),
-        "gray_sw_exponent": float(g.sw_exponent),
-        "gray_sfc_albedo": float(g.sfc_albedo),
         # Sundqvist microphysics
         "sundqvist_RH_crit": float(sq.rh_crit),
         "sundqvist_sigmoid_sharpness": float(sq.sigmoid_sharpness),
@@ -595,9 +578,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         # are not trainable, so they carry no canonical-default entry here.
         "rrtmgp_sfc_emissivity": float(rr.sfc_emissivity),
         "rrtmgp_sfc_albedo": float(rr.sfc_albedo),
-        # Shared
-        "tau_equator": 7.2,
-        "tau_pole": 1.8,
     }
 
 
@@ -616,29 +596,472 @@ def spatial_baselines_from_params(d: dict, radiation: str) -> dict:
     the spatial fields — and, because ocean columns fall back to the baseline,
     they are the only trainable ocean-surface levers.
     """
-    rad = "rrtmgp" if radiation == "rrtmgp" else "gray"
-    return {
+    base = {
         "Cd_neutral": d["surface_Cd_neutral"],
         "Ch_neutral": d["surface_Ch_neutral"],
         "z0": d["surface_z0"],
-        "sfc_emissivity": d[f"{rad}_sfc_emissivity"],
-        "sfc_albedo": d[f"{rad}_sfc_albedo"],
     }
+    if radiation == "rrtmgp":
+        base["sfc_emissivity"] = d["rrtmgp_sfc_emissivity"]
+        base["sfc_albedo"] = d["rrtmgp_sfc_albedo"]
+        return base
+    # Gray carries no trained surface knobs since 2026-08-11 (it is not
+    # trained at all), so the spatial field is anchored on the scheme's own
+    # published defaults instead of on a trained scalar. Reading the removed
+    # ``gray_sfc_*`` leaves here raised KeyError for every
+    # spatial_surface=True gray run (codex).
+    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+    gray = GrayRadiationConfig()
+    base["sfc_emissivity"] = gray.sfc_emissivity
+    base["sfc_albedo"] = gray.sfc_albedo
+    return base
+
+
+# Family field on PhysicsConfig -> registry namespace prefix. The prefix is a
+# GUARD, not a lookup: class names are not unique across components (the ocean
+# registers a TKEConfig too, and matching on the bare name once collected the
+# ocean's parameters and tried to splice them into the atmosphere's config).
+# Same lesson as run_scm_les_turbulence_tuning._scheme_keys_for.
+# A family may span SEVERAL namespaces: the two bin/particle microphysics
+# schemes publish their specs under ``atm.sdm.`` / ``atm.fastsbm.`` rather than
+# ``atm.micro.``, so a single-prefix guard silently derived NO key for them and
+# they trained nothing.
+_AIMIP_FAMILY_NAMESPACES: dict[str, tuple[str, ...]] = {
+    "convection": ("atm.conv.",),
+    "turbulence": ("atm.turb.",),
+    "gravity_wave_drag": ("atm.gwd.",),
+    "microphysics": ("atm.micro.", "atm.sdm.", "atm.fastsbm."),
+    "radiation": ("atm.rad.",),
+}
+
+
+def aimip_active_scheme_keys(physics_config) -> set[str]:
+    """Registry ``scheme_key`` set for the schemes a BUILT config actually runs.
+
+    Derived from the config TREE, never from a hardcoded scheme list, so ANY
+    parameterization — including one added after this function was written —
+    is trainable the moment it carries a ``__param_spec__``. Generalises
+    ``run_scm_les_turbulence_tuning._scheme_keys_for`` from turbulence-only to
+    every physics family.
+
+    For each family the ACTIVE sub-config is ``getattr(family, family.scheme)``
+    — the union config holds every scheme's sub-config, so only the selected
+    one may contribute — and a ``.params`` member is followed one level down
+    (full CLUBB nests its closure coefficients in a ``CLUBBParams``, which is
+    what carries the spec).
+    """
+    from legoesm.training.param_collector import build_registry
+
+    registry = build_registry()
+    keys: set[str] = set()
+    for family, prefixes in _AIMIP_FAMILY_NAMESPACES.items():
+        fam_cfg = getattr(physics_config, family, None)
+        scheme = getattr(fam_cfg, "scheme", None)
+        if fam_cfg is None or not scheme or scheme == "none":
+            continue
+        # A COMPOSITE scheme runs every part: the GWD executor splits
+        # ``"mcfarlane+hines"`` on '+' (gravity_wave_drag/integration.py:167,
+        # 199), so a whole-string getattr resolves to None and the arm would
+        # derive no GWD key at all — training nothing, silently.
+        for part in str(scheme).split("+"):
+            active = getattr(fam_cfg, part, None)
+            if active is None:
+                continue
+            # Descend into a nested ``params`` holder when that is what carries
+            # the spec (CLUBBConfig.params -> CLUBBParams).
+            target = getattr(active, "params", None)
+            if target is None or not hasattr(target, "_fields"):
+                target = active
+            cls = type(target).__name__
+            keys |= {m.scheme_key for m in registry
+                     if m.config_class == cls
+                     and m.scheme_key.startswith(prefixes)}
+    return keys
+
+
+# The six parameterization families a CLASSICAL model must fill. Composability
+# is the point of the classical variant: any scheme may be swapped for another
+# of the same family, but a family may never be EMPTY — a run missing (say)
+# microphysics is not a cheaper classical model, it is a different and
+# incomparable one, and it silently invalidates a scheme-swap comparison
+# against runs that have it. User directive, 2026-08-11.
+CLASSICAL_SCHEME_FAMILIES = (
+    "convection", "turbulence", "cloud", "microphysics", "radiation", "gwd",
+)
+
+# The default scheme per family, in ONE place. Training and evaluation used to
+# carry their own copies of these strings and had already drifted: microphysics
+# defaulted to "none" on the eval side while training used a real scheme, so an
+# omitted key trained one model and scored another (codex).
+CLASSICAL_DEFAULT_SCHEMES = {
+    "convection": "tiedtke",
+    "turbulence": "louis",
+    "cloud": "xu_randall",
+    "microphysics": "sundqvist",
+    "radiation": "rrtmgp",
+    "gwd": "mcfarlane",
+}
+
+_UNFILLED = ("", "none", "off", "false")
+
+
+def validate_classical_scheme_set(
+    *, convection: str, turbulence: str, cloud: str, microphysics: str,
+    radiation: str, gwd: str, allow_unfilled: bool = False,
+) -> dict[str, str]:
+    """Require one active scheme in EVERY classical family; return the set.
+
+    Parameters are the scheme NAMES as the runner resolves them (the
+    ``aimip_<family>`` config keys). ``"none"`` / ``""`` count as unfilled.
+
+    ``allow_unfilled=True`` is the ABLATION escape: a study whose whole point is
+    "run without gravity-wave drag" is legitimate, but it must say so
+    explicitly, because the resulting model is not comparable to a complete
+    one. Production training leaves it False.
+
+    Raises
+    ------
+    ValueError
+        Naming EVERY unfilled family at once — fixing them one error at a time
+        would cost one job submission per family.
+
+    Returns
+    -------
+    dict
+        ``{family: scheme}``, so a caller can log exactly what it validated.
+    """
+    selected = {
+        "convection": convection, "turbulence": turbulence, "cloud": cloud,
+        "microphysics": microphysics, "radiation": radiation, "gwd": gwd,
+    }
+    missing = [f for f in CLASSICAL_SCHEME_FAMILIES
+               if str(selected[f]).strip().lower() in _UNFILLED]
+    if missing and not allow_unfilled:
+        raise ValueError(
+            "a classical model needs one parameterization of EVERY family "
+            f"{list(CLASSICAL_SCHEME_FAMILIES)}; unfilled: {missing}. "
+            f"Selected: {selected}. Set the aimip_<family> key for each "
+            "(scheme swaps are what the classical variant is for; an empty "
+            "family is a different model, not a smaller one)."
+        )
+    return selected
+
+
+def aimip_scheme_keys_for(
+    *, convection: str = "none", turbulence: str = "none",
+    gwd: str = "none", microphysics: str = "none", radiation: str = "none",
+    cloud: str = "none",
+) -> set[str]:
+    """``aimip_active_scheme_keys`` from SCHEME NAMES rather than a built tree.
+
+    The runner knows the names before any physics is built, so it needs this
+    entry point. A minimal probe ``PhysicsConfig`` is assembled from the real
+    config classes here — in the SAME module as the factory — so the knowledge
+    of which sub-config a scheme name materialises lives in one place instead
+    of being duplicated into the run script.
+
+    Only the ``scheme`` selector and the active sub-config's TYPE are read, so
+    the probe needs no tuned values.
+    """
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+
+    turb_kw = {}
+    if turbulence not in ("none", ""):
+        # Sub-configs that default to None must be materialised or the family
+        # contributes nothing (full CLUBB is the case that matters).
+        from legoesm.atmosphere.physics.turbulence import config as _tc
+        if turbulence == "clubb":
+            from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+            turb_kw["clubb"] = CLUBBConfig()
+        else:
+            factory = {
+                "louis": _tc.LouisConfig, "tke": _tc.TKEConfig,
+                "mynn25": _tc.MYNN25Config,
+                "smagorinsky": _tc.SmagorinskyConfig,
+                "clubb_lite": _tc.CLUBBLiteConfig,
+                "holtslag_boville": _tc.HoltslagBovilleConfig,
+                "ysu": _tc.YSUConfig, "edmf": _tc.TurbulentEDMFConfig,
+            }.get(turbulence)
+            if factory is not None:
+                turb_kw[turbulence] = factory()
+    probe = PhysicsConfig(
+        radiation=RadiationConfig(scheme=radiation),
+        convection=ConvectionConfig(scheme=convection),
+        turbulence=TurbulenceConfig(scheme=turbulence, **turb_kw),
+        microphysics=MicrophysicsConfig(scheme=microphysics),
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd),
+    )
+    keys = aimip_active_scheme_keys(probe)
+    # Cloud fraction is not a PhysicsConfig family — the factory places the
+    # (single, scheme-shared) CloudConfig under RadiationConfig.cloud_config,
+    # and ONLY on the rrtmgp path (gray radiation carries no CloudConfig in
+    # its tree, so a cloud override there raises 'matched no config' — caught
+    # by the six-suite smoke, 2026-08-10). Route it explicitly so cloud spec
+    # parameters are collectable whenever they have somewhere to land.
+    if cloud not in ("none", "") and radiation == "rrtmgp":
+        from legoesm.training.param_collector import build_registry
+        keys |= {m.scheme_key for m in build_registry()
+                 if m.scheme_key.startswith("atm.clouds.")}
+    # NOT ROUTED: atm.rad.OzoneProfileConfig. It was added here on 2026-08-10
+    # and REVERTED the same day, for two independent reasons — leave it out
+    # until BOTH are addressed:
+    #   1. INERT. The AIMIP factory builds RadiationConfig without setting an
+    #      ozone source, so it keeps OzoneProfileConfig(source="standard");
+    #      the analytic branch in radiation/integration.py returns None for
+    #      that source and RRTMGP falls back to its own built-in
+    #      climatological profile. Training p_peak_hPa / o3_max_vmr /
+    #      sigma_logp would have had ZERO forward effect — a parameter that
+    #      reaches the config but not the model. Routing it needs
+    #      source="analytical" wired first.
+    #   2. IMPLAUSIBLE AT THIS RESOLUTION. The 8-level sigma grid's highest
+    #      FULL level is ~109 hPa (top interface 50 hPa) while the spec's
+    #      p_peak_hPa bounds are (1, 100) hPa — the trainable ozone peak sits
+    #      above the model's entire domain, leaving only the tail of the
+    #      Gaussian inside. There is ~1 level of stratosphere to heat, and no
+    #      credible path from it to an 850 hPa temperature drift.
+    return keys
+
+
+def aimip_legacy_owned_scheme_keys() -> set[str]:
+    """Registry ``scheme_key``s the LEGACY hand-written params already train.
+
+    OWNERSHIP RULE (design call, 2026-08-06): a config field has exactly ONE
+    trainer.  ``AIMIPClassicalParams.to_<x>_config`` writes these classes'
+    fields from legacy leaves and ``_splice_scheme_overrides`` runs AFTER it,
+    so letting the spec-driven collector also cover such a class would
+    overwrite the legacy value and silently zero those gradients — trading the
+    46 leaves that train today for new ones, with no error.  The spec route
+    therefore covers only the schemes the legacy route CANNOT reach (Bechtold,
+    CLUBB, Thompson, ...), which is why the opt-in exists.
+
+    Legacy wins the overlap rather than the spec because the alternative —
+    dropping the colliding legacy ``ParamConstraint``s — changes the
+    ``AIMIPClassicalParams`` pytree layout and invalidates every existing
+    classical checkpoint, for no additional trained parameter.
+
+    The owned set is derived by CALLING every ``to_*_config`` method and
+    reading the returned TYPE, so a method added later is owned automatically
+    (a hardcoded class list would rot into a silent gradient loss).
+    """
+    from legoesm.training.param_collector import build_registry
+
+    probe = AIMIPClassicalParams.from_defaults()
+    owned_classes = {
+        type(getattr(probe, name)()).__name__
+        for name in dir(type(probe))
+        if name.startswith("to_") and name.endswith("_config")
+    }
+    return {m.scheme_key for m in build_registry()
+            if m.config_class in owned_classes}
+
+
+def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
+    """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
+
+    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    class-level subtraction excluded EVERY spec parameter of a class the
+    legacy route touches, which suppressed spec-only fields the legacy never
+    writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of
+    ``CloudConfig``) — they trained nowhere. The one-trainer ownership rule
+    only requires excluding the FIELDS the legacy ``to_*_config`` methods
+    populate, because ``_splice_scheme_overrides`` runs after them and would
+    overwrite exactly those.
+
+    Derived mechanically (no hardcoded list to rot): every raw leaf is
+    perturbed in unconstrained space and each ``to_*_config`` output is
+    diffed field-by-field against the unperturbed build. A field that moves
+    is legacy-written; one that stays at its default is free for the spec
+    route. Monotonicity alone does not survive float32 (GLM review): a
+    deeply saturated logit could absorb the perturbation below
+    representation. ``from_defaults`` interiorizes every leaf to >=5% of its
+    sigmoid range (|raw| <= logit(0.95) ~ 2.94), where +0.37 moves the
+    constrained value by >~1% of the range — far above float32 resolution —
+    and the assertion below turns any future saturated default into a loud
+    failure instead of a silent misclassification.
+    """
+    import numpy as np
+
+    from legoesm.training.param_collector import build_registry
+
+    probe = AIMIPClassicalParams.from_defaults()
+    for k, v in probe.raw_values.items():
+        if float(jnp.max(jnp.abs(v))) > 6.0:   # sigmoid slope ~2.5e-3 there
+            raise AssertionError(
+                f"raw leaf {k!r} is saturated (|raw|>6); the perturb-and-diff "
+                "ownership derivation would silently misclassify it — "
+                "interiorize the default (see from_defaults sigmoid_margin).")
+    perturbed = eqx.tree_at(
+        lambda p: p.raw_values, probe,
+        {k: v + 0.37 for k, v in probe.raw_values.items()},
+    )
+    registry = build_registry()
+    known = {m.qualified_name for m in registry}
+    key_by_class: dict[str, list[str]] = {}
+    for m in registry:
+        key_by_class.setdefault(m.config_class, []).append(m.scheme_key)
+
+    owned: set[str] = set()
+    for name in dir(type(probe)):
+        if not (name.startswith("to_") and name.endswith("_config")):
+            continue
+        # The factory routes to_cloud_config's leaves ONLY under
+        # cloud_scheme == "xu_randall"; every other cloud scheme starts from
+        # CloudConfig defaults, so its spec fields (rh_crit above all) must
+        # stay collectable there (codex: the sundqvist-cloud arm would
+        # otherwise lose its primary control). The other conditional routes
+        # (tiedtke/sbm conv, gray radiation, louis/mcfarlane/sundqvist-micro)
+        # have their class active only when they are also legacy-routed, so
+        # an unconditional exclusion is harmless for them.
+        if name == "to_cloud_config" and cloud_scheme != "xu_randall":
+            continue
+        cfg_a = getattr(probe, name)()
+        cfg_b = getattr(perturbed, name)()
+        for field in cfg_a._fields:
+            va, vb = getattr(cfg_a, field), getattr(cfg_b, field)
+            try:
+                same = bool(np.array_equal(np.asarray(va), np.asarray(vb)))
+            except (TypeError, ValueError):
+                same = va == vb
+            if not same:
+                for scheme_key in key_by_class.get(type(cfg_a).__name__, []):
+                    q = f"{scheme_key}.{field}"
+                    # Only registry-known names: a legacy-written field with
+                    # no __param_spec__ entry cannot collide with the spec
+                    # route, and build_trainable_params(exclude=...) raises
+                    # on unknown names.
+                    if q in known:
+                        owned.add(q)
+    return owned
+
+
+class AIMIPTrainableBundle(eqx.Module):
+    """The classical arm's trained model when generic scheme params are on.
+
+    Holds the legacy hand-written ``AIMIPClassicalParams`` AND a spec-driven
+    ``TrainablePhysicsParams`` for the ACTIVE schemes, so
+    ``eqx.filter_value_and_grad`` differentiates BOTH. Used only when a suite
+    opts in (``aimip_trainable_schemes``); without it the trained model stays a
+    bare ``AIMIPClassicalParams`` and every existing checkpoint keeps its
+    layout.
+    """
+    classical: "AIMIPClassicalParams"
+    schemes: object
+
+
+def unpack_aimip_params(p):
+    """``p -> (AIMIPClassicalParams, overrides_or_None)``.
+
+    One place decides how the trained model is shaped, so the factory call
+    site cannot drift from the runner's construction.
+    """
+    if isinstance(p, AIMIPTrainableBundle):
+        return p.classical, p.schemes.to_overrides()
+    return p, None
+
+
+def _splice_scheme_overrides(node, overrides: dict, _ctx=None):
+    """Splice ``{scheme_key: {field: value}}`` into a config NamedTuple tree.
+
+    ``scheme_key`` is the param registry's ``<module>.<ClassName>`` (what
+    ``TrainablePhysicsParams.to_overrides()`` returns). Each key is resolved
+    through ``build_registry`` to the DEFINING ``(module, class)`` pair and
+    matched on both — never on the bare class name, because the same name
+    exists in different components (an atmosphere ``TKEConfig`` and an ocean
+    ``TKEConfig``), and name-only matching would cross-route between them.
+    This mirrors ``driver.run_config_yaml._route_overrides_by_class``, which is
+    private and in another package (cross-package private imports are
+    forbidden); each splice delegates to the shared
+    ``core.param_overrides.apply_param_overrides``, which raises on an unknown
+    field, rather than re-deriving ``_replace``.
+
+    Two refusals, both because a trained parameter that fails to reach the
+    model — or reaches the wrong copy of it — is the failure this exists to
+    remove:
+
+    * a key matching NO config in the tree raises;
+    * a key matching the same ``(module, class)`` MORE THAN ONCE raises as
+      AMBIGUOUS. ``TurbulenceConfig`` instantiates every scheme's sub-config
+      and each carries its own ``SurfaceLayerConfig``, so a bare-name walk
+      silently spliced all of them; only the active scheme's copy is read, so
+      "applied" would not have meant "used".
+    """
+    from legoesm.core.param_overrides import apply_param_overrides
+
+    top = _ctx is None
+    if top:
+        from legoesm.training.param_collector import build_registry
+        by_key = {}
+        for m in build_registry():
+            if m.scheme_key:
+                by_key.setdefault(m.scheme_key, (m.module, m.config_class))
+        unknown = sorted(set(overrides) - set(by_key))
+        if unknown:
+            raise ValueError(
+                f"override key(s) {unknown} are not in the parameter registry."
+            )
+        _ctx = {"targets": {k: by_key[k] for k in overrides}, "hits": {}}
+
+    fields = getattr(node, "_fields", None)
+    if fields is not None and isinstance(node, tuple):
+        repl = {}
+        for f in fields:
+            child = getattr(node, f)
+            new_child = _splice_scheme_overrides(child, overrides, _ctx)
+            if new_child is not child:
+                repl[f] = new_child
+        if repl:
+            node = node._replace(**repl)
+        ident = (type(node).__module__, type(node).__name__)
+        for key, target in _ctx["targets"].items():
+            if ident == target:
+                _ctx["hits"][key] = _ctx["hits"].get(key, 0) + 1
+                node = apply_param_overrides(node, overrides[key])
+
+    if top:
+        missing = sorted(k for k in overrides if not _ctx["hits"].get(k))
+        if missing:
+            raise ValueError(
+                f"trained parameter override(s) for {missing} matched no "
+                f"config in the built physics tree. The class is absent "
+                f"entirely — a stale/typo'd key, an unsupported component, or "
+                f"a sub-config this scheme does not materialise. (An INACTIVE "
+                f"but instantiated scheme would have matched.)"
+            )
+        dup = sorted(k for k, n in _ctx["hits"].items() if n > 1)
+        if dup:
+            raise ValueError(
+                f"override key(s) {dup} matched MORE THAN ONE instance of "
+                f"their config class in the physics tree; only the active "
+                f"scheme's copy is read, so the splice is ambiguous. Route "
+                f"them through the owning scheme's config instead."
+            )
+    return node
 
 
 def make_aimip_classical_spectral_physics(
-    params: AIMIPClassicalParams,
+    params,
     grid,
     dt: float,
     *,
-    radiation: str = "gray",
+    param_overrides: dict | None = None,
+    # WB/AIMIP always run rrtmgp (2026-08-12). Gray stays reachable for a
+    # --smoke wiring check and for non-campaign callers, but it is no longer
+    # what you get by omission.
+    radiation: str = "rrtmgp",
     rad_update_interval_steps: int = 6,
     convection_scheme: str = "tiedtke",
     turbulence_scheme: str = "louis",
     surface_bulk_scheme: str = "constant",
     gwd_scheme: str = "mcfarlane",
-    microphysics_scheme: str = "none",
+    microphysics_scheme: str = "sundqvist",
     cloud_scheme: str = "xu_randall",
+    # Ablations that deliberately drop a family set this True; production
+    # training does not (see validate_classical_scheme_set).
+    allow_unfilled_families: bool = False,
     land_mask: "jax.Array | None" = None,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
@@ -654,9 +1077,10 @@ def make_aimip_classical_spectral_physics(
 
         physics_fn(state, grid, sigma_coord) -> SpectralHydrostaticState
 
-    Gray radiation is used (tunable ``tau_equator`` / ``tau_pole``) so
-    surface-energy-balance gradients flow back through radiation as
-    well as through the dynamic schemes.
+    Radiation is RRTMGP in production; gray remains selectable as the cheap
+    backend but carries NO trainable optical knob since 2026-08-11. The
+    radiative gradients a classical model gets come from the surface albedo /
+    emissivity leaves, which reach the solver as per-call overrides.
 
     When ``params.spatial_surface`` is set and ``land_mask`` is
     provided, the surface (``Cd_neutral``, ``Ch_neutral``, ``z0``) and
@@ -672,8 +1096,30 @@ def make_aimip_classical_spectral_physics(
     ``PhysicsPipeline`` cannot host (see
     ``physics_pipeline.py:897`` ``_PIPELINE_UNSUPPORTED_CONVECTION``).
     """
+    # Enforced HERE, not in a single runner: the ablation drivers, the AMIP
+    # finetune and the WB spectral lane all build their classical physics
+    # through this factory, and a runner-only gate left every one of them
+    # unchecked (codex). NOT universal: the lat-lon carry lane
+    # (run_aimip_latlon -> training_driver) builds physics through
+    # physics_pipeline and never reaches here.
+    validate_classical_scheme_set(
+        convection=convection_scheme, turbulence=turbulence_scheme,
+        cloud=cloud_scheme, microphysics=microphysics_scheme,
+        radiation=radiation, gwd=gwd_scheme,
+        allow_unfilled=allow_unfilled_families,
+    )
+    # ``params`` may be a bare AIMIPClassicalParams (legacy) or an
+    # AIMIPTrainableBundle carrying spec-driven scheme params too. Unpacking
+    # HERE means every caller — runner, tests, eval — gets the same behaviour
+    # without knowing which shape it holds.
+    params, _bundle_overrides = unpack_aimip_params(params)
+    if _bundle_overrides is not None:
+        param_overrides = {**_bundle_overrides, **(param_overrides or {})}
+
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.radiation.config import (
+        GrayRadiationConfig, RadiationConfig,
+    )
     from legoesm.core.bulk_flux import validate_bulk_scheme
 
     # Dispatch hardening: reject an unknown surface bulk scheme at builder
@@ -689,8 +1135,11 @@ def make_aimip_classical_spectral_physics(
     # cloud knobs trainable end-to-end (via
     # ``RadiationConfig.cloud_config`` -> ``radiation/integration.py``).
     # ``gray`` is the Frierson-style two-stream analytic path:
-    # cheap, no cloud coupling, only ``tau_equator`` /
-    # ``tau_pole`` are differentiated.  Default ``gray`` keeps the
+    # cheap, no cloud coupling, and NOT trained (2026-08-11) — no
+    # gradient reaches any of its OPTICAL knobs. (Under
+    # spatial_surface=True the learned surface albedo/emissivity FIELD
+    # is still substituted into its config; that is a surface
+    # property, not a radiation-scheme knob.)  Default ``gray`` keeps the
     # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
     # for production-grade physics realism.
     # ---- Cloud config (trained when xu_randall, defaults otherwise) ----
@@ -787,11 +1236,11 @@ def make_aimip_classical_spectral_physics(
             diurnal_cycle=True,
         )
     elif radiation == "gray":
-        # Full 9-knob gray radiation (audit pass).  Was previously
-        # only ``tau_equator`` / ``tau_pole`` — the residual T bias
-        # was traced to fixed-default ``tau_moist_coeff``,
-        # ``lw_diff_factor``, ``sfc_emissivity`` etc.
-        gray_cfg = params.to_gray_radiation_config()
+        # Gray radiation runs at its published defaults — it is NOT
+        # trained (2026-08-11 directive).  Only the SPATIAL surface fields
+        # below are substituted, and those come from the surface knobs, not
+        # from any gray-specific one.
+        gray_cfg = GrayRadiationConfig()
         # Substitute spatial sfc_emissivity / sfc_albedo when present.
         # ``gray.py`` lines 175-176 and 250 use these as scalars that
         # broadcast against column-shaped arrays — passing (ncol,)
@@ -952,6 +1401,31 @@ def make_aimip_classical_spectral_physics(
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
+
+    # SCHEME-AGNOSTIC trained parameters (the generic route).
+    #
+    # The ``to_*_config`` methods above are hand-written per scheme, so a
+    # scheme with no method — Bechtold, CLUBB, Thompson, ... — silently ran at
+    # its defaults and received no gradient. ``TrainablePhysicsParams`` is the
+    # spec-driven alternative: ``build_trainable_params(active_scheme_keys=...)``
+    # collects every ``__param_spec__`` parameter of whatever schemes are
+    # ACTIVE, and ``to_overrides()`` returns them keyed by scheme. Measured at
+    # tier "extended": edmf+louis = 46 trainable leaves, bechtold+clubb = 102.
+    #
+    # Applied HERE, after the tree is assembled and BEFORE make_physics, so the
+    # spliced leaves are traced inside the loss (SegmentForcing doctrine) and
+    # both the combined and rad-split paths below inherit them.
+    if param_overrides:
+        physics_config = _splice_scheme_overrides(
+            physics_config, param_overrides)
+        # The rad-split branch rebuilds a PhysicsConfig from the ORIGINAL
+        # sub-configs, so re-read the spliced ones rather than letting that
+        # path silently keep untrained values.
+        rad_cfg = physics_config.radiation
+        conv_cfg = physics_config.convection
+        turb_cfg = physics_config.turbulence
+        micro_cfg = physics_config.microphysics
+        gwd_cfg = physics_config.gravity_wave_drag
 
     # Combined (legacy) path: a single callable computes every-step
     # physics including radiation.  Returned when ``split_rad=False``

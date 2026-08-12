@@ -1,0 +1,8 @@
+# Scheme-swap arm: cloud fraction xu_randall -> sundqvist; rest = base combo.
+aimip_variant: "classical"
+aimip_convection: "edmf"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "sundqvist"
+aimip_radiation: "rrtmgp"

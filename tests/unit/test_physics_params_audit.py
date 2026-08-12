@@ -240,13 +240,13 @@ class TestAIMIPDefaultsInteriorization:
         from legoesm.training.aimip_params import AIMIPClassicalParams
         params = AIMIPClassicalParams.from_defaults()
         vals = params.as_dict()
-        # gray_sfc_emissivity: canonical 1.0 in [0.5, 1.0] -> margin 0.025 -> 0.975
-        assert abs(float(vals["gray_sfc_emissivity"]) - 0.975) < 1e-5
-        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975
+        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975.
+        # (The gray twin of this assertion went away on 2026-08-11 with the
+        # gray knobs themselves; RRTMGP now carries the edge-knob case.)
         assert abs(float(vals["rrtmgp_sfc_emissivity"]) - 0.975) < 1e-5
         # raw is far from saturation -> non-trivial inverse-sigmoid gradient.
         # logit(0.95) ~= 2.94; a saturated edge default would give ~6.9.
-        raw = float(params.raw_values["gray_sfc_emissivity"])
+        raw = float(params.raw_values["rrtmgp_sfc_emissivity"])
         assert abs(raw) < 4.0
 
     def test_midrange_knob_exact_canonical(self):
@@ -254,10 +254,23 @@ class TestAIMIPDefaultsInteriorization:
             AIMIPClassicalParams, _canonical_scheme_defaults)
         defaults = _canonical_scheme_defaults()
         vals = AIMIPClassicalParams.from_defaults().as_dict()
-        # tiedtke_cape_threshold canonical 70 in [10, 500] is mid-range:
-        # the clamp is a no-op and init must equal the canonical default.
-        name = "tiedtke_cape_threshold"
+        # A knob whose canonical default sits WELL INSIDE its bounds: the
+        # sigmoid clamp is then a no-op and init must reproduce the canonical
+        # value exactly.
+        #
+        # This used to pin tiedtke_cape_threshold (70 in [10, 500]). That
+        # parameter was removed from the AIMIP trainables in #1417 -- its
+        # trigger sigmoid saturates, so its gradient is exactly zero in both
+        # the convecting and the stable regime -- and the test was left
+        # KeyError-ing on main. Moved to cloud_p_xr (0.25 in [0.1, 1.0]),
+        # which preserves the property under test.
+        name = "cloud_p_xr"
+        assert name in vals, f"{name} is no longer a trainable; pick another"
+        assert name in defaults, f"{name} has no canonical default"
         assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
+        # Non-vacuity: the value must genuinely be interior, or a clamped
+        # parameter would pass this by coincidence.
+        assert 0.1 < defaults[name] < 1.0
 
     def test_to_rrtmgp_config_freezes_all_cache_key_fields(self):
         """EVERY RRTMGPConfig field that ``_instance_cache_key`` /

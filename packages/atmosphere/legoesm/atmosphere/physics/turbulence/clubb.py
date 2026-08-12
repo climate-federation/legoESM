@@ -8,45 +8,45 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 5995)
+Table of contents (sections, in order; flag reference table at line 6000)
 -----------------------------------------------------------------------------
   1.  [line   328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2.  [line   411] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3.  [line   636] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3.  [line   641] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4.  [line   967] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4.  [line   972] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5.  [line  1021] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5.  [line  1026] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6.  [line 1195] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6.  [line  1200] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7.  [line 1630] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8.  [line 1758] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7.  [line  1635] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8.  [line  1763] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9.  [line 1939] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9.  [line  1944] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line 2125] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line 2206] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2130] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2211] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line 2528] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2533] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  13. [line 2772] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  2777] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line 3597] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3602] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line 3658] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  3663] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line 4316] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4321] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line 4596] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4601] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line 4970] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  4975] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line 5366] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  5371] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -621,7 +621,12 @@ def derive_mixt_frac_max_mag(Skw_max_mag: float) -> float:
     ``Skw_max_mag = 4.5`` this is ~0.9897.
     """
     inner = 4.0 * (1.0 - _MIXT_FRAC_CAP_SIGMA_REF) ** 3 + Skw_max_mag ** 2
-    return 1.0 - 0.5 * (1.0 - Skw_max_mag / math.sqrt(inner))
+    # jnp.sqrt, not math.sqrt: ``Skw_max_mag`` is a REGISTERED trainable
+    # (__param_spec__, aggressive tier), so once a calibration or a trained
+    # override splices a traced JAX scalar here, math.sqrt raises on the
+    # Python-scalar conversion and the whole trace dies (codex review
+    # 2026-08-05). jnp.sqrt is identical on a Python float.
+    return 1.0 - 0.5 * (1.0 - Skw_max_mag / jnp.sqrt(inner))
 
 
 def derive_lmin(lmin_coef: float) -> float:
@@ -5306,8 +5311,19 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
     """Seed a fresh :class:`CLUBBMomentState` at rest (CAM-default floors).
 
     Means are zero (the bridge resets them from the live column each step);
-    velocity variances start at the floor ``tke_min`` (``w_tol^2`` scale), scalar
-    variances at their tolerance-squared floors, all fluxes and ``wp3`` zero.
+    velocity variances start at ``tke_min``, scalar variances at their
+    tolerance-squared floors, all fluxes and ``wp3`` zero.
+
+    .. warning::
+
+       ``tke_min`` (1e-6) is NOT the floor the prognostic core itself enforces:
+       ``advance_wp2_wp3`` floors ``wp2`` at ``w_tol**2`` (4e-4), 400x higher,
+       from its first advance.  The scalar variance solve runs BEFORE that
+       advance, so on step 1 the maximum-correlation floor
+       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divides by 1e-6 and writes an
+       unphysical surface ``thlp2`` (929 K^2 — a 30 K RMS fluctuation — on the
+       production column), which nothing subsequently lowers.  See #1508; this
+       docstring previously described the mismatch as intentional.
     ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
     """
     nzm = nlev + 1

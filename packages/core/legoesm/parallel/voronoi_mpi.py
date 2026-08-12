@@ -40,7 +40,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.precision import cast_pytree
-from legoesm.core.state import MPASHydrostaticState
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPAS_SFC_DIAG_MPI_UNPUBLISHED,
+    MPASHydrostaticState,
+)
 # NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
 # shared-substrate ``parallel`` package).  Importing them here would make
 # legoesm-core depend on legoesm-atmosphere (a cycle), so — exactly as
@@ -547,6 +551,61 @@ def gather_voronoi_field(
         global_field[idx_chunk] = data_chunk
 
     return jnp.array(global_field)
+
+
+def gather_owned_cells_to_root(
+    owned_fields: dict,
+    owned_indices: np.ndarray,
+    n_global: int,
+    root: int = 0,
+) -> dict | None:
+    """Assemble GLOBAL cell fields on ``root`` from ALREADY-HOST owned rows.
+
+    The host-side sibling of :func:`gather_voronoi_field`, for diagnostics.
+    Takes the WHOLE field dict at once and differs from it deliberately:
+
+    * **ONE collective for every field.**  A per-field loop would put N
+      ``gather`` calls in sequence with root-only reconstruct work between
+      them — and that work (a ``n_global`` allocation, the scatter-assign) can
+      fail on ROOT ALONE, leaving every peer blocked in the next field's
+      gather.  One ``gather`` means all root-only work happens AFTER the last
+      collective, so a root failure can never strand a peer.  It also stops
+      ``owned_indices`` being pickled once per field.
+    * Inputs are plain NumPy — the caller does the device->host copy and the
+      ``[:n_owned]`` slice BEFORE calling, so that failure-prone work also
+      happens outside the collective.
+    * ``gather`` to ``root``, not ``allgather``: non-root ranks hold nothing.
+    * Returns NumPy, so values never round-trip through ``jnp.array`` (which
+      silently demotes a float64 host array to float32 when x64 is off, and
+      would place a global copy on every rank's device).
+
+    Returns ``{name: (n_global,) + trailing}`` on ``root`` and ``None`` on
+    every other rank.
+
+    NOT differentiable (raw ``comm.gather``, like every diagnostic reduction
+    here) — never call it from a traced or ``jax.grad`` context.
+    """
+    require_mpi_stack()
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    # THE only collective.  Every rank contributes the same field names (the
+    # caller agrees them first), so the payload shape is rank-uniform.
+    chunks = comm.gather((owned_indices, owned_fields), root=root)
+    if comm.Get_rank() != root:
+        return None
+    out = {}
+    for name in owned_fields:
+        parts = [(idx, f[name]) for idx, f in chunks]
+        # Promote to the WIDEST contributed dtype: taking root's alone would
+        # let a peer's float64 chunk be silently downcast by the assignment.
+        dtype = np.result_type(*[np.asarray(a).dtype for _, a in parts])
+        trailing = tuple(np.shape(parts[0][1])[1:])
+        buf = np.zeros((int(n_global),) + trailing, dtype=dtype)
+        for idx_chunk, data_chunk in parts:
+            buf[idx_chunk] = data_chunk
+        out[name] = buf
+    return out
 
 
 def gather_state_voronoi(
@@ -1077,15 +1136,19 @@ def make_voronoi_mpi_step(
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
-            # CMOR TOA + surface turbulent-flux extras — mirror the serial
-            # producer's 8-slot contract (primitive_eq_mpas.step) EXACTLY so the
-            # one-rank MPI-voronoi coupled lane exports rlut/rsut/rsdt/hfss/hfls
-            # too. Slot order: (sw_net, lw_net, precip, lw_up_toa, sw_up_toa,
-            # sw_down_toa, shflx, lhflx) — the consumer (model_driver
-            # _feed_mpas_cmip_accumulators) reads slots 3-7 by this order.
-            _extras = tuple(getattr(_pt, _k, None) for _k in (
-                "lw_up_toa", "sw_up_toa", "sw_down_toa",
-                "shflx_sfc", "lhflx_sfc"))
+            # CMOR TOA + surface turbulent-flux extras.  Built from the SHARED
+            # ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract (core.state) so this
+            # producer can no longer drift from the serial one and from the
+            # consumer's slot map: a ONE-rank Voronoi MPI run is exactly the
+            # case ``ModelDriver._mpas_cmip_feed_enabled`` turns the CMOR feed
+            # ON for, and while this tuple stopped at slot 7 that run accepted
+            # ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.
+            # ``MPAS_SFC_DIAG_MPI_UNPUBLISHED`` keys stay None AT THEIR SLOT
+            # (never shortened — a shorter tuple is what misindexes).
+            _extras = tuple(
+                None if _k in MPAS_SFC_DIAG_MPI_UNPUBLISHED
+                else getattr(_pt, _k, None)
+                for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             if (_sw_sfc is not None or _lw_sfc is not None
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):

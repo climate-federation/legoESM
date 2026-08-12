@@ -1,0 +1,266 @@
+#!/usr/bin/env python
+"""Run the six-face duo stepper on Williamson case 6 (Rossby-Haurwitz
+wave 4) and export daily gh/u/v on the Zenodo reference's lat-lon
+canvas for ``case6_duo_oracle_gate.py``.
+
+IC: ``case6_six_face_state`` — the literal port of the pinned oracle's
+``tools/test_cases.F90`` case(6) (:1213-1270), analytic fields from the
+shared :mod:`legoesm.core.williamson_sw_analytic` on the oracle's GFS
+constants.
+
+DECK CONFIGURATION (defaults) — every value below is the RESOLVED
+namelist echo of the Zenodo reference deck
+``C48.sw.case6.alpha0.duo.hord8/rundir/logfile.000000.out``, not the
+declared ``input.nml`` (the w2 d_ext lesson: the echo is the only
+authority):
+
+* damping block (:401-417): ``DDDMP=0  D2_BG=0  D4_BG=0  KE_BG=0
+  D_EXT=0  NORD=2``, ``do_vort_damp=F`` / ``vtdm4=0``, hords all 8 —
+  i.e. ``SW_CFG_CASE8`` with ``d4_bg = 0.0`` (case 8 runs del-6 bg
+  0.12; case 6 runs NO explicit divergence damping at all — hord-8
+  limiting is the only dissipation).
+* cadence: ``DT_ATMOS=1200`` (:184), ``N_SPLIT=7`` (:358), K_SPLIT=1.
+* grid: C48 duo, ``DO_SCHMIDT=T`` with ``STRETCH_FAC=1`` and target
+  (lon 0, lat -90) — read against ``fv_grid_utils.F90:859-917``
+  (``direct_transform``): with c=1 and sin(lat_p)=-1 this is a PURE
+  lon -> lon + pi relabelling of the source cube (plus the skipped
+  ``shift_fac`` -10 deg of the non-Schmidt branch,
+  ``fv_grid_tools.F90:662``).  It moves where the native cells sit and
+  nothing else; the analytic IC and the daily output are GEOGRAPHIC
+  fields, so a canvas comparison is unaffected and this runner keeps
+  the port's standard cube orientation.
+
+CANVAS: the reference ``atmos_daily.nc`` stores T-cell centres at
+lon 0.5..359.5, lat -90..90 (181x360, poles included) — NOT the
+historical W2/modon 0..359 canvas.  Frames here are sampled on the
+reference's own longitudes (``build_nearest_map(ctx, lon_deg=...)``)
+so the gate compares like against like.
+
+REMAP PROTOCOL (documented approximation, same family as the W2/modon
+runners): D winds -> geographic via the certified c2l_ord2 lens (the
+reference's own ucomp/vcomp used the ord4 sibling + fregrid; ord2
+residual is O(dx^2)); gh = delp sampled NEAREST-cell (the reference is
+fregrid).  Scores against the reference are therefore envelope/
+pattern-level, floored by the remap-protocol difference — stated on
+output and in the gate.
+
+Usage: run_duo_stepper_case6.py --n 48 --days 5 --out case6_c48.npz
+       (--days 0 exports the IC frame only — the pure IC-port score.)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+
+import numpy as np
+
+# Resolved Zenodo case-6 deck damping block (logfile.000000.out:401-417):
+# SW_CFG_CASE8 minus its del-6 background (D4_BG 0.12 -> 0.0).  Built
+# from the case-8 block at import time in main() to stay a single
+# source; this literal names only the one differing key.
+CASE6_D4_BG = 0.0
+CASE6_DT_ATMOS_S = 1200.0     # logfile.000000.out:184  DT_ATMOS
+CASE6_N_SPLIT = 7             # logfile.000000.out:358  N_SPLIT
+
+
+def reference_canvas() -> tuple[np.ndarray, np.ndarray]:
+    """(lat_deg, lon_deg) of the Zenodo atmos_daily.nc T-cell canvas."""
+    return (np.linspace(-90.0, 90.0, 181),
+            0.5 + np.arange(360, dtype=float))
+
+
+def _git_sha() -> str:
+    """Repo SHA recorded in the npz (artifact without commit is not
+    comparable to anything)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+# Plausibility bands, mirrored by the gate (sentinel detectors, not
+# physics gates): RH4 lives in gh ~ [7.8e4, 1.04e5] m^2/s^2, |V| <~ 100
+# m/s; the known failure mode (BIG_NUMBER = 1e8 corner sentinel leaking
+# through a sample window) sits orders of magnitude outside.
+GH_PLAUSIBLE = (1.0e4, 5.0e5)
+WIND_PLAUSIBLE_MAX = 500.0
+
+
+def frames_plausible(gh, u, v) -> str | None:
+    """None if within the sentinel bands, else a description."""
+    if not all(np.isfinite(f).all() for f in (gh, u, v)):
+        return "non-finite values"
+    if gh.min() < GH_PLAUSIBLE[0] or gh.max() > GH_PLAUSIBLE[1]:
+        return (f"gh [{gh.min():g}, {gh.max():g}] outside "
+                f"{GH_PLAUSIBLE} — sentinel leak?")
+    m = max(float(np.abs(u).max()), float(np.abs(v).max()))
+    if m > WIND_PLAUSIBLE_MAX:
+        return f"|wind| max {m:g} > {WIND_PLAUSIBLE_MAX:g} m/s"
+    return None
+
+
+def sample_fields(ctx, states, nmap):
+    """(gh, u_east, v_north) 181x360 frames.
+
+    gh: compute-window delp (== g*h on the SW convention) nearest-cell
+    sampled.  Winds: the c2l_ord2 lens (run_duo_stepper_w2 protocol).
+    """
+    from legoesm.grids.fv3_native_ext_vector import (
+        c2l_ord2_face,
+        center_a_matrix,
+    )
+
+    n, ng = ctx["n"], ctx["ng"]
+    sl = slice(ng, ng + n)
+    gh6, u6, v6 = [], [], []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        amat = center_a_matrix(gs)
+        ua, va = c2l_ord2_face(np.asarray(states[t]["u"]),
+                               np.asarray(states[t]["v"]),
+                               gs["dx"], gs["dy"], amat, n, ng)
+        gh6.append(np.asarray(states[t]["delp"])[sl, sl])
+        u6.append(ua[sl, sl])
+        v6.append(va[sl, sl])
+    gh = np.concatenate([f.ravel() for f in gh6])[nmap]
+    u = np.concatenate([f.ravel() for f in u6])[nmap]
+    v = np.concatenate([f.ravel() for f in v6])[nmap]
+    return gh, u, v
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n", type=int, default=48,
+                    help="cube resolution (reference deck is C48)")
+    ap.add_argument("--dt-atmos", type=float, default=CASE6_DT_ATMOS_S,
+                    help="outer block [s]; deck resolves 1200")
+    ap.add_argument("--n-split", type=int, default=CASE6_N_SPLIT,
+                    help="inner acoustic steps per block; deck resolves 7")
+    ap.add_argument("--days", type=float, default=5.0,
+                    help="whole days to run; 0 = IC frame only")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--d-ext", type=float, default=0.0,
+                    help="external-mode filter; deck resolves D_EXT=0.0")
+    ap.add_argument("--d4-bg", type=float, default=CASE6_D4_BG,
+                    help="del-6 divergence-damping bg; deck resolves 0.0 "
+                         "(pass 0.12 for the case-8 block — diagnostic, "
+                         "NON-FAITHFUL to the case-6 deck)")
+    ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
+                    help="along-ring k2e order (2 = authoritative live "
+                         "default)")
+    ap.add_argument("--ext-exclude", default="",
+                    help="comma list of ext families to swap to interim "
+                         "exchanges (attribution probes)")
+    ap.add_argument("--plain-conventions", action="store_true",
+                    help="RETIRED A/B arm (km=1 corpus migration "
+                         "2026-08-11): c_sw refuses duogrid on unbounded "
+                         "metrics (fv_arrays.F90:1512), so this lane can "
+                         "no longer run; the flag now fails fast")
+    args = ap.parse_args()
+    if args.plain_conventions:
+        ap.error("--plain-conventions is retired: duogrid on unbounded "
+                 "metrics is upstream-impossible (fv_arrays.F90:1512) "
+                 "and c_sw now refuses it")
+    if args.n_split < 1:
+        ap.error(f"--n-split must be >= 1, got {args.n_split}")
+    blocks_per_day_f = 86400.0 / args.dt_atmos
+    blocks_per_day = int(round(blocks_per_day_f))
+    if abs(blocks_per_day - blocks_per_day_f) > 1e-9:
+        ap.error("86400 must be an integer multiple of --dt-atmos "
+                 f"(got {blocks_per_day_f} blocks/day)")
+    total_days = int(round(args.days))
+    if abs(total_days - args.days) > 1e-9 or total_days < 0:
+        ap.error(f"--days must be a whole number >= 0, got {args.days}")
+
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    sys.path.insert(0, str(here.parent))       # sibling runner import
+    from run_duo_stepper_w2 import build_nearest_map
+
+    from legoesm.core.fv3_native_duo_stepper import (
+        SW_CFG_CASE8,
+        advance_duo_outer_step,
+        build_six_face_duo_context,
+        case6_six_face_state,
+    )
+
+    sw_cfg = {**SW_CFG_CASE8, "d4_bg": args.d4_bg}
+    oc = not args.plain_conventions
+    excl = tuple(x for x in args.ext_exclude.split(",") if x)
+    ctx = build_six_face_duo_context(args.n, 3,
+                                     use_ext_bundle=True,
+                                     oracle_conventions=oc,
+                                     ext_exclude=excl,
+                                     k2e_nord=args.k2e_nord)
+    states = case6_six_face_state(ctx)
+    lat_deg, lon_deg = reference_canvas()
+    nmap = build_nearest_map(ctx, lon_deg=lon_deg)
+
+    times = [0.0]
+    gh0f, u0f, v0f = sample_fields(ctx, states, nmap)
+    ghf, uf, vf = [gh0f], [u0f], [v0f]
+    bad = frames_plausible(gh0f, u0f, v0f)
+    if bad:
+        print(f"day 0: {bad} — aborting", flush=True)
+        sys.exit(2)
+    print(f"day 0: gh [{gh0f.min():.1f}, {gh0f.max():.1f}] "
+          f"max|u| {np.abs(u0f).max():.3f} max|v| {np.abs(v0f).max():.3f}",
+          flush=True)
+
+    def _save():
+        np.savez_compressed(
+            args.out, times_days=np.array(times),
+            gh=np.stack(ghf), u=np.stack(uf), v=np.stack(vf),
+            lat=lat_deg, lon=lon_deg,
+            n=np.array(int(args.n)),
+            dt_atmos=np.array(float(args.dt_atmos)),
+            n_split=np.array(int(args.n_split)),
+            requested_days=np.array(int(total_days)),
+            d_ext=np.array(float(args.d_ext)),
+            d4_bg=np.array(float(args.d4_bg)),
+            k2e_nord=np.array(int(args.k2e_nord)),
+            ext_exclude=np.array(args.ext_exclude),
+            oracle_conventions=np.array(bool(oc)),
+            git_sha=np.array(_git_sha()),
+            protocol=(
+                "six-face duo stepper, case6_six_face_state IC "
+                "(test_cases.F90:1213-1270 via williamson_sw_analytic, GFS "
+                "constants); resolved Zenodo case-6 deck config "
+                "(SW_CFG_CASE8 with d4_bg="
+                f"{args.d4_bg}, d_ext={args.d_ext}, dt_atmos="
+                f"{args.dt_atmos}, n_split={args.n_split}); c2l_ord2 lens "
+                "(reference used c2l_ord=4 + fregrid; ord2 residual "
+                "O(dx^2)) + NEAREST-cell sampling on the reference T-cell "
+                "canvas (lon 0.5..359.5) — envelope/pattern-level protocol"))
+        print("saved", args.out, flush=True)
+
+    _save()
+    for day in range(1, total_days + 1):
+        for _ in range(blocks_per_day):
+            states = advance_duo_outer_step(ctx, states, args.dt_atmos,
+                                            args.n_split, d_ext=args.d_ext,
+                                            sw_cfg=sw_cfg)
+        gh_d, u_d, v_d = sample_fields(ctx, states, nmap)
+        bad = frames_plausible(gh_d, u_d, v_d)
+        if bad:
+            print(f"day {day}: {bad} — aborting (partial npz kept)",
+                  flush=True)
+            sys.exit(2)
+        times.append(float(day))
+        ghf.append(gh_d)
+        uf.append(u_d)
+        vf.append(v_d)
+        print(f"day {day}: gh [{gh_d.min():.1f}, {gh_d.max():.1f}] "
+              f"max|u| {np.abs(u_d).max():.3f} "
+              f"max|v| {np.abs(v_d).max():.3f}", flush=True)
+        _save()      # incremental: a timeout still leaves day-k frames
+
+
+if __name__ == "__main__":
+    main()

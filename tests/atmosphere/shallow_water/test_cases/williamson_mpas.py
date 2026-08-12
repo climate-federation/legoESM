@@ -17,6 +17,18 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import MPASShallowWaterState
 from legoesm.core.precision import get_policy
+from legoesm.core.williamson_sw_analytic import (
+    RH4_MEAN_DEPTH_M,
+    W2_GH0,
+    W5_H0_M,
+    W5_UBAR_MS,
+    rossby_haurwitz_4_geopotential,
+    rossby_haurwitz_4_winds,
+    solid_body_geopotential,
+    solid_body_rotation_speed,
+    solid_body_winds,
+    williamson_5_mountain_height,
+)
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm import constants
 
@@ -55,20 +67,18 @@ def williamson_test2_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
     MPASShallowWaterState
     """
     R = mesh.radius
-    Omega = constants.Omega
     g = constants.g
 
-    u_0 = 2.0 * jnp.pi * R / (12.0 * 86400.0)  # ~38.6 m/s
-    gh_0 = 2.94e4
-    h_0 = gh_0 / g
-
+    u_0 = solid_body_rotation_speed(R)          # ~38.6 m/s
     lat = mesh.latCell
-    h_data = h_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2 / g
-    h_s_data = jnp.zeros_like(h_data)
+    lon = mesh.lonCell
 
-    # Velocity: solid body rotation u = u_0 * cos(lat), v = 0
-    u_east_cell = u_0 * jnp.cos(lat)
-    v_north_cell = jnp.zeros_like(lat)
+    # Analytic fields: ONE shared definition (williamson_sw_analytic).
+    h_data = solid_body_geopotential(lon, lat, radius=R,
+                                     omega=constants.Omega, u0=u_0,
+                                     gh0=W2_GH0, xp=jnp) / g
+    h_s_data = jnp.zeros_like(h_data)
+    u_east_cell, v_north_cell = solid_body_winds(lon, lat, u0=u_0, xp=jnp)
 
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
 
@@ -96,34 +106,25 @@ def williamson_test5_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
     MPASShallowWaterState
     """
     R = mesh.radius
-    Omega = constants.Omega
     g = constants.g
 
-    u_0 = 20.0  # m/s
-    gh_0 = 5960.0 * g
-
+    u_0 = W5_UBAR_MS
     lat = mesh.latCell
     lon = mesh.lonCell
 
-    # Mountain topography
-    lon_c = 3.0 * jnp.pi / 2.0
-    lat_c = jnp.pi / 6.0
-    R_m = jnp.pi / 9.0
-    h_s0 = 2000.0
+    # ★ CHANGED: this used a GREAT-CIRCLE radius.  Williamson et al.
+    # (1992) case 5 and test_cases.F90:1185 both specify the clipped
+    # PLANAR (lon, lat) radius -- the cubed-sphere sibling already used
+    # it, so W5 was not the same mountain across grids.
+    h_s_data = williamson_5_mountain_height(lon, lat, xp=jnp)
 
-    r = jnp.arccos(jnp.clip(
-        jnp.sin(lat_c) * jnp.sin(lat) +
-        jnp.cos(lat_c) * jnp.cos(lat) * jnp.cos(lon - lon_c),
-        -1.0, 1.0))
-    h_s_data = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
-
-    # Height field: h is fluid depth (column above topography).
-    # Solver uses B = KE + g*(h + h_s), so h = h_free - h_s.
-    h_free = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
+    # h is fluid DEPTH: the solver computes B = KE + g*(h + h_s).
+    h_free = solid_body_geopotential(lon, lat, radius=R,
+                                     omega=constants.Omega, u0=u_0,
+                                     gh0=W5_H0_M * g, xp=jnp) / g
     h_data = h_free - h_s_data
 
-    u_east_cell = u_0 * jnp.cos(lat)
-    v_north_cell = jnp.zeros_like(lat)
+    u_east_cell, v_north_cell = solid_body_winds(lon, lat, u0=u_0, xp=jnp)
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
 
     # Thread the precision-policy storage dtype through the state (the mesh
@@ -154,44 +155,21 @@ def williamson_test6_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
     MPASShallowWaterState
     """
     R = mesh.radius
-    Omega = constants.Omega
     g = constants.g
-
-    # Parameters
-    K = 7.848e-6    # angular frequency
-    R_val = 4       # wave number
-    h_0 = 8000.0    # mean depth [m]
+    h_0 = RH4_MEAN_DEPTH_M    # mean depth [m]
 
     lat = mesh.latCell
     lon = mesh.lonCell
 
-    cos_lat = jnp.cos(lat)
-    sin_lat = jnp.sin(lat)
-
-    # Rossby-Haurwitz wave 4 initial conditions
-    A = 0.5 * K * (2.0 * Omega + K) * cos_lat**2 + \
-        0.25 * K**2 * cos_lat**(2 * R_val) * \
-        ((R_val + 1) * cos_lat**2 +
-         (2 * R_val**2 - R_val - 2) -
-         2.0 * R_val**2 / (cos_lat**2 + 1e-30))
-
-    B = (2.0 * (Omega + K) * K * cos_lat**(R_val - 1) *
-         ((R_val**2 + 2 * R_val + 2) -
-          (R_val + 1)**2 * cos_lat**2)) / \
-        ((R_val + 1) * (R_val + 2) + 1e-30)
-
-    C = 0.25 * K**2 * cos_lat**(2 * R_val) * \
-        ((R_val + 1) * cos_lat**2 - (R_val + 2))
-
-    h_data = h_0 + (R**2 / g) * (A + B * jnp.cos(R_val * lon) +
-                                   C * jnp.cos(2 * R_val * lon))
-
-    # Velocity field
-    u_east_cell = R * cos_lat * K + \
-        R * K * cos_lat**(R_val - 1) * \
-        (R_val * sin_lat**2 - cos_lat**2) * jnp.cos(R_val * lon)
-    v_north_cell = -R * K * R_val * cos_lat**(R_val - 1) * \
-        sin_lat * jnp.sin(R_val * lon)
+    # Rossby-Haurwitz wave 4 initial conditions -- ONE shared analytic
+    # definition (legoesm.core.williamson_sw_analytic), which carries
+    # B ~ cos^R per Williamson Eq. 145 and the FV3 duo oracle; this file
+    # previously had its own copy with cos^(R-1).
+    h_data = rossby_haurwitz_4_geopotential(
+        lon, lat, radius=R, omega=constants.Omega, gh0=h_0 * g,
+        xp=jnp) / g
+    u_east_cell, v_north_cell = rossby_haurwitz_4_winds(
+        lon, lat, radius=R, xp=jnp)
 
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
     h_s_data = jnp.zeros_like(h_data)

@@ -143,8 +143,10 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
 
-    # --- Lock Exchange (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Lock Exchange (NEMO / Petersen et al. 2015): cubed_sphere, latlon, fesom ---
+    # fesom is added HERE ONLY -- not to GRID_TYPES, which drives every
+    # experiment; only lock exchange is wired for the FESOM dycore.
+    for g in ["cubed_sphere", "latlon", "mpas", "fesom"]:
         matrix.append(TestCase(
             "lock_exchange", g, res[g], 1.0, 0.1))
 
