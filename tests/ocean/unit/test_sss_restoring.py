@@ -177,3 +177,90 @@ class TestRealFreshwaterRestoringGuard:
         for norm in (None, "s_target", "live_s"):
             assert self._f("virtual_salt_flux", True, norm) is None
             assert self._f(None, True, norm) is None
+
+
+class TestRestoringHeatFlux:
+    """NEMO carries the HEAT CONTENT of the water restoring moves.
+
+    ``qns = qns - erp * rcp * sst_m`` (sbcssr.F90:138).  Our applier had NO
+    heat term at all, which is one of the three structural gaps (the others
+    being that restoring never enters the water budget and so never moves
+    SSH/volume).
+    """
+
+    def _cfg(self, **kw):
+        from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+
+        return SSSRestoringConfig(
+            enabled=True, tau_restore_days_default=45.5, z1_m=10.0,
+            ice_gate=False, **kw)
+
+    def _call(self, S_model, S_target, sst_C=None, **kw):
+        import jax.numpy as jnp
+
+        from legoesm.ocean.forcing.sss_restoring import (
+            compute_sss_restoring_flux,
+        )
+
+        shp = jnp.shape(S_model)
+        return compute_sss_restoring_flux(
+            S_model_top=jnp.asarray(S_model),
+            S_target=jnp.asarray(S_target),
+            lat_deg=jnp.zeros(shp), lon_deg=jnp.zeros(shp),
+            ice_concentration=jnp.zeros(shp), config=self._cfg(**kw),
+            sst_C=(None if sst_C is None else jnp.asarray(sst_C)))
+
+    def test_absent_unless_sst_is_supplied(self):
+        """Back-compatible: every existing caller passes no SST."""
+        import numpy as np
+
+        out = self._call(np.array([34.0]), np.array([34.0]))
+        assert out["heat_flux"] is None
+
+    def test_matches_nemo_qns_term(self):
+        """qns contribution = +F*rcp*sst, F positive INTO the ocean.
+
+        NEMO's erp is positive UPWARD (added to emp), ours is positive into the
+        ocean, so erp = -F and `qns -= erp*rcp*sst` becomes `qns += F*rcp*sst`.
+        """
+        import numpy as np
+
+        from legoesm import constants
+
+        S_model = np.array([31.0, 34.5, 36.0])
+        S_target = np.array([29.6, 34.5, 35.0])
+        sst = np.array([-1.8, 12.0, 25.0])
+        out = self._call(S_model, S_target, sst_C=sst)
+        F = np.asarray(out["freshwater_flux"])
+        np.testing.assert_allclose(
+            np.asarray(out["heat_flux"]),
+            F * constants.c_p_seawater * sst, rtol=1e-12)
+
+    def test_sign_a_too_salty_cell_gains_water_and_heat(self):
+        """Physical direction, stated so a flipped sign cannot pass silently.
+
+        A cell saltier than target must be FRESHENED: water in (F > 0). That
+        water carries the ocean's own SST, so at a positive SST the heat term
+        is positive (into the ocean) and the column grows without cooling.
+        """
+        import numpy as np
+
+        out = self._call(np.array([31.0]), np.array([29.6]), sst_C=np.array([4.0]))
+        assert float(np.asarray(out["freshwater_flux"])[0]) > 0.0
+        assert float(np.asarray(out["heat_flux"])[0]) > 0.0
+
+    def test_freezing_point_sst_gives_a_negative_term(self):
+        """At sub-zero SST the same inflow REMOVES heat -- rcp*sst is signed."""
+        import numpy as np
+
+        out = self._call(np.array([31.0]), np.array([29.6]),
+                         sst_C=np.array([-1.8]))
+        assert float(np.asarray(out["freshwater_flux"])[0]) > 0.0
+        assert float(np.asarray(out["heat_flux"])[0]) < 0.0
+
+    def test_zero_where_there_is_no_restoring(self):
+        import numpy as np
+
+        out = self._call(np.array([34.5]), np.array([34.5]),
+                         sst_C=np.array([10.0]))
+        np.testing.assert_allclose(np.asarray(out["heat_flux"]), 0.0, atol=1e-18)

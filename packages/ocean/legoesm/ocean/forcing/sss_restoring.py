@@ -248,6 +248,7 @@ def compute_sss_restoring_flux(
     ice_concentration: jnp.ndarray,
     config: SSSRestoringConfig,
     river_runoff: jnp.ndarray | None = None,
+    sst_C: jnp.ndarray | None = None,
 ) -> dict:
     """Compute the OMIP-2 SSS restoring fluxes.
 
@@ -395,12 +396,33 @@ def compute_sss_restoring_flux(
     # were capped.
     dS_dt_top = -freshwater_flux * S_safe / (rho_0 * config.z1_m)
 
+    # NEMO's restoring carries the HEAT CONTENT of the water it moves
+    # (sbcssr.F90:138): ``qns = qns - erp * rcp * sst_m``.
+    #
+    # SIGN, derived rather than copied: NEMO's ``erp`` is positive UPWARD (it
+    # is added to ``emp``, water LEAVING the ocean), while our
+    # ``freshwater_flux`` is positive INTO the ocean, so ``erp = -F``.
+    # Substituting, NEMO's term is ``qns += +F * rcp * sst``, i.e. water added
+    # to the ocean brings the ocean's OWN surface heat content with it, so the
+    # column gains volume at unchanged temperature.  ``qns`` is positive INTO
+    # the ocean in NEMO, which is also our q_net convention, so the returned
+    # value needs no further sign flip at the call site.
+    #
+    # Celsius, matching NEMO: ``sst_m`` is potential temperature in degC, so
+    # the heat content is referenced to 0 degC.  The field carries the ``_C``
+    # suffix because a Kelvin argument here would silently add ~273*rcp*F.
+    if sst_C is None:
+        heat_flux = None
+    else:
+        heat_flux = freshwater_flux * constants.c_p_seawater * sst_C
+
     # Salt-mass flux: dM_salt/dt = rho_0 · z1 · dS/dt · 1e-3
     # (PSU·kg/m³·m/s · g/kg / 1000 = kg(salt)/m²/s), from the capped
     # tendency so all outputs stay mutually consistent.
     salt_flux = rho_0 * config.z1_m * dS_dt_top * 1.0e-3
 
     return {
+        "heat_flux": heat_flux,
         "freshwater_flux": freshwater_flux,
         "salt_flux": salt_flux,
         "dS_dt_top": dS_dt_top,
