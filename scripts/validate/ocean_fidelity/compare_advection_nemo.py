@@ -20,8 +20,14 @@ IMPLEMENTATION matches NEMO's, and ``superbee`` measures what the production
 scheme CHOICE costs against the oracle -- two different questions that must
 not be reported as one.
 
-★ STATUS 2026-08-12: THIS PROBE IS NOT YET A VALID INSTRUMENT — DO NOT QUOTE
-ITS NUMBERS.  After fixing three real defects (regular-lat-lon geometry ->
+★ STATUS 2026-08-12: VALID, WITH DECLARED LIMITS (superseding the earlier
+"not a valid instrument" note).  Driving on NEMO's own effective transports
+(uocetr_eff/vocetr_eff/wocetr_eff) took the correlation from 0.02-0.09 to
+0.6-0.9 for T and 0.3-0.98 for S, and fct2 -- NEMO's own scheme -- beats our
+production superbee in EVERY region and both tracers.  It is NOT exact and
+cannot be: FCT's high-order flux uses T(Kmm) and its limiter T(Kbb), neither
+saved, and trd_tra_iom gates trends to even kt (interval_operation 7200 s).
+Historical note on what was wrong before:  After fixing three real defects (regular-lat-lon geometry ->
 tripolar metrics; native frame -> model halo frame; per-width mass flux) the
 magnitudes are now within 5-100x of NEMO's, but the CORRELATION is ~0.02-0.09,
 i.e. no relationship.  A correct operator on a correct state cannot be
