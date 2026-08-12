@@ -217,9 +217,22 @@ def _spectral_pe_config(yml):
     blocker 1; the explicit lat-lon core's adjoint grows ~x1.3/step).  Set
     ``spectral: {semi_implicit: false}`` to opt back into the explicit
     integrator (then use an explicit-CFL-safe ``spectral.dt``).
+
+    Conservation knobs are forwarded so the WB lane can run the SAME
+    conserved-quantity constraints as the AMIP/AIMIP lane
+    (``run_aimip._build_spectral_config`` forwards the identical four keys):
+    the dry-mass anchor (``fix_mass`` + ``anchor_mass_to_initial``, both
+    honoured by ``spectral_rollout``, which recomputes the target mass from
+    each rollout's own initial state) and the energy numerics
+    (``vertical_advection_scheme``, ``frictional_heating``).  Defaults are
+    ``SpectralPEConfig``'s own, so every existing WB run is byte-identical:
+    the anchor stays OFF unless a YAML asks for it, and the energy-conserving
+    Simmons-Burridge transport + frictional heating stay ON (the code default
+    since the -0.48 K/day upwind T leak was measured).
     """
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
+    _PE_DEFAULTS = SpectralPEConfig()
     spec = dict(yml.get("spectral", {}))
     return SpectralPEConfig(
         hyperdiff_coeff=float(spec.get("hyperdiff_coeff", 2.5e15)),
@@ -233,6 +246,14 @@ def _spectral_pe_config(yml):
         sponge_tau=float(spec.get("sponge_tau", 0.0)),
         spectral_filter_order=int(spec.get("spectral_filter_order", 8)),
         spectral_filter_strength=float(spec.get("spectral_filter_strength", 0.01)),
+        fix_mass=bool(spec.get("fix_mass", _PE_DEFAULTS.fix_mass)),
+        anchor_mass_to_initial=bool(spec.get(
+            "anchor_mass_to_initial", _PE_DEFAULTS.anchor_mass_to_initial)),
+        vertical_advection_scheme=str(spec.get(
+            "vertical_advection_scheme",
+            _PE_DEFAULTS.vertical_advection_scheme)),
+        frictional_heating=bool(spec.get(
+            "frictional_heating", _PE_DEFAULTS.frictional_heating)),
     )
 
 
@@ -256,11 +277,9 @@ def _build_mode_components_spectral(cfg, yml):
     spectral rollout has no model object; only the WB2 pointer hook received
     it).
     """
-    import jax
-    import jax.numpy as jnp
-
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.model_registry import build_variant
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_sponge_factor, compute_spectral_filter,
     )
@@ -301,19 +320,24 @@ def _build_mode_components_spectral(cfg, yml):
     # (prescribed-SST pathway); the classical physics-params fn does not (its
     # gray-radiation/SBM stack matches train_physics_params_spectral).
     if cfg.mode == "physics":
-        from legoesm.training.trainable_params import TrainablePhysicsParams
-        params = TrainablePhysicsParams.from_defaults()
+        params = build_variant("classical", nlev=nlev)
 
         def make_physics_fn(p):
             return make_physics_params_spectral_physics(p, grid, dt)
         uses_forcing = False
 
     elif cfg.mode == "neural_gcm":
-        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
         ov = yml.get("neural_gcm", {})
-        params = NeuralPhysics(
-            nlev=nlev, hidden_dim=int(ov.get("nn_hidden", 256)),
-            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
+        # ``nn_hidden``/``nn_layers`` are this lane's historical key names; the
+        # registry's vocabulary is AIMIP's. The WB-suite adapter retires the
+        # aliases; until then map them here rather than teach the registry two
+        # spellings.
+        _cn = {}
+        if "nn_hidden" in ov:
+            _cn["nn_hidden_dim"] = int(ov["nn_hidden"])
+        if "nn_layers" in ov:
+            _cn["n_layers"] = int(ov["nn_layers"])
+        params = build_variant("column_nn", nlev=nlev, overrides=_cn)
 
         # #1464: the learned arm has no momentum head, so without this it runs
         # with NO surface turbulent drag while the `physics` arm it is scored
@@ -337,27 +361,19 @@ def _build_mode_components_spectral(cfg, yml):
         uses_forcing = True
 
     elif cfg.mode == "sfno":
-        import equinox as eqx
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-
+        # Channel count, forcing planes, residual_prediction=False and the
+        # epoch-0 decoder zero-init (so the first rollout is the pure SI
+        # dycore) now live in the registry, shared with AIMIP.
         ov = yml.get("sfno", {})
-        n_ch = 4 * nlev + 2
-        sfno = SFNO(
-            SFNOConfig(
-                in_channels=n_ch + N_SFNO_FORCING_CHANNELS, out_channels=n_ch,
-                embed_dim=int(ov.get("sfno_embed_dim", 256)),
-                n_blocks=int(ov.get("sfno_n_blocks", 8)),
-                residual_prediction=False,
-            ),
-            grid, key=jax.random.PRNGKey(0))
-        # Epoch-0 stability contract (mirrors the lat-lon path): zero-init the
-        # decoder so the first rollout is the pure (SI) dycore.
-        sfno = eqx.tree_at(
-            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
-            (jnp.zeros_like(sfno.decoder.weight),
-             jnp.zeros_like(sfno.decoder.bias)))
-        params = sfno
+        # NOTE this lane's default SFNO size moved 256/8 -> the registry's
+        # 128/4 for a YAML that pins neither; every shipped config under
+        # config/wb/ pins both, so no existing run moves. `sfno_mlp_expansion`
+        # is newly honoured here (it was silently ignored before).
+        _sf = {k: int(ov[k]) for k in
+               ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion")
+               if k in ov}
+        params = build_variant("sfno_physics", nlev=nlev, grid=grid,
+                               overrides=_sf)
 
         def make_physics_fn(p):
             return make_sfno_spectral_physics(p, grid)

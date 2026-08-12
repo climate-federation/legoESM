@@ -240,11 +240,23 @@ def test_sfno_history_is_gated_not_silently_partial():
 
 
 def test_history_default_leaves_the_architecture_untouched():
-    """history_steps=0 must size in_channels exactly as before."""
-    import pathlib
-    src = pathlib.Path(
-        "packages/ml/legoesm/training/neural_gcm_spectral.py").read_text()
-    assert "in_channels=spec.n_channels * (1 + _history_steps)" in src
-    # 1 + 0 == 1, so the default is the original width. Guard the arithmetic
-    # rather than trusting the reading.
-    assert (1 + 0) * 34 == 34
+    """history_steps=0 must size in_channels exactly as before.
+
+    Asserted on the BUILT config rather than on a source string: the sizing
+    expression moved into ``training.model_registry`` when both campaigns were
+    put on one model builder, and a grep for a literal line in
+    ``neural_gcm_spectral`` silently stops testing anything the moment the code
+    it names is refactored.
+    """
+    from legoesm.ml.channel_packing import PE3DChannelSpec
+    from legoesm.training.model_registry import sfno_arch_config
+
+    nlev = 8
+    n_state = PE3DChannelSpec(nlev=nlev).n_channels
+    assert sfno_arch_config("sfno_full", nlev=nlev).in_channels == n_state
+    assert sfno_arch_config(
+        "sfno_full", nlev=nlev,
+        overrides={"sfno_history_steps": 0}).in_channels == n_state
+    assert sfno_arch_config(
+        "sfno_full", nlev=nlev,
+        overrides={"sfno_history_steps": 1}).in_channels == 2 * n_state
