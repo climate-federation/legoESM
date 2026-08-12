@@ -177,3 +177,57 @@ def test_the_config_sweep_is_not_vacuous():
     seen = list(_campaign_yamls())
     assert len(seen) > 20
     assert any(k.endswith("radiation") for _, doc in seen for k in doc)
+
+
+# --------------------------------------------------------------------------
+# One classical model, both campaigns
+# --------------------------------------------------------------------------
+
+def test_wb_and_aimip_classical_are_the_same_model():
+    """The owner's matrix is {WB, AIMIP} x {classical, column_nn, sfno}: the
+    variant names a MODEL, so both campaigns must build the same one.
+
+    WB's classical used to be ``TrainablePhysicsParams`` — 6 knobs, gray
+    radiation, and only convection + radiation — while AIMIP's was the
+    50-knob six-family ``AIMIPClassicalParams``.
+    """
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    from legoesm.training.model_registry import build_variant
+
+    params = build_variant("classical", nlev=8)
+    assert isinstance(params, AIMIPClassicalParams)
+    assert len(params.raw_values) == 50
+
+
+def test_the_wb_campaign_config_names_every_family():
+    """Defaulted families are how two runs end up differing in more than the
+    variable under test."""
+    import yaml as _yaml
+
+    import inspect
+
+    from legoesm.training.aimip_params import (
+        make_aimip_classical_spectral_physics,
+    )
+
+    defaults = {
+        name: param.default
+        for name, param in inspect.signature(
+            make_aimip_classical_spectral_physics).parameters.items()
+    }
+    for path in ("spectral_t63.yaml", "spectral_t106.yaml", "spectral_smoke.yaml"):
+        cfg = _yaml.safe_load(
+            (_REPO / "config" / "wb" / "campaign" / path).read_text())
+        classical = cfg["classical"]
+        for family, arg in (("convection", "convection_scheme"),
+                            ("turbulence", "turbulence_scheme"),
+                            ("cloud", "cloud_scheme"),
+                            ("microphysics", "microphysics_scheme"),
+                            ("gwd", "gwd_scheme")):
+            assert classical[family] not in (None, "", "none"), (path, family)
+            # ... and it must be the scheme the AIMIP factory would pick, or
+            # "the same model" is only true of the container class. A test that
+            # merely asserted non-empty would pass with WB on edmf and AIMIP on
+            # tiedtke (Claude review).
+            assert classical[family] == defaults[arg], (path, family)
+        assert cfg.get("radiation", "rrtmgp") == "rrtmgp"

@@ -2,9 +2,12 @@
 #
 # One config drives all three families through the SHARED AIMIP spectral stack
 # (``legoesm.training.neural_gcm_spectral`` builders via ``scale_build``):
-#   * physics    -> differentiable trainable-physics params (SBM + surface
-#                   stack; gray radiation RUNS but is never trained since
-#                   2026-08-11)
+#   * physics    -> the CLASSICAL model: the six-family scheme-parameter stack
+#                   (tiedtke/louis/xu_randall/sundqvist/mcfarlane + RRTMGP),
+#                   identical to the AIMIP classical arm since 2026-08-12.
+#                   It was a 6-knob, 2-family, gray-radiation model before
+#                   that — a different experiment under the same name, whose
+#                   numbers are NOT a baseline for this one.
 #   * neural_gcm -> per-column MLP physics (NeuralGCM-style)
 #   * sfno       -> SFNO replaces gridded physics (dycore retained)
 #
@@ -152,3 +155,22 @@ neural_gcm:
 sfno:
   sfno_embed_dim: 256
   sfno_n_blocks: 8
+
+# --- classical: the six-family physics stack (owner rule: a classical model
+# carries one parameterization of EVERY family, and radiation is always
+# RRTMGP). Named explicitly rather than defaulted, so a campaign comparison
+# cannot silently differ in more than the variable under test. Matches the
+# AIMIP classical arm in MODEL CLASS and in the five scheme choices below.
+# It is NOT identical to config/aimip/ace2/suite_classical_v3.yaml, which also
+# sets surface_bulk: most and a trainable spatial surface field — so a
+# WB-vs-AIMIP number differs by those two knobs plus the campaign itself
+# (forcing, ICs, grid). State that when comparing; do not call it "same run".
+classical:
+  convection: "tiedtke"
+  turbulence: "louis"
+  cloud: "xu_randall"
+  microphysics: "sundqvist"
+  gwd: "mcfarlane"
+  surface_bulk: "constant"
+  rad_update_interval_steps: 6
+  spatial_surface: false

@@ -5280,12 +5280,15 @@ def train_physics_params_spectral(
 
     Returns (trained_params, loss_history).
     """
-    from legoesm.training.model_registry import build_variant
+    # The IDEALIZED 2-family parameter set (convection + radiation), not the
+    # campaign "classical" model — the registry's classical is the six-family
+    # AIMIPClassicalParams since 2026-08-12.
+    from legoesm.training.trainable_params import TrainablePhysicsParams
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = build_variant("classical", nlev=config.n_levels)
+    params = TrainablePhysicsParams.from_defaults()
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():

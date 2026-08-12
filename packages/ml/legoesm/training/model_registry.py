@@ -9,6 +9,13 @@ was read from ``neural_gcm.nn_hidden`` on one side and ``nn_hidden_dim`` on the
 other.  Both lanes now call :func:`build_variant`, so "same variant" means the
 same pytree.
 
+CLASSICAL_LEGACY_NOTE: before 2026-08-12 the WB lane's "classical" was a
+different, smaller model — ``TrainablePhysicsParams``, 6 knobs, gray radiation,
+and only two parameterization families (convection + radiation). It still
+exists for ``train_physics_params_spectral`` (an idealized-physics trainer),
+but it is NOT what "classical" means to a campaign, and its numbers are not a
+baseline for the current one.
+
 No model code lives here.  This module only selects and constructs the classes
 that already exist (``TrainablePhysicsParams``, ``NeuralPhysics``, ``SFNO``),
 with one set of defaults and one override vocabulary.
@@ -28,7 +35,13 @@ VALID_VARIANTS = ("classical", "column_nn", "sfno_physics", "sfno_full")
 # `mlp_expansion` 4 and `dropout` 0.0 additionally match SFNOConfig's own
 # class defaults, which is what the WB lane got by not passing them.
 VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
-    "classical": {},
+    "classical": {
+        # The trainable 2-D surface field (roughness / albedo / exchange
+        # coefficients) is off unless a suite asks for it.
+        "spatial_surface": False,
+        "spatial_init_std": 0.0,
+        "spatial_seed": 0,
+    },
     # `residual_scale` is present but NULL: the sentinel means "pass nothing",
     # so `build_column_physics` applies its own value (0.01) — what BOTH lanes
     # get today. Restating the number here would be a second source of truth.
@@ -154,8 +167,17 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
     kw = _resolve(variant, overrides)
 
     if variant == "classical":
-        from legoesm.training.trainable_params import TrainablePhysicsParams
-        return TrainablePhysicsParams.from_defaults()
+        # ONE classical model for both campaigns (owner, 2026-08-12:
+        # "classical means the classical physics-based parameterization",
+        # matrix {WB, AIMIP} x {classical, column_nn, sfno}). That is the
+        # six-family scheme-parameter set, not the 6-knob idealized set the WB
+        # lane used to train — see CLASSICAL_LEGACY_NOTE below.
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        return AIMIPClassicalParams.from_defaults(
+            spatial_surface=bool(kw["spatial_surface"]),
+            spatial_init_std=float(kw["spatial_init_std"]),
+            spatial_seed=int(kw["spatial_seed"]),
+        )
 
     import jax
 
