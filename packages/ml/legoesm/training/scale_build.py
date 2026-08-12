@@ -12,7 +12,11 @@ package signatures) and exposes exactly what
 The three modes differ ONLY in the ``make_run_seg`` factory (per
 ``training_driver._build_train_step``): physics feeds
 ``TrainablePhysicsParams.to_segment_kwargs()``; neural_gcm builds a
-``NeuralPhysics`` step; sfno builds an SFNO lat-lon step.
+``NeuralPhysics`` step; sfno builds an SFNO lat-lon step. On the SPECTRAL
+core, ``physics`` is the six-family classical model shared with AIMIP
+(``make_aimip_classical_spectral_physics``), not the old 6-knob
+``TrainablePhysicsParams`` stack — that one survives only on the lat-lon path
+below and in ``train_physics_params_spectral``.
 
 End-to-end validation is the single-GPU smoke (``--mode physics --smoke``) +
 the cluster launch; the data-parallel gradient average is unit-tested separately.
@@ -334,17 +338,54 @@ def _build_mode_components_spectral(cfg, yml):
 
     # Mode -> (params pytree, physics_fn factory, does the fn take forcing?).
     # The learned fns (column MLP / SFNO) accept the traced ``forcing`` dict
-    # (prescribed-SST pathway); the classical physics-params fn does not (its
-    # gray-radiation/SBM stack matches train_physics_params_spectral).
+    # (prescribed-SST pathway); the classical stack does NOT — its signature is
+    # (state, grid, sigma), same as in the AIMIP trainer, so the WB classical
+    # rollout is unforced exactly as the AIMIP classical one is. The
+    # prescribed-SST AMIP path is a different entry point in both campaigns.
     if cfg.mode == "physics":
-        # WB is a campaign: rrtmgp unless this is a --smoke wiring check.
+        # WB classical IS AIMIP classical since 2026-08-12: the same
+        # six-family scheme-parameter model, built by the same factory. It used
+        # to be a 6-knob, 2-family, gray-radiation model — a different
+        # experiment wearing the same name, and not a baseline for this one.
+        from legoesm.training.aimip_params import (
+            make_aimip_classical_spectral_physics,
+        )
         _radiation = _validated_wb_radiation(cfg, yml)
-        params = build_variant("classical", nlev=nlev)
+        _cl = dict(yml.get("classical", {}))
+        params = build_variant(
+            "classical", nlev=nlev,
+            overrides={
+                "spatial_surface": bool(_cl.get("spatial_surface", False)),
+                "spatial_init_std": float(_cl.get("spatial_init_std", 0.0)),
+                "spatial_seed": int(_cl.get("spatial_seed", 0)),
+            })
+        # Every family named explicitly in the YAML: a classical model carries
+        # one of each, and defaulting them silently is how a campaign ends up
+        # comparing models that differ in more than the variable under test.
+        _schemes = dict(
+            convection_scheme=str(_cl.get("convection", "tiedtke")),
+            turbulence_scheme=str(_cl.get("turbulence", "louis")),
+            gwd_scheme=str(_cl.get("gwd", "mcfarlane")),
+            microphysics_scheme=str(_cl.get("microphysics", "sundqvist")),
+            cloud_scheme=str(_cl.get("cloud", "xu_randall")),
+            surface_bulk_scheme=str(_cl.get("surface_bulk", "constant")),
+        )
+        _rad_interval = int(_cl.get("rad_update_interval_steps", 6))
 
+        # SPLIT radiation, as the AIMIP arm runs it: RRTMGP once every
+        # `rad_update_interval_steps` scan steps instead of on every RK stage.
+        # Without this the interval key is INERT and the SI SSP-RK3 step calls
+        # RRTMGP three times per step — ~18x the intended rate at interval 6,
+        # and the combined wrapper also freezes radiation's solar time (codex).
         def make_physics_fn(p):
-            return make_physics_params_spectral_physics(
-                p, grid, dt, radiation=_radiation)
+            return make_aimip_classical_spectral_physics(
+                p, grid, dt, radiation=_radiation, split_rad=True,
+                rad_update_interval_steps=_rad_interval, **_schemes)
+        # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
+        # kwarg, same as in the AIMIP trainer, where prescribed SST enters
+        # through the surface scheme rather than the physics signature.
         uses_forcing = False
+        split_rad_interval = _rad_interval
 
     elif cfg.mode == "neural_gcm":
         ov = yml.get("neural_gcm", {})
@@ -379,6 +420,7 @@ def _build_mode_components_spectral(cfg, yml):
             return make_column_mlp_spectral_physics(
                 p, grid, momentum_physics_fn=_drag_fn)
         uses_forcing = True
+        split_rad_interval = None
 
     elif cfg.mode == "sfno":
         # Channel count, forcing planes, residual_prediction=False and the
@@ -398,6 +440,7 @@ def _build_mode_components_spectral(cfg, yml):
         def make_physics_fn(p):
             return make_sfno_spectral_physics(p, grid)
         uses_forcing = True
+        split_rad_interval = None
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
@@ -408,16 +451,25 @@ def _build_mode_components_spectral(cfg, yml):
         eqx.filter_value_and_grad (buffer-donation doctrine)."""
 
         def __init__(self, physics_fn):
-            self._physics_fn = physics_fn
+            # The classical factory returns (non_rad_fn, rad_fn) under
+            # split_rad; every other mode returns one callable.
+            if split_rad_interval is not None:
+                self._physics_fn, self._rad_fn = physics_fn
+            else:
+                self._physics_fn, self._rad_fn = physics_fn, None
 
         def raw(self, ic_carry, n_steps, forcing):
             state0 = carry_to_spectral_state(ic_carry, grid)
             forcing_base = forcing if uses_forcing else None
+            gated = ({} if self._rad_fn is None else
+                     {"rad_physics_fn": self._rad_fn,
+                      "rad_update_interval": split_rad_interval})
             final = spectral_rollout(
                 state0, self._physics_fn, grid, sigma, pe_config,
                 dt, int(n_steps),
                 sponge_factor, spectral_filter,
                 forcing_base=forcing_base,
+                **gated,
             )
             return spectral_state_to_carry(final, grid, sigma)
 
