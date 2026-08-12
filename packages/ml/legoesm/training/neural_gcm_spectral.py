@@ -874,7 +874,8 @@ def make_turbulence_only_spectral_physics(dt,
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
 
-def make_physics_params_spectral_physics(params, grid, dt):
+def make_physics_params_spectral_physics(params, grid, dt, *,
+                                         radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
 
     Rebuilds the combined physics (radiation + convection + turbulence + ...)
@@ -910,12 +911,20 @@ def make_physics_params_spectral_physics(params, grid, dt):
 
     p = params.as_dict()
 
-    # Gray radiation at its documented defaults — never trained (2026-08-11
-    # directive). tau_equator / tau_pole are gray optical depths and are no
-    # longer in DEFAULT_TRAINABLE, so reading them here would resurrect a
-    # trainable gray by the back door.
-    gray_cfg = GrayRadiationConfig()
-    rad_cfg = RadiationConfig(scheme="gray", gray=gray_cfg)
+    # Radiation backend. This function HARD-WIRED gray, so the WeatherBench
+    # `physics` arm ran gray no matter what its config said — the campaign pin
+    # could not see it (codex, 2026-08-12). WB/AIMIP now get rrtmgp; gray stays
+    # selectable for the smoke path and for non-campaign callers, and takes no
+    # trained value either way (its optical depths left DEFAULT_TRAINABLE).
+    if radiation == "rrtmgp":
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        rad_cfg = RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig())
+    elif radiation == "gray":
+        rad_cfg = RadiationConfig(scheme="gray", gray=GrayRadiationConfig())
+    else:
+        raise ValueError(
+            f"unsupported radiation {radiation!r} for the trainable-physics "
+            f"spectral path: must be one of ('rrtmgp', 'gray')")
 
     # Build SBM convection config with trainable timescale + RH
     sbm_cfg = SBMConfig(
@@ -925,7 +934,17 @@ def make_physics_params_spectral_physics(params, grid, dt):
     conv_cfg = ConvectionConfig(scheme="sbm", sbm=sbm_cfg)
 
     physics_config = PhysicsConfig(radiation=rad_cfg, convection=conv_cfg)
-    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+    # The trainable SURFACE leaves reach rrtmgp as per-call overrides — writing
+    # them into RRTMGPConfig would key its solver cache on a tracer. Without
+    # this they are inert on the rrtmgp path (codex): gray consumed the blended
+    # albedo directly, so flipping the backend silently froze albedo_ocean /
+    # albedo_ice. C_H / C_E ride the surface-flux config, not radiation.
+    _albedo = p.get("albedo_ocean")
+    _kwargs = {}
+    if _albedo is not None and radiation == "rrtmgp":
+        _kwargs["sfc_albedo_override"] = _albedo
+    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt,
+                          **_kwargs)
 
     def physics_fn(state, grid_, sigma_coord):
         result = raw_fn(state, grid_, sigma_coord)

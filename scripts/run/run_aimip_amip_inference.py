@@ -448,7 +448,9 @@ def main():
             )
         # ``state`` currently holds the IC -> identical pytree structure, so it
         # is the deserialisation template.
-        state = eqx.tree_deserialise_leaves(restart_eqx, state)
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        state = load_checkpoint_or_fail(
+            restart_eqx, state, what="the restart file")
         day = _date(meta["next_day"])
         monthly = {(int(y), int(m)): list(vals) for y, m, vals in meta["monthly"]}
         logger.info(f"RESUMED from {restart_eqx}: continuing at {day} "

@@ -178,7 +178,7 @@ def main():
             host_resident=True,   # non-chunked full-dataset load (#1155)
         )
         dt = spec_cfg.dt
-        radiation = str(base.get("aimip_radiation", "gray"))
+        radiation = str(base.get("aimip_radiation", "rrtmgp"))
         rad_update_interval = int(base.get("aimip_rad_update_interval", 6))
 
         def _make_physics_fn(p, grid_):

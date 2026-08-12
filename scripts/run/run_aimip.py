@@ -363,19 +363,18 @@ def _train_variant(
         Path(cfg["output_dir"]) / cfg["aimip_variant"] if resume else None
     )
 
+    # Radiation pin, EVERY variant (not just classical, which is where this
+    # check used to live): an AIMIP run uses rrtmgp. Scheme comparisons must
+    # not be confounded by the radiation backend, and gray carries no trainable
+    # knob. --smoke may still use gray for a wiring check.
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
+        str(cfg.get("aimip_radiation", "rrtmgp")),
+        campaign="aimip",
+        smoke=bool(cfg.get("smoke", False)),
+    )
+
     if variant == "classical":
-        # Classical-mode radiation pin (campaign_driver, design D1): scheme
-        # swaps always run under rrtmgp so convection/turbulence comparisons
-        # are not confounded by the radiation backend. Smoke and an explicit
-        # allow_non_rrtmgp escape are exempt.
-        from legoesm.training.campaign_driver import (
-            validate_classical_radiation,
-        )
-        validate_classical_radiation(
-            str(cfg.get("aimip_radiation", "rrtmgp")),
-            smoke=bool(cfg.get("smoke", False)),
-            allow_non_rrtmgp=bool(cfg.get("allow_non_rrtmgp", False)),
-        )
         return _train_aimip_classical(
             spec_cfg, cache_dir, cfg=cfg, resume_from_dir=resume_from_dir,
         )
@@ -1238,7 +1237,11 @@ def main():
                     and _newest_raw_mt is not None
                     and _newest_ema.stat().st_mtime >= _newest_raw_mt
                 ):
-                    eval_model = eqx.tree_deserialise_leaves(_newest_ema, model)
+                    from legoesm.ml.checkpoint_io import (
+                        load_checkpoint_or_fail,
+                    )
+                    eval_model = load_checkpoint_or_fail(
+                        _newest_ema, model, what="the EMA weights")
                     eval_weights = "ema"
                     logger.info(
                         f"{variant}: evaluating EMA weights "

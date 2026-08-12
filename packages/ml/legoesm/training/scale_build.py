@@ -154,6 +154,20 @@ def _load_run_amip():
     return mod
 
 
+def _validated_wb_radiation(cfg, yml) -> str:
+    """The WB campaign's radiation backend, pinned to rrtmgp.
+
+    Shared by both training cores so neither can drift; ``--smoke`` keeps the
+    cheap gray path (see campaign_driver.validate_campaign_radiation).
+    """
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+
+    return validate_campaign_radiation(
+        str(yml.get("radiation", "rrtmgp")), campaign="wb",
+        smoke=bool(getattr(cfg, "smoke", False)),
+    )
+
+
 def build_latlon_config(cfg, yml):
     """ExperimentConfig for a lat-lon C-grid PE run, via run_amip's parser."""
     ra = _load_run_amip()
@@ -180,7 +194,10 @@ def build_latlon_config(cfg, yml):
         "--nlev", str(int(yml["nlev"])),
         "--vertical-coord", "sigma",
         "--dt", str(float(yml["dt"])),
-        "--radiation", str(yml.get("radiation", "rrtmgp")),
+        # WB is a campaign: rrtmgp, unless this is a --smoke wiring check. The
+        # lat-lon path forwarded the raw key, so a production WB config could
+        # still run gray while the spectral path was pinned (codex).
+        "--radiation", _validated_wb_radiation(cfg, yml),
         "--convection", str(yml.get("convection", "sbm")),
         "--turbulence", str(_turbulence),
         "--microphysics", str(yml.get("microphysics", "kessler")),
@@ -320,10 +337,13 @@ def _build_mode_components_spectral(cfg, yml):
     # (prescribed-SST pathway); the classical physics-params fn does not (its
     # gray-radiation/SBM stack matches train_physics_params_spectral).
     if cfg.mode == "physics":
+        # WB is a campaign: rrtmgp unless this is a --smoke wiring check.
+        _radiation = _validated_wb_radiation(cfg, yml)
         params = build_variant("classical", nlev=nlev)
 
         def make_physics_fn(p):
-            return make_physics_params_spectral_physics(p, grid, dt)
+            return make_physics_params_spectral_physics(
+                p, grid, dt, radiation=_radiation)
         uses_forcing = False
 
     elif cfg.mode == "neural_gcm":

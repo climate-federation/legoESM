@@ -643,10 +643,6 @@ def build_parser():
     p.add_argument("--output-dir", default="results/aimip_latlon")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
-    p.add_argument("--allow-non-rrtmgp", action="store_true",
-                   dest="allow_non_rrtmgp",
-                   help="Debug escape for the classical-mode rrtmgp radiation "
-                        "pin (campaign_driver.validate_classical_radiation).")
     return p
 
 
@@ -676,18 +672,15 @@ def main(argv=None):
             "trainer: run_amip.py --variants sfno_full."
         )
 
-    # Classical-mode radiation pin (campaign_driver, D1): scheme-swap
-    # training holds radiation fixed at rrtmgp; smoke and the explicit
-    # --allow-non-rrtmgp escape are exempt.
+    # Radiation pin, EVERY variant: an AIMIP run uses rrtmgp. This used to
+    # guard `classical` only, so a column_nn invocation could pass
+    # --radiation gray (Claude review). Only --smoke is exempt.
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
+        str(args.radiation), campaign="aimip", smoke=bool(args.smoke),
+    )
+
     if "classical" in _sel_variants:
-        from legoesm.training.campaign_driver import (
-            validate_classical_radiation,
-        )
-        validate_classical_radiation(
-            str(args.radiation),
-            smoke=bool(args.smoke),
-            allow_non_rrtmgp=bool(getattr(args, "allow_non_rrtmgp", False)),
-        )
         # ... and the same one-parameterization-per-family rule the spectral
         # lane enforces. This lane builds its physics through physics_pipeline
         # rather than make_aimip_classical_spectral_physics, so the factory

@@ -1048,7 +1048,10 @@ def make_aimip_classical_spectral_physics(
     dt: float,
     *,
     param_overrides: dict | None = None,
-    radiation: str = "gray",
+    # WB/AIMIP always run rrtmgp (2026-08-12). Gray stays reachable for a
+    # --smoke wiring check and for non-campaign callers, but it is no longer
+    # what you get by omission.
+    radiation: str = "rrtmgp",
     rad_update_interval_steps: int = 6,
     convection_scheme: str = "tiedtke",
     turbulence_scheme: str = "louis",

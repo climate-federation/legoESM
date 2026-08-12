@@ -22,7 +22,10 @@ aimip_cloud: "xu_randall"
 aimip_microphysics: "sundqvist"  # all 5 categories ON (no "none"): micro=off
                                  # wrecks radiation (OLR rmse 34->80). Matches
                                  # the stage1/ace2 sweep baseline.
-radiation: "gray"          # Base scheme tag (informational).  The actual
+# radiation: removed 2026-08-12 — WB/AIMIP always use rrtmgp, set once in the
+# base config (aimip_radiation). The deleted key was an informational tag that
+# named a backend the run did not use; keeping "gray" in a campaign overlay
+# only invited someone to wire it up.
                            # radiation backend used by AIMIPClassicalParams
                            # is controlled by ``aimip_radiation`` in the
                            # base config (gray | rrtmgp).

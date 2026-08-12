@@ -520,7 +520,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained, grid, spec_cfg.dt,
-            radiation=str(cfg.get("aimip_radiation", "gray")),
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=rad_update_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
@@ -768,7 +768,6 @@ def main(argv=None, ds=None):
     import logging
     import os
 
-    import equinox as eqx
     import yaml
 
     # Spectral cores require float64 (SH transforms). Enable x64 at the entry
@@ -854,7 +853,9 @@ def main(argv=None, ds=None):
     if not os.path.exists(cfg_args.checkpoint):
         raise SystemExit(f"--checkpoint not found: {cfg_args.checkpoint}")
     skeleton = _build_skeleton(cfg_args.variant, yml, spec_cfg, grid)
-    trained = eqx.tree_deserialise_leaves(cfg_args.checkpoint, skeleton)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    trained = load_checkpoint_or_fail(
+        cfg_args.checkpoint, skeleton, what=f"the {cfg_args.variant} variant")
 
     # Multi-seed ensemble: each --member is an INDEPENDENTLY seeded training
     # run of the same architecture, loaded into its own copy of the skeleton.
@@ -865,8 +866,9 @@ def main(argv=None, ds=None):
             if not os.path.exists(extra):
                 raise SystemExit(f"--member not found: {extra}")
         trained = [trained] + [
-            eqx.tree_deserialise_leaves(
-                extra, _build_skeleton(cfg_args.variant, yml, spec_cfg, grid))
+            load_checkpoint_or_fail(
+                extra, _build_skeleton(cfg_args.variant, yml, spec_cfg, grid),
+                what=f"ensemble member {extra}")
             for extra in cfg_args.members
         ]
         log.info(
