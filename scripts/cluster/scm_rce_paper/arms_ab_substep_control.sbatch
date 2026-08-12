@@ -34,7 +34,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 SCHEMES=(sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold)
 SCHEME=${SCHEMES[$SLURM_ARRAY_TASK_ID]}
 ARM=${ARM:-as_shipped}
-REF=/burg-archive/glab/users/pg2328/legoESM/results/rcemip1_n128_ocean
+REF=${REF:-/burg-archive/glab/users/pg2328/legoESM/results/rcemip_ref_sam300}
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/scm_rce_paper/arms_ab_substep1_${ARM}
 
 echo "SCHEME=$SCHEME  KERNEL_ARM=$ARM"

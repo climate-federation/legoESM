@@ -65,31 +65,10 @@ CRM_COLOR = "black"
 SCM_COLOR = "#d62728"
 
 
-def _physical_rmse(
-    ref: campaign.ReferenceProfiles,
-    run: campaign.RunDiagnostics,
-) -> dict[str, float]:
-    """Mass-weighted physical-unit profile RMSE (K, kg/kg) vs the CRM."""
-    if not run.T_profile:
-        return {
-            "T_rmse_K": float("nan"),
-            "qv_rmse_kg_kg": float("nan"),
-            "qcond_rmse_kg_kg": float("nan"),
-        }
-    w = jnp.asarray(ref.mass_weights)
-    return {
-        "T_rmse_K": float(
-            weighted_rmse(jnp.asarray(run.T_profile) - jnp.asarray(ref.T_ref), w)
-        ),
-        "qv_rmse_kg_kg": float(
-            weighted_rmse(jnp.asarray(run.qv_profile) - jnp.asarray(ref.qv_ref), w)
-        ),
-        "qcond_rmse_kg_kg": float(
-            weighted_rmse(
-                jnp.asarray(run.qcond_profile) - jnp.asarray(ref.qcond_ref), w
-            )
-        ),
-    }
+# Physical-unit RMSE lives in the campaign module so this driver and the
+# intercomparison driver cannot drift apart on the weights or the reference
+# arrays (CLAUDE.md: no duplicate numerics across drivers).
+_physical_rmse = campaign.physical_profile_rmse
 
 
 def _run_kwargs(args) -> dict[str, Any]:
