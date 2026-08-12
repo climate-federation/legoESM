@@ -258,6 +258,9 @@ def main(argv=None):
                     cfg.get("aimip_surface_bulk_scheme", "constant")),
                 gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
                 microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
+                # A pressure-spinup diagnostic, not a model claim: it runs
+                # whatever the config names, including an unfilled family.
+                allow_unfilled_families=True,
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
                 land_mask=None,
                 split_rad=rad_update_interval > 1,

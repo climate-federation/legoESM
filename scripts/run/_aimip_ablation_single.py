@@ -161,6 +161,10 @@ def main():
         "gwd_scheme":          args.gwd_scheme,
         "microphysics_scheme": args.microphysics_scheme,
         "cloud_scheme":        args.cloud_scheme,
+        # One arm of a scheme ablation may drop a family on purpose (the CLI
+        # accepts --microphysics-scheme none); declare it rather than trip the
+        # completeness gate, which guards models that claim to be complete.
+        "allow_unfilled_families": True,
     }
     logger.info(f"[{args.label}] schemes = {schemes}")
 

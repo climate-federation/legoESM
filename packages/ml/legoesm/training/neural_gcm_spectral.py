@@ -882,8 +882,9 @@ def make_physics_params_spectral_physics(params, grid, dt):
     flow through the physics computations back to the parameters.
 
     The trainable parameters are injected into the scheme configs:
-    - ``tau_equator``, ``tau_pole`` → gray radiation optical depth
     - ``sbm_tau_c``, ``sbm_RH_ref`` → SBM convection timescale/humidity
+    Gray radiation takes NO trained value since 2026-08-11 (its optical depths
+    ``tau_equator``/``tau_pole`` left the trainable set with it).
 
     Parameters
     ----------
@@ -909,11 +910,11 @@ def make_physics_params_spectral_physics(params, grid, dt):
 
     p = params.as_dict()
 
-    # Build gray radiation config with trainable tau
-    gray_cfg = GrayRadiationConfig(
-        tau_equator=p.get('tau_equator', 7.2),
-        tau_pole=p.get('tau_pole', 1.8),
-    )
+    # Gray radiation at its documented defaults — never trained (2026-08-11
+    # directive). tau_equator / tau_pole are gray optical depths and are no
+    # longer in DEFAULT_TRAINABLE, so reading them here would resurrect a
+    # trainable gray by the back door.
+    gray_cfg = GrayRadiationConfig()
     rad_cfg = RadiationConfig(scheme="gray", gray=gray_cfg)
 
     # Build SBM convection config with trainable timescale + RH
@@ -3810,20 +3811,17 @@ def train_neural_gcm_spectral(
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
     spec = PE3DChannelSpec(nlev=config.n_levels)
-    sfno = SFNO(
-        SFNOConfig(
-            # State channels + the surface-forcing planes (T_sfc, sic,
-            # insolation) on the INPUT side only — see
-            # ``make_sfno_spectral_physics``.
-            in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-            out_channels=spec.n_channels,
-            embed_dim=config.sfno_embed_dim,
-            n_blocks=config.sfno_n_blocks,
-            mlp_expansion=config.sfno_mlp_expansion,
-            residual_prediction=False,
-        ),
-        grid,
-        key=jax.random.PRNGKey(seed),
+    # Channel layout, forcing planes and residual_prediction=False come from
+    # the shared registry, so a WB run and an AIMIP run of this variant build
+    # the same network (they had drifted to 256/8 vs 128/4).
+    from legoesm.training.model_registry import build_variant
+    sfno = build_variant(
+        "sfno_physics", nlev=config.n_levels, grid=grid, seed=seed,
+        overrides={
+            "sfno_embed_dim": config.sfno_embed_dim,
+            "sfno_n_blocks": config.sfno_n_blocks,
+            "sfno_mlp_expansion": config.sfno_mlp_expansion,
+        },
     )
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
     logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
@@ -4014,16 +4012,24 @@ def train_sfno_full_spectral(
     # in_channels carries (1 + history) copies of the packed state; the emulator
     # wrapper validates the two agree rather than mis-slicing.
     _history_steps = int(getattr(config, "sfno_history_steps", 0) or 0)
-    sfno_arch_cfg = SFNOConfig(
-        in_channels=spec.n_channels * (1 + _history_steps),
-        out_channels=spec.n_channels,
-        embed_dim=config.sfno_embed_dim,
-        n_blocks=config.sfno_n_blocks,
-        mlp_expansion=config.sfno_mlp_expansion,
-        residual_prediction=False,
-        dropout=config.sfno_dropout,
+    # Shared registry (same source as the WB lane and as sfno_physics); the
+    # arch config is read back so the emulator wrapper below cannot disagree
+    # with the weights it wraps about channel counts.
+    from legoesm.training.model_registry import (
+        build_variant as _build_variant,
+        sfno_arch_config as _sfno_arch_config,
     )
-    sfno = SFNO(sfno_arch_cfg, grid, key=jax.random.PRNGKey(seed))
+    _sfno_over = {
+        "sfno_embed_dim": config.sfno_embed_dim,
+        "sfno_n_blocks": config.sfno_n_blocks,
+        "sfno_mlp_expansion": config.sfno_mlp_expansion,
+        "sfno_dropout": config.sfno_dropout,
+        "sfno_history_steps": _history_steps,
+    }
+    sfno_arch_cfg = _sfno_arch_config(
+        "sfno_full", nlev=config.n_levels, overrides=_sfno_over)
+    sfno = _build_variant("sfno_full", nlev=config.n_levels, grid=grid,
+                          seed=seed, overrides=_sfno_over)
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
     logger.info(
         f"SFNO full-emulator: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
@@ -5174,7 +5180,10 @@ def train_column_mlp_spectral(
     seed: int = 0,
     hidden_dim: int = 256,
     n_layers: int = 4,
-    residual_scale: float = 0.01,
+    # None = let build_column_physics apply its own default. Restating
+    # 0.01 here made a second source of truth that could drift from the
+    # factory's (and from the WB lane, which never passed it) unnoticed.
+    residual_scale: float | None = None,
     *,
     resume_from_dir=None,
     surface_forcing_path: str | None = None,
@@ -5192,12 +5201,11 @@ def train_column_mlp_spectral(
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    nn_phys = build_column_physics(
-        nlev=config.n_levels,
-        hidden_dim=hidden_dim,
-        n_layers=n_layers,
-        residual_scale=residual_scale,
-        key=jax.random.PRNGKey(seed),
+    from legoesm.training.model_registry import build_variant
+    nn_phys = build_variant(
+        "column_nn", nlev=config.n_levels, seed=seed,
+        overrides={"nn_hidden_dim": hidden_dim, "n_layers": n_layers,
+                   "residual_scale": residual_scale},
     )
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(nn_phys, eqx.is_array)))
     logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
@@ -5242,23 +5250,23 @@ def train_physics_params_spectral(
 ):
     """Train physics-based parameterization parameters + spectral PE dycore.
 
-    Tunes the parameters of combined physics schemes (gray radiation,
-    SBM convection) by backpropagating through both the physics
-    computations and the spectral dynamical core.
+    Tunes the parameters of the combined physics schemes (SBM convection and
+    the surface exchange/albedo knobs) by backpropagating through both the
+    physics computations and the spectral dynamical core. Gray radiation runs
+    at its documented defaults — it is not trained.
 
     Trainable parameters (via ``TrainablePhysicsParams``):
-    - ``tau_equator``, ``tau_pole``: gray radiation optical depths
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
 
     Returns (trained_params, loss_history).
     """
-    from legoesm.training.trainable_params import TrainablePhysicsParams
+    from legoesm.training.model_registry import build_variant
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = build_variant("classical", nlev=config.n_levels)
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():

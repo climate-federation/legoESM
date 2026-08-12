@@ -3,8 +3,9 @@
 Every tier-1/2 ``__param_spec__`` parameter here is NOT settable via the
 ``--params`` qualified-name loader in any of its component's run drivers.  The
 audit test asserts the computed uncovered set EQUALS this baseline; shrink it as
-parameters are wired through (never grow silently).  Idealized gray-radiation
-params are a documented conscious exclusion (--config-only).
+parameters are wired through (never grow silently).  The gray-radiation entries
+left on 2026-08-11: gray is no longer trained at all, so its params moved to
+tunable_tier 0 and the audit (which only sees tier 1-2) stopped listing them.
 
 2026-08-04: re-shrunk 415 -> 106 after the main sync reverted the atm
 post-setup class router (``apply_params_to_pipeline``). The route was
@@ -32,16 +33,8 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.clouds.CloudConfig.r_eff_liq',
     # atm.pblh: PBLHeightConfig (1)
     'atm.pblh.PBLHeightConfig.Ri_crit',
-    # atm.rad: GrayRadiationConfig (9)
-    'atm.rad.GrayRadiationConfig.linear_frac',
-    'atm.rad.GrayRadiationConfig.lw_diff_factor',
-    'atm.rad.GrayRadiationConfig.obliquity',
-    'atm.rad.GrayRadiationConfig.sfc_albedo',
-    'atm.rad.GrayRadiationConfig.sw_exponent',
-    'atm.rad.GrayRadiationConfig.sw_tau_0',
-    'atm.rad.GrayRadiationConfig.tau_equator',
-    'atm.rad.GrayRadiationConfig.tau_moist_coeff',
-    'atm.rad.GrayRadiationConfig.tau_pole',
+    # atm.rad: GrayRadiationConfig — none: every gray param is tier 0
+    # (never trainable) since 2026-08-11.
     # atm.rad: OzoneProfileConfig (3)
     'atm.rad.OzoneProfileConfig.o3_max_vmr',
     'atm.rad.OzoneProfileConfig.p_peak_hPa',

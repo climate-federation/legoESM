@@ -1,7 +1,8 @@
 # ACE2-loss classical: the sweep-WINNER scheme combination
 # (combo_conv_edmf: edmf convection + louis + mcfarlane + sundqvist +
 # xu_randall, RRTMGP from the base). Differs from the standard
-# variant_classical (tiedtke + micro=none) by using the winning schemes.
+# variant_classical (tiedtke) by using the winning schemes. Every family is
+# filled, as a classical model now requires.
 aimip_variant: "classical"
 aimip_convection: "edmf"
 aimip_turbulence: "louis"

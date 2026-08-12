@@ -38,6 +38,19 @@ WB_MODES = ("physics", "neural_gcm", "sfno")
 CLASSICAL_RADIATION = "rrtmgp"
 
 
+def parse_bool_flag(value) -> bool:
+    """A YAML/CLI flag -> bool, parsing the string spellings correctly.
+
+    ``bool("false")`` is True, so a quoted flag would otherwise mean the
+    opposite of what it says. Lives here (import-light, JAX-free) because four
+    drivers need the SAME answer for the same key — hand-rolled copies had
+    already diverged on a numeric ``2``.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def validate_training_core(core: str) -> str:
     """Dispatch-hardened training-core selection.
 

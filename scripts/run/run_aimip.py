@@ -156,6 +156,22 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
     return path, cache
 
 
+def _as_bool(value) -> bool:
+    """YAML flag -> bool. Thin alias for the shared parser (one answer for the
+    same key across the four drivers that read it)."""
+    from legoesm.training.campaign_driver import parse_bool_flag
+    return parse_bool_flag(value)
+
+
+def _classical_default_schemes() -> dict[str, str]:
+    """The one default-scheme table (``legoesm.training.aimip_params``).
+
+    Deferred import so this module's arg-parse layer stays JAX-free.
+    """
+    from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES
+    return CLASSICAL_DEFAULT_SCHEMES
+
+
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
@@ -526,15 +542,35 @@ def _train_aimip_classical(
     # single-callable path runs.
     split_rad = rad_update_interval > 1
 
-    # Physics scheme dispatch from YAML.  Defaults reproduce the legacy
-    # AIMIP classical recipe (tiedtke + louis + mcfarlane + none).
+    # Physics scheme dispatch from YAML. Defaults come from
+    # CLASSICAL_DEFAULT_SCHEMES and fill every family — microphysics used to
+    # default to "none", which produced an incomplete classical model.
     # Used by the combinatorial physics sweep
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
-    conv_scheme = str(cfg.get("aimip_convection", "tiedtke"))
-    turb_scheme = str(cfg.get("aimip_turbulence", "louis"))
-    gwd_scheme = str(cfg.get("aimip_gwd", "mcfarlane"))
-    micro_scheme = str(cfg.get("aimip_microphysics", "none"))
-    cloud_scheme = str(cfg.get("aimip_cloud", "xu_randall"))
+    from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
+    conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
+    turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
+    gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
+    # Was "none", which produced classical runs missing a whole family.
+    micro_scheme = str(cfg.get("aimip_microphysics", _DS["microphysics"]))
+    cloud_scheme = str(cfg.get("aimip_cloud", _DS["cloud"]))
+    rad_scheme_for_gate = str(cfg.get("aimip_radiation", _DS["radiation"]))
+    # bool("false") is True — a quoted YAML flag would have silently WAIVED the
+    # completeness gate (codex). Parse the string spellings explicitly.
+    _allow_unfilled = _as_bool(cfg.get("aimip_allow_unfilled_families", False))
+    # A classical model carries one parameterization of EVERY family; an
+    # unfilled family is a different model, and it invalidates any scheme-swap
+    # comparison against runs that have it (user directive 2026-08-11).
+    from legoesm.training.aimip_params import validate_classical_scheme_set
+    validate_classical_scheme_set(
+        convection=conv_scheme, turbulence=turb_scheme, cloud=cloud_scheme,
+        microphysics=micro_scheme, radiation=rad_scheme_for_gate,
+        gwd=gwd_scheme,
+        # Scheme-ablation suites (config/aimip/sweep/stage1/combo_*_none) drop
+        # one family ON PURPOSE. They must declare it; the resulting model is
+        # not comparable to a complete one.
+        allow_unfilled=_allow_unfilled,
+    )
     # Surface bulk-flux scheme (constant | most | coare3 | large_yeager).
     # Default "constant" reproduces the legacy AIMIP surface path; "most"
     # activates the Monin-Obukhov stability functions + log-law local z0 so
@@ -638,6 +674,9 @@ def _train_aimip_classical(
             gwd_scheme=gwd_scheme,
             microphysics_scheme=micro_scheme,
             cloud_scheme=cloud_scheme,
+            # Forwarded, or the factory's own gate re-raises for exactly the
+            # ablation suites the runner just cleared (codex round 3).
+            allow_unfilled_families=_allow_unfilled,
             land_mask=land_mask,
             split_rad=split_rad,
             rrtmgp_gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
@@ -826,8 +865,16 @@ def _evaluate_variant(
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
-            microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
-            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            # Same default as training above (one source): these used to
+            # disagree, so an omitted key trained WITH microphysics and
+            # evaluated WITHOUT it.
+            microphysics_scheme=str(cfg.get(
+                "aimip_microphysics",
+                _classical_default_schemes()["microphysics"])),
+            cloud_scheme=str(cfg.get(
+                "aimip_cloud", _classical_default_schemes()["cloud"])),
+            allow_unfilled_families=_as_bool(
+                cfg.get("aimip_allow_unfilled_families", False)),
             land_mask=eval_land_mask,
             split_rad=eval_split_rad,
         )

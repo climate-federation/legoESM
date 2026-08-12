@@ -130,10 +130,11 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),
 ]
 
-# Gray two-stream radiation knobs (Frierson et al. 2006).  The user
-# audit identified this as the biggest gap — radiation is the
-# dominant lever on the residual T bias.  ``tau_equator`` and
-# ``tau_pole`` were already exposed via ``_AIMIP_COMMON_TRAINABLE``.
+# Gray two-stream radiation knobs (Frierson et al. 2006) — HISTORICAL.
+# These were trained until 2026-08-11, when the directive "remove gray
+# radiation, we will never train it" retired the whole set (the seven gray_*
+# plus ``tau_equator``/``tau_pole``). Radiation is now trained through RRTMGP's
+# surface albedo/emissivity instead.
 #
 # v7 (2026-05-19): widened sfc_emissivity / sfc_albedo bounds.
 # v5+v6 produced a +1.07 K warm T bias that the optimizer could
@@ -145,15 +146,29 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
 # bias-penalty gradient can move the knobs.  Centering the defaults
 # inside the new range is left to a follow-up that adjusts
 # ``_canonical_scheme_defaults`` consistently.
-_GRAY_RAD_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("gray_linear_frac", 0.0, 0.6, "sigmoid"),
-    ParamConstraint("gray_tau_moist_coeff", 5.0e-3, 2.5e-2, "sigmoid"),
-    ParamConstraint("gray_lw_diff_factor", 1.2, 2.0, "sigmoid"),
-    ParamConstraint("gray_sfc_emissivity", 0.5, 1.0, "sigmoid"),
-    ParamConstraint("gray_sw_tau_0", 0.0, 0.5, "sigmoid"),
-    ParamConstraint("gray_sw_exponent", 1.0, 4.0, "sigmoid"),
-    ParamConstraint("gray_sfc_albedo", 0.03, 0.6, "sigmoid"),
-]
+# Gray radiation carries no trainable OPTICAL knob (user directive 2026-08-11:
+# "remove gray radiation, we will never train it"): no optical depth, moisture
+# coefficient, diffusivity factor or shortwave knob is trained. The SURFACE
+# albedo / emissivity remain trainable — they are properties of the surface,
+# not of the radiation scheme, and they are what the directive asked to keep
+# ("add surface albedo and emissivity in addition to surface roughness").
+# Precisely, under GRAY: no scalar gray leaf is trained (the AIMIP surface
+# scalars are RRTMGP-scoped, so the baselines fall back to
+# GrayRadiationConfig's defaults), but the learned SPATIAL field coefficients
+# do replace gray's sfc_emissivity / sfc_albedo, and the flat lat-lon set
+# (trainable_params.DEFAULT_TRAINABLE) still trains scalar albedo_ice /
+# albedo_ocean, which gray's shortwave consumes. Frozen means gray's OPTICAL
+# knobs, not every number the scheme reads. It stays available as
+# the cheap fixed backend for smokes, at its documented defaults;
+# the classical model trains RRTMGP instead, where the only trainable
+# radiative knobs are the surface albedo and emissivity below. The nine
+# former knobs (7 gray_* + tau_equator/tau_pole, which ARE gray optical
+# depths) sit at tunable_tier 0 in GrayRadiationConfig.__param_spec__, which
+# build_trainable_params never selects (it takes 1 <= tier <= level), so the
+# spec-driven collector cannot re-expose them either. Their BOUNDS stay, because
+# the LES feedback loop promotes gray_tau_* to per-column fields and clamps that
+# diagnosis to exactly those ranges.
+_GRAY_RAD_TRAINABLE: list[ParamConstraint] = []
 
 # Sundqvist large-scale condensation (now the AIMIP-winning
 # microphysics scheme; previously had zero trained knobs).
@@ -197,10 +212,7 @@ _RRTMGP_TRAINABLE: list[ParamConstraint] = [
 # ``make_aimip_classical_spectral_physics`` ever injected them (the
 # Mode-1 RRTMGP knob set in ``trainable_params.py`` is separate and
 # still carries live albedo knobs).
-_AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("tau_equator", 3.0, 12.0, "sigmoid"),
-    ParamConstraint("tau_pole", 0.5, 4.0, "sigmoid"),
-]
+_AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = []   # see _GRAY_RAD_TRAINABLE
 
 
 AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
@@ -459,25 +471,6 @@ class AIMIPClassicalParams(eqx.Module):
             # as_dict() and SBMConfig's published default stands.
         )
 
-    def to_gray_radiation_config(self):
-        """Build a GrayRadiationConfig with all 9 traced fields."""
-        from legoesm.atmosphere.physics.radiation.config import (
-            GrayRadiationConfig,
-        )
-        d = self.as_dict()
-        base = GrayRadiationConfig()
-        return base._replace(
-            tau_equator=d["tau_equator"],
-            tau_pole=d["tau_pole"],
-            linear_frac=d["gray_linear_frac"],
-            tau_moist_coeff=d["gray_tau_moist_coeff"],
-            lw_diff_factor=d["gray_lw_diff_factor"],
-            sfc_emissivity=d["gray_sfc_emissivity"],
-            sw_tau_0=d["gray_sw_tau_0"],
-            sw_exponent=d["gray_sw_exponent"],
-            sfc_albedo=d["gray_sfc_albedo"],
-        )
-
     def to_rrtmgp_config(self):
         """Build a RRTMGPConfig at the canonical defaults (no trained values).
 
@@ -511,7 +504,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     from legoesm.atmosphere.physics.convection.config import SBMConfig
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     from legoesm.atmosphere.physics.radiation.config import (
-        GrayRadiationConfig,
         RRTMGPConfig,
     )
 
@@ -520,7 +512,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     su = SurfaceLayerConfig()
     mc = McFarlaneConfig()
     cl = CloudConfig()
-    g = GrayRadiationConfig()
     sq = SundqvistConfig()
     sbm = SBMConfig()
     rr = RRTMGPConfig()
@@ -573,14 +564,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "cloud_q_c_diagnostic": float(cl.q_c_diagnostic),
         "cloud_r_eff_liq": float(cl.r_eff_liq),
         "cloud_r_eff_ice": float(cl.r_eff_ice),
-        # Gray radiation (the audit's biggest gap)
-        "gray_linear_frac": float(g.linear_frac),
-        "gray_tau_moist_coeff": float(g.tau_moist_coeff),
-        "gray_lw_diff_factor": float(g.lw_diff_factor),
-        "gray_sfc_emissivity": float(g.sfc_emissivity),
-        "gray_sw_tau_0": float(g.sw_tau_0),
-        "gray_sw_exponent": float(g.sw_exponent),
-        "gray_sfc_albedo": float(g.sfc_albedo),
         # Sundqvist microphysics
         "sundqvist_RH_crit": float(sq.rh_crit),
         "sundqvist_sigmoid_sharpness": float(sq.sigmoid_sharpness),
@@ -595,9 +578,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         # are not trainable, so they carry no canonical-default entry here.
         "rrtmgp_sfc_emissivity": float(rr.sfc_emissivity),
         "rrtmgp_sfc_albedo": float(rr.sfc_albedo),
-        # Shared
-        "tau_equator": 7.2,
-        "tau_pole": 1.8,
     }
 
 
@@ -616,14 +596,25 @@ def spatial_baselines_from_params(d: dict, radiation: str) -> dict:
     the spatial fields — and, because ocean columns fall back to the baseline,
     they are the only trainable ocean-surface levers.
     """
-    rad = "rrtmgp" if radiation == "rrtmgp" else "gray"
-    return {
+    base = {
         "Cd_neutral": d["surface_Cd_neutral"],
         "Ch_neutral": d["surface_Ch_neutral"],
         "z0": d["surface_z0"],
-        "sfc_emissivity": d[f"{rad}_sfc_emissivity"],
-        "sfc_albedo": d[f"{rad}_sfc_albedo"],
     }
+    if radiation == "rrtmgp":
+        base["sfc_emissivity"] = d["rrtmgp_sfc_emissivity"]
+        base["sfc_albedo"] = d["rrtmgp_sfc_albedo"]
+        return base
+    # Gray carries no trained surface knobs since 2026-08-11 (it is not
+    # trained at all), so the spatial field is anchored on the scheme's own
+    # published defaults instead of on a trained scalar. Reading the removed
+    # ``gray_sfc_*`` leaves here raised KeyError for every
+    # spatial_surface=True gray run (codex).
+    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+    gray = GrayRadiationConfig()
+    base["sfc_emissivity"] = gray.sfc_emissivity
+    base["sfc_albedo"] = gray.sfc_albedo
+    return base
 
 
 # Family field on PhysicsConfig -> registry namespace prefix. The prefix is a
@@ -686,6 +677,74 @@ def aimip_active_scheme_keys(physics_config) -> set[str]:
                      if m.config_class == cls
                      and m.scheme_key.startswith(prefixes)}
     return keys
+
+
+# The six parameterization families a CLASSICAL model must fill. Composability
+# is the point of the classical variant: any scheme may be swapped for another
+# of the same family, but a family may never be EMPTY — a run missing (say)
+# microphysics is not a cheaper classical model, it is a different and
+# incomparable one, and it silently invalidates a scheme-swap comparison
+# against runs that have it. User directive, 2026-08-11.
+CLASSICAL_SCHEME_FAMILIES = (
+    "convection", "turbulence", "cloud", "microphysics", "radiation", "gwd",
+)
+
+# The default scheme per family, in ONE place. Training and evaluation used to
+# carry their own copies of these strings and had already drifted: microphysics
+# defaulted to "none" on the eval side while training used a real scheme, so an
+# omitted key trained one model and scored another (codex).
+CLASSICAL_DEFAULT_SCHEMES = {
+    "convection": "tiedtke",
+    "turbulence": "louis",
+    "cloud": "xu_randall",
+    "microphysics": "sundqvist",
+    "radiation": "rrtmgp",
+    "gwd": "mcfarlane",
+}
+
+_UNFILLED = ("", "none", "off", "false")
+
+
+def validate_classical_scheme_set(
+    *, convection: str, turbulence: str, cloud: str, microphysics: str,
+    radiation: str, gwd: str, allow_unfilled: bool = False,
+) -> dict[str, str]:
+    """Require one active scheme in EVERY classical family; return the set.
+
+    Parameters are the scheme NAMES as the runner resolves them (the
+    ``aimip_<family>`` config keys). ``"none"`` / ``""`` count as unfilled.
+
+    ``allow_unfilled=True`` is the ABLATION escape: a study whose whole point is
+    "run without gravity-wave drag" is legitimate, but it must say so
+    explicitly, because the resulting model is not comparable to a complete
+    one. Production training leaves it False.
+
+    Raises
+    ------
+    ValueError
+        Naming EVERY unfilled family at once — fixing them one error at a time
+        would cost one job submission per family.
+
+    Returns
+    -------
+    dict
+        ``{family: scheme}``, so a caller can log exactly what it validated.
+    """
+    selected = {
+        "convection": convection, "turbulence": turbulence, "cloud": cloud,
+        "microphysics": microphysics, "radiation": radiation, "gwd": gwd,
+    }
+    missing = [f for f in CLASSICAL_SCHEME_FAMILIES
+               if str(selected[f]).strip().lower() in _UNFILLED]
+    if missing and not allow_unfilled:
+        raise ValueError(
+            "a classical model needs one parameterization of EVERY family "
+            f"{list(CLASSICAL_SCHEME_FAMILIES)}; unfilled: {missing}. "
+            f"Selected: {selected}. Set the aimip_<family> key for each "
+            "(scheme swaps are what the classical variant is for; an empty "
+            "family is a different model, not a smaller one)."
+        )
+    return selected
 
 
 def aimip_scheme_keys_for(
@@ -995,8 +1054,11 @@ def make_aimip_classical_spectral_physics(
     turbulence_scheme: str = "louis",
     surface_bulk_scheme: str = "constant",
     gwd_scheme: str = "mcfarlane",
-    microphysics_scheme: str = "none",
+    microphysics_scheme: str = "sundqvist",
     cloud_scheme: str = "xu_randall",
+    # Ablations that deliberately drop a family set this True; production
+    # training does not (see validate_classical_scheme_set).
+    allow_unfilled_families: bool = False,
     land_mask: "jax.Array | None" = None,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
@@ -1012,9 +1074,10 @@ def make_aimip_classical_spectral_physics(
 
         physics_fn(state, grid, sigma_coord) -> SpectralHydrostaticState
 
-    Gray radiation is used (tunable ``tau_equator`` / ``tau_pole``) so
-    surface-energy-balance gradients flow back through radiation as
-    well as through the dynamic schemes.
+    Radiation is RRTMGP in production; gray remains selectable as the cheap
+    backend but carries NO trainable optical knob since 2026-08-11. The
+    radiative gradients a classical model gets come from the surface albedo /
+    emissivity leaves, which reach the solver as per-call overrides.
 
     When ``params.spatial_surface`` is set and ``land_mask`` is
     provided, the surface (``Cd_neutral``, ``Ch_neutral``, ``z0``) and
@@ -1030,6 +1093,18 @@ def make_aimip_classical_spectral_physics(
     ``PhysicsPipeline`` cannot host (see
     ``physics_pipeline.py:897`` ``_PIPELINE_UNSUPPORTED_CONVECTION``).
     """
+    # Enforced HERE, not in a single runner: the ablation drivers, the AMIP
+    # finetune and the WB spectral lane all build their classical physics
+    # through this factory, and a runner-only gate left every one of them
+    # unchecked (codex). NOT universal: the lat-lon carry lane
+    # (run_aimip_latlon -> training_driver) builds physics through
+    # physics_pipeline and never reaches here.
+    validate_classical_scheme_set(
+        convection=convection_scheme, turbulence=turbulence_scheme,
+        cloud=cloud_scheme, microphysics=microphysics_scheme,
+        radiation=radiation, gwd=gwd_scheme,
+        allow_unfilled=allow_unfilled_families,
+    )
     # ``params`` may be a bare AIMIPClassicalParams (legacy) or an
     # AIMIPTrainableBundle carrying spec-driven scheme params too. Unpacking
     # HERE means every caller — runner, tests, eval — gets the same behaviour
@@ -1039,7 +1114,9 @@ def make_aimip_classical_spectral_physics(
         param_overrides = {**_bundle_overrides, **(param_overrides or {})}
 
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.radiation.config import (
+        GrayRadiationConfig, RadiationConfig,
+    )
     from legoesm.core.bulk_flux import validate_bulk_scheme
 
     # Dispatch hardening: reject an unknown surface bulk scheme at builder
@@ -1055,8 +1132,11 @@ def make_aimip_classical_spectral_physics(
     # cloud knobs trainable end-to-end (via
     # ``RadiationConfig.cloud_config`` -> ``radiation/integration.py``).
     # ``gray`` is the Frierson-style two-stream analytic path:
-    # cheap, no cloud coupling, only ``tau_equator`` /
-    # ``tau_pole`` are differentiated.  Default ``gray`` keeps the
+    # cheap, no cloud coupling, and NOT trained (2026-08-11) — no
+    # gradient reaches any of its OPTICAL knobs. (Under
+    # spatial_surface=True the learned surface albedo/emissivity FIELD
+    # is still substituted into its config; that is a surface
+    # property, not a radiation-scheme knob.)  Default ``gray`` keeps the
     # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
     # for production-grade physics realism.
     # ---- Cloud config (trained when xu_randall, defaults otherwise) ----
@@ -1153,11 +1233,11 @@ def make_aimip_classical_spectral_physics(
             diurnal_cycle=True,
         )
     elif radiation == "gray":
-        # Full 9-knob gray radiation (audit pass).  Was previously
-        # only ``tau_equator`` / ``tau_pole`` — the residual T bias
-        # was traced to fixed-default ``tau_moist_coeff``,
-        # ``lw_diff_factor``, ``sfc_emissivity`` etc.
-        gray_cfg = params.to_gray_radiation_config()
+        # Gray radiation runs at its published defaults — it is NOT
+        # trained (2026-08-11 directive).  Only the SPATIAL surface fields
+        # below are substituted, and those come from the surface knobs, not
+        # from any gray-specific one.
+        gray_cfg = GrayRadiationConfig()
         # Substitute spatial sfc_emissivity / sfc_albedo when present.
         # ``gray.py`` lines 175-176 and 250 use these as scalars that
         # broadcast against column-shaped arrays — passing (ncol,)

@@ -136,6 +136,7 @@ def main():
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
+    from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.aimip_spatial import land_mask_from_phis
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
@@ -355,6 +356,9 @@ def main():
                 gwd_scheme=str(cfg["aimip_gwd"]),
                 microphysics_scheme=str(cfg["aimip_microphysics"]),
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+                # Same suite waiver as the inference driver.
+                allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
                 land_mask=land_mask, split_rad=True,
             )
             ic_state, tgt_carry, sst_col, doy, ghg, o3 = sample
@@ -393,6 +397,9 @@ def main():
             gwd_scheme=str(cfg["aimip_gwd"]),
             microphysics_scheme=str(cfg["aimip_microphysics"]),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            # Same suite waiver (RRTMGP warm-up call).
+            allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
             land_mask=land_mask, split_rad=True,
         )
         del _warm

@@ -10,7 +10,8 @@ not).
 
 Families (this driver — Phase 1):
   * ``classical``  — tune the physics-pipeline scheme parameters
-    (tau_eq/tau_pole, C_H/C_E, albedos, SBM ...) via ``train_physics_params``.
+    (C_H/C_E, albedos, SBM ... — the gray optical depths left the trainable
+    set on 2026-08-11) via ``train_physics_params``.
     The *scheme combination* itself (convection/turbulence/...) is selected
     by CLI flags; sweeping combinations = many invocations of this driver.
   * ``column_nn``  — neural column physics (Rasp-style MLP) via
@@ -577,6 +578,10 @@ def build_parser():
     p.add_argument("--microphysics", default="kessler")
     p.add_argument("--clouds", default="xu_randall")
     p.add_argument("--gravity-wave-drag", default="hines")
+    p.add_argument("--allow-unfilled-families", action="store_true",
+                   help="Permit a classical run with a family set to 'none'. "
+                        "For ablations only: the result is NOT comparable to "
+                        "a complete classical model.")
     # Radiation sub-cycling for the TRAINING rollout: run rrtmgp every N
     # dynamics steps, NOT every step (radiation varies slowly; GCMs update it
     # ~hourly).  rrtmgp is the dominant cost of the classical variant, so the
@@ -682,6 +687,23 @@ def main(argv=None):
             str(args.radiation),
             smoke=bool(args.smoke),
             allow_non_rrtmgp=bool(getattr(args, "allow_non_rrtmgp", False)),
+        )
+        # ... and the same one-parameterization-per-family rule the spectral
+        # lane enforces. This lane builds its physics through physics_pipeline
+        # rather than make_aimip_classical_spectral_physics, so the factory
+        # gate never sees it (codex round 7) — hence the explicit call.
+        from legoesm.training.aimip_params import (
+            validate_classical_scheme_set,
+        )
+        validate_classical_scheme_set(
+            convection=str(args.convection),
+            turbulence=str(args.turbulence),
+            cloud=str(args.clouds),
+            microphysics=str(args.microphysics),
+            radiation=str(args.radiation),
+            gwd=str(args.gravity_wave_drag),
+            allow_unfilled=bool(
+                getattr(args, "allow_unfilled_families", False)),
         )
 
     # Microphysics is now threaded through build_training_segment (the carry

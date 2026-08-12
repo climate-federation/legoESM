@@ -190,6 +190,11 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
+            # This driver's ``microphysics`` axis includes "none" — dropping a
+            # family IS one of the arms it is comparing. The completeness gate
+            # guards models that claim to be complete, so an ablation sweep
+            # declares the waiver instead of tripping over it.
+            allow_unfilled_families=True,
             **schemes,
         )
 
@@ -230,6 +235,9 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         radiation=radiation,
         rad_update_interval_steps=rad_update_interval,
         **schemes,
+        # Same waiver as the training call above: one arm of this sweep
+        # deliberately runs without microphysics.
+        allow_unfilled_families=True,
     )
 
     per_var_acc = {v: {"rmse": [], "bias": []} for v in ("T", "u", "v", "p_s")}
