@@ -358,9 +358,17 @@ def compute_sss_restoring_flux(
     #     F_FW · S_target / (rho_0 · z1) = − dS/dt  →
     #     F_FW = − rho_0 · z1 · dS/dt / S_target
     # With normalization="live_s" the denominator is the live surface
-    # salinity instead, reproducing NEMO sbcssr nn_sssr=2 -- a genuine
-    # water flux, which is what makes it compatible with the
-    # real_freshwater closure.
+    # salinity instead, reproducing NEMO sbcssr nn_sssr=2.
+    #
+    # ⚠ SCOPE (codex 9383572 RED, 2026-08-12): in THIS code path the flux is a
+    # DIAGNOSTIC -- `apply_sss_restoring_step*` consume `dS_dt_top` and edit
+    # the tracer directly.  Because `dS_dt_top` is re-derived below as
+    # `-freshwater_flux * S_safe / (rho_0*z1)`, `S_safe` CANCELS the division
+    # that produced the flux, so the choice of denominator changes what the
+    # ocean actually sees ONLY where the flux cap binds (there the applied
+    # tendency scales with S_safe, i.e. live_s restores MORE strongly in a
+    # too-salty cell).  It does NOT turn restoring into a water flux, and does
+    # NOT make it compatible with the real_freshwater closure.
     # Dispatch hardening: a typo must not silently run the legoESM form.
     if config.normalization == "s_target":
         S_norm = S_target

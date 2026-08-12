@@ -113,17 +113,30 @@ def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
     """
     if freshwater_closure != "real_freshwater" or not sss_restore:
         return None
-    if sss_restore_normalization == "live_s":
-        return None
+    # NOTE (2026-08-12, codex 9383572 RED): `--sss-restore-normalization live_s`
+    # does NOT lift this.  A previous revision let it through on the grounds
+    # that live_s makes the restoring "a genuine water flux".  It does not, in
+    # THIS code path: `apply_sss_restoring_step*` consume `dS_dt_top` and edit
+    # the tracer directly -- the flux never reaches FreshwaterForcing, eta, or
+    # the z-star dilution.  And `dS_dt_top` is re-derived as
+    # `-freshwater_flux * S_safe / (rho_0*z1)`, in which `S_safe` CANCELS the
+    # division that produced the flux, so the normalization changes the applied
+    # tendency ONLY where the +/-4 mm/day cap binds.  Restoring is therefore
+    # still a virtual-salt-like operation whatever the denominator, and pairing
+    # it with a closure that assumes no virtual-salt term is still wrong.
+    # Lifting this guard requires ROUTING restoring as a water flux (and
+    # removing the tracer-side edit), not renaming its denominator.
     return (
         "--freshwater-closure real_freshwater is not compatible with "
-        "--sss-restore under the default SSS-restoring form: the restoring "
-        "flux is computed as a VIRTUAL-salt equivalent (S_target + a fixed "
-        "z1), so under volume-only dilution it applies the wrong relaxation "
-        "strength. Pass --sss-restore-normalization live_s (NEMO sbcssr "
-        "nn_sssr=2: the flux is divided by the LIVE surface salinity, making "
-        "it a genuine water flux), or drop --sss-restore, or keep the "
-        "virtual_salt_flux closure.")
+        "--sss-restore: the restoring is applied as a DIRECT SALINITY "
+        "TENDENCY (apply_sss_restoring_step consumes dS_dt_top; the "
+        "freshwater flux is a diagnostic here and never enters the eta / "
+        "z-star volume channel), which is a virtual-salt-like operation the "
+        "real_freshwater closure assumes is absent. "
+        "--sss-restore-normalization live_s does NOT lift this: S_safe "
+        "cancels in the dS_dt_top re-derivation except where the flux cap "
+        "binds. Drop --sss-restore, or keep the virtual_salt_flux closure, "
+        "until restoring is routed as a real water flux (#1484).")
 
 
 def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):

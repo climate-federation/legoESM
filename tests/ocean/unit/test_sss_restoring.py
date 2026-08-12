@@ -100,6 +100,40 @@ class TestNEMONormalization:
         with _pytest.raises(ValueError, match="unknown SSSRestoringConfig"):
             self._call(self._cfg("nemo"), np.array([34.0]), np.array([34.0]))
 
+    def test_normalization_is_inert_away_from_the_cap(self):
+        """The APPLIED tendency is normalization-independent unless capped.
+
+        `dS_dt_top` is re-derived as `-freshwater_flux * S_safe/(rho_0*z1)`,
+        and `freshwater_flux` was built by DIVIDING by that same `S_safe`, so
+        the two cancel.  This is the property that makes the `live_s` option
+        insufficient to lift the real_freshwater guard -- assert it directly so
+        nobody re-derives the wrong conclusion from the flux diagnostic.
+        """
+        import numpy as np
+
+        S_model = np.array([31.0, 34.5, 36.0])
+        S_target = np.array([29.6, 34.5, 35.0])
+        a = np.asarray(self._call(self._cfg("s_target"), S_model, S_target)
+                       ["dS_dt_top"])
+        b = np.asarray(self._call(self._cfg("live_s"), S_model, S_target)
+                       ["dS_dt_top"])
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=0.0)
+
+    def test_normalization_bites_only_where_the_cap_binds(self):
+        """With a cap tight enough to bind, the applied tendency DOES move."""
+        import numpy as np
+
+        S_model, S_target = np.array([31.0]), np.array([29.6])
+        tight = dict(max_flux_kg_m2_s=1.0e-6)     # far below the uncapped flux
+        a = float(np.asarray(
+            self._call(self._cfg("s_target", **tight), S_model, S_target)
+            ["dS_dt_top"])[0])
+        b = float(np.asarray(
+            self._call(self._cfg("live_s", **tight), S_model, S_target)
+            ["dS_dt_top"])[0])
+        assert a != b
+        # at the cap the applied tendency scales with S_safe
+        np.testing.assert_allclose(b / a, 31.0 / 29.6, rtol=1e-10)
 
 class TestRealFreshwaterRestoringGuard:
     """`real_freshwater` x `--sss-restore`: refused only for the NON-NEMO form.
@@ -120,11 +154,18 @@ class TestRealFreshwaterRestoringGuard:
     def test_s_target_with_real_freshwater_is_refused(self):
         msg = self._f("real_freshwater", True, None)
         assert msg is not None
-        # the message must name the way OUT, not just the problem
-        assert "--sss-restore-normalization live_s" in msg
+        # the message must explain WHY, in terms of the path that runs
+        assert "dS_dt_top" in msg
 
-    def test_live_s_with_real_freshwater_is_allowed(self):
-        assert self._f("real_freshwater", True, "live_s") is None
+    def test_live_s_does_NOT_lift_the_guard(self):
+        """RETRACTED 2026-08-12 (codex 9383572): an earlier revision allowed
+        this, claiming live_s makes restoring a genuine water flux.  It does
+        not -- `apply_sss_restoring_step*` consume `dS_dt_top` and edit the
+        tracer directly, and S_safe cancels in that re-derivation except at the
+        cap.  Restoring stays virtual-salt-like whatever the denominator."""
+        msg = self._f("real_freshwater", True, "live_s")
+        assert msg is not None
+        assert "does NOT lift this" in msg
 
     def test_explicit_s_target_is_still_refused(self):
         assert self._f("real_freshwater", True, "s_target") is not None
