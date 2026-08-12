@@ -94,21 +94,32 @@ def main() -> int:
     u3, v3 = yxz(uo), yxz(vo)
     h3 = np.where(h3 > 0, h3, 0.0)
 
-    # Face thicknesses: two-point mean of the cell thickness (NEMO e3u/e3v).
+    # STAGGERING (the array layout is an API): the C-grid operators want
+    # mass_flux_u on (n_lat, n_lon+1, nlev) and mass_flux_v on
+    # (n_lat+1, n_lon, nlev), i.e. faces INCLUDING both domain edges, while
+    # NEMO's uoce/voce sit on (n_lat, n_lon)/(n_lat, n_lon) cell-indexed
+    # faces.  NEMO's u(i) is the face between T(i) and T(i+1), so our face j
+    # (between T(j-1) and T(j)) is NEMO's u(j-1): prepend the periodic wrap
+    # in x, and pad the southern/northern v rows with zero (closed).
     h_u = 0.5 * (h3 + np.roll(h3, -1, axis=1))
     h_v = 0.5 * (h3 + np.roll(h3, -1, axis=0))
-    # Mass fluxes at faces: h * u * face length.
     e2u = 0.5 * (e2t + np.roll(e2t, -1, axis=1))
     e1v = 0.5 * (e1t + np.roll(e1t, -1, axis=0))
-    mf_u = h_u * u3 * e2u[:, :, None]
-    mf_v = h_v * v3 * e1v[:, :, None]
-    # Vertical transport from continuity (NEMO computes w the same way):
-    # w(k) - w(k+1) = -div_h(k), zero at the sea floor, surface set to 0.
-    div_h = ((mf_u - np.roll(mf_u, 1, axis=1))
-             + (mf_v - np.roll(mf_v, 1, axis=0)))
+    mf_u_c = h_u * u3 * e2u[:, :, None]          # (ny, nx, z) at NEMO u-points
+    mf_v_c = h_v * v3 * e1v[:, :, None]          # (ny, nx, z) at NEMO v-points
+    # x is periodic: face 0 == face nx.
+    mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c], axis=1)      # (ny, nx+1, z)
+    h_u_f = np.concatenate([h_u[:, -1:, :], h_u], axis=1)
+    # y is not periodic: the southern face carries no transport.
+    mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c], axis=0)  # (ny+1, nx, z)
+    h_v_f = np.concatenate([np.zeros_like(h_v[:1]), h_v], axis=0)
+    # Vertical transport from continuity: w(k) - w(k+1) = -div_h(k), zero at
+    # the sea floor, surface interface zeroed.
+    div_h = ((mf_u[:, 1:, :] - mf_u[:, :-1, :])
+             + (mf_v[1:, :, :] - mf_v[:-1, :, :]))
     area = (e1t * e2t)[:, :, None]
     w_int = -np.flip(np.cumsum(np.flip(div_h, axis=-1), axis=-1), axis=-1) / area
-    w_half = np.concatenate([np.zeros_like(w_int[..., :1]), w_int[..., 1:]], axis=-1)
+    w_half = np.concatenate([np.zeros_like(w_int[..., :1]), w_int], axis=-1)[..., :z + 1]
 
     grid = create_latlon_geometry(n_lat=ny, n_lon=nx)
     lat_col = lat.reshape(ny * nx)
@@ -129,8 +140,8 @@ def main() -> int:
         for tr in (T3, S3):
             div_hut, vfd = _compute_advection_flux_div(
                 jnp.asarray(tr), scheme, jnp.asarray(mf_u), jnp.asarray(mf_v),
-                jnp.asarray(w_half), jnp.asarray(h3), jnp.asarray(h_u),
-                jnp.asarray(h_v), grid, a.dt)
+                jnp.asarray(w_half), jnp.asarray(h3), jnp.asarray(h_u_f),
+                jnp.asarray(h_v_f), grid, a.dt)
             inv_h = np.where(h3 > 0, 1.0 / np.maximum(h3, 1e-12), 0.0)
             dT_dt.append(-(np.asarray(div_hut) + np.asarray(vfd)) * inv_h)
         ours_T, ours_S = cols(dT_dt[0]), cols(dT_dt[1])
