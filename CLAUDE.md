@@ -25,6 +25,21 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **Irreversible / outward-facing actions need explicit permission EVERY time**: rewriting published history (`push --force*`), amending/squashing pushed commits, deleting or overwriting files the user created, `git reset --hard`, closing/merging PRs, installing or upgrading system packages, reboots. Approval for one such action does NOT carry to the next. Propose, then wait.
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
+- **DUAL adversarial review MANDATORY — TWO independent reviewers, never one**
+  (user directive 2026-08-12). Route by who WROTE the code:
+  **Claude-authored → codex + GLM-5.2** (`mcp__zai__ask_glm`);
+  **GLM-authored → codex + Claude**.
+  Both BEFORE the PR, not after; report both verdicts in the PR body and in the
+  status line. Subagents doing implementation must be told to run BOTH — they
+  default to codex only. Applies to measurement harnesses and probes too: the
+  instrument decides what we believe.
+  Why two: they catch DIFFERENT classes. Codex finds diff defects (broken
+  contracts, vacuous tests that cannot fail, silent fallbacks, binding gates
+  that accept the wrong arm). GLM finds MECHANISM defects (wrong objective,
+  wrong regime, a lever whose premise the receipts already falsified — it
+  retracted its own top-ranked lever once measurement contradicted it).
+  Reviewer disagreement is SIGNAL, not noise: name the disputed point and the
+  measurement that discriminates, run it if cheap, never average the two.
 - **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict.
   **If the review SUBAGENT dies (spend limit, API error), that is NOT a review
   waiver — the codex CLI is a separate binary with separate credentials and is
