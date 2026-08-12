@@ -381,6 +381,17 @@ def assert_arch_matches_checkpoint(arch, checkpoint_path, member_paths=()):
                 )
 
 
+def _default_schemes() -> dict[str, str]:
+    """The same default-scheme table the trainer uses (one source).
+
+    Eval and training each carried their own copy and had already drifted:
+    microphysics defaulted to "none" here while training used a real scheme,
+    so an omitted key scored a different model than it trained.
+    """
+    from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES
+    return CLASSICAL_DEFAULT_SCHEMES
+
+
 def _build_skeleton(variant, cfg, spec_cfg, grid):
     """Reconstruct the UNTRAINED pytree skeleton exactly as run_aimip builds it
     in training, so ``eqx.tree_deserialise_leaves(checkpoint, skeleton)`` matches.
@@ -392,8 +403,6 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
     * sfno_full  -> ``SFNO(SFNOConfig(...), grid, key)``
       (neural_gcm_spectral.train_sfno_full_spectral, ~L3153).
     """
-    import jax
-
     if variant == "classical":
         from legoesm.training.aimip_params import AIMIPClassicalParams
         # Matches _train_aimip_classical: spatial_surface + init_std + seed all
@@ -423,7 +432,8 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
                 convection=str(cfg.get("aimip_convection", "tiedtke")),
                 turbulence=str(cfg.get("aimip_turbulence", "louis")),
                 gwd=str(cfg.get("aimip_gwd", "mcfarlane")),
-                microphysics=str(cfg.get("aimip_microphysics", "none")),
+                microphysics=str(cfg.get(
+                    "aimip_microphysics", _default_schemes()["microphysics"])),
                 radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 cloud=str(cfg.get("aimip_cloud", "xu_randall")),
             )
@@ -438,37 +448,34 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
         return skeleton
 
     if variant == "column_nn":
-        from legoesm.atmosphere.physics.neural_physics import (
-            build_column_physics,
-        )
-        # Matches train_column_mlp_spectral(seed=nn_seed, hidden_dim=nn_hidden_dim,
-        # n_layers=nn_n_layers, residual_scale defaulted). residual_scale is left
-        # at build_column_physics' default (run_aimip does not override it), so a
-        # checkpoint trained through run_aimip matches without passing it here.
-        return build_column_physics(
-            nlev=spec_cfg.n_levels,
-            hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
-            n_layers=int(cfg.get("nn_n_layers", 4)),
-            key=jax.random.PRNGKey(int(cfg.get("nn_seed", 0))),
+        # Same builder the trainer uses (training.model_registry), so the
+        # skeleton cannot drift from what wrote the checkpoint. residual_scale
+        # is left at the factory default, as run_aimip leaves it.
+        from legoesm.training.model_registry import build_variant
+        return build_variant(
+            "column_nn", nlev=spec_cfg.n_levels,
+            seed=int(cfg.get("nn_seed", 0)),
+            overrides={"nn_hidden_dim": int(cfg.get("nn_hidden_dim", 256)),
+                       "n_layers": int(cfg.get("nn_n_layers", 4))},
         )
 
     if variant == "sfno_full":
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        # Matches train_sfno_full_spectral: in==out channels from PE3DChannelSpec,
-        # embed/blocks/mlp_expansion from spec_cfg, residual_prediction=False,
-        # keyed on sfno_seed.
-        channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
-        arch = SFNOConfig(
-            in_channels=channels,
-            out_channels=channels,
-            embed_dim=spec_cfg.sfno_embed_dim,
-            n_blocks=spec_cfg.sfno_n_blocks,
-            mlp_expansion=spec_cfg.sfno_mlp_expansion,
-            residual_prediction=False,
-            dropout=spec_cfg.sfno_dropout,
+        # Same builder the trainer uses, so the skeleton cannot drift from what
+        # wrote the checkpoint (this block used to restate the channel layout
+        # and every architecture field by hand).
+        from legoesm.training.model_registry import build_variant
+        return build_variant(
+            "sfno_full", nlev=spec_cfg.n_levels, grid=grid,
+            seed=int(cfg.get("sfno_seed", 0)),
+            overrides={
+                "sfno_embed_dim": spec_cfg.sfno_embed_dim,
+                "sfno_n_blocks": spec_cfg.sfno_n_blocks,
+                "sfno_mlp_expansion": spec_cfg.sfno_mlp_expansion,
+                "sfno_dropout": spec_cfg.sfno_dropout,
+                "sfno_history_steps": int(
+                    getattr(spec_cfg, "sfno_history_steps", 0) or 0),
+            },
         )
-        return SFNO(arch, grid, key=jax.random.PRNGKey(int(cfg.get("sfno_seed", 0))))
 
     # Unreachable: build_eval_config_from_args already gates --variant. Kept as a
     # hard error (dispatch hardening) so a future caller of _build_skeleton with a
@@ -502,6 +509,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
     )
+    from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.neural_gcm_spectral import (
         make_column_mlp_spectral_physics,
         spectral_rollout,
@@ -512,14 +520,17 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained, grid, spec_cfg.dt,
-            radiation=str(cfg.get("aimip_radiation", "gray")),
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=rad_update_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(
                 cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
-            microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
+            microphysics_scheme=str(cfg.get(
+                "aimip_microphysics", _default_schemes()["microphysics"])),
+            allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
             land_mask=None,
             split_rad=split_rad,
@@ -757,7 +768,6 @@ def main(argv=None, ds=None):
     import logging
     import os
 
-    import equinox as eqx
     import yaml
 
     # Spectral cores require float64 (SH transforms). Enable x64 at the entry
@@ -843,7 +853,9 @@ def main(argv=None, ds=None):
     if not os.path.exists(cfg_args.checkpoint):
         raise SystemExit(f"--checkpoint not found: {cfg_args.checkpoint}")
     skeleton = _build_skeleton(cfg_args.variant, yml, spec_cfg, grid)
-    trained = eqx.tree_deserialise_leaves(cfg_args.checkpoint, skeleton)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    trained = load_checkpoint_or_fail(
+        cfg_args.checkpoint, skeleton, what=f"the {cfg_args.variant} variant")
 
     # Multi-seed ensemble: each --member is an INDEPENDENTLY seeded training
     # run of the same architecture, loaded into its own copy of the skeleton.
@@ -854,8 +866,9 @@ def main(argv=None, ds=None):
             if not os.path.exists(extra):
                 raise SystemExit(f"--member not found: {extra}")
         trained = [trained] + [
-            eqx.tree_deserialise_leaves(
-                extra, _build_skeleton(cfg_args.variant, yml, spec_cfg, grid))
+            load_checkpoint_or_fail(
+                extra, _build_skeleton(cfg_args.variant, yml, spec_cfg, grid),
+                what=f"ensemble member {extra}")
             for extra in cfg_args.members
         ]
         log.info(

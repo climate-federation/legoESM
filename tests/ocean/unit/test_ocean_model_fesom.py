@@ -1889,3 +1889,66 @@ class TestAnalyticICPrimitives:
             # This mesh IS rotated, so the transform must actually rotate.
             assert not np.allclose(u_r, u, atol=1e-6), (
                 "rotation was a no-op on a rotated mesh")
+
+
+# =============================================================================
+# The free surface must be set where FESOM CARRIES it
+# =============================================================================
+
+class TestFreeSurfaceInitialCondition:
+    """``with_fields(eta=...)`` has to reach the prognostic free surface.
+
+    FESOM's step computes ``hbar`` at substep 11 from ``hbar_old`` plus the
+    transport divergence and then OVERWRITES ``eta_n`` at substep 12 from
+    those two, so an IC that sets only ``eta_n`` survives exactly one step.
+    MEASURED before the fix on the benchmark's barotropic-wave arm: a 1 m
+    Gaussian bump read 0.996 m at t = 0 and 0.0067 m after ONE step, against
+    0.97 m on lat-lon and MPAS. That arm was integrating a rest state, and
+    its missing wave was being read as a dycore difference.
+    """
+
+    def _bump(self, flat_mesh):
+        geo = np.asarray(flat_mesh.geo_coord_nod2D, dtype=np.float64)
+        dist = np.arccos(np.clip(np.cos(geo[:, 1]) * np.cos(geo[:, 0]),
+                                 -1.0, 1.0))
+        return np.exp(-0.5 * (dist / (10.0 * np.pi / 180.0)) ** 2)
+
+    def test_eta_reaches_hbar_not_only_eta_n(self, state, flat_mesh):
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        bump = self._bump(flat_mesh)
+        new = with_fields(state, flat_mesh, eta=bump)
+        for slot in ("eta_n", "hbar", "hbar_old"):
+            got = np.asarray(getattr(new.inner, slot), dtype=np.float64)
+            assert np.allclose(got, bump, atol=1e-12), (
+                f"with_fields(eta=...) did not set {slot}; the free surface "
+                f"is carried by hbar/hbar_old and eta_n is re-derived from "
+                f"them every step")
+        # Fresh-start bootstrap: no SSH history, no stale CG warm start.
+        assert np.allclose(np.asarray(new.inner.ssh_rhs_old), 0.0, atol=1e-12)
+        assert np.allclose(np.asarray(new.inner.d_eta), 0.0, atol=1e-12)
+
+    def test_free_surface_survives_a_step(self, state, flat_mesh,
+                                          lock_config, z20_or_none):
+        """The behavioural check, and the one that FAILS on pre-fix code
+        (0.994 -> 0.0003 m). The tolerance is slack on purpose: the point is
+        "still there", not "unchanged" -- a gravity wave really does start
+        spreading immediately."""
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        bump = self._bump(flat_mesh)
+        st = with_fields(state, flat_mesh, eta=bump)
+        before = float(np.abs(np.asarray(st.eta.data)).max())
+        model = FesomOceanModel(flat_mesh, z20_or_none,
+                                FesomOceanConfig(dt=300.0))
+        st = model.step(st, 300.0)
+        after = float(np.abs(np.asarray(st.eta.data)).max())
+        assert after > 0.9 * before, (
+            f"one step removed the free-surface perturbation: "
+            f"{before:.4f} -> {after:.4f} m")
+
+    def test_unknown_vertical_coordinate_raises(self, state, flat_mesh):
+        """Dispatch hardening: a typo must not silently pick linfs and leave
+        the thicknesses inconsistent with the free surface."""
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        with pytest.raises(ValueError, match="vertical_coordinate"):
+            with_fields(state, flat_mesh, eta=self._bump(flat_mesh),
+                        vertical_coordinate="z-star")

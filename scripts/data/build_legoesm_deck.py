@@ -1338,7 +1338,7 @@ def slide_aimip():
             "Bulk fluxes: C_H, C_E ∈ [10⁻³, 5·10⁻³]",
             "Albedos: α_ice ∈ [0.4, 0.8] · α_ocean ∈ [0.03, 0.10]",
             "Scheme-specific subsets via trainable_constraints_for_scheme()",
-            "AIMIPClassicalParams adds Tiedtke + Louis + McFarlane + Xu–Randall + gray-radiation tunables",
+            "AIMIPClassicalParams adds Tiedtke + Louis + McFarlane + Xu–Randall + Sundqvist + RRTMGP surface tunables",
         ], size=12.5, line_spacing=1.20, space_after_pt=4)))
     rx = lx + lw + 0.30
     rw = SLIDE_W_IN - rx - M

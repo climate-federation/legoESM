@@ -14,7 +14,37 @@ from legoesm import constants as _C
 GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
-    "mpas": "ico3",
+    # ico4 (2562 cells, 446 km effective), NOT ico3 (642 cells, 891 km):
+    # resolution-matched to latlon 36x72 (444 km), cube C24 (384 km) and
+    # fesom pi (403 km) to within 0.6%, so a cross-grid comparison
+    # measures the dycores rather than a 2.3x resolution gap.
+    #
+    # SYNCED with the monolithic run_ocean_test_matrix.py 2026-08-10 after
+    # the blocker was MEASURED rather than assumed. The blocker was that
+    # the MPAS global-wind viscosity floor in experiments.py was tuned at
+    # ico3 and untested elsewhere. Controlled comparison, this package's
+    # own runner, every mpas case, ONLY --resolution changed:
+    #     ico3: 8 PASS / 4 FAIL      ico4: 9 PASS / 3 FAIL
+    #   global_barotropic_wind        PASS -> PASS   (the blocker: the
+    #                                 ico3-tuned A_h floor holds at ico4)
+    #   global_barotropic_wind_1lev   PASS -> PASS
+    #   rest_state x4, geostrophic_adjustment, phillips_two_layer
+    #                                 PASS -> PASS
+    #   barotropic_wave               FAIL -> PASS
+    #   inertia_gravity_wave, lock_exchange, stommel_gyre_tracer
+    #                                 FAIL -> FAIL  (pre-existing at BOTH
+    #                                 resolutions; unrelated to this
+    #                                 change -- see below)
+    # Artifacts: results/modular_ico3, results/modular_ico4.
+    #
+    # The three unchanged failures are this package's OWN divergence from
+    # the monolith, not a resolution effect: it still gates the
+    # inertia-gravity wave on the analytic L2 that no arm can pass on a
+    # sphere, and its lock-exchange runner still uses a private
+    # fixed-reference-volume PE that the monolith retracted. Deduplicating
+    # those runners is the remaining piece of the modular/monolithic
+    # merge; it is not a reason to keep MPAS at the wrong resolution.
+    "mpas": "ico4",
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
     "cs_regional": "C24",
@@ -28,7 +58,9 @@ GRID_RESOLUTIONS: dict[str, str] = {
 # Standard grid types for the full test matrix.
 # Regional grids are only added to specific test cases (gyre experiments).
 # Channel grids are zonally periodic latitude bands (e.g. Eady instability).
-GRID_TYPES = ["cubed_sphere", "latlon", "mpas"]
+# cubed_sphere removed 2026-08-11: not an ocean grid (see the
+# monolithic run_ocean_test_matrix.py for the full reason).
+GRID_TYPES = ["latlon", "mpas"]
 REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
 CHANNEL_GRID_TYPES = ["latlon_channel", "mpas_channel"]
 

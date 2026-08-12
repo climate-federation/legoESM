@@ -73,6 +73,10 @@ declare -A ENTRY=(
   # filter_lnps=False code default) vs the anchored rows above.
   [column_nn_lnpsfix]="config/aimip/ace2/suite_curriculum_v2_anchored_lnpsfix.yaml|results/aimip_cnn_anchored_lnpsfix/column_nn|column_nn"
   [classical_lnpsfix]="config/aimip/ace2/suite_classical_anchored_lnpsfix.yaml|results/aimip_classical_anchored_lnpsfix/classical|classical"
+  # Retrained on the ENERGY-CONSERVING dycore (sb_centered + frictional
+  # heating, now the default): one variable vs the *_lnpsfix rows above.
+  [column_nn_sb]="config/aimip/ace2/suite_curriculum_v2_anchored_sb.yaml|results/aimip_cnn_sb/column_nn|column_nn"
+  [classical_sb]="config/aimip/ace2/suite_classical_anchored_sb.yaml|results/aimip_classical_sb/classical|classical"
 )
 # The two sfno_full arms ARE a controlled pair (identical except training-set
 # size); the classical / column_nn arms are not controlled against them.

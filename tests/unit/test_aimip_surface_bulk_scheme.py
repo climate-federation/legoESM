@@ -112,8 +112,14 @@ def test_spatial_surface_path_carries_most():
 
 
 def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
-                             land_mask=None):
-    """Build the physics and return the intercepted PhysicsConfig."""
+                             land_mask=None, allow_unfilled_families=False):
+    """Build the physics and return the intercepted PhysicsConfig.
+
+    The completeness gate stays ON by default so these tests keep exercising
+    it; only the deliberate ``turbulence_scheme="none"`` fall-through case
+    waives it (codex: a helper-wide waiver silently dropped gate coverage from
+    every test in this module).
+    """
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
     )
@@ -134,6 +140,7 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
             turbulence_scheme=turbulence_scheme,
             surface_bulk_scheme=surface_bulk_scheme,
             land_mask=land_mask,
+            allow_unfilled_families=allow_unfilled_families,
         )
     finally:
         combined.make_physics = orig
@@ -255,6 +262,8 @@ def test_turbulence_none_falls_through_cleanly():
     p = AIMIPClassicalParams.from_defaults()
     cfg = _assemble_physics_config(
         p, grid, turbulence_scheme="none", surface_bulk_scheme="most",
+        # The ONE case in this module that drops a family on purpose.
+        allow_unfilled_families=True,
     )
     assert cfg.turbulence.scheme == "none"
 

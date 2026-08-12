@@ -29,13 +29,24 @@ RESERVED_CORES = ("cubed_sphere", "mpas")
 AIMIP_VARIANTS = ("classical", "column_nn", "sfno_physics", "sfno_full")
 WB_MODES = ("physics", "neural_gcm", "sfno")
 
-# Radiation schemes a CLASSICAL (parameterization-swap) training run may
-# declare. The swap campaign holds radiation FIXED at rrtmgp (user
-# requirement: scheme swaps always run under rrtmgp so convection/turbulence
-# comparisons are not confounded by the radiation backend). Smoke/debug runs
-# may escape via allow_non_rrtmgp (the T21 smoke contract uses gray for
-# ~10x cheaper compile).
+# The ONE radiation backend a WB or AIMIP run may use, for every variant.
+# Scheme swaps must not be confounded by the radiation backend, and gray
+# carries no trainable knob. Only --smoke may fall back to gray (wiring check,
+# ~10x cheaper compile); see validate_campaign_radiation.
 CLASSICAL_RADIATION = "rrtmgp"
+
+
+def parse_bool_flag(value) -> bool:
+    """A YAML/CLI flag -> bool, parsing the string spellings correctly.
+
+    ``bool("false")`` is True, so a quoted flag would otherwise mean the
+    opposite of what it says. Lives here (import-light, JAX-free) because four
+    drivers need the SAME answer for the same key — hand-rolled copies had
+    already diverged on a numeric ``2``.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def validate_training_core(core: str) -> str:
@@ -59,27 +70,44 @@ def validate_training_core(core: str) -> str:
     )
 
 
-def validate_classical_radiation(
+def validate_campaign_radiation(
     radiation: str,
     *,
+    campaign: str = "aimip",
     smoke: bool = False,
-    allow_non_rrtmgp: bool = False,
 ) -> str:
-    """Enforce the classical-mode radiation pin (design D1).
+    """Pin WB and AIMIP to RRTMGP radiation, for EVERY variant.
 
-    A classical parameterization-swap run must use rrtmgp so scheme
-    comparisons share the radiation backend. ``smoke`` runs and an explicit
-    ``allow_non_rrtmgp`` (debug) escape are exempt — both are logged by the
-    caller, never silent.
+    User directive 2026-08-12: "gray radiation should not be used as one of the
+    parameterizations in weatherbench or AIMIP — always use RRTMGP". Gray stays
+    in legoESM for everything else (idealized dycore cases, SCM, DA, land); it
+    is simply not a campaign option.
+
+    This replaced ``validate_classical_radiation``, which checked the CLASSICAL
+    variant only — column_nn / sfno_physics / sfno_full could each select gray
+    — and carried an ``allow_non_rrtmgp`` escape that two shipped configs used.
+    "Always" leaves no room for that escape, so it is gone.
+
+    ``smoke`` still permits gray: a smoke run produces no scientific output, it
+    only checks that the code is wired, and RRTMGP costs ~10x the compile.
+    ``"none"`` is accepted for the variants that replace radiation entirely.
     """
-    if radiation == CLASSICAL_RADIATION or smoke or allow_non_rrtmgp:
+    if radiation == CLASSICAL_RADIATION:
+        return radiation
+    if radiation == "none":
+        # The NN-replacement variants ARE the physics: sfno_full and the
+        # wbcompare column_nn declare aimip_radiation "none" because no
+        # separate radiation scheme runs at all. Pinning them to rrtmgp would
+        # reject a config that never asks for a backend (codex).
+        return radiation
+    if smoke and radiation == "gray":
         return radiation
     raise ValueError(
-        f"Invalid radiation {radiation!r} for classical training: must be "
-        f"{CLASSICAL_RADIATION!r} — the parameterization-swap campaign holds "
-        "the radiation backend fixed so scheme comparisons are unconfounded. "
-        "Set aimip_radiation: rrtmgp, or pass smoke/allow_non_rrtmgp for a "
-        "debug run."
+        f"unsupported radiation {radiation!r} for campaign {campaign!r}: must "
+        f"be one of {(CLASSICAL_RADIATION,)!r}. Gray is not a WB/AIMIP option "
+        f"— scheme comparisons hold the radiation backend fixed, and gray "
+        f"carries no trainable knob. Set aimip_radiation: rrtmgp. (--smoke may "
+        f"still use gray for a wiring check; there is no other escape.)"
     )
 
 

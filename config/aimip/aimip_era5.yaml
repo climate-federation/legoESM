@@ -103,8 +103,9 @@ aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
 
 # Radiation backend for the classical variant:
-#   gray   — Frierson two-stream analytic (default, tractable);
-#            differentiates tau_equator, tau_pole only.  ~30s/sample
+#   gray   — Frierson-style two-stream analytic (cheap); carries NO trainable
+#            knob since 2026-08-11 — it runs at its documented defaults, so a
+#            gray run trains only the non-radiative schemes.  ~30s/sample
 #            at T21 L8 on a single GPU after compile.
 #   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
 #            coupling driven by the trainable Xu-Randall config.

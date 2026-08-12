@@ -1,0 +1,29 @@
+# FRESH START under the 2026-08-12 code: rrtmgp radiation (gray is no
+# longer a campaign option), no gray tuning knobs, and every
+# parameterization family filled. Pre-2026-08-12 checkpoints are
+# abandoned by decision — not migrated — so this trains from epoch 0.
+# CLASSICAL retrained on the ENERGY-CONSERVING dycore. Two knobs vs
+# suite_classical_anchored_lnpsfix.yaml (jobs 26820917+26834270/26838798):
+# vertical_advection_scheme sb_centered + frictional_heating true (commit
+# f2ffaf2a1). Config otherwise byte-identical.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  vertical_advection_scheme: sb_centered
+  frictional_heating: true
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_classical_rrtmgp_v1

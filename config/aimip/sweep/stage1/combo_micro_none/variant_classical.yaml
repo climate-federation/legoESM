@@ -2,3 +2,8 @@ aimip_convection: tiedtke
 aimip_turbulence: louis
 aimip_gwd: mcfarlane
 aimip_microphysics: none
+
+# This ablation drops one family ON PURPOSE (that is the experiment); the
+# completeness gate is waived here and the result is NOT comparable to a
+# complete classical model.
+aimip_allow_unfilled_families: true

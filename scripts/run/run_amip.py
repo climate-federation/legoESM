@@ -2510,10 +2510,11 @@ def _apply_aimip_classical_overrides(
     args._aimip_params = None
     if not getattr(args, "aimip_classical_checkpoint", None):
         return args
-    import equinox as eqx
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
     from legoesm.training.aimip_params import AIMIPClassicalParams
-    _p = eqx.tree_deserialise_leaves(
-        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
+    _p = load_checkpoint_or_fail(
+        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
+        what="--aimip-classical-checkpoint")
     args.convection = "tiedtke"
     args.turbulence = "louis"
     args.gravity_wave_drag = "mcfarlane"
