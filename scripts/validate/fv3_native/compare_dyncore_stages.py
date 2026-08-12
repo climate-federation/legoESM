@@ -31,9 +31,17 @@ for post-exchange stages -- the halo edge bands and corner-diagonal
 blocks separately.  The FIRST stage whose boundary regions jump to the
 1e-6 class names the culprit.
 
-B-grid wind ingredients (ubb/vbb/ubbtemp/vbbtemp) have an UNPROVEN
-component pairing under transposed faces; their rows are labelled
-"direct-faces-authoritative" and only untransposed faces carry a claim.
+B-grid wind ingredients (ubb/vbb/ubbtemp/vbbtemp) are scored under a
+FROZEN, basis-derived transform (codex r2 HIGH#1): d_sw3 defines
+ubbtemp as ytp_v's advected D-grid *v* (a y-component quantity, m/s)
+and vbb as xtp_u's advected D-grid *u* (an x-component quantity), so
+they transform exactly like every other B-grid vector pair -- the
+y-like member takes the dihedral v-sign and pairs with the partner's
+x-like member under a transpose ("bv"), the x-like member takes the
+u-sign ("bu").  Nothing is fitted per run.  The old empirical
+best-of-4 search is retained ONLY as a printed cross-check: if it ever
+finds a combo strictly better than the frozen one, that is flagged as
+FROZEN-VS-EMPIRICAL (the masking codex r2 warned about).
 """
 from __future__ import annotations
 
@@ -67,11 +75,12 @@ UNINIT = 1.0e30    # huge_r init pattern -> field slot never written
 # dump reading
 # ----------------------------------------------------------------------
 
-def read_tile(dump_dir: str, tile: int):
+def read_tile(dump_dir: str, tile: int, prefix: str = "dyncore_stage_t"):
     """Manifest+stream -> dict name -> np.ndarray (F-order axes), plus
-    the NOTE/CERT lines."""
-    mf = os.path.join(dump_dir, f"dyncore_stage_t{tile}.mf")
-    dat = os.path.join(dump_dir, f"dyncore_stage_t{tile}.dat")
+    the NOTE/CERT lines.  ``prefix`` selects the dump family (the
+    extchain metric dumps use ``extchain_t`` with the same format)."""
+    mf = os.path.join(dump_dir, f"{prefix}{tile}.mf")
+    dat = os.path.join(dump_dir, f"{prefix}{tile}.dat")
     if not (os.path.exists(mf) and os.path.exists(dat)):
         raise SystemExit(f"missing stage dumps for tile {tile} in "
                          f"{dump_dir}")
@@ -450,11 +459,15 @@ def stage_rows():
       "S10_dsw23_vbbtemp", "bu", note=bnote)
     r("S10_dsw23", "S10_dsw3", "vbbtemp", "S10_dsw23_vbbtemp",
       "S10_dsw23_ubb", "bv", note=bnote)
-    # the m/s advected pair: empirical best-of-4 mapping per face.
+    # the m/s advected pair: FROZEN basis-derived transform (codex r2
+    # HIGH#1).  ubbtemp = ytp_v output = advected D-grid v (y-like,
+    # sw_core.F90:1315-1323) -> kind "bv"; vbb = xtp_u output =
+    # advected D-grid u (x-like, :1375-1386) -> kind "bu".  Same
+    # staggering algebra as the ubb/vbbtemp pair above; no per-run fit.
     r("S10_dsw23", "S10_dsw3", "ubbtemp", "S10_dsw23_ubbtemp",
-      "S10_dsw23_vbb", "bm", note="empirical-map")
+      "S10_dsw23_vbb", "bv", note="basis-derived m/s pair")
     r("S10_dsw23", "S10_dsw3", "vbb", "S10_dsw23_vbb",
-      "S10_dsw23_ubbtemp", "bm", note="empirical-map")
+      "S10_dsw23_ubbtemp", "bu", note="basis-derived m/s pair")
 
     r("S11_b2", "S11_b2", "ubb", "S11_b2_ubb", "S11_b2_vbbtemp", "bu",
       note=bnote)
@@ -527,10 +540,11 @@ def main(argv=None):
     ap.add_argument("--step-run",
                     default=f"{ORACLE_ROOT}/run_hydro_1step_gfs")
     ap.add_argument("--mutate", default=None,
-                    choices=("b2", "fluxavg"),
+                    choices=("b2", "fluxavg", "dsw3"),
                     help="instrument-teeth control: no-op one port "
-                         "barrier and confirm the matching stage is "
-                         "flagged first (b2 -> S11, fluxavg -> S09)")
+                         "barrier / scale one port stage output and "
+                         "confirm the matching stage is flagged (b2 -> "
+                         "S11, fluxavg -> S09, dsw3 -> S10 ubbtemp)")
     ap.add_argument("--write-receipt", default=None,
                     help="mutation runs: write a PASS receipt here")
     ap.add_argument("--baseline-json", default=None,
@@ -607,6 +621,41 @@ def main(argv=None):
                 lambda afx6, afy6, nq, n, ng: None)
             print("MUTATION: average_allflux_shared_edges -> no-op "
                   "(expect S09_fluxavg flagged first)")
+        elif args.mutate == "dsw3":
+            import legoesm.core.fv3_native_duo_sw_core as DSC
+            _orig_dsw3 = DSC.d_sw3_duo
+
+            def _mut_dsw3(*a, **kw):
+                out = _orig_dsw3(*a, **kw)
+                ubt = np.array(out["ubbtemp"], copy=True)
+                ring = np.abs(np.concatenate(
+                    [ubt[0, :], ubt[-1, :], ubt[:, 0], ubt[:, -1]])).max()
+                if not getattr(_mut_dsw3, "_printed", False):
+                    print(f"MUTATION: d_sw3_duo ubbtemp boundary ring "
+                          f"*= (1+1e-4); baseline max|ring| = "
+                          f"{ring:.6e} (printed BEFORE trusting the "
+                          f"control -- a perturbed zero is not a "
+                          f"control)")
+                    _mut_dsw3._printed = True
+                if ring == 0.0:
+                    raise SystemExit(
+                        "dsw3 mutation perturbs an all-zero ubbtemp "
+                        "ring -- the control is void; refusing to "
+                        "write a receipt")
+                # edge-concentrated on purpose: the flag rule requires
+                # boundary >> interior, so a uniform scale would prove
+                # nothing about the boundary instrument.
+                ubt[0, :] *= 1.0 + 1e-4
+                ubt[-1, :] *= 1.0 + 1e-4
+                ubt[:, 0] *= 1.0 + 1e-4
+                ubt[:, -1] *= 1.0 + 1e-4
+                out = dict(out)
+                out["ubbtemp"] = ubt
+                return out
+
+            DSC.d_sw3_duo = _mut_dsw3
+            print("MUTATION: d_sw3_duo ubbtemp scaled (expect "
+                  "S10_dsw23 boundary rel to grow >= 100x)")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      oracle_conventions=True)
@@ -744,6 +793,19 @@ def main(argv=None):
                 _, combo, p, o = got_bm
             else:
                 p, o = map_stage_field(p_arr, o_dir, o_par, kind, m)
+                if stage == "S10_dsw23" and pf_name in ("ubbtemp", "vbb"):
+                    # codex r2 HIGH#1 cross-check: the retired empirical
+                    # best-of-4 must NOT beat the frozen basis-derived
+                    # transform; if it does, the frozen algebra is wrong
+                    # or the empirical fit was masking a real signal.
+                    frozen_d = float(np.abs(p - o).max())
+                    got_bm = map_bm_best(p_arr, o_dir, o_par, m)
+                    if got_bm is not None and got_bm[0] < 0.5 * frozen_d:
+                        print(f"    FROZEN-VS-EMPIRICAL {pf_name} "
+                              f"face{pf+1}: empirical [{got_bm[1]}] "
+                              f"max|d|={got_bm[0]:.3e} beats frozen "
+                              f"{frozen_d:.3e} -- possible masking")
+                        combo = f"emp!{got_bm[1]}"
             if (np.abs(o) > UNINIT).any() or (np.abs(p) > UNINIT).any():
                 skip_note = "UNAVAILABLE (uninitialised window)"
                 break
@@ -822,7 +884,8 @@ def main(argv=None):
         # GENUINE upstream signal exists in the clean run -- measured:
         # the real S10 d_sw3 difference precedes S11 in ladder order, so
         # the b2 control could never pass while correctly having teeth.)
-        want = {"b2": "S11_b2", "fluxavg": "S09_fluxavg"}[args.mutate]
+        want = {"b2": "S11_b2", "fluxavg": "S09_fluxavg",
+                "dsw3": "S10_dsw23"}[args.mutate]
         base_val = 0.0
         if args.baseline_json:
             import json as _json

@@ -113,16 +113,31 @@ $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
     --write-receipt $OUT/receipt_b2.json | tail -4
 echo "MUTATE_B2_RC=$?"
 
+echo "=== mutation control 3: dsw3 (S10 boundary must grow 100x) ==="
+$PY scripts/validate/fv3_native/compare_dyncore_stages.py \
+    --dump-dir $R --mutate dsw3 --baseline-json $OUT/stage_diffs.json \
+    --write-receipt $OUT/receipt_dsw3.json | tail -5
+echo "MUTATE_DSW3_RC=$?"
+
 echo "=== stage comparison: authoritative (receipt-gated) ==="
 $PY scripts/validate/fv3_native/compare_dyncore_stages.py \
     --dump-dir $R --json $OUT/stage_diffs.json \
-    --receipts $OUT/receipt_fluxavg.json,$OUT/receipt_b2.json > $OUT/clean_final.txt
+    --receipts $OUT/receipt_fluxavg.json,$OUT/receipt_b2.json,$OUT/receipt_dsw3.json > $OUT/clean_final.txt
 RC_CLEAN=$?
-tail -35 $OUT/clean_final.txt
+tail -40 $OUT/clean_final.txt
 echo "COMPARE_CLEAN_RC=$RC_CLEAN"
 
+echo "=== oracle-frame d_sw3 replay (H-FORM vs H-AMP discriminator) ==="
+METRICS=${DYNSTAGE_METRICS:-/burg-archive/glab/users/pg2328/fv3_duo_gaps/retro_gsmetrics/run_c48}
+$PY scripts/validate/fv3_native/dsw3_oracle_frame_replay.py \
+    --dump-dir $R --metrics-dir $METRICS \
+    --json $OUT/dsw3_replay.json
+echo "REPLAY_RC=$?"
+
 echo "=== pytest: instrument unit tests ==="
+PYT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/pyt_${SLURM_JOB_ID:-manual}
+trap 'rm -rf "$TMPDIR" "$PYT"' EXIT
 $PY -m pytest tests/grids/test_fv3_dyncore_stage_instrument.py -q \
-    --basetemp=/burg-archive/glab/users/pg2328/fv3_duo_gaps/pyt_${SLURM_JOB_ID} 2>&1 | tail -6
+    --basetemp=$PYT 2>&1 | tail -6
 
 echo DYNSTAGE_ALL_DONE
