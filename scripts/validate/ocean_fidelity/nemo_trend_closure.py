@@ -98,10 +98,41 @@ def main() -> int:
                 seg = v[k0:k1]
                 b.append(f"{lab} {float(np.sqrt(np.nanmean(seg ** 2))):.2e}")
             print(f"    [{tag}] {tv:12s} rms by band: " + "  ".join(b))
+        # PAIRING SCAN: the sum now MATCHES the state change in magnitude
+        # (rms 1.86e-6 vs 2.01e-6 for T) but leaves a depth-UNIFORM ~45 %
+        # residual -- the signature of a time-pairing/stage mismatch, not a
+        # missing process.  Score the trend at record r against the state
+        # change over (r-1 -> r) and over (r -> r+1) and report correlation:
+        # the correct pairing is the one that correlates.
+        x2 = g(state_var, a.rec + 1)
+        if x2 is not None and e0 is not None:
+            e2 = g("e3t", a.rec + 1)
+            emid2 = 0.5 * (e1 + e2)
+            dxdt_next = np.where(emid2 > 0,
+                                 (e2 * x2 - e1 * x1) / np.where(emid2 > 0, emid2, 1.0) / a.dt,
+                                 np.nan)
+        else:
+            dxdt_next = None
+
         wet = np.isfinite(dxdt) & np.isfinite(x0)
         res = np.where(wet, dxdt - avail, np.nan)
         rms = lambda v: float(np.sqrt(np.nanmean(np.where(wet, v, np.nan) ** 2)))
         r_state, r_res, r_tr = rms(dxdt), rms(res), rms(avail)
+        def _corr(u, v):
+            m = wet & np.isfinite(u) & np.isfinite(v)
+            if m.sum() < 10:
+                return float("nan")
+            uu, vv = u[m].ravel(), v[m].ravel()
+            uu = uu - uu.mean(); vv = vv - vv.mean()
+            d = float(np.sqrt((uu ** 2).sum() * (vv ** 2).sum()))
+            return float((uu * vv).sum() / d) if d else float("nan")
+        print(f"[{tag}] pairing corr(trend r, state r-1->r) = {_corr(avail, dxdt):.4f}")
+        if dxdt_next is not None:
+            rr = float(np.sqrt(np.nanmean(np.where(wet, dxdt_next - avail, np.nan) ** 2)))
+            rs = float(np.sqrt(np.nanmean(np.where(wet, dxdt_next, np.nan) ** 2)))
+            print(f"[{tag}] pairing corr(trend r, state r->r+1) = "
+                  f"{_corr(avail, dxdt_next):.4f}  residual/state = "
+                  f"{rr / rs if rs else float('nan'):.3f}")
         print(f"[{tag}] summed {names}")
         print(f"[{tag}] rms d{tag}/dt {r_state:.4e} | rms trends {r_tr:.4e} | "
               f"rms residual {r_res:.4e}  -> residual/state = {r_res / r_state:.3f}")
