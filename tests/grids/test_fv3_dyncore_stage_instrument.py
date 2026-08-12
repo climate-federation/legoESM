@@ -284,3 +284,76 @@ def test_stage_hook_threading_smoke():
     for t in range(6):
         for f in ("u", "v", "delp", "pt"):
             np.testing.assert_array_equal(state[t][f], state2[t][f])
+
+
+# ----------------------------------------------------------------------
+# 4. frozen basis-derived B transform + oracle-frame replay helpers
+# ----------------------------------------------------------------------
+
+def test_bgrid_ms_pair_rows_are_frozen_not_empirical():
+    """codex r2 HIGH#1: the ubbtemp/vbb rows must score under the FROZEN
+    basis-derived kinds (bv/bu), never the fitted best-of-4 'bm'."""
+    cmp_ = _load("compare_dyncore_stages")
+    rows = {(s, f): kind for s, _, f, _, _, kind, _, _
+            in cmp_.stage_rows()}
+    assert rows[("S10_dsw23", "ubbtemp")] == "bv"
+    assert rows[("S10_dsw23", "vbb")] == "bu"
+    assert "bm" not in set(rows.values())
+    # and the frozen kinds carry the basis signs: y-like -> sv, x-like
+    # -> su (the same algebra the certified ubb/vbbtemp pair uses)
+    assert cmp_.KINDS["bv"][2] == -1
+    assert cmp_.KINDS["bu"][2] == +1
+
+
+def test_read_tile_prefix_and_synthetic_roundtrip(tmp_path):
+    """read_tile must honour the dump-family prefix (extchain metric
+    dumps share the manifest format), with offsets in bytes."""
+    cmp_ = _load("compare_dyncore_stages")
+    a = np.asfortranarray(
+        np.arange(12, dtype=np.float64).reshape(3, 4))
+    b = np.arange(6, dtype=np.float64) + 100.0
+    with open(tmp_path / "extchain_t2.dat", "wb") as fh:
+        fh.write(a.ravel(order="F").tobytes())
+        fh.write(b.tobytes())
+    (tmp_path / "extchain_t2.mf").write_text(
+        "NOTE synthetic\n"
+        "M_A 3 4 1 0\n"
+        "M_B 6 1 1 96\n"
+        "CERT x 0.0\n")
+    fields, notes, certs = cmp_.read_tile(str(tmp_path), 2,
+                                          prefix="extchain_t")
+    np.testing.assert_array_equal(fields["M_A"], a)
+    np.testing.assert_array_equal(fields["M_B"], b)
+    assert notes == ["NOTE synthetic"] and certs == {"x": 0.0}
+    with pytest.raises(SystemExit, match="missing stage dumps"):
+        cmp_.read_tile(str(tmp_path), 2)   # default prefix absent
+
+
+def test_replay_edge_strip_maxima_and_pad_embed():
+    rp = _load("dsw3_oracle_frame_replay")
+    d = np.zeros((49, 49, 2))
+    d[0, 10, 0] = 3.0        # W strip
+    d[20, 48, 1] = -5.0      # N strip
+    d[24, 24, 0] = 1.0       # interior
+    sm = rp.edge_strip_maxima(d)
+    assert sm["W"] == 3.0 and sm["N"] == 5.0
+    assert sm["interior"] == 1.0 and sm["edge_max"] == 5.0
+    # pad_embed places the block at the given offset, NaN elsewhere
+    blk = np.ones((49, 49))
+    out = rp._pad_embed(blk, (55, 55), 3)
+    assert np.isnan(out[0, 0]) and np.isnan(out[54, 54])
+    assert out[3, 3] == 1.0 and out[51, 51] == 1.0
+    assert np.isnan(out[52, 52])
+
+
+def test_mutate_dsw3_choice_registered():
+    """The dsw3 instrument-teeth control must be a valid --mutate choice
+    aimed at S10 (a removed control is a silently weaker instrument)."""
+    cmp_ = _load("compare_dyncore_stages")
+    src = open(os.path.join(_SCRIPTS,
+                            "compare_dyncore_stages.py")).read()
+    assert '"dsw3": "S10_dsw23"' in src
+    with pytest.raises(SystemExit):
+        # argparse rejects an unknown mutate value -> the choice list
+        # is actually enforced (control cannot be invoked by typo)
+        cmp_.main(["--dump-dir", "/nonexistent", "--mutate", "nosuch"])

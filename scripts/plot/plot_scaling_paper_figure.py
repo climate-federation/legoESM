@@ -32,7 +32,8 @@ from matplotlib.lines import Line2D
 # (devices, ms/step). Job ids are the provenance for each series.
 SOURCES = {
     "atm_latlon": "26450848/26453240/26449147 (f32), 26494902 (f64), "
-                  "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858",
+                  "LL2048@64 26502539, @128 26534060, LL2304@96/144 26628072/26657279, fused 26681636/26681858, "
+                  "packed-exchange A/B 26891278 (@128 4.527 vs 5.131, ratio 0.882)",
     "atm_cube": "26452894/26453782",
     "atm_mpas": "26454476/26454618/26486288/26493638/26493734, "
                 "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
@@ -55,10 +56,11 @@ PANELS = [
                 ("float32 (LL2048)", [(64, 6.73), (128, 5.58)]),
                 ("f32 (LL2304)", [(96, 7.87), (144, 5.78)]),
                 ("f32 LL2048 fused+ovl", [(64, 5.278), (128, 4.745)]),
+                ("f32 LL2048 packed exch", [(128, 4.527)]),
                 ],
         scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60),
                  ("LL2880 @144", 144, 7.40)],
-        note="fused+overlap: 4.745 ms @128\n= 46 GC/s, ratio 1.96 (bound)",
+        note="packed exchange @128 GPUs: −11.8%\n(5.131→4.527 ms, 25→13 CPs/step,\njob 26891278) — new LL2048 best",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -136,6 +138,7 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f32 (s10 lloyd-0)": "#000000",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
+          "f32 LL2048 packed exch": "#E31A1C",
           "f32 LL2304 fused": "#000000",
           "f32 s8@16+s9@32 ragged": "#000000",
           "f32 s9 size-colouring": "#D62728",
@@ -153,6 +156,7 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f32 (s10 lloyd-0)": "*",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
+           "f32 LL2048 packed exch": "P",
            "f32 LL2304 fused": "*",
            "f32 s8@16+s9@32 ragged": "*",
            "f32 s9 size-colouring": "X",
