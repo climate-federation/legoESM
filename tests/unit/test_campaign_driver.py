@@ -6,7 +6,7 @@ from legoesm.training.campaign_driver import (
     latest_checkpoint,
     nonempty,
     run_staged_campaign,
-    validate_classical_radiation,
+    validate_campaign_radiation,
     validate_training_core,
 )
 
@@ -30,12 +30,14 @@ def test_training_core_unknown_raises():
 
 
 def test_classical_radiation_pin():
-    assert validate_classical_radiation("rrtmgp") == "rrtmgp"
+    assert validate_campaign_radiation("rrtmgp") == "rrtmgp"
     with pytest.raises(ValueError, match="rrtmgp"):
-        validate_classical_radiation("gray")
+        validate_campaign_radiation("gray")
     # explicit escapes, never silent
-    assert validate_classical_radiation("gray", smoke=True) == "gray"
-    assert validate_classical_radiation("gray", allow_non_rrtmgp=True) == "gray"
+    assert validate_campaign_radiation("gray", smoke=True) == "gray"
+    # The allow_non_rrtmgp escape is GONE (2026-08-12: "always use RRTMGP").
+    with pytest.raises(TypeError):
+        validate_campaign_radiation("gray", allow_non_rrtmgp=True)
 
 
 # --- checkpoint resolution ----------------------------------------------

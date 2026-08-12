@@ -65,6 +65,8 @@ from legoesm.atmosphere.idealized.land_rce import (
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     make_wing2018_theta_ref_fn,
     wing2018_qv_profile,
+    wing2018_T_v0,
+    wing2018_q_sfc,
     WING_Q_SFC_DEFAULT,
 )
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
@@ -123,36 +125,26 @@ def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0,
     as an explicit arg (not the library default) so a single ``q_sfc`` drives
     both θ and q_v from one source.
 
-    ``T_sfc`` IS NOT USED and is retained only because callers pass it: it is
-    the prescribed SEA-surface temperature (the flux boundary condition), and
-    ``T_v0`` is the surface AIR virtual temperature, which gSAM's RCE300
-    sounding puts ~3 K BELOW the SST.  Deriving one from the other
-    (``T_v0 = T_sfc·(1+0.608·q_sfc)``, as an earlier revision of this docstring
-    claimed) overshoots the oracle by ~2.7 K; pinning ``T_v0`` to a fixed 295 K
-    for every SST undershoots it by ~5 K and made the column supersaturated.
-    ``WING_T_V0`` is now calibrated against the gSAM sounding — see the
-    constant's note — and the SST enters only through ``--T-sfc``.
+    ``T_sfc`` IS the case SST and DOES enter the profile: RCEMIP prescribes
+    ``T_v0 = T_sfc·(1 + 0.608·q_sfc)`` (Wing 2018 Eq. 3), so the analytic IC's
+    surface AIR temperature equals the SST by construction.  Two earlier
+    revisions got this wrong in opposite directions and both are recorded on
+    the ``WING_T_V0`` constant: pinning ``T_v0 = 295 K`` for every SST made the
+    initial column ~8 K too cold and 39 % supersaturated, while fitting
+    ``T_v0`` to gSAM's own sounding (``GSAM_SND_T_V0 = 299.274``) reproduces
+    that model's ~3 K air-sea disequilibrium rather than the protocol.
+
+    This wrapper takes ``T_sfc``/``q_sfc`` ONLY and always uses the protocol
+    relation; there is no CLI route to the gSAM calibration through it.  To use
+    that instead, call
+    :func:`~legoesm.atmosphere.idealized.rcemip_initial_conditions.make_wing2018_theta_ref_fn`
+    directly with explicit ``T_v0``/``Gamma``/``q_sfc`` (all three, never one).
     """
-    # SCOPE WARNING (#1507 codex P1): WING_T_V0 / WING_GAMMA / WING_Q_SFC_DEFAULT
-    # are calibrated against the gSAM **RCE300** sounding, and they are MODULE
-    # DEFAULTS -- every defaulted caller gets them, including the SCM campaign
-    # and the RCE295 / RCE305 cases. Discarding T_sfc here is right (the SST is
-    # a boundary condition, not the IC), but it means a non-300 K run silently
-    # receives RCE300-calibrated ATMOSPHERIC coefficients. Say so once, loudly,
-    # rather than let the calibration travel unannounced; pass explicit
-    # T_v0/Gamma/q_sfc, or use --sounding, for the other SSTs.
-    if abs(float(T_sfc) - 300.0) > 0.5:
-        import warnings
-        warnings.warn(
-            f"RCEMIP analytic IC: T_sfc={float(T_sfc):.1f} K but the profile "
-            f"coefficients (T_v0={WING_T_V0}, Gamma={WING_GAMMA}, "
-            f"q_sfc={WING_Q_SFC_DEFAULT}) are calibrated against the gSAM "
-            f"RCE300 sounding. The atmospheric profile is therefore RCE300's, "
-            f"not this SST's. Pass explicit coefficients or --sounding for "
-            f"RCE295/RCE305 (#1507).",
-            stacklevel=2)
-    del T_sfc  # documented above: the SST is a boundary condition, not the IC
-    return make_wing2018_theta_ref_fn(q_sfc=float(q_sfc))(z)
+    # Wing 2018 Eq. (3): T_v0 = T0·(1 + 0.608·q0) with T0 the case SST — the
+    # library derives it, so pass BOTH the SST and the matching q_sfc.
+    return make_wing2018_theta_ref_fn(
+        T_v0=wing2018_T_v0(float(T_sfc), float(q_sfc)), q_sfc=float(q_sfc),
+    )(z)
 
 
 def _rcemip_qv_profile(z: jax.Array,
@@ -753,6 +745,16 @@ def build_sounding_height_coord(args, p_sfc_rcemip, dtype=jnp.float64):
             "path builds the SAM-faithful stretched column, and silently "
             "overriding a requested uniform grid would hide which grid a run "
             "used.")
+    # Same rule for the other tabulated-grid flag: --sam-grd asks for the
+    # oracle's EXACT levels, which this path does not build (it stretches to
+    # its own column), so a run given both would advertise the grd levels in
+    # its command line and run something else.  Refuse instead of picking one.
+    if getattr(args, "sam_grd", None):
+        raise SystemExit(
+            "--sounding and --sam-grd are mutually exclusive: the sounding "
+            "path builds its own stretched column, so the --sam-grd levels "
+            "would be silently ignored. Choose the tabulated SOUNDING "
+            "(thermodynamics) or the tabulated GRID (levels).")
     # The gSAM cold point is a sharp V at ~14.5 km.  Reconstruction error at a
     # kink is FIRST order in dz, so a coarse column moves the tropopause
     # temperature by whole kelvin — measured 1.08 K at nlev=48 over H=20 km.
@@ -1241,12 +1243,18 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     Applied here as a POST-STEP hook on the final state — the same placement
     and the same reviewed core (:func:`hard_saturation_drain`) the MPAS driver
     uses — rather than through each scheme's own ``hard_saturation_adjustment``
-    config field.  That is deliberate: the in-scheme field does not exist on
-    every scheme (``sundqvist`` is a fractional-cloudiness closure with no
-    warm-rain adjustment), so routing through it would apply a DIFFERENT
-    correction per scheme and make the intercomparison a comparison of
-    saturation treatments rather than of microphysics.  One hook, outside the
-    scheme, treats all of them identically.
+    config field.  That is deliberate, but the ORIGINAL reason no longer holds
+    and is corrected here: the in-scheme field used to be missing on some
+    schemes, and since the uniform super-saturation guard (#1506) every
+    factory-reachable scheme carries it EXCEPT ``sdm``/``fast_sbm``, which
+    integrate the super-saturation relaxation explicitly — ``sundqvist`` and
+    ``ml_emulator`` both gained it.  What still differs is PLACEMENT: in-scheme
+    couples the latent heating through the physics tendency path, while this
+    hook corrects the final state after the dycore's vertical transport (the
+    placement that proved stable on the MPAS path), and one hook outside the
+    scheme applies the identical correction to every scheme so the
+    intercomparison stays a comparison of microphysics rather than of
+    saturation treatments.  The driver refuses both at once (see ``main``).
 
     Saturation is judged on the LIVE state — ``sanitize_theta_rho ->
     pressure_from_eos`` on the total (reference + perturbation) density and
@@ -2027,7 +2035,21 @@ def main():
     # at the actual RCEMIP sounding instead of an isentropic 300 K column.
     # Single surface humidity drives BOTH the θ hydrostatic (virtual-T) base
     # and the q_v IC (codex iter-61 [MED] — keep them from desyncing).
-    q_sfc_rce = WING_Q_SFC_DEFAULT
+    # q0 is CASE data (12 / 18.65 / 24 g/kg at SST 295 / 300 / 305 K,
+    # chosen so the lower atmosphere sits near 80 % RH). It must track
+    # --T-sfc: with the SST-derived T_v0 (Wing Eq. 3), pairing the 300 K
+    # q0 with a 295 K SST rebuilds the supersaturated-IC bug at the other
+    # two RCEMIP SSTs.
+    try:
+        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
+    except ValueError:
+        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
+        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
+        # the near-surface RH is then off-protocol.
+        q_sfc_rce = WING_Q_SFC_DEFAULT
+        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
+              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
+              f" near-surface RH is NOT the protocol's ~80 %.")
     # --sounding: initialise from a TABULATED SAM sounding instead of the
     # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
     # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),

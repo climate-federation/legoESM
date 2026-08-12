@@ -68,7 +68,7 @@ def validate_sweep_baseline(repo_root: Path, baseline_rel: Path) -> dict:
 
     The baseline file must exist and must pin ``aimip_radiation: rrtmgp``
     (the swap campaign holds radiation fixed — mirrors
-    ``campaign_driver.validate_classical_radiation``). Returns the loaded
+    ``campaign_driver.validate_campaign_radiation``). Returns the loaded
     YAML dict.
     """
     baseline_path = repo_root / baseline_rel

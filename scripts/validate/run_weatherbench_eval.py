@@ -207,7 +207,9 @@ def main(argv=None, ds=None):
 
     if not os.path.exists(cfg.checkpoint):
         raise SystemExit(f"--checkpoint not found: {cfg.checkpoint}")
-    trained = eqx.tree_deserialise_leaves(cfg.checkpoint, params)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    trained = load_checkpoint_or_fail(
+        cfg.checkpoint, params, what=f"WB mode {cfg.mode}")
     run_seg = make_run_seg(trained)   # built ONCE (no closure churn in the loop)
 
     def rollout_fn(state, physics_fn, grid_, sigma_, pe_config_, dt_, n_steps,

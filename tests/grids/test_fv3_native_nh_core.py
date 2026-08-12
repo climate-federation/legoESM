@@ -242,7 +242,26 @@ def test_sim1_balanced_column_stays_at_rest():
     sim1_balanced_rest_certificate(_run_native_sim1)
 
 
-def test_update_dz_c_zero_wind_is_identity_plus_limiter():
+def _run_native_update_dz_c(bd, km, dt, dp0, zs, area, ut, vt, gz, ws,
+                            npx, npy, **flags):
+    """Functional adapter over the in-place native update_dz_c.
+
+    Shared driver signature for the impl-parameterized certificates
+    below (the JAX twin in test_fv3_nh_core.py plugs its own adapter in
+    here): returns (gz, ws) without mutating the caller's arrays.
+    ``flags`` carries sw/se/ne/nw_corner and optionally grid_type."""
+    gz = np.array(gz)
+    ws = np.array(ws)
+    update_dz_c(bd, km, dt, np.asarray(dp0), np.asarray(zs),
+                np.asarray(area), np.asarray(ut), np.asarray(vt), gz,
+                ws, npx, npy, **flags)
+    return gz, ws
+
+
+def update_dz_c_zero_wind_certificate(run_udzc):
+    """Zero wind: the flux-form update is a mul/div round trip on the
+    compute interior.  Impl-parameterized (same driver signature as
+    ``_run_native_update_dz_c``)."""
     n, ng = 12, 3
     bd = _BD(n, ng)
     full = n + 2 * ng
@@ -261,9 +280,9 @@ def test_update_dz_c_zero_wind_is_identity_plus_limiter():
     gz_in = np.array(gz, copy=True)
     dp0 = np.full(KM, 10000.0)
 
-    update_dz_c(bd, KM, 100.0, dp0, zs, area, ut, vt, gz, ws,
-                n + 1, n + 1, sw_corner=True, se_corner=True,
-                ne_corner=True, nw_corner=True)
+    gz, ws = run_udzc(bd, KM, 100.0, dp0, zs, area, ut, vt, gz, ws,
+                      n + 1, n + 1, sw_corner=True, se_corner=True,
+                      ne_corner=True, nw_corner=True)
 
     # Zero wind: the flux-form update reduces to (gz2*area)/area ON THE
     # COMPUTE INTERIOR -- an identity in real arithmetic, a one-ULP
@@ -281,9 +300,13 @@ def test_update_dz_c_zero_wind_is_identity_plus_limiter():
     assert np.abs(ws[sl, sl]).max() < 1e-11 * np.abs(zs[sl, sl]).max()
 
 
-def test_update_dz_c_uniform_gz_is_transport_invariant():
+def test_update_dz_c_zero_wind_is_identity_plus_limiter():
+    update_dz_c_zero_wind_certificate(_run_native_update_dz_c)
+
+
+def update_dz_c_uniform_gz_certificate(run_udzc):
     """gz spatially uniform per level: flux form gives gz_new == gz for
-    ANY wind field (numerator == gz * denominator)."""
+    ANY wind field (numerator == gz * denominator).  Impl-parameterized."""
     n, ng = 12, 3
     bd = _BD(n, ng)
     full = n + 2 * ng
@@ -297,9 +320,9 @@ def test_update_dz_c_uniform_gz_is_transport_invariant():
     ws = np.zeros((full, full))
     dp0 = np.full(KM, 10000.0)
 
-    update_dz_c(bd, KM, 100.0, dp0, zs, area, ut, vt, gz, ws,
-                n + 1, n + 1, sw_corner=True, se_corner=True,
-                ne_corner=True, nw_corner=True)
+    gz, ws = run_udzc(bd, KM, 100.0, dp0, zs, area, ut, vt, gz, ws,
+                      n + 1, n + 1, sw_corner=True, se_corner=True,
+                      ne_corner=True, nw_corner=True)
 
     sl = slice(ng - 1, ng + n + 1)
     for k in range(KM + 1):
@@ -307,9 +330,15 @@ def test_update_dz_c_uniform_gz_is_transport_invariant():
         assert d < 1e-9 * max(abs(levels[k]), 1.0), (k, d)
 
 
-def test_update_dz_c_limiter_and_ws_sign():
-    """A column squeezed below dz_min is floored at exactly gz(k+1)+dz_min,
-    and a bottom interface displaced below zs gives POSITIVE ws."""
+def test_update_dz_c_uniform_gz_is_transport_invariant():
+    update_dz_c_uniform_gz_certificate(_run_native_update_dz_c)
+
+
+def update_dz_c_limiter_ws_certificate(run_udzc):
+    """A column squeezed below dz_min is floored at exactly
+    gz(k+1)+dz_min, and a bottom interface displaced below zs gives
+    POSITIVE ws.  Impl-parameterized; the floor equality is exact in
+    both lanes (a single f64 add feeds the max)."""
     n, ng = 12, 3
     bd = _BD(n, ng)
     full = n + 2 * ng
@@ -324,9 +353,9 @@ def test_update_dz_c_limiter_and_ws_sign():
     dt = 100.0
     dp0 = np.full(KM, 10000.0)
 
-    update_dz_c(bd, KM, dt, dp0, zs, area, ut, vt, gz, ws,
-                n + 1, n + 1, sw_corner=True, se_corner=True,
-                ne_corner=True, nw_corner=True)
+    gz, ws = run_udzc(bd, KM, dt, dp0, zs, area, ut, vt, gz, ws,
+                      n + 1, n + 1, sw_corner=True, se_corner=True,
+                      ne_corner=True, nw_corner=True)
 
     sl = slice(ng - 1, ng + n + 1)
     for k in range(KM - 1, -1, -1):
@@ -334,6 +363,10 @@ def test_update_dz_c_limiter_and_ws_sign():
         assert np.array_equal(gz[sl, sl, k], expect), k
     # ws sign: zs - gz_bottom = +5 m over dt=100 s -> +0.05 m/s exactly.
     assert np.allclose(ws[sl, sl], 5.0 / dt, rtol=0, atol=0)
+
+
+def test_update_dz_c_limiter_and_ws_sign():
+    update_dz_c_limiter_ws_certificate(_run_native_update_dz_c)
 
 
 def _run_native_riem_c(dt, bd, km, akap, ptop, hs, w3, pt, delp, gz, pef,
@@ -564,22 +597,32 @@ def test_update_dz_d_rejects_float32_every_operand(bad):
                              "rarea": args["rarea"]}, lim_fac=1.0)
 
 
-def test_edge_profile_solves_its_tridiagonal_exactly():
+def _run_native_edge_profile(q1, q2, j_lo, km, dp0, uniform_grid,
+                             limiter):
+    """Shared driver signature for the edge_profile certificates (the
+    native routine is already functional; the JAX twin plugs in its own
+    adapter)."""
+    from legoesm.core.fv3_native_nh_core import edge_profile
+
+    return edge_profile(np.asarray(q1), np.asarray(q2), j_lo, km,
+                        np.asarray(dp0), uniform_grid, limiter)
+
+
+def edge_profile_nonuniform_dense_certificate(run_edge):
     """Rebuild the nonuniform-branch tridiagonal from nh_utils.F90's
     own coefficients (:1583-1618) and verify against a dense solve:
       row 1:      b= g0(g0+.5),          c= 1+g0(g0+1.5),  d= xt1 q1+q2
       rows 2..km: a= 1, b= 2+2 gk,       c= gk,            d= 3(q_{k-1}+gk q_k)
       row km+1:   a= a_bot, b= gk(gk+.5),                  d= xt1 q_km+q_{km-1}
-    """
-    from legoesm.core.fv3_native_nh_core import edge_profile
-
+    Impl-parameterized (same driver signature as
+    ``_run_native_edge_profile``)."""
     rng = np.random.default_rng(19)
     ni, km = 4, KM
     q1 = 10.0 + rng.standard_normal((ni, km))
     q2 = -3.0 + rng.standard_normal((ni, km))
     dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
 
-    qe1, qe2 = edge_profile(q1, q2, 0, km, dp0, False, 0)
+    qe1, qe2 = run_edge(q1, q2, 0, km, dp0, False, 0)
 
     g = dp0[:-1] / dp0[1:]      # gk for rows 2..km (0-based g[k-1])
     g0 = dp0[1] / dp0[0]
@@ -609,8 +652,12 @@ def test_edge_profile_solves_its_tridiagonal_exactly():
     # Non-vacuity + basic sanity: a CONSTANT profile is reproduced
     # exactly at every edge.
     qc = np.full((ni, km), 7.5)
-    e1, _ = edge_profile(qc, qc, 0, km, dp0, False, 0)
+    e1, _ = run_edge(qc, qc, 0, km, dp0, False, 0)
     assert np.abs(e1 - 7.5).max() < 1e-12
+
+
+def test_edge_profile_solves_its_tridiagonal_exactly():
+    edge_profile_nonuniform_dense_certificate(_run_native_edge_profile)
 
 
 def test_update_dz_d_uniform_zh_is_transport_invariant():
@@ -681,12 +728,14 @@ def test_update_dz_d_uniform_zh_is_transport_invariant():
     assert np.abs(ws).max() < 1e-8
 
 
-def test_update_dz_c_nonuniform_vs_vectorised_reference():
+def update_dz_c_nonuniform_reference_certificate(run_udzc):
     """codex NH r1 #3: zero-wind/uniform-gz fixtures cannot see a wrong
     top/bottom/interior ratio.  Nonuniform dp0 + random gz + signed
     winds, checked against an INDEPENDENT vectorised transcription of
     nh_utils.F90:73-171 (same fill_4corners dependency, all other code
-    paths distinct from the port's loop form)."""
+    paths distinct from the port's loop form).  Impl-parameterized; the
+    existing 1e-12 bounds hold the JAX lane's few-ULP FMA divergence
+    with orders of margin."""
     from legoesm.core.fv3_native_sw_core import fill_4corners
     from legoesm.grids.fv3_native_gridstruct import fort
 
@@ -704,13 +753,14 @@ def test_update_dz_c_nonuniform_vs_vectorised_reference():
         axis=2)[:, :, ::-1].copy() * 3.0
     zs = np.array(gz[:, :, km], copy=True)
     ws = np.zeros((full, full))
-    gz_port = np.array(gz, copy=True)
-    ws_port = np.array(ws, copy=True)
     dt = 100.0
 
-    update_dz_c(bd, km, dt, dp0, zs, area, ut, vt, gz_port, ws_port,
-                n + 1, n + 1, sw_corner=True, se_corner=True,
-                ne_corner=True, nw_corner=True)
+    gz_port, ws_port = run_udzc(bd, km, dt, dp0, zs, area, ut, vt,
+                                np.array(gz, copy=True),
+                                np.array(ws, copy=True),
+                                n + 1, n + 1, sw_corner=True,
+                                se_corner=True, ne_corner=True,
+                                nw_corner=True)
 
     # ---------------- vectorised reference ----------------
     # 0-based windows: is1..ie1 ring = ng-1 .. ng+n, x extends +1 col.
@@ -769,6 +819,10 @@ def test_update_dz_c_nonuniform_vs_vectorised_reference():
     assert dws < 1e-12 * max(np.abs(ws_ref).max(), 1.0), dws
     # Non-vacuity: transport moved gz and the winds are signed both ways.
     assert np.abs(gz_port[slw, slw, :] - gz[slw, slw, :]).max() > 1.0
+
+
+def test_update_dz_c_nonuniform_vs_vectorised_reference():
+    update_dz_c_nonuniform_reference_certificate(_run_native_update_dz_c)
 
 
 def riem_c_unbalanced_certificate(run_riem_c):
@@ -871,7 +925,11 @@ def _rect_fields(ni, nj, ng, km, seed):
     return ut, vt, area, gz, zs, dp0
 
 
-def test_update_dz_c_origin_is_a_pure_relabel():
+def update_dz_c_origin_relabel_certificate(run_udzc):
+    """Origins are LABELS: identical padded storage under two different
+    (is, js) origins must produce bitwise-identical results (same impl,
+    deterministic — holds for the JAX lane too).  grid_type=3 skips the
+    corner fill, whose npx/npy-relative indices are NOT origin-labels."""
     ni, nj, ng = 4, 3, 3
     ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, KM, 61)
     fi, fj = ni + 2 * ng, nj + 2 * ng
@@ -879,18 +937,21 @@ def test_update_dz_c_origin_is_a_pure_relabel():
     out = {}
     for tag, bd in (("o11", _BDR(1, ni, 1, nj, ng)),
                     ("o4_10", _BDR(4, 3 + ni, 10, 9 + nj, ng))):
-        g = np.array(gz, copy=True)
-        w = np.zeros((fi, fj))
-        update_dz_c(bd, KM, 100.0, dp0, np.array(zs), np.array(area),
-                    np.array(ut), np.array(vt), g, w,
-                    ni + 1, nj + 1, sw_corner=True, se_corner=True,
-                    ne_corner=True, nw_corner=True, grid_type=3)
+        g, w = run_udzc(bd, KM, 100.0, dp0, np.array(zs), np.array(area),
+                        np.array(ut), np.array(vt),
+                        np.array(gz, copy=True), np.zeros((fi, fj)),
+                        ni + 1, nj + 1, sw_corner=True, se_corner=True,
+                        ne_corner=True, nw_corner=True, grid_type=3)
         out[tag] = (g, w)
 
     assert np.array_equal(out["o11"][0], out["o4_10"][0])
     assert np.array_equal(out["o11"][1], out["o4_10"][1])
     # Non-vacuity: the update moved gz somewhere.
     assert np.abs(out["o11"][0] - gz).max() > 1.0
+
+
+def test_update_dz_c_origin_is_a_pure_relabel():
+    update_dz_c_origin_relabel_certificate(_run_native_update_dz_c)
 
 
 def riem_c_origin_relabel_certificate(run_riem_c):
@@ -954,7 +1015,11 @@ def test_riem_solver_c_origin_is_a_pure_relabel():
 # storage indices, with a rectangular domain and MIXED corner flags.
 # --------------------------------------------------------------------------
 
-def test_update_dz_c_rect_mixed_flags_vs_independent_corner_reference():
+def update_dz_c_rect_mixed_flags_certificate(run_udzc, tol=0.0):
+    """Rect domain + mixed corner flags vs an INDEPENDENT transcription
+    of the oracle's corner fill.  Impl-parameterized; ``tol=0`` demands
+    bitwise equality (the native lane), a nonzero ``tol`` bounds the
+    relative deviation instead (the JAX lane's FMA contraction)."""
     ni, nj, ng = 12, 9, 3
     km = KM
     npx, npy = ni + 1, nj + 1
@@ -963,13 +1028,12 @@ def test_update_dz_c_rect_mixed_flags_vs_independent_corner_reference():
     ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, km, 71)
     fi, fj = ni + 2 * ng, nj + 2 * ng
 
-    gz_port = np.array(gz, copy=True)
-    ws_port = np.zeros((fi, fj))
     dt = 100.0
-    update_dz_c(bd, km, dt, dp0, np.array(zs), np.array(area),
-                np.array(ut), np.array(vt), gz_port, ws_port,
-                npx, npy, sw_corner=flags["sw"], se_corner=flags["se"],
-                ne_corner=flags["ne"], nw_corner=flags["nw"])
+    gz_port, ws_port = run_udzc(
+        bd, km, dt, dp0, np.array(zs), np.array(area), np.array(ut),
+        np.array(vt), np.array(gz, copy=True), np.zeros((fi, fj)),
+        npx, npy, sw_corner=flags["sw"], se_corner=flags["se"],
+        ne_corner=flags["ne"], nw_corner=flags["nw"])
 
     # ---- independent reference (storage indices; s(f) = f + ng - 1) ----
     def s(f):
@@ -1053,20 +1117,29 @@ def test_update_dz_c_rect_mixed_flags_vs_independent_corner_reference():
             gz_ref[a0:a0 + nxi, a0:a0 + nxj, k],
             gz_ref[a0:a0 + nxi, a0:a0 + nxj, k + 1] + DZ_MIN)
 
-    assert np.array_equal(gz_port, gz_ref)
-    assert np.array_equal(ws_port, ws_ref)
+    if tol == 0.0:
+        assert np.array_equal(gz_port, gz_ref)
+        assert np.array_equal(ws_port, ws_ref)
+    else:
+        d = np.abs(gz_port - gz_ref).max()
+        assert d <= tol * np.abs(gz_ref).max(), d
+        dws = np.abs(ws_port - ws_ref).max()
+        assert dws <= tol * max(np.abs(ws_ref).max(), 1.0), dws
     # Non-vacuity.
     assert np.abs(gz_port - gz).max() > 1.0
     # A DIFFERENT flag set must change the answer (the flags are live,
     # so a fill that ignored them -- or a no-op fill -- cannot pass both
     # this and the reference equality above).
-    gz_alt = np.array(gz, copy=True)
-    ws_alt = np.zeros((fi, fj))
-    update_dz_c(bd, km, dt, dp0, np.array(zs), np.array(area),
-                np.array(ut), np.array(vt), gz_alt, ws_alt,
-                npx, npy, sw_corner=False, se_corner=True,
-                ne_corner=False, nw_corner=True)
+    gz_alt, _ = run_udzc(bd, km, dt, dp0, np.array(zs), np.array(area),
+                         np.array(ut), np.array(vt),
+                         np.array(gz, copy=True), np.zeros((fi, fj)),
+                         npx, npy, sw_corner=False, se_corner=True,
+                         ne_corner=False, nw_corner=True)
     assert np.abs(gz_alt - gz_port).max() > 0.0
+
+
+def test_update_dz_c_rect_mixed_flags_vs_independent_corner_reference():
+    update_dz_c_rect_mixed_flags_certificate(_run_native_update_dz_c)
 
 
 # --------------------------------------------------------------------------
@@ -1504,23 +1577,21 @@ def test_update_dz_d_nonuniform_vs_replumbed_reference():
 # zero-crossing semantics for the limiter.
 # --------------------------------------------------------------------------
 
-def test_edge_profile_uniform_branch_dense_solve():
+def edge_profile_uniform_dense_certificate(run_edge):
     """nh_utils.F90:1552-1581.  The recurrence is Thomas on
       row 1:      3 qe(1) + 7 qe(2)              = 4 q(1) + 2 q(2)
       rows 2..km: qe(k-1) + 4 qe(k) + qe(k+1)    = 3 (q(k-1) + q(k))
       row km+1:   3.5 qe(km) + 1.5 qe(km+1)      = 4 q(km) + q(km-1)
     (row-1/row-km+1 coefficients read off the eliminated forms:
     gak(1) = 7/3 with rhs (4/3) q1 + (2/3) q2, and the bottom's
-    bet = 1/(1.5 - 3.5 gak(km)))."""
-    from legoesm.core.fv3_native_nh_core import edge_profile
-
+    bet = 1/(1.5 - 3.5 gak(km))).  Impl-parameterized."""
     rng = np.random.default_rng(97)
     ni, km = 4, KM
     q1 = 10.0 + rng.standard_normal((ni, km))
     q2 = -3.0 + rng.standard_normal((ni, km))
     dp0 = np.full(km, 4.0e3)     # ignored by the uniform branch
 
-    qe1, qe2 = edge_profile(q1, q2, 0, km, dp0, True, 0)
+    qe1, qe2 = run_edge(q1, q2, 0, km, dp0, True, 0)
 
     for i in range(ni):
         for q, qe in ((q1, qe1), (q2, qe2)):
@@ -1548,18 +1619,22 @@ def test_edge_profile_uniform_branch_dense_solve():
     # pinned deck (update_dz_d hardcodes uniform_grid=.false.); this
     # certificate pins the literal transcription, quirk included.
     qc = np.full((ni, km), 7.5)
-    e1, _ = edge_profile(qc, qc, 0, km, dp0, True, 0)
+    e1, _ = run_edge(qc, qc, 0, km, dp0, True, 0)
     assert np.abs(e1[:, 0] - 7.5).max() > 1.0        # top row distorts
-    en, _ = edge_profile(qc, qc, 0, km, dp0, False, 0)
+    en, _ = run_edge(qc, qc, 0, km, dp0, False, 0)
     assert np.abs(en - 7.5).max() < 1e-12            # nonuniform doesn't
 
 
-def test_edge_profile_limiter_clamps_zero_crossings():
+def test_edge_profile_uniform_branch_dense_solve():
+    edge_profile_uniform_dense_certificate(_run_native_edge_profile)
+
+
+def edge_profile_limiter_certificate(run_edge):
     """nh_utils.F90:1623-1633: limiter != 0 zeroes an edge value whose
     sign OPPOSES the adjacent interior value, at the top and bottom
-    edges only; interior edges are untouched."""
-    from legoesm.core.fv3_native_nh_core import edge_profile
-
+    edges only; interior edges are untouched.  Impl-parameterized (the
+    lim-vs-base comparisons are WITHIN one lane, so array_equal holds
+    for the JAX lane too)."""
     rng = np.random.default_rng(101)
     ni, km = 4, KM
     dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
@@ -1572,12 +1647,12 @@ def test_edge_profile_limiter_clamps_zero_crossings():
     for q_top in (-0.01, -0.1, -1.0, 0.01, 0.1, 1.0):
         q1 = 10.0 + rng.standard_normal((ni, km))
         q1[:, 0] = q_top
-        base1, base2 = edge_profile(q1, q2, 0, km, dp0, False, 0)
+        base1, base2 = run_edge(q1, q2, 0, km, dp0, False, 0)
         if (q1[:, 0] * base1[:, 0] < 0.0).any():
             break
     else:
         pytest.fail("no ladder value produced a sign-opposed top edge")
-    lim1, lim2 = edge_profile(q1, q2, 0, km, dp0, False, 1)
+    lim1, lim2 = run_edge(q1, q2, 0, km, dp0, False, 1)
 
     # Interior edges identical.
     assert np.array_equal(lim1[:, 1:km], base1[:, 1:km])
@@ -1592,3 +1667,7 @@ def test_edge_profile_limiter_clamps_zero_crossings():
     assert np.array_equal(lim2[:, km], base2[:, km])
     # Non-vacuity: at least one column actually clamped.
     assert np.any(lim1[:, 0] != base1[:, 0])
+
+
+def test_edge_profile_limiter_clamps_zero_crossings():
+    edge_profile_limiter_certificate(_run_native_edge_profile)
