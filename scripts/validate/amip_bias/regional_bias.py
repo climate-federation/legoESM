@@ -179,7 +179,7 @@ def _region_mean(field, lat, lon, box):
 def main(runs, ctl=None):
     ctl_fields = {}
     if ctl is not None:
-        for var in ("rsut", "rlut", "rsutcs", "clt", "prw", "hfls"):
+        for var in ("rsut", "rlut", "rsutcs", "rsdt", "clt", "prw", "hfls"):
             md = _load_model(ctl, var)
             if md is not None:
                 ctl_fields[var] = (np.asarray(md[var]).mean(axis=0),
@@ -195,10 +195,22 @@ def main(runs, ctl=None):
                 mv = np.asarray(md[var]).mean(axis=0)
                 rows[var] = {name: _region_mean(mv - cv, lat, lon, box)
                              for name, box in REGIONS.items()}
+            # TOA imbalance = rsdt - rsut - rlut, the quantity an energy-budget
+            # knob is judged on.  Reported NEXT TO its components, never alone:
+            # a change that improves the imbalance by making the shortwave and
+            # longwave errors cancel is not a fix, and only the components show
+            # that.
+            if {"rsut", "rlut"} <= set(rows):
+                rows["dTOA"] = {
+                    r: rows.get("rsdt", {}).get(r, 0.0)
+                       - rows["rsut"][r] - rows["rlut"][r]
+                    for r in REGIONS}
             hdr = list(rows.keys())
             print(f"{'region':<16}" + "".join(f"{h:>10}" for h in hdr))
             for r in REGIONS:
                 print(f"{r:<16}" + "".join(f"{rows[h][r]:10.2f}" for h in hdr))
+            print("dTOA = d_rsdt - d_rsut - d_rlut (positive = the arm gains "
+                  "energy relative to the control).")
             continue
         print(f"\n=== {run} (model - CERES-EBAF climatology, matched months) ===")
         rows = {}

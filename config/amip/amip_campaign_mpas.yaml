@@ -1,0 +1,113 @@
+# =============================================================================
+# legoESM AMIP — MPAS bias-campaign deck (Pierre's production science config)
+# =============================================================================
+# The config the 2026-07/08 MPAS AMIP bias campaign actually runs. Until now it
+# existed only as a ~40-flag `EXTRA=` string inside each launcher, which meant
+# no single file described the run, two launchers could silently disagree, and
+# the deck could not be diffed against the tracked default.
+#
+# This is `amip_production.yaml` plus the campaign's overrides, and NOTHING
+# else: every key below differs from the included base, with the measurement
+# that justifies it. Keys that agree with the base are deliberately absent so a
+# change there propagates here.
+#
+#   scripts/run/run_amip.py --config config/amip/amip_campaign_mpas.yaml
+#
+# STILL PASSED AS FLAGS by the launchers, because they are per-run rather than
+# per-deck: --days, --output, --params (the tuned-parameter file), --resolution
+# (5 for production, 4 for the coarse sensitivity screens) and --start-year
+# (the scored epoch). Everything else lives here.
+#
+# WHAT THIS DECK IS FOR. It is the arm-comparison baseline: sensitivity arms
+# differ from it in exactly ONE key, so a delta is attributable. It is NOT a
+# claim that every choice below beats the tracked default — several are open
+# questions, and `_tools/PRE_REGISTRATION_WAVE4.md` tests them one at a time.
+include: amip_production.yaml
+
+# --- Radiation cadence -------------------------------------------------------
+# Base: 12 steps (15 min at dt=75). 48 = hourly, which is the RRTMGP call
+# frequency the offline radiation harness was built and validated against, and
+# ~4x cheaper. UNTESTED as a science choice on this deck — wave-4 arm `w4_rad12`
+# measures what the base cadence buys.
+rad_update_steps: 48
+
+# --- Cloud optics ------------------------------------------------------------
+# Base: cloud_partial_coverage_optics two_column (and, being mutually exclusive
+# with it, no vertical-overlap treatment). This deck runs the max_random
+# subcolumn generator instead. The base's own note records a matched 30-day A/B
+# in which max_random gave rsut 140.98 vs two_column 145.70 (control 168.57) —
+# 4.7 W/m2 better but short of the 8 W/m2 pre-registered as materially better,
+# at the cost of re-solving each column as 8 subcolumns. That measurement is
+# from a different deck; wave-4 arm `w4_twocol` re-runs the comparison here.
+cloud_partial_coverage_optics: none
+cloud_vertical_overlap_optics: max_random
+cloud_n_subcolumns: 8
+
+# --- Diagnostic condensate floor ---------------------------------------------
+# Base: 1.0e-4. The floor is the dominant radiative lever on this lane and 5e-6
+# is the campaign's ADOPTED value, not a guess: paired 12-month stage-2 runs
+# (floorA 1e-4 vs floorB 1e-5) gave annual d_rsut -13.126 W/m2 with a stationary
+# trend and every pre-registered gate passing, and the 5e-6 rung followed with
+# d_rsut -19.4 against a point prediction of [-19.9, -19.1].
+cloud_q_c_diagnostic: 5.0e-6
+
+# --- Convective cloud + the convective rain split ----------------------------
+# Base: convective_cloud true (for parameter-identity with the coupled tuned
+# base) and convective_precip_efficiency 0.8. Under PRESCRIBED SST the base's
+# own 30-day C48 A/B measured conv-cloud ON degrading TOA — albedo 0.295->0.370,
+# OLR 234.7->213.3 — because its benefit is warming a FREE surface, which is
+# inert here. This deck therefore runs it OFF, matching the CMIP6 science chain.
+# convective_precip_efficiency is NOT overridden: the base's 0.8 is inherited.
+# Recording why, because it is a live trap. The campaign's own earlier runs
+# (ref1979 and everything before it) resolved 0.0 — not by choice, but because
+# the tree they ran from shipped 0.0 in the base YAML. main now ships 0.8, so
+# every run launched against main has ALREADY taken this import: the wave-3
+# arms resolve 0.8, verified in w3_ctl/experiment_config.json. The base pins it
+# from a C12/60-day dose-response in which 0 -> 0.5 -> 0.8 moved every
+# hydrological and TOA metric monotonically toward observations. Arm `w4_pe00`
+# tests removing it, which is the direction that is now untested here.
+convective_cloud: false
+
+# --- Land --------------------------------------------------------------------
+# Base: multilayer Richards land. This deck runs the slab: the deep 3 m soil
+# needs a multi-year cold spin-up before its skin temperature is meaningful, and
+# the campaign's arms are 60-120 days. Not a quality judgement on the land model.
+use_multilayer_land: false
+
+# --- Aerosol -> droplet coupling ---------------------------------------------
+# Base: off (a prescribed droplet number). On, the cloud droplet number is
+# activated from the aerosol optical depth, which is the only path by which the
+# aerosol field can change cloud brightness. Wave-4 arm `w4_noccn` measures it.
+aerosol_ccn: true
+
+# --- Non-orographic gravity-wave launch level --------------------------------
+# Base: launch at the surface. Launching in the free troposphere (700 hPa)
+# avoids depositing the Hines momentum flux in the boundary layer, where it acts
+# as an unphysical low-level drag. Wave-4 arm `w4_hinessfc` measures it.
+hines_launch_p: 70000.0
+
+# --- Diagnostics -------------------------------------------------------------
+# Clear-sky TOA fluxes are what split a radiative bias into its cloud and its
+# clear-sky parts; the base enables them too, repeated here because every
+# campaign scorer requires them.
+clear_sky_diag: true
+
+# --- Saturation / ice-microphysics switches the launchers carried as flags ----
+# These were only ever set on the command line, so the tracked base still runs
+# without them and no file recorded that the campaign does. Their defaults are
+# OFF; every campaign run since 2026-07 has had them ON.
+hard_sat_ice_curve: true          # saturation over ICE below freezing, not the
+                                  # liquid curve extrapolated into cold cloud
+homogeneous_ice_nucleation: true  # homogeneous freezing source for N_i
+mpas_ice_skin_prognostic: true    # prognostic sea-ice skin temperature
+mpas_conservative_tracer_clamp: true   # positivity fixer that borrows within
+                                  # the column instead of creating mass
+mpas_qv_smooth_del2_m2s: 2.0e5    # del2 smoothing on q_v (grid-scale moisture
+                                  # noise on the Voronoi mesh)
+
+# --- Prescribed SST unit convention ------------------------------------------
+# The PCMDI CMIP7 AMIP boundary condition stores degC, so the offset that turns
+# it into kelvin is part of the deck, not of the run. The base ships 0.0 for the
+# legacy already-kelvin ICON files — a mismatched pair here is a silent 273 K
+# error, which is why SST and this offset must always travel together.
+sst_offset: 273.15
