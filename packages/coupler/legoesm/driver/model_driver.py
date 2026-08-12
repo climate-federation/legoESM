@@ -290,6 +290,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
             cfg, "cloud_clubb_cf_override_strength", None),
         clubb_cf_override_floor=getattr(
             cfg, "cloud_clubb_cf_override_floor", None),
+        saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
     )
 
 
@@ -3175,6 +3176,14 @@ class ModelDriver:
                     self.config, "cloud_diagnostic_condensate_scheme", None),
                 adiabatic_lwc_rate=getattr(
                     self.config, "cloud_adiabatic_lwc_rate", None),
+                # The RH saturation CURVE sets the cloud fraction itself, so
+                # the clt diagnostic must thread it for the same reason as
+                # p_xr/alpha_xr above: without it a mixed_phase run would
+                # publish clt computed on the LIQUID curve while radiation
+                # integrated the mixed-phase cloud — the published clt would
+                # miss exactly the cold cirrus the switch adds (#1521).
+                saturation_scheme=getattr(
+                    self.config, "cloud_saturation_scheme", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
