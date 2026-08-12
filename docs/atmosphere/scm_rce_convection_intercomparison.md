@@ -832,6 +832,42 @@ bulk flux is no longer throttled by a frozen q_a.
 and the column has a working sensible-heat flux. Two configurations, not a
 delta.
 
+### 8.2j kuo is INACTIVE in the SCM, and a retraction about bit-identity
+
+**kuo contributes nothing.** Scored against a `convection=none` column under
+the campaign's own configuration (job 9379420):
+
+```
+kuo    score=5.736693549527354  T=0.306305 qv=0.323231 P=1.9509 E=1.9454
+none   score=5.736693549527354  T=0.306305 qv=0.323231 P=1.9509 E=1.9454
+BIT-IDENTICAL: True      max|dT_profile| = 0.000e+00 K
+```
+
+This is by design, and the code says so: `convection/integration.py:435` —
+Kuo needs a large-scale moisture-convergence operator, "so on a state with no
+`v` (e.g. ... a single-column SCM) Kuo is deliberately OFF rather than falling
+back to a proxy". Its 48 tuning evaluations were spent on a disabled scheme,
+and **its row in the ranking is the no-convection baseline, not a scheme
+result.**
+
+**That baseline is itself useful:** a no-convection column scores 5.737 in the
+anchor-off configuration, so any scheme scoring above it is worse than having
+no convection at all. `dca` (9.314) is.
+
+**RETRACTED — bit-identity is NOT a code-path signature.** This investigation
+began from "tiedtke and kuo returned tuned scores bit-identical to their
+defaults, across 192 and 48 evaluations, which cannot be weak sensitivity".
+That premise is wrong. In `tune_category_winner`, `best_run` is initialised to
+`default_run`, and when no candidate beats it the returned `tuned` IS that same
+object. Bit-identity therefore means exactly "no candidate improved on the
+default" — the expected output of an unsuccessful search.
+
+**tiedtke needs no fix.** It is active and strong: 1.282 against the 5.737
+no-convection baseline, with 14 of its 16 parameters changing the tendency in
+the reachability probe. Its unmoved score is a SEARCH-BUDGET result — 192
+samples over 16 dimensions — not a reachability failure. The honest response is
+a larger or smarter budget, not a code change.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for

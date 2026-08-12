@@ -18,6 +18,27 @@ whether the read VALUE can change the OUTPUT in this regime -- a parameter
 multiplied by zero, or inside a clip that saturates, is live code and dead
 physics.
 
+WHAT THIS PROBE CANNOT CONCLUDE (codex review, 2026-08-12 — read before
+quoting any DEAD verdict):
+
+* It calls the physics with NO horizontal grid, so the bridge sets
+  ``moisture_convergence=None``.  Kuo treats that as a zero source and returns
+  zero tendencies, so EVERY Kuo parameter reads DEAD here without being
+  tested.  Kuo's real status was established from the code
+  (``convection/integration.py:435``: Kuo is deliberately OFF on a
+  single-column state) and CONFIRMED by scoring a kuo column against a
+  ``convection=none`` column — bit-identical, ``max|dT| = 0``.
+* It passes ``phys_state=None``, i.e. a zero prognostic mass-flux profile, so
+  what it measures is a COLD-START tendency.  A parameter that only bites once
+  the carry has spun up — a cap on a mass flux that is still zero, for
+  instance — reads DEAD here and is not.
+* It reads only ``dT/dt`` and ``dq_v/dt``.  A parameter that moves only
+  condensate, precipitation, momentum or the returned carry reads DEAD.
+
+So a DEAD verdict from this probe means "no effect on the thermal or vapour
+tendency, at cold start, on these five synthetic columns" — not "cannot affect
+the campaign".
+
 WHAT THIS MEASURES.  For each tunable parameter, on each of several column
 states, the scheme's tendency is recomputed with that ONE parameter moved and
 compared to the default:
@@ -207,6 +228,14 @@ def probe_scheme(scheme: str, *, nlev: int, dt: float) -> list[dict]:
                 t_dT, t_dq = _tendency(scheme, trial_sub, state, sigma, dt)
                 ddT = float(np.max(np.abs(t_dT - b_dT)))
                 ddq = float(np.max(np.abs(t_dq - b_dq)))
+                # NaN must never read as DEAD: max(0.0, nan) keeps 0.0, so a
+                # scheme that blew up on a trial value would be reported as
+                # "no effect" (codex review, 2026-08-12).
+                if not (np.isfinite(ddT) and np.isfinite(ddq)):
+                    raise FloatingPointError(
+                        f"{c.field}={v!r} on state {name} produced a non-finite "
+                        "tendency difference; a DEAD verdict here would be an "
+                        "artifact of NaN handling")
                 if ddT > worst_dT or ddq > worst_dq:
                     worst_state = name
                 worst_dT = max(worst_dT, ddT)
