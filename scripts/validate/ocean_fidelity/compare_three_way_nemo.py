@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import subprocess
 import sys
@@ -471,9 +472,20 @@ def main() -> int:
     print(f"[common] {n_common} cells on all three; "
           + ", ".join(f"{k} {int(v.sum())}" for k, v in sub.items()))
 
+    # Slot labels.  Slot A is whatever --tripole was handed and slot B whatever
+    # --mpas was; the defaults only NAME the usual occupants.  Sanitised so the
+    # labels are safe as JSON keys.
+    lab_a = re.sub(r"\W+", "_", a.label_tripole).strip("_") or "slot_a"
+    lab_b = re.sub(r"\W+", "_", a.label_mpas).strip("_") or "slot_b"
+    if lab_a == lab_b:
+        raise SystemExit(
+            f"--label-tripole and --label-mpas are both {lab_a!r}; the report "
+            "keys would collide and one arm's scores would overwrite the "
+            "other's.")
     report = {
         "generated_by": str(_HERE),
         "git_sha": _git_sha(_HERE.parents[3]),
+        "label_a": lab_a, "label_b": lab_b,
         "tripole_snapshot": str(a.tripole), "mpas_snapshot": str(a.mpas),
         "nemo_gridt": str(a.nemo_gridt), "nemo_month": a.nemo_month,
         "nemo_time_idx": None if a.nemo_month else a.nemo_time_idx,
@@ -572,37 +584,45 @@ def main() -> int:
         # one (see the [smooth] note above).
         deep = (a.deep_mld_m if (name == "MLD" and a.smooth_radius_deg is None)
                 else None)
+        # Pair KEYS carry the CLI labels.  They used to be hardcoded
+        # "tripole_vs_nemo"/"mpas_vs_nemo" while --label-tripole/--label-mpas
+        # reached only the plots, so a FESOM2-in-slot-B run printed its numbers
+        # under "mpas_vs_nemo" -- a mislabelled table that was read as MPAS's
+        # score before the provenance in report.json corrected it (2026-08-12).
+        k_a, k_b = f"{lab_a}_vs_nemo", f"{lab_b}_vs_nemo"
+        k_ab = f"{lab_a}_vs_{lab_b}"
         rec = {
             "unit": unit,
-            "tripole_vs_nemo": _scored(Tg, Ng, ar, tgt_lat, sb, deep),
-            "mpas_vs_nemo": _scored(Mg, Ng, ar, tgt_lat, sb, deep),
-            "tripole_vs_mpas": _scored(Tg, Mg, ar, tgt_lat, sb, deep),
+            k_a: _scored(Tg, Ng, ar, tgt_lat, sb, deep),
+            k_b: _scored(Mg, Ng, ar, tgt_lat, sb, deep),
+            k_ab: _scored(Tg, Mg, ar, tgt_lat, sb, deep),
         }
         report["fields"][name] = rec
         print(f"\n===== {name} [{unit}] =====")
-        for pair in ("tripole_vs_nemo", "mpas_vs_nemo", "tripole_vs_mpas"):
-            print(f"  {pair:18s} GLOBAL   {_fmt(rec[pair]['global'])}")
+        for pair in (k_a, k_b, k_ab):
+            print(f"  {pair:22s} GLOBAL   {_fmt(rec[pair]['global'])}")
         for dom in sub:
-            for pair in ("tripole_vs_nemo", "mpas_vs_nemo", "tripole_vs_mpas"):
-                print(f"  {pair:18s} {dom:20s} {_fmt(rec[pair][dom])}")
+            for pair in (k_a, k_b, k_ab):
+                print(f"  {pair:22s} {dom:20s} {_fmt(rec[pair][dom])}")
         if deep is not None:
             print(f"  -- distribution (median / p90|diff| / frac deeper than "
                   f"{deep:.0f} m) --")
             for dom in ["global", *sub]:
-                for pair in ("tripole_vs_nemo", "mpas_vs_nemo"):
+                for pair in (k_a, k_b):
                     t = rec[pair]["tails"].get(dom)
                     if t:
-                        print(f"    {pair:18s} {dom:20s} n={t['n']:6d} "
+                        print(f"    {pair:22s} {dom:20s} n={t['n']:6d} "
                               f"med {t['median_diff']:+8.1f}  p90 {t['p90_abs_diff']:7.1f}  "
                               f"model {t['frac_a_deeper_than']*100:5.1f}%  "
                               f"NEMO {t['frac_b_deeper_than']*100:5.1f}%")
         print("  -- latitude bands (bias) --")
-        for bn in rec["tripole_vs_nemo"]["bands"]:
-            bt = rec["tripole_vs_nemo"]["bands"][bn]
-            bm = rec["mpas_vs_nemo"]["bands"][bn]
+        for bn in rec[k_a]["bands"]:
+            bt = rec[k_a]["bands"][bn]
+            bm = rec[k_b]["bands"][bn]
             if bt and bm:
-                print(f"    {bn:22s} trp {bt['bias']:+8.3f}   mpas {bm['bias']:+8.3f}"
-                      f"   |  rmse trp {bt['rmse']:6.3f} mpas {bm['rmse']:6.3f}")
+                print(f"    {bn:22s} {lab_a} {bt['bias']:+8.3f}   "
+                      f"{lab_b} {bm['bias']:+8.3f}   |  rmse {lab_a} "
+                      f"{bt['rmse']:6.3f} {lab_b} {bm['rmse']:6.3f}")
         plot_fields[name] = (Tg, Mg, Ng, unit, (ar > 0))
 
     # Row availability from the common OCEAN mask, before any per-field
