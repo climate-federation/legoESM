@@ -28,7 +28,7 @@ class TestArgparseRoundTrip:
     def test_defaults_scheme_off(self):
         a = _parse()
         assert a.gm_treguier is False
-        assert a.gm_aei0 == _GM_AEI0_DEFAULT == 1800.0
+        assert a.gm_aei0 == _GM_AEI0_DEFAULT == 900.0
         assert a.gm_kappa_min == _GM_KAPPA_MIN_DEFAULT == 200.0
 
     def test_flag_and_values_round_trip(self):
@@ -38,8 +38,16 @@ class TestArgparseRoundTrip:
         assert a.gm_kappa_min == 50.0
 
     def test_aei0_default_is_the_orca1_namelist_value(self):
-        """aei0 = rn_Ue * rn_Le; ORCA1 runs 0.018 * 100e3."""
-        assert _GM_AEI0_DEFAULT == pytest.approx(0.018 * 100.0e3)
+        """aei0 = 1/2 * rn_Ue * rn_Le for the LAPLACIAN operator.
+
+        NEMO ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud when ln_traldf_lap
+        (ORCA1's setting), and its own printout says "aht0 = 1/2 rn_Ud*rn_Ld"
+        (:331).  The previous expectation dropped the 1/2 and pinned 1800,
+        i.e. TWICE NEMO's cap.  Measured 2026-08-12: NEMO's emitted aeiu_2d
+        maxes at EXACTLY 900 on eORCA1 rec 1, which is what settles it.
+        """
+        assert _GM_AEI0_DEFAULT == pytest.approx(0.5 * 0.018 * 100.0e3)
+        assert _GM_AEI0_DEFAULT == pytest.approx(900.0)
 
 
 class TestBuildTripoleSignatureSharesTheDefaults:

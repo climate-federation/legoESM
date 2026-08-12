@@ -61,7 +61,14 @@ _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
 # `build_tripole`'s signature and the `--gm-aei0` / `--gm-kappa-min` argparse
 # defaults so the two can never drift.
 # aei0 = rn_Ue*rn_Le; ORCA1 namelist = 0.018 * 100e3.
-_GM_AEI0_DEFAULT = 1800.0
+# NEMO ldftra.F90:290-293 -- for the LAPLACIAN operator (ORCA1:
+# ln_traldf_lap=.true.) the prefactor is zUfac = 1/2 * rn_Ud, so
+#     aei0 = 1/2 * rn_Ue * rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s,
+# which the code's own printout states ("aht0 = 1/2 rn_Ud*rn_Ld",
+# ldftra.F90:331) and NEMO's emitted aeiu_2d confirms: max EXACTLY 900
+# (measured 2026-08-12, RUN_TRD2 rec 1).  The previous 1800 dropped the 1/2
+# and made the "NEMO-faithful" GM cap twice NEMO's.
+_GM_AEI0_DEFAULT = 900.0
 # Equatorial-taper floor; matches VisbeckConfig.kappa_min, the coefficient the
 # OMIP tripole otherwise runs.
 _GM_KAPPA_MIN_DEFAULT = 200.0
@@ -4330,7 +4337,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "aeiu/aeiv = F(growth rate of baroclinic instability), "
                         "capped at aei0) INSTEAD of the tripole default's "
                         "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
-                        "(rn_Ue=0.018, rn_Le=100e3 => aei0=1800 m^2/s); the two "
+                        "(rn_Ue=0.018, rn_Le=100e3, laplacian => "
+                        "aei0 = 1/2*rn_Ue*rn_Le = 900 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
     p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
@@ -4345,7 +4353,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "the Hallberg resolution scaling, as Visbeck's is.")
     p.add_argument("--gm-aei0", type=float, default=_GM_AEI0_DEFAULT,
                    help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
-                        "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
+                        "1/2*rn_Ue*rn_Le for the laplacian operator (ORCA1: "
+                        "0.5*0.018*100e3 = 900; ldftra.F90:290-293, and NEMO's "
+                        "own aeiu_2d maxes at exactly 900). Default 900.")
     p.add_argument("--freshwater-closure", type=str, default=None,
                    choices=["none", "virtual_salt_flux", "real_freshwater"],
                    help="Ocean freshwater closure. 'virtual_salt_flux' "
