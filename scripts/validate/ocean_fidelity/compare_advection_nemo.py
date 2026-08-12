@@ -95,21 +95,31 @@ def main() -> int:
 
     z, ny, nx = T.shape
     wet = np.isfinite(T)
-    if e1t_full.shape == (ny, nx):
-        e1t, e2t = e1t_full, e2t_full
-    elif e1t_full.shape == (ny + 1, nx + 2):
-        # mesh-mask halo frame [0:ny, 1:nx+1] -- the native slice used by
-        # every other eORCA1 probe in this directory.
-        e1t, e2t = e1t_full[0:ny, 1:nx + 1], e2t_full[0:ny, 1:nx + 1]
-    else:
-        raise SystemExit(f"grid metrics {e1t_full.shape} do not match the "
-                         f"trend frame ({ny}, {nx})")
+    # The GRID OBJECT carries the model's halo frame (332, 362) and its fold
+    # logic; slicing the metrics is not enough because the operators index
+    # grid.area_T etc. internally.  So lift the native NEMO fields INTO the
+    # model frame instead, run there, and slice the result back.
+    NY, NX = e1t_full.shape
+    if (NY, NX) != (ny + 1, nx + 2):
+        raise SystemExit(f"unexpected model frame {e1t_full.shape} for a "
+                         f"native trend frame ({ny}, {nx})")
+    e1t, e2t = e1t_full, e2t_full
+
+    def lift(native):
+        """(ny, nx, z) native -> (NY, NX, z) model frame with the cyclic
+        overlap columns filled; the north-fold ghost row stays zero and rows
+        >= ny-1 are excluded from scoring below."""
+        full = np.zeros((NY, NX, native.shape[-1]), dtype=np.float64)
+        full[0:ny, 1:nx + 1, :] = native
+        full[:, 0, :] = full[:, nx, :]
+        full[:, nx + 1, :] = full[:, 1, :]
+        return full
     # (z, y, x) -> (y, x, z): the C-grid operators take level-last.
     def yxz(x):
         return np.transpose(np.nan_to_num(x, nan=0.0), (1, 2, 0))
 
-    T3, S3, h3 = yxz(T), yxz(S), yxz(e3t)
-    u3, v3 = yxz(uo), yxz(vo)
+    T3, S3, h3 = lift(yxz(T)), lift(yxz(S)), lift(yxz(e3t))
+    u3, v3 = lift(yxz(uo)), lift(yxz(vo))
     h3 = np.where(h3 > 0, h3, 0.0)
 
     # STAGGERING (the array layout is an API): the C-grid operators want
@@ -149,8 +159,17 @@ def main() -> int:
                                 "vertical transport reconstructed from "
                                 "continuity; not a bitwise test")}
 
-    def cols(x):   # (y, x, z) -> (ncol, z)
+    def unlift(full):
+        """(NY, NX, z) model frame -> (ny, nx, z) native."""
+        return full[0:ny, 1:nx + 1, :]
+
+    def cols(x):   # (ny, nx, z) -> (ncol, z)
         return x.reshape(ny * nx, z)
+
+    # The north-fold ghost row is not reproduced by this single-call
+    # diagnostic, so the two rows adjacent to it are excluded from scoring.
+    fold_excl = np.ones((ny, nx), dtype=bool)
+    fold_excl[ny - 2:, :] = False
 
     for scheme in a.schemes:
         dT_dt, dS_dt = [], []
@@ -160,10 +179,11 @@ def main() -> int:
                 jnp.asarray(w_half), jnp.asarray(h3), jnp.asarray(h_u_f),
                 jnp.asarray(h_v_f), grid, a.dt)
             inv_h = np.where(h3 > 0, 1.0 / np.maximum(h3, 1e-12), 0.0)
-            dT_dt.append(-(np.asarray(div_hut) + np.asarray(vfd)) * inv_h)
+            dT_dt.append(unlift(-(np.asarray(div_hut) + np.asarray(vfd)) * inv_h))
         ours_T, ours_S = cols(dT_dt[0]), cols(dT_dt[1])
         nemo_T, nemo_S = cols(yxz(ttrd)), cols(yxz(strd))
-        wet_c = cols(yxz(wet.astype(float))) > 0.5
+        wet_c = (cols(yxz(wet.astype(float))) > 0.5) & cols(
+            np.broadcast_to(fold_excl[:, :, None], (ny, nx, z)))
         print(f"\n########## scheme = {scheme}")
         result["schemes"][scheme] = {
             "T": region_report(f"Stage C ({scheme}): advection dT vs ttrd_totad [K/s]",
