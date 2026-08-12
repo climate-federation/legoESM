@@ -133,18 +133,26 @@ def main() -> int:
     h_v = 0.5 * (h3 + np.roll(h3, -1, axis=0))
     e2u = 0.5 * (e2t + np.roll(e2t, -1, axis=1))
     e1v = 0.5 * (e1t + np.roll(e1t, -1, axis=0))
-    mf_u_c = h_u * u3 * e2u[:, :, None]          # (ny, nx, z) at NEMO u-points
-    mf_v_c = h_v * v3 * e1v[:, :, None]          # (ny, nx, z) at NEMO v-points
+    # UNITS (read from the model, not inferred): the driver builds
+    #     mass_flux_u = h_u_old * u          (ocean_model_latlon_cgrid.py:4250)
+    # i.e. a transport PER UNIT WIDTH [m^2/s] -- divergence_cgrid multiplies
+    # by the face length itself.  Multiplying by e2u here first overshot the
+    # tendency by ~1e5-1e6 (measured: rms 1.8 K/s vs NEMO 2e-6).
+    mf_u_c = h_u * u3                            # (ny, nx, z) at NEMO u-points
+    mf_v_c = h_v * v3                            # (ny, nx, z) at NEMO v-points
     # x is periodic: face 0 == face nx.
     mf_u = np.concatenate([mf_u_c[:, -1:, :], mf_u_c], axis=1)      # (ny, nx+1, z)
     h_u_f = np.concatenate([h_u[:, -1:, :], h_u], axis=1)
     # y is not periodic: the southern face carries no transport.
     mf_v = np.concatenate([np.zeros_like(mf_v_c[:1]), mf_v_c], axis=0)  # (ny+1, nx, z)
     h_v_f = np.concatenate([np.zeros_like(h_v[:1]), h_v], axis=0)
-    # Vertical transport from continuity: w(k) - w(k+1) = -div_h(k), zero at
-    # the sea floor, surface interface zeroed.
-    div_h = ((mf_u[:, 1:, :] - mf_u[:, :-1, :])
-             + (mf_v[1:, :, :] - mf_v[:-1, :, :]))
+    # Vertical transport from continuity.  w is a VELOCITY [m/s], so the
+    # horizontal divergence must be the VOLUME one: multiply the per-width
+    # transports by their face lengths, difference, and divide by cell area.
+    e2u_f = np.concatenate([e2u[:, -1:], e2u], axis=1)[:, :, None]
+    e1v_f = np.concatenate([np.zeros_like(e1v[:1]), e1v], axis=0)[:, :, None]
+    div_h = (((mf_u * e2u_f)[:, 1:, :] - (mf_u * e2u_f)[:, :-1, :])
+             + ((mf_v * e1v_f)[1:, :, :] - (mf_v * e1v_f)[:-1, :, :]))
     area = (e1t * e2t)[:, :, None]
     w_int = -np.flip(np.cumsum(np.flip(div_h, axis=-1), axis=-1), axis=-1) / area
     w_half = np.concatenate([np.zeros_like(w_int[..., :1]), w_int], axis=-1)[..., :z + 1]
