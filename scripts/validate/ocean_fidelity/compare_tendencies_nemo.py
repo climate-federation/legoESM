@@ -19,11 +19,13 @@ state-matching are absent. Two column-local stages (no model construction):
   ``(T' - T)/dt`` against ``ttrd_zdf``/``strd_zdf`` for hour ``r``.  Tests
   the implicit-diffusion OPERATOR with the closure removed.
 
-Record alignment (rn_Dt=3600 -> ONE step per hourly record): state record
-``r-1`` is the field the step-``r`` physics acted on; trend/avt record ``r``
-is what that step produced.  Records 0..11 are live (the RK3 build stops
-emitting trends at hour 12 — see omip_nemo_tendency_matching notes), so
-pairs r=1..11 are usable.
+Record alignment (rn_Dt=3600 -> ONE step per hourly record).  MEASURED
+2026-08-12 (``nemo_trend_closure.py`` pairing scan, 24-record RUN_TRD2 file):
+the trend at record ``r`` matches the state change ``r -> r+1`` better than
+``r-1 -> r`` — T corr 0.952 vs 0.897, S corr 0.891 vs 0.751 — so record
+``r+1`` is the POST-operator state for trend ``r``.  Stage B2 anchors there.
+Stage A/B keep using state ``r-1`` as the closure input (a diffusivity is a
+function of the state it is computed from, not of the pairing).
 
 Caveats carried from the trend-run findings: NEMO ``ttrd_zdf`` under this
 key_RK3 build INCLUDES the EVD convective enhancement via ``avt`` (no
@@ -92,8 +94,12 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
-        "T_r1": _fill(dsT.variables["votemper"][r1]),
-        "S_r1": _fill(dsT.variables["vosaline"][r1]),
+        # POST-operator state for the trend at r1 (see the pairing note in
+        # run_stage_b): record r1+1, clamped to the last record.
+        "T_post": _fill(dsT.variables["votemper"][
+            min(r1 + 1, dsT.variables["votemper"].shape[0] - 1)]),
+        "S_post": _fill(dsT.variables["vosaline"][
+            min(r1 + 1, dsT.variables["vosaline"].shape[0] - 1)]),
         # XIOS one_file splits coords per grid: T fields on nav_*_grid_T,
         # avt/avm on the W grid (identical horizontal positions on eORCA1).
         "lat": _fill(dsT.variables["nav_lat_grid_T"][:]),
@@ -307,8 +313,19 @@ def run_stage_b(d):
     # ln_zad_Aimp implicit vertical-advection terms and the isoneutral MSC
     # akz addition, which this pure-K solve does not model.  So residual !=
     # pure discretization; it is 'operator + unmodelled matrix terms'.
-    T_r1 = np.nan_to_num(cols(d["T_r1"]), nan=0.0)
-    S_r1 = np.where(np.isfinite(cols(d["S_r1"])), cols(d["S_r1"]), 35.0)
+    # TIME PAIRING (measured 2026-08-12, nemo_trend_closure.py pairing scan
+    # on the 24-record RUN_TRD2 file): the trend written at record r matches
+    # the state change r -> r+1 BETTER than r-1 -> r, for both tracers
+    #   T: corr 0.952 vs 0.897, residual/state 0.305 vs 0.443
+    #   S: corr 0.891 vs 0.751, residual/state 0.475 vs 0.709
+    # so the post-operator state for trend r is record r+1, not record r.
+    # Stage B2's right-inverse construction is insensitive to this (it builds
+    # its input FROM the trend and checks the operator maps it back), which is
+    # why its 0.98-0.999 correlations were not disturbed by the mispairing --
+    # but the anchor is corrected here so the reconstructed state is the one
+    # NEMO's operator actually produced.
+    T_r1 = np.nan_to_num(cols(d["T_post"]), nan=0.0)
+    S_r1 = np.where(np.isfinite(cols(d["S_post"])), cols(d["S_post"]), 35.0)
     T_pre = np.where(np.isfinite(ttrd), T_r1 - dt * np.nan_to_num(ttrd), T_c)
     S_pre = np.where(np.isfinite(strd), S_r1 - dt * np.nan_to_num(strd), S_c)
 
