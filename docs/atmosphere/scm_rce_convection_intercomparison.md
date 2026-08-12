@@ -798,6 +798,40 @@ came from bulk snapshots at unsettled windows. With the applied flux at a
 settled window, E = 1.62 against the CRM's 2.23 — a 27 % deficit. Still real,
 smaller than stated.
 
+### 8.2i The anchor-off arm — precipitation is real and discriminating
+
+Second baseline (job 9376354, outdir `arm_implicit_flux_morrison_noanchor`),
+differing from §8.2g in exactly two LABELLED variables: the precipitation term
+reports the applied microphysics evaluation (§8.2e), and the SST anchor is off
+(`--bl-anchor-top-m -1`, §8.2f) so the sensible heat flux can be nonzero. Both
+are in the checkpoint signature, so the two tables cannot be merged.
+
+First two schemes:
+
+| scheme | prior→tuned | T | q_v | cloud | precip RMSE | P mm/d | E mm/d |
+|---|---|---:|---:|---:|---:|---:|---:|
+| dca | 9.314 → 9.314 | 0.210 | 0.168 | 18.625 | 0.128 | 2.779 | 2.778 |
+| sbm | 11.922 → 7.645 | 0.294 | 0.578 | 15.276 | 0.028 | 2.310 | 2.317 |
+
+Two things the numbers establish.
+
+**The precipitation term now discriminates.** It was 1e-18 mm/day for every
+scheme, giving all of them an identical error of 0.798; here dca precipitates
+2.779 and sbm 2.310 against the CRM's 2.23-2.40, with errors of 0.128 and
+0.028. sbm is within 3 % of the reference precipitation, and the term
+separates schemes rather than adding a constant to every score.
+
+**E ~ P in both columns** (2.778 vs 2.779; 2.317 vs 2.310), i.e. they are in
+water balance at roughly the CRM's rate. The 27 % evaporation deficit measured
+under the anchored configuration (§8.2h) is gone, which is what removing the
+SST pin was expected to do: the near-surface air can respond again, so the
+bulk flux is no longer throttled by a frozen q_a.
+
+**DO NOT read these scores against §8.2g.** sbm is 11.92 → 7.65 here and
+11.45 → 1.70 there, but the objective now contains a live precipitation term
+and the column has a working sensible-heat flux. Two configurations, not a
+delta.
+
 ### 8.3 The instrument
 
 `scripts/validate/check_ifs_supersaturation_cap.py` is the committed probe for
