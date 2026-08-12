@@ -22,6 +22,13 @@
 #
 # CONTROL: nemolev_trp_gwcorr_d30 (same command, superbee), already scored.
 #
+# ONE DIAGNOSTIC DROPPED (not a physics change, but state it): fct2 forms its
+# horizontal face fluxes IN-KERNEL, so the driver refuses --gateway-transports
+# with it ("store_salt_flux is not supported with tracer_advection='fct2'").
+# The gateway salt/volume transports are therefore absent from THIS arm; the
+# scored quantities (SST/SSS/MLD vs NEMO) are unaffected, and the gateway
+# numbers simply cannot be part of this comparison.
+#
 # PRE-REGISTERED (written before the run):
 #  (a) THE NUMBERS: day-30 compare_omip_nemo SST rmse / SSS rmse / MLD rmse
 #      vs NEMO month 1, on the same res-deg and window as the control.
