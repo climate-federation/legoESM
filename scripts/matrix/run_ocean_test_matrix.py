@@ -402,6 +402,19 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
 
+    # --- Inertia-gravity wave, f-PLANE CHANNEL (Bishnu et al. 2024) ---
+    # The global case above cites this reference but cannot verify wave
+    # behaviour on a sphere (see the block comment at igw_channel_mode).
+    # This one puts the wave where it is an exact eigenmode, so it can gate
+    # on the exact solution, the measured frequency, and mode purity.
+    # Two resolutions: the coarse one is the gate, the fine one exists so
+    # the pair gives a convergence rate (L2 should fall ~4x for 2x cells).
+    # latlon_channel parses "n_lat x n_lon"; the geometry is Cartesian and
+    # built by the runner, so the grid string only carries the cell counts.
+    for _res in ("20x40", "40x80"):
+        matrix.append(TestCase(
+            "inertia_gravity_wave_channel", "latlon_channel", _res, 1.0, 1.0))
+
     # --- Lock Exchange (NEMO / Petersen et al. 2015): latlon only ---
     # (cubed_sphere excluded — H_max=20 m + sharp T contrast across a
     # global cube face cannot be made stable with either the cd-grid
@@ -824,6 +837,38 @@ _AQUAPLANET_OCEAN_GRIDS = ("latlon", "mpas")
 
 _BWAVE_ENERGY_FLOOR = 0.02
 _BWAVE_ENERGY_CEILING = 1.5
+#: Channel-IGW gates. The case is an EXACT eigenmode, so these are real
+#: accuracy statements, unlike anything the global case could assert.
+#: Calibrated on the first run and recorded there; L2 should scale as
+#: dx^2 for a 2nd-order C-grid.
+_IGWC_CFL_S_PER_M = 3.0e-3
+#: MEASURED 2026-08-12 at the base 20x40 (dx = 100 km, 20 points per
+#: wavelength): L2 0.0659, refining to 0.0294 at 40x80 with dt scaled with
+#: dx. The gate sits just above the base value with ~20% headroom.
+#:
+#: CONVERGENCE IS ~1.3 ON THE DEFAULT LANE, AND THAT IS CORRECT BEHAVIOUR,
+#: NOT A DEFECT. SETTLED 2026-08-12 by measurement; the earlier guess in
+#: this comment (that coriolis_scheme="matsuno_split" was the limiter) was
+#: WRONG and is retracted. What was actually measured, on this case:
+#:   - refine dx at FIXED dt -> order 1.82, so SPACE is second order;
+#:   - refine dt on a FIXED grid -> order 0.99, so TIME is FIRST order;
+#:   - theta 0.55 -> 0.50 moves the mixed order 1.15 -> 1.31, a real but
+#:     secondary contribution;
+#:   - the error is amplitude-INDEPENDENT to 5 digits at 100x smaller
+#:     amplitude (eta/H = 1.9e-5), which REFUTES the lagged nonlinear
+#:     thickness H_u_old/H_v_old as the cause -- that term is nonlinear;
+#:   - swapping coriolis_scheme alone, or outer_integrator alone, changes
+#:     nothing, because the second-order settings are GATED IN A CHAIN.
+#: The limiter is the explicitly lagged old-time slow forcing. All three
+#: knobs must move together (barotropic_slow_forcing_ab2 requires
+#: coriolis_scheme="explicit_ab2", which requires outer_integrator="ab2"),
+#: and moving all three gives order 1.95 with L2 3x smaller. The default
+#: lane is first order in time BY CONSTRUCTION. Both lanes are pinned in
+#: tests/ocean/unit/test_barotropic_accuracy.py, so this stays measured.
+_IGWC_L2_MAX = 0.08          # relative L2 in eta at 1.25 periods
+_IGWC_OMEGA_ERR_MAX = 0.03   # measured vs analytic frequency
+_IGWC_PURITY_MIN = 0.95      # fraction of eta variance still in the mode
+
 _IGW_AMP_FLOOR = 0.03
 _IGW_IC_CORR_UPPER = 0.95
 
@@ -2608,6 +2653,12 @@ def _parse_resolution(tc: TestCase):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "cs_regional":
         return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon_channel":
+        # "n_lat x n_lon" cell counts. The channel cases build their own
+        # Cartesian geometry, so the string carries counts only -- the
+        # physical cell size is the case's own constant.
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
     elif tc.grid_type == "tripole":
@@ -5565,6 +5616,120 @@ def _get_cell_latlon_rad(grid_type, grid):
 # Tests the barotropic pressure-gradient and Coriolis terms.
 # ===========================================================================
 
+# ===========================================================================
+# Runner: Inertia-Gravity Wave, f-PLANE CHANNEL (Bishnu et al. 2024)
+# ===========================================================================
+# Reference: Bishnu et al. (2024), "A Verification Suite of Test Cases for
+# the Barotropic Solver of Ocean Models", JAMES, 10.1029/2022MS003545.
+#
+# WHY THIS EXISTS ALONGSIDE THE GLOBAL CASE. The global
+# `inertia_gravity_wave` case cites the same paper but does not implement
+# it: it imposes a plane wave built with a CONSTANT f0 = 1e-4 on a sphere
+# where the model integrates f = 2*Omega*sin(lat) over +-1.46e-4. That is
+# not an eigenmode anywhere, so it disperses immediately -- the (k,l) mode
+# carries 50% of the variance at t=0 and 1-14% two outputs later -- and no
+# wave-speed gate is constructible on it (MEASURED 2026-08-11: a phase fit
+# returns omega 11-20x too slow with R^2 0.56-0.90, the diagnostic failing
+# its own control). Worse, its L2-vs-analytic gate ran to 2.997 wave
+# periods, where the analytic field is within 0.3% of the IC, so a FROZEN
+# dycore scored the best L2 of any arm.
+#
+# This case fixes all of that by putting the wave where it is an exact
+# eigenmode: a Cartesian f-plane channel, x-periodic with WALLS in y,
+# built by `create_beta_plane_cgrid_geometry(beta=0)` -- uniform dx/dy, no
+# metric terms, and f evaluated as the same constant at every stagger
+# point (MITgcm ini_cori.F convention).
+#
+# THE MODE. A plane wave is NOT an eigenmode of a walled channel: the
+# Coriolis-induced meridional velocity would not vanish at the walls. The
+# correct solution is the POINCARE channel mode, with l quantised so that
+# v vanishes on both walls:
+#
+#   theta = k x - omega t,  k = 2 pi m / Lx,  l = n pi / Ly
+#   v   = V sin(l y) sin(theta)
+#   u   = [Bc cos(l y) + Bs sin(l y)] cos(theta)
+#   eta = [Ac cos(l y) + As sin(l y)] cos(theta)
+#   As  = V f H k / (f^2 + g H l^2)
+#   Ac  = -omega l As / (f k),  Bc = -g l As / f,  Bs = omega As / (H k)
+#   omega^2 = f^2 + g H (k^2 + l^2)
+#
+# The dispersion relation is not imposed -- it FALLS OUT of requiring the
+# two independent expressions for As to agree, which is the check that the
+# mode is consistent. Verified here by substituting the closed form back
+# into the three linear shallow-water equations: residuals ~1e-8 (the
+# finite-difference truncation of the check itself) and v = 0 at both
+# walls to 7e-20. See tests/ocean/unit/test_igw_channel_mode.py.
+# ===========================================================================
+
+#: FIXED physical domain -- the resolution string sets the CELL COUNT, so
+#: refining it is a genuine convergence test. An earlier revision fixed dx
+#: instead, which made the "fine" arm a BIGGER domain at the same 20 points
+#: per wavelength: the two arms were different problems and their L2 values
+#: were not comparable.
+_IGWC_LX_M = 4000.0e3
+_IGWC_LY_M = 2000.0e3
+_IGWC_H = 1000.0          # flat bottom [m]
+_IGWC_F0 = 1.0e-4         # f-plane Coriolis [1/s]
+_IGWC_M = 2               # zonal mode number (periodic)
+_IGWC_N = 1               # meridional mode number (walls => l = n pi / Ly)
+_IGWC_V_AMP = 1.0e-3      # meridional velocity amplitude [m/s]; the case is
+                          # LINEAR, so the amplitude only sets the scale.
+
+#: Run length in wave periods. DELIBERATELY NON-INTEGER: at an integer
+#: number of periods the exact solution returns to the initial condition
+#: and "close to analytic" degenerates into "close to your own IC", which
+#: is exactly how the global case came to rank a frozen dycore best. At
+#: 1.25 periods a frozen field is in quadrature with the truth.
+_IGWC_PERIODS = 1.25
+
+
+def _igw_channel_params(n_lat: int, n_lon: int):
+    """(Lx, Ly, k, l, omega, period) for the channel mode."""
+    lx = _IGWC_LX_M
+    ly = _IGWC_LY_M
+    k = 2.0 * np.pi * _IGWC_M / lx
+    l = np.pi * _IGWC_N / ly
+    omega = np.sqrt(_IGWC_F0 ** 2 + _G_EARTH * _IGWC_H * (k ** 2 + l ** 2))
+    return lx, ly, k, l, omega, 2.0 * np.pi / omega
+
+
+def igw_channel_mode(x, y, t, n_lat: int, n_lon: int):
+    """Exact Poincare channel mode: returns (eta, u, v) at (x, y, t).
+
+    ``x``/``y`` are metres from the channel's south-west corner. Public
+    (no leading underscore) because the unit test verifies it by
+    substitution into the linear shallow-water equations.
+    """
+    _lx, _ly, k, l, omega, _p = _igw_channel_params(n_lat, n_lon)
+    f, g, h = _IGWC_F0, _G_EARTH, _IGWC_H
+    a_s = _IGWC_V_AMP * f * h * k / (f ** 2 + g * h * l ** 2)
+    a_c = -omega * l * a_s / (f * k)
+    b_c = -g * l * a_s / f
+    b_s = omega * a_s / (h * k)
+    th = k * x - omega * t
+    eta = (a_c * np.cos(l * y) + a_s * np.sin(l * y)) * np.cos(th)
+    u = (b_c * np.cos(l * y) + b_s * np.sin(l * y)) * np.cos(th)
+    v = _IGWC_V_AMP * np.sin(l * y) * np.sin(th)
+    return eta, u, v
+
+
+def _igw_channel_coords(n_lat: int, n_lon: int):
+    """Cell-centre and face coordinates [m] from the SW corner.
+
+    C-grid staggering on this geometry: eta at centres (n_lat, n_lon), u
+    on east faces (n_lat, n_lon+1), v on north faces (n_lat+1, n_lon). The
+    v rows j = 0 and j = n_lat are the WALLS, and the mode puts sin(l*y)
+    exactly zero there by construction.
+    """
+    dx = _IGWC_LX_M / n_lon
+    dy = _IGWC_LY_M / n_lat
+    x_c = (np.arange(n_lon) + 0.5) * dx
+    y_c = (np.arange(n_lat) + 0.5) * dy
+    x_u = np.arange(n_lon + 1) * dx         # east faces, incl. both ends
+    y_v = np.arange(n_lat + 1) * dy         # north faces: y_v[0]=0=wall
+    return x_c, y_c, x_u, y_v
+
+
 def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     """Initialize a sinusoidal inertia-gravity wave perturbation.
 
@@ -5721,6 +5886,181 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         f"grid.lat/grid.lon and a uniform dlon/dlat, so it is "
         f"rectilinear-only; a curvilinear grid (tripole) needs its own "
         f"edge IC rather than a silent fall-through to the cube branch.")
+
+
+def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
+                                     days: float) -> tuple[str, float, str]:
+    """Bishnu et al. (2024) inertia-gravity wave, as actually specified.
+
+    Gates on the three things the global case cannot: agreement with the
+    EXACT solution at a non-integer number of periods, the measured wave
+    FREQUENCY, and mode purity. See the block comment above
+    ``igw_channel_mode`` for why the global case cannot.
+    """
+    import time as _time
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    t_wall = _time.time()
+    params = _parse_resolution(tc)
+    n_lat, n_lon = params["n_lat"], params["n_lon"]
+    _lx, _ly, k, l, omega, period = _igw_channel_params(n_lat, n_lon)
+    x_c, y_c, x_u, y_v = _igw_channel_coords(n_lat, n_lon)
+
+    dx_m = _IGWC_LX_M / n_lon
+    dy_m = _IGWC_LY_M / n_lat
+    grid = create_beta_plane_cgrid_geometry(
+        n_lat, n_lon, dx_m=dx_m, dy_m=dy_m,
+        f0=_IGWC_F0, beta=0.0, cartesian_pseudo_lat=True)
+    z_coord = create_ocean_z_star(n_levels=1, H_max=_IGWC_H)
+    # implicit_cn, NOT the default explicit_substep. MEASURED 2026-08-12 on
+    # this very case: the split-explicit barotropic solver propagates the
+    # external gravity wave at ~0.54*sqrt(gH) -- period 1.86x too long, and
+    # it gets WORSE with more substeps (1.862 at 30, 1.951 at 120, 1.971 at
+    # 480), so it is not a CFL or filter artefact. implicit_cn gives 1.000.
+    # Reproduced on both this Cartesian geometry and the production regional
+    # lat-lon grid, at 20 and 40 points per wavelength, with no damping.
+    # A case that verifies wave SPEED cannot run on a solver that gets it
+    # wrong by 2x; the defect is tracked separately.
+    config = LatLonCGridOceanConfig()
+    config = config._replace(
+        barotropic=config.barotropic._replace(
+            barotropic_solver="implicit_cn"))
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=_IGWC_H,
+        land_mask_override=np.ones((n_lat, n_lon)))
+
+    # Exact mode at t=0, each field at ITS OWN stagger point.
+    xc2, yc2 = np.meshgrid(x_c, y_c)
+    xu2, yu2 = np.meshgrid(x_u, y_c)
+    xv2, yv2 = np.meshgrid(x_c, y_v)
+    eta0, _u_c, _v_c = igw_channel_mode(xc2, yc2, 0.0, n_lat, n_lon)
+    _e_u, u0, _v_u = igw_channel_mode(xu2, yu2, 0.0, n_lat, n_lon)
+    _e_v, _u_v, v0 = igw_channel_mode(xv2, yv2, 0.0, n_lat, n_lon)
+    state = state._replace(
+        eta=Field(jnp.asarray(eta0)),
+        u=Field(jnp.asarray(u0[..., None])),
+        v=Field(jnp.asarray(v0[..., None])))
+
+    # dt from the gravity-wave CFL; c = sqrt(gH).
+    c_grav = float(np.sqrt(_G_EARTH * _IGWC_H))
+    # dt PROPORTIONAL TO dx, so the refinement pair measures the SPATIAL
+    # order rather than a mixture. A fixed dt (or a min() against a
+    # constant) leaves the time error unchanged under refinement and flatts
+    # the apparent convergence rate -- measured 0.77 instead of ~2 before
+    # this was fixed. The constant gives ~300 s at dx = 100 km, i.e. CFL
+    # 0.30 on c = sqrt(gH).
+    dt = _IGWC_CFL_S_PER_M * min(dx_m, dy_m)
+    t_final = _IGWC_PERIODS * period
+    n_steps = max(1, int(round(t_final / dt)))
+    dt = t_final / n_steps                    # land exactly on t_final
+    diag_every = max(1, n_steps // 20)
+
+    def _eta_np(s):
+        return np.asarray(s.eta.data, dtype=np.float64)
+
+    # Projection onto the mode's two quadratures. A 2-D FFT is the natural
+    # tool on a doubly-periodic domain; here y is WALLED, so the y
+    # structure is the mode shape Y(y), not a Fourier harmonic. Projecting
+    # on Y(y)cos(kx) and Y(y)sin(kx) gives cos(omega t) and sin(omega t),
+    # whose arctan2 is the phase -- the wave-speed measurement the global
+    # case could not make.
+    y_shape = (igw_channel_mode(np.zeros_like(yc2), yc2, 0.0, n_lat, n_lon)[0]
+               / max(abs(np.cos(0.0)), 1e-30))
+    p_cos = y_shape * np.cos(k * xc2)
+    p_sin = y_shape * np.sin(k * xc2)
+    norm = float(np.sum(y_shape ** 2))
+
+    times, phases, purity = [], [], []
+
+    def scalar_fn(s):
+        e = _eta_np(s)
+        a = float(np.sum(e * p_cos)); b = float(np.sum(e * p_sin))
+        return {"eta_var": float(np.mean(e ** 2)),
+                "proj_c": a, "proj_s": b,
+                "mass": float(np.mean(e))}
+
+    check_fn = _make_check_fn(tc.grid_type)
+    lon_deg = np.degrees(np.asarray(grid.lon_T))
+    lat_deg = np.degrees(np.asarray(grid.lat_T))
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, d: model.step(s, d), state, dt, n_steps, check_fn,
+        scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"IGW channel ({tc.grid_type})", total_days=t_final / 86400.0)
+
+    # --- L2 against the EXACT solution at t_final ---
+    eta_end = _eta_np(state)
+    eta_exact = igw_channel_mode(xc2, yc2, t_final, n_lat, n_lon)[0]
+    denom = float(np.sqrt(np.mean(eta_exact ** 2)))
+    l2_rel = float(np.sqrt(np.mean((eta_end - eta_exact) ** 2)) /
+                   max(denom, 1e-30))
+
+    # --- measured omega from the projection phase ---
+    pc = np.asarray(diag.get("proj_c", []), dtype=np.float64)
+    ps = np.asarray(diag.get("proj_s", []), dtype=np.float64)
+    n_samp = min(pc.size, ps.size)
+    if n_samp >= 3:
+        t_samp = np.arange(n_samp) * diag_every * dt
+        ph = np.unwrap(np.arctan2(ps[:n_samp], pc[:n_samp]))
+        fit = np.polyfit(t_samp, ph, 1)
+        omega_fit = abs(float(fit[0]))
+        resid = ph - np.polyval(fit, t_samp)
+        ss = 1.0 - float(np.sum(resid ** 2) /
+                         max(np.sum((ph - ph.mean()) ** 2), 1e-30))
+        omega_err = abs(omega_fit - omega) / omega
+    else:
+        omega_fit = omega_err = ss = float("nan")
+
+    # --- mode purity: variance explained by the analytic mode shape ---
+    # Least-squares reconstruction from the two quadratures, then the
+    # variance it explains. An earlier revision divided by sum(Y^2) instead
+    # of the patterns' own norms and returned exactly 0.25 for a perfect
+    # mode -- a normalisation bug, not a physical result.
+    nc = float(np.sum(p_cos ** 2)); ns = float(np.sum(p_sin ** 2))
+    a_end = float(np.sum(eta_end * p_cos)); b_end = float(np.sum(eta_end * p_sin))
+    recon = (a_end / max(nc, 1e-30)) * p_cos + (b_end / max(ns, 1e-30)) * p_sin
+    resid = float(np.sum((eta_end - recon) ** 2))
+    purity_frac = 1.0 - resid / max(float(np.sum(eta_end ** 2)), 1e-30)
+
+    ev = diag.get("eta_var", [])
+    energy_ratio = (float(ev[-1] / ev[0]) if len(ev) >= 2 and ev[0] > 0
+                    else float("nan"))
+
+    notes = (f"L2_rel={l2_rel:.4f}, omega_fit={omega_fit:.4e} "
+             f"(exact {omega:.4e}, err={omega_err * 100:.2f}%, R2={ss:.4f}), "
+             f"purity={purity_frac:.4f}, energy_ratio={energy_ratio:.4f}, "
+             f"periods={_IGWC_PERIODS}, dt={dt:.1f}s")
+
+    ok, notes = _apply_value_threshold(
+        ok, notes, l2_rel, _IGWC_L2_MAX,
+        label="IGW channel L2 vs exact", op="le", n_samples=n_steps)
+    ok, notes = _apply_value_threshold(
+        ok, notes, omega_err, _IGWC_OMEGA_ERR_MAX,
+        label="IGW channel omega error", op="le", n_samples=n_samp)
+    ok, notes = _apply_value_threshold(
+        ok, notes, purity_frac, _IGWC_PURITY_MIN,
+        label="IGW channel mode purity", op="ge", n_samples=n_steps)
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": t_final / 86400.0, "dt": dt, "H_max": _IGWC_H,
+        "f0": _IGWC_F0, "omega_exact": omega, "omega_fit": omega_fit,
+        "period_hours": period / 3600.0, "L2_rel": l2_rel,
+        "mode_purity": purity_frac, "energy_ratio": energy_ratio,
+        "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{_time.time() - t_wall:.1f}s"})
+    return ("PASS" if ok else "FAIL", wall, notes)
 
 
 def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
@@ -7394,6 +7734,7 @@ RUNNERS: dict[str, Callable] = {
     "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
+    "inertia_gravity_wave_channel": run_inertia_gravity_wave_channel,
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,

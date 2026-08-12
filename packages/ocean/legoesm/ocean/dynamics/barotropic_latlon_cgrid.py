@@ -1104,10 +1104,9 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        w_filter, w_total, w_transport = compute_filter_weights(
+        w_filter, w_total, w_transport, n_loop = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
-        n_loop = n_substeps
     return w_filter, w_total, w_transport, n_loop
 
 
@@ -1244,6 +1243,32 @@ def barotropic_substeps_latlon_cgrid(
     # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
     # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
     # AND a supplied traced model time: disabled / no-time => bit-identical.
+    #
+    # FROZEN TIDE vs THE CENTRED WINDOW (2026-08-12, codex HIGH x3).
+    # The tide is held CONSTANT across the substep loop, so the time it is
+    # sampled at sets the quadrature error. Centring the box/cosine window on
+    # t+dt stretched the loop to t+(2n-1)*dt_s, so a tide frozen at the loop
+    # start now lags by nearly a full step -- for M2 at dt=1800 s, 14.5 deg of
+    # phase, ~25% of the complex forcing amplitude.
+    #
+    # A one-line "sample at t + n_substeps*dt_s instead" was TRIED AND
+    # REVERTED: it is only the window centroid for the forward-frame box and
+    # cosine filters. Under the multiple-leapfrog frame dt_s = dt_mom/n with
+    # dt_mom = 2*dt, so that product is 2*dt -- a full outer step too late --
+    # and the discretely trimmed power_law window's centroid is n + 0.0088*n
+    # substeps, not n, while nemo_ab3am4 does no averaging at all and returns
+    # the final substep. One expression cannot be the centroid for all of
+    # them, and a wrong sample time is worse than a documented one.
+    #
+    # So the sampling STAYS at the loop start, unchanged from before this
+    # work. It is not silently fine: a tide-enabled box/cosine run now carries
+    # roughly twice the forcing-quadrature error it used to. It is left as a
+    # documented limitation rather than "fixed", because the two cheap fixes
+    # are both wrong -- the centroid expression above misfires on MLF and
+    # power_law, and refusing the combination outright breaks the working,
+    # tested tide wiring (test_tidal_forcing.py::test_wire_*). FOLLOW-UP: a
+    # per-substep tide at t+(i+1)*dt_s removes the freezing and the whole
+    # centroid question at once.
     from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
     F_slow_u, F_slow_v = apply_tidal_forcing(
         F_slow_u, F_slow_v, grid, t_seconds,
@@ -1721,6 +1746,9 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     # single-owner wrapper does the enabled/t_seconds gate, masking contract and
     # the carry-invariant dtype cast; only the halo-pad context is band-specific.
     with local_halo_pads():
+        # Loop-start sampling, matching the standard path (see the FROZEN
+        # TIDE note there). Both lanes must use the SAME convention or the
+        # wide-halo band runs a different tide phase from the owned rows.
         Fsu_ext, Fsv_ext = apply_tidal_forcing(
             Fsu_ext, Fsv_ext, grid_ext, t_seconds,
             getattr(config, "tidal_forcing", None), g=g)
