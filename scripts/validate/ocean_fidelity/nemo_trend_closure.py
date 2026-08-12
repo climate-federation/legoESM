@@ -78,6 +78,17 @@ def main() -> int:
                 continue
             avail = avail + np.nan_to_num(v, nan=0.0)
             names.append(tv)
+            # PER-TERM magnitude by band: a single term that is huge in the
+            # interior is a units/definition problem, not a closure gap
+            # (measured 2026-08-12: adding qsr+qns fixed the SURFACE residual
+            # 5.8 -> 0.46 but blew the interior up to 37, so one added term
+            # carries an interior signal it should not).
+            nz_ = v.shape[0]
+            b = []
+            for k0, k1, lab in ((0, 1, "sfc"), (1, 10, "1-9"), (10, nz_, "10+")):
+                seg = v[k0:k1]
+                b.append(f"{lab} {float(np.sqrt(np.nanmean(seg ** 2))):.2e}")
+            print(f"    [{tag}] {tv:12s} rms by band: " + "  ".join(b))
         wet = np.isfinite(dxdt) & np.isfinite(x0)
         res = np.where(wet, dxdt - avail, np.nan)
         rms = lambda v: float(np.sqrt(np.nanmean(np.where(wet, v, np.nan) ** 2)))
