@@ -317,6 +317,7 @@ class PhysicsPipeline:
         self._cloud_alpha_xr = None
         self._cloud_diagnostic_condensate_scheme = None
         self._cloud_adiabatic_lwc_rate = None
+        self._cloud_saturation_scheme = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -2361,6 +2362,8 @@ class PhysicsPipeline:
                     self, "_clubb_cf_override_strength", None),
                 clubb_cf_override_floor=getattr(
                     self, "_clubb_cf_override_floor", None),
+                saturation_scheme=getattr(
+                    self, "_cloud_saturation_scheme", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -4208,6 +4211,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    pipeline._cloud_saturation_scheme = getattr(
+        config, 'cloud_saturation_scheme', None)
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).

@@ -62,7 +62,7 @@ import jax.numpy as jnp
 from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 from legoesm import constants
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). This is
@@ -738,8 +738,45 @@ def compute_cloud_properties(
     CloudProperties
         Cloud fraction and water/ice paths for radiation.
     """
-    # Saturation mixing ratio and relative humidity
-    q_sat = saturation_mixing_ratio(T, p_full)
+    # Saturation mixing ratio and relative humidity.
+    # ``saturation_scheme`` selects the curve RH is measured against
+    # (dispatch-hardening: unknown value raises at fn entry on the static
+    # config string, never a silent default):
+    #   * "liquid" (legacy): liquid (Tetens) saturation at ALL temperatures.
+    #     Genuinely ICE-saturated cold air (TTL / tropical anvil, ~205-245 K,
+    #     where the liquid curve sits up to ~60% above the ice curve) then
+    #     reads RH ~ 0.55-0.75 — below any rh_crit — so the RH-based schemes
+    #     diagnose NO stratiform cloud exactly where the model carries
+    #     substantial detrained ice (#1521: production day-365 anvil had
+    #     Sundqvist cf = 0.000 at every level against RH_liq while 77% of the
+    #     anvil cells were super-saturated over the mixed-phase curve).
+    #   * "mixed_phase": w(T)-blended liquid/ice saturation, weighted by the
+    #     SAME linear ice-fraction ramp ``_ice_fraction`` (T_freeze ->
+    #     T_ice_only) that partitions this scheme's condensate — so the RH
+    #     criterion and the diagnosed condensate PHASE agree by construction
+    #     (a cloud diagnosed via the ice curve gets ice condensate).  This is
+    #     the standard mixed-phase saturation convention (ECMWF IFS alpha(T)
+    #     blend, Tiedtke 1993; Morrison M2005 partition ramp), and at the
+    #     default ``T_ice_only = 233.15 K = constants.T_hom_freeze`` it equals
+    #     the shared ``microphysics._warm_rain.mixed_phase_saturation_mixing_
+    #     ratio`` curve used by the hard-saturation drain (verified equal to
+    #     1.7e-18 kg/kg over 190-310 K at the CloudConfig defaults).  At and
+    #     above T_freeze the ICE weight ``_f_ice_sat`` is exactly 0, so the
+    #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
+    #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
+    #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
+    if config.saturation_scheme == "liquid":
+        q_sat = saturation_mixing_ratio(T, p_full)
+    elif config.saturation_scheme == "mixed_phase":
+        _f_ice_sat = _ice_fraction(T, config)
+        q_sat = ((1.0 - _f_ice_sat) * saturation_mixing_ratio(T, p_full)
+                 + _f_ice_sat * saturation_mixing_ratio_ice(T, p_full))
+    else:
+        raise ValueError(
+            f"Unknown cloud saturation_scheme: {config.saturation_scheme!r}. "
+            f"Valid schemes: 'liquid' (legacy, liquid saturation at all T), "
+            f"'mixed_phase' (ice-fraction-blended liquid/ice saturation)."
+        )
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
     # --- Cloud fraction ---

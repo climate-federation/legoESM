@@ -34,6 +34,17 @@ INPUT_FIELDS = (
 FIXTURE_INPUTS = tuple(key for _name, key in INPUT_FIELDS)
 OUTPUT_FIELDS = ("delpc", "ptc", "uc", "vc", "divg_d")
 
+# Lane flags — SINGLE SOURCE for the generator, the serialized input the
+# Fortran driver reads (FLAG records, hash-covered), the packed npz
+# (flag_* keys) and the pytest (which loads them from the npz).
+# fv_arrays.F90:1512 forces bounded_domain=.true. under duogrid;
+# fv_grid_utils.F90:224 leaves the four corner flags .false. there.
+# Folding them into input_sha256 closes the flag-only drift channel
+# between driver/generator/test (GLM km=1 r1 finding 4).
+LANE_FLAGS = (("bounded_domain", True), ("sw_corner", False),
+              ("se_corner", False), ("ne_corner", False),
+              ("nw_corner", False))
+
 
 def _dump_field(name: str, a: np.ndarray, lo: int) -> str:
     ni, nj = a.shape[:2]
@@ -49,9 +60,14 @@ def _dump_field(name: str, a: np.ndarray, lo: int) -> str:
     return "".join(out)
 
 
-def serialize_csw_inputs(fields: dict, res: int = RES, ng: int = NG) -> bytes:
+def serialize_csw_inputs(fields: dict, res: int = RES, ng: int = NG,
+                         flags: tuple = LANE_FLAGS) -> bytes:
     lo = 1 - ng
     s = f"# res {res}\n# ng {ng}\n"
+    # FLAG records: consumed by fv3_csw_driver.F90 (which refuses a
+    # file without all five) AND part of the canonical hash payload.
+    for fname, fval in flags:
+        s += f"FLAG {fname.upper()} {int(bool(fval))}\n"
     for name, key in INPUT_FIELDS:
         s += _dump_field(name, np.asarray(fields[key]), lo)
     return s.encode()
@@ -71,11 +87,20 @@ def _gen(work: str) -> None:
         FV3_OMEGA,
         FV3_RADIUS_M,
         analytic_swcore_state,
-        build_fv3_native_gridstruct,
+        build_fv3_native_gridstruct_bounded,
     )
 
-    gs = build_fv3_native_gridstruct(RES, NG, radius=FV3_RADIUS_M,
-                                     omega=FV3_OMEGA)
+    # BOUNDED-conventions lane (km=1 corpus migration, 2026-08-11):
+    # upstream fv_arrays.F90:1512 forces bounded_domain=.true. under
+    # duogrid, and fv_grid_utils.F90:224 leaves the four corner flags
+    # .false. there.  The pre-migration fixture was generated with
+    # plain (unbounded) metrics + bounded=.false. + flags .true. on
+    # BOTH sides — internally consistent but upstream-unreachable.
+    # fv3_csw_driver.F90 sets the matching Fortran flags.
+    gs = build_fv3_native_gridstruct_bounded(RES, NG, radius=FV3_RADIUS_M,
+                                             omega=FV3_OMEGA)
+    for k, v in LANE_FLAGS:
+        gs[k] = v
     st = analytic_swcore_state(gs)
     bd = Bounds.single_tile(RES, NG)
     fields = {
@@ -123,8 +148,11 @@ def _pack(work: str) -> None:
         _fix_dir(),
         **{k: outs[k] for k in OUTPUT_FIELDS},
         **{k: stag[k] for k in FIXTURE_INPUTS},
+        **{f"flag_{k}": np.bool_(v) for k, v in LANE_FLAGS},
         res=RES, ng=NG, input_sha256=inp_hash,
-        input_lineage="analytic-swcore-state; DUO c_sw (flagstruct%duogrid + "
+        input_lineage="analytic-swcore-state on BOUNDED metrics "
+        "(bounded_domain=.true., corner flags .false. — fv_arrays.F90:1512 / "
+        "fv_grid_utils.F90:224); DUO c_sw (flagstruct%duogrid + "
         "dg%is_initialized) — d2a2c_vect_duo + divergence_corner_duo + simple "
         "upwind KE/vort + interior vorticity transport, corner fills skipped")
     print("fixture packed; input_sha256", inp_hash)

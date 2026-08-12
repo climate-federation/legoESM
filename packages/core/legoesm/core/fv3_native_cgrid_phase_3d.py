@@ -117,8 +117,13 @@ def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
                             dt2: float, ptop: float, akap: float,
                             cp_air: float, a2b_ord: int = 4,
                             hydrostatic: bool = True,
-                            remap_follows: bool = False) -> list:
+                            remap_follows: bool = False,
+                            stage_hook=None) -> list:
     """C-grid ``geopk`` then ``p_grad_c``, once per face over the column.
+
+    ``stage_hook(name, payload)`` observes the oracle stage boundaries
+    S04 (post C-grid geopk) and S05 (post ``p_grad_c``); ``None`` is
+    byte-identical to the pre-hook behaviour.
 
     ``dyn_core.F90:533`` calls geopk with ``CG = .true.``; ``:629`` then
     calls ``p_grad_c``, which MUTATES ``uc``/``vc`` IN PLACE -- so the
@@ -176,6 +181,16 @@ def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,
                  out["uc"], out["vc"], ctx["gs6"][t], bd,
                  npz=km, hydrostatic=True)
         press.append(got)
+    if stage_hook is not None:
+        # S04: geopk's pkc/gz (p_grad_c reads but never writes them, so
+        # observing after the loop is the same state as at :534).
+        stage_hook("S04_geopkC", [{"pkc": press[t]["pk"],
+                                   "gz": press[t]["gz"]}
+                                  for t in range(6)])
+        # S05: uc/vc as mutated in place by p_grad_c (:629).
+        stage_hook("S05_pgradc", [{"uc": csw_outs[t]["uc"],
+                                   "vc": csw_outs[t]["vc"]}
+                                  for t in range(6)])
     return press
 
 

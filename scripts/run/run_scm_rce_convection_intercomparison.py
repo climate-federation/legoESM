@@ -51,8 +51,9 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -93,6 +94,13 @@ class SchemeResult:
     # a confound, not a result).
     subsidence_solve: str = "as_shipped"
     subsidence_solve_status: str = ""
+    # The run signature the checkpoint was written under.  Carried on the
+    # result (not just on disk) because the merge stage must be able to refuse
+    # a checkpoint produced against a DIFFERENT reference: the physical-unit
+    # RMSE columns are computed at merge time against the CURRENT reference,
+    # so a stale profile with the same level count yields a plausible, wrong
+    # number rather than a NaN.
+    signature: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +134,14 @@ _SIGNATURE_FIELDS = (
     "scm_microphysics_substeps", "scm_convection_substeps",
     "subsidence_solve",
     "reference_dir", "last_reference_files",
+    # The column's saturation treatment is part of the experiment: the ice
+    # super-saturation allowance only exists in the ice-capable schemes, and
+    # the in-scheme liquid guard changes the condensation rate every step.  A
+    # checkpoint from one setting must not be reused under another.
+    "microphysics", "hard_saturation_adjustment",
+    # A column whose lowest level is pinned to the SST has no sensible heat
+    # flux; that is a different experiment, not a tuning detail.
+    "bl_anchor_top_m",
 )
 
 
@@ -180,7 +196,85 @@ def load_scheme_result(path: Path) -> SchemeResult:
         # status distinguishes "never stamped" from a stamped "as_shipped".
         subsidence_solve=payload.get("subsidence_solve", "as_shipped"),
         subsidence_solve_status=payload.get("subsidence_solve_status", ""),
+        signature=payload.get("signature", {}) or {},
     )
+
+
+# Fields whose disagreement makes two checkpoints incomparable AT MERGE TIME.
+# Not the whole signature: `tune_evals` is deliberately per-scheme (the budget
+# scales with the scheme's parameter count), and a different tuning budget does
+# not make two rows incomparable — it is reported per row instead.
+_MERGE_CRITICAL_SIGNATURE_FIELDS = tuple(
+    f for f in _SIGNATURE_FIELDS if f != "tune_evals")
+
+
+def _guard_merge_inputs(results, run_sig: dict | None, *, allow_partial: bool,
+                        reference_dir=None) -> None:
+    """Refuse to publish a ranking that is partial or built from mixed runs.
+
+    Two failure modes, both silent without this:
+
+    * a ranking table and figures assembled from whichever schemes happened to
+      finish — one surviving checkpoint is enough to produce a plausible
+      "ranking" of one scheme; and
+    * checkpoints written under DIFFERENT protocols merged into one table.
+      Since the physical-unit RMSE columns are computed at merge time against
+      the CURRENT reference, a stale profile with the same level count
+      produces a believable wrong number, not a NaN.
+
+    ``run_sig`` is the signature of THIS invocation, used as the baseline when
+    the merge happens inside a computing run.  In ``--merge-only`` there is no
+    meaningful current signature — the merge job legitimately does not repeat
+    the arm's twenty flags — so pass ``None`` and the checkpoints are required
+    to agree with EACH OTHER instead, plus with ``reference_dir``, which is the
+    one flag the merge really does supply and the one the physical-unit columns
+    are computed against.
+
+    ``allow_partial`` prints what is wrong and continues, so an operator
+    debugging a subset has said out loud that the artifacts are partial.
+    """
+    def _fail(msg: str) -> None:
+        if not allow_partial:
+            raise SystemExit(msg)
+        print(f"[warn] {msg}", flush=True)
+
+    present = {r.scheme for r in results}
+    missing = [s for s in CONVECTION_SCHEMES if s not in present]
+    if missing:
+        _fail(f"MERGE REFUSED: {len(present)}/{len(CONVECTION_SCHEMES)} scheme "
+              f"checkpoints present; missing {missing}. A ranking over a "
+              "subset is not a ranking of the campaign. Re-run the missing "
+              "arms, or pass --allow-partial if you know the table is partial.")
+
+    unstamped = [r.scheme for r in results if not r.signature]
+    if unstamped:
+        _fail("MERGE REFUSED: unstamped (pre-signature) checkpoint(s) "
+              f"{unstamped} — nothing records which protocol produced them.")
+
+    stamped = [r for r in results if r.signature]
+    baseline = run_sig if run_sig is not None else (
+        stamped[0].signature if stamped else {})
+    mismatched = []
+    for r in stamped:
+        diffs = {k: (r.signature.get(k), baseline.get(k))
+                 for k in _MERGE_CRITICAL_SIGNATURE_FIELDS
+                 if r.signature.get(k) != baseline.get(k)}
+        if diffs:
+            mismatched.append(f"{r.scheme}: {diffs}")
+    if mismatched:
+        _fail("MERGE REFUSED: checkpoint(s) written under a different protocol "
+              "than the rest — the physical-unit RMSE columns are computed "
+              "against ONE reference, so merging these would produce "
+              "believable wrong numbers:\n  " + "\n  ".join(mismatched))
+
+    if reference_dir is not None:
+        wrong_ref = [f"{r.scheme}: {r.signature.get('reference_dir')}"
+                     for r in stamped
+                     if r.signature.get("reference_dir") != str(reference_dir)]
+        if wrong_ref:
+            _fail("MERGE REFUSED: checkpoint(s) were scored against a "
+                  f"different reference than {reference_dir}:\n  "
+                  + "\n  ".join(wrong_ref))
 
 
 def load_all_scheme_results(outdir: Path, schemes) -> list[SchemeResult]:
@@ -212,6 +306,9 @@ def evaluate_scheme(
     radiation: str,
     radiation_update_interval_steps: int,
     subsidence_solve: str = "as_shipped",
+    microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
+    hard_saturation_adjustment: bool = False,
+    bl_anchor_top_m: float = camp.DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -230,6 +327,8 @@ def evaluate_scheme(
         radiation=radiation,
         radiation_update_interval_steps=radiation_update_interval_steps,
         convection=scheme,
+        microphysics=microphysics,
+        hard_saturation_adjustment=hard_saturation_adjustment,
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
@@ -247,6 +346,7 @@ def evaluate_scheme(
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        bl_anchor_top_m=bl_anchor_top_m,
     )
     prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
     _best_cfg, records, tuned = camp.tune_category_winner(
@@ -320,19 +420,53 @@ CSV_FIELDS = (
     "tuned_score", "tuned_T_rmse", "tuned_qv_rmse", "tuned_cloud_rmse",
     "tuned_precip_rmse", "tuned_precip_mm_day", "tuned_verdict",
     "score_improvement_pct", "crm_precip_mm_day", "n_tuned_params",
+    # The tuning budget is per-scheme (it scales with the parameter count), so
+    # it belongs on the ROW; a single campaign-wide number in the preamble
+    # would be the last finisher's value.
+    "tune_evals", "evals_per_param",
     "tuned_drift_T_K", "tuned_madiab_mean_K", "tuned_cold_point_T_K",
     "tuned_cold_point_z_km",
+    # PHYSICAL-unit RMSE (K, g/kg).  The scores above are normalised by the
+    # reference's mass-weighted standard deviation — commensurable for the
+    # optimiser, uninterpretable in a figure caption.  Column names match what
+    # scripts/plot/plot_scm_rce_convection_paper.py reads.
+    "apriori_T_rmse_K", "tuned_T_rmse_K",
+    "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
+    "apriori_qcond_rmse_g_kg", "tuned_qcond_rmse_g_kg",
 )
 
+KG_KG_TO_G_KG = 1_000.0
 
-def _row(res: SchemeResult) -> dict:
+
+def _row(res: SchemeResult, ref=None) -> dict:
     p, t = res.prior, res.tuned
     impr = (
         100.0 * (p.score - t.score) / p.score
         if np.isfinite(p.score) and p.score > 0 and np.isfinite(t.score)
         else float("nan")
     )
+    if ref is None:
+        # No reference in scope (unit tests of the row shape): the physical
+        # columns are NaN rather than absent, so the CSV header never changes
+        # shape between call sites.
+        nan = float("nan")
+        phys = {k: nan for k in (
+            "apriori_T_rmse_K", "tuned_T_rmse_K",
+            "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
+            "apriori_qcond_rmse_g_kg", "tuned_qcond_rmse_g_kg")}
+    else:
+        pr = camp.physical_profile_rmse(ref, p)
+        tr = camp.physical_profile_rmse(ref, t)
+        phys = {
+            "apriori_T_rmse_K": pr["T_rmse_K"],
+            "tuned_T_rmse_K": tr["T_rmse_K"],
+            "apriori_qv_rmse_g_kg": pr["qv_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "tuned_qv_rmse_g_kg": tr["qv_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "apriori_qcond_rmse_g_kg": pr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
+            "tuned_qcond_rmse_g_kg": tr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
+        }
     return {
+        **phys,
         "scheme": res.scheme,
         "subsidence_solve": res.subsidence_solve,
         "subsidence_solve_status": res.subsidence_solve_status,
@@ -350,15 +484,25 @@ def _row(res: SchemeResult) -> dict:
         "tuned_madiab_mean_K": t.moist_adiabat_mean_abs_K,
         "tuned_cold_point_T_K": t.cold_point_T_K,
         "tuned_cold_point_z_km": t.cold_point_z_km,
+        "tune_evals": res.signature.get("tune_evals", ""),
+        "evals_per_param": (
+            round(res.signature["tune_evals"] / len(res.records), 1)
+            if res.signature.get("tune_evals") and res.records else ""),
     }
 
 
-def write_csv(path: Path, results: list[SchemeResult]) -> None:
+def write_csv(path: Path, results: list[SchemeResult], ref=None) -> None:
+    """Machine-readable per-scheme metrics.
+
+    ``ref`` is what turns the physical-unit columns from NaN into numbers, so
+    the merge stage passes it; a caller that only wants the normalised scores
+    may omit it.
+    """
     with path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for res in sorted(results, key=lambda r: r.tuned.score):
-            writer.writerow(_row(res))
+            writer.writerow(_row(res, ref))
 
 
 def _finite_or_none(x: float):
@@ -427,9 +571,12 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         f"{meta['last_reference_files']} CRM 3-D daily volumes). Metrics are the "
         "std-normalized, mass-weighted profile RMSE (T, q_v, condensate) plus a "
         "surface-precip term; **score** is their combination (lower = closer to "
-        "CRM). *A priori* = scheme defaults; *tuned* = after "
-        f"{meta['tune_evals']}-evaluation derivative-free tuning of the scheme's "
-        "extended-tier parameters against the CRM profiles.\n"
+        "CRM). *A priori* = scheme defaults; *tuned* = after derivative-free "
+        "tuning of the scheme's extended-tier parameters against the CRM "
+        "profiles. The evaluation budget is PER SCHEME (it scales with the "
+        "scheme's parameter count, so a 1-parameter scheme is not compared "
+        "against a 19-parameter one at the same number of draws) and is "
+        "reported in the `#evals` column, not here.\n"
     )
     lines.append(
         f"SCM: radiation `{meta['radiation']}`, fixed SST 300 K, dt {meta['dt']:.0f} s, "
@@ -464,12 +611,12 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     lines.append(
         "| rank | scheme | kernel | score (prior→tuned) | T RMSE (p→t) | "
         "qv RMSE (p→t) | cloud RMSE (p→t) | precip mm/d (p→t) | Δscore % | "
-        "verdict (p→t) | cold-pt T,z (tuned) | #params |"
+        "verdict (p→t) | cold-pt T,z (tuned) | #params | #evals |"
     )
-    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|")
+    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|---:|")
     for i, res in enumerate(ordered, 1):
         p, t = res.prior, res.tuned
-        row = _row(res)
+        row = _row(res, ref)
         lines.append(
             f"| {i} | {res.scheme} "
             f"| {res.subsidence_solve_status or res.subsidence_solve} "
@@ -481,7 +628,8 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
             f"| {_fmt(row['score_improvement_pct'], '.1f')} "
             f"| {row['prior_verdict']}→{row['tuned_verdict']} "
             f"| {_fmt(t.cold_point_T_K, '.0f')} K, {_fmt(t.cold_point_z_km, '.1f')} km "
-            f"| {len(res.records)} |"
+            f"| {len(res.records)} "
+            f"| {row['tune_evals']} |"
         )
     lines.append(f"\nCRM reference surface precip: {ref.precip_ref_mm_day:.3g} mm/day.\n")
     lines.append(
@@ -631,6 +779,40 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--radiation-update-interval-steps", type=int, default=None)
+    parser.add_argument(
+        "--microphysics", default=camp.BASELINE_SCHEMES["microphysics"],
+        choices=camp.SCHEME_SWEEPS["microphysics"],
+        help=(
+            "SCM microphysics, held FIXED across every convection scheme. The "
+            "default `kessler` is WARM-RAIN ONLY: it carries no ice, so the "
+            "IFS/SAM homogeneous-freezing ice-super-saturation allowance is "
+            "inert and the upper troposphere is biased for every scheme "
+            "alike. Use `morrison` (SAM M2005 flavor) to score the cold point "
+            "against an ice-carrying CRM reference."
+        ),
+    )
+    parser.add_argument(
+        "--hard-saturation-adjustment", action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable the in-scheme iterated saturation adjustment (the IFS "
+            "'no liquid super-saturation' half) for the selected microphysics. "
+            "Default off = the smooth-sigmoid path, which leaves a few percent "
+            "standing super-saturation. sdm/fast_sbm reject the flag."
+        ),
+    )
+    parser.add_argument(
+        "--bl-anchor-top-m", type=float,
+        default=camp.DEFAULT_SCM_RCE_BL_TOP_M,
+        help=(
+            "Depth [m] over which the boundary layer is anchored to an "
+            "SST-rooted lapse profile. The shipped 0.0 anchors EXACTLY the "
+            "lowest level (the mask is <=, and z is 0 there), so T_a == SST "
+            "and the sensible heat flux is identically zero. Pass a NEGATIVE "
+            "value to disable the anchor entirely, which is what a zero depth "
+            "was meant to express."
+        ),
+    )
     parser.add_argument("--schemes", default=None,
                         help="comma-separated convection scheme subset")
     parser.add_argument("--scm-microphysics-substeps", type=int,
@@ -651,6 +833,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-merge", action="store_true",
                         help="run schemes + write per-scheme json/png but skip the "
                              "aggregate summary/CSV/combined plot (for parallel workers)")
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help=(
+            "Merge even when scheme checkpoints are missing or were written "
+            "under a different protocol. Prints what is wrong and continues; "
+            "the resulting table is NOT a campaign ranking."
+        ),
+    )
     parser.add_argument("--force", action="store_true",
                         help="re-run schemes even if a scheme_*.json checkpoint exists")
     parser.add_argument(
@@ -721,12 +911,17 @@ def main(argv: list[str] | None = None) -> int:
 
     meta = dict(
         radiation=args.radiation, dt=args.dt, days=args.days,
-        analysis_days=args.analysis_days, tune_evals=args.tune_evals,
+        analysis_days=args.analysis_days,
         surface_wind_m_s=args.surface_wind_m_s,
         large_scale_forcing=args.large_scale_forcing,
         last_reference_files=args.last_reference_files,
         reference_dir=str(args.reference_dir),
         subsidence_solve=args.subsidence_solve,
+        microphysics=args.microphysics,
+        hard_saturation_adjustment=args.hard_saturation_adjustment,
+        bl_anchor_top_m=args.bl_anchor_top_m,
+        scm_microphysics_substeps=args.scm_microphysics_substeps,
+        scm_convection_substeps=args.scm_convection_substeps,
     )
     if args.merge_only and saved_meta:
         meta = {**meta, **saved_meta}
@@ -754,14 +949,31 @@ def main(argv: list[str] | None = None) -> int:
                 radiation=args.radiation,
                 radiation_update_interval_steps=args.radiation_update_interval_steps,
                 subsidence_solve=args.subsidence_solve,
+                microphysics=args.microphysics,
+                hard_saturation_adjustment=args.hard_saturation_adjustment,
+                bl_anchor_top_m=args.bl_anchor_top_m,
             )
+            res.signature = run_sig
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
             plot_scheme(args.outdir / f"profiles_{scheme}.png", ref, res)
             print(f"    prior score={_fmt(res.prior.score)} "
                   f"-> tuned score={_fmt(res.tuned.score)} "
                   f"({len(res.records)} params) "
                   f"[kernel {res.subsidence_solve_status}]", flush=True)
-        meta_path.write_text(json.dumps(meta, indent=2))
+        # ATOMIC: the campaign runs one process per scheme against a shared
+        # --outdir, so several finish at once and write this same file. Two
+        # interleaved write_text calls can leave a truncated file, and
+        # --merge-only reads it to rebuild the reference. Write-then-rename is
+        # atomic within a directory on POSIX.
+        #
+        # `meta` deliberately holds only PROTOCOL fields that are identical
+        # across schemes. The tuning budget is NOT one of them — it scales with
+        # each scheme's parameter count — so it lives on the per-scheme
+        # checkpoint signature and is reported per row. Putting it here would
+        # publish the last finisher's budget as if it were the campaign's.
+        _tmp = meta_path.with_suffix(f".json.{os.getpid()}.tmp")
+        _tmp.write_text(json.dumps(meta, indent=2))
+        _tmp.replace(meta_path)
 
     if args.no_merge:
         print(f"[done] ran {len(schemes)} scheme(s); merge skipped (--no-merge)")
@@ -772,7 +984,17 @@ def main(argv: list[str] | None = None) -> int:
     results = load_all_scheme_results(args.outdir, CONVECTION_SCHEMES)
     if not results:
         raise SystemExit(f"No scheme_*.json checkpoints found in {args.outdir}")
-    write_csv(args.outdir / "intercomparison.csv", results)
+    # In --merge-only the current args are NOT the arm's args (the merge job
+    # supplies only the outdir and the reference), so the checkpoints are
+    # required to agree with each other and with the reference being scored
+    # against, rather than with this invocation.
+    _guard_merge_inputs(
+        results, None if args.merge_only else run_sig,
+        allow_partial=args.allow_partial, reference_dir=args.reference_dir)
+    write_csv(args.outdir / "intercomparison.csv", results, ref)
+    # Second copy under the name the paper figure script reads, so the
+    # figures are built from THIS table rather than a hand-copied one.
+    write_csv(args.outdir / "summary_table.csv", results, ref)
     write_tuned_parameters(args.outdir / "tuned_parameters.json", results)
     write_summary(args.outdir / "summary.md", ref, results, meta)
     plot_all(args.outdir / "profiles_all_convection.png", ref, results)

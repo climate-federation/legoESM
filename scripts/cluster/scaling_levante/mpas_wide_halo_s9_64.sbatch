@@ -48,16 +48,26 @@ mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
 rc=0
 
+# Geometry overridable at submit: the lever CONFIRMED -14.1% at s9@64
+# (job 26880593, 8.13 -> 6.98 ms, drift 4.4%); the open question is
+# whether it holds past 100 GPUs, where the per-collective price rises.
+WH_NODES="${WH_NODES:-16}"
+WH_GPN="${WH_GPN:-4}"
+WH_SUBDIV="${WH_SUBDIV:-9}"
+WH_NDEV=$((WH_NODES * WH_GPN))
+
 run_arm () {  # wide tag
   local WH=$1 TAG=$2
   echo "=== s9@64 wide_halo=$WH [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=$WH LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
-    srun --nodes=16 --ntasks=64 --ntasks-per-node=4 --gpus-per-node=4 \
+    srun --nodes="$WH_NODES" --ntasks="$WH_NDEV" \
+      --ntasks-per-node="$WH_GPN" --gpus-per-node="$WH_GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-      --multicontroller --n-devices 64 --subdivision 9 --nlev 26 \
+      --multicontroller --n-devices "$WH_NDEV" \
+      --subdivision "$WH_SUBDIV" --nlev 26 \
       --steps 12 --warmup 3 --lloyd 0 --partition-method sfc \
-      --reorder-for 64 \
+      --reorder-for "$WH_NDEV" \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
 }
 # GPU PARITY GATE first (cheap, 1 node, s6@4): wide step vs the
@@ -80,10 +90,11 @@ run_arm 0 off_a2
 
 echo "=== RECEIPTS ==="
 set +e
-"$PY" - "$OUTDIR" <<'EOF'
-import json, math, sys, pathlib
+WH_NDEV="$WH_NDEV" "$PY" - "$OUTDIR" <<'EOF'
+import json, math, os, sys, pathlib
 out = pathlib.Path(sys.argv[1])
 WANT = {"off_a": (False, 3), "on_b": (True, 9), "off_a2": (False, 3)}
+ND = int(os.environ["WH_NDEV"])
 t = {}
 for tag, (wide, depth) in WANT.items():
     try:
@@ -95,8 +106,9 @@ for tag, (wide, depth) in WANT.items():
     r = rows[0]
     ok = (r.get("wide_halo") == wide and r.get("halo_depth") == depth
           and r.get("halo_strategy_effective") == "ppermute"
-          and r.get("n_devices") == 64 and r.get("platform") == "gpu"
-          and r.get("n_processes") == 64
+          and r.get("n_devices") == ND
+          and r.get("platform") in ("gpu", "cuda")
+          and r.get("n_processes") == ND
           and math.isfinite(r["steady_median_ms"])
           and r["steady_median_ms"] > 0)
     if not ok:
