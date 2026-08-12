@@ -14,7 +14,7 @@ __param_spec__ = {
             "kappa_min": "numerics: stability floor on the equatorial taper, NOT a NEMO namelist parameter; default 0 = inactive (enable via config, not training)",
         },
         "params": {
-            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0 = zUfac*rn_Le**inn with zUfac=1/2*rn_Ue,inn=1 for the LAPLACIAN operator and 1/12*rn_Ue,inn=3 for the bilaplacian (ldftra.F90:290-293) -- NOT plain rn_Ue*rn_Le", "shape": None},
         },
     },
     "HarmonicConfig": {
@@ -176,14 +176,23 @@ class TreguierConfig(NamedTuple):
     ``T⁻¹ = √(Σ N²(S_x²+S_y²)dz / (5 m + Σ dz))`` built from the isopycnal
     slopes.  The fixed factors (0.4, 2/40 km, 20°, +5 m) are hard-coded in the
     NEMO source (module constants in ``_gm_redi_common``); the ONE namelist
-    tunable is the cap ``aei0 = rn_Ue·rn_Le`` (DINO: 0.03·100 km = 3000 m²/s;
+    tunable is the cap ``aei0`` (DINO default below: 3000 m²/s;
     ORCA1: 0.018·100 km = 1800 m²/s).
 
     Mutually exclusive with ``VisbeckConfig.enabled`` (both are adaptive-κ
     diagnostics; the GM/Redi dispatch raises if both are on).
     """
     enabled: bool = False
-    aei0: float = 3000.0     # κ cap [m²/s] = rn_Ue·rn_Le (DINO namelist value)
+    # κ cap [m²/s].  NEMO's own formula is OPERATOR-DEPENDENT
+    # (ldftra.F90:290-293): zUfac = 1/2*rn_Ue for the LAPLACIAN operator and
+    # 1/12*rn_Ue for the bilaplacian, i.e. the laplacian cap is
+    # 1/2*rn_Ue*rn_Le, NOT rn_Ue*rn_Le.  For ORCA1 (ln_traldf_lap) that is
+    # 0.5*0.018*100e3 = 900, confirmed by NEMO's emitted aeiu_2d (max exactly
+    # 900, measured 2026-08-12); run_omip_core2's --gm-aei0 default was
+    # corrected from 1800 to 900 for that reason.  This DINO default is left
+    # at its historical value because DINO's operator/namelist has not been
+    # re-checked here -- verify before reusing the number elsewhere.
+    aei0: float = 3000.0
     # Optional FLOOR on the returned κ_GM [m²/s], applied to WET columns only
     # (dry columns stay exactly 0).  The tropical taper ``min(1, |f/f_20|)``
     # drives κ → 0 AT THE EQUATOR — measured on the eORCA1 tripole state, the
