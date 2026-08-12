@@ -134,6 +134,15 @@ def _ref_clim(var, months, mlat, mlon, src=None):
     v = d[var].sel(time=slice(f"{REF_MIN_YEAR}-01-01", None))
     if v.time.size == 0:
         return None
+    # HONOUR valid_min / valid_max BEFORE averaging.  GPCP stores its
+    # missing-data flag as 9.97e36 with no _FillValue attribute, so xarray
+    # leaves it in place and it passes every isfinite check -- a plausible
+    # number of the right dtype is more dangerous than a NaN, and averaged in
+    # it produced a zonal-mean precipitation of 4e34 mm/day.
+    lo, hi = v.attrs.get("valid_min"), v.attrs.get("valid_max")
+    if lo is not None or hi is not None:
+        v = v.where((v >= (lo if lo is not None else -np.inf))
+                    & (v <= (hi if hi is not None else np.inf)))
     clim = v.groupby("time.month").mean("time").sel(month=months).mean("month")
     clim = clim.load()
 
