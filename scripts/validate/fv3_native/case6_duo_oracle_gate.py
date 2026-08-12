@@ -211,7 +211,12 @@ def load_run(npz_path: str, case: int = 6) -> dict:
     """
     if case not in GH_PLAUSIBLE_BY_CASE:
         raise ValueError(f"unknown case {case}")
-    z = np.load(npz_path, allow_pickle=True)
+    # allow_pickle=False (codex a45 r3 #1): every field the runner
+    # writes is a plain numeric/string array (verified: no object
+    # dtype anywhere in run_duo_stepper_case6.py's savez_compressed
+    # call) — pickle deserialisation of an untrusted npz is an
+    # unnecessary code-execution surface with no functional need.
+    z = np.load(npz_path, allow_pickle=False)
     if "case" in z.files:
         npz_case = int(np.asarray(z["case"]).item())
         if npz_case != case:

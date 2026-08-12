@@ -281,7 +281,7 @@ def test_runner_threads_deck_config_to_stepper(tmp_path, monkeypatch):
         assert call["n_split"] == 7
         assert call["d_ext"] == 0.0
         assert call["sw_cfg"] == _CASE6_SW_CFG_LITERAL
-    z = np.load(out, allow_pickle=True)
+    z = np.load(out, allow_pickle=False)
     assert int(z["requested_days"]) == 1
     assert float(z["dt_atmos"]) == 1200.0
     assert int(z["n_split"]) == 7
@@ -1022,7 +1022,7 @@ def test_runner_case2_alpha45_threads_deck_and_rotation(
         + np.sin(glat) * _COS_45RAD)
     np.testing.assert_allclose(np.asarray(gs["fC"])[sl, sl], fc_expect,
                                rtol=1e-12, atol=1e-18)
-    z = np.load(out, allow_pickle=True)
+    z = np.load(out, allow_pickle=False)
     assert int(z["case"]) == 2
     assert float(z["alpha"]) == 45.0
     assert float(z["dt_atmos"]) == 3600.0
