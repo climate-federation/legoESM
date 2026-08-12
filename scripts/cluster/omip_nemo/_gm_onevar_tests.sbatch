@@ -39,7 +39,7 @@ run_stage () {
   [ $rc -eq 0 ] || NFAIL=$((NFAIL + 1))
 }
 
-run_stage "gm_treguier CLI + one-variable regression" \
+run_stage "gm_treguier CLI + one-variable + operator flags" \
   $PY -u -m pytest -q tests/unit/test_run_omip_core2_gm_treguier.py
 
 run_stage "nemo_match_recipe (aei0 900 correction)" \

@@ -222,3 +222,95 @@ class TestTreguierBlockIsOneVariable:
             "build_tripole references the LAT-LON bathymetry GM default; that "
             "is the block whose use made every --gm-treguier arm a "
             "four-field change.")
+
+
+class TestGMOperatorFlags:
+    """`--gm-slope-scheme` / `--gm-bolus-advection`: the NEMO-faithful lane.
+
+    NEMO ORCA1 runs the STANDARD rotated laplacian with the stabilizing
+    correction (namelist_cfg: ln_traldf_lap/iso=.true., ln_traldf_triad=.false.,
+    ln_traldf_msc=.true.) and adds the eddy-induced transport to the advecting
+    velocity (LDF/ldftra.F90 `ldf_eiv_trp`, called by traadv.F90) so the bolus
+    rides the monotone FCT limiter.  Our OMIP default is centered slopes plus an
+    unlimited centred bolus flux.  `nemo_iso_lap` + `through_fct` were already
+    implemented (the DINO card uses them) but had ZERO references in this
+    driver, so the faithful lane was unreachable from an OMIP run.
+    """
+
+    def _main_with(self, argv, monkeypatch):
+        import sys
+
+        from scripts.run import run_omip_core2
+
+        monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
+        return run_omip_core2.main
+
+    def test_defaults_are_none_so_the_card_value_stands(self):
+        a = _parse()
+        assert a.gm_slope_scheme is None
+        assert a.gm_bolus_advection is None
+
+    def test_round_trip(self):
+        a = _parse("--gm-slope-scheme", "nemo_iso_lap",
+                   "--gm-bolus-advection", "through_fct")
+        assert a.gm_slope_scheme == "nemo_iso_lap"
+        assert a.gm_bolus_advection == "through_fct"
+
+    def test_unknown_scheme_rejected_by_argparse(self):
+        with pytest.raises(SystemExit):
+            _parse("--gm-slope-scheme", "triadz")
+
+    def test_through_fct_without_nemo_iso_lap_rejected(self, monkeypatch):
+        """The model gates on the PAIR, so the flag alone must not run."""
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc",
+             "--gm-bolus-advection", "through_fct"], monkeypatch)
+        with pytest.raises(SystemExit, match="requires --gm-slope-scheme"):
+            main()
+
+    def test_non_tripole_grid_rejected(self, monkeypatch):
+        main = self._main_with(
+            ["--grid", "mpas", "--mesh", "m.nc",
+             "--gm-slope-scheme", "nemo_iso_lap"], monkeypatch)
+        with pytest.raises(SystemExit, match="tripole only"):
+            main()
+
+    def test_conflicts_with_no_gm_redi(self, monkeypatch):
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc",
+             "--gm-slope-scheme", "nemo_iso_lap", "--no-gm-redi"], monkeypatch)
+        with pytest.raises(SystemExit, match="mutually exclusive"):
+            main()
+
+    def test_programmatic_surface_rejects_unknown_values(self):
+        """argparse choices only guard the CLI; build_tripole must raise too."""
+        from scripts.run.run_omip_core2 import build_tripole
+
+        # The guards are the FIRST statements in the body, so these raise
+        # before nlev/H_max/mesh_path are used -- the placeholders never reach
+        # any I/O.
+        args = (75, 6000.0, "unused.nc")
+        with pytest.raises(ValueError, match="unknown gm_slope_scheme"):
+            build_tripole(*args, gm_slope_scheme="triadz")
+        with pytest.raises(ValueError, match="unknown gm_bolus_advection"):
+            build_tripole(*args, gm_bolus_advection="fct")
+        with pytest.raises(ValueError, match="requires"):
+            build_tripole(*args, gm_bolus_advection="through_fct",
+                          gm_slope_scheme="centered")
+
+    def test_the_pair_the_model_honors_is_the_pair_we_expose(self):
+        """The gate in the model is `nemo_iso_lap` + `through_fct` -- assert the
+        driver's allowed values contain exactly that pair's members, so a rename
+        on either side goes red here instead of silently disabling the lane."""
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from scripts.run.run_omip_core2 import (
+            _GM_BOLUS_FORMS, _GM_SLOPE_SCHEMES,
+        )
+
+        assert "nemo_iso_lap" in _GM_SLOPE_SCHEMES
+        assert "through_fct" in _GM_BOLUS_FORMS
+        # the config fields the driver overrides must still exist
+        assert "slope_scheme" in GMRediConfig._fields
+        assert "gm_bolus_advection" in GMRediConfig._fields
+        # and the defaults must be the departure we are making selectable
+        assert GMRediConfig().gm_bolus_advection == "centred"

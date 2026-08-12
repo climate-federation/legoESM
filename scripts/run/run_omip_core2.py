@@ -76,6 +76,18 @@ _GM_AEI0_DEFAULT = 900.0
 # 2026-08-12).  The divergence from the recipe default is deliberate and
 # asserted at both ends (tests/unit/test_run_omip_core2_gm_treguier.py).
 _GM_KAPPA_MIN_DEFAULT = 200.0
+# Isoneutral-slope operators and GM bolus forms selectable on the tripole.
+# NEMO ORCA1 runs the STANDARD rotated laplacian (namelist_cfg:
+# ln_traldf_lap=.true., ln_traldf_iso=.true., ln_traldf_triad=.false.) with the
+# Method of Stabilizing Correction (ln_traldf_msc=.true.), and adds the eddy-
+# induced transport to the ADVECTING velocity (LDF/ldftra.F90 `ldf_eiv_trp`,
+# PUBLIC "called by traadv.F90") so the bolus rides the monotone FCT limiter.
+# "nemo_iso_lap" is that operator (it carries the akz stabilization);
+# "through_fct" is that bolus routing.  The OMIP default is "centered" slopes
+# with an unlimited centred bolus flux -- a documented departure, now
+# selectable rather than hard-wired.
+_GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
+_GM_BOLUS_FORMS = ("centred", "through_fct")
 
 
 def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):
@@ -688,6 +700,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
+                  gm_slope_scheme=None, gm_bolus_advection=None,
                   store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
@@ -703,6 +716,24 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     """
     # Dispatch hardening at the programmatic surface too (argparse `choices`
     # only guards the CLI): ""/None/typos must not silently run as "none".
+    if gm_slope_scheme is not None and gm_slope_scheme not in _GM_SLOPE_SCHEMES:
+        raise ValueError(
+            f"unknown gm_slope_scheme {gm_slope_scheme!r}; expected one of "
+            f"{sorted(_GM_SLOPE_SCHEMES)}.")
+    if (gm_bolus_advection is not None
+            and gm_bolus_advection not in _GM_BOLUS_FORMS):
+        raise ValueError(
+            f"unknown gm_bolus_advection {gm_bolus_advection!r}; expected one "
+            f"of {sorted(_GM_BOLUS_FORMS)}.")
+    # `through_fct` is honored ONLY with slope_scheme="nemo_iso_lap": the model
+    # gates on exactly that pair (ocean_model_latlon_cgrid `_want_bolus`), so
+    # any other slope scheme would silently keep the centred bolus flux while
+    # the run manifest claimed FCT routing.  Fail instead.
+    if gm_bolus_advection == "through_fct" and gm_slope_scheme != "nemo_iso_lap":
+        raise ValueError(
+            "gm_bolus_advection='through_fct' requires "
+            "gm_slope_scheme='nemo_iso_lap' (the model honors the pair, not "
+            f"the flag alone); got gm_slope_scheme={gm_slope_scheme!r}.")
     if tripole_vmix not in ("none", "tke", "kpp"):
         raise ValueError(
             f"unknown tripole_vmix {tripole_vmix!r}; expected 'none', 'tke' "
@@ -785,6 +816,27 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # raises); the tripole recipe already ships Visbeck OFF, so this only
         # turns the Treguier block on.
         _ovr["gm_redi"] = _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min)
+    # NEMO-faithful lateral-mixing lane (opt-in).  Composes with whichever
+    # kappa_GM scheme is active above: this touches ONLY the operator fields, so
+    # `--gm-slope-scheme nemo_iso_lap` alone is a one-variable operator swap
+    # against the control, independent of the coefficient.
+    if gm_slope_scheme is not None or gm_bolus_advection is not None:
+        _gm_base = _ovr.get("gm_redi", config.flat_get("gm_redi"))
+        if _gm_base is None:
+            raise ValueError(
+                "--gm-slope-scheme / --gm-bolus-advection need GM/Redi "
+                "enabled; this run has it disabled (--no-gm-redi).")
+        _gm_kw = {}
+        if gm_slope_scheme is not None:
+            _gm_kw["slope_scheme"] = gm_slope_scheme
+        if gm_bolus_advection is not None:
+            _gm_kw["gm_bolus_advection"] = gm_bolus_advection
+        _ovr["gm_redi"] = _gm_base._replace(**_gm_kw)
+        print(f"[setup] tripole GM/Redi operator: "
+              f"slope_scheme={_ovr['gm_redi'].slope_scheme}, "
+              f"gm_bolus_advection={_ovr['gm_redi'].gm_bolus_advection} "
+              f"(NEMO ORCA1: ln_traldf_iso + ln_traldf_msc, eiv added to the "
+              f"advecting velocity -> nemo_iso_lap + through_fct)")
         print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
               f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
               f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
@@ -4360,6 +4412,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(rn_Ue=0.018, rn_Le=100e3, laplacian => "
                         "aei0 = 1/2*rn_Ue*rn_Le = 900 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
+    p.add_argument("--gm-slope-scheme", choices=_GM_SLOPE_SCHEMES, default=None,
+                   help="Isoneutral-slope operator for GM/Redi (tripole only). "
+                        "Unset keeps the recipe's 'centered'. 'nemo_iso_lap' is "
+                        "NEMO's STANDARD rotated laplacian, which is what ORCA1 "
+                        "runs (namelist_cfg: ln_traldf_lap=.true., "
+                        "ln_traldf_iso=.true., ln_traldf_triad=.false.) and "
+                        "which carries the akz stabilization of "
+                        "ln_traldf_msc=.true.; our default has neither. Required "
+                        "for --gm-bolus-advection through_fct.")
+    p.add_argument("--gm-bolus-advection", choices=_GM_BOLUS_FORMS, default=None,
+                   help="GM eddy-induced (bolus) transport form (tripole only). "
+                        "Unset keeps the recipe's 'centred' = a standalone, "
+                        "UNLIMITED centred flux. 'through_fct' adds the bolus to "
+                        "the tracer advecting mass flux so it rides the monotone "
+                        "FCT limiter -- what NEMO does (LDF/ldftra.F90 "
+                        "ldf_eiv_trp, called by traadv.F90). Honored ONLY with "
+                        "--gm-slope-scheme nemo_iso_lap (the model gates on the "
+                        "pair), so passing it alone raises rather than silently "
+                        "keeping the centred flux.")
     p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
                         "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
@@ -4786,6 +4857,28 @@ def main() -> int:
             "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
             "selects the NEMO ldf_eiv kappa_GM scheme, the latter disables "
             "GM/Redi entirely.")
+    # Same guards for the OPERATOR flags: they are read only inside
+    # build_tripole, so on any other grid they would be silently discarded.
+    _gm_op_flags = [n for n, v in (("--gm-slope-scheme", args.gm_slope_scheme),
+                                   ("--gm-bolus-advection",
+                                    args.gm_bolus_advection)) if v is not None]
+    if _gm_op_flags and args.grid != "tripole":
+        raise SystemExit(
+            f"{' and '.join(_gm_op_flags)} is wired for --grid tripole only "
+            f"(the GM/Redi override lives in build_tripole); got --grid "
+            f"{args.grid!r}.")
+    if _gm_op_flags and args.no_gm_redi:
+        raise SystemExit(
+            f"{' and '.join(_gm_op_flags)} and --no-gm-redi are mutually "
+            "exclusive: the former select the GM/Redi operator, the latter "
+            "disables GM/Redi entirely.")
+    if (args.gm_bolus_advection == "through_fct"
+            and args.gm_slope_scheme != "nemo_iso_lap"):
+        raise SystemExit(
+            "--gm-bolus-advection through_fct requires --gm-slope-scheme "
+            "nemo_iso_lap: the model honors the PAIR (ocean_model_latlon_cgrid "
+            "`_want_bolus`), so through_fct alone would silently keep the "
+            "centred bolus flux while the manifest claimed FCT routing.")
     # Symmetric guard: the two Treguier tunables are read ONLY inside the
     # --gm-treguier branch of build_tripole, so a non-default value passed
     # without the scheme flag would evaporate silently.
@@ -4924,6 +5017,8 @@ def main() -> int:
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            gm_slope_scheme=args.gm_slope_scheme,
+            gm_bolus_advection=args.gm_bolus_advection,
             store_mass_flux=bool(getattr(args, "gateway_transports",
                                          False)),
             store_salt_flux=bool(getattr(args, "gateway_transports",
