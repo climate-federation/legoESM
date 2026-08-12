@@ -118,3 +118,107 @@ class TestGuards:
              "--gm-aei0", "1800", "--gm-kappa-min", "5000"], monkeypatch)
         with pytest.raises(SystemExit, match="exceeds --gm-aei0"):
             main()
+
+
+class TestTreguierBlockIsOneVariable:
+    """`--gm-treguier` must change the `treguier` field and NOTHING else.
+
+    REGRESSION (2026-08-12): the branch built its block from
+    `run_omip._DEFAULT_BATHY_GM_REDI` -- the LAT-LON bathymetry default -- so
+    every `--gm-treguier` arm silently also moved kappa_GM 600->800,
+    kappa_Redi 600->800 and slope_scheme "centered"->"triads" relative to the
+    tripole control.  Two run manifests confirmed the four-field drift, which
+    made the day-5 blow-up of that arm unattributable.
+    """
+
+    def _control_block(self):
+        from legoesm.ocean.fidelity.nemo_match_recipe import (
+            NEMOMatchTripoleRecipeConfig,
+            nemo_match_tripole_model_config,
+        )
+        return nemo_match_tripole_model_config(
+            NEMOMatchTripoleRecipeConfig()).gm_redi
+
+    def test_only_the_treguier_field_differs_from_the_control(self):
+        from scripts.run.run_omip_core2 import _tripole_treguier_gm_redi
+
+        control = self._control_block()
+        arm = _tripole_treguier_gm_redi(_GM_AEI0_DEFAULT,
+                                        _GM_KAPPA_MIN_DEFAULT)
+        differing = [f for f in control._fields
+                     if getattr(control, f) != getattr(arm, f)]
+        assert differing == ["treguier"], (
+            f"--gm-treguier changed {differing}; it must change only "
+            "'treguier' or the arm is not a one-variable experiment.")
+
+    def test_control_block_is_the_tripole_recipe_not_the_latlon_default(self):
+        """Guards the exact substitution that caused the regression."""
+        from scripts.run import run_omip
+
+        control = self._control_block()
+        assert control.kappa_GM == pytest.approx(600.0)
+        assert control.kappa_Redi == pytest.approx(600.0)
+        assert control.slope_scheme == "centered"
+        assert control.visbeck.enabled is False
+        # the block that used to be used, and must not be again
+        latlon = run_omip._DEFAULT_BATHY_GM_REDI
+        assert latlon.kappa_GM != control.kappa_GM
+        assert latlon.visbeck.enabled is True
+
+    def test_scheme_is_on_and_carries_the_cli_values(self):
+        from scripts.run.run_omip_core2 import _tripole_treguier_gm_redi
+
+        arm = _tripole_treguier_gm_redi(750.0, 100.0)
+        assert arm.treguier.enabled is True
+        assert arm.treguier.aei0 == pytest.approx(750.0)
+        assert arm.treguier.kappa_min == pytest.approx(100.0)
+
+    def test_the_guard_fires_on_the_regression_block(self):
+        """MUTATION check: the fields-diff guard must REJECT the old block.
+
+        The pinned-commit non-vacuity run only proves the helper is NEW (it
+        fails with ImportError).  This asserts the stronger property the guard
+        is actually for: rebuild EXACTLY what the pre-fix branch built -- the
+        lat-lon default with Visbeck forced off and Treguier on -- and confirm
+        the one-variable test above would have failed on it.  Commit-
+        independent, so it keeps working after the pinned SHA ages out.
+        """
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            TreguierConfig, VisbeckConfig,
+        )
+        from scripts.run import run_omip
+
+        control = self._control_block()
+        regression = run_omip._DEFAULT_BATHY_GM_REDI._replace(
+            visbeck=VisbeckConfig(enabled=False),
+            treguier=TreguierConfig(enabled=True, aei0=_GM_AEI0_DEFAULT,
+                                    kappa_min=_GM_KAPPA_MIN_DEFAULT),
+        )
+        differing = [f for f in control._fields
+                     if getattr(control, f) != getattr(regression, f)]
+        assert differing != ["treguier"], (
+            "the guard cannot distinguish the lat-lon block from the tripole "
+            "recipe block -- it would not have caught the regression.")
+        assert {"kappa_GM", "kappa_Redi", "slope_scheme"} <= set(differing)
+
+    def test_build_tripole_uses_the_helper_and_not_the_latlon_default(self):
+        """WIRING: the helper above is only meaningful if build_tripole calls it.
+
+        `build_tripole` reads a real eORCA1 mesh before it reaches the GM
+        branch, so exercising it end-to-end is not a unit test.  This inspects
+        the source of the function that ACTUALLY RUNS (build_tripole itself, not
+        a delegating wrapper) and fails if the branch is re-pointed at the
+        lat-lon default -- the exact regression fixed here.
+        """
+        import inspect
+
+        from scripts.run.run_omip_core2 import build_tripole
+
+        src = inspect.getsource(build_tripole)
+        assert "_tripole_treguier_gm_redi(gm_aei0, gm_kappa_min)" in src, (
+            "build_tripole no longer builds its --gm-treguier block from the "
+            "one-variable helper.")
+        assert "_DEFAULT_BATHY_GM_REDI" not in src, (
+            "build_tripole references the LAT-LON bathymetry GM default; that "
+            "is the block whose use made every --gm-treguier arm a "
+            "four-field change.")

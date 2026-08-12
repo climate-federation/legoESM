@@ -68,9 +68,46 @@ _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
 # (measured 2026-08-12, RUN_TRD2 rec 1).  The previous 1800 dropped the 1/2
 # and made the "NEMO-faithful" GM cap twice NEMO's.
 _GM_AEI0_DEFAULT = 900.0
-# Equatorial-taper floor; matches VisbeckConfig.kappa_min, the coefficient the
-# OMIP tripole otherwise runs.
+# Equatorial-taper floor.  NOT a NEMO number: raw NEMO is capped-only and lets
+# kappa_GM -> 0 at the equator (the recipe card keeps that, gm_kappa_min=0.0).
+# 200 is a production stability knob for the 1-degree global run; the numeric
+# value coincides with VisbeckConfig.kappa_min, which the OMIP tripole does NOT
+# run (its recipe ships Visbeck disabled -- verified in the run manifest,
+# 2026-08-12).  The divergence from the recipe default is deliberate and
+# asserted at both ends (tests/unit/test_run_omip_core2_gm_treguier.py).
 _GM_KAPPA_MIN_DEFAULT = 200.0
+
+
+def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):
+    """GM/Redi block for ``--gm-treguier`` on the eORCA1 tripole.
+
+    ONE VARIABLE: this is the tripole NEMO-match recipe's OWN GM/Redi block
+    with `gm_treguier` flipped on, so a `--gm-treguier` arm differs from the
+    control run in the ``treguier`` field and nothing else.
+
+    The base used to be ``run_omip._DEFAULT_BATHY_GM_REDI``, which is the
+    LAT-LON bathymetry default (``kappa_GM=kappa_Redi=800``, Visbeck ON,
+    ``slope_scheme="triads"``) and NOT the tripole recipe's block
+    (``kappa_GM=kappa_Redi=600``, Visbeck OFF, ``slope_scheme="centered"``).
+    Selecting it changed FOUR fields at once, so no ``--gm-treguier`` arm could
+    be attributed to the Treguier coefficient.  Verified against two run
+    manifests (2026-08-12): the arm ran kappa 800/800 + triad slopes against a
+    control at 600/600 + centered slopes.
+
+    The recipe validates the Treguier block while building it
+    (``validate_treguier_cfg``), so a bad ``aei0``/``kappa_min`` fails here
+    rather than inside the first GM tendency.
+    """
+    from legoesm.ocean.fidelity.nemo_match_recipe import (
+        NEMOMatchTripoleRecipeConfig,
+        nemo_match_tripole_model_config,
+    )
+    recipe_cfg = NEMOMatchTripoleRecipeConfig(
+        gm_treguier=True,
+        gm_aei0=float(gm_aei0),
+        gm_kappa_min=float(gm_kappa_min),
+    )
+    return nemo_match_tripole_model_config(recipe_cfg).gm_redi
 
 
 # NEMO eORCA geometry + WOA IC loaders now live in the ocean package so the
@@ -742,29 +779,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # F(growth rate of baroclinic instability), a 2-D time-varying field
         # capped at aei0 = 1/2*rn_Ue*rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s
         # (ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud for the laplacian, which
-        # ORCA1 runs; NEMO's emitted aeiu_2d maxes at exactly 900).  legoESM's TreguierConfig IS that scaling (already
-        # used by the DINO oracle card).  The tripole default
-        # (run_omip._DEFAULT_BATHY_GM_REDI) instead runs the VISBECK adaptive
-        # coefficient (kappa_GM=800, alpha=0.015, kappa in [200,2000]) -- a
-        # different closure.  Visbeck and Treguier are mutually exclusive
-        # (gm_redi_latlon_cgrid raises), so this swaps one for the other and
-        # leaves kappa_Redi / S_max at the proven tripole values.
-        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-            validate_treguier_cfg as _validate_treguier_cfg,
-        )
-        from legoesm.ocean.physics.lateral_mixing.config import (
-            GMRediConfig as _GMRediConfig, TreguierConfig as _TreguierConfig,
-            VisbeckConfig as _VisbeckConfig,
-        )
-        _base = run_omip._DEFAULT_BATHY_GM_REDI
-        _treg_cfg = _TreguierConfig(enabled=True, aei0=float(gm_aei0),
-                                    kappa_min=float(gm_kappa_min))
-        # Fail here rather than inside the first GM tendency.
-        _validate_treguier_cfg(_treg_cfg)
-        _ovr["gm_redi"] = _base._replace(
-            visbeck=_VisbeckConfig(enabled=False),
-            treguier=_treg_cfg,
-        )
+        # ORCA1 runs; NEMO's emitted aeiu_2d maxes at exactly 900).  legoESM's
+        # TreguierConfig IS that scaling (already used by the DINO oracle card).
+        # Visbeck and Treguier are mutually exclusive (gm_redi_latlon_cgrid
+        # raises); the tripole recipe already ships Visbeck OFF, so this only
+        # turns the Treguier block on.
+        _ovr["gm_redi"] = _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min)
         print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
               f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
               f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
