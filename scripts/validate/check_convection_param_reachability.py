@@ -70,7 +70,7 @@ from legoesm.atmosphere.physics import (
 )
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
-from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.training.param_collector import build_trainable_params
 from legoesm.training.trainable_params import TrainablePhysicsParams
 
@@ -90,8 +90,13 @@ def _column(nlev: int, *, T_sfc: float, rh: float, lapse_K_km: float,
     """A single tropical column: linear lapse to a 200 K cap, uniform RH."""
     from legoesm.thermo import saturation_mixing_ratio
 
-    sigma_half = np.linspace(0.0, 1.0, nlev + 1)
-    sigma_full = 0.5 * (sigma_half[1:] + sigma_half[:-1])
+    # Built by the SHARED factory, not by hand: SigmaCoordinate is a
+    # NamedTuple with seven derived fields (ln_ratio, alpha, dsigma_full, ...)
+    # that the physics reads, and constructing it positionally is how this
+    # probe first crashed. Same rule as everywhere else here -- read the
+    # constructor, do not infer it.
+    sigma = create_sigma_coordinate(nlev)
+    sigma_full = np.asarray(sigma.sigma_full, dtype=float)
     p_full = sigma_full * P_SFC
     # height from a dry hydrostatic estimate, only to build a lapse profile
     z = -(constants.R_d * 290.0 / constants.g) * np.log(
@@ -114,7 +119,6 @@ def _column(nlev: int, *, T_sfc: float, rh: float, lapse_K_km: float,
                  "q_c": Field(data=jnp.zeros(shape4), name="q_c", dims=dims4),
                  "q_r": Field(data=jnp.zeros(shape4), name="q_r", dims=dims4)},
     )
-    sigma = SigmaCoordinate(n_levels=nlev)
     return name, state, sigma
 
 
