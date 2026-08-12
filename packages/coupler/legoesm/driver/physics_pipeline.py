@@ -3274,10 +3274,6 @@ def _resolve_convection(config):
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
-            cape_sink_heating_ratio=getattr(
-                config, 'bechtold_cape_sink_heating_ratio', 5.0),
-            cape_relaxation_sink=getattr(
-                config, 'bechtold_cape_relaxation_sink', False),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
