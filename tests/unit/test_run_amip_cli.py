@@ -3573,3 +3573,20 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
          "--mpas-vert-advection-scheme", "van_leer"]), parser))
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
         cfg_hyb.validate_strict()
+
+
+def test_cmip_resolution_deg_round_trips():
+    """--cmip-resolution-deg reaches OutputConfig; default unchanged.
+
+    The CMOR output grid must track the mesh: a refined run written at the
+    5-degree default throws the refinement away, and the tropical rain band --
+    one to two cells wide -- cannot be scored at all. Before this flag the
+    field was reachable from no driver.
+    """
+    import run_amip
+    from legoesm.driver.config import OutputConfig
+
+    p = run_amip.build_arg_parser()
+    a = p.parse_args(["--cmip-resolution-deg", "2.5"])
+    assert a.cmip_resolution_deg == 2.5
+    assert p.parse_args([]).cmip_resolution_deg == OutputConfig().cmip_resolution_deg

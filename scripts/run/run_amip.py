@@ -391,6 +391,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Output
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
+    parser.add_argument("--cmip-resolution-deg", type=float,
+                        default=_OUTPUT_DEFAULTS.cmip_resolution_deg,
+                        help="Lat-lon spacing [deg] of the CMOR output grid. "
+                             "Must track the MESH: at --resolution 4 the native "
+                             "spacing is 379 km and 5 deg output is matched, but "
+                             "a finer mesh written at 5 deg throws the "
+                             "refinement away, and the tropical rain band -- one "
+                             "to two cells wide -- becomes unscorable. "
+                             f"Default {_OUTPUT_DEFAULTS.cmip_resolution_deg}.")
     parser.add_argument("--aimip-classical-checkpoint", type=str, default=None,
                         help="Path to an AIMIP-classical trained params .eqx "
                              "(e.g. results/aimip_001/classical/epoch_0019.eqx). "
@@ -1786,6 +1795,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         output_dir=args.output or "",
         diag_days=args.diag_days,
         checkpoint_days=args.checkpoint_days,
+        cmip_resolution_deg=args.cmip_resolution_deg,
         max_wallclock_seconds=args.max_wallclock_seconds,
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
