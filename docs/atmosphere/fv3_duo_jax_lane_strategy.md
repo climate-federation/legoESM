@@ -114,6 +114,27 @@ What we take:
   infidelity introduced at *either* hop, and it is the tier the campaign is
   finished at.
 
+**What hop B cannot see, stated up front.** Certifying JAX against NumPy is
+blind by construction to any defect the NumPy lane already has: the JAX twin
+reproduces it faithfully and both agree to 1e-15. Only hop C sees those, and
+only if hop C is sensitive to them. Two consequences that are accepted, not
+solved:
+
+- The **1.19e-9 hydrostatic one-step residual** is exactly such a defect. Both
+  instrumented mechanisms for it are refuted and it remains open on the NumPy
+  lane. The JAX lane inherits it. Any JAX number at or below that floor is
+  reported as *inheriting an unexplained residual*, never as agreement (§10).
+- A defect small enough to hide under hop C's solution-tier noise but large
+  enough to matter over a long integration is the **latent-bug class** of §8,
+  and the only guard against it is the one FESOM2-C names: run tier 5 at the
+  **production time step and configuration**, not at a short smoke test.
+
+The compensating asset is FESOM2-JAX §2.4's localization argument: *because
+every kernel is verified on its own, a drift that appears only over many steps
+cannot originate inside a kernel and must arise where two kernels are joined.*
+That is why tier 3 (multi-step replay) and the conservation-budget checks are
+not optional extras — they are the only tiers that interrogate the joins.
+
 ## 3. Rules
 
 **R1 — Literal translation.** The NumPy lane is the specification for the JAX
@@ -279,11 +300,32 @@ Following FESOM2-C §4.4. `LEGOESM_FV3_JAX_VERIFY=1` makes each JAX kernel, on
 each call, run its NumPy twin on the same live inputs, record `max|Δ|` per
 output field to a manifest, and **return the JAX result unchanged** so the
 trajectory is untouched. Default off; zero cost when off (a Python `if` on a
-static flag, resolved at trace time, not a `jnp.where`).
+static flag, resolved at call/trace time, not a `jnp.where`).
 
-This is worth building early: it turns "which kernel first diverges in a 500-step
-run" from a bisection campaign into one instrumented run, and it is the only
-instrument that sees a kernel that is individually correct but wired up wrong.
+**The constraint that makes this non-trivial in JAX, and how it is resolved.**
+FESOM2-C's twin works because C is eager: the twin can read the live state at
+any time. A JAX kernel under `jit` sees *tracers*, not values, so the NumPy twin
+**cannot be called from inside a jitted region** — `np.asarray(tracer)` raises,
+and the two escape hatches are both bad here (`io_callback` serialises the step
+and interferes with the AD path; a `pure_callback` would hide the very
+divergence it is meant to expose). Therefore:
+
+> **Verify mode runs the lane EAGERLY.** `LEGOESM_FV3_JAX_VERIFY=1` bypasses the
+> `make_*_jit()` factories and calls the unjitted kernels, so every operand is a
+> concrete array and the NumPy twin can be applied directly. It is a diagnostic
+> mode, not a production mode: expect it to be one to two orders slower, and
+> never quote a timing from it.
+
+That restriction is acceptable because of what the mode is *for* — turning
+"which kernel first diverges over a 500-step run" from a bisection campaign into
+a single instrumented run, and catching the kernel that is individually correct
+but wired up wrong. Neither needs speed.
+
+A second, cheaper instrument covers the jitted path: the **tier-3 replay**
+(§5) runs N steps on both backends from the same initial state and compares the
+end state. It sees the same class of defect, works under `jit`, and costs one
+extra run — but it localises to "somewhere in the step", where the live twin
+localises to a kernel.
 
 ## 7. Differentiability
 
