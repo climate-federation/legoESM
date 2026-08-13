@@ -83,7 +83,7 @@ class TestComputeFilterWeights:
     period 1.92x (box) / 1.86x (cosine) too long, worsening toward 2 as
     substeps increased. The window now runs ``i+1 = 1..2n-1``, centred on
     ``t + dt``. The centring itself is asserted in
-    ``tests/ocean/unit/test_barotropic_wave_speed.py`` along with the
+    ``tests/ocean/unit/test_barotropic_accuracy.py`` along with the
     end-to-end wave speed; this class covers the shape and the closed form.
     """
 

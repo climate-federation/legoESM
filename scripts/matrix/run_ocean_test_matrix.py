@@ -5655,10 +5655,17 @@ def _get_cell_latlon_rad(grid_type, grid):
 #
 # The dispersion relation is not imposed -- it FALLS OUT of requiring the
 # two independent expressions for As to agree, which is the check that the
-# mode is consistent. Verified here by substituting the closed form back
-# into the three linear shallow-water equations: residuals ~1e-8 (the
-# finite-difference truncation of the check itself) and v = 0 at both
-# walls to 7e-20. See tests/ocean/unit/test_igw_channel_mode.py.
+# mode is consistent. VERIFIED in tests/ocean/unit/test_igw_channel_mode.py
+# by substituting the closed form back into the three linear shallow-water
+# equations. MEASURED relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the
+# central difference's own truncation) and v = 0 at the walls to 1.2e-19
+# m/s against a 1e-3 m/s mode amplitude; the test ASSERTS the looser 1e-6
+# so other hardware cannot turn a correct mode red. That file also carries
+# the controls that make those numbers mean something -- scaling any ONE of
+# eta, u, v by 5% drives the residual above 1e-3; a plane wave, which
+# passes the residual check, is caught by the wall condition; and the
+# domain, depth, f0 and mode numbers are pinned against independent
+# literals so a coherently WRONG channel cannot pass the rest.
 # ===========================================================================
 
 #: FIXED physical domain -- the resolution string sets the CELL COUNT, so

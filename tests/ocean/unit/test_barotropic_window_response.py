@@ -1,4 +1,4 @@
-"""The centred averaging window must not be LESS damping than the one it replaced.
+"""What the centred averaging window damps, and where it does NOT damp more.
 
 WHY THIS EXISTS. Re-centring the split-explicit barotropic averaging window on
 t+dt fixed a half-step phase error that made external gravity waves propagate
