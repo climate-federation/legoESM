@@ -51,8 +51,8 @@ from jax.test_util import check_grads  # noqa: E402
 from legoesm.core import fv3_native_pgrad as npg  # noqa: E402
 from legoesm.core.fv3_native_sw_core import BIG_NUMBER, Bounds  # noqa: E402
 from legoesm.core.fv3_pgrad import (  # noqa: E402
-    a2b_ord4,
     a2b_gridstruct_view,
+    a2b_ord4,
     geopk,
     geopk_jit,
     make_geopk_jit,
@@ -229,6 +229,73 @@ def _adjoint_residual(f, primals, seed=0):
     return abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-300), lhs, rhs
 
 
+def _vjp_fd_projection(f, primals, eps, seed=0):
+    """Exactly what ``check_grads``' ``VJP cotangent projection`` compares.
+
+    Read from the installed source (`_src/public_test_util.py`, check_vjp):
+
+        tangent_out = numerical_jvp(f, args, tangent, eps=eps)   # FD
+        cotangent_out = vjpfun(cotangent)                        # AD rev
+        ip          = inner_prod(tangent, cotangent_out)   # <v, J^T_AD w>
+        ip_expected = inner_prod(tangent_out, cotangent)   # <J_FD v, w>
+
+    So that check is AD-REVERSE vs FINITE DIFFERENCE -- NOT a jvp/vjp
+    identity.  Two consequences that matter here:
+
+    * it is NOT independent evidence from the forward check.  ``check_jvp``
+      compares its own ``numerical_jvp`` output too; the difference is
+      that it compares ARRAYS (tolerance 1e-5 * leaf_size, i.e. 3.1e-3
+      for a 312-element leaf) while this one compares a SCALAR
+      (``.size == 1``, so tolerance 1e-5).  The same FD error can pass
+      one and fail the other by a factor of 312 in tolerance alone --
+      which is what job 9401521's ``rtol=1e-05`` line reports.
+    * a failure here therefore does NOT localise to the VJP until the
+      FD side is ruled out, which is what the eps-scaling gates below do.
+
+    Returns ``(|<v, J^T w> - <J_FD v, w>|, <v, J^T w>)``.
+    """
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
+    out, vjp_fn = jax.vjp(f, *primals)
+    w = jax.tree_util.tree_map(
+        lambda x: jnp.asarray(rng.standard_normal(x.shape)), out)
+    ad = _tree_dot(v, vjp_fn(w))
+    plus = f(*[p + eps * t for p, t in zip(primals, v)])
+    minus = f(*[p - eps * t for p, t in zip(primals, v)])
+    fd = jax.tree_util.tree_map(lambda a, b: (a - b) / (2.0 * eps),
+                                plus, minus)
+    return abs(ad - _tree_dot(fd, w)), ad
+
+
+def _assert_fd_truncation_scaling(name, f, primals, seed=0):
+    """DISCRIMINATOR: is a VJP-vs-FD gap the FD's fault or the VJP's?
+
+    A central difference has truncation error proportional to eps^2 and
+    roundoff proportional to 1/eps; a WRONG derivative has an error that
+    does not move with eps at all.  Halving eps therefore quarters the
+    gap if it is truncation, doubles it if it is roundoff, and leaves it
+    unchanged if the AD reverse mode is wrong.  The verdict is the
+    SCALING, so this gate needs no tolerance on the gap itself -- which
+    is the point, because the gap is exactly the number in dispute.
+
+    Steps are chosen around check_grads' own default (EPS = 1e-4) and
+    stay far above the f64 roundoff floor (~1e-16/1e-4 = 1e-12 on O(1)
+    data), so truncation must dominate across the whole range.
+    """
+    steps = (4.0e-4, 2.0e-4, 1.0e-4)
+    r = [_vjp_fd_projection(f, primals, e, seed=seed)[0] for e in steps]
+    ratios = [r[i] / max(r[i + 1], 1e-300) for i in range(len(r) - 1)]
+    detail = (f"{name}: |<v,J^T w> - <J_FD v,w>| at eps="
+              f"{steps} is {[f'{x:.6e}' for x in r]}, halving ratios "
+              f"{[f'{x:.3f}' for x in ratios]} "
+              f"(eps^2 truncation -> ~4, roundoff -> ~0.5, "
+              f"wrong reverse-mode derivative -> ~1)")
+    assert all(x > 0.0 for x in r), detail
+    for x in ratios:
+        assert 2.5 < x < 6.0, detail
+
+
 def _check_adjoint(name, f, primals, tol, seed=0):
     r, lhs, rhs = _adjoint_residual(f, primals, seed=seed)
     assert abs(lhs) > 0.0, (
@@ -255,7 +322,12 @@ def _a2b_field(seed=3, shape=(M_A, M_A)):
 
 def _run_a2b_np(qin, gs, *, replace, duogrid, grid_type=0,
                 bounded_domain=False):
-    from legoesm.core.fv3_native_d_sw import a2b_ord4
+    # Aliased: the NumPy twin's a2b_ord4 and the JAX one imported at
+    # module scope now share a name (the JAX one was promoted out of
+    # `_a2b_ord4`), and a bare `import a2b_ord4` here would SHADOW the
+    # JAX symbol inside this function -- two different implementations
+    # under one name in one file is the trap this file exists to catch.
+    from legoesm.core.fv3_native_d_sw import a2b_ord4 as a2b_ord4_np
     from legoesm.grids.fv3_native_gridstruct import fort
 
     gsv = dict(gs)
@@ -263,9 +335,9 @@ def _run_a2b_np(qin, gs, *, replace, duogrid, grid_type=0,
     gsf = npg.a2b_gridstruct_view(gsv, BD)
     qi = np.array(qin, dtype=np.float64, copy=True)
     qo = np.full((M_A, M_A), np.nan)
-    a2b_ord4(fort(qi, BD.isd, BD.jsd), fort(qo, BD.isd, BD.jsd), gsf,
-             NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, NG, replace=replace,
-             duogrid=duogrid)
+    a2b_ord4_np(fort(qi, BD.isd, BD.jsd), fort(qo, BD.isd, BD.jsd), gsf,
+                NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, NG, replace=replace,
+                duogrid=duogrid)
     return qi, qo
 
 
@@ -860,17 +932,38 @@ def _wellcond_fields(km):
     The level increments (2.5, 3.5, 4.5) VARY with k on purpose: a
     constant increment would make the momentum weight ``wk`` independent
     of k and a k-shift in it invisible.
+
+    THE LEVEL-1 SEED IS PART OF THE FIXTURE.  ``one_grad_p`` (:2388-2393)
+    and ``nh_p_grad`` (:2172-2181) OVERWRITE the top interface of pk/pk3
+    on the B box with ``top_value = ptop**akap``, so whatever the fixture
+    puts at k=0 there is discarded and the FIRST interface difference is
+    ``p_lev[1] - ptop**akap``, not ``p_lev[1] - p_lev[0]``.  Job 9401521
+    caught this: the profile started at 2.0 while ``100**(2/7) = 3.728``,
+    so the k=0 difference collapsed from the intended 2.5 to
+    ``4.5*0.98 - 3.728 = 0.68`` and the control measured
+    ``den.min() = 1.3695`` against a predicted 4.9 -- the two agree to
+    0.4%, which is what identifies the mechanism.  The profile therefore
+    STARTS at ``ptop**akap`` (unmodulated, exactly as the seed writes
+    it), and the increments run from there.  ``pp``'s k=0 is seeded to
+    0.0 by nh_p_grad for the same reason; it feeds no denominator, but
+    the fixture matches it so the field the routine sees is the field
+    documented here.
     """
     sa = _smooth2d((M_A, M_A), 0.02)
-    p_lev = np.array([2.0 + 2.0 * k + 0.5 * k * k for k in range(km + 1)])
+    ptk = PTOP ** AKAP                       # the routines' own k=1 seed
+    p_lev = ptk + np.concatenate(
+        [[0.0], np.cumsum([2.5 + 1.0 * k for k in range(km)])])
     g_lev = np.array([2.0e4 * (km - k) + 1.0e3 for k in range(km + 1)])
     su = _smooth2d((M_A, M_B), 0.3)
     sv = _smooth2d((M_B, M_A), 0.3, phase=0.5)
+    pk = np.stack([p * sa for p in p_lev], axis=-1)
+    pk[:, :, 0] = ptk                        # unmodulated, as seeded
+    pp = np.stack([30.0 * k * sa for k in range(km + 1)], axis=-1)
+    pp[:, :, 0] = 0.0                        # as nh_p_grad seeds it
     return {
-        "pk": np.stack([p * sa for p in p_lev], axis=-1),
+        "pk": pk,
         "gz": np.stack([g * sa for g in g_lev], axis=-1),
-        "pp": np.stack([30.0 * (k + 1) * sa for k in range(km + 1)],
-                       axis=-1),
+        "pp": pp,
         "delp": np.stack([1.0e4 * (1.0 + 0.1 * k) * sa
                           for k in range(km)], axis=-1),
         "u": np.stack([10.0 * (1.0 + 0.1 * k) * su for k in range(km)],
@@ -995,40 +1088,76 @@ def _ogp_groups(fields, gs, kw, scales):
 
 
 # ---------------------------------------------------------------- gate 4
-def test_one_grad_p_jax_check_grads_order1():
-    """FIRST-ORDER FD on the harsh (random) fixture -- and the
-    DISCRIMINATOR for job 9400424's order-2 failure.
-
-    That run raised on ``JVP of JVP tangent``.  ``_check_grads``
-    (jax `_src/public_test_util.py`) runs the order-1 forward check
-    FIRST and only recurses into ``_check_grads(jvp(f), ..., order-1)``
-    if it passes, and the recursion is what prefixes the message with
-    ``JVP of``.  So order-1 forward was already green there and the
-    defect was in the second tangent, NOT in the Jacobian -- but the
-    order-1 REVERSE check is never reached once the forward recursion
-    raises, so it was untested.  This test makes both mechanical.
-
-    The remaining reverse-mode question -- whether the ``replace=True``
-    read-after-write is threaded consistently between the forward pass
-    and the adjoint -- is settled tolerance-free by
-    :func:`test_one_grad_p_jax_adjoint_consistency`.
-    """
-    km = 2
-    _delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+def _ogp_grad_setup(km, fields=None):
+    """(f_pg, f_lin, primals_pg, primals_lin) at a chosen fixture."""
+    if fields is None:
+        _delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+        s_pk, s_gz = 3.0, 2.0e3
+    else:
+        pk, gz, u, v, divg2 = (fields["pk"], fields["gz"], fields["u"],
+                               fields["v"], fields["divg2"])
+        s_pk, s_gz = 10.0, 2.0e4
     gs = _gs_cached()
     kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
-    s_pk, s_gz = 3.0, 2.0e3
     s_u = np.abs(np.asarray(
         one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
     assert s_u > 0.0
-
     f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
                               (s_pk, s_gz, s_u))
-    check_grads(f_pg, (jnp.asarray(pk / s_pk), jnp.asarray(gz / s_gz)),
-                order=1, modes=("fwd", "rev"))
-    check_grads(f_lin, (jnp.asarray(u), jnp.asarray(v),
-                        jnp.asarray(divg2)), order=1,
+    return (f_pg, f_lin, (pk / s_pk, gz / s_gz), (u, v, divg2))
+
+
+def test_one_grad_p_jax_check_grads_order1():
+    """FIRST-ORDER FD, on the WELL-CONDITIONED fixture -- and the record
+    of why it is not the harsh one.
+
+    Job 9401521 ran this on the random fixture and failed the reverse
+    direction: ``VJP cotangent projection``, ACTUAL -125.005052 vs
+    DESIRED -126.183298, 0.93% relative.  What that check compares,
+    read from the installed source (``check_vjp``), is
+    ``<v, J^T_AD w>`` against ``<J_FD v, w>`` -- AD reverse against a
+    FINITE DIFFERENCE, NOT a jvp/vjp identity.  So it is not independent
+    of the forward check, which consumes the SAME ``numerical_jvp``
+    output; the two differ only in what they compare it against:
+
+      * ``check_jvp`` compares ARRAYS   -> tolerance 1e-5 * leaf_size
+                                          = 3.12e-3 for a 312 leaf;
+      * ``check_vjp`` compares a SCALAR -> ``.size == 1``, tolerance
+                                          1e-5, i.e. 312x tighter.
+
+    "forward passed, reverse failed" is therefore a TOLERANCE gap on one
+    FD dataset, not evidence about reverse mode.  The FD error itself is
+    localised by :func:`test_one_grad_p_vjp_fd_gap_is_fd_truncation`,
+    which measures its eps-scaling on the harsh fixture; the reverse
+    direction there is covered tolerance-free by
+    :func:`test_one_grad_p_jax_adjoint_consistency`.
+
+    Here the fixture is conditioned, so FD truncation is ~1e-7 relative
+    (PLAUSIBLE estimate) and both directions are meaningful.
+    """
+    km = 3
+    f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km, _wellcond_fields(km))
+    check_grads(f_pg, tuple(jnp.asarray(x) for x in p_pg), order=1,
                 modes=("fwd", "rev"))
+    check_grads(f_lin, tuple(jnp.asarray(x) for x in p_lin), order=1,
+                modes=("fwd", "rev"))
+
+
+def test_one_grad_p_vjp_fd_gap_is_fd_truncation():
+    """DISCRIMINATOR for job 9401521's 0.93% ``VJP cotangent projection``
+    failure: FD truncation, or a wrong reverse-mode derivative?
+
+    The gap is measured at three FD steps on the SAME harsh fixture and
+    the SAME code path (``replace=True`` included).  Truncation scales
+    as eps^2, roundoff as 1/eps, a wrong derivative not at all -- so the
+    halving ratio is the verdict and no tolerance is placed on the gap.
+    If this goes red with ratios near 1, the reverse mode IS wrong and
+    the prime suspect is the ``replace=True`` read-after-write threading
+    through ``a2b_ord4``; the assert prints all three residuals."""
+    km = 2
+    f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km)
+    _assert_fd_truncation_scaling("one_grad_p pk/gz", f_pg, p_pg)
+    _assert_fd_truncation_scaling("one_grad_p u/v/divg2", f_lin, p_lin)
 
 
 def test_one_grad_p_jax_check_grads_order2_well_conditioned():
@@ -1069,9 +1198,11 @@ def test_one_grad_p_jax_check_grads_order2_well_conditioned():
     den_u = np.abs(wk[:-1, :, :] + wk[1:, :, :])
     den_v = np.abs(wk[:, :-1, :] + wk[:, 1:, :])
     # Conditioning control, stated as a RATIO (the absolute-floor form is
-    # what failed to catch the 9400424 outlier).  By construction the
-    # level increments are 2.5 / 3.5 / 4.5 and the (i, j) modulation is
-    # +-2%, so den = wk(i) + wk(i+1) spans ~4.9 to ~9.2.
+    # what failed to catch the 9400424 outlier).  By construction --
+    # increments 2.5 / 3.5 / 4.5 above the SEEDED top value, +-2%
+    # modulation -- den = wk(i) + wk(i+1) spans ~4.75 to ~9.18, so the
+    # ratio is ~0.52.  Job 9401521 measured 1.3695 / 9.1753 = 0.149 here
+    # because the fixture ignored the k=1 seed; see _wellcond_fields.
     for nm, d in (("u", den_u), ("v", den_v)):
         assert d.min() > 1.0, (nm, d.min())
         assert d.min() / d.max() > 0.3, (nm, d.min(), d.max())
@@ -1079,16 +1210,10 @@ def test_one_grad_p_jax_check_grads_order2_well_conditioned():
         # window slip in it would be invisible.
         assert d.max() - d.min() > 1e-6, (nm, d.min(), d.max())
 
-    s_pk, s_gz = 10.0, 2.0e4
-    s_u = np.abs(np.asarray(
-        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
-    assert s_u > 0.0
-    f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
-                              (s_pk, s_gz, s_u))
-    check_grads(f_pg, (jnp.asarray(pk / s_pk), jnp.asarray(gz / s_gz)),
-                order=2, modes=("fwd", "rev"))
-    check_grads(f_lin, (jnp.asarray(u), jnp.asarray(v),
-                        jnp.asarray(divg2)), order=2,
+    f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km, f)
+    check_grads(f_pg, tuple(jnp.asarray(x) for x in p_pg), order=2,
+                modes=("fwd", "rev"))
+    check_grads(f_lin, tuple(jnp.asarray(x) for x in p_lin), order=2,
                 modes=("fwd", "rev"))
 
 
@@ -1107,20 +1232,13 @@ def test_one_grad_p_jax_adjoint_consistency():
     1e-5 of another's into the same call lets a defect in the weak one
     hide under the strong one's contribution to the inner product."""
     km = 2
-    _delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
-    gs = _gs_cached()
-    kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
-    s_pk, s_gz = 3.0, 2.0e3
-    s_u = np.abs(np.asarray(
-        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
-    f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
-                              (s_pk, s_gz, s_u))
+    f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("one_grad_p pk/gz", f_pg, (pk / s_pk, gz / s_gz), 1e-12)
+    _check_adjoint("one_grad_p pk/gz", f_pg, p_pg, 1e-12)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("one_grad_p u/v/divg2", f_lin, (u, v, divg2), 1e-12)
+    _check_adjoint("one_grad_p u/v/divg2", f_lin, p_lin, 1e-12)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1282,25 +1400,51 @@ def _nhpg_groups(fields, gs, kw, scales):
 
 
 # ---------------------------------------------------------------- gate 4
-def test_nh_p_grad_jax_check_grads_order1():
-    """FIRST-ORDER FD on the harsh (random) fixture.  Same discriminator
-    argument as :func:`test_one_grad_p_jax_check_grads_order1`: job
-    9400424 raised on ``JVP of JVP tangent`` here too, which is only
-    reachable after the order-1 forward check passes."""
-    km = 2
-    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
+def _nhpg_grad_setup(km, fields=None):
+    """(f_pg, f_nh, primals_pg, primals_nh) at a chosen fixture."""
+    if fields is None:
+        delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
+        s_pk, s_gz = 3.0, 2.0e3
+    else:
+        pk3, gz, pp, delp, u, v = (fields["pk"], fields["gz"],
+                                   fields["pp"], fields["delp"],
+                                   fields["u"], fields["v"])
+        s_pk, s_gz = 10.0, 2.0e4
     gs = _gs_cached()
     kw = {**_nhpg_kw(km), **_ogp_flags()}
-    s = (3.0, 2.0e3, 30.0, 1.0e4,
+    s = (s_pk, s_gz, 30.0, 1.0e4,
          np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
                                      **kw)[0])[UW]).max())
     assert s[4] > 0.0
     f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
-    check_grads(f_pg, (jnp.asarray(pk3 / s[0]), jnp.asarray(gz / s[1])),
-                order=1, modes=("fwd", "rev"))
-    check_grads(f_nh, (jnp.asarray(u), jnp.asarray(v),
-                       jnp.asarray(pp / s[2]), jnp.asarray(delp / s[3])),
-                order=1, modes=("fwd", "rev"))
+    return (f_pg, f_nh, (pk3 / s[0], gz / s[1]),
+            (u, v, pp / s[2], delp / s[3]))
+
+
+def test_nh_p_grad_jax_check_grads_order1():
+    """FIRST-ORDER FD on the WELL-CONDITIONED fixture.  Same instrument
+    argument as :func:`test_one_grad_p_jax_check_grads_order1`: job
+    9401521's ``VJP cotangent projection`` failure here is AD-reverse vs
+    FINITE DIFFERENCE compared as a SCALAR at 1e-5, i.e. 312x tighter
+    than the array-wise forward check on the same FD data."""
+    km = 3
+    f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km, _wellcond_fields(km))
+    check_grads(f_pg, tuple(jnp.asarray(x) for x in p_pg), order=1,
+                modes=("fwd", "rev"))
+    check_grads(f_nh, tuple(jnp.asarray(x) for x in p_nh), order=1,
+                modes=("fwd", "rev"))
+
+
+def test_nh_p_grad_vjp_fd_gap_is_fd_truncation():
+    """DISCRIMINATOR on the harsh fixture -- see
+    :func:`test_one_grad_p_vjp_fd_gap_is_fd_truncation`.  nh_p_grad and
+    one_grad_p are the only two routines that use ``replace=True`` and
+    the only two that failed, so if this is a threading defect BOTH
+    eps-scalings go flat (~1) together."""
+    km = 2
+    f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km)
+    _assert_fd_truncation_scaling("nh_p_grad pk3/gz", f_pg, p_pg)
+    _assert_fd_truncation_scaling("nh_p_grad pp/u/v/delp", f_nh, p_nh)
 
 
 def test_nh_p_grad_jax_check_grads_order2_well_conditioned():
@@ -1332,16 +1476,11 @@ def test_nh_p_grad_jax_check_grads_order2_well_conditioned():
     dp = np.asarray(delp)
     assert dp.min() > 1.0e3 and dp.min() / dp.max() > 0.3
 
-    s = (10.0, 2.0e4, 30.0, 1.0e4,
-         np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
-                                     **kw)[0])[UW]).max())
-    assert s[4] > 0.0
-    f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
-    check_grads(f_pg, (jnp.asarray(pk3 / s[0]), jnp.asarray(gz / s[1])),
-                order=2, modes=("fwd", "rev"))
-    check_grads(f_nh, (jnp.asarray(u), jnp.asarray(v),
-                       jnp.asarray(pp / s[2]), jnp.asarray(delp / s[3])),
-                order=2, modes=("fwd", "rev"))
+    f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km, f)
+    check_grads(f_pg, tuple(jnp.asarray(x) for x in p_pg), order=2,
+                modes=("fwd", "rev"))
+    check_grads(f_nh, tuple(jnp.asarray(x) for x in p_nh), order=2,
+                modes=("fwd", "rev"))
 
 
 def test_nh_p_grad_jax_adjoint_consistency():
@@ -1350,21 +1489,13 @@ def test_nh_p_grad_jax_adjoint_consistency():
     gate that would catch a mis-threaded ``replace=True``.  Per group,
     for the same reason as :func:`test_one_grad_p_jax_adjoint_consistency`."""
     km = 2
-    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
-    gs = _gs_cached()
-    kw = {**_nhpg_kw(km), **_ogp_flags()}
-    s = (3.0, 2.0e3, 30.0, 1.0e4,
-         np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
-                                     **kw)[0])[UW]).max())
-    f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
+    f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("nh_p_grad pk3/gz", f_pg, (pk3 / s[0], gz / s[1]),
-                   1e-12)
+    _check_adjoint("nh_p_grad pk3/gz", f_pg, p_pg, 1e-12)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("nh_p_grad pp/u/v/delp", f_nh,
-                   (u, v, pp / s[2], delp / s[3]), 1e-12)
+    _check_adjoint("nh_p_grad pp/u/v/delp", f_nh, p_nh, 1e-12)
 
 
 # ---------------------------------------------------------------- gate 5
