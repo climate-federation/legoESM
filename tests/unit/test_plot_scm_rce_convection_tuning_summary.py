@@ -245,22 +245,119 @@ def test_every_component_panel_is_actually_drawn(mod, tmp_path, monkeypatch):
     assert len(seen) == 5
 
 
-def test_a_component_that_moved_is_not_greyed_as_structural(mod, tmp_path):
-    """codex finding 2: structural status is decided on the COMBINED score, so
-    a scheme can be flat overall while a component moved.  That component must
-    be coloured by its own direction, not swallowed by the grey legend."""
-    rec = _rec("kuo", NO_CONV, NO_CONV, 2)
-    rec["tuned"]["T_rmse"] = 0.20          # moved
-    rec["prior"]["T_rmse"] = 0.30
-    _write(tmp_path, [rec, _rec("edmf", 0.98, 0.95, 5)])
+def _segment_colours(mod, names, before, after, notes):
+    """Draw one panel on a throwaway axis and return each scheme's SEGMENT
+    colour, so styling claims are asserted on the artist rather than on the
+    fact that a file was written (codex round 2, finding 13)."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    mod._panel(ax, names, before, after, notes, "t", None)
+    # the segments are the 2-point lines; endpoint markers are 1-point plots
+    segs = [ln for ln in ax.lines if len(ln.get_xdata()) == 2]
+    out = {n: ln.get_color() for n, ln in zip(names, segs)}
+    plt.close(fig)
+    return out
+
+
+def test_a_component_that_moved_is_coloured_by_its_own_direction(mod):
+    """codex round 1 finding 2: structural status is decided on the COMBINED
+    score, so a scheme can be flat overall while a component moved. That
+    component must take its own direction colour, not the grey that the
+    legend labels 'flat by construction'."""
+    names = ["kuo", "edmf", "sbm"]
+    # kuo is structurally flat overall, but in THIS component it improved
+    notes = ["scores the no-convection baseline", None, None]
+    got = _segment_colours(mod, names,
+                           before=[0.30, 0.98, 0.40],
+                           after=[0.20, 0.95, 0.55], notes=notes)
+    assert got["kuo"] == mod.AFTER, (
+        f"a component that moved was drawn {got['kuo']}, not the improved "
+        f"colour — the grey legend entry would hide a real change")
+    assert got["edmf"] == mod.AFTER
+    assert got["sbm"] == mod.WORSE
+
+
+def test_a_structurally_flat_component_is_greyed_and_dashed(mod):
+    """The other half: when the component really did not move AND the scheme
+    is structurally flat, it must be grey and dashed."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    mod._panel(ax, ["kuo", "edmf"], [5.7367, 0.98], [5.7367, 0.95],
+               ["scores the no-convection baseline", None], "t", None)
+    segs = [ln for ln in ax.lines if len(ln.get_xdata()) == 2]
+    assert segs[0].get_color() == mod.INERT
+    assert segs[0].get_linestyle() != "-"
+    assert segs[1].get_color() == mod.AFTER
+    plt.close(fig)
+
+
+def test_an_unchanged_component_is_not_coloured_as_degraded(mod):
+    """codex round 1 finding 7: equality is not degradation."""
+    got = _segment_colours(mod, ["a", "b"], [1.0, 1.0], [1.0, 1.5],
+                           [None, None])
+    assert got["a"] == mod.INERT
+    assert got["b"] == mod.WORSE
+
+
+def test_a_missing_pair_is_disclosed_on_the_panel(mod):
+    """codex round 2 finding 3: complete-case filtering shrinks the cohort
+    silently, so the median can describe fewer schemes than the caption
+    claims."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    mod._panel(ax, ["good", "gone"], [1.0, float("nan")],
+               [0.5, float("nan")], [None, None], "t", None)
+    texts = " ".join(t.get_text() for t in ax.texts)
+    plt.close(fig)
+    assert "1/2" in texts and "gone" in texts, texts
+
+
+def test_an_all_missing_score_refuses_to_publish_a_nan_title(mod, tmp_path):
+    """codex round 2 finding 4: a figure captioned 'median nan -> nan (nan%)'
+    looks like a result."""
+    a = _rec("a", float("nan"), float("nan"), 3)
+    b = _rec("b", float("nan"), float("nan"), 3)
+    _write(tmp_path, [a, b])
     recs = mod._load(tmp_path, None)
-    assert mod._structural_note(recs[[r["scheme"] for r in recs].index("kuo")],
-                                NO_CONV) == "scores the no-convection baseline"
-    # the figure must still render; the styling branch is exercised by the
-    # differing prior/tuned T_rmse on a structurally-flat scheme
-    out = tmp_path / "f.png"
-    mod.figure_before_after(recs, {}, out, NO_CONV)
-    assert out.exists()
+    with pytest.raises(SystemExit, match="not finite"):
+        mod.figure_before_after(recs, {}, tmp_path / "f.png", None)
+
+
+def test_missing_water_budget_is_refused(mod, tmp_path):
+    """codex round 2 finding 5: matplotlib skips a NaN bar, and a blank bar
+    reads as a measured zero."""
+    class _Ref:
+        T_ref = np.array([300.0, 250.0])
+        qv_ref = np.array([0.018, 0.001])
+        qcond_ref = np.array([2e-5, 1e-6])
+
+    a = _rec("emanuel", 0.94, 0.79, 11)
+    a["tuned"]["precip_mm_day"] = None
+    _write(tmp_path, [a, _rec("edmf", 0.98, 0.95, 5)])
+    recs = mod._load(tmp_path, None)
+    with pytest.raises(SystemExit, match="missing precip/evap"):
+        mod.figure_profiles(recs, {}, tmp_path / "p.png", _Ref(),
+                            np.array([1000.0, 200.0]))
+
+
+def test_a_single_reference_copy_does_not_satisfy_agreement(mod, tmp_path):
+    """codex round 2 finding 6: one finite value beside NaNs passes an
+    agreement test vacuously."""
+    class _Ref:
+        T_ref = np.array([300.0, 250.0])
+        qv_ref = np.array([0.018, 0.001])
+        qcond_ref = np.array([2e-5, 1e-6])
+
+    b = _rec("edmf", 0.98, 0.95, 5)
+    b["tuned"]["precip_ref_mm_day"] = None
+    _write(tmp_path, [_rec("emanuel", 0.94, 0.79, 11), b])
+    recs = mod._load(tmp_path, None)
+    with pytest.raises(SystemExit, match="no finite precip_ref_mm_day"):
+        mod.figure_profiles(recs, {}, tmp_path / "p.png", _Ref(),
+                            np.array([1000.0, 200.0]))
 
 
 def test_nonfinite_scores_sort_last_deterministically(mod, tmp_path):

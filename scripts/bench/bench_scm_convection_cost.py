@@ -170,10 +170,14 @@ def _activity(fn, state, sigma) -> dict:
     }
 
 
-# Below this the tendency is indistinguishable from an untriggered scheme.
-# Units are K/s summed over the column, so this is a very low bar: an active
-# scheme clears it by many orders of magnitude.
+# Below these a tendency is indistinguishable from an untriggered scheme.
+# Summed over the column, so both are very low bars -- an active scheme clears
+# them by orders of magnitude (the weakest measured is dca at 3.6e-07 K/s).
+# A scheme counts as active if EITHER channel fires: keying activity on
+# temperature alone would misclassify a moisture-only closure as inactive and
+# silently drop it from the pack (codex round 2, finding 10).
 ACTIVITY_FLOOR_K_PER_S = 1.0e-12
+ACTIVITY_FLOOR_KG_PER_KG_PER_S = 1.0e-15
 
 
 def time_scheme(scheme: str, state, sigma, dt: float, *, repeats: int,
@@ -229,7 +233,8 @@ def time_scheme(scheme: str, state, sigma, dt: float, *, repeats: int,
         "call_ms_min": min(ms),
         "call_ms_max": max(ms),
         "n_leaves": len(outs),
-        "active": act["sum_abs_dT_dt"] > ACTIVITY_FLOOR_K_PER_S,
+        "active": (act["sum_abs_dT_dt"] > ACTIVITY_FLOOR_K_PER_S
+                   or act["sum_abs_dqv_dt"] > ACTIVITY_FLOOR_KG_PER_KG_PER_S),
         **act,
     }
 
@@ -275,28 +280,45 @@ def main(argv: list[str] | None = None) -> int:
               f"(nlev {args.nlev}, dt {args.dt:.0f} s, "
               f"state {nbytes / 1024:.1f} KiB) =====")
         print(f"{'scheme':18s}{'compile [s]':>13s}{'median [ms]':>13s}"
-              f"{'mean [ms]':>11s}{'per-col [us]':>14s}  active  finite")
+              f"{'mean [ms]':>11s}{'sum|dT/dt|':>12s}{'sum|dqv/dt|':>13s}"
+              f"  status")
         for r in sorted(rows, key=lambda r: r["call_ms"]):
-            print(f"{r['scheme']:18s}{r['compile_s']:13.2f}"
-                  f"{r['call_ms']:13.3f}{r['call_ms_mean']:11.3f}"
-                  f"{1e3 * r['call_ms'] / ncol:14.2f}  "
-                  f"{str(r['active']):>6s}  {r['finite']}")
+            # An inactive scheme's timing is the cost of its untriggered
+            # branch, NOT a scheme cost, so it is labelled in the table
+            # itself rather than only in a footnote -- a bare number here can
+            # be copied out and published as if it meant something (codex
+            # round 2, finding 12).
+            if r["active"]:
+                med, mean = f"{r['call_ms']:13.3f}", f"{r['call_ms_mean']:11.3f}"
+                status = "active"
+            else:
+                med, mean = f"{'N/A':>13s}", f"{'N/A':>11s}"
+                status = f"INACTIVE (branch cost {r['call_ms']:.3f} ms)"
+            print(f"{r['scheme']:18s}{r['compile_s']:13.2f}{med}{mean}"
+                  f"{r['sum_abs_dT_dt']:12.3e}{r['sum_abs_dqv_dt']:13.3e}"
+                  f"  {status}")
         inactive = [r["scheme"] for r in rows if not r["active"]]
         if inactive:
             print(f"  EXCLUDED from the pack (no tendency on this column, so "
                   f"their timing is the cost of the inactive branch): "
                   f"{', '.join(inactive)}")
-        # ZM against the median of the ACTIVE others.  Including an
-        # untriggered scheme makes the baseline the cost of doing nothing; at
-        # ncol=1 the median of all nine was `kuo`, which cannot convect in a
-        # single column at all (codex finding 14).
-        zm = next(r["call_ms"] for r in rows if r["scheme"] == "zhang_mcfarlane")
+        # ZM against the ACTIVE others.  Including an untriggered scheme makes
+        # the baseline the cost of doing nothing; at ncol=1 the median of all
+        # nine was `kuo`, which cannot convect in a single column at all
+        # (codex round 1, finding 14).  Both reductions are printed: the
+        # median is the steady-state kernel latency, the MEAN is what
+        # extrapolates to a campaign's wall clock over 14,400 sequential
+        # calls, and a ratio that disagrees between them is a long-tail
+        # signal rather than a scheme cost (codex round 2, finding 9).
+        zm_row = next(r for r in rows if r["scheme"] == "zhang_mcfarlane")
         pack_rows = [r for r in rows
                      if r["scheme"] != "zhang_mcfarlane" and r["active"]]
-        if pack_rows:
-            pack = statistics.median([r["call_ms"] for r in pack_rows])
+        if pack_rows and zm_row["active"]:
+            p_med = statistics.median([r["call_ms"] for r in pack_rows])
+            p_mean = statistics.median([r["call_ms_mean"] for r in pack_rows])
             print(f"  zhang_mcfarlane / median({len(pack_rows)} active others)"
-                  f" = {zm / pack:.2f}x")
+                  f" = {zm_row['call_ms'] / p_med:.2f}x by median, "
+                  f"{zm_row['call_ms_mean'] / p_mean:.2f}x by mean")
         else:
             print("  no active comparison scheme — ratio NOT computed")
     payload["by_ncol"] = {str(k): v for k, v in by_ncol.items()}
