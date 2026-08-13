@@ -4973,6 +4973,16 @@ def main() -> int:
             f"{' and '.join(_gm_op_flags)} and --no-gm-redi are mutually "
             "exclusive: the former select the GM/Redi operator, the latter "
             "disables GM/Redi entirely.")
+    # ORDERED MOST-SPECIFIC-FIRST, and this one is the most specific: a
+    # channel selected for a restoring that is switched off.  The previous
+    # ordering fixed only the closure check, so `water_flux` ALONE still
+    # reported "requires live_s" -- and the test missed it because it supplied
+    # live_s (codex 9387497).
+    if (args.sss_restore_channel == "water_flux"
+            and not getattr(args, "sss_restore", False)):
+        raise SystemExit(
+            "--sss-restore-channel water_flux without --sss-restore selects a "
+            "channel for a restoring that is switched off; drop the flag.")
     # The water-flux channel needs NEMO's own conversion: `s_target` is the
     # virtual-salt form, and routing THAT through the freshwater budget would
     # move water at a rate derived from the wrong denominator.
@@ -4984,14 +4994,6 @@ def main() -> int:
             "nn_sssr=2 form (divided by the LIVE surface salinity), whereas "
             "the default 's_target' is the virtual-salt conversion and would "
             "move water at the wrong rate.")
-    # Checks are ordered most-specific-first: selecting a channel for a
-    # restoring that is switched off is a clearer diagnosis than the closure
-    # requirement it would otherwise trip on.
-    if (args.sss_restore_channel == "water_flux"
-            and not getattr(args, "sss_restore", False)):
-        raise SystemExit(
-            "--sss-restore-channel water_flux without --sss-restore selects a "
-            "channel for a restoring that is switched off; drop the flag.")
     # The default `virtual_salt_flux` closure builds its net INTERNALLY from
     # the FreshwaterForcing (`virtual_salt_flux(freshwater, ...)`,
     # ocean_model_latlon_cgrid.py:5044), and that net INCLUDES `restoring`.
@@ -6985,9 +6987,12 @@ def main() -> int:
                     # KPP surface buoyancy: under this channel the restoring IS
                     # physical freshwater, so it belongs in the sum that the
                     # tracer-channel branch above deliberately excludes.
-                    if sf.freshwater is not None:
-                        sf = sf._replace(
-                            freshwater=sf.freshwater + _fw_restore)
+                    # Set it even when absent: skipping would drop the
+                    # restoring-driven HALINE buoyancy from KPP while volume
+                    # and heat still applied (codex 9387497).
+                    sf = sf._replace(
+                        freshwater=(_fw_restore if sf.freshwater is None
+                                    else sf.freshwater + _fw_restore))
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:

@@ -323,6 +323,42 @@ class TestRestoringChannelFlag:
         with _pytest.raises(SystemExit, match="restoring that is switched off"):
             main()
 
+    def test_water_flux_ALONE_reports_the_most_specific_problem(self, monkeypatch):
+        """`--sss-restore-channel water_flux` and nothing else.
+
+        The first ordering fix only moved the CLOSURE check, so this input
+        still reported "requires live_s" -- and the test above could not see it
+        because it supplies live_s (codex 9387497). With no restoring at all,
+        the useful diagnosis is that the channel has nothing to route.
+        """
+        import pytest as _pytest
+
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc",
+             "--sss-restore-channel", "water_flux"], monkeypatch)
+        with _pytest.raises(SystemExit, match="restoring that is switched off"):
+            main()
+
+    def test_kpp_buoyancy_gets_restoring_even_with_no_other_freshwater(self):
+        """`sf.freshwater` may be None; the restoring must still reach KPP.
+
+        The first version guarded with `if sf.freshwater is not None`, so on a
+        run with no other freshwater the restoring drove volume and heat but
+        NOT haline buoyancy -- a partial application, which is worse than
+        either extreme because it is self-consistent-looking (codex 9387497).
+        """
+        import inspect
+
+        from scripts.run import run_omip_core2
+
+        src = inspect.getsource(run_omip_core2.main)
+        block = src[src.index("if _sss_water_flux:"):]
+        block = block[:block.index("state = _ensure_sharded_state")]
+        assert "if sf.freshwater is not None:" not in block, (
+            "restoring is skipped from the KPP buoyancy sum when there is no "
+            "other freshwater; it must be SET, not skipped.")
+        assert "_fw_restore if sf.freshwater is None" in block
+
     def test_the_two_channels_are_exclusive_in_source(self):
         """The post-step applier must be guarded by `not _sss_water_flux`.
 
