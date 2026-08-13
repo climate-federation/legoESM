@@ -90,32 +90,57 @@ def test_none_becomes_nan_not_zero(mod):
 # _structural_note: flat-by-construction vs failed search
 # --------------------------------------------------------------------------- #
 
+NO_CONV = 5.736693549527354
+
+
 def test_zero_parameter_scheme_is_annotated(mod):
-    assert mod._structural_note(_rec("dca", 9.3, 9.3, 0)) \
+    assert mod._structural_note(_rec("dca", 9.3, 9.3, 0), NO_CONV) \
         == "no tunable parameters"
 
 
-def test_inactive_scheme_is_annotated_even_though_it_has_parameters(mod):
-    """kuo exposes two tunable parameters but is deliberately off without a
-    large-scale moisture-convergence operator, so its flat pair is structural
-    and its row is the no-convection baseline."""
-    assert mod._structural_note(_rec("kuo", 5.7367, 5.7367, 2)) \
-        == "inactive in a single column"
+def test_a_scheme_scoring_the_baseline_is_annotated(mod):
+    """kuo exposes two tunable parameters but contributes nothing in a single
+    column, which shows up as its score EQUALLING the measured no-convection
+    baseline. That measurement is the evidence, not the scheme's name."""
+    assert mod._structural_note(_rec("kuo", NO_CONV, NO_CONV, 2), NO_CONV) \
+        == "scores the no-convection baseline"
+
+
+def test_the_label_is_not_keyed_on_the_scheme_name(mod):
+    """NON-VACUITY for the codex finding that a name table cannot express
+    causality: ANY scheme sitting at the baseline earns the label, and `kuo`
+    away from the baseline does NOT -- so wiring kuo up for single columns
+    removes the label with no edit here."""
+    assert mod._structural_note(_rec("emanuel", NO_CONV, NO_CONV, 7),
+                                NO_CONV) == "scores the no-convection baseline"
+    assert mod._structural_note(_rec("kuo", 4.10, 4.10, 2), NO_CONV) is None
 
 
 def test_a_scheme_that_moved_is_never_annotated(mod):
-    """NON-VACUITY. The annotation must key off the measurement, not the
-    name: if kuo is ever wired up for single columns and starts moving, the
-    'inactive' label must disappear by itself."""
-    assert mod._structural_note(_rec("kuo", 5.7367, 4.10, 2)) is None
-    assert mod._structural_note(_rec("dca", 9.3, 8.0, 0)) is None
+    assert mod._structural_note(_rec("kuo", NO_CONV, 4.10, 2), NO_CONV) is None
+    assert mod._structural_note(_rec("dca", 9.3, 8.0, 0), NO_CONV) is None
 
 
 def test_an_ordinary_scheme_whose_search_failed_is_not_annotated(mod):
-    """A flat pair with real parameters and no structural reason is a failed
-    SEARCH and must read as one -- this is the case the grey styling must not
+    """A flat pair with real parameters, away from the baseline, is a failed
+    SEARCH and must read as one -- the case the grey styling must not
     swallow."""
-    assert mod._structural_note(_rec("tiedtke", 3.21, 3.21, 16)) is None
+    assert mod._structural_note(_rec("tiedtke", 3.21, 3.21, 16),
+                                NO_CONV) is None
+
+
+def test_a_nonfinite_pair_is_not_called_structural(mod):
+    """`NaN != NaN` would read as 'moved'; an inf pair would read as 'flat'.
+    Neither is a structural constant -- both are failures to be shown."""
+    assert mod._structural_note(_rec("x", float("nan"), float("nan"), 0),
+                                NO_CONV) is None
+    assert mod._structural_note(_rec("x", float("inf"), float("inf"), 0),
+                                NO_CONV) is None
+
+
+def test_baseline_label_requires_the_baseline_to_be_supplied(mod):
+    """Without a measured baseline the label must not be guessed."""
+    assert mod._structural_note(_rec("kuo", NO_CONV, NO_CONV, 2), None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -192,12 +217,80 @@ def test_a_non_finite_component_does_not_kill_the_panel(mod, tmp_path):
     assert medians["score"][1] == pytest.approx(np.median([0.79, 0.95]))
 
 
-def test_every_component_panel_is_drawn(mod):
-    """The combined score is ~cloud_rmse/2 because the condensate term
-    dominates the quadrature, so dropping the per-component panels would hide
-    the temperature and humidity rankings the campaign is actually about."""
-    keys = [k for k, _ in mod.COMPONENTS]
-    assert keys == ["score", "T_rmse", "qv_rmse", "cloud_rmse", "precip_rmse"]
+def test_every_component_panel_is_actually_drawn(mod, tmp_path, monkeypatch):
+    """The combined score is dominated by the condensate term, so dropping a
+    per-component panel would hide the temperature and humidity rankings the
+    campaign is about.  Asserted by SPYING on the panel calls, not by
+    comparing the COMPONENTS constant to a literal -- the latter passes even
+    if the figure draws nothing (codex finding 15).
+    """
+    seen = []
+    real = mod._panel
+
+    def spy(ax, names, before, after, notes, title, ylabel, baseline=None):
+        seen.append((title, tuple(before), tuple(after)))
+        return real(ax, names, before, after, notes, title, ylabel,
+                    baseline=baseline)
+
+    monkeypatch.setattr(mod, "_panel", spy)
+    _write(tmp_path, [_rec("emanuel", 0.94, 0.79, 11),
+                      _rec("dca", 9.3, 9.3, 0)])
+    recs = mod._load(tmp_path, None)
+    mod.figure_before_after(recs, {}, tmp_path / "f.png", NO_CONV)
+
+    assert [t for t, _, _ in seen] == [t for _, t in mod.COMPONENTS]
+    # and each panel received THAT component's numbers, not the score's
+    by_title = {t: (b, a) for t, b, a in seen}
+    assert by_title["temperature"][1] == (0.79, 9.3)     # T_rmse mirrors score
+    assert len(seen) == 5
+
+
+def test_a_component_that_moved_is_not_greyed_as_structural(mod, tmp_path):
+    """codex finding 2: structural status is decided on the COMBINED score, so
+    a scheme can be flat overall while a component moved.  That component must
+    be coloured by its own direction, not swallowed by the grey legend."""
+    rec = _rec("kuo", NO_CONV, NO_CONV, 2)
+    rec["tuned"]["T_rmse"] = 0.20          # moved
+    rec["prior"]["T_rmse"] = 0.30
+    _write(tmp_path, [rec, _rec("edmf", 0.98, 0.95, 5)])
+    recs = mod._load(tmp_path, None)
+    assert mod._structural_note(recs[[r["scheme"] for r in recs].index("kuo")],
+                                NO_CONV) == "scores the no-convection baseline"
+    # the figure must still render; the styling branch is exercised by the
+    # differing prior/tuned T_rmse on a structurally-flat scheme
+    out = tmp_path / "f.png"
+    mod.figure_before_after(recs, {}, out, NO_CONV)
+    assert out.exists()
+
+
+def test_nonfinite_scores_sort_last_deterministically(mod, tmp_path):
+    """codex finding 3: NaN comparisons are unordered, so sorting on the raw
+    float leaves a missing-score scheme wherever the filename order put it
+    while the legend advertises best-first."""
+    _write(tmp_path, [_rec("zzz_nan", 1.0, float("nan"), 3),
+                      _rec("aaa_good", 5.0, 4.0, 3),
+                      _rec("mmm_best", 2.0, 0.5, 3)])
+    got = [r["scheme"] for r in mod._load(tmp_path, None)]
+    assert got == ["mmm_best", "aaa_good", "zzz_nan"], got
+
+
+def test_disagreeing_reference_precipitation_is_refused(mod, tmp_path):
+    """codex finding 5: two checkpoints scored against different references
+    must not share a figure -- silently drawing recs[0]'s value makes the CRM
+    line depend on sort order."""
+    class _Ref:
+        T_ref = np.array([300.0, 250.0])
+        qv_ref = np.array([0.018, 0.001])
+        qcond_ref = np.array([2e-5, 1e-6])
+
+    a = _rec("emanuel", 0.94, 0.79, 11)
+    b = _rec("edmf", 0.98, 0.95, 5)
+    b["tuned"]["precip_ref_mm_day"] = 3.100      # a different reference
+    _write(tmp_path, [a, b])
+    recs = mod._load(tmp_path, None)
+    with pytest.raises(SystemExit, match="precip_ref_mm_day"):
+        mod.figure_profiles(recs, {}, tmp_path / "p.png", _Ref(),
+                            np.array([1000.0, 200.0]))
 
 
 def test_profiles_figure_writes(mod, tmp_path):

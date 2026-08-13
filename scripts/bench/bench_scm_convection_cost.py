@@ -147,41 +147,90 @@ def _physics(scheme: str, dt: float, sub_overrides: dict | None = None):
     )
 
 
+def _activity(fn, state, sigma) -> dict:
+    """Column-integrated |dT/dt| and |dq_v/dt| for the scheme's tendency.
+
+    A scheme whose trigger never fires on this column returns an all-zero
+    tendency, and timing it measures the cost of the INACTIVE branch.  Such a
+    scheme must not enter the "pack" that ZM is compared against -- at ncol=1
+    the pack median was originally ``kuo``, which cannot convect in a single
+    column at all (codex review, finding 14).  ``finite`` alone does not catch
+    this: an all-zero result is perfectly finite.
+    """
+    tend, _ = fn(state, None, sigma)
+    dT = np.abs(np.asarray(tend.dT_dt.data, dtype=float)).sum()
+    tt = tend.tracer_tendencies or {}
+    dq = (np.abs(np.asarray(tt["q_v"].data, dtype=float)).sum()
+          if "q_v" in tt else 0.0)
+    leaves = [np.asarray(x) for x in jax.tree_util.tree_leaves(tend)]
+    return {
+        "sum_abs_dT_dt": float(dT),
+        "sum_abs_dqv_dt": float(dq),
+        "finite": bool(all(np.all(np.isfinite(x)) for x in leaves)),
+    }
+
+
+# Below this the tendency is indistinguishable from an untriggered scheme.
+# Units are K/s summed over the column, so this is a very low bar: an active
+# scheme clears it by many orders of magnitude.
+ACTIVITY_FLOOR_K_PER_S = 1.0e-12
+
+
 def time_scheme(scheme: str, state, sigma, dt: float, *, repeats: int,
-                sub_overrides: dict | None = None) -> dict:
-    """Compile once, then time ``repeats`` calls.
+                warmups: int = 3, sub_overrides: dict | None = None) -> dict:
+    """Compile once, warm up, then time ``repeats`` calls.
 
     The compile is timed separately and EXCLUDED from the per-call number: a
     tuning evaluation compiles once and then integrates 14,400 steps, so a
     per-call figure contaminated by compile would not be the quantity that
     explains the campaign's wall clock.
+
+    The jitted function returns EVERY leaf of the tendency pytree, not just
+    ``dT_dt``.  Returning one field lets XLA dead-code-eliminate whatever the
+    scheme computes only for moisture, condensate or momentum, which would
+    understate the schemes that produce the most outputs -- a per-scheme bias
+    in exactly the comparison this bench exists to make (codex finding 8).
     """
     fn = _physics(scheme, dt, sub_overrides)
 
     @jax.jit
     def step(st):
         tend, _ = fn(st, None, sigma)
-        return tend.dT_dt.data
+        return tuple(jax.tree_util.tree_leaves(tend))
+
+    def _block(outs):
+        for o in outs:
+            o.block_until_ready()
 
     t0 = time.perf_counter()
-    out = step(state)
-    out.block_until_ready()
+    outs = step(state)
+    _block(outs)
     compile_s = time.perf_counter() - t0
+
+    for _ in range(warmups):
+        _block(step(state))
 
     samples = []
     for _ in range(repeats):
         t0 = time.perf_counter()
-        out = step(state)
-        out.block_until_ready()
+        _block(step(state))
         samples.append(time.perf_counter() - t0)
 
-    finite = bool(np.all(np.isfinite(np.asarray(out))))
+    act = _activity(fn, state, sigma)
+    ms = [1e3 * s for s in samples]
     return {
         "scheme": scheme,
         "compile_s": compile_s,
-        "call_ms": 1e3 * statistics.median(samples),
-        "call_ms_min": 1e3 * min(samples),
-        "finite": finite,
+        # Median is the steady-state kernel latency; the MEAN is the estimator
+        # that extrapolates to a campaign's total wall clock, because 14,400
+        # sequential calls accumulate every slow one (codex finding 12).
+        "call_ms": statistics.median(ms),
+        "call_ms_mean": statistics.fmean(ms),
+        "call_ms_min": min(ms),
+        "call_ms_max": max(ms),
+        "n_leaves": len(outs),
+        "active": act["sum_abs_dT_dt"] > ACTIVITY_FLOOR_K_PER_S,
+        **act,
     }
 
 
@@ -190,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--nlev", type=int, default=DEFAULT_NLEV)
     p.add_argument("--dt", type=float, default=DEFAULT_DT)
     p.add_argument("--repeats", type=int, default=12)
+    p.add_argument("--warmups", type=int, default=3,
+                   help="untimed calls after compile, before the samples")
     p.add_argument("--ncols", type=int, nargs="*", default=[1, 64, 1024])
     p.add_argument("--newton-iters", type=int, nargs="*", default=[5, 10, 20],
                    help="_NEWTON_ITERS values for the scaling control")
@@ -214,23 +265,40 @@ def main(argv: list[str] | None = None) -> int:
     by_ncol: dict[int, list[dict]] = {}
     for ncol in args.ncols:
         state, sigma = build_state(args.nlev, ncol)
-        rows = [time_scheme(s, state, sigma, args.dt, repeats=args.repeats)
+        nbytes = sum(int(np.asarray(x).nbytes)
+                     for x in jax.tree_util.tree_leaves(state))
+        rows = [time_scheme(s, state, sigma, args.dt, repeats=args.repeats,
+                            warmups=args.warmups)
                 for s in SCHEMES]
         by_ncol[ncol] = rows
-        print(f"\n===== ncol = {ncol} "
-              f"(nlev {args.nlev}, dt {args.dt:.0f} s) =====")
-        print(f"{'scheme':18s}{'compile [s]':>13s}{'call [ms]':>12s}"
-              f"{'per-col [us]':>14s}  finite")
+        print(f"\n===== batch width ncol = {ncol} "
+              f"(nlev {args.nlev}, dt {args.dt:.0f} s, "
+              f"state {nbytes / 1024:.1f} KiB) =====")
+        print(f"{'scheme':18s}{'compile [s]':>13s}{'median [ms]':>13s}"
+              f"{'mean [ms]':>11s}{'per-col [us]':>14s}  active  finite")
         for r in sorted(rows, key=lambda r: r["call_ms"]):
             print(f"{r['scheme']:18s}{r['compile_s']:13.2f}"
-                  f"{r['call_ms']:12.3f}"
-                  f"{1e3 * r['call_ms'] / ncol:14.2f}  {r['finite']}")
-        # ZM against the median of the other nine: the quantity whose
-        # ncol-dependence is the actual hypothesis.
+                  f"{r['call_ms']:13.3f}{r['call_ms_mean']:11.3f}"
+                  f"{1e3 * r['call_ms'] / ncol:14.2f}  "
+                  f"{str(r['active']):>6s}  {r['finite']}")
+        inactive = [r["scheme"] for r in rows if not r["active"]]
+        if inactive:
+            print(f"  EXCLUDED from the pack (no tendency on this column, so "
+                  f"their timing is the cost of the inactive branch): "
+                  f"{', '.join(inactive)}")
+        # ZM against the median of the ACTIVE others.  Including an
+        # untriggered scheme makes the baseline the cost of doing nothing; at
+        # ncol=1 the median of all nine was `kuo`, which cannot convect in a
+        # single column at all (codex finding 14).
         zm = next(r["call_ms"] for r in rows if r["scheme"] == "zhang_mcfarlane")
-        pack = statistics.median([r["call_ms"] for r in rows
-                                  if r["scheme"] != "zhang_mcfarlane"])
-        print(f"  zhang_mcfarlane / median(other nine) = {zm / pack:.2f}x")
+        pack_rows = [r for r in rows
+                     if r["scheme"] != "zhang_mcfarlane" and r["active"]]
+        if pack_rows:
+            pack = statistics.median([r["call_ms"] for r in pack_rows])
+            print(f"  zhang_mcfarlane / median({len(pack_rows)} active others)"
+                  f" = {zm / pack:.2f}x")
+        else:
+            print("  no active comparison scheme — ratio NOT computed")
     payload["by_ncol"] = {str(k): v for k, v in by_ncol.items()}
 
     # ---------------------------------------------------------------- #
@@ -238,15 +306,20 @@ def main(argv: list[str] | None = None) -> int:
     # ---------------------------------------------------------------- #
     state1, sigma1 = build_state(args.nlev, 1)
     on = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
-                     repeats=args.repeats,
+                     repeats=args.repeats, warmups=args.warmups,
                      sub_overrides={"use_dilute_cape": True})
     off = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
-                      repeats=args.repeats,
+                      repeats=args.repeats, warmups=args.warmups,
                       sub_overrides={"use_dilute_cape": False})
     print("\n===== control 1: dilute-parcel CAPE ON vs OFF (ncol=1) =====")
-    print(f"  use_dilute_cape=True   {on['call_ms']:9.3f} ms")
-    print(f"  use_dilute_cape=False  {off['call_ms']:9.3f} ms")
+    print(f"  use_dilute_cape=True   {on['call_ms']:9.3f} ms  "
+          f"active={on['active']}")
+    print(f"  use_dilute_cape=False  {off['call_ms']:9.3f} ms  "
+          f"active={off['active']}")
     print(f"  ratio ON/OFF = {on['call_ms'] / off['call_ms']:.2f}x")
+    if not (on["active"] and off["active"]):
+        print("  WARNING: an arm produced no tendency — this compares an "
+              "active scheme against a no-op, not two CAPE closures.")
     payload["dilute_control"] = {"on": on, "off": off}
 
     # ---------------------------------------------------------------- #
@@ -264,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             # scaling, which reads exactly like a refutation.
             jax.clear_caches()
             r = time_scheme("zhang_mcfarlane", state1, sigma1, args.dt,
-                            repeats=args.repeats,
+                            repeats=args.repeats, warmups=args.warmups,
                             sub_overrides={"use_dilute_cape": True})
             r["newton_iters"] = n
             scaling.append(r)

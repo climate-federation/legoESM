@@ -75,18 +75,12 @@ COMPONENTS: tuple[tuple[str, str], ...] = (
     ("precip_rmse", "surface precipitation"),
 )
 
-# Schemes whose default==tuned pair is structural rather than a failed
-# search.  Keyed by scheme name -> short reason drawn on the figure.
-#   dca  : the registry exposes no tunable parameter for it at all.
-#   kuo  : deliberately inactive without a large-scale moisture-convergence
-#          operator, i.e. in any single-column configuration.
-# Both are VERIFIED per run from the checkpoint (see ``_structural_note``)
-# rather than trusted from this table alone, so a scheme that gains
-# parameters later stops being annotated automatically.
-STRUCTURAL_REASONS = {
-    "dca": "no tunable parameters",
-    "kuo": "inactive in a single column",
-}
+# Bit-identity tolerance for "this scheme scored the no-convection baseline".
+# Exact equality is the honest test -- the campaign's kuo checkpoint carries
+# 5.736693549527354, the same float the standalone convection=none probe
+# printed -- but a hair of slack keeps the label from vanishing on a rerun
+# that differs in the last ulp.
+BASELINE_RTOL = 1.0e-12
 
 
 def _ff(x: Any) -> float:
@@ -117,27 +111,46 @@ def _load(indir: Path, schemes: list[str] | None) -> list[dict[str, Any]]:
         recs.append(rec)
     if not recs:
         raise SystemExit("no scheme matched the requested list")
-    recs.sort(key=lambda r: _ff(r["tuned"].get("score")))
+    # NaN is unordered, so sorting on it directly leaves a scheme with a
+    # missing score wherever the input filename order happened to put it,
+    # while the profile legend advertises "best first" (codex finding 3).
+    # Non-finite scores sort last, deterministically.
+    def _key(r):
+        s = _ff(r["tuned"].get("score"))
+        return (not np.isfinite(s), s if np.isfinite(s) else np.inf,
+                r["scheme"])
+
+    recs.sort(key=_key)
     return recs
 
 
-def _structural_note(rec: dict[str, Any]) -> str | None:
+def _structural_note(rec: dict[str, Any],
+                     no_conv_score: float | None = None) -> str | None:
     """Reason this scheme's pair is flat BY CONSTRUCTION, or None.
 
-    Verified against the checkpoint, not asserted from the name: a scheme is
-    only annotated when its pair really is bit-identical, and the parameter
-    count is read from the record list rather than assumed.  A scheme in
-    STRUCTURAL_REASONS that did move is therefore NOT annotated, which is
-    the behaviour we want if `kuo` is ever wired up for single columns.
+    Derived from MEASUREMENTS in the checkpoint, never from a table of scheme
+    names (codex finding 1).  Two independent reasons:
+
+    * the runner recorded zero tunable parameters, so no search was possible;
+    * the scheme scored the measured no-convection baseline, which means it
+      contributed nothing -- the evidence for `kuo` being inactive in a single
+      column, and evidence that survives `kuo` later being wired up, because
+      then it stops matching the baseline and the label disappears by itself.
+
+    Requires the pair to be genuinely flat, with both scores finite: a
+    non-finite score is a failure to be shown, not a structural constant, and
+    `NaN != NaN` would otherwise silently read as "moved".
     """
-    prior, tuned = rec["prior"], rec["tuned"]
-    moved = _ff(prior.get("score")) != _ff(tuned.get("score"))
-    if moved:
+    prior = _ff(rec["prior"].get("score"))
+    tuned = _ff(rec["tuned"].get("score"))
+    if not (np.isfinite(prior) and np.isfinite(tuned)) or prior != tuned:
         return None
-    n_par = len(rec.get("records") or ())
-    if n_par == 0:
-        return STRUCTURAL_REASONS.get(rec["scheme"], "no tunable parameters")
-    return STRUCTURAL_REASONS.get(rec["scheme"])
+    if len(rec.get("records") or ()) == 0:
+        return "no tunable parameters"
+    if (no_conv_score is not None and np.isfinite(no_conv_score)
+            and abs(tuned - no_conv_score) <= BASELINE_RTOL * abs(no_conv_score)):
+        return "scores the no-convection baseline"
+    return None
 
 
 def _panel(
@@ -183,9 +196,19 @@ def _panel(
         if not finite[i]:
             continue
         x0, x1 = 0.0 + jitter[i], 1.0 + jitter[i]
-        inert = notes[i] is not None
+        # Grey means "this component did not move AND the scheme is
+        # structurally unable to move".  The structural status is decided on
+        # the combined score, so a scheme can be structurally flat overall
+        # while a component moved (offsetting changes); that component must
+        # be coloured by its OWN direction rather than greyed, or the figure
+        # hides a real change behind a "flat by construction" legend entry
+        # (codex finding 2).
+        this_flat = before[i] == after[i]
+        inert = notes[i] is not None and this_flat
         if inert:
             seg, mark = INERT, INERT
+        elif this_flat:
+            seg, mark = INERT, None      # unchanged is not "degraded"
         else:
             seg = AFTER if after[i] < before[i] else WORSE
             mark = None
@@ -201,11 +224,16 @@ def _panel(
     # rows a reader must not mistake for "tuning did nothing".
     idx_lab = {int(np.nanargmin(np.where(finite, after, np.nan))),
                int(np.nanargmax(np.where(finite, after, np.nan)))}
-    idx_lab |= {i for i, n in enumerate(notes) if n is not None and finite[i]}
+    idx_lab |= {i for i, n in enumerate(notes)
+                if n is not None and finite[i] and before[i] == after[i]}
     for i in sorted(idx_lab):
-        label = names[i] if notes[i] is None else f"{names[i]} ({notes[i]})"
+        flat_here = before[i] == after[i]
+        label = (names[i] if (notes[i] is None or not flat_here)
+                 else f"{names[i]} ({notes[i]})")
         ax.annotate(label, (1.0 + jitter[i] + 0.09, after[i]),
-                    fontsize=8.0, color=INK_2 if notes[i] is None else INERT,
+                    fontsize=8.0,
+                    color=INERT if (notes[i] is not None and flat_here)
+                    else INK_2,
                     va="center", ha="left")
 
     ax.set_xticks([0, 1])
@@ -232,7 +260,7 @@ def figure_before_after(
     no_conv_score: float | None,
 ) -> dict[str, tuple[float, float]]:
     names = [r["scheme"] for r in recs]
-    notes = [_structural_note(r) for r in recs]
+    notes = [_structural_note(r, no_conv_score) for r in recs]
 
     fig, axes = plt.subplots(1, len(COMPONENTS),
                              figsize=(4.0 * len(COMPONENTS), 5.6))
@@ -273,6 +301,7 @@ def figure_before_after(
     handles = [
         Line2D([0], [0], color=AFTER, lw=1.6, label="improved"),
         Line2D([0], [0], color=WORSE, lw=1.6, label="degraded"),
+        Line2D([0], [0], color=INERT, lw=1.6, label="unchanged"),
         Line2D([0], [0], color=INERT, lw=1.6, ls=(0, (3, 2)),
                label="flat by construction"),
     ]
@@ -344,8 +373,20 @@ def figure_profiles(
     E = np.array([_ff(r["tuned"].get("evap_mm_day")) for r in recs])
     ax.barh(y + 0.18, P, height=0.34, color=AFTER, alpha=0.75, label="P")
     ax.barh(y - 0.18, E, height=0.34, color=BEFORE, alpha=0.75, label="E")
-    p_ref = _ff(recs[0]["tuned"].get("precip_ref_mm_day"))
-    if np.isfinite(p_ref):
+    # Every checkpoint carries its own copy of the reference precipitation.
+    # Reading it off recs[0] alone would silently make the plotted CRM line
+    # depend on which scheme happened to sort first (codex finding 5), so the
+    # copies are required to AGREE before one is drawn.
+    p_refs = [_ff(r["tuned"].get("precip_ref_mm_day")) for r in recs]
+    p_finite = [v for v in p_refs if np.isfinite(v)]
+    if p_finite and (max(p_finite) - min(p_finite)) > 1e-9 * abs(p_finite[0]):
+        raise SystemExit(
+            f"checkpoints disagree on precip_ref_mm_day "
+            f"({min(p_finite)!r} .. {max(p_finite)!r}); they were scored "
+            f"against different references and must not share a figure"
+        )
+    if p_finite:
+        p_ref = p_finite[0]
         ax.axvline(p_ref, color=REF_COLOR, lw=2.0,
                    label=f"CRM P = {p_ref:.2f}")
     ax.set_yticks(y)
