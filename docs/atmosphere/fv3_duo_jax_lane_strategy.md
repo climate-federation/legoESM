@@ -435,11 +435,39 @@ Both are flagged here so they are designed, not discovered:
    NumPy lane's traversal exactly; `searchsorted` picks a different layer at
    ties.
 2. **`tracer_2d_1l_sixface`** (`fv3_native_tracer2d.py:193`) — `nsplt` is a
-   **data-derived loop trip count** (computed from `cmax`), which jit cannot
-   accept as a Python loop bound. Either resolve `nsplt` outside the traced
-   region and treat it as static per call, or use `lax.while_loop` with a
-   bounded maximum. Whichever is chosen must be stated in the module docstring,
-   because it changes the retrace behaviour.
+   **data-derived loop trip count**: `nsplt_k[k] = int(1.0 + cmax[k])`
+   (`:318`), where `cmax[k]` is the six-face max of a Courant-like number
+   built from the flux capacitors (`:299-315`). jit cannot take that as a
+   Python loop bound.
+
+   **Resolved: compute it outside the traced region and treat it as static per
+   call.** The three candidates and why:
+
+   | option | faithful? | reverse-differentiable? | cost |
+   |---|---|---|---|
+   | (a) static, resolved eagerly | yes, exactly | **yes** (plain Python loop, unrolled) | one device→host sync per step; retrace when `nsplt_k` changes |
+   | (b) `lax.fori_loop` with a traced bound | yes | **NO** — a traced bound lowers to `while_loop`, which has no reverse-mode rule | none |
+   | (c) pad to `NSPLT_MAX`, mask the surplus | only if the mask is a proven no-op | yes | `NSPLT_MAX ×` the transport work |
+
+   (b) is disqualified outright: a lane whose reason for existing is the
+   adjoint cannot put its tracer transport inside a `while_loop`. (a) is
+   chosen over (c) because `cmax` is below 1 in any stable configuration, so
+   `nsplt = 1` essentially always and the retrace never fires in practice —
+   whereas (c) pays `NSPLT_MAX ×` unconditionally and needs a separate proof
+   that the masked iterations are exact no-ops.
+
+   **The non-obvious part, and the reason (a) costs no accuracy in the
+   gradient:** making `nsplt` static drops the `∂nsplt/∂cmax` term, but that
+   term is **zero almost everywhere** — `int(1.0 + cmax)` is a floor, so its
+   true derivative vanishes except on the measure-zero set where `cmax`
+   crosses an integer. The static treatment therefore yields the *correct*
+   gradient a.e., not an approximation. The `frac = 1/nsplt` rescale of the
+   capacitors (`:319-333`) inherits the same property. The measure-zero
+   crossings are a genuine non-differentiable site of the SCHEME, not of the
+   port, and are named as such in the gradient gate.
+
+   The retrace behaviour must be stated in the module docstring, and the
+   module logs once when `nsplt_k` changes so a retrace is never silent.
 
 Good news from the same trace: `c_sw` and all six `d_sw*_duo` are **already
 functional** in the NumPy lane (they copy every input at entry and return
