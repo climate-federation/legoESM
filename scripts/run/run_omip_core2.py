@@ -6961,7 +6961,20 @@ def main() -> int:
                     )
                     # Land cells contribute nothing to either budget.
                     _fw_restore = _sss_out["freshwater_flux"] * _lm
-                    fw = fw._replace(restoring=_fw_restore)
+                    if fw is None:
+                        # `fw` is None when the run has no P-E, runoff or ice
+                        # (e.g. --no-emp on a forcing-free probe), and
+                        # `_replace` on None would crash at the first step
+                        # (codex 9387241).  Under this channel the restoring IS
+                        # physical freshwater, so it needs a carrier: build a
+                        # zero forcing and put it in the restoring slot.
+                        from legoesm.ocean.freshwater import FreshwaterForcing
+                        _z = jnp.zeros_like(_fw_restore)
+                        fw = FreshwaterForcing(precip=_z, evap=_z, runoff=_z,
+                                               ice_fw=_z,
+                                               restoring=_fw_restore)
+                    else:
+                        fw = fw._replace(restoring=_fw_restore)
                     # NEMO's qns is positive INTO the ocean, matching q_net, so
                     # this adds with no sign flip (derivation at the term in
                     # sss_restoring.py).

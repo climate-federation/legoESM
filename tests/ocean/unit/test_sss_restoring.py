@@ -387,3 +387,22 @@ class TestRestoringChannelFlag:
             "real_freshwater", True, "live_s", None) is not None
         assert real_freshwater_restoring_conflict(
             "real_freshwater", True, "live_s", "tracer") is not None
+
+    def test_water_flux_block_handles_absent_freshwater_forcing(self):
+        """`fw` is None when a run has no P-E / runoff / ice.
+
+        The first version of the routing called `fw._replace` unconditionally,
+        which would crash at step 1 on such a run (codex 9387241). Under this
+        channel the restoring IS physical freshwater, so it needs a carrier.
+        """
+        import inspect
+
+        from scripts.run import run_omip_core2
+
+        src = inspect.getsource(run_omip_core2.main)
+        block = src[src.index("if _sss_water_flux:"):]
+        block = block[:block.index("state = _ensure_sharded_state")]
+        assert "if fw is None:" in block, (
+            "the water-flux routing assumes `fw` exists; it is None on runs "
+            "with no P-E, runoff or ice.")
+        assert "FreshwaterForcing(" in block
