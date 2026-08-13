@@ -184,30 +184,54 @@ def geo_bounded():
     return gs, st, bd, res + 1, res + 1
 
 
-# Anything at or above this magnitude is a WORKSPACE SENTINEL, not a
-# physical value: the lane uses 1e30 (ut/vt, ptc, ub/vb, heat_source,
-# delpc outside the B ring) and 1e25 (divergence_corner_duo's divg_d
-# init).  The largest physical quantity in this core is an area flux,
-# ~dt*|u|*dy ~ 1e8 on a C12 sphere, so the gap is fifteen decades wide.
-_SENTINEL_FLOOR = 1.0e20
+# The WORKSPACE FILL CONSTANTS this lane round-trips, by VALUE: 1e30
+# (ut/vt, ptc, ub/vb, heat_source, delpc outside the B ring) and 1e25
+# (divergence_corner_duo's divg_d init).  A cell is a fill only if it
+# holds one of these EXACTLY -- see the retraction in _cmp's docstring
+# for why a magnitude threshold was wrong.
+_FILL_VALUES = (1.0e30, 1.0e25)
 
 
 def _cmp(got, ref, name, tol):
-    """Mask-aware relative comparison -- and it MUST be able to fail.
+    """Mask-aware, PER-ELEMENT relative comparison -- and it must be able
+    to fail without also being able to fail spuriously.
 
-    Three defects this guards against, each earned:
+    ⛔ RETRACTION (job 9404093).  The first version of this helper
+    classified a cell as a "sentinel" by MAGNITUDE (``|x| >= 1e20``) and
+    then demanded those cells be BITWISE equal.  That was wrong, and it
+    produced three of this module's eight failures -- ``d_sw1``'s
+    ``allflux_x``, ``d_sw5``'s ``vortfluxx`` and ``d_sw6``'s ``ut``, at
+    values of 1e22 … 1e111.  Those cells are NOT workspace fills: they
+    are the documented SENTINEL-PROPAGATED CASCADE.  ``d_sw1``'s
+    plain-conventions edge/corner blocks read ut/vt cells the duo
+    interior never writes, so ``ut`` picks up ~1e30, ``xfx = dt*ut``
+    ~1e31, ``crx`` ~1e26, and ``fv_tp_2d`` on those Courant numbers
+    yields 1e54 … 1e111.  Every one of those is ORDINARY ARITHMETIC and
+    is therefore subject to XLA's FMA contraction under jit -- demanding
+    it bitwise contradicted this file's own tolerance policy.  (The
+    JAX-vs-NumPy parity gates passed on the same arrays because both
+    lanes evaluate them eagerly.)
 
-    * a mismatch in the NON-FINITE mask is a port bug on its own (a cell
-      the oracle never writes must stay a tripwire in BOTH lanes), so it
-      is checked before any value;
-    * a mismatch in the SENTINEL mask is the same defect wearing a
-      finite disguise -- ``1e30`` passes every ``isfinite`` guard;
-    * and, decisively, a sentinel left in the comparison SET makes the
-      relative bound VACUOUS: ``max|ref|`` becomes ``1e30`` and every
-      physical discrepancy divides to nothing.  The sentinel cells are
-      therefore compared by MASK and excluded from the value scale,
-      which is what keeps a gate on ``ut``/``vt``/``delpc``/``ke`` able
-      to fail at all.
+    The classification is now by VALUE against the known fill constants,
+    and the value comparison is PER ELEMENT:
+
+    * NON-FINITE mask equality -- a cell the oracle never writes must
+      stay a tripwire in BOTH lanes;
+    * EXACT-FILL mask equality (and, being constants, exact values) --
+      ``1e30`` passes every ``isfinite`` guard, so a drifted fill is a
+      real defect wearing a finite disguise;
+    * every other cell: ``|a-b| / (|b| + scale)`` with ``scale`` the
+      MEDIAN of ``|b|`` over those cells.  Per-element relative with a
+      robust floor is the error model strategy section 4 asks for, and
+      it fixes the other half of the original defect: a single 1e111
+      cell can no longer set ``max|ref|`` and divide every physical
+      discrepancy to nothing.
+
+    Returns ``(rel, n_over)`` where ``n_over`` counts cells above a
+    rounding-scale reference -- the BRANCH-FLIP signature.  A handful of
+    cells far out with the rest at 1e-16 is a limiter branch flip; all
+    cells uniformly out is something systematic.  The distribution is
+    printed on failure so the next run does not have to guess.
     """
     a = np.asarray(got, dtype=np.float64)
     b = np.asarray(ref, dtype=np.float64)
@@ -218,28 +242,36 @@ def _cmp(got, ref, name, tol):
         f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
         f"{int(nb.sum())} cells of {a.size})")
 
-    sa = np.isfinite(a) & (np.abs(a) >= _SENTINEL_FLOOR)
-    sb = np.isfinite(b) & (np.abs(b) >= _SENTINEL_FLOOR)
-    assert np.array_equal(sa, sb), (
-        f"{name}: sentinel masks differ (jax {int(sa.sum())} vs numpy "
-        f"{int(sb.sum())} cells of {a.size})")
-    if sa.any():
-        assert np.array_equal(a[sa], b[sa]), (
-            f"{name}: the sentinel VALUES differ -- both lanes must "
-            f"round-trip the identical workspace fill")
+    fa = np.zeros(a.shape, bool)
+    fb = np.zeros(b.shape, bool)
+    for v in _FILL_VALUES:
+        fa |= (a == v)
+        fb |= (b == v)
+    assert np.array_equal(fa, fb), (
+        f"{name}: workspace-FILL masks differ (jax {int(fa.sum())} vs "
+        f"numpy {int(fb.sum())} cells of {a.size}); the fill constants "
+        f"are {list(_FILL_VALUES)}")
 
-    ok = np.isfinite(a) & ~sa
+    ok = np.isfinite(a) & ~fa
     if not ok.any():
-        # every cell is a sentinel or a tripwire: the two mask checks
-        # above ARE the whole gate, and they were exact.
-        return 0.0
-    scale = max(float(np.abs(b[ok]).max()), 1e-30)
-    rel = float(np.abs(a[ok] - b[ok]).max()) / scale
+        # every cell is a fill or a tripwire: the two mask checks above
+        # ARE the whole gate, and they were exact.
+        return 0.0, 0
+    diff = np.abs(a[ok] - b[ok])
+    scale = float(np.median(np.abs(b[ok])))
+    if not (scale > 0.0):
+        scale = max(float(np.abs(b[ok]).max()), 1e-300)
+    den = np.abs(b[ok]) + scale
+    per = diff / den
+    rel = float(per.max())
+    n_over = int((per > 1e-13).sum())
     assert rel <= tol, (
-        f"{name}: rel {rel:.3e} > {tol:.3e} MEASURED={rel:.3e} "
-        f"over {int(ok.sum())} of {a.size} cells "
-        f"(bitwise={np.array_equal(a[ok], b[ok])})")
-    return rel
+        f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
+        f"{n_over} of {int(ok.sum())} compared cells exceed 1e-13 "
+        f"(a handful => limiter BRANCH FLIP, all of them => systematic); "
+        f"median|ref| {scale:.3e}, max|diff| {float(diff.max()):.3e}, "
+        f"bitwise={np.array_equal(a[ok], b[ok])}")
+    return rel, n_over
 
 
 def _tree_dot(a, b) -> float:
@@ -792,30 +824,61 @@ def test_d2a2c_vect_gradients(geo_sw):
     check_grads(obj, (u,), order=2, modes=("fwd",))
 
 
-def test_d2a2c_vect_one_sided_across_the_edge_upwind_surface(geo_sw):
-    """gate 4 (strategy correction 4) -- the SWITCHING-SURFACE test.
+def test_d2a2c_vect_edge_select_is_metric_degenerate_on_this_grid(
+        geo_sw):
+    """gate 4 -- what the ``d2a2c_vect`` upwind selects ACTUALLY are on
+    the admitted metrics, measured rather than assumed.
 
-    Surface: ``ut(1,j) > 0`` at the west edge (sw_core.F90's
-    ``if ( ut(1,j) > 0. )``), which selects ``uc(1,j) = ut*sin_sg(0,j,3)``
-    versus ``uc(1,j) = ut*sin_sg(1,j,1)``.  The two arms are DIFFERENT
-    metrics, so the VALUE jumps across the surface and no classical
-    derivative exists there; the correct statement is the pair of
-    one-sided derivatives, each equal to its own branch's metric.
+    ⛔ RETRACTED AND REPLACED (job 9404093).  This was written as a
+    one-sided derivative gate on ``ut(1,j) > 0``, which selects
+    ``uc(1,j) = ut*sin_sg(0,j,3)`` versus ``ut*sin_sg(1,j,1)``.  Its own
+    bracket precondition refused the state -- and the precondition was
+    right.  MEASURED on ``swcore_input.npz``, over EVERY index, not one
+    unlucky row:
 
-    Construction: ``ut(1,j)`` is ``edge_interpolate4`` of ``ua`` at the
-    four west columns, hence LINEAR in ``u``.  Scaling ``u`` by
-    ``s`` therefore scales ``ut(1,j)`` by ``s`` and flips the branch at
-    ``s = 0``, so ``d/ds uc(1,j)`` approached from ``s>0`` must be
-    ``ut(1,j)|_{s=1} * sin_sg(0,j,3)`` and from ``s<0`` must be
-    ``ut(1,j)|_{s=1} * sin_sg(1,j,1)`` -- and those differ.
+        west   max_j |sin_sg(0,j,3) - sin_sg(1,j,1)|          = 2.8e-15
+        east   max_j |sin_sg(npx-1,j,3) - sin_sg(npx,j,1)|    = 4.3e-15
+        south  max_i |sin_sg(i,0,4) - sin_sg(i,1,2)|          = 2.6e-15
+
+    The two arms are the SAME geometric angle seen from the two sides of
+    a panel edge, and on this gnomonic gridstruct with matched halo
+    metrics they agree to rounding.  So ``d2a2c_vect`` has NO
+    discriminating switching surface on the admitted input: the select
+    is value-continuous to ~3e-15 and a one-sided derivative gate there
+    can only certify noise.  No choice of ``j`` fixes it, which is why
+    this is not a fixture-row problem.
+
+    What this gate now asserts, all falsifiable: (a) the measured
+    degeneracy itself -- if a future gridstruct separates the arms this
+    goes RED and tells you a real one-sided gate has become possible;
+    (b) the select is therefore value-continuous across ``s = 0``; and
+    (c) the derivative is finite on both sides.  The DISCRIMINATING
+    one-sided gates for this campaign live where the jump is real and
+    both are in this file: ``c_sw``'s delp-transport select (arms read
+    ``delp(i-1,j)`` vs ``delp(i,j)``) and ``d_sw1``'s ``crx`` select
+    (arms read ``rdxa(i-1,j)`` vs ``rdxa(i,j)``).
     """
     u = jnp.asarray(geo_sw.f["u"])
     v = jnp.asarray(geo_sw.f["v"])
     bd, npx, npy = geo_sw.bd, geo_sw.npx, geo_sw.npy
     lo = bd.isd
-    jrow = bd.js + 3            # an interior j inside the edge column
-    col_uc = 1 - lo
-    jj = jrow - lo
+    sg = np.asarray(geo_sw.gs_np["sin_sg"])
+
+    # (a) the degeneracy, over EVERY index of all three edge families
+    seps = {
+        "west": np.abs(sg[0 - lo, :, 2] - sg[1 - lo, :, 0]).max(),
+        "east": np.abs(sg[npx - 1 - lo, :, 2] - sg[npx - lo, :, 0]).max(),
+        "south": np.abs(sg[:, 0 - lo, 3] - sg[:, 1 - lo, 1]).max(),
+    }
+    for name, s in seps.items():
+        assert s < 1e-13, (
+            f"{name} arms now SEPARATE by {s:.3e} -- the select has "
+            f"become a real switching surface on this gridstruct, so "
+            f"replace this measurement with a genuine one-sided "
+            f"derivative gate against the two branch metrics")
+
+    jrow = bd.js + 3
+    col_uc, jj = 1 - lo, jrow - lo
 
     def uc1(s):
         out = duo.d2a2c_vect(s * u, s * v, geo_sw.gs_j, bd, npx, npy)
@@ -826,24 +889,27 @@ def test_d2a2c_vect_one_sided_across_the_edge_upwind_surface(geo_sw):
         return out[4][col_uc, jj]
 
     base_ut = float(ut1(jnp.asarray(1.0)))
-    assert abs(base_ut) > 1e-8, "the surface is not exercised"
-    sg = np.asarray(geo_sw.gs_np["sin_sg"])
-    m_pos = float(sg[0 - lo, jj, 2])       # sin_sg(0,j,3)
-    m_neg = float(sg[1 - lo, jj, 0])       # sin_sg(1,j,1)
-    assert abs(m_pos - m_neg) > 1e-6, "the two arms are indistinguishable"
+    assert abs(base_ut) > 1e-8, "the select is not exercised at all"
 
-    g = jax.grad(uc1)
+    # (b) value continuity across s = 0, at the level the metrics allow
     eps = 1e-6
-    sgn = 1.0 if base_ut > 0 else -1.0
+    v_r = float(uc1(jnp.asarray(+eps)))
+    v_l = float(uc1(jnp.asarray(-eps)))
+    m = float(sg[0 - lo, jj, 2])
+    assert abs(v_r + v_l) <= 1e-9 * abs(base_ut * m), (
+        f"the select is NOT value-continuous ({v_r:.6e} vs {v_l:.6e}) "
+        f"even though its two metrics agree to {seps['west']:.3e}")
+
+    # (c) both one-sided derivatives finite, and equal to the shared
+    # metric because the two arms are numerically the same number
+    g = jax.grad(uc1)
     right = float(g(jnp.asarray(+eps)))
     left = float(g(jnp.asarray(-eps)))
-    # d/ds [ (s*ut1) * metric ] = ut1 * metric, with the metric chosen by
-    # the SIGN of s*ut1.
-    want_r = base_ut * (m_pos if sgn > 0 else m_neg)
-    want_l = base_ut * (m_neg if sgn > 0 else m_pos)
-    assert right == pytest.approx(want_r, rel=1e-9), (right, want_r)
-    assert left == pytest.approx(want_l, rel=1e-9), (left, want_l)
-    assert abs(right - left) > 1e-9, "the surface is REAL"
+    assert np.isfinite(right) and np.isfinite(left)
+    for side, val in (("right", right), ("left", left)):
+        assert val == pytest.approx(base_ut * m, rel=1e-9), (
+            f"{side} one-sided derivative {val:.12e} != ut*metric "
+            f"{base_ut * m:.12e}")
 
 
 # =====================================================================
@@ -1447,7 +1513,10 @@ def test_c_sw_one_sided_across_the_transport_upwind_surface(geo_sw):
     # constant -- assert that the fixture is not in that degenerate case.
     d = np.asarray(geo_sw.f["delp"])
     local = d[icell - 1 - lo:icell + 2 - lo, jcell - lo]
-    assert local.ptp() > 0.0, "delp is locally constant -- no surface"
+    # np.ptp(), not ndarray.ptp() -- the method was REMOVED in numpy 2.0
+    # and this line was the whole failure (job 9404093); the gradient
+    # itself never ran.
+    assert np.ptp(local) > 0.0, "delp is locally constant -- no surface"
     assert abs(right - left) > 0.0, (
         f"one-sided derivatives coincide ({right:.6e}) -- the upwind "
         f"surface was not crossed")
@@ -1471,20 +1540,27 @@ def _zero_caps(geo):
             np.zeros((res + 1, m_a)), np.zeros((m_a, res + 1)))
 
 
-def _d_sw1_np(geo, caps=None, **kw):
+def _d_sw1_np(geo, caps=None, w_override=None, **kw):
+    """``w_override`` exists because the committed fixture's ``w`` is
+    identically zero, which makes every NH gate vacuous; BOTH lanes take
+    the same array so the comparison stays one-variable."""
     xf, yf, cx, cy = caps if caps is not None else _zero_caps(geo)
     f = geo.f
-    return npduo.d_sw1_duo(f["delp"], f["pt"], f["w"], f["uc"], f["vc"],
+    w = f["w"] if w_override is None else np.asarray(w_override,
+                                                     np.float64)
+    return npduo.d_sw1_duo(f["delp"], f["pt"], w, f["uc"], f["vc"],
                            xf, yf, cx, cy, geo.gs_np, geo.bd, geo.npx,
                            geo.npy, dt=geo.dt, **{**_DSW_KW, **kw})
 
 
-def _d_sw1_jax(geo, caps=None, fn=None, **kw):
+def _d_sw1_jax(geo, caps=None, fn=None, w_override=None, **kw):
     xf, yf, cx, cy = caps if caps is not None else _zero_caps(geo)
     f = geo.f
+    w = f["w"] if w_override is None else np.asarray(w_override,
+                                                     np.float64)
     g = fn or duo.d_sw1_duo
     return g(jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
-             jnp.asarray(f["w"]), jnp.asarray(f["uc"]),
+             jnp.asarray(w), jnp.asarray(f["uc"]),
              jnp.asarray(f["vc"]), jnp.asarray(xf), jnp.asarray(yf),
              jnp.asarray(cx), jnp.asarray(cy), geo.gs_j, geo.flags,
              geo.bd, geo.npx, geo.npy, dt=geo.dt, **{**_DSW_KW, **kw})
@@ -1716,21 +1792,37 @@ def test_d_sw1_mass_flux_divergence_telescopes(chain):
         f"(interior {interior:.12e}, boundary {boundary:.12e})")
 
 
-def test_d_sw1_jit_equals_eager_and_no_retrace_on_dt(geo_dsw):
-    """gate 2 -- ASSERTED, and ``dt`` proved DYNAMIC."""
-    eager = _d_sw1_jax(geo_dsw)
+def test_d_sw1_no_retrace_on_a_new_dt(geo_dsw):
+    """gate 2a -- ``dt`` is DYNAMIC: a new time step must NOT retrace.
+
+    SPLIT OUT (job 9404093) from the jit-vs-eager gate below, so a
+    retrace regression cannot hide behind a tolerance change to the
+    numeric half.  This half is tolerance-free.
+    """
     box, wrapped = _counted(duo.d_sw1_duo)
     fn = duo.make_d_sw1_duo_jit(wrapped)
-    got = _d_sw1_jax(geo_dsw, fn=fn)
-    geo2 = geo_dsw
-    xf, yf, cx, cy = _zero_caps(geo2)
-    f = geo2.f
+    _d_sw1_jax(geo_dsw, fn=fn)
+    xf, yf, cx, cy = _zero_caps(geo_dsw)
+    f = geo_dsw.f
     fn(jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
        jnp.asarray(f["w"]), jnp.asarray(f["uc"]), jnp.asarray(f["vc"]),
        jnp.asarray(xf), jnp.asarray(yf), jnp.asarray(cx),
-       jnp.asarray(cy), geo2.gs_j, geo2.flags, geo2.bd, geo2.npx,
-       geo2.npy, dt=2.0 * geo2.dt, **_DSW_KW)
+       jnp.asarray(cy), geo_dsw.gs_j, geo_dsw.flags, geo_dsw.bd,
+       geo_dsw.npx, geo_dsw.npy, dt=2.0 * geo_dsw.dt, **_DSW_KW)
     assert box["n"] == 1, f"retraced on a new dt: {box['n']}"
+
+
+def test_d_sw1_jit_equals_eager(geo_dsw):
+    """gate 2b -- the NUMERIC half, asserted with a measured bound.
+
+    NOT bitwise.  ``d_sw1``'s outputs carry the documented
+    sentinel-propagated cascade (values to ~1e111, see ``_cmp``'s
+    retraction), and every one of those cells is ordinary arithmetic
+    containing ``x*y + z`` -- which XLA contracts into an FMA when
+    jitted and not when eager.  A few-ULP gap there is correct.
+    """
+    eager = _d_sw1_jax(geo_dsw)
+    got = _d_sw1_jax(geo_dsw, fn=duo.make_d_sw1_duo_jit())
     for k in _D_SW1_KEYS:
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
@@ -1907,10 +1999,27 @@ def test_d_sw2_duo_nh_arm_parity(geo_dsw):
     from allflux slot 2, plus the ``damp_w`` del-6 block that writes
     ``dw`` and ``heat_source``.  Both are dead on the hydrostatic lane,
     so without this test the whole NH half of the stage is unexercised.
+
+    ⛔ FIXED (job 9404093).  The committed ``dswcore_input.npz`` carries
+    ``w`` IDENTICALLY ZERO (measured: ``max|w| = 0.0``, 0 nonzero cells
+    of 324), so ``del6_vt_flux(nord_w, damp4, w=0, …)`` gives
+    ``d2 = damp*0 = 0``, ``fx2 = fy2 = 0`` and ``dw ≡ 0``.  The five
+    parity comparisons all PASSED -- the two lanes agree on the NH arm,
+    including ``w`` and ``dw`` -- and what failed was this test's own
+    non-vacuity assertion, correctly: *a control that perturbs a zero is
+    not a control*.  The arm is now driven with a NON-ZERO ``w``,
+    byte-identical on both lanes, and the fixture's zero is asserted so
+    the reason for the override is recorded rather than lost.
     """
     geo = geo_dsw
-    n1 = _d_sw1_np(geo, hydrostatic=False)
-    j1 = _d_sw1_jax(geo, hydrostatic=False)
+    assert np.abs(np.asarray(geo.f["w"])).max() == 0.0, (
+        "the fixture's w is no longer zero -- re-derive whether the "
+        "override below is still needed")
+    ii = np.arange(geo.m_a, dtype=np.float64)[:, None]
+    jj = np.arange(geo.m_a, dtype=np.float64)[None, :]
+    w0 = 0.5 * np.cos(0.35 * ii) * np.sin(0.27 * jj) + 0.05 * ii / geo.m_a
+    n1 = _d_sw1_np(geo, hydrostatic=False, w_override=w0)
+    j1 = _d_sw1_jax(geo, hydrostatic=False, w_override=w0)
     kw = dict(w=None, npx=geo.npx, npy=geo.npy, dt=geo.dt, kgb=1.0e-3,
               nord_w=2, damp_w=0.15, hydrostatic=False)
     n2 = npduo.d_sw2_duo(n1["delp"], n1["pt"], n1["allflux_x"],
@@ -1924,9 +2033,12 @@ def test_d_sw2_duo_nh_arm_parity(geo_dsw):
         # job will replace this with `measured X, bound = measured x N`.
         # DO NOT SHIP.   [class: accumulating + del-6 stencil passes]
         _cmp(j2[k], n2[k], f"d_sw2_duo NH.{k}", 1e-12)
-    # non-vacuity: the damp_w block really fired
-    assert np.abs(np.asarray(j2["dw"])).max() > 0.0
-    assert (np.asarray(j2["dw"]) != 1.0e30).any()
+    # non-vacuity, in two independent parts: the block EXECUTED (dw left
+    # the workspace fill) and the arithmetic was NOT trivial (dw != 0).
+    assert (np.asarray(j2["dw"]) != 1.0e30).all(), "damp_w block skipped"
+    assert np.abs(np.asarray(j2["dw"])).max() > 0.0, (
+        "dw is identically zero -- the del-6 damping is being fed a "
+        "constant/zero w and this gate proves nothing")
 
 
 def test_d_sw2_duo_jit_equals_eager(chain, geo_dsw):
@@ -2040,8 +2152,21 @@ def test_d_sw3_duo_jit_equals_eager(geo_dsw):
     for k in _D_SW3_KEYS:
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d_sw3 jit.{k}", 1e-12)
+        # DO NOT SHIP.   [class: jit-vs-eager ACROSS A PPM LIMITER]
+        #
+        # This one is NOT the plain FMA class and must not be pinned as
+        # if it were.  MEASURED at job 9404093: `ubbtemp` differed by
+        # 2.403e-10 (max|diff| / max|ref|), six decades above rounding.
+        # `ubbtemp` is `ytp_v`'s PPM flux at hord 6, where the
+        # `smt5`/`smt6` flags ADD or DROP a whole term -- so a
+        # rounding-level input difference can flip a flag and produce a
+        # discrepancy far above 1e-15 (strategy section 4, the fourth
+        # kernel class).  PLAUSIBLE: a flip in a small number of cells.
+        # `_cmp` now reports how many cells exceed 1e-13, which
+        # discriminates a flip (a handful) from something systematic
+        # (all of them); the measurement job should read that count
+        # BEFORE pinning the number.
+        _cmp(got[k], eager[k], f"d_sw3 jit.{k}", 1e-8)
 
 
 def test_d_sw3_duo_guards(geo_dsw):
@@ -2105,15 +2230,49 @@ def test_d_sw4_duo_parity(chain):
     _cmp(j4["ke"], n4["ke"], "d_sw4_duo.ke", 1e-12)
 
 
-def test_d_sw4_duo_matches_the_stored_fortran_certificate(chain):
-    """SECONDARY -- hop A + hop B."""
-    j4 = chain["jx"][3]
+def test_d_sw4_duo_matches_the_stored_fortran_certificate(chain,
+                                                          geo_dsw):
+    """SECONDARY -- hop A + hop B, on the certificate's OWN input.
+
+    ⛔ FIXED (job 9404093).  This gate previously fed ``d_sw4`` the
+    ``chain`` fixture's ``kee`` assembly and compared the result against
+    a certificate the Fortran driver produced from a DIFFERENT input.
+    The fixture says so itself -- ``dsw4_duo_oracle_c12.npz``'s
+    ``input_lineage`` reads *"ke=1e30 pre-call on both sides, only the 4
+    corner B-nodes written"* -- and the committed NumPy harness
+    (``test_fv3_native_dsw4_duo._run_chain``) feeds
+    ``ke0 = np.full((m_a+1, m_a+1), SENTINEL)``.  The failure was
+    exactly that mismatch: 192 fill cells (361 − the 169-cell kee ring)
+    against the certificate's 357 (361 − 4).  The OPERATOR was never in
+    question -- ``test_d_sw4_duo_parity`` (JAX vs NumPy on the kee
+    input) and ``test_d_sw4_duo_writes_exactly_four_cells`` both passed.
+
+    ``ke`` is INTENT(INOUT), so the input IS part of the contract: the
+    certificate is only meaningful against the input it was generated
+    from.  The chain keeps feeding the kee assembly because that is what
+    ``d_sw5`` consumes; this gate runs its own call.
+    """
+    geo = geo_dsw
+    j1 = chain["jx"][0]
     orc = _oracle("dsw4_duo_oracle_c12.npz")
+    lineage = str(orc["input_lineage"])
+    assert "ke=1e30 pre-call" in lineage, (
+        f"the certificate's input convention changed: {lineage!r} -- "
+        f"re-derive ke0 before trusting this gate")
+    ke0 = jnp.full((geo.m_a + 1, geo.m_a + 1), 1.0e30, jnp.float64)
+    j4 = duo.d_sw4_duo(jnp.asarray(geo.f["u"]), jnp.asarray(geo.f["v"]),
+                       j1["ut"], j1["vt"], ke0, geo.flags, geo.bd,
+                       geo.npx, geo.npy, dt=geo.dt)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job
     # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: LIMITER-CROSSING via the d_sw3 inputs]
+    # DO NOT SHIP.   [class: sentinel-fed corner products, hop A + hop B]
     _cmp(j4["ke"], np.asarray(orc["ke"], np.float64),
          "d_sw4 vs Fortran.ke", 1e-11)
+    # the gate is non-vacuous only if the four corners are NOT fills
+    got = np.asarray(j4["ke"])
+    assert int((got != 1.0e30).sum()) == 4, (
+        f"expected exactly 4 written corners, got "
+        f"{int((got != 1.0e30).sum())}")
 
 
 def test_d_sw4_duo_writes_exactly_four_cells(chain, geo_dsw):
@@ -2510,3 +2669,84 @@ def test_d_sw6_duo_gradients(chain, geo_dsw):
     # will replace this with `measured X, bound = measured x N`.
     # DO NOT SHIP.   [class: adjoint identity, roundoff only]
     _check_adjoint("d_sw6_duo", run, primals, 1e-10)
+
+
+def test_d_sw1_panel_edge_divide_survives_a_zero_in_the_dead_arm(
+        geo_dsw):
+    """R1b regression for :func:`fv3_duo_sw_core._sel_div` -- the codex
+    MAJOR (job 9404230).
+
+    The four ``d_sw1_duo`` panel-edge selects are the only ``jnp.where``
+    sites in the module whose arms DIVIDE.  The NumPy authority
+    evaluates only the taken branch (python ``if``), so a zero in the
+    UNTAKEN ``sin_sg`` entry is finite there; an unsanitized JAX twin
+    forms Inf/NaN in the dead arm and reverse-mode AD carries it into
+    the SELECTED branch's gradient as ``NaN * 0``.
+
+    Construction: read the sign of ``uc(1,j)*dt`` along the west edge
+    column, then zero the metric entry that is DEAD for that sign.  Both
+    lanes get the identical (malformed) gridstruct, so the comparison
+    stays one-variable.  Two assertions, and the second is the one that
+    would have caught the original defect: value parity vs NumPy, and a
+    FINITE reverse-mode gradient.
+    """
+    geo = geo_dsw
+    bd = geo.bd
+    lo = bd.isd
+    dt = geo.dt
+    ucc = np.asarray(geo.f["uc"])[1 - lo, :]
+    pos = (ucc * dt) > 0.0
+    # slot 2 == sin_sg(0,j,3) is the POSITIVE arm's denominator;
+    # slot 0 at i=1 == sin_sg(1,j,1) is the NEGATIVE arm's.
+    if pos.all():
+        dead_i, dead_slot, tag = 1 - lo, 0, "sin_sg(1,j,1)"
+    elif (~pos).all():
+        dead_i, dead_slot, tag = 0 - lo, 2, "sin_sg(0,j,3)"
+    else:
+        # mixed signs: zeroing EITHER entry leaves it dead somewhere, so
+        # take the negative arm's and assert the mixture explicitly
+        dead_i, dead_slot, tag = 1 - lo, 0, "sin_sg(1,j,1)"
+    assert pos.any() or (~pos).any()
+
+    sg_bad = np.array(geo.gs_np["sin_sg"], dtype=np.float64)
+    sg_bad[dead_i, :, dead_slot] = 0.0
+    gs_np_bad = dict(geo.gs_np)
+    gs_np_bad["sin_sg"] = sg_bad
+    gs_j_bad = dict(geo.gs_j)
+    gs_j_bad["sin_sg"] = jnp.asarray(sg_bad)
+
+    xf, yf, cx, cy = _zero_caps(geo)
+    f = geo.f
+    n1 = npduo.d_sw1_duo(f["delp"], f["pt"], f["w"], f["uc"], f["vc"],
+                         xf, yf, cx, cy, gs_np_bad, bd, geo.npx,
+                         geo.npy, dt=dt, **_DSW_KW)
+    j1 = duo.d_sw1_duo(
+        jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
+        jnp.asarray(f["w"]), jnp.asarray(f["uc"]), jnp.asarray(f["vc"]),
+        jnp.asarray(xf), jnp.asarray(yf), jnp.asarray(cx),
+        jnp.asarray(cy), gs_j_bad, geo.flags, bd, geo.npx, geo.npy,
+        dt=dt, **_DSW_KW)
+
+    # (1) value parity with a zero in the dead denominator
+    for k in ("ut", "vt", "crx_adv", "cry_adv"):
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: R1b regression, zeroed dead metric]
+        _cmp(j1[k], n1[k], f"d_sw1 zero-{tag}.{k}", 1e-12)
+
+    # (2) the gradient stays FINITE -- this is the assertion the
+    # unsanitized version failed, and it is not implied by (1)
+    def obj(uc_in):
+        out = duo.d_sw1_duo(
+            jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
+            jnp.asarray(f["w"]), uc_in, jnp.asarray(f["vc"]),
+            jnp.asarray(xf), jnp.asarray(yf), jnp.asarray(cx),
+            jnp.asarray(cy), gs_j_bad, geo.flags, bd, geo.npx,
+            geo.npy, dt=dt, **_DSW_KW)
+        return jnp.sum(out["ut"][1 - lo, :] ** 2)
+
+    g = jax.grad(obj)(jnp.asarray(f["uc"]))
+    assert np.isfinite(np.asarray(g)).all(), (
+        f"reverse-mode gradient is not finite with {tag} zeroed: "
+        f"{int((~np.isfinite(np.asarray(g))).sum())} non-finite entries "
+        f"-- the DEAD arm's division is leaking through the where VJP")

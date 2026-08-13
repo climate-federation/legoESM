@@ -132,15 +132,26 @@ The rule applied here:
    selects; ``d2a2c_vect``'s four ``ut/vt > 0`` ``sin_sg`` selects;
    ``d_sw1_duo``'s ``crx``/``cry`` upwind pair and the four
    ``uc*dt > 0`` / ``vc*dt > 0`` panel-edge selects.
-   The two panel-edge families are the only ``where``s whose arms
-   DIVIDE: ``uc(1,j)/sin_sg(0,j,3)`` vs ``uc(1,j)/sin_sg(1,j,1)``
-   (sw_core.F90:658-663).  Both arms are total on an admitted
-   gridstruct, where ``sin_sg`` is the sine of the angle between grid
-   lines and is strictly positive; this is a stated PRECONDITION of the
-   operand, not an assumption about the selected branch, and it cannot
-   be checked statically because ``sin_sg`` is traced.  Note also that
-   the two arms divide by DIFFERENT metric entries, so masking one would
-   change the live answer, not just the dead one.
+   ``d_sw1_duo``'s four panel-edge families are the only ``where``s
+   whose arms DIVIDE -- ``uc(1,j)/sin_sg(0,j,3)`` vs
+   ``uc(1,j)/sin_sg(1,j,1)`` (sw_core.F90:658-663) -- and they go
+   through :func:`_sel_div`, the double-``where``, which sanitizes the
+   DISCARDED denominator to ``1.0`` and leaves the selected quotient
+   bit-identical.
+
+   ⛔ An earlier revision left these as bare ``jnp.where`` calls over
+   two live divisions, on the argument that ``sin_sg`` is strictly
+   positive on an admitted gridstruct and that "the two arms divide by
+   DIFFERENT metric entries, so masking one would change the live
+   answer".  Codex refuted it (job 9404230, MAJOR) and was right on both
+   counts: the double-``where`` never touches the selected denominator,
+   and positivity is not a guard this module can enforce -- ``_geom``
+   validates presence, dtype and shape only, and ``sin_sg`` is traced.
+   The concrete hazard is a lane divergence, because the NumPy authority
+   evaluates only the taken branch (its predicate is a python ``if``):
+   a zero in the UNTAKEN entry gives NumPy a finite answer and an
+   unsanitized twin an Inf/NaN, plus ``NaN * 0 = NaN`` through the
+   ``where`` VJP into the selected branch's gradient.
 
 Non-smooth sites (each only C^0, or discontinuous, across the named
 surface) -- the gradient gates target these explicitly:
@@ -487,6 +498,39 @@ def _new(ilo, ihi, jlo, jhi, fill=jnp.nan):
     per-stage certificates compare those cells.
     """
     return jnp.full((ihi - ilo + 1, jhi - jlo + 1), fill, jnp.float64)
+
+
+def _sel_div(pred, num, den_true, den_false):
+    """``where(pred, num/den_true, num/den_false)`` with the DISCARDED
+    denominator sanitized -- the double-``where`` idiom.
+
+    ⛔ Written after a codex review (job 9404230, MAJOR) refuted the
+    argument that had left this as a bare ``jnp.where`` over two
+    divisions.  That argument was: "the two arms divide by DIFFERENT
+    metric entries, so masking one would change the live answer."  It is
+    a non sequitur.  The double-``where`` does not touch the SELECTED
+    denominator -- it replaces the UNSELECTED one with ``1.0``, so the
+    selected quotient is bit-identical and only the discarded arm
+    changes.
+
+    Why it matters (R1b), concretely: the NumPy authority evaluates only
+    the taken branch, because its predicate is a python ``if``.  A zero
+    in the UNTAKEN ``sin_sg`` entry therefore gives NumPy a finite
+    answer and an unsanitized JAX twin an Inf/NaN -- a silent lane
+    divergence -- and under reverse-mode AD the discarded arm's NaN
+    derivative meets the ``where`` VJP's zero cotangent as
+    ``NaN * 0 = NaN``, contaminating the gradient of the branch that WAS
+    selected.  ``_geom`` validates presence, dtype and shape only; it
+    cannot check positivity of a traced array, so "production metrics
+    happen to be positive" is not a guard.
+
+    Sole consumer: ``d_sw1_duo``'s four panel-edge selects
+    (sw_core.F90:658-663 and siblings), which are the only ``jnp.where``
+    sites in this module whose arms divide.
+    """
+    safe_t = jnp.where(pred, den_true, 1.0)
+    safe_f = jnp.where(pred, 1.0, den_false)
+    return jnp.where(pred, num / safe_t, num / safe_f)
 
 
 def _runs(lo: int, hi: int, key):
@@ -2052,9 +2096,9 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     if plain_edges and is_ == 1:                       # West edge
         ucc = _fw(uc, isd, jsd, 1, 1, jsd, jed)
         ut = set_ut(1, 1, jsd, jed,
-                   jnp.where(ucc * dt > 0.0,
-                             ucc / rd(sg, 0, 0, jsd, jed, 2),
-                             ucc / rd(sg, 1, 1, jsd, jed, 0)))
+                   _sel_div(ucc * dt > 0.0, ucc,
+                            rd(sg, 0, 0, jsd, jed, 2),
+                            rd(sg, 1, 1, jsd, jed, 0)))
         ja, jb = max(3, js), min(npy - 2, je + 1)
         if ja <= jb:
             for i in (0, 1):
@@ -2068,9 +2112,9 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     if plain_edges and (ie + 1) == npx:                # East edge
         ucc = _fw(uc, isd, jsd, npx, npx, jsd, jed)
         ut = set_ut(npx, npx, jsd, jed,
-                   jnp.where(ucc * dt > 0.0,
-                             ucc / rd(sg, npx - 1, npx - 1, jsd, jed, 2),
-                             ucc / rd(sg, npx, npx, jsd, jed, 0)))
+                   _sel_div(ucc * dt > 0.0, ucc,
+                            rd(sg, npx - 1, npx - 1, jsd, jed, 2),
+                            rd(sg, npx, npx, jsd, jed, 0)))
         ja, jb = max(3, js), min(npy - 2, je + 1)
         if ja <= jb:
             for i in (npx - 1, npx):
@@ -2084,9 +2128,9 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     if plain_edges and js == 1:                        # South edge
         vcc = _fw(vc, isd, jsd, isd, ied, 1, 1)
         vt = set_vt(isd, ied, 1, 1,
-                   jnp.where(vcc * dt > 0.0,
-                             vcc / rd(sg, isd, ied, 0, 0, 3),
-                             vcc / rd(sg, isd, ied, 1, 1, 1)))
+                   _sel_div(vcc * dt > 0.0, vcc,
+                            rd(sg, isd, ied, 0, 0, 3),
+                            rd(sg, isd, ied, 1, 1, 1)))
         ia, ib = max(3, is_), min(npx - 2, ie + 1)
         if ia <= ib:
             for j in (0, 1):
@@ -2100,9 +2144,9 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     if plain_edges and (je + 1) == npy:                # North edge
         vcc = _fw(vc, isd, jsd, isd, ied, npy, npy)
         vt = set_vt(isd, ied, npy, npy,
-                   jnp.where(vcc * dt > 0.0,
-                             vcc / rd(sg, isd, ied, npy - 1, npy - 1, 3),
-                             vcc / rd(sg, isd, ied, npy, npy, 1)))
+                   _sel_div(vcc * dt > 0.0, vcc,
+                            rd(sg, isd, ied, npy - 1, npy - 1, 3),
+                            rd(sg, isd, ied, npy, npy, 1)))
         ia, ib = max(3, is_), min(npx - 2, ie + 1)
         if ia <= ib:
             for j in (npy - 1, npy):
