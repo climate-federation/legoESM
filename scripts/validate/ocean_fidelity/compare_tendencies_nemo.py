@@ -420,6 +420,16 @@ def main():
                     help="target record r (state r-1 vs avt/trends r); 1..11")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--skip-maps", action="store_true")
+    ap.add_argument("--kappa-convention", default=None,
+                    choices=["gaspar_sqrt2e", "veros_sqrte"],
+                    help="Override the K-from-TKE amplitude convention. The "
+                         "run's default is 'gaspar_sqrt2e', which our own "
+                         "config docstring says DOUBLE-COUNTS the sqrt(2) on "
+                         "the buoyancy-length path (tke_mxl_choice=3), giving "
+                         "K_M x1.414. Stage A measured our K_H at 4.8x NEMO's "
+                         "avt in calm Arctic columns; rerunning with "
+                         "'veros_sqrte' tests how much of that factor the "
+                         "double-count carries -- on CPU, with no model run.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -428,6 +438,9 @@ def main():
 
     from scripts.run.run_omip_core2 import orca1_zdftke_config
     cfg = orca1_zdftke_config(prognostic=False)  # Mode-B quasi-steady for the
+    if args.kappa_convention is not None:
+        cfg = cfg._replace(kappa_convention=args.kappa_convention)
+        print(f"[cfg] kappa_convention OVERRIDE -> {args.kappa_convention}")
     # state-function closure test (NEMO's en is prognostic; Mode-B is its
     # documented equilibrium approximation — see module docstring).
 
