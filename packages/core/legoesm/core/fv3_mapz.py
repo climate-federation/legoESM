@@ -48,8 +48,11 @@ TRANSLATION RULES APPLIED (and where each one bit)
   reverse-mode gradient of the taken one.  Every division that could be
   partial is either (a) sanitised before the select with a
   provably value-neutral guard (``cs_limiters`` iv=0, see there), or
-  (b) shown to divide by a layer thickness that is strictly positive on
-  every input the NumPy lane also accepts.  No site here admits
+  (b) MASKED TO A DUMMY DIVISOR EXACTLY WHERE ITS QUOTIENT IS DISCARDED
+  (:func:`_rezone`'s three divisors: a static-length scan performs
+  divisions the dynamic Fortran loop SKIPS, and declining to form one
+  is not the same as inventing a value for one whose result is used).
+  No site here admits
   ``lax.cond``: every predicate is elementwise over the column batch, and
   ``lax.cond`` needs a scalar predicate.
 * **Static Python ``if`` for static values** (``iv``, ``kord``,
@@ -95,7 +98,15 @@ NON-SMOOTH SITES (the gradient is sub-differential AT these points)
 
 Gradients are checked (``check_grads(order=2)``) at states proven away
 from 1, 2, 3, 4, 6 and 7 by measured margins; the proofs live next to the
-tests that use them.
+tests that use them.  Site 6 is additionally gated ON the surface: the
+one-sided derivatives are taken from both sides and compared with the
+closed-form branch derivative ``(q - R(x))/(X - x)``, whose two sides
+differ by exactly the reconstruction's jump ``AR(l-1) - AL(l)`` over
+``X - x`` -- zero for an unlimited column (``:1987-1990`` writes both
+edges from the SAME interface array) and nonzero where a limiter has
+flattened a neighbour.  Forward-vs-reverse adjoint consistency
+(``<J v, w> == <v, J^T w>``) is asserted everywhere, including at the
+tie, because it needs no finite-difference step and no off-switch state.
 """
 from __future__ import annotations
 
@@ -899,18 +910,20 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
       mean with NO division by the target thickness, while a spanning
       cell accumulates and divides once (``:1449``).  Reproducing that
       split is what makes bit-exactness reachable.
-    * **TOTALITY of the selects (correction 2).**  Every division here
-      divides by a SOURCE LAYER THICKNESS ``dp1[m]`` -- strictly
-      positive on every input the NumPy lane also accepts -- or by the
-      target thickness ``denom``, which is the same quantity the NumPy
-      lane divides by.  The gathers at the selected layer are index-
-      CLAMPED so they are always in range.  Consequently no arm of any
-      ``where`` can manufacture a NaN/Inf that would contaminate the
-      reverse-mode gradient of the selected arm.  ``denom`` is
-      deliberately NOT sanitised: a zero target thickness is degenerate
-      input in both lanes, and substituting a finite divisor there would
-      manufacture exactly the plausible-looking number this port refuses
-      to invent.
+    * **TOTALITY of the selects.**  A static-length scan performs every
+      division the dynamic Fortran loop would SKIP, so an operand that
+      is harmless there (a thickness in a layer the Fortran never
+      visits, a target cell whose quotient the contained-cell branch
+      never forms) becomes a NaN here -- in the primal select AND in
+      the adjoint of the arm that was actually taken.  The rule applied
+      at all three divisors below is therefore: **mask the divisor to 1
+      exactly where its quotient is DISCARDED, never where it is
+      used.**  That declines to form a division the authority never
+      performs; it does NOT invent a value for one whose result is
+      used.  Where the quotient IS used the divisor is the same
+      quantity the NumPy lane divides by, so degenerate input is
+      equally undefined in both lanes, by design.  The gathers at the
+      selected layer are index-CLAMPED so they are always in range.
     * **THE NO-BRACKET PATH.**  The NumPy lane RAISES
       ``FloatingPointError`` when ``pe2(i,k)`` is bracketed by no source
       interval (the Fortran falls through to label 123 with ``qsum``
@@ -960,11 +973,21 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
         a3l = _gather_k(q4_3[:, 1:km + 1], ell - 1)
         a6l = _gather_k(q4_4[:, 1:km + 1], ell - 1)
 
-        pl = (pe2k - pe1_l) / dpl                        # :1418
+        # TOTALITY, and the ONE rule that governs every divisor here
+        # (codex #1/#2): a divisor is masked to 1 EXACTLY where its
+        # quotient is DISCARDED, and never where the quotient is used.
+        # That is not inventing a value -- it is declining to FORM a
+        # division the NumPy authority never performs -- and it keeps
+        # the discarded arm out of both the primal select and its
+        # adjoint.  Where the quotient IS used, the divisor is the same
+        # one the NumPy lane divides by, so a degenerate thickness is
+        # equally undefined in both lanes, by design.
+        dpl_safe = jnp.where(found, dpl, jnp.ones_like(dpl))
+        pl = (pe2k - pe1_l) / dpl_safe                   # :1418
         inside = pe2kp1 <= pe1_r                         # :1419
 
         # :1421-1423 -- entire target cell inside source cell l.
-        pr = (pe2kp1 - pe1_l) / dpl
+        pr = (pe2kp1 - pe1_l) / dpl_safe
         q_in = (a2l + 0.5 * (a6l + a3l - a2l) * (pr + pl)
                 - a6l * R3 * (pr * (pr + pl) + pl ** 2))
 
@@ -981,7 +1004,15 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
             active = (~mdone) & (m > ell)
             whole = pe2kp1 > pe1_mp1                     # :1433
             dp = pe2kp1 - pe1_m                          # :1437
-            esl = dp / dp1_m
+            # The Fortran loop starts at l+1 and STOPS at its first
+            # partial layer, so it never divides by dp1 outside
+            # [l+1, terminating m]; this static-length scan visits every
+            # m, so the divisor is masked wherever the quotient is
+            # discarded (codex #2).  `whole` uses dp1_m only as a
+            # multiplier, which is total.
+            dp1_safe = jnp.where(active & (~whole), dp1_m,
+                                 jnp.ones_like(dp1_m))
+            esl = dp / dp1_safe
             inc = jnp.where(
                 whole,
                 dp1_m * a1m,                             # :1435
@@ -995,7 +1026,16 @@ def _rezone(q4, dp1, pe1, pe2, km: int, kn: int, dp2=None):
             _m_step, (qsum0, jnp.zeros((im,), bool), k0),
             (ms, pe1_l_t, pe1_r_t, dp1_t, q1_t, q2_t, q3_t, q4_t))
 
-        q_span = qsum / denom                            # :1449
+        # The contained-cell branch RETURNS at fv3_native_mapz.py:624
+        # WITHOUT ever dividing by the target thickness, so forming this
+        # quotient there is a divergence in its own right: a
+        # zero-thickness target lying wholly inside one source layer is
+        # a legal input on which NumPy returns a finite q_in, while an
+        # unmasked 0/0 would poison the select AND the adjoint of the
+        # branch that WAS taken.  Masked where discarded (codex #1).
+        den_safe = jnp.where(inside | (~found), jnp.ones_like(denom),
+                             denom)
+        q_span = qsum / den_safe                         # :1449
         out = jnp.where(found, jnp.where(inside, q_in, q_span), jnp.nan)
         # k0 advances to l on the contained branch (:1424) and to the
         # terminating m on the spanning branch (:1441); if the m walk

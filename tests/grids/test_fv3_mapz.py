@@ -22,6 +22,23 @@ Four gates per public routine (the NH JAX-mirror pattern), plus two the
    layer and a DIFFERENT formula, so a spread between the three is
    expected and is NOT rounding-scale; what must hold is that BOTH lanes
    make the SAME selection, which is what the assertions compare.
+7. **adjoint consistency** ``<J v, w> == <v, J^T w>`` -- forward mode
+   against reverse mode, with NO finite-difference step, so it has no
+   step size and no dynamic-range sensitivity and it runs even ON a
+   switching surface.  Added after job 9400424, where eight of nine
+   failures were ``check_grads(order=2)`` calls and three causes were
+   confounded.
+8. **one-sided derivatives AT the switching surface**, approached from
+   both sides, each checked against a same-side finite difference AND
+   against the closed-form branch derivative for that side.
+
+WHAT JOB 9400424 CHANGED HERE: nine failures, all EXPECTATION, none
+code.  Six were one arbitrary factor (a 0.5 where the switch is at 1.0
+and the worst measured ratio was 0.70); two were fixtures built smooth
+in the LAYER INDEX rather than in the COORDINATE the reconstruction
+lives in; one was a match string on a refusal Python itself performs.
+The margins are now relative, calibrated to that measurement, and every
+one of them REPORTS what it measured.
 
 TOLERANCE STATUS: every numeric agreement bound in this file carries a
 ``TOL-PENDING`` marker and a provisional 1e-12.  They are NOT measured --
@@ -302,20 +319,91 @@ def test_cs_limiters_jax_check_grads_order2_off_switch():
 KMP = 10          # interior loop k = 3..8: the vectorised block is real
 
 
-def _smooth_column(im=4, km=KMP, curv=1.0):
-    """A strictly monotone, gently curved column.
+_Q_BASE, _Q_SPAN, _Q_CURV = 250.0, 90.0, 0.3
 
-    Monotone -> no interior extremum (``extm`` off).  Curved -> ``A6``
-    is comfortably NONZERO, so "no layer was flattened" is a meaningful
-    assertion rather than one a linear profile satisfies trivially.  The
-    curvature/slope ratio is what keeps every ``|a6|`` vs ``|AR-AL|``
-    switch off; :func:`_assert_profile_off_switch` MEASURES it.
+
+def _quadratic_on(x_edge):
+    """``(f, cell_means)`` for a gentle monotone quadratic ON ``x_edge``.
+
+    ``x_edge`` is 0-based ``(im, nk+1)``.  ``f(x)`` evaluates the
+    function; ``cell_means`` is its EXACT mean over each cell, i.e. what
+    a finite-volume column of that function is.
+
+    WHY EXACT CELL MEANS OF A SMOOTH FUNCTION OF THE COORDINATE, and not
+    a polynomial in the LAYER INDEX -- which is what the first version of
+    this fixture was, and is why six gradient gates failed in job
+    9400424.  PPM reconstructs a sub-grid profile in the COORDINATE.  A
+    column that is smooth in the INDEX but sampled on non-uniform
+    thicknesses is not smooth in the coordinate: its interface values
+    legitimately overshoot the neighbouring cell means, the large-scale
+    min/max constraints at fv_mapz.F90:1949-1983 clamp them back, and
+    the fixture then sits exactly ON a switching surface -- the one
+    place a finite-difference gradient check means nothing.  Building
+    the column from the coordinate removes the cause instead of loosening
+    the assertion.
+
+    The curvature is set as a FRACTION of the linear term, which makes
+    ``|A6| / |AR-AL| ~ _Q_CURV * h / span`` -- i.e. every ``|A6|``-vs-
+    ``|AR-AL|`` switch (the +-da2 clamps, the kord-9 ``fix`` test,
+    ``ext5``, ``ext6``) is off by construction, and
+    :func:`_assert_profile_off_switch` still MEASURES it rather than
+    trusting this comment.
     """
-    k = np.arange(km, dtype=np.float64)
+    x_edge = np.asarray(x_edge, dtype=np.float64)
+    x0 = x_edge[..., :1]
+    u_max = x_edge[..., -1:] - x0
+    b = _Q_SPAN / u_max
+    c = _Q_CURV * b / u_max
+
+    def f(x):
+        u = np.asarray(x, dtype=np.float64) - x0[..., 0]
+        return _Q_BASE + b[..., 0] * u + c[..., 0] * u ** 2
+
+    ul = x_edge[..., :-1] - x0
+    ur = x_edge[..., 1:] - x0
+    means = (_Q_BASE + b * (ul + ur) / 2.0
+             + c * (ul ** 2 + ul * ur + ur ** 2) / 3.0)
+    return f, means
+
+
+def _edges_from_delp(delp):
+    """1-based ``(im, km+1)`` thicknesses -> 0-based ``(im, km+1)`` edges."""
+    return np.concatenate(
+        [np.zeros((delp.shape[0], 1)), np.cumsum(delp[:, 1:], axis=1)],
+        axis=1)
+
+
+def _smooth_column(im=4, km=KMP, delp=None, edges=None):
+    """1-based ``(im, km+1)`` cell means of :func:`_quadratic_on`.
+
+    Give it EITHER the thicknesses the profile will be built on (the
+    pure-profile tests) or the edge array itself (the map tests, where
+    the coordinate is ``pe1``).  Passing neither is a bug, not a default.
+    """
+    if edges is None:
+        if delp is None:
+            raise ValueError("_smooth_column needs delp or edges: the "
+                             "column must be smooth in the COORDINATE "
+                             "the profile is built on")
+        edges = _edges_from_delp(delp)
+    _, means = _quadratic_on(edges)
     q = np.zeros((im, km + 1), dtype=np.float64)
-    for i in range(im):
-        q[i, 1:] = 250.0 + 9.0 * k + curv * k ** 2 + 0.7 * i
+    q[:, 1:] = means
     return q
+
+
+def _smooth_column_bottom_value(delp=None, edges=None):
+    """``f`` at the BOTTOM interface -- the consistent iv=-2 ``qs`` BC.
+
+    ``qs = q(km) + 9`` (the first version) is NOT a value the column's
+    own reconstruction would take there, so it forced an overshoot the
+    large-scale constraints then clamped -- the fixture defect behind
+    ``test_profile_jax_check_grads_order2_iv_minus2_bc``.
+    """
+    if edges is None:
+        edges = _edges_from_delp(delp)
+    f, _ = _quadratic_on(edges)
+    return f(np.asarray(edges)[:, -1])
 
 
 def _cold_column(im=3, km=KMP):
@@ -329,8 +417,29 @@ def _cold_column(im=3, km=KMP):
     return q
 
 
-def _assert_profile_off_switch(a4, q1, km, margin=0.25):
+# --- switch-margin factors, calibrated against job 9400424 -------------
+# MEASURED there: the worst |A6*da1| / da1^2 was 0.70, at the TOP layer
+# where the one-sided cubic extrapolation is steepest.  The clamp switch
+# is at 1.0, so that state was genuinely OFF the switch and the original
+# 0.5 factor was an arbitrary over-tightening -- six gradient gates
+# failed on the FACTOR, not on the physics.  0.95 leaves 5 % headroom,
+# which is ~5e4 times the ~1e-6 relative step check_grads takes.
+_CLAMP_MARGIN = 0.95
+# The flat arms set AL = AR = qbar BITWISE, so proving "no flat arm
+# fired" only has to clear float noise.
+_FLAT_EPS = 1e-9
+# Margins on predicates a finite-difference step must not cross.  Kept
+# RELATIVE: an ABSOLUTE 0.25 K was the second reason the first version
+# failed -- |AL - qbar| legitimately ranges from 0.3 to 9 K across the
+# columns of one fixture.
+_PRED_EPS = 1e-4
+
+
+def _assert_profile_off_switch(a4, q1, km):
     """MEASURE that every limiter switch is off, on the OUTPUT a4.
+
+    Every clause reports the margin it measured, so a future failure
+    says HOW CLOSE the fixture was rather than only that it failed.
 
     Each clause is decisive because of how the oracle's branches land:
 
@@ -342,10 +451,11 @@ def _assert_profile_off_switch(a4, q1, km, margin=0.25):
         correct code while adding nothing -- ``AL != qbar`` already
         excludes every ``flat`` arm;
     (b) after a ``+-da2`` clamp fires, ``A6*(AR-AL) == -(AR-AL)^2``
-        EXACTLY, so ``|A6*da1| < 0.5*da1^2`` proves neither clamp fired.
-        The same inequality gives ``|A6| < 0.5|AR-AL|``, which also puts
-        the kord-9 ``fix`` test, ``ext5`` (``|x0| > x1``) and ``ext6``
-        (``|A6| > x1``) strictly off their switches;
+        EXACTLY -- so the RATIO ``|A6*da1| / da1^2`` IS the distance to
+        that switch, and staying under ``_CLAMP_MARGIN`` proves neither
+        clamp fired.  The same ratio bounds ``|A6|`` against ``|AR-AL|``,
+        which also puts the kord-9 ``fix`` test, ``ext5``
+        (``|x0| > x1``) and ``ext6`` (``|A6| > x1``) off their switches;
     (c) the INPUT has no interior extremum, with margin -> ``extm`` is
         False in the interior and the ``smooth`` predicate of the
         large-scale constraints is strictly satisfied;
@@ -358,16 +468,39 @@ def _assert_profile_off_switch(a4, q1, km, margin=0.25):
     a1, a2, a3 = a4[1][:, 1:km + 1], a4[2][:, 1:km + 1], a4[3][:, 1:km + 1]
     a6 = a4[4][:, 1:km + 1]
     da1 = a3 - a2
-    assert (np.abs(a2 - a1) > margin).all(), "a layer flattened (AL)"      # a
-    assert (np.abs(a3 - a1) > margin).all(), "a layer flattened (AR)"
-    assert (np.abs(da1) > margin).all()
-    assert (np.abs(a6 * da1) < 0.5 * da1 ** 2).all(), "a clamp fired"      # b
-    g = np.diff(q1[:, 1:km + 1], axis=1)                                   # c
-    assert (g[:, :-1] * g[:, 1:] > margin ** 2).all(), "input extremum"
-    lo = np.minimum(a1[:, :-1], a1[:, 1:])                                 # d
+    scale = np.abs(a1).max()
+
+    # (a) the flat arms set AL = AR = qbar BITWISE, so this only has to
+    #     clear float noise.
+    m_al = np.abs(a2 - a1).min() / scale
+    m_ar = np.abs(a3 - a1).min() / scale
+    assert m_al > _FLAT_EPS, f"a layer flattened (AL); margin {m_al:.3e}"
+    assert m_ar > _FLAT_EPS, f"a layer flattened (AR); margin {m_ar:.3e}"
+    assert (np.abs(da1) / scale > _FLAT_EPS).all()
+    # (b) a fired clamp leaves |A6*da1| == da1**2 EXACTLY, so the ratio
+    #     IS the distance to that switch -- and to the kord-9 `fix` test,
+    #     ext5 and ext6, which are all |A6| vs |AR-AL| in disguise.
+    ratio = float(np.max(np.abs(a6 * da1) / da1 ** 2))
+    assert ratio < _CLAMP_MARGIN, \
+        f"clamp/ext switch margin: |A6*da1|/da1^2 = {ratio:.3f} (1.0 is ON)"
+    # (c) the INPUT is strictly monotone -> extm off in the interior and
+    #     the `smooth` predicate strictly satisfied.
+    g = np.diff(q1[:, 1:km + 1], axis=1)
+    assert (g[:, :-1] * g[:, 1:] > 0.0).all(), "input has an extremum"
+    m_g = np.abs(g).min() / np.abs(g).max()
+    assert m_g > _PRED_EPS, f"input increment margin {m_g:.3e}"
+    # (d) each interface strictly inside its two neighbouring cell means
+    #     -> the :1949-1983 min/max clamps inactive with margin.
+    lo = np.minimum(a1[:, :-1], a1[:, 1:])
     hi = np.maximum(a1[:, :-1], a1[:, 1:])
-    assert (a2[:, 1:] > lo + margin).all() and (a2[:, 1:] < hi - margin).all()
-    assert ((a2 - a1) * (a3 - a1) < -margin ** 2).all(), "edge extm switch"  # e
+    room = np.minimum(a2[:, 1:] - lo, hi - a2[:, 1:]) / (hi - lo)
+    assert room.min() > _PRED_EPS, \
+        f"interface clamp margin {room.min():.3e} of the local increment"
+    # (e) the k=1/k=km edge extm test and the iv=1 flat test.
+    prod = (a2 - a1) * (a3 - a1)
+    assert (prod < 0.0).all(), "edge extm switch: AL/AR do not straddle qbar"
+    m_e = np.minimum(np.abs(a2 - a1), np.abs(a3 - a1)).min() / scale
+    assert m_e > _PRED_EPS, f"edge extm margin {m_e:.3e}"
 
 
 @pytest.mark.parametrize("kord", ALL_KORD)
@@ -476,8 +609,8 @@ def test_profile_jax_kord12_uses_one_a6_grouping_and_kord9_two():
     # The SMOOTH column: with no layer flattened (``flat`` sets A6 to a
     # literal 0 in BOTH routines) the two groupings are actually
     # exercised, so the bitwise assertions below are not vacuous.
-    q1 = _smooth_column(im=im, km=km)
     delp = _delp_col(im, km)
+    q1 = _smooth_column(im=im, km=km, delp=delp)
     a_s12 = _jax_profile("scalar", q1, delp, km, 1, 12, qmin=-1e30)
     a_c12 = _jax_profile("cs", q1, delp, km, 1, 12)
     assert a_s12[4].tobytes() == a_c12[4].tobytes(), \
@@ -641,8 +774,8 @@ def test_profile_jax_check_grads_order2_off_switch(kind, kord):
     included so an ``ext5``/``ext6`` arm is in the trace.
     """
     im, km = 3, KMP
-    q1 = _smooth_column(im=im, km=km)
     delp = _delp_col(im, km, seed=41)
+    q1 = _smooth_column(im=im, km=km, delp=delp)
     _assert_profile_off_switch(_jax_profile(kind, q1, delp, km, 1, kord),
                                q1, km)
 
@@ -655,6 +788,13 @@ def test_profile_jax_check_grads_order2_off_switch(kind, kord):
         return jnp.sum(out[2] ** 2) + jnp.sum(out[3] ** 2) \
             + jnp.sum(out[4] ** 2)
 
+    # Order 1 FIRST, as a discriminator: if order 1 passes and order 2
+    # fails, the second-order finite difference cannot resolve this
+    # array's dynamic range -- a property of the CHECK, not of the
+    # gradient.  Reported separately so the two never get confounded
+    # again (job 9400424).
+    check_grads(f, (jnp.asarray(q1), jnp.asarray(delp)), order=1,
+                modes=("fwd", "rev"))
     check_grads(f, (jnp.asarray(q1), jnp.asarray(delp)), order=2,
                 modes=("fwd", "rev"))
 
@@ -663,9 +803,9 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
     """The iv=-2 tridiagonal, including the ``qs`` bottom BC -- the only
     operand the default solve does not have."""
     im, km = 3, KMP
-    q1 = _smooth_column(im=im, km=km)
     delp = _delp_col(im, km, seed=43)
-    qs = np.array([q1[i, km] + 9.0 for i in range(im)])
+    q1 = _smooth_column(im=im, km=km, delp=delp)
+    qs = _smooth_column_bottom_value(delp=delp)
     _assert_profile_off_switch(
         _jax_profile("cs", q1, delp, km, -2, 9, qs=qs), q1, km)
 
@@ -1041,7 +1181,7 @@ def test_map_jax_check_grads_order2_wrt_the_field():
     im, km = 3, KMP
     pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
     pe2 = _midpoint_targets(pe1, km)
-    q1 = _smooth_column(im=im, km=km)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
     dp1 = _dp_1based(pe1)
     _assert_profile_off_switch(_jax_profile("scalar", q1, dp1, km, 1, 9),
                                q1, km)
@@ -1072,7 +1212,7 @@ def test_map_jax_check_grads_order2_wrt_the_coordinates():
     gap = np.abs(pe2[:, 1:km + 2][:, :, None]
                  - pe1[:, 1:km + 2][:, None, :]).min()
     assert gap > 1.0, f"a target edge is {gap} Pa from a source interface"
-    q1 = _smooth_column(im=im, km=km)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
     _assert_profile_off_switch(
         _jax_profile("scalar", q1, _dp_1based(pe1), km, 1, 9), q1, km)
 
@@ -1089,8 +1229,8 @@ def test_map1_ppm_jax_check_grads_order2_iv_minus2_bc():
     im, km = 3, KMP
     pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
     pe2 = _midpoint_targets(pe1, km)
-    q1 = _smooth_column(im=im, km=km)
-    qs = np.array([q1[i, km] + 9.0 for i in range(im)])
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    qs = _smooth_column_bottom_value(edges=pe1[:, 1:])
 
     def f(q_, qs_):
         return jnp.sum(map1_ppm_j(jnp.asarray(pe1), q_, jnp.asarray(pe2),
@@ -1349,7 +1489,15 @@ def test_driver_jax_guards_do_not_over_refuse_a_non_last_step_call():
 
 
 def test_driver_jax_requires_q_and_omga_explicitly():
-    with pytest.raises(TypeError, match="q must be a list"):
+    """Two DIFFERENT refusals, and job 9400424 showed the first
+    expectation was wrong: ``q`` is a keyword-only parameter with no
+    default, so OMITTING it raises Python's own
+    ``missing 1 required keyword-only argument: 'q'`` before any guard
+    in the body can run.  That is the desired behaviour and it is what
+    the NumPy lane does too (its own test asserts a bare ``TypeError``);
+    only the match string was wrong.  Passing the WRONG TYPE is the case
+    the body's guard exists for, and it is asserted separately."""
+    with pytest.raises(TypeError, match="required keyword-only argument"):
         l2e_j(**_face()[0])
     with pytest.raises(TypeError, match="q must be a list"):
         l2e_j(**_face()[0], q=np.zeros((3, 3, 3)))
@@ -1578,23 +1726,27 @@ def test_driver_jax_check_grads_order2_off_switch():
     the ``map1_ppm``/``map1_q2`` gradient gates, which exercise the same
     code.
 
-    NON-SMOOTH SITES in scope: the ``scalar_profile`` limiters.  The
-    fixture gives ``T_v`` a monotone, gently curved column and the
-    margins are MEASURED below by running the profile on exactly the
-    input the driver hands it (``T_v`` on the ln p coordinate).
+    NON-SMOOTH SITES in scope: the ``scalar_profile`` limiters.  ``T_v``
+    is built PER COLUMN as the exact cell means of a gentle quadratic in
+    that column's own ``ln p`` -- a single vector in layer index was the
+    fixture defect that failed this gate in job 9400424, because the
+    ln p thicknesses are strongly non-uniform and the column was
+    therefore not smooth in the coordinate the profile is built on.  The
+    margins are MEASURED below on exactly the input the driver hands
+    the profile.
     """
     n, ng, km = 3, 3, KM
     face = _face(n=n, ng=ng, km=km)[0]
     ia = ng
-    # T_v = 250 + 9k + k^2: monotone (no extremum) and curved (A6 != 0).
-    tv = (250.0 + 9.0 * np.arange(km) + np.arange(km) ** 2.0)
-    face["pt"][ia:ia + n, ia:ia + n, :] = tv[None, None, :] / face["pkz"]
-    # The profile's own inputs: T_v (1-based) on d(ln p).
-    peln = face["peln"]
+    # peln is (i, k, j); the driver's column order is (j, i).
+    pln_cols = face["peln"].transpose(2, 0, 1).reshape(-1, km + 1)
+    _, tv_cols = _quadratic_on(pln_cols)                 # (n*n, km)
+    tv = tv_cols.reshape(n, n, km).transpose(1, 0, 2)    # -> (i, j, k)
+    face["pt"][ia:ia + n, ia:ia + n, :] = tv / face["pkz"]
     q1 = np.zeros((n * n, km + 1))
-    q1[:, 1:] = tv[None, :]
+    q1[:, 1:] = tv_cols
     dlnp = np.zeros((n * n, km + 1))
-    dlnp[:, 1:] = np.diff(peln, axis=1).transpose(2, 0, 1).reshape(-1, km)
+    dlnp[:, 1:] = np.diff(pln_cols, axis=1)
     _assert_profile_off_switch(
         _jax_profile("scalar", q1, dlnp, km, 1, 9), q1, km)
 
@@ -1609,3 +1761,282 @@ def test_driver_jax_check_grads_order2_off_switch():
 
     check_grads(f, (jnp.asarray(face["pt"]), jnp.asarray(face["delp"])),
                 order=2, modes=("fwd", "rev"))
+
+# ====================================================================== #
+# Adjoint consistency -- <J v, w> == <v, J^T w>, NO finite differences
+# ====================================================================== #
+
+def _assert_adjoint_consistent(f, args, seed=0, tol=1e-12, label=""):
+    """The dot-product test: ``<J v, w> == <v, J^T w>``.
+
+    ``J v`` comes from ``jax.jvp`` (forward mode) and ``J^T w`` from
+    ``jax.vjp`` (reverse mode), so this compares the two linearisations
+    against EACH OTHER with no finite-difference step anywhere.
+
+    WHY IT IS HERE (job 9400424): eight of nine failures were
+    ``check_grads(order=2)`` calls, and three causes were live -- (a) a
+    wrong gradient, (b) an order-2 finite difference that cannot resolve
+    the array's dynamic range, (c) a fixture sitting on a switching
+    surface.  This gate has no step size and no dynamic-range
+    sensitivity, and -- unlike ``check_grads`` -- it does not require the
+    state to be off a switch at all: the identity holds for whatever
+    linearisation JAX built, at any point.  So it isolates (a) from (b)
+    and (c) instead of leaving them confounded.
+
+    What it does NOT prove: that the linearisation is the derivative of
+    the primal.  A jvp and a vjp of the same WRONG Jacobian agree.  That
+    is what the ``check_grads`` gates are for; the two together cover
+    each other's blind spot.
+    """
+    rng = np.random.default_rng(seed)
+    args = tuple(jnp.asarray(a) for a in args)
+    v = tuple(jnp.asarray(rng.standard_normal(tuple(a.shape))) for a in args)
+    y, jv = jax.jvp(f, args, v)
+    _, vjp_fn = jax.vjp(f, *args)
+    w = jnp.asarray(rng.standard_normal(tuple(y.shape)))
+    jtw = vjp_fn(w)
+    lhs = float(jnp.sum(jv * w))
+    rhs = float(sum(jnp.sum(a * b) for a, b in zip(v, jtw)))
+    denom = max(abs(lhs), abs(rhs), 1e-30)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert abs(lhs - rhs) / denom <= tol, (label, lhs, rhs)
+    # NON-VACUITY: a zero Jacobian satisfies the identity trivially.
+    assert abs(lhs) > 0.0, (label, "<J v, w> == 0 -- the gate is vacuous")
+
+
+@pytest.mark.parametrize("kord", [9, 13])
+@pytest.mark.parametrize("kind", ["scalar", "cs"])
+def test_profile_jax_adjoint_consistency(kind, kord):
+    im, km = 3, KMP
+    delp = _delp_col(im, km, seed=41)
+    q1 = _smooth_column(im=im, km=km, delp=delp)
+
+    def f(a1_, delp_):
+        a4 = jnp.zeros((5, im, km + 1), jnp.float64).at[1].set(a1_)
+        if kind == "scalar":
+            return scalar_profile_j(a4, delp_, km, 1, kord, T_MIN)[2:5]
+        return cs_profile_j(a4, delp_, km, 1, kord)[2:5]
+
+    _assert_adjoint_consistent(f, (q1, delp), label=f"{kind}-{kord}")
+
+
+@pytest.mark.parametrize("kind", MAP_KINDS)
+def test_map_jax_adjoint_consistency(kind):
+    im, km = 3, KMP
+    pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
+    pe2 = _midpoint_targets(pe1, km)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    dp2 = _dp_1based(pe2)
+    iv = {"map_scalar": 1, "map1_ppm": -1, "map1_q2": 0}[kind]
+
+    def f(pe1_, q_, pe2_):
+        if kind == "map_scalar":
+            return map_scalar_j(pe1_, q_, pe2_, km, km, iv, 9, T_MIN)
+        if kind == "map1_ppm":
+            return map1_ppm_j(pe1_, q_, pe2_, km, km, iv, 9)
+        return map1_q2_j(pe1_, q_, pe2_, jnp.asarray(dp2), km, km, iv, 9,
+                         0.0)
+
+    _assert_adjoint_consistent(f, (pe1, q1, pe2), label=kind)
+
+
+def test_map_jax_adjoint_consistency_at_an_interface_tie():
+    """The gate check_grads CANNOT run: exactly ON the switching surface.
+
+    A finite difference here straddles two branches and is meaningless,
+    but the jvp/vjp identity is still a hard requirement -- whatever
+    one-sided linearisation JAX picked, forward and reverse mode must
+    pick the SAME one.
+    """
+    im, km, which = 3, KMP, 4
+    pe1, pe2 = _tie_edges(im=im, km=km, mode="exact", which=which)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+
+    def f(pe1_, q_, pe2_):
+        return map1_ppm_j(pe1_, q_, pe2_, km, km, -1, 9)
+
+    _assert_adjoint_consistent(f, (pe1, q1, pe2), label="tie")
+
+
+def test_driver_jax_adjoint_consistency():
+    n, ng, km = 3, 3, KM
+    face = _face(n=n, ng=ng, km=km)[0]
+    ia = ng
+    pln_cols = face["peln"].transpose(2, 0, 1).reshape(-1, km + 1)
+    _, tv_cols = _quadratic_on(pln_cols)
+    face["pt"][ia:ia + n, ia:ia + n, :] = (
+        tv_cols.reshape(n, n, km).transpose(1, 0, 2) / face["pkz"])
+    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+          for k, v in face.items() if k not in ("pt", "delp")}
+
+    def f(pt_, delp_):
+        o = l2e_j(**kw, pt=pt_, delp=delp_, q=[], last_step=False)
+        return jnp.concatenate([o.pt.ravel(), o.pkz.ravel(),
+                                o.peln.ravel()])
+
+    _assert_adjoint_consistent(f, (face["pt"], face["delp"]),
+                               label="driver")
+
+
+# ====================================================================== #
+# One-sided derivatives AT the switching surface (codex #3)
+# ====================================================================== #
+
+def _tie_derivative_probe(im, km, which, q1, pe1, pe2b):
+    """``f(t)``: the remapped value of the target layer whose TOP edge is
+    ``pe1(which) + t``, for column 0.
+
+    Crossing ``t = 0`` changes which source layer the interval search
+    selects -- ``which-1`` for t < 0, ``which`` for t > 0 -- so t=0 IS
+    the switching surface.
+    """
+
+    def f(t):
+        pe2 = jnp.asarray(pe2b).at[:, which].set(
+            jnp.asarray(pe1[:, which]) + t)
+        out = map1_ppm_j(jnp.asarray(pe1), jnp.asarray(q1), pe2, km, km,
+                         -1, 9)
+        return out[0, which]
+
+    return f
+
+
+@pytest.mark.parametrize("column", ["smooth", "limited"])
+def test_map_jax_one_sided_derivatives_at_an_interface_tie(column):
+    """One-sided derivatives approaching the tie from BOTH sides, each
+    checked against the documented branch derivative for that side.
+
+    The derivative of a target value w.r.t. its moving top edge ``x`` is
+    ``(q - R(x)) / (X - x)`` where ``R`` is the sub-grid reconstruction
+    and ``X`` the target's fixed bottom edge.  So the ONE-SIDED
+    derivatives differ by exactly
+
+        d+ - d-  =  (AR(l-1) - AL(l)) / (X - x_tie),
+
+    the reconstruction's JUMP at that source interface.  Both arms are
+    asserted:
+
+    * ``smooth``  -- an unlimited column has ``AR(l-1) == AL(l)``
+      (fv_mapz.F90:1987-1990 writes both from the SAME interface array),
+      so the branch changes but the derivative does NOT.  A lane that
+      corrupted the adjoint across the branch would break here.
+    * ``limited`` -- where a limiter has flattened a neighbouring cell
+      the reconstruction IS discontinuous, so the two one-sided
+      derivatives genuinely differ, and the difference must equal the
+      closed form above.  The interface is CHOSEN by measuring the jump,
+      not assumed.
+
+    Each side is also checked against a same-side finite difference
+    taken strictly inside its own branch -- the "documented branch
+    derivative" with no model knowledge at all.
+    """
+    im, km = 3, KMP
+    pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
+    pe2b = _midpoint_targets(pe1, km)
+    if column == "smooth":
+        q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    else:
+        q1 = _column(im=im, km=km, amp=8.0)
+
+    # The reconstruction, from the PUBLIC profile, with the same iv/kord
+    # the map call below uses.
+    a4 = _jax_profile("cs", q1, _dp_1based(pe1), km, -1, 9)
+    jumps = np.abs(a4[3, 0, 2:km] - a4[2, 0, 3:km + 1])   # AR(l-1)-AL(l)
+    which = int(np.argmax(jumps)) + 3
+    jump_ar_al = a4[3, 0, which - 1] - a4[2, 0, which]
+    if column == "smooth":
+        assert abs(jump_ar_al) < 1e-9 * abs(a4[1, 0, which]), \
+            "the smooth fixture's reconstruction is NOT continuous"
+    else:
+        assert abs(jump_ar_al) > 1e-3 * abs(a4[1, 0, which]), \
+            "no limited interface: the 'limited' arm would be vacuous"
+
+    f = _tie_derivative_probe(im, km, which, q1, pe1, pe2b)
+    d, h = 1.0e-2, 1.0e-4               # Pa; [d-h, d+h] stays one-sided
+    g_minus = float(jax.grad(f)(-d))
+    g_plus = float(jax.grad(f)(+d))
+    fd_minus = (float(f(-d + h)) - float(f(-d - h))) / (2.0 * h)
+    fd_plus = (float(f(+d + h)) - float(f(+d - h))) / (2.0 * h)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert abs(g_minus - fd_minus) <= 1e-12 * max(abs(fd_minus), 1.0), \
+        (g_minus, fd_minus)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert abs(g_plus - fd_plus) <= 1e-12 * max(abs(fd_plus), 1.0), \
+        (g_plus, fd_plus)
+
+    # The PRIMAL is continuous across the tie: both branches integrate the
+    # same reconstruction over the same interval, and the spanning arm's
+    # first term vanishes as the edge approaches the interface.  A
+    # discontinuity would be O(1) in the gap, not O(delta).
+    gap = abs(float(f(+h)) - float(f(-h)))
+    slope = max(abs(g_minus), abs(g_plus), 1e-30)
+    assert gap <= 10.0 * h * slope, (gap, h * slope)
+
+    # The DERIVATIVE jump equals the reconstruction's jump / (X - x_tie).
+    x_tie = pe1[0, which]
+    big_x = pe2b[0, which + 1]
+    predicted = jump_ar_al / (big_x - x_tie)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert abs((g_plus - g_minus) - predicted) <= 1e-12 * max(
+        abs(predicted), abs(g_plus), 1e-30), (g_plus - g_minus, predicted)
+    if column == "limited":
+        # NON-VACUITY: this really is a derivative switching surface.
+        assert abs(g_plus - g_minus) > 1e-6 * max(abs(g_plus), 1e-30)
+
+
+# ====================================================================== #
+# The contained zero-thickness target (codex #1 regression)
+# ====================================================================== #
+
+def test_map_jax_zero_thickness_contained_target_is_finite_value_and_grad():
+    """A ZERO-thickness target cell lying wholly inside one source layer.
+
+    The NumPy authority RETURNS at ``fv3_native_mapz.py:624`` on the
+    contained-cell path without ever dividing by the target thickness,
+    so this input is legal there and gives a finite answer.  A JAX twin
+    that forms ``qsum/denom`` unconditionally computes 0/0, which is NaN
+    in the primal select AND -- worse -- in the adjoint of the branch
+    that WAS taken.  The divisor is therefore masked exactly where its
+    quotient is discarded.
+    """
+    im, km = 3, KMP
+    pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    pe2 = _midpoint_targets(pe1, km)
+    pe2[:, 3] = pe2[:, 2]            # target layer 2 has ZERO thickness
+    # It is CONTAINED: `_midpoint_targets` puts pe2(2) at the midpoint of
+    # SOURCE CELL 1, so both (coincident) edges sit strictly inside that
+    # one source layer -- which is what selects the contained branch.
+    assert (pe2[:, 2] > pe1[:, 1]).all() and (pe2[:, 2] < pe1[:, 2]).all()
+
+    ref = map_scalar_n(pe1, q1, pe2, km, km, 1, 9, T_MIN)
+    assert np.isfinite(ref).all(), "the NumPy authority is finite here"
+    got, ok = map_scalar_j(jnp.asarray(pe1), jnp.asarray(q1),
+                           jnp.asarray(pe2), km, km, 1, 9, T_MIN,
+                           return_ok=True)
+    assert bool(ok)
+    assert np.isfinite(np.asarray(got)).all(), "PRIMAL NaN at 0/0"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _rel(np.asarray(got)[:, 1:], ref[:, 1:]) <= 1e-12
+
+    def loss(q_):
+        return jnp.sum(map_scalar_j(jnp.asarray(pe1), q_, jnp.asarray(pe2),
+                                    km, km, 1, 9, T_MIN) ** 2)
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(q1)))
+    assert np.isfinite(g).all(), "ADJOINT NaN at 0/0 (the discarded arm)"
+    assert np.abs(g).max() > 0.0
+    # And the same for the source-layer walk's divisor: a spanning
+    # target whose walk passes layers it must not divide in.
+    def loss_edges(pe1_, pe2_):
+        return jnp.sum(map_scalar_j(pe1_, jnp.asarray(q1), pe2_, km, km,
+                                    1, 9, T_MIN) ** 2)
+
+    ge = jax.grad(loss_edges, argnums=(0, 1))(jnp.asarray(pe1),
+                                              jnp.asarray(pe2))
+    assert all(np.isfinite(np.asarray(x)).all() for x in ge)

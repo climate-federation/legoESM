@@ -91,24 +91,42 @@ it. Those are setup, not hot path, and they stay NumPy.
 ~15k lines landed at `dbfdccb67` and RAN for the first time (job 9400424, x64
 CPU, single node). **All five modules import cleanly.**
 
-| module | LOC | gates | first run | of which `check_grads(order=2)` |
-|---|---:|---:|---|---:|
-| `grids/fv3_duo_halos.py` | 2033 | 52 | 40 pass, 12 fail | 0 |
-| `core/fv3_tp_core.py` | 2620 | 16* | 15 pass, 1 fail | 1 |
-| `core/fv3_pgrad.py` | 1701 | 90 | **88 pass**, 2 fail | 2 |
-| `core/fv3_mapz.py` | 1666 | 212 | **203 pass**, 9 fail | 8 |
-| `core/fv3_nh_core.py` | 2493 | 127 | **126 pass**, 1 fail | 1 |
-| **total** | **10513** | **497** | **472 pass (95.0 %), 25 fail** | **12** |
+| module | LOC | gates | first run |
+|---|---:|---:|---|
+| `grids/fv3_duo_halos.py` | 2033 | 52 | 40 pass, 12 fail |
+| `core/fv3_tp_core.py` | 2620 | 16* | 15 pass, 1 fail |
+| `core/fv3_pgrad.py` | 1701 | 90 | **88 pass**, 2 fail |
+| `core/fv3_mapz.py` | 1666 | 212 | **203 pass**, 9 fail |
+| `core/fv3_nh_core.py` | 2493 | 127 | **126 pass**, 1 fail |
+| **total** | **10513** | **497** | **472 pass (95.0 %), 25 fail** |
 
-**The single most useful number here is that last column.** `check_grads(order=2)`
-failed in **four of the five modules**, and accounts for 12 of the 25 failures.
-The other 12 are the halo module's bitwise-vs-FMA expectations, and the 25th is
-one guard test. That is not four independent flukes — it is a **systematic
-defect in the gate**, and codex predicted it in the strategy review before a
-line of this code existed (finding 7: order-2 finite differencing is a weak gate
-for a scheme whose entire behaviour is switching, and demanding
-finite-difference agreement *at* a switch is wrong because no classical
-derivative exists there).
+**Where the 25 failures actually are** — established by reading where each
+traceback tops out, not by the test's name:
+
+| class | count | what it means |
+|---|---:|---|
+| bitwise `jit`-vs-eager on a floating-point sum | 12 | expectation: XLA contracts mul+add into FMA when jitted, so a few-ULP gap is correct |
+| **off-switch FIXTURE PRECONDITION refused** | **9** | `check_grads` **never ran** — the helper that must certify the state as away from every limiter switch could not, and raised first |
+| genuine `check_grads(order=2)` FD failure | 3 | finite differencing cannot resolve the array's dynamic range |
+| guard-test expectation | 1 | Python's own `TypeError` for a missing keyword-only arg fires before any body guard |
+
+⛔ **CORRECTION to an earlier revision of this file (commit `0b9780620`).** It
+said `check_grads(order=2)` failed in four of five modules and accounted for 12
+of 25 failures. That is wrong on both counts, and it was wrong because I
+attributed failures by the *test's name* instead of by where the traceback
+stopped. `check_grads` itself failed **3** times, in **2** modules. The larger
+group is the 9 above, where the gradient was never taken at all.
+
+**And that is the sharper finding, not a weaker one.** Nine gates failed because
+*constructing a provably off-switch state for a PPM limiter chain is hard* —
+the margins were hand-derived and over-tight (one measured 0.70 against a switch
+at 1.0, guarded at an arbitrary 0.5; another used an absolute 0.25 K margin on a
+quantity that varies 30× across columns). So the strategy's original gradient
+gate was not merely weak at detecting defects, it was **difficult to even set
+up**, which is independent evidence for codex's finding 7 and for the three-part
+gate that replaced it. The tolerance-free adjoint identity needs no such
+fixture: it runs **on** the switching surface, where `check_grads` is
+meaningless.
 
 **Zero confirmed real code defects came out of the run.** The one real code
 defect in the campaign so far came out of the *review*, not the run: codex's
@@ -312,13 +330,23 @@ Each entry cost something. New sessions read this before touching the port.
     took a thirty-second check to refute. Never report a verdict off a printed
     diff — the rule already existed as "diff ARRAYS, never printed summaries",
     and this is its table-shaped cousin.
-11. **`check_grads(order=2)` is a weak gate for this core, empirically.** It
-    failed in four of the five modules on first run and accounted for 12 of 25
-    failures, in every case without a code defect behind it. Finite differencing
-    cannot resolve an array with seven orders of dynamic range, and it is
-    meaningless *at* a switching surface where no classical derivative exists.
-    Use the adjoint identity `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` as the primary gradient gate and
-    keep `check_grads` as a scoped, smooth-region supplement.
+11. **Attribute a failure by where the traceback STOPS, not by the test's
+    name.** Nine gates named `..._check_grads_order2_off_switch` failed without
+    `check_grads` ever running — the fixture precondition raised first. Reading
+    the name instead of the traceback produced a wrong scorecard that went into
+    a commit message. Two of the three retractions in this campaign are the same
+    error: a verdict from a printed artifact rather than from the thing itself.
+12. **`check_grads(order=2)` is a weak gate for this core, and hard to even set
+    up.** Three genuine FD failures (dynamic range), plus nine failures just
+    trying to construct a certifiably off-switch state for a PPM limiter chain —
+    with hand-derived margins that were over-tight (0.5 guarding a switch at
+    1.0, where the state measured 0.70; an absolute 0.25 K margin on a quantity
+    varying 30× across columns). Use the adjoint identity `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` as
+    the primary gate: it needs no off-switch fixture and runs **on** the
+    switching surface. Keep `check_grads` as a scoped smooth-region supplement,
+    and run `order=1` before `order=2` so an FD-resolution failure can never be
+    confused with a wrong Jacobian. Their blind spots are complementary — jvp
+    and vjp of the same *wrong* Jacobian agree, so neither gate alone is enough.
 12. **The run finds expectation defects; the review finds code defects.** On
     this campaign the 497-gate first execution surfaced zero confirmed code
     defects, while the adversarial review surfaced a BLOCKER. Budget for both;
