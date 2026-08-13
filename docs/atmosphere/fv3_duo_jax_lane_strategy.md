@@ -141,18 +141,66 @@ not optional extras — they are the only tiers that interrogate the joins.
 lane. The only permitted transformations are mechanical:
 
 - an explicit `for i` / `for j` loop over grid indices becomes a vectorized slice
-  expression **over the identical index window**;
-- an explicit `for k` *recurrence* becomes `lax.scan` over k — never
-  `associative_scan` and never `cumsum`, because both reassociate the
-  floating-point sum and break the parity contract (this is already the
-  established doctrine in `fv3_nh_core.py`);
+  expression **over the identical index window** — **but only after a dependence
+  and alias audit** (R1a below);
+- an explicit *recurrence* becomes `lax.scan`, **on whatever axis it runs** —
+  never `associative_scan` and never `cumsum`, because both reassociate the
+  floating-point sum and break the parity contract (already the established
+  doctrine in `fv3_nh_core.py`);
 - in-place mutation of an argument becomes a functional return (§ R4);
 - a static Python `if` on a config value stays a Python `if`; an `if` on array
-  data becomes `jnp.where`.
+  data is handled per R1b below — **not** by a blanket `jnp.where`.
 
 Anything else — algebraic simplification, fusing two loops that the Fortran
 keeps separate, "obviously equivalent" reorderings — is forbidden. If a
 transformation looks like an improvement, it is out of scope by definition.
+
+**R1a — Vectorization requires a proven-independent loop.** An `i`/`j` loop may
+be sliced only after showing that **no iteration reads a location an earlier
+iteration writes**, including through aliased views (the NumPy lane's `fort`
+1-based adapters are views onto the same buffer) and through halo/corner
+storage. *"Identical index window" is necessary and not sufficient.* Every
+vectorized loop carries a one-line dependence argument in a comment at the site.
+Where the dependence is real, it stays an ordered `lax.scan` — the axis is
+irrelevant. Three sites in this core that will bite:
+
+- the NH `w_limiter` (`fv3_native_mapz.py:1014-1044`) clips downward then
+  upward and **reads the just-updated adjacent level**, so the spill one level
+  sees depends on the previous level's clip. A bulk `.at[..., k+1].add(...)` is
+  wrong; it is two ordered scans.
+- tracer subcycling (`fv3_native_tracer2d.py:432-460`) overwrites `dp1` with
+  `dp2`, refreshes the tracer halos, and the next iteration reads those new
+  values.
+- `_rezone` (`fv3_native_mapz.py:599-650`) carries `k0` across target layers.
+
+The narrower claim that `c_sw` and `d_sw1…6_duo` are already functional (they
+copy every input at entry and return dicts) **is** sound and was independently
+confirmed in review — but it covers only those routines, not `mapz` or tracer
+transport.
+
+**R1b — `jnp.where` is a select, not lazy control flow.** Both branches are
+traced and evaluated. A division, `log`, `sqrt`, or out-of-range index
+arithmetic in the **unselected** branch produces NaN/Inf, and under reverse-mode
+AD a NaN from the inactive branch **contaminates the gradient of the branch that
+was selected**. The rule is therefore:
+
+- `jnp.where` only when **both branches are total and finite over every admitted
+  input**;
+- otherwise mask or sanitize the dangerous operand *before* the select (the
+  double-`where` idiom), or use `lax.cond` where the predicate is scalar and the
+  branch must genuinely be lazy;
+- state per site which was used and why.
+
+The live hazard is `_rezone`: its contained-cell and spanning-cell formulas
+perform *different divisions* and are valid only after a successful interval
+match (`fv3_native_mapz.py:619-669`), so flattening them into a `where` over all
+candidate layers evaluates formulas outside their intervals. The limiter spill
+formulas dividing by the next layer's `d2` (`:1021-1040`) have the same shape.
+
+Note also what `where` does **not** give: it returns the derivative of the
+selected branch and no derivative of the predicate. That is a legitimate
+piecewise derivative, but it is not a derivative through the discrete upwind or
+interval decision, and §7 must not pretend otherwise.
 
 **R2 — Constants and claims cite file:line.** Every constant in a JAX kernel is
 either imported from the NumPy twin's module or carries a comment with the
@@ -245,54 +293,139 @@ guess, not a tolerance.
 
 | kernel class | examples here | bound |
 |---|---|---|
-| pointwise / neighbour-reading | `edge_profile`, `xppm`/`yppm` limiters, EOS-like algebra | ~1e-15 relative (rounding alone) |
+| pointwise / neighbour-reading | `edge_profile`, EOS-like algebra, the projections in `c2l_ord2` | ~1e-15 relative (rounding alone) |
 | accumulating / reassociated | flux divergence sums, `pe` rebuild, area-weighted global sums | ~1e-12 relative |
 | sequential recurrence under `lax.scan` | `sim1_solver`, `riem_solver3` Thomas sweeps | ~1e-15 own-scale; cancellation-amplified outputs (`pe`, `w2`) sit at ~3e-15 of their own small scale — record which |
+| **branch-switching** | `xppm`/`yppm`/`xtp_u`/`ytp_v` limiters, `_rezone`, the NH `w_limiter` | **no rounding-scale bound is meaningful** — see below |
 
-Three standing riders:
+**The fourth class is why the first three are not enough** (codex finding 2,
+BLOCKER). Several of this core's most important routines are simultaneously
+pointwise, accumulating *and* branch-switching, and near a switching surface a
+rounding-level difference flips the branch and produces a discrepancy far above
+1e-15:
 
-- **Bounds are `measured × (3…10)`**, never loosened without recording the new
-  measurement.
+- `_rezone` (`fv3_native_mapz.py:594-669`) — one ULP at an interface selects a
+  different layer *and* a different formula.
+- the NH `w_limiter` (`:1014-1044`) — a conditional sequential redistribution;
+  clipping one level changes what the next reads.
+- `deln_flux` / `del6_vt_flux` (`fv3_native_d_sw.py:1091`/`:1150`, `:1707`/`:1753`)
+  — repeated stencil passes over `nord`, so error is locally accumulated and
+  window-sensitive, not one flux-divergence sum.
+- `xppm`/`yppm` (`fv3_native_d_sw.py:260`/`:656`) — branch-heavy limiter
+  pipelines, not innocuous neighbour-reading kernels.
+
+For these, a gate must record **which regime its fixture sits in**, and a
+branch-equivalence check (do both lanes take the same branch?) carries the claim
+rather than the numeric bound.
+
+Standing riders:
+
+- **A bound is an error MODEL, not a multiplier on one sample.** Per output:
+  absolute *and* relative tolerance, plus a **scale floor** so a near-zero
+  reference does not make the relative bound meaningless. `measured × (3…10)`
+  from a single fixture is not defensible on its own — and if the measured
+  maximum is exactly zero, multiplying pins the bound to zero and makes harmless
+  backend rounding fail.
+- **Fixtures are a matrix, not a sample**: grids, faces, halo rings, every
+  supported `hord`/`nord`/`kord`, vertical depths, remap ties, and both sides of
+  each limiter regime. The bound comes from the worst observed case with a
+  margin justified by operation count and conditioning.
 - **Assert both hops**: JAX-vs-NumPy *and* jit-vs-eager. Evidence in a comment
   does not fail when the code regresses.
 - **A residual at the tolerance floor is UNEXPLAINED, not agreement.** Say so.
 
 Where a check's power does not depend on tolerance tightness — conservation and
-budget closure, analytic invariants, equivariance, N-step growth judged against
-the 1-step floor, pattern correlation — prefer it.
+budget closure, analytic invariants, equivariance, branch equivalence, N-step
+growth judged against the 1-step floor, pattern correlation — prefer it.
 
 ## 5. The validation ladder
 
+**Every tier is an executable specification.** A tier that says only "bounded
+growth" or "solution-tier" can be claimed after observing almost any finite
+number, which is not a gate (codex finding 8, BLOCKER). Each row below names the
+fixtures, the fields, the window, the norm and a numeric criterion; where a
+number is still to be measured it is marked `TOL-PENDING` in the code and the
+measurement job censuses them before anything ships.
+
 | tier | what is compared | against | acceptance |
 |---|---|---|---|
-| **0** | shapes, dtypes | `jax.eval_shape` | exact; every operand f64 or `TypeError` at entry |
-| **1** | one JAX kernel, one call | its NumPy twin, same live inputs | §4 tolerance, per-field, pinned to measurement |
-| **1g** | one JAX kernel's gradient | finite differences (`check_grads`, order 2) | away from switching points; the point named where it is not |
-| **2** | jit vs eager, same kernel | itself | §4 tolerance; divergence means a tracer bug |
-| **3** | multi-step replay of the assembled chain | NumPy lane, same IC | bounded growth judged against the 1-step floor |
-| **4** | one full `fv_dynamics` step, all fields | NumPy lane end-to-end | per-field, pinned |
-| **5** | 5–9 day integrations | **oracle `atmos_daily.nc`** on matched case/grid/day | solution-tier; the campaign's exit criterion |
+| **0** | shapes, dtypes, **declared read/write window and minimum halo width** | `jax.eval_shape` + static preconditions | exact shapes; every operand f64 or `TypeError` at entry; a sentinel written outside the declared write window fails; the minimum `ng` for the requested `hord`/`nord`/stagger is asserted, not assumed |
+| **1** | one JAX kernel, one call | its NumPy twin, same live inputs | §4 error model per output (abs + rel + scale floor), over the §4 fixture matrix; for branch-switching kernels, **branch equivalence** as well as the numeric bound |
+| **1g** | one JAX kernel's gradient | finite differences | the three-part gate of §7 — smooth-region order-2, one-sided at each switching surface, and adjoint consistency |
+| **2** | jit vs eager, same kernel | itself | §4 tolerance, plus a compiled-path/cache-count check. Divergence means a tracer bug **or** compiler reassociation, a static-argument mistake, or NaN-sensitive arithmetic — diagnose, do not assume |
+| **2c** | **conservation and invariants** | analytic | see the conservation gate below — tolerance-independent, so it does not weaken as bounds are tuned |
+| **3** | N-step replay of the assembled chain | NumPy lane, same IC | per-field growth vs the 1-step value, with a declared allowed amplification per N; the existing N-sweep gives the shape (hydro 9.79e-6 / 1.42e-5 / 9.56e-5 at N = 1/3/10) |
+| **4** | one full `fv_dynamics` step, all fields | NumPy lane end-to-end | per field, per face, owned window and halo scored separately, pinned |
+| **5** | 5–9 day integrations | **oracle `atmos_daily.nc`** on matched case/grid/day | field-by-field, see below |
+| **5a** | one step, stage boundaries | **Fortran directly** | a periodic audit of hop A — see below |
 
-Tier 5 is the only tier that closes the chain back on the original. Its cases:
+**Tier 5 needs field-by-field criteria, not two headline metrics** (codex finding
+1, BLOCKER). W2 `max|v|` and the J&W surface-pressure growth are *fingerprints*;
+they are not sensitive to everything that can be wrong. A realistic survivor:
+a NumPy defect confined to tracer remapping — wrong tracer ordering, a one-cell
+seam error, a non-conservative `map1_q2` branch — which the JAX lane reproduces
+exactly, and which leaves both headline numbers unchanged because passive
+tracers do not feed them. Vertically compensating layer tendencies can likewise
+be invisible in `p_s` while the temperature profile is wrong. **Five to nine days
+does not make an insensitive observable sensitive.** Tier 5 therefore scores
+every carried prognostic — `u`, `v`, `delp`, `pt`, `w`, `delz`, each tracer —
+with vertical/profile and seam-localized norms alongside the global ones.
+
+**Tier 5a exists because the localization argument is weaker than §2 claimed.**
+"Every kernel agrees with NumPy" proves a drift does not originate in hop B; it
+does **not** prove the NumPy kernel is right. So the campaign keeps at least one
+direct Fortran-vs-JAX one-step comparison at stage boundaries as a standing
+audit of hop A, even though NumPy remains the ordinary per-kernel authority.
+
+Tier 5's cases:
 
 - **Shallow water (2-D):** Williamson-2 at α=0 and α=45, `hord` 5/6/8/10, C48
   through C192 as budget permits; case-6 Rossby–Haurwitz C48; case-8 colliding
-  modons C48 at α=0 and α=45. The oracle ships duo **and** plain arms for each,
-  so the duo/plain ratio is a one-variable internal control that no absolute
-  number can fake: the published duo gain is **8.2× at hord8 and 59× at hord6**
-  on `max|v|` for W2 α=0 day 5, where the exact solution has `v ≡ 0`.
+  modons C48 at α=0 and α=45. Of the 42 Zenodo run directories, every case ships
+  a matched duo **and** plain arm (21 pairs), so the duo/plain ratio is a
+  one-variable internal control that no absolute number can fake. Measured in
+  `fv3_duo_gap_register_2026-08-06.md`: the duo grid buys **8.2× at hord8 and
+  59× at hord6** on `max|v|` for W2 α=0 day 5, where the exact solution has
+  `v ≡ 0` so `max|v|` *is* the cube imprint.
 - **3-D, hydrostatic and non-hydrostatic:** DCMIP-2016 Jablonowski–Williamson
   baroclinic wave (`nh.case-13`, `test_cases.F90:77`), C48–C192, days 1–9,
-  scored with the alignment-free area-weighted rms′ of `p_s`. The oracle grows
-  **80× over eight days** (0.0295 → 2.380 hPa); a lane that grows 1.6× and flats
-  out is grid-locked, whatever its norms say.
+  scored with the alignment-free area-weighted rms′ of `p_s` by
+  `jw_duo_oracle_compare.py`. Measured in the same register: the oracle grows
+  **80× over eight days** (0.0295 → 2.380 hPa) — that growth is the baroclinic
+  instability. A lane that starts at 10 hPa, grows 1.6× and flattens from day 4
+  is showing a static grid-locked pressure pattern, whatever its norms say.
+
+Both sets of numbers are the register's measurements, not the published paper's;
+they are quoted here so tier 5 has a target, and they are re-measured rather than
+assumed when the JAX arm is first scored.
 - Our own SW suite (W2/W5/W6, cosine bell) and NH cases (DCMIP TC2/TC3) run on
   the same lane, as the "tested against our test cases" half of the ask.
 
 **Tier-5 protocol is fixed to the oracle's resolved namelist, not to ours.**
 Every duo deck resolves `D_EXT = 0.0` (`logfile.000000.out:406`); a run with
 `d_ext=0.02` is not comparable to any oracle number, and one already produced a
-retracted "23–30×" claim in this campaign.
+retracted "23–30×" claim in this campaign. Tier 5 also runs at the **production
+time step and configuration** — FESOM2-C's most expensive bug was invisible at a
+short validation step and only appeared after ~110 model days at the production
+step (§8).
+
+### Tier 2c — the conservation gate
+
+Named as load-bearing in §2 and §4 but never specified, which made it
+unenforceable (codex finding 10). It is executable and tolerance-independent:
+
+| invariant | why it is the right quantity |
+|---|---|
+| global dry mass | the scheme's primary conserved quantity; the one thing a flux-form core must not leak |
+| per-tracer mass | `tracer_2d_1L` + `map1_q2` are *designed* conservative; a subcycling or remap defect shows here and nowhere else |
+| pressure-thickness closure (`Σ delp` vs `ps − ptop`) | catches a remap that loses column mass without moving the surface pressure |
+| constant-field preservation | a uniform tracer must remap to itself exactly; fails on almost every interval-search defect |
+| flux antisymmetry across all six shared edges | the duo barriers exist to make the seam flux single-valued; this is the direct test that they did |
+| the `w_limiter`'s weighted momentum invariant | it **redistributes** between layers and must not create momentum |
+
+Two protocol requirements, because both change the answer: state whether the
+diagnostic includes halo cells, and use **cubed-sphere area weights** — an
+unweighted mean on a non-uniform grid is not a global mean.
 
 ## 6. The live twin switch
 
@@ -321,6 +454,15 @@ That restriction is acceptable because of what the mode is *for* — turning
 a single instrumented run, and catching the kernel that is individually correct
 but wired up wrong. Neither needs speed.
 
+**What eager verification therefore does NOT cover, stated so it is not
+over-claimed:** it never exercises XLA lowering, fusion, compiled control flow,
+static-argument caching, or the actual jitted composition. It can localise a
+wiring defect only if the eager and compiled dispatch paths are *structurally
+identical* — so the eager and jitted wrappers must share **one pure kernel
+body**, with the environment flag selecting the production callable *before*
+tracing. A jaxpr test asserts no twin operation appears when the flag is off.
+Compiler-induced discrepancies belong to **tier 2**, not to the live twin.
+
 A second, cheaper instrument covers the jitted path: the **tier-3 replay**
 (§5) runs N steps on both backends from the same initial state and compares the
 end state. It sees the same class of defect, works under `jit`, and costs one
@@ -332,16 +474,67 @@ localises to a kernel.
 The lane exists to be differentiated; a lane that runs but whose gradient is
 wrong is worse than no lane.
 
-- `check_grads(f, args, order=2)` on every kernel, at a state **away from**
-  `jnp.maximum`/`jnp.minimum`/limiter switching points, with the non-smooth point
-  named in the test rather than silently avoided.
-- Gradients through a short full-model integration (a few acoustic substeps),
-  not only per kernel.
-- No `donate_argnums`. No Python control flow on traced values. Stable shapes,
-  no retrace: a retrace test on two different `dt` values.
-- PPM limiters and the upwind `sign` selections are the expected non-smooth
-  sites. Each gets an explicit note stating whether the gradient is
-  sub-differential there and which branch it takes.
+**Order-2 `check_grads` at a smooth state is not, by itself, a meaningful gate
+for this core** (codex finding 7). It verifies that AD agrees with finite
+differences *on one fixed branch*. But PPM transport **is** extrema detection,
+monotonicity constraints, upwind selection, clipping and CFL-dependent
+subcycling — so a gate that systematically avoids every switch excludes exactly
+the behaviour most likely to produce zero, unstable, or discontinuous
+sensitivities. Demanding finite-difference agreement *at* a switch is equally
+wrong: there is no single classical derivative there.
+
+The gate is therefore three parts, all required:
+
+1. **Smooth region** — branch-fixed JVP and VJP against finite differences,
+   `check_grads(..., order=2)`. This is the old gate, kept, and demoted to one
+   third of the answer.
+2. **At every switching surface** — one-sided directional derivatives
+   approaching from **both** sides, each asserted against the *documented branch
+   derivative* for that side. The surfaces are enumerated per module, not left
+   as "the limiters": PPM extrema/monotonicity clips, the upwind `sign`
+   selections, `_rezone`'s interval boundaries, the `w_limiter` clip, and the
+   integer crossings of the tracer subcycle schedule.
+3. **Short rollout** — gradients of a physically meaningful scalar objective
+   through a few acoustic substeps, checking finiteness, **adjoint consistency**
+   (`⟨Jv, w⟩ = ⟨v, Jᵀw⟩`), convergence while the perturbation stays inside one
+   branch, and bounded behaviour across a branch change.
+
+If a downstream use ever needs gradients *through* a switch, that requires a
+chosen and validated surrogate or `custom_jvp` policy, declared here. The exact
+discrete FV3 algorithm does not supply one, and pretending otherwise is how a
+silently-zero sensitivity ships.
+
+Mechanics, unchanged: no `donate_argnums`; no Python control flow on traced
+values; stable shapes; a retrace test on two different `dt` values.
+
+## 7a. The state contract and the precision boundary
+
+Two contracts the first revision left implicit. Both decide compilation-cache
+stability and seam correctness, so both are fixed here rather than emerging from
+whichever module is written first (codex findings 11 and 12).
+
+**State layout.** The NumPy lane carries a **list of six per-face states** with
+nested tracer lists (`fv3_native_dynamics.py:237-267`), while some helpers stack
+explicitly (`fv3_native_dsw_phase_3d.py:230`). The JAX lane must choose, and the
+choice is not free: staggered fields have *different shapes per stagger* (A, B,
+C, D), so a leading face axis is not always even constructible. The contract
+must state — and a test must pin — the canonical PyTree, face ordering, field
+staggering, halo widths, array origin (the NumPy lane puts Fortran index `1-ng`
+at numpy index 0 on both axes), and **which leaves are static** (integer index
+tables, topology, `k2e` tables) versus traced (field data). "`ctx` is converted
+to JAX tables once" is not a PyTree definition. Required tests: tree-structure
+and shape stability, a compilation-cache-count check, and a round-trip
+NumPy↔JAX state test.
+
+**Precision.** Tier 0's per-kernel f64 gate is necessary and late: with
+`jax_enable_x64` disabled, `jnp.asarray(x, dtype=float64)` silently truncates at
+*array creation*, and no downstream check can recover the lost bits. So
+`jax_enable_x64` is an **import/startup precondition** that fails before any
+model array is constructed, and the audit covers constants, context tables,
+initial conditions and boundary adapters — not just kernel operands. The stakes
+are recorded in the NumPy authority itself: float32 costs `0.208` in `gz` and
+`2.2e-3` in `pef` (`fv3_native_nh_core.py:68-71`). Mixed precision is outside
+certification; the lane is f64 end to end.
 
 ## 8. Failure modes, and the tier that catches each
 
@@ -430,44 +623,58 @@ specific volume, the `w_limiter` passes). Exit:
 
 Both are flagged here so they are designed, not discovered:
 
-1. **`_rezone`** (`fv3_native_mapz.py:594`) — the remap interval search, three
-   data-dependent branches inside a `for i, k, ell, m` nest. It must keep the
-   NumPy lane's traversal exactly; `searchsorted` picks a different layer at
-   ties.
+1. **`_rezone`** (`fv3_native_mapz.py:594-669`) — the remap interval search:
+   an interval search, *different formulas* for a contained versus a spanning
+   target cell, a conditional accumulation of source layers, a `k0` carried
+   from one target layer to the next (`:599-604`, `:614-650`), and an
+   exceptional no-bracket path.
+
+   **Prescribed design** (saying only "keep the traversal, avoid
+   `searchsorted`" left the central question unanswered — codex finding 6):
+   a **static-length nested `lax.scan`** carrying explicit
+   `(found, k0, qsum, out)` state, fixed ascending traversal, sequential
+   `qsum`, explicit first-match tie rule. Not a dynamic `while_loop` (no
+   reverse-mode rule); not a vectorized interval mask (changes evaluation and
+   reduction order). The no-bracket path must be an explicit returned error
+   flag, a precondition gate, or `checkify` — never a plausible number.
+   Fixtures: exact-interface, one-ULP-below, one-ULP-above. A one-ULP
+   perturbation at an interface selects a different layer **and** a different
+   formula, so its discrepancy is not rounding-scale and must not be certified
+   at a rounding-scale tolerance.
 2. **`tracer_2d_1l_sixface`** (`fv3_native_tracer2d.py:193`) — `nsplt` is a
    **data-derived loop trip count**: `nsplt_k[k] = int(1.0 + cmax[k])`
    (`:318`), where `cmax[k]` is the six-face max of a Courant-like number
    built from the flux capacitors (`:299-315`). jit cannot take that as a
    Python loop bound.
 
-   **Resolved: compute it outside the traced region and treat it as static per
-   call.** The three candidates and why:
+   The three candidates:
 
    | option | faithful? | reverse-differentiable? | cost |
    |---|---|---|---|
-   | (a) static, resolved eagerly | yes, exactly | **yes** (plain Python loop, unrolled) | one device→host sync per step; retrace when `nsplt_k` changes |
+   | (a) static, resolved eagerly | yes, exactly | in isolation | **device→host sync every step; retrace when `nsplt_k` changes; and it CANNOT RUN inside `jit`/`grad`/`scan` at all** |
    | (b) `lax.fori_loop` with a traced bound | yes | **NO** — a traced bound lowers to `while_loop`, which has no reverse-mode rule | none |
-   | (c) pad to `NSPLT_MAX`, mask the surplus | only if the mask is a proven no-op | yes | `NSPLT_MAX ×` the transport work |
+   | (c) fixed `NSPLT_MAX`, mask the inactive iterations | yes, if the mask is a proven no-op | **yes** | `NSPLT_MAX ×` the transport work |
 
-   (b) is disqualified outright: a lane whose reason for existing is the
-   adjoint cannot put its tracer transport inside a `while_loop`. (a) is
-   chosen over (c) because `cmax` is below 1 in any stable configuration, so
-   `nsplt = 1` essentially always and the retrace never fires in practice —
-   whereas (c) pays `NSPLT_MAX ×` unconditionally and needs a separate proof
-   that the masked iterations are exact no-ops.
+   > **RETRACTION (this document, commit `023b996b4`).** An earlier revision
+   > chose **(a)** and argued it costs nothing in the gradient because
+   > `int(1.0 + cmax)` is a floor and its derivative is zero almost everywhere.
+   > The derivative argument is correct **and irrelevant**, because (a) does not
+   > compose: the moment the step is placed inside `jit`, `jax.grad`, or a
+   > `lax.scan` over time — which is the entire point of the lane — `cmax` is a
+   > *tracer*, and `int(1.0 + cmax)` raises. (a) only works if the whole step
+   > runs eagerly, which forfeits the lane. Caught by the codex adversarial
+   > review of this document (finding 5, BLOCKER).
 
-   **The non-obvious part, and the reason (a) costs no accuracy in the
-   gradient:** making `nsplt` static drops the `∂nsplt/∂cmax` term, but that
-   term is **zero almost everywhere** — `int(1.0 + cmax)` is a floor, so its
-   true derivative vanishes except on the measure-zero set where `cmax`
-   crosses an integer. The static treatment therefore yields the *correct*
-   gradient a.e., not an approximation. The `frac = 1/nsplt` rescale of the
-   capacitors (`:319-333`) inherits the same property. The measure-zero
-   crossings are a genuine non-differentiable site of the SCHEME, not of the
-   port, and are named as such in the gradient gate.
-
-   The retrace behaviour must be stated in the module docstring, and the
-   module logs once when `nsplt_k` changes so a retrace is never silent.
+   **Resolved: (c).** A fixed `NSPLT_MAX` derived from the admitted CFL
+   envelope; `lax.scan` (or a fixed-bound `fori_loop`) over `NSPLT_MAX`
+   iterations; inactive iterations masked while the active ones keep the exact
+   state and halo cadence; **fail loudly** if the resolved `nsplt` would exceed
+   `NSPLT_MAX` rather than silently truncating the subcycling. The integer
+   schedule carries `stop_gradient`, and the docstring states that the
+   derivative is piecewise with no term through the trip-count decision — which
+   is the true derivative a.e., the one correct part of the retracted argument.
+   Tests must sit on **both sides of every schedule transition**, not only at
+   `nsplt = 1`.
 
 Good news from the same trace: `c_sw` and all six `d_sw*_duo` are **already
 functional** in the NumPy lane (they copy every input at entry and return
