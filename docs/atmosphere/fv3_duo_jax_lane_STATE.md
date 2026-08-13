@@ -206,6 +206,58 @@ code:**
    `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` — which is what codex predicted when it called order-2 FD
    a weak gate for this core.
 
+### Run 2 (job 9401521, SHA `9b39dc254`) — after the first triage round
+
+| module | run 1 | run 2 |
+|---|---|---|
+| `fv3_duo_halos.py` | 40/52 | **52/53** |
+| `fv3_pgrad.py` | 88/90 | **96/100** |
+| `fv3_mapz.py` | 203/212 | **217/224** |
+| `fv3_tp_core.py` | 15/16 | 227/**249** (suite grew 16 → 249) |
+
+Codex's `_rezone` BLOCKER fix is confirmed working: the zero-thickness
+regression and both map gradient gates now pass.
+
+**Every remaining failure was again an expectation or fixture defect**, and the
+two most instructive are worth keeping:
+
+- **`deln_flux` at `nord=2` is not inert.** It multiplies by `rarea ≈ 1e-12`
+  once per pass, so a hand-picked raw `damp = 1e-3` put the del-6 increment near
+  1e-23 against an `fx0` of order 1…156 — *seven orders below one ULP* of the
+  value it is added to, hence `fx + fx2 == fx` bitwise. `nord = 0, 1` passed
+  because they carry one and two fewer factors of `rarea`. The oracle supplies
+  exactly the compensating scaling at **`tp_core.F90:199`**,
+  `damp = (damp_c · gridstruct%da_min)**(nord+1)`, under the `damp_c > 1.e-4`
+  guard at `:198`; the test bypassed it. Now calibrated from a probe — exact,
+  because `deln_flux` is *linear* in `damp` in all four branches.
+- **A "rough" fixture that never left the limiter.** `smt5 = bl·br < 0` is false
+  only at a local extremum, and for a linear field `bl·br = -(s/2)² < 0` at every
+  cell — so the fixture was one-sided by construction and its own self-check
+  caught it (on = 234, off = 0).
+
+### Four times a measurement refuted MY reasoning
+
+Recorded as a pattern, because it is one. In each case I inferred a mechanism
+from a symptom instead of measuring, and an agent corrected it:
+
+1. **k2e "column swap"** → differently-sorted record tables. Retracted.
+2. **"`check_grads(order=2)` failed in 4 of 5 modules"** → attributed by the
+   test's *name*; 9 of those never ran `check_grads` at all.
+3. **"forward passed, reverse failed, so the VJP is suspect"** → `check_jvp` and
+   `check_vjp` consume the **same** FD data; `_assert_numpy_close` scales the
+   bound by leaf size (`atol*a.size`, `public_test_util.py:164`), so comparing a
+   312-element array gets `rtol = 3.12e-3` while comparing a scalar inner
+   product gets `1e-5`. **312× tighter on identical numbers.** The split carries
+   no information about reverse mode.
+4. **"normalise the loss to O(1)"** (carried over from what fixed `pgrad`) →
+   that fixes an **atol** failure; `mapz`'s was **rtol**, and scaling the loss
+   scales the AD tangent and the finite difference identically, so the ratio is
+   invariant. The levers were the step size and the function's nonlinearity.
+
+The common failure is reasoning from a plausible mechanism to a verdict without
+running the one cheap check that separates it from the alternatives. Every one
+of these was a sub-minute measurement.
+
 ### Codex adversarial review of the CODE — 1 BLOCKER, 2 MAJOR
 
 All three in `_rezone` and the gradient gates, i.e. exactly the node the
