@@ -2341,6 +2341,24 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
     nocomm = _resolve_halo_nocomm(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOCOMM", ""))
+    nostage = _resolve_halo_nocomm(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOSTAGE", ""))
+
+    if nostage:
+        # MEASUREMENT ONLY, WRONG ANSWERS: skip the whole per-round loop,
+        # leaving the halo rows at their padded initial values. The
+        # kernel, the local region, the masking and every other line of
+        # the step are unchanged, so (nocomm - nostage) is the cost of
+        # the on-device halo staging -- gather, concatenate, scatter --
+        # measured against the SAME program.
+        #
+        # Why this is needed: the obvious control, the same per-device
+        # load on ONE device, is NOT the same program.
+        # make_voronoi_sharded_step returns the plain serial model.step
+        # at n_devices == 1, so that arm cannot be subtracted from a
+        # sharded one. Found by codex review after exactly that
+        # subtraction had been reported.
+        return cell_local[:max_lc], u_local[:max_le]
 
     for r, (sc, rc, se, re) in enumerate(halo_sl):
         send_c = cell_pack[sc[0]]             # (hc_r, W)
