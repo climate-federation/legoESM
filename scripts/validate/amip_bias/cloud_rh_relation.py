@@ -147,6 +147,7 @@ def run(name, level_pa):
     pred_m = evaluate_curve(curve, counts, rh_m)     # obs curve at MODEL humidity
     pred_o = evaluate_curve(curve, counts, rh_e)     # obs curve at OBS humidity
 
+    n_broken = []
     print(f"\n  {'region':<16}{'d_cover':>9}{'closure':>9}{'humidity':>10}"
           f"{'RH_mod':>8}{'RH_obs':>8}{'unusable':>10}")
     for reg in REGIONS:
@@ -167,16 +168,36 @@ def run(name, level_pa):
         # up to the binning residual; that residual is folded into `closure`
         # only if we compare against `go`, so report the identity's own sum and
         # the raw difference side by side rather than asserting they match.
+        resid = (closure + humid) - (gm - go)
+        # The identity is only an identity if the observed CURVE reproduces the
+        # observed cover in this region. Where it does not -- stratocumulus is
+        # the obvious case, its cover set by the boundary layer and not by the
+        # humidity above it -- the two terms do not sum to the difference they
+        # claim to split, and neither is interpretable.
+        bad = abs(resid) > 0.25 * max(abs(gm - go), 1.0)
+        mark = "  <-- DOES NOT CLOSE, both terms meaningless" if bad else ""
         print(f"  {reg:<16}{gm - go:9.2f}{closure:9.2f}{humid:10.2f}"
               f"{rb.region_mean(rh_m, lat, lon, box, ok):8.3f}"
               f"{rb.region_mean(rh_e, lat, lon, box, ok):8.3f}"
-              f"{frac_bad:9.0%}")
+              f"{frac_bad:9.0%}{mark}")
+        if bad:
+            n_broken.append(reg)
     print("\n  d_cover = model - ESACCI [% absolute].  closure = cover the "
           "model adds\n  at the OBSERVED humidity.  humidity = cover the "
           "observed curve gives for\n  the model's humidity instead of the "
-          "observed one.  closure + humidity\n  reproduces d_cover up to the "
-          "curve's own binning residual, which is the\n  gap between the two "
-          "columns and their sum.")
+          "observed one.  The two must SUM to\n  d_cover; where they do not, "
+          "the observed curve does not describe that region\n  and the split "
+          "is not available there.")
+    if n_broken:
+        raise SystemExit(
+            "FATAL: the cover-vs-humidity split does not close in "
+            f"{', '.join(n_broken)}.\n"
+            "A single global cover-versus-humidity curve cannot represent "
+            "these regions, and\nthe total-column cover this probe reads is "
+            "not the layer cover the humidity at\none level would govern. "
+            "The split needs the model's 3-D cloud fraction (`cl`)\n"
+            "published per layer; until then no number from this probe is "
+            "usable.")
 
 
 def main(argv=None):
