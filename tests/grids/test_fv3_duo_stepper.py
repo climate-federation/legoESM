@@ -1,0 +1,1412 @@
+"""Certification of the JAX km=1 duo STEPPER against the NumPy lane.
+
+Authority: ``legoesm.core.fv3_native_duo_stepper`` is the SPECIFICATION
+(hop B of ``docs/atmosphere/fv3_duo_jax_lane_strategy.md``).  The pinned
+Fortran is quoted only where a line number says WHY a step exists; it is
+never what a bound here is calibrated against.
+
+This module contributes ORDER, not arithmetic -- every operation inside
+it happens in a kernel gated by ``test_fv3_duo_sw_core.py``,
+``test_fv3_pgrad.py`` or ``test_fv3_duo_halos.py``.  So the gates below
+are chosen to interrogate the JOINS, which is precisely what per-kernel
+gates cannot see (FESOM2-JAX §2.4's localization argument, strategy §2):
+
+1. **parity** -- JAX vs the NumPy twin from a byte-identical initial
+   state, per field, per stage, with a measured bound carrying a
+   ``TOL-PENDING`` marker;
+2. **tier 3, the multi-step replay** -- N steps on both lanes from one
+   IC, per-field growth judged against the 1-step value.  This is the
+   gate single-step tests cannot provide and the one that catches a
+   defect at a join between kernels rather than inside one;
+3. **jit vs eager** -- an ASSERTION, plus a trace counter proving no
+   retrace on a new ``dt`` AND (non-vacuity) that the counter DOES move
+   on a new ``d_ext``.  Bitwise is asserted ONLY where there is no
+   floating-point sum for XLA to contract into an FMA -- here that is
+   exactly the stale-halo carry-forward, which is a pure index copy;
+4. **gradients** -- the PRIMARY gate is the tolerance-free adjoint
+   identity ``<J v, w> == <v, J^T w>`` (``J v`` from ``jax.jvp``,
+   ``J^T w`` from ``jax.vjp``), per operand group, with an explicit
+   non-vacuity assert that ``<J v, w> != 0``.  ``check_grads`` is a
+   SCOPED supplement on the module's own new leaves (the ``*_1lev``
+   pressure adapters), with ``order=1`` and ``order=2`` as separate
+   parametrised IDs so an FD-resolution failure can never be confused
+   with a wrong Jacobian (STATE lesson 12);
+5. **the two behavioural pins** -- the deliberately STALE-BY-ONE D-wind
+   halo (``dyn_core.F90:1332-1338``) and the ``entry_ascalar`` ``it==1``
+   gate (``:432``).  Each is asserted BOTH ways: the faithful behaviour,
+   and a non-vacuity check that the alternative would have produced a
+   different array.
+
+TOLERANCE POLICY.  A full acoustic step is not a neighbour-reading
+kernel: it runs the PPM limiters inside every transport call, and a
+limiter flag ADDS or DROPS a whole flux term, so the result is
+DISCONTINUOUS across a switching surface and a rounding-level lane
+difference near one can produce a discrepancy far above 1e-15.  Every
+numeric bound below therefore carries a ``TOL-PENDING`` marker for the
+orchestrator's measurement job plus a one-word class label.
+
+COST.  These gates run a whole six-face acoustic step, so they are
+minutes, not seconds: at C12 the module compiles the step for four
+distinct static configurations plus the jvp and vjp programs.  That is
+inherent to gating a composition and is stated here so the measurement
+job's wall clock is not read as a hang.
+"""
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+import jax  # noqa: E402
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
+from legoesm.core import fv3_duo_stepper as jstep_mod  # noqa: E402
+from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
+from legoesm.grids import fv3_duo_halos as jhalo  # noqa: E402
+
+# C12 is the smallest resolution the duo corner-region Lagrange fill
+# admits (`build_jax_duo_halo_tables` refuses n < 4 because the X- and
+# X+ abscissa windows would overlap the opposite wedge) and is the
+# resolution every other JAX-lane test module uses, so the fixtures are
+# comparable across the port.
+N, NG = 12, 3
+MA = N + 2 * NG
+MB = N + 2 * NG + 1
+NPX = N + 1
+
+# A time step comfortably inside the C12 acoustic CFL.  Its magnitude is
+# irrelevant to a one-step parity gate and load-bearing for the 4-step
+# replay, which must not be measuring a blow-up.
+DT = 450.0
+
+# Every duo deck RESOLVES D_EXT = 0.0 (logfile.000000.out:406), so that
+# is the value the parity gates run at.  D_EXT_ON exercises the
+# external-mode filter branch, which is otherwise DEAD CODE in this
+# module (`one_grad_p` has `if d_ext > 0.0`) -- a gate suite that never
+# takes it would certify nothing about `divg2`.
+D_EXT_OFF = 0.0
+D_EXT_ON = 0.02
+
+_STATE_KEYS = ("delp", "pt", "u", "v")
+
+
+# =====================================================================
+# fixtures
+# =====================================================================
+
+@pytest.fixture(scope="module")
+def ctx():
+    """The NumPy context, EXT-BUNDLE lane (the faithful one).
+
+    ``oracle_conventions=True`` is the BOUNDED-conventions gridstruct
+    the Zenodo duo runs execute; ``duogrid`` forces it
+    (fv_arrays.F90:1512) and ``c_sw`` refuses the combination without
+    it.
+    """
+    return npstep.build_six_face_duo_context(
+        N, NG, use_ext_bundle=True, oracle_conventions=True)
+
+
+@pytest.fixture(scope="module")
+def jctx(ctx):
+    return jstep_mod.build_jax_duo_stepper_context(ctx)
+
+
+@pytest.fixture(scope="module")
+def states0(ctx):
+    """The balanced Williamson-2 six-face IC -- a PHYSICAL state.
+
+    Not random noise: the limiters, the divergence damping and the
+    pressure gradient all behave differently on a balanced field, and a
+    gate run on noise would be certifying a regime the model never
+    visits.
+    """
+    return npstep.w2_six_face_state(ctx)
+
+
+@pytest.fixture(scope="module")
+def jstates0(states0):
+    return jstep_mod.states_to_jax(states0)
+
+
+@pytest.fixture(scope="module")
+def jstep(jctx):
+    """The production jitted step, compiled ONCE for the whole module."""
+    return jstep_mod.make_full_acoustic_step_sixface_jit()
+
+
+# =====================================================================
+# helpers
+# =====================================================================
+
+_SENTINEL_FLOOR = 1.0e20
+
+
+def _cmp(got, ref, name, tol):
+    """Mask-aware relative comparison -- and it MUST be able to fail.
+
+    Restates the contract of ``test_fv3_duo_sw_core._cmp`` (pytest
+    modules are not an import surface, and importing one test module
+    from another would execute its fixtures' module-level jax config).
+    FOLLOW-UP: a shared ``tests/grids/conftest.py`` helper is the right
+    home for the three copies.
+
+    Three defects it guards against, each earned in this campaign:
+
+    * a mismatch in the NON-FINITE mask is a port bug on its own (a cell
+      the oracle never writes must stay a tripwire in BOTH lanes), so it
+      is checked before any value;
+    * a mismatch in the SENTINEL mask is the same defect wearing a
+      finite disguise -- ``1e30`` passes every ``isfinite`` guard;
+    * a sentinel left in the comparison SET makes the relative bound
+      VACUOUS, because ``max|ref|`` becomes ``1e30`` and every physical
+      discrepancy divides to nothing.
+    """
+    a = np.asarray(got, dtype=np.float64)
+    b = np.asarray(ref, dtype=np.float64)
+    assert a.shape == b.shape, (name, a.shape, b.shape)
+
+    na, nb = ~np.isfinite(a), ~np.isfinite(b)
+    assert np.array_equal(na, nb), (
+        f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
+        f"{int(nb.sum())} cells of {a.size})")
+
+    sa = np.isfinite(a) & (np.abs(a) >= _SENTINEL_FLOOR)
+    sb = np.isfinite(b) & (np.abs(b) >= _SENTINEL_FLOOR)
+    assert np.array_equal(sa, sb), (
+        f"{name}: sentinel masks differ (jax {int(sa.sum())} vs numpy "
+        f"{int(sb.sum())} cells of {a.size})")
+    if sa.any():
+        assert np.array_equal(a[sa], b[sa]), (
+            f"{name}: the sentinel VALUES differ -- both lanes must "
+            f"round-trip the identical workspace fill")
+
+    ok = np.isfinite(a) & ~sa
+    if not ok.any():
+        # every cell is a sentinel or a tripwire: the two mask checks
+        # above ARE the whole gate, and they were exact.
+        return 0.0
+    scale = max(float(np.abs(b[ok]).max()), 1e-30)
+    rel = float(np.abs(a[ok] - b[ok]).max()) / scale
+    assert rel <= tol, (
+        f"{name}: rel {rel:.3e} > {tol:.3e} MEASURED={rel:.3e} "
+        f"over {int(ok.sum())} of {a.size} cells "
+        f"(bitwise={np.array_equal(a[ok], b[ok])})")
+    return rel
+
+
+def _rel(got, ref) -> float:
+    """Max relative difference over the finite, non-sentinel cells.
+
+    The measurement half of :func:`_cmp` with no assertion, used by the
+    tier-3 replay, which compares GROWTH rather than a fixed bound.
+    """
+    a = np.asarray(got, dtype=np.float64)
+    b = np.asarray(ref, dtype=np.float64)
+    ok = (np.isfinite(a) & np.isfinite(b)
+          & (np.abs(b) < _SENTINEL_FLOOR))
+    assert ok.any(), "no comparable cells -- the replay metric is vacuous"
+    scale = max(float(np.abs(b[ok]).max()), 1e-30)
+    return float(np.abs(a[ok] - b[ok]).max()) / scale
+
+
+def _stack_np(per_face: list) -> dict:
+    """Six NumPy per-face dicts -> the JAX lane's face-stacked container."""
+    keys = tuple(per_face[0])
+    return {k: jnp.asarray(np.stack([np.asarray(d[k], dtype=np.float64)
+                                     for d in per_face]))
+            for k in keys}
+
+
+def _deepcopy_faces(per_face: list) -> list:
+    """Six per-face dicts with every array COPIED.
+
+    Required, not tidiness: the NumPy ``dsw12_step_sixface`` passes its
+    ``csw_outs[t]["divg_d"]`` straight into ``exchange_post_pgrad_sixface``,
+    which mutates IN PLACE -- so calling it on a module-scoped fixture
+    would silently corrupt every later test that reads the same fixture.
+    """
+    return [{k: np.array(v, copy=True) for k, v in d.items()}
+            for d in per_face]
+
+
+# Per-field COMPUTE windows: what the step actually writes.  Used
+# wherever a difference has to be reduced -- the halo carries cells the
+# lane deliberately leaves as NaN/sentinel tripwires, and reducing over
+# them with `nanmax` would HIDE a real NaN instead of excluding a known
+# one.  Exclude by WINDOW, never by a nan-aware reduction.
+_WINDOWS = {
+    "delp": (slice(NG, NG + N), slice(NG, NG + N)),
+    "pt": (slice(NG, NG + N), slice(NG, NG + N)),
+    "u": (slice(NG, NG + N), slice(NG, NG + N + 1)),
+    "v": (slice(NG, NG + N + 1), slice(NG, NG + N)),
+}
+
+
+def _window(a, field):
+    i, j = _WINDOWS[field]
+    return np.asarray(a)[:, i, j]
+
+
+def _max_window_diff(a, b) -> float:
+    """max |a - b| over the four prognostics' compute windows."""
+    return max(float(np.max(np.abs(_window(a[k], k) - _window(b[k], k))))
+               for k in _STATE_KEYS)
+
+
+def _tree_dot(a, b) -> float:
+    """Plain inner product -- NO ``nan_to_num``.
+
+    Sanitising here would silently repair a NaN the adjoint identity is
+    supposed to EXPOSE (an R1b dead-branch leak shows up as exactly
+    that), so a non-finite leaf must propagate to the assertion in
+    :func:`_check_adjoint` and name itself there.
+    """
+    la = jax.tree_util.tree_leaves(a)
+    lb = jax.tree_util.tree_leaves(b)
+    assert len(la) == len(lb), (len(la), len(lb))
+    return float(sum(
+        np.dot(np.asarray(x, dtype=np.float64).ravel(),
+               np.asarray(y, dtype=np.float64).ravel())
+        for x, y in zip(la, lb)))
+
+
+def _adjoint_residual(f, primals, seed=0):
+    """Relative residual of ``<J v, w> == <v, J^T w>``.
+
+    NO finite differences: ``J v`` comes from ``jax.jvp`` and
+    ``J^T w`` from ``jax.vjp``, so the identity is exact in exact
+    arithmetic and the residual is pure floating-point roundoff.  Its
+    power does not depend on an FD step, on operand scaling, or on the
+    output's dynamic range -- which is why it, and not
+    ``check_grads``, is the primary gradient gate for this port.
+    """
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
+    _, jv = jax.jvp(f, primals, v)
+    for i, leaf in enumerate(jax.tree_util.tree_leaves(jv)):
+        assert np.isfinite(np.asarray(leaf)).all(), (
+            f"J v leaf {i} is not finite -- the objective window "
+            f"includes cells the step never writes, or a dead branch is "
+            f"leaking a NaN into the gradient (R1b)")
+    _, vjp_fn = jax.vjp(f, *primals)
+    w = jax.tree_util.tree_map(
+        lambda x: jnp.asarray(rng.standard_normal(x.shape)), jv)
+    jtw = vjp_fn(w)
+    lhs = _tree_dot(jv, w)
+    rhs = _tree_dot(v, jtw)
+    return abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-300), lhs, rhs
+
+
+def _check_adjoint(name, f, primals, tol, seed=0):
+    r, lhs, rhs = _adjoint_residual(f, primals, seed=seed)
+    assert abs(lhs) > 0.0, (
+        f"{name}: <J v, w> == 0 -- the identity is satisfied trivially, "
+        f"so this gate proves nothing (check the window/scale)")
+    assert np.isfinite(lhs) and np.isfinite(rhs), (
+        f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    assert r <= tol, (
+        f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
+        f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
+        f"value is {r:.3e}")
+    return r
+
+
+def _counted(fn):
+    """(traced-call counter, wrapper) for the retrace assertions."""
+    box = {"n": 0}
+
+    def wrapper(*a, **k):
+        box["n"] += 1
+        return fn(*a, **k)
+
+    return box, wrapper
+
+
+def _perturb_halo(states, key="delp", amount=1.0):
+    """Perturb ONE halo side-strip, leaving every compute cell alone.
+
+    Fortran ``i = 0`` (numpy row ``ng-1``, the first halo ring), ``j``
+    over the compute span: a cell the A-scalar strip exchange
+    unconditionally rewrites from the neighbour face, and one every
+    upwind stencil in ``c_sw``/``d_sw1`` reads.  That is what makes the
+    ``entry_ascalar`` gate OBSERVABLE -- on an already-consistent state
+    the exchange is a no-op and the gate would be untestable.
+    """
+    f = states[key]
+    return {**states,
+            key: f.at[:, NG - 1, NG:NG + N].add(amount)}
+
+
+# =====================================================================
+# bookkeeping -- the module's own claims about its restated constants
+# =====================================================================
+
+def test_sw_config_defaults_match_the_numpy_lane():
+    """The restated stage defaults must equal the NumPy lane's.
+
+    They are restated rather than imported because ``_SW_CFG_DEFAULT``
+    is PRIVATE and a cross-module private import is banned by
+    ``tests/test_no_private_cross_imports.py``; this test is what makes
+    the duplication safe.  Attribute access on a private symbol from a
+    TEST is not an import and is the established pattern in
+    ``test_fv3_duo_sw_core.py``.
+    """
+    assert jstep_mod.SW_CFG_DEFAULT._asdict() == dict(
+        npstep._SW_CFG_DEFAULT)
+    # SW_CFG_CASE8 is PUBLIC on the NumPy side, so this one is a
+    # cross-check against the real symbol, not a restatement
+    assert jstep_mod.SW_CFG_CASE8._asdict() == dict(npstep.SW_CFG_CASE8)
+
+
+def test_stepper_nq_matches_the_allflux_slot_count():
+    """Barrier 1's ``do iq=1,4+nq`` and ``d_sw1``'s allocation must agree.
+
+    The NumPy stepper passes ``nq = 1`` positionally
+    (``average_allflux_shared_edges(afx6, afy6, 1, n, ng)``); the JAX
+    barrier reads it off the halo table and REFUSES a mismatched slot
+    axis, so a silent disagreement is impossible -- but a silent CHANGE
+    on either side would break every stepper build, which is what this
+    pins.
+    """
+    assert jstep_mod._STEPPER_NQ == 1
+
+
+def test_no_donate_argnums_in_this_lane():
+    """Strategy R4: buffer donation conflicts with reverse-mode AD, and
+    this lane exists to be differentiated.
+
+    The discriminator is the USE (``donate_argnums=``), not the word --
+    the jit-policy comment names the ban in prose, so a bare substring
+    test would be vacuous.
+    """
+    import inspect
+    src = inspect.getsource(jstep_mod)
+    assert "donate_argnums=" not in src
+    assert "donate_argnums" in src, (
+        "the doctrine comment naming the ban has gone missing")
+
+
+# =====================================================================
+# tier 0 -- the state layout contract
+# =====================================================================
+
+def test_state_layout_is_face_stacked(jstates0):
+    """Contract §1/§2: a LEADING face axis of 6, per stagger.
+
+    A ``(6, …)`` stack exists within one stagger because all six faces
+    share a shape; ACROSS staggers it does not, which is why ``u`` and
+    ``v`` are two arrays and never one.
+    """
+    # ``w`` is optional on INPUT (case-6 ICs carry it, W2 does not) and
+    # never on output, so the admitted key set is stated as a range
+    assert set(_STATE_KEYS) <= set(jstates0)
+    assert set(jstates0) <= set(_STATE_KEYS) | {"w"}
+    assert jstates0["delp"].shape == (6, MA, MA)
+    assert jstates0["pt"].shape == (6, MA, MA)
+    assert jstates0["u"].shape == (6, MA, MB)
+    assert jstates0["v"].shape == (6, MB, MA)
+    for k, a in jstates0.items():
+        assert a.dtype == jnp.float64, (k, a.dtype)
+
+
+def test_state_boundary_adapters_round_trip(states0, jstates0):
+    """BITWISE -- the adapters are pure reshapes/copies with no
+    floating-point sum for XLA to contract, so bitwise is the right
+    assertion here (and would be wrong on any summing path)."""
+    back = jstep_mod.states_to_numpy(jstates0)
+    assert len(back) == 6
+    for t in range(6):
+        for k in _STATE_KEYS:
+            assert np.array_equal(back[t][k],
+                                  np.asarray(states0[t][k]))
+
+
+def test_context_is_identity_hashable(ctx, jctx):
+    """The context is a STATIC jit argument, hashed by identity.
+
+    Consequence stated in its docstring and pinned here: two
+    structurally identical bundles are two cache keys, so a caller that
+    rebuilds it per step would recompile per step.
+    """
+    assert hash(jctx) == id(jctx)
+    other = jstep_mod.build_jax_duo_stepper_context(ctx)
+    assert other != jctx and hash(other) != hash(jctx)
+    assert jctx == jctx
+
+
+def test_context_carries_the_static_halves(ctx, jctx):
+    assert (jctx.n, jctx.ng, jctx.npx, jctx.m_a) == (N, NG, NPX, MA)
+    assert jctx.bd is ctx["bd"]
+    assert len(jctx.gs6) == 6 and len(jctx.flags6) == 6
+    for t in range(6):
+        assert jctx.flags6[t].bounded_domain is True
+        assert jctx.flags6[t].da_min_c == ctx["gs6"][t]["da_min_c"]
+    assert jctx.hs6.shape == (6, MA, MA)
+    assert jctx.tab.nq == jstep_mod._STEPPER_NQ
+
+
+# =====================================================================
+# tier 0 -- guards (dispatch hardening); each shown NON-VACUOUS by the
+# faithful context building successfully in the same test
+# =====================================================================
+
+def test_context_refuses_the_non_ext_bundle_lane(ctx):
+    bad = {**ctx, "use_ext_bundle": False}
+    with pytest.raises(ValueError, match="EXT-BUNDLE lane only"):
+        jstep_mod.build_jax_duo_stepper_context(bad)
+    # non-vacuous: the same ctx WITH the bundle builds
+    assert jstep_mod.build_jax_duo_stepper_context(ctx) is not None
+
+
+def test_context_refuses_the_legacy_and_unported_options(ctx):
+    with pytest.raises(ValueError, match="use_k2e_scalars"):
+        jstep_mod.build_jax_duo_stepper_context(
+            {**ctx, "use_k2e_scalars": True})
+    with pytest.raises(ValueError, match="step_dump"):
+        jstep_mod.build_jax_duo_stepper_context(
+            {**ctx, "step_dump": lambda *a: None})
+
+
+@pytest.mark.parametrize("fam", ["ascalar", "dvec", "divgd", "cvec"])
+def test_context_refuses_a_step_time_ext_exclusion(ctx, fam):
+    """The four STEP-TIME families each substitute a different exchange
+    inside the step; the JAX lane implements the faithful path only."""
+    with pytest.raises(ValueError, match="ext_exclude"):
+        jstep_mod.build_jax_duo_stepper_context(
+            {**ctx, "ext_exclude": (fam,)})
+
+
+@pytest.mark.parametrize("fam", ["metrics", "f0"])
+def test_context_accepts_a_build_time_ext_exclusion(ctx, fam):
+    """``metrics``/``f0`` are consumed by ``build_six_face_duo_context``
+    BEFORE the step, so excluding them changes the context, not the
+    cadence -- and must not be refused (that would be a guard firing on
+    the wrong set)."""
+    assert jstep_mod.build_jax_duo_stepper_context(
+        {**ctx, "ext_exclude": (fam,)}) is not None
+
+
+@pytest.mark.parametrize(
+    "var,val,match",
+    [("LEGOESM_DUO_ENTRY_ASCALAR", "off", "entry_ascalar=False"),
+     ("LEGOESM_DUO_PG_BVERTEX", "mean2", "bvertex"),
+     ("LEGOESM_DUO_AVG_B_ENDPOINTS", "local", "skip_b_endpoints")])
+def test_env_diagnostic_modes_are_refused(ctx, monkeypatch, var, val,
+                                          match):
+    """D2 -- a production lane whose numerics depend on the environment
+    is a silent-divergence trap.  Each variable CHANGES what the NumPy
+    stepper computes, so a JAX run made with one exported would
+    disagree with the NumPy run it is compared against."""
+    monkeypatch.setenv(var, val)
+    with pytest.raises(ValueError, match=match):
+        jstep_mod.build_jax_duo_stepper_context(ctx)
+    monkeypatch.delenv(var)
+    # non-vacuous: unset, the same context builds
+    assert jstep_mod.build_jax_duo_stepper_context(ctx) is not None
+
+
+def test_f64_gate_on_the_step(jctx, jstates0):
+    """Tier 0 -- an f32 operand raises at ENTRY.
+
+    With ``jax_enable_x64`` off, ``jnp.asarray(x, float64)`` truncates at
+    ARRAY CREATION and no downstream check recovers the bits, so the
+    gate has to be a hard entry raise, not a warning.
+    """
+    f32 = {**jstates0, "delp": jstates0["delp"].astype(jnp.float32)}
+    with pytest.raises(TypeError, match="float64"):
+        jstep_mod.full_acoustic_step_sixface(jctx, f32, DT,
+                                             d_ext=D_EXT_OFF)
+    with pytest.raises(TypeError, match="float64"):
+        jstep_mod.states_to_jax(
+            [{k: np.zeros((MA, MA), np.float32) for k in _STATE_KEYS}] * 6)
+
+
+def test_sw_cfg_must_be_hashable(jctx, jstates0):
+    """A plain dict cannot be a jit-static argument; refuse it at the
+    door instead of failing inside ``jax.jit`` with a hashability
+    error that names nothing."""
+    with pytest.raises(TypeError, match="SWConfig.from_mapping"):
+        jstep_mod.full_acoustic_step_sixface(
+            jctx, jstates0, DT, d_ext=D_EXT_OFF,
+            sw_cfg={"hord_tr": 8})
+    # non-vacuous: the converted form is accepted
+    cfg = jstep_mod.SWConfig.from_mapping({"hord_tr": 8})
+    assert isinstance(cfg, jstep_mod.SWConfig) and cfg.hord_tr == 8
+
+
+def test_sw_config_from_mapping_rejects_an_unknown_knob():
+    """A knob that is silently ignored is a different run wearing the
+    same name -- so an unknown key raises rather than being dropped."""
+    with pytest.raises(ValueError, match="unknown knobs"):
+        jstep_mod.SWConfig.from_mapping({"hord_zz": 8})
+
+
+def test_exchange_post_pgrad_rejects_a_fractional_nord(jctx, jstates0):
+    """``nord`` is a damping ORDER, integral by construction; the deck
+    dicts mix ints and floats, so ``int()`` would round 2.7 to 2 without
+    a word."""
+    z = jnp.zeros((6, MB, MB), dtype=jnp.float64)
+    uc = jnp.zeros((6, MB, MA), dtype=jnp.float64)
+    vc = jnp.zeros((6, MA, MB), dtype=jnp.float64)
+    with pytest.raises(ValueError, match="integral damping order"):
+        jstep_mod.exchange_post_pgrad_sixface(jctx, z, uc, vc, nord=2.7)
+    # non-vacuous: the integral value runs
+    out = jstep_mod.exchange_post_pgrad_sixface(jctx, z, uc, vc, nord=2)
+    assert len(out) == 3
+
+
+def test_advance_and_run_reject_nonsense_counts(jctx, jstates0):
+    with pytest.raises(ValueError, match="n_split must be >= 1"):
+        jstep_mod.advance_duo_outer_step(jctx, jstates0, 900.0, 0)
+    with pytest.raises(ValueError, match="nsteps must be >= 0"):
+        jstep_mod.run_duo_sw(jctx, jstates0, DT, -1)
+
+
+# =====================================================================
+# gate 1 -- parity, leaf by leaf (the *_1lev pressure adapters)
+# =====================================================================
+
+@pytest.fixture(scope="module")
+def csw_np(ctx, states0):
+    """The NumPy ``c_sw`` outputs on the raw IC -- the shared operand
+    for every leaf-level comparison below, so both lanes see BYTE-
+    IDENTICAL inputs (the controlled-comparison requirement)."""
+    return npstep.csw_step_sixface(ctx, states0, dt2=0.5 * DT)
+
+
+def test_geopk_sw_1lev_parity(ctx, jctx, csw_np):
+    """gate 1.  FIXTURE CLASS: accumulating (a k recurrence and a
+    log/exp pair), no data branch."""
+    bd = ctx["bd"]
+    for t in range(6):
+        hs = np.zeros_like(csw_np[t]["delpc"])
+        pk_n, gz_n = npstep.geopk_sw_1lev(csw_np[t]["delpc"], hs, bd,
+                                          pt=csw_np[t]["ptc"])
+        pk_j, gz_j = jstep_mod.geopk_sw_1lev(
+            jnp.asarray(csw_np[t]["delpc"]), jnp.asarray(hs), bd,
+            pt=jnp.asarray(csw_np[t]["ptc"]))
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: accumulating]
+        _cmp(pk_j, pk_n, f"geopk_sw_1lev.pk[face {t}]", 1e-12)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: accumulating]
+        _cmp(gz_j, gz_n, f"geopk_sw_1lev.gz[face {t}]", 1e-12)
+
+
+def test_geopk_sw_1lev_d_widens_the_box(ctx, jctx, csw_np, states0):
+    """gate 1 + a CONTROL: the D-grid call (``cg=.false.``) must write a
+    WIDER box than the C-grid one (``is-2..ie+2`` vs ``is-1..ie+1``,
+    dyn_core's geopk range predicate).  Without this the two adapters
+    could be the same function under two names and the parity gate
+    above would not notice."""
+    bd = ctx["bd"]
+    delp = np.asarray(states0[0]["delp"])
+    pt = np.asarray(states0[0]["pt"])
+    hs = np.zeros_like(delp)
+    pk_n, gz_n = npstep.geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+    pk_j, gz_j = jstep_mod.geopk_sw_1lev_d(
+        jnp.asarray(delp), jnp.asarray(hs), bd, pt=jnp.asarray(pt))
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: accumulating]
+    _cmp(pk_j, pk_n, "geopk_sw_1lev_d.pk", 1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: accumulating]
+    _cmp(gz_j, gz_n, "geopk_sw_1lev_d.gz", 1e-12)
+    pk_c, _ = jstep_mod.geopk_sw_1lev(jnp.asarray(delp), jnp.asarray(hs),
+                                      bd, pt=jnp.asarray(pt))
+    wide = np.asarray(pk_j)[:, :, 1] != 0.0      # unwritten_fill = 0.0
+    narrow = np.asarray(pk_c)[:, :, 1] != 0.0
+    assert wide.sum() > narrow.sum(), (
+        "the D-grid geopk did not write a wider box than the C-grid one "
+        f"({int(wide.sum())} vs {int(narrow.sum())} cells) -- the two "
+        f"adapters are not selecting different cg branches")
+
+
+def test_p_grad_c_1lev_parity(ctx, jctx, csw_np):
+    """gate 1.  FIXTURE CLASS: pointwise/neighbour-reading, no branch."""
+    bd = ctx["bd"]
+    for t in range(6):
+        hs = np.zeros_like(csw_np[t]["delpc"])
+        pk_n, gz_n = npstep.geopk_sw_1lev(csw_np[t]["delpc"], hs, bd,
+                                          pt=csw_np[t]["ptc"])
+        uc_n = np.array(csw_np[t]["uc"], copy=True)
+        vc_n = np.array(csw_np[t]["vc"], copy=True)
+        npstep.p_grad_c_1lev(0.5 * DT, csw_np[t]["delpc"], pk_n, gz_n,
+                             uc_n, vc_n, ctx["gs6"][t], bd)
+        uc_j, vc_j = jstep_mod.p_grad_c_1lev(
+            0.5 * DT, jnp.asarray(csw_np[t]["delpc"]), jnp.asarray(pk_n),
+            jnp.asarray(gz_n), jnp.asarray(csw_np[t]["uc"]),
+            jnp.asarray(csw_np[t]["vc"]), jctx.gs6[t], bd)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: pointwise]
+        _cmp(uc_j, uc_n, f"p_grad_c_1lev.uc[face {t}]", 1e-13)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: pointwise]
+        _cmp(vc_j, vc_n, f"p_grad_c_1lev.vc[face {t}]", 1e-13)
+
+
+@pytest.mark.parametrize("d_ext", [D_EXT_OFF, D_EXT_ON])
+def test_one_grad_p_1lev_parity(ctx, jctx, states0, d_ext):
+    """gate 1, BOTH sides of the ``d_ext > 0`` branch.
+
+    At ``d_ext = 0`` the external-mode filter increments are structurally
+    zero; at 0.02 they are live.  A suite that ran only the deck value
+    would leave ``wk1``/``wk2`` uncertified.
+    """
+    bd = ctx["bd"]
+    for t in range(6):
+        delp = np.asarray(states0[t]["delp"])
+        pt = np.asarray(states0[t]["pt"])
+        hs = np.zeros_like(delp)
+        pk_n, gz_n = npstep.geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+        divg2 = np.full((NPX, NPX), 3.0e-4)
+        u_n = np.array(states0[t]["u"], copy=True)
+        v_n = np.array(states0[t]["v"], copy=True)
+        npstep.one_grad_p_1lev(u_n, v_n, pk_n, gz_n, divg2,
+                               ctx["gs6"][t], bd, NPX, NPX, dt=DT,
+                               d_ext=d_ext)
+        u_j, v_j = jstep_mod.one_grad_p_1lev(
+            jnp.asarray(states0[t]["u"]), jnp.asarray(states0[t]["v"]),
+            jnp.asarray(pk_n), jnp.asarray(gz_n), jnp.asarray(divg2),
+            jctx.gs6[t], bd, NPX, NPX, dt=DT, d_ext=d_ext)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: pointwise + a2b interior stencil]
+        _cmp(u_j, u_n, f"one_grad_p_1lev.u[face {t}, d_ext={d_ext}]",
+             1e-12)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: pointwise + a2b interior stencil]
+        _cmp(v_j, v_n, f"one_grad_p_1lev.v[face {t}, d_ext={d_ext}]",
+             1e-12)
+
+
+def test_one_grad_p_1lev_does_not_mutate_its_pressure_operands(ctx, jctx,
+                                                               states0):
+    """ALIASING CONTRACT.  The NumPy adapter has to COPY ``pkc``/``gz``
+    on entry because the shared kernel is faithful to dyn_core and
+    mutates them through ``a2b_ord4(replace=.true.)``; the JAX kernel
+    returns new arrays instead, so the caller's operands must be
+    untouched BY CONSTRUCTION.  Asserted, not argued -- the NumPy lane
+    shipped a regression here once."""
+    bd = ctx["bd"]
+    delp = np.asarray(states0[0]["delp"])
+    pt = np.asarray(states0[0]["pt"])
+    pk, gz = jstep_mod.geopk_sw_1lev_d(jnp.asarray(delp),
+                                       jnp.zeros_like(jnp.asarray(delp)),
+                                       bd, pt=jnp.asarray(pt))
+    pk_before = np.array(pk, copy=True)
+    gz_before = np.array(gz, copy=True)
+    jstep_mod.one_grad_p_1lev(
+        jnp.asarray(states0[0]["u"]), jnp.asarray(states0[0]["v"]),
+        pk, gz, jnp.zeros((NPX, NPX), dtype=jnp.float64), jctx.gs6[0],
+        bd, NPX, NPX, dt=DT, d_ext=D_EXT_OFF)
+    assert np.array_equal(np.asarray(pk), pk_before)
+    assert np.array_equal(np.asarray(gz), gz_before)
+
+
+def test_exchange_post_pgrad_parity(ctx, jctx, csw_np):
+    """gate 1 -- the ``:652``/``:655`` pair, both faces of the ``nord``
+    gate.  At ``nord = 0`` the divgd exchange must NOT fire (it is gated
+    on the DIVERGENCE-damping order) while the uc/vc one still must."""
+    for nord in (0, 1, 2):
+        divgd_n = [np.array(o["divg_d"], copy=True) for o in csw_np]
+        uc_n = [np.array(o["uc"], copy=True) for o in csw_np]
+        vc_n = [np.array(o["vc"], copy=True) for o in csw_np]
+        npstep.exchange_post_pgrad_sixface(ctx, divgd_n, uc_n, vc_n,
+                                           nord=nord)
+        d_j, u_j, v_j = jstep_mod.exchange_post_pgrad_sixface(
+            jctx, _stack_np(csw_np)["divg_d"], _stack_np(csw_np)["uc"],
+            _stack_np(csw_np)["vc"], nord=nord)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: accumulating (k2e/Lagrange weight sums)]
+        _cmp(d_j, np.stack(divgd_n), f"post_pgrad.divgd[nord={nord}]",
+             1e-12)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: accumulating]
+        _cmp(u_j, np.stack(uc_n), f"post_pgrad.uc[nord={nord}]", 1e-12)
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: accumulating]
+        _cmp(v_j, np.stack(vc_n), f"post_pgrad.vc[nord={nord}]", 1e-12)
+
+
+def test_exchange_post_pgrad_nord_gate_is_live(jctx, csw_np):
+    """CONTROL for the test above: at ``nord = 0`` the divgd array must
+    come back UNCHANGED, at ``nord > 0`` it must not.  Without this the
+    parity gate would pass even if the exchange never ran."""
+    d0 = _stack_np(csw_np)["divg_d"]
+    uc = _stack_np(csw_np)["uc"]
+    vc = _stack_np(csw_np)["vc"]
+    off, _, _ = jstep_mod.exchange_post_pgrad_sixface(jctx, d0, uc, vc,
+                                                      nord=0)
+    on, _, _ = jstep_mod.exchange_post_pgrad_sixface(jctx, d0, uc, vc,
+                                                     nord=1)
+    assert np.array_equal(np.asarray(off), np.asarray(d0)), (
+        "nord=0 changed divgd -- the :652 gate is not being applied")
+    assert not np.array_equal(np.asarray(on), np.asarray(d0)), (
+        "nord=1 left divgd unchanged -- the exchange did not run, so "
+        "the parity gate above proves nothing")
+
+
+# =====================================================================
+# gate 1 -- parity, stage by stage
+# =====================================================================
+
+def test_csw_step_sixface_parity(ctx, jctx, states0, jstates0, csw_np):
+    """gate 1.  FIXTURE CLASS: LIMITER-CROSSING (``c_sw`` runs the
+    transport upwind selects), so this bound must not be shared with the
+    pointwise gates."""
+    got = jstep_mod.csw_step_sixface(jctx, jstates0, 0.5 * DT)
+    ref = _stack_np(csw_np)
+    assert set(got) == set(ref), (sorted(got), sorted(ref))
+    for k in sorted(ref):
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING]
+        _cmp(got[k], ref[k], f"csw_step_sixface.{k}", 1e-12)
+
+
+def test_dsw12_step_sixface_parity(ctx, jctx, states0, jstates0, csw_np):
+    """gate 1, ISOLATED: both lanes are fed the SAME (NumPy) ``c_sw``
+    output, so this measures ``dsw12``'s own residual rather than one
+    accumulated through ``c_sw``.  The whole-step gates below measure
+    the accumulation."""
+    ref = npstep.dsw12_step_sixface(ctx, states0,
+                                    _deepcopy_faces(csw_np), dt=DT)
+    got = jstep_mod.dsw12_step_sixface(jctx, jstates0, _stack_np(csw_np),
+                                       DT)
+    ref_s = _stack_np(ref)
+    assert set(got) == set(ref_s), (sorted(got), sorted(ref_s))
+    for k in sorted(ref_s):
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING + barrier 1]
+        _cmp(got[k], ref_s[k], f"dsw12_step_sixface.{k}", 1e-11)
+
+
+def test_acoustic_step_sixface_parity(ctx, jctx, states0, jstates0):
+    """gate 1 -- the whole stage chain including BOTH barriers, from a
+    byte-identical IC.  Scores every carried field, not two headline
+    numbers: a defect confined to (say) ``divg_d`` would leave
+    ``delp``/``pt`` looking fine."""
+    ref = _stack_np(npstep.acoustic_step_sixface(ctx, states0, DT))
+    got = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
+    assert set(got) == set(ref), (sorted(got), sorted(ref))
+    for k in sorted(ref):
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING + both barriers]
+        _cmp(got[k], ref[k], f"acoustic_step_sixface.{k}", 1e-11)
+
+
+@pytest.mark.parametrize("d_ext", [D_EXT_OFF, D_EXT_ON])
+def test_full_acoustic_step_parity(ctx, jctx, states0, jstates0, d_ext):
+    """gate 1 -- THE gate this campaign converges on, at both settings
+    of the external-mode filter.
+
+    ``d_ext = 0`` is the value every duo deck resolves and is what any
+    oracle comparison must use; ``d_ext = 0.02`` is here only to keep
+    the ``divg2``/``wk1``/``wk2`` branch from being dead code in the
+    suite.
+    """
+    ref = npstep.full_acoustic_step_sixface(ctx, states0, DT,
+                                            d_ext=d_ext)
+    got = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+                                               d_ext=d_ext)
+    ref_s = _stack_np(ref)
+    assert set(got) == set(_STATE_KEYS), sorted(got)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING, whole step]
+        _cmp(got[k], ref_s[k],
+             f"full_acoustic_step.{k}[d_ext={d_ext}]", 1e-11)
+
+
+def test_full_acoustic_step_parity_case8_config(ctx, jctx, states0,
+                                                jstates0):
+    """gate 1 on the OTHER shipped configuration.
+
+    ``SW_CFG_CASE8`` is what ``run_duo_stepper_case6.py`` runs and what
+    the calibrated ``case6_duo_oracle_gate.py`` scores, so a lane
+    certified only at the W2 defaults would be certified on a
+    configuration the gate never uses: hords all 8, vorticity damping
+    OFF, ``dddmp = 0``, ``nord = 2`` (a LONGER divergence-damping
+    recurrence, i.e. a different unrolled program).
+    """
+    ref = npstep.full_acoustic_step_sixface(
+        ctx, states0, DT, d_ext=D_EXT_OFF, sw_cfg=npstep.SW_CFG_CASE8)
+    got = jstep_mod.full_acoustic_step_sixface(
+        jctx, jstates0, DT, d_ext=D_EXT_OFF,
+        sw_cfg=jstep_mod.SW_CFG_CASE8)
+    ref_s = _stack_np(ref)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING, nord=2 recurrence]
+        _cmp(got[k], ref_s[k], f"full_step_case8.{k}", 1e-11)
+
+
+def test_advance_duo_outer_step_parity(ctx, jctx, states0, jstates0):
+    """gate 1 on the OUTER step -- two inner substeps, i.e. the first
+    place the ``entry_ascalar`` cadence can differ between the lanes."""
+    ref = _stack_np(npstep.advance_duo_outer_step(
+        ctx, states0, 2.0 * DT, 2, d_ext=D_EXT_OFF))
+    got = jstep_mod.advance_duo_outer_step(jctx, jstates0, 2.0 * DT, 2,
+                                            d_ext=D_EXT_OFF)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING, 2 substeps]
+        _cmp(got[k], ref[k], f"advance_duo_outer_step.{k}", 1e-10)
+
+
+def test_run_duo_sw_parity(ctx, jctx, states0, jstates0):
+    """gate 1 on the flat time loop.
+
+    ``run_duo_sw`` and ``advance_duo_outer_step`` are DIFFERENT exchange
+    schedules (flat = entry exchange every step; outer = once per
+    block), so each needs its own gate -- one cannot stand in for the
+    other.
+    """
+    ref = _stack_np(npstep.run_duo_sw(ctx, states0, DT, 2,
+                                      d_ext=D_EXT_OFF))
+    got = jstep_mod.run_duo_sw(jctx, jstates0, DT, 2, d_ext=D_EXT_OFF)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: LIMITER-CROSSING, 2 steps]
+        _cmp(got[k], ref[k], f"run_duo_sw.{k}", 1e-10)
+
+
+# NOTE on the pair above: the flat and outer schedules are NOT asserted
+# to differ from each other.  They differ only in whether the SECOND
+# substep re-runs the entry A-scalar exchange, and after the first
+# step's tail refresh (dyn_core.F90:1336-1337) that exchange may be a
+# no-op -- whether it is depends on what the k2e ring stencil reads,
+# which has not been established here.  Asserting a difference would be
+# asserting an unverified claim.  The cadence itself is gated, twice and
+# decisively, by `test_entry_ascalar_gate_is_live` and
+# `test_advance_duo_outer_step_fires_entry_only_on_the_first_substep`.
+
+
+# =====================================================================
+# gate 2 (tier 3) -- the MULTI-STEP REPLAY
+# =====================================================================
+
+# Allowed amplification of the per-field lane difference at N steps,
+# relative to the measured 1-step difference.  This is the gate that
+# single-step tests cannot provide: a defect at a JOIN between kernels
+# (rather than inside one) shows up as growth, not as a large first
+# step.  A linear-in-N budget would be too tight for a chaotic-in-the-
+# limit flow and a free budget would be no gate at all, so the shape is
+# pinned here and the NUMBERS are measured.
+#
+# TOL-PENDING: provisional bounds; the orchestrator's measurement job
+# will replace these with `measured X, bound = measured x N`.
+# DO NOT SHIP.   [class: N-step growth vs the 1-step floor]
+_REPLAY_AMP = {2: 1.0e1, 4: 1.0e2}
+
+# TOL-PENDING: provisional bound; the orchestrator's measurement job
+# will replace this with `measured X, bound = measured x N`.
+# DO NOT SHIP.   [class: absolute floor, so a 1-step diff of exactly 0
+# cannot pin every later bound to 0]
+_REPLAY_FLOOR = 1.0e-13
+
+
+@pytest.fixture(scope="module")
+def replay(ctx, jctx, states0, jstates0, jstep):
+    """Both lanes, 1/2/4 steps from ONE initial state.
+
+    The JAX arm runs the JITTED step -- that is the lane the runners
+    execute, and jit-vs-eager is gated separately below.
+    """
+    out = {}
+    s_np = states0
+    s_jx = jstates0
+    for n in range(1, 5):
+        s_np = npstep.full_acoustic_step_sixface(ctx, s_np, DT,
+                                                 d_ext=D_EXT_OFF)
+        s_jx = jstep(jctx, s_jx, DT, d_ext=D_EXT_OFF)
+        if n in (1, 2, 4):
+            out[n] = (_stack_np(s_np), s_jx)
+    return out
+
+
+@pytest.mark.parametrize("field", _STATE_KEYS)
+def test_tier3_replay_stays_finite(replay, field):
+    """A replay whose state went non-finite would make every growth
+    ratio meaningless, so this runs before any ratio.
+
+    Finiteness is asserted on the COMPUTE WINDOW: the halo legitimately
+    carries the lane's NaN tripwires (cells the oracle never writes), so
+    demanding a finite full array would fail on correct code.  The halo
+    is not skipped, though -- the non-finite MASKS must match between
+    the lanes everywhere, which is the actual port check.
+    """
+    for n, (ref, got) in replay.items():
+        assert np.isfinite(_window(ref[field], field)).all(), (
+            field, n, "numpy compute window")
+        assert np.isfinite(_window(got[field], field)).all(), (
+            field, n, "jax compute window")
+        assert np.array_equal(~np.isfinite(np.asarray(ref[field])),
+                              ~np.isfinite(np.asarray(got[field]))), (
+            f"{field} at n={n}: the non-finite masks differ between the "
+            f"lanes -- a cell one lane leaves as a tripwire the other "
+            f"filled with a number")
+
+
+@pytest.mark.parametrize("field", _STATE_KEYS)
+@pytest.mark.parametrize("nsteps", [2, 4])
+def test_tier3_multistep_replay_growth(replay, field, nsteps):
+    """TIER 3 -- the join gate.
+
+    Because every kernel is verified on its own, a difference that
+    appears only after several steps cannot originate inside a kernel
+    and must arise where two kernels are joined (FESOM2-JAX §2.4).  The
+    criterion is therefore GROWTH relative to the 1-step value, not an
+    absolute bound: an absolute bound at N steps would be satisfied by a
+    lane whose first step was already wrong.
+    """
+    ref1, got1 = replay[1]
+    refn, gotn = replay[nsteps]
+    r1 = _rel(got1[field], ref1[field])
+    rn = _rel(gotn[field], refn[field])
+    bound = max(r1 * _REPLAY_AMP[nsteps], _REPLAY_FLOOR)
+    assert rn <= bound, (
+        f"{field}: {nsteps}-step lane difference {rn:.3e} > "
+        f"{bound:.3e} (1-step {r1:.3e}, allowed amplification "
+        f"{_REPLAY_AMP[nsteps]:g}) -- MEASURED 1-step {r1:.3e}, "
+        f"{nsteps}-step {rn:.3e}")
+
+
+# =====================================================================
+# gate 3 -- jit vs eager, and the retrace budget
+# =====================================================================
+
+def test_full_step_jit_equals_eager(jctx, jstates0, jstep):
+    """gate 2.  NOT bitwise: the step is one long chain of ``x*y + z``,
+    and XLA contracts those into FMAs in the jitted lowering and not in
+    the eager one, so a few-ULP gap is CORRECT behaviour (STATE lesson
+    2).  Bitwise here would be a test that fails for the wrong reason."""
+    eager = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+                                                 d_ext=D_EXT_OFF)
+    got = jstep(jctx, jstates0, DT, d_ext=D_EXT_OFF)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
+        _cmp(got[k], eager[k], f"full_step jit.{k}", 1e-12)
+
+
+def test_full_step_no_retrace_on_dt(jctx, jstates0):
+    """gate 2 mechanics -- ``dt`` is proved DYNAMIC.
+
+    ``fv3_pgrad``'s own jit factories pin the time step STATIC, which
+    would recompile the whole step on every new ``dt``; the stepper
+    calls the raw kernels for exactly this reason (module deviation D3),
+    and this is the assertion that says so.
+    """
+    box, wrapped = _counted(jstep_mod.full_acoustic_step_sixface)
+    fn = jstep_mod.make_full_acoustic_step_sixface_jit(wrapped)
+    fn(jctx, jstates0, DT, d_ext=D_EXT_OFF)
+    fn(jctx, jstates0, 2.0 * DT, d_ext=D_EXT_OFF)
+    fn(jctx, jstates0, 0.5 * DT, d_ext=D_EXT_OFF)
+    assert box["n"] == 1, f"retraced on a new dt: {box['n']} traces"
+
+
+def test_full_step_retraces_on_a_new_static_argument(jctx, jstates0):
+    """NON-VACUITY for the counter above.
+
+    A trace counter that can never move would make the no-retrace test
+    unfalsifiable.  ``d_ext`` and ``entry_ascalar`` are STATIC by
+    design -- ``one_grad_p`` branches on ``d_ext`` in Python and
+    ``entry_ascalar`` selects whether two exchanges exist at all -- so
+    each new value MUST produce a new trace.
+    """
+    box, wrapped = _counted(jstep_mod.full_acoustic_step_sixface)
+    fn = jstep_mod.make_full_acoustic_step_sixface_jit(wrapped)
+    fn(jctx, jstates0, DT, d_ext=D_EXT_OFF)
+    fn(jctx, jstates0, DT, d_ext=D_EXT_ON)
+    assert box["n"] == 2, (
+        f"d_ext did not retrace ({box['n']} traces) -- it is static by "
+        f"design; a shared trace would mean one of the two runs used "
+        f"the other's branch")
+    fn(jctx, jstates0, DT, d_ext=D_EXT_OFF, entry_ascalar=False)
+    assert box["n"] == 3, (
+        f"entry_ascalar did not retrace ({box['n']} traces)")
+
+
+def test_d_ext_is_static_when_passed_positionally(jctx, jstates0):
+    """``d_ext`` is listed in BOTH ``static_argnums`` and
+    ``static_argnames`` so it is static either way a caller passes it.
+    Without the argnums entry a positional call would hand
+    ``one_grad_p`` a TRACER and its ``if d_ext > 0.0`` would raise."""
+    fn = jstep_mod.make_full_acoustic_step_sixface_jit()
+    out = fn(jctx, jstates0, DT, D_EXT_ON)      # positional d_ext
+    assert np.isfinite(np.asarray(out["delp"])).all()
+
+
+# =====================================================================
+# gate 4 -- gradients
+# =====================================================================
+
+def _objective_windows(out):
+    """The compute windows of the four prognostics.
+
+    Restricted to what the step WRITES: the halo strips carry cells no
+    stage touches, and including them would make the inner products
+    insensitive to most of the operator (or, where the lane keeps a
+    NaN tripwire, poison them outright).  ``one_grad_p`` writes ``u``
+    over Fortran i=is..ie, j=js..je+1 and ``v`` over i=is..ie+1,
+    j=js..je, which is the cell x node / node x cell pairing below.
+    """
+    cs = slice(NG, NG + N)
+    bs = slice(NG, NG + N + 1)
+    return {"delp": out["delp"][:, cs, cs], "pt": out["pt"][:, cs, cs],
+            "u": out["u"][:, cs, bs], "v": out["v"][:, bs, cs]}
+
+
+def test_full_step_adjoint_identity_scalars(jctx, jstates0, jstep):
+    """gate 4, PRIMARY -- operand group (delp, pt).
+
+    Tolerance-free: ``J v`` from ``jax.jvp``, ``J^T w`` from
+    ``jax.vjp``, so the identity is exact in exact arithmetic and the
+    residual is pure roundoff.  Neither an FD step nor the array's
+    dynamic range can make it fail spuriously, which is what sank
+    ``check_grads(order=2)`` on this port's first run.
+    """
+    u0, v0 = jstates0["u"], jstates0["v"]
+
+    def f(delp, pt):
+        return _objective_windows(jstep(
+            jctx, {"delp": delp, "pt": pt, "u": u0, "v": v0}, DT,
+            d_ext=D_EXT_OFF))
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
+    _check_adjoint("full_step d(delp,pt)", f,
+                   (jstates0["delp"], jstates0["pt"]), 1e-9)
+
+
+def test_full_step_adjoint_identity_winds(jctx, jstates0, jstep):
+    """gate 4, PRIMARY -- operand group (u, v).
+
+    Split from the scalars deliberately: a Jacobian block that is
+    identically zero (a wind the step never propagates into ``delp``,
+    say) would still satisfy the identity when summed with a healthy
+    block, so the groups are certified separately and each carries its
+    own ``<J v, w> != 0`` non-vacuity assert.
+    """
+    delp0, pt0 = jstates0["delp"], jstates0["pt"]
+
+    def f(u, v):
+        return _objective_windows(jstep(
+            jctx, {"delp": delp0, "pt": pt0, "u": u, "v": v}, DT,
+            d_ext=D_EXT_OFF))
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
+    _check_adjoint("full_step d(u,v)", f,
+                   (jstates0["u"], jstates0["v"]), 1e-9)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_p_grad_c_1lev_check_grads(ctx, jctx, csw_np, order):
+    """gate 4, SUPPLEMENT -- scoped to this module's OWN new leaves.
+
+    ``order=1`` and ``order=2`` are separate parametrised IDs so an
+    FD-resolution failure at order 2 can never be confused with a wrong
+    Jacobian (STATE lesson 12).  The scope is the ``*_1lev`` adapters
+    rather than the whole step for two reasons: they are the only new
+    arithmetic-carrying code here, and they contain NO limiter, so an
+    FD ball around this state is inside one branch -- which is the
+    precondition ``check_grads`` needs and the full step cannot offer.
+    """
+    bd = ctx["bd"]
+    hs = np.zeros_like(csw_np[0]["delpc"])
+    pk, gz = jstep_mod.geopk_sw_1lev(jnp.asarray(csw_np[0]["delpc"]),
+                                     jnp.asarray(hs), bd,
+                                     pt=jnp.asarray(csw_np[0]["ptc"]))
+    gs, uc0 = jctx.gs6[0], jnp.asarray(csw_np[0]["uc"])
+    vc0 = jnp.asarray(csw_np[0]["vc"])
+    delpc = jnp.asarray(csw_np[0]["delpc"])
+    cs = slice(NG, NG + N)
+    one = jnp.asarray(1.0)
+
+    # DIFFERENTIATED VARIABLES ARE O(1) SCALE FACTORS, not the fields.
+    # A finite-difference step on `pk` itself (~3e4 here) would be a
+    # relative perturbation of ~1e-9 at any usable absolute eps, leaving
+    # only a handful of significant digits in the difference -- an FD
+    # failure that says nothing about the Jacobian.  Scaling instead
+    # makes the FD well conditioned while still exercising the same
+    # directional derivative.
+    def f(a, b):
+        uc, vc = jstep_mod.p_grad_c_1lev(0.5 * DT, delpc, a * pk, b * gz,
+                                         uc0, vc0, gs, bd)
+        return jnp.sum(uc[cs, cs] ** 2) + jnp.sum(vc[cs, cs] ** 2)
+
+    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
+    # will replace these with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region finite differences]
+    check_grads(f, (one, one), order=order, modes=("fwd", "rev"),
+                atol=2e-2, rtol=2e-2, eps=1e-4)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_one_grad_p_1lev_check_grads(ctx, jctx, states0, order):
+    """gate 4, SUPPLEMENT -- the second of the module's own leaves.
+
+    Run with ``d_ext`` ON so the external-mode increment is inside the
+    differentiated region; at the deck's 0.0 those terms are structural
+    zeros and the gate would certify a smaller operator than the one
+    the research configuration runs.
+    """
+    bd = ctx["bd"]
+    delp = jnp.asarray(states0[0]["delp"])
+    pt = jnp.asarray(states0[0]["pt"])
+    pk, gz = jstep_mod.geopk_sw_1lev_d(delp, jnp.zeros_like(delp), bd,
+                                       pt=pt)
+    gs = jctx.gs6[0]
+    u0 = jnp.asarray(states0[0]["u"])
+    v0 = jnp.asarray(states0[0]["v"])
+    divg2 = jnp.full((NPX, NPX), 3.0e-4, dtype=jnp.float64)
+    cs = slice(NG, NG + N)
+    bs = slice(NG, NG + N + 1)
+    one = jnp.asarray(1.0)
+
+    # O(1) scale factors, for the FD-conditioning reason stated on the
+    # p_grad_c gate above.
+    def f(a, b, c):
+        u, v = jstep_mod.one_grad_p_1lev(u0, v0, a * pk, b * gz,
+                                         c * divg2, gs, bd, NPX, NPX,
+                                         dt=DT, d_ext=D_EXT_ON)
+        return jnp.sum(u[cs, bs] ** 2) + jnp.sum(v[bs, cs] ** 2)
+
+    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
+    # will replace these with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region finite differences]
+    check_grads(f, (one, one, one), order=order, modes=("fwd", "rev"),
+                atol=2e-2, rtol=2e-2, eps=1e-4)
+
+
+# =====================================================================
+# gate 5 -- the two behavioural pins
+# =====================================================================
+
+def test_returned_d_wind_halo_is_stale_by_one(jctx, jstates0):
+    """THE pin.  ``dyn_core.F90:1332-1338`` refreshes ONLY ``delp`` and
+    ``pt`` after the step; the D-wind ``ext_vector`` runs at the NEXT
+    step's entry (``:471``).  So the returned D-wind halos still carry
+    what THIS step's entry exchange left there, and a twin that
+    refreshes them here is a DIVERGENCE that looks more correct.
+
+    Three assertions, because none alone is decisive:
+
+    1. the outermost ``u`` row (numpy 0 == Fortran ``i = 1-ng``) is
+       BITWISE the value THIS step's entry ``ext_vector`` wrote.
+       Bitwise is legitimate here and only here: no stage writes that
+       row -- both ``d_sw6`` (sw_core.F90:1934-1944, window
+       ``is..ie``) and ``one_grad_p`` (same window) stop at the compute
+       box -- so the cell reaches the output by pure carry-forward with
+       no floating-point sum for XLA to contract into an FMA;
+    2. the COMPUTE window did change, so a refresh computed from the
+       post-step winds could NOT have reproduced the entry value by
+       coincidence.  Without this, assertion 1 would also pass on a
+       step that did nothing at all;
+    3. NON-VACUITY: applying ``ext_vector`` to the RETURNED state DOES
+       change that row.  If someone adds the "helpful" post-step
+       refresh, this is what goes red.
+    """
+    tab = jctx.tab
+    u_entry, v_entry = jhalo.ext_vector_dgrid_sixface(
+        jstates0["u"], jstates0["v"], tab)
+    out = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+                                               d_ext=D_EXT_OFF)
+
+    assert np.array_equal(np.asarray(out["u"])[:, 0, :],
+                          np.asarray(u_entry)[:, 0, :]), (
+        "the outermost u halo row is NOT the entry-exchange value -- "
+        "either a post-step vector refresh was added (a divergence from "
+        "dyn_core.F90:1332-1338) or a stage grew its write window")
+    assert np.array_equal(np.asarray(out["v"])[:, :, 0],
+                          np.asarray(v_entry)[:, :, 0]), (
+        "the outermost v halo column is NOT the entry-exchange value")
+
+    moved = _max_window_diff(out, {k: jstates0[k] for k in _STATE_KEYS})
+    assert moved > 0.0, (
+        "the step left the compute window unchanged, so assertion 1 "
+        "above is satisfied trivially -- a post-step refresh would have "
+        "reproduced the entry value")
+
+    u_ref, v_ref = jhalo.ext_vector_dgrid_sixface(out["u"], out["v"], tab)
+    du = float(np.max(np.abs(np.asarray(u_ref)[:, 0, :]
+                             - np.asarray(out["u"])[:, 0, :])))
+    dv = float(np.max(np.abs(np.asarray(v_ref)[:, :, 0]
+                             - np.asarray(out["v"])[:, :, 0])))
+    assert du > 0.0 and dv > 0.0, (
+        f"refreshing the returned winds changed nothing (du={du:.3e}, "
+        f"dv={dv:.3e}) -- the stale-by-one assertion above is then "
+        f"vacuous, because a refreshed lane would pass it too")
+
+
+def test_delp_and_pt_are_refreshed_after_the_step(jctx, jstates0):
+    """The OTHER half of ``dyn_core.F90:1332-1338``: the A-scalars ARE
+    refreshed, and only in the halo.
+
+    Without this, "we do not refresh the winds" could be satisfied by a
+    lane that refreshes nothing at all.  Compared against the stage
+    output (``acoustic_step_sixface``), which is the state the tail
+    refresh receives -- so the two assertions are exactly the two halves
+    of what ``ext_scalar`` is contracted to do:
+
+    * the compute box is carried through BITWISE (``ext_scalar`` writes
+      halo slots only -- a pure index/gather path with no sum);
+    * the halo DID change (the stage left it holding values consistent
+      with the PRE-step compute cells).
+    """
+    stage = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
+    out = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+                                               d_ext=D_EXT_OFF)
+    cs = slice(NG, NG + N)
+    for k in ("delp", "pt"):
+        assert np.array_equal(np.asarray(out[k])[:, cs, cs],
+                              np.asarray(stage[k])[:, cs, cs]), (
+            f"the tail ext_scalar changed a COMPUTE cell of {k} -- it is "
+            f"contracted to write halo slots only")
+        halo = float(np.max(np.abs(np.asarray(out[k])[:, 0, :]
+                                   - np.asarray(stage[k])[:, 0, :])))
+        assert halo > 0.0, (
+            f"the outermost {k} halo row is unchanged by the tail "
+            f"refresh -- dyn_core.F90:1336-1337 did not run")
+
+
+def test_entry_ascalar_gate_is_live(jctx, jstates0):
+    """``dyn_core.F90:432`` ``if ( it==1 )`` -- the ENTRY A-scalar
+    exchange.
+
+    Observable only on a state whose ``delp`` halo DISAGREES with its
+    neighbours: on a consistent state the exchange is a no-op and the
+    gate would be untestable, so the fixture perturbs one halo strip and
+    leaves every compute cell alone.
+
+    * ``entry_ascalar=True`` must ERASE the perturbation (the exchange
+      overwrites the halo from the neighbour face), so the result must
+      match the unperturbed run;
+    * ``entry_ascalar=False`` must NOT, so the result must differ.
+    """
+    base = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+                                                d_ext=D_EXT_OFF)
+    pert = _perturb_halo(jstates0)
+    on = jstep_mod.full_acoustic_step_sixface(jctx, pert, DT,
+                                              d_ext=D_EXT_OFF,
+                                              entry_ascalar=True)
+    off = jstep_mod.full_acoustic_step_sixface(jctx, pert, DT,
+                                               d_ext=D_EXT_OFF,
+                                               entry_ascalar=False)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: exact erasure, roundoff only]
+        _cmp(on[k], base[k], f"entry_ascalar erased the halo perturbation"
+                             f" ({k})", 1e-13)
+    diff = _max_window_diff(off, base)
+    assert diff > 0.0, (
+        "entry_ascalar=False produced the same state as the exchanged "
+        "run -- the halo perturbation never reached the answer, so the "
+        "erasure assertion above is vacuous")
+
+
+def test_step_fn_seam_is_used_and_carries_the_it1_cadence(jctx,
+                                                          jstates0):
+    """The ``step_fn`` seam must be HONOURED and must receive the
+    ``it == 1`` cadence.
+
+    This is the cheapest possible test of ``dyn_core.F90:432``: a
+    recording fake in place of the step, asserting the exact
+    ``entry_ascalar`` sequence and the exact ``dt``.  It costs no model
+    evaluation and it fails on a cadence bug that a state comparison
+    could only detect indirectly.  The seam exists so the runners get a
+    jitted step WITHOUT re-implementing that cadence.
+    """
+    seen = []
+
+    def fake(ctx_, states_, dt_, *, d_ext, sw_cfg, entry_ascalar):
+        seen.append((float(dt_), entry_ascalar, d_ext))
+        return states_
+
+    out = jstep_mod.advance_duo_outer_step(
+        jctx, jstates0, 7.0 * DT, 7, d_ext=D_EXT_OFF, step_fn=fake)
+    assert out is jstates0, "step_fn was bypassed -- the seam is dead"
+    assert [s[1] for s in seen] == [True] + [False] * 6, (
+        f"entry_ascalar sequence {[s[1] for s in seen]} != True then six "
+        f"False -- dyn_core.F90:432 gates the entry A-scalar exchange on "
+        f"`it == 1`")
+    assert all(abs(s[0] - DT) < 1e-12 for s in seen), (
+        f"dt_atmos was not split n_split ways: {[s[0] for s in seen]}")
+    assert all(s[2] == D_EXT_OFF for s in seen)
+
+    flat = []
+
+    def fake2(ctx_, states_, dt_, *, d_ext, sw_cfg):
+        flat.append(float(dt_))
+        return states_
+
+    jstep_mod.run_duo_sw(jctx, jstates0, DT, 3, d_ext=D_EXT_OFF,
+                         step_fn=fake2)
+    assert len(flat) == 3, (
+        "run_duo_sw did not use step_fn three times")
+
+
+def test_advance_duo_outer_step_fires_entry_only_on_the_first_substep(
+        jctx, jstates0):
+    """``advance_duo_outer_step`` must compose as
+    ``entry=True`` then ``entry=False`` (``dyn_core.F90:432``,
+    ``if ( it==1 )``), and NOT as two ``entry=True`` steps.
+
+    Run from a HALO-PERTURBED state, because that is the only state on
+    which the two schedules differ: on a consistent state the tail
+    refresh (``:1336-1337``) makes the second entry exchange idempotent
+    and every schedule agrees.
+    """
+    pert = _perturb_halo(jstates0)
+    composed = jstep_mod.advance_duo_outer_step(jctx, pert, 2.0 * DT, 2,
+                                                d_ext=D_EXT_OFF)
+    manual = jstep_mod.full_acoustic_step_sixface(
+        jctx, pert, DT, d_ext=D_EXT_OFF, entry_ascalar=True)
+    manual = jstep_mod.full_acoustic_step_sixface(
+        jctx, manual, DT, d_ext=D_EXT_OFF, entry_ascalar=False)
+    for k in _STATE_KEYS:
+        # TOL-PENDING: provisional bound; the orchestrator's measurement
+        # job will replace this with `measured X, bound = measured x N`.
+        # DO NOT SHIP.   [class: identical program, roundoff only]
+        _cmp(composed[k], manual[k], f"outer step composition ({k})",
+             1e-13)
+
+    wrong = jstep_mod.full_acoustic_step_sixface(
+        jctx, pert, DT, d_ext=D_EXT_OFF, entry_ascalar=False)
+    wrong = jstep_mod.full_acoustic_step_sixface(
+        jctx, wrong, DT, d_ext=D_EXT_OFF, entry_ascalar=False)
+    diff = _max_window_diff(composed, wrong)
+    assert diff > 0.0, (
+        "the outer step matched a schedule that NEVER runs the entry "
+        "exchange -- `it == 0` is not selecting entry_ascalar=True on "
+        "the first substep")
