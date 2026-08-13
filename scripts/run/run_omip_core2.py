@@ -504,7 +504,8 @@ TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
 
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
                         mxl_choice: int | None = None,
-                        prognostic: bool | None = None):
+                        prognostic: bool | None = None,
+                        kappa_convention: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -600,6 +601,23 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
+        # K-from-TKE AMPLITUDE.  NEMO: avm = MAX( avtb, rn_ediff*zmxlm*en^1/2 )
+        # (zdftke.F90:150 and the tke_avn header :553) -- the sqrt carries `en`,
+        # NOT `2*en`; the factor 2 lives in the LENGTH, zmxlm = SQRT(2*en/rn2)
+        # (:651).  legoESM's `gaspar_sqrt2e` DEFAULT applies sqrt(2*e) in the
+        # amplitude as well, and the nn_mxl=2/3 branch already builds the
+        # length from sqrt(2e)/N (tke.py:700-702), so the default DOUBLE-COUNTS
+        # the sqrt(2) on exactly the path this card selects.  MEASURED on
+        # NEMO's own state (Stage A, commit 39ce0701c, Arctic calm columns):
+        #     gaspar_sqrt2e  K_H 4.048e-2 = 4.81x NEMO avt 8.410e-3
+        #     veros_sqrte    K_H 2.730e-2 = 3.25x
+        # a 1.48x reduction against the 1.414 the algebra predicts, the extra
+        # ~5% being cells where the floors/caps bind.  `veros_sqrte` is
+        # c_k*l_k*sqrt(max(0,e)) = NEMO's form; it differs from NEMO only for
+        # e < rn_emin (NEMO floors en at rn_emin=1e-6 before the sqrt), and
+        # there the kappaM_min/kappaH_min floors bind anyway.  Revert the
+        # closure to the legacy amplitude with --tke-kappa-convention.
+        kappa_convention="veros_sqrte",
         lc=True,                        # ln_lc
         lc_coeff=0.25,                  # rn_lc (namelist_cfg override)
         etau_mode="below_ml",           # nn_etau=1
@@ -622,6 +640,17 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # K-from-TKE amplitude (``--tke-kappa-convention``).  DEFAULT keeps the
+    # card value (``veros_sqrte`` = NEMO's ``rn_ediff*zmxlm*sqrt(en)``);
+    # ``gaspar_sqrt2e`` restores the legacy sqrt(2)-double-counting amplitude
+    # so the fix can be A/B'd against every arm that predates it.
+    if kappa_convention is not None:
+        if kappa_convention not in ("veros_sqrte", "gaspar_sqrt2e"):
+            raise ValueError(
+                f"orca1_zdftke_config kappa_convention {kappa_convention!r} "
+                "invalid; expected 'veros_sqrte' (NEMO avm = rn_ediff*zmxlm*"
+                "sqrt(en)) or 'gaspar_sqrt2e' (the legacy double-count).")
+        _cfg = _cfg._replace(kappa_convention=kappa_convention)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -675,7 +704,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
-                              tke_prognostic=None):
+                              tke_prognostic=None, tke_kappa_convention=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -704,7 +733,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
-                    ("--tke-prognostic", tke_prognostic)):
+                    ("--tke-prognostic", tke_prognostic),
+                    ("--tke-kappa-convention", tke_kappa_convention)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -715,7 +745,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
                                    mxl_choice=tke_mxl_choice,
-                                   prognostic=tke_prognostic)
+                                   prognostic=tke_prognostic,
+                                   kappa_convention=tke_kappa_convention)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -758,6 +789,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
+                  tke_kappa_convention=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -963,7 +995,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
-            tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic)
+            tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
+            tke_kappa_convention=tke_kappa_convention)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -2050,7 +2083,7 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
-                            tke_prognostic=None):
+                            tke_prognostic=None, tke_kappa_convention=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -2071,7 +2104,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
-                        ("--tke-prognostic", tke_prognostic)):
+                        ("--tke-prognostic", tke_prognostic),
+                        ("--tke-kappa-convention", tke_kappa_convention)):
         if _val is not None and not (grid == "tripole"
                                      and tripole_vmix == "tke"):
             raise SystemExit(
@@ -4467,6 +4501,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-kappa-convention", type=str, default=None,
+                   choices=["veros_sqrte", "gaspar_sqrt2e"],
+                   help="Amplitude of K from TKE for --tripole-vmix tke. "
+                        "None (default) keeps the card value ('veros_sqrte' "
+                        "= NEMO's avm = rn_ediff*zmxlm*sqrt(en), zdftke.F90:"
+                        "150/553). 'gaspar_sqrt2e' restores the legacy "
+                        "c_k*l_k*sqrt(2*e) amplitude, which DOUBLE-COUNTS the "
+                        "sqrt(2) already carried by the nn_mxl=2/3 buoyancy "
+                        "length sqrt(2e)/N and measured 4.81x NEMO's avt "
+                        "against 3.25x for the NEMO form (Stage A, 39ce0701c) "
+                        "-- supply it only to reproduce arms that predate the "
+                        "fix. Requires --tripole-vmix tke (else raises).")
     p.add_argument("--tke-mxl-choice", type=int, default=None,
                    choices=list(TKE_MXL_CHOICES),
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
@@ -4944,7 +4990,7 @@ def main() -> int:
     # its "none" default and under the kpp closure.
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
-                            args.tke_prognostic)
+                            args.tke_prognostic, args.tke_kappa_convention)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5150,6 +5196,7 @@ def main() -> int:
             tke_surface_bc=args.tke_surface_bc,
             tke_mxl_choice=args.tke_mxl_choice,
             tke_prognostic=args.tke_prognostic,
+            tke_kappa_convention=args.tke_kappa_convention,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
