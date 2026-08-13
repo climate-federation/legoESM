@@ -23,6 +23,7 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import numpy as np
 import pytest
 
@@ -60,13 +61,29 @@ def test_state_has_the_requested_shape(mod):
     assert sigma.n_levels == NLEV
 
 
-def test_columns_are_identical_across_ncol(mod):
-    """The vector-width control varies ONLY ncol. If the columns differed,
-    a cost difference could be physics rather than width."""
-    _, _ = mod.build_state(NLEV, 1)
-    state, _ = mod.build_state(NLEV, 8)
-    T = np.asarray(state.T.data)
-    assert np.allclose(T[:, 0], T[:, 7], rtol=0, atol=0)
+def test_every_state_leaf_is_identical_across_batch_width(mod):
+    """The batch-width control must vary ONLY the number of columns.  Compares
+    EVERY leaf of the wide state against the ncol=1 state, not just the first
+    and last temperature column (codex finding 18): qv, winds, tracers and
+    surface fields could each differ and turn a width effect into a physics
+    effect.  Memory layout and total bytes unavoidably change with width --
+    that is documented in the bench, not gated here.
+    """
+    narrow, sig1 = mod.build_state(NLEV, 1)
+    wide, sig8 = mod.build_state(NLEV, 8)
+
+    leaves1 = jax.tree_util.tree_leaves(narrow)
+    leaves8 = jax.tree_util.tree_leaves(wide)
+    assert len(leaves1) == len(leaves8)
+    for a, b in zip(leaves1, leaves8):
+        a, b = np.asarray(a), np.asarray(b)
+        assert a.shape[1] == 1 and b.shape[1] == 8, (a.shape, b.shape)
+        for c in range(8):
+            assert np.array_equal(b[:, c:c + 1], a), (
+                f"column {c} of the wide state differs from the ncol=1 state")
+    for f1, f8 in zip(sig1, sig8):
+        assert np.array_equal(np.asarray(f1), np.asarray(f8)), (
+            "the sigma coordinate must not depend on the column count")
 
 
 def test_profile_is_physical(mod):
@@ -81,22 +98,71 @@ def test_profile_is_physical(mod):
 
 def test_timing_a_scheme_returns_finite_tendencies(mod, col):
     state, sigma = col
-    r = mod.time_scheme("mass_flux", state, sigma, DT, repeats=1)
+    r = mod.time_scheme("mass_flux", state, sigma, DT, repeats=1, warmups=0)
     assert r["finite"], "the timed call produced non-finite tendencies"
     assert r["call_ms"] > 0.0
     assert r["compile_s"] > 0.0
+    assert r["n_leaves"] > 1, (
+        "the timed function must return the whole tendency pytree; returning "
+        "one field lets XLA delete the rest of the scheme's work")
 
 
-def test_dilute_flag_reaches_the_scheme_config(mod):
-    """ON/OFF control non-vacuity: the override must change the config the
-    scheme actually receives, not be silently dropped."""
-    from legoesm.atmosphere.physics import ConvectionConfig
+def test_the_timed_function_returns_more_than_the_temperature_tendency(mod, col):
+    """codex finding 8: with only dT_dt observed, XLA can dead-code-eliminate
+    whatever a scheme computes solely for moisture or momentum, biasing the
+    comparison by scheme."""
+    import jax
 
-    base = ConvectionConfig(scheme="zhang_mcfarlane")
-    assert base.zhang_mcfarlane.use_dilute_cape is True
-    off = base._replace(
-        zhang_mcfarlane=base.zhang_mcfarlane._replace(use_dilute_cape=False))
-    assert off.zhang_mcfarlane.use_dilute_cape is False
+    state, sigma = col
+    fn = mod._physics("mass_flux", DT)
+    leaves = jax.tree_util.tree_leaves(fn(state, None, sigma)[0])
+    assert len(leaves) >= 4, len(leaves)
+
+
+@pytest.mark.parametrize("scheme", ["mass_flux", "dca", "zhang_mcfarlane",
+                                    "emanuel", "tiedtke"])
+def test_active_schemes_are_reported_active(mod, col, scheme):
+    """codex finding 19/14: an all-zero tendency is finite and times fine, so
+    an untriggered scheme silently joins the 'pack' that ZM is measured
+    against. The activity flag is what keeps it out."""
+    state, sigma = col
+    r = mod.time_scheme(scheme, state, sigma, DT, repeats=1, warmups=0)
+    assert r["active"], (
+        f"{scheme} produced no tendency on the probe column "
+        f"(sum|dT/dt| = {r['sum_abs_dT_dt']:.3e}); its timing would be the "
+        f"cost of the inactive branch")
+
+
+def test_kuo_is_reported_inactive_and_would_be_excluded(mod, col):
+    """The measured case the flag exists for: kuo cannot convect without a
+    large-scale moisture-convergence operator, and at ncol=1 it was ORIGINALLY
+    the median of the 'other nine', i.e. the baseline was the cost of doing
+    nothing."""
+    state, sigma = col
+    r = mod.time_scheme("kuo", state, sigma, DT, repeats=1, warmups=0)
+    assert not r["active"], (
+        "kuo produced a tendency here; if it is genuinely active in this "
+        "geometry the pack-exclusion rationale needs revisiting")
+
+
+def test_dilute_override_reaches_the_config_through_physics(mod, monkeypatch):
+    """codex finding 17: asserting on a hand-built _replace cannot fail if
+    `_physics` drops or misroutes sub_overrides. Spy on make_physics and read
+    the config it actually received."""
+    seen = {}
+    real = mod.make_physics
+
+    def spy(cfg, **kw):
+        seen["cfg"] = cfg
+        return real(cfg, **kw)
+
+    monkeypatch.setattr(mod, "make_physics", spy)
+    mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": False})
+    assert seen["cfg"].convection.scheme == "zhang_mcfarlane"
+    assert seen["cfg"].convection.zhang_mcfarlane.use_dilute_cape is False
+
+    mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": True})
+    assert seen["cfg"].convection.zhang_mcfarlane.use_dilute_cape is True
 
 
 def test_dilute_on_and_off_give_different_tendencies(mod, col):
