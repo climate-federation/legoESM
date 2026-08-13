@@ -60,7 +60,31 @@ it. Those are setup, not hot path, and they stay NumPy.
 - **`nsplt` design resolved** — static, with the argument for why that costs
   nothing in the gradient (floor ⇒ derivative zero a.e.).
 - Measurement job `scripts/cluster/fv3_native/jax_lane_measure.sbatch`.
-- Codex adversarial review of the strategy submitted.
+- **Codex adversarial review of the strategy: 13 findings, all closed**
+  (job 9398328, log in this directory). 4 BLOCKER, 7 MAJOR, 1 MINOR, and two
+  concerns explicitly returned as unfounded. The four blockers:
+  1. tier 5 was the only independent authority check and had no acceptance
+     criterion → tiers are now executable specs, tier 5 scores every carried
+     prognostic, and tier 5a adds a standing direct Fortran-vs-JAX audit of
+     hop A;
+  2. the tolerance taxonomy had no class for branch-switching kernels, where
+     one ULP flips a branch and the discrepancy is not rounding-scale;
+  3. R1's "grid loop → vectorized slice" was not semantics-preserving without
+     a dependence/alias audit (three sites in this core break it);
+  4. **my `nsplt` resolution was refuted** — see the retraction below.
+- **RETRACTION, same session.** Commit `023b996b4` resolved the tracer
+  subcycle count as "static, resolved outside the trace", arguing it costs
+  nothing in the gradient because `int(1.0 + cmax)` is a floor. The derivative
+  argument is correct and irrelevant: static resolution *does not compose* —
+  under `jit`/`grad`/`scan`, `cmax` is a tracer and `int()` on it raises, so
+  the option only works if the whole step runs eagerly, which forfeits the
+  lane. Replaced by fixed `NSPLT_MAX` + masking + `stop_gradient` on the
+  schedule (commit `d8df2bde0`).
+- **GLM-5.2 is unreachable**: the `Z_AI_API_KEY` in the environment returns
+  401 on `api.z.ai`, on `open.bigmodel.cn` with a bearer token, and with a
+  signed JWT. The key is expired, not the endpoint. Dual adversarial review is
+  standing policy (main `a6060d41d`), so **this campaign is one reviewer short
+  until the key is refreshed** — everything below has had codex only.
 
 ### In flight
 
