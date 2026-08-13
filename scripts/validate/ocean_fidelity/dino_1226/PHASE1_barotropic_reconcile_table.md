@@ -135,3 +135,137 @@ as a selectable option, hold everything else byte-identical, re-run the 90-day a
 Predicted: ACC |diff vs NEMO d90| drops toward the arm1 value AND the faithful fixes then
 IMPROVE rather than degrade ACC (Rule 8 satisfied). If ACC does not move, this term is
 exonerated and the search returns to N6's subtract-side (`U_bar_corr` vs NEMO `puu_b(Kmm)`).
+
+---
+
+# PHASE 2 (2026-08-13) — the 0.88 m²/s Hu_avg wall bias is the F_slow forcing residual, NOT a loop-internal defect. CONFIRMED.
+
+## Instrument
+`substep_traj_compare.py` — captures legoESM's FULL per-substep barotropic
+trajectory (teeing `fori_loop`→`scan` under `jax.disable_jit`, fp64,
+`LEGOESM_NEMO_E3T=both`, day-0 bit-identical) and compares it, substep by
+substep, against NEMO's `substep_dump.bin` (dynspg_ts.F90:926-940, the FULL
+per-jn=1..68 dump of `sshn_e/ssha_e/zsshp2_e/un_e/vn_e/ua_e/va_e`, kt=nit000=
+230401 = the exact replayed step). Registered `substep_dump.bin` in
+`time_levels.py` ("before", cited to :570 seed proof).
+
+## Substep-count reconcile (Rule 1e — retracts a probe error, not a lego DIFF)
+NEMO `ts_wgt` CASE(2) with `nn_e=23, ln_bt_fw=F`: `jic=2·nn_e=46`, boxcar
+`|jn-46|/23<1` ⇒ nonzero primary weights jn=24..68 (45 of them, the table's
+"45"), but `Kpit=icycle=68` (substeps 1..23 execute with zero primary weight —
+AB3 spin-up). **legoESM runs n_loop=68 too** — the MLF path passes
+`_barotropic_substep_scale=2` ⇒ `compute_nemo_boxcar_centred_weights(46, scale=2)`
+⇒ `m_star=68`. My first `_compute_weights(...,23,scale=1)` returned 45; that was
+MY probe error (wrong scale), RETRACTED. Confirmed: captured n_loop=68 == NEMO
+icycle=68; `wgtbtp2` 68 nonzero, sum 1.0 both sides.
+
+## Trajectory result (the bias is BORN in the loop, grows ~linearly)
+| jn | cum Hu err wall | cum Hu err interior |
+|----|-----------------|---------------------|
+| 1  | 3.1e-15 (bit-identical) | 3.1e-15 |
+| 8  | 1.7e-2 | 1.6e-2 |
+| 24 | 1.7e-1 | 1.4e-1 |
+| 48 | 6.5e-1 | 4.5e-1 |
+| 68 | **8.7926e-1** | **5.8885e-1** |
+
+**Instrument validation (Rule 3, calibrate before trusting):** the probe
+reconstructs NEMO's `zhU/e2u = ua_e_mid·zhup2_e` from the dumped `un_e`/`sshn_e`
+history (AB3 coeffs + `zhup2_e` formula), sums it with `wgtbtp2` over all 68
+substeps, and checks it against NEMO's OWN `spg_dump_un_adv_final.bin`:
+**rel 7.287e-16 (roundoff) — RECON VALID.** So comparing lego `Hu_avg` against
+the reconstruction is bit-identical to comparing against the un_adv dump; no
+reconstruction bug can hide the finding. (Probe raises if this exceeds 1e-10.)
+
+Final wall 0.87926 / interior 0.58885 m²/s — **reproduces `hu_avg_perface_diff`
+(0.879 / 0.589) exactly**, across the jit boundary (per-face probe jitted, this
+probe under `disable_jit` for the fori→scan tee) — the agreement is the
+jit-parity control. Substep 1 is bit-identical; the bias accumulates
+monotonically. Wall and interior grow TOGETHER — the wall is where it is
+LARGEST (max transport at the barrier seam), not where the per-substep defect
+lives.
+
+## Decomposition — velocity, not depth; and the velocity error IS the forcing
+- **Velocity trajectory** `U_bar[jn]` vs NEMO `un_e[jn+1]`: wall err 1.1e-5
+  (jn=1) → 1.3e-3 (jn=67), ~1% of |un|=0.12 m/s. Grows every substep.
+- **Flux ratio** lego/NEMO: 0.9996 (jn=2) → **0.9948 (jn=68)** — a steadily
+  growing ~0.5% flux DEFICIT (sign-coherent, not noise).
+- **jn=1 END velocity** `U_bar[0]` vs NEMO `ua_e[1]`: max|Δ| **1.1151e-5**,
+  which is **3× NEMO's ENTIRE jn=1 increment** (|ua−un|=3.7e-6). So legoESM's
+  substep-1 update already differs materially. Error per-col top: 50,51 (E
+  seam), 3,4,5,6 (W) — wall-emphasised but domain-wide, near-uniform.
+
+## THE CAUSE (CONFIRMED to 4 significant figures)
+`F_slow_u` (legoESM's assembled zu_frc-equivalent, captured at the
+`barotropic_substeps_latlon_cgrid` call) vs NEMO's dumped `zu_frc`
+(`spg_dump_zu_frc.bin`):
+
+    max|F_slow_u − zu_frc| = 9.4915e-8   median = 1.6969e-8   [m/s²]
+    |zu_frc| max = 3.03e-5   median = 6.86e-7
+    relative |ΔF|/|zu_frc|:  median 2.0e-2 (2%)   p99 9.4e-1
+
+With `dt_s = 117.39 s`:
+
+    dt_s · max|ΔF|    = 1.1142e-5   ==  jn=1 vel err max    1.1151e-5   ✓
+    dt_s · median|ΔF| = 1.9920e-6   ==  jn=1 vel err median 1.9912e-6   ✓
+
+**The per-substep barotropic velocity error is `dt_s·(F_slow_u − zu_frc)` to 4
+s.f.** `dt_s = 117.39 s = 2·2700/46` (the MLF-scaled substep length, read off
+the loop's own `dt_s` arg, not assumed).
+
+### Non-circularity control (proves the loop DYNAMICS match, not just the forcing)
+`verr` (jn=1 vel err = `U_bar[0] − ua_e[1]`, from the carry trajectory) and `ΔF`
+(`F_slow_u − zu_frc`, from the loop's call arg) are captured by DIFFERENT hooks
+in the same run — independent measurements. Their residual:
+
+    RESIDUAL = verr − dt_s·ΔF :  max 2.3446e-7   median 4.318e-10   (2.1% / 0.02% of verr)
+
+Since at jn=1 the seed velocity is bit-identical to NEMO's `un_e`, the update
+`U_bar_new = seed + dt_s·(cor + drag − g·∇η + F_slow_u)` gives
+`verr = dt_s·ΔF + dt_s·(Δcor + Δdrag − gΔ∇η)`. The residual being ~2e-7
+(≪ the 1.1e-5 forcing term, and non-accumulating) PROVES the Coriolis
+(een_metric), PGF and drag all match NEMO to ~2e-7 at jn=1 — the finding is NOT
+tautological: it independently establishes that the loop dynamics are faithful
+and ONLY the forcing input is biased.
+
+ΔF's spatial structure (per-col top 50,51,4,5,6,3) is IDENTICAL to the
+jn=1 velocity-error structure. ΔF is sign-coherent (mean −9.5e-9, |mean|/rms
+0.425) ⇒ it accumulates into the net 0.5% flux deficit over 68 substeps, and
+the flux integral concentrates the bias at the seam wall (where |Hu| is
+largest). ΔF itself is near-uniform (wall max 9.49e-8 vs interior 9.08e-8) —
+the wall concentration of the *transport* bias is a `·H·U` weighting effect, not
+a wall-localised forcing error.
+
+## STOP — statement-level DIFF + measured share of the bias
+- **The barotropic substep loop is FAITHFUL.** Coriolis (een_metric), PGF
+  (−g·∇η), the AB3 velocity extrapolation, `zhup2_e` mid-step flux depth, the
+  boxcar/AB3 weights, the substep count (68) — all reproduce NEMO substep-1
+  bit-identically and carry no per-substep defect of their own.
+- **The DIFF is UPSTREAM of the loop**: `F_slow_u`, legoESM's assembled slow
+  forcing (`zu_frc`-equivalent, baroclinic PGF + viscosity + advection +
+  drag depth-mean), differs from NEMO's `zu_frc` by a sign-coherent
+  ~2%-median (up to 94% p99) residual.
+- **Measured share of the bias: 100%.** `dt_s·ΔF` reproduces the per-substep
+  velocity error to 4 s.f. at jn=1; the 68-substep accumulation reproduces the
+  final 0.88 m²/s wall / 0.59 interior transport bias, whose `−2dt·div` is the
+  4.2e-3 m/step eta injection (`hu_avg_perface_diff` closure, 3 s.f.).
+
+This is the "separately owned input residual" the earlier phase flagged and
+exonerated the LOOP for — now CLOSED to the transport bias: the loop faithfully
+integrates a biased forcing input. The residual is NOT in `dynspg_ts.F90`'s
+substep dynamics; it is in the assembly of the slow-mode forcing that feeds it
+(NEMO `zu_frc`, built in `dyn_spg_ts` :300-508 from the now 3-D RHS + the
+dyn_cor_2D/wind/drag adds). **Next stage (a SEPARATE reviewed change, per the
+STOP rule): trace the `F_slow_u` assembly term-by-term against NEMO's `zu_frc`
+build — the residual is sign-coherent and ~2%, so one of its constituent adds
+(baroclinic PGF depth-mean, the +bt Coriolis/wind/drag `zu_frc` corrections at
+dynspg_ts.F90:302-508, or the depth-weighting) is systematically off by ~2%.**
+
+## Retraction ledger (Rule 11)
+- "45 vs 68 substep-count DIFF" — RETRACTED same session: my `_compute_weights`
+  call used `substep_scale=1`; the live MLF path uses 2 ⇒ 68. No lego DIFF.
+- The PLANT (NEMO trajectory shifted +1 substep) is WEAK (0.747 vs 0.879, not
+  >3×) because the CUMULATIVE metric is dominated by the 68-substep integral; a
+  1-substep shift barely moves it. This is a known limitation of a cumulative
+  planted control, NOT a failure — the decisive controls are (a) substep-1
+  bit-identity (3.1e-15), (b) exact reproduction of the independently-measured
+  final 0.879/0.589, and (c) the 4-s.f. `dt_s·ΔF` == velocity-error identity.

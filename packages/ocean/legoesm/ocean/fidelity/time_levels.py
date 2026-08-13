@@ -373,6 +373,21 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "spg_dump_vn_adv_final.bin": ("now", "dynspg_ts.F90:1047 WRITE(8863) vn_adv; "
         "v twin of spg_dump_un_adv_final.bin, same substep-mean accumulation "
         "(:737) and Kmm=NOW reconcile."),
+    # --- #1455 sec-D PHASE 2: the FULL per-barotropic-substep trajectory
+    # substep_dump.bin (dynspg_ts.F90:926-940, guarded "IF(kt==nit000)", one
+    # record per jn=1..icycle).  Each record holds sshn_e/ssha_e/zsshp2_e/un_e/
+    # vn_e/ua_e/va_e at that substep -- the barotropic-mode fast fields, which
+    # have NO leapfrog time level of their own (un_e etc. are the split-explicit
+    # sub-cycle state, seeded at jn=1 from puu_b(:,:,Kbb) via the ln_bt_fw=F
+    # CENTRED branch, dynspg_ts.F90:570; proven by un_e[jn=1] == un_e_init to
+    # 0.0e0).  Registered "before" for the SAME reason as
+    # cor2d_dump_ua_e_in_substep1.bin above (the sub-cycle seed is the Kbb
+    # barotropic transport); this dump is a superset (all icycle substeps, not
+    # just jn=1).  jpi x jpj = 56 x 203, per-substep records, fp64.
+    "substep_dump.bin": ("before", "dynspg_ts.F90:926-940 WRITE(799) per-jn "
+        "barotropic sub-cycle fields (sshn_e/ssha_e/zsshp2_e/un_e/vn_e/ua_e/"
+        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:570, ln_bt_fw=F "
+        "CENTRED seed), same Kbb sub-cycle seed as cor2d_dump_ua_e_in_substep1.bin"),
     # --- #1226 SEQDUMP intra-step seam walk (RUN_SEQDUMP_Y20_1R, y20 kt=
     # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
     # ebeb8a5), each proved by reading the CALL that produces the dumped
