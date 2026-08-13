@@ -97,6 +97,25 @@ def main() -> int:
                    help="rebuild_nemo_restart.py output; MUST include "
                         "avm_k (and ideally dissl) as well as en/tn/sn.")
     p.add_argument("--mesh-mask", required=True)
+    p.add_argument("--trd-tfile", default=None,
+                   help="RUN_TRD2 hourly trd1h_T file. Enables the ONE-STEP "
+                        "mode: seed with NEMO's en, take one 3600 s step, and "
+                        "compare K_M against NEMO's `avm`. avm is the CLEAN "
+                        "target — ORCA1 sets nn_evdm=0 so EVD never touches "
+                        "momentum (namelist_cfg:429), and no Prandtl number "
+                        "stands between the closure and avm. Every Stage-A "
+                        "number to date used K_H vs avt, which carries both.")
+    p.add_argument("--trd-rec", type=int, default=0,
+                   help="record of --trd-tfile to score the one step against "
+                        "(0 = the step the restart runs into).")
+    p.add_argument("--cfg-override", action="append", default=[],
+                   metavar="FIELD=VALUE",
+                   help="repeatable TKEConfig override applied to the ORCA1 "
+                        "card, for one-variable source-term ablation of the "
+                        "one-step TKE growth (e.g. lc=False, etau_mode=none, "
+                        "surface_bc=veros_flux, tke_mxl_choice=4). Values are "
+                        "parsed as bool / int / float / str in that order. An "
+                        "unknown FIELD raises rather than being ignored.")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -119,8 +138,34 @@ def main() -> int:
             "field list drops the zdftke coefficients this probe needs.")
 
     cfg = orca1_zdftke_config()          # the production card (veros_sqrte)
+    for spec in a.cfg_override:
+        if "=" not in spec:
+            raise SystemExit(f"--cfg-override {spec!r} must be FIELD=VALUE")
+        k, _, raw = spec.partition("=")
+        if k not in cfg._fields:
+            raise SystemExit(
+                f"--cfg-override {k!r} is not a TKEConfig field. Silently "
+                "ignoring it would make an ablation look like a null result.")
+        if raw in ("True", "False"):
+            val = (raw == "True")
+        else:
+            try:
+                val = int(raw)
+            except ValueError:
+                try:
+                    val = float(raw)
+                except ValueError:
+                    val = raw
+        if getattr(cfg, k) == val:
+            raise SystemExit(
+                f"--cfg-override {k}={val!r} equals the card value, so this "
+                "arm is a NO-OP and would be reported as 'no effect'.")
+        cfg = cfg._replace(**{k: val})
+        print(f"[cfg] OVERRIDE {k} -> {val!r}")
     print(f"[card] c_k={cfg.c_k} kappa_convention={cfg.kappa_convention!r} "
-          f"tke_mxl_choice={cfg.tke_mxl_choice} kappaM_min={cfg.kappaM_min:g}")
+          f"tke_mxl_choice={cfg.tke_mxl_choice} kappaM_min={cfg.kappaM_min:g} "
+          f"lc={cfg.lc} etau_mode={cfg.etau_mode!r} "
+          f"surface_bc={cfg.surface_bc!r}")
 
     e1t, e2t, e3t, tmask = load_mesh_metrics(a.mesh_mask)     # (nlev,nj,ni)
     lat = load_mesh_latitude(a.mesh_mask)
@@ -280,6 +325,120 @@ def main() -> int:
           "dissipation length sqrt(lup*ldn) (tke_mxl_choice=3) against NEMO's "
           "nn_mxl=2 min(lup,ldn) — that ratio IS the nn_mxl gap, measured "
           "here on NEMO's own state.")
+
+    # ---- ONE-STEP mode: where does the Stage-A2 excess actually appear? ----
+    if a.trd_tfile:
+        import netCDF4 as nc
+        from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
+        ds = nc.Dataset(a.trd_tfile)
+        try:
+            def _v(n):
+                x = ds.variables[n][a.trd_rec]
+                return np.ma.filled(np.ma.masked_invalid(x), np.nan).astype(
+                    np.float64)
+            avm_nemo = _v("avm")
+            taum_n = _v("taum")
+        finally:
+            ds.close()
+        if avm_nemo.shape != (z, ny, nx):
+            raise SystemExit(f"FATAL: avm {avm_nemo.shape} vs {(z, ny, nx)}")
+        avm_next = np.nan_to_num(cols(avm_nemo)[:, 1:], nan=0.0)
+        # SET MATCHING (2026-08-13 retraction): the zero-step table scores on
+        # `ok` (avm_k off its floor) and an earlier revision of this block
+        # scored on avm_next off ITS floor -- 491743 vs 1192195 interfaces.
+        # Comparing 0.861 (zero step) against 1.755 (one step) across those two
+        # populations is not a comparison at all. Both tables now use the
+        # INTERSECTION, and the zero-step K ratio is recomputed on it and
+        # printed here so the two rows sit on identical ocean.
+        taum_c = np.nan_to_num(taum_n.reshape(ncol), nan=0.0)
+        u_c = np.nan_to_num(cols(rst["un"]), nan=0.0)
+        v_c = np.nan_to_num(cols(rst["vn"]), nan=0.0)
+        step = tke_vertical_mixing(
+            jnp.asarray(u_c), jnp.asarray(v_c), jnp.asarray(T_c),
+            jnp.asarray(S_c), jnp.asarray(rho), jnp.asarray(dz_half),
+            tke_old=jnp.asarray(en_i),
+            tau_x_surface=jnp.asarray(taum_c),
+            tau_y_surface=jnp.zeros_like(jnp.asarray(taum_c)),
+            taum_surface=jnp.asarray(taum_c),
+            dt=3600.0, cfg=cfg, rho_0=constants.rho_ocean, g=constants.g,
+            n_iterations=1,
+            z_interface=jnp.asarray(-np.cumsum(dz_ref_1d)[:-1]),
+            lat_deg=jnp.asarray(lat.reshape(ncol)), ice_frac=None,
+            dz_ref=jnp.asarray(dz_ref_1d),
+            jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
+            # z=0-to-first-cell-centre distance, required by
+            # tke_surface_bc_level="nemo_z0" (tke.py:1268) and ignored by the
+            # "interior_pinned" default, so passing it unconditionally keeps
+            # every arm on ONE variable.  Full top cell => gdept(1)=e3t(1)/2.
+            dz_surface=jnp.asarray(0.5 * dz_c[:, 0]))
+        e_after = np.asarray(step.tke_new)
+        KM_after = np.asarray(step.K_M)
+        okn = (ok & wet_i & (avm_next > avmb * 1.01) & np.isfinite(avm_next))
+        print()
+        print("ONE STEP (3600 s) from NEMO's en, scored against NEMO `avm` — "
+              "the EVD-free, Prandtl-free target (nn_evdm=0). Scored on the "
+              "INTERSECTION with the zero-step set, so K0_rat below is the "
+              "zero-step ratio recomputed on these SAME interfaces and the "
+              "two are directly comparable.")
+        # TKE growth as a RATIO OF VOLUME-WEIGHTED MEANS, never a mean of
+        # ratios.  The first revision printed <e_after/en> and returned
+        # 9000-11700, which is not a measurement: NEMO floors `en` at
+        # rn_emin=1e-6, so any interface sitting on that floor contributes a
+        # ratio of order 1e4 and the mean is entirely those cells.  The
+        # ratio-of-means is bounded by the fields themselves, and the
+        # floor-excluded subset (en > 10*rn_emin) is reported beside it so the
+        # reader can see how much of the domain is even eligible.
+        emin = float(cfg.tke_background)
+        print("%-22s %9s %8s %8s %10s %10s %8s %8s" % (
+            "band", "n_iface", "e_grow", "e_gr_act", "KM_after",
+            "NEMO_avm", "K0_rat", "KM_rat"))
+        out["one_step"] = {"trd_tfile": a.trd_tfile, "trd_rec": a.trd_rec,
+                           "rn_emin": emin, "bands": {}}
+        for bname, lo, hi in _BANDS:
+            inb = ((lat >= lo) & (lat < hi)).reshape(ncol)
+            m = okn & inb[:, None] & (en_i > 0)
+            if not m.any():
+                continue
+            ww = w_i[m]
+            e_r_all = _wmean(e_after[m], ww) / max(_wmean(en_i[m], ww), 1e-30)
+            act = m & (en_i > 10.0 * emin)
+            if act.any():
+                wa = w_i[act]
+                e_r_act = _wmean(e_after[act], wa) / max(
+                    _wmean(en_i[act], wa), 1e-30)
+                f_act = float(w_i[act].sum() / max(ww.sum(), 1e-30))
+            else:
+                e_r_act, f_act = float("nan"), 0.0
+            km, an = _wmean(KM_after[m], ww), _wmean(avm_next[m], ww)
+            # zero-step ratio recomputed on THIS set, so the before/after pair
+            # is a comparison rather than two different populations.
+            k0 = _wmean(K_M[m], ww) / max(_wmean(avm_i[m], ww), 1e-30)
+            out["one_step"]["bands"][bname] = {
+                "n_interfaces": int(m.sum()),
+                "our_tke_growth_all": e_r_all,
+                "our_tke_growth_active": e_r_act,
+                "active_volume_fraction": f_act,
+                "K0_ratio_same_set": k0,
+                "KM_after": km, "nemo_avm_next": an,
+                "KM_ratio": km / an if an > 0 else float("nan")}
+            print("%-22s %9d %8.3f %8.3f %10.4e %10.4e %8.3f %8.3f" % (
+                bname, m.sum(), e_r_all, e_r_act, km, an, k0,
+                km / an if an > 0 else float("nan")))
+        print()
+        print("READ, and note two labels that were WRONG in earlier revisions.")
+        print(" * K0_rat -> KM_rat is the real before/after pair: both are "
+              "ratios of volume-weighted means of OUR K_M to NEMO's own "
+              "momentum diffusivity, on the SAME interfaces. What one step "
+              "creates is the change between them.")
+        print(" * e_grow / e_gr_act are OUR TKE after the step over the TKE we "
+              "were HANDED (NEMO's en at the seed instant). There is no "
+              "NEMO-after value in them, so they are a diagnostic of our own "
+              "growth and NOT an error: NEMO's en evolves over the same hour "
+              "too. An earlier revision reported them as if they were an "
+              "error against NEMO. They are not.")
+        print(f"   (e_gr_act restricts to en > 10x rn_emin={emin:g}; a mean of "
+              "RATIOS was tried before that and is meaningless here — a "
+              "floored denominator makes it read ~1e4 whatever the model does.)")
 
     if a.out_json:
         Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
