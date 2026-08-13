@@ -6540,6 +6540,35 @@ class ModelDriver:
         # Geographic cell-centre winds from the edge-normal velocity.
         u_east, v_north = reconstruct_cell_velocity(
             state.u.data if u_override is None else u_override, self.grid)
+        # Pressure vertical velocity, for the subsidence the scorecard could
+        # previously only guess at.  Built from the SAME halo-refreshed edge
+        # field, through the pair the column-forcing extractor already
+        # composes on this mesh: cell divergence of the edge-normal wind, then
+        # the coordinate-aware continuity integral.  Not the dycore's own
+        # omega -- the dycore closes continuity in FLUX form div(u*dp) while
+        # this rebuilds it from the advective div(v)*dp, and the two differ
+        # wherever the surface-pressure gradient is large (see the comment in
+        # primitive_eq_mpas beside the mass-flux branch).  It IS a closed
+        # continuity solve, which the monthly-mean-wind estimate it replaces
+        # was not: that one returned a global mean of -6 hPa/day where
+        # continuity requires ~0, and amplitudes ~30x ERA5.
+        wap = None
+        _sigma = getattr(self, "sigma", None)
+        if _sigma is None:
+            # Absent only on a partially built driver. Say so: the enclosing
+            # feed swallows exceptions, so a raise here would drop the WHOLE
+            # CMOR stream silently rather than just this field.
+            logger.warning(
+                "no vertical coordinate on the driver: publishing no wap, so "
+                "subsidence cannot be scored for this run")
+        else:
+            from legoesm.atmosphere.forcing.column_large_scale_extract import (
+                omega_from_divergence)
+            from legoesm.core.operators_voronoi import divergence_cell_3d
+            _u_edge = state.u.data if u_override is None else u_override
+            wap = omega_from_divergence(
+                divergence_cell_3d(jnp.asarray(_u_edge), self.grid),
+                state.p_s.data, _sigma)
         # Water vapour (moist runs only).
         q_v = None
         if (state.tracers is not None and "q_v" in state.tracers):
@@ -6693,6 +6722,7 @@ class ModelDriver:
             hfls=hfls,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
+            wap=wap,
             flux_interval_days=_flux_days,
         )
 
@@ -7191,7 +7221,7 @@ class ModelDriver:
                 and (float(cfg.output.diag_days) <= 0.0
                      or _true_cad_days >= 1.0)):
             _diag.cmip_snapshot_vars = {
-                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va"}
+                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "wap"}
             if cfg.output.clear_sky_diag:
                 # The cloud-diagnostic trio (fed only with --clear-sky-diag,
                 # see _feed_mpas_cmip_accumulators) is state-derived => same

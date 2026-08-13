@@ -3472,30 +3472,42 @@ def test_bechtold_mixing_rates_are_settable_from_a_params_file():
             scalar_param_map=m)
 
 
-def test_amip_round_trip_keeps_every_convection_scalar():
-    """A legacy-format restart must not silently reset a tuned convection knob.
+def test_amip_round_trip_keeps_the_tuned_convection_scalars():
+    """A legacy-format restart must not silently reset a TUNED convection knob.
 
-    Before 2026-08-13 ten of them were dropped, including the in-plume
-    conversion rates the AMIP campaign sets on every arm: a run restarted from
-    a legacy checkpoint quietly continued on defaults. The assertion is over
-    the FIELD LIST, so a knob added later without being mirrored fails here
-    rather than in a three-month climatology.
+    The legacy flat schema is a deliberate SUBSET of ExperimentConfig -- some
+    140 fields are outside it by design -- so this is not a claim that nothing
+    is dropped. It pins the convection scalars the AMIP campaign actually sets
+    on its arms, which before 2026-08-13 were dropped: a run restarted from a
+    legacy checkpoint quietly continued on defaults, which would have surfaced
+    as "the knob does nothing" rather than as an error.
+
+    Codex, reviewing the first version of this test, showed that a
+    prefix-based "every convection scalar" assertion was false -- e.g.
+    ``sbm_T_min_convect`` is dropped too. Widening the flat schema to satisfy
+    that claim is a separate change; this test states only what it checks.
     """
     from legoesm.driver.config import ExperimentConfig
     from legoesm.forcing.amip_config import AMIPExperimentConfig
-    lost = sorted(
-        f for f in set(ExperimentConfig._fields) - set(AMIPExperimentConfig._fields)
-        if f.startswith(("bechtold_", "autoconv_", "convective_")))
-    assert not lost, f"convection scalars dropped by the AMIP round-trip: {lost}"
 
-    tuned = ExperimentConfig(
-        convection="bechtold", bechtold_epsilon_deep=3.0e-3,
-        bechtold_delta_deep=3.0e-5, bechtold_rprcon=5.0e-3,
-        bechtold_dnoprc=1.0e-4)
-    back = ExperimentConfig.from_amip_config(tuned.to_amip_config())
-    for f in ("bechtold_epsilon_deep", "bechtold_delta_deep",
-              "bechtold_rprcon", "bechtold_dnoprc"):
-        assert getattr(back, f) == getattr(tuned, f), f
+    tuned = {
+        "bechtold_epsilon_deep": 3.0e-3,
+        "bechtold_delta_deep": 3.0e-5,
+        "bechtold_rprcon": 5.0e-3,
+        "bechtold_dnoprc": 1.0e-4,
+        "bechtold_downdraft_entrain_rate": 5.0e-4,
+        "bechtold_downdraft_detrain_scale_m": 900.0,
+        "convective_precip_efficiency": 0.6,
+        "autoconv_q_c_crit": 3.0e-4,
+    }
+    missing = sorted(k for k in tuned
+                     if k not in AMIPExperimentConfig._fields)
+    assert not missing, f"campaign-tuned knobs absent from the flat schema: {missing}"
+
+    cfg = ExperimentConfig(convection="bechtold", **tuned)
+    back = ExperimentConfig.from_amip_config(cfg.to_amip_config())
+    for k, v in tuned.items():
+        assert getattr(back, k) == v, f"{k} reset by the AMIP round-trip"
 
 
 def test_inplume_conversion_responds_to_rprcon():
