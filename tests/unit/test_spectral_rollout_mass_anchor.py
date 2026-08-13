@@ -130,20 +130,51 @@ def test_anchor_off_is_byte_identical_to_before(setup, gated):
         np.asarray(a.lnps_hat.data), np.asarray(b.lnps_hat.data))
 
 
-def test_the_unanchored_rollout_really_does_drift(setup):
+@pytest.mark.parametrize("gated", [False, True])
+def test_the_unanchored_rollout_really_does_drift(setup, gated):
     """Non-vacuity: the anchored test above must be measuring something.
 
     If the unanchored rollout conserved mass on its own, the anchor test would
-    pass for the wrong reason. The spectral filter damping non-mean ``lnps``
-    modes changes ``∫exp(lnps)dA``, which is exactly the leak the anchor closes.
+    pass for the wrong reason.
+
+    The leak this control USED to exercise was the spectral filter damping
+    non-mean ``lnps`` modes, which moves ``∫exp(lnps)dA``.  #1531 stopped
+    filtering ``lnps`` (``apply_spectral_filter_to_state(..., filter_lnps``
+    defaults False, ``spectral_pe.py``), and ``spectral_rollout`` never passes
+    the flag — so that mechanism is gone: measured over these 6 filter
+    applications, ``filter_lnps=True`` moves the mass by -0.60 ppm and the
+    shipped ``filter_lnps=False`` by exactly 0.  What remains is ~1e3 x
+    smaller (mostly the dynamics: deleting the post-step filter entirely moves
+    the residual only 3.671e-4 -> 3.429e-4 ppm, ~7%), so the old absolute
+    1e-2 ppm floor could no longer be met by anything and the control failed
+    for a reason unrelated to the anchor.
+
+    The gate is therefore a SEPARATION, with a much lower absolute floor only
+    to keep "both are zero" from passing: the unanchored drift must be nonzero
+    AND far larger than the anchored one.  Measured: 3.7e-4 ppm unanchored vs
+    1.6e-10 ppm anchored (fp64 correction/measurement round-off) — six orders
+    apart, so 1e3 x is loose and still goes red the moment the anchor becomes
+    a no-op.  x64 is forced at import; fp32 is not a supported path here (the
+    Gaussian spectral grid rejects it).
     """
     grid, sigma, rest = setup
     state = _perturbed(rest, grid)
     # Strong filter so the leak is unambiguous at 6 steps.
     filt = jnp.exp(-2.0 * (jnp.asarray(grid.ls, jnp.float64) / _N_MAX) ** 4)
+    # Both step bodies: the rad-gated branch carries its OWN anchor call, so a
+    # removal there is invisible to the ungated case (codex).
+    kw = ({"rad_physics_fn": _zero_physics, "rad_update_interval": 3}
+          if gated else {})
     off = spectral_rollout(state, _zero_physics, grid, sigma, _cfg(),
-                           _DT, 6, None, filt)
-    assert abs(_drift_ppm(grid, state, off)) > 1.0e-2
+                           _DT, 6, None, filt, **kw)
+    on = spectral_rollout(
+        state, _zero_physics, grid, sigma,
+        _cfg(fix_mass=True, anchor_mass_to_initial=True),
+        _DT, 6, None, filt, **kw)
+    drift_off = abs(_drift_ppm(grid, state, off))
+    drift_on = abs(_drift_ppm(grid, state, on))
+    assert drift_off > 1.0e-5
+    assert drift_off > 1.0e3 * drift_on
 
 
 def test_anchor_also_acts_in_the_prescribed_sst_amip_rollout(setup):

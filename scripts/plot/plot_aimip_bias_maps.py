@@ -174,7 +174,7 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     if variant == "classical":
         return make_aimip_classical_spectral_physics(
             model, grid, spec_cfg.dt,
-            radiation=str(base_cfg.get("aimip_radiation", "gray")),
+            radiation=str(base_cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=int(
                 base_cfg.get("aimip_rad_update_interval", 6),
             ),

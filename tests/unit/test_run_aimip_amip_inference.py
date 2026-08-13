@@ -51,6 +51,30 @@ def test_merged_cfg_applies_classical_overlay(tmp_path):
     assert cfg["nlev"] == 8  # n_levels mapped to nlev
 
 
+def test_build_spec_cfg_forwards_conservation_knobs():
+    """The AMIP inference lane must honour the same four conservation keys
+    ``run_aimip`` honours; before this the two energy-numerics keys were
+    silently ignored here (a suite pinning legacy 'upwind' still ran
+    sb_centered)."""
+    if importlib.util.find_spec("legoesm") is None:  # pragma: no cover
+        pytest.skip("legoesm not importable in this environment")
+    mod = _load_driver()
+    base = dict(n_max=63, nlev=8, dt=600.0)
+
+    pe = mod._build_spec_cfg(base).pe_config
+    assert pe.fix_mass is False and pe.anchor_mass_to_initial is False
+    assert pe.vertical_advection_scheme == "sb_centered"
+    assert pe.frictional_heating is True
+
+    pe_on = mod._build_spec_cfg(dict(
+        base, fix_mass=True, anchor_mass_to_initial=True,
+        vertical_advection_scheme="upwind", frictional_heating=False,
+    )).pe_config
+    assert pe_on.fix_mass is True and pe_on.anchor_mass_to_initial is True
+    assert pe_on.vertical_advection_scheme == "upwind"
+    assert pe_on.frictional_heating is False
+
+
 def test_spectral_amip_rollout_signature():
     spec = importlib.util.find_spec(
         "legoesm.training.neural_gcm_spectral"

@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import platform
-import subprocess
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -27,6 +26,10 @@ from legoesm.forcing.amip_config import save_checkpoint
 # so io.state_checkpoint can share them without importing this driver-level
 # module (federation carve, Step 3).  Re-exported here for back-compat callers
 # of ``legoesm.driver.restart.{compute_state_digest,pytree_state_digest}``.
+from legoesm.io.git_provenance import (
+    check_cwd_import_consistency,
+    git_provenance,
+)
 from legoesm.io.state_digest import compute_state_digest, pytree_state_digest
 
 # Lazy imports to avoid circular dependency:
@@ -222,52 +225,31 @@ def _get_platform_tag() -> str:
     return f"{platform.system().lower()}-{platform.machine()}"
 
 
+def _package_anchor() -> Path:
+    """File of the IMPORTED module doing the stamping (this one).
+
+    Provenance is derived from the repository containing this file — the code
+    that actually runs — never from the CWD (2026-08-10: a run launched from a
+    pinned worktree stamped the pin while executing the editable install).
+    Reads the module global ``__file__`` at call time so tests can monkeypatch
+    it to point provenance at a synthetic repository.
+    """
+    return Path(__file__)
+
+
 def _get_git_hash() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
+    """HEAD SHA of the imported legoesm package's repo ("" if not a repo)."""
+    return git_provenance(_package_anchor()).commit
 
 
 def _get_git_ref() -> str:
-    """Current branch/ref name (empty string if detached or not a git repo)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            ref = result.stdout.strip()
-            return "" if ref == "HEAD" else ref  # "HEAD" => detached
-    except Exception:
-        pass
-    return ""
+    """Branch name of the imported package's repo ("" if detached / no repo)."""
+    return git_provenance(_package_anchor()).ref
 
 
 def _get_git_dirty() -> bool:
-    """True if the working tree has uncommitted changes (False if unknown)."""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return bool(result.stdout.strip())
-    except Exception:
-        pass
-    return False
+    """True if the imported package's repo has uncommitted changes."""
+    return git_provenance(_package_anchor()).dirty
 
 
 def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
@@ -464,7 +446,12 @@ def build_run_manifest(
     config_kind: str | None = None,
     params_applied: dict | None = None,
 ) -> dict:
-    """Assemble the run-manifest dict (pure; does no I/O).
+    """Assemble the run-manifest dict (no file I/O; reads git provenance).
+
+    Raises ``RuntimeError`` when the CWD is a legoesm checkout whose HEAD
+    differs from the imported package's repository (see
+    :mod:`legoesm.io.git_provenance`), unless ``LEGOESM_ALLOW_IMPORT_MISMATCH``
+    is set — then the mismatch is recorded under ``[legoESM].cwd_repo``.
 
     Parameters
     ----------
@@ -485,12 +472,33 @@ def build_run_manifest(
 
     kind = config_kind or detect_config_kind(config)
 
+    # Provenance of the IMPORTED package — the code that runs — not the CWD.
+    # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into
+    # a pinned worktree while importing another tree), this RAISES unless
+    # LEGOESM_ALLOW_IMPORT_MISMATCH=1, in which case the mismatch is recorded.
+    anchor = _package_anchor()
+    cwd_mismatch = check_cwd_import_consistency(anchor)
+    prov = git_provenance(anchor)
+    legoesm_section = {
+        "ref": prov.ref,
+        "commit": prov.commit,
+        # Resolved file the provenance was derived from, so a reader can see
+        # WHICH tree actually ran (legoesm is a namespace package; its
+        # __file__ is None, so the stamping module's file is recorded).
+        "package_path": prov.anchor,
+    }
+    if cwd_mismatch is not None:
+        # Explicitly-allowed mismatch: record the launch directory's repo too,
+        # so the manifest tells the whole story instead of certifying a lie.
+        legoesm_section["cwd_repo"] = {
+            "root": cwd_mismatch["cwd_root"],
+            "commit": cwd_mismatch["cwd_commit"],
+            "import_mismatch_allowed": True,
+        }
+
     raw = {
         "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
-        "legoESM": {
-            "ref": _get_git_ref(),
-            "commit": _get_git_hash(),
-        },
+        "legoESM": legoesm_section,
         "reproducibility": {
             "runner_tag": runner_tag,
             "python_version": platform.python_version(),
@@ -499,7 +507,7 @@ def build_run_manifest(
             "numpy_version": np.__version__,
             "legoesm_version": __version__,
             "platform": _get_platform_tag(),
-            "git_dirty": _get_git_dirty(),
+            "git_dirty": prov.dirty,  # imported package's repo, not the CWD
             "patches": list(patches) if patches else [],
         },
         "config": {

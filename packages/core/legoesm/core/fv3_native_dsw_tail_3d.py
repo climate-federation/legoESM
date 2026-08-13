@@ -51,8 +51,14 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                       dsw_outs: list, dt: float, km: int, *,
                       cfg: dict | None = None,
                       hydrostatic: bool = True,
-                      remap_follows: bool = False) -> list:
+                      remap_follows: bool = False,
+                      stage_hook=None) -> list:
     """``d_sw3`` -> BARRIER 2 -> ``d_sw4/5/6``, per level, all six faces.
+
+    ``stage_hook(name, payload)`` observes S10 (d_sw3 B-wind
+    ingredients), S11 (post BARRIER 2), S12 (corner KE), S13 (d_sw5
+    diagnostics) and S14 (d_sw6-updated winds); ``None`` changes
+    nothing.
 
     Returns per-face dicts with the updated D winds ``u``/``v`` at every
     level plus the ``d_sw5`` diagnostics later stages read.
@@ -87,6 +93,14 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                                  ctx["gs6"][t], bd, npx, npx, dt=dt,
                                  hord_mt=c["hord_mt"])
 
+    if stage_hook is not None:
+        # S10 (:961-966): d_sw3's B-grid corner-velocity ingredients,
+        # BEFORE barrier 2 blends ubb/vbbtemp.
+        stage_hook("S10_dsw3", [
+            {nm: np.stack([s3[t][k][nm] for k in range(km)], axis=2)
+             for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp")}
+            for t in range(6)])
+
     # --- BARRIER 2: B-grid corner ingredients, one level at a time --------
     # dyn_core.F90:984. All six faces must be present for a level before it
     # is blended, or a face is averaged against a stale neighbour.
@@ -98,8 +112,17 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
         ubb6_k.append(ubb6)
         vbb6_k.append(vbbtemp6)
 
+    if stage_hook is not None:
+        # S11 (:969-1011): the blended ubb/vbbtemp.
+        stage_hook("S11_b2", [
+            {"ubb": np.stack([ubb6_k[k][t] for k in range(km)], axis=2),
+             "vbbtemp": np.stack([vbb6_k[k][t] for k in range(km)], axis=2)}
+            for t in range(6)])
+
     # --- d_sw4 / d_sw5 / d_sw6 on the blended ingredients -----------------
     outs = []
+    kee12 = [[] for _ in range(6)] if stage_hook is not None else None
+    s5diag = [[] for _ in range(6)] if stage_hook is not None else None
     for t in range(6):
         # Allocate diagnostics from the SHAPE THE STAGE ACTUALLY RETURNS.
         # Guessing (m_a, m_a) is wrong for the B-grid members: divg_d and
@@ -120,6 +143,9 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
             ring = slice(ng, ng + npx)
             kee = s3[t][k]["ubbtemp"] * vbb6_k[k][t]
             ke[ring, ring] = 0.5 * (kee + ubb6_k[k][t] * s3[t][k]["vbb"])
+            if kee12 is not None:
+                # S12 (:1015-1020): the corner KE before d_sw4 owns it.
+                kee12[t].append(np.array(ke, copy=True))
 
             s4 = d_sw4_duo(lev["u"], lev["v"], s1["ut"], s1["vt"], ke,
                            ctx["gs6"][t], bd, npx, npx, dt=dt)
@@ -141,6 +167,13 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                               else dsw_outs[t]["w"][:, :, k]),
                            dw=(None if hydrostatic else s1.get("dw")),
                            damp_w=nh_damp_w)
+            if s5diag is not None:
+                # S13 (:1102-1123): d_sw5's diagnostics as d_sw6 will
+                # consume them (copies -- d_sw6 may write in place).
+                s5diag[t].append({nm: np.array(s5[nm], copy=True)
+                                  for nm in ("ke", "wk", "vortfluxx",
+                                             "vortfluxy", "ut", "vt")
+                                  if nm in s5})
             s6 = d_sw6_duo(lev["u"], lev["v"], s5["ut"], s5["vt"],
                            s5["ke"], s5["wk"], s5["vortfluxx"],
                            s5["vortfluxy"], ctx["gs6"][t], bd, npx, npx,
@@ -163,6 +196,16 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                         f"a stage must not change shape between levels")
                 acc[nm][:, :, k] = arr
         outs.append(acc)
+    if stage_hook is not None:
+        stage_hook("S12_kee", [
+            {"kee": np.stack(kee12[t], axis=2)} for t in range(6)])
+        stage_hook("S13_dsw45", [
+            {nm: np.stack([lvl[nm] for lvl in s5diag[t]], axis=2)
+             for nm in s5diag[t][0]}
+            for t in range(6)])
+        # S14 (:1256-1288): the d_sw6-updated D winds.
+        stage_hook("S14_dsw6", [{"u": outs[t]["u"], "v": outs[t]["v"]}
+                                for t in range(6)])
     return outs
 
 
@@ -171,8 +214,15 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
                             cp_air: float, a2b_ord: int = 4,
                             d_ext: float = 0.0,
                             remap_step: bool = False,
-                            remap_follows: bool = False) -> list:
+                            remap_follows: bool = False,
+                            stage_hook=None) -> list:
     """D-grid ``geopk`` (``:1401``) then ``one_grad_p`` (``:1531``).
+
+    ``stage_hook(name, payload)`` observes S16 (post D-grid geopk) and
+    S17 (post ``one_grad_p``); ``None`` changes nothing.  The S16
+    payload is COPIED at the stage boundary: ``one_grad_p`` scratches
+    ``pk``/``gz`` in place (``a2b_ord4`` with ``replace=.true.``), so a
+    live view would show the post-one_grad_p corner values instead.
 
     ``one_grad_p`` mutates ``u``, ``v``, AND ``pk``/``gz`` in place --
     ``a2b_ord4`` is called with ``replace=.true.``, so on return ``pk`` and
@@ -212,6 +262,10 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
         if remap_step:
             # dyn_core.F90:1511-1519, taken BEFORE :1531 one_grad_p.
             got["pk_remap"] = np.array(got["pk"], copy=True)
+        if stage_hook is not None:
+            got["_s16"] = {"pkc": np.array(got["pk"], copy=True),
+                           "gz": np.array(got["gz"], copy=True),
+                           "pkz": np.array(got["pkz"], copy=True)}
         divg2 = np.zeros((n + 2 * ng + 1, n + 2 * ng + 1), dtype=np.float64)
         one_grad_p(tail_outs[t]["u"], tail_outs[t]["v"],
                    got["pk"], got["gz"], divg2, dsw_outs[t]["delp"],
@@ -220,6 +274,11 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
                    hydrostatic=True, a2b_ord=a2b_ord, d_ext=d_ext,
                    ng=ng, duogrid=True)
         press.append(got)
+    if stage_hook is not None:
+        stage_hook("S16_geopkD", [press[t].pop("_s16") for t in range(6)])
+        stage_hook("S17_onegradp", [{"u": tail_outs[t]["u"],
+                                     "v": tail_outs[t]["v"]}
+                                    for t in range(6)])
     return press
 
 

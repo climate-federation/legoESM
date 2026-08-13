@@ -232,9 +232,15 @@ def main():
                     help="comma list of ext families to swap to interim "
                          "exchanges (attribution probes)")
     ap.add_argument("--plain-conventions", action="store_true",
-                    help="A/B arm: plain-conventions lane (default = the "
-                         "bounded/oracle lane the Zenodo duo runs execute)")
+                    help="RETIRED A/B arm (km=1 corpus migration "
+                         "2026-08-11): c_sw refuses duogrid on unbounded "
+                         "metrics (fv_arrays.F90:1512), so this lane can "
+                         "no longer run; the flag now fails fast")
     args = ap.parse_args()
+    if args.plain_conventions:
+        ap.error("--plain-conventions is retired: duogrid on unbounded "
+                 "metrics is upstream-impossible (fv_arrays.F90:1512) "
+                 "and c_sw now refuses it")
     deck = CASE_DECKS[args.case]
     if args.dt_atmos is None:
         args.dt_atmos = deck["dt_atmos"]

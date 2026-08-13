@@ -236,7 +236,9 @@ def main(argv=None):
         wbe_spec.loader.exec_module(wbe)
 
         skeleton = wbe._build_skeleton(args.variant, cfg, spec_cfg, grid)
-        trained = eqx.tree_deserialise_leaves(args.checkpoint, skeleton)
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        trained = load_checkpoint_or_fail(
+            args.checkpoint, skeleton, what="the pressure-spinup diagnostic")
         if args.variant == "column_nn":
             from legoesm.training.neural_gcm_spectral import (
                 make_column_mlp_spectral_physics,
@@ -250,7 +252,9 @@ def main(argv=None):
             rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
             built = make_aimip_classical_spectral_physics(
                 trained, grid, spec_cfg.dt,
-                radiation=str(cfg.get("aimip_radiation", "gray")),
+                # rrtmgp by default like every other AIMIP path; a config
+                # may still name gray for a cheap diagnostic (Claude review).
+                radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 rad_update_interval_steps=rad_update_interval,
                 convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
                 turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
@@ -258,6 +262,9 @@ def main(argv=None):
                     cfg.get("aimip_surface_bulk_scheme", "constant")),
                 gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
                 microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
+                # A pressure-spinup diagnostic, not a model claim: it runs
+                # whatever the config names, including an unfilled family.
+                allow_unfilled_families=True,
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
                 land_mask=None,
                 split_rad=rad_update_interval > 1,

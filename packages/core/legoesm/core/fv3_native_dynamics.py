@@ -44,26 +44,24 @@ exchange then overwrites -- harmless here, but it would also convert the
 corner-diagonal sentinels, and those are NOT overwritten.  Mirror the
 Fortran window.
 
-TRACERS ARE NOT ADVECTED, AND THAT IS A DECLARED SCOPE LIMIT
-------------------------------------------------------------
-``fv_tracer2d`` is not ported.  On the pinned deck that changes NOTHING
-in ``u``/``v``/``pt``/``delp``, and the reason is checkable rather than
-asserted:
+TRACERS ARE ADVECTED (tracer_2d_1L) AND REMAPPED
+------------------------------------------------
+``fv_tracer2d``'s live arm for this deck -- ``tracer_2d_1L``
+(``z_tracer = .T.``, duo) -- is ported in
+``fv3_native_tracer2d`` and called at the oracle's site
+(``fv_dynamics.F90:534``, between ``dyn_core`` and the remap) on the
+mfx/mfy/cx/cy flux capacitors the acoustic loop accumulates
+(``dyn_core.F90:313`` zeroing + ``sw_core.F90:903-920`` per-sub-step
+accumulation, threaded through ``dsw_transport_phase_3d``).  ``dp1``
+is the pre-dyn_core ``delp`` (``:472-478``), copied per ``n_map``.
+The remap then makes its ``nr`` tracer passes through
+``fv_mapz.F90:330-342`` as before.
 
-* ``adiabatic = .true.`` => ``zvir = 0`` (``driver/solo/atmosphere.F90``),
-  so ``dp1 = zvir*q = 0`` at ``:291`` and the closing
-  ``pt/(1 + r_vir*q(sphum))`` at ``fv_mapz.F90:975`` is an identity;
-* ``consv_te = 0.`` gates out the total-energy fixer
-  (``fv_mapz.F90:628``), the only other place ``q`` reaches ``pt``;
-* ``fill = .F.`` and ``do_sat_adj = .F.`` gate out ``fillz`` and the
-  saturation adjustment, which are the only places ``q`` reaches
-  ``delp``.
-
-So ``q`` is a passenger.  :func:`fv_dynamics_step` still REQUIRES the
-tracer list, because the remap must make the same ``nr`` passes through
-``fv_mapz.F90:330-342`` the oracle makes, and it refuses to run with a
-non-zero ``zvir`` or ``consv`` where the passenger argument would stop
-being true.
+The tracers still do not FEED BACK on this deck, and the guards that
+keep that visible remain: ``zvir != 0`` (the ``dp1 = zvir*q(sphum)``
+coupling at ``:291``/``:402`` and the ``pt/(1 + r_vir*q)`` at
+``fv_mapz.F90:975``) and ``consv_te != 0`` (the total-energy fixer)
+are refused, exactly as before.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------
@@ -249,7 +247,11 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      use_logp: bool = False, kord_wz: int = 9,
                      w_limiter: bool | None = None,
                      cfg: dict | None = None, a2b_ord: int = 4,
-                     validate: bool = True) -> dict:
+                     validate: bool = True,
+                     hord_tr: int = 6, tracer_q_split: int = 0,
+                     nord_tr: int = 0, trdm2: float = 0.0,
+                     lim_fac: float = 1.0, z_tracer: bool = True,
+                     inline_q: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -262,9 +264,13 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     owns the round trip (``:396-408`` in, ``fv_mapz.F90:209-217`` out).
     A caller that stops between the two gets ``theta_v``.
 
-    ``q`` is six lists of tracer arrays.  It is required -- see the module
-    docstring for why the pinned deck's tracers are passengers and why
-    that must stay a visible choice rather than a default.
+    ``q`` is six lists of tracer arrays (each shaped like ``delp``).
+    They are ADVECTED by ``tracer_2d_1L`` between the acoustic loop and
+    the remap, then remapped -- see the module docstring.  The tracer
+    flags default to the resolved parity deck (``HORD_TR=6 Q_SPLIT=0
+    NORD_TR=0 TRDM2=0 LIM_FAC=1 Z_TRACER=T INLINE_Q=F``, from the
+    logfile echo); any unported arm raises in
+    ``fv3_native_tracer2d.require_tracer_2d_1l_lane``.
     """
     if k_split < 1:
         raise ValueError(f"k_split must be >= 1, got {k_split}")
@@ -291,6 +297,23 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             "consv_te = 0.")
 
     n, ng = ctx["n"], ctx["ng"]
+    nq = len(q[0])
+    if any(len(qt) != nq for qt in q):
+        raise ValueError(
+            f"every face must carry the same tracer count; got "
+            f"{[len(qt) for qt in q]}")
+    from legoesm.core.fv3_native_tracer2d import (
+        alloc_flux_capacitors,
+        require_tracer_2d_1l_lane,
+        tracer_2d_1l_sixface,
+    )
+    if nq > 0:
+        # Fail on an unported tracer arm BEFORE the acoustic loop, not
+        # after k_split*n_split sub-steps of work.
+        require_tracer_2d_1l_lane(z_tracer=z_tracer,
+                                  q_split=tracer_q_split,
+                                  nord_tr=nord_tr, trdm=trdm2,
+                                  inline_q=inline_q)
     if omga is None:
         omga = [np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
                 for _ in range(6)]
@@ -332,6 +355,11 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     for n_map in range(1, k_split + 1):
         last_step = (n_map == k_split)
 
+        # :472-478  dp1 = delp, full padded box, BEFORE dyn_core.
+        # :313-316 (dyn_core)  fresh zeroed flux capacitors per call.
+        dp1_6 = [np.array(state[t]["delp"], copy=True) for t in range(6)]
+        flux_cap = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
+
         # :502  dyn_core.  press_out receives the remap-step geopk bundle.
         press_out: list = []
         acoustic_loop_3d(ctx, state, mdt, km, n_split=n_split, ptop=ptop,
@@ -340,13 +368,22 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                          hydrostatic=hydrostatic,
                          p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                          use_logp=use_logp,
-                         press_out=press_out)
+                         press_out=press_out,
+                         flux_cap=flux_cap)
         if len(press_out) != 6:
             raise RuntimeError(
                 "dyn_core did not return the remap-step pressure bundle; "
                 "acoustic_loop_3d must fill press_out on it == n_split")
 
-        # :528-540  tracer_2d -- see the module docstring. Nothing to do.
+        # :517/:528-540  tracer_2d_1L on the accumulated capacitors
+        # (`if (.not. inline_q .and. nq /= 0)`; inline_q is refused
+        # above, so the gate is just nq).
+        if nq > 0:
+            tracer_2d_1l_sixface(ctx, q, dp1_6, flux_cap,
+                                 km=km, nq=nq, hord_tr=hord_tr, dt=mdt,
+                                 q_split=tracer_q_split, nord_tr=nord_tr,
+                                 trdm=trdm2, lim_fac=lim_fac,
+                                 z_tracer=z_tracer, inline_q=inline_q)
 
         if not remapped:
             # :568 gates the remap on npz > 4 and the oracle leaves pt in

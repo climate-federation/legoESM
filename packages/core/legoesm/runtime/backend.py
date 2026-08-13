@@ -125,7 +125,29 @@ NVIDIA_GPU_XLA_FLAGS = {
     # eliminates the ~5-10μs per-launch overhead that dominates
     # small-grain step kernels.  Requires CUDA ≥ 12.3 (XLA falls back
     # silently on older runtimes, so always-on is safe).
-    "xla_gpu_enable_command_buffer": "FUSION,CUSTOM_CALL,COLLECTIVES",
+    #
+    # COLLECTIVES is deliberately NOT in the list.  Capturing NCCL
+    # collectives into command buffers freezes the thunk schedule and
+    # discards the dynamic compute/comm overlap the latency-hiding
+    # scheduler provides: measured on the MPAS shard_map lane
+    # (Levante, 2 nodes x 2 A100, s6@4, job 26873637) the full
+    # FUSION,CUSTOM_CALL,CUBLAS,CUDNN,COLLECTIVES set was +25% step
+    # time (2.81 -> 3.52 ms) versus XLA defaults; the non-collective
+    # tokens measured noise-neutral in the 2026-06-15 np1 audits
+    # (jobs 8488104/8490224), attributing the loss to COLLECTIVES.
+    # The old FUSION,CUSTOM_CALL,COLLECTIVES default was never A/B'd
+    # at multi-rank (np1 has no collectives).  Re-enable per-run for allreduce-heavy
+    # data-parallel workloads with no interleaved compute (the one
+    # regime where capture can win) via
+    # LEGOESM_XLA_CMDBUF_COLLECTIVES=1 — set BEFORE the first
+    # ``legoesm.runtime`` import: the value freezes when this module
+    # loads (XLA_FLAGS must be set before JAX initialises anyway, so
+    # later mutation could never take effect).
+    "xla_gpu_enable_command_buffer": (
+        "FUSION,CUSTOM_CALL,COLLECTIVES"
+        if os.environ.get("LEGOESM_XLA_CMDBUF_COLLECTIVES") == "1"
+        else "FUSION,CUSTOM_CALL"
+    ),
 }
 
 AMD_GPU_XLA_FLAGS: dict[str, str] = {
