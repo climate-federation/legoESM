@@ -143,13 +143,41 @@ own discretisation error at the refined level too, so the difference has a
 tolerance there as well. Without it every row is labelled UNBUDGETED TREND,
 because a direction is not a convergence claim.
 
-Measured 2026-08-13 for `phillips_two_layer` (latlon 36x72→72x144, MPAS
-ico4→ico5, budgets from 144x288 and ico6): the cross-arm difference is
-0.20 of the arms' own resolution sensitivity at the coarse level and
-**1.08 at the refined level**. The two dycores part company faster than
-either arm's answer settles. The case's own amplitude also DOUBLES between
-the two levels, so neither resolution is near converged and this is a
-relative rate of approach to an unknown limit, not a convergence result.
+Measured 2026-08-13 (jobs 26917825/26917826/26918225; latlon 36x72→72x144
+with the tolerance from 144x288, MPAS ico4→ico5 with the tolerance from
+ico6). D/E is the cross-arm difference over the larger of the two arms'
+own self-error AT THAT LEVEL:
+
+| Case | D/E coarse | D/E refined | label |
+|---|---|---|---|
+| barotropic_wave | 0.50 | 0.70 | FLAT |
+| geostrophic_adjustment | 0.74 | 0.57 | FLAT |
+| inertia_gravity_wave | 0.31 | 0.41 | CONVERGING |
+| lock_exchange (front displacement) | 0.56 | 0.24 | UNCONVERGED TREND (diverging) |
+| phillips_two_layer | 0.20 | **1.08** | UNCONVERGED TREND (diverging) |
+
+**`phillips_two_layer` is the one case where the two dycores differ by
+more than either arm's own resolution sensitivity once both are refined.**
+Every other case stays inside its budget at both levels. That is the
+remaining cross-grid inconsistency in this suite, and it was invisible at
+the coarse resolution alone, where the difference was a fifth of the
+tolerance.
+
+It is NOT a formal divergence result: the phillips case amplitude doubles
+between the two levels, so neither resolution is near the continuous
+answer and this is a relative rate of approach to an unknown limit. The
+obvious competing reading — that an unstable case simply amplifies any
+difference at its own growth rate — was tested with a log-linear fit of
+the difference against time and is NOT settled either way (R² 0.43–0.76,
+negative slope: the difference appears early and does not grow through the
+run). A poor fit refutes nothing in either direction, and the report says
+so rather than claiming the instability reading is dead.
+
+The lock-exchange front row is the opposite shape and is reported, not
+resolved: the arms' front-displacement disagreement GROWS (1.0 → 1.5 km)
+while D/E FALLS (0.56 → 0.24), because each arm's own front self-error
+grew faster still (1.88 → 6.73 km). A tolerance that grows faster than the
+thing it bounds is not evidence of agreement.
 
 ## The Petersen channel arm's advection scheme
 
