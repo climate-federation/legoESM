@@ -85,7 +85,8 @@ def _month_labels(d):
     return out
 
 
-def bin_to_model(arr, rlat, rlon, mlat, mlon, label="reference"):
+def bin_to_model(arr, rlat, rlon, mlat, mlon, label="reference",
+                 allow_gaps=False):
     """Area-weighted BIN average of a (lat, lon) field onto the model grid.
 
     ``np.bincount`` over cos-lat weights, not ``coarsen``: CERES is 180x360 and
@@ -93,6 +94,18 @@ def bin_to_model(arr, rlat, rlon, mlat, mlon, label="reference"):
     model 36x72.  Binning is exact for both and stays conservative on the
     pole-inclusive ERA5 latitude axis.  Public so the 3-D profile probe uses
     THIS reduction rather than a second copy that could drift from it.
+
+    A reference that does not cover every model cell is FATAL by default: a
+    partially covered field averaged with ``nanmean`` produced a confidently
+    wrong number once already.  ``allow_gaps=True`` is the explicit opt-in for
+    a caller that will handle the holes itself, and it is STRICTER than the
+    default about what counts as covered: a model cell is NaN unless EVERY
+    native reference cell binned into it carried data.  An empty-cell test
+    alone would pass a cell at the retrieval terminator that received one
+    valid sample out of twenty-five, and that half-sampled cell would then sit
+    inside a band the caller calls "fully covered".  The caller is responsible
+    for restricting the comparison to the surviving domain and SAYING which
+    domain it used.  Only the roughness band in ``scorecard.py`` opts in.
     """
     dlat = float(mlat[1] - mlat[0])
     dlon = float(mlon[1] - mlon[0])
@@ -107,13 +120,26 @@ def bin_to_model(arr, rlat, rlon, mlat, mlon, label="reference"):
     good = np.isfinite(arr)
     num = np.bincount(flat[good], weights=(arr * w2)[good], minlength=n)
     den = np.bincount(flat[good], weights=w2[good], minlength=n)
+    if allow_gaps:
+        # PARTIAL counts as missing, not just empty, and the test cannot be
+        # gated on some OTHER cell being empty: a cell straddling the
+        # retrieval terminator can be the only defective one on the grid.
+        # den_all is the weight the cell would carry were every native sample
+        # valid; a cell no native sample reaches at all has den_all == 0.
+        den_all = np.bincount(flat.ravel(), weights=w2.ravel(), minlength=n)
+        incomplete = (den < den_all * (1.0 - 1e-9)) | (den_all <= 0)
+        if not incomplete.any():
+            return (num / den).reshape(mlat.size, mlon.size)
+        out = np.divide(num, den, out=np.full_like(num, np.nan),
+                        where=~incomplete)
+        return out.reshape(mlat.size, mlon.size)
     if (den <= 0).any():
         raise SystemExit(f"FATAL: {label} left {int((den <= 0).sum())} model "
                          "cells with no reference data -- never nanmean past this")
     return (num / den).reshape(mlat.size, mlon.size)
 
 
-def _ref_clim(var, months, mlat, mlon, src=None):
+def _ref_clim(var, months, mlat, mlon, src=None, allow_gaps=False):
     """Reference monthly climatology BINNED onto the model grid, >=REF_MIN_YEAR.
 
     ``src`` overrides the default dataset directory for ``var`` (``_SOURCE``),
@@ -153,7 +179,8 @@ def _ref_clim(var, months, mlat, mlon, src=None):
         arr = arr.T
     assert arr.shape == (rlat.size, rlon.size), f"{var}: unexpected ref shape"
 
-    return bin_to_model(arr, rlat, rlon, mlat, mlon, label=var)
+    return bin_to_model(arr, rlat, rlon, mlat, mlon, label=var,
+                        allow_gaps=allow_gaps)
 
 
 def region_mean(field, lat, lon, box, valid=None):

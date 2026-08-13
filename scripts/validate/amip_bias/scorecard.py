@@ -60,6 +60,65 @@ rb = bm.rb
 
 ROUGH_VARS = (("pr", tc.GPCP), ("clwvi", bm.ESACCI), ("clt", bm.ESACCI))
 TA_LEVELS = (70000.0, 50000.0, 15000.0)
+# A roughness ratio needs a domain both fields share.  ESACCI's water-path
+# retrievals are visible/near-IR, so in a JFM run there is no reference at all
+# north of +45 (polar night) and none over the southern polar cap -- 795 of
+# 2592 cells.  The ratio is then taken over the largest contiguous run of
+# fully-covered latitude rows, identically on both sides, and the band is
+# printed.  Below this many rows the domain is too small for a high-pass
+# statistic to mean anything (the metric already discards the two outermost
+# rows), so refuse rather than quote it.
+ROUGH_MIN_ROWS = 10
+
+
+def covered_band(ref, var):
+    """Latitude rows of ``ref`` on which a roughness ratio may be quoted.
+
+    The LARGEST CONTIGUOUS run of fully-covered rows, never ``min..max`` of the
+    covered rows: an interior hole would otherwise be swept straight back in.
+    A reference with no holes returns the whole grid, so a fully covered
+    variable keeps the global number it had before this existed.
+
+    ``grid_scale_residual`` wraps in latitude, so the crop's own top and bottom
+    rows take a neighbour from the far side of the band -- but its ``[1:-1]``
+    drops exactly those two rows from the mean, so the wrap never reaches the
+    statistic.  The sd normalisation is simply taken over the band, identically
+    for model and reference.
+    """
+    covered = np.flatnonzero(~np.isnan(ref).any(axis=1))
+    runs = (np.split(covered, np.flatnonzero(np.diff(covered) != 1) + 1)
+            if covered.size else [covered])
+    band = max(runs, key=lambda r: r.size)
+    if band.size < ROUGH_MIN_ROWS:
+        raise SystemExit(
+            f"FATAL: rough_{var}: largest contiguous fully-covered latitude "
+            f"band is {band.size} rows (< {ROUGH_MIN_ROWS}) -- refusing to "
+            "quote a roughness ratio on that domain")
+    return slice(int(band[0]), int(band[-1]) + 1)
+
+
+def rough_ratio(f, ref, var):
+    """Roughness of ``f`` over that of ``ref``, on the domain they share.
+
+    Returns ``(ratio, band)`` where ``band`` is the crop slice, or ``None``
+    when no crop was needed.  BOTH fields take the same crop -- a ratio whose
+    two halves came from different domains is not a ratio.  A NaN surviving
+    into either field is fatal: ``grid_scale_residual`` would return NaN and
+    the table prints NaN as a dash, which reads as "not computed" rather than
+    "computed wrong".
+    """
+    sl = covered_band(ref, var)
+    band = None
+    if sl != slice(0, ref.shape[0]):
+        f, ref = f[sl], ref[sl]
+        band = sl
+    for name, arr in (("model", f), ("reference", ref)):
+        if not np.isfinite(arr).all():
+            raise SystemExit(
+                f"FATAL: rough_{var}: {int((~np.isfinite(arr)).sum())} "
+                f"non-finite cells left in the {name} field on the scored "
+                "band -- a roughness ratio cannot be quoted here")
+    return bm.grid_scale_residual(f) / bm.grid_scale_residual(ref), band
 
 
 def headline(run):
@@ -98,14 +157,16 @@ def headline(run):
         md = rb._load_model(run, var)
         if md is None or lat is None:
             continue
-        ref = rb._ref_clim(var, months, lat, lon, src=src)
+        ref = rb._ref_clim(var, months, lat, lon, src=src, allow_gaps=True)
         if ref is None:
             continue
         f = np.asarray(md[var]).mean(axis=0)
         if var == "clt" and np.nanmax(ref) <= 1.5:
             ref = ref * 100.0
-        out[f"rough_{var}"] = (bm.grid_scale_residual(f)
-                               / bm.grid_scale_residual(ref))
+        out[f"rough_{var}"], sl = rough_ratio(f, ref, var)
+        if sl is not None:
+            out[f"rough_{var}_band"] = (float(lat[sl.start]),
+                                        float(lat[sl.stop - 1]))
 
     mt = rb._load_model(run, "ta")
     if mt is not None:
@@ -151,6 +212,21 @@ def print_headline(rows):
           "|lat|<=15.  d_width/d_cent = continuous\nrain-band width and "
           "centroid vs GPCP [deg].  rgh_* = grid-scale roughness / the\n"
           "observation's own (1.0 = as smooth as observed).")
+    seen = {}
+    for r in rows:
+        for key in sorted(k for k in r if k.endswith("_band")):
+            lo, hi = r[key]
+            print(f"  {r['run']}: {key[:-5]} scored on latitudes "
+                  f"{lo:+.1f}..{hi:+.1f} only -- the reference does not cover "
+                  "the rest of the globe in these months.")
+            seen.setdefault(key, set()).add((lo, hi))
+    for key, bands in seen.items():
+        if len(bands) > 1:
+            print(f"  WARNING: {key[:-5]} was scored on DIFFERENT latitude "
+                  f"bands across these runs ({sorted(bands)}).  A roughness "
+                  "ratio is a domain-dependent statistic -- these columns are "
+                  "NOT comparable to each other.  Score runs that share the "
+                  "simulated months, or drop the column.")
 
 
 def main(argv=None):
