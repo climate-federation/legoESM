@@ -226,15 +226,34 @@ be written against the real API. Then the km=1 stepper, then Phases 2 and 3.
 
 ## Next task, precisely
 
-1. `sbatch scripts/cluster/fv3_native/jax_lane_measure.sbatch`; read the
-   `MEASURED`/assertion values; replace **every** `TOL-PENDING` marker with
-   `measured X, bound = measured × N`. Nothing ships with a marker left —
-   the job censuses them in step 1 for exactly this reason.
-2. Codex adversarial review of the code (not just the strategy), then fix and
-   re-review until clean.
-3. SW core port, then the km=1 `full_acoustic_step_sixface` JAX twin.
-4. `--backend {numpy,jax}` on `run_duo_stepper_w2.py` / `run_duo_stepper_case6.py`
-   and score with the **existing** calibrated gates.
+1. **Re-run the measurement job** against the post-triage code (re-pin a
+   worktree at the new SHA, edit `REPO=` in
+   `scripts/cluster/fv3_native/jax_lane_measure.sbatch`, `sbatch`). Expect the
+   remaining `TOL-PENDING` bounds to trip on purpose — several were left at a
+   provisional 1e-12 with the assertion message printing the measured value, so
+   one run yields the number.
+2. **Replace every `TOL-PENDING` marker** with `measured X, bound = measured ×
+   N`. Nothing ships with a marker left; the job censuses them in step 1 for
+   exactly this reason. Current count is ~120 across five test files.
+3. **Close codex's `_rezone` BLOCKER and the two MAJORs**, then re-review.
+4. **SW core** (`fv3_duo_sw_core.py`: `c_sw`, `d_sw1..6_duo`,
+   `d2a2c_vect_duo`, `divergence_corner_duo`, `del6_vt_flux`) — in flight.
+5. **The km=1 stepper**: a JAX `full_acoustic_step_sixface(ctx, states, dt,
+   d_ext=…)`. This is the whole of Phase 1's remaining risk, and it is one
+   function.
+6. `--backend {numpy,jax}` on `run_duo_stepper_w2.py` /
+   `run_duo_stepper_case6.py`, then score with the **existing** calibrated
+   gates — do not write new ones.
+
+### Dependency note for step 4
+
+`a2b_ord4` was promoted from `_a2b_ord4` in `fv3_pgrad.py` so the SW core's
+`d_sw5_duo` can import it (a private cross-module import is banned by a CI
+ratchet, and the alternative was a third copy of a 300-line routine).
+`_a2b_ord4_k`, its vmap-over-levels wrapper, stays private. `del6_vt_flux` is a
+**sw_core** routine and its home is the SW module; `fv3_nh_core._del6_vt_flux`
+is a temporary private copy made before the SW module existed and should be
+deleted once the SW one lands.
 
 ---
 
