@@ -1451,6 +1451,17 @@ def _field_decomposition(paths: dict, t_index: int = -1):
     amplitude, because eta in metres and SST in degrees cannot be compared
     raw. The returned fraction is therefore "how far apart the arms are,
     in units of how much this field actually moved".
+
+    TWO WARNINGS ON READING THE FRACTION (GLM-5.2, 2026-08-13):
+
+    * It is unreliable for a field the case barely moves. A relaxed tracer
+      on a timescale comparable to the run length has a structurally small
+      denominator, so a bounded difference divides into a fraction above 1
+      that says nothing physical. Read the ABSOLUTE difference and its
+      growth for such a field, not the fraction.
+    * The row for the case's OWN headline field is the headline number
+      restated, not new information. What the decomposition adds is the
+      OTHER rows -- specifically whether they share the headline's trend.
     """
     names = sorted(paths)
     if len(names) < 2:
@@ -1475,11 +1486,25 @@ def _field_decomposition(paths: dict, t_index: int = -1):
             continue
         d = _pair_diff(A - A0, mA & mA0, B - B0, mB & mB0,
                        shift=False)["rms_abs"]
-        both = _erode(mA & mA0 & np.isfinite(A) & np.isfinite(A0))
+        # SYMMETRIC, and on the NUMERATOR'S OWN SUPPORT. An earlier
+        # revision divided by the first sorted arm's motion, computed on
+        # that arm's mask -- so "lat-lon" became the yardstick purely by
+        # alphabetical order, on a different set of cells from the
+        # difference it was scaling, and a nearly stationary lat-lon arm
+        # would have sent the ratio to infinity however normally MPAS
+        # evolved (codex 2026-08-13). Both arms are reported, and the
+        # headline scale is the larger of the two, on the same cells the
+        # difference used.
+        both = _erode(mA & mA0 & mB & mB0 & np.isfinite(A) & np.isfinite(A0)
+                      & np.isfinite(B) & np.isfinite(B0))
         w = np.where(both, np.broadcast_to(_W_LAT, A.shape), 0.0)
-        moved = _wrms(np.where(both, A - A0, 0.0), w)
-        out[field] = dict(difference=float(d), field_moved=float(moved),
-                          fraction=float(d / moved) if moved > 0
+        moved_a = _wrms(np.where(both, A - A0, 0.0), w)
+        moved_b = _wrms(np.where(both, B - B0, 0.0), w)
+        scale = max(moved_a, moved_b)
+        out[field] = dict(difference=float(d),
+                          moved={a: float(moved_a), b: float(moved_b)},
+                          field_moved=float(scale),
+                          fraction=float(d / scale) if scale > 0
                           else float("nan"),
                           points_at=meaning)
     return out
@@ -1701,6 +1726,32 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                                else float("nan"))
             rec.setdefault("budget", {})[level] = pair_budget
             rec.setdefault("difference_over_budget", {})[level] = per_pair
+            # PEAK OVER TIME, not only the final sample. The final time is
+            # ONE sample of a difference that need not be monotone, and on
+            # phillips it is not: D(t) spikes in the first output interval
+            # and then OSCILLATES with a ~2-day period, so day 10 lands in
+            # a trough at one resolution and mid-swing at the other. A
+            # final-time comparison then reads that sampling phase as a
+            # resolution effect -- the same defect as gating the old
+            # barotropic wave on the global peak at one instant. GLM-5.2
+            # asked for this a round before it was implemented.
+            gr = rec["levels"].get(level, {}).get("difference_growth", {})
+            series = np.asarray(gr.get("rms_evolution", []), dtype=np.float64)
+            peak = (float(np.nanmax(series)) if series.size
+                    else float("nan"))
+            rec.setdefault("difference_peak", {})[level] = peak
+            # UNITS. The peak series is the FIELD difference, but on the
+            # front lane the budget is a displacement in km. Dividing one
+            # by the other printed a meaningless 0.01 for the lock exchange
+            # (caught immediately on the first run of this metric). There
+            # is no front-displacement TIME SERIES to take a peak of, so
+            # the ratio is undefined on that lane and says so.
+            rec.setdefault("peak_over_budget", {})[level] = {
+                k: (float(peak / pair_budget[k])
+                    if not on_front and np.isfinite(peak)
+                    and np.isfinite(pair_budget.get(k, np.nan))
+                    and pair_budget[k] > 0 else float("nan"))
+                for k in pair_budget}
             # PER ARM as well as the max. A max-based ratio can pass while
             # one arm carries almost all of the self-error and the other is
             # tight -- and which arm is the loose one changes what to do
@@ -1732,15 +1783,21 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
         # (GLM-5.2, 2026-08-13), which is exactly the pair a reader will
         # confuse.
         bud = rec.get("budget", {})
-        # IS IT THE INITIAL CONDITION? The evolution difference cancels the
-        # two meshes' discretisation of the shared IC on the COMMON mesh,
-        # but not on the NATIVE ones -- each arm still starts from its own
-        # sampling and evolves it. If the t=0 difference SHRINKS under
-        # refinement while the evolution difference GROWS, the arms are
-        # starting closer together and ending further apart, which rules
-        # the initial condition out as the driver (GLM-5.2 proposed a
-        # shared-IC rerun to settle this; this is the free version of the
-        # same question, from artifacts already on disk).
+        # THE t=0 DIFFERENCE, WHICH CONSTRAINS THE INITIAL-CONDITION STORY
+        # WITHOUT SETTLING IT. If it SHRINKS under refinement while the
+        # evolution difference grows, the arms start closer together and
+        # finish further apart.
+        #
+        # THAT IS A CONSTRAINT, NOT AN EXONERATION, and an earlier revision
+        # of this comment claimed the latter (GLM-5.2, 2026-08-13). What is
+        # measured here is the difference AFTER both arms are sampled onto
+        # the COMMON mesh; what drives each simulation is the IC on its own
+        # NATIVE mesh, and regridding is not an orthogonal projection, so
+        # the two do not decompose additively. A t=0 difference that is
+        # smaller in NORM can still carry more power in the directions that
+        # grow -- for a Phillips jet, the unstable manifold. Settling it
+        # needs both arms started from ONE high-resolution analytic field
+        # regridded to each native mesh, which this function does not do.
         rec["initial_difference"] = {
             k: dict(base=float(b[k]["rms_initial"]),
                     refined=float(f[k]["rms_initial"]),
@@ -1757,11 +1814,22 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                     and d_lo > 0):
                 rec["signature"][k] = "unmeasured"
                 continue
+            # The D ratio quoted here is FINAL-TIME. Where the difference
+            # is not monotone in time that number is sampling-dependent --
+            # on phillips the final-time ratio is 3.30x and the PEAK ratio
+            # is 1.17x -- so the peak one is quoted beside it and neither
+            # is allowed to stand alone.
+            pk = rec.get("difference_peak", {})
+            p_lo, p_hi = pk.get("base", np.nan), pk.get("refined", np.nan)
+            peak_txt = (f"; on PEAK sampling {p_hi / p_lo:.2f}x"
+                        if np.isfinite(p_lo) and np.isfinite(p_hi)
+                        and p_lo > 0 else "")
             e_up, d_up = e_hi > e_lo, d_hi > d_lo
             rec["signature"][k] = (
                 "converging to DIFFERENT limits: each arm settles "
-                "(tolerance {:.2f}x) while they move apart ({:.2f}x)"
-                .format(e_hi / e_lo, d_hi / d_lo) if (not e_up and d_up) else
+                "(tolerance {:.2f}x) while they move apart ({:.2f}x{})"
+                .format(e_hi / e_lo, d_hi / d_lo, peak_txt)
+                if (not e_up and d_up) else
                 "case de-settling: BOTH the difference ({:.2f}x) and the "
                 "tolerance ({:.2f}x) grow -- not adjudicable here"
                 .format(d_hi / d_lo, e_hi / e_lo) if (e_up and d_up) else
@@ -2070,6 +2138,18 @@ def main() -> None:
                     print(f"    {'':24s} {'':16s} {level:8s} disagreement "
                           f"{rate} (log fit R2 {r2:.2f}, log range "
                           f"{gr.get('log_range', float('nan')):.2f}){note}")
+                pk = ra[case].get("peak_over_budget", {})
+                pv = ra[case].get("difference_peak", {})
+                if pv.get("base") is not None and case not in RMS_NOT_GATED:
+                    print(f"    {'':24s} {'':16s} PEAK over time / budget: "
+                          f"base "
+                          f"{pk.get('base', {}).get(pair, float('nan')):5.2f}"
+                          f"   refined "
+                          f"{pk.get('refined', {}).get(pair, float('nan')):5.2f}"
+                          f"   (peak D {pv.get('base', float('nan')):.3e} -> "
+                          f"{pv.get('refined', float('nan')):.3e}) -- the "
+                          f"final-time row below is ONE sample of a "
+                          f"difference that need not be monotone")
                 dob = ra[case].get("difference_over_budget", {})
                 bud = ra[case].get("budget", {})
                 print(f"    {'':24s} {'':16s} difference / budget: "
@@ -2092,9 +2172,13 @@ def main() -> None:
                     print(f"    {'':24s} {'':16s} SIGNATURE: {sig}")
                 ic = ra[case].get("initial_difference", {}).get(pair)
                 if ic and np.isfinite(ic["ratio"]):
-                    print(f"    {'':24s} {'':16s} IC discretisation "
-                          f"difference at t=0: {ic['base']:.3e} -> "
-                          f"{ic['refined']:.3e} ({ic['ratio']:.2f}x)")
+                    print(f"    {'':24s} {'':16s} t=0 difference in "
+                          f"{CASE_FIELD[case]} only: {ic['base']:.3e} -> "
+                          f"{ic['refined']:.3e} ({ic['ratio']:.2f}x) -- "
+                          f"CONSTRAINS the initial-condition story, does "
+                          f"NOT settle it: it is the headline field alone, "
+                          f"on the COMMON mesh, and each arm is driven by "
+                          f"its own NATIVE-mesh IC")
                 for level in ("base", "refined"):
                     bf = lv.get(level, {}).get("by_field", {})
                     if not bf:
@@ -2112,9 +2196,13 @@ def main() -> None:
                                   f"({v['points_at']} is therefore "
                                   f"UNMEASURED, not agreeing)")
                             continue
+                        mv = "/".join(f"{g} {x:.3e}" for g, x
+                                      in sorted(v.get("moved", {}).items()))
                         print(f"    {'':24s} {'':16s}   {fld:10s} "
                               f"{v['fraction']:6.2f}  ({v['difference']:.3e} "
-                              f"of {v['field_moved']:.3e})  {v['points_at']}")
+                              f"vs the larger arm motion "
+                              f"{v['field_moved']:.3e}; each arm moved "
+                              f"{mv})  {v['points_at']}")
                 if case in RMS_NOT_GATED:
                     print(f"    {'':24s} {'':16s} NOTE this row's ratio and "
                           f"budget are a SCALAR displacement in km, not a "

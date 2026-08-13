@@ -188,14 +188,33 @@ What the other rows do and do NOT say:
   the Petersen channel, which runs on `latlon_regional` only. A second arm
   is buildable as far as the MESH goes — `create_regional_voronoi_mesh`
   over the Petersen box at 1 km produces 781 cells with 1.00 km spacing
-  (verified 2026-08-13). It is blocked one level down: the MPAS port
-  supports `tvd`, `superbee` and `upwind` tracer advection and **no FCT**,
-  and those are exactly the schemes MEASURED to break this case's
-  boundedness gate on the resolving geometry (`tvd` −0.40 °C, `superbee`
-  −2.99 °C from an initial [5, 30]). A second arm today would differ from
-  the first in its advection FAMILY as well as its grid, which is the
-  confound this whole comparison exists to remove. Resolved cross-grid lock
-  exchange needs FCT in the MPAS tracer port.
+  (verified 2026-08-13). It is blocked one level down, on the
+  advection scheme.
+
+  TWO blockers, and the advection one is the softer of them.
+
+  **1. The runner cannot extract the diagnostic.** `_rpe_extract`
+  recognises `"mpas"` and nothing else, so `"mpas_regional"` falls to the
+  `else` branch and reads `grid.area` — which a `VoronoiMesh` does not
+  have (it carries `areaCell`). `run_lock_exchange` calls that diagnostic
+  before its first step, so the arm would raise before integrating.
+  Verified 2026-08-13, not inferred.
+
+  **2. The advection family cannot be matched.** The sweep below was run on
+  the **structured** arm, and `tvd` and `superbee` failed THERE (−0.40 °C
+  and −2.99 °C from an initial [5, 30]). So this is not "MPAS handles the
+  front worse": the case's front breaks the limiters that were tested, on
+  the structured grid, and the flux-CORRECTED schemes hold it. The MPAS
+  tracer port offers `tvd`, `superbee` and `upwind` and no FCT (verified:
+  unknown schemes raise). `upwind` was NOT measured on this geometry, so
+  "only FCT can be bounded here" is not established — two limiters were
+  tested, not three. What IS established is that the two arms could not
+  share an advection family today, which is the confound this comparison
+  exists to remove.
+
+  So: fix the regional RPE extraction first, then either port FCT to the
+  MPAS tracer scheme or soften the lock-exchange front enough that a
+  limiter stays bounded on both grids.
 
 The phillips result is a delta between two resolutions, not a trend, and
 the case's own amplitude doubles between them, so it is reported as
@@ -206,44 +225,88 @@ difference against time and is NOT settled either way (R² 0.43–0.76, and a
 NEGATIVE slope: the difference appears early and does not grow through the
 run). A poor fit refutes nothing in either direction.
 
-### Where the phillips disagreement lives (measured 2026-08-13, job 26919902)
+### Where the phillips disagreement lives (measured 2026-08-13)
 
-**The initial condition is ruled out.** The evolution-difference
-construction cancels the two meshes' sampling of the shared IC on the
-COMMON mesh but not on the native ones, so IC projection was the obvious
-competing explanation. Measured: the t=0 difference between the arms
-**HALVES** under refinement (2.38e-3 → 1.21e-3, 0.51×) while the end-state
-difference triples. The arms start closer together and finish further
-apart. No shared-IC rerun is needed to settle this.
+**READ THE TIME SERIES FIRST — the headline is one sample of an
+oscillation.** The arm-to-arm difference D(t) does NOT grow through the
+run. It spikes in the first output interval and then oscillates with a
+~2-day period while decaying:
 
-**The growth is in the free surface, not the tracer.** Splitting the same
-evolution difference by field, and dividing each by how far that field
-itself moved:
+| | day 1 | day 2 | day 3 | day 4 | … | day 9 | day 10 |
+|---|---|---|---|---|---|---|---|
+| coarse | **0.127** | 0.050 | 0.085 | 0.033 | | 0.020 | 0.023 |
+| refined | **0.149** | 0.083 | 0.125 | 0.071 | | 0.062 | 0.076 |
 
-| Field | difference, coarse → refined | growth | fraction of its own motion |
-|---|---|---|---|
-| `eta` (free surface — pressure gradient, divergent mode) | 2.32e-2 → 7.65e-2 | **3.30×** | 0.51 → 0.61 |
-| `SST` (surface tracer — advection, mixing) | 2.40e-1 → 2.61e-1 | 1.09× | 2.15 → 1.48 |
+The headline number is the day-10 sample, and at the coarse resolution
+that lands in a TROUGH (0.023, against its own day-1 peak of 0.127).
+Comparing the two levels at their PEAKS instead gives **1.17×, not the
+3.30× the final-time comparison reports.** Part of the headline growth is
+therefore where in the oscillation each level's last sample happens to
+fall — the same defect as gating a wave case on a global peak at one
+instant. The refinement block now reports peak-over-time alongside
+final-time for every case.
 
-Two different things, and they should not be conflated:
+What survives that correction: at BOTH samplings the refined level's
+difference exceeds the arms' own tolerance (final-time D/E 0.20 → 1.08;
+peak D/E 1.08 → 2.11). The disagreement is real. What does NOT survive is
+"invisible at the coarse resolution" — on peak sampling it was already at
+1.08 there.
 
-- `eta` is what GROWS under refinement (3.30×), and it grows faster than
-  the free surface itself moves. That is the term carrying the
-  different-limits signature.
-- `SST` carries a LARGER disagreement in absolute terms and the arms
-  disagree about it by more than it moved (fraction > 1 at both levels) —
-  but it is essentially FLAT under refinement (1.09×). A large standing
-  disagreement, not a diverging one. Its fraction falls only because the
-  tracer field itself moved further at the finer resolution.
+**The initial condition is CONSTRAINED, and only weakly.** The t=0
+difference between the arms halves under refinement (2.38e-3 → 1.21e-3).
+An earlier version of this section called that a ruling-out; it is not,
+for three separate reasons:
 
-So the next thing to look at is the pressure-gradient / divergent-mode
-treatment (C-grid vs TRiSK), not tracer advection.
+- It is measured AFTER both arms are sampled onto the COMMON mesh, while
+  each simulation is driven by its initial condition on its own NATIVE
+  mesh. Regridding is not an orthogonal projection, so the two do not
+  decompose additively.
+- It measures the headline field (`eta`) ONLY — not the temperature or
+  velocity initial state, and not the projection of any of them onto the
+  jet's unstable manifold. A smaller total sampling error can carry more
+  power in the directions that grow.
+- The 3.30× it is being contrasted against is the ratio of the EVOLUTION
+  difference, not of the final-state difference ‖A_f − B_f‖. Those two can
+  partially cancel, so "the arms finish further apart" does not follow.
 
-**Surface velocity was not compared at all.** `speed_sfc` is written by the
-lat-lon extractor and not by the MPAS one, so the velocity row is
-UNMEASURED — the report now says so rather than omitting the row, which
-would read as agreement. Comparing it needs the MPAS extractor to save a
-cell-shaped surface speed.
+Settling it still needs both arms started from one high-resolution
+analytic field regridded to each native mesh.
+
+**By field**, the same evolution difference split across the saved fields.
+Each is scaled by the LARGER of the two arms' own motion, on exactly the
+cells the difference used:
+
+| Field | difference, coarse → refined | growth |
+|---|---|---|
+| `eta` (free surface) | 2.32e-2 → 7.65e-2 | 3.30× |
+| `SST` (surface tracer) | 2.40e-1 → 2.61e-1 | 1.09× |
+
+Read this table narrowly. What it does NOT establish:
+
+- The `eta` row is the headline restated — `eta` IS this case's headline
+  field — so it is not independent localisation.
+- The two columns are metres and degrees. Their absolute sizes are not
+  comparable; only each row's own change-with-refinement is.
+- A flat surface-tracer discrepancy does NOT exclude tracer advection.
+  `SST` is the SURFACE tracer only, the case relaxes temperature toward a
+  zonal target on a 15-day timescale over a 10-day run, and tracer errors
+  couple into `eta` through the density field. "It is the pressure
+  gradient, not tracer advection" is NOT supported by this table, and an
+  earlier version of this section said it.
+- Surface velocity was not compared at all (`speed_sfc` is saved by the
+  lat-lon extractor and not the MPAS one), so the row is UNMEASURED. `eta`
+  is dynamically tied to column-integrated divergence, so "free surface"
+  and "barotropic mode" are not separated here either.
+
+What is left, stated at its real strength: **the disagreement in `eta`
+grows with refinement while the surface-tracer disagreement does not.**
+That is one fact about two fields, not a mechanism.
+
+**Next measurement**, given the oscillation: the difference's spatial
+spectrum at its PEAK time (day 1), not at day 10, plus a cell-shaped
+surface speed from the MPAS extractor so the velocity row stops being
+blank. The day-1 spike is where the signal is; day 10 is where it is
+smallest.
 
 ## The Petersen channel arm's advection scheme
 
