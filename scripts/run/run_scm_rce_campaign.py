@@ -156,6 +156,19 @@ DEFAULT_ANALYSIS_DAYS = 5.0
 DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS = 72
 DEFAULT_SCM_RCE_SURFACE_WIND_M_S = 5.0
 DEFAULT_SCM_RCE_CORIOLIS_S_INV = 2.5e-5
+# Depth over which the boundary layer is anchored to an SST-rooted lapse-rate
+# profile.  0.0 READS as "anchor disabled" and was surely meant that way, but
+# the mask below is `z_above_lowest <= BL_TOP_M` and z_above_lowest is exactly
+# 0 at the lowest level, so 0.0 anchors EXACTLY that level: it is reset to
+# 300.000 K every step, T_a == T_sfc identically, and the sensible heat flux
+# is therefore IDENTICALLY ZERO by construction (measured: SHF = 0.000 W/m^2
+# in every configuration, jobs 9361582/9361587/9361599).  The near-surface air
+# then cannot respond to radiation, convection or turbulence, and q_sat there
+# is pinned, which constrains RH and hence evaporation.
+#
+# The default is UNCHANGED so the 2026-08-10 arms remain reproducible; use
+# `--bl-anchor-top-m -1` (any negative value) to disable the anchor entirely,
+# which is what a zero depth was meant to express.
 DEFAULT_SCM_RCE_BL_TOP_M = 0.0
 DEFAULT_SCM_RCE_BL_LAPSE_K_M = 6.5e-3
 DEFAULT_SCM_RCE_BL_MIN_T_K = 285.0
@@ -273,6 +286,10 @@ class RunDiagnostics:
     drift_qv_rmse: float
     drift_qcond_rmse: float
     precip_mm_day: float = float("nan")
+    # Surface evaporation [mm/day], co-sampled with precip_mm_day over the same
+    # analysis window from the same applied tendency, so d(CWV+CWC)/dt = E - P
+    # can be checked without comparing quantities sampled differently.
+    evap_mm_day: float = float("nan")
     precip_ref_mm_day: float = float("nan")
     moist_adiabat_mean_abs_K: float = float("nan")
     moist_adiabat_max_abs_K: float = float("nan")
@@ -598,6 +615,9 @@ def make_physics_config(
     prognostic_spectral_gwd_thermal_tendency: bool = (
         SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY
     ),
+    hard_saturation_adjustment: bool = False,
+    hard_sat_adjust_threshold: float | None = None,
+    hard_sat_max_heating_K: float | None = None,
 ) -> PhysicsConfig:
     cfg = base if base is not None else PhysicsConfig()
     radiation_update_interval_steps = max(1, int(radiation_update_interval_steps))
@@ -641,6 +661,37 @@ def make_physics_config(
             f"Unknown campaign radiation scheme: {radiation!r}; "
             "choose from 'gray' or 'rrtmgp'."
         )
+    # IN-SCHEME liquid super-saturation guard (the IFS/SAM "no liquid
+    # super-saturation" half; the ice half is the Koop/Kärcher homogeneous-
+    # freezing allowance, which lives inside morrison/thompson/p3 and needs no
+    # switch here).  Threaded through the SHARED
+    # ``apply_microphysics_experiment_flags`` so a scheme that cannot carry the
+    # flag raises instead of silently ignoring it — never a private copy of
+    # that dispatch.
+    micro_cfg = cfg.microphysics._replace(scheme=microphysics)
+    if (hard_saturation_adjustment
+            or hard_sat_adjust_threshold is not None
+            or hard_sat_max_heating_K is not None):
+        if not hard_saturation_adjustment:
+            # A float override without the boolean gate is SILENTLY INERT (the
+            # schemes branch on a static ``if config.hard_saturation_
+            # adjustment``), so refuse it rather than let a caller believe the
+            # threshold took effect.  Mirrors ExperimentConfig.validate_strict.
+            raise ValueError(
+                "hard_sat_adjust_threshold / hard_sat_max_heating_K require "
+                "hard_saturation_adjustment=True (the override would be "
+                "silently inert without it)."
+            )
+        from legoesm.atmosphere.physics.microphysics.config import (
+            apply_microphysics_experiment_flags,
+        )
+        micro_cfg = micro_cfg._replace(**{microphysics: (
+            apply_microphysics_experiment_flags(
+                getattr(micro_cfg, microphysics), microphysics,
+                hard_saturation_adjustment=hard_saturation_adjustment,
+                hard_sat_adjust_threshold=hard_sat_adjust_threshold,
+                hard_sat_max_heating_K=hard_sat_max_heating_K,
+            ))})
     gwd_cfg = cfg.gravity_wave_drag._replace(scheme=gravity_wave_drag)
     if gravity_wave_drag == "prognostic_spectral":
         gwd_cfg = gwd_cfg._replace(
@@ -652,7 +703,7 @@ def make_physics_config(
         radiation=radiation_cfg,
         convection=cfg.convection._replace(scheme=convection),
         turbulence=cfg.turbulence._replace(scheme=turbulence),
-        microphysics=cfg.microphysics._replace(scheme=microphysics),
+        microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
 
@@ -717,6 +768,7 @@ def _config_cache_key(
     surface_wind_m_s: float,
     coriolis_s_inv: float,
     large_scale_forcing: str,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -734,6 +786,7 @@ def _config_cache_key(
         "surface_wind_m_s": surface_wind_m_s,
         "coriolis_s_inv": coriolis_s_inv,
         "large_scale_forcing": large_scale_forcing,
+        "bl_anchor_top_m": bl_anchor_top_m,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1022,6 +1075,7 @@ def run_scm_rce(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> RunDiagnostics:
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
@@ -1087,13 +1141,19 @@ def run_scm_rce(
     forcing_dict = {"T_sfc": sst_col}
     z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
     z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
-    bl_mask = z_above_lowest <= DEFAULT_SCM_RCE_BL_TOP_M
+    # A NEGATIVE depth disables the anchor outright: no level satisfies
+    # `z >= 0 <= negative`.  `<=` is kept (not changed to `<`) so a zero depth
+    # keeps its historical meaning and the published arms stay reproducible.
+    bl_mask = z_above_lowest <= bl_anchor_top_m
     physics_fn = scm.physics_fn
     grid = scm.grid
     sigma_coord = scm.sigma_coord
     dt_arr = jnp.asarray(dt, dtype=jnp.float64)
     microphysics_scheme = cfg.microphysics.scheme
-    precip_diagnostic = _make_microphysics_precip_diagnostic(cfg, dt)
+    # _make_microphysics_precip_diagnostic is NOT built here any more: it was
+    # the wrong-dt second evaluation whose value the score used to report, and
+    # leaving a loaded closure around for someone to reach for again is how the
+    # defect would come back (codex review, 2026-08-11).
     convective_precip_diagnostic = _make_convective_precip_diagnostic(cfg, dt)
 
     def apply_surface_sst_anchor(state):
@@ -1130,7 +1190,18 @@ def run_scm_rce(
         forcing_tend = compute_forcing_tendencies(
             state, sigma_coord, forcing, t,
         )
-        return add_tendencies(tend, forcing_tend), phys_out
+        summed = add_tendencies(tend, forcing_tend)
+        # RESTORE the surface-flux diagnostics the sum drops. add_tendencies
+        # rebuilds HydrostaticTendencies from six fields, so lhflx_sfc/
+        # shflx_sfc (and precip) are None on its result -- which is exactly how
+        # the evaporation readout first measured E = 0.0000 on a column whose
+        # own bulk formula gives 1.559 mm/day. The forcing tendency carries no
+        # surface fluxes, so taking the physics values is the whole answer.
+        # precip is deliberately NOT restored: it is read from the microphysics
+        # tendency at the point of application, and putting it here as well
+        # would invite exactly the double count that was just removed.
+        return summed._replace(
+            lhflx_sfc=tend.lhflx_sfc, shflx_sfc=tend.shflx_sfc), phys_out
 
     def apply_convection_substeps(state, phys_state):
         if not use_split_convection:
@@ -1169,7 +1240,7 @@ def run_scm_rce(
         if effective_microphysics_substeps <= 1:
             return (
                 apply_tendencies(state, tend, dt),
-                precip_diagnostic(state, grid, sigma_coord),
+                applied_precip_mm_day(tend, state),
             )
         sub_dt = dt / effective_microphysics_substeps
         microphysics_fn = scm._microphysics_fn
@@ -1179,11 +1250,15 @@ def run_scm_rce(
         )
 
         def substep(sub_state, _i):
-            precip_rate = precip_diagnostic(sub_state, grid, sigma_coord)
             micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
             new_sub_state = apply_tendencies(
-                sub_state, add_tendencies(tend, micro_tend), sub_dt,
-            )
+                sub_state, add_tendencies(tend, micro_tend), sub_dt)
+            # Read precip from MICRO_TEND, not from the sum: add_tendencies
+            # rebuilds a HydrostaticTendencies from six fields only
+            # (du/dT/dp_s/dphis/dv/tracers) and DROPS every diagnostic field,
+            # precip included. Taking it from the sum would have silently
+            # reported None -> 0.0, i.e. reproduced the bug this fixes.
+            precip_rate = applied_precip_mm_day(micro_tend, sub_state)
             return new_sub_state, sub_weight * precip_rate
 
         new_state, precip_rates = lax.scan(
@@ -1208,18 +1283,27 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        if use_split_convection:
+        # WHETHER convection is sub-stepped is irrelevant to whether its
+        # condensate is double-counted; what matters is whether MICROPHYSICS
+        # will sediment it.  The rule used to branch on sub-stepping, so the
+        # non-sub-stepped path added a convective diagnostic on top of
+        # condensate that microphysics would later rain out and count again
+        # (codex review, 2026-08-11).  The default ten substeps hid it.
+        if microphysics_scheme == "none":
             convective_precip_for_score = (
-                convective_precip
-                if microphysics_scheme == "none"
-                else jnp.zeros((), dtype=new_state.T.data.dtype)
+                convective_precip if use_split_convection
+                else convective_precip_diagnostic(
+                    new_state, new_phys, grid, sigma_coord)
             )
         else:
-            convective_precip_for_score = convective_precip_diagnostic(
-                new_state, new_phys, grid, sigma_coord,
-            )
+            convective_precip_for_score = jnp.zeros(
+                (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
+        # E recorded ALONGSIDE P, from the same applied tendency and with the
+        # same per-step weight, so the water budget can be closed with both
+        # terms sampled identically (see applied_evap_mm_day).
+        evap = applied_evap_mm_day(base_tend, new_state)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
         return (new_state, new_phys), out
 
     def cached_radiation_body(carry, k):
@@ -1250,18 +1334,24 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        if use_split_convection:
+        # WHETHER convection is sub-stepped is irrelevant to whether its
+        # condensate is double-counted; what matters is whether MICROPHYSICS
+        # will sediment it.  The rule used to branch on sub-stepping, so the
+        # non-sub-stepped path added a convective diagnostic on top of
+        # condensate that microphysics would later rain out and count again
+        # (codex review, 2026-08-11).  The default ten substeps hid it.
+        if microphysics_scheme == "none":
             convective_precip_for_score = (
-                convective_precip
-                if microphysics_scheme == "none"
-                else jnp.zeros((), dtype=new_state.T.data.dtype)
+                convective_precip if use_split_convection
+                else convective_precip_diagnostic(
+                    new_state, new_phys, grid, sigma_coord)
             )
         else:
-            convective_precip_for_score = convective_precip_diagnostic(
-                new_state, new_phys, grid, sigma_coord,
-            )
+            convective_precip_for_score = jnp.zeros(
+                (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
+        evap = applied_evap_mm_day(nonrad_tend, new_state)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
         return (new_state, new_phys, rad_tend), out
 
     if use_cached_radiation:
@@ -1289,7 +1379,7 @@ def run_scm_rce(
     try:
         final_state, _final_phys, history = driver(scm.state, scm.phys_state)
         del final_state
-        T_hist, qv_hist, qcond_hist, precip_hist = (
+        T_hist, qv_hist, qcond_hist, precip_hist, evap_hist = (
             np.asarray(x, dtype=float) for x in history
         )
         last_steps = max(1, int(round(analysis_days * SECONDS_PER_DAY / dt)))
@@ -1298,6 +1388,7 @@ def run_scm_rce(
         qv_profile = qv_hist[-last_steps:].mean(axis=0)
         qcond_profile = np.maximum(qcond_hist[-last_steps:].mean(axis=0), 0.0)
         precip_mm_day = float(np.maximum(np.mean(precip_hist[-last_steps:]), 0.0))
+        evap_mm_day = float(np.mean(evap_hist[-last_steps:]))
 
         prev_end = nsteps - last_steps
         prev_start = max(0, prev_end - last_steps)
@@ -1389,6 +1480,7 @@ def run_scm_rce(
             drift_qv_rmse=float(drift_qv),
             drift_qcond_rmse=float(drift_qcond),
             precip_mm_day=precip_mm_day,
+            evap_mm_day=evap_mm_day,
             precip_ref_mm_day=float(ref.precip_ref_mm_day),
             moist_adiabat_mean_abs_K=float(realism.get("mean_abs_K", float("nan"))),
             moist_adiabat_max_abs_K=float(realism.get("max_abs_K", float("nan"))),
@@ -1440,6 +1532,7 @@ def run_cached(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -1450,8 +1543,20 @@ def run_cached(
         surface_wind_m_s,
         coriolis_s_inv,
         large_scale_forcing,
+        bl_anchor_top_m,
     )
     if key not in cache:
+        # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
+        # PhysicsConfig, so ``run_scm_rce`` builds a fresh jitted closure and
+        # XLA emits a fresh executable — nothing is ever reused between evals.
+        # Retaining them is therefore pure cost, and it is not a small one:
+        # the RRTMGP k-distribution tables are baked into each executable as
+        # literals, so a 48-eval tune accumulated enough that XLA:CPU's LLVM
+        # JIT could no longer mmap a section and aborted the process
+        # ("LLVM ERROR: Unable to allocate section memory", jobs 9331806/7,
+        # rc=134, 8 of 10 schemes lost).  Dropping the caches before each new
+        # compile bounds the footprint at roughly one executable.
+        jax.clear_caches()
         cache[key] = run_scm_rce(
             cfg,
             ref,
@@ -1469,11 +1574,108 @@ def run_cached(
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
+            bl_anchor_top_m=bl_anchor_top_m,
         )
     cached = cache[key]
     return RunDiagnostics(
         **{**asdict(cached), "label": label, "config": _config_scheme_dict(cfg)}
     )
+
+
+def applied_precip_mm_day(applied_tend, like) -> jax.Array:
+    """Surface precipitation [mm/day] from the tendency that was APPLIED.
+
+    ``HydrostaticTendencies.precip`` is the microphysics' own surface
+    sedimentation flux [kg/m^2/s, +into surface], summed over rain, cloud ice,
+    snow and graupel; 1 kg/m^2 == 1 mm of liquid water, so the conversion is a
+    single factor.
+
+    This replaces a SECOND, diagnostic-only invocation of the microphysics,
+    which was wrong twice over: it evaluated a different call than the one
+    whose tendencies advanced the column, and its closure was built with the
+    OUTER dt (600 s) while the applied operator runs at dt/substeps (20 s).
+    Measured consequence: the campaign reported 1e-18..3e-5 mm/day for every
+    scheme while its columns were losing 1.2-1.8 mm/day of water (jobs
+    9361582/9361587/9361599).  The global model reads the applied value
+    (``physics_pipeline.py:1473``), which is why it never showed this.
+
+    CALL THIS ON THE MICROPHYSICS TENDENCY, never on a summed one:
+    ``add_tendencies`` rebuilds ``HydrostaticTendencies`` from six fields
+    (du/dT/dp_s/dphis/dv/tracers) and DROPS every diagnostic field, ``precip``
+    included, so a summed tendency reports ``None`` -> 0.0 and silently
+    reproduces the defect.  Gated by
+    ``tests/unit/test_scm_rce_applied_precip.py``.
+    """
+    if applied_tend.precip is None:
+        return jnp.zeros((), dtype=like.T.data.dtype)
+    flat = jnp.reshape(applied_tend.precip.data, (-1,))
+    if flat.shape[0] != 1:
+        # Taking [0] of a multi-column field would silently score column 0 and
+        # call it "the column".  This driver is single-column by construction;
+        # a multi-column state means the caller is not what this readout
+        # assumes, so refuse instead of reporting one column's rain.
+        raise ValueError(
+            f"applied_precip_mm_day expects a single-column state, got "
+            f"{flat.shape[0]} columns; this readout scores one column.")
+    return flat[0] * SECONDS_PER_DAY
+
+
+def applied_evap_mm_day(applied_tend, like) -> jax.Array:
+    """Surface evaporation [mm/day] from the tendency that was APPLIED.
+
+    ``HydrostaticTendencies.lhflx_sfc`` is the turbulence scheme's own surface
+    latent-heat flux [W/m^2]; ``E = LHF / L_v`` in kg/m^2/s, and 1 kg/m^2 ==
+    1 mm of liquid water.  ``None`` when turbulence is off or the scheme
+    computes no surface fluxes.
+
+    Recorded per step ALONGSIDE the precipitation so the column's water budget
+    ``d(CWV+CWC)/dt = E - P`` can be closed with both terms sampled the SAME
+    way over the SAME window.  Both reviewers of the precipitation fix asked
+    for exactly this: without it, a residual can always be blamed on comparing
+    a snapshot E against a window-mean P, and never tested.  It is also what
+    would catch water lost to a downstream positivity clip, which the readout
+    tests cannot see.
+    """
+    if applied_tend.lhflx_sfc is None:
+        return jnp.zeros((), dtype=like.T.data.dtype)
+    flat = jnp.reshape(applied_tend.lhflx_sfc.data, (-1,))
+    if flat.shape[0] != 1:
+        raise ValueError(
+            f"applied_evap_mm_day expects a single-column state, got "
+            f"{flat.shape[0]} columns.")
+    return flat[0] / constants.L_v * SECONDS_PER_DAY
+
+
+def physical_profile_rmse(
+    ref: ReferenceProfiles,
+    run: RunDiagnostics,
+) -> dict[str, float]:
+    """Mass-weighted profile RMSE in PHYSICAL units (K, kg/kg) vs the CRM.
+
+    The campaign's own ``score`` normalises each component by the reference's
+    mass-weighted standard deviation, which makes the four terms commensurable
+    for the optimiser but is not a quantity a reader can interpret.  Reports
+    and figures need K and kg/kg, so both tuning drivers call THIS helper —
+    same weights, same reference arrays, one implementation.
+
+    A crashed run (empty ``T_profile``) yields NaNs rather than a zero RMSE,
+    so a failure cannot masquerade as a perfect fit in a table.
+    """
+    if not run.T_profile:
+        return {
+            "T_rmse_K": float("nan"),
+            "qv_rmse_kg_kg": float("nan"),
+            "qcond_rmse_kg_kg": float("nan"),
+        }
+    w = jnp.asarray(ref.mass_weights)
+    return {
+        "T_rmse_K": float(weighted_rmse_jax(
+            jnp.asarray(run.T_profile) - jnp.asarray(ref.T_ref), w)),
+        "qv_rmse_kg_kg": float(weighted_rmse_jax(
+            jnp.asarray(run.qv_profile) - jnp.asarray(ref.qv_ref), w)),
+        "qcond_rmse_kg_kg": float(weighted_rmse_jax(
+            jnp.asarray(run.qcond_profile) - jnp.asarray(ref.qcond_ref), w)),
+    }
 
 
 def _sort_category_results(category: str, results: list[RunDiagnostics]) -> list[RunDiagnostics]:
@@ -1766,6 +1968,42 @@ def _raw_from_physical(value: float, constraint) -> jax.Array:
     return arr
 
 
+# A parameter whose bounds span this many decades is sampled LOG-uniformly.
+# Linear sampling of, say, [1e-6, 1e-2] puts ~90 % of the draws in the top
+# decade and never visits the bottom three, so the tuned value is biased high
+# by construction — for autoconversion / entrainment / rate coefficients that
+# is most of the plausible range.  Two decades is the threshold at which the
+# distortion (a factor ~100 in sampling density across the range) stops being
+# a detail.
+_LOG_SAMPLING_DECADES = 2.0
+
+
+def _sample_scale(constraint) -> str:
+    """``"log"`` for a strictly-positive range spanning >= 2 decades."""
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if lo > 0.0 and hi > lo and (math.log10(hi) - math.log10(lo)) >= _LOG_SAMPLING_DECADES:
+        return "log"
+    return "linear"
+
+
+def _interp(constraint, frac: float) -> float:
+    """Value at fraction ``frac`` of the range, in the parameter's own scale.
+
+    Clamped to the bounds: ``lo * (hi/lo)**frac`` is not exactly ``hi`` at
+    ``frac == 1`` in floating point, and the tuner asserts every candidate is
+    inside ``[lo, hi]`` — a one-ULP overshoot would abort a whole scheme's arm
+    hours in.
+    """
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if _sample_scale(constraint) == "log":
+        value = lo * (hi / lo) ** frac
+    else:
+        value = lo + frac * (hi - lo)
+    return float(min(max(value, lo), hi))
+
+
 def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed: int):
     yield defaults
     if n_eval <= 1:
@@ -1777,18 +2015,17 @@ def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed
         for name, c in zip(names, constraints):
             if budget <= 0:
                 return
-            lo = float(c.min_val)
-            hi = float(c.max_val)
             cand = dict(defaults)
-            cand[name] = lo + frac * (hi - lo)
+            cand[name] = _interp(c, frac)
             budget -= 1
             yield cand
     while budget > 0:
         cand = {}
         for name, c in zip(names, constraints):
-            lo = float(c.min_val)
-            hi = float(c.max_val)
-            cand[name] = float(rng.uniform(lo, hi))
+            # ONE rng.uniform(0, 1) draw per parameter regardless of scale, so
+            # the random STREAM is identical for linear and log parameters and
+            # a longer budget stays a strict superset of a shorter one.
+            cand[name] = _interp(c, float(rng.uniform(0.0, 1.0)))
         budget -= 1
         yield cand
 
@@ -1814,6 +2051,7 @@ def tune_category_winner(
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -1835,6 +2073,7 @@ def tune_category_winner(
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        bl_anchor_top_m=bl_anchor_top_m,
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
@@ -1850,6 +2089,14 @@ def tune_category_winner(
     best_cfg = base_cfg
     best_run = default_run
     best_values = defaults
+    # A non-finite incumbent score makes EVERY ``trial < best`` comparison
+    # False, so the tuner would report the defaults as "tuned" while silently
+    # discarding every trial.  The default run scores +inf when it fails
+    # (run_scm_rce), which compares correctly; NaN would not, so it is mapped
+    # to +inf here rather than trusted.
+    best_score = float(default_run.score)
+    if not math.isfinite(best_score):
+        best_score = float("inf")
     for i, values in enumerate(_candidate_values(defaults, constraints, tune_evals, seed)):
         raw_values = {
             c.name: _raw_from_physical(values[c.name], c) for c in constraints
@@ -1891,8 +2138,12 @@ def tune_category_winner(
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
+            bl_anchor_top_m=bl_anchor_top_m,
         )
-        if trial_run.status == "ok" and trial_run.score < best_run.score:
+        if (trial_run.status == "ok"
+                and math.isfinite(trial_run.score)
+                and trial_run.score < best_score):
+            best_score = float(trial_run.score)
             best_cfg = trial_cfg
             best_run = trial_run
             best_values = {

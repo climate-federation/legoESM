@@ -268,10 +268,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
         # Unified campaign driver (D1): training-core dispatch (reserved cores
         # raise NotImplementedError, unknown raises ValueError) and the
-        # classical-mode rrtmgp radiation pin (smoke/allow_non_rrtmgp escapes
+        # campaign-wide rrtmgp radiation pin (only --smoke escapes
         # are explicit args, never silent).
         ("packages/ml/legoesm/training/campaign_driver.py", "validate_training_core"),
-        ("packages/ml/legoesm/training/campaign_driver.py", "validate_classical_radiation"),
+        ("packages/ml/legoesm/training/campaign_driver.py", "validate_campaign_radiation"),
         ("packages/ml/legoesm/training/loss_presets.py", "load_loss_preset"),
         ("packages/ocean/legoesm/ocean/biogeochemistry/config.py", "init_biogeo_state"),
         ("packages/ocean/legoesm/ocean/config.py", "to_ocean_config"),

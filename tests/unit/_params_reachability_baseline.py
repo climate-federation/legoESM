@@ -3,54 +3,26 @@
 Every tier-1/2 ``__param_spec__`` parameter here is NOT settable via the
 ``--params`` qualified-name loader in any of its component's run drivers.  The
 audit test asserts the computed uncovered set EQUALS this baseline; shrink it as
-parameters are wired through (never grow silently).  Idealized gray-radiation
-params are a documented conscious exclusion (--config-only).
+parameters are wired through (never grow silently).  The gray-radiation entries
+left on 2026-08-11: gray is no longer trained at all, so its params moved to
+tunable_tier 0 and the audit (which only sees tier 1-2) stopped listing them.
 
 2026-08-04: re-shrunk 415 -> 106 after the main sync reverted the atm
 post-setup class router (``apply_params_to_pipeline``). The route was
 re-applied onto main's version of run_config_yaml.py; the numbers below are
 recomputed, not restored from the pre-sync file.
-
-2026-08-10 (origin/main merge): RECOMPUTED against the merged tree, 104
-entries.  The atm post-setup class router survives the merge, so every
-atm.conv / atm.gwd / atm.micro / atm.turb entry main still carried is
-reachable here and was dropped; main's new PrognosticAerosolConfig quartet is
-genuinely unreachable and was added.  Not a hand edit — the set below equals
-``test_params_reachability_audit._compute_uncovered()`` on the merge result.
 """
 
 UNREACHABLE_PARAMS = frozenset({
-    # atm.aerosol: PrognosticAerosolConfig (4) — new on main at the 2026-08-10
-    # sync; no ExperimentConfig scalar routes them, so they are --config-only.
+    # atm.aerosol: CCNFromAODConfig (2)
+    'atm.aerosol.CCNFromAODConfig.aot_coeff',
+    'atm.aerosol.CCNFromAODConfig.aot_exponent',
+    # atm.aerosol: PrognosticAerosolConfig (4)
     'atm.aerosol.PrognosticAerosolConfig.dry_dep_velocity_m_s',
     'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
     'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
     'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
-    # atm: AhmedNeelinDCAConfig (7)
-    # atm: BechtoldConfig — M_b_max wired 2026-07-10 (#869 campaign lever)
-    # RCAPQADV blend weight (2026-07-17 ZDQCV closure work): same conscious
-    # exclusion as the rest of the BechtoldConfig family (CLI/ExperimentConfig
-    # scalars, not the --params qualified-name loader).
-    # downdraft_alpha / downdraft_entrain_rate were REMOVED 2026-07-23: their
-    # convention-named ExperimentConfig scalars (bechtold_downdraft_alpha /
-    # bechtold_downdraft_entrain_rate) are threaded unconditionally by
-    # _resolve_convection, so they are now in _ATM_SCALAR_PARAM_MAP
-    # (--params-reachable).  downdraft_evap_efficiency stays CLI-only: its
-    # scalar (bechtold_downdraft_evap) is NOT convention-named, so the map's
-    # verified-threading contract does not cover it.
-    # atm: CCNFromAODConfig (2)
-    'atm.aerosol.CCNFromAODConfig.aot_coeff',
-    'atm.aerosol.CCNFromAODConfig.aot_exponent',
-    # atm: CLUBBLiteConfig (4)
-    # atm: CLUBBParams (48) — like every other turbulence scheme, full CLUBB is
-    # calibrated via the SCM-RCE campaign / LES tuning collector, not the atm
-    # run_amip --params scalar map (build_atm_scalar_param_map exposes 0
-    # atm.turb.* params). Driver-level reachability (nested CLUBBConfig.params
-    # descent in build_atm_scalar_param_map) is tracked as a follow-up.
-    # atm: CloudConfig (6)
-    # (Nc_default + conv_cloud_coeff wired 2026-08-02: flat ExperimentConfig
-    #  scalars cloud_Nc_default / cloud_conv_cloud_coeff, threaded by
-    #  build_cloud_config on both the FV pipeline and the MPAS standalone lane.)
+    # atm.clouds: CloudConfig (8)
     'atm.clouds.CloudConfig.T_ice_only',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
@@ -59,43 +31,9 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.clouds.CloudConfig.r_eff_liq',
     # atm.pblh: PBLHeightConfig (1)
     'atm.pblh.PBLHeightConfig.Ri_crit',
-    # atm.rad: GrayRadiationConfig (9)
-    'atm.rad.GrayRadiationConfig.linear_frac',
-    'atm.rad.GrayRadiationConfig.lw_diff_factor',
-    'atm.rad.GrayRadiationConfig.obliquity',
-    'atm.rad.GrayRadiationConfig.sfc_albedo',
-    'atm.rad.GrayRadiationConfig.sw_exponent',
-    'atm.rad.GrayRadiationConfig.sw_tau_0',
-    'atm.rad.GrayRadiationConfig.tau_equator',
-    'atm.rad.GrayRadiationConfig.tau_moist_coeff',
-    'atm.rad.GrayRadiationConfig.tau_pole',
-    # atm: HinesConfig (0) — Fmax + total_rms_wind became reachable when
-    # gwd_config_for started threading the hines_* ExperimentConfig scalars
-    # into the kernel leaf on every lane (2026-07-24).
-    # atm: HoltslagBovilleConfig (13)
-    # atm: KainFritschConfig (12)
-    # atm: KesslerConfig (5)
-    # The hard-saturation-adjustment trigger + heating cap (all warm-rain
-    # micro configs) were REMOVED from this baseline 2026-07-23: they are now
-    # routed onto ExperimentConfig flat scalars (hard_sat_adjust_threshold /
-    # hard_sat_max_heating_K) and reachable via --params through
-    # _ATM_SCALAR_PARAM_MAP (the day-137 summer-regime tuning need).  The
-    # remaining sibling micro params stay SCM-RCE-only (pipeline-internal).
-    # atm: KuoConfig (2)
-    # atm: LindzenConfig (2)
-    # atm: LouisConfig (1) — l_mix_max / Ri_crit / b_louis / c_louis / d_louis
-    # became reachable 2026-08-02: d8268e6fa made turbulence_config_for thread
-    # the flat louis_* scalars into the active louis sub-config, and they now
-    # carry --louis-* CLI flags plus _ATM_SCALAR_PARAM_MAP entries.
-    # b_heat_ratio stays unreachable: it has no flat ExperimentConfig scalar.
-    # atm: MYNN25Config (9)
-    # atm: MassFluxConfig (6)
-    # atm: McFarlaneConfig (6) — directional_spread became reachable via the
-    # mcfarlane_directional_spread scalar + gwd_config_for (2026-07-24); the
-    # rest still have no ExperimentConfig scalar to route through.
-    # atm: MorrisonConfig (15; 5 wired 2026-07-26 + ice_snow_d_auto wired
-    # 2026-07-27 via thread_morrison_scalars — anvil-ice tuning)
-    # atm: OzoneProfileConfig (3)
+    # atm.rad: GrayRadiationConfig — none: every gray param is tier 0
+    # (never trainable) since 2026-08-11.
+    # atm.rad: OzoneProfileConfig (3)
     'atm.rad.OzoneProfileConfig.o3_max_vmr',
     'atm.rad.OzoneProfileConfig.p_peak_hPa',
     'atm.rad.OzoneProfileConfig.sigma_logp',

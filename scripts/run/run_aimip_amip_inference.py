@@ -92,6 +92,14 @@ def _build_spec_cfg(cfg: dict):
             fix_mass=bool(cfg.get("fix_mass", False)),
             anchor_mass_to_initial=bool(
                 cfg.get("anchor_mass_to_initial", False)),
+            # Energy numerics, forwarded for the same reason: the code
+            # defaults are already the conserving pair (sb_centered +
+            # frictional heating), but a suite that pins the legacy
+            # upwind form to reproduce a pre-2026-08-11 result was
+            # SILENTLY IGNORED here while run_aimip honoured it.
+            vertical_advection_scheme=str(
+                cfg.get("vertical_advection_scheme", "sb_centered")),
+            frictional_heating=bool(cfg.get("frictional_heating", True)),
         ),
         n_epochs=1, lr=float(cfg.get("aimip_lr", 3.0e-4)),
         weight_decay=float(cfg.get("aimip_weight_decay", 1.0e-5)),
@@ -202,6 +210,7 @@ def main():
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
+    from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.aimip_spatial import land_mask_from_phis
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
@@ -276,6 +285,11 @@ def main():
             gwd_scheme=str(cfg["aimip_gwd"]),
             microphysics_scheme=str(cfg["aimip_microphysics"]),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            # Honour the suite's ablation waiver: this driver only
+            # REPLAYS a trained checkpoint, so a suite that trained
+            # with a family off must be able to run here too.
+            allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
             land_mask=land_mask, split_rad=True,
         )
         sizing_ps = init_physics_state(
@@ -434,7 +448,9 @@ def main():
             )
         # ``state`` currently holds the IC -> identical pytree structure, so it
         # is the deserialisation template.
-        state = eqx.tree_deserialise_leaves(restart_eqx, state)
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        state = load_checkpoint_or_fail(
+            restart_eqx, state, what="the restart file")
         day = _date(meta["next_day"])
         monthly = {(int(y), int(m)): list(vals) for y, m, vals in meta["monthly"]}
         logger.info(f"RESUMED from {restart_eqx}: continuing at {day} "

@@ -54,18 +54,13 @@ def test_build_reference_roundtrips_wing_profiles_through_campaign_reader(tmp_pa
     outdir = tmp_path / "ref"
     diag = builder.build_reference(outdir, n_levels=48, n_volumes=3)
 
-    # Wing cold point is T_v0 - Gamma*z_t = 299.274 - 0.0069901*15000
-    # = 194.42 K, which is gSAM's own cold point EXACTLY (the calibration is
-    # endpoint-constrained through it). The original 193-196 K band therefore
-    # STANDS. An intermediate least-squares calibration moved this to 189.4 K
-    # and the band was widened to 187-192 to accommodate it; that was the wrong
-    # way round, and the fix was the constant, not the band. Do not widen this.
-    assert 193.0 < diag["cold_point_T_K"] < 196.0
+    # Wing ANALYTIC cold point is T_v0 - Gamma*z_t with T_v0 = T0*(1+0.608*q0)
+    # = 303.4 K (Eq. 3), i.e. 202.9 K at 15 km. That is the IC, NOT the 100-day
+    # equilibrium cold point (~194-198 K) the resolved runs settle to.
+    assert 201.0 < diag["cold_point_T_K"] < 205.0
     assert 13.0 < diag["cold_point_z_km"] < 17.0
-    # Lowest-level Wing air temperature ~297.9 K at z=0
-    # (T_v0 / (1 + eps^-1 q_sfc)); this is the surface AIR temp, not the
-    # 300 K SST. gSAM's sounding has 296.92 K at z=37 m.
-    assert 294.0 < diag["sfc_T_K"] < 299.0
+    # Lowest-level Wing air temperature = T_v0/(1+eps^-1 q_sfc) = T0 = 300 K.
+    assert 298.0 < diag["sfc_T_K"] < 302.0
     assert diag["precip_mm_day"] == builder.RCEMIP1_SMALL_PRECIP_MM_DAY
 
     # Bundle is readable by the campaign loader and recovers the Wing profiles.

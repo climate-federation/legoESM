@@ -2973,6 +2973,36 @@ def test_cloud_optics_inhomogeneity_validate():
                      cloud_fsd=0.75).validate_strict()
 
 
+def test_cloud_saturation_scheme_round_trips_and_threads():
+    """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
+    into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
+    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--cloud-saturation-scheme", "mixed_phase",
+    ]), parser))
+    assert cfg.cloud_saturation_scheme == "mixed_phase"
+    cc = build_cloud_config(
+        cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
+    assert cc.saturation_scheme == "mixed_phase"
+    # default: 'liquid' => CloudConfig default (legacy path).
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_saturation_scheme == "liquid"
+    assert build_cloud_config(
+        d.cloud_scheme,
+        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+
+
+def test_cloud_saturation_scheme_validate():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_saturation_scheme"):
+        ExperimentConfig(cloud_saturation_scheme="bogus").validate_strict()
+    ExperimentConfig(cloud_saturation_scheme="mixed_phase").validate_strict()
+
+
 def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
     """--cloudtop-entrainment-efficiency round-trips (marine-Sc BL-top
     ventilation: thins excess Sc liquid cloud without an evap trade; the

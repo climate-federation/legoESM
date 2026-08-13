@@ -136,6 +136,7 @@ def main():
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
+    from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.aimip_spatial import land_mask_from_phis
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
@@ -146,6 +147,16 @@ def main():
     )
 
     cfg = _merged_cfg(args.suite, args.variant)
+
+    # Radiation pin, EVERY variant — an AIMIP run uses rrtmgp. Nested under the
+    # classical branch it left the NN paths unchecked (my own AST test caught
+    # this after codex flagged the same shape in run_aimip and run_aimip_latlon).
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
+        str(cfg.get("aimip_radiation", "rrtmgp")),
+        campaign="aimip",
+        smoke=bool(cfg.get("smoke", False)),
+    )
     is_nn = args.variant != "classical"
     if args.convection_scheme:
         if is_nn:
@@ -335,15 +346,6 @@ def main():
                 },
             )
         else:
-            # Classical-mode radiation pin (campaign_driver, D1).
-            from legoesm.training.campaign_driver import (
-                validate_classical_radiation,
-            )
-            validate_classical_radiation(
-                str(cfg.get("aimip_radiation", "rrtmgp")),
-                smoke=bool(cfg.get("smoke", False)),
-                allow_non_rrtmgp=bool(cfg.get("allow_non_rrtmgp", False)),
-            )
             non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
                 params, grid, dt,
                 radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
@@ -355,6 +357,9 @@ def main():
                 gwd_scheme=str(cfg["aimip_gwd"]),
                 microphysics_scheme=str(cfg["aimip_microphysics"]),
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+                # Same suite waiver as the inference driver.
+                allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
                 land_mask=land_mask, split_rad=True,
             )
             ic_state, tgt_carry, sst_col, doy, ghg, o3 = sample
@@ -393,6 +398,9 @@ def main():
             gwd_scheme=str(cfg["aimip_gwd"]),
             microphysics_scheme=str(cfg["aimip_microphysics"]),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            # Same suite waiver (RRTMGP warm-up call).
+            allow_unfilled_families=parse_bool_flag(
+    cfg.get("aimip_allow_unfilled_families", False)),
             land_mask=land_mask, split_rad=True,
         )
         del _warm

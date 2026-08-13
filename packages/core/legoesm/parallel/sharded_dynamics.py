@@ -2066,10 +2066,17 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                 if rng.random() < 0.5:
                     jit[i], jit[i + 1] = jit[i + 1], jit[i]
             candidates.append(jit)
+        # +1-ROUND CANDIDATES admitted (2026-08-11): the cross-lane law
+        # (wide-halo 0.970, mixed-pad 0.983) prices an extra sequential
+        # collective at ~15 us marginal while the lane is BYTES-bound —
+        # so a colouring that spends one extra round to cut padded
+        # weight is a good trade. Admission bar at adoption below:
+        # equal rounds need ANY strict weight win; rounds+1 needs
+        # >= 10% below the best equal-rounds weight.
         seeds = [dict(edge_colors)]
         for order in candidates:
             ec = greedy_edge_coloring_ordered(comm_pairs, order)
-            if max(ec.values(), default=-1) + 1 <= n_rounds:
+            if max(ec.values(), default=-1) + 1 <= n_rounds + 1:
                 seeds.append(ec)
 
         def _local_search(ec):
@@ -2107,16 +2114,24 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                         colors[p] = c0
             return colors
 
-        best_w, best_ec = base_w, None
+        best_w, best_ec = base_w, None          # equal-rounds champion
+        plus_w, plus_ec = None, None            # rounds+1 champion
         for seed_ec in seeds:
             ec = _local_search(seed_ec)
             if not _check_proper_edge_coloring(ec, comm_pairs):
                 continue
-            if max(ec.values(), default=-1) + 1 > n_rounds:
+            r = max(ec.values(), default=-1) + 1
+            if r > n_rounds + 1:
                 continue
             w = _padded_weight(ec, pair_w)
-            if w < best_w:
-                best_w, best_ec = w, ec
+            if r <= n_rounds:
+                if w < best_w:
+                    best_w, best_ec = w, ec
+            else:
+                if plus_w is None or w < plus_w:
+                    plus_w, plus_ec = w, ec
+        if plus_ec is not None and plus_w < 0.90 * best_w:
+            best_w, best_ec = plus_w, plus_ec
         if best_ec is not None:
             edge_colors = best_ec
             n_rounds = max(edge_colors.values()) + 1

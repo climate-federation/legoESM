@@ -49,6 +49,8 @@ __all__ = [
     "FesomOceanModel",
     "build_flat_bottom_mesh",
     "create_lock_exchange_state",
+    "use_legoesm_constants",
+    "rescale_mesh_coriolis",
 ]
 
 
@@ -86,6 +88,29 @@ class FesomOceanConfig(NamedTuple):
     dt: Optional[float] = None
     k_ver: Optional[float] = None
     a_ver: Optional[float] = None
+    # Vertical coordinate / free-surface mode. "linfs" (default, and
+    # fesom_jax's own default) keeps layer thicknesses FIXED and carries
+    # the free-surface volume change as a surface concentration/dilution
+    # term -- tracer CONTENT is then conserved only to that
+    # approximation (measured: volume-weighted heat drifts ~1e-6 relative
+    # over 2 days of geostrophic adjustment, against ~1e-15 for the
+    # z-star arms). "zstar" selects fesom_jax's ALE z-star coordinate, in
+    # which thicknesses move with eta and content is conserved.
+    # Static Python string (selects a compile-time branch), NOT a leaf.
+    vertical_coordinate: str = "linfs"
+    # Whose physical constants the arm runs on.
+    #
+    # "legoesm" (DEFAULT, user directive 2026-08-11): g, R_earth, Omega and
+    # the reference density come from ``legoesm.constants``, so this arm and
+    # every other legoESM arm share them and a cross-dycore difference is
+    # not partly a constants difference. pi is NOT overridden -- it stays
+    # FESOM's truncated 3.14159265358979, a discretisation convention baked
+    # through the mesh, not a physical constant.
+    #
+    # THIS BREAKS BIT-FIDELITY WITH FESOM2 (gaps closed: rho_0 4.9e-3,
+    # Omega 2.7e-3, R_earth 5.9e-4, g 3.9e-4). Select "fesom" for oracle
+    # work where reproducing FESOM2 exactly is the point.
+    constants: str = "legoesm"
 
 
 # =============================================================================
@@ -350,6 +375,151 @@ jax.tree_util.register_dataclass(
 # Flat-bottom mesh derivation
 # =============================================================================
 
+#: FESOM's OWN truncated pi, captured the first time it is needed and never
+#: overwritten. The mesh's Coriolis arrays were built as 2*PI_fesom*sin(lat)
+#: at load, so :func:`rescale_mesh_coriolis` must divide by THAT value --
+#: reading config.PI after the override would use the new pi and compute the
+#: wrong ratio. Ordering bug avoided, not discovered later.
+_FESOM_NATIVE_PI: float | None = None
+
+
+def _fesom_native_pi() -> float:
+    global _FESOM_NATIVE_PI
+    if _FESOM_NATIVE_PI is None:
+        _require_fesom_jax()
+        from fesom_jax import config as _fcfg
+        _FESOM_NATIVE_PI = float(_fcfg.PI)
+    return _FESOM_NATIVE_PI
+
+
+def use_legoesm_constants() -> tuple[dict[str, tuple[float, float]],
+                                     list[str]]:
+    """Make fesom_jax use legoESM's physical constants. NOT pi.
+
+    USER DIRECTIVE 2026-08-11: the arms in a cross-dycore comparison must
+    share their constants, so the FESOM arm takes legoESM's g, R_earth,
+    Omega and reference density. ``PI`` is deliberately left at FESOM's
+    truncated 3.14159265358979 -- it is a discretisation convention baked
+    through the mesh geometry, not a physical constant, and fesom_jax's own
+    source says do not replace it.
+
+    THIS BREAKS BIT-FIDELITY WITH FESOM2. That is the point of the trade
+    and it is why the function returns a report and the caller logs it
+    rather than doing this silently. Gaps closed (relative):
+    rho_0 4.9e-3, Omega 2.7e-3, R_earth 5.9e-4, g 3.9e-4.
+
+    Why it is not a one-line assignment
+    -----------------------------------
+    fesom_jax consumers do ``from .config import G``, which COPIES the
+    binding at import time, so rebinding ``config.G`` alone reaches nothing
+    already imported. Every consumer module is rebound too.
+
+    Two things cannot be reached this way and are reported as
+    ``unreachable`` instead of being silently missed:
+
+    * dataclass FIELD DEFAULTS evaluated at import (``gm.py``'s
+      ``g: float = G``) -- a config built before this call keeps 9.81;
+    * ``forcing.py``'s bulk block, which carries its OWN gravity 9.80 and
+      its own air constants, independent of ``config.G`` (its own comment
+      says so). Ocean-only arms do not touch it.
+
+    Omega is special: it never appears in fesom_jax outside ``config``.
+    It reaches the dynamics ONLY as the mesh's precomputed
+    ``coriolis``/``coriolis_node`` arrays (``2*Omega*sin(lat)``, built at
+    mesh load), so rebinding the name changes nothing at all. Use
+    :func:`rescale_mesh_coriolis` on the mesh as well; this function
+    reports it under ``unreachable`` so the caller cannot forget.
+
+    Returns ``(changed, unreachable)`` where ``changed`` maps constant name
+    to ``(old, new)``.
+    """
+    _require_fesom_jax()
+    import sys as _sys
+
+    from legoesm import constants as _C
+    from fesom_jax import config as _fcfg
+
+    _fesom_native_pi()          # capture BEFORE we overwrite anything
+    #: fesom_jax name -> legoESM value. PI included as of 2026-08-11 (user
+    #: directive): every constant comes from legoESM core, so the arms
+    #: share them all.
+    wanted = {
+        "G": float(_C.g),
+        "R_EARTH": float(_C.R_earth),
+        "OMEGA": float(_C.Omega),
+        "DENSITY_0": float(_C.rho_ocean),
+        "PI": float(_C.PI),
+    }
+    changed: dict[str, tuple[float, float]] = {}
+    for name, new in wanted.items():
+        old = float(getattr(_fcfg, name))
+        if old != new:
+            changed[name] = (old, new)
+        setattr(_fcfg, name, new)
+        # Rebind in every already-imported consumer that copied the name.
+        for mod_name, mod in list(_sys.modules.items()):
+            if (mod_name.startswith("fesom_jax.")
+                    and mod is not None
+                    and getattr(mod, name, None) is not None
+                    and isinstance(getattr(mod, name), float)):
+                setattr(mod, name, new)
+
+    # Derived from PI, so it has to follow. NOTE mesh.load_mesh takes it as
+    # a DEFAULT ARGUMENT, which Python binds at import: a mesh already
+    # loaded keeps the old cyclic length, and one loaded later only picks
+    # this up if the caller passes cyclic_length_rad explicitly. The
+    # difference is 2*(pi_true - pi_fesom) ~ 1e-14 rad on a 2*pi domain,
+    # i.e. 1e-15 relative -- far below the mesh coordinates' own precision,
+    # which is why this is recorded rather than plumbed.
+    new_cyclic = 2.0 * float(_C.PI)
+    setattr(_fcfg, "CYCLIC_LENGTH_RAD", new_cyclic)
+    for mod_name, mod in list(_sys.modules.items()):
+        if (mod_name.startswith("fesom_jax.")
+                and mod is not None
+                and isinstance(getattr(mod, "CYCLIC_LENGTH_RAD", None), float)):
+            setattr(mod, "CYCLIC_LENGTH_RAD", new_cyclic)
+
+    unreachable = [
+        "OMEGA: reaches the dynamics only through the mesh's precomputed "
+        "coriolis arrays -- call rescale_mesh_coriolis(mesh) too",
+        "dataclass field defaults evaluated at import (e.g. fesom_jax.gm's "
+        "g: float = G) keep the old value in configs built earlier",
+        "fesom_jax.forcing's bulk block has its own gravity 9.80 and air "
+        "constants, independent of config.G (ice/bulk paths only)",
+        "mesh.load_mesh's cyclic_length_rad DEFAULT ARG is bound at import, "
+        "so a mesh loaded before this call keeps 2*pi_fesom (a 1e-15 "
+        "relative difference, below the mesh coordinates' precision)",
+    ]
+    return changed, unreachable
+
+
+def rescale_mesh_coriolis(mesh: "Mesh") -> "Mesh":
+    """Return *mesh* with its Coriolis arrays on legoESM's Omega.
+
+    ``coriolis``/``coriolis_node`` are ``2*Omega*sin(lat)`` baked in at mesh
+    load, so they are the ONLY place Omega reaches the solution. f is
+    linear in Omega, so rescaling by the ratio is exact -- no need to
+    recompute from latitude, and no risk of using a different latitude
+    convention than the mesh did.
+    """
+    _require_fesom_jax()
+    import dataclasses as _dc
+
+    from legoesm import constants as _C
+    from fesom_jax import config as _fcfg
+
+    # FESOM's ORIGINAL pi, not the possibly-overridden config.PI: the mesh
+    # was built with the former, and reading the latter after the override
+    # would compute the ratio against the wrong denominator.
+    omega_mesh = 2.0 * _fesom_native_pi() / 86400.0
+    ratio = float(_C.Omega) / omega_mesh
+    upd = {}
+    for field in ("coriolis", "coriolis_node"):
+        if hasattr(mesh, field):
+            upd[field] = jnp.asarray(getattr(mesh, field)) * ratio
+    return _dc.replace(mesh, **upd) if upd else mesh
+
+
 def build_flat_bottom_mesh(
     mesh: "Mesh",
     H_max: float,
@@ -504,6 +674,25 @@ def build_flat_bottom_mesh(
 # Initial condition
 # =============================================================================
 
+def resolve_ale_cfg(vertical_coordinate: str):
+    """``AleConfig`` for *vertical_coordinate*, or ``None`` for linfs.
+
+    RAISES on an unknown mode -- a silent fall-through to linfs would run
+    a different vertical coordinate than the caller asked for (the repo's
+    dispatch-hardening rule).
+    """
+    if vertical_coordinate == "linfs":
+        return None
+    if vertical_coordinate == "zstar":
+        _require_fesom_jax()
+        from fesom_jax.ale import AleConfig
+        return AleConfig()
+    raise ValueError(
+        f"FesomOceanConfig.vertical_coordinate={vertical_coordinate!r} is "
+        f"not supported; expected 'linfs' (fixed thicknesses) or 'zstar' "
+        f"(ALE moving thicknesses).")
+
+
 def element_centroid_lat_lon(mesh: "Mesh") -> tuple[jax.Array, jax.Array]:
     """GEOGRAPHIC (lat, lon) of every element centroid, radians.
 
@@ -572,6 +761,7 @@ def with_fields(
     S: jnp.ndarray | None = None,
     eta: jnp.ndarray | None = None,
     uv_elem: jnp.ndarray | None = None,
+    vertical_coordinate: str = "linfs",
 ) -> "FesomOceanState":
     """Return *state* with the given fields replaced (analytic-IC setter).
 
@@ -580,6 +770,13 @@ def with_fields(
     ``(elem2D, nlev, 2)`` or ``(elem2D, 2)`` (broadcast down the column).
     Shapes are checked against the mesh rather than broadcast blindly -- a
     silently transposed IC is the failure mode this guards.
+
+    ``vertical_coordinate`` MUST match the model's
+    ``FesomOceanConfig.vertical_coordinate``. It only matters when ``eta``
+    is set: under z-star the layer thicknesses are a function of the free
+    surface, so an ``eta`` written without restretching them is an
+    inconsistent column. See the ``eta`` branch below for why setting the
+    free surface is not simply ``eta_n=...``.
 
     The pad column (fesom_jax carries ``nl`` = ``nlev + 1`` slots) is
     filled by repeating the deepest value, and ``T_old``/``uv`` time levels
@@ -632,7 +829,57 @@ def with_fields(
         if e.shape != (n_node,):
             raise ValueError(
                 f"with_fields: eta shape {e.shape} != ({n_node},).")
-        repl.update(eta_n=e)
+        # The PROGNOSTIC free surface is ``hbar``, not ``eta_n``. FESOM's
+        # step computes hbar at substep 11 from hbar_old plus the transport
+        # divergence, then OVERWRITES eta_n at substep 12 with
+        # ``alpha*hbar + (1-alpha)*hbar_old``. Setting eta_n alone therefore
+        # survives exactly one step -- long enough to push the momentum RHS
+        # once (substep 5 reads the lagged eta_n) and then vanish.
+        #
+        # MEASURED 2026-08-10 on the barotropic-wave arm: a 1 m Gaussian
+        # bump gave peak |eta| 0.996 m at t=0 and 0.0067 m after ONE step,
+        # against 0.97 m on lat-lon and MPAS. The arm was integrating a
+        # rest state with a one-step kick, and its "the wave is gone"
+        # signature was being read as a dycore difference.
+        #
+        # hbar_old = hbar = eta keeps the substep-12 blend at eta for any
+        # alpha. It is also the only choice consistent with a state at
+        # rest: hbar = hbar_old + dt*div(UH), so U = 0 forces the two time
+        # levels equal, and leaving hbar_old at 0 asserts a large initial
+        # divergence -- which is what erased the bump.
+        #
+        # ssh_rhs_old = 0 and d_eta = 0 are a fresh-start BOOTSTRAP
+        # CONVENTION, not a derivation: equal time levels say the
+        # accumulated elevation change is zero, not that the previous
+        # step's continuity RHS was (codex 2026-08-10). d_eta is the CG
+        # warm start, and carrying a stale one across a discontinuous IC
+        # replacement changes finite-tolerance convergence.
+        #
+        # LIMITATION, stated not hidden: when a caller sets ``uv_elem`` to
+        # something non-zero AT THE SAME TIME (the inertia-gravity wave and
+        # Phillips ICs do), the surface IS changing at t=0 and the exact
+        # bootstrap is the transport divergence of that velocity, not zero.
+        # The error is one step of history on the AB tail.
+        repl.update(eta_n=e, hbar=e, hbar_old=e,
+                    ssh_rhs_old=jnp.zeros_like(e),
+                    d_eta=jnp.zeros_like(e))
+        if vertical_coordinate == "zstar":
+            # z-star ties layer thickness to the free surface, so a
+            # non-zero hbar with nominal hnode/helem is an inconsistent
+            # column. Use fesom_jax's own initialiser rather than
+            # re-deriving the stretch here.
+            from fesom_jax import ale as _ale
+            hnode, helem, eta_n_z, ssh_rhs_old_z = _ale.init_thickness_zstar(
+                mesh, e, e)
+            repl.update(hnode=hnode, helem=helem, eta_n=eta_n_z,
+                        ssh_rhs_old=ssh_rhs_old_z)
+        elif vertical_coordinate != "linfs":
+            raise ValueError(
+                f"with_fields: vertical_coordinate="
+                f"{vertical_coordinate!r} is not supported; expected "
+                f"'linfs' or 'zstar' (must match "
+                f"FesomOceanConfig.vertical_coordinate, or the initial "
+                f"free surface and the layer thicknesses disagree).")
     if uv_elem is not None:
         uv = jnp.asarray(uv_elem, dtype=jnp.float64)
         if uv.ndim not in (2, 3):
@@ -678,6 +925,7 @@ def create_rest_state(
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     stratified: bool = True,
+    vertical_coordinate: str = "linfs",
 ) -> FesomOceanState:
     """Rest state on *mesh*: zero velocity, flat free surface, uniform S.
 
@@ -700,7 +948,8 @@ def create_rest_state(
     from fesom_jax.state import State
     from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
-    state = State.rest(mesh, T0=float(T_water_init_C), S0=float(S_uniform))
+    state = State.rest(mesh, T0=float(T_water_init_C), S0=float(S_uniform),
+                       ale_cfg=resolve_ale_cfg(vertical_coordinate))
     if stratified:
         z_full = jnp.asarray(z_coord.z_full_ref, dtype=jnp.float64)
         T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
@@ -806,6 +1055,36 @@ class FesomOceanModel:
         from fesom_jax import ssh as fssh
         from fesom_jax.params import Params
 
+        # Constants FIRST: they must be in place before anything reads
+        # fconfig, and the Coriolis rescale has to happen before the mesh
+        # is handed to the solver.
+        mode = getattr(config, "constants", "legoesm")
+        if mode == "legoesm":
+            changed, unreachable = use_legoesm_constants()
+            mesh = rescale_mesh_coriolis(mesh)
+            # LOUD by design, and on EVERY construction in this mode -- not
+            # only the one that happened to do the mutation. The flag
+            # describes the RUN ("this arm is not FESOM2"), which stays
+            # true for the second model built in a process; keying it on
+            # `changed` made every construction after the first silent.
+            import warnings
+            detail = (", ".join(f"{k} {o!r}->{n!r}"
+                                for k, (o, n) in sorted(changed.items()))
+                      if changed else "already applied in this process")
+            warnings.warn(
+                f"FESOM arm running on legoESM constants, NOT FESOM2's: "
+                f"{detail}; pi deliberately left at FESOM's truncated "
+                f"value. Bit-fidelity with FESOM2 is broken by this "
+                f"(select FesomOceanConfig(constants='fesom') for oracle "
+                f"work). Out of reach of the override: "
+                + "; ".join(unreachable),
+                RuntimeWarning, stacklevel=2)
+        elif mode != "fesom":
+            raise ValueError(
+                f"FesomOceanConfig.constants={mode!r} is not supported; "
+                f"expected 'legoesm' (share the suite's constants) or "
+                f"'fesom' (keep FESOM2's, for oracle fidelity).")
+
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config
@@ -823,6 +1102,11 @@ class FesomOceanModel:
             else float(fconfig.A_VER)
         )
 
+        # None => linfs (fesom_jax's default); an AleConfig => z-star.
+        # Static: it selects a compile-time branch inside step_jit.
+        self._ale_cfg = resolve_ale_cfg(
+            getattr(config, "vertical_coordinate", "linfs")
+            if config is not None else "linfs")
         self._ssh_op = fssh.build_ssh_operator(mesh, dt=self._dt)
         self._stress_surf = jnp.zeros((int(mesh.elem2D), 2), dtype=jnp.float64)
         self._params = Params(
@@ -869,6 +1153,7 @@ class FesomOceanModel:
             self._params,
             dt=self._dt,
             is_first_step=state.is_first_step,
+            ale_cfg=self._ale_cfg,
         )
 
         # Materialise the per-step node velocity ONCE.  ``u`` / ``v``

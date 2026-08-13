@@ -28,7 +28,8 @@ def save_physics_checkpoint(model, path: str | Path) -> None:
 
 def load_physics_checkpoint(model_template, path: str | Path):
     """Load an Equinox joint-physics model from disk."""
-    return eqx.tree_deserialise_leaves(str(path), model_template)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    return load_checkpoint_or_fail(str(path), model_template)
 
 
 def save_physics_stats(

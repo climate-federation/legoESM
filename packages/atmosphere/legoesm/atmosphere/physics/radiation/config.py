@@ -30,9 +30,10 @@ if TYPE_CHECKING:
 # Machine-readable tunable/fixed split for the radiation scheme configs.
 # Reviewed 2026-06-13 (placeholders replaced with physically-correct
 # classifications):
-#   * gray tau_equator/tau_pole are PRIMARY trained knobs (the legacy-8 set
-#     in training/trainable_params.py DEFAULT_TRAINABLE) -> tier 1 with their
-#     flat build_segment_fn aliases preserved as legacy_name;
+#   * gray tau_equator/tau_pole were PRIMARY trained knobs until 2026-08-11;
+#     gray radiation is no longer trained at all, so every gray param is now
+#     tier 0 (never selected) with its bounds retained for the LES feedback
+#     loop's per-column promotion clamp;
 #   * surface albedo (the AIMIP-trained blended-surface knob that reaches the
 #     heating through both solvers) -> tier 1;
 #   * other closure knobs (LW/SW optical-depth shape, ozone profile,
@@ -47,15 +48,23 @@ __param_spec__ = {
             "sfc_emissivity": "physics: surface boundary emissivity is a domain boundary condition, not a sigmoid-tunable closure (fix via config)",
         },
         "params": {
-            "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
-            "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
-            "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
-            "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
-            "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
-            "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
-            "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
-            "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "gray radiation scheme default", "shape": None},
-            "obliquity": {"units": "degree", "bounds": (0.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "solar", "reference": "gray radiation scheme default", "shape": None},
+        # Gray radiation is NOT trainable: every knob below sits at
+        # tunable_tier 0, which build_trainable_params never selects (it takes
+        # 1 <= tier <= level). The classical model trains RRTMGP instead —
+        # there, only the surface albedo and emissivity are tunable. Bounds are
+        # retained deliberately: promotable_params.py promotes gray_tau_equator
+        # / gray_tau_pole to per-column fields in the LES feedback loop, and
+        # feedback.param_field_bounds clamps that diagnosis to these ranges.
+        # User directive 2026-08-11.
+        "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 0, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
+        "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 0, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
+        "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
+        "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
+        "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
+        "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
+        "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 0, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
+        "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "albedo", "reference": "gray radiation scheme default", "shape": None},
+        "obliquity": {"units": "degree", "bounds": (0.0, 90.0), "tunable_tier": 0, "transform": "sigmoid", "category": "solar", "reference": "gray radiation scheme default", "shape": None},
         },
     },
     "OzoneProfileConfig": {
