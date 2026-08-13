@@ -27,6 +27,43 @@ so a reader can see the scale.
 
 Run AFTER building the mesh the case uses; writes a JSON record per sampled
 step so the onset can be walked rather than inferred from one frame.
+
+MEASURED 2026-08-13 on the failing case (mpas_channel, 70 km, 504 cells,
+channel lat 16-34 so mid-channel is 25 deg). Sampling every 20 steps:
+
+    step     max|eta|      chequerboard   concentration
+    19300     0.880 m        -0.623          0.720
+    19400     0.881 m        -0.623          0.722
+    19420     0.882 m        -0.625          0.718
+    19440  5470.043 m        -0.677          0.077
+    19460       NaN            --              --
+
+  controls on THIS mesh: alternating +0.340, random -0.011, constant -1.000
+
+WHAT THAT RULES OUT.
+
+ * NOT a grid-scale chequerboard. The index at the blow-up frame moves AWAY
+   from the alternating control (-0.677 against +0.340) -- the exploding
+   field is SMOOTHER than the healthy one, not rougher. The hexagonal
+   divergence null-space reading is refuted.
+ * NOT a domain-filling resolved mode. Concentration collapses 0.72 -> 0.077:
+   39 of 504 cells.
+ * NOT the existing feature amplifying. Those 39 cells have ZERO overlap with
+   the 39 largest cells one sample earlier; they sat at 0.25 m mean against a
+   0.88 m domain peak, then grew 11150x in 20 steps.
+ * NOT degenerate geometry. Their median cell area is 0.99 of the domain
+   median and their smallest is twice the domain minimum -- they are ordinary
+   cells, not the small or distorted ones.
+ * NOT a wall or buffer effect. They lie at lat 25.4-29.2 in a 16-34 channel,
+   i.e. from mid-channel toward the northern half, with none in the outer 10%
+   latitude band.
+
+WHAT IS LEFT. A localised, smooth, explosively growing patch in the JET
+region: quiescent to 5470 m in 20 baroclinic steps after 400 steps flat to
+four decimal places, in ordinary cells, starting where the flow was NOT
+strongest. The onset is sharp enough that the reported blow-up step moves by
+one check interval between runs (19400 vs 19500), so it sits near a threshold
+rather than growing through one.
 """
 from __future__ import annotations
 
