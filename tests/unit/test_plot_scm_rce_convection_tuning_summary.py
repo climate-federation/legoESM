@@ -245,19 +245,28 @@ def test_every_component_panel_is_actually_drawn(mod, tmp_path, monkeypatch):
     assert len(seen) == 5
 
 
-def _segment_colours(mod, names, before, after, notes):
-    """Draw one panel on a throwaway axis and return each scheme's SEGMENT
-    colour, so styling claims are asserted on the artist rather than on the
-    fact that a file was written (codex round 2, finding 13)."""
+def _artists(mod, names, before, after, notes):
+    """Draw one panel on a throwaway axis and return the per-scheme artists by
+    gid, so styling claims are asserted on the artist rather than on the fact
+    that a file was written (codex round 2, finding 13).
+
+    Selected by gid, NOT by point count: the boxplot draws its whiskers, caps
+    and medians as two-point lines too, and picking on ``len(xdata) == 2``
+    silently returned those instead -- which is how the first version of this
+    helper "failed" against correct plotting code.
+    """
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()
     mod._panel(ax, names, before, after, notes, "t", None)
-    # the segments are the 2-point lines; endpoint markers are 1-point plots
-    segs = [ln for ln in ax.lines if len(ln.get_xdata()) == 2]
-    out = {n: ln.get_color() for n, ln in zip(names, segs)}
+    got = {ln.get_gid(): ln for ln in ax.lines if ln.get_gid()}
     plt.close(fig)
-    return out
+    return got
+
+
+def _segment_colours(mod, names, before, after, notes):
+    a = _artists(mod, names, before, after, notes)
+    return {n: a[f"seg:{n}"].get_color() for n in names}
 
 
 def test_a_component_that_moved_is_coloured_by_its_own_direction(mod):
@@ -281,16 +290,22 @@ def test_a_component_that_moved_is_coloured_by_its_own_direction(mod):
 def test_a_structurally_flat_component_is_greyed_and_dashed(mod):
     """The other half: when the component really did not move AND the scheme
     is structurally flat, it must be grey and dashed."""
-    import matplotlib.pyplot as plt
+    a = _artists(mod, ["kuo", "edmf"], [5.7367, 0.98], [5.7367, 0.95],
+                 ["scores the no-convection baseline", None])
+    assert a["seg:kuo"].get_color() == mod.INERT
+    assert a["seg:kuo"].get_linestyle() != "-"
+    assert a["seg:edmf"].get_color() == mod.AFTER
+    assert a["seg:edmf"].get_linestyle() == "-"
 
-    fig, ax = plt.subplots()
-    mod._panel(ax, ["kuo", "edmf"], [5.7367, 0.98], [5.7367, 0.95],
-               ["scores the no-convection baseline", None], "t", None)
-    segs = [ln for ln in ax.lines if len(ln.get_xdata()) == 2]
-    assert segs[0].get_color() == mod.INERT
-    assert segs[0].get_linestyle() != "-"
-    assert segs[1].get_color() == mod.AFTER
-    plt.close(fig)
+
+def test_the_tuned_endpoint_carries_the_direction_colour(mod):
+    """codex round 2 finding 7: a green dot on a degraded scheme is the
+    strongest encoding on the panel and contradicts the red segment."""
+    a = _artists(mod, ["up", "down"], [1.0, 1.0], [1.5, 0.5], [None, None])
+    assert a["after:down"].get_color() == mod.AFTER
+    assert a["after:up"].get_color() == mod.WORSE
+    # the default endpoint keeps the "before" condition colour
+    assert a["before:up"].get_color() == mod.BEFORE
 
 
 def test_an_unchanged_component_is_not_coloured_as_degraded(mod):

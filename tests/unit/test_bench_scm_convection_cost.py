@@ -126,17 +126,25 @@ def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col)
     assert r["n_leaves"] >= 4, r["n_leaves"]
 
 
-# Every scheme except the two measured inactive on this idealized column.
-# `kuo` cannot convect without large-scale moisture convergence; `emanuel`
-# reads exactly 0.0 on both dT/dt and dq_v/dt here despite being the
-# campaign's best scheme, i.e. its trigger does not fire on this profile.
-_EXPECTED_INACTIVE = ("kuo", "emanuel")
+# Only `kuo` is pinned as inactive, and only because its reason is
+# STRUCTURAL: it needs a large-scale moisture-convergence operator, which a
+# single column never supplies, at any vertical resolution.
+#
+# `emanuel` is deliberately NOT pinned. At the production nlev=74 it measures
+# exactly 0.0 on both channels and the bench excludes it, but at this module's
+# nlev=16 it fires (dT ~ 9.9e-06 K/s) -- so its inactivity is a property of
+# that particular column, not a fact about the scheme, and asserting the
+# nlev=74 measurement here would be a claim carried across a configuration
+# change. The bench decides per run from its own activity flag; this suite
+# only pins the reason that is resolution-independent.
+_EXPECTED_INACTIVE = ("kuo",)
 
-
+# Schemes expected to trigger AT THIS MODULE'S nlev. `emanuel` belongs here
+# precisely because it is active at nlev=16.
 @pytest.mark.parametrize(
     "scheme", [s for s in (
         "sbm", "dca", "mass_flux", "edmf", "zhang_mcfarlane",
-        "kain_fritsch", "tiedtke", "bechtold") ])
+        "kain_fritsch", "tiedtke", "bechtold", "emanuel") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
     """codex round 1 findings 14/19: an all-zero tendency is finite and times
     fine, so an untriggered scheme silently joins the 'pack' that ZM is
@@ -177,18 +185,6 @@ def test_the_expected_inactive_schemes_are_flagged(mod, col, scheme):
         f"{scheme} produced a tendency here (dT {r['sum_abs_dT_dt']:.3e}, "
         f"dqv {r['sum_abs_dqv_dt']:.3e}); the pack-exclusion rationale and "
         f"every published ratio need revisiting")
-
-
-def test_kuo_is_reported_inactive_and_would_be_excluded(mod, col):
-    """The measured case the flag exists for: kuo cannot convect without a
-    large-scale moisture-convergence operator, and at ncol=1 it was ORIGINALLY
-    the median of the 'other nine', i.e. the baseline was the cost of doing
-    nothing."""
-    state, sigma = col
-    r = mod.time_scheme("kuo", state, sigma, DT, repeats=1, warmups=0)
-    assert not r["active"], (
-        "kuo produced a tendency here; if it is genuinely active in this "
-        "geometry the pack-exclusion rationale needs revisiting")
 
 
 def test_dilute_override_reaches_the_config_through_physics(mod, monkeypatch):

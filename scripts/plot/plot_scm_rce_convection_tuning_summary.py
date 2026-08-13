@@ -240,17 +240,22 @@ def _panel(
         else:
             seg = AFTER if after[i] < before[i] else WORSE
             mark = None
+        # gid tags the per-scheme artists so a test can select THEM rather
+        # than whatever else is on the axis -- the boxplot's whiskers, caps
+        # and medians are also two-point lines, and picking lines by point
+        # count silently returned those instead.
         ax.plot([x0, x1], [before[i], after[i]], "-",
                 color=seg, alpha=0.45 if inert else 0.55,
-                lw=1.4, ls=(0, (3, 2)) if inert else "-", zorder=2)
+                lw=1.4, ls=(0, (3, 2)) if inert else "-", zorder=2,
+                gid=f"seg:{name}")
         ax.plot(x0, before[i], "o", ms=8, color=mark or BEFORE,
-                mec=SURFACE, mew=2.0, zorder=3)
+                mec=SURFACE, mew=2.0, zorder=3, gid=f"before:{name}")
         # The tuned endpoint takes the DIRECTION colour, not a fixed "after"
         # green. A green dot on a degraded scheme is the strongest visual
         # encoding on the panel and contradicts the red segment joining it
         # (codex round 2, finding 7).
         ax.plot(x1, after[i], "o", ms=8, color=mark or seg,
-                mec=SURFACE, mew=2.0, zorder=3)
+                mec=SURFACE, mew=2.0, zorder=3, gid=f"after:{name}")
 
     # Label the extremes plus every structurally-flat scheme: those are the
     # rows a reader must not mistake for "tuning did nothing".
