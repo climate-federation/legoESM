@@ -121,12 +121,42 @@ class _Geo:
                       + 0.05 * ii * jj + 0.01 * ii * ii)
             cscale, csign = 0.25, 1.0
         elif kind == "rough":
-            # delp plus a one-cell step -> the limiters DO fire.
-            self.q = np.array(inp["delp"], dtype=np.float64)
-            step = np.zeros((ni, nj))
-            step[ni // 2:, :] += 40.0
-            step[:, nj // 3] -= 25.0
-            self.q = self.q + step
+            # TWO REGIMES BY CONSTRUCTION, so the limiter flag takes BOTH
+            # values (job 9401521 measured the previous delp+step+dip
+            # fixture at on=234 / off=0 -- entirely on ONE side of the
+            # surface, which is what its own self-check caught).
+            #
+            # Why a step does not work and a 2-delta-x oscillation does:
+            # `smt5 = bl*br < 0` is FALSE only where the cell is a LOCAL
+            # EXTREMUM.  For a linear field q = m + s*i the 4-point PPM
+            # edge values are al(i) = q(i) - s/2 and al(i+1) = q(i) + s/2,
+            # so bl*br = -(s/2)^2 < 0 -> flag ON at EVERY cell; a step
+            # adds two isolated cells and leaves the rest ON.  For a
+            # +-A alternation about a mean m the edge value is exactly m
+            # at every interface (p1*2m + p2*2m = m), so bl = br = -+A and
+            # bl*br = A^2 > 0 -> flag OFF at EVERY cell of that region.
+            # Halving the domain therefore guarantees a non-empty split
+            # WITHOUT depending on any property of the fixture data.
+            base = float(np.mean(np.asarray(inp["delp"],
+                                            dtype=np.float64)))
+            amp = 200.0
+
+            def _two_regime(shape, i_lo, j_lo):
+                """linear (flag ON) on the low half of each axis,
+                2-delta-x oscillation (flag OFF) on the high half."""
+                n_i, n_j = shape
+                a = np.arange(n_i, dtype=np.float64)[:, None]
+                c = np.arange(n_j, dtype=np.float64)[None, :]
+                out = base + 40.0 * a / n_i + 15.0 * c / n_j
+                si = (-1.0) ** np.arange(n_i, dtype=np.float64)
+                sj = (-1.0) ** np.arange(n_j, dtype=np.float64)
+                out[n_i // 2:, :] += amp * si[n_i // 2:, None]
+                out[:, n_j // 2:] += amp * sj[None, n_j // 2:]
+                del i_lo, j_lo
+                return out
+
+            self.q = _two_regime((ni, nj), b.isd, b.jsd)
+            self._two_regime = _two_regime
             cscale, csign = 0.45, -1.0
         else:                       # pragma: no cover - guard
             raise ValueError(f"_Geo: unknown kind {kind!r}")
@@ -160,8 +190,6 @@ class _Geo:
         assert (self.ra_x > 0).all() and (self.ra_y > 0).all()
 
         # Staggered operands for xtp_u / ytp_v.
-        self.u = np.asarray(inp["u"], dtype=np.float64)   # (isd:ied,jsd:jed+1)
-        self.v = np.asarray(inp["v"], dtype=np.float64)   # (isd:ied+1,jsd:jed)
         if kind == "smooth":
             iu = np.arange(b.isd, b.ied + 1, dtype=np.float64)[:, None]
             ju = np.arange(b.jsd, b.jed + 2, dtype=np.float64)[None, :]
@@ -169,6 +197,12 @@ class _Geo:
             iv = np.arange(b.isd, b.ied + 2, dtype=np.float64)[:, None]
             jv = np.arange(b.jsd, b.jed + 1, dtype=np.float64)[None, :]
             self.v = -4.0 + 0.25 * iv - 0.15 * jv + 0.003 * iv * jv
+        else:
+            # same two-regime construction as `q`, so xtp_u / ytp_v also
+            # span BOTH sides of their smt5 surface.
+            self.u = self._two_regime((ni, nj + 1), b.isd, b.jsd)
+            self.v = self._two_regime((ni + 1, nj), b.isd, b.jsd)
+
         # c for xtp_u/ytp_v is (is:ie+1, js:je+1) and is multiplied by
         # rdx/rdy inside, so scale it by a representative dx.
         nc_i = b.ie + 1 - b.is_ + 1
@@ -178,6 +212,31 @@ class _Geo:
         dxr = float(np.median(self.dx))
         self.c_sw = csign * cscale * dxr * np.cos(
             0.7 * ci + 0.4 * cj + (0.0 if kind == "smooth" else 1.3))
+        if kind == "smooth":
+            # The gradient gates need the upwind select `c > 0` (site N1)
+            # bounded AWAY from its switching surface BY CONSTRUCTION.
+            # The fixture-derived uc/vc and a bare cosine both cross zero,
+            # which made the old preconditions `|c|.min() > 1e-3` a
+            # hand-derived margin on a global min -- exactly the
+            # over-tight-margin class of lesson 12.  A strictly positive
+            # field removes the precondition instead of tuning it.
+            self.crx = 0.30 + 0.10 * np.sin(
+                0.5 * np.arange(self.crx.shape[0])[:, None]
+                + 0.3 * np.arange(self.crx.shape[1])[None, :])
+            self.cry = 0.28 + 0.09 * np.cos(
+                0.4 * np.arange(self.cry.shape[0])[:, None]
+                + 0.6 * np.arange(self.cry.shape[1])[None, :])
+            self.xfx = self.crx * self.dy[i0:i1, :] * 0.5
+            self.yfx = self.cry * self.dx[:, j0:j1] * 0.5
+            self.ra_x = (self.area[i0:i0 + (b.ie - b.is_ + 1), :]
+                         + self.xfx[:-1, :] - self.xfx[1:, :])
+            self.ra_y = (self.area[:, j0:j0 + (b.je - b.js + 1)]
+                         + self.yfx[:, :-1] - self.yfx[:, 1:])
+            assert (self.ra_x > 0).all() and (self.ra_y > 0).all()
+            self.c_sw = dxr * (0.30 + 0.10 * np.sin(0.7 * ci + 0.4 * cj))
+            assert np.abs(self.crx).min() > 0.15
+            assert np.abs(self.cry).min() > 0.15
+            assert np.abs(self.c_sw).min() > 0.15 * dxr
 
         self.mass = np.abs(self.q) + 1.0
         self.damp_km = 0.05 + 0.01 * np.abs(np.sin(ii + jj))
@@ -342,34 +401,61 @@ def test_pert_ppm_rejects_float32():
                     jnp.asarray(ar), 1)
 
 
-def test_pert_ppm_grads_order2_smooth(smooth):
-    """gate 4 -- order-2 grads at a state PROVED away from every
-    switching surface of ``iv=1``.
+def test_pert_ppm_adjoint_identity():
+    """gate 4 PRIMARY -- runs ON pert_ppm's switching surfaces (a random
+    ensemble straddles all of S1/S2/S3), which is exactly where the FD
+    gate below cannot go."""
+    a0, al, ar = _pert_fixture()
+    for iv in (0, 1):
+        def f(x, iv=iv):
+            n = x.shape[0] // 2
+            l_, r_ = tp.pert_ppm(jnp.asarray(a0), x[:n], x[n:], iv)
+            return jnp.concatenate([l_, r_])
+
+        _adjoint_identity(f, np.concatenate([al, ar]),
+                          f"pert_ppm iv={iv}", seed=30 + iv)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_pert_ppm_check_grads_smooth(order):
+    """gate 4 SUPPLEMENT -- order 1 before order 2, at a CONSTRUCTED
+    state whose distance from every switching surface is computed and
+    asserted rather than sampled.
+
+    The previous version drew ``al``/``ar`` from a random normal and
+    then required ``.all()`` cells to clear a hand-picked margin -- the
+    over-tight-margin class of lesson 12: with ``al+ar`` free to wander
+    through zero, some of the 64 samples inevitably land near
+    ``|a6da| = da2`` and the precondition, not ``check_grads``, decides
+    the test.  Here the amplitude is chosen so the margin is provable:
+    ``|al+ar| <= 0.2`` and ``|da1| >= 1.8`` give ``|a6da| <= 3*0.2*2.2 =
+    1.32`` against ``da2 >= 3.24``, i.e. never closer than 59 %.
 
     NON-SMOOTH SITES of pert_ppm(iv=1), all named and all avoided here:
-      S1  ``al*ar = 0``      (the outer cross-sign test),
-      S2  ``a6da = -da2``    (the ``ar = -2*al`` arm boundary),
-      S3  ``a6da = +da2``    (the ``al = -2*ar`` arm boundary).
+      S1 ``al*ar = 0``, S2 ``a6da = -da2``, S3 ``a6da = +da2``.
     """
-    del smooth
-    rng = np.random.default_rng(21)
-    al = -(0.5 + rng.random(64))            # strictly negative
-    ar = +(0.5 + rng.random(64))            # strictly positive
-    a0 = 1.0 + rng.random(64)
+    k = np.arange(64, dtype=np.float64)
+    al = -(1.0 + 0.1 * np.sin(k))
+    ar = +(1.0 + 0.1 * np.cos(k))
+    a0 = 1.0 + 0.1 * np.cos(0.5 * k)
     da1 = al - ar
     da2 = da1 ** 2
     a6da = 3.0 * (al + ar) * da1
-    # Control: every cell is strictly inside ONE arm, with >=10% margin
-    # on each surface, so the order-2 check is taken on a smooth patch.
-    assert (al * ar < -1e-2).all(), "S1 (al*ar=0) too close"
-    assert (np.abs(np.abs(a6da) - da2) > 0.1 * da2).all(), "S2/S3 close"
+    # Measured margins (not assumed): report-and-assert.
+    assert (al * ar).max() < -0.4, float((al * ar).max())
+    assert ((da2 - np.abs(a6da)) / da2).min() > 0.5, \
+        float(((da2 - np.abs(a6da)) / da2).min())
 
-    def f(al_, ar_):
-        a, b = tp.pert_ppm(jnp.asarray(a0), al_, ar_, 1)
-        return jnp.sum(a * a) + jnp.sum(b * b) + jnp.sum(a * b)
+    def f(x):
+        n = x.shape[0] // 2
+        l_, r_ = tp.pert_ppm(jnp.asarray(a0), x[:n], x[n:], 1)
+        return jnp.sum(l_ * l_) + jnp.sum(r_ * r_) + jnp.sum(l_ * r_)
 
-    check_grads(f, (jnp.asarray(al), jnp.asarray(ar)), order=2,
-                modes=("fwd", "rev"))
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(np.concatenate([al, ar])),), order=order,
+                modes=("fwd", "rev"), eps=1e-4, atol=1e-6, rtol=1e-6)
 
 
 def test_pert_ppm_one_sided_derivative_across_switching_surfaces():
@@ -513,10 +599,12 @@ def test_copy_corners_guards(rough):
     assert np.isfinite(np.asarray(ok)).any()
 
 
-def test_copy_corners_grads_order2(rough):
+@pytest.mark.parametrize("order", [1, 2])
+def test_copy_corners_check_grads(order, rough):
     """gate 4 -- a gather/scatter is LINEAR in ``q``; there is no
-    switching surface at all, so order-2 grads must be exact
-    everywhere."""
+    switching surface at all, so grads must be exact everywhere.
+    ``order=1`` runs as a separate case so an FD-resolution failure can
+    never be confounded with a wrong Jacobian (lesson 12)."""
     q0 = jnp.asarray(rough.q[:8, :8])
     bd = Bounds.single_tile(2, 3)
 
@@ -524,32 +612,109 @@ def test_copy_corners_grads_order2(rough):
         y = tp.copy_corners(x, 3, 3, 1, False, bd, True, True, True, True)
         return jnp.nansum(y * y)
 
-    check_grads(f, (q0,), order=2, modes=("fwd", "rev"))
+    check_grads(f, (q0,), order=order, modes=("fwd", "rev"))
+
+
+def test_copy_corners_adjoint_identity(rough):
+    """gate 4 PRIMARY -- the gather is linear, so the identity is the
+    natural statement of correctness for its transpose (the scatter)."""
+    bd = Bounds.single_tile(2, 3)
+
+    def f(x):
+        return tp.copy_corners(x, 3, 3, 2, False, bd, True, True, True,
+                               True)
+
+    _adjoint_identity(f, rough.q[:8, :8], "copy_corners", seed=40)
 
 
 # =====================================================================
 # shared smoothness control (strategy correction 4)
 # =====================================================================
 
-def _assert_locally_smooth(f, x, dx, name, eps=1e-6, tol=1e-6):
-    """No switching surface inside the finite-difference ball.
+def _assert_scalar_locally_smooth(f, t0, name, eps=1e-3, tol=1e-6):
+    """No switching surface inside the finite-difference ball, measured
+    on a SINGLE-CELL scalar functional.
 
-    Compares the LEFT and RIGHT one-sided directional derivatives.  At a
-    limiter kink (or a flux discontinuity) they differ at O(1); inside a
-    smooth patch they agree to O(eps).  This is the control that licenses
-    the order-2 ``check_grads`` below -- without it a "grads pass" claim
-    is a claim about an arbitrary state.
+    Lesson 12 + job 9401521: the previous version compared one-sided
+    derivatives of a GLOBAL functional (``nansum(out*out)``) under a
+    dense random perturbation of every input cell.  A PPM flux array
+    crosses hundreds of limiter surfaces at once under such a
+    perturbation, so the two one-sided derivatives disagree for reasons
+    that have nothing to do with the state being probed -- the detector
+    diluted every individual surface into an unreadable average.  One
+    input cell, one output cell, one scalar parameter.
     """
-    x = jnp.asarray(x)
-    dx = jnp.asarray(dx)
-    f0 = float(f(x))
-    fp = (float(f(x + eps * dx)) - f0) / eps
-    fm = (f0 - float(f(x - eps * dx))) / eps
+    f0 = float(f(jnp.asarray(t0)))
+    fp = (float(f(jnp.asarray(t0 + eps))) - f0) / eps
+    fm = (f0 - float(f(jnp.asarray(t0 - eps)))) / eps
     den = max(abs(fp), abs(fm), 1.0)
     assert abs(fp - fm) / den <= tol, (
         f"{name}: one-sided derivatives disagree ({fp:.6e} vs {fm:.6e}) "
-        f"-- a switching surface is inside the FD ball, so an order-2 "
-        f"check_grads here would be certifying a kink")
+        f"-- a switching surface is inside the FD ball, so a check_grads "
+        f"here would be certifying a kink")
+    return fp
+
+
+def _scalar_probe(run, field, kk, probe):
+    """Scalar -> scalar view of a transport routine: perturb ONE input
+    cell by ``t``, read ONE output cell.
+
+    ``check_grads`` perturbs its ARGUMENTS in a random direction, so
+    handing it the full operand moves every cell at once and reproduces
+    exactly the dilution above.  A scalar argument confines the
+    perturbation to the single cell whose smoothness was measured.
+    """
+    base = jnp.asarray(field)
+
+    def f(t):
+        return run(base.at[kk].add(t))[probe]
+
+    return f
+
+
+def _adjoint_identity(f, x, name, seed=0, tol=1e-12):
+    """PRIMARY gradient gate: ``<J v, w> == <v, J^T w>``.
+
+    Why this and not ``check_grads`` (lesson 12, and 15 of the 22
+    failures in job 9401521): the identity is exact for ANY state,
+    needs no finite-difference step, no dynamic-range budget and -- the
+    decisive property here -- **no off-switch fixture**.  It runs ON the
+    limiter surface, where a PPM chain spends most of its state space
+    and where ``check_grads`` cannot go at all.  A wrong Jacobian breaks
+    it by O(1), so the bound is a rounding bound, not a threshold.
+
+    Its blind spot is the one lesson 12 names: ``jvp`` and ``vjp`` of the
+    SAME wrong Jacobian agree.  That is why the scoped ``check_grads``
+    gates below are kept as the complementary FD check rather than
+    deleted.
+
+    Non-vacuity is asserted, not assumed: a routine whose Jacobian
+    happened to be the zero map would satisfy the identity trivially.
+    """
+    rng = np.random.default_rng(seed)
+    x = jnp.asarray(x)
+    v = jnp.asarray(rng.standard_normal(x.shape))
+    y, jv = jax.jvp(f, (x,), (v,))
+    assert bool(jnp.isfinite(y).all()), f"{name}: output not finite"
+    assert bool(jnp.isfinite(jv).all()), f"{name}: J v not finite"
+    w = jnp.asarray(rng.standard_normal(y.shape))
+    _, vjp_fn = jax.vjp(f, x)
+    (jtw,) = vjp_fn(w)
+    assert bool(jnp.isfinite(jtw).all()), f"{name}: J^T w not finite"
+    lhs = float(jnp.vdot(jv, w))
+    rhs = float(jnp.vdot(v, jtw))
+    # Non-vacuity: the Jacobian is not the zero map and the pairing is
+    # not accidentally orthogonal.
+    assert float(jnp.linalg.norm(jv)) > 0.0, f"{name}: J v == 0"
+    assert abs(lhs) > 0.0, f"{name}: <J v, w> == 0 (vacuous pairing)"
+    den = max(abs(lhs), abs(rhs))
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: adjoint identity, exact to rounding]
+    assert abs(lhs - rhs) / den <= tol, (
+        f"{name}: <Jv,w>={lhs:.17e} != <v,J^Tw>={rhs:.17e} "
+        f"(rel {abs(lhs - rhs) / den:.3e})")
+    return lhs, rhs
 
 
 # =====================================================================
@@ -686,53 +851,64 @@ def test_fixture_classes_are_what_they_claim(smooth, rough):
                 f"(off={int((~on).sum())})")
 
 
-@pytest.mark.parametrize("iord", [2, 5, 8])
-def test_xppm_grads_order2_smooth(iord, smooth):
-    """gate 4 -- order-2 grads at a state whose smoothness is MEASURED
-    (``_assert_locally_smooth``), not assumed.
+@pytest.mark.parametrize("iord", PPM_ORDS)
+def test_xppm_adjoint_identity(iord, rough):
+    """gate 4 PRIMARY -- runs ON the limiter surfaces, every iord.
 
-    NON-SMOOTH SITES of xppm, all named:
-      N1  the upwind select ``c(i,j) > 0``          (value continuous,
-          derivative w.r.t. c not) -- avoided: the smooth fixture's
-          Courant field is single-signed and bounded away from 0;
-      N2  ``smt5 = bl*br < 0`` / ``smt5 = 3|b0| < |bl-br|`` /
-          ``smt6`` / ``hi5`` / ``hi6`` -- the flux JUMPS across these;
-          the flag is uniform on this fixture
-          (``test_fixture_classes_are_what_they_claim``);
-      N3  ``jnp.copysign`` in ``dm`` and at iord 8/11 -- kinked at a
-          zero argument and jumping at a sign flip of the second;
-      N4  the three-way ``min`` in ``dm`` and the PPM ``min``/``max``
-          clamps at iord 9/10/13 and in the edge blocks;
-      N5  the ``max(0., al)`` clamp for iord < 0;
-      N6  ``0.25/a4`` at ``a4 = 0`` (iord -5/7/12) -- UNDEFINED, made
-          finite by the double-``where`` but with NO gradient claim.
-    iord=2 has NONE of N2-N6 (perfectly linear); 5 adds N2; 8 adds
-    N3/N4.  The FD control below is what certifies we are off all of
-    them on this fixture.
+    NON-SMOOTH SITES of xppm, all named: N1 the upwind select
+    ``c(i,j) > 0``; N2 the ``smt5``/``smt6``/``hi5``/``hi6`` flags,
+    across which the flux JUMPS; N3 ``copysign`` in ``dm`` and at
+    iord 8/11; N4 the three-way ``min`` in ``dm`` and the PPM
+    ``min``/``max`` clamps at iord 9/10/13 and in the edge blocks;
+    N5 ``max(0., al)`` for iord < 0; N6 ``0.25/a4`` at ``a4 = 0``
+    (iord -5/7/12), where the value is defined by the double-``where``
+    but NO gradient claim is made.  This gate is valid at all of
+    N1-N5 -- the identity holds for whichever branch AD linearised.
     """
-    b = smooth.bd
-    rng = np.random.default_rng(4)
-    dq = rng.standard_normal(smooth.q.shape)
-
     def f(q_):
-        out = _xppm_jax(smooth, iord, q_, smooth.crx)
-        return jnp.nansum(out * out)
+        return _xppm_jax(rough, iord, q_, rough.crx)
 
-    _assert_locally_smooth(f, smooth.q, dq, f"xppm iord={iord}")
-    # A reduced window keeps the order-2 FD affordable; the smoothness
-    # control above is run on the FULL operand.
-    check_grads(f, (jnp.asarray(smooth.q),), order=2, modes=("fwd",))
+    _adjoint_identity(f, rough.q, f"xppm q iord={iord}", seed=iord + 1)
 
     def g(c_):
-        out = _xppm_jax(smooth, iord, smooth.q, c_)
-        return jnp.nansum(out * out)
+        return _xppm_jax(rough, iord, rough.q, c_)
 
-    assert np.abs(smooth.crx).min() > 1e-3, "N1: c too close to 0"
-    _assert_locally_smooth(g, smooth.crx,
-                           rng.standard_normal(smooth.crx.shape),
-                           f"xppm(c) iord={iord}")
-    check_grads(g, (jnp.asarray(smooth.crx),), order=2, modes=("fwd",))
-    del b
+    _adjoint_identity(g, rough.crx, f"xppm c iord={iord}", seed=iord + 2)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("iord", [2, 5, 8])
+def test_xppm_check_grads_single_cell(order, iord, smooth):
+    """gate 4 SUPPLEMENT -- scoped smooth-region FD check.
+
+    ``order=1`` is a separate parametrization from ``order=2`` so an FD
+    RESOLUTION failure can never be confounded with a wrong Jacobian
+    (lesson 12): order-1 red means the Jacobian is wrong, order-1 green
+    with order-2 red means the second-order FD ran out of digits.
+
+    Scope: ONE input cell, ONE output cell, deliberately in the interior
+    (Fortran i = is+4) so the ``is==1`` / ``ie+1==npx`` edge blocks are
+    outside the stencil.  The smooth fixture is a low-order polynomial
+    with a strictly positive Courant field, so N1 and N2 are inactive;
+    the ``_assert_scalar_locally_smooth`` control MEASURES that rather
+    than assuming it.
+    """
+    b = smooth.bd
+    iq, jq = b.is_ + 4, b.jsd + 8
+    kk = (iq - b.isd, jq - b.jsd)
+    probe = (iq - b.is_, jq - b.jsd)
+
+    def run(q_):
+        return _xppm_jax(smooth, iord, q_, smooth.crx)
+
+    f = _scalar_probe(run, smooth.q, kk, probe)
+    slope = _assert_scalar_locally_smooth(f, 0.0, f"xppm iord={iord}")
+    assert abs(slope) > 1e-6, "probe cell does not influence the probed flux"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -826,26 +1002,41 @@ def test_yppm_unknown_jord_guard_is_non_vacuous(rough, monkeypatch):
     assert np.isfinite(np.asarray(out)).any()
 
 
-@pytest.mark.parametrize("jord", [2, 5, 8])
-def test_yppm_grads_order2_smooth(jord, smooth):
-    """gate 4 -- same non-smooth-site list as :func:`test_xppm_grads_
-    order2_smooth` (N1-N6), same measured smoothness control."""
-    rng = np.random.default_rng(6)
-
+@pytest.mark.parametrize("jord", PPM_ORDS)
+def test_yppm_adjoint_identity(jord, rough):
+    """gate 4 PRIMARY -- same non-smooth-site list (N1-N6) as
+    :func:`test_xppm_adjoint_identity`, j direction."""
     def f(q_):
-        return jnp.nansum(_yppm_jax(smooth, jord, q_, smooth.cry) ** 2)
+        return _yppm_jax(rough, jord, q_, rough.cry)
 
-    _assert_locally_smooth(f, smooth.q, rng.standard_normal(
-        smooth.q.shape), f"yppm jord={jord}")
-    check_grads(f, (jnp.asarray(smooth.q),), order=2, modes=("fwd",))
+    _adjoint_identity(f, rough.q, f"yppm q jord={jord}", seed=jord + 3)
 
     def g(c_):
-        return jnp.nansum(_yppm_jax(smooth, jord, smooth.q, c_) ** 2)
+        return _yppm_jax(rough, jord, rough.q, c_)
 
-    assert np.abs(smooth.cry).min() > 1e-3, "N1: c too close to 0"
-    _assert_locally_smooth(g, smooth.cry, rng.standard_normal(
-        smooth.cry.shape), f"yppm(c) jord={jord}")
-    check_grads(g, (jnp.asarray(smooth.cry),), order=2, modes=("fwd",))
+    _adjoint_identity(g, rough.cry, f"yppm c jord={jord}", seed=jord + 4)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("jord", [2, 5, 8])
+def test_yppm_check_grads_single_cell(order, jord, smooth):
+    """gate 4 SUPPLEMENT -- scoped, single-cell, order 1 before 2."""
+    b = smooth.bd
+    iq, jq = b.isd + 8, b.js + 4
+    kk = (iq - b.isd, jq - b.jsd)
+    probe = (iq - b.isd, jq - b.js)
+
+    def run(q_):
+        return _yppm_jax(smooth, jord, q_, smooth.cry)
+
+    f = _scalar_probe(run, smooth.q, kk, probe)
+    slope = _assert_scalar_locally_smooth(f, 0.0, f"yppm jord={jord}")
+    assert abs(slope) > 1e-6, "probe cell does not influence the flux"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -889,6 +1080,40 @@ def _deln_jax(geo, nord, damp, fx0, fy0, mass=None, damp_km=None,
               duogrid=duogrid)
 
 
+def _deln_damp(geo, nord, fx0, fy0, mass, damp_km, target=0.05):
+    """Self-calibrated ``damp`` giving a ``target``-relative increment.
+
+    WHY THIS EXISTS (job 9401521, the four ``nord=2`` non-vacuity
+    failures).  ``deln_flux`` multiplies by ``rarea`` ONCE PER PASS, and
+    on this C12 fixture ``rarea ~ 1/area ~ 1e-12``.  With the previous
+    hand-picked ``damp = 1e-3`` the nord=2 (del-6) increment landed near
+    ``1e-23`` against an ``fx0`` of order 1..156, i.e. seven orders BELOW
+    one ULP of the value it is added to, so ``fx + fx2 == fx`` exactly.
+    nord=0 and nord=1 passed because they carry one ``rarea`` fewer.
+    The operator was never inert -- the FIXTURE's damp was wrong, and
+    the oracle itself supplies the compensating scaling at
+    tp_core.F90:196-198, ``damp = (damp_c*da_min)**(nord+1)``, precisely
+    to undo ``rarea**nord``.
+
+    Calibrating rather than hardcoding a per-nord constant is exact
+    here: ``deln_flux`` is EXACTLY LINEAR in ``damp`` in all four
+    optional branches -- plain scales ``d2 = damp*q`` and everything
+    downstream is linear in ``d2``; the ``mass`` / ``damp_km`` branches
+    leave ``d2 = q`` and put ``damp`` in the final ``damp2`` factor
+    alone.  So ONE probe at ``damp = 1`` fixes the scale.
+    """
+    fxp, fyp = _deln_np(geo, nord, 1.0, fx0, fy0, mass, damp_km)
+    inc = max(float(np.nanmax(np.abs(fxp - fx0))),
+              float(np.nanmax(np.abs(fyp - fy0))))
+    assert np.isfinite(inc) and inc > 0.0, (
+        f"deln_flux probe at damp=1 moved NOTHING (nord={nord}) -- the "
+        f"operator, not the fixture scale, is inert; this is the (b) "
+        f"branch of the discrimination and is a CODE defect")
+    scale = max(float(np.nanmax(np.abs(fx0))),
+                float(np.nanmax(np.abs(fy0))))
+    return target * scale / inc
+
+
 @pytest.mark.parametrize("nord", [0, 1, 2])
 @pytest.mark.parametrize("opt", ["plain", "mass", "damp_km", "both"])
 def test_deln_flux_parity(nord, opt, rough):
@@ -902,7 +1127,7 @@ def test_deln_flux_parity(nord, opt, rough):
     fx0, fy0 = _fxfy0(rough)
     mass = rough.mass if opt in ("mass", "both") else None
     dkm = rough.damp_km if opt in ("damp_km", "both") else None
-    damp = 1.0e-3
+    damp = _deln_damp(rough, nord, fx0, fy0, mass, dkm)
     fx_n, fy_n = _deln_np(rough, nord, damp, fx0, fy0, mass, dkm)
     fx_j, fy_j = _deln_jax(rough, nord, damp, fx0, fy0, mass, dkm)
     # Non-vacuity: the damping actually changed the fluxes.
@@ -920,7 +1145,8 @@ def test_deln_flux_parity(nord, opt, rough):
 def test_deln_flux_jit_equals_eager_and_no_retrace(rough):
     """gate 2 -- ASSERTED."""
     fx0, fy0 = _fxfy0(rough)
-    eager = _deln_jax(rough, 2, 1e-3, fx0, fy0)
+    damp = _deln_damp(rough, 2, fx0, fy0, None, None)
+    eager = _deln_jax(rough, 2, damp, fx0, fy0)
     traces = {"n": 0}
 
     def _counted(*a, **k):
@@ -928,8 +1154,8 @@ def test_deln_flux_jit_equals_eager_and_no_retrace(rough):
         return tp.deln_flux(*a, **k)
 
     fn = tp.make_deln_flux_jit(_counted)
-    j1 = _deln_jax(rough, 2, 1e-3, fx0, fy0, fn=fn)
-    _deln_jax(rough, 2, 2e-3, fx0 * 1.1, fy0 * 0.9, fn=fn)
+    j1 = _deln_jax(rough, 2, damp, fx0, fy0, fn=fn)
+    _deln_jax(rough, 2, 2.0 * damp, fx0 * 1.1, fy0 * 0.9, fn=fn)
     assert traces["n"] == 1, traces["n"]
     for name, e, j in zip(("fx", "fy"), eager, j1):
         # TOL-PENDING: provisional bound; the orchestrator's measurement
@@ -942,9 +1168,9 @@ def test_deln_flux_guards(rough):
     """gate 3 -- float32 TypeError and a negative ``nord`` ValueError."""
     fx0, fy0 = _fxfy0(rough)
     with pytest.raises(TypeError, match="float64"):
-        _deln_jax(rough, 1, 1e-3, np.asarray(fx0, np.float32), fy0)
+        _deln_jax(rough, 1, 1.0, np.asarray(fx0, np.float32), fy0)
     with pytest.raises(ValueError, match="nord"):
-        _deln_jax(rough, -1, 1e-3, fx0, fy0)
+        _deln_jax(rough, -1, 1.0, fx0, fy0)
 
 
 def test_deln_flux_nord_guard_is_non_vacuous(rough):
@@ -959,35 +1185,88 @@ def test_deln_flux_nord_guard_is_non_vacuous(rough):
     silent degradation the JAX guard converts into a loud ValueError.
     """
     fx0, fy0 = _fxfy0(rough)
-    fx_bad, fy_bad = _deln_np(rough, -1, 1e-3, fx0, fy0)   # no raise
+    fx_bad, fy_bad = _deln_np(rough, -1, 1.0, fx0, fy0)    # no raise
     assert np.isnan(fx_bad).any() or np.isnan(fy_bad).any(), (
         "the unguarded NumPy lane did NOT degrade at nord=-1, so this "
         "demonstration proves nothing -- re-derive it before trusting "
         "the guard test")
     # ...and the guarded lane refuses the same call.
     with pytest.raises(ValueError, match="nord"):
-        _deln_jax(rough, -1, 1e-3, fx0, fy0)
+        _deln_jax(rough, -1, 1.0, fx0, fy0)
 
 
-def test_deln_flux_grads_order2(rough):
+@pytest.mark.parametrize("order", [1, 2])
+def test_deln_flux_check_grads(order, rough):
     """gate 4 -- deln_flux has NO switching surface (no limiter, no
     upwind select, no copysign): it is LINEAR in q and in fx/fy, so
-    order-2 grads must be exact.  ``nord=2`` exercises the ordered pass
-    recurrence in reverse mode as well."""
+    grads must be exact.  ``nord=2`` exercises the ordered pass
+    recurrence in reverse mode as well; ``order=1`` is a separate case
+    per lesson 12."""
     fx0, fy0 = _fxfy0(rough)
+    damp = _deln_damp(rough, 2, fx0, fy0, None, None)
 
     def f(q_, fx_):
         geo = rough
         b = geo.bd
         a, c = tp.deln_flux(
-            2, b.is_, b.ie, b.js, b.je, geo.npx, geo.npy, 1e-3, q_, fx_,
+            2, b.is_, b.ie, b.js, b.je, geo.npx, geo.npy, damp, q_, fx_,
             jnp.asarray(fy0), jnp.asarray(geo.del6_v),
             jnp.asarray(geo.del6_u), jnp.asarray(geo.rarea), b, False,
             True, True, True, True)
         return jnp.nansum(a * a) + jnp.nansum(c * c)
 
-    check_grads(f, (jnp.asarray(rough.q), jnp.asarray(fx0)), order=2,
+    check_grads(f, (jnp.asarray(rough.q), jnp.asarray(fx0)), order=order,
                 modes=("fwd", "rev"))
+
+
+def test_deln_flux_adjoint_identity(rough):
+    """gate 4 PRIMARY -- nord=2, i.e. through the ordered pass
+    recurrence, paired on both returned fluxes at once."""
+    fx0, fy0 = _fxfy0(rough)
+    damp = _deln_damp(rough, 2, fx0, fy0, None, None)
+
+    def f(q_):
+        b = rough.bd
+        a, c = tp.deln_flux(
+            2, b.is_, b.ie, b.js, b.je, rough.npx, rough.npy, damp, q_,
+            jnp.asarray(fx0), jnp.asarray(fy0),
+            jnp.asarray(rough.del6_v), jnp.asarray(rough.del6_u),
+            jnp.asarray(rough.rarea), b, False, True, True, True, True)
+        return jnp.concatenate([a.reshape(-1), c.reshape(-1)])
+
+    _adjoint_identity(f, rough.q, "deln_flux nord=2", seed=41)
+
+
+@pytest.mark.parametrize("nord", [0, 1, 2])
+def test_deln_flux_increment_scales_as_rarea_to_the_nord(nord, rough):
+    """RECORD of the job-9401521 nord=2 discrimination, so the finding is
+    a gate and not a paragraph.
+
+    The four ``nord=2`` non-vacuity failures were branch (a): the
+    FIXTURE's damp, not the operator.  Two independent facts settle it.
+    (i) The failing assertion read ``fx_n``, the output of the NUMPY
+    lane, so it could not have been a JAX defect whatever the cause.
+    (ii) ``deln_flux`` applies ``rarea`` once per pass and ``rarea ~
+    1e-12`` on this C12 grid, so the del-6 increment at ``damp = 1e-3``
+    was ~1e-23 against an ``fx0`` of order 1..156 -- below one ULP, so
+    ``fx + fx2 == fx`` bitwise.  Asserted here: the increment per unit
+    ``damp`` FALLS by roughly ``rarea`` for each extra pass, which is
+    the signature of (a) and is incompatible with an inert operator.
+    """
+    fx0, fy0 = _fxfy0(rough)
+    fxp, _ = _deln_np(rough, nord, 1.0, fx0, fy0, None, None)
+    inc = float(np.nanmax(np.abs(fxp - fx0)))
+    assert np.isfinite(inc) and inc > 0.0, (
+        f"nord={nord}: the operator moved NOTHING at damp=1 -- that is "
+        f"branch (b), a CODE defect in the pass recurrence")
+    ra = float(np.nanmax(np.abs(rough.rarea)))
+    # A del-n operator carries n factors of rarea; allow three decades
+    # of slack either side so this is a SIGNATURE check, not a fit.
+    lo, hi = ra ** nord * 1e-3, ra ** nord * 1e3
+    ref = float(np.nanmax(np.abs(rough.q)))
+    assert lo * ref * 1e-6 < inc < hi * ref * 1e6, (
+        f"nord={nord}: increment/damp {inc:.3e} is not the expected "
+        f"rarea**{nord} ~ {ra ** nord:.3e} scaling")
 
 
 # =====================================================================
@@ -1161,29 +1440,58 @@ def test_fv_tp_2d_returns_the_mutated_q(rough):
     assert np.array_equal(np.asarray(q_j), q_n)
 
 
-def test_fv_tp_2d_grads_order2_smooth(smooth):
-    """gate 4 -- order-2 grads on the ASSEMBLED routine at hord=2 (the
-    perfectly-linear scheme: NONE of the limiter surfaces N2-N6 exist in
-    that trace) with the measured local-smoothness control.  The upwind
-    select N1 is avoided by the single-signed Courant fixture."""
-    rng = np.random.default_rng(9)
-
+@pytest.mark.parametrize("hord", [2, 5, 8, 10])
+def test_fv_tp_2d_adjoint_identity(hord, rough):
+    """gate 4 PRIMARY on the ASSEMBLED routine -- runs ON the limiter
+    surfaces the two xppm and two yppm sweeps cross, plus the deln_flux
+    stencil.  Only ``fx``/``fy`` are paired: ``q`` is returned for the
+    caller's benefit but is a pure index shuffle of the input."""
     def f(q_):
-        geo = smooth
-        b = geo.bd
+        geo = rough
+        bd = geo.bd
         _, fx, fy = tp.fv_tp_2d(
             q_, jnp.asarray(geo.crx), jnp.asarray(geo.cry), geo.npx,
-            geo.npy, 2, jnp.asarray(geo.xfx), jnp.asarray(geo.yfx),
+            geo.npy, hord, jnp.asarray(geo.xfx), jnp.asarray(geo.yfx),
             jnp.asarray(geo.dxa), jnp.asarray(geo.dya),
             jnp.asarray(geo.area), jnp.asarray(geo.del6_v),
             jnp.asarray(geo.del6_u), jnp.asarray(geo.rarea), geo.da_min,
-            b, jnp.asarray(geo.ra_x), jnp.asarray(geo.ra_y), 1.0, False,
+            bd, jnp.asarray(geo.ra_x), jnp.asarray(geo.ra_y), 1.0, False,
             0, True, True, True, True, nord=1, damp_c=0.5)
-        return jnp.nansum(fx * fx) + jnp.nansum(fy * fy)
+        return jnp.concatenate([fx.reshape(-1), fy.reshape(-1)])
 
-    _assert_locally_smooth(f, smooth.q, rng.standard_normal(
-        smooth.q.shape), "fv_tp_2d hord=2")
-    check_grads(f, (jnp.asarray(smooth.q),), order=2, modes=("fwd",))
+    _adjoint_identity(f, rough.q, f"fv_tp_2d hord={hord}", seed=hord + 5)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_fv_tp_2d_check_grads_single_cell(order, smooth):
+    """gate 4 SUPPLEMENT -- hord=2 (the perfectly-linear scheme: NONE of
+    the limiter surfaces N2-N6 exist in that trace), single input cell,
+    single output cell, order 1 before order 2."""
+    bd = smooth.bd
+    iq, jq = bd.is_ + 4, bd.js + 4
+    kk = (iq - bd.isd, jq - bd.jsd)
+    probe = (iq - bd.is_, jq - bd.js)
+
+    def run(q_):
+        _, fx, _ = tp.fv_tp_2d(
+            q_, jnp.asarray(smooth.crx), jnp.asarray(smooth.cry),
+            smooth.npx, smooth.npy, 2, jnp.asarray(smooth.xfx),
+            jnp.asarray(smooth.yfx), jnp.asarray(smooth.dxa),
+            jnp.asarray(smooth.dya), jnp.asarray(smooth.area),
+            jnp.asarray(smooth.del6_v), jnp.asarray(smooth.del6_u),
+            jnp.asarray(smooth.rarea), smooth.da_min, bd,
+            jnp.asarray(smooth.ra_x), jnp.asarray(smooth.ra_y), 1.0,
+            False, 0, True, True, True, True, nord=1, damp_c=0.5)
+        return fx
+
+    f = _scalar_probe(run, smooth.q, kk, probe)
+    slope = _assert_scalar_locally_smooth(f, 0.0, "fv_tp_2d hord=2")
+    assert abs(slope) > 1e-9, "probe cell does not influence the flux"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -1293,33 +1601,47 @@ def test_xtp_u_unknown_iord_guard_is_non_vacuous(bad, rough, monkeypatch):
     assert np.isfinite(np.asarray(out)).any()
 
 
-@pytest.mark.parametrize("iord", [2, 5, 8])
-def test_xtp_u_grads_order2_smooth(iord, smooth):
-    """gate 4 -- order-2 grads with the measured smoothness control.
+@pytest.mark.parametrize("iord", SW_ORDS)
+def test_xtp_u_adjoint_identity(iord, rough):
+    """gate 4 PRIMARY -- runs ON the limiter surfaces, every iord.
 
     NON-SMOOTH SITES of xtp_u, all named: the upwind select ``c > 0``
-    (N1); ``smt5``/``smt6``/``hi5``/``hi6`` flag flips, which ADD or
-    DROP the whole ``fx0`` term (N2); ``copysign`` in ``dm`` and at
-    iord 8, and in the iord=3 piecewise-linear fallback (N3); the
-    three-way ``min`` in ``dm`` and the ``min``/``max`` PPM clamps at
-    iord 9/10 (N4); the ``NEAR_ZERO_SW`` flat-region test at iord 10
-    (N5).  iord=2 has none of N2-N5."""
-    rng = np.random.default_rng(12)
-
+    (N1); the ``smt5``/``smt6``/``hi5``/``hi6`` flags, which ADD or DROP
+    the whole ``fx0`` term (N2); ``copysign`` in ``dm``, at iord 8, and
+    in the iord=3 piecewise-linear fallback (N3); the three-way ``min``
+    in ``dm`` and the PPM ``min``/``max`` clamps at iord 9/10 (N4); the
+    ``NEAR_ZERO_SW`` flat-region test at iord 10 (N5)."""
     def f(u_):
-        return jnp.nansum(_xtp_jax(smooth, iord, u_, smooth.c_sw) ** 2)
+        return _xtp_jax(rough, iord, u_, rough.c_sw)
 
-    _assert_locally_smooth(f, smooth.u, rng.standard_normal(
-        smooth.u.shape), f"xtp_u iord={iord}")
-    check_grads(f, (jnp.asarray(smooth.u),), order=2, modes=("fwd",))
+    _adjoint_identity(f, rough.u, f"xtp_u u iord={iord}", seed=iord + 6)
 
     def g(c_):
-        return jnp.nansum(_xtp_jax(smooth, iord, smooth.u, c_) ** 2)
+        return _xtp_jax(rough, iord, rough.u, c_)
 
-    assert np.abs(smooth.c_sw).min() > 1e-6, "N1: c too close to 0"
-    _assert_locally_smooth(g, smooth.c_sw, rng.standard_normal(
-        smooth.c_sw.shape), f"xtp_u(c) iord={iord}")
-    check_grads(g, (jnp.asarray(smooth.c_sw),), order=2, modes=("fwd",))
+    _adjoint_identity(g, rough.c_sw, f"xtp_u c iord={iord}", seed=iord + 7)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("iord", [2, 5, 8])
+def test_xtp_u_check_grads_single_cell(order, iord, smooth):
+    """gate 4 SUPPLEMENT -- scoped, single-cell, order 1 before 2."""
+    b = smooth.bd
+    iu, ju = b.is_ + 4, b.js + 4
+    kk = (iu - b.isd, ju - b.jsd)
+    probe = (iu - b.is_, ju - b.js)
+
+    def run(u_):
+        return _xtp_jax(smooth, iord, u_, smooth.c_sw)
+
+    f = _scalar_probe(run, smooth.u, kk, probe)
+    slope = _assert_scalar_locally_smooth(f, 0.0, f"xtp_u iord={iord}")
+    assert abs(slope) > 1e-6, "probe cell does not influence the flux"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -1420,25 +1742,40 @@ def test_ytp_v_unknown_jord_guard_is_non_vacuous(rough, monkeypatch):
     assert np.isfinite(np.asarray(out)).any()
 
 
-@pytest.mark.parametrize("jord", [2, 5, 8])
-def test_ytp_v_grads_order2_smooth(jord, smooth):
-    """gate 4 -- same non-smooth-site list as ``xtp_u`` (N1-N5)."""
-    rng = np.random.default_rng(15)
-
+@pytest.mark.parametrize("jord", SW_ORDS)
+def test_ytp_v_adjoint_identity(jord, rough):
+    """gate 4 PRIMARY -- same non-smooth-site list as ``xtp_u``."""
     def f(v_):
-        return jnp.nansum(_ytp_jax(smooth, jord, v_, smooth.c_sw) ** 2)
+        return _ytp_jax(rough, jord, v_, rough.c_sw)
 
-    _assert_locally_smooth(f, smooth.v, rng.standard_normal(
-        smooth.v.shape), f"ytp_v jord={jord}")
-    check_grads(f, (jnp.asarray(smooth.v),), order=2, modes=("fwd",))
+    _adjoint_identity(f, rough.v, f"ytp_v v jord={jord}", seed=jord + 8)
 
     def g(c_):
-        return jnp.nansum(_ytp_jax(smooth, jord, smooth.v, c_) ** 2)
+        return _ytp_jax(rough, jord, rough.v, c_)
 
-    assert np.abs(smooth.c_sw).min() > 1e-6, "N1: c too close to 0"
-    _assert_locally_smooth(g, smooth.c_sw, rng.standard_normal(
-        smooth.c_sw.shape), f"ytp_v(c) jord={jord}")
-    check_grads(g, (jnp.asarray(smooth.c_sw),), order=2, modes=("fwd",))
+    _adjoint_identity(g, rough.c_sw, f"ytp_v c jord={jord}", seed=jord + 9)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("jord", [2, 5, 8])
+def test_ytp_v_check_grads_single_cell(order, jord, smooth):
+    """gate 4 SUPPLEMENT -- scoped, single-cell, order 1 before 2."""
+    b = smooth.bd
+    iv, jv = b.is_ + 4, b.js + 4
+    kk = (iv - b.isd, jv - b.jsd)
+    probe = (iv - b.is_, jv - b.js)
+
+    def run(v_):
+        return _ytp_jax(smooth, jord, v_, smooth.c_sw)
+
+    f = _scalar_probe(run, smooth.v, kk, probe)
+    slope = _assert_scalar_locally_smooth(f, 0.0, f"ytp_v jord={jord}")
+    assert abs(slope) > 1e-6, "probe cell does not influence the flux"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
+    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -1506,9 +1843,10 @@ def test_tolerances_are_all_marked_pending():
     n_mark = src.count("TOL-PENDING")
     n_cmp = src.count("_cmp(")
     # every _cmp call site (minus the def and the two loop-bodies that
-    # share one marker) must be preceded by a marker
-    assert n_mark >= 20, n_mark
-    assert n_cmp > n_mark // 2
+    # share one marker) must be preceded by a marker, and the adjoint
+    # and check_grads gates carry their own.
+    assert n_mark >= 30, n_mark
+    assert n_cmp > 0
 
 
 # =====================================================================
@@ -1610,75 +1948,69 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     sides and check each side separately.
 
     Crossing that surface ADDS or DROPS the whole ``fx0`` term, so the
-    flux is DISCONTINUOUS there, not merely kinked; a two-sided finite
-    difference straddling it is meaningless and an order-2
-    ``check_grads`` taken there would be certifying a jump.
+    flux is DISCONTINUOUS there; a two-sided finite difference
+    straddling it is meaningless and an order-2 ``check_grads`` taken
+    there would be certifying a jump.
 
-    What is asserted, per side:
-      * the one-sided derivative is STABLE -- evaluating it at offset
-        ``d`` and at ``d/4`` agrees to 1e-6 relative, i.e. that side is
-        genuinely smooth right up to the surface;
-      * the two sides DIFFER by more than that stability margin, i.e.
-        the surface is real and was actually crossed.
-    The surface itself is located by bisection on the limiter FLAG,
-    which is read out of the public flux (flux == plain upwind value
-    <=> both flags false), so no private state is touched.
+    The perturbed cell is placed in the LINEAR quadrant of the rough
+    fixture, where the flag is ON at ``t = 0`` by the argument in
+    ``_Geo``; driving that one cell far enough makes it a local extremum,
+    which turns the flag OFF.  So the bracket straddles BY
+    CONSTRUCTION, and ``_bisect_flag_switch`` still asserts it rather
+    than assuming it (job 9401521: with the old all-ON fixture the
+    bracket did not straddle and this test failed in its precondition,
+    never reaching a derivative -- lesson 11).
+
+    Asserted, per side: the one-sided derivative is STABLE (offset ``d``
+    vs ``d/4`` agree to 1e-6 relative, i.e. that side is smooth right up
+    to the surface), and the two sides DIFFER by more than that margin.
     """
     b = rough.bd
-    n = b.ie + 1 - b.is_ + 1
-    # A single interior cell of the transported field carries the sweep.
+    fi, fj = b.is_ + 3, b.js + 3        # Fortran flux cell, interior
+    ci, cj = fi - b.is_, fj - b.js      # 0-based flux index
+    c_probe = float(rough.c_sw[ci, cj])
+
     if routine == "xtp_u":
-        base_field = np.array(rough.u, dtype=np.float64)
-        kk = (base_field.shape[0] // 2, base_field.shape[1] // 2)
+        field = np.array(rough.u, dtype=np.float64)
+        # `flux(i,j)` reads u(i-1,j) and u(i,j); perturb the upwind one.
+        ui = fi - 1 if c_probe > 0.0 else fi
+        kk = (ui - b.isd, fj - b.jsd)
 
         def run(fld):
             return _xtp_jax(rough, 5, fld, rough.c_sw)
 
-        i0 = b.is_ - b.isd
-        j0 = b.js - b.jsd
-
-        def plain(fld):
-            c = rough.c_sw
-            return np.where(c > 0.0,
-                            fld[i0 - 1:i0 - 1 + n, j0:j0 + n],
-                            fld[i0:i0 + n, j0:j0 + n])
+        def base_of(fld):
+            src = fi - 1 if c_probe > 0.0 else fi
+            return float(fld[src - b.isd, fj - b.jsd])
     else:
-        base_field = np.array(rough.v, dtype=np.float64)
-        kk = (base_field.shape[0] // 2, base_field.shape[1] // 2)
+        field = np.array(rough.v, dtype=np.float64)
+        vj = fj - 1 if c_probe > 0.0 else fj
+        kk = (fi - b.isd, vj - b.jsd)
 
         def run(fld):
             return _ytp_jax(rough, 5, fld, rough.c_sw)
 
-        i0 = b.is_ - b.isd
-        j0 = b.js - b.jsd
+        def base_of(fld):
+            src = fj - 1 if c_probe > 0.0 else fj
+            return float(fld[fi - b.isd, src - b.jsd])
 
-        def plain(fld):
-            c = rough.c_sw
-            return np.where(c > 0.0,
-                            fld[i0:i0 + n, j0 - 1:j0 - 1 + n],
-                            fld[i0:i0 + n, j0:j0 + n])
-
-    probe = (n // 2, n // 2)
+    probe = (ci, cj)
 
     def _field(t):
-        f = base_field.copy()
-        f[kk] = base_field[kk] + t
+        f = field.copy()
+        f[kk] = field[kk] + t
         return f
 
     def flag_of_t(t):
         f = _field(float(t))
-        fl = np.asarray(run(f))
-        return bool(abs(fl[probe] - plain(f)[probe]) > 0.0)
+        return bool(abs(float(np.asarray(run(f))[probe]) - base_of(f))
+                    > 0.0)
 
-    t_star = _bisect_flag_switch(flag_of_t, -60.0, 60.0)
+    t_star = _bisect_flag_switch(flag_of_t, -800.0, 800.0)
 
     def scalar(t):
-        f = jnp.asarray(base_field).at[kk].set(base_field[kk] + t)
-        if routine == "xtp_u":
-            out = _xtp_jax(rough, 5, f, rough.c_sw)
-        else:
-            out = _ytp_jax(rough, 5, f, rough.c_sw)
-        return out[probe]
+        f = jnp.asarray(field).at[kk].add(t)
+        return run(f)[probe]
 
     g = jax.grad(scalar)
     sides = {}
