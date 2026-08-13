@@ -48,14 +48,15 @@ PROTOCOL (each one earned by a failure in this campaign)
 
 Usage
 -----
-    # scheduler ON  (replace XLA_FLAGS, never append)
-    XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true \\
-               --xla_gpu_enable_pipelined_p2p=true" \\
+    # The scheduler A/B must move ONE flag. Hold pipelined-p2p FIXED in
+    # both arms and toggle only the latency-hiding scheduler; replace
+    # XLA_FLAGS, never append, and set it BEFORE this process starts.
+    F="--xla_gpu_enable_pipelined_p2p=true"
+    XLA_FLAGS="$F --xla_gpu_enable_latency_hiding_scheduler=true" \\
         srun -p gpu-devel --gpus-per-node=2 \\
         python scripts/validate/collective_compute_overlap.py
-
-    # scheduler OFF (the control for the flag itself)
-    XLA_FLAGS="" srun -p gpu-devel --gpus-per-node=2 \\
+    XLA_FLAGS="$F --xla_gpu_enable_latency_hiding_scheduler=false" \\
+        srun -p gpu-devel --gpus-per-node=2 \\
         python scripts/validate/collective_compute_overlap.py
 """
 from __future__ import annotations
@@ -96,12 +97,15 @@ def _build(n_dev: int, payload: int, work: int, n_flop: int, comm: bool):
         for _ in range(n_flop):
             acc = acc * 1.0000001 + 1e-7
         # SEPARATE outputs: nothing downstream joins the collective's
-        # result to the independent work.
-        return x.sum(), acc.sum()
+        # result to the independent work.  Both are PER-DEVICE (shape
+        # (1,) inside the region): the payload is device-distinct, so
+        # promising a replica-equal P() output would be a false contract
+        # that only survives because the checker is off.
+        return x.sum()[None], acc.sum()[None]
 
     f = jax.jit(shard_map(
         body, mesh=mesh, in_specs=(P("device"), P("device")),
-        out_specs=(P(), P()), check_vma=False))
+        out_specs=(P("device"), P("device"))))
     # Device-distinct payload, so a misrouted permutation is visible in
     # the value rather than hidden by a uniform fill.
     x = jnp.arange(n_dev, dtype=jnp.float32)[:, None] * jnp.ones(
@@ -128,7 +132,8 @@ def _hlo_census(f, x, y) -> dict:
         if m2:
             src = m2.group(2).lstrip("%")
             if src in starts:
-                gaps.append(i - starts[src])
+                # instructions strictly BETWEEN the pair
+                gaps.append(i - starts[src] - 1)
     return {
         "n_start": len(starts),
         "n_plain": len(re.findall(r"collective-permute(?!-start|-done)", txt)),
@@ -199,6 +204,11 @@ def main() -> int:
                 f"control arm compiled WITH a collective "
                 f"({cen0}); the subtraction would not isolate the "
                 f"collective. Refusing to report a number.")
+        if not (cen1["n_start"] or cen1["n_plain"]):
+            raise SystemExit(
+                f"collective arm compiled WITHOUT a collective "
+                f"({cen1}); the delta would be pure noise. Refusing to "
+                f"report a number.")
         t1, t0 = _paired_times(f1, f0, x, y, args.reps, args.warmup)
         d = t1 - t0
         iqr = float(np.percentile(d, 75) - np.percentile(d, 25))
