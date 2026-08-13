@@ -12,16 +12,17 @@ oracle-parity reference; this module is the production/JAX twin and is
 certified AGAINST the NumPy lane, never against the Fortran directly
 (one authority per hop).
 
-``update_dz_d`` drags in the transport call tree the oracle reuses
-(``fv_tp_2d`` -> ``copy_corners``/``xppm``/``yppm``/``pert_ppm``, and
-``del6_vt_flux``).  None of those had a JAX twin, so each is mirrored
-PRIVATELY at the bottom of this module against
-``fv3_native_d_sw.py``'s certified copies.  They are NOT the same
-operator as ``fv_tp_2d.py`` / ``fv3_del6_vt_flux.py`` /
-``fv3_sw_core._d_sw_native``, which are the repo's research
-cubed-sphere solvers on ``(6, n, n)`` face arrays with cdgrid objects
-and halo exchange (strategy doc R3: the research solver is not the
-target of this port).
+``update_dz_d`` drags in the transport call tree the oracle reuses:
+``fv_tp_2d`` (-> ``copy_corners``/``xppm``/``yppm``/``pert_ppm``) and
+``del6_vt_flux``.  The tp_core half is IMPORTED from
+``legoesm.core.fv3_tp_core`` — no tp_core numerics are re-derived here.
+``del6_vt_flux`` is a **sw_core** routine with no JAX twin, so it alone
+is mirrored privately at the bottom of this module against
+``fv3_native_d_sw.del6_vt_flux``.  It is NOT the same operator as
+``fv3_del6_vt_flux.py`` / ``fv3_sw_core._del6_vt_flux``, which are the
+repo's research cubed-sphere solvers on ``(6, n, n)`` face arrays with
+cdgrid objects and halo exchange (strategy doc R3: the research solver
+is not the target of this port).
 
 Mirror doctrine established here for the remaining NH kernels:
 
@@ -51,6 +52,84 @@ Mirror doctrine established here for the remaining NH kernels:
   boundary the kernel is only C^0 and order-2 ``check_grads`` is not
   expected to hold THERE; away from the floor (the generic and the
   physical case) it holds.
+
+COST -- ``update_dz_d``'s STATIC ``damp``/``ndif`` and its UNROLLED k
+loop
+-----------------------------------------------------------------
+
+Stated so the trade-off is costed rather than discovered.  NONE of the
+numbers below is measured; each is an op-count argument or an explicit
+unknown, and the measurement that would settle it is named at the end.
+
+*Program size vs km.*  ``update_dz_d``'s k loop is a PYTHON loop over
+``km + 1`` interfaces, unrolled at trace time, because ``damp[k] > 1e-5``
+selects between two different operator chains and ``ndif[k]`` is the
+del-nord LOOP COUNT -- neither can be traced.  Each unrolled body holds
+one ``fv_tp_2d`` (4 PPM sweeps + 2 ``copy_corners`` + 2 flux-form nests)
+and, on a damped level, one ``_del6_vt_flux`` (``2 + 2*nord``
+``copy_corners`` and as many flux nests).  Traced op count is therefore
+LINEAR in ``km + 1`` with a large constant.  The pinned decks resolve
+``npz = 3`` or ``5`` (every ``input.nml`` under ``fv3_oracle_pinned/``),
+i.e. 4 or 6 unrolled bodies.  At the coordinator's stated production
+target of ``km = 79`` -- which NO pinned deck resolves -- that is 80
+bodies, ~13x the km=5 program, and ``update_dz_d`` sits inside an
+acoustic substep inside ``k_split``, so trace+compile time could become
+the binding constraint on the lane.  Runtime FLOPs are unaffected: the
+oracle does the same work per level either way.  The ``edge_profile``
+call is NOT unrolled -- it is one ``lax.scan`` over k, once for x and
+once for y.
+
+*How many distinct compilations a run produces.*  The jit cache key is
+``(ndif, damp, hord, bounds, km, npx, npy, rdt)`` plus the flag
+keywords.  On the shipped duo deck ``nord_v``/``damp_vt`` are
+LEVEL-INVARIANT (``fv3_native_dsw_tail_3d.py:406-408`` builds them with
+``np.full(km + 1, ...)``), and ``rdt = 1/dt`` is fixed within a run, so
+a whole run is ONE compilation, reused across all six faces, every
+acoustic substep and every ``k_split`` step.  A deck with a sponge
+(``n_sponge >= 0``) still has ONE fixed pattern, hence still one
+compilation.  Only a pattern that CHANGES between substeps would
+multiply compilations, and no deck in the tree does that.  So the cost
+is one big compile, not many.
+
+*The alternative, if compile time binds.*  A ``lax.scan`` over levels
+needs a UNIFORM per-level program, which costs two things:
+
+1. ``damp[k] > 1e-5`` must become a masked blend instead of a static
+   branch.  That IS faithful, and for a non-obvious reason worth
+   recording: at ``damp = 0`` the del-nord chain starts from
+   ``d2 = 0 * q = 0``, so every ``fx2``/``fy2`` is exactly ``0`` and the
+   damped update ``num/den + del6`` reduces EXACTLY (not approximately)
+   to the undamped ``num/den``.  The one piece that does NOT fall out of
+   the arithmetic is the GHOST-CELL aliasing: the damped branch runs
+   ``fv_tp_2d`` on a copy and preserves ``zh``'s corner ghosts, the
+   undamped branch aliases ``zh`` and lets ``copy_corners`` rewrite them
+   (nh_utils.F90:264-268 vs :279).  Under a scan that becomes a
+   ``jnp.where`` over the whole level between the two candidate ghost
+   states -- expressible, and still exact.
+2. ``ndif[k]`` must be uniform across levels, because the del-nord
+   iteration count is a loop bound, not a coefficient.  It IS uniform on
+   every deck in the tree.  For a level-VARYING ``nord`` a scan would
+   have to run ``max(nord)`` iterations everywhere and select the right
+   INTERMEDIATE per level, which means carrying all intermediates -- so
+   that case should keep the unrolled loop rather than grow a second
+   numerics path.
+
+FLOP cost of the blend, as an op-count estimate and NOT a measurement:
+on the shipped deck every level is damped, so computing both chains adds
+nothing.  On a mixed-``damp`` deck the del-nord chain would run on the
+undamped levels too, and it is roughly 6 flux nests (nord=2) against
+``fv_tp_2d``'s 4 full PPM sweeps, so of order +10-20% per extra level.
+
+*UNKNOWN UNTIL MEASURED, and the measurement.*  Whether trace+compile
+actually binds at ``km = 79`` is not derivable from op counts.  The
+measurement is: in the lane's SLURM measurement job, for
+``km in {5, 79}`` at the deck's ``hord_tm = 6``, ``nord_v = 2``, record
+(a) ``jax.jit(update_dz_d).lower(*args).compile()`` wall time and the
+lowered HLO instruction count, and (b) the number of distinct jit cache
+entries created over one representative ``k_split x n_split`` step.  If
+(a) at km=79 is a small multiple of one step's runtime, the unrolled
+loop stays; if it dominates, the scan-with-blend above is the change to
+make.
 """
 from __future__ import annotations
 
@@ -58,38 +137,23 @@ import jax
 import jax.numpy as jnp
 import numpy as np  # STATIC trace-time values only, never traced
 from jax import lax
-from legoesm.core.fv3_native_d_sw import (
-    NEAR_ZERO_TP,
-    PPM_FAC,
-    R12,
-    TP_C1,
-    TP_C2,
-    TP_C3,
-    TP_P1,
-    TP_P2,
-    TP_S11,
-    TP_S14,
-    TP_S15,
-)
-from legoesm.core.fv3_native_d_sw import (
-    R3 as _TP_R3,
-)
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # nh_utils.F90:40-44
+from legoesm.core.fv3_native_sw_core import Bounds
+from legoesm.core.fv3_tp_core import copy_corners, fv_tp_2d
 from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
 
 # nh_utils.F90:45 (math constant; mirrors the NumPy lane's module constant)
 _R3 = 1.0 / 3.0
 
-# Every tp_core/sw_core coefficient this module's transport tree needs is
-# IMPORTED from the NumPy twin's module above, never re-typed here
-# (campaign rule R2: a constant is either imported from the twin or
-# carries an oracle file.F90:line plus the literal value read there; a
-# re-typed coefficient is exactly the mis-ported-constant failure mode
-# R2 exists to stop).  Provenance of each, as recorded at its definition
-# in ``fv3_native_d_sw.py:47-70`` (tp_core.F90 module header):
-# TP_P1/TP_P2 the PPM volume-mean pair, TP_C1/TP_C2/TP_C3 the edge
-# 3-point stencil, TP_S11/TP_S14/TP_S15 the monotone edge weights,
-# _TP_R3 = 1/3, R12 = 1/12, PPM_FAC = 1.5, NEAR_ZERO_TP = 1e-25.
+# ``update_dz_d`` reuses the SHIPPED JAX tp_core twins (``fv_tp_2d`` ->
+# xppm/yppm/pert_ppm/copy_corners) exactly as the oracle reuses its own
+# — no tp_core numerics are re-derived in this module.  Only
+# ``del6_vt_flux`` is mirrored here (privately, below): it is a
+# **sw_core** routine, not tp_core, and the only JAX ``del6_vt_flux``
+# functions in the tree (``fv3_del6_vt_flux.py``, ``fv3_sw_core.py``)
+# are the repo's research cubed-sphere solvers on ``(6, n, n)`` face
+# arrays with cdgrid objects, which is a different operator (strategy
+# doc R3).
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
@@ -910,10 +974,13 @@ update_dz_c_jit = make_update_dz_c_jit()
 
 
 # =====================================================================
-# update_dz_d (nh_utils.F90:194-311) and the transport call tree it
-# reuses.  Every private routine below is a functional JAX twin of the
-# SAME-NAMED routine in ``fv3_native_d_sw.py`` — hop B, so the NumPy
-# lane is the specification and the Fortran is never read directly.
+# update_dz_d (nh_utils.F90:194-311).
+#
+# The transport half comes from the SHIPPED ``legoesm.core.fv3_tp_core``
+# twins (``fv_tp_2d``, and ``copy_corners`` for the del6 chain); only
+# ``del6_vt_flux`` — a sw_core routine with no JAX twin — is mirrored
+# privately below, against ``fv3_native_d_sw.del6_vt_flux`` (hop B: the
+# NumPy lane is the specification, the Fortran is never read directly).
 #
 # WHICH ARMS ARE LIVE (R6, read what the deck RESOLVES): the shipped duo
 # tail config is ``hord_tm = 6``, ``nord_v = 2``, ``damp_v = 0.12``
@@ -974,1147 +1041,7 @@ def _fs(a, ilo, jlo, i0, i1, j0, j1, v):
     return a.at[lo_i:hi_i + 1, lo_j:hi_j + 1].set(v)
 
 
-def _copy_corners(q, npx, npy, dir_, bounded_domain, bounds,
-                  sw_corner, se_corner, nw_corner, ne_corner,
-                  duogrid=False):
-    """Functional twin of ``fv3_native_d_sw.copy_corners``
-    (tp_core.F90 copy_corners): rotate data through the tile corners.
-
-    ``q`` is a 2-D array with Fortran origin ``(isd, jsd)``; the updated
-    array is RETURNED (the NumPy lane mutates in place).
-
-    DUO (symmetryclean tp_core:239): ``bounded_domain .or. duogrid``
-    returns immediately — the duo halos already carry real cross-face
-    corner data.
-
-    The eight index blocks are transcribed as the Fortran double loops
-    (``ng`` is static, so the loops run at trace time) and collected into
-    ONE gather + ONE scatter.  That is exact only because within a
-    direction every READ lands outside every WRITE block; the assertion
-    below proves it for the actual index sets rather than trusting the
-    argument.  The index arithmetic mixes ``npx`` and ``npy`` exactly as
-    the oracle does, which presumes a SQUARE tile (npx == npy) — true
-    for every cubed-sphere face.
-    """
-    is_, ie, js, je, ng = bounds
-    isd, jsd = is_ - ng, js - ng
-    if bounded_domain or duogrid:
-        return q
-
-    ti, tj, si, sj = [], [], [], []
-
-    def _pair(i, j, i_src, j_src):
-        ti.append(i)
-        tj.append(j)
-        si.append(i_src)
-        sj.append(j_src)
-
-    if dir_ == 1:
-        # XDir (fv3_native_d_sw.copy_corners :221-238)
-        if sw_corner:
-            for j in range(1 - ng, 0 + 1):
-                for i in range(1 - ng, 0 + 1):
-                    _pair(i, j, j, 1 - i)
-        if se_corner:
-            for j in range(1 - ng, 0 + 1):
-                for i in range(npx, npx + ng - 1 + 1):
-                    _pair(i, j, npy - j, i - npx + 1)
-        if ne_corner:
-            for j in range(npy, npy + ng - 1 + 1):
-                for i in range(npx, npx + ng - 1 + 1):
-                    _pair(i, j, j, 2 * npx - 1 - i)
-        if nw_corner:
-            for j in range(npy, npy + ng - 1 + 1):
-                for i in range(1 - ng, 0 + 1):
-                    _pair(i, j, npy - j, i - 1 + npx)
-    elif dir_ == 2:
-        # YDir (:240-257)
-        if sw_corner:
-            for j in range(1 - ng, 0 + 1):
-                for i in range(1 - ng, 0 + 1):
-                    _pair(i, j, 1 - j, i)
-        if se_corner:
-            for j in range(1 - ng, 0 + 1):
-                for i in range(npx, npx + ng - 1 + 1):
-                    _pair(i, j, npy + j - 1, npx - i)
-        if ne_corner:
-            for j in range(npy, npy + ng - 1 + 1):
-                for i in range(npx, npx + ng - 1 + 1):
-                    _pair(i, j, 2 * npy - 1 - j, i)
-        if nw_corner:
-            for j in range(npy, npy + ng - 1 + 1):
-                for i in range(1 - ng, 0 + 1):
-                    _pair(i, j, j + 1 - npx, npy - i)
-    else:
-        raise ValueError(
-            f"_copy_corners: dir_={dir_} is neither XDir (1) nor YDir "
-            f"(2) (tp_core.F90 copy_corners has exactly two arms)")
-
-    if not ti:
-        return q
-
-    overlap = set(zip(ti, tj)) & set(zip(si, sj))
-    if overlap:                       # pragma: no cover - static tripwire
-        raise ValueError(
-            f"_copy_corners: dir_={dir_} reads {len(overlap)} cell(s) it "
-            f"also writes ({sorted(overlap)[:4]}...), so the single "
-            f"gather+scatter is NOT equivalent to the sequential Fortran "
-            f"loop; npx={npx} npy={npy} ng={ng}")
-
-    t_i = np.asarray(ti) - isd
-    t_j = np.asarray(tj) - jsd
-    s_i = np.asarray(si) - isd
-    s_j = np.asarray(sj) - jsd
-    for name, idx, n in (("target i", t_i, q.shape[0]),
-                         ("target j", t_j, q.shape[1]),
-                         ("source i", s_i, q.shape[0]),
-                         ("source j", s_j, q.shape[1])):
-        if int(idx.min()) < 0 or int(idx.max()) >= n:
-            raise IndexError(
-                f"_copy_corners: {name} index range "
-                f"[{int(idx.min())}, {int(idx.max())}] escapes the "
-                f"{n}-long storage axis (ng={ng}, npx={npx}, npy={npy})")
-    return q.at[t_i, t_j].set(q[s_i, s_j])
-
-
-def _pert_ppm(a0, al, ar, iv):
-    """Elementwise functional twin of ``fv3_native_d_sw.pert_ppm``
-    (tp_core.F90 pert_ppm).  Returns ``(al, ar)``.
-
-    Every Fortran ``if`` here is on array DATA, so each becomes a
-    ``jnp.where`` (R1).  Both arms of a ``jnp.where`` are EVALUATED, so
-    the ``0.25 / a4`` of the iv=0 arm — which the oracle only reaches
-    under ``abs(da1) < -a4``, i.e. strictly ``a4 < 0`` — divides by a
-    GUARDED denominator: without it the untaken branch injects a NaN
-    into the reverse-mode gradient (the value would still be right).
-    The guard changes no taken-branch number.
-
-    Non-smooth by construction (this IS the PPM limiter): C^0 at every
-    branch boundary.
-    """
-    if iv == 0:
-        # Positive definite constraint (:168-186)
-        a4 = -3.0 * (ar + al)
-        da1 = ar - al
-        pos = a0 > 0.0
-        inner = jnp.abs(da1) < -a4
-        a4s = jnp.where(inner, a4, 1.0)
-        fmin = a0 + 0.25 / a4s * da1 ** 2 + a4 * R12
-        fire = pos & inner & (fmin < 0.0)
-        both = fire & (ar > 0.0) & (al > 0.0)
-        gt = fire & (~both) & (da1 > 0.0)
-        le = fire & (~both) & (~(da1 > 0.0))
-        ar_o = jnp.where(both, 0.0, jnp.where(gt, -2.0 * al, ar))
-        al_o = jnp.where(both, 0.0, jnp.where(le, -2.0 * ar, al))
-        # a0 <= 0 zeroes BOTH (the outer `if a0 <= 0` arm)
-        al_o = jnp.where(pos, al_o, 0.0)
-        ar_o = jnp.where(pos, ar_o, 0.0)
-        return al_o, ar_o
-
-    # Standard PPM constraint (:188-202); `else` includes the dm=0 case
-    cross = al * ar < 0.0
-    da1 = al - ar
-    da2 = da1 ** 2
-    a6da = 3.0 * (al + ar) * da1
-    lo = a6da < -da2
-    hi = (~lo) & (a6da > da2)
-    ar_o = jnp.where(cross, jnp.where(lo, -2.0 * al, ar), 0.0)
-    al_o = jnp.where(cross, jnp.where(hi, -2.0 * ar, al), 0.0)
-    return al_o, ar_o
-
-
-def _ppm_iord_guard(fname, iord):
-    """Dispatch hardening for the xppm/yppm order selector.
-
-    The oracle has no ``else: error`` here: ``iord <= -7`` silently falls
-    into the linear branch's mord-5/6 arm and ``iord >= 14`` silently
-    falls into the monotonic branch's plain ``bl = al - q`` arm.  Both
-    are configurations no deck resolves, and a silent wrong-scheme
-    dispatch on a typo is the exact failure this repo forbids, so the
-    ported set is stated and anything outside it RAISES.
-
-    Ported: ``mord = |iord| in 1..6`` (linear) and ``iord in 7..13``
-    (monotonic) — the complete set the Fortran names in its own comments
-    (tp_core.F90 xppm/yppm: ord 2/5/6 linear, 8 Lin monotone, 10 Huynh,
-    7/12 positive-definite, 9/13 pert_ppm, 11 van-Leer emulation).
-    """
-    mord = abs(iord)
-    if (iord < 7 and 1 <= mord <= 6) or (7 <= iord <= 13):
-        return
-    raise ValueError(
-        f"{fname}: iord={iord} selects no ported arm. Ported: "
-        f"|iord| in 1..6 (linear) and iord in 7..13 (monotonic); the "
-        f"pinned duo deck resolves hord_tm=6.")
-
-
-def _xppm(q, c, dxa, iord, is_, ie, isd, ied, jfirst, jlast, npx, npy,
-          bounded_domain, grid_type, lim_fac, duogrid=False):
-    """Functional twin of ``fv3_native_d_sw.xppm`` (tp_core.F90 xppm),
-    every iord branch, vectorised over BOTH i and j.
-
-    LAYOUT — the Fortran dummies, with the caller having already
-    selected the j window so all three operands share ``jlo = jfirst``:
-
-      ``q``   (isd:ied, jfirst:jlast), i-origin ``isd``
-      ``c``   (is:ie+1, jfirst:jlast), i-origin ``is_``  (Courant number)
-      ``dxa`` (isd:ied, jfirst:jlast), i-origin ``isd``
-      returns ``flux`` (is:ie+1, jfirst:jlast), i-origin ``is_``
-
-    The oracle's ``do 666 j = jfirst, jlast`` row loop becomes a
-    vectorised slice over the IDENTICAL window (R1): every statement in
-    the body is elementwise in j, including the ``is_ == 1`` /
-    ``ie+1 == npx`` edge fixes, which read ``dxa(., j)`` per row.
-    ``q1(i) = q(i, j)`` is that row copy, so ``q`` IS ``q1`` here.
-
-    Unwritten local slots are NaN-filled exactly as the NumPy lane's
-    ``_fl1`` fills them: a slot the oracle never defines must read as a
-    LOUD NaN downstream, never as a plausible 0.  With ``is_ == 1`` and
-    ``ie + 1 == npx`` (a whole face) the edge fixes complete the
-    coverage and no NaN survives into ``flux``.
-
-    ``if`` on iord / is_ / ie / npx / grid_type: STATIC Python ``if``.
-    ``if`` on array data: ``jnp.where``.
-    """
-    _ppm_iord_guard("_xppm", iord)
-    nj = jlast - jfirst + 1
-    dtype = q.dtype
-
-    def _r(a, ilo, i0, i1):
-        return _fw(a, ilo, jfirst, i0, i1, jfirst, jlast)
-
-    def _w(a, ilo, i0, i1, v):
-        return _fs(a, ilo, jfirst, i0, i1, jfirst, jlast, v)
-
-    def _new(i0, i1):
-        return jnp.full((i1 - i0 + 1, nj), jnp.nan, dtype)
-
-    if (not (bounded_domain or duogrid)) and grid_type < 3:
-        is1 = max(3, is_ - 1)                       # :274-276
-        ie3 = min(npx - 2, ie + 2)
-        ie1 = min(npx - 3, ie + 1)
-    else:
-        is1 = is_ - 1                               # :278-280
-        ie3 = ie + 2
-        ie1 = ie + 1
-    mord = abs(iord)
-    alo = is_ - 1                    # al  origin (is-1 : ie+2)
-    blo = is_ - 1                    # bl/br/b0/smt5/smt6 (is-1 : ie+1)
-    edge_lo = (not (bounded_domain or duogrid)) and grid_type < 3 \
-        and is_ == 1
-    edge_hi = (not (bounded_domain or duogrid)) and grid_type < 3 \
-        and (ie + 1) == npx
-
-    if iord < 7:
-        # ---- linear reconstructions, ord 2 < 5 < 3 < 4 < 6 (:290-488)
-        al = _new(is_ - 1, ie + 2)
-        al = _w(al, alo, is1, ie3,                            # :294-296
-                TP_P1 * (_r(q, isd, is1 - 1, ie3 - 1)
-                         + _r(q, isd, is1, ie3))
-                + TP_P2 * (_r(q, isd, is1 - 2, ie3 - 2)
-                           + _r(q, isd, is1 + 1, ie3 + 1)))
-
-        if edge_lo:                                           # :299-307
-            al = _w(al, alo, 0, 0,
-                    TP_C1 * _r(q, isd, -2, -2)
-                    + TP_C2 * _r(q, isd, -1, -1)
-                    + TP_C3 * _r(q, isd, 0, 0))
-            al = _w(al, alo, 1, 1,
-                    0.5 * (((2.0 * _r(dxa, isd, 0, 0)
-                             + _r(dxa, isd, -1, -1)) * _r(q, isd, 0, 0)
-                            - _r(dxa, isd, 0, 0) * _r(q, isd, -1, -1))
-                           / (_r(dxa, isd, -1, -1) + _r(dxa, isd, 0, 0))
-                           + ((2.0 * _r(dxa, isd, 1, 1)
-                               + _r(dxa, isd, 2, 2)) * _r(q, isd, 1, 1)
-                              - _r(dxa, isd, 1, 1) * _r(q, isd, 2, 2))
-                           / (_r(dxa, isd, 1, 1) + _r(dxa, isd, 2, 2))))
-            al = _w(al, alo, 2, 2,
-                    TP_C3 * _r(q, isd, 1, 1) + TP_C2 * _r(q, isd, 2, 2)
-                    + TP_C1 * _r(q, isd, 3, 3))
-        if edge_hi:                                           # :308-317
-            al = _w(al, alo, npx - 1, npx - 1,
-                    TP_C1 * _r(q, isd, npx - 3, npx - 3)
-                    + TP_C2 * _r(q, isd, npx - 2, npx - 2)
-                    + TP_C3 * _r(q, isd, npx - 1, npx - 1))
-            al = _w(al, alo, npx, npx,
-                    0.5 * (((2.0 * _r(dxa, isd, npx - 1, npx - 1)
-                             + _r(dxa, isd, npx - 2, npx - 2))
-                            * _r(q, isd, npx - 1, npx - 1)
-                            - _r(dxa, isd, npx - 1, npx - 1)
-                            * _r(q, isd, npx - 2, npx - 2))
-                           / (_r(dxa, isd, npx - 2, npx - 2)
-                              + _r(dxa, isd, npx - 1, npx - 1))
-                           + ((2.0 * _r(dxa, isd, npx, npx)
-                               + _r(dxa, isd, npx + 1, npx + 1))
-                              * _r(q, isd, npx, npx)
-                              - _r(dxa, isd, npx, npx)
-                              * _r(q, isd, npx + 1, npx + 1))
-                           / (_r(dxa, isd, npx, npx)
-                              + _r(dxa, isd, npx + 1, npx + 1))))
-            al = _w(al, alo, npx + 1, npx + 1,
-                    TP_C3 * _r(q, isd, npx, npx)
-                    + TP_C2 * _r(q, isd, npx + 1, npx + 1)
-                    + TP_C1 * _r(q, isd, npx + 2, npx + 2))
-
-        if iord < 0:                                          # :320-322
-            al = _w(al, alo, is_ - 1, ie + 2,
-                    jnp.maximum(0.0, _r(al, alo, is_ - 1, ie + 2)))
-
-        # bl/br/b0 over (is-1 : ie+1).  The Fortran repeats these three
-        # lines verbatim in the mord 1/3/4/5/6 arms and OMITS them in
-        # mord 2, which reads `al` directly -- hoisted once, still
-        # skipped for mord 2 so no arm computes a quantity the oracle
-        # does not.
-        if mord != 2:
-            bl = _r(al, alo, is_ - 1, ie + 1) - _r(q, isd, is_ - 1, ie + 1)
-            br = _r(al, alo, is_, ie + 2) - _r(q, isd, is_ - 1, ie + 1)
-            b0 = bl + br
-
-        if mord == 1:                                         # :324-344
-            smt5 = jnp.abs(lim_fac * b0) < jnp.abs(bl - br)
-            pos = c > 0.0
-            fx1 = jnp.where(
-                pos,
-                (1.0 - c) * (_r(br, blo, is_ - 1, ie)
-                             - c * _r(b0, blo, is_ - 1, ie)),
-                (1.0 + c) * (_r(bl, blo, is_, ie + 1)
-                             + c * _r(b0, blo, is_, ie + 1)))
-            flux = jnp.where(pos, _r(q, isd, is_ - 1, ie),
-                             _r(q, isd, is_, ie + 1))
-            sel = jnp.logical_or(_r(smt5, blo, is_ - 1, ie),
-                                 _r(smt5, blo, is_, ie + 1))
-            return jnp.where(sel, flux + fx1, flux)
-
-        if mord == 2:                                         # :346-358
-            qtm = _r(q, isd, is_ - 1, ie)
-            qtk = _r(q, isd, is_, ie + 1)
-            al_m = _r(al, alo, is_ - 1, ie)
-            al_k = _r(al, alo, is_, ie + 1)
-            al_p = _r(al, alo, is_ + 1, ie + 2)
-            return jnp.where(
-                c > 0.0,
-                qtm + (1.0 - c) * (al_k - qtm
-                                   - c * (al_m + al_k - (qtm + qtm))),
-                qtk + (1.0 + c) * (al_k - qtk
-                                   + c * (al_k + al_p - (qtk + qtk))))
-
-        if mord == 3:                                         # :360-388
-            x0 = jnp.abs(b0)
-            xt = jnp.abs(bl - br)
-            smt5 = x0 < xt
-            smt6 = 3.0 * x0 < xt
-            pos = c > 0.0
-            take_p = jnp.logical_or(_r(smt5, blo, is_ - 1, ie),
-                                    _r(smt6, blo, is_, ie + 1))
-            take_n = jnp.logical_or(_r(smt6, blo, is_ - 1, ie),
-                                    _r(smt5, blo, is_, ie + 1))
-            qtm = _r(q, isd, is_ - 1, ie)
-            qtk = _r(q, isd, is_, ie + 1)
-            return jnp.where(
-                pos,
-                jnp.where(take_p,
-                          qtm + (1.0 - c) * (_r(br, blo, is_ - 1, ie)
-                                             - c * _r(b0, blo, is_ - 1, ie)),
-                          qtm),
-                jnp.where(take_n,
-                          qtk + (1.0 + c) * (_r(bl, blo, is_, ie + 1)
-                                             + c * _r(b0, blo, is_, ie + 1)),
-                          qtk))
-
-        if mord == 4:                                         # :390-422
-            x0 = jnp.abs(b0)
-            xt = jnp.abs(bl - br)
-            smt5 = x0 < xt
-            smt6 = 3.0 * x0 < xt
-            hi6 = jnp.logical_or(_r(smt6, blo, is_ - 1, ie),
-                                 _r(smt6, blo, is_, ie + 1))
-            hi5 = jnp.logical_or(
-                jnp.logical_and(_r(smt5, blo, is_ - 1, ie),
-                                _r(smt5, blo, is_, ie + 1)), hi6)
-            pos = c > 0.0
-            fx1 = jnp.where(
-                pos,
-                (1.0 - c) * (_r(br, blo, is_ - 1, ie)
-                             - c * _r(b0, blo, is_ - 1, ie)),
-                (1.0 + c) * (_r(bl, blo, is_, ie + 1)
-                             + c * _r(b0, blo, is_, ie + 1)))
-            flux = jnp.where(pos, _r(q, isd, is_ - 1, ie),
-                             _r(q, isd, is_, ie + 1))
-            return jnp.where(hi5, flux + fx1, flux)
-
-        # ---- mord 5, 6 (:424-486) ----
-        if iord == 5:                                         # :430-435
-            smt5 = bl * br < 0.0
-        elif iord == -5:                                      # :437-460
-            smt5 = bl * br < 0.0
-            da1 = br - bl
-            a4 = -3.0 * b0
-            inner = jnp.abs(da1) < -a4
-            a4s = jnp.where(inner, a4, 1.0)     # see _pert_ppm on the guard
-            fire = inner & (_r(q, isd, is_ - 1, ie + 1)
-                            + 0.25 / a4s * da1 ** 2 + a4 * R12 < 0.0)
-            both = fire & (~smt5)
-            gt = fire & smt5 & (da1 > 0.0)
-            le = fire & smt5 & (~(da1 > 0.0))
-            bl_n = jnp.where(both, 0.0, jnp.where(le, -2.0 * br, bl))
-            br_n = jnp.where(both, 0.0, jnp.where(gt, -2.0 * bl, br))
-            b0_n = jnp.where(both, 0.0,
-                             jnp.where(gt, -bl, jnp.where(le, -br, b0)))
-            bl, br, b0 = bl_n, br_n, b0_n
-        else:                                                 # :462-466
-            smt5 = 3.0 * jnp.abs(b0) < jnp.abs(bl - br)
-
-        if iord != 5:
-            # WMP: fix edge issues (:468-475) — NOT applied for iord == 5,
-            # whose smt5 already IS the bl*br test.
-            if edge_lo:
-                for idx in (0, 1):
-                    smt5 = _w(smt5, blo, idx, idx,
-                              _r(bl, blo, idx, idx)
-                              * _r(br, blo, idx, idx) < 0.0)
-            if edge_hi:
-                for idx in (npx - 1, npx):
-                    smt5 = _w(smt5, blo, idx, idx,
-                              _r(bl, blo, idx, idx)
-                              * _r(br, blo, idx, idx) < 0.0)
-
-        pos = c > 0.0                                         # :477-486
-        fx1 = jnp.where(
-            pos,
-            (1.0 - c) * (_r(br, blo, is_ - 1, ie)
-                         - c * _r(b0, blo, is_ - 1, ie)),
-            (1.0 + c) * (_r(bl, blo, is_, ie + 1)
-                         + c * _r(b0, blo, is_, ie + 1)))
-        flux = jnp.where(pos, _r(q, isd, is_ - 1, ie),
-                         _r(q, isd, is_, ie + 1))
-        sel = jnp.logical_or(_r(smt5, blo, is_ - 1, ie),
-                             _r(smt5, blo, is_, ie + 1))
-        return jnp.where(sel, flux + fx1, flux)
-
-    # ---- Monotonic constraints, iord >= 7 (:490-626) ----
-    dmlo = is_ - 2
-    dqlo = is_ - 3
-    al = _new(is_ - 1, ie + 2)
-    bl = _new(is_ - 1, ie + 1)
-    br = _new(is_ - 1, ie + 1)
-    dm = _new(is_ - 2, ie + 2)
-    dq = _new(is_ - 3, ie + 2)
-
-    qm = _r(q, isd, is_ - 3, ie + 1)                          # :503-508
-    qk = _r(q, isd, is_ - 2, ie + 2)
-    qp = _r(q, isd, is_ - 1, ie + 3)
-    xt = 0.25 * (qp - qm)
-    dm = _w(dm, dmlo, is_ - 2, ie + 2, jnp.copysign(
-        jnp.minimum(
-            jnp.minimum(jnp.abs(xt),
-                        jnp.maximum(jnp.maximum(qm, qk), qp) - qk),
-            qk - jnp.minimum(jnp.minimum(qm, qk), qp)), xt))
-
-    al = _w(al, alo, is1, ie1 + 1,                            # :509-510
-            0.5 * (_r(q, isd, is1 - 1, ie1) + _r(q, isd, is1, ie1 + 1))
-            + _TP_R3 * (_r(dm, dmlo, is1 - 1, ie1)
-                        - _r(dm, dmlo, is1, ie1 + 1)))
-
-    if iord == 8:                                             # :512-518
-        xt8 = 2.0 * _r(dm, dmlo, is1, ie1)
-        bl = _w(bl, blo, is1, ie1, -jnp.copysign(
-            jnp.minimum(jnp.abs(xt8),
-                        jnp.abs(_r(al, alo, is1, ie1)
-                                - _r(q, isd, is1, ie1))), xt8))
-        br = _w(br, blo, is1, ie1, jnp.copysign(
-            jnp.minimum(jnp.abs(xt8),
-                        jnp.abs(_r(al, alo, is1 + 1, ie1 + 1)
-                                - _r(q, isd, is1, ie1))), xt8))
-    elif iord == 10:                                          # :519-537
-        dq = _w(dq, dqlo, is1 - 2, ie1 + 1,
-                2.0 * (_r(q, isd, is1 - 1, ie1 + 2)
-                       - _r(q, isd, is1 - 2, ie1 + 1)))
-        blv = _r(al, alo, is1, ie1) - _r(q, isd, is1, ie1)
-        brv = _r(al, alo, is1 + 1, ie1 + 1) - _r(q, isd, is1, ie1)
-        flat = (jnp.abs(_r(dm, dmlo, is1 - 1, ie1 - 1))
-                + jnp.abs(_r(dm, dmlo, is1, ie1))
-                + jnp.abs(_r(dm, dmlo, is1 + 1, ie1 + 1))) < NEAR_ZERO_TP
-        wide = jnp.abs(3.0 * (blv + brv)) > jnp.abs(blv - brv)
-        pmp_2 = _r(dq, dqlo, is1 - 1, ie1 - 1)
-        lac_2 = pmp_2 - 0.75 * _r(dq, dqlo, is1 - 2, ie1 - 2)
-        br_c = jnp.minimum(
-            jnp.maximum(jnp.maximum(0.0, pmp_2), lac_2),
-            jnp.maximum(brv, jnp.minimum(jnp.minimum(0.0, pmp_2), lac_2)))
-        pmp_1 = -_r(dq, dqlo, is1, ie1)
-        lac_1 = pmp_1 + 0.75 * _r(dq, dqlo, is1 + 1, ie1 + 1)
-        bl_c = jnp.minimum(
-            jnp.maximum(jnp.maximum(0.0, pmp_1), lac_1),
-            jnp.maximum(blv, jnp.minimum(jnp.minimum(0.0, pmp_1), lac_1)))
-        sel = (~flat) & wide
-        bl = _w(bl, blo, is1, ie1,
-                jnp.where(flat, 0.0, jnp.where(sel, bl_c, blv)))
-        br = _w(br, blo, is1, ie1,
-                jnp.where(flat, 0.0, jnp.where(sel, br_c, brv)))
-    elif iord == 11:                                          # :538-545
-        xt11 = PPM_FAC * _r(dm, dmlo, is1, ie1)
-        bl = _w(bl, blo, is1, ie1, -jnp.copysign(
-            jnp.minimum(jnp.abs(xt11),
-                        jnp.abs(_r(al, alo, is1, ie1)
-                                - _r(q, isd, is1, ie1))), xt11))
-        br = _w(br, blo, is1, ie1, jnp.copysign(
-            jnp.minimum(jnp.abs(xt11),
-                        jnp.abs(_r(al, alo, is1 + 1, ie1 + 1)
-                                - _r(q, isd, is1, ie1))), xt11))
-    elif iord == 7 or iord == 12:                             # :546-569
-        blv = _r(al, alo, is1, ie1) - _r(q, isd, is1, ie1)
-        brv = _r(al, alo, is1 + 1, ie1 + 1) - _r(q, isd, is1, ie1)
-        a4 = -3.0 * (blv + brv)
-        da1 = brv - blv
-        ext5 = brv * blv > 0.0
-        ext6 = jnp.abs(da1) < -a4
-        a4s = jnp.where(ext6, a4, 1.0)   # see _pert_ppm on the guard
-        fire = ext6 & (_r(q, isd, is1, ie1) + 0.25 / a4s * da1 ** 2
-                       + a4 * R12 < 0.0)
-        bl = _w(bl, blo, is1, ie1,
-                jnp.where(fire & ext5, 0.0,
-                          jnp.where(fire & (~ext5) & (~(da1 > 0.0)),
-                                    -2.0 * brv, blv)))
-        br = _w(br, blo, is1, ie1,
-                jnp.where(fire & ext5, 0.0,
-                          jnp.where(fire & (~ext5) & (da1 > 0.0),
-                                    -2.0 * blv, brv)))
-    else:                                                     # :570-573
-        bl = _w(bl, blo, is1, ie1,
-                _r(al, alo, is1, ie1) - _r(q, isd, is1, ie1))
-        br = _w(br, blo, is1, ie1,
-                _r(al, alo, is1 + 1, ie1 + 1) - _r(q, isd, is1, ie1))
-
-    if iord == 9 or iord == 13:                               # :575-579
-        blv, brv = _pert_ppm(_r(q, isd, is1, ie1),
-                             _r(bl, blo, is1, ie1),
-                             _r(br, blo, is1, ie1), 0)
-        bl = _w(bl, blo, is1, ie1, blv)
-        br = _w(br, blo, is1, ie1, brv)
-
-    if edge_lo:                                               # :582-600
-        bl = _w(bl, blo, 0, 0,
-                TP_S14 * _r(dm, dmlo, -1, -1)
-                + TP_S11 * (_r(q, isd, -1, -1) - _r(q, isd, 0, 0)))
-        xt = 0.5 * (((2.0 * _r(dxa, isd, 0, 0) + _r(dxa, isd, -1, -1))
-                     * _r(q, isd, 0, 0)
-                     - _r(dxa, isd, 0, 0) * _r(q, isd, -1, -1))
-                    / (_r(dxa, isd, -1, -1) + _r(dxa, isd, 0, 0))
-                    + ((2.0 * _r(dxa, isd, 1, 1) + _r(dxa, isd, 2, 2))
-                       * _r(q, isd, 1, 1)
-                       - _r(dxa, isd, 1, 1) * _r(q, isd, 2, 2))
-                    / (_r(dxa, isd, 1, 1) + _r(dxa, isd, 2, 2)))
-        q4 = [_r(q, isd, kk, kk) for kk in (-1, 0, 1, 2)]
-        xt = jnp.maximum(xt, jnp.minimum(jnp.minimum(q4[0], q4[1]),
-                                         jnp.minimum(q4[2], q4[3])))
-        xt = jnp.minimum(xt, jnp.maximum(jnp.maximum(q4[0], q4[1]),
-                                         jnp.maximum(q4[2], q4[3])))
-        br = _w(br, blo, 0, 0, xt - _r(q, isd, 0, 0))
-        bl = _w(bl, blo, 1, 1, xt - _r(q, isd, 1, 1))
-        xt2 = (TP_S15 * _r(q, isd, 1, 1) + TP_S11 * _r(q, isd, 2, 2)
-               - TP_S14 * _r(dm, dmlo, 2, 2))
-        br = _w(br, blo, 1, 1, xt2 - _r(q, isd, 1, 1))
-        bl = _w(bl, blo, 2, 2, xt2 - _r(q, isd, 2, 2))
-        br = _w(br, blo, 2, 2, _r(al, alo, 3, 3) - _r(q, isd, 2, 2))
-        blv, brv = _pert_ppm(_r(q, isd, 0, 2), _r(bl, blo, 0, 2),
-                             _r(br, blo, 0, 2), 1)
-        bl = _w(bl, blo, 0, 2, blv)
-        br = _w(br, blo, 0, 2, brv)
-
-    if edge_hi:                                               # :601-626
-        bl = _w(bl, blo, npx - 2, npx - 2,
-                _r(al, alo, npx - 2, npx - 2)
-                - _r(q, isd, npx - 2, npx - 2))
-        xt2 = (TP_S15 * _r(q, isd, npx - 1, npx - 1)
-               + TP_S11 * _r(q, isd, npx - 2, npx - 2)
-               + TP_S14 * _r(dm, dmlo, npx - 2, npx - 2))
-        br = _w(br, blo, npx - 2, npx - 2,
-                xt2 - _r(q, isd, npx - 2, npx - 2))
-        bl = _w(bl, blo, npx - 1, npx - 1,
-                xt2 - _r(q, isd, npx - 1, npx - 1))
-        xt = 0.5 * (((2.0 * _r(dxa, isd, npx - 1, npx - 1)
-                      + _r(dxa, isd, npx - 2, npx - 2))
-                     * _r(q, isd, npx - 1, npx - 1)
-                     - _r(dxa, isd, npx - 1, npx - 1)
-                     * _r(q, isd, npx - 2, npx - 2))
-                    / (_r(dxa, isd, npx - 2, npx - 2)
-                       + _r(dxa, isd, npx - 1, npx - 1))
-                    + ((2.0 * _r(dxa, isd, npx, npx)
-                        + _r(dxa, isd, npx + 1, npx + 1))
-                       * _r(q, isd, npx, npx)
-                       - _r(dxa, isd, npx, npx)
-                       * _r(q, isd, npx + 1, npx + 1))
-                    / (_r(dxa, isd, npx, npx)
-                       + _r(dxa, isd, npx + 1, npx + 1)))
-        q4 = [_r(q, isd, kk, kk)
-              for kk in (npx - 2, npx - 1, npx, npx + 1)]
-        xt = jnp.maximum(xt, jnp.minimum(jnp.minimum(q4[0], q4[1]),
-                                         jnp.minimum(q4[2], q4[3])))
-        xt = jnp.minimum(xt, jnp.maximum(jnp.maximum(q4[0], q4[1]),
-                                         jnp.maximum(q4[2], q4[3])))
-        br = _w(br, blo, npx - 1, npx - 1,
-                xt - _r(q, isd, npx - 1, npx - 1))
-        bl = _w(bl, blo, npx, npx, xt - _r(q, isd, npx, npx))
-        br = _w(br, blo, npx, npx,
-                TP_S11 * (_r(q, isd, npx + 1, npx + 1)
-                          - _r(q, isd, npx, npx))
-                - TP_S14 * _r(dm, dmlo, npx + 1, npx + 1))
-        blv, brv = _pert_ppm(_r(q, isd, npx - 2, npx),
-                             _r(bl, blo, npx - 2, npx),
-                             _r(br, blo, npx - 2, npx), 1)
-        bl = _w(bl, blo, npx - 2, npx, blv)
-        br = _w(br, blo, npx - 2, npx, brv)
-
-    if iord == 7:                                             # :629-645
-        b0 = (_r(bl, blo, is_ - 1, ie + 1)
-              + _r(br, blo, is_ - 1, ie + 1))
-        smt5 = (_r(bl, blo, is_ - 1, ie + 1)
-                * _r(br, blo, is_ - 1, ie + 1) < 0.0)
-        pos = c > 0.0
-        fx1 = jnp.where(
-            pos,
-            (1.0 - c) * (_r(br, blo, is_ - 1, ie)
-                         - c * _r(b0, blo, is_ - 1, ie)),
-            (1.0 + c) * (_r(bl, blo, is_, ie + 1)
-                         + c * _r(b0, blo, is_, ie + 1)))
-        flux = jnp.where(pos, _r(q, isd, is_ - 1, ie),
-                         _r(q, isd, is_, ie + 1))
-        sel = jnp.logical_or(_r(smt5, blo, is_ - 1, ie),
-                             _r(smt5, blo, is_, ie + 1))
-        return jnp.where(sel, flux + fx1, flux)
-
-    bl_m = _r(bl, blo, is_ - 1, ie)                           # :646-653
-    br_m = _r(br, blo, is_ - 1, ie)
-    bl_k = _r(bl, blo, is_, ie + 1)
-    br_k = _r(br, blo, is_, ie + 1)
-    return jnp.where(
-        c > 0.0,
-        _r(q, isd, is_ - 1, ie) + (1.0 - c) * (br_m - c * (bl_m + br_m)),
-        _r(q, isd, is_, ie + 1) + (1.0 + c) * (bl_k + c * (bl_k + br_k)))
-
-
-def _yppm(q, c, dya, jord, ifirst, ilast, js, je, jsd, jed, npx, npy,
-          bounded_domain, grid_type, lim_fac, duogrid=False):
-    """Functional twin of ``fv3_native_d_sw.yppm`` (tp_core.F90 yppm),
-    every jord branch, vectorised over BOTH i and j.
-
-    LAYOUT — the Fortran dummies, with the caller having already
-    selected the i window so all three operands share ``ilo = ifirst``:
-
-      ``q``   (ifirst:ilast, jsd:jed), j-origin ``jsd``
-      ``c``   (ifirst:ilast, js:je+1), j-origin ``js``  (Courant number)
-      ``dya`` (ifirst:ilast, jsd:jed), j-origin ``jsd``
-      returns ``flux`` (ifirst:ilast, js:je+1), j-origin ``js``
-
-    Structurally identical to :func:`_xppm` with the roles of i and j
-    exchanged — that is the ORACLE's own structure (two separate
-    routines with mirrored bodies), so keeping them separate here is
-    R1-faithful, not duplication to be factored away.  The 1-D
-    per-row temporaries the Fortran reuses across j (``fx1``, ``xt1``,
-    ``a4``, ``hi5``, ``hi6``) are written and read inside the SAME j
-    iteration, so batching them over j is exact.
-
-    The NumPy lane's ``isd``/``ied`` dummies are NOT parameters here:
-    grepped over ``fv3_native_d_sw.yppm``'s whole body (:656-1088) they
-    appear only in the signature and the docstring, never in a
-    statement — the i extent is carried by ``ifirst``/``ilast``.
-
-    ``jord`` / ``js`` / ``je`` / ``npy`` / ``grid_type`` branches are
-    STATIC Python ``if``; data branches are ``jnp.where``.
-    """
-    _ppm_iord_guard("_yppm", jord)
-    ni = ilast - ifirst + 1
-    dtype = q.dtype
-
-    def _r(a, jlo, j0, j1):
-        return _fw(a, ifirst, jlo, ifirst, ilast, j0, j1)
-
-    def _w(a, jlo, j0, j1, v):
-        return _fs(a, ifirst, jlo, ifirst, ilast, j0, j1, v)
-
-    def _new(j0, j1):
-        return jnp.full((ni, j1 - j0 + 1), jnp.nan, dtype)
-
-    if (not (bounded_domain or duogrid)) and grid_type < 3:
-        js1 = max(3, js - 1)                        # :667-671
-        je3 = min(npy - 2, je + 2)
-        je1 = min(npy - 3, je + 1)
-    else:
-        js1 = js - 1                                # :672-676
-        je3 = je + 2
-        je1 = je + 1
-    mord = abs(jord)
-    alo = js - 1                     # al  origin (js-1 : je+2)
-    blo = js - 1                     # bl/br/b0/smt5/smt6 (js-1 : je+1)
-    edge_lo = (not (bounded_domain or duogrid)) and grid_type < 3 \
-        and js == 1
-    edge_hi = (not (bounded_domain or duogrid)) and grid_type < 3 \
-        and (je + 1) == npy
-
-    if jord < 7:
-        al = _new(js - 1, je + 2)
-        al = _w(al, alo, js1, je3,                            # :694-697
-                TP_P1 * (_r(q, jsd, js1 - 1, je3 - 1)
-                         + _r(q, jsd, js1, je3))
-                + TP_P2 * (_r(q, jsd, js1 - 2, je3 - 2)
-                           + _r(q, jsd, js1 + 1, je3 + 1)))
-
-        if edge_lo:                                           # :700-710
-            al = _w(al, alo, 0, 0,
-                    TP_C1 * _r(q, jsd, -2, -2)
-                    + TP_C2 * _r(q, jsd, -1, -1)
-                    + TP_C3 * _r(q, jsd, 0, 0))
-            al = _w(al, alo, 1, 1,
-                    0.5 * (((2.0 * _r(dya, jsd, 0, 0)
-                             + _r(dya, jsd, -1, -1)) * _r(q, jsd, 0, 0)
-                            - _r(dya, jsd, 0, 0) * _r(q, jsd, -1, -1))
-                           / (_r(dya, jsd, -1, -1) + _r(dya, jsd, 0, 0))
-                           + ((2.0 * _r(dya, jsd, 1, 1)
-                               + _r(dya, jsd, 2, 2)) * _r(q, jsd, 1, 1)
-                              - _r(dya, jsd, 1, 1) * _r(q, jsd, 2, 2))
-                           / (_r(dya, jsd, 1, 1) + _r(dya, jsd, 2, 2))))
-            al = _w(al, alo, 2, 2,
-                    TP_C3 * _r(q, jsd, 1, 1) + TP_C2 * _r(q, jsd, 2, 2)
-                    + TP_C1 * _r(q, jsd, 3, 3))
-        if edge_hi:                                           # :711-724
-            al = _w(al, alo, npy - 1, npy - 1,
-                    TP_C1 * _r(q, jsd, npy - 3, npy - 3)
-                    + TP_C2 * _r(q, jsd, npy - 2, npy - 2)
-                    + TP_C3 * _r(q, jsd, npy - 1, npy - 1))
-            al = _w(al, alo, npy, npy,
-                    0.5 * (((2.0 * _r(dya, jsd, npy - 1, npy - 1)
-                             + _r(dya, jsd, npy - 2, npy - 2))
-                            * _r(q, jsd, npy - 1, npy - 1)
-                            - _r(dya, jsd, npy - 1, npy - 1)
-                            * _r(q, jsd, npy - 2, npy - 2))
-                           / (_r(dya, jsd, npy - 2, npy - 2)
-                              + _r(dya, jsd, npy - 1, npy - 1))
-                           + ((2.0 * _r(dya, jsd, npy, npy)
-                               + _r(dya, jsd, npy + 1, npy + 1))
-                              * _r(q, jsd, npy, npy)
-                              - _r(dya, jsd, npy, npy)
-                              * _r(q, jsd, npy + 1, npy + 1))
-                           / (_r(dya, jsd, npy, npy)
-                              + _r(dya, jsd, npy + 1, npy + 1))))
-            al = _w(al, alo, npy + 1, npy + 1,
-                    TP_C3 * _r(q, jsd, npy, npy)
-                    + TP_C2 * _r(q, jsd, npy + 1, npy + 1)
-                    + TP_C1 * _r(q, jsd, npy + 2, npy + 2))
-
-        if jord < 0:                                          # :726-729
-            al = _w(al, alo, js - 1, je + 2,
-                    jnp.maximum(0.0, _r(al, alo, js - 1, je + 2)))
-
-        # See the same note in _xppm: mord 2 reads `al` directly and the
-        # oracle does not build bl/br/b0 for it.
-        if mord != 2:
-            bl = _r(al, alo, js - 1, je + 1) - _r(q, jsd, js - 1, je + 1)
-            br = _r(al, alo, js, je + 2) - _r(q, jsd, js - 1, je + 1)
-            b0 = bl + br
-
-        if mord == 1:                                         # :731-750
-            smt5 = jnp.abs(lim_fac * b0) < jnp.abs(bl - br)
-            pos = c > 0.0
-            fx1 = jnp.where(
-                pos,
-                (1.0 - c) * (_r(br, blo, js - 1, je)
-                             - c * _r(b0, blo, js - 1, je)),
-                (1.0 + c) * (_r(bl, blo, js, je + 1)
-                             + c * _r(b0, blo, js, je + 1)))
-            flux = jnp.where(pos, _r(q, jsd, js - 1, je),
-                             _r(q, jsd, js, je + 1))
-            sel = jnp.logical_or(_r(smt5, blo, js - 1, je),
-                                 _r(smt5, blo, js, je + 1))
-            return jnp.where(sel, flux + fx1, flux)
-
-        if mord == 2:                                         # :752-768
-            qtm = _r(q, jsd, js - 1, je)
-            qtk = _r(q, jsd, js, je + 1)
-            al_m = _r(al, alo, js - 1, je)
-            al_k = _r(al, alo, js, je + 1)
-            al_p = _r(al, alo, js + 1, je + 2)
-            return jnp.where(
-                c > 0.0,
-                qtm + (1.0 - c) * (al_k - qtm
-                                   - c * (al_m + al_k - (qtm + qtm))),
-                qtk + (1.0 + c) * (al_k - qtk
-                                   + c * (al_k + al_p - (qtk + qtk))))
-
-        if mord == 3:                                         # :770-795
-            x0 = jnp.abs(b0)
-            xt = jnp.abs(bl - br)
-            smt5 = x0 < xt
-            smt6 = 3.0 * x0 < xt
-            take_p = jnp.logical_or(_r(smt5, blo, js - 1, je),
-                                    _r(smt6, blo, js, je + 1))
-            take_n = jnp.logical_or(_r(smt6, blo, js - 1, je),
-                                    _r(smt5, blo, js, je + 1))
-            qtm = _r(q, jsd, js - 1, je)
-            qtk = _r(q, jsd, js, je + 1)
-            return jnp.where(
-                c > 0.0,
-                jnp.where(take_p,
-                          qtm + (1.0 - c) * (_r(br, blo, js - 1, je)
-                                             - c * _r(b0, blo, js - 1, je)),
-                          qtm),
-                jnp.where(take_n,
-                          qtk + (1.0 + c) * (_r(bl, blo, js, je + 1)
-                                             + c * _r(b0, blo, js, je + 1)),
-                          qtk))
-
-        if mord == 4:                                         # :797-823
-            x0 = jnp.abs(b0)
-            xt = jnp.abs(bl - br)
-            smt5 = x0 < xt
-            smt6 = 3.0 * x0 < xt
-            hi6 = jnp.logical_or(_r(smt6, blo, js - 1, je),
-                                 _r(smt6, blo, js, je + 1))
-            hi5 = jnp.logical_or(
-                jnp.logical_and(_r(smt5, blo, js - 1, je),
-                                _r(smt5, blo, js, je + 1)), hi6)
-            pos = c > 0.0
-            fx1 = jnp.where(
-                pos,
-                (1.0 - c) * (_r(br, blo, js - 1, je)
-                             - c * _r(b0, blo, js - 1, je)),
-                (1.0 + c) * (_r(bl, blo, js, je + 1)
-                             + c * _r(b0, blo, js, je + 1)))
-            flux = jnp.where(pos, _r(q, jsd, js - 1, je),
-                             _r(q, jsd, js, je + 1))
-            return jnp.where(hi5, flux + fx1, flux)
-
-        # ---- mord 5, 6 (:825-889) ----
-        if jord == 5:                                         # :826-832
-            smt5 = bl * br < 0.0
-        elif jord == -5:                                      # :834-856
-            smt5 = bl * br < 0.0
-            xt1 = br - bl
-            a4 = -3.0 * b0
-            inner = jnp.abs(xt1) < -a4
-            a4s = jnp.where(inner, a4, 1.0)     # see _pert_ppm on the guard
-            fire = inner & (_r(q, jsd, js - 1, je + 1)
-                            + 0.25 / a4s * xt1 ** 2 + a4 * R12 < 0.0)
-            both = fire & (~smt5)
-            gt = fire & smt5 & (xt1 > 0.0)
-            le = fire & smt5 & (~(xt1 > 0.0))
-            bl_n = jnp.where(both, 0.0, jnp.where(le, -2.0 * br, bl))
-            br_n = jnp.where(both, 0.0, jnp.where(gt, -2.0 * bl, br))
-            b0_n = jnp.where(both, 0.0,
-                             jnp.where(gt, -bl, jnp.where(le, -br, b0)))
-            bl, br, b0 = bl_n, br_n, b0_n
-        else:                                                 # :857-864
-            smt5 = 3.0 * jnp.abs(b0) < jnp.abs(bl - br)
-
-        if jord != 5:
-            # WMP: fix edge issues (:866-876)
-            if edge_lo:
-                for idx in (0, 1):
-                    smt5 = _w(smt5, blo, idx, idx,
-                              _r(bl, blo, idx, idx)
-                              * _r(br, blo, idx, idx) < 0.0)
-            if edge_hi:
-                for idx in (npy - 1, npy):
-                    smt5 = _w(smt5, blo, idx, idx,
-                              _r(bl, blo, idx, idx)
-                              * _r(br, blo, idx, idx) < 0.0)
-
-        pos = c > 0.0                                         # :878-889
-        fx1 = jnp.where(
-            pos,
-            (1.0 - c) * (_r(br, blo, js - 1, je)
-                         - c * _r(b0, blo, js - 1, je)),
-            (1.0 + c) * (_r(bl, blo, js, je + 1)
-                         + c * _r(b0, blo, js, je + 1)))
-        flux = jnp.where(pos, _r(q, jsd, js - 1, je),
-                         _r(q, jsd, js, je + 1))
-        sel = jnp.logical_or(_r(smt5, blo, js - 1, je),
-                             _r(smt5, blo, js, je + 1))
-        return jnp.where(sel, flux + fx1, flux)
-
-    # ---- Monotonic constraints, jord >= 7 (:893-1060) ----
-    dmlo = js - 2
-    dqlo = js - 3
-    al = _new(js - 1, je + 2)
-    bl = _new(js - 1, je + 1)
-    br = _new(js - 1, je + 1)
-    dm = _new(js - 2, je + 2)
-    dq = _new(js - 3, je + 2)
-
-    qm = _r(q, jsd, js - 3, je + 1)                           # :911-918
-    qk = _r(q, jsd, js - 2, je + 2)
-    qp = _r(q, jsd, js - 1, je + 3)
-    xt = 0.25 * (qp - qm)
-    dm = _w(dm, dmlo, js - 2, je + 2, jnp.copysign(
-        jnp.minimum(
-            jnp.minimum(jnp.abs(xt),
-                        jnp.maximum(jnp.maximum(qm, qk), qp) - qk),
-            qk - jnp.minimum(jnp.minimum(qm, qk), qp)), xt))
-
-    al = _w(al, alo, js1, je1 + 1,                            # :919-922
-            0.5 * (_r(q, jsd, js1 - 1, je1) + _r(q, jsd, js1, je1 + 1))
-            + _TP_R3 * (_r(dm, dmlo, js1 - 1, je1)
-                        - _r(dm, dmlo, js1, je1 + 1)))
-
-    if jord == 8:                                             # :924-931
-        xt8 = 2.0 * _r(dm, dmlo, js1, je1)
-        bl = _w(bl, blo, js1, je1, -jnp.copysign(
-            jnp.minimum(jnp.abs(xt8),
-                        jnp.abs(_r(al, alo, js1, je1)
-                                - _r(q, jsd, js1, je1))), xt8))
-        br = _w(br, blo, js1, je1, jnp.copysign(
-            jnp.minimum(jnp.abs(xt8),
-                        jnp.abs(_r(al, alo, js1 + 1, je1 + 1)
-                                - _r(q, jsd, js1, je1))), xt8))
-    elif jord == 10:                                          # :932-955
-        dq = _w(dq, dqlo, js1 - 2, je1 + 1,
-                2.0 * (_r(q, jsd, js1 - 1, je1 + 2)
-                       - _r(q, jsd, js1 - 2, je1 + 1)))
-        blv = _r(al, alo, js1, je1) - _r(q, jsd, js1, je1)
-        brv = _r(al, alo, js1 + 1, je1 + 1) - _r(q, jsd, js1, je1)
-        flat = (jnp.abs(_r(dm, dmlo, js1 - 1, je1 - 1))
-                + jnp.abs(_r(dm, dmlo, js1, je1))
-                + jnp.abs(_r(dm, dmlo, js1 + 1, je1 + 1))) < NEAR_ZERO_TP
-        wide = jnp.abs(3.0 * (blv + brv)) > jnp.abs(blv - brv)
-        pmp_2 = _r(dq, dqlo, js1 - 1, je1 - 1)
-        lac_2 = pmp_2 - 0.75 * _r(dq, dqlo, js1 - 2, je1 - 2)
-        br_c = jnp.minimum(
-            jnp.maximum(jnp.maximum(0.0, pmp_2), lac_2),
-            jnp.maximum(brv, jnp.minimum(jnp.minimum(0.0, pmp_2), lac_2)))
-        pmp_1 = -_r(dq, dqlo, js1, je1)
-        lac_1 = pmp_1 + 0.75 * _r(dq, dqlo, js1 + 1, je1 + 1)
-        bl_c = jnp.minimum(
-            jnp.maximum(jnp.maximum(0.0, pmp_1), lac_1),
-            jnp.maximum(blv, jnp.minimum(jnp.minimum(0.0, pmp_1), lac_1)))
-        sel = (~flat) & wide
-        bl = _w(bl, blo, js1, je1,
-                jnp.where(flat, 0.0, jnp.where(sel, bl_c, blv)))
-        br = _w(br, blo, js1, je1,
-                jnp.where(flat, 0.0, jnp.where(sel, br_c, brv)))
-    elif jord == 11:                                          # :956-963
-        xt11 = PPM_FAC * _r(dm, dmlo, js1, je1)
-        bl = _w(bl, blo, js1, je1, -jnp.copysign(
-            jnp.minimum(jnp.abs(xt11),
-                        jnp.abs(_r(al, alo, js1, je1)
-                                - _r(q, jsd, js1, je1))), xt11))
-        br = _w(br, blo, js1, je1, jnp.copysign(
-            jnp.minimum(jnp.abs(xt11),
-                        jnp.abs(_r(al, alo, js1 + 1, je1 + 1)
-                                - _r(q, jsd, js1, je1))), xt11))
-    elif jord == 7 or jord == 12:                             # :964-983
-        blv = _r(al, alo, js1, je1) - _r(q, jsd, js1, je1)
-        brv = _r(al, alo, js1 + 1, je1 + 1) - _r(q, jsd, js1, je1)
-        xt1 = brv - blv
-        a4 = -3.0 * (brv + blv)
-        hi5 = blv * brv > 0.0
-        hi6 = jnp.abs(xt1) < -a4
-        a4s = jnp.where(hi6, a4, 1.0)      # see _pert_ppm on the guard
-        fire = hi6 & (_r(q, jsd, js1, je1) + 0.25 / a4s * xt1 ** 2
-                      + a4 * R12 < 0.0)
-        bl = _w(bl, blo, js1, je1,
-                jnp.where(fire & hi5, 0.0,
-                          jnp.where(fire & (~hi5) & (~(xt1 > 0.0)),
-                                    -2.0 * brv, blv)))
-        br = _w(br, blo, js1, je1,
-                jnp.where(fire & hi5, 0.0,
-                          jnp.where(fire & (~hi5) & (xt1 > 0.0),
-                                    -2.0 * blv, brv)))
-    else:                                                     # :984-988
-        bl = _w(bl, blo, js1, je1,
-                _r(al, alo, js1, je1) - _r(q, jsd, js1, je1))
-        br = _w(br, blo, js1, je1,
-                _r(al, alo, js1 + 1, je1 + 1) - _r(q, jsd, js1, je1))
-
-    if jord == 9 or jord == 13:                               # :990-996
-        blv, brv = _pert_ppm(_r(q, jsd, js1, je1),
-                             _r(bl, blo, js1, je1),
-                             _r(br, blo, js1, je1), 0)
-        bl = _w(bl, blo, js1, je1, blv)
-        br = _w(br, blo, js1, je1, brv)
-
-    if edge_lo:                                               # :999-1028
-        bl = _w(bl, blo, 0, 0,
-                TP_S14 * _r(dm, dmlo, -1, -1)
-                + TP_S11 * (_r(q, jsd, -1, -1) - _r(q, jsd, 0, 0)))
-        xt = 0.5 * (((2.0 * _r(dya, jsd, 0, 0) + _r(dya, jsd, -1, -1))
-                     * _r(q, jsd, 0, 0)
-                     - _r(dya, jsd, 0, 0) * _r(q, jsd, -1, -1))
-                    / (_r(dya, jsd, -1, -1) + _r(dya, jsd, 0, 0))
-                    + ((2.0 * _r(dya, jsd, 1, 1) + _r(dya, jsd, 2, 2))
-                       * _r(q, jsd, 1, 1)
-                       - _r(dya, jsd, 1, 1) * _r(q, jsd, 2, 2))
-                    / (_r(dya, jsd, 1, 1) + _r(dya, jsd, 2, 2)))
-        q4 = [_r(q, jsd, kk, kk) for kk in (-1, 0, 1, 2)]
-        xt = jnp.maximum(xt, jnp.minimum(jnp.minimum(q4[0], q4[1]),
-                                         jnp.minimum(q4[2], q4[3])))
-        xt = jnp.minimum(xt, jnp.maximum(jnp.maximum(q4[0], q4[1]),
-                                         jnp.maximum(q4[2], q4[3])))
-        br = _w(br, blo, 0, 0, xt - _r(q, jsd, 0, 0))
-        bl = _w(bl, blo, 1, 1, xt - _r(q, jsd, 1, 1))
-        xt2 = (TP_S15 * _r(q, jsd, 1, 1) + TP_S11 * _r(q, jsd, 2, 2)
-               - TP_S14 * _r(dm, dmlo, 2, 2))
-        br = _w(br, blo, 1, 1, xt2 - _r(q, jsd, 1, 1))
-        bl = _w(bl, blo, 2, 2, xt2 - _r(q, jsd, 2, 2))
-        br = _w(br, blo, 2, 2, _r(al, alo, 3, 3) - _r(q, jsd, 2, 2))
-        # The Fortran pert_ppm run is ONE F-contiguous span over columns
-        # j = 0, 1, 2 and pert_ppm is elementwise, so the 3-column block
-        # call is exactly equivalent (same note as the NumPy lane :1020).
-        blv, brv = _pert_ppm(_r(q, jsd, 0, 2), _r(bl, blo, 0, 2),
-                             _r(br, blo, 0, 2), 1)
-        bl = _w(bl, blo, 0, 2, blv)
-        br = _w(br, blo, 0, 2, brv)
-
-    if edge_hi:                                               # :1029-1060
-        bl = _w(bl, blo, npy - 2, npy - 2,
-                _r(al, alo, npy - 2, npy - 2)
-                - _r(q, jsd, npy - 2, npy - 2))
-        xt2 = (TP_S15 * _r(q, jsd, npy - 1, npy - 1)
-               + TP_S11 * _r(q, jsd, npy - 2, npy - 2)
-               + TP_S14 * _r(dm, dmlo, npy - 2, npy - 2))
-        br = _w(br, blo, npy - 2, npy - 2,
-                xt2 - _r(q, jsd, npy - 2, npy - 2))
-        bl = _w(bl, blo, npy - 1, npy - 1,
-                xt2 - _r(q, jsd, npy - 1, npy - 1))
-        xt = 0.5 * (((2.0 * _r(dya, jsd, npy - 1, npy - 1)
-                      + _r(dya, jsd, npy - 2, npy - 2))
-                     * _r(q, jsd, npy - 1, npy - 1)
-                     - _r(dya, jsd, npy - 1, npy - 1)
-                     * _r(q, jsd, npy - 2, npy - 2))
-                    / (_r(dya, jsd, npy - 2, npy - 2)
-                       + _r(dya, jsd, npy - 1, npy - 1))
-                    + ((2.0 * _r(dya, jsd, npy, npy)
-                        + _r(dya, jsd, npy + 1, npy + 1))
-                       * _r(q, jsd, npy, npy)
-                       - _r(dya, jsd, npy, npy)
-                       * _r(q, jsd, npy + 1, npy + 1))
-                    / (_r(dya, jsd, npy, npy)
-                       + _r(dya, jsd, npy + 1, npy + 1)))
-        q4 = [_r(q, jsd, kk, kk)
-              for kk in (npy - 2, npy - 1, npy, npy + 1)]
-        xt = jnp.maximum(xt, jnp.minimum(jnp.minimum(q4[0], q4[1]),
-                                         jnp.minimum(q4[2], q4[3])))
-        xt = jnp.minimum(xt, jnp.maximum(jnp.maximum(q4[0], q4[1]),
-                                         jnp.maximum(q4[2], q4[3])))
-        br = _w(br, blo, npy - 1, npy - 1,
-                xt - _r(q, jsd, npy - 1, npy - 1))
-        bl = _w(bl, blo, npy, npy, xt - _r(q, jsd, npy, npy))
-        br = _w(br, blo, npy, npy,
-                TP_S11 * (_r(q, jsd, npy + 1, npy + 1)
-                          - _r(q, jsd, npy, npy))
-                - TP_S14 * _r(dm, dmlo, npy + 1, npy + 1))
-        blv, brv = _pert_ppm(_r(q, jsd, npy - 2, npy),
-                             _r(bl, blo, npy - 2, npy),
-                             _r(br, blo, npy - 2, npy), 1)
-        bl = _w(bl, blo, npy - 2, npy, blv)
-        br = _w(br, blo, npy - 2, npy, brv)
-
-    if jord == 7:                                             # :1062-1078
-        b0 = (_r(bl, blo, js - 1, je + 1)
-              + _r(br, blo, js - 1, je + 1))
-        smt5 = (_r(bl, blo, js - 1, je + 1)
-                * _r(br, blo, js - 1, je + 1) < 0.0)
-        pos = c > 0.0
-        fx1 = jnp.where(
-            pos,
-            (1.0 - c) * (_r(br, blo, js - 1, je)
-                         - c * _r(b0, blo, js - 1, je)),
-            (1.0 + c) * (_r(bl, blo, js, je + 1)
-                         + c * _r(b0, blo, js, je + 1)))
-        flux = jnp.where(pos, _r(q, jsd, js - 1, je),
-                         _r(q, jsd, js, je + 1))
-        sel = jnp.logical_or(_r(smt5, blo, js - 1, je),
-                             _r(smt5, blo, js, je + 1))
-        return jnp.where(sel, flux + fx1, flux)
-
-    bl_m = _r(bl, blo, js - 1, je)                            # :1079-1088
-    br_m = _r(br, blo, js - 1, je)
-    bl_k = _r(bl, blo, js, je + 1)
-    br_k = _r(br, blo, js, je + 1)
-    return jnp.where(
-        c > 0.0,
-        _r(q, jsd, js - 1, je) + (1.0 - c) * (br_m - c * (bl_m + br_m)),
-        _r(q, jsd, js, je + 1) + (1.0 + c) * (bl_k + c * (bl_k + br_k)))
-
-
-def _fv_tp_2d(q, crx, cry, npx, npy, hord, xfx, yfx, bounds, ra_x, ra_y,
-              lim_fac, dxa, dya, area, bounded_domain, grid_type,
-              sw_corner, se_corner, nw_corner, ne_corner, duogrid):
-    """Functional twin of ``fv3_native_d_sw.fv_tp_2d`` (tp_core.F90
-    fv_tp_2d), restricted to the arm ``update_dz_d`` actually calls.
-
-    Operand origins (Fortran, as the oracle declares them):
-      ``q``   (isd:ied, jsd:jed)    ``area``/``dxa``/``dya`` likewise
-      ``crx``/``xfx`` (is:ie+1, jsd:jed)
-      ``cry``/``yfx`` (isd:ied, js:je+1)
-      ``ra_x`` (is:ie, jsd:jed)     ``ra_y`` (isd:ied, js:je)
-
-    Returns ``(fx, fy, q)``:
-      ``fx`` (is:ie+1, js:je), ``fy`` (is:ie, js:je+1), and ``q`` AFTER
-      the two ``copy_corners`` calls.  Returning q is not cosmetic: the
-      oracle passes ``zh(isd,jsd,k)`` itself on the undamped branch, so
-      those corner writes land in ``zh`` and must survive into the
-      output (nh_utils.F90:279-280 vs the damped branch's ``z2`` copy).
-
-    ``mfx``/``mfy``/``nord``/``damp_c``/``damp_smag``/``damp_km`` are
-    NOT parameters: update_dz_d's call passes none of them, so the
-    mass-weighted averaging arm and both ``deln_flux`` calls are
-    unreachable from here (R5 — port the execution, not the call text).
-    """
-    is_, ie, js, je, ng = bounds
-    isd, ied = is_ - ng, ie + ng
-    jsd, jed = js - ng, je + ng
-    ni_x = ie + 1 - is_ + 1
-    nj_y = je + 1 - js + 1
-
-    ord_in = 8 if hord == 10 else hord                        # :1254-1257
-    ord_ou = hord
-
-    if not bounded_domain:                                    # :1260-1263
-        q = _copy_corners(q, npx, npy, 2, bounded_domain, bounds,
-                          sw_corner, se_corner, nw_corner, ne_corner,
-                          duogrid)
-
-    # :1265-1266  yppm(fy2, q, cry, ord_in, isd, ied, ..., js, je, ...)
-    fy2 = _yppm(q, cry, dya, ord_in, isd, ied, js, je, jsd, jed,
-                npx, npy, bounded_domain, grid_type, lim_fac, duogrid)
-
-    fyy = yfx * fy2                                           # :1268-1270
-    q_i = ((_fw(q, isd, jsd, isd, ied, js, je)                # :1271-1274
-            * _fw(area, isd, jsd, isd, ied, js, je)
-            + fyy[:, 0:nj_y - 1] - fyy[:, 1:nj_y]) / ra_y)
-
-    # :1278-1279  xppm(fx, q_i, crx, ord_ou, ..., js, je, ...)
-    fx = _xppm(q_i, _fw(crx, is_, jsd, is_, ie + 1, js, je),
-               _fw(dxa, isd, jsd, isd, ied, js, je),
-               ord_ou, is_, ie, isd, ied, js, je, npx, npy,
-               bounded_domain, grid_type, lim_fac, duogrid)
-
-    if not bounded_domain:                                    # :1281-1284
-        q = _copy_corners(q, npx, npy, 1, bounded_domain, bounds,
-                          sw_corner, se_corner, nw_corner, ne_corner,
-                          duogrid)
-
-    # :1286-1287  xppm(fx2, q, crx, ord_in, ..., jsd, jed, ...)
-    fx2 = _xppm(q, crx, dxa, ord_in, is_, ie, isd, ied, jsd, jed,
-                npx, npy, bounded_domain, grid_type, lim_fac, duogrid)
-
-    fx1 = xfx * fx2                                           # :1289-1291
-    q_j = ((_fw(q, isd, jsd, is_, ie, jsd, jed)               # :1292-1294
-            * _fw(area, isd, jsd, is_, ie, jsd, jed)
-            + fx1[0:ni_x - 1, :] - fx1[1:ni_x, :]) / ra_x)
-
-    # :1296-1297  yppm(fy, q_j, cry, ord_ou, is, ie, ...)
-    fy = _yppm(q_j, _fw(cry, isd, js, is_, ie, js, je + 1),
-               _fw(dya, isd, jsd, is_, ie, jsd, jed),
-               ord_ou, is_, ie, js, je, jsd, jed, npx, npy,
-               bounded_domain, grid_type, lim_fac, duogrid)
-
-    # Flux averaging, transport-of-delp/vorticity arm (:1330-1335)
-    fx = 0.5 * (fx + _fw(fx2, is_, jsd, is_, ie + 1, js, je)) \
-        * _fw(xfx, is_, jsd, is_, ie + 1, js, je)
-    fy = 0.5 * (fy + _fw(fy2, isd, js, is_, ie, js, je + 1)) \
-        * _fw(yfx, isd, js, is_, ie, js, je + 1)
-    return fx, fy, q
-
-
-def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
+def _del6_vt_flux(nord, npx, npy, damp, q, bd, del6_u, del6_v,
                   rarea, bounded_domain, sw_corner, se_corner,
                   nw_corner, ne_corner, duogrid):
     """Functional twin of ``fv3_native_d_sw.del6_vt_flux``
@@ -2139,9 +1066,8 @@ def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
     (a wrongly sized window therefore shows up as a NaN, not as a
     plausible number).
     """
-    is_, ie, js, je, ng = bounds
-    isd, ied = is_ - ng, ie + ng
-    jsd, jed = js - ng, je + ng
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
     nid, njd = ied - isd + 1, jed - jsd + 1
     dtype = q.dtype
 
@@ -2155,9 +1081,9 @@ def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
              damp * _fw(q, isd, jsd, i1, i2, j1, j2))
 
     if nord > 0 and (not bounded_domain):                     # :1736-1739
-        d2 = _copy_corners(d2, npx, npy, 1, bounded_domain, bounds,
-                           sw_corner, se_corner, nw_corner, ne_corner,
-                           duogrid)
+        d2 = copy_corners(d2, npx, npy, 1, bounded_domain, bd,
+                          sw_corner, se_corner, nw_corner, ne_corner,
+                          duogrid=duogrid)
     fx2 = _fs(fx2, isd, jsd, is_ - nord, ie + nord + 1,       # :1740-1742
               js - nord, je + nord,
               _fw(del6_v, isd, jsd, is_ - nord, ie + nord + 1,
@@ -2168,9 +1094,9 @@ def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
                        js - nord, je + nord)))
 
     if nord > 0 and (not bounded_domain):                     # :1744-1747
-        d2 = _copy_corners(d2, npx, npy, 2, bounded_domain, bounds,
-                           sw_corner, se_corner, nw_corner, ne_corner,
-                           duogrid)
+        d2 = copy_corners(d2, npx, npy, 2, bounded_domain, bd,
+                          sw_corner, se_corner, nw_corner, ne_corner,
+                          duogrid=duogrid)
     fy2 = _fs(fy2, isd, jsd, is_ - nord, ie + nord,           # :1748-1750
               js - nord, je + nord + 1,
               _fw(del6_u, isd, jsd, is_ - nord, ie + nord,
@@ -2197,9 +1123,9 @@ def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
                            js - nt - 1, je + nt + 1))
 
             if not bounded_domain:
-                d2 = _copy_corners(d2, npx, npy, 1, bounded_domain,
-                                   bounds, sw_corner, se_corner,
-                                   nw_corner, ne_corner, duogrid)
+                d2 = copy_corners(d2, npx, npy, 1, bounded_domain, bd,
+                                  sw_corner, se_corner, nw_corner,
+                                  ne_corner, duogrid=duogrid)
             fx2 = _fs(fx2, isd, jsd, is_ - nt, ie + nt + 1,
                       js - nt, je + nt,
                       _fw(del6_v, isd, jsd, is_ - nt, ie + nt + 1,
@@ -2210,9 +1136,9 @@ def _del6_vt_flux(nord, npx, npy, damp, q, bounds, del6_u, del6_v,
                                js - nt, je + nt)))
 
             if not bounded_domain:
-                d2 = _copy_corners(d2, npx, npy, 2, bounded_domain,
-                                   bounds, sw_corner, se_corner,
-                                   nw_corner, ne_corner, duogrid)
+                d2 = copy_corners(d2, npx, npy, 2, bounded_domain, bd,
+                                  sw_corner, se_corner, nw_corner,
+                                  ne_corner, duogrid=duogrid)
             fy2 = _fs(fy2, isd, jsd, is_ - nt, ie + nt,
                       js - nt, je + nt + 1,
                       _fw(del6_u, isd, jsd, is_ - nt, ie + nt,
@@ -2295,12 +1221,18 @@ def update_dz_d(ndif, damp, hord, bounds, km, npx, npy, area, rarea,
 
     NON-SMOOTH SITES (all C^0, named for the gradient gate):
       * the PPM ``smt5``/``smt6``/``hi5`` selectors and every
-        ``copysign``/``min``/``max`` limiter inside ``_xppm``/``_yppm``
-        (absent entirely at ``hord = 2``, the perfectly-linear arm);
+        ``copysign``/``min``/``max`` limiter inside ``fv3_tp_core``'s
+        ``xppm``/``yppm`` — absent entirely at ``hord = 2``, the
+        perfectly-linear arm the gradient gate uses;
       * the upwind selection ``jnp.where(c > 0)`` at every flux point;
-      * ``_pert_ppm``'s branches (only reachable at |hord| in
+      * ``fv3_tp_core.pert_ppm``'s branches (reachable at |hord| in
         {7, 9, 12, 13} and at the monotone edge fixes);
       * the ``dz_min`` bottom-up ``jnp.maximum`` floor (:305).
+
+    UNSUPPORTED ``hord`` raises: the guard is ``fv3_tp_core``'s
+    ``_validate_ord`` against its ``_PPM_ORDS`` (-6..-1, 1..13), reached
+    through :func:`fv_tp_2d`, so a typo cannot silently fall through to
+    a neighbouring PPM branch.
     """
     _require_f64_jax("update_dz_d", {
         "area": area, "rarea": rarea, "dp0": dp0, "zs": zs, "zh": zh,
@@ -2313,6 +1245,12 @@ def update_dz_d(ndif, damp, hord, bounds, km, npx, npy, area, rarea,
     ni, nj = ie - is_ + 1, je - js + 1
     ni_x, nj_y = ie + 1 - is_ + 1, je + 1 - js + 1
     nid, njd = ied - isd + 1, jed - jsd + 1
+    # fv3_tp_core takes the NumPy lane's Bounds NamedTuple (hashable by
+    # VALUE, so a fresh-but-equal one shares a jit cache entry); this
+    # module's public surface keeps the 5-tuple used by riem_solver_c
+    # and update_dz_c, and derives the rest here rather than asking
+    # callers to keep two conventions straight.
+    bd = Bounds(is_, ie, js, je, isd, ied, jsd, jed, ng)
 
     if km < 2:
         raise ValueError(
@@ -2412,11 +1350,19 @@ def update_dz_d(ndif, damp, hord, bounds, km, npx, npy, area, rarea,
                 + yfx_adv[:, 0:nj_y - 1, k] - yfx_adv[:, 1:nj_y, k])
 
         z_in = zh_out[:, :, k]
-        fx, fy, q_cc = _fv_tp_2d(
+        # The SHIPPED tp_core twin (no tp_core numerics re-derived here).
+        # mfx/mfy/mass/nord/damp_c/damp_smag/damp_km stay at their None
+        # defaults -- the oracle's call passes none of them (:269-270) --
+        # so `da_min` is UNREAD: fv3_tp_core only touches it inside the
+        # `damp_c > 1e-4` / `damp_smag > 1e-3` deln_flux arms, which
+        # those Nones make unreachable.  0.0 is passed to make that
+        # non-participation explicit rather than smuggling in a metric.
+        q_cc, fx, fy = fv_tp_2d(
             z_in, crx_adv[:, :, k], cry_adv[:, :, k], npx, npy, hord,
-            xfx_adv[:, :, k], yfx_adv[:, :, k], bounds, ra_x, ra_y,
-            lim_fac, dxa, dya, area, bounded_domain, grid_type,
-            sw_corner, se_corner, nw_corner, ne_corner, duogrid)
+            xfx_adv[:, :, k], yfx_adv[:, :, k], dxa, dya, area,
+            del6_v, del6_u, rarea, 0.0, bd, ra_x, ra_y, lim_fac,
+            bounded_domain, grid_type, sw_corner, se_corner, nw_corner,
+            ne_corner, duogrid=duogrid)
 
         num = (_fw(q_cc, isd, jsd, is_, ie, js, je)
                * _fw(area, isd, jsd, is_, ie, js, je)
@@ -2430,7 +1376,7 @@ def update_dz_d(ndif, damp, hord, bounds, km, npx, npy, area, rarea,
 
         if damp_e[k] > 1.0e-5:                                # :263-278
             fx2, fy2 = _del6_vt_flux(
-                ndif_e[k], npx, npy, damp_e[k], q_cc, bounds,
+                ndif_e[k], npx, npy, damp_e[k], q_cc, bd,
                 del6_u, del6_v, rarea, bounded_domain, sw_corner,
                 se_corner, nw_corner, ne_corner, duogrid)
             win = num / den + (
