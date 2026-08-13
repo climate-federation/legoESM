@@ -126,6 +126,20 @@ D6. **``ctx["step_dump"]`` is not supported.**  It is a Python callback
     A context carrying one raises rather than silently dropping the
     instrument.
 
+OPEN DEFECT (job 9404093, C12, dt=450 s, d_ext=0)
+--------------------------------------------------
+The JITTED step and the EAGER step disagree on ``u`` by
+**7.510956730778894e-07 relative** after one step; ``delp``, ``pt`` and
+``v`` agree to better than 1e-12.  The EAGER lane matches the NumPy
+authority to 1e-11 on all four fields, so this is a property of the
+compiled lowering and NOT a port defect -- but it is nine orders above
+the f64 ULP, so the usual "XLA contracts mul+add into an FMA"
+explanation does not cover it and the residual is UNEXPLAINED, not
+agreement.  Every multi-step growth number in
+``tests/grids/test_fv3_duo_stepper.py`` is downstream of it.  The three
+``test_jit_gap_localiser_*`` gates there bisect it: stage chain vs
+D-grid tail, then ``geopk_sw_1lev_d`` vs ``one_grad_p_1lev``.
+
 Differentiability
 -----------------
 No ``donate_argnums`` anywhere (it conflicts with reverse-mode AD,
@@ -185,6 +199,11 @@ __all__ = [
     "full_acoustic_step_sixface",
     "advance_duo_outer_step",
     "run_duo_sw",
+    "make_geopk_sw_1lev_jit",
+    "make_geopk_sw_1lev_d_jit",
+    "make_p_grad_c_1lev_jit",
+    "make_one_grad_p_1lev_jit",
+    "make_exchange_post_pgrad_sixface_jit",
     "make_csw_step_sixface_jit",
     "make_dsw12_step_sixface_jit",
     "make_acoustic_step_sixface_jit",
@@ -1054,6 +1073,39 @@ def run_duo_sw(ctx: DuoStepperContext, states: dict, dt, nsteps: int,
 # time step does not recompile.  No `donate_argnums` anywhere: buffer
 # donation conflicts with reverse-mode AD, which is the point of the
 # lane.
+
+def make_geopk_sw_1lev_jit(fn=geopk_sw_1lev):
+    """Static: ``bd`` only.  ``delpc``/``hs``/``pt`` dynamic."""
+    return jax.jit(fn, static_argnums=(2,))
+
+
+def make_geopk_sw_1lev_d_jit(fn=geopk_sw_1lev_d):
+    """Static: ``bd`` only.  ``delp``/``hs``/``pt`` dynamic."""
+    return jax.jit(fn, static_argnums=(2,))
+
+
+def make_p_grad_c_1lev_jit(fn=p_grad_c_1lev):
+    """Static: ``bd`` only.
+
+    ``dt2`` deliberately stays DYNAMIC here even though
+    ``fv3_pgrad.make_p_grad_c_jit`` pins it static -- deviation D3: the
+    kernel uses it only as a multiplier, and a static time step would
+    recompile the stepper on every new ``dt``.
+    """
+    return jax.jit(fn, static_argnums=(7,))
+
+
+def make_one_grad_p_1lev_jit(fn=one_grad_p_1lev):
+    """Static: ``bd``/``npx``/``npy`` + ``d_ext`` (``one_grad_p``
+    branches on it in Python).  ``dt`` stays DYNAMIC, per D3."""
+    return jax.jit(fn, static_argnums=(6, 7, 8),
+                   static_argnames=("d_ext",))
+
+
+def make_exchange_post_pgrad_sixface_jit(fn=exchange_post_pgrad_sixface):
+    """Static: ctx + ``nord`` (a Python branch AND a window selector)."""
+    return jax.jit(fn, static_argnums=(0,), static_argnames=("nord",))
+
 
 def make_csw_step_sixface_jit(fn=csw_step_sixface):
     """Static: ctx + duogrid.  ``states``/``dt2`` dynamic."""

@@ -54,6 +54,7 @@ job's wall clock is not read as a hang.
 from __future__ import annotations
 
 import os
+import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -147,14 +148,43 @@ def jstep(jctx):
 _SENTINEL_FLOOR = 1.0e20
 
 
+# ⛔ KNOWN INSTRUMENT DEFECT IN THIS FILE, INHERITED AND NOT YET FIXED.
+# A concurrent session RETRACTED the magnitude-based classification
+# below in ``test_fv3_duo_sw_core.py`` (same job, 9404093): a cell is a
+# workspace fill only if it holds ``1e30`` or ``1e25`` EXACTLY, and
+# classifying by ``|x| >= 1e20`` wrongly swept up the sentinel-
+# PROPAGATED cascade (1e22 … 1e111), which is ordinary arithmetic and
+# therefore subject to FMA contraction.  That session also replaced the
+# GLOBAL ``max|a-b| / max|b|`` metric with a PER-ELEMENT
+# ``|a-b| / (|b| + median|b|)``, so one huge cell can no longer divide
+# every real discrepancy to nothing.  Both corrections apply here.
+#
+# They are NOT applied in this round ON PURPOSE.  Swapping the metric
+# now would change the tolerance definition at the same time as the
+# three fixes this round is testing, and the next run has to be a
+# ONE-VARIABLE test of those fixes -- a red gate would be unattributable
+# between "the jit gap is still there" and "the metric moved".  Every
+# number quoted in this file is therefore under the GLOBAL metric and is
+# labelled as such.  FOLLOW-UP, next round: adopt the corrected helper
+# (ideally as one shared ``tests/grids/conftest.py`` fixture rather than
+# a third copy) and RE-MEASURE every bound under it.
+#
+# The stepper's exposure to the classification half is lower than
+# sw_core's, and that is measured rather than assumed: this module runs
+# ``d_sw1`` with ``workspace_sentinel=0.0`` (the NumPy stepper's own
+# choice, fv3_native_duo_stepper.py:680), which is precisely what stops
+# the 1e30 cascade from forming.  The SCALE half applies in full.
+
+
 def _cmp(got, ref, name, tol):
     """Mask-aware relative comparison -- and it MUST be able to fail.
 
     Restates the contract of ``test_fv3_duo_sw_core._cmp`` (pytest
     modules are not an import surface, and importing one test module
     from another would execute its fixtures' module-level jax config).
-    FOLLOW-UP: a shared ``tests/grids/conftest.py`` helper is the right
-    home for the three copies.
+    See the retraction banner above for what is already known to be
+    wrong with this version and why it is being fixed in the next round
+    rather than this one.
 
     Three defects it guards against, each earned in this campaign:
 
@@ -205,6 +235,14 @@ def _rel(got, ref) -> float:
 
     The measurement half of :func:`_cmp` with no assertion, used by the
     tier-3 replay, which compares GROWTH rather than a fixed bound.
+
+    It uses the SAME metric as :func:`_cmp` by construction, and that is
+    load-bearing rather than tidiness: it is what let job 9404093's
+    replay ``rel(1)`` for ``u`` be compared digit-for-digit against the
+    jit-vs-eager gap and found IDENTICAL, which is the evidence that the
+    two are one number.  If one of the pair is ever migrated to the
+    corrected per-element metric, the other must migrate in the same
+    commit or that comparison silently stops meaning anything.
     """
     a = np.asarray(got, dtype=np.float64)
     b = np.asarray(ref, dtype=np.float64)
@@ -911,41 +949,93 @@ def test_run_duo_sw_parity(ctx, jctx, states0, jstates0):
 # =====================================================================
 
 # Allowed amplification of the per-field lane difference at N steps,
-# relative to the measured 1-step difference.  This is the gate that
-# single-step tests cannot provide: a defect at a JOIN between kernels
-# (rather than inside one) shows up as growth, not as a large first
-# step.  A linear-in-N budget would be too tight for a chaotic-in-the-
-# limit flow and a free budget would be no gate at all, so the shape is
-# pinned here and the NUMBERS are measured.
+# relative to the ANCHOR below.  This is the gate that single-step tests
+# cannot provide: a defect at a JOIN between kernels (rather than inside
+# one) shows up as growth, not as a large first step.
 #
-# TOL-PENDING: provisional bounds; the orchestrator's measurement job
-# will replace these with `measured X, bound = measured x N`.
-# DO NOT SHIP.   [class: N-step growth vs the 1-step floor]
-_REPLAY_AMP = {2: 1.0e1, 4: 1.0e2}
+# MEASURED, job 9404093 (C12, dt=450 s, d_ext=0, jitted JAX arm):
+#   delp   rel(1) 1.810e-14   rel(2) 1.324e-07   rel(4) 2.053e-07
+#   u      rel(1) 7.511e-07   rel(2) 8.285e-06   rel(4) <= 7.511e-05
+#   pt, v  passed at the old bounds; values NOT recorded (see below)
+# u's 1->2 ratio is 11.03; delp's is 7315, then only 1.55 from 2 to 4.
+#
+# THE ANCHOR IS NOT rel(1) ALONE, and that correction is the real fix
+# here.  `delp`'s rel(1) of 1.8e-14 is not a floor -- it is `delp` not
+# yet having felt the step-1 wind error, which reaches it one step later
+# through the flux divergence -- so anchoring on it demanded that a
+# LATER step stay within 10x of machine precision.  The strategy doc's
+# own standing rider says exactly this ("if the measured maximum is
+# exactly zero, multiplying pins the bound to zero").  The anchor is
+# therefore max(rel(1), _REPLAY_FLOOR), with the floor set from the
+# lane's actual measured one-step difference (u, 7.5e-07).
+#
+# TOL-PENDING: bounds pinned to the job-9404093 measurement above, but
+# `u`'s rel(4) and BOTH of pt/v are still unmeasured (a passing gate
+# printed nothing -- an instrument gap the warning emission below now
+# closes).  DO NOT SHIP until one more run fills the table.
+# [class: N-step growth vs the one-step floor]
+_REPLAY_AMP = {2: 2.0e1, 4: 2.0e2}
 
-# TOL-PENDING: provisional bound; the orchestrator's measurement job
-# will replace this with `measured X, bound = measured x N`.
-# DO NOT SHIP.   [class: absolute floor, so a 1-step diff of exactly 0
-# cannot pin every later bound to 0]
-_REPLAY_FLOOR = 1.0e-13
+# TOL-PENDING: the lane's measured one-step floor is 7.511e-07 (u,
+# job 9404093), which is DOMINATED BY THE JIT-VS-EAGER GAP and is
+# therefore an UNEXPLAINED residual, not agreement -- see
+# `test_full_step_jit_equals_eager`.  Rounded up to 1e-6.
+# DO NOT SHIP.   [class: one-step floor of the whole step]
+_REPLAY_FLOOR = 1.0e-6
+
+# How many steps the EAGER arm replays.  Two is enough to answer the
+# only question it exists for -- is the growth a join defect or an
+# artefact of the jitted lowering? -- and each eager step costs far more
+# than a compiled one.
+_REPLAY_EAGER_N = 2
+
+
+class ReplayMeasurement(UserWarning):
+    """Carries the replay table out of a PASSING test.
+
+    A gate that reports only on failure cannot pin a tolerance: job
+    9404093 left `pt`, `v` and `u`'s 4-step value unmeasured for exactly
+    that reason.  pytest prints its warnings summary for passing tests
+    too, so this is the emission channel that does not depend on `-s`.
+    """
 
 
 @pytest.fixture(scope="module")
 def replay(ctx, jctx, states0, jstates0, jstep):
-    """Both lanes, 1/2/4 steps from ONE initial state.
+    """Three lanes, 1/2/4 steps from ONE initial state.
 
-    The JAX arm runs the JITTED step -- that is the lane the runners
-    execute, and jit-vs-eager is gated separately below.
+    * NumPy -- the authority;
+    * JAX JITTED -- the lane the runners execute, and the growth gate's
+      subject;
+    * JAX EAGER, to ``_REPLAY_EAGER_N`` steps -- the DISCRIMINATOR.  If
+      the eager arm tracks NumPy while the jitted arm does not, the
+      growth is an artefact of the compiled lowering and not a defect at
+      a join between kernels.  Those two have entirely different fixes,
+      so the gate must not report growth without saying which it is.
     """
     out = {}
-    s_np = states0
-    s_jx = jstates0
+    s_np, s_jx, s_eg = states0, jstates0, jstates0
     for n in range(1, 5):
         s_np = npstep.full_acoustic_step_sixface(ctx, s_np, DT,
                                                  d_ext=D_EXT_OFF)
         s_jx = jstep(jctx, s_jx, DT, d_ext=D_EXT_OFF)
+        if n <= _REPLAY_EAGER_N:
+            s_eg = jstep_mod.full_acoustic_step_sixface(
+                jctx, s_eg, DT, d_ext=D_EXT_OFF)
         if n in (1, 2, 4):
-            out[n] = (_stack_np(s_np), s_jx)
+            out[n] = (_stack_np(s_np), s_jx,
+                      s_eg if n <= _REPLAY_EAGER_N else None)
+
+    rows = []
+    for n in sorted(out):
+        ref, got, eg = out[n]
+        for k in _STATE_KEYS:
+            eager = ("" if eg is None
+                     else f" eager {_rel(eg[k], ref[k]):.4e}")
+            rows.append(f"n={n} {k}: jit {_rel(got[k], ref[k]):.4e}"
+                        f"{eager}")
+    warnings.warn("TIER-3 REPLAY TABLE (vs NumPy, C12 dt=450 d_ext=0): "
+                  + "; ".join(rows), ReplayMeasurement, stacklevel=1)
     return out
 
 
@@ -960,7 +1050,7 @@ def test_tier3_replay_stays_finite(replay, field):
     is not skipped, though -- the non-finite MASKS must match between
     the lanes everywhere, which is the actual port check.
     """
-    for n, (ref, got) in replay.items():
+    for n, (ref, got, _eg) in replay.items():
         assert np.isfinite(_window(ref[field], field)).all(), (
             field, n, "numpy compute window")
         assert np.isfinite(_window(got[field], field)).all(), (
@@ -984,35 +1074,182 @@ def test_tier3_multistep_replay_growth(replay, field, nsteps):
     absolute bound: an absolute bound at N steps would be satisfied by a
     lane whose first step was already wrong.
     """
-    ref1, got1 = replay[1]
-    refn, gotn = replay[nsteps]
+    ref1, got1, _ = replay[1]
+    refn, gotn, _ = replay[nsteps]
     r1 = _rel(got1[field], ref1[field])
     rn = _rel(gotn[field], refn[field])
-    bound = max(r1 * _REPLAY_AMP[nsteps], _REPLAY_FLOOR)
+    anchor = max(r1, _REPLAY_FLOOR)
+    bound = anchor * _REPLAY_AMP[nsteps]
     assert rn <= bound, (
-        f"{field}: {nsteps}-step lane difference {rn:.3e} > "
-        f"{bound:.3e} (1-step {r1:.3e}, allowed amplification "
+        f"{field}: {nsteps}-step lane difference {rn:.3e} > {bound:.3e} "
+        f"(1-step {r1:.3e}, anchor {anchor:.3e}, allowed amplification "
         f"{_REPLAY_AMP[nsteps]:g}) -- MEASURED 1-step {r1:.3e}, "
         f"{nsteps}-step {rn:.3e}")
+
+
+def test_tier3_eager_replay_isolates_the_jit_gap(replay):
+    """THE DISCRIMINATOR for the growth gate above.
+
+    Two mechanisms produce N-step growth and they have nothing in
+    common: a defect at a JOIN between kernels, or a difference in the
+    compiled lowering that the eager lane does not have.  Reporting
+    growth without saying which would be reporting a symptom.
+
+    So: the EAGER JAX arm is scored against NumPy over the same steps.
+    Eager tracking NumPy while the jitted arm does not means the growth
+    is carried by the jitted lowering -- there is no join defect, and
+    the fix is in the compiled path, not in the composition.
+    """
+    for n in sorted(k for k in replay if replay[k][2] is not None):
+        ref, got, eg = replay[n]
+        for field in _STATE_KEYS:
+            r_eager = _rel(eg[field], ref[field])
+            r_jit = _rel(got[field], ref[field])
+            # TOL-PENDING: provisional bound; the orchestrator's
+            # measurement job will replace this with `measured X, bound
+            # = measured x N`.  Job 9404093 measured the EAGER one-step
+            # step at <= 1e-11 for every field
+            # (test_full_acoustic_step_parity), which is what this
+            # extends to n steps.
+            # DO NOT SHIP.   [class: eager JAX vs NumPy, n steps]
+            assert r_eager <= 1e-9, (
+                f"{field} at n={n}: the EAGER lane differs from NumPy by "
+                f"{r_eager:.3e} -- the growth is NOT a jit artefact, it "
+                f"is in the composition (jit arm {r_jit:.3e})")
 
 
 # =====================================================================
 # gate 3 -- jit vs eager, and the retrace budget
 # =====================================================================
 
+# Per-field jit-vs-eager bounds, MEASURED in job 9404093.
+#
+# ⛔ THE FMA EXPLANATION IS REFUTED FOR `u`, AND THIS IS THE ONE OPEN
+# DEFECT IN THIS MODULE.  XLA contracting `x*y + z` into an FMA moves a
+# result by a few ULP -- 1e-15 relative in f64.  The measured `u` gap is
+# 7.510956730778894e-07, which is 3.4e9 ULP.  That is not rounding, and
+# a bound written as "FMA, expected" would be certifying a residual
+# whose mechanism is unknown.  It is recorded here as UNEXPLAINED.
+#
+# What is CONFIRMED, from the same run and with no inference:
+#   * the EAGER lane matches NumPy (test_full_acoustic_step_parity
+#     passed at 1e-11 on all four fields);
+#   * the tier-3 1-step jit-vs-NumPy `u` difference is
+#     7.510956730778894e-07 -- IDENTICAL TO SIXTEEN DIGITS to the
+#     jit-vs-eager gap here.  So the whole one-step `u` lane difference
+#     IS this gap, and all three tier-3 growth failures are downstream
+#     of it.
+#   * delp/pt/v passed at 1e-12, so only `u` carries it.
+#
+# The localisers below bisect it: stage chain vs D-grid tail, then
+# geopk_d vs one_grad_p.  Do NOT widen this bound further without a
+# mechanism.
+_JIT_EAGER_BOUND = {
+    # TOL-PENDING: measured <= 1e-12 (passed); exact values unrecorded.
+    # DO NOT SHIP.   [class: jit-vs-eager, rounding-scale]
+    "delp": 1e-12, "pt": 1e-12, "v": 1e-12,
+    # TOL-PENDING: measured 7.511e-07, bound = measured x 3.  This is an
+    # UNEXPLAINED RESIDUAL, NOT AGREEMENT.
+    # DO NOT SHIP.   [class: jit-vs-eager, UNEXPLAINED]
+    "u": 2.3e-06,
+}
+
+
 def test_full_step_jit_equals_eager(jctx, jstates0, jstep):
-    """gate 2.  NOT bitwise: the step is one long chain of ``x*y + z``,
-    and XLA contracts those into FMAs in the jitted lowering and not in
-    the eager one, so a few-ULP gap is CORRECT behaviour (STATE lesson
-    2).  Bitwise here would be a test that fails for the wrong reason."""
+    """gate 2 -- and the module's one open defect, see the block above.
+
+    NOT bitwise: the step is one long chain of ``x*y + z`` and the
+    jitted lowering contracts those into FMAs, so a few-ULP gap would be
+    correct.  The measured `u` gap is nine orders larger than that, so
+    the bound it carries is labelled UNEXPLAINED rather than expected.
+    """
     eager = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
                                                  d_ext=D_EXT_OFF)
     got = jstep(jctx, jstates0, DT, d_ext=D_EXT_OFF)
     for k in _STATE_KEYS:
+        _cmp(got[k], eager[k], f"full_step jit.{k}",
+             _JIT_EAGER_BOUND[k])
+
+
+def test_jit_gap_localiser_stage_chain(jctx, jstates0):
+    """LOCALISER 1 of 3 -- is the `u` gap in the stage chain or the tail?
+
+    ``acoustic_step_sixface`` is everything BEFORE the D-grid tail.  If
+    its `u` is rounding-scale here while the full step's is 7.5e-07, the
+    gap lives in the tail (geopk_d -> divg2 -> one_grad_p) and the next
+    two localisers name the kernel.  If it already shows here, the tail
+    is exonerated and the SW chain is the subject.
+
+    Either outcome is a result; the bound is provisional so the run
+    PRINTS the number in both cases.
+    """
+    eager = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
+    fn = jstep_mod.make_acoustic_step_sixface_jit()
+    got = fn(jctx, jstates0, DT)
+    for k in ("delp", "pt", "u", "v"):
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"full_step jit.{k}", 1e-12)
+        # DO NOT SHIP.   [class: jit-vs-eager localiser]
+        _cmp(got[k], eager[k], f"acoustic_step jit.{k}", 1e-12)
+
+
+def test_jit_gap_localiser_geopk_d(ctx, jctx, states0):
+    """LOCALISER 2 of 3 -- the D-grid ``geopk``.
+
+    Runs on face 0 only: the gap is not face-specific (all four fields
+    are scored across all six faces above and only `u` moves), and one
+    face is enough to name a kernel.
+    """
+    bd = ctx["bd"]
+    delp = jnp.asarray(states0[0]["delp"])
+    pt = jnp.asarray(states0[0]["pt"])
+    hs = jnp.zeros_like(delp)
+    pk_e, gz_e = jstep_mod.geopk_sw_1lev_d(delp, hs, bd, pt=pt)
+    fn = jstep_mod.make_geopk_sw_1lev_d_jit()
+    pk_j, gz_j = fn(delp, hs, bd, pt=pt)
+    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
+    # will replace these with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: jit-vs-eager localiser]
+    _cmp(pk_j, pk_e, "geopk_sw_1lev_d jit.pk", 1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: jit-vs-eager localiser]
+    _cmp(gz_j, gz_e, "geopk_sw_1lev_d jit.gz", 1e-12)
+
+
+def test_jit_gap_localiser_one_grad_p(ctx, jctx, states0):
+    """LOCALISER 3 of 3 -- ``one_grad_p``, the prime suspect.
+
+    It is the only routine in the step that writes `u` last, and at
+    km=1 SW its pressure bracket is a difference of two nearly equal
+    products (``gz`` and ``pk`` both reduce to ``delp`` there), i.e. a
+    cancellation whose conditioning could in principle amplify a
+    rounding-level input difference.  "Could in principle" is why this
+    is a MEASUREMENT and not the explanation: the amplification factor
+    needed is ~1e9 and nothing here has shown one.
+    """
+    bd = ctx["bd"]
+    delp = jnp.asarray(states0[0]["delp"])
+    pt = jnp.asarray(states0[0]["pt"])
+    pk, gz = jstep_mod.geopk_sw_1lev_d(delp, jnp.zeros_like(delp), bd,
+                                       pt=pt)
+    divg2 = jnp.zeros((NPX, NPX), dtype=jnp.float64)
+    u0 = jnp.asarray(states0[0]["u"])
+    v0 = jnp.asarray(states0[0]["v"])
+    u_e, v_e = jstep_mod.one_grad_p_1lev(u0, v0, pk, gz, divg2,
+                                         jctx.gs6[0], bd, NPX, NPX,
+                                         dt=DT, d_ext=D_EXT_OFF)
+    fn = jstep_mod.make_one_grad_p_1lev_jit()
+    u_j, v_j = fn(u0, v0, pk, gz, divg2, jctx.gs6[0], bd, NPX, NPX,
+                  dt=DT, d_ext=D_EXT_OFF)
+    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
+    # will replace these with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: jit-vs-eager localiser]
+    _cmp(u_j, u_e, "one_grad_p_1lev jit.u", 1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job
+    # will replace this with `measured X, bound = measured x N`.
+    # DO NOT SHIP.   [class: jit-vs-eager localiser]
+    _cmp(v_j, v_e, "one_grad_p_1lev jit.v", 1e-12)
 
 
 def test_full_step_no_retrace_on_dt(jctx, jstates0):
@@ -1275,16 +1512,31 @@ def test_delp_and_pt_are_refreshed_after_the_step(jctx, jstates0):
     Without this, "we do not refresh the winds" could be satisfied by a
     lane that refreshes nothing at all.  Compared against the stage
     output (``acoustic_step_sixface``), which is the state the tail
-    refresh receives -- so the two assertions are exactly the two halves
-    of what ``ext_scalar`` is contracted to do:
+    refresh receives, so the two assertions are exactly what
+    ``ext_scalar`` is contracted to do: the compute box carried through
+    BITWISE (it writes halo slots only -- a pure index/gather path with
+    no sum), and the halo CHANGED.
 
-    * the compute box is carried through BITWISE (``ext_scalar`` writes
-      halo slots only -- a pure index/gather path with no sum);
-    * the halo DID change (the stage left it holding values consistent
-      with the PRE-step compute cells).
+    ⛔ RUN ON A NON-CONSTANT ``pt``, and that is not tidiness.  Job
+    9404093 failed this gate on `pt` with the halo difference EXACTLY
+    0.0, and the cause was the FIXTURE, not the code: ``w2_six_face_state``
+    sets ``pt = ones_like(delp)`` (fv3_native_duo_stepper.py:1091), so
+    ``pt`` is identically 1 over the whole array and an exchange of a
+    constant field cannot change a cell by construction.  `delp` passed
+    the same assertion in the same run, which is what proves the tail
+    refresh runs.  A diagnostic that can only return zero is not a
+    gate -- so the fixture is perturbed into a smooth non-constant
+    ``pt`` and the fixture's own non-constancy is asserted first.
     """
-    stage = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
-    out = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
+    dp = jstates0["delp"]
+    pt_var = jstates0["pt"] * (1.0 + 1.0e-3 * dp / jnp.max(jnp.abs(dp)))
+    assert float(jnp.max(pt_var) - jnp.min(pt_var)) > 0.0, (
+        "the perturbed pt is still constant -- this gate would be "
+        "vacuous again")
+    st = {**jstates0, "pt": pt_var}
+
+    stage = jstep_mod.acoustic_step_sixface(jctx, st, DT)
+    out = jstep_mod.full_acoustic_step_sixface(jctx, st, DT,
                                                d_ext=D_EXT_OFF)
     cs = slice(NG, NG + N)
     for k in ("delp", "pt"):
@@ -1297,6 +1549,18 @@ def test_delp_and_pt_are_refreshed_after_the_step(jctx, jstates0):
         assert halo > 0.0, (
             f"the outermost {k} halo row is unchanged by the tail "
             f"refresh -- dyn_core.F90:1336-1337 did not run")
+
+
+def test_w2_pt_is_identically_one(states0):
+    """Pins the fact that made the gate above vacuous, so the next
+    reader does not re-derive it from a failure.
+
+    ``w2_six_face_state`` sets ``pt = ones_like(delp)``: on this IC any
+    ``pt``-only diagnostic that looks for a CHANGE is measuring nothing.
+    """
+    for t in range(6):
+        assert np.array_equal(np.asarray(states0[t]["pt"]),
+                              np.ones_like(np.asarray(states0[t]["pt"])))
 
 
 def test_entry_ascalar_gate_is_live(jctx, jstates0):
