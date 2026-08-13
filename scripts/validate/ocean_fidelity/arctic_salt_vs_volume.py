@@ -114,6 +114,47 @@ def _profile(S, dV, gdept, label, out=None):
     return rows
 
 
+def _native_salt_main(a) -> int:
+    """Arctic profile of a native (t, nlev, nj, ni) salinity field."""
+    import netCDF4 as nc
+
+    var, _, path = a.native_salt.partition(":")
+    if not path:
+        raise SystemExit("--native-salt expects VAR:PATH")
+    e1t, e2t, e3t, tmask = load_mesh_metrics(a.mesh_mask)
+    lat = load_mesh_latitude(a.mesh_mask)
+    gdept = load_mesh_depth_1d(a.mesh_mask)
+
+    ds = nc.Dataset(path)
+    try:
+        arr = ds.variables[var][a.nemo_month - 1]
+        S = np.ma.filled(np.ma.masked_invalid(arr), 0.0).astype(np.float64)
+    finally:
+        ds.close()
+    if np.abs(S).max() > 1.0e6:
+        raise SystemExit(f"FATAL: {var} carries fill values "
+                         f"(max {np.abs(S).max():.3e})")
+    if S.shape != tmask.shape:
+        raise SystemExit(f"{var} {S.shape} vs mesh frame {tmask.shape}; this "
+                         "mode expects an ALREADY-NATIVE (nlev, 331, 360) field")
+
+    wet = tmask > 0.5
+    arctic = (lat >= a.arctic_lat) & wet.any(axis=0)
+    dV = e1t[None] * e2t[None] * e3t * (wet & arctic[None])
+    num = (S * dV).sum(axis=(1, 2))
+    den = dV.sum(axis=(1, 2))
+    print(f"[profile:{a.label}] level depth_m mean_S volume_m3")
+    for k in range(num.size):
+        if den[k] > 0:
+            print(f"[profile:{a.label}] {k:3d} {gdept[k]:9.2f} "
+                  f"{num[k] / den[k]:9.4f} {den[k]:.4e}")
+    V = float(den.sum())
+    M = float((S * dV).sum())
+    print(f"[{a.label}] Arctic (>{a.arctic_lat:g}N): V {V:.6e} m3   "
+          f"M_salt {M:.6e} psu.m3   S_mean {M / V:.4f} psu")
+    return 0
+
+
 def _nemo_main(a) -> int:
     """Arctic salt/volume from NEMO's own output, using NEMO's own metrics."""
     try:
@@ -220,12 +261,28 @@ def main() -> int:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--snapshot", help="legoESM day-30 .npz")
     src.add_argument("--nemo-gridt", help="NEMO grid_T .nc (the reference arm)")
+    src.add_argument("--native-salt", metavar="VAR:PATH",
+                     help="Profile a NATIVE (t, nlev, 331, 360) salinity field "
+                          "-- e.g. presalt:woce_salt_monthly_init_4p2.nc, the "
+                          "INITIAL CONDITION. This is the day-0 control: "
+                          "without it, a weak day-5 halocline cannot be "
+                          "attributed to mixing rather than to the IC.")
     p.add_argument("--nemo-month", type=int, default=1,
                    help="1-based month index into the NEMO file (default 1)")
     p.add_argument("--mesh-mask", required=True, help="NEMO mesh_mask .nc")
     p.add_argument("--label", required=True)
     p.add_argument("--arctic-lat", type=float, default=ARCTIC_LAT_DEG)
     p.add_argument("--out-json", default=None)
+    p.add_argument("--tke-profile", action="store_true",
+                   help="Arctic volume-weighted mean TKE per level from the "
+                        "snapshot's `tke` field. Discriminates WHERE the "
+                        "over-mixing comes from: energetic TKE through 0-60 m "
+                        "implicates TKE production; small TKE with a mixed-"
+                        "flat column implicates something else (background "
+                        "diffusivity, convection, or numerical mixing in the "
+                        "advection). NOTE this is OUR field only -- NEMO's "
+                        "grid_W avt is an ANNUAL MEAN and cannot be compared "
+                        "to a January snapshot without a window confound.")
     p.add_argument("--profile", action="store_true",
                    help="Also print the Arctic VOLUME-WEIGHTED mean salinity "
                         "per level. With the inventory and volume both matching "
@@ -243,6 +300,8 @@ def main() -> int:
     # below as an INDEPENDENT check on this probe's salt integral.
     if a.nemo_gridt:
         return _nemo_main(a)
+    if a.native_salt:
+        return _native_salt_main(a)
 
     z = dict(np.load(a.snapshot))
     # load_mesh_metrics returns a 4-TUPLE (read it, do not assume a dict --
@@ -306,6 +365,55 @@ def main() -> int:
         dil = np.where(colw, (H + eta * colw) / np.where(colw, H, 1.0), 0.0)
         _profile(S3d, dV_ref * dil[None], load_mesh_depth_1d(a.mesh_mask),
                  a.label, out)
+
+    if a.tke_profile:
+        if "tke" not in z:
+            raise SystemExit("FATAL: snapshot has no `tke` field")
+        wet3 = (tmask > 0.5) & arctic[None]
+        dV_ref = e1t[None] * e2t[None] * e3t * wet3
+        _tke = _native(z["tke"])
+        # TKE (and K_H) live at INTERFACES: shape (..., nlev-1), read from the
+        # kernel's own annotations (tke.py:329/344), not assumed -- the first
+        # version weighted them by CELL volumes and the shape guard caught it
+        # (74 vs 75).  Interface j sits between cells j and j+1, so weight it
+        # by the adjacent half-cells and label it with the midpoint depth.
+        nint = dV_ref.shape[0] - 1
+        if _tke.shape[0] != nint:
+            raise SystemExit(
+                f"tke has {_tke.shape[0]} levels; expected nlev-1 = {nint} "
+                "interfaces")
+        dV_int = 0.5 * (dV_ref[:-1] + dV_ref[1:])
+        num = (_tke * dV_int).sum(axis=(1, 2))
+        den = dV_int.sum(axis=(1, 2))
+        gd = load_mesh_depth_1d(a.mesh_mask)
+        gd_int = 0.5 * (gd[:-1] + gd[1:])
+        # SPLIT BY ICE COVER.  A whole-Arctic mean blends ice-covered water
+        # with open water, and January open water (Nordic/Barents) is windy --
+        # so a high mean does NOT establish that the UNDER-ICE column is
+        # over-energetic, which is the actual claim.  26 % of the Arctic volume
+        # here is open water.
+        _ice_m, _open_m, _src = _ice_masks(z, arctic)
+        if _ice_m is not None:
+            gd_i = 0.5 * (load_mesh_depth_1d(a.mesh_mask)[:-1]
+                          + load_mesh_depth_1d(a.mesh_mask)[1:])
+            for _nm, _m2 in (("ice", _ice_m), ("open", _open_m)):
+                _w3 = (tmask > 0.5) & _m2[None]
+                _dv = e1t[None] * e2t[None] * e3t * _w3
+                _dvi = 0.5 * (_dv[:-1] + _dv[1:])
+                _n = (_tke * _dvi).sum(axis=(1, 2))
+                _d = _dvi.sum(axis=(1, 2))
+                print(f"[tke_{_nm}:{a.label}] iface depth_m mean_tke_m2s2")
+                for k in range(_n.size):
+                    if _d[k] > 0:
+                        print(f"[tke_{_nm}:{a.label}] {k:3d} {gd_i[k]:9.2f} "
+                              f"{_n[k] / _d[k]:.6e}")
+        print(f"[tke:{a.label}] iface depth_m mean_tke_m2s2   "
+              f"(interface index; +/-1 in the vertical convention does not "
+              f"change whether the top ~60 m is energetic)")
+        for k in range(num.size):
+            if den[k] > 0:
+                print(f"[tke:{a.label}] {k:3d} {gd_int[k]:9.2f} "
+                      f"{num[k]/den[k]:.6e}")
 
     ice, openw, src = _ice_masks(z, arctic)
     if ice is None:
