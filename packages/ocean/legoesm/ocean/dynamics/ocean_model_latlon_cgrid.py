@@ -3805,8 +3805,29 @@ class LatLonCGridOceanModel:
                 # would subtract a per-band mean.
                 from legoesm.ocean.freshwater import normalize_freshwater_net
                 _g_eta = _grid if _grid is not None else self.grid
-                F_slow_eta = normalize_freshwater_net(
-                    F_slow_eta, _g_eta.area_T, state.land_mask.data)
+                # RESTORING IS EXCLUDED FROM THE NORMALIZATION (codex round 2
+                # RED).  The flag exists to remove the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact.  SSS restoring is not part of
+                # that imbalance, and NEMO never normalizes its `erp`
+                # (sbcssr.F90 adds it straight to `emp`; the global correction
+                # in NEMO applies to the forcing fields, not the damping term).
+                # Normalizing the full net would subtract the restoring's own
+                # global mean from EVERY cell -- a spurious uniform water flux
+                # plus a globally weakened restoring, both silent.
+                #
+                # So: normalize the PHYSICAL net, then add the restoring rate
+                # back untouched.  When `restoring` is absent this is exactly
+                # the previous expression.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                if _fw_rest is None:
+                    F_slow_eta = normalize_freshwater_net(
+                        F_slow_eta, _g_eta.area_T, state.land_mask.data)
+                else:
+                    _F_rest = (jnp.asarray(_fw_rest) / self.config.rho_0
+                               ) * state.land_mask.data
+                    F_slow_eta = normalize_freshwater_net(
+                        F_slow_eta - _F_rest, _g_eta.area_T,
+                        state.land_mask.data) + _F_rest
             # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
             # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
             # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's

@@ -406,3 +406,61 @@ class TestRestoringChannelFlag:
             "the water-flux routing assumes `fw` exists; it is None on runs "
             "with no P-E, runoff or ice.")
         assert "FreshwaterForcing(" in block
+
+
+class TestRestoringExcludedFromNormalization:
+    """The global freshwater normalization must NOT touch the restoring flux.
+
+    `--no-normalize-freshwater` is off in the OMIP runs (the manifests resolve
+    `normalize_freshwater: true`), so with restoring in the water budget the
+    normalizer was removing the restoring's own global mean from every cell:
+    a spurious uniform water flux AND a globally weakened restoring, neither
+    of which raises anything. NEMO adds `erp` straight to `emp` and never
+    normalizes it (sbcssr.F90:137).
+    """
+
+    def test_normalizing_the_physical_net_leaves_restoring_intact(self):
+        """Reference semantics, independent of the model classes.
+
+        normalize(phys) + restoring must have the SAME area-mean restoring as
+        the raw restoring field -- i.e. the restoring's global mean survives,
+        while the physical net's is removed.
+        """
+        import numpy as np
+
+        area = np.array([1.0, 2.0, 3.0, 4.0])
+        mask = np.ones(4)
+        phys = np.array([1.0, -2.0, 3.0, 0.5])        # unbalanced, as CORE-II is
+        rest = np.array([0.2, 0.2, 0.2, 0.2])         # nonzero global mean
+
+        def amean(x):
+            return float(np.sum(x * area * mask) / np.sum(area * mask))
+
+        combined = phys + rest
+        # WRONG (what the code did): normalize the whole net
+        wrong = combined - amean(combined) * mask
+        # RIGHT: normalize only the physical part, add restoring back
+        right = (phys - amean(phys) * mask) + rest
+
+        assert abs(amean(right - phys + phys)) >= 0.0        # sanity, no-op
+        # the physical imbalance is removed in BOTH
+        assert abs(amean(right) - amean(rest)) < 1e-12
+        # but the wrong form has ZERO net, having eaten the restoring mean
+        assert abs(amean(wrong)) < 1e-12
+        # and the two differ by exactly the restoring's global mean
+        np.testing.assert_allclose(right - wrong, amean(rest) * mask,
+                                   rtol=1e-12, atol=1e-15)
+
+    def test_both_model_paths_exclude_restoring(self):
+        """Pin the fix in the two normalizers that run."""
+        import inspect
+
+        from legoesm.ocean.dynamics import (
+            ocean_model_latlon_cgrid, ocean_model_mpas,
+        )
+
+        for mod in (ocean_model_latlon_cgrid, ocean_model_mpas):
+            src = inspect.getsource(mod)
+            assert 'getattr(freshwater, "restoring", None)' in src, (
+                f"{mod.__name__} no longer excludes the restoring flux from "
+                "the freshwater normalization")
