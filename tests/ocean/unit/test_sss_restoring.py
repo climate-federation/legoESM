@@ -341,3 +341,49 @@ class TestRestoringChannelFlag:
             "the water-flux channel; restoring would be applied twice.")
         # and the pre-step branch must exist
         assert "if _sss_water_flux:" in src
+
+    def test_water_flux_requires_real_freshwater(self, monkeypatch):
+        """The DOUBLE-APPLICATION guard (codex 9387241 RED).
+
+        `virtual_salt_flux(freshwater, ...)` builds its net internally and that
+        net includes `fw.restoring`, so under the default closure a routed
+        restoring would reach the ocean twice: as volume through eta/z-star,
+        and again as the closure's virtual-salt tendency.
+        """
+        import pytest as _pytest
+
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc", "--sss-restore",
+             "--sss-restore-channel", "water_flux",
+             "--sss-restore-normalization", "live_s"], monkeypatch)
+        with _pytest.raises(SystemExit, match="requires --freshwater-closure"):
+            main()
+
+    def test_the_full_nemo_combination_is_allowed(self):
+        """water_flux + live_s + real_freshwater must NOT be refused.
+
+        This is the combination the real_freshwater guard's own message has
+        always pointed at: restoring routed as a genuine water flux with the
+        tracer-side edit skipped.
+        """
+        from scripts.run.run_omip_core2 import (
+            real_freshwater_restoring_conflict,
+        )
+
+        assert real_freshwater_restoring_conflict(
+            "real_freshwater", True, "live_s", "water_flux") is None
+
+    def test_the_exemption_is_narrow(self):
+        """Neither piece alone lifts the guard."""
+        from scripts.run.run_omip_core2 import (
+            real_freshwater_restoring_conflict,
+        )
+
+        # right channel, wrong conversion
+        assert real_freshwater_restoring_conflict(
+            "real_freshwater", True, "s_target", "water_flux") is not None
+        # right conversion, tracer channel (the retracted claim)
+        assert real_freshwater_restoring_conflict(
+            "real_freshwater", True, "live_s", None) is not None
+        assert real_freshwater_restoring_conflict(
+            "real_freshwater", True, "live_s", "tracer") is not None

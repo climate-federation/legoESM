@@ -93,7 +93,8 @@ _GM_BOLUS_FORMS = ("centred", "through_fct")
 
 
 def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
-                                       sss_restore_normalization):
+                                       sss_restore_normalization,
+                                       sss_restore_channel=None):
     """Return the refusal message for an incompatible pairing, else None.
 
     ``--freshwater-closure real_freshwater`` drops the virtual-salt term, so a
@@ -112,6 +113,16 @@ def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
     only after the model is built, which no unit test can cheaply reach.
     """
     if freshwater_closure != "real_freshwater" or not sss_restore:
+        return None
+    # EXEMPTION, and the only one: `--sss-restore-channel water_flux` with the
+    # NEMO conversion.  That combination is exactly the precondition this
+    # guard's own message has always named -- the restoring is routed through
+    # `fw.restoring` as a real water flux (driving eta / z-star) with its heat
+    # term, and the post-step tracer edit is SKIPPED, so there is no
+    # virtual-salt-like operation left for `real_freshwater` to contradict.
+    # `live_s` is required alongside it by a separate guard in `main`.
+    if (sss_restore_channel == "water_flux"
+            and sss_restore_normalization == "live_s"):
         return None
     # NOTE (2026-08-12, codex 9383572 RED): `--sss-restore-normalization live_s`
     # does NOT lift this.  A previous revision let it through on the grounds
@@ -4973,11 +4984,28 @@ def main() -> int:
             "nn_sssr=2 form (divided by the LIVE surface salinity), whereas "
             "the default 's_target' is the virtual-salt conversion and would "
             "move water at the wrong rate.")
+    # Checks are ordered most-specific-first: selecting a channel for a
+    # restoring that is switched off is a clearer diagnosis than the closure
+    # requirement it would otherwise trip on.
     if (args.sss_restore_channel == "water_flux"
             and not getattr(args, "sss_restore", False)):
         raise SystemExit(
             "--sss-restore-channel water_flux without --sss-restore selects a "
             "channel for a restoring that is switched off; drop the flag.")
+    # The default `virtual_salt_flux` closure builds its net INTERNALLY from
+    # the FreshwaterForcing (`virtual_salt_flux(freshwater, ...)`,
+    # ocean_model_latlon_cgrid.py:5044), and that net INCLUDES `restoring`.
+    # So under that closure a populated `fw.restoring` would reach the ocean
+    # TWICE: once as volume through eta / z-star, and again as the closure's
+    # virtual-salt tendency.  (codex 9387241 RED, verified.)
+    if (args.sss_restore_channel == "water_flux"
+            and args.freshwater_closure != "real_freshwater"):
+        raise SystemExit(
+            "--sss-restore-channel water_flux requires --freshwater-closure "
+            "real_freshwater: the default virtual_salt_flux closure derives "
+            "its salt tendency from the NET freshwater, which already "
+            "includes fw.restoring, so routing restoring as water would apply "
+            "it twice (volume AND virtual salt).")
     if (args.gm_bolus_advection == "through_fct"
             and args.gm_slope_scheme != "nemo_iso_lap"):
         raise SystemExit(
@@ -5753,7 +5781,7 @@ def main() -> int:
         # as FreshwaterForcing.restoring, a traced array).
         _fw_conflict = real_freshwater_restoring_conflict(
             args.freshwater_closure, getattr(args, "sss_restore", False),
-            args.sss_restore_normalization)
+            args.sss_restore_normalization, args.sss_restore_channel)
         if _fw_conflict is not None:
             raise SystemExit(_fw_conflict)
     if args.no_normalize_freshwater:
