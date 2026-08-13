@@ -91,13 +91,35 @@ it. Those are setup, not hot path, and they stay NumPy.
 ~15k lines landed at `dbfdccb67` and RAN for the first time (job 9400424, x64
 CPU, single node). **All five modules import cleanly.**
 
-| module | LOC | gates | first run |
-|---|---:|---:|---|
-| `grids/fv3_duo_halos.py` | 2033 | 52 | 40 pass, 12 fail |
-| `core/fv3_tp_core.py` | 2620 | 16* | 15 pass, 1 fail |
-| `core/fv3_pgrad.py` | 1701 | 90 | **88 pass**, 2 fail |
-| `core/fv3_mapz.py` | 1666 | 212 | **203 pass**, 9 fail |
-| `core/fv3_nh_core.py` | 2493 | 127 | running |
+| module | LOC | gates | first run | of which `check_grads(order=2)` |
+|---|---:|---:|---|---:|
+| `grids/fv3_duo_halos.py` | 2033 | 52 | 40 pass, 12 fail | 0 |
+| `core/fv3_tp_core.py` | 2620 | 16* | 15 pass, 1 fail | 1 |
+| `core/fv3_pgrad.py` | 1701 | 90 | **88 pass**, 2 fail | 2 |
+| `core/fv3_mapz.py` | 1666 | 212 | **203 pass**, 9 fail | 8 |
+| `core/fv3_nh_core.py` | 2493 | 127 | **126 pass**, 1 fail | 1 |
+| **total** | **10513** | **497** | **472 pass (95.0 %), 25 fail** | **12** |
+
+**The single most useful number here is that last column.** `check_grads(order=2)`
+failed in **four of the five modules**, and accounts for 12 of the 25 failures.
+The other 12 are the halo module's bitwise-vs-FMA expectations, and the 25th is
+one guard test. That is not four independent flukes — it is a **systematic
+defect in the gate**, and codex predicted it in the strategy review before a
+line of this code existed (finding 7: order-2 finite differencing is a weak gate
+for a scheme whose entire behaviour is switching, and demanding
+finite-difference agreement *at* a switch is wrong because no classical
+derivative exists there).
+
+**Zero confirmed real code defects came out of the run.** The one real code
+defect in the campaign so far came out of the *review*, not the run: codex's
+`_rezone` BLOCKER. That asymmetry is worth remembering when budgeting: the run
+found expectation defects, the review found the code defect.
+
+Replacement gate, now required everywhere (strategy §7 part 3): the
+tolerance-free adjoint identity `⟨Jv, w⟩ = ⟨v, Jᵀw⟩`, with `Jv` from `jax.jvp`
+and `Jᵀw` from `jax.vjp`. It uses no finite differences, so neither the FD step
+nor the array's dynamic range can make it fail spuriously — and unlike
+`check_grads` it stays meaningful on a linear operator.
 
 *the tp_core gate count is a stale snapshot: its test file grew 511 → 1772
 lines (63 tests) after the pin, closing a coverage hole where `xtp_u` and
@@ -265,3 +287,20 @@ Each entry cost something. New sessions read this before touching the port.
    the token once. Use a node-local `CODEX_HOME=/tmp/codex_home_$SLURM_JOB_ID`.
 9. **Login-node policy is hard.** Nothing over a few seconds or one core,
    including codex. Everything goes through `sbatch`.
+10. **A printed element-wise diff of two TABLES OF RECORDS cannot distinguish a
+    column swap from a row reordering.** Compare record *sets*. This produced a
+    confidently-reported, wholly imaginary "transposed halo table" defect that
+    took a thirty-second check to refute. Never report a verdict off a printed
+    diff — the rule already existed as "diff ARRAYS, never printed summaries",
+    and this is its table-shaped cousin.
+11. **`check_grads(order=2)` is a weak gate for this core, empirically.** It
+    failed in four of the five modules on first run and accounted for 12 of 25
+    failures, in every case without a code defect behind it. Finite differencing
+    cannot resolve an array with seven orders of dynamic range, and it is
+    meaningless *at* a switching surface where no classical derivative exists.
+    Use the adjoint identity `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` as the primary gradient gate and
+    keep `check_grads` as a scoped, smooth-region supplement.
+12. **The run finds expectation defects; the review finds code defects.** On
+    this campaign the 497-gate first execution surfaced zero confirmed code
+    defects, while the adversarial review surfaced a BLOCKER. Budget for both;
+    neither substitutes for the other.
