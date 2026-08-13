@@ -402,7 +402,10 @@ def test_k2e_tables_are_the_pinned_nord2_oracle_tables():
             f"{fam}: Lagrange coefficients differ by {cmax:.3e}, far "
             f"above the 2.2e-16 rounding floor measured for this "
             f"fixture -- that is a formula difference, not rounding")
-    # partition of unity, independent of the fixture entirely
+    # partition of unity, independent of the fixture entirely.  This is
+    # the tolerance-independent half of the gate: a Lagrange stencil
+    # whose weights do not sum to 1 is wrong no matter what the fixture
+    # says, and no rounding difference can make it pass.
     for fam in ("A", "B"):
         assert np.abs(got[f"{fam}_coef"].sum(axis=1) - 1.0).max() < 1e-10
 

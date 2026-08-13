@@ -1447,10 +1447,43 @@ def test_ytp_v_grads_order2_smooth(jord, smooth):
 
 def test_no_donate_argnums_in_the_lane():
     """Grad-path doctrine (CLAUDE.md): buffer donation conflicts with
-    reverse-mode AD, which is the whole point of this lane."""
+    reverse-mode AD, which is the whole point of this lane.
+
+    Scans the AST, not the source TEXT.  The text form failed (job
+    9401521) on the module's own docstring sentence "No ``donate_argnums``
+    anywhere in this lane" -- a guard tripping on its own documentation,
+    the same class as a log-scraping check that greps the prompt it
+    echoed.  An AST scan cannot see docstrings or comments, so it fails
+    only on a real keyword argument.
+    """
+    import ast
     import inspect
-    src = inspect.getsource(tp)
-    assert "donate_argnums" not in src
+    tree = ast.parse(inspect.getsource(tp))
+    offenders = [
+        f"line {node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword) and node.arg == "donate_argnums"
+    ]
+    assert not offenders, f"donate_argnums passed at {offenders}"
+
+
+def test_the_donate_argnums_guard_is_not_vacuous():
+    """The AST scan above must actually fire on a real donation.
+
+    Without this, replacing the scan with `assert True` would be
+    invisible -- and the text-form version it replaces was itself a
+    guard that fired for the wrong reason, so this one earns its
+    scepticism.
+    """
+    import ast
+    tree = ast.parse("import jax\nf = jax.jit(g, donate_argnums=(0,))\n")
+    hits = [n for n in ast.walk(tree)
+            if isinstance(n, ast.keyword) and n.arg == "donate_argnums"]
+    assert len(hits) == 1, "the AST scan cannot see a real donation"
+    # ...and must NOT fire on the word appearing in prose.
+    prose = ast.parse('"""No donate_argnums anywhere."""\n')
+    assert not [n for n in ast.walk(prose)
+                if isinstance(n, ast.keyword) and n.arg == "donate_argnums"]
 
 
 def test_every_public_routine_has_a_jit_factory():
