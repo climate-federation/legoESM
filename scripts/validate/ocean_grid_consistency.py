@@ -1394,8 +1394,22 @@ def _refinement_verdict(rec: dict, pair: str) -> dict:
             f"the case's own amplitude moved "
             f"{100 * rec['case_amplitude_moved']:.0f}% between levels")
         settled = False
-    label = ("CONVERGING" if ratio < _REFINE_CONVERGING_BELOW else
-             "FLAT" if ratio < _REFINE_DIVERGING_ABOVE else "DIVERGING")
+    # NOT "DIVERGING". Two resolutions are a DELTA, not a trend, and in
+    # this suite the difference's slope IN TIME is negative -- it appears
+    # early and decays -- so "diverging" would be read as the simulation
+    # coming apart, which is the opposite of what is measured (GLM-5.2,
+    # 2026-08-13). The words describe the delta and nothing else.
+    label = ("DIFFERENCE SHRANK" if ratio < _REFINE_CONVERGING_BELOW else
+             "DIFFERENCE FLAT" if ratio < _REFINE_DIVERGING_ABOVE else
+             "DIFFERENCE GREW")
+    # And the thing a reader actually needs: is it now outside the arms'
+    # own tolerance?
+    over = rec.get("difference_over_budget", {}).get("refined", {}).get(pair)
+    if over is not None and np.isfinite(over) and over > 1.0:
+        label = f"BUDGET EXCEEDED ({over:.2f}x) — {label.lower()}"
+        caveats.append(
+            "the two dycores now differ by MORE than either arm's own "
+            "resolution sensitivity")
     # The WORD, not a footnote. A caveat under a line that says
     # "CONVERGING" is still read as a convergence claim (codex rounds 2
     # and 3). Two separate things can remove the claim and leave only a
@@ -1627,6 +1641,11 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                                else float("nan"))
             rec.setdefault("budget", {})[level] = pair_budget
             rec.setdefault("difference_over_budget", {})[level] = per_pair
+            # PER ARM as well as the max. A max-based ratio can pass while
+            # one arm carries almost all of the self-error and the other is
+            # tight -- and which arm is the loose one changes what to do
+            # next (GLM-5.2, 2026-08-13).
+            rec.setdefault("budget_per_arm", {})[level] = dict(finite)
         rec["ratio_normalised"] = {
             k: (float((f[k]["rms_evolution"] / cf)
                       / (b[k]["rms_evolution"] / cb))
@@ -1634,6 +1653,49 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                     and b.get(k, {}).get("rms_evolution", 0.0) > 0)
                 else float("nan"))
             for k in sorted(set(b) & set(f))}
+        # THE SIGNATURE THAT SEPARATES A DEFECT FROM A COARSE MESH.
+        # Refining changes two things at once: how far apart the arms are
+        # (D) and how well each arm knows its own answer (E). Only one
+        # combination is diagnostic on its own:
+        #
+        #   E falls  and D rises  -> each arm is converging, and they are
+        #                            converging to DIFFERENT limits. That
+        #                            is an algorithmic inconsistency, not
+        #                            a resolution artefact.
+        #   E rises  and D rises  -> the case is de-settling; nothing can
+        #                            be adjudicated at these resolutions.
+        #   E rises  and D falls  -> D/E improves for the wrong reason: the
+        #                            tolerance loosened. Not evidence.
+        #   E falls  and D falls  -> the arms are converging together.
+        #
+        # A D/E ratio alone cannot tell the first case from the third
+        # (GLM-5.2, 2026-08-13), which is exactly the pair a reader will
+        # confuse.
+        bud = rec.get("budget", {})
+        rec["signature"] = {}
+        for k in sorted(set(b) & set(f)):
+            e_lo = bud.get("base", {}).get(k, float("nan"))
+            e_hi = bud.get("refined", {}).get(k, float("nan"))
+            d_lo = b[k]["rms_evolution"]
+            d_hi = f[k]["rms_evolution"]
+            if not (np.isfinite(e_lo) and np.isfinite(e_hi) and e_lo > 0
+                    and d_lo > 0):
+                rec["signature"][k] = "unmeasured"
+                continue
+            e_up, d_up = e_hi > e_lo, d_hi > d_lo
+            rec["signature"][k] = (
+                "converging to DIFFERENT limits: each arm settles "
+                "(tolerance {:.2f}x) while they move apart ({:.2f}x)"
+                .format(e_hi / e_lo, d_hi / d_lo) if (not e_up and d_up) else
+                "case de-settling: BOTH the difference ({:.2f}x) and the "
+                "tolerance ({:.2f}x) grow -- not adjudicable here"
+                .format(d_hi / d_lo, e_hi / e_lo) if (e_up and d_up) else
+                "tolerance loosened ({:.2f}x) faster than the difference "
+                "shrank ({:.2f}x) -- the ratio improved for the wrong "
+                "reason".format(e_hi / e_lo, d_hi / d_lo)
+                if (e_up and not d_up) else
+                "converging together: difference {:.2f}x, tolerance "
+                "{:.2f}x".format(d_hi / d_lo, e_hi / e_lo))
         rec["verdict"] = {
             k: _refinement_verdict(rec, k) for k in
             sorted(set(b) & set(f))}
@@ -1943,11 +2005,21 @@ def main() -> None:
                       f"{bud.get('base', {}).get(pair, float('nan')):.3e}"
                       f" -> "
                       f"{bud.get('refined', {}).get(pair, float('nan')):.3e}"
-                      f"; arms measured: base "
-                      f"{ra[case].get('budget_arms', {}).get('base', [])}, "
-                      f"refined "
-                      f"{ra[case].get('budget_arms', {}).get('refined', [])})")
+                      f")")
+                for level in ("base", "refined"):
+                    per = ra[case].get("budget_per_arm", {}).get(level, {})
+                    if per:
+                        print(f"    {'':24s} {'':16s}   {level:8s} per-arm "
+                              f"tolerance " + "  ".join(
+                                  f"{g} {v:.3e}" for g, v in sorted(per.items())))
+                sig = ra[case].get("signature", {}).get(pair)
+                if sig:
+                    print(f"    {'':24s} {'':16s} SIGNATURE: {sig}")
                 if case in RMS_NOT_GATED:
+                    print(f"    {'':24s} {'':16s} NOTE this row's ratio and "
+                          f"budget are a SCALAR displacement in km, not a "
+                          f"field norm -- not comparable with the other "
+                          f"cases' numbers (GLM-5.2 2026-08-13)")
                     print(f"    {'':24s} {'':16s} RMS NOT THE VERDICT here "
                           f"({RMS_NOT_GATED[case]}); front displacement:")
                     for level in ("base", "refined"):

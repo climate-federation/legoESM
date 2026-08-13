@@ -143,41 +143,61 @@ own discretisation error at the refined level too, so the difference has a
 tolerance there as well. Without it every row is labelled UNBUDGETED TREND,
 because a direction is not a convergence claim.
 
-Measured 2026-08-13 (jobs 26917825/26917826/26918225; latlon 36x72→72x144
-with the tolerance from 144x288, MPAS ico4→ico5 with the tolerance from
-ico6). D/E is the cross-arm difference over the larger of the two arms'
-own self-error AT THAT LEVEL:
+Measured 2026-08-13 (jobs 26917825/26917826/26918225/26918425; latlon
+36x72→72x144 with the tolerance from 144x288, MPAS ico4→ico5 with the
+tolerance from ico6).
 
-| Case | D/E coarse | D/E refined | label |
-|---|---|---|---|
-| barotropic_wave | 0.50 | 0.70 | FLAT |
-| geostrophic_adjustment | 0.74 | 0.57 | FLAT |
-| inertia_gravity_wave | 0.31 | 0.41 | CONVERGING |
-| lock_exchange (front displacement) | 0.56 | 0.24 | UNCONVERGED TREND (diverging) |
-| phillips_two_layer | 0.20 | **1.08** | UNCONVERGED TREND (diverging) |
+A D/E ratio alone is not readable, because refining moves TWO things: how
+far apart the arms are (D) and how well each arm knows its own answer (E).
+Only one combination is diagnostic on its own — **E falling while D rises**
+means each arm is converging and they are converging to DIFFERENT limits.
+D/E improving because the tolerance loosened is not evidence of anything.
 
-**`phillips_two_layer` is the one case where the two dycores differ by
-more than either arm's own resolution sensitivity once both are refined.**
-Every other case stays inside its budget at both levels. That is the
-remaining cross-grid inconsistency in this suite, and it was invisible at
-the coarse resolution alone, where the difference was a fifth of the
-tolerance.
+| Case | D/E coarse | D/E refined | D ratio | E ratio | what that combination means |
+|---|---|---|---|---|---|
+| barotropic_wave | 0.50 | 0.70 | 0.93 | 0.66 | converging together |
+| geostrophic_adjustment | 0.74 | 0.57 | 0.85 | 1.11 | tolerance loosened faster than the difference shrank |
+| inertia_gravity_wave | 0.31 | 0.41 | 0.62 | 0.46 | converging together |
+| lock_exchange (front, km) | 0.56 | 0.24 | 1.50 | 3.58 | case de-settling — **not adjudicable here** |
+| phillips_two_layer | 0.20 | **1.08** | 3.30 | 0.60 | **converging to DIFFERENT limits** |
 
-It is NOT a formal divergence result: the phillips case amplitude doubles
-between the two levels, so neither resolution is near the continuous
-answer and this is a relative rate of approach to an unknown limit. The
-obvious competing reading — that an unstable case simply amplifies any
-difference at its own growth rate — was tested with a log-linear fit of
-the difference against time and is NOT settled either way (R² 0.43–0.76,
-negative slope: the difference appears early and does not grow through the
-run). A poor fit refutes nothing in either direction, and the report says
-so rather than claiming the instability reading is dead.
+**`phillips_two_layer` is the one case with the different-limits
+signature**: each arm's own resolution sensitivity FALLS by 0.60× while
+the two arms move 3.30× further apart, ending at 1.08× of their own
+tolerance. Each dycore is settling down; they are settling on different
+answers. That is an algorithmic inconsistency, and it was invisible at the
+coarse resolution alone, where the difference was a fifth of the tolerance.
 
-The lock-exchange front row is the opposite shape and is reported, not
-resolved: the arms' front-displacement disagreement GROWS (1.0 → 1.5 km)
-while D/E FALLS (0.56 → 0.24), because each arm's own front self-error
-grew faster still (1.88 → 6.73 km). A tolerance that grows faster than the
-thing it bounds is not evidence of agreement.
+What the other rows do and do NOT say:
+
+- `inertia_gravity_wave` and `barotropic_wave` converge together — both D
+  and E fall. These two are cross-grid consistent as far as this test goes.
+- `geostrophic_adjustment`'s D/E improves from 0.74 to 0.57, but its
+  tolerance LOOSENED (1.11×) while the difference fell only to 0.85×. The
+  improvement is partly the tolerance moving, so read it as "inside budget
+  at both levels", not as a demonstration of convergence.
+- `lock_exchange` is **unadjudicated, not passing**. Its front-displacement
+  disagreement grows (1.0 → 1.5 km) and its D/E falls to 0.24 only because
+  each arm's own front self-error grew 3.58× (1.88 → 6.73 km). A tolerance
+  outrunning the thing it bounds is not agreement. This row's numbers are a
+  scalar displacement in km and are NOT comparable with the field-norm
+  numbers in the other rows.
+
+The phillips result is a delta between two resolutions, not a trend, and
+the case's own amplitude doubles between them, so it is reported as
+"BUDGET EXCEEDED (1.08x)" rather than as a convergence or divergence
+result. The competing reading — that an unstable case simply amplifies any
+difference at its own growth rate — was tested with a log-linear fit of the
+difference against time and is NOT settled either way (R² 0.43–0.76, and a
+NEGATIVE slope: the difference appears early and does not grow through the
+run). A poor fit refutes nothing in either direction.
+
+Next measurement for phillips, in order: decompose D by field at its peak
+time (SSH vs temperature vs barotropic velocity localises which term the
+two discretisations represent differently), then re-run both arms from a
+single high-resolution analytic initial condition regridded to each native
+mesh, which controls the initial-condition projection that the
+evolution-difference construction does not cancel on the native meshes.
 
 ## The Petersen channel arm's advection scheme
 
