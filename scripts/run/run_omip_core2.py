@@ -6820,6 +6820,45 @@ def main() -> int:
             # the residency-helper classification).  t_seconds threads the
             # equilibrium-tide model time (None when tide off; the SPMD path
             # fail-fasts at setup if the tide is enabled).
+            # SSS-restoring INPUT ASSEMBLY, hoisted above the ocean step.
+            #
+            # VALUE-IDENTICAL to assembling it after the step, which is why the
+            # move is safe: the sea ice is updated earlier in THIS iteration
+            # (step_sea_ice, above), the runoff already fed `fw`, the monthly
+            # target selection is pure, and `_sss_ice` reads only `land_mask`
+            # (static) plus `ice_state`, which `_ocean_step` does not modify.
+            #
+            # WHY IT MOVED: routing restoring as a real water flux (NEMO
+            # nn_sssr=2) needs these inputs BEFORE the step, because the flux
+            # must enter `fw.restoring` / `q_net` instead of being applied as a
+            # post-step tracer edit.  It is also the more faithful ordering in
+            # its own right: NEMO computes `sbcssr` in the surface-forcing
+            # phase from the NOW-level SSS, whereas the post-step call below
+            # sees the already-updated salinity.
+            _sss_ice = None
+            _R_gate = None
+            _sss_tgt_step = None
+            if sss_restore_cfg is not None:
+                # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS
+                # restoring under sea ice).  Feed the SAME prescribed siconc
+                # the albedo uses (``_sic``); with --prognostic-sea-ice the
+                # prescribed NEMO siconc is no longer the truth, so gate on the
+                # LIVE (ocean-masked) prognostic concentration instead.
+                _sss_ice = _sic
+                if ice_resp is not None:
+                    _lc = ice_state.concentration.data
+                    if _lc.ndim > np.asarray(state.land_mask.data).ndim:
+                        _lc = jnp.sum(_lc, axis=-1)
+                    _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
+                # River-mouth gate (legoESM deviation, see sss_restoring.py):
+                # restoring OFF at river mouths so it does not fight the plume
+                # toward coarse WOA.  Gated by flag.
+                _R_gate = _R if args.river_mouth_restoring_gate else None
+                # Monthly (12, ...) NEMO sn_sss target -> this step's month;
+                # static IC-surface target unchanged.
+                _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
+                                 if _sss_monthly
+                                 else sss_restore_target)
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
@@ -6873,23 +6912,11 @@ def main() -> int:
             # ice concentration instead, via the SAME ``ice_concentration=``
             # parameter (codex MED): prescribed and live ice must not disagree in
             # the salt-restoring path.
-            _sss_ice = _sic
-            if ice_resp is not None:
-                _lc = ice_state.concentration.data
-                if _lc.ndim > np.asarray(state.land_mask.data).ndim:
-                    _lc = jnp.sum(_lc, axis=-1)
-                _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
-            # River-mouth gate (NEMO sbcssr (1-2*rnfmsk)): pass the per-cell
-            # runoff so restoring is OFF at river mouths and does not fight
-            # the plume toward coarse WOA (Amazon artifact). Gated by flag.
-            _R_gate = _R if args.river_mouth_restoring_gate else None
-            # Monthly (12, ...) NEMO sn_sss target -> this step's month;
-            # static IC-surface target unchanged.  _sss_monthly is grid-agnostic
-            # (structured 3-D / MPAS 2-D); indexing the 12-axis yields this
-            # month's field at the target grid's spatial rank (2-D or nCells).
-            _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
-                             if _sss_monthly
-                             else sss_restore_target)
+            # `_sss_ice` / `_R_gate` / `_sss_tgt_step` were assembled ABOVE the
+            # ocean step (see the hoist comment there).  They are unchanged by
+            # the step, so this call is value-identical to the previous inline
+            # assembly; the hoist exists so the same inputs can feed the
+            # water-flux routing, which must run pre-step.
             # sss_apply pulls ONE 2-D S-surface slice to host and scatters
             # the updated layer back device-side (slice-before-convert
             # contract, locked by tests/unit/test_sss_apply.py) — counted.
