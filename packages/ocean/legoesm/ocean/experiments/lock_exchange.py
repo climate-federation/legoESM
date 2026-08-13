@@ -78,6 +78,26 @@ class LockExchangeConfig:
 
     # Front location (longitude threshold)
     front_longitude: float = 0.0   # Prime meridian [degrees]
+    #: Half-width of the temperature transition [degrees longitude]. ZERO
+    #: is a hard step and is the shipped default, so this field changes no
+    #: existing result.
+    #:
+    #: WHY IT EXISTS. A step front is not multi-dimensionally monotone
+    #: under a 1-D flux LIMITER applied direction by direction: MEASURED on
+    #: the resolved Petersen channel, tvd undershoots the initial [5, 30]
+    #: degC range to -0.40 and superbee to -2.99, while the flux-CORRECTED
+    #: schemes stay bounded. The MPAS tracer port has no FCT, so a
+    #: cross-grid lock exchange at resolving resolution cannot share an
+    #: advection family with the lat-lon arm while the front is a step.
+    #: Softening it over a few CELL widths lets both arms run the same
+    #: limited scheme on a front they can each resolve, which is the
+    #: comparison the case is for (GLM-5.2, 2026-08-13).
+    #:
+    #: It is a different experiment, not a bug fix: less available
+    #: potential energy, so smaller absolute mixing, and it probes baseline
+    #: implicit diffusion rather than limiter behaviour at a discontinuity.
+    #: Do not compare its RPE against a step-front number.
+    front_width_deg: float = 0.0
 
     # Physical parameters for RPE calculation
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
@@ -201,8 +221,25 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
     T_warm = config.T_warm_C
     front_lon = config.front_longitude
 
-    # Wrapping-aware "west of front" test: works for any lon convention
-    west_of_front = ((lon - front_lon + 180.0) % 360.0 - 180.0) < 0.0
+    # Wrapping-aware signed distance from the front, in degrees, valid for
+    # any longitude convention.
+    d_lon = (lon - front_lon + 180.0) % 360.0 - 180.0
+    west_of_front = d_lon < 0.0
+
+    def _front_profile(cold, warm):
+        """cold west of the front, warm east, with an optional ramp.
+
+        width 0 reproduces the hard step EXACTLY (np.where on the same
+        predicate), so the default path is unchanged bit for bit. A
+        positive width applies a half-sine over +-width, which is C1 at
+        both ends -- a linear ramp would leave a kink for the limiter to
+        catch on, which is the thing being avoided.
+        """
+        w = float(config.front_width_deg)
+        if w <= 0.0:
+            return np.where(west_of_front, cold, warm)
+        x = np.clip(d_lon / w, -1.0, 1.0)
+        return cold + (warm - cold) * 0.5 * (1.0 + np.sin(0.5 * np.pi * x))
 
     if grid_type == "spectral":
         # Spectral grid
@@ -213,7 +250,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
 
         # Create temperature front at front_longitude
-        T_field = np.where(west_of_front, T_cold, T_warm)
+        T_field = _front_profile(T_cold, T_warm)
 
         # Apply to all levels with land mask
         nlev = T_grid.shape[-1]
@@ -234,7 +271,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         nlev = T_data.shape[-1]
 
         # Apply temperature front to all levels
-        T_front = np.where(west_of_front, T_cold, T_warm)
+        T_front = _front_profile(T_cold, T_warm)
         for k in range(nlev):
             T_data[..., k] = T_front * mask
 

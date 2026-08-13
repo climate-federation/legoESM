@@ -1261,6 +1261,68 @@ def _evolution_amplitude(paths: dict, field: str) -> float:
     return _wrms(np.where(both, A - A0, 0.0), w)
 
 
+def _native_evolution_amplitude(paths: dict, fields=("SST", "eta")):
+    """How far each arm's own solution moved, ON ITS OWN MESH.
+
+    WHY THIS IS NOT A DUPLICATE of the common-mesh amplitude. Every other
+    number in this file is reduced on the shared 2-degree mesh, which the
+    MPAS arm reaches through an unstructured regrid and the lat-lon arm
+    reaches through something close to the identity. If the two arms are
+    found to evolve by different amounts, the FIRST question is whether the
+    regrid did it -- a resolution-dependent smoothing applied to one arm
+    and not the other would produce exactly that, and would mean the
+    comparison pipeline, not the models, is the finding.
+
+    So the same quantity is computed a second time from
+    ``snapshots_native.npz``, on each arm's own cells with no regrid in the
+    path at all. If the ratio survives, the regrid is not the explanation.
+
+    MEASURED 2026-08-13 on phillips_two_layer, native vs common mesh:
+
+        field         common   native
+        SST coarse     2.9x     2.79x
+        SST refined    2.2x     2.13x
+        eta coarse     1.4x     1.34x
+        eta refined    1.4x     1.33x
+
+    i.e. it survives, and the regrid-artefact reading (GLM-5.2's leading
+    hypothesis) is refuted. The MPAS arm genuinely moves its surface
+    tracer about 2-3x further than the lat-lon arm on this case.
+    """
+    out = {}
+    for field in fields:
+        per_arm = {}
+        for g, npz in sorted(paths.items()):
+            native = Path(npz).parent / "snapshots_native.npz"
+            if not native.is_file():
+                per_arm[g] = None
+                continue
+            z = np.load(native)
+            if field not in z.files or "land_mask" not in z.files:
+                per_arm[g] = None
+                continue
+            a = np.asarray(z[field], dtype=np.float64)
+            m = np.asarray(z["land_mask"], dtype=np.float64)
+            m = m[-1] if m.ndim == a.ndim else m
+            wet = m > 0.5
+            d = (a[-1] - a[0])[wet]
+            d = d[np.isfinite(d)]
+            # UNWEIGHTED on purpose, and it must stay a like-for-like
+            # comparison of the SAME arm against itself across levels
+            # rather than an area-weighted global mean: the two native
+            # meshes have different cell areas, so this is a scale, not a
+            # conserved quantity. It is only ever read as a RATIO.
+            per_arm[g] = float(np.sqrt(np.mean(d ** 2))) if d.size else None
+        names = [g for g in sorted(per_arm) if per_arm[g]]
+        rec = dict(per_arm=per_arm)
+        if len(names) == 2:
+            a, b = names
+            rec["ratio"] = float(per_arm[b] / per_arm[a])
+            rec["ratio_of"] = f"{b}/{a}"
+        out[field] = rec
+    return out
+
+
 def _difference_growth(paths: dict, field: str):
     """Arm-to-arm evolution difference at EVERY shared output time.
 
@@ -1601,6 +1663,8 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
             rec["levels"][level]["difference_growth"] = _difference_growth(
                 paths, CASE_FIELD[case])
             rec["levels"][level]["by_field"] = _field_decomposition(paths)
+            rec["levels"][level]["native_amplitude"] = \
+                _native_evolution_amplitude(paths)
             # THE BUDGET AT THIS LEVEL. Without it a growing cross-arm
             # difference is unreadable: each arm's own solution is still
             # moving under refinement, and the question is whether the two
@@ -2167,6 +2231,22 @@ def main() -> None:
                         print(f"    {'':24s} {'':16s}   {level:8s} per-arm "
                               f"tolerance " + "  ".join(
                                   f"{g} {v:.3e}" for g, v in sorted(per.items())))
+                for level in ("base", "refined"):
+                    na = lv.get(level, {}).get("native_amplitude", {})
+                    rows = [(f, v) for f, v in sorted(na.items())
+                            if "ratio" in v]
+                    if not rows:
+                        continue
+                    print(f"    {'':24s} {'':16s} {level:8s} how far each arm "
+                          f"moved ON ITS OWN MESH (no regrid in the path) --"
+                          f" if these ratios match the common-mesh ones, the "
+                          f"regrid is NOT the explanation:")
+                    for f, v in rows:
+                        per = "  ".join(f"{g} {x:.3e}" for g, x
+                                        in sorted(v["per_arm"].items())
+                                        if x)
+                        print(f"    {'':24s} {'':16s}   {f:10s} "
+                              f"{v['ratio']:5.2f}x ({v['ratio_of']})   {per}")
                 sig = ra[case].get("signature", {}).get(pair)
                 if sig:
                     print(f"    {'':24s} {'':16s} SIGNATURE: {sig}")
