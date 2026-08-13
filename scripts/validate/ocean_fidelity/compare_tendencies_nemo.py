@@ -485,8 +485,13 @@ def main():
         cfg_a2 = orca1_zdftke_config()  # prognostic=True card
         K_H2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
         result["stage_a2_mode_a"] = region_report(
+            # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
+            # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
+            # deliberately, because the restart stores no avt so rec 0 is an
+            # initialisation transient (calm-column rms 9-22 m2/s at rec 0 vs
+            # 0.003-0.1 at rec 1).  The label contradicted the code it names.
             "Stage A2: MODE-A closure — kernel(restart state + NEMO en, one "
-            "3600s en-step) K_H vs NEMO avt rec 0 [m2/s]",
+            "3600s en-step) K_H vs NEMO avt REC 1 [m2/s]",
             K_H2, avt_a2(d), wet_pair, lat_col, evd_cols=evd_cols)
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
