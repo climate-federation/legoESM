@@ -2339,6 +2339,8 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
 
     ballast = _resolve_halo_ballast(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
+    nocomm = _resolve_halo_nocomm(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOCOMM", ""))
 
     for r, (sc, rc, se, re) in enumerate(halo_sl):
         send_c = cell_pack[sc[0]]             # (hc_r, W)
@@ -2355,8 +2357,20 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
             # from an older trace. Result is bit-identical: the kept
             # slice is the same buffer that would have been sent.
             send_packed = jnp.concatenate([send_packed] * ballast)
-        recv_packed = jax.lax.ppermute(
-            send_packed, "device", perm=ppermute_perms[r])
+        if nocomm:
+            # MEASUREMENT ONLY, and it produces WRONG ANSWERS: drop the
+            # collective and let each device scatter its OWN gathered
+            # rows into its halo slots. Everything else -- the gather,
+            # the concatenate, the scatter, the schedule shape, the
+            # kernel count -- is unchanged, so the step's change is the
+            # wire time plus whatever waiting for the slowest peer
+            # costs. Splitting that pair off is the only way to see how
+            # much of the step is on-device halo staging rather than
+            # communication.
+            recv_packed = send_packed
+        else:
+            recv_packed = jax.lax.ppermute(
+                send_packed, "device", perm=ppermute_perms[r])
         split_at = send_c_flat.shape[0]       # static
         recv_c = recv_packed[:split_at].reshape(send_c.shape)
         recv_e = recv_packed[split_at:split_at + send_e.size].reshape(
@@ -2370,6 +2384,31 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
 #: Canonical decimal integer, no sign / whitespace / underscores /
 #: leading zeros — the spellings ``int()`` would silently accept.
 _CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_halo_nocomm(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_NOCOMM: ``'1'`` replaces every halo
+    ``ppermute`` with the identity; ``''``/``'0'`` off (default).
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- each
+    device scatters its own rows into its halo slots, so the halo is
+    garbage and the run is meaningless as physics. It exists to time
+    the on-device halo staging (gather, concatenate, scatter) and the
+    enlarged local region SEPARATELY from the wire time and the wait
+    for the slowest peer, which is otherwise unsplittable: the profiler
+    on this stack does not record the halo collectives at all.
+
+    Never valid in production. Unknown values raise (dispatch
+    hardening).
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_NOCOMM={env_value!r}: must be '0' or '1' "
+        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
 
 
 def _resolve_halo_ballast(env_value: str) -> int:

@@ -22,6 +22,17 @@
 # de-padding the coloured schedule -- is priced against that unmeasured
 # number.  So measure it.
 #
+# Second knob in the same arm: LEGOESM_MPAS_HALO_NOCOMM=1 replaces every
+# halo ppermute with the identity, keeping the gather, the concatenate,
+# the scatter, the schedule shape and the enlarged local region. It
+# BREAKS THE ANSWER and exists only to time on-device halo staging apart
+# from wire time and peer skew -- the profiler on this stack records none
+# of the halo collectives, so there is no other way to split them.
+#   b1 - nocomm     = wire + skew
+#   nocomm - 2.00   = staging + ghost-cell work (2.00 ms = same per-device
+#                     load on ONE GPU, measured)
+#   wire alone      = the ballast delta below, so skew falls out.
+#
 # LEGOESM_MPAS_HALO_BALLAST=N repeats each packed halo message N times on
 # the wire and discards the copies on receipt.  Bytes scale by N; the round
 # count, the schedule, the arithmetic and the answer are unchanged (bit
@@ -70,11 +81,11 @@ rc=0
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
 NDEV=$((NODES * GPN))
 
-run_arm () {  # ballast tag
-  local BAL=$1 TAG=$2
-  echo "=== s${SUBDIV}@${NDEV} wide_halo=1 ballast=$BAL [$TAG] ==="
+run_arm () {  # ballast tag [nocomm]
+  local BAL=$1 TAG=$2 NC=${3:-0}
+  echo "=== s${SUBDIV}@${NDEV} wide_halo=1 ballast=$BAL nocomm=$NC [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
-  LEGOESM_MPAS_HALO_BALLAST=$BAL JAX_ENABLE_X64=0 \
+  LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
     srun --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
@@ -92,8 +103,10 @@ run_arm () {  # ballast tag
 run_arm 1 warmup_discard
 # Interleaved, so drift is bounded by one arm rather than by arm order.
 run_arm 1 b1_a
+run_arm 1 nc_a 1
 run_arm 2 b2_a
 run_arm 1 b1_b
+run_arm 1 nc_b 1
 run_arm 2 b2_b
 run_arm 4 b4_a
 
@@ -102,7 +115,7 @@ echo "=== RECEIPTS ==="
 import json, os, sys
 d = sys.argv[1]
 med = {}
-for tag in ("b1_a", "b1_b", "b2_a", "b2_b", "b4_a"):
+for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "b2_a", "b2_b", "b4_a"):
     p = os.path.join(d, tag + ".jsonl")
     try:
         lines = [l for l in open(p).read().strip().split("\n")
@@ -110,8 +123,8 @@ for tag in ("b1_a", "b1_b", "b2_a", "b2_b", "b4_a"):
         med[tag] = json.loads(lines[-1])["steady_median_ms"]
     except Exception as e:
         print(f"{tag}: MISSING -> {e}")
-missing = [t for t in ("b1_a", "b1_b", "b2_a", "b2_b", "b4_a")
-           if t not in med]
+missing = [t for t in ("b1_a", "b1_b", "nc_a", "nc_b", "b2_a", "b2_b",
+                      "b4_a") if t not in med]
 if missing:
     # A gate that reports a number from a partial run is not a gate.
     print(f"ABORT: arms missing {missing}; no verdict")
@@ -126,6 +139,19 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
     d2 = b2 - b1
     print(f"b1 mean {b1:.3f}  b2 mean {b2:.3f}  delta(2) {d2:+.3f} ms")
     print(f"arm spreads: b1 {spread1:.1%}  b2 {spread2:.1%}")
+    if "nc_a" in med and "nc_b" in med:
+        nc = (med["nc_a"] + med["nc_b"]) / 2
+        # nocomm keeps the gather/scatter staging and the enlarged local
+        # region but deletes every collective, so:
+        #   b1 - nocomm = wire time + waiting for the slowest peer
+        #   nocomm - 2.00 = on-device halo staging + ghost-cell work
+        #                   (2.00 ms = the same load on ONE GPU)
+        print(f"nocomm mean {nc:.3f}  spread "
+              f"{abs(med['nc_a'] - med['nc_b']) / nc:.1%}")
+        print(f"  wire + skew          = b1 - nocomm = {b1 - nc:+.3f} ms")
+        print(f"  staging + ghost      = nocomm - 2.000 = {nc - 2.0:+.3f} ms")
+        print(f"  of which wire (ballast) = {d2:.3f} ms  "
+              f"=> skew = {b1 - nc - d2:+.3f} ms")
     # A ratio smaller than half the arm spread is not a result.
     if abs(d2) < 0.5 * max(spread1, spread2) * b1:
         print("INCONCLUSIVE: delta is inside the arm spread")

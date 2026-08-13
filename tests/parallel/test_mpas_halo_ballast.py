@@ -132,3 +132,35 @@ def test_env_validation_raises():
     for bad in ("0", "yes", "+2", " 2 ", "02", "2_0", "9", "-1"):
         with pytest.raises(ValueError, match="HALO_BALLAST"):
             _resolve_halo_ballast(bad)
+
+
+def test_nocomm_removes_every_collective_but_keeps_the_staging(monkeypatch):
+    """The no-comm knob must delete the collectives and NOTHING else. If
+    XLA also drops the gather/scatter staging once the permute is gone,
+    the arm measures a different program and the split is invalid."""
+    _need(4)
+
+    def compiled(nocomm):
+        monkeypatch.setenv("LEGOESM_MPAS_HALO_NOCOMM", "1" if nocomm else "0")
+        step, state, dt = _build(4, ballast="1", monkeypatch=monkeypatch)
+        return jax.jit(step).lower(state, dt).compile().as_text()
+
+    on, off = compiled(True), compiled(False)
+    assert "collective-permute" not in on
+    assert "collective-permute" in off
+    # staging survives: the scatters that write received rows into the
+    # halo slots must still be in the program
+    assert on.count("scatter") >= 0.8 * off.count("scatter"), (
+        f"no-comm dropped the halo staging too: "
+        f"{on.count('scatter')} vs {off.count('scatter')} scatters")
+
+
+def test_nocomm_env_validation_raises():
+    from legoesm.parallel.sharded_dynamics import _resolve_halo_nocomm
+
+    assert _resolve_halo_nocomm("") is False
+    assert _resolve_halo_nocomm("0") is False
+    assert _resolve_halo_nocomm("1") is True
+    for bad in ("yes", "true", "2", " 1"):
+        with pytest.raises(ValueError, match="HALO_NOCOMM"):
+            _resolve_halo_nocomm(bad)
