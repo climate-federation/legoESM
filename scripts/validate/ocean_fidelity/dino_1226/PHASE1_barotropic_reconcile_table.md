@@ -269,3 +269,169 @@ dynspg_ts.F90:302-508, or the depth-weighting) is systematically off by ~2%.**
   planted control, NOT a failure — the decisive controls are (a) substep-1
   bit-identity (3.1e-15), (b) exact reproduction of the independently-measured
   final 0.879/0.589, and (c) the 4-s.f. `dt_s·ΔF` == velocity-error identity.
+
+---
+
+# PHASE 1 (sec-D) — WHICH TERM of F_slow_u carries the sign-coherent ΔF: it is the WIND, and the residual is a HARNESS ARTIFACT (surface_forcing=None). CONFIRMED 2026-08-13.
+
+## PHASE 0 (Rule 0, read from dynspg_ts.F90 — see PHASE0_zu_frc_assembly.md)
+NEMO zu_frc (DINO MLF key_qco): base = REST-weighted depth-mean (:337
+`SUM(e3u_0*puu[Krhs])*r1_hu_0`) of adv+vor+ldf+hpg (stpmlf :303-318; NOT zdf,
+which runs at :385 AFTER dyn_spg); then −Coriolis_2D (:361-369) + drag_inc
+(:382-383, ln_drgimp=T) + wind_inc (:443, `r1_rho0*0.5*(utau_b+utauU)*r1_hu(Kmm)`).
+ln_apr_dyn=F ⇒ no ssh_ib. Constituent dumps: wnd_dump/drg_dump/cor2d_dump.
+
+## Instrument: `fslow_stage_decomp.py` (fp64, LEGOESM_NEMO_E3T=both, day-0 bit-identical)
+Rule 1e control PASSED FIRST: reproduced recorded ΔF (max 9.08e-8, med 1.69e-8,
+mean −9.28e-9 vs recorded 9.49e-8/1.70e-8/−9.50e-9).
+
+## OWNER = the WIND term (CONFIRMED, sign gate below)
+NEMO constituent magnitudes (interior, m/s²): wind_inc max 8.62e-8 med 1.70e-8
+mean +9.28e-9;  drag_inc max 1.67e-9 (negligible, ~100× < ΔF);  zu_frc final
+med 6.7e-7.  ΔF med (1.70e-8) == wind_inc med (1.70e-8) to 3 s.f.
+
+- **corr(ΔF, wind_inc) = −0.9991**, least-sq c = −1.001, 96% norm reduction.
+- **PLANT OK**: corr(ΔF, shuffled wind_inc) = −0.002 (collapses).
+- `|F_slow_u − (zu_frc − wind_inc)|` med **2.50e-11** vs `|ΔF|` med 1.69e-8 —
+  a **680× drop**: F_slow_u ≈ zu_frc − wind_inc, i.e. F_slow_u is MISSING the wind.
+- legoESM's OWN wind contribution (direct `depthmean(τ/(ρ0·dz0)@k=0)`) EQUALS
+  NEMO wind_inc to roundoff (max diff 1.98e-12) — so when the wind is applied,
+  the two match; the term itself is faithful.
+
+## ROOT CAUSE = HARNESS ARTIFACT, not a production forcing residual (DECISIVE control)
+The recorded finding's probes call `model.step(..., surface_forcing=None)`
+(`multistep_replay.py:311`, `substep_traj_compare.py:174`). The DINO kamm_mlf
+card sets `wind_through_step=True` + `barotropic_forcing_centred=True` +
+`surface_stress_implicit=False`, so the MOMENTUM wind is delivered ONLY via
+`model.step(surface_forcing=dino_step_surface_forcing(...))` — the
+`_bc_external_surface_forcing` top-cell kick (ocean_pe_latlon_cgrid.py:3588) AND
+the centred blend (ocean_model_latlon_cgrid.py:3360-3369) BOTH require
+`surface_forcing != None`. With `surface_forcing=None`, the wind never enters
+`du_dt`, so `F_slow_u = zu_frc − wind_inc`.
+
+Re-running step WITH the wind passed (production wind_through_step=True), ONE
+variable changed, everything else byte-identical, day-0 bit-identical:
+
+| step call                          | ΔF max   | ΔF median | ΔF mean   |
+|------------------------------------|----------|-----------|-----------|
+| surface_forcing=None (recorded)    | 9.08e-8  | 1.69e-8   | −9.28e-9  |
+| surface_forcing=WIND (production)  | 2.70e-8  | **2.62e-11** | +2.58e-11 |
+
+**Median ΔF collapses 646×** and the sign-coherent mean vanishes
+(−9.28e-9 → +2.6e-11, ~roundoff, ~1e-4 of |zu_frc| med 6.7e-7). The sign-coherent
+~2% residual was the DROPPED WIND, an artifact of the replay harness passing
+`surface_forcing=None`.
+
+## Arithmetic projection onto the 0.88/4.2e-3/ACC chain
+The recorded chain scaled linearly: ΔF → ×68 substeps → 0.88 m²/s wall / 0.59
+interior transport bias → −2dt·div → 4.2e-3 m/step eta injection → sec-D ACC.
+Since dt_s·ΔF == the per-substep velocity error to 4 s.f. (substep_traj_compare),
+the bias is linear in ΔF:
+- median ΔF ÷646  ⇒ projected transport bias 0.88/646 ≈ **1.4e-3 m²/s** and eta
+  injection 4.2e-3/646 ≈ **6.5e-6 m/step** — NEGLIGIBLE.
+- the wall bias is max-driven (concentrates at max|Hu|); max ΔF 9.08e-8→2.70e-8
+  (3.4×) bounds the wall term above by 0.88/3.4 ≈ 0.26 m²/s worst case, but the
+  SIGN-COHERENT mean (the accumulating part) collapses to roundoff, so the
+  68-substep INTEGRAL — which is what makes 0.88 — loses its coherent driver.
+
+**CONCLUSION:** in the PRODUCTION DINO kamm_mlf configuration (wind passed to
+step), F_slow_u matches NEMO zu_frc to ~roundoff (med 2.6e-11) — CONFIRMED by
+direct measurement. The recorded "sign-coherent 2% forcing residual" was the
+replay harness dropping the momentum wind by calling step with
+surface_forcing=None; the remaining production ΔF (max 2.70e-8, med 2.6e-11) is
+at the fp64 roundoff floor for this assembly and carries no sign-coherent bias.
+That the downstream 0.88 m²/s transport bias / sec-D ACC anomaly ALSO vanishes is
+a LINEAR PROJECTION (PLAUSIBLE, not re-measured through the 68-substep loop with
+wind present) — see the recommended follow-up.
+
+## STOP — owning term + statement-level cause + projection (NO production fix)
+- **Owning term:** the WIND-STRESS contribution to F_slow_u.
+- **Statement-level cause:** the RESIDUAL is a harness artifact — the replay
+  drivers (`multistep_replay.py:311`, `substep_traj_compare.py:174`) call
+  `model.step(surface_forcing=None)`, dropping the momentum wind that the DINO
+  card (`wind_through_step=True`) routes through `surface_forcing`. It is NOT a
+  term mismatch in the model: legoESM's wind add equals NEMO's wind_inc to
+  roundoff (1.98e-12) once applied.
+- **Forcing collapse (CONFIRMED, measured):** with the wind passed, F_slow_u
+  matches zu_frc to med 2.6e-11 (646× smaller ΔF, sign-coherent mean gone).
+- **Transport-bias/ACC collapse (PLAUSIBLE, linear projection):** by the 4-s.f.
+  dt_s·ΔF identity the 0.88 m²/s → 4.2e-3 eta → ACC chain is expected to fall
+  ~646× (median) — NOT re-measured through the loop with wind present.
+- **Recommended (NOT done here, separate reviewed change):** the replay/trajectory
+  probes should pass `surface_forcing=dino_step_surface_forcing(forcing)` to
+  `model.step` to match the production `wind_through_step=True` card — otherwise
+  they measure a wind-less momentum RHS. The 4-s.f. dt_s·ΔF identity and the
+  0.88 m²/s bias in substep_traj_compare.py inherit this artifact and should be
+  re-measured with the wind present before any of them drives a model change.
+
+## Retraction ledger (Rule 11)
+- **RETRACTED:** the recorded chain "residual 3-D momentum-RHS gap → sign-coherent
+  2% ΔF → 0.88 m²/s → 4.2e-3 eta → sec-D ACC anomaly" as a PRODUCTION forcing
+  residual. The ΔF is a REPLAY-HARNESS ARTIFACT (surface_forcing=None drops the
+  wind); with the production wind_through_step path it collapses 646× to
+  roundoff. What KILLED it: the one-variable DECISIVE control in
+  fslow_stage_decomp.py (surface_forcing=None vs =wind, day-0 bit-identical) +
+  corr(ΔF,wind_inc)=−0.9991 + F_slow_u==zu_frc−wind_inc to 2.5e-11 + legoESM's
+  wind==NEMO wind_inc to 1.98e-12. The substep LOOP faithfulness findings
+  (bit-identical substep-1, exact un_adv reconstruction) STAND — they are
+  independent of the forcing input and remain correct.
+
+## Sign-convention gate (CLAUDE.md mandatory; PASSED)
+Convention: momentum RHS positive = eastward acceleration [m/s²].
+- NEMO wind add (dynspg_ts.F90:443, ln_bt_fw=F): `zu_frc += r1_rho0·½·(utau_b+utauU)·r1_hu(Kmm)`;
+  utauU = stress ON ocean (DINO +0.2 Pa westerly → eastward), so **+ eastward**.
+  wind_inc mean = +9.28e-9 ✓ (positive; channel westerlies).
+- legoESM: `dino_step_surface_forcing` sets `tau_x = −forcing["tau_u_cell_2d"]`
+  (atmospheric convention); PE applies ocean reaction −tau → double-negative →
+  **+ eastward** top-cell deposit. lego wind mean +9.28e-9 == NEMO wind_inc mean ✓.
+- The −1× in ΔF (mean −9.28e-9) is because F_slow_u LACKS the wind
+  (surface_forcing=None), so `F_slow_u − zu_frc = −wind_inc`. Signs self-consistent.
+
+## Frame robustness (attack #1)
+The main probe strips HLS=2 from BOTH umask and zu_frc via the SAME `to_cell`
+map, and both A/B arms + wind_inc use that identical mapping — so the 646×
+collapse and corr(ΔF,wind_inc)=−0.9991 are frame-robust BY CONSTRUCTION (a wrong
+east/west face or halo strip corrupts both arms equally, leaving the collapse
+ratio and the correlation intact; a MISALIGNED frame would instead DESTROY the
+−0.9991 correlation, as the PLANT (shuffled → −0.002) demonstrates the metric can
+fail). NEMO frames confirmed from ocean.output: full grid jpi=56/jpj=203; zu_frc
+dumped over A2D(0) no-halo Nis0..Nie0=3..54 / Njs0..Nje0=3..201 = (199,52),
+matching mesh_mask umask (199,52). INDEPENDENT native-(199,52)-frame cross-check
+(NO extra HLS strip, `F[:,1:]` east face) reproduces both arms:
+  surface_forcing=None : ΔF med 1.6969e-8  max 9.4915e-8  mean −9.48e-9
+  surface_forcing=WIND : ΔF med 2.9494e-11 max 2.6999e-8  mean +2.29e-11
+= 575× native-frame collapse — the artifact is frame-robust by MEASUREMENT, not
+just by construction. (The None-arm native-frame ΔF 9.4915e-8/1.6969e-8 matches
+the ORIGINALLY recorded 9.49e-8/1.70e-8 to 3 s.f., closing the frame question.)
+
+## Review status — GO (adversarial physics-validator, 2026-08-13)
+Codex CLI unavailable on this account (no ~/.codex/auth.json); a fresh
+physics-validator subagent ran the mandatory adversarial review, reproduced the
+probe end-to-end, and REFUTED all six break-attempts:
+- #1 frame/halo: `to_cell` (`[:,HLS:-HLS]` then `[:,1:]` east-face) is BYTE-
+  IDENTICAL to sibling probes `hu_avg_perface_diff.py:291-295` /
+  `substep_traj_compare.py:296,392`; a wrong map could not have cleared Rule 1e.
+- #2 one-variable: both arms print day-0 max|du|=0 (bit-identical IC); fresh
+  build+clear_caches; only surface_forcing differs; the centred blend is itself
+  gated on surface_forcing!=None so it is PART of the wind variable, not a confound.
+- #3 dump post-wind: zu_frc dumped :514-520 AFTER wind add :443; zu_frc/wnd/drg
+  share the Nis0:Nie0 frame. CONFIRMED.
+- #4 production passes wind: run_dino.py:763-767 passes sf_step when
+  wind_through_step=True; kamm_mlf sets it True, surface_stress_implicit=False.
+- #5 sign: lego wind mean +9.28e-9 == NEMO wind_inc mean; adding it drives ΔF
+  mean −9.28e-9→+2.6e-11 (cancels, not doubles) — genuine, not a sign coincidence.
+- #6 correlation: PLANT collapses (−0.002); drag confound ruled out
+  (c=−83.8, 12% vs wind c=−1.001, 96%; drag med 0.0024× wind).
+
+**Reviewer's one correct nuance (labelling):** the FORCING-RESIDUAL collapse
+(median ΔF 646× to roundoff) is CONFIRMED by direct measurement. The downstream
+TRANSPORT-BIAS collapse (0.88 m²/s → 4.2e-3 eta → ACC) is a LINEAR PROJECTION
+from the dt_s·ΔF identity, NOT re-measured through the 68-substep loop with wind
+present. So:
+- CONFIRMED: F_slow_u matches NEMO zu_frc to roundoff once the wind is applied;
+  the recorded sign-coherent 2% forcing residual is a surface_forcing=None artifact.
+- PLAUSIBLE (linear projection, not re-run): the 0.88 m²/s transport bias and the
+  sec-D ACC anomaly collapse proportionally. RECOMMENDED FOLLOW-UP (separate
+  reviewed change): re-run substep_traj_compare.py with
+  surface_forcing=dino_step_surface_forcing(forcing) passed to model.step and
+  confirm the 0.88/0.59 wall/interior bias collapses empirically.
