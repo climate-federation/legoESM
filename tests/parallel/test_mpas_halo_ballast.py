@@ -148,11 +148,47 @@ def test_nocomm_removes_every_collective_but_keeps_the_staging(monkeypatch):
     on, off = compiled(True), compiled(False)
     assert "collective-permute" not in on
     assert "collective-permute" in off
-    # staging survives: the scatters that write received rows into the
-    # halo slots must still be in the program
-    assert on.count("scatter") >= 0.8 * off.count("scatter"), (
-        f"no-comm dropped the halo staging too: "
-        f"{on.count('scatter')} vs {off.count('scatter')} scatters")
+    # Staging must survive INTACT. Counting scatters alone is not enough
+    # and was not: without a barrier the no-comm arm silently lost one
+    # CONCATENATE per round (21 -> 18) because the receive slice folded
+    # back to the send-side pack, so the arm timed a slightly different
+    # program. Count both, and require a nonzero baseline so the check
+    # cannot pass on two empty counts.
+    for op in ("scatter", "concatenate"):
+        n_off, n_on = off.count(op), on.count(op)
+        assert n_off > 0, f"baseline has no {op}; the check is vacuous"
+        assert n_on >= 0.95 * n_off, (
+            f"no-comm dropped halo staging: {n_on} vs {n_off} {op}")
+
+
+def test_nostage_removes_the_staging_and_nothing_survives_it(monkeypatch):
+    """The no-staging arm must delete the gather/concatenate/scatter and
+    the collectives with them — if any survived, the subtraction against
+    the no-comm arm would not be the staging cost."""
+    _need(4)
+
+    def compiled(nostage):
+        monkeypatch.setenv("LEGOESM_MPAS_HALO_NOCOMM", "1")
+        monkeypatch.setenv("LEGOESM_MPAS_HALO_NOSTAGE",
+                           "1" if nostage else "0")
+        step, state, dt = _build(4, ballast="1", monkeypatch=monkeypatch)
+        return jax.jit(step).lower(state, dt).compile().as_text()
+
+    on, off = compiled(True), compiled(False)
+    assert off.count("concatenate") > 0
+    assert on.count("concatenate") < off.count("concatenate")
+    assert "collective-permute" not in on
+
+
+def test_nostage_env_validation_names_its_own_variable():
+    from legoesm.parallel.sharded_dynamics import _resolve_halo_nostage
+
+    assert _resolve_halo_nostage("") is False
+    assert _resolve_halo_nostage("0") is False
+    assert _resolve_halo_nostage("1") is True
+    for bad in ("yes", "true", "2", " 1"):
+        with pytest.raises(ValueError, match="HALO_NOSTAGE"):
+            _resolve_halo_nostage(bad)
 
 
 def test_nocomm_env_validation_raises():

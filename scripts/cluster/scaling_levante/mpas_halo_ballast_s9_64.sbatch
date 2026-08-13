@@ -81,11 +81,12 @@ rc=0
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
 NDEV=$((NODES * GPN))
 
-run_arm () {  # ballast tag [nocomm]
-  local BAL=$1 TAG=$2 NC=${3:-0}
-  echo "=== s${SUBDIV}@${NDEV} wide_halo=1 ballast=$BAL nocomm=$NC [$TAG] ==="
+run_arm () {  # ballast tag [nocomm] [nostage]
+  local BAL=$1 TAG=$2 NC=${3:-0} NS=${4:-0}
+  echo "=== s${SUBDIV}@${NDEV} wide=1 ballast=$BAL nocomm=$NC nostage=$NS [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
-  LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
+  LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC \
+  LEGOESM_MPAS_HALO_NOSTAGE=$NS JAX_ENABLE_X64=0 \
     srun --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
@@ -104,18 +105,20 @@ run_arm 1 warmup_discard
 # Interleaved, so drift is bounded by one arm rather than by arm order.
 run_arm 1 b1_a
 run_arm 1 nc_a 1
-run_arm 2 b2_a
+run_arm 1 ns_a 1 1
 run_arm 1 b1_b
 run_arm 1 nc_b 1
+run_arm 1 ns_b 1 1
+run_arm 2 b2_a
 run_arm 2 b2_b
-run_arm 4 b4_a
 
 echo "=== RECEIPTS ==="
 "$PY" - "$OUTDIR" <<'EOF'
 import json, os, sys
 d = sys.argv[1]
 med = {}
-for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "b2_a", "b2_b", "b4_a"):
+for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "ns_a", "ns_b",
+            "b2_a", "b2_b"):
     p = os.path.join(d, tag + ".jsonl")
     try:
         lines = [l for l in open(p).read().strip().split("\n")
@@ -123,8 +126,8 @@ for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "b2_a", "b2_b", "b4_a"):
         med[tag] = json.loads(lines[-1])["steady_median_ms"]
     except Exception as e:
         print(f"{tag}: MISSING -> {e}")
-missing = [t for t in ("b1_a", "b1_b", "nc_a", "nc_b", "b2_a", "b2_b",
-                      "b4_a") if t not in med]
+missing = [t for t in ("b1_a", "b1_b", "nc_a", "nc_b", "ns_a", "ns_b",
+                      "b2_a", "b2_b") if t not in med]
 if missing:
     # A gate that reports a number from a partial run is not a gate.
     print(f"ABORT: arms missing {missing}; no verdict")
@@ -152,6 +155,18 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         print(f"  staging + ghost      = nocomm - 2.000 = {nc - 2.0:+.3f} ms")
         print(f"  of which wire (ballast) = {d2:.3f} ms  "
               f"=> skew = {b1 - nc - d2:+.3f} ms")
+    if "ns_a" in med and "ns_b" in med and "nc_a" in med:
+        ns = (med["ns_a"] + med["ns_b"]) / 2
+        nc = (med["nc_a"] + med["nc_b"]) / 2
+        # nostage deletes the halo entirely while keeping the kernel, the
+        # local region and the masking, so it is the SAME program at 4
+        # and at 64 devices. The difference between the two scales is
+        # therefore whatever grows with device count that is NOT the
+        # halo: the mass-fix allreduce across nodes, and jitter.
+        print(f"  staging (nocomm - nostage) = {nc - ns:+.3f} ms")
+        print(f"  nostage@{NDEV} = {ns:.3f} ms   (compare the 4-device "
+              f"nostage arm: 2.725 ms at the SAME per-device load; the "
+              f"difference is the residual that grows with device count)")
     # A ratio smaller than half the arm spread is not a result.
     if abs(d2) < 0.5 * max(spread1, spread2) * b1:
         print("INCONCLUSIVE: delta is inside the arm spread")

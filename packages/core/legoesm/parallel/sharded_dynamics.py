@@ -2341,7 +2341,7 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
     nocomm = _resolve_halo_nocomm(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOCOMM", ""))
-    nostage = _resolve_halo_nocomm(
+    nostage = _resolve_halo_nostage(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOSTAGE", ""))
 
     if nostage:
@@ -2385,7 +2385,15 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
             # costs. Splitting that pair off is the only way to see how
             # much of the step is on-device halo staging rather than
             # communication.
-            recv_packed = send_packed
+            # optimization_barrier keeps the send-side pack alive.
+            # Without it `recv_packed[:split]` is a slice of the
+            # concatenate, XLA folds it back to the operand, and the arm
+            # silently drops one concatenate and one fusion per round --
+            # measured 21 -> 18 concatenates, 110 -> 107 fusions at 4
+            # devices. That made the arm time a slightly different
+            # program, so its two terms were bounds rather than
+            # estimates.
+            recv_packed = jax.lax.optimization_barrier(send_packed)
         else:
             recv_packed = jax.lax.ppermute(
                 send_packed, "device", perm=ppermute_perms[r])
@@ -2425,6 +2433,31 @@ def _resolve_halo_nocomm(env_value: str) -> bool:
         return True
     raise ValueError(
         f"LEGOESM_MPAS_HALO_NOCOMM={env_value!r}: must be '0' or '1' "
+        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
+
+
+def _resolve_halo_nostage(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_NOSTAGE: ``'1'`` skips the entire
+    per-round halo staging loop; ``''``/``'0'`` off (default).
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- the halo
+    rows keep their padded initial values. It exists so the staging cost
+    (gather, concatenate, scatter) can be measured against the SAME
+    program: the kernel, the local region and the masking are unchanged.
+    The obvious alternative, the same per-device load on ONE device,
+    is NOT the same program -- ``make_voronoi_sharded_step`` returns the
+    plain serial ``model.step`` at ``n_devices == 1``.
+
+    Its own resolver rather than sharing LEGOESM_MPAS_HALO_NOCOMM's, so
+    a typo raises an error naming the variable the user actually set.
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_NOSTAGE={env_value!r}: must be '0' or '1' "
         f"(empty = off). It is a timing knob that BREAKS the answer; "
         f"a typo must not silently enable it.")
 

@@ -640,7 +640,19 @@ def main() -> int:
             "steps": args.steps,
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": int(mesh.nCells) // nd * args.nlev,
-        },
+            # Which arm actually ran. Without this the receipts of a
+            # measurement arm and of the baseline are distinguishable
+            # only by their FILENAME, and a knob that failed to take
+            # effect is indistinguishable from one that did.
+            "halo_knobs": {
+                k: os.environ.get(k, "")
+                for k in ("LEGOESM_MPAS_WIDE_HALO",
+                          "LEGOESM_MPAS_WIDE_HALO_STRIDE",
+                          "LEGOESM_MPAS_RAGGED_HALO",
+                          "LEGOESM_MPAS_HALO_BALLAST",
+                          "LEGOESM_MPAS_HALO_NOCOMM",
+                          "LEGOESM_MPAS_HALO_NOSTAGE")
+            },
     ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
