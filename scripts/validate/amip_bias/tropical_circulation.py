@@ -109,6 +109,115 @@ def itcz_metrics(pr, lat, lon):
                 centroid=centroid, width_sd=width_sd, zm=zm)
 
 
+MIN_MERIDIAN_RAIN = 0.5     # mm/day; below this a meridian carries no band
+SPLIT_FRAC = 0.6            # a second peak this strong makes a meridian double
+SPLIT_SEP = 5.0             # deg; how far apart two peaks must be to count
+
+
+def itcz_by_longitude(pr, lat, lon, belt=20.0):
+    """Where the rain band sits at each longitude, and whether there are two.
+
+    Uses the PEAK latitude, not the rain-weighted centroid.  A centroid is not
+    a band location where the rain is double-peaked: over the warm pool GPCP
+    has comparable maxima near 12S and 7N, and their centroid lands at 1.6S
+    where no band exists.  Scoring that against a model would compare two
+    numbers that both describe nothing.
+
+    Returns per longitude:
+
+    * ``centre`` -- latitude of the meridian's rainfall maximum, NaN where the
+      meridian is drier than ``MIN_MERIDIAN_RAIN``;
+    * ``sharp`` -- share of that meridian's rain within 5 degrees of the peak;
+    * ``split`` -- strength of the strongest SECOND maximum, separated from the
+      first by at least ``SPLIT_SEP``, as a fraction of the first.  A double
+      ITCZ is a real and well-known failure, so it is reported rather than
+      averaged away.
+    """
+    m = np.abs(lat) <= belt
+    la = lat[m]
+    w = np.cos(np.deg2rad(la))[:, None] * np.maximum(pr[m], 0.0)
+    tot = w.sum(axis=0)
+    mean_rain = np.maximum(pr[m], 0.0).mean(axis=0)
+    good = (tot > 0) & (mean_rain >= MIN_MERIDIAN_RAIN)
+
+    centre = np.full(lon.size, np.nan)
+    sharp = np.full(lon.size, np.nan)
+    split = np.full(lon.size, np.nan)
+    for i in np.flatnonzero(good):
+        col = w[:, i]
+        k = int(np.argmax(col))
+        centre[i] = la[k]
+        near = np.abs(la - la[k]) <= 5.0
+        sharp[i] = col[near].sum() / col.sum()
+        far = np.abs(la - la[k]) >= SPLIT_SEP
+        split[i] = (col[far].max() / col[k]) if far.any() and col[k] > 0 else 0.0
+    return centre, sharp, split
+
+
+def _shape_corr_ci(a, b, n_boot=500, block=6, seed=0):
+    """Correlation of two longitude series, with a CIRCULAR BLOCK bootstrap.
+
+    Band latitude is strongly autocorrelated along longitude -- GPCP's lag-1
+    correlation is 0.93 -- so 72 longitudes are nowhere near 72 independent
+    samples and an ordinary confidence interval would overstate the skill by a
+    long way.  Resampling contiguous blocks around the globe keeps that
+    autocorrelation, so the interval reflects how much the series actually
+    constrains.
+    """
+    n = a.size
+    r = float(np.corrcoef(a, b)[0, 1])
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(n / block))
+    out = []
+    for _ in range(n_boot):
+        starts = rng.integers(0, n, n_blocks)
+        idx = np.concatenate([(np.arange(s, s + block) % n) for s in starts])[:n]
+        aa, bb = a[idx], b[idx]
+        if np.std(aa) > 0 and np.std(bb) > 0:
+            out.append(np.corrcoef(aa, bb)[0, 1])
+    lo, hi = (np.nanpercentile(out, [2.5, 97.5]) if out else (np.nan, np.nan))
+    return r, float(lo), float(hi)
+
+
+def band_structure(pr_m, pr_o, lat, lon, belt=20.0):
+    """How well the model reproduces the OBSERVED band's shape, per longitude.
+
+    Longitudes where EITHER side is double-peaked are excluded from the
+    position scores and counted separately: a single latitude does not describe
+    a split band on either side, so a difference between two such numbers is
+    not a position error.  The count is itself a result.
+    """
+    cm, sm, spm = itcz_by_longitude(pr_m, lat, lon, belt)
+    co, so, spo = itcz_by_longitude(pr_o, lat, lon, belt)
+    both = np.isfinite(cm) & np.isfinite(co)
+    single = both & (spm < SPLIT_FRAC) & (spo < SPLIT_FRAC)
+    if single.sum() < 8:
+        raise SystemExit(
+            f"FATAL: only {int(single.sum())} longitudes carry a single band on "
+            "both sides -- a per-longitude position score is not available")
+    dc = cm[single] - co[single]
+    r, lo, hi = _shape_corr_ci(cm[single], co[single])
+    return {
+        "lat_rms": float(np.sqrt(np.mean(dc ** 2))),
+        "lat_bias": float(np.mean(dc)),
+        "lat_r": r,
+        "lat_r_lo": lo,
+        "lat_r_hi": hi,
+        # rain-weighted so a nearly dry meridian cannot count as much as the
+        # warm pool, which an equal-weight mean let it do
+        "sharp_m": float(np.average(sm[both],
+                                    weights=np.maximum(pr_m[np.abs(lat) <= belt],
+                                                       0.0).mean(axis=0)[both])),
+        "sharp_o": float(np.average(so[both],
+                                    weights=np.maximum(pr_o[np.abs(lat) <= belt],
+                                                       0.0).mean(axis=0)[both])),
+        "double_m": float(np.mean(spm[both] >= SPLIT_FRAC)),
+        "double_o": float(np.mean(spo[both] >= SPLIT_FRAC)),
+        "n_lon": int(single.sum()),
+        "n_both": int(both.sum()),
+    }
+
+
 def concentration(pr, lat, lon):
     """How concentrated the tropical rain is, two ways.
 

@@ -96,6 +96,18 @@ def measure(name):
     pr_o = rb._ref_clim("pr", months, lat, lon, src=tc.GPCP)
     if pr_o is None:
         raise SystemExit("FATAL: no GPCP reference")
+    # GPCP is kg m-2 s-1; the model was converted above. Both sides must carry
+    # the SAME units or the map panels are drawn on incomparable scales -- the
+    # first version of this figure plotted GPCP against a 0-12 mm/day colour
+    # bar while it still held values of order 1e-5, so the reference panel came
+    # out uniformly blank. Correlations and centroids are invariant under a
+    # positive rescale, so only the figure was wrong; convert once, here, so
+    # the two cannot drift apart again.
+    pr_o = pr_o * 86400.0
+    if float(np.nanmax(pr_o)) > 500.0:
+        raise SystemExit(
+            f"FATAL: GPCP peaks at {float(np.nanmax(pr_o)):.1f} mm/day after "
+            "unit conversion -- it was probably already in mm/day")
     om_true, ue, ve, ref_year = tc.era5_omega(months, plev)
     om_o = tc.omega_from_divergence(ue, ve, plev, lat, lon)[k]   # SAME operator
 
