@@ -81,6 +81,27 @@ arm no_etau          --cfg-override etau_mode=none
 arm veros_surface_bc --cfg-override surface_bc=veros_flux
 arm nnmxl2_control   --cfg-override tke_mxl_choice=4
 arm nemo_z0_placement --cfg-override tke_surface_bc_level=nemo_z0
+# ---- ARMS 6-7: the TRANSPORT and SINK of TKE, not its sources -------------
+# Arms 0-5 showed the excess is created BY THE STEP and that only the surface
+# source matters -- but killing a source is not a fix when the source value is
+# already right (en(k=0) matches NEMO at 0.944 median). What the step does
+# with that energy is the remaining freedom, and two card defaults govern it:
+#   alpha_tke = 30.0. This multiplies the TKE vertical-diffusion coefficient.
+#     Its OWN __param_spec__ reference reads "NEMO avm x1 (zdftke); Veros/
+#     Gaspar 30" -- so the card is running the Veros value against a NEMO
+#     oracle, and NEMO's tridiagonal (zdftke.F90:407-409) uses
+#     -0.5*rn_Dt*(avm(k+1)+avm(k)) = -rn_Dt * mean(avm), i.e. exactly x1.
+#   dissipation_discretization = "backward_euler". NEMO linearises the
+#     Kolmogoroff sink as a NEWTON split: zfact2 = 1.5*rn_Dt*rn_ediss on the
+#     diagonal (:241,:414) plus zfact3 = 0.5*rn_ediss added back explicitly
+#     (:242,:419) -- the correct Jacobian for eps ~ e^{3/2}. Ours puts 1.0 on
+#     the diagonal with no add-back, a WEAKER implicit sink.
+# Both would let a correct surface value overshoot, and neither is selected by
+# the ORCA1 card. PRE-REGISTERED on antarctic KM_rat (baseline 1.846, and the
+# zero-step value on the same interfaces is 0.861, so ~1.0 is the target):
+#   CONFIRMED : <= 1.2.   CONTRIBUTOR : 1.2-1.6.   REFUTED : >= 1.6.
+arm alpha_tke_nemo   --cfg-override alpha_tke=1.0
+arm nemo_diss_split  --cfg-override dissipation_discretization=nemo_1p5_split
 
 echo; echo "=== ALL DONE (failed arms: $NFAIL) ==="
 exit $((NFAIL > 0))
