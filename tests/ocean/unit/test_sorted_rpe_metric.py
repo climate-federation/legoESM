@@ -149,3 +149,61 @@ def test_moving_volumes_enter_the_metric(latlon_setup):
         "an eta perturbation must move RPE_mov (moving z-star volumes); "
         "invariance means the implementation regressed to fixed dz_ref "
         "volumes")
+
+
+# ---------------------------------------------------------------------------
+# Which attribute the cell area comes from, per grid family
+# ---------------------------------------------------------------------------
+#
+# _rpe_extract used to name "mpas" alone and let EVERY other grid fall
+# through to `grid.area`. A VoronoiMesh carries `areaCell` and no `area`,
+# so a regional or channel Voronoi arm raised AttributeError -- and
+# run_lock_exchange calls this diagnostic before its first step, so such an
+# arm would have died before integrating. Found while scoping a resolved
+# lock-exchange arm on mpas_regional (codex 2026-08-13).
+
+def test_every_voronoi_grid_reads_area_from_areaCell(matrix_mod):
+    """Not just the global one: regional and channel meshes too."""
+    m = matrix_mod
+    assert "mpas" in m._MPAS_GRID_TYPES
+    for g in ("mpas_regional", "mpas_channel"):
+        assert g in m._MPAS_GRID_TYPES, (
+            f"{g} is a Voronoi mesh and must read areaCell; falling through "
+            f"to grid.area raises AttributeError before the first step")
+    # And the two families must not overlap, or the branch order decides.
+    assert not (set(m._MPAS_GRID_TYPES) & set(m._CELL_AREA_GRID_TYPES))
+
+
+def test_an_unclassified_grid_raises_instead_of_guessing(matrix_mod):
+    """NON-VACUITY for the hardened fall-through.
+
+    The two families keep the cell area under DIFFERENT attribute names, so
+    a default branch reads whichever happens to exist. A new grid type must
+    be classified, not silently absorbed.
+    """
+    m = matrix_mod
+    state = SimpleNamespace(T=SimpleNamespace(data=np.zeros((4, 2))),
+                            S=SimpleNamespace(data=np.zeros((4, 2))),
+                            land_mask=SimpleNamespace(data=np.ones(4)))
+    grid = SimpleNamespace(area=np.ones(4), areaCell=np.ones(4))
+    with pytest.raises(ValueError, match="unknown grid_type"):
+        m._rpe_extract(state, "some_new_grid", grid, None)
+
+
+def test_the_classified_grids_do_not_raise(matrix_mod):
+    """The guard must not have swallowed the families it is meant to admit."""
+    m = matrix_mod
+    for g in ("mpas", "latlon"):
+        state = SimpleNamespace(T=SimpleNamespace(data=np.zeros((4, 2))),
+                                S=SimpleNamespace(data=np.zeros((4, 2))),
+                                land_mask=SimpleNamespace(data=np.ones(4)))
+        grid = SimpleNamespace(area=np.ones(4), areaCell=np.ones(4))
+        # The minimal fixture has no eta/z_coord, so the call fails LATER
+        # on purpose -- what is asserted is only that it got PAST the
+        # classification, i.e. the guard admits these families. Any
+        # exception is fine except the one that says it did not.
+        try:
+            m._rpe_extract(state, g, grid, None)
+        except Exception as exc:             # noqa: BLE001 - see above
+            assert "unknown grid_type" not in str(exc), (
+                f"{g} must be classified, not rejected: {exc}")

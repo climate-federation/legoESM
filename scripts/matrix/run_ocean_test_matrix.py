@@ -197,6 +197,14 @@ MATCHED_TRACER_ADV = "tvd"  # limited scheme: no dispersive over/undershoot
 # 3e-12/day at ico3 resolution) -- documented per-grid difference.
 LOCKEX_CGRID_TRACER_ADV = "fct2"
 
+#: Grid families by WHERE THEY KEEP THE CELL AREA. Voronoi meshes expose
+#: ``areaCell``; the structured/curvilinear grids expose ``area``. Keeping
+#: the split explicit is what stops a new grid type silently reading
+#: whichever attribute happens to exist (see ``_rpe_extract``).
+_MPAS_GRID_TYPES = ("mpas", "mpas_regional", "mpas_channel")
+_CELL_AREA_GRID_TYPES = ("latlon", "latlon_regional", "latlon_channel",
+                         "cubed_sphere", "cs_regional", "tripole", "fesom")
+
 # Physical constants for idealized ocean test cases — use canonical values.
 from legoesm import constants as _C
 _A_EARTH = _C.R_earth   # Earth radius (m)
@@ -3292,6 +3300,20 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         "S_3d": S_3d,
         "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
+    if mesh is not None:
+        # SURFACE SPEED, ALWAYS -- one cell-shaped velocity field so the
+        # arm can be compared against the structured one. The lat-lon
+        # extractor has always written speed_sfc and this one did not, so
+        # the cross-grid velocity row was silently absent from every
+        # comparison: the reports read "velocity agrees" when velocity had
+        # never been looked at (2026-08-13). Level 0 only; the full 3-D
+        # reconstruction below stays behind include_velocity_3d because it
+        # costs one solve per level.
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity as _rcv
+        _ue0, _vn0 = _rcv(state.u.data[:, 0], mesh)
+        result["speed_sfc"] = np.sqrt(
+            np.asarray(_ue0, dtype=np.float64) ** 2
+            + np.asarray(_vn0, dtype=np.float64) ** 2)
     if include_velocity_3d and mesh is not None:
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_edge = np.asarray(state.u.data, dtype=np.float64)  # (nEdges, nlev)
@@ -3659,7 +3681,14 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
             return _extract_spectral_ocean(s, grid)
         return extract_fn
     elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
-        _mesh = grid if include_velocity_3d else None
+        # The mesh goes in ALWAYS. It used to be passed only when the
+        # 3-D velocity reconstruction was requested, which meant the
+        # cheap SURFACE speed could never be produced either -- so the
+        # cross-grid velocity row was blank on every MPAS arm and read as
+        # agreement rather than as "never compared" (2026-08-13).
+        # include_velocity_3d still gates the per-level loop, which is the
+        # part that actually costs.
+        _mesh = grid
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
                                        include_velocity_3d=include_velocity_3d)
@@ -6395,16 +6424,33 @@ def _rpe_extract(state, grid_type, grid, z_coord):
         # GaussianGrid exposes grid_area, NOT area (codex 2026-08-08).
         area = np.asarray(getattr(grid, "grid_area", None), dtype=np.float64)
         mask_attr = "land_mask_grid"
-    elif grid_type == "mpas":
+    elif grid_type in _MPAS_GRID_TYPES:
+        # EVERY Voronoi grid, not just the global one. A VoronoiMesh
+        # carries areaCell and NOT area, so a regional or channel mesh fell
+        # through to the else branch below and raised on grid.area -- and
+        # run_lock_exchange calls this diagnostic BEFORE its first step, so
+        # such an arm would have died before integrating rather than
+        # producing a wrong number (codex 2026-08-13, found while scoping a
+        # resolved lock-exchange arm on mpas_regional).
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.areaCell, dtype=np.float64)
         mask_attr = "land_mask"
-    else:
+    elif grid_type in _CELL_AREA_GRID_TYPES:
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.area, dtype=np.float64)
         mask_attr = "land_mask"
+    else:
+        # NOT a silent default. The two families above expose their cell
+        # area under different names, so a new grid type reaching here
+        # would pick one at random; say which name it needs instead.
+        raise ValueError(
+            f"_rpe_extract: unknown grid_type {grid_type!r}. Add it to "
+            f"_MPAS_GRID_TYPES (cell area on .areaCell) or to "
+            f"_CELL_AREA_GRID_TYPES (cell area on .area); do not rely on a "
+            f"fall-through, which reads whichever attribute happens to "
+            f"exist.")
 
     _MISSING = object()
     mask_obj = getattr(state, mask_attr, _MISSING)
