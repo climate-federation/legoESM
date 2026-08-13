@@ -86,12 +86,79 @@ it. Those are setup, not hot path, and they stay NumPy.
   standing policy (main `a6060d41d`), so **this campaign is one reviewer short
   until the key is refreshed** — everything below has had codex only.
 
-### In flight
+### The JAX lane exists — first execution scorecard
 
-Five kernel-port agents writing JAX mirrors (`update_dz_d`; `fv3_pgrad.py`;
-`fv3_tp_core.py`; `fv3_mapz.py`; `fv3_duo_halos.py`), each under the rules in
-the strategy doc, each leaving `TOL-PENDING` markers for the measurement job to
-replace.
+~15k lines landed at `dbfdccb67` and RAN for the first time (job 9400424, x64
+CPU, single node). **All five modules import cleanly.**
+
+| module | LOC | gates | first run |
+|---|---:|---:|---|
+| `grids/fv3_duo_halos.py` | 2033 | 52 | 40 pass, 12 fail |
+| `core/fv3_tp_core.py` | 2620 | 16* | 15 pass, 1 fail |
+| `core/fv3_pgrad.py` | 1701 | 90 | **88 pass**, 2 fail |
+| `core/fv3_mapz.py` | 1666 | 212 | **203 pass**, 9 fail |
+| `core/fv3_nh_core.py` | 2493 | 127 | running |
+
+*the tp_core gate count is a stale snapshot: its test file grew 511 → 1772
+lines (63 tests) after the pin, closing a coverage hole where `xtp_u` and
+`ytp_v` had **zero** tests despite running every acoustic substep.
+
+**Failure triage — the discipline is to say WHICH is wrong, expectation or
+code:**
+
+1. **REAL DEFECT — the k2e index tables are column-swapped.** The JAX table
+   builder produces `[[-2,-1],[-2,0],…]` where the oracle table is
+   `[[-1,-2],[0,-2],…]`: an exact (i,j)→(j,i) swap. A transposed halo-source
+   table reads the **wrong neighbour cell** and stays finite and plausible
+   forever. Same class as the earlier probe here that indexed `(nCells,6)` on a
+   `(6,nCells)` array. Fix in flight.
+2. **EXPECTATION WRONG — bitwise `jit`-vs-eager on floating-point sums.** XLA
+   contracts mul+add into FMA in the jitted lowering and not the eager one, so a
+   few-ULP gap is correct behaviour, not a defect. Bitwise stays only on pure
+   index-copy paths. (The pattern-setter already documented this; the new gates
+   did not inherit it.)
+3. **EXPECTATION WRONG — NaN compared with equality.** `NaN == NaN` is False, so
+   a gate over deliberately NaN-filled scratch can never pass. The fix is to
+   score the written window and separately assert the scratch is NaN on both
+   lanes — not `equal_nan=True`, which would let a genuinely all-NaN output
+   through.
+4. **EXPECTATION WRONG — pgrad's two `check_grads(order=2)`.** One element out
+   of 312, 0.39 % against a 0.31 % tolerance, on a value of 3.5e5 in an array
+   whose entries are ~1e2. Order-2 finite differencing cannot resolve that
+   spread. Being replaced by the tolerance-free adjoint identity
+   `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` — which is what codex predicted when it called order-2 FD
+   a weak gate for this core.
+
+### Codex adversarial review of the CODE — 1 BLOCKER, 2 MAJOR
+
+All three in `_rezone` and the gradient gates, i.e. exactly the node the
+strategy flagged as hardest.
+
+- **BLOCKER** `fv3_mapz.py:998` — `q_span = qsum / denom` is formed
+  unconditionally and then discarded by the `inside` select. The NumPy authority
+  **returns** on the contained-cell path (`fv3_native_mapz.py:624`) without ever
+  dividing, so a zero-thickness target inside one source layer gives NumPy a
+  finite answer and JAX a 0/0 that reverse-mode AD propagates into the selected
+  branch. The fix is not to invent a divisor — it is to not *form* a division
+  whose result is discarded.
+- **MAJOR** `fv3_mapz.py:983` — same defect in the source-layer loop: `esl = dp
+  / dp1_m` runs on every static scan iteration including ones NumPy never
+  visits.
+- **MAJOR** — the gradient gates avoid every switching surface (`_rezone`
+  interface ties; `update_dz_d` pinned to the linear `hord=2` arm), so they
+  prove smooth arithmetic rather than the branch-heavy operators.
+
+**Cleared by name** (so the review is known to have been real): both duo
+barriers — slot selection `[0,3,4…]` preserving `w` and `q_con`, blend, and
+compute-ring layout; duplicate-index scatter handling; the Lagrange diagonal
+reading the incoming field; the `n ≥ 4` non-collision argument; no
+`donate_argnums` anywhere.
+
+### Also fixed
+
+Two oracle citations in the NumPy lane were wrong by two lines — `pe_halo` was
+cited as starting at `:1933`, which is `end subroutine pln_halo`. Found by the
+JAX author re-deriving the spans instead of copying them.
 
 ### Not started
 
