@@ -183,6 +183,20 @@ What the other rows do and do NOT say:
   scalar displacement in km and are NOT comparable with the field-norm
   numbers in the other rows.
 
+  **Why it cannot be made adjudicable today.** The global arms cannot
+  resolve the front (see the Benjamin row above); the resolving geometry is
+  the Petersen channel, which runs on `latlon_regional` only. A second arm
+  is buildable as far as the MESH goes — `create_regional_voronoi_mesh`
+  over the Petersen box at 1 km produces 781 cells with 1.00 km spacing
+  (verified 2026-08-13). It is blocked one level down: the MPAS port
+  supports `tvd`, `superbee` and `upwind` tracer advection and **no FCT**,
+  and those are exactly the schemes MEASURED to break this case's
+  boundedness gate on the resolving geometry (`tvd` −0.40 °C, `superbee`
+  −2.99 °C from an initial [5, 30]). A second arm today would differ from
+  the first in its advection FAMILY as well as its grid, which is the
+  confound this whole comparison exists to remove. Resolved cross-grid lock
+  exchange needs FCT in the MPAS tracer port.
+
 The phillips result is a delta between two resolutions, not a trend, and
 the case's own amplitude doubles between them, so it is reported as
 "BUDGET EXCEEDED (1.08x)" rather than as a convergence or divergence
@@ -192,12 +206,44 @@ difference against time and is NOT settled either way (R² 0.43–0.76, and a
 NEGATIVE slope: the difference appears early and does not grow through the
 run). A poor fit refutes nothing in either direction.
 
-Next measurement for phillips, in order: decompose D by field at its peak
-time (SSH vs temperature vs barotropic velocity localises which term the
-two discretisations represent differently), then re-run both arms from a
-single high-resolution analytic initial condition regridded to each native
-mesh, which controls the initial-condition projection that the
-evolution-difference construction does not cancel on the native meshes.
+### Where the phillips disagreement lives (measured 2026-08-13, job 26919902)
+
+**The initial condition is ruled out.** The evolution-difference
+construction cancels the two meshes' sampling of the shared IC on the
+COMMON mesh but not on the native ones, so IC projection was the obvious
+competing explanation. Measured: the t=0 difference between the arms
+**HALVES** under refinement (2.38e-3 → 1.21e-3, 0.51×) while the end-state
+difference triples. The arms start closer together and finish further
+apart. No shared-IC rerun is needed to settle this.
+
+**The growth is in the free surface, not the tracer.** Splitting the same
+evolution difference by field, and dividing each by how far that field
+itself moved:
+
+| Field | difference, coarse → refined | growth | fraction of its own motion |
+|---|---|---|---|
+| `eta` (free surface — pressure gradient, divergent mode) | 2.32e-2 → 7.65e-2 | **3.30×** | 0.51 → 0.61 |
+| `SST` (surface tracer — advection, mixing) | 2.40e-1 → 2.61e-1 | 1.09× | 2.15 → 1.48 |
+
+Two different things, and they should not be conflated:
+
+- `eta` is what GROWS under refinement (3.30×), and it grows faster than
+  the free surface itself moves. That is the term carrying the
+  different-limits signature.
+- `SST` carries a LARGER disagreement in absolute terms and the arms
+  disagree about it by more than it moved (fraction > 1 at both levels) —
+  but it is essentially FLAT under refinement (1.09×). A large standing
+  disagreement, not a diverging one. Its fraction falls only because the
+  tracer field itself moved further at the finer resolution.
+
+So the next thing to look at is the pressure-gradient / divergent-mode
+treatment (C-grid vs TRiSK), not tracer advection.
+
+**Surface velocity was not compared at all.** `speed_sfc` is written by the
+lat-lon extractor and not by the MPAS one, so the velocity row is
+UNMEASURED — the report now says so rather than omitting the row, which
+would read as agreement. Comparing it needs the MPAS extractor to save a
+cell-shaped surface speed.
 
 ## The Petersen channel arm's advection scheme
 

@@ -1426,6 +1426,65 @@ def _refinement_verdict(rec: dict, pair: str) -> dict:
                 caveats=caveats)
 
 
+#: Cell-shaped fields worth decomposing a disagreement into, and the term
+#: each one points at. u_sfc/v_sfc are FACE-staggered on the C-grid arm
+#: (n_lon+1 / n_lat+1 columns) and are not comparable cell-by-cell, so the
+#: cell-shaped ``speed_sfc`` stands in for the velocity.
+_DECOMPOSE_FIELDS = {
+    "eta": "free surface — pressure gradient and the divergent mode",
+    "SST": "surface tracer — advection and mixing",
+    "speed_sfc": "surface velocity — Coriolis and momentum advection",
+}
+
+
+def _field_decomposition(paths: dict, t_index: int = -1):
+    """Which FIELD carries the arm-to-arm disagreement?
+
+    One norm over one field says how MUCH two dycores disagree; it cannot
+    say about WHAT. Splitting the same evolution difference across the
+    saved fields localises the term: a disagreement that lives in the free
+    surface points at the pressure gradient and the divergent mode, one in
+    the surface tracer at advection and mixing, one in the velocity at the
+    Coriolis discretisation (GLM-5.2, 2026-08-13).
+
+    Each field's difference is divided by THAT FIELD'S own evolution
+    amplitude, because eta in metres and SST in degrees cannot be compared
+    raw. The returned fraction is therefore "how far apart the arms are,
+    in units of how much this field actually moved".
+    """
+    names = sorted(paths)
+    if len(names) < 2:
+        return {}
+    a, b = names[0], names[1]
+    out = {}
+    for field, meaning in _DECOMPOSE_FIELDS.items():
+        try:
+            A, mA = _on_common_mesh(paths[a], field, t_index=t_index)
+            B, mB = _on_common_mesh(paths[b], field, t_index=t_index)
+            A0, mA0 = _on_common_mesh(paths[a], field, t_index=0)
+            B0, mB0 = _on_common_mesh(paths[b], field, t_index=0)
+        except KeyError:
+            # NAMED, not skipped. speed_sfc is saved by the lat-lon
+            # extractor and NOT by the MPAS one, so the velocity row simply
+            # vanished from the table -- which reads as "velocity agrees"
+            # rather than "velocity was never compared" (2026-08-13, the
+            # same class as the map plotter returning 9 of 10 figures in
+            # silence).
+            out[field] = dict(skipped="not saved by every arm",
+                              points_at=meaning)
+            continue
+        d = _pair_diff(A - A0, mA & mA0, B - B0, mB & mB0,
+                       shift=False)["rms_abs"]
+        both = _erode(mA & mA0 & np.isfinite(A) & np.isfinite(A0))
+        w = np.where(both, np.broadcast_to(_W_LAT, A.shape), 0.0)
+        moved = _wrms(np.where(both, A - A0, 0.0), w)
+        out[field] = dict(difference=float(d), field_moved=float(moved),
+                          fraction=float(d / moved) if moved > 0
+                          else float("nan"),
+                          points_at=meaning)
+    return out
+
+
 def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                          force=False, budget_levels=("base",)):
     """Does the arm-to-arm difference SHRINK when both arms are refined?
@@ -1516,6 +1575,7 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
             # phillips_two_layer, and a single end-time RMS cannot.
             rec["levels"][level]["difference_growth"] = _difference_growth(
                 paths, CASE_FIELD[case])
+            rec["levels"][level]["by_field"] = _field_decomposition(paths)
             # THE BUDGET AT THIS LEVEL. Without it a growing cross-arm
             # difference is unreadable: each arm's own solution is still
             # moving under refinement, and the question is whether the two
@@ -1672,6 +1732,21 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
         # (GLM-5.2, 2026-08-13), which is exactly the pair a reader will
         # confuse.
         bud = rec.get("budget", {})
+        # IS IT THE INITIAL CONDITION? The evolution difference cancels the
+        # two meshes' discretisation of the shared IC on the COMMON mesh,
+        # but not on the NATIVE ones -- each arm still starts from its own
+        # sampling and evolves it. If the t=0 difference SHRINKS under
+        # refinement while the evolution difference GROWS, the arms are
+        # starting closer together and ending further apart, which rules
+        # the initial condition out as the driver (GLM-5.2 proposed a
+        # shared-IC rerun to settle this; this is the free version of the
+        # same question, from artifacts already on disk).
+        rec["initial_difference"] = {
+            k: dict(base=float(b[k]["rms_initial"]),
+                    refined=float(f[k]["rms_initial"]),
+                    ratio=(float(f[k]["rms_initial"] / b[k]["rms_initial"])
+                           if b[k]["rms_initial"] > 0 else float("nan")))
+            for k in sorted(set(b) & set(f))}
         rec["signature"] = {}
         for k in sorted(set(b) & set(f)):
             e_lo = bud.get("base", {}).get(k, float("nan"))
@@ -2015,6 +2090,31 @@ def main() -> None:
                 sig = ra[case].get("signature", {}).get(pair)
                 if sig:
                     print(f"    {'':24s} {'':16s} SIGNATURE: {sig}")
+                ic = ra[case].get("initial_difference", {}).get(pair)
+                if ic and np.isfinite(ic["ratio"]):
+                    print(f"    {'':24s} {'':16s} IC discretisation "
+                          f"difference at t=0: {ic['base']:.3e} -> "
+                          f"{ic['refined']:.3e} ({ic['ratio']:.2f}x)")
+                for level in ("base", "refined"):
+                    bf = lv.get(level, {}).get("by_field", {})
+                    if not bf:
+                        continue
+                    print(f"    {'':24s} {'':16s} {level:8s} by field, "
+                          f"difference / how far that field moved:")
+                    for fld, v in sorted(
+                            bf.items(),
+                            key=lambda kv: -kv[1].get("fraction", 0.0)
+                            if np.isfinite(kv[1].get("fraction", np.nan))
+                            else 0.0):
+                        if "skipped" in v:
+                            print(f"    {'':24s} {'':16s}   {fld:10s} "
+                                  f"NOT COMPARED — {v['skipped']} "
+                                  f"({v['points_at']} is therefore "
+                                  f"UNMEASURED, not agreeing)")
+                            continue
+                        print(f"    {'':24s} {'':16s}   {fld:10s} "
+                              f"{v['fraction']:6.2f}  ({v['difference']:.3e} "
+                              f"of {v['field_moved']:.3e})  {v['points_at']}")
                 if case in RMS_NOT_GATED:
                     print(f"    {'':24s} {'':16s} NOTE this row's ratio and "
                           f"budget are a SCALAR displacement in km, not a "
