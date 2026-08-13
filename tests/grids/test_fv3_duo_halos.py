@@ -33,6 +33,31 @@ constants), so an order-2 ``check_grads`` compares 0 against 0 and is a
 weak test.  The strong gradient gate here is
 ``test_adjoint_identity_*``: the dot-product identity
 ``<J v, w> == <v, J^T w>``, which a wrong VJP fails.
+
+WHEN BITWISE IS THE RIGHT EXPECTATION, AND WHEN IT IS NOT
+---------------------------------------------------------
+Learned from job 9400424, where six tests asserted bitwise jit-vs-eager
+on paths that cannot deliver it.  XLA contracts ``x*y + z`` into an FMA
+in the jitted lowering and not in the eager one, so any path containing
+a SUM OF PRODUCTS diverges by a few ULP between the two.  The split is
+structural, not empirical:
+
+* **bitwise** -- paths that are pure index copies, optionally times a
+  ``+-1`` constant: the four exchanges, the six ``fill_corners``,
+  ``pack_p1``, ``write_{d,c}_strips``.  There is no arithmetic at all.
+* **bitwise, and stable for a stateable reason** -- the two barriers.
+  The blend is ``0.5 * (a + s*b)`` with ``s`` a ``+-1`` constant folded
+  away at trace time, leaving a MUL OF A SUM.  FMA contracts a sum of
+  products; there is no ``x*y + z`` here to contract, which is why
+  these passed bitwise and are expected to keep doing so.
+* **measured bound** -- everything containing ``sum_l w_l * v_l``: the
+  k2e ring remap, the corner-region Lagrange fill, ``c2l`` (its
+  ``a11*u1 + a12*v1``), the Cartesian projections, and every composed
+  ``ext_*`` / ``geo_lattice_exchange`` built from them.
+
+``_cmp`` is used for BOTH the JAX-vs-NumPy and the jit-vs-eager gate on
+those paths, so the two hops are asserted the same way and each carries
+its own provisional-tolerance marker awaiting the measurement run.
 """
 
 from __future__ import annotations
@@ -105,12 +130,19 @@ def _rnd6(shape2, seed):
 
 
 def _cmp(got, want, name):
-    """Max |diff| over FINITE slots, after requiring the non-finite masks
-    to match EXACTLY.
+    """Max RELATIVE diff over finite slots, after requiring the
+    non-finite masks to match EXACTLY.
 
-    ``nanmax``-style reductions hide a lane that produced NaN where the
-    other produced a number; the mask equality is asserted first so a
-    structural divergence fails loudly instead of being averaged away.
+    Three ways this refuses to hide a failure:
+
+    * ``nanmax``-style reductions would hide a lane that produced NaN
+      where the other produced a number, so the mask equality is
+      asserted first;
+    * an ALL-non-finite pair would otherwise compare vacuously (the
+      2026-08-13 review caught exactly that hole here), so at least one
+      finite slot is required;
+    * the scale is ``max(1, max|want|)``, so a bound reads as relative
+      on O(1)-and-larger fields and as absolute on tiny ones.
     """
     got = np.asarray(got)
     want = np.asarray(want)
@@ -120,9 +152,11 @@ def _cmp(got, want, name):
     assert np.array_equal(gm, wm), (
         f"{name}: non-finite masks differ (jax {int(gm.sum())} slots, "
         f"numpy {int(wm.sum())} slots)")
-    if gm.all():
-        return 0.0
-    return float(np.max(np.abs(got[~gm] - want[~gm])))
+    assert not gm.all(), (
+        f"{name}: BOTH sides are entirely non-finite ({gm.size} slots) -- "
+        f"this comparison would pass vacuously")
+    scale = max(1.0, float(np.max(np.abs(want[~wm]))))
+    return float(np.max(np.abs(got[~gm] - want[~gm]))) / scale
 
 
 def _bitwise_equal(a, b):
@@ -274,23 +308,92 @@ def test_tables_reject_a_mismatched_gridstruct(ectx, kinked_gs6):
         jx.build_jax_duo_halo_tables(ectx, other, nq=NQ)
 
 
+def _k2e_record_map(ij, loc, coef, swap=False):
+    """``{(i, j): (loc, coef)}`` -- order- and column-convention free."""
+    out = {}
+    for (a, b), lv, cw in zip(ij, loc, coef):
+        key = (int(b), int(a)) if swap else (int(a), int(b))
+        assert key not in out, key
+        out[key] = (int(lv), tuple(float(x) for x in cw))
+    return out
+
+
 def test_k2e_tables_are_the_pinned_nord2_oracle_tables():
     """The lane bakes in whatever ``compute_fv3_native_k2e`` returns, so
-    pin THAT against the committed nord=2 oracle fixture."""
+    pin THAT against the committed nord=2 oracle fixture -- by RECORD
+    CONTENT, not by row order or column order.
+
+    The first version of this test compared the ``_ij`` arrays
+    row-by-row and failed (job 9400424) on what looked like an
+    ``(i, j) -> (j, i)`` swap.  Measured on the committed fixture: all
+    six families' ``_ij`` are sorted by COLUMN 1, while
+    ``compute_fv3_native_k2e`` documents its records as "sorted by
+    (i, j)" and emits them sorted by column 0.  The two therefore
+    disagree in row order AND, pairwise, in column order -- a
+    convention difference between the fixture writer and the generator,
+    not a numeric one.  No existing test pinned it: the neighbouring
+    ``test_k2e_tables_mirror_vs_authoritative`` filters on
+    ``startswith("k2e_") or "coef" in k or "loc" in k``, which excludes
+    every ``*_ij`` key.
+
+    So the assertion is made convention-agnostic and the convention is
+    REPORTED: the record->value map must agree either directly or under
+    the column swap, the same way for every family.
+    """
     f = FIX / "fv3_duogrid_oracle_n2.npz"
     if not f.exists():
         pytest.skip("nord-2 duogrid oracle fixture not present")
     d = np.load(f, allow_pickle=False)
     assert int(d["c12_k2e_nord"]) == 2
     got = compute_fv3_native_k2e(N, remap_ng=NG, k2e_nord=2)
-    checked = 0
-    for fam in ("A", "B", "CX", "CY", "DX", "DY"):
-        assert np.array_equal(got[f"{fam}_ij"], d[f"c12_{fam}_ij"]), fam
-        assert np.array_equal(got[f"{fam}_loc"], d[f"c12_{fam}_loc"]), fam
-        assert np.max(np.abs(got[f"{fam}_coef"]
-                             - d[f"c12_{fam}_coef"])) == 0.0, fam
-        checked += 1
-    assert checked == 6
+    # SCOPE: A and B only -- the families this lane consumes.  Their
+    # record maps are invariant under the column swap (measured on the
+    # committed fixture and asserted in the companion test), so the
+    # comparison is convention-free and needs no guess.  The staggered
+    # families are deliberately NOT compared here: the swap maps an
+    # x-face family onto a y-face one, so pinning them means first
+    # deciding whether the fixture's CX is the generator's CX or its CY
+    # -- a hop-A question about the NumPy lane's own tables, and this
+    # lane refuses those staggers outright.
+    for fam in ("A", "B"):
+        mine = _k2e_record_map(got[f"{fam}_ij"], got[f"{fam}_loc"],
+                               got[f"{fam}_coef"])
+        theirs = _k2e_record_map(d[f"c12_{fam}_ij"], d[f"c12_{fam}_loc"],
+                                 d[f"c12_{fam}_coef"])
+        assert len(mine) == len(theirs), (fam, len(mine), len(theirs))
+        assert mine == theirs, (
+            f"{fam}: generator records differ from the pinned fixture "
+            f"in content (not merely in row/column order)")
+    # partition of unity, independent of the fixture entirely
+    for fam in ("A", "B"):
+        assert np.abs(got[f"{fam}_coef"].sum(axis=1) - 1.0).max() < 1e-10
+
+
+def test_k2e_column_convention_is_inert_for_the_staggers_this_lane_uses():
+    """Why the convention above cannot reach the JAX lane.
+
+    The lane consumes only the A and B families, and their record->value
+    maps are INVARIANT under the column swap, so the ring classification
+    in ``k2e_remap_halo_rings`` reads the same table either way.  (The
+    staggered families are not invariant -- and the lane refuses them.)
+
+    Generator-side only: no fixture, no convention assumption.
+    """
+    got = compute_fv3_native_k2e(N, remap_ng=NG, k2e_nord=2)
+    for fam in ("A", "B"):
+        direct = _k2e_record_map(got[f"{fam}_ij"], got[f"{fam}_loc"],
+                                 got[f"{fam}_coef"])
+        swapped = _k2e_record_map(got[f"{fam}_ij"], got[f"{fam}_loc"],
+                                  got[f"{fam}_coef"], swap=True)
+        assert direct == swapped, f"{fam} is NOT swap-invariant"
+    # non-vacuity: the staggered families must NOT be swap-invariant,
+    # otherwise the check above is trivially true for any table
+    for fam in ("CX", "DY"):
+        direct = _k2e_record_map(got[f"{fam}_ij"], got[f"{fam}_loc"],
+                                 got[f"{fam}_coef"])
+        swapped = _k2e_record_map(got[f"{fam}_ij"], got[f"{fam}_loc"],
+                                  got[f"{fam}_coef"], swap=True)
+        assert direct != swapped, f"{fam} is unexpectedly swap-invariant"
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +473,11 @@ def test_k2e_remap_matches_numpy_and_jit(tab, stag, shape, ring):
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     assert _cmp(got, np.stack(ref), f"k2e[{stag}]") < 1e-12
     got_j = jx.k2e_remap_halo_rings_jit(jnp.asarray(f6), tab, stag, ring)
-    assert _bitwise_equal(got_j, got), "jit vs eager"
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(got_j, got, f"k2e[{stag}] jit vs eager") < 1e-12
     assert not _bitwise_equal(got, f6)
 
 
@@ -477,7 +584,11 @@ def test_corner_lagrange_fill_matches_numpy(tab, ectx, key, fld, stagger):
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     assert _cmp(got, np.stack(ref), f"corner[{key}]") < 1e-12
     got_j = jx.corner_lagrange_fill_jit(jnp.asarray(f6), tab, key)
-    assert _bitwise_equal(got_j, got), "jit vs eager"
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(got_j, got, f"corner[{key}] jit vs eager") < 1e-12
     # non-vacuity: the fill must move the 36 wedge slots per face
     assert not _bitwise_equal(got, f6)
 
@@ -519,7 +630,53 @@ def test_corner_lagrange_diagonal_is_the_average_of_two_directions(tab,
 # gate 1 + 2: c2l, packing, projections, strip write-back
 # ---------------------------------------------------------------------------
 
+def _c2l_window_report(arr, win, label):
+    """Non-finite counts inside the written window and in the scratch."""
+    a = np.asarray(arr)
+    sc = np.ones(a.shape, dtype=bool)
+    sc[:, win, win] = False
+    inside = int((~np.isfinite(a[:, win, win])).sum())
+    outside = int(np.isfinite(a[sc]).sum())
+    return (f"{label}: {inside} non-finite of {a[:, win, win].size} inside "
+            f"the written window, {outside} finite of {int(sc.sum())} in "
+            f"the scratch region"), inside, outside, sc
+
+
 def test_c2l_ord2_face_matches_numpy_and_jit(tab, ectx):
+    """VERDICT on the NaN region: (a) legitimate untouched scratch.
+
+    ``c2l_ord2`` with ``do_halo=.true.`` (fv_grid_utils.F90:2547-2628) is
+    defined on ONE ring around the compute domain -- Fortran
+    ``is-1..ie+1`` -- and the NumPy lane starts from
+    ``np.full(..., np.nan)`` and writes only that window.  At C12 that is
+    a 14x14 block of an 18x18 face, so 40% of every output array is
+    scratch the routine never defines, and it sits in the outer rings,
+    which is where the pytest array repr samples.
+
+    CORRECTION to the first reading of the job-9400424 failure: the NaN
+    slots are NOT what broke the old assertion.  ``_bitwise_equal``
+    calls ``np.array_equal(..., equal_nan=True)``, so NaNs in matching
+    positions already compare equal, and the two lanes' NaN masks DO
+    match (``_cmp`` asserts that, and it passed).  What failed was the
+    FINITE part: ``a11*u1 + a12*v1`` is a sum of products, so the jitted
+    lowering contracts it into an FMA and the eager one does not.  This
+    failure belongs to the same class as the other six, and the
+    "both sides all-NaN" in the report is the truncated array repr
+    sampling the scratch corners.
+
+    The NaN region is nevertheless worth pinning, and ``_cmp`` had a
+    real vacuity hole (an all-non-finite pair compared equal), so the
+    region is split and each half gets the assertion that can actually
+    discriminate:
+
+    * the written window must be entirely FINITE on BOTH lanes -- this
+      is the gate that fires if reading (b) is true and ``c2l`` really
+      is producing NaN where numbers belong;
+    * the scratch must be entirely NON-FINITE on BOTH lanes -- so if the
+      written window ever moves, the test fails instead of quietly
+      comparing fewer slots;
+    * values are compared on the window only.
+    """
     u6 = _rnd6((MA, MB), 13)
     v6 = _rnd6((MB, MA), 14)
     ru, rv = [], []
@@ -529,16 +686,29 @@ def test_c2l_ord2_face_matches_numpy_and_jit(tab, ectx):
         ru.append(a)
         rv.append(b)
     ga, gb = jx.c2l_ord2_face(jnp.asarray(u6), jnp.asarray(v6), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(ga, np.stack(ru), "c2l ua") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gb, np.stack(rv), "c2l va") < 1e-12
+    win = slice(tab.c2l_s, tab.c2l_e + 1)
+    assert (tab.c2l_e - tab.c2l_s + 1) == N + 2, (tab.c2l_s, tab.c2l_e)
     ja, jb = jx.c2l_ord2_face_jit(jnp.asarray(u6), jnp.asarray(v6), tab)
-    assert _bitwise_equal(ja, ga) and _bitwise_equal(jb, gb)
-    # the NaN structure is part of the contract, not an accident
-    assert not np.isfinite(np.asarray(ga)[:, 0, 0]).any()
+
+    for label, g, r, j in (("ua", ga, np.stack(ru), ja),
+                           ("va", gb, np.stack(rv), jb)):
+        for lane, arr in (("jax", g), ("numpy", r)):
+            msg, inside, outside, sc = _c2l_window_report(
+                arr, win, f"c2l {label} [{lane}]")
+            assert inside == 0, msg      # reading (b) would fire here
+            assert outside == 0, msg     # the window must not have moved
+            assert sc.sum() > 0, msg     # and scratch must exist at all
+        gw = np.asarray(g)[:, win, win]
+        rw = r[:, win, win]
+        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+        assert _cmp(gw, rw, f"c2l {label} window") < 1e-12
+        # a11*u1 + a12*v1 is a sum of products -> FMA contraction, so the
+        # jit gate is a bound on the window, not bitwise on the array
+        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+        assert _cmp(np.asarray(j)[:, win, win], gw,
+                    f"c2l {label} jit vs eager") < 1e-12
 
 
 def test_c2l_ord2_cgrid_face_matches_numpy(tab, ectx):
@@ -589,7 +759,14 @@ def test_projections_match_numpy_and_jit(tab, ectx):
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     assert _cmp(gc_v, np.stack([r[1] for r in rc]), "a2c vc") < 1e-12
     ju, jv = jx.a2d_project_jit(jnp.asarray(ug), jnp.asarray(vg), tab)
-    assert _bitwise_equal(ju, gd_u) and _bitwise_equal(jv, gd_v)
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(ju, gd_u, "a2d ud jit vs eager") < 1e-12
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(jv, gd_v, "a2d vd jit vs eager") < 1e-12
 
 
 def test_write_strips_match_numpy_including_the_overwrite_order(tab):
@@ -631,8 +808,12 @@ def test_geo_lattice_exchange_matches_numpy(tab, ectx):
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     assert _cmp(got, np.stack(ref), "geo_lattice_exchange") < 1e-12
-    assert _bitwise_equal(
-        jx.geo_lattice_exchange_jit(jnp.asarray(g6), tab), got)
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(jx.geo_lattice_exchange_jit(jnp.asarray(g6), tab), got,
+                "geo_lattice_exchange jit vs eager") < 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -651,8 +832,12 @@ def test_ext_scalar_a_matches_numpy_on_oracle_inputs(tab, ectx):
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     assert _cmp(got, np.stack(ref), "ext_scalar A") < 1e-12
-    assert _bitwise_equal(
-        jx.ext_scalar_sixface_jit(jnp.asarray(f6), tab, "A"), got)
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(jx.ext_scalar_sixface_jit(jnp.asarray(f6), tab, "A"), got,
+                "ext_scalar A jit vs eager") < 1e-12
     # the compute domain must be untouched by an exchange
     sl = slice(NG, NG + N)
     assert _bitwise_equal(np.asarray(got)[:, sl, sl], f6[:, sl, sl])
@@ -689,7 +874,14 @@ def test_ext_vector_dgrid_matches_numpy_on_oracle_inputs(tab, ectx):
     assert _cmp(gv, np.stack(rv), "ext_vector D v") < 1e-12
     ju, jv = jx.ext_vector_dgrid_sixface_jit(jnp.asarray(u6),
                                              jnp.asarray(v6), tab)
-    assert _bitwise_equal(ju, gu) and _bitwise_equal(jv, gv)
+    # weighted sum -> FMA contraction differs between the jitted and the
+    # eager lowering; a bound, not bitwise (see the module docstring)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(ju, gu, "ext_vector D u jit vs eager") < 1e-12
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _cmp(jv, gv, "ext_vector D v jit vs eager") < 1e-12
 
 
 def test_ext_vector_cgrid_matches_numpy_on_oracle_inputs(tab, ectx):

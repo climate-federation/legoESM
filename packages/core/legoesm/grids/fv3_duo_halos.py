@@ -208,7 +208,6 @@ import os
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.grids.fv3_native_halos import (
     compute_fv3_native_k2e,
     neighbor_index,

@@ -98,7 +98,7 @@ Dependence proofs (the four non-trivial vectorised loops)
    become one ``jax.vmap`` over the level axis: a2b reads only the plane
    it is handed (no level index appears in any of its expressions), and
    its ``qout`` scratch is never read before it is written WITHIN a call
-   (proved window by window in ``_a2b_ord4``'s docstring), so nothing
+   (proved window by window in ``a2b_ord4``'s docstring), so nothing
    carries from level k to level k+1.  vmap is a batching transform, not
    a reassociation -- each level executes the identical op sequence.
 3. **``replace=.true.`` is a read-after-write ACROSS the call boundary**:
@@ -141,7 +141,7 @@ reused, deliberately:
   duo takes the interior 4th-order arm EVERYWHERE and reads none of
   ``dxa``/``dya``/``grid``/``agrid``/``edge_*``.
 
-``_a2b_ord4`` below therefore mirrors ``fv3_native_d_sw.a2b_ord4``
+``a2b_ord4`` below therefore mirrors ``fv3_native_d_sw.a2b_ord4``
 statement for statement -- ALL arms: duo/bounded, the plain
 corner+edge arm (3-way corner extrapolation, one-sided west/east/south/
 north reconstructions, the ``c1``/``c2`` edge blends) and the
@@ -173,7 +173,7 @@ Deliberate deviations from the NumPy twin (each one declared)
 4. **Strict-``bool`` guards on ``hydrostatic``** (p_grad_c, one_grad_p).
    The NumPy lane branches on truthiness; a ``np.bool_``, a string or a
    tracer would silently take an arm.  Added guard, no numerics change.
-5. **``ng >= 2`` guard in ``_a2b_ord4``** and the shape guards in
+5. **``ng >= 2`` guard in ``a2b_ord4``** and the shape guards in
    ``geopk``.  The NumPy lane's ``fort`` views index ``i - ilo``, so a
    too-small halo WRAPS to the far edge and returns numbers; here it is
    a loud error (same class as ``fv3_nh_core.update_dz_c``'s ng guard).
@@ -298,11 +298,11 @@ def _require_bool(fname: str, name: str, v) -> None:
 # =====================================================================
 
 def a2b_gridstruct_view(gs: dict, bd) -> dict:
-    """The geometry ``_a2b_ord4`` consumes, as float64 jax arrays.
+    """The geometry ``a2b_ord4`` consumes, as float64 jax arrays.
 
     JAX twin of ``fv3_native_pgrad.a2b_gridstruct_view``.  Two declared
     differences (module docstring, deviations 1-2): the arrays are NOT
-    wrapped in ``fort`` views (``_a2b_ord4`` carries the Fortran origins
+    wrapped in ``fort`` views (``a2b_ord4`` carries the Fortran origins
     itself) and the corner/domain FLAGS are not carried in the dict --
     they are explicit static keyword arguments, because a Python bool
     inside a traced pytree becomes a tracer.
@@ -354,7 +354,7 @@ def _extrap_corner(p0, p1, p2, q1, q2):
     return q1 + x1 / (x2 - x1) * (q1 - q2)
 
 
-def _a2b_ord4(qin, qout, geom: dict, npx: int, npy: int, is_: int, ie: int,
+def a2b_ord4(qin, qout, geom: dict, npx: int, npy: int, is_: int, ie: int,
               js: int, je: int, ng: int, replace: bool | None = None,
               duogrid: bool = False, *, bounded_domain: bool = False,
               grid_type: int = 0, sw_corner: bool = True,
@@ -384,17 +384,17 @@ def _a2b_ord4(qin, qout, geom: dict, npx: int, npy: int, is_: int, ie: int,
     """
     if ng < 2:
         raise ValueError(
-            f"_a2b_ord4: ng={ng} < 2 unsupported (the interior stencil "
+            f"a2b_ord4: ng={ng} < 2 unsupported (the interior stencil "
             f"reads i = is-2 and j = js-2; the NumPy lane's fort views "
             f"would silently WRAP to the far edge instead of raising)")
-    _require_bool("_a2b_ord4", "duogrid", duogrid)
-    _require_bool("_a2b_ord4", "bounded_domain", bounded_domain)
+    _require_bool("a2b_ord4", "duogrid", duogrid)
+    _require_bool("a2b_ord4", "bounded_domain", bounded_domain)
 
     qin = jnp.asarray(qin)
     qout = jnp.asarray(qout)
     if qin.ndim != 2 or qout.ndim != 2:
         raise ValueError(
-            f"_a2b_ord4: qin/qout must be 2-D (the Fortran dummy is 2-D; "
+            f"a2b_ord4: qin/qout must be 2-D (the Fortran dummy is 2-D; "
             f"the k loop lives in the caller), got {qin.shape}/"
             f"{qout.shape}")
     dtype = qin.dtype
@@ -832,7 +832,7 @@ def _a2b_ord4_k(qin3, qout3, geom: dict, npx: int, npy: int, is_: int,
                 ie: int, js: int, je: int, ng: int,
                 replace: bool | None = None, duogrid: bool = False,
                 **flags):
-    """``_a2b_ord4`` over a trailing k axis (the caller's ``do k`` loop).
+    """``a2b_ord4`` over a trailing k axis (the caller's ``do k`` loop).
 
     The Fortran calls ``a2b_ord4`` once per level with a 2-D slice
     ``q(isd,jsd,k)`` (dyn_core.F90:2399/:2409/:2456 and :2182-:2191).
@@ -841,7 +841,7 @@ def _a2b_ord4_k(qin3, qout3, geom: dict, npx: int, npy: int, is_: int,
     the plane it is handed; (b) its writes land in that same plane
     (``replace``) and in ``qout``; (c) ``qout`` is never read before it
     is written WITHIN a call (established window by window in
-    ``_a2b_ord4``'s docstring), so nothing survives from level k to level
+    ``a2b_ord4``'s docstring), so nothing survives from level k to level
     k+1 through the shared scratch -- which is what makes the Fortran's
     OMP ``private(wk1)`` legal in the first place.  ``jax.vmap`` maps the
     identical operation sequence over the axis: a batching transform, no
@@ -851,7 +851,7 @@ def _a2b_ord4_k(qin3, qout3, geom: dict, npx: int, npy: int, is_: int,
     """
 
     def _one(a, b):
-        return _a2b_ord4(a, b, geom, npx, npy, is_, ie, js, je, ng,
+        return a2b_ord4(a, b, geom, npx, npy, is_, ie, js, je, ng,
                          replace=replace, duogrid=duogrid, **flags)
 
     return jax.vmap(_one, in_axes=(2, 2), out_axes=(2, 2))(qin3, qout3)
@@ -1193,7 +1193,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     (module docstring, deviation 3).
     """
     _require_bool("one_grad_p", "hydrostatic", hydrostatic)
-    # Checked HERE, not only inside _a2b_ord4: a raise from inside the
+    # Checked HERE, not only inside a2b_ord4: a raise from inside the
     # vmap trace is harder to attribute, and these two select the
     # interior-everywhere arm vs the corner/edge arm -- a different set
     # of formulas, not a different number.

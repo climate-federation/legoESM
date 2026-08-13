@@ -36,6 +36,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
@@ -43,19 +44,14 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 
-from legoesm.core.fv3_native_pgrad import (  # noqa: E402
-    a2b_gridstruct_view as a2b_view_np,
-    geopk as geopk_np,
-    nh_p_grad as nh_p_grad_np,
-    one_grad_p as one_grad_p_np,
-    p_grad_c as p_grad_c_np,
-    pe_halo as pe_halo_np,
-    pk3_halo as pk3_halo_np,
-    pln_halo as pln_halo_np,
-)
+# The NumPy twin is imported as a MODULE (`npg.geopk`, `npg.p_grad_c`,
+# ...) rather than as eight aliased names: it names the lane at every
+# call site in a two-lane parity file, and it keeps ruff's isort from
+# splitting an aliased member list into eight separate from-imports.
+from legoesm.core import fv3_native_pgrad as npg  # noqa: E402
 from legoesm.core.fv3_native_sw_core import BIG_NUMBER, Bounds  # noqa: E402
 from legoesm.core.fv3_pgrad import (  # noqa: E402
-    _a2b_ord4,
+    a2b_ord4,
     a2b_gridstruct_view,
     geopk,
     geopk_jit,
@@ -82,8 +78,9 @@ from legoesm.core.fv3_pgrad import (  # noqa: E402
 
 from tests.grids.test_fv3_native_pgrad import (  # noqa: E402
     M_A,
-    N,
+    M_B,
     NG,
+    N,
     _gs,
     _nh_pgrad_fields,
     _synthetic,
@@ -122,19 +119,33 @@ def _gs_cached() -> dict:
     return _GS_CACHE["gs"]
 
 
-# check_grads' f64 gradient tolerance is atol = rtol = 1e-5 and its step
-# `eps` is ABSOLUTE (jax `_src/public_test_util.py`: EPS = 1e-4,
-# `default_gradient_tolerance[float64] = 1e-5`, central difference).  Two
-# consequences drive every gradient gate below:
-#   * a DIRECTIONAL DERIVATIVE smaller than ~1e-5 is compared against
-#     atol and the check becomes VACUOUS -- so each call normalises its
-#     inputs AND its outputs to O(1), which makes every derivative a
-#     RELATIVE sensitivity, and operand groups whose sensitivity differs
-#     by orders of magnitude get their own call rather than being
-#     swamped in the shared VJP inner product;
-#   * with O(1) inputs the default 1e-4 step is a 1e-4 RELATIVE
-#     perturbation, the usual f64 central-difference choice.
-_GRAD_MIN_SENSITIVITY = 1e-5
+# check_grads, READ FROM THE INSTALLED SOURCE (jax
+# `_src/public_test_util.py`), not from memory:
+#   :33   EPS = 1e-4                        -- an ABSOLUTE central-difference step
+#   :88   default_gradient_tolerance[float64] = 1e-5
+#   :159-164 _assert_numpy_close scales BOTH bounds by the leaf size:
+#            `_assert_numpy_allclose(a, b, atol=atol * a.size,
+#                                    rtol=rtol * b.size)`
+# so the effective per-leaf bound is 1e-5 * size -- which is exactly the
+# `rtol=0.00312, atol=0.00312` printed by job 9400424 on a 312-element
+# leaf (12 x 13 x 2).  Two consequences drive every gradient gate below:
+#   * a DIRECTIONAL DERIVATIVE below ~1e-5 * leaf_size (3e-3 for the
+#     u/v leaves here, 5e-3 for the 507-element pk/gz leaves) is
+#     compared against atol and the check is VACUOUS.  Each call
+#     therefore normalises its inputs AND its outputs to O(1), which
+#     turns every derivative into a RELATIVE sensitivity, and operand
+#     groups whose sensitivity differs by orders of magnitude get their
+#     own call instead of being swamped in the shared VJP inner product.
+#   * with O(1) inputs the 1e-4 step is a 1e-4 RELATIVE perturbation,
+#     the usual f64 central-difference choice.
+# An earlier version of this comment said the floor was 1e-5 flat; that
+# was wrong by the size factor (~2.5 orders here) and is corrected here.
+_GRAD_TOL_PER_ELEMENT = 1e-5
+
+
+def _grad_vacuity_floor(n_elements: int) -> float:
+    """The bound a directional derivative must clear to be tested."""
+    return _GRAD_TOL_PER_ELEMENT * n_elements
 
 
 def _rel(a, b) -> float:
@@ -157,6 +168,78 @@ def _finite(name, x):
         f"{np.asarray(x).size})")
 
 
+def test_grad_vacuity_floor_matches_the_installed_jax_rule():
+    """Pin the rule every gradient gate's scaling is built on.
+
+    ``0.00312`` in job 9400424's log is ``1e-5 * 312`` -- the per-element
+    gradient tolerance times the leaf size.  If a jax upgrade changes
+    either factor, every scaling choice below silently moves toward
+    vacuous, so the rule is asserted rather than commented.  A moved
+    module path fails LOUDLY here on purpose; do not turn that into a
+    skip."""
+    from jax._src import public_test_util as ptu
+
+    assert ptu.default_gradient_tolerance[np.dtype(np.float64)] == \
+        _GRAD_TOL_PER_ELEMENT
+    assert _grad_vacuity_floor(312) == pytest.approx(0.00312, rel=1e-12)
+    # and the step is ABSOLUTE, which is why the fixtures are normalised
+    assert ptu.EPS == 1e-4
+
+
+def _tree_dot(a, b) -> float:
+    la = jax.tree_util.tree_leaves(a)
+    lb = jax.tree_util.tree_leaves(b)
+    assert len(la) == len(lb), (len(la), len(lb))
+    return float(sum(
+        np.dot(np.asarray(x, dtype=np.float64).ravel(),
+               np.asarray(y, dtype=np.float64).ravel())
+        for x, y in zip(la, lb)))
+
+
+def _adjoint_residual(f, primals, seed=0):
+    """Relative residual of the adjoint identity ``<J v, w> == <v, J^T w>``.
+
+    NO finite differences: ``J v`` comes from ``jax.jvp`` and ``J^T w``
+    from ``jax.vjp``, so the identity is exact in exact arithmetic and
+    the residual is pure floating-point roundoff -- its power does NOT
+    depend on the FD step, on the operand scaling, or on the dynamic
+    range of the output, which is precisely what an FD check loses on a
+    badly spread array (job 9400424).
+
+    It is also strictly stronger than an FD check for a THREADING
+    defect: if the forward pass and the adjoint disagree about which
+    array a value came from -- the `replace=True` read-after-write
+    through ``a2b_ord4`` being the candidate here -- the two inner
+    products differ at O(1), not at the noise floor.
+
+    Returns ``(relative residual, <J v, w>, <v, J^T w>)``.  The caller
+    asserts on the residual AND on ``<J v, w> != 0`` (a zero Jacobian
+    would satisfy the identity trivially).
+    """
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
+    _, jv = jax.jvp(f, primals, v)
+    _, vjp_fn = jax.vjp(f, *primals)
+    w = jax.tree_util.tree_map(
+        lambda x: jnp.asarray(rng.standard_normal(x.shape)), jv)
+    jtw = vjp_fn(w)
+    lhs = _tree_dot(jv, w)
+    rhs = _tree_dot(v, jtw)
+    return abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-300), lhs, rhs
+
+
+def _check_adjoint(name, f, primals, tol, seed=0):
+    r, lhs, rhs = _adjoint_residual(f, primals, seed=seed)
+    assert abs(lhs) > 0.0, (
+        f"{name}: <J v, w> == 0 -- the identity is satisfied trivially, "
+        f"so this gate proves nothing (check the window/scale)")
+    assert r <= tol, (
+        f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
+        f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
+        f"value is {r:.3e}")
+
+
 # =====================================================================
 # a2b_ord4 -- the private mirror one_grad_p / nh_p_grad are built on
 # =====================================================================
@@ -177,7 +260,7 @@ def _run_a2b_np(qin, gs, *, replace, duogrid, grid_type=0,
 
     gsv = dict(gs)
     gsv.update(grid_type=grid_type, bounded_domain=bounded_domain)
-    gsf = a2b_view_np(gsv, BD)
+    gsf = npg.a2b_gridstruct_view(gsv, BD)
     qi = np.array(qin, dtype=np.float64, copy=True)
     qo = np.full((M_A, M_A), np.nan)
     a2b_ord4(fort(qi, BD.isd, BD.jsd), fort(qo, BD.isd, BD.jsd), gsf,
@@ -189,7 +272,7 @@ def _run_a2b_np(qin, gs, *, replace, duogrid, grid_type=0,
 def _run_a2b_jax(qin, gs, *, replace, duogrid, grid_type=0,
                  bounded_domain=False):
     geom = a2b_gridstruct_view(gs, BD)
-    qi, qo = _a2b_ord4(
+    qi, qo = a2b_ord4(
         jnp.asarray(qin), jnp.full((M_A, M_A), jnp.nan, jnp.float64),
         geom, NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, NG, replace=replace,
         duogrid=duogrid, grid_type=grid_type,
@@ -239,10 +322,36 @@ def test_a2b_ord4_jax_rejects_bad_shape_and_small_ng():
     geom = a2b_gridstruct_view(gs, BD)
     q3 = jnp.zeros((M_A, M_A, 2), jnp.float64)
     with pytest.raises(ValueError, match="2-D"):
-        _a2b_ord4(q3, q3, geom, NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, NG)
+        a2b_ord4(q3, q3, geom, NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, NG)
     q2 = jnp.zeros((M_A, M_A), jnp.float64)
     with pytest.raises(ValueError, match="ng=1"):
-        _a2b_ord4(q2, q2, geom, NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, 1)
+        a2b_ord4(q2, q2, geom, NPX, NPY, BD.is_, BD.ie, BD.js, BD.je, 1)
+
+
+@pytest.mark.parametrize("arm", ["duo", "plain"])
+def test_a2b_ord4_jax_adjoint_consistency(arm):
+    """FD-free adjoint identity on the operator the whole pgrad lane is
+    built from.  This is where a ``replace=True`` threading defect would
+    live, and it also proves the NaN-filled ``qout`` scratch stays out of
+    the ADJOINT (a constant NaN whose cotangent is discarded), not just
+    out of the primal."""
+    gs = _gs_cached()
+    q = _a2b_field()
+    geom = a2b_gridstruct_view(gs, BD)
+    box = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
+
+    def f(qin):
+        qi, qo = a2b_ord4(
+            qin, jnp.full((M_A, M_A), jnp.nan, jnp.float64), geom, NPX,
+            NPY, BD.is_, BD.ie, BD.js, BD.je, NG, replace=True,
+            duogrid=(arm == "duo"), bounded_domain=False, grid_type=0,
+            sw_corner=True, se_corner=True, ne_corner=True,
+            nw_corner=True)
+        return qi[box], qo[box]
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint(f"a2b_ord4[{arm}]", f, (q,), 1e-12)
 
 
 def test_a2b_gridstruct_view_rejects_float32_and_missing_keys():
@@ -281,7 +390,7 @@ def _geopk_kw(km, *, cg, computehalo, fill=BIG_NUMBER, npx=NPX,
 def test_geopk_jax_matches_numpy_lane(km, cg, computehalo):
     st = _synthetic(km)
     kw = _geopk_kw(km, cg=cg, computehalo=computehalo, fill=0.0)
-    want = geopk_np(st["delp"], st["pt"], st["hs"], BD, **kw)
+    want = npg.geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     got = geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
         # TOL-PENDING: provisional bound; the orchestrator's measurement job will
@@ -300,7 +409,7 @@ def test_geopk_jax_write_footprint_is_identical(km, cg, computehalo):
     of the sentinel MASK certifies the write window itself."""
     st = _synthetic(km)
     kw = _geopk_kw(km, cg=cg, computehalo=computehalo)
-    want = geopk_np(st["delp"], st["pt"], st["hs"], BD, **kw)
+    want = npg.geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     got = geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
         mw = np.asarray(want[name]) == BIG_NUMBER
@@ -425,6 +534,27 @@ def test_geopk_jax_check_grads_order2():
                 order=2, modes=("fwd", "rev"))
 
 
+def test_geopk_jax_adjoint_consistency():
+    """FD-free adjoint identity for the whole geopk chain, including both
+    ``lax.scan`` recurrences (the top-down p1d accumulator and the
+    bottom-up gz integral) and the pkz division."""
+    km = 3
+    bd, delp, pt, hs = _small_geopk_fixture(km=km)
+    npx = npy = bd.ie + 1
+    kw = _geopk_kw(km, cg=False, computehalo=True, fill=0.0, npx=npx,
+                   npy=npy)
+    box = (slice(bd.is_ - bd.isd - 2, bd.ie - bd.isd + 3),) * 2
+
+    def f(delp_, pt_, hs_):
+        o = geopk(delp_, pt_, hs_, bd, **kw)
+        return (o["pk"][box], o["gz"][box], o["pe"], o["peln"],
+                o["pkz"])
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("geopk", f, (delp, pt, hs), 1e-12)
+
+
 # ---------------------------------------------------------------- gate 5
 def _poison_ring(a, width=2):
     """NaN in the OUTERMOST ``width`` rows/cols of the (i, j) axes."""
@@ -493,7 +623,7 @@ def test_p_grad_c_jax_matches_numpy_lane(hydrostatic):
     delpc = pkc[:, :, 1:] - pkc[:, :, :-1] if not hydrostatic else st["delp"]
 
     uc_n, vc_n = np.array(st["uc"]), np.array(st["vc"])
-    p_grad_c_np(1.0, delpc, pkc, gz, uc_n, vc_n, gs, BD, npz=km,
+    npg.p_grad_c(1.0, delpc, pkc, gz, uc_n, vc_n, gs, BD, npz=km,
                 hydrostatic=hydrostatic)
     uc_j, vc_j = p_grad_c(1.0, delpc, pkc, gz, st["uc"], st["vc"], gs, BD,
                           npz=km, hydrostatic=hydrostatic)
@@ -628,6 +758,38 @@ def test_p_grad_c_jax_check_grads_order2():
                 order=2, modes=("fwd", "rev"))
 
 
+def test_p_grad_c_jax_adjoint_consistency():
+    """FD-free adjoint identity, split the same way as the FD gate: the
+    increment is ~1e-6 of the wind, so a single call would let a defect
+    in the pkc/gz block hide under the uc/vc pass-through's contribution
+    to the inner product."""
+    km = 2
+    st, pkc, gz = _pgc_fixture(km)
+    gs = _gs_cached()
+    uw = (slice(NG, NG + N + 1), slice(NG, NG + N))
+    vw = (slice(NG, NG + N), slice(NG, NG + N + 1))
+    z_uc = np.zeros_like(st["uc"])
+    z_vc = np.zeros_like(st["vc"])
+
+    def f_bracket(pkc_, gz_):
+        uo, vo = p_grad_c(1.0, None, pkc_, gz_, z_uc, z_vc, gs, BD,
+                          npz=km, hydrostatic=True)
+        return uo[uw], vo[vw]
+
+    def f_pass(uc_, vc_):
+        uo, vo = p_grad_c(1.0, None, pkc, gz, uc_, vc_, gs, BD, npz=km,
+                          hydrostatic=True)
+        return uo[uw], vo[vw]
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("p_grad_c bracket", f_bracket, (pkc, gz), 1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("p_grad_c passthrough", f_pass,
+                   (st["uc"], st["vc"]), 1e-12)
+
+
 # ---------------------------------------------------------------- gate 5
 def test_p_grad_c_jax_nan_poison_stays_out_of_primal_and_vjp():
     """p_grad_c reads pkc/gz on i,j = is-1..ie+1 only -> the outer TWO
@@ -678,6 +840,47 @@ def _ogp_fixture(km=2, seed=51):
     return delp, pk, gz, u, v, divg2
 
 
+def _smooth2d(shape, amp, phase=0.0):
+    """1 + amp * (a full-domain cosine x sine) -- smooth at the grid
+    scale (period = the whole side, 18 or 19 cells), so a2b_ord4's
+    4-point stencils reproduce it to O(h^4 * curvature)."""
+    ii, jj = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]),
+                         indexing="ij")
+    return 1.0 + amp * (np.cos(2.0 * np.pi * (ii + phase) / shape[0])
+                        * np.sin(2.0 * np.pi * (jj + 0.5) / shape[1]))
+
+
+def _wellcond_fields(km):
+    """A SMOOTH, physically-shaped column for the order-2 FD gates.
+
+    Every 3-D field is ``(level profile) * (1 +- 2% smooth in i, j)``, so
+    a2b's B-grid interface difference stays within 2% of the level
+    increment -- see the rationale in
+    :func:`test_one_grad_p_jax_check_grads_order2_well_conditioned`.
+    The level increments (2.5, 3.5, 4.5) VARY with k on purpose: a
+    constant increment would make the momentum weight ``wk`` independent
+    of k and a k-shift in it invisible.
+    """
+    sa = _smooth2d((M_A, M_A), 0.02)
+    p_lev = np.array([2.0 + 2.0 * k + 0.5 * k * k for k in range(km + 1)])
+    g_lev = np.array([2.0e4 * (km - k) + 1.0e3 for k in range(km + 1)])
+    su = _smooth2d((M_A, M_B), 0.3)
+    sv = _smooth2d((M_B, M_A), 0.3, phase=0.5)
+    return {
+        "pk": np.stack([p * sa for p in p_lev], axis=-1),
+        "gz": np.stack([g * sa for g in g_lev], axis=-1),
+        "pp": np.stack([30.0 * (k + 1) * sa for k in range(km + 1)],
+                       axis=-1),
+        "delp": np.stack([1.0e4 * (1.0 + 0.1 * k) * sa
+                          for k in range(km)], axis=-1),
+        "u": np.stack([10.0 * (1.0 + 0.1 * k) * su for k in range(km)],
+                      axis=-1),
+        "v": np.stack([8.0 * (1.0 - 0.05 * k) * sv for k in range(km)],
+                      axis=-1),
+        "divg2": _smooth2d((N + 1, N + 1), 0.5),
+    }
+
+
 # ---------------------------------------------------------------- gate 1
 @pytest.mark.parametrize("km", [1, 2, 3])
 @pytest.mark.parametrize("d_ext", [0.0, 0.02])
@@ -688,7 +891,7 @@ def test_one_grad_p_jax_matches_numpy_lane(km, d_ext):
 
     u_n, v_n = np.array(u), np.array(v)
     pk_n, gz_n = np.array(pk), np.array(gz)
-    one_grad_p_np(u_n, v_n, pk_n, gz_n, divg2, None, gs, BD, **kw)
+    npg.one_grad_p(u_n, v_n, pk_n, gz_n, divg2, None, gs, BD, **kw)
 
     u_j, v_j, pk_j, gz_j = one_grad_p(u, v, pk, gz, divg2, None, gs, BD,
                                       **kw, **_ogp_flags())
@@ -760,61 +963,164 @@ def test_one_grad_p_jax_rejects_float32_every_operand(bad):
                    None, gs, BD, **_ogp_kw(km), **_ogp_flags())
 
 
-# ---------------------------------------------------------------- gate 4
-def test_one_grad_p_jax_check_grads_order2():
-    """one_grad_p is rational in its operands: a2b_ord4's duo arm is a
-    fixed linear stencil and the momentum bracket is a product of
-    differences over ``wk(i,j) + wk(i+1,j)`` (:2466).  That denominator
-    is the ONLY singular site on this arm (the plain arm adds
-    ``arcsin(sqrt(.))`` in ``_great_circle_dist``, non-smooth at
-    coincident/antipodal points -- not exercised here, and named in the
-    module docstring).  The control below pins the denominator away from
-    zero with an FD-safe margin."""
-    km = 2
-    delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
-    gs = _gs_cached()
-    kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
+UW = (slice(NG, NG + N), slice(NG, NG + N + 1))       # u write window
+VW = (slice(NG, NG + N + 1), slice(NG, NG + N))       # v write window
+BW = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))   # the B box
 
-    _, _, pk_b, _ = one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)
-    b = np.asarray(pk_b)[NG:NG + N + 1, NG:NG + N + 1, :]
-    wk = b[:, :, 1:] - b[:, :, :-1]
-    den_u = np.abs(wk[:-1, :, :] + wk[1:, :, :])
-    den_v = np.abs(wk[:, :-1, :] + wk[:, 1:, :])
-    assert den_u.min() > 1e-3, den_u.min()
-    assert den_v.min() > 1e-3, den_v.min()
 
-    uw = (slice(NG, NG + N), slice(NG, NG + N + 1))
-    vw = (slice(NG, NG + N + 1), slice(NG, NG + N))
-    bw = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
-    s_pk, s_gz = 3.0, 2.0e3
-    u_out = np.abs(np.asarray(
-        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[uw]).max()
-    assert u_out > 0.0
+def _ogp_groups(fields, gs, kw, scales):
+    """The two operand groups of one_grad_p, as closures.
 
-    # Group A: the DOMINANT directions (the whole momentum bracket is
-    # the pk/gz term -- rdx ~ 1.2e-6 times ~3e4).
+    Group A = pk/gz, which ARE the momentum bracket.  Group B = u, v and
+    divg2, which enter it LINEARLY and are then multiplied by
+    rdx ~ 1.2e-6, so their sensitivity is ~1e-5 of group A's; a shared
+    call would compare them against atol and pass vacuously, so group B
+    gets its own call with the wind outputs scaled by 1e6 instead.
+    """
+    pk, gz, u, v, divg2 = fields
+    s_pk, s_gz, s_u = scales
+
     def f_pg(pk_h, gz_h):
         uo, vo, pko, gzo = one_grad_p(u, v, pk_h * s_pk, gz_h * s_gz,
                                       divg2, None, gs, BD, **kw)
-        return (uo[uw] / u_out, vo[vw] / u_out, pko[bw] / s_pk,
-                gzo[bw] / s_gz)
+        return (uo[UW] / s_u, vo[VW] / s_u, pko[BW] / s_pk,
+                gzo[BW] / s_gz)
 
-    check_grads(f_pg, (jnp.asarray(pk / s_pk), jnp.asarray(gz / s_gz)),
-                order=2, modes=("fwd", "rev"))
-
-    # Group B: u/v/divg2 enter the bracket LINEARLY and are multiplied by
-    # rdx ~ 1.2e-6, so their sensitivity is ~1e-5 of group A's -- a
-    # shared call would compare them against atol and pass vacuously.
-    # Their own call scales the output by 1e6 instead, putting the
-    # derivative at ~1.2.
     def f_lin(u_, v_, divg2_):
         uo, vo, _, _ = one_grad_p(u_, v_, pk, gz, divg2_, None, gs, BD,
                                   **kw)
-        return uo[uw] * 1.0e6, vo[vw] * 1.0e6
+        return uo[UW] * 1.0e6, vo[VW] * 1.0e6
 
+    return f_pg, f_lin
+
+
+# ---------------------------------------------------------------- gate 4
+def test_one_grad_p_jax_check_grads_order1():
+    """FIRST-ORDER FD on the harsh (random) fixture -- and the
+    DISCRIMINATOR for job 9400424's order-2 failure.
+
+    That run raised on ``JVP of JVP tangent``.  ``_check_grads``
+    (jax `_src/public_test_util.py`) runs the order-1 forward check
+    FIRST and only recurses into ``_check_grads(jvp(f), ..., order-1)``
+    if it passes, and the recursion is what prefixes the message with
+    ``JVP of``.  So order-1 forward was already green there and the
+    defect was in the second tangent, NOT in the Jacobian -- but the
+    order-1 REVERSE check is never reached once the forward recursion
+    raises, so it was untested.  This test makes both mechanical.
+
+    The remaining reverse-mode question -- whether the ``replace=True``
+    read-after-write is threaded consistently between the forward pass
+    and the adjoint -- is settled tolerance-free by
+    :func:`test_one_grad_p_jax_adjoint_consistency`.
+    """
+    km = 2
+    _delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+    gs = _gs_cached()
+    kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
+    s_pk, s_gz = 3.0, 2.0e3
+    s_u = np.abs(np.asarray(
+        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
+    assert s_u > 0.0
+
+    f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
+                              (s_pk, s_gz, s_u))
+    check_grads(f_pg, (jnp.asarray(pk / s_pk), jnp.asarray(gz / s_gz)),
+                order=1, modes=("fwd", "rev"))
+    check_grads(f_lin, (jnp.asarray(u), jnp.asarray(v),
+                        jnp.asarray(divg2)), order=1,
+                modes=("fwd", "rev"))
+
+
+def test_one_grad_p_jax_check_grads_order2_well_conditioned():
+    """SECOND-ORDER FD, on a fixture whose momentum denominator is
+    conditioned by CONSTRUCTION.
+
+    Why not the random fixture: job 9400424 measured a second tangent of
+    3.472e5 at element [8, 1, 0] of a 312-element (12 x 13 x 2) wind
+    leaf whose neighbours print at ~1e2 and ~1e-2 -- a ~3.5e3 spread on
+    an output normalised to O(1).  The only nonlinearity here is
+    ``1 / (wk(i,j) + wk(i+1,j))`` (:2466), whose second derivative goes
+    as that denominator^-3, so a 3.5e3 spread implies (PLAUSIBLE, not
+    measured) a denominator ~15x below the typical one at that cell.
+    The old control -- ``den.min() > 1e-3`` -- could not see that: it
+    admitted a denominator three orders below the typical value.
+
+    The fix is the fixture, not the bound.  ``a2b_ord4``'s stencils are
+    symmetric 4-point with weights summing to 1 (B1+B2 = 1/2 twice,
+    A1+A2 = 1/2 twice), so on a field that is smooth at the grid scale
+    the B-grid value is the corner value to O(h^4 * curvature).  Building
+    ``pk`` as ``P_k * (1 + 0.02 * smooth(i, j))`` with strictly
+    increasing ``P_k`` therefore pins every B-grid interface difference
+    near ``P_(k+1) - P_k`` -- while still VARYING in (i, j), so a window
+    slip in ``wk`` stays visible.  The random column does not have that
+    property: ``cumsum(|N(0,1)| + 1)`` has O(1) curvature at the grid
+    scale, and a2b's negative outer weights (-1/12, -1/16) can then
+    drive a B-grid difference far below the A-grid minimum of 1.
+    """
+    km = 3
+    f = _wellcond_fields(km)
+    gs = _gs_cached()
+    kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
+    pk, gz, u, v, divg2 = (f["pk"], f["gz"], f["u"], f["v"], f["divg2"])
+
+    _, _, pk_b, _ = one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)
+    b = np.asarray(pk_b)[BW]
+    wk = b[:, :, 1:] - b[:, :, :-1]
+    den_u = np.abs(wk[:-1, :, :] + wk[1:, :, :])
+    den_v = np.abs(wk[:, :-1, :] + wk[:, 1:, :])
+    # Conditioning control, stated as a RATIO (the absolute-floor form is
+    # what failed to catch the 9400424 outlier).  By construction the
+    # level increments are 2.5 / 3.5 / 4.5 and the (i, j) modulation is
+    # +-2%, so den = wk(i) + wk(i+1) spans ~4.9 to ~9.2.
+    for nm, d in (("u", den_u), ("v", den_v)):
+        assert d.min() > 1.0, (nm, d.min())
+        assert d.min() / d.max() > 0.3, (nm, d.min(), d.max())
+        # Non-vacuity of the control itself: wk must actually vary, or a
+        # window slip in it would be invisible.
+        assert d.max() - d.min() > 1e-6, (nm, d.min(), d.max())
+
+    s_pk, s_gz = 10.0, 2.0e4
+    s_u = np.abs(np.asarray(
+        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
+    assert s_u > 0.0
+    f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
+                              (s_pk, s_gz, s_u))
+    check_grads(f_pg, (jnp.asarray(pk / s_pk), jnp.asarray(gz / s_gz)),
+                order=2, modes=("fwd", "rev"))
     check_grads(f_lin, (jnp.asarray(u), jnp.asarray(v),
                         jnp.asarray(divg2)), order=2,
                 modes=("fwd", "rev"))
+
+
+def test_one_grad_p_jax_adjoint_consistency():
+    """``<J v, w> == <v, J^T w>`` on the HARSH (random) fixture -- the
+    gate the campaign strategy requires (S7 part 3).
+
+    No finite differences, so this is the check that survives the
+    dynamic range that defeated order-2 FD above, and it is the one that
+    would catch a mis-threaded ``replace=True`` (a forward pass and an
+    adjoint that disagree about which array a value came from differ at
+    O(1) here, not at the noise floor).
+
+    Run PER GROUP, with the same split as the FD gates: the identity is
+    one SCALAR comparison, so folding a direction whose sensitivity is
+    1e-5 of another's into the same call lets a defect in the weak one
+    hide under the strong one's contribution to the inner product."""
+    km = 2
+    _delp, pk, gz, u, v, divg2 = _ogp_fixture(km)
+    gs = _gs_cached()
+    kw = {**_ogp_kw(km, d_ext=0.02), **_ogp_flags()}
+    s_pk, s_gz = 3.0, 2.0e3
+    s_u = np.abs(np.asarray(
+        one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)[0])[UW]).max()
+    f_pg, f_lin = _ogp_groups((pk, gz, u, v, divg2), gs, kw,
+                              (s_pk, s_gz, s_u))
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("one_grad_p pk/gz", f_pg, (pk / s_pk, gz / s_gz), 1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("one_grad_p u/v/divg2", f_lin, (u, v, divg2), 1e-12)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -869,7 +1175,7 @@ def test_nh_p_grad_jax_matches_numpy_lane(km, use_logp):
 
     u_n, v_n = np.array(u), np.array(v)
     pp_n, pk_n, gz_n = np.array(pp), np.array(pk3), np.array(gz)
-    nh_p_grad_np(u_n, v_n, pp_n, gz_n, np.array(delp), pk_n, gs, BD, **kw)
+    npg.nh_p_grad(u_n, v_n, pp_n, gz_n, np.array(delp), pk_n, gs, BD, **kw)
 
     u_j, v_j, pp_j, pk_j, gz_j = nh_p_grad(u, v, pp, gz, delp, pk3, gs,
                                            BD, **kw, **_ogp_flags())
@@ -947,56 +1253,118 @@ def test_nh_p_grad_jax_rejects_float32_every_operand(bad):
                   ops["pk3"], gs, BD, **_nhpg_kw(km), **_ogp_flags())
 
 
+def _nhpg_groups(fields, gs, kw, scales):
+    """nh_p_grad's two operand groups (same split rationale as
+    :func:`_ogp_groups`).
+
+    Group A = pk3/gz, the dominant hydrostatic ``du1`` direction.
+    Group B = pp (the NH term, ~0.3% of the bracket), the linear u/v
+    pass-through, and delp -- which enters ONLY through the NH weight
+    ``wk1 = a2b(delp)``, i.e. as ``1/delp``.  All three are ~1e-5 of
+    group A's sensitivity, so their call scales the wind outputs by 1e6;
+    ``ppo`` carries pp's own O(1) direction.
+    """
+    pk3, gz, pp, delp, u, v = fields
+    s_pk, s_gz, s_pp, s_dp, s_u = scales
+
+    def f_pg(pk3_h, gz_h):
+        uo, vo, _, pko, gzo = nh_p_grad(u, v, pp, gz_h * s_gz, delp,
+                                        pk3_h * s_pk, gs, BD, **kw)
+        return (uo[UW] / s_u, vo[VW] / s_u, pko[BW] / s_pk,
+                gzo[BW] / s_gz)
+
+    def f_nh(u_, v_, pp_h, delp_h):
+        uo, vo, ppo, _, _ = nh_p_grad(u_, v_, pp_h * s_pp, gz,
+                                      delp_h * s_dp, pk3, gs, BD, **kw)
+        return uo[UW] * 1.0e6, vo[VW] * 1.0e6, ppo[BW] / s_pp
+
+    return f_pg, f_nh
+
+
 # ---------------------------------------------------------------- gate 4
-def test_nh_p_grad_jax_check_grads_order2():
-    """Two singular sites, both denominators (:2201 / :2218): the
-    hydrostatic weight ``wk`` (B-grid pk3 differences) and the NH weight
-    ``wk1`` (B-grid delp).  Both controls below are FD-safe margins."""
+def test_nh_p_grad_jax_check_grads_order1():
+    """FIRST-ORDER FD on the harsh (random) fixture.  Same discriminator
+    argument as :func:`test_one_grad_p_jax_check_grads_order1`: job
+    9400424 raised on ``JVP of JVP tangent`` here too, which is only
+    reachable after the order-1 forward check passes."""
     km = 2
     delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
     gs = _gs_cached()
     kw = {**_nhpg_kw(km), **_ogp_flags()}
+    s = (3.0, 2.0e3, 30.0, 1.0e4,
+         np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
+                                     **kw)[0])[UW]).max())
+    assert s[4] > 0.0
+    f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
+    check_grads(f_pg, (jnp.asarray(pk3 / s[0]), jnp.asarray(gz / s[1])),
+                order=1, modes=("fwd", "rev"))
+    check_grads(f_nh, (jnp.asarray(u), jnp.asarray(v),
+                       jnp.asarray(pp / s[2]), jnp.asarray(delp / s[3])),
+                order=1, modes=("fwd", "rev"))
+
+
+def test_nh_p_grad_jax_check_grads_order2_well_conditioned():
+    """SECOND-ORDER FD on the smooth fixture -- see the full rationale in
+    :func:`test_one_grad_p_jax_check_grads_order2_well_conditioned`.
+
+    Two singular sites here, both denominators (:2201 / :2218): the
+    hydrostatic weight ``wk`` (B-grid pk3 differences) and the NH weight
+    ``wk1`` (B-grid delp).  Both get a ratio control below; the old
+    absolute floor (``> 1e-3`` on a quantity whose typical value is
+    ~7) is what let the 9400424 outlier through."""
+    km = 3
+    f = _wellcond_fields(km)
+    gs = _gs_cached()
+    kw = {**_nhpg_kw(km), **_ogp_flags()}
+    pk3, gz, pp, delp, u, v = (f["pk"], f["gz"], f["pp"], f["delp"],
+                               f["u"], f["v"])
 
     _, _, _, pk_b, _ = nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD, **kw)
-    b = np.asarray(pk_b)[NG:NG + N + 1, NG:NG + N + 1, :]
+    b = np.asarray(pk_b)[BW]
     wk = b[:, :, 1:] - b[:, :, :-1]
-    assert np.abs(wk[:-1, :, :] + wk[1:, :, :]).min() > 1e-3
-    assert np.abs(wk[:, :-1, :] + wk[:, 1:, :]).min() > 1e-3
-    # wk1 is a2b(delp): delp is ~1e4 and strictly positive, so its
-    # B-grid interpolant cannot approach zero.
-    assert float(np.asarray(delp).min()) > 1.0e3
+    for nm, d in (("u", np.abs(wk[:-1, :, :] + wk[1:, :, :])),
+                  ("v", np.abs(wk[:, :-1, :] + wk[:, 1:, :]))):
+        assert d.min() > 1.0, (nm, d.min())
+        assert d.min() / d.max() > 0.3, (nm, d.min(), d.max())
+        assert d.max() - d.min() > 1e-6, (nm, d.min(), d.max())
+    # wk1 = a2b(delp): delp is ~1e4 +- 2% and strictly positive, so its
+    # B-grid interpolant stays within 2% of 1e4.
+    dp = np.asarray(delp)
+    assert dp.min() > 1.0e3 and dp.min() / dp.max() > 0.3
 
-    uw = (slice(NG, NG + N), slice(NG, NG + N + 1))
-    vw = (slice(NG, NG + N + 1), slice(NG, NG + N))
-    bw = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
-    s_pk, s_gz, s_pp, s_dp = 3.0, 2.0e3, 30.0, 1.0e4
-    u_out = np.abs(np.asarray(
-        nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD, **kw)[0])[uw]).max()
-    assert u_out > 0.0
-
-    # Group A: the dominant hydrostatic du1 direction.
-    def f_pg(pk3_h, gz_h):
-        uo, vo, _, pko, gzo = nh_p_grad(u, v, pp, gz_h * s_gz, delp,
-                                        pk3_h * s_pk, gs, BD, **kw)
-        return (uo[uw] / u_out, vo[vw] / u_out, pko[bw] / s_pk,
-                gzo[bw] / s_gz)
-
-    check_grads(f_pg, (jnp.asarray(pk3 / s_pk), jnp.asarray(gz / s_gz)),
+    s = (10.0, 2.0e4, 30.0, 1.0e4,
+         np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
+                                     **kw)[0])[UW]).max())
+    assert s[4] > 0.0
+    f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
+    check_grads(f_pg, (jnp.asarray(pk3 / s[0]), jnp.asarray(gz / s[1])),
                 order=2, modes=("fwd", "rev"))
-
-    # Group B: pp (the NH term, ~0.3% of the bracket), the linear u/v
-    # pass-through, and delp (which enters ONLY through the NH weight
-    # wk1 = a2b(delp), i.e. as 1/delp).  All three are ~1e-5 of group
-    # A's sensitivity, so they get their own call with the wind outputs
-    # scaled by 1e6; ppo carries pp's own O(1) direction.
-    def f_nh(u_, v_, pp_h, delp_h):
-        uo, vo, ppo, _, _ = nh_p_grad(u_, v_, pp_h * s_pp, gz,
-                                      delp_h * s_dp, pk3, gs, BD, **kw)
-        return uo[uw] * 1.0e6, vo[vw] * 1.0e6, ppo[bw] / s_pp
-
     check_grads(f_nh, (jnp.asarray(u), jnp.asarray(v),
-                       jnp.asarray(pp / s_pp), jnp.asarray(delp / s_dp)),
+                       jnp.asarray(pp / s[2]), jnp.asarray(delp / s[3])),
                 order=2, modes=("fwd", "rev"))
+
+
+def test_nh_p_grad_jax_adjoint_consistency():
+    """``<J v, w> == <v, J^T w>`` on the HARSH fixture -- FD-free, so it
+    survives the dynamic range that defeated order-2 FD, and it is the
+    gate that would catch a mis-threaded ``replace=True``.  Per group,
+    for the same reason as :func:`test_one_grad_p_jax_adjoint_consistency`."""
+    km = 2
+    delp, pk3, gz, pp, u, v = _nh_pgrad_fields(km)
+    gs = _gs_cached()
+    kw = {**_nhpg_kw(km), **_ogp_flags()}
+    s = (3.0, 2.0e3, 30.0, 1.0e4,
+         np.abs(np.asarray(nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD,
+                                     **kw)[0])[UW]).max())
+    f_pg, f_nh = _nhpg_groups((pk3, gz, pp, delp, u, v), gs, kw, s)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("nh_p_grad pk3/gz", f_pg, (pk3 / s[0], gz / s[1]),
+                   1e-12)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    _check_adjoint("nh_p_grad pp/u/v/delp", f_nh,
+                   (u, v, pp / s[2], delp / s[3]), 1e-12)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1046,7 +1414,7 @@ SENT = 4.4e30
 def test_pk3_and_pln_halo_jax_match_numpy_lane(km):
     delp = _halo_fixture(km)
     pk3_n = np.full((M_A, M_A, km + 1), SENT)
-    pk3_halo_np(pk3_n, delp, BD, npz=km, ptop=PTOP, akap=AKAP)
+    npg.pk3_halo(pk3_n, delp, BD, npz=km, ptop=PTOP, akap=AKAP)
     pk3_j = pk3_halo(np.full((M_A, M_A, km + 1), SENT), delp, BD, npz=km,
                      ptop=PTOP, akap=AKAP)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
@@ -1054,7 +1422,7 @@ def test_pk3_and_pln_halo_jax_match_numpy_lane(km):
     _cmp(f"pk3_halo[km={km}]", pk3_j, pk3_n, 1e-12)
 
     pln_n = np.full((M_A, M_A, km + 1), SENT)
-    pln_halo_np(pln_n, delp, BD, npz=km, ptop=PTOP)
+    npg.pln_halo(pln_n, delp, BD, npz=km, ptop=PTOP)
     pln_j = pln_halo(np.full((M_A, M_A, km + 1), SENT), delp, BD, npz=km,
                      ptop=PTOP)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
@@ -1072,7 +1440,7 @@ def test_pk3_and_pln_halo_jax_match_numpy_lane(km):
 def test_pe_halo_jax_matches_numpy_lane(km):
     delp = _halo_fixture(km)
     pe_n = np.full((N + 2, km + 1, N + 2), SENT)
-    pe_halo_np(pe_n, delp, BD, npz=km, ptop=PTOP)
+    npg.pe_halo(pe_n, delp, BD, npz=km, ptop=PTOP)
     pe_j = pe_halo(np.full((N + 2, km + 1, N + 2), SENT), delp, BD,
                    npz=km, ptop=PTOP)
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
@@ -1185,6 +1553,26 @@ def test_halo_jax_check_grads_order2():
                     modes=("fwd", "rev"))
 
 
+def test_halo_jax_adjoint_consistency():
+    """FD-free adjoint identity for the three ring rebuilds, including
+    their ``lax.scan`` column integral."""
+    km = 3
+    delp = _halo_fixture(km)
+    pk3 = np.zeros((M_A, M_A, km + 1))
+    pe = np.zeros((N + 2, km + 1, N + 2))
+
+    for name, f in (
+            ("pk3_halo",
+             lambda d: pk3_halo(pk3, d, BD, npz=km, ptop=PTOP, akap=AKAP)),
+            ("pln_halo",
+             lambda d: pln_halo(pk3, d, BD, npz=km, ptop=PTOP)),
+            ("pe_halo",
+             lambda d: pe_halo(pe, d, BD, npz=km, ptop=PTOP))):
+        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+        _check_adjoint(name, f, (delp,), 1e-12)
+
+
 # ---------------------------------------------------------------- gate 5
 def test_halo_jax_nan_poison_stays_out_of_primal_and_vjp():
     """pk3_halo/pln_halo read i,j = is-2..ie+2 and pe_halo reads
@@ -1255,7 +1643,7 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
     kwd = _geopk_kw(km, cg=False, computehalo=True, fill=0.0)
 
     # ---- C site
-    gc_n = geopk_np(f["delpc"], f["ptc"], f["hs"], BD, **kwc)
+    gc_n = npg.geopk(f["delpc"], f["ptc"], f["hs"], BD, **kwc)
     gc_j = geopk(f["delpc"], f["ptc"], f["hs"], BD, **kwc)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
         # TOL-PENDING: provisional bound; the orchestrator's measurement job will
@@ -1265,7 +1653,7 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
 
     # ---- p_grad_c
     uc_n, vc_n = np.array(f["uc"]), np.array(f["vc"])
-    p_grad_c_np(1.0, f["delpc"], np.array(gc_n["pk"]),
+    npg.p_grad_c(1.0, f["delpc"], np.array(gc_n["pk"]),
                 np.array(gc_n["gz"]), uc_n, vc_n, gs_np, BD, npz=km,
                 hydrostatic=True)
     uc_j, vc_j = p_grad_c(1.0, None, gc_j["pk"], gc_j["gz"], f["uc"],
@@ -1278,10 +1666,10 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
     _cmp(f"oracle km={km} vc_pgc", vc_j, vc_n, 1e-12)
 
     # ---- D site + one_grad_p
-    gd_n = geopk_np(f["delp"], f["pt"], f["hs"], BD, **kwd)
+    gd_n = npg.geopk(f["delp"], f["pt"], f["hs"], BD, **kwd)
     gd_j = geopk(f["delp"], f["pt"], f["hs"], BD, **kwd)
     u_n, v_n = np.array(f["u"]), np.array(f["v"])
-    one_grad_p_np(u_n, v_n, np.array(gd_n["pk"]), np.array(gd_n["gz"]),
+    npg.one_grad_p(u_n, v_n, np.array(gd_n["pk"]), np.array(gd_n["gz"]),
                   f["divg2"], None, gs_np, BD, npx=NPX, npy=NPY, npz=km,
                   dt=30.0, ptop=PTOP, akap=AKAP, hydrostatic=True,
                   a2b_ord=4, d_ext=d_ext, ng=NG, duogrid=True)
