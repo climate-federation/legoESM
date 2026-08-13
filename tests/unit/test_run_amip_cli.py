@@ -3590,3 +3590,28 @@ def test_cmip_resolution_deg_round_trips():
     a = p.parse_args(["--cmip-resolution-deg", "2.5"])
     assert a.cmip_resolution_deg == 2.5
     assert p.parse_args([]).cmip_resolution_deg == OutputConfig().cmip_resolution_deg
+
+
+def test_capdcycl_land_tau_scale_reaches_the_kernel_and_defaults_to_ifs():
+    """The land diurnal-CAPE timescale is a knob, not just an on/off flag.
+
+    The flag disables the diurnal subtraction over BOTH surfaces; this scales
+    only the land branch, which is the one whose IFS value assumes a ~10 km
+    mesh. 1.0 must reproduce the flag-on behaviour exactly, or every run in the
+    campaign so far changes meaning.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+    )
+    assert convection_config_for(
+        ExperimentConfig(convection="bechtold")).bechtold.capdcycl_land_tau_scale == 1.0
+    cfg = apply_params_to_config(
+        ExperimentConfig(convection="bechtold"),
+        {"atm.conv.BechtoldConfig.capdcycl_land_tau_scale": 0.25},
+        scalar_param_map=build_atm_scalar_param_map())
+    assert convection_config_for(cfg).bechtold.capdcycl_land_tau_scale == 0.25
+    with pytest.raises(ValueError, match="capdcycl_land_tau_scale"):
+        ExperimentConfig(bechtold_capdcycl_land_tau_scale=5.0).validate_strict()

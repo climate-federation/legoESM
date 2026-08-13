@@ -3309,6 +3309,8 @@ def _resolve_convection(config):
             rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
             epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
             delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
+            capdcycl_land_tau_scale=getattr(
+                config, 'bechtold_capdcycl_land_tau_scale', 1.0),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(

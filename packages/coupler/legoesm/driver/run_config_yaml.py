@@ -211,6 +211,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
     "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
+    "atm.conv.BechtoldConfig.capdcycl_land_tau_scale": "bechtold_capdcycl_land_tau_scale",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:

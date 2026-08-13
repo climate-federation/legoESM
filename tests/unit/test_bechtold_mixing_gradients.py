@@ -120,3 +120,47 @@ def test_more_entrainment_dries_the_column_as_the_campaign_measured():
     hi = float(_rain_of(3.0e-3, DELTA_DEEP_DEFAULT))
     assert hi < lo, "raising entrainment did not reduce single-column rain"
     assert g < 0.0, f"gradient sign {g:.3e} disagrees with the finite sweep"
+
+
+def test_land_diurnal_scale_is_neutral_at_one():
+    """Scale 1.0 must reproduce the shipped behaviour exactly.
+
+    That is all this asserts. The first version also claimed that LOWERING the
+    scale adds land rain, using ``rain(0.0) >= rain(1.0)`` -- which passes
+    trivially when the knob does nothing, and it does nothing here: in this
+    single-column harness the diurnal CAPE subtraction is inert, and switching
+    the whole feature off changes the answer by exactly zero. The harness does
+    not reach the path (the term is consumed inside the IFS CAPE-closure
+    branch, which this column configuration does not exercise), so no claim
+    about the knob's effect can be made from it. The guard below FAILS if that
+    ever stops being true, so the day the harness does activate the path this
+    test stops silently passing and has to be rewritten to assert the real
+    behaviour.
+    """
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig as C
+    assert C().capdcycl_land_tau_scale == 1.0
+
+    T, q, pf, ph, u, v = _column()
+    cpp = jnp.zeros(T.shape)
+    stoch = jnp.zeros((T.shape[0],))
+    land = jnp.ones((T.shape[0],))
+    shf = jnp.full((T.shape[0],), 150.0)
+    lhf = jnp.full((T.shape[0],), 100.0)
+
+    def rain(**kw):
+        from legoesm import constants
+        out, _, _ = bechtold_convection(
+            T, q, pf, ph, u, v, cpp, stoch, None, dt=600.0, config=C(**kw),
+            land_frac=land, shf_w_m2=shf, lhf_w_m2=lhf)
+        dp = ph[:, 1:] - ph[:, :-1]
+        return float(-jnp.sum(out.dq_v_dt * dp) / constants.g)
+
+    on = rain(use_ifs_capdcycl=True)
+    assert rain(use_ifs_capdcycl=True, capdcycl_land_tau_scale=1.0) == on
+
+    off = rain(use_ifs_capdcycl=False)
+    assert off == on, (
+        "the diurnal CAPE subtraction is now ACTIVE in this column -- this "
+        "test was written when it was inert and its silence meant nothing. "
+        "Rewrite it to assert the knob's real effect rather than deleting "
+        "this guard.")

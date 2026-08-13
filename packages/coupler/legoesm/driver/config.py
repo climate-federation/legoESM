@@ -1436,6 +1436,11 @@ class ExperimentConfig(NamedTuple):
     # positional argument.
     bechtold_epsilon_deep: float = 1.75e-3  # BechtoldConfig.epsilon_deep [1/m]
     bechtold_delta_deep: float = 0.75e-4    # BechtoldConfig.delta_deep [1/m]
+    # Scale on the LAND branch of the diurnal-cycle CAPE subtraction. The IFS
+    # value assumes a ~10 km mesh; 1.0 reproduces it, 0.0 removes the land
+    # branch while leaving the ocean branch alone -- which the on/off flag
+    # cannot do, because it disables both.
+    bechtold_capdcycl_land_tau_scale: float = 1.0
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1640,6 +1645,7 @@ class ExperimentConfig(NamedTuple):
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
             ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
             ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
+            ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
@@ -3059,6 +3065,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
             bechtold_epsilon_deep=getattr(amip_cfg, 'bechtold_epsilon_deep', 1.75e-3),
             bechtold_delta_deep=getattr(amip_cfg, 'bechtold_delta_deep', 0.75e-4),
+            bechtold_capdcycl_land_tau_scale=getattr(
+                amip_cfg, 'bechtold_capdcycl_land_tau_scale', 1.0),
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
@@ -3232,6 +3240,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_dx_m=self.bechtold_dx_m,
             bechtold_epsilon_deep=self.bechtold_epsilon_deep,
             bechtold_delta_deep=self.bechtold_delta_deep,
+            bechtold_capdcycl_land_tau_scale=self.bechtold_capdcycl_land_tau_scale,
             bechtold_rprcon=self.bechtold_rprcon,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,

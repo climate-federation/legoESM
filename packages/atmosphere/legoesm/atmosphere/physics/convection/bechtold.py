@@ -1781,6 +1781,7 @@ def _ifs_capdcycl(
     p_full: jax.Array,
     land_frac: jax.Array,
     gate_w: jax.Array,
+    land_tau_scale: float = 1.0,
 ) -> jax.Array:
     r"""IFS RCAPDCYCL=2 diurnal-cycle CAPE subtraction (cumastrn.F90:780-793).
 
@@ -1818,7 +1819,14 @@ def _ifs_capdcycl(
     zduten = _IFS_CAPDCYCL_DUTEN_BASE + jnp.sqrt(
         0.5 * (u_b**2 + v_b**2 + u_9**2 + v_9**2) + 1e-12)
     ztaupbl = z_pbl / zduten
-    zcap_land = supply_virt_w_m2 * tau_conv
+    # ``land_tau_scale`` multiplies the LAND timescale only.  The IFS value it
+    # scales was set for a ~10 km mesh, where the surface heating this term
+    # subtracts against is resolved; on a coarse mesh that heating is smeared
+    # over a cell hundreds of kilometres wide and the same subtraction can
+    # remove convective energy that never returns.  1.0 reproduces the IFS
+    # exactly, 0.0 removes the land branch while leaving the ocean branch
+    # untouched -- which the on/off flag cannot do, since it disables both.
+    zcap_land = supply_virt_w_m2 * tau_conv * land_tau_scale
     zcap_ocean = supply_virt_w_m2 * ztaupbl
     return gate_w * (land_frac * zcap_land
                      + (1.0 - land_frac) * zcap_ocean)
@@ -2617,7 +2625,7 @@ def bechtold_convection(
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
                 _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
-                land_frac, _gate_w,
+                land_frac, _gate_w, config.capdcycl_land_tau_scale,
             )
         _qadv = None
         if (config.use_ifs_cape_qadv and dT_dt_dyn is not None
