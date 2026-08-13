@@ -58,6 +58,47 @@ WHAT THAT RULES OUT.
    i.e. from mid-channel toward the northern half, with none in the outer 10%
    latitude band.
 
+THE CONTROLLED COMPARISON, which is the finding that matters.
+
+Same instrument, same case, same steps, only the code differs -- edge
+``max|u|`` in m/s against a 0.30 m/s jet:
+
+    step      origin/main      with the centred window
+    12000        0.416              0.471
+    14000        0.426              0.781
+    16000        0.425              1.364
+    18000        0.430             ~2.09
+    19400          --              11.91
+    19428          --              45.26
+    48000        0.501              (dead at 19460)
+
+origin/main drifts 0.385 -> 0.501 across the WHOLE 200-day run and never
+leaves the physical range. The centred window departs from it at about step
+12000-13000 and grows monotonically from there. So the fix does not expose a
+pre-existing instability -- it INTRODUCES one on this arm.
+
+VELOCITY LEADS, THE FREE SURFACE FOLLOWS. Per-step over the onset, eta is
+flat to four decimals at 0.881-0.883 while max|u| goes 11.91 -> 45.26; eta
+only responds at step 19427 once u is near 40 m/s. The 5192 m free surface
+that trips the blow-up detector is a SYMPTOM, roughly 30 steps downstream of
+the actual failure.
+
+IT IS NOT GEOPHYSICAL. The late growth rate is 1.589e-4 /s (e-folding 1.75
+h), against the case's own Eady rate of 2.3e-7 /s and the Coriolis parameter
+f = 6.16e-5 /s at 25 deg:
+
+    observed / Eady = 691x        observed / f = 2.6x
+
+A mode growing FASTER THAN f cannot be rotationally balanced, so this is not
+the Eady instability being revealed by a correctly-phased free surface. It is
+numerical.
+
+A CAUTION THAT COST ME A WRONG READING. The matrix's reported ``max_speed``
+(2.68 m/s on origin/main at day 200) is the CELL-CENTRE reconstructed speed,
+not edge ``max|u|``. Comparing the two suggested the baseline had comparable
+velocity growth; it does not. Name the staggering and the reduction of both
+sides before comparing them.
+
 WHAT IS LEFT. A localised, smooth, explosively growing patch in the JET
 region: quiescent to 5470 m in 20 baroclinic steps after 400 steps flat to
 four decimal places, in ordinary cells, starting where the flow was NOT
