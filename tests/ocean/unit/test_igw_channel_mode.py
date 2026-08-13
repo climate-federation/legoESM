@@ -208,7 +208,18 @@ def test_v_vanishes_on_both_walls():
 #: case is supposed to be; if the module drifts from them, the mode may
 #: still be a valid Poincare mode of a DIFFERENT channel.
 _SPEC = dict(lx_m=4000.0e3, ly_m=2000.0e3, h_m=1000.0, f0=1.0e-4,
-             zonal_mode=2, meridional_mode=1)
+             zonal_mode=2, meridional_mode=1,
+             # The run length is part of the specification, not a detail:
+             # at an INTEGER number of periods the exact solution returns
+             # to the initial condition and "close to exact" degenerates
+             # into "close to your own IC" -- which is precisely how the
+             # global sphere case came to rank a frozen dycore best. 1.25
+             # puts a frozen field in quadrature with the truth. Asserting
+             # only "it moved" would pass at 0.25 or 0.5 (codex round 3).
+             periods=1.25,
+             # And the pair of resolutions, so the convergence arm cannot
+             # quietly become a repeat of the gate arm.
+             resolutions=("20x40", "40x80"))
 
 
 def test_the_case_is_the_channel_the_reference_specifies():
@@ -219,6 +230,10 @@ def test_the_case_is_the_channel_the_reference_specifies():
     assert M._IGWC_F0 == _SPEC["f0"]
     assert M._IGWC_M == _SPEC["zonal_mode"]
     assert M._IGWC_N == _SPEC["meridional_mode"]
+    assert M._IGWC_PERIODS == _SPEC["periods"]
+    registered = tuple(tc.resolution for tc in M._build_test_matrix()
+                       if tc.case == "inertia_gravity_wave_channel")
+    assert registered == _SPEC["resolutions"], registered
     # And the frequency that follows from those literals alone, computed
     # here without reference to the module's own dispersion relation.
     k = 2.0 * np.pi * _SPEC["zonal_mode"] / _SPEC["lx_m"]

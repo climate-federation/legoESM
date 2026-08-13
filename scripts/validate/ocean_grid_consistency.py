@@ -1374,24 +1374,42 @@ def _refinement_verdict(rec: dict, pair: str) -> dict:
         caveats.append("the ratio is not finite: one level produced no "
                        "comparable measurement")
         return dict(label="UNASSESSABLE", ratio=ratio, quantity=quantity,
-                    caveats=caveats)
-    if not rec.get("case_converged", True):
+                    budgeted=bool(budgeted), caveats=caveats)
+    # Is the case's own answer settled? On the RMS lane that is a real
+    # question with a measured answer. On the FRONT lane it is NOT: the
+    # amplitude that would be compared is built from the field RMS this
+    # file has already declared unable to adjudicate the case, so using it
+    # to add or drop a caveat would smuggle the invalid quantity back into
+    # the verdict (codex round 3). Say it is undefined instead.
+    on_front = quantity.startswith("front")
+    settled = True
+    if on_front:
+        caveats.append(
+            "no case-amplitude check on the front lane: the amplitude this "
+            "file measures is the field RMS, which is exactly the quantity "
+            "the case is NOT judged by")
+        settled = False
+    elif not rec.get("case_converged", True):
         caveats.append(
             f"the case's own amplitude moved "
-            f"{100 * rec['case_amplitude_moved']:.0f}% between levels, so "
-            f"this is a relative rate of approach to an unknown limit, "
-            f"NOT a convergence result")
+            f"{100 * rec['case_amplitude_moved']:.0f}% between levels")
+        settled = False
     label = ("CONVERGING" if ratio < _REFINE_CONVERGING_BELOW else
              "FLAT" if ratio < _REFINE_DIVERGING_ABOVE else "DIVERGING")
     # The WORD, not a footnote. A caveat under a line that says
-    # "CONVERGING" is still read as a convergence claim, and without a
-    # refined tolerance there is no claim to make -- only a direction
-    # (codex round 2). Both halves are kept so the direction is still
-    # visible; what changes is that the headline cannot be quoted alone.
-    if not budgeted:
-        label = f"UNBUDGETED TREND ({label.lower()})"
+    # "CONVERGING" is still read as a convergence claim (codex rounds 2
+    # and 3). Two separate things can remove the claim and leave only a
+    # direction: no tolerance at the refined level, and a case whose own
+    # answer is still moving between the two levels. Either one demotes
+    # the headline; the direction stays visible in the parentheses.
+    if not budgeted or not settled:
+        why = ("UNBUDGETED" if not budgeted and settled else
+               "UNCONVERGED" if budgeted and not settled else
+               "UNBUDGETED, UNCONVERGED")
+        label = f"{why} TREND ({label.lower()})"
     return dict(label=label, ratio=float(ratio), quantity=quantity,
-                budgeted=bool(budgeted), caveats=caveats)
+                budgeted=bool(budgeted), case_settled=bool(settled),
+                caveats=caveats)
 
 
 def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
