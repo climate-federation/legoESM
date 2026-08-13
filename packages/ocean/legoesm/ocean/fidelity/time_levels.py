@@ -356,6 +356,23 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
         "zv_trd at jn=1; v twin of cor2d_dump_zu_trd_substep1.bin, same "
         "dyn_cor_2D call at :783 and same governing before-level input "
         "(pvv_b(:,:,Kbb))."),
+    # --- #1455 sec-D JOB 1: the barotropic time-mean advective transport
+    # un_adv/vn_adv (dynspg_ts.F90).  Accumulated OVER the substep window
+    # (:736 ``un_adv += za2*zhU*r1_e2u``, wgtbtp2 boxcar weights) and
+    # normalised at :999 (``/r1_wgt2s``).  It is a SUBSTEP TIME MEAN, not a
+    # bare leapfrog level; NEMO reconciles the 3-D momentum depth-mean ONTO it
+    # at Kmm=NOW (dynspg_ts.F90:1172, ``un_adv*r1_hu(Kmm)``), so it is
+    # registered "now" -- the level of the reconcile that consumes it (the same
+    # transport_avg target the DINO card selects, dino.py:1487).  Written as a
+    # SINGLETON (first-step-only, ll_spg_dump=kt==nit000) at :1046 WRITE(8862).
+    # Units: [m^2/s] transport per unit width = <SUM_k e3u*u>_substep (map to
+    # full transport [m^3/s] via *e2u).
+    "spg_dump_un_adv_final.bin": ("now", "dynspg_ts.F90:1046 WRITE(8862) un_adv; "
+        "substep time-mean advective transport (:736 accumulate, :999 /r1_wgt2s) "
+        "reconciled at Kmm=NOW (:1172 un_adv*r1_hu(Kmm))."),
+    "spg_dump_vn_adv_final.bin": ("now", "dynspg_ts.F90:1047 WRITE(8863) vn_adv; "
+        "v twin of spg_dump_un_adv_final.bin, same substep-mean accumulation "
+        "(:737) and Kmm=NOW reconcile."),
     # --- #1226 SEQDUMP intra-step seam walk (RUN_SEQDUMP_Y20_1R, y20 kt=
     # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
     # ebeb8a5), each proved by reading the CALL that produces the dumped
