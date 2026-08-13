@@ -23,6 +23,25 @@ case in question, but the general claim does not.
 
 The window is a filter in TIME over substeps, so the frequency axis is cycles
 per substep: 0.5 is the substep Nyquist, 1/n is one baroclinic step.
+
+THE COMPLETED SUBSTEP SWEEP (n = 30 / 60 / 120, one variable):
+
+    n     FB substeps per window   CFL     outcome
+    30            59               0.033   max|eta| 5192 m
+    60           119               0.017   NaN
+   120           239               0.008   NaN
+
+The averaging window spans 2n-1 substeps of dt_s = dt/n, so the total
+excursion is ~2*dt for ALL of them -- only the STEP COUNT changes. The
+failure gets monotonically worse as the steps get smaller and more
+numerous, which is the opposite of what a CFL problem does.
+
+PLAUSIBLE, not established: a defect that worsens with step COUNT at fixed
+elapsed time is a per-step process rather than a per-time one -- for
+example reconstruction noise injected once per substep on the distorted
+Voronoi cells, or a per-step leak in a momentum/Coriolis pair that is not
+exactly energy-conserving under forward-backward substepping. Separating
+those needs the free surface's spatial structure just before onset.
 """
 from __future__ import annotations
 
