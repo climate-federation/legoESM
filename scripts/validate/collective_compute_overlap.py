@@ -37,9 +37,14 @@ PROTOCOL (each one earned by a failure in this campaign)
 * The paired delta is reported as a median over paired samples together
   with its inter-quartile range, so a delta smaller than the noise is
   visible as such instead of being read as a signal.
-* The sweep must start at ``n_flop = 0`` (the reference row) — a custom
-  ``--flops`` list that does not is refused rather than silently
-  renormalised against an arbitrary row.
+* The sweep must start at ``n_flop = 0`` — a custom ``--flops`` list
+  that does not is refused rather than silently renormalised against an
+  arbitrary row. Note what that row is and is NOT: it is the MINIMUM-
+  independent-work reference, not a zero-independent-work one. The
+  region still reduces the whole independent buffer there, so the sweep
+  measures how much ADDITIONAL collective time is hidden as the FMA
+  chain grows past that floor. It cannot support a claim about a step
+  that contains no independent work at all.
 * Every effective flag, version and device string is printed with the
   numbers, and the compiled module's async-collective census is printed
   next to them: a run whose ``XLA_FLAGS`` did not select the
@@ -74,7 +79,8 @@ from jax.sharding import Mesh, PartitionSpec as P
 from legoesm.parallel.shard_map_compat import shard_map
 
 
-def _build(n_dev: int, payload: int, work: int, n_flop: int, comm: bool):
+def _build(n_dev: int, payload: int, work: int, n_flop: int, comm: bool,
+           n_col: int = 1):
     """Return ``(f, x, y)``.
 
     ``f`` returns the payload reduction and the independent-work
@@ -86,31 +92,63 @@ def _build(n_dev: int, payload: int, work: int, n_flop: int, comm: bool):
     replaced by the identity — same payload, same two reductions, same
     FMA chain — so the difference between the arms is the collective and
     whatever codegen the collective itself forces.
+
+    ``n_col`` splits the SAME total payload and the SAME total
+    independent work into ``n_col`` collectives with one chunk of work
+    between consecutive ones. This is the production shape: the MPAS
+    step issues 11-13 coloured rounds that all carry ``channel_id=1``,
+    so NCCL serialises them on one communicator stream and each window
+    can only be filled by the work that is independent of THAT round.
+    One fat collective with unlimited work behind it is the best case
+    for the scheduler; ``n_col`` sweeps toward the real one.
     """
     mesh = Mesh(np.array(jax.devices()[:n_dev]), ("device",))
-    perm = [(i, (i + 1) % n_dev) for i in range(n_dev)]
+
+    def _perm(k):
+        # Round k shifts by a DIFFERENT stride. Identical permutations
+        # let XLA's collective combiner merge the rounds into one
+        # collective (observed at n_dev=2, where the only non-trivial
+        # shift is 1: the census reported n_start=1 for every n_col).
+        # Production's coloured rounds each have their own
+        # source_target_pairs, so distinct strides are the faithful
+        # shape. Needs n_dev >= 3 to produce more than one stride.
+        shift = 1 + (k % max(1, n_dev - 1))
+        return [(i, (i + shift) % n_dev) for i in range(n_dev)]
+
+    per_pay = payload // n_col
+    per_work = work // n_col
+    if per_pay == 0 or per_work == 0:
+        raise SystemExit(
+            f"n_col={n_col} leaves an empty chunk (payload {payload}, "
+            f"work {work}); the sweep would not hold the totals fixed.")
 
     def body(x, y):
-        if comm:
-            x = jax.lax.ppermute(x, "device", perm=perm)
-        acc = y
-        for _ in range(n_flop):
-            acc = acc * 1.0000001 + 1e-7
+        pay_sum = jnp.zeros((), x.dtype)
+        acc_sum = jnp.zeros((), y.dtype)
+        for k in range(n_col):
+            xk = x[k]
+            if comm:
+                xk = jax.lax.ppermute(xk, "device", perm=_perm(k))
+            acc = y[k]
+            for _ in range(n_flop):
+                acc = acc * 1.0000001 + 1e-7
+            pay_sum = pay_sum + xk.sum()
+            acc_sum = acc_sum + acc.sum()
         # SEPARATE outputs: nothing downstream joins the collective's
         # result to the independent work.  Both are PER-DEVICE (shape
         # (1,) inside the region): the payload is device-distinct, so
         # promising a replica-equal P() output would be a false contract
         # that only survives because the checker is off.
-        return x.sum()[None], acc.sum()[None]
+        return pay_sum[None], acc_sum[None]
 
     f = jax.jit(shard_map(
         body, mesh=mesh, in_specs=(P("device"), P("device")),
         out_specs=(P("device"), P("device"))))
     # Device-distinct payload, so a misrouted permutation is visible in
     # the value rather than hidden by a uniform fill.
-    x = jnp.arange(n_dev, dtype=jnp.float32)[:, None] * jnp.ones(
-        (n_dev, payload), jnp.float32)
-    y = jnp.ones((n_dev, work), jnp.float32)
+    x = (jnp.arange(n_dev, dtype=jnp.float32)[:, None, None]
+         * jnp.ones((n_dev, n_col, per_pay), jnp.float32))
+    y = jnp.ones((n_dev, n_col, per_work), jnp.float32)
     return f, x, y
 
 
@@ -169,16 +207,22 @@ def main() -> int:
                     help="floats in the independent FMA chain")
     ap.add_argument("--flops", type=int, nargs="+",
                     default=[0, 64, 256, 512, 1024, 2048, 4096],
-                    help="FMA-chain lengths; MUST start at 0")
+                    help="FMA-chain lengths; MUST start at 0 (the "
+                         "minimum-independent-work reference row)")
+    ap.add_argument("--n-collectives", type=int, nargs="+", default=[1],
+                    help="split the SAME total payload and work into this "
+                         "many collectives (production is 11-13, all on "
+                         "one channel)")
     ap.add_argument("--reps", type=int, default=60)
     ap.add_argument("--warmup", type=int, default=10)
     args = ap.parse_args()
 
     if not args.flops or args.flops[0] != 0:
         raise SystemExit(
-            f"--flops must start at 0 (the no-independent-work reference "
-            f"row); got {args.flops}. Renormalising against an arbitrary "
-            f"row would make every reported fraction meaningless.")
+            f"--flops must start at 0 (the minimum-independent-work "
+            f"reference row); got {args.flops}. Renormalising against an "
+            f"arbitrary row would make every reported fraction "
+            f"meaningless.")
 
     n = min(args.n_devices, jax.device_count())
     if n < 2:
@@ -192,11 +236,14 @@ def main() -> int:
           f"({args.payload * 4 / 1e6:.1f} MB/device) work={args.work} "
           f"reps={args.reps} warmup={args.warmup} (arms interleaved)")
 
-    print(f"{'n_flop':>7} {'t_comm_ms':>10} {'t_ctrl_ms':>10} "
-          f"{'delta_ms':>9} {'delta_iqr':>10} {'cp_start':>9} {'gaps':>16}")
-    for nf in args.flops:
-        f1, x, y = _build(n, args.payload, args.work, nf, comm=True)
-        f0, _, _ = _build(n, args.payload, args.work, nf, comm=False)
+    print(f"{'n_col':>6} {'n_flop':>7} {'t_comm_ms':>10} {'t_ctrl_ms':>10} "
+          f"{'delta_ms':>9} {'delta_iqr':>10} {'cp_start':>9} {'gaps':>20}")
+    for nc in args.n_collectives:
+      for nf in args.flops:
+        f1, x, y = _build(n, args.payload, args.work, nf, comm=True,
+                          n_col=nc)
+        f0, _, _ = _build(n, args.payload, args.work, nf, comm=False,
+                          n_col=nc)
         cen1 = _hlo_census(f1, x, y)
         cen0 = _hlo_census(f0, x, y)
         if cen0["n_start"] or cen0["n_plain"]:
@@ -212,9 +259,10 @@ def main() -> int:
         t1, t0 = _paired_times(f1, f0, x, y, args.reps, args.warmup)
         d = t1 - t0
         iqr = float(np.percentile(d, 75) - np.percentile(d, 25))
-        print(f"{nf:7d} {np.median(t1):10.3f} {np.median(t0):10.3f} "
-              f"{np.median(d):9.3f} {iqr:10.3f} {cen1['n_start']:9d} "
-              f"{str(cen1['start_done_gaps']):>16}")
+        print(f"{nc:6d} {nf:7d} {np.median(t1):10.3f} "
+              f"{np.median(t0):10.3f} {np.median(d):9.3f} {iqr:10.3f} "
+              f"{cen1['n_start']:9d} "
+              f"{str(cen1['start_done_gaps'])[:20]:>20}")
     return 0
 
 
