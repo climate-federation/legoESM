@@ -3417,6 +3417,87 @@ def test_bechtold_rprcon_dnoprc_thread_and_validate():
         ExperimentConfig(bechtold_dnoprc=1.0e-2).validate_strict()
 
 
+def test_bechtold_epsilon_deep_delta_deep_thread_and_validate():
+    """bechtold_epsilon_deep / bechtold_delta_deep (the IFS deep plume-mixing
+    rates) thread into the hot-loop BechtoldConfig on BOTH resolvers; defaults
+    byte-identical; validate_strict bounds enforced.  Before this wiring the
+    deep entrainment rate could not be set from any MIP driver at all, and the
+    param spec excluded it on the false ground that the in-scheme (1.3-RH)
+    height factor made it "not a constant tunable" -- that factor MULTIPLIES
+    the base rate, exactly as it does for delta_deep, which was always tunable.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    cfg = ExperimentConfig(convection="bechtold", bechtold_epsilon_deep=4.0e-3,
+                           bechtold_delta_deep=2.0e-4)
+    leaf = _resolve_convection(cfg)[1]
+    assert (leaf.epsilon_deep, leaf.delta_deep) == (4.0e-3, 2.0e-4)
+    cc = convection_config_for(cfg)
+    assert (cc.bechtold.epsilon_deep, cc.bechtold.delta_deep) == (4.0e-3, 2.0e-4)
+    d = _resolve_convection(ExperimentConfig(convection="bechtold"))[1]
+    assert (d.epsilon_deep, d.delta_deep) == (1.75e-3, 0.75e-4)
+    with pytest.raises(ValueError, match="bechtold_epsilon_deep"):
+        ExperimentConfig(bechtold_epsilon_deep=1.0).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_delta_deep"):
+        ExperimentConfig(bechtold_delta_deep=1.0e-2).validate_strict()
+
+
+def test_bechtold_mixing_rates_are_settable_from_a_params_file():
+    """The --params route, not just the constructor.
+
+    Deleting either scalar-map entry leaves the constructor test above green
+    while making the knob unreachable from every driver, which is the exact
+    state this wiring was written to end.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+    )
+    m = build_atm_scalar_param_map()
+    base = ExperimentConfig(convection="bechtold")
+    cfg = apply_params_to_config(
+        base, {"atm.conv.BechtoldConfig.epsilon_deep": 3.0e-3,
+               "atm.conv.BechtoldConfig.delta_deep": 3.0e-5},
+        scalar_param_map=m)
+    leaf = convection_config_for(cfg).bechtold
+    assert (leaf.epsilon_deep, leaf.delta_deep) == (3.0e-3, 3.0e-5)
+    with pytest.raises(SystemExit):
+        apply_params_to_config(
+            base, {"atm.conv.BechtoldConfig.epsilon_deep": 1.0},
+            scalar_param_map=m)
+
+
+def test_amip_round_trip_keeps_every_convection_scalar():
+    """A legacy-format restart must not silently reset a tuned convection knob.
+
+    Before 2026-08-13 ten of them were dropped, including the in-plume
+    conversion rates the AMIP campaign sets on every arm: a run restarted from
+    a legacy checkpoint quietly continued on defaults. The assertion is over
+    the FIELD LIST, so a knob added later without being mirrored fails here
+    rather than in a three-month climatology.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.forcing.amip_config import AMIPExperimentConfig
+    lost = sorted(
+        f for f in set(ExperimentConfig._fields) - set(AMIPExperimentConfig._fields)
+        if f.startswith(("bechtold_", "autoconv_", "convective_")))
+    assert not lost, f"convection scalars dropped by the AMIP round-trip: {lost}"
+
+    tuned = ExperimentConfig(
+        convection="bechtold", bechtold_epsilon_deep=3.0e-3,
+        bechtold_delta_deep=3.0e-5, bechtold_rprcon=5.0e-3,
+        bechtold_dnoprc=1.0e-4)
+    back = ExperimentConfig.from_amip_config(tuned.to_amip_config())
+    for f in ("bechtold_epsilon_deep", "bechtold_delta_deep",
+              "bechtold_rprcon", "bechtold_dnoprc"):
+        assert getattr(back, f) == getattr(tuned, f), f
+
+
 def test_inplume_conversion_responds_to_rprcon():
     """Non-vacuity: the in-plume conversion must produce MORE precip at
     higher rprcon and at lower dnoprc on a moist synthetic plume profile —
