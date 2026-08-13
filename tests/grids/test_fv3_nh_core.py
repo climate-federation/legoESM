@@ -35,6 +35,7 @@ from legoesm.core.fv3_nh_core import (  # noqa: E402
     make_riem_solver_c_jit,
     make_sim1_solver_jit,
     make_update_dz_c_jit,
+    make_update_dz_d_jit,
     riem_solver3 as riem3_jax,
     riem_solver3_jit,
     riem_solver_c as riem_c_jax,
@@ -43,6 +44,8 @@ from legoesm.core.fv3_nh_core import (  # noqa: E402
     sim1_solver_jit,
     update_dz_c as udzc_jax,
     update_dz_c_jit,
+    update_dz_d as udzd_jax,
+    update_dz_d_jit,
 )
 from legoesm.core.fv3_native_nh_core import (  # noqa: E402
     DZ_MIN,
@@ -1395,3 +1398,553 @@ def test_riem3_jax_dead_arm_and_ws_shape_raise():
         riem3_jax(1, 100.0, (1, ni, 1, nj, ng), KM, FV3_KAPPA, 1004.6,
                   100.0, z2, z3, delz, z3, z3, z3p, pe, z3p, z3p, pk,
                   peln, jnp.zeros((ni, nj + 1), jnp.float64), 0.05, 1.0)
+
+
+# ======================================================================
+# update_dz_d — JAX twin certification
+#
+# Four gates, same shape as the update_dz_c block above:
+#   1. equivalence vs ``fv3_native_nh_core.update_dz_d`` on the SAME
+#      fixture the NumPy lane's own reference test uses (n=12, ng=3,
+#      seed 83, hord=6, mixed damp/ndif), compared over the FULL array
+#      including ghost cells;
+#   2. jit-vs-eager parity + no-retrace-across-calls (trace counter),
+#      asserted, not commented;
+#   3. guards: every float64 operand rejects float32, the transport
+#      order selector rejects an unported value, and the km/ng/shape/
+#      ndif preconditions raise;
+#   4. ``check_grads(order=2)`` at hord=2 (the perfectly-linear PPM arm),
+#      with both remaining C^0 sites proven off with margin.
+# ======================================================================
+
+UDZD_HORD = 6            # DUO_TAIL_CFG['hord_tm'] on the shipped deck
+UDZD_RDT = 1.0 / 100.0
+
+
+def _udzd_fixture(n=12, ng=3, km=KM, seed=83):
+    """The NumPy lane's nonuniform update_dz_d fixture, rebuilt with the
+    SAME n/ng/km, the same seed and the same draw ORDER as
+    ``test_fv3_native_nh_core.test_update_dz_d_nonuniform_vs_replumbed_reference``
+    (:1406-1455), so this gate inherits that fixture's demonstrated
+    non-vacuity (it moves zh by >1 m and exercises both the damped and
+    the undamped branch).  Both lanes are handed the SAME arrays, so the
+    seed only fixes what is exercised, never what is compared.
+
+    ``area``/``rarea`` are overridden with SENTINEL-FREE values: the
+    single-tile gridstruct leaves BIG_NUMBER in the corner-diagonal halo
+    cells and ``fv_tp_2d``'s y-intermediates read them.  That is the
+    NumPy lane's documented precondition (its probe job 9355001), not a
+    JAX-lane concern, and it is restated in ``update_dz_d``'s docstring.
+    """
+    from legoesm.core.fv3_native_sw_core import Bounds
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct,
+    )
+
+    full = n + 2 * ng
+    bd = Bounds.single_tile(n, ng)
+    gs = dict(build_fv3_native_gridstruct(n, ng, tile=1,
+                                          radius=FV3_RADIUS_M,
+                                          omega=FV3_OMEGA))
+    gs.update(bounded_domain=False, grid_type=0, sw_corner=True,
+              se_corner=True, nw_corner=True, ne_corner=True)
+    rng = np.random.default_rng(seed)
+    area = np.abs(4.0e11 * (1.0 + 0.05 * rng.standard_normal((full, full))))
+    rarea = 1.0 / area
+    gs["area"] = area
+    gs["rarea"] = rarea
+
+    crx = 0.2 * rng.standard_normal((n + 1, full, km))
+    xfx = 1.0e10 * rng.standard_normal((n + 1, full, km))
+    cry = 0.2 * rng.standard_normal((full, n + 1, km))
+    yfx = 1.0e10 * rng.standard_normal((full, n + 1, km))
+
+    levels = np.array([(km - k) * 3000.0 + 5000.0 for k in range(km + 1)])
+    zh0 = (np.broadcast_to(levels, (full, full, km + 1)).copy()
+           + 150.0 * rng.standard_normal((full, full, km + 1)))
+    zs = np.array(zh0[:, :, km], copy=True)
+    return {"bd": bd, "gs": gs, "n": n, "ng": ng, "km": km, "full": full,
+            "area": area, "rarea": rarea, "crx": crx, "cry": cry,
+            "xfx": xfx, "yfx": yfx, "zh0": zh0, "zs": zs,
+            "dp0": np.full(km, 1.0e4)}
+
+
+def _run_np_udzd(fxt, ndif, damp, zh, ws, *, hord=UDZD_HORD,
+                 rdt=UDZD_RDT, lim_fac=1.0):
+    """NumPy lane driver: copies every mutated operand so the caller's
+    arrays are never disturbed between the two lanes."""
+    from legoesm.core.fv3_native_nh_core import update_dz_d as udzd_np
+
+    zh_w = np.array(zh, dtype=np.float64, copy=True)
+    ws_w = np.array(ws, dtype=np.float64, copy=True)
+    ndif_w = np.array(ndif, dtype=np.float64, copy=True)
+    damp_w = np.array(damp, dtype=np.float64, copy=True)
+    udzd_np(ndif_w, damp_w, hord, fxt["bd"], fxt["km"], fxt["n"] + 1,
+            fxt["n"] + 1, fxt["area"], fxt["rarea"], fxt["dp0"],
+            fxt["zs"], zh_w, fxt["crx"], fxt["cry"], fxt["xfx"],
+            fxt["yfx"], ws_w, rdt, dict(fxt["gs"]), lim_fac=lim_fac)
+    return zh_w, ws_w, damp_w, ndif_w
+
+
+def _udzd_jax_args(fxt, ndif, damp, zh, ws, *, hord=UDZD_HORD,
+                   rdt=UDZD_RDT):
+    """Positional argument tuple for the JAX twin (static leaders as
+    hashable tuples so the jit cache keys by value)."""
+    gs = fxt["gs"]
+    return (tuple(int(x) for x in ndif), tuple(float(x) for x in damp),
+            hord, _bounds(fxt["bd"]), fxt["km"], fxt["n"] + 1,
+            fxt["n"] + 1,
+            jnp.asarray(fxt["area"]), jnp.asarray(fxt["rarea"]),
+            jnp.asarray(fxt["dp0"]), jnp.asarray(fxt["zs"]),
+            jnp.asarray(zh), jnp.asarray(fxt["crx"]),
+            jnp.asarray(fxt["cry"]), jnp.asarray(fxt["xfx"]),
+            jnp.asarray(fxt["yfx"]), jnp.asarray(ws), rdt,
+            jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
+            jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]))
+
+
+UDZD_FLAGS = dict(lim_fac=1.0, bounded_domain=False, grid_type=0,
+                  sw_corner=True, se_corner=True, nw_corner=True,
+                  ne_corner=True, duogrid=False)
+
+
+def _run_jax_udzd(fxt, ndif, damp, zh, ws, *, jit=False, hord=UDZD_HORD,
+                  rdt=UDZD_RDT, fn=None):
+    if fn is None:
+        fn = update_dz_d_jit if jit else udzd_jax
+    zh_o, ws_o = fn(*_udzd_jax_args(fxt, ndif, damp, zh, ws, hord=hord,
+                                    rdt=rdt), **UDZD_FLAGS)
+    return np.asarray(zh_o), np.asarray(ws_o)
+
+
+def _corner_masks(full, ng):
+    """(corner-block mask, non-corner-halo mask) in STORAGE indices.
+
+    ``copy_corners`` writes exactly the four ng x ng blocks at the array
+    corners (Fortran i, j in [1-ng, 0] and [npx, npx+ng-1], which map to
+    storage [0, ng-1] and [full-ng, full-1]); everything else outside
+    the compute window must be carried through untouched."""
+    corner = np.zeros((full, full), dtype=bool)
+    for si in (slice(0, ng), slice(full - ng, full)):
+        for sj in (slice(0, ng), slice(full - ng, full)):
+            corner[si, sj] = True
+    halo = np.ones((full, full), dtype=bool)
+    halo[ng:full - ng, ng:full - ng] = False
+    return corner, halo & ~corner
+
+
+# ---------------------------------------------------------------- gate 1
+def test_udzd_jax_matches_numpy_lane():
+    """Equivalence on the NumPy lane's own nonuniform fixture: hord=6
+    (the deck's hord_tm), damp alternating so BOTH the del-nord branch
+    and the plain-transport branch run, ndif alternating 1/0 so both a
+    del-4 and a del-2 del6 chain run, and the km+1 slot left at 999 so
+    the :231-232 copy is exercised."""
+    fxt = _udzd_fixture()
+    n, ng, km, full = fxt["n"], fxt["ng"], fxt["km"], fxt["full"]
+    damp0 = [1.0e6, 0.0, 1.0e6, 0.0, 1.0e6, 999.0]
+    ndif0 = [1, 0, 1, 0, 1, 999]
+    assert len(damp0) == km + 1 and len(ndif0) == km + 1
+    ws0 = np.zeros((n, n))
+
+    zh_n, ws_n, damp_m, ndif_m = _run_np_udzd(fxt, ndif0, damp0,
+                                              fxt["zh0"], ws0)
+    zh_j, ws_j = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
+
+    # Instrument check BEFORE the comparison: a NaN on both sides would
+    # make array_equal-style agreement meaningless and _rel produce nan.
+    assert np.isfinite(zh_n).all() and np.isfinite(ws_n).all()
+    assert np.isfinite(zh_j).all() and np.isfinite(ws_j).all()
+    # The NumPy lane's :231-232 mutation actually happened.
+    assert damp_m[km] == damp0[km - 1] and ndif_m[km] == ndif0[km - 1]
+
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _rel(zh_j, zh_n) <= 1e-12, _rel(zh_j, zh_n)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
+        np.abs(ws_n).max(), 1.0), np.abs(ws_j - ws_n).max()
+
+    # No-op killers: the transport moved the interior, and ws is nonzero.
+    sl = slice(ng, ng + n)
+    assert np.abs(zh_n[sl, sl, :] - fxt["zh0"][sl, sl, :]).max() > 1.0
+    assert np.abs(ws_n).max() > 0.0
+
+    # Ghost-cell contract, per level (this is what makes the full-array
+    # comparison above non-trivial):
+    #   damped  -> fv_tp_2d works on a COPY, ghosts untouched;
+    #   undamped-> fv_tp_2d ALIASES zh, so copy_corners' four corner
+    #              blocks are rewritten and MUST have changed.
+    corner, halo_rest = _corner_masks(full, ng)
+    for k in range(km + 1):
+        damped = damp0[k if k < km else km - 1] > 1.0e-5
+        assert np.array_equal(zh_j[halo_rest, k], fxt["zh0"][halo_rest, k]), k
+        if damped:
+            assert np.array_equal(zh_j[corner, k],
+                                  fxt["zh0"][corner, k]), k
+        else:
+            assert not np.array_equal(zh_j[corner, k],
+                                      fxt["zh0"][corner, k]), k
+
+
+def test_udzd_jax_matches_numpy_lane_all_damped_nord2():
+    """Second point in the branch space: EVERY level damped with
+    nord = 2 (the deck's nord_v), which is the only setting that runs
+    del6_vt_flux's two-iteration high-order chain and its four extra
+    copy_corners calls.  Gate 1's alternating fixture never reaches
+    nord = 2."""
+    fxt = _udzd_fixture(seed=97)
+    n, km = fxt["n"], fxt["km"]
+    damp0 = [0.12] * (km + 1)
+    ndif0 = [2] * (km + 1)
+    ws0 = np.zeros((n, n))
+    zh_n, ws_n, _, _ = _run_np_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
+    zh_j, ws_j = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
+    assert np.isfinite(zh_n).all() and np.isfinite(zh_j).all()
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _rel(zh_j, zh_n) <= 1e-12, _rel(zh_j, zh_n)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
+        np.abs(ws_n).max(), 1.0), np.abs(ws_j - ws_n).max()
+    sl = slice(fxt["ng"], fxt["ng"] + n)
+    assert np.abs(zh_n[sl, sl, :] - fxt["zh0"][sl, sl, :]).max() > 1.0
+
+
+@pytest.mark.parametrize("hord", [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13])
+def test_udzd_jax_matches_numpy_lane_every_hord(hord):
+    """Every ported transport order against the NumPy lane on one
+    fixture.  hord 6 is covered by gate 1; hord 10 additionally splits
+    ord_in=8 / ord_ou=10 inside fv_tp_2d, and 9/13 are the only orders
+    that reach ``pert_ppm``'s positive-definite arm."""
+    fxt = _udzd_fixture(seed=31)
+    n = fxt["n"]
+    damp0 = [1.0e6, 0.0, 1.0e6, 0.0, 1.0e6, 999.0]
+    ndif0 = [1, 0, 1, 0, 1, 999]
+    ws0 = np.zeros((n, n))
+    zh_n, ws_n, _, _ = _run_np_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0,
+                                    hord=hord)
+    zh_j, ws_j = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0,
+                               hord=hord)
+    assert np.isfinite(zh_n).all() and np.isfinite(zh_j).all()
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _rel(zh_j, zh_n) <= 1e-12, (hord, _rel(zh_j, zh_n))
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
+        np.abs(ws_n).max(), 1.0), (hord, np.abs(ws_j - ws_n).max())
+    sl = slice(fxt["ng"], fxt["ng"] + n)
+    assert np.abs(zh_n[sl, sl, :] - fxt["zh0"][sl, sl, :]).max() > 1.0
+
+
+# ---------------------------------------------------------------- gate 2
+def test_udzd_jax_jit_eager_parity_and_no_retrace():
+    """jit vs eager as an ASSERTION (not a comment), plus a trace counter
+    on the PRODUCTION jit policy: two calls that differ only in data must
+    compile once.  Both lanes are ALSO bound directly against the NumPy
+    fp64 lane so a jit-only regression cannot hide inside the
+    jit-vs-eager budget."""
+    fxt = _udzd_fixture()
+    n = fxt["n"]
+    damp0 = [1.0e6, 0.0, 1.0e6, 0.0, 1.0e6, 999.0]
+    ndif0 = [1, 0, 1, 0, 1, 999]
+    ws0 = np.zeros((n, n))
+
+    eager = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
+
+    traces = {"n": 0}
+
+    def _counted(*a, **kw):
+        traces["n"] += 1
+        return udzd_jax(*a, **kw)
+
+    fn = make_update_dz_d_jit(_counted)      # the PRODUCTION jit policy
+    jit1 = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0, fn=fn)
+    jit2 = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"] * 1.001, ws0,
+                         fn=fn)
+    assert traces["n"] == 1, traces["n"]
+    assert not np.array_equal(jit1[0], jit2[0])   # the 2nd call ran
+
+    native = _run_np_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)[:2]
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    bounds_ = {"zh": 1e-12, "ws": 1e-12}
+    for name, e, j, nat in zip(("zh", "ws"), eager, jit1, native):
+        scale = max(np.abs(e).max(), 1e-30)
+        r = np.abs(np.asarray(j) - e).max() / scale
+        assert r <= bounds_[name], (name, "jit-vs-eager", r)
+        n_scale = max(np.abs(nat).max(), 1e-30)
+        r_en = np.abs(np.asarray(e) - nat).max() / n_scale
+        r_jn = np.abs(np.asarray(j) - nat).max() / n_scale
+        assert r_jn <= bounds_[name], (name, "jit-vs-numpy", r_jn)
+        assert r_jn <= r_en + bounds_[name], (name, r_jn, r_en)
+
+
+# ------------------------------------------------------------ gate 3
+@pytest.mark.parametrize("bad", ["area", "rarea", "dp0", "zs", "zh",
+                                 "crx", "cry", "xfx", "yfx", "ws",
+                                 "dxa", "dya", "del6_u", "del6_v"])
+def test_udzd_jax_rejects_float32_every_operand(bad):
+    """Every float64 operand, one at a time (the oracle build is
+    -fdefault-real-8; a float32 operand silently degrades the solve)."""
+    n, ng, km = 4, 3, 3
+    full = n + 2 * ng
+    args = {
+        "area": np.full((full, full), 5.0e8),
+        "rarea": np.full((full, full), 1.0 / 5.0e8),
+        "dp0": np.full(km, 1.0e4),
+        "zs": np.zeros((full, full)),
+        "zh": np.zeros((full, full, km + 1)),
+        "crx": np.zeros((n + 1, full, km)),
+        "cry": np.zeros((full, n + 1, km)),
+        "xfx": np.zeros((n + 1, full, km)),
+        "yfx": np.zeros((full, n + 1, km)),
+        "ws": np.zeros((n, n)),
+        "dxa": np.full((full, full), 1.0e5),
+        "dya": np.full((full, full), 1.0e5),
+        "del6_u": np.ones((full, full + 1)),
+        "del6_v": np.ones((full + 1, full)),
+    }
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        udzd_jax((0,) * (km + 1), (0.0,) * (km + 1), UDZD_HORD,
+                 (1, n, 1, n, ng), km, n + 1, n + 1,
+                 jnp.asarray(args["area"]), jnp.asarray(args["rarea"]),
+                 jnp.asarray(args["dp0"]), jnp.asarray(args["zs"]),
+                 jnp.asarray(args["zh"]), jnp.asarray(args["crx"]),
+                 jnp.asarray(args["cry"]), jnp.asarray(args["xfx"]),
+                 jnp.asarray(args["yfx"]), jnp.asarray(args["ws"]),
+                 UDZD_RDT, jnp.asarray(args["dxa"]),
+                 jnp.asarray(args["dya"]), jnp.asarray(args["del6_u"]),
+                 jnp.asarray(args["del6_v"]), **UDZD_FLAGS)
+
+
+def _udzd_min_args(n=4, ng=3, km=3, **over):
+    """Smallest well-formed operand set, for the guard tests."""
+    full = n + 2 * ng
+    a = {
+        "ndif": (0,) * (km + 1), "damp": (0.0,) * (km + 1),
+        "hord": UDZD_HORD, "bounds": (1, n, 1, n, ng), "km": km,
+        "npx": n + 1, "npy": n + 1,
+        "area": jnp.full((full, full), 5.0e8, jnp.float64),
+        "rarea": jnp.full((full, full), 1.0 / 5.0e8, jnp.float64),
+        "dp0": jnp.full((km,), 1.0e4, jnp.float64),
+        "zs": jnp.zeros((full, full), jnp.float64),
+        "zh": jnp.zeros((full, full, km + 1), jnp.float64),
+        "crx": jnp.zeros((n + 1, full, km), jnp.float64),
+        "cry": jnp.zeros((full, n + 1, km), jnp.float64),
+        "xfx": jnp.zeros((n + 1, full, km), jnp.float64),
+        "yfx": jnp.zeros((full, n + 1, km), jnp.float64),
+        "ws": jnp.zeros((n, n), jnp.float64),
+        "rdt": UDZD_RDT,
+        "dxa": jnp.full((full, full), 1.0e5, jnp.float64),
+        "dya": jnp.full((full, full), 1.0e5, jnp.float64),
+        "del6_u": jnp.ones((full, full + 1), jnp.float64),
+        "del6_v": jnp.ones((full + 1, full), jnp.float64),
+    }
+    a.update(over)
+    return [a[k] for k in ("ndif", "damp", "hord", "bounds", "km", "npx",
+                           "npy", "area", "rarea", "dp0", "zs", "zh",
+                           "crx", "cry", "xfx", "yfx", "ws", "rdt",
+                           "dxa", "dya", "del6_u", "del6_v")]
+
+
+@pytest.mark.parametrize("hord", [0, 14, -7, -8, 20])
+def test_udzd_jax_unported_hord_raises(hord):
+    """DISPATCH HARDENING.  The oracle silently routes iord <= -7 into
+    the linear mord-5/6 arm and iord >= 14 into the monotonic ``bl =
+    al - q`` arm; a typo there would run different physics without a
+    word.  Every value outside the ported set raises instead."""
+    with pytest.raises(ValueError, match="no ported arm"):
+        udzd_jax(*_udzd_min_args(hord=hord), **UDZD_FLAGS)
+
+
+def test_udzd_jax_precondition_guards():
+    """km, ng, damp/ndif length, ndif range and the ws shape all raise
+    with a message that names the failing quantity."""
+    n, ng, km = 4, 3, 3
+    with pytest.raises(ValueError, match="km=1"):
+        udzd_jax(*_udzd_min_args(km=1, ndif=(0, 0), damp=(0.0, 0.0),
+                                 dp0=jnp.full((1,), 1.0e4, jnp.float64),
+                                 zh=jnp.zeros((n + 2 * ng, n + 2 * ng, 2),
+                                              jnp.float64),
+                                 crx=jnp.zeros((n + 1, n + 2 * ng, 1),
+                                               jnp.float64),
+                                 xfx=jnp.zeros((n + 1, n + 2 * ng, 1),
+                                               jnp.float64),
+                                 cry=jnp.zeros((n + 2 * ng, n + 1, 1),
+                                               jnp.float64),
+                                 yfx=jnp.zeros((n + 2 * ng, n + 1, 1),
+                                               jnp.float64)),
+                 **UDZD_FLAGS)
+    with pytest.raises(ValueError, match="ng=2"):
+        n2, ng2, km2 = 4, 2, 3
+        f2 = n2 + 2 * ng2
+        udzd_jax((0,) * (km2 + 1), (0.0,) * (km2 + 1), UDZD_HORD,
+                 (1, n2, 1, n2, ng2), km2, n2 + 1, n2 + 1,
+                 jnp.full((f2, f2), 5.0e8, jnp.float64),
+                 jnp.full((f2, f2), 2.0e-9, jnp.float64),
+                 jnp.full((km2,), 1.0e4, jnp.float64),
+                 jnp.zeros((f2, f2), jnp.float64),
+                 jnp.zeros((f2, f2, km2 + 1), jnp.float64),
+                 jnp.zeros((n2 + 1, f2, km2), jnp.float64),
+                 jnp.zeros((f2, n2 + 1, km2), jnp.float64),
+                 jnp.zeros((n2 + 1, f2, km2), jnp.float64),
+                 jnp.zeros((f2, n2 + 1, km2), jnp.float64),
+                 jnp.zeros((n2, n2), jnp.float64), UDZD_RDT,
+                 jnp.full((f2, f2), 1.0e5, jnp.float64),
+                 jnp.full((f2, f2), 1.0e5, jnp.float64),
+                 jnp.ones((f2, f2 + 1), jnp.float64),
+                 jnp.ones((f2 + 1, f2), jnp.float64), **UDZD_FLAGS)
+    with pytest.raises(ValueError, match="km\\+1"):
+        udzd_jax(*_udzd_min_args(ndif=(0,) * km), **UDZD_FLAGS)
+    with pytest.raises(ValueError, match="out of range"):
+        # nord = ng is one past the widest stencil del6_vt_flux can read.
+        udzd_jax(*_udzd_min_args(ndif=(ng,) * (km + 1),
+                                 damp=(1.0,) * (km + 1)), **UDZD_FLAGS)
+    with pytest.raises(ValueError, match="ws must be"):
+        udzd_jax(*_udzd_min_args(
+            ws=jnp.zeros((n, n + 1), jnp.float64)), **UDZD_FLAGS)
+    with pytest.raises(ValueError, match="del6_u must be"):
+        udzd_jax(*_udzd_min_args(
+            del6_u=jnp.ones((n + 2 * ng, n + 2 * ng), jnp.float64)),
+            **UDZD_FLAGS)
+
+
+# ---------------------------------------------------------------- gate 4
+def test_udzd_jax_check_grads_order2_away_from_switches():
+    """Order-2 fwd+rev gradients over every dynamic operand except ``ws``
+    (whose gradient is identically zero and is asserted so below).
+
+    ``hord = 2`` — the oracle's PERFECTLY LINEAR PPM arm (tp_core.F90
+    xppm/yppm ``mord == 2``).  That arm contains no ``smt5``/``smt6``
+    selector, no ``copysign``/``min``/``max`` limiter and no
+    ``pert_ppm``, so the ONLY non-smooth sites left in the whole call
+    tree are:
+
+      * the upwind selection ``jnp.where(c > 0)`` at every flux point,
+        where ``c`` is ``crx_adv``/``cry_adv``.  Control 1 below rebuilds
+        both with the ALREADY-CERTIFIED ``edge_profile`` twin (no
+        re-derived numerics) and asserts a margin far beyond any FD step
+        at |c| ~ 1e-1, plus that BOTH branches fire;
+      * the ``dz_min`` bottom-up ``jnp.maximum`` floor.  Control 2
+        asserts every output level clears it strictly.
+
+    The PPM limiter switches at hord 1/3/4/5/6 and the ``pert_ppm``
+    branches at hord 7/9/12/13 are C^0 by construction and are NOT
+    differentiated here; they are named in ``update_dz_d``'s docstring.
+
+    Magnitudes are FD-friendly and self-consistent (area ~5e2, metric
+    lengths ~1e1, del6 ~1, heights ~1e3): the gate-1 fixture's 4e11 areas
+    would make check_grads' fixed-eps numerical derivative meaningless.
+    This is a DIFFERENTIABILITY fixture, not a physical one — the value
+    comparison against the NumPy lane is gate 1's job.
+    """
+    n, ng, km = 6, 3, 4
+    full = n + 2 * ng
+    npx = npy = n + 1
+    bd = _BD(n, ng)
+    bnds = _bounds(bd)
+    rng = np.random.default_rng(404)
+
+    # crx/cry are CONSTANT DOWN EACH COLUMN with a sign that depends on
+    # (i, j) only.  edge_profile is linear in q, so a k-constant column
+    # maps to sign(c(i,j)) * (a fixed unit profile) -- the interface
+    # Courant numbers cannot land on 0 unless that unit profile does,
+    # and control 1 measures exactly that.  The (i + j) checkerboard,
+    # with cry in antiphase, makes BOTH upwind branches fire.
+    ii, jj = np.meshgrid(np.arange(full), np.arange(full), indexing="ij")
+    sgn = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
+    mag = 0.2 * (1.0 + 0.1 * np.sin(ii + 2.0 * jj))
+    crx = np.broadcast_to((sgn * mag)[:n + 1, :, None],
+                          (n + 1, full, km)).copy()
+    cry = np.broadcast_to((-sgn * mag)[:, :n + 1, None],
+                          (full, n + 1, km)).copy()
+    kprof = (1.0 + 0.05 * np.arange(km))[None, None, :]
+    xfx = (1.0e1 * (1.0 + 0.1 * rng.standard_normal((n + 1, full, 1)))
+           * kprof)
+    yfx = (1.0e1 * (1.0 + 0.1 * rng.standard_normal((full, n + 1, 1)))
+           * kprof)
+    dp0 = np.full(km, 1.0e4)          # uniform: g0 = 1 in edge_profile
+    area = np.abs(5.0e2 * (1.0 + 0.1 * rng.standard_normal((full, full))))
+    rarea = 1.0 / area
+    dxa = np.abs(1.0e1 * (1.0 + 0.1 * rng.standard_normal((full, full))))
+    dya = np.abs(1.0e1 * (1.0 + 0.1 * rng.standard_normal((full, full))))
+    del6_u = 1.0 + 0.1 * rng.standard_normal((full, full + 1))
+    del6_v = 1.0 + 0.1 * rng.standard_normal((full + 1, full))
+    zh = np.cumsum(np.abs(300.0 + 40.0 * rng.standard_normal(
+        (full, full, km + 1))), axis=2)[:, :, ::-1].copy()
+    zs = np.array(zh[:, :, km], copy=True)
+    ws0 = rng.standard_normal((n, n))          # nonzero: see the assert
+    damp = (1.0e4, 0.0, 1.0e4, 0.0, 0.0)       # km+1 = 5 entries
+    ndif = (1, 0, 1, 0, 0)
+    assert len(damp) == km + 1 and len(ndif) == km + 1
+    assert any(d > 1.0e-5 for d in damp), "del6 branch never runs"
+    assert any(d <= 1.0e-5 for d in damp), "plain branch never runs"
+
+    # --- control 1: the upwind switch is off, with margin, both ways ---
+    for name, cc in (("crx", crx), ("cry", cry)):
+        adv, _ = edge_jax(jnp.asarray(cc.reshape(-1, km)),
+                          jnp.asarray(cc.reshape(-1, km)),
+                          0, km, jnp.asarray(dp0), False, 0)
+        adv = np.asarray(adv)
+        assert np.abs(adv).min() > 1.0e-2, (name, np.abs(adv).min())
+        assert (adv > 0).any() and (adv < 0).any(), name
+
+    statics = dict(UDZD_FLAGS)
+
+    def _call(nd, dm, dp0_, crx_, cry_, xfx_, yfx_, zh_, zs_, area_,
+              rarea_, dxa_, dya_, du_, dv_, ws_):
+        """(ndif, damp) first so the no-damp control below reuses the
+        SAME argument mapping — one place for the operand order."""
+        return udzd_jax(nd, dm, 2, bnds, km, npx, npy, area_, rarea_,
+                        dp0_, zs_, zh_, crx_, cry_, xfx_, yfx_, ws_,
+                        UDZD_RDT, dxa_, dya_, du_, dv_, **statics)
+
+    ja = [jnp.asarray(x) for x in (dp0, crx, cry, xfx, yfx, zh, zs, area,
+                                   rarea, dxa, dya, del6_u, del6_v, ws0)]
+    zh_o, ws_o = _call(ndif, damp, *ja)
+    zh_o = np.asarray(zh_o)
+    assert np.isfinite(zh_o).all() and np.isfinite(np.asarray(ws_o)).all()
+
+    # --- control 2: the dz_min floor never fired ---
+    w = slice(ng, ng + n)
+    gap = zh_o[w, w, :-1] - (zh_o[w, w, 1:] + DZ_MIN)
+    assert gap.min() > 1.0, f"dz_min floor margin {gap.min()} too small"
+
+    # --- control 3: the del-nord branch is not a no-op at this damp ---
+    # A gradient path that contributes ~0 to the VALUE is not tested by
+    # check_grads, so the del6 term must MOVE the answer before its
+    # gradient is claimed.  Same fixture, damp = 0 everywhere.
+    zh_nodamp, _ = _call((0,) * (km + 1), (0.0,) * (km + 1), *ja)
+    d_del6 = np.abs(zh_o - np.asarray(zh_nodamp)).max()
+    assert d_del6 > 1.0e-3, f"del-nord term moved zh by only {d_del6}"
+
+    def _loss(zh_out, ws_out):
+        return (jnp.sum(zh_out * zh_out) / 1e6
+                + jnp.sum(ws_out * ws_out))
+
+    def f(dp0_, crx_, cry_, xfx_, yfx_, zh_):
+        return _loss(*_call(ndif, damp, dp0_, crx_, cry_, xfx_, yfx_,
+                            zh_, *ja[6:]))
+
+    check_grads(f, tuple(ja[:6]), order=2, modes=("fwd", "rev"))
+
+    def g(zs_, area_, rarea_, dxa_, dya_, du_, dv_):
+        return _loss(*_call(ndif, damp, *ja[:6], zs_, area_, rarea_,
+                            dxa_, dya_, du_, dv_, ja[13]))
+
+    check_grads(g, tuple(ja[6:13]), order=2, modes=("fwd", "rev"))
+
+    # ``ws`` is intent(out) in the oracle and every compute-window cell
+    # is written, so its INPUT cannot influence anything.  Asserted here
+    # rather than claimed in prose: a nonzero ws0 with a zero gradient.
+    assert np.abs(ws0).max() > 0.0
+    g_ws = jax.grad(
+        lambda ws_: _loss(*_call(ndif, damp, *ja[:13], ws_)))(ja[13])
+    assert np.array_equal(np.asarray(g_ws), np.zeros((n, n)))
