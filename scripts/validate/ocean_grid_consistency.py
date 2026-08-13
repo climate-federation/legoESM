@@ -1168,8 +1168,51 @@ def _self_error_pair(case: str, grid: str, base: str, root: Path,
     return rec
 
 
+def _difference_growth(paths: dict, field: str):
+    """Arm-to-arm evolution difference at EVERY shared output time.
+
+    Returns the series, plus the e-folding time of a log-linear fit over
+    the growing part. The fit is reported with its own R^2 so a series that
+    is not exponential at all cannot be quoted as a growth rate -- the
+    diagnostic has to be able to say "this is not exponential".
+    """
+    names = sorted(paths)
+    if len(names) < 2:
+        return {}
+    a, b = names[0], names[1]
+    ta = np.load(paths[a])["times_days"]
+    tb = np.load(paths[b])["times_days"]
+    n = min(len(ta), len(tb))
+    if n < 3 or not np.allclose(ta[:n], tb[:n]):
+        return dict(skipped="the two arms do not share an output cadence")
+    A0, mA0 = _on_common_mesh(paths[a], field, t_index=0)
+    B0, mB0 = _on_common_mesh(paths[b], field, t_index=0)
+    times, series = [], []
+    for i in range(n):
+        A, mA = _on_common_mesh(paths[a], field, t_index=i)
+        B, mB = _on_common_mesh(paths[b], field, t_index=i)
+        series.append(_pair_diff(A - A0, mA & mA0, B - B0, mB & mB0,
+                                 shift=False)["rms_abs"])
+        times.append(float(ta[i]))
+    s = np.asarray(series, dtype=np.float64)
+    t = np.asarray(times, dtype=np.float64)
+    good = np.isfinite(s) & (s > 0) & (t > t[0])
+    out = dict(pair=f"{a}|{b}", times_days=times, rms_evolution=series)
+    if good.sum() >= 3:
+        y = np.log(s[good])
+        x = t[good]
+        slope, icept = np.polyfit(x, y, 1)
+        resid = y - (slope * x + icept)
+        ss = 1.0 - float(np.sum(resid ** 2)
+                         / max(float(np.sum((y - y.mean()) ** 2)), 1e-30))
+        out["e_folding_days"] = float(1.0 / slope) if slope > 0 else \
+            float("inf")
+        out["log_fit_r2"] = ss
+    return out
+
+
 def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
-                         force=False):
+                         force=False, budget_levels=("base",)):
     """Does the arm-to-arm difference SHRINK when both arms are refined?
 
     WHY THIS EXISTS. The consistency block asks "is the arm-to-arm
@@ -1244,13 +1287,35 @@ def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
                            if k.endswith("_sep_km")
                            and not k.endswith("_init_sep_km")}
                     for pair, rows in fp["pairs"].items()}
+            # IS THE DISAGREEMENT GROWING EXPONENTIALLY? An unstable case
+            # amplifies ANY difference, including the two meshes'
+            # discretisation of the same initial condition, at the flow's
+            # own growth rate. If the arm-to-arm difference grows like
+            # exp(t/tau) with tau comparable to the case's instability
+            # timescale, then a larger difference at higher resolution is
+            # the instability doing its job on a sharper initial state --
+            # NOT evidence that the two dycores disagree about the physics.
+            # Distinguishing those two readings is the whole question for
+            # phillips_two_layer, and a single end-time RMS cannot.
+            rec["levels"][level]["difference_growth"] = _difference_growth(
+                paths, CASE_FIELD[case])
             # THE BUDGET AT THIS LEVEL. Without it a growing cross-arm
             # difference is unreadable: each arm's own solution is still
             # moving under refinement, and the question is whether the two
             # arms are parting company FASTER than that.
-            rec["levels"][level]["self_error"] = {
-                g: _self_error_pair(case, g, r, root, prefix, force)
-                for g, r in sorted(res_used.items())}
+            # Measuring it at the REFINED level costs a 4x run per arm
+            # (lat-lon 144x288, MPAS ico6), so it is opt-in. When it is not
+            # asked for the level records that it is UNMEASURED rather than
+            # quietly reusing the coarse budget, which would compare a
+            # refined difference against a coarse tolerance and flatter the
+            # refined arm.
+            rec["levels"][level]["self_error"] = (
+                {g: _self_error_pair(case, g, r, root, prefix, force)
+                 for g, r in sorted(res_used.items())}
+                if level in budget_levels else
+                {g: dict(skipped="budget not measured at this level "
+                                 "(pass --refined-budget)")
+                 for g in sorted(res_used)})
         b = rec["levels"].get("base", {}).get("pairs", {})
         f = rec["levels"].get("refined", {}).get("pairs", {})
         rec["ratio_refined_over_base"] = {
@@ -1436,6 +1501,12 @@ def main() -> None:
                          "not run on a login node.")
     ap.add_argument("--force-rerun", action="store_true",
                     help="rerun self-error arms whose snapshot already exists")
+    ap.add_argument("--refined-budget", action="store_true",
+                    help="also measure each arm's OWN discretisation error "
+                         "at the REFINED resolution, so the refined "
+                         "cross-arm difference has a tolerance of its own. "
+                         "Costs a 4x run per arm per case (lat-lon 144x288, "
+                         "MPAS ico6) -- off by default.")
     ap.add_argument("--refinement", action="store_true",
                     help="ask whether the arm-to-arm difference SHRINKS when "
                          "both arms are refined one step. Reads the same "
@@ -1518,7 +1589,9 @@ def main() -> None:
             a.self_error_root,
             cases=[c for c in a.self_error_cases.split(",") if c] or None,
             grids=[g for g in a.self_error_grids.split(",") if g] or None,
-            prefix=shlex.split(a.run_prefix), force=a.force_rerun)
+            prefix=shlex.split(a.run_prefix), force=a.force_rerun,
+            budget_levels=(("base", "refined") if a.refined_budget
+                           else ("base",)))
         report["refinement_agreement"] = ra
         print("\nREFINEMENT OF AGREEMENT  (does the arm-to-arm EVOLUTION "
               "difference shrink when BOTH arms are refined one step?)")
@@ -1551,6 +1624,15 @@ def main() -> None:
                       f"   case amplitude "
                       f"{ra[case]['case_ref_base']:.3e} -> "
                       f"{ra[case]['case_ref_refined']:.3e}")
+                for level in ("base", "refined"):
+                    gr = lv.get(level, {}).get("difference_growth", {})
+                    if "e_folding_days" in gr:
+                        print(f"    {'':24s} {'':16s} {level:8s} "
+                              f"disagreement e-folds every "
+                              f"{gr['e_folding_days']:6.2f} d "
+                              f"(log fit R2 {gr['log_fit_r2']:.2f}; "
+                              f"R2 well below 1 means it is not "
+                              f"exponential and the time is not a rate)")
                 dob = ra[case].get("difference_over_budget", {})
                 print(f"    {'':24s} {'':16s} difference / budget: "
                       f"base {dob.get('base', {}).get(pair, float('nan')):5.2f}"
