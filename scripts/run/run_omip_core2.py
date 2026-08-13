@@ -4204,6 +4204,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
                         "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
                         "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-channel", default=None,
+                   choices=["tracer", "water_flux"],
+                   help="How SSS restoring reaches the ocean (tripole/latlon). "
+                        "Unset = 'tracer' (default, bit-identical to earlier "
+                        "runs): a post-step salinity edit, which is a "
+                        "virtual-salt-like operation that moves no water and "
+                        "carries no heat. 'water_flux' is NEMO nn_sssr=2: the "
+                        "flux enters the freshwater budget (so it drives eta / "
+                        "z-star dilution, NEMO sshwzv.F90:123) and carries "
+                        "qns -= erp*rcp*sst_m (sbcssr.F90:138). The post-step "
+                        "edit is then SKIPPED -- the two channels are "
+                        "exclusive, since running both applies restoring "
+                        "twice. Requires --sss-restore-normalization live_s, "
+                        "NEMO's own conversion for a real water flux.")
     p.add_argument("--sss-restore-normalization", default=None,
                    choices=["s_target", "live_s"],
                    help="Denominator of the SSS-restoring salinity->freshwater "
@@ -4948,6 +4962,22 @@ def main() -> int:
             f"{' and '.join(_gm_op_flags)} and --no-gm-redi are mutually "
             "exclusive: the former select the GM/Redi operator, the latter "
             "disables GM/Redi entirely.")
+    # The water-flux channel needs NEMO's own conversion: `s_target` is the
+    # virtual-salt form, and routing THAT through the freshwater budget would
+    # move water at a rate derived from the wrong denominator.
+    if (args.sss_restore_channel == "water_flux"
+            and args.sss_restore_normalization != "live_s"):
+        raise SystemExit(
+            "--sss-restore-channel water_flux requires "
+            "--sss-restore-normalization live_s: the water flux is NEMO's "
+            "nn_sssr=2 form (divided by the LIVE surface salinity), whereas "
+            "the default 's_target' is the virtual-salt conversion and would "
+            "move water at the wrong rate.")
+    if (args.sss_restore_channel == "water_flux"
+            and not getattr(args, "sss_restore", False)):
+        raise SystemExit(
+            "--sss-restore-channel water_flux without --sss-restore selects a "
+            "channel for a restoring that is switched off; drop the flag.")
     if (args.gm_bolus_advection == "through_fct"
             and args.gm_slope_scheme != "nemo_iso_lap"):
         raise SystemExit(
@@ -5509,6 +5539,11 @@ def main() -> int:
               f"{args.nemo_monthly_init[1].rsplit('/', 1)[-1]}")
 
     sss_restore_cfg = None
+    # Defined unconditionally: the step loop reads it next to a
+    # `sss_restore_cfg is not None` short-circuit, and relying on that
+    # evaluation order for a name to exist is one reorder away from a
+    # NameError deep inside a multi-day run.
+    _sss_water_flux = False
     sss_restore_target = None
     # Monthly (sn_sss climatology) vs static (IC-surface) SSS target, detected
     # grid-agnostically below: monthly carries a leading 12-month axis ON TOP OF
@@ -5538,6 +5573,9 @@ def main() -> int:
             _cfg_kwargs["max_flux_kg_m2_s"] = (
                 float(args.sss_restore_bound_mmday) * 1.0e-3 / 86400.0
                 * float(constants.rho_water))
+        # Water-flux channel switch, resolved once so the step loop reads a
+        # plain bool (and so an unset flag can never accidentally enable it).
+        _sss_water_flux = (args.sss_restore_channel == "water_flux")
         sss_restore_cfg = SSSRestoringConfig(
             enabled=True,
             tau_restore_days_default=float(args.sss_restore_tau_days),
@@ -6859,6 +6897,56 @@ def main() -> int:
                 _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
                                  if _sss_monthly
                                  else sss_restore_target)
+                # WATER-FLUX CHANNEL (NEMO nn_sssr=2).  Default OFF: the
+                # post-step tracer edit below stays the only application, so an
+                # unset flag is bit-identical to before.
+                #
+                # ON: the restoring flux enters `fw.restoring`, so it reaches
+                # the ocean the way NEMO's does -- through the freshwater
+                # budget, which drives eta / the z-star dilution
+                # (`freshwater_eta_tendency = net_freshwater_flux / rho_0`,
+                # the analogue of NEMO `pssh(Kaa) = pssh(Kbb) - rDt*(emp/rho0 +
+                # hdiv)`) -- and it carries NEMO's heat term
+                # (`qns -= erp*rcp*sst_m`, sbcssr.F90:138).  The post-step
+                # applier is then SKIPPED; running both would apply restoring
+                # TWICE, which is the sharpest failure mode of this change and
+                # is asserted against in tests.
+                if _sss_water_flux:
+                    from legoesm.ocean.forcing.sss_restoring import (
+                        compute_sss_restoring_flux as _sss_flux_fn,
+                    )
+                    _S_now = state.S.data[..., 0]
+                    _T_now = state.T.data[..., 0]          # potential temp [degC]
+                    _lm = jnp.asarray(state.land_mask.data, _S_now.dtype)
+                    _sss_out = _sss_flux_fn(
+                        S_model_top=_S_now,
+                        S_target=jnp.asarray(_sss_tgt_step, _S_now.dtype),
+                        lat_deg=jnp.asarray(lat2d, _S_now.dtype),
+                        lon_deg=jnp.asarray(lon2d, _S_now.dtype),
+                        ice_concentration=(jnp.zeros_like(_S_now)
+                                           if _sss_ice is None
+                                           else jnp.asarray(_sss_ice, _S_now.dtype)),
+                        config=sss_restore_cfg,
+                        river_runoff=(None if _R_gate is None
+                                      else jnp.asarray(_R_gate, _S_now.dtype)),
+                        sst_C=_T_now,
+                    )
+                    # Land cells contribute nothing to either budget.
+                    _fw_restore = _sss_out["freshwater_flux"] * _lm
+                    fw = fw._replace(restoring=_fw_restore)
+                    # NEMO's qns is positive INTO the ocean, matching q_net, so
+                    # this adds with no sign flip (derivation at the term in
+                    # sss_restoring.py).
+                    _q_restore = _sss_out["heat_flux"] * _lm
+                    sf = sf._replace(
+                        q_net=(_q_restore if sf.q_net is None
+                               else sf.q_net + _q_restore))
+                    # KPP surface buoyancy: under this channel the restoring IS
+                    # physical freshwater, so it belongs in the sum that the
+                    # tracer-channel branch above deliberately excludes.
+                    if sf.freshwater is not None:
+                        sf = sf._replace(
+                            freshwater=sf.freshwater + _fw_restore)
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
@@ -6902,7 +6990,13 @@ def main() -> int:
                 _gateway_cumulative_row(_gw_csv, _gw_acc, step - 1,
                                         (step - 1) * dt / _SEC_PER_DAY)
                 _gw_acc = None
-        if sss_restore_cfg is not None:
+        if sss_restore_cfg is not None and not _sss_water_flux:
+            # SKIPPED under the water-flux channel: the flux already entered
+            # `fw.restoring` / `q_net` BEFORE the step.  Running this as well
+            # would apply restoring TWICE, and the run would still look
+            # plausible -- which is why this is a hard either/or, never a
+            # blend, and why a test asserts the two channels are exclusive.
+            #
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
             # (``_sic``; None only if neither --ice-albedo nor a siconc field is

@@ -264,3 +264,80 @@ class TestRestoringHeatFlux:
         out = self._call(np.array([34.5]), np.array([34.5]),
                          sst_C=np.array([10.0]))
         np.testing.assert_allclose(np.asarray(out["heat_flux"]), 0.0, atol=1e-18)
+
+
+class TestRestoringChannelFlag:
+    """`--sss-restore-channel water_flux` = NEMO nn_sssr=2 routing.
+
+    The two channels are EXCLUSIVE. Under `water_flux` the flux enters
+    `fw.restoring` / `q_net` before the step and the post-step tracer edit is
+    skipped; running both would apply restoring twice and still look plausible,
+    which is the sharpest failure mode of this change.
+    """
+
+    def _parse(self, *extra):
+        from scripts.run.run_omip_core2 import _build_arg_parser
+
+        return _build_arg_parser().parse_args(
+            ["--grid", "tripole", "--mesh", "m.nc", *extra])
+
+    def _main_with(self, argv, monkeypatch):
+        import sys
+
+        from scripts.run import run_omip_core2
+
+        monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv])
+        return run_omip_core2.main
+
+    def test_default_is_the_tracer_channel(self):
+        assert self._parse().sss_restore_channel is None
+
+    def test_round_trip(self):
+        a = self._parse("--sss-restore-channel", "water_flux")
+        assert a.sss_restore_channel == "water_flux"
+
+    def test_unknown_channel_rejected(self):
+        import pytest as _pytest
+
+        with _pytest.raises(SystemExit):
+            self._parse("--sss-restore-channel", "emp")
+
+    def test_water_flux_requires_live_s(self, monkeypatch):
+        """s_target is the virtual-salt conversion; routing it as water would
+        move mass at a rate derived from the wrong denominator."""
+        import pytest as _pytest
+
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc", "--sss-restore",
+             "--sss-restore-channel", "water_flux"], monkeypatch)
+        with _pytest.raises(SystemExit, match="requires --sss-restore-normalization"):
+            main()
+
+    def test_water_flux_without_restoring_rejected(self, monkeypatch):
+        import pytest as _pytest
+
+        main = self._main_with(
+            ["--grid", "tripole", "--mesh", "m.nc",
+             "--sss-restore-channel", "water_flux",
+             "--sss-restore-normalization", "live_s"], monkeypatch)
+        with _pytest.raises(SystemExit, match="restoring that is switched off"):
+            main()
+
+    def test_the_two_channels_are_exclusive_in_source(self):
+        """The post-step applier must be guarded by `not _sss_water_flux`.
+
+        Asserted on the source of the function that RUNS, because reaching this
+        branch in a unit test needs a real eORCA1 mesh. A double application
+        would not crash -- it would quietly double the restoring -- so the
+        exclusivity is worth pinning even by this weaker means.
+        """
+        import inspect
+
+        from scripts.run import run_omip_core2
+
+        src = inspect.getsource(run_omip_core2.main)
+        assert "if sss_restore_cfg is not None and not _sss_water_flux:" in src, (
+            "the post-step SSS-restoring applier is no longer guarded against "
+            "the water-flux channel; restoring would be applied twice.")
+        # and the pre-step branch must exist
+        assert "if _sss_water_flux:" in src
