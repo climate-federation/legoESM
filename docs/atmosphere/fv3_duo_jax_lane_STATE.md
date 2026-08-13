@@ -106,22 +106,57 @@ lines (63 tests) after the pin, closing a coverage hole where `xtp_u` and
 **Failure triage — the discipline is to say WHICH is wrong, expectation or
 code:**
 
-1. **REAL DEFECT — the k2e index tables are column-swapped.** The JAX table
-   builder produces `[[-2,-1],[-2,0],…]` where the oracle table is
-   `[[-1,-2],[0,-2],…]`: an exact (i,j)→(j,i) swap. A transposed halo-source
-   table reads the **wrong neighbour cell** and stays finite and plausible
-   forever. Same class as the earlier probe here that indexed `(nCells,6)` on a
-   `(6,nCells)` array. Fix in flight.
+1. **⛔ RETRACTED — there was no k2e "column swap". The TEST was wrong.**
+   I reported a transposed halo-source table as a confirmed real defect. It is
+   not one. Measured (`fv3_duogrid_oracle_n2.npz`): every `c12_*_ij` family is
+   sorted by **column 1** (`[[-1,-2],[0,-2],[1,-2],…]`), while
+   `compute_fv3_native_k2e` emits records sorted by column 0
+   (`[[-2,-1],[-2,0],…]`). They are the **same record set in a different row
+   order**, and an element-wise `np.array_equal` on two differently-sorted
+   tables of records looks exactly like a pairwise column swap. The assertion
+   pinned a convention nobody had spot-checked.
+
+   It cannot reach the lane, for two independent reasons, both measured rather
+   than argued: the consumer unpacks `for (fi, fj), lv, cw in zip(ij, loc,
+   coef)` **character-identically in both lanes**, so any convention cancels in
+   a JAX-vs-NumPy comparison; and the A and B record→value maps are *invariant*
+   under the swap, while CX/DY are not — and A and B are the only families this
+   lane consumes.
+
+   **LESSON:** a printed element-wise diff of two TABLES OF RECORDS cannot
+   distinguish a column swap from a row reordering. Compare record **sets**.
+   The discriminating check was one line and took thirty seconds; I pattern-
+   matched to a known trap in this repo (a probe that indexed `(nCells,6)` on a
+   `(6,nCells)` array) and reported CONFIRMED without running it.
+
+   **So the halo module's first run contained ZERO real code defects** — all 12
+   failures were wrong test expectations.
 2. **EXPECTATION WRONG — bitwise `jit`-vs-eager on floating-point sums.** XLA
    contracts mul+add into FMA in the jitted lowering and not the eager one, so a
-   few-ULP gap is correct behaviour, not a defect. Bitwise stays only on pure
-   index-copy paths. (The pattern-setter already documented this; the new gates
-   did not inherit it.)
-3. **EXPECTATION WRONG — NaN compared with equality.** `NaN == NaN` is False, so
-   a gate over deliberately NaN-filled scratch can never pass. The fix is to
-   score the written window and separately assert the scratch is NaN on both
-   lanes — not `equal_nan=True`, which would let a genuinely all-NaN output
-   through.
+   few-ULP gap is correct behaviour, not a defect. This is the cause of **most**
+   of the halo failures, including the two `k2e_remap` ones and the c2l one.
+   The split is now structural, not empirical: bitwise is kept only where there
+   is no `x*y + z` for XLA to contract — the four exchanges, the six
+   `fill_corners`, `pack_p1`, `write_*_strips`, **and both barriers**, whose
+   blend is `0.5 * (a + s·b)` with `s` a ±1 constant folded at trace time, i.e.
+   a multiply *of* a sum with no contraction site. Everything containing
+   `Σ w·v` now asserts a measured bound.
+3. **⛔ MY DIAGNOSIS WAS WRONG — the c2l failure was not a NaN-equality
+   problem.** I claimed `NaN == NaN` was making the gate unpassable. In fact
+   `_bitwise_equal` already passes `equal_nan=True`, and the mask-equality gate
+   passed, proving both lanes' NaN patterns are identical. The finite part
+   diverged, from `a11·u1 + a12·v1` — FMA again, i.e. cause 2. "Both sides
+   all-NaN" was pytest's truncated array repr sampling the scratch corners.
+   The NaN region is legitimate untouched scratch: `do_halo=.true.` defines a
+   14×14 window of an 18×18 face and the NumPy lane NaN-fills the rest by
+   construction.
+
+   The instruction still produced a better test, and it exposed a genuine
+   defect in the comparison helper: `_cmp` returned `0.0` when *both* sides were
+   entirely non-finite — **a comparison that could not fail**. It now raises on
+   that case. The gate is restructured to assert the window entirely finite on
+   both lanes (fires if the NaN is real), the scratch entirely non-finite on
+   both (fires if the window moves), and values compared on the window only.
 4. **EXPECTATION WRONG — pgrad's two `check_grads(order=2)`.** One element out
    of 312, 0.39 % against a 0.31 % tolerance, on a value of 3.5e5 in an array
    whose entries are ~1e2. Order-2 finite differencing cannot resolve that
