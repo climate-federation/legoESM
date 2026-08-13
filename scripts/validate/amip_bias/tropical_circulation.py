@@ -143,6 +143,20 @@ def omega_from_divergence(u, v, plev, lat, lon):
     """
     from legoesm import constants
     a = constants.R_earth
+    # THE VERTICAL AXIS MUST INCREASE DOWNWARD HERE.  CMOR publishes plev
+    # surface-first (100000 -> 100 Pa); this integral starts at p = 0 and
+    # marches down, and the O'Brien correction below reads plev[-1] as the
+    # surface.  Handed a descending axis it produced a first layer thickness of
+    # +96 kPa followed by negative ones, and corrected the residual against
+    # 100 Pa as though that were the ground -- which is how this estimator came
+    # to be described as "30x too strong" and "does not close".  Sort here and
+    # restore the caller's order on the way out, so every call site is fixed
+    # rather than each one remembering.
+    _order = np.argsort(plev)
+    if not np.array_equal(_order, np.arange(plev.size)):
+        _inv = np.argsort(_order)
+        return omega_from_divergence(
+            u[_order], v[_order], np.asarray(plev)[_order], lat, lon)[_inv]
     dlam = np.deg2rad(float(lon[1] - lon[0]))
     dphi = np.deg2rad(float(lat[1] - lat[0]))
     cphi = np.cos(np.deg2rad(lat))[None, :, None]
