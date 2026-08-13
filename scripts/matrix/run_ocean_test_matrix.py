@@ -3328,6 +3328,11 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         result["u_3d"] = u_cc
         result["v_3d"] = v_cc
         result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
+        # Reuse level 0 rather than reconstructing it a second time: the
+        # surface block above already did this solve, and the loop has now
+        # redone it at k=0 (codex 2026-08-13). Same value, one less Perot
+        # reconstruction per 3-D snapshot.
+        result["speed_sfc"] = result["speed_3d"][..., 0]
         
         # Add vertical velocity if available (for future MPAS implementation)
         if hasattr(state, "w"):

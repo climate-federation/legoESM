@@ -162,6 +162,82 @@ def test_moving_volumes_enter_the_metric(latlon_setup):
 # arm would have died before integrating. Found while scoping a resolved
 # lock-exchange arm on mpas_regional (codex 2026-08-13).
 
+def _one_attr_grid(which: str, n=4):
+    """A grid exposing ONLY one of the two area attributes.
+
+    This is what makes the tests below able to tell them apart. Supplying
+    BOTH -- which an earlier revision did -- means the call succeeds
+    whichever one the code reads, so the test could not distinguish the
+    families it claimed to be testing (codex 2026-08-13).
+    """
+    return SimpleNamespace(**{which: np.full(n, 2.0)})
+
+
+def _minimal_state(n=4, nlev=2):
+    """Enough state for _rpe_extract to run to completion.
+
+    eta is required: the z-star branch calls compute_layer_thickness on it
+    to build the layer depths.
+    """
+    return SimpleNamespace(
+        T=SimpleNamespace(data=np.zeros((n, nlev))),
+        S=SimpleNamespace(data=np.zeros((n, nlev))),
+        eta=SimpleNamespace(data=np.zeros(n)),
+        land_mask=SimpleNamespace(data=np.ones(n)))
+
+
+def _z_coord(nlev=2):
+    return SimpleNamespace(z_interfaces=np.linspace(0.0, -20.0, nlev + 1),
+                           dz=np.full(nlev, 10.0),
+                           z_centers=np.array([-5.0, -15.0])[:nlev])
+
+
+def _area_attr_read(m, grid_type, which):
+    """Which area attribute does _rpe_extract reach for on this grid_type?
+
+    The grid exposes ONLY ``which``. The call is expected to fail LATER --
+    the minimal state has no bathymetry and no real z-coordinate -- so what
+    is asserted is narrow and exact: whether it died reaching for the area,
+    and if so which name it wanted. Building a full valid state for five
+    grid families would test the thickness code, not the dispatch this
+    guard is about.
+
+    Returns the missing attribute name, or None if the area lookup
+    succeeded and the call got past it.
+    """
+    try:
+        m._rpe_extract(_minimal_state(), grid_type, _one_attr_grid(which),
+                       _z_coord())
+    except AttributeError as exc:
+        for name in ("areaCell", "area"):
+            if f"'{name}'" in str(exc) or f"attribute {name}" in str(exc):
+                return name
+        return None       # died later, past the area lookup
+    return None
+
+
+@pytest.mark.parametrize("grid_type", ["mpas", "mpas_regional",
+                                       "mpas_channel"])
+def test_voronoi_grids_read_areaCell(matrix_mod, grid_type):
+    """Given ONLY areaCell, the area lookup must succeed."""
+    assert _area_attr_read(matrix_mod, grid_type, "areaCell") is None
+
+
+@pytest.mark.parametrize("grid_type", ["latlon", "latlon_regional",
+                                       "latlon_channel", "tripole", "fesom"])
+def test_structured_grids_read_area(matrix_mod, grid_type):
+    """Given ONLY area, the area lookup must succeed."""
+    assert _area_attr_read(matrix_mod, grid_type, "area") is None
+
+
+def test_the_attribute_is_load_bearing(matrix_mod):
+    """NON-VACUITY. Hand each family the OTHER family's attribute and the
+    lookup must fail, naming the one it wanted -- otherwise the two tests
+    above would pass for any dispatch at all."""
+    assert _area_attr_read(matrix_mod, "mpas", "area") == "areaCell"
+    assert _area_attr_read(matrix_mod, "latlon", "areaCell") == "area"
+
+
 def test_every_voronoi_grid_reads_area_from_areaCell(matrix_mod):
     """Not just the global one: regional and channel meshes too."""
     m = matrix_mod
