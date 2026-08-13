@@ -282,6 +282,35 @@ HARNESS_ONLY: dict[str, str] = {
         "the assembled (model_cfg, physics_cfg) this test walks never sees "
         "it (dino.py:3667-3675)"
     ),
+    "surface_tendency_placement": (
+        "VERIFIED 2026-08-13 on the current tree, three facts: (1) CONSUMER "
+        "is packages/ocean/legoesm/ocean/experiments/dino.py:3560, "
+        "`placement = getattr(cfg, \"surface_tendency_placement\", "
+        "\"applied_now\")`, whose ENCLOSING function is "
+        "`_check_surface_tendency_placement` (def at dino.py:3547) -- it "
+        "reads the value off the DINOConfig object, NOT off the assembled "
+        "config; (2) that checker is INVOKED at dino.py:3608, inside "
+        "`apply_dino_lat_lon_surface_forcing` (def at dino.py:3576), the "
+        "per-step surface-forcing helper -- a DIFFERENT call site than "
+        "`dino_lat_lon_model_config`, so the (model_cfg, physics_cfg) pair "
+        "this test walks never sees it; (3) it is not a field of the "
+        "assembled config at all -- `grep -c surface_tendency_placement` is "
+        "0 in BOTH ocean/state.py and ocean/physics/combined.py (the two "
+        "modules defining LatLonCGridOceanConfig / OceanPhysicsConfig). "
+        "It is a ROUTE ASSERTION, not a routed value: its only effect is to "
+        "raise when the declared placement disagrees with the driver's "
+        "`return_rate` argument (dino.py:3565-3573); the physics difference "
+        "it names is carried by the driver's "
+        "`model.step(external_tracer_rate=...)` route "
+        "(ocean_model_latlon_cgrid.py:3399, 7899), not by any config leaf. "
+        "Same class as the surface_flux_divisor / "
+        "shortwave_penetration_ladder entries above. NB those two entries' "
+        "reason strings name `dino_step_surface_forcing` as the consumer; "
+        "on the current tree surface_flux_divisor is actually read at "
+        "dino.py:3658, also inside `apply_dino_lat_lon_surface_forcing` -- "
+        "their function name and line ranges have drifted (not corrected "
+        "here; the classification itself still holds)."
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -339,12 +368,12 @@ SIBLING_PARITY_BASELINE: tuple[tuple[str, str, str], ...] = (
 CALL_SITE_BASELINE: tuple[tuple[str, int, str, str], ...] = (
     ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_latlon_cgrid.py", 1103, "_make_multigrid_preconditioner_banded", "omega"),
     ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_latlon_cgrid.py", 1105, "_make_multigrid_preconditioner", "omega"),
-    ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", 550, "compute_ocean_rho", "eos_depth"),
+    ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", 564, "compute_ocean_rho", "eos_depth"),
     ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", 317, "iterate_eos_and_pressure_anomaly", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", 205, "iterate_eos_and_pressure_anomaly", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2397, "compute_hydrostatic_pressure", "g"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2421, "compute_ocean_rho", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2423, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", 214, "iterate_eos_and_pressure_anomaly", "eos_depth"),
+    ("packages/ocean/legoesm/ocean/eos.py", 2536, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/eos.py", 2560, "compute_ocean_rho", "eos_depth"),
+    ("packages/ocean/legoesm/ocean/eos.py", 2562, "compute_hydrostatic_pressure", "g"),
     ("packages/ocean/legoesm/ocean/fidelity/box_heat_budget.py", 323, "gm_redi_tracer_tendency_latlon", "omega"),
     ("packages/ocean/legoesm/ocean/fidelity/mitgcm_baroclinic_gyre_recipe.py", 173, "mitgcm_canonical_ocean_config", "barotropic_solver"),
     ("packages/ocean/legoesm/ocean/fidelity/mitgcm_baroclinic_gyre_recipe.py", 173, "mitgcm_canonical_ocean_config", "tracer_advection"),
@@ -373,11 +402,11 @@ CALL_SITE_BASELINE: tuple[tuple[str, int, str, str], ...] = (
     ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", 198, "restoring_surface_forcing", "c_p"),
     ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", 216, "restoring_surface_forcing", "c_p"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", 222, "kpp_vertical_mixing", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 512, "compute_hydrostatic_pressure", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 701, "compute_hydrostatic_pressure", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 982, "kpp_vertical_mixing", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1044, "compute_hydrostatic_pressure", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1084, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 595, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 784, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1065, "kpp_vertical_mixing", "g"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1127, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1167, "compute_hydrostatic_pressure", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py", 339, "compute_buoyancy_frequency", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py", 552, "compute_buoyancy_frequency", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py", 253, "compute_ocean_rho", "eos_depth"),

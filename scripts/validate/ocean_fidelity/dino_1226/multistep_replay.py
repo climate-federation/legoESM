@@ -261,6 +261,25 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         surface_tendency_placement=surface_tendency_placement,
         run_traj=run_traj, run_twin_step1=run_twin_step1)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+
+    # Opt-in outer_integrator override for the nemo_mlf step-transcription A/B
+    # (rung (b) of nemo_mlf_step_transcription_spec.md). Same pattern as
+    # dino_year_screen_fullframe.py / kamm_twin_90d.py -- unset/"leapfrog"
+    # leaves the recipe default untouched. nemo_mlf HARD-REQUIRES the NEMO
+    # e3w(Kmm) divisor at construction, so force it here too.
+    _oi = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+    if _oi:
+        if _oi not in ("leapfrog", "nemo_mlf"):
+            raise SystemExit(
+                f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
+                "'leapfrog' or 'nemo_mlf'")
+        mc = mc._replace(
+            outer_integrator=_oi,
+            implicit_vmix_e3t_now_divisor=(
+                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 
