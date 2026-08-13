@@ -258,6 +258,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         # instability arrives through the advecting velocity.
         cfg = dataclasses.replace(cfg, gm_bolus_advection=_ba)
         print(f"ABLATION: gm_bolus_advection={_ba}")
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170): which time-averaged barotropic
+        # mean the 3-D momentum depth-mean is reconciled onto ("velocity_avg" =
+        # primary boxcar; "transport_avg" = un_adv/hu secondary/transport mean).
+        # The confirmation A/B for the barotropic-reconcile term: one variable.
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which

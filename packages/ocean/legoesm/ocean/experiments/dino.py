@@ -307,6 +307,12 @@ class DINOConfig:
     # :1349-1379). Only differs from the default under the MLF leapfrog, so
     # only the nemo_dino_kamm_mlf card flips it.
     barotropic_een_seed: str = "window_start"
+    # 3-D momentum depth-mean reconciliation target (NEMO dyn_spg_ts N6): see
+    # BarotropicConfig.barotropic_reconcile_target docstring. "velocity_avg"
+    # (default, bit-identical) = lego's legacy primary/velocity boxcar mean;
+    # "transport_avg" = NEMO's un_adv*r1_hu(Kmm) secondary/transport mean
+    # (dynspg_ts.F90:1170-1172). Only the nemo_dino_kamm_mlf card flips it.
+    barotropic_reconcile_target: str = "velocity_avg"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -1476,6 +1482,15 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # under the leapfrog's Nbb seed, so it lands on THIS card only (under
     # FE the window seed IS Kmm and the options coincide byte-identically).
     "barotropic_een_seed": "nemo_kmm",
+    # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170-1172): reconcile the 3-D momentum
+    # depth-mean onto un_adv*r1_hu(Kmm) -- the SECONDARY/transport-weighted
+    # substep mean (== legoESM Hu_avg, the same quantity already routed to
+    # tracer advection) -- instead of the primary/velocity boxcar mean. The two
+    # kernels sample the substep profile at different phases (DINO nn_e=23:
+    # centroid 22.0 vs 14.67), so only this reaches the ACC velocity as NEMO
+    # does. MLF-only (the N6 reconciliation is where the leap-frog barotropic
+    # mode lands on the 3-D velocity), so it lands on THIS card only.
+    "barotropic_reconcile_target": "transport_avg",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
     # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
     # — meaningful ONLY under the MLF integrator (construction raises
@@ -3062,6 +3077,9 @@ def dino_lat_lon_model_config(
         # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
         # DINOConfig.barotropic_een_seed docstring).
         barotropic_een_seed=cfg.barotropic_een_seed,
+        # NEMO dyn_spg_ts N6 momentum reconciliation target (dynspg_ts.F90:1170;
+        # see DINOConfig.barotropic_reconcile_target docstring).
+        barotropic_reconcile_target=cfg.barotropic_reconcile_target,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
