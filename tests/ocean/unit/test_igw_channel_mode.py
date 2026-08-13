@@ -20,8 +20,11 @@ WHAT IS CHECKED, and why each is not redundant:
 
 2. ``v`` vanishes on both walls. The channel's boundary condition, and the
    reason the meridional wavenumber is quantised as ``l = n pi / Ly``. A
-   plane wave passes check 1 and fails this one, which is exactly the error
-   the global sphere case makes.
+   plane wave passes check 1 and fails this one. That is the WALL half of
+   what the global sphere case gets wrong; the sphere's other error -- a
+   constant f imposed where the model integrates 2*Omega*sin(lat), on a
+   metric that is not Cartesian -- is NOT reproduced by this control and
+   is not claimed to be.
 
 3. The dispersion relation the case's own parameters carry is
    ``omega^2 = f^2 + gH(k^2 + l^2)``. Checks 1 and 2 constrain the amplitude
@@ -128,6 +131,11 @@ def test_the_mode_solves_the_linear_shallow_water_equations():
     res = _swe_residuals(
         lambda x, y, t: M.igw_channel_mode(x, y, t, _NLAT, _NLON),
         X, Y, 0.317 * period, k, l_y, period)
+    # 1e-6, not the ~1e-8 the residuals actually reach: the tolerance is
+    # the claim the test ENFORCES, and it is set two orders above the
+    # observed value so central-difference truncation on other hardware
+    # cannot turn a correct mode red. Prose that quotes the 1e-8 must say
+    # it is the measured value, not the asserted one (codex 2026-08-13).
     assert max(res) < 1e-6, res
 
 
@@ -190,6 +198,34 @@ def test_v_vanishes_on_both_walls():
             # Scaled against the mode's own peak meridional velocity, not
             # against an absolute floor.
             assert np.max(np.abs(v)) < 1e-12 * M._IGWC_V_AMP
+
+
+#: The Bishnu et al. (2024) channel specification, as LITERALS. Every other
+#: test in this file takes its geometry from the module under test, so a
+#: coherently WRONG domain -- right algebra on the wrong box -- would pass
+#: every residual, wall, dispersion and periodicity check (codex
+#: 2026-08-13). These numbers are the independent statement of what the
+#: case is supposed to be; if the module drifts from them, the mode may
+#: still be a valid Poincare mode of a DIFFERENT channel.
+_SPEC = dict(lx_m=4000.0e3, ly_m=2000.0e3, h_m=1000.0, f0=1.0e-4,
+             zonal_mode=2, meridional_mode=1)
+
+
+def test_the_case_is_the_channel_the_reference_specifies():
+    M = _matrix()
+    assert M._IGWC_LX_M == _SPEC["lx_m"]
+    assert M._IGWC_LY_M == _SPEC["ly_m"]
+    assert M._IGWC_H == _SPEC["h_m"]
+    assert M._IGWC_F0 == _SPEC["f0"]
+    assert M._IGWC_M == _SPEC["zonal_mode"]
+    assert M._IGWC_N == _SPEC["meridional_mode"]
+    # And the frequency that follows from those literals alone, computed
+    # here without reference to the module's own dispersion relation.
+    k = 2.0 * np.pi * _SPEC["zonal_mode"] / _SPEC["lx_m"]
+    l_y = np.pi * _SPEC["meridional_mode"] / _SPEC["ly_m"]
+    omega = np.sqrt(_SPEC["f0"] ** 2
+                    + C.g * _SPEC["h_m"] * (k ** 2 + l_y ** 2))
+    assert abs(_params()[5] - omega) <= 1e-12 * omega
 
 
 def test_the_dispersion_relation_is_the_one_the_gate_reads():

@@ -479,11 +479,58 @@ def _build_test_matrix() -> list[TestCase]:
             "beta_S": 0.0,
             "T_ref": 17.5,
             "S_ref": 35.0,
-            # WENO5 tracer advection: less front-diffusive than the
+            # PPM + flux correction. This arm is the ONLY lock-exchange
+            # arm that resolves its own front, and until 2026-08-13 it was
+            # the only FAILING case in the whole ocean-grid suite: it
+            # finished with water at -3.00 degC from an initial range of
+            # exactly [5, 30], which is not a tolerance question, it is
+            # water that cannot exist.
+            #
+            # It ran WENO5, chosen for being "less front-diffusive than the
             # default TVD scheme, comparable in sharpness to Veros's
-            # superbee flux limiter. A diffused front weakens the local
-            # density gradient that drives the gravity current.
-            "tracer_advection": "weno5",
+            # superbee flux limiter". Sharpness was the right thing to
+            # want and the wrong property to select on: WENO5 is
+            # essentially-non-oscillatory, NOT monotonicity-preserving, and
+            # superbee -- the scheme it was being matched to -- is a TVD
+            # limiter that cannot create a new extremum.
+            #
+            # MEASURED 2026-08-13, one variable, this arm, everything else
+            # in this registration held fixed. Final T range against the
+            # initial [5.00, 30.00], and the spurious-mixing number the
+            # case exists to report:
+            #
+            #   scheme     T range [degC]      RPE_rel
+            #   weno5      -3.00 .. 31.77      6.536e-06   FAIL
+            #   tvd        -0.40 .. 30.00      9.832e-06   FAIL
+            #   superbee   -2.99 .. 30.00      8.889e-06   FAIL
+            #   ppm_fct     5.00 .. 30.00      6.261e-06   PASS
+            #   fct2        5.00 .. 30.00      6.852e-06   PASS
+            #
+            # The flux LIMITERS all undershoot; only the flux-CORRECTED
+            # schemes are bounded. That is the expected split: tvd and
+            # superbee are one-dimensional limiters applied direction by
+            # direction, and the multi-dimensional combination of monotone
+            # sweeps is not itself monotone, whereas FCT corrects the
+            # antidiffusive flux against the local min/max of the whole
+            # stencil. Note tvd and superbee produce NO overshoot above
+            # 30.00 while still undershooting by 5.4 and 8.0 degC -- the
+            # one-sidedness is what shows the limiter is working in each
+            # sweep and the combination still is not.
+            #
+            # ppm_fct is chosen over fct2 because it is bounded AND has the
+            # lowest spurious mixing of all five, so the change costs the
+            # diagnostic nothing. It is not a diffusivity trade.
+            # NOT a vertical-CFL artefact, and the FCT schemes are not
+            # masking one. dz = 1 m and dt = 30 s put CFL_v = 1 at only
+            # 0.033 m/s, so an unstable vertical operator was the obvious
+            # competing explanation (GLM-5.2 ranked it first). PERTURBATION
+            # TEST, weno5, only dt changed: 30 s -> -3.00 degC, 15 s ->
+            # -2.92, 7.5 s -> -2.88. A 4x reduction in dt moves the
+            # undershoot by 4%, where a CFL mechanism predicts it falling
+            # roughly with dt. The undershoot is a property of the spatial
+            # scheme, so ppm_fct's boundedness is real and not a clip over
+            # a hidden instability.
+            "tracer_advection": "ppm_fct",
             # WENO5 momentum advection: removes the intrinsic dissipation
             # of the vector_invariant scheme that can damp the baroclinic
             # mode on this small, sharply-stratified geometry.
@@ -5657,12 +5704,15 @@ def _get_cell_latlon_rad(grid_type, grid):
 # two independent expressions for As to agree, which is the check that the
 # mode is consistent. VERIFIED in tests/ocean/unit/test_igw_channel_mode.py
 # by substituting the closed form back into the three linear shallow-water
-# equations: relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the central
-# difference's own truncation) and v = 0 at the walls to 1.2e-19 m/s
-# against a 1e-3 m/s mode amplitude. That file also carries the controls
-# that make those numbers mean something -- scaling any ONE of eta, u, v by
-# 5% drives the residual above 1e-3, and a plane wave, which passes the
-# residual check, is caught by the wall condition.
+# equations. MEASURED relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the
+# central difference's own truncation) and v = 0 at the walls to 1.2e-19
+# m/s against a 1e-3 m/s mode amplitude; the test ASSERTS the looser 1e-6
+# so other hardware cannot turn a correct mode red. That file also carries
+# the controls that make those numbers mean something -- scaling any ONE of
+# eta, u, v by 5% drives the residual above 1e-3; a plane wave, which
+# passes the residual check, is caught by the wall condition; and the
+# domain, depth, f0 and mode numbers are pinned against independent
+# literals so a coherently WRONG channel cannot pass the rest.
 # ===========================================================================
 
 #: FIXED physical domain -- the resolution string sets the CELL COUNT, so
