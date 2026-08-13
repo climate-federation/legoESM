@@ -127,7 +127,14 @@ def main() -> int:
     out = {}
     for tag, run in (("choice 4 (NEMO nn_mxl=2)", "nemolev_trp_mxl4_d30"),
                      ("choice 3 (control)", "nemolev_trp_mxl3ctl_d30")):
+        # The arms ran --years 0.0821918-ish, and the model uses a 365-DAY year,
+        # so they stopped at day 29.979 and the day-30 snapshot cadence never
+        # fired; only snapshot_final.npz exists. BOTH arms stopped at the SAME
+        # time, so the A/B stays exactly controlled; the 0.021-day offset vs the
+        # day-30 reference points (14.63% / 5.35%) is ~30 min of model time.
         snap = f"{R}/{run}/snapshot_day0030.npz"
+        if not os.path.exists(snap):
+            snap = f"{R}/{run}/snapshot_final.npz"
         if not os.path.exists(snap):
             print(f"  {tag:26s} NOT READY ({run})"); continue
         out[tag] = no_crossing_fraction(snap)

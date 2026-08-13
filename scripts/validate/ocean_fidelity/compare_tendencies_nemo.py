@@ -420,6 +420,19 @@ def main():
                     help="target record r (state r-1 vs avt/trends r); 1..11")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--skip-maps", action="store_true")
+    ap.add_argument("--mxl-choice", type=int, default=None, choices=[1, 2, 3, 4],
+                    help="Override tke_mxl_choice. Stage A's correlation is "
+                         "0.63 and did NOT move when the amplitude convention "
+                         "changed -- an amplitude error cannot change "
+                         "correlation. So the SPATIAL PATTERN of our K_H is "
+                         "wrong independently of its size, and the length is "
+                         "the remaining term (the energy already matches NEMO "
+                         "to 4 digits). If corr moves with this, the pattern "
+                         "defect is in the length.")
+    ap.add_argument("--prandtl-mode", default=None,
+                    choices=["unit", "constant", "richardson"],
+                    help="Override prandtl_mode. The other term that can "
+                         "reshape K_H at fixed energy.")
     ap.add_argument("--kappa-convention", default=None,
                     choices=["gaspar_sqrt2e", "veros_sqrte"],
                     help="Override the K-from-TKE amplitude convention. The "
@@ -438,6 +451,12 @@ def main():
 
     from scripts.run.run_omip_core2 import orca1_zdftke_config
     cfg = orca1_zdftke_config(prognostic=False)  # Mode-B quasi-steady for the
+    if args.mxl_choice is not None:
+        cfg = cfg._replace(tke_mxl_choice=int(args.mxl_choice))
+        print(f"[cfg] tke_mxl_choice OVERRIDE -> {args.mxl_choice}")
+    if args.prandtl_mode is not None:
+        cfg = cfg._replace(prandtl_mode=args.prandtl_mode)
+        print(f"[cfg] prandtl_mode OVERRIDE -> {args.prandtl_mode}")
     if args.kappa_convention is not None:
         cfg = cfg._replace(kappa_convention=args.kappa_convention)
         print(f"[cfg] kappa_convention OVERRIDE -> {args.kappa_convention}")
