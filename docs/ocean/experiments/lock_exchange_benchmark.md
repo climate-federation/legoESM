@@ -298,9 +298,27 @@ Read this table narrowly. What it does NOT establish:
   is dynamically tied to column-integrated divergence, so "free surface"
   and "barotropic mode" are not separated here either.
 
+What the fair scale DID surface, once the normaliser stopped being one
+arm picked by alphabetical order: **the two arms do not evolve by the same
+amount.** On exactly the cells the difference uses,
+
+| Field | lat-lon moved | MPAS moved | ratio |
+|---|---|---|---|
+| `SST` coarse | 1.12e-1 | 3.29e-1 | 2.9× |
+| `SST` refined | 1.76e-1 | 3.93e-1 | 2.2× |
+| `eta` coarse | 4.51e-2 | 6.25e-2 | 1.4× |
+| `eta` refined | 1.25e-1 | 1.77e-1 | 1.4× |
+
+MPAS's surface tracer moves roughly three times as far as lat-lon's at
+both resolutions. That is a bigger asymmetry than the disagreement itself
+and it was completely hidden while the scale was lat-lon's own motion —
+which is also why the fractions used to exceed 1 and now do not (0.73 and
+0.66 for `SST`, 0.37 and 0.43 for `eta`).
+
 What is left, stated at its real strength: **the disagreement in `eta`
-grows with refinement while the surface-tracer disagreement does not.**
-That is one fact about two fields, not a mechanism.
+grows with refinement while the surface-tracer disagreement does not, and
+the MPAS arm evolves its surface tracer far further than the lat-lon arm
+at both resolutions.** Facts about fields, not a mechanism.
 
 **Next measurement**, given the oscillation: the difference's spatial
 spectrum at its PEAK time (day 1), not at day 10, plus a cell-shaped
