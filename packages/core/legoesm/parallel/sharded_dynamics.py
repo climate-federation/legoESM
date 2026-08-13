@@ -70,6 +70,7 @@ References
 from __future__ import annotations
 
 import logging
+import re
 import time
 from functools import partial
 from typing import NamedTuple
@@ -2326,6 +2327,8 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
     Returns ``(cell_local, u_local)`` of shapes ``(max_lc, W)`` /
     ``(max_le, nlev)``; ghost tail rows stay zero.
     """
+    import os as _os_ballast
+
     cells_per = cell_pack.shape[0]
     edges_per = u_shard.shape[0]
     # +1 garbage slot for padded scatter targets (trimmed at the end):
@@ -2334,20 +2337,69 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
     cell_local = jnp.pad(cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)))
     u_local = jnp.pad(u_shard, ((0, max_le + 1 - edges_per), (0, 0)))
 
+    ballast = _resolve_halo_ballast(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
+
     for r, (sc, rc, se, re) in enumerate(halo_sl):
         send_c = cell_pack[sc[0]]             # (hc_r, W)
         send_e = u_shard[se[0]]               # (he_r, nlev)
         send_c_flat = send_c.ravel()
         send_packed = jnp.concatenate([send_c_flat, send_e.ravel()])
+        if ballast > 1:
+            # MEASUREMENT ONLY: multiply the bytes on the wire by
+            # `ballast` while holding the round count, the schedule and
+            # every arithmetic operation fixed, then discard the copies
+            # on receipt. This is the one-variable experiment for the
+            # bandwidth term of the exchange -- fitting it out of three
+            # A/B receipts leaves it resting on a compute time imported
+            # from an older trace. Result is bit-identical: the kept
+            # slice is the same buffer that would have been sent.
+            send_packed = jnp.concatenate([send_packed] * ballast)
         recv_packed = jax.lax.ppermute(
             send_packed, "device", perm=ppermute_perms[r])
         split_at = send_c_flat.shape[0]       # static
         recv_c = recv_packed[:split_at].reshape(send_c.shape)
-        recv_e = recv_packed[split_at:].reshape(send_e.shape)
+        recv_e = recv_packed[split_at:split_at + send_e.size].reshape(
+            send_e.shape)
         cell_local = cell_local.at[rc[0]].set(recv_c)
         u_local = u_local.at[re[0]].set(recv_e)
 
     return cell_local[:max_lc], u_local[:max_le]
+
+
+#: Canonical decimal integer, no sign / whitespace / underscores /
+#: leading zeros — the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_halo_ballast(env_value: str) -> int:
+    """Resolve LEGOESM_MPAS_HALO_BALLAST: wire-payload multiplier for
+    the exchange, ``''``/``'1'`` = off (default).
+
+    A MEASUREMENT knob, never a production one. It repeats the packed
+    send buffer N times so the collective moves N x the bytes with the
+    SAME round count, the SAME schedule and the SAME arithmetic, and
+    throws the copies away on receipt. The step's change is then the
+    bandwidth term of the exchange, measured with one variable moved
+    instead of fitted out of three separate A/B receipts against a
+    compute time taken from an older trace.
+
+    Unknown or non-canonical values raise (dispatch hardening): a typo
+    must not silently run a different payload multiple.
+    """
+    if env_value in ("", "1"):
+        return 1
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={env_value!r}: must be a "
+            f"canonical decimal integer >= 1 (empty or '1' = off)")
+    n = int(env_value)
+    if not 1 <= n <= 8:
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={n}: out of range 1..8. It "
+            f"multiplies every halo message, so a large value runs the "
+            f"node out of memory rather than measuring anything.")
+    return n
 
 
 # Device-count ceiling for LEGOESM_MPAS_RAGGED_HALO=auto. Production A/B
