@@ -15,7 +15,9 @@ the code, so a fresh short session can rebuild context from a few reads.
 |---|---|
 | worktree | `/burg-archive/glab/users/pg2328/legoESM_fv3jax` |
 | branch | `feat/fv3-duo-jax-lane` (pushed to `cf`) |
+| **PR** | **#1610, DRAFT** — not mergeable while `TOL-PENDING` markers remain |
 | run/log dir | `/burg-archive/glab/users/pg2328/fv3_duo_gaps/` |
+| pinned run worktrees | `_fv3jax_run` (SHA `dbfdccb67`, run 1), `_fv3jax_run2` (SHA `9b39dc254`, run 2) |
 | **pinned oracle tree** | `/burg-archive/glab/users/pg2328/fv3_oracle_pinned/atmos_cubed_sphere-symmetryclean` |
 | oracle reference runs (42) | `/burg-archive/glab/users/pg2328/Code/FV3/duogrid_zenodo/extracted/Code and simulations files` |
 | oracle 1-step/N-step runs | `/burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_{hydro,nh}_{zerostep,1step,96min,320min}*` |
