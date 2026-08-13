@@ -265,6 +265,32 @@ be written against the real API. Then the km=1 stepper, then Phases 2 and 3.
    `run_duo_stepper_case6.py`, then score with the **existing** calibrated
    gates — do not write new ones.
 
+### Step 5 in detail — the stepper is a thin composition, not a new algorithm
+
+Read from `fv3_native_duo_stepper.py::full_acoustic_step_sixface`. Its whole
+body is four things, and every JAX piece either exists or is in flight:
+
+1. `acoustic_step_sixface(ctx, states, dt, sw_cfg, entry_ascalar)` — the
+   `c_sw → p_grad_c → d_sw1…d_sw6` chain with both barriers.
+   *Needs:* `fv3_duo_sw_core.py` (in flight) + `fv3_duo_halos.py` ✅ +
+   `fv3_pgrad.py` ✅.
+2. A post-step `delp`/`pt` halo refresh via `ext_scalar_sixface(…, "A", …)`
+   (`dyn_core.F90:1336-1337`). *Needs:* `fv3_duo_halos.ext_scalar_sixface` ✅.
+3. Per face: `geopk_sw_1lev_d` → the external-mode filter
+   `divg2 = d_ext · da_min_c · saved divergence` (km=1, where the mass weight
+   cancels at one level) → `one_grad_p_1lev`. *Needs:* km=1 wrappers over the
+   already-ported `fv3_pgrad.geopk` / `one_grad_p` ✅.
+4. **No post-step vector refresh on the ext path.** The returned D-wind halos
+   are deliberately STALE-BY-ONE, faithful to `dyn_core.F90:1332-1338` — that
+   routine refreshes only `delp`/`pt`, and `ext_vector` runs at the *next*
+   step's entry (`:468-472`). A JAX twin that "helpfully" refreshes the winds
+   here is a divergence, not a fix. This is the single easiest place in the
+   whole port to be wrong while looking more correct.
+
+Note `d_ext` **must default to 0** for any oracle comparison: every duo deck
+resolves `D_EXT = 0.0`. The NumPy signature's `d_ext=0.02` default is a
+research value and has already produced one retracted claim.
+
 ### Dependency note for step 4
 
 `a2b_ord4` was promoted from `_a2b_ord4` in `fv3_pgrad.py` so the SW core's
