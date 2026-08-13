@@ -320,11 +320,88 @@ From FESOM2-C §7.1, mapped onto this port. Every row is a bug class that
 ## 9. Work breakdown
 
 Ordered so that every unit is certifiable the moment it lands, and so the
-end-to-end assembly is reached as early as the dependencies allow.
+end-to-end assembly is reached as early as the dependencies allow. Derived from
+a full call-graph trace of one `fv_dynamics` step in the NumPy lane.
 
-*(Filled in from the call-graph inventory; see the campaign STATE file for live
-status. Kernels already in the JAX lane: `sim1_solver`, `riem_solver_c`,
-`riem_solver3`, `edge_profile`, `update_dz_c` — `fv3_nh_core.py`.)*
+**Already in the JAX lane** (`fv3_nh_core.py`): `sim1_solver`, `riem_solver_c`,
+`riem_solver3`, `edge_profile`, `update_dz_c`.
+
+**Not the target of this port, despite looking like it:** the JAX `fv_tp_2d`
+(`fv_tp_2d.py:1122`), `ppm_transport_1d` (`fv3_sw_core.py:2927`),
+`interp_center_to_corner_a2b_ord4` (`operators_cdgrid.py:1145`), and
+`_d_sw_native` (`fv3_sw_core.py:3359`, monolithic). These are cdgrid-signature
+research reimplementations, not loop-faithful mirrors of the NumPy duo lane.
+They stay where they are; the mirrors are separate modules.
+
+### Phase 1 — 2-D (shallow water), the runnable-and-scoreable milestone
+
+| unit | mirrors | new module |
+|---|---|---|
+| duo halos + **both barriers** | `fv3_native_gridstruct` exchanges, `k2e_remap_halo_rings`, `_fill_corners_*`, `average_*_shared_edge*`; `fv3_native_ext_vector` `ext_scalar`/`ext_vector`, `c2l_ord2*`, corner-region Lagrange | `grids/fv3_duo_halos.py` |
+| tp_core | `xppm`, `yppm`, `pert_ppm`, `fv_tp_2d`, `copy_corners`, `deln_flux`, `xtp_u`, `ytp_v` | `core/fv3_tp_core.py` |
+| SW core | `c_sw`, `d2a2c_vect_duo`, `divergence_corner_duo`, `d_sw1_duo`…`d_sw6_duo`, `del6_vt_flux`, `a2b_ord4` | `core/fv3_duo_sw_core.py` |
+| pressure gradient | `geopk`, `p_grad_c`, `one_grad_p`, `nh_p_grad`, `pk3_halo`, `pln_halo`, `pe_halo` | `core/fv3_pgrad.py` |
+| km=1 acoustic step + outer step | `full_acoustic_step_sixface`, `advance_duo_outer_step`, `run_duo_sw` | `core/fv3_duo_stepper.py` |
+
+Exit: `run_duo_stepper_w2.py` / `run_duo_stepper_case6.py` gain a
+`--backend {numpy,jax}` flag, and the **existing** `w2_duo_oracle_gate.py` /
+`case6_duo_oracle_gate.py` score the JAX arm unchanged. Swapping the engine
+under calibrated gates is worth more than a new gate.
+
+**The swap is one symbol.** `run_duo_stepper_w2.py:178-215` imports exactly
+three things and calls one of them in the time loop:
+
+```python
+ctx    = build_six_face_duo_context(...)   # SETUP  — stays NumPy
+states = w2_six_face_state(ctx)            # IC     — stays NumPy
+for _ in range(steps_per_day):             # HOT    — the swap point
+    states = full_acoustic_step_sixface(ctx, states, args.dt, d_ext=args.d_ext)
+```
+
+So Phase 1 needs a JAX `full_acoustic_step_sixface` with that exact signature
+and nothing else changes: the context builder, the initial condition, the
+`geographic_va` lens, the nearest-neighbour lat-lon map and the npz provenance
+record all stay on the NumPy side, where they are already certified. `ctx` is
+converted to JAX tables once, before the loop.
+
+This also makes the tier-3 replay gate free: run N steps on both backends from
+the same `states` and compare, which is precisely the multi-step state-threading
+test FESOM2-JAX §2.4 requires and single-step kernel gates cannot provide.
+
+### Phase 2 — 3-D hydrostatic
+
+`fv3_native_state_3d`/`eta` conversion, the three phase drivers
+(`cgrid_phase_3d`, `dsw_phase_3d`, `dsw_tail_3d`), `acoustic_substep_3d` +
+`acoustic_loop_3d` (`lax.scan` over `n_split`), `fv_mapz` remap,
+`tracer_2d_1L`, and the `fv_dynamics_step` shell (`lax.scan` over `k_split`).
+Exit: `full_step_oracle_parity.py --backend jax` at the same `--max-rel`.
+
+### Phase 3 — non-hydrostatic
+
+`update_dz_d` (the last NH kernel with no JAX twin), `cgrid_nh_pressure_phase`,
+`dgrid_nh_pressure_phase`, the NH arms of `c_sw`/`d_sw1`/`d_sw2`/`d_sw5`, the
+`gz`↔`zh` acoustic carry, and the NH `map1_ppm` arms (`w` at `iv=-2`, `delz`
+specific volume, the `w_limiter` passes). Exit:
+`full_step_oracle_parity.py --nh --backend jax`, then the N-step gate.
+
+### The two nodes that will not port mechanically
+
+Both are flagged here so they are designed, not discovered:
+
+1. **`_rezone`** (`fv3_native_mapz.py:594`) — the remap interval search, three
+   data-dependent branches inside a `for i, k, ell, m` nest. It must keep the
+   NumPy lane's traversal exactly; `searchsorted` picks a different layer at
+   ties.
+2. **`tracer_2d_1l_sixface`** (`fv3_native_tracer2d.py:193`) — `nsplt` is a
+   **data-derived loop trip count** (computed from `cmax`), which jit cannot
+   accept as a Python loop bound. Either resolve `nsplt` outside the traced
+   region and treat it as static per call, or use `lax.while_loop` with a
+   bounded maximum. Whichever is chosen must be stated in the module docstring,
+   because it changes the retrace behaviour.
+
+Good news from the same trace: `c_sw` and all six `d_sw*_duo` are **already
+functional** in the NumPy lane (they copy every input at entry and return
+dicts), so R4 costs nothing there.
 
 ## 10. Explicitly out of scope
 
