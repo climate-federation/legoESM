@@ -5655,10 +5655,14 @@ def _get_cell_latlon_rad(grid_type, grid):
 #
 # The dispersion relation is not imposed -- it FALLS OUT of requiring the
 # two independent expressions for As to agree, which is the check that the
-# mode is consistent. Verified here by substituting the closed form back
-# into the three linear shallow-water equations: residuals ~1e-8 (the
-# finite-difference truncation of the check itself) and v = 0 at both
-# walls to 7e-20. See tests/ocean/unit/test_igw_channel_mode.py.
+# mode is consistent. VERIFIED in tests/ocean/unit/test_igw_channel_mode.py
+# by substituting the closed form back into the three linear shallow-water
+# equations: relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the central
+# difference's own truncation) and v = 0 at the walls to 1.2e-19 m/s
+# against a 1e-3 m/s mode amplitude. That file also carries the controls
+# that make those numbers mean something -- scaling any ONE of eta, u, v by
+# 5% drives the residual above 1e-3, and a plane wave, which passes the
+# residual check, is caught by the wall condition.
 # ===========================================================================
 
 #: FIXED physical domain -- the resolution string sets the CELL COUNT, so
@@ -5918,15 +5922,31 @@ def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
         n_lat, n_lon, dx_m=dx_m, dy_m=dy_m,
         f0=_IGWC_F0, beta=0.0, cartesian_pseudo_lat=True)
     z_coord = create_ocean_z_star(n_levels=1, H_max=_IGWC_H)
-    # implicit_cn, NOT the default explicit_substep. MEASURED 2026-08-12 on
-    # this very case: the split-explicit barotropic solver propagates the
-    # external gravity wave at ~0.54*sqrt(gH) -- period 1.86x too long, and
-    # it gets WORSE with more substeps (1.862 at 30, 1.951 at 120, 1.971 at
-    # 480), so it is not a CFL or filter artefact. implicit_cn gives 1.000.
-    # Reproduced on both this Cartesian geometry and the production regional
-    # lat-lon grid, at 20 and 40 points per wavelength, with no damping.
-    # A case that verifies wave SPEED cannot run on a solver that gets it
-    # wrong by 2x; the defect is tracked separately.
+    # implicit_cn, NOT the default explicit_substep.
+    #
+    # The ORIGINAL reason is now obsolete and must not be repeated: the
+    # split-explicit solver used to propagate this wave at ~0.54*sqrt(gH)
+    # (period 1.86x too long) because its averaging window was centred half
+    # a step early. That is FIXED -- the window now runs i+1 = 1..2n-1,
+    # symmetric about t+dt -- and the split-explicit frequency is right.
+    #
+    # RE-MEASURED 2026-08-13 on this case, x64, only the solver changed:
+    #
+    #   solver             omega error 20x40 / 40x80    L2 20x40 / 40x80
+    #   explicit_substep      0.52% / 0.45%              0.235 / 0.078
+    #   implicit_cn           0.49% / 0.45%              0.066 / 0.029
+    #
+    # The two solvers now agree on the wave SPEED to within 0.03 percentage
+    # points. What still separates them is AMPLITUDE: the time-averaging
+    # window is a low-pass filter, so the split-explicit arm loses 41% of
+    # the wave variance over 1.25 periods at 20x40 against 8% for
+    # implicit_cn (energy_ratio 0.590 vs 0.924), and its L2 misses the 0.08
+    # gate at the coarse resolution.
+    #
+    # implicit_cn is kept because this case exists to measure the SPATIAL
+    # discretisation against an exact solution, and the filter's damping
+    # would otherwise dominate the L2. The default lane's damping is a
+    # separate question and is NOT covered here.
     config = LatLonCGridOceanConfig()
     config = config._replace(
         barotropic=config.barotropic._replace(

@@ -429,17 +429,25 @@ def _on_common_mesh(npz: Path, field: str, t_index: int = -1):
     return A, M > 0.5
 
 
-def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS):
+def cross_grid_rms(root: Path, case: str, grids=CONSISTENCY_GRIDS,
+                   npz_by_grid=None):
     """Arm-to-arm difference of the final field, in the field's own units.
 
     Per-pair entries are documented on :func:`_pair_diff`. A case-level
     reference amplitude (independent of any pair) is returned separately so
     the differences can be read against one fixed scale.
+
+    ``npz_by_grid`` supplies the snapshots directly instead of locating the
+    registered ones under ``root`` -- the same escape hatch
+    :func:`front_position` already takes, and what lets
+    :func:`refinement_agreement` reduce a REFINED pair through this exact
+    code path rather than a second copy of it.
     """
     field = CASE_FIELD[case]
     got, got0 = {}, {}
-    for g in grids:
-        p = _find(root, case, g)
+    src = (npz_by_grid if npz_by_grid is not None
+           else {g: _find(root, case, g) for g in grids})
+    for g, p in src.items():
         if p is None:
             continue
         got[g] = _on_common_mesh(p, field)
@@ -790,8 +798,25 @@ def theory_lock_exchange(root: Path, grids=ALL_GRIDS):
         dt_s = (t[-1] - t[0]) * 86400.0
         dx_deg = abs(((x1 - x0 + 180.0) % 360.0) - 180.0)
         speed = dx_deg * (np.pi / 180.0) * C.R_earth / dt_s if dt_s else np.nan
+        # CAN THIS ARM RESOLVE THE ANSWER AT ALL? The comparison is only a
+        # measurement if the front is expected to cross a few cells during
+        # the run. On the global aquaplanet arms it is not: at 36x72 the
+        # equatorial cell is 556 km wide and Benjamin predicts 42.8 km of
+        # travel in the registered 1 day, i.e. 0.08 of ONE CELL. What the
+        # sub-cell interpolation then reports is how the two arms smeared a
+        # step, not how fast a gravity current ran -- the same defect as
+        # the old IGW L2 gate, which rewarded a frozen dycore. The
+        # resolved measurement lives on the latlon_regional Petersen
+        # channel (1 km cells, 64 km domain), not here.
+        dlon = float(np.median(np.abs(np.diff(np.asarray(lon,
+                                                          dtype=np.float64)))))
+        cell_m = dlon * (np.pi / 180.0) * C.R_earth
+        cells = c_theory * dt_s / cell_m if cell_m > 0 else np.nan
         rows[grid] = dict(front_deg_moved=dx_deg, speed_m_s=speed,
-                          ratio_to_theory=speed / c_theory)
+                          ratio_to_theory=speed / c_theory,
+                          output_cell_width_km=cell_m / 1e3,
+                          theory_cells_on_output_mesh=float(cells),
+                          resolvable=bool(cells >= 1.0))
     return dict(theory_c_m_s=c_theory, g_prime=g_prime, arms=rows)
 
 
@@ -1075,63 +1100,200 @@ def self_error(root: Path, cases=None, grids=None, prefix=(), force=False):
     grids = list(grids or SELF_ERROR_GRIDS)
     out = {}
     for case in cases:
-        field = CASE_FIELD[case]
         for grid in grids:
-            key = f"{grid}|{case}"
             base = _registered_resolution(case, grid)
             if base is None:
-                out[key] = dict(skipped="arm not registered for this case")
+                out[f"{grid}|{case}"] = dict(
+                    skipped="arm not registered for this case")
                 continue
-            fine = _refine(grid, base)
-            if fine is None:
-                out[key] = dict(skipped=f"no 2x sibling for {grid} {base!r}")
+            out[f"{grid}|{case}"] = _self_error_pair(
+                case, grid, base, root, prefix, force)
+    return out
+
+
+def _self_error_pair(case: str, grid: str, base: str, root: Path,
+                     prefix=(), force: bool = False):
+    """One arm's own discretisation error at resolution ``base``.
+
+    Split out of :func:`self_error` so :func:`refinement_agreement` can ask
+    for it at the REFINED resolution too, through the same runs and the
+    same reduction. A budget measured only at the coarse level cannot say
+    whether a cross-arm difference that grows under refinement is the two
+    dycores parting company or simply each arm's own solution still moving.
+    """
+    field = CASE_FIELD[case]
+    fine = _refine(grid, base)
+    if fine is None:
+        return dict(skipped=f"no 2x sibling for {grid} {base!r}")
+    pb = _run_matrix_arm(case, grid, base, root, list(prefix), force)
+    pf = _run_matrix_arm(case, grid, fine, root, list(prefix), force)
+    if pb is None or pf is None:
+        return dict(skipped="one of the two runs produced no snapshot "
+                            "(see log above)", base=base, refined=fine)
+    # The evolution below is (final - initial) on each side, so the two
+    # runs must share BOTH endpoints. Cadence in between may differ;
+    # endpoints may not (codex round 2).
+    tb = np.load(pb)["times_days"]
+    tf = np.load(pf)["times_days"]
+    if not (np.isclose(tb[0], 0.0) and np.isclose(tf[0], 0.0)
+            and np.isclose(tb[-1], tf[-1])):
+        return dict(skipped=f"time bases differ: base spans "
+                            f"{tb[0]}..{tb[-1]} d, refined "
+                            f"{tf[0]}..{tf[-1]} d",
+                    base=base, refined=fine)
+    A, mA = _on_common_mesh(pb, field)
+    B, mB = _on_common_mesh(pf, field)
+    A0, mA0 = _on_common_mesh(pb, field, t_index=0)
+    B0, mB0 = _on_common_mesh(pf, field, t_index=0)
+    rec = dict(_pair_diff(A, mA, B, mB),
+               base=base, refined=fine, field=field)
+    # The tolerance has to be the SAME QUANTITY the cross-arm verdict is
+    # taken on, or a row can be flagged "IC-dominated" and "outside budget"
+    # in the same breath. Both sides are therefore the
+    # difference-of-differences.
+    rec["rms_evolution"] = _pair_diff(A - A0, mA & mA0, B - B0, mB & mB0,
+                                      shift=False)["rms_abs"]
+    if case in RMS_NOT_GATED:
+        fp = front_position(root, npz_by_grid={"base": pb, "refined": pf})
+        pair = fp["pairs"].get("base|refined", {})
+        # DISPLACEMENT separations only. "front_0E_init_sep_km" also ends
+        # in "_sep_km" and is the mesh-phase floor, two orders of magnitude
+        # larger; including it emitted a 115 km front tolerance instead of
+        # 0.96 km.
+        rec["front_sep_km"] = {
+            k: v for k, v in pair.items()
+            if k.endswith("_sep_km") and not k.endswith("_init_sep_km")}
+        rec["median_crossings"] = {
+            k: v["median_crossings"] for k, v in fp["arms"].items()}
+    return rec
+
+
+def refinement_agreement(root: Path, cases=None, grids=None, prefix=(),
+                         force=False):
+    """Does the arm-to-arm difference SHRINK when both arms are refined?
+
+    WHY THIS EXISTS. The consistency block asks "is the arm-to-arm
+    difference inside one arm's own discretisation error?" and every case
+    currently answers yes -- with the budget 1.5x to 245x larger than the
+    difference it is judging. A test that cannot fail has not established
+    agreement; it has established that the instrument is blunt. Measured
+    2026-08-11, EVOLUTION difference against its budget:
+    geostrophic_adjustment 0.69, barotropic_wave 0.48, phillips 0.36,
+    inertia_gravity_wave 0.38, lock-exchange front displacement 0.004.
+
+    The question a coarse pair cannot answer is whether the two dycores are
+    converging to the SAME solution or merely to solutions that are both
+    blurry enough to overlap. Refining BOTH arms one step discriminates:
+
+      * difference falls with the refinement  -> the arms are converging
+        together; the coarse agreement was real.
+      * difference stays flat while each arm's own solution moves -> a
+        genuine cross-grid disagreement that the coarse budget was hiding.
+
+    Both resolutions are reduced through :func:`cross_grid_rms`, i.e. the
+    same common mesh, erosion and area weights as the headline number, and
+    the refined runs are the ones :func:`self_error` already produces, so
+    the usual invocation runs no extra model.
+    """
+    cases = list(cases or SELF_ERROR_CASES)
+    grids = list(grids or SELF_ERROR_GRIDS)
+    out = {}
+    for case in cases:
+        rec = {"levels": {}}
+        for level in ("base", "refined"):
+            paths, res_used = {}, {}
+            for grid in grids:
+                res = _registered_resolution(case, grid)
+                if res is None:
+                    continue
+                if level == "refined":
+                    res = _refine(grid, res)
+                    if res is None:
+                        continue
+                p = _run_matrix_arm(case, grid, res, root, list(prefix),
+                                    force)
+                if p is not None:
+                    paths[grid], res_used[grid] = p, res
+            if len(paths) < 2:
+                rec["levels"][level] = dict(
+                    skipped="fewer than two arms produced a snapshot",
+                    resolutions=res_used)
                 continue
-            pb = _run_matrix_arm(case, grid, base, root, list(prefix), force)
-            pf = _run_matrix_arm(case, grid, fine, root, list(prefix), force)
-            if pb is None or pf is None:
-                out[key] = dict(skipped="one of the two runs produced no "
-                                        "snapshot (see log above)",
-                                base=base, refined=fine)
+            # Endpoints must match on BOTH sides or the difference mixes a
+            # time offset into a discretisation one -- the same guard
+            # self_error applies to its own pair.
+            ends = {g: np.load(p)["times_days"] for g, p in paths.items()}
+            t_end = {g: float(t[-1]) for g, t in ends.items()}
+            if (max(t_end.values()) - min(t_end.values())
+                    > 1e-9 * max(1.0, max(abs(v) for v in t_end.values()))):
+                rec["levels"][level] = dict(
+                    skipped=f"arms end at different times: {t_end}",
+                    resolutions=res_used)
                 continue
-            # The evolution below is (final - initial) on each side, so the
-            # two runs must share BOTH endpoints. Cadence in between may
-            # differ; endpoints may not (codex round 2).
-            tb = np.load(pb)["times_days"]
-            tf = np.load(pf)["times_days"]
-            if not (np.isclose(tb[0], 0.0) and np.isclose(tf[0], 0.0)
-                    and np.isclose(tb[-1], tf[-1])):
-                out[key] = dict(skipped=f"time bases differ: base spans "
-                                        f"{tb[0]}..{tb[-1]} d, refined "
-                                        f"{tf[0]}..{tf[-1]} d",
-                                base=base, refined=fine)
-                continue
-            A, mA = _on_common_mesh(pb, field)
-            B, mB = _on_common_mesh(pf, field)
-            A0, mA0 = _on_common_mesh(pb, field, t_index=0)
-            B0, mB0 = _on_common_mesh(pf, field, t_index=0)
-            rec = dict(_pair_diff(A, mA, B, mB),
-                       base=base, refined=fine, field=field)
-            # The tolerance has to be the SAME QUANTITY the cross-arm
-            # verdict is taken on, or a row can be flagged "IC-dominated"
-            # and "outside budget" in the same breath. Both sides are
-            # therefore the difference-of-differences.
-            rec["rms_evolution"] = _pair_diff(A - A0, mA & mA0,
-                                              B - B0, mB & mB0,
-                                              shift=False)["rms_abs"]
-            if case == "lock_exchange":
-                fp = front_position(root, npz_by_grid={"base": pb,
-                                                       "refined": pf})
-                pair = fp["pairs"].get("base|refined", {})
-                # DISPLACEMENT separations only. "front_0E_init_sep_km"
-                # also ends in "_sep_km" and is the mesh-phase floor, two
-                # orders of magnitude larger; including it emitted a
-                # 115 km front tolerance instead of 0.96 km.
-                rec["front_sep_km"] = {
-                    k: v for k, v in pair.items()
-                    if k.endswith("_sep_km") and not k.endswith("_init_sep_km")}
-                rec["median_crossings"] = {
-                    k: v["median_crossings"] for k, v in fp["arms"].items()}
-            out[key] = rec
+            pairs, case_ref = cross_grid_rms(root, case, npz_by_grid=paths)
+            rec["levels"][level] = dict(pairs=pairs, case_ref=case_ref,
+                                        resolutions=res_used)
+            # A case this file has already declared un-adjudicable by field
+            # RMS must not be adjudicated by field RMS here either. For the
+            # lock exchange the quantity is how far the front MOVED, so the
+            # refinement question is asked of that instead.
+            if case in RMS_NOT_GATED:
+                fp = front_position(root, npz_by_grid=paths)
+                rec["levels"][level]["front"] = {
+                    pair: {k: v for k, v in rows.items()
+                           if k.endswith("_sep_km")
+                           and not k.endswith("_init_sep_km")}
+                    for pair, rows in fp["pairs"].items()}
+            # THE BUDGET AT THIS LEVEL. Without it a growing cross-arm
+            # difference is unreadable: each arm's own solution is still
+            # moving under refinement, and the question is whether the two
+            # arms are parting company FASTER than that.
+            rec["levels"][level]["self_error"] = {
+                g: _self_error_pair(case, g, r, root, prefix, force)
+                for g, r in sorted(res_used.items())}
+        b = rec["levels"].get("base", {}).get("pairs", {})
+        f = rec["levels"].get("refined", {}).get("pairs", {})
+        rec["ratio_refined_over_base"] = {
+            k: (float(f[k]["rms_evolution"] / b[k]["rms_evolution"])
+                if b.get(k, {}).get("rms_evolution", 0.0) > 0 else float("nan"))
+            for k in sorted(set(b) & set(f))}
+        # CONTROL, without which the raw ratio is unreadable. Refining an
+        # unstable or front-resolving case makes the SOLUTION bigger too --
+        # more resolved eddy energy, a sharper gravity current -- so a
+        # difference that grows in absolute terms may be a constant
+        # FRACTION of a growing signal, which is convergence, not
+        # disagreement. Both levels are therefore also divided by that
+        # level's own case reference amplitude (the area-weighted anomaly
+        # RMS of the widest arm), and it is the normalised ratio that
+        # carries the verdict.
+        cb = rec["levels"].get("base", {}).get("case_ref", float("nan"))
+        cf = rec["levels"].get("refined", {}).get("case_ref", float("nan"))
+        rec["case_ref_base"], rec["case_ref_refined"] = cb, cf
+        # D/E at each level: the cross-arm difference measured in units of
+        # the arms' OWN discretisation error there. This, not the bare
+        # difference, is what has to fall for "the arms agree" to mean
+        # anything -- and it is the number the coarse-only consistency
+        # block reports without ever asking whether it improves.
+        for level in ("base", "refined"):
+            se_l = rec["levels"].get(level, {}).get("self_error", {})
+            budget = max((v.get("rms_evolution", float("nan"))
+                          for v in se_l.values()
+                          if np.isfinite(v.get("rms_evolution", np.nan))),
+                         default=float("nan"))
+            rec.setdefault("budget", {})[level] = budget
+            rec.setdefault("difference_over_budget", {})[level] = {
+                k: (float(v["rms_evolution"] / budget)
+                    if np.isfinite(budget) and budget > 0 else float("nan"))
+                for k, v in rec["levels"].get(level, {})
+                                .get("pairs", {}).items()}
+        rec["ratio_normalised"] = {
+            k: (float((f[k]["rms_evolution"] / cf)
+                      / (b[k]["rms_evolution"] / cb))
+                if (cb > 0 and cf > 0
+                    and b.get(k, {}).get("rms_evolution", 0.0) > 0)
+                else float("nan"))
+            for k in sorted(set(b) & set(f))}
+        out[case] = rec
     return out
 
 
@@ -1274,6 +1436,12 @@ def main() -> None:
                          "not run on a login node.")
     ap.add_argument("--force-rerun", action="store_true",
                     help="rerun self-error arms whose snapshot already exists")
+    ap.add_argument("--refinement", action="store_true",
+                    help="ask whether the arm-to-arm difference SHRINKS when "
+                         "both arms are refined one step. Reads the same "
+                         "runs --self-error produces, so after a --self-error "
+                         "pass it runs no model; on its own it runs the same "
+                         "two runs per arm.")
     a = ap.parse_args()
     if not a.runs_root.is_dir():
         raise SystemExit(f"no suite output under {a.runs_root}")
@@ -1344,6 +1512,66 @@ def main() -> None:
             print("\n    paste into FRONT_SELF_ERROR_KM:")
             for (g, c), e in sorted(front.items()):
                 print(f'        ("{g}", "{c}"): {e:.3g},')
+
+    if a.refinement:
+        ra = refinement_agreement(
+            a.self_error_root,
+            cases=[c for c in a.self_error_cases.split(",") if c] or None,
+            grids=[g for g in a.self_error_grids.split(",") if g] or None,
+            prefix=shlex.split(a.run_prefix), force=a.force_rerun)
+        report["refinement_agreement"] = ra
+        print("\nREFINEMENT OF AGREEMENT  (does the arm-to-arm EVOLUTION "
+              "difference shrink when BOTH arms are refined one step?)")
+        print("    A ratio well below 1 means the arms are converging to the "
+              "same solution.\n"
+              "    A ratio near or above 1 means they are not, and the "
+              "coarse pass came from a blunt budget.")
+        for case in sorted(ra):
+            lv = ra[case]["levels"]
+            for pair, ratio in sorted(ra[case]["ratio_refined_over_base"]
+                                      .items()):
+                b = lv["base"]["pairs"][pair]["rms_evolution"]
+                f = lv["refined"]["pairs"][pair]["rms_evolution"]
+                rb = "/".join(f"{g}:{r}" for g, r
+                              in sorted(lv["base"]["resolutions"].items()))
+                rf = "/".join(f"{g}:{r}" for g, r
+                              in sorted(lv["refined"]["resolutions"].items()))
+                # The NORMALISED ratio carries the verdict; the raw one is
+                # printed beside it so a case whose whole signal grew under
+                # refinement is visible rather than mistaken for a
+                # disagreement.
+                rn = ra[case]["ratio_normalised"].get(pair, float("nan"))
+                verdict = ("CONVERGING" if rn < 0.75 else
+                           "FLAT — the arms disagree at a level refinement "
+                           "does not remove" if rn < 1.25 else
+                           "DIVERGING")
+                print(f"    {case:24s} {pair:16s} {b:9.3e} -> {f:9.3e}  "
+                      f"ratio {ratio:5.2f}  normalised {rn:5.2f}  {verdict}")
+                print(f"    {'':24s} {'':16s} base {rb}   refined {rf}"
+                      f"   case amplitude "
+                      f"{ra[case]['case_ref_base']:.3e} -> "
+                      f"{ra[case]['case_ref_refined']:.3e}")
+                dob = ra[case].get("difference_over_budget", {})
+                print(f"    {'':24s} {'':16s} difference / budget: "
+                      f"base {dob.get('base', {}).get(pair, float('nan')):5.2f}"
+                      f"   refined "
+                      f"{dob.get('refined', {}).get(pair, float('nan')):5.2f}"
+                      f"   (budget "
+                      f"{ra[case].get('budget', {}).get('base', float('nan')):.3e}"
+                      f" -> "
+                      f"{ra[case].get('budget', {}).get('refined', float('nan')):.3e})")
+                if case in RMS_NOT_GATED:
+                    print(f"    {'':24s} {'':16s} RMS NOT THE VERDICT here "
+                          f"({RMS_NOT_GATED[case]}); front displacement:")
+                    for level in ("base", "refined"):
+                        fr = lv[level].get("front", {}).get(pair, {})
+                        cell = "  ".join(f"{k[:-7]} {v:7.1f} km"
+                                         for k, v in sorted(fr.items()))
+                        print(f"    {'':24s} {'':16s}   {level:8s} {cell}")
+            for level, v in sorted(lv.items()):
+                if "skipped" in v:
+                    print(f"    {case:24s} {level:16s} SKIPPED — "
+                          f"{v['skipped']}")
 
     print("\nCROSS-GRID CONSISTENCY  (arm-to-arm RMS difference of the final "
           "field, in the field's own units; 0 = identical)")
@@ -1451,9 +1679,24 @@ def main() -> None:
           f"0.5*sqrt(g'H) = {le['theory_c_m_s']:.3f} m/s "
           f"(g' = {le['g_prime']:.4f} m/s^2)")
     for g, r in le["arms"].items():
+        # The width quoted is the SAVED OUTPUT mesh, which is what the
+        # front-crossing is measured on. Every arm's own model mesh here is
+        # coarser than or equal to it, so this is the OPTIMISTIC bound.
+        flag = ("" if r["resolvable"] else
+                "   NOT A MEASUREMENT: theory moves the front only "
+                f"{r['theory_cells_on_output_mesh']:.2f} of one "
+                f"{r['output_cell_width_km']:.0f} km OUTPUT cell over this "
+                f"run (model mesh {_registered_resolution('lock_exchange', g)})")
         print(f"    {g:13s} moved {r['front_deg_moved']:5.2f} deg -> "
               f"{r['speed_m_s']:.3f} m/s  "
-              f"({r['ratio_to_theory']:.2f} x theory)")
+              f"({r['ratio_to_theory']:.2f} x theory){flag}")
+    if not any(r["resolvable"] for r in le["arms"].values()):
+        print("    -> NO arm here can resolve the Benjamin speed. The ratios "
+              "above are the sub-cell smearing of a temperature step, not a "
+              "front speed, and must not be quoted as a dycore result. The "
+              "resolved test is the latlon_regional Petersen channel "
+              "(1 km cells); --convergence shows the deficit shrinking under "
+              "refinement.")
     bw = theory_barotropic_wave(a.runs_root)
     report["theory"]["barotropic_wave"] = bw
     print(f"\nbarotropic_wave — sqrt(gH) = {bw['theory_c_m_s']:.1f} m/s "
