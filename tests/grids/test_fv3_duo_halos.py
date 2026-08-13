@@ -339,6 +339,18 @@ def test_k2e_tables_are_the_pinned_nord2_oracle_tables():
     So the assertion is made convention-agnostic and the convention is
     REPORTED: the record->value map must agree either directly or under
     the column swap, the same way for every family.
+
+    The SECOND version then failed too (job 9401521), and for a third
+    reason: it compared the record maps with ``==``, which compares the
+    float64 Lagrange coefficients exactly.  120 records were
+    bit-identical and the rest differed in the last bit or two
+    (0.6981966520583825 vs ...27), because the fixture's weights come
+    from the Fortran ``tools/global_grid`` while
+    ``compute_fv3_native_k2e`` recomputes the same formula in Python.
+    Comparing floats with ``==`` is forbidden for exactly this reason.
+    The gate now splits the comparison by what each part means: keys and
+    the integer source level EXACTLY (a wrong cell or ring is a defect),
+    coefficients against a measured bound.
     """
     f = FIX / "fv3_duogrid_oracle_n2.npz"
     if not f.exists():
@@ -361,9 +373,35 @@ def test_k2e_tables_are_the_pinned_nord2_oracle_tables():
         theirs = _k2e_record_map(d[f"c12_{fam}_ij"], d[f"c12_{fam}_loc"],
                                  d[f"c12_{fam}_coef"])
         assert len(mine) == len(theirs), (fam, len(mine), len(theirs))
-        assert mine == theirs, (
-            f"{fam}: generator records differ from the pinned fixture "
-            f"in content (not merely in row/column order)")
+        # KEYS and the integer source level are compared EXACTLY -- a
+        # wrong cell or a wrong ring is a defect, never a rounding
+        # difference.
+        assert set(mine) == set(theirs), (
+            f"{fam}: the generator and the fixture disagree about WHICH "
+            f"halo cells are remapped, which is a real defect and not a "
+            f"convention difference")
+        for key in mine:
+            assert mine[key][0] == theirs[key][0], (
+                f"{fam} {key}: source level {mine[key][0]} vs "
+                f"{theirs[key][0]}")
+        # COEFFICIENTS are float64 and must NOT be compared with ==.
+        # The fixture's Lagrange weights come from the Fortran
+        # tools/global_grid; compute_fv3_native_k2e recomputes the same
+        # formula in Python, so the two differ in the last bit or two.
+        # Job 9401521 measured, over both families: max |delta| =
+        # 2.2e-16 on weights of order 0.7 / 0.3, i.e. 1-2 ULP, with 120
+        # of the records bit-identical.  An exact-equality assertion
+        # here reported a "content difference" that was pure rounding.
+        # TOL-PENDING: measured 2.2e-16 (job 9401521); bound = measured
+        # x ~45 to leave room for a different libm.  Re-measure before
+        # tightening.
+        cmax = max(abs(a - b)
+                   for key in mine
+                   for a, b in zip(mine[key][1], theirs[key][1]))
+        assert cmax < 1.0e-14, (
+            f"{fam}: Lagrange coefficients differ by {cmax:.3e}, far "
+            f"above the 2.2e-16 rounding floor measured for this "
+            f"fixture -- that is a formula difference, not rounding")
     # partition of unity, independent of the fixture entirely
     for fam in ("A", "B"):
         assert np.abs(got[f"{fam}_coef"].sum(axis=1) - 1.0).max() < 1e-10
