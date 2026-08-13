@@ -501,6 +501,21 @@ def _assert_profile_off_switch(a4, q1, km):
     assert (prod < 0.0).all(), "edge extm switch: AL/AR do not straddle qbar"
     m_e = np.minimum(np.abs(a2 - a1), np.abs(a3 - a1)).min() / scale
     assert m_e > _PRED_EPS, f"edge extm margin {m_e:.3e}"
+    # (f) ext5, ext6 and the kord-9 `fix` test, REPORTED SEPARATELY.
+    #     All three are ``|A6| vs |AR-AL|`` in disguise -- ext6 and `fix`
+    #     ARE clause (b)'s ratio, and ext5 is that ratio over 3 -- so (b)
+    #     already subsumes them; naming them anyway means a failure says
+    #     WHICH surface instead of leaving "some other switch" as a live
+    #     hypothesis (it was one of the three candidates after job
+    #     9401521).  Valid on the OUTPUT edges precisely because (a),
+    #     (b), (d) and (e) certify that no limiter modified them.
+    x0 = 2.0 * a1 - (a2 + a3)
+    x1 = np.abs(a2 - a3)
+    r_ext5 = float(np.max(np.abs(x0) / x1))
+    r_ext6 = float(np.max(np.abs(a6) / x1))
+    assert r_ext5 < _CLAMP_MARGIN, f"ext5 margin {r_ext5:.3f} (1.0 is ON)"
+    assert r_ext6 < _CLAMP_MARGIN, \
+        f"ext6 / kord-9 fix margin {r_ext6:.3f} (1.0 is ON)"
 
 
 @pytest.mark.parametrize("kord", ALL_KORD)
@@ -788,20 +803,57 @@ def test_profile_jax_check_grads_order2_off_switch(kind, kord):
         return jnp.sum(out[2] ** 2) + jnp.sum(out[3] ** 2) \
             + jnp.sum(out[4] ** 2)
 
-    # Order 1 FIRST, as a discriminator: if order 1 passes and order 2
-    # fails, the second-order finite difference cannot resolve this
-    # array's dynamic range -- a property of the CHECK, not of the
-    # gradient.  Reported separately so the two never get confounded
-    # again (job 9400424).
-    check_grads(f, (jnp.asarray(q1), jnp.asarray(delp)), order=1,
-                modes=("fwd", "rev"))
+    # ARM (i) -- w.r.t. q1 ALONE, at the DEFAULT step.  At a state where
+    # no limiter fires, a4(2:4) are LINEAR in q1 for fixed delp (the
+    # tridiagonal RHS is linear in q1, every clamp is the identity, and
+    # A6 = 3*(2q - AL - AR) is linear), so this loss is exactly QUADRATIC
+    # in q1: every derivative above the second vanishes and the central
+    # difference is EXACT up to roundoff.  This arm therefore needs no
+    # step tuning, and a failure HERE is a real gradient defect rather
+    # than a finite-difference artifact.  That is the permanent
+    # separation between cause (a) and cause (c).
+    check_grads(lambda a1_: f(a1_, jnp.asarray(delp)),
+                (jnp.asarray(q1),), order=2, modes=("fwd", "rev"))
+
+    # ARM (ii) -- both operands, at a SMALLER step.  delp enters the
+    # tridiagonal coefficients RATIONALLY, so f''' != 0 along a delp
+    # perturbation and jax's central difference carries a truncation
+    # error ~ (eps^2/6)*f'''.  MEASURED (job 9401521, at the default
+    # EPS = 1e-4, public_test_util.py:33): the JVP tangent is -105.452185
+    # against a numerical -105.453734, i.e. 1.469e-5 RELATIVE, which
+    # misses the 1e-5 rtol by 1.47x.
+    #
+    # NOTE, because it is counter-intuitive: normalising this loss to
+    # O(1) does NOT fix that.  The failing comparison is RELATIVE, and
+    # scaling the loss scales the AD tangent and the finite difference
+    # identically, leaving 1.469e-5 exactly where it was.  The levers are
+    # the step size and the function's own nonlinearity, not its scale.
+    #
+    # Budget at eps=1e-5, with |f| ~ 5.4e6 and |f'| = 105.45 measured:
+    #   truncation ~ 1.469e-5 * (1e-5/1e-4)^2 = 1.5e-7   (falls as eps^2)
+    #   roundoff   ~ eps_mach*|f| / (2*eps*|f'|) = 5.6e-7 (rises as 1/eps)
+    #   total      ~ 7e-7, i.e. ~14x under the 1e-5 rtol.
+    # eps=1e-6 would be WORSE (roundoff alone 5.6e-6), so 1e-5 is near
+    # the optimum rather than "smaller is safer".
     check_grads(f, (jnp.asarray(q1), jnp.asarray(delp)), order=2,
-                modes=("fwd", "rev"))
+                modes=("fwd", "rev"), eps=1.0e-5)
 
 
 def test_profile_jax_check_grads_order2_iv_minus2_bc():
     """The iv=-2 tridiagonal, including the ``qs`` bottom BC -- the only
-    operand the default solve does not have."""
+    operand the default solve does not have.
+
+    Split into the same two arms as the interior gate, for the same
+    reason and with the same discriminating power: ``q1`` AND ``qs``
+    both enter the tridiagonal RHS linearly, so arm (i) is exactly
+    quadratic and needs no step tuning, while ``delp`` enters the
+    coefficients rationally and needs the smaller step.  This BC arm is
+    a different code path from the interior one
+    (``_edge_solve_iv_m2`` vs ``_edge_solve_default``), and it failed
+    job 9401521 with the SAME 1.469e-5 relative residual -- which is
+    itself evidence for the finite-difference explanation, since a
+    defect in one path would not reproduce the other's number.
+    """
     im, km = 3, KMP
     delp = _delp_col(im, km, seed=43)
     q1 = _smooth_column(im=im, km=km, delp=delp)
@@ -815,8 +867,15 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
         return jnp.sum(out[2] ** 2) + jnp.sum(out[3] ** 2) \
             + jnp.sum(out[4] ** 2)
 
+    # ARM (i): the two operands the solve is LINEAR in, at the default
+    # step.  A failure here is a real gradient defect.
+    check_grads(lambda a1_, qs_: f(a1_, jnp.asarray(delp), qs_),
+                (jnp.asarray(q1), jnp.asarray(qs)), order=2,
+                modes=("fwd", "rev"))
+    # ARM (ii): including delp, at the smaller step (budget as in the
+    # interior gate).
     check_grads(f, (jnp.asarray(q1), jnp.asarray(delp), jnp.asarray(qs)),
-                order=2, modes=("fwd", "rev"))
+                order=2, modes=("fwd", "rev"), eps=1.0e-5)
 
 
 # ====================================================================== #
@@ -1883,6 +1942,19 @@ def test_driver_jax_adjoint_consistency():
 # One-sided derivatives AT the switching surface (codex #3)
 # ====================================================================== #
 
+# AD-vs-finite-difference agreement, RELATIVE TO THE DERIVATIVE'S OWN
+# SCALE.  The first version wrote `<= tol * max(|fd|, 1.0)`, and that
+# floor is what failed job 9401521: a scale floor exists to stop a
+# NEAR-ZERO reference from blowing up a relative bound, but the
+# reference here is 1.04e-3 -- nowhere near zero -- so `max(., 1.0)`
+# silently converted a relative test into an ABSOLUTE 1e-12 one, three
+# orders of magnitude tighter than the finite difference's own floor.
+# The two derivatives agreed to nine significant digits and the gate
+# called it a failure.  No floor: normalise by the quantity's own scale.
+_AD_FD_REL = 1.5e-6
+# The one-sided derivative JUMP vs its closed form; see the assertion.
+_D_JUMP_REL = 1.0e-4
+
 def _tie_derivative_probe(im, km, which, q1, pe1, pe2b):
     """``f(t)``: the remapped value of the target layer whose TOP edge is
     ``pe1(which) + t``, for column 0.
@@ -1958,13 +2030,15 @@ def test_map_jax_one_sided_derivatives_at_an_interface_tie(column):
     g_plus = float(jax.grad(f)(+d))
     fd_minus = (float(f(-d + h)) - float(f(-d - h))) / (2.0 * h)
     fd_plus = (float(f(+d + h)) - float(f(+d - h))) / (2.0 * h)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs(g_minus - fd_minus) <= 1e-12 * max(abs(fd_minus), 1.0), \
+    # measured 1.47e-7 relative, bound = measured x ~10 (job 9401521:
+    # 1.0363858e-3 AD vs 1.0363860e-3 FD, |delta| = 1.53e-10).  That
+    # residual IS the central difference's own roundoff floor --
+    # eps_mach*|f| / (2*h*|f'|) = 2.2e-16*250 / (2e-4*1.04e-3) = 2.6e-7
+    # relative -- so any bound below ~1e-6 would be measuring the finite
+    # difference's noise rather than the gradient.
+    assert abs(g_minus - fd_minus) <= _AD_FD_REL * abs(fd_minus), \
         (g_minus, fd_minus)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs(g_plus - fd_plus) <= 1e-12 * max(abs(fd_plus), 1.0), \
+    assert abs(g_plus - fd_plus) <= _AD_FD_REL * abs(fd_plus), \
         (g_plus, fd_plus)
 
     # The PRIMAL is continuous across the tie: both branches integrate the
@@ -1979,10 +2053,15 @@ def test_map_jax_one_sided_derivatives_at_an_interface_tie(column):
     x_tie = pe1[0, which]
     big_x = pe2b[0, which + 1]
     predicted = jump_ar_al / (big_x - x_tie)
+    # Normalised by BOTH scales, whichever is larger: in the `limited`
+    # arm `predicted` is the meaningful one, while in the `smooth` arm it
+    # is exactly 0 and the residual is the derivative's own drift across
+    # the 2d evaluation interval (an O(d) effect, estimated ~1e-5
+    # relative), so the derivative scale has to carry the bound there.
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs((g_plus - g_minus) - predicted) <= 1e-12 * max(
-        abs(predicted), abs(g_plus), 1e-30), (g_plus - g_minus, predicted)
+    assert abs((g_plus - g_minus) - predicted) <= _D_JUMP_REL * max(
+        abs(predicted), abs(g_plus)), (g_plus - g_minus, predicted)
     if column == "limited":
         # NON-VACUITY: this really is a derivative switching surface.
         assert abs(g_plus - g_minus) > 1e-6 * max(abs(g_plus), 1e-30)
