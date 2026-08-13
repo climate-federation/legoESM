@@ -517,9 +517,24 @@ def _build_test_matrix() -> list[TestCase]:
             # one-sidedness is what shows the limiter is working in each
             # sweep and the combination still is not.
             #
-            # ppm_fct is chosen over fct2 because it is bounded AND has the
-            # lowest spurious mixing of all five, so the change costs the
-            # diagnostic nothing. It is not a diffusivity trade.
+            # THE SAME CONSTANT THE GLOBAL LAT-LON ARM USES. This case's
+            # global sibling already runs LOCKEX_CGRID_TRACER_ADV, and the
+            # benchmark doc already states the policy this arm had drifted
+            # from: "Zalesak FCT class on latlon + tripole ... Dim-split
+            # TVD is not multi-D monotone on distorted curvilinear cells;
+            # certified FCT is." The channel arm's run_kwargs overrode that
+            # with weno5, and the regional grid branch does not inherit the
+            # global one's default, so the choice has to be written here --
+            # but it is written as the shared constant, not a second
+            # literal, so the two lock-exchange lanes cannot drift apart
+            # again.
+            #
+            # ppm_fct measured 9% lower spurious mixing (6.261e-6 vs
+            # 6.852e-6) and is equally bounded, so it is the better arm on
+            # the diagnostic alone; matching the family was judged worth
+            # more than 9% of an already-small number. Revisit with a
+            # deliberate one-line change if the mixing number becomes the
+            # binding term.
             # NOT a vertical-CFL artefact, and the FCT schemes are not
             # masking one. dz = 1 m and dt = 30 s put CFL_v = 1 at only
             # 0.033 m/s, so an unstable vertical operator was the obvious
@@ -530,7 +545,7 @@ def _build_test_matrix() -> list[TestCase]:
             # roughly with dt. The undershoot is a property of the spatial
             # scheme, so ppm_fct's boundedness is real and not a clip over
             # a hidden instability.
-            "tracer_advection": "ppm_fct",
+            "tracer_advection": LOCKEX_CGRID_TRACER_ADV,
             # WENO5 momentum advection: removes the intrinsic dissipation
             # of the vector_invariant scheme that can damp the baroclinic
             # mode on this small, sharply-stratified geometry.

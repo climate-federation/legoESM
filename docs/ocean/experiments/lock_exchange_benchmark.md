@@ -86,10 +86,10 @@ inconsistency, FCT h_new certification bug, TVD corner overshoot):
 
 ## The rest of the standard ocean-grid suite
 
-Lock exchange is one case in a family. The other standard cases and the
-grids they cover (`sbatch --array=0-6
-scripts/cluster/ocean_grid_benchmark_suite.sbatch`, results 2026-08-10,
-job 26850849):
+Lock exchange is one case in a family. Run the family with
+`sbatch --array=0-9 scripts/cluster/ocean_grid_benchmark_suite.sbatch`.
+Results 2026-08-13 (jobs 26917739 + 26917853), on the re-centred
+split-explicit barotropic averaging window:
 
 | Case | latlon | mpas | fesom | tripole |
 |---|---|---|---|---|
@@ -97,30 +97,87 @@ job 26850849):
 | rest_state_uniform_with_land | PASS | PASS | PASS | PASS |
 | rest_state_stratified_no_land | PASS | PASS | —¹ | —² |
 | rest_state_uniform_no_land | PASS | PASS | —¹ | —² |
-| geostrophic_adjustment | PASS | PASS | —³ | PASS |
-| phillips_two_layer | PASS | PASS | —³ | —⁴ |
-| inertia_gravity_wave | FAIL⁵ | FAIL⁵ | —³ | —⁴ |
+| geostrophic_adjustment | PASS | PASS | PASS | PASS |
+| phillips_two_layer | PASS | PASS | PASS | PASS |
+| inertia_gravity_wave | PASS³ | PASS³ | PASS³ | PASS³ |
+| barotropic_wave | PASS | PASS | PASS | PASS |
 | lock_exchange | PASS | PASS | PASS | PASS |
+| inertia_gravity_wave_channel | —⁴ | —⁴ | —⁴ | —⁴ |
+| lock_exchange (Petersen channel) | PASS⁵ | — | — | — |
 
 Rest-state drifts are at machine precision on every arm (eta 0 to 1e-31,
-T ≤ 1.5e-14, S ≤ 7.6e-15); geostrophic adjustment settles to
-max|u| = 0.014 (latlon) / 0.027 (mpas) / 0.446 m/s (tripole, the
-continental-boundary arm) against a 1 m/s gate.
+T ≤ 1.5e-14, S ≤ 7.6e-15).
 
 1. The FESOM mesh is built with the same 80° land threshold as the
    with-land arms (190 of 3140 nodes dry), and the setup exposes no 90°
-   variant — so FESOM belongs to the WITH-LAND rows only. (An earlier
-   version of this table registered it as "no land"; that was a
-   mislabel, caught in review.)
+   variant — so FESOM belongs to the WITH-LAND rows only.
 2. The tripole basin is defined by the NEMO tmask, so a no-land tripole
    variant does not exist.
-3. FESOM has IC builders for the rest state and the lock exchange only;
-   the perturbation cases would each need a node-based analytic IC.
-4. The IC writes the analytic u/v EDGE fields from 1-D `grid.lat`/`grid.lon`
-   and a uniform `dlon`/`dlat` — rectilinear-only; on the curvilinear
-   eORCA1 mesh both now raise `NotImplementedError` naming the gap
-   (previously a bare shape mismatch). Needs a curvilinear edge IC.
-5. Pre-existing failure on every grid (analytic L2 0.91 latlon / 1.01 mpas
-   / 0.23 cubed_sphere vs a 0.1 gate) — an unresolved case, not an arm
-   problem. `cubed_sphere` also fails geostrophic_adjustment (2.05 m/s)
-   and phillips (eta_growth 26.4).
+3. PASS here means only: not frozen, not exploding, not extinguished.
+   This case's initial condition is an f-plane plane wave imposed on a
+   sphere where the model integrates `f = 2Ω sin(lat)`, so it is not an
+   eigenmode anywhere and no wave-speed gate is constructible on it. The
+   case that DOES verify wave behaviour is the channel one below.
+4. `inertia_gravity_wave_channel` runs on `latlon_channel` only — a
+   Cartesian f-plane box, which is the one geometry where the Poincaré
+   channel mode is exact. A second grid would need a PLANAR hexagonal
+   mesh with TRiSK metrics and a constant Coriolis parameter; the repo
+   has no such mesh (`create_beta_plane_cgrid_geometry` is lat-lon only,
+   Voronoi meshes carry `f = 2Ω sin(lat)`, and `grids/plane.py` is a quad
+   C-grid for CRM work). Putting the mode on a spherical patch would make
+   it a non-eigenmode and repeat exactly the error in note 3.
+5. Was the ONLY failing case in the suite until 2026-08-13: it finished
+   with water at −3.00 °C from an initial range of exactly [5, 30]. See
+   "The Petersen channel arm's advection scheme" below.
+
+## Is the cross-grid agreement real, or is the instrument blunt?
+
+`scripts/validate/ocean_grid_consistency.py` compares the arms against a
+MEASURED tolerance (each arm against itself at 2× resolution). Every case
+passed — with the tolerance 1.5× to 245× LARGER than the difference it was
+judging, so the test could not fail.
+
+`--refinement` asks the question that can: refine BOTH arms one step and
+see whether the difference shrinks. `--refined-budget` measures each arm's
+own discretisation error at the refined level too, so the difference has a
+tolerance there as well. Without it every row is labelled UNBUDGETED TREND,
+because a direction is not a convergence claim.
+
+Measured 2026-08-13 for `phillips_two_layer` (latlon 36x72→72x144, MPAS
+ico4→ico5, budgets from 144x288 and ico6): the cross-arm difference is
+0.20 of the arms' own resolution sensitivity at the coarse level and
+**1.08 at the refined level**. The two dycores part company faster than
+either arm's answer settles. The case's own amplitude also DOUBLES between
+the two levels, so neither resolution is near converged and this is a
+relative rate of approach to an unknown limit, not a convergence result.
+
+## The Petersen channel arm's advection scheme
+
+The 64 km × 4 km, 1 km-resolution channel is the only lock-exchange arm
+that resolves its own front. It ran WENO5, chosen for sharpness, and
+finished with water at −3.00 °C. WENO5 is essentially-non-oscillatory, not
+monotonicity-preserving.
+
+One variable, everything else in the registration fixed. Final T range
+against the initial [5.00, 30.00], and the spurious-mixing number:
+
+| scheme | T range [°C] | RPE_rel | |
+|---|---|---|---|
+| `weno5` | −3.00 … 31.77 | 6.536e-6 | FAIL |
+| `tvd` | −0.40 … 30.00 | 9.832e-6 | FAIL |
+| `superbee` | −2.99 … 30.00 | 8.889e-6 | FAIL |
+| `ppm_fct` | 5.00 … 30.00 | 6.261e-6 | PASS |
+| `fct2` | 5.00 … 30.00 | 6.852e-6 | PASS |
+
+Every flux LIMITER undershoots; only the flux-CORRECTED schemes are
+bounded — the same reason the global lat-lon and tripole arms already run
+`LOCKEX_CGRID_TRACER_ADV`, and the channel arm now runs that same
+constant. `tvd` and `superbee` produce no overshoot above 30.00 while
+still undershooting: the limiter works within each directional sweep and
+the multi-dimensional combination of monotone sweeps does not.
+
+NOT a vertical-CFL artefact. With dz = 1 m and dt = 30 s, CFL_v reaches 1
+at only 0.033 m/s, so an unstable vertical operator was the competing
+explanation. Perturbation test, `weno5`, only dt changed: 30 s → −3.00,
+15 s → −2.92, 7.5 s → −2.88 °C. A 4× smaller dt moves the undershoot by
+4%, where a CFL mechanism predicts it falling roughly with dt.
