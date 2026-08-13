@@ -98,14 +98,62 @@ def test_the_pin_is_load_bearing_sqrt2():
     l_k = jnp.full((1, 8), 2.0)
     N2 = jnp.full((1, 8), 1.0e-5)
     sh2 = jnp.full((1, 8), 1.0e-5)
-    K_nemo, _ = compute_K_from_tke(e, l_k, c_nemo, N2=N2, shear_sq=sh2)
-    K_leg, _ = compute_K_from_tke(e, l_k, c_legacy, N2=N2, shear_sq=sh2)
-    ratio = float(jnp.max(K_leg / K_nemo))
+    KM_nemo, KH_nemo = compute_K_from_tke(e, l_k, c_nemo, N2=N2, shear_sq=sh2)
+    KM_leg, KH_leg = compute_K_from_tke(e, l_k, c_legacy, N2=N2, shear_sq=sh2)
+    ratio = float(jnp.max(KM_leg / KM_nemo))
     assert ratio == pytest.approx(math.sqrt(2.0), rel=1e-6), (
         f"legacy/NEMO amplitude ratio {ratio} is not sqrt(2) — either a floor "
         "or the ceiling is binding in this fixture (so the test proves "
         "nothing), or the amplitude branch changed.")
-    # And the fixture must sit strictly inside the clamps, else the check above
-    # could pass for the wrong reason.
-    assert float(jnp.min(K_nemo)) > c_nemo.kappaM_min
-    assert float(jnp.max(K_leg)) < c_nemo.kappaM_max
+    # The TRACER coefficient is what sets entrainment, and it runs through the
+    # Richardson Prandtl chain and an INDEPENDENT kappaH_min floor -- so the
+    # momentum ratio above does not imply it (codex 9400815 #5).  Assert it.
+    ratio_H = float(jnp.max(KH_leg / KH_nemo))
+    assert ratio_H == pytest.approx(math.sqrt(2.0), rel=1e-6), (
+        f"legacy/NEMO TRACER ratio {ratio_H} is not sqrt(2); the Prandtl "
+        "chain or the kappaH_min floor is intercepting the amplitude.")
+    # And the fixture must sit strictly inside every clamp, else the checks
+    # above could pass for the wrong reason.
+    assert float(jnp.min(KM_nemo)) > c_nemo.kappaM_min
+    assert float(jnp.max(KM_leg)) < c_nemo.kappaM_max
+    assert float(jnp.min(KH_nemo)) > c_nemo.kappaH_min
+
+
+def test_the_nn_mxl_length_really_carries_the_sqrt2():
+    """The OTHER half of the double-count argument, which the ratio test
+    ASSUMES rather than shows (codex 9400815 #5: the fixture above supplies
+    ``l_k`` directly, so it cannot prove the length already has the sqrt(2)).
+
+    Drive the model's own ``compute_mixing_lengths`` on the choice-3 branch in
+    a regime where neither the |dl/dz|<=e3t sweeps nor the surface anchor can
+    bind — huge cells, huge anchor — so the returned length must be the raw
+    buoyancy length.  NEMO's is ``SQRT(2*en/rn2)`` (zdftke.F90:651); if ours
+    were ``sqrt(en)/N`` instead, the amplitude's sqrt(2) would NOT be a
+    double-count and the pin would be wrong.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_mixing_lengths
+
+    cfg = _core2().orca1_zdftke_config()
+    assert cfg.tke_mxl_choice in (3, 4), (
+        "the card no longer selects a NEMO nn_mxl branch; this test targets "
+        "the branch whose length is claimed to carry the sqrt(2).")
+    nlev = 6
+    e_val, n2_val = 1.0e-3, 1.0e-5
+    e = jnp.full((1, nlev - 1), e_val)
+    N2 = jnp.full((1, nlev - 1), n2_val)
+    dz_half = jnp.full(nlev - 1, 1.0e6)          # sweeps cannot bind
+    dz_cell = jnp.full((1, nlev), 1.0e6)
+    anchor = jnp.full((1,), 1.0e6)               # surface seed cannot bind
+    l_k, _ = compute_mixing_lengths(e, N2, dz_half, cfg, signed_n2=False,
+                                    dz_cell=dz_cell, boundary_cap=None,
+                                    l_surface_anchor=anchor)
+    expected_nemo = math.sqrt(2.0 * e_val) / math.sqrt(n2_val)
+    got = float(jnp.max(l_k))
+    assert got == pytest.approx(expected_nemo, rel=1e-9), (
+        f"buoyancy length {got} != NEMO's sqrt(2*en/rn2) = {expected_nemo}; "
+        "if it equals sqrt(en)/N instead, the amplitude sqrt(2) is NOT a "
+        "double-count and the card pin must be reverted.")
+    # Stated as the ratio the whole argument rests on.
+    assert got / (math.sqrt(e_val) / math.sqrt(n2_val)) == pytest.approx(
+        math.sqrt(2.0), rel=1e-9)

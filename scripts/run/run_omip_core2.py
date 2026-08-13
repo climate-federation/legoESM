@@ -601,22 +601,43 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
-        # K-from-TKE AMPLITUDE.  NEMO: avm = MAX( avtb, rn_ediff*zmxlm*en^1/2 )
-        # (zdftke.F90:150 and the tke_avn header :553) -- the sqrt carries `en`,
-        # NOT `2*en`; the factor 2 lives in the LENGTH, zmxlm = SQRT(2*en/rn2)
-        # (:651).  legoESM's `gaspar_sqrt2e` DEFAULT applies sqrt(2*e) in the
-        # amplitude as well, and the nn_mxl=2/3 branch already builds the
-        # length from sqrt(2e)/N (tke.py:700-702), so the default DOUBLE-COUNTS
-        # the sqrt(2) on exactly the path this card selects.  MEASURED on
-        # NEMO's own state (Stage A, commit 39ce0701c, Arctic calm columns):
+        # K-from-TKE AMPLITUDE.  NEMO zdftke tke_avn computes
+        #     zsqen = SQRT(en) ; zav = rn_ediff*zmxlm*zsqen
+        #     p_avm = MAX(zav, avmb)*wmask
+        # -- the sqrt carries `en`, NOT `2*en`; the factor 2 lives in the
+        # LENGTH, zmxlm = SQRT(2*en/rn2) (zdftke.F90:651).  (NEMO's own header
+        # comment at :150/:553 writes the momentum floor as `avtb`; the CODE
+        # uses `avmb` and `avtb` is the TRACER floor -- codex 9400815 #1.
+        # nn_pdl=1 changes only avt, and NOT as pdlr*avm: the tracer floor
+        # avtb is applied AFTER the Prandtl reduction, which
+        # compute_K_from_tke mirrors as K_H = max(kappaH_min, K_M_raw/Pr).)
+        # legoESM's `gaspar_sqrt2e` DEFAULT applies sqrt(2*e) in the amplitude
+        # as well, and the nn_mxl=2/3 branch already builds the length from
+        # sqrt(2)*sqrt(e)/N (tke.py:698-702), so the default DOUBLE-COUNTS the
+        # sqrt(2) on exactly the path this card selects.  MEASURED on NEMO's
+        # own state (Stage A, commit 39ce0701c, Arctic calm columns):
         #     gaspar_sqrt2e  K_H 4.048e-2 = 4.81x NEMO avt 8.410e-3
         #     veros_sqrte    K_H 2.730e-2 = 3.25x
-        # a 1.48x reduction against the 1.414 the algebra predicts, the extra
-        # ~5% being cells where the floors/caps bind.  `veros_sqrte` is
-        # c_k*l_k*sqrt(max(0,e)) = NEMO's form; it differs from NEMO only for
-        # e < rn_emin (NEMO floors en at rn_emin=1e-6 before the sqrt), and
-        # there the kappaM_min/kappaH_min floors bind anyway.  Revert the
-        # closure to the legacy amplitude with --tke-kappa-convention.
+        # SCOPE OF "exact", stated narrowly on purpose (codex 9400815 #2):
+        # `veros_sqrte` is c_k*l_k*sqrt(max(0,e)) and is EXACT against NEMO on
+        # wet rows of this card's normal trajectory, because positivity="floor"
+        # ends every solve at e >= tke_background = 1e-6 = rn_emin, so
+        # sqrt(max(0,e)) == sqrt(e) there.  It is NOT globally identical: NEMO
+        # zeroes dry rows via *wmask while this card leaves tke_dry_wmask=False
+        # and keeps the background there, and the e<=0 branch differs (ours
+        # returns 0, floored back up by kappaM_min/kappaH_min; NEMO floors en
+        # first).  Neither is reachable on the floored path this card runs.
+        # SIGN, also narrowly: at fixed e/l_k/N2/shear the pin divides K by
+        # sqrt(2).  It does NOT follow that the mixed layer shallows by any
+        # particular amount -- the prognostic solve is coupled (lower K_M cuts
+        # shear production and reinforces; lower K_H cuts buoyancy destruction
+        # and offsets), so the integrated response is what the day-90 A/B
+        # measures, not something the algebra gives.
+        # Revert with --tke-kappa-convention -- WHICH REACHES THE TRIPOLE ONLY.
+        # The MPAS branch calls this same card with no overrides, so the pin
+        # changes MPAS too, but `_validate_tke_card_grid` rejects the flag off
+        # the tripole (the standing contract for all four card knobs), so MPAS
+        # cannot be A/B'd from the CLI.  Known asymmetry, not an oversight.
         kappa_convention="veros_sqrte",
         lc=True,                        # ln_lc
         lc_coeff=0.25,                  # rn_lc (namelist_cfg override)

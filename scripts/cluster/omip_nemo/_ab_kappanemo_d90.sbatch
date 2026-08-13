@@ -12,13 +12,14 @@
 # NEMO's K-from-TKE AMPLITUDE at day 90 — the largest single closure defect.
 # ============================================================================
 #
-# THE DEFECT.  NEMO: avm = MAX( avtb, rn_ediff*zmxlm*en^(1/2) ) — zdftke.F90
-# :150 and the tke_avn header :553 — the square root takes `en`, NOT `2*en`;
-# the factor 2 lives in the LENGTH, zmxlm = SQRT(2*en/rn2) (:651).  legoESM's
-# TKEConfig default `gaspar_sqrt2e` applies sqrt(2*e) in the AMPLITUDE as well,
-# and the tke_mxl_choice 3/4 branch already builds its length from sqrt(2e)/N
-# (tke.py:700-702).  So every tripole and MPAS arm to date has DOUBLE-COUNTED
-# the sqrt(2) on exactly the branch the ORCA1 card selects.
+# THE DEFECT.  NEMO tke_avn: zsqen = SQRT(en); zav = rn_ediff*zmxlm*zsqen;
+# p_avm = MAX(zav, avmb)*wmask — the square root takes `en`, NOT `2*en`; the
+# factor 2 lives in the LENGTH, zmxlm = SQRT(2*en/rn2) at zdftke.F90:651.
+# (NEMO's own header comment writes that floor as `avtb`; the CODE uses `avmb`
+# — codex 9400815 #1.)  legoESM's TKEConfig default `gaspar_sqrt2e` applies
+# sqrt(2*e) in the AMPLITUDE as well, and the tke_mxl_choice 3/4 branch already
+# builds its length from sqrt(2)*sqrt(e)/N (tke.py:698-702).  So every tripole
+# and MPAS arm to date has DOUBLE-COUNTED the sqrt(2) on that branch.
 #
 # ALREADY MEASURED, on NEMO's own state, no integration (Stage A, 39ce0701c):
 #     gaspar_sqrt2e (every prior arm)  K_H 4.048e-2 = 4.81x NEMO avt 8.410e-3
@@ -27,10 +28,17 @@
 # was made last session and the CARD WAS NEVER FIXED; this run is the first at
 # NEMO's amplitude.
 #
-# WHY IT SHOULD MOVE THE SOUTHERN OCEAN.  Less tracer diffusivity means less
-# entrainment at the mixed-layer base.  The day-90 Southern Ocean is 19 m TOO
-# DEEP (mlefix_d90 89.6 m vs NEMO 70.4 m), i.e. we over-mix — the same
-# direction as the Arctic halocline erosion.  This is a much larger lever than
+# WHY IT SHOULD MOVE THE SOUTHERN OCEAN, and why that is a HYPOTHESIS and not
+# a corollary.  At fixed e/l_k/N2/shear the pin divides K by sqrt(2); less
+# tracer diffusivity means less entrainment at the mixed-layer base, and the
+# day-90 Southern Ocean is 19 m TOO DEEP (mlefix_d90 89.6 m vs NEMO 70.4 m),
+# i.e. we over-mix — the same direction as the Arctic halocline erosion.  BUT
+# the prognostic TKE solve is COUPLED (codex 9400815 #3): lower K_M cuts shear
+# production and reinforces the reduction, while lower K_H cuts stable
+# buoyancy destruction and offsets it, and both feed back through N2, l_k and
+# the Prandtl number.  The realized change in K need not be 1/1.414 and could
+# locally reverse.  THIS RUN IS THE FALSIFIER; the algebra is not.
+# It is still a much larger lever than
 # the nn_mxl dissipation-length choice, which a same-day offline probe
 # (job 9398998) showed is worth only ~1-3 m: nn_mxl already separates the two
 # settings by a factor 2.7 in the top 20 m at DAY 30, where the measured
