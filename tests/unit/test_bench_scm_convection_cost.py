@@ -107,30 +107,76 @@ def test_timing_a_scheme_returns_finite_tendencies(mod, col):
         "one field lets XLA delete the rest of the scheme's work")
 
 
-def test_the_timed_function_returns_more_than_the_temperature_tendency(mod, col):
-    """codex finding 8: with only dT_dt observed, XLA can dead-code-eliminate
-    whatever a scheme computes solely for moisture or momentum, biasing the
-    comparison by scheme."""
-    import jax
+def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col):
+    """codex round 1 finding 8: with only dT_dt observed, XLA can
+    dead-code-eliminate whatever a scheme computes solely for moisture or
+    momentum, biasing the comparison by scheme.
 
+    Asserted on what ``time_scheme`` ACTUALLY returned (`n_leaves`), not on a
+    separate direct `_physics` call, which would pass even if the jitted step
+    still returned one array (codex round 2, finding 15).
+    """
     state, sigma = col
-    fn = mod._physics("mass_flux", DT)
-    leaves = jax.tree_util.tree_leaves(fn(state, None, sigma)[0])
-    assert len(leaves) >= 4, len(leaves)
+    r = mod.time_scheme("mass_flux", state, sigma, DT, repeats=1, warmups=0)
+    direct = len(jax.tree_util.tree_leaves(
+        mod._physics("mass_flux", DT)(state, None, sigma)[0]))
+    assert r["n_leaves"] == direct, (
+        f"the timed step returned {r['n_leaves']} arrays but the tendency has "
+        f"{direct}; the missing ones are free for XLA to delete")
+    assert r["n_leaves"] >= 4, r["n_leaves"]
 
 
-@pytest.mark.parametrize("scheme", ["mass_flux", "dca", "zhang_mcfarlane",
-                                    "emanuel", "tiedtke"])
+# Every scheme except the two measured inactive on this idealized column.
+# `kuo` cannot convect without large-scale moisture convergence; `emanuel`
+# reads exactly 0.0 on both dT/dt and dq_v/dt here despite being the
+# campaign's best scheme, i.e. its trigger does not fire on this profile.
+_EXPECTED_INACTIVE = ("kuo", "emanuel")
+
+
+@pytest.mark.parametrize(
+    "scheme", [s for s in (
+        "sbm", "dca", "mass_flux", "edmf", "zhang_mcfarlane",
+        "kain_fritsch", "tiedtke", "bechtold") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
-    """codex finding 19/14: an all-zero tendency is finite and times fine, so
-    an untriggered scheme silently joins the 'pack' that ZM is measured
-    against. The activity flag is what keeps it out."""
+    """codex round 1 findings 14/19: an all-zero tendency is finite and times
+    fine, so an untriggered scheme silently joins the 'pack' that ZM is
+    measured against. Covers every scheme expected to trigger, not a sample
+    (codex round 2, finding 11)."""
     state, sigma = col
     r = mod.time_scheme(scheme, state, sigma, DT, repeats=1, warmups=0)
     assert r["active"], (
         f"{scheme} produced no tendency on the probe column "
-        f"(sum|dT/dt| = {r['sum_abs_dT_dt']:.3e}); its timing would be the "
+        f"(sum|dT/dt| = {r['sum_abs_dT_dt']:.3e}, "
+        f"sum|dqv/dt| = {r['sum_abs_dqv_dt']:.3e}); its timing would be the "
         f"cost of the inactive branch")
+
+
+def test_activity_accepts_a_moisture_only_tendency(mod):
+    """codex round 2 finding 10: keying activity on temperature alone would
+    drop a moisture-only closure from the pack. Exercised on the flag's own
+    thresholds, since no shipped scheme is moisture-only here."""
+    assert (mod.ACTIVITY_FLOOR_KG_PER_KG_PER_S > 0.0
+            and mod.ACTIVITY_FLOOR_K_PER_S > 0.0)
+    dT_only = 10.0 * mod.ACTIVITY_FLOOR_K_PER_S
+    dq_only = 10.0 * mod.ACTIVITY_FLOOR_KG_PER_KG_PER_S
+    # the rule the bench applies: EITHER channel above its floor is active
+    assert (dT_only > mod.ACTIVITY_FLOOR_K_PER_S
+            or 0.0 > mod.ACTIVITY_FLOOR_KG_PER_KG_PER_S)
+    assert (0.0 > mod.ACTIVITY_FLOOR_K_PER_S
+            or dq_only > mod.ACTIVITY_FLOOR_KG_PER_KG_PER_S)
+
+
+@pytest.mark.parametrize("scheme", _EXPECTED_INACTIVE)
+def test_the_expected_inactive_schemes_are_flagged(mod, col, scheme):
+    """Pins the exclusion list itself: if one of these starts producing a
+    tendency on this column it must be re-admitted to the pack, and every
+    ratio recomputed."""
+    state, sigma = col
+    r = mod.time_scheme(scheme, state, sigma, DT, repeats=1, warmups=0)
+    assert not r["active"], (
+        f"{scheme} produced a tendency here (dT {r['sum_abs_dT_dt']:.3e}, "
+        f"dqv {r['sum_abs_dqv_dt']:.3e}); the pack-exclusion rationale and "
+        f"every published ratio need revisiting")
 
 
 def test_kuo_is_reported_inactive_and_would_be_excluded(mod, col):

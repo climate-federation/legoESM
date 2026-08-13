@@ -27,6 +27,23 @@ ordinary flat segments.  ``--no-convection-score`` supplies the measured
 baseline so the "worse than running no convection at all" line can be
 drawn; without it the line is omitted rather than guessed.
 
+KNOWN LIMITATION, stated because a reader will otherwise assume more than
+is true (codex round 2, findings 1-2).  Both labels are **inferences from
+the checkpoint**, not facts the runner recorded:
+
+* "no tunable parameters" is read from an EMPTY ``records`` list, which is
+  also what a search that aborted before recording a trial would leave; and
+* "scores the no-convection baseline" is score equality, which is evidence
+  of inactivity rather than proof — an active scheme could in principle
+  land on the same float, and a genuinely inactive one could drift off it
+  if the diagnostics changed.
+
+Closing this properly means persisting ``n_tunable_parameters`` and an
+activity diagnostic in the checkpoint itself, which is a change to
+``run_scm_rce_convection_intercomparison.py`` and a re-run of the arms.
+Until then, treat a grey row as "very probably structural, verify before
+citing".
+
 The combined score is ``sqrt((T^2 + qv^2 + cloud^2 + w*precip^2)/(3+w))``
 with ``w = 1`` (``training/scm_rce_metrics.score_profiles_precip_jax``),
 each component normalized by the reference profile's own mass-weighted
@@ -170,6 +187,17 @@ def _panel(
     if not finite.any():
         ax.set_title(f"{title}\n(no finite pair)", fontsize=11, color=INK)
         return float("nan"), float("nan")
+    # Complete-case filtering silently shrinks the cohort: a scheme missing
+    # either arm vanishes from both boxes AND both medians, so the published
+    # median can describe fewer schemes than the caption claims. Disclose it
+    # on the panel rather than dropping it quietly (codex round 2, finding 3).
+    n_drop = int((~finite).sum())
+    if n_drop:
+        dropped = ", ".join(n for n, ok in zip(names, finite) if not ok)
+        ax.text(0.02, 0.02,
+                f"{int(finite.sum())}/{finite.size} schemes\nmissing: {dropped}",
+                transform=ax.transAxes, fontsize=7.5, color=WORSE,
+                va="bottom", ha="left")
 
     bp = ax.boxplot(
         [before[finite], after[finite]], positions=[0, 1], widths=0.45,
@@ -217,7 +245,11 @@ def _panel(
                 lw=1.4, ls=(0, (3, 2)) if inert else "-", zorder=2)
         ax.plot(x0, before[i], "o", ms=8, color=mark or BEFORE,
                 mec=SURFACE, mew=2.0, zorder=3)
-        ax.plot(x1, after[i], "o", ms=8, color=mark or AFTER,
+        # The tuned endpoint takes the DIRECTION colour, not a fixed "after"
+        # green. A green dot on a degraded scheme is the strongest visual
+        # encoding on the panel and contradicts the red segment joining it
+        # (codex round 2, finding 7).
+        ax.plot(x1, after[i], "o", ms=8, color=mark or seg,
                 mec=SURFACE, mew=2.0, zorder=3)
 
     # Label the extremes plus every structurally-flat scheme: those are the
@@ -280,6 +312,12 @@ def figure_before_after(
         )
 
     mb, ma = medians["score"]
+    if not (np.isfinite(mb) and np.isfinite(ma) and mb != 0.0):
+        raise SystemExit(
+            f"the combined-score median is not finite (before={mb!r}, "
+            f"after={ma!r}); refusing to publish a figure titled "
+            f"'median nan -> nan (nan%)' (codex round 2, finding 4)"
+        )
     fig.suptitle(
         f"SCM convection schemes before and after tuning against a CRM in "
         f"RCEMIP1 —  median {mb:.4f} → {ma:.4f} "
@@ -371,6 +409,15 @@ def figure_profiles(
     y = np.arange(len(recs))[::-1]
     P = np.array([_ff(r["tuned"].get("precip_mm_day")) for r in recs])
     E = np.array([_ff(r["tuned"].get("evap_mm_day")) for r in recs])
+    # Matplotlib silently skips a NaN bar, leaving a blank that reads as zero
+    # precipitation rather than as missing data (codex round 2, finding 5).
+    missing = [r["scheme"] for r, p, e in zip(recs, P, E)
+               if not (np.isfinite(p) and np.isfinite(e))]
+    if missing:
+        raise SystemExit(
+            f"missing precip/evap for {', '.join(missing)}; a blank bar is "
+            f"indistinguishable from a measured zero"
+        )
     ax.barh(y + 0.18, P, height=0.34, color=AFTER, alpha=0.75, label="P")
     ax.barh(y - 0.18, E, height=0.34, color=BEFORE, alpha=0.75, label="E")
     # Every checkpoint carries its own copy of the reference precipitation.
@@ -378,17 +425,23 @@ def figure_profiles(
     # depend on which scheme happened to sort first (codex finding 5), so the
     # copies are required to AGREE before one is drawn.
     p_refs = [_ff(r["tuned"].get("precip_ref_mm_day")) for r in recs]
-    p_finite = [v for v in p_refs if np.isfinite(v)]
-    if p_finite and (max(p_finite) - min(p_finite)) > 1e-9 * abs(p_finite[0]):
+    # EVERY checkpoint must carry the value, not just one: one finite copy
+    # beside nine NaNs would pass an agreement test vacuously and draw the
+    # lone value as if all schemes had confirmed it (codex round 2, finding 6).
+    absent = [r["scheme"] for r, v in zip(recs, p_refs) if not np.isfinite(v)]
+    if absent:
+        raise SystemExit(
+            f"no finite precip_ref_mm_day in checkpoints for "
+            f"{', '.join(absent)}; cannot confirm they share one reference"
+        )
+    if (max(p_refs) - min(p_refs)) > 1e-9 * abs(p_refs[0]):
         raise SystemExit(
             f"checkpoints disagree on precip_ref_mm_day "
-            f"({min(p_finite)!r} .. {max(p_finite)!r}); they were scored "
+            f"({min(p_refs)!r} .. {max(p_refs)!r}); they were scored "
             f"against different references and must not share a figure"
         )
-    if p_finite:
-        p_ref = p_finite[0]
-        ax.axvline(p_ref, color=REF_COLOR, lw=2.0,
-                   label=f"CRM P = {p_ref:.2f}")
+    p_ref = p_refs[0]
+    ax.axvline(p_ref, color=REF_COLOR, lw=2.0, label=f"CRM P = {p_ref:.2f}")
     ax.set_yticks(y)
     ax.set_yticklabels([r["scheme"] for r in recs], fontsize=9, color=INK_2)
     ax.set_xlabel("water flux [mm/day]", fontsize=10, color=INK_2)
