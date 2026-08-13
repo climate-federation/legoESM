@@ -17,8 +17,10 @@ plausible-looking number on the real mesh.
 import pytest
 
 from scripts.validate.mpas_halo_padding_schedules import (
-    _cost, _greedy_first_fit, _size_banded,
+    _cost, _greedy_first_fit, _pair_extents, _size_banded,
 )
+
+CW, EW = 4, 1     # 1 cell row = 4 bytes, 1 edge row = 1 byte, in tests
 
 
 def _matching_ok(rounds):
@@ -32,13 +34,38 @@ def _matching_ok(rounds):
     return True
 
 
-def test_cost_is_pairs_times_round_max():
-    # one round of three pairs sized 10, 20, 30 costs 3 * 30, not 60
-    sizes = {(0, 1): 10, (2, 3): 20, (4, 5): 30}
-    assert _cost([[(0, 1), (2, 3), (4, 5)]], sizes) == 90
-    # split so each round is size-homogeneous and the cost drops to the
-    # true total
-    assert _cost([[(0, 1)], [(2, 3)], [(4, 5)]], sizes) == 60
+def test_cost_matches_production_padding_semantics():
+    """A round pads CELLS and EDGES independently, and BOTH endpoints of
+    every pair send the padded buffer — so the round costs
+    2 * n_pairs * (max_cells * cell_w + max_edges * edge_w). Charging
+    the max of the byte SUM, or one send per pair, both understate it."""
+    ext = {(0, 1): (1, 30), (2, 3): (3, 1)}
+    # max_c = 3, max_e = 30 -> per-buffer 3*4 + 30*1 = 42; 2 pairs, both
+    # endpoints send -> 4 * 42
+    assert _cost([[(0, 1), (2, 3)]], ext, CW, EW) == 4 * 42
+    # split into two rounds and each pays only its own extents
+    assert _cost([[(0, 1)], [(2, 3)]], ext, CW, EW) == \
+        2 * (1 * 4 + 30 * 1) + 2 * (3 * 4 + 1 * 1)
+
+
+def test_cost_pads_cells_and_edges_separately():
+    """A pair that is fat in CELLS must not be priced as if it were also
+    fat in EDGES: the two extents are independent maxima."""
+    ext = {(0, 1): (100, 1), (2, 3): (1, 100)}
+    together = _cost([[(0, 1), (2, 3)]], ext, CW, EW)
+    apart = _cost([[(0, 1)], [(2, 3)]], ext, CW, EW)
+    assert together == 4 * (100 * 4 + 100 * 1)
+    assert apart < together
+
+
+def test_pair_extents_are_undirected_and_take_the_larger_direction():
+    comm = [(0, 1), (1, 0), (2, 3)]
+    cell_send = {(0, 1): [0, 1, 2], (1, 0): [0], (2, 3): [0, 1]}
+    edge_send = {(0, 1): [0], (1, 0): [0, 1, 2, 3], (2, 3): []}
+    ext = _pair_extents(comm, cell_send, edge_send)
+    assert set(ext) == {(0, 1), (2, 3)}, "directions must collapse"
+    assert ext[(0, 1)] == (3, 4)
+    assert ext[(2, 3)] == (2, 0)
 
 
 def test_first_fit_produces_a_proper_matching_per_round():
@@ -58,7 +85,8 @@ def test_size_banding_never_costs_more_than_one_band():
     flat = _greedy_first_fit(pairs, sizes, pairs)
     banded = _size_banded(pairs, sizes, 2)
     assert _matching_ok(banded)
-    assert _cost(banded, sizes) < _cost(flat, sizes)
+    ext = {p: (sizes[p], 0) for p in pairs}
+    assert _cost(banded, ext, CW, EW) < _cost(flat, ext, CW, EW)
 
 
 def test_size_banding_keeps_every_pair():

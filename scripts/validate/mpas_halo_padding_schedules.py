@@ -55,24 +55,44 @@ _LATENCY_PER_ROUND_S = 52e-6
 _BANDWIDTH_S_PER_BYTE = 2.64e-3 / (512.0e6 / 1.0)   # 2.64 ms per 512 MB
 
 
-def _pair_sizes(sched_pairs, cell_send_map, edge_send_map, cell_w, edge_w):
-    """Bytes each DIRECTED pair actually has to move."""
-    sizes = {}
-    for (a, b) in sched_pairs:
-        n_c = len(cell_send_map.get((a, b), ()))
-        n_e = len(edge_send_map.get((a, b), ()))
-        sizes[(a, b)] = n_c * cell_w + n_e * edge_w
-    return sizes
+def _pair_extents(comm_pairs, cell_send_map, edge_send_map):
+    """Per UNDIRECTED pair ``(u, v)`` with ``u < v``: the cell-row and
+    edge-row counts of its LARGER direction.
+
+    Production colours UNDIRECTED pairs and each round posts ONE
+    bidirectional ``ppermute``, so both directions of a pair are always
+    in the same round; and the round's buffer is padded SEPARATELY for
+    cells and for edges. Modelling directed pairs as independently
+    colourable, or padding on their byte SUM, both give the wrong
+    schedule and the wrong price.
+    """
+    ext = {}
+    for (u, v) in comm_pairs:
+        key = (min(u, v), max(u, v))
+        c = max(len(cell_send_map.get((key[0], key[1]), ())),
+                len(cell_send_map.get((key[1], key[0]), ())))
+        e = max(len(edge_send_map.get((key[0], key[1]), ())),
+                len(edge_send_map.get((key[1], key[0]), ())))
+        ext[key] = (c, e)
+    return ext
 
 
-def _cost(rounds, sizes):
-    """Padded bytes of a schedule given as a list of rounds, each a list
-    of directed pairs: every pair in a round ships the round maximum."""
+def _cost(rounds, ext, cell_w, edge_w):
+    """Padded bytes of a schedule.
+
+    Mirrors the production assembly: in round ``r`` the buffer is sized
+    by the round's maximum cell count and, independently, its maximum
+    edge count, and BOTH endpoints of every pair send one such buffer —
+    so the round moves ``2 * n_pairs_r * (max_c_r * cell_w + max_e_r *
+    edge_w)`` bytes.
+    """
     total = 0
     for rnd in rounds:
         if not rnd:
             continue
-        total += len(rnd) * max(sizes[p] for p in rnd)
+        max_c = max(ext[p][0] for p in rnd)
+        max_e = max(ext[p][1] for p in rnd)
+        total += 2 * len(rnd) * (max_c * cell_w + max_e * edge_w)
     return total
 
 
@@ -95,7 +115,7 @@ def _greedy_first_fit(pairs, sizes, order):
     return rounds
 
 
-def _size_banded(pairs, sizes, n_bands):
+def _size_banded(pairs, sizes, n_bands):  # noqa: D401 (see below)
     """Colour within size BANDS: pairs are sorted by size and cut into
     ``n_bands`` contiguous chunks of equal COUNT, and each chunk is
     coloured on its own, so a round only ever mixes pairs of similar
@@ -157,23 +177,32 @@ def main() -> int:
 
     cell_w = (args.nlev + 2) * 4     # T (nlev) + p_s + phis, f32
     edge_w = args.nlev * 4
-    pairs = [p for p in cell_send_map.keys()]
-    sizes = _pair_sizes(pairs, cell_send_map, edge_send_map,
-                        cell_w, edge_w)
-    actual = sum(sizes.values())
+
+    # UNDIRECTED pairs, as production colours them; each pair's extent is
+    # its larger direction, and cells/edges pad independently.
+    ext = _pair_extents(comm_pairs, cell_send_map, edge_send_map)
+    pairs = sorted(ext)
+    # A pair's WEIGHT for ordering/banding is the buffer it forces.
+    sizes = {p: ext[p][0] * cell_w + ext[p][1] * edge_w for p in pairs}
+    # Actual bytes = what every DIRECTED transfer truly has to move.
+    actual = sum(
+        len(rows) * cell_w for rows in cell_send_map.values()) + sum(
+        len(rows) * edge_w for rows in edge_send_map.values())
 
     print(f"# subdiv-{args.subdivision} n_dev={n_dev} reorder_for={tgt} "
           f"nlev={args.nlev}")
-    print(f"# directed pairs={len(pairs)} comm_pairs={len(comm_pairs)} "
-          f"actual={actual / 1e6:.2f} MB/fill")
+    print(f"# undirected pairs={len(pairs)} directed transfers="
+          f"{len(cell_send_map)} actual={actual / 1e6:.2f} MB/fill")
     print(f"# model: {_LATENCY_PER_ROUND_S * 1e6:.0f} us/round + "
-          f"{_BANDWIDTH_S_PER_BYTE * 1e6 * 1e6:.3f} us/MB  (fitted, not "
-          f"measured per schedule)")
+          f"{_BANDWIDTH_S_PER_BYTE * 1e12:.3f} us/MB  (FITTED, and the "
+          f"fit is what job 26919124 is currently measuring)")
     print(f"{'schedule':>22} {'rounds':>7} {'padded_MB':>10} "
           f"{'inflation':>10} {'model_ms':>9}")
 
     def report(name, rounds):
-        padded = _cost(rounds, sizes)
+        flat = [p for r in rounds for p in r]
+        assert sorted(flat) == pairs, f"{name} dropped/duplicated a pair"
+        padded = _cost(rounds, ext, cell_w, edge_w)
         ms = (len(rounds) * _LATENCY_PER_ROUND_S
               + padded * _BANDWIDTH_S_PER_BYTE) * 1e3
         print(f"{name:>22} {len(rounds):7d} {padded / 1e6:10.2f} "
@@ -187,12 +216,15 @@ def main() -> int:
         report(f"size-banded x{nb}", _size_banded(pairs, sizes, nb))
 
     # Floor: no padding at all (what a true ragged exchange would move),
-    # priced at the same bandwidth with the round count of the best
-    # colouring — the target any schedule is trying to approach.
-    best_r = min(len(_size_banded(pairs, sizes, nb)) for nb in args.bands)
+    # priced at the round count of the tightest colouring found — the
+    # target any schedule is trying to approach.
+    best_r = min([len(_greedy_first_fit(pairs, sizes,
+                                        sorted(pairs, key=lambda p: -sizes[p])))]
+                 + [len(_size_banded(pairs, sizes, nb)) for nb in args.bands])
+    ms = (best_r * _LATENCY_PER_ROUND_S
+          + actual * _BANDWIDTH_S_PER_BYTE) * 1e3
     print(f"{'zero-padding floor':>22} {best_r:7d} {actual / 1e6:10.2f} "
-          f"{1.0:10.3f} "
-          f"{(best_r * _LATENCY_PER_ROUND_S + actual * _BANDWIDTH_S_PER_BYTE) * 1e3:9.3f}")
+          f"{1.0:10.3f} {ms:9.3f}")
     return 0
 
 

@@ -110,6 +110,12 @@ for tag in ("b1_a", "b1_b", "b2_a", "b2_b", "b4_a"):
         med[tag] = json.loads(lines[-1])["steady_median_ms"]
     except Exception as e:
         print(f"{tag}: MISSING -> {e}")
+missing = [t for t in ("b1_a", "b1_b", "b2_a", "b2_b", "b4_a")
+           if t not in med]
+if missing:
+    # A gate that reports a number from a partial run is not a gate.
+    print(f"ABORT: arms missing {missing}; no verdict")
+    sys.exit(4)
 for t, v in med.items():
     print(f"{t:>8}: {v:7.3f} ms")
 if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
@@ -125,9 +131,27 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         print("INCONCLUSIVE: delta is inside the arm spread")
     if "b4_a" in med:
         d4 = med["b4_a"] - b1
+        lin = d4 / d2 if d2 else float("nan")
         print(f"delta(4) {d4:+.3f} ms   linearity delta(4)/delta(2) "
-              f"{(d4 / d2 if d2 else float('nan')):.2f}  (a bandwidth "
-              f"term predicts 3.00)")
+              f"{lin:.2f}  (a bandwidth term predicts 3.00)")
+        # Enforce the a-priori gate written in the header, so the
+        # verdict is the SCRIPT's not the reader's.
+        if not (2.0 <= lin <= 4.0):
+            print("VERDICT: NON-LINEAR in payload -- the knob is not "
+                  "measuring wire time; the delta(2) row means nothing")
+            sys.exit(5)
+        if 2.3 <= d2 <= 3.0:
+            print("VERDICT: CONFIRMS the fitted 2.64 ms payload term")
+        elif d2 <= 1.8:
+            print("VERDICT: REFUTES -- payload is a SMALLER share than "
+                  "fitted; compute is the bigger term")
+            sys.exit(6)
+        elif d2 >= 3.5:
+            print("VERDICT: REFUTES -- payload is LARGER than fitted; "
+                  "bytes levers are worth more than predicted")
+            sys.exit(7)
+        else:
+            print("VERDICT: intermediate -- reprice before acting")
 EOF
 echo "DONE rc=$rc"
 exit $rc

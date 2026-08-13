@@ -2869,6 +2869,20 @@ def make_voronoi_sharded_step(
     # wide fill cuts 33 -> 11 sequential collectives at ~ +17% payload.
     # ------------------------------------------------------------------
     import os as _os_wide
+    # Validate the ballast knob HERE, not only where it is consumed: it
+    # is read inside the ppermute fill, so with an allgather or ragged
+    # halo both a typo and a deliberate N>1 would be silently ignored
+    # and the run would quietly measure nothing (codex).
+    import os as _os_bal
+    _bal = _resolve_halo_ballast(
+        _os_bal.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
+    if _bal > 1 and halo_strategy not in ("auto", "ppermute"):
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={_bal} is only implemented for "
+            f"the coloured ppermute exchange, but halo_strategy="
+            f"{halo_strategy!r} was requested. The run would move the "
+            f"unmodified payload and the measurement would be null.")
+
     use_wide_halo = _resolve_wide_halo(
         _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO", "0"))
     if use_wide_halo:
