@@ -102,7 +102,46 @@ def load_mesh_metrics(mesh_mask_path):
             e3t[:, _NATIVE_J, _NATIVE_I], tmask[:, _NATIVE_J, _NATIVE_I])
 
 
-def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None):
+def load_mesh_latitude(mesh_mask_path):
+    """``gphit`` on the SAME native (331, 360) frame as load_mesh_metrics.
+
+    Separate loader so a caller that needs a geographic region (e.g. an Arctic
+    integral) gets the latitude on the identical frame, instead of slicing the
+    full (332, 362) field itself and risking a one-row offset against the
+    metrics.
+    """
+    try:
+        import netCDF4 as nc
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit(f"netCDF4 required to read the mesh mask: {exc}")
+    ds = nc.Dataset(mesh_mask_path)
+    try:
+        gphit = np.asarray(ds.variables["gphit"][:], dtype=np.float64).squeeze()
+    finally:
+        ds.close()
+    if gphit.shape != (332, 362):
+        raise SystemExit(f"expected eORCA1 (332, 362) gphit, got {gphit.shape}")
+    return gphit[_NATIVE_J, _NATIVE_I]
+
+
+def load_mesh_depth_1d(mesh_mask_path):
+    """``gdept_1d`` as a plain (nlev,) array of level-centre depths [m]."""
+    try:
+        import netCDF4 as nc
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit(f"netCDF4 required to read the mesh mask: {exc}")
+    ds = nc.Dataset(mesh_mask_path)
+    try:
+        g = np.asarray(ds.variables["gdept_1d"][:], dtype=np.float64).squeeze()
+    finally:
+        ds.close()
+    if g.ndim != 1:
+        raise SystemExit(f"expected 1-D gdept_1d, got {g.shape}")
+    return g
+
+
+def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None,
+                   region_mask=None):
     """Volume integrals of T and S with the z-star column dilation.
 
     All inputs on the SAME native frame.  Returns a dict of plain floats.
@@ -111,12 +150,26 @@ def tracer_content(T3d, S3d, eta, e1t, e2t, e3t, tmask, gdept=None):
     S3d = np.asarray(S3d, dtype=np.float64)
     eta = np.asarray(eta, dtype=np.float64)
     wet = tmask > 0.5
+    if region_mask is not None:
+        # Restrict the integral to a horizontal region (e.g. Arctic, or the
+        # open-water / ice-covered split of it).  Applied to the WET mask so
+        # every downstream quantity -- volume, salt, the depth bins -- is
+        # restricted consistently and no term is left global by accident.
+        wet = wet & (np.asarray(region_mask, dtype=bool)[None] if
+                     np.ndim(region_mask) == 2 else
+                     np.asarray(region_mask, dtype=bool))
     dV_ref = e1t[None] * e2t[None] * e3t * wet          # (nlev, nj, ni)
     H = (e3t * wet).sum(axis=0)                          # column depth [m]
     col_wet = H > 0.0
     dilation = np.where(col_wet, (H + eta * col_wet) / np.where(col_wet, H, 1.0), 0.0)
     dV = dV_ref * dilation[None]
 
+    if not wet.any():
+        # An empty region is a CALLER error (bad lat bounds, mask on the wrong
+        # frame).  Returning zeros would be a plausible-looking number that
+        # passes every finite check downstream -- the exact failure this
+        # campaign has already paid for once.
+        raise SystemExit("FATAL: region selects zero wet cells")
     if not np.isfinite(T3d[wet]).all() or not np.isfinite(S3d[wet]).all():
         # NaN in a wet cell must be FATAL, not silently nansum'd away.
         n_bad = int((~np.isfinite(T3d[wet])).sum() + (~np.isfinite(S3d[wet])).sum())
