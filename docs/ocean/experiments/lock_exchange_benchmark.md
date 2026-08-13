@@ -293,10 +293,19 @@ Read this table narrowly. What it does NOT establish:
   couple into `eta` through the density field. "It is the pressure
   gradient, not tracer advection" is NOT supported by this table, and an
   earlier version of this section said it.
-- Surface velocity was not compared at all (`speed_sfc` is saved by the
-  lat-lon extractor and not the MPAS one), so the row is UNMEASURED. `eta`
-  is dynamically tied to column-integrated divergence, so "free surface"
-  and "barotropic mode" are not separated here either.
+- Surface velocity is now SAVED by both arms (it was missing from the MPAS
+  extractor entirely) but is still **not comparable**, for a different
+  reason: the two arms reduce velocity to cell centres with DIFFERENT
+  operators. Lat-lon takes a 2-point mean of the staggered components;
+  MPAS reconstructs a cell-centred vector from the edge normals by Perot,
+  averaging over ~6 edges, which smooths more. Measured, the row reads the
+  OPPOSITE way from every other field — lat-lon moves 2.1x further in
+  surface speed while MPAS moves 2.9x further in SST — which is exactly
+  what the smoother reduction would produce and is NOT evidence of a
+  weaker MPAS surface flow. The report prints the row marked REPORTED, NOT
+  COMPARABLE. So "free surface" and "barotropic mode" are still not
+  separated: `eta` is tied to column-integrated divergence and the
+  velocity field that would disentangle it cannot yet be compared.
 
 What the fair scale DID surface, once the normaliser stopped being one
 arm picked by alphabetical order: **the two arms do not evolve by the same

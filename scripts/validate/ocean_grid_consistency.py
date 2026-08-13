@@ -1498,6 +1498,25 @@ _DECOMPOSE_FIELDS = {
     "speed_sfc": "surface velocity — Coriolis and momentum advection",
 }
 
+#: Fields whose two arms are NOT reduced by the same operator, with the
+#: reason. A row listed here is reported and must NOT be read as a
+#: cross-grid result: the difference it shows contains the difference
+#: between the two reductions.
+_NOT_LIKE_FOR_LIKE = {
+    "speed_sfc":
+        "the arms build this with DIFFERENT operators. The lat-lon C-grid "
+        "averages each staggered component to cell centres with a 2-point "
+        "mean; MPAS reconstructs a cell-centred vector from the edge "
+        "normals by Perot, which averages over ~6 edges and therefore "
+        "smooths more. A smaller MPAS speed follows from the reduction "
+        "alone, so this row cannot separate a dynamical difference from "
+        "the reconstruction. MEASURED 2026-08-13 and it does read the "
+        "other way from every other field -- lat-lon moves 2.1x further "
+        "here while MPAS moves 2.9x further in SST -- which is exactly "
+        "what a smoothing reduction would produce and is NOT evidence "
+        "that MPAS has a weaker surface flow.",
+}
+
 
 def _field_decomposition(paths: dict, t_index: int = -1):
     """Which FIELD carries the arm-to-arm disagreement?
@@ -2276,6 +2295,10 @@ def main() -> None:
                                   f"({v['points_at']} is therefore "
                                   f"UNMEASURED, not agreeing)")
                             continue
+                        if fld in _NOT_LIKE_FOR_LIKE:
+                            print(f"    {'':24s} {'':16s}   {fld:10s} "
+                                  f"REPORTED, NOT COMPARABLE — "
+                                  f"{_NOT_LIKE_FOR_LIKE[fld]}")
                         mv = "/".join(f"{g} {x:.3e}" for g, x
                                       in sorted(v.get("moved", {}).items()))
                         print(f"    {'':24s} {'':16s}   {fld:10s} "
