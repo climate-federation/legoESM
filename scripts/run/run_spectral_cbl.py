@@ -45,6 +45,12 @@ from legoesm.atmosphere.forcing import wangara_day33  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
+# Frame label per --case, i.e. the name `legoesm.training.les_reference` will
+# accept for a reference built from this driver's output. The driver's own
+# option spelling ("nieuwstadt") is not the reference registry's ("cbl"), so
+# the map is explicit rather than `args.case` passed straight through.
+_CASE_LABELS: dict[str, str] = {"nieuwstadt": "cbl", "wangara": "wangara"}
+
 
 def build(args, dtype):
     cfg = sl.SpectralLESConfig(
@@ -132,14 +138,26 @@ def main():
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=20,
                    help="evenly-spaced frames (snapshots + profiles); 0 disables.")
-    p.add_argument("--case-label", type=str, default="cbl",
-                   help="This driver integrates Nieuwstadt CBL_N91, NOT "
-                        "Wangara Day 33 (which is moist, rotating and "
-                        "diurnally forced). It was labelled \"wangara\" for "
-                        "years; the label is corrected here so a reference "
-                        "cannot be mistaken for the other case.")
+    p.add_argument("--case-label", type=str, default=None,
+                   help="Label stamped into every recorded frame, which "
+                        "`legoesm.training.les_reference` checks against the "
+                        "case it is asked to build. DEFAULTS TO THE --case IT "
+                        "WAS GIVEN (nieuwstadt -> 'cbl', wangara -> "
+                        "'wangara'); pass it only to override. It used to "
+                        "default to the literal 'cbl' for BOTH cases, so "
+                        "`--case wangara` without this flag stamped a genuine "
+                        "8 h Wangara run (theta0 = 277 K) as 'cbl' and the "
+                        "reference loader refused it -- correctly, since the "
+                        "two are not cross-aliased.")
     p.add_argument("--output", type=Path, default=Path("results/spectral_cbl"))
     args = p.parse_args()
+    # Derive the frame label from the case unless it was given explicitly. The
+    # old literal default meant the ONE flag that identifies the reference was
+    # wrong precisely when it mattered -- `--case wangara` produced 8 h of a
+    # genuine Wangara run stamped "cbl", which the reference loader then
+    # refused (it does not cross-alias the two, and should not: accepting the
+    # alias would let a real Wangara directory become the CBL reference).
+    args.case_label = args.case_label or _CASE_LABELS[args.case]
     if args.case == "wangara":
         # Wangara's own initial state and forcing, taken from the SHARED module
         # the SCM case reads, so the two sides cannot drift apart.

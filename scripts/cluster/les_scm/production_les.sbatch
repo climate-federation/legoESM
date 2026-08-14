@@ -103,7 +103,12 @@ case "$LES_CASE" in
     # the 13:00 flux maximum and into the afternoon decay. Lz = 2000 m clears
     # the depth the layer reaches; the sponge sits above 1700 m, which is where
     # the SCM case stops scoring.
-    $PY scripts/run/run_spectral_cbl.py --case wangara \
+    # --case-label is now derived from --case, but it is passed explicitly
+    # here anyway: the first production run of this case omitted it, the flag
+    # then defaulted to the literal "cbl", and eight hours of a genuine
+    # Wangara integration were stamped as the other case. The reference loader
+    # refused it and the eight-case tuning campaign died on the spot.
+    $PY scripts/run/run_spectral_cbl.py --case wangara --case-label wangara \
       --nx 96 --ny 96 --nz 128 --Lx 4000 --Ly 4000 --Lz 2000 \
       --z0 0.01 --hours 8 --dt 0.5 --record-frames 48 --print-every 5000 \
       --output $OUT
