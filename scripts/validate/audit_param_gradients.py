@@ -258,8 +258,21 @@ def _single_scheme_config(category: str, scheme: str, subcfg=None) -> PhysicsCon
 
 
 def _subconfig_of(cfg: PhysicsConfig, category: str):
+    """The active scheme's sub-config.
+
+    ``TurbulenceConfig.clubb`` is annotated ``CLUBBConfig or None`` and ships
+    None, so a bare ``getattr`` returns None and CLUBB would be SKIPPED by the
+    audit entirely — every one of its ~70 parameters silently unaudited. The
+    campaign's own accessor materialises the default; mirror it rather than
+    letting the largest scheme fall out of the report.
+    """
     component = getattr(cfg, category)
-    return getattr(component, component.scheme, None)
+    subcfg = getattr(component, component.scheme, None)
+    if subcfg is None and category == "turbulence" and component.scheme == "clubb":
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+        subcfg = CLUBBConfig()
+    return subcfg
 
 
 def _tunable_object(subcfg):
