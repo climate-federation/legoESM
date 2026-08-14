@@ -25,9 +25,20 @@
 # lower.  So this may well go the wrong way.  Running it because it is what
 # NEMO does and because the magnitude is unknown, not because I expect a fix.
 #
-# Also note the card runs n2_mode="insitu", which CLIPS N2 >= 0, so the
-# convective SOURCE half of this term is inert on both branches -- this arm
-# tests the SINK discretisation only.
+# 2026-08-13 RESULT (old card, OUT=tke_source_ablation): Antarctic KM_ratio
+# 0.7086 -> 0.7051. A -0.5% move, i.e. NEUTRAL by the thresholds below, and
+# very slightly WORSE, exactly as the algebra above warned. So this is not
+# the step error.
+#
+# WHY IT IS BEING RE-RUN 2026-08-14. That measurement is stale in a way that
+# matters. It was taken while the card ran n2_mode="insitu", which CLIPS
+# N2 >= 0 -- so the convective SOURCE half of -p_avt*rn2 was inert on BOTH
+# branches and the arm tested the SINK discretisation only. The card now runs
+# n2_mode="nemo_bn2" + n2_eos_form="teos10" with SIGNED N2 (9efc193b4), so in
+# unstable columns the term is a source and the explicit-vs-implicit choice
+# is no longer a pure sink question. One variable changed (the card); same
+# probe, same thresholds. Writing to a NEW output dir so the pre-N2-fix
+# numbers above stay on disk as the record of that state.
 #
 # PRE-REGISTERED, Antarctic K_M/avm (reviewed card 0.709; zero-step 0.861;
 # NEMO's own avm grows 5% over the hour, so the target is ~0.90):
@@ -41,7 +52,7 @@ export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 TRD2=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_TRD2
-OUT=$WT/results/omip_nemo/tke_source_ablation
+OUT=$WT/results/omip_nemo/tke_source_ablation_signedn2
 echo "HEAD: $(git -C $WT log --oneline -1)"
 NFAIL=0
 arm () {
@@ -58,6 +69,15 @@ arm () {
 
 arm reviewed_card_baseline
 arm nemo_explicit_buoyancy --cfg-override tke_buoyancy_sink=nemo_explicit
+# CONTROL for the N2 change itself, added 2026-08-14 after catching a
+# confound: the 08-13 baseline (KM_ratio 0.7086 Antarctic) was taken with an
+# OLDER PROBE -- a698729c5 changed the surface length anchor at 08-14 03:29,
+# and its own commit message says that recovers a quarter of the length
+# deficit. So old-vs-new across those two runs mixes a card change with an
+# instrument change and cannot attribute anything. This arm reverts ONLY
+# n2_mode on the CURRENT probe, which is the one-variable comparison.
+# (n2_eos_form is inert under insitu -- see TKEConfig.)
+arm n2_insitu_control --cfg-override n2_mode=insitu
 
 echo; echo "########## card audit (tke_buoyancy_sink now in the flag table)"
 $PY -u scripts/validate/ocean_fidelity/audit_orca1_tke_card.py --iwm | tail -20
