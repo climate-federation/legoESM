@@ -475,6 +475,15 @@ class TestCrossGridAndEndToEnd:
             name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
         moved = pf(raised, mesh, z)[1]
 
+        # CHALLENGED AND UPHELD. An adversarial review argued this
+        # perturbation is two-variable, because eta also enters the z*
+        # Jacobian and so moves dz_half by ~1% independently of the ladders.
+        # Reasonable a priori, but the injection experiment already
+        # discriminates it: the regression was injected by zeroing eta INSIDE
+        # _bn2_ladder_kwargs ONLY, leaving the Jacobian at
+        # mpas_integration.py:273 reading the real eta. Under that injection
+        # the assertion below FAILED. If dz_half carried the signal it would
+        # have passed. So the difference is attributable to the ladders.
         assert np.all(np.isfinite(np.asarray(moved)))
         assert not np.allclose(np.asarray(flat), np.asarray(moved)), (
             "eta did not change the MPAS diffusivity -- the bridge is on "

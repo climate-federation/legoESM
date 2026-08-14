@@ -708,12 +708,14 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
     if getattr(cfg, "n2_mode", "insitu") not in ("insitu", "nemo_bn2"):
         raise NotImplementedError(
             f"vertical_mixing.tke.n2_mode={getattr(cfg, 'n2_mode', 'insitu')!r} "
-            "is not wired on the MPAS ocean: the ADIABATIC path needs the "
+            "is not wired on the MPAS ocean. 'adiabatic' needs the "
             "cell-centre hydrostatic pressure this bridge does not compute. "
-            "MPAS supports 'insitu' and 'nemo_bn2' -- the latter needs only "
-            "the geometric depth ladders, which this bridge now threads from "
-            "z_coord (the old guard blocked it citing a pressure requirement "
-            "that only applies to 'adiabatic').")
+            "'insitu_signed' needs only rho and dz_half, which this bridge "
+            "DOES pass -- it stays blocked because nothing has validated it "
+            "here, not because it is infeasible; wire it with a test if you "
+            "want it. MPAS supports 'insitu' and 'nemo_bn2', the latter "
+            "needing only the geometric depth ladders this bridge threads "
+            "from z_coord.")
     # NOTE: eice (under-ice lc/etau attenuation) IS wired on this bridge —
     # profiles_fn reads surface_forcing.ice_concentration under the shared
     # static gate (mirroring _run_mpas_kpp) and threads ice_frac into

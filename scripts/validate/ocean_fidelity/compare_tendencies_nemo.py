@@ -192,9 +192,14 @@ def run_stage_a(d, cfg):
         ice_frac=None,
         dz_ref=jnp.asarray(dz_ref_1d), jacobian=jnp.asarray(jac1),
         # Geometric depth ladders for n2_mode="nemo_bn2". These are built
-        # from NEMO's OWN e3t at this record, so they already carry the live
-        # z* stretch -- strictly better here than z_coord.gdept_0*(1+eta/H),
-        # which only approximates what NEMO used. Without them the closure
+        # from NEMO's OWN e3t at this record, so they carry the live z*
+        # stretch. NOTE this is a RECONSTRUCTION of gdept (cumsum(e3t)-e3t/2),
+        # not NEMO's analytic gdept_1d; measured against ORCA1 L75's own
+        # e3w_1d the divisor differs by 6.6e-4 median / 2.9e-3 max (job
+        # 9411507). An earlier version of this comment called it "strictly
+        # better" than the z_coord ladder, which was never measured -- the
+        # honest statement is that both are approximations and this one's
+        # error is bounded above. Without them the closure
         # raises rather than silently falling back to S-EOS, which is how
         # this gap was found (job 9411221).
         t_depth=jnp.asarray(zc),
