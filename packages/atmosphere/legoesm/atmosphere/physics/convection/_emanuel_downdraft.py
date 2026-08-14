@@ -85,8 +85,11 @@ __physics_contract__ = {
     "reference": "Emanuel (1991) CONVECT v4.3c, convect43c.f lines 713-934",
     "idealized_test": (
         "A column with no detrained condensate (ep == 0) gives exactly zero "
-        "mp, evap and tendencies; a saturated environment gives zero "
-        "evaporation because the ventilation factor AFAC floors at zero."
+        "mp, evap and tendencies. Evaporation floors at zero only when the "
+        "MIXTURE of environmental and downdraft air is supersaturated: a "
+        "saturated ENVIRONMENT still evaporates, because AFAC is driven by "
+        "QS(I) - 0.5*(Q(I) + QP(I+1)) and the descending shaft is drier than "
+        "its surroundings (measured, not assumed)."
     ),
 }
 

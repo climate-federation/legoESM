@@ -124,12 +124,39 @@ def test_evaporation_moistens_and_cools():
     assert dT[k] < 0.0, "evaporation warmed the layer"
 
 
-def test_saturated_environment_evaporates_nothing():
-    """AFAC floors at zero, so a saturated column cannot evaporate rain."""
+def test_a_saturated_environment_still_evaporates():
+    """A saturated ENVIRONMENT does not stop the shaft, and that is correct.
+
+    The ventilation factor is driven by ``QS(I) - 0.5*(Q(I) + QP(I+1))``
+    (convect43c.f line 754): the deficit of the MIXTURE of environmental and
+    downdraft air, not of the environment alone.  The shaft descends carrying
+    air from aloft, so ``QP`` sits below the local ``QS`` and evaporation
+    continues even at ``Q == QS``.
+
+    Written as an explicit expectation because the obvious guess -- saturate
+    the column, evaporation stops -- is wrong, and an earlier version of this
+    file (and of the module's physics contract) asserted it.
+    """
     col = _column(ep_level=12)
     col["q"] = col["qs"]
     out = emanuel_downdraft(**col, **_ORACLE)
-    assert np.max(np.abs(np.asarray(out.evap))) == 0.0
+    assert np.max(np.asarray(out.evap)) > 0.0
+
+
+def test_supersaturating_the_mixture_floors_evaporation_at_zero():
+    """The guarantee that DOES hold: ``AFAC=MAX(AFAC,0.0)`` (line 755).
+
+    Push the environment far enough above saturation that the mixture's
+    deficit is negative at every level, and the floor must give exactly zero
+    -- never a negative 'evaporation' that would condense rain out of thin
+    air and reverse the sign of the tendencies.
+    """
+    col = _column(ep_level=12)
+    col["q"] = col["qs"] * 3.0
+    out = emanuel_downdraft(**col, **_ORACLE)
+    evap = np.asarray(out.evap)
+    assert np.max(np.abs(evap)) == 0.0
+    assert np.min(evap) >= 0.0
 
 
 def test_gradients_are_finite_through_the_whole_sweep():
