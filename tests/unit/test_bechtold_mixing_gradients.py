@@ -164,3 +164,76 @@ def test_land_diurnal_scale_is_neutral_at_one():
         "test was written when it was inert and its silence meant nothing. "
         "Rewrite it to assert the knob's real effect rather than deleting "
         "this guard.")
+
+
+def _land_column_rain(**cfg_kw):
+    """Column convective rain for a LAND column with the sub-cloud layer dry
+    enough that re-evaporation is genuinely active."""
+    from legoesm import constants
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig as C
+
+    T, q, pf, ph, u, v = _column(q_sfc=0.014)     # sub-saturated below cloud
+    n = T.shape[0]
+    out, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, jnp.zeros(T.shape), jnp.zeros((n,)), None,
+        dt=600.0, config=C(use_ifs_land_rhebc=True, **cfg_kw),
+        land_frac=jnp.ones((n,)),
+        shf_w_m2=jnp.full((n,), 120.0), lhf_w_m2=jnp.full((n,), 90.0))
+    dp = ph[:, 1:] - ph[:, :-1]
+    return float(-jnp.sum(out.dq_v_dt * dp) / constants.g)
+
+
+def test_subcloud_evaporation_knobs_are_live_and_add_land_rain():
+    """Lowering either knob must STRICTLY increase land convective rain.
+
+    Strict, not ``>=``: an inert knob satisfies ``>=`` trivially, which is how
+    the land diurnal-CAPE knob's first test passed while proving nothing. Rain
+    lost to re-evaporation between cloud base and the ground is the candidate
+    for the campaign's land deficit, so this has to be shown to move.
+    """
+    base = _land_column_rain()
+    assert np.isfinite(base) and base > 0.0
+
+    slower = _land_column_rain(subcloud_evap_scale=0.25)
+    lower_break = _land_column_rain(rhebc_land=0.55, rhebc_land_deep=0.55)
+    assert slower > base, (
+        f"quartering the sub-cloud evaporation rate did not add rain "
+        f"({slower:.6e} vs {base:.6e}) -- the knob is not reaching the kernel")
+    assert lower_break > base, (
+        f"lowering the land RH break did not add rain ({lower_break:.6e} vs "
+        f"{base:.6e}) -- the land branch is not active on this column")
+
+
+def test_subcloud_knob_defaults_are_bit_identical():
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig as C
+    import legoesm.atmosphere.physics.convection.bechtold as _b
+    assert C().subcloud_evap_scale == 1.0
+    assert C().rhebc_land == _b._IFS_RHEBC_LAND
+    assert C().rhebc_land_deep == _b._IFS_RHEBC_LAND_DEEP
+    assert _land_column_rain(subcloud_evap_scale=1.0, rhebc_land=0.75,
+                             rhebc_land_deep=0.70) == _land_column_rain()
+
+
+def test_a_gradient_reaches_the_subcloud_evaporation_scale():
+    """It must be trainable, not just settable."""
+    from legoesm import constants
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig as C
+
+    T, q, pf, ph, u, v = _column(q_sfc=0.014)
+    n = T.shape[0]
+
+    def f(x):
+        out, _, _ = bechtold_convection(
+            T, q, pf, ph, u, v, jnp.zeros(T.shape), jnp.zeros((n,)), None,
+            dt=600.0, config=C(use_ifs_land_rhebc=True, subcloud_evap_scale=x),
+            land_frac=jnp.ones((n,)),
+            shf_w_m2=jnp.full((n,), 120.0), lhf_w_m2=jnp.full((n,), 90.0))
+        dp = ph[:, 1:] - ph[:, :-1]
+        return -jnp.sum(out.dq_v_dt * dp) / constants.g
+
+    g = float(jax.grad(f)(1.0))
+    fd = float((f(1.05) - f(0.95)) / 0.10)
+    assert np.isfinite(g) and abs(g) > 0.0, "no gradient reaches the evap scale"
+    assert 0.8 < g / fd < 1.25, (
+        f"analytic {g:.6e} disagrees with the finite difference {fd:.6e}")
+    assert g < 0.0, "more sub-cloud evaporation should mean less surface rain"

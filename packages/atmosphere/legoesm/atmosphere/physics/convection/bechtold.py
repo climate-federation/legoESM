@@ -443,8 +443,14 @@ _IFS_RCUCOV_RH_BASE = 0.8               # non-deep area RH enhancement threshold
 _IFS_RCUCOV_RH_SLOPE = 1.0 / 0.025      # ...(max(0.8,RHm)-0.8)/0.025 (cuflxn.F90:440)
 _IFS_RHEBC_OCEAN = 0.92                 # RHEBC over water (sucumf.F90:179)
 _IFS_RHEBC_OCEAN_DEEP = 0.85            # deep KTYPE=1 over water (cuflxn.F90:226)
-# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) need a land mask the leaf
-# does not receive — documented gap; the ocean values are used everywhere.
+# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) ARE applied: the leaf
+# receives ``land_frac`` whenever ``use_ifs_land_rhebc`` is set, which the
+# driver does, and blends land against ocean per tile below.  (The previous
+# note here said the land mask never arrives; that stopped being true when the
+# blend was added and the prose was not updated.)  Both land values are
+# overridable from ``BechtoldConfig`` -- their IFS setting assumes a mesh far
+# finer than the campaign runs, and they control how much convective rain
+# re-evaporates before reaching the ground over land.
 _IFS_EVAP_FLUX_TINY = 1.0e-12           # IF(ZRFL > 1.E-12) evap gate (cuflxn.F90:450)
 
 # --- IFS convective snow: rain/snow partition + melt (cuflxn.F90:198-211,374-397) ---
@@ -1178,6 +1184,9 @@ def _ifs_subcloud_rain_evaporation(
     snow_melt: bool = False,
     T: jax.Array | None = None,
     p_full: jax.Array | None = None,
+    evap_scale: float = 1.0,
+    rhebc_land_val: float = _IFS_RHEBC_LAND,
+    rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
@@ -1289,8 +1298,8 @@ def _ifs_subcloud_rain_evaporation(
         # Land RH break (cuflxn.F90:222-223): 0.70 deep / 0.75 non-deep —
         # evaporation stops EARLIER over land; fractional tile blend.
         rhebc_land = (
-            deep_weight * _IFS_RHEBC_LAND_DEEP
-            + (1.0 - deep_weight) * _IFS_RHEBC_LAND
+            deep_weight * rhebc_land_deep_val
+            + (1.0 - deep_weight) * rhebc_land_val
         )
         rhebc = (land_frac * rhebc_land
                  + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
@@ -1340,7 +1349,7 @@ def _ifs_subcloud_rain_evaporation(
         zrfl = flux_top
         zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
         zdrfl1 = (
-            _IFS_RCPECONS
+            _IFS_RCPECONS * evap_scale
             * jnp.maximum(qsat_k - q_k, 0.0)
             * area
             * (sqrtp_k / _IFS_RCVRFACTOR * zrfl_safe / area) ** _IFS_EVAP_EXPONENT
@@ -3038,6 +3047,9 @@ def bechtold_convection(
                 land_frac=(land_frac if config.use_ifs_land_rhebc else None),
                 snow_melt=config.use_ifs_snow_melt,
                 T=T, p_full=p_full,
+                evap_scale=config.subcloud_evap_scale,
+                rhebc_land_val=config.rhebc_land,
+                rhebc_land_deep_val=config.rhebc_land_deep,
             ))
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs

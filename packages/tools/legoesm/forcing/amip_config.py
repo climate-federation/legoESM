@@ -95,6 +95,9 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_epsilon_deep: float = 1.75e-3
     bechtold_delta_deep: float = 0.75e-4
     bechtold_capdcycl_land_tau_scale: float = 1.0
+    bechtold_subcloud_evap_scale: float = 1.0
+    bechtold_rhebc_land: float = 0.75
+    bechtold_rhebc_land_deep: float = 0.70
     bechtold_rprcon: float = 1.4e-3
     bechtold_dnoprc: float = 3.0e-4
     bechtold_downdraft_entrain_rate: float = 3.0e-4
