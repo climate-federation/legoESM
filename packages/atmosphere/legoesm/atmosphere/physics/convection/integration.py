@@ -35,6 +35,40 @@ from legoesm.grids.vertical import (
 )
 
 logger = logging.getLogger("legoesm.atmosphere.convection")
+
+
+def land_fraction_for_columns(grid, ncol, scheme_config=None):
+    """The per-column land fraction a convection leaf needs, or None.
+
+    ONE helper for every bridge in this module.  The land-dependent parts of a
+    convection scheme -- the sub-cloud rain evaporation humidity break and the
+    diurnal-cycle CAPE subtraction -- go silently inert when this is missing,
+    and that is exactly what happened on the MPAS lane: rain over tropical land
+    re-evaporated under the ocean setting for the whole campaign because one
+    bridge did not pass an argument the other one did.  A single helper is
+    harder to omit from a new bridge than a block of inline code.
+
+    Only ``VoronoiMesh`` carries the field today, so a structured grid returns
+    None and the leaf keeps its previous ocean branch unchanged.
+    """
+    lf = getattr(grid, "land_frac", None)
+    if lf is not None:
+        lf = jnp.asarray(lf).reshape(-1)
+        if lf.shape[0] != ncol:
+            raise ValueError(
+                f"grid.land_frac carries {lf.shape[0]} values but this "
+                f"convection call has {ncol} columns; a mismatched mask would "
+                "silently mislabel which columns are land")
+        return lf
+    if scheme_config is not None and getattr(
+            scheme_config, "use_ifs_land_rhebc", False):
+        logger.warning(
+            "convection: use_ifs_land_rhebc is set but the grid carries no "
+            "land_frac, so the land/ocean split in the sub-cloud rain "
+            "evaporation is INERT and the ocean humidity break is applied "
+            "everywhere, land included")
+    return None
+
 from legoesm import constants
 
 from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -579,26 +613,6 @@ def _make_hydrostatic_convection(
                         "heat fluxes reached this call, so the diurnal CAPE "
                         "subtraction is INERT and land convection will not be "
                         "delayed to the afternoon")
-                _land_frac = getattr(grid, "land_frac", None)
-                if _land_frac is not None:
-                    _land_frac = jnp.asarray(_land_frac).reshape(-1)
-                    if _land_frac.shape[0] != ncol:
-                        raise ValueError(
-                            f"grid.land_frac carries {_land_frac.shape[0]} "
-                            f"values but this convection call has {ncol} "
-                            "columns; a mismatched mask would silently "
-                            "mislabel which columns are land")
-                elif getattr(scheme_config, "use_ifs_land_rhebc", False):
-                    # Loud, not silent.  The MPI cell-partitioned lane builds
-                    # its local mesh BEFORE topography attaches the land
-                    # fraction, so the flag can be on while the mask never
-                    # arrives -- a run that believes it has land physics and
-                    # does not is exactly the failure this guard exists for.
-                    logger.warning(
-                        "convection: use_ifs_land_rhebc is set but the grid "
-                        "carries no land_frac, so the land/ocean split in the "
-                        "sub-cloud rain evaporation is INERT and the ocean "
-                        "humidity break is applied everywhere, land included")
                 _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
                           if phys_state is not None else None)
                 _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
@@ -625,6 +639,7 @@ def _make_hydrostatic_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1101,6 +1116,7 @@ def _make_nonhydrostatic_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1112,6 +1128,7 @@ def _make_nonhydrostatic_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -1500,6 +1517,7 @@ def _make_spectral_pe_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1511,6 +1529,7 @@ def _make_spectral_pe_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.

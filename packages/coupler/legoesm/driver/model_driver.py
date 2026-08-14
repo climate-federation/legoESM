@@ -1487,6 +1487,20 @@ class ModelDriver:
                 and self._f_land is not None):
             self.grid = self.grid._replace(
                 land_frac=jnp.asarray(self._f_land, dtype=_sd).reshape(-1))
+        # Under MPI the compiled step does NOT use ``self.grid`` -- it closes
+        # over ``self._voronoi_layout.local_mesh``, which was built during grid
+        # creation, i.e. BEFORE this attach.  Without this refresh the mask
+        # reaches the serial lane and silently misses the distributed one, so a
+        # run would get land physics or not depending on how it was launched.
+        # That is the failure mode this whole land-mask work is about; keep the
+        # two copies in step.
+        if (self._voronoi_layout is not None
+                and getattr(self.grid, "land_frac", None) is not None
+                and getattr(self._voronoi_layout.local_mesh, "land_frac",
+                            "no-field") is None):
+            self._voronoi_layout = self._voronoi_layout._replace(
+                local_mesh=self._voronoi_layout.local_mesh._replace(
+                    land_frac=self.grid.land_frac))
 
         # Per-column subgrid orographic stddev for the orographic GWD launch
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
