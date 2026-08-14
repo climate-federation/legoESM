@@ -191,6 +191,14 @@ def run_stage_a(d, cfg):
         lat_deg=jnp.asarray(lat_deg),
         ice_frac=None,
         dz_ref=jnp.asarray(dz_ref_1d), jacobian=jnp.asarray(jac1),
+        # Geometric depth ladders for n2_mode="nemo_bn2". These are built
+        # from NEMO's OWN e3t at this record, so they already carry the live
+        # z* stretch -- strictly better here than z_coord.gdept_0*(1+eta/H),
+        # which only approximates what NEMO used. Without them the closure
+        # raises rather than silently falling back to S-EOS, which is how
+        # this gap was found (job 9411221).
+        t_depth=jnp.asarray(zc),
+        w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     # NEMO avt lives at W-points (levels 1..z-1 are the interior interfaces
@@ -249,6 +257,10 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         ice_frac=None,
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
+        # Same ladders as Stage A, for the same reason -- built from NEMO's
+        # own e3t so they carry the live z* stretch.
+        t_depth=jnp.asarray(zc),
+        w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     return K_H
@@ -443,6 +455,19 @@ def main():
                          "avt in calm Arctic columns; rerunning with "
                          "'veros_sqrte' tests how much of that factor the "
                          "double-count carries -- on CPU, with no model run.")
+    ap.add_argument("--n2-mode", default=None,
+                    choices=["insitu", "insitu_signed", "adiabatic",
+                             "nemo_bn2"],
+                    help="Override the stratification the closure sees. The "
+                         "card now selects 'nemo_bn2' (NEMO's own eosbn2 "
+                         "assembly). Passing 'insitu' reverts ONLY that, "
+                         "which is the one-variable control for the signed "
+                         "TEOS-10 change -- the in-situ density gradient "
+                         "carries a +g^2/c^2 = 4.27e-5 s^-2 compressibility "
+                         "bias that the adiabatic form does not.")
+    ap.add_argument("--n2-eos-form", default=None, choices=["seos", "teos10"],
+                    help="Which alpha/beta the nemo_bn2 assembly uses. Inert "
+                         "under every other --n2-mode.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -451,15 +476,33 @@ def main():
 
     from scripts.run.run_omip_core2 import orca1_zdftke_config
     cfg = orca1_zdftke_config(prognostic=False)  # Mode-B quasi-steady for the
-    if args.mxl_choice is not None:
-        cfg = cfg._replace(tke_mxl_choice=int(args.mxl_choice))
-        print(f"[cfg] tke_mxl_choice OVERRIDE -> {args.mxl_choice}")
-    if args.prandtl_mode is not None:
-        cfg = cfg._replace(prandtl_mode=args.prandtl_mode)
-        print(f"[cfg] prandtl_mode OVERRIDE -> {args.prandtl_mode}")
-    if args.kappa_convention is not None:
-        cfg = cfg._replace(kappa_convention=args.kappa_convention)
-        print(f"[cfg] kappa_convention OVERRIDE -> {args.kappa_convention}")
+    def _apply_overrides(c, label):
+        """Every CLI override, applied through ONE path.
+
+        Stage A2 used to rebuild the card with a bare
+        ``orca1_zdftke_config()``, so EVERY override -- --mxl-choice,
+        --prandtl-mode, --kappa-convention and later --n2-mode -- was
+        silently discarded there. Two Stage A2 arms differing only in
+        --n2-mode came back bit-identical in all ten regions (job 9411271),
+        which reads as "the change has no effect in Mode-A" when it actually
+        means the flag never arrived. Both stages now go through here.
+        """
+        for flag, field, cast in (
+                ("mxl_choice", "tke_mxl_choice", int),
+                ("prandtl_mode", "prandtl_mode", str),
+                ("kappa_convention", "kappa_convention", str),
+                ("n2_mode", "n2_mode", str),
+                ("n2_eos_form", "n2_eos_form", str)):
+            v = getattr(args, flag)
+            if v is not None:
+                c = c._replace(**{field: cast(v)})
+                print(f"[cfg/{label}] {field} OVERRIDE -> {cast(v)}")
+        print(f"[cfg/{label}] EFFECTIVE: n2_mode={c.n2_mode!r} "
+              f"n2_eos_form={c.n2_eos_form!r} "
+              f"mxl={c.tke_mxl_choice} kappa={c.kappa_convention!r}")
+        return c
+
+    cfg = _apply_overrides(cfg, "stage_a")
     # state-function closure test (NEMO's en is prognostic; Mode-B is its
     # documented equilibrium approximation — see module docstring).
 
@@ -482,7 +525,8 @@ def main():
             raise SystemExit("--restart-npz requires --rec 1 (the restart "
                              "state pairs with avt record 0)")
         rst = dict(np.load(args.restart_npz))
-        cfg_a2 = orca1_zdftke_config()  # prognostic=True card
+        # prognostic=True card, THEN the same overrides Stage A got.
+        cfg_a2 = _apply_overrides(orca1_zdftke_config(), "stage_a2")
         K_H2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
