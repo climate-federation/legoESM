@@ -2,7 +2,7 @@
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --job-name=fv3jaxmeas
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -22,7 +22,11 @@
 # cluster.  pytest --basetemp is forced onto a burg path below.
 set -uo pipefail
 
-REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
+# REPO is DERIVED from this script's own location, never edited per run.
+# Editing REPO= inside a pinned worktree makes it dirty, and the preflight
+# below then (correctly) refuses -- which is exactly how job 9408879 died.
+# A script that must be modified to be used cannot live in a pinned tree.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 BASETMP=/burg-archive/glab/users/pg2328/fv3_duo_gaps/pytest_basetemp_$SLURM_JOB_ID
 mkdir -p "$BASETMP"
@@ -62,6 +66,8 @@ packages/core/legoesm/core/fv3_tp_core.py
 packages/core/legoesm/core/fv3_pgrad.py
 packages/core/legoesm/core/fv3_mapz.py
 packages/core/legoesm/core/fv3_nh_core.py
+packages/core/legoesm/core/fv3_duo_sw_core.py
+packages/core/legoesm/core/fv3_duo_stepper.py
 "
 NEW_TESTS="
 tests/grids/test_fv3_duo_halos.py
@@ -69,6 +75,8 @@ tests/grids/test_fv3_tp_core.py
 tests/grids/test_fv3_pgrad.py
 tests/grids/test_fv3_mapz.py
 tests/grids/test_fv3_nh_core.py
+tests/grids/test_fv3_duo_sw_core.py
+tests/grids/test_fv3_duo_stepper.py
 "
 
 echo "=== 0. which of the expected files exist ==="

@@ -31,7 +31,11 @@
 #     certify.  Do not "improve" this into an edit-and-restore.
 set -uo pipefail
 
-REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
+# REPO is DERIVED from this script's own location, never edited per run.
+# Editing REPO= inside a pinned worktree makes it dirty, and the preflight
+# below then (correctly) refuses -- which is exactly how job 9408879 died.
+# A script that must be modified to be used cannot live in a pinned tree.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 RUNDIR=/burg-archive/glab/users/pg2328/fv3_duo_gaps
 WORK=$RUNDIR/mutcensus_$SLURM_JOB_ID
