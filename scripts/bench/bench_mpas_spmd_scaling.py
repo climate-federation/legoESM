@@ -653,6 +653,7 @@ def main() -> int:
                           "LEGOESM_MPAS_HALO_NOCOMM",
                           "LEGOESM_MPAS_HALO_NOSTAGE")
             },
+        },
     ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).

@@ -113,9 +113,10 @@ run_arm 2 b2_a
 run_arm 2 b2_b
 
 echo "=== RECEIPTS ==="
-"$PY" - "$OUTDIR" <<'EOF'
+"$PY" - "$OUTDIR" "$NDEV" <<'EOF'
 import json, os, sys
 d = sys.argv[1]
+ndev = sys.argv[2]
 med = {}
 for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "ns_a", "ns_b",
             "b2_a", "b2_b"):
