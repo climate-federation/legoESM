@@ -40,6 +40,16 @@ CONTROLS, all asserted before any number is reported:
   C4  Everything is volume-weighted on the eORCA1 metrics and split by the same
       latitude bands the MLD scorecard uses, so the numbers sit next to it.
 
+WHAT THE ZERO-STEP RATIO IS AND IS NOT (codex 9405117 #4).  It is a genuine
+mismatch of the closure AS THIS PROBE RECONSTRUCTS IT.  It is NOT a clean
+"our mixing length is 15% short" diagnosis, because the reconstruction differs
+from the model's own tripole path in three named ways: N2 comes from
+``n2_mode="insitu"`` rather than NEMO's ``rn2``; the stress-dependent NEMO
+surface anchor is replaced by the windless ``mxl0_min_m`` floor (the snapshot
+carries no taum at the restart instant); and the bottom row uses the legacy
+``e3t`` proxy because NEMO's extra terminal slot is unavailable here.  Quote
+the number as "the probe's reconstructed closure", never as the model's.
+
 NOTE ON THE N-SQUARED INSTRUMENT.  The mixing length needs N2.  This mirrors
 `compare_tendencies_nemo.py::run_stage_a` exactly -- in-situ density from
 `nemo_seos_eos` at cell-centre pressure, then `n2_mode="insitu"` -- so the two

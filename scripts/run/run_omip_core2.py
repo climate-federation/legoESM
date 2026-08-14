@@ -601,6 +601,29 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
+        # TKE VERTICAL-DIFFUSION COEFFICIENT.  NEMO diffuses `en` with the
+        # PLAIN viscosity: zzd_up = -0.5*rn_Dt*(avm(k+1)+avm(k))/(e3t*e3w)
+        # (zdftke.F90:407-409) is a face coefficient of mean(avm), i.e. x1.
+        # TKEConfig's default is the Veros/Gaspar 30.0 -- as its own
+        # __param_spec__ reference says outright, "NEMO avm x1 (zdftke);
+        # Veros/Gaspar 30" -- so the card was diffusing TKE THIRTY TIMES too
+        # fast against a NEMO oracle.  MEASURED on NEMO's own state and `en`,
+        # one 3600 s step, Antarctic, 491743 interfaces, scored against NEMO's
+        # avm (EVD-free: nn_evdm=0), job 9405026:
+        #     zero step                          K_M/avm 0.861
+        #     alpha_tke=30 (was the card)  e 3.20x, K_M/avm 1.846
+        #     alpha_tke=1.0 (NEMO)         e 0.95x, K_M/avm 0.634
+        # Arctic 1.666 -> 0.673.  Nothing else in the closure came within an
+        # order of it: Langmuir, nn_etau, the mixing-length choice, the surface
+        # BC placement and the dissipation split are each worth 2-9%.
+        # HONEST CAVEAT: 1.0 overshoots the other way -- over that hour NEMO's
+        # avm rises 5% and ours then FALLS 22%.  1.0 is still the faithful
+        # value (it is what NEMO's discretisation computes); a residual of the
+        # same order as the 0.861 zero-step offset remains, and the dissipation
+        # split moves the wrong way for it.
+        # No CLI flag: alpha_tke carries a __param_spec__ (tier 2, bounds
+        # 1-90), so `--params vertical_mixing.tke.alpha_tke=30` reverts it.
+        alpha_tke=1.0,                  # NEMO zdftke: TKE diffused by avm x1
         # K-from-TKE AMPLITUDE.  NEMO zdftke tke_avn computes
         #     zsqen = SQRT(en) ; zav = rn_ediff*zmxlm*zsqen
         #     p_avm = MAX(zav, avmb)*wmask

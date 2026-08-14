@@ -23,6 +23,26 @@ def _core2():
     return core2
 
 
+def test_card_pins_the_nemo_tke_diffusion_coefficient():
+    """NEMO diffuses `en` with the PLAIN viscosity, not 30x it.
+
+    zdftke.F90:407-409 assembles zzd_up = -0.5*rn_Dt*(avm(k+1)+avm(k)) /
+    (e3t*e3w), a face coefficient of mean(avm) — i.e. alpha_tke = 1.
+    TKEConfig's default is the Veros/Gaspar 30.0, and its own __param_spec__
+    reference says so ("NEMO avm x1 (zdftke); Veros/Gaspar 30").  Measured on
+    NEMO's own state and en (job 9405026): with 30 our one-step diffusivity is
+    1.846x NEMO's, with 1.0 it is 0.634x, while the ZERO-step value is 0.861x
+    either way — the coefficient only acts through the step.
+    """
+    cfg = _core2().orca1_zdftke_config()
+    assert cfg.alpha_tke == 1.0, (
+        "orca1_zdftke_config no longer pins NEMO's TKE diffusion coefficient; "
+        "the TKEConfig default of 30.0 is the Veros/Gaspar value and diffuses "
+        "TKE thirty times too fast against a NEMO oracle.")
+    vm = _core2().build_tripole_vmix_config("tke", iwm=None)
+    assert vm.tke.alpha_tke == 1.0, "the MPAS/tripole builder lost the pin"
+
+
 def test_card_pins_the_nemo_amplitude():
     """The ORCA1 card must select NEMO's ``rn_ediff*zmxlm*sqrt(en)`` form."""
     cfg = _core2().orca1_zdftke_config()
