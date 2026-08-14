@@ -56,25 +56,44 @@ def test_first_bad_sees_an_infinity_with_no_nan_present(mod):
     assert mod._first_bad(fields) == ("T", 1, 1)
 
 
-def test_profiles_watches_the_prognostics_and_skips_absent_carries(mod):
-    """A diagnostic closure carries no TKE; the probe must watch four fields
-    then, not raise and not invent a zero one."""
+def _fake_state():
     import types
 
     def _f(v):
         return types.SimpleNamespace(data=np.full((1, 1, 1, 3), v))
 
-    state = types.SimpleNamespace(
+    return types.SimpleNamespace(
         T=_f(300.0), u=_f(1.0), v=_f(0.0),
         tracers={"q_v": _f(0.01)},
     )
-    phys_bare = types.SimpleNamespace()
-    assert set(mod._profiles(state, phys_bare)) == {"T", "qv", "u", "v"}
 
-    phys_tke = types.SimpleNamespace(tke=np.full((1, 1, 1, 3), 0.4))
-    got = mod._profiles(state, phys_tke)
-    assert set(got) == {"T", "qv", "u", "v", "tke_carry"}
-    assert got["tke_carry"].shape == (3,), "must be flattened for the reduction"
+
+def test_profiles_watches_the_prognostics_and_skips_absent_carries(mod):
+    """A diagnostic closure carries no turbulent energy; the probe must watch
+    four fields then, not raise and not invent a zero one."""
+    import types
+    phys_bare = types.SimpleNamespace()
+    assert set(mod._profiles(_fake_state(), phys_bare)) == {"T", "qv", "u", "v"}
+
+
+def test_profiles_watches_the_qke_slot_not_only_tke(mod):
+    """mynn25's carry is `qke`, a DIFFERENT PhysicsState slot from `tke`.
+
+    Watching `tke` alone printed a flat zero for every mynn25 run and invited
+    the conclusion that its prognostic never advances -- the probe was reading
+    a slot that scheme does not use. Regression on the instrument, not the
+    model.
+    """
+    import types
+    phys = types.SimpleNamespace(
+        tke=np.zeros((1, 1, 1, 3)),
+        qke=np.full((1, 1, 1, 3), 0.8),
+        clubb_moments=np.zeros((1, 15, 4)),
+    )
+    got = mod._profiles(_fake_state(), phys)
+    assert set(got) == {"T", "qv", "u", "v", "tke", "qke", "clubb_mom"}
+    assert got["qke"].shape == (3,), "must be flattened for the reduction"
+    assert float(got["qke"].max()) == 0.8
 
 
 def test_unknown_case_is_a_hard_error(mod):

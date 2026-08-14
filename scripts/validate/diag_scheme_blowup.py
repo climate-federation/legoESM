@@ -64,16 +64,19 @@ def _profiles(state, phys):
         "u": np.asarray(state.u.data).ravel(),
         "v": np.asarray(state.v.data).ravel(),
     }
-    # The turbulence carry is scheme-dependent (TKE for tke/edmf/clubb_lite,
-    # qke = 2*TKE for mynn25, the packed moment vector for prognostic CLUBB)
-    # and absent for the diagnostic closures, so it is watched only when the
-    # state actually carries one.
-    tke = getattr(phys, "tke", None)
-    if tke is not None:
-        out["tke_carry"] = np.asarray(tke).ravel()
-    mom = getattr(phys, "clubb_moments", None)
-    if mom is not None:
-        out["clubb_moments"] = np.asarray(mom).ravel()
+    # The turbulence carry is scheme-dependent and lives in a DIFFERENT
+    # PhysicsState slot per family -- `turbulence_carry_field` returns "tke"
+    # for tke/clubb_lite/edmf/diagnostic-CLUBB, "qke" for mynn25 (q^2 = 2*TKE,
+    # a separate slot so a restart-time scheme switch cannot feed the wrong
+    # moment as energy) and "clubb_moments" for prognostic CLUBB. Watching
+    # only `tke` reported a flat zero for mynn25 and invited the conclusion
+    # that its prognostic never advances; it was the probe reading an unused
+    # slot. Watch all three and let the empty ones be visibly empty.
+    for slot, label in (("tke", "tke"), ("qke", "qke"),
+                        ("clubb_moments", "clubb_mom")):
+        val = getattr(phys, slot, None)
+        if val is not None:
+            out[label] = np.asarray(val).ravel()
     return out
 
 
@@ -99,6 +102,11 @@ def main(argv=None) -> int:
                    help="hand a prescribed-flux deck's surface heat flux to "
                         "the closure instead of injecting it afterwards; "
                         "matches the campaign flag of the same name.")
+    p.add_argument("--dump-profiles", action="store_true",
+                   help="print the full column of every watched field at the "
+                        "last step reached. A column min/max says a blow-up "
+                        "happened; the profile says WHERE, which is what "
+                        "separates a surface-layer feedback from a lid one.")
     args = p.parse_args(argv)
 
     import jax.numpy as jnp
@@ -165,9 +173,29 @@ def main(argv=None) -> int:
             print(f"NON-FINITE at step {k + 1} (t={(k + 1) * dt:.1f} s): "
                   f"field={name} first_flat_index={idx} n_bad={count} "
                   f"of {fields[name].size}")
+            _dump(fields, args.dump_profiles, k + 1)
             return 2
+    _dump(_profiles(state, phys), args.dump_profiles, args.steps)
     print(f"finite through step {args.steps}")
     return 0
+
+
+def _dump(fields, enabled: bool, step: int) -> None:
+    """Full column of every watched field, top-of-atmosphere first.
+
+    Index 0 is the model's FIRST level, which for these SCM columns is the top
+    (``z_full`` descends), so the surface is the LAST entry. Stated because
+    reading the array the other way round turns a surface-layer runaway into a
+    lid one.
+    """
+    if not enabled:
+        return
+    print(f"--- full columns at step {step} (index 0 = model top, "
+          "last = surface) ---")
+    for name, arr in fields.items():
+        with np.printoptions(precision=4, suppress=False, linewidth=140,
+                             threshold=10_000):
+            print(f"{name}: {arr}")
 
 
 if __name__ == "__main__":

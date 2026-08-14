@@ -97,19 +97,45 @@ def test_prescribed_fluxes_zero_the_bulk_heat_coefficient(scheme):
 
 # --- confounded cases are refused, not silently scored ----------------------
 
-def test_dycoms_is_refused_for_a_radiation_mismatch():
-    assert "dycoms" in drv._RADIATION_MISMATCH
-    with pytest.raises(SystemExit, match="Stevens"):
-        drv.main(["--case", "dycoms", "--les-dir", "/nonexistent"])
+def test_dycoms_is_matched_by_simple_lw_rather_than_refused():
+    """DYCOMS WAS refused; it is not any more, and the reason must be real.
+
+    Both stratocumulus decks set ``dolongwave = .true., doradsimple = .true.``
+    and the SCM now selects the same Stevens (2005) kernel, so the case is
+    matched instead of confounded and ``_RADIATION_MISMATCH`` is empty. The
+    old test asserted the refusal and went red when that landed; asserting the
+    RESOLUTION is what keeps it honest -- deleting `simple_lw` from the arm
+    config would put a radiation confound back without the refusal to catch it.
+    """
+    assert drv._RADIATION_MISMATCH == {}
+    assert {"dycoms", "astex"} <= drv._SIMPLE_LW_CASES
+    for case in ("dycoms", "astex"):
+        cfg = drv.build_physics_config(
+            "louis", prescribed_fluxes=True, simple_lw=True)
+        assert cfg.radiation.scheme == "simple_lw", (
+            f"{case} needs the LES's own longwave on the SCM side")
+    assert drv.build_physics_config(
+        "louis", prescribed_fluxes=True).radiation.scheme != "simple_lw", (
+        "a case that does NOT set doradsimple must not get the kernel")
 
 
-def test_dycoms_override_gets_past_the_refusal(tmp_path):
-    """--allow-radiation-mismatch must change the failure mode, not be a no-op."""
+def test_the_radiation_refusal_still_works_for_the_next_case(monkeypatch,
+                                                             tmp_path):
+    """The mechanism outlived its only instance, so it is tested with one.
+
+    The NEXT case whose LES applies a forcing the SCM cannot reproduce must be
+    refused rather than scored, and ``--allow-radiation-mismatch`` must change
+    the failure mode rather than being a no-op.
+    """
+    monkeypatch.setitem(drv._RADIATION_MISMATCH, "bomex", "SYNTHETIC mismatch")
+    with pytest.raises(SystemExit, match="SYNTHETIC mismatch"):
+        drv.main(["--case", "bomex", "--les-dir", "/nonexistent"])
     with pytest.raises(Exception) as excinfo:
-        drv.main(["--case", "dycoms", "--les-dir", str(tmp_path),
+        drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--allow-radiation-mismatch"])
-    # it should now fail on the missing LES reference, not the refusal
-    assert "Stevens" not in str(excinfo.value)
+    assert "SYNTHETIC mismatch" not in str(excinfo.value), (
+        "the override must get past the refusal and fail on the missing "
+        "reference instead")
 
 
 def test_unknown_scheme_on_the_cli_is_a_hard_error():
@@ -622,12 +648,21 @@ def test_a_penalty_valued_candidate_is_never_accepted():
     """
     import inspect
     src = inspect.getsource(drv.tune_scheme_multicase)
-    i = src.index("cand_loss = float(loss_fn(cand))")
-    window = src[i:i + 700]
-    assert "cand_loss >= NONFINITE_PENALTY" in window, (
+    # Anchored on the symbols that RUN today. The earlier anchor was the
+    # string `cand_loss = float(loss_fn(cand))`, which the per-case rewrite
+    # deleted -- so the test raised ValueError on a missing substring instead
+    # of checking anything, which is a red gate that proves nothing.
+    reject = src.index("NONFINITE_PENALTY")
+    improve = src.index("cand_loss < loss_val")
+    assert reject < improve, (
         "the line search must reject a candidate at or above the penalty "
         "BEFORE the improvement test; otherwise a NaN rollout is accepted "
         "whenever the current loss exceeds the sentinel")
+    # PER CASE, not on the aggregate: the objective is a mean over cases, so
+    # one blown case among eight contributes ~1/8 of the penalty and never
+    # trips a test on the aggregate.
+    assert "cand_per_case.values()" in src[reject - 200:improve], (
+        "the penalty test must look at the per-case scores")
 
 
 def test_tuned_nonfinite_flag_reaches_the_result():

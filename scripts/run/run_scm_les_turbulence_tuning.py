@@ -1369,6 +1369,7 @@ def main(argv=None) -> int:
             print(f"    FAILED {res.error}", flush=True)
         res.wall_s = time.time() - t0
         results.append(res)
+        _flush_outputs(outdir, args, arms, results, profiles)
         jax.clear_caches()
 
     if configs:
@@ -1401,6 +1402,10 @@ def main(argv=None) -> int:
                 res.status = "tune_failed"
                 res.error = f"{type(exc).__name__}: {exc}"
                 print(f"    FAILED {res.error}", flush=True)
+                # Flush before the continue: this branch CHANGES the report
+                # (status + error), and a job killed after it would otherwise
+                # leave a stale "ok" on disk for an arm that died.
+                _flush_outputs(outdir, args, arms, results, profiles)
                 continue
             for f in ("status", "score_tuned", "components_tuned", "n_trained",
                       "frozen", "parameters", "loss_history",
@@ -1417,16 +1422,10 @@ def main(argv=None) -> int:
                       f"{rel}   "
                       + "  ".join(f"{k}={v:.4g}"
                                   for k, v in (res.per_case_tuned or {}).items()))
+            _flush_outputs(outdir, args, arms, results, profiles)
             jax.clear_caches()
 
-    _write_outputs(outdir, args, arms, results)
-    for i, a in enumerate(arms):
-        _write_case_profiles(
-            outdir, a,
-            {s_: p_[i] for s_, p_ in profiles.items() if p_[i] is not None},
-            {r.scheme: r.profiles_tuned[i] for r in results
-             if r.profiles_tuned is not None},
-        )
+    _flush_outputs(outdir, args, arms, results, profiles)
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1483,6 +1482,27 @@ def _write_case_profiles(outdir: Path, arm, per_scheme: dict,
     out = outdir / (f"profiles_{arm.name}.npz" if outdir.name != arm.name
                     else "profiles.npz")
     np.savez(out, **payload)
+
+
+def _flush_outputs(outdir: Path, args, arms, results, profiles) -> None:
+    """Write every artifact from whatever is finished so far.
+
+    Called after EACH scheme, not once at the end. The eight-case campaign is
+    tens of hours of XLA compilation and `_write_outputs` used to run a single
+    time after the last arm, so a walltime kill, an OOM or one fatal arm threw
+    away every completed scheme with it. Each writer is a full rewrite of its
+    own file from `results`, so a partial call is a partial report rather than
+    a corrupt one, and the penalty relabelling inside `_write_outputs` is
+    idempotent (an arm it demotes leaves `_RANKABLE`, so a later call skips it).
+    """
+    _write_outputs(outdir, args, arms, results)
+    for i, a in enumerate(arms):
+        _write_case_profiles(
+            outdir, a,
+            {s_: p_[i] for s_, p_ in profiles.items() if p_[i] is not None},
+            {r.scheme: r.profiles_tuned[i] for r in results
+             if r.profiles_tuned is not None},
+        )
 
 
 def _write_outputs(outdir: Path, args, arms, results) -> None:
@@ -1639,8 +1659,12 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
 
+    # args.case is None whenever --cases drove the run, which titled every
+    # multi-case report "vs LES — None". Name the regimes that were actually
+    # fitted instead.
     lines = [
-        f"# SCM turbulence closures vs LES — {args.case}", "",
+        f"# SCM turbulence closures vs LES — "
+        f"{args.case or ' + '.join(a.name for a in arms)}", "",
     ]
     if args.radiation_confound:
         lines += ["> **THIS IS NOT A TURBULENCE RANKING.** "
