@@ -760,3 +760,75 @@ def test_safe_sqrt_still_returns_zero_for_nan():
     import jax.numpy as jnp
     from legoesm.training.scm_rce_metrics import safe_sqrt
     assert float(safe_sqrt(jnp.asarray(float("nan")))) == 0.0
+
+
+# --- profile capture: DEFAULT and TUNED both reach the npz ------------------
+
+def _profiles_arm(nlev: int = 5):
+    """The minimum CaseArm surface `_write_case_profiles` reads."""
+    import types
+    import numpy as _np
+    ref = types.SimpleNamespace(
+        mask=_np.ones(nlev, dtype=bool),
+        weights=_np.full(nlev, 1.0 / nlev),
+        z_les=_np.linspace(20.0, 3000.0, 8),
+        window_hours=(4.0, 6.0),
+        profiles={"theta": _np.linspace(300.0, 303.0, nlev)},
+        profiles_les={"theta": _np.linspace(300.0, 303.0, 8)},
+    )
+    case = types.SimpleNamespace(
+        z_full=_np.linspace(3000.0, 20.0, nlev),
+        p_full=_np.linspace(7.0e4, 1.0e5, nlev),
+    )
+    return types.SimpleNamespace(
+        name="bomex", case=case, reference=ref, scored=("theta",))
+
+
+def test_write_case_profiles_carries_both_parameter_states(tmp_path):
+    """The npz must hold the tuned profiles as well as the default ones.
+
+    Without the tuned family the per-case figure can only draw the STARTING
+    point of the fit, which is what made the earlier figure carry default
+    curves under a tuned legend order.
+    """
+    import numpy as _np
+    nlev = 5
+    arm = _profiles_arm(nlev)
+    default = {"louis": {"theta": _np.full(nlev, 300.0),
+                         "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                         "v": _np.zeros(nlev)}}
+    tuned = {"louis": {"theta": _np.full(nlev, 301.0),
+                       "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                       "v": _np.zeros(nlev)}}
+    drv._write_case_profiles(tmp_path, arm, default, tuned)
+
+    data = _np.load(tmp_path / "profiles_bomex.npz", allow_pickle=True)
+    assert "scm_louis_theta" in data.files
+    assert "scm_louis_tuned_theta" in data.files
+    # Distinguishable, so a plot cannot draw one and label it the other.
+    assert float(data["scm_louis_theta"][0]) == 300.0
+    assert float(data["scm_louis_tuned_theta"][0]) == 301.0
+
+
+def test_an_untuned_scheme_contributes_no_tuned_keys(tmp_path):
+    """An excluded/failed arm has no tuned rollout; the npz must say so by
+    OMITTING the key rather than by duplicating its default profile, which a
+    plotter would draw as 'tuning changed nothing'."""
+    import numpy as _np
+    nlev = 5
+    arm = _profiles_arm(nlev)
+    default = {"mynn25": {"theta": _np.full(nlev, 300.0),
+                          "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                          "v": _np.zeros(nlev)}}
+    drv._write_case_profiles(tmp_path, arm, default, {})
+    data = _np.load(tmp_path / "profiles_bomex.npz", allow_pickle=True)
+    assert "scm_mynn25_theta" in data.files
+    assert "scm_mynn25_tuned_theta" not in data.files
+
+
+def test_scheme_result_declares_the_tuned_profile_slot():
+    """`main` copies this field off the tuning result; a rename that misses
+    one side would silently drop every tuned profile."""
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(drv.SchemeResult)}
+    assert "profiles_tuned" in fields

@@ -744,6 +744,9 @@ class SchemeResult:
     # mean of s_i(tuned)/s_i(default); 1.0 = no net change. None when
     # the scheme was never tuned.
     score_relative_tuned: float | None = None
+    # Analysis-window mean profiles at the TUNED parameters, one dict per arm
+    # in `arms` order. None until the scheme has actually been tuned.
+    profiles_tuned: list[dict[str, np.ndarray]] | None = None
 
 
 def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
@@ -976,6 +979,18 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     joint, per_case, per_comp = joint_score(scheme, arms, args, params=None,
                                             cfgs=tuned_cfgs)
     result.score_tuned = float(joint)
+    # The TUNED profiles cost NOTHING extra: the call above already rolled
+    # every arm out at the tuned parameters to produce score_tuned, and
+    # `last_means` holds exactly those rollouts. Capturing them here is what
+    # lets the per-case figure draw the fit instead of only its starting
+    # point -- previously the npz held DEFAULT profiles alone, so a figure
+    # captioned with a tuned ranking showed untuned curves.
+    result.profiles_tuned = [
+        {"theta": np.asarray(_theta_from_T(mm["T"], a.case.p_full)),
+         "qv": np.asarray(mm["qv"]), "u": np.asarray(mm["u"]),
+         "v": np.asarray(mm["v"])}
+        for a, mm in zip(arms, joint_score.last_means)
+    ]
     # Normalised by the DEFAULT scores, not by case_norm: the headroom
     # number is reported in BOTH aggregations, and case_norm is None in
     # 'mean' mode. Reporting it only when it happened to drive the fit is
@@ -1389,7 +1404,8 @@ def main(argv=None) -> int:
                 continue
             for f in ("status", "score_tuned", "components_tuned", "n_trained",
                       "frozen", "parameters", "loss_history",
-                      "per_case_tuned", "score_relative_tuned"):
+                      "per_case_tuned", "score_relative_tuned",
+                      "profiles_tuned"):
                 setattr(res, f, getattr(tuned, f))
             if tuned.error:
                 res.error = tuned.error
@@ -1405,9 +1421,12 @@ def main(argv=None) -> int:
 
     _write_outputs(outdir, args, arms, results)
     for i, a in enumerate(arms):
-        _write_case_profiles(outdir, a, {s_: p_[i]
-                                         for s_, p_ in profiles.items()
-                                         if p_[i] is not None})
+        _write_case_profiles(
+            outdir, a,
+            {s_: p_[i] for s_, p_ in profiles.items() if p_[i] is not None},
+            {r.scheme: r.profiles_tuned[i] for r in results
+             if r.profiles_tuned is not None},
+        )
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1431,9 +1450,17 @@ def _half_pressures(case) -> np.ndarray:
     return np.asarray(sigma.sigma_half, dtype=np.float64) * case.p_s
 
 
-def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
+def _write_case_profiles(outdir: Path, arm, per_scheme: dict,
+                         per_scheme_tuned: dict | None = None) -> None:
     """One profiles npz PER CASE, so the plot keeps working and a successful
-    run does not silently lose its profile-level audit trail."""
+    run does not silently lose its profile-level audit trail.
+
+    Two families of SCM keys are written per scheme: ``scm_<scheme>_<var>`` at
+    the DEFAULT parameters and ``scm_<scheme>_tuned_<var>`` at the fitted ones.
+    A scheme that was never tuned (excluded, failed, nothing spec'd) contributes
+    only the first family, so the plotter must treat the tuned key as optional
+    rather than assume the pair exists.
+    """
     payload = {
         "z_scm": np.asarray(arm.case.z_full),
         "p_full": np.asarray(arm.case.p_full),
@@ -1450,6 +1477,9 @@ def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
     for scheme, prof in per_scheme.items():
         for name, values in prof.items():
             payload[f"scm_{scheme}_{name}"] = np.asarray(values)
+    for scheme, prof in (per_scheme_tuned or {}).items():
+        for name, values in prof.items():
+            payload[f"scm_{scheme}_tuned_{name}"] = np.asarray(values)
     out = outdir / (f"profiles_{arm.name}.npz" if outdir.name != arm.name
                     else "profiles.npz")
     np.savez(out, **payload)

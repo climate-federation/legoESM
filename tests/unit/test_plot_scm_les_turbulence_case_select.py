@@ -95,3 +95,50 @@ def test_excluded_schemes_are_not_drawn(tmp_path, mod):
 
 def test_missing_ranking_file_is_not_an_error(tmp_path, mod):
     assert mod._read_ranking(tmp_path / "ranking.csv") == []
+
+
+# --- default-vs-tuned overlay -----------------------------------------------
+
+def _profiles_with(tmp_path, keys):
+    payload = {"z_scm": np.arange(4.0), "mask": np.ones(4, dtype=bool),
+               "window_hours": np.array([4.0, 6.0])}
+    for k in keys:
+        payload[k] = np.zeros(4)
+    path = tmp_path / "profiles_bomex.npz"
+    np.savez(path, **payload)
+    return np.load(path, allow_pickle=True)
+
+
+def test_scheme_names_survive_an_underscore(mod, tmp_path):
+    """`k.split("_")[1]` reported 'holtslag' for holtslag_boville and would
+    have invented a scheme called 'tuned' once the tuned family existed."""
+    data = _profiles_with(tmp_path, [
+        "scm_holtslag_boville_theta", "scm_holtslag_boville_tuned_theta",
+        "scm_tke_qv",
+    ])
+    assert mod._schemes_in(data.files) == ["holtslag_boville", "tke"]
+
+
+def test_non_profile_keys_are_not_mistaken_for_schemes(mod, tmp_path):
+    data = _profiles_with(tmp_path, ["les_scmlev_theta", "scm_louis_theta"])
+    assert mod._schemes_in(data.files) == ["louis"]
+
+
+def test_both_is_reported_when_both_families_exist(mod, tmp_path):
+    data = _profiles_with(tmp_path,
+                          ["scm_louis_theta", "scm_louis_tuned_theta"])
+    assert mod._states_present(data, ["louis"], "both") == ["default", "tuned"]
+
+
+def test_a_pre_tuning_npz_still_plots_its_defaults(mod, tmp_path):
+    """Backwards compatible: an older campaign has no tuned family, and asking
+    for 'both' must give the default-only figure rather than failing."""
+    data = _profiles_with(tmp_path, ["scm_louis_theta"])
+    assert mod._states_present(data, ["louis"], "both") == ["default"]
+
+
+def test_asking_for_tuned_when_there_is_none_is_a_hard_error(mod, tmp_path):
+    """A silently empty panel reads as 'the tuned profiles match nothing'."""
+    data = _profiles_with(tmp_path, ["scm_louis_theta"])
+    with pytest.raises(SystemExit):
+        mod._states_present(data, ["louis"], "tuned")
