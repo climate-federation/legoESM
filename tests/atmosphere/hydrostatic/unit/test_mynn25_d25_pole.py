@@ -322,3 +322,26 @@ def test_the_guards_do_not_promote_a_float32_column_to_float64():
     )
     assert sm.dtype == f32, f"SM25 came back {sm.dtype}, not float32"
     assert sh.dtype == f32, f"SH25 came back {sh.dtype}, not float32"
+
+
+def test_away_from_zero_keeps_a_python_scalar_a_python_scalar():
+    """F1/F2 are plain floats in every untraced run.
+
+    Routing them through jnp.where moves their arithmetic from CPython onto
+    XLA, which reassociates: measured, that alone changed ekman and wangara in
+    the last bits of `v`. Both branches must agree to the bit on the values the
+    guard is inert for, and the scalar branch must not allocate.
+    """
+    from legoesm.atmosphere.physics.turbulence.mynn25 import _away_from_zero
+    for x in (6.291, -6.291, 1e-9, -1e-9, 0.0, -0.0, 1.0, -1.0):
+        got = _away_from_zero(x, 1e-6)
+        assert isinstance(got, float), f"{x!r} became {type(got)}"
+        arr = float(np.asarray(_away_from_zero(jnp.asarray(x), 1e-6)))
+        assert got == arr, (
+            f"scalar and array branches disagree at {x!r}: {got} vs {arr}")
+    # Inert above the floor, to the bit.
+    assert _away_from_zero(6.291, 1e-6) == 6.291
+    assert _away_from_zero(-6.291, 1e-6) == -6.291
+    # And it still floors what it must.
+    assert _away_from_zero(1e-9, 1e-6) == 1e-6
+    assert _away_from_zero(-1e-9, 1e-6) == -1e-6

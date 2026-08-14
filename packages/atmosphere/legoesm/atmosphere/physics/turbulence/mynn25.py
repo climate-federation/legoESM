@@ -99,6 +99,8 @@ References
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -198,7 +200,18 @@ def _away_from_zero(x: jax.Array, floor: float) -> jax.Array:
     flips the sign of every negative value. Every entry with
     ``|x| >= floor`` is returned unchanged, so the guard is inert wherever the
     expression was already well posed.
+
+    A PYTHON scalar stays a Python scalar. The level-2 constants F1/F2 are
+    plain floats whenever the config is not being traced (i.e. every
+    production run), and routing them through ``jnp.where`` moved their
+    arithmetic from CPython onto XLA, which reassociates. MEASURED: that alone
+    changed ekman and wangara in the last bits of ``v`` -- a field whose true
+    value is zero, so the change was pure round-off, but it was a change to
+    every existing mynn25 result for no benefit. The guard is only reachable
+    when the coefficients are TRACED, which is exactly when they are arrays.
     """
+    if isinstance(x, (int, float)):
+        return math.copysign(max(abs(x), floor), x) if x else floor
     return jnp.where(x >= 0.0, jnp.maximum(x, floor), jnp.minimum(x, -floor))
 
 
