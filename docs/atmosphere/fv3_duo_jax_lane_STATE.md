@@ -258,6 +258,33 @@ The common failure is reasoning from a plausible mechanism to a verdict without
 running the one cheap check that separates it from the alternatives. Every one
 of these was a sub-minute measurement.
 
+
+### ★ THE JIT-VS-EAGER GAP IS EXPLAINED (run 9408346) — cancellation, not a defect
+
+The campaign's one open defect. Chain, all measured:
+
+- `del6_vt_flux` (`sw_core.F90:1948-1951`) computes `ut`/`vt` as a del-6 stencil
+  — a chain of differences of large nearly-equal numbers. Measured condition
+  number at the worst cell **(9, 2): 7.781e+12**.
+- Under `jit`, XLA contracts mul+add into FMA; eager does not. That shifts an
+  input by ~1 ULP.
+- `cond x eps = 1.728e-03` is the ceiling such a perturbation can reach. The
+  **measured gap is 1.257e-06** — three decades *under* the ceiling. The
+  amplification capacity is present and sufficient.
+- `ut` feeds **`v`** (`v -= ut`), and the stepper's full-step gate measures
+  `v` at **7.456e-07**, with `acoustic_step` carrying **5.646e-07**. The chain
+  closes.
+
+**This is not a port defect.** It is an ill-conditioned difference operator
+amplifying a legitimate compiler freedom. Treatment, already in place: gate on
+the **cell count** (2 of 342; a branch to systematic goes red), report the
+magnitude, label it UNEXPLAINED-BY-TOLERANCE rather than bounding it.
+
+Two of my hypotheses were refuted on the way: a PPM limiter **branch flip**
+(`del6_vt_flux` contains no data-dependent branch at all — verified by scanning
+the symbol that runs, with `d_sw1_duo`'s `jnp.where` as the non-vacuity control)
+and, earlier, FMA-scale rounding (7.5e-07 is 3.4e9 ULP).
+
 ### Codex adversarial review of the CODE — 1 BLOCKER, 2 MAJOR
 
 All three in `_rezone` and the gradient gates, i.e. exactly the node the
