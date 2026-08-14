@@ -1,4 +1,34 @@
-"""Validate our N² against NEMO's OWN rn2, recovered from its restart.
+"""INVALID — DO NOT USE. Kept as the record of a validator whose premise is false.
+
+Codex 9408213 #5 refuted this, and the refutation is decisive:
+
+  * `dissl` and the restart `tn/sn` are NOT the same state. NEMO writes
+    `dissl` inside vertical physics (zdftke.F90:929), BEFORE tracers are
+    advanced into Naa and the time levels swap; the restart `tn/sn` come from
+    the NEW Kmm afterwards (stpmlf.F90:363, restart.F90:192). The claim below
+    that there is "no time alignment" is exactly backwards.
+
+  * The inversion is only exact where the raw buoyancy length survives every
+    limiter. Under nn_mxl=2 NEMO sweeps the length from surface and bottom
+    (zdftke.F90:680); where a sweep caps it, 2*dissl^2 = rn2*(L_b/L_swept)^2.
+    A factor-2 cap alone produces 0.602 in log10 -- the middle of the 0.3-0.65
+    range this validator reported, so the signal may be entirely artifact.
+    Filtering on the already-contaminated inversion does not fix that.
+
+  * It reads static `gdept_1d` while ORCA1 runs z-star; NEMO evaluates bn2 on
+    live `gdept(Kmm)` / `e3w(Kmm)`.
+
+CONSEQUENCE, retracted loudly: the verdict this produced -- "the TEOS-10 form
+does not beat S-EOS, better in 1 of 3 bands" -- IS NOT SUPPORTED. Not shown
+false, shown unfounded. The EOS comparison is reopened.
+
+WHAT WOULD ACTUALLY WORK: an instantaneous NEMO dump of `rn2`, `rab`, live
+`gdept`/`e3w` and the matching `ts(Nnn)` taken BEFORE tracer advancement.
+That needs a NEMO run with added diagnostics, not a restart inversion.
+
+Original docstring follows.
+
+Validate our N² against NEMO's OWN rn2, recovered from its restart.
 
 THE PROBLEM.  NEMO writes no rn2/bn2 into its restart, and the only bn2 in the
 output stream is an ANNUAL MEAN on grid_W while the T/S we can pair with it are

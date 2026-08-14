@@ -28,6 +28,25 @@ def _eos():
 # Transcription
 # ---------------------------------------------------------------------------
 
+def test_coefficient_table_is_bit_pinned():
+    """Counts and 'differs from EOS-80' cannot catch a ONE-DIGIT edit.
+
+    Codex 9408213 flagged that gap. This hashes the whole table, so any future
+    change to any of the 126 entries goes red and has to be justified against
+    eosbn2.F90 rather than slipping through.
+    """
+    import hashlib
+    import json
+    c = _eos()._ROQUET_TEOS10
+    items = sorted((k, repr(v)) for k, v in c.items())
+    h = hashlib.sha256(json.dumps(items).encode()).hexdigest()[:16]
+    assert len(c) == 126, len(c)
+    assert h == "fffd0a0f90450c83", (
+        f"TEOS-10 coefficient table changed (hash {h}). If deliberate, "
+        "re-derive it with the mechanical extractor against eosbn2.F90:"
+        "1926-2110 and update this hash -- do not hand-edit coefficients.")
+
+
 def test_coefficient_families_are_complete():
     """52 density + 35 thermal + 35 haline, matching NEMO's block exactly.
 

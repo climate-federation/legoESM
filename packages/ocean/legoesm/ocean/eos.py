@@ -939,7 +939,12 @@ _ROQUET_TEOS10 = {
 }
 
 
-def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = rho_0):
+_NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's
+# constants.rho_ocean is 1025, and using it here biases alpha, beta and
+# hence N2 high by 1026/1025 = +0.0976% (codex 9408213 #6).
+
+
+def nemo_roquet_alpha_beta(T, S, depth_m, rho0: float = _NEMO_RHO0):
     r"""NEMO ``rab_3d`` thermal expansion / haline contraction (polynomial EOS).
 
     Transcribes ``eosbn2.F90:1108-1143`` verbatim for the
