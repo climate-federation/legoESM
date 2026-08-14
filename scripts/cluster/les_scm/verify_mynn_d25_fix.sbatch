@@ -74,16 +74,23 @@ echo "=============== 4. unit gate at the NEW pin ==============="
 cd "$NEW_WT" || exit 1
 export PYTHONPATH=$NEW_WT/src:$(ls -d "$NEW_WT"/packages/*/ | tr '\n' ':')
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
-$PY -m pytest -q \
-    tests/atmosphere/hydrostatic/unit/test_mynn25_d25_pole.py \
-    tests/atmosphere/hydrostatic/unit/test_mynn25_faithful.py \
-    tests/atmosphere/hydrostatic/unit/test_mynn25.py \
-    tests/test_param_specs.py tests/test_physics_contracts.py \
-    tests/test_no_inline_physics_coeffs.py \
-    tests/unit/test_diag_scheme_blowup.py \
-    tests/unit/test_plot_scm_les_turbulence_case_select.py \
-    tests/atmosphere/hydrostatic/test_run_scm_les_turbulence_tuning.py \
-    2>&1 | tail -25
+# The three repo-wide ratchets take ~40 of the job's ~45 minutes and are not
+# affected by a change inside one scheme, so FAST=1 drops them when the run is
+# an ITERATION on the numerics. They stay in the default path, which is what
+# the last run before a merge must use.
+SUITE="tests/atmosphere/hydrostatic/unit/test_mynn25_d25_pole.py
+       tests/atmosphere/hydrostatic/unit/test_mynn25_faithful.py
+       tests/atmosphere/hydrostatic/unit/test_mynn25.py
+       tests/unit/test_diag_scheme_blowup.py
+       tests/unit/test_plot_scm_les_turbulence_case_select.py
+       tests/atmosphere/hydrostatic/test_run_scm_les_turbulence_tuning.py"
+if [ "${FAST:-0}" != "1" ]; then
+  SUITE="$SUITE tests/test_param_specs.py tests/test_physics_contracts.py
+         tests/test_no_inline_physics_coeffs.py"
+else
+  echo "FAST=1: repo-wide ratchets SKIPPED -- this run does NOT clear them"
+fi
+$PY -m pytest -q $SUITE 2>&1 | tail -25
 echo "unit rc=${PIPESTATUS[0]}"
 
 echo "=============== 5. NON-VACUITY: revert the floor, cbl must die ==============="
