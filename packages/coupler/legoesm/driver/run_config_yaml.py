@@ -227,6 +227,8 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # production default), so rprcon/dnoprc supersede it as the conversion
     # knobs on this lane.
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
+    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
