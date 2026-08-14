@@ -2488,6 +2488,10 @@ def tune_focused_params(
         )
         overrides = trial_params.to_overrides()
         trial_cfg = base_cfg
+        # The value that was APPLIED, not the one that was requested: the
+        # sampler's physical draw goes through raw <-> sigmoid, so the two can
+        # differ at round-off and it is the applied one that produced the score.
+        applied: dict[str, float] = {}
         for scheme_key, (category, subcfg) in resolved.items():
             field_values = overrides.get(scheme_key, {})
             if not field_values:
@@ -2500,11 +2504,17 @@ def tune_focused_params(
                 if not (lo <= value <= hi):
                     raise AssertionError(
                         f"{c.name}={value} escaped bounds [{lo}, {hi}]")
+                applied[c.name] = value
             tuned_tunable = apply_param_overrides(
                 _tunable_subconfig(subcfg), field_values)
             trial_cfg = _set_active_subconfig(
                 trial_cfg, category,
                 _rewrap_tunable_subconfig(subcfg, tuned_tunable))
+        if len(applied) != len(constraints):
+            raise AssertionError(
+                f"focused tune applied {len(applied)} of {len(constraints)} "
+                "parameters; an override was dropped between the sampler and "
+                "the config.")
         trial_run = run_cached(
             cache, trial_cfg, ref,
             label=f"focused-tune:eval{i:03d}",
@@ -2527,7 +2537,7 @@ def tune_focused_params(
             best_score = trial_score
             best_cfg = trial_cfg
             best_run = trial_run
-            best_values = {c.name: float(values[c.name]) for c in constraints}
+            best_values = dict(applied)
 
     meta_by_name = {m.qualified_name: m for m in build_registry()}
     records = []
