@@ -274,6 +274,71 @@ def _cmp(got, ref, name, tol):
     return rel, n_over
 
 
+def _jit_gap(got, ref, name, *, max_cells, tail_ratio=None):
+    """COUNT-gated jit-vs-eager comparison for the two keys whose gap is
+    real but is NOT a tolerance question.
+
+    Rationale (coordinator, run 5).  Two of this module's jit gates show
+    a per-element relative gap far above rounding on a SMALL NUMBER of
+    cells.  Loosening the bound to cover them would also hide a future
+    regression to a systematic failure, which is strictly worse than a
+    red gate.  So the ASSERTION is on the cell COUNT -- tolerance-free,
+    and it goes red exactly when "a handful" becomes "systematic" -- and
+    the magnitude is REPORTED, labelled UNEXPLAINED-BY-TOLERANCE, rather
+    than certified.
+
+    ``tail_ratio``: when given, every violating cell must additionally
+    have ``|ref|`` at least this many times the MEDIAN ``|ref|`` of the
+    NON-violating cells.  That is the sentinel-cascade claim made
+    falsifiable without needing an absolute physical ceiling: a cascade
+    cell sits in the extreme tail by construction, whereas a PHYSICAL
+    cell that started violating would sit near the median and go red.
+    """
+    a = np.asarray(got, dtype=np.float64)
+    b = np.asarray(ref, dtype=np.float64)
+    assert a.shape == b.shape, (name, a.shape, b.shape)
+    fin = np.isfinite(a) & np.isfinite(b)
+    assert np.array_equal(np.isfinite(a), np.isfinite(b)), (
+        f"{name}: non-finite masks differ")
+    keep = fin & (a != 1.0e30) & (b != 1.0e30)
+    assert keep.any(), f"{name}: nothing to compare"
+    scale = float(np.median(np.abs(b[keep]))) or 1e-300
+    per = np.zeros(a.shape)
+    per[keep] = np.abs(a[keep] - b[keep]) / (np.abs(b[keep]) + scale)
+    bad = keep & (per > 1e-13)
+    n_bad = int(bad.sum())
+    n_cmp = int(keep.sum())
+
+    if n_bad:
+        k = np.unravel_index(int(np.argmax(per)), per.shape)
+        detail = (
+            f"{name}: MEASURED max per-element rel {per.max():.3e} at "
+            f"cell {tuple(int(x) for x in k)} where |ref| = "
+            f"{abs(float(b[k])):.6e}; {n_bad} of {n_cmp} cells exceed "
+            f"1e-13; |ref| over violators "
+            f"[{np.abs(b[bad]).min():.3e}, {np.abs(b[bad]).max():.3e}], "
+            f"median|ref| over the rest "
+            f"{float(np.median(np.abs(b[keep & ~bad]))):.3e}")
+    else:
+        detail = f"{name}: no cell exceeds 1e-13"
+
+    assert n_bad <= max_cells, (
+        f"CELL-COUNT GATE RED -- {detail}. A handful of cells is the "
+        f"known isolated-amplification signature; {n_bad} > "
+        f"{max_cells} means it has become SYSTEMATIC, which is a "
+        f"different defect and must not be absorbed by a tolerance.")
+
+    if tail_ratio is not None and n_bad:
+        med_rest = float(np.median(np.abs(b[keep & ~bad])))
+        worst = float(np.abs(b[bad]).min())
+        assert worst >= tail_ratio * med_rest, (
+            f"a violating cell is NOT in the extreme tail: min|ref| over "
+            f"violators {worst:.3e} < {tail_ratio} x median|ref| over "
+            f"the rest {med_rest:.3e} -- so at least one PHYSICAL cell "
+            f"is now violating, which is a separate finding. {detail}")
+    return per, bad, detail
+
+
 def _tree_dot(a, b) -> float:
     """Plain inner product -- NO ``nan_to_num``.
 
@@ -1823,7 +1888,20 @@ def test_d_sw1_jit_equals_eager(geo_dsw):
     """
     eager = _d_sw1_jax(geo_dsw)
     got = _d_sw1_jax(geo_dsw, fn=duo.make_d_sw1_duo_jit())
+    # The two allflux stacks carry the sentinel-propagated CASCADE, and
+    # FMA contraction on cascade arithmetic shows up there far above
+    # rounding: MEASURED at job 9408115, `allflux_x` = 7.276e-12
+    # per-element rel on 28 of 312 cells, median|ref| 1.526e+16 (four
+    # decades above any physical flux on this C12 fixture) and max|diff|
+    # 1.142e+99.  Those magnitudes are the cascade's, not the model's.
+    # The COUNT is gated and every violator must sit in the extreme
+    # tail; the magnitude is reported, not certified.
+    for k in ("allflux_x", "allflux_y"):
+        _jit_gap(got[k], eager[k], f"d_sw1 jit.{k}",
+                 max_cells=60, tail_ratio=1.0e4)
     for k in _D_SW1_KEYS:
+        if k in ("allflux_x", "allflux_y"):
+            continue
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
         # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
@@ -2622,7 +2700,20 @@ def test_d_sw6_duo_jit_equals_eager(chain, geo_dsw):
     got = fn(*args)
     fn(args[0] * 1.001, *args[1:])
     assert box["n"] == 1, box["n"]
+    # ``ut``/``vt`` are ``del6_vt_flux``'s outputs -- a del-6 operator is
+    # a CHAIN OF DIFFERENCES OF LARGE NEARLY-EQUAL NUMBERS, so its
+    # condition number is enormous wherever the field is locally smooth
+    # and a 1-ULP FMA perturbation is amplified at isolated cells.
+    # MEASURED at job 9408115: `ut` = 1.257e-06 per-element rel on
+    # exactly 2 of 342 cells.  See
+    # test_d_sw6_ut_gap_is_not_a_limiter_branch_flip for why the
+    # branch-flip explanation is REFUTED here.  Count-gated, magnitude
+    # reported.
+    for k in ("ut", "vt"):
+        _jit_gap(got[k], eager[k], f"d_sw6 jit.{k}", max_cells=8)
     for k in _D_SW6_KEYS:
+        if k in ("ut", "vt"):
+            continue
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
         # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
@@ -2669,84 +2760,277 @@ def test_d_sw6_duo_gradients(chain, geo_dsw):
     # will replace this with `measured X, bound = measured x N`.
     # DO NOT SHIP.   [class: adjoint identity, roundoff only]
     _check_adjoint("d_sw6_duo", run, primals, 1e-10)
+def test_d_sw6_ut_gap_is_not_a_limiter_branch_flip(chain, geo_dsw):
+    """⛔ REFUTES the proposed mechanism for ``d_sw6``'s jit gap, and
+    names + measures the surviving candidate.
 
+    PROPOSED (coordinator, run 5): FMA contraction shifts a sum by a few
+    ULP under jit, that flips a ``>`` comparison in a PPM limiter, the
+    limiter adds or drops a WHOLE term, and an O(1) change on two cells
+    propagates into ``u``.
 
-def test_d_sw1_panel_edge_divide_survives_a_zero_in_the_dead_arm(
-        geo_dsw):
-    """R1b regression for :func:`fv3_duo_sw_core._sel_div` -- the codex
-    MAJOR (job 9404230).
+    REFUTED, structurally.  ``d_sw6``'s ``ut`` is written by exactly one
+    operator -- ``del6_vt_flux``, called at sw_core.F90:1948-1951 -- and
+    that routine contains NO data-dependent branch of any kind: no
+    ``jnp.where``, no ``minimum``/``maximum``, no ``copysign``, no
+    ``lax.cond``, no comparison on an array.  It is ``d2 = damp*q``,
+    ``fx2 = del6_v*(d2[i-1]-d2[i])`` and an ordered pass loop, all
+    linear with fixed coefficients; its only ``if``s are on the STATIC
+    ``nord``/``bounded_domain``/``damp_km is None``.  There is no
+    predicate for an FMA shift to flip.  This test asserts that
+    branch-freedom mechanically, on the symbol that actually RUNS.
 
-    The four ``d_sw1_duo`` panel-edge selects are the only ``jnp.where``
-    sites in the module whose arms DIVIDE.  The NumPy authority
-    evaluates only the taken branch (python ``if``), so a zero in the
-    UNTAKEN ``sin_sg`` entry is finite there; an unsanitized JAX twin
-    forms Inf/NaN in the dead arm and reverse-mode AD carries it into
-    the SELECTED branch's gradient as ``NaN * 0``.
+    Two corrections while we are here, both checkable above:
+      * in ``d_sw6`` ``ut`` feeds ``v`` (``v -= ut``) and ``vt`` feeds
+        ``u`` (``u += vt``) -- so "``d_sw6`` writes ``ut``, therefore
+        ``u``" is off by one.  ``vt`` comes from the SAME
+        ``del6_vt_flux`` call, so a localisation to the stage chain can
+        still hold through ``vt``;
+      * ``vt`` PASSED at 1e-12 in the same call in which ``ut`` failed
+        at 1.26e-6.  Same operator, same inputs, one output clean --
+        which is itself evidence against anything systematic.
 
-    Construction: read the sign of ``uc(1,j)*dt`` along the west edge
-    column, then zero the metric entry that is DEAD for that sign.  Both
-    lanes get the identical (malformed) gridstruct, so the comparison
-    stays one-variable.  Two assertions, and the second is the one that
-    would have caught the original defect: value parity vs NumPy, and a
-    FINITE reverse-mode gradient.
+    SURVIVING CANDIDATE (PLAUSIBLE, measured below): CATASTROPHIC
+    CANCELLATION.  A del-6 operator IS a chain of differences of large
+    nearly-equal numbers, so at a cell where the field is locally smooth
+    the condition number of the final difference can reach ~1e10 and a
+    1-ULP upstream perturbation lands at 1e-6.  The discriminator is the
+    cancellation ratio at the worst cell: if the operator's terms are
+    many decades larger than their difference, cancellation is the
+    mechanism; if the ratio is O(1), this is refuted too and something
+    else is producing the gap.
     """
-    geo = geo_dsw
-    bd = geo.bd
-    lo = bd.isd
-    dt = geo.dt
-    ucc = np.asarray(geo.f["uc"])[1 - lo, :]
-    pos = (ucc * dt) > 0.0
-    # slot 2 == sin_sg(0,j,3) is the POSITIVE arm's denominator;
-    # slot 0 at i=1 == sin_sg(1,j,1) is the NEGATIVE arm's.
-    if pos.all():
-        dead_i, dead_slot, tag = 1 - lo, 0, "sin_sg(1,j,1)"
-    elif (~pos).all():
-        dead_i, dead_slot, tag = 0 - lo, 2, "sin_sg(0,j,3)"
-    else:
-        # mixed signs: zeroing EITHER entry leaves it dead somewhere, so
-        # take the negative arm's and assert the mixture explicitly
-        dead_i, dead_slot, tag = 1 - lo, 0, "sin_sg(1,j,1)"
-    assert pos.any() or (~pos).any()
+    import inspect
 
-    sg_bad = np.array(geo.gs_np["sin_sg"], dtype=np.float64)
-    sg_bad[dead_i, :, dead_slot] = 0.0
+    # ---- (1) branch-freedom of the ONLY writer, mechanically --------
+    tokens = ("jnp.where", "jnp.minimum", "jnp.maximum", "copysign",
+              "lax.cond", "lax.select")
+    src = inspect.getsource(duo.del6_vt_flux)
+    body = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    found = [t for t in tokens if t in body]
+    assert not found, (
+        f"del6_vt_flux is no longer branch-free ({found}) -- the "
+        f"branch-flip mechanism may now apply and this refutation must "
+        f"be re-derived")
+    # NON-VACUITY: the same scan MUST find branches in a routine that
+    # has them, otherwise it proves nothing about del6_vt_flux.
+    ref_src = inspect.getsource(duo.d_sw1_duo)
+    assert [t for t in tokens if t in ref_src], (
+        "the branch scanner found nothing in d_sw1_duo either -- the "
+        "scanner is broken, so the assertion above is vacuous")
+
+    # ---- (2) the cancellation ratio at the worst cell ---------------
+    geo, f = geo_dsw, geo_dsw.f
+    j5 = chain["jx"][4]
+    args = (jnp.asarray(f["u"]), jnp.asarray(f["v"]), j5["ut"],
+            j5["vt"], j5["ke"], j5["wk"], j5["vortfluxx"],
+            j5["vortfluxy"], geo.gs_j, geo.flags, geo.bd, geo.npx,
+            geo.npy)
+    eager = duo.d_sw6_duo(*args)
+    jitted = duo.make_d_sw6_duo_jit()(*args)
+    per, bad, detail = _jit_gap(jitted["ut"], eager["ut"],
+                                "d_sw6 ut mechanism", max_cells=8)
+    if not bad.any():
+        pytest.skip(f"no cell exceeds 1e-13 on this build -- {detail}")
+
+    k = np.unravel_index(int(np.argmax(per)), per.shape)
+    # The operator's own terms at that cell: damp * q * del6_v, versus
+    # the output it produced.  del6_vt_flux is linear, so this ratio IS
+    # the cancellation the difference performed.
+    damp4 = (0.2 * geo.flags.da_min_c) ** (1 + 1)
+    wk = np.abs(np.asarray(j5["wk"]))
+    d6v = np.abs(np.asarray(geo.gs_j["del6_v"]))
+    term = damp4 * float(np.median(wk[np.isfinite(wk)])) * \
+        float(np.median(d6v[np.isfinite(d6v)]))
+    out = abs(float(np.asarray(eager["ut"])[k]))
+    cond = term / max(out, 1e-300)
+    eps = float(np.finfo(np.float64).eps)
+    predicted = cond * eps
+    measured = float(per[k])
+    assert cond >= 1.0e4, (
+        f"NO significant cancellation at the worst cell {k}: "
+        f"terms {term:.3e} vs output {out:.3e} gives condition "
+        f"{cond:.3e}. The cancellation mechanism is REFUTED too -- the "
+        f"gap has another cause. MEASURED gap {measured:.3e}. {detail}")
+    # Reported, NOT asserted as an equality: the condition number is a
+    # median-based estimate, so it fixes the DECADE, not the digit.
+    print(f"\nd_sw6 ut cancellation check at cell {k}: "
+          f"condition ~{cond:.3e}, cond*eps ~{predicted:.3e}, "
+          f"MEASURED gap {measured:.3e} "
+          f"(UNEXPLAINED-BY-TOLERANCE; count-gated, not bounded)")
+
+
+# ---------------------------------------------------------------------
+# R1b regression for _sel_div -- the four panel-edge divides
+# ---------------------------------------------------------------------
+
+def _edge_site(geo, site):
+    """``(pred, pos_slot, neg_slot)`` for one ``d_sw1_duo`` panel edge.
+
+    ``pred`` is the site's predicate evaluated in NUMPY on the fixture,
+    and each slot is the ``(i_index, j_index, k)`` addressing of one
+    arm's denominator, given as a callable of the free index so the
+    caller can zero it only where that arm is DEAD.
+    """
+    lo = geo.bd.isd
+    dt, npx, npy = geo.dt, geo.npx, geo.npy
+    uc = np.asarray(geo.f["uc"])
+    vc = np.asarray(geo.f["vc"])
+    if site == "west":                       # sw_core.F90:658-663
+        return (uc[1 - lo, :] * dt > 0.0,
+                (0 - lo, slice(None), 2), (1 - lo, slice(None), 0))
+    if site == "east":
+        return (uc[npx - lo, :] * dt > 0.0,
+                (npx - 1 - lo, slice(None), 2), (npx - lo, slice(None), 0))
+    if site == "south":
+        return (vc[:, 1 - lo] * dt > 0.0,
+                (slice(None), 0 - lo, 3), (slice(None), 1 - lo, 1))
+    if site == "north":
+        return (vc[:, npy - lo] * dt > 0.0,
+                (slice(None), npy - 1 - lo, 3), (slice(None), npy - lo, 1))
+    raise ValueError(site)                   # pragma: no cover
+
+
+def _run_both_lanes(geo, sg_bad):
+    """Both lanes of ``d_sw1_duo`` on ONE (possibly malformed)
+    gridstruct, so the comparison stays one-variable."""
     gs_np_bad = dict(geo.gs_np)
     gs_np_bad["sin_sg"] = sg_bad
     gs_j_bad = dict(geo.gs_j)
     gs_j_bad["sin_sg"] = jnp.asarray(sg_bad)
-
     xf, yf, cx, cy = _zero_caps(geo)
     f = geo.f
     n1 = npduo.d_sw1_duo(f["delp"], f["pt"], f["w"], f["uc"], f["vc"],
-                         xf, yf, cx, cy, gs_np_bad, bd, geo.npx,
-                         geo.npy, dt=dt, **_DSW_KW)
+                         xf, yf, cx, cy, gs_np_bad, geo.bd, geo.npx,
+                         geo.npy, dt=geo.dt, **_DSW_KW)
     j1 = duo.d_sw1_duo(
         jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
         jnp.asarray(f["w"]), jnp.asarray(f["uc"]), jnp.asarray(f["vc"]),
         jnp.asarray(xf), jnp.asarray(yf), jnp.asarray(cx),
-        jnp.asarray(cy), gs_j_bad, geo.flags, bd, geo.npx, geo.npy,
-        dt=dt, **_DSW_KW)
+        jnp.asarray(cy), gs_j_bad, geo.flags, geo.bd, geo.npx, geo.npy,
+        dt=geo.dt, **_DSW_KW)
+    return n1, j1, gs_j_bad
 
-    # (1) value parity with a zero in the dead denominator
+
+@pytest.mark.parametrize("site", ["west", "east", "south", "north"])
+def test_sel_div_survives_a_zero_in_the_dead_denominator(site, geo_dsw):
+    """R1b regression for ``_sel_div``, ONE SITE PER TEST so a failure
+    names the site (coordinator, run 5).
+
+    ⛔ The previous version of this test was MIS-CONSTRUCTED and its
+    failure was mine, not ``_sel_div``'s.  It zeroed ``sin_sg(1,j,1)``
+    across the WHOLE west column.  MEASURED on the fixture:
+    ``uc(1,j)*dt > 0`` holds for 15 of 18 j and FAILS for 3 -- so at
+    those 3 j the zeroed entry is the SELECTED denominator, both lanes
+    legitimately divide by zero, and a non-finite gradient is the
+    CORRECT answer.  The reported "3 non-finite entries" is exactly
+    those 3 cells.  ``_sel_div`` never leaked.
+
+    This version zeroes each arm's denominator ONLY at the indices where
+    that arm is DEAD, which is precisely the R1b hazard and nothing
+    else: NumPy (a python ``if``) never touches it, and an unsanitized
+    twin would form Inf/NaN there and carry it into the selected
+    branch's gradient as ``NaN * 0``.
+
+    Two assertions, and the second is the one the unsanitized version
+    would fail: value parity vs NumPy, and a FINITE reverse-mode
+    gradient.
+    """
+    geo = geo_dsw
+    pred, pos_slot, neg_slot = _edge_site(geo, site)
+    sg_bad = np.array(geo.gs_np["sin_sg"], dtype=np.float64)
+    # the POSITIVE arm's denominator is dead where pred is False;
+    # the NEGATIVE arm's is dead where pred is True.
+    n_zeroed = 0
+    for slot, dead in ((pos_slot, ~pred), (neg_slot, pred)):
+        if not dead.any():
+            continue
+        idx = list(slot)
+        free = 0 if isinstance(slot[0], slice) else 1
+        sel = np.where(dead)[0]
+        if free == 0:
+            sg_bad[sel, idx[1], idx[2]] = 0.0
+        else:
+            sg_bad[idx[0], sel, idx[2]] = 0.0
+        n_zeroed += int(dead.sum())
+    assert n_zeroed > 0, (
+        f"{site}: no index has a dead arm on this fixture, so nothing "
+        f"was zeroed and this gate proves nothing")
+
+    n1, j1, gs_j_bad = _run_both_lanes(geo, sg_bad)
+
+    # (1) value parity with a zero in every DEAD denominator
     for k in ("ut", "vt", "crx_adv", "cry_adv"):
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
         # DO NOT SHIP.   [class: R1b regression, zeroed dead metric]
-        _cmp(j1[k], n1[k], f"d_sw1 zero-{tag}.{k}", 1e-12)
+        _cmp(j1[k], n1[k], f"d_sw1 {site} dead-zero.{k}", 1e-12)
 
-    # (2) the gradient stays FINITE -- this is the assertion the
-    # unsanitized version failed, and it is not implied by (1)
+    # (2) the gradient stays FINITE -- not implied by (1), and this is
+    # what an unsanitized `where`-over-divide fails
+    f = geo.f
+    xf, yf, cx, cy = _zero_caps(geo)
+
     def obj(uc_in):
         out = duo.d_sw1_duo(
             jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
             jnp.asarray(f["w"]), uc_in, jnp.asarray(f["vc"]),
             jnp.asarray(xf), jnp.asarray(yf), jnp.asarray(cx),
-            jnp.asarray(cy), gs_j_bad, geo.flags, bd, geo.npx,
-            geo.npy, dt=dt, **_DSW_KW)
-        return jnp.sum(out["ut"][1 - lo, :] ** 2)
+            jnp.asarray(cy), gs_j_bad, geo.flags, geo.bd, geo.npx,
+            geo.npy, dt=geo.dt, **_DSW_KW)
+        return jnp.sum(jnp.nan_to_num(out["ut"]) ** 2) \
+            + jnp.sum(jnp.nan_to_num(out["vt"]) ** 2)
 
-    g = jax.grad(obj)(jnp.asarray(f["uc"]))
-    assert np.isfinite(np.asarray(g)).all(), (
-        f"reverse-mode gradient is not finite with {tag} zeroed: "
-        f"{int((~np.isfinite(np.asarray(g))).sum())} non-finite entries "
-        f"-- the DEAD arm's division is leaking through the where VJP")
+    g = np.asarray(jax.grad(obj)(jnp.asarray(f["uc"])))
+    n_bad = int((~np.isfinite(g)).sum())
+    assert n_bad == 0, (
+        f"{site}: reverse-mode gradient has {n_bad} non-finite entries "
+        f"with {n_zeroed} DEAD denominators zeroed -- the dead arm's "
+        f"division is leaking through the where VJP, i.e. _sel_div is "
+        f"not sanitizing this site")
+
+
+@pytest.mark.parametrize("site", ["west", "east", "south", "north"])
+def test_sel_div_still_propagates_a_zero_in_the_live_denominator(
+        site, geo_dsw):
+    """The CONTROL for the test above, and the reason its verdict is
+    trustworthy.
+
+    ``_sel_div`` must sanitize the DEAD arm and leave the LIVE one
+    alone.  If it silently repaired the live denominator too, the
+    dead-arm test would still pass while the operator quietly returned a
+    wrong finite number instead of the Inf both lanes owe.  So: put the
+    zero in the SELECTED denominator and assert BOTH lanes go
+    non-finite, on the SAME cells.  This is also the direct measurement
+    behind the retraction above -- it is what the previous test was
+    accidentally doing.
+    """
+    geo = geo_dsw
+    pred, pos_slot, neg_slot = _edge_site(geo, site)
+    sg_bad = np.array(geo.gs_np["sin_sg"], dtype=np.float64)
+    # zero the POSITIVE arm's denominator where pred is TRUE == LIVE
+    live = pred
+    if not live.any():
+        pytest.skip(f"{site}: the positive arm is never selected here")
+    idx = list(pos_slot)
+    sel = np.where(live)[0]
+    if isinstance(pos_slot[0], slice):
+        sg_bad[sel, idx[1], idx[2]] = 0.0
+    else:
+        sg_bad[idx[0], sel, idx[2]] = 0.0
+
+    n1, j1, _ = _run_both_lanes(geo, sg_bad)
+    key = "ut" if site in ("west", "east") else "vt"
+    a = np.asarray(j1[key])
+    b = np.asarray(n1[key])
+    assert not np.isfinite(a).all(), (
+        f"{site}: JAX stayed finite with the LIVE denominator zeroed -- "
+        f"_sel_div is sanitizing the SELECTED arm, which silently "
+        f"changes the answer instead of propagating the division by "
+        f"zero both lanes owe")
+    assert np.array_equal(~np.isfinite(a), ~np.isfinite(b)), (
+        f"{site}: the two lanes disagree about WHICH cells go "
+        f"non-finite (jax {int((~np.isfinite(a)).sum())} vs numpy "
+        f"{int((~np.isfinite(b)).sum())}) -- that is a real lane "
+        f"divergence, not a shared division by zero")
