@@ -79,7 +79,7 @@ def resolve_key() -> str:
 
 def ask(prompt: str, *, model: str = "glm-5.2", max_tokens: int = 32000,
         endpoint: str = CODING_ENDPOINT, timeout: float = 1800.0,
-        stream: bool = True) -> dict:
+        stream: bool = True, think: bool = True) -> dict:
     """One completion.  Returns the parsed message plus usage.
 
     STREAMS BY DEFAULT, and that is not a preference.  A non-streaming request
@@ -93,12 +93,21 @@ def ask(prompt: str, *, model: str = "glm-5.2", max_tokens: int = 32000,
     ``1113`` balance error and a ``401`` auth error mean very different things
     and must not be collapsed into "GLM is down".
     """
-    body = json.dumps({
+    payload_req = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": stream,
-    }).encode()
+    }
+    if not think:
+        # MEASURED: asked to author a 261-line module, glm-5.3 spent 64000
+        # completion tokens with 63998 of them reasoning and emitted TWO tokens
+        # of content.  Raising the budget does not help -- it thinks more.
+        # With thinking disabled the same shape of request returned code after
+        # 72 reasoning tokens.  Keep it ON for review (the reasoning IS the
+        # deliverable there) and OFF for authoring.
+        payload_req["thinking"] = {"type": "disabled"}
+    body = json.dumps(payload_req).encode()
     req = urllib.request.Request(
         endpoint, data=body,
         headers={"Authorization": f"Bearer {resolve_key()}",
@@ -171,6 +180,10 @@ def main() -> int:
                          "(expected to fail with 1113 on this account)")
     ap.add_argument("--out", help="write the answer here as well as to stdout")
     ap.add_argument("--show-reasoning", action="store_true")
+    ap.add_argument("--code", action="store_true",
+                    help="authoring mode: disable thinking (it otherwise eats "
+                         "the whole budget) and strip markdown fences from "
+                         "--out")
     ap.add_argument("--no-stream", action="store_true",
                     help="disable streaming (expect IncompleteRead on long "
                          "answers -- see ask() docstring)")
@@ -178,7 +191,7 @@ def main() -> int:
 
     prompt = pathlib.Path(args.prompt_file).read_text()
     res = ask(prompt, model=args.model, max_tokens=args.max_tokens,
-              stream=not args.no_stream,
+              stream=not args.no_stream, think=not args.code,
               endpoint=(GENERAL_ENDPOINT if args.general_endpoint
                         else CODING_ENDPOINT))
 
@@ -199,7 +212,24 @@ def main() -> int:
     print("\n===== answer =====\n" + res["content"])
 
     if args.out:
-        pathlib.Path(args.out).write_text(res["content"])
+        text = res["content"]
+        if args.code:
+            # GLM wraps code in ``` fences even when told not to; a file that
+            # starts with a fence does not import.  Strip only a leading and a
+            # trailing fence line, never fences inside the body.
+            lines = text.splitlines()
+            if lines and lines[0].lstrip().startswith("```"):
+                lines = lines[1:]
+            while lines and not lines[-1].strip():
+                lines.pop()
+            if lines and lines[-1].lstrip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines) + "\n"
+            if not text.strip():
+                print("# ERROR: --code asked for source and the answer is "
+                      "empty after fence-stripping", file=sys.stderr)
+                return 2
+        pathlib.Path(args.out).write_text(text)
     return 0 if res["content"] else 2
 
 
