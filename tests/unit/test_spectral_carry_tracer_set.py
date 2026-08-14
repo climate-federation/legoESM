@@ -87,3 +87,19 @@ def test_a_nine_species_scheme_gets_nine_slots_from_the_loader():
 
     assert set(prognostic_carry_seeds("morrison", "none", (4, 8, 3))) == set(_EXTRA)
     assert prognostic_carry_seeds("sundqvist", "none", (4, 8, 3)) == {}
+
+
+def test_a_state_that_cannot_hold_the_scheme_is_refused_at_build_time():
+    """The WeatherBench arm trained to a NaN because nobody checked that the
+    state it built could hold the species its microphysics writes. The check
+    counts the CARRY, not the registry the scheme itself selected — counting
+    the latter can only ever agree with itself and could never fire."""
+    from legoesm.training.scale_build import validate_carry_holds_scheme
+
+    three = _carry(8, 16, extras=False)
+    nine = _carry(8, 16, extras=True)
+
+    assert validate_carry_holds_scheme(three, "sundqvist", context="t") == 3
+    assert validate_carry_holds_scheme(nine, "morrison", context="t") == 9
+    with pytest.raises(ValueError, match="morrison"):
+        validate_carry_holds_scheme(three, "morrison", context="t")

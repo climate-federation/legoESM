@@ -663,6 +663,33 @@ def era5_time_to_forcing_calendar(time_ns, year):
     return doy_1based, sod
 
 
+def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> int:
+    """Refuse a scheme whose species the BUILT carry cannot hold.
+
+    Mirrors the production driver, which counts the leading non-None slots of
+    its live tracer state and validates that count.  Counting instead the
+    registry the scheme itself selected would be tautological — the two can
+    only ever agree, so such a check could never catch the failure it claims to
+    (codex).  Counting the carry catches a seeding path that silently produced
+    fewer slots than the scheme writes, which is exactly how the WeatherBench
+    classical arm trained to a NaN: nine-species microphysics on a
+    three-species state, six tendencies discarded per evaluation.
+
+    Deliberately NOT placed in the shared microphysics bridge: several dycore
+    tests build partial tracer states on purpose and rely on its tolerance, so
+    turning that into a hard error is a separate policy decision.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+    from legoesm.driver.physics_pipeline import validate_microphysics_tracer_slots
+
+    have = 0
+    for name in make_full_moisture_registry().names:
+        if getattr(carry, name, None) is None:
+            break
+        have += 1
+    return validate_microphysics_tracer_slots(microphysics, have, context=context)
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -710,6 +737,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
     _micro = str(_cl.get("microphysics", "none"))
 
+
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
@@ -717,6 +745,9 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                     microphysics=_micro)
         target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma,
                                         microphysics=_micro)
+        if not samples:
+            validate_carry_holds_scheme(
+                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
         sst_src = load_era5_slice(era5_cfg, i_ic)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
