@@ -180,3 +180,48 @@ def test_alpha_beta_is_differentiable():
     g = jax.grad(f)(jnp.array([5.0, 15.0, 25.0]))
     assert np.all(np.isfinite(np.asarray(g))), g
     assert np.any(np.asarray(g) != 0.0)
+
+
+def test_alpha_beta_match_the_derivative_of_the_density_polynomial():
+    """The decisive check on NEMO's ``zn / zs`` on beta.
+
+    NEMO writes ``pab(jp_sal) = zn / zs * r1_rho0`` with zs = sqrt(scaled S),
+    and there is no explicit r1_S0/2 chain-rule factor in that line -- it is
+    absorbed into the BET coefficients. If it were NOT absorbed, our beta
+    would be off by r1_S0/(2*zs), i.e. a factor of several.
+
+    Rather than reason about it, differentiate the density polynomial these
+    coefficients belong to. NEMO's convention is
+
+        alpha = -(1/rho0) d(rho)/dT ,   beta = +(1/rho0) d(rho)/dS
+
+    so a central difference on ``nemo_roquet_eos`` evaluated with the SAME
+    TEOS-10 coefficient set must reproduce ``nemo_roquet_alpha_beta``. This
+    also catches a wrong normalization constant, since both sides would have
+    to be wrong identically to agree.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    e = _eos()
+    rho0 = e.rho_0
+    T0, S0, depth = 10.0, 35.0, 500.0
+    p = constants.rho_ocean * constants.g * depth      # nemo_roquet_eos takes Pa
+
+    def rho(T, S):
+        return float(e.nemo_roquet_eos(
+            jnp.array([T]), jnp.array([S]), jnp.array([p]),
+            coeffs=e._ROQUET_TEOS10, rho0=rho0)[0])
+
+    dT, dS = 1.0e-3, 1.0e-3
+    alpha_fd = -(rho(T0 + dT, S0) - rho(T0 - dT, S0)) / (2 * dT) / rho0
+    beta_fd = (rho(T0, S0 + dS) - rho(T0, S0 - dS)) / (2 * dS) / rho0
+
+    alpha, beta = e.nemo_roquet_alpha_beta(
+        jnp.array([T0]), jnp.array([S0]), jnp.array([depth]))
+    a, b = float(alpha[0]), float(beta[0])
+
+    assert a == pytest.approx(alpha_fd, rel=2e-4), (
+        f"alpha {a:.6e} != d(rho)/dT {alpha_fd:.6e}")
+    assert b == pytest.approx(beta_fd, rel=2e-4), (
+        f"beta {b:.6e} != d(rho)/dS {beta_fd:.6e} -- the /zs factor on "
+        "NEMO's beta line is wrong (dropped, doubled, or double-counted)")
