@@ -709,6 +709,30 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # No CLI flag: alpha_tke carries a __param_spec__ (tier 2, bounds
         # 1-90), so `--params vertical_mixing.tke.alpha_tke=30` reverts it.
         alpha_tke=1.0,                  # NEMO zdftke: TKE diffused by avm x1
+        # STRATIFICATION: stop clipping. The card computed N2 from the in-situ
+        # density gradient CLIPPED at zero; NEMO's rn2 is SIGNED. In
+        # convectively neutral water the signed form gives N -> 0, the
+        # buoyancy length sqrt(2e)/N blows up, and the lup/ldown sweeps set a
+        # LONG length -- which is what NEMO's zmxlm does there. Clipping
+        # suppresses exactly those, and job 9407791 showed that is the whole
+        # remaining mixing-length deficit: seeding the length with a signed N2
+        # moved our zero-step length ratio against NEMO's own from 0.897 to
+        # 0.997 (Southern Ocean), 0.914 to 0.998 (tropics) and 0.792 to 1.004
+        # (Arctic). The largest correction is the Arctic, the most convective
+        # band -- the mechanism's own prediction.
+        #
+        # This is also the counterpart of alpha_tke: at day 30 the sqrt(2) and
+        # alpha fixes drove the Southern Ocean mixed layer from +1.5 m to
+        # -19.7 m, because removing two large over-mixing errors left the
+        # short-length under-mixing error uncompensated. This is that error.
+        #
+        # n2_eos_form: ORCA1 runs ln_teos10=.true. (namelist_cfg:308), so the
+        # alpha/beta come from the Roquet polynomial with the TEOS-10
+        # coefficient set. A previous revision set n2_mode alone and codex
+        # 9405307 refuted it -- the bn2 helper defaulted to S-EOS, so the
+        # TEOS-10 path was unreachable. Both fields are needed.
+        n2_mode="nemo_bn2",
+        n2_eos_form="teos10",
         # K-from-TKE AMPLITUDE.  NEMO zdftke tke_avn computes
         #     zsqen = SQRT(en) ; zav = rn_ediff*zmxlm*zsqen
         #     p_avm = MAX(zav, avmb)*wmask

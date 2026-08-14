@@ -2147,6 +2147,7 @@ def tke_vertical_mixing(
         T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
+        n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
         adiabatic_over_dz_half=veros_slots,
         t_depth=t_depth, w_depth=w_depth,
     )
@@ -2173,6 +2174,7 @@ def tke_vertical_mixing(
             T_cell=T_n2b, S_cell=S_n2b, p_cell=p_cell,
             dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
             n2_mode=cfg.n2_mode,
+        n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
             adiabatic_over_dz_half=veros_slots,
             t_depth=t_depth, w_depth=w_depth,
         )

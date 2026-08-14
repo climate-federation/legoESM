@@ -222,7 +222,10 @@ def test_alpha_beta_match_the_derivative_of_the_density_polynomial():
     import jax.numpy as jnp
     from legoesm import constants
     e = _eos()
-    rho0 = e.rho_0
+    # MUST match nemo_roquet_alpha_beta's default, which is NEMO's
+    # rho0 = 1026 -- not legoESM's constants.rho_ocean = 1025. Using
+    # the wrong one makes the derivative identity fail by 1026/1025.
+    rho0 = e._NEMO_RHO0
     T0, S0, depth = 10.0, 35.0, 500.0
     p = constants.rho_ocean * constants.g * depth      # nemo_roquet_eos takes Pa
 
@@ -244,3 +247,67 @@ def test_alpha_beta_match_the_derivative_of_the_density_polynomial():
     assert b == pytest.approx(beta_fd, rel=2e-4), (
         f"beta {b:.6e} != d(rho)/dS {beta_fd:.6e} -- the /zs factor on "
         "NEMO's beta line is wrong (dropped, doubled, or double-counted)")
+
+
+class TestProductionWiring:
+    """The TEOS-10 path must be REACHABLE from the card, not just importable.
+
+    Codex 9408213 #6: compute_N2's nemo_bn2 branch called the bn2 helper
+    without eos_form, so n2_mode="nemo_bn2" silently took the S-EOS branch and
+    the whole port was dead code from production's point of view. These pin
+    the chain card -> TKEConfig -> tke kernel -> compute_N2 -> bn2.
+    """
+
+    def test_card_selects_signed_teos10_stratification(self):
+        import scripts.run.run_omip_core2 as core2
+        cfg = core2.orca1_zdftke_config()
+        assert cfg.n2_mode == "nemo_bn2", (
+            "the card is clipping N2 again; NEMO's rn2 is signed and the "
+            "clipped form is the whole mixing-length deficit (job 9407791)")
+        assert cfg.n2_eos_form == "teos10", (
+            "ORCA1 runs ln_teos10=.true.; setting n2_mode without "
+            "n2_eos_form leaves the S-EOS alpha/beta in place")
+
+    def test_compute_n2_forwards_the_eos_form(self):
+        """The forward that was missing. Must CHANGE the answer, not just pass."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+        nlev = 10
+        T = jnp.asarray(np.linspace(16.0, 2.0, nlev))
+        S = jnp.asarray(np.linspace(34.4, 34.9, nlev))
+        gd = jnp.asarray(np.linspace(5.0, 400.0, nlev))
+        gw = 0.5 * (gd[:-1] + gd[1:])
+        common = dict(T_cell=T, S_cell=S, t_depth=gd, w_depth=gw,
+                      n2_mode="nemo_bn2")
+        a = np.asarray(compute_N2(None, None, 1026.0, **common,
+                                  n2_eos_form="seos"))
+        b = np.asarray(compute_N2(None, None, 1026.0, **common,
+                                  n2_eos_form="teos10"))
+        assert not np.allclose(a, b), (
+            "compute_N2 ignored n2_eos_form -- the forward is missing again "
+            "and the TEOS-10 port is unreachable from production")
+
+    def test_mpas_accepts_nemo_bn2_and_still_refuses_adiabatic(self):
+        """MPAS shares the card, so it must run the same stratification.
+
+        The old guard rejected every non-insitu mode citing a hydrostatic
+        pressure requirement that only applies to 'adiabatic'. If MPAS cannot
+        run what the card sets, the three-grid comparison measures the code.
+        """
+        import inspect
+        from legoesm.ocean.physics.vertical_mixing import mpas_integration as m
+        src = inspect.getsource(m)
+        assert '("insitu", "nemo_bn2")' in src, (
+            "the MPAS n2_mode guard no longer admits nemo_bn2; the card sets "
+            "it, so MPAS would fail loud and the cross-grid arms could not run")
+        assert "_bn2_ladder_kwargs" in src, (
+            "MPAS stopped threading the depth ladders nemo_bn2 needs")
+        assert "nemo_bn2_live_ladders" in src, (
+            "MPAS reverted to STATIC depth ladders. NEMO evaluates bn2 on "
+            "gdept_0*(1+eta/ht_0) under z*, and the C-grid path uses the live "
+            "helper -- static ones agree only at eta=0, so the two grids would "
+            "run different stratification and the cross-grid comparison would "
+            "measure the code, not the physics (codex 9408814 #2).")
+        assert "nemo_bn2_depth_ladders" not in src, (
+            "the static ladder helper is back in the MPAS bridge")

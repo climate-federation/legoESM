@@ -48,15 +48,24 @@ def test_card_pins_the_converged_nemo_baseline():
     # they cannot be re-wired without re-reading why:
     #   veros_dz_slots  -- discards the partial-cell bottom metric, and
     #                      collides with nemo_z0 over dz_surface (2x).
-    #   n2_mode         -- 'nemo_bn2' is S-EOS; ORCA1 selects TEOS-10, so it
-    #                      is a DIFFERENT N2, not ORCA1's rn2.
+    #   n2_mode         -- RESOLVED 2026-08-14: was S-EOS-only, now paired
+    #                      with n2_eos_form="teos10".
     #   nemo_z0         -- right placement, wrong metric: dz_surface is the
     #                      top-cell midpoint where NEMO's jk=2 needs e3t(1).
     # And MPAS shares this card: mpas_integration.py fail-loud rejects both
     # n2_mode != 'insitu' and veros_dz_slots=True, so wiring them breaks the
     # three-grid comparison outright.
     assert cfg.veros_dz_slots is False
-    assert cfg.n2_mode == "insitu"
+    # n2_mode WAS pinned to "insitu" here after codex 9405307 refuted an
+    # earlier attempt. That refutation was specific and has now been
+    # ANSWERED, not overridden: it said 'nemo_bn2' is legoESM's S-EOS while
+    # ORCA1 runs TEOS-10, so setting the mode alone gave a DIFFERENT N2.
+    # The TEOS-10 coefficient set now exists (9a3a54ce3) and n2_eos_form
+    # carries it, so the mode is re-enabled WITH the piece that was missing.
+    # Codex also required the MPAS bridge to accept it; it now does, and
+    # TestProductionWiring pins that.
+    assert cfg.n2_mode == "nemo_bn2"
+    assert cfg.n2_eos_form == "teos10"
     assert cfg.tke_surface_bc_level == "interior_pinned"
     assert cfg.tke_shear_production == "squared_centered", (
         "tke_shear_production was enabled without a grid-level test; the "

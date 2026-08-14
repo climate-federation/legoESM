@@ -88,7 +88,13 @@ def test_orca1_zdftke_namelist_mapping():
     assert tke_mod._NEMO_TKE_EBB == 67.83
     # NEMO integrates en prognostically -> the ORCA1 card default (2026-07-24).
     assert cfg.prognostic is True
-    assert cfg.n2_mode == "insitu"
+    # 2026-08-14: the card stopped CLIPPING. NEMO's rn2 is signed, and the
+    # clipped in-situ form was the whole remaining mixing-length deficit
+    # (job 9407791: seeding the length with a signed N2 moved our zero-step
+    # ratio against NEMO's own length from 0.897 to 0.997 in the Southern
+    # Ocean, 0.792 to 1.004 in the Arctic).
+    assert cfg.n2_mode == "nemo_bn2"
+    assert cfg.n2_eos_form == "teos10"      # ORCA1 ln_teos10=.true.
     # prognostic carry uses the vertical TKE solve only (no horizontal en
     # advection): advection_scheme stays "none" (Veros vs.dtke path off).
     assert cfg.advection_scheme == "none"
