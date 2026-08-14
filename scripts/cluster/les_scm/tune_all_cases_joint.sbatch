@@ -3,23 +3,40 @@
 #SBATCH --partition=glab1
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a40|a100"
-#SBATCH --job-name=les_eight
+#SBATCH --job-name=les_seven
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/les_eight_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/les_seven_%j.out
 set +e
-# ONE parameter set per turbulence closure, fitted jointly to EVERY LES
-# reference we have -- four dry and four wet:
+# ONE parameter set per turbulence closure, fitted jointly to every USABLE
+# LES reference -- three dry and four wet:
 #
 #   dry   ekman     neutral shear layer          scored u, v
 #         gabls1    stable boundary layer        scored theta, u, v
 #         cbl       Nieuwstadt free convection   scored theta
-#         wangara   diurnal convective BL        scored theta, u, v
 #   wet   bomex     shallow trade cumulus        scored theta, qv
 #         rico      precipitating trade cumulus  scored theta, qv
 #         astex     transitioning stratocumulus  scored theta, qv
 #         dycoms    nocturnal stratocumulus      scored theta, qv
+#
+# WANGARA IS EXCLUDED, and it is excluded for a structural reason rather than a
+# bad score. Its surface heat flux is DIURNAL. The path that hands a prescribed
+# flux to the closure carries a single scalar in SurfaceLayerConfig, so it can
+# only pass one instant of that cycle -- doing so measured 8.6-9.9 normalized
+# error on every closure, scheme-independent, i.e. the arm. Driving the cycle
+# correctly from the SCMForcing channel instead leaves the closure seeing a
+# surface heat flux of exactly ZERO, which is the defining input of every
+# flux-driven nonlocal scheme, and measures 13.0-15.5. Both numbers are a
+# missing boundary condition, not a turbulence signal, and fitting against
+# either would tune the parameters to compensate for it.
+#
+# What would put it back: a time-varying prescribed surface flux reaching the
+# closure. That needs `t` threaded through all nine closure signatures, which
+# take (u, v, T, q_v, <carry>, p, z, T_sfc, q_sfc, rho, dt, config) and no
+# clock. The case's forcing itself is now correct either way (the SCM reads the
+# same wangara_day33 module as the LES), so only the boundary condition is
+# outstanding.
 #
 # Both stratocumulus decks set `dolongwave = .true., doradsimple = .true.` and
 # the SCM arm runs that SAME Stevens (2005) kernel, so cloud-top radiative
@@ -58,13 +75,13 @@ export PYTHONPATH=$WT/src:$(ls -d "$WT"/packages/*/ | tr '\n' ':')$PYTHONPATH
 export XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results
-CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
+CASE_LIST="ekman gabls1 cbl bomex rico astex dycoms"
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
-OUT=${OUT:-$R/scm_les_turbulence/all_eight}
+OUT=${OUT:-$R/scm_les_turbulence/all_seven}
 
-# PREFLIGHT: refuse to start if any reference is missing. Eight cases is a long
-# job and discovering a missing deck after the queue wait wastes the slot.
+# PREFLIGHT: refuse to start if any reference is missing. This is a long job
+# and discovering a missing deck after the queue wait wastes the slot.
 CASES=""
 for c in $CASE_LIST; do
   if [ ! -d "$R/les_ref/$c" ]; then
@@ -72,7 +89,7 @@ for c in $CASE_LIST; do
   fi
   CASES="${CASES:+$CASES,}$c:$R/les_ref/$c"
 done
-echo "all eight references present"
+echo "all references present"
 # ...and that each one is the case it claims to be. A directory can exist and
 # still be refused: the Wangara reference was stamped "cbl" by a --case-label
 # default, the loader rejected it (correctly -- the two are not cross-aliased),
@@ -95,7 +112,7 @@ print(f"  {case}: {len(fs)} frames, stamped {wrote!r} -> "
 sys.exit(0 if ok else 1)
 PYEOF
 done
-echo "all eight stamps accepted"
+echo "all stamps accepted"
 echo "cases: $CASES"
 
 rm -rf "$OUT"
