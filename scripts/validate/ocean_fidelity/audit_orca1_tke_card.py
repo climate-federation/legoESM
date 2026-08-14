@@ -86,7 +86,21 @@ _KNOWN_NEMO_OPTIONS = {
                                    "NEMO zfact2=1.5*dt*rn_ediss diagonal + "
                                    "zfact3=0.5*rn_ediss explicit add-back"),
     "prandtl_mode": ("richardson", "NEMO nn_pdl=1"),
-    "n2_mode": ("nemo_bn2", "NEMO rn2 from eosbn2"),
+    # n2_mode: 'nemo_bn2' is legoESM's S-EOS bn2, and ORCA1 selects TEOS-10
+    # (namelist_cfg:307), so it is NOT ORCA1's rn2 -- flagged here as an
+    # UNRESOLVED gap rather than as a value to wire. Codex 9405307 caught this
+    # after I had wired and then reverted it. Closing it needs a TEOS-10
+    # rab/bn2 implementation.
+    "n2_mode": ("<TEOS-10 rn2, NOT IMPLEMENTED>",
+                "ORCA1 runs TEOS-10; legoESM's 'nemo_bn2' is S-EOS, a "
+                "DIFFERENT N2. Do not wire nemo_bn2 as if it were ORCA1's."),
+    # Added after codex 9405307 named it and this auditor had missed it: NEMO
+    # puts -avt*rn2 EXPLICITLY on the RHS with the carried avt
+    # (zdftke.F90:417-418); the default splits it sign-aware onto the implicit
+    # diagonal instead.
+    "tke_buoyancy_sink": ("nemo_explicit",
+                          "NEMO zdftke:417 puts -p_avt*rn2 on the RHS "
+                          "explicitly with the carried avt"),
 }
 
 
