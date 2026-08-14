@@ -443,14 +443,18 @@ _IFS_RCUCOV_RH_BASE = 0.8               # non-deep area RH enhancement threshold
 _IFS_RCUCOV_RH_SLOPE = 1.0 / 0.025      # ...(max(0.8,RHm)-0.8)/0.025 (cuflxn.F90:440)
 _IFS_RHEBC_OCEAN = 0.92                 # RHEBC over water (sucumf.F90:179)
 _IFS_RHEBC_OCEAN_DEEP = 0.85            # deep KTYPE=1 over water (cuflxn.F90:226)
-# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) ARE applied: the leaf
-# receives ``land_frac`` whenever ``use_ifs_land_rhebc`` is set, which the
-# driver does, and blends land against ocean per tile below.  (The previous
-# note here said the land mask never arrives; that stopped being true when the
-# blend was added and the prose was not updated.)  Both land values are
-# overridable from ``BechtoldConfig`` -- their IFS setting assumes a mesh far
-# finer than the campaign runs, and they control how much convective rain
-# re-evaporates before reaching the ground over land.
+# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) are applied ONLY on the
+# lane that hands the leaf a ``land_frac``.  The unified physics pipeline does
+# (physics_pipeline.py, gated on ``use_ifs_land_rhebc``); the MPAS convection
+# bridge does NOT (convection/integration.py, the ``conv_fn(...)`` call omits
+# it), so on the AMIP MPAS lane this blend takes the OCEAN branch over land and
+# both land values are inert.  That is a defect, not a design: it means
+# convective rain re-evaporates under ocean settings over the Amazon and the
+# Congo, and it is a live suspect for that lane's tropical land rain deficit.
+# (2026-08-14: an earlier edit here asserted the opposite -- that the land mask
+# always arrives -- which was true of the pipeline lane and false of the MPAS
+# one.  Codex caught it.)  Both values are overridable from ``BechtoldConfig``
+# so they can be fitted once they are reachable.
 _IFS_EVAP_FLUX_TINY = 1.0e-12           # IF(ZRFL > 1.E-12) evap gate (cuflxn.F90:450)
 
 # --- IFS convective snow: rain/snow partition + melt (cuflxn.F90:198-211,374-397) ---
