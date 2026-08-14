@@ -208,7 +208,10 @@ class EmanuelMixingOutput(NamedTuple):
     clw: jax.Array = None       # CLW(i): adiabatic cloud water
     ep: jax.Array = None        # EP(i): precipitation efficiency
     qs: jax.Array = None        # QS(i): saturation mixing ratio
-    h_moist: jax.Array = None   # H(i): moist static energy
+    # H(i) = T*CPN + GZ (oracle line 353): DRY static energy carrying a
+    # moisture-weighted heat capacity.  It has NO LV*Q term, despite the
+    # oracle calling the array H; naming it "moist" here cost a review round.
+    h_dry_static: jax.Array = None
     gz: jax.Array = None        # GZ(i): geopotential
     lv: jax.Array = None        # LV(i): latent heat of vaporisation
 
@@ -450,7 +453,8 @@ def emanuel_mixing_tendencies(
     )                                                       # (ncol, nlev)
 
     cpn = cpd * (1.0 - qf) + cpv * qf                       # oracle CPN
-    h = Tf * cpn + gz                                       # moist static energy H
+    h = Tf * cpn + gz            # oracle H (line 353): DRY static energy with
+    #                              a moisture-weighted CPN -- no LV*Q term.
     lv = lv0 - cpvmcl * (Tf - constants.T_freeze)           # LV(i)
     # Frozen MSE (oracle HM) for the NK / IHMIN search.
     hm = (
@@ -943,7 +947,7 @@ def emanuel_mixing_tendencies(
         clw=clw,
         ep=ep,
         qs=qs,
-        h_moist=h,
+        h_dry_static=h,
         gz=gz,
         lv=lv,
     )

@@ -253,35 +253,107 @@ def subcloud_bulk_state(
             jnp.asarray(sst_K, dtype=dtype) - T_air_K)
 
 
+#: FIXED scales for the sub-cloud objective.  Deliberately NOT the reference's
+#: own spread across the layer: over a nearly well-mixed kilometre that spread
+#: is small and mostly uninformative, and it sets the T-versus-q_v weight to
+#: whatever happens to fall out of the reference profile.  Measured on the
+#: SAM_CRM RCE_small300 sounding, sigma_qv over the sub-cloud layer is ~0.07
+#: g/kg while sigma_T is ~2.3 K, so a harmless 0.1 g/kg humidity error would
+#: outweigh a 3 K temperature bias.  A declared tolerance says what "wrong by
+#: one unit" means instead of discovering it.
+DEFAULT_SUBCLOUD_T_SCALE_K = 1.0
+DEFAULT_SUBCLOUD_QV_SCALE = 1.0e-3          # 1 g/kg
+DEFAULT_SUBCLOUD_EVAP_SCALE_MM_DAY = 0.5
+
+
+def _weighted_mean(profile: jax.Array, weights: jax.Array) -> jax.Array:
+    return jnp.sum(weights * profile)
+
+
 def score_subcloud_jax(
     ref: Any,
     T_profile: jax.Array,
     qv_profile: jax.Array,
     *,
     subcloud_weights: jax.Array,
-    profile_floor: float,
+    T_scale_K: float = DEFAULT_SUBCLOUD_T_SCALE_K,
+    qv_scale: float = DEFAULT_SUBCLOUD_QV_SCALE,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Sub-cloud ``(T_rmse, qv_rmse, combined)``, same arithmetic as the column.
+    """Sub-cloud ``(T_term, qv_term, combined)`` on FIXED physical scales.
 
-    Each term is normalized by the reference's own SUB-CLOUD standard deviation
-    (the restricted weights enter the normalization as well as the RMSE), so a
-    value of 1 means "off by the spread the reference itself shows across this
-    layer" exactly as it does for the full-column score.  Condensate is
-    deliberately absent: this objective exists because the column score is
-    condensate-dominated, and re-admitting it here would reproduce that.
+    Each variable contributes two numbers, kept separate because they are
+    different defects with different fixes:
+
+    * the layer-mean BIAS — is the sub-cloud layer too warm / too moist, which
+      is the measured defect and what the surface fluxes respond to;
+    * the demeaned SHAPE error — is its internal structure wrong.
+
+    They are combined in quadrature per variable and then across variables,
+    every term divided by a declared tolerance rather than by the reference's
+    own spread.  Condensate is deliberately absent: this objective exists
+    because the column score is condensate-dominated, and re-admitting it here
+    would reproduce exactly that.
     """
     T_profile = jnp.asarray(T_profile)
     dtype = T_profile.dtype
     qv_profile = jnp.asarray(qv_profile, dtype=dtype)
     weights = jnp.asarray(subcloud_weights, dtype=dtype)
-    floor = jnp.asarray(profile_floor, dtype=dtype)
-    T_rmse = normalized_profile_rmse(
-        jnp.asarray(ref.T_ref, dtype=dtype), T_profile, weights,
-        profile_floor=floor)
-    qv_rmse = normalized_profile_rmse(
-        jnp.asarray(ref.qv_ref, dtype=dtype), qv_profile, weights,
-        profile_floor=floor)
-    return T_rmse, qv_rmse, safe_sqrt((T_rmse ** 2 + qv_rmse ** 2) / 2.0)
+    T_ref = jnp.asarray(ref.T_ref, dtype=dtype)
+    qv_ref = jnp.asarray(ref.qv_ref, dtype=dtype)
+
+    def _term(profile, reference, scale):
+        diff = (profile - reference) / jnp.asarray(scale, dtype=dtype)
+        bias = _weighted_mean(diff, weights)
+        shape = weighted_rmse(diff - bias, weights)
+        return safe_sqrt(bias ** 2 + shape ** 2)
+
+    T_term = _term(T_profile, T_ref, T_scale_K)
+    qv_term = _term(qv_profile, qv_ref, qv_scale)
+    return T_term, qv_term, safe_sqrt((T_term ** 2 + qv_term ** 2) / 2.0)
+
+
+def subcloud_objective_jax(
+    ref: Any,
+    T_profile: jax.Array,
+    qv_profile: jax.Array,
+    evap_mm_day: jax.Array | float,
+    *,
+    subcloud_weights: jax.Array,
+    T_scale_K: float = DEFAULT_SUBCLOUD_T_SCALE_K,
+    qv_scale: float = DEFAULT_SUBCLOUD_QV_SCALE,
+    evap_scale_mm_day: float = DEFAULT_SUBCLOUD_EVAP_SCALE_MM_DAY,
+    evap_weight: float = 1.0,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """``(T_term, qv_term, evap_term, combined)`` — the full sub-cloud target.
+
+    The evaporation term is not decoration.  The defect that motivated this
+    objective was measured as a FLUX deficit (1.2-1.9 mm/day against the
+    reference's 2.73), and T and q_v at the lowest level are its downstream
+    consequences.  An objective that scores only the state variables can be
+    satisfied by getting them right for the wrong reason — a column can carry
+    the right sub-cloud humidity while exchanging far too little water with the
+    surface.  Scoring the flux alongside the state closes that.
+
+    ``ref.evap_ref_mm_day`` is used when the reference carries a MEASURED
+    surface latent heat flux; otherwise the caller is expected to have fallen
+    back to the equilibrium identity E = P and to have said so.
+    """
+    T_term, qv_term, _profile_only = score_subcloud_jax(
+        ref, T_profile, qv_profile, subcloud_weights=subcloud_weights,
+        T_scale_K=T_scale_K, qv_scale=qv_scale)
+    dtype = T_term.dtype
+    evap_ref = jnp.asarray(
+        getattr(ref, "evap_ref_mm_day", None)
+        if getattr(ref, "evap_ref_mm_day", None) is not None
+        else getattr(ref, "precip_ref_mm_day", 0.0), dtype=dtype)
+    evap = jnp.asarray(evap_mm_day, dtype=dtype)
+    evap = jnp.where(jnp.isfinite(evap), evap, evap_ref)
+    evap_term = jnp.abs(evap - evap_ref) / jnp.asarray(
+        max(float(evap_scale_mm_day), 1.0e-12), dtype=dtype)
+    w = jnp.asarray(evap_weight, dtype=dtype)
+    combined = safe_sqrt(
+        (T_term ** 2 + qv_term ** 2 + w * evap_term ** 2) / (2.0 + w))
+    return T_term, qv_term, evap_term, combined
 
 
 def moist_adiabat_diagnostics_jax(

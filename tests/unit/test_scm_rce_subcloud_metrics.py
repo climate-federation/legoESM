@@ -15,11 +15,14 @@ import numpy as np
 import pytest
 
 from legoesm.training.scm_rce_metrics import (
+    DEFAULT_SUBCLOUD_QV_SCALE,
     DEFAULT_SUBCLOUD_TOP_M,
+    DEFAULT_SUBCLOUD_T_SCALE_K,
     score_profiles_precip_jax,
     score_subcloud_jax,
     subcloud_bulk_state,
     subcloud_mass_weights,
+    subcloud_objective_jax,
 )
 
 #: A 20-level idealized column, top -> surface like the CRM reference's grid.
@@ -34,7 +37,7 @@ def _fake_reference():
     qcond = 1.0e-5 * np.exp(-((z - 9000.0) / 3000.0) ** 2)
     return SimpleNamespace(
         z_m=z, mass_weights=weights, T_ref=T, qv_ref=qv, qcond_ref=qcond,
-        precip_ref_mm_day=2.4,
+        precip_ref_mm_day=2.4, evap_ref_mm_day=2.73,
     )
 
 
@@ -66,7 +69,7 @@ def test_perfect_profile_scores_zero():
     ref = _fake_reference()
     w = subcloud_mass_weights(ref.z_m, ref.mass_weights)
     T_sc, qv_sc, combined = score_subcloud_jax(
-        ref, ref.T_ref, ref.qv_ref, subcloud_weights=w, profile_floor=1.0e-12)
+        ref, ref.T_ref, ref.qv_ref, subcloud_weights=w)
     assert float(T_sc) == pytest.approx(0.0, abs=1e-12)
     assert float(qv_sc) == pytest.approx(0.0, abs=1e-12)
     assert float(combined) == pytest.approx(0.0, abs=1e-12)
@@ -86,9 +89,8 @@ def test_subcloud_objective_sees_what_the_column_score_cannot():
     qv_bad = np.where(below, ref.qv_ref * 1.20, ref.qv_ref)
 
     _t, _q, sc_good = score_subcloud_jax(
-        ref, ref.T_ref, ref.qv_ref, subcloud_weights=w, profile_floor=1.0e-12)
-    _t, _q, sc_bad = score_subcloud_jax(
-        ref, T_bad, qv_bad, subcloud_weights=w, profile_floor=1.0e-12)
+        ref, ref.T_ref, ref.qv_ref, subcloud_weights=w)
+    _t, _q, sc_bad = score_subcloud_jax(ref, T_bad, qv_bad, subcloud_weights=w)
 
     col_good = float(score_profiles_precip_jax(
         ref, ref.T_ref, ref.qv_ref, ref.qcond_ref, 2.4,
@@ -146,3 +148,74 @@ def test_objective_value_dispatch_and_nan_mapping():
     nan_run = SimpleNamespace(score=float("nan"), subcloud_score=float("nan"))
     assert objective_value(nan_run, "combined") == float("inf")
     assert objective_value(nan_run, "subcloud") == float("inf")
+
+
+def test_fixed_scales_stop_a_tiny_humidity_error_outweighing_a_3K_bias():
+    """THE reason the normalization changed.
+
+    Normalizing by the reference's own spread over a nearly well-mixed layer
+    gave sigma_qv ~ 0.07 g/kg against sigma_T ~ 2.3 K, so a harmless 0.1 g/kg
+    humidity error scored ~1.4 while a 3 K temperature bias scored ~1.3 — the
+    weighting was an accident of the reference profile. On declared scales
+    (1 K, 1 g/kg) the ordering is the physical one.
+    """
+    ref = _fake_reference()
+    w = subcloud_mass_weights(ref.z_m, ref.mass_weights)
+    T_off, _q, _c = score_subcloud_jax(
+        ref, ref.T_ref + 3.0, ref.qv_ref, subcloud_weights=w)
+    _t, qv_off, _c2 = score_subcloud_jax(
+        ref, ref.T_ref, ref.qv_ref + 1.0e-4, subcloud_weights=w)
+    assert float(T_off) == pytest.approx(3.0, rel=1e-6)
+    assert float(qv_off) == pytest.approx(0.1, rel=1e-6)
+    assert float(T_off) > 10.0 * float(qv_off)
+
+
+def test_bias_and_shape_are_separated():
+    """A uniform offset is pure bias; a zero-mean tilt is pure shape. Both
+    contribute, and a scheme cannot hide one inside the other."""
+    ref = _fake_reference()
+    w = np.asarray(subcloud_mass_weights(ref.z_m, ref.mass_weights))
+    below = np.asarray(ref.z_m) <= DEFAULT_SUBCLOUD_TOP_M
+    tilt = np.where(below, np.asarray(ref.z_m) - np.sum(w * ref.z_m), 0.0)
+    tilt = tilt / np.max(np.abs(tilt[below]))          # zero-mean, unit scale
+    T_bias, _q, _c = score_subcloud_jax(
+        ref, ref.T_ref + 1.0, ref.qv_ref, subcloud_weights=w)
+    T_shape, _q2, _c2 = score_subcloud_jax(
+        ref, ref.T_ref + tilt, ref.qv_ref, subcloud_weights=w)
+    # A uniform 1 K offset is pure bias and scores exactly 1 on the 1 K scale.
+    assert float(T_bias) == pytest.approx(1.0, rel=1e-6)
+    # A zero-mean tilt has NO bias, so everything it scores comes from the
+    # shape half -- which is the separation being tested.  (Its magnitude is
+    # not asserted: on a two-level sub-cloud layer with equal weights a
+    # unit-amplitude tilt has weighted RMS exactly 1, so a "< 1" bound would
+    # be a statement about the fixture, not about the metric.)
+    assert float(T_shape) > 0.0
+    tilt_bias = float(np.sum(w * tilt))
+    assert tilt_bias == pytest.approx(0.0, abs=1e-12)
+
+
+def test_evaporation_term_enters_the_objective():
+    """The defect was measured as a FLUX deficit; an objective that scores only
+    the state can be satisfied by getting the state right for the wrong
+    reason."""
+    ref = _fake_reference()
+    w = subcloud_mass_weights(ref.z_m, ref.mass_weights)
+    _t, _q, e_match, c_match = subcloud_objective_jax(
+        ref, ref.T_ref, ref.qv_ref, ref.evap_ref_mm_day, subcloud_weights=w)
+    _t2, _q2, e_low, c_low = subcloud_objective_jax(
+        ref, ref.T_ref, ref.qv_ref, 1.30, subcloud_weights=w)
+    assert float(e_match) == pytest.approx(0.0, abs=1e-12)
+    assert float(c_match) == pytest.approx(0.0, abs=1e-12)
+    assert float(e_low) > 0.0
+    assert float(c_low) > float(c_match)
+
+
+def test_non_finite_evaporation_does_not_poison_the_objective():
+    """A crashed column must score badly, not NaN — a NaN incumbent makes every
+    ``trial < best`` comparison False and silently discards the search."""
+    ref = _fake_reference()
+    w = subcloud_mass_weights(ref.z_m, ref.mass_weights)
+    _t, _q, e_term, combined = subcloud_objective_jax(
+        ref, ref.T_ref, ref.qv_ref, float("nan"), subcloud_weights=w)
+    assert np.isfinite(float(e_term))
+    assert np.isfinite(float(combined))

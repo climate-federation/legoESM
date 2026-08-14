@@ -72,6 +72,7 @@ from scripts.run.run_scm_rce_campaign import (  # noqa: E402
     SECONDS_PER_DAY,
     WING_P_SFC,
     build_reference_profiles,
+    reference_evap_from_hfls,
 )
 
 #: Observed near-surface relative humidity over the tropical warm pool, for
@@ -168,31 +169,12 @@ def saturation_at_sst(
 def crm_evap_from_hfls(aux_dir: Path) -> tuple[float, str] | None:
     """Reference evaporation [mm/day] from the archive's own ``hfls_avg``.
 
-    ``None`` when the file is absent -- the caller then falls back to the
-    equilibrium identity and SAYS SO.  A missing measurement must never be
-    silently replaced by a derived one.
+    Delegates to the campaign's reader so the probe and every scored run use
+    ONE definition of the reference evaporation and one windowing convention;
+    a second copy here would be free to drift.  ``aux_dir`` is the campaign
+    reader's ``<reference-dir>/aux_0D``, so the parent is passed through.
     """
-    path = aux_dir / "SAM_CRM_RCE_small300_0D_hfls_avg.nc"
-    if not path.exists():
-        return None
-    try:
-        import xarray as xr
-    except ImportError:  # pragma: no cover - environment-dependent
-        return None
-    with xr.open_dataset(path) as ds:
-        name = "hfls_avg" if "hfls_avg" in ds else next(iter(ds.data_vars))
-        series = np.asarray(ds[name].values, dtype=float).reshape(-1)
-    finite = series[np.isfinite(series)]
-    if finite.size == 0:
-        return None
-    # Equilibrium mean over the last quarter of the record, matching the
-    # campaign's "settled window" convention rather than averaging spin-up in.
-    tail = finite[-max(1, finite.size // 4):]
-    hfls = float(np.mean(tail))
-    return (
-        hfls / constants.L_v * SECONDS_PER_DAY,
-        f"measured hfls_avg={hfls:.2f} W/m^2 (last {tail.size}/{finite.size} samples)",
-    )
+    return reference_evap_from_hfls(Path(aux_dir).parent)
 
 
 def crm_sensible_from_hfss(aux_dir: Path) -> float | None:

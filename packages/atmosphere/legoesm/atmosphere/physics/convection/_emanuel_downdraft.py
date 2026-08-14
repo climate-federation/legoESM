@@ -46,6 +46,15 @@ backwards produces a plausible-looking wrong answer with every shape intact,
 so ``emanuel_downdraft_tendencies`` asserts the orientation of its inputs
 rather than trusting it.
 
+FAITHFUL WHERE?  The arithmetic is line-by-line faithful.  TWO branches are
+deliberately NOT: the ``T(I) > 273`` phase switch (line 749) and the
+``EP(INB) < 1e-4`` whole-shaft skip (line 717) are replaced by sigmoids, so
+inside their transition intervals this produces numbers the Fortran does not.
+That is the price of a scheme that has to train, and it is bounded: both
+widths are arguments, and driving them to zero recovers the oracle's hard
+branches exactly, which is asserted by a test rather than argued.  Every other
+departure would be a defect.
+
 DIFFERENTIABILITY.  Every oracle branch becomes smooth or masked.  Three
 places need the double-``where`` guard, because a plain ``jnp.where`` still
 differentiates the unselected branch and propagates its NaN: the division by
@@ -243,7 +252,7 @@ def emanuel_downdraft(
     qs: jax.Array,
     p_full: jax.Array,
     p_half: jax.Array,
-    h_moist: jax.Array,
+    h_dry_static: jax.Array,
     gz: jax.Array,
     lv: jax.Array,
     cpn: jax.Array,
@@ -278,7 +287,11 @@ def emanuel_downdraft(
     p_half : (ncol, nlev) pressure of the interface at the BOTTOM of level i
         [Pa], oracle ``PH`` — so ``p_half[i] - p_half[i+1]`` is the mass
         thickness of level i, which is how the oracle uses it.
-    h_moist, gz, lv, cpn : (ncol, nlev) oracle ``H``, ``GZ``, ``LV``, ``CPN``.
+    h_dry_static, gz, lv, cpn : (ncol, nlev) oracle ``H``, ``GZ``, ``LV``,
+        ``CPN``.  NOTE that the oracle's ``H`` is ``T*CPN + GZ`` (line 353) --
+        DRY static energy carrying a moisture-weighted heat capacity, with NO
+        ``LV*Q`` term.  Passing a true moist static energy here changes
+        ``DHDP`` and therefore the whole downdraft mass flux.
     m_profile, ment, elij, clw, ep : updraught mass flux, mixing matrix,
         mixture condensate, adiabatic cloud water and precipitation efficiency
         from ``_emanuel_mixing`` (all surface-first).
@@ -316,7 +329,7 @@ def emanuel_downdraft(
     dph = ph_hpa - _above(ph_hpa)                 # PH(I) - PH(I+1)  > 0
     dph_below = _below(ph_hpa) - ph_hpa           # PH(I-1) - PH(I)  > 0
     dp_below = _below(p_hpa) - p_hpa              # P(I-1) - P(I)    > 0
-    h_below = _below(h_moist)
+    h_below = _below(h_dry_static)
     qs_below = _below(qs)                         # QSTM
     T_above = _above(T)
     lv_above = _above(lv)
@@ -332,7 +345,7 @@ def emanuel_downdraft(
         water_up, wt_up, mp_up, qp_up = carry
         (T_i, q_i, qs_i, wt_i, coeff_i, sigt_i, dph_i, dph_below_i,
          dp_below_i, wdtrain_i, ph_i, lv_i, h_i, h_below_i, gz_i, gz_up_i,
-         T_up_i, lv_up_i, qs_below_i, surf_i, top_i) = x
+         T_up_i, lv_up_i, qs_below_i, qp_top_i, surf_i, top_i) = x
 
         qsm = 0.5 * (q_i + qp_up)
         afac = coeff_i * ph_i * (qs_i - qsm) / (1.0e4 + 2.0e3 * ph_i * qs_i)
@@ -368,7 +381,11 @@ def emanuel_downdraft(
         qp_new = jnp.where(mp_i > mp_up, qp_mix,
                            jnp.where(mp_up > 0.0, qp_desc, qp_up))
         qp_new = jnp.clip(qp_new, 0.0, qs_below_i)
-        qp_i = jnp.where(top_i, qp_up, qp_new)
+        # ``IF(I.EQ.INB)GOTO 400`` leaves QP(INB) at its INITIALISATION, which
+        # is Q(I-1) (line 501) -- NOT the incoming carry QP(INB+1)=Q(INB).
+        # The two differ by one level, and using the carry here would feed the
+        # next step a shifted QP(I+1) that still runs and still looks sane.
+        qp_i = jnp.where(top_i, qp_top_i, qp_new)
 
         return ((water_i, wt_i, mp_i, qp_i),
                 (mp_i, qp_i, evap_i, water_i))
@@ -378,8 +395,8 @@ def emanuel_downdraft(
     zeros = jnp.zeros_like(T[:, 0])
     carry0 = (zeros, jnp.full_like(zeros, omtsnow), zeros, q[:, -1])
     xs = (T, q, qs, wt, coeff, sigt, dph, dph_below, dp_below, wdtrain,
-          ph_hpa, lv, h_moist, h_below, gz, gz_above, T_above, lv_above,
-          qs_below, jnp.broadcast_to(is_surface, T.shape),
+          ph_hpa, lv, h_dry_static, h_below, gz, gz_above, T_above, lv_above,
+          qs_below, _below(q), jnp.broadcast_to(is_surface, T.shape),
           jnp.broadcast_to(is_top, T.shape))
     xs = tuple(jnp.moveaxis(a, 1, 0) for a in xs)
     _carry, out = lax.scan(step, carry0, xs, reverse=True)

@@ -93,8 +93,8 @@ from legoesm.training.scm_rce_metrics import (
     moist_adiabat_diagnostics_jax,
     realism_reasons_from_diagnostics,
     score_profiles_precip_jax,
-    score_subcloud_jax,
     subcloud_bulk_state,
+    subcloud_objective_jax,
     subcloud_mass_weights,
     weighted_rmse as weighted_rmse_jax,
     weighted_std as weighted_std_jax,
@@ -270,6 +270,12 @@ class ReferenceProfiles:
     files_used: list[str]
     sfc_cross_check: dict[str, float]
     precip_ref_mm_day: float = float("nan")
+    #: Surface evaporation of the REFERENCE [mm/day].  Preferably the
+    #: archive's own measured latent heat flux; NaN when no such file is
+    #: present, in which case the sub-cloud objective falls back to the
+    #: equilibrium identity E = P and the provenance string says so.
+    evap_ref_mm_day: float = float("nan")
+    evap_ref_note: str = ""
     precip_files_used: list[str] = field(default_factory=list)
     precip_unit_note: str = ""
     crm_clear_sky_subsidence_m_s: np.ndarray | None = None
@@ -318,6 +324,7 @@ class RunDiagnostics:
     #: changes.
     subcloud_T_rmse: float = float("nan")
     subcloud_qv_rmse: float = float("nan")
+    subcloud_evap_term: float = float("nan")
     subcloud_score: float = float("nan")
     subcloud_top_m: float = float("nan")
     subcloud_n_levels: int = 0
@@ -411,6 +418,7 @@ def _subcloud_diagnostics(
     qv_profile: np.ndarray,
     *,
     subcloud_top_m: float,
+    evap_mm_day: float,
 ) -> dict[str, float]:
     """Sub-cloud profile scores plus the lowest level's bulk-flux state.
 
@@ -424,12 +432,12 @@ def _subcloud_diagnostics(
         jnp.asarray(ref.z_m), jnp.asarray(ref.mass_weights),
         top_m=subcloud_top_m,
     )
-    T_sc, qv_sc, combined_sc = score_subcloud_jax(
+    T_sc, qv_sc, evap_sc, combined_sc = subcloud_objective_jax(
         ref,
         jnp.asarray(T_profile),
         jnp.asarray(qv_profile),
+        jnp.asarray(evap_mm_day, dtype=jnp.float64),
         subcloud_weights=weights,
-        profile_floor=PROFILE_FLOOR,
     )
     rh, driver, delta_T = subcloud_bulk_state(
         T_air_K=jnp.asarray(T_profile[-1], dtype=jnp.float64),
@@ -441,6 +449,7 @@ def _subcloud_diagnostics(
     return {
         "subcloud_T_rmse": float(T_sc),
         "subcloud_qv_rmse": float(qv_sc),
+        "subcloud_evap_term": float(evap_sc),
         "subcloud_score": float(combined_sc),
         "subcloud_top_m": float(subcloud_top_m),
         "subcloud_n_levels": int(np.sum(np.asarray(ref.z_m) <= subcloud_top_m)),
@@ -597,6 +606,37 @@ def _reference_crm_clear_sky_subsidence(
     return w_sub, cloud_fraction
 
 
+def reference_evap_from_hfls(reference_dir: Path) -> tuple[float, str] | None:
+    """Reference evaporation [mm/day] from the archive's own ``hfls_avg``.
+
+    ``None`` when the file is absent — the caller then falls back to the
+    equilibrium identity E = P and SAYS SO.  A missing measurement must never
+    be silently replaced by a derived one.
+
+    Averaged over the last quarter of the record, matching the campaign's
+    "settled window" convention rather than averaging spin-up in.
+    """
+    path = (Path(reference_dir) / "aux_0D"
+            / "SAM_CRM_RCE_small300_0D_hfls_avg.nc")
+    if not path.exists():
+        return None
+    try:
+        import xarray as xr
+    except ImportError:  # pragma: no cover - environment-dependent
+        return None
+    with xr.open_dataset(path) as ds:
+        name = "hfls_avg" if "hfls_avg" in ds else next(iter(ds.data_vars))
+        series = np.asarray(ds[name].values, dtype=float).reshape(-1)
+    finite = series[np.isfinite(series)]
+    if finite.size == 0:
+        return None
+    tail = finite[-max(1, finite.size // 4):]
+    hfls = float(np.mean(tail))
+    return (hfls / constants.L_v * SECONDS_PER_DAY,
+            f"measured hfls_avg={hfls:.2f} W/m^2 "
+            f"(last {tail.size}/{finite.size} samples)")
+
+
 def build_reference_profiles(
     reference_dir: Path,
     last_n: int,
@@ -651,6 +691,12 @@ def build_reference_profiles(
     crm_subsidence, crm_cloud_fraction = _reference_crm_clear_sky_subsidence(
         files,
     )
+    measured_evap = reference_evap_from_hfls(reference_dir)
+    if measured_evap is None:
+        evap_ref, evap_note = float(precip_ref), (
+            "EQUILIBRIUM IDENTITY E=P (no measured hfls_avg on disk)")
+    else:
+        evap_ref, evap_note = measured_evap
     return ReferenceProfiles(
         z_m=z_m,
         sigma_half=sigma_half,
@@ -662,6 +708,8 @@ def build_reference_profiles(
         files_used=[str(p) for p in files],
         sfc_cross_check=sfc_cross_check,
         precip_ref_mm_day=precip_ref,
+        evap_ref_mm_day=evap_ref,
+        evap_ref_note=evap_note,
         precip_files_used=precip_files,
         precip_unit_note=precip_note,
         crm_clear_sky_subsidence_m_s=crm_subsidence,
@@ -1668,7 +1716,8 @@ def run_scm_rce(
             qprecip_profile=qprecip_profile.tolist(),
             **(
                 _subcloud_diagnostics(
-                    ref, T_profile, qv_profile, subcloud_top_m=subcloud_top_m,
+                    ref, T_profile, qv_profile,
+                    subcloud_top_m=subcloud_top_m, evap_mm_day=evap_mm_day,
                 )
                 # A non-finite column would make the saturation call return
                 # garbage rather than raise; leave the sub-cloud fields at NaN

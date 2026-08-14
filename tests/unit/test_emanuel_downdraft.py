@@ -33,7 +33,8 @@ _ORACLE = dict(
 )
 
 
-def _column(*, ep_level: int | None = None, ep_value: float = 0.5):
+def _column(*, ep_level: int | None = None, ep_value: float = 0.5,
+            force_top_source: bool = True):
     """One idealized tropical column, SURFACE-FIRST (index 0 = surface).
 
     ``ep_level`` places ALL the precipitation efficiency at a single level so
@@ -52,7 +53,11 @@ def _column(*, ep_level: int | None = None, ep_value: float = 0.5):
     lv = jnp.full_like(T, constants.L_v)
     cpn = jnp.full_like(T, constants.c_pd)
     gz = constants.g * z
-    h_moist = constants.c_pd * T + gz + constants.L_v * q
+    # The oracle's H is DRY static energy with a moisture-weighted heat
+    # capacity (convect43c.f line 353) -- NO Lv*q term.  Building a true moist
+    # static energy here would silently disagree with production and change
+    # DHDP, hence the whole downdraft mass flux.
+    h_dry_static = cpn * T + gz
 
     clw = jnp.full_like(T, 2.0e-3)
     m_profile = jnp.full_like(T, 0.02)
@@ -62,11 +67,14 @@ def _column(*, ep_level: int | None = None, ep_value: float = 0.5):
         ep = jnp.zeros_like(T)
     else:
         ep = jnp.zeros_like(T).at[:, ep_level].set(ep_value)
-        # The whole-shaft gate reads ep at cloud top, so a source anywhere
-        # must be accompanied by a non-zero top value or nothing runs.
-        ep = ep.at[:, -1].set(max(ep_value, 1.0e-2))
+        if force_top_source:
+            # The whole-shaft gate reads ep at cloud top, so a source anywhere
+            # normally needs a non-zero top value or nothing runs.  Tests that
+            # need a SINGLE unambiguous source open the gate instead (see
+            # _OPEN_GATE) rather than adding a second one.
+            ep = ep.at[:, -1].set(max(ep_value, 1.0e-2))
     return dict(T=T, q=q, qs=qs, p_full=p_full, p_half=p_half,
-                h_moist=h_moist, gz=gz, lv=lv, cpn=cpn,
+                h_dry_static=h_dry_static, gz=gz, lv=lv, cpn=cpn,
                 m_profile=m_profile, ment=ment, elij=elij, clw=clw, ep=ep)
 
 
@@ -81,24 +89,60 @@ def test_no_detrained_condensate_gives_exactly_zero():
 
 
 def test_rain_falls_downward_not_upward():
-    """ORIENTATION GATE — the test a surface-last/surface-first swap fails.
+    """ORIENTATION GATE — the test a surface-first/surface-last swap fails.
 
-    All the detrained condensate is placed at one level.  Rain falls, so the
-    rain-water content must be non-zero AT and BELOW that level and zero above
-    it.  A flipped port puts the water on the wrong side and this fails while
-    every shape and every finiteness check still passes.
+    ONE source level, and the whole-shaft gate forced open so no second source
+    is needed at the top.  Rain falls, so the support of the rain-water field
+    must be exactly the source level and everything BELOW it, and exactly zero
+    above.  An earlier version of this test seeded a second source at the top
+    to satisfy the gate, which let a reversed sweep populate the levels below
+    from that source and pass (codex review, 2026-08-14).
     """
     src = 12
-    out = emanuel_downdraft(**_column(ep_level=src), **_ORACLE)
+    col = _column(ep_level=src, force_top_source=False)
+    out = emanuel_downdraft(**col, **{**_ORACLE, **_OPEN_GATE})
     water = np.asarray(out.water)[0]
-    below = water[:src]
-    above = water[src + 1:]
-    assert np.max(below) > 0.0, "no rain water below the source level"
-    # Above the source only the top-level gate value contributes, which is a
-    # separate source; check the levels strictly between it and the source.
-    assert np.max(above[:-2]) <= np.max(below), (
-        "rain water is larger ABOVE the source than below it — the level "
-        "ordering is inverted")
+    assert water[src] > 0.0, "no rain water at the source level"
+    assert np.all(water[:src] > 0.0), "rain did not reach the levels below"
+    assert np.max(water[src + 1:]) == 0.0, (
+        "rain water appears ABOVE the only source — the level ordering is "
+        "inverted")
+
+
+#: Gate wide open: threshold below any ep, so a test can use ONE source level.
+_OPEN_GATE = dict(ep_gate_threshold=-1.0, ep_gate_width=1.0e-3)
+
+
+def test_top_level_downdraft_humidity_uses_the_oracle_initialisation():
+    """``IF(I.EQ.INB)GOTO 400`` leaves QP(INB) at its INITIALISATION Q(INB-1)
+    (convect43c.f line 501), not at the incoming carry Q(INB).  The two differ
+    by one level and the wrong one still runs, still looks sane, and feeds a
+    shifted QP(I+1) into every level below."""
+    col = _column(ep_level=12)
+    # Make the two candidate values unmistakably different.
+    q = np.asarray(col["q"]).copy()
+    q[0, -1] = 1.0e-6
+    q[0, -2] = 5.0e-3
+    col["q"] = jnp.asarray(q)
+    out = emanuel_downdraft(**col, **_ORACLE)
+    assert float(out.qp[0, -1]) == pytest.approx(q[0, -2], rel=1e-9)
+
+
+def test_the_smooth_branches_recover_the_oracle_in_the_zero_width_limit():
+    """The two deliberate departures are bounded, not open-ended.
+
+    Driving the phase-switch width to zero must reproduce the hard
+    ``IF(T(I).GT.273.0)`` selection: every level of this column is warmer than
+    273 K except the top few, so the fall speed must collapse onto OMTRAIN
+    below the freezing level and OMTSNOW above it.
+    """
+    col = _column(ep_level=12)
+    out = emanuel_downdraft(**col, **{**_ORACLE, "freeze_transition_K": 1.0e-4})
+    T = np.asarray(col["T"])[0]
+    wt = np.asarray(out.wt)[0]
+    warm = T > 273.0
+    assert np.allclose(wt[warm], _ORACLE["omtrain"], rtol=1e-6)
+    assert np.allclose(wt[~warm], _ORACLE["omtsnow"], rtol=1e-6)
 
 
 def test_mass_flux_is_zero_at_the_surface_and_non_negative():
