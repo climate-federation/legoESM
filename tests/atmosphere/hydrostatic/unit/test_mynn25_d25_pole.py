@@ -301,3 +301,24 @@ def test_away_from_zero_is_inert_outside_the_floor_and_keeps_the_sign():
     assert got[0] == -5.0 and got[4] == 5.0, "must not touch well-posed values"
     assert got[1] == -1e-3 and got[3] == 1e-3, "must push out to +/- the floor"
     assert got[2] == 1e-3, "the exact zero takes the positive branch"
+
+
+def test_the_guards_do_not_promote_a_float32_column_to_float64():
+    """The F1/F2 floor sits on quantities built from Python floats.
+
+    Wrapping them in `jnp.asarray` would give them a STRONG float64 dtype
+    whenever jax_enable_x64 is on, and that promotes the whole level-2 block
+    away from a float32 column -- a silent precision and memory change in
+    every global run, with no error anywhere. x64 is on in this module, so the
+    check is live.
+    """
+    assert jax.config.read("jax_enable_x64"), (
+        "this test only means something with x64 enabled")
+    f32 = jnp.float32
+    sm, sh = _compute_SM_SH(
+        jnp.full((1, 2), 1.0, dtype=f32), jnp.full((1, 2), 0.5, dtype=f32),
+        jnp.full((1, 2), 4.0, dtype=f32), jnp.full((1, 2), 1e-2, dtype=f32),
+        MYNN25Config(),
+    )
+    assert sm.dtype == f32, f"SM25 came back {sm.dtype}, not float32"
+    assert sh.dtype == f32, f"SH25 came back {sh.dtype}, not float32"

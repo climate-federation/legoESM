@@ -355,8 +355,13 @@ def _compute_SM_SH(
     # C3=0.95, C5=0.5, gamma1=0.15 -- so an optimizer exploring those bounds
     # can produce infinities before D25 is even formed. They are ~6.3 and ~5.0
     # at the NN09 defaults, so the two-sided floor is inert there. (codex)
-    F1 = _away_from_zero(jnp.asarray(F1), _F_FLOOR)
-    F2 = _away_from_zero(jnp.asarray(F2), _F_FLOOR)
+    # NOT wrapped in jnp.asarray: these are built from Python floats when the
+    # config is not being traced, and an explicit array creation would give
+    # them a STRONG dtype (float64 under jax_enable_x64) that then promotes the
+    # whole level-2 block away from the column's float32. jnp.where on weakly
+    # typed inputs keeps the weak type and lets the state decide.
+    F1 = _away_from_zero(F1, _F_FLOOR)
+    F2 = _away_from_zero(F2, _F_FLOOR)
     Rf1 = B1 * (gamma1 - C1) / F1
     Rf2 = B1 * gamma1 / F2
     Rfc = gamma1 / (gamma1 + gamma2)
