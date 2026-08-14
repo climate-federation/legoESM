@@ -102,3 +102,85 @@ def test_wangara_is_registered_as_its_own_scm_case():
     cbl = ANALYTIC_SCM_CASES["cbl"]
     assert cbl.theta0_K != spec.theta0_K
     assert cbl.f_c == 0.0
+
+
+# --- the SCM arm must be driven by this module, not by a frozen snapshot ----
+
+def test_the_scm_case_uses_the_shared_diurnal_flux():
+    """The LES driver reads wangara_day33; the SCM case must read the SAME
+    functions, or the two sides are driven differently while claiming not to
+    be. The loader used to build `w_th_s = lambda _t: <the 09:00 value>`, which
+    held that value through the 13:00 maximum and the whole afternoon decay."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        ANALYTIC_SCM_CASES,
+    )
+    spec = ANALYTIC_SCM_CASES["wangara"]
+    assert spec.surface_theta_flux_fn is w.surface_theta_flux
+    assert spec.geostrophic_u_fn is w.geostrophic_u
+    assert spec.t_start_s == pytest.approx(w.T_START_S)
+    # The steady cases must NOT have acquired one.
+    for name in ("cbl", "gabls1", "ekman"):
+        assert ANALYTIC_SCM_CASES[name].surface_theta_flux_fn is None
+        assert ANALYTIC_SCM_CASES[name].geostrophic_u_fn is None
+
+
+def test_the_built_case_actually_varies_in_time_and_height():
+    """NON-VACUOUS: assert the FORCING the SCM will call, not the spec field.
+
+    A spec entry that the loader ignores looks identical from the table.
+    """
+    import numpy as np
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case("wangara", nlev=24, dt=10.0)
+
+    # TIME: the flux must trace out the cycle, and peak near 13:00 local, i.e.
+    # 4 h into a 09:00 start.
+    hours = np.arange(0.0, 8.01, 0.5)
+    flux = np.array([float(case.forcing.w_th_s(h * 3600.0)) for h in hours])
+    assert flux.std() > 0.02, (
+        f"the surface flux is effectively constant ({flux.std():.4g} K m/s "
+        "spread) over the 8 h run")
+    assert hours[int(np.argmax(flux))] == pytest.approx(4.0, abs=0.5)
+    # ...and the first value is the one the old code froze, so the defect is
+    # exactly "the whole run at flux[0]".
+    assert abs(flux[-1] - flux[0]) > 0.02
+
+    # HEIGHT: the geostrophic wind must be sheared, not a uniform -5.5 m/s.
+    ug = np.asarray(case.forcing.u_geo(0.0))
+    assert ug.shape == (24,)
+    assert ug.max() - ug.min() > 1.0, (
+        f"geostrophic u spans only {ug.max() - ug.min():.3g} m/s; the LES uses "
+        "a kinked easterly jet")
+
+
+def test_the_steady_cases_are_untouched_by_the_new_path():
+    """cbl/gabls1/ekman must still get exactly their scalar flux."""
+    import numpy as np
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        ANALYTIC_SCM_CASES,
+        load_analytic_scm_case,
+    )
+    for name in ("cbl", "gabls1", "ekman"):
+        case = load_analytic_scm_case(name, nlev=16, dt=10.0)
+        want = ANALYTIC_SCM_CASES[name].sfc_theta_flux_K_m_s
+        for t in (0.0, 1234.0, 28800.0):
+            assert float(case.forcing.w_th_s(t)) == pytest.approx(want), name
+        if case.forcing.u_geo is not None:
+            ug = np.asarray(case.forcing.u_geo(0.0))
+            assert ug.min() == ug.max() == pytest.approx(
+                ANALYTIC_SCM_CASES[name].u_geo_m_s), name
+
+
+def test_the_flux_is_traceable():
+    """It is called inside the differentiated rollout; a NumPy-materialising
+    forcing would break the tuner rather than merely be slow."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case("wangara", nlev=8, dt=10.0)
+    got = jax.jit(lambda t: case.forcing.w_th_s(t))(jnp.asarray(3600.0))
+    assert jnp.isfinite(got)

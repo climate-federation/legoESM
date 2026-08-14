@@ -209,6 +209,18 @@ def deck_surface_scalar_fluxes(case) -> tuple[float, float] | None:
     """
     if case.forcing.prescribe != "fluxes":
         return None
+    spec_early = getattr(case, "spec", None)
+    if getattr(spec_early, "surface_theta_flux_fn", None) is not None:
+        # A TIME-VARYING flux cannot be handed to the closure: SurfaceLayerConfig
+        # carries a scalar, so doing it freezes the cycle at one instant AND
+        # switches the SCMForcing surface channel off, which is worse than not
+        # handing it over at all. Wangara Day 33 measured 113.4 W/m^2 held for
+        # 8 h against a cycle peaking at 13:00, and every closure scored ~9x the
+        # LES profile's own spread there -- scheme-independent, i.e. the arm,
+        # not the closures. Returning None keeps the case on its own
+        # time-dependent channel with the closure's exchange coefficient zeroed,
+        # exactly as it ran before --surface-flux-to-closure existed.
+        return None
     rho_sfc = float(case.rho_sfc)
     surf = getattr(case, "surface", None)
     if isinstance(surf, dict) and "shf" in surf and "lhf" in surf:
@@ -1224,7 +1236,14 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
             case, bulk_scheme=args.surface_bulk_scheme,
             flux_to_closure=args.surface_flux_to_closure)
         prescribed = case.forcing.prescribe == "fluxes"
-        if args.surface_flux_to_closure and prescribed:
+        # `prescribed_shflx_w_m2 is None` means deck_surface_scalar_fluxes
+        # declined -- today only because the case's flux VARIES IN TIME and a
+        # scalar config cannot carry it. Switching the forcing channel off on
+        # that basis would replace a real diurnal cycle with one instant of it,
+        # so the handover is skipped and SAID, not skipped silently.
+        handover = (args.surface_flux_to_closure and prescribed
+                    and surface.prescribed_shflx_w_m2 is not None)
+        if handover:
             # The closure now applies the deck flux as its lower boundary
             # condition, so the forcing channel MUST be switched off: leaving
             # both on would add the same flux to the column twice.
@@ -1237,6 +1256,13 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
                   f"LHF={surface.prescribed_lhflx_w_m2:.4g} W/m^2); "
                   "the SCMForcing surface channel is OFF so it is not "
                   "counted twice.")
+        elif args.surface_flux_to_closure and prescribed:
+            print(f"  {name}: surface flux NOT handed to the closure -- this "
+                  "case's flux varies in TIME and SurfaceLayerConfig carries a "
+                  "scalar. It stays on the SCMForcing channel with the "
+                  "closure's exchange coefficient zeroed, as every case ran "
+                  "before --surface-flux-to-closure existed. The closure "
+                  "therefore sees a surface heat flux of zero here.")
         arms.append(CaseArm(
             name=name, case=case, reference=ref, scored=scored,
             hours=les_end, analysis_hours=span, dt=dt,

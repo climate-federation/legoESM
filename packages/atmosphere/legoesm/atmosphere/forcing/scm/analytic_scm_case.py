@@ -15,11 +15,21 @@ from the same-named case in ``scripts/matrix/scm/`` -- those do not match:
   defaults to 0. Verified independently from the archive: its column heat
   budget over 9 h is -162.000 K m exactly, i.e. a constant -0.005 K m/s.
 
-Every case here therefore uses a CONSTANT prescribed kinematic surface heat
-flux, which also keeps ``SCMForcing.T_s`` out of the picture entirely -- a
+Every case here prescribes a kinematic surface heat FLUX rather than a surface
+temperature, which keeps ``SCMForcing.T_s`` out of the picture entirely -- a
 time-varying prescribed surface temperature cannot be traced (its validator
 materialises with NumPy), so a ``T_s``-driven case could not be gradient-tuned
 at all without changing that validator first.
+
+That flux is CONSTANT for every case except Wangara Day 33, whose defining
+feature is its diurnal cycle. This file previously said the flux was constant
+everywhere and built it that way, so Wangara's SCM arm ran its 09:00 value for
+all 8 h -- through the 13:00 maximum and the afternoon decay -- and took a
+uniform -5.5 m/s geostrophic wind where the LES uses a sheared profile. The
+LES driver reads both from ``legoesm.atmosphere.forcing.wangara_day33``; the
+spec now names the same functions, so the two sides really cannot be driven
+differently. A case declares non-steady forcing with
+``surface_theta_flux_fn`` / ``geostrophic_u_fn``.
 
 Two heights, deliberately distinct. The SCM column spans the LES DOMAIN
 (``les_lz_m``) so its lid matches the LES lid; SCORING stops at
@@ -42,6 +52,7 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (
 )
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing import wangara_day33
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -78,6 +89,24 @@ class AnalyticSCMCaseSpec:
     default_dt_s: float
     scored: tuple[str, ...]
     note: str
+
+    # --- non-steady forcing, for the cases that have it ---------------------
+    # A case whose surface flux varies in TIME, or whose geostrophic wind
+    # varies with HEIGHT, declares the function here and the loader uses it in
+    # place of the scalar above. Wangara Day 33 has both, and without them its
+    # SCM arm is a constant-flux, uniform-wind CBL that merely starts from the
+    # same 277 K sounding -- which is what it was: the LES driver pulls the
+    # diurnal cycle and the sheared geostrophic wind from
+    # `legoesm.atmosphere.forcing.wangara_day33` while this loader hard-coded
+    # `w_th_s = lambda _t: spec.sfc_theta_flux_K_m_s`, so the two sides WERE
+    # driven differently despite the claim that they could not be.
+    #
+    # `surface_theta_flux_fn(t_seconds) -> K m/s` is called with the SCM's own
+    # clock, which starts at zero; `t_start_s` is added first, so a case that
+    # keys its forcing to local time gets the right hour.
+    surface_theta_flux_fn: Any = None
+    geostrophic_u_fn: Any = None            # (z_m) -> m/s
+    t_start_s: float = 0.0
 
     # The tuner reads these off the deck spec; analytic cases prescribe their
     # surface flux, so there is no bulk exchange coefficient to carry.
@@ -136,6 +165,12 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         # structure under the height-dependent geostrophic forcing is what this
         # case constrains.
         scored=("theta", "u", "v"),
+        # The SAME module the LES driver reads, so the two sides really cannot
+        # be driven differently. Wired as functions rather than as the scalars
+        # above because both quantities genuinely vary.
+        surface_theta_flux_fn=wangara_day33.surface_theta_flux,
+        geostrophic_u_fn=wangara_day33.geostrophic_u,
+        t_start_s=wangara_day33.T_START_S,
         note="Wangara Day 33 convective boundary layer (Clarke et al. 1971), "
              "DRY: diurnal surface heat flux peaking at 13:00 local, "
              "southern-hemisphere Coriolis, height-dependent easterly "
@@ -265,16 +300,39 @@ def load_analytic_scm_case(case: str, *, nlev: int = 48,
     from legoesm import constants
     rho_sfc = _P_S_PA / (constants.R_d * float(T_profile[-1]))
 
-    u_geo = jnp.full(nlev, spec.u_geo_m_s)
+    # Geostrophic wind: the scalar unless the case declares a PROFILE. Wangara
+    # Day 33's easterly jet is sheared (-5.5 m/s at the surface, kinking at
+    # 1 km), and a uniform -5.5 gives the SCM a different momentum forcing from
+    # the LES it is scored against.
+    if spec.geostrophic_u_fn is not None:
+        u_geo = jnp.asarray(spec.geostrophic_u_fn(z_full), dtype=jnp.float64)
+    else:
+        u_geo = jnp.full(nlev, spec.u_geo_m_s)
     v_geo = jnp.full(nlev, spec.v_geo_m_s)
-    flux = jnp.asarray(spec.sfc_theta_flux_K_m_s)
+
+    # Surface heat flux: the scalar unless the case declares a TIME FUNCTION.
+    # The scalar is evaluated at the run's first instant for a diurnal case, so
+    # using it there holds the 09:00 flux for the whole 8 h -- straight through
+    # the 13:00 maximum and the afternoon decay.
+    if spec.surface_theta_flux_fn is not None:
+        flux_fn = spec.surface_theta_flux_fn
+        t0 = float(spec.t_start_s)
+
+        def _w_th_s(t):
+            return jnp.asarray(flux_fn(jnp.asarray(t) + t0),
+                               dtype=jnp.float64)
+    else:
+        flux = jnp.asarray(spec.sfc_theta_flux_K_m_s)
+
+        def _w_th_s(_t):
+            return flux                       # CONSTANT, stays concrete
+
     forcing = SCMForcing(
         f_c=float(spec.f_c),
         u_geo=(lambda _t: u_geo) if spec.f_c != 0.0 else None,
         v_geo=(lambda _t: v_geo) if spec.f_c != 0.0 else None,
         prescribe="fluxes",
-        # CONSTANT, so it stays concrete under tracing.
-        w_th_s=lambda _t: flux,
+        w_th_s=_w_th_s,
     )
 
     return AnalyticSCMCase(

@@ -1050,3 +1050,41 @@ def test_a_finished_report_carries_no_partial_banner(tmp_path):
     payload = json.loads((tmp_path / "tuned_parameters.json").read_text())
     assert payload["run_complete"] is True
     assert payload["schemes_missing"] == []
+
+
+# --- a time-varying flux is never frozen into the closure's scalar ----------
+
+def test_a_time_varying_flux_is_not_handed_to_the_closure():
+    """SurfaceLayerConfig carries ONE scalar. Handing Wangara's diurnal cycle
+    to it froze the 09:00 value for all 8 h AND switched the SCMForcing
+    channel off, so the SCM ran a constant 113.4 W/m^2 against an LES driven
+    by the cycle. Every closure then scored ~9x the LES profile's own spread
+    there -- scheme-independent, i.e. the arm, not the closures.
+    """
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    wangara = load_analytic_scm_case("wangara", nlev=16, dt=10.0)
+    assert wangara.forcing.prescribe == "fluxes"
+    assert drv.deck_surface_scalar_fluxes(wangara) is None, (
+        "a case whose flux varies in time must decline the handover")
+
+    surface = drv.build_surface_config(wangara, flux_to_closure=True)
+    assert surface.prescribed_shflx_w_m2 is None
+    assert surface.prescribed_lhflx_w_m2 is None
+
+
+@pytest.mark.parametrize("case_name", ["cbl", "gabls1"])
+def test_a_steady_flux_is_still_handed_over(case_name):
+    """NON-VACUOUS: the refusal must be specific to the time-varying case, or
+    it has silently disabled the flag everywhere."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case(case_name, nlev=16, dt=10.0)
+    got = drv.deck_surface_scalar_fluxes(case)
+    assert got is not None, case_name
+    shf, lhf = got
+    assert abs(shf) > 1.0 and lhf == 0.0, (case_name, shf, lhf)
+    surface = drv.build_surface_config(case, flux_to_closure=True)
+    assert surface.prescribed_shflx_w_m2 == pytest.approx(shf)
