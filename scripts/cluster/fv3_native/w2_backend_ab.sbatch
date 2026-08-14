@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=11:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/w2_backend_ab_%j.log
 # Williamson-2 duo stepper, NumPy arm vs JAX arm, ONE VARIABLE: --backend.
 #
@@ -63,7 +63,7 @@ echo "PINNED sha: $(git rev-parse HEAD)"
 
 N=24
 DT=450
-DAYS=2
+DAYS=5
 COMMON="--n $N --dt $DT --days $DAYS --d-ext 0.0 --k2e-nord 2 --ext-bundle --oracle-conventions"
 echo "COMMON FLAGS: $COMMON   (the ONLY difference between arms is --backend)"
 
