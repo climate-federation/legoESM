@@ -102,6 +102,46 @@ arm nemo_z0_placement --cfg-override tke_surface_bc_level=nemo_z0
 #   CONFIRMED : <= 1.2.   CONTRIBUTOR : 1.2-1.6.   REFUTED : >= 1.6.
 arm alpha_tke_nemo   --cfg-override alpha_tke=1.0
 arm nemo_diss_split  --cfg-override dissipation_discretization=nemo_1p5_split
+# ---- ROUND 2: the gaps the card audit flagged, plus the CUMULATIVE arm -----
+# alpha_tke=1.0 is now the CARD DEFAULT (618db20a2), so `baseline` above is
+# already the alpha-fixed card and these are one variable off THAT.
+#   veros_dz_slots: codex 9405117 #2 -- NEMO's zzd divides by e3t*e3w, which is
+#     flux form (gradient across the T cell, divergence into the W control
+#     volume). legoESM maps dz_cell->e3t and dz_half->e3w ONLY in the slots
+#     branch; the legacy default uses dz_half TWICE. So the coefficient is now
+#     NEMO's but the STENCIL is not. This is the sixth gap and it was on my
+#     auditor's ignore list until codex pulled it off.
+#   n2_mode=nemo_bn2: the card clips in-situ N2, which carries a
+#     compressibility bias (+4.3e-5 measured in a prior session, enough to
+#     stop the EVD trigger firing in the Arctic). It sets BOTH the buoyancy
+#     length and the buoyancy sink.
+#   nemo_face_native: NEMO's zdf_sh2 with the coastal doubling. EXPECTED TO
+#     RAISE here -- it needs a per-level wet mask (z_coord.is_active) that a
+#     column probe has no way to supply. Kept in deliberately: a clean raise
+#     is the honest answer that this instrument CANNOT test it, and the widened
+#     log filter will now show the reason instead of a bare rc=1.
+#   cumulative: every faithful option this session identified, together. That
+#     is the question the one-at-a-time arms cannot answer -- do they CONVERGE
+#     on NEMO or trade against each other?
+# PRE-REGISTERED on the cumulative arm, antarctic K_M/avm (zero-step reference
+# on the same interfaces is 0.861, NEMO's own avm rises 5% over the hour):
+#   CLOSURE CLOSED     : 0.85 to 1.20.
+#   IMPROVED NOT CLOSED: 0.60-0.85 or 1.20-1.40.
+#   NOT CONVERGING     : outside that -- the options trade against each other
+#     and the remaining error is structural, not a config gap.
+arm veros_dz_slots   --cfg-override veros_dz_slots=True
+arm n2_nemo_bn2      --cfg-override n2_mode=nemo_bn2
+# face_native_shear REMOVED as an arm: tke_vertical_mixing requires
+# u_face_now/v_face_now/u_face_before/v_face_before AND face_masks_3d (the raw
+# C-grid face state plus per-level wumask/wvmask/coast masks, zdfsh2.F90:78-94).
+# A column probe has flattened the face topology away and CANNOT supply them.
+# This gap is only testable on the real grid path (k_profiles), i.e. a tripole
+# run -- not offline. Recorded rather than silently dropped.
+arm cumulative       --cfg-override veros_dz_slots=True \
+                     --cfg-override n2_mode=nemo_bn2 \
+                     --cfg-override dissipation_discretization=nemo_1p5_split \
+                     --cfg-override tke_mxl_choice=4 \
+                     --cfg-override tke_surface_bc_level=nemo_z0
 
 echo; echo "=== ALL DONE (failed arms: $NFAIL) ==="
 exit $((NFAIL > 0))

@@ -80,8 +80,19 @@ for _p in ("ocean", "core"):
 sys.path.insert(0, str(_REPO))
 
 from global_tracer_content import (  # noqa: E402
-    load_mesh_latitude, load_mesh_metrics,
+    load_mesh_depth_1d, load_mesh_latitude, load_mesh_metrics,
 )
+
+
+def _mesh_gdepw(mesh_mask_path):
+    """gdepw_1d interface ladder — same accessor arctic_n2_compare.py uses."""
+    import netCDF4 as nc
+    ds = nc.Dataset(mesh_mask_path)
+    try:
+        return np.asarray(ds.variables["gdepw_1d"][:],
+                          dtype=np.float64).squeeze()
+    finally:
+        ds.close()
 
 _BANDS = (
     ("antarctic_S_of_45S", -91.0, -45.0),
@@ -376,6 +387,23 @@ def main() -> int:
             lat_deg=jnp.asarray(lat.reshape(ncol)), ice_frac=None,
             dz_ref=jnp.asarray(dz_ref_1d),
             jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
+            # Geometric depth ladders, required by n2_mode="nemo_bn2" and
+            # ignored by the "insitu" default -- passed unconditionally so
+            # every ablation arm stays ONE variable.
+            t_depth=jnp.asarray(load_mesh_depth_1d(a.mesh_mask)),
+            w_depth=jnp.asarray(_mesh_gdepw(a.mesh_mask)[1:]),
+            # BEFORE velocities go in ONLY when the shear form consumes them.
+            # tke_vertical_mixing has a silent-no-op guard that RAISES if they
+            # are supplied under 'squared_centered' -- passing them
+            # unconditionally (to keep arms one-variable) therefore broke every
+            # arm at once, 12 failures. The guard is right and the probe was
+            # wrong. A NEMO 5 RK3 restart carries no ub/vb (checked: only
+            # un/vn); at a restart before == now, which is what NEMO starts
+            # from, so the now x before product degenerates to the square.
+            **({"u_before_cell": jnp.asarray(u_c),
+                "v_before_cell": jnp.asarray(v_c)}
+               if cfg.tke_shear_production in ("nemo_face_native",
+                                               "nemo_burchard") else {}),
             # z=0-to-first-cell-centre distance, required by
             # tke_surface_bc_level="nemo_z0" (tke.py:1268) and ignored by the
             # "interior_pinned" default, so passing it unconditionally keeps
