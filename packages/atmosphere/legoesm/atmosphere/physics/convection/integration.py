@@ -545,8 +545,10 @@ def _make_hydrostatic_convection(
                 # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
                 # Python bool on scheme_config, not a traced array).
                 # Land fraction for the leaf's land/ocean split.  Read off the
-                # GRID, the canonical carrier (``VoronoiMesh.land_frac`` /
-                # ``CubedSphereGrid.land_frac``), exactly as the gravity-wave
+                # GRID.  Only ``VoronoiMesh`` carries it today -- the driver
+                # attaches it there and nowhere else -- so on a structured grid
+                # this stays None and the leaf keeps its ocean branch, exactly
+                # as before.  This is how the gravity-wave
                 # leaf reaches it on this same bridge.  Until this existed the
                 # MPAS lane called the leaf with NO land fraction, so the
                 # sub-cloud rain evaporation used the OCEAN relative-humidity

@@ -240,17 +240,25 @@ def test_a_gradient_reaches_the_subcloud_evaporation_scale():
 
 
 def test_the_mpas_convection_bridge_passes_the_grid_land_fraction():
-    """The bridge must hand the leaf a land fraction, or every land-specific
-    behaviour in the scheme is dead on the lane the campaign runs.
+    """CALL the bridge and assert the leaf received the mask.
 
-    This is an end-to-end assertion on the BRIDGE, not on the leaf: the leaf
-    tests above force ``land_frac=1`` themselves and would keep passing while
-    production never supplied one -- which is exactly the state this repairs.
+    The first version of this test asserted two source strings and never
+    invoked anything, so reverting the fix would have failed it for the wrong
+    reason and any rewrite of the same logic would have failed it for no
+    reason. Codex caught that. This one runs the bridge the MPAS lane builds
+    and inspects what the leaf was actually handed.
     """
     import types
 
-    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.convection import integration as ci
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    ncol, nlev = 8, 12
+    land = np.zeros(ncol)
+    land[:3] = 1.0                                   # three land columns
 
     seen = {}
     real = ci.bechtold_convection
@@ -259,27 +267,57 @@ def test_the_mpas_convection_bridge_passes_the_grid_land_fraction():
         seen["land_frac"] = k.get("land_frac")
         return real(*a, **k)
 
-    ncol, nlev = 6, 12
-    T, q, pf, ph, u, v = _column(ncol=ncol, nlev=nlev)
-    land = np.zeros(ncol)
-    land[:3] = 1.0                       # half the columns are land
-
+    sigma = create_sigma_coordinate(nlev)
+    p_s = jnp.full((ncol,), 1.0e5)
+    T = jnp.broadcast_to(jnp.linspace(295.0, 220.0, nlev)[None, :], (ncol, nlev))
+    q = jnp.broadcast_to(jnp.linspace(0.015, 1e-5, nlev)[None, :], (ncol, nlev))
+    state = HydrostaticState(
+        u=Field(jnp.zeros((ncol, nlev))), T=Field(T),
+        p_s=Field(p_s), phis=Field(jnp.zeros((ncol,))),
+        v=Field(jnp.zeros((ncol, nlev))), tracers={"q_v": Field(q)})
     grid = types.SimpleNamespace(grid_shape_2d=(ncol,), land_frac=land)
+
+    # Patch BEFORE building: the factory resolves the leaf into its closure at
+    # construction time, so a spy installed afterwards is never reached -- the
+    # first version of this test did exactly that and reported the fix missing.
     ci.bechtold_convection = spy
     try:
         fn = ci.make_convection_physics(
             ConvectionConfig(scheme="bechtold"), model_type="mpas", dt=600.0)
-        assert fn is not None
+        fn(state, grid, sigma)
     finally:
         ci.bechtold_convection = real
 
-    # The bridge reads the mask off the grid object it is handed; assert the
-    # canonical field is the one it looks for, so a rename cannot quietly
-    # reintroduce the defect.
-    assert hasattr(grid, "land_frac")
-    src = __import__("inspect").getsource(ci)
-    assert 'getattr(grid, "land_frac", None)' in src, (
-        "the convection bridge no longer reads the grid's land fraction; the "
-        "land RH break and the diurnal CAPE term both go inert without it")
-    assert "land_frac=_land_frac," in src, (
-        "the land fraction is read but not passed to the leaf")
+    got = seen.get("land_frac", "NEVER CALLED")
+    assert got is not None and not isinstance(got, str), (
+        "the convection bridge handed the leaf no land fraction: every "
+        "land-dependent behaviour in the scheme is inert on this lane")
+    got = np.asarray(got)
+    assert got.shape == (ncol,), got.shape
+    assert np.allclose(got, land), "the mask reached the leaf altered"
+
+
+def test_the_bridge_refuses_a_land_mask_of_the_wrong_length():
+    import types
+
+    from legoesm.atmosphere.physics.convection import integration as ci
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    ncol, nlev = 8, 12
+    sigma = create_sigma_coordinate(nlev)
+    state = HydrostaticState(
+        u=Field(jnp.zeros((ncol, nlev))),
+        T=Field(jnp.broadcast_to(jnp.linspace(295.0, 220.0, nlev)[None, :],
+                                 (ncol, nlev))),
+        p_s=Field(jnp.full((ncol,), 1.0e5)),
+        phis=Field(jnp.zeros((ncol,))), v=Field(jnp.zeros((ncol, nlev))),
+        tracers={"q_v": Field(jnp.full((ncol, nlev), 5e-3))})
+    grid = types.SimpleNamespace(grid_shape_2d=(ncol,),
+                                 land_frac=np.zeros(ncol + 1))
+    fn = ci.make_convection_physics(
+        ConvectionConfig(scheme="bechtold"), model_type="mpas", dt=600.0)
+    with pytest.raises(ValueError, match="land_frac"):
+        fn(state, grid, sigma)
