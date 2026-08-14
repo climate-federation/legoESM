@@ -67,6 +67,7 @@ run "rebuild the step-8760 restart WITH the zdftke coefficients" \
 run "zero-step closure: our l_k and K_M vs NEMO's own zmxlm and avm_k" \
   $PY -u scripts/validate/ocean_fidelity/nemo_zero_step_closure.py \
     --restart-npz $FULL --mesh-mask "$MESH" \
+    --trd-tfile $TRD2/ORCA1_1h_20010101_20010101_trd1h_T.nc --trd-rec 0 \
     --out-json $OUT/step8760.json
 
 echo; echo "=== ALL DONE (failed stages: $NFAIL) ==="
