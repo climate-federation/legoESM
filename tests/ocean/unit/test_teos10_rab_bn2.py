@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import math
 
+import jax.numpy as jnp
+
 import numpy as np
 import pytest
 
@@ -270,7 +272,6 @@ class TestProductionWiring:
 
     def test_compute_n2_forwards_the_eos_form(self):
         """The forward that was missing. Must CHANGE the answer, not just pass."""
-        import jax.numpy as jnp
         import numpy as np
         from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
         nlev = 10
@@ -326,47 +327,72 @@ class TestCrossGridAndEndToEnd:
     a clip would plausibly come back.
     """
 
-    def test_both_bridges_get_identical_ladders(self):
-        """Cross-grid equality, at the input the bridges actually differ in.
+    def test_ladders_are_live_not_static(self):
+        """The MPAS bridge must CONSUME eta, not just be handed a ladder.
 
-        The tripole C-grid path and the MPAS path build the depth ladders
-        with separate call sites. Feed both the same eta/H and require the
-        ladders — and hence the N^2 — to be bit-identical.
+        My first attempt at this test called ``nemo_bn2_live_ladders`` twice
+        with the same arguments and asserted the two results matched. That is
+        trivially true and proves nothing about either bridge -- the exact
+        cannot-fail pattern this file exists to avoid. The defect codex 9408814
+        actually found was MPAS calling the STATIC ladder helper, which agrees
+        with the live one only at eta = 0.
+
+        So the discriminating measurement is the one the defect would fail:
+        raise eta and require the diffusivity to MOVE. A static-ladder
+        regression makes the two runs identical.
         """
-        import jax.numpy as jnp
         import numpy as np
-        from legoesm.ocean.eos import (
-            compute_buoyancy_frequency_nemo_bn2, nemo_bn2_live_ladders)
+        from legoesm.core.field import Field
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            TKEConfig, VerticalMixingConfig)
+        from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+            make_tke_profiles_mpas)
         from legoesm.ocean.vertical import create_ocean_z_star
 
-        z = create_ocean_z_star(n_levels=8, H_max=4000.0)
-        rng = np.random.default_rng(1226)
-        eta = jnp.asarray(rng.uniform(-0.8, 0.8, size=(12,)))
-        H = jnp.asarray(rng.uniform(500.0, 4000.0, size=(12,)))
-        T = jnp.asarray(rng.uniform(-1.5, 28.0, size=(12, 8)))
-        S = jnp.asarray(rng.uniform(31.0, 37.0, size=(12, 8)))
+        mesh = create_voronoi_mesh(subdivision_level=1)
+        z = create_ocean_z_star(n_levels=6, H_max=4000.0)
+        st = rest_state_mpas_ocean(
+            mesh, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0, land_lat_threshold=85.0)
+        pf = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(n2_mode="nemo_bn2", n2_eos_form="teos10")))
 
-        # Both bridges call this same helper with these same three args --
-        # k_profiles.py (tripole) and mpas_integration.py (MPAS).
-        t_a, w_a = nemo_bn2_live_ladders(z, eta, H)
-        t_b, w_b = nemo_bn2_live_ladders(z, eta, H)
-        assert np.array_equal(np.asarray(t_a), np.asarray(t_b))
-        assert np.array_equal(np.asarray(w_a), np.asarray(w_b))
+        flat = pf(st, mesh, z)[1]
+        # A large but physical z* excursion, so the stretch 1+eta/H_bathy is
+        # unambiguously different from 1.
+        # Field is a plain pytree class, not a NamedTuple -- rebuild it.
+        raised = st._replace(eta=Field(
+            data=jnp.full_like(st.eta.data, 40.0),
+            name=st.eta.name, dims=st.eta.dims, units=st.eta.units))
+        moved = pf(raised, mesh, z)[1]
 
-        n2 = compute_buoyancy_frequency_nemo_bn2(
-            T, S, t_a, w_a, eos_form="teos10")
-        n2_b = compute_buoyancy_frequency_nemo_bn2(
-            T, S, t_b, w_b, eos_form="teos10")
-        assert np.array_equal(np.asarray(n2), np.asarray(n2_b))
-        assert np.all(np.isfinite(np.asarray(n2)))
+        assert np.all(np.isfinite(np.asarray(moved)))
+        assert not np.allclose(np.asarray(flat), np.asarray(moved)), (
+            "eta did not change the MPAS diffusivity -- the bridge is on "
+            "STATIC depth ladders, so it runs a different N^2 from the "
+            "tripole path and the cross-grid comparison is invalid")
 
-        # Non-vacuity: eta must actually MOVE the ladders, otherwise this
-        # equality is the trivial one and a static-ladder regression on
-        # either bridge would slip through (that regression really happened
-        # on MPAS -- codex 9408814 #2).
-        t_flat, _ = nemo_bn2_live_ladders(z, jnp.zeros_like(eta), H)
-        assert not np.allclose(np.asarray(t_a), np.asarray(t_flat)), (
-            "eta does not move the ladders; the equality above is vacuous")
+    def test_both_bridges_share_one_ladder_helper(self):
+        """Cross-grid equality reduces to both bridges calling ONE helper.
+
+        Asserting the helper equals itself is vacuous, so what is checked
+        here is the thing that can actually drift: that neither bridge has
+        grown its own ladder construction. Source-level, and deliberately
+        narrow -- the execution check above is what proves MPAS uses eta.
+        """
+        import inspect
+        from legoesm.ocean.physics.vertical_mixing import (
+            k_profiles, mpas_integration)
+        for mod in (k_profiles, mpas_integration):
+            src = inspect.getsource(mod)
+            assert "nemo_bn2_live_ladders" in src, (
+                f"{mod.__name__} does not use the shared live-ladder helper")
+            assert "nemo_bn2_depth_ladders(" not in src, (
+                f"{mod.__name__} calls the STATIC ladder helper; under z* it "
+                f"agrees with the live one only at eta = 0")
 
     def test_production_consumes_negative_bn2_as_buoyancy_production(self):
         """End-to-end: an inverted column must gain TKE from the signed N^2.
@@ -377,7 +403,6 @@ class TestCrossGridAndEndToEnd:
         re-inserted anywhere between the config and the kernel kills the
         difference and fails this test.
         """
-        import jax.numpy as jnp
         import numpy as np
         from legoesm.ocean.eos import nemo_bn2_live_ladders
         from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
