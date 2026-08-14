@@ -254,6 +254,7 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         apply_dino_lat_lon_surface_forcing,
         dino_lat_lon_model_config,
         dino_lat_lon_surface_forcing_arrays,
+        dino_step_surface_forcing,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
 
@@ -283,6 +284,20 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 
+    # #1455 retraction fix: the card routes the WIND MOMENTUM through
+    # model.step(surface_forcing=sf), NOT through the analytic
+    # apply_dino_lat_lon_surface_forcing applicator (which carries only
+    # heat/salt/SW). Passing surface_forcing=None (the retracted bug) drops
+    # the wind entirely -> a fabricated per-step residual. Mirror production
+    # (run_dino.py:665-670,763-767) exactly: build sf iff wind_through_step.
+    _wind = bool(getattr(cfg, "wind_through_step", False))
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
+    _tau_lo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    _tau_hi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    print(f"FORCING: wind_through_step={_wind} "
+          f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
+          f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]", flush=True)
+
     tmask3 = np.asarray(g.tmask) > 0.5
     umask3 = np.asarray(g.umask) > 0.5
     vmask3 = np.asarray(g.vmask) > 0.5
@@ -308,7 +323,7 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         else:
             st = apply_dino_lat_lon_surface_forcing(
                 st, forcing, br.z_coord, cfg, dt, t_seconds=k * dt)
-        st = model.step(st, dt, surface_forcing=None, external_tracer_rate=ext_rate)
+        st = model.step(st, dt, surface_forcing=sf_step, external_tracer_rate=ext_rate)
 
         # --- path 1: now-level state vs NEMO's restart at the SAME step ---
         ns = nemo_now_state_at(kt, run_twin_step1=run_twin_step1)

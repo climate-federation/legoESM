@@ -161,7 +161,8 @@ def phase_b(kts, ht_0, wet2):
     from legoesm.ocean.experiments.dino import (
         apply_dino_lat_lon_surface_forcing,
         dino_lat_lon_model_config,
-        dino_lat_lon_surface_forcing_arrays)
+        dino_lat_lon_surface_forcing_arrays,
+        dino_step_surface_forcing)
 
     if not mr.have_step1_artifacts():
         print("SKIP phase B: RUN_TWIN_STEP1 artifacts absent")
@@ -192,18 +193,38 @@ def phase_b(kts, ht_0, wet2):
         model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
         forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 
+        # #1455 retraction fix: the card routes the WIND MOMENTUM through
+        # model.step(surface_forcing=sf) (run_dino.py:665-670,763-767), NOT
+        # through the analytic applicator. surface_forcing=None dropped the
+        # wind and fabricated the 4.2e-3 m/step eta injection this walk
+        # localises. Mirror production: sf iff wind_through_step.
+        # DINO_SEAM_WIND=0 forces the wind OFF -- the Rule-1e continuity
+        # control that reproduces the retracted (wind-off) measurement so the
+        # wind-on flip is a single-variable change. Default (unset/"1") = the
+        # faithful card behavior (wind on iff wind_through_step).
+        _wind = bool(getattr(cfg, "wind_through_step", False))
+        if os.environ.get("DINO_SEAM_WIND", "1") == "0":
+            _wind = False
+        sf_step = dino_step_surface_forcing(forcing) if _wind else None
+        if jj == 0:
+            _tlo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+            _thi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+            print(f"  FORCING: wind_through_step={_wind} "
+                  f"surface_stress_implicit={getattr(cfg,'surface_stress_implicit',None)} "
+                  f"tau_x[Pa] range=[{_tlo:.4f},{_thi:.4f}]")
+
         placement = getattr(cfg, "surface_tendency_placement", "applied_now")
         t_sec = (jj + 1) * DT
         if placement == "leapfrog_rhs":
             st, rate = apply_dino_lat_lon_surface_forcing(
                 st0, forcing, br.z_coord, cfg, DT, t_seconds=t_sec,
                 return_rate=True)
-            st = model.step(st, DT, surface_forcing=None,
+            st = model.step(st, DT, surface_forcing=sf_step,
                             external_tracer_rate=rate)
         else:
             st = apply_dino_lat_lon_surface_forcing(
                 st0, forcing, br.z_coord, cfg, DT, t_seconds=t_sec)
-            st = model.step(st, DT, surface_forcing=None,
+            st = model.step(st, DT, surface_forcing=sf_step,
                             external_tracer_rate=None)
         eta_k = np.asarray(st.eta.data)
         ssh_bt_k = _load2d("seq_dump_r3t_aaa", kt) * ht_0

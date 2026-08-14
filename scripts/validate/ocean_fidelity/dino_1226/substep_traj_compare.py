@@ -155,7 +155,7 @@ def main():
     g, br, cfg, st0 = mr.build_replay_ic()
     from legoesm.ocean.experiments.dino import (
         apply_dino_lat_lon_surface_forcing, dino_lat_lon_model_config,
-        dino_lat_lon_surface_forcing_arrays)
+        dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing)
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
@@ -165,13 +165,26 @@ def main():
           f"reconcile={mc.barotropic.barotropic_reconcile_target!r}")
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+    # #1455 retraction fix: route the WIND MOMENTUM through
+    # model.step(surface_forcing=sf) as production does (run_dino.py:665-670,
+    # 763-767); surface_forcing=None dropped the wind and fabricated the
+    # F_slow residual. The wind ENTERS the substep loop's F_slow, so this
+    # probe -- which compares the barotropic substep trajectory -- MUST carry
+    # it or it measures the wrong F_slow.
+    _wind = bool(getattr(cfg, "wind_through_step", False))
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
+    _tau_lo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    _tau_hi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    print(f"  FORCING: wind_through_step={_wind} "
+          f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
+          f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]")
     DT = 2700.0
     st, rate = apply_dino_lat_lon_surface_forcing(
         st0, forcing, br.z_coord, cfg, DT, t_seconds=DT, return_rate=True)
     # Run EAGER (disable_jit) so the fori->scan tee yields CONCRETE carries
     # across the jit boundary (fp64, one baroclinic step -- cheap).
     with jax.disable_jit():
-        st = model.step(st, DT, surface_forcing=None, external_tracer_rate=rate)
+        st = model.step(st, DT, surface_forcing=sf_step, external_tracer_rate=rate)
 
     if captured["carries"] is None:
         raise SystemExit("did not capture the substep carries (fori path?)")
@@ -334,11 +347,19 @@ def main():
     # must reproduce the independently-JITTED hu_avg_perface_diff wall/interior
     # bias -- if the tee perturbed the physics, these would diverge.  Assert,
     # don't just print (Rule: never trust a probe's own verdict).
-    assert abs(_fw - 0.879) < 2e-3, (
-        f"jit-parity BROKEN: final wall bias {_fw:.4e} != hu_avg_perface_diff "
-        "0.879 -- the disable_jit tee perturbed the physics")
-    assert abs(_fi - 0.589) < 2e-3, (
-        f"jit-parity BROKEN: final interior bias {_fi:.4e} != 0.589")
+    # #1455: the 0.879/0.589 reference values are WIND-OFF measurements
+    # (hu_avg_perface_diff predates the retraction) -- with the wind now
+    # correctly passed through model.step the wall bias collapses, so the pin
+    # only applies when the wind is off (sf_step None).
+    if sf_step is None:
+        assert abs(_fw - 0.879) < 2e-3, (
+            f"jit-parity BROKEN: final wall bias {_fw:.4e} != hu_avg_perface_diff "
+            "0.879 -- the disable_jit tee perturbed the physics")
+        assert abs(_fi - 0.589) < 2e-3, (
+            f"jit-parity BROKEN: final interior bias {_fi:.4e} != 0.589")
+    else:
+        print("  (jit-parity pin vs hu_avg_perface_diff 0.879/0.589 SKIPPED: "
+              "those are wind-off reference values; this run is wind-on)")
 
     # ===================================================================
     # DECOMPOSE: is the drift in the VELOCITY trajectory (U_bar vs un_e) or in
