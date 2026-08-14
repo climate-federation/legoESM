@@ -180,9 +180,25 @@ def parse_args():
                    help="Stevens-LW recompute cadence [steps].")
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=8)
-    p.add_argument("--case-label", type=str, default="dycoms")
+    p.add_argument("--case-label", type=str, default=None,
+                   help="Label stamped into every recorded frame, which "
+                        "`legoesm.training.les_reference` checks against the "
+                        "case it is asked to build. DEFAULTS TO --case; pass "
+                        "it only to override. It used to default to the "
+                        "literal 'dycoms' for BOTH decks, so `--case astex` "
+                        "without this flag stamped a genuine 6 h ASTEX run "
+                        "(domain top 1995 m against DYCOMS's 1496 m) as "
+                        "'dycoms', and the reference loader refused it.")
     p.add_argument("--output", type=Path, default=Path("results/les_dycoms"))
     args = p.parse_args()
+    # The frame label follows the case unless it was given explicitly. The old
+    # literal default meant the ONE field that identifies a reference was wrong
+    # precisely when it mattered: `--case astex` produced 6 h of genuine ASTEX
+    # stamped "dycoms", which the reference loader then refused (and should --
+    # accepting the alias would let a real DYCOMS directory become the ASTEX
+    # reference). Both deck names ARE the reference registry's names here, so
+    # unlike run_spectral_cbl.py no mapping is needed.
+    args.case_label = args.case_label or args.case
     # Resolve the case's own defaults, letting an explicit flag win. argparse
     # cannot tell "given" from "equal to the default", so the overridable
     # fields default to None and are filled in here.
