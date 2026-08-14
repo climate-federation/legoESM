@@ -218,10 +218,36 @@ def main() -> int:
     avm_i = np.nan_to_num(cols(avm3)[:, 1:], nan=0.0)
 
     dz_ref_1d = np.nanmax(dz_c, axis=0)
+    # REAL ln_mxl0 SURFACE ANCHOR (codex 9405117 #4 named the windless floor as
+    # a reconstruction gap, and it is a big one). NEMO: zraug = vkarmn*2e5/
+    # (rho0*grav); zmxlm(1) = zraug*taum, floored at rn_mxl0 (zdftke.F90:575,
+    # 602) -- LINEAR in the stress modulus, not a square root. zraug is ~7.95,
+    # so a 0.2 N/m2 wind gives ~1.6 m and a Southern Ocean storm ~2.8 m,
+    # against the 0.04 m floor this probe used before. A too-short anchor
+    # shortens lup near the surface and therefore UNDERSTATES our l_k -- which
+    # is the direction of the 0.86 zero-step ratio, so the ratio may have been
+    # measuring the probe rather than the model.
+    _anchor = np.full((ncol,), cfg.mxl0_min_m)
+    _anchor_src = f"windless floor rn_mxl0={cfg.mxl0_min_m:g} m"
+    if a.trd_tfile:
+        import netCDF4 as _nc
+        _ds = _nc.Dataset(a.trd_tfile)
+        try:
+            _tm = np.ma.filled(np.ma.masked_invalid(
+                _ds.variables["taum"][a.trd_rec]), 0.0).astype(np.float64)
+        finally:
+            _ds.close()
+        _zraug = 0.4 * 2.0e5 / (constants.rho_ocean * constants.g)
+        _anchor = np.maximum(cfg.mxl0_min_m,
+                             _zraug * np.maximum(_tm.reshape(ncol), 0.0))
+        _anchor_src = (f"NEMO zraug={_zraug:.3f} x taum  "
+                       f"(median {np.median(_anchor):.3f} m, "
+                       f"p90 {np.percentile(_anchor, 90):.3f} m)")
+    print(f"[anchor] ln_mxl0 surface length: {_anchor_src}")
     l_k, l_eps = compute_mixing_lengths(
         jnp.asarray(en_i), jnp.asarray(N2), jnp.asarray(dz_half), cfg,
         signed_n2=False, dz_cell=jnp.asarray(dz_c), boundary_cap=None,
-        l_surface_anchor=jnp.full((ncol,), cfg.mxl0_min_m))
+        l_surface_anchor=jnp.asarray(_anchor))
     l_k = np.asarray(l_k)
     K_M, K_H = compute_K_from_tke(
         jnp.asarray(en_i), jnp.asarray(l_k), cfg, N2=jnp.asarray(N2),
