@@ -66,6 +66,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from legoesm import constants  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
+from legoesm.training.scm_rce_metrics import subcloud_bulk_state  # noqa: E402
 from scripts.run.run_scm_rce_campaign import (  # noqa: E402
     FIXED_SST_K,
     SECONDS_PER_DAY,
@@ -119,21 +120,31 @@ def surface_humidity_row(
 ) -> SurfaceHumidityRow:
     """Bulk-flux decomposition of one column's lowest level.
 
-    Pure: every array operation is on scalars, so this is the unit under test.
+    The humidity/temperature state comes from
+    ``legoesm.training.scm_rce_metrics.subcloud_bulk_state`` — the SAME helper
+    the campaign records per run — so a probe number and a checkpoint number
+    can never disagree.  Only the transfer residual, which needs an
+    evaporation rate the campaign already stores separately, is formed here.
     """
-    r_sat_sfc = float(saturation_mixing_ratio(np.float64(sst_K), np.float64(p_sfc_Pa)))
-    r_sat_air = float(saturation_mixing_ratio(np.float64(T_air_K), np.float64(p_air_Pa)))
-    driver = r_sat_sfc - float(r_air)
+    rh, driver, delta_T = subcloud_bulk_state(
+        T_air_K=np.float64(T_air_K),
+        r_air=np.float64(r_air),
+        p_air_Pa=np.float64(p_air_Pa),
+        sst_K=np.float64(sst_K),
+        p_sfc_Pa=np.float64(p_sfc_Pa),
+    )
+    driver = float(driver)
     transfer = float(evap_mm_day) / driver if driver != 0.0 else float("nan")
     return SurfaceHumidityRow(
         label=label,
         T_air_K=float(T_air_K),
         p_air_Pa=float(p_air_Pa),
         r_air=float(r_air),
-        r_sat_air=r_sat_air,
-        relative_humidity=float(r_air) / r_sat_air,
+        r_sat_air=float(saturation_mixing_ratio(
+            np.float64(T_air_K), np.float64(p_air_Pa))),
+        relative_humidity=float(rh),
         driver_kg_kg=driver,
-        delta_T_K=float(sst_K) - float(T_air_K),
+        delta_T_K=float(delta_T),
         evap_mm_day=float(evap_mm_day),
         evap_source=evap_source,
         transfer_mm_day_per_kg_kg=transfer,

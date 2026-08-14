@@ -177,6 +177,113 @@ def score_profiles_precip_jax(
     return T_rmse, qv_rmse, cloud_rmse, precip_rmse, combined
 
 
+#: Top of the layer treated as "sub-cloud" [m].  Set from the CRM reference's
+#: own structure rather than convention: its condensate has a shallow-cumulus
+#: maximum at 1.3 km, so 1 km is below cloud base and the layer being scored is
+#: the one the surface fluxes and the downdrafts ventilate.  Configurable
+#: because a different reference has a different cloud base.
+DEFAULT_SUBCLOUD_TOP_M = 1000.0
+
+
+def subcloud_mass_weights(
+    z_m: jax.Array,
+    mass_weights: jax.Array,
+    *,
+    top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+) -> jax.Array:
+    """Mass weights restricted to ``z <= top_m`` and renormalized to sum to 1.
+
+    A column-mean RMSE dilutes the sub-cloud layer to invisibility: the layer
+    holds a few percent of the column mass, so an error there moves the total
+    score by less than the tuner's noise.  Scoring it with its own renormalized
+    weights makes it a first-class target while reusing the SAME normalized-RMSE
+    arithmetic as the full-column score, so the two are directly comparable.
+
+    Selecting no level is a hard error, never an all-zero weight vector that
+    would silently score every column identically.
+    """
+    z_m = jnp.asarray(z_m)
+    mass_weights = jnp.asarray(mass_weights, dtype=z_m.dtype)
+    if z_m.shape != mass_weights.shape:
+        raise ValueError(
+            f"subcloud_mass_weights: z_m {z_m.shape} and mass_weights "
+            f"{mass_weights.shape} must share a shape.")
+    mask = z_m <= jnp.asarray(top_m, dtype=z_m.dtype)
+    n_selected = int(jnp.sum(mask))
+    if n_selected == 0:
+        raise ValueError(
+            f"subcloud_mass_weights: no level at or below {top_m} m "
+            f"(lowest level is {float(jnp.min(z_m)):.1f} m).")
+    selected = jnp.where(mask, mass_weights, jnp.zeros_like(mass_weights))
+    total = jnp.sum(selected)
+    return selected / total
+
+
+def subcloud_bulk_state(
+    *,
+    T_air_K: jax.Array | float,
+    r_air: jax.Array | float,
+    p_air_Pa: jax.Array | float,
+    sst_K: jax.Array | float,
+    p_sfc_Pa: jax.Array | float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Near-surface bulk-flux state: ``(relative_humidity, driver, delta_T)``.
+
+    ``driver = r_sat(SST, p_sfc) - r_air`` [kg/kg] is the air-sea humidity
+    difference the bulk evaporation is proportional to, and ``delta_T =
+    SST - T_air`` [K] the one the sensible flux is proportional to.  Both are
+    formed from MIXING RATIOS on both sides — the CRM reference carries SAM's
+    native ``QV_avg``, a mixing ratio, and the SCM's ``q_v`` tracer is the same
+    quantity, so no specific-vs-mixing conversion belongs anywhere here.
+
+    Saturation comes from ``legoesm.thermo``; this module contains no
+    saturation numerics of its own.
+    """
+    from legoesm.thermo import saturation_mixing_ratio
+
+    T_air_K = jnp.asarray(T_air_K)
+    dtype = T_air_K.dtype
+    r_air = jnp.asarray(r_air, dtype=dtype)
+    r_sat_sfc = saturation_mixing_ratio(
+        jnp.asarray(sst_K, dtype=dtype), jnp.asarray(p_sfc_Pa, dtype=dtype))
+    r_sat_air = saturation_mixing_ratio(
+        T_air_K, jnp.asarray(p_air_Pa, dtype=dtype))
+    return (r_air / r_sat_air,
+            r_sat_sfc - r_air,
+            jnp.asarray(sst_K, dtype=dtype) - T_air_K)
+
+
+def score_subcloud_jax(
+    ref: Any,
+    T_profile: jax.Array,
+    qv_profile: jax.Array,
+    *,
+    subcloud_weights: jax.Array,
+    profile_floor: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Sub-cloud ``(T_rmse, qv_rmse, combined)``, same arithmetic as the column.
+
+    Each term is normalized by the reference's own SUB-CLOUD standard deviation
+    (the restricted weights enter the normalization as well as the RMSE), so a
+    value of 1 means "off by the spread the reference itself shows across this
+    layer" exactly as it does for the full-column score.  Condensate is
+    deliberately absent: this objective exists because the column score is
+    condensate-dominated, and re-admitting it here would reproduce that.
+    """
+    T_profile = jnp.asarray(T_profile)
+    dtype = T_profile.dtype
+    qv_profile = jnp.asarray(qv_profile, dtype=dtype)
+    weights = jnp.asarray(subcloud_weights, dtype=dtype)
+    floor = jnp.asarray(profile_floor, dtype=dtype)
+    T_rmse = normalized_profile_rmse(
+        jnp.asarray(ref.T_ref, dtype=dtype), T_profile, weights,
+        profile_floor=floor)
+    qv_rmse = normalized_profile_rmse(
+        jnp.asarray(ref.qv_ref, dtype=dtype), qv_profile, weights,
+        profile_floor=floor)
+    return T_rmse, qv_rmse, safe_sqrt((T_rmse ** 2 + qv_rmse ** 2) / 2.0)
+
+
 def moist_adiabat_diagnostics_jax(
     *,
     T_profile: jax.Array,

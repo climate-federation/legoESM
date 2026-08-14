@@ -142,7 +142,96 @@ _SIGNATURE_FIELDS = (
     # A column whose lowest level is pinned to the SST has no sensible heat
     # flux; that is a different experiment, not a tuning detail.
     "bl_anchor_top_m",
+    # WHICH boundary-layer scheme maintains the sub-cloud layer, WHAT the tuner
+    # minimises, WHICH parameters it is allowed to move, and where the
+    # sub-cloud layer is taken to end.  Each changes the experiment outright, so
+    # a checkpoint from one setting must never be reused under another.
+    "turbulence", "tune_mode", "objective", "focused_include", "subcloud_top_m",
 )
+
+
+#: What the tuner is allowed to move.  ``convection`` is the historical arm
+#: (every extended-tier parameter of the active convection scheme);
+#: ``focused`` searches ONE named cross-category set instead.  A typo must
+#: select nothing, so both the driver and ``evaluate_scheme`` raise.
+TUNE_MODES = ("convection", "focused")
+
+#: Categories the focused mode is allowed to touch.  A category whose active
+#: scheme has no tunable sub-config (convection="none") is skipped with a note.
+FOCUSED_TUNE_CATEGORIES = ("turbulence", "microphysics", "convection")
+
+#: THE SUB-CLOUD HYPOTHESIS, written down as parameters.
+#:
+#: Measured (job 9403110): our tuned columns sit at RH 0.82-0.99 with the
+#: lowest level within ~1 K of the SST, against the CRM's RH 0.752 and 3.06 K.
+#: The air-sea humidity difference that drives evaporation is therefore 26-59 %
+#: of the reference's, while the transfer coefficient residual is already
+#: 1.6-1.8x too LARGE — so the deficit is the state of the sub-cloud layer, not
+#: the surface exchange, and only two families of process set that state in an
+#: RCE column with no large-scale forcing:
+#:
+#: 1. how vigorously the boundary-layer scheme ventilates the layer, and
+#: 2. how much falling precipitation re-evaporates into it (directly in the
+#:    microphysics, and through the convection scheme's downdrafts).
+#:
+#: Each name below is registry-qualified; ``tune_focused_params`` raises if one
+#: matches no parameter of an active scheme, so this list cannot silently rot.
+SUBCLOUD_TURBULENCE_INCLUDE = {
+    "clubb": (
+        # Eddy diffusivity: Km = c_K * L * sqrt(TKE), and the scalar variants.
+        "atm.turb.CLUBBParams.c_K",
+        "atm.turb.CLUBBParams.c_K1",
+        "atm.turb.CLUBBParams.c_K2",
+        # Mixing length: the parcel entrainment rate and the floor/stability
+        # limiters that decide how deep the surface layer's mixing reaches.
+        "atm.turb.CLUBBParams.mu",
+        "atm.turb.CLUBBParams.Lscale_mu_coef",
+        "atm.turb.CLUBBParams.lmin_coef",
+        "atm.turb.CLUBBParams.lambda0_stability_coef",
+        "atm.turb.CLUBBParams.mult_coef",
+        # Dissipation time scale near the surface and in the background: how
+        # fast the layer forgets the flux it was given.
+        "atm.turb.CLUBBParams.C_invrs_tau_sfc",
+        "atm.turb.CLUBBParams.C_invrs_tau_bkgnd",
+    ),
+}
+
+#: Rain re-evaporation below cloud base.  ``evap_coeff`` scales the rate;
+#: the two ventilation coefficients set how it grows with drop Reynolds number,
+#: i.e. how much of the re-evaporation happens in the sub-cloud layer rather
+#: than aloft.
+SUBCLOUD_MICROPHYSICS_INCLUDE = {
+    "morrison": (
+        "atm.micro.MorrisonConfig.evap_coeff",
+        "atm.micro.MorrisonConfig.rain_vent_f1",
+        "atm.micro.MorrisonConfig.rain_vent_f2",
+    ),
+}
+
+#: The convective downdraft that carries the re-evaporated air DOWN.  Only the
+#: schemes that expose such a knob appear; for the others the focused set is
+#: turbulence + microphysics, which is reported rather than silently assumed.
+SUBCLOUD_CONVECTION_INCLUDE = {
+    "bechtold": ("atm.conv.BechtoldConfig.downdraft_evap_efficiency",),
+    "tiedtke": ("atm.conv.TiedtkeConfig.downdraft_evap_efficiency",),
+    "emanuel": ("atm.conv.EmanuelConfig.downdraft_efficiency",),
+}
+
+
+def default_focused_include(
+    *, turbulence: str, microphysics: str, convection: str,
+) -> tuple[str, ...]:
+    """The focused parameter set for one (turbulence, microphysics, convection).
+
+    Built per configuration rather than as one flat list because a name that
+    belongs to an INACTIVE scheme is a hard error in the tuner (by design), so
+    the default must contain exactly the knobs the active schemes own.
+    """
+    return (
+        SUBCLOUD_TURBULENCE_INCLUDE.get(turbulence, ())
+        + SUBCLOUD_MICROPHYSICS_INCLUDE.get(microphysics, ())
+        + SUBCLOUD_CONVECTION_INCLUDE.get(convection, ())
+    )
 
 
 def _run_signature(args) -> dict:
@@ -309,6 +398,11 @@ def evaluate_scheme(
     microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
     hard_saturation_adjustment: bool = False,
     bl_anchor_top_m: float = camp.DEFAULT_SCM_RCE_BL_TOP_M,
+    turbulence: str = camp.BASELINE_SCHEMES["turbulence"],
+    tune_mode: str = "convection",
+    objective: str = "combined",
+    focused_include: tuple[str, ...] = (),
+    subcloud_top_m: float = camp.DEFAULT_SUBCLOUD_TOP_M,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -322,11 +416,16 @@ def evaluate_scheme(
     and before tuning, so BOTH see the same kernel — applying it later would
     tune under one kernel and report under another.
     """
+    if tune_mode not in TUNE_MODES:
+        raise ValueError(
+            f"evaluate_scheme: unknown tune_mode {tune_mode!r}; "
+            f"expected one of {TUNE_MODES}")
     cache: dict[str, "camp.RunDiagnostics"] = {}
     base_cfg = camp.make_physics_config(
         radiation=radiation,
         radiation_update_interval_steps=radiation_update_interval_steps,
         convection=scheme,
+        turbulence=turbulence,
         microphysics=microphysics,
         hard_saturation_adjustment=hard_saturation_adjustment,
     )
@@ -347,17 +446,37 @@ def evaluate_scheme(
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
         bl_anchor_top_m=bl_anchor_top_m,
+        subcloud_top_m=subcloud_top_m,
     )
     prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
-    _best_cfg, records, tuned = camp.tune_category_winner(
-        "convection",
-        base_cfg,
-        ref,
-        cache,
-        tune_evals=tune_evals,
-        seed=seed,
-        **common,
-    )
+    if tune_mode == "focused":
+        # The sub-cloud experiment: ONE named parameter set spanning the
+        # boundary-layer scheme, the microphysics' rain re-evaporation and the
+        # convection scheme's downdrafts.  ``prior`` above and the tuner's own
+        # default run are the same config, so they hit the same cache entry —
+        # the a-priori column is not paid for twice.
+        _best_cfg, records, _default_run, tuned = camp.tune_focused_params(
+            base_cfg,
+            ref,
+            cache,
+            categories=FOCUSED_TUNE_CATEGORIES,
+            include=focused_include,
+            tune_evals=tune_evals,
+            seed=seed,
+            objective=objective,
+            **common,
+        )
+    else:
+        _best_cfg, records, tuned = camp.tune_category_winner(
+            "convection",
+            base_cfg,
+            ref,
+            cache,
+            tune_evals=tune_evals,
+            seed=seed,
+            objective=objective,
+            **common,
+        )
     return SchemeResult(
         scheme=scheme, prior=prior, tuned=tuned, records=records,
         subsidence_solve=subsidence_solve, subsidence_solve_status=solve_status,
@@ -433,6 +552,15 @@ CSV_FIELDS = (
     "apriori_T_rmse_K", "tuned_T_rmse_K",
     "apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
     "apriori_qcond_rmse_g_kg", "tuned_qcond_rmse_g_kg",
+    # SUB-CLOUD LAYER.  Reported for every arm, not only the sub-cloud one, so
+    # the column that was never scored can still be read off the historical
+    # rows.  The bulk state is what the surface fluxes see; the CRM reference
+    # values it should be compared against are RH 0.752, SST-T_air 3.06 K.
+    "apriori_subcloud_score", "tuned_subcloud_score",
+    "apriori_sfc_rh", "tuned_sfc_rh",
+    "apriori_sfc_delta_T_K", "tuned_sfc_delta_T_K",
+    "apriori_sfc_driver_g_kg", "tuned_sfc_driver_g_kg",
+    "apriori_evap_mm_day", "tuned_evap_mm_day",
 )
 
 KG_KG_TO_G_KG = 1_000.0
@@ -465,8 +593,21 @@ def _row(res: SchemeResult, ref=None) -> dict:
             "apriori_qcond_rmse_g_kg": pr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
             "tuned_qcond_rmse_g_kg": tr["qcond_rmse_kg_kg"] * KG_KG_TO_G_KG,
         }
+    subcloud = {
+        "apriori_subcloud_score": p.subcloud_score,
+        "tuned_subcloud_score": t.subcloud_score,
+        "apriori_sfc_rh": p.sfc_relative_humidity,
+        "tuned_sfc_rh": t.sfc_relative_humidity,
+        "apriori_sfc_delta_T_K": p.sfc_delta_T_K,
+        "tuned_sfc_delta_T_K": t.sfc_delta_T_K,
+        "apriori_sfc_driver_g_kg": p.sfc_driver_kg_kg * KG_KG_TO_G_KG,
+        "tuned_sfc_driver_g_kg": t.sfc_driver_kg_kg * KG_KG_TO_G_KG,
+        "apriori_evap_mm_day": p.evap_mm_day,
+        "tuned_evap_mm_day": t.evap_mm_day,
+    }
     return {
         **phys,
+        **subcloud,
         "scheme": res.scheme,
         "subsidence_solve": res.subsidence_solve,
         "subsidence_solve_status": res.subsidence_solve_status,
@@ -780,6 +921,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--radiation-update-interval-steps", type=int, default=None)
     parser.add_argument(
+        "--turbulence", default=camp.BASELINE_SCHEMES["turbulence"],
+        choices=camp.SCHEME_SWEEPS["turbulence"],
+        help=(
+            "Boundary-layer scheme, held FIXED across every convection scheme. "
+            "It is what maintains the sub-cloud layer, so switching it is a "
+            "one-variable experiment in its own right and is recorded in the "
+            "checkpoint signature."
+        ),
+    )
+    parser.add_argument(
+        "--tune-mode", default="convection", choices=TUNE_MODES,
+        help=(
+            "`convection` searches every extended-tier parameter of the active "
+            "convection scheme (the historical arm). `focused` searches ONE "
+            "named cross-category set instead — see --focused-include."
+        ),
+    )
+    parser.add_argument(
+        "--objective", default="combined", choices=camp.TUNE_OBJECTIVES,
+        help=(
+            "What the tuner MINIMISES. `combined` is the full-column score, "
+            "measured to be 87-100 %% condensate, which cannot see the "
+            "sub-cloud layer. `subcloud` is the T/q_v error below "
+            "--subcloud-top-m, normalized by the reference's own spread there. "
+            "Both are reported for every run whichever is selected."
+        ),
+    )
+    parser.add_argument(
+        "--focused-include", action="append", default=None, metavar="SCHEME_KEY.FIELD",
+        help=(
+            "Registry-qualified parameter to tune in --tune-mode focused; "
+            "repeatable. Omit to use the sub-cloud default set for the active "
+            "(turbulence, microphysics, convection) triple. A name that matches "
+            "no parameter of an active scheme is a hard error."
+        ),
+    )
+    parser.add_argument(
+        "--subcloud-top-m", type=float, default=camp.DEFAULT_SUBCLOUD_TOP_M,
+        help=(
+            "Top of the layer scored as sub-cloud [m]. The default sits below "
+            "the CRM reference's own shallow-cumulus condensate maximum at "
+            "1.3 km."
+        ),
+    )
+    parser.add_argument(
         "--microphysics", default=camp.BASELINE_SCHEMES["microphysics"],
         choices=camp.SCHEME_SWEEPS["microphysics"],
         help=(
@@ -922,6 +1108,10 @@ def main(argv: list[str] | None = None) -> int:
         bl_anchor_top_m=args.bl_anchor_top_m,
         scm_microphysics_substeps=args.scm_microphysics_substeps,
         scm_convection_substeps=args.scm_convection_substeps,
+        turbulence=args.turbulence,
+        tune_mode=args.tune_mode,
+        objective=args.objective,
+        subcloud_top_m=args.subcloud_top_m,
     )
     if args.merge_only and saved_meta:
         meta = {**meta, **saved_meta}
@@ -952,6 +1142,19 @@ def main(argv: list[str] | None = None) -> int:
                 microphysics=args.microphysics,
                 hard_saturation_adjustment=args.hard_saturation_adjustment,
                 bl_anchor_top_m=args.bl_anchor_top_m,
+                turbulence=args.turbulence,
+                tune_mode=args.tune_mode,
+                objective=args.objective,
+                focused_include=tuple(
+                    args.focused_include
+                    if args.focused_include
+                    else default_focused_include(
+                        turbulence=args.turbulence,
+                        microphysics=args.microphysics,
+                        convection=scheme,
+                    )
+                ),
+                subcloud_top_m=args.subcloud_top_m,
             )
             res.signature = run_sig
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting
@@ -960,6 +1163,17 @@ def main(argv: list[str] | None = None) -> int:
                   f"-> tuned score={_fmt(res.tuned.score)} "
                   f"({len(res.records)} params) "
                   f"[kernel {res.subsidence_solve_status}]", flush=True)
+            # The sub-cloud arm's actual target, next to the score it was tuned
+            # on, so a reader never has to infer whether the layer moved.
+            print(f"    sub-cloud score={_fmt(res.prior.subcloud_score)} "
+                  f"-> {_fmt(res.tuned.subcloud_score)} | "
+                  f"RH {_fmt(res.prior.sfc_relative_humidity, '.3f')} "
+                  f"-> {_fmt(res.tuned.sfc_relative_humidity, '.3f')} | "
+                  f"SST-T_air {_fmt(res.prior.sfc_delta_T_K, '.2f')} "
+                  f"-> {_fmt(res.tuned.sfc_delta_T_K, '.2f')} K | "
+                  f"E {_fmt(res.prior.evap_mm_day, '.2f')} "
+                  f"-> {_fmt(res.tuned.evap_mm_day, '.2f')} mm/day "
+                  f"(CRM RH 0.752, 3.06 K, 2.73)", flush=True)
         # ATOMIC: the campaign runs one process per scheme against a shared
         # --outdir, so several finish at once and write this same file. Two
         # interleaved write_text calls can leave a truncated file, and
