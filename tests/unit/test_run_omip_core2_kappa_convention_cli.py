@@ -23,6 +23,46 @@ def _core2():
     return core2
 
 
+def test_card_pins_the_converged_nemo_baseline():
+    """The five options job 9405195 showed CONVERGE, pinned together.
+
+    Our K_M against NEMO's own avm after one matched 3600 s step, Antarctic,
+    491743 interfaces: the card as it stood was ~2.6x NEMO; the amplitude fix
+    took it to 1.846; alpha_tke=1 overshot to 0.634; these five land it at
+    0.854 (Arctic 0.930).  They are pinned as ONE baseline because they
+    converge only together -- alpha alone undershoots and these lift it back.
+
+    tke_shear_production is deliberately NOT here: NEMO's face-native zdf_sh2
+    with its coastal doubling needs the raw C-grid face state, which the
+    offline probe cannot supply, so it is untested and must not be enabled on
+    an untested basis.
+    """
+    cfg = _core2().orca1_zdftke_config()
+    expected = {
+        "tke_mxl_choice": 4,             # ORCA1 namelist_cfg nn_mxl = 2
+        "dissipation_discretization": "nemo_1p5_split",
+    }
+    got = {k: getattr(cfg, k) for k in expected}
+    assert got == expected, f"card drifted off the reviewed baseline: {got}"
+    # THREE MORE WERE WIRED AND THEN REVERTED (codex 9405307). Pinned OFF so
+    # they cannot be re-wired without re-reading why:
+    #   veros_dz_slots  -- discards the partial-cell bottom metric, and
+    #                      collides with nemo_z0 over dz_surface (2x).
+    #   n2_mode         -- 'nemo_bn2' is S-EOS; ORCA1 selects TEOS-10, so it
+    #                      is a DIFFERENT N2, not ORCA1's rn2.
+    #   nemo_z0         -- right placement, wrong metric: dz_surface is the
+    #                      top-cell midpoint where NEMO's jk=2 needs e3t(1).
+    # And MPAS shares this card: mpas_integration.py fail-loud rejects both
+    # n2_mode != 'insitu' and veros_dz_slots=True, so wiring them breaks the
+    # three-grid comparison outright.
+    assert cfg.veros_dz_slots is False
+    assert cfg.n2_mode == "insitu"
+    assert cfg.tke_surface_bc_level == "interior_pinned"
+    assert cfg.tke_shear_production == "squared_centered", (
+        "tke_shear_production was enabled without a grid-level test; the "
+        "offline probe cannot supply the C-grid face state it needs.")
+
+
 def test_card_pins_the_nemo_tke_diffusion_coefficient():
     """NEMO diffuses `en` with the PLAIN viscosity, not 30x it.
 

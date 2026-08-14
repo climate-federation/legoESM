@@ -587,7 +587,91 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
         # (ln_mxl0=T).  choice=2 (Veros Bougeault-Lacarrere, no ln_mxl0) was the
         # flagged fidelity gap; =3 closes it.  See the A/B campaign (2026-07-24).
-        tke_mxl_choice=3,
+        # ORCA1's namelist_cfg sets `nn_mxl = 2` (EXP00/namelist_cfg:444), which
+        # is choice 4, NOT 3.  The card carried 3 while its own comment above
+        # said 4 was the ORCA1 value -- flagged by codex 9405117 as a direct
+        # card inconsistency that invalidates one-step parity.  Choices 3 and 4
+        # share l_k = min(lup,ldn) and differ only in the dissipation length
+        # (3: sqrt(lup*ldn), 4: min(lup,ldn)), so 4 dissipates more.
+        tke_mxl_choice=4,
+        # ---- what survived codex 9405307, which REFUTED three of five ------
+        # The cumulative offline test (job 9405195) put all five at 0.854
+        # Antarctic / 0.930 Arctic and I wired them as a new baseline. Codex
+        # refuted three of them and the headline. Reverted, with the reasons
+        # kept here so nobody re-wires them:
+        #
+        # veros_dz_slots=True -- REVERTED. The interior solver does map
+        #   dz_cell<->e3t and dz_half<->e3w, but on --partial-cell the tripole
+        #   caller supplies dz_ref*J while the real bottom thickness is
+        #   h_partial*J, so the partial metric is silently discarded. It is
+        #   not an e3t/e3w mapping at partial bottoms. It also COLLIDES with
+        #   nemo_z0: both overload dz_surface, one as a Veros surface
+        #   half-volume and one as a top-cell face-gradient distance, and on
+        #   the centred grid those differ by 2x.
+        #
+        # n2_mode="nemo_bn2" -- REVERTED, and this one was simply wrong.
+        #   ORCA1 selects TEOS-10 (namelist_cfg:307). legoESM's `nemo_bn2`
+        #   calls nemo_seos_alpha_beta and its own docstring says "exact bn2
+        #   (S-EOS)". That is a DIFFERENT N2, not ORCA1's rn2. Closing this
+        #   properly needs a TEOS-10 rab/bn2, not a config flip.
+        #
+        # tke_surface_bc_level="nemo_z0" -- REVERTED. The placement is right
+        #   but the metric is not: dz_surface = -z_full_ref[0]*J is the top
+        #   cell's MIDPOINT, i.e. half dz_ref[0], while NEMO's jk=2 lower
+        #   coefficient needs the full top-cell e3t(1). That doubles the
+        #   virtual-surface coupling.
+        #
+        # ALSO REVERTED BY THE SAME REVIEW: --grid mpas shares this card and
+        # mpas_integration.py:686 fail-loud rejects BOTH n2_mode != "insitu"
+        # and veros_dz_slots=True, so the five-field card could not run on
+        # MPAS at all. The user's standing ask is three-grid agreement; a card
+        # that only one grid can execute is not a baseline.
+        # ---- the two the review confirmed --------------------------------
+        # Job 9405195, our K_M vs NEMO's own avm after one matched 3600 s step
+        # from NEMO's state and en, Antarctic 491743 interfaces: the card as it
+        # stood was ~2.6x NEMO, the amplitude fix took it to 1.846, alpha_tke=1
+        # OVERSHOT to 0.634, and these five together land it at 0.854
+        # (Arctic 0.930) -- inside the pre-registered 0.85-1.20 band.  They
+        # converge rather than trade: alpha alone undershoots and these lift it
+        # back.  This block is therefore a deliberate NEW BASELINE, not five
+        # independent one-variable edits, and must not be compared term-by-term
+        # against arms that predate it.
+        #
+        # veros_dz_slots: NEMO's zzd = -0.5*rn_Dt*mean(avm)/(e3t*e3w) is
+        #   flux-form -- gradient across the intervening T cell (/e3t),
+        #   divergence into the W control volume (/e3w).  legoESM maps
+        #   dz_cell<->e3t and dz_half<->e3w ONLY in this branch; the legacy
+        #   default uses dz_half for BOTH, so the coefficient was NEMO's while
+        #   the stencil was not (codex 9405117 #2).  Alone: 0.627.
+        # n2_mode: the clipped in-situ N2 carries a compressibility bias
+        #   (+4.3e-5 measured in a prior session -- enough to stop the EVD
+        #   trigger firing in the Arctic at all).  It sets BOTH the buoyancy
+        #   length and the buoyancy sink.  k_profiles threads the gdept /
+        #   interior-gdepw ladders when this mode is selected.  Alone: 0.808.
+        # dissipation_discretization: NEMO linearises the Kolmogoroff sink as a
+        #   NEWTON split -- zfact2 = 1.5*rn_Dt*rn_ediss on the diagonal
+        #   (zdftke.F90:241,414) plus zfact3 = 0.5*rn_ediss added back
+        #   explicitly (:242,:419) -- the correct Jacobian for eps ~ e^{3/2}.
+        #   Plain backward Euler puts 1.0 on the diagonal with no add-back.
+        #   Codex 9405117 predicted the direction before it was run ("retains
+        #   more TKE than plain BE"); alone it lifts 0.634 -> 0.739.
+        dissipation_discretization="nemo_1p5_split",
+        # tke_surface_bc_level: NEMO holds en(1) at the z=0 W-point and SOLVES
+        #   the tridiagonal from jk=2 (zdftke.F90:264,403-410).
+        #   "interior_pinned" pins the Dirichlet value AT the first interior
+        #   interface instead -- one w-level too deep.  Worth only ~4% on its
+        #   own (measured, and it REFUTED a root-cause hypothesis of mine), but
+        #   it is what NEMO does.  Requires the surface Dirichlet value, which
+        #   this card sets, and dz_surface, which k_profiles:811-815 threads
+        #   for exactly this option.
+        # STILL NOT NEMO, and not closable here: tke_shear_production stays
+        # "squared_centered".  NEMO's zdf_sh2 is face-native with a now x
+        # before velocity product and DOUBLES production adjacent to coasts
+        # via (2 - umask*umask) (zdfsh2.F90).  "nemo_face_native" implements
+        # exactly that and needs the raw C-grid face state plus per-level
+        # wumask/wvmask/coast masks, which the offline column probe cannot
+        # supply -- so it is untested and deliberately NOT enabled here.  It is
+        # the last known card gap and needs a tripole run to evaluate.
         # NEMO nn_bc_surf=1: en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0) Dirichlet surface
         # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
         # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.

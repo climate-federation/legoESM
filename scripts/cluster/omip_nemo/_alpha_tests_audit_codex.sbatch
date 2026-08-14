@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=alphacdx
+#SBATCH --job-name=basecdx
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=1:30:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/alphacdx_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/basecdx_%j.out
 #
 # Card audit + tests + MANDATORY codex adversarial review for alpha_tke=1.0.
 set -uo pipefail
@@ -39,60 +39,54 @@ cp /burg-archive/home/pg2328/.codex/config.toml "$CODEX_HOME/" 2>/dev/null || tr
 echo "=== CODEX_HOME contents: $(ls -A $CODEX_HOME) ==="
 
 codex exec --sandbox read-only -C $WT \
-  "ATTACK THIS. I want it refuted if wrong, not confirmed.
+  "ATTACK THIS NEW BASELINE. Refute it if it is wrong.
 
-CHANGE: \`orca1_zdftke_config\` (scripts/run/run_omip_core2.py) now pins
-\`alpha_tke=1.0\`; TKEConfig's default is 30.0.  alpha_tke multiplies the TKE
-vertical-diffusion coefficient in \`_solve_tke_backward_euler\`
-(packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py, look for
-\`K_tke_face = cfg.alpha_tke * 0.5 * (K_M_old[..., :-1] + K_M_old[..., 1:])\`).
+CHANGE: \`orca1_zdftke_config\` now pins FIVE more NEMO options together --
+tke_mxl_choice 3->4, veros_dz_slots=True, n2_mode='nemo_bn2',
+dissipation_discretization='nemo_1p5_split', tke_surface_bc_level='nemo_z0'
+-- on top of kappa_convention='veros_sqrte' and alpha_tke=1.0 from earlier
+today. It is labelled a NEW BASELINE, not five one-variable edits.
 
-MY CLAIM: NEMO diffuses \`en\` with the PLAIN viscosity.  In zdftke.F90 the
-tridiagonal is zzd_up = zcof * MAX(p_avm(jk+1)+p_avm(jk), 2e-5) /
-(e3t(jk)*e3w(jk)) with zcof = zfact1*tmask and zfact1 = -0.5*rn_Dt, so the
-face coefficient is -rn_Dt*mean(avm) and alpha_tke is 1.
+EVIDENCE (job 9405195; our TKE kernel fed NEMO's OWN restart state and en, one
+3600 s step, scored against NEMO's avm because ORCA1 sets nn_evdm=0 so EVD
+never touches momentum; Antarctic band, 491743 interfaces on every row):
+    card as it was (alpha=30 + gaspar)  ~2.6
+    + kappa fix                          1.846
+    + alpha_tke=1                        0.634   (OVERSHOOTS low)
+    + these five                         0.854   Antarctic, 0.930 Arctic
+  individually off the alpha-fixed card: diss split 0.739, bn2 0.808,
+  veros_dz_slots 0.627.
 
-EVIDENCE (job 9405026, our TKE kernel fed NEMO's OWN restart state and \`en\`,
-one 3600 s step, scored against NEMO's \`avm\` because ORCA1 sets nn_evdm=0 so
-EVD never touches momentum; Antarctic band, 491743 interfaces on every row):
-    zero step                     K_M/avm 0.861
-    alpha_tke=30                  K_M/avm 1.846,  our TKE grows 3.20x
-    alpha_tke=1.0                 K_M/avm 0.634,  our TKE grows 0.95x
-    dissipation nemo_1p5_split    K_M/avm 1.673
-    lc=False / etau=none / nn_mxl=2 / nemo_z0: 1.81 / 1.77 / 1.73 / 1.80
-
-QUESTIONS. Quote sources.
- 1. Read zdftke.F90's tke_tke tridiagonal IN FULL. Is the TKE diffusivity
-    really avm x1, or is there a factor I have dropped -- in zfact1, in the
-    e3t*e3w denominators (note it is e3t*e3w, NOT e3w^2 -- does that make the
-    operator something other than d/dz(avm dE/dz)?), or in the 2e-5 floor?
-    Does NEMO diffuse \`en\` with avm or with avm/sigma_e for some Schmidt
-    number?
- 2. Is legoESM's \`K_tke_face\` the SAME operator? Compare the discrete forms
-    including the metric slots (dz_half vs dz_cell) and the Veros
-    veros_dz_slots branch. If our operator differs structurally, alpha_tke=1
-    may not be equivalent to NEMO even though the coefficient matches.
- 3. THE OVERSHOOT. With alpha_tke=1 our avm goes 1.331e-2 -> 1.033e-2 over the
-    hour (DOWN 22%) while NEMO's goes 1.5468e-2 -> 1.6281e-2 (UP 5%). So the
-    pin does not land on NEMO. What is the most likely remaining term? Rank:
-    the shear production (we run tke_shear_production='squared_centered', NEMO
-    uses face-native zdf_sh2 with coastal doubling), the buoyancy sink, the
-    surface Dirichlet's interaction with the solve, the missing avm_k
-    (previous-step) viscosity in the tridiagonal, our N2 (n2_mode='insitu' vs
-    NEMO rn2), or the dissipation split.
- 4. IS THE 0.861 ZERO-STEP OFFSET REAL OR AN ARTIFACT? At zero steps our K_M
-    is 0.76-0.95x NEMO's avm_k with the SAME en and the same c_k, so it is
-    purely a mixing-length difference. Where does a uniform ~15% short length
-    come from? Check the lup/ldown sweeps against zdftke.F90:658-690, the
-    surface anchor, and whether our probe's global-max e3t reference profile
-    (nemo_zero_step_closure.py builds dz_ref as nanmax over columns) biases it.
- 5. BLAST RADIUS. alpha_tke is a tier-2 __param_spec__ tunable with bounds
-    (1.0, 90.0), so 1.0 sits ON the lower bound. Does anything -- the
-    trainable-parameter collector, a sigmoid transform, a test -- break or
-    become degenerate at the bound? Does any committed baseline, DINO recipe
-    or scorecard depend on 30.0? The MPAS branch reaches the same card.
- 6. WHAT AM I OVER-READING? The scoring uses one hour from one restart in
-    January. Name what that cannot support."
+QUESTIONS. Quote sources for each.
+ 1. Is each of the five ACTUALLY what ORCA1 runs? Check nn_mxl=2 -> choice 4
+    against zdftke.F90's SELECT CASE; check that veros_dz_slots really maps
+    dz_cell->e3t and dz_half->e3w in the branch the tripole takes; check that
+    'nemo_bn2' is NEMO's rn2 and not a different N2; check the 1.5/0.5 split
+    line by line; check nemo_z0 against zdftke.F90:264,403-410.
+ 2. WHICH OF THE FIVE NEEDS INPUTS THE TRIPOLE PATH MIGHT NOT SUPPLY AT
+    RUNTIME? I verified k_profiles.py:811-815 threads dz_surface when
+    veros_dz_slots OR nemo_z0 is set, and that it threads the gdept/gdepw
+    ladders for nemo_bn2. Is that ACTUALLY reached on --grid tripole
+    --tripole-vmix tke --partial-cell, and on --grid mpas which shares this
+    card? A 30-hour run that dies at minute two is the failure I most want to
+    avoid. Name any path where one of these raises or silently no-ops.
+ 3. COMBINATION HAZARDS. Do any two of these interact badly -- e.g.
+    veros_dz_slots changing the metric slots that nemo_z0's virtual surface
+    row assumes, or nemo_1p5_split with the implicit-linearized buoyancy sink
+    driving the diagonal non-positive? Is there any regime (deep convection,
+    N2<0, a 1-level column, a dry column) where the combination is unstable
+    when each alone is fine?
+ 4. IS 0.854/0.930 ACTUALLY GOOD? The zero-step reference on the same
+    interfaces is 0.861 and NEMO's own avm rises 5% over the hour. So we now
+    end slightly BELOW NEMO having started slightly below. Is landing at 0.85
+    meaningfully different from the 0.861 we started at -- i.e. did the step
+    become right, or did it just stop being wrong by cancellation?
+ 5. WHAT DOES THIS BASELINE BREAK? It changes MPAS too. Check DINO recipes,
+    committed scorecards, bit-identity tests, the trainable-parameter
+    collector, and anything asserting tke_mxl_choice==3.
+ 6. WHAT AM I OVER-READING? One hour, one January restart, one band.
+    Name what this cannot support -- especially any claim about the day-90
+    Southern Ocean mixed layer or the Arctic halocline."
 rc=$?
 echo "=== CODEX RC=$rc ==="
 echo; echo "=== ALL DONE (failed stages: $NFAIL) ==="
