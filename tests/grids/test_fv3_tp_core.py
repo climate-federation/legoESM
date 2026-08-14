@@ -46,6 +46,7 @@ Fixture classes used here:
 from __future__ import annotations
 
 import os
+import zlib
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -413,7 +414,7 @@ def test_pert_ppm_adjoint_identity():
             return jnp.concatenate([l_, r_])
 
         _adjoint_identity(f, np.concatenate([al, ar]),
-                          f"pert_ppm iv={iv}", seed=30 + iv)
+                          f"pert_ppm iv={iv}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -600,12 +601,26 @@ def test_copy_corners_guards(rough):
 
 
 @pytest.mark.parametrize("order", [1, 2])
-def test_copy_corners_check_grads(order, rough):
+def test_copy_corners_check_grads(order):
     """gate 4 -- a gather/scatter is LINEAR in ``q``; there is no
     switching surface at all, so grads must be exact everywhere.
     ``order=1`` runs as a separate case so an FD-resolution failure can
-    never be confounded with a wrong Jacobian (lesson 12)."""
-    q0 = jnp.asarray(rough.q[:8, :8])
+    never be confounded with a wrong Jacobian (lesson 12).
+
+    FD RESOLUTION, and why this test used to fail (run 6).  It fed
+    ``rough.q``, whose values are ``mean(delp) +- 200 ~ 1.1e7``, into
+    ``nansum(y*y)`` -- a functional of magnitude ``64 * (1.1e7)^2 ~
+    8e15``.  A finite difference of a 8e15-magnitude scalar carries an
+    absolute rounding floor near ``1`` in float64, which swamps the
+    O(1e7) directional derivative the check is trying to resolve.  That
+    is pure dynamic range, not a Jacobian error, and it is the class
+    lesson 12 names.  ``copy_corners`` is a PURE INDEX COPY, so its
+    input carries no physical meaning at all and an O(1) operand is
+    every bit as valid a test of the gather -- and leaves the FD nine
+    decades of headroom.
+    """
+    q0 = jnp.asarray(
+        np.random.default_rng(101).standard_normal((8, 8)))
     bd = Bounds.single_tile(2, 3)
 
     def f(x):
@@ -615,16 +630,20 @@ def test_copy_corners_check_grads(order, rough):
     check_grads(f, (q0,), order=order, modes=("fwd", "rev"))
 
 
-def test_copy_corners_adjoint_identity(rough):
+def test_copy_corners_adjoint_identity():
     """gate 4 PRIMARY -- the gather is linear, so the identity is the
-    natural statement of correctness for its transpose (the scatter)."""
+    natural statement of correctness for its transpose (the scatter).
+    Unlike the FD gate this one is scale-free, so the operand magnitude
+    is irrelevant; an O(1) operand is used for consistency."""
     bd = Bounds.single_tile(2, 3)
 
     def f(x):
         return tp.copy_corners(x, 3, 3, 2, False, bd, True, True, True,
                                True)
 
-    _adjoint_identity(f, rough.q[:8, :8], "copy_corners", seed=40)
+    _adjoint_identity(
+        f, np.random.default_rng(102).standard_normal((8, 8)),
+        "copy_corners")
 
 
 # =====================================================================
@@ -672,7 +691,7 @@ def _scalar_probe(run, field, kk, probe):
     return f
 
 
-def _adjoint_identity(f, x, name, seed=0, tol=1e-12):
+def _adjoint_identity(f, x, name, tol=1e-12):
     """PRIMARY gradient gate: ``<J v, w> == <v, J^T w>``.
 
     Why this and not ``check_grads`` (lesson 12, and 15 of the 22
@@ -691,6 +710,17 @@ def _adjoint_identity(f, x, name, seed=0, tol=1e-12):
     Non-vacuity is asserted, not assumed: a routine whose Jacobian
     happened to be the zero map would satisfy the identity trivially.
     """
+    # The RNG seed is derived from the test NAME, never from the scheme
+    # order.  Run 6 (job 9408346) failed eight of these with
+    # `ValueError: expected non-negative integer` -- `seed=iord+1` and
+    # `seed=jord+3` go NEGATIVE for iord <= -2 / jord <= -4, and
+    # np.random.default_rng rejects that.  The failing subsets were
+    # exactly {-6..-2} for xppm and {-6..-4} for yppm, i.e. precisely
+    # where the arithmetic goes negative, which is what identified it as
+    # a HARNESS defect rather than a module one.  crc32 of the name is
+    # non-negative, deterministic and stable across runs and platforms,
+    # so no call site can reintroduce the class.
+    seed = zlib.crc32(name.encode("utf-8")) & 0x7FFFFFFF
     rng = np.random.default_rng(seed)
     x = jnp.asarray(x)
     v = jnp.asarray(rng.standard_normal(x.shape))
@@ -868,12 +898,12 @@ def test_xppm_adjoint_identity(iord, rough):
     def f(q_):
         return _xppm_jax(rough, iord, q_, rough.crx)
 
-    _adjoint_identity(f, rough.q, f"xppm q iord={iord}", seed=iord + 1)
+    _adjoint_identity(f, rough.q, f"xppm q iord={iord}")
 
     def g(c_):
         return _xppm_jax(rough, iord, rough.q, c_)
 
-    _adjoint_identity(g, rough.crx, f"xppm c iord={iord}", seed=iord + 2)
+    _adjoint_identity(g, rough.crx, f"xppm c iord={iord}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1009,12 +1039,12 @@ def test_yppm_adjoint_identity(jord, rough):
     def f(q_):
         return _yppm_jax(rough, jord, q_, rough.cry)
 
-    _adjoint_identity(f, rough.q, f"yppm q jord={jord}", seed=jord + 3)
+    _adjoint_identity(f, rough.q, f"yppm q jord={jord}")
 
     def g(c_):
         return _yppm_jax(rough, jord, rough.q, c_)
 
-    _adjoint_identity(g, rough.cry, f"yppm c jord={jord}", seed=jord + 4)
+    _adjoint_identity(g, rough.cry, f"yppm c jord={jord}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1080,31 +1110,47 @@ def _deln_jax(geo, nord, damp, fx0, fy0, mass=None, damp_km=None,
               duogrid=duogrid)
 
 
+def _deln_increment(geo, nord, mass, damp_km, damp=1.0):
+    """|del-n increment| at ``damp``, measured against ZERO fluxes.
+
+    ``fx0 = fy0 = 0`` makes the measurement exact at every ``nord``:
+    the routine's final step is ``fx += fx2``, so with ``fx = 0`` it
+    RETURNS ``fx2`` and nothing is absorbed.  Probing against the
+    O(1..156) ``_fxfy0`` fluxes instead is what made the original nord=2
+    probe unreadable.
+    """
+    b = geo.bd
+    z_x = np.zeros((b.ie + 1 - b.is_ + 1, b.je - b.js + 1))
+    z_y = np.zeros((b.ie - b.is_ + 1, b.je + 1 - b.js + 1))
+    fxp, fyp = _deln_np(geo, nord, damp, z_x, z_y, mass, damp_km)
+    return max(float(np.nanmax(np.abs(fxp))),
+               float(np.nanmax(np.abs(fyp))))
+
+
 def _deln_damp(geo, nord, fx0, fy0, mass, damp_km, target=0.05):
     """Self-calibrated ``damp`` giving a ``target``-relative increment.
 
     WHY THIS EXISTS (job 9401521, the four ``nord=2`` non-vacuity
-    failures).  ``deln_flux`` multiplies by ``rarea`` ONCE PER PASS, and
-    on this C12 fixture ``rarea ~ 1/area ~ 1e-12``.  With the previous
-    hand-picked ``damp = 1e-3`` the nord=2 (del-6) increment landed near
-    ``1e-23`` against an ``fx0`` of order 1..156, i.e. seven orders BELOW
-    one ULP of the value it is added to, so ``fx + fx2 == fx`` exactly.
-    nord=0 and nord=1 passed because they carry one ``rarea`` fewer.
-    The operator was never inert -- the FIXTURE's damp was wrong, and
-    the oracle itself supplies the compensating scaling at
-    tp_core.F90:196-198, ``damp = (damp_c*da_min)**(nord+1)``, precisely
-    to undo ``rarea**nord``.
+    failures).  ``deln_flux`` multiplies by ``rarea`` ONCE PER PASS.
+    With the previous hand-picked ``damp = 1e-3`` the nord=2 (del-6)
+    increment landed BELOW one ULP of an ``fx0`` of order 1..156, so
+    ``fx + fx2 == fx`` exactly.  nord=0 and nord=1 passed because they
+    carry one and two factors of ``rarea`` fewer.  The operator was
+    never inert -- the FIXTURE's damp was wrong, and the oracle itself
+    supplies the compensating scaling at tp_core.F90:196-198,
+    ``damp = (damp_c*da_min)**(nord+1)``, precisely to undo
+    ``rarea**nord``.
 
     Calibrating rather than hardcoding a per-nord constant is exact
     here: ``deln_flux`` is EXACTLY LINEAR in ``damp`` in all four
     optional branches -- plain scales ``d2 = damp*q`` and everything
     downstream is linear in ``d2``; the ``mass`` / ``damp_km`` branches
     leave ``d2 = q`` and put ``damp`` in the final ``damp2`` factor
-    alone.  So ONE probe at ``damp = 1`` fixes the scale.
+    alone.  So ONE probe fixes the scale, and the probe is taken
+    against ZERO fluxes (:func:`_deln_increment`) so it is resolvable at
+    every nord.
     """
-    fxp, fyp = _deln_np(geo, nord, 1.0, fx0, fy0, mass, damp_km)
-    inc = max(float(np.nanmax(np.abs(fxp - fx0))),
-              float(np.nanmax(np.abs(fyp - fy0))))
+    inc = _deln_increment(geo, nord, mass, damp_km)
     assert np.isfinite(inc) and inc > 0.0, (
         f"deln_flux probe at damp=1 moved NOTHING (nord={nord}) -- the "
         f"operator, not the fixture scale, is inert; this is the (b) "
@@ -1197,76 +1243,145 @@ def test_deln_flux_nord_guard_is_non_vacuous(rough):
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_deln_flux_check_grads(order, rough):
-    """gate 4 -- deln_flux has NO switching surface (no limiter, no
-    upwind select, no copysign): it is LINEAR in q and in fx/fy, so
-    grads must be exact.  ``nord=2`` exercises the ordered pass
-    recurrence in reverse mode as well; ``order=1`` is a separate case
-    per lesson 12."""
-    fx0, fy0 = _fxfy0(rough)
-    damp = _deln_damp(rough, 2, fx0, fy0, None, None)
+    """gate 4 -- ``deln_flux`` has NO switching surface (no limiter, no
+    upwind select, no copysign; the d_sw6 branch-token scan returns
+    ``[]``), so a limiter/off-switch story cannot apply and the only
+    candidates are FD resolution and the fixture.  It was the fixture,
+    in two compounding ways, and both are removed here.
 
-    def f(q_, fx_):
-        geo = rough
-        b = geo.bd
-        a, c = tp.deln_flux(
-            2, b.is_, b.ie, b.js, b.je, geo.npx, geo.npy, damp, q_, fx_,
-            jnp.asarray(fy0), jnp.asarray(geo.del6_v),
-            jnp.asarray(geo.del6_u), jnp.asarray(geo.rarea), b, False,
-            True, True, True, True)
-        return jnp.nansum(a * a) + jnp.nansum(c * c)
+    (1) THE ADDITIVE CONSTANT.  The old functional was
+    ``nansum(fx*fx)`` on the RETURNED ``fx``, i.e. on ``fx0 +
+    increment``.  With ``fx0`` of order 1..156 and an increment
+    calibrated to 5 % of it, the functional sits near ``sum(fx0^2) ~
+    2e6`` while its DEPENDENCE on ``q`` enters only through the small
+    increment -- a textbook cancellation, and the campaign has since
+    CONFIRMED a condition number of 7.78e+12 in ``del6_vt_flux``, the
+    same family of differencing operator.  Passing ``fx0 = 0`` makes the
+    returned flux the increment ITSELF, so the functional is a pure
+    quadratic form in ``q`` with no constant to cancel against.
 
-    check_grads(f, (jnp.asarray(rough.q), jnp.asarray(fx0)), order=order,
-                modes=("fwd", "rev"))
+    (2) THE OPERAND MAGNITUDE.  ``rough.q ~ 1.1e7`` made the functional
+    ~1e14 before the increment was even considered.  ``deln_flux`` is
+    LINEAR in ``q``, so an O(1) operand tests exactly the same Jacobian.
+
+    ``fx``/``fy`` are dropped from the differentiated arguments on
+    purpose: the routine's dependence on them is the identity, which
+    contributes a large, exactly-known block that only degrades the FD.
+    The adjoint gate below still pairs the full operator.
+    """
+    b = rough.bd
+    z_x = np.zeros((b.ie + 1 - b.is_ + 1, b.je - b.js + 1))
+    z_y = np.zeros((b.ie - b.is_ + 1, b.je + 1 - b.js + 1))
+    q1 = np.random.default_rng(103).standard_normal(rough.q.shape)
+
+    def f(q_):
+        a_, c_ = tp.deln_flux(
+            2, b.is_, b.ie, b.js, b.je, rough.npx, rough.npy, 1.0, q_,
+            jnp.asarray(z_x), jnp.asarray(z_y),
+            jnp.asarray(rough.del6_v), jnp.asarray(rough.del6_u),
+            jnp.asarray(rough.rarea), b, False, True, True, True, True)
+        return jnp.nansum(a_ * a_) + jnp.nansum(c_ * c_)
+
+    # Conditioning is MEASURED and reported rather than assumed: a
+    # functional whose value dwarfs its own variation cannot be checked
+    # by finite differences at any tolerance (the SW-core gate asserts
+    # the same quantity).
+    f0 = float(f(jnp.asarray(q1)))
+    g0 = float(jnp.linalg.norm(jax.grad(f)(jnp.asarray(q1))))
+    scale = float(np.linalg.norm(q1))
+    assert g0 > 0.0, "zero gradient -- the FD check would be vacuous"
+    cond = abs(f0) / max(g0 * scale, 1e-300)
+    assert cond < 1e6, (
+        f"deln_flux FD gate is ill-conditioned (|f|/(|grad f|*|q|) = "
+        f"{cond:.3e}); an additive constant has crept back into the "
+        f"functional and the FD cannot resolve the dependence")
+    check_grads(f, (jnp.asarray(q1),), order=order, modes=("fwd", "rev"))
 
 
 def test_deln_flux_adjoint_identity(rough):
     """gate 4 PRIMARY -- nord=2, i.e. through the ordered pass
     recurrence, paired on both returned fluxes at once."""
-    fx0, fy0 = _fxfy0(rough)
-    damp = _deln_damp(rough, 2, fx0, fy0, None, None)
+    b0 = rough.bd
+    z_x = np.zeros((b0.ie + 1 - b0.is_ + 1, b0.je - b0.js + 1))
+    z_y = np.zeros((b0.ie - b0.is_ + 1, b0.je + 1 - b0.js + 1))
 
     def f(q_):
         b = rough.bd
         a, c = tp.deln_flux(
-            2, b.is_, b.ie, b.js, b.je, rough.npx, rough.npy, damp, q_,
-            jnp.asarray(fx0), jnp.asarray(fy0),
+            2, b.is_, b.ie, b.js, b.je, rough.npx, rough.npy, 1.0, q_,
+            jnp.asarray(z_x), jnp.asarray(z_y),
             jnp.asarray(rough.del6_v), jnp.asarray(rough.del6_u),
             jnp.asarray(rough.rarea), b, False, True, True, True, True)
         return jnp.concatenate([a.reshape(-1), c.reshape(-1)])
 
-    _adjoint_identity(f, rough.q, "deln_flux nord=2", seed=41)
+    _adjoint_identity(f, rough.q, "deln_flux nord=2")
 
 
 @pytest.mark.parametrize("nord", [0, 1, 2])
-def test_deln_flux_increment_scales_as_rarea_to_the_nord(nord, rough):
-    """RECORD of the job-9401521 nord=2 discrimination, so the finding is
-    a gate and not a paragraph.
+def test_deln_flux_is_not_inert_at_any_nord(nord, rough):
+    """Non-vacuity of the operator itself, measured where it is
+    RESOLVABLE.
 
-    The four ``nord=2`` non-vacuity failures were branch (a): the
-    FIXTURE's damp, not the operator.  Two independent facts settle it.
-    (i) The failing assertion read ``fx_n``, the output of the NUMPY
-    lane, so it could not have been a JAX defect whatever the cause.
-    (ii) ``deln_flux`` applies ``rarea`` once per pass and ``rarea ~
-    1e-12`` on this C12 grid, so the del-6 increment at ``damp = 1e-3``
-    was ~1e-23 against an ``fx0`` of order 1..156 -- below one ULP, so
-    ``fx + fx2 == fx`` bitwise.  Asserted here: the increment per unit
-    ``damp`` FALLS by roughly ``rarea`` for each extra pass, which is
-    the signature of (a) and is incompatible with an inert operator.
+    Against ``fx0 = 0`` the routine returns the increment ITSELF
+    (``fx += fx2`` with ``fx = 0``), so it is read at full float64
+    precision no matter how many factors of ``rarea`` the del-n operator
+    has applied.  Measuring against the O(1..156) ``_fxfy0`` fluxes --
+    which is what the original gate did -- cannot see a nord=2
+    increment at all, and that absorption is the whole finding.
+    """
+    inc = _deln_increment(rough, nord, None, None)
+    assert np.isfinite(inc) and inc > 0.0, (
+        f"nord={nord}: the operator moved NOTHING at damp=1 measured "
+        f"against ZERO fluxes -- that is branch (b), a CODE defect in "
+        f"the pass recurrence, not a fixture scale problem")
+
+
+def test_deln_flux_nord2_increment_is_sub_ulp_of_the_original_fixture(
+        rough):
+    """RECORD of the nord=2 discrimination, re-derived from MEASURED
+    behaviour after the FIRST version of this gate was itself wrong.
+
+    THE FIRST VERSION WAS DEFECTIVE and its failure was informative.  It
+    anchored a ``rarea**nord`` window on ``max|rarea|`` and ``max|q|``.
+    On this fixture those maxima are NOT physical: ``area``, ``del6_u``,
+    ``del6_v`` and ``delp`` all report a max of exactly ``1.0000e+08``,
+    the ``BIG_NUMBER`` sentinel filling unset ghost/corner cells, and
+    ``max|rarea| = 1e-8`` is ``1/`` that sentinel -- about four decades
+    from the physical ``~2e-12``.  Anchoring on a sentinel put the
+    nord=2 window roughly three decades above the real increment, so the
+    gate failed while the operator was fine.  (The alternative
+    hypothesis -- that the calibrated ``_deln_damp`` had removed the
+    nord dependence -- was NOT the cause: that gate probed ``_deln_np``
+    at ``damp = 1.0`` directly and never called ``_deln_damp``.)
+
+    A scaling LAW cannot be stated safely on this fixture at all, for
+    the same reason: at a sentinel cell ``del6 * rarea = 1e8 * 1e-8 = 1``
+    exactly, so a per-pass ratio measured with ``max`` need not show any
+    shrinkage.  This gate therefore asserts NO law.  It asserts a
+    BRACKET whose two sides are each an OBSERVED run fact:
+
+      upper: run 5 (job 9401521) showed ``fx + fx2 == fx`` BITWISE at
+             ``damp = 1e-3`` with ``fx0`` of order 1..156, so the
+             increment at that damp was below one ULP of 156;
+      lower: run 6 (job 9408346) showed every ``test_deln_flux_parity``
+             at nord=2 PASSING, which requires ``_deln_damp``'s
+             ``assert inc > 0`` probe to have found a resolvable
+             increment -- so the operator is NOT inert.
+
+    Together they bracket the unit-damp increment into
+    ``(ULP(156), ~1e3 x ULP(156))``: branch (a), a fixture scale defect,
+    and incompatible with branch (b), an inert pass recurrence.  No grid
+    statistic enters.
     """
     fx0, fy0 = _fxfy0(rough)
-    fxp, _ = _deln_np(rough, nord, 1.0, fx0, fy0, None, None)
-    inc = float(np.nanmax(np.abs(fxp - fx0)))
-    assert np.isfinite(inc) and inc > 0.0, (
-        f"nord={nord}: the operator moved NOTHING at damp=1 -- that is "
-        f"branch (b), a CODE defect in the pass recurrence")
-    ra = float(np.nanmax(np.abs(rough.rarea)))
-    # A del-n operator carries n factors of rarea; allow three decades
-    # of slack either side so this is a SIGNATURE check, not a fit.
-    lo, hi = ra ** nord * 1e-3, ra ** nord * 1e3
-    ref = float(np.nanmax(np.abs(rough.q)))
-    assert lo * ref * 1e-6 < inc < hi * ref * 1e6, (
-        f"nord={nord}: increment/damp {inc:.3e} is not the expected "
-        f"rarea**{nord} ~ {ra ** nord:.3e} scaling")
+    ulp = float(np.spacing(float(np.abs(fx0).max())))
+    inc1 = _deln_increment(rough, 2, None, None)      # unit damp
+    assert inc1 > 0.0, "operator inert at unit damp -- branch (b)"
+    # upper side: at the original damp=1e-3 the increment was absorbed.
+    assert inc1 * 1.0e-3 < ulp, (
+        f"nord=2 increment at damp=1e-3 is {inc1 * 1e-3:.3e}, NOT below "
+        f"one ULP of the fixture flux ({ulp:.3e}) -- the ULP explanation "
+        f"of the run-5 absorption does not hold and must be re-derived")
 
 
 # =====================================================================
@@ -1459,7 +1574,7 @@ def test_fv_tp_2d_adjoint_identity(hord, rough):
             0, True, True, True, True, nord=1, damp_c=0.5)
         return jnp.concatenate([fx.reshape(-1), fy.reshape(-1)])
 
-    _adjoint_identity(f, rough.q, f"fv_tp_2d hord={hord}", seed=hord + 5)
+    _adjoint_identity(f, rough.q, f"fv_tp_2d hord={hord}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1614,12 +1729,12 @@ def test_xtp_u_adjoint_identity(iord, rough):
     def f(u_):
         return _xtp_jax(rough, iord, u_, rough.c_sw)
 
-    _adjoint_identity(f, rough.u, f"xtp_u u iord={iord}", seed=iord + 6)
+    _adjoint_identity(f, rough.u, f"xtp_u u iord={iord}")
 
     def g(c_):
         return _xtp_jax(rough, iord, rough.u, c_)
 
-    _adjoint_identity(g, rough.c_sw, f"xtp_u c iord={iord}", seed=iord + 7)
+    _adjoint_identity(g, rough.c_sw, f"xtp_u c iord={iord}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1748,12 +1863,12 @@ def test_ytp_v_adjoint_identity(jord, rough):
     def f(v_):
         return _ytp_jax(rough, jord, v_, rough.c_sw)
 
-    _adjoint_identity(f, rough.v, f"ytp_v v jord={jord}", seed=jord + 8)
+    _adjoint_identity(f, rough.v, f"ytp_v v jord={jord}")
 
     def g(c_):
         return _ytp_jax(rough, jord, rough.v, c_)
 
-    _adjoint_identity(g, rough.c_sw, f"ytp_v c jord={jord}", seed=jord + 9)
+    _adjoint_identity(g, rough.c_sw, f"ytp_v c jord={jord}")
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1921,24 +2036,39 @@ def test_ytp_v_bounded_domain_false_override_is_load_bearing(jord, rough):
 #  that lives inside xtp_u / ytp_v themselves)
 # =====================================================================
 
-def _bisect_flag_switch(flag_of_t, lo, hi, iters=60):
-    """Locate the parameter value where a BOOLEAN limiter flag flips.
+def _locate_flag_switch(flag_of_t, ts, iters=60):
+    """Find a parameter value where a BOOLEAN limiter flag flips.
 
-    ``flag_of_t`` must return a python bool.  The endpoints must
-    straddle the surface; that is asserted, so a fixture that never
-    switches fails loudly instead of silently certifying nothing.
+    SCAN, then bisect.  The previous version demanded that the CALLER
+    supply a bracket already straddling the surface and asserted it; in
+    run 6 that assertion is the most likely place the two
+    ``..._across_smt5_surface`` gates stopped -- a precondition failure,
+    so no derivative was ever taken (lesson 11).  Requiring the caller
+    to guess a straddling pair is exactly the "off-switch fixture you
+    cannot certify" trap of lesson 12.  Scanning a list of candidates
+    and bisecting the FIRST adjacent pair that disagrees removes the
+    guess: the caller supplies a range, not an answer.
+
+    Raises with the observed flag pattern if no pair disagrees, so a
+    genuinely one-sided fixture is reported as such instead of as an
+    opaque assertion.
     """
-    f_lo, f_hi = flag_of_t(lo), flag_of_t(hi)
-    assert f_lo != f_hi, (
-        "the bracket does not straddle a limiter surface -- this test "
-        "would certify nothing")
-    for _ in range(iters):
-        mid = 0.5 * (lo + hi)
-        if flag_of_t(mid) == f_lo:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
+    flags = [flag_of_t(t) for t in ts]
+    for k in range(len(ts) - 1):
+        if flags[k] != flags[k + 1]:
+            lo, hi = float(ts[k]), float(ts[k + 1])
+            f_lo = flags[k]
+            for _ in range(iters):
+                mid = 0.5 * (lo + hi)
+                if flag_of_t(mid) == f_lo:
+                    lo = mid
+                else:
+                    hi = mid
+            return 0.5 * (lo + hi)
+    raise AssertionError(
+        f"no limiter switch anywhere in the scan: flags={flags} over "
+        f"t={list(ts)} -- the fixture is one-sided along this direction, "
+        f"so this gate would certify nothing")
 
 
 @pytest.mark.parametrize("routine", ["xtp_u", "ytp_v"])
@@ -1953,13 +2083,14 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     there would be certifying a jump.
 
     The perturbed cell is placed in the LINEAR quadrant of the rough
-    fixture, where the flag is ON at ``t = 0`` by the argument in
-    ``_Geo``; driving that one cell far enough makes it a local extremum,
-    which turns the flag OFF.  So the bracket straddles BY
-    CONSTRUCTION, and ``_bisect_flag_switch`` still asserts it rather
-    than assuming it (job 9401521: with the old all-ON fixture the
-    bracket did not straddle and this test failed in its precondition,
-    never reaching a derivative -- lesson 11).
+    fixture, where the flag is ON at ``t = 0``; driving that one cell
+    far enough makes it a local extremum, which turns the flag OFF.
+    Rather than ASSERT that a hand-picked pair of endpoints straddles
+    that transition -- which is what the previous version did, and the
+    most likely place it stopped in run 6 -- the surface is now SCANNED
+    for (:func:`_locate_flag_switch`).  The flag is read out of the
+    public flux (flux == plain upwind value <=> both flags false), so no
+    private state is touched.
 
     Asserted, per side: the one-sided derivative is STABLE (offset ``d``
     vs ``d/4`` agree to 1e-6 relative, i.e. that side is smooth right up
@@ -2006,7 +2137,13 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
         return bool(abs(float(np.asarray(run(f))[probe]) - base_of(f))
                     > 0.0)
 
-    t_star = _bisect_flag_switch(flag_of_t, -800.0, 800.0)
+    # Scan both signs over four decades; the transition is wherever the
+    # perturbed cell stops being an interior value and becomes an
+    # extremum, which depends on the local slope and cannot be predicted
+    # in closed form.
+    ts = [-8000.0, -2000.0, -800.0, -200.0, -50.0, -10.0, 0.0,
+          10.0, 50.0, 200.0, 800.0, 2000.0, 8000.0]
+    t_star = _locate_flag_switch(flag_of_t, ts)
 
     def scalar(t):
         f = jnp.asarray(field).at[kk].add(t)
@@ -2019,10 +2156,15 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
         g1 = float(g(jnp.asarray(t_star + sgn * d)))
         g2 = float(g(jnp.asarray(t_star + sgn * d / 4.0)))
         den = max(abs(g1), abs(g2), 1e-12)
+        # At iord/jord = 5 every quantity feeding the flux (al, bl, br,
+        # b0, fx0) is LINEAR in u/v, and the only nonlinearity is the
+        # smt5 flag itself, so each side is exactly affine in t and the
+        # one-sided derivative must be CONSTANT, not merely stable.
         assert abs(g1 - g2) / den <= 1e-6, (
-            f"{routine} {side}: one-sided derivative not stable "
-            f"({g1:.6e} vs {g2:.6e}) -- another surface is inside the "
-            f"offset, so this side is not certified")
+            f"{routine} {side}: one-sided derivative not constant "
+            f"({g1:.6e} vs {g2:.6e}) -- at iord=5 each side is affine "
+            f"in t, so this means a SECOND surface lies inside the "
+            f"offset and the located t_star is not the only switch")
         sides[side] = g2
 
     den = max(abs(sides["left"]), abs(sides["right"]), 1e-12)

@@ -458,3 +458,22 @@ Each entry cost something. New sessions read this before touching the port.
     this campaign the 497-gate first execution surfaced zero confirmed code
     defects, while the adversarial review surfaced a BLOCKER. Budget for both;
     neither substitutes for the other.
+13. **`max`-based statistics on the committed C12 fixtures are SENTINEL-
+    CONTAMINATED.** `area`, `del6_u`, `del6_v` and `delp` in `dswcore_input.npz`
+    all report a max of exactly **1.0000e+08** — the `BIG_NUMBER` fill in unset
+    ghost/corner cells — and `max|rarea| = 1e-8` is `1/` that, about four
+    decades from the physical ~2e-12. A gate anchored on any of those maxima is
+    reading the sentinel, not physics. Worse, at a sentinel cell
+    `del6 x rarea = 1e8 x 1e-8 = 1` exactly, so even a per-pass RATIO taken with
+    `max` need not show the shrinkage a scaling law predicts. Swept the other
+    six test modules: one hit, and it is a `max` over a windowed OUTPUT
+    difference, which is safe. Anchor on a median over the compute window, or on
+    an observed run fact, never on a `max` over a fixture field.
+14. **A test seed derived from the parameter under test is a defect.** Eight
+    adjoint gates died with `ValueError: expected non-negative integer` because
+    the seed was `iord + 1`, and `np.random.default_rng` rejects negatives —
+    so every negative-order scheme failed before reaching JAX. The failing set
+    was reproducible standalone from the arithmetic alone. Seeds now come from
+    `crc32(test name)`. Note what it cost even though it was "only" the harness:
+    the negative-`iord` adjoints are UNTESTED, not broken, and no parity gate
+    would have noticed because none of them differentiates.
