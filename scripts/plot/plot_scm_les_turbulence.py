@@ -35,8 +35,8 @@ import numpy as np  # noqa: E402
 # wrote, so an old profiles npz still plots, it simply has nothing tuned to
 # overlay.
 _STATES = {
-    "default": ("", "--", 1.15, 0.55, "default"),
-    "tuned": ("tuned_", "-", 1.6, 1.0, "tuned"),
+    "default": ("", "--", 0.9, 0.4, "default"),
+    "tuned": ("tuned_", "-", 1.7, 1.0, "tuned"),
 }
 
 _PANELS = (
