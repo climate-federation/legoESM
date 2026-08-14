@@ -22,11 +22,27 @@
 # design of this campaign is that it scores the JAX arm unchanged.
 set -uo pipefail
 
-# REPO is DERIVED from this script's own location, never edited per run.
-# Editing REPO= inside a pinned worktree makes it dirty, and the preflight
-# below then (correctly) refuses -- which is exactly how job 9408879 died.
-# A script that must be modified to be used cannot live in a pinned tree.
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# REPO is derived from the script's SUBMITTED path, never edited per run.
+#
+# Two earlier attempts failed and both are worth recording:
+#   * editing REPO= inside a pinned worktree makes it dirty, so the preflight
+#     below (correctly) refuses -- that killed job 9408879;
+#   * ${BASH_SOURCE[0]} does NOT work under sbatch: SLURM copies the batch
+#     script into its spool dir, so it resolved to /cm/local/apps/slurm and the
+#     job ran with REPO pointing at the scheduler -- that killed job 9409086.
+# scontrol reports the path actually submitted, which is the only one that
+# refers to the worktree.  Falls back to BASH_SOURCE for a bare `bash` run.
+if [ -n "${SLURM_JOB_ID:-}" ] && command -v scontrol >/dev/null 2>&1; then
+  _SELF=$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+          | tr ' ' '\n' | sed -n 's/^Command=//p' | head -1)
+fi
+[ -n "${_SELF:-}" ] || _SELF="${BASH_SOURCE[0]}"
+REPO=$(cd "$(dirname "$_SELF")/../../.." && pwd)
+if [ ! -e "$REPO/.git" ]; then
+  echo "PREFLIGHT FAILED: REPO=$REPO is not a git worktree (resolved from"
+  echo "$_SELF). Refusing rather than running against the wrong tree."
+  exit 5
+fi
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/w2_ab_$SLURM_JOB_ID
 mkdir -p "$OUT"
