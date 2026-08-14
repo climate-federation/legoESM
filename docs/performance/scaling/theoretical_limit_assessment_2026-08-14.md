@@ -93,8 +93,19 @@ counts the compiled collectives:
   advection, implicit vertical diffusion) serialises across level
   shards and 3-D is dead for these lanes, as it is for spectral.
 
-RESULT: pending (compiling at time of writing; recorded in the
-follow-up commit).
+RESULT (2026-08-14, 8 virtual CPU devices, nlev 24): **3-D is DEAD for
+both lanes.** Collectives per compiled step with the LEVEL axis sharded:
+
+    lat-lon LL48x96   level x2: 274   x4: 346   x8: 544
+    MPAS s4           level x2: 303   x4: 237   x8: 336
+
+versus 11-13 per step for the production horizontal decomposition —
+twenty to forty times more, and GROWING with level-shard count. GSPMD
+turns every column recurrence into chains of collective-permutes plus
+all-to-alls (the lat-lon count includes 180 all-to-alls at x8). Same
+verdict as the spectral lane's measured 0.74x anti-scaling, now
+established for the finite-volume lanes too. Probe committed as
+`scripts/validate/level_shard_census.py`.
 
 Physics of the expectation: both lanes' vertical operators are
 per-column recurrences (cumsum for hydrostatic pressure/geopotential,
