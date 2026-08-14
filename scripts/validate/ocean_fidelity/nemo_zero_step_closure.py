@@ -137,6 +137,18 @@ def main() -> int:
                         "surface_bc=veros_flux, tke_mxl_choice=4). Values are "
                         "parsed as bool / int / float / str in that order. An "
                         "unknown FIELD raises rather than being ignored.")
+    p.add_argument("--n2-for-length", default="insitu",
+                   choices=["insitu", "nemo_bn2"],
+                   help="Which N2 seeds the buoyancy length sqrt(2e)/N. "
+                        "'insitu' (default) mirrors the production card and "
+                        "clips the in-situ density gradient at zero; it is "
+                        "biased TOO STABLE (a +4.3e-5 compressibility offset "
+                        "was measured in a prior session), and a larger N "
+                        "gives a SHORTER length -- the direction of the "
+                        "measured deficit. 'nemo_bn2' uses the model's "
+                        "adiabatic bn2. NOTE it is S-EOS while ORCA1 runs "
+                        "TEOS-10 (codex 9405307), so this BOUNDS the effect "
+                        "rather than reproducing NEMO's rn2.")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -209,9 +221,30 @@ def main() -> int:
     rho = np.asarray(nemo_seos_eos(
         jnp.asarray(T_c), jnp.asarray(S_c),
         jnp.asarray(constants.rho_ocean * constants.g * zc)))
-    N2 = np.asarray(compute_N2(jnp.asarray(rho), jnp.asarray(dz_half),
-                               constants.rho_ocean, g=constants.g,
-                               n2_mode="insitu"))
+    if a.n2_for_length == "nemo_bn2":
+        from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+        _gd = load_mesh_depth_1d(a.mesh_mask)
+        _gw = _mesh_gdepw(a.mesh_mask)[1:]
+        N2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+            jnp.asarray(T_c), jnp.asarray(S_c),
+            jnp.asarray(_gd), jnp.asarray(_gw)))
+    else:
+        N2 = np.asarray(compute_N2(jnp.asarray(rho), jnp.asarray(dz_half),
+                                   constants.rho_ocean, g=constants.g,
+                                   n2_mode="insitu"))
+    # WET-MASKED, and it has to be: the first revision printed these over the
+    # WHOLE array and reported 60% non-positive, which is not physical and
+    # nearly cost a real result. Dry cells enter with nan_to_num T=0 and the
+    # S=35 fill, so they contribute exactly-zero stratification and dominate
+    # the statistic. On wet interfaces it is ~9%, with ~25% in the upper 20
+    # levels -- the mixed layer being neutral, which is the point.
+    _wc = np.transpose(tmask.reshape(z, ncol), (1, 0)) > 0.5
+    _wi = _wc[:, :-1] & _wc[:, 1:]
+    print(f"[N2] length seed = {a.n2_for_length!r}; WET interfaces: "
+          f"median {np.median(N2[_wi]):.4e}, "
+          f"frac(N2<=0) {float(np.mean(N2[_wi] <= 0)):.4f}, "
+          f"upper-20 frac(N2<=0) "
+          f"{float(np.mean(N2[:, :20][_wi[:, :20]] <= 0)):.4f}")
     # NEMO stores en / avm_k on W-levels (index 0 = surface); the legoESM
     # kernel works on the nlev-1 INTERIOR interfaces, i.e. levels 1..z-1.
     en_i = np.nan_to_num(cols(en3)[:, 1:], nan=0.0)
