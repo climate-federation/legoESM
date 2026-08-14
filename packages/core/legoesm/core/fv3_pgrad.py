@@ -201,6 +201,38 @@ limiter, no ``max``/``min`` and no data-dependent select, so
 * ``_great_circle_dist`` (plain a2b arm only) -- ``arcsin(sqrt(x))`` is
   non-differentiable at ``x = 0`` (coincident points) and its derivative
   diverges at ``x = 1`` (antipodal).  Grid corners are neither.
+
+MEASURED, and one retraction (jobs 9400424 / 9401521 / 9408346)
+---------------------------------------------------------------------
+Reverse mode is CONFIRMED correct here, by three independent gates:
+the primal matches the NumPy oracle at 1e-12; the FD-free adjoint
+identity ``<J v, w> == <v, J^T w>`` holds for every routine; and the
+same finite-difference gate that failed on an ill-conditioned fixture
+PASSES on a conditioned one with the code, the operands and the
+``replace=True`` path unchanged -- a defect cannot be
+conditioning-sensitive.
+
+The failures along the way were both in the INSTRUMENT, and the second
+was a wrong mechanism of mine, retracted here rather than left to read
+as settled:
+
+* ``check_grads``'s ``VJP cotangent projection`` compares AD-reverse
+  against a FINITE DIFFERENCE (jax ``_src/public_test_util.py``,
+  ``check_vjp``), not jvp against vjp, and it compares a SCALAR, so its
+  bound is ``1e-5 * 1`` while the forward check's array bound is
+  ``1e-5 * leaf_size``.  On the same FD data that is 312x tighter --
+  "forward passed, reverse failed" was a tolerance gap, not evidence
+  about reverse mode.
+* RETRACTED: I attributed the residual gap in the ``u``/``v``/``divg2``
+  direction to eps^2 FD truncation.  It is not.  With ``pk``/``gz``
+  fixed, :func:`one_grad_p` is EXACTLY AFFINE in those three operands
+  (``u = rdx * (wk2 + u + <bracket in pk, gz>)``, :2464-2477), so its
+  central difference has an identically ZERO truncation term and the
+  gap is pure roundoff -- measured growing as eps shrank
+  (5.50e-08 -> 1.62e-06 -> 2.05e-06 over eps 4e-4 -> 1e-4), and matching
+  ``u_mach * ||f||_inf * sqrt(n) / eps`` at a condition number of ONE.
+  The truncation finding for the NONLINEAR ``pk``/``gz`` direction is
+  unaffected and was confirmed by the same run.
 """
 from __future__ import annotations
 

@@ -268,6 +268,57 @@ def _vjp_fd_projection(f, primals, eps, seed=0):
     return abs(ad - _tree_dot(fd, w)), ad
 
 
+_U_MACH_F64 = float(np.finfo(np.float64).eps)      # 2.220446e-16
+
+
+def _fd_roundoff_floor(f, primals, eps) -> float:
+    """The central difference's own roundoff floor on the projection.
+
+    Each evaluation of ``f`` carries ~``u_mach * |f|`` of representation
+    error; ``(f(x+eps v) - f(x-eps v)) / (2 eps)`` differences two nearly
+    equal values and divides by the step, amplifying that error by
+    ``1/eps``; the ``n_out`` contributions then enter the projection with
+    random signs, so they accumulate as ``sqrt(n_out)``:
+
+        floor ~ u_mach * ||f(x)||_inf * sqrt(n_out) / eps
+
+    This GROWS as eps shrinks, which is why a ladder that only shrinks
+    eps walks AWAY from the truncation regime, never toward it.
+    """
+    out = f(*[jnp.asarray(p) for p in primals])
+    leaves = jax.tree_util.tree_leaves(out)
+    scale = max(float(np.abs(np.asarray(x)).max()) for x in leaves)
+    n = sum(int(np.asarray(x).size) for x in leaves)
+    return _U_MACH_F64 * scale * float(np.sqrt(n)) / eps
+
+
+def _affine_residual(f, primals, seed=0) -> float:
+    """Relative failure of ``f(x+2v) - f(x) == 2 (f(x+v) - f(x))``.
+
+    Zero for an AFFINE ``f``, and measured with FULL O(1) steps, so
+    unlike any finite difference it involves no cancellation and no step
+    size -- there is nothing to tune and no regime to be in.  Uses the
+    same ``seed`` (hence the same direction ``v``) as
+    :func:`_vjp_fd_projection`, so both statements describe the same
+    slice of the map.
+    """
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
+    f0 = f(*primals)
+    f1 = f(*[p + t for p, t in zip(primals, v)])
+    f2 = f(*[p + 2.0 * t for p, t in zip(primals, v)])
+    lo = jax.tree_util.tree_leaves(f0)
+    l1 = jax.tree_util.tree_leaves(f1)
+    l2 = jax.tree_util.tree_leaves(f2)
+    num = max(float(np.abs((np.asarray(b) - np.asarray(a))
+                           - 2.0 * (np.asarray(c) - np.asarray(a))).max())
+              for a, b, c in zip(lo, l2, l1))
+    den = max(float(np.abs(np.asarray(b) - np.asarray(a)).max())
+              for a, b in zip(lo, l2))
+    return num / max(den, 1e-300)
+
+
 def _assert_fd_truncation_scaling(name, f, primals, seed=0):
     """DISCRIMINATOR: is a VJP-vs-FD gap the FD's fault or the VJP's?
 
@@ -279,21 +330,59 @@ def _assert_fd_truncation_scaling(name, f, primals, seed=0):
     SCALING, so this gate needs no tolerance on the gap itself -- which
     is the point, because the gap is exactly the number in dispute.
 
-    Steps are chosen around check_grads' own default (EPS = 1e-4) and
-    stay far above the f64 roundoff floor (~1e-16/1e-4 = 1e-12 on O(1)
-    data), so truncation must dominate across the whole range.
+    ONLY VALID WHERE TRUNCATION DOMINATES, and that is now asserted
+    rather than assumed (job 9408346 caught the assumption): the
+    largest-eps gap must clear the roundoff floor by 10x, otherwise the
+    ratio measures nothing and the message says to go to LARGER eps --
+    shrinking eps cannot reach the truncation regime, it leaves it.
+    A group in which ``f`` is AFFINE has NO truncation term at any eps
+    and belongs in :func:`_assert_affine_and_roundoff_floor` instead.
     """
     steps = (4.0e-4, 2.0e-4, 1.0e-4)
     r = [_vjp_fd_projection(f, primals, e, seed=seed)[0] for e in steps]
     ratios = [r[i] / max(r[i + 1], 1e-300) for i in range(len(r) - 1)]
+    floor0 = _fd_roundoff_floor(f, primals, steps[0])
     detail = (f"{name}: |<v,J^T w> - <J_FD v,w>| at eps="
               f"{steps} is {[f'{x:.6e}' for x in r]}, halving ratios "
-              f"{[f'{x:.3f}' for x in ratios]} "
+              f"{[f'{x:.3f}' for x in ratios]}, roundoff floor at "
+              f"eps={steps[0]:g} is {floor0:.6e} "
               f"(eps^2 truncation -> ~4, roundoff -> ~0.5, "
               f"wrong reverse-mode derivative -> ~1)")
     assert all(x > 0.0 for x in r), detail
+    assert r[0] > 10.0 * floor0, (
+        detail + " -- PRECONDITION FAILED: the largest-eps gap does not "
+        "clear the roundoff floor, so this ladder is in the roundoff "
+        "regime and its ratio is meaningless.  Use LARGER eps, or -- if "
+        "f is affine in these operands -- the affine/roundoff gate.")
     for x in ratios:
         assert 2.5 < x < 6.0, detail
+
+
+def _assert_affine_and_roundoff_floor(name, f, primals, tol_affine,
+                                      margin, eps=1.0e-4, seed=0):
+    """The FD gate for a group in which ``f`` is AFFINE.
+
+    There is no truncation term to measure, so the two things worth
+    asserting are (a) that the map really is affine in these operands --
+    tolerance-free in eps, full O(1) steps -- and (b) that the FD-vs-AD
+    projection gap sits at the central-difference ROUNDOFF FLOOR rather
+    than anywhere above it.  (b) is the ``cond x eps``-style check for
+    this instrument, with the floor formula spelled out in
+    :func:`_fd_roundoff_floor`.
+    """
+    r_aff = _affine_residual(f, primals, seed=seed)
+    assert r_aff <= tol_affine, (
+        f"{name}: f(x+2v)-f(x) != 2(f(x+v)-f(x)) at {r_aff:.3e} relative "
+        f"-- these operands are NOT affine, so the roundoff-floor "
+        f"argument below does not apply.  MEASURED {r_aff:.3e}")
+    gap, ad = _vjp_fd_projection(f, primals, eps, seed=seed)
+    floor = _fd_roundoff_floor(f, primals, eps)
+    assert gap <= margin * floor, (
+        f"{name}: FD projection gap {gap:.6e} exceeds {margin:g}x the "
+        f"central-difference roundoff floor {floor:.6e} "
+        f"(u_mach*||f||_inf*sqrt(n)/eps at eps={eps:g}); AD projection "
+        f"<v,J^T w> = {ad:.6e}.  MEASURED gap/floor = "
+        f"{gap / max(floor, 1e-300):.3f}")
 
 
 def _check_adjoint(name, f, primals, tol, seed=0):
@@ -1153,11 +1242,71 @@ def test_one_grad_p_vjp_fd_gap_is_fd_truncation():
     halving ratio is the verdict and no tolerance is placed on the gap.
     If this goes red with ratios near 1, the reverse mode IS wrong and
     the prime suspect is the ``replace=True`` read-after-write threading
-    through ``a2b_ord4``; the assert prints all three residuals."""
+    through ``a2b_ord4``; the assert prints all three residuals.
+
+    CONFIRMED, job 9408346: this group's ratios landed inside the
+    (2.5, 6.0) truncation window -- the run's ONLY failure was the
+    u/v/divg2 group, which this test asserted AFTER this call, so this
+    call had already passed.  Together with
+    :func:`test_one_grad_p_jax_check_grads_order1` passing on the
+    well-conditioned fixture (same code, same ``replace=True``, only the
+    conditioning changed), the 0.93% gap is eps^2 truncation amplified
+    by an ill-conditioned momentum denominator, and reverse mode is
+    exonerated: a defect cannot be conditioning-sensitive.
+
+    SCOPE (the retraction, see the sibling test): this is asserted ONLY
+    for pk/gz, the operands the map is NONLINEAR in.  The u/v/divg2
+    group is affine and has no truncation term at all."""
     km = 2
-    f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km)
+    f_pg, _f_lin, p_pg, _p_lin = _ogp_grad_setup(km)
     _assert_fd_truncation_scaling("one_grad_p pk/gz", f_pg, p_pg)
-    _assert_fd_truncation_scaling("one_grad_p u/v/divg2", f_lin, p_lin)
+
+
+def test_one_grad_p_linear_group_is_affine_and_gap_is_roundoff():
+    """RETRACTION + replacement gate for the u/v/divg2 group.
+
+    RETRACTED (job 9408346 measured it, and the mechanism was mine):
+    I applied the eps^2 truncation discriminator to this group as well
+    and predicted halving ratios ~4.  The measurement was
+    ``[5.497159e-08, 1.621543e-06, 2.047777e-06]`` at
+    eps = (4e-4, 2e-4, 1e-4) -- the gap GROWS as eps shrinks, ratios
+    0.034 and 0.792.  There is no truncation here to see and there never
+    was: ``one_grad_p`` (:2464-2477) is
+    ``u = rdx * (wk2 + u + dt/(wk+wk) * <bracket in pk, gz>)``, and with
+    pk/gz held fixed the map is EXACTLY AFFINE in u, v and divg2 (u
+    enters additively, divg2 only through the linear wk2 differences).
+    A central difference of an affine map has an identically zero
+    truncation term, so the only error is roundoff -- which is precisely
+    the 1/eps growth measured.  The claim was wrong about this group;
+    the pk/gz group's truncation finding is unaffected and was CONFIRMED
+    by the same run.
+
+    CONFIRMED replacement, and the arithmetic that closes it: the
+    central-difference roundoff floor is
+    ``u_mach * ||f||_inf * sqrt(n) / eps``.  Here ``||f||_inf ~ 4e4``
+    (the winds are scaled by 1e6), ``n = 624`` (two 12x13x2 leaves) and
+    ``eps = 1e-4``, giving ``2.22e-16 * 4e4 * 25 / 1e-4 = 2.2e-6``
+    against the measured ``2.047777e-06`` -- agreement within 10% with a
+    condition number of ONE.  So no ill-conditioning is needed to
+    explain this group at all; it is the irreducible cancellation floor
+    of differencing a quantity 1e6 times larger than its own
+    step-times-derivative.  (The 5.5e-08 point at eps=4e-4 is one
+    realisation of a 624-term random-sign sum landing low, not a trend.)
+
+    This gate therefore asserts what is actually true of an affine map:
+    affinity itself, tolerance-free in eps, and the gap against the
+    computed floor -- NOT a halving ratio, which cannot be satisfied
+    here at any step size."""
+    km = 2
+    _f_pg, f_lin, _p_pg, p_lin = _ogp_grad_setup(km)
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    tol_affine = 1e-12
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    floor_margin = 10.0
+    _assert_affine_and_roundoff_floor("one_grad_p u/v/divg2", f_lin,
+                                      p_lin, tol_affine, floor_margin)
 
 
 def test_one_grad_p_jax_check_grads_order2_well_conditioned():
@@ -1440,7 +1589,16 @@ def test_nh_p_grad_vjp_fd_gap_is_fd_truncation():
     :func:`test_one_grad_p_vjp_fd_gap_is_fd_truncation`.  nh_p_grad and
     one_grad_p are the only two routines that use ``replace=True`` and
     the only two that failed, so if this is a threading defect BOTH
-    eps-scalings go flat (~1) together."""
+    eps-scalings go flat (~1) together.  CONFIRMED job 9408346: both
+    groups landed in the (2.5, 6.0) truncation window.
+
+    Why BOTH groups are legitimately on this gate, unlike one_grad_p's
+    (see the retraction in
+    :func:`test_one_grad_p_linear_group_is_affine_and_gap_is_roundoff`):
+    ``pp/u/v/delp`` is MIXED, not affine.  u, v and pp do enter
+    linearly, but ``delp`` reaches the momentum update only through the
+    NH weight ``wk1 = a2b(delp)`` as ``1/wk1`` (:2201/:2218), and that
+    nonlinearity carries the truncation term the ratio measures."""
     km = 2
     f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km)
     _assert_fd_truncation_scaling("nh_p_grad pk3/gz", f_pg, p_pg)
