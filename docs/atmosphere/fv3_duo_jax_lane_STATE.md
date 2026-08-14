@@ -477,3 +477,21 @@ Each entry cost something. New sessions read this before touching the port.
     `crc32(test name)`. Note what it cost even though it was "only" the harness:
     the negative-`iord` adjoints are UNTESTED, not broken, and no parity gate
     would have noticed because none of them differentiates.
+15. **`cp` is ALIASED to prompt on this machine, so a plain `cp` AND `cp -f`
+    both silently do nothing.** Hit twice in five minutes on 2026-08-14: a job
+    was submitted against a stale file and would have been reported as a
+    result. `/bin/cp` bypasses the alias — but the real fix is structural and is
+    now enforced: **never hand-copy into a pinned worktree.** Commit first, then
+    `scripts/cluster/fv3_native/pin_worktree.sh <name>`, which refuses on a
+    dirty source, verifies the pinned SHA and asserts the new tree is clean.
+    `jax_lane_measure.sbatch` additionally aborts with exit 3 if its worktree is
+    dirty, so a run that cannot be attributed to a commit cannot silently
+    produce numbers. This is the repo's existing "preflight before every sbatch"
+    rule, made mechanical.
+16. **A non-streaming request to GLM dies with `IncompleteRead`.** It is a
+    reasoning model that can think for minutes with nothing crossing the wire,
+    and the connection gets dropped. `glm_review.py` streams by default and
+    keeps a partial answer on a mid-flight drop. Separately: a 1500-token cap
+    produced 1497 reasoning tokens and EMPTY content, which reads as a refusal
+    and is not one — the client now reports the reasoning/content split.
+

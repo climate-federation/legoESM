@@ -33,8 +33,28 @@ export JAX_ENABLE_X64=1
 
 echo "host: $(hostname)"
 cd "$REPO"
+
+# ---------------------------------------------------------------- PREFLIGHT
+# Earned 2026-08-14, twice in five minutes.  `cp` is aliased to prompt on this
+# machine, so BOTH a plain `cp` and a `cp -f` into a pinned worktree silently
+# did nothing -- and a job was submitted against a stale file, which would have
+# been reported as a result.  `/bin/cp` bypasses the alias, but the real fix is
+# to never hand-copy into a pinned tree: COMMIT FIRST, create the worktree at
+# that SHA, and let git place the files.
+#
+# This block makes a stale run impossible to mistake for a good one: it aborts
+# if the tree is dirty, and it prints the SHA next to every result so a log can
+# never be attributed to the wrong code.
+DIRTY=$(git status --porcelain | wc -l)
 echo "PINNED sha: $(git rev-parse HEAD)"
-echo "dirty files: $(git status --porcelain | wc -l)"
+echo "dirty files: $DIRTY"
+if [ "$DIRTY" -ne 0 ]; then
+  echo "PREFLIGHT FAILED: worktree is DIRTY. A pinned run must be reproducible"
+  echo "from its SHA alone; an uncommitted file means the log cannot be"
+  echo "attributed to any commit. Commit, re-create the worktree, resubmit."
+  git status --porcelain | head -20
+  exit 3
+fi
 
 NEW_MODULES="
 packages/core/legoesm/grids/fv3_duo_halos.py
