@@ -93,6 +93,47 @@ A mode growing FASTER THAN f cannot be rotationally balanced, so this is not
 the Eady instability being revealed by a correctly-phased free surface. It is
 numerical.
 
+THE MECHANISM, QUANTIFIED BUT NOT SUFFICIENT.
+
+The barotropic loop returns three averages and they are NOT taken over the
+same effective interval. Velocity uses the symmetric filter weights centred
+on t+dt; transport uses the SM2005 continuity-consistent tail-sum weights,
+whose centroid sits near t+0.55*dt. Weight centroids, cosine, n=30:
+
+                  velocity      transport      offset
+    before          t+dt        ~t+0.78 dt     0.22 dt
+    after           t+dt        ~t+0.55 dt     0.45 dt
+
+The centring fix corrects the VELOCITY window and leaves the transport shape
+alone, so it roughly DOUBLES a pre-existing offset. Every coupling step then
+resets the 3-D barotropic mode from one average while moving mass with the
+other. Two independent derivations agree (codex puts the offset at 0.451 dt
+for the start-of-substep flux convention, 0.435 dt at the midpoint).
+
+THE DENOMINATOR IS NOT THE BUG, and this constrains any fix. The transport
+weight keeps the PHYSICAL n_substeps deliberately: substituting n_loop makes
+the transport weights sum to 30/59 and breaks
+``div(Hu_avg) == (eta_old - eta_avg)/dt`` by 49%. The tail-sum SHAPE is
+load-bearing, so the mismatch cannot be removed by re-weighting transport.
+
+MEASURED CONTRIBUTION, and the reason this is not billed as the root cause:
+deriving the velocity from the transport instead (u_bar_avg = Hu_avg / H_e,
+one variable, same solver) moves the blow-up from step 19400 to 23500. A 21%
+delay, not a cure. The mismatch is contributory and quantified; it is not
+sufficient. Note that substitution also trades one inconsistency for another
+-- it reintroduces a phase error in the velocity -- so it is a mechanism
+probe, not a candidate fix.
+
+TWO MORE ARMS, one informative and one void:
+ * BOX kernel instead of cosine blows up at the IDENTICAL step 19400, despite
+   damping 30x harder at the coupling period (0.017 against 0.500). Kernel
+   damping is not the mechanism; whatever drives this is common to both, and
+   the centroid mismatch is.
+ * implicit_cn also fails (step 35400) but that arm is VOID as evidence:
+   barotropic_implicit_mpas.py is not in the fix's file list and never calls
+   compute_filter_weights, so that solver is identical on both sides and its
+   failure is pre-existing and independent. It changes two things at once.
+
 A CAUTION THAT COST ME A WRONG READING. The matrix's reported ``max_speed``
 (2.68 m/s on origin/main at day 200) is the CELL-CENTRE reconstructed speed,
 not edge ``max|u|``. Comparing the two suggested the baseline had comparable
