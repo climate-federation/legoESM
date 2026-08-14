@@ -1465,7 +1465,14 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            rho_col = p_full_col / (constants.R_d * T_col)
+            # MOIST (virtual-T) density, the same basis every other bridge
+            # uses for the per-mass droplet-number conversion below — a dry
+            # rho here biased that round trip by (1+0.61 q_v) systematically
+            # (codex final round).  dz keeps the same rho so hydrostatic
+            # thickness stays consistent with the density handed to the
+            # scheme.
+            from legoesm.atmosphere.physics._shared import compute_rho
+            rho_col = compute_rho(T_col, p_full_col, q_v_col)
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             dz_col = dp_col / (rho_col * constants.g)
             _z = jnp.zeros_like(q_c_col)

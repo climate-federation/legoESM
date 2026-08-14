@@ -45,6 +45,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
@@ -1904,10 +1905,11 @@ def build_segment_fn(
                 q_v_dyn = _adv["q_v"].data
                 q_c_dyn = _adv["q_c"].data
                 q_r_dyn = _adv["q_r"].data
-                # Tracers NOT in the advected set (per-volume N_c/N_r are
-                # intentionally excluded, #772 review) fall back to their carry
-                # value — i.e. they stay column-locked — NOT to None, which
-                # would drop the double-moment number fields on an opt-in run.
+                # Every water species advects since 2026-08-14 (all stored
+                # per mass, registry-driven), so for present fields this
+                # fallback is dead; it remains for OPTIONAL fields that are
+                # None on warm-rain runs — those must stay None, not be
+                # invented.
                 q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
                 q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
                 q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
@@ -3082,9 +3084,11 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
         # driver gates on cubed_sphere+cdgrid); a state type without a
         # ``tracers`` field fails loudly here rather than silently
         # dropping the moisture.
+        _units = {t.name: t.units for t in make_full_moisture_registry().tracers}
         tracers = {
             nm: Field(getattr(carry, nm), name=nm,
-                      dims=("face", "x", "y", "level"), units="kg/kg")
+                      dims=("face", "x", "y", "level"),
+                      units=_units.get(nm, "kg/kg"))
             for nm in _ADVECTED_TRACER_NAMES
             if getattr(carry, nm) is not None
         }
