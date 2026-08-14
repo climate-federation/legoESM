@@ -1004,11 +1004,14 @@ def test_main_unions_the_default_and_tuned_nonfinite_flags():
     an arm that blew up before tuning and not after would come back clean."""
     import inspect
     src = inspect.getsource(drv.main)
-    i = src.index("res.nonfinite_cases")
-    window = src[i:i + 300]
-    assert "set(res.nonfinite_cases or [])" in window
-    assert "set(tuned.nonfinite_cases or [])" in window
-    assert "|" in window, "must be a union, not a copy"
+    # Anchored on the TUNED side, not on the first `res.nonfinite_cases` --
+    # that one is the DEFAULT evaluation's assignment and matching it made the
+    # window miss the handoff entirely.
+    i = src.index("set(tuned.nonfinite_cases or [])")
+    window = src[max(0, i - 200):i + 60]
+    assert "set(res.nonfinite_cases or [])" in window and "|" in window, (
+        "the handoff must UNION the default and tuned flags; a copy would "
+        "overwrite the default one")
 
 
 def test_a_partial_report_says_so(tmp_path):

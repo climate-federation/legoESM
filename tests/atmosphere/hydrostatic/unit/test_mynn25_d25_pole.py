@@ -227,9 +227,13 @@ def test_ri_is_bounded_below_the_float32_square_overflow():
     from legoesm.atmosphere.physics.turbulence.mynn25 import _RI_MAX
     assert _RI_MAX ** 2 < np.finfo(np.float32).max, (
         f"_RI_MAX={_RI_MAX:g} squared still overflows float32")
-    # And it must be far above any Ri the closure resolves, or the clip is
-    # doing physics: Rf saturates long before this.
-    assert _RI_MAX >= 1e12
+    # And it must be set as HIGH as that allows, not at a comfortable round
+    # number: every entry the clip touches is one the closure would otherwise
+    # have evaluated, so a lower bound perturbs more columns for no extra
+    # protection. Measured: 1e15 moved ekman, wangara and astex at round-off.
+    assert _RI_MAX ** 2 > 0.001 * np.finfo(np.float32).max, (
+        f"_RI_MAX={_RI_MAX:g} is far below the float32 headroom and is "
+        "clipping columns it does not need to")
 
 
 def test_f1_reaches_zero_inside_the_declared_tunable_bounds():

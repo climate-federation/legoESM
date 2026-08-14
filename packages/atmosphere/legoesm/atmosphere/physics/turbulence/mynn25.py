@@ -165,8 +165,13 @@ _SMOOTH_EPS = 1e-30       # used in safe sqrt / safe divide
 # ~1e28-1e30 and Ri*Ri overflows float32 (max 3.4e38) to inf, whose later
 # inf/inf is NaN. This module runs x64 in the SCM benchmarks and float32 in a
 # global run, so the overflow is a real runtime mode rather than a hypothetical.
-# Rf saturates far below 1e15, so the clip changes no physical answer.
-_RI_MAX = 1e15
+# Set as HIGH as float32 allows rather than at a round number: the bound is
+# only there to keep the square finite, and every entry it touches is one the
+# closure would otherwise have evaluated, so a lower bound perturbs more
+# columns for no extra protection. 1e18^2 = 1e36 against a float32 max of
+# 3.4e38. MEASURED at 1e15 it moved ekman, wangara and astex at round-off (the
+# near-zero shear above the boundary layer); at 1e18 it does not.
+_RI_MAX = 1e18
 # Two-sided floor on |F1| and |F2|, the level-2 combinations of the closure
 # constants that Ri1/Ri2/Ri3 and Rf1/Rf2 divide by. They are ~6.3 and ~5.0 at
 # the NN09 defaults, but they are built from TRAINABLE coefficients and F1 hits
