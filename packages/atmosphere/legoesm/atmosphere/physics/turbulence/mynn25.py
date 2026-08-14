@@ -341,7 +341,37 @@ def _compute_SM_SH(
     phi_4 = phi_1 - _MYNN_PHI_C12 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
     phi_5 = 6.0 * alpha_c2 * A1 * A1 * G_M
 
-    D25 = jnp.maximum(phi_2 * phi_4 + phi_5 * phi_3, _SMOOTH_EPS)
+    # D25 is the level-2.5 denominator. It equals 1.0 at G_M = G_H = 0 and it
+    # PASSES THROUGH ZERO, so a one-sided ``maximum(D25, 1e-30)`` does not
+    # regularize it -- it converts the root into a ~1e30 amplification.
+    #
+    # At exactly zero resolved shear phi_5 = 6*alpha_c^2*A1^2*G_M is 0, so
+    # D25 = phi_2*phi_4 with
+    #     phi_4 = 1 - [3*A2*B2*(1-C3) + 12*A1*A2*(1-C2)] * G_H,
+    # whose root at the NN09 constants is G_H = 0.046. G_H = -L^2 N^2 / qke, so
+    # any unstable layer in a shear-free column sweeps straight through it.
+    # MEASURED at G_M = 0: SH25 = +5.5e29 just past the root, i.e. Kh ~ 1e25
+    # m^2/s -- POSITIVE, so the downstream ``Kh >= 0`` clamp cannot see it, and
+    # it enters the qke budget as -Kh*N^2. On the Nieuwstadt CBL (the one
+    # tuning case with u_geo = v_geo = f_c = 0, hence S^2 identically zero)
+    # that took qke from 5e-6 to 1e24 in a single step and the whole column to
+    # NaN by step 10, while all seven other cases and all eight other closures
+    # were finite through 2000 steps.
+    #
+    # The floor is TWO-SIDED and keeps the sign: SM25/SH25 are bit-identical
+    # wherever |D25| >= the floor, and past the root they stay negative and are
+    # caught by the existing Km/Kh >= 0 clamp exactly as before. Only the
+    # neighbourhood of the root changes, which is the only place that was
+    # producing 1e25 diffusivities.
+    #
+    # This bounds the singularity; it is not the NN09/Helfand-Labraga (1988)
+    # joint (G_M, G_H) realizability limit, which would additionally keep the
+    # closure inside its derived region.
+    D25_raw = phi_2 * phi_4 + phi_5 * phi_3
+    floor = config.d25_floor
+    D25 = jnp.where(D25_raw >= 0.0,
+                    jnp.maximum(D25_raw, floor),
+                    jnp.minimum(D25_raw, -floor))
     SM25 = alpha_c * A1 * (phi_3 - 3.0 * C1 * phi_4) / D25
     SH25 = alpha_c * A2 * (phi_2 + 3.0 * C1 * phi_5) / D25
     return SM25, SH25
@@ -478,13 +508,17 @@ def mynn25_turbulence(
     Kh_half = L * q_half * SH
     Kq_half = L * q_half * (3.0 * SM)        # NN09 eq 67
     # Sign convention: eddy diffusivities are >= 0 (down-gradient mixing).
-    # The EXACT NN09 level-2.5 ``SM``/``SH`` are analytically nonnegative (it
-    # is the level-3 corrections ``S'_M``/``S'_H`` that can turn negative).
-    # This floor is therefore a DEFENSIVE guard on the AD-safe approximations
-    # used here (the floored ``D25`` / discriminant / ``1-Rf`` / ``Rf2-Rf``),
-    # which can yield a slightly negative ``SM25``/``SH25`` -> Km/Kh<0 ->
-    # ANTI-diffusive mixing in the implicit tridiagonal solve in numerical edge
-    # cases.  Clamp at 0 so mixing only ever diffuses (never upgradient).
+    # This clamp is LOAD-BEARING, not defensive. The comment it replaces said
+    # the level-2.5 SM/SH are "analytically nonnegative" and that only a
+    # numerical edge case could make them "slightly negative"; both halves are
+    # false and were measured so. Past the D25 root at G_M = 0 the exact
+    # algebra gives SM25 = -0.67 and SH25 = -0.032 at G_H = 1 -- O(1) negative,
+    # not slight -- because SH25 reduces to A2/phi_4 there and phi_4 changes
+    # sign. So this is a real upgradient branch of the closure being clamped
+    # away, and the clamp must stay.
+    # It is also NOT sufficient on its own: the same root produces LARGE
+    # POSITIVE SM25/SH25 on the other side, which a >= 0 clamp cannot see. That
+    # is bounded at the source by the two-sided D25 floor in _compute_SM_SH.
     Km_half = jnp.maximum(Km_half, 0.0)
     Kh_half = jnp.maximum(Kh_half, 0.0)
     Kq_half = jnp.maximum(Kq_half, 0.0)
