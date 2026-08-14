@@ -1695,6 +1695,44 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         pos = str(i + 1) if rankable else "excl."
         lines.append(f"| {pos} | {r.scheme} | {r.status} | {d} | {t} | "
                      f"{r.n_trained} | {len(r.frozen or {})} |")
+    # The scores say a fit helped; only the parameter values say WHAT it did,
+    # and they were reachable solely by reading tuned_parameters.json. Trained
+    # parameters only: a scheme like full CLUBB carries 48 spec'd leaves of
+    # which 15 have no gradient, and listing all of them buries the ones that
+    # moved. The frozen ones are counted, and named with their reason in the
+    # JSON.
+    lines += ["", "## Parameters, prior and tuned", ""]
+    for r in ranked:
+        moved = [p for p in (r.parameters or []) if p.get("trained")]
+        n_frozen = len(r.frozen or {})
+        if not moved:
+            lines += [f"### {r.scheme}", "",
+                      f"no trained parameters ({r.status}; {n_frozen} frozen)",
+                      ""]
+            continue
+        lines += [
+            f"### {r.scheme}", "",
+            f"{len(moved)} trained, {n_frozen} frozen (zero preflight "
+            "gradient or unimplemented; see `tuned_parameters.json`)", "",
+            "| parameter | units | prior | tuned | change | bounds |",
+            "|---|---|---|---|---|---|",
+        ]
+        for p in sorted(moved, key=lambda q: q["name"]):
+            prior, tuned = p.get("default"), p.get("tuned")
+            if prior is None or tuned is None:
+                change = "—"
+            elif abs(prior) > 0.0:
+                change = f"{100.0 * (tuned - prior) / abs(prior):+.1f}%"
+            else:
+                # A prior of exactly zero has no percentage; say the absolute
+                # move rather than printing a division by zero as "inf%".
+                change = f"{tuned - prior:+.4g} (prior 0)"
+            lines.append(
+                f"| `{p['name'].rsplit('.', 1)[-1]}` | {p.get('units') or '—'} "
+                f"| {prior:.6g} | {tuned:.6g} | {change} "
+                f"| [{p['lower']:.4g}, {p['upper']:.4g}] |")
+        lines.append("")
+
     failures = [r for r in ranked if r.error]
     if failures:
         lines += ["", "## Failures", ""]

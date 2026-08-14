@@ -867,3 +867,104 @@ def test_scheme_result_declares_the_tuned_profile_slot():
     import dataclasses
     fields = {f.name for f in dataclasses.fields(drv.SchemeResult)}
     assert "profiles_tuned" in fields
+
+
+# --- the report names the parameter VALUES, prior and tuned -----------------
+
+def _minimal_arm_for_report():
+    import types
+    import numpy as _np
+    ref = types.SimpleNamespace(
+        window_label="4.00-6.00 h (13 frames)", window_hours=(4.0, 6.0),
+        n_frames=13, mask=_np.ones(4, dtype=bool),
+    )
+    case = types.SimpleNamespace(
+        nlev=4, p_s=1.0e5,
+        spec=types.SimpleNamespace(bulk_ch=None, bulk_ce=None),
+        forcing=types.SimpleNamespace(prescribe="fluxes"),
+    )
+    return types.SimpleNamespace(
+        name="bomex", case=case, reference=ref, scored=("theta",),
+        les_dir="/nowhere", dt=60.0, prescribed_fluxes=True,
+        surface=types.SimpleNamespace(Cd_neutral=1.07e-3, Ch_neutral=0.0,
+                                      z0=1e-4, z_ref=20.0),
+    )
+
+
+def _report_args(tmp_path):
+    import types
+    return types.SimpleNamespace(
+        case=None, radiation_confound=None, nlev=4, tier="extended",
+        optimizer="muon", lr=0.1, steps=2, joint_aggregation="mean",
+        relative_norm_floor=0.05, microphysics="none",
+    )
+
+
+def test_summary_lists_the_prior_and_tuned_value_of_every_trained_param(
+        tmp_path):
+    """A score says the fit helped; only the values say what it DID.
+
+    They were previously reachable only by reading tuned_parameters.json by
+    hand, which is not a report.
+    """
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+    res.frozen = {"atm.turb.LouisConfig.b_unstable": "|grad| <= 1e-14"}
+    res.parameters = [
+        {"name": "atm.turb.LouisConfig.b_stable", "units": "1",
+         "default": 5.0, "tuned": 6.25, "lower": 1.0, "upper": 20.0,
+         "trained": True, "frozen_reason": None},
+        {"name": "atm.turb.LouisConfig.b_unstable", "units": "1",
+         "default": 7.5, "tuned": None, "lower": 1.0, "upper": 20.0,
+         "trained": False,
+         "frozen_reason": "|grad| <= 1e-14 in preflight"},
+    ]
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+
+    assert "## Parameters, prior and tuned" in text
+    assert "b_stable" in text
+    assert "5" in text and "6.25" in text
+    assert "+25.0%" in text, "the report must say how far each parameter moved"
+    # The frozen one is COUNTED but not listed: with 48 leaves and 15 frozen,
+    # listing them buries the ones that moved.
+    assert "1 trained, 1 frozen" in text
+    assert "b_unstable" not in text
+
+
+def test_a_zero_prior_does_not_print_an_infinite_change(tmp_path):
+    """`(tuned - 0)/|0|` is inf, which renders as a percentage and reads as a
+    real number."""
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="tke", status="tuned")
+    res.score_default, res.score_tuned = 0.8, 0.7
+    res.parameters = [
+        {"name": "atm.turb.TKEConfig.some_offset", "units": "1",
+         "default": 0.0, "tuned": 0.25, "lower": -1.0, "upper": 1.0,
+         "trained": True, "frozen_reason": None},
+    ]
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "inf" not in text.lower()
+    assert "+0.25 (prior 0)" in text
+
+
+def test_a_scheme_with_nothing_trained_says_so(tmp_path):
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="mynn25", status="no_active_gradient")
+    res.score_default = 1.2
+    res.frozen = {"a": "x", "b": "y"}
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "no trained parameters (no_active_gradient; 2 frozen)" in text
+
+
+def test_the_multicase_report_is_titled_with_its_regimes(tmp_path):
+    """args.case is None under --cases, which titled every multi-case report
+    'vs LES - None'."""
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="ok", score_default=0.5)
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    head = (tmp_path / "summary.md").read_text().splitlines()[0]
+    assert "None" not in head and "bomex" in head
