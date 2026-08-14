@@ -1170,6 +1170,15 @@ class ExperimentConfig(NamedTuple):
     # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
+    # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
+    # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
+    # raising epsilon_deep dilutes the deep plume faster in dry air, so
+    # convection survives only where the column is already moist -> a narrower,
+    # wetter rain band. Both are scaled in-scheme by the IFS height/RH factors;
+    # these are the BASE rates. Defaults are the published IFS deep values and
+    # are byte-identical to the previous hard-coded behaviour.
+    bechtold_epsilon_deep: float = 1.75e-3   # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4     # BechtoldConfig.delta_deep [1/m]
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
     # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
@@ -1633,6 +1642,8 @@ class ExperimentConfig(NamedTuple):
             )
         for _f, _lo, _hi in (
             ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
+            ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
