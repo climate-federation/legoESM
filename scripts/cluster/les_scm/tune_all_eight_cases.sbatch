@@ -73,6 +73,29 @@ for c in $CASE_LIST; do
   CASES="${CASES:+$CASES,}$c:$R/les_ref/$c"
 done
 echo "all eight references present"
+# ...and that each one is the case it claims to be. A directory can exist and
+# still be refused: the Wangara reference was stamped "cbl" by a --case-label
+# default, the loader rejected it (correctly -- the two are not cross-aliased),
+# and this campaign died six seconds in AFTER waiting for a GPU. The stamp is
+# one npz field; check it here rather than discovering it past the queue.
+for c in $CASE_LIST; do
+  $PY - "$c" "$R/les_ref/$c" <<'PYEOF' || exit 3
+import sys, glob
+import numpy as np
+case, d = sys.argv[1], sys.argv[2]
+fs = sorted(glob.glob(f"{d}/profiles/prof_*.npz"))
+if not fs:
+    print(f"  {case}: NO profile frames in {d}"); sys.exit(1)
+wrote = str(np.load(fs[0], allow_pickle=True)["case"])
+sys.path.insert(0, "packages/ml")
+from legoesm.training.les_reference import _case_matches
+ok = _case_matches(wrote, case)
+print(f"  {case}: {len(fs)} frames, stamped {wrote!r} -> "
+      f"{'ok' if ok else 'REFUSED by the reference loader'}")
+sys.exit(0 if ok else 1)
+PYEOF
+done
+echo "all eight stamps accepted"
 echo "cases: $CASES"
 
 rm -rf "$OUT"
