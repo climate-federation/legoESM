@@ -709,7 +709,27 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # No CLI flag: alpha_tke carries a __param_spec__ (tier 2, bounds
         # 1-90), so `--params vertical_mixing.tke.alpha_tke=30` reverts it.
         alpha_tke=1.0,                  # NEMO zdftke: TKE diffused by avm x1
-        # STRATIFICATION: stop clipping. The card computed N2 from the in-situ
+        # STRATIFICATION. Precise statement, after GLM-5.2 pushed back and
+        # zdftke.F90:650 settled it: BOTH forms floor N2 inside the length --
+        # NEMO evaluates zrn2 = MAX(rn2, rsmall) and legoESM's choice-3/4
+        # branch takes sqrt(max(N2, 1e-12)). So this is NOT "signed vs
+        # clipped"; the floor is on both sides. What changes is the N2 VALUE.
+        # The in-situ density gradient carries a POSITIVE compressibility bias
+        # (+4.3e-5 measured in a prior session) that keeps N2 comfortably
+        # above the floor even in neutral water, so the buoyancy length stays
+        # SHORT. The adiabatic form reaches the floor where the water really
+        # is neutral, the length runs to the sweep bound, and that is NEMO's
+        # long zmxlm. Same mechanism as described below, correctly named.
+        #
+        # Carried from the same review, not acted on: the stacked MIN sweeps
+        # make the diffusivity non-differentiable at the mixed-layer base, and
+        # in neutral layers the limiter IS effectively the convection
+        # parameterisation (length set by ramp geometry, not closure physics)
+        # -- the documented resolution-sensitivity of convective mixing in
+        # ORCA-type runs. ORCA1 sets no Galperin cap (no rn_clim_galp in the
+        # namelist), so NEMO lives with this too; matching it is the goal here.
+        #
+        # ORIGINAL NOTE: the card computed N2 from the in-situ
         # density gradient CLIPPED at zero; NEMO's rn2 is SIGNED. In
         # convectively neutral water the signed form gives N -> 0, the
         # buoyancy length sqrt(2e)/N blows up, and the lup/ldown sweeps set a
