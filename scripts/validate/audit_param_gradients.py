@@ -415,6 +415,9 @@ def scheme_gradients(
         for _name, state, sigma in states:
             holder = {"w": None, "key": key}
             try:
+                # Same executable-accumulation hazard as the sweep below: one
+                # fresh reverse-mode program per (scheme, projection, state).
+                jax.clear_caches()
                 grads = jax.grad(loss_for(state, sigma, holder))(raw0)
             except Exception as exc:  # noqa: BLE001 - the failure IS a verdict
                 return ({c.name: float("nan") for c in constraints},
@@ -450,6 +453,13 @@ def finite_difference_response(
     trials += [min(max(default * k, lo), hi) for k in DEFAULT_MULTIPLES]
 
     def tendency(value):
+        # COMPILED-EXECUTABLE HYGIENE.  Each trial is a DIFFERENT static
+        # PhysicsConfig, so XLA emits a fresh executable and retaining them is
+        # not free: the campaign already lost eight schemes to
+        # "Unable to allocate section memory" (jobs 9331806/7) and this audit
+        # died the same way at "Failed to materialize symbols" on its first
+        # sweep.  Dropping the caches bounds the footprint at ~one executable.
+        jax.clear_caches()
         tuned = apply_param_overrides(_tunable_object(base_sub),
                                       {constraint.field: value})
         cfg = _single_scheme_config(category, scheme, _rewrap(base_sub, tuned))
