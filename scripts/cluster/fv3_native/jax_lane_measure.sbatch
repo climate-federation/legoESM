@@ -84,6 +84,7 @@ packages/core/legoesm/core/fv3_mapz.py
 packages/core/legoesm/core/fv3_nh_core.py
 packages/core/legoesm/core/fv3_duo_sw_core.py
 packages/core/legoesm/core/fv3_duo_stepper.py
+packages/core/legoesm/core/fv3_cgrid_phase_3d.py
 "
 NEW_TESTS="
 tests/grids/test_fv3_duo_halos.py
@@ -93,6 +94,7 @@ tests/grids/test_fv3_mapz.py
 tests/grids/test_fv3_nh_core.py
 tests/grids/test_fv3_duo_sw_core.py
 tests/grids/test_fv3_duo_stepper.py
+tests/grids/test_fv3_cgrid_phase_3d.py
 "
 
 echo "=== 0. which of the expected files exist ==="
