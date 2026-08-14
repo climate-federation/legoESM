@@ -63,6 +63,40 @@ def test_card_pins_the_converged_nemo_baseline():
         "offline probe cannot supply the C-grid face state it needs.")
 
 
+@pytest.mark.parametrize("value", ["nemo_face_native", "nemo_burchard"])
+def test_shear_production_flag_roundtrip(value):
+    """--tke-shear-production reaches the closure, and is guarded off-tke.
+
+    The last unclosed ORCA1 gap. NEMO's zdf_sh2 is face-native with a now x
+    before product and DOUBLES production adjacent to coasts; ours averages
+    velocities to cell centres first, which smooths and therefore weakens the
+    source. It is the only card gap an offline column probe cannot evaluate --
+    it needs the raw C-grid face state -- so it gets a flag and a grid run
+    rather than a card pin.
+    """
+    core2 = _core2()
+    p = core2._build_arg_parser()
+    a = p.parse_args(["--grid", "tripole", "--tripole-vmix", "tke",
+                      "--tke-shear-production", value])
+    assert a.tke_shear_production == value
+    vm = core2.build_tripole_vmix_config(
+        "tke", iwm=None, tke_shear_production=a.tke_shear_production)
+    assert vm.tke.tke_shear_production == value
+    # Silent-discard guard, same contract as the other card knobs.
+    with pytest.raises(SystemExit, match="tke-shear-production"):
+        core2._validate_tke_card_grid(
+            "mpas", tripole_vmix="tke", tke_shear_production=value)
+    with pytest.raises(ValueError, match="tke-shear-production"):
+        core2.build_tripole_vmix_config(
+            "kpp", iwm=None, tke_shear_production=value)
+
+
+def test_shear_production_unknown_raises():
+    """Dispatch hardening: a typo must not silently pick a discretisation."""
+    with pytest.raises(ValueError, match="shear_production"):
+        _core2().orca1_zdftke_config(shear_production="face_native")
+
+
 def test_card_pins_the_nemo_tke_diffusion_coefficient():
     """NEMO diffuses `en` with the PLAIN viscosity, not 30x it.
 

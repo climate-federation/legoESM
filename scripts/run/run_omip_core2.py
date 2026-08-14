@@ -505,7 +505,8 @@ TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
                         mxl_choice: int | None = None,
                         prognostic: bool | None = None,
-                        kappa_convention: str | None = None):
+                        kappa_convention: str | None = None,
+                        shear_production: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -779,6 +780,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "invalid; expected 'veros_sqrte' (NEMO avm = rn_ediff*zmxlm*"
                 "sqrt(en)) or 'gaspar_sqrt2e' (the legacy double-count).")
         _cfg = _cfg._replace(kappa_convention=kappa_convention)
+    # Shear-production discretisation (``--tke-shear-production``).  DEFAULT
+    # keeps the card value (``squared_centered``).  ``nemo_face_native`` is
+    # NEMO's zdf_sh2: face-native differences, a now x before velocity
+    # product, and production DOUBLED adjacent to coasts via
+    # (2 - umask*umask) (zdfsh2.F90:78-94).  It is the LAST unclosed gap on
+    # this card and the only one the offline column probe cannot evaluate --
+    # it needs the raw C-grid face state, which k_profiles supplies on the
+    # tripole under --partial-cell.
+    if shear_production is not None:
+        if shear_production not in ("squared_centered", "nemo_face_native",
+                                    "nemo_burchard"):
+            raise ValueError(
+                f"orca1_zdftke_config shear_production {shear_production!r} "
+                "invalid; expected 'squared_centered', 'nemo_face_native' "
+                "(NEMO zdf_sh2) or 'nemo_burchard'.")
+        _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -832,7 +849,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
-                              tke_prognostic=None, tke_kappa_convention=None):
+                              tke_prognostic=None, tke_kappa_convention=None,
+                              tke_shear_production=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -862,7 +880,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
                     ("--tke-prognostic", tke_prognostic),
-                    ("--tke-kappa-convention", tke_kappa_convention)):
+                    ("--tke-kappa-convention", tke_kappa_convention),
+                    ("--tke-shear-production", tke_shear_production)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -874,7 +893,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
                                    mxl_choice=tke_mxl_choice,
                                    prognostic=tke_prognostic,
-                                   kappa_convention=tke_kappa_convention)
+                                   kappa_convention=tke_kappa_convention,
+                                   shear_production=tke_shear_production)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -917,7 +937,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
-                  tke_kappa_convention=None,
+                  tke_kappa_convention=None, tke_shear_production=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1124,7 +1144,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
-            tke_kappa_convention=tke_kappa_convention)
+            tke_kappa_convention=tke_kappa_convention,
+            tke_shear_production=tke_shear_production)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -2211,7 +2232,8 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
-                            tke_prognostic=None, tke_kappa_convention=None):
+                            tke_prognostic=None, tke_kappa_convention=None,
+                              tke_shear_production=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -2233,7 +2255,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
                         ("--tke-prognostic", tke_prognostic),
-                        ("--tke-kappa-convention", tke_kappa_convention)):
+                        ("--tke-kappa-convention", tke_kappa_convention),
+                    ("--tke-shear-production", tke_shear_production)):
         if _val is not None and not (grid == "tripole"
                                      and tripole_vmix == "tke"):
             raise SystemExit(
@@ -4629,6 +4652,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-shear-production", type=str, default=None,
+                   choices=["squared_centered", "nemo_face_native",
+                            "nemo_burchard"],
+                   help="TKE shear-production discretisation for "
+                        "--tripole-vmix tke. None (default) keeps the card "
+                        "value ('squared_centered': velocities averaged to "
+                        "cell centres, then differenced). 'nemo_face_native' "
+                        "is NEMO's zdf_sh2 -- face-native differences, a now "
+                        "x before velocity product, and production DOUBLED "
+                        "adjacent to coasts via (2 - umask*umask) "
+                        "(zdfsh2.F90:78-94). Averaging before differencing "
+                        "SMOOTHS, so the default is systematically weaker "
+                        "than NEMO's; this is the last unclosed gap on the "
+                        "ORCA1 card and the only one an offline column probe "
+                        "cannot evaluate, because it needs the raw C-grid "
+                        "face state. Requires --partial-cell (k_profiles "
+                        "builds wumask/wvmask/coast masks from "
+                        "z_coord.is_active) and --tripole-vmix tke.")
     p.add_argument("--tke-kappa-convention", type=str, default=None,
                    choices=["veros_sqrte", "gaspar_sqrt2e"],
                    help="Amplitude of K from TKE for --tripole-vmix tke. "
@@ -5118,7 +5159,8 @@ def main() -> int:
     # its "none" default and under the kpp closure.
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
-                            args.tke_prognostic, args.tke_kappa_convention)
+                            args.tke_prognostic, args.tke_kappa_convention,
+                            args.tke_shear_production)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5325,6 +5367,7 @@ def main() -> int:
             tke_mxl_choice=args.tke_mxl_choice,
             tke_prognostic=args.tke_prognostic,
             tke_kappa_convention=args.tke_kappa_convention,
+            tke_shear_production=args.tke_shear_production,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
