@@ -131,7 +131,7 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
     # energy-conserving PV flux, SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=True,
+        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=not args.no_fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -237,6 +237,12 @@ def main() -> int:
                         "loop both pays a host round-trip per step and "
                         "forbids cross-step pipelining. Warmup steps still "
                         "run the Python loop (compile + steady check).")
+    p.add_argument("--no-fix-mass", action="store_true",
+                   help="Disable the global mass fixer. TIMING ONLY on a "
+                        "scaling arm: it removes the ONE global allreduce "
+                        "the step performs, so the arm prices that "
+                        "reduction. Mass is then not pinned, and the "
+                        "conservation gate must not be used with it.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -644,6 +650,7 @@ def main() -> int:
             # measurement arm and of the baseline are distinguishable
             # only by their FILENAME, and a knob that failed to take
             # effect is indistinguishable from one that did.
+            "fix_mass": not args.no_fix_mass,
             "halo_knobs": {
                 k: os.environ.get(k, "")
                 for k in ("LEGOESM_MPAS_WIDE_HALO",
