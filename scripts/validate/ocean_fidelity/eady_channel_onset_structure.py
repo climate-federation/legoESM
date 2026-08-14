@@ -93,7 +93,75 @@ A mode growing FASTER THAN f cannot be rotationally balanced, so this is not
 the Eady instability being revealed by a correctly-phased free surface. It is
 numerical.
 
-THE MECHANISM, QUANTIFIED BUT NOT SUFFICIENT.
+THE MECHANISM, CONFIRMED BY A ONE-VARIABLE TEST.
+
+The old averaging window ran the barotropic mode at roughly HALF SPEED. Its
+weights have their first moment at 0.533*dt (n=30), not at dt, and because the
+slow baroclinic forcing is frozen across the scan and enters linearly, that
+first moment IS the multiplier on the forcing. The same weights set how far eta
+advances and how large the returned transport is. Three faces of one number:
+
+                          weight centroid   forcing applied   transport
+    old (half window)        0.533 dt            53 %           53 %
+    new (centred window)     1.000 dt           100 %          100 %
+
+The centred window is CORRECT and the old one was wrong. It is not a lag, it is
+a halving.
+
+THE DISCRIMINATOR. Run the new 2n-1 substep loop with the OLD weights
+zero-padded past j = n. Substep trajectory, substep count, frozen-forcing
+exposure, window duration, eta diffusion and divergence damping are then all
+IDENTICAL to the shipped arm; only the centroid moves.
+
+    centroid 0.53 dt  ->  PASS, max_speed 2.6820 m/s, T_drift 3.70e-12
+    centroid 1.00 dt  ->  FAIL, blow-up at step 19400
+
+The passing arm reproduces the untouched BASELINE to five digits (baseline:
+2.6820 m/s, 3.71e-12), which is the internal control that the padded weights
+really do restore the old behaviour. One variable, both directions.
+
+WHAT THIS RULES OUT, each carried by the PASSING arm and therefore dead:
+ * the doubled window DURATION (~2*dt against ~1*dt),
+ * the doubled total eta diffusion and divergence damping that come with it,
+ * the doubled frozen-forcing extrapolation horizon,
+ * the filter KERNEL shape (box and cosine share the centroid exactly).
+
+SUBSTEP COUNT DOES NOTHING, and this retires the one fact that contradicted the
+mechanism. With the count overridden at the point of use and the effective value
+printed, the failure lands at the SAME step every time:
+
+    30 substeps -> step 19400 (metric 5192.4)
+    60 substeps -> step 19400 (metric nan)
+   120 substeps -> step 19400 (metric nan)
+
+The earlier "more substeps is worse" reading was an artifact: the metric goes
+from finite to non-finite at one detection point, while onset never moves.
+
+A SHORTER BAROCLINIC STEP DOES NOT RESCUE IT. Halving dt moves onset from step
+19400 to 43000, which is 67.4 -> 74.7 simulated days: 11 % more physical time,
+not a cure. Onset is near-invariant in PHYSICAL time, so this is not something a
+timestep reduction converges away.
+
+DIVERGENCE DAMPING IS NOT THE CAUSE and is load-bearing in the other direction:
+0.05 (default) fails at 19400, 0.025 goes non-finite, 0.0 goes non-finite. Less
+damping is strictly worse. A predicted per-application factor of ~0.6-0.9 said
+the operator is comfortably stabilising, and the sweep agrees.
+
+THE READING. This case was stable only because the barotropic mode was being
+under-forced by half. Correcting it crosses a genuine stability boundary of the
+mode split. The remedy is NOT to revert the correction and NOT to shrink the
+timestep; it is to close the coupling with ONE consistent average, so the
+depth-mean of the corrected 3-D velocity equals the filtered barotropic
+transport by construction (SM2005 / MOM6). That the earlier velocity-only
+substitution merely DELAYED blow-up (19400 -> 23500) is the signature of a
+partially closed loop -- it corrected the velocity while leaving eta and the
+forcing at half speed.
+
+SUPERSEDED: an earlier revision of this file called the velocity/transport
+centroid offset "contributory but not sufficient". That framing is retracted.
+The offset is a symptom of the halving, not a separate mechanism.
+
+A CAUTION THAT COST ME A WRONG READING.
 
 The barotropic loop returns three averages and they are NOT taken over the
 same effective interval. Velocity uses the symmetric filter weights centred
