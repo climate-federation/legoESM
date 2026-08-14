@@ -101,6 +101,7 @@ __param_spec__ = {
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
+            "cape_sink_heating_ratio": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Arakawa & Schubert (1974) quasi-equilibrium energy flux", "shape": None},
         },
     },
     "ConvectiveEDMFConfig": {
@@ -1483,8 +1484,44 @@ class BechtoldConfig(NamedTuple):
     depth_split_sharpness: float = 1.0e-3
     # Bechtold-specific
     use_pbl_cape: bool = True
+    # Polar-night harden (#929 deeper fix): cap the launch parcel's theta at
+    # the SURFACE parcel's theta (+ parcel_dT).  The mass-weighted PBL-mean
+    # parcel is theta-warmer than the surface air whenever the boundary layer
+    # holds a surface inversion (theta rising with height), so inversion
+    # warmth leaked into the launch parcel and manufactured CAPE in columns
+    # where no BL air can convect (mid-Feb ~71N polar-night runaway; the #822
+    # departure-level mask removed only the below-departure part of the
+    # artifact).  With the cap, an inversion column's parcel collapses to the
+    # surface parcel — the coldest air, CAPE ~ 0, true quiescence — while a
+    # well-mixed or superadiabatic BL (theta_sfc >= theta_mean) is untouched.
+    # False restores the legacy uncapped parcel.
+    parcel_theta_cap: bool = True
     cape_pbl_depth: float = 500.0
     tau_bl: float = 3600.0
+    # CAPE quasi-equilibrium heating ceiling (the C12/RCE warm-runaway
+    # harden).  Bechtold's M_b closure is a CAPE-relaxation SURROGATE with
+    # no quasi-equilibrium constraint on the APPLIED heating: at pinned
+    # M_b_max the scheme sustains large column heating for months while the
+    # PBL-parcel CAPE never drains (measured: the scheme's own tendencies
+    # GENERATE CAPE on a convecting fixture — downdraft below-LCL moistening
+    # feeds the parcel), so nothing bounds the warming (C12 pilot: mean T
+    # 267->312 K over days 90-170; SCM-RCE moist-adiabat bias ~50 K).  The
+    # sink caps the column-integrated positive convective heating by the
+    # quasi-equilibrium energy flux (Arakawa & Schubert 1974 lineage):
+    #     H = (c_p/g)·∫ max(dT_dt,0) dp  ≤  ratio · M_b · CAPE   [W/m²]
+    # scaling ALL tendencies (and the M_u carry) by
+    #     f = clip(ratio·M_b·CAPE / H, 0, 1).
+    # M_b·CAPE is the closure's own available-energy flux; `heating_ratio` absorbs the
+    # heating-to-KE-generation ratio (tunable, SCM-RCE-calibrated).  A
+    # vigorous tower (large CAPE) keeps its full heating; the runaway mode
+    # (heating at pinned M_b with modest CAPE) is throttled.  False =
+    # bit-exact legacy path.
+    # DEFAULT OFF since the 2026-07-17 merge: use_ifs_cape_closure (default
+    # True, IFS cumastrn ZMFUB1 closure) consumes CAPE at the SOURCE, fixing
+    # the same runaway faithfully; stacking the surrogate ceiling on top
+    # double-throttles.  Opt-in lever for legacy/no-IFS-closure configs.
+    cape_relaxation_sink: bool = False
+    cape_sink_heating_ratio: float = 5.0
     # IFS convective-turnover CAPE-closure timescale (audit F1).  When True
     # (default) the deep closure divides PBL-CAPE by the state-dependent
     # tau_conv = cloud_depth/(2+w_mean), clamped [720,10800] s (cumastrn.F90:773),
