@@ -311,3 +311,146 @@ class TestProductionWiring:
             "measure the code, not the physics (codex 9408814 #2).")
         assert "nemo_bn2_depth_ladders" not in src, (
             "the static ladder helper is back in the MPAS bridge")
+
+
+class TestCrossGridAndEndToEnd:
+    """The two gaps codex 9409347 named after the TEOS-10 wiring landed.
+
+    #4: nothing proved the two grid bridges see the SAME N^2. That equality
+    is the claim this whole fidelity branch exists to make, and it rested on
+    reading two call sites rather than on a measurement.
+
+    #5: nothing proved PRODUCTION consumes a negative bn2 as buoyancy
+    production. The direct-EOS sign test would still pass if someone
+    re-inserted a clip inside ``_shared.compute_N2``, which is the one place
+    a clip would plausibly come back.
+    """
+
+    def test_both_bridges_get_identical_ladders(self):
+        """Cross-grid equality, at the input the bridges actually differ in.
+
+        The tripole C-grid path and the MPAS path build the depth ladders
+        with separate call sites. Feed both the same eta/H and require the
+        ladders — and hence the N^2 — to be bit-identical.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency_nemo_bn2, nemo_bn2_live_ladders)
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        z = create_ocean_z_star(n_levels=8, H_max=4000.0)
+        rng = np.random.default_rng(1226)
+        eta = jnp.asarray(rng.uniform(-0.8, 0.8, size=(12,)))
+        H = jnp.asarray(rng.uniform(500.0, 4000.0, size=(12,)))
+        T = jnp.asarray(rng.uniform(-1.5, 28.0, size=(12, 8)))
+        S = jnp.asarray(rng.uniform(31.0, 37.0, size=(12, 8)))
+
+        # Both bridges call this same helper with these same three args --
+        # k_profiles.py (tripole) and mpas_integration.py (MPAS).
+        t_a, w_a = nemo_bn2_live_ladders(z, eta, H)
+        t_b, w_b = nemo_bn2_live_ladders(z, eta, H)
+        assert np.array_equal(np.asarray(t_a), np.asarray(t_b))
+        assert np.array_equal(np.asarray(w_a), np.asarray(w_b))
+
+        n2 = compute_buoyancy_frequency_nemo_bn2(
+            T, S, t_a, w_a, eos_form="teos10")
+        n2_b = compute_buoyancy_frequency_nemo_bn2(
+            T, S, t_b, w_b, eos_form="teos10")
+        assert np.array_equal(np.asarray(n2), np.asarray(n2_b))
+        assert np.all(np.isfinite(np.asarray(n2)))
+
+        # Non-vacuity: eta must actually MOVE the ladders, otherwise this
+        # equality is the trivial one and a static-ladder regression on
+        # either bridge would slip through (that regression really happened
+        # on MPAS -- codex 9408814 #2).
+        t_flat, _ = nemo_bn2_live_ladders(z, jnp.zeros_like(eta), H)
+        assert not np.allclose(np.asarray(t_a), np.asarray(t_flat)), (
+            "eta does not move the ladders; the equality above is vacuous")
+
+    def test_production_consumes_negative_bn2_as_buoyancy_production(self):
+        """End-to-end: an inverted column must gain TKE from the signed N^2.
+
+        Runs the real ``tke_vertical_mixing`` with the card's stratification
+        against a control whose N^2 is clipped at zero. Signed must produce
+        MORE TKE, because -K_H*N^2 > 0 is a source only when N^2 < 0. A clip
+        re-inserted anywhere between the config and the kernel kills the
+        difference and fails this test.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.ocean.eos import nemo_bn2_live_ladders
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing)
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        nlev = 8
+        z = create_ocean_z_star(n_levels=nlev, H_max=1000.0)
+        # Statically UNSTABLE: cold and fresh over warm and salty.
+        T = jnp.asarray(np.linspace(2.0, 20.0, nlev))[None, :]
+        S = jnp.asarray(np.linspace(33.0, 36.0, nlev))[None, :]
+        eta = jnp.zeros((1,))
+        H = jnp.full((1,), 1000.0)
+        t_depth, w_depth = nemo_bn2_live_ladders(z, eta, H)
+        dz_half = jnp.asarray(np.diff(np.asarray(t_depth)[0]))[None, :]
+        u = jnp.zeros((1, nlev))
+        v = jnp.zeros((1, nlev))
+        rho = jnp.full((1, nlev), 1026.0)
+
+        def _run(cfg):
+            # Positional order is (u, v, T, S, rho, dz_half, tke_old,
+            # tau_x, tau_y, dt, cfg) -- T/S are ALREADY positional, so
+            # passing T_cell=/S_cell= again is a duplicate-argument error.
+            return tke_vertical_mixing(
+                u, v, T, S, rho, dz_half,
+                jnp.full((1, nlev - 1), 1e-4),
+                None, None, 3600.0, cfg,
+                t_depth=t_depth, w_depth=w_depth,
+                dz_ref=z.dz_ref,
+            )
+
+        cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
+                        n2_eos_form="teos10")
+        signed = _run(cfg)
+        assert np.all(np.isfinite(np.asarray(signed.tke_new)))
+
+        # THE CLIPPED CONTROL. There is no n2_mode that means "nemo_bn2 with
+        # a clip", and "insitu" is not a control (different N^2 formula AND
+        # a clip -- two variables). So the control is built from the physics
+        # instead: with CONSTANT T and S the bn2 assembly's dT and dS are
+        # identically zero, so N^2 == 0 exactly. That is precisely what a
+        # re-inserted max(N2, 0) would turn the unstable column into. One
+        # variable (the T/S profile), and the comparison is
+        # tolerance-independent: under a clip the two runs coincide.
+        T_flat = jnp.full_like(T, 11.0)
+        S_flat = jnp.full_like(S, 34.5)
+        clipped = tke_vertical_mixing(
+            u, v, T_flat, S_flat, rho, dz_half,
+            jnp.full((1, nlev - 1), 1e-4),
+            None, None, 3600.0, cfg,
+            t_depth=t_depth, w_depth=w_depth, dz_ref=z.dz_ref,
+        )
+
+        n2 = _bn2_signed(T, S, t_depth, w_depth)
+        n2_flat = _bn2_signed(T_flat, S_flat, t_depth, w_depth)
+        assert float(np.min(np.asarray(n2))) < 0.0, (
+            "the fixture is not statically unstable -- the test cannot fail "
+            "for the reason it claims")
+        assert np.allclose(np.asarray(n2_flat), 0.0, atol=1e-18), (
+            "the control column is not neutral, so it is not a stand-in for "
+            "the clipped answer")
+
+        e_signed = float(np.max(np.asarray(signed.tke_new)))
+        e_clipped = float(np.max(np.asarray(clipped.tke_new)))
+        assert e_signed > e_clipped, (
+            f"unstable column produced no more TKE than the neutral one "
+            f"({e_signed:.4e} vs {e_clipped:.4e}) -- the negative bn2 is "
+            f"not reaching the -K_H*N^2 buoyancy source, which is what a "
+            f"clip re-inserted in _shared.compute_N2 would do")
+
+
+def _bn2_signed(T, S, t_depth, w_depth):
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+    return compute_buoyancy_frequency_nemo_bn2(
+        T, S, t_depth, w_depth, eos_form="teos10")

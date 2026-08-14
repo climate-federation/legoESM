@@ -854,7 +854,6 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             _tke_seed = None
             _dt_kernel = _TKE_DIAGNOSTIC_DT_S
             _n_iter = _TKE_DIAGNOSTIC_N_ITER
-        _ = None  # (kept: keeps the diff on the call site minimal)
         tke_out = tke_vertical_mixing(
             u_east_w, v_north_w, T_w, S_w, rho, dz_half,
             tke_old=_tke_seed,

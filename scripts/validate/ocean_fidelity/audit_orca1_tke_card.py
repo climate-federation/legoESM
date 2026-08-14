@@ -86,14 +86,24 @@ _KNOWN_NEMO_OPTIONS = {
                                    "NEMO zfact2=1.5*dt*rn_ediss diagonal + "
                                    "zfact3=0.5*rn_ediss explicit add-back"),
     "prandtl_mode": ("richardson", "NEMO nn_pdl=1"),
-    # n2_mode: 'nemo_bn2' is legoESM's S-EOS bn2, and ORCA1 selects TEOS-10
-    # (namelist_cfg:307), so it is NOT ORCA1's rn2 -- flagged here as an
-    # UNRESOLVED gap rather than as a value to wire. Codex 9405307 caught this
-    # after I had wired and then reverted it. Closing it needs a TEOS-10
-    # rab/bn2 implementation.
-    "n2_mode": ("<TEOS-10 rn2, NOT IMPLEMENTED>",
-                "ORCA1 runs TEOS-10; legoESM's 'nemo_bn2' is S-EOS, a "
-                "DIFFERENT N2. Do not wire nemo_bn2 as if it were ORCA1's."),
+    # n2_mode / n2_eos_form: RESOLVED 2026-08-14. This entry used to read
+    # "<TEOS-10 rn2, NOT IMPLEMENTED> ... Do not wire nemo_bn2 as if it were
+    # ORCA1's" -- correct when written (codex 9405307 caught me wiring
+    # nemo_bn2 alone, which silently took the S-EOS branch), and its own
+    # stated exit condition was "closing it needs a TEOS-10 rab/bn2
+    # implementation". That now exists: eos.nemo_roquet_alpha_beta ports the
+    # Roquet et al. 2015 polynomial with the TEOS-10 coefficient set, and
+    # compute_buoyancy_frequency_nemo_bn2(eos_form=...) selects it. So the
+    # NEMO value is the PAIR -- nemo_bn2 alone is still the wrong N2, which
+    # is why both are listed.
+    "n2_mode": ("nemo_bn2",
+                "ORCA1 zdftke consumes eosbn2's rn2; needs n2_eos_form="
+                "'teos10' WITH it -- nemo_bn2 alone is the S-EOS bn2, a "
+                "DIFFERENT N2 (codex 9405307)."),
+    "n2_eos_form": ("teos10",
+                    "ORCA1 runs ln_teos10=.true. (namelist_cfg:308), so the "
+                    "bn2 alpha/beta are the Roquet polynomial on the TEOS-10 "
+                    "coefficient set, not the 3-term S-EOS fit."),
     # Added after codex 9405307 named it and this auditor had missed it: NEMO
     # puts -avt*rn2 EXPLICITLY on the RHS with the carried avt
     # (zdftke.F90:417-418); the default splits it sign-aware onto the implicit
