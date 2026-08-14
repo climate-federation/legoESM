@@ -147,6 +147,9 @@ _SIGNATURE_FIELDS = (
     # sub-cloud layer is taken to end.  Each changes the experiment outright, so
     # a checkpoint from one setting must never be reused under another.
     "turbulence", "tune_mode", "objective", "focused_include", "subcloud_top_m",
+    # Emanuel's downdraft re-evaporation ships OFF behind a static branch;
+    # turning it on is different PHYSICS, not a tuning detail.
+    "emanuel_unsaturated_downdraft",
 )
 
 
@@ -176,6 +179,13 @@ FOCUSED_TUNE_CATEGORIES = ("turbulence", "microphysics", "convection")
 #:
 #: Each name below is registry-qualified; ``tune_focused_params`` raises if one
 #: matches no parameter of an active scheme, so this list cannot silently rot.
+#: EVERY name here was checked to be READ by numerical code.  Four more were
+#: proposed and REMOVED after that check: ``Lscale_mu_coef``, ``mult_coef``,
+#: ``C_invrs_tau_sfc`` and ``C_invrs_tau_bkgnd`` exist as CLUBBParams fields and
+#: are referenced by nothing but tuning include-lists — the same defect class
+#: as the ``a_const``/``up2_sfc_coef`` that PR #1601 found unread.
+#: ``scripts/validate/audit_param_gradients.py`` is the mechanical form of that
+#: check; run it before adding a name here.
 SUBCLOUD_TURBULENCE_INCLUDE = {
     "clubb": (
         # Eddy diffusivity: Km = c_K * L * sqrt(TKE), and the scalar variants.
@@ -185,53 +195,78 @@ SUBCLOUD_TURBULENCE_INCLUDE = {
         # Mixing length: the parcel entrainment rate and the floor/stability
         # limiters that decide how deep the surface layer's mixing reaches.
         "atm.turb.CLUBBParams.mu",
-        "atm.turb.CLUBBParams.Lscale_mu_coef",
         "atm.turb.CLUBBParams.lmin_coef",
         "atm.turb.CLUBBParams.lambda0_stability_coef",
-        "atm.turb.CLUBBParams.mult_coef",
-        # Dissipation time scale near the surface and in the background: how
-        # fast the layer forgets the flux it was given.
-        "atm.turb.CLUBBParams.C_invrs_tau_sfc",
-        "atm.turb.CLUBBParams.C_invrs_tau_bkgnd",
     ),
 }
 
-#: Rain re-evaporation below cloud base.  ``evap_coeff`` scales the rate;
-#: the two ventilation coefficients set how it grows with drop Reynolds number,
-#: i.e. how much of the re-evaporation happens in the sub-cloud layer rather
-#: than aloft.
+#: Rain re-evaporation below cloud base -- and the direction that matters here
+#: is DOWNWARD.  Rain falling into a sub-saturated layer evaporates, cooling it
+#: (helping the 3 K air-sea deficit) but ADDING VAPOUR to it, and too much of
+#: that drives the layer towards saturation, which is the measured defect
+#: (RH 0.82-0.99 against the reference's 0.752).  So these are tuned as a
+#: SUSPECTED EXCESS, not as a missing process.  Consistent with the columns
+#: themselves: the low-level condensate is precipitation-dominated
+#: (0.011 g/kg rain against 0.006 g/kg cloud in the smoke column).
+#:
+#: ``MorrisonConfig.evap_coeff`` was proposed and REMOVED: the default
+#: ``rain_evap_scheme="m2005"`` calls ``rain_evaporation_m2005``, which uses
+#: the two ventilation coefficients; ``evap_coeff`` is read only by the legacy
+#: ``"bulk"`` branch (morrison.py:316-320, config.py:610).
 SUBCLOUD_MICROPHYSICS_INCLUDE = {
     "morrison": (
-        "atm.micro.MorrisonConfig.evap_coeff",
         "atm.micro.MorrisonConfig.rain_vent_f1",
         "atm.micro.MorrisonConfig.rain_vent_f2",
     ),
 }
 
-#: The convective downdraft that carries the re-evaporated air DOWN.  Only the
-#: schemes that expose such a knob appear; for the others the focused set is
-#: turbulence + microphysics, which is reported rather than silently assumed.
+#: The convective downdraft that re-evaporates precipitation below cloud base.
+#: Only the schemes that expose such a knob appear; for the others the focused
+#: set is turbulence + microphysics, reported rather than silently assumed.
+#:
+#: EMANUEL IS ABSENT BY DEFAULT AND THAT IS A FINDING, NOT AN OVERSIGHT.  Its
+#: ``downdraft_efficiency`` is read only inside
+#: ``if config.enable_unsaturated_downdraft:`` (emanuel.py:465), a STATIC
+#: Python branch whose field defaults to ``False`` (config.py:1073) -- so
+#: Emanuel currently has NO convective downdraft re-evaporation at all, and
+#: there is nothing to slow until the branch is switched on.  (The field's own
+#: docstring at config.py:995-1011 still claims "default ``True``"; the code is
+#: the authority and the docstring is stale.)  Enabling it is a one-variable
+#: experiment of its own -- the branch MOISTENS the sub-cloud layer, per the
+#: comment at emanuel.py:463 -- so it is exposed as
+#: ``--emanuel-unsaturated-downdraft`` and enters the checkpoint signature,
+#: rather than being turned on silently as part of a tuning set.
 SUBCLOUD_CONVECTION_INCLUDE = {
     "bechtold": ("atm.conv.BechtoldConfig.downdraft_evap_efficiency",),
     "tiedtke": ("atm.conv.TiedtkeConfig.downdraft_evap_efficiency",),
-    "emanuel": ("atm.conv.EmanuelConfig.downdraft_efficiency",),
 }
+
+#: Curated only when the gating flag is on; see the note above.
+EMANUEL_DOWNDRAFT_INCLUDE = ("atm.conv.EmanuelConfig.downdraft_efficiency",)
 
 
 def default_focused_include(
     *, turbulence: str, microphysics: str, convection: str,
+    emanuel_unsaturated_downdraft: bool = False,
 ) -> tuple[str, ...]:
     """The focused parameter set for one (turbulence, microphysics, convection).
 
     Built per configuration rather than as one flat list because a name that
     belongs to an INACTIVE scheme is a hard error in the tuner (by design), so
     the default must contain exactly the knobs the active schemes own.
+
+    Emanuel's downdraft efficiency is included ONLY when its gating flag is on,
+    because with the flag off the parameter is read by no executed code and
+    would be a search dimension that cannot move anything.
     """
-    return (
+    include = (
         SUBCLOUD_TURBULENCE_INCLUDE.get(turbulence, ())
         + SUBCLOUD_MICROPHYSICS_INCLUDE.get(microphysics, ())
         + SUBCLOUD_CONVECTION_INCLUDE.get(convection, ())
     )
+    if convection == "emanuel" and emanuel_unsaturated_downdraft:
+        include = include + EMANUEL_DOWNDRAFT_INCLUDE
+    return include
 
 
 def _run_signature(args) -> dict:
@@ -403,6 +438,7 @@ def evaluate_scheme(
     objective: str = "combined",
     focused_include: tuple[str, ...] = (),
     subcloud_top_m: float = camp.DEFAULT_SUBCLOUD_TOP_M,
+    emanuel_unsaturated_downdraft: bool = False,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -431,6 +467,21 @@ def evaluate_scheme(
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
+    if emanuel_unsaturated_downdraft:
+        # Emanuel's downdraft re-evaporation is a STATIC Python branch that
+        # ships OFF, so its efficiency parameter is read by no executed code
+        # until this is set.  Applied BEFORE the a-priori run so both
+        # conditions see the same branch — switching it later would tune under
+        # one physics and report under another.
+        if scheme != "emanuel":
+            raise ValueError(
+                "emanuel_unsaturated_downdraft was requested with "
+                f"convection={scheme!r}; the flag belongs to EmanuelConfig and "
+                "silently ignoring it would leave the run label wrong.")
+        _component, _s, sub = camp._active_subconfig(base_cfg, "convection")
+        base_cfg = camp._set_active_subconfig(
+            base_cfg, "convection",
+            sub._replace(enable_unsaturated_downdraft=True))
     common = dict(
         days=days,
         dt=dt,
@@ -958,6 +1009,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--emanuel-unsaturated-downdraft", action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Switch ON Emanuel's unsaturated-downdraft re-evaporation, which "
+            "ships OFF behind a static Python branch. With it off, "
+            "EmanuelConfig.downdraft_efficiency is read by no executed code. "
+            "The branch re-evaporates a fraction of the column condensate "
+            "below the LCL, which COOLS and MOISTENS the sub-cloud layer, so "
+            "it is different physics and enters the checkpoint signature."
+        ),
+    )
+    parser.add_argument(
         "--subcloud-top-m", type=float, default=camp.DEFAULT_SUBCLOUD_TOP_M,
         help=(
             "Top of the layer scored as sub-cloud [m]. The default sits below "
@@ -1152,9 +1215,13 @@ def main(argv: list[str] | None = None) -> int:
                         turbulence=args.turbulence,
                         microphysics=args.microphysics,
                         convection=scheme,
+                        emanuel_unsaturated_downdraft=(
+                            args.emanuel_unsaturated_downdraft),
                     )
                 ),
                 subcloud_top_m=args.subcloud_top_m,
+                emanuel_unsaturated_downdraft=(
+                    args.emanuel_unsaturated_downdraft and scheme == "emanuel"),
             )
             res.signature = run_sig
             save_scheme_result(args.outdir, res, run_sig)  # checkpoint before plotting

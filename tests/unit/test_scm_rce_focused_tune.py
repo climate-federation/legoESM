@@ -35,6 +35,57 @@ def test_default_include_is_the_union_of_the_three_active_schemes():
     assert all(n.count(".") >= 2 for n in inc)
 
 
+def test_emanuel_downdraft_knob_appears_only_when_its_branch_is_on():
+    """``EmanuelConfig.downdraft_efficiency`` is read only inside
+    ``if config.enable_unsaturated_downdraft:``, which ships False, so with the
+    branch off it is a search dimension that can move nothing."""
+    off = default_focused_include(
+        turbulence="clubb", microphysics="morrison", convection="emanuel")
+    on = default_focused_include(
+        turbulence="clubb", microphysics="morrison", convection="emanuel",
+        emanuel_unsaturated_downdraft=True)
+    name = "atm.conv.EmanuelConfig.downdraft_efficiency"
+    assert name not in off
+    assert name in on
+    assert set(on) - set(off) == {name}
+
+
+def test_the_flag_is_refused_for_a_non_emanuel_scheme():
+    """Silently ignoring it would leave the run label claiming physics the run
+    does not have."""
+    with pytest.raises(ValueError, match="belongs to EmanuelConfig"):
+        evaluate_scheme(
+            "bechtold", object(),
+            days=0.01, dt=600.0, analysis_days=0.01,
+            tune_evals=1, seed=0,
+            scm_microphysics_substeps=1, scm_convection_substeps=1,
+            surface_wind_m_s=5.0, coriolis_s_inv=0.0,
+            large_scale_forcing="none", radiation="gray",
+            radiation_update_interval_steps=1,
+            emanuel_unsaturated_downdraft=True,
+        )
+
+
+def test_curated_sets_contain_no_known_dead_parameter():
+    """The four CLUBB fields and MorrisonConfig.evap_coeff were checked to be
+    read by no executed code in the default configuration; a future edit must
+    not quietly put them back."""
+    curated = set()
+    for table in (SUBCLOUD_TURBULENCE_INCLUDE, SUBCLOUD_MICROPHYSICS_INCLUDE,
+                  SUBCLOUD_CONVECTION_INCLUDE):
+        for names in table.values():
+            curated.update(names)
+    known_dead = {
+        "atm.turb.CLUBBParams.Lscale_mu_coef",
+        "atm.turb.CLUBBParams.mult_coef",
+        "atm.turb.CLUBBParams.C_invrs_tau_sfc",
+        "atm.turb.CLUBBParams.C_invrs_tau_bkgnd",
+        "atm.micro.MorrisonConfig.evap_coeff",
+        "atm.conv.EmanuelConfig.downdraft_efficiency",
+    }
+    assert not (curated & known_dead)
+
+
 def test_default_include_omits_a_scheme_with_no_downdraft_knob():
     """sbm/dca/kuo expose no downdraft parameter; the focused set must then be
     turbulence + microphysics only, NOT a name that would raise in the tuner."""
