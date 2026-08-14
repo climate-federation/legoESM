@@ -247,14 +247,15 @@ class TestAllTracersBorrowed:
             "the number exclusion reappeared — it invents number x2.2/day")
 
     def test_eligibility_rule(self):
-        """Per-mass fields (mixing ratios + N_i/N_s/N_g) are borrowed;
-        per-volume N_c/N_r are not (dsigma weight has no conservation
-        meaning for #/m^3 — codex 2026-07-28)."""
+        """Every water species is borrowable: since 2026-08-14 ALL numbers
+        are stored per MASS [#/kg], so the dsigma-weighted column integral is
+        the conserved quantity for each of them.  (N_c/N_r were per-volume and
+        excluded until then — codex 2026-07-28.)  Non-water tracers stay out."""
         from legoesm.core.conservation import is_borrow_eligible_tracer
         for k in ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
-                  "N_i", "N_s", "N_g", "trc_N_i"):
+                  "N_c", "N_r", "N_i", "N_s", "N_g", "trc_N_i", "trc_N_r"):
             assert is_borrow_eligible_tracer(k), k
-        for k in ("N_c", "N_r", "trc_N_r", "aerosol_number", "ozone"):
+        for k in ("aerosol_number", "ozone"):
             assert not is_borrow_eligible_tracer(k), k
 
     def test_net_negative_number_column_with_positive_ice_mass(self):
