@@ -55,6 +55,10 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.core.tracers import (
+    make_full_moisture_registry,
+    make_moisture_registry,
+)
 from legoesm.grids.gaussian import (
     GaussianGrid,
     create_gaussian_grid,
@@ -512,21 +516,30 @@ def carry_to_spectral_state(
 
     tracers = None
     if include_tracers:
-        # Build a tracer dict from the SegmentCarry's q_v / q_c / q_r.
-        # Cast to float64 to match the spectral PE precision contract.
+        # The species carried through the time stepping follow the MICROPHYSICS
+        # SCHEME, as they already do in the production driver: the carry's
+        # optional hydrometeor / number fields are seeded (non-None) by
+        # ``prognostic_carry_seeds`` only when the selected scheme needs more
+        # than the three warm-rain slots, so PRESENCE ON THE CARRY *is* the
+        # scheme test.  Names and units come from the registry that defines
+        # them (``make_full_moisture_registry``) rather than being retyped.
+        #
+        # This used to hardcode q_v/q_c/q_r.  A nine-species scheme (morrison,
+        # thompson, p3, seifert_beheng, fast_sbm) then ran against a
+        # three-species state: the microphysics bridge emits a tendency only
+        # for a key already present on ``state.tracers``, so ice, snow, graupel
+        # and the number concentrations restarted from zero at every
+        # evaluation while the vapour and cloud sinks that produced them — and
+        # the latent heat they released — were kept.  Neither water nor energy
+        # closed, and nothing raised.
+        _units = {t.name: t.units for t in make_full_moisture_registry().tracers}
         tracers = {
-            "q_v": Field(
-                carry.q_v.astype(jnp.float64),
-                name="q_v", dims=grid_dims_3d, units="kg/kg",
-            ),
-            "q_c": Field(
-                carry.q_c.astype(jnp.float64),
-                name="q_c", dims=grid_dims_3d, units="kg/kg",
-            ),
-            "q_r": Field(
-                carry.q_r.astype(jnp.float64),
-                name="q_r", dims=grid_dims_3d, units="kg/kg",
-            ),
+            name: Field(
+                getattr(carry, name).astype(jnp.float64),
+                name=name, dims=grid_dims_3d, units=units,
+            )
+            for name, units in _units.items()
+            if getattr(carry, name, None) is not None
         }
 
     return SpectralHydrostaticState(
@@ -579,6 +592,24 @@ def spectral_state_to_carry(
             return tr.data if hasattr(tr, "data") else tr
         return jnp.zeros_like(T)
 
+    # Give back exactly the species the state carried, so a rolled-out carry
+    # has the same structure as the ``era5_to_spectral_carry`` initial
+    # condition it is scored against.  Absent species stay ``None`` rather than
+    # becoming zeros: ``None`` is what marks a slot as unused for this scheme,
+    # and zeros would make a three-species run's carry structurally different
+    # from its own initial condition.
+    # Set difference against the warm-rain registry, not a positional slice:
+    # the three always-present species are defined by name, so a reordering of
+    # the full registry cannot silently shift which ones this treats as
+    # optional.
+    _warm = set(make_moisture_registry().names)
+    _extra = {
+        name: _tracer(name)
+        for name in make_full_moisture_registry().names
+        if name not in _warm
+        and state.tracers is not None and name in state.tracers
+    }
+
     shape_3d = T.shape
     shape_2d = p_s.shape
     return pack_carry(
@@ -586,6 +617,7 @@ def spectral_state_to_carry(
         q_v=_tracer("q_v"),
         q_c=_tracer("q_c"),
         q_r=_tracer("q_r"),
+        **_extra,
         held_dT_rad=jnp.zeros(shape_3d),
         held_sw_net_sfc=jnp.zeros(shape_2d),
         held_lw_net_sfc=jnp.zeros(shape_2d),

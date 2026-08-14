@@ -693,11 +693,30 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
+    # Which water species the state must carry follows the scheme the arm
+    # selects, and the carry builder already knows how to seed them — it was
+    # simply never told which scheme was running here, so every state was built
+    # for the three warm-rain slots.  A nine-species microphysics then had its
+    # ice / snow / graupel / number tendencies silently dropped downstream.
+    # The learned arms run no microphysics or turbulence scheme at all, so they
+    # keep the three-slot carry and are byte-unchanged.
+    #
+    # Microphysics only. A stateful turbulence scheme (CLUBB, MYNN, EDMF) would
+    # also seed a prognostic energy carry, but the spectral rollout threads no
+    # turbulence state between steps and the spectral->carry conversion has
+    # nowhere to put one, so seeding it would make the forecast carry
+    # structurally different from the initial condition it is scored against.
+    # Carrying turbulence energy across steps on this path is separate work.
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
+
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
+        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma,
+                                    microphysics=_micro)
+        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma,
+                                        microphysics=_micro)
         sst_src = load_era5_slice(era5_cfg, i_ic)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
