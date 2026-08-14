@@ -19,7 +19,7 @@ G=/burg-archive/glab/users/pg2328/fv3_duo_gaps/glm
 echo "host: $(hostname)"; cd $REPO; echo "PINNED sha: $(git rev-parse HEAD)"
 $PY $REPO/scripts/validate/glm_review.py \
     --prompt-file $G/prompt_cgrid3d.txt \
-    --model glm-5.3 --max-tokens 32000 --code \
+    --model glm-5.3 --max-tokens 32000 --code --no-stream \
     --out $G/fv3_cgrid_phase_3d.generated.py
 echo "rc=$?"
 echo "--- generated ---"; wc -l $G/fv3_cgrid_phase_3d.generated.py 2>/dev/null
