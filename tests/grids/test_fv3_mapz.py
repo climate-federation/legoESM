@@ -2119,3 +2119,80 @@ def test_map_jax_zero_thickness_contained_target_is_finite_value_and_grad():
     ge = jax.grad(loss_edges, argnums=(0, 1))(jnp.asarray(pe1),
                                               jnp.asarray(pe2))
     assert all(np.isfinite(np.asarray(x)).all() for x in ge)
+
+
+def test_map_jax_degenerate_source_layer_the_walk_never_visits():
+    """M02: a degenerate SOURCE layer outside the walk's range.
+
+    Sibling of the target-thickness regression above, and the one that
+    was MISSING: the mutation census (job 9409097) reverted
+    ``dp1_safe = where(active & ~whole, dp1_m, 1)`` in the source-layer
+    walk and NOTHING in this file went red, while the same census caught
+    the target-thickness sibling immediately.
+
+    The fixture is not the M01 one with a different index, because two
+    constraints have to hold at once:
+
+    * the NumPy authority must stay FINITE -- its ``do m=l+1,km`` loop
+      never visits source layer 1 here, so it never divides by that
+      thickness (``fv3_native_mapz.py:640-651``);
+    * the PROFILE builder must never divide by it either, and only the
+      ``iv=-2`` solve qualifies: ``_edge_solve_iv_m2`` reads ``delp(1)``
+      solely as a NUMERATOR (``fv3_native_mapz.py:201``, whose loop
+      starts at k=2, so its divisors are ``delp(2..km)``), whereas the
+      default solve divides by it outright at ``:230``
+      (``grat = delp(2)/delp(1)``).  So this gate runs the w lane,
+      ``map1_ppm(iv=-2)``.
+
+    WHERE THE TEETH ARE: without the mask the m=1 step -- INACTIVE, since
+    ``m > ell`` fails for every target here -- evaluates ``dp/0``.  The
+    PRIMAL is unharmed, because that step's contribution is discarded by
+    the ``where(active, ...)``, which is exactly why the census found no
+    failing test.  The defect appears only in reverse mode, where the
+    discarded arm's ZERO cotangent multiplies an infinite derivative and
+    gives NaN.  The gradient assertions are therefore the ones that
+    matter; the primal and parity checks only pin that the input is
+    legal.
+    """
+    im, km = 3, KMP
+    pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
+    pe1 = pe1.copy()
+    pe1[:, 1] = pe1[:, 2]                 # SOURCE layer 1: zero thickness
+    # Target grid strictly inside source layers 2..km.  The interval
+    # search then never SELECTS layer 1 (which would be a 0/0 in `pl`,
+    # non-finite in BOTH lanes and a different defect), and the walk,
+    # which starts at ell+1 >= 3, never reaches it either.
+    lo = pe1[:, 2] + 0.05 * (pe1[:, 3] - pe1[:, 2])
+    hi = pe1[:, km + 1]
+    frac = np.linspace(0.0, 1.0, km + 1)[None, :]
+    pe2 = np.zeros_like(pe1)
+    pe2[:, 1:] = lo[:, None] + (hi - lo)[:, None] * frac
+    assert (np.diff(pe2[:, 1:], axis=1) > 0).all(), "target not monotone"
+    assert (pe2[:, 1] > pe1[:, 2]).all(), \
+        "a target edge could bracket in the degenerate layer"
+    q1 = _smooth_column(im=im, km=km, edges=pe1[:, 1:])
+    qs = _smooth_column_bottom_value(edges=pe1[:, 1:])
+
+    ref = map1_ppm_n(pe1, q1, pe2, km, km, -2, 9, qs=qs)
+    assert np.isfinite(ref).all(), "the NumPy authority is finite here"
+    got, ok = map1_ppm_j(jnp.asarray(pe1), jnp.asarray(q1),
+                         jnp.asarray(pe2), km, km, -2, 9,
+                         qs=jnp.asarray(qs), return_ok=True)
+    assert bool(ok)
+    assert np.isfinite(np.asarray(got)).all(), "PRIMAL non-finite"
+    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
+    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    assert _rel(np.asarray(got)[:, 1:], ref[:, 1:]) <= 1e-12
+
+    def loss(q_, pe1_, pe2_):
+        return jnp.sum(map1_ppm_j(pe1_, q_, pe2_, km, km, -2, 9,
+                                  qs=jnp.asarray(qs)) ** 2)
+
+    grads = jax.grad(loss, argnums=(0, 1, 2))(
+        jnp.asarray(q1), jnp.asarray(pe1), jnp.asarray(pe2))
+    for name, g in zip(("q1", "pe1", "pe2"), grads):
+        assert np.isfinite(np.asarray(g)).all(), (
+            f"ADJOINT NaN in d/d{name}: the source-layer walk divided by a "
+            f"thickness in a layer the NumPy loop never visits")
+    # NON-VACUITY: the gradient is real, not an all-zero pass.
+    assert np.abs(np.asarray(grads[0])).max() > 0.0
