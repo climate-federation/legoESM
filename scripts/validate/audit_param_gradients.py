@@ -128,6 +128,14 @@ _CATEGORY_WRAPPER = {
     "gravity_wave_drag": GravityWaveDragConfig,
 }
 
+#: Categories the SCM-RCE campaign's own ``SCHEME_SWEEPS`` does not enumerate
+#: (it sweeps only what that campaign varies).  Listed here so the audit covers
+#: them rather than skipping them; a category in neither map is a hard error,
+#: never a silent gap in a report whose whole purpose is finding gaps.
+_CATEGORY_EXTRA_SCHEMES = {
+    "radiation": ("gray", "rrtmgp"),
+}
+
 P_SFC = 101_480.0
 
 #: Finite-difference sweep, only ever run for a parameter whose gradient came
@@ -307,9 +315,17 @@ def scheme_key_map(categories) -> dict[str, tuple[str, str]]:
     """
     by_class = {m.config_class: m.scheme_key for m in build_registry()}
     out: dict[str, tuple[str, str]] = {}
-    from scripts.run.run_scm_rce_campaign import SCHEME_SWEEPS
+    from scripts.run.run_scm_rce_campaign import SCHEME_SWEEPS as _SWEEPS
 
+    SCHEME_SWEEPS = {**_SWEEPS, **_CATEGORY_EXTRA_SCHEMES}
     for category in categories:
+        if category not in SCHEME_SWEEPS:
+            raise KeyError(
+                f"no scheme list for category {category!r}: the campaign's "
+                f"SCHEME_SWEEPS covers {sorted(SCHEME_SWEEPS)} and "
+                f"_CATEGORY_EXTRA_SCHEMES covers "
+                f"{sorted(_CATEGORY_EXTRA_SCHEMES)}. Add it rather than "
+                "letting the category be silently unaudited.")
         for scheme in SCHEME_SWEEPS[category]:
             if scheme == "none":
                 continue
