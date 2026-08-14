@@ -143,9 +143,16 @@ def test_the_built_case_actually_varies_in_time_and_height():
         f"the surface flux is effectively constant ({flux.std():.4g} K m/s "
         "spread) over the 8 h run")
     assert hours[int(np.argmax(flux))] == pytest.approx(4.0, abs=0.5)
-    # ...and the first value is the one the old code froze, so the defect is
-    # exactly "the whole run at flux[0]".
-    assert abs(flux[-1] - flux[0]) > 0.02
+    # flux[0] is the value the old code froze for the whole run, so the peak
+    # must stand well clear of it. NOT flux[-1] vs flux[0]: the cycle is
+    # symmetric about 13:00 and the window is 09:00-17:00, so those two are
+    # equal BY CONSTRUCTION (0.0897 both ends) and the check was vacuous in
+    # the direction that mattered.
+    assert flux.max() - flux[0] > 0.05, (
+        f"peak {flux.max():.4g} is barely above the 09:00 value {flux[0]:.4g}")
+    assert flux[-1] == pytest.approx(flux[0], abs=1e-9), (
+        "the cosine is symmetric about its 13:00 peak; if this fails the "
+        "clock offset t_start_s is wrong")
 
     # HEIGHT: the geostrophic wind must be sheared, not a uniform -5.5 m/s.
     ug = np.asarray(case.forcing.u_geo(0.0))
