@@ -968,3 +968,82 @@ def test_the_multicase_report_is_titled_with_its_regimes(tmp_path):
     drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
     head = (tmp_path / "summary.md").read_text().splitlines()[0]
     assert "None" not in head and "bomex" in head
+
+
+# --- the tuned non-finite flag, and partial reports --------------------------
+
+def test_a_tuned_blowup_reaches_the_report_and_loses_its_rank(tmp_path,
+                                                              monkeypatch):
+    """An arm whose TUNED parameters blow up must not stay rankable.
+
+    `tune_scheme_multicase` computes the tuned evaluation's non-finite flag on
+    its OWN fresh SchemeResult, and `main`'s handoff list omitted it, so the
+    flag was computed and dropped -- a scheme that blew up only after tuning
+    kept the clean flag from its default evaluation and could be ranked first.
+    Exercises the HANDOFF, which a source search of the tuning function cannot.
+    """
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.20    # "best" on score alone
+    res.nonfinite_cases = ["bomex"]                    # ... but it blew up
+    clean = drv.SchemeResult(scheme="tke", status="tuned")
+    clean.score_default, clean.score_tuned = 0.9, 0.8
+
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res, clean])
+    rows = (tmp_path / "ranking.csv").read_text().splitlines()
+    by_scheme = {r.split(",")[1]: r.split(",")[0] for r in rows[1:]}
+    assert by_scheme["louis"] == "EXCLUDED", (
+        "an arm with a non-finite case must not be ranked, however good its "
+        f"score; got rank {by_scheme['louis']}")
+    assert by_scheme["tke"] == "1"
+    assert "nonfinite_rollout" in (tmp_path / "summary.md").read_text()
+
+
+def test_main_unions_the_default_and_tuned_nonfinite_flags():
+    """A plain copy would OVERWRITE the default flag with the tuned one, so
+    an arm that blew up before tuning and not after would come back clean."""
+    import inspect
+    src = inspect.getsource(drv.main)
+    i = src.index("res.nonfinite_cases")
+    window = src[i:i + 300]
+    assert "set(res.nonfinite_cases or [])" in window
+    assert "set(tuned.nonfinite_cases or [])" in window
+    assert "|" in window, "must be a union, not a copy"
+
+
+def test_a_partial_report_says_so(tmp_path):
+    """The report is rewritten after every scheme so a killed campaign still
+    yields what finished. Without a completeness marker that partial report is
+    indistinguishable from a full one, and its own prose describes a finished
+    comparison."""
+    import json
+    arm = _minimal_arm_for_report()
+    args = _report_args(tmp_path)
+    args.resolved_schemes = ["louis", "tke", "ysu"]
+    args.run_complete = False
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+
+    drv._write_outputs(tmp_path, args, [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "PARTIAL" in text and "1 of 3" in text
+    assert "tke" in text and "ysu" in text, "must name what is still missing"
+    payload = json.loads((tmp_path / "tuned_parameters.json").read_text())
+    assert payload["run_complete"] is False
+    assert payload["schemes_missing"] == ["tke", "ysu"]
+
+
+def test_a_finished_report_carries_no_partial_banner(tmp_path):
+    import json
+    arm = _minimal_arm_for_report()
+    args = _report_args(tmp_path)
+    args.resolved_schemes = ["louis"]
+    args.run_complete = True
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+
+    drv._write_outputs(tmp_path, args, [arm], [res])
+    assert "PARTIAL" not in (tmp_path / "summary.md").read_text()
+    payload = json.loads((tmp_path / "tuned_parameters.json").read_text())
+    assert payload["run_complete"] is True
+    assert payload["schemes_missing"] == []

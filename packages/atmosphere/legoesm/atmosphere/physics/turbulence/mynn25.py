@@ -160,6 +160,19 @@ __physics_contract__ = {
 _QKE_FLOOR = 1e-10        # m²/s²; floor on qke to keep sqrt finite
 _L_FLOOR = 1.0            # m; floor on master length scale
 _SMOOTH_EPS = 1e-30       # used in safe sqrt / safe divide
+# |Ri| is bounded BEFORE it is squared in the level-2 discriminant. G_M is
+# exactly zero in a shear-free column, so the 1e-30 divisor floor sends Ri to
+# ~1e28-1e30 and Ri*Ri overflows float32 (max 3.4e38) to inf, whose later
+# inf/inf is NaN. This module runs x64 in the SCM benchmarks and float32 in a
+# global run, so the overflow is a real runtime mode rather than a hypothetical.
+# Rf saturates far below 1e15, so the clip changes no physical answer.
+_RI_MAX = 1e15
+# Two-sided floor on |F1| and |F2|, the level-2 combinations of the closure
+# constants that Ri1/Ri2/Ri3 and Rf1/Rf2 divide by. They are ~6.3 and ~5.0 at
+# the NN09 defaults, but they are built from TRAINABLE coefficients and F1 hits
+# exactly zero inside the declared sigmoid bounds, so the tuner can walk onto
+# the singularity.
+_F_FLOOR = 1e-6
 
 
 # MYNN Level-2.5 (Nakanishi-Niino 2009) fixed closure constants.
@@ -170,6 +183,19 @@ _MYNN_LT_COEFF = 0.23
 _MYNN_LB_COEFF = 5.0
 _MYNN_PHI_C9 = 9.0
 _MYNN_PHI_C12 = 12.0
+
+def _away_from_zero(x: jax.Array, floor: float) -> jax.Array:
+    """``x`` pushed out to ``+/-floor`` without changing its sign.
+
+    For denominators that CROSS zero rather than merely approach it. A
+    one-sided ``jnp.maximum(x, eps)`` does not regularize such a quantity: it
+    leaves the root in place, converts it into a ~1/eps amplification, and
+    flips the sign of every negative value. Every entry with
+    ``|x| >= floor`` is returned unchanged, so the guard is inert wherever the
+    expression was already well posed.
+    """
+    return jnp.where(x >= 0.0, jnp.maximum(x, floor), jnp.minimum(x, -floor))
+
 
 def _safe_pow_pos(x: jax.Array, p: float) -> jax.Array:
     """Floored power for AD-safe ``x**p`` with ``p`` fractional and ``p < 1``.
@@ -239,7 +265,17 @@ def _compute_master_length(
     L_S_unstable = kappa * z_half_geom * _safe_pow_pos(
         1.0 - 100.0 * zeta, _MYNN_LS_STABLE_FLOOR,
     )
-    L_S_stable_mid = kappa * z_half_geom / (1.0 + _MYNN_LS_STABLE_MID * zeta)
+    # The mid-stability branch is SELECTED only for 0 <= zeta < 1, where the
+    # denominator is >= 1, but jnp.where EVALUATES it everywhere and it
+    # vanishes at zeta = -1/2.7 = -0.370 -- an ordinary unstable surface-layer
+    # value. Forward that is harmless (the entry is discarded), but reverse
+    # mode differentiates the division by zero and returns NaN through an
+    # unselected branch. Substituting a safe denominator outside the branch's
+    # own domain is the same double-where the Obukhov guard above uses, and it
+    # leaves the forward result bit-identical. (codex)
+    denom_mid = 1.0 + _MYNN_LS_STABLE_MID * zeta
+    denom_mid = jnp.where(zeta >= 0.0, denom_mid, 1.0)
+    L_S_stable_mid = kappa * z_half_geom / denom_mid
     L_S_stable_high = kappa * z_half_geom / _MYNN_LS_STABLE_HIGH
     L_S = jnp.where(
         zeta < 0.0,
@@ -308,6 +344,14 @@ def _compute_SM_SH(
     gamma2 = (2.0 * A1 * (3.0 - 2.0 * C2) + B2 * (1.0 - C3)) / B1
     F1 = B1 * (gamma1 - C1) + 2.0 * A1 * (3.0 - 2.0 * C2) + 3.0 * A2 * (1.0 - C2) * (1.0 - C5)
     F2 = B1 * (gamma1 + gamma2) - 3.0 * A1 * (1.0 - C2)
+    # F1 and F2 are divided by four times below and they are built entirely
+    # from TRAINABLE coefficients. F1 = 0 is reachable inside the declared
+    # sigmoid bounds -- e.g. A1=0.7, A2=0.4, B1=15, B2=8, C1=0.15267, C2=1.4,
+    # C3=0.95, C5=0.5, gamma1=0.15 -- so an optimizer exploring those bounds
+    # can produce infinities before D25 is even formed. They are ~6.3 and ~5.0
+    # at the NN09 defaults, so the two-sided floor is inert there. (codex)
+    F1 = _away_from_zero(jnp.asarray(F1), _F_FLOOR)
+    F2 = _away_from_zero(jnp.asarray(F2), _F_FLOOR)
     Rf1 = B1 * (gamma1 - C1) / F1
     Rf2 = B1 * gamma1 / F2
     Rfc = gamma1 / (gamma1 + gamma2)
@@ -315,7 +359,10 @@ def _compute_SM_SH(
     Ri2 = 0.5 * Rf1 / Ri1
     Ri3 = (2.0 * Rf2 - Rf1) / Ri1
 
-    Ri = -G_H / jnp.maximum(G_M, _SMOOTH_EPS)
+    # Bounded BEFORE the square below: G_M is exactly 0 with no resolved shear,
+    # so the 1e-30 divisor floor makes |Ri| ~ 1e30 and Ri*Ri overflows float32
+    # to inf, and inf/inf downstream is NaN. See _RI_MAX. (codex)
+    Ri = jnp.clip(-G_H / jnp.maximum(G_M, _SMOOTH_EPS), -_RI_MAX, _RI_MAX)
     # Level-2 flux Richardson, NN09 eq A11.  Discriminant clipped to
     # zero for AD safety in near-neutral regimes.
     disc = jnp.maximum(Ri * Ri - Ri3 * Ri + Ri2 * Ri2, 0.0)
@@ -367,11 +414,7 @@ def _compute_SM_SH(
     # This bounds the singularity; it is not the NN09/Helfand-Labraga (1988)
     # joint (G_M, G_H) realizability limit, which would additionally keep the
     # closure inside its derived region.
-    D25_raw = phi_2 * phi_4 + phi_5 * phi_3
-    floor = config.d25_floor
-    D25 = jnp.where(D25_raw >= 0.0,
-                    jnp.maximum(D25_raw, floor),
-                    jnp.minimum(D25_raw, -floor))
+    D25 = _away_from_zero(phi_2 * phi_4 + phi_5 * phi_3, config.d25_floor)
     SM25 = alpha_c * A1 * (phi_3 - 3.0 * C1 * phi_4) / D25
     SH25 = alpha_c * A2 * (phi_2 + 3.0 * C1 * phi_5) / D25
     return SM25, SH25
@@ -401,6 +444,18 @@ def mynn25_turbulence(
     :class:`PhysicsState.tke` slot.
     """
     ncol, nlev = T.shape
+    # Validated at function entry on the STATIC config value, like every other
+    # scheme guard in this package. d25_floor = 0 restores the division by zero
+    # at the D25 root, and a NEGATIVE value disables the floor entirely --
+    # _away_from_zero then returns the raw denominator on both branches -- so
+    # neither can be allowed to pass silently. It is excluded from
+    # __param_spec__, so it is never a traced leaf. (codex)
+    if not float(config.d25_floor) > 0.0:
+        raise ValueError(
+            f"MYNN25Config.d25_floor must be > 0, got {config.d25_floor!r}. "
+            "Zero reinstates the level-2.5 denominator's pole and a negative "
+            "value silently turns the guard off."
+        )
     qke = jnp.maximum(qke, _QKE_FLOOR)
 
     # Heights above surface for L_S and L_T integrals.

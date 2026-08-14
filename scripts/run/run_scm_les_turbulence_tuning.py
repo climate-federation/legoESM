@@ -1316,6 +1316,11 @@ def main(argv=None) -> int:
             f"unknown scheme(s) {unknown}; choose from {list(TURBULENCE_SCHEMES)}"
         )
 
+    # Recorded so the report can say how much of the campaign it holds; the
+    # per-scheme flush means a killed run still writes a full-looking one.
+    args.resolved_schemes = list(schemes)
+    args.run_complete = False
+
     outdir = args.outdir or (DEFAULT_OUTDIR / ("+".join(case_names)
                                                 if len(case_names) > 1
                                                 else case_names[0]))
@@ -1412,6 +1417,15 @@ def main(argv=None) -> int:
                       "per_case_tuned", "score_relative_tuned",
                       "profiles_tuned"):
                 setattr(res, f, getattr(tuned, f))
+            # UNION, and NOT part of the loop above. `tune_scheme_multicase`
+            # computes the TUNED evaluation's non-finite flag on its own fresh
+            # SchemeResult, so a plain copy would overwrite the DEFAULT flag
+            # this arm already carries, and omitting it entirely -- which is
+            # what happened -- threw the tuned flag away and let an arm whose
+            # tuned parameters blow up stay rankable, possibly first. An arm is
+            # penalised if EITHER evaluation went non-finite. (codex)
+            res.nonfinite_cases = sorted(
+                set(res.nonfinite_cases or []) | set(tuned.nonfinite_cases or []))
             if tuned.error:
                 res.error = tuned.error
             if res.score_tuned is not None:
@@ -1425,7 +1439,7 @@ def main(argv=None) -> int:
             _flush_outputs(outdir, args, arms, results, profiles)
             jax.clear_caches()
 
-    _flush_outputs(outdir, args, arms, results, profiles)
+    _flush_outputs(outdir, args, arms, results, profiles, complete=True)
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1484,7 +1498,8 @@ def _write_case_profiles(outdir: Path, arm, per_scheme: dict,
     np.savez(out, **payload)
 
 
-def _flush_outputs(outdir: Path, args, arms, results, profiles) -> None:
+def _flush_outputs(outdir: Path, args, arms, results, profiles,
+                   complete: bool = False) -> None:
     """Write every artifact from whatever is finished so far.
 
     Called after EACH scheme, not once at the end. The eight-case campaign is
@@ -1494,7 +1509,14 @@ def _flush_outputs(outdir: Path, args, arms, results, profiles) -> None:
     own file from `results`, so a partial call is a partial report rather than
     a corrupt one, and the penalty relabelling inside `_write_outputs` is
     idempotent (an arm it demotes leaves `_RANKABLE`, so a later call skips it).
+
+    ``complete`` is False for every intermediate call and True only for the one
+    after the last scheme. Without it a campaign killed after scheme one left a
+    normal-looking rank-1 report whose own prose described a finished
+    comparison; now the report says how many of the requested schemes it
+    actually holds. (codex)
     """
+    args.run_complete = bool(complete)
     _write_outputs(outdir, args, arms, results)
     for i, a in enumerate(arms):
         _write_case_profiles(
@@ -1555,8 +1577,20 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                         r.n_trained, n_acc, len(r.frozen or {}),
                         f"{r.wall_s:.1f}", r.error or ""])
 
+    # COMPLETENESS, recorded rather than implied. The report is rewritten after
+    # every scheme so a killed campaign still yields what finished; without
+    # these fields that partial report is indistinguishable from a full one.
+    requested = list(getattr(args, "resolved_schemes", None)
+                     or [r.scheme for r in results])
+    complete = bool(getattr(args, "run_complete", False))
+    missing = [s for s in requested if s not in {r.scheme for r in results}]
+
     payload = {
         "case": args.case,
+        "run_complete": complete,
+        "schemes_requested": requested,
+        "schemes_present": [r.scheme for r in ranked],
+        "schemes_missing": missing,
         # Present and non-null ONLY when --allow-radiation-mismatch was used.
         # Without this the JSON claimed a controlled comparison while ranking a
         # case whose LES radiation the SCM cannot reproduce.
@@ -1666,6 +1700,13 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         f"# SCM turbulence closures vs LES — "
         f"{args.case or ' + '.join(a.name for a in arms)}", "",
     ]
+    if not complete:
+        lines += [
+            "> **PARTIAL — THIS CAMPAIGN DID NOT FINISH.** The report is "
+            f"rewritten after every scheme, and it currently holds "
+            f"{len(results)} of {len(requested)} requested "
+            f"({', '.join(missing)} still to run). The ranking below is a "
+            "ranking of what completed, not of every closure.", ""]
     if args.radiation_confound:
         lines += ["> **THIS IS NOT A TURBULENCE RANKING.** "
                   "`--allow-radiation-mismatch` was used:", ""]
