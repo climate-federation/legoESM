@@ -229,7 +229,12 @@ def test_alpha_beta_match_the_derivative_of_the_density_polynomial():
     # the wrong one makes the derivative identity fail by 1026/1025.
     rho0 = e._NEMO_RHO0
     T0, S0, depth = 10.0, 35.0, 500.0
-    p = constants.rho_ocean * constants.g * depth      # nemo_roquet_eos takes Pa
+    # Pressure MUST be built with the SAME rho0 the EOS inverts it with
+    # (docstring: depth is recovered as p/(rho0*g)). Using
+    # constants.rho_ocean = 1025 here while passing rho0 = 1026 below
+    # shifts the recovered depth by 0.0975%, which is 4.9 m at 5000 m
+    # and was the entire measured alpha mismatch (job 9410757).
+    p = rho0 * constants.g * depth                     # nemo_roquet_eos takes Pa
 
     def rho(T, S):
         return float(e.nemo_roquet_eos(
@@ -249,6 +254,107 @@ def test_alpha_beta_match_the_derivative_of_the_density_polynomial():
     assert b == pytest.approx(beta_fd, rel=2e-4), (
         f"beta {b:.6e} != d(rho)/dS {beta_fd:.6e} -- the /zs factor on "
         "NEMO's beta line is wrong (dropped, doubled, or double-counted)")
+
+
+def test_alpha_beta_match_the_density_derivative_ACROSS_THE_OCEAN():
+    """The same identity as above, swept over the ocean's real T/S/p range.
+
+    The single-point version (T=10, S=35, 500 m) is the decisive check on
+    NEMO's zn/zs beta line, but it is a weak check on the COEFFICIENT TABLES:
+    126 numbers were transcribed by hand, and a typo in a high-order term is
+    invisible at one point while changing the answer at cold/fresh or
+    warm/deep. Nothing else validates the transcription -- the hash pin only
+    locks in whatever was typed.
+
+    What makes this an independent check rather than a tautology: alpha/beta
+    come from the 35-entry ALP_ and BET_ tables, while the density comes from
+    the SEPARATE 52-entry EOS_ table. They are different columns of Roquet et
+    al. (2015) transcribed separately, so a typo in one has to be matched by
+    an exactly compensating typo in the other to survive.
+    """
+    import itertools
+    import jax
+    import jax.numpy as jnp
+    from legoesm import constants
+    e = _eos()
+    rho0 = e._NEMO_RHO0
+
+    def rho_j(T, S, p):
+        return e.nemo_roquet_eos(
+            jnp.atleast_1d(T), jnp.atleast_1d(S), jnp.atleast_1d(p),
+            coeffs=e._ROQUET_TEOS10, rho0=rho0)[0]
+
+    # Corners plus interior of the real ocean envelope: polar-freezing to
+    # tropical-surface, brackish-shelf to Red-Sea, surface to full depth.
+    temps = (-2.0, 0.0, 10.0, 20.0, 30.0)
+    sals = (30.0, 34.0, 35.0, 37.0, 40.0)
+    depths = (0.0, 100.0, 1000.0, 5000.0)
+    # jax.grad, NOT a central difference. Differencing this polynomial has a
+    # truncation floor of ~1.3e-7 in alpha, the SAME size as the signal from a
+    # mistyped coefficient (measured, job 9410697), so the differenced version
+    # could not separate a real typo from its own error.
+    d_dT = jax.grad(rho_j, argnums=0)
+    d_dS = jax.grad(rho_j, argnums=1)
+    worst_a = worst_b = 0.0
+    worst_at = None
+    for T0, S0, depth in itertools.product(temps, sals, depths):
+        # Pressure built with the SAME rho0 the EOS inverts it with. Using
+        # constants.rho_ocean (1025) against rho0 = 1026 shifts the recovered
+        # depth by 0.0975% -- 4.9 m at 5000 m -- and that alone WAS the entire
+        # apparent mismatch (job 9410799: floor 1.32e-7 -> 1.44e-13).
+        p = rho0 * constants.g * depth
+        alpha_fd = -float(d_dT(T0, S0, p)) / rho0
+        beta_fd = float(d_dS(T0, S0, p)) / rho0
+        alpha, beta = e.nemo_roquet_alpha_beta(
+            jnp.array([T0]), jnp.array([S0]), jnp.array([depth]))
+        ra = abs(float(alpha[0]) - alpha_fd)
+        rb = abs(float(beta[0]) - beta_fd)
+        if max(ra, rb) > max(worst_a, worst_b):
+            worst_at = (T0, S0, depth, float(alpha[0]), alpha_fd,
+                        float(beta[0]), beta_fd)
+        worst_a, worst_b = max(worst_a, ra), max(worst_b, rb)
+
+    # TOLERANCE CALIBRATED, NOT GUESSED. scripts/validate/ocean_fidelity/
+    # teos10_coeff_sensitivity.py measures the floor at 1.44e-13 (alpha) and
+    # 3.16e-12 (beta) over this envelope -- pure float64 round-off on a
+    # 52-term polynomial. 1e-11 is 3.2x that, and a perturbation of ONE EOS
+    # coefficient by 1 part in 1e4 is caught for 47 of the 52 coefficients.
+    #
+    # The 5 it cannot catch are EOS000/001/002/003 and EOS103: the constant
+    # and pure-pressure terms have no T or S dependence, so they vanish under
+    # d/dT and d/dS and NO derivative check can see them, by construction.
+    # That is a property of the method, not slack in the tolerance.
+    #
+    # ABSOLUTE, not relative: alpha passes through ZERO near the temperature
+    # of maximum density in cold fresh water, so a relative error divides by
+    # ~0 there and one meaningless point would set the whole gate. Both
+    # quantities are O(1e-4) in their own units.
+    assert worst_a < 1.0e-11, f"alpha: worst |diff| {worst_a:.3e} at {worst_at}"
+    assert worst_b < 1.0e-11, f"beta: worst |diff| {worst_b:.3e} at {worst_at}"
+
+
+def test_density_stays_in_the_physical_range_over_that_envelope():
+    """A transcription typo large enough to matter usually leaves the range.
+
+    Derived, not remembered: seawater over -2..30 C, 30..40 g/kg, 0..5000 dbar
+    spans roughly 1015-1070 kg/m3. This is a coarse tripwire, deliberately --
+    its job is to fail loudly on a mistyped exponent, not to certify accuracy.
+    That is what the derivative sweep above is for.
+    """
+    import itertools
+    import jax.numpy as jnp
+    from legoesm import constants
+    e = _eos()
+    lo, hi = 1e9, -1e9
+    for T0, S0, depth in itertools.product(
+            (-2.0, 10.0, 30.0), (30.0, 35.0, 40.0), (0.0, 1000.0, 5000.0)):
+        r = float(e.nemo_roquet_eos(
+            jnp.array([T0]), jnp.array([S0]),
+            jnp.array([e._NEMO_RHO0 * constants.g * depth]),
+            coeffs=e._ROQUET_TEOS10, rho0=e._NEMO_RHO0)[0])
+        lo, hi = min(lo, r), max(hi, r)
+    assert 1015.0 < lo < 1030.0, f"min density {lo:.3f} kg/m3 is unphysical"
+    assert 1030.0 < hi < 1070.0, f"max density {hi:.3f} kg/m3 is unphysical"
 
 
 class TestProductionWiring:
