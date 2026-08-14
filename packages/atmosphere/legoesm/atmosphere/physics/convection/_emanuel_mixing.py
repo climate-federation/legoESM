@@ -198,6 +198,19 @@ class EmanuelMixingOutput(NamedTuple):
     ment: jax.Array
     m_profile: jax.Array
     convective_layer_mask: jax.Array
+    # ---- Oracle intermediates the DOWNDRAFT pass consumes ----------------
+    # convect43c.f computes the downdraft (lines 713-830) from arrays this
+    # function has already built, so they are exposed rather than recomputed
+    # by a second pass that could drift from this one.  ALL surface-FIRST,
+    # matching ``ment``/``m_profile`` and the oracle's own indexing, and named
+    # for their oracle symbols so a reader can diff against the Fortran.
+    elij: jax.Array = None      # ELIJ(i,j): condensate of the (i->j) mixture
+    clw: jax.Array = None       # CLW(i): adiabatic cloud water
+    ep: jax.Array = None        # EP(i): precipitation efficiency
+    qs: jax.Array = None        # QS(i): saturation mixing ratio
+    h_moist: jax.Array = None   # H(i): moist static energy
+    gz: jax.Array = None        # GZ(i): geopotential
+    lv: jax.Array = None        # LV(i): latent heat of vaporisation
 
 
 def _safe_ratio(num, den, floor):
@@ -925,4 +938,12 @@ def emanuel_mixing_tendencies(
         ment=MENT,            # surface-first (i,j) for diagnostics
         m_profile=m_i,        # surface-first
         convective_layer_mask=ents_mask[:, ::-1],
+        # Surface-FIRST, exactly as the oracle indexes them.
+        elij=ELIJ,
+        clw=clw,
+        ep=ep,
+        qs=qs,
+        h_moist=h,
+        gz=gz,
+        lv=lv,
     )
