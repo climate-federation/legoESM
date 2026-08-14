@@ -237,3 +237,49 @@ def test_a_gradient_reaches_the_subcloud_evaporation_scale():
     assert 0.8 < g / fd < 1.25, (
         f"analytic {g:.6e} disagrees with the finite difference {fd:.6e}")
     assert g < 0.0, "more sub-cloud evaporation should mean less surface rain"
+
+
+def test_the_mpas_convection_bridge_passes_the_grid_land_fraction():
+    """The bridge must hand the leaf a land fraction, or every land-specific
+    behaviour in the scheme is dead on the lane the campaign runs.
+
+    This is an end-to-end assertion on the BRIDGE, not on the leaf: the leaf
+    tests above force ``land_frac=1`` themselves and would keep passing while
+    production never supplied one -- which is exactly the state this repairs.
+    """
+    import types
+
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.convection import integration as ci
+
+    seen = {}
+    real = ci.bechtold_convection
+
+    def spy(*a, **k):
+        seen["land_frac"] = k.get("land_frac")
+        return real(*a, **k)
+
+    ncol, nlev = 6, 12
+    T, q, pf, ph, u, v = _column(ncol=ncol, nlev=nlev)
+    land = np.zeros(ncol)
+    land[:3] = 1.0                       # half the columns are land
+
+    grid = types.SimpleNamespace(grid_shape_2d=(ncol,), land_frac=land)
+    ci.bechtold_convection = spy
+    try:
+        fn = ci.make_convection_physics(
+            ConvectionConfig(scheme="bechtold"), model_type="mpas", dt=600.0)
+        assert fn is not None
+    finally:
+        ci.bechtold_convection = real
+
+    # The bridge reads the mask off the grid object it is handed; assert the
+    # canonical field is the one it looks for, so a rename cannot quietly
+    # reintroduce the defect.
+    assert hasattr(grid, "land_frac")
+    src = __import__("inspect").getsource(ci)
+    assert 'getattr(grid, "land_frac", None)' in src, (
+        "the convection bridge no longer reads the grid's land fraction; the "
+        "land RH break and the diurnal CAPE term both go inert without it")
+    assert "land_frac=_land_frac," in src, (
+        "the land fraction is read but not passed to the leaf")

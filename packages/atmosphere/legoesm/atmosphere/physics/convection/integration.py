@@ -11,6 +11,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, NamedTuple
 
 import jax
@@ -32,6 +33,8 @@ from legoesm.grids.vertical import (
     compute_sigma_dot_and_total,
     compute_pressure_velocity,
 )
+
+logger = logging.getLogger("legoesm.atmosphere.convection")
 from legoesm import constants
 
 from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -541,6 +544,36 @@ def _make_hydrostatic_convection(
                 # so guard at TRACE time on the STATIC config value (mirrors
                 # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
                 # Python bool on scheme_config, not a traced array).
+                # Land fraction for the leaf's land/ocean split.  Read off the
+                # GRID, the canonical carrier (``VoronoiMesh.land_frac`` /
+                # ``CubedSphereGrid.land_frac``), exactly as the gravity-wave
+                # leaf reaches it on this same bridge.  Until this existed the
+                # MPAS lane called the leaf with NO land fraction, so the
+                # sub-cloud rain evaporation used the OCEAN relative-humidity
+                # break over the Amazon and the Congo -- convective rain
+                # re-evaporating on the way down under the wrong setting, in a
+                # configuration whose tropical LAND rain is 26 % short while its
+                # land evaporation sits at observed levels.
+                _land_frac = getattr(grid, "land_frac", None)
+                if _land_frac is not None:
+                    _land_frac = jnp.asarray(_land_frac).reshape(-1)
+                    if _land_frac.shape[0] != ncol:
+                        raise ValueError(
+                            f"grid.land_frac carries {_land_frac.shape[0]} "
+                            f"values but this convection call has {ncol} "
+                            "columns; a mismatched mask would silently "
+                            "mislabel which columns are land")
+                elif getattr(scheme_config, "use_ifs_land_rhebc", False):
+                    # Loud, not silent.  The MPI cell-partitioned lane builds
+                    # its local mesh BEFORE topography attaches the land
+                    # fraction, so the flag can be on while the mask never
+                    # arrives -- a run that believes it has land physics and
+                    # does not is exactly the failure this guard exists for.
+                    logger.warning(
+                        "convection: use_ifs_land_rhebc is set but the grid "
+                        "carries no land_frac, so the land/ocean split in the "
+                        "sub-cloud rain evaporation is INERT and the ocean "
+                        "humidity break is applied everywhere, land included")
                 _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
                           if phys_state is not None else None)
                 _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
@@ -578,6 +611,7 @@ def _make_hydrostatic_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
