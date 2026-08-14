@@ -321,3 +321,55 @@ def test_the_bridge_refuses_a_land_mask_of_the_wrong_length():
         ConvectionConfig(scheme="bechtold"), model_type="mpas", dt=600.0)
     with pytest.raises(ValueError, match="land_frac"):
         fn(state, grid, sigma)
+
+
+def test_the_bridge_forwards_the_surface_fluxes_so_the_diurnal_term_can_run():
+    """The diurnal CAPE subtraction needs land fraction AND both surface heat
+    fluxes. Land fraction alone leaves it inert, which is where this lane was
+    after the previous fix. This asserts all three arrive together."""
+    import types
+
+    from legoesm.atmosphere.physics.convection import integration as ci
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    ncol, nlev = 8, 12
+    seen = {}
+    real = ci.bechtold_convection
+
+    def spy(*a, **k):
+        seen.update({key: k.get(key)
+                     for key in ("land_frac", "shf_w_m2", "lhf_w_m2")})
+        return real(*a, **k)
+
+    sigma = create_sigma_coordinate(nlev)
+    state = HydrostaticState(
+        u=Field(jnp.zeros((ncol, nlev))),
+        T=Field(jnp.broadcast_to(jnp.linspace(298.0, 220.0, nlev)[None, :],
+                                 (ncol, nlev))),
+        p_s=Field(jnp.full((ncol,), 1.0e5)),
+        phis=Field(jnp.zeros((ncol,))), v=Field(jnp.zeros((ncol, nlev))),
+        tracers={"q_v": Field(jnp.broadcast_to(
+            jnp.linspace(0.015, 1e-5, nlev)[None, :], (ncol, nlev)))})
+    grid = types.SimpleNamespace(grid_shape_2d=(ncol,), land_frac=np.ones(ncol))
+    forcing = {"shflx_sfc": np.full(ncol, 140.0),
+               "lhflx_sfc": np.full(ncol, 95.0)}
+
+    ci.bechtold_convection = spy
+    try:
+        fn = ci.make_convection_physics(
+            ConvectionConfig(scheme="bechtold"), model_type="mpas", dt=600.0)
+        assert getattr(fn, "_wants_forcing", False), (
+            "the bridge is not marked as wanting forcing, so the orchestrator "
+            "will never hand it the surface fluxes")
+        fn(state, grid, sigma, forcing=forcing)
+    finally:
+        ci.bechtold_convection = real
+
+    for key, want in (("land_frac", 1.0), ("shf_w_m2", 140.0),
+                      ("lhf_w_m2", 95.0)):
+        got = seen.get(key)
+        assert got is not None, f"{key} never reached the leaf"
+        assert np.allclose(np.asarray(got), want), (key, np.asarray(got)[:3])

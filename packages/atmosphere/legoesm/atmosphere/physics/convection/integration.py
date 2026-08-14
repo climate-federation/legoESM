@@ -345,6 +345,7 @@ def _make_hydrostatic_convection(
         grid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
+        forcing=None,
     ):
         T = state.T.data          # cubed: (6,n,n,nlev) | latlon: (n_lat,n_lon,nlev) | mpas: (nCells,nlev)
         p_s = state.p_s.data      # cubed: (6,n,n)      | latlon: (n_lat,n_lon)      | mpas: (nCells,)
@@ -556,6 +557,28 @@ def _make_hydrostatic_convection(
                 # re-evaporating on the way down under the wrong setting, in a
                 # configuration whose tropical LAND rain is 26 % short while its
                 # land evaporation sits at observed levels.
+                # Surface heat fluxes for the diurnal-cycle CAPE subtraction.
+                # They are the PREVIOUS step's: on this lane turbulence produces
+                # them AFTER convection runs, so this step's do not exist yet.
+                # One step is 75 s against a daily cycle, so the lag is
+                # immaterial -- and without them the mechanism that delays land
+                # storms to the afternoon does not run at all, which is the
+                # state this repairs.
+                _shf = _lhf = None
+                if forcing is not None:
+                    _shf = forcing.get("shflx_sfc")
+                    _lhf = forcing.get("lhflx_sfc")
+                    if _shf is not None:
+                        _shf = jnp.asarray(_shf).reshape(-1)
+                    if _lhf is not None:
+                        _lhf = jnp.asarray(_lhf).reshape(-1)
+                if (getattr(scheme_config, "use_ifs_capdcycl", False)
+                        and (_shf is None or _lhf is None)):
+                    logger.warning(
+                        "convection: use_ifs_capdcycl is set but no surface "
+                        "heat fluxes reached this call, so the diurnal CAPE "
+                        "subtraction is INERT and land convection will not be "
+                        "delayed to the afternoon")
                 _land_frac = getattr(grid, "land_frac", None)
                 if _land_frac is not None:
                     _land_frac = jnp.asarray(_land_frac).reshape(-1)
@@ -614,6 +637,8 @@ def _make_hydrostatic_convection(
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
                     land_frac=_land_frac,
+                    shf_w_m2=_shf,
+                    lhf_w_m2=_lhf,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -841,6 +866,9 @@ def _make_hydrostatic_convection(
         pass
 
     physics_fn.reset_state = reset_state
+    # combined.py routes ``forcing`` only to modules that ask for it.
+    physics_fn._wants_forcing = True
+
     return physics_fn
 
 

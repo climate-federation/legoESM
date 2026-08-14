@@ -8214,6 +8214,13 @@ class ModelDriver:
         # ``get_sst_sic`` call per day, not per step; the dict structure is
         # constant so the jit'd step compiles once (the value is traced).
         _forcing = None
+        # Does the convection scheme want the diurnal-cycle CAPE subtraction?
+        # Resolved once: a static Python bool, so the per-step seeding below is
+        # a trace-time branch and cannot retrace.
+        _capdcycl_on = bool(getattr(
+            getattr(self.config, "convection_config", None), "use_ifs_capdcycl",
+            False)) or bool(getattr(self.config, "bechtold_use_ifs_capdcycl",
+                                    False))
         _last_force_day = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
         # the MPAS path: threaded through the same per-step TRACED
@@ -8672,6 +8679,28 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                # Surface heat fluxes for the convective diurnal-cycle CAPE
+                # subtraction, which is what delays land storms from noon to
+                # late afternoon.  They are the PREVIOUS step's: turbulence
+                # produces them after convection inside the same step, so this
+                # step's do not exist yet.  75 s of lag against a daily cycle.
+                #
+                # The keys are seeded UNCONDITIONALLY with zeros on the first
+                # step, exactly as beta_land is, so the forcing pytree keeps a
+                # stable structure and the compiled step does not retrace when
+                # real values first arrive.  Zero flux on step one means the
+                # subtraction is simply absent for that step, which is correct:
+                # there has been no surface heating yet.
+                if _capdcycl_on:
+                    _sd_prev = getattr(self.model, "_sfc_diag", None)
+                    _zero = jnp.zeros((self.grid.grid_shape_2d[0],),
+                                      dtype=self.state.p_s.data.dtype)
+                    for _slot, _key in ((6, "shflx_sfc"), (7, "lhflx_sfc")):
+                        _v = None
+                        if (_sd_prev is not None and len(_sd_prev) > _slot
+                                and _sd_prev[_slot] is not None):
+                            _v = jnp.asarray(_sd_prev[_slot].data).reshape(-1)
+                        _forcing[_key] = _zero if _v is None else _v
                 # Interactive land skin T (one-step lag): blend the multilayer
                 # tile's last skin temperature into the surface anchor over the
                 # land fraction.  Ocean/ice keep the prescribed SST/SIC blend;
