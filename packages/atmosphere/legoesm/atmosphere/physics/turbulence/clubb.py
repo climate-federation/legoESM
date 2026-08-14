@@ -8,23 +8,23 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 6000)
+Table of contents (sections, in order; flag reference table at line 6131)
 -----------------------------------------------------------------------------
-  1.  [line   328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  [line   411] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  328] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  411] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3.  [line   641] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  641] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4.  [line   972] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  972] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5.  [line  1026] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1026] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6.  [line  1200] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1200] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7.  [line  1635] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8.  [line  1763] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1635] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1763] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9.  [line  1944] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  1944] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
   10. [line  2130] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
   11. [line  2211] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
@@ -44,9 +44,9 @@ Table of contents (sections, in order; flag reference table at line 6000)
   17. [line  4601] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
   18. [line  4975] Core orchestration (``compute_clubb_diagnostics`` /
-      ``compute_pdf_closure`` / ``advance_clubb_core`` + the
-      ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  5371] Scheme entries (``clubb_turbulence`` diagnostic default /
+      ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
+      the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
+  19. [line  5497] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -5174,6 +5174,109 @@ class CLUBBForcing(NamedTuple):
     rtpthlp: jax.Array
 
 
+# --- Surface second-moment BC (sfc_varnce_module.F90, Andre et al. 1978) ---
+# Fixed constants of ``calc_sfc_varnce``; the two tunable coefficients it uses
+# (``a_const``, ``up2_sfc_coef``) live in :class:`CLUBBParams`.
+_SFC_VARNCE_Z_CONST = 1.0       # z_const, the "defined height of 1 metre" [m]
+_SFC_VARNCE_UFMIN = 0.01        # ufmin, minimum allowable u* [m/s]
+_SFC_VARNCE_WSTAR_COEF = 0.3    # weight of w*^2 in uf^2
+_SFC_VARNCE_XP2_COEF = 0.4      # thlp2/rtp2 prefactor
+_SFC_VARNCE_XPYP_COEF = 0.2     # rtpthlp prefactor
+
+
+def calc_sfc_varnce(wp2, up2, vp2, thlp2, rtp2, rtpthlp,
+                    upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc, config):
+    """Diagnose the zm level-0 (surface) second moments from the surface fluxes.
+
+    Faithful port of ``sfc_varnce_module.F90::calc_sfc_varnce`` for the
+    CAM-default flag tree. Without it the lower solver row simply carries
+    whatever the previous step left at level 0, so the surface variances are
+    never tied to the surface fluxes and the Cauchy-Schwarz floor is free to
+    pin ``thlp2`` at a value set by the (tiny) initial ``wp2`` seed — the
+    prognostic-CLUBB runaway of #1508.
+
+    Ported branches and the reasons the others are dropped:
+
+    * ``l_andre_1978 = .false.`` — the Andre-1978 alternative (surface
+      Monin-Obukhov ``zeta`` scaling, wind-oriented ``u_s``/``v_s`` variances)
+      is a compile-time ``parameter`` in the reference and is not implemented.
+    * ``l_vary_convect_depth = .false.`` (CAM default, recorded in this file's
+      flag table) — the convective-depth variants of ``wstar`` and of the
+      ``thlp2``/``rtp2``/``rtpthlp`` formulas are not implemented.
+    * ``C_wp2_splat = 0`` in the CAM tree, so ``lhs_splat_wp2`` is identically
+      zero and the reference's splat branch collapses to
+      ``wp2 <- max(wp2, min_wp2_sfc_val)`` with the leftover correction handed
+      to ``up2``/``vp2`` — reproduced exactly below, not skipped.
+    * Passive scalars (``sclr_dim > 0``) — CLUBB's passive-scalar set is not
+      carried by this port at all.
+    * The reference's "lowest level is not the ground" escape (which resets the
+      six moments to their tolerances) is unreachable here: the caller sets
+      ``sfc_elevation`` to ``z_half[0]``, i.e. to ``zm[0]`` itself, so the
+      guard's condition is false by construction.
+
+    Parameters
+    ----------
+    wp2, up2, vp2, thlp2, rtp2, rtpthlp : jax.Array
+        ``(ngrdcol, nzm)`` moments whose level-0 row is replaced.
+    upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc : jax.Array
+        ``(ngrdcol,)`` surface fluxes (kinematic) already imposed at level 0.
+    config : CLUBBConfig
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(wp2, up2, vp2, thlp2, rtp2, rtpthlp)`` with the level-0 row set.
+    """
+    p = config.params
+    # u*^2 = |tau|/rho. The 1e-30 floor mirrors the ustar diagnostic in
+    # ``clubb_turbulence_prognostic``: a prescribed zero-stress BC is legal and
+    # a bare sqrt there would hand jax.grad an infinite slope. Any physical
+    # stress is bit-unchanged.
+    ustar_sqd = jnp.sqrt(jnp.maximum(upwp_sfc ** 2 + vpwp_sfc ** 2, 1e-30))
+    # w* = ((g/T0) * <w'thl'>_sfc * z_const)^(1/3), zero for a non-positive
+    # surface heat flux. `jnp.where` is not lazy — both arms are evaluated — so
+    # the inner `where` is what matters: it guarantees the cube root never
+    # RECEIVES a non-positive argument, in the primal or the VJP, and so cannot
+    # hand back the infinite slope of x^(1/3) at 0 on the stable branch.
+    wstar_cubed = (constants.g / config.T0) * wpthlp_sfc * _SFC_VARNCE_Z_CONST
+    unstable = wpthlp_sfc > 0.0
+    wstar = jnp.where(
+        unstable, jnp.cbrt(jnp.where(unstable, wstar_cubed, 1.0)), 0.0)
+    uf = jnp.maximum(
+        safe_sqrt(ustar_sqd + _SFC_VARNCE_WSTAR_COEF * wstar * wstar),
+        _SFC_VARNCE_UFMIN)
+    uf_sqd = uf * uf
+
+    wp2_sfc = p.a_const * uf_sqd
+    up2_sfc = p.up2_sfc_coef * p.a_const * uf_sqd   # Andre et al. (1978)
+    vp2_sfc = up2_sfc
+
+    # With a_const = 1.8 these give corr(w,rt) = corr(w,thl) ~ 0.878 and
+    # corr(rt,thl) = 0.5 at the surface.
+    thlp2_sfc = _SFC_VARNCE_XP2_COEF * p.a_const * (wpthlp_sfc / uf) ** 2
+    rtp2_sfc = _SFC_VARNCE_XP2_COEF * p.a_const * (wprtp_sfc / uf) ** 2
+    rtpthlp_sfc = (_SFC_VARNCE_XPYP_COEF * p.a_const
+                   * (wpthlp_sfc / uf) * (wprtp_sfc / uf))
+    thlp2_sfc = jnp.maximum(config.thl_tol ** 2, thlp2_sfc)
+    rtp2_sfc = jnp.maximum(config.rt_tol ** 2, rtp2_sfc)
+
+    # wp2 must be large enough to keep corr(w,thl) and corr(w,rt) inside
+    # (-1, 1); the shortfall is taken back out of the horizontal variances.
+    max_corr_sqd = _MAX_MAG_CORRELATION_FLUX ** 2
+    min_wp2_sfc = jnp.maximum(
+        jnp.maximum(config.w_tol ** 2,
+                    wprtp_sfc ** 2 / (rtp2_sfc * max_corr_sqd)),
+        wpthlp_sfc ** 2 / (thlp2_sfc * max_corr_sqd))
+    correction = jnp.maximum(min_wp2_sfc - wp2_sfc, 0.0)
+    wp2_sfc = jnp.minimum(wp2_sfc + correction, config.wp2_max)
+    up2_sfc = up2_sfc - 0.5 * correction
+    vp2_sfc = vp2_sfc - 0.5 * correction
+
+    return (wp2.at[:, 0].set(wp2_sfc), up2.at[:, 0].set(up2_sfc),
+            vp2.at[:, 0].set(vp2_sfc), thlp2.at[:, 0].set(thlp2_sfc),
+            rtp2.at[:, 0].set(rtp2_sfc), rtpthlp.at[:, 0].set(rtpthlp_sfc))
+
+
 def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        Lscale, brunt_vaisala_freq_sqd, exner_zt, p_in_Pa_zt,
                        thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
@@ -5182,7 +5285,9 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
-    PDF closure (``l_call_pdf_closure_twice = .true.``) -> the four moment
+    PDF closure (``l_call_pdf_closure_twice = .true.``) -> ``calc_sfc_varnce``
+    (the surface second-moment BC, which the reference likewise applies after
+    that closure and before any advance) -> the four moment
     advances ``advance_xm_wpxp -> advance_xp2_xpyp -> advance_wp2_wp3 ->
     advance_windm_edsclrm`` with ``clip_covars_denom`` between the variance/flux
     solves -> the post-advance PDF closure for the cloud/buoyancy diagnostics. The
@@ -5234,6 +5339,16 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.up2, state.vp2, state.wprtp, state.wpthlp, state.upwp, state.vpwp,
         wm_zt, state.rtm, state.thlm, state.um, state.vm, exner_zt, p_in_Pa_zt,
         thv_ds_zt, gr, config)
+
+    # ---- (2b) surface second-moment BC, in the CAM order: after the
+    # pre-advance PDF closure and before every moment advance ----
+    sfc_wp2, sfc_up2, sfc_vp2, sfc_thlp2, sfc_rtp2, sfc_rtpthlp = calc_sfc_varnce(
+        state.wp2, state.up2, state.vp2, state.thlp2, state.rtp2, state.rtpthlp,
+        state.upwp[:, 0], state.vpwp[:, 0], state.wpthlp[:, 0],
+        state.wprtp[:, 0], config)
+    state = state._replace(
+        wp2=sfc_wp2, up2=sfc_up2, vp2=sfc_vp2,
+        thlp2=sfc_thlp2, rtp2=sfc_rtp2, rtpthlp=sfc_rtpthlp)
 
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
@@ -5933,14 +6048,19 @@ def integrate_clubb_column(
     and the dynamical core advances + numerically diffuses the means; that
     diffusion damps grid-scale (2Δz) vertical noise. A *bare* single-column
     driver advances the means with CLUBB alone, so it must supply that stand-in
-    itself — without it, a long near-dry weakly-stratified column grows
-    grid-scale ``T`` noise and ``wp2`` (the iter-48 instability; root-caused iter
-    49-51 to absent host diffusion, NOT a closure/conservation/port error — a
-    tiny ``host_numerical_diffusion`` removes it entirely, ``wp2max`` 10.7→0.06).
-    ``host_numerical_diffusion`` is a dimensionless 2nd-order vertical-diffusion
-    coefficient (0 ⇒ bare CLUBB, exposes the noise; default 0.05 ⇒ a coupled-
-    model-like stand-in). Applied in **flux form** so it conserves the
+    itself. ``host_numerical_diffusion`` is a dimensionless 2nd-order
+    vertical-diffusion coefficient (0 ⇒ bare CLUBB; default 0.05 ⇒ a
+    coupled-model-like stand-in), applied in **flux form** so it conserves the
     column-summed means exactly (zero-flux top/bottom).
+
+    This docstring used to add that a bare near-dry weakly-stratified column
+    grows grid-scale ``T``/``wp2`` noise, "root-caused iter 49-51 to absent host
+    diffusion, NOT a closure/conservation/port error". **That attribution was
+    wrong and is retracted (#1508).** The growth was CLUBB's own missing surface
+    second-moment BC, now ported as :func:`calc_sfc_varnce`; with it in place the
+    bare (nu=0) dry column stays bounded on its own. The stand-in remains
+    available and still matters for what it was named for — representing the
+    host's own diffusion — but it is not what made that column stable.
 
     **Prescribed surface fluxes** (``sfc_wpthlp``/``sfc_wprtp``/``sfc_upwp``/
     ``sfc_vpwp``, each ``(ncol,)`` or ``None``) are forwarded to :func:`clubb_step`
