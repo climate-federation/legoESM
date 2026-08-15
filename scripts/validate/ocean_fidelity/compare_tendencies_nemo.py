@@ -91,6 +91,11 @@ def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
         "v": _fill(dsV.variables["voce"][r0]),           # V-points
         "avt": _fill(dsT.variables["avt"][r1]),          # (z+? , y, x) W-points
         "avt_rec0": _fill(dsT.variables["avt"][0]),      # step-8761 avt (A2 target)
+        # MOMENTUM diffusivity at the same record as avt. NEMO's own Prandtl
+        # number is avm/avt (nn_pdl=1), so carrying both makes the tracer-vs-
+        # momentum split of the Stage-A excess a read of NEMO's own output
+        # rather than an inference. ORCA1 sets nn_evdm=0, so avm carries no EVD.
+        "avm": _fill(dsT.variables["avm"][r1]),
         "avs": _fill(dsT.variables["avs"][r1]),
         "ttrd_zdf": _fill(dsT.variables["ttrd_zdf"][r1]),
         "strd_zdf": _fill(dsT.variables["strd_zdf"][r1]),
@@ -206,12 +211,14 @@ def run_stage_a(d, cfg):
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
+    K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
     # NEMO avt lives at W-points (levels 1..z-1 are the interior interfaces
     # legoESM computes; level 0 is the surface). Slice to interior.
     avt_i = np.transpose(d["avt"].reshape(z, ncol), (1, 0))[:, 1:]
+    avm_i = np.transpose(d["avm"].reshape(z, ncol), (1, 0))[:, 1:]
     wet_i = np.transpose(wet.reshape(z, ncol), (1, 0))
     wet_pair = wet_i[:, :-1] & wet_i[:, 1:]
-    return K_H, avt_i, wet_pair, (z, ny, nx)
+    return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
 def run_stage_a2_mode_a(d, rst, cfg_prog):
@@ -438,6 +445,103 @@ def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
     return rows
 
 
+def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
+                         evd_cols=None):
+    """Split the Stage-A K_H excess into a MOMENTUM part and a PRANDTL part.
+
+    Stage A scores K_H against ``avt``, which carries BOTH the closure
+    amplitude and the Prandtl reduction (nn_pdl=1).  NEMO writes ``avm`` at
+    the same record, so the two factors separate with no model run and no
+    inference:
+
+        K_H/avt  =  (K_M/avm)  x  (Pr_nemo/Pr_ours),
+        Pr_nemo = avm/avt,      Pr_ours = K_M/K_H.
+
+    A K_M/avm near 1 with the whole excess in the Prandtl ratio means the
+    closure amplitude and length are right and our tracer/momentum SPLIT is
+    wrong -- a different defect, in a different place, from an over-energetic
+    closure.  The POINTWISE identity is asserted at runtime (it is algebra, so
+    it can only fail if a field is misaligned) and the run aborts if it does.
+    The PRINTED columns do not satisfy it: the K columns are ratios of means,
+    matching how the Stage-A rms ratios are read, and the Pr columns are
+    pointwise medians, so the two do not compose.  They are printed together
+    to be read against each other, not multiplied.
+
+    FLOORED INTERFACES ARE EXCLUDED, and they have to be.  NEMO applies the
+    tracer floor ``avtb`` AFTER the Prandtl reduction and the momentum floor
+    ``avmb`` to avm, so on a floored interface avm/avt is the ratio of two
+    constants and has nothing to do with nn_pdl.  Both floors are detected as
+    the field minimum over wet interfaces (the same way the zero-step closure
+    detects avmb) rather than hardcoded from the namelist, so a rebuilt oracle
+    with different backgrounds cannot silently poison the ratio.
+    """
+    fin = wet & np.isfinite(avt_i) & np.isfinite(avm_i) \
+        & np.isfinite(K_H) & np.isfinite(K_M)
+    avtb = float(np.min(avt_i[fin & (avt_i > 0)])) if (fin & (avt_i > 0)).any() else 0.0
+    avmb = float(np.min(avm_i[fin & (avm_i > 0)])) if (fin & (avm_i > 0)).any() else 0.0
+    free = fin & (avt_i > avtb * 1.01) & (avm_i > avmb * 1.01) & (K_H > 0)
+    print(f"\n=== Stage A: momentum vs Prandtl split ===")
+    print(f"  NEMO floors detected: avtb {avtb:.3e}, avmb {avmb:.3e} m2/s; "
+          f"off-floor on {100.0 * free.sum() / max(fin.sum(), 1):.1f}% of wet "
+          f"interfaces ({int(free.sum())} of {int(fin.sum())})")
+    if free.sum() == 0:
+        raise SystemExit("FATAL: every interface sits on a NEMO floor; the "
+                         "Prandtl split has no domain to measure on.")
+    # CONTROL, known answer: the factorisation is pure algebra, so it holds
+    # pointwise to roundoff unless avm and avt are misaligned against K_M/K_H
+    # (a level-slice or W-point offset). That misalignment is the one failure
+    # that would look like a physics result, so it aborts here.
+    _lhs = K_H[free] / avt_i[free]
+    _rhs = (K_M[free] / avm_i[free]) * ((avm_i[free] / avt_i[free])
+                                        / (K_M[free] / K_H[free]))
+    _rel = float(np.max(np.abs(_lhs - _rhs) / np.maximum(np.abs(_lhs), 1e-30)))
+    if _rel > 1e-9:
+        raise SystemExit(
+            f"FATAL: K_H/avt != (K_M/avm)*(Pr_nemo/Pr_ours) by {_rel:.3e} -- "
+            "the four fields are not on the same interfaces and no split "
+            "below is meaningful.")
+    print(f"  [control] pointwise factorisation exact to {_rel:.2e} — PASS")
+    rows = []
+    subsets = [("", None)] if evd_cols is None else [
+        ("/calm", ~evd_cols), ("/evd", evd_cols)]
+    regions = [(n, (lat_col >= lo) & (lat_col <= hi)) for n, lo, hi in REGIONS]
+    for n, la, lb, lo, hi in BOX_REGIONS:
+        inlon = ((lon_col >= lo) & (lon_col <= hi) if lo <= hi
+                 else (lon_col >= lo) | (lon_col <= hi))
+        regions.append((n, (lat_col >= la) & (lat_col <= lb) & inlon))
+    for tag0, incol in regions:
+        for suff, colsel in subsets:
+            m = free & incol[:, None]
+            if colsel is not None:
+                m = m & colsel[:, None]
+            if m.sum() < 10:
+                continue
+            # Ratios of MEANS, matching how the Stage-A rms ratios are read;
+            # the pointwise medians go beside them because the two diverge
+            # exactly when the weighting, not the physics, carries the number.
+            kh, at = float(K_H[m].mean()), float(avt_i[m].mean())
+            km, am = float(K_M[m].mean()), float(avm_i[m].mean())
+            pr_n = float(np.median(avm_i[m] / avt_i[m]))
+            pr_o = float(np.median(K_M[m] / K_H[m]))
+            rows.append({"region": tag0 + suff, "n": int(m.sum()),
+                         "K_M_over_avm": km / am if am > 0 else float("nan"),
+                         "K_H_over_avt": kh / at if at > 0 else float("nan"),
+                         "Pr_nemo_median": pr_n, "Pr_ours_median": pr_o,
+                         "K_M_ours": km, "avm_nemo": am,
+                         "K_H_ours": kh, "avt_nemo": at})
+    for r in rows:
+        print(f"  {r['region']:14s} n={r['n']:>7d}  K_M/avm {r['K_M_over_avm']:6.3f}"
+              f"  K_H/avt {r['K_H_over_avt']:6.3f}"
+              f"  Pr_nemo {r['Pr_nemo_median']:5.2f}"
+              f"  Pr_ours {r['Pr_ours_median']:5.2f}")
+    print("  READ: K_M/avm ~ 1 with K_H/avt >> 1 means the closure amplitude "
+          "and length are RIGHT and the tracer/momentum split is wrong. Both "
+          ">> 1 means the closure itself over-mixes and the Prandtl number is "
+          "not the lever. Pr columns are pointwise MEDIANS (the mean of a "
+          "clamped ratio is dominated by its clamp).")
+    return rows
+
+
 def region_report(name, ours, theirs, wet, lat_col, top_k=None,
                   evd_cols=None):
     """Per-region metrics; when ``evd_cols`` (bool, ncol) is given each
@@ -604,7 +708,7 @@ def main():
     out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
     result = {"rec": args.rec}
 
-    K_H, avt_i, wet_pair, shp = run_stage_a(d, cfg)
+    K_H, avt_i, wet_pair, shp, K_M, avm_i = run_stage_a(d, cfg)
     # EVD flag: any interface in the column at/above NEMO's rn_evd scale.
     evd_cols = np.nanmax(np.where(wet_pair, avt_i, 0.0), axis=1) > 1.0
     print(f"[evd] convecting columns: {int(evd_cols.sum())} "
@@ -616,6 +720,9 @@ def main():
     result["stage_a"] = region_report(
         "Stage A: closure K_H (legoESM TKE card) vs NEMO avt [m2/s]",
         K_H, avt_i, wet_pair, lat_col, evd_cols=evd_cols)
+    result["stage_a_prandtl"] = prandtl_split_report(
+        K_H, K_M, avt_i, avm_i, wet_pair, lat_col, d["lon"].reshape(-1),
+        evd_cols=evd_cols)
 
     if args.restart_npz:
         if args.rec != 1:
