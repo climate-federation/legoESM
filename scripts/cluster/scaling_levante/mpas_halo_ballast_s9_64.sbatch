@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --exclude=l50100
 #SBATCH --output=wh_ballast.%j.log
 # ===========================================================================
@@ -75,7 +75,8 @@ source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ballast_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
-export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
+export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
+mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
@@ -87,7 +88,7 @@ run_arm () {  # ballast tag [nocomm] [nostage]
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
   LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC \
   LEGOESM_MPAS_HALO_NOSTAGE=$NS JAX_ENABLE_X64=0 \
-    srun --nodes="$NODES" --ntasks="$NDEV" \
+    timeout 1800 srun --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \

@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=00:50:00
+#SBATCH --time=03:00:00
 #SBATCH --exclude=l50100
 #SBATCH --output=wh_massfix.%j.log
 # ===========================================================================
@@ -54,7 +54,8 @@ source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/massfix_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
-export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
+export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
+mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
 run_arm () {  # nodes gpn subdiv nofix tag
@@ -63,7 +64,7 @@ run_arm () {  # nodes gpn subdiv nofix tag
   local FLAG=""; [ "$NOFIX" = 1 ] && FLAG="--no-fix-mass"
   echo "=== s${SUB}@${NDEV} nofix=$NOFIX [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
-    srun --nodes="$ND" --ntasks="$NDEV" --ntasks-per-node="$GPN" \
+    timeout 1800 srun --nodes="$ND" --ntasks="$NDEV" --ntasks-per-node="$GPN" \
       --gpus-per-node="$GPN" --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
       --multicontroller --n-devices "$NDEV" --subdivision "$SUB" --nlev 26 \

@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=00:55:00
+#SBATCH --time=03:00:00
 #SBATCH --exclude=l50100
 #SBATCH --output=wh_skew.%j.log
 # ===========================================================================
@@ -46,14 +46,15 @@ source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/skew_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
-export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
+export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
+mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
 run_arm () {  # bind tag
   local BIND=$1 TAG=$2
   echo "=== s9@64 wide=1 gpu-bind=$BIND [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
-    srun --nodes=16 --ntasks=64 --ntasks-per-node=4 --gpus-per-node=4 \
+    timeout 1800 srun --nodes=16 --ntasks=64 --ntasks-per-node=4 --gpus-per-node=4 \
       --gpu-bind="$BIND" --cpu-bind=cores --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
       --multicontroller --n-devices 64 --subdivision 9 --nlev 26 \
