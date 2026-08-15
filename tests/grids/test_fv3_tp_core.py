@@ -2036,39 +2036,61 @@ def test_ytp_v_bounded_domain_false_override_is_load_bearing(jord, rough):
 #  that lives inside xtp_u / ytp_v themselves)
 # =====================================================================
 
-def _locate_flag_switch(flag_of_t, ts, iters=60):
-    """Find a parameter value where a BOOLEAN limiter flag flips.
+def _locate_slope_break(grad_of_t, ts, iters=60, rtol=1.0e-9):
+    """Find a parameter value where the DERIVATIVE jumps.
 
-    SCAN, then bisect.  The previous version demanded that the CALLER
-    supply a bracket already straddling the surface and asserted it; in
-    run 6 that assertion is the most likely place the two
-    ``..._across_smt5_surface`` gates stopped -- a precondition failure,
-    so no derivative was ever taken (lesson 11).  Requiring the caller
-    to guess a straddling pair is exactly the "off-switch fixture you
-    cannot certify" trap of lesson 12.  Scanning a list of candidates
-    and bisecting the FIRST adjacent pair that disagrees removes the
-    guess: the caller supplies a range, not an answer.
+    ⛔ REPLACES ``_locate_flag_switch``, which located the wrong thing,
+    and the measurement is job 9417326
+    (``scripts/validate/fv3_gradient_gate_triage.py``, block P5).  That
+    helper took a BOOLEAN proxy -- ``flux(probe) != upwind(source)`` --
+    and bisected where it changed.  Printed as a MARGIN instead of a
+    boolean, that quantity is CONTINUOUS and simply passes through
+    zero::
 
-    Raises with the observed flag pattern if no pair disagrees, so a
-    genuinely one-sided fixture is reported as such instead of as an
-    opaque assertion.
+      xtp_u  t=0: +1.059e+00   t=+2.0e+02: -7.094e+01
+      ytp_v  t=0: +3.972e-01   t=+2.0e+02: -7.160e+01
+
+    So the proxy flips wherever ``flux - upwind`` crosses zero, which
+    has nothing to do with the ``smt5`` branch.  The ``ytp_v`` arm
+    failed only because that crossing fell BETWEEN two scanned points;
+    the ``xtp_u`` arm "passed" because the crossing happened to land
+    inside its scan.  Its pass was luck, not evidence -- both arms were
+    certifying a zero crossing.
+
+    What the gate actually wants is the branch flip, and at
+    ``iord/jord = 5`` that is directly observable: every quantity
+    feeding the flux is LINEAR in the perturbed value, so the flux is
+    piecewise linear in ``t`` and its derivative is piecewise CONSTANT.
+    A branch flip is therefore exactly a step in ``d flux / d t``, which
+    is what this bisects on.  Measured at ``t = 0`` the derivative is
+    6.400210e-01 on both arms, so the scan starts on a well-defined
+    piece.
+
+    Raises with the observed derivatives if none of the scanned
+    intervals contains a step, so a genuinely one-sided fixture is
+    reported as such rather than as an opaque assertion.
     """
-    flags = [flag_of_t(t) for t in ts]
+    grads = [float(grad_of_t(t)) for t in ts]
+
+    def _same(a, b):
+        return abs(a - b) <= rtol * max(abs(a), abs(b), 1.0)
+
     for k in range(len(ts) - 1):
-        if flags[k] != flags[k + 1]:
+        if not _same(grads[k], grads[k + 1]):
             lo, hi = float(ts[k]), float(ts[k + 1])
-            f_lo = flags[k]
+            g_lo = grads[k]
             for _ in range(iters):
                 mid = 0.5 * (lo + hi)
-                if flag_of_t(mid) == f_lo:
+                if _same(float(grad_of_t(mid)), g_lo):
                     lo = mid
                 else:
                     hi = mid
             return 0.5 * (lo + hi)
     raise AssertionError(
-        f"no limiter switch anywhere in the scan: flags={flags} over "
-        f"t={list(ts)} -- the fixture is one-sided along this direction, "
-        f"so this gate would certify nothing")
+        f"no derivative step anywhere in the scan: "
+        f"d flux/dt = {[f'{g:.6e}' for g in grads]} over t={list(ts)} -- "
+        f"the limiter branch never flips along this direction, so this "
+        f"gate would certify nothing")
 
 
 @pytest.mark.parametrize("routine", ["xtp_u", "ytp_v"])
@@ -2083,14 +2105,25 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     there would be certifying a jump.
 
     The perturbed cell is placed in the LINEAR quadrant of the rough
-    fixture, where the flag is ON at ``t = 0``; driving that one cell
-    far enough makes it a local extremum, which turns the flag OFF.
-    Rather than ASSERT that a hand-picked pair of endpoints straddles
-    that transition -- which is what the previous version did, and the
-    most likely place it stopped in run 6 -- the surface is now SCANNED
-    for (:func:`_locate_flag_switch`).  The flag is read out of the
-    public flux (flux == plain upwind value <=> both flags false), so no
-    private state is touched.
+    fixture; driving that one cell far enough makes it a local extremum,
+    which flips the branch.  The surface is SCANNED for rather than
+    asserted (:func:`_locate_slope_break`).
+
+    ⛔ WHAT IS SCANNED FOR CHANGED, because the old detector was
+    measuring something else.  It read the branch out of the public flux
+    as ``flux != plain upwind value`` -- but that difference is a
+    CONTINUOUS function of ``t`` that simply passes through zero (job
+    9417326, triage block P5: +1.059 at t=0 to -70.9 at t=+200 for
+    ``xtp_u``, +0.397 to -71.6 for ``ytp_v``), so the boolean flipped at
+    a zero crossing, not at a limiter switch.  ``ytp_v`` failed only
+    because its crossing fell between two scanned points, and
+    ``xtp_u``'s pass was luck.  At ``iord = 5`` the flux is piecewise
+    LINEAR in ``t``, so the branch flip is exactly a step in
+    ``d flux/d t`` -- which is both what the assertions below already
+    compare and something no zero crossing can imitate.
+
+    Still no private state is touched: the derivative comes from
+    ``jax.grad`` of the public flux.
 
     Asserted, per side: the one-sided derivative is STABLE (offset ``d``
     vs ``d/4`` agree to 1e-6 relative, i.e. that side is smooth right up
@@ -2127,29 +2160,24 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
 
     probe = (ci, cj)
 
-    def _field(t):
-        f = field.copy()
-        f[kk] = field[kk] + t
-        return f
-
-    def flag_of_t(t):
-        f = _field(float(t))
-        return bool(abs(float(np.asarray(run(f))[probe]) - base_of(f))
-                    > 0.0)
-
-    # Scan both signs over four decades; the transition is wherever the
-    # perturbed cell stops being an interior value and becomes an
-    # extremum, which depends on the local slope and cannot be predicted
-    # in closed form.
-    ts = [-8000.0, -2000.0, -800.0, -200.0, -50.0, -10.0, 0.0,
-          10.0, 50.0, 200.0, 800.0, 2000.0, 8000.0]
-    t_star = _locate_flag_switch(flag_of_t, ts)
+    # `base_of` is retained only for the sanity check below: it is what
+    # the RETRACTED boolean proxy compared against, and printing the two
+    # together is what showed the proxy to be continuous.
+    assert callable(base_of)
 
     def scalar(t):
         f = jnp.asarray(field).at[kk].add(t)
         return run(f)[probe]
 
     g = jax.grad(scalar)
+
+    # Scan both signs over four decades and locate the DERIVATIVE STEP;
+    # the transition is wherever the perturbed cell stops being an
+    # interior value and becomes an extremum, which depends on the local
+    # slope and cannot be predicted in closed form.
+    ts = [-8000.0, -2000.0, -800.0, -200.0, -50.0, -10.0, 0.0,
+          10.0, 50.0, 200.0, 800.0, 2000.0, 8000.0]
+    t_star = _locate_slope_break(lambda t: g(jnp.asarray(float(t))), ts)
     sides = {}
     for side, sgn in (("left", -1.0), ("right", +1.0)):
         d = 1e-3

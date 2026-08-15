@@ -292,34 +292,8 @@ def _fd_roundoff_floor(f, primals, eps) -> float:
     return _U_MACH_F64 * scale * float(np.sqrt(n)) / eps
 
 
-def _affine_residual(f, primals, seed=0) -> float:
-    """Relative failure of ``f(x+2v) - f(x) == 2 (f(x+v) - f(x))``.
-
-    Zero for an AFFINE ``f``, and measured with FULL O(1) steps, so
-    unlike any finite difference it involves no cancellation and no step
-    size -- there is nothing to tune and no regime to be in.  Uses the
-    same ``seed`` (hence the same direction ``v``) as
-    :func:`_vjp_fd_projection`, so both statements describe the same
-    slice of the map.
-    """
-    rng = np.random.default_rng(seed)
-    primals = tuple(jnp.asarray(p) for p in primals)
-    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
-    f0 = f(*primals)
-    f1 = f(*[p + t for p, t in zip(primals, v)])
-    f2 = f(*[p + 2.0 * t for p, t in zip(primals, v)])
-    lo = jax.tree_util.tree_leaves(f0)
-    l1 = jax.tree_util.tree_leaves(f1)
-    l2 = jax.tree_util.tree_leaves(f2)
-    num = max(float(np.abs((np.asarray(b) - np.asarray(a))
-                           - 2.0 * (np.asarray(c) - np.asarray(a))).max())
-              for a, b, c in zip(lo, l2, l1))
-    den = max(float(np.abs(np.asarray(b) - np.asarray(a)).max())
-              for a, b in zip(lo, l2))
-    return num / max(den, 1e-300)
-
-
-def _assert_fd_truncation_scaling(name, f, primals, seed=0):
+def _assert_fd_truncation_scaling(name, f, primals, seed=0,
+                                  steps=(4.0e-4, 2.0e-4, 1.0e-4)):
     """DISCRIMINATOR: is a VJP-vs-FD gap the FD's fault or the VJP's?
 
     A central difference has truncation error proportional to eps^2 and
@@ -338,7 +312,6 @@ def _assert_fd_truncation_scaling(name, f, primals, seed=0):
     A group in which ``f`` is AFFINE has NO truncation term at any eps
     and belongs in :func:`_assert_affine_and_roundoff_floor` instead.
     """
-    steps = (4.0e-4, 2.0e-4, 1.0e-4)
     r = [_vjp_fd_projection(f, primals, e, seed=seed)[0] for e in steps]
     ratios = [r[i] / max(r[i + 1], 1e-300) for i in range(len(r) - 1)]
     floor0 = _fd_roundoff_floor(f, primals, steps[0])
@@ -358,6 +331,36 @@ def _assert_fd_truncation_scaling(name, f, primals, seed=0):
         assert 2.5 < x < 6.0, detail
 
 
+def _affine_residual_absolute(f, primals, scale=1.0, seed=0):
+    """``(numerator, |f|_inf)`` of the affinity check, UNNORMALISED.
+
+    :func:`_affine_residual` divides by ``|f(x+2v) - f(x)|``, i.e. by the
+    RESPONSE, which makes the number depend on how big the probing step
+    happened to be.  The numerator is the quantity with a predictable
+    size: for an affine ``f`` it is pure cancellation noise, so it sits
+    at ``u_mach * |f|_inf`` REGARDLESS of the step, while the denominator
+    grows linearly with it.  Returning both lets the caller assert the
+    thing that is actually bounded.
+    """
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(scale * rng.standard_normal(p.shape))
+              for p in primals)
+    f0 = f(*primals)
+    f1 = f(*[p + t for p, t in zip(primals, v)])
+    f2 = f(*[p + 2.0 * t for p, t in zip(primals, v)])
+    lo = jax.tree_util.tree_leaves(f0)
+    l1 = jax.tree_util.tree_leaves(f1)
+    l2 = jax.tree_util.tree_leaves(f2)
+    num = max(float(np.abs((np.asarray(b) - np.asarray(a))
+                           - 2.0 * (np.asarray(c) - np.asarray(a))).max())
+              for a, b, c in zip(lo, l2, l1))
+    den = max(float(np.abs(np.asarray(b) - np.asarray(a)).max())
+              for a, b in zip(lo, l2))
+    fmax = max(float(np.abs(np.asarray(a)).max()) for a in lo)
+    return num, den, fmax
+
+
 def _assert_affine_and_roundoff_floor(name, f, primals, tol_affine,
                                       margin, eps=1.0e-4, seed=0):
     """The FD gate for a group in which ``f`` is AFFINE.
@@ -369,12 +372,33 @@ def _assert_affine_and_roundoff_floor(name, f, primals, tol_affine,
     than anywhere above it.  (b) is the ``cond x eps``-style check for
     this instrument, with the floor formula spelled out in
     :func:`_fd_roundoff_floor`.
+
+    ⛔ (a) IS NOW ASSERTED ON THE NUMERATOR, not on the ratio, and the
+    reason is measured (job 9417326, ``scripts/validate/
+    fv3_gradient_gate_triage.py`` block P3).  The ratio was compared with
+    ``tol_affine = 1e-12`` and came out at 6.148e-11, which was read as
+    "these operands are NOT affine".  Sweeping the probe scale ``s`` over
+    four decades settles it: the NUMERATOR is flat at 9.3e-10 across
+    s = 0.1 … 100 while the DENOMINATOR grows exactly linearly, so the
+    ratio falls like 1/s (3.07e-09, 6.15e-10, 6.15e-11, 6.15e-12,
+    9.22e-13).  A real quadratic term would make the ratio GROW like s.
+    The map is affine; the ratio was measuring the probe step.
+
+    And the numerator's size is not free either -- ``u_mach * |f|_inf =
+    2.22e-16 * 3.895e+06 = 8.65e-10`` against the measured 9.31e-10, i.e.
+    ONE ULP of the field, with a condition number of one.  So the bound
+    here is ``margin * u_mach * |f|_inf``, which is scale-aware by
+    construction and cannot be satisfied by shrinking the probe.
     """
-    r_aff = _affine_residual(f, primals, seed=seed)
-    assert r_aff <= tol_affine, (
-        f"{name}: f(x+2v)-f(x) != 2(f(x+v)-f(x)) at {r_aff:.3e} relative "
-        f"-- these operands are NOT affine, so the roundoff-floor "
-        f"argument below does not apply.  MEASURED {r_aff:.3e}")
+    num, den, fmax = _affine_residual_absolute(f, primals, seed=seed)
+    floor_aff = _U_MACH_F64 * fmax
+    assert num <= tol_affine * floor_aff, (
+        f"{name}: f(x+2v)-f(x) != 2(f(x+v)-f(x)); the second difference "
+        f"is {num:.3e}, which is {num / max(floor_aff, 1e-300):.1f}x "
+        f"u_mach*|f|_inf = {floor_aff:.3e} (|f|_inf = {fmax:.3e}) -- "
+        f"above {tol_affine:g}x that is a real quadratic term, not "
+        f"cancellation.  Probe response |f(x+2v)-f(x)| = {den:.3e}.  "
+        f"MEASURED second difference {num:.3e}")
     gap, ad = _vjp_fd_projection(f, primals, eps, seed=seed)
     floor = _fd_roundoff_floor(f, primals, eps)
     assert gap <= margin * floor, (
@@ -1299,9 +1323,11 @@ def test_one_grad_p_linear_group_is_affine_and_gap_is_roundoff():
     here at any step size."""
     km = 2
     _f_pg, f_lin, _p_pg, p_lin = _ogp_grad_setup(km)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    tol_affine = 1e-12
+    # MEASURED (job 9417326, triage block P3): the second difference is
+    # 9.313e-10 against u_mach*|f|_inf = 8.65e-10, i.e. 1.08x.  Bound =
+    # measured x ~3, expressed as a MULTIPLE OF THE ULP FLOOR so it
+    # cannot be satisfied by shrinking the probe step.
+    tol_affine = 3.0
     # TOL-PENDING: provisional bound; the orchestrator's measurement job will
     # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
     floor_margin = 10.0
@@ -1602,7 +1628,19 @@ def test_nh_p_grad_vjp_fd_gap_is_fd_truncation():
     km = 2
     f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km)
     _assert_fd_truncation_scaling("nh_p_grad pk3/gz", f_pg, p_pg)
-    _assert_fd_truncation_scaling("nh_p_grad pp/u/v/delp", f_nh, p_nh)
+    # LARGER STEPS on the mixed group, and the gate's own failure message
+    # is what asked for them: at eps = (4e-4, 2e-4, 1e-4) the top gap is
+    # 4.06e-4 against a roundoff floor of 7.27e-5, i.e. only 5.6x, so the
+    # ladder was straddling the two regimes and its second ratio came out
+    # at 4.518.  MEASURED (job 9417326, triage block P4) at
+    # (1.6e-3, 8e-4, 4e-4): ratios 3.999 / 4.009 with top/floor = 358.
+    # (6.4e-3 gives 4.000 / 4.000 at top/floor = 22938 and would be even
+    # cleaner, but a 6.4e-3 step on this fixture is a 1.6 % perturbation,
+    # far enough that the higher-order terms the ratio ignores start to
+    # matter; 1.6e-3 is the smallest ladder that clears the floor by the
+    # required 10x.)
+    _assert_fd_truncation_scaling("nh_p_grad pp/u/v/delp", f_nh, p_nh,
+                                  steps=(1.6e-3, 8.0e-4, 4.0e-4))
 
 
 def test_nh_p_grad_jax_check_grads_order2_well_conditioned():

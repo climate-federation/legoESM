@@ -30,6 +30,14 @@
 # reasoning AND content, not content alone.
 set -uo pipefail
 PART=${PART:?usage: sbatch --export=ALL,PART=A|B|C glm_code_tail3d_part.sbatch}
+# STREAM=1 (default) streams; STREAM=0 restores the non-streaming call.
+# MEASURED (job 9417346): with thinking={"type":"disabled"} BOTH modes
+# now return content -- 671/812 reasoning tokens non-streaming, 774/893
+# streaming -- so the 687d20a82 finding that streaming ignores the flag no
+# longer reproduces. Streaming is therefore strictly better here: the
+# non-streaming call at 48000 tokens died with IncompleteRead again (job
+# 9417348), and a stream both keeps the socket busy and KEEPS what arrived.
+STREAM_FLAG=$([ "${STREAM:-1}" = "0" ] && echo --no-stream || echo "")
 case "$PART" in A|B|C) ;; *) echo "PART must be A, B or C"; exit 2 ;; esac
 if [ -n "${SLURM_JOB_ID:-}" ] && command -v scontrol >/dev/null 2>&1; then
   _SELF=$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | tr ' ' '\n' | sed -n 's/^Command=//p' | head -1)
@@ -49,7 +57,7 @@ for attempt in 1 2 3; do
   echo "--- attempt $attempt ---"
   $PY $REPO/scripts/validate/glm_review.py \
       --prompt-file "$PROMPT" \
-      --model glm-5.3 --max-tokens ${MAXTOK:-48000} --code --no-stream \
+      --model glm-5.3 --max-tokens ${MAXTOK:-48000} --code ${STREAM_FLAG} \
       --out "$OUT"
   echo "rc=$?"
   GOT=$( [ -f "$OUT" ] && wc -c < "$OUT" || echo 0 )

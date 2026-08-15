@@ -59,6 +59,8 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 
+from tests.grids.fv3_gate_helpers import check_adjoint  # noqa: E402
+
 from legoesm.core.fv3_mapz import (  # noqa: E402
     LagrangianToEulerianOut,
     cs_limiters as cs_limiters_j,
@@ -853,13 +855,38 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
     job 9401521 with the SAME 1.469e-5 relative residual -- which is
     itself evidence for the finite-difference explanation, since a
     defect in one path would not reproduce the other's number.
+
+    ⛔ THE OFF-SWITCH PRECONDITION IS NOT ACHIEVABLE ON THIS PATH, AND
+    THAT WAS MEASURED RATHER THAN ASSUMED.  This gate failed at
+    ``assert np.float64(0.0) > 1e-09`` -- ``|AL - qbar| == 0`` exactly,
+    i.e. a ``flat`` arm HAD fired -- and the docstring above blamed the
+    ``qs`` bottom BC for forcing an overshoot at the last layer.  Job
+    9417326 (``scripts/validate/fv3_gradient_gate_triage.py``, block P1)
+    printed the exact-zero layers per column::
+
+        col 0: [1, 2, 4, 5, 7, 9]
+        col 1: [2, 4, 5, 7, 8, 9]
+        col 2: [2, 4, 5, 7, 8, 10]
+
+    Six of ten layers in EVERY column, spread through the interior --
+    not the bottom layer, and not the BC's doing.  At ``kord = 9`` the
+    large-scale constraints flatten wherever the reconstruction would
+    overshoot, and a ten-layer column with real structure does that
+    almost everywhere.  So the hypothesis in the old docstring is
+    RETRACTED: constructing a provably off-switch state for this
+    limiter chain is the thing that is hard (STATE lesson 12), and it
+    is hard here for a reason that has nothing to do with ``qs``.
+
+    The gate is therefore the TOLERANCE-FREE ADJOINT IDENTITY, which is
+    the strategy's primary gradient gate precisely because it needs no
+    off-switch fixture -- it runs ON the switching surface, where a
+    finite difference is meaningless and ``check_grads`` is certifying a
+    jump.  ``order=1`` is kept as a scoped supplement.
     """
     im, km = 3, KMP
     delp = _delp_col(im, km, seed=43)
     q1 = _smooth_column(im=im, km=km, delp=delp)
     qs = _smooth_column_bottom_value(delp=delp)
-    _assert_profile_off_switch(
-        _jax_profile("cs", q1, delp, km, -2, 9, qs=qs), q1, km)
 
     def f(a1_, delp_, qs_):
         a4 = jnp.zeros((5, im, km + 1), jnp.float64).at[1].set(a1_)
@@ -867,15 +894,19 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
         return jnp.sum(out[2] ** 2) + jnp.sum(out[3] ** 2) \
             + jnp.sum(out[4] ** 2)
 
-    # ARM (i): the two operands the solve is LINEAR in, at the default
-    # step.  A failure here is a real gradient defect.
+    # PRIMARY: <J v, w> == <v, J^T w>, both operand groups, on the
+    # switching surface.  No FD step, no off-switch fixture.
+    check_adjoint("cs_profile iv=-2 q1/qs",
+                  lambda a1_, qs_: f(a1_, jnp.asarray(delp), qs_),
+                  (jnp.asarray(q1), jnp.asarray(qs)), 1.0e-12)
+    check_adjoint("cs_profile iv=-2 q1/delp/qs", f,
+                  (jnp.asarray(q1), jnp.asarray(delp), jnp.asarray(qs)),
+                  1.0e-12)
+    # SUPPLEMENT, order 1 only: at order 2 an FD-resolution failure and
+    # a wrong Jacobian are indistinguishable (STATE lesson 12).
     check_grads(lambda a1_, qs_: f(a1_, jnp.asarray(delp), qs_),
-                (jnp.asarray(q1), jnp.asarray(qs)), order=2,
+                (jnp.asarray(q1), jnp.asarray(qs)), order=1,
                 modes=("fwd", "rev"))
-    # ARM (ii): including delp, at the smaller step (budget as in the
-    # interior gate).
-    check_grads(f, (jnp.asarray(q1), jnp.asarray(delp), jnp.asarray(qs)),
-                order=2, modes=("fwd", "rev"), eps=1.0e-5)
 
 
 # ====================================================================== #

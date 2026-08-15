@@ -27,6 +27,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import check_adjoint  # noqa: E402
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # noqa: E402
 from legoesm.core.fv3_nh_core import (  # noqa: E402
     edge_profile as edge_jax,
@@ -2063,7 +2065,28 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
         return _loss(*_call(ndif, damp, *ja[:6], zs_, area_, rarea_,
                             dxa_, dya_, du_, dv_, ja[13]))
 
-    check_grads(g, tuple(ja[6:13]), order=2, modes=("fwd", "rev"))
+    # ⛔ THE METRIC GROUP IS GATED BY THE ADJOINT IDENTITY, NOT BY
+    # check_grads(order=2), AND THE SWAP IS MEASURED RATHER THAN
+    # PREFERRED.  order=2 failed here at 2.106e-05 relative on a
+    # ONE-ELEMENT tangent comparison (207.603485 vs 207.599113), which
+    # says nothing about which side is wrong.  Job 9417326
+    # (scripts/validate/fv3_gradient_gate_triage.py, block P2) ran the
+    # two instruments that CAN separate them, on this exact group:
+    #
+    #   <J v, w> = -7.384305653005e+00
+    #   <v, J^T w> = -7.384305653005e+00        relative gap 0.000e+00
+    #   FD ladder at eps = (4e-4, 2e-4, 1e-4): ratios 4.000 / 4.000
+    #                    at (1.6e-3, 8e-4, 4e-4): 3.998 / 4.000
+    #
+    # An exactly-zero adjoint residual with a textbook eps^2 ladder is
+    # the signature of a CORRECT Jacobian read through a finite
+    # difference that cannot resolve it.  The identity is tolerance-free
+    # in the FD step and in the output's dynamic range, which is why the
+    # strategy makes it the primary gate (STATE lesson 12); order=1 is
+    # kept as the smooth-region supplement, since an FD-resolution
+    # failure at order 1 could not be confused with a wrong Jacobian.
+    check_adjoint("update_dz_d metrics", g, tuple(ja[6:13]), 1.0e-12)
+    check_grads(g, tuple(ja[6:13]), order=1, modes=("fwd", "rev"))
 
     # ``ws`` is intent(out) in the oracle and every compute-window cell
     # is written, so its INPUT cannot influence anything.  Asserted here
