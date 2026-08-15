@@ -138,12 +138,40 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     validate_stacked(fname, csw_outs, ctx, km,
                      ("uc", "vc", "ua", "va", "divg_d"),
                      what="c_sw outputs")
-    dsw_req = ("ut", "vt", "crx_adv", "cry_adv", "xfx_adv", "yfx_adv",
-               "ra_x", "ra_y", "delp")
-    if not hydrostatic:
-        # NH arm: d_sw5 needs the d_sw1/d_sw2 w and dw stacks.
-        dsw_req = dsw_req + ("w", "dw")
-    validate_stacked(fname, dsw_outs, ctx, km, dsw_req, what="d_sw outputs")
+    # `delp` (and `w` on the NH arm) are DECLARED fields, so they go
+    # through the shape table.  The d_sw1 transport outputs do NOT: they
+    # have their own staggerings that no table describes, and the sibling
+    # transport phase says so where it stacks them ("d_sw1/d_sw2 publish
+    # no such table -- re-deriving ten Fortran bound expressions here
+    # would be exactly the kind of restatement that drifts").
+    #
+    # MEASURED, and it is why this split exists (job 9417450): routing
+    # them through `validate_stacked` refused a CORRECT input --
+    # `field_shape("ut")` is the C-grid `ut`, ``(m_a, m_a, km)``, while
+    # d_sw1's `ut` is ``(m_a+1, m_a, km)``.  Two different quantities
+    # under one name is exactly the hazard the table exists to catch, so
+    # the table must not be applied across that boundary.
+    dsw_declared = ("delp",) + (() if hydrostatic else ("w",))
+    validate_stacked(fname, dsw_outs, ctx, km, dsw_declared,
+                     what="d_sw outputs")
+    dsw_stacks = ("ut", "vt", "crx_adv", "cry_adv", "xfx_adv", "yfx_adv",
+                  "ra_x", "ra_y") + (() if hydrostatic else ("dw",))
+    missing = [k for k in dsw_stacks if k not in dsw_outs]
+    if missing:
+        raise KeyError(
+            f"{fname}: d_sw outputs is missing {missing}; keys are "
+            f"{sorted(dsw_outs)}")
+    for nm in dsw_stacks:
+        arr = jnp.asarray(dsw_outs[nm])
+        # What IS checkable without a table: the face axis and the level
+        # axis.  A face or level slip is the defect that would otherwise
+        # broadcast silently; the stagger axes are the kernels' own.
+        if arr.ndim != 4 or arr.shape[0] != 6 or arr.shape[3] != km:
+            raise ValueError(
+                f"{fname}: d_sw outputs[{nm!r}] has shape {arr.shape}; "
+                f"expected (6, i, j, {km}) -- the face axis and the "
+                f"level axis are fixed by convention C1 even where the "
+                f"stagger is the kernel's own")
     # f64 entry gate -- reads static dtypes only, so it is jit-safe (C5).
     require_f64_jax(fname, {
         "state/u": state["u"], "state/v": state["v"],
