@@ -275,7 +275,14 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
-    return K_H
+    # K_M too: Stage A (Mode-B, our own equilibrium TKE) measures K_M/avm 0.47
+    # in the equatorial upper 100 m, while the zero-step closure HANDED NEMO's
+    # own en reproduces avm_k to 0.999. Those two differ in the TKE and in the
+    # state, so neither alone says whether our viscosity deficit is the closure
+    # or the equilibrium. Mode-A takes NEMO's own en on NEMO's own state and is
+    # the control that separates them.
+    K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
+    return K_H, K_M
 
 
 def run_stage_b(d):
@@ -851,8 +858,9 @@ def main():
                              "state pairs with avt record 0)")
         rst = dict(np.load(args.restart_npz))
         # prognostic=True card, THEN the same overrides Stage A got.
-        cfg_a2 = _apply_overrides(orca1_zdftke_config(), "stage_a2")
-        K_H2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
+        cfg_a2 = _apply_overrides(
+            orca1_zdftke_config(iwm_enabled=args.iwm_backgrounds), "stage_a2")
+        K_H2, K_M2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
@@ -862,6 +870,24 @@ def main():
             "Stage A2: MODE-A closure — kernel(restart state + NEMO en, one "
             "3600s en-step) K_H vs NEMO avt REC 1 [m2/s]",
             K_H2, avt_a2(d), wet_pair, lat_col, evd_cols=evd_cols)
+        # THE CONTROL THAT SEPARATES CLOSURE FROM EQUILIBRIUM.  Stage A builds
+        # its own Mode-B equilibrium TKE and lands K_M/avm = 0.47 in the
+        # equatorial upper 100 m; the zero-step closure, HANDED NEMO's own en,
+        # reproduces avm_k to 0.999. Those two differ in the TKE *and* in the
+        # state, so neither says which. Mode-A takes NEMO's own en on NEMO's own
+        # state and scores the SAME split with the SAME reduction and the SAME
+        # depth cuts, so the only thing left between it and Stage A is the TKE.
+        #   A2 K_M/avm ~ 1 above 100 m -> the closure is fine and our
+        #        EQUILIBRIUM TKE is ~4x too small at the equator (K ~ sqrt(e)).
+        #   A2 K_M/avm ~ 0.47 as well  -> the TKE is not the difference and the
+        #        deficit is in the closure or the length after all.
+        print("\n--- Stage A2 (Mode-A, NEMO's own en) momentum/Prandtl split "
+              "--- read against the Stage-A table above; the ONLY difference "
+              "is where the TKE came from.")
+        result["stage_a2_prandtl"] = prandtl_split_report(
+            K_H2, K_M2, avt_a2(d), avm_i, wet_pair, lat_col,
+            d["lon"].reshape(-1), evd_cols=evd_cols, z_iface=_z_iface,
+            z_cuts_m=(300.0, 100.0))
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
