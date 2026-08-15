@@ -161,6 +161,61 @@ SUPERSEDED: an earlier revision of this file called the velocity/transport
 centroid offset "contributory but not sufficient". That framing is retracted.
 The offset is a symptom of the halving, not a separate mechanism.
 
+THE LOOP-CLOSURE FIX IS REFUTED. Do not re-attempt it as specified.
+
+The proposed cure (GLM-5.2) was to accumulate the edge thickness under the same
+tail weights as the transport and define the prognostic barotropic velocity as
+the Favre average the transport implies, u_bar = Hu_avg / He_tail, so that
+He_tail * u_bar == Hu_avg by construction. Implemented, unit-tested (11 tests,
+191 across the touched suites) and run. It does NOT work, for two independent
+reasons, both measured.
+
+FIRST, IT IS THE PROBE. The per-level rescale h_e_bt_k = h_e_k * (He_tail/H_e)
+uses a factor that is UNIFORM IN THE VERTICAL, so it cancels exactly in every
+thickness-weighted column mean:
+
+    sum(u * h_e_k * r) / (H_e * r) == sum(u * h_e_k) / H_e
+
+Measured difference in u_bar_old between the two bases: 1.39e-17, i.e. bit
+identical. The whole rescale is a no-op for the momentum path. What remains is
+only the velocity's averaging window -- exactly what the earlier one-line probe
+changed. The two agree to 7.27e-06, and the Eady case blows up at the IDENTICAL
+step 23500 (day 81.6) under both. GLM's premise, that the cure was conditional
+on every consumer pairing with He_tail, is refuted: that pairing is worth 1e-5.
+
+SECOND, AND DISQUALIFYING: IT REINSTATES THE HALF-SPEED DEFECT IN THE VELOCITY.
+A velocity derived from the transport inherits the TAIL weights, whose centroid
+is not t+dt:
+
+                        eta centroid     velocity-from-transport centroid
+    n=30 cosine            1.000 dt              0.582 dt
+    n=30 box               1.000 dt              0.678 dt
+    n=5  cosine            1.000 dt              0.665 dt
+
+So the free surface would sit at t+dt and the velocity at ~0.58*dt -- the same
+mid-step centring that made gravity waves run 1.86-1.92x too slow before #1609,
+reintroduced in one of the two fields. Trading a 1e-5 mass/momentum mismatch for
+a ~2x error in wave speed is a bad trade in the direction that matters.
+
+TWO MORE DEFECTS in the attempt, worth recording because they are traps:
+ * The "delta_u is now a tripwire" claim was FALSE. delta_u is algebraically
+   zero for ANY He_tail, right or wrong, because reconcile forces the
+   h_e_bt_k-weighted mean and sum_k h_e_bt_k == He_tail by construction. A
+   quantity that is identically zero detects nothing.
+ * On partial cells the two thicknesses genuinely disagree: He_tail accumulates
+   a TOTAL-COLUMN min(H_c1,H_c2) while the outer step forms a PER-LEVEL
+   sum_k min(h_k[c1],h_k[c2]), and sum(min) <= min(sum). The claim that the
+   rescale "changes only the column total" is not true there.
+
+WHAT THIS LEAVES. The mass/momentum mismatch is real but SMALL (1e-5 here), and
+it is not what destabilises this case. Any future attempt must keep the velocity
+centred on t+dt -- so it cannot be derived from the tail-weighted transport --
+and must beat the 23500-step ceiling that both the probe and this attempt hit.
+Note also that the lat-lon sibling still uses the filter mean, so a velocity
+redefinition here would silently diverge the two solvers; the discriminating
+measurement is the barotropic wave-speed period ratio run against MPAS, which
+the existing accuracy gate does NOT cover (it drives the lat-lon model).
+
 A CAUTION THAT COST ME A WRONG READING.
 
 The barotropic loop returns three averages and they are NOT taken over the
