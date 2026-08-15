@@ -63,6 +63,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from legoesm.core import fv3_dsw_tail_3d as jtail  # noqa: E402
+from legoesm.core import fv3_native_acoustic_3d as npacoustic  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npcg  # noqa: E402
 from legoesm.core import fv3_native_dsw_phase_3d as npdsw  # noqa: E402
 from legoesm.core import fv3_native_dsw_tail_3d as nptail  # noqa: E402
@@ -231,6 +232,30 @@ def jdsw(jctx, jstate, jcsw):
 _TAIL_COMPARED = ("u", "v", "ke", "wk", "divg_d", "delpc")
 
 
+def _stack_dsw_np(dsw_np):
+    """The NumPy transport output -> this lane's face-stacked dict.
+
+    Not `stack_np`: the spec's per-face dict carries a ``levels`` key
+    holding a LIST of per-level dicts (the d_sw1 stage outputs), which
+    has no array to stack.  The JAX lane returns those as (6, i, j, km)
+    stacks under their own names, so the adapter builds them from the
+    per-level lists and drops ``levels`` itself.
+    """
+    per_level_names = tuple(dsw_np[0]["levels"][0])
+    out = {}
+    for k, v in dsw_np[0].items():
+        if k == "levels":
+            continue
+        out[k] = jnp.asarray(np.stack(
+            [np.asarray(d[k], dtype=np.float64) for d in dsw_np]))
+    for nm in per_level_names:
+        out[nm] = jnp.asarray(np.stack([
+            np.stack([np.asarray(lvl[nm], dtype=np.float64)
+                      for lvl in face["levels"]], axis=2)
+            for face in dsw_np]))
+    return out
+
+
 def _np_tail(ctx, state_np, csw_np, dsw_np, **kw):
     """The spec, on COPIES -- it mutates its inputs."""
     return nptail.dsw_tail_phase_3d(
@@ -265,8 +290,8 @@ def test_tail_unit_parity_hydrostatic_on_identical_inputs(
     such; this one is the parity claim.
     """
     ref = _np_tail(ctx, state_np, csw_np, dsw_np)
-    got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, stack_np(dsw_np),
-                                  DT, KM)
+    got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw,
+                                  _stack_dsw_np(dsw_np), DT, KM)
     _require_keys(got, ref[0], _TAIL_COMPARED, "tail unit parity")
     for nm in _TAIL_COMPARED:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
@@ -715,3 +740,198 @@ def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
     # measure.
     assert_fd_truncation_scaling("press delp", f, (jdsw["delp"],),
                                  steps=(1.6e-3, 8.0e-4, 4.0e-4))
+
+
+# =====================================================================
+# 7. THE NON-HYDROSTATIC D-GRID TAIL
+#
+# ⛔ codex BLOCKER (job 9417466): this file had NO test of
+# `nh_exchanged_area6` or `dgrid_nh_pressure_phase_3d`.  The NH fixture
+# was built and never consumed, so the entire chain -- update_dz_d,
+# riem_solver3, the conditional halo order, both interface exchanges,
+# the two-cell gz box, the pkc generations and every carry return --
+# could have been deleted or reordered without failing anything, while
+# the module docstring claimed both pressure chains were certified.
+# =====================================================================
+
+_NH_CARRY_KEYS = ("zh", "gz", "zs", "pk3", "pe", "pk", "peln", "ws")
+
+# dp_ref: the reference thickness profile update_dz_d takes.  A LINEAR
+# profile, so a level mix-up in the km+1 slot shows up as a wrong value
+# rather than as the same number twice.
+_DP0 = np.linspace(1.0e4, 1.2e4, KM)
+
+
+def _nh_stack_carry(carry_np):
+    """The spec's per-face lists -> the JAX lane's face-stacked dict."""
+    ren = {"zh": "zh6", "gz": "gz6", "zs": "zs6", "pk3": "pk3_6",
+           "pe": "pe6", "pk": "pk6", "peln": "peln6", "ws": "ws6"}
+    return {k: jnp.asarray(np.stack([np.asarray(x, dtype=np.float64)
+                                     for x in carry_np[ren[k]]]))
+            for k in _NH_CARRY_KEYS}
+
+
+@pytest.fixture(scope="module")
+def nh_bundle(ctx, state_np_nh):
+    """Everything the NH tail consumes, built by the NumPy lane.
+
+    Both lanes are then fed THIS, so the gate is hop-B unit parity on
+    the NH phase and nothing upstream can compensate.
+    """
+    hs6 = [np.zeros((MA, MA), dtype=np.float64) for _ in range(6)]
+    carry = npacoustic.build_nh_carry(ctx, KM, hs6)
+    # first-substep gz seed, the cadence the acoustic driver owns:
+    # gz[..., km] = zs padded, then gz(k) = gz(k+1) - delz on the
+    # compute window (dyn_core.F90:384-416).
+    b = ctx["bd"]
+    i0, j0 = b.is_ - b.isd, b.js - b.jsd
+    for t in range(6):
+        gz = carry["gz6"][t]
+        gz[:, :, KM] = carry["zs6"][t]
+        for k in range(KM - 1, -1, -1):
+            gz[i0:i0 + N, j0:j0 + N, k] = (
+                gz[i0:i0 + N, j0:j0 + N, k + 1]
+                - state_np_nh[t]["delz"][:, :, k])
+        carry["zh6"][t][:] = carry["gz6"][t]
+
+    csw = npcg.csw_phase_3d(ctx, deepcopy_faces(state_np_nh), dt2=DT2,
+                            km=KM, nord=2, duogrid=True,
+                            hydrostatic=False)
+    csw_press = npcg.cgrid_nh_pressure_phase_3d(
+        ctx, deepcopy_faces(csw), carry["gz6"], carry["ws3_6"], KM,
+        dt2=DT2, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
+        a_imp=A_IMP, dp0=_DP0, hs6=carry["hs6"], zs6=carry["zs6"])
+    dsw = npdsw.dsw_transport_phase_3d(
+        ctx, deepcopy_faces(state_np_nh), deepcopy_faces(csw),
+        dt=DT, km=KM, hydrostatic=False)
+    tail = nptail.dsw_tail_phase_3d(
+        ctx, deepcopy_faces(state_np_nh), deepcopy_faces(csw),
+        deepcopy_faces(dsw), dt=DT, km=KM, hydrostatic=False)
+    return {"carry": carry, "csw": csw, "csw_press": csw_press,
+            "dsw": dsw, "tail": tail}
+
+
+def _run_nh(ctx_, bundle, lane, **kw):
+    """One NH tail call on either lane, from COPIES of one fixture."""
+    delz_np = [np.array(f["delz"], copy=True) for f in bundle["state"]]
+    if lane == "numpy":
+        return nptail.dgrid_nh_pressure_phase_3d(
+            ctx_, deepcopy_faces(bundle["csw_press"]),
+            deepcopy_faces(bundle["dsw"]), deepcopy_faces(bundle["tail"]),
+            {k: [np.array(x, copy=True) for x in v] if isinstance(v, list)
+             else v for k, v in bundle["carry"].items()},
+            KM, dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
+            a_imp=A_IMP, dp0=_DP0, delz6=delz_np, **kw)
+    return jtail.dgrid_nh_pressure_phase_3d(
+        ctx_, stack_np(bundle["csw_press"]), stack_np(bundle["dsw"]),
+        stack_np(bundle["tail"]), _nh_stack_carry(bundle["carry"]), KM,
+        dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
+        a_imp=A_IMP, dp0=jnp.asarray(_DP0),
+        delz=jnp.asarray(np.stack(delz_np)), **kw)
+
+
+def test_nh_exchanged_area_is_sentinel_free_and_matches_the_spec(
+        ctx, jctx):
+    """``nh_exchanged_area6``: the single-tile gridstruct leaves
+    BIG_NUMBER in the corner-diagonal halos of ``area``, and
+    ``update_dz_d``'s inner ``fv_tp_2d`` reads them."""
+    ref = nptail.nh_exchanged_area6(dict(ctx))
+    got = jtail.nh_exchanged_area6(jctx)
+    want = np.stack([np.asarray(a, dtype=np.float64) for a in ref])
+    a = np.asarray(got)
+    assert a.shape == want.shape, (a.shape, want.shape)
+    # The point of the routine: no sentinel survives.
+    assert not np.isclose(np.abs(a), 1.0e8, rtol=1e-12).any(), (
+        "a BIG_NUMBER sentinel survived the exchange")
+    # TOL-PENDING: provisional bound.  DO NOT SHIP.  [class: exchange]
+    cmp_fields(a, want, "nh area", 1e-13)
+
+
+@pytest.mark.parametrize("remap_step,use_logp,square_domain", [
+    (False, False, True),      # the shipped duo cadence
+    (True, False, True),       # the remap substep: pe_halo fires
+    (False, True, True),       # use_logp: pln_halo INSTEAD of pk3_halo
+    (False, False, False),     # no second pkc exchange
+])
+def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
+                        remap_step, use_logp, square_domain):
+    """Hop-B parity on every NH branch the spec can take.
+
+    Parameterised over the three switches the chain's ORDER depends on,
+    because each selects a different call: ``remap_step`` adds
+    ``pe_halo``, ``use_logp`` swaps ``pk3_halo`` for ``pln_halo`` (an
+    unconditional ``pk3_halo`` would overwrite log(p) halos with
+    p**akap), and ``square_domain`` adds the second ``pkc`` exchange.
+    """
+    bundle = dict(nh_bundle, state=state_np_nh)
+    kw = dict(remap_step=remap_step, use_logp=use_logp,
+              square_domain=square_domain)
+    ref = _run_nh(dict(ctx), bundle, "numpy", **kw)
+    got = _run_nh(jctx, bundle, "jax", **kw)
+
+    # The spec RETURNS the press list and MUTATES the carry in place;
+    # this lane returns both.  Compare the press members the spec hands
+    # back, from the carry it mutated.
+    _require_keys(got, {"nh": 1, "press": 1}, ("nh", "press"), "NH tail")
+    for nm in ("pe", "pk", "peln", "ws"):
+        want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy nh {nm}")
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # [class: accumulating -- the Riemann solve is a recurrence]
+        cmp_fields(got["press"][nm], want, f"nh {nm}", 1e-12)
+
+
+def test_nh_tail_returns_every_array_the_spec_mutates(ctx, jctx,
+                                                      state_np_nh,
+                                                      nh_bundle):
+    """Convention C4, as a MANIFEST rather than a claim (codex MAJOR).
+
+    The spec mutates the eight carry members, ``delz6``, the
+    ``csw_press`` ``pkc`` storage and the D winds. Every one must come
+    back, and each must have MOVED against the input it was built from
+    -- a returned key that is bitwise the input is a stage that did not
+    run.
+    """
+    bundle = dict(nh_bundle, state=state_np_nh)
+    got = _run_nh(jctx, bundle, "jax")
+    _require_keys(got["nh"], {k: 1 for k in _NH_CARRY_KEYS},
+                  _NH_CARRY_KEYS, "NH carry")
+    for nm in ("delz", "pkc", "u", "v", "w"):
+        assert nm in got, f"the NH tail does not return {nm!r}"
+
+    before = _nh_stack_carry(nh_bundle["carry"])
+    moved = [k for k in ("zh", "gz", "pk3", "pe", "pk", "peln", "ws")
+             if not np.array_equal(np.asarray(before[k]),
+                                   np.asarray(got["nh"][k]),
+                                   equal_nan=True)]
+    assert set(moved) >= {"zh", "gz", "pk3"}, (
+        f"only {moved} moved: update_dz_d writes zh, the gz = zh*grav "
+        f"box writes gz, and pk3_halo writes pk3, so a carry member "
+        f"that is bitwise its input means its stage did not run")
+    # zs is the surface and is NOT written by this phase -- asserted so
+    # a future edit that starts writing it is noticed.
+    assert np.array_equal(np.asarray(before["zs"]),
+                          np.asarray(got["nh"]["zs"]), equal_nan=True), (
+        "zs moved; it is the surface elevation and nothing in this "
+        "chain writes it")
+
+
+def test_nh_tail_use_logp_selects_pln_halo_not_pk3_halo(ctx, jctx,
+                                                        state_np_nh,
+                                                        nh_bundle):
+    """The exclusive branch, driven rather than read.
+
+    ``dyn_core.F90:1444-1448``: ``pln_halo`` under ``use_logp``,
+    ``pk3_halo`` otherwise. An unconditional ``pk3_halo`` would
+    overwrite log(p) halos with p**akap -- finite, plausible, wrong. So
+    the two settings must give DIFFERENT pk3, and each must match its
+    own NumPy reference (the parity gate above does the matching).
+    """
+    bundle = dict(nh_bundle, state=state_np_nh)
+    a = _run_nh(jctx, bundle, "jax", use_logp=False)
+    b = _run_nh(jctx, bundle, "jax", use_logp=True)
+    pa = assert_real(a["nh"]["pk3"], "pk3 (pk3_halo)")
+    pb = assert_real(b["nh"]["pk3"], "pk3 (pln_halo)")
+    assert not np.array_equal(pa, pb, equal_nan=True), (
+        "use_logp did not change pk3, so the pln_halo/pk3_halo branch "
+        "is not selected by it")
