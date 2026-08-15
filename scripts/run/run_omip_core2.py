@@ -504,6 +504,8 @@ TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
 
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
                         mxl_choice: int | None = None,
+                        n2_mode: str | None = None,
+                        n2_eos_form: str | None = None,
                         prognostic: bool | None = None,
                         kappa_convention: str | None = None,
                         shear_production: str | None = None):
@@ -878,6 +880,22 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2 -- the value ORCA1's "
                 "namelist_cfg actually runs).")
         _cfg = _cfg._replace(tke_mxl_choice=int(mxl_choice))
+    if n2_mode is not None:
+        # Scheme Literal -> validate at config-build time on the STATIC value,
+        # never a silent fallback (dispatch hardening).
+        _N2_MODES = ("insitu", "insitu_signed", "adiabatic", "nemo_bn2")
+        if n2_mode not in _N2_MODES:
+            raise ValueError(
+                f"orca1_zdftke_config n2_mode {n2_mode!r} invalid; expected "
+                f"one of {_N2_MODES}")
+        _cfg = _cfg._replace(n2_mode=n2_mode)
+    if n2_eos_form is not None:
+        _EOS_FORMS = ("seos", "teos10")
+        if n2_eos_form not in _EOS_FORMS:
+            raise ValueError(
+                f"orca1_zdftke_config n2_eos_form {n2_eos_form!r} invalid; "
+                f"expected one of {_EOS_FORMS}")
+        _cfg = _cfg._replace(n2_eos_form=n2_eos_form)
     # Prognostic vs diagnostic TKE (``--tke-prognostic``).  DEFAULT keeps the
     # card value (False = the DINO-validated quasi-steady Mode-B diagnostic, 3
     # backward-Euler iters).  True selects NEMO's PROGNOSTIC en integration
@@ -893,6 +911,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
+                              tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
@@ -923,6 +942,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
+                    ("--tke-n2-mode", tke_n2_mode),
+                    ("--tke-n2-eos-form", tke_n2_eos_form),
                     ("--tke-prognostic", tke_prognostic),
                     ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production)):
@@ -936,6 +957,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
                                    mxl_choice=tke_mxl_choice,
+                                   n2_mode=tke_n2_mode,
+                                   n2_eos_form=tke_n2_eos_form,
                                    prognostic=tke_prognostic,
                                    kappa_convention=tke_kappa_convention,
                                    shear_production=tke_shear_production)
@@ -981,6 +1004,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
+                  tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
@@ -1188,6 +1212,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
+            tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
             tke_shear_production=tke_shear_production)
         if _use_vmix:
@@ -2277,7 +2302,8 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
-                              tke_shear_production=None):
+                            tke_shear_production=None,
+                            tke_n2_mode=None, tke_n2_eos_form=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -2298,6 +2324,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
+                        ("--tke-n2-mode", tke_n2_mode),
+                        ("--tke-n2-eos-form", tke_n2_eos_form),
                         ("--tke-prognostic", tke_prognostic),
                         ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production)):
@@ -4726,6 +4754,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "against 3.25x for the NEMO form (Stage A, 39ce0701c) "
                         "-- supply it only to reproduce arms that predate the "
                         "fix. Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-n2-mode", default=None,
+                   choices=["insitu", "insitu_signed", "adiabatic",
+                            "nemo_bn2"],
+                   help="Override the stratification the ORCA1 zdftke card "
+                        "feeds its closure. The card selects 'nemo_bn2' "
+                        "(NEMO's own eosbn2 assembly, what ORCA1 runs). "
+                        "'insitu' reverts ONLY that, which is the "
+                        "one-variable control: the in-situ density gradient "
+                        "carries a +g^2/c^2 = 4.27e-5 s^-2 compressibility "
+                        "bias the adiabatic form does not. Requires --grid "
+                        "tripole --tripole-vmix tke.")
+    p.add_argument("--tke-n2-eos-form", default=None,
+                   choices=["seos", "teos10"],
+                   help="Which alpha/beta the nemo_bn2 assembly uses. The "
+                        "card selects 'teos10' (ORCA1 runs ln_teos10=.true.). "
+                        "Inert under every other --tke-n2-mode.")
     p.add_argument("--tke-mxl-choice", type=int, default=None,
                    choices=list(TKE_MXL_CHOICES),
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
@@ -5204,7 +5248,9 @@ def main() -> int:
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
                             args.tke_prognostic, args.tke_kappa_convention,
-                            args.tke_shear_production)
+                            args.tke_shear_production,
+                            tke_n2_mode=args.tke_n2_mode,
+                            tke_n2_eos_form=args.tke_n2_eos_form)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5409,6 +5455,8 @@ def main() -> int:
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
             tke_mxl_choice=args.tke_mxl_choice,
+            tke_n2_mode=args.tke_n2_mode,
+            tke_n2_eos_form=args.tke_n2_eos_form,
             tke_prognostic=args.tke_prognostic,
             tke_kappa_convention=args.tke_kappa_convention,
             tke_shear_production=args.tke_shear_production,
