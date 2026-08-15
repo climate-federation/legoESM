@@ -276,8 +276,25 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
         # gSAM's local density, held at the layer below each face; the top
         # face reuses the topmost layer (gSAM's flux(nz) uses rhow(nz)).
         rho_ref = jnp.pad(rho, (0, 1), mode="edge")
-    clear_sky = (rho_ref * config.cp_j_kg_k * config.divergence_s
-                 * (0.25 * dz_i ** (4.0 / 3.0) + z_i * dz_i ** (1.0 / 3.0)))
+    # `dz_i ** (1/3)` has an INFINITE derivative at dz_i = 0, and dz_i is
+    # EXACTLY zero at every face below the inversion -- by construction, since
+    # that clip is how the clear-sky term switches itself off there. Forward
+    # that is harmless; in reverse mode d/dx x^(1/3) = x^(-2/3)/3 is inf at the
+    # zeros, the clip contributes a zero cotangent, and inf * 0 is NaN. It
+    # poisoned the WHOLE joint gradient of the SCM turbulence campaign: the
+    # loss stayed finite, every one of the nine closures came back with every
+    # parameter frozen for "non-finite gradient", and only the two arms running
+    # this kernel did so.
+    #
+    # Evaluate the powers on a strictly positive substitute and mask the
+    # RESULT. The forward value is bit-identical -- still exactly zero below
+    # the inversion, still the same expression above it -- and the cotangent is
+    # finite. Flooring dz_i itself would instead leak a small nonzero clear-sky
+    # flux into the sub-inversion column.
+    dz_safe = jnp.where(dz_i > 0.0, dz_i, 1.0)
+    shape = 0.25 * dz_safe ** (4.0 / 3.0) + z_i * dz_safe ** (1.0 / 3.0)
+    shape = jnp.where(dz_i > 0.0, shape, 0.0)
+    clear_sky = rho_ref * config.cp_j_kg_k * config.divergence_s * shape
     return (config.f0_w_m2 * jnp.exp(-q_above)
             + config.f1_w_m2 * jnp.exp(-q_below)
             + clear_sky)

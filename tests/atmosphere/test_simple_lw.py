@@ -201,3 +201,82 @@ def test_batched_columns_match_the_single_column_result():
         simple_lw_net_upward_flux(0.5 * q_cond, q_tot, rho, dz, z_half, cfg))
     assert np.allclose(batched[0], single_a, rtol=1e-12)
     assert np.allclose(batched[1], single_b, rtol=1e-12)
+
+
+# --- the gradient path the SCM actually uses --------------------------------
+
+def _finite(x) -> bool:
+    return bool(np.all(np.isfinite(np.asarray(x))))
+
+
+def test_gradient_through_the_COLUMN_GEOMETRY_is_finite():
+    """`test_flux_is_differentiable_in_its_coefficients` cannot catch this.
+
+    f0 and kappa never reach `dz_i`, so differentiating in them never touches
+    the fractional power at its zero. The SCM's path does: its level heights
+    move with temperature, so `z_half` is live, `dz_i = clip(z_half - z_i, 0,
+    None)` is live, and `dz_i ** (1/3)` has an INFINITE derivative at the zeros
+    that clip creates below the inversion. inf times the clip's zero cotangent
+    is NaN.
+
+    That NaN is what froze every parameter of all NINE closures in the
+    seven-case turbulence campaign while the loss stayed finite -- and only in
+    the two arms that select this kernel.
+    """
+    z_half, dz, rho, q_cond, q_tot = _cloud_column()
+
+    def loss(stretch):
+        # A column stretched about the surface: exactly the dependence a
+        # temperature change induces, reduced to one scalar.
+        return jnp.sum(simple_lw_temperature_tendency(
+            q_cond, q_tot, rho, dz * stretch, z_half * stretch) ** 2)
+
+    g = jax.grad(loss)(1.0)
+    assert _finite(g), (
+        f"d(loss)/d(column stretch) = {g}; the clear-sky fractional power is "
+        "differentiating at zero")
+    assert abs(float(g)) > 0.0, "the geometry must actually reach the flux"
+
+
+def test_gradient_through_the_STATE_is_finite():
+    """The other live input in the SCM: condensate moves with the closure."""
+    z_half, dz, rho, q_cond, q_tot = _cloud_column()
+
+    def loss(qc, qt):
+        return jnp.sum(simple_lw_temperature_tendency(
+            qc, qt, rho, dz, z_half) ** 2)
+
+    g_c, g_t = jax.grad(loss, argnums=(0, 1))(q_cond, q_tot)
+    assert _finite(g_c) and _finite(g_t)
+
+
+def test_gradient_through_density_is_finite():
+    z_half, dz, rho, q_cond, q_tot = _cloud_column()
+
+    def loss(scale):
+        return jnp.sum(simple_lw_temperature_tendency(
+            q_cond, q_tot, rho * scale, dz, z_half) ** 2)
+
+    assert _finite(jax.grad(loss)(1.0))
+
+
+def test_the_clear_sky_term_is_still_exactly_zero_below_the_inversion():
+    """The guard masks the RESULT rather than flooring dz_i, so the forward
+    value must be untouched -- a floored base would leak a small clear-sky
+    flux into the sub-inversion column, where gSAM's loop bound puts none."""
+    z_half, dz, rho, q_cond, q_tot = _cloud_column()
+    cfg = SimpleLWConfig()
+    z_i = float(np.asarray(simple_lw_inversion_height(q_tot, z_half, cfg))
+                .ravel()[0])
+    flux = np.asarray(simple_lw_net_upward_flux(
+        q_cond, q_tot, rho, dz, z_half, cfg))
+    zh = np.asarray(z_half)
+
+    # Below the inversion the flux is exactly the two-exponential floor.
+    dq = np.asarray(cfg.kappa_m2_kg * rho * q_cond * dz)
+    q_below = np.concatenate([[0.0], np.cumsum(dq)])
+    q_above = q_below[-1] - q_below
+    floor = (cfg.f0_w_m2 * np.exp(-q_above) + cfg.f1_w_m2 * np.exp(-q_below))
+    below = zh <= z_i
+    assert below.sum() > 5, "the fixture must have faces below the inversion"
+    np.testing.assert_array_equal(flux[below], floor[below])
