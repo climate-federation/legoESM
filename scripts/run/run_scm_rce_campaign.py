@@ -84,6 +84,10 @@ from legoesm.training.scm_rce_metrics import (
     COLD_POINT_MAX_K,
     COLD_POINT_MIN_K,
     DEFAULT_SUBCLOUD_TOP_M,
+    DEFAULT_THERMO_MIN_P_PA,
+    DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+    DEFAULT_THERMO_RH_SCALE,
+    DEFAULT_THERMO_T_SCALE_K,
     MADIAB_MAX_TOL_K,
     MADIAB_MEAN_TOL_K,
     PRECIP_NORMALIZATION_MM_DAY,
@@ -92,7 +96,10 @@ from legoesm.training.scm_rce_metrics import (
     TROP_MIN_Z_KM,
     moist_adiabat_diagnostics_jax,
     realism_reasons_from_diagnostics,
+    relative_humidity_profile,
     score_profiles_precip_jax,
+    score_thermo_jax,
+    tropospheric_mass_weights,
     subcloud_bulk_state,
     subcloud_objective_jax,
     subcloud_mass_weights,
@@ -334,6 +341,31 @@ class RunDiagnostics:
     sfc_relative_humidity: float = float("nan")
     sfc_driver_kg_kg: float = float("nan")
     sfc_delta_T_K: float = float("nan")
+    #: TEMPERATURE-AND-HUMIDITY objective (``--objective thermo``).  Full-column
+    #: temperature plus TROPOSPHERIC RELATIVE humidity, each divided by a fixed
+    #: physical tolerance (1 K, 5 % RH) rather than by the reference's own
+    #: spread.  Reported for every run whether or not it is the one minimised,
+    #: so an arm tuned on one objective can still be read on the other.
+    thermo_T_term: float = float("nan")
+    thermo_rh_term: float = float("nan")
+    thermo_score: float = float("nan")
+    #: Physical-unit companions to the terms above: mean absolute RH error over
+    #: the same masked levels, and the number of levels the mask kept.  A score
+    #: is not interpretable in a caption; these are.
+    trop_rh_rmse: float = float("nan")
+    trop_qv_rmse_g_kg: float = float("nan")
+    trop_n_levels: int = 0
+    #: The SAME thermo score evaluated on a HELD-OUT analysis window ending one
+    #: window earlier.  A parameter set that matches the CRM only during the
+    #: window it was tuned on — because the column is still drifting, or because
+    #: the scheme is intermittent and one favourable phase happened to land
+    #: there — shows up as a gap between these two numbers and nowhere else.
+    heldout_thermo_score: float = float("nan")
+    #: PHYSICAL units on the held-out window (K, g/kg) — deliberately NOT the
+    #: same quantity as ``T_rmse``/``qv_rmse`` above, which are normalized by
+    #: the reference's own spread.  The unit suffix is the whole point.
+    heldout_T_rmse_K: float = float("nan")
+    heldout_qv_rmse_g_kg: float = float("nan")
 
 
 @dataclass
@@ -383,9 +415,21 @@ def _to_jsonable(obj: Any) -> Any:
 #: What the derivative-free tuner minimises.  ``combined`` is the historical
 #: full-column score, which §8.2d measured to be 87-100 % condensate; the
 #: ``subcloud`` objective exists because that score cannot see the sub-cloud
-#: layer at all.  A typo must select nothing (dispatch-hardening), so the
-#: resolver raises rather than defaulting.
-TUNE_OBJECTIVES = ("combined", "subcloud")
+#: layer at all; ``thermo`` exists because it cannot see TEMPERATURE or
+#: HUMIDITY either (T contributes 0.01-2.3 % of it and q_v 0.008-3.4 %).  A
+#: typo must select nothing (dispatch-hardening), so the resolver raises rather
+#: than defaulting.
+TUNE_OBJECTIVES = ("combined", "subcloud", "thermo")
+
+#: The scalar each objective minimises, as a field of ``RunDiagnostics``.  One
+#: mapping, so the tuner, the CSV sort key and the figure label cannot pick
+#: three different numbers — a real failure mode: the shipped writer sorted a
+#: sub-cloud-tuned table by the combined score.
+OBJECTIVE_FIELD = {
+    "combined": "score",
+    "subcloud": "subcloud_score",
+    "thermo": "thermo_score",
+}
 
 
 def objective_value(run: "RunDiagnostics", objective: str) -> float:
@@ -400,7 +444,7 @@ def objective_value(run: "RunDiagnostics", objective: str) -> float:
         raise ValueError(
             f"objective_value: unknown objective {objective!r}; "
             f"expected one of {TUNE_OBJECTIVES}")
-    value = float(run.score if objective == "combined" else run.subcloud_score)
+    value = float(getattr(run, OBJECTIVE_FIELD[objective]))
     return value if math.isfinite(value) else float("inf")
 
 
@@ -456,6 +500,67 @@ def _subcloud_diagnostics(
         "sfc_relative_humidity": float(rh),
         "sfc_driver_kg_kg": float(driver),
         "sfc_delta_T_K": float(delta_T),
+    }
+
+
+def reference_pressure_profile(ref: ReferenceProfiles) -> np.ndarray:
+    """Full-level pressure [Pa] of the shared column.
+
+    ONE pressure profile is used for the SCM and for the CRM: the SCM runs on
+    the CRM reference's own vertical grid at the RCEMIP surface pressure, so a
+    relative humidity computed on two different pressure profiles would differ
+    by a nominal number rather than by anything physical.  The same expression
+    already backs the sub-cloud bulk state.
+    """
+    return np.asarray(ref.sigma_full, dtype=float) * WING_P_SFC
+
+
+def _thermo_diagnostics(
+    ref: ReferenceProfiles,
+    T_profile: np.ndarray,
+    qv_profile: np.ndarray,
+    *,
+    min_p_Pa: float = DEFAULT_THERMO_MIN_P_PA,
+    T_scale_K: float = DEFAULT_THERMO_T_SCALE_K,
+    rh_scale: float = DEFAULT_THERMO_RH_SCALE,
+    blend_width_K: float = DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+) -> dict[str, float]:
+    """Temperature + tropospheric-relative-humidity score and its companions.
+
+    Everything is computed by the shared helpers in ``scm_rce_metrics``; the
+    only arithmetic here is the physical-unit RMSE pair reported alongside the
+    score, and that reuses the same mass-weighted RMSE the score does.
+    """
+    p_full = reference_pressure_profile(ref)
+    weights = tropospheric_mass_weights(
+        jnp.asarray(p_full), jnp.asarray(ref.mass_weights), min_p_Pa=min_p_Pa,
+    )
+    T_term, rh_term, combined = score_thermo_jax(
+        ref,
+        jnp.asarray(T_profile),
+        jnp.asarray(qv_profile),
+        jnp.asarray(p_full),
+        trop_weights=weights,
+        T_scale_K=T_scale_K,
+        rh_scale=rh_scale,
+        blend_width_K=blend_width_K,
+    )
+    rh = relative_humidity_profile(
+        jnp.asarray(T_profile), jnp.asarray(qv_profile), jnp.asarray(p_full),
+        blend_width_K=blend_width_K)
+    rh_ref = relative_humidity_profile(
+        jnp.asarray(ref.T_ref), jnp.asarray(ref.qv_ref), jnp.asarray(p_full),
+        blend_width_K=blend_width_K)
+    return {
+        "thermo_T_term": float(T_term),
+        "thermo_rh_term": float(rh_term),
+        "thermo_score": float(combined),
+        "trop_rh_rmse": _weighted_rmse(
+            np.asarray(rh) - np.asarray(rh_ref), np.asarray(weights)),
+        "trop_qv_rmse_g_kg": _weighted_rmse(
+            (np.asarray(qv_profile) - np.asarray(ref.qv_ref)) * 1000.0,
+            np.asarray(weights)),
+        "trop_n_levels": int(np.sum(p_full >= min_p_Pa)),
     }
 
 
@@ -1724,6 +1829,23 @@ def run_scm_rce(
                 # so the objective reads +inf and the run cannot win.
                 if finite else {}
             ),
+            **(_thermo_diagnostics(ref, T_profile, qv_profile) if finite else {}),
+            **(
+                # The HELD-OUT window: the analysis window immediately before the
+                # scored one, already averaged above for the drift diagnostic.
+                # Free, and it is the only thing that separates "the column sits
+                # where the CRM does" from "one five-day slice of a drifting or
+                # intermittent column happened to land there".
+                {
+                    "heldout_thermo_score": _thermo_diagnostics(
+                        ref, T_prev, qv_prev)["thermo_score"],
+                    "heldout_T_rmse_K": _weighted_rmse(
+                        T_prev - ref.T_ref, ref.mass_weights),
+                    "heldout_qv_rmse_g_kg": _weighted_rmse(
+                        (qv_prev - ref.qv_ref) * 1000.0, ref.mass_weights),
+                }
+                if finite and prev_end > prev_start else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - campaign records per-scheme failures
         return RunDiagnostics(
@@ -2239,6 +2361,30 @@ def _interp(constraint, frac: float) -> float:
     return float(min(max(value, lo), hi))
 
 
+def _frac_from_value(constraint, value: float) -> float:
+    """Inverse of :func:`_interp`: where ``value`` sits in the range, in the
+    parameter's own sampling scale.
+
+    Used by the local refinement so a step of "0.1 of the range" means the same
+    thing for a linearly-sampled fraction and for a log-sampled rate
+    coefficient (where it is a multiplicative step).  Clamped to [0, 1] so a
+    default sitting fractionally outside its own declared bounds — which the
+    registry permits, the bounds being a search range rather than a hard
+    validity limit — cannot produce a negative or >1 fraction and silently skip
+    every refinement of that parameter.
+    """
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if not (hi > lo):
+        return 0.0
+    if _sample_scale(constraint) == "log":
+        value = min(max(float(value), lo), hi)
+        frac = math.log(value / lo) / math.log(hi / lo)
+    else:
+        frac = (float(value) - lo) / (hi - lo)
+    return float(min(max(frac, 0.0), 1.0))
+
+
 def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed: int):
     yield defaults
     if n_eval <= 1:
@@ -2265,6 +2411,68 @@ def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed
         yield cand
 
 
+#: Selectable tuning parameter sets.  The first three are the registry's own
+#: tiers; ``physical`` is the DERIVATIVE-FREE calibration set defined below.
+PARAM_SETS = ("core", "extended", "aggressive", "physical")
+
+#: Marker the registry uses on a tier-0 parameter that is physically real but
+#: whose AD gradient vanishes (``see _CAPE_TRIGGER_AD_NOTE``, #1417).  Matched
+#: on the spec's own reference string so a newly re-classified parameter is
+#: picked up automatically instead of needing a name added here.
+_AD_UNREACHABLE_MARKER = "AD-unreachable"
+
+#: Parameters excluded from the ``physical`` set BY NAME, each with the reason.
+#: Only for cases the ``category`` field cannot express.
+PHYSICAL_SET_NAME_EXCLUSIONS = {
+    "atm.conv.KainFritschConfig.dtlcl_dx_scale":
+        "grid-length scaling (Kain 2004): a single column has no grid length, "
+        "so tuning it absorbs a resolution dependence into a column fit",
+}
+
+
+def resolve_param_selection(
+    scheme_key: str, param_set: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """``(tier, include_tier0, exclude)`` for ``build_trainable_params``.
+
+    ``core``/``extended``/``aggressive`` pass straight through to the registry
+    tiers.  ``physical`` is the set a DERIVATIVE-FREE calibration should use
+    when it is asked to tune "all the parameters of the scheme", and it differs
+    from ``aggressive`` in both directions — which is the whole reason it
+    exists, because ``aggressive`` is neither a superset nor a subset of "the
+    physics":
+
+    * it DROPS every ``category == "numerics"`` parameter (measured: four of
+      them are tier 3, e.g. a sigmoid layer-edge width and a mass-flux
+      normalisation scale), because a value chosen to fit a column is then a
+      statement about the discretisation;
+    * it ADDS the tier-0 parameters whose exclusion reason is that their AD
+      GRADIENT VANISHES — the CAPE trigger threshold of eight of the ten
+      schemes.  Those are textbook closure parameters; a gradient-free search
+      can move them, and leaving them out would mean the campaign never touched
+      the trigger of most of the schemes it claims to have tuned.
+    """
+    if param_set not in PARAM_SETS:
+        raise ValueError(
+            f"resolve_param_selection: unknown param_set {param_set!r}; "
+            f"expected one of {PARAM_SETS}")
+    if param_set != "physical":
+        return param_set, (), ()
+    metas = [m for m in build_registry() if m.scheme_key == scheme_key]
+    include_tier0 = tuple(sorted(
+        m.qualified_name for m in metas
+        if m.tunable_tier == 0 and _AD_UNREACHABLE_MARKER in m.reference
+    ))
+    exclude = tuple(sorted(
+        m.qualified_name for m in metas
+        if m.tunable_tier != 0 and (
+            m.category == "numerics"
+            or m.qualified_name in PHYSICAL_SET_NAME_EXCLUSIONS
+        )
+    ))
+    return "aggressive", include_tier0, exclude
+
+
 def tune_category_winner(
     category: str,
     base_cfg: PhysicsConfig,
@@ -2289,6 +2497,8 @@ def tune_category_winner(
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
     objective: str = "combined",
+    param_set: str = "extended",
+    refine_frac: float = 0.0,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -2315,9 +2525,12 @@ def tune_category_winner(
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
+    tier, include_tier0, exclude = resolve_param_selection(scheme_key, param_set)
     params = build_trainable_params(
         active_scheme_keys={scheme_key},
-        tier="extended",
+        tier=tier,
+        include_tier0=include_tier0,
+        exclude=exclude,
         dtype=jnp.float64,
     )
     if not params.constraints:
@@ -2332,7 +2545,17 @@ def tune_category_winner(
     # discarding every trial.  ``objective_value`` maps NaN to +inf for exactly
     # that reason.
     best_score = objective_value(default_run, objective)
-    for i, values in enumerate(_candidate_values(defaults, constraints, tune_evals, seed)):
+    # The random phase gets the budget minus whatever the refinement stage is
+    # given.  Computed BEFORE the loop so the two phases cannot overspend
+    # between them, and floored at 1 so `refine_frac=1.0` still evaluates the
+    # defaults.
+    n_refine = max(0, int(round(float(refine_frac) * tune_evals)))
+    n_random = max(1, tune_evals - n_refine)
+    candidates = list(_candidate_values(defaults, constraints, n_random, seed))
+
+    def _try(values: dict[str, float], label: str) -> None:
+        """Evaluate one candidate and keep it if it beats the incumbent."""
+        nonlocal best_score, best_cfg, best_run, best_values
         raw_values = {
             c.name: _raw_from_physical(values[c.name], c) for c in constraints
         }
@@ -2359,7 +2582,7 @@ def tune_category_winner(
             cache,
             trial_cfg,
             ref,
-            label=f"tune:{category}:{scheme}:eval{i:03d}",
+            label=label,
             days=days,
             dt=dt,
             analysis_days=analysis_days,
@@ -2384,6 +2607,56 @@ def tune_category_winner(
             best_values = {
                 c.name: float(field_values[c.field]) for c in constraints
             }
+
+    for i, values in enumerate(candidates):
+        _try(values, f"tune:{category}:{scheme}:eval{i:03d}")
+
+    # LOCAL REFINEMENT.  A uniform random search over 19-25 parameters resolves
+    # nothing: 200 draws in 19 dimensions sit ~0.76 of the range apart on every
+    # axis, so the incumbent is a lucky corner rather than a local optimum.  A
+    # coordinate sweep AROUND the incumbent — each parameter moved alone by a
+    # shrinking fraction of its own range, both directions, incumbent updated
+    # greedily — costs the same per evaluation and is the cheapest thing that
+    # turns "the best of N lottery tickets" into "a point no single-parameter
+    # move improves".  It does NOT establish convergence, and does not remove
+    # the cross-scheme dimensionality confound; that is what the second seed is
+    # for.  Off by default (refine_frac=0.0) so every existing campaign keeps
+    # its exact search.
+    if n_refine > 0:
+        step_fracs = (0.25, 0.10, 0.04)
+        spent = 0
+        for step in step_fracs:
+            if spent >= n_refine:
+                break
+            for c in constraints:
+                if spent >= n_refine:
+                    break
+                for direction in (+1.0, -1.0):
+                    if spent >= n_refine:
+                        break
+                    incumbent = dict(best_values)
+                    lo = float(c.min_val)
+                    hi = float(c.max_val)
+                    current = float(incumbent[c.name])
+                    frac = (
+                        # Move in the parameter's OWN sampling scale, so a
+                        # log-sampled rate coefficient takes a multiplicative
+                        # step rather than one dominated by its top decade.
+                        _frac_from_value(c, current) + direction * step
+                    )
+                    if not (0.0 <= frac <= 1.0):
+                        continue
+                    proposal = _interp(c, frac)
+                    if proposal == current or not (lo <= proposal <= hi):
+                        continue
+                    incumbent[c.name] = proposal
+                    _try(
+                        incumbent,
+                        f"refine:{category}:{scheme}:s{step:g}:"
+                        f"{c.field}:{'+' if direction > 0 else '-'}",
+                    )
+                    spent += 1
+
     records = []
     meta_by_name = {m.qualified_name: m for m in build_registry()}
     for c in constraints:
@@ -2404,8 +2677,12 @@ def tune_category_winner(
                 lower=lo,
                 upper=hi,
                 units=meta.units,
-                score_default=float(default_run.score),
-                score_tuned=float(best_run.score),
+                # The objective actually minimised, not the historical combined
+                # score: a record whose "score_tuned" comes from a different
+                # metric than the search used reads as a failed search whenever
+                # the two disagree.  ``tune_focused_params`` already does this.
+                score_default=objective_value(default_run, objective),
+                score_tuned=objective_value(best_run, objective),
             )
         )
     return best_cfg, records, best_run

@@ -150,6 +150,18 @@ _SIGNATURE_FIELDS = (
     # Emanuel's downdraft re-evaporation ships OFF behind a static branch;
     # turning it on is different PHYSICS, not a tuning detail.
     "emanuel_unsaturated_downdraft",
+    # WHICH parameter set the tuner may move (registry tier, or the
+    # derivative-free `physical` set) and how much of the budget goes to the
+    # local refinement.  An `extended`-tier checkpoint reused under an
+    # `aggressive` request would report a search that never happened.
+    "param_set", "tune_refine_frac",
+    # The DEFINITION of the thermodynamic objective: its two tolerances, the
+    # pressure bound that separates troposphere from stratosphere, and the
+    # liquid/ice blend width of the saturation curve behind RH.  Each changes
+    # what "close to the CRM" means, so a checkpoint written under one must
+    # never be merged into a table labelled with another.
+    "thermo_T_scale_K", "thermo_rh_scale", "thermo_min_p_Pa",
+    "thermo_rh_blend_width_K",
 )
 
 
@@ -276,7 +288,33 @@ def _run_signature(args) -> dict:
     # different experiment and must invalidate a checkpoint.
     def _norm(v):
         return str(v) if isinstance(v, Path) else v
-    return {k: _norm(getattr(args, k)) for k in _SIGNATURE_FIELDS}
+    sig = {}
+    for k in _SIGNATURE_FIELDS:
+        if hasattr(args, k):
+            sig[k] = _norm(getattr(args, k))
+        elif k in _OBJECTIVE_DEFINITION_CONSTANTS:
+            # Not a flag: the objective's tolerances are module constants with
+            # written-down reasons, deliberately not per-run knobs.  They still
+            # belong in the signature — editing one redefines "close to the
+            # CRM", and a checkpoint scored under the old value would otherwise
+            # merge into a table labelled with the new one.
+            sig[k] = _OBJECTIVE_DEFINITION_CONSTANTS[k]
+        else:
+            raise AttributeError(
+                f"_run_signature: {k!r} is in _SIGNATURE_FIELDS but is neither "
+                "an argparse field nor a declared objective constant")
+    return sig
+
+
+#: Objective-definition constants that enter the signature without being flags.
+#: Read from the shared metrics module by NAME so an edit there propagates here
+#: instead of this file carrying a second copy of the number.
+_OBJECTIVE_DEFINITION_CONSTANTS = {
+    "thermo_T_scale_K": camp.DEFAULT_THERMO_T_SCALE_K,
+    "thermo_rh_scale": camp.DEFAULT_THERMO_RH_SCALE,
+    "thermo_min_p_Pa": camp.DEFAULT_THERMO_MIN_P_PA,
+    "thermo_rh_blend_width_K": camp.DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+}
 
 
 def _checkpoint_signature(path: Path) -> dict:
@@ -287,9 +325,11 @@ def _checkpoint_signature(path: Path) -> dict:
 
 
 def _signature_compatible(ckpt_sig: dict, run_sig: dict) -> bool:
-    # Legacy/unstamped checkpoints ({}) are grandfathered in; a STAMPED
-    # signature that differs is the mismatch we reject.
-    return (not ckpt_sig) or ckpt_sig == run_sig
+    # An UNSTAMPED checkpoint ({}) is no longer grandfathered: it predates the
+    # signature, so nothing establishes which protocol produced it, and
+    # accepting it is how a stale result reaches a published table.  Delete it
+    # or re-run with --force.
+    return bool(ckpt_sig) and ckpt_sig == run_sig
 
 
 def save_scheme_result(outdir: Path, res: SchemeResult, signature: dict | None = None) -> None:
@@ -439,6 +479,8 @@ def evaluate_scheme(
     focused_include: tuple[str, ...] = (),
     subcloud_top_m: float = camp.DEFAULT_SUBCLOUD_TOP_M,
     emanuel_unsaturated_downdraft: bool = False,
+    param_set: str = "extended",
+    tune_refine_frac: float = 0.0,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -526,6 +568,8 @@ def evaluate_scheme(
             tune_evals=tune_evals,
             seed=seed,
             objective=objective,
+            param_set=param_set,
+            refine_frac=tune_refine_frac,
             **common,
         )
     return SchemeResult(
@@ -612,18 +656,83 @@ CSV_FIELDS = (
     "apriori_sfc_delta_T_K", "tuned_sfc_delta_T_K",
     "apriori_sfc_driver_g_kg", "tuned_sfc_driver_g_kg",
     "apriori_evap_mm_day", "tuned_evap_mm_day",
+    # THE OBJECTIVE THAT WAS ACTUALLY MINIMISED, by name, next to its value on
+    # both conditions and next to the improvement computed FROM IT.  Without
+    # this the table carries `score`/`score_improvement_pct` from the historical
+    # combined score whatever the tuner was asked to minimise, which is how a
+    # thermo-tuned campaign gets read as a condensate result.
+    "objective", "prior_objective", "tuned_objective",
+    "objective_improvement_pct",
+    # TEMPERATURE AND TROPOSPHERIC HUMIDITY, the target of --objective thermo.
+    # The `_term` columns are the two halves of that score (dimensionless,
+    # 1 K and 5 % RH per unit); the RH/qv columns are physical.
+    "apriori_thermo_score", "tuned_thermo_score",
+    "apriori_thermo_T_term", "tuned_thermo_T_term",
+    "apriori_thermo_rh_term", "tuned_thermo_rh_term",
+    "apriori_trop_rh_rmse", "tuned_trop_rh_rmse",
+    "apriori_trop_qv_rmse_g_kg", "tuned_trop_qv_rmse_g_kg",
+    # HELD-OUT WINDOW: the same thermo score one analysis window earlier.  A
+    # tuned column that matches only where it was scored shows up here.
+    "apriori_heldout_thermo_score", "tuned_heldout_thermo_score",
+    "tuned_heldout_T_rmse_K", "tuned_heldout_qv_rmse_g_kg",
+    # WATER BUDGET of the tuned column: an "equilibrium" accumulating water is
+    # not one, and the previous arm's winner was doing exactly that.
+    "tuned_P_minus_E_mm_day",
 )
 
 KG_KG_TO_G_KG = 1_000.0
 
 
-def _row(res: SchemeResult, ref=None) -> dict:
-    p, t = res.prior, res.tuned
-    impr = (
-        100.0 * (p.score - t.score) / p.score
-        if np.isfinite(p.score) and p.score > 0 and np.isfinite(t.score)
+def _improvement_pct(prior: float, tuned: float) -> float:
+    return (
+        100.0 * (prior - tuned) / prior
+        if np.isfinite(prior) and prior > 0 and np.isfinite(tuned)
         else float("nan")
     )
+
+
+def _row_objective(res: SchemeResult) -> str:
+    """The objective this scheme's checkpoint was tuned under.
+
+    Read from the ROW's own signature, never from the current invocation's
+    arguments: a merge aggregates checkpoints, and labelling each row with the
+    merging process's flags is how a table gets a name its numbers do not have.
+    An unstamped row says so instead of guessing.
+    """
+    return str(res.signature.get("objective", "unstamped"))
+
+
+def _row(res: SchemeResult, ref=None) -> dict:
+    p, t = res.prior, res.tuned
+    impr = _improvement_pct(p.score, t.score)
+    objective = _row_objective(res)
+    prior_obj = (
+        camp.objective_value(p, objective)
+        if objective in camp.TUNE_OBJECTIVES else float("nan"))
+    tuned_obj = (
+        camp.objective_value(t, objective)
+        if objective in camp.TUNE_OBJECTIVES else float("nan"))
+    thermo = {
+        "objective": objective,
+        "prior_objective": prior_obj,
+        "tuned_objective": tuned_obj,
+        "objective_improvement_pct": _improvement_pct(prior_obj, tuned_obj),
+        "apriori_thermo_score": p.thermo_score,
+        "tuned_thermo_score": t.thermo_score,
+        "apriori_thermo_T_term": p.thermo_T_term,
+        "tuned_thermo_T_term": t.thermo_T_term,
+        "apriori_thermo_rh_term": p.thermo_rh_term,
+        "tuned_thermo_rh_term": t.thermo_rh_term,
+        "apriori_trop_rh_rmse": p.trop_rh_rmse,
+        "tuned_trop_rh_rmse": t.trop_rh_rmse,
+        "apriori_trop_qv_rmse_g_kg": p.trop_qv_rmse_g_kg,
+        "tuned_trop_qv_rmse_g_kg": t.trop_qv_rmse_g_kg,
+        "apriori_heldout_thermo_score": p.heldout_thermo_score,
+        "tuned_heldout_thermo_score": t.heldout_thermo_score,
+        "tuned_heldout_T_rmse_K": t.heldout_T_rmse_K,
+        "tuned_heldout_qv_rmse_g_kg": t.heldout_qv_rmse_g_kg,
+        "tuned_P_minus_E_mm_day": t.precip_mm_day - t.evap_mm_day,
+    }
     if ref is None:
         # No reference in scope (unit tests of the row shape): the physical
         # columns are NaN rather than absent, so the CSV header never changes
@@ -659,6 +768,7 @@ def _row(res: SchemeResult, ref=None) -> dict:
     return {
         **phys,
         **subcloud,
+        **thermo,
         "scheme": res.scheme,
         "subsidence_solve": res.subsidence_solve,
         "subsidence_solve_status": res.subsidence_solve_status,
@@ -689,11 +799,23 @@ def write_csv(path: Path, results: list[SchemeResult], ref=None) -> None:
     ``ref`` is what turns the physical-unit columns from NaN into numbers, so
     the merge stage passes it; a caller that only wants the normalised scores
     may omit it.
+
+    Rows are ordered by the objective each was TUNED under, not by the
+    historical combined score: sorting a thermo-tuned table by a
+    condensate-dominated number ranks it on something nobody minimised.  A
+    non-finite or unstamped objective sorts last rather than first, so a
+    crashed scheme cannot head the table.
     """
+    def _sort_key(res: SchemeResult) -> float:
+        objective = _row_objective(res)
+        if objective not in camp.TUNE_OBJECTIVES:
+            return float("inf")
+        return camp.objective_value(res.tuned, objective)
+
     with path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
         writer.writeheader()
-        for res in sorted(results, key=lambda r: r.tuned.score):
+        for res in sorted(results, key=_sort_key):
             writer.writerow(_row(res, ref))
 
 
@@ -990,6 +1112,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--param-set", default="extended", choices=camp.PARAM_SETS,
+        help=(
+            "WHICH parameters of the convection scheme the tuner may move. "
+            "`core`/`extended`/`aggressive` are the registry's own tiers. "
+            "`physical` is the DERIVATIVE-FREE calibration set: every "
+            "aggressive-tier parameter EXCEPT those categorised `numerics`, "
+            "PLUS the tier-0 parameters excluded only because their AD "
+            "gradient vanishes (the CAPE trigger of eight of the ten schemes). "
+            "Use it when the campaign claims to have tuned the scheme's "
+            "physics; `aggressive` is neither a superset nor a subset of that. "
+            "Enters the checkpoint signature."
+        ),
+    )
+    parser.add_argument(
+        "--tune-refine-frac", type=float, default=0.0,
+        help=(
+            "Fraction of the evaluation budget spent on a LOCAL COORDINATE "
+            "REFINEMENT around the best random draw instead of on more random "
+            "draws. 0.0 (default) reproduces the historical pure random "
+            "search. A uniform search over ~20 parameters leaves points ~0.76 "
+            "of the range apart on every axis, so without this the reported "
+            "optimum is the best of N lottery tickets rather than a point that "
+            "no single-parameter move improves. Enters the signature."
+        ),
+    )
+    parser.add_argument(
         "--objective", default="combined", choices=camp.TUNE_OBJECTIVES,
         help=(
             "What the tuner MINIMISES. `combined` is the full-column score, "
@@ -1220,6 +1368,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 ),
                 subcloud_top_m=args.subcloud_top_m,
+                param_set=args.param_set,
+                tune_refine_frac=args.tune_refine_frac,
                 emanuel_unsaturated_downdraft=(
                     args.emanuel_unsaturated_downdraft and scheme == "emanuel"),
             )
