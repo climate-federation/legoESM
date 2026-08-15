@@ -677,6 +677,19 @@ def main():
                     help="target record r (state r-1 vs avt/trends r); 1..11")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--skip-maps", action="store_true")
+    ap.add_argument("--iwm-backgrounds", action="store_true",
+                    help="Build the card with iwm_enabled=True, i.e. the "
+                         "MOLECULAR backgrounds NEMO's zdfiwm_init substitutes "
+                         "for &namzdf's rn_avm0/rn_avt0 when ln_zdfiwm=.true. "
+                         "(avmb=1.4e-6, avtb=1e-10; zdfiwm.F90:375-379). ORCA1 "
+                         "runs ln_zdfiwm=.true., so this is the MATCHED card "
+                         "and the default is the mismatched one -- kept as the "
+                         "default only so the standing 2.311 stays "
+                         "reproducible. Note it matches the FLOORS only: the "
+                         "de Lavergne wave field that supplies NEMO's actual "
+                         "interior background is not modelled here at all, so "
+                         "the deep rows go from 'our floor vs their wave "
+                         "mixing' to 'nothing vs their wave mixing'.")
     ap.add_argument("--mxl-choice", type=int, default=None, choices=[1, 2, 3, 4],
                     help="Override tke_mxl_choice. Stage A's correlation is "
                          "0.63 and did NOT move when the amplitude convention "
@@ -735,7 +748,19 @@ def main():
     args = ap.parse_args()
 
     from scripts.run.run_omip_core2 import orca1_zdftke_config
-    cfg = orca1_zdftke_config(prognostic=False)  # Mode-B quasi-steady for the
+    # --iwm-backgrounds: ORCA1 runs ln_zdfiwm=.true., and NEMO's zdfiwm_init
+    # then OVERWRITES the &namzdf backgrounds it just read --
+    #     avmb(:) = rnu (1.4e-6, molecular);  avtb(:) = 1e-10
+    # (zdfiwm.F90:375-379, "background avt is specified in zdf_iwm"). So the
+    # rn_avm0/rn_avt0 pair the card carries by default, 1.2e-4/1.2e-5, is NOT
+    # what this oracle ran. Measured on its own output: the restart's avm_k
+    # floor is 1.400e-06, exactly rnu; the deep equatorial avt runs down to
+    # 3.5e-07 with 89% of interfaces BELOW rn_avt0. Comparing our floored K
+    # against that is a confound, not a closure test, and it is the obvious
+    # candidate for the whole-column-only 2.3x.
+    cfg = orca1_zdftke_config(prognostic=False,
+                              iwm_enabled=args.iwm_backgrounds)
+    # Mode-B quasi-steady for the
     def _apply_overrides(c, label):
         """Every CLI override, applied through ONE path.
 
