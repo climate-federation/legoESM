@@ -124,10 +124,18 @@ def _wmean(field, w):
 # variable -> (scale to display units, unit label).  evspsbl is published as a
 # mass flux and read as a depth rate so it lines up with the rain rows.
 _SURF = {"tas": (1.0, "K"), "evspsbl": (86400.0, "mm/day"),
-         "hfls": (1.0, "W/m2"), "hfss": (1.0, "W/m2")}
+         "hfls": (1.0, "W/m2"), "hfss": (1.0, "W/m2"),
+         # reflected shortwave belongs in a SURFACE table here because the
+         # question it answers is a surface one: an excess of it is sunlight
+         # the surface never received, and over wet land that shading is a
+         # competing explanation for the evaporation deficit that does not
+         # need the land's evaporation efficiency to be wrong at all.  The
+         # run does not publish surface shortwave, so this is the top of the
+         # atmosphere and an UPPER BOUND on the surface deficit.
+         "rsut": (1.0, "W/m2")}
 # the ones printed under an "obs" header: a missing reference for these is a
 # blank in a scored column, so it is FATAL rather than a nan
-_REFERENCED = ("tas", "evspsbl")
+_REFERENCED = ("tas", "evspsbl", "rsut")
 
 
 # Land is split again by the OBSERVED rain rate, so the mask carries no model
@@ -218,14 +226,17 @@ def print_surface(rows, tags):
         print(f"\n=== tropical {tag.upper()}: surface state "
               f"(tas/evap vs ERA5; fluxes MODEL-ONLY, no reference exists) ===")
         print(f"  {'run':<13}{'tas':>8}{'d_obs':>7}{'evap':>8}{'obs':>7}"
-              f"{'ratio':>7}{'LE':>8}{'H':>7}{'EF':>6}{'rain_obs':>10}")
+              f"{'ratio':>7}{'LE':>8}{'H':>7}{'EF':>6}"
+              f"{'d_rsut':>8}{'rain_obs':>10}")
         for r in rows:
             em, eo = r[f"evspsbl_{tag}_m"], r[f"evspsbl_{tag}_o"]
             print(f"  {r['run']:<13}{r[f'tas_{tag}_m']:8.2f}"
                   f"{r[f'tas_{tag}_m'] - r[f'tas_{tag}_o']:+7.2f}"
                   f"{em:8.2f}{eo:7.2f}{em / max(eo, 1e-9):7.2f}"
                   f"{r[f'hfls_{tag}_m']:8.1f}{r[f'hfss_{tag}_m']:7.1f}"
-                  f"{_ef(r, tag):6.2f}{r['rain_obs'][tag]:10.2f}")
+                  f"{_ef(r, tag):6.2f}"
+                  f"{r[f'rsut_{tag}_m'] - r[f'rsut_{tag}_o']:+8.1f}"
+                  f"{r['rain_obs'][tag]:10.2f}")
     print(f"\n  d_obs = model - ERA5 [K].  evap in mm/day so it reads against "
           f"the rain rows\n  above: evaporation that matches while rain does "
           f"not is a conversion fault,\n  not a supply fault.  EF = LE/(LE+H), "
