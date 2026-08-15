@@ -36,6 +36,7 @@ JAX_ENABLE_X64=1 $PY -m pytest -q \
   tests/unit/test_scm_rce_thermo_objective.py \
   tests/unit/test_plot_scm_rce_tq_ranking.py \
   tests/unit/test_scm_rce_tq_objective_probe.py \
+  tests/unit/test_scm_rce_tq_seed_agreement.py \
   tests/unit/test_scm_rce_convection_intercomparison_cli.py \
   tests/unit/test_param_collector.py \
   tests/test_param_specs.py \
