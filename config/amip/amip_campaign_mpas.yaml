@@ -89,21 +89,37 @@ convective_cloud: false
 # rain only between 0.35 and 0.41 of observed -- they were being asked to convect
 # over an ocean wearing a coastline.
 #
-# So the land model is ON, and its evaporation is throttled by its OWN soil
-# moisture rather than by a global constant. That brings the three things a land
-# surface has to have: soil water (Richards column with infiltration, drainage
-# and runoff), stomatal control on transpiration, and a prognostic skin
-# temperature that feeds back to the atmosphere.
+# The obvious repair -- switch the land model on -- was tried and MEASURED, and
+# it is not yet usable on this lane. What that arm did is recorded next, because
+# the next person to read the paragraph above will reach for the same switch.
 #
-# The old reason for disabling it -- that the deep 3 m soil needs a multi-year
-# spin-up the campaign's 30-120 day arms cannot afford -- is real but is the
-# lesser error: a soil column still equilibrating is closer to a land surface
-# than the neighbouring sea is. Soil moisture is seeded aridity-aware from the
-# initial condition's own near-surface humidity, so the rainforest starts wet
-# and the desert dry. A spun-up restart is the proper answer and is a separate
-# piece of work.
-use_multilayer_land: true
-mpas_land_beta_soil: true
+# MEASURED, 30 d, res-4 (w12_soil vs w12_ctl): turning the land model on from a
+# COLD START makes this configuration DIVERGE. Tropical desert evaporation
+# reaches 12.9 mm/day against 0.87 observed — a latent heat flux of 372 W/m2,
+# which is not a bias, it is more energy than the surface receives. Column water
+# vapour climbs monotonically 24.5 -> 33.8 kg/m2 over the month with no sign of
+# levelling, the global mean temperature rises 6 K, and land rain reaches 2.9x
+# observed. The control plateaus at 26.1 kg/m2.
+#
+# PLAUSIBLE cause, not yet tested: this mesh only supports the BULK surface
+# energy balance — the canopy schemes are refused here — and the driver's own
+# note on that dispatch says the two-leaf canopy is what "limits land ET below
+# potential and breaks the over-evaporation wet loop". Cold-started with soil
+# near field capacity in the wet tropics and no canopy to hold water back,
+# evaporation runs at potential and feeds itself. The aridity-aware seed was
+# meant to prevent exactly this and did not.
+#
+# So the land stays OFF here, and this deck is KNOWINGLY WRONG in the other
+# direction: with it off there is no land surface at all and land temperature is
+# the neighbouring ocean's SST minus a lapse rate (see the note above). Neither
+# state is acceptable; the difference is that this one does not diverge.
+#
+# BLOCKED ON: a spun-up land state on THIS mesh from the multi-year CRU-JRA
+# land spin-up (now reachable — the schema that refused this mesh was fixed),
+# and/or wiring a canopy scheme onto this lane. Turn these back on together
+# with a land initial condition, never alone.
+use_multilayer_land: false
+mpas_land_beta_soil: false
 
 # Stomatal control on transpiration. Adversarial review caught the first pass
 # claiming this came free with the land model: it does not. `land_stomatal_beta`
@@ -114,7 +130,7 @@ mpas_land_beta_soil: true
 #
 # The multilayer Richards soil supplies the root-zone moisture the Jarvis model
 # down-regulates, so no separate bucket is needed here.
-land_stomatal_beta: true
+land_stomatal_beta: false
 
 # The bulk surface energy balance, NOT the two-leaf canopy. The canopy schemes
 # would be the better answer -- the driver's own note says the two-leaf scheme
