@@ -538,4 +538,28 @@ Each entry cost something. New sessions read this before touching the port.
     keeps a partial answer on a mid-flight drop. Separately: a 1500-token cap
     produced 1497 reasoning tokens and EMPTY content, which reads as a refusal
     and is not one — the client now reports the reasoning/content split.
+17. **BUDGET THE AUTHORING CALL FOR REASONING *PLUS* CONTENT, and stream.**
+    `thinking={"type":"disabled"}` is honoured only PARTIALLY on this endpoint
+    (job 9417346: a 17-line function still spent 671 of 812 completion tokens
+    reasoning), and reasoning scales with the task — a 400-line module spent
+    **41 000 of a 48 000** budget on it and the code was cut off mid-function.
+    So size `--max-tokens` at several times the expected content, cap the
+    module docstring in the prompt, and STREAM: the earlier finding that
+    streaming ignores the thinking flag no longer reproduces, while the
+    non-streaming call keeps dropping (9417290, 9417297, 9417348).
+18. **A TRUNCATED PYTHON FILE CAN PASS `ast.parse`.** The cut landed on
+    `u_lev, v_`, which is a valid tuple expression, so the completeness gate
+    printed "PARSES OK / MISSING none" on a module whose last function is half
+    written. Three checks now, no single one load-bearing: the jit FACTORY
+    must exist (it is last in the file), the last top-level node must END on
+    the last non-blank line, and the file must not end in a bare expression.
+19. **THE ADJOINT IDENTITY CANNOT SEE A WRONG JACOBIAN** (codex BLOCKER, job
+    9417397). `jvp` and `vjp` are two transformations of the SAME program, so
+    `⟨Jv,w⟩ = ⟨v,Jᵀw⟩` holds for whatever Jacobian that program has — a
+    missing term, a wrong coefficient and a stray `stop_gradient` all pass.
+    It certifies AD self-consistency. Correctness of the MAP is the PARITY
+    gates' job against the NumPy authority, and a finite difference is the
+    only gradient instrument that compares the derivative against the
+    function. Never let the identity be the ONLY gate on an operand group —
+    that is what happened to mapz's `delp`, and it took the review to see it.
 
