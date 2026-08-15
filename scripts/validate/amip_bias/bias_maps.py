@@ -57,7 +57,12 @@ SPEC = {
     "clt": (ESACCI, "ESACCI-CLOUD", "Blues", 40.0, "%"),
     "tas": (ERA5, "ERA5", "RdYlBu_r", 10.0, "K"),
     "prw": (ERA5, "ERA5", "YlGnBu", 10.0, "kg m-2"),
+    "evspsbl": (ERA5, "ERA5", "YlGnBu", 3.0, "mm day-1"),
 }
+
+# display scaling applied to BOTH model and reference before plotting, for
+# variables whose CMOR unit is not the one a reader expects to see on a map.
+_DISPLAY_SCALE = {"evspsbl": 86400.0}
 
 
 def _model_clim(run, var):
@@ -150,7 +155,9 @@ def maps(run, variables, out_dir):
         if ref is None:
             print(f"  {var}: no {label} reference -- skipped")
             continue
-        rows.append((var, field, ref, mlat, mlon, label, cmap, blim, units))
+        scale = _DISPLAY_SCALE.get(var, 1.0)
+        rows.append((var, field * scale, ref * scale, mlat, mlon, label, cmap,
+                     blim, units))
     if not rows:
         raise SystemExit(f"{run}: nothing to plot")
 

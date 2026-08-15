@@ -41,7 +41,7 @@ REF_MIN_YEAR = 1979
 # TOA fluxes: CERES only (ERA5 has no rsut/rlut here).  Cloud state: ERA5.
 _SOURCE = {"rsut": CERES, "rlut": CERES, "rsutcs": CERES, "rlutcs": CERES,
            "clt": ERA5, "lwp": ERA5, "clivi": ERA5, "prw": ERA5, "pr": ERA5,
-           "tas": ERA5}
+           "tas": ERA5, "evspsbl": ERA5}
 
 REGIONS = {           # (lat_lo, lat_hi, lon_lo, lon_hi) lon in [0,360)
     "ITCZ 10S-10N":     (-10, 10, 0, 360),
