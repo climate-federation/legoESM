@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=insn2_30
 #SBATCH --account=glab
-#SBATCH --partition=glab1
+#SBATCH --partition=short
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=20:00:00
+#SBATCH --time=11:45:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/insn2_30_%j.out
 #
 # THE MISSING CONTROL for the signed-TEOS-10 arm 9409057.
@@ -21,6 +21,20 @@
 # n2_eos_form stays teos10 and is INERT under insitu, so it is not a second
 # variable -- verified by the roundtrip check in _n2_flag_roundtrip.sbatch.
 #
+# RESOURCES MATCH THE SIGNED ARM DELIBERATELY (short/gpu:1/64G/11:45), not
+# just for scheduling: a control should meet the same hardware as the arm it
+# controls. The first attempt (9412628) went to glab1 alongside two other GPU
+# arms and died in 9 minutes with CUDA_ERROR_OUT_OF_MEMORY.
+#
+# THE TWO ARMS RUN AT DIFFERENT SHAs, and that was checked rather than
+# waved through. The signed arm ran at 6ab481009; this one runs at 4db34c41378a9e1f94d986cf476b2774db475c06.
+# git diff 6ab481009..HEAD -- packages/ src/ touches exactly two model files
+# and its only non-comment changes are a dead '_ = None' line removed and one
+# kwarg re-indented -- both semantically null, and both in mpas_integration,
+# which the tripole path does not execute at all. The machine check that the
+# physics matches is the manifest comparison: 3 of 556 config leaves differ,
+# and they are n2_mode, output_path, and the config hash.
+#
 # PRE-REGISTERED, Southern Ocean mean MLD bias vs NEMO at day 30. The sqrt(2)
 # and alpha fixes drove it from +1.5 m to -19.7 m; the question is how much
 # of that the stratification change gives back.
@@ -33,7 +47,7 @@
 # IMPROVES, calm-column K is not the controlling term for the halocline.
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM
-PIN=063f6bd003e7177e219ce95d3b184407affd59df
+PIN=4db34c41378a9e1f94d986cf476b2774db475c06
 cd $WT || exit 1
 HAVE=$(git -C $WT rev-parse HEAD)
 [ "$HAVE" = "$PIN" ] || { echo "FATAL: pin drift, HEAD=$HAVE want=$PIN"; exit 1; }
