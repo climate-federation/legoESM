@@ -111,7 +111,13 @@ _SANE_MAX = {"delp": 1.0e6, "pt": 1.0e4, "u": 1.0e4, "v": 1.0e4, "w": 1.0e3}
 def _duo_tables(ctx):
     """The DuoHaloTables the JAX ctx carries (csw_phase_3d's contract:
     ctx already carries the halo tables its callees need)."""
-    tab = getattr(ctx, "duo_halos", None)
+    # `ctx.tab`, which is what build_jax_duo_stepper_context names it and
+    # what every sibling phase passes to the halo routines.  The first
+    # draft looked for `ctx.duo_halos` -- a name nothing sets -- so this
+    # guard fired on a perfectly good context (job 9417502).  The guard
+    # itself is right and stays: it is the reason the wrong name was a
+    # loud failure instead of a silent stale-corner exchange.
+    tab = getattr(ctx, "tab", None)
     if tab is None:
         # Fail closed, mirroring the spec: the D-wind exchange at
         # dyn_core.F90:504 is ext_vector; this lane has NO interim
