@@ -343,3 +343,34 @@ def assert_fd_truncation_scaling(name, f, primals, seed=0,
     for x in ratios:
         assert 2.5 < x < 6.0, detail
     return ratios
+
+
+def assert_fd_gap_at_roundoff_floor(name, f, primals, margin, eps=1.0e-4,
+                                    seed=0):
+    """The independent FD check when there is NO truncation term to see.
+
+    :func:`assert_fd_truncation_scaling` needs the eps^2 term to dominate
+    the FD's own roundoff.  When it does not -- because the map is affine
+    in these operands, or because its curvature is simply too small at
+    the output's scale -- the ladder's ratio measures nothing, and the
+    precondition there says so rather than reporting a number.
+
+    What is still assertable, and still INDEPENDENT of the AD (it
+    compares the derivative against the FUNCTION), is that the gap sits
+    AT the central difference's own floor rather than anywhere above it:
+
+        floor ~ u_mach * ||f||_inf * sqrt(n_out) / eps
+
+    A wrong Jacobian puts the gap ABOVE that floor by whatever the error
+    is, which at these scales is orders of magnitude, so the gate can
+    still fail on the defect it exists for.
+    """
+    gap, ad = vjp_fd_projection(f, primals, eps, seed=seed)
+    floor = fd_roundoff_floor(f, primals, eps)
+    assert gap <= margin * floor, (
+        f"{name}: FD projection gap {gap:.6e} exceeds {margin:g}x the "
+        f"central-difference roundoff floor {floor:.6e} "
+        f"(u_mach*||f||_inf*sqrt(n)/eps at eps={eps:g}); AD projection "
+        f"<v,J^T w> = {ad:.6e}.  MEASURED gap/floor = "
+        f"{gap / max(floor, 1e-300):.3f}")
+    return gap, floor

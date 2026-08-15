@@ -279,3 +279,38 @@ def test_fd_ladder_refuses_the_roundoff_regime():
     with pytest.raises(AssertionError, match="PRECONDITION FAILED"):
         helpers.assert_fd_truncation_scaling(
             "affine", f, (x,), steps=(1.0e-6, 5.0e-7, 2.5e-7))
+
+
+def test_floor_gate_passes_when_ad_and_fd_agree_to_roundoff():
+    """The affine case the ladder cannot serve: no truncation term, so
+    the only assertable statement is that the gap is AT the floor."""
+    m = jnp.asarray(np.random.default_rng(5).standard_normal((7, 7)))
+
+    def f(x):
+        return m @ x
+
+    x = jnp.asarray(np.random.default_rng(6).standard_normal(7))
+    gap, floor = helpers.assert_fd_gap_at_roundoff_floor(
+        "affine", f, (x,), margin=50.0, eps=1.0e-4)
+    assert gap <= 50.0 * floor
+
+
+def test_floor_gate_catches_a_wrong_reverse_mode():
+    """It must still fail on the defect it exists for: a Jacobian wrong
+    by 50 % lifts the gap far above the floor."""
+    @jax.custom_vjp
+    def f(x):
+        return jnp.sum(x * 3.0)
+
+    def f_fwd(x):
+        return f(x), None
+
+    def f_bwd(_, g):
+        return (g * 3.0 * 1.5 * jnp.ones(7),)     # 50 % too large
+
+    f.defvjp(f_fwd, f_bwd)
+
+    x = jnp.asarray(np.random.default_rng(7).standard_normal(7))
+    with pytest.raises(AssertionError, match="exceeds"):
+        helpers.assert_fd_gap_at_roundoff_floor(
+            "wrongvjp", f, (x,), margin=50.0, eps=1.0e-4)

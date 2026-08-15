@@ -79,6 +79,7 @@ from legoesm.core.fv3_duo_stepper import (  # noqa: E402
 from legoesm.core.fv3_native_state_3d import build_state_3d  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_fd_gap_at_roundoff_floor,
     assert_fd_truncation_scaling,
     assert_real,
     check_adjoint,
@@ -717,12 +718,24 @@ def test_tail_fd_ladder_on_the_linear_ppm_arm(jctx, jstate, jcsw, jdsw):
         return (jnp.sum(out["u"][:, _CS, _CS, :] ** 2)
                 + jnp.sum(out["v"][:, _CS, _CS, :] ** 2))
 
-    # TOL-PENDING: the ladder is tolerance-free in the gap, but the STEP
-    # set is a measurement; the job replaces it if the precondition
-    # (top gap > 10x the roundoff floor) is not met here.
-    assert_fd_truncation_scaling("tail u/v (linear arm)", f,
-                                 (jstate["u"], jstate["v"]),
-                                 steps=(1.6e-3, 8.0e-4, 4.0e-4))
+    # ⛔ AND THE LADDER IS THE WRONG HALF OF THE INSTRUMENT HERE, which
+    # the precondition caught rather than papering over (job 9417478):
+    # gaps 2.172e+04, 5.741e+02, 1.429e+04 at eps = 1.6e-3, 8e-4, 4e-4
+    # against a roundoff floor of 1.068e+04 -- erratic, and all AT the
+    # floor.  On the linear arm the truncation term is below what fp64
+    # can resolve at an output scale of ~1e14, so there is no eps^2
+    # signal to scale and the ratios are noise.
+    #
+    # What remains assertable, and still compares the derivative against
+    # the FUNCTION rather than against another transformation of the
+    # same program, is that the gap sits AT that floor.  A wrong
+    # Jacobian lifts it by the size of the error, which at these scales
+    # is orders of magnitude.
+    #
+    # MEASURED gap/floor = 2.03 at eps = 1.6e-3; bound = 5x the floor.
+    assert_fd_gap_at_roundoff_floor("tail u/v (linear arm)", f,
+                                    (jstate["u"], jstate["v"]),
+                                    margin=5.0, eps=1.6e-3)
 
 
 def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
