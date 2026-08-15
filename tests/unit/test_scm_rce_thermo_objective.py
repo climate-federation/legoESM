@@ -682,3 +682,43 @@ def test_run_cached_builds_a_key_for_every_argument_it_is_given(monkeypatch):
         "term becomes thermo_score, so one entry cannot serve both")
     assert calls[0]["thermo_humidity"] == "logq"
     assert calls[1]["thermo_humidity"] == "rh"
+
+
+def test_tune_stats_count_only_this_calls_integrations(monkeypatch):
+    """`unique_evals` must be columns THIS call integrated, not the cache size.
+
+    Exercised through the REAL `run_cached`, with only the integration stubbed,
+    so the caching and the counting are the production ones: a stub that
+    replaces `run_cached` would never insert anything and the accounting could
+    report any value without failing.  The cache is pre-populated to stand in
+    for a caller that shares one across schemes.
+    """
+    from scripts.run import run_scm_rce_campaign as camp
+
+    integrations = []
+
+    def _stub_run_scm_rce(cfg, ref, **kw):
+        integrations.append(kw["label"])
+        return _diag(score=1.0, thermo_score=1.0, subcloud_score=1.0)
+
+    monkeypatch.setattr(camp, "run_scm_rce", _stub_run_scm_rce)
+    base = camp.make_physics_config(convection="dca")
+    cache = {"a-key-from-another-scheme": _diag(), "and-another": _diag()}
+    common = dict(
+        days=0.01, dt=600.0, analysis_days=0.01,
+        require_equilibrium=False, require_realism=False,
+        equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0,
+    )
+    _cfg, records, _tuned, stats = camp.tune_category_winner(
+        "convection", base, object(), cache, tune_evals=12, seed=3,
+        objective="thermo", param_set="physical", refine_frac=0.5, **common)
+
+    assert len(records) == 1, "dca exposes exactly its CAPE trigger here"
+    assert stats["requested_evals"] == 12
+    assert stats["random_proposals"] + stats["refine_proposals"] <= 12
+    # The two foreign entries must not be counted, and the default run (made
+    # BEFORE the loop) must not be either.
+    assert stats["unique_evals"] == len(cache) - 3, (
+        f"unique_evals={stats['unique_evals']} vs cache={len(cache)}; it must "
+        "count only the keys this call inserted after the default")
+    assert stats["unique_evals"] <= len(integrations)
