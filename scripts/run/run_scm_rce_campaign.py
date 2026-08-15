@@ -1090,6 +1090,7 @@ def _config_cache_key(
     large_scale_forcing: str,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -1109,6 +1110,10 @@ def _config_cache_key(
         "large_scale_forcing": large_scale_forcing,
         "bl_anchor_top_m": bl_anchor_top_m,
         "subcloud_top_m": subcloud_top_m,
+        # Post-processing only, like subcloud_top_m, but it decides WHICH
+        # humidity term becomes thermo_score, so a cache entry computed under
+        # one variable must never be served for another.
+        "thermo_humidity": thermo_humidity,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

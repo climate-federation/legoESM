@@ -605,3 +605,37 @@ def test_physical_set_defaults_are_all_inside_their_bounds():
             if not (float(c.min_val) <= v <= float(c.max_val)):
                 offenders[c.name] = (v, float(c.min_val), float(c.max_val))
     assert not offenders, offenders
+
+
+def test_run_cached_builds_a_key_for_every_argument_it_is_given(monkeypatch):
+    """The smoke caught this and no unit test would have: adding a parameter to
+    `run_cached` without widening `_config_cache_key` raises only once a real
+    evaluation is attempted, minutes into a job.  Exercise the real key
+    construction with the full argument set the driver passes."""
+    from scripts.run import run_scm_rce_campaign as camp
+
+    calls = []
+
+    def _stub_run_scm_rce(cfg, ref, **kw):
+        calls.append(kw)
+        return _diag()
+
+    monkeypatch.setattr(camp, "run_scm_rce", _stub_run_scm_rce)
+    cfg = camp.make_physics_config(convection="dca")
+    common = dict(
+        label="x", days=0.01, dt=600.0, analysis_days=0.01,
+        require_equilibrium=False, require_realism=False,
+        equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0,
+        scm_microphysics_substeps=1, scm_convection_substeps=1,
+        surface_wind_m_s=5.0, coriolis_s_inv=0.0,
+        large_scale_forcing="none", bl_anchor_top_m=-1.0,
+        subcloud_top_m=1000.0,
+    )
+    cache: dict = {}
+    camp.run_cached(cache, cfg, object(), thermo_humidity="logq", **common)
+    camp.run_cached(cache, cfg, object(), thermo_humidity="rh", **common)
+    assert len(cache) == 2, (
+        "the humidity variable must be part of the cache key: it decides which "
+        "term becomes thermo_score, so one entry cannot serve both")
+    assert calls[0]["thermo_humidity"] == "logq"
+    assert calls[1]["thermo_humidity"] == "rh"
