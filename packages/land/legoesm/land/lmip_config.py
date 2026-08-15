@@ -50,7 +50,15 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 # --- Schema keys, validated at load time ---
-_GRID_TYPES = ("latlon", "gaussian", "cubed_sphere")
+# The SCVT Voronoi aliases are here because the DRIVER already builds that mesh
+# (``run_lmip_biophys.make_grid`` branches on it) and only this list stood in
+# the way of asking for one. That gap mattered: a coupled AMIP run on the
+# Voronoi mesh needs its land state spun up on the SAME mesh, because the
+# restart loader compares column counts and refuses a mismatch rather than
+# interpolating. Without the aliases the only offline spin-up reachable for
+# such a run was a different grid whose output it would then reject.
+_GRID_TYPES = ("latlon", "gaussian", "cubed_sphere",
+               "voronoi", "icosahedral", "ico", "mpas", "mpas_voronoi")
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
