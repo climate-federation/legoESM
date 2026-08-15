@@ -87,7 +87,6 @@ from legoesm.core.fv3_phase3d_common import (
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
-    exchange_agrid_scalar_halos,
     ext_scalar_sixface,
     ext_vector_dgrid_sixface,
 )
@@ -138,9 +137,21 @@ def _exchange_scalar_stack(f6, tab, km):
     loop over static km because the halo routine's contract -- and the
     spec's per-k call -- is per level.  The extent is the halo
     module's, never re-derived here.
+
+    ⛔ ``ext_scalar_sixface``, NOT ``exchange_agrid_scalar_halos``.  The
+    spec routes every one of these sites through ``_pad_scalars_6``,
+    which uses the EXT bundle and falls back to the interim
+    index-copy helper only when the context explicitly declares the
+    substitution.  The two are not interchangeable: the interim helper
+    leaves the CORNER DIAGONALS untouched, and that exact substitution
+    is what produced the ``u = 1.17534e+11`` acoustic blow-up in this
+    campaign's NumPy phase -- the 3-D lane had used the index-copy
+    helper where the km=1 lane already used ext_scalar.  Measured here
+    as a 37 % delp disagreement against the spec on the first composed
+    run (job 9417519).
     """
     for k in range(km):
-        f6 = f6.at[..., k].set(exchange_agrid_scalar_halos(f6[..., k], tab))
+        f6 = f6.at[..., k].set(ext_scalar_sixface(f6[..., k], tab, "A"))
     return f6
 
 
