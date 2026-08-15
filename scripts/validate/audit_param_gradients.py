@@ -66,8 +66,11 @@ real:
 * the columns carry NO horizontal grid, so a parameter whose only consumer
   needs a grid-derived input (Kuo's moisture convergence) reads dead without
   having been tested;
-* ``phys_state`` is a COLD START unless ``--spinup-steps`` is given, so a cap
-  on a mass flux that has not spun up reads dead;
+* ``--spinup-steps`` (default 3) iterates the physics to build a non-zero
+  prognostic carry before differentiating, because a parameter that multiplies
+  a CARRIED quantity has an exactly zero derivative at cold start.  It is a
+  few steps, not an equilibrium, so a parameter that only bites after long
+  spin-up can still read dead;
 * the verdict is over the union of the sampled columns only.
 
 So ``dead`` means "no path to the output on these states, at this spin-up" —
@@ -208,16 +211,24 @@ def _column(nlev: int, *, T_sfc: float, rh: float, lapse_K_km: float,
         "q_v": Field(data=jnp.asarray(q_v).reshape(shape4), name="q_v",
                      dims=dims4),
     }
-    for extra, seed_value in (("q_c", 1.0e-5), ("q_r", 1.0e-6),
-                              ("q_i", 1.0e-6), ("q_s", 1.0e-6),
-                              ("q_g", 1.0e-7)):
-        # Seeded NON-ZERO: a process rate proportional to a species that is
-        # exactly zero has an exactly zero derivative, which would be reported
-        # as a dead parameter when it is only an empty column.
+    for extra, seed_value in (("q_c", 1.5e-3), ("q_r", 3.0e-4),
+                              ("q_i", 3.0e-4), ("q_s", 1.5e-4),
+                              ("q_g", 5.0e-5)):
+        # Seeded at REALISTIC in-cloud magnitudes, not token non-zeros.  Two
+        # separate reasons, both of which produced false DEAD verdicts on the
+        # first run:
+        #   * a rate proportional to a species that is exactly zero has an
+        #     exactly zero derivative;
+        #   * a rate behind a THRESHOLD -- Kessler's autoconversion fires only
+        #     above ~1 g/kg of cloud water -- is dormant below it, so a 0.01
+        #     g/kg seed reported the scheme's single most important parameter
+        #     (``autoconversion_rate``) as dead.
         tracers[extra] = Field(data=zeros4 + seed_value, name=extra,
                                dims=dims4)
-    for number in ("N_c", "N_r", "N_i"):
-        tracers[number] = Field(data=zeros4 + 1.0e6, name=number, dims=dims4)
+    # Number concentrations at typical maritime values [1/kg]; a
+    # two-moment rate divided by a token N is not the rate the scheme runs.
+    for number, n_seed in (("N_c", 1.0e8), ("N_r", 1.0e4), ("N_i", 1.0e5)):
+        tracers[number] = Field(data=zeros4 + n_seed, name=number, dims=dims4)
     state = HydrostaticState(
         u=Field(data=jnp.full(shape4, 5.0), name="u", dims=dims4),
         v=Field(data=jnp.full(shape4, 1.0), name="v", dims=dims4),
@@ -378,6 +389,22 @@ def _numeric_leaves(tree):
             if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.inexact)]
 
 
+def _spun_up_carry(fn, state, grid, sigma, steps: int):
+    """Iterate the physics to build a non-zero prognostic carry.
+
+    A scheme whose parameters multiply a CARRIED quantity — every CLUBB
+    pressure-correlation coefficient multiplies a second moment, every
+    mass-flux cap bounds a carried flux — has an exactly zero derivative at
+    cold start, and reads DEAD without ever having been tested.  The column
+    itself is held fixed so only the carry spins up; drifting the state as
+    well would change what is being audited between schemes.
+    """
+    carry = None
+    for _ in range(max(0, steps)):
+        _tend, carry = fn(state, grid, sigma, carry)
+    return carry
+
+
 def scheme_gradients(
     category: str,
     scheme: str,
@@ -386,6 +413,7 @@ def scheme_gradients(
     nlev: int,
     dt: float,
     states,
+    spinup_steps: int = 0,
 ) -> tuple[dict[str, float], str]:
     """max |dL/dtheta| per parameter for one scheme, over states+projections.
 
@@ -412,7 +440,8 @@ def scheme_gradients(
             cfg = _single_scheme_config(category, scheme,
                                         _rewrap(base_sub, tuned))
             fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
-            tend, carry = fn(state, grid, sigma)
+            carry_in = _spun_up_carry(fn, state, grid, sigma, spinup_steps)
+            tend, carry = fn(state, grid, sigma, carry_in)
             leaves = _numeric_leaves((tend, carry))
             if not leaves:
                 return jnp.asarray(0.0, dtype=jnp.float64)
@@ -454,6 +483,7 @@ def finite_difference_response(
     *,
     dt: float,
     states,
+    spinup_steps: int = 0,
 ) -> float:
     """max |change in the tendency| over a sweep of ONE parameter.
 
@@ -480,7 +510,8 @@ def finite_difference_response(
         fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
         out = []
         for _name, state, sigma, grid in states:
-            tend, carry = fn(state, grid, sigma)
+            carry_in = _spun_up_carry(fn, state, grid, sigma, spinup_steps)
+            tend, carry = fn(state, grid, sigma, carry_in)
             out.append([np.asarray(leaf, dtype=float)
                         for leaf in _numeric_leaves((tend, carry))])
         return out
@@ -514,6 +545,7 @@ def audit(
     nlev: int = 30,
     dt: float = 600.0,
     run_finite_difference: bool = True,
+    spinup_steps: int = 3,
 ) -> list[ParamVerdict]:
     states = build_states(nlev)
     key_map = scheme_key_map(categories)
@@ -521,7 +553,8 @@ def audit(
     verdicts: list[ParamVerdict] = []
     for scheme_key, (category, scheme) in sorted(key_map.items()):
         grads, note = scheme_gradients(
-            category, scheme, scheme_key, nlev=nlev, dt=dt, states=states)
+            category, scheme, scheme_key, nlev=nlev, dt=dt, states=states,
+            spinup_steps=spinup_steps)
         if not grads:
             continue
         params = build_trainable_params(
@@ -551,7 +584,7 @@ def audit(
                 if run_finite_difference:
                     fd = finite_difference_response(
                         category, scheme, c, defaults[name], dt=dt,
-                        states=states)
+                        states=states, spinup_steps=spinup_steps)
                     verdict = "blocked" if fd > 0.0 else "dead"
                 else:
                     verdict = "zero_grad_unclassified"
@@ -573,6 +606,11 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"'all' or comma-separated from {ATM_CATEGORIES}")
     p.add_argument("--nlev", type=int, default=30)
     p.add_argument("--dt", type=float, default=600.0)
+    p.add_argument("--spinup-steps", type=int, default=3,
+                   help="physics calls used to build a non-zero prognostic "
+                        "carry before differentiating. 0 reproduces the "
+                        "cold-start behaviour, under which every parameter "
+                        "that multiplies a carried quantity reads DEAD.")
     p.add_argument("--no-finite-difference", action="store_true",
                    help="skip the dead-vs-blocked discrimination (faster, "
                         "leaves zero-gradient parameters unclassified)")
@@ -590,7 +628,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"unknown categories {unknown}; expected from {ATM_CATEGORIES}")
 
     verdicts = audit(categories, nlev=args.nlev, dt=args.dt,
-                     run_finite_difference=not args.no_finite_difference)
+                     run_finite_difference=not args.no_finite_difference,
+                     spinup_steps=args.spinup_steps)
     if not verdicts:
         raise SystemExit("no parameters audited — the registry or the scheme "
                          "map resolved empty, which is itself a defect")

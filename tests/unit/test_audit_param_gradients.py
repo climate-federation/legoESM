@@ -153,3 +153,33 @@ def test_gravity_wave_drag_traces_now():
         nlev=_NLEV, dt=_DT, states=build_states(_NLEV))
     assert note == "", f"gravity-wave drag still fails to trace: {note}"
     assert grads
+
+
+@pytest.mark.slow
+def test_kessler_autoconversion_is_detected_live():
+    """THE calibration case for the harness.
+
+    ``autoconversion_rate`` is Kessler's single most important parameter.  If
+    the probe reports it dead, the probe is starving the scheme -- which is
+    exactly what a 0.01 g/kg cloud-water seed did, sitting below the scheme's
+    own ~1 g/kg autoconversion threshold.  Any DEAD verdict from this audit is
+    uninterpretable while this test fails.
+    """
+    grads, note = scheme_gradients(
+        "microphysics", "kessler", "atm.micro.KesslerConfig",
+        nlev=_NLEV, dt=_DT, states=build_states(_NLEV), spinup_steps=1)
+    assert note == "", f"tracing failed: {note}"
+    name = "atm.micro.KesslerConfig.autoconversion_rate"
+    assert name in grads, "the parameter left the registry; update this test"
+    assert grads[name] > 0.0, (
+        "Kessler autoconversion reads DEAD — the probe's column is not "
+        "raining, so no DEAD verdict in this audit can be trusted")
+
+
+def test_condensate_seeds_are_physically_realistic():
+    """Guards the calibration above from being silently undone."""
+    for _name, state, _sigma, _grid in build_states(_NLEV):
+        q_c = float(jnp.min(state.tracers["q_c"].data))
+        # Above the ~1 g/kg autoconversion threshold of the warm-rain schemes.
+        assert q_c >= 1.0e-3, f"cloud water seed {q_c} is below threshold"
+        assert float(jnp.min(state.tracers["N_c"].data)) >= 1.0e7
