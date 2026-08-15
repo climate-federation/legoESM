@@ -60,7 +60,15 @@ from legoesm.core.fv3_duo_sw_core import (
 )
 from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
 from legoesm.core.fv3_native_state_3d import require_no_remap_needed
-from legoesm.core.fv3_pgrad import geopk, one_grad_p
+from legoesm.core.fv3_nh_core import riem_solver3, update_dz_d
+from legoesm.core.fv3_pgrad import (
+    geopk,
+    nh_p_grad,
+    one_grad_p,
+    pe_halo,
+    pk3_halo,
+    pln_halo,
+)
 from legoesm.core.fv3_phase3d_common import (
     require_bool,
     require_f64_jax,
@@ -70,7 +78,10 @@ from legoesm.core.fv3_phase3d_common import (
     stack_levels,
     validate_stacked,
 )
-from legoesm.grids.fv3_duo_halos import average_shared_edge_bgrid
+from legoesm.grids.fv3_duo_halos import (
+    average_shared_edge_bgrid,
+    ext_scalar_sixface,
+)
 
 # The spec's own deck, imported not restated (C7).  "hord_tm" rides in it
 # for update_dz_d's transport order (dyn_core.F90:1406), read by the NH
@@ -505,3 +516,388 @@ def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
             remap_step=remap_step, remap_follows=remap_follows)
 
     return jax.jit(_phase)
+
+
+# ---------------------------------------------------------------------------
+# PART C -- the non-hydrostatic D-grid tail.  Spec:
+# fv3_native_dsw_tail_3d.dgrid_nh_pressure_phase_3d (dyn_core.F90:1403-1543):
+# update_dz_d -> riem_solver3 -> pe_halo / (pln_halo | pk3_halo) -> zh+pkc
+# duo exchanges -> gz = zh*grav -> (square_domain: second pkc exchange) ->
+# nh_p_grad.  This chain REPLACES part B's hydrostatic geopk + one_grad_p
+# at beta = 0; everything it writes comes back as a functional carry.
+# ---------------------------------------------------------------------------
+
+
+def _ext_scalar_planes_6(planes6, ctx):
+    """Functional twin of the spec's in-place ``_ext_scalar_planes_6``.
+
+    The NH D-stage sites (dyn_core.F90:1482-1483: ``ext_scalar(zh)``,
+    ``ext_scalar(pkc)``) exchange ONE 2-D plane per face at A
+    staggering.  The spec's ext-bundle / single-tile-fallback dispatch
+    collapses on this lane to the ONE ported exchange -- ``ctx.tab`` is
+    the duo halo table the barrier module itself takes -- so there is no
+    substitution to declare and nothing to fail closed against.
+
+    Returns the exchanged (6, i, j) stack; nothing is mutated.
+    """
+    return ext_scalar_sixface(planes6, ctx.tab, "A")
+
+
+def nh_exchanged_area6(ctx):
+    """Sentinel-free face-stacked ``area`` with REAL corner-diagonal halos.
+
+    Twin of the spec's ``nh_exchanged_area6`` (which returns a per-face
+    LIST and caches on the ctx): ONE ``(6, i, j)`` stack comes back here
+    (convention C1).  The single-tile gridstruct leaves BIG_NUMBER
+    sentinels in the corner-diagonal halo cells of ``area`` and
+    ``fv_tp_2d``'s inner updates inside ``update_dz_d`` read them; the
+    oracle's ``gridstruct%area`` halos are exchange-filled at grid init,
+    so the six-face NH integration supplies the analog: one A-grid
+    six-face exchange of the area planes.  PLAUSIBLE, in the spec's own
+    words: the Lagrange corner-region fill of an exchanged FIELD may
+    differ from the oracle's own corner-area construction in the last
+    bits; any disagreement will localise to corner-adjacent stencils.
+
+    Deviations from the spec, each with its reason:
+    - No ``ctx["nh_area6"]`` cache: a value cached during one trace is a
+      TRACER, and handing it to the next trace is exactly the defect the
+      cache would cause.  The metric is time-invariant and a pure
+      function of static inputs, so XLA constant-folds the whole
+      exchange -- the same work the cache saved.
+    - No per-face ``copy``: the spec's ``np.array(..., copy=True)``
+      guards a buffer alias that cannot exist on a functional lane
+      (sibling deviation D2's rule).
+    - ``rarea`` is not returned: the caller takes ``1.0 / area`` (the
+      spec's ``ctx["nh_rarea6"]``), so no second cached value exists.
+    """
+    a6 = jnp.stack(
+        [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
+         for t in range(6)], axis=0)
+    return _ext_scalar_planes_6(a6, ctx)
+
+
+def _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w):
+    """Effective tail deck -> ``(hord_tm, nord_v, damp_v)``.
+
+    The SWConfig is BUILT from the imported ``DUO_TAIL_CFG`` (never
+    restated here).  ``hord_tm`` / ``nord_w`` / ``damp_w`` are not
+    SWConfig fields, so they stay explicit keywords whose ``None``
+    default reproduces the spec's own ``c.get("nord_w", c["nord_v"])``
+    and ``c.get("damp_w", c["damp_v"])`` fallbacks exactly (sibling
+    deviation D3's rule); hord_tm rides the deck dict because
+    update_dz_d's transport order is flagstruct%hord_tm
+    (dyn_core.F90:1406).
+    """
+    if cfg is None:
+        c = SWConfig.from_mapping(DUO_TAIL_CFG)
+    elif isinstance(cfg, SWConfig):
+        c = cfg
+    else:
+        raise TypeError(
+            f"{fname}: cfg must be an SWConfig or None (a dict is not "
+            f"jit-static); got {type(cfg).__name__}")
+    h = hord_tm if hord_tm is not None else getattr(c, "hord_tm", None)
+    if h is None:
+        h = DUO_TAIL_CFG["hord_tm"]
+    # Integral by construction (require_nord's rule); the order dispatch
+    # itself is update_dz_d's, which raises statically at trace time on
+    # an order it does not implement.
+    if isinstance(h, bool) or not isinstance(h, int):
+        raise TypeError(
+            f"{fname}: hord_tm is a transport-order flag and must be an "
+            f"int; got {h!r}")
+    if h < 0:
+        raise ValueError(f"{fname}: unknown transport order hord_tm={h}")
+    if nord_w is not None:
+        nord_v = require_nord(fname, "nord_w", nord_w)
+    else:
+        nord_v = require_nord(fname, "nord_v",
+                              getattr(c, "nord_w", c.nord_v))
+    damp_v = float(damp_w) if damp_w is not None \
+        else float(getattr(c, "damp_w", c.damp_v))
+    return int(h), nord_v, damp_v
+
+
+def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
+                               *, dt, ptop, akap, cp_air, p_fac, a_imp,
+                               dp0, delz, remap_step=False,
+                               use_logp=False, square_domain=True,
+                               cfg=None, hord_tm=None, nord_w=None,
+                               damp_w=None, remap_follows=False):
+    """The NH D-grid tail (``dyn_core.F90:1403-1543``): ``update_dz_d`` ->
+    ``Riem_Solver3`` -> ``pe_halo``/``pk3_halo`` (``pln_halo`` under
+    ``use_logp``) -> zh/pkc duo exchanges -> ``gz = zh*grav`` ->
+    (``square_domain``: second pkc exchange) -> ``nh_p_grad``.  Consumes
+    the post-d_sw2 ``delp``/``pt`` (whose halos the caller has already
+    refreshed -- the :1336-1337 exchange precedes this block) and the
+    d_sw5-final ``w`` in ``tail_outs``.
+
+    Face-stacked inputs (convention C1).  ``csw_press``: needs ``pkc``.
+    ``dsw_outs``: the transport phase's ONE stacked dict (keys
+    DSW1_OUT_2D) read at ``[..., k]`` -- there is no "levels" key on
+    this lane; this phase reads ``delp``/``pt`` and
+    ``crx_adv``/``cry_adv``/``xfx_adv``/``yfx_adv``.  ``tail_outs``:
+    part A's dict, read for ``w``/``u``/``v``.  ``delz``: stacked twin
+    of the spec's ``delz6`` list, gated against ``nh["zh"]`` with the
+    interface axis shortened.  ``nh``: zh/gz/pk3/pe/pk/peln are km+1
+    interface fields, zs/ws are 2-D -- these shapes are NOT trusted
+    from this prose: ``validate_stacked`` gates them through
+    ``field_shape`` (CSW_OUT_LIKE-aware), the lane's single shape
+    authority, cross-checked against the kernel contracts
+    (update_dz_d: ``zh (isd:ied, jsd:jed, km+1)``, ``ws`` 2-D;
+    pe_halo: the oracle allocates ``pe`` with k as its middle axis, and
+    this phase never k-indexes pe, mirroring the spec).
+
+    FUNCTIONAL (convention C4): everything the spec mutates comes back
+    -- ``nh`` (zh, gz, zs, pk3, pe, pk, peln, ws), ``delz``, ``pkc``
+    (the csw_press storage Riem_Solver3 overwrites with the D-stage
+    PERTURBATION and nh_p_grad then B-grid-scratches -- trap #6), the
+    D winds ``u``/``v`` and the Riemann-updated ``w``.  ``press``
+    aliases the returned ``nh["pe"|"pk"|"peln"|"ws"]`` exactly as the
+    spec's press list aliases the nh carry.  The CALLER threads them.
+
+    Stage payloads (convention C6): this phase ADDS NO observation
+    returns.  Its spec has no stage_hook sites; the only values lost to
+    overwriting are the zh/pkc halos the exchanges themselves consume,
+    which the module's stage policy (part A) deliberately does not copy.
+
+    STATIC vs DYNAMIC (convention C3): ``ctx``, ``km``, ``remap_step``,
+    ``use_logp``, ``square_domain``, ``cfg``/``hord_tm``/``nord_w``/
+    ``damp_w`` and ``remap_follows`` are static.  ``dt``, ``ptop``,
+    ``akap``, ``cp_air``, ``p_fac`` and ``a_imp`` stay DYNAMIC: the only
+    Python branches any callee takes are on ``use_logp``/``last_call``
+    (riem_solver3) and ``use_logp`` (nh_p_grad), which are static
+    keywords here, and pk3_halo/pln_halo/pe_halo use ``ptop``/``akap``
+    arithmetically only -- so a new time step does not recompile.
+    """
+    fname = "dgrid_nh_pressure_phase_3d"
+    km = require_km(fname, km)
+    for nm, v in (("remap_step", remap_step), ("use_logp", use_logp),
+                  ("square_domain", square_domain),
+                  ("remap_follows", remap_follows)):
+        require_bool(fname, nm, v)
+    require_no_remap_needed(km, remap_follows=remap_follows)
+    hord_v, nord_v, damp_vt = _nh_tail_cfg(fname, cfg, hord_tm, nord_w,
+                                           damp_w)
+    require_f64_jax(fname, {
+        "csw_press.pkc": csw_press["pkc"],
+        "dsw_outs.delp": dsw_outs["delp"],
+        "dsw_outs.pt": dsw_outs["pt"],
+        "dsw_outs.crx_adv": dsw_outs["crx_adv"],
+        "dsw_outs.cry_adv": dsw_outs["cry_adv"],
+        "dsw_outs.xfx_adv": dsw_outs["xfx_adv"],
+        "dsw_outs.yfx_adv": dsw_outs["yfx_adv"],
+        "tail_outs.u": tail_outs["u"],
+        "tail_outs.v": tail_outs["v"],
+        "tail_outs.w": tail_outs["w"],
+        "nh.zh": nh["zh"], "nh.gz": nh["gz"], "nh.zs": nh["zs"],
+        "nh.pk3": nh["pk3"], "nh.pe": nh["pe"], "nh.pk": nh["pk"],
+        "nh.peln": nh["peln"], "nh.ws": nh["ws"],
+        "delz": delz, "dp0": dp0,
+    })
+    validate_stacked(fname, csw_press, ctx, km, ("pkc",),
+                     what="csw_press (C-stage pressure)")
+    validate_stacked(fname, dsw_outs, ctx, km,
+                     ("delp", "pt", "crx_adv", "cry_adv",
+                      "xfx_adv", "yfx_adv"),
+                     what="dsw_outs (transport phase, keys DSW1_OUT_2D)")
+    validate_stacked(fname, tail_outs, ctx, km, ("u", "v", "w"),
+                     what="tail_outs (part A d_sw3..d_sw6 chain)")
+    validate_stacked(fname, nh, ctx, km,
+                     ("zh", "gz", "zs", "pk3", "pe", "pk", "peln", "ws"),
+                     what="nh carry")
+    if delz.shape != nh["zh"].shape[:-1] + (km,):
+        raise ValueError(
+            f"{fname}: delz {delz.shape} must equal nh['zh'] "
+            f"{nh['zh'].shape} with the interface axis shortened to km")
+    if dp0.shape != (km,):
+        raise ValueError(f"{fname}: dp0 must be ({km},), got {dp0.shape}")
+
+    # Pure Python constant; imported at the call site exactly as the spec
+    # does, because the JAX callee list carries no grav of its own.
+    from legoesm.core.fv3_native_gridstruct import FV3_GRAV
+
+    bd = ctx.bd
+    n, ng = ctx.n, ctx.ng
+    npx = ctx.npx
+    # update_dz_d / riem_solver3 take the STATIC (is_, ie, js, je, ng)
+    # bounds tuple, not the bd object.
+    bounds = (bd.is_, bd.ie, bd.js, bd.je, int(ng))
+    # Sentinel-free area/rarea: the spec's nh_exchanged_area6 plus its
+    # ctx["nh_rarea6"], computed here instead of cached (see that twin).
+    area6 = nh_exchanged_area6(ctx)
+    rarea6 = 1.0 / area6
+
+    rdt = 1.0 / dt
+    delp6 = dsw_outs["delp"]
+    pt6 = dsw_outs["pt"]
+    gs6 = ctx.gs6
+    faces = []
+    for t in range(6):
+        # The DSW1 advective fluxes are ALREADY (i, j, km) with km at
+        # axis 2 on this lane -- the spec's np.stack(..., axis=2) is the
+        # transport phase's own stacked layout, so this is a plain slice.
+        crx_t = dsw_outs["crx_adv"][t]
+        cry_t = dsw_outs["cry_adv"][t]
+        xfx_t = dsw_outs["xfx_adv"][t]
+        yfx_t = dsw_outs["yfx_adv"][t]
+        # nord_v/damp_vt are level-invariant on this deck (n_sponge=-1);
+        # slot km is free for update_dz_d's :231-232 mutation.  The twin
+        # takes km+1 PYTHON-number sequences (its static-by-necessity
+        # contract), not the spec's np.full arrays.
+        ndif = (float(nord_v),) * (km + 1)
+        damp = (damp_vt,) * (km + 1)
+        zs_t = nh["zs"][t]
+        zh_t = nh["zh"][t]
+        ws_t = nh["ws"][t]
+        w_t = tail_outs["w"][t]
+        delz_t = delz[t]
+        pkc_t = csw_press["pkc"][t]
+        pe_t = nh["pe"][t]
+        pk3_t = nh["pk3"][t]
+        pk_t = nh["pk"][t]
+        peln_t = nh["peln"][t]
+        gs_t = gs6[t]
+        # The spec's gs_nh (gridstruct with area/rarea swapped for the
+        # exchanged planes) unpacks to the twin's explicit metric
+        # dummies: area/rarea from the exchange, dxa/dya/del6_* from
+        # ctx.gs6[t].  No duogrid/corner selector is passed -- the spec
+        # passes none, and the twin's defaults reproduce the oracle's
+        # copy_corners path.
+        zh_t, ws_t = update_dz_d(
+            ndif, damp, hord_v, bounds, km, npx, npx,
+            area6[t], rarea6[t], dp0, zs_t, zh_t,
+            crx_t, cry_t, xfx_t, yfx_t, ws_t, rdt,
+            gs_t["dxa"], gs_t["dya"], gs_t["del6_u"], gs_t["del6_v"],
+            lim_fac=1.0)
+        # trap #6: pkc -- FULL pressure out of the C stage -- is the
+        # SAME storage Riem_Solver3 overwrites with the D-stage
+        # PERTURBATION (the ppe slot) and nh_p_grad then B-grid
+        # scratches; the returned ppe is threaded forward as pkc.
+        (w_t, delz_t, zh_t, pe_t, pkc_t, pk3_t, pk_t,
+         peln_t) = riem_solver3(
+            0, dt, bounds, km, akap, cp_air, ptop, zs_t, w_t, delz_t,
+            pt6[t], delp6[t], zh_t, pe_t, pkc_t, pk3_t, pk_t, peln_t,
+            ws_t, p_fac, a_imp, use_logp=use_logp,
+            last_call=remap_step, fp_out=False)
+        if remap_step:
+            pe_t = pe_halo(pe_t, delp6[t], bd, npz=km, ptop=ptop)
+        # dyn_core.F90:1444-1448: pln_halo under use_logp, pk3_halo
+        # otherwise (an unconditional pk3_halo would overwrite log(p)
+        # halos with p**akap on a use_logp deck).
+        if use_logp:
+            pk3_t = pln_halo(pk3_t, delp6[t], bd, npz=km, ptop=ptop)
+        else:
+            pk3_t = pk3_halo(pk3_t, delp6[t], bd, npz=km, ptop=ptop,
+                             akap=akap)
+        faces.append({"zh": zh_t, "ws": ws_t, "w": w_t, "delz": delz_t,
+                      "pkc": pkc_t, "pe": pe_t, "pk3": pk3_t,
+                      "pk": pk_t, "peln": peln_t})
+    upd = stack_faces(fname, faces)
+    zh6 = upd["zh"]
+    pkc6 = upd["pkc"]
+
+    # zh + pkc duo exchanges (:1482-1483), ONE interface level at a time
+    # with all six faces present for that level -- the spec's k loop and
+    # the same one-level-at-a-time discipline as barrier 2.  Each
+    # level's exchange reads and writes only its own plane, so no
+    # iteration reads another's write; source order is preserved.
+    for k in range(km + 1):
+        zh6 = zh6.at[:, :, :, k].set(
+            _ext_scalar_planes_6(zh6[:, :, :, k], ctx))
+        pkc6 = pkc6.at[:, :, :, k].set(
+            _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+
+    # gz = zh*grav over the two-cell halo box (:1487-1494).  The spec's
+    # face loop vectorises over the leading axis of the IDENTICAL
+    # window: every face writes only its own slab and reads only that
+    # slab's zh -- no face reads another face's write.
+    i0 = bd.is_ - bd.isd
+    j0 = bd.js - bd.jsd
+    sl_i = slice(i0 - 2, i0 + n + 2)
+    sl_j = slice(j0 - 2, j0 + n + 2)
+    gz6 = nh["gz"].at[:, sl_i, sl_j, :].set(
+        zh6[:, sl_i, sl_j, :] * FV3_GRAV)
+
+    # Second pkc exchange, square_domain only (:1496-1502): between the
+    # first exchange and it only gz changes, so it is idempotent -- kept
+    # for statement-order fidelity, exactly as the spec gates it.
+    if square_domain:
+        for k in range(km + 1):
+            pkc6 = pkc6.at[:, :, :, k].set(
+                _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+
+    # nh_p_grad (:1534-1543): beta = 0 on the deck.  It takes the
+    # ORIGINAL ctx.gs6[t] (rdx/rdy metrics), not the exchanged-area
+    # gridstruct, and returns (u, v, pp, pk3, gz) -- the B-grid corner
+    # scratch of pp(=pkc)/pk3/gz rides the returned functional carry.
+    pg_faces = []
+    for t in range(6):
+        u_t, v_t, pkc_t, pk3_t, gz_t = nh_p_grad(
+            tail_outs["u"][t], tail_outs["v"][t], pkc6[t], gz6[t],
+            delp6[t], upd["pk3"][t], gs6[t], bd,
+            npx=npx, npy=npx, npz=km, dt=dt, ptop=ptop, akap=akap,
+            use_logp=use_logp, ng=ng, duogrid=True)
+        pg_faces.append({"u": u_t, "v": v_t, "pkc": pkc_t,
+                         "pk3": pk3_t, "gz": gz_t})
+    pg = stack_faces(fname, pg_faces)
+
+    nh_out = {"zh": zh6, "gz": pg["gz"], "zs": nh["zs"],
+              "pk3": pg["pk3"], "pe": upd["pe"], "pk": upd["pk"],
+              "peln": upd["peln"], "ws": upd["ws"]}
+    return {
+        "nh": nh_out,
+        "delz": upd["delz"],
+        "w": upd["w"],
+        "pkc": pg["pkc"],
+        "u": pg["u"],
+        "v": pg["v"],
+        # The spec's press list aliases the nh arrays post-mutation; the
+        # aliasing is preserved here (same values, zero copies).
+        "press": {"pe": nh_out["pe"], "pk": nh_out["pk"],
+                  "peln": nh_out["peln"], "ws": nh_out["ws"]},
+    }
+
+
+def make_dgrid_nh_pressure_phase_3d_jit(ctx, km, *, remap_step=False,
+                                        use_logp=False,
+                                        square_domain=True, cfg=None,
+                                        hord_tm=None, nord_w=None,
+                                        damp_w=None,
+                                        remap_follows=False):
+    """jit factory for :func:`dgrid_nh_pressure_phase_3d`.
+
+    Every STATIC selector is baked and validated ONCE here, so a bad
+    deck knob raises at build time, before any tracing: ``ctx`` is
+    closed over (static metrics/halo tables, per the sibling
+    convention), and ``km`` plus the branch keywords are Python-only.
+    The returned callable takes the DYNAMIC operands only::
+
+        run(csw_press, dsw_outs, tail_outs, nh, delz, dp0,
+            dt, ptop, akap, cp_air, p_fac, a_imp)
+
+    ``dt`` stays a traced argument, so a new time step does not
+    recompile the phase (convention C3).  No ``donate_argnums`` (this
+    lane is differentiable); every return is a fresh value the caller
+    threads forward as the functional NH carry.
+    """
+    fname = "make_dgrid_nh_pressure_phase_3d_jit"
+    km = require_km(fname, km)
+    for nm, v in (("remap_step", remap_step), ("use_logp", use_logp),
+                  ("square_domain", square_domain),
+                  ("remap_follows", remap_follows)):
+        require_bool(fname, nm, v)
+    _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w)
+    require_no_remap_needed(km, remap_follows=remap_follows)
+
+    def run(csw_press, dsw_outs, tail_outs, nh, delz, dp0,
+            dt, ptop, akap, cp_air, p_fac, a_imp):
+        return dgrid_nh_pressure_phase_3d(
+            ctx, csw_press, dsw_outs, tail_outs, nh, km,
+            dt=dt, ptop=ptop, akap=akap, cp_air=cp_air,
+            p_fac=p_fac, a_imp=a_imp, dp0=dp0, delz=delz,
+            remap_step=remap_step, use_logp=use_logp,
+            square_domain=square_domain, cfg=cfg, hord_tm=hord_tm,
+            nord_w=nord_w, damp_w=damp_w, remap_follows=remap_follows)
+
+    return jax.jit(run)

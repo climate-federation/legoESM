@@ -468,10 +468,21 @@ def test_tail_jit_equals_eager_and_does_not_retrace(jctx, jstate, jcsw,
     a retrace count.
     """
     eager = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
+    # Through the module's OWN factory, which is where the static/dynamic
+    # split is declared: ctx and km are baked in, dt stays traced.  A test
+    # that re-derives that split with its own jax.jit would be certifying
+    # the test's opinion instead of the module's contract -- and the first
+    # version of this gate did exactly that, handing jit the ctx OBJECT as
+    # a traced argument.
     box, wrapped = counted(jtail.dsw_tail_phase_3d)
-    fast = jax.jit(wrapped, static_argnums=(5,), static_argnames=())
-    got = fast(jctx, jstate, jcsw, jdsw, DT, KM)
-    got2 = fast(jctx, jstate, jcsw, jdsw, 0.5 * DT, KM)
+    monkey = jtail.dsw_tail_phase_3d
+    try:
+        jtail.dsw_tail_phase_3d = wrapped
+        fast = jtail.make_dsw_tail_phase_3d_jit(jctx, KM)
+        got = fast(jstate, jcsw, jdsw, DT)
+        got2 = fast(jstate, jcsw, jdsw, 0.5 * DT)
+    finally:
+        jtail.dsw_tail_phase_3d = monkey
     assert box["n"] == 1, (
         f"{box['n']} traces: dt must be DYNAMIC (convention C3), or a "
         f"new time step recompiles the whole phase")
