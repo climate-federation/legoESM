@@ -189,7 +189,7 @@ def exchange_state_halos_3d(ctx, state: dict, km: int, *, scalars: bool,
     stay stale) has no analogue -- there is nothing to substitute, and
     a context without the halo tables fails closed in ``_duo_tables``.
     """
-    require_f64_jax(state, "exchange_state_halos_3d: state")
+    require_f64_jax("exchange_state_halos_3d", state)
     tab = _duo_tables(ctx)
     out = dict(state)
     if scalars:
@@ -227,7 +227,8 @@ def build_nh_carry(ctx, km: int, hs6) -> dict:
              with ni rows, a different array from the padded hydro-geopk
              pk that field_shape("pk") describes.
     """
-    require_f64_jax(hs6, "build_nh_carry: hs6")
+    require_f64_jax("build_nh_carry",
+                    {f"hs6[{t}]": h for t, h in enumerate(hs6)})
     n, ng = ctx.n, ctx.ng
     m_a = n + 2 * ng
     hs6 = jnp.asarray(hs6, dtype=jnp.float64)   # list of faces OR stacked
@@ -314,7 +315,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     recorded sub-step 2 producing 278 non-finite delp values.
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
-    require_f64_jax(state, "acoustic_substep_3d: state")
+    require_f64_jax("acoustic_substep_3d", state)
     if a2b_ord not in (2, 4):
         raise ValueError(
             f"acoustic_substep_3d: unknown a2b_ord {a2b_ord!r}")
@@ -324,7 +325,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
             "acoustic_substep_3d: hydrostatic=False needs the persistent "
             "nh carry (build_nh_carry) and dp0 (dp_ref)")
     if not hydrostatic:
-        require_f64_jax(nh, "acoustic_substep_3d: nh")
+        require_f64_jax("acoustic_substep_3d[nh]", nh)
 
     tab = _duo_tables(ctx)
     bd = ctx.bd
@@ -660,7 +661,11 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
     ``hydrostatic=False`` with ``nh=None`` builds the carry from
     ``ctx.hs6`` via build_nh_carry (``zs = phis / grav``, D5).
     """
-    require_f64_jax(ctx)  # R3: reads only static dtype information
+    # The f64 gate belongs on the ARRAYS, and it runs inside
+    # acoustic_substep_3d on the state and the carry.  The first draft
+    # called `require_f64_jax(ctx)` here -- ctx is the context OBJECT,
+    # not a dict of arrays, and the helper's signature is
+    # (fname, arrays), so this raised TypeError on the first call.
     require_no_remap_needed(km, remap_follows=remap_follows)
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
@@ -767,7 +772,8 @@ def make_acoustic_loop_3d_jit(ctx, km, *, n_split, cfg=None,
     them in Python (R12).  No donate_argnums (R3); the f64 gate runs
     once here on static dtypes, not per call.
     """
-    require_f64_jax(ctx)
+    # (see the note in acoustic_loop_3d: the f64 gate runs on the
+    # arrays inside the sub-step, not on the context object.)
     require_no_remap_needed(km, remap_follows=remap_follows)
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
