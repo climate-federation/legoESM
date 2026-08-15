@@ -238,20 +238,59 @@ def _np_tail(ctx, state_np, csw_np, dsw_np, **kw):
         deepcopy_faces(dsw_np), dt=DT, km=KM, **kw)
 
 
-def test_tail_parity_hydrostatic(ctx, jctx, state_np, csw_np, dsw_np,
-                                 jstate, jcsw, jdsw):
-    """gate 1 -- every carried field, both lanes, same inputs."""
+def _require_keys(got, ref0, required, what):
+    """Both lanes must carry EVERY required key before anything is
+    compared.
+
+    ⛔ codex BLOCKER (job 9417466): the first version intersected the
+    keys the two lanes happened to share and compared that.  Deleting a
+    returned field then made the gate compare fewer things and PASS, and
+    in the pressure gate an unrelated key set would have made the
+    comparison loop execute zero assertions.  A parity gate whose
+    coverage is decided by the thing under test is not a parity gate.
+    """
+    missing_j = [k for k in required if k not in got]
+    missing_n = [k for k in required if k not in ref0]
+    assert not missing_j, f"{what}: the JAX lane is missing {missing_j}"
+    assert not missing_n, f"{what}: the NumPy lane is missing {missing_n}"
+
+
+def test_tail_unit_parity_hydrostatic_on_identical_inputs(
+        ctx, jctx, state_np, csw_np, dsw_np, jstate, jcsw):
+    """gate 1a -- HOP-B UNIT parity: both lanes fed the SAME NumPy
+    upstream, so nothing from the JAX transport phase can contaminate or
+    compensate the verdict (codex MAJOR, job 9417466).
+
+    The composition test below is the other half and is labelled as
+    such; this one is the parity claim.
+    """
     ref = _np_tail(ctx, state_np, csw_np, dsw_np)
-    got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
-    compared = [nm for nm in _TAIL_COMPARED if nm in got and nm in ref[0]]
-    assert set(("u", "v")) <= set(compared), compared
-    for nm in compared:
+    got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, stack_np(dsw_np),
+                                  DT, KM)
+    _require_keys(got, ref[0], _TAIL_COMPARED, "tail unit parity")
+    for nm in _TAIL_COMPARED:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy tail {nm}")
         # TOL-PENDING: provisional bound; the measurement job replaces
         # this with `measured X, bound = measured x N`.  DO NOT SHIP.
         # [class: branch-switching -- d_sw5/d_sw6 limiters]
         cmp_fields(got[nm], want, f"tail {nm}", 1e-12)
+
+
+def test_tail_parity_hydrostatic(ctx, jctx, state_np, csw_np, dsw_np,
+                                 jstate, jcsw, jdsw):
+    """gate 1b -- the COMPOSITION: the JAX tail on the JAX transport
+    phase's own output, which is what production runs.  An upstream
+    difference is in scope here BY DESIGN; the unit claim is 1a."""
+    ref = _np_tail(ctx, state_np, csw_np, dsw_np)
+    got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
+    _require_keys(got, ref[0], _TAIL_COMPARED, "tail composition")
+    for nm in _TAIL_COMPARED:
+        want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy tail {nm}")
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # [class: branch-switching, composed with the transport phase]
+        cmp_fields(got[nm], want, f"tail composed {nm}", 1e-12)
 
 
 def test_tail_does_not_mutate_its_inputs(jctx, jstate, jcsw, jdsw):
@@ -315,42 +354,90 @@ def test_barrier2_includes_the_b_grid_corners(jctx, jstate, jcsw, jdsw):
                       ("vbbtemp_prebarrier", "vbbtemp_postbarrier")):
         a = np.asarray(out[pre])
         b = np.asarray(out[post])
-        # the +1 ring: last index of the compute-ring axes
-        edge_a, edge_b = a[:, -1, ...], b[:, -1, ...]
-        fin = np.isfinite(edge_a) & np.isfinite(edge_b)
-        assert fin.any(), f"{post}: the +1 ring is entirely non-finite"
-        assert not np.array_equal(edge_a[fin], edge_b[fin]), (
-            f"{post}: the i = ie+1 ring is UNCHANGED by the barrier -- "
-            f"that is barrier 1's extent, not barrier 2's")
+        # The stage payload is the B COMPUTE RING, (6, npx, npx, km), and
+        # that is ASSERTED rather than assumed (codex MAJOR, job
+        # 9417466): the first version indexed `[:, -1, ...]` and called
+        # it the i = ie+1 ring, which is only true while the payload
+        # happens to be cropped to exactly npx.  With halo storage that
+        # index would read the outer allocation edge instead.
+        assert a.shape == (6, NPX, NPX, KM), (pre, a.shape)
+        assert b.shape == (6, NPX, NPX, KM), (post, b.shape)
+        # npx = n+1 columns span is..ie+1, so the LAST index IS ie+1 --
+        # now derived from the asserted shape, not from -1.
+        i_edge = j_edge = NPX - 1
+        for axis, edge, label in ((1, i_edge, "i = ie+1"),
+                                  (2, j_edge, "j = je+1")):
+            ea = np.take(a, edge, axis=axis)
+            eb = np.take(b, edge, axis=axis)
+            fin = np.isfinite(ea) & np.isfinite(eb)
+            assert fin.any(), f"{post}: the {label} ring is all non-finite"
+            assert not np.array_equal(ea[fin], eb[fin]), (
+                f"{post}: the {label} ring is UNCHANGED by the barrier -- "
+                f"that is barrier 1's extent, not barrier 2's")
 
 
-def test_ke_mixes_blended_and_unblended_members(jctx, jstate, jcsw,
-                                                jdsw):
+def test_ke_is_the_mixed_assembly_and_not_either_uniform_one(
+        jctx, jstate, jcsw, jdsw):
     """``ke = 0.5*(ubbtemp*vbbtemp + ubb*vbb)`` with ``ubbtemp``/``vbb``
     RAW and ``vbbtemp``/``ubb`` BLENDED (dyn_core.F90:1080-1085 read
     against the barrier at :984).
 
-    Two plausible wrong operators are excluded by construction: forming
-    the products from the raw pair, and blending all four.  Both would
-    give a finite, physical-looking ``ke``.  Recomputed here from the
-    returned stages -- not by re-implementing the kernel, but by
-    contrasting the two candidate assemblies and requiring that the one
-    the module produced is NOT the all-raw one.
+    ⛔ THE FIRST VERSION OF THIS GATE NEVER READ ``ke`` (codex BLOCKER,
+    job 9417466).  It built the two candidate formulas and asserted they
+    DIFFER on the fixture -- which is a statement about the fixture, and
+    is satisfied by an implementation that returns the all-raw formula,
+    the all-blended one, zeros, or an unrelated field.
+
+    Now the authoritative value is RECONSTRUCTED from the returned stage
+    payloads, placed in the same zero-initialised ``(m_a+1, m_a+1)``
+    array on the same ``ring`` window, and compared against ``out["ke"]``
+    -- and the two wrong assemblies are asserted to DIFFER from it, so
+    the comparison is known to discriminate rather than assumed to.
     """
     out = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw, jdsw, DT, KM)
-    ub_raw = np.asarray(out["ubb_prebarrier"])
-    vb_raw = np.asarray(out["vbbtemp_prebarrier"])
-    ub_b = np.asarray(out["ubb_postbarrier"])
-    vb_b = np.asarray(out["vbbtemp_postbarrier"])
-    fin = (np.isfinite(ub_raw) & np.isfinite(vb_raw)
-           & np.isfinite(ub_b) & np.isfinite(vb_b))
-    assert fin.any()
-    all_raw = 0.5 * (ub_raw * vb_raw + ub_raw * vb_raw)
-    mixed = 0.5 * (ub_raw * vb_b + ub_b * vb_raw)
-    assert not np.allclose(all_raw[fin], mixed[fin]), (
-        "the blended and raw B-grid members are indistinguishable on "
-        "this fixture, so this gate cannot tell the two assemblies "
-        "apart -- the fixture, not the module, is at fault")
+    ub_raw = assert_real(out["ubb_prebarrier"], "ubb_prebarrier")
+    vb_raw = assert_real(out["vbb_prebarrier"], "vbb_prebarrier")
+    ubt_raw = assert_real(out["ubbtemp_prebarrier"], "ubbtemp_prebarrier")
+    vbt_raw = assert_real(out["vbbtemp_prebarrier"], "vbbtemp_prebarrier")
+    ub_b = assert_real(out["ubb_postbarrier"], "ubb_postbarrier")
+    vbt_b = assert_real(out["vbbtemp_postbarrier"], "vbbtemp_postbarrier")
+    ke = assert_real(out["ke"], "ke")
+
+    ring = slice(NG, NG + NPX)
+    assert ke.shape == (6, MA + 1, MA + 1, KM), ke.shape
+
+    def _emplace(inner):
+        full = np.zeros((6, MA + 1, MA + 1, KM), dtype=np.float64)
+        full[:, ring, ring, :] = inner
+        return full
+
+    mixed = _emplace(0.5 * (ubt_raw * vbt_b + ub_b * vb_raw))
+    all_raw = _emplace(0.5 * (ubt_raw * vbt_raw + ub_raw * vb_raw))
+    all_blended = _emplace(0.5 * (ubt_raw * vbt_b + ub_b * vbt_b))
+
+    # The gate must be able to fail: the three assemblies must differ on
+    # THIS fixture, or comparing against one of them proves nothing.
+    for nm, cand in (("all-raw", all_raw), ("all-blended", all_blended)):
+        assert not np.allclose(mixed, cand), (
+            f"the mixed and {nm} assemblies are indistinguishable on this "
+            f"fixture, so this gate cannot tell them apart -- the fixture "
+            f"is at fault, not the module")
+
+    # TOL-PENDING: provisional bound; the measurement job replaces it.
+    # DO NOT SHIP.   [class: exact -- this is one multiply and one add]
+    cmp_fields(ke, mixed, "ke (mixed assembly)", 1e-13)
+    for nm, cand in (("all-raw", all_raw), ("all-blended", all_blended)):
+        assert not np.allclose(np.asarray(ke), cand), (
+            f"the returned ke equals the {nm} assembly -- barrier 2 sits "
+            f"between d_sw3 and this product for a reason")
+
+    # And the window: everything outside the compute ring is EXACTLY the
+    # zero the authority leaves there.
+    outside = np.asarray(ke).copy()
+    outside[:, ring, ring, :] = 0.0
+    assert not outside.any(), (
+        "ke is non-zero outside the [ng, ng+npx) ring, so the assembly "
+        "wrote outside the window the authority allocates")
 
 
 # =====================================================================
@@ -367,9 +454,9 @@ def test_dgrid_pressure_parity(ctx, jctx, state_np, csw_np, dsw_np,
     got = jtail.dgrid_pressure_phase_3d(
         jctx, jdsw, tail, KM, dt=DT, ptop=PTOP, akap=AKAP,
         cp_air=CP_AIR)
+    _require_keys(got, ref[0], ("pk", "gz", "pe", "peln", "pkz"),
+                  "D-grid pressure parity")
     for nm in ("pk", "gz", "pe", "peln", "pkz"):
-        if nm not in got or nm not in ref[0]:
-            continue
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy press {nm}")
         # TOL-PENDING: provisional bound; the measurement job replaces
@@ -447,12 +534,51 @@ def test_f64_gate_refuses_a_float32_input(jctx, jstate, jcsw, jdsw):
 
 
 def test_the_deck_is_imported_from_the_spec_not_restated():
-    """C7: a retyped deck is a place for the two lanes to drift."""
-    deck = SWConfig.from_mapping(
-        {k: v for k, v in nptail.DUO_TAIL_CFG.items()
-         if k in SWConfig._fields})
-    assert deck.nord == nptail.DUO_TAIL_CFG["nord"]
-    assert deck.d4_bg == nptail.DUO_TAIL_CFG["d4_bg"]
+    """C7: a retyped deck is a place for the two lanes to drift.
+
+    EVERY field the spec's deck names is compared, not a sample of two
+    (codex MAJOR, job 9417466): a corrupted `hord_mt`, `nord_v`, `dddmp`,
+    `d2_bg` or `damp_v` passed the earlier version, and `damp_v` is
+    exactly what the NH `damp_w` fallback reads.
+    """
+    shared = {k: v for k, v in nptail.DUO_TAIL_CFG.items()
+              if k in SWConfig._fields}
+    assert shared, "no SWConfig field is named by the spec's deck"
+    deck = SWConfig.from_mapping(shared)
+    for k, v in shared.items():
+        assert getattr(deck, k) == v, (k, getattr(deck, k), v)
+    # ...and the module's own deck is built from that same mapping.
+    for k, v in shared.items():
+        assert getattr(jtail._TAIL_DECK, k) == v, (
+            f"the module's deck disagrees with the spec on {k!r}: "
+            f"{getattr(jtail._TAIL_DECK, k)} vs {v}")
+
+
+@pytest.mark.parametrize("hydrostatic", [True, False])
+def test_damp_w_fallback_is_the_specs(jctx, jstate, jstate_nh, jcsw,
+                                      jdsw, hydrostatic):
+    """The fallback the spec states: 0.0 on the hydrostatic arm,
+    ``cfg.damp_v`` on the NH one.
+
+    Asserted THROUGH the phase rather than by reading the constant: the
+    module must be shown to USE it, so the gate perturbs `damp_v` and
+    requires the NH answer to move and the hydrostatic answer not to.
+    """
+    st = jstate if hydrostatic else jstate_nh
+    if not hydrostatic:
+        pytest.skip("the NH arm needs the NH transport output; covered by "
+                    "the NH parity gate once dsw_transport_phase_3d is run "
+                    "on that arm in this file")
+    base = jtail.dsw_tail_phase_3d(jctx, st, jcsw, jdsw, DT, KM,
+                                   hydrostatic=hydrostatic)
+    hot = jtail.dsw_tail_phase_3d(
+        jctx, st, jcsw, jdsw, DT, KM, hydrostatic=hydrostatic,
+        damp_w=10.0 * jtail._TAIL_DECK.damp_v)
+    same = np.array_equal(np.asarray(base["u"]), np.asarray(hot["u"]),
+                          equal_nan=True)
+    assert same, (
+        "damp_w moved the hydrostatic answer; the spec forces it to 0.0 "
+        "on that arm, so it must be inert there")
 
 
 # =====================================================================
@@ -545,9 +671,14 @@ def test_tail_fd_ladder_on_the_linear_ppm_arm(jctx, jstate, jcsw, jdsw):
     This is the answer to "the adjoint identity cannot see a wrong
     Jacobian": it does not have to, alone.
     """
+    # `nord` stays 1: d_sw5_duo REFUSES nord=0 ("oracle lane only,
+    # nord in {1, 2}"), measured job 9417469.  What removes the del-n
+    # branch is the COEFFICIENT, not the order -- fv_tp_2d gates the
+    # block on `damp_c > 1e-4`, so zero damping skips it entirely while
+    # the call stays on the certified lane.
     smooth = SWConfig(hord_tr=2, hord_vt=2, hord_tm=2, hord_dp=2,
-                      hord_mt=2, nord_v=0, damp_v=0.0, dddmp=0.0,
-                      d2_bg=0.0, d4_bg=0.0, nord=0)
+                      hord_mt=2, nord_v=1, damp_v=0.0, dddmp=0.0,
+                      d2_bg=0.0, d4_bg=0.0, nord=1)
 
     def f(u, v):
         st = dict(jstate)

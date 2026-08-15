@@ -27,8 +27,6 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
-
-from tests.grids.fv3_gate_helpers import check_adjoint  # noqa: E402
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # noqa: E402
 from legoesm.core.fv3_nh_core import (  # noqa: E402
     edge_profile as edge_jax,
@@ -68,6 +66,10 @@ from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
     FV3_RDGAS,
 )
 
+from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_fd_truncation_scaling,
+    check_adjoint,
+)
 from tests.grids.test_fv3_native_nh_core import (  # noqa: E402
     _BD,
     _BDR,
@@ -2059,7 +2061,18 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
         return _loss(*_call(ndif, damp, dp0_, crx_, cry_, xfx_, yfx_,
                             zh_, *ja[6:]))
 
-    check_grads(f, tuple(ja[:6]), order=2, modes=("fwd", "rev"))
+    # The TRANSPORT group gets the same treatment as the metric group
+    # below, and for the same measured reason: job 9417437 failed this
+    # order-2 check at 2.106e-05 relative on a ONE-ELEMENT tangent
+    # (207.603485 vs 207.599113) -- the identical signature the triage
+    # probe already settled for `g`. Both groups run on the hord = 2
+    # LINEAR arm, so the eps^2 ladder is meaningful here and a wrong
+    # reverse mode would leave its gap flat in eps.
+    check_adjoint("update_dz_d transport", f, tuple(ja[:6]), 1.0e-12)
+    assert_fd_truncation_scaling("update_dz_d transport", f,
+                                 tuple(ja[:6]),
+                                 steps=(4.0e-4, 2.0e-4, 1.0e-4))
+    check_grads(f, tuple(ja[:6]), order=1, modes=("fwd", "rev"))
 
     def g(zs_, area_, rarea_, dxa_, dya_, du_, dv_):
         return _loss(*_call(ndif, damp, *ja[:6], zs_, area_, rarea_,
@@ -2086,6 +2099,12 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
     # kept as the smooth-region supplement, since an FD-resolution
     # failure at order 1 could not be confused with a wrong Jacobian.
     check_adjoint("update_dz_d metrics", g, tuple(ja[6:13]), 1.0e-12)
+    # MEASURED (triage block P2): ratios 4.000 / 4.000 at this ladder,
+    # i.e. textbook eps^2 truncation, which is what makes the order-2
+    # failure the finite difference's doing.
+    assert_fd_truncation_scaling("update_dz_d metrics", g,
+                                 tuple(ja[6:13]),
+                                 steps=(4.0e-4, 2.0e-4, 1.0e-4))
     check_grads(g, tuple(ja[6:13]), order=1, modes=("fwd", "rev"))
 
     # ``ws`` is intent(out) in the oracle and every compute-window cell
