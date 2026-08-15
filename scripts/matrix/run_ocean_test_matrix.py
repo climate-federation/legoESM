@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
@@ -580,8 +581,19 @@ TEST_MATRIX = _build_test_matrix()
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
+#: The ONE status->icon map.  Both ``record`` and the end-of-run summary read
+#: it, so a new status can never be added to one and forgotten in the other --
+#: the failure mode codex caught here, where a missing XFAIL key raised
+#: KeyError inside ``record``, the caller's ``except`` turned it into ERROR,
+#: and the waiver silently made the suite MORE red instead of less.
+STATUS_ICONS: dict[str, str] = {
+    "PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+    "XFAIL": "x ", "XPASS": "XX",
+}
+
+
 def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
+    icon = STATUS_ICONS[status]
     ALL_RESULTS.append({
         "test": tc.case, "grid": tc.grid_type,
         "resolution": tc.resolution, "status": status,
@@ -6568,6 +6580,107 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 # diagnostics so we don't repeat ~100 lines of boilerplate per case.
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Known failures (mirrors run_atmosphere_test_matrix.KNOWN_FAILURES / #1029)
+# ---------------------------------------------------------------------------
+# A waived FAIL becomes XFAIL; a full-length PASS becomes XPASS and is LOUD,
+# because an entry that has silently started passing is an entry that must be
+# removed.  ERROR, SKIP, short runs and any differently-caused FAIL pass
+# through unchanged, so the waiver cannot mask an unrelated regression.
+KNOWN_FAILURES: dict[tuple[str, str, str], dict] = {
+    # Centring the barotropic averaging window on t+dt (#1609) restored the
+    # barotropic mode to FULL forcing: the old half window applied only ~53%
+    # of the slow baroclinic forcing, advanced eta by ~53% of a step, and
+    # returned ~53% of the transport.  This case was stable only because of
+    # that under-forcing, and the correction crosses a genuine stability
+    # boundary of the mode split.
+    #
+    # CONFIRMED one variable at a time (see
+    # scripts/validate/ocean_fidelity/eady_channel_onset_structure.py):
+    # running the SAME 2n-1 substep loop with the OLD weights zero-padded
+    # past j = n -- identical trajectory, substep count, window duration,
+    # diffusion and divergence damping -- PASSES and reproduces the untouched
+    # baseline to five digits (2.6820 m/s, 3.70e-12 against 3.71e-12).  Only
+    # the weight centroid differs.
+    #
+    # REFUTED as remedies, each by its own arm: shrinking the baroclinic step
+    # (halving dt buys 11% more physical time, 67.4 -> 74.7 days); changing
+    # the substep count (onset sits at step 19400 for 30, 60 and 120); and
+    # the divergence damping, which is load-bearing the OTHER way (0.05 fails
+    # at 19400, 0.025 and 0.0 both go non-finite).
+    #
+    # The owed fix is loop closure, NOT a revert: make the depth-mean of the
+    # corrected 3-D velocity equal the filtered barotropic transport by
+    # construction (SM2005 / MOM6).  The earlier velocity-only substitution
+    # merely DELAYED blow-up (19400 -> 23500), the signature of a partially
+    # closed loop -- it corrected the velocity while leaving eta and the
+    # forcing at half speed.  Remove this entry when that lands.
+    # min_days 68.0 deliberately EXCEEDS the 67.36-day onset, so the 60-day
+    # --quick lane is NOT waived: it stops before the blow-up and must keep
+    # PASSING on the Eady growth rate.  A quick-lane failure is by
+    # construction a DIFFERENT bug and stays red (GLM-5.2 review).
+    ("eady_uniform", "mpas_channel", "70km"): {
+        "issue": "#1609", "min_days": 68.0, "expect_day_range": (60.0, 75.0)},
+}
+
+
+def _blowup_day_from_results(out_dir) -> float | None:
+    """Parse the blow-up day this case recorded, or None if it did not blow up.
+
+    ``_write_results_txt`` prepends ``BLOWUP at step N (day D)`` to the notes
+    whenever a FAIL carries blow-up info, so the day is on disk even though the
+    runner's in-memory notes only carry the last clean diagnostic.  Returning
+    None (missing file, unreadable, no marker) FAILS CLOSED: no waiver.
+    """
+    if out_dir is None:
+        return None
+    try:
+        txt = (Path(out_dir) / "results.txt").read_text()
+    except (OSError, ValueError, TypeError):
+        return None
+    m = re.search(r"BLOWUP at step \d+ \(day ([0-9.]+)\)", txt)
+    if m is None:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None   # malformed marker (e.g. "1.2.3"): fail closed, no waiver
+
+
+def _apply_known_failure(tc: "TestCase", status: str, days: float,
+                         notes: str = "", out_dir=None) -> str:
+    """Remap a waived FAIL to XFAIL and a full-length PASS to XPASS.
+
+    The waiver requires ALL of:
+
+    * an entry keyed on this exact ``(case, grid_type, resolution)``;
+    * a run at least ``min_days`` long -- shorter lanes cannot reach the known
+      blow-up, so a failure there is a DIFFERENT bug and stays red;
+    * a recorded blow-up whose DAY falls inside ``expect_day_range``.
+
+    The day band is a POSITIVE signature of the known mechanism.  Matching on
+    the notes text was rejected in review: this case emits two different
+    failure notes depending on which detector fires first ("Non-finite values
+    in u" against a max_speed threshold string), and no substring covers both
+    without also covering every unrelated regression.
+
+    Anything else -- ERROR, SKIP, a short run, a blow-up outside the band, or a
+    FAIL with no recorded blow-up at all -- is returned unchanged.
+    """
+    entry = KNOWN_FAILURES.get((tc.case, tc.grid_type, tc.resolution))
+    if entry is None or days < entry["min_days"]:
+        return status
+    if status == "PASS":
+        return "XPASS"
+    if status != "FAIL":
+        return status   # ERROR / SKIP pass through
+    lo, hi = entry["expect_day_range"]
+    day = _blowup_day_from_results(out_dir)
+    if day is None or not (lo <= day <= hi):
+        return "FAIL"   # fail closed: a differently-timed failure is NOT waived
+    return "XFAIL"
+
+
 def _run_experiment_via_registry(
     tc, output_dir, days, *,
     exp_config,
@@ -9657,6 +9770,8 @@ def main():
 
         try:
             status, wall, notes = runner(tc, out_dir, days)
+            status = _apply_known_failure(tc, status, days, notes,
+                                          out_dir)
             record(tc, status, wall, notes)
         except NotImplementedError as e:
             record(tc, "SKIP", 0, str(e)[:120])
@@ -9703,10 +9818,9 @@ def main():
           f"{'Resolution':<10}  {'Time':>8}  Notes")
     print("-" * 90)
 
-    n_pass = n_fail = n_error = n_skip = 0
+    n_pass = n_fail = n_error = n_skip = n_xfail = n_xpass = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
-                "SKIP": "--"}[r["status"]]
+        icon = STATUS_ICONS[r["status"]]
         print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
               f"{r['test']:<22}  {r['resolution']:<10}  "
               f"{r['wall_time']:7.1f}s  {r['notes']}")
@@ -9716,12 +9830,17 @@ def main():
             n_fail += 1
         elif r["status"] == "SKIP":
             n_skip += 1
+        elif r["status"] == "XFAIL":
+            n_xfail += 1
+        elif r["status"] == "XPASS":
+            n_xpass += 1
         else:
             n_error += 1
 
     print("-" * 90)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
           f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
           f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
@@ -9764,6 +9883,7 @@ def main():
         json.dump({
             "results": ALL_RESULTS, "total_wall_time": total_wall,
             "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
+            "n_xfail": n_xfail, "n_xpass": n_xpass,
             "n_error": n_error, "quick_mode": args.quick,
             "levels": DEFAULT_NLEV, "dt": DEFAULT_DT,
         }, f, indent=2)
@@ -9772,6 +9892,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
                 f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
                 f"ERROR: {n_error}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
         f.write(f"Levels: {DEFAULT_NLEV}, dt: {DEFAULT_DT}s\n")
@@ -9827,7 +9948,14 @@ def main():
     # Generate rest-state cross-variant comparison
     _create_rest_state_cross_variant_comparison(output_base)
 
-    if n_fail > 0 or n_error > 0:
+    # XPASS gates too: a known-failure entry that has started passing is stale,
+    # and a stale waiver silently hides the next real regression on that case.
+    if n_fail > 0 or n_error > 0 or n_xpass > 0:
+        if n_xpass > 0:
+            print(f"  XPASS: {n_xpass} known-failure entr"
+                  f"{'y has' if n_xpass == 1 else 'ies have'} started passing "
+                  f"-- remove {'it' if n_xpass == 1 else 'them'} from "
+                  f"KNOWN_FAILURES.")
         sys.exit(1)
 
 
