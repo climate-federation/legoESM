@@ -81,10 +81,38 @@ except SyntaxError as exc:
 defs = [n.name for n in mod.body if isinstance(n, ast.FunctionDef)]
 print(f"PARSES OK: {len(src)} chars, {src.count(chr(10))} lines")
 print("top-level defs:", defs)
-want = {"A": ["dsw_tail_phase_3d"],
-        "B": ["dgrid_pressure_phase_3d"],
-        "C": ["nh_exchanged_area6", "dgrid_nh_pressure_phase_3d"]}["$PART"]
+want = {"A": ["dsw_tail_phase_3d", "make_dsw_tail_phase_3d_jit"],
+        "B": ["dgrid_pressure_phase_3d", "make_dgrid_pressure_phase_3d_jit"],
+        "C": ["nh_exchanged_area6", "dgrid_nh_pressure_phase_3d",
+              "make_dgrid_nh_pressure_phase_3d_jit"]}["$PART"]
 missing = [w for w in want if w not in defs]
 print("MISSING PUBLIC ROUTINES:", missing if missing else "none")
+# TRUNCATION CHECK, and it is not paranoia: attempt 1 of job 9417381 was
+# cut off mid-function at \`u_lev, v_\`, which is a VALID tuple expression,
+# so ast.parse accepted it and the old gate printed "PARSES OK / MISSING
+# none" on a file that stops in the middle of a loop body. A completeness
+# gate that a truncated file can pass is the campaign's own recurring
+# defect class. Three independent checks:
+#   * the jit FACTORY must exist -- it is the last thing in the file, so
+#     its presence means the tail arrived (already in \`want\` above);
+#   * the last top-level statement must END on the last non-blank line;
+#   * the final line must not be a bare expression statement, which is
+#     what a mid-expression cut looks like after ast.parse forgives it.
+lines = src.rstrip().splitlines()
+last_node = mod.body[-1] if mod.body else None
+ok = True
+if last_node is None or getattr(last_node, "end_lineno", 0) < len(lines):
+    print(f"TRUNCATED: last top-level node ends at line "
+          f"{getattr(last_node, 'end_lineno', 0)} of {len(lines)}")
+    ok = False
+tail = ast.parse(src).body[-1]
+if isinstance(tail, ast.Expr) and not isinstance(tail.value, ast.Constant):
+    print(f"TRUNCATED: file ends in a bare expression "
+          f"(line {tail.lineno}) -- a mid-expression cut")
+    ok = False
+if missing:
+    ok = False
+print("COMPLETENESS:", "OK" if ok else "FAILED")
+sys.exit(0 if ok else 1)
 PYEOF
 echo GLM_CODE_DONE
