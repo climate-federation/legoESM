@@ -71,9 +71,9 @@ def test_numeric_leaves_drops_non_inexact():
 def test_states_span_several_columns_with_seeded_condensate():
     states = build_states(_NLEV)
     assert len(states) >= 4, "one column cannot support a DEAD verdict"
-    names = {n for n, _s, _sig in states}
+    names = {n for n, _s, _sig, _g in states}
     assert len(names) == len(states)
-    for _name, state, _sigma in states:
+    for _name, state, _sigma, _grid in states:
         for species in ("q_c", "q_r", "q_i", "q_s"):
             assert species in state.tracers
             # Seeded non-zero: a rate proportional to a species that is exactly
@@ -133,3 +133,23 @@ def test_tunable_object_unwraps_clubb_but_passes_others_through():
     turb = _subconfig_of(_single_scheme_config("turbulence", "clubb"),
                          "turbulence")
     assert _tunable_object(turb) is turb.params
+
+
+def test_every_state_carries_a_grid():
+    """Gravity-wave drag and radiation read ``grid_lat`` off it.  Passing None
+    made all 36 GWD parameters raise during tracing and read as
+    non-differentiable — a statement about the probe, not the model."""
+    for _name, _state, _sigma, grid in build_states(_NLEV):
+        assert hasattr(grid, "grid_lat")
+        assert hasattr(grid, "grid_lon")
+
+
+@pytest.mark.slow
+def test_gravity_wave_drag_traces_now():
+    """The regression for the 36 false verdicts: GWD must produce a verdict,
+    not a trace failure."""
+    grads, note = scheme_gradients(
+        "gravity_wave_drag", "rayleigh", "atm.gwd.RayleighConfig",
+        nlev=_NLEV, dt=_DT, states=build_states(_NLEV))
+    assert note == "", f"gravity-wave drag still fails to trace: {note}"
+    assert grads

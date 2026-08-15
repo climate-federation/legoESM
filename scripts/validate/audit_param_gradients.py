@@ -49,9 +49,15 @@ THE FOUR OUTCOMES, and why they are not one outcome
               path from the parameter to the output in these states.  Either
               the field is read by no code at all, or it sits behind a
               default-off flag.
-``nondiff``   the gradient is non-finite, or tracing raised — typically a
-              Python ``if`` on the traced leaf inside a factory.  A real bug
-              for any gradient-based trainer.
+``nondiff``   the gradient is non-finite — typically a Python ``if`` on the
+              traced leaf inside a factory.  A real bug for any gradient-based
+              trainer.
+``harness``   tracing raised for a reason that is the HARNESS's, not the
+              model's — a missing input this bare-column driver does not
+              supply.  Reported separately and never counted as nondiff:
+              conflating "the model cannot differentiate this" with "my probe
+              did not feed it a grid" would publish 36 false defects, which is
+              exactly what the first run of this audit did.
 
 WHAT A ``dead`` VERDICT DOES AND DOES NOT MEAN.  Inherited honestly from the
 convection probe this generalizes, and every one of these limits is still
@@ -82,6 +88,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from pathlib import Path
 
 import jax
@@ -219,7 +226,14 @@ def _column(nlev: int, *, T_sfc: float, rh: float, lapse_K_km: float,
         phis=Field(data=jnp.zeros((1, 1, 1)), name="phis", dims=dims3),
         tracers=tracers,
     )
-    return name, state, sigma
+    # A minimal grid.  Gravity-wave drag and radiation read ``grid_lat`` /
+    # ``grid_lon`` off it; passing None makes every one of their parameters
+    # raise during tracing and read as non-differentiable, which is a
+    # statement about this probe and not about the model.  Placed at the
+    # equator because the columns above are tropical.
+    grid = SimpleNamespace(
+        grid_lat=jnp.zeros((1, 1, 1)), grid_lon=jnp.zeros((1, 1, 1)))
+    return name, state, sigma, grid
 
 
 def build_states(nlev: int):
@@ -388,7 +402,7 @@ def scheme_gradients(
         return {}, "no spec'd parameters"
     raw0 = {c.name: params.raw_values[c.name] for c in constraints}
 
-    def loss_for(state, sigma, weights_holder):
+    def loss_for(state, sigma, grid, weights_holder):
         def loss(raw):
             trial = TrainablePhysicsParams(raw_values=raw,
                                            constraints=constraints)
@@ -398,7 +412,7 @@ def scheme_gradients(
             cfg = _single_scheme_config(category, scheme,
                                         _rewrap(base_sub, tuned))
             fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
-            tend, carry = fn(state, None, sigma)
+            tend, carry = fn(state, grid, sigma)
             leaves = _numeric_leaves((tend, carry))
             if not leaves:
                 return jnp.asarray(0.0, dtype=jnp.float64)
@@ -412,13 +426,13 @@ def scheme_gradients(
     best = {c.name: 0.0 for c in constraints}
     for p in range(N_PROJECTIONS):
         key = jax.random.PRNGKey(PROJECTION_SEED + p)
-        for _name, state, sigma in states:
+        for _name, state, sigma, grid in states:
             holder = {"w": None, "key": key}
             try:
                 # Same executable-accumulation hazard as the sweep below: one
                 # fresh reverse-mode program per (scheme, projection, state).
                 jax.clear_caches()
-                grads = jax.grad(loss_for(state, sigma, holder))(raw0)
+                grads = jax.grad(loss_for(state, sigma, grid, holder))(raw0)
             except Exception as exc:  # noqa: BLE001 - the failure IS a verdict
                 return ({c.name: float("nan") for c in constraints},
                         f"{type(exc).__name__}: {exc}"[:200])
@@ -465,8 +479,8 @@ def finite_difference_response(
         cfg = _single_scheme_config(category, scheme, _rewrap(base_sub, tuned))
         fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
         out = []
-        for _name, state, sigma in states:
-            tend, carry = fn(state, None, sigma)
+        for _name, state, sigma, grid in states:
+            tend, carry = fn(state, grid, sigma)
             out.append([np.asarray(leaf, dtype=float)
                         for leaf in _numeric_leaves((tend, carry))])
         return out
@@ -523,7 +537,12 @@ def audit(
             g = grads.get(name, 0.0)
             fd = float("nan")
             if note:
-                verdict = "nondiff"
+                # Tracing raised.  An AttributeError on a field this bare
+                # column does not supply is the HARNESS's failure; anything
+                # else (a Python branch on a traced leaf, a shape error from
+                # the parameter itself) is the model's.
+                verdict = ("harness" if "AttributeError" in note
+                           else "nondiff")
             elif np.isnan(g):
                 verdict = "nondiff"
             elif g > 0.0:
@@ -576,8 +595,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("no parameters audited — the registry or the scheme "
                          "map resolved empty, which is itself a defect")
 
-    order = {"nondiff": 0, "dead": 1, "blocked": 2,
-             "zero_grad_unclassified": 3, "live": 4}
+    order = {"nondiff": 0, "dead": 1, "blocked": 2, "harness": 3,
+             "zero_grad_unclassified": 4, "live": 5}
     print()
     print(f"{'parameter':58s} {'tier':>4s} {'|dL/dp|':>11s} {'fd':>11s}  verdict")
     print("-" * 100)
