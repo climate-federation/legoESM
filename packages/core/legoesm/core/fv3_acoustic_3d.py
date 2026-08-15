@@ -484,8 +484,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     if hydrostatic:
         # S16 keys follow the dsw lane's <field>_pre<stage> convention;
         # dgrid_pressure_phase_3d returns the S16 payload itself.
-        stages["S16"] = {"pk": press["pk_preonegradp"],
-                         "gz": press["gz_preonegradp"]}
+        # The producing phase names these `pk_pre_onegradp` /
+        # `gz_pre_onegradp`; this part was authored against a guessed
+        # spelling and raised KeyError on the first composed run (job
+        # 9417516). Read them by the names the phase returns.
+        stages["S16"] = {"pk": press["pk_pre_onegradp"],
+                         "gz": press["gz_pre_onegradp"]}
 
     return {"state": state, "nh": nh, "flux_cap": flux_cap,
             "press": press, "stages": stages}
