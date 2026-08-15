@@ -150,6 +150,18 @@ __param_spec__ = {
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
             "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
+            "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
+            "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
+            "downdraft_omtrain_pa_s": {"units": "Pa/s", "bounds": (10.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTRAIN, rain fall speed (convect43c.f:194)", "shape": None},
+            "downdraft_omtsnow_pa_s": {"units": "Pa/s", "bounds": (1.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTSNOW, snow fall speed (convect43c.f:195)", "shape": None},
+            "downdraft_coeffr": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c COEFFR, rain evaporation rate coefficient (convect43c.f:196)", "shape": None},
+            "downdraft_coeffs": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c COEFFS, snow evaporation rate coefficient (convect43c.f:197)", "shape": None},
+            "downdraft_freeze_transition_K": {"units": "K", "bounds": (0.1, 5.0), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "smoothing width replacing the oracle's hard IF(T>273) phase switch", "shape": None},
+            "downdraft_inertia_scale_hPa": {"units": "hPa", "bounds": (5.0, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c FAC=20/(PH(I-1)-PH(I)) downdraft inertia (convect43c.f:776)", "shape": None},
+            "downdraft_taper_p_fraction": {"units": "1", "bounds": (0.9, 0.99), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c 0.949*P(1) taper of MP to zero at the surface (convect43c.f:779)", "shape": None},
+            "downdraft_dhdp_min": {"units": "J/kg/hPa", "bounds": (1.0, 50.0), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c DHDP floor guarding the MP divisor (convect43c.f:770)", "shape": None},
+            "downdraft_ep_gate_threshold": {"units": "1", "bounds": (0.0, 0.01), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c IF(EP(INB).LT.0.0001) whole-shaft skip (convect43c.f:717)", "shape": None},
+            "downdraft_ep_gate_width": {"units": "1", "bounds": (1e-6, 1e-3), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "smoothing width replacing the oracle's hard EP(INB) threshold", "shape": None},
             "dtmax": {"units": "K", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) CONVECT v4.3c DTMAX", "shape": None},
             "elcrit": {"units": "kg/kg", "bounds": (0.000363, 0.0033), "tunable_tier": 1, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c ELCRIT", "shape": None},
             "entp": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) CONVECT v4.3c ENTP", "shape": None},
@@ -1061,6 +1073,22 @@ class EmanuelConfig(NamedTuple):
     # should override this to ``True``.
     enable_unsaturated_downdraft: bool = False
     downdraft_efficiency: float = 0.2
+    # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
+    # Read ONLY when ``enable_unsaturated_downdraft`` is set, which selects
+    # the ported shaft (``_emanuel_downdraft``) rather than the legacy
+    # column-integrated stand-in.  Defaults are Emanuel's published values.
+    downdraft_sigd: float = 0.05
+    downdraft_sigs: float = 0.12
+    downdraft_omtrain_pa_s: float = 50.0
+    downdraft_omtsnow_pa_s: float = 5.5
+    downdraft_coeffr: float = 1.0
+    downdraft_coeffs: float = 0.8
+    downdraft_freeze_transition_K: float = 1.0
+    downdraft_inertia_scale_hPa: float = 20.0
+    downdraft_taper_p_fraction: float = 0.949
+    downdraft_dhdp_min: float = 10.0
+    downdraft_ep_gate_threshold: float = 1.0e-4
+    downdraft_ep_gate_width: float = 1.0e-5
     smooth_trigger_sharpness: float = 0.5
     # Bulk-plume entrainment/detrainment for the cloud-base updraft.
     # Deep-convection value (~2e-4 /m): in Emanuel's scheme the

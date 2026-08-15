@@ -256,3 +256,76 @@ def test_taper_survives_two_levels_at_equal_pressure():
     out = np.asarray(_taper_mass_flux_to_surface(
         mp, p, taper_p_fraction=0.949))
     assert np.all(np.isfinite(out)), "degenerate pressures produced NaN"
+
+
+# --------------------------------------------------------------------------- #
+# Integration through the PUBLIC Emanuel entry point.
+#
+# The isolated tests above exercise a helper.  They cannot catch the failure
+# mode the review actually found: a correct helper that production never
+# calls.  These do.
+# --------------------------------------------------------------------------- #
+def _production_column(nlev: int = 30):
+    """Surface-LAST column for the public scheme (index -1 is the surface)."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    p_sfc = 101_480.0
+    sigma = create_sigma_coordinate(nlev)
+    sigma_full = np.asarray(sigma.sigma_full, dtype=float)
+    p_full = jnp.asarray(sigma_full * p_sfc)[None, :]
+    p_half = jnp.asarray(
+        np.asarray(sigma.sigma_half, dtype=float) * p_sfc)[None, :]
+    z = -(constants.R_d * 290.0 / constants.g) * np.log(
+        np.maximum(sigma_full, 1e-6))
+    T = jnp.asarray(np.maximum(302.0 - 8.0e-3 * z, 200.0))[None, :]
+    from legoesm.thermo import saturation_mixing_ratio
+    q_v = 0.85 * saturation_mixing_ratio(T, p_full)
+    return T, q_v, p_full, p_half
+
+
+def _emanuel_tendencies(*, downdraft: bool):
+    from legoesm.atmosphere.physics.convection.config import EmanuelConfig
+    from legoesm.atmosphere.physics.convection.emanuel import (
+        emanuel_convection,
+    )
+
+    T, q_v, p_full, p_half = _production_column()
+    cfg = EmanuelConfig(use_genuine_mixing=True,
+                        enable_unsaturated_downdraft=downdraft)
+    # ``conv_prog_profile`` is the carried cloud-base mass flux; a zero
+    # profile is the cold start the scheme is documented to accept.
+    cbmf = jnp.zeros_like(T)
+    out, _carry = emanuel_convection(
+        T, q_v, p_full, p_half, cbmf, 600.0, cfg)
+    return out
+
+
+def test_the_flag_actually_changes_the_production_tendencies():
+    """THE integration gate.  The port was committed unwired once, and every
+    isolated test still passed; only a comparison through the public entry
+    point can see that."""
+    off = _emanuel_tendencies(downdraft=False)
+    on = _emanuel_tendencies(downdraft=True)
+    dT_off = np.asarray(off.dT_dt)
+    dT_on = np.asarray(on.dT_dt)
+    assert np.all(np.isfinite(dT_on)), "the wired downdraft produced non-finite T"
+    assert np.max(np.abs(dT_on - dT_off)) > 0.0, (
+        "enable_unsaturated_downdraft changed nothing in production — the "
+        "flag is advertising a scheme it does not run")
+
+
+def test_the_downdraft_is_refused_on_the_legacy_surrogate():
+    """It is driven by the buoyancy-sort mixing matrix, which the surrogate
+    does not produce; running silently would be different physics under the
+    same flag."""
+    from legoesm.atmosphere.physics.convection.config import EmanuelConfig
+    from legoesm.atmosphere.physics.convection.emanuel import (
+        emanuel_convection,
+    )
+
+    T, q_v, p_full, p_half = _production_column()
+    cfg = EmanuelConfig(use_genuine_mixing=False,
+                        enable_unsaturated_downdraft=True)
+    with pytest.raises(ValueError, match="requires use_genuine_mixing"):
+        emanuel_convection(
+            T, q_v, p_full, p_half, jnp.zeros_like(T), 600.0, cfg)
