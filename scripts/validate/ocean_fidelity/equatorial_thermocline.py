@@ -77,6 +77,22 @@ def main() -> int:
     ap.add_argument("--nemo-month", type=int, default=1)
     ap.add_argument("--lat-halfwidth", type=float, default=2.0)
     ap.add_argument("--label", default="legoESM")
+    ap.add_argument("--nemo-wfile", default=None,
+                    help="NEMO file carrying `wocetr_eff` (the hourly trd1h_T; "
+                         "the monthly grid_T does NOT have it). Enables the "
+                         "UPWELLING block, which asks the question Z20 cannot: "
+                         "if the thermocline is too deep, is it because the "
+                         "equatorial ascent is too weak?")
+    ap.add_argument("--mesh-mask", default=None,
+                    help="eORCA1 mesh_mask, required with --nemo-wfile: "
+                         "`wocetr_eff` is a TRANSPORT [m3/s] and our "
+                         "`mass_flux_w` is a VELOCITY [m/s], so one side has "
+                         "to be divided by the cell area e1t*e2t before they "
+                         "are the same quantity.")
+    ap.add_argument("--w-depth-m", type=float, default=50.0,
+                    help="depth at which the equatorial vertical velocity is "
+                         "compared. 50 m sits inside the upwelling core and "
+                         "above the Z20 the bias is measured at.")
     a = ap.parse_args()
 
     import xarray as xr
@@ -181,7 +197,126 @@ def main() -> int:
           f"NEMO {tn:+.1f} m  -> ours is {100.0 * tl / tn:.0f}% of NEMO's"
           if np.isfinite(tn) and tn != 0 else
           f"[tilt] ours {tl:+.1f} m, NEMO {tn:+.1f} m")
+
+    if a.nemo_wfile:
+        if not a.mesh_mask:
+            raise SystemExit("--nemo-wfile requires --mesh-mask: wocetr_eff is "
+                             "m3/s and our mass_flux_w is m/s, and without the "
+                             "cell area the two are not the same quantity.")
+        _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc,
+                         regrid_curv_to_latlon)
     return 0
+
+
+def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
+    """Equatorial vertical velocity, ours vs NEMO, at a single depth.
+
+    WHY IT IS HERE.  Z20 says the thermocline is 26 m too deep; it cannot say
+    whether that is because the water is not being lifted.  This is the cheapest
+    measurement that can, and it runs on files that already exist.
+
+    UNITS ARE NOT THE SAME ON THE TWO SIDES and that is the whole trap: NEMO's
+    ``wocetr_eff`` is an effective vertical TRANSPORT [m3/s] on the W points,
+    ours is ``mass_flux_w`` [m/s] (MASS_FLUX_W_UNITS, ocean_model_latlon_cgrid
+    :120).  NEMO's is divided by the T-cell area e1t*e2t here so both sides are
+    velocities before anything is compared.
+
+    SIGN IS DERIVED, NOT ASSUMED.  Equatorial upwelling is a known answer: the
+    Pacific cold tongue exists because water rises there.  So NEMO's band mean
+    at this depth TELLS us NEMO's sign convention, and ours is then reported
+    with the same test rather than flipped to match.  If the two disagree the
+    block says so and stops short of a ratio -- a sign difference is either a
+    convention difference or a reversed circulation, and this probe cannot tell
+    those apart.
+
+    WHAT IT CANNOT SUPPORT.  The two sides are at DIFFERENT TIMES: ours is an
+    instantaneous snapshot from a 30/90-day run, NEMO's is a 24-hour mean at the
+    end of its first year, because the monthly grid_T carries no vertical
+    velocity at all.  A 10-20% difference is inside that mismatch and must not
+    be read.  A factor of ~2 is not, and the Z20 gap (26 m on 55 m) is a
+    factor-of-2-sized question.
+    """
+    import netCDF4 as nc
+    from legoesm import constants  # noqa: F401  (unit conventions live there)
+
+    w_l = np.load(a.legoesm_snapshot).get("mass_flux_w")
+    if w_l is None:
+        raise SystemExit("snapshot has no `mass_flux_w`; rerun with the mass "
+                         "flux carry stored, or drop --nemo-wfile.")
+    w_l = np.asarray(w_l, dtype=np.float64)
+    # Interface depths: the snapshot stores CENTRES, so interfaces are their
+    # midpoints with the surface at 0. Good to a few metres, which is far
+    # inside the level spacing at 50 m and is only used to PICK a level.
+    z_if = np.concatenate([[0.0], 0.5 * (zc[:-1] + zc[1:])])
+    kl = int(np.argmin(np.abs(z_if - a.w_depth_m)))
+
+    ds = nc.Dataset(a.nemo_wfile)
+    try:
+        wn = np.ma.filled(np.ma.masked_invalid(
+            ds.variables["wocetr_eff"][:]), np.nan).astype(np.float64)
+        zw = np.asarray(ds.variables["depthw"][:], dtype=np.float64)
+        nav_lat = np.asarray(ds.variables["nav_lat_grid_T"][:])
+        nav_lon = np.asarray(ds.variables["nav_lon_grid_T"][:])
+    finally:
+        ds.close()
+    n_rec = wn.shape[0]
+    wn = np.nanmean(wn, axis=0)                      # 24-hour mean
+    kn = int(np.argmin(np.abs(zw - a.w_depth_m)))
+
+    dsm = nc.Dataset(a.mesh_mask)
+    try:
+        e1t = np.asarray(dsm.variables["e1t"][:], dtype=np.float64).squeeze()
+        e2t = np.asarray(dsm.variables["e2t"][:], dtype=np.float64).squeeze()
+    finally:
+        dsm.close()
+    # wocetr_eff is written on the (331,360) inner frame; the mesh_mask is the
+    # full (332,362). Slice with the SAME native window the rest of this
+    # campaign uses rather than guessing an offset here.
+    from global_tracer_content import _NATIVE_J, _NATIVE_I
+    area = (e1t * e2t)[_NATIVE_J, _NATIVE_I]
+    if area.shape != wn.shape[1:]:
+        raise SystemExit(f"area {area.shape} vs wocetr_eff {wn.shape[1:]} -- "
+                         "frames do not match; do not divide.")
+    wn_ms = wn[kn] / area                            # m3/s -> m/s
+
+    lm = np.isfinite(np.asarray(L["mask"], dtype=np.float64))
+    ours, _ = regrid(w_l[..., kl], L["lat"], L["lon"],
+                     np.asarray(L["mask"], dtype=np.float64),
+                     tgt_lat, tgt_lon)
+    theirs, _ = regrid(wn_ms, nav_lat, nav_lon,
+                       np.isfinite(wn_ms).astype(np.float64),
+                       tgt_lat, tgt_lon)
+    del lm
+
+    print()
+    print(f"Equatorial vertical velocity at {z_if[kl]:.1f} m (ours) / "
+          f"{zw[kn]:.1f} m (NEMO), band mean, m/s x 1e6.")
+    print(f"  NEMO side is a {n_rec}-record mean of wocetr_eff [m3/s] divided "
+          f"by e1t*e2t; ours is mass_flux_w [m/s] from the snapshot.")
+    rows = np.nonzero(band)[0]
+    box = (tgt_lon >= 180.0) & (tgt_lon <= 280.0)    # 180-80W, the cold tongue
+    bo = np.nanmean(ours[np.ix_(rows, np.nonzero(box)[0])])
+    bt = np.nanmean(theirs[np.ix_(rows, np.nonzero(box)[0])])
+    print(f"{'lon':>6} {'ours':>11} {'NEMO':>11}")
+    for lon in (160, 180, 200, 220, 240, 260, 280):
+        j = int(np.argmin(np.abs(tgt_lon - lon)))
+        print(f"{lon:6d} {1e6 * np.nanmean(ours[rows, j]):11.3f} "
+              f"{1e6 * np.nanmean(theirs[rows, j]):11.3f}")
+    print(f"[box 180-80W] ours {1e6 * bo:+.3f}  NEMO {1e6 * bt:+.3f}  (1e-6 m/s)")
+    if not (np.isfinite(bo) and np.isfinite(bt)):
+        print("[upwelling] one side is NaN in the box — no ratio.")
+    elif np.sign(bo) != np.sign(bt):
+        print("[upwelling] THE TWO SIGNS DISAGREE. NEMO's sign here is the "
+              "known-answer anchor (the cold tongue requires ascent), so this "
+              "is either an opposite w convention in our snapshot or a "
+              "reversed equatorial cell. NO RATIO is reported: this probe "
+              "cannot tell those apart, and the next step is to check the "
+              "convention before reading anything into the magnitude.")
+    else:
+        print(f"[upwelling] ours / NEMO = {bo / bt:.2f} in the 180-80W box. "
+              "Read only a LARGE departure from 1: the two sides are at "
+              "different times (instantaneous snapshot vs 24 h mean at the end "
+              "of NEMO's first year), which is worth more than 10-20%.")
 
 
 if __name__ == "__main__":

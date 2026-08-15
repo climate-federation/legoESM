@@ -453,7 +453,8 @@ def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
 
 
 def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
-                         evd_cols=None, z_iface=None, z_cuts_m=(300.0, 100.0)):
+                         evd_cols=None, z_iface=None, z_cuts_m=(300.0, 100.0),
+                         stage="Stage A"):
     """Split the Stage-A K_H excess into a MOMENTUM part and a PRANDTL part.
 
     Stage A scores K_H against ``avt``, which carries BOTH the closure
@@ -514,7 +515,7 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     avtb = float(np.min(avt_i[fin & (avt_i > 0)])) if (fin & (avt_i > 0)).any() else 0.0
     avmb = float(np.min(avm_i[fin & (avm_i > 0)])) if (fin & (avm_i > 0)).any() else 0.0
     free = fin & (avt_i > avtb * 1.01) & (avm_i > avmb * 1.01) & (K_H > 0)
-    print(f"\n=== Stage A: momentum vs Prandtl split ===")
+    print(f"\n=== {stage}: momentum vs Prandtl split ===")
     print(f"  NEMO floors detected: avtb {avtb:.3e}, avmb {avmb:.3e} m2/s; "
           f"off-floor on {100.0 * free.sum() / max(fin.sum(), 1):.1f}% of wet "
           f"interfaces ({int(free.sum())} of {int(fin.sum())})")
@@ -887,7 +888,7 @@ def main():
         result["stage_a2_prandtl"] = prandtl_split_report(
             K_H2, K_M2, avt_a2(d), avm_i, wet_pair, lat_col,
             d["lon"].reshape(-1), evd_cols=evd_cols, z_iface=_z_iface,
-            z_cuts_m=(300.0, 100.0))
+            z_cuts_m=(300.0, 100.0), stage="Stage A2 (Mode-A, NEMO's own en)")
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
