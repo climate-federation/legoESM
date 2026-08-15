@@ -47,7 +47,12 @@ arm () {   # $1 = tag, rest = overrides
     | grep -aE "lon-boxed|nino|eqpac|cfg/stage_a\]"
   echo "=== $tag rc=${PIPESTATUS[0]}"
 }
-# BASELINE: the card as it stands (prandtl_mode="richardson").
+# PRODUCTION-MATCHED baseline. The signed d30 arm passes --tke-mxl-choice 3
+# while the CARD default is 4, so the first run of this probe measured the
+# 2.297 ratio at mxl=4 -- a setting the run being explained does not use. The
+# instrument must be configured like the run it explains.
+arm prod_mxl3 --mxl-choice 3
+# The card default, kept for the mxl comparison it now gives for free.
 arm baseline
 # THE SUSPECT: NEMO's exact nn_pdl=1 Prandtl. Codex review 9409347 called the
 # card's "richardson" a STABLE-COLUMN fidelity gap, and the equatorial
