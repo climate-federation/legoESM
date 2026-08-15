@@ -390,6 +390,54 @@ def avt_a2(d):
     return np.transpose(d["avt"].reshape(z, ncol), (1, 0))[:, 1:]
 
 
+# Lon-boxed regions (lon in NEMO's -180..180 convention on this grid).
+# The latitude REGIONS above cannot see the equatorial Pacific: "tropics" is
+# -15..15 over ALL longitudes, so a cold-tongue diffusivity error is averaged
+# against the Indian and Atlantic basins. Nino3 is where the +3.19 C SST bias
+# and the 26 m too-deep thermocline both live.
+BOX_REGIONS = (
+    ("nino3", -5.0, 5.0, -150.0, -90.0),
+    ("nino4", -5.0, 5.0, 160.0, -150.0),      # crosses the dateline
+    ("eqpac", -2.0, 2.0, -180.0, -80.0),
+)
+
+
+def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
+    """Same metrics as region_report but over lon-boxed equatorial regions.
+
+    Kept as a separate function rather than folded into REGIONS because the
+    dateline wrap needs an OR where the latitude bands need an AND, and
+    silently special-casing that inside the existing loop is how a region ends
+    up selecting the wrong cells.
+    """
+    rows = []
+    subsets = [("", None)] if evd_cols is None else [
+        ("/calm", ~evd_cols), ("/evd", evd_cols)]
+    for tag0, la, lb, lo, hi in BOX_REGIONS:
+        inlon = ((lon_col >= lo) & (lon_col <= hi) if lo <= hi
+                 else (lon_col >= lo) | (lon_col <= hi))
+        for suff, colsel in subsets:
+            m = (wet & np.isfinite(theirs) & np.isfinite(ours)
+                 & (lat_col[:, None] >= la) & (lat_col[:, None] <= lb)
+                 & inlon[:, None])
+            if colsel is not None:
+                m = m & colsel[:, None]
+            if not m.any():
+                continue
+            o, t = ours[m], theirs[m]
+            ro = float(np.sqrt(np.mean(o ** 2)))
+            rt = float(np.sqrt(np.mean(t ** 2)))
+            rows.append({"region": tag0 + suff, "n": int(m.sum()),
+                         "rms_ours": ro, "rms_nemo": rt,
+                         "rms_diff": float(np.sqrt(np.mean((o - t) ** 2))),
+                         "ratio": ro / rt if rt > 0 else float("nan")})
+    print(f"\n=== {name} (lon-boxed) ===")
+    for r in rows:
+        print(f"  {r['region']:14s} n={r['n']:>7d}  ours {r['rms_ours']:.4e}  "
+              f"nemo {r['rms_nemo']:.4e}  ours/nemo {r['ratio']:.3f}")
+    return rows
+
+
 def region_report(name, ours, theirs, wet, lat_col, top_k=None,
                   evd_cols=None):
     """Per-region metrics; when ``evd_cols`` (bool, ncol) is given each
@@ -447,9 +495,13 @@ def main():
                          "to 4 digits). If corr moves with this, the pattern "
                          "defect is in the length.")
     ap.add_argument("--prandtl-mode", default=None,
-                    choices=["unit", "constant", "richardson"],
+                    choices=["unit", "constant", "richardson", "nemo_ri"],
                     help="Override prandtl_mode. The other term that can "
-                         "reshape K_H at fixed energy.")
+                         "reshape K_H at fixed energy. 'nemo_ri' is NEMO's "
+                         "exact nn_pdl=1 form and was missing from this list "
+                         "while being implemented in tke.py:1467 -- so the "
+                         "one option a stable-column comparison most needs "
+                         "was unreachable from the validator.")
     ap.add_argument("--kappa-convention", default=None,
                     choices=["gaspar_sqrt2e", "veros_sqrte"],
                     help="Override the K-from-TKE amplitude convention. The "
@@ -521,6 +573,10 @@ def main():
     evd_cols = np.nanmax(np.where(wet_pair, avt_i, 0.0), axis=1) > 1.0
     print(f"[evd] convecting columns: {int(evd_cols.sum())} "
           f"({100.0 * evd_cols.mean():.1f}% of columns)")
+    result["stage_a_boxes"] = box_report(
+        "Stage A: closure K_H vs NEMO avt, equatorial Pacific boxes",
+        K_H, avt_i, wet_pair, lat_col, d["lon"].reshape(-1),
+        evd_cols=evd_cols)
     result["stage_a"] = region_report(
         "Stage A: closure K_H (legoESM TKE card) vs NEMO avt [m2/s]",
         K_H, avt_i, wet_pair, lat_col, evd_cols=evd_cols)
