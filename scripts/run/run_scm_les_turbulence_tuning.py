@@ -759,6 +759,10 @@ class SchemeResult:
     # Analysis-window mean profiles at the TUNED parameters, one dict per arm
     # in `arms` order. None until the scheme has actually been tuned.
     profiles_tuned: list[dict[str, np.ndarray]] | None = None
+    # How many times the line search found the optimizer's direction pointing
+    # UPHILL and the momentum buffer had to be dropped to continue. A fit with
+    # several of these converged despite the optimizer, not because of it.
+    n_momentum_restarts: int = 0
 
 
 def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
@@ -875,6 +879,28 @@ def relative_joint(per_case: dict[str, float],
     ]))
 
 
+def line_search_verdict(*, accepted: bool, restarted: bool,
+                        dir_deriv: float) -> str:
+    """What to do after one pass of the line search: accept / restart / stop.
+
+    ``dir_deriv`` is ``sum(grad . update)``. optax returns updates to be
+    ADDED, so ``dir_deriv < 0`` is a descent direction and every scale in
+    ``_LINE_SEARCH_SCALES`` shrinks the same direction: if a descent direction
+    was rejected at all nine scales the fit really has stalled. A REJECTED
+    direction with ``dir_deriv > 0`` points uphill, and no positive scale of it
+    can ever reduce the loss -- that is Adam's momentum buffer disagreeing with
+    the current gradient, not a step that is too long. Dropping the buffer
+    turns it back into a descent direction, so it is worth exactly one retry
+    per step; ``restarted`` is what bounds it to one and keeps a genuinely
+    converged fit from looping.
+    """
+    if accepted:
+        return "accept"
+    if restarted or dir_deriv <= 0.0:
+        return "stop"
+    return "restart"
+
+
 def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
                           case_norm: dict[str, float] | None = None,
                           default_per_case: dict[str, float] | None = None,
@@ -946,36 +972,81 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
             result.error = f"gradient gate failed at step {step}: {bad}"
             result.status = "failed"
             break
-        updates, opt_next = optimizer.update(
-            eqx.filter(grads, eqx.is_array), opt_state,
-            eqx.filter(params, eqx.is_array))
-        accepted = False
-        for scale in _LINE_SEARCH_SCALES:
-            cand = eqx.apply_updates(
-                params, jax.tree_util.tree_map(lambda x: x * scale, updates))
-            _assert_strict_bounds(cand)
-            # Score the candidate PER CASE, not just as the aggregate. A
-            # non-finite rollout is mapped to exactly NONFINITE_PENALTY in the
-            # case that blew up, but the objective is a MEAN over cases, so one
-            # blown case among five contributes only ~200 -- far under the
-            # penalty. Testing the aggregate therefore did not reliably reject
-            # a blown-up candidate, and could not reject one at all under an
-            # aggregation that divides each case by a normalizer above 1.
-            cand_joint, cand_per_case, _ = joint_score(
-                scheme, arms, args, params=cand, cfgs=cfgs,
-                case_norm=case_norm)
-            cand_loss = float(cand_joint)
-            if any(float(v) >= NONFINITE_PENALTY
-                   for v in cand_per_case.values()):
-                continue
-            if np.isfinite(cand_loss) and cand_loss < loss_val:
-                params, opt_state = cand, opt_next
-                loss_history.append(cand_loss)
-                accepted = True
+        accepted, note, restarted = False, "", False
+        while True:
+            updates, opt_next = optimizer.update(
+                eqx.filter(grads, eqx.is_array), opt_state,
+                eqx.filter(params, eqx.is_array))
+            # Directional derivative of the loss along the update optax
+            # actually proposes. optax returns updates to be ADDED, so a
+            # descent direction is dL = sum(g . u) < 0, and NO line-search
+            # scale can rescue a direction with dL > 0. Measuring it separates
+            # two unrelated causes that "no reducing step" used to report with
+            # one message: "the step is too big" (dL < 0, every scale still
+            # rejected, so the reduction fell under the comparison's
+            # resolution) from "the direction is uphill" (dL > 0, which is
+            # stale momentum -- Adam's m is an average over past steps and can
+            # point against the current gradient -- and is not a step-size
+            # problem at all).
+            dir_deriv = float(sum(
+                jnp.sum(g * u) for g, u in zip(
+                    jax.tree_util.tree_leaves(
+                        eqx.filter(grads, eqx.is_array)),
+                    jax.tree_util.tree_leaves(
+                        eqx.filter(updates, eqx.is_array)))))
+            best_rejected = None
+            for scale in _LINE_SEARCH_SCALES:
+                cand = eqx.apply_updates(
+                    params,
+                    jax.tree_util.tree_map(lambda x: x * scale, updates))
+                _assert_strict_bounds(cand)
+                # Score the candidate PER CASE, not just as the aggregate. A
+                # non-finite rollout is mapped to exactly NONFINITE_PENALTY in
+                # the case that blew up, but the objective is a MEAN over
+                # cases, so one blown case among five contributes only ~200 --
+                # far under the penalty. Testing the aggregate therefore did
+                # not reliably reject a blown-up candidate, and could not
+                # reject one at all under an aggregation that divides each
+                # case by a normalizer above 1.
+                cand_joint, cand_per_case, _ = joint_score(
+                    scheme, arms, args, params=cand, cfgs=cfgs,
+                    case_norm=case_norm)
+                cand_loss = float(cand_joint)
+                if any(float(v) >= NONFINITE_PENALTY
+                       for v in cand_per_case.values()):
+                    continue
+                if np.isfinite(cand_loss) and cand_loss < loss_val:
+                    params, opt_state = cand, opt_next
+                    loss_history.append(cand_loss)
+                    accepted = True
+                    break
+                if np.isfinite(cand_loss) and (
+                        best_rejected is None or cand_loss < best_rejected[1]):
+                    best_rejected = (scale, cand_loss)
+            verdict = line_search_verdict(
+                accepted=accepted, restarted=restarted, dir_deriv=dir_deriv)
+            if verdict != "restart":
+                if not accepted and best_rejected is not None:
+                    note = (f" dL={dir_deriv:.3g} best rejected "
+                            f"{best_rejected[1]:.10g} at scale "
+                            f"{best_rejected[0]:g}")
+                elif not accepted:
+                    note = f" dL={dir_deriv:.3g} every scale non-finite"
                 break
+            # Uphill direction: the momentum buffer, not the step size, is what
+            # blocks progress, so scaling it down cannot help. Drop the buffer
+            # and retry this step once from the raw gradient, which IS a
+            # descent direction. Re-init also restarts the cosine learning-rate
+            # schedule at its peak -- a warm restart, deliberate: a stalled fit
+            # has nothing to lose from a larger step it must still pass the
+            # line search to take.
+            restarted = True
+            opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
+            result.n_momentum_restarts += 1
         print(f"    [{scheme}] step {step}/{args.steps} joint={loss_val:.6g} "
-              f"{'accepted' if accepted else 'no reducing step -> stop'}",
-              flush=True)
+              f"{'accepted' if accepted else 'no reducing step -> stop'}"
+              f"{' (after momentum restart)' if restarted and accepted else ''}"
+              f"{note}", flush=True)
         if not accepted:
             if step == 1:
                 result.status = "no_reducing_step"
@@ -1593,14 +1664,16 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         # number that says how much optimisation actually happened.
         w.writerow(["rank", "scheme", "status", "score_default",
                     "score_tuned", "score_relative_tuned", "n_trained",
-                    "n_accepted_steps", "n_frozen", "wall_s", "error"])
+                    "n_accepted_steps", "n_momentum_restarts", "n_frozen",
+                    "wall_s", "error"])
         for i, r in enumerate(ranked):
             rankable = r.status in _RANKABLE and r.score_default is not None
             n_acc = max(0, len(r.loss_history or []) - 1)
             w.writerow([(i + 1) if rankable else "EXCLUDED",
                         r.scheme, r.status, r.score_default, r.score_tuned,
                         r.score_relative_tuned,
-                        r.n_trained, n_acc, len(r.frozen or {}),
+                        r.n_trained, n_acc, r.n_momentum_restarts,
+                        len(r.frozen or {}),
                         f"{r.wall_s:.1f}", r.error or ""])
 
     # COMPLETENESS, recorded rather than implied. The report is rewritten after
@@ -1708,6 +1781,7 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                 "per_case_tuned": r.per_case_tuned,
                 "score_relative_tuned": r.score_relative_tuned,
                 "n_trained": r.n_trained, "frozen": r.frozen,
+                "n_momentum_restarts": r.n_momentum_restarts,
                 "parameters": r.parameters, "loss_history": r.loss_history,
                 "surface_pressure_drift_pa": r.ps_drift_pa,
                 "error": r.error, "wall_s": r.wall_s,

@@ -1088,3 +1088,50 @@ def test_a_steady_flux_is_still_handed_over(case_name):
     assert abs(shf) > 1.0 and lhf == 0.0, (case_name, shf, lhf)
     surface = drv.build_surface_config(case, flux_to_closure=True)
     assert surface.prescribed_shflx_w_m2 == pytest.approx(shf)
+
+
+# --- line search: stalled-fit verdict ---------------------------------------
+
+def test_line_search_verdict_branches():
+    """Accept wins outright; an uphill direction earns exactly ONE retry."""
+    v = drv.line_search_verdict
+    # Accepted -> nothing else matters, including an uphill dL (the scale that
+    # was accepted is the evidence, not the sign of the full-length step).
+    assert v(accepted=True, restarted=False, dir_deriv=+1.0) == "accept"
+    assert v(accepted=True, restarted=True, dir_deriv=-1.0) == "accept"
+    # Rejected and DESCENT: shrinking the same direction is all the ladder can
+    # do and it already failed, so the fit has genuinely stalled.
+    assert v(accepted=False, restarted=False, dir_deriv=-1.0) == "stop"
+    assert v(accepted=False, restarted=False, dir_deriv=0.0) == "stop"
+    # Rejected and UPHILL: retry once without the momentum buffer...
+    assert v(accepted=False, restarted=False, dir_deriv=+1.0) == "restart"
+    # ...but only once, or a persistently uphill step loops forever.
+    assert v(accepted=False, restarted=True, dir_deriv=+1.0) == "stop"
+
+
+def test_stale_momentum_really_can_point_uphill():
+    """NON-VACUOUS premise check for the retry above.
+
+    The retry only pays for itself if Adam's update can genuinely disagree in
+    SIGN with the current gradient. Feed the optimizer a large gradient and
+    then its opposite: the momentum average still points the old way, so
+    ``sum(grad . update) > 0`` -- an uphill direction that no line-search scale
+    can rescue. Re-initialising the state (what the driver does on a stall)
+    must restore a descent direction on the SAME gradient.
+    """
+    import jax.numpy as jnp
+    import optax
+
+    opt = optax.adam(learning_rate=1e-2)
+    params = jnp.array([1.0])
+    state = opt.init(params)
+
+    for _ in range(6):                      # build momentum pointing one way
+        updates, state = opt.update(jnp.array([+1.0]), state, params)
+    g_now = jnp.array([-1.0])               # gradient reverses
+    updates, _ = opt.update(g_now, state, params)
+    assert float(jnp.sum(g_now * updates)) > 0.0, "premise: no uphill step"
+
+    updates_fresh, _ = opt.update(g_now, opt.init(params), params)
+    assert float(jnp.sum(g_now * updates_fresh)) < 0.0, (
+        "a freshly initialised optimizer must descend on the current gradient")
