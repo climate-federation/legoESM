@@ -262,21 +262,29 @@ def test_gradient_through_density_is_finite():
 
 def test_the_clear_sky_term_is_still_exactly_zero_below_the_inversion():
     """The guard masks the RESULT rather than flooring dz_i, so the forward
-    value must be untouched -- a floored base would leak a small clear-sky
-    flux into the sub-inversion column, where gSAM's loop bound puts none."""
+    value must be untouched -- a floored base would leak a small clear-sky flux
+    into the sub-inversion column, where gSAM's loop bound puts none.
+
+    Controlled against the SAME kernel with the divergence set to zero, which
+    removes the clear-sky term outright and leaves everything else identical.
+    An earlier version compared against a NumPy reimplementation of the
+    two-exponential floor and failed at 4.6e-14 -- it was measuring jnp-vs-np
+    summation order, not a leak.
+    """
     z_half, dz, rho, q_cond, q_tot = _cloud_column()
     cfg = SimpleLWConfig()
+    on = np.asarray(simple_lw_net_upward_flux(
+        q_cond, q_tot, rho, dz, z_half, cfg))
+    off = np.asarray(simple_lw_net_upward_flux(
+        q_cond, q_tot, rho, dz, z_half, SimpleLWConfig(divergence_s=0.0)))
+
     z_i = float(np.asarray(simple_lw_inversion_height(q_tot, z_half, cfg))
                 .ravel()[0])
-    flux = np.asarray(simple_lw_net_upward_flux(
-        q_cond, q_tot, rho, dz, z_half, cfg))
-    zh = np.asarray(z_half)
-
-    # Below the inversion the flux is exactly the two-exponential floor.
-    dq = np.asarray(cfg.kappa_m2_kg * rho * q_cond * dz)
-    q_below = np.concatenate([[0.0], np.cumsum(dq)])
-    q_above = q_below[-1] - q_below
-    floor = (cfg.f0_w_m2 * np.exp(-q_above) + cfg.f1_w_m2 * np.exp(-q_below))
-    below = zh <= z_i
+    below = np.asarray(z_half) <= z_i
     assert below.sum() > 5, "the fixture must have faces below the inversion"
-    np.testing.assert_array_equal(flux[below], floor[below])
+    np.testing.assert_array_equal(
+        on[below], off[below],
+        err_msg="the clear-sky term is leaking below the inversion")
+    assert np.any(on[~below] != off[~below]), (
+        "the term must still be ON above the inversion, or this test passes "
+        "for the wrong reason")
