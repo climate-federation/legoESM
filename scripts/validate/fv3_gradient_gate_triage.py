@@ -42,7 +42,12 @@ jax.config.update("jax_enable_x64", True)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
+# BOTH paths are needed: the test modules are imported by bare name (they
+# are not a package), and they themselves do `from tests.grids...`, which
+# needs the repo ROOT on the path.  Job 9417309 had only the first and
+# every block but P5 died with ModuleNotFoundError: No module named 'tests'.
 sys.path.insert(0, os.path.join(_REPO, "tests", "grids"))
+sys.path.insert(0, _REPO)
 
 
 def _hdr(name, question, confirms, refutes):
@@ -272,6 +277,25 @@ def p5_ytp_probe_cell():
         print(f"      cells that MOVED under a unit bump: "
               f"{[tuple(int(x) for x in r) for r in nz[:8]]}"
               f"{' ...' if len(nz) > 8 else ''} (n={len(nz)})")
+
+        # The gate's own flag proxy, scanned WIDER than the gate scans
+        # it and printed as a MARGIN rather than a boolean.  The gate
+        # only sees `flux != upwind`, so a fixture that approaches the
+        # collapse without reaching it looks identical to one that never
+        # approaches it at all; the margin separates them.
+        def base_of(fld):
+            return float(fld[kk])
+
+        print("      t -> flux[probe] - upwind(source)  (0 => the "
+              "limiter collapsed the reconstruction, i.e. flag OFF)")
+        row = []
+        for t in (-2.0e6, -2.0e5, -8.0e4, -8000.0, -200.0, 0.0, 200.0,
+                  8000.0, 8.0e4, 2.0e5, 2.0e6):
+            f = field.copy()
+            f[kk] = field[kk] + t
+            d = float(np.asarray(run(jnp.asarray(f)))[ci, cj]) - base_of(f)
+            row.append(f"{t:+.1e}:{d:+.3e}")
+        print("        " + "  ".join(row))
 
 
 _BLOCKS = {"P1": p1_mapz_flat_arm, "P2": p2_udzd_ladder,
