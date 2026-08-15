@@ -57,31 +57,53 @@ def _find_csv(arm: Path) -> Path:
     return candidates[0]
 
 
-def _ranking(rows: dict[str, dict]) -> list[str]:
-    """Schemes ordered by the objective they were tuned under, best first."""
-    def key(scheme: str) -> float:
-        value = _ff(rows[scheme].get("tuned_objective"))
-        return value if math.isfinite(value) else float("inf")
-    return sorted(rows, key=key)
+def _ranking(rows: dict[str, dict], subset: set[str] | None = None) -> list[str]:
+    """Schemes ordered by the objective they were tuned under, best first.
+
+    Restricted to ``subset`` BEFORE ranking, and to rows with a FINITE score.
+    Ranking the full table and then filtering leaves gaps, so a scheme present
+    in only one seed silently shifts every rank below it; and a crashed run's
+    +inf score would otherwise be ordered by scheme NAME and take part in the
+    swap count, manufacturing churn out of two failures.
+    """
+    names = [s for s in rows if subset is None or s in subset]
+    finite = [s for s in names
+              if math.isfinite(_ff(rows[s].get("tuned_objective")))]
+    return sorted(finite, key=lambda s: _ff(rows[s].get("tuned_objective")))
 
 
 def compare_seeds(rows_a: dict, rows_b: dict, *, seed_a: str, seed_b: str) -> dict:
-    common = sorted(set(rows_a) & set(rows_b))
+    only_a = sorted(set(rows_a) - set(rows_b))
+    only_b = sorted(set(rows_b) - set(rows_a))
+    shared = set(rows_a) & set(rows_b)
+    # A scheme that produced a non-finite score in EITHER seed is not ranked:
+    # it is a failure, reported as one, not a rank.
+    common = sorted(
+        s for s in shared
+        if math.isfinite(_ff(rows_a[s].get("tuned_objective")))
+        and math.isfinite(_ff(rows_b[s].get("tuned_objective"))))
+    non_finite = sorted(shared - set(common))
     if not common:
-        raise ValueError("the two seeds share no scheme")
-    rank_a = {s: i for i, s in enumerate(_ranking(rows_a)) if s in common}
-    rank_b = {s: i for i, s in enumerate(_ranking(rows_b)) if s in common}
+        raise ValueError(
+            "the two seeds share no scheme with a finite score in both "
+            f"(shared={sorted(shared)}, non-finite={non_finite})")
+    subset = set(common)
+    rank_a = {s: i for i, s in enumerate(_ranking(rows_a, subset))}
+    rank_b = {s: i for i, s in enumerate(_ranking(rows_b, subset))}
 
     per_scheme = {}
     for scheme in common:
         a = _ff(rows_a[scheme].get("tuned_objective"))
         b = _ff(rows_b[scheme].get("tuned_objective"))
-        # The noise floor to compare against is the LARGER of the two runs'
-        # own window-to-window spreads: a difference inside it says nothing.
-        noise = max(
+        # The noise floor of a DIFFERENCE of two independent scores is the
+        # quadrature sum of their own spreads, not the larger of them; and a
+        # missing (NaN) spread must be ignored rather than poisoning the
+        # comparison, because `max(nan, x)` is NaN.
+        floors = [f for f in (
             _ff(rows_a[scheme].get("tuned_thermo_window_std")),
             _ff(rows_b[scheme].get("tuned_thermo_window_std")),
-        )
+        ) if math.isfinite(f)]
+        noise = math.sqrt(sum(f * f for f in floors)) if floors else float("nan")
         delta = abs(a - b) if math.isfinite(a) and math.isfinite(b) else float("nan")
         per_scheme[scheme] = {
             f"objective_seed{seed_a}": a,
@@ -95,8 +117,8 @@ def compare_seeds(rows_a: dict, rows_b: dict, *, seed_a: str, seed_b: str) -> di
         }
 
     swaps = []
-    order_a = [s for s in _ranking(rows_a) if s in common]
-    order_b = [s for s in _ranking(rows_b) if s in common]
+    order_a = _ranking(rows_a, subset)
+    order_b = _ranking(rows_b, subset)
     for i, si in enumerate(order_a):
         for sj in order_a[i + 1:]:
             if order_b.index(si) > order_b.index(sj):
@@ -115,6 +137,11 @@ def compare_seeds(rows_a: dict, rows_b: dict, *, seed_a: str, seed_b: str) -> di
         "pair_swaps": swaps,
         "n_differences_exceeding_noise": sum(
             1 for v in per_scheme.values() if v["difference_exceeds_noise"]),
+        # Reported, never silently dropped: a scheme that ran under one seed
+        # only, or crashed under either, is itself a disagreement.
+        "schemes_only_in_seed_" + seed_a: only_a,
+        "schemes_only_in_seed_" + seed_b: only_b,
+        "schemes_non_finite_in_one_or_both": non_finite,
         "per_scheme": per_scheme,
     }
 
@@ -134,9 +161,16 @@ def compare_parameters(arm_a: Path, arm_b: Path) -> dict:
     out = {}
     for scheme in sorted(set(a) & set(b)):
         per_param = {}
+        incomparable: list[str] = []
         for name in sorted(set(a[scheme]) & set(b[scheme])):
             pa, pb = a[scheme][name], b[scheme][name]
             lo, hi = float(pa["bounds"][0]), float(pa["bounds"][1])
+            # Differing bounds between the two runs means the two tuned values
+            # are not on a common scale, so a range fraction would be a number
+            # with no meaning.  Skip it rather than compute it.
+            if (float(pb["bounds"][0]), float(pb["bounds"][1])) != (lo, hi):
+                incomparable.append(name)
+                continue
             span = hi - lo
             if not span > 0:
                 continue
@@ -147,6 +181,7 @@ def compare_parameters(arm_a: Path, arm_b: Path) -> dict:
                 "max_range_fraction": max(per_param.values()),
                 "mean_range_fraction": sum(per_param.values()) / len(per_param),
                 "per_parameter_range_fraction": per_param,
+                "incomparable_bounds": incomparable,
             }
     return out
 

@@ -459,14 +459,40 @@ def log_humidity_profile(
 
 #: Buffer kept BELOW the reference cold point when the mask is derived from it.
 DEFAULT_THERMO_COLD_POINT_BUFFER_PA = 2_000.0
-#: Pressure above which the cold-point search looks (i.e. ``p`` less than this),
-#: so a surface temperature minimum cannot be mistaken for the tropopause.
-_COLD_POINT_SEARCH_MAX_P_PA = 30_000.0
+
+
+def reference_cold_point(
+    T_ref: jax.Array,
+    z_m: jax.Array,
+) -> tuple[int, float, float]:
+    """``(index, T [K], z [km])`` of the reference's cold point.
+
+    Uses THIS MODULE'S EXISTING cold-point definition — the minimum of ``T``
+    inside ``[TROP_MIN_Z_KM, TROP_MAX_Z_KM]`` — rather than a second one.  The
+    height window is what makes it a tropopause search: an unbounded ``argmin``
+    over everything above some pressure can return an upper-level inversion,
+    a noise spike, or the model top on a profile that keeps cooling, and
+    nothing downstream would notice.
+
+    Raises if the window selects no level, so a reference on a different
+    vertical extent fails loudly instead of yielding index 0.
+    """
+    T_ref = jnp.asarray(T_ref)
+    z_km = jnp.asarray(z_m, dtype=T_ref.dtype) / 1000.0
+    window = ((z_km >= TROP_MIN_Z_KM) & (z_km <= TROP_MAX_Z_KM))
+    if int(jnp.sum(window)) == 0:
+        raise ValueError(
+            f"reference_cold_point: no level in [{TROP_MIN_Z_KM}, "
+            f"{TROP_MAX_Z_KM}] km (z spans {float(jnp.min(z_km)):.2f}-"
+            f"{float(jnp.max(z_km)):.2f} km).")
+    idx = int(jnp.argmin(jnp.where(window, T_ref, jnp.inf)))
+    return idx, float(T_ref[idx]), float(z_km[idx])
 
 
 def tropospheric_min_pressure(
     T_ref: jax.Array,
     p_profile: jax.Array,
+    z_m: jax.Array,
     *,
     floor_p_Pa: float = DEFAULT_THERMO_MIN_P_PA,
     buffer_Pa: float = DEFAULT_THERMO_COLD_POINT_BUFFER_PA,
@@ -485,15 +511,9 @@ def tropospheric_min_pressure(
     identical domain; a bound derived from each model's own cold point would
     score every scheme on a different column.
     """
-    T_ref = jnp.asarray(T_ref)
-    p_profile = jnp.asarray(p_profile, dtype=T_ref.dtype)
-    aloft = p_profile < jnp.asarray(_COLD_POINT_SEARCH_MAX_P_PA, dtype=T_ref.dtype)
-    if not bool(jnp.any(aloft)):
-        raise ValueError(
-            "tropospheric_min_pressure: no level above "
-            f"{_COLD_POINT_SEARCH_MAX_P_PA} Pa to search for a cold point.")
-    cold_idx = int(jnp.argmin(jnp.where(aloft, T_ref, jnp.inf)))
-    p_cold = float(p_profile[cold_idx])
+    p_profile = jnp.asarray(p_profile)
+    idx, _T_cold, _z_cold = reference_cold_point(T_ref, z_m)
+    p_cold = float(p_profile[idx])
     return float(max(float(floor_p_Pa), p_cold + float(buffer_Pa)))
 
 

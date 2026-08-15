@@ -105,6 +105,7 @@ from legoesm.training.scm_rce_metrics import (
     score_profiles_precip_jax,
     score_thermo_jax,
     thermo_terms_jax,
+    reference_cold_point,
     tropospheric_mass_weights,
     tropospheric_min_pressure,
     subcloud_bulk_state,
@@ -544,7 +545,7 @@ def thermo_mask_weights(ref: ReferenceProfiles) -> tuple[np.ndarray, float]:
     """
     p_full = reference_pressure_profile(ref)
     min_p_Pa = tropospheric_min_pressure(
-        jnp.asarray(ref.T_ref), jnp.asarray(p_full))
+        jnp.asarray(ref.T_ref), jnp.asarray(p_full), jnp.asarray(ref.z_m))
     weights = np.asarray(tropospheric_mass_weights(
         jnp.asarray(p_full), jnp.asarray(ref.mass_weights), min_p_Pa=min_p_Pa))
     return weights, float(min_p_Pa)
@@ -2681,6 +2682,9 @@ def tune_category_winner(
     # proposal that lands on the incumbent's own value hits the cache.  Reporting
     # the request as if it were the work done overstates both the search and the
     # evaluations-per-parameter that a reader divides by.
+    # Count keys INSERTED BY THIS CALL, not the cache size: the cache already
+    # holds the default run, and a caller may share one across schemes.
+    _keys_before = set(cache)
     stats = {"requested_evals": int(tune_evals), "random_proposals": 0,
              "refine_proposals": 0, "unique_evals": 0}
 
@@ -2731,7 +2735,7 @@ def tune_category_winner(
             subcloud_top_m=subcloud_top_m,
             thermo_humidity=thermo_humidity,
         )
-        stats["unique_evals"] = len(cache)
+        stats["unique_evals"] = len(set(cache) - _keys_before)
         trial_score = objective_value(trial_run, objective)
         if trial_run.status == "ok" and trial_score < best_score:
             best_score = trial_score

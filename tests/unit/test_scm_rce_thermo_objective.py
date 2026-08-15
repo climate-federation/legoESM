@@ -25,6 +25,7 @@ from legoesm.training.scm_rce_metrics import (
     THERMO_HUMIDITY_VARIABLES,
     relative_humidity_profile,
     score_thermo_jax,
+    reference_cold_point,
     tropospheric_mass_weights,
     tropospheric_min_pressure,
     weighted_rmse,
@@ -110,26 +111,68 @@ def test_logq_scores_a_uniform_relative_error_uniformly():
     assert float(q_term) == pytest.approx(1.0, rel=1e-9)
 
 
+def _tropopause_column(n=60, cold_z_km=16.0):
+    """A column with an UNAMBIGUOUS cold point at ``cold_z_km``."""
+    z_km = np.linspace(0.0, 30.0, n)[::-1]              # top -> surface
+    p = 100_000.0 * np.exp(-z_km / 8.0)
+    T = 200.0 + 100.0 * np.exp(-((z_km - 0.0) / 12.0) ** 2)
+    T = np.where(z_km > cold_z_km, 200.0 + 3.0 * (z_km - cold_z_km), T)
+    T[np.argmin(np.abs(z_km - cold_z_km))] = 190.0      # the minimum
+    return T, p, z_km * 1000.0
+
+
 def test_tropospheric_min_pressure_sits_below_the_reference_cold_point():
     """The mask must be derived from the reference's own cold point, not from a
     bound that happens to be near it."""
-    n = 60
-    p = np.linspace(3_000.0, 100_000.0, n)
-    # A cold point at ~9000 Pa, well above the 100 hPa floor.
-    T = 300.0 - 80.0 * np.exp(-((p - 9_000.0) / 6_000.0) ** 2)
+    T, p, z_m = _tropopause_column()
+    idx, T_cold, z_cold = reference_cold_point(jnp.asarray(T), jnp.asarray(z_m))
+    assert T_cold == pytest.approx(190.0)
+    assert 12.0 <= z_cold <= 25.0
     min_p = tropospheric_min_pressure(
-        jnp.asarray(T), jnp.asarray(p), floor_p_Pa=1.0, buffer_Pa=2_000.0)
-    cold_p = float(p[int(np.argmin(np.where(p < 30_000.0, T, np.inf)))])
-    assert min_p == pytest.approx(cold_p + 2_000.0, rel=1e-9)
-    assert min_p > cold_p
+        jnp.asarray(T), jnp.asarray(p), jnp.asarray(z_m),
+        floor_p_Pa=1.0, buffer_Pa=2_000.0)
+    assert min_p == pytest.approx(float(p[idx]) + 2_000.0, rel=1e-9)
+    assert min_p > float(p[idx])
+
+
+def test_cold_point_ignores_a_stratospheric_minimum_above_the_window():
+    """The failure an unbounded argmin over `p < 300 hPa` would have: a colder
+    level ABOVE the tropopause window (a mesospheric minimum, a noise spike, or
+    a profile that keeps cooling to the model top) must not be selected."""
+    T, p, z_m = _tropopause_column()
+    z_km = z_m / 1000.0
+    T = T.copy()
+    T[z_km > 26.0] = 150.0            # colder than the real cold point
+    _idx, T_cold, z_cold = reference_cold_point(
+        jnp.asarray(T), jnp.asarray(z_m))
+    assert T_cold == pytest.approx(190.0)
+    assert z_cold <= 25.0
+
+
+def test_cold_point_ignores_a_low_level_inversion():
+    """A cold layer BELOW the window must not be selected either."""
+    T, p, z_m = _tropopause_column()
+    z_km = z_m / 1000.0
+    T = T.copy()
+    T[z_km < 2.0] = 180.0             # an absurd near-surface minimum
+    _idx, T_cold, z_cold = reference_cold_point(
+        jnp.asarray(T), jnp.asarray(z_m))
+    assert T_cold == pytest.approx(190.0)
+    assert z_cold >= 12.0
+
+
+def test_cold_point_raises_on_a_column_that_does_not_reach_the_window():
+    z_m = np.linspace(0.0, 8_000.0, 20)[::-1]
+    T = np.linspace(220.0, 300.0, 20)
+    with pytest.raises(ValueError, match="no level in"):
+        reference_cold_point(jnp.asarray(T), jnp.asarray(z_m))
 
 
 def test_tropospheric_min_pressure_respects_the_floor():
-    n = 60
-    p = np.linspace(3_000.0, 100_000.0, n)
-    T = 300.0 - 80.0 * np.exp(-((p - 9_000.0) / 6_000.0) ** 2)
+    T, p, z_m = _tropopause_column()
     min_p = tropospheric_min_pressure(
-        jnp.asarray(T), jnp.asarray(p), floor_p_Pa=50_000.0, buffer_Pa=0.0)
+        jnp.asarray(T), jnp.asarray(p), jnp.asarray(z_m),
+        floor_p_Pa=50_000.0, buffer_Pa=0.0)
     assert min_p == 50_000.0
 
 

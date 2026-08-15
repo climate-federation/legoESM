@@ -186,8 +186,9 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
     w_masked, min_p_Pa = camp.thermo_mask_weights(ref)
     # The mask is derived from the reference's cold point, so REPORT the cold
     # point rather than leaving the reader to infer it from the bound.
-    aloft = p_full < 30_000.0
-    cold_idx = int(np.argmin(np.where(aloft, T, np.inf)))
+    from legoesm.training.scm_rce_metrics import reference_cold_point
+    cold_idx, _T_cold, _z_cold = reference_cold_point(
+        jnp.asarray(T), jnp.asarray(ref.z_m))
     out["masked"] = {
         "min_p_Pa": float(min_p_Pa),
         "cold_point_p_Pa": float(p_full[cold_idx]),
