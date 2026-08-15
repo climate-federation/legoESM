@@ -116,12 +116,19 @@ mpas_land_beta_soil: true
 # down-regulates, so no separate bucket is needed here.
 land_stomatal_beta: true
 
-# The two-leaf canopy rather than the bulk surface energy balance. The driver's
-# own note on this dispatch says the two-leaf scheme "limits land ET below
-# potential and breaks the over-evaporation wet loop" -- which is the exact
-# defect measured on this deck, where the tropical deserts evaporate 3.5x
-# observed. The bulk scheme has no canopy to hold water back.
-land_surface_scheme: two_leaf
+# The bulk surface energy balance, NOT the two-leaf canopy. The canopy schemes
+# would be the better answer -- the driver's own note says the two-leaf scheme
+# "limits land ET below potential and breaks the over-evaporation wet loop",
+# which is exactly this deck's measured defect -- but they are NOT WIRED on
+# this mesh: the canopy needs the coupled pipeline's grid threading, and the
+# run refuses to start if asked for one here. Setting it was caught by review
+# before it cost a queue slot.
+#
+# What the bulk scheme still gives, with the stomatal switch above on, is the
+# stomatal limitation multiplying the root-zone soil availability, so
+# transpiration is plant-limited even without a resolved canopy. That is the
+# most this lane can do today; wiring the canopy onto it is separate work.
+land_surface_scheme: simple_seb
 
 # NOT SET, and worth knowing why. The per-PFT land parameters -- albedo,
 # emissivity, root depth, roughness, bulk transfer coefficient, wilting point,
