@@ -184,8 +184,15 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
     }
     # The SAME shares over the masked domain the objective actually scores.
     w_masked, min_p_Pa = camp.thermo_mask_weights(ref)
+    # The mask is derived from the reference's cold point, so REPORT the cold
+    # point rather than leaving the reader to infer it from the bound.
+    aloft = p_full < 30_000.0
+    cold_idx = int(np.argmin(np.where(aloft, T, np.inf)))
     out["masked"] = {
         "min_p_Pa": float(min_p_Pa),
+        "cold_point_p_Pa": float(p_full[cold_idx]),
+        "cold_point_z_km": float(z_km[cold_idx]),
+        "cold_point_T_K": float(T[cold_idx]),
         "n_levels": int(np.sum(w_masked > 0.0)),
         "absolute_qv": _relative_perturbation_shares(
             qv, w_masked, z_km, transform="identity",
@@ -281,7 +288,9 @@ def main(argv: list[str] | None = None) -> int:
         f"{mass_row[f'mass_share_above_{h:g}km']:11.4%} "
         for h in SPLIT_HEIGHTS_KM))
     m = weighting["masked"]
-    print(f"\n-- over the SCORED mask only (p >= {m['min_p_Pa']:.0f} Pa, "
+    print(f"\n-- reference cold point: {m['cold_point_T_K']:.1f} K at "
+          f"{m['cold_point_z_km']:.2f} km / {m['cold_point_p_Pa']:.0f} Pa --")
+    print(f"-- over the SCORED mask only (p >= {m['min_p_Pa']:.0f} Pa, "
           f"{m['n_levels']} levels) --")
     print(header)
     for name in ("absolute_qv", "log_qv", "relative_humidity"):

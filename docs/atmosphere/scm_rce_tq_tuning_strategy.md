@@ -184,9 +184,15 @@ came from aloft:
 | metric | share above 2 km | above 5 km | above 10 km |
 |---|---|---|---|
 | absolute `q_v` | 26.4 % | **1.72 %** | 0.0006 % |
-| relative humidity | 66.5 % | 27.9 % | 4.3 % |
+| relative humidity | 71.7 % | 38.9 % | 10.7 % |
 | `log q` | 80.6 % | 56.6 % | 28.6 % |
 | (column mass share) | 80.6 % | 56.6 % | 28.6 % |
+
+(An earlier version of this table gave 66.5/27.9/4.3 % for relative humidity.
+That probe used a liquid-only saturation curve on a pressure profile computed
+straight from height, i.e. it measured a metric the campaign does not minimise;
+the row above is the re-measurement with the campaign's own blended curve and
+pressure. The `q_v` and `log q` rows use no saturation curve and did not move.)
 
 An absolute `q_v` RMSE is a boundary-layer metric — 1.7 % of its leverage lies
 above 5 km against a 56.6 % mass share. That is the original defect.
