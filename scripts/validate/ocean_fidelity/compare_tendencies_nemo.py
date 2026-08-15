@@ -446,7 +446,7 @@ def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
 
 
 def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
-                         evd_cols=None, z_iface=None, z_cut_m=300.0):
+                         evd_cols=None, z_iface=None, z_cuts_m=(300.0, 100.0)):
     """Split the Stage-A K_H excess into a MOMENTUM part and a PRANDTL part.
 
     Stage A scores K_H against ``avt``, which carries BOTH the closure
@@ -554,10 +554,24 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     if z_iface is None:
         depths = [("", None)]
     else:
-        depths = [("", None), (f"<{z_cut_m:g}m", z_iface <= z_cut_m)]
+        # 300 m brackets the equatorial thermocline; 100 m is the EUC core and
+        # the depth the Z20 bias is measured at. Both, because the full-column
+        # rms turned out to be a DEEP signal (nino3/calm 2.311 whole column,
+        # 1.054 above 300 m) and one cut cannot show that.
+        depths = [("", None)] + [(f"<{c:g}m", z_iface <= c) for c in z_cuts_m]
 
     def _rms(x):
         return float(np.sqrt(np.mean(x ** 2)))
+
+    def _ri_ratio(pr_o, pr_n):
+        """Ri(ours)/Ri(NEMO) on the both-unclamped subset, or NaN if empty."""
+        free_both = ((pr_o > 1.001) & (pr_o < 9.99)
+                     & (pr_n > 1.001) & (pr_n < 9.99))
+        n = int(free_both.sum())
+        return {"n_both_unclamped": n,
+                "Ri_ratio_median": (float(np.median(pr_o[free_both]
+                                                    / pr_n[free_both]))
+                                    if n >= 10 else float("nan"))}
 
     for tag0, incol in regions:
         for suff, colsel in subsets:
@@ -586,15 +600,26 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                     # A median that equals a clamp is not a Prandtl number.
                     "Pr_ours_frac_at_ceiling": float(np.mean(pr_o > 9.99)),
                     "Pr_ours_frac_at_floor": float(np.mean(pr_o < 1.001)),
+                    "Pr_nemo_frac_at_ceiling": float(np.mean(pr_n > 9.99)),
+                    "Pr_nemo_frac_at_floor": float(np.mean(pr_n < 1.001)),
+                    # Both closures use Pr = clamp(4.5*Ri, 1, 10) -- the card
+                    # sets prandtl_ri_coeff = 1/ri_cri = 4.5 to match nn_pdl=1
+                    # -- so ON THE INTERFACES WHERE NEITHER IS CLAMPED the Pr
+                    # ratio IS the Richardson-number ratio, with the shared
+                    # coefficient cancelling. That subset is the only place the
+                    # comparison means anything, and its size is reported so a
+                    # ratio taken on a handful of points is visible as such.
+                    **_ri_ratio(pr_o, pr_n),
                 })
-    print("  %-22s %8s %9s %9s %9s %8s %8s %8s" % (
-        "region", "n", "KH/avt_r", "KM/avm_r", "KH/avt_m",
-        "Pr_nemo", "Pr_ours", "at_ceil"))
+    print("  %-22s %8s %9s %9s %8s %8s %8s %8s %8s" % (
+        "region", "n", "KH/avt_r", "KM/avm_r",
+        "Pr_nemo", "Pr_ours", "at_ceil", "Ri_o/Ri_n", "n_free"))
     for r in rows:
-        print("  %-22s %8d %9.3f %9.3f %9.3f %8.2f %8.2f %8.3f" % (
+        print("  %-22s %8d %9.3f %9.3f %8.2f %8.2f %8.3f %8.2f %8d" % (
             r["region"], r["n"], r["K_H_over_avt_rms"], r["K_M_over_avm_rms"],
-            r["K_H_over_avt_mean"], r["Pr_nemo_median"], r["Pr_ours_median"],
-            r["Pr_ours_frac_at_ceiling"]))
+            r["Pr_nemo_median"], r["Pr_ours_median"],
+            r["Pr_ours_frac_at_ceiling"], r["Ri_ratio_median"],
+            r["n_both_unclamped"]))
     print("  READ: KH/avt_r is the SAME reduction as the Stage-A box ratio, so "
           "it is the number that has to be explained; KM/avm_r is the same "
           "reduction on momentum. KM/avm_r ~ 1 with KH/avt_r >> 1 means the "
@@ -793,7 +818,7 @@ def main():
     _z_iface = np.cumsum(_e3t_c, axis=1)[:, :-1]
     result["stage_a_prandtl"] = prandtl_split_report(
         K_H, K_M, avt_i, avm_i, wet_pair, lat_col, d["lon"].reshape(-1),
-        evd_cols=evd_cols, z_iface=_z_iface)
+        evd_cols=evd_cols, z_iface=_z_iface, z_cuts_m=(300.0, 100.0))
 
     if args.restart_npz:
         if args.rec != 1:

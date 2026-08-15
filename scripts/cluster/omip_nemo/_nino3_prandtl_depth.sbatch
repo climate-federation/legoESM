@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=nino3prd
+#SBATCH --job-name=nino3euc
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96G
 #SBATCH --time=1:30:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/nino3prd_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/nino3euc_%j.out
 #
 # RE-RUN of the Prandtl split after the first pass came back UNREADABLE.
 #
@@ -47,6 +47,6 @@ $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --ufile $D/ORCA1_1h_20010101_20010101_trd1h_U.nc \
   --vfile $D/ORCA1_1h_20010101_20010101_trd1h_V.nc \
   --rec 1 --skip-maps --mxl-choice 3 \
-  --output-dir $REPO/results/omip_nemo/nino3_prandtl_depth 2>&1 \
+  --output-dir $REPO/results/omip_nemo/nino3_prandtl_euc 2>&1 \
   | grep -aE "Prandtl split|control|floors detected|^  region|^  arctic|^  nh_mid|^  tropics|^  sh_mid|^  antarctic|^  nino|^  eqpac|READ:|FATAL"
 echo "=== rc=${PIPESTATUS[0]} ==="

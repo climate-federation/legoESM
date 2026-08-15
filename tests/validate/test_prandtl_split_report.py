@@ -107,7 +107,7 @@ def test_depth_split_separates_the_thermocline_from_the_abyss():
                 (NCOL, 1))
     K_H = K_M / np.where(z <= 300.0, PR_OURS, 10.0)   # saturated only deep
     rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon,
-                                    z_iface=z, z_cut_m=300.0)
+                                    z_iface=z, z_cuts_m=(300.0,))
     shallow = _row(rows, "nino3<300m")
     assert shallow["Pr_ours_median"] == pytest.approx(PR_OURS, rel=1e-12)
     assert shallow["Pr_ours_frac_at_ceiling"] == 0.0
@@ -116,3 +116,18 @@ def test_depth_split_separates_the_thermocline_from_the_abyss():
     # the first NEMO run unreadable.
     full = _row(rows, "nino3")
     assert full["Pr_ours_frac_at_ceiling"] == pytest.approx(0.6, rel=1e-12)
+
+
+def test_ri_ratio_uses_only_the_both_unclamped_subset():
+    """Pr = clamp(4.5*Ri,1,10) on both sides, so the Pr ratio is the Ri ratio
+    ONLY where neither is clamped. A clamped point must not enter it."""
+    K_H, K_M, avt, avm, wet, lat, lon = _fields()
+    # Half the interfaces get OUR Pr pinned on the ceiling; those must be
+    # excluded, leaving the planted PR_OURS/PR_NEMO on the rest.
+    K_H = K_M / PR_OURS
+    K_H[: NCOL // 2, :] = K_M[: NCOL // 2, :] / 10.0
+    rows = ctn.prandtl_split_report(K_H, K_M, avt, avm, wet, lat, lon)
+    r = _row(rows, "nino3")
+    assert r["Pr_ours_frac_at_ceiling"] == pytest.approx(0.5, rel=1e-12)
+    assert r["n_both_unclamped"] == (NCOL // 2) * (NIFACE - 1)
+    assert r["Ri_ratio_median"] == pytest.approx(PR_OURS / PR_NEMO, rel=1e-12)
