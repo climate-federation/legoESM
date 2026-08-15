@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=scoresgn
+#SBATCH --job-name=scoenso
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=96G
 #SBATCH --time=1:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/scoresgn_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/scoenso_%j.out
 #
 # ABSOLUTE skill of the signed-TEOS-10 arm 9409057 against NEMO at day 30.
 #
@@ -29,5 +29,5 @@ echo "HEAD: $(git -C $ROOT log --oneline -1)"
 $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
   --nemo-gridt "$GT" --nemo-month 1 --freeze-clamp-C -1.8 --sss-faithful \
   --grid-label signedn2_d30 \
-  --output-dir $ROOT/results/omip_nemo/compare_signedn2_d30_m01 2>&1 | tail -45
+  --output-dir $ROOT/results/omip_nemo/compare_signedn2_d30_m01_enso 2>&1 | tail -60
 echo "=== rc=$?"
