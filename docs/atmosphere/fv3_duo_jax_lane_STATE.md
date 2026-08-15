@@ -328,10 +328,36 @@ Phase 2 (3-D) is **a stack of six modules, three of them landed**:
 |---|---|---|---|
 | 1 | `fv3_cgrid_phase_3d.py` | `fv3_native_cgrid_phase_3d` | landed `534939307` |
 | 2 | `fv3_dsw_phase_3d.py` | `fv3_native_dsw_phase_3d` | landed `87eee49e9` |
-| 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **authoring, jobs 9417315/16/17** |
-| 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | not started |
+| 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **landed** — 903 lines, all six routines |
+| 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | next |
 | 5 | `fv3_tracer2d.py` | `fv3_native_tracer2d` | not started (the `NSPLT_MAX` node) |
 | 6 | `fv3_dynamics.py` | `fv3_native_dynamics` | not started |
+
+Module 3 was authored by GLM-5.3 in three parts (A `dsw_tail_phase_3d`,
+B `dgrid_pressure_phase_3d`, C `nh_exchanged_area6` +
+`dgrid_nh_pressure_phase_3d`), reviewed by Claude, and its gate file is
+`tests/grids/test_fv3_dsw_tail_3d.py`. **Three defects the review and the
+first gate run caught, worth keeping because each is a class:**
+
+* `GridFlags.from_gridstruct(ctx.gs6[0])` — a constructor that does not exist
+  (it is `from_gs`) AND a per-run value where the kernels take a per-face one.
+  `ctx.flags6[t]` is what the km=1 stepper and both siblings pass.
+* the entry gate routed the d_sw1 transport outputs through `validate_stacked`,
+  which REFUSED a correct input: `field_shape("ut")` is the C-grid `ut`
+  `(m_a, m_a, km)`, d_sw1's is `(m_a+1, m_a, km)`. The shape table does not
+  cross that boundary; those stacks are checked for face axis 6 and level
+  axis `km` only.
+* the jit-vs-eager gate built its own `jax.jit` and handed it the ctx OBJECT.
+  It goes through the module's own `make_*_jit` factory now — a test that
+  re-derives the static/dynamic split certifies its opinion, not the contract.
+
+**The authoring loop that works** (three failed shapes before it): GLM-5.3,
+STREAMING, `--max-tokens 96000`, one ~400-line part per call, and a prompt
+that caps the module docstring at 70 lines. Reasoning takes 23–26k tokens
+per part even with `thinking={"type":"disabled"}`, and at a 48k ceiling it
+took 41–43k and the code was truncated. Prompts are built by
+`scripts/experiment/fv3_build_glm_authoring_prompt.py` from the tree, with
+the shared rules in `docs/atmosphere/fv3_glm_authoring_rules.txt`.
 
 `lagrangian_to_eulerian` is ALREADY in the JAX lane (`fv3_mapz.py:1319`), and so
 is every NH kernel including `update_dz_d` (`fv3_nh_core.py:1153`) — the
@@ -369,8 +395,9 @@ refuted the hypothesis the gate or its own docstring rested on:
 
 ## Next task, precisely
 
-1. **Land module 3** (`fv3_dsw_tail_3d.py`): assemble parts A/B/C, review
-   (Claude + codex), write its gate file, run it.
+1. **Codex-review module 3** (`scripts/cluster/fv3_native/codex_review_gate_triage.sbatch`
+   is the pattern; point it at `fv3_dsw_tail_3d.py` and its gate file), and
+   finish its gate run — the parity/adjoint bounds still carry `TOL-PENDING`.
 2. **Module 4** (`fv3_acoustic_3d.py`) — `acoustic_substep_3d` +
    `acoustic_loop_3d` over `n_split` (`lax.scan`), `exchange_state_halos_3d`,
    `build_nh_carry`. This is the one that composes 1→3 into a step.
