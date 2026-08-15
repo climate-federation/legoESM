@@ -32,26 +32,32 @@
 set -uo pipefail
 # sbatch runs the script from a SPOOL copy, so BASH_SOURCE is useless here;
 # SLURM_SUBMIT_DIR is the directory sbatch was invoked from (the repo root).
-WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+# The override is LEGOESM_WORKDIR, not WORKDIR: sbatch exports the caller's whole
+# environment, and a generic inherited WORKDIR would silently outrank the
+# submission directory and run a DIFFERENT checkout.
+WORKDIR="${LEGOESM_WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 test -d "$WORKDIR/packages" || {
-    echo "WORKDIR=$WORKDIR is not a legoESM checkout (no packages/); submit from the repo root or set WORKDIR"; exit 2; }
+    echo "WORKDIR=$WORKDIR is not a legoESM checkout (no packages/); submit from the repo root or set LEGOESM_WORKDIR"; exit 2; }
 cd "$WORKDIR"
 
 export PYTHONPATH=$(ls -d "$WORKDIR"/packages/*/ | sed 's:/$::' | tr '\n' ':')
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cpu
 export XLA_FLAGS="--xla_force_host_platform_device_count=1"
-PYJ="${PYJ:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}"
+PYJ="${LEGOESM_PYTHON:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}"
 
 # Raw CLM5 surfdata is staged read-only in the shared tree (data, not code), so
 # it is an absolute default rather than a WORKDIR-relative path.
-SURF="${SURF:-/burg-archive/glab/users/pg2328/legoESM/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
-CLIM="${CLIM:-$WORKDIR/results/land_forcing/era5_land_forcing_clim_2deg.nc}"
-OUTDIR="${OUTDIR:-$WORKDIR/results/global_carbon_ic}"
-CCACHE="${CCACHE:-$WORKDIR/.xla_cache_carbon_ic}"          # persistent XLA compile cache
-ECACHE="${ECACHE:-$WORKDIR/.carbon_equilibrium_cache}"     # deterministic (eq,qc) result cache
+SURF="${CIC_SURF:-/burg-archive/glab/users/pg2328/legoESM/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+CLIM="${CIC_CLIM:-$WORKDIR/results/land_forcing/era5_land_forcing_clim_2deg.nc}"
+OUTDIR="${CIC_OUTDIR:-$WORKDIR/results/global_carbon_ic}"
+CCACHE="${CIC_CCACHE:-$WORKDIR/.xla_cache_carbon_ic}"          # persistent XLA compile cache
+ECACHE="${CIC_ECACHE:-$WORKDIR/.carbon_equilibrium_cache}"     # deterministic (eq,qc) result cache
 
 echo "=== node: $(hostname)  time: $(date)  global carbon IC (science-grade climate) ==="
+# The guard above only proves "a legoESM-like tree" -- stamp WHICH tree, so the
+# product is attributable to a commit rather than to a path.
+echo "provenance: $WORKDIR @ $(git rev-parse --short HEAD 2>/dev/null || echo NO-GIT) dirty=$(git status --porcelain 2>/dev/null | wc -l) files"
 test -f "$SURF" || { echo "MISSING surfdata $SURF"; exit 2; }
 test -f "$CLIM" || { echo "MISSING Stage-1 climatology $CLIM (run build_land_forcing_climatology.sbatch first)"; exit 2; }
 
@@ -64,4 +70,8 @@ test -f "$CLIM" || { echo "MISSING Stage-1 climatology $CLIM (run build_land_for
   --output "$OUTDIR" \
   --compilation-cache-dir "$CCACHE" \
   --equilibrium-cache-dir "$ECACHE" 2>&1
-echo "EXIT=$?  done: $(date)"
+# EXIT the build's status, not echo's: this script is the afterok gate for the
+# QC stage, and a trailing echo would make every failed build "succeed".
+RC=$?
+echo "EXIT=$RC  done: $(date)"
+exit $RC

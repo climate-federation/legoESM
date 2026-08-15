@@ -27,20 +27,28 @@
 set -uo pipefail
 # sbatch runs the script from a SPOOL copy, so BASH_SOURCE is useless here;
 # SLURM_SUBMIT_DIR is the directory sbatch was invoked from (the repo root).
-WORKDIR="${WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+# The override is LEGOESM_WORKDIR, not WORKDIR: sbatch exports the caller's whole
+# environment, and a generic inherited WORKDIR would silently outrank the
+# submission directory and run a DIFFERENT checkout.
+WORKDIR="${LEGOESM_WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 test -d "$WORKDIR/packages" || {
-    echo "WORKDIR=$WORKDIR is not a legoESM checkout (no packages/); submit from the repo root or set WORKDIR"; exit 2; }
+    echo "WORKDIR=$WORKDIR is not a legoESM checkout (no packages/); submit from the repo root or set LEGOESM_WORKDIR"; exit 2; }
 cd "$WORKDIR"
 
 # packages/* federation layout (PEP420); the builder imports legoesm.constants only.
 export PYTHONPATH=$(ls -d "$WORKDIR"/packages/*/ | sed 's:/$::' | tr '\n' ':')
-PYJ="${PYJ:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}"
+PYJ="${LEGOESM_PYTHON:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}"
 
-OUT="${OUT:-$WORKDIR/results/land_forcing/era5_land_forcing_clim_2deg.nc}"
+OUT="${CIC_CLIM:-$WORKDIR/results/land_forcing/era5_land_forcing_clim_2deg.nc}"
 mkdir -p "$(dirname "$OUT")"
 
 echo "=== node: $(hostname)  time: $(date)  ARCO-ERA5 land-forcing climatology ==="
+echo "provenance: $WORKDIR @ $(git rev-parse --short HEAD 2>/dev/null || echo NO-GIT) dirty=$(git status --porcelain 2>/dev/null | wc -l) files"
 /usr/bin/time -v $PYJ scripts/data/build_land_forcing_climatology.py \
   --out "$OUT" \
   --stride 8 --years 2015 2016 2017 2018 2019 2020 2>&1
-echo "EXIT=$?  done: $(date)"
+# EXIT the builder's status, not echo's: Stage 2 chains on afterok, and a
+# trailing echo would make every failed build "succeed".
+RC=$?
+echo "EXIT=$RC  done: $(date)"
+exit $RC

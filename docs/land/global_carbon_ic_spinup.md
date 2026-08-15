@@ -18,8 +18,15 @@ mkdir -p data/land_carbon_ic
 gh release download land-carbon-ic-v1 -R climate-federation/legoESM \
     -D data/land_carbon_ic
 
+# coupled ESM — whole-grid seed
 python scripts/run/run_coupled.py \
     --carbon-ic data/land_carbon_ic/global_carbon_ic.npz  ...
+
+# single-point LMIP — nearest-land-cell seed, or just use the shipped config
+python scripts/run/run_lmip.py --lat 40.0 --lon -105.0 \
+    --carbon-scheme differland \
+    --carbon-ic data/land_carbon_ic/global_carbon_ic.npz
+python scripts/run/run_lmip.py --config config/lmip/lmip_carbon_ic.yaml
 ```
 
 | asset | what |
@@ -30,8 +37,42 @@ python scripts/run/run_coupled.py \
 | `carbon_ic_maps.png` | SOC / biomass / permafrost-phi maps + zonal SOC vs observations |
 | `SHA256SUMS` | checksums of the two `.npz` |
 
-`--carbon-ic` is a **coupled-path-only** feature: `run_amip` prescribes carbon
-and discards evolved pools, so it is intentionally not wired there.
+### Which drivers can consume it
+
+| driver | seeded? | how |
+|---|---|---|
+| `scripts/run/run_coupled.py` (coupled ESM) | yes | `--carbon-ic <finidat>` → `CoupledConfig.carbon_ic_path`; STRICT whole-grid match, needs multilayer land |
+| `scripts/run/run_lmip.py` (single-point LMIP) | yes | `--carbon-ic <finidat>` with `--carbon-scheme differland`, or the shipped `config/lmip/lmip_carbon_ic.yaml`; seeds the one column from the **nearest land cell** |
+| `scripts/run/run_amip.py` (AMIP) | no, by design | AMIP prescribes carbon and discards evolved pools |
+| `scripts/run/run_lmip_biophys.py` (global LMIP biophysics) | not yet | that driver pins `carbon="none"` — energy/water/snow/soil only, with GPP taped as a diagnostic. There are no pools to seed until its carbon cycle lands |
+
+For the single-point LMIP the whole-grid contract cannot be met (one column at an
+arbitrary site), but the column can still be *initialised* from the nearest cell:
+the pools are per-area densities [gC/m2], so `load_finidat_carbon_ic_at_point`
+simply reads the column that the spin-up equilibrated at the nearest place on
+Earth — no regridding, no area weighting. It mirrors `surface_params_at_point`,
+which already picks the nearest surfdata gridcell for the same driver, so cover,
+soil and carbon come from the same neighbourhood. Candidates are restricted to
+land cells and ranked by great-circle angle (a lat/lon Euclidean metric mis-ranks
+them at high latitude); exact ties fall to the lowest flat index, i.e. file
+order; and a match farther than 3° is refused rather than silently seeding a
+column from a different climate. `run_lmip`'s soil defaults (10 layers / 3.0 m)
+already match the column the IC was spun up on.
+
+> **It is a nearest-cell initialisation, not an equilibrium of the site.** The
+> pools equilibrated under the finidat *cell's* grid-mean climate and its
+> cover-weighted **PFT mixture**, whereas a point run picks one `veg_type` and
+> one `soil_texture` at coordinates that need not resemble any of that. The
+> driver prints the matched cell's dominant cover and its cover fraction, and
+> warns when that cover or the soil column disagrees with the run. Expect the
+> pools to drift toward the point configuration's own equilibrium — far less
+> than from a cold start, but not to zero. Do not quote a seeded point run as
+> "at equilibrium" without showing its drift.
+
+The permafrost `phi` that scaled the seed is loaded with it and threaded into the
+run's SOM protection, so seeded high-latitude carbon is held by the same
+protection that produced it. Without that, the seeded Arctic SOC decays back
+toward the unprotected equilibrium and the seed is cosmetic.
 
 ### Grid contract (strict, fail-loud)
 
@@ -51,8 +92,31 @@ Voronoi run must build its own IC with the recipe below.
 ## 2. Rebuild it
 
 Three SLURM jobs, all submitted **from the repo root of the checkout you want to
-run**. `WORKDIR` defaults to `SLURM_SUBMIT_DIR`, so the chain works in any
-worktree; `WORKDIR`, `PYJ`, `SURF`, `CLIM`, `OUTDIR` are environment overrides.
+run**: the working directory defaults to `SLURM_SUBMIT_DIR`, so the chain works
+in any worktree, and each job stamps `WORKDIR @ <sha> dirty=<n>` in its log so
+the product is attributable to a commit rather than to a path. Every stage exits
+with the status of the work it ran, so the `afterok` chain is a real gate.
+
+Environment overrides (all namespaced — a bare `WORKDIR`/`OUT`/`ARCH` inherited
+from your shell would otherwise outrank the submission directory, since `sbatch`
+exports the caller's whole environment):
+
+| variable | stage | meaning |
+|---|---|---|
+| `LEGOESM_WORKDIR` | all | the checkout to run (default: submit dir) |
+| `LEGOESM_PYTHON` | all | interpreter |
+| `CIC_CLIM` | 1 writes, 2 reads | the ERA5 climatology NetCDF |
+| `CIC_SURF` | 2 | CLM5 surfdata NetCDF |
+| `CIC_OUTDIR` | 2 writes, 3 reads | the build-product directory |
+| `CIC_CCACHE` / `CIC_ECACHE` | 2, 3 | XLA compile cache / equilibrium result cache |
+| `CIC_ARCH` | 3 | `archetypes.npz` to validate (defaults inside `CIC_OUTDIR`) |
+| `CIC_VALDIR` | 3 | where the validation report is written |
+
+Submit plainly — `sbatch --chdir=…` is **not** supported, because the
+`--output=scripts/tmp/%x_%j.out` directive is resolved by SLURM against the job
+working directory while the script separately `cd`s to `LEGOESM_WORKDIR`, and the
+directive cannot follow it. These are also not array jobs: every task of an
+`--array` would share one output directory and one cache.
 
 ```bash
 mkdir -p scripts/tmp                       # SLURM opens --output before the job starts
