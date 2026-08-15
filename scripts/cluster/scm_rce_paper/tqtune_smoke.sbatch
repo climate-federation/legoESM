@@ -16,6 +16,10 @@ set +e
 # It also checks the two things a passing exit code would NOT establish:
 #   * the tuner minimised the thermo score (tuned <= prior on THAT column);
 #   * the CSV's `objective` column says `thermo` and its rows are ordered by it.
+#
+# --allow-partial is REQUIRED here and only here: the merge gate refuses a table
+# missing 8 of 10 schemes, which is correct for a campaign and wrong for a
+# two-scheme wiring check.  The production arms never pass it.
 # ---------------------------------------------------------------------------
 WT=${WT:?export WT=<pinned worktree>}
 PIN=${PIN:?export PIN=<sha> the worktree must be at}
@@ -60,7 +64,8 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --scm-microphysics-substeps 30 \
   --bl-anchor-top-m -1 \
   --tune-evals 8 \
-  --tune-seed 20260815 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
+  --tune-seed 20260815 \
+  --allow-partial 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
 RC=${PIPESTATUS[0]}
 echo "RUN_RC=$RC"
 [ $RC -eq 0 ] || { echo "SMOKE FAILED in the run"; exit $RC; }
