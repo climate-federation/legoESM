@@ -107,13 +107,19 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     * S11 (``:969-1011``) ``ubb_postbarrier`` / ``vbbtemp_postbarrier``
       -- the blended pair, same shape (average_shared_edge_bgrid's
       ``(6, npx, npx)`` per level);
-    * S12 (corner KE, ``:1015-1020``), S13 (d_sw5 diagnostics,
-      ``:1102-1123``) and S14 (d_sw6 winds, ``:1256-1288``) are
-      RECOVERABLE and deliberately NOT re-returned: S12 is
-      ``0.5*(ubbtemp_pre*vbbtemp_post + ubb_post*vbb_pre)`` on the B
-      compute ring, S13 is the returned ``ke``/``wk``/``divg_d``/
-      ``delpc`` stacks as d_sw6 consumed them, S14 is the returned
-      ``u``/``v``.
+    * S12 (corner KE, ``:1015-1020``) ``ke_corner`` -- the assembly
+      THIS phase performs, ``0.5*(ubbtemp_pre*vbbtemp_post +
+      ubb_post*vbb_pre)`` on the B compute ring and exact zeros
+      outside it.  Returned, and the reason is worth stating: a caller
+      can recompute that formula from the barrier stacks, but
+      recomputing a formula does not certify that this module used it,
+      and the ``ke`` in the diagnostics below is d_sw5's OUTPUT ke --
+      a different quantity, two stages later (measured 1.2e+02
+      relative apart, job 9417474);
+    * S13 (d_sw5 diagnostics, ``:1102-1123``) and S14 (d_sw6 winds,
+      ``:1256-1288``) ARE recoverable and are not re-returned: S13 is
+      the returned ``ke``/``wk``/``divg_d``/``delpc`` stacks as d_sw6
+      consumed them, S14 is the returned ``u``/``v``.
 
     Field returns, each shape traced to its origin: ``u``
     ``(6, m_a, m_a+1, km)`` and ``v`` ``(6, m_a+1, m_a, km)`` (the
@@ -250,6 +256,7 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     for t in range(6):
         gs_t, fl_t = ctx.gs6[t], ctx.flags6[t]
         u_lv, v_lv, w_lv = [], [], []
+        ke_corner = []          # S12, the corner KE this phase assembles
         # The spec allocates each diagnostic from the shape the stage
         # actually returns; here the per-level lists carry that rôle and
         # stack_levels asserts no stage changes shape between levels.
@@ -266,6 +273,17 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
             kee = s3[t][k]["ubbtemp"] * vbbtemp_bld[k][t]
             ke = jnp.zeros((m_a + 1, m_a + 1), dtype=fdt).at[ring, ring].set(
                 0.5 * (kee + ubb_bld[k][t] * s3[t][k]["vbb"]))
+            # S12 (dyn_core.F90:1015-1020) IS RETURNED, and the earlier
+            # claim that it is "recoverable" was wrong in the way that
+            # matters: a caller can recompute the formula from the
+            # returned barrier stacks, but recomputing a formula does
+            # not certify that THIS module used it -- and `ke` in the
+            # returned diagnostics is d_sw5's OUTPUT ke, a different
+            # quantity that has been through two more stages.  Measured
+            # (job 9417474): the reconstruction and the returned `ke`
+            # differ by 1.2e+02 relative, exactly as they should.  So
+            # the assembly is exposed at the boundary it happens on.
+            ke_corner.append(ke)
             s4 = d_sw4_duo(u_k, v_k, ut_k, vt_k, ke, fl_t, bd, npx, npx,
                            dt=dt)
             s5 = d_sw5_duo(
@@ -301,7 +319,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                 if nm in s5:       # dict membership is static under jit
                     diag[nm].append(s5[nm])
         face = {"u": stack_levels(fname, "u", u_lv),
-                "v": stack_levels(fname, "v", v_lv)}
+                "v": stack_levels(fname, "v", v_lv),
+                "ke_corner": stack_levels(fname, "ke_corner", ke_corner)}
         if not hydrostatic:
             face["w"] = stack_levels(fname, "w", w_lv)
         for nm, lvls in diag.items():

@@ -426,7 +426,11 @@ def test_ke_is_the_mixed_assembly_and_not_either_uniform_one(
     vbt_raw = assert_real(out["vbbtemp_prebarrier"], "vbbtemp_prebarrier")
     ub_b = assert_real(out["ubb_postbarrier"], "ubb_postbarrier")
     vbt_b = assert_real(out["vbbtemp_postbarrier"], "vbbtemp_postbarrier")
-    ke = assert_real(out["ke"], "ke")
+    # S12: the assembly THIS phase performs.  NOT out["ke"], which is
+    # d_sw5's OUTPUT ke -- two stages later and a different quantity
+    # (measured 1.2e+02 relative apart, job 9417474; the first version
+    # of this gate compared against it and failed for that reason).
+    ke = assert_real(out["ke_corner"], "ke_corner")
 
     ring = slice(NG, NG + NPX)
     assert ke.shape == (6, MA + 1, MA + 1, KM), ke.shape
@@ -450,7 +454,7 @@ def test_ke_is_the_mixed_assembly_and_not_either_uniform_one(
 
     # TOL-PENDING: provisional bound; the measurement job replaces it.
     # DO NOT SHIP.   [class: exact -- this is one multiply and one add]
-    cmp_fields(ke, mixed, "ke (mixed assembly)", 1e-13)
+    cmp_fields(ke, mixed, "ke_corner (mixed assembly)", 1e-13)
     for nm, cand in (("all-raw", all_raw), ("all-blended", all_blended)):
         assert not np.allclose(np.asarray(ke), cand), (
             f"the returned ke equals the {nm} assembly -- barrier 2 sits "
