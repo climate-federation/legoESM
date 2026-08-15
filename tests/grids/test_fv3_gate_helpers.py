@@ -46,8 +46,34 @@ def test_cmp_reports_a_real_difference():
 def test_cmp_refuses_a_nan_mask_mismatch():
     a = _f([1.0, np.nan, 3.0])
     b = _f([1.0, 2.0, 3.0])
-    with pytest.raises(AssertionError, match="non-finite masks differ"):
+    with pytest.raises(AssertionError, match="NaN masks differ"):
         helpers.cmp_fields(a, b, "maskslip", 1e-9)
+
+
+def test_cmp_refuses_a_nan_swapped_for_an_infinity():
+    """codex MAJOR 3: a single ``~isfinite`` mask calls these equal, so a
+    dead branch leaking a NaN where an infinity belongs would be
+    invisible -- and the cell is then EXCLUDED from the comparison."""
+    a = _f([1.0, np.nan, 3.0])
+    b = _f([1.0, np.inf, 3.0])
+    with pytest.raises(AssertionError, match="NaN masks differ"):
+        helpers.cmp_fields(a, b, "nan-vs-inf", 1e-9)
+
+
+def test_cmp_refuses_plus_inf_swapped_for_minus_inf():
+    a = _f([1.0, np.inf, 3.0])
+    b = _f([1.0, -np.inf, 3.0])
+    with pytest.raises(AssertionError, match=r"\+Inf masks differ"):
+        helpers.cmp_fields(a, b, "posinf-vs-neginf", 1e-9)
+
+
+def test_cmp_refuses_one_fill_constant_swapped_for_the_other():
+    """codex MAJOR 2: both are fills, so the fill MASKS agree and the
+    cells drop out of the comparison; only a value check catches it."""
+    a = _f([1.0, 1.0e25, 3.0])
+    b = _f([1.0, 1.0e30, 3.0])
+    with pytest.raises(AssertionError, match="fill VALUES differ"):
+        helpers.cmp_fields(a, b, "fillswap", 1e-9)
 
 
 def test_cmp_refuses_a_drifted_fill():
@@ -78,13 +104,41 @@ def test_cmp_refuses_a_shape_mismatch():
 
 
 def test_cmp_scale_floor_stops_one_huge_cell_hiding_the_rest():
-    """Without the median floor, a 1e12 cell divides every physical
-    discrepancy in the field down to nothing."""
+    """A lone 1e12 cell must not divide every physical discrepancy in
+    the field down to nothing."""
     b = _f([1.0, 1.0, 1.0, 1.0e12])
     a = b.copy()
     a[0] += 0.5                     # a 50 % error on a unit cell
     rel, _ = helpers.cmp_fields(a, b, "hugecell", 1.0)
     assert rel > 0.1, rel
+
+
+def test_cmp_still_sees_a_small_cell_when_large_values_dominate():
+    """codex MAJOR 4, and it is the case a MEDIAN floor gets wrong.
+
+    With most of the field at 1e30, the median is 1e30, so a unit-scale
+    cell inherits a 1e30 denominator and a 100 % error on it reports as
+    ~1e-30 -- inside any bound anyone would write.  A low percentile
+    tracks the small end of the population, which is the end that needs
+    protecting.
+    """
+    b = _f([1.0, 2.0, 1.0e30, 1.0e30, 1.0e30, 1.0e30])
+    a = b.copy()
+    a[0] *= 2.0                     # a 100 % error on a unit cell
+    rel, _ = helpers.cmp_fields(a, b, "bigmajority", 1.0)
+    assert rel > 0.1, (
+        f"a 100 % error on a unit cell reported as {rel:.3e} because the "
+        f"scale floor followed the large majority")
+
+
+def test_cmp_floor_still_protects_a_near_zero_reference_cell():
+    """The floor's original job, which the percentile must not lose: a
+    rounding-scale difference on a near-zero cell is not a defect."""
+    b = _f([1.0, 2.0, 3.0, 1.0e-18])
+    a = b.copy()
+    a[3] += 1.0e-18                 # a 100 % error on a NEGLIGIBLE cell
+    rel, _ = helpers.cmp_fields(a, b, "tinycell", 1e-15)
+    assert rel < 1e-15, rel
 
 
 # -------------------------------------------------------- bitwise_equal

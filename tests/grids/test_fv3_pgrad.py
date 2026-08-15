@@ -388,7 +388,19 @@ def _assert_affine_and_roundoff_floor(name, f, primals, tol_affine,
     2.22e-16 * 3.895e+06 = 8.65e-10`` against the measured 9.31e-10, i.e.
     ONE ULP of the field, with a condition number of one.  So the bound
     here is ``margin * u_mach * |f|_inf``, which is scale-aware by
-    construction and cannot be satisfied by shrinking the probe.
+    construction.
+
+    Precision, because the first draft of this comment overstated it
+    (codex, job 9417397): a bound on the NUMERATOR is not immune to the
+    probe step either -- a genuine quadratic term's second difference
+    falls as ``s^2`` until cancellation dominates, so a small enough
+    probe hides curvature here too.  What the change buys is that the
+    bound no longer moves with ``s`` for an AFFINE map, which is the
+    case that was failing.  The reachability question is answered
+    separately and by measurement: this gate fails on curvature above
+    ~``3 * u_mach * |f|_inf = 2.6e-9`` in the second difference at the
+    probe scale used, and the group is algebraically affine on a fixed
+    branch, so there is no physical curvature for it to miss.
     """
     num, den, fmax = _affine_residual_absolute(f, primals, seed=seed)
     floor_aff = _U_MACH_F64 * fmax

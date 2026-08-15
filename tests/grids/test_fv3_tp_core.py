@@ -2066,29 +2066,68 @@ def _locate_slope_break(grad_of_t, ts, iters=60, rtol=1.0e-9):
     6.400210e-01 on both arms, so the scan starts on a well-defined
     piece.
 
+    ⛔ THE PREDICATE IS QUADRATIC, SO AN INTERVAL CAN HOLD TWO SWITCHES
+    (codex MAJOR 5, job 9417397).  ``smt5`` is ``bl*br < 0``, a product
+    of two functions each linear in ``t``, so as ``t`` sweeps, both
+    factors can cross zero inside one sampled interval -- restoring the
+    original slope at the far endpoint and hiding the pair, or breaking
+    the monotone partition a bisection needs.  Two defences, both
+    mechanical: intervals whose endpoints AGREE are refined once at
+    their midpoint before being dismissed, and the final bracket is
+    checked to contain exactly ONE slope value on each side.
+
     Raises with the observed derivatives if none of the scanned
     intervals contains a step, so a genuinely one-sided fixture is
     reported as such rather than as an opaque assertion.
     """
-    grads = [float(grad_of_t(t)) for t in ts]
+    ts = [float(t) for t in ts]
 
     def _same(a, b):
         return abs(a - b) <= rtol * max(abs(a), abs(b), 1.0)
 
+    def _g(t):
+        return float(grad_of_t(float(t)))
+
+    # Refine EVERY interval once at its midpoint before trusting an
+    # "endpoints agree" verdict: a pair of switches inside can return
+    # the slope to its original value at the far endpoint.
+    fine = []
     for k in range(len(ts) - 1):
-        if not _same(grads[k], grads[k + 1]):
-            lo, hi = float(ts[k]), float(ts[k + 1])
-            g_lo = grads[k]
-            for _ in range(iters):
-                mid = 0.5 * (lo + hi)
-                if _same(float(grad_of_t(mid)), g_lo):
-                    lo = mid
-                else:
-                    hi = mid
-            return 0.5 * (lo + hi)
+        fine.append(ts[k])
+        fine.append(0.5 * (ts[k] + ts[k + 1]))
+    fine.append(ts[-1])
+    grads = [_g(t) for t in fine]
+
+    for k in range(len(fine) - 1):
+        if _same(grads[k], grads[k + 1]):
+            continue
+        lo, hi = fine[k], fine[k + 1]
+        g_lo, g_hi = grads[k], grads[k + 1]
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            if _same(_g(mid), g_lo):
+                lo = mid
+            else:
+                hi = mid
+        t_star = 0.5 * (lo + hi)
+        # The bracket must now hold ONE surface: the slope must be
+        # constant on each side of it out to the sampled endpoints, or
+        # the bisection converged onto an arbitrary point of a
+        # multi-switch region and the gate would test the wrong surface.
+        for side, edge, g_ref in ((-1.0, fine[k], g_lo),
+                                  (+1.0, fine[k + 1], g_hi)):
+            probe = t_star + side * abs(edge - t_star) * 0.5
+            assert _same(_g(probe), g_ref), (
+                f"more than one derivative step inside the bracket "
+                f"[{fine[k]:.6g}, {fine[k + 1]:.6g}]: d flux/dt is "
+                f"{_g(probe):.6e} at t={probe:.6g} but {g_ref:.6e} at "
+                f"the endpoint -- smt5 is `bl*br < 0`, a QUADRATIC "
+                f"predicate, so two switches can sit in one interval "
+                f"and the located t_star is then arbitrary")
+        return t_star
     raise AssertionError(
         f"no derivative step anywhere in the scan: "
-        f"d flux/dt = {[f'{g:.6e}' for g in grads]} over t={list(ts)} -- "
+        f"d flux/dt = {[f'{g:.6e}' for g in grads]} over t={fine} -- "
         f"the limiter branch never flips along this direction, so this "
         f"gate would certify nothing")
 
@@ -2114,10 +2153,15 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     as ``flux != plain upwind value`` -- but that difference is a
     CONTINUOUS function of ``t`` that simply passes through zero (job
     9417326, triage block P5: +1.059 at t=0 to -70.9 at t=+200 for
-    ``xtp_u``, +0.397 to -71.6 for ``ytp_v``), so the boolean flipped at
-    a zero crossing, not at a limiter switch.  ``ytp_v`` failed only
-    because its crossing fell between two scanned points, and
-    ``xtp_u``'s pass was luck.  At ``iord = 5`` the flux is piecewise
+    ``xtp_u``, +0.397 to -71.6 for ``ytp_v``), so the boolean can flip
+    at a zero crossing rather than at a limiter switch.  That is what
+    lets ``ytp_v`` report "no switch anywhere" -- its crossing fell
+    between two scanned points.  What the ``xtp_u`` bracket actually
+    contained is NOT established (codex MAJOR 6): saying its pass was
+    luck would need the old flags, the margins and the ``smt5``
+    predicate printed on both sides of it, and that was not measured.
+    Either way the detector below does not depend on the answer.  At
+    ``iord = 5`` the flux is piecewise
     LINEAR in ``t``, so the branch flip is exactly a step in
     ``d flux/d t`` -- which is both what the assertions below already
     compare and something no zero crossing can imitate.

@@ -881,7 +881,20 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
     the strategy's primary gradient gate precisely because it needs no
     off-switch fixture -- it runs ON the switching surface, where a
     finite difference is meaningless and ``check_grads`` is certifying a
-    jump.  ``order=1`` is kept as a scoped supplement.
+    jump.
+
+    ⛔ BUT THE IDENTITY ALONE IS NOT ENOUGH, AND THE FIRST VERSION OF
+    THIS REPLACEMENT LEFT ``delp`` WITH NOTHING ELSE (codex BLOCKER,
+    job 9417397).  ``jvp`` and ``vjp`` are two transformations of the
+    SAME program, so ``<Jv,w> == <v,J^T w>`` holds for whatever Jacobian
+    that program has -- including one with a missing term, a wrong
+    coefficient or a stray ``stop_gradient``.  It certifies AD
+    self-consistency, not correctness.  What certifies correctness here
+    is (i) the PARITY gates against the NumPy lane, which is the
+    authority for the map itself, and (ii) a finite difference, which is
+    the only instrument that compares the derivative against the
+    function.  So ``order=1`` runs over ALL THREE operands, including
+    ``delp``, not just the two the solve is linear in.
     """
     im, km = 3, KMP
     delp = _delp_col(im, km, seed=43)
@@ -902,11 +915,22 @@ def test_profile_jax_check_grads_order2_iv_minus2_bc():
     check_adjoint("cs_profile iv=-2 q1/delp/qs", f,
                   (jnp.asarray(q1), jnp.asarray(delp), jnp.asarray(qs)),
                   1.0e-12)
-    # SUPPLEMENT, order 1 only: at order 2 an FD-resolution failure and
-    # a wrong Jacobian are indistinguishable (STATE lesson 12).
+    # THE INDEPENDENT CHECK, order 1 only: at order 2 an FD-resolution
+    # failure and a wrong Jacobian are indistinguishable (STATE lesson
+    # 12), but at order 1 a finite difference is still the only gate
+    # here that compares the derivative against the FUNCTION rather than
+    # against another transformation of the same program.  It runs over
+    # all three operands -- `delp` included, which is the one the first
+    # version of this replacement left uncovered.
     check_grads(lambda a1_, qs_: f(a1_, jnp.asarray(delp), qs_),
                 (jnp.asarray(q1), jnp.asarray(qs)), order=1,
                 modes=("fwd", "rev"))
+    # `delp` enters the tridiagonal COEFFICIENTS rationally, so its FD
+    # needs the smaller step the interior gate also uses; the default
+    # 1e-4 on a 1e2-scale thickness is a 1e-6 relative step and lands in
+    # the roundoff regime.
+    check_grads(f, (jnp.asarray(q1), jnp.asarray(delp), jnp.asarray(qs)),
+                order=1, modes=("fwd", "rev"), eps=1.0e-5)
 
 
 # ====================================================================== #

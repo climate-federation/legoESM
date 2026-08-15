@@ -44,35 +44,50 @@ import numpy as np
 FILL_VALUES = (1.0e30, 1.0e25)
 
 
-def cmp_fields(got, ref, name, tol, fills=FILL_VALUES):
+def cmp_fields(got, ref, name, tol, fills=FILL_VALUES, floor_pct=10.0,
+               n_over_at=1.0e-13):
     """Mask-aware, PER-ELEMENT relative comparison.
 
     It must be able to fail, and must not be able to fail spuriously:
 
-    * NON-FINITE mask equality -- a cell the oracle never writes must
-      stay a tripwire in BOTH lanes, and ``assert_array_equal`` treats
-      ``NaN == NaN`` as equal, so an unchecked comparison over a
-      mostly-NaN halo passes while proving nothing;
-    * EXACT-FILL mask and value equality -- ``1e30`` passes every
-      ``isfinite`` guard, so a drifted fill is a real defect wearing a
-      finite disguise;
-    * every other cell: ``|a-b| / (|b| + median|b|)``.  A robust floor
-      stops one huge cell from setting the scale and dividing every
-      physical discrepancy to nothing.
+    * NON-FINITE CLASS equality, per kind -- NaN, +Inf and -Inf are
+      compared as SEPARATE masks.  A cell the oracle never writes must
+      stay a tripwire in both lanes, and a lane that swapped a NaN for
+      an infinity (a dead branch leaking, say) would be invisible to a
+      single ``~isfinite`` mask;
+    * EXACT-FILL mask equality AND fill VALUE equality -- ``1e30``
+      passes every ``isfinite`` guard, so a drifted fill is a real
+      defect wearing a finite disguise, and the two fill constants must
+      not be interchangeable either;
+    * every other cell: ``|a-b| / (|b| + floor)``.  A floor is needed so
+      a near-zero reference cell does not divide a rounding-scale
+      difference into a spurious catastrophe.
 
-    Returns ``(rel, n_over)``; ``n_over`` counts cells above a
-    rounding-scale reference, which is the BRANCH-FLIP signature (a
-    handful far out with the rest at 1e-16 is a limiter flip, all of
-    them out is something systematic).
+    ``floor_pct`` sets that floor as a LOW PERCENTILE of ``|ref|`` over
+    the compared cells, not the median.  The median is wrong whenever
+    large values are a MAJORITY: with half the field at 1e30, a
+    unit-scale cell would inherit a 1e30 denominator and a 100 % error on
+    it would report as 1e-30.  A low percentile tracks the small end of
+    the population, which is the end that needs protecting.
+
+    Returns ``(rel, n_over)``.  ``n_over`` is DESCRIPTIVE only -- the
+    number of compared cells whose per-element ratio exceeds
+    ``n_over_at`` -- and carries no causal interpretation: a sparse index
+    error and a limiter flip both give "a handful", and a limiter flip
+    downstream of a wide stencil can give "all of them".
     """
     a = np.asarray(got, dtype=np.float64)
     b = np.asarray(ref, dtype=np.float64)
     assert a.shape == b.shape, (name, a.shape, b.shape)
 
-    na, nb = ~np.isfinite(a), ~np.isfinite(b)
-    assert np.array_equal(na, nb), (
-        f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
-        f"{int(nb.sum())} cells of {a.size})")
+    for kind, fn in (("NaN", np.isnan), ("+Inf", np.isposinf),
+                     ("-Inf", np.isneginf)):
+        ma, mb = fn(a), fn(b)
+        assert np.array_equal(ma, mb), (
+            f"{name}: {kind} masks differ (jax {int(ma.sum())} vs numpy "
+            f"{int(mb.sum())} cells of {a.size}); the three non-finite "
+            f"kinds are compared separately so a NaN cannot be swapped "
+            f"for an infinity unnoticed")
 
     fa = np.zeros(a.shape, bool)
     fb = np.zeros(b.shape, bool)
@@ -83,6 +98,13 @@ def cmp_fields(got, ref, name, tol, fills=FILL_VALUES):
         f"{name}: workspace-FILL masks differ (jax {int(fa.sum())} vs "
         f"numpy {int(fb.sum())} cells of {a.size}); the fill constants "
         f"are {list(fills)}")
+    # ... and the fill VALUES themselves, or one sentinel could be
+    # replaced by the other everywhere and the cells would then be
+    # EXCLUDED from the comparison below rather than reported.
+    assert np.array_equal(a[fa], b[fa]), (
+        f"{name}: the fill masks agree but the fill VALUES differ at "
+        f"{int((a[fa] != b[fa]).sum())} of {int(fa.sum())} fill cells "
+        f"(the constants {list(fills)} are not interchangeable)")
 
     ok = np.isfinite(a) & ~fa
     assert ok.any(), (
@@ -96,17 +118,20 @@ def cmp_fields(got, ref, name, tol, fills=FILL_VALUES):
         f"the zero is the contract (assert it explicitly, do not route "
         f"it through a relative comparison).")
     diff = np.abs(a[ok] - b[ok])
-    scale = float(np.median(np.abs(b[ok])))
-    if not (scale > 0.0):
-        scale = max(float(np.abs(b[ok]).max()), 1e-300)
-    per = diff / (np.abs(b[ok]) + scale)
+    mag = np.abs(b[ok])
+    floor = float(np.percentile(mag[mag > 0.0], floor_pct)) \
+        if np.any(mag > 0.0) else 0.0
+    if not (floor > 0.0):
+        floor = max(float(mag.max()), 1e-300)
+    per = diff / (mag + floor)
     rel = float(per.max())
-    n_over = int((per > 1e-13).sum())
+    n_over = int((per > n_over_at).sum())
     assert rel <= tol, (
         f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
-        f"{n_over} of {int(ok.sum())} compared cells exceed 1e-13 "
-        f"(a handful => BRANCH FLIP, all of them => systematic); "
-        f"median|ref| {scale:.3e}, max|diff| {float(diff.max()):.3e}, "
+        f"{n_over} of {int(ok.sum())} compared cells exceed {n_over_at:g} "
+        f"(descriptive only, no cause implied); p{floor_pct:g}|ref| "
+        f"{floor:.3e}, median|ref| {float(np.median(mag)):.3e}, "
+        f"max|diff| {float(diff.max()):.3e}, "
         f"bitwise={np.array_equal(a[ok], b[ok])}")
     return rel, n_over
 

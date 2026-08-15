@@ -139,9 +139,23 @@ def p2_udzd_ladder():
     """
     import test_fv3_nh_core as tn
 
-    _hdr("P2", "update_dz_d: FD truncation or wrong Jacobian?",
-         "ladder ~4 per halving AND adjoint residual ~1e-14 => FD's fault",
-         "ladder ~1 OR adjoint residual large => the Jacobian is wrong")
+    # ⛔ THE LABELS BELOW WERE OVERSTATED AND ARE CORRECTED (codex MAJOR
+    # 7, job 9417397).  Both instruments compare the implemented program
+    # with derivatives OF THAT SAME PROGRAM: `jvp` and `vjp` are two
+    # transformations of it, and the FD ladder differences the program
+    # itself.  A smoothly WRONG implementation -- missing term, wrong
+    # coefficient, wrong index -- has an exact adjoint identity and a
+    # perfect eps^2 ladder.  So neither can say "the Jacobian is right";
+    # what they separate is "AD disagrees with the function it was
+    # derived from" (a real AD defect) from "the finite difference
+    # cannot resolve it".  Correctness of the MAP is the parity gates'
+    # job, against the NumPy authority.
+    _hdr("P2", "update_dz_d: is check_grads' failure the FD's doing?",
+         "ladder ~4 per halving AND adjoint residual ~0 => AD is "
+         "self-consistent and agrees with the FD of its own function, "
+         "so the gap is FD resolution",
+         "ladder ~1 OR adjoint residual large => a real AD defect "
+         "(neither outcome speaks to whether the MAP matches the spec)")
     # The SAME operand mapping and loss the gate differentiates, taken
     # from the test module rather than retyped (a retyped 14-operand
     # order would measure the transcription, not the Jacobian).
@@ -235,11 +249,19 @@ def p5_ytp_probe_cell():
     """
     import test_fv3_tp_core as tt
 
+    # SCOPE, corrected (codex MAJOR 6, job 9417397): the margin scan
+    # below shows the old boolean proxy is a CONTINUOUS quantity that
+    # crosses zero, which explains how the ytp arm could report "no
+    # switch anywhere".  It does NOT establish what the xtp arm's
+    # passing bracket contained -- that would need the old flags, the
+    # margins and the smt5 predicate printed on both sides of it.  Any
+    # statement about the xtp arm is PLAUSIBLE, not confirmed.
     _hdr("P5", "ytp_v: is the probed flux cell downstream of the "
                "perturbed cell?",
          "d flux[probe]/dt == 0 for ytp_v and != 0 for xtp_u => the "
          "test's y index map is wrong",
-         "both nonzero => the fixture really is one-sided")
+         "both nonzero => the index map is fine, and the boolean proxy "
+         "is what needs examining")
     inp = np.load(os.path.join(tt.FIX, "dswcore_input.npz"))
     rough = tt._Geo(inp, "rough")
     b = rough.bd
