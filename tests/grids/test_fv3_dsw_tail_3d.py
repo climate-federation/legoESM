@@ -511,19 +511,56 @@ def test_tail_adjoint_identity_wind_group(jctx, jstate, jcsw, jdsw):
     # TOL-PENDING: provisional bound; the measurement job replaces this.
     # DO NOT SHIP.   [class: roundoff -- the identity is exact]
     check_adjoint("tail u/v", f, (jstate["u"], jstate["v"]), 1e-10)
-    # ...AND an INDEPENDENT instrument, because the identity compares two
-    # transformations of the SAME program and is blind to a wrong
-    # Jacobian (codex BLOCKER, job 9417397).
-    #
-    # NOT `check_grads`: measured 6.6 % relative on this exact group (job
-    # 9417462, tangent -9.485e13 vs -8.897e13).  A fixed-step FD on a map
-    # containing d_sw5's del-n damping and d_sw6's limiter straddles a
-    # switching surface and certifies a jump, and its verdict cannot say
-    # which side is wrong.  The eps-SCALING can: eps^2 truncation gives
-    # ~4 per halving, roundoff ~0.5, and a wrong reverse mode ~1, because
-    # its error does not move with eps at all.  Tolerance-free in the gap
-    # itself, which is the number in dispute.
-    assert_fd_truncation_scaling("tail u/v", f,
+    # NO FINITE DIFFERENCE ON THE PRODUCTION DECK, and that is measured
+    # rather than conceded.  `check_grads` gave 6.6 % on this group (job
+    # 9417462); the eps-SCALING ladder then gave gaps of 1.271e+12,
+    # 3.484e+12, 9.969e+12 at eps = 1.6e-3, 8e-4, 4e-4 -- ratios 0.365
+    # and 0.350, i.e. the gap GROWS as the step shrinks, and it sits
+    # EIGHT DECADES above the 1.065e+04 roundoff floor (job 9417465).
+    # That is the signature of a DISCONTINUITY inside every bracket, not
+    # of roundoff and not of truncation: d_sw5's del-n damping and
+    # d_sw6's limiter switch somewhere in each interval, so the
+    # difference quotient carries a jump at every step size and no FD
+    # ladder can certify this group.  The independent gradient evidence
+    # for those kernels lives at the KERNEL level, in
+    # test_fv3_duo_sw_core.py, where each is differentiated on its own
+    # fixture; what this phase adds is the CADENCE, and a composition
+    # error in the cadence is exactly what the adjoint identity does
+    # catch.  The FD ladder runs on the LINEAR-ARM deck instead, below.
+
+
+def test_tail_fd_ladder_on_the_linear_ppm_arm(jctx, jstate, jcsw, jdsw):
+    """The INDEPENDENT gradient check, on a deck where a finite
+    difference is meaningful.
+
+    ``hord = 2`` is the oracle's PERFECTLY LINEAR PPM arm (tp_core.F90
+    ``mord == 2``): no ``smt5``/``smt6`` selector, no ``copysign`` /
+    ``min`` / ``max`` limiter, no ``pert_ppm``.  With the del-n damping
+    knobs at zero as well, the remaining map is smooth along the wind
+    direction, so the eps^2 ladder measures what it claims -- and a
+    wrong reverse mode would leave the gap FLAT in eps, which no
+    smoothness can imitate.  Same technique as
+    ``test_fv3_nh_core``'s update_dz_d gate, and the same reason.
+
+    This is the answer to "the adjoint identity cannot see a wrong
+    Jacobian": it does not have to, alone.
+    """
+    smooth = SWConfig(hord_tr=2, hord_vt=2, hord_tm=2, hord_dp=2,
+                      hord_mt=2, nord_v=0, damp_v=0.0, dddmp=0.0,
+                      d2_bg=0.0, d4_bg=0.0, nord=0)
+
+    def f(u, v):
+        st = dict(jstate)
+        st["u"], st["v"] = u, v
+        out = jtail.dsw_tail_phase_3d(jctx, st, jcsw, jdsw, DT, KM,
+                                      cfg=smooth)
+        return (jnp.sum(out["u"][:, _CS, _CS, :] ** 2)
+                + jnp.sum(out["v"][:, _CS, _CS, :] ** 2))
+
+    # TOL-PENDING: the ladder is tolerance-free in the gap, but the STEP
+    # set is a measurement; the job replaces it if the precondition
+    # (top gap > 10x the roundoff floor) is not met here.
+    assert_fd_truncation_scaling("tail u/v (linear arm)", f,
                                  (jstate["u"], jstate["v"]),
                                  steps=(1.6e-3, 8.0e-4, 4.0e-4))
 
