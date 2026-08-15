@@ -80,8 +80,15 @@ for _p in ("ocean", "core"):
 sys.path.insert(0, str(_REPO))
 
 from global_tracer_content import (  # noqa: E402
-    load_mesh_depth_1d, load_mesh_latitude, load_mesh_metrics,
+    load_mesh_depth_1d, load_mesh_latitude, load_mesh_longitude,
+    load_mesh_metrics,
 )
+# The lon-boxed equatorial regions are DEFINED (with the reason they exist) in
+# compare_tendencies_nemo; imported rather than restated so the box that scored
+# the 2.31x K_H excess and the box that splits it into length x sqrt(e) can
+# never drift apart.  That module sets JAX_ENABLE_X64=1 at import, which is
+# what this probe's sbatch already exports.
+from compare_tendencies_nemo import BOX_REGIONS  # noqa: E402
 
 
 def _mesh_gdepw(mesh_mask_path):
@@ -109,6 +116,38 @@ def _wmean(x, w):
     if d <= 0:
         return float("nan")
     return float((x * w).sum() / d)
+
+
+def _region_masks(lat_col, lon_col):
+    """[(name, per-column bool)] for the latitude bands AND the lon boxes.
+
+    Built once and consumed by both the zero-step and the one-step table so
+    the two can never select different ocean under the same region name.
+    The dateline-crossing box (nino4) needs an OR where a latitude band needs
+    an AND; that branch is written once here for the same reason.
+    """
+    out = [(n, (lat_col >= lo) & (lat_col < hi)) for n, lo, hi in _BANDS]
+    for n, la, lb, lo, hi in BOX_REGIONS:
+        inlon = ((lon_col >= lo) & (lon_col <= hi) if lo <= hi
+                 else (lon_col >= lo) | (lon_col <= hi))
+        m = (lat_col >= la) & (lat_col <= lb) & inlon
+        # C0, a check with a KNOWN answer: each of these boxes is >=4 deg of
+        # latitude by >=50 deg of longitude of open equatorial Pacific, i.e.
+        # several hundred columns on a 1-deg mesh.  A wrong frame (the eORCA1
+        # (332,362) vs (331,360) offset) or an unwrapped 0..360 longitude
+        # selects a handful of cells or none, and the loop below would then
+        # silently `continue` -- the box would be MISSING from the table and
+        # the latitude band quoted in its place, which is the confound these
+        # boxes were added to remove.
+        if int(m.sum()) < 100:
+            raise SystemExit(
+                f"FATAL C0: box {n!r} selects {int(m.sum())} columns; expected "
+                f"several hundred. lat range in mesh "
+                f"[{lat_col.min():.1f},{lat_col.max():.1f}], lon range "
+                f"[{lon_col.min():.1f},{lon_col.max():.1f}] -- check the frame "
+                "and the longitude convention before reading any number.")
+        out.append((n, m))
+    return out
 
 
 def main() -> int:
@@ -202,6 +241,7 @@ def main() -> int:
 
     e1t, e2t, e3t, tmask = load_mesh_metrics(a.mesh_mask)     # (nlev,nj,ni)
     lat = load_mesh_latitude(a.mesh_mask)
+    lon_mesh = load_mesh_longitude(a.mesh_mask)
     T3, S3, en3 = rst["tn"], rst["sn"], rst["en"]
     avm3 = rst["avm_k"]
     z, ny, nx = T3.shape
@@ -365,8 +405,8 @@ def main() -> int:
     print("%-22s %9s %11s %11s %8s %8s %8s %8s" % (
         "band", "n_iface", "K_M_ours", "NEMO_avm_k", "K_rat", "lk/zmxlm",
         "lk/zmxld", "leps/zd"))
-    for bname, lo, hi in _BANDS:
-        inb = ((lat >= lo) & (lat < hi)).reshape(ncol)
+    for bname, inb2d in _region_masks(lat, lon_mesh):
+        inb = inb2d.reshape(ncol)
         m = ok & inb[:, None]
         if not m.any():
             continue
@@ -491,8 +531,8 @@ def main() -> int:
             "NEMO_avm", "K0_rat", "KM_rat"))
         out["one_step"] = {"trd_tfile": a.trd_tfile, "trd_rec": a.trd_rec,
                            "rn_emin": emin, "bands": {}}
-        for bname, lo, hi in _BANDS:
-            inb = ((lat >= lo) & (lat < hi)).reshape(ncol)
+        for bname, inb2d in _region_masks(lat, lon_mesh):
+            inb = inb2d.reshape(ncol)
             m = okn & inb[:, None] & (en_i > 0)
             if not m.any():
                 continue

@@ -124,6 +124,29 @@ def load_mesh_latitude(mesh_mask_path):
     return gphit[_NATIVE_J, _NATIVE_I]
 
 
+def load_mesh_longitude(mesh_mask_path):
+    """``glamt`` on the SAME native (331, 360) frame as load_mesh_latitude.
+
+    Wrapped to NEMO's -180..180 convention, which is the convention the
+    lon-boxed equatorial regions (nino3/nino4) are written in.  ``glamt`` on
+    eORCA1 is already in that range, but the wrap is applied unconditionally
+    so a mesh written on 0..360 selects the same water rather than an empty
+    box -- a silently-empty region is the failure this loader exists to avoid.
+    """
+    try:
+        import netCDF4 as nc
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit(f"netCDF4 required to read the mesh mask: {exc}")
+    ds = nc.Dataset(mesh_mask_path)
+    try:
+        glamt = np.asarray(ds.variables["glamt"][:], dtype=np.float64).squeeze()
+    finally:
+        ds.close()
+    if glamt.shape != (332, 362):
+        raise SystemExit(f"expected eORCA1 (332, 362) glamt, got {glamt.shape}")
+    return (glamt[_NATIVE_J, _NATIVE_I] + 180.0) % 360.0 - 180.0
+
+
 def load_mesh_depth_1d(mesh_mask_path):
     """``gdept_1d`` as a plain (nlev,) array of level-centre depths [m]."""
     try:
