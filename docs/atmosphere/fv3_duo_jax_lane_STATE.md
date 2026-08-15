@@ -316,33 +316,66 @@ Two oracle citations in the NumPy lane were wrong by two lines — `pe_halo` was
 cited as starting at `:1933`, which is `end subroutine pln_halo`. Found by the
 JAX author re-deriving the spans instead of copying them.
 
-### Not started
+### ★ WHERE THE PORT ACTUALLY STANDS (2026-08-15)
 
-SW core (`c_sw`, `d_sw1..6_duo`) — blocked on `fv3_tp_core.py` landing so it can
-be written against the real API. Then the km=1 stepper, then Phases 2 and 3.
+Phase 1 is **done and swappable**: `fv3_duo_sw_core.py`, `fv3_duo_stepper.py`
+and `--backend {numpy,jax}` on the W2 / case-6 runners all landed, so the km=1
+lane runs under the existing calibrated gates rather than new ones.
+
+Phase 2 (3-D) is **a stack of six modules, three of them landed**:
+
+| # | module | mirrors | state |
+|---|---|---|---|
+| 1 | `fv3_cgrid_phase_3d.py` | `fv3_native_cgrid_phase_3d` | landed `534939307` |
+| 2 | `fv3_dsw_phase_3d.py` | `fv3_native_dsw_phase_3d` | landed `87eee49e9` |
+| 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **authoring, jobs 9417315/16/17** |
+| 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | not started |
+| 5 | `fv3_tracer2d.py` | `fv3_native_tracer2d` | not started (the `NSPLT_MAX` node) |
+| 6 | `fv3_dynamics.py` | `fv3_native_dynamics` | not started |
+
+`lagrangian_to_eulerian` is ALREADY in the JAX lane (`fv3_mapz.py:1319`), and so
+is every NH kernel including `update_dz_d` (`fv3_nh_core.py:1153`) — the
+strategy's Phase-3 line calling that one unported is **stale**. Phase 3 is
+therefore not a separate porting effort any more: modules 3, 4 and 6 each carry
+their NH arm, and what remains after them is the NH *gate*, not NH *code*.
+
+Shared entry gates and assembly helpers now live ONCE in
+`fv3_phase3d_common.py` (`a111bf998`); the five private copies are gone.
+
+### The eleven standing gate failures, classified
+
+Identical in jobs 9408760 / 9411351 / 9414224 / 9415283 — reproducible, not
+flaky. **Zero are new code defects**; every one is a gate that outran what it
+can assert.
+
+| class | count | what it is |
+|---|---:|---|
+| jit-vs-eager at a 1e-12 bound | 4 | `d_sw1`, `full_step.v` 7.456e-07, `acoustic_step.u` 5.646e-07, `cgrid nh.ws3` 1.6e-09 — the CANCELLATION finding is already written up above; those four gates were never re-calibrated to the cell-count policy it prescribes |
+| gradient / fixture preconditions | 5 | the five the triage probe (`scripts/validate/fv3_gradient_gate_triage.py`) discriminates |
+| stale premise about JAX itself | 2 | both CLOSED at `dbbc46628` — an out-of-bounds scatter DROPS (it does not clamp), and a neutered shape gate does not raise, it goes silently wrong |
 
 ---
 
 ## Next task, precisely
 
-1. **Re-run the measurement job** against the post-triage code (re-pin a
-   worktree at the new SHA, edit `REPO=` in
-   `scripts/cluster/fv3_native/jax_lane_measure.sbatch`, `sbatch`). Expect the
-   remaining `TOL-PENDING` bounds to trip on purpose — several were left at a
-   provisional 1e-12 with the assertion message printing the measured value, so
-   one run yields the number.
-2. **Replace every `TOL-PENDING` marker** with `measured X, bound = measured ×
-   N`. Nothing ships with a marker left; the job censuses them in step 1 for
-   exactly this reason. Current count is ~120 across five test files.
-3. **Close codex's `_rezone` BLOCKER and the two MAJORs**, then re-review.
-4. **SW core** (`fv3_duo_sw_core.py`: `c_sw`, `d_sw1..6_duo`,
-   `d2a2c_vect_duo`, `divergence_corner_duo`, `del6_vt_flux`) — in flight.
-5. **The km=1 stepper**: a JAX `full_acoustic_step_sixface(ctx, states, dt,
-   d_ext=…)`. This is the whole of Phase 1's remaining risk, and it is one
-   function.
-6. `--backend {numpy,jax}` on `run_duo_stepper_w2.py` /
-   `run_duo_stepper_case6.py`, then score with the **existing** calibrated
-   gates — do not write new ones.
+1. **Land module 3** (`fv3_dsw_tail_3d.py`): assemble parts A/B/C, review
+   (Claude + codex), write its gate file, run it.
+2. **Module 4** (`fv3_acoustic_3d.py`) — `acoustic_substep_3d` +
+   `acoustic_loop_3d` over `n_split` (`lax.scan`), `exchange_state_halos_3d`,
+   `build_nh_carry`. This is the one that composes 1→3 into a step.
+3. **Module 5** (`fv3_tracer2d.py`) — the `NSPLT_MAX` + masking design that the
+   strategy already resolved; tests on BOTH sides of every schedule transition.
+4. **Module 6** (`fv3_dynamics.py`) — `fv_dynamics_step` (`lax.scan` over
+   `k_split`), `p_var_*`.
+5. **`full_step_oracle_parity.py --backend jax`**, hydro then `--nh`, at the
+   SAME `--max-rel` the NumPy lane is held to. This is the exit criterion for
+   Phases 2 and 3 both.
+6. **Re-calibrate the four jit-vs-eager gates** to the policy the cancellation
+   write-up prescribes (gate the CELL COUNT, report the magnitude, label it
+   UNEXPLAINED-BY-TOLERANCE) instead of a 1e-12 bound they cannot meet.
+7. **Replace every `TOL-PENDING` marker** with `measured X, bound = measured ×
+   N`. The measurement job censuses them for exactly this reason; ~120 remain
+   across the test files, and nothing ships with one left.
 
 ### Step 5 in detail — the stepper is a thin composition, not a new algorithm
 
