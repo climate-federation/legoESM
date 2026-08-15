@@ -2155,16 +2155,28 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     9417326, triage block P5: +1.059 at t=0 to -70.9 at t=+200 for
     ``xtp_u``, +0.397 to -71.6 for ``ytp_v``), so the boolean can flip
     at a zero crossing rather than at a limiter switch.  That is what
-    lets ``ytp_v`` report "no switch anywhere" -- its crossing fell
-    between two scanned points.  What the ``xtp_u`` bracket actually
-    contained is NOT established (codex MAJOR 6): saying its pass was
-    luck would need the old flags, the margins and the ``smt5``
-    predicate printed on both sides of it, and that was not measured.
-    Either way the detector below does not depend on the answer.  At
-    ``iord = 5`` the flux is piecewise
-    LINEAR in ``t``, so the branch flip is exactly a step in
-    ``d flux/d t`` -- which is both what the assertions below already
-    compare and something no zero crossing can imitate.
+    let a boolean detector fire on something that is not a switch.  What
+    the ``xtp_u`` bracket actually contained is NOT established (codex
+    MAJOR 6): saying its pass was luck would need the old flags, the
+    margins and the ``smt5`` predicate printed on both sides of it, and
+    that was not measured.  Either way the detector below does not
+    depend on the answer.  At ``iord = 5`` the flux is piecewise LINEAR
+    in ``t``, so the branch flip is exactly a step in ``d flux/d t`` --
+    which is both what the assertions below already compare and
+    something no zero crossing can imitate.
+
+    ⛔ AND THE ``ytp_v`` FIXTURE REALLY IS ONE-SIDED AT THE FIRST CELL
+    TRIED (job 9417389, MEASURED after the detector was replaced):
+    ``d flux/dt`` is 6.400210e-01 at EVERY ``t`` from -8000 to +8000,
+    constant to all printed digits, i.e. the flux is globally linear in
+    that perturbation and no branch flips along it.  That is a fact
+    about the FIXTURE, not about ``ytp_v``: which cell of the stencil
+    can be driven across ``bl*br = 0`` depends on the local field, and
+    the ``u`` and ``v`` fixtures have different structure.  So the gate
+    now SEARCHES the upwind cell and its two transport-direction
+    neighbours and uses the first that shows a step -- and if none of
+    the three does, it says so with all three derivative tables, which
+    is a finding about the fixture rather than an opaque failure.
 
     Still no private state is touched: the derivative comes from
     ``jax.grad`` of the public flux.
@@ -2209,11 +2221,11 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     # together is what showed the proxy to be continuous.
     assert callable(base_of)
 
-    def scalar(t):
-        f = jnp.asarray(field).at[kk].add(t)
-        return run(f)[probe]
-
-    g = jax.grad(scalar)
+    def _grad_at(cell):
+        def scalar(t):
+            f = jnp.asarray(field).at[cell].add(t)
+            return run(f)[probe]
+        return jax.grad(scalar)
 
     # Scan both signs over four decades and locate the DERIVATIVE STEP;
     # the transition is wherever the perturbed cell stops being an
@@ -2221,7 +2233,30 @@ def test_sw_transport_one_sided_grads_across_smt5_surface(routine, rough):
     # slope and cannot be predicted in closed form.
     ts = [-8000.0, -2000.0, -800.0, -200.0, -50.0, -10.0, 0.0,
           10.0, 50.0, 200.0, 800.0, 2000.0, 8000.0]
-    t_star = _locate_slope_break(lambda t: g(jnp.asarray(float(t))), ts)
+    # WHICH cell can be driven across `bl*br = 0` is a property of the
+    # FIXTURE, not of the routine: the first ytp_v candidate has a
+    # constant derivative over the whole scan (job 9417389). Try the
+    # upwind cell and its two transport-direction neighbours, and report
+    # all three if none of them switches.
+    step = (1, 0) if routine == "xtp_u" else (0, 1)
+    cands = [kk,
+             (kk[0] - step[0], kk[1] - step[1]),
+             (kk[0] + step[0], kk[1] + step[1])]
+    t_star, g, why = None, None, []
+    for cell in cands:
+        gc = _grad_at(cell)
+        try:
+            t_star = _locate_slope_break(
+                lambda t, _g=gc: _g(jnp.asarray(float(t))), ts)
+        except AssertionError as exc:
+            why.append(f"cell {cell}: {exc}")
+            continue
+        g = gc
+        break
+    assert t_star is not None, (
+        f"{routine}: no candidate cell in the transport stencil crosses "
+        f"the smt5 surface on this fixture, so the gate would certify "
+        f"nothing. Tried {cands}.\n" + "\n".join(why))
     sides = {}
     for side, sgn in (("left", -1.0), ("right", +1.0)):
         d = 1e-3
