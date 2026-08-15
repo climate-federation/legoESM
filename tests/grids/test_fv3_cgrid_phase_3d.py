@@ -94,6 +94,8 @@ from legoesm.core.fv3_native_state_3d import (  # noqa: E402
     build_state_3d,
     field_shape,
 )
+from legoesm.core.fv3_native_sw_core import BIG_NUMBER  # noqa: E402
+from legoesm.core.fv3_pgrad import geopk  # noqa: E402
 from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
     FV3_CP_AIR,
     FV3_GRAV,
@@ -139,6 +141,18 @@ A_IMP = 1.0
 # swept up the sentinel-PROPAGATED cascade (1e22 ... 1e111), which is
 # ordinary arithmetic and therefore subject to FMA contraction.
 _FILL_VALUES = (1.0e30, 1.0e25)
+
+# geopk writes `pkz` ONLY on the D-grid call.  `dyn_core.F90:2781` gates
+# the whole pkz loop on `.not. CG` (the write is at :2784), and the
+# C-grid call site `:533` passes `.true.` -- so on THIS call `pkz` is
+# 100 % `unwritten_fill` in BOTH lanes by construction.  That is a
+# CONTRACT, not a windowing mistake and not something to compare: there
+# are no non-fill cells anywhere in the array, at any origin.
+# `test_pkz_is_unwritten_on_the_cgrid_call` asserts the contract instead
+# (with a cg=False control proving the field IS writable), which is
+# strictly stronger than dropping the field from the loop.
+_CGRID_GEOPK_COMPARED = ("pk", "gz", "pe", "peln")
+_CGRID_GEOPK_UNWRITTEN = ("pkz",)
 
 
 # =====================================================================
@@ -199,6 +213,17 @@ def _cmp(got, ref, name, tol):
     assert ok.any(), (
         f"{name}: every cell is a fill or a tripwire -- there is nothing "
         f"to compare and this gate would pass vacuously")
+    assert np.any(b[ok] != 0.0), (
+        f"{name}: the REFERENCE is identically zero over all "
+        f"{int(ok.sum())} compared cells, so any `got` that is also zero "
+        f"passes and this comparison CANNOT FAIL. Either the fixture "
+        f"drives the field to a structural zero (fix the fixture), or "
+        f"the zero is the contract (assert it explicitly, do not route "
+        f"it through a relative comparison). Added after job 9411351, "
+        f"where the NH stage's ws3 was compared 0-against-0 and the "
+        f"per-element metric returned rel = 0.0 -- the same shape as "
+        f"this campaign's earlier `_cmp` that returned 0.0 on an "
+        f"all-non-finite pair.")
     diff = np.abs(a[ok] - b[ok])
     scale = float(np.median(np.abs(b[ok])))
     if not (scale > 0.0):
@@ -352,6 +377,44 @@ def jctx(ctx):
     return build_jax_duo_stepper_context(ctx)
 
 
+# A smooth GLOBAL surface for the NH fixtures, 200-600 m, strictly
+# positive and non-uniform on EVERY face.  Deliberately not
+# Williamson-5's cone: W5 is exactly zero outside its cone
+# (`test_cases.F90:1181-1189` takes `min(r0**2, r**2)`), so five of the
+# six faces would carry a UNIFORM surface and the ws3 gate would be
+# right back where job 9411351 found it.
+_TOPO_H0_M = 400.0
+
+
+def _topo(lon, lat):
+    """``topo_fn(lon, lat) -> phis`` [m^2/s^2], the ctx builder's
+    contract (`fv3_native_duo_stepper.py:265-274`); it is evaluated on
+    the full data domain and then ext-exchanged, so the halo ring
+    `update_dz_c` reads carries k2e-consistent values."""
+    return FV3_GRAV * _TOPO_H0_M * (1.0 + 0.5 * np.sin(lat)
+                                    * np.cos(lon))
+
+
+@pytest.fixture(scope="module")
+def ctx_topo():
+    """A SECOND context, identical except for real topography.
+
+    Separate rather than shared ON PURPOSE: the hydrostatic gates are
+    green on the flat-`hs` context and re-using one context for both
+    would change their fixture at the same time as this one, which is
+    the confound the controlled-comparison rule exists to stop.  The
+    cost is one extra halo-table build at module scope.
+    """
+    return npstep.build_six_face_duo_context(
+        N, NG, use_ext_bundle=True, oracle_conventions=True,
+        topo_fn=_topo)
+
+
+@pytest.fixture(scope="module")
+def jctx_topo(ctx_topo):
+    return build_jax_duo_stepper_context(ctx_topo)
+
+
 def _seeded_state(km, seed=0, hydrostatic=True):
     """A PHYSICAL 3-D column, distinct per face AND per level.
 
@@ -405,28 +468,53 @@ def csw_np(ctx, state_np):
 
 
 @pytest.fixture(scope="module")
-def csw_np_nh(ctx, state_np):
-    return npphase.csw_phase_3d(ctx, _deepcopy_faces(state_np),
+def csw_np_nh(ctx_topo, state_np):
+    """Built on the TOPOGRAPHY context so the whole NH chain -- c_sw,
+    update_dz_c, Riem_Solver_C, p_grad_c -- runs on one gridstruct."""
+    return npphase.csw_phase_3d(ctx_topo, _deepcopy_faces(state_np),
                                 dt2=DT2, km=KM, nord=2, duogrid=True,
                                 hydrostatic=False)
 
 
-def _nh_column(km=KM, seed=23):
+def _nh_column(ctx_topo, km=KM, seed=23):
     """(dp0, zs6, gz6, ws3_6) -- a hydrostatically consistent height
-    column with a FLAT surface at z = 0.
+    column standing on the ctx's REAL surface.
 
-    ``zs = 0`` and ``hs = 0`` are consistent by construction
-    (``hs = phis = g*zs``), and ``ctx.hs6`` defaults to zeros, so the
-    two arguments the NH stage takes from different places cannot
-    disagree.  ``dz`` is the exact inverse of the solver's EOS at zero
+    ⛔ EARNED, job 9411351.  The first version put a FLAT surface at
+    ``z = 0`` on every face, which made ``ws3`` come out identically
+    zero -- and not by a small margin, but EXACTLY, for any wind.  The
+    reason is structural, not a tuning miss: ``update_dz_c``'s bottom
+    interface is updated in FLUX FORM,
+    ``gz_new = (gz*area + div(F)) / (area + div(u))`` with
+    ``F = u * gz_upwind`` (`nh_utils.F90:166-171`).  With
+    ``gz[:, :, km] == 0`` everywhere, every upwind donor is 0, so the
+    numerator is 0 and ``gz_new[km] = 0`` exactly; then
+    ``ws = (zs - gz_new[km])/dt = 0``.  A control that perturbs a zero
+    is not a control.
+
+    The fix mirrors what the certified ``update_dz_c`` fixtures do
+    (`update_dz_c_zero_wind_certificate`, which builds a spatially
+    VARYING gz and gets ws ~ 0 only because its WIND is zero): give the
+    surface real structure.  ``zs = hs / g`` keeps the two arguments the
+    NH stage takes from different places -- ``zs`` (height) to
+    ``update_dz_c`` and ``hs`` (geopotential) to ``Riem_Solver_C`` --
+    consistent by construction.
+
+    ``dz`` is the exact inverse of the solver's EOS at zero
     perturbation, which is what the certified ``riem_solver_c`` fixtures
-    use -- an arbitrary monotone column would put sim1 far from the
+    use; an arbitrary monotone column would put sim1 far from the
     balanced state it is gated on.
     """
     rng = np.random.default_rng(seed)
     gama = 1.0 / (1.0 - FV3_KAPPA)
+    hs6 = ctx_topo["hs6"]
+    assert hs6 is not None, (
+        "ctx_topo carries no hs6 -- build it with topo_fn, or this "
+        "fixture is back to the flat zero surface that made ws3 "
+        "identically zero")
     gz6, ws6, zs6 = [], [], []
     for _t in range(6):
+        zs = np.asarray(hs6[_t], dtype=np.float64) / FV3_GRAV
         delp = np.abs(1.0e4 + 300.0 * rng.standard_normal((MA, MA, km)))
         pt = 280.0 + 5.0 * rng.standard_normal((MA, MA, km))
         pem = np.zeros((MA, MA, km + 1))
@@ -440,18 +528,38 @@ def _nh_column(km=KM, seed=23):
         dzh = -(delp / FV3_GRAV) * FV3_RDGAS * pt / np.exp(
             np.log(pm) / gama)
         gz = np.zeros((MA, MA, km + 1))
+        gz[:, :, km] = zs          # the column STANDS on the surface
         for k in range(km - 1, -1, -1):
             gz[:, :, k] = gz[:, :, k + 1] - dzh[:, :, k]
         gz6.append(gz)
+        # ws3 enters as the workspace update_dz_c FILLS; zero in, and
+        # the gate below requires it to be non-zero out.
         ws6.append(np.zeros((MA, MA)))
-        zs6.append(np.zeros((MA, MA)))
+        zs6.append(zs)
     dp0 = np.full(km, 1.0e4)
     return dp0, zs6, gz6, ws6
 
 
 @pytest.fixture(scope="module")
-def nh_inputs():
-    return _nh_column()
+def nh_inputs(ctx_topo):
+    return _nh_column(ctx_topo)
+
+
+def test_nh_fixture_surface_is_not_uniform(nh_inputs):
+    """The precondition the ws3 gate rests on, asserted rather than
+    assumed: a face whose ``zs`` is CONSTANT cannot produce a non-zero
+    ``ws3``, because the flux-form bottom update of a constant field
+    reproduces that constant exactly.  This is the check that would have
+    caught the flat-zero fixture before it certified anything."""
+    _dp0, zs6, gz6, _ws6 = nh_inputs
+    for t in range(6):
+        spread = float(np.ptp(zs6[t]))
+        assert spread > 1.0, (
+            f"face {t + 1}: zs varies by only {spread:.3e} m -- the ws3 "
+            f"gate would be measuring a constant field")
+        assert np.array_equal(gz6[t][:, :, KM], zs6[t]), (
+            f"face {t + 1}: the column does not stand on its own "
+            f"surface, so ws3 would start from a spurious offset")
 
 
 # =====================================================================
@@ -674,7 +782,7 @@ def test_cgrid_pressure_phase_3d_matches_numpy_lane(ctx, jctx, csw_np):
 
     assert set(got) == {"pk", "gz", "pe", "peln", "pkz", "uc", "vc"}
     for t in range(6):
-        for name in ("pk", "gz", "pe", "peln", "pkz"):
+        for name in _CGRID_GEOPK_COMPARED:
             # TOL-PENDING: provisional bound; the orchestrator's
             # measurement job will replace this with `measured X,
             # bound = measured x N`.  DO NOT SHIP.
@@ -693,6 +801,48 @@ def test_cgrid_pressure_phase_3d_matches_numpy_lane(ctx, jctx, csw_np):
                  f"cgrid_pressure.{name}[face {t + 1}]", 1e-13)
 
 
+def test_pkz_is_unwritten_on_the_cgrid_call(ctx, jctx, csw_np):
+    """``pkz`` is NOT a comparable output of the C-grid geopk call.
+
+    ``dyn_core.F90:2781`` opens the pkz block with
+    ``if ( .not. CG .and. j .ge. js .and. j .le. je )`` and the write is
+    at ``:2784``; the C-grid call site ``:533`` passes ``.true.``.  So
+    the oracle never writes pkz here, and both lanes leave the whole
+    array at ``unwritten_fill``.  This asserts that CONTRACT -- which
+    goes red the moment either lane starts writing it, whereas simply
+    dropping the field from the parity loop would go quiet forever.
+
+    The ``cg=False`` control at the end is what makes this non-vacuous:
+    it proves the field IS writable by this same kernel on this same
+    state, so the all-fill result above is about ``CG`` and not about
+    pkz being structurally impossible to fill.
+    """
+    kw = dict(dt2=DT2, ptop=PTOP, akap=FV3_KAPPA, cp_air=FV3_CP_AIR)
+    ref = npphase.cgrid_pressure_phase_3d(ctx, _deepcopy_faces(csw_np),
+                                          KM, a2b_ord=4, **kw)
+    got = jphase.cgrid_pressure_phase_3d(jctx, _stack_np(csw_np), KM,
+                                         a2b_ord=4, **kw)
+    for t in range(6):
+        assert np.all(np.asarray(got["pkz"][t]) == BIG_NUMBER), (
+            f"face {t + 1}: the JAX lane WROTE pkz on a CG call; "
+            f"dyn_core.F90:2781 gates that block on `.not. CG`")
+        assert np.all(np.asarray(ref[t]["pkz"]) == BIG_NUMBER), (
+            f"face {t + 1}: the NumPy lane WROTE pkz on a CG call")
+
+    # CONTROL: the same kernel, the same state, cg=False -- pkz must
+    # now be written, or the assertions above are about the wrong thing.
+    d_out = geopk(jnp.asarray(csw_np[0]["delpc"]),
+                  jnp.asarray(csw_np[0]["ptc"]), jctx.hs6[0], ctx["bd"],
+                  km=KM, ptop=PTOP, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+                  cg=False, duogrid=True, computehalo=False,
+                  npx=NPX, npy=NPX, a2b_ord=4, bounded_domain=False,
+                  sw_dynamics=False)
+    written = np.asarray(d_out["pkz"]) != BIG_NUMBER
+    assert written.all(), (
+        "the cg=False control did not fill pkz either, so the CG "
+        "attribution above is unproven")
+
+
 def test_cgrid_pressure_phase_3d_actually_moves_uc(jctx, csw_np):
     """Non-vacuity for the gate above: if ``p_grad_c`` never wrote,
     comparing the returned ``uc`` to the input would pass trivially."""
@@ -707,7 +857,8 @@ def test_cgrid_pressure_phase_3d_actually_moves_uc(jctx, csw_np):
         "parity gate on uc would then be comparing an input to itself")
 
 
-def test_cgrid_nh_pressure_phase_3d_matches_numpy_lane(ctx, jctx,
+def test_cgrid_nh_pressure_phase_3d_matches_numpy_lane(ctx_topo,
+                                                       jctx_topo,
                                                        csw_np_nh,
                                                        nh_inputs):
     """gate 1 for the NH pressure chain, FED THE SAME INPUT.
@@ -723,12 +874,12 @@ def test_cgrid_nh_pressure_phase_3d_matches_numpy_lane(ctx, jctx,
     gz_ref = [np.array(g, copy=True) for g in gz6]
     ws_ref = [np.array(w, copy=True) for w in ws6]
     ref = npphase.cgrid_nh_pressure_phase_3d(
-        ctx, ref_in, gz_ref, ws_ref, KM, dt2=DT2, ptop=PTOP,
+        ctx_topo, ref_in, gz_ref, ws_ref, KM, dt2=DT2, ptop=PTOP,
         akap=FV3_KAPPA, cp_air=FV3_CP_AIR, p_fac=P_FAC, a_imp=A_IMP,
-        dp0=dp0, hs6=[np.zeros((MA, MA)) for _ in range(6)], zs6=zs6)
+        dp0=dp0, hs6=ctx_topo["hs6"], zs6=zs6)
 
     got = jphase.cgrid_nh_pressure_phase_3d(
-        jctx, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
+        jctx_topo, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
         jnp.asarray(np.stack(ws6)), KM, dt2=DT2, ptop=PTOP,
         akap=FV3_KAPPA, cp_air=FV3_CP_AIR, p_fac=P_FAC, a_imp=A_IMP,
         dp0=jnp.asarray(dp0), zs6=jnp.asarray(np.stack(zs6)))
@@ -758,21 +909,40 @@ def test_cgrid_nh_pressure_phase_3d_matches_numpy_lane(ctx, jctx,
                  f"cgrid_nh.{name}[face {t + 1}]", 1e-13)
 
 
-def test_nh_stage_rebuilds_gz_and_fills_ws(jctx, csw_np_nh, nh_inputs):
+def test_nh_stage_rebuilds_gz_and_fills_ws(jctx_topo, csw_np_nh,
+                                           nh_inputs):
     """Non-vacuity for the NH parity gate: ``gz`` must LEAVE different
     from how it arrived (height in, geopotential out) and ``ws3`` must
     stop being all zeros, or those two comparisons are input-to-input.
+
+    PER FACE, not globally.  A global ``max > 0`` passes as soon as ONE
+    face responds, which is exactly how a surface that is flat on five
+    faces would slip through -- the failure this gate has already had
+    once (job 9411351), in its stronger form.
     """
     dp0, zs6, gz6, ws6 = nh_inputs
     got = jphase.cgrid_nh_pressure_phase_3d(
-        jctx, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
+        jctx_topo, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
         jnp.asarray(np.stack(ws6)), KM, dt2=DT2, ptop=PTOP,
         akap=FV3_KAPPA, cp_air=FV3_CP_AIR, p_fac=P_FAC, a_imp=A_IMP,
         dp0=jnp.asarray(dp0), zs6=jnp.asarray(np.stack(zs6)))
     gz_in = np.stack(gz6)
     gz_out = np.asarray(got["gz"])
-    assert np.abs(gz_out[:, _CS, _CS, :] - gz_in[:, _CS, _CS, :]).max() > 0.0
-    assert np.abs(np.asarray(got["ws3"])[:, _CS, _CS]).max() > 0.0
+    ws_out = np.asarray(got["ws3"])
+    for t in range(6):
+        moved = np.abs(gz_out[t, _CS, _CS, :]
+                       - gz_in[t, _CS, _CS, :]).max()
+        assert moved > 0.0, (
+            f"face {t + 1}: gz came back unchanged -- the NH stage is "
+            f"dead on this face and the gz parity comparison is "
+            f"input-against-input")
+        wmax = np.abs(ws_out[t, _CS, _CS]).max()
+        assert wmax > 0.0, (
+            f"face {t + 1}: ws3 is identically zero. update_dz_c's "
+            f"bottom update is FLUX FORM (nh_utils.F90:166-171), so a "
+            f"UNIFORM surface reproduces itself exactly and ws = "
+            f"(zs - gz[km])/dt is structurally 0 for any wind -- check "
+            f"that this face's zs actually varies")
 
 
 # =====================================================================
@@ -807,6 +977,16 @@ def test_cgrid_pressure_phase_3d_jit_matches_eager(jctx, csw_np):
                                            check_delpc=False, **kw)
     fast = fn(jctx, stacked, KM, check_delpc=False, **kw)
     for name in eager:
+        if name in _CGRID_GEOPK_UNWRITTEN:
+            # 100 % unwritten_fill on a CG call (dyn_core.F90:2781);
+            # `_cmp` correctly refuses an all-fill pair, and the
+            # contract is asserted by
+            # test_pkz_is_unwritten_on_the_cgrid_call.  Compilation
+            # cannot change a constant fill, so there is nothing for a
+            # jit-vs-eager gate to say about it.
+            assert np.array_equal(np.asarray(fast[name]),
+                                  np.asarray(eager[name])), name
+            continue
         # TOL-PENDING: provisional bound; the orchestrator's measurement
         # job will replace this with `measured X, bound = measured x N`.
         # DO NOT SHIP.  [class: FMA contraction on an accumulator]
@@ -814,11 +994,12 @@ def test_cgrid_pressure_phase_3d_jit_matches_eager(jctx, csw_np):
              1e-12)
 
 
-def test_cgrid_nh_pressure_phase_3d_jit_matches_eager(jctx, csw_np_nh,
+def test_cgrid_nh_pressure_phase_3d_jit_matches_eager(jctx_topo,
+                                                      csw_np_nh,
                                                       nh_inputs):
     dp0, zs6, gz6, ws6 = nh_inputs
     fn = jphase.make_cgrid_nh_pressure_phase_3d_jit()
-    args = (jctx, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
+    args = (jctx_topo, _stack_np(csw_np_nh), jnp.asarray(np.stack(gz6)),
             jnp.asarray(np.stack(ws6)), KM)
     kw = dict(dt2=DT2, ptop=PTOP, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
               p_fac=P_FAC, a_imp=A_IMP, dp0=jnp.asarray(dp0),
@@ -1126,7 +1307,8 @@ def test_cgrid_pressure_phase_3d_adjoint_identity(jctx, csw_np):
                    (stacked["delpc"], stacked["ptc"]), 1e-10)
 
 
-def test_cgrid_nh_pressure_phase_3d_adjoint_identity(jctx, csw_np_nh,
+def test_cgrid_nh_pressure_phase_3d_adjoint_identity(jctx_topo,
+                                                     csw_np_nh,
                                                      nh_inputs):
     """gate 6, PRIMARY -- the NH chain, including the sim1 Thomas sweep
     and the ``p_fac`` floor.  Run ON the state, not away from it: the
@@ -1141,7 +1323,8 @@ def test_cgrid_nh_pressure_phase_3d_adjoint_identity(jctx, csw_np_nh,
 
     def f(delpc, ptc, wc):
         out = jphase.cgrid_nh_pressure_phase_3d(
-            jctx, {**stacked, "delpc": delpc, "ptc": ptc, "wc": wc},
+            jctx_topo, {**stacked, "delpc": delpc, "ptc": ptc,
+                        "wc": wc},
             gz0, ws0, KM, dt2=DT2, ptop=PTOP, akap=FV3_KAPPA,
             cp_air=FV3_CP_AIR, p_fac=P_FAC, a_imp=A_IMP, dp0=dp0j,
             zs6=zs0)
