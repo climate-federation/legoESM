@@ -525,6 +525,17 @@ def main():
     ap.add_argument("--n2-eos-form", default=None, choices=["seos", "teos10"],
                     help="Which alpha/beta the nemo_bn2 assembly uses. Inert "
                          "under every other --n2-mode.")
+    ap.add_argument("--cfg-override", action="append", default=[],
+                    metavar="FIELD=VALUE",
+                    help="repeatable TKEConfig override on the ORCA1 card, "
+                         "for one-variable ablation of any field the named "
+                         "flags do not cover (e.g. etau_frac=0.0, "
+                         "tke_shear_production=nemo_face_native). Values "
+                         "parse as bool/int/float/str in that order. An "
+                         "unknown FIELD raises, and so does an override that "
+                         "EQUALS the card value -- a no-op arm reported as "
+                         "'no effect' is the worst outcome here. Ported from "
+                         "nemo_zero_step_closure.py, same semantics.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -544,6 +555,31 @@ def main():
         which reads as "the change has no effect in Mode-A" when it actually
         means the flag never arrived. Both stages now go through here.
         """
+        for spec in args.cfg_override:
+            if "=" not in spec:
+                raise SystemExit(f"--cfg-override {spec!r} must be FIELD=VALUE")
+            k, _, raw = spec.partition("=")
+            if k not in c._fields:
+                raise SystemExit(
+                    f"--cfg-override {k!r} is not a TKEConfig field. Silently "
+                    "ignoring it would make an ablation look like a null "
+                    "result.")
+            if raw in ("True", "False"):
+                v = (raw == "True")
+            else:
+                try:
+                    v = int(raw)
+                except ValueError:
+                    try:
+                        v = float(raw)
+                    except ValueError:
+                        v = raw
+            if getattr(c, k) == v:
+                raise SystemExit(
+                    f"--cfg-override {k}={v!r} EQUALS the card value, so this "
+                    "arm is a no-op and would be reported as 'no effect'.")
+            c = c._replace(**{k: v})
+            print(f"[cfg/{label}] {k} OVERRIDE -> {v!r}")
         for flag, field, cast in (
                 ("mxl_choice", "tke_mxl_choice", int),
                 ("prandtl_mode", "prandtl_mode", str),

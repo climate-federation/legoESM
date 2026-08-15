@@ -60,5 +60,20 @@ arm baseline
 # lives there. One variable.
 arm nemo_ri --prandtl-mode nemo_ri
 
+# REMAINING SUSPECTS for the 2.3x, each one variable off the PRODUCTION card
+# (mxl=3). --cfg-override raises if a value equals the card's, so none of
+# these can come back a silent no-op.
+#
+#  etau: the card injects surface TKE below the mixed layer (etau_mode=
+#  below_ml, frac 0.08). On the equator the mixed layer is thin, so that flux
+#  lands close to the thermocline -- a plausible way to smear it downward.
+arm no_etau   --mxl-choice 3 --cfg-override etau_mode=none
+#  lc: Langmuir. Same argument, different term, and it is ON in the card.
+arm no_lc     --mxl-choice 3 --cfg-override lc=False
+#  background diffusivity: bg_diff_scale is 0.0 on the card so this SHOULD be
+#  inert. Running it as a NEGATIVE CONTROL -- if it moves nino3, my reading of
+#  the card is wrong and every other arm here is suspect.
+arm bg_on     --mxl-choice 3 --cfg-override bg_diff_scale=1.0
+
 echo; echo "=== DONE"
 
