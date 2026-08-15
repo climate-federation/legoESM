@@ -69,10 +69,41 @@ cloud_q_c_diagnostic: 5.0e-6
 convective_cloud: false
 
 # --- Land --------------------------------------------------------------------
-# Base: multilayer Richards land. This deck runs the slab: the deep 3 m soil
-# needs a multi-year cold spin-up before its skin temperature is meaningful, and
-# the campaign's arms are 60-120 days. Not a quality judgement on the land model.
-use_multilayer_land: false
+# This block used to read "this deck runs the slab" and set the multilayer land
+# to false. THAT COMMENT WAS FALSE ON THIS LANE, and it cost the campaign
+# months. There is no slab land on the MPAS lane -- `slab_land_active` is not
+# wired there at all -- so switching the multilayer land off did not select a
+# simpler land model, it selected NO LAND MODEL. What the runs actually had was
+# this: land surface temperature was the nearest OCEAN's prescribed SST, cooled
+# by a 6.5 K/km lapse rate for elevation, and land evaporation was a fixed 0.6
+# of saturation at that temperature. No soil, no water store, no memory of
+# rain, no surface energy balance -- a continent whose temperature was the sea's.
+#
+# Everything that followed is explained by it. Tropical deserts evaporated 3.5x
+# observed and the rainforest 0.73x, from one global constant. The screen ran
+# 6.1 K cold over wet tropical land while that same land received MORE sunlight
+# than observed. Land sensible heat was ~25 W/m2 everywhere, Sahara and Amazon
+# alike. The January rising branch never migrated onto the southern summer
+# continents (1.3 S against 7.9 S observed) because no continent could warm.
+# Five different convection schemes were swapped against this and moved wet-land
+# rain only between 0.35 and 0.41 of observed -- they were being asked to convect
+# over an ocean wearing a coastline.
+#
+# So the land model is ON, and its evaporation is throttled by its OWN soil
+# moisture rather than by a global constant. That brings the three things a land
+# surface has to have: soil water (Richards column with infiltration, drainage
+# and runoff), stomatal control on transpiration, and a prognostic skin
+# temperature that feeds back to the atmosphere.
+#
+# The old reason for disabling it -- that the deep 3 m soil needs a multi-year
+# spin-up the campaign's 30-120 day arms cannot afford -- is real but is the
+# lesser error: a soil column still equilibrating is closer to a land surface
+# than the neighbouring sea is. Soil moisture is seeded aridity-aware from the
+# initial condition's own near-surface humidity, so the rainforest starts wet
+# and the desert dry. A spun-up restart is the proper answer and is a separate
+# piece of work.
+use_multilayer_land: true
+mpas_land_beta_soil: true
 
 # --- Aerosol -> droplet coupling ---------------------------------------------
 # Base: off (a prescribed droplet number). On, the cloud droplet number is
