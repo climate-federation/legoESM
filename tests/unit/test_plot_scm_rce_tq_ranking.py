@@ -48,15 +48,29 @@ def test_ff_maps_blank_and_garbage_to_nan():
 
 
 def test_structural_note_only_when_actually_flat():
-    flat = {"scheme": "kuo", "n_tuned_params": "2"}
-    assert P._structural_note(flat, 1.0, 1.0) is not None
-    assert P._structural_note(flat, 1.0, 0.5) is None
-    # A zero-parameter scheme is flat by construction whatever the numbers are.
+    """A NAMED structural reason applies only while the row is genuinely flat."""
+    named = {"scheme": "kuo", "n_tuned_params": "2"}
+    assert P._structural_note(named, 1.0, 1.0) is not None
+    assert P._structural_note(named, 1.0, 0.5) is None
+    # A scheme with no named reason and a nonzero parameter count is never
+    # annotated, however flat it happens to be.
     assert P._structural_note(
-        {"scheme": "dca", "n_tuned_params": "0"}, 1.0, 0.5) is not None
-    # A scheme not on the list is never annotated.
+        {"scheme": "bechtold", "n_tuned_params": "3"}, 1.0, 1.0) is None
+
+
+def test_zero_parameter_note_comes_from_the_row_not_a_hardcoded_scheme_list():
+    """`dca` had no tunable parameter under the extended tier and HAS one under
+    the physical set, so a hardcoded per-scheme note would become a false label
+    the moment the parameter set changes. The note must follow the count."""
     assert P._structural_note(
-        {"scheme": "bechtold", "n_tuned_params": "0"}, 1.0, 1.0) is None
+        {"scheme": "dca", "n_tuned_params": "0"}, 1.0, 0.5) == P._NO_PARAMS_NOTE
+    assert P._structural_note(
+        {"scheme": "dca", "n_tuned_params": "1"}, 1.0, 0.5) is None
+    # ...and it is not specific to dca: ANY zero-parameter row gets it.
+    assert P._structural_note(
+        {"scheme": "bechtold", "n_tuned_params": "0"}, 1.0, 1.0) == (
+            P._NO_PARAMS_NOTE)
+    assert "dca" not in P.STRUCTURALLY_FLAT
 
 
 def test_panel_ranks_by_the_tuned_value_worst_first(tmp_path):

@@ -172,12 +172,38 @@ def test_humidity_term_sees_an_upper_tropospheric_error_analytically():
     expected = math.sqrt(mass_fraction) * math.log(1.2) / logq_scale
     assert float(q_term) == pytest.approx(expected, rel=1e-9)
 
-    # And the control that makes it a statement about the CHOICE of variable:
-    # the absolute-q_v RMSE over the same perturbation, expressed in its own
-    # 1 g/kg tolerance, is far smaller because q_v up there is tiny.
-    absolute_in_tolerances = float(np.sqrt(np.sum(
-        weights * ((qv_pert - np.asarray(ref.qv_ref)) / 1.0e-3) ** 2)))
-    assert float(q_term) > 10.0 * absolute_in_tolerances
+
+def test_logq_is_blind_to_where_in_the_column_the_error_is():
+    """The property that makes `logq` the right variable, stated as an identity
+    rather than as a threshold: the SAME fractional error costs the SAME amount
+    wherever it is applied, while an absolute q_v RMSE over the identical
+    perturbation differs by orders of magnitude between a dry level and a moist
+    one.  No invented factor: the logq terms must be EQUAL and the absolute
+    ones must differ by the ratio of the q_v values.
+    """
+    ref, p, w = _ref(40)
+    weights = np.asarray(
+        tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w)))
+    live = np.flatnonzero(weights > 0.0)
+    dry, moist = live[:4], live[-4:]          # top-most vs bottom-most levels
+
+    def _terms(idx):
+        qv = np.asarray(ref.qv_ref).copy()
+        qv[idx] *= 1.2
+        _T, q_term, _c = score_thermo_jax(
+            ref, jnp.asarray(ref.T_ref), jnp.asarray(qv), jnp.asarray(p),
+            trop_weights=jnp.asarray(weights), humidity="logq")
+        absolute = float(np.sqrt(np.sum(
+            weights * (qv - np.asarray(ref.qv_ref)) ** 2)))
+        return float(q_term), absolute
+
+    q_dry, abs_dry = _terms(dry)
+    q_moist, abs_moist = _terms(moist)
+    # Equal weights per level in this fixture, so the logq cost is identical.
+    assert q_dry == pytest.approx(q_moist, rel=1e-9)
+    # The absolute metric is not: it scales with q_v itself, which here spans
+    # three orders of magnitude between the two groups.
+    assert abs_moist > 100.0 * abs_dry
 
 
 def test_tropospheric_mask_excludes_the_stratosphere():
@@ -462,18 +488,29 @@ def test_tuner_minimises_the_named_objective_and_the_csv_agrees(tmp_path,
 
     base = camp.make_physics_config(convection="mass_flux")
 
-    def _tuned_sum(cfg) -> float:
-        """A scalar that distinguishes candidate configurations."""
-        _c, _s, sub = camp._active_subconfig(cfg, "convection")
-        return sum(float(v) for v in sub._asdict().values()
-                   if isinstance(v, float))
+    # Key the stub on ONE named parameter crossing the MIDPOINT of its own
+    # declared range.  The tuner's first phase sweeps every parameter to the
+    # 25 % and 75 % points, so a candidate on each side is GUARANTEED to be
+    # offered — the test cannot fail for want of a lucky draw.
+    from legoesm.training.param_collector import build_trainable_params
 
-    baseline = _tuned_sum(base)
+    _c0, _s0, sub0 = camp._active_subconfig(base, "convection")
+    key = camp._scheme_key_for_subconfig(sub0)
+    tier, include_tier0, exclude = camp.resolve_param_selection(key, "physical")
+    params = build_trainable_params(
+        active_scheme_keys={key}, tier=tier, include_tier0=include_tier0,
+        exclude=exclude, dtype=jnp.float64)
+    probe = params.constraints[0]
+    midpoint = 0.5 * (float(probe.min_val) + float(probe.max_val))
+
+    def _probe_value(cfg) -> float:
+        _c, _s, sub = camp._active_subconfig(cfg, "convection")
+        return float(getattr(camp._tunable_subconfig(sub), probe.field))
 
     def _fake_run_cached(cache, cfg, ref, *, label, **kw):
-        # Candidates whose parameters sum ABOVE the shipped configuration are
-        # good on `thermo` and bad on `combined`; below, the reverse.
-        if _tuned_sum(cfg) > baseline:
+        # Above the midpoint is good on `thermo` and bad on `combined`; below,
+        # the reverse.  The two objectives therefore have opposite optima.
+        if _probe_value(cfg) > midpoint:
             return _diag(score=9.0, thermo_score=0.1, subcloud_score=1.0)
         return _diag(score=1.0, thermo_score=0.9, subcloud_score=1.0)
 
@@ -486,17 +523,18 @@ def test_tuner_minimises_the_named_objective_and_the_csv_agrees(tmp_path,
     picked = {}
     for objective in ("combined", "thermo"):
         cfg, records, tuned, _stats = camp.tune_category_winner(
-            "convection", base, object(), {}, tune_evals=24, seed=7,
+            "convection", base, object(), {}, tune_evals=32, seed=7,
             objective=objective, param_set="physical", **common)
-        picked[objective] = (_tuned_sum(cfg), tuned, records)
+        picked[objective] = (_probe_value(cfg), tuned, records)
 
-    combined_sum, combined_run, _cr = picked["combined"]
-    thermo_sum, thermo_run, thermo_records = picked["thermo"]
+    combined_value, combined_run, _cr = picked["combined"]
+    thermo_value, thermo_run, thermo_records = picked["thermo"]
     assert combined_run.score == 1.0 and combined_run.thermo_score == 0.9
     assert thermo_run.thermo_score == 0.1 and thermo_run.score == 9.0
-    assert thermo_sum > baseline >= combined_sum or thermo_sum != combined_sum, (
-        "the two objectives must select DIFFERENT configurations, else the "
-        f"test cannot fail (combined={combined_sum}, thermo={thermo_sum})")
+    assert thermo_value > midpoint >= combined_value, (
+        "the two objectives must select configurations on OPPOSITE sides of "
+        f"{probe.field}'s midpoint, else the test cannot fail "
+        f"(combined={combined_value}, thermo={thermo_value}, mid={midpoint})")
     # The RECORDS carry the objective minimised, not the combined score.
     assert thermo_records and thermo_records[0].score_tuned == 0.1
 
