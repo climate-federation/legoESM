@@ -325,10 +325,21 @@ def _require_barrier_layout(fname: str, ctx, afx, afy, km: int) -> None:
 
     ``average_allflux_shared_edges`` blends through a FLAT index table
     built for ``(6, npx, n)`` / ``(6, n, npx)`` planes.  A wrong
-    leading shape does NOT raise there: ``jnp.ndarray.at[idx].set()``
-    CLAMPS out-of-bounds indices instead of erroring, so a mis-shaped
-    operand would be silently blended at the wrong cells.  That makes
-    this check load-bearing rather than defensive politeness.
+    leading shape does NOT raise there, and the reason is read from the
+    installed JAX rather than remembered
+    (``jax/_src/numpy/array_methods.py:728-731``, jax 0.9.1): the
+    default ``.at[]`` mode is ``promise_in_bounds``, under which an
+    out-of-bounds ``get()`` is CLIPPED and an out-of-bounds ``set()``
+    is **DROPPED**.  So a mis-shaped operand loses part of the blend
+    silently.  That makes this check load-bearing rather than defensive
+    politeness.
+
+    CORRECTION (job 9415283): an earlier revision of this docstring, and
+    of the raise below, said the update CLAMPS to the last valid index.
+    That is the GATHER rule, not the scatter one.  The premise test
+    ``test_out_of_bounds_scatter_drops_the_update`` measures it, which
+    is how the wrong reason was caught; the guard itself was right
+    either way, because both behaviours are silent.
     """
     n, npx = ctx.n, ctx.npx
     want_x = (6, npx, n, km)
@@ -338,9 +349,10 @@ def _require_barrier_layout(fname: str, ctx, afx, afy, km: int) -> None:
             f"{fname}: barrier-1 operands have leading shapes "
             f"{afx.shape[:4]} / {afy.shape[:4]}, expected {want_x} / "
             f"{want_y} for n={n} km={km}. The blend's index table is "
-            f"baked for that layout and `.at[].set()` CLAMPS rather "
-            f"than raising, so a mismatch would blend the wrong cells "
-            f"silently.")
+            f"baked for that layout and an out-of-bounds `.at[].set()` "
+            f"DROPS the update rather than raising, so a mismatch would "
+            f"silently lose part of the blend.")
+
 
 def _cap_shape(name: str, n: int, ng: int, km: int) -> tuple:
     """Declared capacitor shape -- ``alloc_flux_capacitors``' contract.

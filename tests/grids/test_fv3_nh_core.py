@@ -30,6 +30,8 @@ from jax.test_util import check_grads  # noqa: E402
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # noqa: E402
 from legoesm.core.fv3_nh_core import (  # noqa: E402
     edge_profile as edge_jax,
+)
+from legoesm.core.fv3_nh_core import (
     edge_profile_jit,
     make_edge_profile_jit,
     make_riem_solver3_jit,
@@ -37,16 +39,26 @@ from legoesm.core.fv3_nh_core import (  # noqa: E402
     make_sim1_solver_jit,
     make_update_dz_c_jit,
     make_update_dz_d_jit,
-    riem_solver3 as riem3_jax,
     riem_solver3_jit,
-    riem_solver_c as riem_c_jax,
     riem_solver_c_jit,
-    sim1_solver as sim1_jax,
     sim1_solver_jit,
-    update_dz_c as udzc_jax,
     update_dz_c_jit,
-    update_dz_d as udzd_jax,
     update_dz_d_jit,
+)
+from legoesm.core.fv3_nh_core import (
+    riem_solver3 as riem3_jax,
+)
+from legoesm.core.fv3_nh_core import (
+    riem_solver_c as riem_c_jax,
+)
+from legoesm.core.fv3_nh_core import (
+    sim1_solver as sim1_jax,
+)
+from legoesm.core.fv3_nh_core import (
+    update_dz_c as udzc_jax,
+)
+from legoesm.core.fv3_nh_core import (
+    update_dz_d as udzd_jax,
 )
 from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
     FV3_GRAV,
@@ -1925,6 +1937,40 @@ def _udzd_grad_runner(fxt, hord, *, damp=None, ndif=None):
     return run
 
 
+def udzd_call_and_operands(fxt):
+    """``(_call, ja)`` for the gate-4 fixture -- the operand mapping once.
+
+    PUBLIC (no leading underscore) because the standing triage probe
+    ``scripts/tmp/fv3_gradient_gate_triage.py`` builds the SAME gradient
+    groups to decide whether this gate's 2.1e-5 check_grads gap is
+    finite-difference truncation or a wrong Jacobian.  A probe that
+    retyped the fourteen-operand order would be measuring its own
+    transcription, and a private cross-module import is banned by a CI
+    ratchet -- so the mapping lives here, once, and both callers take it
+    from this function.
+    """
+    km, npx, npy, bnds = fxt["km"], fxt["npx"], fxt["npy"], fxt["bnds"]
+    statics = dict(UDZD_FLAGS)
+
+    def _call(nd, dm, dp0_, crx_, cry_, xfx_, yfx_, zh_, zs_, area_,
+              rarea_, dxa_, dya_, du_, dv_, ws_):
+        """(ndif, damp) first so the no-damp control reuses the SAME
+        argument mapping — one place for the operand order."""
+        return udzd_jax(nd, dm, 2, bnds, km, npx, npy, area_, rarea_,
+                        dp0_, zs_, zh_, crx_, cry_, xfx_, yfx_, ws_,
+                        UDZD_RDT, dxa_, dya_, du_, dv_, **statics)
+
+    ja = [jnp.asarray(fxt[k]) for k in
+          ("dp0", "crx", "cry", "xfx", "yfx", "zh", "zs", "area",
+           "rarea", "dxa", "dya", "del6_u", "del6_v", "ws0")]
+    return _call, ja
+
+
+def udzd_loss(zh_out, ws_out):
+    """The scalar the gate differentiates -- shared with the probe."""
+    return jnp.sum(zh_out * zh_out) / 1e6 + jnp.sum(ws_out * ws_out)
+
+
 def _one_sided(phi, s, h):
     """One-sided difference quotient whose TWO stencil points lie on the
     SAME side of ``s`` (sign of ``h`` picks the side), so it never
@@ -1961,14 +2007,12 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
     comparison against the NumPy lane is gate 1's job.
     """
     fxt = _udzd_grad_fixture()
+    # Only the names the CONTROLS below read are unpacked; every
+    # operand the gradients take now comes from
+    # `udzd_call_and_operands`, which owns the order.
     n, ng, km = fxt["n"], fxt["ng"], fxt["km"]
-    npx, npy, bnds = fxt["npx"], fxt["npy"], fxt["bnds"]
-    crx, cry, xfx, yfx = (fxt["crx"], fxt["cry"], fxt["xfx"],
-                          fxt["yfx"])
-    dp0, area, rarea = fxt["dp0"], fxt["area"], fxt["rarea"]
-    dxa, dya = fxt["dxa"], fxt["dya"]
-    del6_u, del6_v = fxt["del6_u"], fxt["del6_v"]
-    zh, zs, ws0 = fxt["zh"], fxt["zs"], fxt["ws0"]
+    crx, cry = fxt["crx"], fxt["cry"]
+    dp0, ws0 = fxt["dp0"], fxt["ws0"]
     damp, ndif = fxt["damp"], fxt["ndif"]
     assert len(damp) == km + 1 and len(ndif) == km + 1
     assert any(d > 1.0e-5 for d in damp), "del6 branch never runs"
@@ -1983,18 +2027,7 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
         assert np.abs(adv).min() > 1.0e-2, (name, np.abs(adv).min())
         assert (adv > 0).any() and (adv < 0).any(), name
 
-    statics = dict(UDZD_FLAGS)
-
-    def _call(nd, dm, dp0_, crx_, cry_, xfx_, yfx_, zh_, zs_, area_,
-              rarea_, dxa_, dya_, du_, dv_, ws_):
-        """(ndif, damp) first so the no-damp control below reuses the
-        SAME argument mapping — one place for the operand order."""
-        return udzd_jax(nd, dm, 2, bnds, km, npx, npy, area_, rarea_,
-                        dp0_, zs_, zh_, crx_, cry_, xfx_, yfx_, ws_,
-                        UDZD_RDT, dxa_, dya_, du_, dv_, **statics)
-
-    ja = [jnp.asarray(x) for x in (dp0, crx, cry, xfx, yfx, zh, zs, area,
-                                   rarea, dxa, dya, del6_u, del6_v, ws0)]
+    _call, ja = udzd_call_and_operands(fxt)
     zh_o, ws_o = _call(ndif, damp, *ja)
     zh_o = np.asarray(zh_o)
     assert np.isfinite(zh_o).all() and np.isfinite(np.asarray(ws_o)).all()
@@ -2018,9 +2051,7 @@ def test_udzd_jax_check_grads_order2_away_from_switches():
     d_del6 = np.abs(zh_o[w, w, :] - np.asarray(zh_ref)[w, w, :]).max()
     assert d_del6 > 1.0, f"del-nord term moved zh by only {d_del6} m"
 
-    def _loss(zh_out, ws_out):
-        return (jnp.sum(zh_out * zh_out) / 1e6
-                + jnp.sum(ws_out * ws_out))
+    _loss = udzd_loss
 
     def f(dp0_, crx_, cry_, xfx_, yfx_, zh_):
         return _loss(*_call(ndif, damp, dp0_, crx_, cry_, xfx_, yfx_,

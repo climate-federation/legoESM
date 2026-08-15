@@ -20,11 +20,25 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 G=/burg-archive/glab/users/pg2328/fv3_duo_gaps/glm
 OUT=$G/fv3_dsw_tail_3d.generated.py
 echo "host: $(hostname)"; cd $REPO; echo "PINNED sha: $(git rev-parse HEAD)"
-$PY $REPO/scripts/validate/glm_review.py \
-    --prompt-file $G/prompt_tail3d.txt \
-    --model glm-5.3 --max-tokens 32000 --code --no-stream \
-    --out $OUT
-echo "rc=$?"
+# --no-stream is REQUIRED, not preferred: thinking={"type":"disabled"} is
+# ignored on the streaming endpoint (probe 687d20a82 -- 31991 reasoning tokens
+# and EMPTY content), and with thinking ON this model spends the whole budget
+# reasoning.  The cost of non-streaming is that a long completion can die with
+# IncompleteRead (job 9417290 died after 10511 bytes), so the call is RETRIED
+# and the retry gate is on the OUTPUT FILE, never on the exit code.
+for attempt in 1 2 3; do
+  echo "--- attempt $attempt ---"
+  $PY $REPO/scripts/validate/glm_review.py \
+      --prompt-file $G/prompt_tail3d.txt \
+      --model glm-5.3 --max-tokens 32000 --code --no-stream \
+      --out $OUT
+  echo "rc=$?"
+  if [ -s "$OUT" ] && [ "$(wc -c < "$OUT")" -gt 20000 ]; then
+    echo "attempt $attempt produced $(wc -c < "$OUT") chars -- stopping"
+    break
+  fi
+  echo "attempt $attempt produced $(wc -c < "$OUT" 2>/dev/null || echo 0) chars"
+done
 echo "--- generated ---"; wc -l $OUT 2>/dev/null
 # A bare ast.parse() on an EMPTY file succeeds -- that vacuous check reported
 # "PARSES OK" on the 0-byte first attempt. Assert non-empty AND parseable.

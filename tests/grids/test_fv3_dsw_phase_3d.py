@@ -1237,14 +1237,42 @@ def test_a_stagger_slip_raises_instead_of_broadcasting(jctx, jstate,
 
 
 def test_shape_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
-    monkeypatch.setattr(jdsw, "validate_stacked",
-                        lambda *a, **k: None)
-    bad = dict(jcsw)
-    bad["uc"] = jnp.swapaxes(jcsw["uc"], 1, 2)
-    with pytest.raises(Exception) as ei:
-        jdsw.dsw_transport_phase_3d(jctx, jstate, bad, DT, KM)
-    assert "expected (6," not in str(ei.value), (
-        "the shape gate still fired after being neutered")
+    """Neutered, a stagger slip does NOT raise -- it changes the answer.
+
+    ⛔ CORRECTED (job 9411351 measured it).  This gate used to demand
+    that the neutered call raise SOMETHING deeper, on the assumption
+    that a ``(m_b, m_a)`` operand handed to a ``(m_a, m_b)`` slot must
+    eventually trip a shape error.  It does not: every downstream read
+    is a windowed slice, and both staggers are large enough to serve
+    every window, so the phase runs to completion on the wrong cells.
+    ``DID NOT RAISE`` was the correct answer to the wrong question.
+
+    That makes the gate MORE load-bearing, not less, so the assertion is
+    now the strong one: with the gate off the call SUCCEEDS and the
+    result DIFFERS.  Silently wrong is precisely what ``validate_stacked``
+    is the only thing standing between this phase and.
+    """
+    good = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM)
+
+    monkeypatch.setattr(jdsw, "validate_stacked", lambda *a, **k: None)
+    bad_in = dict(jcsw)
+    bad_in["uc"] = jnp.swapaxes(jcsw["uc"], 1, 2)
+    bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
+
+    # `equal_nan=True`: these stacks carry NaN scratch by construction
+    # (the halo lane's tripwire fill), and plain array_equal calls two
+    # identical NaN arrays UNEQUAL -- which would make `moved` non-empty
+    # for every key and this gate unable to fail.
+    moved = [k for k in good
+             if k in bad and (good[k].shape != bad[k].shape
+                              or not np.array_equal(np.asarray(good[k]),
+                                                    np.asarray(bad[k]),
+                                                    equal_nan=True))]
+    assert moved, (
+        "a transposed uc changed NOTHING in the phase output, so the "
+        "shape gate it is protected by would be certifying nothing -- "
+        "either the operand is unused on this arm or the fixture is "
+        "symmetric under the swap")
 
 
 def test_f64_gate_refuses_a_float32_state(jctx, jstate, jcsw):
@@ -1311,23 +1339,37 @@ def test_barrier_nq_mismatch_is_named(jctx, jstate, jcsw, monkeypatch):
         jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM)
 
 
-def test_out_of_bounds_scatter_clamps_instead_of_raising():
+def test_out_of_bounds_scatter_drops_the_update():
     """The PREMISE the barrier-layout guard rests on, MEASURED.
 
-    The guard's docstring claims ``.at[idx].set()`` clamps rather than
-    raising, which is why a mis-shaped barrier operand would be blended
-    at the wrong cells silently instead of erroring.  That is a claim
-    about JAX's semantics, so it is checked rather than asserted in
-    prose -- if a future JAX made it raise, the guard would still be
-    right but its stated reason would not be.
+    The guard is load-bearing because a mis-shaped barrier operand is
+    mis-blended SILENTLY rather than raising.  Which silent behaviour it
+    is was stated wrongly at first: the guard said the index CLAMPS to
+    the last valid one, which is JAX's GATHER rule.  For a SCATTER under
+    the default ``promise_in_bounds`` mode the out-of-bounds update is
+    DROPPED (``jax/_src/numpy/array_methods.py:728-731``).  This gate
+    measured that and failed, which is exactly what a premise test is
+    for; the guard's docstring now says DROPS.
+
+    Both halves are asserted, so the test still fails if a future JAX
+    starts raising (the guard would remain right, its reason would not):
+    the array keeps its shape, and the last valid cell is UNTOUCHED.
     """
     x = jnp.zeros(3, dtype=jnp.float64)
     y = x.at[jnp.asarray([10])].set(1.0)
     assert np.asarray(y).shape == (3,)
-    assert float(np.asarray(y)[2]) == 1.0, (
-        "an out-of-bounds scatter no longer clamps to the last index; "
-        "the barrier-layout guard's stated justification needs updating "
-        "(the guard itself is still required)")
+    assert float(np.asarray(y)[2]) == 0.0, (
+        "an out-of-bounds scatter wrote into the last index, i.e. it "
+        "CLAMPED; the barrier-layout guard's stated justification needs "
+        "updating (the guard itself is still required)")
+    # ... and nothing else moved either: a dropped update is a no-op.
+    assert not np.asarray(y).any(), (
+        "an out-of-bounds scatter wrote somewhere; it is documented as "
+        "dropped, so the whole array must be unchanged")
+    # The CONTROL: the same scatter in bounds must land, or the two
+    # assertions above would pass on a scatter that never works.
+    z = x.at[jnp.asarray([2])].set(1.0)
+    assert float(np.asarray(z)[2]) == 1.0
 
 
 def test_barrier_layout_guard_refuses_a_wrong_leading_shape(jctx):
@@ -1337,9 +1379,9 @@ def test_barrier_layout_guard_refuses_a_wrong_leading_shape(jctx):
     good_y = jnp.zeros((6, N, NPX, KM, _NSLOT), dtype=jnp.float64)
     # the right shapes must NOT raise, or the test below proves nothing
     jdsw._require_barrier_layout("t", jctx, good_x, good_y, KM)
-    with pytest.raises(ValueError, match="CLAMPS"):
+    with pytest.raises(ValueError, match="DROPS the update"):
         jdsw._require_barrier_layout("t", jctx, good_y, good_y, KM)
-    with pytest.raises(ValueError, match="CLAMPS"):
+    with pytest.raises(ValueError, match="DROPS the update"):
         jdsw._require_barrier_layout("t", jctx, good_x, good_x, KM)
 
 
