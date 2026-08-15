@@ -21,6 +21,13 @@
 #   B: dgrid_pressure_phase_3d     (D-grid geopk + one_grad_p)
 #   C: nh_exchanged_area6 + dgrid_nh_pressure_phase_3d (the NH D tail)
 # A carries the module docstring and imports; B and C are appended to it.
+#
+# MAXTOK (default 48000).  MEASURED, job 9417346: thinking={"type":"disabled"}
+# is honoured only PARTIALLY on this endpoint -- a 17-line function still spent
+# 671 of 812 completion tokens reasoning.  Reasoning scales with the task, so a
+# 400-line module at --max-tokens 20000 spent ALL 20000 on reasoning and emitted
+# nothing (jobs 9417315/16/17 attempt 1).  The budget therefore has to cover
+# reasoning AND content, not content alone.
 set -uo pipefail
 PART=${PART:?usage: sbatch --export=ALL,PART=A|B|C glm_code_tail3d_part.sbatch}
 case "$PART" in A|B|C) ;; *) echo "PART must be A, B or C"; exit 2 ;; esac
@@ -42,7 +49,7 @@ for attempt in 1 2 3; do
   echo "--- attempt $attempt ---"
   $PY $REPO/scripts/validate/glm_review.py \
       --prompt-file "$PROMPT" \
-      --model glm-5.3 --max-tokens 20000 --code --no-stream \
+      --model glm-5.3 --max-tokens ${MAXTOK:-48000} --code --no-stream \
       --out "$OUT"
   echo "rc=$?"
   GOT=$( [ -f "$OUT" ] && wc -c < "$OUT" || echo 0 )
