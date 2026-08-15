@@ -342,17 +342,28 @@ their NH arm, and what remains after them is the NH *gate*, not NH *code*.
 Shared entry gates and assembly helpers now live ONCE in
 `fv3_phase3d_common.py` (`a111bf998`); the five private copies are gone.
 
-### The eleven standing gate failures, classified
+### The eleven standing gate failures, classified — SEVEN NOW CLOSED
 
 Identical in jobs 9408760 / 9411351 / 9414224 / 9415283 — reproducible, not
 flaky. **Zero are new code defects**; every one is a gate that outran what it
 can assert.
 
-| class | count | what it is |
+| class | count | state |
 |---|---:|---|
-| jit-vs-eager at a 1e-12 bound | 4 | `d_sw1`, `full_step.v` 7.456e-07, `acoustic_step.u` 5.646e-07, `cgrid nh.ws3` 1.6e-09 — the CANCELLATION finding is already written up above; those four gates were never re-calibrated to the cell-count policy it prescribes |
-| gradient / fixture preconditions | 5 | the five the triage probe (`scripts/validate/fv3_gradient_gate_triage.py`) discriminates |
-| stale premise about JAX itself | 2 | both CLOSED at `dbbc46628` — an out-of-bounds scatter DROPS (it does not clamp), and a neutered shape gate does not raise, it goes silently wrong |
+| jit-vs-eager at a 1e-12 bound | 4 | **OPEN.** `d_sw1`, `full_step.v` 7.456e-07, `acoustic_step.u` 5.646e-07, `cgrid nh.ws3` 1.6e-09. The CANCELLATION finding above explains them; these four gates were never re-calibrated to the cell-count policy it prescribes |
+| gradient / fixture preconditions | 5 | **CLOSED** at `7bc183a9b`, each keyed to a number from the triage probe (job 9417326) |
+| stale premise about JAX itself | 2 | **CLOSED** at `dbbc46628` |
+
+The five gradient/fixture ones, and what the measurement said — three of them
+refuted the hypothesis the gate or its own docstring rested on:
+
+| gate | measured | verdict |
+|---|---|---|
+| `one_grad_p` affine | numerator FLAT at 9.3e-10 across probe scale s = 0.1…100 while the denominator grows linearly (ratio ∝ 1/s); `u_mach·|f|∞` = 8.65e-10 | the map IS affine; the gate was measuring the probe step. Bound moved onto the numerator as a multiple of the ULP floor |
+| `nh_p_grad` FD ladder | at eps (1.6e-3, 8e-4, 4e-4): ratios 3.999 / 4.009, top/floor 358 | the gate's own message was right — larger eps. Ladder is now a parameter |
+| `update_dz_d` metrics | `⟨Jv,w⟩ − ⟨v,Jᵀw⟩` = **0.000e+00**, FD ladder 4.000 / 4.000 | Jacobian CORRECT, `check_grads(order=2)` was FD resolution. Swapped to the adjoint identity + order-1 |
+| mapz iv=−2 BC | exact-zero `|AL−qbar|` layers [1,2,4,5,7,9] etc. — six of ten in EVERY column | ⛔ my "the `qs` BC forces it" was wrong; kord-9 flattens throughout. No off-switch fixture exists → adjoint identity |
+| `xtp_u`/`ytp_v` smt5 | the boolean proxy `flux ≠ upwind` is CONTINUOUS and crosses zero (+1.059 → −70.9) | ⛔ the detector was finding a zero crossing, not a branch flip, and `xtp_u`'s pass was luck. Now bisects a step in `d flux/dt` |
 
 ---
 
