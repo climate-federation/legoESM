@@ -258,3 +258,88 @@ def stack_np(per_face: list) -> dict:
     return {k: jnp.asarray(np.stack([np.asarray(d[k], dtype=np.float64)
                                      for d in per_face]))
             for k in keys}
+
+
+# ---------------------------------------------------------------------
+# the FD-vs-AD discriminator
+#
+# The adjoint identity above compares two transformations of the SAME
+# program, so it is blind to a wrong Jacobian (codex BLOCKER, job
+# 9417397).  A finite difference IS independent -- it compares the
+# derivative against the function -- but on a limiter-heavy map a plain
+# `check_grads` at a fixed step straddles a switching surface and
+# certifies a jump: measured 6.6 % on the D-grid tail's wind group (job
+# 9417462), which says nothing about which side is wrong.
+#
+# What CAN be asserted without a tolerance is the SCALING.  A central
+# difference has truncation error ~eps^2 and roundoff ~1/eps, so halving
+# eps quarters the gap if truncation dominates, doubles it if roundoff
+# does, and leaves it UNCHANGED if the reverse mode is wrong.  The
+# verdict is the ratio, and the ratio needs no bound on the gap itself
+# -- which is the number in dispute.
+#
+# Promoted here from `test_fv3_pgrad`'s private copies for the same
+# reason `cmp_fields` was: the D-grid tail would have been the second
+# copy.  The pgrad copies keep their calibrated ladders and are not
+# touched in the same change.
+# ---------------------------------------------------------------------
+
+_U_MACH_F64 = float(np.finfo(np.float64).eps)      # 2.220446e-16
+
+
+def vjp_fd_projection(f, primals, eps, seed=0):
+    """``(|<v, J^T w> - <J_FD v, w>|, <v, J^T w>)`` at one step size."""
+    rng = np.random.default_rng(seed)
+    primals = tuple(jnp.asarray(p) for p in primals)
+    v = tuple(jnp.asarray(rng.standard_normal(p.shape)) for p in primals)
+    out, vjp_fn = jax.vjp(f, *primals)
+    w = jax.tree_util.tree_map(
+        lambda x: jnp.asarray(rng.standard_normal(x.shape)), out)
+    ad = tree_dot(v, vjp_fn(w))
+    plus = f(*[p + eps * t for p, t in zip(primals, v)])
+    minus = f(*[p - eps * t for p, t in zip(primals, v)])
+    fd = jax.tree_util.tree_map(lambda a, b: (a - b) / (2.0 * eps),
+                                plus, minus)
+    return abs(ad - tree_dot(fd, w)), ad
+
+
+def fd_roundoff_floor(f, primals, eps) -> float:
+    """``u_mach * ||f||_inf * sqrt(n_out) / eps`` -- the FD's own floor.
+
+    It GROWS as eps shrinks, which is why a ladder that only shrinks eps
+    walks AWAY from the truncation regime rather than toward it.
+    """
+    out = f(*[jnp.asarray(p) for p in primals])
+    leaves = jax.tree_util.tree_leaves(out)
+    scale = max(float(np.abs(np.asarray(x)).max()) for x in leaves)
+    n = sum(int(np.asarray(x).size) for x in leaves)
+    return _U_MACH_F64 * scale * float(np.sqrt(n)) / eps
+
+
+def assert_fd_truncation_scaling(name, f, primals, seed=0,
+                                 steps=(4.0e-4, 2.0e-4, 1.0e-4)):
+    """Is a VJP-vs-FD gap the FD's fault or the VJP's?
+
+    eps^2 truncation -> ratio ~4 per halving; roundoff -> ~0.5; a WRONG
+    reverse-mode derivative -> ~1, because its error does not move with
+    eps at all.  The precondition that the largest-eps gap clears the
+    roundoff floor by 10x is ASSERTED, not assumed -- without it the
+    ladder is in the roundoff regime and its ratio measures nothing.
+    """
+    r = [vjp_fd_projection(f, primals, e, seed=seed)[0] for e in steps]
+    ratios = [r[i] / max(r[i + 1], 1e-300) for i in range(len(r) - 1)]
+    floor0 = fd_roundoff_floor(f, primals, steps[0])
+    detail = (f"{name}: |<v,J^T w> - <J_FD v,w>| at eps={steps} is "
+              f"{[f'{x:.6e}' for x in r]}, halving ratios "
+              f"{[f'{x:.3f}' for x in ratios]}, roundoff floor at "
+              f"eps={steps[0]:g} is {floor0:.6e} (eps^2 truncation -> ~4, "
+              f"roundoff -> ~0.5, wrong reverse-mode derivative -> ~1)")
+    assert all(x > 0.0 for x in r), detail
+    assert r[0] > 10.0 * floor0, (
+        detail + " -- PRECONDITION FAILED: the largest-eps gap does not "
+        "clear the roundoff floor, so this ladder is in the roundoff "
+        "regime and its ratio is meaningless.  Use LARGER eps, or -- if "
+        "f is affine in these operands -- an affine/roundoff gate.")
+    for x in ratios:
+        assert 2.5 < x < 6.0, detail
+    return ratios

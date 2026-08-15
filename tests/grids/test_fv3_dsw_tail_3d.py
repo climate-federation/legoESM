@@ -62,7 +62,6 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from jax.test_util import check_grads  # noqa: E402
 from legoesm.core import fv3_dsw_tail_3d as jtail  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npcg  # noqa: E402
 from legoesm.core import fv3_native_dsw_phase_3d as npdsw  # noqa: E402
@@ -79,6 +78,7 @@ from legoesm.core.fv3_duo_stepper import (  # noqa: E402
 from legoesm.core.fv3_native_state_3d import build_state_3d  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_fd_truncation_scaling,
     assert_real,
     check_adjoint,
     cmp_fields,
@@ -511,13 +511,21 @@ def test_tail_adjoint_identity_wind_group(jctx, jstate, jcsw, jdsw):
     # TOL-PENDING: provisional bound; the measurement job replaces this.
     # DO NOT SHIP.   [class: roundoff -- the identity is exact]
     check_adjoint("tail u/v", f, (jstate["u"], jstate["v"]), 1e-10)
-    # ...AND an independent finite difference, because the identity
-    # compares two transformations of the SAME program and is blind to a
-    # wrong Jacobian (codex BLOCKER, job 9417397).  order=1 only: at
-    # order 2 an FD-resolution failure is indistinguishable from a real
-    # defect on a limiter-heavy map.
-    check_grads(f, (jstate["u"], jstate["v"]), order=1,
-                modes=("fwd", "rev"))
+    # ...AND an INDEPENDENT instrument, because the identity compares two
+    # transformations of the SAME program and is blind to a wrong
+    # Jacobian (codex BLOCKER, job 9417397).
+    #
+    # NOT `check_grads`: measured 6.6 % relative on this exact group (job
+    # 9417462, tangent -9.485e13 vs -8.897e13).  A fixed-step FD on a map
+    # containing d_sw5's del-n damping and d_sw6's limiter straddles a
+    # switching surface and certifies a jump, and its verdict cannot say
+    # which side is wrong.  The eps-SCALING can: eps^2 truncation gives
+    # ~4 per halving, roundoff ~0.5, and a wrong reverse mode ~1, because
+    # its error does not move with eps at all.  Tolerance-free in the gap
+    # itself, which is the number in dispute.
+    assert_fd_truncation_scaling("tail u/v", f,
+                                 (jstate["u"], jstate["v"]),
+                                 steps=(1.6e-3, 8.0e-4, 4.0e-4))
 
 
 def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
@@ -533,4 +541,9 @@ def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
     # TOL-PENDING: provisional bound; the measurement job replaces this.
     # DO NOT SHIP.   [class: roundoff -- the identity is exact]
     check_adjoint("press delp", f, (jdsw["delp"],), 1e-10)
-    check_grads(f, (jdsw["delp"],), order=1, modes=("fwd", "rev"))
+    # The same independent instrument, same reason.  `delp` reaches the
+    # winds through geopk's vertical recurrence and one_grad_p's 1/(wk+wk),
+    # so the group is genuinely nonlinear and HAS a truncation term to
+    # measure.
+    assert_fd_truncation_scaling("press delp", f, (jdsw["delp"],),
+                                 steps=(1.6e-3, 8.0e-4, 4.0e-4))

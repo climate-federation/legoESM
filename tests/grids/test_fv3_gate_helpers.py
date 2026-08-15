@@ -231,3 +231,51 @@ def test_stack_np_puts_the_face_axis_first():
     out = helpers.stack_np(src)
     assert out["u"].shape == (6, 2, 3)
     assert float(out["u"][4, 0, 0]) == 4.0
+
+
+# ------------------------------------------- the FD-vs-AD discriminator
+
+def test_fd_ladder_reports_eps_squared_truncation_on_a_smooth_map():
+    """A smooth nonlinear map: the gap must quarter per halving."""
+    def f(x):
+        return jnp.sum(jnp.tanh(x) ** 3) + jnp.sum(x ** 4) / 7.0
+
+    x = jnp.asarray(np.random.default_rng(3).standard_normal(9))
+    ratios = helpers.assert_fd_truncation_scaling(
+        "smooth", f, (x,), steps=(4.0e-3, 2.0e-3, 1.0e-3))
+    assert all(2.5 < r < 6.0 for r in ratios), ratios
+
+
+def test_fd_ladder_catches_a_wrong_reverse_mode():
+    """The case the gate exists for: a Jacobian that is wrong by a
+    constant factor has an error that does NOT move with eps, so the
+    ratio collapses toward 1 -- and the adjoint identity, which compares
+    the same program with itself, is blind to it."""
+    @jax.custom_vjp
+    def f(x):
+        return jnp.sum(x ** 3)
+
+    def f_fwd(x):
+        return f(x), x
+
+    def f_bwd(x, g):
+        return (g * 3.0 * x ** 2 * 1.5,)      # 50 % too large
+
+    f.defvjp(f_fwd, f_bwd)
+
+    x = jnp.asarray(np.random.default_rng(4).standard_normal(9))
+    with pytest.raises(AssertionError, match="wrong reverse-mode"):
+        helpers.assert_fd_truncation_scaling(
+            "wrongvjp", f, (x,), steps=(4.0e-3, 2.0e-3, 1.0e-3))
+
+
+def test_fd_ladder_refuses_the_roundoff_regime():
+    """PRECONDITION: below the roundoff floor the ratio measures nothing,
+    and shrinking eps walks further from truncation, not toward it."""
+    def f(x):
+        return jnp.sum(x) * 1.0e12          # affine: no truncation term
+
+    x = jnp.asarray(np.ones(9))
+    with pytest.raises(AssertionError, match="PRECONDITION FAILED"):
+        helpers.assert_fd_truncation_scaling(
+            "affine", f, (x,), steps=(1.0e-6, 5.0e-7, 2.5e-7))
