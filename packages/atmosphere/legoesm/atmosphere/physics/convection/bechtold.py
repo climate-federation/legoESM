@@ -2530,6 +2530,17 @@ def bechtold_convection(
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
+        # The diurnal-cycle land branch wants ZTAU/ZTAURES, and ZTAU is the
+        # CLAMPED turnover time -- the oracle divides the resolution factor
+        # back out of the clamped value, it does not step around the clamp.
+        # Handing it the raw ratio skipped the 720 s floor: measured 197 s on a
+        # heated tropical land column, so the subtraction came out 3.7x too
+        # small before the departure gate shrank it further.  With the floor
+        # the land timescale is at least 720 s, which is what makes the term
+        # able to hold CAPE back through the morning.
+        _tau_capdcycl = jnp.clip(
+            _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
+        ) / _ztaures
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
         # (cumastrn.F90:704-833; see _ifs_cape_closure_target).  Supersedes the
@@ -2637,7 +2648,7 @@ def bechtold_convection(
                  - (p_half[:, -1] - p_parcel_source))
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
-                _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
+                _supply_virt, _tau_capdcycl, _z_base, u, v, _base_w2, p_full,
                 land_frac, _gate_w, config.capdcycl_land_tau_scale,
             )
         _qadv = None
