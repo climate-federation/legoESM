@@ -150,8 +150,13 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
         "relative_error": relative_error,
         "n_levels": int(z_km.size),
         "z_km_range": [float(z_km.min()), float(z_km.max())],
-        "qv_g_kg_surface": float(qv[0] * 1000.0),
-        "qv_g_kg_top": float(qv[-1] * 1000.0),
+        # Index 0 is the TOP of the column and -1 the surface: the reference
+        # grid descends in height (build_reference_profiles sets
+        # z_half[-1] = 0.0), which is also why the campaign reads the lowest
+        # level as ``T[-1]``.  Getting this backwards only mislabels a printed
+        # scalar, but a mislabelled scalar is what gets quoted.
+        "qv_g_kg_surface": float(qv[-1] * 1000.0),
+        "qv_g_kg_top": float(qv[0] * 1000.0),
         "rh_min": float(np.min(rh)),
         "rh_max": float(np.max(rh)),
         "absolute_qv": _relative_perturbation_shares(
@@ -235,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=== CRM reference humidity/temperature metric weighting ===")
     print(f"levels={weighting['n_levels']}  z={weighting['z_km_range'][0]:.2f}"
           f"-{weighting['z_km_range'][1]:.2f} km  "
-          f"q_v {weighting['qv_g_kg_surface']:.2f} -> "
+          f"q_v sfc {weighting['qv_g_kg_surface']:.2f} -> top "
           f"{weighting['qv_g_kg_top']:.2e} g/kg  "
           f"RH {weighting['rh_min']:.3f}-{weighting['rh_max']:.3f}")
     print(f"uniform relative error = {args.relative_error:.1%} at every level")
