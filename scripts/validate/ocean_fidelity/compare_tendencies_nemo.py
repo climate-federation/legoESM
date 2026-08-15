@@ -446,7 +446,7 @@ def box_report(name, ours, theirs, wet, lat_col, lon_col, evd_cols=None):
 
 
 def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
-                         evd_cols=None):
+                         evd_cols=None, z_iface=None, z_cut_m=300.0):
     """Split the Stage-A K_H excess into a MOMENTUM part and a PRANDTL part.
 
     Stage A scores K_H against ``avt``, which carries BOTH the closure
@@ -460,12 +460,15 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     A K_M/avm near 1 with the whole excess in the Prandtl ratio means the
     closure amplitude and length are right and our tracer/momentum SPLIT is
     wrong -- a different defect, in a different place, from an over-energetic
-    closure.  The POINTWISE identity is asserted at runtime (it is algebra, so
-    it can only fail if a field is misaligned) and the run aborts if it does.
-    The PRINTED columns do not satisfy it: the K columns are ratios of means,
-    matching how the Stage-A rms ratios are read, and the Pr columns are
-    pointwise medians, so the two do not compose.  They are printed together
-    to be read against each other, not multiplied.
+    closure.  The PRINTED columns do not compose into the identity: the K
+    columns are ratios of means, matching how the Stage-A rms ratios are read,
+    and the Pr columns are pointwise medians.  They are printed together to be
+    read against each other, not multiplied.
+
+    The runtime control is NOT the identity -- that is a tautology for any
+    four arrays and cannot fail.  It is NEMO's own Prandtl sign (avt <= avm
+    off the floors, since pdlr <= 1), which a level or record misalignment
+    does break; see the comment at the check.
 
     FLOORED INTERFACES ARE EXCLUDED, and they have to be.  NEMO applies the
     tracer floor ``avtb`` AFTER the Prandtl reduction and the momentum floor
@@ -474,6 +477,30 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     the field minimum over wet interfaces (the same way the zero-step closure
     detects avmb) rather than hardcoded from the namelist, so a rebuilt oracle
     with different backgrounds cannot silently poison the ratio.
+
+    DEPTH SPLIT, and why it is not optional.  The first run of this report gave
+    a Pr_ours MEDIAN of exactly 10.00 -- the clamp ceiling -- in all sixteen
+    region rows at once, which is a statement about the abyss (shear ~ 0 makes
+    Ri enormous and Pr saturates legitimately) and says nothing about the
+    thermocline the cold-tongue bias lives in.  Rows are therefore emitted for
+    the full column AND for interfaces above ``z_cut_m``, and the fraction of
+    interfaces sitting ON each clamp is printed beside the median so a
+    saturated statistic can never again be read as a physical Prandtl number.
+
+    REDUCTION, matched on purpose.  ``ratio_rms`` is rms(ours)/rms(theirs), the
+    SAME reduction ``box_report`` uses for the 2.311 this is meant to explain;
+    ``ratio_mean`` is the ratio of means beside it.  They differ by ~4x in the
+    equatorial boxes because the K distribution is heavy-tailed, and quoting
+    one against the other is the confound this docstring exists to prevent.
+
+    WHAT ``avt`` IS NOT.  ORCA1 runs ln_zdfiwm=.true., so NEMO's avt/avm carry
+    an internal-wave (tidal) mixing contribution our TKE closure does not model
+    at all, plus EVD on the tracer (rn_evd=100, nn_evdm=0 so momentum is
+    spared).  And the hourly file writes both with ``cell_methods = time:
+    mean``, i.e. an average over the hour rather than an instantaneous field --
+    which is also why the detected "floor" is not the namelist background.
+    None of that is fixable here; it is stated so the numbers are read as
+    "our TKE K vs NEMO's TOTAL diffusivity", which is what they are.
     """
     fin = wet & np.isfinite(avt_i) & np.isfinite(avm_i) \
         & np.isfinite(K_H) & np.isfinite(K_M)
@@ -487,20 +514,35 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     if free.sum() == 0:
         raise SystemExit("FATAL: every interface sits on a NEMO floor; the "
                          "Prandtl split has no domain to measure on.")
-    # CONTROL, known answer: the factorisation is pure algebra, so it holds
-    # pointwise to roundoff unless avm and avt are misaligned against K_M/K_H
-    # (a level-slice or W-point offset). That misalignment is the one failure
-    # that would look like a physics result, so it aborts here.
-    _lhs = K_H[free] / avt_i[free]
-    _rhs = (K_M[free] / avm_i[free]) * ((avm_i[free] / avt_i[free])
-                                        / (K_M[free] / K_H[free]))
-    _rel = float(np.max(np.abs(_lhs - _rhs) / np.maximum(np.abs(_lhs), 1e-30)))
-    if _rel > 1e-9:
+    # CONTROL, with a known answer and able to FAIL.  (An earlier revision
+    # asserted the factorisation identity here; that is worthless --
+    # (a/b)*((b/c)/(a/d)) == d/c for ANY four arrays, so it passes on
+    # misaligned fields, on shuffled fields, on noise.  A check that cannot
+    # fail is not a control.)
+    #
+    # What IS falsifiable is NEMO's own Prandtl sign: nn_pdl=1 sets
+    # avt = max(avtb, pdlr*zav) with pdlr = 1/max(1, ...) <= 1 and
+    # avm = max(avmb, zav), so OFF THE FLOORS avt <= avm always.  A level
+    # slice or W-point offset between the two breaks that, and so does
+    # reading the wrong record.  EVD is the one legitimate inversion (rn_evd
+    # sets avt=10 while nn_evdm=0 leaves avm alone), so the abort is scoped to
+    # the CALM columns and the global fraction is reported beside it.
+    _inv = float(np.mean(avt_i[free] > avm_i[free]))
+    if evd_cols is not None:
+        _calm = free & (~evd_cols)[:, None]
+        _inv_calm = float(np.mean(avt_i[_calm] > avm_i[_calm])) \
+            if _calm.any() else 0.0
+    else:
+        _inv_calm = _inv
+    print(f"  [control] NEMO avt > avm (Prandtl sign violated) on "
+          f"{100.0 * _inv:.3f}% of off-floor interfaces, "
+          f"{100.0 * _inv_calm:.3f}% in calm columns — expected ~0 in calm")
+    if _inv_calm > 0.01:
         raise SystemExit(
-            f"FATAL: K_H/avt != (K_M/avm)*(Pr_nemo/Pr_ours) by {_rel:.3e} -- "
-            "the four fields are not on the same interfaces and no split "
-            "below is meaningful.")
-    print(f"  [control] pointwise factorisation exact to {_rel:.2e} — PASS")
+            f"FATAL: NEMO's own avt exceeds its avm on {100.0 * _inv_calm:.2f}% "
+            "of off-floor CALM interfaces. nn_pdl=1 makes that impossible, so "
+            "the two fields are not on the same interfaces (or not the same "
+            "record) and no Prandtl number below is meaningful.")
     rows = []
     subsets = [("", None)] if evd_cols is None else [
         ("/calm", ~evd_cols), ("/evd", evd_cols)]
@@ -509,36 +551,57 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
         inlon = ((lon_col >= lo) & (lon_col <= hi) if lo <= hi
                  else (lon_col >= lo) | (lon_col <= hi))
         regions.append((n, (lat_col >= la) & (lat_col <= lb) & inlon))
+    if z_iface is None:
+        depths = [("", None)]
+    else:
+        depths = [("", None), (f"<{z_cut_m:g}m", z_iface <= z_cut_m)]
+
+    def _rms(x):
+        return float(np.sqrt(np.mean(x ** 2)))
+
     for tag0, incol in regions:
         for suff, colsel in subsets:
-            m = free & incol[:, None]
-            if colsel is not None:
-                m = m & colsel[:, None]
-            if m.sum() < 10:
-                continue
-            # Ratios of MEANS, matching how the Stage-A rms ratios are read;
-            # the pointwise medians go beside them because the two diverge
-            # exactly when the weighting, not the physics, carries the number.
-            kh, at = float(K_H[m].mean()), float(avt_i[m].mean())
-            km, am = float(K_M[m].mean()), float(avm_i[m].mean())
-            pr_n = float(np.median(avm_i[m] / avt_i[m]))
-            pr_o = float(np.median(K_M[m] / K_H[m]))
-            rows.append({"region": tag0 + suff, "n": int(m.sum()),
-                         "K_M_over_avm": km / am if am > 0 else float("nan"),
-                         "K_H_over_avt": kh / at if at > 0 else float("nan"),
-                         "Pr_nemo_median": pr_n, "Pr_ours_median": pr_o,
-                         "K_M_ours": km, "avm_nemo": am,
-                         "K_H_ours": kh, "avt_nemo": at})
+            for dsuff, dsel in depths:
+                m = free & incol[:, None]
+                if colsel is not None:
+                    m = m & colsel[:, None]
+                if dsel is not None:
+                    m = m & dsel
+                if m.sum() < 10:
+                    continue
+                pr_n = avm_i[m] / avt_i[m]
+                pr_o = K_M[m] / K_H[m]
+                rows.append({
+                    "region": tag0 + suff + dsuff, "n": int(m.sum()),
+                    # MATCHED to box_report's reduction; the mean sits beside it
+                    # because the two disagree by ~4x on a heavy-tailed K field.
+                    "K_H_over_avt_rms": _rms(K_H[m]) / _rms(avt_i[m]),
+                    "K_M_over_avm_rms": _rms(K_M[m]) / _rms(avm_i[m]),
+                    "K_H_over_avt_mean": float(K_H[m].mean() / avt_i[m].mean()),
+                    "K_M_over_avm_mean": float(K_M[m].mean() / avm_i[m].mean()),
+                    "Pr_nemo_median": float(np.median(pr_n)),
+                    "Pr_ours_median": float(np.median(pr_o)),
+                    "Pr_ours_p10": float(np.percentile(pr_o, 10)),
+                    "Pr_ours_p90": float(np.percentile(pr_o, 90)),
+                    # A median that equals a clamp is not a Prandtl number.
+                    "Pr_ours_frac_at_ceiling": float(np.mean(pr_o > 9.99)),
+                    "Pr_ours_frac_at_floor": float(np.mean(pr_o < 1.001)),
+                })
+    print("  %-22s %8s %9s %9s %9s %8s %8s %8s" % (
+        "region", "n", "KH/avt_r", "KM/avm_r", "KH/avt_m",
+        "Pr_nemo", "Pr_ours", "at_ceil"))
     for r in rows:
-        print(f"  {r['region']:14s} n={r['n']:>7d}  K_M/avm {r['K_M_over_avm']:6.3f}"
-              f"  K_H/avt {r['K_H_over_avt']:6.3f}"
-              f"  Pr_nemo {r['Pr_nemo_median']:5.2f}"
-              f"  Pr_ours {r['Pr_ours_median']:5.2f}")
-    print("  READ: K_M/avm ~ 1 with K_H/avt >> 1 means the closure amplitude "
-          "and length are RIGHT and the tracer/momentum split is wrong. Both "
-          ">> 1 means the closure itself over-mixes and the Prandtl number is "
-          "not the lever. Pr columns are pointwise MEDIANS (the mean of a "
-          "clamped ratio is dominated by its clamp).")
+        print("  %-22s %8d %9.3f %9.3f %9.3f %8.2f %8.2f %8.3f" % (
+            r["region"], r["n"], r["K_H_over_avt_rms"], r["K_M_over_avm_rms"],
+            r["K_H_over_avt_mean"], r["Pr_nemo_median"], r["Pr_ours_median"],
+            r["Pr_ours_frac_at_ceiling"]))
+    print("  READ: KH/avt_r is the SAME reduction as the Stage-A box ratio, so "
+          "it is the number that has to be explained; KM/avm_r is the same "
+          "reduction on momentum. KM/avm_r ~ 1 with KH/avt_r >> 1 means the "
+          "closure amplitude and length are right and the tracer/momentum "
+          "split is wrong. at_ceil is the fraction of interfaces where OUR Pr "
+          "sits on its 10.0 clamp -- where that is large the Pr median is the "
+          "clamp, not a physical Prandtl number, and the row says nothing.")
     return rows
 
 
@@ -720,9 +783,17 @@ def main():
     result["stage_a"] = region_report(
         "Stage A: closure K_H (legoESM TKE card) vs NEMO avt [m2/s]",
         K_H, avt_i, wet_pair, lat_col, evd_cols=evd_cols)
+    # Interface depths for the depth split: NEMO's own e3t at this record,
+    # cumulated to the W-points, then sliced to the interior interfaces the
+    # K arrays live on (drop the surface, same [:, 1:] slice avt/avm get).
+    _z, _ny, _nx = shp
+    _e3t_c = np.transpose(
+        np.where(np.isfinite(d["e3t"]), d["e3t"], 0.0).reshape(_z, _ny * _nx),
+        (1, 0))
+    _z_iface = np.cumsum(_e3t_c, axis=1)[:, :-1]
     result["stage_a_prandtl"] = prandtl_split_report(
         K_H, K_M, avt_i, avm_i, wet_pair, lat_col, d["lon"].reshape(-1),
-        evd_cols=evd_cols)
+        evd_cols=evd_cols, z_iface=_z_iface)
 
     if args.restart_npz:
         if args.rec != 1:
