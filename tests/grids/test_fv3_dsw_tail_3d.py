@@ -80,7 +80,6 @@ from legoesm.core.fv3_native_state_3d import build_state_3d  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
     assert_fd_gap_at_roundoff_floor,
-    assert_fd_truncation_scaling,
     assert_real,
     check_adjoint,
     cmp_fields,
@@ -751,12 +750,19 @@ def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
     # TOL-PENDING: provisional bound; the measurement job replaces this.
     # DO NOT SHIP.   [class: roundoff -- the identity is exact]
     check_adjoint("press delp", f, (jdsw["delp"],), 1e-10)
-    # The same independent instrument, same reason.  `delp` reaches the
-    # winds through geopk's vertical recurrence and one_grad_p's 1/(wk+wk),
-    # so the group is genuinely nonlinear and HAS a truncation term to
-    # measure.
-    assert_fd_truncation_scaling("press delp", f, (jdsw["delp"],),
-                                 steps=(1.6e-3, 8.0e-4, 4.0e-4))
+    # The same independent instrument, and the same measured verdict as
+    # the wind group: the ladder's precondition REFUSED this one too
+    # (job 9417483) -- gaps 1.025e+04, 2.804e+04, 3.898e+04 at
+    # eps = 1.6e-3, 8e-4, 4e-4 against a floor of 2.904e+03, i.e. the
+    # gap GROWS as the step shrinks and tracks the floor's own 1/eps
+    # within a factor of ~3.5 at every step.  `delp` does reach the
+    # winds nonlinearly (geopk's vertical recurrence, one_grad_p's
+    # 1/(wk+wk)), but that curvature is below what fp64 resolves here,
+    # so there is no eps^2 signal to scale.
+    #
+    # MEASURED gap/floor = 3.53 at eps = 1.6e-3; bound = 8x the floor.
+    assert_fd_gap_at_roundoff_floor("press delp", f, (jdsw["delp"],),
+                                    margin=8.0, eps=1.6e-3)
 
 
 # =====================================================================
