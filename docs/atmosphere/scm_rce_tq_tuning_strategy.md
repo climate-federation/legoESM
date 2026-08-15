@@ -1,7 +1,9 @@
 # SCM-RCE convection tuning against CRM **temperature and humidity** profiles
 
-Status: STRATEGY, under adversarial review (codex + GLM). Nothing has been run
-under it yet.
+Status: REVIEWED (codex on the strategy, codex on the code, GLM on both) and
+IMPLEMENTED. The sections below are the plan as first written; **"What the
+review changed" at the end is what is actually being run**, and where the two
+disagree the later section wins.
 
 ## The ask
 
@@ -163,3 +165,102 @@ the budget) worth adding, or does it just buy over-fitting to a 5-day window?
   value there means the tuner is perturbing something it should not.
 * A scheme whose tuned T/q RMSE improves while its condensate RMSE explodes is
   a real trade-off to report, not a bug — but it must be visible in the figure.
+
+---
+
+## What the review changed
+
+Three reviews ran before any tuning compute was spent: codex on the strategy,
+GLM on the strategy, codex on the implementation. Each of the following is a
+change they forced, with the measurement that settled it.
+
+### 1. The humidity variable is `log q`, not RH and not absolute `q_v`
+
+The probe (`scripts/validate/scm_rce_tq_objective_probe.py`, job 9417296)
+imposed a uniform 10 % relative humidity error at every level of the SAM_CRM
+reference and reported what fraction of each candidate metric's sum of squares
+came from aloft:
+
+| metric | share above 2 km | above 5 km | above 10 km |
+|---|---|---|---|
+| absolute `q_v` | 26.4 % | **1.72 %** | 0.0006 % |
+| relative humidity | 66.5 % | 27.9 % | 4.3 % |
+| `log q` | 80.6 % | 56.6 % | 28.6 % |
+| (column mass share) | 80.6 % | 56.6 % | 28.6 % |
+
+An absolute `q_v` RMSE is a boundary-layer metric — 1.7 % of its leverage lies
+above 5 km against a 56.6 % mass share. That is the original defect.
+
+RH fixes most of it but carries a cost GLM quantified: `RH = q_v/q_sat(T)` and
+`dln q_sat/dT ≈ 0.06 /K` at 300 K rising to ~0.12 /K near the cold point, so a
+5 % RH tolerance ALSO demands ~0.8 K near the surface and ~0.4 K aloft. It
+re-weights temperature by 2–4×, unevenly, and makes a compensating
+warm-and-moist bias the exact optimum.
+
+`log q` has neither problem: no saturation curve, so no liquid/ice phase
+convention and no coupling to temperature, and its leverage is distributed
+exactly like the column mass. It is the default; `rh` stays selectable and both
+terms are reported for every run.
+
+### 2. `physical`, not `aggressive`
+
+`aggressive` is neither a superset nor a subset of "the scheme's physics". It
+ADMITS four `category == "numerics"` parameters (a sigmoid layer-edge width, a
+mass-flux normalisation scale, an MSE search offset) and EXCLUDES the CAPE
+trigger of eight of the ten schemes — tier 0 solely because the trigger sigmoid
+saturates and its AD gradient vanishes, which is irrelevant to a gradient-free
+search. The `physical` set is aggressive minus `numerics`, minus Kain-Fritsch's
+grid-length scaling (meaningless in a single column), plus the tier-0 parameters
+whose spec reference marks them AD-unreachable. The resulting set is pinned
+per scheme by a test.
+
+### 3. The mask comes from the reference's cold point
+
+A fixed 100 hPa bound sat near the RCEMIP-300 K cold point by coincidence. If
+the cold point falls just below it the objective scores tropopause levels where
+a radiatively-controlled temperature bias no convection parameter can fix turns
+into a large humidity error. The bound is now the reference's own cold-point
+pressure plus a buffer, computed from the reference alone so every scheme is
+scored on one identical domain.
+
+### 4. Two seeds, a local refinement, and a measured noise floor
+
+The search remains a random draw plus a greedy coordinate refinement; codex
+quantified what that is worth at 19–25 parameters (draws ~0.76 of each range
+apart; the chance of landing in a 20 %-wide box around an optimum is ~1e-11).
+It is therefore reported as what it is. Three things make that reportable
+rather than hidden:
+
+* **the refinement stage** turns the best random draw into a point no single
+  parameter move improves;
+* **two independent seeds**, compared by
+  `scripts/validate/scm_rce_tq_seed_agreement.py`, which reports rank churn,
+  pair swaps, and — the part a score table cannot show — whether the two seeds
+  landed on DISTANT parameter values with similar scores, i.e.
+  non-identifiability;
+* **the score's own noise floor**, the spread of the objective across the last
+  four non-overlapping analysis windows of the same run. An improvement smaller
+  than that is not a result, and nothing previously measured it.
+
+### 5. Labelling
+
+The CSV and the markdown summary sorted a tuned table by the historical
+combined score and described the search as "extended-tier" whatever had been
+run. Both now rank by, and name, the objective and parameter set recorded in
+each row's own checkpoint signature; unstamped checkpoints are no longer
+accepted on the skip path, and the ranking figure refuses to mix objectives.
+
+### Still open, stated rather than fixed
+
+* **No energetics in the objective.** Precipitation, OLR and cloud radiative
+  effect are reported but not minimised, so a scheme can match T and humidity
+  with wrong energetics. `P-E` is on every row for exactly this reason.
+* **No held-out SST.** A 295 K / 305 K RCEMIP case would test generalisation;
+  it costs another integration per incumbent and is not run here.
+* **One CRM.** Tuning to SAM optimises SAM-emulation, including SAM's own
+  structural biases.
+* **A spec inconsistency found in passing**: `KainFritschConfig`'s
+  `cape_threshold` appears in BOTH the `excluded` block and the `params` block
+  of its `__param_spec__`. The registry honours `excluded` (measured: zero
+  tier-0 entries for that scheme), so nothing here is affected, but the
+  duplicate should be removed.
