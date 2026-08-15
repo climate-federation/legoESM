@@ -1,59 +1,91 @@
 #!/bin/bash
-#SBATCH --job-name=insn2_30
 #SBATCH --account=glab
 #SBATCH --partition=short
+#SBATCH --job-name=insn2_30
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --time=11:45:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/insn2_30_%j.out
 #
-# THE MISSING CONTROL for the signed-TEOS-10 arm 9409057.
+# ============================================================================
+# THE MATCHED insitu-N2 CONTROL for arm 9409057. Cloned from that arm's OWN
+# sbatch so the ENVIRONMENT matches too, not just the command line -- the
+# first two attempts (9412628, 9412863) were rebuilt from the manifest's
+# recorded command_line and died in ~10 minutes with CUDA_ERROR_OUT_OF_MEMORY
+# because they lacked this launcher's most-free-GPU selection and its
+# XLA_PYTHON_CLIENT_PREALLOCATE=false. The launcher environment is part of
+# the run; a control reconstructed from the command line alone is not a
+# clone.
 #
-# Every other day-30 arm on disk differs from 9409057 in THREE card fields
-# (alpha_tke, kappa_convention, n2_mode) and the closest 90-day arm also
-# differs in dissipation_discretization. Without this run the signed arm
-# cannot be attributed to the stratification change at all.
+# WHY THIS RUN EXISTS AT ALL. The signed arm's header names job 9405182
+# (nemolev_trp_alphatke_d90) as its control and states that n2_mode is the
+# only behavioural difference. That is FALSE, checked field by field: 9405182
+# also runs dissipation_discretization='backward_euler' where this card runs
+# 'nemo_1p5_split'. Every other day-30 arm on disk is further away still,
+# differing in alpha_tke AND kappa_convention AND n2_mode. There was no
+# one-variable control anywhere, so the signed arm could not be attributed.
 #
-# Byte-identical to 9409057's command line except:
-#   --tke-n2-mode insitu   (the one variable)
-#   a distinct --output dir
-# n2_eos_form stays teos10 and is INERT under insitu, so it is not a second
-# variable -- verified by the roundtrip check in _n2_flag_roundtrip.sbatch.
+# THE ONE VARIABLE, verified from the two run manifests rather than asserted:
+# 3 of 556 resolved-config leaves differ, and they are n2_mode, output_path
+# and the config hash.
 #
-# RESOURCES MATCH THE SIGNED ARM DELIBERATELY (short/gpu:1/64G/11:45), not
-# just for scheduling: a control should meet the same hardware as the arm it
-# controls. The first attempt (9412628) went to glab1 alongside two other GPU
-# arms and died in 9 minutes with CUDA_ERROR_OUT_OF_MEMORY.
-#
-# THE TWO ARMS RUN AT DIFFERENT SHAs, and that was checked rather than
-# waved through. The signed arm ran at 6ab481009; this one runs at 4db34c41378a9e1f94d986cf476b2774db475c06.
-# git diff 6ab481009..HEAD -- packages/ src/ touches exactly two model files
-# and its only non-comment changes are a dead '_ = None' line removed and one
-# kwarg re-indented -- both semantically null, and both in mpas_integration,
-# which the tripole path does not execute at all. The machine check that the
-# physics matches is the manifest comparison: 3 of 556 config leaves differ,
-# and they are n2_mode, output_path, and the config hash.
-#
-# PRE-REGISTERED, Southern Ocean mean MLD bias vs NEMO at day 30. The sqrt(2)
-# and alpha fixes drove it from +1.5 m to -19.7 m; the question is how much
-# of that the stratification change gives back.
+# PRE-REGISTERED, Southern Ocean mean MLD bias at day 30, signed minus this:
 #   CONFIRMED : signed lands -8 to +8 m.
 #   PARTIAL   : -15 to -8 m.
 #   OVERSHOOT : beyond +8 m.
 #   REFUTED   : still below -15 m.
-# Arctic SSS is the counter-prediction already on record: calm-column K went
-# 1.37x -> 1.80x NEMO, so Arctic SSS should get slightly WORSE. If it
-# IMPROVES, calm-column K is not the controlling term for the halocline.
+# COUNTER-PREDICTION already on record: calm-column Arctic K went 1.37x ->
+# 1.80x NEMO, so Arctic SSS should get slightly WORSE. If it IMPROVES,
+# calm-column K is not the controlling term for the halocline.
 set -uo pipefail
-WT=/burg-archive/glab/users/pg2328/legoESM
-PIN=4db34c41378a9e1f94d986cf476b2774db475c06
-cd $WT || exit 1
-HAVE=$(git -C $WT rev-parse HEAD)
-[ "$HAVE" = "$PIN" ] || { echo "FATAL: pin drift, HEAD=$HAVE want=$PIN"; exit 1; }
-echo "=== insitu-N2 control, pin $PIN ==="
-git -C $WT log --oneline -1
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+ROOT=/burg-archive/glab/users/pg2328/legoESM
+cd $ROOT || exit 1
+
+# ---- preflight: refuse to run a 30 h job against an unpinned tree ----------
+echo "HEAD:    $(git -C $ROOT rev-parse HEAD)"
+echo "SUBJECT: $(git -C $ROOT log --oneline -1)"
+git -C $ROOT status --porcelain -- scripts/run/run_omip_core2.py \
+    packages/ocean/legoesm/ocean/physics/vertical_mixing/ > /tmp/sgn30_dirty.$$
+if [ -s /tmp/sgn30_dirty.$$ ]; then
+  echo "FATAL: model/driver paths are dirty at launch. Offending paths:"
+  cat /tmp/sgn30_dirty.$$; rm -f /tmp/sgn30_dirty.$$; exit 1
+fi
+rm -f /tmp/sgn30_dirty.$$
+
+export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
-$PY -u scripts/run/run_omip_core2.py --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.0822 --snapshot-every-days 10 --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic --iwm --iwm-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc --dm2dc --isf --isf-forcing-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc --bbl-adv --woa-init --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc --nemo-monthly-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc --sss-restore-file /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc --tripole-vmix tke --ice-init /burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/Ice_initialization.nc --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 --gateway-transports --output /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/nemolev_trp_insitun2_d30 --mle --mle-ce 0.06 --tke-n2-mode insitu
-rc=$?; echo "=== insitu-N2 control rc=$rc ==="; exit $rc
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
+export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \
+  --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
+IN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
+
+XLA_PYTHON_CLIENT_PREALLOCATE=false LEGOESM_JIT_CACHE_DIR="" \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
+  --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
+  --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical \
+  --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 \
+  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
+  --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \
+  --prognostic-ice-dynamics free_drift --years 0.0822 --snapshot-every-days 10 \
+  --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini \
+  --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
+  --iwm --iwm-forcing-file $IN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --dm2dc --isf --isf-forcing-file $IN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
+  --bbl-adv --woa-init \
+  --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc \
+  --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc \
+  --nemo-monthly-init \
+    $IN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
+    $IN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
+  --sss-restore-file $IN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
+  --tripole-vmix tke --ice-init $IN/Ice_initialization.nc \
+  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
+  --tke-kappa-convention veros_sqrte \
+  --sw-rgb-chl --ice-ocean-heat-coeff 70 --gateway-transports \
+  --tke-n2-mode insitu \
+  --output $ROOT/results/omip_nemo/nemolev_trp_insitun2_d30 \
+  --mle --mle-ce 0.06
+rc=$?
+echo "=== run_omip_core2 rc=$rc ==="
+exit $rc
