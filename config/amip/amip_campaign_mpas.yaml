@@ -105,6 +105,33 @@ convective_cloud: false
 use_multilayer_land: true
 mpas_land_beta_soil: true
 
+# Stomatal control on transpiration. Adversarial review caught the first pass
+# claiming this came free with the land model: it does not. `land_stomatal_beta`
+# is separately off by default, and with it off the stomatal code hands back the
+# bare root-zone availability with no canopy resistance in it -- soil-moisture
+# limitation without plants. Turning the land on and leaving this off gives
+# plausible evaporation for the wrong reason, which is worse than an error.
+#
+# The multilayer Richards soil supplies the root-zone moisture the Jarvis model
+# down-regulates, so no separate bucket is needed here.
+land_stomatal_beta: true
+
+# The two-leaf canopy rather than the bulk surface energy balance. The driver's
+# own note on this dispatch says the two-leaf scheme "limits land ET below
+# potential and breaks the over-evaporation wet loop" -- which is the exact
+# defect measured on this deck, where the tropical deserts evaporate 3.5x
+# observed. The bulk scheme has no canopy to hold water back.
+land_surface_scheme: two_leaf
+
+# NOT SET, and worth knowing why. The per-PFT land parameters -- albedo,
+# emissivity, root depth, roughness, bulk transfer coefficient, wilting point,
+# field capacity, snow albedo and its decay -- are the CALIBRATED tables baked
+# into the CLM surface map, and the land setup reads them automatically. They
+# need no key here. What is still missing is not the tuned PARAMETERS but the
+# spun-up STATE: soil moisture, deep soil temperature and the carbon pools all
+# cold-start. The only land restart on disk is a single mid-latitude column, so
+# it cannot graft onto this mesh.
+
 # --- Aerosol -> droplet coupling ---------------------------------------------
 # Base: off (a prescribed droplet number). On, the cloud droplet number is
 # activated from the aerosol optical depth, which is the only path by which the
