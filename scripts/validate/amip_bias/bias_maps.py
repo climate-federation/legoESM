@@ -281,7 +281,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True)
     ap.add_argument("--vars", nargs="+",
-                    default=["albedo", "rsut", "rlut", "clt", "tas", "prw"])
+                    default=["albedo", "rsut", "rlut", "clt", "tas", "prw",
+                             "evspsbl"])
     ap.add_argument("--out", default=".")
     ap.add_argument("--no-section", action="store_true")
     args = ap.parse_args(argv)
