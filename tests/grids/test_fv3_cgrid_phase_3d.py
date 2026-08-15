@@ -611,7 +611,7 @@ def test_state_3d_to_jax_refuses_f32(state_np):
 def test_f64_gate_is_non_vacuous(state_np, monkeypatch):
     """Neutering the gate must let the f32 state through -- otherwise
     the test above is passing for some other reason."""
-    monkeypatch.setattr(jphase, "_require_f64_jax", lambda *a, **k: None)
+    monkeypatch.setattr(jphase, "require_f64_jax", lambda *a, **k: None)
     out = jphase.state_3d_to_jax(_f32_pt(state_np))
     assert out["pt"].dtype == jnp.float32
 
@@ -1065,7 +1065,7 @@ def test_nord_guard_is_non_vacuous(jctx, jstate, monkeypatch):
     """Neutered, the float reaches ``c_sw`` and something else objects
     (or it silently runs a different set of divergence terms) -- either
     way the guard is what produces the clean refusal."""
-    monkeypatch.setattr(jphase, "_require_nord", lambda f, v: v)
+    monkeypatch.setattr(jphase, "require_nord", lambda f, n, v: v)
     with pytest.raises(Exception) as exc:
         jphase.csw_phase_3d(jctx, jstate, DT2, KM, nord=2.7)
     assert "integral damping order" not in str(exc.value)
@@ -1147,7 +1147,7 @@ def test_a_stagger_slip_raises_instead_of_broadcasting(jctx, jstate):
 
 
 def test_shape_gate_is_non_vacuous(jctx, jstate, monkeypatch):
-    monkeypatch.setattr(jphase, "_validate_stacked", lambda *a, **k: None)
+    monkeypatch.setattr(jphase, "validate_stacked", lambda *a, **k: None)
     bad = dict(jstate)
     bad["u"] = jnp.swapaxes(jstate["u"], 1, 2)
     with pytest.raises(Exception) as exc:

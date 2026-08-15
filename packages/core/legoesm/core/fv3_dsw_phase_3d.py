@@ -200,8 +200,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
-from legoesm.core.fv3_cgrid_phase_3d import CSW_OUT_LIKE
 from legoesm.core.fv3_duo_stepper import (
     SWConfig,
     exchange_post_pgrad_sixface,
@@ -210,8 +208,16 @@ from legoesm.core.fv3_duo_sw_core import d_sw1_duo, d_sw2_duo
 from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
 from legoesm.core.fv3_native_state_3d import (
     STATE_FIELDS,
-    field_shape,
     require_no_remap_needed,
+)
+from legoesm.core.fv3_phase3d_common import (
+    require_bool,
+    require_f64_jax,
+    require_km,
+    require_nord,
+    stack_faces,
+    stack_levels,
+    validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import average_allflux_shared_edges
 
@@ -269,77 +275,6 @@ _EXCHANGE_FIELDS = ("divg_d", "uc", "vc")
 # ---------------------------------------------------------------------
 # entry gates
 # ---------------------------------------------------------------------
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or, with ``jax_enable_x64``
-    disabled, the whole phase would silently run in float32 -- and the
-    oracle build is ``-fdefault-real-8``.
-
-    DUPLICATION, deliberate and already the campaign's convention:
-    character-identical to ``fv3_cgrid_phase_3d``'s /
-    ``fv3_duo_stepper``'s / ``fv3_duo_halos``'s /
-    ``fv3_duo_sw_core``'s, which are private and therefore not
-    importable across modules (the empty-allowlist ratchet
-    ``tests/test_no_private_cross_imports.py``).  FOLLOW-UP, already
-    open on the other four: promote ONE definition to a public name and
-    delete the copies -- this is now the fifth.
-    """
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        if jnp.asarray(a).dtype != jnp.float64:
-            raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
-
-
-def _require_bool(fname: str, name: str, value) -> None:
-    """A truthy non-bool would silently select a branch.
-
-    ``remap_follows`` in particular is a PROMISE that the vertical remap
-    runs later; a string sentinel or a stray ``1`` must not license a
-    deformed-``delp`` state.  ``hydrostatic`` chooses whether allflux
-    slot 2 is written at all, i.e. what the barrier is handed.
-    """
-    if not isinstance(value, bool):
-        raise TypeError(
-            f"{fname}: {name} must be a bool, got "
-            f"{type(value).__name__} ({value!r})")
-
-
-def _require_km(fname: str, km) -> int:
-    """``km`` is a Python trip count and a shape -- never traced."""
-    if isinstance(km, bool) or not isinstance(km, (int, np.integer)):
-        raise TypeError(
-            f"{fname}: km must be a Python int (it is a loop trip count "
-            f"and an array extent, so it cannot be traced), got "
-            f"{type(km).__name__} ({km!r})")
-    if km < 1:
-        raise ValueError(f"{fname}: km must be >= 1, got {km}")
-    return int(km)
-
-
-def _require_nord(fname: str, name: str, nord) -> int:
-    """A damping ORDER is integral by construction.
-
-    ``int()`` on 2.7 would round to 2 without a word, and
-    ``exchange_post_pgrad_sixface`` branches on ``nord > 0`` -- so a
-    float here silently selects whether the ``divgd`` halo is exchanged
-    at all.  Same guard, same reason, as the km=1 lane's.
-    """
-    if isinstance(nord, bool) or nord != int(nord):
-        raise ValueError(
-            f"{fname}: {name} must be an integral damping order, got "
-            f"{nord!r}")
-    nord = int(nord)
-    if nord < 0:
-        raise ValueError(f"{fname}: {name} must be >= 0, got {nord}")
-    return nord
-
 
 def _resolve_cfg(fname: str, cfg) -> SWConfig:
     """``None``/``SWConfig`` -> ``SWConfig``; anything else RAISES.
@@ -407,38 +342,6 @@ def _require_barrier_layout(fname: str, ctx, afx, afy, km: int) -> None:
             f"than raising, so a mismatch would blend the wrong cells "
             f"silently.")
 
-
-def _validate_stacked(fname: str, container: dict, ctx, km: int,
-                      required: tuple, *, what: str) -> None:
-    """Tier-0 gate: every required key present, every shape declared.
-
-    Shapes are ``(6,) + field_shape(name, n, ng, km)`` with
-    ``CSW_OUT_LIKE`` mapping a C-grid output name onto the field whose
-    shape it shares.  Checking is not optional politeness: a stagger
-    slip between ``(m_a, m_b)`` and ``(m_b, m_a)`` BROADCASTS in a
-    later arithmetic op instead of raising.
-    """
-    if not isinstance(container, dict):
-        raise TypeError(
-            f"{fname}: {what} must be the face-stacked dict of arrays "
-            f"(convention C1), got {type(container).__name__}. A list of "
-            f"six per-face dicts is the NumPy lane's container -- convert "
-            f"it with fv3_cgrid_phase_3d.state_3d_to_jax().")
-    missing = [k for k in required if k not in container]
-    if missing:
-        raise KeyError(
-            f"{fname}: {what} is missing {missing}; keys are "
-            f"{sorted(container)}")
-    n, ng = ctx.n, ctx.ng
-    for name in required:
-        a = jnp.asarray(container[name])
-        want = (6,) + field_shape(CSW_OUT_LIKE.get(name, name), n, ng, km)
-        if a.shape != want:
-            raise ValueError(
-                f"{fname}: {what}[{name!r}] has shape {a.shape}, expected "
-                f"{want} for n={n} ng={ng} km={km}")
-
-
 def _cap_shape(name: str, n: int, ng: int, km: int) -> tuple:
     """Declared capacitor shape -- ``alloc_flux_capacitors``' contract.
 
@@ -490,57 +393,6 @@ def _validate_flux_cap(fname: str, flux_cap: dict, ctx, km: int) -> None:
 
 
 # ---------------------------------------------------------------------
-# assembly helpers
-# ---------------------------------------------------------------------
-
-def _stack_levels(fname: str, name: str, per_level: list):
-    """``km`` per-level outputs -> one array with ``km`` at AXIS 2.
-
-    Axis 2 rather than -1 so an ``allflux`` slab ``(i, j, slot)``
-    becomes ``(i, j, km, slot)`` -- the oracle's own
-    ``allflux_x(i,j,k,iq)`` layout (``dyn_core.F90:860``) and the
-    spec's ``np.stack(..., axis=2)``.  For a plain 2-D output the two
-    conventions coincide.
-
-    The reference shape is level 0's, and every other level is required
-    to match it.  A per-level shape TABLE is not used because
-    ``d_sw1``/``d_sw2`` publish no such table -- re-deriving ten Fortran
-    bound expressions here would be exactly the kind of restatement
-    that drifts.  What this catches is the defect that could actually
-    occur: a level whose output shape differs from its neighbours'.
-
-    ``jnp.stack`` is a pure index copy -- no ``x*y + z`` for XLA to
-    contract into an FMA -- which is why the jit-vs-eager gate on the
-    assembly step alone may be BITWISE while the gates on the kernels'
-    arithmetic may not.
-    """
-    want = per_level[0].shape
-    for k, arr in enumerate(per_level[1:], start=1):
-        if arr.shape != want:
-            raise ValueError(
-                f"{fname}: level {k} output {name!r} has shape "
-                f"{arr.shape}, level 0 has {want}. A stagger or window "
-                f"mismatch here would broadcast, not raise.")
-    return jnp.stack(per_level, axis=2)
-
-
-def _stack_faces(fname: str, per_face: list) -> dict:
-    """Six per-face dicts of 3-D arrays -> one dict of ``(6, …)`` stacks.
-
-    All six dicts carry the same keys and, within one key, the same
-    per-face shape -- the FACE axis is stackable, the stagger axis is
-    not, which is why this stacks per key and never across keys.
-    """
-    keys = tuple(per_face[0])
-    for t, d in enumerate(per_face):
-        if tuple(d) != keys:
-            raise KeyError(
-                f"{fname}: face {t + 1} produced keys {sorted(d)}, face 1 "
-                f"produced {sorted(keys)} -- a per-face lane split")
-    return {k: jnp.stack([d[k] for d in per_face], axis=0) for k in keys}
-
-
-# ---------------------------------------------------------------------
 # the post-p_grad_c duo exchanges (dyn_core.F90:652 / :655), per level
 # ---------------------------------------------------------------------
 
@@ -581,11 +433,11 @@ def exchange_post_pgrad_3d(ctx, csw_outs: dict, km, *, nord: int) -> dict:
     them (R4 / convention C4), and the spec's per-level ``np.copy`` is
     dropped because a functional slice has no buffer to alias (D2).
     """
-    km = _require_km("exchange_post_pgrad_3d", km)
-    nord = _require_nord("exchange_post_pgrad_3d", "nord", nord)
-    _validate_stacked("exchange_post_pgrad_3d", csw_outs, ctx, km,
+    km = require_km("exchange_post_pgrad_3d", km)
+    nord = require_nord("exchange_post_pgrad_3d", "nord", nord)
+    validate_stacked("exchange_post_pgrad_3d", csw_outs, ctx, km,
                       _EXCHANGE_FIELDS, what="csw_outs")
-    _require_f64_jax("exchange_post_pgrad_3d",
+    require_f64_jax("exchange_post_pgrad_3d",
                      {k: csw_outs[k] for k in _EXCHANGE_FIELDS})
 
     per_level = {name: [] for name in _EXCHANGE_FIELDS}
@@ -667,10 +519,10 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     * ``w`` and ``dw`` on the NH arm only;
     * ``mfx`` / ``mfy`` / ``cx`` / ``cy`` when ``flux_cap`` was given.
     """
-    km = _require_km("dsw_transport_phase_3d", km)
+    km = require_km("dsw_transport_phase_3d", km)
     for nm, vv in (("hydrostatic", hydrostatic),
                    ("remap_follows", remap_follows)):
-        _require_bool("dsw_transport_phase_3d", nm, vv)
+        require_bool("dsw_transport_phase_3d", nm, vv)
     require_no_remap_needed(km, remap_follows=remap_follows)
     c = _resolve_cfg("dsw_transport_phase_3d", cfg)
 
@@ -680,25 +532,25 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # would additionally make the kernel demand `del6_u`/`del6_v`.
     kgb = 0.0 if kgb is None else float(kgb)
     # NOT `int(...)` before the guard: `int(2.7)` rounds to 2 without a
-    # word, which is exactly what `_require_nord` exists to refuse.
+    # word, which is exactly what `require_nord` exists to refuse.
     nord_w = c.nord_v if nord_w is None else nord_w
-    nord_w = _require_nord("dsw_transport_phase_3d", "nord_w", nord_w)
+    nord_w = require_nord("dsw_transport_phase_3d", "nord_w", nord_w)
     if hydrostatic:
         damp_w = 0.0
     else:
         damp_w = float(c.damp_v) if damp_w is None else float(damp_w)
 
-    _validate_stacked("dsw_transport_phase_3d", states, ctx, km,
+    validate_stacked("dsw_transport_phase_3d", states, ctx, km,
                       STATE_FIELDS, what="states")
-    _validate_stacked("dsw_transport_phase_3d", csw_outs, ctx, km,
+    validate_stacked("dsw_transport_phase_3d", csw_outs, ctx, km,
                       _EXCHANGE_FIELDS, what="csw_outs")
-    _require_f64_jax("dsw_transport_phase_3d",
+    require_f64_jax("dsw_transport_phase_3d",
                      {k: states[k] for k in STATE_FIELDS}
                      | {k: csw_outs[k] for k in _EXCHANGE_FIELDS}
                      | {"dt": jnp.asarray(dt)})
     if flux_cap is not None:
         _validate_flux_cap("dsw_transport_phase_3d", flux_cap, ctx, km)
-        _require_f64_jax("dsw_transport_phase_3d",
+        require_f64_jax("dsw_transport_phase_3d",
                          {f"flux_cap[{k}]": flux_cap[k]
                           for k in CAPACITOR_FIELDS})
 
@@ -806,10 +658,10 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # (edge, k) per iq and both operands come from the PRE-update
     # buffer -- so the two loops commute.  R1a: no iteration reads a
     # location another writes, in either order.
-    afx_pre = [_stack_levels("dsw_transport_phase_3d", "allflux_x",
+    afx_pre = [stack_levels("dsw_transport_phase_3d", "allflux_x",
                              [per_face_levels[t][k]["allflux_x"]
                               for k in range(km)]) for t in range(6)]
-    afy_pre = [_stack_levels("dsw_transport_phase_3d", "allflux_y",
+    afy_pre = [stack_levels("dsw_transport_phase_3d", "allflux_y",
                              [per_face_levels[t][k]["allflux_y"]
                               for k in range(km)]) for t in range(6)]
     afx_pre = jnp.stack(afx_pre, axis=0)
@@ -857,17 +709,17 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
                         f"silently drop a stage output")
                 per_level[name].append(jnp.asarray(s2[name]))
         per_face.append({
-            name: _stack_levels(f"dsw_transport_phase_3d[face {t + 1}]",
+            name: stack_levels(f"dsw_transport_phase_3d[face {t + 1}]",
                                 name, per_level[name])
             for name in names})
-    s2s = _stack_faces("dsw_transport_phase_3d", per_face)
+    s2s = stack_faces("dsw_transport_phase_3d", per_face)
 
     # `allflux_x`/`allflux_y` are EXCLUDED from this comprehension --
     # they were already stacked into `afx_pre`/`afy_pre` above, and
     # re-stacking them here would trace a second copy of the two
     # largest arrays only to overwrite it with the averaged version.
     out = {name: jnp.stack(
-        [_stack_levels(f"dsw_transport_phase_3d[face {t + 1}]", name,
+        [stack_levels(f"dsw_transport_phase_3d[face {t + 1}]", name,
                        [per_face_levels[t][k][name] for k in range(km)])
          for t in range(6)], axis=0)
         for name in DSW1_OUT_2D if not name.startswith("allflux_")}

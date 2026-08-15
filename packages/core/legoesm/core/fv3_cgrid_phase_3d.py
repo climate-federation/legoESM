@@ -181,6 +181,16 @@ from legoesm.core.fv3_native_state_3d import (
 )
 from legoesm.core.fv3_nh_core import riem_solver_c, update_dz_c
 from legoesm.core.fv3_pgrad import geopk, p_grad_c
+from legoesm.core.fv3_phase3d_common import (
+    CSW_OUT_LIKE,
+    require_bool,
+    require_f64_jax,
+    require_km,
+    require_nord,
+    stack_faces,
+    stack_levels,
+    validate_stacked,
+)
 from legoesm.grids.fv3_duo_halos import stack6, unstack6
 
 __all__ = [
@@ -196,16 +206,13 @@ __all__ = [
     "make_cgrid_nh_pressure_phase_3d_jit",
 ]
 
-# Which field's shape each c_sw output shares.  Re-stated rather than
-# imported because the spec's copy (`_out_like`) is private and a
-# private cross-module import is banned by the empty-allowlist ratchet
-# `tests/test_no_private_cross_imports.py`.  Pinned against the spec's
-# copy by `test_csw_out_like_matches_the_spec`, so the two cannot drift.
-CSW_OUT_LIKE = {
-    "divg_d": "divgd", "uc": "uc", "vc": "vc",
-    "delpc": "delp", "ptc": "pt", "ua": "ua", "va": "va",
-    "ut": "ut", "vt": "vt", "wc": "w",
-}
+# `CSW_OUT_LIKE` -- which field's shape each c_sw output shares -- now
+# lives in `fv3_phase3d_common` (imported above) because
+# `validate_stacked` needs it and every 3-D phase module imports that
+# one; defining it here and importing it there would be a cycle.  It
+# stays in this module's `__all__` so existing importers do not move,
+# and `test_csw_out_like_matches_the_spec` still pins it against the
+# NumPy spec's private `_out_like`, so the two cannot drift.
 
 # What the hydrostatic and NH pressure stages must be handed.  Stated as
 # data so the entry gate names the missing key instead of raising a bare
@@ -217,75 +224,6 @@ _PRESSURE_IN_NH = ("delpc", "ptc", "uc", "vc", "ut", "vt", "wc")
 # ---------------------------------------------------------------------
 # entry gates
 # ---------------------------------------------------------------------
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or, with ``jax_enable_x64``
-    disabled, the whole phase would silently run in float32 -- and the
-    oracle build is ``-fdefault-real-8``.
-
-    DUPLICATION, deliberate and already the campaign's convention:
-    character-identical to ``fv3_duo_stepper``'s / ``fv3_duo_halos``'s /
-    ``fv3_duo_sw_core``'s, which are private and therefore not
-    importable across modules (the empty-allowlist ratchet
-    ``tests/test_no_private_cross_imports.py``).  FOLLOW-UP: promote ONE
-    definition to a public name and delete the copies -- tracked on the
-    halo module's own copy, and this is now the fourth.
-    """
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        if jnp.asarray(a).dtype != jnp.float64:
-            raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
-
-
-def _require_bool(fname: str, name: str, value) -> None:
-    """A truthy non-bool would silently select a branch.
-
-    ``remap_follows`` in particular is a PROMISE that the vertical remap
-    runs later; a string sentinel or a stray ``1`` must not license a
-    deformed-``delp`` state (the NumPy guard raises on exactly this).
-    """
-    if not isinstance(value, bool):
-        raise TypeError(
-            f"{fname}: {name} must be a bool, got "
-            f"{type(value).__name__} ({value!r})")
-
-
-def _require_km(fname: str, km) -> int:
-    """``km`` is a Python trip count and a shape -- never traced."""
-    if isinstance(km, bool) or not isinstance(km, (int, np.integer)):
-        raise TypeError(
-            f"{fname}: km must be a Python int (it is a loop trip count "
-            f"and an array extent, so it cannot be traced), got "
-            f"{type(km).__name__} ({km!r})")
-    if km < 1:
-        raise ValueError(f"{fname}: km must be >= 1, got {km}")
-    return int(km)
-
-
-def _require_nord(fname: str, nord) -> int:
-    """The divergence-damping ORDER is integral by construction.
-
-    ``int()`` on 2.7 would round to 2 without a word, and ``c_sw``
-    branches on ``nord > 0`` -- so a float here silently selects a
-    different set of divergence terms.  Same guard, same reason, as
-    ``fv3_duo_stepper.exchange_post_pgrad_sixface``.
-    """
-    if isinstance(nord, bool) or nord != int(nord):
-        raise ValueError(
-            f"{fname}: nord must be an integral damping order, got "
-            f"{nord!r}")
-    nord = int(nord)
-    if nord < 0:
-        raise ValueError(f"{fname}: nord must be >= 0, got {nord}")
-    return nord
-
 
 def _require_a2b_ord(fname: str, a2b_ord) -> int:
     """Dispatch hardening: ``geopk`` selects a different B-grid
@@ -398,7 +336,7 @@ def state_3d_to_jax(state6) -> dict:
                 f"face 1 has {sorted(keys)}; a per-face key split would "
                 f"stack a different field into the same slot")
     out = {k: stack6([face[k] for face in state6]) for k in keys}
-    _require_f64_jax("state_3d_to_jax", out)
+    require_f64_jax("state_3d_to_jax", out)
     return out
 
 
@@ -417,78 +355,10 @@ def state_3d_to_numpy(states: dict) -> list:
         raise TypeError(
             f"state_3d_to_numpy: expected the face-stacked dict, got "
             f"{type(states).__name__}")
-    _require_f64_jax("state_3d_to_numpy", states)
+    require_f64_jax("state_3d_to_numpy", states)
     per_key = {k: unstack6(v) for k, v in states.items()}
     return [{k: np.asarray(per_key[k][t]) for k in states}
             for t in range(6)]
-
-
-# ---------------------------------------------------------------------
-# shared shape / assembly helpers
-# ---------------------------------------------------------------------
-
-def _validate_stacked(fname: str, container: dict, ctx, km: int,
-                      required: tuple, *, what: str) -> None:
-    """Tier-0 gate: every required key present, every shape declared.
-
-    Shapes are ``(6,) + field_shape(name, n, ng, km)``.  Checking is not
-    optional politeness: a stagger slip between ``(m_a, m_b)`` and
-    ``(m_b, m_a)`` BROADCASTS in a later arithmetic op instead of
-    raising, which is precisely the failure ``field_shape`` was written
-    to stop in the NumPy lane.
-    """
-    if not isinstance(container, dict):
-        raise TypeError(
-            f"{fname}: {what} must be the face-stacked dict of arrays "
-            f"(convention C1), got {type(container).__name__}. A list of "
-            f"six per-face dicts is the NumPy lane's container -- convert "
-            f"it with state_3d_to_jax().")
-    missing = [k for k in required if k not in container]
-    if missing:
-        raise KeyError(
-            f"{fname}: {what} is missing {missing}; keys are "
-            f"{sorted(container)}")
-    n, ng = ctx.n, ctx.ng
-    for name in required:
-        a = jnp.asarray(container[name])
-        want = (6,) + field_shape(CSW_OUT_LIKE.get(name, name), n, ng, km)
-        if a.shape != want:
-            raise ValueError(
-                f"{fname}: {what}[{name!r}] has shape {a.shape}, expected "
-                f"{want} for n={n} ng={ng} km={km}")
-
-
-def _stack_levels(fname: str, name: str, per_level: list, want2d: tuple):
-    """km per-level 2-D outputs -> one ``(..., km)`` array.
-
-    ``jnp.stack`` is a pure index copy -- no ``x*y + z`` for XLA to
-    contract into an FMA -- which is why the jit-vs-eager gate on the
-    assembly step alone is allowed to be BITWISE while the gates on the
-    kernels' arithmetic are not.
-    """
-    for k, arr in enumerate(per_level):
-        if arr.shape != want2d:
-            raise ValueError(
-                f"{fname}: level {k} output {name!r} has shape "
-                f"{arr.shape}, the 3-D container expects {want2d}. A "
-                f"stagger mismatch here would broadcast, not raise.")
-    return jnp.stack(per_level, axis=2)
-
-
-def _stack_faces(fname: str, per_face: list) -> dict:
-    """Six per-face dicts of 3-D arrays -> one dict of ``(6, …)`` stacks.
-
-    All six dicts carry the same keys and, within one key, the same
-    per-face shape -- the FACE axis is stackable, the stagger axis is
-    not, which is why this stacks per key and never across keys.
-    """
-    keys = tuple(per_face[0])
-    for t, d in enumerate(per_face):
-        if tuple(d) != keys:
-            raise KeyError(
-                f"{fname}: face {t + 1} produced keys {sorted(d)}, face 1 "
-                f"produced {sorted(keys)} -- a per-face lane split")
-    return {k: jnp.stack([d[k] for d in per_face], axis=0) for k in keys}
 
 
 # ---------------------------------------------------------------------
@@ -527,17 +397,17 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
     ``c_sw`` fills internally are NOT returned -- ``c_sw`` does not
     export them, in either lane.
     """
-    km = _require_km("csw_phase_3d", km)
-    _require_bool("csw_phase_3d", "remap_follows", remap_follows)
+    km = require_km("csw_phase_3d", km)
+    require_bool("csw_phase_3d", "remap_follows", remap_follows)
     require_no_remap_needed(km, remap_follows=remap_follows)
     for nm, vv in (("duogrid", duogrid), ("hydrostatic", hydrostatic)):
-        _require_bool("csw_phase_3d", nm, vv)
-    nord = _require_nord("csw_phase_3d", nord)
+        require_bool("csw_phase_3d", nm, vv)
+    nord = require_nord("csw_phase_3d", "nord", nord)
     _require_grid_type_zero("csw_phase_3d", ctx)
 
-    _validate_stacked("csw_phase_3d", states, ctx, km, STATE_FIELDS,
+    validate_stacked("csw_phase_3d", states, ctx, km, STATE_FIELDS,
                       what="states")
-    _require_f64_jax("csw_phase_3d",
+    require_f64_jax("csw_phase_3d",
                      {k: states[k] for k in STATE_FIELDS}
                      | {"dt2": jnp.asarray(dt2)})
 
@@ -580,11 +450,11 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
         acc = {}
         for name in names:
             want2d = field_shape(CSW_OUT_LIKE[name], n, ng, km)[:2]
-            acc[name] = _stack_levels(
+            acc[name] = stack_levels(
                 f"csw_phase_3d[face {t + 1}]", name, per_level[name],
                 want2d)
         per_face.append(acc)
-    return _stack_faces("csw_phase_3d", per_face)
+    return stack_faces("csw_phase_3d", per_face)
 
 
 # ---------------------------------------------------------------------
@@ -626,18 +496,18 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
     RAISES instead of silently skipping; pass ``check_delpc=False`` to
     opt out on purpose.
     """
-    km = _require_km("cgrid_pressure_phase_3d", km)
+    km = require_km("cgrid_pressure_phase_3d", km)
     for nm, vv in (("hydrostatic", hydrostatic),
                    ("remap_follows", remap_follows),
                    ("check_delpc", check_delpc)):
-        _require_bool("cgrid_pressure_phase_3d", nm, vv)
+        require_bool("cgrid_pressure_phase_3d", nm, vv)
     require_no_remap_needed(km, remap_follows=remap_follows)
     _refuse_nh_pressure("cgrid_pressure_phase_3d", hydrostatic)
     a2b_ord = _require_a2b_ord("cgrid_pressure_phase_3d", a2b_ord)
 
-    _validate_stacked("cgrid_pressure_phase_3d", csw_outs, ctx, km,
+    validate_stacked("cgrid_pressure_phase_3d", csw_outs, ctx, km,
                       _PRESSURE_IN_HYDRO, what="csw_outs")
-    _require_f64_jax("cgrid_pressure_phase_3d",
+    require_f64_jax("cgrid_pressure_phase_3d",
                      {k: csw_outs[k] for k in _PRESSURE_IN_HYDRO}
                      | {"hs6": ctx.hs6, "dt2": jnp.asarray(dt2)})
 
@@ -661,7 +531,7 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
                               csw_outs["vc"][t], ctx.gs6[t], bd,
                               npz=km, hydrostatic=True)
         per_face.append({**got, "uc": uc_t, "vc": vc_t})
-    return _stack_faces("cgrid_pressure_phase_3d", per_face)
+    return stack_faces("cgrid_pressure_phase_3d", per_face)
 
 
 def _check_delpc_positive(fname: str, delpc6, bd) -> None:
@@ -730,12 +600,12 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     REBUILT geopotential; ``delpc``/``ptc`` are unchanged and live on in
     ``csw_outs``.
     """
-    km = _require_km("cgrid_nh_pressure_phase_3d", km)
-    _require_bool("cgrid_nh_pressure_phase_3d", "remap_follows",
+    km = require_km("cgrid_nh_pressure_phase_3d", km)
+    require_bool("cgrid_nh_pressure_phase_3d", "remap_follows",
                   remap_follows)
     require_no_remap_needed(km, remap_follows=remap_follows)
 
-    _validate_stacked("cgrid_nh_pressure_phase_3d", csw_outs, ctx, km,
+    validate_stacked("cgrid_nh_pressure_phase_3d", csw_outs, ctx, km,
                       _PRESSURE_IN_NH, what="csw_outs")
 
     n, ng = ctx.n, ctx.ng
@@ -759,7 +629,7 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
         raise ValueError(
             f"cgrid_nh_pressure_phase_3d: dp0 has shape {dp0.shape}, "
             f"expected {(km,)} (one reference thickness per layer)")
-    _require_f64_jax("cgrid_nh_pressure_phase_3d",
+    require_f64_jax("cgrid_nh_pressure_phase_3d",
                      {k: csw_outs[k] for k in _PRESSURE_IN_NH}
                      | {"gz6": gz6, "ws3_6": ws3_6, "zs6": zs6,
                         "dp0": dp0, "hs6": ctx.hs6,
@@ -798,7 +668,7 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
                               ctx.gs6[t], bd, npz=km, hydrostatic=False)
         per_face.append({"pkc": pkc_t, "gz": gz_t, "ws3": ws_t,
                          "uc": uc_t, "vc": vc_t})
-    return _stack_faces("cgrid_nh_pressure_phase_3d", per_face)
+    return stack_faces("cgrid_nh_pressure_phase_3d", per_face)
 
 
 # ---------------------------------------------------------------------

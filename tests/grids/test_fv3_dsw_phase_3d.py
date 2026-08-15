@@ -1175,7 +1175,7 @@ def test_bool_guard_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     and asserting on the wording would make this test pass whichever
     guard fired.
     """
-    monkeypatch.setattr(jdsw, "_require_bool",
+    monkeypatch.setattr(jdsw, "require_bool",
                         lambda *a, **k: None)
     with pytest.raises(Exception) as ei:
         jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
@@ -1195,7 +1195,7 @@ def test_nord_guard_is_non_vacuous(jctx, jcsw, monkeypatch):
     has its own copy of the same refusal, so the call still raises but
     with the km=1 lane's message.  That is the proof the guard is what
     produces the 3-D lane's clean, named error."""
-    monkeypatch.setattr(jdsw, "_require_nord",
+    monkeypatch.setattr(jdsw, "require_nord",
                         lambda fname, name, v: v)
     with pytest.raises(ValueError, match="integral damping order"):
         jdsw.exchange_post_pgrad_3d(jctx, jcsw, KM, nord=2.7)
@@ -1237,7 +1237,7 @@ def test_a_stagger_slip_raises_instead_of_broadcasting(jctx, jstate,
 
 
 def test_shape_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
-    monkeypatch.setattr(jdsw, "_validate_stacked",
+    monkeypatch.setattr(jdsw, "validate_stacked",
                         lambda *a, **k: None)
     bad = dict(jcsw)
     bad["uc"] = jnp.swapaxes(jcsw["uc"], 1, 2)
@@ -1264,7 +1264,7 @@ def test_f64_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     proves is that the CLEAN, early refusal comes from the 3-D lane's
     gate rather than from luck three frames deeper.
     """
-    monkeypatch.setattr(jdsw, "_require_f64_jax", lambda *a, **k: None)
+    monkeypatch.setattr(jdsw, "require_f64_jax", lambda *a, **k: None)
     bad = dict(jstate)
     bad["pt"] = jstate["pt"].astype(jnp.float32)
     with pytest.raises(Exception) as ei:
