@@ -241,7 +241,7 @@ def compute_filter_weights(
 
     This is exactly the Shchepetkin & McWilliams (2005) secondary
     (transport) weight used by the ``power_law`` path; with a uniform
-    (box) ``w_i=1`` it is ``(n−j)/n²`` — NOT the flat ``1/n`` that the
+    (box) ``w_i=1`` it is ``(n_loop−j)/(n·n_loop)`` with ``n_loop = 2n−1`` — NOT the flat ``1/n`` that the
     earlier code used, which broke continuity for BOTH box and cosine
     (the cosine inconsistency was the worse of the two, ~99 % residual;
     box ~95 %).  Returning it here makes every non-``power_law`` filter
