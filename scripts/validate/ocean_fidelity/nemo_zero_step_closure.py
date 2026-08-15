@@ -188,6 +188,13 @@ def main() -> int:
                         "adiabatic bn2. NOTE it is S-EOS while ORCA1 runs "
                         "TEOS-10 (codex 9405307), so this BOUNDS the effect "
                         "rather than reproducing NEMO's rn2.")
+    p.add_argument("--n2-eos-form", default="teos10",
+                   choices=["seos", "teos10"],
+                   help="alpha/beta source for --n2-for-length nemo_bn2. "
+                        "Defaults to 'teos10' because ORCA1 runs "
+                        "ln_teos10=.true. and the production card selects it; "
+                        "the kernel's own default is 'seos', which is what "
+                        "this probe silently used before.")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -265,9 +272,13 @@ def main() -> int:
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         _gd = load_mesh_depth_1d(a.mesh_mask)
         _gw = _mesh_gdepw(a.mesh_mask)[1:]
+        # eos_form MUST be passed: it defaults to "seos", so the previous call
+        # advertised "the model's adiabatic bn2" and silently delivered the
+        # SIMPLIFIED EOS while ORCA1 runs ln_teos10=.true. and the production
+        # card selects n2_eos_form="teos10" (codex 9417284 #2).
         N2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
             jnp.asarray(T_c), jnp.asarray(S_c),
-            jnp.asarray(_gd), jnp.asarray(_gw)))
+            jnp.asarray(_gd), jnp.asarray(_gw), eos_form=a.n2_eos_form))
     else:
         N2 = np.asarray(compute_N2(jnp.asarray(rho), jnp.asarray(dz_half),
                                    constants.rho_ocean, g=constants.g,
@@ -405,11 +416,28 @@ def main() -> int:
     print("%-22s %9s %11s %11s %8s %8s %8s %8s" % (
         "band", "n_iface", "K_M_ours", "NEMO_avm_k", "K_rat", "lk/zmxlm",
         "lk/zmxld", "leps/zd"))
+    _box_names = {n for n, *_ in BOX_REGIONS}
+    _seen = set()
     for bname, inb2d in _region_masks(lat, lon_mesh):
         inb = inb2d.reshape(ncol)
         m = ok & inb[:, None]
+        # COVERAGE, printed for every box before its row (codex 9417284 #5).
+        # `ok` drops every interface where NEMO's avm_k sits on its avmb floor,
+        # and in nino3 that leaves 28.8% of interfaces but only 1.78% of the
+        # interface VOLUME -- a thin near-surface sliver. A ratio measured on
+        # 1.78% of the water is not a statement about the box, and the number
+        # has to be on the page next to the ratio or it will be read as one.
+        if bname in _box_names:
+            _aw = wet_i & inb[:, None]
+            _vf = (100.0 * w_i[m].sum() / max(w_i[_aw].sum(), 1e-30)
+                   if _aw.any() else 0.0)
+            print(f"[coverage] {bname}: columns {int(inb.sum())}, wet "
+                  f"interfaces {int(_aw.sum())}, off-floor {int(m.sum())} "
+                  f"({100.0 * m.sum() / max(_aw.sum(), 1):.1f}% by count, "
+                  f"{_vf:.2f}% by volume)")
         if not m.any():
             continue
+        _seen.add(bname)
         ww = w_i[m]
         km, an = _wmean(K_M[m], ww), _wmean(avm_i[m], ww)
         lr = _wmean(l_k[m] / np.maximum(zmxlm_nemo[m], 1e-30), ww)
@@ -436,6 +464,16 @@ def main() -> int:
         print("%-22s %9d %11.4e %11.4e %8.3f %8.3f %8.3f %8.3f" % (
             bname, m.sum(), km, an, km / an if an > 0 else float("nan"),
             lr, lrd, leps_r))
+    # A named box that survives the geometry guard but is emptied by `ok` would
+    # otherwise vanish from the table, and a MISSING row reads as "no data"
+    # while the latitude band above it gets quoted in its place (codex 9417284
+    # #4c). Every box is mandatory once, after every analytical mask.
+    _missing = sorted(_box_names - _seen)
+    if _missing:
+        raise SystemExit(
+            f"FATAL: box(es) {_missing} have columns but NO off-floor "
+            "interfaces, so they were silently dropped from the table. Either "
+            "the `ok` mask or the box is wrong; do not read the bands instead.")
     print()
     print("READ: K_rat and lk/zmxlm must agree by construction (same en, same "
           "c_k) — printed separately as a redundancy check; a gap means a "
