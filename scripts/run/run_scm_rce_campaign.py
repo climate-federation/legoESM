@@ -84,10 +84,15 @@ from legoesm.training.scm_rce_metrics import (
     COLD_POINT_MAX_K,
     COLD_POINT_MIN_K,
     DEFAULT_SUBCLOUD_TOP_M,
+    DEFAULT_THERMO_COLD_POINT_BUFFER_PA,
+    DEFAULT_THERMO_HUMIDITY,
+    DEFAULT_THERMO_LOGQ_FLOOR,
+    DEFAULT_THERMO_LOGQ_SCALE,
     DEFAULT_THERMO_MIN_P_PA,
     DEFAULT_THERMO_RH_BLEND_WIDTH_K,
     DEFAULT_THERMO_RH_SCALE,
     DEFAULT_THERMO_T_SCALE_K,
+    THERMO_HUMIDITY_VARIABLES,
     MADIAB_MAX_TOL_K,
     MADIAB_MEAN_TOL_K,
     PRECIP_NORMALIZATION_MM_DAY,
@@ -99,7 +104,9 @@ from legoesm.training.scm_rce_metrics import (
     relative_humidity_profile,
     score_profiles_precip_jax,
     score_thermo_jax,
+    thermo_terms_jax,
     tropospheric_mass_weights,
+    tropospheric_min_pressure,
     subcloud_bulk_state,
     subcloud_objective_jax,
     subcloud_mass_weights,
@@ -347,14 +354,28 @@ class RunDiagnostics:
     #: spread.  Reported for every run whether or not it is the one minimised,
     #: so an arm tuned on one objective can still be read on the other.
     thermo_T_term: float = float("nan")
+    #: The humidity term that was MINIMISED, and both candidates, so an arm
+    #: tuned on one humidity variable can be read on the other.
+    thermo_humidity_variable: str = DEFAULT_THERMO_HUMIDITY
+    thermo_q_term: float = float("nan")
     thermo_rh_term: float = float("nan")
+    thermo_logq_term: float = float("nan")
     thermo_score: float = float("nan")
-    #: Physical-unit companions to the terms above: mean absolute RH error over
-    #: the same masked levels, and the number of levels the mask kept.  A score
-    #: is not interpretable in a caption; these are.
+    #: Physical-unit companions to the terms above, on the same masked levels,
+    #: plus the mask itself.  A score is not interpretable in a caption.
     trop_rh_rmse: float = float("nan")
     trop_qv_rmse_g_kg: float = float("nan")
+    trop_min_p_Pa: float = float("nan")
     trop_n_levels: int = 0
+    #: SPREAD of the thermo score across the last few non-overlapping analysis
+    #: windows of the SAME run.  This is the score's own noise floor — internal
+    #: variability plus residual drift — and an "improvement" smaller than it is
+    #: not a result.  Nothing else in the campaign measures it, and every
+    #: downstream claim (the ranking, the seed comparison, the tuned parameter
+    #: values) inherits it.
+    thermo_score_window_std: float = float("nan")
+    thermo_score_window_mean: float = float("nan")
+    thermo_score_n_windows: int = 0
     #: The SAME thermo score evaluated on a HELD-OUT analysis window ending one
     #: window earlier.  A parameter set that matches the CRM only during the
     #: window it was tuned on — because the column is still drifting, or because
@@ -515,52 +536,102 @@ def reference_pressure_profile(ref: ReferenceProfiles) -> np.ndarray:
     return np.asarray(ref.sigma_full, dtype=float) * WING_P_SFC
 
 
+def thermo_mask_weights(ref: ReferenceProfiles) -> tuple[np.ndarray, float]:
+    """``(masked mass weights, min pressure)`` for the thermodynamic objective.
+
+    Derived from the REFERENCE alone and therefore identical for every scheme,
+    so the objective scores one fixed domain rather than a per-model one.
+    """
+    p_full = reference_pressure_profile(ref)
+    min_p_Pa = tropospheric_min_pressure(
+        jnp.asarray(ref.T_ref), jnp.asarray(p_full))
+    weights = np.asarray(tropospheric_mass_weights(
+        jnp.asarray(p_full), jnp.asarray(ref.mass_weights), min_p_Pa=min_p_Pa))
+    return weights, float(min_p_Pa)
+
+
 def _thermo_diagnostics(
     ref: ReferenceProfiles,
     T_profile: np.ndarray,
     qv_profile: np.ndarray,
     *,
-    min_p_Pa: float = DEFAULT_THERMO_MIN_P_PA,
-    T_scale_K: float = DEFAULT_THERMO_T_SCALE_K,
-    rh_scale: float = DEFAULT_THERMO_RH_SCALE,
-    blend_width_K: float = DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+    humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> dict[str, float]:
-    """Temperature + tropospheric-relative-humidity score and its companions.
+    """Every thermodynamic term for one profile pair, plus its companions.
 
-    Everything is computed by the shared helpers in ``scm_rce_metrics``; the
-    only arithmetic here is the physical-unit RMSE pair reported alongside the
-    score, and that reuses the same mass-weighted RMSE the score does.
+    All the arithmetic lives in ``scm_rce_metrics``; this only names the fields
+    and converts ``q_v`` to g/kg.  Both humidity variables are reported whatever
+    is being minimised, so a trade-off between them is visible.
     """
     p_full = reference_pressure_profile(ref)
-    weights = tropospheric_mass_weights(
-        jnp.asarray(p_full), jnp.asarray(ref.mass_weights), min_p_Pa=min_p_Pa,
-    )
-    T_term, rh_term, combined = score_thermo_jax(
+    weights, min_p_Pa = thermo_mask_weights(ref)
+    terms = thermo_terms_jax(
         ref,
         jnp.asarray(T_profile),
         jnp.asarray(qv_profile),
         jnp.asarray(p_full),
-        trop_weights=weights,
-        T_scale_K=T_scale_K,
-        rh_scale=rh_scale,
-        blend_width_K=blend_width_K,
+        trop_weights=jnp.asarray(weights),
     )
-    rh = relative_humidity_profile(
-        jnp.asarray(T_profile), jnp.asarray(qv_profile), jnp.asarray(p_full),
-        blend_width_K=blend_width_K)
-    rh_ref = relative_humidity_profile(
-        jnp.asarray(ref.T_ref), jnp.asarray(ref.qv_ref), jnp.asarray(p_full),
-        blend_width_K=blend_width_K)
+    T_term = float(terms["T"])
+    q_term = float(terms[humidity])
     return {
-        "thermo_T_term": float(T_term),
-        "thermo_rh_term": float(rh_term),
-        "thermo_score": float(combined),
-        "trop_rh_rmse": _weighted_rmse(
-            np.asarray(rh) - np.asarray(rh_ref), np.asarray(weights)),
-        "trop_qv_rmse_g_kg": _weighted_rmse(
-            (np.asarray(qv_profile) - np.asarray(ref.qv_ref)) * 1000.0,
-            np.asarray(weights)),
-        "trop_n_levels": int(np.sum(p_full >= min_p_Pa)),
+        "thermo_humidity_variable": humidity,
+        "thermo_T_term": T_term,
+        "thermo_q_term": q_term,
+        "thermo_rh_term": float(terms["rh"]),
+        "thermo_logq_term": float(terms["logq"]),
+        "thermo_score": float(math.sqrt((T_term ** 2 + q_term ** 2) / 2.0)),
+        "trop_rh_rmse": float(terms["rh_rmse"]),
+        "trop_qv_rmse_g_kg": float(terms["qv_rmse_kg_kg"]) * 1000.0,
+        "trop_min_p_Pa": min_p_Pa,
+        "trop_n_levels": int(np.sum(weights > 0.0)),
+    }
+
+
+#: How many non-overlapping analysis windows the score's noise floor is
+#: estimated over.  Four windows of the default 5 days is days 80-100 — late
+#: enough that the column is near equilibrium, long enough that the spread is
+#: an estimate rather than a single difference.
+THERMO_NOISE_WINDOWS = 4
+
+
+def _thermo_window_spread(
+    ref: ReferenceProfiles,
+    T_hist: np.ndarray,
+    qv_hist: np.ndarray,
+    *,
+    last_steps: int,
+    humidity: str = DEFAULT_THERMO_HUMIDITY,
+) -> dict[str, float]:
+    """Mean and spread of the thermo score over the last few analysis windows.
+
+    The scored number is ONE window mean of a column with internal variability
+    and residual drift, and a derivative-free search with hundreds of
+    evaluations will happily select whatever fits that window's noise.  The
+    spread across adjacent windows of the SAME run bounds how much of a
+    reported improvement can be real.  It costs nothing: the history is already
+    in memory for the drift diagnostic.
+    """
+    n_steps = int(T_hist.shape[0])
+    scores = []
+    for w in range(THERMO_NOISE_WINDOWS):
+        end = n_steps - w * last_steps
+        start = end - last_steps
+        if start < 0:
+            break
+        scores.append(_thermo_diagnostics(
+            ref, T_hist[start:end].mean(axis=0), qv_hist[start:end].mean(axis=0),
+            humidity=humidity)["thermo_score"])
+    if len(scores) < 2:
+        return {}
+    arr = np.asarray(scores, dtype=float)
+    return {
+        "thermo_score_window_mean": float(arr.mean()),
+        # Sample standard deviation (ddof=1): with 2-4 windows the population
+        # form would understate the spread, and understating the noise floor is
+        # exactly the direction that manufactures a false improvement.
+        "thermo_score_window_std": float(arr.std(ddof=1)),
+        "thermo_score_n_windows": int(arr.size),
     }
 
 
@@ -1377,7 +1448,12 @@ def run_scm_rce(
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> RunDiagnostics:
+    if thermo_humidity not in THERMO_HUMIDITY_VARIABLES:
+        raise ValueError(
+            f"run_scm_rce: unknown thermo_humidity {thermo_humidity!r}; "
+            f"expected one of {THERMO_HUMIDITY_VARIABLES}")
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
     forcing = _make_scm_rce_forcing(
@@ -1829,7 +1905,8 @@ def run_scm_rce(
                 # so the objective reads +inf and the run cannot win.
                 if finite else {}
             ),
-            **(_thermo_diagnostics(ref, T_profile, qv_profile) if finite else {}),
+            **(_thermo_diagnostics(ref, T_profile, qv_profile,
+                                   humidity=thermo_humidity) if finite else {}),
             **(
                 # The HELD-OUT window: the analysis window immediately before the
                 # scored one, already averaged above for the drift diagnostic.
@@ -1838,13 +1915,20 @@ def run_scm_rce(
                 # intermittent column happened to land there".
                 {
                     "heldout_thermo_score": _thermo_diagnostics(
-                        ref, T_prev, qv_prev)["thermo_score"],
+                        ref, T_prev, qv_prev,
+                        humidity=thermo_humidity)["thermo_score"],
                     "heldout_T_rmse_K": _weighted_rmse(
                         T_prev - ref.T_ref, ref.mass_weights),
                     "heldout_qv_rmse_g_kg": _weighted_rmse(
                         (qv_prev - ref.qv_ref) * 1000.0, ref.mass_weights),
                 }
                 if finite and prev_end > prev_start else {}
+            ),
+            **(
+                _thermo_window_spread(
+                    ref, T_hist, qv_hist, last_steps=last_steps,
+                    humidity=thermo_humidity)
+                if finite else {}
             ),
         )
     except Exception as exc:  # noqa: BLE001 - campaign records per-scheme failures
@@ -1886,6 +1970,7 @@ def run_cached(
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -1900,6 +1985,8 @@ def run_cached(
         # Post-processing only, but it CHANGES a recorded number, so a cache
         # entry computed at one layer top must never be served for another.
         subcloud_top_m,
+        # Same argument: it selects WHICH humidity term becomes thermo_score.
+        thermo_humidity,
     )
     if key not in cache:
         # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
@@ -1932,6 +2019,7 @@ def run_cached(
             large_scale_forcing=large_scale_forcing,
             bl_anchor_top_m=bl_anchor_top_m,
             subcloud_top_m=subcloud_top_m,
+            thermo_humidity=thermo_humidity,
         )
     cached = cache[key]
     return RunDiagnostics(
@@ -2415,6 +2503,14 @@ def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed
 #: tiers; ``physical`` is the DERIVATIVE-FREE calibration set defined below.
 PARAM_SETS = ("core", "extended", "aggressive", "physical")
 
+#: What a scheme with no tunable parameter searched.  Explicit zeros rather
+#: than an empty dict, so a consumer reading "0 unique evaluations" learns the
+#: true fact instead of finding a missing key and printing the request.
+EMPTY_TUNE_STATS = {
+    "requested_evals": 0, "random_proposals": 0,
+    "refine_proposals": 0, "unique_evals": 0,
+}
+
 #: Marker the registry uses on a tier-0 parameter that is physically real but
 #: whose AD gradient vanishes (``see _CAPE_TRIGGER_AD_NOTE``, #1417).  Matched
 #: on the spec's own reference string so a newly re-classified parameter is
@@ -2499,7 +2595,12 @@ def tune_category_winner(
     objective: str = "combined",
     param_set: str = "extended",
     refine_frac: float = 0.0,
-) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics, dict[str, int]]:
+    if not (0.0 <= float(refine_frac) <= 1.0):
+        raise ValueError(
+            f"tune_category_winner: refine_frac must be in [0, 1], got "
+            f"{refine_frac!r}")
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
     default_run = run_cached(
@@ -2522,9 +2623,10 @@ def tune_category_winner(
         large_scale_forcing=large_scale_forcing,
         bl_anchor_top_m=bl_anchor_top_m,
         subcloud_top_m=subcloud_top_m,
+        thermo_humidity=thermo_humidity,
     )
     if scheme_key is None or subcfg is None:
-        return base_cfg, [], default_run
+        return base_cfg, [], default_run, EMPTY_TUNE_STATS
     tier, include_tier0, exclude = resolve_param_selection(scheme_key, param_set)
     params = build_trainable_params(
         active_scheme_keys={scheme_key},
@@ -2534,9 +2636,25 @@ def tune_category_winner(
         dtype=jnp.float64,
     )
     if not params.constraints:
-        return base_cfg, [], default_run
+        return base_cfg, [], default_run, EMPTY_TUNE_STATS
     constraints = params.constraints
     defaults = {c.name: float(params.as_dict()[c.name]) for c in constraints}
+    # A DEFAULT OUTSIDE ITS OWN BOUNDS is silently clamped by the sigmoid
+    # seeding (``range_to_sigmoid_array`` clips to 0.001/0.999), so candidate
+    # zero would not be the a-priori configuration and the reported "default"
+    # would not be the shipped value.  Refuse instead: the registry's bounds are
+    # a search range, and one that excludes the shipped value is a spec bug that
+    # must be fixed in the spec, not absorbed here.
+    out_of_bounds = {
+        c.name: (defaults[c.name], float(c.min_val), float(c.max_val))
+        for c in constraints
+        if not (float(c.min_val) <= defaults[c.name] <= float(c.max_val))
+    }
+    if out_of_bounds:
+        raise ValueError(
+            "tune_category_winner: these parameters' shipped defaults lie "
+            f"outside their declared bounds, so the search's 'default' would "
+            f"not be the a-priori configuration: {out_of_bounds}")
     best_cfg = base_cfg
     best_run = default_run
     best_values = defaults
@@ -2552,6 +2670,14 @@ def tune_category_winner(
     n_refine = max(0, int(round(float(refine_frac) * tune_evals)))
     n_random = max(1, tune_evals - n_refine)
     candidates = list(_candidate_values(defaults, constraints, n_random, seed))
+
+    # ACCOUNTING.  `tune_evals` is a REQUESTED budget, not a count of columns
+    # integrated: candidate zero repeats the default run, and a refinement
+    # proposal that lands on the incumbent's own value hits the cache.  Reporting
+    # the request as if it were the work done overstates both the search and the
+    # evaluations-per-parameter that a reader divides by.
+    stats = {"requested_evals": int(tune_evals), "random_proposals": 0,
+             "refine_proposals": 0, "unique_evals": 0}
 
     def _try(values: dict[str, float], label: str) -> None:
         """Evaluate one candidate and keep it if it beats the incumbent."""
@@ -2598,7 +2724,9 @@ def tune_category_winner(
             large_scale_forcing=large_scale_forcing,
             bl_anchor_top_m=bl_anchor_top_m,
             subcloud_top_m=subcloud_top_m,
+            thermo_humidity=thermo_humidity,
         )
+        stats["unique_evals"] = len(cache)
         trial_score = objective_value(trial_run, objective)
         if trial_run.status == "ok" and trial_score < best_score:
             best_score = trial_score
@@ -2609,6 +2737,7 @@ def tune_category_winner(
             }
 
     for i, values in enumerate(candidates):
+        stats["random_proposals"] += 1
         _try(values, f"tune:{category}:{scheme}:eval{i:03d}")
 
     # LOCAL REFINEMENT.  A uniform random search over 19-25 parameters resolves
@@ -2650,6 +2779,7 @@ def tune_category_winner(
                     if proposal == current or not (lo <= proposal <= hi):
                         continue
                     incumbent[c.name] = proposal
+                    stats["refine_proposals"] += 1
                     _try(
                         incumbent,
                         f"refine:{category}:{scheme}:s{step:g}:"
@@ -2685,7 +2815,7 @@ def tune_category_winner(
                 score_tuned=objective_value(best_run, objective),
             )
         )
-    return best_cfg, records, best_run
+    return best_cfg, records, best_run, stats
 
 
 def tune_focused_params(

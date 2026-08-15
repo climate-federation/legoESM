@@ -50,11 +50,15 @@ def test_decaying_profile_is_bottom_heavy():
         f"mass distribution; got share={share:.4g} vs mass={mass:.4g}")
 
 
-def test_log_transform_recovers_the_mass_distribution():
+def test_log_transform_recovers_the_mass_distribution_away_from_the_floor():
     """``d log q`` is the same at every level under a uniform relative error, so
-    the log metric looks exactly where the mass is, whatever the profile."""
+    the log metric looks exactly where the mass is — PROVIDED the floor does not
+    bind.  Every level here is far above it."""
+    from scripts.validate.scm_rce_tq_objective_probe import LOG_QV_FLOOR
+
     z_km, w = _linear_grid()
     qv = 18.0e-3 * 10.0 ** (-3.0 * z_km / 15.0)
+    assert qv.min() > 100.0 * LOG_QV_FLOOR
     out = _relative_perturbation_shares(
         qv, w, z_km, transform="log", relative_error=0.1)
     for h in SPLIT_HEIGHTS_KM:
@@ -62,9 +66,31 @@ def test_log_transform_recovers_the_mass_distribution():
             out[f"mass_share_above_{h:g}km"], rel=1e-12)
 
 
+def test_log_transform_is_not_the_mass_distribution_when_the_floor_binds():
+    """The control that makes the test above non-tautological: at levels the
+    floor clamps, ``d log q`` is NOT constant, and the share must move away from
+    the mass share.  A probe that hardcoded ``log(1+eps)`` would pass the test
+    above and fail here."""
+    from scripts.validate.scm_rce_tq_objective_probe import LOG_QV_FLOOR
+
+    z_km, w = _linear_grid()
+    qv = np.full(z_km.size, 18.0e-3)
+    # Drive the top half to (and below) the floor.
+    qv[z_km > 10.0] = LOG_QV_FLOOR * 1.0e-3
+    out = _relative_perturbation_shares(
+        qv, w, z_km, transform="log", relative_error=0.1)
+    assert out["share_above_10km"] < 0.5 * out["mass_share_above_10km"]
+
+
 def test_shares_are_independent_of_the_perturbation_size():
     """The printed table is only meaningful if the SHARES do not depend on the
-    arbitrary 10 % — verify rather than assert it in a docstring."""
+    arbitrary 10 % — verify rather than assert it in a docstring.
+
+    The claim is restricted to the identity transform at FIXED temperature,
+    where the common factor cancels algebraically; it is NOT claimed for the
+    floored log or for relative humidity under a simultaneous temperature
+    error, and this test does not establish it for those.
+    """
     z_km, w = _linear_grid()
     qv = 18.0e-3 * 10.0 ** (-3.0 * z_km / 15.0)
     a = _relative_perturbation_shares(

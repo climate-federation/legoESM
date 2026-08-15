@@ -6,10 +6,12 @@ condensate.  This one plots the two quantities the tuning was asked to improve,
 in PHYSICAL units, a-priori against tuned, one row of segments per scheme:
 
 * left panel — mass-weighted temperature RMSE against the CRM [K];
-* right panel — tropospheric relative-humidity RMSE against the CRM [RH units],
-  with absolute ``q_v`` RMSE [g/kg] available via ``--humidity qv`` because the
-  two answer different questions (absolute ``q_v`` is a boundary-layer metric:
-  MEASURED, 1.7 % of its leverage lies above 5 km).
+* right panel — the humidity error, selected by ``--humidity``.  ``logq``
+  (default) is the fractional humidity error the campaign minimises; ``rh`` is
+  the RCEMIP-conventional relative humidity; ``qv``/``trop_qv`` are the absolute
+  ``q_v`` RMSE in g/kg, kept because a reader will ask for it, and labelled as
+  what it is — a boundary-layer metric, since MEASURED on this reference only
+  1.7 % of its leverage lies above 5 km.
 
 Reads the merged campaign CSV; computes nothing the campaign did not already
 measure.
@@ -28,6 +30,9 @@ import numpy as np
 HUMIDITY_COLUMNS = {
     "rh": ("apriori_trop_rh_rmse", "tuned_trop_rh_rmse",
            "tropospheric RH RMSE vs CRM  [RH units]"),
+    "logq": ("apriori_thermo_logq_term", "tuned_thermo_logq_term",
+             "tropospheric fractional humidity error vs CRM\n"
+             "[units of the 10 % tolerance]"),
     "qv": ("apriori_qv_rmse_g_kg", "tuned_qv_rmse_g_kg",
            "column $q_v$ RMSE vs CRM  [g/kg]"),
     "trop_qv": ("apriori_trop_qv_rmse_g_kg", "tuned_trop_qv_rmse_g_kg",
@@ -37,14 +42,19 @@ HUMIDITY_COLUMNS = {
 T_COLUMNS = ("apriori_T_rmse_K", "tuned_T_rmse_K",
              "column $T$ RMSE vs CRM  [K]")
 
-#: Schemes that cannot move in this configuration for a STRUCTURAL reason, so a
-#: flat before->after segment is the honest result rather than a failed search.
-#: The label is only applied when the row is ALSO flat, so a scheme that starts
-#: moving loses it automatically instead of being permanently annotated.
+#: Schemes whose flat before->after segment has a STRUCTURAL cause, so it must
+#: not read as a failed search.  The note is applied only when the row is ALSO
+#: flat, so a scheme that starts moving loses it automatically.
+#:
+#: `dca` is deliberately NOT here.  It had no tunable parameter under the
+#: extended tier, but the `physical` set admits its CAPE trigger, so a hardcoded
+#: "no tunable parameters" note would be a FALSE label the moment the parameter
+#: set changes.  A zero-parameter row is annotated from its own
+#: `n_tuned_params` column instead, which is true whatever set was searched.
 STRUCTURALLY_FLAT = {
     "kuo": "inactive in a single column (needs large-scale moisture convergence)",
-    "dca": "no tunable parameters exposed",
 }
+_NO_PARAMS_NOTE = "no tunable parameter in the set that was searched"
 
 
 def _ff(value: str | None) -> float:
@@ -66,14 +76,19 @@ def read_rows(csv_path: Path) -> list[dict]:
 
 
 def _structural_note(row: dict, prior: float, tuned: float) -> str | None:
+    """Why this scheme's before->after segment is flat, or None.
+
+    Two sources, in order: a zero tunable-parameter count (read from the row, so
+    it stays true when the parameter set changes) and a named structural reason
+    for a scheme that has parameters but cannot use them here.
+    """
+    n_params = _ff(row.get("n_tuned_params"))
+    if math.isfinite(n_params) and n_params == 0:
+        return _NO_PARAMS_NOTE
     scheme = row.get("scheme", "")
     if scheme not in STRUCTURALLY_FLAT:
         return None
-    n_params = _ff(row.get("n_tuned_params"))
-    flat = (
-        (math.isfinite(prior) and math.isfinite(tuned) and prior == tuned)
-        or (math.isfinite(n_params) and n_params == 0)
-    )
+    flat = math.isfinite(prior) and math.isfinite(tuned) and prior == tuned
     return STRUCTURALLY_FLAT[scheme] if flat else None
 
 
@@ -95,7 +110,7 @@ def _panel(ax, rows, columns, *, title, log_x: bool):
               reverse=True)
 
     y = np.arange(len(data))
-    dropped = []
+    flat_notes: list[tuple[str, str]] = []
     for i, (scheme, prior, tuned, row) in enumerate(data):
         if math.isfinite(prior) and math.isfinite(tuned):
             ax.plot([prior, tuned], [i, i], color="#9aa0a6", lw=1.4, zorder=1)
@@ -106,7 +121,7 @@ def _panel(ax, rows, columns, *, title, log_x: bool):
         ax.scatter([tuned], [i], s=46, color="#e76f51" if not note else "#c9c9c9",
                    zorder=3, label="tuned" if i == 0 else None)
         if note:
-            dropped.append(scheme)
+            flat_notes.append((scheme, note))
 
     labels = [
         d[0] + (" *" if _structural_note(d[3], d[1], d[2]) else "") for d in data
@@ -119,7 +134,7 @@ def _panel(ax, rows, columns, *, title, log_x: bool):
         ax.set_xscale("log")
     ax.grid(axis="x", alpha=0.25)
     ax.set_ylim(-0.7, len(data) - 0.3)
-    return dropped
+    return flat_notes
 
 
 def make_figure(rows, out_path: Path, *, humidity: str, log_x: bool,
@@ -146,7 +161,7 @@ def make_figure(rows, out_path: Path, *, humidity: str, log_x: bool,
         fig.text(
             0.5, 0.012,
             "* flat by construction: "
-            + "; ".join(f"{s} — {STRUCTURALLY_FLAT[s]}" for s in note),
+            + "; ".join(f"{s} — {n}" for s, n in note),
             ha="center", fontsize=8, color="#555555")
     if suptitle:
         fig.suptitle(suptitle, fontsize=11)
@@ -162,21 +177,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("csv", type=Path,
                         help="merged convection-intercomparison CSV")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--humidity", default="rh",
+    parser.add_argument("--humidity", default="logq",
                         choices=sorted(HUMIDITY_COLUMNS))
+    parser.add_argument(
+        "--allow-mixed-objectives", action="store_true",
+        help=(
+            "Plot rows tuned under DIFFERENT objectives in one figure. Refused "
+            "by default: the panels would put numbers side by side that no "
+            "single search minimised, which is a confound, not a comparison."))
     parser.add_argument("--log-x", action="store_true",
                         help="log x axis (RMSEs span decades across schemes)")
     parser.add_argument("--suptitle", default=None)
     args = parser.parse_args(argv)
 
     rows = read_rows(args.csv)
+    objectives = sorted({r.get("objective", "unstamped") for r in rows})
+    if len(objectives) > 1 and not args.allow_mixed_objectives:
+        raise SystemExit(
+            f"REFUSED: rows were tuned under different objectives {objectives}. "
+            "A figure mixing them shows numbers no single search minimised. "
+            "Split the CSV, or pass --allow-mixed-objectives if that is "
+            "genuinely what is wanted.")
     out = make_figure(rows, args.out, humidity=args.humidity,
                       log_x=args.log_x, suptitle=args.suptitle)
-    objectives = sorted({r.get("objective", "unstamped") for r in rows})
     print(f"wrote {out}  ({len(rows)} schemes, objective(s)={objectives})")
-    if len(objectives) > 1:
-        print("WARNING: rows were tuned under DIFFERENT objectives "
-              f"({objectives}); the two panels are not a controlled comparison.")
     return 0
 
 

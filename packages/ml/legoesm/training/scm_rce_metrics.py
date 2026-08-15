@@ -60,9 +60,17 @@ def weighted_rmse(diff: jax.Array, weights: jax.Array) -> jax.Array:
 
     Uses a floored sqrt so the gradient stays finite at a perfect fit
     (``diff == 0`` makes ``d sqrt(s)/ds = 1/(2 sqrt(s))`` blow up at ``s == 0``).
+
+    A level with weight EXACTLY zero contributes exactly zero even if its
+    residual is NaN or infinite.  IEEE says ``0 * NaN == NaN``, so without the
+    mask a single non-finite level inside a region the caller deliberately
+    excluded — the stratosphere above the tropospheric mask, everything above
+    the sub-cloud layer — would poison the whole score.  It is a no-op when
+    every weight is positive, which is the common case.
     """
     diff = jnp.asarray(diff)
     weights = jnp.asarray(weights, dtype=diff.dtype)
+    diff = jnp.where(weights > 0, diff, jnp.zeros_like(diff))
     return safe_sqrt(jnp.sum(weights * diff ** 2))
 
 
@@ -369,6 +377,35 @@ DEFAULT_THERMO_T_SCALE_K = 1.0
 #: RCEMIP CRM ensemble is several times this, so a column inside one tolerance
 #: of the reference is inside the ensemble's own disagreement.
 DEFAULT_THERMO_RH_SCALE = 0.05
+#: 10 % FRACTIONAL humidity error, the tolerance for the ``logq`` variable
+#: (``|d ln q| = 0.1`` is a 10.5 % error).  Chosen for rough radiative parity
+#: with the 1 K temperature tolerance: a 1 K free-tropospheric temperature error
+#: is a few W/m^2 of OLR, and a ~10 % free-tropospheric humidity error is of the
+#: same order.  Declared, like the others, rather than discovered.
+DEFAULT_THERMO_LOGQ_SCALE = 0.10
+#: Floor inside the log [kg/kg].  The reference's driest level is ~1e-6 kg/kg,
+#: so a floor two decades below it never touches a real level; it exists so a
+#: model column that dries to exactly zero yields a large finite penalty rather
+#: than -inf, which would make every candidate compare False and silently
+#: discard the search.
+DEFAULT_THERMO_LOGQ_FLOOR = 1.0e-8
+
+#: Which humidity variable the objective minimises.
+#:
+#: ``logq`` (default) scores FRACTIONAL humidity error.  It needs no saturation
+#: curve, so it carries no liquid/ice phase convention and cannot double-count a
+#: temperature error, and — MEASURED on the SAM_CRM reference under a uniform
+#: relative perturbation — its leverage is distributed exactly like the column
+#: mass (56.6 % above 5 km) instead of the 1.7 % an absolute ``q_v`` RMSE gives.
+#:
+#: ``rh`` is the RCEMIP-conventional diagnostic and is reported either way.  Its
+#: KNOWN cost, quantified: ``RH = q_v/q_sat(T)`` and ``dlnq_sat/dT ~ 0.06 /K``
+#: at 300 K rising to ~0.12 /K near the cold point, so at a 5 % RH tolerance the
+#: humidity term ALSO demands ~0.8 K near the surface and ~0.4 K aloft — i.e. it
+#: silently re-weights temperature by 2-4x, unevenly in the vertical, and a
+#: compensating warm-and-moist bias can satisfy it exactly.
+THERMO_HUMIDITY_VARIABLES = ("logq", "rh")
+DEFAULT_THERMO_HUMIDITY = "logq"
 #: Below this pressure the column is stratospheric: humidity there is tiny,
 #: radiatively driven rather than convectively driven, and the RH ratio becomes
 #: numerically fragile because q_sat over ice at ~190 K is ~1e-6 kg/kg.  A FIXED
@@ -409,6 +446,57 @@ def relative_humidity_profile(
     return qv_profile / q_sat
 
 
+def log_humidity_profile(
+    qv_profile: jax.Array,
+    *,
+    floor: float = DEFAULT_THERMO_LOGQ_FLOOR,
+) -> jax.Array:
+    """``ln(max(q_v, floor))`` — fractional humidity, with no saturation curve."""
+    qv_profile = jnp.asarray(qv_profile)
+    return jnp.log(jnp.maximum(qv_profile,
+                               jnp.asarray(floor, dtype=qv_profile.dtype)))
+
+
+#: Buffer kept BELOW the reference cold point when the mask is derived from it.
+DEFAULT_THERMO_COLD_POINT_BUFFER_PA = 2_000.0
+#: Pressure above which the cold-point search looks (i.e. ``p`` less than this),
+#: so a surface temperature minimum cannot be mistaken for the tropopause.
+_COLD_POINT_SEARCH_MAX_P_PA = 30_000.0
+
+
+def tropospheric_min_pressure(
+    T_ref: jax.Array,
+    p_profile: jax.Array,
+    *,
+    floor_p_Pa: float = DEFAULT_THERMO_MIN_P_PA,
+    buffer_Pa: float = DEFAULT_THERMO_COLD_POINT_BUFFER_PA,
+) -> float:
+    """Lowest pressure the thermodynamic objective scores, from the REFERENCE.
+
+    A fixed 100 hPa bound is close to the RCEMIP-300 K cold point (~17 km,
+    ~100 hPa) by coincidence, and the coincidence is the problem: if the cold
+    point sits just BELOW the bound, the objective scores tropopause levels
+    where ``dln q_sat/dT`` is ~0.15 /K and a 2 K radiatively-controlled
+    temperature bias — which no convection parameter can fix — becomes a ~30 %
+    humidity error carrying real weight.  Deriving the bound from the
+    reference's own cold point, plus a buffer, removes the coincidence.
+
+    It is computed from the REFERENCE ONLY, so every scheme is scored on the
+    identical domain; a bound derived from each model's own cold point would
+    score every scheme on a different column.
+    """
+    T_ref = jnp.asarray(T_ref)
+    p_profile = jnp.asarray(p_profile, dtype=T_ref.dtype)
+    aloft = p_profile < jnp.asarray(_COLD_POINT_SEARCH_MAX_P_PA, dtype=T_ref.dtype)
+    if not bool(jnp.any(aloft)):
+        raise ValueError(
+            "tropospheric_min_pressure: no level above "
+            f"{_COLD_POINT_SEARCH_MAX_P_PA} Pa to search for a cold point.")
+    cold_idx = int(jnp.argmin(jnp.where(aloft, T_ref, jnp.inf)))
+    p_cold = float(p_profile[cold_idx])
+    return float(max(float(floor_p_Pa), p_cold + float(buffer_Pa)))
+
+
 def tropospheric_mass_weights(
     p_profile: jax.Array,
     mass_weights: jax.Array,
@@ -437,7 +525,7 @@ def tropospheric_mass_weights(
     return selected / jnp.sum(selected)
 
 
-def score_thermo_jax(
+def thermo_terms_jax(
     ref: Any,
     T_profile: jax.Array,
     qv_profile: jax.Array,
@@ -446,33 +534,15 @@ def score_thermo_jax(
     trop_weights: jax.Array,
     T_scale_K: float = DEFAULT_THERMO_T_SCALE_K,
     rh_scale: float = DEFAULT_THERMO_RH_SCALE,
+    logq_scale: float = DEFAULT_THERMO_LOGQ_SCALE,
+    logq_floor: float = DEFAULT_THERMO_LOGQ_FLOOR,
     blend_width_K: float = DEFAULT_THERMO_RH_BLEND_WIDTH_K,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """``(T_term, rh_term, combined)`` — the temperature-and-humidity target.
+) -> dict[str, jax.Array]:
+    """Every thermodynamic term, computed once: ``T``, ``logq`` and ``rh``.
 
-    Two deliberate departures from :func:`score_profiles_jax`, each because the
-    combined score cannot answer the question this objective is for:
-
-    * **Condensate and precipitation are absent.**  MEASURED on the ten-scheme
-      2026-08-13 arm, the condensate term carries 87-100 % of the combined
-      score's sum of squares, so minimizing it is not minimizing T or humidity.
-    * **Humidity is scored as RELATIVE humidity, not as absolute ``q_v``.**  A
-      mass-weighted absolute ``q_v`` RMSE is a boundary-layer metric: ``q_v``
-      falls ~3 decades between the surface and the upper troposphere and the
-      mass weights add another low-level factor, so the free-tropospheric
-      humidity — the field convection schemes actually differ in, and the one
-      RCEMIP reports — contributes a per-mille fraction of it.  RH is bounded
-      and O(1) at every level.
-
-    The KNOWN COST of the RH choice, stated rather than hidden: RH depends on
-    temperature through ``q_sat``, so a temperature error is counted once in
-    ``T_term`` and again, partially, in ``rh_term``.  That is a deliberate
-    trade against a humidity metric that cannot see two thirds of the column;
-    absolute ``q_v`` RMSE is still reported alongside so a reader can separate
-    them.
-
-    Both terms are divided by a FIXED physical tolerance and combined in
-    quadrature, so the T-versus-humidity weight is a declared decision.
+    All three are ALWAYS returned, whichever one the objective minimises, so a
+    campaign tuned on one can be read on the other without re-running it — and
+    so a trade-off between them is visible rather than inferred.
     """
     T_profile = jnp.asarray(T_profile)
     dtype = T_profile.dtype
@@ -486,12 +556,72 @@ def score_thermo_jax(
         T_profile, qv_profile, p_profile, blend_width_K=blend_width_K)
     rh_ref = relative_humidity_profile(
         T_ref, qv_ref, p_profile, blend_width_K=blend_width_K)
+    lnq = log_humidity_profile(qv_profile, floor=logq_floor)
+    lnq_ref = log_humidity_profile(qv_ref, floor=logq_floor)
 
-    T_term = weighted_rmse(
-        (T_profile - T_ref) / jnp.asarray(T_scale_K, dtype=dtype), weights)
-    rh_term = weighted_rmse(
-        (rh - rh_ref) / jnp.asarray(rh_scale, dtype=dtype), weights)
-    return T_term, rh_term, safe_sqrt((T_term ** 2 + rh_term ** 2) / 2.0)
+    return {
+        "T": weighted_rmse(
+            (T_profile - T_ref) / jnp.asarray(T_scale_K, dtype=dtype), weights),
+        "rh": weighted_rmse(
+            (rh - rh_ref) / jnp.asarray(rh_scale, dtype=dtype), weights),
+        "logq": weighted_rmse(
+            (lnq - lnq_ref) / jnp.asarray(logq_scale, dtype=dtype), weights),
+        # Physical-unit companions, on the SAME masked weights, so a caption can
+        # quote a number a reader can interpret.
+        "rh_rmse": weighted_rmse(rh - rh_ref, weights),
+        "qv_rmse_kg_kg": weighted_rmse(qv_profile - qv_ref, weights),
+    }
+
+
+def score_thermo_jax(
+    ref: Any,
+    T_profile: jax.Array,
+    qv_profile: jax.Array,
+    p_profile: jax.Array,
+    *,
+    trop_weights: jax.Array,
+    humidity: str = DEFAULT_THERMO_HUMIDITY,
+    T_scale_K: float = DEFAULT_THERMO_T_SCALE_K,
+    rh_scale: float = DEFAULT_THERMO_RH_SCALE,
+    logq_scale: float = DEFAULT_THERMO_LOGQ_SCALE,
+    logq_floor: float = DEFAULT_THERMO_LOGQ_FLOOR,
+    blend_width_K: float = DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """``(T_term, humidity_term, combined)`` — the temperature-and-humidity target.
+
+    Two deliberate departures from :func:`score_profiles_jax`, each because the
+    combined score cannot answer the question this objective is for:
+
+    * **Condensate and precipitation are absent.**  MEASURED on the ten-scheme
+      2026-08-13 arm, the condensate term carries 87-100 % of the combined
+      score's sum of squares, so minimizing it is not minimizing T or humidity.
+    * **Humidity is NOT scored as absolute ``q_v``.**  A mass-weighted absolute
+      ``q_v`` RMSE is a boundary-layer metric: ``q_v`` falls ~3 decades between
+      the surface and the upper troposphere and the mass weights add another
+      low-level factor.  MEASURED on this reference under a uniform relative
+      error, 1.72 % of its leverage lies above 5 km and 0.0006 % above 10 km,
+      against a 56.6 % mass share — so the free-tropospheric humidity, the field
+      convection schemes actually differ in, is invisible to it.
+
+    ``humidity`` selects the variable that is MINIMISED; see
+    :data:`THERMO_HUMIDITY_VARIABLES` for what each buys and costs.  A typo must
+    select nothing, so this raises rather than defaulting.
+
+    Both terms are divided by a FIXED physical tolerance and combined in
+    quadrature, so the T-versus-humidity weight is a declared decision rather
+    than whatever the reference profile's own spread happens to be.
+    """
+    if humidity not in THERMO_HUMIDITY_VARIABLES:
+        raise ValueError(
+            f"score_thermo_jax: unknown humidity variable {humidity!r}; "
+            f"expected one of {THERMO_HUMIDITY_VARIABLES}")
+    terms = thermo_terms_jax(
+        ref, T_profile, qv_profile, p_profile, trop_weights=trop_weights,
+        T_scale_K=T_scale_K, rh_scale=rh_scale, logq_scale=logq_scale,
+        logq_floor=logq_floor, blend_width_K=blend_width_K)
+    T_term = terms["T"]
+    q_term = terms[humidity]
+    return T_term, q_term, safe_sqrt((T_term ** 2 + q_term ** 2) / 2.0)
 
 
 def moist_adiabat_diagnostics_jax(

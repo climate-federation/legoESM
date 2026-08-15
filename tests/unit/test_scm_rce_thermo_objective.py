@@ -22,9 +22,12 @@ import pytest
 
 from legoesm.training.scm_rce_metrics import (
     DEFAULT_THERMO_MIN_P_PA,
+    THERMO_HUMIDITY_VARIABLES,
     relative_humidity_profile,
     score_thermo_jax,
     tropospheric_mass_weights,
+    tropospheric_min_pressure,
+    weighted_rmse,
 )
 
 
@@ -62,6 +65,74 @@ def test_condensate_has_exactly_no_effect():
     assert before == after
 
 
+def test_masked_levels_cannot_leak_a_nan():
+    """A NaN inside the region the mask excludes must contribute exactly zero.
+    IEEE says 0 * NaN == NaN, so without an explicit mask one stratospheric
+    non-finite level would poison a score that never looked there."""
+    weights = jnp.asarray([0.0, 0.0, 0.5, 0.5])
+    diff = jnp.asarray([jnp.nan, jnp.inf, 1.0, 1.0])
+    assert float(weighted_rmse(diff, weights)) == pytest.approx(1.0, rel=1e-12)
+
+
+def test_humidity_variable_dispatch_raises_on_a_typo():
+    ref, p, w = _ref()
+    weights = tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w))
+    with pytest.raises(ValueError, match="unknown humidity variable"):
+        score_thermo_jax(
+            ref, jnp.asarray(ref.T_ref), jnp.asarray(ref.qv_ref),
+            jnp.asarray(p), trop_weights=weights, humidity="specific")
+
+
+def test_logq_and_rh_select_different_terms():
+    """The two humidity variables must actually be different numbers, else the
+    selectable objective is decoration."""
+    ref, p, w = _ref()
+    weights = tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w))
+    qv = np.asarray(ref.qv_ref) * 1.3
+    args = (jnp.asarray(ref.T_ref), jnp.asarray(qv), jnp.asarray(p))
+    _t1, q_logq, _c1 = score_thermo_jax(
+        ref, *args, trop_weights=weights, humidity="logq")
+    _t2, q_rh, _c2 = score_thermo_jax(
+        ref, *args, trop_weights=weights, humidity="rh")
+    assert float(q_logq) != float(q_rh)
+    assert set(THERMO_HUMIDITY_VARIABLES) == {"logq", "rh"}
+
+
+def test_logq_scores_a_uniform_relative_error_uniformly():
+    """A 10 % moisture error EVERYWHERE is exactly one tolerance unit, whatever
+    the profile shape — the property an absolute q_v RMSE does not have."""
+    ref, p, w = _ref(40)
+    weights = tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w))
+    qv = np.asarray(ref.qv_ref) * 1.10
+    _T, q_term, _c = score_thermo_jax(
+        ref, jnp.asarray(ref.T_ref), jnp.asarray(qv), jnp.asarray(p),
+        trop_weights=weights, humidity="logq", logq_scale=math.log(1.10))
+    assert float(q_term) == pytest.approx(1.0, rel=1e-9)
+
+
+def test_tropospheric_min_pressure_sits_below_the_reference_cold_point():
+    """The mask must be derived from the reference's own cold point, not from a
+    bound that happens to be near it."""
+    n = 60
+    p = np.linspace(3_000.0, 100_000.0, n)
+    # A cold point at ~9000 Pa, well above the 100 hPa floor.
+    T = 300.0 - 80.0 * np.exp(-((p - 9_000.0) / 6_000.0) ** 2)
+    min_p = tropospheric_min_pressure(
+        jnp.asarray(T), jnp.asarray(p), floor_p_Pa=1.0, buffer_Pa=2_000.0)
+    cold_p = float(p[int(np.argmin(np.where(p < 30_000.0, T, np.inf)))])
+    assert min_p == pytest.approx(cold_p + 2_000.0, rel=1e-9)
+    assert min_p > cold_p
+
+
+def test_tropospheric_min_pressure_respects_the_floor():
+    n = 60
+    p = np.linspace(3_000.0, 100_000.0, n)
+    T = 300.0 - 80.0 * np.exp(-((p - 9_000.0) / 6_000.0) ** 2)
+    min_p = tropospheric_min_pressure(
+        jnp.asarray(T), jnp.asarray(p), floor_p_Pa=50_000.0, buffer_Pa=0.0)
+    assert min_p == 50_000.0
+
+
 def test_one_kelvin_everywhere_scores_one_on_the_T_term():
     """The declared tolerance is the unit: a uniform 1 K error is exactly 1."""
     ref, p, w = _ref()
@@ -73,29 +144,40 @@ def test_one_kelvin_everywhere_scores_one_on_the_T_term():
     assert float(T_term) == pytest.approx(1.0, rel=1e-10)
 
 
-def test_humidity_term_sees_the_free_troposphere():
-    """The defect this objective exists to fix, as a control.
+def test_humidity_term_sees_an_upper_tropospheric_error_analytically():
+    """The defect this objective exists to fix, checked against an EXACT value.
 
-    A 20 % relative humidity error applied ONLY above 500 hPa must move the
-    thermo score by far more than it moves an absolute-q_v RMSE, because
-    absolute q_v up there is ~1e-4 of its surface value.
+    A 20 % moisture error applied to the upper HALF of the column mass (and
+    nothing else) must give a ``logq`` term of exactly
+    ``sqrt(0.5) * ln(1.2) / logq_scale`` — no tolerance-free "factor of 30"
+    assertion, and the number is derivable by hand.  The synthetic profile here
+    spans a factor ``(p_top/p_sfc)^3`` in q_v, NOT the reference's own range;
+    the claim about the real CRM profile is the probe's, not this test's.
     """
     ref, p, w = _ref(40)
     weights = np.asarray(
         tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w)))
-    upper = p < 50_000.0
+    # Exactly half the (uniform) weights, chosen by index so the expected value
+    # is exact rather than approximately half.
+    upper = np.zeros(p.size, dtype=bool)
+    upper[: p.size // 2] = True
     qv_pert = np.where(upper, np.asarray(ref.qv_ref) * 1.2, ref.qv_ref)
 
-    _T, rh_term, _c = score_thermo_jax(
+    logq_scale = 0.10
+    _T, q_term, _c = score_thermo_jax(
         ref, jnp.asarray(ref.T_ref), jnp.asarray(qv_pert), jnp.asarray(p),
-        trop_weights=jnp.asarray(weights))
-    absolute = float(np.sqrt(np.sum(
-        weights * (qv_pert - np.asarray(ref.qv_ref)) ** 2)))
-    # In units of each metric's own declared tolerance: 5 % RH, and 1 g/kg.
-    assert float(rh_term) > 30.0 * (absolute / 1.0e-3), (
-        f"rh_term={float(rh_term):.4g} vs absolute-qv-in-g/kg="
-        f"{absolute / 1.0e-3:.4g}; the RH term is supposed to be the one that "
-        "can see an upper-tropospheric humidity error")
+        trop_weights=jnp.asarray(weights), humidity="logq",
+        logq_scale=logq_scale)
+    mass_fraction = float(np.sum(weights[upper]))
+    expected = math.sqrt(mass_fraction) * math.log(1.2) / logq_scale
+    assert float(q_term) == pytest.approx(expected, rel=1e-9)
+
+    # And the control that makes it a statement about the CHOICE of variable:
+    # the absolute-q_v RMSE over the same perturbation, expressed in its own
+    # 1 g/kg tolerance, is far smaller because q_v up there is tiny.
+    absolute_in_tolerances = float(np.sqrt(np.sum(
+        weights * ((qv_pert - np.asarray(ref.qv_ref)) / 1.0e-3) ** 2)))
+    assert float(q_term) > 10.0 * absolute_in_tolerances
 
 
 def test_tropospheric_mask_excludes_the_stratosphere():
@@ -114,22 +196,50 @@ def test_empty_mask_raises_rather_than_scoring_every_column_alike():
                                   min_p_Pa=1.0e9)
 
 
-def test_relative_humidity_uses_the_ice_blend_below_freezing():
-    """A liquid-only curve would inflate cold-level RH; the blend must not."""
+def test_relative_humidity_uses_ice_saturation_below_the_blend_window():
+    """Independent check, not a call to the same helper: at 230 K the blend is
+    fully on the ICE branch, so RH must equal q_v/q_sat_ice computed here."""
     from legoesm.thermo import (
         saturation_mixing_ratio,
-        saturation_mixing_ratio_blend,
+        saturation_mixing_ratio_ice,
     )
     T = jnp.asarray([230.0])
     p = jnp.asarray([30_000.0])
     qv = jnp.asarray([1.0e-4])
     rh = float(relative_humidity_profile(T, qv, p)[0])
+    ice = float(qv[0] / saturation_mixing_ratio_ice(T, p)[0])
     liquid = float(qv[0] / saturation_mixing_ratio(T, p)[0])
-    blended = float(qv[0] / saturation_mixing_ratio_blend(T, p)[0])
-    assert rh == pytest.approx(blended, rel=1e-12)
+    assert rh == pytest.approx(ice, rel=1e-10)
     assert rh > liquid, (
-        "ice saturation is LOWER than liquid at 230 K, so the blended RH must "
-        "exceed the liquid-only RH; got blended=%r liquid=%r" % (rh, liquid))
+        f"ice saturation is LOWER than liquid at 230 K, so the RH must exceed "
+        f"the liquid-only value; got {rh!r} vs {liquid!r}")
+
+
+def test_reference_and_model_humidity_go_through_the_same_curve(monkeypatch):
+    """Both sides must use ONE saturation curve. Counting the calls is the only
+    way to establish it: a version that used liquid for the model and the blend
+    for the reference would still produce plausible numbers."""
+    from legoesm.training import scm_rce_metrics as M
+
+    ref, p, w = _ref()
+    weights = tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w))
+    calls = []
+    import legoesm.thermo as thermo
+
+    real = thermo.saturation_mixing_ratio_blend
+
+    def _spy(T, pp, *a, **kw):
+        calls.append(float(jnp.asarray(T).mean()))
+        return real(T, pp, *a, **kw)
+
+    monkeypatch.setattr(thermo, "saturation_mixing_ratio_blend", _spy)
+    M.score_thermo_jax(
+        ref, jnp.asarray(np.asarray(ref.T_ref) + 1.0),
+        jnp.asarray(ref.qv_ref), jnp.asarray(p),
+        trop_weights=weights, humidity="rh")
+    assert len(calls) == 2, (
+        f"expected exactly two saturation calls (model and reference), got "
+        f"{len(calls)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -336,3 +446,124 @@ def test_frac_from_value_clamps_a_default_outside_its_own_bounds():
     assert camp._frac_from_value(c, 0.5) == 0.0
     assert camp._frac_from_value(c, 9.0) == 1.0
     assert math.isfinite(camp._frac_from_value(c, 1.5))
+
+
+def test_tuner_minimises_the_named_objective_and_the_csv_agrees(tmp_path,
+                                                                monkeypatch):
+    """The decisive wiring test: run the REAL tuner against a stub evaluator in
+    which `combined` and `thermo` prefer OPPOSITE candidates, and require the
+    selected configuration, the record scores and the CSV to follow whichever
+    was asked for.  A dispatch-dictionary test cannot establish this.
+    """
+    import csv as _csv
+
+    from scripts.run import run_scm_rce_campaign as camp
+    from scripts.run import run_scm_rce_convection_intercomparison as driver
+
+    base = camp.make_physics_config(convection="mass_flux")
+
+    def _tuned_sum(cfg) -> float:
+        """A scalar that distinguishes candidate configurations."""
+        _c, _s, sub = camp._active_subconfig(cfg, "convection")
+        return sum(float(v) for v in sub._asdict().values()
+                   if isinstance(v, float))
+
+    baseline = _tuned_sum(base)
+
+    def _fake_run_cached(cache, cfg, ref, *, label, **kw):
+        # Candidates whose parameters sum ABOVE the shipped configuration are
+        # good on `thermo` and bad on `combined`; below, the reverse.
+        if _tuned_sum(cfg) > baseline:
+            return _diag(score=9.0, thermo_score=0.1, subcloud_score=1.0)
+        return _diag(score=1.0, thermo_score=0.9, subcloud_score=1.0)
+
+    monkeypatch.setattr(camp, "run_cached", _fake_run_cached)
+    common = dict(
+        days=0.01, dt=600.0, analysis_days=0.01,
+        require_equilibrium=False, require_realism=False,
+        equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0,
+    )
+    picked = {}
+    for objective in ("combined", "thermo"):
+        cfg, records, tuned, _stats = camp.tune_category_winner(
+            "convection", base, object(), {}, tune_evals=24, seed=7,
+            objective=objective, param_set="physical", **common)
+        picked[objective] = (_tuned_sum(cfg), tuned, records)
+
+    combined_sum, combined_run, _cr = picked["combined"]
+    thermo_sum, thermo_run, thermo_records = picked["thermo"]
+    assert combined_run.score == 1.0 and combined_run.thermo_score == 0.9
+    assert thermo_run.thermo_score == 0.1 and thermo_run.score == 9.0
+    assert thermo_sum > baseline >= combined_sum or thermo_sum != combined_sum, (
+        "the two objectives must select DIFFERENT configurations, else the "
+        f"test cannot fail (combined={combined_sum}, thermo={thermo_sum})")
+    # The RECORDS carry the objective minimised, not the combined score.
+    assert thermo_records and thermo_records[0].score_tuned == 0.1
+
+    res = driver.SchemeResult(
+        scheme="mass_flux", prior=_diag(score=1.0, thermo_score=0.9),
+        tuned=thermo_run, records=list(thermo_records),
+        signature={"objective": "thermo", "tune_evals": 24},
+    )
+    out = tmp_path / "one.csv"
+    driver.write_csv(out, [res])
+    row = next(iter(_csv.DictReader(out.open())))
+    assert row["objective"] == "thermo"
+    assert float(row["tuned_objective"]) == pytest.approx(0.1)
+    assert float(row["tuned_score"]) == pytest.approx(9.0)
+
+
+def test_physical_set_pins_the_admitted_tier0_parameters_for_every_scheme():
+    """The tier-0 opt-in is selected by matching a free-text reference field, so
+    the RESULT is pinned here: exactly the CAPE trigger of the eight schemes
+    that declare one, and nothing else.  A reworded reference string, or a
+    numerics parameter acquiring the marker, goes red."""
+    from scripts.run import run_scm_rce_campaign as camp
+
+    expected = {
+        "atm.conv.SBMConfig": {"atm.conv.SBMConfig.cape_threshold"},
+        "atm.conv.DCAConfig": {"atm.conv.DCAConfig.cape_threshold"},
+        "atm.conv.KuoConfig": set(),
+        "atm.conv.MassFluxConfig": {"atm.conv.MassFluxConfig.cape_threshold"},
+        "atm.conv.ConvectiveEDMFConfig": {
+            "atm.conv.ConvectiveEDMFConfig.cape_threshold"},
+        "atm.conv.ZhangMcFarlaneConfig": {
+            "atm.conv.ZhangMcFarlaneConfig.cape_threshold"},
+        "atm.conv.KainFritschConfig": set(),
+        "atm.conv.EmanuelConfig": {"atm.conv.EmanuelConfig.cape_threshold"},
+        "atm.conv.TiedtkeConfig": {"atm.conv.TiedtkeConfig.cape_threshold"},
+        "atm.conv.BechtoldConfig": {"atm.conv.BechtoldConfig.cape_threshold"},
+    }
+    for key, want in expected.items():
+        _tier, include_tier0, _exclude = camp.resolve_param_selection(
+            key, "physical")
+        assert set(include_tier0) == want, f"{key}: {include_tier0}"
+
+
+def test_physical_set_defaults_are_all_inside_their_bounds():
+    """A default outside its own bounds is silently clamped by the sigmoid
+    seeding, so candidate zero would not be the a-priori configuration. Check
+    every scheme, since the tuner only raises for the one being run."""
+    from legoesm.training.param_collector import build_trainable_params
+    from scripts.run import run_scm_rce_campaign as camp
+
+    offenders = {}
+    for scheme in ("sbm", "dca", "kuo", "mass_flux", "edmf",
+                   "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke",
+                   "bechtold"):
+        cfg = camp.make_physics_config(convection=scheme)
+        _c, _s, sub = camp._active_subconfig(cfg, "convection")
+        key = camp._scheme_key_for_subconfig(sub)
+        if key is None:
+            continue
+        tier, include_tier0, exclude = camp.resolve_param_selection(
+            key, "physical")
+        params = build_trainable_params(
+            active_scheme_keys={key}, tier=tier, include_tier0=include_tier0,
+            exclude=exclude, dtype=jnp.float64)
+        values = params.as_dict()
+        for c in params.constraints:
+            v = float(values[c.name])
+            if not (float(c.min_val) <= v <= float(c.max_val)):
+                offenders[c.name] = (v, float(c.min_val), float(c.max_val))
+    assert not offenders, offenders

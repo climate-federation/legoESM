@@ -46,6 +46,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --schemes mass_flux,dca \
   --objective thermo \
   --param-set physical \
+  --thermo-humidity logq \
   --tune-refine-frac 0.35 \
   --subsidence-solve implicit_flux \
   --microphysics morrison \
@@ -82,22 +83,35 @@ for r in rows:
         bad.append(f"{r['scheme']}: tuned objective {tuned} WORSE than prior {prior}")
     if not math.isfinite(float(r["tuned_thermo_score"])):
         bad.append(f"{r['scheme']}: non-finite thermo score")
-    if not math.isfinite(float(r["tuned_trop_rh_rmse"])):
-        bad.append(f"{r['scheme']}: non-finite tropospheric RH RMSE")
+    for col in ("tuned_trop_rh_rmse", "tuned_thermo_logq_term",
+                "tuned_thermo_rh_term", "tuned_thermo_window_std"):
+        if not math.isfinite(float(r[col])):
+            bad.append(f"{r['scheme']}: non-finite {col}")
 order = [float(r["tuned_objective"]) for r in rows]
 if order != sorted(order):
     bad.append(f"rows not ordered by the tuned objective: {order}")
-# dca exposes no tunable parameter even in the physical set, so it MUST be
-# untouched -- a moved value there means the tuner is perturbing something it
-# was not given.
+# dca exposed NO parameter under the extended tier; the physical set admits its
+# CAPE trigger, so it must now report exactly one. If this reads 0 the tier-0
+# opt-in never reached the tuner and every scheme's trigger is untouched.
 for r in rows:
-    if r["scheme"] == "dca" and int(r["n_tuned_params"]) != 0:
-        bad.append(f"dca reported {r['n_tuned_params']} tuned params, expected 0")
+    if r["scheme"] == "dca" and int(r["n_tuned_params"]) != 1:
+        bad.append(f"dca reported {r['n_tuned_params']} tuned params, expected 1 "
+                   "(its CAPE trigger, admitted by the physical set)")
+    if r["thermo_humidity_variable"] != "logq":
+        bad.append(f"{r['scheme']}: humidity variable "
+                   f"{r['thermo_humidity_variable']!r}, expected 'logq'")
+    if int(r["unique_evals"]) < 2:
+        bad.append(f"{r['scheme']}: unique_evals={r['unique_evals']} - the "
+                   "search did not actually integrate distinct columns")
+    if r["scheme"] != "dca" and int(r["refine_proposals"]) < 1:
+        bad.append(f"{r['scheme']}: refinement never proposed anything")
 for r in rows:
     print(f"{r['scheme']:<12} obj {float(r['prior_objective']):.4f} -> "
           f"{float(r['tuned_objective']):.4f}   T {float(r['apriori_T_rmse_K']):.3f} -> "
           f"{float(r['tuned_T_rmse_K']):.3f} K   RH {float(r['apriori_trop_rh_rmse']):.4f} -> "
-          f"{float(r['tuned_trop_rh_rmse']):.4f}   n_par {r['n_tuned_params']}")
+          f"{float(r['tuned_trop_rh_rmse']):.4f}   n_par {r['n_tuned_params']}   "
+          f"noise+-{float(r['tuned_thermo_window_std']):.4f}   "
+          f"evals req {r['requested_evals']} uniq {r['unique_evals']}")
 if bad:
     print("SMOKE ASSERTIONS FAILED:")
     for b in bad:
@@ -110,7 +124,7 @@ ARC=$?
 
 echo "=== FIGURE ==="
 JAX_ENABLE_X64=1 $PY $WT/scripts/plot/plot_scm_rce_tq_ranking.py "$CSV" \
-  --out $OUT/tq_ranking_smoke.png --humidity rh --suptitle "smoke" 2>&1 | tail -3
+  --out $OUT/tq_ranking_smoke.png --humidity logq --suptitle "smoke" 2>&1 | tail -3
 FRC=${PIPESTATUS[0]}
 echo "FIG_RC=$FRC"
 echo "SMOKE_STATUS=$([ $FRC -eq 0 ] && echo OK || echo FAILED)"

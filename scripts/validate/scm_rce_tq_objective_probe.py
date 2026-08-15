@@ -21,10 +21,14 @@ and neither is safe to assume:
    wrong about it before (it claimed ``dca`` had 1 extended-tier parameter; the
    live registry says 0).  Read it from the registry, never from prose.
 
-The probe computes NOTHING of its own: reference profiles come from
-``run_scm_rce_campaign.build_reference_profiles``, saturation from
-``legoesm.thermo``, pressure from the RCEMIP analytic profile, and parameter
-metadata from ``legoesm.training.param_collector``.
+The probe computes NOTHING of its own: reference profiles, the column pressure
+and the relative humidity all come from the campaign's own helpers (so the
+probe measures the metric the campaign minimises, not a lookalike), and
+parameter metadata comes from ``legoesm.training.param_collector``.
+
+Shares are reported twice: over the FULL column, and over the TROPOSPHERIC MASK
+the objective actually scores — the two differ most for relative humidity,
+which the stratosphere drags toward zero.
 """
 
 from __future__ import annotations
@@ -44,11 +48,11 @@ if str(_REPO_ROOT) not in sys.path:
 import jax.numpy as jnp  # noqa: E402
 
 from scripts.run import run_scm_rce_campaign as camp  # noqa: E402
-from legoesm.atmosphere.idealized.rcemip_initial_conditions import (  # noqa: E402
-    wing2018_pressure_profile,
-)
-from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
 from legoesm.training.param_collector import build_registry  # noqa: E402
+from legoesm.training.scm_rce_metrics import (  # noqa: E402
+    DEFAULT_THERMO_LOGQ_FLOOR,
+    relative_humidity_profile,
+)
 
 #: Schemes in the convection intercomparison, in the array order of
 #: ``convtune_arms.sbatch`` so the two can be read side by side.
@@ -63,10 +67,10 @@ SCHEMES = (
 #: regime the schemes are supposed to differ in.
 SPLIT_HEIGHTS_KM = (2.0, 5.0, 10.0)
 
-#: Floor for log(q_v) [kg/kg].  The upper troposphere in the reference reaches
-#: ~1e-6, so a floor two decades below that does not touch any real level while
-#: keeping the transform finite if a future reference carries an exact zero.
-LOG_QV_FLOOR = 1.0e-8
+#: Floor for log(q_v) [kg/kg].  Taken from the objective itself so the probe
+#: cannot measure a metric the campaign does not use — a probe that answers a
+#: slightly different question is how a justification number goes wrong.
+LOG_QV_FLOOR = DEFAULT_THERMO_LOGQ_FLOOR
 
 
 def _relative_perturbation_shares(
@@ -86,8 +90,11 @@ def _relative_perturbation_shares(
       ``dq_k = eps * q_k``, so the share is ``w_k q_k^2``.  ``sigma`` is a
       single constant and cancels out of the SHARE (not out of the value), so
       the answer is independent of the normalisation choice.
-    * ``"log"`` — ``d log q = log(1 + eps)`` at EVERY level, so the share is
-      ``w_k`` alone: the metric looks exactly where the mass is.
+    * ``"log"`` — the ACTUAL floored transform the objective uses,
+      ``ln(max((1+eps) q, floor)) - ln(max(q, floor))``.  Away from the floor
+      this is ``log(1+eps)`` at every level, so the share reduces to ``w_k``
+      and the metric looks exactly where the mass is; at a level the floor
+      binds it does NOT, which is the case worth being able to see.
     * ``"precomputed"`` — ``values`` already holds the per-level perturbation
       magnitude (used for relative humidity, where a relative ``q_v`` error
       maps to a relative RH error of the same size only because ``q_sat`` is
@@ -96,7 +103,10 @@ def _relative_perturbation_shares(
     if transform == "identity":
         magnitude = relative_error * values
     elif transform == "log":
-        magnitude = np.full_like(values, np.log1p(relative_error))
+        magnitude = (
+            np.log(np.maximum((1.0 + relative_error) * values, LOG_QV_FLOOR))
+            - np.log(np.maximum(values, LOG_QV_FLOOR))
+        )
     elif transform == "precomputed":
         magnitude = values
     else:
@@ -130,17 +140,16 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
     qv = np.asarray(ref.qv_ref, dtype=float)
     T = np.asarray(ref.T_ref, dtype=float)
 
-    p_full = np.asarray(
-        wing2018_pressure_profile(jnp.asarray(ref.z_m, dtype=jnp.float64)),
-        dtype=float,
-    )
-    q_sat = np.asarray(
-        saturation_mixing_ratio(
-            jnp.asarray(T, dtype=jnp.float64), jnp.asarray(p_full, dtype=jnp.float64)
-        ),
-        dtype=float,
-    )
-    rh = qv / q_sat
+    # The SAME pressure profile and the SAME (liquid/ice blended) saturation
+    # curve the objective uses.  The first version of this probe used
+    # liquid-only Tetens on a pressure computed straight from height, so its RH
+    # number described a metric the campaign does not minimise.
+    p_full = camp.reference_pressure_profile(ref)
+    rh = np.asarray(relative_humidity_profile(
+        jnp.asarray(T, dtype=jnp.float64),
+        jnp.asarray(qv, dtype=jnp.float64),
+        jnp.asarray(p_full, dtype=jnp.float64),
+    ), dtype=float)
     # RH = q_v / q_sat is LINEAR in q_v at fixed T, so a uniform relative q_v
     # error is a uniform relative RH error; the per-level magnitude is
     # eps * RH_k, which is NOT uniform because RH itself varies.
@@ -162,7 +171,7 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
         "absolute_qv": _relative_perturbation_shares(
             qv, w, z_km, transform="identity", relative_error=relative_error),
         "log_qv": _relative_perturbation_shares(
-            np.maximum(qv, LOG_QV_FLOOR), w, z_km,
+            qv, w, z_km,
             transform="log", relative_error=relative_error),
         "relative_humidity": _relative_perturbation_shares(
             rh_magnitude, w, z_km,
@@ -172,6 +181,21 @@ def humidity_metric_weighting(ref, *, relative_error: float) -> dict:
         # the mass share.  If it is not, the probe itself is wrong.
         "absolute_T": _relative_perturbation_shares(
             T, w, z_km, transform="identity", relative_error=relative_error),
+    }
+    # The SAME shares over the masked domain the objective actually scores.
+    w_masked, min_p_Pa = camp.thermo_mask_weights(ref)
+    out["masked"] = {
+        "min_p_Pa": float(min_p_Pa),
+        "n_levels": int(np.sum(w_masked > 0.0)),
+        "absolute_qv": _relative_perturbation_shares(
+            qv, w_masked, z_km, transform="identity",
+            relative_error=relative_error),
+        "log_qv": _relative_perturbation_shares(
+            qv, w_masked, z_km, transform="log",
+            relative_error=relative_error),
+        "relative_humidity": _relative_perturbation_shares(
+            rh_magnitude, w_masked, z_km, transform="precomputed",
+            relative_error=relative_error),
     }
     return out
 
@@ -255,6 +279,18 @@ def main(argv: list[str] | None = None) -> int:
     mass_row = weighting["absolute_qv"]
     print("(mass share)".ljust(20) + "".join(
         f"{mass_row[f'mass_share_above_{h:g}km']:11.4%} "
+        for h in SPLIT_HEIGHTS_KM))
+    m = weighting["masked"]
+    print(f"\n-- over the SCORED mask only (p >= {m['min_p_Pa']:.0f} Pa, "
+          f"{m['n_levels']} levels) --")
+    print(header)
+    for name in ("absolute_qv", "log_qv", "relative_humidity"):
+        row = m[name]
+        cells = "".join(
+            f"{row[f'share_above_{h:g}km']:11.4%} " for h in SPLIT_HEIGHTS_KM)
+        print(name.ljust(20) + cells)
+    print("(mass share)".ljust(20) + "".join(
+        f"{m['absolute_qv'][f'mass_share_above_{h:g}km']:11.4%} "
         for h in SPLIT_HEIGHTS_KM))
 
     print("\n=== tunable parameters per convection scheme ===")

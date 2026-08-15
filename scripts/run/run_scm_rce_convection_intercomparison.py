@@ -94,6 +94,12 @@ class SchemeResult:
     # a confound, not a result).
     subsidence_solve: str = "as_shipped"
     subsidence_solve_status: str = ""
+    # What the search ACTUALLY did, as opposed to what was requested: the
+    # budget counts proposals, and candidate zero repeats the default while a
+    # refinement step that lands on the incumbent hits the cache.  Reporting
+    # the request as the work done overstates both the search and the
+    # evaluations-per-parameter a reader divides by.
+    tune_stats: dict = field(default_factory=dict)
     # The run signature the checkpoint was written under.  Carried on the
     # result (not just on disk) because the merge stage must be able to refuse
     # a checkpoint produced against a DIFFERENT reference: the physical-unit
@@ -154,7 +160,7 @@ _SIGNATURE_FIELDS = (
     # derivative-free `physical` set) and how much of the budget goes to the
     # local refinement.  An `extended`-tier checkpoint reused under an
     # `aggressive` request would report a search that never happened.
-    "param_set", "tune_refine_frac",
+    "param_set", "tune_refine_frac", "thermo_humidity",
     # The DEFINITION of the thermodynamic objective: its two tolerances, the
     # pressure bound that separates troposphere from stratosphere, and the
     # liquid/ice blend width of the saturation curve behind RH.  Each changes
@@ -338,6 +344,7 @@ def save_scheme_result(outdir: Path, res: SchemeResult, signature: dict | None =
         "signature": signature or {},
         "subsidence_solve": res.subsidence_solve,
         "subsidence_solve_status": res.subsidence_solve_status,
+        "tune_stats": res.tune_stats,
         "prior": asdict(res.prior),
         "tuned": asdict(res.tuned),
         "records": [asdict(r) for r in res.records],
@@ -361,6 +368,7 @@ def load_scheme_result(path: Path) -> SchemeResult:
         subsidence_solve=payload.get("subsidence_solve", "as_shipped"),
         subsidence_solve_status=payload.get("subsidence_solve_status", ""),
         signature=payload.get("signature", {}) or {},
+        tune_stats=payload.get("tune_stats", {}) or {},
     )
 
 
@@ -481,6 +489,7 @@ def evaluate_scheme(
     emanuel_unsaturated_downdraft: bool = False,
     param_set: str = "extended",
     tune_refine_frac: float = 0.0,
+    thermo_humidity: str = camp.DEFAULT_THERMO_HUMIDITY,
 ) -> SchemeResult:
     """A-priori run + derivative-free tuning for one convection scheme.
 
@@ -540,6 +549,7 @@ def evaluate_scheme(
         large_scale_forcing=large_scale_forcing,
         bl_anchor_top_m=bl_anchor_top_m,
         subcloud_top_m=subcloud_top_m,
+        thermo_humidity=thermo_humidity,
     )
     prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
     if tune_mode == "focused":
@@ -548,6 +558,7 @@ def evaluate_scheme(
         # convection scheme's downdrafts.  ``prior`` above and the tuner's own
         # default run are the same config, so they hit the same cache entry —
         # the a-priori column is not paid for twice.
+        tune_stats = dict(camp.EMPTY_TUNE_STATS)
         _best_cfg, records, _default_run, tuned = camp.tune_focused_params(
             base_cfg,
             ref,
@@ -560,7 +571,7 @@ def evaluate_scheme(
             **common,
         )
     else:
-        _best_cfg, records, tuned = camp.tune_category_winner(
+        _best_cfg, records, tuned, tune_stats = camp.tune_category_winner(
             "convection",
             base_cfg,
             ref,
@@ -575,6 +586,7 @@ def evaluate_scheme(
     return SchemeResult(
         scheme=scheme, prior=prior, tuned=tuned, records=records,
         subsidence_solve=subsidence_solve, subsidence_solve_status=solve_status,
+        tune_stats=tune_stats,
     )
 
 
@@ -669,6 +681,8 @@ CSV_FIELDS = (
     "apriori_thermo_score", "tuned_thermo_score",
     "apriori_thermo_T_term", "tuned_thermo_T_term",
     "apriori_thermo_rh_term", "tuned_thermo_rh_term",
+    "apriori_thermo_logq_term", "tuned_thermo_logq_term",
+    "thermo_humidity_variable",
     "apriori_trop_rh_rmse", "tuned_trop_rh_rmse",
     "apriori_trop_qv_rmse_g_kg", "tuned_trop_qv_rmse_g_kg",
     # HELD-OUT WINDOW: the same thermo score one analysis window earlier.  A
@@ -678,6 +692,17 @@ CSV_FIELDS = (
     # WATER BUDGET of the tuned column: an "equilibrium" accumulating water is
     # not one, and the previous arm's winner was doing exactly that.
     "tuned_P_minus_E_mm_day",
+    # THE SCORE'S OWN NOISE FLOOR, from the spread of the same objective across
+    # the last few non-overlapping analysis windows of the tuned run.  An
+    # improvement smaller than this is not a result, and nothing else in the
+    # campaign measures it.
+    "tuned_thermo_window_std", "tuned_thermo_window_mean",
+    "tuned_thermo_n_windows",
+    # WHAT THE SEARCH ACTUALLY DID, next to what was requested.  `tune_evals` is
+    # a budget of proposals; these are the columns integrated.
+    "requested_evals", "random_proposals", "refine_proposals", "unique_evals",
+    # The masked domain the thermodynamic score was taken over.
+    "trop_min_p_Pa", "trop_n_levels",
 )
 
 KG_KG_TO_G_KG = 1_000.0
@@ -723,6 +748,9 @@ def _row(res: SchemeResult, ref=None) -> dict:
         "tuned_thermo_T_term": t.thermo_T_term,
         "apriori_thermo_rh_term": p.thermo_rh_term,
         "tuned_thermo_rh_term": t.thermo_rh_term,
+        "apriori_thermo_logq_term": p.thermo_logq_term,
+        "tuned_thermo_logq_term": t.thermo_logq_term,
+        "thermo_humidity_variable": t.thermo_humidity_variable,
         "apriori_trop_rh_rmse": p.trop_rh_rmse,
         "tuned_trop_rh_rmse": t.trop_rh_rmse,
         "apriori_trop_qv_rmse_g_kg": p.trop_qv_rmse_g_kg,
@@ -732,6 +760,15 @@ def _row(res: SchemeResult, ref=None) -> dict:
         "tuned_heldout_T_rmse_K": t.heldout_T_rmse_K,
         "tuned_heldout_qv_rmse_g_kg": t.heldout_qv_rmse_g_kg,
         "tuned_P_minus_E_mm_day": t.precip_mm_day - t.evap_mm_day,
+        "tuned_thermo_window_std": t.thermo_score_window_std,
+        "tuned_thermo_window_mean": t.thermo_score_window_mean,
+        "tuned_thermo_n_windows": t.thermo_score_n_windows,
+        "requested_evals": res.tune_stats.get("requested_evals", ""),
+        "random_proposals": res.tune_stats.get("random_proposals", ""),
+        "refine_proposals": res.tune_stats.get("refine_proposals", ""),
+        "unique_evals": res.tune_stats.get("unique_evals", ""),
+        "trop_min_p_Pa": t.trop_min_p_Pa,
+        "trop_n_levels": t.trop_n_levels,
     }
     if ref is None:
         # No reference in scope (unit tests of the row shape): the physical
@@ -867,6 +904,23 @@ _ARM_BLURB = {
         "the other direction."
     ),
 }
+#: One sentence per objective, so a reader of the table knows what "better"
+#: meant without opening the code.
+_OBJECTIVE_BLURB = {
+    "thermo": (
+        "`thermo` = full-column temperature plus TROPOSPHERIC humidity, each "
+        "divided by a declared physical tolerance (1 K; 10 % fractional "
+        "humidity for `logq`, 5 % absolute RH for `rh`). Condensate and "
+        "precipitation are deliberately absent from it."),
+    "combined": (
+        "`combined` = the historical T + q_v + condensate + precip score, whose "
+        "condensate term MEASURED 87-100 % of the sum of squares — it is a "
+        "condensate ranking, not a temperature or humidity one."),
+    "subcloud": (
+        "`subcloud` = the sub-cloud layer's temperature, humidity and surface "
+        "evaporation only."),
+}
+
 _MIXED_ARM_BLURB = (
     "**WARNING — CONFOUNDED TABLE.** These rows were NOT produced under one "
     "common kernel arm, so the ranking mixes scheme physics with transport-"
@@ -876,21 +930,47 @@ _MIXED_ARM_BLURB = (
 
 
 def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> None:
-    ordered = sorted(results, key=lambda r: r.tuned.score)
+    # Ranked by the objective each row was TUNED under, read from the row's own
+    # signature.  The previous version sorted by the historical combined score
+    # and described the parameter set as "extended-tier" whatever had been run,
+    # so a thermo/physical arm was published under a condensate ranking and a
+    # false description of what had been searched.
+    def _obj_of(res: SchemeResult) -> float:
+        objective = _row_objective(res)
+        if objective not in camp.TUNE_OBJECTIVES:
+            return float("inf")
+        return camp.objective_value(res.tuned, objective)
+
+    ordered = sorted(results, key=_obj_of)
+    objectives = sorted({_row_objective(r) for r in results})
+    param_sets = sorted({str(r.signature.get("param_set", "unstamped"))
+                         for r in results})
+    one_objective = len(objectives) == 1
+    objective_label = objectives[0] if one_objective else (
+        "MIXED(" + ",".join(objectives) + ")")
     lines: list[str] = []
     lines.append("# SCM RCE Convection-Scheme Intercomparison vs CRM (RCEMIP1)\n")
     lines.append(
         "Each convection scheme is run in the SCM RCE column and scored against "
         "the plane-CRM reference (horizontal/time mean of the last "
-        f"{meta['last_reference_files']} CRM 3-D daily volumes). Metrics are the "
-        "std-normalized, mass-weighted profile RMSE (T, q_v, condensate) plus a "
-        "surface-precip term; **score** is their combination (lower = closer to "
-        "CRM). *A priori* = scheme defaults; *tuned* = after derivative-free "
-        "tuning of the scheme's extended-tier parameters against the CRM "
-        "profiles. The evaluation budget is PER SCHEME (it scales with the "
+        f"{meta['last_reference_files']} CRM 3-D daily volumes). *A priori* = "
+        "scheme defaults; *tuned* = after derivative-free tuning against the "
+        "CRM profiles. The evaluation budget is PER SCHEME (it scales with the "
         "scheme's parameter count, so a 1-parameter scheme is not compared "
-        "against a 19-parameter one at the same number of draws) and is "
+        "against a 25-parameter one at the same number of draws) and is "
         "reported in the `#evals` column, not here.\n"
+    )
+    lines.append(
+        f"**Ranked by `{objective_label}`**, the objective these rows were "
+        "tuned under, read from each row's own checkpoint signature. "
+        + (_OBJECTIVE_BLURB.get(objective_label, "") if one_objective else
+           "**WARNING — CONFOUNDED TABLE.** Rows were tuned under DIFFERENT "
+           "objectives, so the ranking compares numbers nobody minimised in "
+           "common. Re-run each objective into its own `--outdir`.")
+        + " Parameter set searched: `" + ",".join(param_sets) + "`. "
+        + "The `combined` columns (condensate-dominated) are still reported so "
+        "the trade-off against the historical score is visible, but they are "
+        "NOT the ranking.\n"
     )
     lines.append(
         f"SCM: radiation `{meta['radiation']}`, fixed SST 300 K, dt {meta['dt']:.0f} s, "
@@ -923,9 +1003,9 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     )
     lines.append("## A priori vs tuned RMSE\n")
     lines.append(
-        "| rank | scheme | kernel | score (prior→tuned) | T RMSE (p→t) | "
-        "qv RMSE (p→t) | cloud RMSE (p→t) | precip mm/d (p→t) | Δscore % | "
-        "verdict (p→t) | cold-pt T,z (tuned) | #params | #evals |"
+        "| rank | scheme | kernel | objective (prior→tuned) | T RMSE K (p→t) | "
+        "trop RH RMSE (p→t) | combined score (p→t) | precip mm/d (p→t) | "
+        "Δobjective % | verdict (p→t) | cold-pt T,z (tuned) | #params | #evals |"
     )
     lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|---:|")
     for i, res in enumerate(ordered, 1):
@@ -934,12 +1014,14 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         lines.append(
             f"| {i} | {res.scheme} "
             f"| {res.subsidence_solve_status or res.subsidence_solve} "
+            f"| {_fmt(row['prior_objective'])}→{_fmt(row['tuned_objective'])} "
+            f"| {_fmt(row['apriori_T_rmse_K'], '.3g')}→"
+            f"{_fmt(row['tuned_T_rmse_K'], '.3g')} "
+            f"| {_fmt(row['apriori_trop_rh_rmse'], '.3g')}→"
+            f"{_fmt(row['tuned_trop_rh_rmse'], '.3g')} "
             f"| {_fmt(p.score)}→{_fmt(t.score)} "
-            f"| {_fmt(p.T_rmse)}→{_fmt(t.T_rmse)} "
-            f"| {_fmt(p.qv_rmse)}→{_fmt(t.qv_rmse)} "
-            f"| {_fmt(p.cloud_rmse)}→{_fmt(t.cloud_rmse)} "
             f"| {_fmt(p.precip_mm_day, '.3g')}→{_fmt(t.precip_mm_day, '.3g')} "
-            f"| {_fmt(row['score_improvement_pct'], '.1f')} "
+            f"| {_fmt(row['objective_improvement_pct'], '.1f')} "
             f"| {row['prior_verdict']}→{row['tuned_verdict']} "
             f"| {_fmt(t.cold_point_T_K, '.0f')} K, {_fmt(t.cold_point_z_km, '.1f')} km "
             f"| {len(res.records)} "
@@ -957,9 +1039,14 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     lines.append("## Tuned parameters\n")
     for res in ordered:
         if not res.records:
-            lines.append(f"- **{res.scheme}**: no extended-tier tunable parameters.")
+            lines.append(
+                f"- **{res.scheme}**: no tunable parameters in the "
+                f"`{res.signature.get('param_set', 'unstamped')}` set.")
             continue
-        lines.append(f"- **{res.scheme}** (score {_fmt(res.prior.score)}→{_fmt(res.tuned.score)}):")
+        lines.append(
+            f"- **{res.scheme}** ({_row_objective(res)} "
+            f"{_fmt(res.records[0].score_default)}→"
+            f"{_fmt(res.records[0].score_tuned)}):")
         for rec in res.records:
             lines.append(
                 f"  - `{rec.scheme_key}.{rec.parameter}` "
@@ -1126,6 +1213,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--thermo-humidity", default=camp.DEFAULT_THERMO_HUMIDITY,
+        choices=camp.THERMO_HUMIDITY_VARIABLES,
+        help=(
+            "Which humidity variable --objective thermo MINIMISES. `logq` "
+            "(default) is fractional humidity error: no saturation curve, so "
+            "no liquid/ice phase convention and no double-counting of a "
+            "temperature error, and MEASURED on this reference its leverage is "
+            "distributed like the column mass (56.6 %% above 5 km) where an "
+            "absolute q_v RMSE gives 1.7 %%. `rh` is the RCEMIP-conventional "
+            "diagnostic but re-weights temperature by 2-4x through q_sat(T). "
+            "BOTH are reported whichever is chosen. Enters the signature."
+        ),
+    )
+    parser.add_argument(
         "--tune-refine-frac", type=float, default=0.0,
         help=(
             "Fraction of the evaluation budget spent on a LOCAL COORDINATE "
@@ -1287,6 +1388,11 @@ def main(argv: list[str] | None = None) -> int:
         args.tune_evals = min(args.tune_evals, 2)
         schemes = schemes[:2]
 
+    if not (0.0 <= float(args.tune_refine_frac) <= 1.0):
+        raise SystemExit(
+            "--tune-refine-frac must be in [0, 1] (it is the FRACTION of the "
+            f"budget spent on local refinement); got {args.tune_refine_frac}")
+
     args.outdir.mkdir(parents=True, exist_ok=True)
     meta_path = args.outdir / "run_meta.json"
 
@@ -1323,6 +1429,9 @@ def main(argv: list[str] | None = None) -> int:
         tune_mode=args.tune_mode,
         objective=args.objective,
         subcloud_top_m=args.subcloud_top_m,
+        param_set=args.param_set,
+        tune_refine_frac=args.tune_refine_frac,
+        thermo_humidity=args.thermo_humidity,
     )
     if args.merge_only and saved_meta:
         meta = {**meta, **saved_meta}
@@ -1370,6 +1479,7 @@ def main(argv: list[str] | None = None) -> int:
                 subcloud_top_m=args.subcloud_top_m,
                 param_set=args.param_set,
                 tune_refine_frac=args.tune_refine_frac,
+                thermo_humidity=args.thermo_humidity,
                 emanuel_unsaturated_downdraft=(
                     args.emanuel_unsaturated_downdraft and scheme == "emanuel"),
             )
