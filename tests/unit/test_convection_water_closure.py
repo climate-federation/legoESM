@@ -57,8 +57,52 @@ def _column(n=40):
     return p_full, p_half, T, q_v
 
 
-def _residual_mm_day(scheme: str) -> float:
-    """``∫(dq_v + dq_c + dq_r) dp/g`` for one convection call, in mm/day."""
+#: Schemes whose leaf cannot be called with a bare column here (they need a
+#: carry whose shape this test cannot synthesise).  SHRINK-ONLY, and asserted
+#: below — a silent `pytest.skip` on TypeError made an earlier version of this
+#: file report "1 passed, 11 skipped", i.e. it did not test the very bug it was
+#: written for.
+NOT_DIRECTLY_CALLABLE: dict[str, str] = {}
+
+
+def _leaf_kwargs(conv_fn, scheme_cfg, p_full, p_half, T, q_v):
+    """Build the leaf's arguments from its ACTUAL signature.
+
+    Read, not guessed: the leaves differ (emanuel takes a prognostic profile,
+    bechtold also takes winds, a stochastic carry and a PRNG key), and several
+    return a tuple rather than a bare ConvectionOutput.
+    """
+    import inspect
+
+    import jax
+
+    ncol, nlev = 1, p_full.shape[0]
+    zeros_2d = jnp.zeros((ncol, nlev))
+    supply = {
+        "T": jnp.asarray(T)[None, :],
+        "q_v": jnp.asarray(q_v)[None, :],
+        "p_full": jnp.asarray(p_full)[None, :],
+        "p_half": jnp.asarray(p_half)[None, :],
+        "dt": 600.0,
+        "config": scheme_cfg,
+        "u": zeros_2d,
+        "v": zeros_2d,
+        "conv_prog_profile": zeros_2d,
+        "conv_stoch_state": zeros_2d,
+        "prng_key": jax.random.PRNGKey(0),
+    }
+    sig = inspect.signature(conv_fn)
+    kwargs, missing = {}, []
+    for name, param in sig.parameters.items():
+        if name in supply:
+            kwargs[name] = supply[name]
+        elif param.default is inspect.Parameter.empty:
+            missing.append(name)
+    return kwargs, missing
+
+
+def _call_leaf(scheme: str):
+    """Return the ConvectionOutput for one scheme, or (None, reason)."""
     from legoesm.atmosphere.physics.convection.integration import (
         _get_convection_fn,
     )
@@ -68,20 +112,23 @@ def _residual_mm_day(scheme: str) -> float:
     cfg = camp.make_physics_config(convection=scheme)
     _name, conv_fn, scheme_cfg = _get_convection_fn(cfg.convection)
     if conv_fn is None:
-        pytest.skip(f"{scheme}: no backend function")
+        return None, "no backend function"
+    kwargs, missing = _leaf_kwargs(conv_fn, scheme_cfg, p_full, p_half, T, q_v)
+    if missing:
+        return None, f"cannot synthesise required args {missing}"
+    out = conv_fn(**kwargs)
+    if isinstance(out, tuple):        # emanuel returns (output, carry)
+        out = out[0]
+    return out, None
 
-    kwargs = dict(
-        T=jnp.asarray(T)[None, :],
-        q_v=jnp.asarray(q_v)[None, :],
-        p_full=jnp.asarray(p_full)[None, :],
-        p_half=jnp.asarray(p_half)[None, :],
-        config=scheme_cfg,
-    )
-    try:
-        out = conv_fn(**kwargs)
-    except TypeError as exc:
-        pytest.skip(f"{scheme}: leaf signature needs more inputs ({exc})")
 
+def _residual_mm_day(scheme: str) -> float:
+    """``∫(dq_v + dq_c + dq_r) dp/g`` for one convection call, in mm/day."""
+    out, reason = _call_leaf(scheme)
+    assert out is not None, (
+        f"{scheme}: {reason}. Add it to NOT_DIRECTLY_CALLABLE with a reason "
+        "rather than letting the test silently pass.")
+    _p_full, p_half, _T, _q = _column()
     dp = jnp.asarray(np.diff(p_half))[None, :]
     water = out.dq_v_dt + out.dq_c_conv_dt
     if getattr(out, "dq_r_conv_dt", None) is not None:
@@ -92,6 +139,8 @@ def _residual_mm_day(scheme: str) -> float:
 
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_convection_neither_creates_nor_destroys_water(scheme):
+    if scheme in NOT_DIRECTLY_CALLABLE:
+        pytest.skip(f"{scheme}: {NOT_DIRECTLY_CALLABLE[scheme]}")
     residual = _residual_mm_day(scheme)
     if scheme in KNOWN_LEAKING:
         assert residual > CLOSURE_TOL_MM_DAY, (
@@ -115,22 +164,32 @@ def test_emanuel_declares_its_precipitating_condensate():
     )
     from scripts.run import run_scm_rce_campaign as camp
 
-    p_full, p_half, T, q_v = _column()
     cfg = camp.make_physics_config(convection="emanuel")
-    _n, conv_fn, scheme_cfg = _get_convection_fn(cfg.convection)
+    _n, _fn, scheme_cfg = _get_convection_fn(cfg.convection)
     assert scheme_cfg.use_genuine_mixing, (
         "this regression is about the genuine-mixing path")
-    try:
-        out = conv_fn(T=jnp.asarray(T)[None, :], q_v=jnp.asarray(q_v)[None, :],
-                      p_full=jnp.asarray(p_full)[None, :],
-                      p_half=jnp.asarray(p_half)[None, :], config=scheme_cfg)
-    except TypeError as exc:
-        pytest.skip(f"emanuel leaf signature needs more inputs ({exc})")
+    out, reason = _call_leaf("emanuel")
+    assert out is not None, f"emanuel could not be called: {reason}"
     assert out.dq_r_conv_dt is not None, (
         "emanuel returned no convective rain source; EP*CLW is being dropped "
         "again (see emanuel.py, the deficit/dq_r block)")
     assert float(jnp.min(out.dq_r_conv_dt)) >= 0.0, (
         "convective rain is a SOURCE; a negative value is a sign error")
+
+
+def test_every_scheme_is_actually_exercised():
+    """The guard that an earlier version of this file needed and lacked.
+
+    It skipped on TypeError and reported "1 passed, 11 skipped" — nine schemes,
+    including the one the file exists for, were never tested at all. A skip is
+    only acceptable when it is DECLARED.
+    """
+    assert NOT_DIRECTLY_CALLABLE == {}, (
+        "a scheme became uncallable by this harness. Fix the harness or record "
+        f"the reason; this list may only SHRINK. Got: {NOT_DIRECTLY_CALLABLE}")
+    covered = [s for s in SCHEMES if s not in NOT_DIRECTLY_CALLABLE]
+    assert "emanuel" in covered, "emanuel is the regression this file exists for"
+    assert len(covered) == len(SCHEMES)
 
 
 def test_known_leaking_is_shrink_only():
