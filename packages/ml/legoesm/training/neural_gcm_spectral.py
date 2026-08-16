@@ -54,6 +54,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     global_dry_mass,
 )
 from legoesm import constants
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
 from legoesm.core.tracers import (
     make_full_moisture_registry,
@@ -1096,6 +1097,62 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     return _integrate_si
 
 
+def positive_tracers(tracers, sigma_coord):
+    """Every water species non-negative after the transport + filter step.
+
+    The spectral core's tracer transport and the post-step SH-round-trip
+    filter are both NON-MONOTONE: at sharp moisture gradients they overshoot
+    (Gibbs), leaving small negative mixing ratios every step (measured
+    q_v ~ -7e-4 kg/kg on a 2016-09-01 ERA5 start at T63). Downstream physics
+    has no negative-water state, and a plain ``max(q, 0)`` would convert the
+    overshoot into a compounding spurious source (the MPAS-century
+    +30 kg/m2/yr water lesson on ``conservative_positive_clip``, and the
+    N_i -> 1e193 -> NaN number lesson on ``TestAllTracersBorrowed``).
+
+    EVERY per-mass tracer — the six water mixing ratios AND the number
+    concentrations, which are stored per mass [#/kg] — gets the per-column
+    conserving borrow: clip to zero, then rescale the column's positive cells
+    so the dsigma-weighted column integral is unchanged (``p_s/g`` is
+    constant per column and cancels in the ratio). Eligibility comes from
+    the SHARED rule (``is_borrow_eligible_tracer``), not a local units
+    split: a units-based "numbers clip freely" branch here would repeat the
+    2026-07-26 exclusion that the century measurement reversed (codex,
+    2026-08-16 round 1, P0).
+
+    Pure-sigma coordinates only: with a hybrid coordinate the layer mass is
+    ``dA·p_ref + dB·p_s`` (per-column), and a flat ``dsigma`` weight would
+    conserve the wrong physical integral — refuse loudly rather than
+    mis-conserve (codex round 1, P1).
+
+    Container-type-preserving like ``apply_filter_to_tracers`` (Field stays
+    Field, raw array stays raw; Field detection requires BOTH ``data`` and
+    ``replace``, matching that helper). Unknown tracer names raise: a new
+    species must state its positivity class rather than inherit one silently.
+    """
+    from legoesm.core.conservation import is_borrow_eligible_tracer
+
+    if tracers is None:
+        return None
+    if not isinstance(sigma_coord, SigmaCoordinate):
+        raise ValueError(
+            "positive_tracers: only pure-sigma coordinates are supported — "
+            f"got {type(sigma_coord).__name__}. A hybrid coordinate needs "
+            "per-column layer-mass weights (dA·p_ref + dB·p_s), not dsigma.")
+    dsigma = sigma_coord.dsigma
+    out = {}
+    for name, val in tracers.items():
+        if not is_borrow_eligible_tracer(name):
+            raise ValueError(
+                f"positive_tracers: tracer {name!r} is not a known per-mass "
+                "species (BORROW_ELIGIBLE_TRACERS); classify it before "
+                "running it through the spectral training core.")
+        is_field = hasattr(val, "data") and hasattr(val, "replace")
+        arr = val.data if is_field else val
+        arr, _created = conservative_positive_clip(arr, dsigma, axis=-1)
+        out[name] = val.replace(data=arr) if is_field else arr
+    return out
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -1275,22 +1332,19 @@ def spectral_rollout(
                     )
                 )
 
-            # MOISTURE POSITIVITY (ACE2-style budget fixer) on forced
-            # learned-physics runs: a q_v gone negative feeds the *1e3
-            # normalized NN feature with huge negative values, saturating
-            # the net into the runaway class. Clip at zero after the step
-            # (physics has no negative-water state). Kept off the classical/
-            # legacy paths, which conserve by construction.
-            if forcing_base is not None and new_state.tracers is not None \
-                    and "q_v" in new_state.tracers:
-                _qv = new_state.tracers["q_v"]
-                if hasattr(_qv, "data"):
-                    _qv = _qv.replace(data=jnp.maximum(_qv.data, 0.0))
-                else:
-                    _qv = jnp.maximum(_qv, 0.0)
-                _tr = dict(new_state.tracers)
-                _tr["q_v"] = _qv
-                new_state = new_state._replace(tracers=_tr)
+            # SPECIES POSITIVITY, every path, every step: the transport and
+            # the filter above are non-monotone, so every species can leave
+            # the step slightly negative. Conserving borrow for mass, plain
+            # clip for numbers — see ``positive_tracers``. This subsumes the
+            # earlier learned-arm-only q_v clip (whose "the classical paths
+            # conserve by construction" rationale predated the nine-species
+            # carry and was wrong for it).
+            if new_state.tracers is not None:
+                new_state = new_state._replace(
+                    tracers=positive_tracers(
+                        new_state.tracers, sigma_coord,
+                    )
+                )
 
             # DRY-MASS ANCHOR, last in the chain so it also absorbs what the
             # sponge / spectral / tracer filters above took out. Off unless a
@@ -1406,6 +1460,13 @@ def spectral_rollout(
                 tracers=apply_filter_to_tracers(
                     new_state.tracers, tracer_filter, grid,
                 )
+            )
+
+        # SPECIES POSITIVITY — same fixer as the ungated body; this is the
+        # branch the WB and AIMIP classical arms actually run (split rad).
+        if new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=positive_tracers(new_state.tracers, sigma_coord)
             )
 
         # Same anchor as the ungated body above, and this is the branch the
@@ -1564,6 +1625,12 @@ def spectral_amip_rollout(
                 tracers=apply_filter_to_tracers(
                     new_state.tracers, tracer_filter, grid,
                 )
+            )
+        # SPECIES POSITIVITY — same fixer as spectral_rollout, same reason
+        # (non-monotone transport + filter), on the prescribed-SST lane.
+        if new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=positive_tracers(new_state.tracers, sigma_coord)
             )
         # Same dry-mass anchor as spectral_rollout, for the same reason. This is
         # the PRESCRIBED-SST lane (classical AMIP inference and AMIP

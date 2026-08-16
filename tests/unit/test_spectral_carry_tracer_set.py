@@ -103,3 +103,120 @@ def test_a_state_that_cannot_hold_the_scheme_is_refused_at_build_time():
     assert validate_carry_holds_scheme(nine, "morrison", context="t") == 9
     with pytest.raises(ValueError, match="morrison"):
         validate_carry_holds_scheme(three, "morrison", context="t")
+
+
+# ---------------------------------------------------------------------------
+# positive_tracers: every species non-negative after the spectral step
+# ---------------------------------------------------------------------------
+
+def _neg_tracers(nlev=4):
+    """Tiny tracer dict with deliberate MIXED-SIGN columns (net positive) in
+    a mass and a number slot — so the conserving borrow is distinguishable
+    from a plain clip (an all-negative column is zeroed by both)."""
+    q = jnp.array([[[2.0e-3, -1.0e-4, 5.0e-4, -2.0e-5]]])   # (1, 1, nlev)
+    n = jnp.array([[[1.0e6, -3.0e4, 2.0e5, 0.0]]])
+    return {"q_v": q, "N_i": n}
+
+
+def test_positive_tracers_borrows_every_per_mass_species():
+    """Numbers included: N_* are stored per mass, and the plain clip that a
+    units split would give them INVENTED number at every transport
+    undershoot (x2.2/day compound on century3; N_i hit 1e193 then NaN —
+    ``TestAllTracersBorrowed``). Column integrals must be conserved for BOTH
+    the mixing ratio and the number concentration."""
+    from legoesm.training.neural_gcm_spectral import positive_tracers
+
+    sigma = create_sigma_coordinate(4)
+    dsigma = jnp.asarray(sigma.dsigma)
+    tr = _neg_tracers()
+    out = positive_tracers(tr, sigma)
+
+    for name in ("q_v", "N_i"):
+        assert float(jnp.min(out[name])) >= 0.0, name
+        col_before = float(jnp.sum(tr[name] * dsigma))
+        col_after = float(jnp.sum(out[name] * dsigma))
+        # Borrow, not creation: the plain-clip integral would be larger.
+        assert col_after == pytest.approx(col_before, rel=1e-12), name
+
+
+def test_positive_tracers_gradient_finite_at_zero_and_negative():
+    """Cold-start states sit exactly on the clip kinks; the fixer must hand
+    back finite gradients there (it runs inside the training adjoint)."""
+    from legoesm.training.neural_gcm_spectral import positive_tracers
+
+    sigma = create_sigma_coordinate(4)
+
+    def f(q):
+        out = positive_tracers({"q_v": q, "N_c": jnp.zeros_like(q)}, sigma)
+        return jnp.sum(out["q_v"] ** 2) + jnp.sum(out["N_c"])
+
+    g = jax.grad(f)(_neg_tracers()["q_v"])
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_positive_tracers_unknown_species_raises():
+    from legoesm.training.neural_gcm_spectral import positive_tracers
+
+    with pytest.raises(ValueError, match="not a known per-mass"):
+        positive_tracers({"so2": jnp.zeros((1, 1, 4))},
+                         create_sigma_coordinate(4))
+
+
+def test_positive_tracers_refuses_hybrid_coordinate():
+    """dsigma is the layer-mass weight for PURE sigma only; a hybrid
+    coordinate's layer mass is dA·p_ref + dB·p_s (per column), so borrowing
+    with flat dsigma would conserve the wrong physical integral (codex)."""
+    from legoesm.training.neural_gcm_spectral import positive_tracers
+    from legoesm.grids.vertical import create_hybrid_coordinate
+
+    k = jnp.linspace(0.0, 1.0, 9)
+    hybrid = create_hybrid_coordinate(
+        8, A_half=1.0e4 * (1.0 - k) * k, B_half=k**2)
+    with pytest.raises(ValueError, match="pure-sigma"):
+        positive_tracers({"q_v": jnp.zeros((1, 1, 8))}, hybrid)
+
+
+def test_rollout_step_leaves_every_species_non_negative_and_conserves():
+    """Wiring test on the classical/unforced scan body: an IC with
+    mixed-sign columns (net positive, one negative level, horizontally
+    uniform) must come back (a) non-negative in every species and (b) with
+    the dsigma-weighted column integral of the poisoned species unchanged —
+    zero winds + horizontally uniform fields make transport and the SH
+    filter identities, so any integral change would be the fixer creating
+    mass/number the way a plain clip does."""
+    from legoesm.training.neural_gcm_spectral import (
+        carry_to_spectral_state, spectral_rollout, spectral_state_to_carry,
+    )
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+
+    grid = create_gaussian_grid(5)
+    sigma = create_sigma_coordinate(4)
+    dsigma = jnp.asarray(sigma.dsigma)
+    carry = _carry(grid.n_lat, grid.n_lon, extras=True)
+    # Horizontally uniform, level-varying poison: net-positive columns with
+    # one negative level each.
+    q_c_prof = jnp.asarray([3.0e-4, -1.0e-4, 2.0e-4, 1.0e-4])
+    n_r_prof = jnp.asarray([2.0e3, 1.0e3, -4.0e2, 5.0e2])
+    shape = (grid.n_lat, grid.n_lon, 4)
+    carry = carry._replace(
+        q_c=jnp.broadcast_to(q_c_prof, shape),
+        N_r=jnp.broadcast_to(n_r_prof, shape),
+    )
+    state0 = carry_to_spectral_state(carry, grid)
+
+    def zero_physics(s, g, sc):
+        return None
+
+    final = spectral_rollout(
+        state0, zero_physics, grid, sigma,
+        SpectralPEConfig(semi_implicit=True), 600.0, 2,
+        None, None,
+    )
+    back = spectral_state_to_carry(final, grid, sigma)
+    for name in ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+        v = getattr(back, name)
+        assert v is not None and float(jnp.min(jnp.asarray(v))) >= 0.0, name
+    for name, prof in (("q_c", q_c_prof), ("N_r", n_r_prof)):
+        col_ref = float(jnp.sum(prof * dsigma))
+        col = jnp.sum(jnp.asarray(getattr(back, name)) * dsigma, axis=-1)
+        assert jnp.allclose(col, col_ref, rtol=1e-10), name
