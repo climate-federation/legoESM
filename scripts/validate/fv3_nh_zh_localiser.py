@@ -272,12 +272,30 @@ def main() -> int:
     zh_chain_j = jnp.asarray(zh_chain)
     for k in range(KM + 1):
         zh_chain_j = zh_chain_j.at[:, :, :, k].set(
-            gate.jtail._ext_scalar_planes_6(zh_chain_j[:, :, :, k], jctx)
-            if hasattr(gate, "jtail") else
+            # ONE operator, named outright: the conditional this used to
+            # carry could silently pick a different function than the
+            # phase calls, which is not a thing a comparison may leave
+            # open.  Signature read from source: (planes6, ctx).
             jtail_mod._ext_scalar_planes_6(zh_chain_j[:, :, :, k], jctx))
     d_post = np.abs(zh_j - np.asarray(zh_chain_j))
     print(f"  after the exchange:  max|phase - chain| {d_post.max():.6e}"
           f"   compute {d_post[:, cs, cs].max():.6e}")
+
+    # MAGNITUDES, not only differences.  Four measurements here cannot
+    # all be true -- the two phases agree to 2.6e+02 while each differs
+    # from the hand-composed chain by 4.2e+05 -- and the missing number
+    # in every one of them is the SCALE.  If the chain is ~1e+05 where
+    # the phases are ~1e+03 then the chain exploded and its "agreement"
+    # with the NumPy kernels only says both hand-calls are equally
+    # wrong; if all three are the same size, the disagreement is real
+    # and lives in an operator the chain omits.  One print separates
+    # them, and not having it is why this hunt ran as long as it did.
+    print("\nSCALES (the number missing from every comparison above):")
+    for nm, arr in (("numpy phase", zh_n), ("jax phase", zh_j),
+                    ("jax chain", np.asarray(zh_chain_j))):
+        a = np.abs(arr)
+        print(f"  {nm:11s} max {a.max():.6e}  compute max "
+              f"{a[:, cs, cs].max():.6e}  mean {a.mean():.6e}")
     print("\nzs and ws (the bottom boundary condition):")
     zs = np.stack([np.asarray(x) for x in bundle["carry"]["zs6"]])
     print(f"  zs max|.| {np.abs(zs).max():.6e}")
