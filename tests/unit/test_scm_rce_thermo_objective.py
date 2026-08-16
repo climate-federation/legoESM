@@ -758,15 +758,18 @@ def test_the_default_candidate_is_not_re_evaluated(monkeypatch):
     assert stats["unique_evals"] >= 1
 
 
-def test_sigmoid_round_trip_is_not_exact_for_the_real_registry_defaults():
-    """Pin the mechanism on the ACTUAL registry constraints, not invented ones.
+def test_the_collectors_defaults_are_not_the_shipped_defaults():
+    """The mechanism behind the default-candidate skip, compared against the
+    RIGHT pair.
 
-    The round-trip error depends on the parameter's own bounds, so a test with
-    guessed bounds proves nothing — a first version of this test used
-    (600, 10800) for sbm's tau_c, found the round trip exact, and would have
-    read as evidence that the defect did not exist. The probe
-    (scripts/validate/scm_rce_default_roundtrip_probe.py) measured at least one
-    inexact field in EVERY scheme; this requires that to still be true.
+    ``build_trainable_params`` seeds its raw space FROM the shipped NamedTuple
+    default, so ``as_dict()`` already returns a value that has been through
+    ``value -> sigmoid raw -> value``. Comparing ``as_dict()`` against a second
+    round trip of itself is circular and shows nothing — two earlier versions of
+    this test did exactly that and "passed"/"failed" for the wrong reason. The
+    comparison that matters is the collector's default against the value the
+    scheme actually ships, which is what the probe measured: sbm's tau_c ships
+    as 7200.0 and comes back as 7199.999999999998.
     """
     from legoesm.training.param_collector import build_trainable_params
     from scripts.run import run_scm_rce_campaign as camp
@@ -781,17 +784,13 @@ def test_sigmoid_round_trip_is_not_exact_for_the_real_registry_defaults():
         params = build_trainable_params(
             active_scheme_keys={key}, tier=tier, include_tier0=include_tier0,
             exclude=exclude, dtype=jnp.float64)
-        values = params.as_dict()
-        trial = TrainablePhysicsParams(
-            raw_values={c.name: camp._raw_from_physical(
-                float(values[c.name]), c) for c in params.constraints},
-            constraints=params.constraints)
-        back = trial.to_overrides().get(key, {})
+        collected = params.as_dict()
+        tunable = camp._tunable_subconfig(sub)
         inexact[scheme] = [
             c.field for c in params.constraints
-            if float(back[c.field]) != float(values[c.name])
+            if float(collected[c.name]) != float(getattr(tunable, c.field))
         ]
     assert all(inexact.values()), (
-        "the round trip is now exact for some scheme; the default-candidate "
-        f"skip can be revisited, but only with a measurement showing the "
-        f"scores agree. inexact fields per scheme: {inexact}")
+        "the collector now reproduces the shipped defaults exactly; the "
+        "default-candidate skip can be revisited, but only with a measurement "
+        f"showing the two columns score the same. inexact per scheme: {inexact}")
