@@ -791,8 +791,13 @@ def _make_jax_step(ctx):
         jpress = {nm: _stack(press, nm)
                   for nm in ("ps", "pe", "peln", "pk", "pkz")}
         q_in = kw.pop("q")
-        jq = _np.stack([_np.stack([_np.asarray(a) for a in face])
-                        for face in q_in])
+        # TRACER-MAJOR: fv_dynamics_step takes nq face-stacked arrays,
+        # not one (6, nq, ...) stack. The spec's q is [face][iq], so the
+        # transpose is here, in the adapter, where every other layout
+        # difference between the lanes already lives.
+        _nq = len(q_in[0])
+        jq = [_np.stack([_np.asarray(q_in[t][iq]) for t in range(6)])
+              for iq in range(_nq)]
         out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
 
         # Write back IN PLACE -- see the docstring.
@@ -805,7 +810,7 @@ def _make_jax_step(ctx):
                 if nm in out["press"]:
                     press[t][nm][...] = _np.asarray(out["press"][nm])[t]
             for iq, arr in enumerate(q_in[t]):
-                arr[...] = _np.asarray(out["q"])[t, iq]
+                arr[...] = _np.asarray(out["q"][iq])[t]
         return out
 
     return _step
