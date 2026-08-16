@@ -276,3 +276,25 @@ def test_substep_parity(ctx, jctx, state_np, jstate, first_substep):
         # this.  DO NOT SHIP.   [class: branch-switching, one sub-step]
         cmp_fields(state[nm], want, f"substep {nm} first={first_substep}",
                    1e-12)
+
+
+def test_entry_exchange_parity(ctx, jctx, state_np, jstate):
+    """The entry halo exchange alone, both lanes.
+
+    The next bisect after the sub-step: ``u`` is off by 2.106e-02 inside
+    ONE sub-step (job 9417545) while ``delp`` and ``pt`` match, and the
+    entry exchange is the first thing that touches ``u``.  If this
+    passes, the wind difference is made downstream; if it fails, it is
+    made here, and the halo is where a 2 % wind error with a panel-edge
+    footprint would come from.
+    """
+    st = deepcopy_faces(state_np)
+    npac.exchange_state_halos_3d(ctx, st, KM, scalars=True, winds=True)
+    got = jac.exchange_state_halos_3d(jctx, jstate, KM, scalars=True,
+                                      winds=True)
+    for nm in ("delp", "pt", "u", "v"):
+        want = np.stack([np.asarray(st[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy entry-exchange {nm}")
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # [class: exchange -- weighted stencil sums]
+        cmp_fields(got[nm], want, f"entry exchange {nm}", 1e-12)
