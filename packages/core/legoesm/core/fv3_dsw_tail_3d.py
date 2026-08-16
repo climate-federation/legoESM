@@ -716,10 +716,26 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     })
     validate_stacked(fname, csw_press, ctx, km, ("pkc",),
                      what="csw_press (C-stage pressure)")
-    validate_stacked(fname, dsw_outs, ctx, km,
-                     ("delp", "pt", "crx_adv", "cry_adv",
-                      "xfx_adv", "yfx_adv"),
-                     what="dsw_outs (transport phase, keys DSW1_OUT_2D)")
+    # Declared fields through the shape table; the d_sw1 TRANSPORT
+    # stacks structurally -- the same split part A already makes, and
+    # for the same reason: `field_shape` has no entry for `crx_adv` and
+    # should not, because that stagger is the kernel's own (job 9417540
+    # raised "unknown field 'crx_adv'" here, one gate after the same
+    # thing was fixed on the hydrostatic path).
+    validate_stacked(fname, dsw_outs, ctx, km, ("delp", "pt"),
+                     what="dsw_outs (transport phase)")
+    for _nm in ("crx_adv", "cry_adv", "xfx_adv", "yfx_adv"):
+        if _nm not in dsw_outs:
+            raise KeyError(
+                f"{fname}: dsw_outs is missing {_nm!r}; keys are "
+                f"{sorted(dsw_outs)}")
+        _a = jnp.asarray(dsw_outs[_nm])
+        if _a.ndim != 4 or _a.shape[0] != 6 or _a.shape[3] != km:
+            raise ValueError(
+                f"{fname}: dsw_outs[{_nm!r}] has shape {_a.shape}; "
+                f"expected (6, i, j, {km}) -- the face and level axes "
+                f"are fixed by convention C1 even where the stagger is "
+                f"the kernel's own")
     validate_stacked(fname, tail_outs, ctx, km, ("u", "v", "w"),
                      what="tail_outs (part A d_sw3..d_sw6 chain)")
     validate_stacked(fname, nh, ctx, km,
