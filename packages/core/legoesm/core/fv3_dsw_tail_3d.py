@@ -645,7 +645,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                                dp0, delz, remap_step=False,
                                use_logp=False, square_domain=True,
                                cfg=None, hord_tm=None, nord_w=None,
-                               damp_w=None, remap_follows=False):
+                               damp_w=None, remap_follows=False,
+                               return_stages: bool = False):
     """The NH D-grid tail (``dyn_core.F90:1403-1543``): ``update_dz_d`` ->
     ``Riem_Solver3`` -> ``pe_halo``/``pk3_halo`` (``pln_halo`` under
     ``use_logp``) -> zh/pkc duo exchanges -> ``gz = zh*grav`` ->
@@ -811,6 +812,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     pt6 = dsw_outs["pt"]
     gs6 = ctx.gs6
     faces = []
+    stage_zh: list = []
     for t in range(6):
         # The DSW1 advective fluxes are ALREADY (i, j, km) with km at
         # axis 2 on this lane -- the spec's np.stack(..., axis=2) is the
@@ -864,6 +866,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
             bounded_domain=_fl.bounded_domain, grid_type=_fl.grid_type,
             sw_corner=_fl.sw_corner, se_corner=_fl.se_corner,
             nw_corner=_fl.nw_corner, ne_corner=_fl.ne_corner)
+        zh_after_dz = zh_t if return_stages else None
         # trap #6: pkc -- FULL pressure out of the C stage -- is the
         # SAME storage Riem_Solver3 overwrites with the D-stage
         # PERTURBATION (the ppe slot) and nh_p_grad then B-grid
@@ -884,6 +887,15 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
         else:
             pk3_t = pk3_halo(pk3_t, delp6[t], bd, npz=km, ptop=ptop,
                              akap=akap)
+        if return_stages:
+            # C6: stage observation by RETURN. The two kernels that
+            # write zh, captured BETWEEN them, so the phase can be
+            # bisected against the spec's stage_hook on ONE shared
+            # bundle. The alternative -- rebuilding the chain by hand
+            # outside -- is a second implementation that can differ for
+            # its own reasons, and did.
+            stage_zh.append({"after_update_dz_d": zh_after_dz,
+                             "after_riem_solver3": zh_t})
         faces.append({"zh": zh_t, "ws": ws_t, "w": w_t, "delz": delz_t,
                       "pkc": pkc_t, "pe": pe_t, "pk3": pk3_t,
                       "pk": pk_t, "peln": peln_t})
@@ -950,6 +962,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
         # aliasing is preserved here (same values, zero copies).
         "press": {"pe": nh_out["pe"], "pk": nh_out["pk"],
                   "peln": nh_out["peln"], "ws": nh_out["ws"]},
+        **({"stages": {"zh": stage_zh}} if return_stages else {}),
     }
 
 

@@ -306,6 +306,46 @@ def main() -> int:
     # wrong; if all three are the same size, the disagreement is real
     # and lives in an operator the chain omits.  One print separates
     # them, and not having it is why this hunt ran as long as it did.
+    # --- THE COMPARISON THAT NEEDED NO RECONSTRUCTION -----------------
+    # Both lanes' OWN phases, on ONE shared bundle, reporting zh after
+    # each of the two kernels that write it. The hand-built chain was a
+    # second implementation; this is the phases themselves, so a
+    # difference here is in the phase and nowhere else.
+    print("\nstage-by-stage, both PHASES on the same bundle:")
+    np_stage = {}
+
+    def _hook(name, t, arr):
+        np_stage.setdefault(name, {})[t] = np.array(arr, copy=True)
+
+    _c2 = {k: [np.array(x, copy=True) for x in v] if isinstance(v, list) else v
+           for k, v in bundle["carry"].items()}
+    nptail_mod.dgrid_nh_pressure_phase_3d(
+        dict(ctx), gate.deepcopy_faces(bundle["csw_press"]),
+        gate.deepcopy_faces(bundle["dsw"]), gate.deepcopy_faces(bundle["tail"]),
+        _c2, KM, dt=DT, ptop=100.0, akap=2.0 / 7.0, cp_air=1004.6,
+        p_fac=0.05, a_imp=1.0, dp0=_DP0,
+        delz6=[np.array(f["delz"], copy=True) for f in bundle["state"]],
+        stage_hook=_hook, **kw)
+    j_out = gate.jtail.dgrid_nh_pressure_phase_3d(
+        jctx, gate.stack_np(bundle["csw_press"]),
+        gate._stack_dsw_np(bundle["dsw"]), gate.stack_np(bundle["tail"]),
+        gate._nh_stack_carry(bundle["carry"]), KM, dt=DT, ptop=100.0,
+        akap=2.0 / 7.0, cp_air=1004.6, p_fac=0.05, a_imp=1.0,
+        dp0=jnp.asarray(_DP0),
+        delz=jnp.asarray(np.stack([np.asarray(f["delz"])
+                                   for f in bundle["state"]])),
+        return_stages=True, **kw)
+    for sname in ("after_update_dz_d", "after_riem_solver3"):
+        for t in range(6):
+            a = np.asarray(j_out["stages"]["zh"][t][sname])
+            b = np_stage[f"S_nh_{sname}"][t]
+            if a.shape != b.shape:
+                raise SystemExit(f"REFUSING: {sname} face {t} shapes "
+                                 f"{a.shape} vs {b.shape}")
+            d = np.abs(a - b)
+            print(f"  {sname:22s} face {t + 1}: max|d| {d.max():.6e}"
+                  f"   compute {d[cs, cs].max():.6e}")
+
     print("\nSCALES (the number missing from every comparison above):")
     for nm, arr in (("numpy phase", zh_n), ("jax phase", zh_j),
                     ("jax chain", np.asarray(zh_chain_j))):
