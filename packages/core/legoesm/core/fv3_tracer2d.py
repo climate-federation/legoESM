@@ -229,22 +229,32 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
     if cy6.shape != (6, m_a, npx, km) or mfy6.shape != (6, m_a, npx, km):
         raise ValueError("cy/mfy must be (6, m_a, npx, km), got "
                          f"{cy6.shape}/{mfy6.shape}")
+    # The FLAGS live on ctx.flags6, never on ctx.gs6: the JAX context
+    # builder keeps only the np.ndarray members of each gridstruct
+    # (fv3_duo_stepper.py:484) and puts every scalar/bool into a
+    # GridFlags NamedTuple alongside.  Reading them off gs6 with a
+    # `.get(..., default)` therefore silently returns the DEFAULT on
+    # every valid duo context -- which for bounded_domain is False, so
+    # the guard below rejected everything, and for the corner flags
+    # would have selected corner fills the oracle skips.  Module 3 shipped
+    # the same mistake against update_dz_d; it is the "getattr fallback
+    # counts as hardcoded" rule in CLAUDE.md, one level up.
     flg = []
     for t in range(6):
-        g = ctx.gs6[t]
-        if not bool(g.get("bounded_domain", False)):
+        fl = ctx.flags6[t]
+        if not bool(fl.bounded_domain):
             raise ValueError(
                 f"face {t + 1}: gridstruct is not bounded_domain -- the "
                 f"duo tracer lane (ext_scalar halos + flux_adj seam "
                 f"averaging) is only certified on the bounded duo "
                 f"gridstructs.")
-        flg.append({"da_min": float(g["da_min"]),
+        flg.append({"da_min": float(fl.da_min),
                     "bounded_domain": True,
-                    "grid_type": int(g.get("grid_type", 0)),
-                    "sw_corner": bool(g.get("sw_corner", True)),
-                    "se_corner": bool(g.get("se_corner", True)),
-                    "nw_corner": bool(g.get("nw_corner", True)),
-                    "ne_corner": bool(g.get("ne_corner", True))})
+                    "grid_type": int(fl.grid_type),
+                    "sw_corner": bool(fl.sw_corner),
+                    "se_corner": bool(fl.se_corner),
+                    "nw_corner": bool(fl.nw_corner),
+                    "ne_corner": bool(fl.ne_corner)})
     # C1: gridstruct metrics as ONE dict of face-stacked arrays (static
     # ctx data).  The spec's _tp_gsf fort-wrapper is replaced by direct
     # 0-based slicing: Fortran index f sits at numpy f + ng - 1.

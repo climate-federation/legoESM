@@ -305,6 +305,25 @@ def test_the_cap_check_is_quiet_on_an_in_envelope_schedule(jctx):
 # 3.  Lane refusals, jit parity, differentiability
 # --------------------------------------------------------------------
 
+def test_the_grid_flags_are_read_from_flags6_not_gs6(jctx):
+    """The tripwire for the bug this file caught on its first run.
+
+    ``build_jax_duo_stepper_context`` keeps only the ndarray members of
+    each gridstruct and puts every scalar and bool on ``flags6``.  A
+    guard that reads them off ``gs6`` with a defaulted ``.get`` gets the
+    DEFAULT on every valid context -- False for bounded_domain, which
+    rejected everything, and True for the corner flags, which would have
+    selected corner fills the oracle skips (module 3 shipped exactly
+    that).  This asserts both halves of the reason: the flags are
+    present where the code now looks, and ABSENT where it used to.
+    """
+    for t in range(6):
+        assert bool(jctx.flags6[t].bounded_domain), t
+        assert "bounded_domain" not in jctx.gs6[t], (
+            "gs6 carries the flags again -- if that is now intended, this "
+            "test and the guard both need revisiting together")
+
+
 @pytest.mark.parametrize("kw", [{"z_tracer": False}, {"q_split": 2},
                                 {"nord_tr": 1}, {"trdm": 1.0},
                                 {"inline_q": True}])
