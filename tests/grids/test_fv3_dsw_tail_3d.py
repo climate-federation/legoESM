@@ -900,7 +900,20 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     # this lane returns both.  Compare the press members the spec hands
     # back, from the carry it mutated.
     _require_keys(got, {"nh": 1, "press": 1}, ("nh", "press"), "NH tail")
-    for nm in ("pe", "pk", "peln", "ws"):
+    # `pe` is written by `pe_halo`, which runs ONLY on the remap step
+    # (dyn_core.F90:1424-1425).  Off that step it stays the carry's
+    # zeros in BOTH lanes, so comparing it is vacuous -- assert_real
+    # said so (job 9417616).  It gets the contract instead.
+    compared = ("pe", "pk", "peln", "ws") if remap_step else \
+        ("pk", "peln", "ws")
+    if not remap_step:
+        for lane, arr in (("jax", np.asarray(got["press"]["pe"])),
+                          ("numpy", np.stack([np.asarray(ref[t]["pe"])
+                                              for t in range(6)]))):
+            assert not arr.any(), (
+                f"{lane}: pe is non-zero off the remap step, where "
+                f"pe_halo does not run")
+    for nm in compared:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy nh {nm}")
         # TOL-PENDING: provisional bound.  DO NOT SHIP.
