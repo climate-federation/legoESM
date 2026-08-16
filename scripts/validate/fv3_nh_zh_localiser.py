@@ -112,7 +112,7 @@ def main() -> int:
                                 for lvl in dsw[t]["levels"]], axis=2)
                       for t in range(6)])
         b = np.asarray(gate._stack_dsw_np(
-            dsw, face_level_wins=("pt", "delp"))[nm])
+            dsw, face_level_wins=gate._TAIL_FACE_LEVEL)[nm])
         print(f"  {nm}: max|stack - adapter| "
               f"{np.abs(a - b).max():.3e}  shape {a.shape}")
 
@@ -329,7 +329,7 @@ def main() -> int:
         stage_hook=_hook, **kw)
     j_out = gate.jtail.dgrid_nh_pressure_phase_3d(
         jctx, gate.stack_np(bundle["csw_press"]),
-        gate._stack_dsw_np(bundle["dsw"], face_level_wins=("pt", "delp")),
+        gate._stack_dsw_np(bundle["dsw"], face_level_wins=gate._TAIL_FACE_LEVEL),
         gate.stack_np(bundle["tail"]),
         gate._nh_stack_carry(bundle["carry"]), KM, dt=DT, ptop=100.0,
         akap=2.0 / 7.0, cp_air=1004.6, p_fac=0.05, a_imp=1.0,
@@ -358,7 +358,7 @@ def main() -> int:
     print("\nriem_solver3's inputs, the stacked adapters vs the spec's "
           "per-face arrays:")
     _dsw_s = gate._stack_dsw_np(bundle["dsw"],
-                                face_level_wins=("pt", "delp"))
+                                face_level_wins=gate._TAIL_FACE_LEVEL)
     _tail_s = gate.stack_np(bundle["tail"])
     _cswp_s = gate.stack_np(bundle["csw_press"])
     _nh_s = gate._nh_stack_carry(bundle["carry"])

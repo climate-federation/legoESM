@@ -150,7 +150,10 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
         lnp = jnp.log(acc)
         return acc, (acc, lnp, jnp.exp(akap * lnp))
     acc0 = jnp.zeros((6, n, n), dtype=dt) + ptop
-    pe_c, lnp_c, pk_c = lax.scan(_col, acc0, wink)   # each (km, 6, n, n)
+    # lax.scan returns (final_carry, stacked_ys) -- TWO values. The
+    # three stage outputs come back inside ys, so they unpack from
+    # the second element, never from the call.
+    _, (pe_c, lnp_c, pk_c) = lax.scan(_col, acc0, wink)  # (km,6,n,n)
 
     # :80-83  pe(i,1,j) = ptop ; pk(i,j,1) = ptop**cappa
     pek = ptop ** akap

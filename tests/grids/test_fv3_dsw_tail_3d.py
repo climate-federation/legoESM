@@ -232,6 +232,15 @@ def jdsw(jctx, jstate, jcsw):
 _TAIL_COMPARED = ("u", "v", "ke", "wk", "divg_d", "delpc")
 
 
+# Names the transport output carries in BOTH generations: as a
+# face-level key (the post-d_sw2 state) and as a per-level d_sw1 stage
+# output. The tail phase consumes the face-level one -- riem_solver3
+# takes the post-d_sw2 pt/delp -- so every caller in this lane declares
+# that. The adapter refuses any collision NOT listed here, which is how
+# the pt/delp defect surfaced and how the next one will.
+_TAIL_FACE_LEVEL = ("pt", "delp", "allflux_x", "allflux_y")
+
+
 def _stack_dsw_np(dsw_np, face_level_wins=()):
     """The NumPy transport output -> this lane's face-stacked dict.
 
@@ -879,7 +888,7 @@ def _run_nh(ctx_, bundle, lane, **kw):
         # riem_solver3 consumes the POST-d_sw2 pt/delp (the face-level
         # entries), not d_sw1's per-level stage outputs of the same name.
         ctx_, stack_np(bundle["csw_press"]),
-        _stack_dsw_np(bundle["dsw"], face_level_wins=("pt", "delp")),
+        _stack_dsw_np(bundle["dsw"], face_level_wins=_TAIL_FACE_LEVEL),
         stack_np(bundle["tail"]), _nh_stack_carry(bundle["carry"]), KM,
         dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
         a_imp=A_IMP, dp0=jnp.asarray(_DP0),
