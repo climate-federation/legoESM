@@ -54,6 +54,9 @@ def main() -> int:
     global _DP0
     import test_fv3_dsw_tail_3d as gate  # noqa: E402
     from legoesm.core import (  # noqa: E402
+        fv3_dsw_tail_3d as jtail_mod,
+    )
+    from legoesm.core import (  # noqa: E402
         fv3_native_dsw_tail_3d as nptail_mod,
     )
     from legoesm.core.fv3_duo_stepper import (  # noqa: E402
@@ -129,6 +132,22 @@ def main() -> int:
     area6 = nptail_mod.nh_exchanged_area6(dict(ctx))
     rarea6 = [1.0 / np.asarray(a) for a in area6]
     fl = jctx.flags6
+
+    # ⛔ THE ONE OPERAND THE DIRECT COMPARISON DOES NOT TEST.  Both
+    # kernels agree to <=1.05e-04 when called with the NUMPY exchanged
+    # area, while the phase differs by 2.590e+02 in the compute window --
+    # so the phase must hand them something else, and `area` is the only
+    # operand the phase COMPUTES rather than receives.
+    a_j = np.asarray(jtail_mod.nh_exchanged_area6(jctx))
+    a_n = np.stack([np.asarray(a) for a in area6])
+    print("\nthe exchanged area, JAX vs NumPy (each lane's own):")
+    print(f"  max|d| {np.abs(a_j - a_n).max():.6e}   "
+          f"max|numpy| {np.abs(a_n).max():.6e}   "
+          f"cells>1e-13: {int((np.abs(a_j - a_n) > 1e-13).sum())} "
+          f"of {a_n.size}")
+    sent_j = int(np.isclose(np.abs(a_j), 1.0e8, rtol=1e-12).sum())
+    sent_n = int(np.isclose(np.abs(a_n), 1.0e8, rtol=1e-12).sum())
+    print(f"  BIG_NUMBER sentinels surviving: jax {sent_j}  numpy {sent_n}")
 
     print("\nthe two kernels that write zh, face by face:")
     for t in range(3):
