@@ -136,15 +136,29 @@ def test_loop_parity_across_the_peel_scan_peel_structure(
                                n_split=n_split, ptop=PTOP, akap=AKAP,
                                cp_air=CP_AIR)
     state = got["state"] if isinstance(got, dict) else got
-    for nm in STATE_FIELDS:
-        if nm not in state:
-            continue
+    # `w` is IDENTICALLY ZERO on the hydrostatic arm -- the anti-vacuity
+    # guard in assert_real caught the first version comparing it (job
+    # 9417521), which is the guard working: a relative comparison of
+    # zero against zero passes at any tolerance and certifies nothing.
+    # It gets a CONTRACT assertion instead, below.
+    compared = [nm for nm in STATE_FIELDS if nm in state and nm != "w"]
+    assert {"delp", "pt", "u", "v"} <= set(compared), compared
+    for nm in compared:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy loop {nm} (n_split={n_split})")
         # TOL-PENDING: provisional bound; the measurement job replaces
         # this with `measured X, bound = measured x N`.  DO NOT SHIP.
         # [class: branch-switching, composed over n_split sub-steps]
         cmp_fields(state[nm], want, f"loop {nm} n_split={n_split}", 1e-12)
+    if "w" in state:
+        # The contract, asserted rather than compared: nothing on the
+        # hydrostatic arm writes w, in EITHER lane.
+        for lane, arr in (("jax", np.asarray(state["w"])),
+                          ("numpy", np.stack([np.asarray(ref[t]["w"])
+                                              for t in range(6)]))):
+            assert not arr.any(), (
+                f"{lane}: w is non-zero on the hydrostatic arm, where "
+                f"nothing writes it")
 
 
 def test_loop_does_not_mutate_its_input_state(jctx, jstate):
