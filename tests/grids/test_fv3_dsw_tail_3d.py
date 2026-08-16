@@ -838,14 +838,21 @@ def _run_nh(ctx_, bundle, lane, **kw):
     """One NH tail call on either lane, from COPIES of one fixture."""
     delz_np = [np.array(f["delz"], copy=True) for f in bundle["state"]]
     if lane == "numpy":
-        return nptail.dgrid_nh_pressure_phase_3d(
+        # The spec MUTATES the carry it is handed, so the caller needs
+        # the object back: `press` off the remap step is structurally
+        # zero on this fixture (flat hs6 => zh(km) == zs => ws == 0),
+        # and the members that actually move are the CARRY's.
+        carry = {k: [np.array(x, copy=True) for x in v]
+                 if isinstance(v, list) else v
+                 for k, v in bundle["carry"].items()}
+        out = nptail.dgrid_nh_pressure_phase_3d(
             ctx_, deepcopy_faces(bundle["csw_press"]),
             deepcopy_faces(bundle["dsw"]), deepcopy_faces(bundle["tail"]),
-            {k: [np.array(x, copy=True) for x in v] if isinstance(v, list)
-             else v for k, v in bundle["carry"].items()},
-            KM, dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
-            a_imp=A_IMP, dp0=_DP0, delz6=delz_np, **kw)
+            carry, KM, dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR,
+            p_fac=P_FAC, a_imp=A_IMP, dp0=_DP0, delz6=delz_np, **kw)
+        return out, carry
     return jtail.dgrid_nh_pressure_phase_3d(
+
         # `_stack_dsw_np`, not `stack_np`: the transport output carries a
         # "levels" list of per-level dicts, which has no array to stack
         # (job 9417488 hit exactly that here after the hydrostatic gates
@@ -889,31 +896,39 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     ``pe_halo``, ``use_logp`` swaps ``pk3_halo`` for ``pln_halo`` (an
     unconditional ``pk3_halo`` would overwrite log(p) halos with
     p**akap), and ``square_domain`` adds the second ``pkc`` exchange.
+
+    WHAT IS COMPARED, and why it is not the obvious thing.  The
+    ``press`` bundle (pe, pk, peln, ws) is written by the REMAP-STEP
+    branch, and on this fixture ws is structurally zero as well -- flat
+    ``hs6`` makes ``zh(km) == zs``, so ``ws = (zs - zh)/dt`` is exactly
+    0.  Off the remap step every member of it is therefore zero in both
+    lanes, and ``assert_real`` refused each in turn (jobs 9417616,
+    9417626, 9417636, 9417640) rather than let a zero-vs-zero pass
+    stand in for a parity claim.  What DOES move on every step is the
+    carry -- zh from update_dz_d, gz from the zh*grav box, pk3 from the
+    halo -- so that is the comparison off the remap step, and press
+    joins it on.
     """
     bundle = dict(nh_bundle, state=state_np_nh)
     kw = dict(remap_step=remap_step, use_logp=use_logp,
               square_domain=square_domain)
-    ref = _run_nh(dict(ctx), bundle, "numpy", **kw)
+    ref, ref_carry = _run_nh(dict(ctx), bundle, "numpy", **kw)
     got = _run_nh(jctx, bundle, "jax", **kw)
 
-    # The spec RETURNS the press list and MUTATES the carry in place;
-    # this lane returns both.  Compare the press members the spec hands
-    # back, from the carry it mutated.
-    _require_keys(got, {"nh": 1, "press": 1}, ("nh", "press"), "NH tail")
-    # `pe` is written by `pe_halo`, which runs ONLY on the remap step
-    # (dyn_core.F90:1424-1425).  Off that step it stays the carry's
-    # zeros in BOTH lanes, so comparing it is vacuous -- assert_real
-    # said so (job 9417616).  It gets the contract instead.
-    # `pe`, `pk` and `peln` are ALL produced only on the remap step --
-    # pe_halo at :1424-1425 and Riem_Solver3's `last_call` writes -- so
-    # off it they stay the carry's zeros in both lanes and comparing
-    # them is vacuous.  assert_real found them one at a time (jobs
-    # 9417616, 9417626, 9417636), which is the guard working three
-    # times rather than three separate mistakes.  `ws` is the one
-    # member this phase writes on every step, so off the remap step it
-    # is the whole comparison; the contract covers the other three.
-    compared = ("pe", "pk", "peln", "ws") if remap_step else ("ws",)
-    if not remap_step:
+    ren = {"zh": "zh6", "gz": "gz6", "pk3": "pk3_6"}
+    for nm, npnm in ren.items():
+        want = np.stack([np.asarray(x) for x in ref_carry[npnm]])
+        assert_real(want, f"numpy nh carry {nm}")
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # [class: accumulating -- the Riemann solve is a recurrence]
+        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 1e-12)
+
+    if remap_step:
+        for nm in ("pe", "pk", "peln", "ws"):
+            want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
+            assert_real(want, f"numpy nh {nm}")
+            cmp_fields(got["press"][nm], want, f"nh {nm}", 1e-12)
+    else:
         for nm in ("pe", "pk", "peln"):
             for lane, arr in (("jax", np.asarray(got["press"][nm])),
                               ("numpy", np.stack([np.asarray(ref[t][nm])
@@ -921,12 +936,6 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
                 assert not arr.any(), (
                     f"{lane}: {nm} is non-zero off the remap step, "
                     f"where nothing writes it")
-    for nm in compared:
-        want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
-        assert_real(want, f"numpy nh {nm}")
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
-        # [class: accumulating -- the Riemann solve is a recurrence]
-        cmp_fields(got["press"][nm], want, f"nh {nm}", 1e-12)
 
 
 def test_nh_tail_returns_every_array_the_spec_mutates(ctx, jctx,
