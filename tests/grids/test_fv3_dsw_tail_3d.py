@@ -953,9 +953,15 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     for nm, npnm in ren.items():
         want = np.stack([np.asarray(x) for x in ref_carry[npnm]])
         assert_real(want, f"numpy nh carry {nm}")
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # MEASURED 3.498e-10 per-element relative on zh (job 9419797,
+        # the run in which the pt/delp generation defect was fixed);
+        # bound = measured x 10.  NOT a guess and not roundoff: the
+        # Riemann solve is a vertical recurrence and the two lanes
+        # associate it differently (stacked ops against per-face loops),
+        # so the floor sits far above fp64 eps -- max|diff| 1.847e-04 on
+        # a field whose median magnitude is 9.991e+04.
         # [class: accumulating -- the Riemann solve is a recurrence]
-        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 1e-12)
+        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 3.5e-9)
 
     if remap_step:
         for nm in ("pe", "pk", "peln", "ws"):

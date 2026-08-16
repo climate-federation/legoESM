@@ -438,7 +438,14 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # C4: d_sw1 accumulates into the capacitors every sub-step (the
         # UN-averaged fluxes, before barrier 1); the transport phase
         # returns the accumulated bundle only when one was given.
-        flux_cap = dsw["flux_cap"]
+        #
+        # It returns them FLAT, as top-level mfx/mfy/cx/cy keys
+        # (fv3_dsw_phase_3d's `out.update(caps)`), not nested under
+        # "flux_cap" -- reading the nested name raised KeyError the
+        # first time a non-None bundle ever reached here, which was the
+        # module-6 gate. Reassembled by name so the two modules' shapes
+        # of the same data stay explicit at the seam.
+        flux_cap = {nm: dsw[nm] for nm in flux_cap}
 
     # ⛔ THE TAIL READS THE EXCHANGED uc/vc, NOT THE ONES THE C STAGE
     # PRODUCED.  The spec hands the SAME `csw` object to the transport

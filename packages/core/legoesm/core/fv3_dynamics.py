@@ -449,7 +449,9 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 # the NH tail carries no pkz (mapz owns it)
                 newpr["pk"] = pr["pk"].at[:, ia:ia + n, ia:ia + n, :] \
                     .set(g["pk"])
-            return (st, newpr, qq, om, nhc), ac["stages"]
+            # SEVEN elements, like the other return: the carry gained
+            # nsplt/nsplt_exceeded and this early branch was missed.
+            return (st, newpr, qq, om, nhc, nspl, nexc), ac["stages"]
 
         # press refresh hoisted out of the spec's per-face loop: each
         # face's update touches only that face's slices and no face reads
