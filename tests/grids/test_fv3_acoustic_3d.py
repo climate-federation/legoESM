@@ -356,10 +356,14 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
         cmp_fields(j_press[nm], want, f"stage p_grad_c {nm}", 1e-12)
 
     j_csw = {**j_csw, "uc": j_press["uc"], "vc": j_press["vc"]}
-    n_dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st),
-                                         deepcopy_faces(n_csw), dt=dt,
-                                         km=KM)
+    # the SAME n_csw object, as the spec does (see the NumPy-chain gate)
+    n_dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st), n_csw,
+                                         dt=dt, km=KM)
     j_dsw = dsw_transport_phase_3d(jctx, jst, j_csw, dt, KM)
+    # S07: the transport phase EXCHANGES uc/vc/divg_d and returns them;
+    # the tail reads the exchanged ones (job 9417625).
+    j_csw = {**j_csw, "uc": j_dsw["uc"], "vc": j_dsw["vc"],
+             "divg_d": j_dsw["divg_d"]}
     # `delp`/`pt` are the d_sw2 UPDATE and sit at the top level of the
     # spec's per-face dict; `ut`/`vt` live inside its "levels" list (the
     # per-level d_sw1 outputs), so they are stacked from there rather
@@ -374,8 +378,7 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
                      axis=2) for t in range(6)])
         cmp_fields(j_dsw[nm], want, f"stage d_sw1 {nm}", 1e-12)
 
-    n_tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st),
-                                      deepcopy_faces(n_csw),
+    n_tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st), n_csw,
                                       deepcopy_faces(n_dsw), dt=dt,
                                       km=KM)
     j_tail = dsw_tail_phase_3d(jctx, jst, j_csw, j_dsw, dt, KM)
@@ -455,6 +458,8 @@ def test_substep_equals_its_own_stage_chain(ctx, jctx, state_np, jstate):
                                     akap=AKAP, cp_air=CP_AIR)
     csw = {**csw, "uc": prs_c["uc"], "vc": prs_c["vc"]}
     dsw = dsw_transport_phase_3d(jctx, jst, csw, dt, KM)
+    csw = {**csw, "uc": dsw["uc"], "vc": dsw["vc"],
+           "divg_d": dsw["divg_d"]}
     tail = dsw_tail_phase_3d(jctx, jst, csw, dsw, dt, KM)
     dsw = {**dsw,
            "delp": jac._exchange_scalar_stack(dsw["delp"], jctx.tab, KM),
@@ -507,10 +512,13 @@ def test_numpy_substep_equals_its_own_stage_chain(ctx, state_np):
                             nord=2)
     npcg.cgrid_pressure_phase_3d(ctx, csw, KM, dt2=dt2, ptop=PTOP,
                                  akap=AKAP, cp_air=CP_AIR)
-    dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st),
-                                       deepcopy_faces(csw), dt=dt, km=KM)
-    tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st),
-                                    deepcopy_faces(csw),
+    # The SAME csw object, as the spec does: the transport phase mutates
+    # its uc/vc/divg_d with the post-p_grad_c exchanges, and the tail
+    # reads the mutated ones.  Handing each phase a fresh copy is what
+    # made this chain disagree with the spec's sub-step by 2.106e-02.
+    dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st), csw,
+                                       dt=dt, km=KM)
+    tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st), csw,
                                     deepcopy_faces(dsw), dt=dt, km=KM)
     for _nm in ("delp", "pt"):
         for k in range(KM):

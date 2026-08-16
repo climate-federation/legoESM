@@ -430,6 +430,23 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # returns the accumulated bundle only when one was given.
         flux_cap = dsw["flux_cap"]
 
+    # ⛔ THE TAIL READS THE EXCHANGED uc/vc, NOT THE ONES THE C STAGE
+    # PRODUCED.  The spec hands the SAME `csw` object to the transport
+    # phase and then to the tail, and the transport phase MUTATES
+    # uc/vc/divg_d in place with the post-p_grad_c duo exchanges
+    # (dyn_core.F90:652/:655).  On this functional lane those come back
+    # in the transport phase's return as stage S07, so they have to be
+    # threaded in here -- exactly convention C4, at a seam that a
+    # phase-by-phase reading does not show.
+    #
+    # MEASURED (job 9417625): composing the NUMPY phases by hand with a
+    # fresh csw for the tail reproduces this lane's answer and differs
+    # from the spec's own sub-step by 2.106e-02 on u, 1512 of 6156
+    # cells -- the identical number this module was showing.  d_sw3 and
+    # d_sw5 both read uc/vc, so stale halos there move the winds.
+    csw = {**csw, "uc": dsw["uc"], "vc": dsw["vc"],
+           "divg_d": dsw["divg_d"]}
+
     tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
                              hydrostatic=hydrostatic,
                              remap_follows=remap_follows)
