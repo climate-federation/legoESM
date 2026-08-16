@@ -414,9 +414,10 @@ def test_jit_matches_eager(jctx, eta):
     # return carries pt_units, a str -- so a hand-rolled jit here would
     # have tested a path nobody runs.
     fn = jdyn.make_fv_dynamics_step_jit(
-        jctx, KM, k_split=1, n_split=2, kord_mt=KORD_MT,
+        jctx, KM, k_split=1, n_split=2, ptop=ptop, ak=ak, bk=bk,
+        akap=AKAP, cp_air=CP_AIR, kord_mt=KORD_MT,
         kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=True)
-    jitted = _out_state(fn(jst, press, q, BDT, ptop, ak, bk, AKAP, CP_AIR))
+    jitted = _out_state(fn(jst, press, q, BDT))
     for nm in ("delp", "pt", "u", "v"):
         a = np.asarray(eager[nm])
         assert_real(a, f"eager {nm}")

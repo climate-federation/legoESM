@@ -598,8 +598,10 @@ def make_p_var_nonhydrostatic_jit(*, n: int, ng: int, km: int,
 
 
 def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
-                              n_split: int, kord_mt: int, kord_tm: int,
-                              kord_tr, sphum_index=None, n_sponge: int = -1,
+                              n_split: int, ptop, ak, bk, akap, cp_air,
+                              kord_mt: int, kord_tm: int,
+                              kord_tr, p_fac=0.05, a_imp=1.0,
+                              sphum_index=None, n_sponge: int = -1,
                               tau: float = -1.0, hydrostatic: bool = True,
                               use_logp: bool = False, kord_wz: int = 9,
                               w_limiter=None, cfg=None, a2b_ord: int = 4,
@@ -608,12 +610,16 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
                               consv_te: float = 0.0):
-    """Static (C3/D5): everything below plus ctx/km.  Dynamic: state,
-    press, q, bdt, ptop, ak, bk, akap, cp_air, omga, nh, p_fac, a_imp
-    (R12: no callee branches on them in Python; the f64 gate reads only
-    static dtypes)."""
-    def run(state, press, q, bdt, ptop, ak, bk, akap, cp_air,
-            omga=None, nh=None, p_fac=0.05, a_imp=1.0):
+    """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
+    state, press, q, bdt, omga and nh.
+
+    ptop/ak/bk/akap/cp_air/p_fac/a_imp are BAKED, matching the module-4
+    factory. They were dynamic here, and that could not work: geopk
+    computes `float(np.log(ptop))` at trace time (fv3_pgrad.py:1001), so
+    a traced ptop raises TracerArrayConversionError. A deck constant is
+    static in this lane by contract, and this factory was the one place
+    that disagreed."""
+    def run(state, press, q, bdt, omga=None, nh=None):
         return fv_dynamics_step(
             ctx, state, press, bdt=bdt, km=km, k_split=k_split,
             n_split=n_split, ptop=ptop, ak=ak, bk=bk, akap=akap,
