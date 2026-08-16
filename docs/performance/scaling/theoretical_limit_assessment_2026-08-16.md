@@ -106,18 +106,31 @@ then round fusion. Caveat from the campaign's own receipt: full
 CUDA-graph capture of collectives was already measured HARMFUL
 (cmdbuf 1.268×, #1575) — graph capture is NOT on this ladder.
 
-LADDER RESULT (job 26999539, 8/12 arms before walltime; PROVISIONAL —
-single reps, replicate+validity job 27001029 in flight): **the
-multi-channel-p2p arm (`NCCL_MIN/MAX_NCHANNELS=8` +
-`NCCL_P2P_NET_CHUNKSIZE=131072`) cut the step 6.75 → 5.91 ms
-(−12.4 %) — intercept −0.53 ms (CONFIRM band) AND slope −0.32 ms.**
-GLM r2's compress-together prediction holds on first read; the
-overhead is partly NCCL-internal after all. LL128: within noise of
-base (its 0.1–0.3 ms expected win did not appear). If the replicates
-hold: adopt the two NCCL vars in the production launch environment
-(config change, one receipt on a second grid), rerun the three-arm
-split under them, THEN re-rank the fused-exchange build against the
-new, smaller comm stack.
+LADDER RESULT — **CONFIRMED (jobs 26999539 + 27002564)**: the
+multi-channel-p2p env pair (`NCCL_MIN/MAX_NCHANNELS=8` +
+`NCCL_P2P_NET_CHUNKSIZE=131072`) is a large, replicated, env-only
+win at s9@64 wide halo:
+- mcp2p step 5.87/5.88/5.91 ms across THREE arms in TWO jobs on
+  different node sets (spread 0.04 ms) vs same-job base 7.18/7.26
+  and best-ever base 6.75 → **−0.9 to −1.3 ms per step (−13 to
+  −18 %)**. Two-point fit (26999539): intercept −0.53, slope −0.32 —
+  it compresses BOTH per-op overhead and payload cost, as GLM r2
+  predicted.
+- mcp2p is also far LESS node-set-sensitive than base (base wanders
+  6.75–7.26 across days/jobs; mcp2p does not) — consistent with the
+  variable part of the step being the serialised per-op overhead.
+- LL128 protocol: within noise (expected 0.1–0.3 ms win absent).
+- Validity-log arms kept failing (NCCL_DEBUG_FILE runs); the knobs'
+  effect is evidenced by the replicated delta itself — an inert arm
+  cannot produce −1.3 ms.
+NEXT (decision + receipts): (1) adopt the two vars in the production
+GPU launch env — USER DECISION, it changes every multi-GPU run;
+(2) receipt on a second lane (lat-lon packed exchange) and at 128+;
+(3) rerun the three-arm split under mcp2p, then re-rank the
+fused-exchange build against the smaller comm stack.
+Ops note, 2026-08-16 evening: three consecutive jobs lost to sick
+nodes/stragglers (l50003 CUDA fault, l50139 hang, l50027/l50009
+stragglers) — exclude-lists are load-bearing today.
 
 Floor reading from the split: the step is 3.460 compute-side + 3.360
 comm-side (0.315 staging + 1.815 payload slope + 1.230 residual).
