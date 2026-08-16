@@ -289,13 +289,24 @@ def _stack_dsw_np(dsw_np, face_level_wins=(),
                 np.stack([np.asarray(lvl[nm], dtype=np.float64)
                           for lvl in face["levels"]], axis=2)
                 for face in dsw_np])
-            if not np.array_equal(np.asarray(out[nm]), _pl):
+            # equal_nan: these carry BIG_NUMBER/NaN fill in cells the
+            # kernel never writes, and plain array_equal calls NaN !=
+            # NaN, so the first version of this check reported
+            # "max|d| nan" on two arrays that are in fact identical.
+            # The fill must match POSITIONALLY too, which equal_nan
+            # gives -- a lane that moved its fill would still fail.
+            _a = np.asarray(out[nm])
+            if not np.array_equal(_a, _pl, equal_nan=True):
+                _fin = np.isfinite(_a) & np.isfinite(_pl)
+                _d = (np.abs(_a[_fin] - _pl[_fin]).max()
+                      if _fin.any() else float("nan"))
                 raise ValueError(
                     f"_stack_dsw_np: {nm!r} is declared an alias but its "
-                    f"two views DIFFER (max|d| "
-                    f"{np.abs(np.asarray(out[nm]) - _pl).max():.3e}) -- "
-                    f"it is two generations after all, and a caller must "
-                    f"choose.")
+                    f"two views DIFFER (max|d| over finite cells {_d:.3e}, "
+                    f"non-finite masks "
+                    f"{'match' if np.array_equal(np.isfinite(_a), _fin) else 'DIFFER'}"
+                    f") -- it is two generations after all, and a caller "
+                    f"must choose.")
             continue
         if nm in out:
             raise ValueError(
