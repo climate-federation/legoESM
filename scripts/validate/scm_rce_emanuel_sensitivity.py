@@ -59,14 +59,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scheme", default="emanuel")
     parser.add_argument("--param-set", default="physical")
+    # NOT camp.DEFAULT_REFERENCE_DIR: that points at results/rcemip1_n128_ocean,
+    # OUR OWN CRM run, which is the artifact under investigation rather than an
+    # oracle (see the campaign's self-reference note).  Default to the external
+    # RCEMIP archive run and refuse anything that looks like our own output.
     parser.add_argument("--reference-dir", type=Path,
-                        default=camp.DEFAULT_REFERENCE_DIR)
+                        default=Path("results/rcemip_ref_sam300"))
     parser.add_argument("--last-reference-files", type=int, default=5)
     parser.add_argument("--days", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=600.0)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
+    if "rcemip1_n128" in str(args.reference_dir) or "rcemip1_postfix" in str(
+            args.reference_dir):
+        raise SystemExit(
+            f"REFUSED: {args.reference_dir} is our own CRM run, not an oracle.")
     ref = camp.build_reference_profiles(
         args.reference_dir, args.last_reference_files)
     base_cfg = camp.make_physics_config(
