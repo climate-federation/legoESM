@@ -16,6 +16,30 @@ from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.forcing import wangara_day33 as w  # noqa: E402
 
 
+def _wangara_reference_glob() -> str:
+    """Where the stored Wangara LES frames are.
+
+    The relative path alone SKIPPED both reference checks whenever the tests
+    ran from a pinned worktree -- `results/` lives in the main checkout, not in
+    the worktree -- so the non-vacuity check silently never ran. `LES_REF_DIR`
+    overrides; otherwise try the working directory first and fall back to the
+    main checkout.
+    """
+    import os
+    from pathlib import Path
+
+    roots = []
+    env = os.environ.get("LES_REF_DIR")
+    if env:
+        roots.append(Path(env))
+    roots += [Path("results/les_ref"),
+              Path("/burg-archive/glab/users/pg2328/legoESM/results/les_ref")]
+    for root in roots:
+        if (root / "wangara" / "profiles").is_dir():
+            return str(root / "wangara" / "profiles" / "prof_*.npz")
+    return "results/les_ref/wangara/profiles/prof_*.npz"   # nothing found
+
+
 def test_clock_is_absolute_not_run_relative():
     """The easy thing to get wrong, and it flips the sign of the forcing.
 
@@ -270,8 +294,7 @@ def test_wangara_column_reproduces_the_les_initial_theta():
         load_analytic_scm_case,
     )
     from legoesm.atmosphere.physics._shared import exner_function
-    frames = sorted(glob.glob(
-        "results/les_ref/wangara/profiles/prof_*.npz"))
+    frames = sorted(glob.glob(_wangara_reference_glob()))
     if not frames:
         pytest.skip("no stored wangara LES reference on this machine")
     ref = np.load(frames[0], allow_pickle=True)
@@ -296,8 +319,7 @@ def test_a_flat_column_would_fail_that_check():
     """NON-VACUITY: the assertion above must reject the profile it replaced."""
     import glob
 
-    frames = sorted(glob.glob(
-        "results/les_ref/wangara/profiles/prof_*.npz"))
+    frames = sorted(glob.glob(_wangara_reference_glob()))
     if not frames:
         pytest.skip("no stored wangara LES reference on this machine")
     ref = np.load(frames[0], allow_pickle=True)
