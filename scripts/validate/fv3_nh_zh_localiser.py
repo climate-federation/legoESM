@@ -36,6 +36,7 @@ import jax  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
+import jax.numpy as jnp  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
@@ -43,12 +44,18 @@ sys.path.insert(0, os.path.join(_REPO, "tests", "grids"))
 sys.path.insert(0, _REPO)
 
 N, NG, KM = 12, 3, 3
+# the reference thickness profile the gate file uses
+_DP0 = None  # set from the gate module at run time
 MA = N + 2 * NG
 DT = 20.0
 
 
 def main() -> int:
+    global _DP0
     import test_fv3_dsw_tail_3d as gate  # noqa: E402
+    from legoesm.core import (  # noqa: E402
+        fv3_native_dsw_tail_3d as nptail_mod,
+    )
     from legoesm.core.fv3_duo_stepper import (  # noqa: E402
         build_jax_duo_stepper_context,
     )
@@ -56,6 +63,7 @@ def main() -> int:
         build_six_face_duo_context,
     )
 
+    _DP0 = gate._DP0
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      oracle_conventions=True)
     jctx = build_jax_duo_stepper_context(ctx)
@@ -103,6 +111,92 @@ def main() -> int:
         b = np.asarray(gate._stack_dsw_np(dsw)[nm])
         print(f"  {nm}: max|stack - adapter| "
               f"{np.abs(a - b).max():.3e}  shape {a.shape}")
+
+    # --- which of the TWO kernels that write zh is responsible -------
+    # update_dz_d writes zh's compute window, then riem_solver3 rewrites
+    # it, then the per-interface ext_scalar fills the halos.  The kernel
+    # probe in the gate file already clears update_dz_d (1.333e-09 after
+    # the grid flags were threaded), so this runs BOTH in sequence and
+    # prints the diff after each.
+    import legoesm.core.fv3_native_nh_core as npnh
+    import legoesm.core.fv3_nh_core as jnh
+
+    bd = ctx["bd"]
+    bounds = (bd.is_, bd.ie, bd.js, bd.je, NG)
+    carry = bundle["carry"]
+    dsw, tail = bundle["dsw"], bundle["tail"]
+    cswp = bundle["csw_press"]
+    area6 = nptail_mod.nh_exchanged_area6(dict(ctx))
+    rarea6 = [1.0 / np.asarray(a) for a in area6]
+    fl = jctx.flags6
+
+    print("\nthe two kernels that write zh, face by face:")
+    for t in range(3):
+        crx = np.stack([dsw[t]["levels"][k]["crx_adv"] for k in range(KM)],
+                       axis=2)
+        cry = np.stack([dsw[t]["levels"][k]["cry_adv"] for k in range(KM)],
+                       axis=2)
+        xfx = np.stack([dsw[t]["levels"][k]["xfx_adv"] for k in range(KM)],
+                       axis=2)
+        yfx = np.stack([dsw[t]["levels"][k]["yfx_adv"] for k in range(KM)],
+                       axis=2)
+        gs = ctx["gs6"][t]
+        gs_nh = dict(gs)
+        gs_nh["area"] = area6[t]
+        gs_nh["rarea"] = rarea6[t]
+        ndif = np.full(KM + 1, 2.0)
+        damp = np.full(KM + 1, 0.12)
+        rdt = 1.0 / DT
+
+        zh_np = np.array(carry["zh6"][t], copy=True)
+        ws_np = np.array(carry["ws6"][t], copy=True)
+        npnh.update_dz_d(ndif, damp, 6, bd, KM, N + 1, N + 1, area6[t],
+                         rarea6[t], _DP0, carry["zs6"][t], zh_np,
+                         np.array(crx, copy=True), np.array(cry, copy=True),
+                         np.array(xfx, copy=True), np.array(yfx, copy=True),
+                         ws_np, rdt, gs_nh, lim_fac=1.0)
+        zh_j, ws_j = jnh.update_dz_d(
+            (2.0,) * (KM + 1), (0.12,) * (KM + 1), 6, bounds, KM, N + 1,
+            N + 1, jnp.asarray(area6[t]), jnp.asarray(rarea6[t]),
+            jnp.asarray(_DP0), jnp.asarray(carry["zs6"][t]),
+            jnp.asarray(carry["zh6"][t]), jnp.asarray(crx),
+            jnp.asarray(cry), jnp.asarray(xfx), jnp.asarray(yfx),
+            jnp.asarray(carry["ws6"][t]), rdt, jnp.asarray(gs["dxa"]),
+            jnp.asarray(gs["dya"]), jnp.asarray(gs["del6_u"]),
+            jnp.asarray(gs["del6_v"]), lim_fac=1.0,
+            bounded_domain=fl[t].bounded_domain, grid_type=fl[t].grid_type,
+            sw_corner=fl[t].sw_corner, se_corner=fl[t].se_corner,
+            nw_corner=fl[t].nw_corner, ne_corner=fl[t].ne_corner)
+        d1 = float(np.abs(np.asarray(zh_j) - zh_np).max())
+
+        # ...then riem_solver3 on each lane's own update_dz_d output.
+        pe_np = np.array(carry["pe6"][t], copy=True)
+        pkc_np = np.array(cswp[t]["pkc"], copy=True)
+        pk3_np = np.array(carry["pk3_6"][t], copy=True)
+        pk_np = np.array(carry["pk6"][t], copy=True)
+        peln_np = np.array(carry["peln6"][t], copy=True)
+        w_np = np.array(tail[t]["w"], copy=True)
+        delz_np2 = np.array(bundle["state"][t]["delz"], copy=True)
+        npnh.riem_solver3(0, DT, bd, KM, 2.0 / 7.0, 1004.6, 100.0,
+                          carry["zs6"][t], w_np, delz_np2,
+                          np.array(dsw[t]["pt"], copy=True),
+                          np.array(dsw[t]["delp"], copy=True), zh_np,
+                          pe_np, pkc_np, pk3_np, pk_np, peln_np, ws_np,
+                          0.05, 1.0, use_logp=False, last_call=False,
+                          fp_out=False)
+        out_j = jnh.riem_solver3(
+            0, DT, bounds, KM, 2.0 / 7.0, 1004.6, 100.0,
+            jnp.asarray(carry["zs6"][t]), jnp.asarray(tail[t]["w"]),
+            jnp.asarray(bundle["state"][t]["delz"]),
+            jnp.asarray(dsw[t]["pt"]), jnp.asarray(dsw[t]["delp"]),
+            zh_j, jnp.asarray(carry["pe6"][t]),
+            jnp.asarray(cswp[t]["pkc"]), jnp.asarray(carry["pk3_6"][t]),
+            jnp.asarray(carry["pk6"][t]), jnp.asarray(carry["peln6"][t]),
+            ws_j, 0.05, 1.0, use_logp=False, last_call=False,
+            fp_out=False)
+        d2 = float(np.abs(np.asarray(out_j[2]) - zh_np).max())
+        print(f"  face {t + 1}: after update_dz_d max|d| {d1:.6e}   "
+              f"after riem_solver3 max|d| {d2:.6e}")
 
     print("\nzs and ws (the bottom boundary condition):")
     zs = np.stack([np.asarray(x) for x in bundle["carry"]["zs6"]])
