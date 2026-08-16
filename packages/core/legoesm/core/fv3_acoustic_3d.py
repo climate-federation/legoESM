@@ -360,9 +360,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         gz = nh["gz"].at[:, :, :, km].set(nh["zs"])
         wi = slice(i0, i0 + n)
         wj = slice(j0, j0 + n)
-        # The spec's per-face loop is the stacked axis 0 (identical
-        # window every face); only delz's compute window is read.
-        dz_cw = state["delz"][:, wi, wj, :]                # (6,n,n,km)
+        # delz is allocated COMPUTE-ONLY -- field_shape("delz") is
+        # (n, n, km), not the padded (m_a, m_a, km) every neighbouring
+        # field uses. Windowing it again took a 9x9 sub-block of the
+        # 12x12 window and tried to subtract it from the 12x12 zs, which
+        # is where "(6, 12, 12) vs (6, 9, 9)" came from.
+        dz_cw = state["delz"]                              # (6,n,n,km)
 
         def _dz_down(gzw, dz):
             gzw = gzw - dz
@@ -370,8 +373,10 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
 
         # k-recurrence -> lax.scan (never cumsum).  reverse=True walks
         # k = km-1 .. 0 from the zs carry; ys stack in xs order, so
-        # ys[k] is gz at level k.
-        gzcw, _ = jax.lax.scan(_dz_down, nh["zs"][:, wi, wj],
+        # ys[k] is gz at level k -- so the SECOND element is the one
+        # wanted here. Taking the carry would keep only k = 0 and then
+        # fail to fit the (…, :km) destination.
+        _, gzcw = jax.lax.scan(_dz_down, nh["zs"][:, wi, wj],
                                jnp.moveaxis(dz_cw, -1, 0), reverse=True)
         gz = gz.at[:, wi, wj, :km].set(jnp.moveaxis(gzcw, 0, -1))
         nh = {**nh, "gz": gz}
