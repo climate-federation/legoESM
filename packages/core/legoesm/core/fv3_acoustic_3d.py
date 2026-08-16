@@ -514,8 +514,12 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # press list aliases the nh carry; pkc rides along (C4).
         press = {"pe": _rnh["pe"], "pk": _rnh["pk"], "peln": _rnh["peln"],
                  "ws": _rnh["ws"], "pkc": res["pkc"]}
-        if remap_step:
-            press["pk_remap"] = res["press"]["pk_remap"]
+        # NO pk_remap ON THE NH ARM. It is the HYDROSTATIC chain's
+        # snapshot, taken before one_grad_p scratches pk; the NH tail
+        # never produces one, because Riem_Solver3's last_call writes
+        # the compute-window `pk` the remap reads instead. The consumer
+        # agrees -- fv_dynamics_step takes g["pk_remap"] only on the
+        # hydrostatic branch and g["pk"] on this one.
         state = {**state, "delz": res["delz"]}
         u_new, v_new = res["u"], res["v"]
 
