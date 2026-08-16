@@ -84,7 +84,12 @@ MA = N + 2 * NG
 NQ = 2
 BDT = 60.0
 AKAP, CP_AIR = 2.0 / 7.0, 1004.6
-KORD = 9
+# The deck's triple, read from the oracle-parity runner -- NOT one
+# value for all three. kord_tm is NEGATIVE: a positive kord_tm selects a
+# different operator (remaps theta_v in linear p, needs pkez and the te
+# array, converts pt at fv_mapz.F90:495-501 instead of :209-217), and
+# the lane refuses it rather than running the wrong arm.
+KORD_MT, KORD_TM, KORD_TR = 9, -9, 9
 
 # A temperature field is ~250-320 K; theta_v on this deck is several
 # hundred K higher, so "did the round trip close" is answerable by
@@ -153,8 +158,8 @@ def _press_jax(jstate, ptop):
 
 def _common(ptop, ak, bk, hydrostatic, k_split, n_split):
     return dict(bdt=BDT, km=KM, k_split=k_split, n_split=n_split, ptop=ptop,
-                ak=ak, bk=bk, akap=AKAP, cp_air=CP_AIR, kord_mt=KORD,
-                kord_tm=KORD, kord_tr=KORD, hydrostatic=hydrostatic)
+                ak=ak, bk=bk, akap=AKAP, cp_air=CP_AIR, kord_mt=KORD_MT,
+                kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=hydrostatic)
 
 
 def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2):

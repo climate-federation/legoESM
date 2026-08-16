@@ -346,6 +346,52 @@ def main() -> int:
             print(f"  {sname:22s} face {t + 1}: max|d| {d.max():.6e}"
                   f"   compute {d[cs, cs].max():.6e}")
 
+    # --- EVERY riem_solver3 INPUT, phase-side vs spec-side ------------
+    # update_dz_d agrees to 2.85e-06 and riem_solver3 disagrees by
+    # ~2e+02 on ALL SIX faces, while the SAME JAX kernel called by hand
+    # matches the spec exactly. So the phase hands riem an operand the
+    # chain does not -- and the adapters that build those operands are
+    # the part of this comparison never checked. crx/cry/xfx/yfx were
+    # verified earlier; these are the rest.
+    print("\nriem_solver3's inputs, the stacked adapters vs the spec's "
+          "per-face arrays:")
+    _dsw_s = gate._stack_dsw_np(bundle["dsw"])
+    _tail_s = gate.stack_np(bundle["tail"])
+    _cswp_s = gate.stack_np(bundle["csw_press"])
+    _nh_s = gate._nh_stack_carry(bundle["carry"])
+    checks = [
+        ("pt", lambda t: bundle["dsw"][t]["pt"], lambda t: _dsw_s["pt"][t]),
+        ("delp", lambda t: bundle["dsw"][t]["delp"],
+         lambda t: _dsw_s["delp"][t]),
+        ("w", lambda t: bundle["tail"][t]["w"], lambda t: _tail_s["w"][t]),
+        ("delz", lambda t: bundle["state"][t]["delz"],
+         lambda t: np.stack([np.asarray(f["delz"])
+                             for f in bundle["state"]])[t]),
+        ("pkc", lambda t: bundle["csw_press"][t]["pkc"],
+         lambda t: _cswp_s["pkc"][t]),
+        ("zs", lambda t: bundle["carry"]["zs6"][t], lambda t: _nh_s["zs"][t]),
+        ("pe", lambda t: bundle["carry"]["pe6"][t], lambda t: _nh_s["pe"][t]),
+        ("pk3", lambda t: bundle["carry"]["pk3_6"][t],
+         lambda t: _nh_s["pk3"][t]),
+        ("pk", lambda t: bundle["carry"]["pk6"][t], lambda t: _nh_s["pk"][t]),
+        ("peln", lambda t: bundle["carry"]["peln6"][t],
+         lambda t: _nh_s["peln"][t]),
+        ("ws", lambda t: bundle["carry"]["ws6"][t], lambda t: _nh_s["ws"][t]),
+    ]
+    for nm, spec_of, stack_of in checks:
+        worst, shp = 0.0, None
+        for t in range(6):
+            a = np.asarray(spec_of(t), dtype=np.float64)
+            b = np.asarray(stack_of(t), dtype=np.float64)
+            if a.shape != b.shape:
+                print(f"  {nm:5s} SHAPE MISMATCH face {t + 1}: spec "
+                      f"{a.shape} vs stacked {b.shape}")
+                worst = float("nan")
+                break
+            shp = a.shape
+            worst = max(worst, float(np.abs(a - b).max()))
+        print(f"  {nm:5s} max|spec - stacked| {worst:.6e}   shape {shp}")
+
     print("\nSCALES (the number missing from every comparison above):")
     for nm, arr in (("numpy phase", zh_n), ("jax phase", zh_j),
                     ("jax chain", np.asarray(zh_chain_j))):

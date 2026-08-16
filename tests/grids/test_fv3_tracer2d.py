@@ -124,15 +124,21 @@ def _caps(level_amp, seed=13):
     npx = N + 1
     shp = {"mfx": (npx, MA, KM), "mfy": (MA, npx, KM),
            "cx": (npx, MA, KM), "cy": (MA, npx, KM)}
-    cap_np = []
-    for _t in range(6):
-        d = {}
-        for nm, s in shp.items():
-            a = rng.standard_normal(s)
-            for k in range(KM):
-                a[:, :, k] *= level_amp[k]
-            d[nm] = a
-        cap_np.append(d)
+    cap_np = [{nm: rng.standard_normal(sh) for nm, sh in shp.items()}
+              for _ in range(6)]
+    # NORMALISE, do not scale blindly. cmax is a max over |cx|,|cy| plus
+    # a metric term, so a raw multiplier maps to nsplt through the
+    # random draw -- the first version of this fixture asked for
+    # nsplt 1/2/3 and got 1/6/9, overshooting NSPLT_MAX and turning a
+    # parity test into a cap refusal. Setting the peak Courant number
+    # per level makes `level_amp` mean what its name says; the gates
+    # still assert the schedule the lane RETURNS.
+    for k in range(KM):
+        peak = max(np.abs(cap_np[t][nm][:, :, k]).max()
+                   for t in range(6) for nm in ("cx", "cy"))
+        for t in range(6):
+            for nm in shp:
+                cap_np[t][nm][:, :, k] *= level_amp[k] / peak
     cap_j = {nm: jnp.asarray(np.stack([cap_np[t][nm] for t in range(6)]))
              for nm in shp}
     return cap_np, cap_j
@@ -171,9 +177,12 @@ def _schedule(out):
 # second sub-cycles every level, the third mixes the two WITHIN one call
 # (which is the case a per-level bug survives).  The resolved counts are
 # asserted, not assumed.
-_AMPS = {"all_single": (0.10, 0.12, 0.14),
-         "all_split": (1.40, 1.60, 1.90),
-         "mixed": (0.10, 1.40, 2.60)}
+# Peak Courant number per level, so nsplt = int(1+cmax) is roughly
+# 1 / 2 / 3 -- comfortably inside NSPLT_MAX = 8. Every gate still
+# asserts the MEASURED schedule; these are targets, not claims.
+_AMPS = {"all_single": (0.30, 0.40, 0.50),
+         "all_split": (1.30, 1.60, 2.30),
+         "mixed": (0.30, 1.30, 2.30)}
 
 
 @pytest.mark.parametrize("label", sorted(_AMPS))
