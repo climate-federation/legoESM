@@ -63,12 +63,18 @@ rounded values do not visibly sum:
 
 The former "2.40 unexplained" resolves into the 1.230 ms residual
 (rank skew refuted at <24 µs) plus ~1.46 ms by which the no-halo
-program exceeds the 2.00 ms single-GPU control. Per-round pricing of
-the residual is 88–112 µs/round — the denominator is uncertain
-because the production wide fill receipted 11 collectives while the
-offline probe (default 1:1 size weights, NOT production's nlev-based
-weights) reports 14 rounds; do not build on the per-round figure
-until the schedule is dumped from the production build (codex r2).
+program exceeds the 2.00 ms single-GPU control. Denominator resolved
+(job 26998727, production builders WITH production's nlev size
+weights, s9 lloyd-0 reorder-for-64 sfc): **the wide depth-9 fill is
+14 rounds** (max_degree 13), so the residual prices at ~88 µs/round.
+The earlier "11 collectives" figure's mesh-state provenance is
+unresolved — do not reuse it. Two new facts from the same receipt:
+(a) the wide schedule uses 14 rounds against a degree bound of 13 —
+one recolouring round may be recoverable (~88 µs); (b) per-round-MAX
+padding ships ~2.0× the true cell halo (36,953 padded vs 18,377
+actual rows), so exact per-pair sizing — what the ragged path does —
+would roughly HALVE the 1.815 ms payload term. That upgrades the
+ragged-after-pruning lever from latency play to latency+bytes play.
 
 Offline row-count receipt (job 26997346, production partition
 builders): sfc at wide depth 9 computes 59,338 cell rows vs 40,961
