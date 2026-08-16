@@ -125,6 +125,39 @@ class EadyUniformConfig:
     # (0.05 fails day 67, 0.025 and 0.0 both go non-finite sooner).
     barotropic_diffusion_alpha: float = 0.0
     barotropic_div_damp: float = 0.05
+    # Depth-mean velocity viscosity: ON, and this is what makes the case run
+    # its full 200 days. It damps the ROTATIONAL grid mode, which carries
+    # near-zero surface-height gradient and is therefore invisible to the
+    # free-surface Laplacian above -- the reason that filter could never fix
+    # this and only destabilised it.
+    #
+    # Measured, with the filter already off:
+    #     0        fails day 122.9
+    #     1e3      PASSES 200 days, max_speed 1.894 m/s
+    #     1e4      PASSES 200 days, max_speed 0.883 m/s
+    #     1e5      fails day 191.7
+    #
+    # A WINDOW, with a real upper edge: doubling the barotropic substeps at
+    # 1e5 leaves the failure at the IDENTICAL step 55200, so that edge is not
+    # an artefact of stacking explicit dampers inside the fast loop. What sets
+    # it is NOT established -- an isolated forward-Euler Laplacian on this grid
+    # would allow 2.4e8, three orders higher, so that bound explains nothing
+    # here and is quoted only to show the value is not near it.
+    #
+    # THE VALUE IS DERIVED, not fitted. Match the grid-scale viscous decay rate
+    # to the growth rate of the mode this case measures:
+    #
+    #     nu = sigma_Eady * dx^2 / pi^2,   sigma_Eady = 0.31*f0*Lambda/N
+    #
+    # which is 1.15e3 m^2/s at 70 km for this case's own parameters (its
+    # 5.0-day Eady e-folding). 1e3 is that value to one significant figure, and
+    # the form generalises as dx^2 rather than being a constant tuned here.
+    #
+    # RETRACTED: an earlier revision justified 1e3 by "keeps 71% of the
+    # reference eddy speed". That comparison was against a run 67 days into an
+    # exploding mode, so the reference was noise-inflated and the ratio
+    # measured nothing (GLM-5.2).
+    barotropic_u_viscosity: float = 1.0e3
     tracer_advection: str = "tvd"     # "upwind", "tvd", "dst3", "dst3_multidim", "som"
 
     @property

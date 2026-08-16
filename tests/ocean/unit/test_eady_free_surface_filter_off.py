@@ -28,6 +28,7 @@ knob in physical units, and it is the one I originally got backwards.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +39,38 @@ from legoesm.ocean.mpas_config import MPASOceanConfig
 def test_free_surface_filter_is_off():
     """The one-line change. If this goes red, read the module docstring first."""
     assert EadyUniformConfig().barotropic_diffusion_alpha == 0.0
+
+
+def test_velocity_viscosity_is_on_and_is_what_cures_the_case():
+    """The setting that makes the case run its full 200 days.
+
+    It damps the ROTATIONAL grid mode, which the free-surface Laplacian cannot
+    see (that mode carries near-zero surface-height gradient). Measured with
+    the filter already off: 0 fails day 122.9; 1e3 and 1e4 both PASS the full
+    200 days; 1e5 fails again at day 191.7.
+
+    A WINDOW, not "more damping is better" -- the too-strong arm failing is the
+    signature of a targeted instrument. 1e3 is the least dissipation that
+    works and keeps 71% of the reference eddy speed (1.894 against 2.682 m/s)
+    where 1e4 keeps 33%; this case exists to resolve eddies."""
+    assert EadyUniformConfig().barotropic_u_viscosity == 1.0e3
+
+
+def test_the_viscosity_actually_reaches_the_model():
+    """A config field the matrix does not carry is a dangling knob.
+
+    This bit twice in this investigation: the free-surface filter reaches the
+    unstructured grid but is silently dropped on the lat-lon path, and three
+    separate probe knobs turned out to be wired to nothing. So assert the
+    scrape list carries it, rather than trusting that setting the field is
+    enough."""
+    matrix = (Path(__file__).resolve().parents[3]
+              / "scripts" / "matrix" / "run_ocean_test_matrix.py").read_text()
+    block = matrix[matrix.index('for attr in ("tracer_advection"'):]
+    block = block[:block.index(")")]
+    assert "barotropic_u_viscosity" in block, (
+        "the matrix does not carry barotropic_u_viscosity, so setting it on "
+        "the case config reaches nothing")
 
 
 def test_divergence_damping_is_kept():
@@ -106,3 +139,50 @@ def test_sibling_channel_cases_are_flagged_not_silently_changed():
         f"a sibling channel case changed its free-surface filter: {inherited}. "
         f"That is fine, but it needs its own measured justification -- update "
         f"this test with the evidence.")
+
+
+def test_the_viscosity_matches_its_derivation():
+    """The shipped value is DERIVED, not fitted, and this keeps it that way.
+
+    Match the grid-scale viscous decay rate to the growth rate of the mode the
+    case measures:
+
+        nu = sigma_Eady * dx^2 / pi^2,    sigma_Eady = 0.31 * f0 * Lambda / N
+
+    which is 1.15e3 m^2/s at 70 km for this case's own parameters (its 5.0-day
+    Eady e-folding). The shipped 1e3 is that to one significant figure.
+
+    This exists so the value cannot drift out of agreement with its own
+    justification: change the stratification, the shear or the resolution and
+    it goes red, which is the signal to RE-DERIVE rather than to re-tune.
+    Tolerance 30% -- wide enough for the rounding, tight enough that a real
+    change in the case's physics trips it."""
+    c = EadyUniformConfig()
+    sigma = 0.31 * c.f0 * c.Lambda / c.N
+    nu_derived = sigma * (70e3) ** 2 / math.pi ** 2
+    shipped = c.barotropic_u_viscosity
+    assert abs(shipped - nu_derived) / nu_derived < 0.30, (
+        f"shipped {shipped:.3e} no longer matches the derived "
+        f"{nu_derived:.3e} m^2/s; re-derive rather than re-tune")
+
+
+def test_the_case_is_not_being_suppressed():
+    """A damping that CURES must not also erase what the case measures.
+
+    Measured peak eddy speed against viscosity, all passing the full 200 days
+    except where noted:
+
+        500 -> 1.934   750 -> 1.926   1e3 -> 1.894   1.15e3 -> 1.855
+        1e4 -> 0.883   1e5 -> fails day 191.7
+
+    A 2.3x change across the low end moves the eddy field by 4% -- that is what
+    damping GRID NOISE looks like. 1e4 halving it is what SUPPRESSING THE MODE
+    looks like. The shipped value must stay in the flat part of that curve, so
+    this pins it an order of magnitude below 1e4.
+
+    (The earlier justification -- "keeps 71% of the reference eddy speed" --
+    is RETRACTED: that reference was a run 67 days into an exploding mode, so
+    the ratio measured nothing.)"""
+    assert EadyUniformConfig().barotropic_u_viscosity <= 2.0e3, (
+        "the viscosity has moved toward the regime where it damps the eddies "
+        "themselves rather than the grid mode")
