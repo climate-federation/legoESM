@@ -33,7 +33,7 @@ mkdir -p $REPO/results/param_grad_audit
 JAX_ENABLE_X64=1 $PY -u scripts/validate/audit_param_gradients.py \
   --categories $CAT \
   --json-out $REPO/results/param_grad_audit/${CAT}.json 2>&1 \
-  | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
+  | grep --line-buffered -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
 RC=${PIPESTATUS[0]}
 echo "AUDIT_STATUS=$([ $RC -eq 0 ] && echo OK || echo FAILED) (category=$CAT rc=$RC)"
 echo ALLDONE
