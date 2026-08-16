@@ -486,6 +486,60 @@ gate, not the fix: an unexercised module's correctness is unknown
 regardless of how carefully it was reviewed, and this one had been read
 by GLM, by me, and by codex.
 
+## ALL SIX MODULES GREEN (2026-08-16)
+
+| module | file | gates |
+|---|---|---|
+| 1-2 | cgrid / dsw phases | green (unchanged this session) |
+| 3 | `fv3_dsw_tail_3d.py` | **27 passed, 1 skipped** |
+| 4 | `fv3_acoustic_3d.py` | **16 passed** |
+| 5 | `fv3_tracer2d.py` | **19 passed** |
+| 6 | `fv3_dynamics.py` | **18 passed** |
+
+Module 6 needs its own runner (`dynamics_gate_bigmem.sbatch`): ~37 min,
+and its heavy cases must not share compiled graphs (autouse
+`jax.clear_caches()`).
+
+### Nine defects, seven in shipped module code
+
+Every one was invisible until the module was RUN. Modules 5 and 6 had
+no gate file before this session; module 4's 16 green tests could not
+see two of these because they pass `flux_cap=None` throughout.
+
+1. flags read off `ctx.gs6`, which keeps only arrays -> `bounded_domain`
+   defaulted False (rejected every valid context) and the corner flags
+   defaulted True (would have run fills the oracle skips).
+2. capacitor frac rescale indexed a face-stacked 4-D array with THREE
+   selectors -> scaled the wrong axis at every level, coupling levels.
+3. `qq` bound to the tracer routine's returned DICT -> KeyError on any
+   run with tracers.
+4. `p_var_hydrostatic` scanned the FACE axis as if it were k, and
+   unpacked three names from `lax.scan`'s two-element return. At km = 6
+   the first would have run and returned a plausible pressure field.
+5. the gz seed re-windowed `delz`, which is allocated COMPUTE-ONLY, and
+   took the scan's carry where its own comment says it wants `ys`.
+6. THREE seams where two modules disagreed about the shape of the same
+   data: flux capacitors flat vs nested, tracers face-major vs
+   tracer-major, the NH carry nested under `"nh"` vs top-level.
+7. the jit factory returned a `str` (`pt_units`), so the compiled path
+   could never have run; and it traced the deck constants that `geopk`
+   takes `float()` of at trace time. Both were codex findings.
+
+### The lesson that cost the most
+
+The NH `zh` gap -- 2.465e-02, chased across a dozen jobs -- was the
+GATE's own stacking adapter feeding the JAX lane an earlier generation
+of `pt`/`delp`. Fixing it moved the number to 3.498e-10 with NO change
+to the module. Four of my own measurements were wrong before the right
+one: a chain missing the exchange, a sweep stopped at three of six
+faces, a shadowed variable that let numpy broadcast a one-face result
+against six-face stacks, and -- underneath all three -- never printing
+the SCALE of the arrays being compared.
+
+What worked, and is the first move next time: stage returns on BOTH
+lanes over ONE shared bundle. A hand-built chain is a second
+implementation that can differ for its own reasons.
+
 ## Next task, precisely
 
 0. **Close the NH `zh` gap** with the spec-against-itself comparison
