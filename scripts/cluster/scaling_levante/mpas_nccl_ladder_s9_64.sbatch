@@ -60,7 +60,13 @@ source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/nccl_ladder_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
-export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
+# Multi-shard autotune sync crashed ALL 16 arms of job 26998105 at 64
+# ranks (same "No configuration found in cache after synchronizing"
+# failure as the 192-rank jobs 26979367/68) — disable it, and use a
+# per-job JIT cache in case the shared one carries a poisoned autotune
+# entry from those crashes.
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
+export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_j${SLURM_JOB_ID}"
 mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
