@@ -604,9 +604,36 @@ def _make_mpas_turbulence(
         # of the forcing pytree structure; the knob is a build-time closure
         # const — the JAX feature-gating exception): defaults keep these
         # branches out of the trace entirely, byte-identical to before.
+        # ``forcing["q_sfc_land"]`` — the land scheme's SOLVED boundary
+        # humidity (for the two-leaf canopy the canopy-air humidity out of the
+        # stomatal + soil + aerodynamic resistance network), used DIRECTLY as
+        # the land fraction's surface humidity.  Review killed the first
+        # attempt at this handoff, which round-tripped the humidity through an
+        # effective beta: the inversion and this reconstruction anchored their
+        # saturation at different pressures and different-lag skin
+        # temperatures (0.3-2.5 % of q_sat before lag error), and the [0,1]
+        # clip could only ever SHRINK the flux -- truncating legitimate
+        # super-saturation sources and zeroing evening-transition dew.  Passing
+        # the humidity itself has no inversion, no anchor mismatch and no
+        # clip.  Blended by land fraction; ocean/ice keep saturation at SST.
+        _qsfc_traced = (forcing.get("q_sfc_land")
+                        if forcing is not None else None)
+        if _qsfc_traced is not None:
+            if f_land is None:
+                raise ValueError(
+                    "forcing['q_sfc_land'] (traced land surface humidity) "
+                    "requires the land fraction to be threaded into the "
+                    "turbulence factory (make_physics f_land=...)."
+                )
+            _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            q_sfc = ((1.0 - _f_land_col) * q_sfc
+                     + _f_land_col * jnp.asarray(
+                         _qsfc_traced, dtype=q_sfc.dtype).reshape(nCells))
         _beta_traced = (forcing.get("beta_land")
                         if forcing is not None else None)
-        if _beta_traced is not None:
+        if _qsfc_traced is not None:
+            pass                     # the solved humidity supersedes beta
+        elif _beta_traced is not None:
             if f_land is None:
                 raise ValueError(
                     "forcing['beta_land'] (traced per-cell beta_soil) "

@@ -1148,6 +1148,10 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
+    # Snow that was present when the scheme computed its humidity but melted
+    # away during the step leaves that humidity stale on the ICE curve; the
+    # end-state reconstruction below is the honest value for that transition.
+    _snow_melted_out = (snow > 1e-6) & ~has_snow_new
     if surface_out.q_surface is not None:
         # The surface scheme SOLVED for its own boundary humidity -- CLM-ML's
         # Philip soil relative humidity, the two-leaf canopy's canopy-air
@@ -1159,6 +1163,12 @@ def _step_multilayer_land_impl(
         # slab wrapper preserved it; this wrapper did not).  Snow still
         # overrides to the ice-saturation surface.
         q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+        q_sfc_new = jnp.where(
+            _snow_melted_out,
+            forcing.q_lowest
+            + jnp.where(has_snow_new, 1.0, beta_new)
+            * (q_sat_sfc_new - forcing.q_lowest),
+            q_sfc_new)
     else:
         # Scheme returned no humidity: reconstruct the bounded GRADIENT form
         # (never the product form -- beta is a flux efficiency, and beta*q_sat

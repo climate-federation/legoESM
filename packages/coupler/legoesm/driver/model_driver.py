@@ -8071,6 +8071,7 @@ class ModelDriver:
         _land_albedo_cells = None      # (nCells,) land albedo of the last step
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
+        _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
         if _land_ml_on:
             if not _sst_forcing:
                 raise ValueError(
@@ -8134,38 +8135,24 @@ class ModelDriver:
                             land_state.theta_soil, _lml_cfg, _lml_params),
                         0.0, 1.0)
 
-                from legoesm.thermo import saturation_mixing_ratio as _satmr
+                # The land's SOLVED surface humidity is handed to the
+                # turbulence VERBATIM via forcing["q_sfc_land"] -- review
+                # refuted the previous effective-beta round trip here (its
+                # saturation anchors disagreed by 0.3-2.5 % and its clip could
+                # only shrink the flux), so there is no inversion any more.
 
-                @jax.jit
-                def _land_beta_from_qsfc(q_sfc_land, T_skin, a2s):
-                    """The land's SOLVED surface humidity, as the beta the
-                    turbulence channel already carries.
-
-                    The surface layer reconstructs
-                    ``q_air + beta*(q_sat - q_air)``, so
-                    ``beta = (q_sfc - q_air)/(q_sat - q_air)`` hands the
-                    scheme's own boundary humidity through the EXISTING traced
-                    forcing key -- no new channel, no turbulence change, and
-                    the round trip is exact up to the one-step lag every other
-                    land field on this lane already has.  For the two-leaf
-                    canopy that humidity comes out of the resistance network,
-                    so this is the resistance-based surface reaching the
-                    atmosphere, not an imposed one.  Clipped to [0, 1]: the
-                    reconstruction stays between the air and saturation by
-                    construction, and where the air itself is saturated the
-                    gradient (and the flux) vanishes whatever beta says.
-                    """
-                    q_sat = _satmr(T_skin, a2s.p_lowest)
-                    denom = q_sat - a2s.q_lowest
-                    beta = (q_sfc_land - a2s.q_lowest) / jnp.where(
-                        jnp.abs(denom) > 1e-12, denom, 1.0)
-                    return jnp.clip(jnp.where(
-                        jnp.abs(denom) > 1e-12, beta, 1.0), 0.0, 1.0)
                 if _land_beta != 1.0:
                     logger.info(
                         "  mpas_land_beta_soil: traced per-cell beta_soil "
                         "REPLACES the static mpas_land_beta=%.2f over land",
                         _land_beta)
+
+            from legoesm.land.forcing.solar import cos_solar_zenith as _csz
+            _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
+
+            @jax.jit
+            def _cos_zen_fn(doy, hour_utc):
+                return _csz(_lml_lat, _lml_lon, doy, hour_utc)
 
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
@@ -8199,10 +8186,13 @@ class ModelDriver:
                 u_c, v_c = reconstruct_cell_velocity(
                     self.state.u.data[:, -1], self.grid)
                 # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
-                # ideal-gas rho at the lowest level, snow split at T_freeze,
-                # fixed cos_zenith=0.5 for the non-canopy schemes (the real
-                # zenith already drives RRTMGP; the land uses it only for
-                # canopy radiation, which is coupled-pipeline-only here).
+                # ideal-gas rho at the lowest level, snow split at T_freeze.
+                # The zenith is the REAL per-cell sun (same doy/seconds the
+                # radiation uses this step): it was a fixed 0.5 when only the
+                # bulk scheme ran here (which never reads it), but the two-leaf
+                # canopy now runs on this lane and its radiation partitioning
+                # is zenith-driven -- a fixed sun would give the canopy neither
+                # a diurnal cycle nor night.
                 return AtmToSurface(
                     sw_down=sw_down, lw_down=lw_down,
                     precip_total=precip,
@@ -8212,7 +8202,9 @@ class ModelDriver:
                     u_lowest=u_c, v_lowest=v_c,
                     p_lowest=0.99 * p_s, p_surface=p_s,
                     rho_lowest=p_s / (constants.R_d * T_air),
-                    cos_zenith=jnp.full_like(T_air, 0.5),
+                    cos_zenith=_cos_zen_fn(
+                        jnp.asarray(_doy, dtype=jnp.float64),
+                        jnp.asarray(_sod, dtype=jnp.float64) / 3600.0),
                     co2_ppmv=jnp.full_like(T_air, float(
                         getattr(cfg, "co2_ppmv", 412.0))),
                     has_radiation=jnp.ones_like(T_air),
@@ -8615,6 +8607,24 @@ class ModelDriver:
         # ``model.step``.
         if _land_beta_fn is not None:
             _land_beta_cells = _land_beta_fn(self._land_ml_state)
+            # Seed the SOLVED-humidity channel too (the forcing pytree must be
+            # structurally stable from step 0 -- adding the key mid-run would
+            # retrace model.step).  Before the first land step there is no
+            # solved humidity, so reconstruct the bounded gradient form from
+            # the seed beta at the model's own lowest level; the land's real
+            # answer replaces it from step 1.
+            from legoesm.thermo import saturation_mixing_ratio as _satmr0
+            _qv_tr0 = (self.state.tracers or {}).get("q_v")
+            if _qv_tr0 is not None:
+                _q_air0 = jnp.asarray(_qv_tr0.data[:, -1]).reshape(-1)
+                _ph0 = self.sigma.pressure_at_half(
+                    jnp.asarray(self.state.p_s.data).reshape(-1))
+                _p_low0 = 0.5 * (_ph0[..., -1] + _ph0[..., -2])
+                _T_land0 = jnp.asarray(
+                    self._land_ml_state.T_soil[:, 0]).reshape(-1)
+                _qsat0 = _satmr0(_T_land0, _p_low0)
+                _land_qsfc_cells = (
+                    _q_air0 + _land_beta_cells * (_qsat0 - _q_air0))
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -8843,6 +8853,10 @@ class ModelDriver:
                 # structurally stable — no retrace).
                 if _land_beta_cells is not None:
                     _forcing["beta_land"] = _land_beta_cells
+                # The land's solved boundary humidity, used verbatim by the
+                # turbulence over the land fraction (supersedes beta there).
+                if _land_qsfc_cells is not None:
+                    _forcing["q_sfc_land"] = _land_qsfc_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -8918,19 +8932,19 @@ class ModelDriver:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
-                     _land_albedo_cells, _land_qsfc_cells) = _land_step_fn(
+                     _land_albedo_cells, _land_qsfc_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
-                    if _land_beta_fn is not None:
-                        # The scheme's solved humidity when it provides one
-                        # (always, since the wrapper stopped overwriting it);
-                        # the root-zone reconstruction only seeds the pre-loop
-                        # value before the first land step.
-                        _land_beta_cells = (
-                            _land_beta_from_qsfc(
-                                _land_qsfc_cells, _land_T_skin, _a2s)
-                            if _land_qsfc_cells is not None
-                            else _land_beta_fn(self._land_ml_state))
+                    # Published only under the same switch that threads f_land
+                    # into the turbulence factory: without the land fraction
+                    # the consumer refuses the key, and adding it mid-run
+                    # would change the forcing pytree and retrace.
+                    if _land_beta_soil_on:
+                        _land_qsfc_cells = _land_qsfc_step
+                    if _land_beta_fn is not None and _land_qsfc_cells is None:
+                        # Root-zone beta only until the humidity channel is
+                        # live (or when the scheme solves none).
+                        _land_beta_cells = _land_beta_fn(self._land_ml_state)
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.
