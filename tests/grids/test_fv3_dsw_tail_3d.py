@@ -319,7 +319,10 @@ def test_tail_unit_parity_hydrostatic_on_identical_inputs(
     """
     ref = _np_tail(ctx, state_np, csw_np, dsw_np)
     got = jtail.dsw_tail_phase_3d(jctx, jstate, jcsw,
-                                  _stack_dsw_np(dsw_np), DT, KM)
+                                  _stack_dsw_np(
+                                      dsw_np,
+                                      face_level_wins=_TAIL_FACE_LEVEL),
+                                  DT, KM)
     _require_keys(got, ref[0], _TAIL_COMPARED, "tail unit parity")
     for nm in _TAIL_COMPARED:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
