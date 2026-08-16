@@ -99,8 +99,14 @@ T_LO, T_HI = 150.0, 400.0
 
 @pytest.fixture(scope="module")
 def ctx():
-    return build_six_face_duo_context(N, NG, use_ext_bundle=True,
-                                      oracle_conventions=True)
+    c = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                   oracle_conventions=True)
+    # The NH carry derives zs = phis/grav (dyn_core.F90:262-278) and the
+    # spec refuses hydrostatic=False without it. Flat orography, matching
+    # the oracle-parity runner's own NH setup -- and the tail gates rely
+    # on that flatness elsewhere (it is what makes ws identically zero).
+    c["hs6"] = [np.zeros((MA, MA), dtype=np.float64) for _ in range(6)]
+    return c
 
 
 @pytest.fixture(scope="module")

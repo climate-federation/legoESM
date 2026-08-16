@@ -964,10 +964,23 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
         cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 3.5e-9)
 
     if remap_step:
-        for nm in ("pe", "pk", "peln", "ws"):
+        # `ws` is EXCLUDED, not forgotten: the fixture has flat
+        # orography, so zh(km) == zs and the surface vertical velocity
+        # is identically 0.0 in both lanes. assert_real refused the
+        # comparison, which is the guard working -- an equality over an
+        # all-zero field passes at any tolerance and certifies nothing.
+        # It gets a CONTRACT assertion instead, the same treatment `w`
+        # gets on the hydrostatic arm.
+        for nm in ("pe", "pk", "peln"):
             want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
             assert_real(want, f"numpy nh {nm}")
             cmp_fields(got["press"][nm], want, f"nh {nm}", 1e-12)
+        for lane, arr in (("jax", np.asarray(got["press"]["ws"])),
+                          ("numpy", np.stack([np.asarray(ref[t]["ws"])
+                                              for t in range(6)]))):
+            assert not arr.any(), (
+                f"{lane}: ws is non-zero on a FLAT-orography fixture, "
+                f"where zh(km) == zs forces it to 0")
     else:
         for nm in ("pe", "pk", "peln"):
             for lane, arr in (("jax", np.asarray(got["press"][nm])),
