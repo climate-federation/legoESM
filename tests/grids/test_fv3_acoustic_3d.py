@@ -477,3 +477,55 @@ def test_substep_equals_its_own_stage_chain(ctx, jctx, state_np, jstate):
             f"the sub-step's {nm} differs from the hand-composed chain "
             f"-- max|diff| "
             f"{float(np.nanmax(np.abs(np.asarray(got[nm]) - np.asarray(want)))):.3e}")
+
+
+def test_numpy_substep_equals_its_own_stage_chain(ctx, state_np):
+    """NumPy vs NumPy: the SPEC's sub-step against the same NumPy phases
+    composed by hand, in the order its source lists them.
+
+    This is the last piece of the triangle, and it is where the
+    contradiction has to resolve.  Measured so far: every stage matches
+    across lanes (job 9417609), and the JAX sub-step is BITWISE its own
+    hand-composed chain (job 9417615) -- yet the JAX sub-step disagrees
+    with the SPEC's sub-step on u.  Those three cannot all hold unless
+    the spec's sub-step does something the hand-composed chain does not.
+
+    If this fails, my model of the sub-step is what is incomplete and
+    the JAX module may be right; if it passes, the two lanes' sub-steps
+    differ for a reason neither chain exposes.
+    """
+    import legoesm.core.fv3_native_cgrid_phase_3d as npcg
+    import legoesm.core.fv3_native_dsw_phase_3d as npdsw
+    import legoesm.core.fv3_native_dsw_tail_3d as nptail
+    import legoesm.grids.fv3_native_gridstruct as npgs
+
+    dt, dt2 = DT_ATMOS, 0.5 * DT_ATMOS
+
+    st = deepcopy_faces(state_np)
+    npac.exchange_state_halos_3d(ctx, st, KM, scalars=True, winds=True)
+    csw = npcg.csw_phase_3d(ctx, deepcopy_faces(st), dt2=dt2, km=KM,
+                            nord=2)
+    npcg.cgrid_pressure_phase_3d(ctx, csw, KM, dt2=dt2, ptop=PTOP,
+                                 akap=AKAP, cp_air=CP_AIR)
+    dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st),
+                                       deepcopy_faces(csw), dt=dt, km=KM)
+    tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st),
+                                    deepcopy_faces(csw),
+                                    deepcopy_faces(dsw), dt=dt, km=KM)
+    for _nm in ("delp", "pt"):
+        for k in range(KM):
+            f6 = [dsw[t][_nm][:, :, k] for t in range(6)]
+            npac._pad_scalars_6(f6, ctx, N, NG,
+                                npgs.exchange_agrid_scalar_halos)
+    nptail.dgrid_pressure_phase_3d(ctx, dsw, tail, KM, dt=dt, ptop=PTOP,
+                                   akap=AKAP, cp_air=CP_AIR)
+
+    ref = deepcopy_faces(state_np)
+    npac.acoustic_substep_3d(ctx, ref, dt, KM, first_substep=True,
+                             ptop=PTOP, akap=AKAP, cp_air=CP_AIR)
+
+    for nm, src in (("delp", dsw), ("pt", dsw), ("u", tail), ("v", tail)):
+        want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
+        got = np.stack([np.asarray(src[t][nm]) for t in range(6)])
+        assert_real(want, f"spec substep {nm}")
+        cmp_fields(got, want, f"numpy chain vs spec substep {nm}", 1e-12)
