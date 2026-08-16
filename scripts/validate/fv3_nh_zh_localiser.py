@@ -150,7 +150,11 @@ def main() -> int:
     print(f"  BIG_NUMBER sentinels surviving: jax {sent_j}  numpy {sent_n}")
 
     print("\nthe two kernels that write zh, face by face:")
-    for t in range(3):
+    # ALL SIX faces, not three: the first version stopped at three
+    # "enough to localise" and the trend across them was 0.0, 2.27e-13,
+    # 2.85e-06 -- two decades per face, which makes the untested half
+    # the likely home of the phase-level term.
+    for t in range(6):
         crx = np.stack([dsw[t]["levels"][k]["crx_adv"] for k in range(KM)],
                        axis=2)
         cry = np.stack([dsw[t]["levels"][k]["cry_adv"] for k in range(KM)],
@@ -260,10 +264,20 @@ def main() -> int:
             fp_out=False)
         zh_chain.append(np.asarray(out[2]))
     zh_chain = np.stack(zh_chain)
-    # the phase exchanges zh per interface AFTER the kernels
-    d_pre = np.abs(zh_j - zh_chain)
-    print(f"  before the exchange: max|phase - chain| {d_pre.max():.6e}"
-          f"   compute {d_pre[:, cs, cs].max():.6e}")
+    # The chain has to include the EXCHANGE to be comparable: the phase
+    # applies it per interface level after the kernels, and it rewrites
+    # the compute ring as well as the halo (the first version of this
+    # comparison omitted it and duly reported 4.213e+05, which measured
+    # the exchange rather than any defect).
+    zh_chain_j = jnp.asarray(zh_chain)
+    for k in range(KM + 1):
+        zh_chain_j = zh_chain_j.at[:, :, :, k].set(
+            gate.jtail._ext_scalar_planes_6(zh_chain_j[:, :, :, k], jctx)
+            if hasattr(gate, "jtail") else
+            jtail_mod._ext_scalar_planes_6(zh_chain_j[:, :, :, k], jctx))
+    d_post = np.abs(zh_j - np.asarray(zh_chain_j))
+    print(f"  after the exchange:  max|phase - chain| {d_post.max():.6e}"
+          f"   compute {d_post[:, cs, cs].max():.6e}")
     print("\nzs and ws (the bottom boundary condition):")
     zs = np.stack([np.asarray(x) for x in bundle["carry"]["zs6"]])
     print(f"  zs max|.| {np.abs(zs).max():.6e}")
