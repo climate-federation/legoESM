@@ -2237,15 +2237,19 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
     # only simple_seb is wired on MPAS.
     if (args.use_multilayer_land
-            and args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and args.land_surface_scheme == "clm_ml"
             and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
                                     "mpas")
                  or args.discretization == "mpas")):
         parser.error(
-            f"--land-surface-scheme {args.land_surface_scheme} is not wired "
-            "on the MPAS lane (coupled-pipeline canopy threading); use "
-            "--land-surface-scheme simple_seb with --use-multilayer-land "
-            "on MPAS.")
+            "--land-surface-scheme clm_ml is not wired on the MPAS lane "
+            "(it needs the coupled pipeline's per-column canopy grid "
+            "threading); use two_leaf or simple_seb with "
+            "--use-multilayer-land on MPAS.")
+    # two_leaf IS wired on MPAS: the land step dispatches to it, and its
+    # solved canopy-air humidity now reaches the turbulence through the traced
+    # beta channel (the guard here used to refuse it alongside clm_ml, which
+    # made a resistance-based land surface unreachable on this lane).
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade

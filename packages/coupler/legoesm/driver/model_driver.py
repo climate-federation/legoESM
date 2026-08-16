@@ -8112,7 +8112,12 @@ class ModelDriver:
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
                 # land tile's snow-albedo feedback never reached radiation.
-                return new_state, resp.T_sfc, resp.albedo
+                # resp.q_surface is the scheme's SOLVED boundary humidity --
+                # for the two-leaf canopy the canopy-air humidity out of the
+                # stomatal+soil+aerodynamic resistance network.  It used to be
+                # discarded here too, which is why no resistance-based land
+                # surface could reach the atmosphere on this lane.
+                return new_state, resp.T_sfc, resp.albedo, resp.q_surface
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8128,6 +8133,34 @@ class ModelDriver:
                         land_tile_beta_soil(
                             land_state.theta_soil, _lml_cfg, _lml_params),
                         0.0, 1.0)
+
+                from legoesm.thermo import saturation_mixing_ratio as _satmr
+
+                @jax.jit
+                def _land_beta_from_qsfc(q_sfc_land, T_skin, a2s):
+                    """The land's SOLVED surface humidity, as the beta the
+                    turbulence channel already carries.
+
+                    The surface layer reconstructs
+                    ``q_air + beta*(q_sat - q_air)``, so
+                    ``beta = (q_sfc - q_air)/(q_sat - q_air)`` hands the
+                    scheme's own boundary humidity through the EXISTING traced
+                    forcing key -- no new channel, no turbulence change, and
+                    the round trip is exact up to the one-step lag every other
+                    land field on this lane already has.  For the two-leaf
+                    canopy that humidity comes out of the resistance network,
+                    so this is the resistance-based surface reaching the
+                    atmosphere, not an imposed one.  Clipped to [0, 1]: the
+                    reconstruction stays between the air and saturation by
+                    construction, and where the air itself is saturated the
+                    gradient (and the flux) vanishes whatever beta says.
+                    """
+                    q_sat = _satmr(T_skin, a2s.p_lowest)
+                    denom = q_sat - a2s.q_lowest
+                    beta = (q_sfc_land - a2s.q_lowest) / jnp.where(
+                        jnp.abs(denom) > 1e-12, denom, 1.0)
+                    return jnp.clip(jnp.where(
+                        jnp.abs(denom) > 1e-12, beta, 1.0), 0.0, 1.0)
                 if _land_beta != 1.0:
                     logger.info(
                         "  mpas_land_beta_soil: traced per-cell beta_soil "
@@ -8885,11 +8918,19 @@ class ModelDriver:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
-                     _land_albedo_cells) = _land_step_fn(
+                     _land_albedo_cells, _land_qsfc_cells) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     if _land_beta_fn is not None:
-                        _land_beta_cells = _land_beta_fn(self._land_ml_state)
+                        # The scheme's solved humidity when it provides one
+                        # (always, since the wrapper stopped overwriting it);
+                        # the root-zone reconstruction only seeds the pre-loop
+                        # value before the first land step.
+                        _land_beta_cells = (
+                            _land_beta_from_qsfc(
+                                _land_qsfc_cells, _land_T_skin, _a2s)
+                            if _land_qsfc_cells is not None
+                            else _land_beta_fn(self._land_ml_state))
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
             # Pure device elementwise multiply — no host sync, no retrace.

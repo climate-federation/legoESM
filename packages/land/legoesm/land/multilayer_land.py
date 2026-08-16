@@ -1148,18 +1148,24 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
-        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
-        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
-        # Use it directly so the coupler sees the same humidity as CLM-ML used
-        # for soil evaporation.  Override with q_sat_ice over snow (physically
-        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+    if surface_out.q_surface is not None:
+        # The surface scheme SOLVED for its own boundary humidity -- CLM-ML's
+        # Philip soil relative humidity, the two-leaf canopy's canopy-air
+        # humidity q_c (solved through the stomatal + soil + aerodynamic
+        # resistance network), or SimpleSEB's bounded gradient form.  Use it.
+        # This branch used to be CLM-ML only, and the else-branch OVERWROTE the
+        # two-leaf canopy's solved q_c with the product form beta*q_sat -- the
+        # resistance physics ran and was then discarded at the boundary (the
+        # slab wrapper preserved it; this wrapper did not).  Snow still
+        # overrides to the ice-saturation surface.
         q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
     else:
-        # SimpleSEB / TwoLeafCanopy: beta·qsat with the updated moisture state
-        # (``beta_new`` computed unconditionally above).
+        # Scheme returned no humidity: reconstruct the bounded GRADIENT form
+        # (never the product form -- beta is a flux efficiency, and beta*q_sat
+        # manufactures condensation over dry soil; see simple_seb.py).
         beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-        q_sfc_new = beta_effective_new * q_sat_sfc_new
+        q_sfc_new = (forcing.q_lowest
+                     + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
