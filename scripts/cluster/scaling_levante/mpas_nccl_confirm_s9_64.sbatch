@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=00:50:00
+#SBATCH --time=01:15:00
 #SBATCH --output=nccl_confirm.%j.log
 # ===========================================================================
 # NCCL ENV LADDER at s9@64, wide halo — INTERCEPT/SLOPE design (v2, after
@@ -88,7 +88,7 @@ run_arm () {  # tag env_name ballast steps [validity]
   env $EXTRA $DBG \
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
   LEGOESM_MPAS_HALO_BALLAST=$BAL JAX_ENABLE_X64=0 \
-    timeout 1800 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
+    timeout 900 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
