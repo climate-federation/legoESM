@@ -233,6 +233,20 @@ def main() -> int:
           f"est={_est / 1024**3:.1f} GB/device", flush=True)
 
     # Preflight has passed -> JAX may now be imported (deferred for #1361).
+    # Stage banners (every rank, flushed): the LL2304@192 arms hung for two
+    # full walltimes with NOTHING after the preflight line (jobs 26979367 /
+    # 26996572), so the hanging stage was undecidable from the log. Cheap,
+    # permanent, and rank-tagged so a straggler rank names itself.
+    import time as _t0mod
+    _t0 = _t0mod.time()
+
+    def _stage(msg):
+        import os as _os_stage
+        _r = _os_stage.environ.get("SLURM_PROCID", "?")
+        print(f"[stage +{_t0mod.time() - _t0:7.1f}s r{_r}] {msg}",
+              flush=True)
+
+    _stage("importing jax")
     _import_jax()
 
     if args.multicontroller:
@@ -244,7 +258,9 @@ def main() -> int:
         from legoesm.parallel.early_init import (
             init_multicontroller_distributed,
         )
+        _stage("distributed init (coordinator barrier)")
         init_multicontroller_distributed(args.coordinator)
+        _stage("distributed init done")
 
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         atm_latlon_geometry_bytes,
@@ -260,7 +276,9 @@ def main() -> int:
         physics_fn = held_suarez_forcing_latlon
 
     nd = args.n_devices
+    _stage("querying devices (backend init)")
     avail = len(jax.devices())
+    _stage(f"backend up: {avail} devices")
     if avail < nd:
         raise SystemExit(f"need {nd} devices, have {avail} "
                          f"(set --xla_force_host_platform_device_count)")
@@ -286,11 +304,14 @@ def main() -> int:
         # devices own (no global build, no device_put replication, no
         # assert_equal all-gather). This is what lets full-node-packed CPU
         # rungs (128 procs/node) survive at large n_lat.
+        _stage("building model geometry (host)")
         model = _build_model(n_lat, args.n_lon, args.nlev)
+        _stage("geometry built; creating mesh + band-local IC")
         mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
                                  axis_names=("lat",))
         c = build_sharded_held_suarez_state_atm_latlon(
             model.grid, model.sigma_coord, mesh)
+    _stage("IC built; constructing step/segment fn")
     if seg_n > 0:
         seg_fn = make_sharded_atm_latlon_segment(
             model, mesh, seg_n, physics_fn=physics_fn)
