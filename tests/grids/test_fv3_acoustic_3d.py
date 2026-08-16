@@ -382,3 +382,39 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
     for nm in ("u", "v"):
         want = np.stack([np.asarray(n_tail[t][nm]) for t in range(6)])
         cmp_fields(j_tail[nm], want, f"stage d_sw3-6 {nm}", 1e-12)
+
+    # --- the two stages the first version of this bisect stopped short
+    # of, and therefore the only remaining candidates: the post-d_sw
+    # delp/pt exchange (dyn_core.F90:1336-1337) and the D-grid pressure
+    # chain (:1401 geopk, :1531 one_grad_p).  The stages above all
+    # PASSED (job 9417559), so the wind error is made in one of these.
+    import legoesm.core.fv3_native_gridstruct as npgs  # noqa: F401
+    from legoesm.core.fv3_dsw_tail_3d import dgrid_pressure_phase_3d
+
+    for _nm in ("delp", "pt"):
+        for k in range(KM):
+            f6 = [n_dsw[t][_nm][:, :, k] for t in range(6)]
+            npac._pad_scalars_6(f6, ctx, N, NG,
+                                npgs.exchange_agrid_scalar_halos)
+    j_dsw = {**j_dsw, "delp": jac._exchange_scalar_stack(
+        j_dsw["delp"], jctx.tab, KM),
+        "pt": jac._exchange_scalar_stack(j_dsw["pt"], jctx.tab, KM)}
+    for nm in ("delp", "pt"):
+        want = np.stack([np.asarray(n_dsw[t][nm]) for t in range(6)])
+        cmp_fields(j_dsw[nm], want, f"stage post-d_sw exchange {nm}",
+                   1e-12)
+
+    n_prs = nptail.dgrid_pressure_phase_3d(ctx, deepcopy_faces(n_dsw),
+                                           deepcopy_faces(n_tail), KM,
+                                           dt=dt, ptop=PTOP, akap=AKAP,
+                                           cp_air=CP_AIR)
+    j_prs = dgrid_pressure_phase_3d(jctx, j_dsw, j_tail, KM, dt=dt,
+                                    ptop=PTOP, akap=AKAP, cp_air=CP_AIR)
+    for nm in ("pk", "gz"):
+        want = np.stack([np.asarray(n_prs[t][nm]) for t in range(6)])
+        cmp_fields(j_prs[nm], want, f"stage D geopk {nm}", 1e-12)
+    # one_grad_p MUTATES the tail's winds in the NumPy lane, so the
+    # reference is n_tail after the call, not the returned bundle.
+    for nm in ("u", "v"):
+        want = np.stack([np.asarray(n_tail[t][nm]) for t in range(6)])
+        cmp_fields(j_prs[nm], want, f"stage one_grad_p {nm}", 1e-12)
