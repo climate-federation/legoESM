@@ -837,17 +837,33 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
         peln_t = nh["peln"][t]
         gs_t = gs6[t]
         # The spec's gs_nh (gridstruct with area/rarea swapped for the
-        # exchanged planes) unpacks to the twin's explicit metric
-        # dummies: area/rarea from the exchange, dxa/dya/del6_* from
-        # ctx.gs6[t].  No duogrid/corner selector is passed -- the spec
-        # passes none, and the twin's defaults reproduce the oracle's
-        # copy_corners path.
+        # exchanged planes) unpacks to the twin's explicit dummies:
+        # area/rarea from the exchange, dxa/dya/del6_* from ctx.gs6[t],
+        # AND THE GRID FLAGS.
+        #
+        # ⛔ THE FLAGS ARE NOT OPTIONAL, and the comment that used to
+        # stand here -- "no duogrid/corner selector is passed; the
+        # twin's defaults reproduce the oracle's copy_corners path" --
+        # was wrong.  The NumPy kernel hands `gridstruct` straight to
+        # `fv_tp_2d` and `del6_vt_flux`, which read `bounded_domain`,
+        # `grid_type` and the four corner flags out of it; the JAX twin
+        # takes them as keywords defaulting to bounded_domain=False with
+        # all four corners TRUE.  On this lane `oracle_conventions=True`
+        # makes bounded_domain TRUE and every corner flag FALSE, so the
+        # defaults ran corner fills the oracle skips.  MEASURED (job
+        # 9419255): the two twins differ by 1.155e-04 on zh, 80 of 1296
+        # cells, on identical operands -- which is what sent the NH
+        # parity gate red at 2.465e-02 once it was composed.
+        _fl = ctx.flags6[t]
         zh_t, ws_t = update_dz_d(
             ndif, damp, hord_v, bounds, km, npx, npx,
             area6[t], rarea6[t], dp0, zs_t, zh_t,
             crx_t, cry_t, xfx_t, yfx_t, ws_t, rdt,
             gs_t["dxa"], gs_t["dya"], gs_t["del6_u"], gs_t["del6_v"],
-            lim_fac=1.0)
+            lim_fac=1.0,
+            bounded_domain=_fl.bounded_domain, grid_type=_fl.grid_type,
+            sw_corner=_fl.sw_corner, se_corner=_fl.se_corner,
+            nw_corner=_fl.nw_corner, ne_corner=_fl.ne_corner)
         # trap #6: pkc -- FULL pressure out of the C stage -- is the
         # SAME storage Riem_Solver3 overwrites with the D-stage
         # PERTURBATION (the ppe slot) and nh_p_grad then B-grid

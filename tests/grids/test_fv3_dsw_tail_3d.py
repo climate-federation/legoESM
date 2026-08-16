@@ -1060,7 +1060,16 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             jnp.asarray(carry["ws6"][t]), rdt,
             jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
             jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]),
-            lim_fac=1.0)
+            lim_fac=1.0,
+            # The flags the NumPy kernel reads out of `gridstruct` and
+            # hands to fv_tp_2d / del6_vt_flux.  Omitting them is what
+            # this probe measured at 1.155e-04.
+            bounded_domain=jctx.flags6[t].bounded_domain,
+            grid_type=jctx.flags6[t].grid_type,
+            sw_corner=jctx.flags6[t].sw_corner,
+            se_corner=jctx.flags6[t].se_corner,
+            nw_corner=jctx.flags6[t].nw_corner,
+            ne_corner=jctx.flags6[t].ne_corner)
 
         assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
         # TOL-PENDING: provisional bound.  DO NOT SHIP.
