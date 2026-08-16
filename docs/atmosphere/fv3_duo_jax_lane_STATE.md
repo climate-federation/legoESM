@@ -422,47 +422,69 @@ Generalise: **when porting an in-place lane, every shared mutable object
 is an undeclared data path.** Composing the phases yourself and diffing
 against the spec's own composition is what finds them.
 
-### OPEN: the NH tail's `zh` — and THREE MEASUREMENTS THAT CANNOT ALL HOLD
+### CLOSED: the NH tail's `zh` was the HARNESS, not the port
 
-`test_nh_tail_parity` fails on the carry's `zh`; everything else in
-module 3 passes (20 of 22, 1 skipped). One real defect was found and
-fixed on the way, and the residual is now an INCONSISTENT SET, which is
-a statement about the instruments, not about the module.
+Two real defects were fixed on the way, and the residual turned out to
+be the gate's own adapter. The sequence is worth keeping because four
+separate "measurements" were wrong before the right one was taken.
 
-**Fixed en route (a real defect):** `update_dz_d` was called without the
-grid FLAGS. The NumPy kernel hands its gridstruct to `fv_tp_2d` and
-`del6_vt_flux`, which read `bounded_domain`, `grid_type` and the four
-corner flags from it; the JAX twin takes them as keywords defaulting to
-`bounded_domain=False` with all corners TRUE, and `oracle_conventions`
-makes them TRUE/FALSE respectively — so the defaults ran corner fills the
-oracle skips. Kernel agreement went from **1.155e-04 (80 cells) to
-1.333e-09 (2 cells)**.
+**What it actually was.** `_stack_dsw_np` builds the face-stacked
+transport output in two passes: face-level keys first, then the
+per-level d_sw1 stage outputs. `pt` and `delp` exist in BOTH sets, so
+the second pass OVERWROTE the first. The spec's phase consumed the
+post-d_sw2 `pt`/`delp`; the JAX phase was handed d_sw1's. Measured
+**2.367489e-01 on pt and 2.341751e+01 on delp, with all nine other
+riem_solver3 inputs at exactly 0.0**. The adapter now REFUSES a
+colliding name; callers declare `face_level_wins=_TAIL_FACE_LEVEL`.
 
-**The set that does not close** (all from
-`scripts/validate/fv3_nh_zh_localiser.py`, jobs 9419273-9419284):
+**Fixed en route (both real):** `update_dz_d` was called without the
+grid FLAGS, so the twin ran corner fills the oracle skips (1.155e-04 ->
+1.333e-09); and the module-4 seam handed the tail un-exchanged `uc`/`vc`.
 
-| measurement | value |
-|---|---|
-| operands into the kernels (crx/cry/xfx/yfx), JAX vs NumPy | **0.000e+00** |
-| the exchanged `area`, each lane computing its own | **0.000e+00**, zero surviving sentinels |
-| both kernels called directly, ALL SIX faces | ≤ **1.05e-04** (worst face 3; others ~5e-10) |
-| the two PHASES against each other, `zh` | 2.590e+02 compute, 6.680e+03 halo, **0.0 at the surface** |
-| the JAX PHASE against the same JAX kernels composed by hand, exchange included | **4.213e+05** compute |
+**The four wrong measurements, in order, all mine:**
 
-If the chain matches NumPy's kernels to 1e-4 and the JAX phase is 4.2e5
-from that chain, the JAX phase must be ~4.2e5 from the NumPy phase — and
-it is 2.6e2. **One of these five comparisons is mis-specified**, and it
-is more likely mine than the module's.
+1. The hand-composed chain OMITTED the exchange, so its 4.2e5 measured
+   the exchange.
+2. The kernel comparison stopped at three of six faces, and the trend
+   across those three (0.0, 2.27e-13, 2.85e-06) invited a conclusion
+   about the untested half. All six later agreed.
+3. A per-face loop bound its results to `zh_j`/`ws_j` -- the names
+   already holding the PHASE's outputs. Everything printed afterwards
+   compared ONE face's 3-D result against six-face 4-D stacks, and
+   numpy BROADCAST it into a plausible number instead of raising. That
+   single shadow produced the whole "five measurements that cannot all
+   be true" set.
+4. The scale of the arrays was never printed. Adding one line -- max,
+   compute-max and mean for all three candidates -- exposed the shadow
+   immediately, because the "jax phase" row came back 3-D with a
+   compute max of exactly 0.0.
 
-**Next step: re-derive, do not extend.** The suspect is the phase-vs-chain
-construction — it rebuilds the carry, the operands and the exchange by
-hand, and any one of those can silently be a different generation of a
-MUTATED array (which is exactly what module 4's defect turned out to be).
-The cheapest decisive version is to give the JAX phase and the NumPy
-phase the identical bundle and diff `zh` after EACH internal step, which
-needs a stage payload the phase does not currently return — so returning
-the post-`update_dz_d` and post-`riem_solver3` `zh` (the same treatment
-`ke_corner` got, and for the same reason) is the first move.
+**What finally worked, and should be the first move next time:** stage
+returns on BOTH lanes (`stage_hook` on the spec, `return_stages` on the
+twin, C6), driven on ONE shared bundle. It localised the difference to a
+kernel boundary in a single run -- `update_dz_d` agreeing to 2.85e-06 on
+all six faces, `riem_solver3` disagreeing by 1.53e+02 to 2.59e+02 on all
+six -- and from there the operand audit named the two arrays. A
+hand-built chain is a SECOND IMPLEMENTATION that can differ for its own
+reasons, and in this hunt it did, twice.
+
+### Module 6 had two defects in four lines, both in never-executed code
+
+`p_var_hydrostatic` is a k-recurrence ported to `lax.scan`, and until
+this session nothing had ever called it:
+
+* the transpose was `(0, 3, 1, 2)`, putting the FACE axis first, so the
+  scan walked the six faces as if they were levels. It raised only
+  because km != 6 makes the shapes disagree; **at km = 6 it would have
+  run and returned a plausible pressure field built from the wrong
+  axis.**
+* `pe_c, lnp_c, pk_c = lax.scan(...)` unpacked three names from a
+  two-element return.
+
+Both were invisible while module 6 had no gate file. The lesson is the
+gate, not the fix: an unexercised module's correctness is unknown
+regardless of how carefully it was reviewed, and this one had been read
+by GLM, by me, and by codex.
 
 ## Next task, precisely
 
