@@ -138,56 +138,70 @@ def main() -> int:
         r, nc = _rel(zh_j, zh_np)
         print(f"   {km:4d} {r:12.4e} {nc:7d} {r / km:12.4e}")
 
-    print("\n2. WHICH CELLS, AND WHAT IS BEING DIFFERENCED THERE?")
-    print("   (a handful of cells at ~1e7 eps is the signature of")
-    print("    cancellation, which is a CONDITIONING statement, not a bug)")
-    km = 3
-    zh = np.zeros((MA, MA, km + 1), dtype=np.float64)
-    for k in range(km, -1, -1):
-        zh[:, :, k] = 545.0 * (km - k)
-    rng = np.random.default_rng(4)
-    crx = 0.1 + 0.01 * rng.standard_normal((N + 1, MA, km))
-    cry = 0.1 + 0.01 * rng.standard_normal((MA, N + 1, km))
-    xfx = 1.0e6 * (1.0 + 0.01 * rng.standard_normal((N + 1, MA, km)))
-    yfx = 1.0e6 * (1.0 + 0.01 * rng.standard_normal((MA, N + 1, km)))
-    zs = np.zeros((MA, MA), dtype=np.float64)
-    ws = np.zeros((N, N), dtype=np.float64)
-    dp0 = np.full(km, 1.0e4, dtype=np.float64)
-    area = np.asarray(ctx["gs6"][0]["area"], dtype=np.float64)
-    rarea = 1.0 / area
-    gs = ctx["gs6"][0]
-    gs_nh = dict(gs)
-    gs_nh["area"] = area
-    gs_nh["rarea"] = rarea
-    zh_np = np.array(zh, copy=True)
-    ws_np = np.array(ws, copy=True)
-    npnh.update_dz_d(np.full(km + 1, 2.0), np.full(km + 1, 0.12), 6, bd, km,
-                     N + 1, N + 1, area, rarea, dp0, zs, zh_np,
-                     np.array(crx, copy=True), np.array(cry, copy=True),
-                     np.array(xfx, copy=True), np.array(yfx, copy=True),
-                     ws_np, 1.0 / DT, gs_nh, lim_fac=1.0)
-    zh_j, _ = jnh.update_dz_d(
-        (2.0,) * (km + 1), (0.12,) * (km + 1), 6, bounds, km, N + 1, N + 1,
-        jnp.asarray(area), jnp.asarray(rarea), jnp.asarray(dp0),
-        jnp.asarray(zs), jnp.asarray(zh), jnp.asarray(crx), jnp.asarray(cry),
-        jnp.asarray(xfx), jnp.asarray(yfx), jnp.asarray(ws), 1.0 / DT,
-        jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
-        jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]), lim_fac=1.0,
-        bounded_domain=fl[0].bounded_domain, grid_type=fl[0].grid_type,
-        sw_corner=fl[0].sw_corner, se_corner=fl[0].se_corner,
-        nw_corner=fl[0].nw_corner, ne_corner=fl[0].ne_corner)
-    d = np.abs(np.asarray(zh_j) - zh_np)
-    scale = max(np.abs(zh_np).max(), 1e-300)
-    bad = np.argwhere(d > 1e-13 * scale)
-    print(f"   field |zh| max {scale:.6e}, differing cells {len(bad)}")
-    for idx in bad[:8]:
-        i, j, k = (int(x) for x in idx)
-        print(f"   [{i:3d},{j:3d},{k:2d}]  numpy {zh_np[i, j, k]:.17e}")
-        print(f"                jax   {float(zh_j[i, j, k]):.17e}")
-        print(f"                |d| {d[i, j, k]:.3e}   "
-              f"rel-to-cell {d[i, j, k] / max(abs(zh_np[i, j, k]), 1e-300):.3e}")
-        print(f"                zh_in at that cell {zh[i, j, k]:.6e}, "
-              f"dz below {zh_np[i, j, k] - zh_np[i, j, min(k + 1, km)]:.6e}")
+    print("\n2. THE GATE'S OWN OPERANDS, since the smooth fixture above")
+    print("   is bit-identical -- so the residual is DATA-TRIGGERED, not a")
+    print("   systematic expression-order difference. Face 3 is the worst.")
+    KM = 3
+    state = gate._seeded_state(KM, seed=11, hydrostatic=False)
+    bundle = gate.nh_bundle.__wrapped__(ctx, state)
+    bundle = dict(bundle, state=state)
+    carry = bundle["carry"]
+    dsw = bundle["dsw"]
+    import legoesm.core.fv3_native_dsw_tail_3d as nptail_mod
+    area6 = nptail_mod.nh_exchanged_area6(dict(ctx))
+    rarea6 = [1.0 / np.asarray(a) for a in area6]
+
+    for t in (2,):                      # face 3, the worst in the gate
+        gs = ctx["gs6"][t]
+        crx = np.stack([dsw[t]["levels"][k]["crx_adv"] for k in range(KM)],
+                       axis=2)
+        cry = np.stack([dsw[t]["levels"][k]["cry_adv"] for k in range(KM)],
+                       axis=2)
+        xfx = np.stack([dsw[t]["levels"][k]["xfx_adv"] for k in range(KM)],
+                       axis=2)
+        yfx = np.stack([dsw[t]["levels"][k]["yfx_adv"] for k in range(KM)],
+                       axis=2)
+        zh_np = np.array(carry["zh6"][t], copy=True)
+        ws_np = np.array(carry["ws6"][t], copy=True)
+        gs_nh = dict(gs)
+        gs_nh["area"] = area6[t]
+        gs_nh["rarea"] = rarea6[t]
+        npnh.update_dz_d(np.full(KM + 1, 2.0), np.full(KM + 1, 0.12), 6, bd,
+                         KM, N + 1, N + 1, area6[t], rarea6[t],
+                         np.asarray(gate._DP0), carry["zs6"][t], zh_np,
+                         np.array(crx, copy=True), np.array(cry, copy=True),
+                         np.array(xfx, copy=True), np.array(yfx, copy=True),
+                         ws_np, 1.0 / DT, gs_nh, lim_fac=1.0)
+        zh_j, _ = jnh.update_dz_d(
+            (2.0,) * (KM + 1), (0.12,) * (KM + 1), 6, bounds, KM, N + 1,
+            N + 1, jnp.asarray(area6[t]), jnp.asarray(rarea6[t]),
+            jnp.asarray(gate._DP0), jnp.asarray(carry["zs6"][t]),
+            jnp.asarray(carry["zh6"][t]), jnp.asarray(crx), jnp.asarray(cry),
+            jnp.asarray(xfx), jnp.asarray(yfx),
+            jnp.asarray(carry["ws6"][t]), 1.0 / DT,
+            jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
+            jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]),
+            lim_fac=1.0,
+            bounded_domain=fl[t].bounded_domain, grid_type=fl[t].grid_type,
+            sw_corner=fl[t].sw_corner, se_corner=fl[t].se_corner,
+            nw_corner=fl[t].nw_corner, ne_corner=fl[t].ne_corner)
+        d = np.abs(np.asarray(zh_j) - zh_np)
+        scale = max(np.abs(zh_np).max(), 1e-300)
+        bad = np.argwhere(d > 1e-13 * scale)
+        print(f"   face {t + 1}: |zh| max {scale:.6e}, max|d| {d.max():.6e}, "
+              f"rel {d.max() / scale:.6e}, cells {len(bad)}")
+        for idx in bad[:6]:
+            i, j, k = (int(x) for x in idx)
+            below = zh_np[i, j, min(k + 1, KM)]
+            print(f"   [{i:3d},{j:3d},{k:2d}] numpy {zh_np[i, j, k]:.17e}")
+            print(f"                 jax   {float(zh_j[i, j, k]):.17e}")
+            print(f"                 |d| {d[i, j, k]:.3e}  cell-rel "
+                  f"{d[i, j, k] / max(abs(zh_np[i, j, k]), 1e-300):.3e}")
+            print(f"                 dz across this interface "
+                  f"{zh_np[i, j, k] - below:.6e}  "
+                  f"(a small dz here means CANCELLATION)")
+            print(f"                 crx {crx[min(i, crx.shape[0] - 1), j, min(k, KM - 1)]:.6e}  "
+                  f"cry {cry[i, min(j, cry.shape[1] - 1), min(k, KM - 1)]:.6e}")
 
     print("\nUPDATE_DZ_D_TWIN_LOCALISER_DONE")
     return 0
