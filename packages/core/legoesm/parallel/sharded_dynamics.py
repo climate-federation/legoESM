@@ -1642,15 +1642,24 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         local_vertices = np.concatenate([owned_vertices, halo_vertices])
 
         # ----- Global-to-local maps ----- #
-        cell_g2l = np.full(nCells, -1, dtype=np.int64)
-        for i, g in enumerate(local_cells):
-            cell_g2l[g] = i
-        edge_g2l = np.full(nEdges, -1, dtype=np.int64)
-        for i, g in enumerate(local_edges):
-            edge_g2l[g] = i
-        vertex_g2l = np.full(nVertices, -1, dtype=np.int64)
-        for i, g in enumerate(local_vertices):
-            vertex_g2l[g] = i
+        # int32, not int64: every rank of the setup holds ALL n_dev
+        # partitions, and these three full-global arrays dominate the
+        # setup's HOST memory — at subdiv-10 / 192 devices the int64
+        # version is ~100 GB per rank, and 4 ranks/node OOM-killed a
+        # 512 GB node (job 26996571). int32 halves it. Guarded: a mesh
+        # at or beyond 2^31-1 entities fails loudly, not wraps (the
+        # >= keeps one entity of headroom on purpose; codex/GLM r1).
+        if max(nCells, nEdges, nVertices) >= np.iinfo(np.int32).max:
+            raise ValueError(
+                f"global-to-local maps use int32; mesh has "
+                f"{max(nCells, nEdges, nVertices)} entities >= 2^31-1")
+        cell_g2l = np.full(nCells, -1, dtype=np.int32)
+        cell_g2l[local_cells] = np.arange(len(local_cells), dtype=np.int32)
+        edge_g2l = np.full(nEdges, -1, dtype=np.int32)
+        edge_g2l[local_edges] = np.arange(len(local_edges), dtype=np.int32)
+        vertex_g2l = np.full(nVertices, -1, dtype=np.int32)
+        vertex_g2l[local_vertices] = np.arange(len(local_vertices),
+                                               dtype=np.int32)
 
         part = VoronoiPartition(
             rank=rank,
