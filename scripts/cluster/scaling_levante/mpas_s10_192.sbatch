@@ -20,6 +20,12 @@ export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
 export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
+# 192-rank fix (2026-08-16, jobs 26979367/68): multi-shard autotune-cache
+# sync crashed ("No configuration found in cache after synchronizing
+# results across all shards") at 192 ranks and plausibly hung the atm arm.
+# Flag verified present in installed jaxlib (libjax_common.so).
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
+
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/mpas_s10_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
