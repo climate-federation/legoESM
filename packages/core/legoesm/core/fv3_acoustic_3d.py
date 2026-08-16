@@ -500,16 +500,22 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         # C4 / rule: everything the spec mutates comes back.  nh
         # members, delz, pkc (the csw_press storage Riemann_Solver3
         # overwrites), the D winds and the Riemann-updated w.
+        # The NH tail returns its carry NESTED under "nh" (its C4 dict is
+        # {"nh", "delz", "w", "pkc", "u", "v", "press"}); reading the
+        # members at the top level was a KeyError the first time this
+        # branch ran. `pkc`, `u`, `v`, `delz` and `w` ARE top-level --
+        # only the carry is nested.
+        _rnh = res["nh"]
         nh = {**nh,
-              "zh": res["zh"], "gz": res["gz"], "zs": res["zs"],
-              "pk3": res["pk3"], "pe": res["pe"], "pk": res["pk"],
-              "peln": res["peln"], "ws": res["ws"]}
+              "zh": _rnh["zh"], "gz": _rnh["gz"], "zs": _rnh["zs"],
+              "pk3": _rnh["pk3"], "pe": _rnh["pe"], "pk": _rnh["pk"],
+              "peln": _rnh["peln"], "ws": _rnh["ws"]}
         # press aliases the returned nh members exactly as the spec's
         # press list aliases the nh carry; pkc rides along (C4).
-        press = {"pe": res["pe"], "pk": res["pk"], "peln": res["peln"],
-                 "ws": res["ws"], "pkc": res["pkc"]}
+        press = {"pe": _rnh["pe"], "pk": _rnh["pk"], "peln": _rnh["peln"],
+                 "ws": _rnh["ws"], "pkc": res["pkc"]}
         if remap_step:
-            press["pk_remap"] = res["pk_remap"]
+            press["pk_remap"] = res["press"]["pk_remap"]
         state = {**state, "delz": res["delz"]}
         u_new, v_new = res["u"], res["v"]
 

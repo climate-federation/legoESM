@@ -960,8 +960,15 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
         "v": pg["v"],
         # The spec's press list aliases the nh arrays post-mutation; the
         # aliasing is preserved here (same values, zero copies).
-        "press": {"pe": nh_out["pe"], "pk": nh_out["pk"],
-                  "peln": nh_out["peln"], "ws": nh_out["ws"]},
+        # pk_remap exists ONLY on a remap step (the spec's own gating,
+        # kept exact at the face level) and was being computed, stacked
+        # into `upd`, and then dropped -- a C4 violation the acoustic
+        # loop caught by asking for it. Static dict structure either
+        # way, so the shape of this return is a compile-time constant.
+        "press": ({"pe": nh_out["pe"], "pk": nh_out["pk"],
+                   "peln": nh_out["peln"], "ws": nh_out["ws"]}
+                  | ({"pk_remap": upd["pk_remap"]}
+                     if "pk_remap" in upd else {})),
         **({"stages": {"zh": stage_zh}} if return_stages else {}),
     }
 
