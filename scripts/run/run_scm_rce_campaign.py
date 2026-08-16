@@ -2689,8 +2689,23 @@ def tune_category_winner(
              "refine_proposals": 0, "unique_evals": 0}
 
     def _try(values: dict[str, float], label: str) -> None:
-        """Evaluate one candidate and keep it if it beats the incumbent."""
+        """Evaluate one candidate and keep it if it beats the incumbent.
+
+        A candidate EQUAL to the defaults is skipped: ``default_run`` already
+        is that column, and re-evaluating it does not reproduce it.  The
+        round trip ``value -> sigmoid raw -> value`` is accurate to about one
+        ULP (MEASURED: 7200.0 -> 7199.999999999998, 0.9 -> 0.8999999999999999,
+        every scheme affected), which is a DIFFERENT configuration, a different
+        cache key, and a separate 100-day integration.  A single column
+        integrated that long is chaotic, so the two scores differ by far more
+        than the perturbation: emanuel scored 6.9607 a priori and 6.7207 on the
+        bit-perturbed defaults, and the tuner recorded that 0.24 as an
+        improvement with ZERO parameters moved.  Skipping it removes the
+        spurious win and returns one evaluation to the budget.
+        """
         nonlocal best_score, best_cfg, best_run, best_values
+        if all(values[c.name] == defaults[c.name] for c in constraints):
+            return
         raw_values = {
             c.name: _raw_from_physical(values[c.name], c) for c in constraints
         }

@@ -722,3 +722,54 @@ def test_tune_stats_count_only_this_calls_integrations(monkeypatch):
         f"unique_evals={stats['unique_evals']} vs cache={len(cache)}; it must "
         "count only the keys this call inserted after the default")
     assert stats["unique_evals"] <= len(integrations)
+
+
+def test_the_default_candidate_is_not_re_evaluated(monkeypatch):
+    """MEASURED defect: `_candidate_values` yields the defaults first, and the
+    round trip through the sigmoid raw space is accurate only to ~1 ULP, so
+    "candidate zero" was a bit-perturbed configuration with its own cache key
+    and its own 100-day integration. On a chaotic column that scored 0.24 away
+    from the a-priori run, and the tuner banked it as an improvement with zero
+    parameters moved. The defaults must never be integrated twice.
+    """
+    from scripts.run import run_scm_rce_campaign as camp
+
+    labels = []
+
+    def _stub_run_scm_rce(cfg, ref, **kw):
+        labels.append(kw["label"])
+        return _diag(score=1.0, thermo_score=1.0, subcloud_score=1.0)
+
+    monkeypatch.setattr(camp, "run_scm_rce", _stub_run_scm_rce)
+    base = camp.make_physics_config(convection="dca")
+    _cfg, _records, _tuned, stats = camp.tune_category_winner(
+        "convection", base, object(), {}, tune_evals=6, seed=1,
+        objective="thermo", param_set="physical",
+        days=0.01, dt=600.0, analysis_days=0.01,
+        require_equilibrium=False, require_realism=False,
+        equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0)
+
+    assert labels, "the tuner integrated nothing"
+    assert labels[0].startswith("tune-default:"), labels[0]
+    # eval000 IS the defaults, so it must not reach the integrator at all.
+    assert not any(l.endswith("eval000") for l in labels), (
+        f"the default candidate was integrated a second time: {labels}")
+    assert stats["unique_evals"] >= 1
+
+
+def test_sigmoid_round_trip_is_not_exact_which_is_why_the_skip_exists():
+    """Pin the mechanism, so a future exact round trip does not leave the skip
+    looking like superstition."""
+    import jax.numpy as _jnp
+    from types import SimpleNamespace
+
+    from scripts.run import run_scm_rce_campaign as camp
+    from legoesm.training.trainable_params import sigmoid_to_range
+
+    c = SimpleNamespace(min_val=600.0, max_val=10800.0, transform="sigmoid")
+    raw = camp._raw_from_physical(7200.0, c)
+    back = float(sigmoid_to_range(_jnp.asarray(raw), c.min_val, c.max_val))
+    assert back != 7200.0, (
+        "the round trip is now exact; the default-candidate skip can be "
+        "revisited, but only with a measurement showing the scores agree")
+    assert abs(back - 7200.0) / 7200.0 < 1e-12
