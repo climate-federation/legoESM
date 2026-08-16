@@ -165,7 +165,11 @@ def _press_jax(jstate, ptop):
 def _common(ptop, ak, bk, hydrostatic, k_split, n_split):
     return dict(bdt=BDT, km=KM, k_split=k_split, n_split=n_split, ptop=ptop,
                 ak=ak, bk=bk, akap=AKAP, cp_air=CP_AIR, kord_mt=KORD_MT,
-                kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=hydrostatic)
+                kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=hydrostatic,
+                # The resolved NH deck runs W_LIMITER=T (fv_mapz.F90:368)
+                # and the lane refuses hydrostatic=False without an
+                # explicit choice rather than defaulting one.
+                w_limiter=not hydrostatic)
 
 
 def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2):

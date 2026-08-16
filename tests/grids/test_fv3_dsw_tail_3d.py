@@ -1125,6 +1125,10 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             ne_corner=jctx.flags6[t].ne_corner)
 
         assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # MEASURED 1.333e-09 per-element relative, worst face 3, 2 of
+        # 1296 cells (job 9419804); bound = measured x 10. This is the
+        # residual left AFTER the grid flags were threaded through --
+        # the same probe read 1.155e-04 on 80 cells before that fix, so
+        # the number is a floor for this kernel pair, not a symptom.
         # [class: accumulating -- a vertical recurrence]
-        cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1e-12)
+        cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1.4e-8)
