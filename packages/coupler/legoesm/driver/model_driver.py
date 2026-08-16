@@ -6497,8 +6497,9 @@ class ModelDriver:
                 self._feed_mpas_cmip_multirank(
                     day, diag, self._voronoi_layout)
             else:
-                diag.feed_cmip_accumulators_native(
-                    day, **self._mpas_cmip_native_kwargs(day, diag))
+                _kw = self._mpas_cmip_native_kwargs(day, diag)
+                diag.feed_cmip_accumulators_native(day, **_kw)
+                self._feed_mpas_moisture_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
                 "  CMOR accumulator feed FAILED at day %.2f (run continues; "
@@ -6511,6 +6512,58 @@ class ModelDriver:
             _acc = getattr(self, "_mpas_sfc_accum", None)
             if _acc is not None:
                 _acc.reset(window_start_day=day)
+
+    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
+        """Record the atmospheric water-budget closure E - P - dW/dt.
+
+        The model has always carried this tracker, and this lane has never fed
+        it: the tracker is updated inside ``DiagnosticCollector.collect``, which
+        the MPAS run loop does not call, so every run of this campaign published
+        a blank moisture residual. A ~0.4 mm/day gap between the reported global
+        evaporation and rainfall therefore sat unexamined for months. An
+        instrument that is not wired is not a check.
+
+        Fed from the SAME window-mean ``precip`` and ``hfls`` the CMOR output
+        publishes, which is the tracker's own stated contract: the residual then
+        closes against the numbers a reader can see in ``pr`` and ``hfls``,
+        rather than against a second, privately-averaged pair that could differ
+        for reasons nobody could trace.
+
+        SERIAL ONLY, deliberately. The tracker takes a plain area-weighted mean,
+        which under a cell partition would be rank-local and count halo cells
+        twice -- a confidently wrong global number, which is worse than none.
+        The multi-rank path needs the owned-mask-and-allreduce treatment
+        ``_mpas_global_diag`` already does, and says so once rather than
+        publishing rubbish.
+        """
+        if self._voronoi_layout is not None:
+            if not getattr(self, "_logged_moisture_budget_mpi", False):
+                logger.info(
+                    "  moisture-budget closure NOT recorded under the cell "
+                    "partition (the tracker's area mean is rank-local); serial "
+                    "runs publish it.")
+                self._logged_moisture_budget_mpi = True
+            return
+        precip = kw.get("precip")
+        hfls = kw.get("hfls")
+        tracers = self.state.tracers
+        if (precip is None or hfls is None or tracers is None
+                or "q_v" not in tracers):
+            return          # dry run, or a window whose fluxes were withheld
+        area = getattr(self.grid, "areaCell", None)
+        _p_s = self.state.p_s.data
+        _p_half = self.sigma.pressure_at_half(_p_s)
+        diag.moisture_tracker.update(
+            tracers["q_v"].data, _p_s, self.sigma.dsigma,
+            precip, hfls,
+            elapsed_seconds=float(day) * 86400.0,
+            area_weights=(None if area is None
+                          else jnp.asarray(area).reshape(-1)),
+            # Hybrid coordinates make ``p_s * dsigma`` wrong for a bottom-heavy
+            # tracer over terrain; the half-level difference is right for either
+            # coordinate.
+            dp=_p_half[..., 1:] - _p_half[..., :-1],
+        )
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
                                  u_override=None) -> dict:
