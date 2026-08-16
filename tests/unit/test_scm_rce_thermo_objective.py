@@ -794,3 +794,33 @@ def test_the_collectors_defaults_are_not_the_shipped_defaults():
         "the collector now reproduces the shipped defaults exactly; the "
         "default-candidate skip can be revisited, but only with a measurement "
         f"showing the two columns score the same. inexact per scheme: {inexact}")
+
+
+def test_a_default_candidate_win_is_flagged_in_the_table(tmp_path):
+    """Checkpoints written before the skip landed can carry an "improvement"
+    that is only the chaotic gap between two runs of the same configuration.
+    The table must say so without the reader having to know the history."""
+    import csv as _csv
+
+    from scripts.run import run_scm_rce_convection_intercomparison as driver
+
+    fake = driver.SchemeResult(
+        scheme="emanuel",
+        prior=_diag(score=1.0, thermo_score=6.961),
+        tuned=_diag(score=1.0, thermo_score=6.721,
+                    label="tune:convection:emanuel:eval000"),
+        records=[], signature={"objective": "thermo", "tune_evals": 240},
+    )
+    real = driver.SchemeResult(
+        scheme="edmf",
+        prior=_diag(score=1.0, thermo_score=7.879),
+        tuned=_diag(score=1.0, thermo_score=3.234,
+                    label="tune:convection:edmf:eval037"),
+        records=[], signature={"objective": "thermo", "tune_evals": 72},
+    )
+    out = tmp_path / "r.csv"
+    driver.write_csv(out, [fake, real])
+    rows = {r["scheme"]: r for r in _csv.DictReader(out.open())}
+    assert rows["emanuel"]["tuned_is_default_candidate"] == "True"
+    assert rows["edmf"]["tuned_is_default_candidate"] == "False"
+    assert rows["emanuel"]["tuned_winner_label"].endswith("eval000")

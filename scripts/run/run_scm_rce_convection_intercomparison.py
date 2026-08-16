@@ -698,6 +698,12 @@ CSV_FIELDS = (
     # campaign measures it.
     "tuned_thermo_window_std", "tuned_thermo_window_mean",
     "tuned_thermo_n_windows",
+    # WHICH candidate won, and whether it was the DEFAULT one. Checkpoints
+    # written before the default-candidate skip landed can report an
+    # "improvement" that is only the chaotic difference between two runs of the
+    # same configuration perturbed at ~1 ULP by the sigmoid round trip. Such a
+    # row is not a result and must be readable as such from the table alone.
+    "tuned_winner_label", "tuned_is_default_candidate",
     # WHAT THE SEARCH ACTUALLY DID, next to what was requested.  `tune_evals` is
     # a budget of proposals; these are the columns integrated.
     "requested_evals", "random_proposals", "refine_proposals", "unique_evals",
@@ -706,6 +712,16 @@ CSV_FIELDS = (
 )
 
 KG_KG_TO_G_KG = 1_000.0
+
+
+#: Label the tuner gives the FIRST candidate, which `_candidate_values` yields
+#: as the defaults.  A win there is the chaos artifact described in
+#: `tune_category_winner._try`, not a tuning result.
+_DEFAULT_CANDIDATE_SUFFIX = "eval000"
+
+
+def _is_default_candidate(label: str) -> bool:
+    return str(label).endswith(_DEFAULT_CANDIDATE_SUFFIX)
 
 
 def _improvement_pct(prior: float, tuned: float) -> float:
@@ -760,6 +776,8 @@ def _row(res: SchemeResult, ref=None) -> dict:
         "tuned_heldout_T_rmse_K": t.heldout_T_rmse_K,
         "tuned_heldout_qv_rmse_g_kg": t.heldout_qv_rmse_g_kg,
         "tuned_P_minus_E_mm_day": t.precip_mm_day - t.evap_mm_day,
+        "tuned_winner_label": t.label,
+        "tuned_is_default_candidate": _is_default_candidate(t.label),
         "tuned_thermo_window_std": t.thermo_score_window_std,
         "tuned_thermo_window_mean": t.thermo_score_window_mean,
         "tuned_thermo_n_windows": t.thermo_score_n_windows,
@@ -1016,7 +1034,8 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         row = _row(res, ref)
         lines.append(
             f"| {i} | {res.scheme} "
-            f"| {res.subsidence_solve_status or res.subsidence_solve} "
+            f"| {res.subsidence_solve_status or res.subsidence_solve}"
+            f"{' **[default-candidate win: not a result]**' if _is_default_candidate(t.label) else ''} "
             f"| {_fmt(row['prior_objective'])}→{_fmt(row['tuned_objective'])} "
             f"| {_fmt(row['apriori_thermo_T_term'], '.3g')}→"
             f"{_fmt(row['tuned_thermo_T_term'], '.3g')} "
