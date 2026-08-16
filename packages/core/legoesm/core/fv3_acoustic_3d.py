@@ -84,6 +84,7 @@ from legoesm.core.fv3_native_state_3d import (
 )
 from legoesm.core.fv3_phase3d_common import (
     require_f64_jax,  # f64 entry gate, reads only static dtypes
+    require_km,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
@@ -331,6 +332,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     the D-grid pressure phase every sub-step: without it the spec
     recorded sub-step 2 producing 278 non-finite delp values.
     """
+    km = require_km("acoustic_substep_3d", km)
     require_no_remap_needed(km, remap_follows=remap_follows)
     require_f64_jax("acoustic_substep_3d", state)
     if a2b_ord not in (2, 4):
@@ -712,6 +714,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
     # called `require_f64_jax(ctx)` here -- ctx is the context OBJECT,
     # not a dict of arrays, and the helper's signature is
     # (fname, arrays), so this raised TypeError on the first call.
+    km = require_km("acoustic_loop_3d", km)
     require_no_remap_needed(km, remap_follows=remap_follows)
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
