@@ -329,7 +329,7 @@ Phase 2 (3-D) is **a stack of six modules, three of them landed**:
 | 1 | `fv3_cgrid_phase_3d.py` | `fv3_native_cgrid_phase_3d` | landed `534939307` |
 | 2 | `fv3_dsw_phase_3d.py` | `fv3_native_dsw_phase_3d` | landed `87eee49e9` |
 | 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **landed** — 903 lines, all six routines |
-| 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | next |
+| 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | **landed, 16/16 gates green** |
 | 5 | `fv3_tracer2d.py` | `fv3_native_tracer2d` | not started (the `NSPLT_MAX` node) |
 | 6 | `fv3_dynamics.py` | `fv3_native_dynamics` | not started |
 
@@ -392,6 +392,35 @@ refuted the hypothesis the gate or its own docstring rested on:
 | `xtp_u`/`ytp_v` smt5 | the boolean proxy `flux ≠ upwind` is CONTINUOUS and crosses zero (+1.059 → −70.9) | ⛔ the detector was finding a zero crossing, not a branch flip, and `xtp_u`'s pass was luck. Now bisects a step in `d flux/dt` |
 
 ---
+
+### ★ THE MODULE-4 DEFECT WORTH REMEMBERING: a mutation carries the seam
+
+`acoustic_substep_3d` disagreed with the spec by 2.106e-02 on `u`, 1512
+of 6156 cells, and it took FOUR comparisons to localise because the first
+three all pointed away from it:
+
+| comparison | verdict |
+|---|---|
+| every stage, JAX vs NumPy | MATCHES |
+| JAX sub-step vs the same JAX phases composed by hand | BITWISE equal |
+| JAX sub-step vs the spec's sub-step | differs, 2.106e-02 |
+| **the spec's phases composed by hand vs the spec's own sub-step** | **differs, the IDENTICAL 2.106e-02** |
+
+The fourth is the one that resolves it: the discrepancy lives entirely
+inside the NumPy lane, between two ways of composing the SAME phases, so
+the JAX module was faithful to a model that was wrong.
+
+**The spec hands the SAME `csw` object to the transport phase and then to
+the tail**, and the transport phase MUTATES `uc`/`vc`/`divg_d` in place
+with the post-`p_grad_c` duo exchanges (`dyn_core.F90:652`/`:655`).
+`d_sw3` and `d_sw5` both read `uc`/`vc`, so the tail must see the
+EXCHANGED ones. A phase-by-phase reading cannot show this: the mutation
+is the only thing carrying it across the seam. On a functional lane they
+come back as stage S07 and must be threaded in explicitly.
+
+Generalise: **when porting an in-place lane, every shared mutable object
+is an undeclared data path.** Composing the phases yourself and diffing
+against the spec's own composition is what finds them.
 
 ## Next task, precisely
 
