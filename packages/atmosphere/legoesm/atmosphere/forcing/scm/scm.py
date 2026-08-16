@@ -71,6 +71,7 @@ from legoesm.atmosphere.forcing.scm.scm_forcing import (
     compute_forcing_tendencies,
     default_forcing,
     inject_prescribed_T_sfc_into_phys_state,
+    inject_prescribed_surface_fluxes_into_phys_state,
     validate_forcing,
     validate_forcing_against_state,
 )
@@ -337,6 +338,20 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             if callable(rad_hook):
                 rad_hook(phys_state.surface_T_sfc_override)
                 hook_armed = True
+
+        # For ``prescribe="fluxes"`` with ``flux_to_closure``: hand THIS
+        # stage's surface flux to the turbulence closure as its lower boundary
+        # condition instead of injecting it as a column tendency.  Evaluated at
+        # the stage time ``t``, so an RK stage and a diurnal cycle stay
+        # consistent; ``compute_forcing_tendencies`` skips its own injection
+        # under the same flag, so the flux is applied exactly once.
+        if (forcing is not None and forcing.prescribe == "fluxes"
+                and forcing.flux_to_closure):
+            phys_state = inject_prescribed_surface_fluxes_into_phys_state(
+                phys_state,
+                wth=None if forcing.w_th_s is None else forcing.w_th_s(t),
+                wqv=None if forcing.w_qv_s is None else forcing.w_qv_s(t),
+            )
 
         try:
             tend, phys_out = physics_fn(

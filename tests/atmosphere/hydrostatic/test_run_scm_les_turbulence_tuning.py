@@ -1054,24 +1054,72 @@ def test_a_finished_report_carries_no_partial_banner(tmp_path):
 
 # --- a time-varying flux is never frozen into the closure's scalar ----------
 
-def test_a_time_varying_flux_is_not_handed_to_the_closure():
+def test_a_time_varying_flux_is_not_handed_to_the_closures_scalar():
     """SurfaceLayerConfig carries ONE scalar. Handing Wangara's diurnal cycle
     to it froze the 09:00 value for all 8 h AND switched the SCMForcing
     channel off, so the SCM ran a constant 113.4 W/m^2 against an LES driven
     by the cycle. Every closure then scored ~9x the LES profile's own spread
     there -- scheme-independent, i.e. the arm, not the closures.
+
+    Declining the SCALAR is now a route SELECTION, not the end of the handover:
+    such a case goes through ``SCMForcing.flux_to_closure`` instead (below).
     """
     from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
         load_analytic_scm_case,
     )
     wangara = load_analytic_scm_case("wangara", nlev=16, dt=10.0)
     assert wangara.forcing.prescribe == "fluxes"
+    assert drv.surface_flux_varies_in_time(wangara)
     assert drv.deck_surface_scalar_fluxes(wangara) is None, (
-        "a case whose flux varies in time must decline the handover")
+        "a case whose flux varies in time must decline the SCALAR route")
 
     surface = drv.build_surface_config(wangara, flux_to_closure=True)
     assert surface.prescribed_shflx_w_m2 is None
     assert surface.prescribed_lhflx_w_m2 is None
+    # ...and the closure's own heat exchange stays zeroed, so the per-step
+    # override is the ONLY source of the surface heat flux (no double count).
+    assert surface.Ch_neutral == 0.0
+
+
+def test_the_time_varying_route_keeps_the_forcing_channel_live():
+    """The two routes differ in WHERE the flux is applied, not whether.
+
+    The steady route switches ``prescribe`` off and writes a config scalar;
+    the time-varying route leaves ``prescribe='fluxes'`` and ``w_th_s`` intact
+    and flips ``flux_to_closure``, which redirects the same callable from a
+    column tendency to the closure's boundary condition. Getting these
+    backwards -- switching the channel off without a scalar to replace it --
+    is what silently gave the closure a surface heat flux of zero.
+    """
+    import dataclasses
+
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    from legoesm.atmosphere.forcing.scm.scm_forcing import validate_forcing
+
+    wangara = load_analytic_scm_case("wangara", nlev=16, dt=10.0)
+    routed = dataclasses.replace(
+        wangara, forcing=wangara.forcing._replace(flux_to_closure=True))
+    validate_forcing(routed.forcing)
+    assert routed.forcing.prescribe == "fluxes"
+    assert routed.forcing.w_th_s is not None
+    # The cycle is real: the flux at 09:00 is not the flux four hours later.
+    # (t is seconds since the run start; the case adds its own t_start_s.)
+    early = float(routed.forcing.w_th_s(0.0))
+    later = float(routed.forcing.w_th_s(4.0 * 3600.0))
+    assert abs(later - early) > 0.01, (
+        f"Wangara's surface flux must vary over the run: {early} -> {later}")
+
+
+def test_a_steady_case_does_not_take_the_time_varying_route():
+    """NON-VACUITY for the predicate that selects between the two routes."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    for name in ("cbl", "gabls1", "ekman"):
+        case = load_analytic_scm_case(name, nlev=16, dt=10.0)
+        assert not drv.surface_flux_varies_in_time(case), name
 
 
 @pytest.mark.parametrize("case_name", ["cbl", "gabls1"])

@@ -3,40 +3,43 @@
 #SBATCH --partition=glab1
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a40|a100"
-#SBATCH --job-name=les_seven
+#SBATCH --job-name=les_eight
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
-#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/les_seven_%j.out
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/les_eight_%j.out
 set +e
-# ONE parameter set per turbulence closure, fitted jointly to every USABLE
-# LES reference -- three dry and four wet:
+# ONE parameter set per turbulence closure, fitted jointly to every LES
+# reference -- four dry and four wet:
 #
 #   dry   ekman     neutral shear layer          scored u, v
 #         gabls1    stable boundary layer        scored theta, u, v
 #         cbl       Nieuwstadt free convection   scored theta
+#         wangara   diurnal dry CBL (Day 33)     scored theta, u, v
 #   wet   bomex     shallow trade cumulus        scored theta, qv
 #         rico      precipitating trade cumulus  scored theta, qv
 #         astex     transitioning stratocumulus  scored theta, qv
 #         dycoms    nocturnal stratocumulus      scored theta, qv
 #
-# WANGARA IS EXCLUDED, and it is excluded for a structural reason rather than a
-# bad score. Its surface heat flux is DIURNAL. The path that hands a prescribed
-# flux to the closure carries a single scalar in SurfaceLayerConfig, so it can
-# only pass one instant of that cycle -- doing so measured 8.6-9.9 normalized
-# error on every closure, scheme-independent, i.e. the arm. Driving the cycle
-# correctly from the SCMForcing channel instead leaves the closure seeing a
-# surface heat flux of exactly ZERO, which is the defining input of every
-# flux-driven nonlocal scheme, and measures 13.0-15.5. Both numbers are a
-# missing boundary condition, not a turbulence signal, and fitting against
-# either would tune the parameters to compensate for it.
+# WANGARA IS BACK. It was excluded for a structural reason: its surface heat
+# flux is DIURNAL, and the only path that reached the closure carried a single
+# scalar in SurfaceLayerConfig. Freezing the cycle at one instant measured
+# 8.6-9.9 normalized error on every closure, scheme-independent -- i.e. the
+# arm, not the closures -- and driving the cycle from the SCMForcing channel
+# instead left the closure seeing a surface heat flux of exactly ZERO, the
+# defining input of every flux-driven nonlocal scheme, at 13.0-15.5. Both were
+# a missing boundary condition, not a turbulence signal.
 #
-# What would put it back: a time-varying prescribed surface flux reaching the
-# closure. That needs `t` threaded through all nine closure signatures, which
-# take (u, v, T, q_v, <carry>, p, z, T_sfc, q_sfc, rho, dt, config) and no
-# clock. The case's forcing itself is now correct either way (the SCM reads the
-# same wangara_day33 module as the LES), so only the boundary condition is
-# outstanding.
+# The fix does NOT thread `t` through the nine closure signatures. It reuses
+# the channel `prescribe="T_s"` already used for a time-varying skin
+# temperature: the SCM writes the current kinematic flux into
+# `PhysicsState.surface_wth_override` before every tendency evaluation, and the
+# turbulence integration folds it into the config leaf the closure already
+# reads (`turbulence/integration.py::_resolve_prescribed_surface_fluxes`), with
+# the SAME rho the closure is handed -- so YSU's `shflx / (rho[:, -1] * c_pd)`
+# recovers exactly the prescribed value. `SCMForcing.flux_to_closure` moves the
+# flux from the column tendency to that boundary condition, so it is applied
+# exactly once.
 #
 # Both stratocumulus decks set `dolongwave = .true., doradsimple = .true.` and
 # the SCM arm runs that SAME Stevens (2005) kernel, so cloud-top radiative
@@ -75,10 +78,10 @@ export PYTHONPATH=$WT/src:$(ls -d "$WT"/packages/*/ | tr '\n' ':')$PYTHONPATH
 export XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results
-CASE_LIST="ekman gabls1 cbl bomex rico astex dycoms"
+CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
-OUT=${OUT:-$R/scm_les_turbulence/all_seven}
+OUT=${OUT:-$R/scm_les_turbulence/all_eight_wangara}
 
 # PREFLIGHT: refuse to start if any reference is missing. This is a long job
 # and discovering a missing deck after the queue wait wastes the slot.

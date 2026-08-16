@@ -179,3 +179,141 @@ def test_ysu_convective_pathway_switches_on_with_the_flux():
     assert amp_on > 100.0 * amp_off, (
         f"the flux-driven tendency must dominate the residual background "
         f"diffusion: {amp_on:.3e} vs {amp_off:.3e} K/s")
+
+
+# ---------------------------------------------------------------------------
+# TIME-VARYING prescribed flux (Wangara Day 33's diurnal cycle)
+#
+# The config scalar above is ONE value for the whole run, so a case whose
+# surface flux follows a diurnal cycle could only ever hand the closure one
+# instant of it. The per-step route writes the current value into PhysicsState
+# and the turbulence integration folds it into the same config leaf, so no
+# closure signature changes and no scheme learns about time.
+# ---------------------------------------------------------------------------
+
+def _phys_state_stub(*, wth=None, wqv=None, ncol=1):
+    """A minimal PhysicsState carrying (or not carrying) the flux overrides."""
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE, PhysicsState,
+    )
+    z1 = jnp.zeros((ncol, 1))
+    return PhysicsState(
+        tke=z1, conv_prog_profile=z1, conv_stoch_state=jnp.zeros((ncol,)),
+        gwd_spectrum=jnp.zeros((ncol, 1, 1)),
+        prng_key=jax.random.PRNGKey(0),
+        surface_T_sfc_override=jnp.full((ncol,), NO_SFC_T_OVERRIDE),
+        qke=z1, clubb_moments=jnp.zeros((ncol, 1, 1)), rad_heating=z1,
+        col_index=jnp.arange(ncol, dtype=jnp.int32),
+        surface_wth_override=(None if wth is None
+                              else jnp.full((ncol,), float(wth))),
+        surface_wqv_override=(None if wqv is None
+                              else jnp.full((ncol,), float(wqv))),
+    )
+
+
+def test_absent_override_leaves_the_config_untouched():
+    """NON-VACUITY: the default path must be the identity, object and all.
+
+    Without this the two tests below would pass on a helper that rewrote every
+    config it was handed, which is the change that would silently perturb every
+    3-D run in the repo.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        _resolve_prescribed_surface_fluxes,
+    )
+    cfg = YSUConfig(surface=SurfaceLayerConfig(Ch_neutral=1.1e-3))
+    rho = jnp.full((1, 4), CBL_RHO)
+    assert _resolve_prescribed_surface_fluxes(cfg, None, rho) is cfg
+    assert _resolve_prescribed_surface_fluxes(
+        cfg, _phys_state_stub(), rho) is cfg
+
+
+@pytest.mark.parametrize("w_theta", [0.0897, 0.0])
+def test_the_override_arrives_as_the_matching_w_m2_flux(w_theta):
+    """rho * c_pd * w'T', with rho the LOWEST FULL level the closure is given."""
+    from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        _resolve_prescribed_surface_fluxes,
+    )
+    cfg = YSUConfig(surface=SurfaceLayerConfig(Ch_neutral=0.0))
+    # A rho PROFILE, not a constant: picking the wrong level is then visible.
+    rho = jnp.asarray([[0.9, 1.0, 1.1, CBL_RHO]])
+    out = _resolve_prescribed_surface_fluxes(
+        cfg, _phys_state_stub(wth=w_theta), rho)
+    assert float(out.surface.prescribed_shflx_w_m2[0]) == pytest.approx(
+        w_theta * CBL_RHO * constants.c_pd)
+    # The moisture channel was not supplied, so it must stay absent rather
+    # than become a zero flux -- a dry case has no latent flux, and writing
+    # 0.0 would override an interactive one on a moist case.
+    assert out.surface.prescribed_lhflx_w_m2 is None
+
+
+def test_the_kinematic_round_trip_is_exact():
+    """YSU divides straight back out; it must recover what was prescribed.
+
+    ``ysu.py``: ``wtheta_sfc = shflx / (rho[:, -1] * c_pd)``. Converting with
+    any OTHER density here would leave a silent offset in the one number every
+    flux-driven nonlocal scheme is built on.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        _resolve_prescribed_surface_fluxes,
+    )
+    w_theta = 0.0897
+    rho = jnp.asarray([[0.9, 1.0, 1.1, CBL_RHO]])
+    out = _resolve_prescribed_surface_fluxes(
+        YSUConfig(surface=SurfaceLayerConfig(Ch_neutral=0.0)),
+        _phys_state_stub(wth=w_theta), rho)
+    recovered = (out.surface.prescribed_shflx_w_m2
+                 / (rho[:, -1] * constants.c_pd))
+    assert float(recovered[0]) == pytest.approx(w_theta, rel=1e-12)
+
+
+def test_the_closure_tracks_a_flux_that_changes_between_steps():
+    """The whole point: two times, two fluxes, two different PBLs.
+
+    Pinned through ``make_turbulence_physics`` rather than the helper, so the
+    integration wiring is part of what is tested; a helper that worked while
+    its call site still passed the unmodified config would pass the tests
+    above and fail this one.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import (
+        TurbulenceConfig, YSUConfig,
+    )
+    from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+
+    nlev, ncol = 24, 1
+    z_half = jnp.linspace(1600.0, 0.0, nlev + 1)[None, :]
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T = jnp.full((ncol, nlev), 300.0)
+    u = jnp.zeros((ncol, nlev))
+    v = jnp.zeros((ncol, nlev))
+    q_v = jnp.full((ncol, nlev), 1.0e-3)
+    rho = jnp.full((ncol, nlev), CBL_RHO)
+    T_sfc = jnp.full((ncol,), 300.0)
+    q_sfc = jnp.full((ncol,), 1.0e-3)
+
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        _resolve_prescribed_surface_fluxes,
+    )
+    base = YSUConfig(surface=SurfaceLayerConfig(
+        Cd_neutral=7.5e-3, Ch_neutral=0.0))
+    assert TurbulenceConfig(scheme="ysu", ysu=base).ysu is base  # dispatch sanity
+
+    def _run(w_theta):
+        cfg = _resolve_prescribed_surface_fluxes(
+            base, _phys_state_stub(wth=w_theta), rho)
+        return ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
+                              T_sfc, q_sfc, rho, 10.0, cfg)
+
+    morning, midday = _run(0.02), _run(0.12)
+    assert float(morning.shflx[0]) == pytest.approx(
+        0.02 * CBL_RHO * constants.c_pd)
+    assert float(midday.shflx[0]) == pytest.approx(
+        0.12 * CBL_RHO * constants.c_pd)
+    assert float(midday.h_pbl[0]) > float(morning.h_pbl[0]), (
+        "a stronger surface heat flux must deepen the convective PBL; "
+        "equal depths mean the per-step value never reached the closure")

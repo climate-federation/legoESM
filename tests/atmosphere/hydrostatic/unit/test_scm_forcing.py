@@ -1174,3 +1174,65 @@ def test_add_tendencies_is_field_wise_sum():
         rtol=1e-12,
     )
 
+
+
+# ----------------------------------------------------------------------
+# flux_to_closure: WHERE the prescribed surface flux is applied
+# ----------------------------------------------------------------------
+
+
+def test_flux_to_closure_requires_prescribed_fluxes():
+    """Inert on any other forcing, so setting it there must be an error.
+
+    Nothing outside the ``prescribe='fluxes'`` branch reads the flag; without
+    this guard a caller would believe the closure had been handed a surface
+    flux that was never even defined.
+    """
+    with pytest.raises(ValueError, match="requires prescribe='fluxes'"):
+        validate_forcing(SCMForcing(prescribe="none", flux_to_closure=True))
+    # ...and it must stay legal on the branch that does read it.
+    validate_forcing(SCMForcing(
+        prescribe="fluxes", w_th_s=lambda _t: 0.06, flux_to_closure=True))
+
+
+def test_flux_to_closure_moves_the_flux_out_of_the_column_tendency():
+    """The double-count guard, both directions.
+
+    With the flag OFF the flux lands on the lowest cell as a tendency; with it
+    ON that injection must vanish, because the turbulence closure is applying
+    the same flux as its lower boundary condition. Asserting only the ON side
+    would pass on a forcing that never injected anything.
+    """
+    scm = _make_scm()
+    common = dict(prescribe="fluxes", w_th_s=lambda _t: 0.06)
+    off = compute_forcing_tendencies(
+        scm.state, scm.sigma_coord, SCMForcing(**common), 0.0)
+    on = compute_forcing_tendencies(
+        scm.state, scm.sigma_coord,
+        SCMForcing(**common, flux_to_closure=True), 0.0)
+    dT_off = np.asarray(off.dT_dt.data).ravel()
+    dT_on = np.asarray(on.dT_dt.data).ravel()
+    assert dT_off[-1] > 0.0, "the OFF path must inject at the lowest cell"
+    assert np.allclose(dT_on, 0.0), (
+        f"flux_to_closure must remove the column injection; got {dT_on[-1]:.3e}"
+    )
+
+
+def test_the_injector_writes_the_kinematic_value_unconverted():
+    """PhysicsState carries [K m/s]; the W/m^2 conversion belongs downstream.
+
+    Converting here would need a density this function does not have, and the
+    turbulence integration already has the exact one the closure divides back
+    out by.
+    """
+    from legoesm.atmosphere.forcing.scm.scm_forcing import (
+        inject_prescribed_surface_fluxes_into_phys_state,
+    )
+    scm = _make_scm()
+    out = inject_prescribed_surface_fluxes_into_phys_state(
+        scm.phys_state, wth=0.0897)
+    assert np.allclose(np.asarray(out.surface_wth_override), 0.0897)
+    # A dry case has no moisture flux: absent, not zero.
+    assert out.surface_wqv_override is None
+    assert out.surface_T_sfc_override.shape == out.surface_wth_override.shape
+    assert inject_prescribed_surface_fluxes_into_phys_state(None) is None

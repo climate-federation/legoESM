@@ -195,6 +195,22 @@ _ATM_TURB_NAMESPACE = "atm.turb."
 # configuration: identical across arms except turbulence
 # --------------------------------------------------------------------------
 
+def surface_flux_varies_in_time(case) -> bool:
+    """Does this case's PRESCRIBED surface flux change during the run?
+
+    One predicate for two decisions that must never disagree: whether the
+    run-constant ``SurfaceLayerConfig`` scalar can carry the flux at all
+    (:func:`deck_surface_scalar_fluxes`), and which of the two handover routes
+    the arm takes. When these were separate expressions the second silently
+    fell through to "no handover" and the closure saw a surface heat flux of
+    zero on a case that prescribes one.
+    """
+    if case.forcing.prescribe != "fluxes":
+        return False
+    spec = getattr(case, "spec", None)
+    return getattr(spec, "surface_theta_flux_fn", None) is not None
+
+
 def deck_surface_scalar_fluxes(case) -> tuple[float, float] | None:
     """The deck's PRESCRIBED surface (sensible, latent) heat flux [W/m^2, up].
 
@@ -209,17 +225,19 @@ def deck_surface_scalar_fluxes(case) -> tuple[float, float] | None:
     """
     if case.forcing.prescribe != "fluxes":
         return None
-    spec_early = getattr(case, "spec", None)
-    if getattr(spec_early, "surface_theta_flux_fn", None) is not None:
-        # A TIME-VARYING flux cannot be handed to the closure: SurfaceLayerConfig
-        # carries a scalar, so doing it freezes the cycle at one instant AND
-        # switches the SCMForcing surface channel off, which is worse than not
-        # handing it over at all. Wangara Day 33 measured 113.4 W/m^2 held for
-        # 8 h against a cycle peaking at 13:00, and every closure scored ~9x the
-        # LES profile's own spread there -- scheme-independent, i.e. the arm,
-        # not the closures. Returning None keeps the case on its own
-        # time-dependent channel with the closure's exchange coefficient zeroed,
-        # exactly as it ran before --surface-flux-to-closure existed.
+    if surface_flux_varies_in_time(case):
+        # A TIME-VARYING flux cannot go through THIS route: SurfaceLayerConfig
+        # carries one scalar for the whole run, so writing it here freezes the
+        # cycle at one instant. Wangara Day 33 measured 113.4 W/m^2 held for
+        # 8 h against a cycle peaking at 13:00, and every closure scored ~9x
+        # the LES profile's own spread there -- scheme-independent, i.e. the
+        # arm, not the closures.
+        #
+        # It is no longer the end of the story: such a case now takes the
+        # PER-STEP route instead (``SCMForcing.flux_to_closure`` ->
+        # ``PhysicsState.surface_wth_override``), which carries the whole
+        # cycle. Declining here selects that route rather than disabling the
+        # handover -- see ``build_arms``.
         return None
     rho_sfc = float(case.rho_sfc)
     surf = getattr(case, "surface", None)
@@ -893,6 +911,17 @@ def line_search_verdict(*, accepted: bool, restarted: bool,
     turns it back into a descent direction, so it is worth exactly one retry
     per step; ``restarted`` is what bounds it to one and keeps a genuinely
     converged fit from looping.
+
+    MEASURED (job 9417294, 7 cases): the uphill branch did NOT fire on either
+    scheme that stalls. mynn25 reported ``dL = -5.25`` at its stall and
+    smagorinsky ``dL = -2.08e17`` -- both descent directions rejected at every
+    scale down to 1e-4 of the step. So stale momentum is NOT why these fits
+    stop, and this branch is a bounded guard for a case not yet observed, not
+    the explanation. The measured cause is a locally NON-SMOOTH objective
+    (smagorinsky's ``sqrt(max(0, 1 - Ri/Pr_t))`` cutoff has an unbounded
+    derivative; mynn25 runs against its D25 denominator floor on cbl), where a
+    correct gradient predicts a decrease the finite step does not deliver.
+    Do not read this helper as the fix for a stalled fit.
     """
     if accepted:
         return "accept"
@@ -1307,14 +1336,19 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
             case, bulk_scheme=args.surface_bulk_scheme,
             flux_to_closure=args.surface_flux_to_closure)
         prescribed = case.forcing.prescribe == "fluxes"
-        # `prescribed_shflx_w_m2 is None` means deck_surface_scalar_fluxes
-        # declined -- today only because the case's flux VARIES IN TIME and a
-        # scalar config cannot carry it. Switching the forcing channel off on
-        # that basis would replace a real diurnal cycle with one instant of it,
-        # so the handover is skipped and SAID, not skipped silently.
-        handover = (args.surface_flux_to_closure and prescribed
-                    and surface.prescribed_shflx_w_m2 is not None)
-        if handover:
+        # Two routes to the SAME destination -- the closure's lower boundary
+        # condition -- chosen by whether the flux is constant over the run.
+        #   STEADY: the value goes into SurfaceLayerConfig and the SCMForcing
+        #     surface channel is switched OFF.
+        #   TIME-VARYING: the channel STAYS ON but is redirected, per step,
+        #     into PhysicsState instead of into a column tendency.
+        # Both apply the flux exactly once. Everything else about the arm is
+        # identical, so a case does not change category by being tuned.
+        steady_handover = (args.surface_flux_to_closure and prescribed
+                           and surface.prescribed_shflx_w_m2 is not None)
+        varying_handover = (args.surface_flux_to_closure
+                            and surface_flux_varies_in_time(case))
+        if steady_handover:
             # The closure now applies the deck flux as its lower boundary
             # condition, so the forcing channel MUST be switched off: leaving
             # both on would add the same flux to the column twice.
@@ -1327,13 +1361,26 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
                   f"LHF={surface.prescribed_lhflx_w_m2:.4g} W/m^2); "
                   "the SCMForcing surface channel is OFF so it is not "
                   "counted twice.")
+        elif varying_handover:
+            # prescribe STAYS "fluxes" and w_th_s stays live: the flag only
+            # moves WHERE the flux is applied. compute_forcing_tendencies
+            # skips its column injection under the same flag, so it is still
+            # applied exactly once -- now as the closure's boundary condition,
+            # which is the input every flux-driven nonlocal scheme is built on.
+            case = dataclasses.replace(
+                case, forcing=case.forcing._replace(flux_to_closure=True))
+            w0 = float(case.forcing.w_th_s(0.0))
+            print(f"  {name}: TIME-VARYING surface flux -> closure per step "
+                  f"(w'T' = {w0:.4g} K m/s at t=0, ~"
+                  f"{w0 * float(case.rho_sfc) * constants.c_pd:.4g} W/m^2); "
+                  "the SCMForcing column injection is OFF so it is not "
+                  "counted twice.")
         elif args.surface_flux_to_closure and prescribed:
-            print(f"  {name}: surface flux NOT handed to the closure -- this "
-                  "case's flux varies in TIME and SurfaceLayerConfig carries a "
-                  "scalar. It stays on the SCMForcing channel with the "
-                  "closure's exchange coefficient zeroed, as every case ran "
-                  "before --surface-flux-to-closure existed. The closure "
-                  "therefore sees a surface heat flux of zero here.")
+            raise SystemExit(
+                f"{name}: prescribes a surface flux but took neither handover "
+                "route. A steady flux goes through SurfaceLayerConfig and a "
+                "time-varying one through PhysicsState; falling through means "
+                "the closure would silently see a surface heat flux of zero.")
         arms.append(CaseArm(
             name=name, case=case, reference=ref, scored=scored,
             hours=les_end, analysis_hours=span, dt=dt,
