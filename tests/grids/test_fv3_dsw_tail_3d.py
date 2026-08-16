@@ -232,7 +232,7 @@ def jdsw(jctx, jstate, jcsw):
 _TAIL_COMPARED = ("u", "v", "ke", "wk", "divg_d", "delpc")
 
 
-def _stack_dsw_np(dsw_np):
+def _stack_dsw_np(dsw_np, face_level_wins=()):
     """The NumPy transport output -> this lane's face-stacked dict.
 
     Not `stack_np`: the spec's per-face dict carries a ``levels`` key
@@ -249,6 +249,25 @@ def _stack_dsw_np(dsw_np):
         out[k] = jnp.asarray(np.stack(
             [np.asarray(d[k], dtype=np.float64) for d in dsw_np]))
     for nm in per_level_names:
+        # ⛔ A COLLIDING NAME IS TWO DIFFERENT QUANTITIES, NOT A DUPLICATE.
+        # `pt` and `delp` exist BOTH as face-level keys (the post-d_sw2
+        # state, which is what the NH tail's riem_solver3 consumes) and
+        # as per-level d_sw1 stage outputs (an EARLIER generation). This
+        # loop used to overwrite the face-level entry with the per-level
+        # stack, so the JAX lane was handed d_sw1's pt/delp while the
+        # spec used the post-d_sw2 ones -- measured 2.367489e-01 on pt
+        # and 2.341751e+01 on delp, with all nine other riem inputs at
+        # exactly 0.0, and it is why the NH parity gate was red.
+        # Refusing is the only safe behaviour: silently picking either
+        # generation is a coin flip on which physics the gate certifies.
+        if nm in face_level_wins:
+            continue          # caller stated which generation it wants
+        if nm in out:
+            raise ValueError(
+                f"_stack_dsw_np: {nm!r} is both a face-level key and a "
+                f"per-level d_sw1 output -- two different generations of "
+                f"the same name. The caller must say which it wants "
+                f"via face_level_wins=; this adapter will not choose.")
         out[nm] = jnp.asarray(np.stack([
             np.stack([np.asarray(lvl[nm], dtype=np.float64)
                       for lvl in face["levels"]], axis=2)
@@ -857,7 +876,10 @@ def _run_nh(ctx_, bundle, lane, **kw):
         # "levels" list of per-level dicts, which has no array to stack
         # (job 9417488 hit exactly that here after the hydrostatic gates
         # had already been fixed for it).
-        ctx_, stack_np(bundle["csw_press"]), _stack_dsw_np(bundle["dsw"]),
+        # riem_solver3 consumes the POST-d_sw2 pt/delp (the face-level
+        # entries), not d_sw1's per-level stage outputs of the same name.
+        ctx_, stack_np(bundle["csw_press"]),
+        _stack_dsw_np(bundle["dsw"], face_level_wins=("pt", "delp")),
         stack_np(bundle["tail"]), _nh_stack_carry(bundle["carry"]), KM,
         dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
         a_imp=A_IMP, dp0=jnp.asarray(_DP0),
