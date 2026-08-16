@@ -802,9 +802,10 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             "stages": {"first": stages_first, "last": stages_last}}
 
 
-def make_acoustic_loop_3d_jit(ctx, km, *, n_split, cfg=None,
-                              check_state=False, remap_follows=False,
-                              hydrostatic=True, use_logp=False):
+def make_acoustic_loop_3d_jit(ctx, km, *, n_split, ptop, akap, cp_air,
+                              cfg=None, check_state=False,
+                              remap_follows=False, hydrostatic=True,
+                              use_logp=False, p_fac=0.05, a_imp=1.0):
     """jit factory for acoustic_loop_3d (one per public routine).
 
     STATIC, captured here (a change recompiles): ctx, km, n_split (a
@@ -835,8 +836,14 @@ def make_acoustic_loop_3d_jit(ctx, km, *, n_split, cfg=None,
             "jitted (data-dependent, the spec's `validate`); call the "
             "eager acoustic_loop_3d with check_state=True instead")
 
-    def _loop(state, dt_atmos, *, ptop, akap, cp_air, nh=None,
-              flux_cap=None, dp0=None, p_fac=0.05, a_imp=1.0):
+    # ptop/akap/cp_air/p_fac/a_imp are BAKED IN, not traced.  The first
+    # draft took them as arguments of the jitted closure, which makes
+    # them Tracers -- and the D-grid pressure phase REFUSES a traced
+    # ptop/akap/cp_air by design (its C5-style screen), so the closure
+    # could not have traced at all.  Deck constants are static (C3);
+    # only the state and dt_atmos are dynamic, which is what keeps a new
+    # outer time step from recompiling the loop.
+    def _loop(state, dt_atmos, *, nh=None, flux_cap=None, dp0=None):
         return acoustic_loop_3d(
             ctx, state, dt_atmos, km, n_split=n_split, ptop=ptop,
             akap=akap, cp_air=cp_air, cfg=cfg, check_state=False,
