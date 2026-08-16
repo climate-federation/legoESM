@@ -11,7 +11,16 @@ measured fact that **halo collectives on this stack overlap nothing**
 NCCL; the interior/rim overlap pattern is refuted — cut rounds or
 bytes, do not try to hide them).
 
-## 0. Cross-cutting gate — verify the interconnect FIRST (cheap, blocks everything)
+## 0. Cross-cutting gate — RESOLVED: transport is InfiniBand (CONFIRMED)
+
+**Receipt landed 2026-08-16, job 26996570 (2 vader nodes, 4 ranks,
+`NCCL_DEBUG=INFO`): all four ranks print `NCCL INFO Using network IB`.**
+The early-init sockets warning is a false alarm on Levante — NCCL's
+builtin IB verbs transport needs no plugin. Every multi-node figure
+point stands as measured. Follow-up worth one line: the warning's
+heuristic could check for a usable verbs device before claiming
+"likely TCP sockets". Original gate reasoning kept below for the
+record.
 
 The running 192-GPU lat-lon job (26979367) prints the early-init
 warning: *multi-node launch with no NCCL net plugin visible —
