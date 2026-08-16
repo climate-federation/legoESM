@@ -774,6 +774,7 @@ def _make_jax_step(ctx):
     arrays rather than rebound, or the mutation the scoring relies on
     would be invisible.
     """
+    import jax.numpy as _jnp
     import numpy as _np
 
     from legoesm.core import fv3_dynamics as _jdyn
@@ -783,8 +784,12 @@ def _make_jax_step(ctx):
     jctx = build_jax_duo_stepper_context(ctx)
 
     def _stack(per_face, key=None):
-        return _np.stack([_np.asarray(f[key] if key else f)
-                          for f in per_face])
+        # jnp, not np: the module indexes these with `.at[...]`, which a
+        # numpy array does not have. Stacking with numpy and handing the
+        # result straight over got as far as the remap's pk update
+        # before failing.
+        return _jnp.asarray(_np.stack([_np.asarray(f[key] if key else f)
+                                       for f in per_face]))
 
     def _step(_ctx, state, press, **kw):
         jstate = state_3d_to_jax(state)
@@ -796,7 +801,8 @@ def _make_jax_step(ctx):
         # transpose is here, in the adapter, where every other layout
         # difference between the lanes already lives.
         _nq = len(q_in[0])
-        jq = [_np.stack([_np.asarray(q_in[t][iq]) for t in range(6)])
+        jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
+                                      for t in range(6)]))
               for iq in range(_nq)]
         out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
 
