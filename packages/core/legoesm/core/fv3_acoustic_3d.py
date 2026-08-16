@@ -386,11 +386,19 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                        remap_follows=remap_follows)
 
     if hydrostatic:
+        # `check_delpc` is a DATA-DEPENDENT check and this sub-step is
+        # traced inside `acoustic_loop_3d`'s scan, where the C-grid
+        # phase REFUSES it rather than skipping silently (its C5
+        # contract, and it fired at n_split=3 in job 9417652).  It is
+        # threaded from this function's own `check_state` flag, so the
+        # eager entry can still ask for it and the traced lane cannot
+        # accidentally get it.
         csw_press = cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2,
                                             ptop=ptop, akap=akap,
                                             cp_air=cp_air,
                                             a2b_ord=a2b_ord,
-                                            remap_follows=remap_follows)
+                                            remap_follows=remap_follows,
+                                            check_delpc=check_state)
     else:
         if first_substep:
             # :535-557 -- duo-exchange gz, then save zh = gz (padded).
