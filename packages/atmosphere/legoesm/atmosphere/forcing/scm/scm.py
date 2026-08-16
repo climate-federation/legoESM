@@ -637,6 +637,22 @@ class SingleColumnModel:
             return
         turb = physics_config.turbulence
         if turb.scheme == "none":
+            # No closure, so nothing can double-count the column injection --
+            # UNLESS the flux was routed to the closure, in which case there
+            # is no consumer at all and the prescribed flux is applied ZERO
+            # times.  ``make_turbulence_physics`` returns zero tendencies
+            # before it ever reads the surface config, so this fails silently
+            # rather than loudly: the column simply never feels its surface.
+            if forcing.flux_to_closure:
+                raise ValueError(
+                    "SCMForcing.flux_to_closure=True hands the prescribed "
+                    "surface flux to the turbulence closure, but "
+                    "turbulence.scheme='none' -- there is no closure to "
+                    "receive it and the column-tendency injection is switched "
+                    "off, so the flux would be applied NOWHERE.  Select a "
+                    "turbulence scheme, or leave flux_to_closure=False to "
+                    "keep the flux on the column-tendency channel."
+                )
             return
         scheme_sub = getattr(turb, turb.scheme, None)
         if scheme_sub is None:

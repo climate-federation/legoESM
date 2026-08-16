@@ -281,9 +281,14 @@ def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
     Units and the round trip: the overrides are KINEMATIC ([K m/s] and
     [(kg/kg) m/s], positive UPWARD, the ``SCMForcing.w_th_s``/``w_qv_s``
     convention) and are converted here with the SAME ``rho`` handed to the
-    closure.  A nonlocal scheme divides straight back out (``ysu.py``:
-    ``wtheta_sfc = shflx / (rho[:, -1] * c_pd)``), so it recovers exactly the
-    prescribed kinematic flux -- no second density convention enters.
+    closure, so a scheme that divides straight back out recovers exactly the
+    prescribed value -- ``ysu.py``'s ``wtheta_sfc = shflx / (rho[:, -1] *
+    c_pd)`` is the exact inverse of the line below.  NOT every consumer: HB
+    rebuilds its kinematic flux with a DRY-air ``rrho = R_d*T/p`` on purpose
+    (oracle fidelity, holtslag_boville.py), so it recovers ``wth`` times
+    ``rho_moist/rho_dry`` -- ~0.5 % at 8 g/kg, exactly 1 on a dry case. That
+    offset is the pre-existing convention gap the run-constant config scalar
+    already had; this route does not add to it.
 
     PRECEDENCE: an override present replaces the config scalar, because it is
     the value for THIS step and the config's is the value for the whole run.

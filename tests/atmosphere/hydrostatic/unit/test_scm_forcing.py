@@ -1236,3 +1236,19 @@ def test_the_injector_writes_the_kinematic_value_unconverted():
     assert out.surface_wqv_override is None
     assert out.surface_T_sfc_override.shape == out.surface_wth_override.shape
     assert inject_prescribed_surface_fluxes_into_phys_state(None) is None
+
+
+def test_flux_to_closure_needs_a_closure_to_receive_it():
+    """turbulence='none' + flux_to_closure applies the flux ZERO times.
+
+    make_turbulence_physics returns zero tendencies before it ever reads the
+    surface config, so this fails silently: the column never feels its
+    surface. The same forcing WITHOUT the flag is legitimate on a no-physics
+    column -- the column-tendency route needs no closure -- which is what
+    makes the guard specific rather than a blanket refusal.
+    """
+    flux = dict(prescribe="fluxes", w_th_s=lambda _t: 0.06)
+    with pytest.raises(ValueError, match="no closure to receive it"):
+        _make_scm(forcing=SCMForcing(**flux, flux_to_closure=True))
+    scm = _make_scm(forcing=SCMForcing(**flux))
+    assert scm.forcing.prescribe == "fluxes"
