@@ -499,6 +499,16 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 grav=(None if hydrostatic else _FV3_GRAV),
                 fill=False, do_sat_adj=False, do_inline_mp=False,
                 do_adiabatic_init=False))
+        # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
+        # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
+        # from scratch DROPS a hydrostatic run's `w` -- which the state
+        # still carries (build_state_3d allocates it zeroed either way).
+        # lax.scan then rejects the k_split loop with "carry input and
+        # carry output must have the same pytree structure ... symmetric
+        # difference {'w'}". Any key the remap does not own is carried
+        # through untouched rather than recreated, so the structure is
+        # whatever the caller handed in.
+        _st_in = st
         st = {"delp": jnp.stack([o.delp for o in fs]),
               "pt": jnp.stack([o.pt for o in fs]),
               "u": jnp.stack([o.u for o in fs]),
@@ -506,6 +516,9 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         if not hydrostatic:
             st["w"] = jnp.stack([o.w for o in fs])
             st["delz"] = jnp.stack([o.delz for o in fs])
+        for _k in _st_in:
+            if _k not in st:
+                st[_k] = _st_in[_k]
         pr = {"ps": jnp.stack([o.ps for o in fs]),
               "pe": jnp.stack([o.pe for o in fs]),
               "peln": jnp.stack([o.peln for o in fs]),
@@ -513,8 +526,12 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
               "pkz": jnp.stack([o.pkz for o in fs])}
         if nq > 0:
             # rebuild the list of stacked tracers from the per-face lists
-            qq = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
-                                        *[o.q for o in fs])
+            # list(), not the tree_map result as-is: the callee returns
+            # its tracers as a tuple, and a carry that goes in a list and
+            # comes out a tuple is a pytree-structure mismatch under
+            # lax.scan even though every leaf matches.
+            qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
+                                             *[o.q for o in fs]))
         om = jnp.stack([o.omga for o in fs])
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 
