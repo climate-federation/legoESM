@@ -904,15 +904,17 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     # (dyn_core.F90:1424-1425).  Off that step it stays the carry's
     # zeros in BOTH lanes, so comparing it is vacuous -- assert_real
     # said so (job 9417616).  It gets the contract instead.
-    # `pe` (pe_halo, :1424-1425) and `pk` (Riem_Solver3's `last_call`
-    # write) are BOTH produced only on the remap step; off it they stay
-    # the carry's zeros in both lanes, so comparing them is vacuous and
-    # assert_real says so (jobs 9417616, 9417626).  Contract off the
-    # step, comparison on it.
-    compared = ("pe", "pk", "peln", "ws") if remap_step else \
-        ("peln", "ws")
+    # `pe`, `pk` and `peln` are ALL produced only on the remap step --
+    # pe_halo at :1424-1425 and Riem_Solver3's `last_call` writes -- so
+    # off it they stay the carry's zeros in both lanes and comparing
+    # them is vacuous.  assert_real found them one at a time (jobs
+    # 9417616, 9417626, 9417636), which is the guard working three
+    # times rather than three separate mistakes.  `ws` is the one
+    # member this phase writes on every step, so off the remap step it
+    # is the whole comparison; the contract covers the other three.
+    compared = ("pe", "pk", "peln", "ws") if remap_step else ("ws",)
     if not remap_step:
-        for nm in ("pe", "pk"):
+        for nm in ("pe", "pk", "peln"):
             for lane, arr in (("jax", np.asarray(got["press"][nm])),
                               ("numpy", np.stack([np.asarray(ref[t][nm])
                                                   for t in range(6)]))):
