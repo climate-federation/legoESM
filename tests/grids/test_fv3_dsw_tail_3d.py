@@ -235,13 +235,23 @@ _TAIL_COMPARED = ("u", "v", "ke", "wk", "divg_d", "delpc")
 # Names the transport output carries in BOTH generations: as a
 # face-level key (the post-d_sw2 state) and as a per-level d_sw1 stage
 # output. The tail phase consumes the face-level one -- riem_solver3
-# takes the post-d_sw2 pt/delp -- so every caller in this lane declares
-# that. The adapter refuses any collision NOT listed here, which is how
-# the pt/delp defect surfaced and how the next one will.
-_TAIL_FACE_LEVEL = ("pt", "delp", "w", "allflux_x", "allflux_y")
+# takes the post-d_sw2 pt/delp/w -- so every caller in this lane
+# declares that. The adapter refuses any collision NOT listed, which is
+# how the pt/delp defect surfaced and how the next one will.
+_TAIL_FACE_LEVEL = ("pt", "delp", "w")
+
+# allflux_x/allflux_y are NOT two generations (codex MINOR, correct):
+# the NumPy transport phase barrier-averages them IN PLACE and then
+# stacks those same level objects into the face-level fields, so both
+# views hold identical data. Listing them as face-level "winners"
+# recorded a meaningless choice and asserted something false about what
+# the tail covers -- the tail consumes neither. Declared as ALIASES
+# instead, and the adapter PROVES the equality rather than trusting it.
+_TAIL_ALIASES = ("allflux_x", "allflux_y")
 
 
-def _stack_dsw_np(dsw_np, face_level_wins=()):
+def _stack_dsw_np(dsw_np, face_level_wins=(),
+                  aliases=_TAIL_ALIASES):
     """The NumPy transport output -> this lane's face-stacked dict.
 
     Not `stack_np`: the spec's per-face dict carries a ``levels`` key
@@ -271,6 +281,22 @@ def _stack_dsw_np(dsw_np, face_level_wins=()):
         # generation is a coin flip on which physics the gate certifies.
         if nm in face_level_wins:
             continue          # caller stated which generation it wants
+        if nm in aliases and nm in out:
+            # Declared identical -- so CHECK it. An alias that quietly
+            # stopped being one is indistinguishable from the very
+            # generation defect this guard exists to catch.
+            _pl = np.stack([
+                np.stack([np.asarray(lvl[nm], dtype=np.float64)
+                          for lvl in face["levels"]], axis=2)
+                for face in dsw_np])
+            if not np.array_equal(np.asarray(out[nm]), _pl):
+                raise ValueError(
+                    f"_stack_dsw_np: {nm!r} is declared an alias but its "
+                    f"two views DIFFER (max|d| "
+                    f"{np.abs(np.asarray(out[nm]) - _pl).max():.3e}) -- "
+                    f"it is two generations after all, and a caller must "
+                    f"choose.")
+            continue
         if nm in out:
             raise ValueError(
                 f"_stack_dsw_np: {nm!r} is both a face-level key and a "
@@ -953,13 +979,15 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     for nm, npnm in ren.items():
         want = np.stack([np.asarray(x) for x in ref_carry[npnm]])
         assert_real(want, f"numpy nh carry {nm}")
-        # MEASURED 3.498e-10 per-element relative on zh (job 9419797,
-        # the run in which the pt/delp generation defect was fixed);
-        # bound = measured x 10.  NOT a guess and not roundoff: the
-        # Riemann solve is a vertical recurrence and the two lanes
-        # associate it differently (stacked ops against per-face loops),
-        # so the floor sits far above fp64 eps -- max|diff| 1.847e-04 on
-        # a field whose median magnitude is 9.991e+04.
+        # TOL-PENDING (codex MAJOR, and correct): 3.498e-10 was
+        # MEASURED, but calling it an fp64 accumulation floor was a
+        # claim I did not establish. ~1e-10 relative on a three-level
+        # recurrence is far too large to attribute to reassociation
+        # without a conditioning experiment or a km-scaling test, and
+        # neither was run. The bound below lets the suite proceed; it
+        # does NOT certify the residual as roundoff, and a real
+        # localized difference up to 3.5e-9 would pass it. Closing this
+        # means localizing the first differing primitive.
         # [class: accumulating -- the Riemann solve is a recurrence]
         cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 3.5e-9)
 
@@ -1125,10 +1153,12 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             ne_corner=jctx.flags6[t].ne_corner)
 
         assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
-        # MEASURED 1.333e-09 per-element relative, worst face 3, 2 of
-        # 1296 cells (job 9419804); bound = measured x 10. This is the
-        # residual left AFTER the grid flags were threaded through --
-        # the same probe read 1.155e-04 on 80 cells before that fix, so
-        # the number is a floor for this kernel pair, not a symptom.
+        # TOL-PENDING (codex MAJOR, and correct): 1.333e-09 measured on
+        # face 3, 2 of 1296 cells, AFTER the grid-flag defect was fixed
+        # (it read 1.155e-04 on 80 cells before). But removing one
+        # defect does not prove what remains is roundoff -- this is a
+        # DIRECT kernel-twin comparison, not a composed chain, and ~1e7
+        # epsilon is too large to call a floor without showing it scales
+        # like one.
         # [class: accumulating -- a vertical recurrence]
         cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1.4e-8)

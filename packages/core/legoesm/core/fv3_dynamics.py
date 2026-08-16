@@ -642,6 +642,17 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
     # computed here, outside the trace, and re-attached to the compiled
     # call's result -- the caller sees the same dict either way, which
     # is what makes eager-vs-jit comparable at all.
+    # C5/D3, matching make_acoustic_loop_3d_jit: check_state reaches
+    # data-dependent Python conversions in the acoustic loop, so a
+    # compiled step can never honour it. Rejecting HERE means the caller
+    # finds out at construction; leaving it to the callee's tracer guard
+    # means a callable that builds fine and dies on first invocation.
+    if check_state:
+        raise ValueError(
+            "make_fv_dynamics_step_jit: check_state=True cannot be "
+            "compiled -- the state sanity check converts traced values "
+            "to Python. Use the eager fv_dynamics_step for checked runs.")
+
     _meta = {"omga_is_meaningless": True,
              "pt_units": "K" if km > REMAP_MIN_NPZ else "theta_v"}
 
