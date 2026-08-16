@@ -732,7 +732,12 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             "run under jit; call the eager entry with check_state=True "
             "outside jit instead (C5/D3)")
     if not hydrostatic and nh is None:
-        hs6 = ctx.get("hs6")
+        # The JAX ctx is an OBJECT (attribute access), not the spec's
+        # dict -- `.get` does not exist on it. Module 3 got this right
+        # and says so in a comment; these two sites kept the spec's dict
+        # idiom and raised AttributeError the first time the NH path
+        # built its own carry.
+        hs6 = getattr(ctx, "hs6", None)
         if hs6 is None:
             raise ValueError(
                 "acoustic_loop_3d: hydrostatic=False needs ctx.hs6 "

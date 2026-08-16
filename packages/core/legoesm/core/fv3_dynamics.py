@@ -342,7 +342,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             if nm not in state:
                 raise ValueError(f"hydrostatic=False needs '{nm}' in the "
                                  f"state")
-        if ctx.get("hs6") is None:
+        # attribute access, not dict .get -- see fv3_acoustic_3d
+        if getattr(ctx, "hs6", None) is None:
             raise ValueError("hydrostatic=False needs ctx['hs6'] (phis) for "
                              "the NH carry (zs = phis/grav, "
                              "dyn_core.F90:262-278)")
