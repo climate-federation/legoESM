@@ -97,6 +97,22 @@ KORD_MT, KORD_TM, KORD_TR = 9, -9, 9
 T_LO, T_HI = 150.0, 400.0
 
 
+@pytest.fixture(autouse=True)
+def _drop_compiled_graphs():
+    """Free each test's compiled executables before the next one.
+
+    A full fv_dynamics step unrolls six faces of vertical remap per
+    k_split iteration, and XLA keeps every compiled executable alive in
+    the process cache. Run individually all four parity cases pass (126
+    s, 127 s, 313 s, 522 s); run in one process the fourth ABORTS inside
+    backend_compile_and_load -- and it aborts identically at 32G and at
+    180G, so it is the retained graphs, not the working set. Measured,
+    after I had already claimed memory was the cause and was wrong.
+    """
+    yield
+    jax.clear_caches()
+
+
 @pytest.fixture(scope="module")
 def ctx():
     c = build_six_face_duo_context(N, NG, use_ext_bundle=True,
