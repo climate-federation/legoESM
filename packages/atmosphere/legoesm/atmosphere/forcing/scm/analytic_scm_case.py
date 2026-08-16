@@ -108,6 +108,28 @@ class AnalyticSCMCaseSpec:
     geostrophic_u_fn: Any = None            # (z_m) -> m/s
     t_start_s: float = 0.0
 
+    # WHERE THE WIND STARTS, which the LES driver decides and this column must
+    # copy. It is declared per case rather than inferred because the two live
+    # in different files and only the driver knows.
+    #
+    #   "geostrophic" — u = the geostrophic wind, v = 0. `run_spectral_les.py`
+    #     --ekman initialises `u = broadcast_to(u_tar)` with v at noise level,
+    #     so its SCM twin starts balanced too.
+    #   "rest" — u = v = 0. `run_spectral_cbl.py` (cbl AND wangara) builds
+    #     `u = zeros, v = zeros` and lets Coriolis and friction spin the wind
+    #     up from nothing.
+    #
+    # This is not a detail that averages out. Wangara's inertial period is
+    # 2*pi/|f| = 21.1 h and the benchmark is 8 h, so an initial-wind mismatch
+    # does NOT decay within the run -- it rotates. Starting the column at a
+    # uniform -5.5 m/s against an LES starting from rest measured u +2.4 and
+    # v -4.2 m/s of bias at the analysis window, against an LES profile whose
+    # own spread is 0.27 and 0.23 m/s: normalised errors of 9 and 18, IDENTICAL
+    # across all nine closures, which is the signature of the arm rather than
+    # the closures. The surface-flux boundary condition was a separate defect
+    # in the same arm and fixing it did not move these two terms at all.
+    initial_wind: str = "geostrophic"
+
     # The tuner reads these off the deck spec; analytic cases prescribe their
     # surface flux, so there is no bulk exchange coefficient to carry.
     @property
@@ -137,6 +159,10 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         theta0_K=300.0, inversion_z_m=800.0, lapse_above_K_m=0.008,
         inversion_width_m=0.0,             # driver uses a sharp jnp.where
         sfc_theta_flux_K_m_s=0.06,
+        # run_spectral_cbl.py builds u = v = 0. Numerically identical to
+        # "geostrophic" here (u_geo = v_geo = 0), declared so the driver's
+        # choice is recorded rather than coincidental.
+        initial_wind="rest",
         u_geo_m_s=0.0, v_geo_m_s=0.0, f_c=0.0,
         # run_spectral_cbl.py has NO sponge, so scoring runs to the lid.
         les_z0_m=0.1, les_lz_m=1600.0, les_domain_top_m=1600.0,
@@ -171,6 +197,11 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         surface_theta_flux_fn=wangara_day33.surface_theta_flux,
         geostrophic_u_fn=wangara_day33.geostrophic_u,
         t_start_s=wangara_day33.T_START_S,
+        # THE SAME run_spectral_cbl.py build: the LES starts from REST and
+        # spins the wind up under Coriolis. Starting this column at a uniform
+        # -5.5 m/s instead left u +2.4 and v -4.2 m/s biased at 8 h, 9x and
+        # 18x the LES profile's own spread, on every closure alike.
+        initial_wind="rest",
         note="Wangara Day 33 convective boundary layer (Clarke et al. 1971), "
              "DRY: diurnal surface heat flux peaking at 13:00 local, "
              "southern-hemisphere Coriolis, height-dependent easterly "
@@ -294,8 +325,28 @@ def load_analytic_scm_case(case: str, *, nlev: int = 48,
     theta = _theta_profile(spec, z_full)
     T_profile = theta * exner
     q_v_profile = np.zeros(nlev)                 # every analytic case is dry
-    u_profile = np.full(nlev, spec.u_geo_m_s)
-    v_profile = np.full(nlev, spec.v_geo_m_s)
+    # Initial wind: copy the LES driver's, which is per case (see the
+    # `initial_wind` field). Dispatch raises on an unknown value rather than
+    # falling through to a default -- a typo here is a silently different
+    # experiment, not an error.
+    if spec.initial_wind == "rest":
+        u_profile = np.zeros(nlev)
+        v_profile = np.zeros(nlev)
+    elif spec.initial_wind == "geostrophic":
+        # The PROFILE when the case declares one. Using the scalar here was
+        # the same defect the forcing had: a case with a sheared geostrophic
+        # wind would start uniform and be relaxed toward a sheared target.
+        if spec.geostrophic_u_fn is not None:
+            u_profile = np.asarray(spec.geostrophic_u_fn(z_full),
+                                   dtype=np.float64)
+        else:
+            u_profile = np.full(nlev, spec.u_geo_m_s)
+        v_profile = np.full(nlev, spec.v_geo_m_s)
+    else:
+        raise ValueError(
+            f"case {case!r}: initial_wind={spec.initial_wind!r} is not one of "
+            "'geostrophic' / 'rest'."
+        )
 
     from legoesm import constants
     rho_sfc = _P_S_PA / (constants.R_d * float(T_profile[-1]))

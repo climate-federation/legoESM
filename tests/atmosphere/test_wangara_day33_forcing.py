@@ -191,3 +191,59 @@ def test_the_flux_is_traceable():
     case = load_analytic_scm_case("wangara", nlev=8, dt=10.0)
     got = jax.jit(lambda t: case.forcing.w_th_s(t))(jnp.asarray(3600.0))
     assert jnp.isfinite(got)
+
+
+# --- the initial WIND must copy the LES driver's, per case -----------------
+
+def test_wangara_starts_from_rest_like_its_les():
+    """``run_spectral_cbl.py`` builds ``u = zeros, v = zeros``.
+
+    Starting the SCM column at a uniform -5.5 m/s instead is not a transient
+    that averages out: Wangara's inertial period is 2*pi/|f| = 21.1 h and the
+    benchmark is 8 h, so the mismatch ROTATES rather than decays. Measured at
+    the 6-8 h analysis window it left u +2.4 and v -4.2 m/s biased against an
+    LES whose own profile spread is 0.27 and 0.23 m/s -- normalized errors of
+    9 and 18, identical on all nine closures.
+    """
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case("wangara", nlev=24, dt=10.0)
+    assert np.allclose(np.asarray(case.u_profile), 0.0)
+    assert np.allclose(np.asarray(case.v_profile), 0.0)
+    # ...while the geostrophic TARGET it is relaxed toward is unchanged, and
+    # is the sheared profile rather than the scalar.
+    u_geo = np.asarray(case.forcing.u_geo(0.0))
+    assert u_geo.min() < -5.0 and u_geo.max() > -5.0, u_geo
+
+
+@pytest.mark.parametrize("name,u_expect", [("ekman", 10.0), ("gabls1", 8.0)])
+def test_the_balanced_cases_still_start_at_the_geostrophic_wind(name, u_expect):
+    """NON-VACUITY. Both of these LES drivers initialise u at the geostrophic
+    wind (``run_spectral_les.py`` --ekman broadcasts ``u_tar``;
+    ``run_spectral_sbl.py`` uses ``full(Ug)``), so 'rest' must NOT have
+    leaked into them -- that would silently break the two cases that work."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case(name, nlev=16, dt=10.0)
+    assert np.allclose(np.asarray(case.u_profile), u_expect)
+    assert np.allclose(np.asarray(case.v_profile), 0.0)
+
+
+def test_an_unknown_initial_wind_raises():
+    """A typo here is a silently different experiment, not an error."""
+    import dataclasses
+
+    from legoesm.atmosphere.forcing.scm import analytic_scm_case as m
+
+    bad = dataclasses.replace(m.ANALYTIC_SCM_CASES["cbl"],
+                              initial_wind="geostropic")   # typo on purpose
+    patched = dict(m.ANALYTIC_SCM_CASES, cbl=bad)
+    original = m.ANALYTIC_SCM_CASES
+    m.ANALYTIC_SCM_CASES = patched
+    try:
+        with pytest.raises(ValueError, match="initial_wind"):
+            m.load_analytic_scm_case("cbl", nlev=16, dt=10.0)
+    finally:
+        m.ANALYTIC_SCM_CASES = original
