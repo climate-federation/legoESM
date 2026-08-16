@@ -11,12 +11,18 @@ you spend the 7 h rebuilding it.**
 ## 1. Use the published IC
 
 Release [`land-carbon-ic-v1`](https://github.com/climate-federation/legoESM/releases/tag/land-carbon-ic-v1)
-(private to the org, 3.8 MB total):
+(private to the org, 136 MB total — it carries the build's **inputs** as well as
+its outputs, so Stage 2 can be re-run byte-for-byte):
 
 ```bash
 mkdir -p data/land_carbon_ic
+# just the finidat (3.5 MB) — enough to RUN with
+gh release download land-carbon-ic-v1 -R climate-federation/legoESM \
+    -p 'global_carbon_ic.npz' -p 'SHA256SUMS' -D data/land_carbon_ic
+# everything, incl. both build inputs (136 MB) — enough to REBUILD 1:1
 gh release download land-carbon-ic-v1 -R climate-federation/legoESM \
     -D data/land_carbon_ic
+( cd data/land_carbon_ic && sha256sum -c --ignore-missing SHA256SUMS )
 
 # coupled ESM — whole-grid seed
 python scripts/run/run_coupled.py \
@@ -29,13 +35,34 @@ python scripts/run/run_lmip.py --lat 40.0 --lon -105.0 \
 python scripts/run/run_lmip.py --config config/lmip/lmip_carbon_ic.yaml
 ```
 
+**Outputs:**
+
 | asset | what |
 |---|---|
 | `global_carbon_ic.npz` | the finidat — per-cell 8-pool `CarbonState` [gC/m2] + `soil_frozen_fraction` phi + lat/lon/land_mask/pft_weights |
 | `archetypes.npz` | the 187 spun-up (PFT x climate x soil) archetypes the map was assembled from, with per-archetype QC |
 | `validation_report.md` / `.json` | the drift QC below |
 | `carbon_ic_maps.png` | SOC / biomass / permafrost-phi maps + zonal SOC vs observations |
-| `SHA256SUMS` | checksums of the two `.npz` |
+| `SHA256SUMS` | checksums of the four `.npz` / `.nc` files |
+
+**Inputs** (published so a rebuild is pinned to the same bytes):
+
+| asset | what |
+|---|---|
+| `era5_land_forcing_clim_2deg.nc` | the Stage-1 product (ARCO-ERA5 monthly climatology, 2015-2020, stride 8). Ours; regenerating costs ~32 min and needs outbound internet |
+| `surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc` | the CLM5 cover/soil surfdata, native 1.9 x 2.5 grid. **Third-party** — a CESM `mksurfdata_map` product (`Source: Community Land Model: CLM4`, CESM2 alpha06k tag, created 2017-06-07), redistributed unmodified for reproducibility. Credit NCAR/UCAR, not us |
+
+### Verify your copy reproduces the numbers
+
+```bash
+mkdir -p scripts/tmp
+sbatch scripts/cluster/land_carbon/verify_carbon_ic_release.sbatch
+```
+
+Checks the asset checksums, recomputes the global scorecard from the finidat and
+compares it against the values in this document, confirms the strict loader
+ingests it, and runs a seeded-vs-cold single-point LMIP pair including the
+permafrost-`phi` restart round-trip. Exits non-zero on any mismatch.
 
 ### Which drivers can consume it
 
@@ -96,6 +123,24 @@ run**: the working directory defaults to `SLURM_SUBMIT_DIR`, so the chain works
 in any worktree, and each job stamps `WORKDIR @ <sha> dirty=<n>` in its log so
 the product is attributable to a commit rather than to a path. Every stage exits
 with the status of the work it ran, so the `afterok` chain is a real gate.
+
+To reproduce the published build rather than make a new one, **skip Stage 1** and
+point Stage 2 at the released inputs — that is what makes the rebuild 1:1 (Stage
+1 streams live ARCO-ERA5, so re-deriving the climatology is not guaranteed
+byte-identical):
+
+```bash
+gh release download land-carbon-ic-v1 -R climate-federation/legoESM -D data/land_carbon_ic
+( cd data/land_carbon_ic && sha256sum -c --ignore-missing SHA256SUMS )   # pin the inputs
+mkdir -p scripts/tmp
+CIC_SURF=$PWD/data/land_carbon_ic/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc \
+CIC_CLIM=$PWD/data/land_carbon_ic/era5_land_forcing_clim_2deg.nc \
+    sbatch --export=ALL,CIC_SURF,CIC_CLIM \
+    scripts/cluster/land_carbon/build_global_carbon_ic.sbatch
+```
+
+Everything else about the published build is pinned in §4: the code SHA, the
+exact command line, and the checksums of both inputs.
 
 Environment overrides (all namespaced — a bare `WORKDIR`/`OUT`/`ARCH` inherited
 from your shell would otherwise outrank the submission directory, since `sbatch`
@@ -187,8 +232,9 @@ published IC on your own tree.
 | build job | SLURM **8973690**, 7 h 16 min CPU, exit 0, 2026-07-14 |
 | validation job | SLURM **8974824** (`scripts/validate/global_carbon_ic_map.py`) |
 | code at build | `d4c5f5115` (branch `land/carbon-global-init`, merged to main via #1015) |
-| cover / soil | `surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc` (CLM5, native grid) |
-| climate | ARCO-ERA5 monthly climatology 2015-2020, stride 8 |
+| cover / soil | `surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc` (CLM5, native grid) — published with the release |
+| climate | ARCO-ERA5 monthly climatology 2015-2020, stride 8 — published with the release |
+| backend | CPU, `JAX_ENABLE_X64=1`, `JAX_PLATFORMS=cpu`, 8 cpus / 64 GB |
 
 Build command as executed:
 
@@ -200,6 +246,26 @@ python scripts/data/build_global_carbon_ic.py \
   --compilation-cache-dir <.xla_cache_carbon_ic> \
   --equilibrium-cache-dir <.carbon_equilibrium_cache>
 ```
+
+Input checksums (`sha256`), so a replication run can prove it read the same bytes:
+
+```
+7d7201b61573538b2363351bb0d225c6e942e834b0cc6b0cbe29d8908f14726f  era5_land_forcing_clim_2deg.nc
+b683e194ce1b5ddb9e2d5ce26f0d13506cad655907766c173d22bda62df355af  surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc
+```
+
+Output checksums:
+
+```
+1ead22a52dbbe45b5ab0d8195cc19bd9b33bbac8d9aa1e6a1e815009dddef336  global_carbon_ic.npz
+b14b916fdd0c056a6e17aadd28ff2c726603d6343dca5862c8f5c1ef8de190fd  archetypes.npz
+```
+
+**A rebuild will not be bit-identical, and that is expected.** The equilibration
+runs in float64 on CPU, but XLA is free to reassociate across compiler and CPU
+generations, so reproduce the *scorecard* (§3, to the tolerances
+`verify_carbon_ic_release.sbatch` applies), not the bytes. Bit-identity is only
+guaranteed by downloading the published artifact.
 
 ## Related
 
