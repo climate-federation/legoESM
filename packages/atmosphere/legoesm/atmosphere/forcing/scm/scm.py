@@ -347,6 +347,16 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
         # under the same flag, so the flux is applied exactly once.
         if (forcing is not None and forcing.prescribe == "fluxes"
                 and forcing.flux_to_closure):
+            # PhysicsState is the ONLY carrier for this flux and the column
+            # injection is switched off, so a None carry would drop it
+            # silently -- the injector's own None-tolerance is for composing
+            # with configurations that have no prescribed flux at all.
+            if phys_state is None:
+                raise ValueError(
+                    "SCMForcing.flux_to_closure=True needs a PhysicsState to "
+                    "carry the per-step surface flux, but phys_state is None; "
+                    "the flux would be applied nowhere."
+                )
             phys_state = inject_prescribed_surface_fluxes_into_phys_state(
                 phys_state,
                 wth=None if forcing.w_th_s is None else forcing.w_th_s(t),
