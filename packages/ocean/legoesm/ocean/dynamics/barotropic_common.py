@@ -195,7 +195,7 @@ def compute_filter_weights(
     dtype: jnp.dtype,
     *,
     use_cosine: bool,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
     """Return per-substep accumulator weights for time-averaging.
 
     The cosine bell (Hanning window) suppresses the side lobes of the
@@ -203,8 +203,17 @@ def compute_filter_weights(
     coupling.  Both the lat-lon C-grid and MPAS solvers compute the
     weights with the same formula:
 
-        w_i = 1 + cos(2π · (i - n/2) / n)         (cosine)
+        w_i = 1 + cos(π · (i+1 - n) / n)          (cosine)
         w_i = 1                                   (box)
+
+    over ``i+1 = 1 .. 2n-1``, i.e. a window CENTRED ON ``t + dt`` rather
+    than on the middle of the step.  A window centred on ``t + dt/2``
+    returns a mid-step free surface as the end-of-step state, which
+    propagates gravity waves at roughly HALF their correct speed (measured
+    2026-08-12: T_model/T_exact 1.86 cosine, 1.92 box, and 1.00 for both
+    ``nemo_ab3am4`` and ``implicit_cn``, neither of which averages).  Costs
+    ``2n-1`` substeps instead of ``n``; NEMO's centred boxcar pays the same
+    factor.
 
     Transport (``Hu``) weights — continuity-consistent (SM2005)
     ----------------------------------------------------------------
@@ -218,14 +227,21 @@ def compute_filter_weights(
     The flux-form tracer step requires the depth-integrated transport
     ``Hu_avg`` to satisfy the discrete continuity invariant
     ``div(Hu_avg) == (eta_old − eta_avg)/dt`` (``dt = n·dt_s``) so a
-    uniform tracer is preserved.  Matching the two expressions gives the
+    uniform tracer is preserved.  EXACT ONLY FOR THE SOURCE-FREE
+    RECURRENCE: with a free-surface source ``S_j`` (slow eta forcing,
+    freshwater, eta diffusion applied after the accumulation) the identity
+    picks up the TRANSPORT-WEIGHTED source average,
+    ``div(Hu_avg) == (eta_old − eta_avg)/dt + Σ_j w_transport_j·S_j``.
+    That reduces to ``+ S`` only for a source held constant across the
+    substeps, which eta diffusion — being state-dependent, hence different
+    every substep — is NOT (codex 2026-08-12).  Matching the two expressions gives the
     ONLY consistent per-substep transport weight
 
         w_transport[j] = tail_j / (n_substeps · w_total).
 
     This is exactly the Shchepetkin & McWilliams (2005) secondary
     (transport) weight used by the ``power_law`` path; with a uniform
-    (box) ``w_i=1`` it is ``(n−j)/n²`` — NOT the flat ``1/n`` that the
+    (box) ``w_i=1`` it is ``(n_loop−j)/(n·n_loop)`` with ``n_loop = 2n−1`` — NOT the flat ``1/n`` that the
     earlier code used, which broke continuity for BOTH box and cosine
     (the cosine inconsistency was the worse of the two, ~99 % residual;
     box ~95 %).  Returning it here makes every non-``power_law`` filter
@@ -242,39 +258,47 @@ def compute_filter_weights(
 
     Returns
     -------
-    w_filter : jax.Array, shape (n_substeps,)
+    w_filter : jax.Array, shape (2*n_substeps - 1,)
         Per-substep averaging weight (eta / velocity) passed as ``xs``
         to ``lax.scan`` (or indexed inside ``fori_loop``).
     w_total : jax.Array, scalar
         ``sum(w_filter)`` — normalises the eta / velocity accumulators.
-    w_transport : jax.Array, shape (n_substeps,)
-        Per-substep TRANSPORT weight (continuity-consistent, sums to
-        ``(n+1)/(2n)`` for box; the accumulator ``Σ_i w_transport_i·flux_i``
-        IS the time-averaged transport ``Hu_avg`` directly — no further
-        ``/n_substeps`` normalisation).
+    w_transport : jax.Array, shape (2*n_substeps - 1,)
+        Per-substep TRANSPORT weight (continuity-consistent; the
+        accumulator ``Σ_i w_transport_i·flux_i`` IS the time-averaged
+        transport ``Hu_avg`` directly — no further ``/n_substeps``
+        normalisation).  On the centred window it sums to 1 ANALYTICALLY
+        for both filters — ``Σ_j tail_j == Σ_j j·w_j == n·w_total`` by the
+        window's symmetry about ``j = n`` — up to floating-point rounding
+        (measured 1.0000000000000002 at n=10, cosine, fp64: the reduction
+        orders differ).  On the old half window the box sum was
+        ``(n+1)/(2n)``.
+    n_loop : int
+        Number of substeps to run, ``2*n_substeps - 1``.
     """
-    i = jnp.arange(n_substeps, dtype=dtype)
+    # Substep ``i`` (0-based) produces the state at time ``t + (i+1)*dt_s``,
+    # so a window centred on ``t + dt`` is centred on ``i+1 == n_substeps``.
+    # Running the loop over ``i+1 in [1, 2n-1]`` makes the weights exactly
+    # symmetric about that centre, hence n_loop = 2*n_substeps - 1.
+    n_loop = 2 * n_substeps - 1
+    tau = jnp.arange(1, n_loop + 1, dtype=dtype) - n_substeps   # 0 at the centre
     if use_cosine:
-        # Hanning-window weights.  At ``n_substeps == 1`` (rare, only
-        # used by tests / 1-substep spin-ups) the formula
-        # ``1 + cos(2 pi (0 - 0.5)/1) = 1 + cos(-pi) = 0`` collapses to
-        # zero, which then divides by zero in
-        # ``eta_sum / w_total`` downstream.  Fall back to the box
-        # filter when the cosine bell would degenerate (codex
-        # adversarial review iter-1, bug #4).
-        if n_substeps < 2:
-            w_filter = jnp.ones(n_substeps, dtype=dtype)
-        else:
-            w_filter = 1.0 + jnp.cos(
-                2.0 * jnp.pi * (i - 0.5 * n_substeps) / n_substeps,
-            )
+        # Hanning bell of full width 2n centred at tau == 0.  Positive
+        # everywhere on this range (the smallest weight, at the two ends,
+        # is 1 - cos(pi/n) > 0), so the ``n_substeps < 2`` degeneracy the
+        # old half-window formula had -- 1 + cos(-pi) == 0, a division by
+        # zero downstream -- cannot arise and needs no special case.
+        w_filter = 1.0 + jnp.cos(jnp.pi * tau / n_substeps)
     else:
-        w_filter = jnp.ones(n_substeps, dtype=dtype)
+        w_filter = jnp.ones(n_loop, dtype=dtype)
     w_total = jnp.sum(w_filter)
     # tail_j = sum_{i>=j} w_filter[i]  (reverse cumulative sum).
     tail = jnp.cumsum(w_filter[::-1])[::-1]
+    # The denominator stays the PHYSICAL n_substeps: ``dt = n_substeps*dt_s``
+    # is the baroclinic step the transport must close continuity over, and it
+    # is unaffected by how far past t+dt the averaging window reaches.
     w_transport = tail / (jnp.asarray(n_substeps, dtype=dtype) * w_total)
-    return w_filter, w_total, w_transport
+    return w_filter, w_total, w_transport, n_loop
 
 
 def bebt_blend(

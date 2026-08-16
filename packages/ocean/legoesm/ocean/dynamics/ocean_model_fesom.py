@@ -398,10 +398,14 @@ def use_legoesm_constants() -> tuple[dict[str, tuple[float, float]],
 
     USER DIRECTIVE 2026-08-11: the arms in a cross-dycore comparison must
     share their constants, so the FESOM arm takes legoESM's g, R_earth,
-    Omega and reference density. ``PI`` is deliberately left at FESOM's
-    truncated 3.14159265358979 -- it is a discretisation convention baked
-    through the mesh geometry, not a physical constant, and fesom_jax's own
-    source says do not replace it.
+    Omega and reference density. ``PI`` was initially excepted -- it is a
+    discretisation convention baked through the mesh geometry, and
+    fesom_jax's own source says do not replace it -- but USER DIRECTIVE
+    2026-08-11 overrode that so there is a SINGLE definition of pi, and it
+    now comes from ``legoesm.constants.PI`` like the rest. The concern the
+    exception was made for is real but bounded: pi enters mesh-derived
+    quantities at LOAD time, so overriding it afterwards does not
+    retroactively change a mesh, and the numerical gap is 1e-15 relative.
 
     THIS BREAKS BIT-FIDELITY WITH FESOM2. That is the point of the trade
     and it is why the function returns a report and the caller logs it
@@ -1073,8 +1077,7 @@ class FesomOceanModel:
                       if changed else "already applied in this process")
             warnings.warn(
                 f"FESOM arm running on legoESM constants, NOT FESOM2's: "
-                f"{detail}; pi deliberately left at FESOM's truncated "
-                f"value. Bit-fidelity with FESOM2 is broken by this "
+                f"{detail}. Bit-fidelity with FESOM2 is broken by this "
                 f"(select FesomOceanConfig(constants='fesom') for oracle "
                 f"work). Out of reach of the override: "
                 + "; ".join(unreachable),
