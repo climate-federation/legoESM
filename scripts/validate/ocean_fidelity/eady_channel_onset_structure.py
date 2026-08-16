@@ -161,6 +161,65 @@ SUPERSEDED: an earlier revision of this file called the velocity/transport
 centroid offset "contributory but not sufficient". That framing is retracted.
 The offset is a symptom of the halving, not a separate mechanism.
 
+THE FREE-SURFACE SMOOTHING IS THE DOMINANT DESTABILISER, and it is enormous.
+
+Sweeping ``barotropic_diffusion_alpha`` on this case is the largest effect
+anything has had on it, cleanly monotone over four points:
+
+    alpha 0.10   blow-up day  61.5
+    alpha 0.05   blow-up day  67.4     <- what this case ships
+    alpha 0.025  blow-up day  82.3
+    alpha 0.00   blow-up day 122.9     <- off
+
+Turning it off nearly doubles survival. Not a cure (the case runs 200 days),
+but no other lever has moved it at all: substep count does nothing, halving the
+baroclinic step buys 11%, the divergence damping runs the other way, and two
+separate velocity/transport reconciliations both stall at day 82.
+
+WHY IT IS SO STRONG. The coefficient is applied as
+``nu_dt_edge = alpha * (dt_baro/dt_ref) * areaCell``, so the implied
+free-surface diffusivity is ``kappa = alpha * area / dt_ref``:
+
+    alpha 0.05, 70 km cells, dt_ref 60 s  ->  kappa = 3.5e6 m^2/s
+    alpha 0.01 (the MODEL DEFAULT)        ->  kappa = 7.1e5 m^2/s
+
+Ocean lateral tracer diffusivity is 1e2-1e3 m^2/s. This is three to four
+ORDERS of magnitude larger. As a numerical filter on the free surface that is
+defensible -- it damps grid-scale eta in ~140 s -- but the number should be
+stated wherever the knob is tuned, because nothing in the config says it.
+
+AND IT MOVES MORE WATER THAN THE OCEAN DOES. Differencing two solver runs that
+differ ONLY in alpha, the diffusive part of the substep mass flux against the
+advective part:
+
+    alpha 0.01 (default)   diffusive flux is   9.1x the advective transport
+    alpha 0.05 (this case) diffusive flux is  42.7x the advective transport
+
+A REFUTED FIX, recorded so it is not re-attempted. The smoothing's mass flux is
+NOT carried in ``Hu_avg``, so the transport that advects layer thickness and
+tracers misses it. Measured violation of ``div(Hu_avg) == (eta_old-eta_avg)/dt``:
+7.1e-14 with the smoothing off, but 0.970 / 0.994 / 0.997 at alpha
+0.01 / 0.05 / 0.10 -- i.e. with the shipped DEFAULT on, the transport carrying
+tracers misses ~97% of the mass movement the free surface saw.
+
+Folding the diffusive flux into the transport (``transport -= diff_flux/dt_baro``)
+closes the identity exactly at every alpha (to 1e-14/1e-15) and is
+stability-NEUTRAL: at the shipped alpha the case still fails at the identical
+step 19400. But it is the WRONG CURE, and the ratio above is why -- it would
+advect tracers with a numerical filter 9x to 43x stronger than the actual
+current. The identity violation is real; laundering a 3.5e6 m^2/s filter into
+tracer transport is worse than leaving it out.
+
+The coherent alternatives, neither attempted here: make the filter weak enough
+that its flux is a genuine transport, or stop it changing the volume the tracer
+update integrates against. Smoothing eta at this strength while withholding its
+flux is incoherent either way (GLM-5.2).
+
+CAUTION ON THE 97% FIGURE: it is normalised by the total free-surface tendency
+``max|(eta_old-eta_avg)/dt|``, so it says the omitted flux is comparable to the
+whole eta change -- consistent with the 9x-43x flux ratio, which is the
+dimensional statement and the one to quote.
+
 A CAUTION THAT COST ME A WRONG READING.
 
 The barotropic loop returns three averages and they are NOT taken over the
