@@ -793,7 +793,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
 
     # Pure Python constant; imported at the call site exactly as the spec
     # does, because the JAX callee list carries no grav of its own.
-    from legoesm.core.fv3_native_gridstruct import FV3_GRAV
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
 
     bd = ctx.bd
     n, ng = ctx.n, ctx.ng
