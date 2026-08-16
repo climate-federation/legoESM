@@ -59,7 +59,10 @@ from legoesm.core.fv3_duo_sw_core import (
     d_sw6_duo,
 )
 from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
-from legoesm.core.fv3_native_state_3d import require_no_remap_needed
+from legoesm.core.fv3_native_state_3d import (
+    field_shape,
+    require_no_remap_needed,
+)
 from legoesm.core.fv3_nh_core import riem_solver3, update_dz_d
 from legoesm.core.fv3_pgrad import (
     geopk,
@@ -738,9 +741,40 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                 f"the kernel's own")
     validate_stacked(fname, tail_outs, ctx, km, ("u", "v", "w"),
                      what="tail_outs (part A d_sw3..d_sw6 chain)")
-    validate_stacked(fname, nh, ctx, km,
-                     ("zh", "gz", "zs", "pk3", "pe", "pk", "peln", "ws"),
-                     what="nh carry")
+    # THE NH CARRY IS NOT A field_shape CONTAINER, and one of its
+    # members is a TRAP: `field_shape("pk")` is the padded hydrostatic
+    # geopk layout, while dyn_core's NH `pk` is COMPUTE-WINDOW
+    # (is:ie, js:je, npz+1) -- the spec says so where it allocates the
+    # carry, and Riem_Solver3 writes `pk[:, jc, k]` with `ni` rows.
+    # Validating the carry through the shape table would therefore have
+    # accepted the wrong array under the right name, so the shapes come
+    # from `build_nh_carry`'s own allocation instead (jobs 9417540 /
+    # 9417598 raised "unknown field 'crx_adv'" and "unknown field 'zh'"
+    # on the way to this).
+    _m_a, _npx_c = ctx.n + 2 * ctx.ng, ctx.n
+    _nh_shapes = {
+        "zh": (6, _m_a, _m_a, km + 1),
+        "gz": (6, _m_a, _m_a, km + 1),
+        "pk3": (6, _m_a, _m_a, km + 1),
+        "zs": (6, _m_a, _m_a),
+        "ws": (6, _npx_c, _npx_c),
+        "pk": (6, _npx_c, _npx_c, km + 1),
+        "pe": (6,) + field_shape("pe", ctx.n, ctx.ng, km),
+        "peln": (6,) + field_shape("peln", ctx.n, ctx.ng, km),
+    }
+    _missing = [k for k in _nh_shapes if k not in nh]
+    if _missing:
+        raise KeyError(
+            f"{fname}: the nh carry is missing {_missing}; keys are "
+            f"{sorted(nh)} (build it with build_nh_carry)")
+    for _nm, _want in _nh_shapes.items():
+        _got = jnp.asarray(nh[_nm]).shape
+        if _got != _want:
+            raise ValueError(
+                f"{fname}: nh[{_nm!r}] has shape {_got}, expected "
+                f"{_want} -- these come from build_nh_carry's own "
+                f"allocation, NOT from field_shape (dyn_core's NH pk is "
+                f"compute-window where the hydrostatic pk is padded)")
     if delz.shape != nh["zh"].shape[:-1] + (km,):
         raise ValueError(
             f"{fname}: delz {delz.shape} must equal nh['zh'] "
