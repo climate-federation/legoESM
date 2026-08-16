@@ -47,46 +47,66 @@ cross-node collectives will likely run on TCP sockets*.
   (~1-3 GB/s). If implied bandwidth is single-digit GB/s per node,
   the warning is real.
 
-## c. MPAS icosahedral GPU — 35 % of the step is unexplained; splitting it is the work
+## c. MPAS icosahedral GPU — every term of the step is now named; comm overhead is the target
 
-CONFIRMED budget @ s9/64 GPUs, wide halo (6.82 ms/step) — UPDATED
-with the three-arm split receipt (job 26942819: interleaved
-full / no-comm / no-staging arms, 60 steps, spreads 0.3–0.6 %):
+CONFIRMED budget @ s9/64 GPUs, wide halo (6.820 ms/step) — three-arm
+split receipt (job 26942819: interleaved full / no-comm / no-staging
+arms, 60 steps, spreads 0.3–0.6 %). Three decimals because the
+rounded values do not visibly sum:
 
 | term | ms | how |
 |---|---|---|
-| no-halo program (owned+ghost compute, masking, machinery) | 3.46 | MEASURED (no-staging arm) |
-| halo staging (gather/concat/scatter) | 0.32 | MEASURED (no-comm − no-staging) |
-| halo wire (bytes) | 1.82 | MEASURED (ballast, same job) |
-| in-collective wait / round serialisation | 1.23 | MEASURED (full − no-comm − wire) |
+| no-halo program (owned+ghost compute, masking, machinery) | 3.460 | MEASURED (no-staging arm) |
+| halo staging (gather/concat/scatter) | 0.315 | MEASURED (no-comm − no-staging) |
+| halo wire (payload slope) | 1.815 | MEASURED (ballast N=2 delta; N=4 from job 26919124 was super-linear 3.36 vs 3.00, so this is a payload SLOPE, not pure wire) |
+| in-collective wait / per-op overhead | 1.230 | arithmetic residual (full − no-comm − 1.815; exact) |
 
-The former "2.40 unexplained" is RESOLVED into 1.23 ms of
-in-collective wait (~112 µs/round across 11 sequential rounds — rank
-skew refuted at <24 µs, so this is the cross-node rounds themselves)
-plus ~1.46 ms by which the no-halo program exceeds the 2.00 ms
-single-GPU control. Offline row-count receipt (job 26997346, same
-builders production uses): the sfc partition at wide depth 9 computes
-59,338 rows/rank against 40,961 owned — ×1.449, i.e. **+0.90 ms of
-the 1.46 is ghost+padding rows** (the sfc split is non-compact, so
-the depth-9 corona is ~2.9× a compact ring's). Narrow depth 3 is
-×1.24 (+0.48 ms). Remaining ~0.5 ms: masking + machinery, bounded
-not attributed (the single-GPU control is a different program).
-Partitioner check (job 26997437): metis cuts the wide ghost rows to
-×1.342 (−0.22 ms) but needs 16 rounds vs sfc's 14 (+2 × ~112 µs wait
-≈ +0.22 ms) — a WASH on these two terms; metis's receipted value
-stays the byte cut. Compactness and low degree conflict; the ghost
-term is better attacked by not computing trash/ghost rows (masked
-early-exit is not expressible — rows are dense) or by the stride
-trade, both needing a GPU receipt.
-GLM's pack-cost hypothesis is REFUTED at 64: staging is 0.32 ms
+The former "2.40 unexplained" resolves into the 1.230 ms residual
+(rank skew refuted at <24 µs) plus ~1.46 ms by which the no-halo
+program exceeds the 2.00 ms single-GPU control. Per-round pricing of
+the residual is 88–112 µs/round — the denominator is uncertain
+because the production wide fill receipted 11 collectives while the
+offline probe (default 1:1 size weights, NOT production's nlev-based
+weights) reports 14 rounds; do not build on the per-round figure
+until the schedule is dumped from the production build (codex r2).
+
+Offline row-count receipt (job 26997346, production partition
+builders): sfc at wide depth 9 computes 59,338 cell rows vs 40,961
+owned (×1.449; edges ×1.429), pricing ghost+padding rows at
+**+0.86–0.90 ms of the 1.46** — an upper-bound PROXY (the 49 ns/row
+rate embeds the control's fixed costs and cell/edge mix; codex r2 +
+GLM r2 agree). Falsifier, single GPU, cheap: run padded shapes
+{40,961; ~50k; 59,338} same-program and fit the slope — the slope is
+the price. Masking zeroes OUTPUTS, not work (confirmed in source), so
+these rows are genuinely computed. Remainder after the proxy:
+~0.6 ms masking/machinery, bounded not attributed.
+
+Partitioner check (job 26997437, same caveats): metis ×1.342 cell
+rows (−0.21 ms) at 16 vs 14 probe rounds. With the 88–112 µs/round
+range this is anywhere from a small metis GAIN (~+0.04 ms net) to a
+wash — NOT decided offline; and the offline round counts are not
+production's. GPU timing of a metis wide-halo arm decides it; metis's
+receipted value meanwhile stays the byte cut (−10.5 % @32).
+GLM's r1 pack-cost hypothesis is REFUTED at 64: staging is 0.315 ms
 (~5 % of step), not the residual.
 
-Floor reading from the split: the step is 3.46 compute-side + 3.36
-comm-side (0.32 staging + 1.82 wire + 1.23 wait). Optimistic bound if
-the named levers all land (fusion/layout 2× on the compute side, few
-collectives with wire mostly hidden): ~2 ms — treat as bound, not
-target. (codex r1: earlier 2.6-ms/"~55 % recoverable" arithmetic
-retracted; superseded again by the 26942819 split.)
+**GLM r2 mechanism read of the comm stack (PLAUSIBLE, cheap to
+falsify): the exchange moves ~6 GB/s effective against ~25 GB/s
+available, so the "wire" slope itself is partly per-op overhead —
+wire and wait would then compress TOGETHER under a fused/multi-channel
+exchange.** Falsification ladder, env-vars before code, one variable
+per arm: `NCCL_MAX_NCHANNELS` (4→8), `NCCL_PROTO` (LL128 vs Simple),
+then round fusion. Caveat from the campaign's own receipt: full
+CUDA-graph capture of collectives was already measured HARMFUL
+(cmdbuf 1.268×, #1575) — graph capture is NOT on this ladder.
+
+Floor reading from the split: the step is 3.460 compute-side + 3.360
+comm-side (0.315 staging + 1.815 payload slope + 1.230 residual).
+Optimistic bound if the named levers all land (fusion/layout 2× on
+the compute side, fused few-collective exchange compressing
+wire+wait): ~2 ms — treat as bound, not target. (codex r1: earlier
+2.6-ms/"~55 % recoverable" arithmetic retracted; superseded again by
+the 26942819 split.)
 
 Ranked levers:
 
@@ -94,16 +114,16 @@ Ranked levers:
    identity-permutation instrument both reviews asked for already
    existed as the no-comm/no-staging knobs and had been run at 64).
    Result above. What remains actionable from the split:
-   (i) **in-collective wait 1.23 ms** — sequential cross-node rounds;
-   attacked by fewer rounds + overlap of a few-collective exchange
-   (item 2), NOT by repartitioning (skew refuted);
-   (ii) **~1.1 ms no-halo program overhead** — masking, padded
-   trash-slot work, machinery; needs an HLO-level look at the
-   no-staging arm (single-node, cheap) before any lever is named;
-   (iii) wide-halo redundant ghost compute (~0.34 ms priced) — the
-   uncommitted stride-k diff trades exactly this against extra
-   fills; only k ∈ {1, evals−1, evals} sound (codex r1), and any
-   stride A/B must record per-arm padded bytes + schedule.
+   (i) **comm overhead 1.230 ms residual (+ part of the 1.815
+   slope)** — attacked first by the NCCL env-var ladder (GLM r2,
+   costs one small A/B job), then by the fused few-collective
+   exchange (item 2), NOT by repartitioning (skew refuted);
+   (ii) **ghost+padding rows, 0.86–0.90 ms proxy** — single-GPU
+   shape-slope falsifier first; then the stride-k diff (only k ∈
+   {1, evals−1, evals} sound, per-arm padded bytes + schedule
+   recorded) and/or padding size-classes instead of one global max;
+   (iii) **~0.6 ms masking/machinery** — HLO census of the
+   no-staging arm (single-node, cheap) before any lever is named.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
@@ -111,7 +131,7 @@ Ranked levers:
    expose: overlap is refuted only for MANY same-channel rounds; a
    SINGLE collective was measured 79 % hidden with the
    latency-hiding scheduler on. Collapsing to 2 collectives is the
-   precondition for hiding the 1.85 ms wire term under the 2.0 ms
+   precondition for hiding the 1.815 ms payload term under the 2.0 ms
    compute. Order: fix slice pruning → re-receipt ragged cost alone
    → then A/B latency-hiding overlap on top. Ceiling if both land:
    most of wire + latency disappears.
@@ -124,14 +144,14 @@ Ranked levers:
    of the 32 kernels (XLA will not fuse across gather/scatter
    boundaries): 2–3×; (iii) RCM/Hilbert local reorder: only
    1.2–1.6× — with contiguous columns coalescing is already decent;
-   its real value is contiguous halo PACK, i.e. it attacks the
-   2.40 ms residual too. Net plausible: 2.0 → 0.6–0.9 ms. Receipts:
+   its real value is contiguous halo PACK (staging is only 0.315 ms,
+   so that side prize is small). Net plausible: 2.0 → 0.6–0.9 ms. Receipts:
    single-GPU A/Bs, no cluster time.
 4. Bytes: per-round-MAX padding (`sharded_dynamics.py`) means byte
    cuts only pay off at the round's fattest pair. Pricing: the
    0.37 step-%/byte-% figure is the 32-GPU EMPIRICAL ratio
    (10.5/28); the wire-linear price implied by the 64-GPU budget is
-   0.27 (1.85/6.82) — quote whichever matches the device count.
+   0.27 (1.815/6.82) — quote whichever matches the device count.
    METIS −28 % padded bytes is config-only and already receipted
    (−10.5 % @32); default-flip still blocked on the
    disconnected-components question. Note (codex r1): Vizing bounds
@@ -139,7 +159,7 @@ Ranked levers:
    max_degree can still cut rounds; the degree-prototype probe
    reported a 9.4 % padded-byte cut. Low expected value, not
    refuted.
-5. **bf16 halo payload** (GLM r1 addition): halves the 1.85 ms wire
+5. **bf16 halo payload** (GLM r1 addition): halves the 1.815 ms payload
    term; does NOT touch the byte-independent residual. Costs:
    reproducibility across device counts, AD/conservation impact on
    halo-adjacent gradients, and it breaks bit-parity gates —
@@ -255,8 +275,9 @@ for this panel's measured point.
    point. `NCCL_DEBUG=INFO` names the transport only; a bandwidth
    claim additionally needs per-link padded bytes + active pairs.
 2. ~~MPAS 2.40 ms split~~ DONE (receipt 26942819; §c1). Next in its
-   place: HLO census of the no-staging arm's ~1.1 ms program
-   overhead — single-node, cheap.
+   place: NCCL env-var ladder A/B (channels/proto) on the comm residual,
+   the single-GPU ghost-row slope fit, and the HLO census of the
+   ~0.6 ms masking/machinery — all cheap.
 3. MPAS layout + fusion, single-GPU (§c3) — parallel track, no
    cluster time; biggest plausible levers on the 6×-off-roofline
    compute (level-contiguous columns, batched shared-index gathers,
