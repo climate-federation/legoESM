@@ -486,6 +486,47 @@ gate, not the fix: an unexercised module's correctness is unknown
 regardless of how carefully it was reviewed, and this one had been read
 by GLM, by me, and by codex.
 
+## ★ THE EXIT CRITERION IS MET (2026-08-16)
+
+The ported JAX lane scored against the pinned Zenodo Fortran, BOTH
+backends in one job on one IC and one set of oracle files, only
+``--backend`` differing (`scripts/cluster/fv3_native/full_step_backend_parity.sbatch`):
+
+| arm | NumPy lane (the SPEC) | JAX lane (the PORT) |
+|---|---|---|
+| hydrostatic | 1.1866e-09 | **1.1866e-09** |
+| non-hydrostatic | 6.6116e-04 | **6.6116e-04** |
+
+Worst one-step relative over all faces and fields. 87 of the compared
+metrics are BIT-IDENTICAL between backends; the rest differ in the
+fourth digit of residuals that are themselves 1e-11 to 1e-12.
+
+The NH number is the NumPy lane's OWN standing gap against the oracle,
+not the port's -- the port reproduces it to five digits rather than
+adding to it. Closing that gap is a question about the NumPy lane and
+is out of scope for the port.
+
+Instrument controls on both arms: IC worst rel 3.685e-14, and the
+derived face map matches the frozen 2026-08-07 bijection.
+
+## OPEN, and honestly labelled (codex MAJOR, 2026-08-16)
+
+TWO TOLERANCES ARE NOT EXPLAINED, and both were briefly mislabelled by
+me as fp64 accumulation floors. Measuring a number is not explaining
+it:
+
+* nh carry ``zh``: measured 3.498e-10 relative, gate at 3.5e-9;
+* ``update_dz_d`` twins: measured 1.333e-09 relative, gate at 1.4e-8.
+
+~1e-10 on a three-level recurrence, and ~1e7 epsilon on a DIRECT
+kernel-twin comparison, are both far too large to attribute to
+reassociation without a conditioning experiment or a km-scaling test,
+and neither was run. Removing the grid-flag defect that preceded them
+does not prove what remains is roundoff. Closing this means localizing
+the first differing primitive and matching its expression order to the
+NumPy twin -- the stage-return technique that closed the pt/delp defect
+is the tool for it.
+
 ## ALL SIX MODULES GREEN (2026-08-16)
 
 | module | file | gates |
