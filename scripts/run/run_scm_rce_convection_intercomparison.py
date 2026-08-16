@@ -970,7 +970,9 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
         + " Parameter set searched: `" + ",".join(param_sets) + "`. "
         + "The `combined` columns (condensate-dominated) are still reported so "
         "the trade-off against the historical score is visible, but they are "
-        "NOT the ranking.\n"
+        "NOT the ranking. **`trop` columns are over the scored mask** (the "
+        "objective's domain); `col` columns span the whole column and will "
+        "differ — reading the wrong one understates the tuned improvement.\n"
     )
     lines.append(
         f"SCM: radiation `{meta['radiation']}`, fixed SST 300 K, dt {meta['dt']:.0f} s, "
@@ -1003,11 +1005,12 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
     )
     lines.append("## A priori vs tuned RMSE\n")
     lines.append(
-        "| rank | scheme | kernel | objective (prior→tuned) | T RMSE K (p→t) | "
-        "trop RH RMSE (p→t) | combined score (p→t) | precip mm/d (p→t) | "
+        "| rank | scheme | kernel | objective (prior→tuned) | "
+        "trop T RMSE K (p→t) | col T RMSE K (p→t) | trop RH RMSE (p→t) | "
+        "combined score (p→t) | precip mm/d (p→t) | "
         "Δobjective % | verdict (p→t) | cold-pt T,z (tuned) | #params | #evals |"
     )
-    lines.append("|---:|---|---|---|---|---|---|---|---:|---|---|---:|---:|")
+    lines.append("|---:|---|---|---|---|---|---|---|---|---:|---|---|---:|---:|")
     for i, res in enumerate(ordered, 1):
         p, t = res.prior, res.tuned
         row = _row(res, ref)
@@ -1015,6 +1018,8 @@ def write_summary(path: Path, ref, results: list[SchemeResult], meta: dict) -> N
             f"| {i} | {res.scheme} "
             f"| {res.subsidence_solve_status or res.subsidence_solve} "
             f"| {_fmt(row['prior_objective'])}→{_fmt(row['tuned_objective'])} "
+            f"| {_fmt(row['apriori_thermo_T_term'], '.3g')}→"
+            f"{_fmt(row['tuned_thermo_T_term'], '.3g')} "
             f"| {_fmt(row['apriori_T_rmse_K'], '.3g')}→"
             f"{_fmt(row['tuned_T_rmse_K'], '.3g')} "
             f"| {_fmt(row['apriori_trop_rh_rmse'], '.3g')}→"

@@ -20,8 +20,12 @@ def _row(scheme, T_prior, T_tuned, rh_prior, rh_tuned, n_params=5):
         "scheme": scheme,
         "objective": "thermo",
         "n_tuned_params": str(n_params),
-        "apriori_T_rmse_K": str(T_prior),
-        "tuned_T_rmse_K": str(T_tuned),
+        "apriori_thermo_T_term": str(T_prior),
+        "tuned_thermo_T_term": str(T_tuned),
+        # Full-column values deliberately DIFFERENT, so a test that reads the
+        # wrong pair fails instead of silently agreeing.
+        "apriori_T_rmse_K": str(T_prior * 3.0),
+        "tuned_T_rmse_K": str(T_tuned * 3.0),
         "apriori_trop_rh_rmse": str(rh_prior),
         "tuned_trop_rh_rmse": str(rh_tuned),
         "apriori_qv_rmse_g_kg": str(rh_prior),
@@ -83,7 +87,7 @@ def test_panel_ranks_by_the_tuned_value_worst_first(tmp_path):
             _row("b", 0.5, 1.9, 0.1, 0.30),
             _row("c", 1.0, 1.0, 0.3, 0.10)]
     fig, ax = plt.subplots()
-    P._panel(ax, rows, P.T_COLUMNS, title="T", log_x=False)
+    P._panel(ax, rows, P.T_COLUMN_CHOICES["trop"], title="T", log_x=False)
     labels = [t.get_text() for t in ax.get_yticklabels()]
     plt.close(fig)
     # tuned T: a 0.4, b 1.9, c 1.0 -> worst first is b, c, a
@@ -96,9 +100,14 @@ def test_a_row_with_no_numbers_is_dropped_not_plotted_at_zero(tmp_path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = [_row("a", 2.0, 0.4, 0.2, 0.05), _row("dead", "", "", "", "")]
+    rows = [_row("a", 2.0, 0.4, 0.2, 0.05)]
+    dead = _row("dead", 1.0, 1.0, 1.0, 1.0)
+    for k in list(dead):
+        if k not in ("scheme", "objective", "n_tuned_params"):
+            dead[k] = ""
+    rows.append(dead)
     fig, ax = plt.subplots()
-    P._panel(ax, rows, P.T_COLUMNS, title="T", log_x=False)
+    P._panel(ax, rows, P.T_COLUMN_CHOICES["trop"], title="T", log_x=False)
     labels = [t.get_text() for t in ax.get_yticklabels()]
     plt.close(fig)
     assert labels == ["a"]
@@ -124,3 +133,39 @@ def test_empty_csv_raises(tmp_path):
     path.write_text("scheme\n")
     with pytest.raises(ValueError, match="no data rows"):
         P.read_rows(path)
+
+
+def test_temperature_panel_defaults_to_the_scored_domain():
+    """The two panels must share a vertical domain. Plotting a FULL-COLUMN
+    temperature beside a TROPOSPHERIC humidity puts two different domains side
+    by side, and on real data it understated the tuned improvement (edmf:
+    8.35->7.22 K over the column against 6.91->3.65 K over the mask)."""
+    assert P.T_COLUMN_CHOICES["trop"][0] == "apriori_thermo_T_term"
+    assert P.T_COLUMN_CHOICES["trop"][1] == "tuned_thermo_T_term"
+    assert "tropospheric" in P.T_COLUMN_CHOICES["trop"][2]
+    assert "full-column" in P.T_COLUMN_CHOICES["column"][2]
+
+
+def test_temperature_choice_changes_what_is_plotted(tmp_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = [_row("a", 2.0, 0.4, 0.2, 0.05)]
+    seen = {}
+    for choice in ("trop", "column"):
+        fig, ax = plt.subplots()
+        P._panel(ax, rows, P.T_COLUMN_CHOICES[choice], title="T", log_x=False)
+        seen[choice] = [c.get_offsets().tolist() for c in ax.collections]
+        plt.close(fig)
+    assert seen["trop"] != seen["column"], (
+        "the two temperature choices must plot different numbers, else the "
+        "option is decoration")
+
+
+def test_unknown_temperature_choice_raises(tmp_path):
+    rows = [_row("a", 2.0, 0.4, 0.2, 0.05)]
+    with pytest.raises(ValueError, match="unknown temperature"):
+        P.make_figure(rows, tmp_path / "x.png", humidity="logq", log_x=False,
+                      suptitle=None, temperature="stratosphere")

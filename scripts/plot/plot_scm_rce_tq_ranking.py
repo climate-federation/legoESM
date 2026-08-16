@@ -5,7 +5,9 @@ The campaign's own ranking figure plots the combined score, which is 87-100 %
 condensate.  This one plots the two quantities the tuning was asked to improve,
 in PHYSICAL units, a-priori against tuned, one row of segments per scheme:
 
-* left panel — mass-weighted temperature RMSE against the CRM [K];
+* left panel — mass-weighted temperature RMSE against the CRM [K], over the
+  TROPOSPHERIC mask by default so it shares a vertical domain with the humidity
+  panel (``--temperature column`` for the full-column value);
 * right panel — the humidity error, selected by ``--humidity``.  ``logq``
   (default) is the fractional humidity error the campaign minimises; ``rh`` is
   the RCEMIP-conventional relative humidity; ``qv``/``trop_qv`` are the absolute
@@ -39,8 +41,19 @@ HUMIDITY_COLUMNS = {
                 "tropospheric $q_v$ RMSE vs CRM  [g/kg]"),
 }
 
-T_COLUMNS = ("apriori_T_rmse_K", "tuned_T_rmse_K",
-             "column $T$ RMSE vs CRM  [K]")
+#: Temperature panel.  DEFAULT is the TROPOSPHERIC term — the one the objective
+#: minimises, and the one on the same vertical domain as the humidity panel.
+#: Plotting the full-column value beside a tropospheric humidity value put two
+#: different domains side by side and understated the tuned improvement
+#: (measured on edmf: 8.35->7.22 K over the column, 6.91->3.65 K over the mask).
+#: Both terms are in KELVIN: the thermo T tolerance is exactly 1 K, so the
+#: dimensionless term and the physical RMSE are the same number.
+T_COLUMN_CHOICES = {
+    "trop": ("apriori_thermo_T_term", "tuned_thermo_T_term",
+             "tropospheric $T$ RMSE vs CRM  [K]"),
+    "column": ("apriori_T_rmse_K", "tuned_T_rmse_K",
+               "full-column $T$ RMSE vs CRM  [K]"),
+}
 
 #: Schemes whose flat before->after segment has a STRUCTURAL cause, so it must
 #: not read as a failed search.  The note is applied only when the row is ALSO
@@ -138,7 +151,7 @@ def _panel(ax, rows, columns, *, title, log_x: bool):
 
 
 def make_figure(rows, out_path: Path, *, humidity: str, log_x: bool,
-                suptitle: str | None) -> Path:
+                suptitle: str | None, temperature: str = "trop") -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -148,10 +161,14 @@ def make_figure(rows, out_path: Path, *, humidity: str, log_x: bool,
         raise ValueError(
             f"make_figure: unknown humidity {humidity!r}; "
             f"expected one of {sorted(HUMIDITY_COLUMNS)}")
+    if temperature not in T_COLUMN_CHOICES:
+        raise ValueError(
+            f"make_figure: unknown temperature {temperature!r}; "
+            f"expected one of {sorted(T_COLUMN_CHOICES)}")
 
     fig, axes = plt.subplots(
         1, 2, figsize=(12.4, 0.46 * max(len(rows), 6) + 2.6), sharey=False)
-    flat_T = _panel(axes[0], rows, T_COLUMNS,
+    flat_T = _panel(axes[0], rows, T_COLUMN_CHOICES[temperature],
                     title="Temperature", log_x=log_x)
     flat_q = _panel(axes[1], rows, HUMIDITY_COLUMNS[humidity],
                     title="Humidity", log_x=log_x)
@@ -185,6 +202,11 @@ def main(argv: list[str] | None = None) -> int:
             "Plot rows tuned under DIFFERENT objectives in one figure. Refused "
             "by default: the panels would put numbers side by side that no "
             "single search minimised, which is a confound, not a comparison."))
+    parser.add_argument("--temperature", default="trop",
+                        choices=sorted(T_COLUMN_CHOICES),
+                        help="`trop` (default) is the term the objective "
+                             "minimises and shares a vertical domain with the "
+                             "humidity panel; `column` is the full-column RMSE.")
     parser.add_argument("--log-x", action="store_true",
                         help="log x axis (RMSEs span decades across schemes)")
     parser.add_argument("--suptitle", default=None)
@@ -199,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
             "Split the CSV, or pass --allow-mixed-objectives if that is "
             "genuinely what is wanted.")
     out = make_figure(rows, args.out, humidity=args.humidity,
-                      log_x=args.log_x, suptitle=args.suptitle)
+                      log_x=args.log_x, suptitle=args.suptitle,
+                      temperature=args.temperature)
     print(f"wrote {out}  ({len(rows)} schemes, objective(s)={objectives})")
     return 0
 
