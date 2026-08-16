@@ -372,7 +372,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
 
     def _n_map(carry, last_step: bool):
-        st, pr, qq, om, nhc = carry
+        st, pr, qq, om, nhc, nspl, nexc = carry
         # :472-478 dp1 = delp, full padded box, BEFORE dyn_core; arrays are
         # immutable here so the spec's anti-alias copy is a plain binding
         dp1 = st["delp"]
@@ -395,12 +395,26 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         if nq > 0:
             # :517/:528-540 tracer_2d_1L on the accumulated capacitors
             # (inline_q is refused above, so the gate is just nq)
-            qq = tracer_2d_1l_sixface(ctx, qq, dp1, ac["flux_cap"],
-                                      km=km, nq=nq, hord_tr=hord_tr,
-                                      dt=mdt, q_split=tracer_q_split,
-                                      nord_tr=nord_tr, trdm=trdm2,
-                                      lim_fac=lim_fac, z_tracer=z_tracer,
-                                      inline_q=inline_q)
+            _tr = tracer_2d_1l_sixface(ctx, qq, dp1, ac["flux_cap"],
+                                       km=km, nq=nq, hord_tr=hord_tr,
+                                       dt=mdt, q_split=tracer_q_split,
+                                       nord_tr=nord_tr, trdm=trdm2,
+                                       lim_fac=lim_fac, z_tracer=z_tracer,
+                                       inline_q=inline_q)
+            # The routine returns a DICT (C4: everything the spec
+            # mutates). Binding the whole dict to qq made the remap's
+            # `qq[i]` a KeyError on any run with tracers.
+            qq = _tr["q"]
+            # ...and its loud-failure pair has to travel with it. The
+            # tracer factory's default caller runs check_nsplt_schedule;
+            # this is the RAW routine, so an nsplt above NSPLT_MAX would
+            # otherwise run NSPLT_MAX passes and under-advect SILENTLY --
+            # the exact failure C5 exists to prevent. The flag rides the
+            # carry (a Python bool on it here would be a tracer error,
+            # and impossible inside the scan) and is checked once, by the
+            # caller, where it is concrete.
+            nspl = _tr["nsplt"]
+            nexc = jnp.logical_or(nexc, _tr["nsplt_exceeded"])
         if not remapped:
             # :568 gates the remap on npz > 4 and the oracle leaves pt in
             # theta_v below it.  BUT dyn_core still wrote pe/peln/pkz and
@@ -483,9 +497,13 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             qq = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
                                         *[o.q for o in fs])
         om = jnp.stack([o.omga for o in fs])
-        return (st, pr, qq, om, nhc), ac["stages"]
+        return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 
-    carry0 = (state, press, q, omga, nh)
+    # nsplt seeds at 1 (a schedule of all-ones is "no sub-cycling", the
+    # correct answer when nq == 0 and the tracer routine never runs) and
+    # the exceeded flag at False.
+    carry0 = (state, press, q, omga, nh,
+              jnp.ones((km,), dtype=jnp.int32), jnp.asarray(False))
     # D1: with the NH carry prebuilt at entry, iterations 1..k_split-1 are
     # ONE program (dp1 and the capacitors are re-derived identically each
     # time); only the LAST differs -- last_step=True reaches the remap
@@ -500,8 +518,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             return c2, None
         carry, _ = lax.scan(_mid, carry0, None, length=k_split - 1)
         carry, stages = _n_map(carry, True)
-    state, press, q, omga, nh = carry
+    state, press, q, omga, nh, nsplt, nsplt_exceeded = carry
     return {"state": state, "press": press, "q": q, "omga": omga, "nh": nh,
+            # C5, propagated: check_nsplt_schedule(out) is the caller's
+            # gate and works on this dict unchanged.
+            "nsplt": nsplt, "nsplt_exceeded": nsplt_exceeded,
             "omga_is_meaningless": True,
             "pt_units": "K" if remapped else "theta_v",
             "stages": stages}

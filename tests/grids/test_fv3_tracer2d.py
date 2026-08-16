@@ -204,6 +204,29 @@ def test_parity_against_the_spec(ctx, jctx, label):
                f"dp1 ({label}, nsplt={sched})", rtol=1e-11)
 
 
+def test_the_rescale_touches_only_level_k(ctx, jctx):
+    """Localiser for the coupling the previous test can only detect.
+
+    The frac rescale is per level, so scaling level k must leave every
+    other level's capacitors untouched. Compared against the spec
+    directly, per level, so a wrong AXIS in the `.at[]` selector is
+    named here rather than surfacing as a mysterious cross-level
+    dependence two tests away.
+    """
+    amp = (0.10, 1.40, 2.60)
+    _, _, cap_ref = _run_np(ctx, amp)
+    got = _run_jax(jctx, amp)
+    sched = _schedule(got)
+    assert sched[0] == 1 and max(sched) > 1, sched
+    for nm in CAP_KEYS:
+        want = np.stack([cap_ref[t][nm] for t in range(6)])
+        have = np.asarray(got[nm])
+        for k in range(KM):
+            assert_real(want[..., k], f"numpy {nm} level {k}")
+            cmp_fields(have[..., k], want[..., k],
+                       f"{nm} level {k} (nsplt={sched[k]})", rtol=1e-13)
+
+
 @pytest.mark.parametrize("label", sorted(_AMPS))
 def test_capacitors_come_back_frac_rescaled(ctx, jctx, label):
     """The spec divides the capacitors by nsplt IN PLACE (:262-291).
@@ -246,8 +269,13 @@ def test_a_levels_answer_does_not_depend_on_other_levels_schedules(jctx):
     assert_real(a, "level-0 q (all-single fixture)")
     assert np.array_equal(a, b), (
         "level 0 changed when OTHER levels sub-cycled: max|d| "
-        f"{np.abs(a - b).max():.6e} -- the inactive-iteration mask is "
-        "not a no-op")
+        f"{np.abs(a - b).max():.6e} -- ANY illegal coupling between "
+        "levels. A leaking inactive-iteration mask is one cause; a "
+        "capacitor rescale that indexes the wrong axis is another, and "
+        "it fires BEFORE the masked scan (that is what this test caught "
+        "on its first run: `mfx6.at[:, 0:n, k]` on a 4-D stack). Do not "
+        "read this failure as a mask defect without checking the "
+        "rescale slices first -- the next test does exactly that.")
 
 
 def test_both_sides_of_a_schedule_transition(ctx, jctx):

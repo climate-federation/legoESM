@@ -70,8 +70,16 @@ from tests.grids.fv3_gate_helpers import (  # noqa: E402
     deepcopy_faces,
 )
 
-# Same geometry as the other 3-D gate files.
-N, NG, KM = 12, 3, 3
+# N and NG match the other 3-D gate files; KM does NOT, and cannot.
+# set_eta_analytic implements fv_eta.F90's `case (5,10)` and RAISES for
+# anything else -- km < 5 has no table in the oracle at all. The first
+# version of this file used KM = 3 for consistency with its siblings and
+# every test in it errored at fixture construction, which is how the
+# module's return-contract defect survived to the review. 5 is the
+# smallest legal value, and it is also > REMAP_MIN_NPZ = 4, so the remap
+# actually runs -- at km <= 4 the oracle skips it and pt would come back
+# as theta_v, making the round-trip gate below vacuous.
+N, NG, KM = 12, 3, 5
 MA = N + 2 * NG
 NQ = 2
 BDT = 60.0
@@ -238,6 +246,22 @@ def test_pt_leaves_as_temperature_not_theta_v(jctx, eta, hydrostatic):
     several hundred K too warm.  A parity test cannot see that if both
     lanes did it; a range assertion can.
     """
+    # ANTI-VACUITY FIRST: the gate is only a gate if theta_v on THIS
+    # fixture actually lands outside the window. theta_v = pt*(1+dp1)/pkz
+    # with dp1 = 0 (zvir = 0 is refused otherwise), so it is computable
+    # here -- and asserting the range without checking this would be a
+    # test that cannot fail, which is the failure mode this campaign
+    # ranks worst in an instrument.
+    ak, bk, ptop = eta
+    st0 = _state(hydrostatic)
+    pkz = np.stack([np.asarray(p["pkz"]) for p in _press_np(st0, ptop)])
+    pt0 = np.stack([f["pt"][NG:-NG, NG:-NG, :] for f in st0])
+    theta_v = pt0 / pkz
+    assert not ((theta_v > T_LO) & (theta_v < T_HI)).all(), (
+        f"theta_v on this fixture is inside [{T_LO}, {T_HI}] "
+        f"([{theta_v.min():.1f}, {theta_v.max():.1f}] K), so the range "
+        "assertion below cannot detect a dropped conversion")
+
     got = _out_state(_run_jax(jctx, eta, hydrostatic=hydrostatic))
     pt = np.asarray(got["pt"])[:, NG:-NG, NG:-NG, :]
     assert_real(pt, "returned pt")
@@ -263,8 +287,8 @@ def test_the_tracers_actually_moved(jctx, eta):
     assert moved > 0.0, "q is unchanged: the tracers were never advected"
 
 
-def test_the_two_lanes_change_mass_by_the_same_amount(ctx, jctx, eta):
-    """A relative statement, deliberately.
+def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
+    """A relative statement, deliberately -- NOT a conservation claim.
 
     Whether this dycore conserves dry mass exactly on the duo seam is a
     question about FV3, not about this port, so the gate compares the

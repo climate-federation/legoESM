@@ -329,8 +329,16 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
         # the whole slabs, mfx live columns and mfy live rows only).
         cx6 = cx6.at[:, :, :, k].multiply(f_k)
         cy6 = cy6.at[:, :, :, k].multiply(f_k)
-        mfx6 = mfx6.at[:, 0:n, k].multiply(f_k)
-        mfy6 = mfy6.at[0:n, :, k].multiply(f_k)
+        # FOUR selectors, not three: these are face-STACKED (C1), so a
+        # three-index `.at[:, 0:n, k]` reads as `[:, 0:n, k, :]` -- it
+        # scales one horizontal row at EVERY level instead of the live
+        # columns at level k, and for mfy it also treats 0:n as the face
+        # axis. Silent: the shapes broadcast, the run completes, and the
+        # mass fluxes are wrong in a way that couples levels. The reader
+        # two lines below (`mfx6[t, :, 0:n, k]`) already had the right
+        # form, which is the tell.
+        mfx6 = mfx6.at[:, :, 0:n, k].multiply(f_k)
+        mfy6 = mfy6.at[:, 0:n, :, k].multiply(f_k)
         xf = [xfx6[t][k] * f_k for t in range(6)]
         yf = [yfx6[t][k] * f_k for t in range(6)]
         cxk = [cx6[t, :, :, k] for t in range(6)]
@@ -386,7 +394,14 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                     fy_l.append(fyt)
                 # flux_adj (:310-312, :46-108): the halo module's CGRID_NE
                 # blend, all six faces of this level present (rule 6).
-                fx_l, fy_l = average_shared_edge_cgrid(fx_l, fy_l, n, ng)
+                # Signature READ, not recalled: the halo module's twin is
+                # `(fx6, fy6, tab)` over STACKED (6, npx, n) / (6, n, npx)
+                # arrays, not the NumPy lane's `(fx6, fy6, n, ng)` over
+                # lists of per-face slabs. Same operator, different lane,
+                # different call -- and the spec's home
+                # (fv3_native_gridstruct) is a different module entirely.
+                fx_l, fy_l = average_shared_edge_cgrid(
+                    jnp.stack(fx_l), jnp.stack(fy_l), tab)
                 for t in range(6):
                     # Vectorised (update nests of :284-388): each q cell
                     # reads only its own flux pair; dp2 > 0 so the
