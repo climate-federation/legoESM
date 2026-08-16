@@ -404,8 +404,15 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
         cmp_fields(j_dsw[nm], want, f"stage post-d_sw exchange {nm}",
                    1e-12)
 
+    # one_grad_p MUTATES the tail winds IN PLACE, so the copy handed to
+    # it is the object that ends up holding the updated u/v -- keep it.
+    # The first version passed `deepcopy_faces(n_tail)` inline and then
+    # compared against `n_tail`, i.e. against the PRE-one_grad_p winds,
+    # and duly reported rel = 1.000e+00 (job 9417607).  A comparison
+    # against the wrong side of a mutation looks exactly like a defect.
+    n_tail_prs = deepcopy_faces(n_tail)
     n_prs = nptail.dgrid_pressure_phase_3d(ctx, deepcopy_faces(n_dsw),
-                                           deepcopy_faces(n_tail), KM,
+                                           n_tail_prs, KM,
                                            dt=dt, ptop=PTOP, akap=AKAP,
                                            cp_air=CP_AIR)
     j_prs = dgrid_pressure_phase_3d(jctx, j_dsw, j_tail, KM, dt=dt,
@@ -413,8 +420,6 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
     for nm in ("pk", "gz"):
         want = np.stack([np.asarray(n_prs[t][nm]) for t in range(6)])
         cmp_fields(j_prs[nm], want, f"stage D geopk {nm}", 1e-12)
-    # one_grad_p MUTATES the tail's winds in the NumPy lane, so the
-    # reference is n_tail after the call, not the returned bundle.
     for nm in ("u", "v"):
-        want = np.stack([np.asarray(n_tail[t][nm]) for t in range(6)])
+        want = np.stack([np.asarray(n_tail_prs[t][nm]) for t in range(6)])
         cmp_fields(j_prs[nm], want, f"stage one_grad_p {nm}", 1e-12)

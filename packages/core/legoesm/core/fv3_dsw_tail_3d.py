@@ -775,10 +775,19 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                 f"{_want} -- these come from build_nh_carry's own "
                 f"allocation, NOT from field_shape (dyn_core's NH pk is "
                 f"compute-window where the hydrostatic pk is padded)")
-    if delz.shape != nh["zh"].shape[:-1] + (km,):
+    # `delz` is COMPUTE-ONLY, `(6, n, n, km)`.  fv_arrays allocates it
+    # `(is:ie, js:je, npz)` and the NumPy lane's shape table says so at
+    # the entry, with the reason: padding it would invite a non-oracle
+    # halo read.  So it is NOT `nh['zh']`'s padded footprint with the
+    # interface axis shortened, which is what this check demanded --
+    # measured (6, 12, 12, 3) against a required (6, 18, 18, 3) on the
+    # first NH parity run (job 9417599).
+    _want_delz = (6,) + field_shape("delz", ctx.n, ctx.ng, km)
+    if delz.shape != _want_delz:
         raise ValueError(
-            f"{fname}: delz {delz.shape} must equal nh['zh'] "
-            f"{nh['zh'].shape} with the interface axis shortened to km")
+            f"{fname}: delz {delz.shape} must be {_want_delz} -- "
+            f"fv_arrays allocates delz COMPUTE-ONLY (is:ie, js:je, npz), "
+            f"NOT on nh['zh']'s padded footprint {nh['zh'].shape}")
     if dp0.shape != (km,):
         raise ValueError(f"{fname}: dp0 must be ({km},), got {dp0.shape}")
 
