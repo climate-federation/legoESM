@@ -617,6 +617,37 @@ def emanuel_convection(
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
     add_weight = drying / jnp.maximum(drying_col[:, None], 1e-30)  # ∫w dp/g = 1
     dq_c_add = deficit[:, None] * add_weight              # ∫ dq_c_add dp/g = deficit
+
+    # THE PRECIPITATING BRANCH (the water this scheme used to destroy).
+    #
+    # On the genuine mixing path the negative net water IS the oracle's
+    # ``EP·CLW``: the precipitating fraction of the adiabatic condensate, which
+    # ``QTI = Q(NK) − EP·CLW`` removes from the updraught's total water and
+    # which CONVECT hands to ``WDTRAIN`` → ``PRECIP``.  Before this it was
+    # returned to NOTHING — ``deficit`` is pinned to 0 above, the receiving
+    # unsaturated downdraft ships OFF, and its ``precip_mm_day`` was consumed by
+    # no one even when ON.  MEASURED in a 100-day RCEMIP1 column: evaporation
+    # 2.41 mm/day (correct, the CRM's own value) against precipitation 0.28
+    # (CRM 2.4) with the column in steady state, i.e. 2.13 mm/day of water
+    # destroyed, ≈61 W/m² of spurious latent sink.  It is invisible in the
+    # temperature field because the latent heat was already released during
+    # ascent, which is why it survived so long.
+    #
+    # It is emitted as ``dq_r_conv_dt``, the in-updraught rain source the
+    # bechtold / tiedtke / mass_flux schemes already use for exactly this
+    # quantity (their ``precip_efficiency``-diverted condensate, #929); the
+    # physics pipeline column-integrates it into same-step surface precip.
+    # Deliberately NOT routed into ``dq_c_conv_dt``: ``EP`` already
+    # parameterises autoconversion, so the cloud route would convert it a
+    # second time, delay it by the host's autoconversion timescale, and load
+    # radiatively active anvil condensate the comment below rightly warns of.
+    # NO heating accompanies it — the latent heat is already in ``dT_dt``, and
+    # adding more would double-count L_v.
+    dq_r_conv_dt = jnp.where(
+        config.use_genuine_mixing,
+        jnp.maximum(-net_water, 0.0)[:, None] * add_weight,
+        0.0,
+    )                                                     # ∫dq_r dp/g = |deficit|
     # Down-scale only the spurious-excess case; when net_water<0 qc_scale=1.
     qc_scale = jnp.clip(
         1.0 - jnp.maximum(net_water, 0.0)
@@ -650,6 +681,7 @@ def emanuel_convection(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
+        dq_r_conv_dt=dq_r_conv_dt,
         cape=cape,
         convective_mask=cape_weight,
         du_dt_conv=None,
