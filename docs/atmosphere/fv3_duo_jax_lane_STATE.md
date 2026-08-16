@@ -509,6 +509,31 @@ is out of scope for the port.
 Instrument controls on both arms: IC worst rel 3.685e-14, and the
 derived face map matches the frozen 2026-08-07 bijection.
 
+## The update_dz_d residual is CHARACTERISED (2026-08-16)
+
+Not roundoff, not a transport defect: a **free-stream preservation**
+difference at a handful of cells.
+
+* smooth fixture, km = 2/3/6/12: the twins are **bit-identical**
+  (0.0 relative, zero cells) -- so there is no systematic
+  expression-order difference, and the km-scaling question dissolves;
+* the gate's own bundle, face 3: exactly **2 of 1296** cells differ,
+  and at both `zh` is horizontally CONSTANT, so the divergence must
+  telescope to zero. NumPy returns the input to all 17 digits
+  (1.59000000000000000e+03); JAX returns 1.59000000285184387e+03 and
+  1.58999999752043232e+03. `dz` there is 510 m (NOT cancellation) and
+  the Courant numbers are ~1e-4.
+
+CONFIRMED: the JAX twin loses exact preservation of a constant field
+where the NumPy loop keeps it, by ~2.9e-6 absolute / 1.8e-9 relative.
+PLAUSIBLE: the stacked divergence associates its inflow/outflow pair
+differently, so they no longer cancel bitwise. Closing it means
+matching that one expression's order — a bounded, named task rather
+than an open question.
+
+The nh `zh` residual (3.498e-10) is very likely the same effect one
+stage downstream, but that has NOT been measured and is not claimed.
+
 ## OPEN, and honestly labelled (codex MAJOR, 2026-08-16)
 
 TWO TOLERANCES ARE NOT EXPLAINED, and both were briefly mislabelled by

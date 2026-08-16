@@ -1164,12 +1164,27 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             ne_corner=jctx.flags6[t].ne_corner)
 
         assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
-        # TOL-PENDING (codex MAJOR, and correct): 1.333e-09 measured on
-        # face 3, 2 of 1296 cells, AFTER the grid-flag defect was fixed
-        # (it read 1.155e-04 on 80 cells before). But removing one
-        # defect does not prove what remains is roundoff -- this is a
-        # DIRECT kernel-twin comparison, not a composed chain, and ~1e7
-        # epsilon is too large to call a floor without showing it scales
-        # like one.
+        # CHARACTERISED (job 9421844), no longer "unexplained": this is
+        # a FREE-STREAM PRESERVATION difference, not roundoff and not a
+        # transport defect.
+        #
+        # On a smooth fixture the twins are BIT-IDENTICAL at km = 2, 3,
+        # 6 and 12 (0.0, zero cells), so there is no systematic
+        # expression-order difference. On the gate's own bundle, face 3,
+        # exactly 2 of 1296 cells differ -- and at both, `zh` is
+        # horizontally CONSTANT, so the flux divergence must telescope
+        # to exactly zero. NumPy returns the input to all 17 digits
+        # (1.59000000000000000e+03); JAX returns
+        # 1.59000000285184387e+03 and 1.58999999752043232e+03. dz across
+        # those interfaces is 510 m, so it is not cancellation, and the
+        # Courant numbers there are ~1e-4.
+        #
+        # So the JAX twin loses EXACT preservation of a constant field
+        # where the NumPy loop keeps it, at a handful of cells, by
+        # ~2.9e-6 absolute (1.8e-9 relative). PLAUSIBLE mechanism: the
+        # stacked form associates the divergence differently, so the
+        # inflow/outflow pair no longer cancels bitwise. Closing it
+        # means matching that one expression's order; the bound below
+        # holds the line until then and now says what it tolerates.
         # [class: accumulating -- a vertical recurrence]
         cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1.4e-8)
