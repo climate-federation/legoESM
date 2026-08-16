@@ -217,6 +217,53 @@ def main() -> int:
         print(f"  face {t + 1}: after update_dz_d max|d| {d1:.6e}   "
               f"after riem_solver3 max|d| {d2:.6e}")
 
+    # --- JAX PHASE vs JAX CHAIN, the technique that cracked module 4 --
+    # Every component agrees (areas 0.0, operands 0.0, both kernels
+    # <=1.05e-04) and the phase still differs by 2.590e+02, so the phase
+    # is doing something the hand-composed chain is not.  This runs the
+    # SAME JAX kernels in the phase's own order, per face, and compares
+    # against what the phase returned.
+    print("\nJAX phase vs the SAME JAX kernels composed by hand:")
+    zh_chain = []
+    for t in range(6):
+        crx = np.stack([dsw[t]["levels"][k]["crx_adv"] for k in range(KM)],
+                       axis=2)
+        cry = np.stack([dsw[t]["levels"][k]["cry_adv"] for k in range(KM)],
+                       axis=2)
+        xfx = np.stack([dsw[t]["levels"][k]["xfx_adv"] for k in range(KM)],
+                       axis=2)
+        yfx = np.stack([dsw[t]["levels"][k]["yfx_adv"] for k in range(KM)],
+                       axis=2)
+        gs = ctx["gs6"][t]
+        zh_t, ws_t = jnh.update_dz_d(
+            (2.0,) * (KM + 1), (0.12,) * (KM + 1), 6, bounds, KM, N + 1,
+            N + 1, jnp.asarray(area6[t]), jnp.asarray(rarea6[t]),
+            jnp.asarray(_DP0), jnp.asarray(carry["zs6"][t]),
+            jnp.asarray(carry["zh6"][t]), jnp.asarray(crx),
+            jnp.asarray(cry), jnp.asarray(xfx), jnp.asarray(yfx),
+            jnp.asarray(carry["ws6"][t]), 1.0 / DT,
+            jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
+            jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]),
+            lim_fac=1.0,
+            bounded_domain=fl[t].bounded_domain, grid_type=fl[t].grid_type,
+            sw_corner=fl[t].sw_corner, se_corner=fl[t].se_corner,
+            nw_corner=fl[t].nw_corner, ne_corner=fl[t].ne_corner)
+        out = jnh.riem_solver3(
+            0, DT, bounds, KM, 2.0 / 7.0, 1004.6, 100.0,
+            jnp.asarray(carry["zs6"][t]), jnp.asarray(tail[t]["w"]),
+            jnp.asarray(bundle["state"][t]["delz"]),
+            jnp.asarray(dsw[t]["pt"]), jnp.asarray(dsw[t]["delp"]),
+            zh_t, jnp.asarray(carry["pe6"][t]),
+            jnp.asarray(cswp[t]["pkc"]), jnp.asarray(carry["pk3_6"][t]),
+            jnp.asarray(carry["pk6"][t]), jnp.asarray(carry["peln6"][t]),
+            ws_t, 0.05, 1.0, use_logp=False, last_call=False,
+            fp_out=False)
+        zh_chain.append(np.asarray(out[2]))
+    zh_chain = np.stack(zh_chain)
+    # the phase exchanges zh per interface AFTER the kernels
+    d_pre = np.abs(zh_j - zh_chain)
+    print(f"  before the exchange: max|phase - chain| {d_pre.max():.6e}"
+          f"   compute {d_pre[:, cs, cs].max():.6e}")
     print("\nzs and ws (the bottom boundary condition):")
     zs = np.stack([np.asarray(x) for x in bundle["carry"]["zs6"]])
     print(f"  zs max|.| {np.abs(zs).max():.6e}")
