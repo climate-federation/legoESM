@@ -39,12 +39,12 @@ CLOSURE_TOL_MM_DAY = 1.0e-3
 #: where a leaf-level residual has been seen; a residual alone is not yet proof
 #: of a leak for them, because their condensate may be closed downstream — that
 #: is the open follow-up, not a claim.
-KNOWN_LEAKING: dict[str, str] = {
-    "mass_flux": "leaf residual seen; downstream closure not yet traced",
-    "edmf": "leaf residual seen; downstream closure not yet traced",
-    "kain_fritsch": "leaf residual seen; downstream closure not yet traced",
-    "tiedtke": "leaf residual seen; downstream closure not yet traced",
-}
+#: RETRACTED: an earlier revision listed mass_flux, edmf and kain_fritsch here
+#: as "leaf residual seen".  They had never been CALLED — the harness could not
+#: supply their prognostic carry (M_c / a_u) or the resolved vertical velocity
+#: (w_grid), so the entry recorded a measurement that did not happen.  The
+#: carries are supplied now and this list holds only what has been measured.
+KNOWN_LEAKING: dict[str, str] = {}
 
 SCHEMES = (
     "sbm", "dca", "kuo", "mass_flux", "edmf",
@@ -99,6 +99,11 @@ def _leaf_kwargs(conv_fn, scheme_cfg, p_full, p_half, T, q_v):
         "conv_prog_profile": zeros_2d,
         "conv_stoch_state": zeros_2d,
         "prng_key": jax.random.PRNGKey(0),
+        # Scalar prognostic carries (ConvectionSchemeTraits.is_scalar_prognostic)
+        # and the resolved vertical velocity the Kain-Fritsch trigger consumes.
+        "M_c": jnp.zeros((ncol,)),
+        "a_u": jnp.zeros((ncol,)),
+        "w_grid": zeros_2d,
     }
     sig = inspect.signature(conv_fn)
     kwargs, missing = {}, []
@@ -232,7 +237,6 @@ def test_known_leaking_is_shrink_only():
     """
     assert "emanuel" not in KNOWN_LEAKING, (
         "emanuel is back in KNOWN_LEAKING; the EP*CLW rain channel regressed")
-    assert set(KNOWN_LEAKING) <= {
-        "mass_flux", "edmf", "kain_fritsch", "tiedtke"}, (
+    assert set(KNOWN_LEAKING) <= set(SCHEMES), (
         "a scheme was added to KNOWN_LEAKING. This list may only SHRINK; a new "
         f"water leak is a defect to fix, not to register. Got: {KNOWN_LEAKING}")
