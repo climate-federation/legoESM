@@ -423,3 +423,57 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
     for nm in ("u", "v"):
         want = np.stack([np.asarray(n_tail_prs[t][nm]) for t in range(6)])
         cmp_fields(j_prs[nm], want, f"stage one_grad_p {nm}", 1e-12)
+
+
+def test_substep_equals_its_own_stage_chain(ctx, jctx, state_np, jstate):
+    """JAX vs JAX: the sub-step against the SAME phases composed by hand.
+
+    Every stage matches the NumPy lane (job 9417609) and the sub-step
+    does not (2.106e-02 on u at remap_step=True, 1.931e-02 at False --
+    so remap_step is not the variable either).  Two possibilities remain
+    and this separates them without the NumPy lane in the picture: if
+    the hand-composed chain reproduces the sub-step, my bisect and the
+    sub-step differ in an ARGUMENT and the bisect is the thing that is
+    wrong; if it does not, the sub-step's own plumbing differs from the
+    calls it claims to make.
+    """
+    from legoesm.core.fv3_cgrid_phase_3d import (
+        cgrid_pressure_phase_3d,
+        csw_phase_3d,
+    )
+    from legoesm.core.fv3_dsw_phase_3d import dsw_transport_phase_3d
+    from legoesm.core.fv3_dsw_tail_3d import (
+        dgrid_pressure_phase_3d,
+        dsw_tail_phase_3d,
+    )
+
+    dt, dt2 = DT_ATMOS, 0.5 * DT_ATMOS
+    jst = jac.exchange_state_halos_3d(jctx, jstate, KM, scalars=True,
+                                      winds=True)
+    csw = csw_phase_3d(jctx, jst, dt2, KM, nord=2)
+    prs_c = cgrid_pressure_phase_3d(jctx, csw, KM, dt2=dt2, ptop=PTOP,
+                                    akap=AKAP, cp_air=CP_AIR)
+    csw = {**csw, "uc": prs_c["uc"], "vc": prs_c["vc"]}
+    dsw = dsw_transport_phase_3d(jctx, jst, csw, dt, KM)
+    tail = dsw_tail_phase_3d(jctx, jst, csw, dsw, dt, KM)
+    dsw = {**dsw,
+           "delp": jac._exchange_scalar_stack(dsw["delp"], jctx.tab, KM),
+           "pt": jac._exchange_scalar_stack(dsw["pt"], jctx.tab, KM)}
+    prs = dgrid_pressure_phase_3d(jctx, dsw, tail, KM, dt=dt, ptop=PTOP,
+                                  akap=AKAP, cp_air=CP_AIR)
+
+    got = jac.acoustic_substep_3d(jctx, jstate, dt, KM,
+                                  first_substep=True, ptop=PTOP,
+                                  akap=AKAP, cp_air=CP_AIR)["state"]
+    hand = {"delp": dsw["delp"], "pt": dsw["pt"],
+            "u": prs["u"], "v": prs["v"]}
+    for nm, want in hand.items():
+        assert_real(want, f"hand-composed {nm}")
+        # BITWISE: the same functions on the same values in the same
+        # order must give the same bits.  Any difference is a difference
+        # in what the sub-step actually calls.
+        assert np.array_equal(np.asarray(got[nm]), np.asarray(want),
+                              equal_nan=True), (
+            f"the sub-step's {nm} differs from the hand-composed chain "
+            f"-- max|diff| "
+            f"{float(np.nanmax(np.abs(np.asarray(got[nm]) - np.asarray(want)))):.3e}")
