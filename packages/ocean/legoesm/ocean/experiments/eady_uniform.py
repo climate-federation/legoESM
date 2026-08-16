@@ -97,7 +97,33 @@ class EadyUniformConfig:
     sponge_width_deg: float = 2.0
     sponge_timescale_days: float = 1.0
 
-    barotropic_diffusion_alpha: float = 0.05
+    # Free-surface Laplacian: OFF. This channel runs the Voronoi C-grid, and
+    # the filter is a collocated-grid device -- it exists to damp that grid's
+    # checkerboard mode in sea surface height, and the value 0.05 is the
+    # cubed-sphere default raised for a face-boundary feedback. This case
+    # inherited it. The C-grid has no such null mode (it was introduced to
+    # remove it), and the grid-scale mode that does go unstable here is the
+    # rotational one, which carries near-zero surface-height gradient -- so
+    # the filter is structurally blind to it.
+    #
+    # It was not harmless. At 0.05 on 70 km cells the implied diffusivity is
+    # 3.5e6 m^2/s (ocean lateral diffusivity is 1e2-1e3), it moved 42.7x more
+    # water than the actual flow, and it was the dominant destabiliser of this
+    # case -- measured monotone: alpha 0.10 fails day 61.5, 0.05 day 67.4,
+    # 0.025 day 82.3, 0.00 day 122.9. Turning it off also removes a mass
+    # inconsistency: the filter's flux is not carried in the time-averaged
+    # transport that advects thickness and tracers, so with it on, that
+    # transport missed ~97% of the free-surface mass movement.
+    #
+    # Precedent: the NEMO-matching recipe, the DINO cards and
+    # silvestri_baroclinic_jet all run this at 0, the last through an 80-day
+    # turbulent transient with no dissipation backstop.
+    #
+    # NOT a cure. The case still fails at day 122.9 of 200; the residual is a
+    # separate instability. Divergence damping below is KEPT -- it targets the
+    # divergent grid mode directly and measurement shows it doing real work
+    # (0.05 fails day 67, 0.025 and 0.0 both go non-finite sooner).
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_div_damp: float = 0.05
     tracer_advection: str = "tvd"     # "upwind", "tvd", "dst3", "dst3_multidim", "som"
 
