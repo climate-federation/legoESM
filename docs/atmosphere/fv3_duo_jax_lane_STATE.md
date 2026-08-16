@@ -328,7 +328,7 @@ Phase 2 (3-D) is **a stack of six modules, three of them landed**:
 |---|---|---|---|
 | 1 | `fv3_cgrid_phase_3d.py` | `fv3_native_cgrid_phase_3d` | landed `534939307` |
 | 2 | `fv3_dsw_phase_3d.py` | `fv3_native_dsw_phase_3d` | landed `87eee49e9` |
-| 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **landed** — 903 lines, all six routines |
+| 3 | `fv3_dsw_tail_3d.py` | `fv3_native_dsw_tail_3d` | **landed**, 20/22 gates green — one OPEN (NH `zh`, below) |
 | 4 | `fv3_acoustic_3d.py` | `fv3_native_acoustic_3d` | **landed, 16/16 gates green** |
 | 5 | `fv3_tracer2d.py` | `fv3_native_tracer2d` | not started (the `NSPLT_MAX` node) |
 | 6 | `fv3_dynamics.py` | `fv3_native_dynamics` | not started |
@@ -422,8 +422,33 @@ Generalise: **when porting an in-place lane, every shared mutable object
 is an undeclared data path.** Composing the phases yourself and diffing
 against the spec's own composition is what finds them.
 
+### OPEN: the NH tail's `zh`, 2.465e-02
+
+`test_nh_tail_parity` compares the carry members the phase writes every
+step. `gz` and `pk3` are not reached yet because `zh` fails first:
+**2.465e-02 per-element, 5832 of 7776 cells, max|diff| 6.680e+03 against
+a median |ref| of 9.991e+04** (job 9417689). Everything else in the file
+passes, including the four-way NH branch parameterisation's other
+members, `nh_exchanged_area6`, and the whole hydrostatic chain.
+
+Already checked and NOT the cause: the effective deck
+(`nord_w`→`nord_v`=2, `damp_w`→`damp_v`=0.12 by the spec's own
+`c.get` fallbacks), and the `area`/`rarea` override — both lanes pass
+the EXCHANGED area from `nh_exchanged_area6` and the ORIGINAL
+`dxa`/`dya`/`del6_u`/`del6_v`, which is what the spec's `gs_nh` does.
+
+**The instrument to use is the one that worked on module 4**: compose the
+spec's own NH inputs two ways and diff the SPEC against ITSELF. `zh` is
+written by `update_dz_d`, whose inputs cross three seams — the carry
+(mutated in place across substeps), `csw_press["pkc"]` (trap #6: the same
+storage Riem_Solver3 overwrites) and `delz` (mutated) — and module 4's
+defect was exactly a mutation carrying a seam that a phase-by-phase
+reading cannot show.
+
 ## Next task, precisely
 
+0. **Close the NH `zh` gap** with the spec-against-itself comparison
+   above; it is the last gate in modules 1-4.
 1. **Codex-review module 3** (`scripts/cluster/fv3_native/codex_review_gate_triage.sbatch`
    is the pattern; point it at `fv3_dsw_tail_3d.py` and its gate file), and
    finish its gate run — the parity/adjoint bounds still carry `TOL-PENDING`.
