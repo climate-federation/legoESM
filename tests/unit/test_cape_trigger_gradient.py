@@ -128,7 +128,11 @@ def test_gradient_is_nonzero_through_a_real_scheme():
             T=jnp.asarray(T)[None, :], q_v=jnp.asarray(q_v)[None, :],
             p_full=jnp.asarray(p_full)[None, :],
             p_half=jnp.asarray(p_half)[None, :], dt=600.0, config=cfg_t)
-        if isinstance(out, tuple):
+        # ConvectionOutput is a NamedTuple, i.e. a tuple, so an
+        # `isinstance(out, tuple)` unwrap silently takes its FIRST FIELD.
+        # Some leaves return (output, carry), others the bare output; test for
+        # the field, not the type.
+        if not hasattr(out, "dT_dt"):
             out = out[0]
         return jnp.sum(out.dT_dt) + jnp.sum(out.dq_v_dt)
 

@@ -140,7 +140,10 @@ def _call_leaf(scheme: str):
     if missing:
         return None, f"cannot synthesise required args {missing}"
     out = conv_fn(**kwargs)
-    if isinstance(out, tuple):        # emanuel returns (output, carry)
+    # ConvectionOutput is a NamedTuple, so it IS a tuple: an
+    # `isinstance(out, tuple)` unwrap would silently take its first FIELD for
+    # the schemes that return the bare output. Test for the field instead.
+    if not hasattr(out, "dq_v_dt"):   # (output, carry) form
         out = out[0]
     return out, None
 
