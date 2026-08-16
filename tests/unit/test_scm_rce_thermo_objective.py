@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.training.trainable_params import TrainablePhysicsParams
 from legoesm.training.scm_rce_metrics import (
     DEFAULT_THERMO_MIN_P_PA,
     THERMO_HUMIDITY_VARIABLES,
@@ -757,19 +758,40 @@ def test_the_default_candidate_is_not_re_evaluated(monkeypatch):
     assert stats["unique_evals"] >= 1
 
 
-def test_sigmoid_round_trip_is_not_exact_which_is_why_the_skip_exists():
-    """Pin the mechanism, so a future exact round trip does not leave the skip
-    looking like superstition."""
-    import jax.numpy as _jnp
-    from types import SimpleNamespace
+def test_sigmoid_round_trip_is_not_exact_for_the_real_registry_defaults():
+    """Pin the mechanism on the ACTUAL registry constraints, not invented ones.
 
+    The round-trip error depends on the parameter's own bounds, so a test with
+    guessed bounds proves nothing — a first version of this test used
+    (600, 10800) for sbm's tau_c, found the round trip exact, and would have
+    read as evidence that the defect did not exist. The probe
+    (scripts/validate/scm_rce_default_roundtrip_probe.py) measured at least one
+    inexact field in EVERY scheme; this requires that to still be true.
+    """
+    from legoesm.training.param_collector import build_trainable_params
     from scripts.run import run_scm_rce_campaign as camp
-    from legoesm.training.trainable_params import sigmoid_to_range
 
-    c = SimpleNamespace(min_val=600.0, max_val=10800.0, transform="sigmoid")
-    raw = camp._raw_from_physical(7200.0, c)
-    back = float(sigmoid_to_range(_jnp.asarray(raw), c.min_val, c.max_val))
-    assert back != 7200.0, (
-        "the round trip is now exact; the default-candidate skip can be "
-        "revisited, but only with a measurement showing the scores agree")
-    assert abs(back - 7200.0) / 7200.0 < 1e-12
+    inexact = {}
+    for scheme in ("sbm", "mass_flux", "emanuel"):
+        cfg = camp.make_physics_config(convection=scheme)
+        _c, _s, sub = camp._active_subconfig(cfg, "convection")
+        key = camp._scheme_key_for_subconfig(sub)
+        tier, include_tier0, exclude = camp.resolve_param_selection(
+            key, "physical")
+        params = build_trainable_params(
+            active_scheme_keys={key}, tier=tier, include_tier0=include_tier0,
+            exclude=exclude, dtype=jnp.float64)
+        values = params.as_dict()
+        trial = TrainablePhysicsParams(
+            raw_values={c.name: camp._raw_from_physical(
+                float(values[c.name]), c) for c in params.constraints},
+            constraints=params.constraints)
+        back = trial.to_overrides().get(key, {})
+        inexact[scheme] = [
+            c.field for c in params.constraints
+            if float(back[c.field]) != float(values[c.name])
+        ]
+    assert all(inexact.values()), (
+        "the round trip is now exact for some scheme; the default-candidate "
+        f"skip can be revisited, but only with a measurement showing the "
+        f"scores agree. inexact fields per scheme: {inexact}")
