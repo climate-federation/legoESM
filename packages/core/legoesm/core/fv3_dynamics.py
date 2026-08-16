@@ -404,7 +404,14 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         if nq > 0:
             # :517/:528-540 tracer_2d_1L on the accumulated capacitors
             # (inline_q is refused above, so the gate is just nq)
-            _tr = tracer_2d_1l_sixface(ctx, qq, dp1, ac["flux_cap"],
+            # LAYOUT BRIDGE, not a reshape for convenience: this module
+            # carries q tracer-major (a list of nq face-stacked arrays,
+            # which is what the per-face remap at :480 indexes), while
+            # tracer_2d_1l_sixface takes ONE (6, nq, m_a, m_a, km) stack
+            # -- the spec's own [face][iq] order. Passing the list
+            # straight through made the callee see nq as the face axis.
+            _q_in = jnp.stack(qq, axis=1)
+            _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
@@ -413,7 +420,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # The routine returns a DICT (C4: everything the spec
             # mutates). Binding the whole dict to qq made the remap's
             # `qq[i]` a KeyError on any run with tracers.
-            qq = _tr["q"]
+            qq = [_tr["q"][:, i] for i in range(nq)]
             # ...and its loud-failure pair has to travel with it. The
             # tracer factory's default caller runs check_nsplt_schedule;
             # this is the RAW routine, so an nsplt above NSPLT_MAX would

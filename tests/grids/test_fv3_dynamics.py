@@ -176,7 +176,11 @@ def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2):
 def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
-    q = jnp.asarray(np.stack([np.stack(f) for f in _tracers()]))
+    # Tracer-major, matching this module's contract (nq entries, each
+    # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
+    _t = _tracers()
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q,
                                  **_common(ptop, ak, bk, hydrostatic,
@@ -218,7 +222,11 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
                    f"{nm} (hydro={hydrostatic}, k_split={k_split})",
                    tol=1e-10)
 
-    want_q = np.stack([np.stack(ref_q[t]) for t in range(6)])
+    # Tracer-major on BOTH sides: the module returns nq face-stacked
+    # arrays, so building the reference face-major would compare
+    # transposed axes and report a difference that is pure layout.
+    want_q = np.stack([np.stack([ref_q[t][iq] for t in range(6)])
+                       for iq in range(NQ)])
     assert_real(want_q, "numpy q")
     cmp_fields(np.asarray(got["q"]), want_q,
                f"q (hydro={hydrostatic}, k_split={k_split})", tol=1e-10)
@@ -289,7 +297,9 @@ def test_the_tracers_actually_moved(jctx, eta):
     A driver that never called tracer_2d_1L returns the input q, which
     matches a spec bug of the same shape and looks entirely healthy.
     """
-    q_in = np.stack([np.stack(f) for f in _tracers()])
+    _t = _tracers()
+    q_in = np.stack([np.stack([_t[t][iq] for t in range(6)])
+                     for iq in range(NQ)])
     got = _run_jax(jctx, eta, hydrostatic=True)
     q_out = np.asarray(got["q"])
     assert_real(q_out, "returned q")
@@ -347,7 +357,11 @@ def test_unported_arms_raise_instead_of_running_something_adjacent(
     """
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(True))
-    q = jnp.asarray(np.stack([np.stack(f) for f in _tracers()]))
+    # Tracer-major, matching this module's contract (nq entries, each
+    # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
+    _t = _tracers()
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     args = _common(ptop, ak, bk, True, 1, 2)
     args.update(kw)
@@ -359,7 +373,11 @@ def test_jit_matches_eager(jctx, eta):
     """Divergence means a Python branch on a traced value."""
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(True))
-    q = jnp.asarray(np.stack([np.stack(f) for f in _tracers()]))
+    # Tracer-major, matching this module's contract (nq entries, each
+    # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
+    _t = _tracers()
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     kw = _common(ptop, ak, bk, True, 1, 2)
 
@@ -384,7 +402,11 @@ def test_gradient_through_a_whole_step_is_finite(jctx, eta):
     """
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(True))
-    q = jnp.asarray(np.stack([np.stack(f) for f in _tracers()]))
+    # Tracer-major, matching this module's contract (nq entries, each
+    # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
+    _t = _tracers()
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     kw = _common(ptop, ak, bk, True, 1, 2)
 

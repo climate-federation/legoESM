@@ -238,7 +238,7 @@ _TAIL_COMPARED = ("u", "v", "ke", "wk", "divg_d", "delpc")
 # takes the post-d_sw2 pt/delp -- so every caller in this lane declares
 # that. The adapter refuses any collision NOT listed here, which is how
 # the pt/delp defect surfaced and how the next one will.
-_TAIL_FACE_LEVEL = ("pt", "delp", "allflux_x", "allflux_y")
+_TAIL_FACE_LEVEL = ("pt", "delp", "w", "allflux_x", "allflux_y")
 
 
 def _stack_dsw_np(dsw_np, face_level_wins=()):
