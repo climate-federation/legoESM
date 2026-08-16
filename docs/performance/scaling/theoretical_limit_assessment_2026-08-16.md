@@ -123,9 +123,13 @@ win at s9@64 wide halo:
 - Validity-log arms kept failing (NCCL_DEBUG_FILE runs); the knobs'
   effect is evidenced by the replicated delta itself — an inert arm
   cannot produce −1.3 ms.
+SECOND-LANE RECEIPT (job 27004277, LL2304@32 packed exchange,
+palindrome pairs): base 10.521 ms (spread 0.038) vs mcp2p 9.884
+(spread 0.006) — **−6.1 %, CONFIRM band: the pair TRANSFERS to the
+lat-lon lane** (panels a and, by the same exchange machinery, e).
 NEXT (decision + receipts): (1) adopt the two vars in the production
 GPU launch env — USER DECISION, it changes every multi-GPU run;
-(2) receipt on a second lane (lat-lon packed exchange) and at 128+;
+(2) receipt at 128+ devices (the 192 arms in queue predate the vars);
 (3) rerun the three-arm split under mcp2p, then re-rank the
 fused-exchange build against the smaller comm stack.
 Ops note, 2026-08-16 evening: three consecutive jobs lost to sick
