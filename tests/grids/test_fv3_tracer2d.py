@@ -196,12 +196,12 @@ def test_parity_against_the_spec(ctx, jctx, label):
     assert_real(want_q, f"numpy q ({label})")
     # TOL-PENDING (limiter-heavy advection): provisional bound.
     cmp_fields(np.asarray(got["q"]), want_q, f"q ({label}, nsplt={sched})",
-               rtol=1e-11)
+               tol=1e-11)
 
     want_dp = np.stack([np.asarray(dp_ref[t]) for t in range(6)])
     assert_real(want_dp, f"numpy dp1 ({label})")
     cmp_fields(np.asarray(got["dp1"]), want_dp,
-               f"dp1 ({label}, nsplt={sched})", rtol=1e-11)
+               f"dp1 ({label}, nsplt={sched})", tol=1e-11)
 
 
 def test_the_rescale_touches_only_level_k(ctx, jctx):
@@ -224,7 +224,7 @@ def test_the_rescale_touches_only_level_k(ctx, jctx):
         for k in range(KM):
             assert_real(want[..., k], f"numpy {nm} level {k}")
             cmp_fields(have[..., k], want[..., k],
-                       f"{nm} level {k} (nsplt={sched[k]})", rtol=1e-13)
+                       f"{nm} level {k} (nsplt={sched[k]})", tol=1e-13)
 
 
 @pytest.mark.parametrize("label", sorted(_AMPS))
@@ -242,7 +242,7 @@ def test_capacitors_come_back_frac_rescaled(ctx, jctx, label):
     for nm in CAP_KEYS:
         want = np.stack([cap_ref[t][nm] for t in range(6)])
         assert_real(want, f"numpy {nm} ({label})")
-        cmp_fields(np.asarray(got[nm]), want, f"{nm} ({label})", rtol=1e-13)
+        cmp_fields(np.asarray(got[nm]), want, f"{nm} ({label})", tol=1e-13)
 
 
 # --------------------------------------------------------------------
@@ -302,7 +302,7 @@ def test_both_sides_of_a_schedule_transition(ctx, jctx):
         assert_real(want, f"numpy q (amp={amp})")
         # TOL-PENDING (limiter-heavy advection): provisional bound.
         cmp_fields(np.asarray(got["q"]), want,
-                   f"q at amp={amp} (nsplt={seen[amp]})", rtol=1e-11)
+                   f"q at amp={amp} (nsplt={seen[amp]})", tol=1e-11)
 
 
 def test_exceeding_the_cap_raises_instead_of_truncating(jctx):
@@ -385,7 +385,7 @@ def test_jit_matches_eager(jctx):
         a, b = np.asarray(eager[nm]), np.asarray(jitted[nm])
         assert_real(a, f"eager {nm}")
         # TOL-PENDING: jit reassociates; bound to be measured.
-        cmp_fields(b, a, f"jit vs eager {nm}", rtol=1e-12)
+        cmp_fields(b, a, f"jit vs eager {nm}", tol=1e-12)
 
 
 def test_gradient_is_finite_and_carries_no_term_through_the_trip_count(jctx):
