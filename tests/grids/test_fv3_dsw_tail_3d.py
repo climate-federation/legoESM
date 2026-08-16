@@ -846,7 +846,11 @@ def _run_nh(ctx_, bundle, lane, **kw):
             KM, dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
             a_imp=A_IMP, dp0=_DP0, delz6=delz_np, **kw)
     return jtail.dgrid_nh_pressure_phase_3d(
-        ctx_, stack_np(bundle["csw_press"]), stack_np(bundle["dsw"]),
+        # `_stack_dsw_np`, not `stack_np`: the transport output carries a
+        # "levels" list of per-level dicts, which has no array to stack
+        # (job 9417488 hit exactly that here after the hydrostatic gates
+        # had already been fixed for it).
+        ctx_, stack_np(bundle["csw_press"]), _stack_dsw_np(bundle["dsw"]),
         stack_np(bundle["tail"]), _nh_stack_carry(bundle["carry"]), KM,
         dt=DT, ptop=PTOP, akap=AKAP, cp_air=CP_AIR, p_fac=P_FAC,
         a_imp=A_IMP, dp0=jnp.asarray(_DP0),
