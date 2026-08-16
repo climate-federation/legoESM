@@ -247,3 +247,62 @@ def test_an_unknown_initial_wind_raises():
             m.load_analytic_scm_case("cbl", nlev=16, dt=10.0)
     finally:
         m.ANALYTIC_SCM_CASES = original
+
+
+def test_wangara_column_reproduces_the_les_initial_theta():
+    """The capping inversion, checked against the REFERENCE, not the argparse.
+
+    ``run_spectral_cbl.py``'s wangara branch overrides only theta0, f_cor,
+    t_start_s and Q0, so zi0=800 m and gamma=0.008 K/m stay at their defaults
+    and the LES starts with a lapse above 800 m. Declaring no inversion here
+    left the column uniform at 277 K, ~1.8 K colder in the domain mean, which
+    was the whole -2.1 K theta bias left after the surface-flux and
+    initial-wind fixes.
+
+    Skips rather than fails when the stored reference is absent: it is a large
+    artifact outside the repo, and a missing one is not a code defect.
+    """
+    import glob
+
+    import jax.numpy as jnp
+
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    from legoesm.atmosphere.physics._shared import exner_function
+    frames = sorted(glob.glob(
+        "results/les_ref/wangara/profiles/prof_*.npz"))
+    if not frames:
+        pytest.skip("no stored wangara LES reference on this machine")
+    ref = np.load(frames[0], allow_pickle=True)
+    assert float(ref["t_hours"]) == 0.0, "frame 0 must BE the initial state"
+    z_les, th_les = np.asarray(ref["z"]), np.asarray(ref["theta"])
+
+    case = load_analytic_scm_case("wangara", nlev=64, dt=10.0)
+    z_scm = np.asarray(case.z_full)
+    theta_scm = np.asarray(case.T_profile) / np.asarray(
+        exner_function(jnp.asarray(case.p_full)))
+
+    inside = (z_scm > z_les.min()) & (z_scm < z_les.max())
+    err = theta_scm[inside] - np.interp(z_scm[inside], z_les, th_les)
+    # 0.1 K: the LES frame carries a 0.1 K random perturbation below z_i, and
+    # the two columns sit on different vertical grids.
+    assert np.abs(err).max() < 0.1, (
+        f"max |SCM - LES| initial theta = {np.abs(err).max():.3f} K at "
+        f"z = {z_scm[inside][np.argmax(np.abs(err))]:.0f} m")
+
+
+def test_a_flat_column_would_fail_that_check():
+    """NON-VACUITY: the assertion above must reject the profile it replaced."""
+    import glob
+
+    frames = sorted(glob.glob(
+        "results/les_ref/wangara/profiles/prof_*.npz"))
+    if not frames:
+        pytest.skip("no stored wangara LES reference on this machine")
+    ref = np.load(frames[0], allow_pickle=True)
+    z_les, th_les = np.asarray(ref["z"]), np.asarray(ref["theta"])
+    flat = np.full_like(th_les, 277.0)            # the old spec, uniform
+    assert np.abs(flat - th_les).max() > 5.0, (
+        "a uniform 277 K column must differ from the LES by far more than the "
+        "0.1 K tolerance, or the check above proves nothing")

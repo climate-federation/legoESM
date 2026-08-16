@@ -176,8 +176,17 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
     ),
     "wangara": AnalyticSCMCaseSpec(
         les_driver="run_spectral_cbl.py --case wangara",
-        theta0_K=277.0, inversion_z_m=None, lapse_above_K_m=0.0,
-        inversion_width_m=0.0,
+        # The capping inversion is `run_spectral_cbl.py`'s DEFAULT zi0/gamma:
+        # the wangara branch overrides only theta0, f_cor, t_start_s and Q0, so
+        # `th = where(z > 800, 277 + 0.008*(z-800), 277)` is what it built.
+        # MEASURED off frame 0 of the stored reference rather than read off the
+        # argparse defaults: theta = 277.000 +- 0.001 K below 800 m and a
+        # 0.00800 K/m lapse fitted above 900 m. Declaring no inversion here
+        # left the column uniform at 277 K, ~1.8 K colder than the LES in the
+        # domain mean, which is the whole of the -2.1 K theta bias that
+        # survived the surface-flux and initial-wind fixes.
+        theta0_K=277.0, inversion_z_m=800.0, lapse_above_K_m=0.008,
+        inversion_width_m=0.0,   # a sharp `where`, no tanh: matches the driver
         # DIURNAL in the real case: the constant here is the flux at the 09:00
         # start, and the SCM arm overrides it with the shared time-dependent
         # forcing (see wangara_day33). It is carried so the spec stays
