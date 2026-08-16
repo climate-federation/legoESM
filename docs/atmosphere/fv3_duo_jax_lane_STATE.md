@@ -422,28 +422,47 @@ Generalise: **when porting an in-place lane, every shared mutable object
 is an undeclared data path.** Composing the phases yourself and diffing
 against the spec's own composition is what finds them.
 
-### OPEN: the NH tail's `zh`, 2.465e-02
+### OPEN: the NH tail's `zh` — and THREE MEASUREMENTS THAT CANNOT ALL HOLD
 
-`test_nh_tail_parity` compares the carry members the phase writes every
-step. `gz` and `pk3` are not reached yet because `zh` fails first:
-**2.465e-02 per-element, 5832 of 7776 cells, max|diff| 6.680e+03 against
-a median |ref| of 9.991e+04** (job 9417689). Everything else in the file
-passes, including the four-way NH branch parameterisation's other
-members, `nh_exchanged_area6`, and the whole hydrostatic chain.
+`test_nh_tail_parity` fails on the carry's `zh`; everything else in
+module 3 passes (20 of 22, 1 skipped). One real defect was found and
+fixed on the way, and the residual is now an INCONSISTENT SET, which is
+a statement about the instruments, not about the module.
 
-Already checked and NOT the cause: the effective deck
-(`nord_w`→`nord_v`=2, `damp_w`→`damp_v`=0.12 by the spec's own
-`c.get` fallbacks), and the `area`/`rarea` override — both lanes pass
-the EXCHANGED area from `nh_exchanged_area6` and the ORIGINAL
-`dxa`/`dya`/`del6_u`/`del6_v`, which is what the spec's `gs_nh` does.
+**Fixed en route (a real defect):** `update_dz_d` was called without the
+grid FLAGS. The NumPy kernel hands its gridstruct to `fv_tp_2d` and
+`del6_vt_flux`, which read `bounded_domain`, `grid_type` and the four
+corner flags from it; the JAX twin takes them as keywords defaulting to
+`bounded_domain=False` with all corners TRUE, and `oracle_conventions`
+makes them TRUE/FALSE respectively — so the defaults ran corner fills the
+oracle skips. Kernel agreement went from **1.155e-04 (80 cells) to
+1.333e-09 (2 cells)**.
 
-**The instrument to use is the one that worked on module 4**: compose the
-spec's own NH inputs two ways and diff the SPEC against ITSELF. `zh` is
-written by `update_dz_d`, whose inputs cross three seams — the carry
-(mutated in place across substeps), `csw_press["pkc"]` (trap #6: the same
-storage Riem_Solver3 overwrites) and `delz` (mutated) — and module 4's
-defect was exactly a mutation carrying a seam that a phase-by-phase
-reading cannot show.
+**The set that does not close** (all from
+`scripts/validate/fv3_nh_zh_localiser.py`, jobs 9419273-9419284):
+
+| measurement | value |
+|---|---|
+| operands into the kernels (crx/cry/xfx/yfx), JAX vs NumPy | **0.000e+00** |
+| the exchanged `area`, each lane computing its own | **0.000e+00**, zero surviving sentinels |
+| both kernels called directly, ALL SIX faces | ≤ **1.05e-04** (worst face 3; others ~5e-10) |
+| the two PHASES against each other, `zh` | 2.590e+02 compute, 6.680e+03 halo, **0.0 at the surface** |
+| the JAX PHASE against the same JAX kernels composed by hand, exchange included | **4.213e+05** compute |
+
+If the chain matches NumPy's kernels to 1e-4 and the JAX phase is 4.2e5
+from that chain, the JAX phase must be ~4.2e5 from the NumPy phase — and
+it is 2.6e2. **One of these five comparisons is mis-specified**, and it
+is more likely mine than the module's.
+
+**Next step: re-derive, do not extend.** The suspect is the phase-vs-chain
+construction — it rebuilds the carry, the operands and the exchange by
+hand, and any one of those can silently be a different generation of a
+MUTATED array (which is exactly what module 4's defect turned out to be).
+The cheapest decisive version is to give the JAX phase and the NumPy
+phase the identical bundle and diff `zh` after EACH internal step, which
+needs a stage payload the phase does not currently return — so returning
+the post-`update_dz_d` and post-`riem_solver3` `zh` (the same treatment
+`ke_corner` got, and for the same reason) is the first move.
 
 ## Next task, precisely
 
