@@ -72,8 +72,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--last-reference-files", type=int, default=5)
     parser.add_argument("--days", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=600.0)
+    parser.add_argument(
+        "--inert-floor-K", type=float, default=1.0e-5,
+        help="max|dT| at or below which a parameter counts as INERT. Default "
+             "1e-5 K, an order of magnitude above the ~6e-7 K sigmoid "
+             "round-trip floor measured on emanuel.")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
+    inert_floor_K = float(args.inert_floor_K)
 
     if "rcemip1_n128" in str(args.reference_dir) or "rcemip1_postfix" in str(
             args.reference_dir):
@@ -135,21 +141,38 @@ def main(argv: list[str] | None = None) -> int:
             }
         moved = max(abs(row["lo"]["d_T_max_K"]), abs(row["hi"]["d_T_max_K"]))
         row["max_dT_K"] = moved
-        row["dead"] = bool(moved == 0.0)
+        # NOT ``moved == 0``.  Every candidate goes through the sigmoid raw
+        # space, whose round trip is inexact by about one ULP, so even a
+        # parameter the scheme never reads perturbs the column slightly and an
+        # exact-zero test calls it live.  MEASURED on emanuel: thirteen
+        # unrelated parameters all returned max|dT| = 5.845e-07 K to seven
+        # figures — that shared value IS the floor, not a response.  Anything
+        # within an order of magnitude of it is inert.
+        row["inert"] = bool(moved <= inert_floor_K)
+        row["nonfinite"] = not (np.isfinite(row["lo"]["d_thermo"])
+                                and np.isfinite(row["hi"]["d_thermo"]))
         results.append(row)
-        flag = "DEAD" if row["dead"] else "live"
+        flag = "INERT" if row["inert"] else "live "
+        if row["nonfinite"]:
+            flag += " NaN!"
         print(f"  {c.field:<34} {flag:4s} max|dT|={moved:.3e} K  "
               f"d_thermo lo={row['lo']['d_thermo']:+.4f} "
               f"hi={row['hi']['d_thermo']:+.4f}")
 
-    dead = [r["parameter"] for r in results if r["dead"]]
-    print(f"\n{len(dead)} of {len(results)} parameters are DEAD in this "
-          f"configuration (perturbing them changes the column by exactly 0)")
+    dead = [r["parameter"] for r in results if r["inert"]]
+    nonfinite = [r["parameter"] for r in results if r["nonfinite"]]
+    print(f"\n{len(dead)} of {len(results)} parameters are INERT (they move "
+          f"the column by <= {inert_floor_K:.2e} K, the round-trip floor)")
     if dead:
         print("  " + ", ".join(dead))
+    if nonfinite:
+        print(f"{len(nonfinite)} parameter(s) produced a NON-FINITE score, "
+              "which is a defect in its own right:")
+        print("  " + ", ".join(nonfinite))
     payload = {"scheme": args.scheme, "days": args.days,
-               "base_thermo": base.thermo_score, "n_dead": len(dead),
-               "dead": dead, "parameters": results}
+               "inert_floor_K": inert_floor_K,
+               "base_thermo": base.thermo_score, "n_inert": len(dead),
+               "inert": dead, "nonfinite": nonfinite, "parameters": results}
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, indent=2))
