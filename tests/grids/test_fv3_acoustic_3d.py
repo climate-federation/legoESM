@@ -388,7 +388,7 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
     # delp/pt exchange (dyn_core.F90:1336-1337) and the D-grid pressure
     # chain (:1401 geopk, :1531 one_grad_p).  The stages above all
     # PASSED (job 9417559), so the wind error is made in one of these.
-    import legoesm.core.fv3_native_gridstruct as npgs  # noqa: F401
+    import legoesm.grids.fv3_native_gridstruct as npgs  # noqa: F401
     from legoesm.core.fv3_dsw_tail_3d import dgrid_pressure_phase_3d
 
     for _nm in ("delp", "pt"):
