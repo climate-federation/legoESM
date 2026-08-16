@@ -298,3 +298,87 @@ def test_entry_exchange_parity(ctx, jctx, state_np, jstate):
         # TOL-PENDING: provisional bound.  DO NOT SHIP.
         # [class: exchange -- weighted stencil sums]
         cmp_fields(got[nm], want, f"entry exchange {nm}", 1e-12)
+
+
+def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
+    """Which STAGE of the sub-step first disagrees.
+
+    The sub-step gate says the wind error is made inside one sub-step
+    and the entry-exchange gate says it is not made there, so the
+    remaining candidates are the four phases the sub-step composes.
+    Each is separately parity-gated on its OWN fixture, which means the
+    defect is in what this module hands one of them -- and that is a
+    statement about a specific stage boundary, so the bisect walks them
+    in order and reports the FIRST one that moves.
+
+    Ordered exactly as the sub-step runs them; the first failure names
+    the stage and everything after it is consequence, so this test
+    deliberately does not continue past it.
+    """
+    import legoesm.core.fv3_native_cgrid_phase_3d as npcg
+    import legoesm.core.fv3_native_dsw_phase_3d as npdsw
+    import legoesm.core.fv3_native_dsw_tail_3d as nptail
+    from legoesm.core.fv3_cgrid_phase_3d import (
+        cgrid_pressure_phase_3d,
+        csw_phase_3d,
+    )
+    from legoesm.core.fv3_dsw_phase_3d import dsw_transport_phase_3d
+    from legoesm.core.fv3_dsw_tail_3d import dsw_tail_phase_3d
+
+    dt, dt2 = DT_ATMOS, 0.5 * DT_ATMOS
+
+    # both lanes from the SAME exchanged state
+    st = deepcopy_faces(state_np)
+    npac.exchange_state_halos_3d(ctx, st, KM, scalars=True, winds=True)
+    jst = jac.exchange_state_halos_3d(jctx, jstate, KM, scalars=True,
+                                      winds=True)
+
+    n_csw = npcg.csw_phase_3d(ctx, deepcopy_faces(st), dt2=dt2, km=KM,
+                              nord=2, duogrid=True)
+    j_csw = csw_phase_3d(jctx, jst, dt2, KM, nord=2)
+    for nm in ("uc", "vc", "divg_d"):
+        want = np.stack([np.asarray(n_csw[t][nm]) for t in range(6)])
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.  [class: stage]
+        cmp_fields(j_csw[nm], want, f"stage c_sw {nm}", 1e-12)
+
+    # The NumPy pressure phase's RETURN is not used: what this stage
+    # contributes to the winds is its in-place mutation of n_csw's
+    # uc/vc, which is the reference compared below.
+    npcg.cgrid_pressure_phase_3d(ctx, n_csw, KM, dt2=dt2, ptop=PTOP,
+                                 akap=AKAP, cp_air=CP_AIR)
+    j_press = cgrid_pressure_phase_3d(jctx, j_csw, KM, dt2=dt2,
+                                      ptop=PTOP, akap=AKAP,
+                                      cp_air=CP_AIR)
+    for nm in ("uc", "vc"):
+        want = np.stack([np.asarray(n_csw[t][nm]) for t in range(6)])
+        # p_grad_c mutates uc/vc in the NumPy lane, so the reference is
+        # the MUTATED n_csw, not the returned bundle.
+        cmp_fields(j_press[nm], want, f"stage p_grad_c {nm}", 1e-12)
+
+    j_csw = {**j_csw, "uc": j_press["uc"], "vc": j_press["vc"]}
+    n_dsw = npdsw.dsw_transport_phase_3d(ctx, deepcopy_faces(st),
+                                         deepcopy_faces(n_csw), dt=dt,
+                                         km=KM)
+    j_dsw = dsw_transport_phase_3d(jctx, jst, j_csw, dt, KM)
+    # `delp`/`pt` are the d_sw2 UPDATE and sit at the top level of the
+    # spec's per-face dict; `ut`/`vt` live inside its "levels" list (the
+    # per-level d_sw1 outputs), so they are stacked from there rather
+    # than looked up at the top, which is what raised KeyError on the
+    # first run of this bisect.
+    for nm in ("delp", "pt"):
+        want = np.stack([np.asarray(n_dsw[t][nm]) for t in range(6)])
+        cmp_fields(j_dsw[nm], want, f"stage d_sw1/2 {nm}", 1e-12)
+    for nm in ("ut", "vt"):
+        want = np.stack([
+            np.stack([np.asarray(lvl[nm]) for lvl in n_dsw[t]["levels"]],
+                     axis=2) for t in range(6)])
+        cmp_fields(j_dsw[nm], want, f"stage d_sw1 {nm}", 1e-12)
+
+    n_tail = nptail.dsw_tail_phase_3d(ctx, deepcopy_faces(st),
+                                      deepcopy_faces(n_csw),
+                                      deepcopy_faces(n_dsw), dt=dt,
+                                      km=KM)
+    j_tail = dsw_tail_phase_3d(jctx, jst, j_csw, j_dsw, dt, KM)
+    for nm in ("u", "v"):
+        want = np.stack([np.asarray(n_tail[t][nm]) for t in range(6)])
+        cmp_fields(j_tail[nm], want, f"stage d_sw3-6 {nm}", 1e-12)
