@@ -24,6 +24,7 @@ from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
     energy_consistent_moisture_floor,
+    conservative_positive_clip, is_borrow_eligible_tracer,
 )
 from legoesm.core.tracers import (
     TracerRegistry,
@@ -1070,10 +1071,32 @@ class ModelDriver:
         return {k: self.tracers[k] for k in self._DOUBLE_MOMENT_TRACERS
                 if self.tracers.get(k) is not None}
 
+    def _conserving_floor(self, field, dp=None):
+        """Column-conserving non-negativity for a per-mass field
+        ``(..., nlev)``: clip negatives, rescale the column's positives so
+        the TRUE layer-mass (dp) weighted integral is unchanged (owner
+        decision 2026-08-16: conserving form always — the plain
+        ``max(q, 0)`` invents mass at every overdraw/undershoot, the
+        MPAS-century +30 kg/m2/yr class). dp from ``pressure_at_half`` is
+        hybrid-correct and reduces to ``dsigma * p_s`` on pure sigma (the
+        per-column ``p_s`` cancels in the rescale); non-positive dp (broken
+        hybrid layer over terrain) is zero-weighted rather than divided by —
+        mirrors the MPAS floors stage. Pass a precomputed ``dp`` when
+        flooring several fields against the same ``p_s`` (the double-moment
+        loop) to skip recomputing it per field."""
+        if dp is None:
+            _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+            dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+        fixed, _created = conservative_positive_clip(field, dp, axis=-1)
+        return fixed
+
     def _apply_double_moment_tendencies(self, phys_out, dt) -> None:
         """Integrate the ice/snow/graupel + number tracers one step from the
-        matching ``PhysicsOutput`` tendencies, clipped non-negative. No-op
-        unless the full-moisture registry is active (q_i present)."""
+        matching ``PhysicsOutput`` tendencies, floored non-negative by the
+        column-conserving borrow (every one of these is per-mass and
+        borrow-eligible; a plain clip invented number at x2.2/day compound on
+        century3 until N_i overflowed). No-op unless the full-moisture
+        registry is active (q_i present)."""
         if not (isinstance(self.tracers, dict)
                 and self.tracer_registry.has("q_i")):
             return
@@ -1082,9 +1105,13 @@ class ModelDriver:
             "q_g": phys_out.dq_g_dt, "N_c": phys_out.dN_c_dt,
             "N_r": phys_out.dN_r_dt, "N_i": phys_out.dN_i_dt,
         }
+        _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+        _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
         for k, tend in _upd.items():
             if self.tracers.get(k) is not None:
-                self.tracers[k] = jnp.maximum(self.tracers[k] + dt * tend, 0.0)
+                assert is_borrow_eligible_tracer(k), k
+                self.tracers[k] = self._conserving_floor(
+                    self.tracers[k] + dt * tend, dp=_dp)
 
     def _checkpoint_carry_aux(self) -> dict | None:
         """``self._carry_aux`` augmented with the evolved double-moment tracers
@@ -12889,9 +12916,11 @@ class ModelDriver:
         if self.config.energy_consistent_moisture_clip:
             self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
         else:
-            self.q_v = jnp.maximum(_qv_raw, 0.0)
-        self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-        self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+            # Conserving form always (owner decision 2026-08-16): the plain
+            # ``max(q, 0)`` invented water at every physics overdraw.
+            self.q_v = self._conserving_floor(_qv_raw)
+        self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+        self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
         self._apply_double_moment_tendencies(phys_out, DT)
 
         if MICROPHYSICS == "none":
@@ -12907,8 +12936,11 @@ class ModelDriver:
                 u=self.state.u.replace(data=self.state.u.data + DT * phys_out.du_dt),
                 v=self.state.v.replace(data=self.state.v.data + DT * phys_out.dv_dt),
             )
-        self.q_v = jnp.maximum(
-            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff), 0.0
+        # Conserving form always (owner decision 2026-08-16): the
+        # hyperdiffusion tail is non-monotone, so its floor is the same
+        # mass-creating clamp class as the physics floors above.
+        self.q_v = self._conserving_floor(
+            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
         )
         self.state = self.state._replace(
             u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
@@ -13039,9 +13071,10 @@ class ModelDriver:
             if self.config.energy_consistent_moisture_clip:
                 self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
             else:
-                self.q_v = jnp.maximum(_qv_raw, 0.0)
-            self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-            self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+                # Conserving form always (owner decision 2026-08-16).
+                self.q_v = self._conserving_floor(_qv_raw)
+            self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+            self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
 
             # Apply ice/number tracer tendencies when full registry is active
             self._apply_double_moment_tendencies(phys_out, DT)
@@ -13079,10 +13112,10 @@ class ModelDriver:
                     self.state.p_s.data, dsigma, self.grid,
                 )
 
-            # Moisture smoothing
-            self.q_v = jnp.maximum(
-                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff),
-                0.0,
+            # Moisture smoothing — conserving floor (owner decision
+            # 2026-08-16), same class as the warmup-lane site.
+            self.q_v = self._conserving_floor(
+                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
             )
 
             # Rayleigh friction

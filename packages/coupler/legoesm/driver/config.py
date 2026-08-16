@@ -225,14 +225,16 @@ class DycoreConfig(NamedTuple):
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
     # Column-CONSERVING tracer positivity clamp in the MPAS floors stage.
-    # The default plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
+    # The plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
     # ``tracer_transport_mpas``, horizontal advection undershoot alone made it
     # invent +0.0822 kg/m2/day (+30 kg/m2/yr) of water on the AMIP century
     # (measured 2026-07-26, 96% from q_i/q_c), driving column water 23->42
     # kg/m2, OLR 199->109 W/m2 and +10 K/yr warming.  True borrows the clipped
     # deficit back from the positives (10.4x less spurious mass, measured).
-    # Default False keeps every existing MPAS result bit-identical.
-    mpas_conservative_tracer_clamp: bool = False
+    # Default TRUE since 2026-08-16 (owner decision: "conserving form
+    # always"); ``--no-mpas-conservative-tracer-clamp`` restores the legacy
+    # mass-creating clamp for bit-comparison against older runs.
+    mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default OFF — the
@@ -1442,6 +1444,26 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must ANNOUNCE itself when invoked. These are
+        # warnings, not errors — the legacy/exception paths stay selectable
+        # for bit-comparison and for the documented MSE-vs-water trade-off.
+        import logging as _logging
+        _wlog = _logging.getLogger(__name__)
+        if not d.mpas_conservative_tracer_clamp:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "mpas_conservative_tracer_clamp=False restores the plain "
+                "max(q, 0) tracer clamp, which CREATES mass at every "
+                "transport undershoot (+30 kg/m2/yr of water measured on "
+                "the AMIP century). Legacy bit-comparison mode only.")
+        if self.energy_consistent_moisture_clip:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "energy_consistent_moisture_clip=True conserves "
+                "moist static energy but CREATES the clipped vapour "
+                "(water is NOT conserved by this floor) — the documented "
+                "exception to 'conserving form always'.")
         if g.resolution <= 0:
             errors.append(f"grid.resolution must be > 0, got {g.resolution}")
         if g.nlev <= 0:

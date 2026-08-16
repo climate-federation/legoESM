@@ -171,14 +171,16 @@ def test_repeated_application_does_not_drift():
     assert abs(float(jnp.sum(x * w)) - total0) < 1e-10 * max(abs(total0), 1.0)
 
 
-def test_mpas_config_flag_defaults_off_and_is_wired():
-    """Default must be bit-identical to today; the flag must reach the step."""
+def test_mpas_config_flag_defaults_on_and_is_wired():
+    """Conserving form is the default (owner decision 2026-08-16); the flag
+    must reach the step (the default-value assert lives in
+    ``test_mpas_conserving_clamp_is_the_default_now``)."""
     import inspect
 
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel,
     )
-    assert MPASPrimitiveEquationConfig().conservative_tracer_clamp is False
+    assert MPASPrimitiveEquationConfig().conservative_tracer_clamp is True
     # The floors stage lives in ``_step_jit`` (``step`` delegates to it) — the
     # method actually executed by the MPAS lane.  Asserting against ``step``
     # silently passed nothing, the same wrong-target mistake that once had a
@@ -199,15 +201,18 @@ def test_cli_round_trip_and_factory_wiring():
         _postprocess_args, build_arg_parser, build_config_from_args,
     )
     parser = build_arg_parser()
-    off = build_config_from_args(_postprocess_args(
+    # Conserving form is the DEFAULT (owner decision 2026-08-16); the
+    # legacy mass-creating clamp is the explicit opt-out for
+    # bit-comparison against older runs.
+    on = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert off.dycore.mpas_conservative_tracer_clamp is False
-
-    on = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--mpas-conservative-tracer-clamp"]),
-        parser))
     assert on.dycore.mpas_conservative_tracer_clamp is True
     on.validate_strict()
+
+    off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--no-mpas-conservative-tracer-clamp"]),
+        parser))
+    assert off.dycore.mpas_conservative_tracer_clamp is False
 
 
 def test_factory_forwards_the_flag_to_the_dycore_config():
@@ -552,3 +557,204 @@ def test_mpi_floor_iterates_tracers_sorted():
     from legoesm.parallel import voronoi_mpi
     src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
     assert "sorted(state_new.tracers)" in src
+
+
+class TestPerStepDriverConservingFloor:
+    """Owner decision 2026-08-16: conserving form ALWAYS. The per-step
+    lat-lon/cube driver's plain ``max(q, 0)`` species floors move to the
+    column-conserving borrow, weighted by the TRUE layer mass dp
+    (hybrid-correct; reduces to dsigma*p_s on pure sigma)."""
+
+    def test_conserving_floor_conserves_the_dp_integral(self):
+        """REAL execution of the driver method on a minimal fake self: a
+        mixed-sign column keeps its dp-weighted integral (borrow), and a
+        plain clip would inflate it (non-vacuity)."""
+        from types import SimpleNamespace
+
+        from legoesm.driver.model_driver import ModelDriver
+        from legoesm.grids.vertical import create_sigma_coordinate
+
+        sigma = create_sigma_coordinate(4)
+        p_s = jnp.full((2, 3), 1.0e5)
+        fake = SimpleNamespace(
+            sigma=sigma,
+            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
+        )
+        q = jnp.broadcast_to(
+            jnp.asarray([3.0e-4, -1.0e-4, 2.0e-4, 1.0e-4]), (2, 3, 4))
+        out = ModelDriver._conserving_floor(fake, q)
+        _ph = sigma.pressure_at_half(p_s)
+        dp = _ph[..., 1:] - _ph[..., :-1]
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(out * dp, axis=-1)),
+            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
+        assert float(jnp.min(out)) >= 0.0
+        # non-vacuity: the plain clip changes the integral on this input
+        assert not np.allclose(
+            np.asarray(jnp.sum(jnp.maximum(q, 0.0) * dp, axis=-1)),
+            np.asarray(jnp.sum(q * dp, axis=-1)))
+
+    def test_per_step_lanes_route_through_the_conserving_floor(self):
+        """Source pin on the symbols that RUN (_run_per_step and the
+        double-moment integrator): the conserving floor must be called and
+        the old plain clamp must be gone from the species updates. Fails if
+        either lane's floor is reverted to ``jnp.maximum``."""
+        import inspect
+
+        from legoesm.driver.model_driver import ModelDriver
+
+        src_step = inspect.getsource(ModelDriver._run_per_step)
+        assert src_step.count("self._conserving_floor(_qv_raw)") == 2
+        assert src_step.count(
+            "self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)") == 2
+        assert src_step.count(
+            "self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)") == 2
+        assert "jnp.maximum(_qv_raw, 0.0)" not in src_step
+        assert "jnp.maximum(self.q_c" not in src_step
+        assert "jnp.maximum(self.q_r" not in src_step
+
+        src_dm = inspect.getsource(
+            ModelDriver._apply_double_moment_tendencies)
+        assert "self._conserving_floor(" in src_dm
+        assert "jnp.maximum(self.tracers[k]" not in src_dm
+
+        src_floor = inspect.getsource(ModelDriver._conserving_floor)
+        assert "conservative_positive_clip" in src_floor
+        assert "pressure_at_half" in src_floor   # hybrid-correct dp weight
+
+
+def test_mpas_conserving_clamp_is_the_default_now():
+    """Owner decision 2026-08-16: conserving form always — the MPAS floors
+    default flips ON (the OFF assertions live in the CLI test above, via
+    --no-mpas-conservative-tracer-clamp)."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig,
+    )
+    from legoesm.driver.config import DycoreConfig
+
+    assert MPASPrimitiveEquationConfig().conservative_tracer_clamp is True
+    assert DycoreConfig().mpas_conservative_tracer_clamp is True
+
+
+class TestConservingFormAlways:
+    """Extension of the owner decision to the paths codex round 2 named:
+    the DEFAULT AMIP route (compiled segments, both the single-rank and the
+    MPI owned-face bodies) and the per-step hyperdiffusion floors."""
+
+    def test_compiled_segment_floors_are_conserving(self):
+        """Source pin on the compiled single-rank step body: every species
+        floor routes through conservative_positive_clip; the plain clamps
+        are gone."""
+        import inspect
+
+        from legoesm.driver import compiled_segments as cs
+
+        src = inspect.getsource(cs)
+        # q_v else-branch, q_c, q_r and the shared _dm_upd all conserving:
+        assert src.count("conservative_positive_clip(") >= 7
+        # The old plain clamps must be gone from the update spellings.
+        assert "jnp.maximum(_qv_raw, 0.0)" not in src
+        assert "jnp.maximum(moist[\"q_c\"]" not in src
+        assert "jnp.maximum(moist[\"q_r\"]" not in src
+        assert "jnp.maximum(fld + statics.dt * tend, 0.0)" not in src
+        assert "jnp.maximum(fld[_ofi] + _dt * tend, 0.0)" not in src
+
+    def test_per_step_hyperdiffusion_floor_is_conserving(self):
+        """The q_v smoothing tail is non-monotone; its floor is the same
+        clamp class. Both per-step sites must route through the conserving
+        floor."""
+        import inspect
+
+        from legoesm.driver.model_driver import ModelDriver
+
+        src = inspect.getsource(ModelDriver._run_per_step)
+        assert "jnp.maximum(\n            self.q_v + DT * hyperdiffusion_3d" \
+            not in src
+        assert src.count(
+            "self._conserving_floor(\n"
+            "            self.q_v + DT * hyperdiffusion_3d") == 1
+        assert src.count(
+            "self._conserving_floor(\n"
+            "                self.q_v + DT * hyperdiffusion_3d") == 1
+
+    def test_conserving_floor_is_hybrid_correct_by_execution(self):
+        """REAL execution with a hybrid coordinate: the dp-weighted column
+        integral is conserved, and the flat-dsigma integral of the same
+        output is NOT (non-vacuity — the two weights genuinely differ)."""
+        from types import SimpleNamespace
+
+        from legoesm.driver.model_driver import ModelDriver
+        from legoesm.grids.vertical import create_hybrid_coordinate
+
+        k = jnp.linspace(0.0, 1.0, 9)
+        hybrid = create_hybrid_coordinate(
+            8, A_half=2.0e4 * (1.0 - k) * k, B_half=k**2)
+        p_s = jnp.asarray([[6.0e4, 1.03e5]])   # strong per-column variation
+        fake = SimpleNamespace(
+            sigma=hybrid,
+            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
+        )
+        q = jnp.broadcast_to(
+            jnp.asarray([3e-4, -1e-4, 2e-4, 1e-4, 5e-5, -2e-5, 4e-5, 6e-5]),
+            (1, 2, 8))
+        out = ModelDriver._conserving_floor(fake, q)
+        _ph = hybrid.pressure_at_half(p_s)
+        dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(out * dp, axis=-1)),
+            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
+        assert float(jnp.min(out)) >= 0.0
+        dsig = jnp.asarray(hybrid.dsigma)
+        assert not np.allclose(
+            np.asarray(jnp.sum(out * dsig, axis=-1)),
+            np.asarray(jnp.sum(q * dsig, axis=-1)))
+
+
+class TestNonConservingFormsWarn:
+    """Owner decision 2026-08-16 addendum: any selectable NON-conserving
+    form must announce itself when invoked. Warnings fire at build/validate
+    time (static Python), never inside traced code."""
+
+    def test_mpas_legacy_clamp_warns_at_model_build(self, caplog):
+        import logging
+
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel,
+        )
+        from legoesm.grids.voronoi import create_voronoi_mesh
+
+        mesh = create_voronoi_mesh(0, lloyd_iterations=1)
+        from legoesm.grids.vertical import create_sigma_coordinate
+        sigma = create_sigma_coordinate(3)
+        with caplog.at_level(logging.WARNING):
+            MPASPrimitiveEquationModel(
+                mesh, sigma,
+                MPASPrimitiveEquationConfig(conservative_tracer_clamp=False))
+        assert any("NON-CONSERVING" in r.message for r in caplog.records)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            MPASPrimitiveEquationModel(mesh, sigma)
+        assert not any("NON-CONSERVING" in r.message for r in caplog.records)
+
+    def test_validate_strict_warns_on_both_optouts(self, caplog):
+        import logging
+
+        from legoesm.driver.config import ExperimentConfig
+
+        base = ExperimentConfig()
+        with caplog.at_level(logging.WARNING):
+            base._replace(
+                dycore=base.dycore._replace(
+                    mpas_conservative_tracer_clamp=False),
+                energy_consistent_moisture_clip=True,
+            ).validate_strict()
+        msgs = [r.message for r in caplog.records
+                if "NON-CONSERVING" in r.message]
+        assert len(msgs) == 2
+        assert any("mpas_conservative_tracer_clamp" in m for m in msgs)
+        assert any("energy_consistent_moisture_clip" in m for m in msgs)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            base.validate_strict()
+        assert not any("NON-CONSERVING" in r.message
+                       for r in caplog.records)

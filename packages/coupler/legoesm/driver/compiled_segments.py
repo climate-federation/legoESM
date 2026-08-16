@@ -44,6 +44,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
 from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.thermo import saturation_mixing_ratio
@@ -1250,14 +1251,27 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     if statics.energy_consistent_moisture_clip:
         # Issue #323: keep the q_v floor moist-static-energy neutral by
         # removing the latent heat of the clipped (un-removed) vapour sink.
+        # KNOWN EXCEPTION to "conserving form always": this opt-in branch
+        # conserves MSE but CREATES the clipped vapour; a jointly water- and
+        # energy-conserving floor is a separate limiter (codex 2026-08-16).
         q_v_upd, T_upd = energy_consistent_moisture_floor(_qv_raw, T_upd)
     else:
-        q_v_upd = jnp.maximum(_qv_raw, 0.0)
-    q_c_upd = jnp.maximum(moist["q_c"] + statics.dt * phys_out.dq_c_dt, 0.0)
-    q_r_upd = jnp.maximum(moist["q_r"] + statics.dt * phys_out.dq_r_dt, 0.0)
+        # Conserving form always (owner decision 2026-08-16): column borrow,
+        # never the mass-creating plain max(q, 0). Pure-sigma lane: dsigma is
+        # the layer-mass weight up to the per-column p_s factor, which
+        # cancels in the rescale.
+        q_v_upd = conservative_positive_clip(
+            _qv_raw, statics.dsigma, axis=-1)[0]
+    q_c_upd = conservative_positive_clip(
+        moist["q_c"] + statics.dt * phys_out.dq_c_dt, statics.dsigma,
+        axis=-1)[0]
+    q_r_upd = conservative_positive_clip(
+        moist["q_r"] + statics.dt * phys_out.dq_r_dt, statics.dsigma,
+        axis=-1)[0]
     def _dm_upd(fld, tend):
         return (None if fld is None
-                else jnp.maximum(fld + statics.dt * tend, 0.0))
+                else conservative_positive_clip(
+                    fld + statics.dt * tend, statics.dsigma, axis=-1)[0])
     q_i_upd = _dm_upd(moist["q_i"], phys_out.dq_i_dt)
     q_s_upd = _dm_upd(moist["q_s"], phys_out.dq_s_dt)
     q_g_upd = _dm_upd(moist["q_g"], phys_out.dq_g_dt)
@@ -2076,22 +2090,28 @@ def build_segment_fn(
                     _qv_owned, _T_owned = energy_consistent_moisture_floor(
                         _qv_raw, _T_owned)
                 else:
-                    _qv_owned = jnp.maximum(_qv_raw, 0.0)
+                    # Conserving form always (owner decision 2026-08-16):
+                    # column borrow on the owned subset (rows are whole
+                    # columns, so the borrow is rank-local and MPI-safe).
+                    _qv_owned = conservative_positive_clip(
+                        _qv_raw, dsigma, axis=-1)[0]
                 T_upd = T_new.at[_ofi].set(_T_owned)
                 q_v_upd = q_v_dyn.at[_ofi].set(_qv_owned)
-                q_c_upd = q_c_dyn.at[_ofi].set(
-                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
-                )
-                q_r_upd = q_r_dyn.at[_ofi].set(
-                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
-                )
+                q_c_upd = q_c_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, dsigma,
+                    axis=-1)[0])
+                q_r_upd = q_r_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, dsigma,
+                    axis=-1)[0])
                 # Double-moment tracers (None unless populated): evolve at owned
-                # indices from the matching microphysics tendencies, clipped
-                # non-negative like q_c/q_r.  Base = the (possibly advected)
-                # _dyn alias so non-owned faces keep dynamics-only values.
+                # indices from the matching microphysics tendencies, floored by
+                # the conserving borrow like q_c/q_r.  Base = the (possibly
+                # advected) _dyn alias so non-owned faces keep dynamics-only
+                # values.
                 def _dm_upd_owned(fld, tend):
                     return (None if fld is None else fld.at[_ofi].set(
-                        jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
+                        conservative_positive_clip(
+                            fld[_ofi] + _dt * tend, dsigma, axis=-1)[0]))
                 q_i_upd = _dm_upd_owned(q_i_dyn, phys_out.dq_i_dt)
                 q_s_upd = _dm_upd_owned(q_s_dyn, phys_out.dq_s_dt)
                 q_g_upd = _dm_upd_owned(q_g_dyn, phys_out.dq_g_dt)
