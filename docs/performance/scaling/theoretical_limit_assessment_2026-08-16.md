@@ -49,48 +49,52 @@ cross-node collectives will likely run on TCP sockets*.
 
 ## c. MPAS icosahedral GPU — 35 % of the step is unexplained; splitting it is the work
 
-CONFIRMED budget @ s9/64 GPUs, wide halo (6.82 ms/step):
+CONFIRMED budget @ s9/64 GPUs, wide halo (6.82 ms/step) — UPDATED
+with the three-arm split receipt (job 26942819: interleaved
+full / no-comm / no-staging arms, 60 steps, spreads 0.3–0.6 %):
 
-| term | ms | status |
+| term | ms | how |
 |---|---|---|
-| local compute | 2.00 | CONFIRMED (single-GPU control, same per-device load) |
-| halo wire (bytes) | 1.85 | CONFIRMED (ballast A/B, job 26919124) |
-| halo latency | 0.57 | fitted (11 rounds × 52 µs) |
-| unexplained | 2.40 | 35 % of step; skew REFUTED (all ranks within 24 µs, receipt e96c3d231); "inside the collectives" |
+| no-halo program (owned+ghost compute, masking, machinery) | 3.46 | MEASURED (no-staging arm) |
+| halo staging (gather/concat/scatter) | 0.32 | MEASURED (no-comm − no-staging) |
+| halo wire (bytes) | 1.82 | MEASURED (ballast, same job) |
+| in-collective wait / round serialisation | 1.23 | MEASURED (full − no-comm − wire) |
 
-Floor with today's code structure = 2.00 + 1.85 + 0.57 ≈ 4.4 ms ⇒
-**gap 2.4 ms (35 %)**. The 2.40 ms is UNEXPLAINED, not "recoverable" —
-whether any of it can be removed is exactly what the receipts below
-decide. Best case (all of it removed, 2× compute from the reorder
-lever, one 52 µs round left): 1.00 + 1.85 + 0.05 ≈ 2.9 ms — treat
-that as the optimistic bound, not a target. (codex r1: earlier
-2.6-ms/"~55 % recoverable" arithmetic retracted.)
+The former "2.40 unexplained" is RESOLVED into 1.23 ms of
+in-collective wait (~112 µs/round across 11 sequential rounds — rank
+skew refuted at <24 µs, so this is the cross-node rounds themselves)
+plus ~1.46 ms by which the no-halo program exceeds the 2.00 ms
+single-GPU control. Of that 1.46, ~0.34 is priced by the wide halo's
+~17 % enlarged region; the remaining ~1.1 ms is program overhead
+(masking, padded trash-slot work, shard_map machinery) — the
+single-GPU control is a DIFFERENT program (serial `model.step`), so
+this term is bounded, not attributed (instrument's own caveat).
+GLM's pack-cost hypothesis is REFUTED at 64: staging is 0.32 ms
+(~5 % of step), not the residual.
+
+Floor reading from the split: the step is 3.46 compute-side + 3.36
+comm-side (0.32 staging + 1.82 wire + 1.23 wait). Optimistic bound if
+the named levers all land (fusion/layout 2× on the compute side, few
+collectives with wire mostly hidden): ~2 ms — treat as bound, not
+target. (codex r1: earlier 2.6-ms/"~55 % recoverable" arithmetic
+retracted; superseded again by the 26942819 split.)
 
 Ranked levers:
 
-1. **Split the 2.40 ms "inside the collectives"** (biggest known
-   unknown). GLM r1 mechanism read: the ballast's own receipt BOUNDS
-   byte-coupled congestion small — 4× bytes ran only ~12 % over
-   linear, so a congestion term proportional to bytes would have
-   added ~+7 ms, not +0.36. The residual is therefore predominantly
-   BYTE-INDEPENDENT: leading suspects are (i) pack/unpack
-   gather-scatter kernels running at the same ~6×-off-roofline
-   gather bandwidth as the compute (invisible to the wire budget),
-   (ii) XLA pre/post-collective layout ops (flatten/pad/concat D2D
-   copies, including the per-round-MAX zero-padding = fake bytes),
-   (iii) dispatch gaps/event syncs between the 11 serialised rounds.
-   Caveats GLM itself flags: the dense ballast bypasses the gather
-   path, and 4× message size can flip the NCCL protocol (LL→Simple)
-   — both confound the bound. Discriminators, cheapest first:
-   (a) identity-permutation ppermute at identical shapes — splits
-   pack/index cost from transport, needs no profiler (important:
-   nsys does NOT record these collectives on this stack, receipt
-   2026-08-13); (b) nsys bucketing of the comm window for the PACK
-   and memcpy kernels only (those DO appear). CAVEAT (codex r1): a
-   bare stride-k sweep does NOT discriminate — stride changes fill
-   count AND fetched depth together, and only k ∈ {1, evals−1,
-   evals} are correctness-sound; any sweep must record per-arm
-   padded bytes + schedule and equalize bytes via ballast.
+1. ~~Split the 2.40 ms~~ **DONE — receipt 26942819** (the
+   identity-permutation instrument both reviews asked for already
+   existed as the no-comm/no-staging knobs and had been run at 64).
+   Result above. What remains actionable from the split:
+   (i) **in-collective wait 1.23 ms** — sequential cross-node rounds;
+   attacked by fewer rounds + overlap of a few-collective exchange
+   (item 2), NOT by repartitioning (skew refuted);
+   (ii) **~1.1 ms no-halo program overhead** — masking, padded
+   trash-slot work, machinery; needs an HLO-level look at the
+   no-staging arm (single-node, cheap) before any lever is named;
+   (iii) wide-halo redundant ghost compute (~0.34 ms priced) — the
+   uncommitted stride-k diff trades exactly this against extra
+   fills; only k ∈ {1, evals−1, evals} sound (codex r1), and any
+   stride A/B must record per-arm padded bytes + schedule.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
@@ -241,9 +245,9 @@ for this panel's measured point.
 1. NCCL transport receipt (§0) — minutes, gates every multi-NODE
    point. `NCCL_DEBUG=INFO` names the transport only; a bandwidth
    claim additionally needs per-link padded bytes + active pairs.
-2. MPAS 2.40 ms split (§c1) — identity-permutation ppermute probe
-   first (splits pack cost from transport, no profiler needed), then
-   bytes-equalized arms; NOT a bare stride sweep.
+2. ~~MPAS 2.40 ms split~~ DONE (receipt 26942819; §c1). Next in its
+   place: HLO census of the no-staging arm's ~1.1 ms program
+   overhead — single-node, cheap.
 3. MPAS layout + fusion, single-GPU (§c3) — parallel track, no
    cluster time; biggest plausible levers on the 6×-off-roofline
    compute (level-contiguous columns, batched shared-index gathers,
