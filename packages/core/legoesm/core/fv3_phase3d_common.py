@@ -66,6 +66,14 @@ CSW_OUT_LIKE = {
     "divg_d": "divgd", "uc": "uc", "vc": "vc",
     "delpc": "delp", "ptc": "pt", "ua": "ua", "va": "va",
     "ut": "ut", "vt": "vt", "wc": "w",
+    # `pkc` is the C-stage FULL interface pressure, allocated
+    # `(m_a, m_a, km+1)` at fv3_native_cgrid_phase_3d.py:253 -- the same
+    # shape `field_shape` declares for `pk`/`gz`.  Added because the NH
+    # D-grid tail validates `csw_press` through this table and the
+    # lookup raised "unknown field 'pkc'" (job 9417536); the message was
+    # right that the fix belongs HERE and not in an undeclared shape at
+    # the call site.
+    "pkc": "pk",
 }
 
 

@@ -120,6 +120,21 @@ def test_validate_stacked_accepts_declared_shapes():
                             what="states")
 
 
+def test_pkc_maps_to_the_interface_shape_the_c_stage_allocates():
+    """`pkc` is the C-stage FULL interface pressure, (m_a, m_a, km+1) at
+    fv3_native_cgrid_phase_3d.py:253 -- the shape field_shape declares
+    for pk/gz.  The NH D-grid tail validates csw_press through this
+    table, and the lookup raised "unknown field 'pkc'" without it."""
+    assert common.CSW_OUT_LIKE["pkc"] == "pk"
+    cont = {"pkc": _stacked("pk")}
+    common.validate_stacked("t", cont, _Ctx(), KM, ("pkc",),
+                            what="csw_press")
+    bad = {"pkc": _stacked("delp")}          # (m_a, m_a, km), not km+1
+    with pytest.raises(ValueError, match=r"csw_press\['pkc'\]"):
+        common.validate_stacked("t", bad, _Ctx(), KM, ("pkc",),
+                                what="csw_press")
+
+
 def test_validate_stacked_maps_csw_names_through_the_table():
     # `delpc` shares `delp`'s shape and `divg_d` shares `divgd`'s; the
     # mapping is what makes the C-grid outputs checkable at all.
