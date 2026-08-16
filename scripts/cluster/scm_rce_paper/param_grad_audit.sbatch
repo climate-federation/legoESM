@@ -4,7 +4,7 @@
 #SBATCH --job-name=grad_audit
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=11:30:00
 #SBATCH --array=0-4
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/grad_audit_%A_%a.out
 set +e
