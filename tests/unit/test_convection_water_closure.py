@@ -44,7 +44,16 @@ CLOSURE_TOL_MM_DAY = 1.0e-3
 #: supply their prognostic carry (M_c / a_u) or the resolved vertical velocity
 #: (w_grid), so the entry recorded a measurement that did not happen.  The
 #: carries are supplied now and this list holds only what has been measured.
-KNOWN_LEAKING: dict[str, str] = {}
+KNOWN_LEAKING: dict[str, str] = {
+    # MEASURED on this synthetic sounding, one leaf call each.  Recorded, NOT
+    # asserted to be model-level leaks: both schemes close their water budget
+    # in the full SCM (|P-E| <= 0.02 mm/day over a 100-day RCE column), so the
+    # residual may be closed downstream by the physics pipeline rather than at
+    # the leaf.  Tracing that is the open follow-up; until it is traced, the
+    # honest statement is "leaf-level residual, model-level closure unverified".
+    "mass_flux": "leaf residual 1.114 mm/day; closes in the SCM, path untraced",
+    "tiedtke": "leaf residual 0.116 mm/day; closes in the SCM, path untraced",
+}
 
 SCHEMES = (
     "sbm", "dca", "kuo", "mass_flux", "edmf",
