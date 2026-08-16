@@ -8072,6 +8072,8 @@ class ModelDriver:
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
         _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
+        _land_shflx_cells = None       # (nCells,) land's own sensible flux
+        _land_lhflx_cells = None       # (nCells,) land's own latent flux
         if _land_ml_on:
             if not _sst_forcing:
                 raise ValueError(
@@ -8113,12 +8115,16 @@ class ModelDriver:
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
                 # land tile's snow-albedo feedback never reached radiation.
-                # resp.q_surface is the scheme's SOLVED boundary humidity --
-                # for the two-leaf canopy the canopy-air humidity out of the
-                # stomatal+soil+aerodynamic resistance network.  It used to be
-                # discarded here too, which is why no resistance-based land
-                # surface could reach the atmosphere on this lane.
-                return new_state, resp.T_sfc, resp.albedo, resp.q_surface
+                # resp.q_surface is the scheme's SOLVED boundary humidity;
+                # resp.shflx / resp.lhflx are the fluxes its OWN energy
+                # balance closed with.  The FLUXES are the coupling now: the
+                # humidity handoff was measured insufficient (the canopy's
+                # boundary humidity sits close to the air by construction, so
+                # the atmosphere re-applying its own exchange coefficient
+                # delivered ~a tenth of the solved flux -- Amazon latent heat
+                # 78 W/m2 offline vs 7 coupled, land 10 K cold in 30 days).
+                return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
+                        resp.shflx, resp.lhflx)
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8625,6 +8631,10 @@ class ModelDriver:
                 _qsat0 = _satmr0(_T_land0, _p_low0)
                 _land_qsfc_cells = (
                     _q_air0 + _land_beta_cells * (_qsat0 - _q_air0))
+                # Flux-channel seeds: zero exchange for the one step before
+                # the land produces its first solved fluxes.
+                _land_shflx_cells = jnp.zeros_like(_q_air0)
+                _land_lhflx_cells = jnp.zeros_like(_q_air0)
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -8857,6 +8867,10 @@ class ModelDriver:
                 # turbulence over the land fraction (supersedes beta there).
                 if _land_qsfc_cells is not None:
                     _forcing["q_sfc_land"] = _land_qsfc_cells
+                # The land's OWN turbulent fluxes -- the actual coupling.
+                if _land_shflx_cells is not None:
+                    _forcing["shflx_land"] = _land_shflx_cells
+                    _forcing["lhflx_land"] = _land_lhflx_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -8932,7 +8946,8 @@ class ModelDriver:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
-                     _land_albedo_cells, _land_qsfc_step) = _land_step_fn(
+                     _land_albedo_cells, _land_qsfc_step,
+                     _land_shflx_step, _land_lhflx_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     # Published only under the same switch that threads f_land
@@ -8941,6 +8956,8 @@ class ModelDriver:
                     # would change the forcing pytree and retrace.
                     if _land_beta_soil_on:
                         _land_qsfc_cells = _land_qsfc_step
+                        _land_shflx_cells = _land_shflx_step
+                        _land_lhflx_cells = _land_lhflx_step
                     if _land_beta_fn is not None and _land_qsfc_cells is None:
                         # Root-zone beta only until the humidity channel is
                         # live (or when the scheme solves none).

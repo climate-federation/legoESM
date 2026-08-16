@@ -468,6 +468,8 @@ def _make_hydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
+                **({"surface_flux": _surface_flux}
+                   if _surface_flux is not None else {}),
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -657,6 +659,42 @@ def _make_mpas_turbulence(
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col, land_beta)
 
+        # ``forcing["shflx_land"]`` / ``forcing["lhflx_land"]`` — the land
+        # scheme's OWN turbulent fluxes, blended by land fraction into the
+        # surface flux the BL scheme consumes.  This exists because handing
+        # over the canopy's HUMIDITY was measured insufficient: the canopy
+        # solved its flux against ITS aerodynamic resistance, so its boundary
+        # humidity sits close to the air by construction, and the atmosphere
+        # re-applying its own resistance to that already-collapsed gradient
+        # delivered ~a tenth of the canopy's flux (Amazon latent heat 78 W/m2
+        # offline -> 7 coupled, land 10 K cold in 30 days).  A flux is what
+        # the land solved; a flux is what crosses the boundary.  Momentum and
+        # the ocean/ice fraction keep the scheme's own bulk computation.
+        _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
+        _surface_flux = None
+        if _shf_land is not None:
+            if f_land is None:
+                raise ValueError(
+                    "forcing['shflx_land'] requires f_land in the turbulence "
+                    "factory (make_physics f_land=...).")
+            from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                compute_surface_fluxes,
+            )
+            _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
+                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], scheme_config.surface,
+            )
+            _lh_land = jnp.asarray(
+                forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
+            _sh_land = jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells)
+            _surface_flux = (
+                _tx, _ty,
+                (1.0 - _fl) * _sh + _fl * _sh_land,
+                (1.0 - _fl) * _lh + _fl * _lh_land,
+                _us,
+            )
+
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
@@ -671,6 +709,8 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
+                **({"surface_flux": _surface_flux}
+                   if _surface_flux is not None else {}),
             )
 
         # Cell → edge tendency projection.  Average the cell tendencies
@@ -1006,6 +1046,8 @@ def _make_spectral_pe_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
+                **({"surface_flux": _surface_flux}
+                   if _surface_flux is not None else {}),
             )
 
         # Reshape tendencies to grid space
