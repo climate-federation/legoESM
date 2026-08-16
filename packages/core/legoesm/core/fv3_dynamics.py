@@ -626,4 +626,26 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             hord_tr=hord_tr, tracer_q_split=tracer_q_split,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
             z_tracer=z_tracer, inline_q=inline_q)
-    return jax.jit(run)
+
+    # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
+    # `omga_is_meaningless` (a bool) -- and jit refuses to return either
+    # ("returned a value of type <class 'str'>, which is not a valid JAX
+    # type"), so jitting `run` directly could never have worked. Both
+    # are decided by STATIC arguments alone: pt_units by km vs
+    # REMAP_MIN_NPZ, omga_is_meaningless unconditionally. So they are
+    # computed here, outside the trace, and re-attached to the compiled
+    # call's result -- the caller sees the same dict either way, which
+    # is what makes eager-vs-jit comparable at all.
+    _meta = {"omga_is_meaningless": True,
+             "pt_units": "K" if km > REMAP_MIN_NPZ else "theta_v"}
+
+    def _arrays_only(*a, **kw):
+        out = run(*a, **kw)
+        return {k: v for k, v in out.items() if k not in _meta}
+
+    _compiled = jax.jit(_arrays_only)
+
+    def _call(*a, **kw):
+        return {**_compiled(*a, **kw), **_meta}
+
+    return _call

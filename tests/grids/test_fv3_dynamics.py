@@ -408,9 +408,15 @@ def test_jit_matches_eager(jctx, eta):
     kw = _common(ptop, ak, bk, True, 1, 2)
 
     eager = _out_state(jdyn.fv_dynamics_step(jctx, jst, press, q=q, **kw))
-    fn = jax.jit(lambda s, p, qq: jdyn.fv_dynamics_step(
-        jctx, s, p, q=qq, **kw))
-    jitted = _out_state(fn(jst, press, q))
+    # The MODULE's factory, not a hand-rolled jax.jit: it is what a
+    # caller would use, and it is where the static/dynamic split is
+    # declared. Jitting fv_dynamics_step directly cannot work -- the
+    # return carries pt_units, a str -- so a hand-rolled jit here would
+    # have tested a path nobody runs.
+    fn = jdyn.make_fv_dynamics_step_jit(
+        jctx, KM, k_split=1, n_split=2, kord_mt=KORD_MT,
+        kord_tm=KORD_TM, kord_tr=KORD_TR, hydrostatic=True)
+    jitted = _out_state(fn(jst, press, q, BDT, ptop, ak, bk, AKAP, CP_AIR))
     for nm in ("delp", "pt", "u", "v"):
         a = np.asarray(eager[nm])
         assert_real(a, f"eager {nm}")
