@@ -31,25 +31,46 @@ def _load_script():
     return mod
 
 
-def _synthetic(path, *, n_lat=48, n_lon=96, patch=(10.0, 30.0, 20.0, 60.0)):
-    """A source whose only land is one lat-lon box, carbon 1000 gC/m2 flat."""
+# Two land boxes with very different carbon, on opposite sides of the globe.
+# One box alone cannot test placement any more: the interpolator fills every
+# mesh cell from its nearest LAND cell, so a single-box source puts the same
+# value everywhere and a transposed map would look identical. Two contrasting
+# boxes make placement observable again -- cells near the rich box must be rich
+# and cells near the poor box poor, which a transpose cannot satisfy.
+_RICH = (10.0, 30.0, 20.0, 60.0)      # lat0, lat1, lon0, lon1
+_POOR = (-30.0, -10.0, 200.0, 240.0)
+_RICH_C, _POOR_C = 1000.0, 10.0
+
+
+def _synthetic(path, *, n_lat=48, n_lon=96):
     lat_1d = np.linspace(-90.0, 90.0, n_lat)
     lon_1d = np.linspace(0.0, 360.0, n_lon, endpoint=False)
     lat = np.repeat(lat_1d, n_lon)
     lon = np.tile(lon_1d, n_lat)
-    la0, la1, lo0, lo1 = patch
-    land = ((lat >= la0) & (lat <= la1) & (lon >= lo0) & (lon <= lo1))
-    pools = {f: np.where(land, 1000.0, 0.0) for f in CarbonState._fields}
+
+    def _box(b):
+        la0, la1, lo0, lo1 = b
+        return ((lat >= la0) & (lat <= la1) & (lon >= lo0) & (lon <= lo1))
+
+    rich, poor = _box(_RICH), _box(_POOR)
+    land = rich | poor
+    val = np.where(rich, _RICH_C, np.where(poor, _POOR_C, 0.0))
+    pools = {f: val.copy() for f in CarbonState._fields}
+    npft = 3
+    pw = np.zeros((lat.size, npft))
+    pw[rich, 0] = 1.0
+    pw[poor, 2] = 1.0
     np.savez(path, lat=lat, lon=lon, land_mask=land.astype(float),
-             soil_frozen_fraction=np.zeros_like(lat),
+             soil_frozen_fraction=np.where(rich, 0.8, 0.0),
+             pft_weights=pw, dominant_pft=np.argmax(pw, axis=1),
+             pft_present=(pw > 0),
              n_layers=10, soil_depth=3.0, resolution_deg=180.0 / n_lat,
              **pools)
-    return patch
 
 
-def test_carbon_lands_on_the_source_patch_and_nowhere_else(tmp_path):
+def _run(tmp_path):
     src = tmp_path / "src.npz"
-    la0, la1, lo0, lo1 = _synthetic(src)
+    _synthetic(src)
     out = tmp_path / "out.npz"
     r = subprocess.run(
         [sys.executable, str(_SCRIPT), "--source", str(src),
@@ -57,19 +78,60 @@ def test_carbon_lands_on_the_source_patch_and_nowhere_else(tmp_path):
         capture_output=True, text=True, env={**_env()},
     )
     assert r.returncode == 0, r.stderr[-2000:]
+    return np.load(out)
 
-    z = np.load(out)
+
+def _in_box(lat, lon, b, halo=8.0):
+    la0, la1, lo0, lo1 = b
+    return ((lat >= la0 - halo) & (lat <= la1 + halo)
+            & (lon >= lo0 - halo) & (lon <= lo1 + halo))
+
+
+def test_carbon_lands_where_its_source_is(tmp_path):
+    """Rich box stays rich, poor box stays poor. A transpose cannot do both."""
+    z = _run(tmp_path)
     lat, lon = np.asarray(z["lat"]), np.asarray(z["lon"])
     soc = np.asarray(z["C_som_active"])
-    inside = (lat >= la0 - 15) & (lat <= la1 + 15) & \
-             (lon >= lo0 - 15) & (lon <= lo1 + 15)
+    rich = _in_box(lat, lon, _RICH)
+    poor = _in_box(lat, lon, _POOR)
+    assert rich.any() and poor.any(), "synthetic boxes missed the mesh entirely"
+    assert soc[rich].mean() > 0.5 * _RICH_C, (
+        f"the rich box came back at {soc[rich].mean():.1f} gC/m2")
+    assert soc[poor].mean() < 10.0 * _POOR_C, (
+        f"the poor box came back at {soc[poor].mean():.1f} gC/m2 -- carbon "
+        f"from the other side of the globe landed on it")
 
-    assert soc[inside].max() > 500.0, "no carbon landed on the source patch"
-    # Outside a generous halo of the patch there must be none: this is the
-    # assertion a transposed reshape fails, and a global-mean check does not.
-    assert soc[~inside].max() < 1e-6, (
-        f"carbon appeared {soc[~inside].max():.1f} gC/m2 away from the only "
-        f"land in the source")
+
+def test_every_per_cell_field_is_on_the_target_grid(tmp_path):
+    """No field may keep the SOURCE cell count -- a stale one indexes a
+    different planet, and the loader would not catch it."""
+    z = _run(tmp_path)
+    ncol = np.asarray(z["lat"]).size
+    for name in z.files:
+        a = np.asarray(z[name])
+        if a.ndim >= 1 and a.shape[0] not in (ncol, 1) and a.size > 8:
+            raise AssertionError(
+                f"{name} has leading dimension {a.shape[0]}, not {ncol}")
+
+
+def test_categories_stay_categories(tmp_path):
+    """A dominant plant type of 4.37 is not a plant type."""
+    z = _run(tmp_path)
+    dom = np.asarray(z["dominant_pft"])
+    assert np.allclose(dom, np.round(dom)), "dominant_pft was interpolated"
+    assert np.asarray(z["pft_present"]).dtype == bool
+
+
+def test_frozen_fraction_is_never_gap_filled_to_zero(tmp_path):
+    """Zero frozen fraction silently disables the frozen-ground protection, so
+    a cell must inherit its nearest land value rather than a fill."""
+    z = _run(tmp_path)
+    lat, lon = np.asarray(z["lat"]), np.asarray(z["lon"])
+    phi = np.asarray(z["soil_frozen_fraction"])
+    assert np.all(np.isfinite(phi))
+    rich = _in_box(lat, lon, _RICH)
+    assert phi[rich].mean() > 0.4, (
+        f"the frozen box came back at {phi[rich].mean():.2f}")
 
 
 def test_non_regular_source_is_rejected(tmp_path):
