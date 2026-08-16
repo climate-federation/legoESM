@@ -47,6 +47,25 @@ class _Grid:
         self.areaCell = jnp.ones((ncol,))
 
 
+class _Accum:
+    """The flux accumulator, as far as this closure is concerned.
+
+    Its state is load-bearing: an incomplete window means the CMOR slot getter
+    would hand back an INSTANTANEOUS diagnostic instead of the window mean, and
+    a closure that mixed a mean rainfall with an instantaneous evaporation
+    would manufacture an imbalance out of nothing.
+    """
+
+    def __init__(self, samples=True, complete=True):
+        self._samples, self._complete = samples, complete
+
+    def has_samples(self):
+        return self._samples
+
+    def is_complete(self):
+        return self._complete
+
+
 class _Diag:
     def __init__(self):
         self.moisture_tracker = MoistureBudgetTracker()
@@ -57,12 +76,13 @@ class _Driver:
 
     _feed_mpas_moisture_budget = ModelDriver._feed_mpas_moisture_budget
 
-    def __init__(self, ncol=16, nlev=4, voronoi_layout=None):
+    def __init__(self, ncol=16, nlev=4, voronoi_layout=None, accum=None):
         self.state = _State(jnp.full((ncol, nlev), 0.01),
                             jnp.full((ncol,), 1.0e5))
         self.sigma = _Sigma(nlev)
         self.grid = _Grid(ncol)
         self._voronoi_layout = voronoi_layout
+        self._mpas_sfc_accum = _Accum() if accum is None else accum
 
 
 def _kw(ncol, *, precip_mm_day, hfls_w_m2):
@@ -84,6 +104,8 @@ def test_a_known_imbalance_reaches_the_tracker_with_the_right_size():
                                                 hfls_w_m2=hfls))
     res = diag.moisture_tracker.residual
     assert len(res) == 2, "the tracker was not fed"
+    assert np.isnan(res[0]), (
+        "the FIRST sample has no tendency and must report nothing, not zero")
     assert res[-1] == pytest.approx(1.0, abs=0.05), (
         f"a 1 mm/day imbalance came back as {res[-1]:.3f}")
 
@@ -141,3 +163,28 @@ def test_the_cmor_feed_actually_calls_it():
     src = inspect.getsource(ModelDriver._feed_mpas_cmip_accumulators)
     assert "_feed_mpas_moisture_budget" in src, (
         "the MPAS CMOR feed no longer records the water budget")
+
+
+def test_an_incomplete_window_is_not_closed_against():
+    """A partial window makes the slot getter fall back to instantaneous
+    values; mixing those with a mean invents an imbalance."""
+    d = _Driver(accum=_Accum(samples=True, complete=False))
+    diag = _Diag()
+    d._feed_mpas_moisture_budget(0.0, diag, _kw(16, precip_mm_day=2.0,
+                                                hfls_w_m2=100.0))
+    assert diag.moisture_tracker.residual == []
+
+
+def test_the_first_sample_after_a_restart_reports_nothing():
+    """The tendency baseline lives in memory and no checkpoint carries it, so
+    a restarted segment has no closure until its second window. Reporting zero
+    there would publish a clean pass at the start of every segment of a chained
+    run -- which is most of this campaign's runs."""
+    from legoesm.diagnostics.energy_budget import MoistureBudgetTracker as _T
+    fresh = _T()          # what a restart hands us
+    d = _Driver()
+    diag = _Diag()
+    diag.moisture_tracker = fresh
+    d._feed_mpas_moisture_budget(10.0, diag, _kw(16, precip_mm_day=2.0,
+                                                 hfls_w_m2=100.0))
+    assert np.isnan(diag.moisture_tracker.residual[-1])

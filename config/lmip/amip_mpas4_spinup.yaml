@@ -33,9 +33,22 @@
 # off the result. Carbon is not spun up here at all: the pools come from the
 # published carbon initial condition instead.
 #
+# THE SOIL COLUMN MUST MATCH, and it does not by default. This driver builds
+# the shared soil grid at ITS default -- 8 layers, geometric spacing, 6.375 m --
+# while the AMIP deck runs 10 layers over 3 m. The restart loader checks the
+# layer count and would refuse the handoff. There is no config key here for the
+# soil grid, so the AMIP side is what moves:
+#
+#   run_amip.py --land-ic <restart> --multilayer-n-layers 8 \
+#               --multilayer-soil-depth 6.375
+#
+# 6.375 m is not a rounded guess: filling that depth with 8 layers at growth
+# factor 2 gives a first layer of exactly 0.025 m, which is this driver's own
+# default -- so the two columns are the same column, not merely the same size.
+#
 # Usage:
 #   python scripts/run/run_lmip_biophys.py --config config/lmip/amip_mpas4_spinup.yaml
-# then hand the restart to the coupled run with `run_amip.py --land-ic <restart>`.
+# then hand the restart to the coupled run with the flags above.
 
 template_name: biophysics/amip_mpas4_spinup
 template_version: 1.0.0
@@ -79,9 +92,20 @@ land_frac_min: 0.0
 land_mask_file: ""
 
 output:
+  # Names and averaging modes copied from the shipped 5-year template, not
+  # invented: a tape asking for a variable the driver does not publish dies
+  # mid-scan with a bare KeyError, which is how the first version of this file
+  # was caught.
   tapes:
     - name: monthly
       freq: monthly
-      average: true
-      vars: [soil_moisture, soil_temperature, snow_water, latent_heat,
-             sensible_heat, skin_temperature, runoff]
+      average: mean
+      vars: [T_sfc, shflx, lhflx, albedo, runoff, precip, soil_evap]
+
+    # The equilibrium diagnostic: the year-over-year drift of these three is
+    # what says whether the spin-up has settled. Instantaneous, because a
+    # monthly MEAN soil moisture hides the drift the end-of-year value shows.
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]
