@@ -138,26 +138,32 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
 
     # :102-108 k-recurrence -> lax.scan (never cumsum); the body is the
     # oracle's own per-k arithmetic in the oracle's order (D7)
-    wink = jnp.transpose(win, (0, 3, 1, 2))          # k leads the scan
+    # (3, 0, 1, 2), NOT (0, 3, 1, 2): lax.scan consumes the LEADING axis,
+    # so k must lead -- the old transpose put the FACE axis first and
+    # scanned the six faces as if they were levels, accumulating one
+    # face's delp onto the next. It failed loudly here only because
+    # km != 6 makes the shapes disagree; at km = 6 it would have run and
+    # returned a plausible pressure field.
+    wink = jnp.transpose(win, (3, 0, 1, 2))          # (km, 6, n, n)
     def _col(acc, x):
         acc = acc + x
         lnp = jnp.log(acc)
         return acc, (acc, lnp, jnp.exp(akap * lnp))
     acc0 = jnp.zeros((6, n, n), dtype=dt) + ptop
-    pe_c, lnp_c, pk_c = lax.scan(_col, acc0, wink)   # each (6, km, n, n)
+    pe_c, lnp_c, pk_c = lax.scan(_col, acc0, wink)   # each (km, 6, n, n)
 
     # :80-83  pe(i,1,j) = ptop ; pk(i,j,1) = ptop**cappa
     pek = ptop ** akap
     pe = jnp.zeros((6,) + tuple(field_shape("pe", n, ng, km)), dtype=dt)
     pe = pe.at[:, 1:n + 1, 0, 1:n + 1].set(ptop)
     pe = pe.at[:, 1:n + 1, 1:km + 1, 1:n + 1].set(
-        jnp.transpose(pe_c, (0, 2, 1, 3)))           # (i,k,j); data movement
+        jnp.transpose(pe_c, (1, 2, 0, 3)))           # (6,i,k,j)
     pk = jnp.zeros((6,) + tuple(field_shape("pk", n, ng, km)), dtype=dt)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 0].set(pek)
     pk = pk.at[:, ia:ia + n, ia:ia + n, 1:km + 1].set(
-        jnp.transpose(pk_c, (0, 2, 3, 1)))           # (i,j,k)
+        jnp.transpose(pk_c, (1, 2, 3, 0)))           # (6,i,j,k)
     peln = jnp.zeros((6,) + tuple(field_shape("peln", n, ng, km)), dtype=dt)
-    peln = peln.at[:, :, 1:km + 1, :].set(jnp.transpose(lnp_c, (0, 2, 1, 3)))
+    peln = peln.at[:, :, 1:km + 1, :].set(jnp.transpose(lnp_c, (1, 2, 0, 3)))
     # :110-112  ps = pe(i,km+1,j)
     ps = jnp.zeros((6,) + tuple(field_shape("ps", n, ng, km)), dtype=dt)
     ps = ps.at[:, ia:ia + n, ia:ia + n].set(pe[:, 1:n + 1, km, 1:n + 1])
