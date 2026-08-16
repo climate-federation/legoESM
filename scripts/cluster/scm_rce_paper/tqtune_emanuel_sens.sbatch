@@ -20,6 +20,7 @@ export LEGOESM_JIT_CACHE_DIR=""
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 JAX_ENABLE_X64=1 $PY scripts/validate/scm_rce_emanuel_sensitivity.py \
   --scheme ${SCHEME:-emanuel} --days ${DAYS:-3} \
+  --reference-dir ${REF:-$REPO/results/rcemip_ref_sam300} \
   --out $REPO/results/scm_rce_tqtune/${SCHEME:-emanuel}_sensitivity.json \
   2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader" | tail -45
 echo "RC=${PIPESTATUS[0]}"

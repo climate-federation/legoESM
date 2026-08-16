@@ -63,8 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     # OUR OWN CRM run, which is the artifact under investigation rather than an
     # oracle (see the campaign's self-reference note).  Default to the external
     # RCEMIP archive run and refuse anything that looks like our own output.
-    parser.add_argument("--reference-dir", type=Path,
-                        default=Path("results/rcemip_ref_sam300"))
+    # ABSOLUTE: a relative default resolves against the WORKTREE, and this
+    # script is run from pinned worktrees where results/ does not exist.
+    parser.add_argument(
+        "--reference-dir", type=Path,
+        default=Path("/burg-archive/glab/users/pg2328/legoESM/results"
+                     "/rcemip_ref_sam300"))
     parser.add_argument("--last-reference-files", type=int, default=5)
     parser.add_argument("--days", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=600.0)
