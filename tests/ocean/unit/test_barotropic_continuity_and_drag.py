@@ -175,14 +175,38 @@ class TestBottomDragSingleOwner:
         m = np.asarray(u_mask) > 0
         u_new = np.asarray(sn.u.data)[..., 0]
         u_mean = float(np.mean(np.where(m, u_new, np.nan)[~np.isnan(np.where(m, u_new, np.nan))]))
-        # Expected single-rate decay of the time-MEAN over the step.  Frozen
-        # F_slow gives U(t)=U0 - (r U0/H) t, whose step-mean is U0(1 - r*dt/(2H)).
-        expected_mean = U0 * (1.0 - r * dt / (2.0 * H))
-        # The DOUBLE-counted (old) drag would also apply ~ (1 - r*dt/H) on top,
-        # giving a clearly smaller value; assert we are within 5% of the
-        # single-owner expectation and NOT near the double-rate value.
+        # Expected single-rate decay of the averaged state.  Frozen F_slow
+        # gives U(t) = U0 - (r U0/H) t, which is LINEAR in t, and the weighted
+        # mean of a linear function is exactly its value at the window's
+        # CENTROID.  Since 2026-08-12 the box/cosine averaging window is
+        # centred on t+dt (it used to be centred on t+dt/2, which propagated
+        # gravity waves at half speed -- see
+        # tests/ocean/unit/test_barotropic_accuracy.py), so the centroid value
+        # is U0*(1 - r*dt/H), not the old U0*(1 - r*dt/(2H)).
+        #
+        # EXPECTATION UPDATED, NOT THE CODE: the old numbers here encoded the
+        # mis-centred window. This case is in fact a second, independent
+        # confirmation that the window is centred correctly -- U is linear, so
+        # the measured mean must land on the analytic value at t+dt to
+        # roundoff, and it does (0.199910).
+        expected_mean = U0 * (1.0 - r * dt / H)
+        # Double-counting the drag would decay at 2r/H over the same window.
         single = abs(u_mean - expected_mean) / expected_mean
-        double_mean = U0 * (1.0 - 3.0 * r * dt / (2.0 * H))  # ~2x drag proxy
+        double_mean = U0 * (1.0 - 2.0 * r * dt / H)
+        # NON-VACUITY (codex 2026-08-12): a 2% bound is looser than the whole
+        # effect -- undamped U0 = 0.2 sits within 2% of 0.199910 and is also
+        # closer to the single proxy than the double one, so the original
+        # bounds passed even with NO drag at all. Bound the error against the
+        # single/double SEPARATION (9e-5) instead, and assert the flow
+        # actually decelerated.
+        assert u_mean < U0 - 0.25 * (U0 - expected_mean), (
+            f"mean u={u_mean:.6f} is essentially undamped (U0={U0}); the "
+            f"drag never acted, so the comparison below proves nothing")
+        assert abs(u_mean - expected_mean) < 0.25 * abs(expected_mean
+                                                        - double_mean), (
+            f"mean u={u_mean:.6f} is not tight to the single-owner value "
+            f"{expected_mean:.6f} relative to the {abs(expected_mean - double_mean):.2e} "
+            f"single/double separation")
         assert single < 0.02, (
             f"barotropic drag mean u={u_mean:.6f} vs single-owner "
             f"{expected_mean:.6f} (rel {single:.3e}); drag may be double-counted")
