@@ -243,3 +243,36 @@ def test_loop_jit_equals_eager_and_dt_stays_dynamic(jctx, jstate):
         # TOL-PENDING: provisional bound.  DO NOT SHIP.
         # [class: FMA contraction, composed over sub-steps]
         cmp_fields(gg[nm], ge[nm], f"loop jit-vs-eager {nm}", 1e-9)
+
+
+# =====================================================================
+# ONE SUB-STEP, which is the bisect between "the sub-step is wrong" and
+# "the loop plumbing is wrong".  Added when the loop parity showed u
+# off by 2.106e-02 on 1512 of 6156 cells while delp and pt matched
+# (job 9417532) -- a discrepancy that could sit on either side.
+# =====================================================================
+
+@pytest.mark.parametrize("first_substep", [True, False])
+def test_substep_parity(ctx, jctx, state_np, jstate, first_substep):
+    """One ``it`` of the loop, both lanes, from the same state.
+
+    ``remap_step`` is tied to ``first_substep`` here only to keep the
+    two cases distinct; the loop gate covers the combinations.
+    """
+    st = deepcopy_faces(state_np)
+    npac.acoustic_substep_3d(ctx, st, DT_ATMOS, KM,
+                             first_substep=first_substep, ptop=PTOP,
+                             akap=AKAP, cp_air=CP_AIR,
+                             remap_step=first_substep)
+    got = jac.acoustic_substep_3d(jctx, jstate, DT_ATMOS, KM,
+                                  first_substep=first_substep,
+                                  ptop=PTOP, akap=AKAP, cp_air=CP_AIR,
+                                  remap_step=first_substep)
+    state = got["state"]
+    for nm in ("delp", "pt", "u", "v"):
+        want = np.stack([np.asarray(st[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy substep {nm}")
+        # TOL-PENDING: provisional bound; the measurement job replaces
+        # this.  DO NOT SHIP.   [class: branch-switching, one sub-step]
+        cmp_fields(state[nm], want, f"substep {nm} first={first_substep}",
+                   1e-12)
