@@ -992,3 +992,77 @@ def test_nh_tail_use_logp_selects_pln_halo_not_pk3_halo(ctx, jctx,
     assert not np.array_equal(pa, pb, equal_nan=True), (
         "use_logp did not change pk3, so the pln_halo/pk3_halo branch "
         "is not selected by it")
+
+
+def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
+                                                    state_np_nh):
+    """`zh` is written by ONE kernel, so compare that kernel directly.
+
+    The NH parity gate fails on `zh` at 2.465e-02 and nothing else in
+    the phase writes it (``gz`` is ``zh*grav`` afterwards).  Its twins
+    are separately gated in ``test_fv3_nh_core``, but on THAT file's
+    fixture -- and a kernel can agree on one fixture and not another,
+    which is the whole reason the phase-level gates exist.
+
+    So: both ``update_dz_d`` twins, the same operands taken from this
+    bundle, per face.  Agreement here moves the search into the phase
+    (the exchanges after the kernel); disagreement moves it into the
+    kernel and off this module entirely.
+    """
+    from legoesm.core.fv3_native_nh_core import (
+        update_dz_d as np_udzd,
+    )
+    from legoesm.core.fv3_nh_core import update_dz_d as j_udzd
+
+    carry = nh_bundle["carry"]
+    dsw = nh_bundle["dsw"]
+    bd = ctx["bd"]
+    # The JAX twin takes a STATIC BOUNDS TUPLE, not the NumPy `bd`
+    # object -- (is_, ie, js, je, ng), so a fresh-but-equal object
+    # cannot retrace it. Passing `bd` gave "too many values to unpack
+    # (expected 5)".
+    bounds = (bd.is_, bd.ie, bd.js, bd.je, NG)
+    npx = N + 1
+    area6 = nptail.nh_exchanged_area6(dict(ctx))
+    rarea6 = [1.0 / np.asarray(a) for a in area6]
+    ndif = np.full(KM + 1, 2.0)
+    damp = np.full(KM + 1, 0.12)
+    rdt = 1.0 / DT
+
+    for t in range(3):          # three faces is enough to localise
+        crx = np.stack([dsw[t]["levels"][k]["crx_adv"] for k in range(KM)],
+                       axis=2)
+        cry = np.stack([dsw[t]["levels"][k]["cry_adv"] for k in range(KM)],
+                       axis=2)
+        xfx = np.stack([dsw[t]["levels"][k]["xfx_adv"] for k in range(KM)],
+                       axis=2)
+        yfx = np.stack([dsw[t]["levels"][k]["yfx_adv"] for k in range(KM)],
+                       axis=2)
+        gs = ctx["gs6"][t]
+        gs_nh = dict(gs)
+        gs_nh["area"] = area6[t]
+        gs_nh["rarea"] = rarea6[t]
+
+        zh_np = np.array(carry["zh6"][t], copy=True)
+        ws_np = np.array(carry["ws6"][t], copy=True)
+        np_udzd(ndif, damp, 6, bd, KM, npx, npx, area6[t], rarea6[t],
+                _DP0, carry["zs6"][t], zh_np, np.array(crx, copy=True),
+                np.array(cry, copy=True), np.array(xfx, copy=True),
+                np.array(yfx, copy=True), ws_np, rdt, gs_nh, lim_fac=1.0)
+
+        zh_j, _ws_j = j_udzd(
+            (2.0,) * (KM + 1), (0.12,) * (KM + 1), 6, bounds, KM,
+            npx, npx,
+            jnp.asarray(area6[t]), jnp.asarray(rarea6[t]),
+            jnp.asarray(_DP0), jnp.asarray(carry["zs6"][t]),
+            jnp.asarray(carry["zh6"][t]), jnp.asarray(crx),
+            jnp.asarray(cry), jnp.asarray(xfx), jnp.asarray(yfx),
+            jnp.asarray(carry["ws6"][t]), rdt,
+            jnp.asarray(gs["dxa"]), jnp.asarray(gs["dya"]),
+            jnp.asarray(gs["del6_u"]), jnp.asarray(gs["del6_v"]),
+            lim_fac=1.0)
+
+        assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
+        # TOL-PENDING: provisional bound.  DO NOT SHIP.
+        # [class: accumulating -- a vertical recurrence]
+        cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1e-12)
