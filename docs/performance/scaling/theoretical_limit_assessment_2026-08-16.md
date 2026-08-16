@@ -64,11 +64,20 @@ The former "2.40 unexplained" is RESOLVED into 1.23 ms of
 in-collective wait (~112 µs/round across 11 sequential rounds — rank
 skew refuted at <24 µs, so this is the cross-node rounds themselves)
 plus ~1.46 ms by which the no-halo program exceeds the 2.00 ms
-single-GPU control. Of that 1.46, ~0.34 is priced by the wide halo's
-~17 % enlarged region; the remaining ~1.1 ms is program overhead
-(masking, padded trash-slot work, shard_map machinery) — the
-single-GPU control is a DIFFERENT program (serial `model.step`), so
-this term is bounded, not attributed (instrument's own caveat).
+single-GPU control. Offline row-count receipt (job 26997346, same
+builders production uses): the sfc partition at wide depth 9 computes
+59,338 rows/rank against 40,961 owned — ×1.449, i.e. **+0.90 ms of
+the 1.46 is ghost+padding rows** (the sfc split is non-compact, so
+the depth-9 corona is ~2.9× a compact ring's). Narrow depth 3 is
+×1.24 (+0.48 ms). Remaining ~0.5 ms: masking + machinery, bounded
+not attributed (the single-GPU control is a different program).
+Partitioner check (job 26997437): metis cuts the wide ghost rows to
+×1.342 (−0.22 ms) but needs 16 rounds vs sfc's 14 (+2 × ~112 µs wait
+≈ +0.22 ms) — a WASH on these two terms; metis's receipted value
+stays the byte cut. Compactness and low degree conflict; the ghost
+term is better attacked by not computing trash/ghost rows (masked
+early-exit is not expressible — rows are dense) or by the stride
+trade, both needing a GPU receipt.
 GLM's pack-cost hypothesis is REFUTED at 64: staging is 0.32 ms
 (~5 % of step), not the residual.
 
