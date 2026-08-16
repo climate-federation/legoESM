@@ -106,6 +106,19 @@ then round fusion. Caveat from the campaign's own receipt: full
 CUDA-graph capture of collectives was already measured HARMFUL
 (cmdbuf 1.268×, #1575) — graph capture is NOT on this ladder.
 
+LADDER RESULT (job 26999539, 8/12 arms before walltime; PROVISIONAL —
+single reps, replicate+validity job 27001029 in flight): **the
+multi-channel-p2p arm (`NCCL_MIN/MAX_NCHANNELS=8` +
+`NCCL_P2P_NET_CHUNKSIZE=131072`) cut the step 6.75 → 5.91 ms
+(−12.4 %) — intercept −0.53 ms (CONFIRM band) AND slope −0.32 ms.**
+GLM r2's compress-together prediction holds on first read; the
+overhead is partly NCCL-internal after all. LL128: within noise of
+base (its 0.1–0.3 ms expected win did not appear). If the replicates
+hold: adopt the two NCCL vars in the production launch environment
+(config change, one receipt on a second grid), rerun the three-arm
+split under them, THEN re-rank the fused-exchange build against the
+new, smaller comm stack.
+
 Floor reading from the split: the step is 3.460 compute-side + 3.360
 comm-side (0.315 staging + 1.815 payload slope + 1.230 residual).
 Optimistic bound if the named levers all land (fusion/layout 2× on
