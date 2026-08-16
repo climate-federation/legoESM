@@ -178,7 +178,13 @@ def main() -> int:
                          np.array(crx, copy=True), np.array(cry, copy=True),
                          np.array(xfx, copy=True), np.array(yfx, copy=True),
                          ws_np, rdt, gs_nh, lim_fac=1.0)
-        zh_j, ws_j = jnh.update_dz_d(
+        # NOT `zh_j` / `ws_j`: those name the PHASE's outputs, which
+        # every comparison below still needs. Rebinding them here made
+        # the scale prints and the phase-vs-chain diff compare ONE
+        # face's 3-D kernel result against the six-face 4-D arrays, and
+        # that single shadow is the whole reason this hunt produced a
+        # set of measurements that could not all be true.
+        zh_k1, ws_k1 = jnh.update_dz_d(
             (2.0,) * (KM + 1), (0.12,) * (KM + 1), 6, bounds, KM, N + 1,
             N + 1, jnp.asarray(area6[t]), jnp.asarray(rarea6[t]),
             jnp.asarray(_DP0), jnp.asarray(carry["zs6"][t]),
@@ -190,7 +196,7 @@ def main() -> int:
             bounded_domain=fl[t].bounded_domain, grid_type=fl[t].grid_type,
             sw_corner=fl[t].sw_corner, se_corner=fl[t].se_corner,
             nw_corner=fl[t].nw_corner, ne_corner=fl[t].ne_corner)
-        d1 = float(np.abs(np.asarray(zh_j) - zh_np).max())
+        d1 = float(np.abs(np.asarray(zh_k1) - zh_np).max())
 
         # ...then riem_solver3 on each lane's own update_dz_d output.
         pe_np = np.array(carry["pe6"][t], copy=True)
@@ -212,10 +218,10 @@ def main() -> int:
             jnp.asarray(carry["zs6"][t]), jnp.asarray(tail[t]["w"]),
             jnp.asarray(bundle["state"][t]["delz"]),
             jnp.asarray(dsw[t]["pt"]), jnp.asarray(dsw[t]["delp"]),
-            zh_j, jnp.asarray(carry["pe6"][t]),
+            zh_k1, jnp.asarray(carry["pe6"][t]),
             jnp.asarray(cswp[t]["pkc"]), jnp.asarray(carry["pk3_6"][t]),
             jnp.asarray(carry["pk6"][t]), jnp.asarray(carry["peln6"][t]),
-            ws_j, 0.05, 1.0, use_logp=False, last_call=False,
+            ws_k1, 0.05, 1.0, use_logp=False, last_call=False,
             fp_out=False)
         d2 = float(np.abs(np.asarray(out_j[2]) - zh_np).max())
         print(f"  face {t + 1}: after update_dz_d max|d| {d1:.6e}   "
@@ -277,6 +283,16 @@ def main() -> int:
             # phase calls, which is not a thing a comparison may leave
             # open.  Signature read from source: (planes6, ctx).
             jtail_mod._ext_scalar_planes_6(zh_chain_j[:, :, :, k], jctx))
+    # SHAPE GUARD, earned: a rebound name upstream made this line
+    # compare a single face's 3-D kernel output against the six-face
+    # 4-D stack, and numpy broadcast it into a number instead of
+    # raising. Every comparison in this probe now states the shapes it
+    # is comparing.
+    if zh_j.shape != np.asarray(zh_chain_j).shape:
+        raise SystemExit(
+            f"REFUSING TO COMPARE: phase zh {zh_j.shape} vs chain "
+            f"{np.asarray(zh_chain_j).shape} -- one of them is not what "
+            f"its name says.")
     d_post = np.abs(zh_j - np.asarray(zh_chain_j))
     print(f"  after the exchange:  max|phase - chain| {d_post.max():.6e}"
           f"   compute {d_post[:, cs, cs].max():.6e}")
