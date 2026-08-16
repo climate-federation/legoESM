@@ -92,12 +92,11 @@ def main() -> int:
     print("    accumulated; a fixed implementation difference does not)")
     print(f"   {'km':>4s} {'max rel':>12s} {'cells':>7s} {'rel/km':>12s}")
     rng = np.random.default_rng(4)
-    for km in (1, 3, 6, 12):
+    # km >= 2: edge_profile reads dp0[1] (fv3_native_nh_core.py:259),
+    # so a single-level column is not a valid input to this kernel.
+    for km in (2, 3, 6, 12):
         # One horizontal fixture, replicated per level, so the ONLY
         # thing changing across rows is the number of levels.
-        base_zh = np.cumsum(
-            np.full((MA, MA, km + 1), -500.0, dtype=np.float64)[..., ::-1],
-            axis=2)[..., ::-1] * 0.0
         zh = np.zeros((MA, MA, km + 1), dtype=np.float64)
         for k in range(km, -1, -1):
             zh[:, :, k] = 545.0 * (km - k)
@@ -138,7 +137,6 @@ def main() -> int:
             nw_corner=fl[0].nw_corner, ne_corner=fl[0].ne_corner)
         r, nc = _rel(zh_j, zh_np)
         print(f"   {km:4d} {r:12.4e} {nc:7d} {r / km:12.4e}")
-    del base_zh
 
     print("\n2. WHICH CELLS, AND WHAT IS BEING DIFFERENCED THERE?")
     print("   (a handful of cells at ~1e7 eps is the signature of")
