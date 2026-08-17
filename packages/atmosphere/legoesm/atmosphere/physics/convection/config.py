@@ -53,6 +53,7 @@ __param_spec__ = {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
+            "cape_sink_heating_ratio": "inert: the quasi-equilibrium heating ceiling it scales has no consumer in bechtold.py, so the leaf carries no loss gradient; re-tier to 2 in the same PR that implements the sink",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
@@ -101,7 +102,6 @@ __param_spec__ = {
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
-            "cape_sink_heating_ratio": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Arakawa & Schubert (1974) quasi-equilibrium energy flux", "shape": None},
         },
     },
     "ConvectiveEDMFConfig": {
@@ -270,6 +270,7 @@ __param_spec__ = {
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
             "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
+            "epsilon_deep": "entrainment: deep-branch base rate held fixed in-scheme",
             "epsilon_midlevel": "entrainment: mid-level base rate held fixed in-scheme",
             "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
