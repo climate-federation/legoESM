@@ -82,11 +82,24 @@ def main():
     print(f"#   LE      bias {np.average(lbi, weights=w):+.2f} -> {np.average(lbc, weights=w):+.2f} W/m2"
           f"   RMSE {_wrms(lbi, w):.2f} -> {_wrms(lbc, w):.2f} W/m2")
 
-    # per-cell coordinates from the loader itself — the loader PERMUTES the cell
-    # order (rng.choice), so re-deriving lon from the unpermuted land index gave
-    # scrambled maps (lat and lon belonged to different cells; no continents).
+    # Rasterize the (permuted) land cells back onto the source lat-lon grid for
+    # publication-quality PIXEL maps (pcolormesh, ocean = NaN/white).  Per-cell
+    # coordinates come from the loader itself — the loader PERMUTES the cell
+    # order (rng.choice), so any re-derived unpermuted index map is wrong.
+    D = np.load(args.npz)
+    lat1, lon1 = D["lat"], D["lon"]
     latc = np.rad2deg(np.asarray(data["lat"]))
-    lonc = np.asarray(data["lon"]); lonc = np.where(lonc > 180, lonc - 360, lonc)
+    lonc = np.asarray(data["lon"])                       # native 0-360 axis values
+    iy = np.abs(lat1[None, :] - latc[:, None]).argmin(1)
+    ix = np.abs(((lon1[None, :] - lonc[:, None] + 180.0) % 360.0) - 180.0).argmin(1)
+    # display axes: roll to [-180, 180) so continents are centred
+    order = np.argsort(np.where(lon1 > 180.0, lon1 - 360.0, lon1))
+    lon_plot = np.where(lon1 > 180.0, lon1 - 360.0, lon1)[order]
+
+    def to_grid(v):
+        g = np.full((lat1.size, lon1.size), np.nan)
+        g[iy, ix] = v
+        return g[:, order]
 
     # 3 rows (skin-T, albedo, LE) x 3 cols (initial bias, calibrated bias, gain)
     rows = [("skin-T bias [K]", tbi, tbc, 8.0, "RdBu_r"),
@@ -99,11 +112,13 @@ def main():
         panels = [("initial bias", bi, lim, cmap), ("calibrated bias", bc, lim, cmap),
                   ("bias reduced (|init|-|cal|)", gain, glim, "PiYG")]
         for c, (ttl, v, vl, cm) in enumerate(panels):
-            sc = ax[r, c].scatter(lonc, latc, c=v, s=7, cmap=cm, vmin=-vl, vmax=vl)
+            pc = ax[r, c].pcolormesh(lon_plot, lat1, to_grid(v), cmap=cm,
+                                     vmin=-vl, vmax=vl, shading="nearest")
             ax[r, c].set_title(f"{name} — {ttl}", fontsize=9)
             ax[r, c].set_xlim(-180, 180); ax[r, c].set_ylim(-90, 90)
-            ax[r, c].axhline(0, color="k", lw=0.3); plt.colorbar(sc, ax=ax[r, c], fraction=0.03)
-    plt.tight_layout(); plt.savefig(args.out, dpi=95)
+            ax[r, c].axhline(0, color="k", lw=0.3)
+            plt.colorbar(pc, ax=ax[r, c], fraction=0.03)
+    plt.tight_layout(); plt.savefig(args.out, dpi=110)
     print(f"# bias maps -> {args.out}")
 
 
