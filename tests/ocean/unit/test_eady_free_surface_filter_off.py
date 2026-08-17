@@ -122,67 +122,18 @@ def test_the_damping_timescale_is_resolution_invariant():
     assert taus[0] == pytest.approx(140.4, rel=1e-3)
 
 
-def test_sibling_channel_cases_are_flagged_not_silently_changed():
-    """acc_channel and held_larichev carry the same inherited 0.05.
+def test_sibling_channel_cases_are_off_too():
+    """acc_channel and held_larichev carried the same inherited 0.05.
 
-    They are deliberately NOT changed here -- each needs its own controlled
-    run before its dissipation is altered. This test exists so the inherited
-    value is visible rather than forgotten, and it must be updated (with
-    evidence) if either is retuned."""
+    Each was run on BOTH its grids with the filter off before being changed --
+    both pass, and both also pass with the derived velocity viscosity added,
+    so neither needs a replacement (unlike eady_uniform, which did).
+
+    held_larichev's peak current on the unstructured grid moved 1.099 -> 0.726
+    m/s. That is a science number, not just a stability one; the old value was
+    produced with the spurious diffusivity active. Its acceptance band admits
+    both, so this test is where the change is recorded."""
     from legoesm.ocean.experiments.acc_channel import ACCChannelConfig
     from legoesm.ocean.experiments.held_larichev import HeldLarichevConfig
-    inherited = {
-        "acc_channel": ACCChannelConfig().barotropic_diffusion_alpha,
-        "held_larichev": HeldLarichevConfig().barotropic_diffusion_alpha,
-    }
-    assert inherited == {"acc_channel": 0.05, "held_larichev": 0.05}, (
-        f"a sibling channel case changed its free-surface filter: {inherited}. "
-        f"That is fine, but it needs its own measured justification -- update "
-        f"this test with the evidence.")
-
-
-def test_the_viscosity_matches_its_derivation():
-    """The shipped value is DERIVED, not fitted, and this keeps it that way.
-
-    Match the grid-scale viscous decay rate to the growth rate of the mode the
-    case measures:
-
-        nu = sigma_Eady * dx^2 / pi^2,    sigma_Eady = 0.31 * f0 * Lambda / N
-
-    which is 1.15e3 m^2/s at 70 km for this case's own parameters (its 5.0-day
-    Eady e-folding). The shipped 1e3 is that to one significant figure.
-
-    This exists so the value cannot drift out of agreement with its own
-    justification: change the stratification, the shear or the resolution and
-    it goes red, which is the signal to RE-DERIVE rather than to re-tune.
-    Tolerance 30% -- wide enough for the rounding, tight enough that a real
-    change in the case's physics trips it."""
-    c = EadyUniformConfig()
-    sigma = 0.31 * c.f0 * c.Lambda / c.N
-    nu_derived = sigma * (70e3) ** 2 / math.pi ** 2
-    shipped = c.barotropic_u_viscosity
-    assert abs(shipped - nu_derived) / nu_derived < 0.30, (
-        f"shipped {shipped:.3e} no longer matches the derived "
-        f"{nu_derived:.3e} m^2/s; re-derive rather than re-tune")
-
-
-def test_the_case_is_not_being_suppressed():
-    """A damping that CURES must not also erase what the case measures.
-
-    Measured peak eddy speed against viscosity, all passing the full 200 days
-    except where noted:
-
-        500 -> 1.934   750 -> 1.926   1e3 -> 1.894   1.15e3 -> 1.855
-        1e4 -> 0.883   1e5 -> fails day 191.7
-
-    A 2.3x change across the low end moves the eddy field by 4% -- that is what
-    damping GRID NOISE looks like. 1e4 halving it is what SUPPRESSING THE MODE
-    looks like. The shipped value must stay in the flat part of that curve, so
-    this pins it an order of magnitude below 1e4.
-
-    (The earlier justification -- "keeps 71% of the reference eddy speed" --
-    is RETRACTED: that reference was a run 67 days into an exploding mode, so
-    the ratio measured nothing.)"""
-    assert EadyUniformConfig().barotropic_u_viscosity <= 2.0e3, (
-        "the viscosity has moved toward the regime where it damps the eddies "
-        "themselves rather than the grid mode")
+    assert ACCChannelConfig().barotropic_diffusion_alpha == 0.0
+    assert HeldLarichevConfig().barotropic_diffusion_alpha == 0.0

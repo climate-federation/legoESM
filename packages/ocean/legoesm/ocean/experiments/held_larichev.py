@@ -96,7 +96,24 @@ class HeldLarichevConfig:
     K_v: float = 1.0e-5
     bottom_drag_coeff: float = 1.0e-5
     tracer_advection: str = "tvd"
-    barotropic_diffusion_alpha: float = 0.05
+    # Free-surface Laplacian: OFF. Inherited from the collocated/cubed-sphere
+    # solvers (0.05 is the CUBED-SPHERE default, raised there for a
+    # face-boundary feedback); this is a C-grid case, which has no such
+    # checkerboard mode. At its resolution the setting implied a diffusivity
+    # of order 1e6 m^2/s against 1e2-1e3 for the real ocean, and it moved far
+    # more water than the flow itself.
+    #
+    # Measured, one variable at a time: with it OFF this case PASSES on both
+    # its grids, and it also passes with the derived velocity viscosity added,
+    # so no replacement is required -- unlike eady_uniform, which needed one.
+    #
+    # THIS CHANGES A SCIENCE NUMBER, not just stability: peak current on
+    # the unstructured grid goes 1.099 -> 0.726 m/s (-34%). The OLD value
+    # is the contaminated one -- it was produced with the spurious
+    # diffusivity active -- but the case's acceptance band admits both, so
+    # the move would otherwise have been silent. The lat-lon arm is
+    # unchanged at 0.648 because that path never receives this setting.
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_div_damp: float = 0.05
 
 
