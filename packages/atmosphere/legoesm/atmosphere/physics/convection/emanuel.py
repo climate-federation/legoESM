@@ -643,11 +643,41 @@ def emanuel_convection(
     # radiatively active anvil condensate the comment below rightly warns of.
     # NO heating accompanies it — the latent heat is already in ``dT_dt``, and
     # adding more would double-count L_v.
+    #
+    # HONEST NAMING, after review: this is a CLOSURE BY RESIDUAL, not a
+    # restoration of the oracle's precipitation pathway.  ``-net_water`` is the
+    # NET column residual — gross ``EP·CLW`` MINUS any downdraft moistening
+    # still present in ``dq_v_dt``, PLUS any other non-conservative term this
+    # port has, PLUS roundoff.  Two consequences a reader must know:
+    #   * with the unsaturated downdraft disabled this rains 100 % of what the
+    #     oracle would partially re-evaporate, so the sub-cloud moistening and
+    #     evaporative cooling of the shaft remain ABSENT;
+    #   * routing the residual to rain LAUNDERS any further water leak in this
+    #     scheme into "precipitation", so the column-closure test can no longer
+    #     detect one here.  That is the price of closing the budget this way,
+    #     and it is why the rain source is separately measured in
+    #     tests/unit/test_emanuel_rain_is_physics_not_residue.py.
+    #
+    # ``add_weight`` is zero when the column removes no vapour at all, in which
+    # case a negative residual would vanish silently — the original failure
+    # mode.  It cannot arise here (a negative residual REQUIRES net drying),
+    # but the guard below makes that structural rather than incidental.
+    _residual = jnp.maximum(-net_water, 0.0)
     dq_r_conv_dt = jnp.where(
         config.use_genuine_mixing,
-        jnp.maximum(-net_water, 0.0)[:, None] * add_weight,
+        _residual[:, None] * add_weight,
         0.0,
     )                                                     # ∫dq_r dp/g = |deficit|
+    # A residual that could not be placed (no drying anywhere) must not be
+    # dropped on the floor; that is exactly how EP·CLW disappeared before.
+    _placed = jnp.sum(dq_r_conv_dt * dp, axis=-1) / constants.g
+    _unplaced = jnp.where(config.use_genuine_mixing, _residual - _placed, 0.0)
+    dq_r_conv_dt = dq_r_conv_dt + jnp.where(
+        (drying_col <= 0.0)[:, None],
+        _unplaced[:, None] * (dp / jnp.sum(dp, axis=-1, keepdims=True))
+        * constants.g / jnp.maximum(dp, 1e-30),
+        0.0,
+    )
     # Down-scale only the spurious-excess case; when net_water<0 qc_scale=1.
     qc_scale = jnp.clip(
         1.0 - jnp.maximum(net_water, 0.0)
