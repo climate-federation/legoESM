@@ -197,6 +197,62 @@ def test_mpas_turbulence_beta_throttles_land_only(mpas_mesh, sigma_coord,
     assert (dq_beta[land] >= 0.0).all()
 
 
+@pytest.mark.parametrize("scheme", ["smagorinsky", "holtslag_boville", "ysu",
+                                    "tke"])
+def test_land_fluxes_are_refused_by_a_scheme_that_cannot_consume_them(
+        mpas_mesh, sigma_coord, mpas_state, scheme):
+    """Handing the land model's fluxes to a scheme that computes its own.
+
+    Smagorinsky, Holtslag-Boville and YSU take no ``surface_flux`` argument,
+    and the TKE-carrying kernels are called on a branch that never forwards
+    one.  Passing the fluxes anyway used to raise TypeError from inside a
+    traced column; silently dropping them would be worse still, because the
+    run would advertise land coupling while the atmosphere applied a surface
+    flux the land model never solved.
+    """
+    ncell = mpas_state.T.data.shape[0]
+    f_land = jnp.ones((ncell,))
+    forcing = {
+        "T_sfc": jnp.full((ncell,), 300.0),
+        "shflx_land": jnp.full((ncell,), 40.0),
+        "lhflx_land": jnp.full((ncell,), 90.0),
+    }
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=f_land)
+    with pytest.raises(ValueError, match="cannot be handed the land surface"):
+        fn(mpas_state, mpas_mesh, sigma_coord, forcing=forcing)
+
+
+def test_land_fluxes_actually_reach_the_scheme_that_can_take_them(
+        mpas_mesh, sigma_coord, mpas_state):
+    """The other half of the guard: with Louis the fluxes must MOVE the answer.
+
+    A guard that only ever refuses would be satisfied by a coupling that never
+    works, so the accepting arm is pinned too.
+    """
+    ncell = mpas_state.T.data.shape[0]
+    f_land = jnp.ones((ncell,))
+    base_forcing = {"T_sfc": jnp.full((ncell,), 300.0)}
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme="louis"), 300.0, f_land=f_land)
+
+    without = fn(mpas_state, mpas_mesh, sigma_coord, forcing=base_forcing)
+    with_flux = fn(mpas_state, mpas_mesh, sigma_coord, forcing={
+        **base_forcing,
+        # Far larger than anything the bulk formula would produce here, so the
+        # difference cannot be round-off.
+        "shflx_land": jnp.full((ncell,), 400.0),
+        "lhflx_land": jnp.full((ncell,), 400.0),
+    })
+    if isinstance(without, tuple):
+        without, with_flux = without[0], with_flux[0]
+    # ``dT_dt`` is a Field on this lane; ``.data`` is (nCells, nlev).
+    dT_without = np.asarray(without.dT_dt.data)[:, -1]
+    dT_with = np.asarray(with_flux.dT_dt.data)[:, -1]
+    assert not np.allclose(dT_without, dT_with), (
+        "the land sensible-heat flux was accepted and then ignored")
+
+
 def test_mpas_turbulence_beta_one_bit_identical(mpas_mesh, sigma_coord,
                                                  mpas_state):
     """beta=1 with f_land supplied must be byte-identical to no knobs."""

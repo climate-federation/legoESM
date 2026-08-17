@@ -15,6 +15,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import inspect
 from typing import Callable, NamedTuple
 
 import jax.numpy as jnp
@@ -464,12 +465,13 @@ def _make_hydrostatic_turbulence(
             )
             tke_out = tke_new
         else:
+            # No land-flux hand-over on this lane: the structured-grid driver
+            # has no forcing channel carrying the surface scheme's own
+            # turbulent fluxes, so the scheme computes its own from T_sfc/q_sfc.
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
-                **({"surface_flux": _surface_flux}
-                   if _surface_flux is not None else {}),
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -535,6 +537,18 @@ def _make_mpas_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    # Which schemes can be HANDED a surface flux instead of computing their
+    # own?  Only the non-TKE kernels that declare the keyword: louis and
+    # diagnostic clubb today.  smagorinsky, holtslag_boville and ysu do not,
+    # and the TKE-carrying kernels are called on a branch that never forwards
+    # it.  Resolved once here, from the static kernel, so land coupling with an
+    # unsupported scheme fails at build time with a scheme name rather than as
+    # a TypeError inside a traced column.
+    _accepts_surface_flux = (
+        (not needs_tke)
+        and turb_fn is not None
+        and "surface_flux" in inspect.signature(turb_fn).parameters
+    )
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -677,6 +691,14 @@ def _make_mpas_turbulence(
                 raise ValueError(
                     "forcing['shflx_land'] requires f_land in the turbulence "
                     "factory (make_physics f_land=...).")
+            if not _accepts_surface_flux:
+                raise ValueError(
+                    f"turbulence scheme {scheme_name!r} cannot be handed the "
+                    "land surface fluxes: it computes its own from T_sfc/q_sfc "
+                    "and takes no 'surface_flux' argument. Silently dropping "
+                    "them would run the advertised land coupling with a "
+                    "surface flux the land model never solved. Use 'louis' or "
+                    "'clubb', or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 compute_surface_fluxes,
             )
@@ -1042,12 +1064,11 @@ def _make_spectral_pe_turbulence(
             )
             tke_out = tke_new
         else:
+            # No land-flux hand-over on this lane (see the hydrostatic closure).
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
-                **({"surface_flux": _surface_flux}
-                   if _surface_flux is not None else {}),
             )
 
         # Reshape tendencies to grid space
