@@ -214,6 +214,20 @@ _LAND_FLUX_REFUSED = ["smagorinsky", "holtslag_boville", "ysu", "tke",
 _LAND_FLUX_ACCEPTED = ["louis", "clubb", "clubb_lite"]
 
 
+def test_the_admissible_set_matches_the_hand_written_split():
+    """Ties the signature scan to the two lists the tests below are built from.
+
+    Written out by hand on purpose: if a kernel gains or loses the argument,
+    this fails and forces the parametrised cases to move with it, instead of
+    both sides drifting together and proving nothing.
+    """
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        schemes_accepting_surface_flux,
+    )
+    assert set(schemes_accepting_surface_flux()) == set(_LAND_FLUX_ACCEPTED)
+    assert not set(schemes_accepting_surface_flux()) & set(_LAND_FLUX_REFUSED)
+
+
 @pytest.mark.parametrize("scheme", _LAND_FLUX_REFUSED)
 def test_land_fluxes_are_refused_by_a_scheme_that_cannot_consume_them(
         mpas_mesh, sigma_coord, mpas_state, scheme):
