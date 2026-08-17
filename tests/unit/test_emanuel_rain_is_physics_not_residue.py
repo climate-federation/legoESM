@@ -106,6 +106,13 @@ def test_a_positive_residual_would_not_be_routed_to_rain():
     from legoesm.atmosphere.physics.convection import emanuel as E
 
     src = inspect.getsource(E)
-    assert "jnp.maximum(-net_water, 0.0)[:, None] * add_weight" in src, (
-        "the rain source is no longer the one-sided residual; if it became "
-        "two-sided, water CREATION would be emitted as negative rain")
+    # Match the SEMANTICS (a one-sided max on -net_water feeding the rain
+    # source), not an exact source line — the first version of this assertion
+    # broke on a pure rename, which is the source-inspection failure mode the
+    # repo's own rules warn about.
+    assert "jnp.maximum(-net_water, 0.0)" in src, (
+        "the residual is no longer clamped one-sided; water CREATION could be "
+        "emitted as negative rain")
+    assert "_residual[:, None] * add_weight" in src or (
+        "jnp.maximum(-net_water, 0.0)[:, None] * add_weight" in src), (
+        "the rain source no longer distributes the clamped residual")
