@@ -24,7 +24,7 @@ import scripts.run.train_multilayer_land_era5 as M
 
 def _bias(cp, data):
     """Per-cell annual-mean (model - obs) bias for skin-T [K] and albedo."""
-    T, A, _ = M.forward_ml(cp, data)                 # (12, ncol)
+    T, A, _, _ = M.forward_ml(cp, data)              # (12, ncol)
     tb = np.asarray(T.mean(0) - data["skt"].mean(0))  # (ncol,)
     ab = np.asarray(A.mean(0) - data["alb"].mean(0))
     return tb, ab

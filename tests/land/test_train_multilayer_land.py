@@ -49,6 +49,8 @@ def _synthetic_data(ncol=12):
     _dz = np.asarray(_gr.dz); _bot = np.cumsum(_dz); _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)
     data["sm"] = c(0.25)
     data["rz_w"] = jnp.asarray(_ov[_ov > 1e-9])
+    # latent-heat target (positive-up W/m2), the evaporation leg of the dual target
+    data["le"] = jnp.full((12, ncol), 40.0)
     return data
 
 
@@ -108,7 +110,7 @@ def test_json_init_params_round_trips_a_saved_checkpoint(tmp_path):
 
 def test_forward_finite_and_physical():
     data = _synthetic_data()
-    T, A, W = forward_ml(constrain_ext(init_ext_params()), data)
+    T, A, W, L = forward_ml(constrain_ext(init_ext_params()), data)
     assert T.shape == (12, 12) and A.shape == (12, 12)
     assert jnp.all(jnp.isfinite(T)) and jnp.all(jnp.isfinite(A))
     assert 230.0 < float(T.mean()) < 330.0       # no runaway / freeze-out
@@ -116,18 +118,23 @@ def test_forward_finite_and_physical():
     # root-zone soil moisture is physical (within [theta_r, theta_sat]) and finite
     assert W.shape == (12,) and jnp.all(jnp.isfinite(W))
     assert jnp.all((W > 0.0) & (W < 0.6))
+    # monthly latent heat is finite and physically bounded
+    assert L.shape == (12, 12) and jnp.all(jnp.isfinite(L))
+    assert -200.0 < float(L.mean()) < 400.0
 
 
 def test_loss_is_differentiable():
     data = _synthetic_data()
     g = jax.grad(lambda p: loss_ml(p, data)[0])(init_ext_params())
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
-    # In the DEFAULT (MOST, stomata off) config these knobs are trainable: albedo
-    # (net SW), per-PFT soil thermal inertia (C_soil, k_solid -> seasonal cycle) and
-    # the MOST roughness z0.  theta_wp is data-dependent (test_water_stress_response);
-    # Ch is inert under MOST and the Farquhar params (Vc_max25/g1/LCMA) are inert
-    # unless --stomata (test_bulk_stomata_toggle_params).
-    for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0"):
+    # In the DEFAULT (MOST, stomata ON) config these knobs are trainable: albedo
+    # (net SW), per-PFT soil thermal inertia (C_soil, k_solid -> seasonal cycle),
+    # the MOST roughness z0 and the unfrozen Farquhar canopy-conductance params
+    # (Vc_max25/g1/LCMA, constrained by the latent-heat leg of the dual target).
+    # theta_wp is data-dependent (test_water_stress_response); Ch has no gradient
+    # path under MOST and is frozen out by _inactive_keys in train().
+    for k in ("pft_alb", "pft_kscale", "pft_cscale", "pft_z0",
+              "pft_vcmax", "pft_g1", "pft_lcma"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} has zero gradient"
     # the soil-moisture target makes the porosity scale (theta_sat) trainable
     assert float(jnp.max(jnp.abs(g["pft_smscale"]))) > 0.0, "pft_smscale has zero gradient"
@@ -173,11 +180,12 @@ def test_lam_sm_zero_is_true_noop():
     aux smse is exactly 0 and the total loss equals the sum of the other terms."""
     data = _synthetic_data()
     p = init_ext_params()
-    l, (tm, am, pp, sa, sm, gb) = loss_ml(p, data, lam_sm=0.0)
+    l, (tm, am, pp, sa, sm, gb, le) = loss_ml(p, data, lam_sm=0.0)
     assert float(sm) == 0.0
-    # the SM term contributes nothing: loss == tmse + lam_alb*amse + lam_pft*pp + lam_amp*sa
+    # the SM term contributes nothing: loss == sum of the other weighted terms
     import scripts.run.train_multilayer_land_era5 as _M
-    expect = float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp) + _M._LAM_AMP * float(sa)
+    expect = (float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp)
+              + _M._LAM_AMP * float(sa) + _M._LAM_LE * float(le))
     assert abs(float(l) - expect) < 1e-6
 
 
@@ -189,8 +197,8 @@ def test_lam_tbias_penalizes_global_bias():
     p = init_ext_params()
     l0, aux0 = loss_ml(p, data, lam_tbias=0.0)
     l1, aux1 = loss_ml(p, data, lam_tbias=50.0)
-    gbias = float(aux0[-1])                                  # signed global skin-T bias [K]
-    assert float(aux1[-1]) == gbias                          # diagnostic independent of the weight
+    gbias = float(aux0[5])                                   # signed global skin-T bias [K]
+    assert float(aux1[5]) == gbias                           # diagnostic independent of the weight
     assert abs((float(l1) - float(l0)) - 50.0 * gbias ** 2) < 1e-5
     g = jax.grad(lambda q: loss_ml(q, data, lam_tbias=50.0)[0])(p)
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
@@ -218,6 +226,35 @@ def test_all_nan_soil_moisture_target_is_fully_masked():
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
 
 
+def test_latent_heat_loss_is_nan_safe_and_maskable():
+    """One NaN LE target cell must not poison the gradient; an all-NaN LE target
+    (legacy npz without slhf_wm2) masks the term to exactly 0 (backward compat)."""
+    data = dict(_synthetic_data())
+    le = np.asarray(data["le"]).copy(); le[:, 0] = np.nan
+    data["le"] = jnp.asarray(le)
+    g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values()), "NaN LE target poisoned the gradient"
+    data["le"] = jnp.full_like(data["le"], jnp.nan)
+    l, aux = loss_ml(init_ext_params(), data)
+    assert float(aux[6]) == 0.0 and jnp.isfinite(l)          # lemse (index 6) masked to 0
+
+
+def test_inactive_keys_track_mode():
+    """The strict no-inert-parameters rule freezes exactly the keys with no gradient
+    path in each mode; the default mode (MOST + stomata + no elev bands) trains the
+    Farquhar params and freezes only Ch + the elevation-band closures."""
+    import scripts.run.train_multilayer_land_era5 as M
+    saved = (M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON)
+    try:
+        M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = "most", True, False
+        assert M._inactive_keys() == {"pft_ch", "elev_lapse", "elev_sw_grad",
+                                      "elev_lw_lapse", "glac_ice_alb"}
+        M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = "constant", False, True
+        assert M._inactive_keys() == {"pft_z0", "pft_vcmax", "pft_g1", "pft_lcma"}
+    finally:
+        M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = saved
+
+
 def test_porosity_scale_keeps_theta_sat_above_field_capacity():
     """The pft_smscale clamp must keep the scaled porosity above theta_r AND the plant
     field capacity for ANY in-bounds scale (incl. the 0.7 minimum) so van-Genuchten +
@@ -235,8 +272,8 @@ def test_porosity_scale_keeps_theta_sat_above_field_capacity():
 
 
 def test_bulk_stomata_toggle_params():
-    """--bulk constant makes Ch trainable (z0 inert); --stomata makes the Farquhar
-    photosynthesis params (Vc_max25/g1/LCMA) trainable."""
+    """--bulk constant makes Ch trainable (z0 inert); stomata ON (default) makes the
+    Farquhar photosynthesis params (Vc_max25/g1/LCMA) trainable."""
     import scripts.run.train_multilayer_land_era5 as M
     data = _synthetic_data()
     saved = (M._BULK_SCHEME, M._STOMATA_ON)
@@ -286,7 +323,9 @@ def test_water_stress_response():
 def test_adam_reduces_loss():
     data = _synthetic_data()
     p = init_ext_params()
-    vg = jax.value_and_grad(lambda q: loss_ml(q, data)[0])
+    # jit: the eager (op-by-op) backward through the two-year scan segfaults with
+    # the stomata-ON forward; the compiled backward is what train() runs anyway.
+    vg = jax.jit(jax.value_and_grad(lambda q: loss_ml(q, data)[0]))
     opt = optax.adam(3e-2); s = opt.init(p)
     l0 = float(vg(p)[0])
     for _ in range(4):
