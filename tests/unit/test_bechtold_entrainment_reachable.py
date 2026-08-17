@@ -103,10 +103,30 @@ def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
     assert "epsilon_deep" not in tiedtke["params"]
 
     routes = build_atm_scalar_param_map()
-    assert "atm.conv.TiedtkeConfig.epsilon_deep" not in routes
-    # The flat field the Bechtold route lands on is Bechtold-prefixed, so a
-    # Tiedtke run cannot pick it up by accident.
-    assert routes["atm.conv.BechtoldConfig.epsilon_deep"].startswith("bechtold_")
+    for field in ("epsilon_deep", "delta_deep"):
+        assert f"atm.conv.TiedtkeConfig.{field}" not in routes
+        # The flat field the Bechtold route lands on is Bechtold-prefixed, so
+        # a Tiedtke run cannot pick it up by accident.
+        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
+
+    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knob
+    # set must leave Tiedtke's own rates at their in-scheme defaults.
+    import legoesm.driver.physics_pipeline as pp
+    from legoesm.driver.config import ExperimentConfig
+    seen = {}
+    real = cc.TiedtkeConfig
+    cc.TiedtkeConfig = lambda *a, **kw: (seen.update(kw), real(*a, **kw))[1]
+    try:
+        pp._resolve_convection(ExperimentConfig()._replace(
+            convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
+            bechtold_delta_deep=1.8e-4))
+    finally:
+        cc.TiedtkeConfig = real
+    defaults = real()
+    for field in ("epsilon_deep", "delta_deep"):
+        assert seen.get(field, getattr(defaults, field)) == getattr(
+            defaults, field), (
+            f"the Bechtold {field} knob reached TiedtkeConfig")
 
 
 def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
@@ -126,7 +146,25 @@ def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
     assert "cape_sink_heating_ratio" not in blk["params"]
     assert "cape_sink_heating_ratio" in blk["excluded"]
     # And the reason is still true: promote it only together with a consumer.
-    src = inspect.getsource(bechtold)
-    assert "cape_relaxation_sink" not in src
-    assert "cape_sink_heating_ratio" not in src
+    # Scanned across the whole convection package, not just the one module, so
+    # a reader landing in a sibling file still trips this.
+    import pathlib
+    pkg = pathlib.Path(bechtold.__file__).parent
+    for path in sorted(pkg.rglob("*.py")):
+        if path.name == "config.py":
+            continue                     # where the fields are declared
+        src = path.read_text(errors="replace")
+        assert "cape_relaxation_sink" not in src, path.name
+        assert "cape_sink_heating_ratio" not in src, path.name
+    assert inspect.ismodule(bechtold)
     assert hasattr(cc.BechtoldConfig(), "cape_sink_heating_ratio")
+
+
+def test_the_unread_polar_cap_flag_is_gone():
+    """The PR's own production change: a cap nothing applied, defaulting True.
+
+    A reader who sees the field assumes the cap is on. It is not implemented,
+    so it must not be advertised; it comes back with its consumer.
+    """
+    import legoesm.atmosphere.physics.convection.config as cc
+    assert "parcel_theta_cap" not in cc.BechtoldConfig._fields
