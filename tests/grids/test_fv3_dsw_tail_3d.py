@@ -1164,27 +1164,31 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             ne_corner=jctx.flags6[t].ne_corner)
 
         assert_real(zh_np, f"numpy update_dz_d zh face {t + 1}")
-        # CHARACTERISED (job 9421844), no longer "unexplained": this is
-        # a FREE-STREAM PRESERVATION difference, not roundoff and not a
-        # transport defect.
+        # RESOLVED (jobs 9421844 -> 9424569): the residual was
+        # edge_profile's Thomas recurrences running inside lax.scan,
+        # whose body is XLA-COMPILED even on eager calls -- the compiled
+        # body's contracted multiply-adds perturbed the *_adv outputs at
+        # ~1e-14 relative, and on a level where zh is horizontally
+        # CONSTANT those ulps flipped two upwind selector bits and broke
+        # exact free-stream preservation (2 cells, 2.9e-6, NumPy exact
+        # to 17 digits). My first PLAUSIBLE mechanism -- divergence
+        # association -- was REFUTED by the stage-split probe: fv_tp_2d,
+        # xppm/yppm and del6_vt_flux were all bitwise identical; ONLY
+        # the scan differed. The recurrences are now unrolled in python
+        # over the static km (see edge_profile's docstring), and the
+        # stage-split probe measured the full twins BITWISE identical on
+        # this bundle afterwards.
         #
-        # On a smooth fixture the twins are BIT-IDENTICAL at km = 2, 3,
-        # 6 and 12 (0.0, zero cells), so there is no systematic
-        # expression-order difference. On the gate's own bundle, face 3,
-        # exactly 2 of 1296 cells differ -- and at both, `zh` is
-        # horizontally CONSTANT, so the flux divergence must telescope
-        # to exactly zero. NumPy returns the input to all 17 digits
-        # (1.59000000000000000e+03); JAX returns
-        # 1.59000000285184387e+03 and 1.58999999752043232e+03. dz across
-        # those interfaces is 510 m, so it is not cancellation, and the
-        # Courant numbers there are ~1e-4.
-        #
-        # So the JAX twin loses EXACT preservation of a constant field
-        # where the NumPy loop keeps it, at a handful of cells, by
-        # ~2.9e-6 absolute (1.8e-9 relative). PLAUSIBLE mechanism: the
-        # stacked form associates the divergence differently, so the
-        # inflow/outflow pair no longer cancels bitwise. Closing it
-        # means matching that one expression's order; the bound below
-        # holds the line until then and now says what it tolerates.
-        # [class: accumulating -- a vertical recurrence]
-        cmp_fields(zh_j, zh_np, f"update_dz_d zh face {t + 1}", 1.4e-8)
+        # So the comparison is EXACT EQUALITY, not a tolerance: the
+        # eager path is op-by-op primitive-for-primitive with the spec,
+        # and any reappearing difference is a regression of exactly the
+        # class this hunt just closed -- a tolerance would hide it for
+        # months again. (Under jit only the documented ~1e-14 parity
+        # holds; this gate runs eager.)
+        zh_ja = np.asarray(zh_j)
+        assert np.array_equal(zh_ja, zh_np, equal_nan=True), (
+            f"update_dz_d zh face {t + 1}: twins no longer bitwise -- "
+            f"max|d| {np.abs(np.where(np.isfinite(zh_ja) & np.isfinite(zh_np), zh_ja - zh_np, 0.0)).max():.3e}, "
+            f"{int((zh_ja != zh_np).sum() - (~(np.isfinite(zh_ja)) & ~(np.isfinite(zh_np))).sum())} cells. "
+            f"The eager edge_profile/update_dz_d path regressed from "
+            f"op-by-op primitives (see the RESOLVED note above).")

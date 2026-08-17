@@ -36,7 +36,13 @@ Mirror doctrine established here for the remaining NH kernels:
   order (and divides by intermediate matrix entries), which both breaks
   the <=1e-15 parity contract with the sequential NumPy lane and is less
   numerically robust.  ``km`` is small (5..~130); a sequential scan over
-  k with everything vectorised over i is the right shape.
+  k with everything vectorised over i is the right shape.  EXCEPTION:
+  ``edge_profile`` unrolls its recurrences in python instead — its
+  consumer ``update_dz_d``'s EAGER path (the one the free-stream gates
+  measure) needs BITWISE parity with the NumPy lane, and a scan-compiled
+  body's fused multiply-adds broke it (job 9421844; see
+  ``edge_profile``).  Under ``jax.jit`` the unrolled graph is compiled
+  like everything else and only the ~1e-14 jit-parity contract holds.
 * **Sequential integrals too**: the pe rebuild is a cumulative sum, but
   ``jnp.cumsum`` may lower to a log-depth associative scan whose
   association order differs from the NumPy loop -- it is a ``lax.scan``
@@ -76,8 +82,12 @@ bodies, ~13x the km=5 program, and ``update_dz_d`` sits inside an
 acoustic substep inside ``k_split``, so trace+compile time could become
 the binding constraint on the lane.  Runtime FLOPs are unaffected: the
 oracle does the same work per level either way.  The ``edge_profile``
-call is NOT unrolled -- it is one ``lax.scan`` over k, once for x and
-once for y.
+recurrences are ALSO python-unrolled over k (they were a ``lax.scan``
+until the free-stream measurement, job 9421844 — see the
+``edge_profile`` docstring), adding roughly four array recurrence
+chains of length km plus scalar coefficient/bottom-row bookkeeping —
+expected (unmeasured) to be small next to the km+1 ``fv_tp_2d``
+bodies.
 
 *How many distinct compilations a run produces.*  The jit cache key is
 ``(ndif, damp, hord, bounds, km, npx, npy, rdt)`` plus the flag
@@ -611,12 +621,30 @@ def edge_profile(q1: jnp.ndarray, q2: jnp.ndarray, j_lo: int, km: int,
     ``limiter``, is STATIC — the two grid branches and the limiter are
     Python ``if`` arms, never traced.
 
-    The interface tridiagonal is a sequential Thomas recurrence in k —
-    ``lax.scan``, NOT associative_scan (parity doctrine, module
-    docstring).  The k-recurrence coefficients (``gam``/``gak``) depend
-    only on ``dp0``, so they ride the scan carry as scalars; the NumPy
-    lane stores them as (ni,) vectors of identical entries, which is the
-    same elementwise arithmetic.
+    The interface tridiagonal is a sequential Thomas recurrence in k,
+    UNROLLED IN PYTHON over the static ``km`` — deliberately NOT a
+    ``lax.scan``.  ``lax.scan`` compiles its body, and the compiled
+    body's contracted multiply-adds broke bit parity with the NumPy
+    loop: the stage-split probe on the face-3 gate bundle (follow-up to
+    job 9421844) measured ~1e-14 relative differences in all four
+    ``*_adv`` outputs while every OTHER sub-operation of ``update_dz_d``
+    (fv_tp_2d, xppm/yppm, del6_vt_flux) was bitwise identical — eager
+    op-by-op primitives are bit-exact against NumPy, compiled fusions
+    are not.  Those ulp perturbations flipped two smt5/upwind selector
+    bits on an interior-constant zh level and broke exact free-stream
+    preservation in ``update_dz_d`` (job 9421844: 2 cells at k=0,
+    2.9e-6 abs, where NumPy returns the input to all 17 digits).
+    SCOPE OF THE GUARANTEE: the unroll makes the NON-jitted call
+    op-by-op eager, which is what the free-stream gates measure and
+    what the stage-split probe re-verified bitwise after the change.
+    Inside ``edge_profile_jit``/``update_dz_d_jit`` the unrolled graph
+    is compiled like everything else, fusion/contraction remains
+    permitted, and only the documented ~1e-14 jit-parity tolerance is
+    established.  The
+    k-recurrence coefficients (``gam``/``gak``) depend only on ``dp0``
+    and ride the loop as scalars; the NumPy lane stores them as (ni,)
+    vectors of identical entries, which is the same elementwise
+    arithmetic.
 
     Differentiability: both grid branches are smooth (rational in dp0 and
     linear in q).  The ``limiter != 0`` zero-crossing clamp is a
@@ -631,6 +659,13 @@ def edge_profile(q1: jnp.ndarray, q2: jnp.ndarray, j_lo: int, km: int,
     both lanes.  The explicit guard turns both into one loud error.
     """
     del j_lo
+    # GLM review 2026-08-17: the unrolled recurrences do `range(1, km)`,
+    # so a TRACED km would fail with an opaque tracer error deep in the
+    # loop machinery. km is static by contract (C3); say so at the door.
+    if isinstance(km, bool) or not isinstance(km, int):
+        raise TypeError(
+            f"edge_profile: km must be a static python int (C3; the "
+            f"recurrences are unrolled over it), got {type(km).__name__}")
     _require_f64_jax("edge_profile", {"q1": q1, "q2": q2, "dp0": dp0})
     q1 = jnp.asarray(q1)
     q2 = jnp.asarray(q2)
@@ -647,84 +682,83 @@ def edge_profile(q1: jnp.ndarray, q2: jnp.ndarray, j_lo: int, km: int,
         raise ValueError(f"edge_profile: dp0 must be ({km},), got "
                          f"{dp0.shape}")
 
+    # Both recurrences below are UNROLLED python loops over the static
+    # ``km`` (never lax.scan) so that on a NON-jitted call every op is
+    # an eager elementwise primitive — measured requirement, not style:
+    # the scan-compiled body's fused multiply-adds perturbed
+    # crx_adv/xfx_adv at ~1e-14 relative and broke update_dz_d's exact
+    # free-stream preservation (job 9421844: 2 cells at k=0, 2.9e-6
+    # abs; NumPy exact to 17 digits).  Under jax.jit the graph is
+    # compiled anyway and only the ~1e-14 jit-parity contract holds.
+    # See the docstring paragraph on the parity doctrine.
     if uniform_grid:                                   # :1552-1581
         r2o3 = 2.0 / 3.0
         r4o3 = 4.0 / 3.0
-        e1_0 = r4o3 * q1[:, 0] + r2o3 * q1[:, 1]
-        e2_0 = r4o3 * q2[:, 0] + r2o3 * q2[:, 1]
-        coef0 = jnp.asarray(7.0 / 3.0, dp0.dtype)      # gak(1)
+        e1 = r4o3 * q1[:, 0] + r2o3 * q1[:, 1]
+        e2 = r4o3 * q2[:, 0] + r2o3 * q2[:, 1]
+        gak = 7.0 / 3.0                                # gak(1)
+        e1_rows, e2_rows, coefs = [e1], [e2], [gak]
+        for k in range(1, km):
+            gak = 1.0 / (4.0 - gak)
+            e1 = (3.0 * (q1[:, k - 1] + q1[:, k]) - e1) * gak
+            e2 = (3.0 * (q2[:, k - 1] + q2[:, k]) - e2) * gak
+            e1_rows.append(e1)
+            e2_rows.append(e2)
+            coefs.append(gak)
 
-        def _fwd_u(carry, x):
-            gak_prev, e1p, e2p = carry
-            q1m, q1k, q2m, q2k = x
-            gak = 1.0 / (4.0 - gak_prev)
-            e1 = (3.0 * (q1m + q1k) - e1p) * gak
-            e2 = (3.0 * (q2m + q2k) - e2p) * gak
-            return (gak, e1, e2), (gak, e1, e2)
-
-        xs = (q1[:, :-1].T, q1[:, 1:].T, q2[:, :-1].T, q2[:, 1:].T)
-        ((gak_last, e1_last, e2_last),
-         (coef_tail, e1_tail, e2_tail)) = lax.scan(
-            _fwd_u, (coef0, e1_0, e2_0), xs)
-
-        bet = 1.0 / (1.5 - 3.5 * gak_last)             # :1571
+        bet = 1.0 / (1.5 - 3.5 * gak)                  # :1571
         e1_bot = (4.0 * q1[:, km - 1] + q1[:, km - 2]
-                  - 3.5 * e1_last) * bet
+                  - 3.5 * e1) * bet
         e2_bot = (4.0 * q2[:, km - 1] + q2[:, km - 2]
-                  - 3.5 * e2_last) * bet
+                  - 3.5 * e2) * bet
     else:                                              # :1583-1618
-        g_arr = dp0[:-1] / dp0[1:]                     # gk for k=1..km-1
         g0 = dp0[1] / dp0[0]
         xt1 = 2.0 * g0 * (g0 + 1.0)
         bet0 = g0 * (g0 + 0.5)
-        e1_0 = (xt1 * q1[:, 0] + q1[:, 1]) / bet0
-        e2_0 = (xt1 * q2[:, 0] + q2[:, 1]) / bet0
-        coef0 = (1.0 + g0 * (g0 + 1.5)) / bet0         # gam(1)
-
-        def _fwd_n(carry, x):
-            gam_prev, e1p, e2p = carry
-            gk, q1m, q1k, q2m, q2k = x
-            bet_v = 2.0 + 2.0 * gk - gam_prev
-            e1 = (3.0 * (q1m + gk * q1k) - e1p) / bet_v
-            e2 = (3.0 * (q2m + gk * q2k) - e2p) / bet_v
+        e1 = (xt1 * q1[:, 0] + q1[:, 1]) / bet0
+        e2 = (xt1 * q2[:, 0] + q2[:, 1]) / bet0
+        gam = (1.0 + g0 * (g0 + 1.5)) / bet0           # gam(1)
+        e1_rows, e2_rows, coefs = [e1], [e2], [gam]
+        # gk is ALWAYS assigned: the km >= 2 entry guard means this
+        # loop runs at least once, and the bottom-row formulas below
+        # reuse its LAST value exactly as the Fortran does (the same
+        # division dp0[km-2]/dp0[km-1], bit-identical). (GLM review
+        # flagged the bare sentinel as fragile without this note.)
+        gk = None
+        for k in range(1, km):
+            gk = dp0[k - 1] / dp0[k]
+            bet_v = 2.0 + 2.0 * gk - gam
+            e1 = (3.0 * (q1[:, k - 1] + gk * q1[:, k]) - e1) / bet_v
+            e2 = (3.0 * (q2[:, k - 1] + gk * q2[:, k]) - e2) / bet_v
             gam = gk / bet_v
-            return (gam, e1, e2), (gam, e1, e2)
+            e1_rows.append(e1)
+            e2_rows.append(e2)
+            coefs.append(gam)
 
-        xs = (g_arr, q1[:, :-1].T, q1[:, 1:].T, q2[:, :-1].T,
-              q2[:, 1:].T)
-        ((gam_last, e1_last, e2_last),
-         (coef_tail, e1_tail, e2_tail)) = lax.scan(
-            _fwd_n, (coef0, e1_0, e2_0), xs)
-
-        # :1602-1609 — the Fortran reuses the LAST loop gk; g_arr[km-2]
-        # is the same division dp0(km-1)/dp0(km), bit-identical.
-        gk = g_arr[km - 2]
+        # :1602-1609 — the Fortran reuses the LAST loop gk
+        # (dp0(km-1)/dp0(km), 1-based), exactly as the loop above
+        # leaves it (km >= 2 is guarded at entry).
         a_bot = 1.0 + gk * (gk + 1.5)
         xt1b = 2.0 * gk * (gk + 1.0)
-        xt2 = gk * (gk + 0.5) - a_bot * gam_last
+        xt2 = gk * (gk + 0.5) - a_bot * gam
         e1_bot = (xt1b * q1[:, km - 1] + q1[:, km - 2]
-                  - a_bot * e1_last) / xt2
+                  - a_bot * e1) / xt2
         e2_bot = (xt1b * q2[:, km - 1] + q2[:, km - 2]
-                  - a_bot * e2_last) / xt2
+                  - a_bot * e2) / xt2
 
     # Back-substitution k=km-1..0 (:1577-1580 / :1612-1617): the raw
-    # forward rows are e[k]=e_0..e_last; coef[k] is gak/gam for k=0..km-1.
-    e1_raw = jnp.concatenate([e1_0[:, None], e1_tail.T], axis=1)  # (ni,km)
-    e2_raw = jnp.concatenate([e2_0[:, None], e2_tail.T], axis=1)
-    coef = jnp.concatenate([coef0[None], coef_tail], axis=0)      # (km,)
-
-    def _bwd(carry, x):
-        e1n, e2n = carry
-        e1r, e2r, ck = x
-        e1 = e1r - ck * e1n
-        e2 = e2r - ck * e2n
-        return (e1, e2), (e1, e2)
-
-    (_, (e1_head_rev, e2_head_rev)) = lax.scan(
-        _bwd, (e1_bot, e2_bot), (e1_raw.T, e2_raw.T, coef),
-        reverse=True)
-    qe1 = jnp.concatenate([e1_head_rev.T, e1_bot[:, None]], axis=1)
-    qe2 = jnp.concatenate([e2_head_rev.T, e2_bot[:, None]], axis=1)
+    # forward rows are e1_rows/e2_rows for k=0..km-1; coefs[k] is
+    # gak/gam for k=0..km-1.  Same unrolled-python doctrine as above.
+    nxt1, nxt2 = e1_bot, e2_bot
+    out1: list = [None] * km
+    out2: list = [None] * km
+    for k in range(km - 1, -1, -1):
+        nxt1 = e1_rows[k] - coefs[k] * nxt1
+        nxt2 = e2_rows[k] - coefs[k] * nxt2
+        out1[k] = nxt1
+        out2[k] = nxt2
+    qe1 = jnp.stack(out1 + [e1_bot], axis=1)           # (ni, km+1)
+    qe2 = jnp.stack(out2 + [e2_bot], axis=1)
 
     if limiter != 0:                                   # :1623-1633
         qe1 = qe1.at[:, 0].set(
