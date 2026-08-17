@@ -248,9 +248,11 @@ def test_inactive_keys_track_mode():
     try:
         M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = "most", True, False
         assert M._inactive_keys() == {"pft_ch", "elev_lapse", "elev_sw_grad",
-                                      "elev_lw_lapse", "glac_ice_alb"}
+                                      "elev_lw_lapse", "glac_ice_alb", "snow_zenith"}
         M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = "constant", False, True
-        assert M._inactive_keys() == {"pft_z0", "pft_vcmax", "pft_g1", "pft_lcma"}
+        # snow_zenith frozen in every mode: no albedo call site passes cos_zenith
+        assert M._inactive_keys() == {"pft_z0", "pft_vcmax", "pft_g1", "pft_lcma",
+                                      "snow_zenith"}
     finally:
         M._BULK_SCHEME, M._STOMATA_ON, M._ELEV_BANDS_ON = saved
 

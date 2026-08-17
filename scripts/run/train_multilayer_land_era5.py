@@ -670,6 +670,12 @@ def _inactive_keys() -> set:
         ks |= {"pft_vcmax", "pft_g1", "pft_lcma"}
     if not _ELEV_BANDS_ON:
         ks |= {"elev_lapse", "elev_sw_grad", "elev_lw_lapse", "glac_ice_alb"}
+    # snow_zenith is inert in EVERY current mode — the gate caught it on the
+    # first full-grid dual-target run: no compute_land_albedo call site (SEB,
+    # multilayer post-step, snow bands) passes cos_zenith, so the BATS zenith
+    # brightening never executes.  Frozen until that wiring exists (a production
+    # albedo change, out of calibration scope).
+    ks.add("snow_zenith")
     return ks
 
 
