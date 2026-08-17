@@ -60,7 +60,8 @@ grid:
 
 physics:
   land_mode: multilayer
-  surface_scheme: simple_seb    # the only scheme wired on the MPAS lane
+  surface_scheme: two_leaf_canopy   # now wired on the MPAS lane; spin up
+                                    # against the same scheme the arm runs
   bulk_scheme: most
   stomata_enabled: true         # matches the coupled deck's stomatal control
   stomatal_model: ball_berry
