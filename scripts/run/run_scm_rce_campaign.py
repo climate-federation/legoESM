@@ -2561,6 +2561,11 @@ def resolve_param_selection(
     if param_set != "physical":
         return param_set, (), ()
     metas = [m for m in build_registry() if m.scheme_key == scheme_key]
+    # Tier-0 parameters excluded ONLY because their AD gradient vanishes.  As of
+    # 2026-08-16 the CAPE thresholds are no longer among them — the trigger
+    # gained a straight-through gradient and they were promoted to tier 2, so
+    # the ordinary tier selection picks them up.  The opt-in stays because the
+    # class it serves (physically real, AD-unreachable) can recur.
     include_tier0 = tuple(sorted(
         m.qualified_name for m in metas
         if m.tunable_tier == 0 and _AD_UNREACHABLE_MARKER in m.reference

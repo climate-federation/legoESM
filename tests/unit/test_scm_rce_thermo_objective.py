@@ -595,31 +595,51 @@ def test_tuner_minimises_the_named_objective_and_the_csv_agrees(tmp_path,
     assert float(row["tuned_score"]) == pytest.approx(9.0)
 
 
-def test_physical_set_pins_the_admitted_tier0_parameters_for_every_scheme():
-    """The tier-0 opt-in is selected by matching a free-text reference field, so
-    the RESULT is pinned here: exactly the CAPE trigger of the eight schemes
-    that declare one, and nothing else.  A reworded reference string, or a
-    numerics parameter acquiring the marker, goes red."""
+def test_the_cape_thresholds_are_trainable_not_tier_zero():
+    """They were tier 0 ONLY because the trigger sigmoid saturated to an exactly
+    zero gradient (#1417).  The trigger now carries a straight-through gradient
+    (_triggers.py), so they are ordinary tier-2 closure parameters and the
+    normal tier selection must pick them up — no tier-0 opt-in required.
+
+    This is the same knob `dca` gained 65 % from in the 2026-08-16 campaign.
+    """
+    from legoesm.training.param_collector import build_registry
     from scripts.run import run_scm_rce_campaign as camp
 
-    expected = {
-        "atm.conv.SBMConfig": {"atm.conv.SBMConfig.cape_threshold"},
-        "atm.conv.DCAConfig": {"atm.conv.DCAConfig.cape_threshold"},
-        "atm.conv.KuoConfig": set(),
-        "atm.conv.MassFluxConfig": {"atm.conv.MassFluxConfig.cape_threshold"},
-        "atm.conv.ConvectiveEDMFConfig": {
-            "atm.conv.ConvectiveEDMFConfig.cape_threshold"},
-        "atm.conv.ZhangMcFarlaneConfig": {
-            "atm.conv.ZhangMcFarlaneConfig.cape_threshold"},
-        "atm.conv.KainFritschConfig": set(),
-        "atm.conv.EmanuelConfig": {"atm.conv.EmanuelConfig.cape_threshold"},
-        "atm.conv.TiedtkeConfig": {"atm.conv.TiedtkeConfig.cape_threshold"},
-        "atm.conv.BechtoldConfig": {"atm.conv.BechtoldConfig.cape_threshold"},
-    }
-    for key, want in expected.items():
-        _tier, include_tier0, _exclude = camp.resolve_param_selection(
-            key, "physical")
-        assert set(include_tier0) == want, f"{key}: {include_tier0}"
+    by_name = {m.qualified_name: m for m in build_registry()}
+    thresholds = [n for n in by_name if n.endswith(".cape_threshold")]
+    assert len(thresholds) >= 8, (
+        f"expected the CAPE threshold of at least eight schemes, got "
+        f"{sorted(thresholds)}")
+    still_tier0 = [n for n in thresholds if by_name[n].tunable_tier == 0]
+    assert not still_tier0, (
+        "these CAPE thresholds are still tier 0 despite the trigger being "
+        f"differentiable: {still_tier0}")
+
+    # And they must arrive through the ORDINARY tier selection.
+    _tier, include_tier0, _excl = camp.resolve_param_selection(
+        "atm.conv.BechtoldConfig", "physical")
+    assert not any(n.endswith(".cape_threshold") for n in include_tier0), (
+        "the CAPE threshold is being admitted via the tier-0 opt-in; it should "
+        "now be selected by its tier like any other closure parameter")
+
+
+def test_the_tier0_optin_still_works_for_a_genuine_ad_unreachable_case():
+    """The opt-in mechanism must survive the CAPE promotion: the class it serves
+    (physically real but AD-unreachable) can recur, and a silently broken
+    opt-in would be found only by the next parameter that needs it."""
+    from scripts.run import run_scm_rce_campaign as camp
+
+    assert camp._AD_UNREACHABLE_MARKER, "the marker string was removed"
+    tier, include_tier0, exclude = camp.resolve_param_selection(
+        "atm.conv.EmanuelConfig", "physical")
+    assert tier == "aggressive"
+    assert isinstance(include_tier0, tuple)
+    # Emanuel's remaining tier-0 entries are genuine numerics (smoothing widths,
+    # divisor floors), so none of them may be admitted.
+    for name in ("downdraft_dhdp_min", "downdraft_ep_gate_threshold",
+                 "downdraft_ep_gate_width", "downdraft_freeze_transition_K"):
+        assert f"atm.conv.EmanuelConfig.{name}" not in include_tier0
 
 
 def test_physical_set_defaults_are_all_inside_their_bounds():
