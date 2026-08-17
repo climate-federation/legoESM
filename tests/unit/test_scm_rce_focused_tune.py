@@ -213,6 +213,12 @@ def test_every_driver_unpacks_the_tuners_real_return_arity():
     The arity is taken from a REAL call with the column evaluation stubbed —
     not from the return annotation, which is a string under
     ``from __future__ import annotations`` and can drift from the code.
+
+    SCOPE, stated so it is not read as more than it is: this covers direct
+    tuple assignment from a call, under ``scripts/``. Two-step unpacking, a
+    loop target, or a call through an alias all evade it, and a caller outside
+    ``scripts/`` is not scanned. It catches the shape every current caller
+    uses; it is a tripwire, not a proof.
     """
     import ast
     import pathlib
@@ -252,7 +258,8 @@ def test_every_driver_unpacks_the_tuners_real_return_arity():
     for path in sorted((root / "scripts").rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(errors="replace"))
-        except SyntaxError:          # not ours to police
+        except SyntaxError as exc:   # a file the ratchet cannot see is a hole
+            bad.append(f"{path.relative_to(root)}: unparseable ({exc})")
             continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
