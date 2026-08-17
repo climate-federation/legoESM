@@ -30,10 +30,11 @@ kernel below it is certified in its own gate file; what is new here is:
   unported arm that silently proceeds is the defect class this campaign
   ranks worst, because it returns numbers.
 
-TOLERANCE POLICY.  A full step composes every limiter in the model, so
-per strategy section 4 the numeric bounds carry ``TOL-PENDING`` until
-the measurement job replaces them with ``measured X, bound = measured x
-N``.  The contract and movement gates carry no tolerance and are final.
+TOLERANCE POLICY.  Every numeric bound in this file is MEASURED (job
+9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10.
+The worst composed-chain figure is w at 3.126e-11 relative (NH
+k_split=2); pressure diagnostics sit at 1e-16..5e-15.  The contract and
+movement gates carry no tolerance and are final.
 """
 from __future__ import annotations
 
@@ -243,10 +244,13 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
         # is excluded there rather than compared: assert_real refuses a
         # comparison that cannot fail.
         assert_real(want, f"numpy {nm} (hydro={hydrostatic}, k={k_split})")
-        # TOL-PENDING (a full step composes every limiter in the model).
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst field w at
+        # 3.126e-11 (NH k_split=2, the deepest chain: w rides
+        # riem_solver3 twice plus the remap); next worst pt 2.247e-13,
+        # winds < 8e-14. Bound = worst measured x 10.
         cmp_fields(np.asarray(state[nm]), want,
                    f"{nm} (hydro={hydrostatic}, k_split={k_split})",
-                   tol=1e-16)
+                   tol=3.2e-10)
 
     # Tracer-major on BOTH sides: the module returns nq face-stacked
     # arrays, so building the reference face-major would compare
@@ -254,8 +258,10 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
     want_q = np.stack([np.stack([ref_q[t][iq] for t in range(6)])
                        for iq in range(NQ)])
     assert_real(want_q, "numpy q")
+    # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst 3.448e-14; bound =
+    # measured x 10.
     cmp_fields(np.asarray(got["q"]), want_q,
-               f"q (hydro={hydrostatic}, k_split={k_split})", tol=1e-16)
+               f"q (hydro={hydrostatic}, k_split={k_split})", tol=3.5e-13)
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -273,9 +279,11 @@ def test_pressure_diagnostics_come_back_matching(ctx, jctx, eta,
     for nm in ("ps", "pe", "peln", "pk", "pkz"):
         want = np.stack([np.asarray(ref_press[t][nm]) for t in range(6)])
         assert_real(want, f"numpy {nm}")
-        # TOL-PENDING.
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst pkz 4.689e-15 (the
+        # kappa power is the only transcendental); ps/pe/peln < 2e-16.
+        # Bound = worst measured x 10.
         cmp_fields(np.asarray(press[nm]), want, f"{nm} (hydro={hydrostatic})",
-                   tol=1e-16)
+                   tol=4.7e-14)
 
 
 # --------------------------------------------------------------------
@@ -354,7 +362,11 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 
     d_np, d_j = m_np - m0, m_j - m0
     scale = max(abs(d_np), 1e-6 * abs(m0))
-    # TOL-PENDING: bound on the AGREEMENT of the two drifts.
+    # Bound DERIVED from the measured delp parity (6.034e-14 rel,
+    # job 9425079): the two lanes' summed-mass drifts can differ by at
+    # most n_cells x max|delp diff|, far inside 1e-9 x scale. Never
+    # itself failed; kept as drift-parity (codex: not a conservation
+    # claim), the name says so.
     assert abs(d_j - d_np) <= 1e-9 * scale, (
         f"mass change disagrees: numpy {d_np:.6e}, jax {d_j:.6e} "
         f"(initial {m0:.6e})")
@@ -421,9 +433,10 @@ def test_jit_matches_eager(jctx, eta):
     for nm in ("delp", "pt", "u", "v"):
         a = np.asarray(eager[nm])
         assert_real(a, f"eager {nm}")
-        # TOL-PENDING: jit reassociates; bound to be measured.
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst u 4.217e-14; bound =
+        # measured x 10.
         cmp_fields(np.asarray(jitted[nm]), a, f"jit vs eager {nm}",
-                   tol=1e-16)
+                   tol=4.3e-13)
 
 
 def test_gradient_through_a_whole_step_is_finite(jctx, eta):

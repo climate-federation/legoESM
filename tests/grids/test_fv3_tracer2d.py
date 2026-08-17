@@ -33,10 +33,10 @@ is not mechanical, and it fails in three distinct ways:
    C5 the lane refuses loudly; the gate drives ``cmax`` past the cap and
    requires the raise.
 
-TOLERANCE POLICY.  The advection kernels are limiter-heavy, so per
-strategy section 4 numeric bounds carry ``TOL-PENDING`` until the
-measurement job replaces them.  The three structural gates above carry
-no tolerance at all and are already final.
+TOLERANCE POLICY.  Every numeric bound in this file is MEASURED (job
+9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10;
+the capacitors and dp1 measured exactly 0.0 and carry an eps guard
+instead.  The structural gates carry no tolerance at all.
 """
 from __future__ import annotations
 
@@ -203,14 +203,18 @@ def test_parity_against_the_spec(ctx, jctx, label):
 
     want_q = np.stack([np.stack(q_ref[t]) for t in range(6)])
     assert_real(want_q, f"numpy q ({label})")
-    # TOL-PENDING (limiter-heavy advection): provisional bound.
+    # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst across the three
+    # schedules 2.518e-14 (all_split); bound = measured x 10.
     cmp_fields(np.asarray(got["q"]), want_q, f"q ({label}, nsplt={sched})",
-               tol=1e-16)
+               tol=2.6e-13)
 
     want_dp = np.stack([np.asarray(dp_ref[t]) for t in range(6)])
     assert_real(want_dp, f"numpy dp1 ({label})")
+    # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): exactly 0.0 on all three
+    # schedules -- dp1 = dp2 is the same divergence arithmetic on both
+    # lanes. Eps guard, not 10 x 0.
     cmp_fields(np.asarray(got["dp1"]), want_dp,
-               f"dp1 ({label}, nsplt={sched})", tol=1e-16)
+               f"dp1 ({label}, nsplt={sched})", tol=1e-15)
 
 
 def test_the_rescale_touches_only_level_k(ctx, jctx):
@@ -232,8 +236,10 @@ def test_the_rescale_touches_only_level_k(ctx, jctx):
         have = np.asarray(got[nm])
         for k in range(KM):
             assert_real(want[..., k], f"numpy {nm} level {k}")
+            # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): exactly 0.0 at every
+            # level -- the frac rescale is one multiply. Eps guard.
             cmp_fields(have[..., k], want[..., k],
-                       f"{nm} level {k} (nsplt={sched[k]})", tol=1e-16)
+                       f"{nm} level {k} (nsplt={sched[k]})", tol=1e-15)
 
 
 @pytest.mark.parametrize("label", sorted(_AMPS))
@@ -251,7 +257,9 @@ def test_capacitors_come_back_frac_rescaled(ctx, jctx, label):
     for nm in CAP_KEYS:
         want = np.stack([cap_ref[t][nm] for t in range(6)])
         assert_real(want, f"numpy {nm} ({label})")
-        cmp_fields(np.asarray(got[nm]), want, f"{nm} ({label})", tol=1e-16)
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): exactly 0.0 for all four
+        # capacitors on all three schedules. Eps guard.
+        cmp_fields(np.asarray(got[nm]), want, f"{nm} ({label})", tol=1e-15)
 
 
 # --------------------------------------------------------------------
@@ -309,9 +317,10 @@ def test_both_sides_of_a_schedule_transition(ctx, jctx):
         got = _run_jax(jctx, (amp, amp, amp))
         want = np.stack([np.stack(q_ref[t]) for t in range(6)])
         assert_real(want, f"numpy q (amp={amp})")
-        # TOL-PENDING (limiter-heavy advection): provisional bound.
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst side of the crossing
+        # 2.309e-14; bound = measured x 10.
         cmp_fields(np.asarray(got["q"]), want,
-                   f"q at amp={amp} (nsplt={seen[amp]})", tol=1e-16)
+                   f"q at amp={amp} (nsplt={seen[amp]})", tol=2.4e-13)
 
 
 def test_exceeding_the_cap_raises_instead_of_truncating(jctx):
@@ -393,8 +402,9 @@ def test_jit_matches_eager(jctx):
     for nm in ("q", "dp1") + CAP_KEYS:
         a, b = np.asarray(eager[nm]), np.asarray(jitted[nm])
         assert_real(a, f"eager {nm}")
-        # TOL-PENDING: jit reassociates; bound to be measured.
-        cmp_fields(b, a, f"jit vs eager {nm}", tol=1e-16)
+        # MEASURED (job 9425079, LEGOESM_FV3_TOL_MEASURE sweep): worst 1.571e-14 (q);
+        # capacitors and dp1 exactly 0.0. Bound = measured x 10.
+        cmp_fields(b, a, f"jit vs eager {nm}", tol=1.6e-13)
 
 
 def test_gradient_is_finite_and_carries_no_term_through_the_trip_count(jctx):
