@@ -84,3 +84,49 @@ def test_out_of_range_is_refused(field, bad):
     cfg = ExperimentConfig()._replace(**{field: bad})
     with pytest.raises(Exception):
         cfg.validate_strict()
+
+
+def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
+    """The two schemes have a field of the same name; only one is tunable.
+
+    Tiedtke's deep base rate is still held fixed in-scheme, so it must stay in
+    that scheme's `excluded` block, and the driver route must be qualified to
+    Bechtold at every hop: the registry key, the flat field name, and the
+    constructor that actually receives it.
+    """
+    import legoesm.atmosphere.physics.convection.config as cc
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+
+    tiedtke = next(b for b in cc.__param_spec__.values()
+                   if b.get("scheme_key") == "atm.conv.TiedtkeConfig")
+    assert "epsilon_deep" in tiedtke["excluded"]
+    assert "epsilon_deep" not in tiedtke["params"]
+
+    routes = build_atm_scalar_param_map()
+    assert "atm.conv.TiedtkeConfig.epsilon_deep" not in routes
+    # The flat field the Bechtold route lands on is Bechtold-prefixed, so a
+    # Tiedtke run cannot pick it up by accident.
+    assert routes["atm.conv.BechtoldConfig.epsilon_deep"].startswith("bechtold_")
+
+
+def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
+    """`cape_relaxation_sink` and the ratio it scales have no consumer.
+
+    Nothing in the scheme reads them, so a tunable entry would be a search
+    dimension that can move nothing — a zero-gradient leaf handed to an
+    optimiser. The fields stay (the driver pipeline passes them to the
+    constructor); the tunable classification does not.
+    """
+    import inspect
+
+    import legoesm.atmosphere.physics.convection.bechtold as bechtold
+    import legoesm.atmosphere.physics.convection.config as cc
+
+    blk = _bechtold_spec()
+    assert "cape_sink_heating_ratio" not in blk["params"]
+    assert "cape_sink_heating_ratio" in blk["excluded"]
+    # And the reason is still true: promote it only together with a consumer.
+    src = inspect.getsource(bechtold)
+    assert "cape_relaxation_sink" not in src
+    assert "cape_sink_heating_ratio" not in src
+    assert hasattr(cc.BechtoldConfig(), "cape_sink_heating_ratio")
