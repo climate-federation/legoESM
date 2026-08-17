@@ -144,7 +144,15 @@ def main(argv: list[str] | None = None) -> int:
 
     results = {}
     cache: dict = {}
-    for arm in [a.strip() for a in args.arms.split(",") if a.strip()]:
+    # "+" is accepted as a separator alongside ",": sbatch --export splits its
+    # OWN list on commas, so a comma-separated ARMS value silently truncates to
+    # its first element (measured: a two-arm submission ran exactly one arm).
+    _arm_list = [a.strip() for a in
+                 args.arms.replace("+", ",").split(",") if a.strip()]
+    unknown = [a for a in _arm_list if a not in arm_cfgs]
+    if unknown:
+        raise SystemExit(f"unknown arms {unknown}; known={sorted(arm_cfgs)}")
+    for arm in _arm_list:
         cfg = arm_cfgs[arm]
         run = camp.run_cached(
             cache, cfg, ref, label=f"blqv:{arm}", days=args.days, dt=args.dt,
