@@ -35,10 +35,19 @@ derivative-free.
 | microphysics | 85 | 66 | 4 | 0 |
 | gravity-wave drag | 14 | 18 | 4 | 0 |
 | radiation | — | — | — | — |
-| turbulence | running | | | |
+| turbulence | 46 | 89 | 3 | 0 |
+| **atmosphere total** | **219** | **216** | **16** | **0** |
 
 Convection was re-audited AFTER the CAPE promotion: 66 live -> 74, the eight
 added rows being exactly the promoted thresholds.
+
+Turbulence is the dead-heaviest category (89 of 138): consistent with the
+audit's own caveat that parameters multiplying CARRIED second moments (every
+CLUBB pressure-correlation coefficient) read dead at cold start even with the
+carry spin-up, and with several schemes' surface parameters being live only
+under a stability-dependent bulk scheme the default config does not select
+(the campaign resolves bulk_scheme="constant" — a finding in its own right,
+see the BL-humidity investigation).
 
 **No `nondiff` parameters anywhere so far** — nothing produces a non-finite
 gradient, which is the outcome that would break a trainer outright.
