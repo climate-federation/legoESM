@@ -2250,8 +2250,8 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
     # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']).
     # clm_ml still needs the coupled pipeline's per-column canopy grid
-    # threading, which this lane does not have; simple_seb and two_leaf are
-    # both wired (see the note on two_leaf below).
+    # threading, which this lane does not have.  simple_seb and two_leaf are
+    # both dispatched by the MPAS land step, so only clm_ml is refused here.
     if (args.use_multilayer_land
             and args.land_surface_scheme == "clm_ml"
             and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",

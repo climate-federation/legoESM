@@ -222,14 +222,18 @@ def test_multilayer_land_still_rejected_on_spectral():
 
 
 def test_clm_ml_rejected_on_mpas_but_two_leaf_is_not():
-    """Only ``clm_ml`` is unwired on the MPAS lane.
+    """Only ``clm_ml`` is refused on the MPAS lane.
 
     It needs the coupled pipeline's per-column canopy grid threading, which
     this lane does not have, so selecting it must fail early rather than
-    silently run something else. ``two_leaf`` IS wired here — the land step
-    dispatches to it and its solved canopy-air humidity reaches the turbulence
-    — and refusing it would leave a resistance-based land surface unreachable
-    on the lane the AMIP campaign runs on.
+    silently run something else. ``two_leaf`` is not refused: the MPAS land
+    step dispatches to it, and refusing it would leave a resistance-based land
+    surface unreachable on the lane the AMIP campaign runs on.
+
+    SCOPE: this pins the ARGUMENT GUARD, nothing downstream. Whether the
+    canopy's solved humidity and fluxes actually reach the atmosphere is a
+    separate question — that hand-over sits behind its own switch, which
+    defaults off — and is pinned by the land-boundary tests, not here.
     """
     parser = build_arg_parser()
     mpas_args = ["--dataset", "analytical",
