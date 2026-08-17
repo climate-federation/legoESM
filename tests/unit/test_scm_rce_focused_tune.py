@@ -201,6 +201,75 @@ def test_unknown_objective_raises():
         )
 
 
+def test_every_driver_unpacks_the_tuners_real_return_arity():
+    """A tuner that grows a return value silently breaks its callers.
+
+    ``tune_category_winner`` gained ``tune_stats``; three call sites across the
+    campaign driver, the per-scheme tuning driver and a unit test kept
+    unpacking three values, so every non-``--skip-tuning`` run died with
+    ``ValueError: too many values to unpack``. Nothing caught it, because the
+    only exercised path was the skip-tuning one.
+
+    The arity is taken from a REAL call with the column evaluation stubbed —
+    not from the return annotation, which is a string under
+    ``from __future__ import annotations`` and can drift from the code.
+    """
+    import ast
+    import pathlib
+    from types import SimpleNamespace
+
+    class _Diag(SimpleNamespace):
+        pass
+
+    def _stub(*_a, **_k):
+        return _Diag(status="ok", score=1.0, subcloud_score=1.0,
+                     thermo_score=1.0)
+
+    common = dict(
+        days=0.01, dt=600.0, analysis_days=0.01,
+        require_equilibrium=False, require_realism=False,
+        tune_evals=1, seed=0,
+        equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0,
+    )
+    real_run_cached = camp.run_cached
+    camp.run_cached = _stub
+    try:
+        cfg = camp.make_physics_config(radiation="gray", turbulence="clubb",
+                                       convection="bechtold")
+        arity = {
+            "tune_category_winner": len(camp.tune_category_winner(
+                "convection", cfg, object(), {}, **common)),
+            "tune_focused_params": len(camp.tune_focused_params(
+                cfg, object(), {},
+                categories=FOCUSED_TUNE_CATEGORIES,
+                include=("atm.turb.CLUBBParams.c_K",), **common)),
+        }
+    finally:
+        camp.run_cached = real_run_cached
+
+    root = pathlib.Path(camp.__file__).resolve().parents[2]
+    bad = []
+    for path in sorted((root / "scripts").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:          # not ours to police
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                continue
+            fn = node.value.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if name not in arity:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Tuple) and len(target.elts) != arity[name]:
+                    bad.append(
+                        f"{path.relative_to(root)}:{node.lineno} unpacks "
+                        f"{len(target.elts)} from {name}, which returns "
+                        f"{arity[name]}")
+    assert not bad, "\n".join(bad)
+
+
 def test_focused_mode_reaches_the_tuner_from_the_driver(monkeypatch):
     """The real call site, with only the column evaluation stubbed out.
 
@@ -250,18 +319,23 @@ def test_focused_tuning_forwards_the_humidity_variable_to_every_column(
     every candidate under the default variable while the log and the CSV claim
     the requested one — a silent objective mismatch, not a crash.
     """
+    import inspect
     from types import SimpleNamespace
 
     cfg = camp.make_physics_config(radiation="gray", turbulence="clubb")
     seen = []
+    accepted = set(inspect.signature(camp.run_cached).parameters)
 
     def _record(*_a, **kw):
         seen.append(kw)
-        return SimpleNamespace(status="ok", thermo_score=1.0,
-                               subcloud_score=1.0, score=1.0)
+        # The trial must SCORE BETTER than the default, or the tuner's
+        # accept branch never runs and the forwarding on it is unexercised.
+        score = 1.0 if len(seen) == 1 else 0.5
+        return SimpleNamespace(status="ok", thermo_score=score,
+                               subcloud_score=score, score=score)
 
     monkeypatch.setattr(camp, "run_cached", _record)
-    camp.tune_focused_params(
+    _cfg, records, default_run, best_run = camp.tune_focused_params(
         cfg, object(), {},
         categories=FOCUSED_TUNE_CATEGORIES,
         include=("atm.turb.CLUBBParams.c_K",),
@@ -272,8 +346,15 @@ def test_focused_tuning_forwards_the_humidity_variable_to_every_column(
         equil_T_tol_K=1.0, equil_qv_tol=1.0, equil_qcond_tol=1.0,
         thermo_humidity="rh",
     )
-    # Both the default column and the trial column, or the comparison the
-    # tuner makes is between two different objectives.
+    # The default column and at least one trial, or the comparison the tuner
+    # makes is between two different objectives.
     assert len(seen) >= 2
+    assert best_run is not default_run, (
+        "the better trial was not accepted; the accept branch never ran")
     assert all(kw.get("thermo_humidity") == "rh" for kw in seen), (
         f"columns ran under {[kw.get('thermo_humidity') for kw in seen]}")
+    # The stub takes **kwargs, so it would swallow a name the real function
+    # does not have — which is the exact defect class this test exists for.
+    for kw in seen:
+        unknown = set(kw) - accepted
+        assert not unknown, f"run_cached does not accept {sorted(unknown)}"

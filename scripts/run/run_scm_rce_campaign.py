@@ -3492,7 +3492,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_tuning:
         for category in categories:
             print(f"[tune] {category}={winners[category]}")
-            tuned_cfg, records, tuned_run = tune_category_winner(
+            tuned_cfg, records, tuned_run, _tune_stats = tune_category_winner(
                 category,
                 tuned_cfg,
                 ref,

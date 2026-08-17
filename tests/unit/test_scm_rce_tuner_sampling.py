@@ -165,10 +165,16 @@ def test_a_nan_default_score_does_not_block_every_trial(camp, monkeypatch):
     assert math.isfinite(tuned.score), "tuner kept the NaN default"
     assert tuned.score == pytest.approx(0.5)
     assert records, "no parameter records written for a successful tune"
-    # The stats are per-call, so they must count this call's columns and no
-    # more: the default run plus the three trials.
+    # The stats are per-call, so they must count THIS call's proposals and no
+    # more.  A lower bound would pass on a global/cumulative dict.
     assert set(tune_stats) == set(camp.EMPTY_TUNE_STATS)
-    assert sum(tune_stats.values()) > 0
+    assert tune_stats["requested_evals"] == 3
+    assert (tune_stats["random_proposals"] + tune_stats["refine_proposals"]
+            == 3)
+    # ``unique_evals`` counts keys ADDED to the run cache. ``run_cached`` is
+    # stubbed here and never writes one, so zero is the correct value — and
+    # asserting it pins that the counter measures the cache, not the loop.
+    assert tune_stats["unique_evals"] == 0
 
 
 def test_a_non_finite_trial_is_never_accepted(camp, monkeypatch):
