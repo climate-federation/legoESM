@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --account=glab
-#SBATCH --partition=short
+#SBATCH --partition=glab1
 #SBATCH --job-name=clubb_pc
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/clubb_pc_%j.out
 set +e
 # WHICH CASE contributes the 1e15 gradient? Stop hypothesising and enumerate.
@@ -36,7 +36,11 @@ export PYTHONPATH=$E_WT/src:$(ls -d "$E_WT"/packages/*/ | tr '\n' ':')
 export XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results
-for C in ekman gabls1 cbl wangara bomex rico astex dycoms; do
+# ONE case per job, set by CASES. The all-eight loop hit the walltime on
+# wangara -- 2880 steps at dt=10 s with the slowest closure, whose COMPILE alone
+# exceeded an hour -- and took the four unrun cases down with it. A slow case
+# must not starve the others.
+for C in ${CASES:?set CASES to the case name(s) to enumerate}; do
   echo "########## $C ##########"
   $PY scripts/run/run_scm_les_turbulence_tuning.py \
       --cases "$C:$R/les_ref/$C" \
