@@ -48,9 +48,46 @@ def m():
     return _load_matrix()
 
 
+#: The entry the registry used to hold, kept as the shape the machinery is
+#: tested against. The registry itself is EMPTY -- the Eady channel passes
+#: again -- but every guarantee below must still hold for the NEXT entry, so
+#: the tests register this one temporarily rather than deleting themselves.
+_ENTRY_SHAPE = {"issue": "#1609", "min_days": 68.0,
+                "expect_day_range": (60.0, 75.0)}
+
+
 @pytest.fixture(scope="module")
 def entry_key():
     return ("eady_uniform", "mpas_channel", "70km")
+
+
+@pytest.fixture
+def registered(m, entry_key):
+    """Temporarily register an entry so the waiver machinery can be tested."""
+    m.KNOWN_FAILURES[entry_key] = dict(_ENTRY_SHAPE)
+    try:
+        yield entry_key
+    finally:
+        m.KNOWN_FAILURES.pop(entry_key, None)
+
+
+_REMOVED_ENTRY = {
+    "issue": "#1609", "min_days": 68.0, "expect_day_range": (60.0, 75.0)}
+
+
+def _require_live(m, key):
+    """Guard against the vacuity codex found.
+
+    Every NEGATIVE test here asserts that some input is NOT waived. On an
+    empty registry that is true for the boring reason -- ``_apply_known_failure``
+    returns early when the key is unregistered -- so the test passes while
+    proving nothing. Dropping the ``registered`` fixture from one of them was
+    measured to leave it GREEN. This makes that failure mode impossible: the
+    test now says out loud that the entry is live before asserting it is not
+    applied."""
+    assert key in m.KNOWN_FAILURES, (
+        "no entry registered -- this negative test would pass vacuously; "
+        "the `registered` fixture is missing")
 
 
 def _case(m, key, **kw):
@@ -74,7 +111,7 @@ def _out_dir(tmp_path, day):
 # The waiver applies where it should
 # ---------------------------------------------------------------------------
 
-def test_registered_fail_becomes_xfail(m, entry_key, tmp_path):
+def test_registered_fail_becomes_xfail(m, registered, entry_key, tmp_path):
     """The real case: a full-length run that blew up on the known day."""
     tc = _case(m, entry_key)
     d = _out_dir(tmp_path, 67.36)
@@ -82,7 +119,7 @@ def test_registered_fail_becomes_xfail(m, entry_key, tmp_path):
         tc, "FAIL", 200.0, "Non-finite values in u", d) == "XFAIL"
 
 
-def test_waiver_applies_at_exactly_min_days(m, entry_key, tmp_path):
+def test_waiver_applies_at_exactly_min_days(m, registered, entry_key, tmp_path):
     """Boundary: ``days < min_days`` is the rejection test, so equality waives."""
     tc = _case(m, entry_key)
     min_days = m.KNOWN_FAILURES[entry_key]["min_days"]
@@ -90,7 +127,7 @@ def test_waiver_applies_at_exactly_min_days(m, entry_key, tmp_path):
     assert m._apply_known_failure(tc, "FAIL", min_days, "boom", d) == "XFAIL"
 
 
-def test_both_observed_failure_notes_are_waived(m, entry_key, tmp_path):
+def test_both_observed_failure_notes_are_waived(m, registered, entry_key, tmp_path):
     """The two detectors emit different notes; the day band covers both.
 
     This is why the waiver is NOT keyed on the notes text."""
@@ -105,8 +142,9 @@ def test_both_observed_failure_notes_are_waived(m, entry_key, tmp_path):
 # The positive signature: a failure at the WRONG TIME is a different bug
 # ---------------------------------------------------------------------------
 
-def test_blowup_outside_the_day_band_is_not_waived(m, entry_key, tmp_path):
+def test_blowup_outside_the_day_band_is_not_waived(m, registered, entry_key, tmp_path):
     """An early blow-up cannot be this mechanism, whose onset is day 67.4."""
+    _require_live(m, entry_key)
     tc = _case(m, entry_key)
     lo, hi = m.KNOWN_FAILURES[entry_key]["expect_day_range"]
     for day in (lo - 5.0, hi + 5.0, 1.0, 150.0):
@@ -114,8 +152,9 @@ def test_blowup_outside_the_day_band_is_not_waived(m, entry_key, tmp_path):
         assert m._apply_known_failure(tc, "FAIL", 200.0, "boom", d) == "FAIL", day
 
 
-def test_fail_with_no_recorded_blowup_is_not_waived(m, entry_key, tmp_path):
+def test_fail_with_no_recorded_blowup_is_not_waived(m, registered, entry_key, tmp_path):
     """Fail closed. A FAIL that never blew up is an unrelated regression."""
+    _require_live(m, entry_key)
     tc = _case(m, entry_key)
     d = tmp_path / "nb"
     d.mkdir()
@@ -124,20 +163,22 @@ def test_fail_with_no_recorded_blowup_is_not_waived(m, entry_key, tmp_path):
     assert m._apply_known_failure(tc, "FAIL", 200.0, "rate", d) == "FAIL"
 
 
-def test_missing_results_file_is_not_waived(m, entry_key, tmp_path):
+def test_missing_results_file_is_not_waived(m, registered, entry_key, tmp_path):
     tc = _case(m, entry_key)
     assert m._apply_known_failure(tc, "FAIL", 200.0, "boom",
                                   tmp_path / "absent") == "FAIL"
     assert m._apply_known_failure(tc, "FAIL", 200.0, "boom", None) == "FAIL"
 
 
-def test_quick_lane_is_not_waived(m, entry_key, tmp_path):
+def test_quick_lane_is_not_waived(m, registered, entry_key, tmp_path):
     """THE lane that must stay red.
 
     Onset is simulated day 67.4, so the 60-day --quick lane stops BEFORE the
     known blow-up and is expected to PASS on the Eady growth rate. Waiving it
     would paint an unrelated quick-lane bug green and destroy the cheapest
     early-warning lane for this case (GLM-5.2 review)."""
+    _require_live(m, entry_key)
+    _require_live(m, entry_key)
     tc = _case(m, entry_key)
     d = _out_dir(tmp_path, 40.0)
     assert m._apply_known_failure(tc, "FAIL", 60.0, "boom", d) == "FAIL"
@@ -145,7 +186,7 @@ def test_quick_lane_is_not_waived(m, entry_key, tmp_path):
     assert m._apply_known_failure(tc, "PASS", 60.0, "fine", d) == "PASS"
 
 
-def test_min_days_exceeds_the_known_onset(m, entry_key):
+def test_min_days_exceeds_the_known_onset(m, registered, entry_key):
     """The invariant behind the two tests above, asserted directly."""
     e = m.KNOWN_FAILURES[entry_key]
     lo, _hi = e["expect_day_range"]
@@ -160,7 +201,7 @@ def test_min_days_exceeds_the_known_onset(m, entry_key):
 # fail if someone widens the entry.
 # ---------------------------------------------------------------------------
 
-def test_short_run_is_not_waived(m, entry_key, tmp_path):
+def test_short_run_is_not_waived(m, registered, entry_key, tmp_path):
     tc = _case(m, entry_key)
     min_days = m.KNOWN_FAILURES[entry_key]["min_days"]
     d = _out_dir(tmp_path, 67.36)
@@ -168,22 +209,25 @@ def test_short_run_is_not_waived(m, entry_key, tmp_path):
         tc, "FAIL", min_days - 1.0, "boom", d) == "FAIL"
 
 
-def test_error_is_never_waived(m, entry_key, tmp_path):
+def test_error_is_never_waived(m, registered, entry_key, tmp_path):
     """ERROR is infrastructure breakage, not the known physics failure."""
+    _require_live(m, entry_key)
+    _require_live(m, entry_key)
     tc = _case(m, entry_key)
     d = _out_dir(tmp_path, 67.36)
     assert m._apply_known_failure(
         tc, "ERROR", 200.0, "ImportError", d) == "ERROR"
 
 
-def test_skip_passes_through(m, entry_key, tmp_path):
+def test_skip_passes_through(m, registered, entry_key, tmp_path):
     tc = _case(m, entry_key)
     d = _out_dir(tmp_path, 67.36)
     assert m._apply_known_failure(tc, "SKIP", 200.0, "no mesh", d) == "SKIP"
 
 
-def test_other_cases_are_untouched(m, tmp_path):
+def test_other_cases_are_untouched(m, registered, tmp_path):
     """The waiver is keyed on all three of case, grid and resolution."""
+    _require_live(m, registered)
     d = _out_dir(tmp_path, 67.36)
     for key in (("eady_uniform", "latlon_channel", "30x30"),
                 ("phillips_two_layer", "mpas_channel", "70km"),
@@ -193,17 +237,21 @@ def test_other_cases_are_untouched(m, tmp_path):
             tc, "FAIL", 200.0, "boom", d) == "FAIL", key
 
 
-def test_registry_holds_exactly_the_documented_entry(m, entry_key):
-    """Grow-only vigilance: a NEW waiver must be a deliberate, reviewed edit."""
-    assert set(m.KNOWN_FAILURES) == {entry_key}
-    assert m.KNOWN_FAILURES[entry_key]["issue"] == "#1609"
+def test_registry_is_empty(m):
+    """The registry holds nothing, and adding to it is a reviewed decision.
+
+    Every waived case is a red result made green by fiat. If this goes red,
+    someone added one -- check it carries a positive signature (a blow-up day
+    band, not a notes substring) and a min_days above the onset, the two
+    things review forced on the entry that used to live here."""
+    assert m.KNOWN_FAILURES == {}
 
 
 # ---------------------------------------------------------------------------
 # A passing waived case must be LOUD, not silently green
 # ---------------------------------------------------------------------------
 
-def test_pass_becomes_xpass(m, entry_key, tmp_path):
+def test_pass_becomes_xpass(m, registered, entry_key, tmp_path):
     """If the owed loop-closure fix lands, this entry must announce itself."""
     tc = _case(m, entry_key)
     d = _out_dir(tmp_path, 67.36)
@@ -249,12 +297,17 @@ def test_waiver_is_applied_at_the_dispatcher(m):
 def test_entry_is_a_real_matrix_case(m):
     """Every key must select a case the matrix actually enumerates.
 
-    A typo in any of the three fields would produce a waiver that silently
-    covers nothing -- the failure mode this repo's setup-template rule exists
-    to prevent."""
-    matrix = m._build_test_matrix() if hasattr(m, "_build_test_matrix") \
-        else m.build_test_matrix()
+    The registry is empty, so this checks the SHAPE the next entry has to
+    satisfy: the key used by the entry that used to live here must still
+    resolve to a real case. A typo in any of the three fields would produce a
+    waiver that silently covers nothing.
+
+    Written to be non-vacuous on an empty registry -- codex caught several
+    sibling tests that quietly asserted nothing once the real entry went."""
+    matrix = m._build_test_matrix()
     present = {(t.case, t.grid_type, t.resolution) for t in matrix}
+    assert ("eady_uniform", "mpas_channel", "70km") in present, (
+        "the case the removed waiver named is no longer in the matrix")
     for key in m.KNOWN_FAILURES:
         assert key in present, (
             f"KNOWN_FAILURES key {key} matches no case in the matrix")
@@ -270,7 +323,7 @@ def test_entry_is_a_real_matrix_case(m):
 # because none of them called ``record``.
 # ---------------------------------------------------------------------------
 
-def test_record_accepts_every_waived_status(m, entry_key):
+def test_record_accepts_every_waived_status(m, registered, entry_key):
     """The regression test for the blocker: recording must not raise."""
     tc = _case(m, entry_key)
     before = len(m.ALL_RESULTS)
@@ -320,11 +373,12 @@ def test_rerun_merge_carries_the_waived_counters():
         "a clean suite while a stale waiver went unaccounted for")
 
 
-def test_malformed_blowup_marker_fails_closed(m, entry_key, tmp_path):
+def test_malformed_blowup_marker_fails_closed(m, registered, entry_key, tmp_path):
     """A marker that matches the regex but is not a number must not ERROR.
 
     ``float()`` originally sat outside the try, so a corrupt results.txt
     raised instead of returning None (codex review)."""
+    _require_live(m, entry_key)
     tc = _case(m, entry_key)
     d = tmp_path / "bad"
     d.mkdir()
