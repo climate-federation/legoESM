@@ -19,8 +19,12 @@ def _synthetic_data(ncol=16):
     lat = np.deg2rad(rng.uniform(-80, 80, ncol))
     pft = rng.random((ncol, _N_PFT)); pft /= pft.sum(1, keepdims=True)
     z = lambda v: jnp.full((ncol,), v)
+    # snow falls where the air is below freezing (matches the loader) so the
+    # snow-albedo params carry gradient and the no-inert gate passes in train()
+    Tair = jnp.asarray(285 - 0.3 * np.abs(np.rad2deg(lat)))
     f = [AtmToSurface(
-        sw_down=z(200.0), lw_down=z(320.0), precip_total=z(2e-5), precip_snow=z(0.0),
+        sw_down=z(200.0), lw_down=z(320.0), precip_total=z(2e-5),
+        precip_snow=jnp.where(Tair < constants.T_freeze, 2e-5, 0.0),
         T_lowest=jnp.asarray(285 - 0.3 * np.abs(np.rad2deg(lat))),
         q_lowest=z(5e-3), u_lowest=z(3.0), v_lowest=z(2.0), p_lowest=z(9.9e4),
         p_surface=z(1.0e5), rho_lowest=z(1.2), cos_zenith=z(0.5), co2_ppmv=z(412.0),
@@ -91,6 +95,14 @@ def test_all_slab_params_live():
     g = jax.grad(lambda q: loss_fn(q, data, n_spin_years=1)[0])(init_raw_params())
     for k in ("pft_alb", "pft_emis", "pft_wmax", "ch"):
         assert float(jnp.max(jnp.abs(g[k]))) > 0.0, f"{k} inert"
+
+
+def test_train_two_iters_smoke():
+    """train() end-to-end (jit + static lam_le + inert gate): 2 iterations must
+    run without raising — this is the path the sbatch job takes, which the
+    eager-loss tests above do not cover (a traced lam_le broke it in prod)."""
+    tuned = train(_synthetic_data(), n_iter=2)
+    assert "pft_wmax" in tuned and len(tuned["pft_wmax"]) == _N_PFT
 
 
 def test_adam_reduces_loss():

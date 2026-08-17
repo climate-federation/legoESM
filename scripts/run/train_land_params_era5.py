@@ -231,7 +231,10 @@ def loss_fn(p, data, lam_alb=300.0, lam_pft=2.0, lam_le=_LAM_LE, n_spin_years=2)
 
 def train(data, n_iter=80, lr=3e-2, lam_le=_LAM_LE):
     p = init_raw_params()
-    vg = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    # lam_le is STATIC (the loss branches on it in Python); passing it as a
+    # traced jit kwarg raises TracerBoolConversionError.
+    vg = jax.jit(jax.value_and_grad(loss_fn, has_aux=True),
+                 static_argnames=("lam_le", "n_spin_years"))
     opt = optax.adam(lr); state = opt.init(p)
     for it in range(n_iter):
         (l, (tm, am, pp, lm)), g = vg(p, data, lam_le=lam_le)
