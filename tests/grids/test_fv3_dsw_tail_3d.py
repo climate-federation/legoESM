@@ -990,16 +990,18 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     for nm, npnm in ren.items():
         want = np.stack([np.asarray(x) for x in ref_carry[npnm]])
         assert_real(want, f"numpy nh carry {nm}")
-        # RE-MEASURING (post edge_profile unroll, jobs 9424740/9424741):
-        # the previous 3.498e-10 was dominated by the edge_profile scan
-        # FMA defect, now fixed -- the stage-split localiser reads
-        # ~5.8e-10 ABSOLUTE (vs 1.847e-04 before) with the remainder
-        # wholly inside riem_solver3 (PLAUSIBLE same scan-compilation
-        # class; NOT measured). This bound is set tight to make the
-        # gate's own machinery print the exact post-fix number; the
-        # final bound is 10x whatever this run reports.
+        # MEASURED by this gate's own machinery post edge_profile
+        # unroll (job 9424782): 4.543e-14 per-element relative,
+        # max|diff| 2.049e-08 on a ~1e5-magnitude field, ZERO cells over
+        # 1e-13. Down from 3.498e-10 / 1.847e-04 before the fix -- the
+        # old residual was the edge_profile scan-FMA defect, CONFIRMED
+        # by its removal. Bound = measured x 10. What remains localises
+        # wholly inside riem_solver3 (stage-split localiser, job
+        # 9424741, ~5.8e-10 absolute per face) and at ~200 eps is in
+        # the jit-parity class; PLAUSIBLY riem's own lax.scan, not
+        # measured, not claimed.
         # [class: accumulating -- the Riemann solve is a recurrence]
-        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 1e-14)
+        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 4.6e-13)
 
     if remap_step:
         # `ws` is EXCLUDED, not forgotten: the fixture has flat

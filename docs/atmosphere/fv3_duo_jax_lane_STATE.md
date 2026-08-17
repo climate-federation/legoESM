@@ -509,30 +509,37 @@ is out of scope for the port.
 Instrument controls on both arms: IC worst rel 3.685e-14, and the
 derived face map matches the frozen 2026-08-07 bijection.
 
-## The update_dz_d residual is CHARACTERISED (2026-08-16)
+## ★ The update_dz_d residual is FIXED — and the mechanism was not mine (2026-08-17)
 
-Not roundoff, not a transport defect: a **free-stream preservation**
-difference at a handful of cells.
+Authored by Fable, reviewed by codex (no blocker) and GLM-5.3
+(equivalent, no blocker). My PLAUSIBLE mechanism (divergence
+association) was REFUTED by the stage-split probe: fv_tp_2d, xppm/yppm
+and del6_vt_flux were all bitwise identical. The one divergent
+sub-operation was **edge_profile** — its Thomas recurrences ran inside
+`lax.scan`, whose body is XLA-COMPILED even on eager calls, and the
+compiled body's contracted multiply-adds perturbed the `*_adv` outputs
+at ~1e-14, flipping two upwind selector bits on a constant level.
 
-* smooth fixture, km = 2/3/6/12: the twins are **bit-identical**
-  (0.0 relative, zero cells) -- so there is no systematic
-  expression-order difference, and the km-scaling question dissolves;
-* the gate's own bundle, face 3: exactly **2 of 1296** cells differ,
-  and at both `zh` is horizontally CONSTANT, so the divergence must
-  telescope to zero. NumPy returns the input to all 17 digits
-  (1.59000000000000000e+03); JAX returns 1.59000000285184387e+03 and
-  1.58999999752043232e+03. `dz` there is 510 m (NOT cancellation) and
-  the Courant numbers are ~1e-4.
+Fix: both recurrences unrolled in python over the static km,
+expression-identical to the spec. Measured after:
 
-CONFIRMED: the JAX twin loses exact preservation of a constant field
-where the NumPy loop keeps it, by ~2.9e-6 absolute / 1.8e-9 relative.
-PLAUSIBLE: the stacked divergence associates its inflow/outflow pair
-differently, so they no longer cancel bitwise. Closing it means
-matching that one expression's order — a bounded, named task rather
-than an open question.
+* the full `update_dz_d` twins **BITWISE IDENTICAL** on the previously
+  failing bundle — the gate now asserts EXACT EQUALITY on all six
+  faces (faces 2/6's old 2.27e-13 wobble vanished too: same mechanism);
+* the composed NH carry `zh`: **4.543e-14** per-element relative
+  (was 3.498e-10), max|diff| 2.049e-08 (was 1.847e-04), measured by
+  the gate's own machinery (job 9424782); bound = measured × 10.
 
-The nh `zh` residual (3.498e-10) is very likely the same effect one
-stage downstream, but that has NOT been measured and is not claimed.
+What remains (~5.8e-10 absolute per face) localises wholly inside
+`riem_solver3` and at ~200 eps is jit-parity class. PLAUSIBLY riem's
+own `lax.scan`, same compilation mechanism — NOT measured, NOT claimed,
+and not worth chasing unless a gate needs it.
+
+LESSON (doctrine, added to the module docstring): `lax.scan` bodies are
+compiled even on eager calls, so a scan can never sit on a path that
+claims BITWISE parity with a sequential NumPy loop — unroll over the
+static trip count there. Under jit everything is compiled anyway and
+only the ~1e-14 parity contract holds.
 
 ## OPEN, and honestly labelled (codex MAJOR, 2026-08-16)
 
