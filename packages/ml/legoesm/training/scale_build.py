@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -414,10 +415,28 @@ def _build_mode_components_spectral(cfg, yml):
         # Without this the interval key is INERT and the SI SSP-RK3 step calls
         # RRTMGP three times per step — ~18x the intended rate at interval 6,
         # and the combined wrapper also freezes radiation's solar time (codex).
+        # CAM trop_cloud_top_press for CLUBB [hPa in the YAML, Pa inside]:
+        # None/absent -> CLUBBConfig's default 0.0 = feature off. The
+        # 32-level arm sets 50 hPa — the diagnostic scheme's measured
+        # stratospheric excursion lives 16-50 hPa there. A non-finite or
+        # non-positive value is a config error, not a silent off-switch.
+        _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
+        if _clubb_top_hpa is None:
+            _clubb_top = None
+        else:
+            _clubb_top = float(_clubb_top_hpa) * 100.0
+            if not math.isfinite(_clubb_top) or _clubb_top <= 0.0:
+                raise ValueError(
+                    "classical.clubb_top_press_hpa must be a finite "
+                    f"positive pressure in hPa, got {_clubb_top_hpa!r}; "
+                    "omit the key to leave the CAM trop-cloud-top taper "
+                    "off.")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
-                rad_update_interval_steps=_rad_interval, **_schemes)
+                rad_update_interval_steps=_rad_interval,
+                clubb_top_press=_clubb_top, **_schemes)
         # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
         # kwarg, same as in the AIMIP trainer, where prescribed SST enters
         # through the surface scheme rather than the physics signature.

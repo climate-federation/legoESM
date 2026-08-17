@@ -1059,6 +1059,12 @@ def make_aimip_classical_spectral_physics(
     gwd_scheme: str = "mcfarlane",
     microphysics_scheme: str = "sundqvist",
     cloud_scheme: str = "xu_randall",
+    # CAM ``trop_cloud_top_press`` [Pa] for turbulence_scheme="clubb": the
+    # pressure above which CLUBB's mixing tapers to zero. None keeps
+    # CLUBBConfig's default 0.0 = OFF (CAM's own code default; the taper is a
+    # no-op branch); the 32-level WB arm sets 5000 Pa (see CLUBBConfig
+    # docstring).
+    clubb_top_press: float | None = None,
     # Ablations that deliberately drop a family set this True; production
     # training does not (see validate_classical_scheme_set).
     allow_unfilled_families: bool = False,
@@ -1365,9 +1371,14 @@ def make_aimip_classical_spectral_physics(
         }
         factory = _surface_scheme_configs.get(turbulence_scheme)
         if factory is not None:
+            _turb_sub = factory()
+            if turbulence_scheme == "clubb" and clubb_top_press is not None:
+                # CAM trop_cloud_top_press override (see the kwarg above).
+                _turb_sub = _turb_sub._replace(
+                    trop_cloud_top_press=float(clubb_top_press))
             turb_cfg = TurbulenceConfig(
                 scheme=turbulence_scheme,
-                **{turbulence_scheme: _spatial_surface_override(factory())},
+                **{turbulence_scheme: _spatial_surface_override(_turb_sub)},
             )
         else:
             # "none" — no surface sub-config to thread the bulk scheme onto.
