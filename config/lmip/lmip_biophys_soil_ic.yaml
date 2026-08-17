@@ -8,14 +8,19 @@
 # CRU-JRA forcing (1975-1984, noleap), calibrated biophysics.  Warm-starting
 # from it replaces this ~8 h A100 spin-up.
 #
+#   # fetch the published IC (Zenodo record 21986853, concept DOI
+#   # 10.5281/zenodo.21986852; md5-pinned in the script):
+#   ./scripts/data/download_lmip_data.sh --soil-ic-only
+#
 #   # consume the IC (any biophysics LMIP run on the SAME grid + soil grid):
 #   python scripts/run/run_lmip_biophys.py --config <your config.yaml> \
-#       --output-dir <dir> --restart-from data/lmip_soil_ic/<IC file>
+#       --output-dir <dir> \
+#       --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz
 #   # or, via the experiment workflow:
 #   python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
 #       --name prod --output-dir <dir> --machine derecho_gpu \
 #       -o forcing.year_start=1985 -o forcing.year_end=1994 \
-#       -o restart.from=data/lmip_soil_ic/<IC file>
+#       -o restart.from=data/lmip_soil_ic/restart_1985_d000h00.npz
 #
 #   # rebuild the IC = run THIS file (forcing years 1975-1984 must be staged):
 #   python scripts/run/run_lmip_biophys.py \

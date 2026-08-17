@@ -1,33 +1,34 @@
 # LMIP biophysics soil-state initial condition — spin-up recipe and published product
 
-<!-- DRAFT: every [TBD-n] below must be filled from the actual Derecho run /
-     Zenodo upload before this document is published.  The list of what each
-     needs is at the bottom (“Before publishing”). -->
-
 A cold-started global land run spends its first years drifting while soil
 moisture and soil temperature equilibrate to the forcing. This recipe replaces
 that spin-up with a published **land restart**: the end state of a 10-year
 CRU-JRA spin-up (1975–1984) of the calibrated 2° biophysics LMIP — spun-up soil
-moisture and temperature profiles (10 layers / 3.0 m), snow and canopy state for
-every land column — that a run ingests at `t = 0` via `restart.from`.
+moisture and temperature profiles (10 layers / 3.0 m) plus snow state for every
+column — that a run ingests at `t = 0` via `restart.from`.
 
 **The product is already built and published — download it before you spend an
 A100 job (≤ 4 h walltime) rebuilding it.**
 
 ## 1. Use the published IC
 
-Zenodo record [TBD-2: DOI + link]:
+Published on Zenodo: [record 21986853](https://zenodo.org/records/21986853)
+(version DOI `10.5281/zenodo.21986853`, concept DOI `10.5281/zenodo.21986852` —
+cite the concept DOI). One file: `restart_1985_d000h00.npz`, 3.4 MB,
+md5 `e619b555cf6bd018a19ac8a52f77b52a`.
+
+`scripts/data/download_lmip_data.sh` stages it automatically (alongside the
+CRU-JRA forcing and the surfdata), verifying the zip magic and the pinned md5;
+it is idempotent, and `--soil-ic-only` fetches just this file:
 
 ```bash
-mkdir -p data/lmip_soil_ic
-curl -fL -o data/lmip_soil_ic/[TBD-3: filename] \
-    "https://zenodo.org/records/[TBD-2]/files/[TBD-3]"
-# verify
-echo "[TBD-4: sha256]  data/lmip_soil_ic/[TBD-3]" | shasum -a 256 -c -
+./scripts/data/download_lmip_data.sh --soil-ic-only
+#  -> data/lmip_soil_ic/restart_1985_d000h00.npz
 ```
 
-(Once the IC is staged by `scripts/data/download_lmip_data.sh`, use that
-instead — it is idempotent and checks the file magic.)
+A new IC build means bumping the Zenodo record + md5 pin in that script
+together; `--soil-ic-url` / `$LEGOESM_SOIL_IC_URL` point at a different build
+(md5 pin dropped, magic check kept).
 
 > ⚠️ **The ice-sheet snowpack in this IC is not physical.** The single-bulk
 > snow scheme has no glacier sink (no ablation, no calving, no ice conversion),
@@ -45,13 +46,13 @@ instead — it is idempotent and checks the file magic.)
 ```bash
 # direct driver call
 python scripts/run/run_lmip_biophys.py --config <your config.yaml> \
-    --output-dir <dir> --restart-from data/lmip_soil_ic/[TBD-3]
+    --output-dir <dir> --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz
 
 # experiment workflow (production block warm-started at 1985)
 python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
     --name prod --output-dir $ROOT/prod --machine derecho_gpu \
     -o forcing.year_start=1985 -o forcing.year_end=1994 \
-    -o restart.from=data/lmip_soil_ic/[TBD-3]
+    -o restart.from=data/lmip_soil_ic/restart_1985_d000h00.npz
 ```
 
 The restart timestamp is the start of model year 1985 (after forcing years
@@ -69,25 +70,30 @@ for climatological work, but say so.
 
 ### What is (and is not) in the file
 
-A land restart round-trips the **prognostic** fields — soil temperature and
-moisture profiles, snow (SWE, age), surface/canopy stores, and the freeze/thaw
-state — and the driver grafts them onto a canonical cold-start template for the
-optional structural fields. It contains **no carbon pools** (the biophysics
-driver runs carbon-off; for carbon see `docs/land/global_carbon_ic_spinup.md`)
-and **no atmosphere**: forcing comes from CRU-JRA at run time.
+A land restart round-trips the **prognostic** fields; this file carries soil
+temperature, matric potential, and volumetric water content on the 10-layer
+column, surface and subsurface runoff stores, and snow water equivalent + snow
+age (optional reservoirs — ponding, canopy interception store, snow bands — are
+written only when the feature is active, and none were in this run). The driver
+grafts the loaded fields onto a canonical cold-start template for the rest. It
+contains **no carbon pools** (the biophysics driver runs carbon-off; for carbon
+see `docs/land/global_carbon_ic_spinup.md`) and **no atmosphere**: forcing
+comes from CRU-JRA at run time. Freeze/thaw needs no extra state — it is
+diagnosed from soil temperature.
 
 ### Grid contract (fail-loud, with one gap)
 
-~2° lat-lon (90 × 180), 7955 land columns (tape-derived; confirm against the
-restart — TBD-5), 10 soil layers / 3.0 m
+~2° lat-lon (90 × 180): the driver carries **all 16 200 grid cells as columns**
+(7955 of them have land cover under `c260716`), and the restart matches that —
+`T_soil` is `(16200, 10)` float64. 10 soil layers / 3.0 m
 (growth factor 2.0 — a 2.93 mm top layer), dt = 3600 s, noleap calendar,
 surfdata `c260716`.
 
-`load_land_restart` **raises** on restart-version, `land_mode`, land-column-
-count, or soil-layer-count mismatch, so the common mistakes (different
-resolution, 8-layer soil) fail loudly. It does **not** compare per-column
-coordinates: a different grid that happened to produce the same land-column
-count would load silently. Use the IC only on this exact grid + surfdata; any
+`load_land_restart` **raises** on restart-version, `land_mode`, column-count,
+or soil-layer-count mismatch, so the common mistakes (different resolution,
+8-layer soil) fail loudly. It does **not** compare per-column coordinates: a
+different grid that happened to produce the same column count would load
+silently. Use the IC only on this exact grid + surfdata; any
 other grid must rebuild with the recipe below.
 
 ## 2. Rebuild it
@@ -224,18 +230,13 @@ science.
 | config as run | `config/lmip/lmip_biophys_soil_ic.yaml` (paths repo-relativized; as-run they pointed into `/glade/work/linnia/legoESM/data/`) |
 | surfdata | `legoesm_surfdata_c260716.nc` (Zenodo record 21401647) |
 | forcing | CRU-JRA v2.5 `filled_antarct_and_grnlnd`, glade archive, years 1975–1984 |
-| product | `[TBD-3: filename]`, [TBD-12: size], sha256 `[TBD-4]` |
+| product | `restart_1985_d000h00.npz`, 3.4 MB, md5 `e619b555cf6bd018a19ac8a52f77b52a`; Zenodo record 21986853 (concept DOI `10.5281/zenodo.21986852`). Fields: `T_soil`, `psi_soil`, `theta_soil`, `runoff_surface`, `runoff_subsurface`, `snow_depth`, `snow_age` (all `(16200, …)` float64) + bookkeeping (`restart_version` 1, `t_end_s` = 3.1536e8 s = exactly 10 noleap years, `n_steps_completed` 87600, provenance JSON) |
 
 ## Before publishing (fill-in checklist)
 
 | tag | needed | where to get it |
 |---|---|---|
-| TBD-2 | Zenodo record + DOI | after upload |
-| TBD-3 | published filename (recommend `legoesm_lmip_soil_ic_1985_<date>.npz`) | your choice at upload |
-| TBD-4 | sha256 of the file | `sha256sum restart_1985_d000h00.npz` on Derecho |
-| TBD-5 | land-column count (ncol) | the tapes say 7955 cells have land under `c260716`; confirm against the restart: `python -c "import numpy; print(numpy.load('restart_1985_d000h00.npz')['T_soil'].shape)"` |
-| TBD-6 | calibrated-config PR number | after opening it |
-| TBD-12 | file size | `ls -lh restart_1985_d000h00.npz` |
+| TBD-6 | calibrated-config PR number (the branch shipping `biophysics/lmip_calibrated_spinup`) | after opening it |
 
 ## Related
 
