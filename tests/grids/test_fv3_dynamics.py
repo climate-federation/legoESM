@@ -246,7 +246,7 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
         # TOL-PENDING (a full step composes every limiter in the model).
         cmp_fields(np.asarray(state[nm]), want,
                    f"{nm} (hydro={hydrostatic}, k_split={k_split})",
-                   tol=1e-10)
+                   tol=1e-16)
 
     # Tracer-major on BOTH sides: the module returns nq face-stacked
     # arrays, so building the reference face-major would compare
@@ -255,7 +255,7 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
                        for iq in range(NQ)])
     assert_real(want_q, "numpy q")
     cmp_fields(np.asarray(got["q"]), want_q,
-               f"q (hydro={hydrostatic}, k_split={k_split})", tol=1e-10)
+               f"q (hydro={hydrostatic}, k_split={k_split})", tol=1e-16)
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -275,7 +275,7 @@ def test_pressure_diagnostics_come_back_matching(ctx, jctx, eta,
         assert_real(want, f"numpy {nm}")
         # TOL-PENDING.
         cmp_fields(np.asarray(press[nm]), want, f"{nm} (hydro={hydrostatic})",
-                   tol=1e-11)
+                   tol=1e-16)
 
 
 # --------------------------------------------------------------------
@@ -423,7 +423,7 @@ def test_jit_matches_eager(jctx, eta):
         assert_real(a, f"eager {nm}")
         # TOL-PENDING: jit reassociates; bound to be measured.
         cmp_fields(np.asarray(jitted[nm]), a, f"jit vs eager {nm}",
-                   tol=1e-12)
+                   tol=1e-16)
 
 
 def test_gradient_through_a_whole_step_is_finite(jctx, eta):

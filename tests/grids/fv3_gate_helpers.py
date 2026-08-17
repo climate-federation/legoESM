@@ -30,6 +30,8 @@ import functools
 
 import jax
 import jax.numpy as jnp
+import os
+
 import numpy as np
 
 # The workspace FILL CONSTANTS the duo lane round-trips, BY VALUE.
@@ -126,6 +128,18 @@ def cmp_fields(got, ref, name, tol, fills=FILL_VALUES, floor_pct=10.0,
     per = diff / (mag + floor)
     rel = float(per.max())
     n_over = int((per > n_over_at).sum())
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print every
+    # comparison's measured value and DO NOT raise on the tolerance.
+    # Exists so one run can replace a whole file's TOL-PENDING bounds
+    # with `measured x 10` instead of one first-failure per test per
+    # run. Structural checks above (shapes, non-finite classes, fills,
+    # anti-vacuity) still raise -- only the numeric bound is suspended,
+    # so a measurement run cannot silently bless a broken comparison.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e}, "
+              f"n_over {n_over}, max|diff| {float(diff.max()):.3e})",
+              flush=True)
+        return rel, n_over
     assert rel <= tol, (
         f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
         f"{n_over} of {int(ok.sum())} compared cells exceed {n_over_at:g} "
