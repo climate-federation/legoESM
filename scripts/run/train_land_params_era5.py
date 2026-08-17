@@ -286,10 +286,10 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0) -> dict:
                                              replace=False)
     return _pack(mh, latc, np.asarray(cmap["pft_fractions"]),
                  np.asarray(cmap["glacier_frac"]), np.asarray(cmap["theta_wp"]),
-                 np.asarray(cmap["theta_fc"]), sub)
+                 np.asarray(cmap["theta_fc"]), sub, lonc=lonc)
 
 
-def _pack(mh, latc, pft, fg, wp, fc, idx):
+def _pack(mh, latc, pft, fg, wp, fc, idx, lonc=None):
     z = lambda v: jnp.full((idx.size,), v)
     T2 = mh("2m_temperature"); D2 = mh("2m_dewpoint_temperature")
     SP = mh("surface_pressure"); PR = np.maximum(mh("precip_kgms"), 0)
@@ -314,7 +314,10 @@ def _pack(mh, latc, pft, fg, wp, fc, idx):
         le = mh("slhf_wm2")[:, idx]
     except KeyError:
         le = np.full((12, idx.size), np.nan)
-    return dict(forc=forc, lat=jnp.asarray(latc[idx]), pft=jnp.asarray(pft[idx]),
+    # per-cell longitude [deg] in the SAME subsampled order as every other field
+    lon = (lonc[idx] if lonc is not None else np.zeros(idx.size))
+    return dict(forc=forc, lat=jnp.asarray(latc[idx]), lon=jnp.asarray(lon),
+                pft=jnp.asarray(pft[idx]),
                 fg=jnp.asarray(fg[idx]), wp=jnp.asarray(wp[idx]), fc=jnp.asarray(fc[idx]),
                 le=jnp.asarray(le),
                 skt=jnp.asarray(mh("skin_temperature")[:, idx]),

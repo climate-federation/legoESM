@@ -82,11 +82,11 @@ def main():
     print(f"#   LE      bias {np.average(lbi, weights=w):+.2f} -> {np.average(lbc, weights=w):+.2f} W/m2"
           f"   RMSE {_wrms(lbi, w):.2f} -> {_wrms(lbc, w):.2f} W/m2")
 
-    # reconstruct lon/lat for the land cells (same order as load_training_data)
-    D = np.load(args.npz); lat1, lon1 = D["lat"], D["lon"]; nlat, nlon = lat1.size, lon1.size
-    lidx = np.where((D["lsm"].reshape(nlat, nlon) > 0.5).ravel())[0]
+    # per-cell coordinates from the loader itself — the loader PERMUTES the cell
+    # order (rng.choice), so re-deriving lon from the unpermuted land index gave
+    # scrambled maps (lat and lon belonged to different cells; no continents).
     latc = np.rad2deg(np.asarray(data["lat"]))
-    lonc = lon1[lidx % nlon]; lonc = np.where(lonc > 180, lonc - 360, lonc)
+    lonc = np.asarray(data["lon"]); lonc = np.where(lonc > 180, lonc - 360, lonc)
 
     # 3 rows (skin-T, albedo, LE) x 3 cols (initial bias, calibrated bias, gain)
     rows = [("skin-T bias [K]", tbi, tbc, 8.0, "RdBu_r"),

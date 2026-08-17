@@ -913,7 +913,11 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
     _dz = np.asarray(_grid.dz); _bot = np.cumsum(_dz)
     _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)              # layer∩[0,0.28m]
     _K = int((_ov > 1e-9).sum())
-    data = dict(forc=forc, lat=jnp.asarray(latc), pft=jnp.asarray(pft),
+    # per-cell longitude [deg], SAME (subsampled/permuted) order as every other
+    # field — plotters must use this, not a re-derived unpermuted index map
+    lon = lonc if lonc is not None else np.zeros_like(latc)
+    data = dict(forc=forc, lat=jnp.asarray(latc), lon=jnp.asarray(lon),
+                pft=jnp.asarray(pft),
                 sm=jnp.asarray(sm), rz_w=jnp.asarray(_ov[:_K]),
                 fg=jnp.asarray(np.asarray(cmap["glacier_frac"])[sub]),
                 wp=jnp.asarray(np.asarray(cmap["theta_wp"])[sub]),
