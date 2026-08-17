@@ -175,6 +175,34 @@ def get_turbulence_fn(config: TurbulenceConfig):
         raise ValueError(f"Unknown turbulence scheme: {config.scheme!r}")
 
 
+def kernel_accepts_surface_flux(turb_fn) -> bool:
+    """Can this turbulence kernel be HANDED a surface flux instead of computing
+    its own?
+
+    The single question the MPAS land-flux hand-over turns on, and deliberately
+    NOT the same question as whether the scheme carries prognostic turbulent
+    energy: clubb and clubb_lite do both, so keying the decision off the carry
+    refuses exactly the schemes best able to use the flux.
+    """
+    return (turb_fn is not None
+            and "surface_flux" in inspect.signature(turb_fn).parameters)
+
+
+def schemes_accepting_surface_flux() -> tuple[str, ...]:
+    """Scheme names whose kernels declare ``surface_flux``, for error text.
+
+    Derived from the same signature scan the guard uses, so the advice cannot
+    go stale when a kernel gains or loses the argument.
+    """
+    names = []
+    for name in ("smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+                 "clubb", "holtslag_boville", "ysu", "edmf"):
+        _n, fn, _cfg = get_turbulence_fn(TurbulenceConfig(scheme=name))
+        if kernel_accepts_surface_flux(fn):
+            names.append(name)
+    return tuple(names)
+
+
 def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
     """PhysicsState field that carries this turbulence scheme's prognostic state.
 
@@ -553,18 +581,10 @@ def _make_mpas_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
-    # Which schemes can be HANDED a surface flux instead of computing their
-    # own?  Exactly the kernels that declare the keyword — today louis,
-    # diagnostic clubb and clubb_lite.  smagorinsky, holtslag_boville, ysu,
-    # tke, mynn25 and edmf do not.  This is deliberately NOT keyed off
-    # ``needs_tke``: clubb and clubb_lite carry a prognostic energy field AND
-    # take the flux, so the two properties are independent.  Resolved once
-    # here from the static kernel, so an unsupported scheme raises with its own
-    # name on the first step instead of as a TypeError inside a traced column.
-    _accepts_surface_flux = (
-        turb_fn is not None
-        and "surface_flux" in inspect.signature(turb_fn).parameters
-    )
+    # Resolved once here from the static kernel, so an unsupported scheme
+    # raises with its own name on the first step instead of as a TypeError
+    # inside a traced column.
+    _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -714,8 +734,8 @@ def _make_mpas_turbulence(
                     "argument, so it computes its own from T_sfc/q_sfc. "
                     "Silently dropping them would run the advertised land "
                     "coupling with a surface flux the land model never "
-                    "solved. Use louis, clubb or clubb_lite, or teach this "
-                    "scheme the argument.")
+                    f"solved. Use one of {schemes_accepting_surface_flux()}, "
+                    "or teach this scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 compute_surface_fluxes,
             )

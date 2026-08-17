@@ -250,10 +250,12 @@ def test_land_fluxes_actually_reach_every_scheme_the_guard_admits(
 
     without = fn(mpas_state, mpas_mesh, sigma_coord,
                  forcing=_land_forcing(ncell))
-    # Far larger than anything the bulk formula produces here, so neither the
-    # difference nor its sign can be round-off.
+    # Both far larger than anything the bulk formula produces here, so neither
+    # the difference nor its sign can be round-off — and DELIBERATELY unequal,
+    # so a consumer that swapped the sensible and latent members of the flux
+    # tuple could not satisfy both assertions below.
     with_flux = fn(mpas_state, mpas_mesh, sigma_coord,
-                   forcing=_land_forcing(ncell, 400.0, 400.0))
+                   forcing=_land_forcing(ncell, 400.0, 40.0))
     if isinstance(without, tuple):
         without, with_flux = without[0], with_flux[0]
     # ``dT_dt`` is a Field on this lane; ``.data`` is (nCells, nlev).
@@ -264,6 +266,22 @@ def test_land_fluxes_actually_reach_every_scheme_the_guard_admits(
     assert (dT_with > dT_without).all(), (
         f"{scheme}: +400 W/m2 into the surface layer must warm it; the "
         "hand-over has the wrong sign")
+
+    # The latent half is the headline of this coupling and needs its own pin:
+    # a kernel that consumes the sensible flux and drops the latent one would
+    # pass every assertion above.
+    wetter = fn(mpas_state, mpas_mesh, sigma_coord,
+                forcing=_land_forcing(ncell, 400.0, 400.0))
+    if isinstance(wetter, tuple):
+        wetter = wetter[0]
+    dq_without = np.asarray(without.tracer_tendencies["q_v"])[:, -1]
+    dq_with = np.asarray(with_flux.tracer_tendencies["q_v"])[:, -1]
+    dq_wetter = np.asarray(wetter.tracer_tendencies["q_v"])[:, -1]
+    assert not np.allclose(dq_without, dq_with), (
+        f"{scheme}: the land latent-heat flux was accepted and then ignored")
+    assert (dq_wetter > dq_with).all(), (
+        f"{scheme}: raising the land latent flux from 40 to 400 W/m2 must "
+        "moisten the surface layer more; the hand-over has the wrong sign")
 
 
 def test_mpas_turbulence_beta_one_bit_identical(mpas_mesh, sigma_coord,
