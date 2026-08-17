@@ -35,15 +35,41 @@ def test_biophysics_template_validates(path):
     assert cfg.time["n_steps"] > 0
 
 
-def test_canopy_4deg_smoke_defaults():
-    """The 4° smoke ships with the merged-code updates enabled — the whole point
-    of the run (freeze/thaw stabilisation + per-cell canopy albedo)."""
-    path = _TEMPLATE_DIR / "lmip_canopy_4deg_smoke.yaml"
+def test_smoke_4deg_defaults():
+    """The 4° smoke ships the production physics — canopy + freeze/thaw — so a
+    clean smoke is evidence about the configuration the 2° template runs."""
+    path = _TEMPLATE_DIR / "smoke_4deg.yaml"
     cfg = validate_config(yaml.safe_load(path.read_text()))
     assert cfg.physics["surface_scheme"] == "two_leaf_canopy"
     assert cfg.physics["enable_freeze_thaw"] is True
     assert cfg.physics["snow_albedo_feedback"] is True
     assert cfg.grid["resolution"] == 45
+
+
+def test_lmip_biophys_2deg_ships_calibration_on():
+    """The 2° template IS the calibrated configuration (the one the published
+    soil-state IC was spun up with): all three calibration selectors on, cold
+    start by default, and the corrected c260716 surfdata.  A silent revert to
+    pre-calibration defaults would spin up the wrong state and only surface
+    weeks later as a confusing climatology — pin it here."""
+    path = _TEMPLATE_DIR / "lmip_biophys_2deg.yaml"
+    cfg = validate_config(yaml.safe_load(path.read_text()))
+    assert cfg.physics["albedo_calibration"] == "amip_multilayer"
+    assert cfg.physics["root_calibration"] == "amip_multilayer"
+    assert (cfg.physics["soil_n_layers"], cfg.physics["soil_depth_m"]) == (10, 3.0)
+    assert cfg.physics["snow_scheme"] == "single"
+    assert cfg.restart["from"] == ""                       # cold start = spin-up
+    assert cfg.surfdata["path"].endswith("c260716.nc")     # not the superseded c250617
+
+
+def test_smoke_matches_production_physics():
+    """The 4° smoke and the 2° template agree on every physics key, so a green
+    smoke certifies the production configuration and not a diverged cousin."""
+    smoke = validate_config(yaml.safe_load(
+        (_TEMPLATE_DIR / "smoke_4deg.yaml").read_text()))
+    prod = validate_config(yaml.safe_load(
+        (_TEMPLATE_DIR / "lmip_biophys_2deg.yaml").read_text()))
+    assert smoke.physics == prod.physics
 
 
 def test_lulcc_template_declares_transient_cover_and_eluc():

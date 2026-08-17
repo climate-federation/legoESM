@@ -1,11 +1,31 @@
-# 10-year CRU-JRA-forced BIOPHYSICS-ONLY LMIP at ~2 deg latlon, two-leaf canopy.
+# The ~2 deg CRU-JRA-forced BIOPHYSICS-ONLY LMIP: two-leaf canopy + MOST +
+# multi-layer Richards soil, carbon OFF, prescribed seasonal CLM LAI, with the
+# 2026-07 calibrated configuration (albedo / soil grid / roots) ON by default.
 #
-# The reference LMIP production config: mechanistic two-leaf canopy (its own
-# Ball-Berry stomata) + MOST surface flux + multi-layer Richards soil, carbon
-# OFF (biophysics only), prescribed SEASONAL CLM LAI (monthly climatology,
-# repeats annually).  Land physics is AMIP-composable: the same (land_mode,
-# land_config) surface the coupled ModelDriver assembles, so a config here maps
-# to an AMIP land run.  Override anything with `init_experiment.py -o k.p=v`.
+# ONE template for both spin-up and production: the default is a 10-year COLD
+# START (this exact config, years 1975-1984, produced the published soil-state
+# IC — docs/land/lmip_biophys_soil_ic_spinup.md); a warm-started block is the
+# same template with `-o restart.from=...` + shifted years.  The reference
+# 30-year run (spin-up -> 1985-2014) is four jobs:
+#
+#   # spin-up 1975-1984 (cold start; or skip it — download the published IC)
+#   python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \
+#       --name spinup --output-dir $ROOT/spinup --machine derecho_gpu
+#   # production 1985-1994 / 1995-2004 / 2005-2014, each warm-started from the
+#   # previous block's end-of-run restart:
+#   python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \
+#       --name prod_1985 --output-dir $ROOT/prod_1985 --machine derecho_gpu \
+#       -o forcing.year_start=1985 -o forcing.year_end=1994 \
+#       -o restart.from=$ROOT/spinup/restart_1985_d000h00.npz
+#
+# Each calibration selector reverts with one `-o` override (albedo_calibration /
+# root_calibration -> default, soil_n_layers/soil_depth_m -> 8/0.0), so a
+# controlled pre-calibration baseline is a documented command, not a checkout.
+#
+# ⚠️ Exact reproduction of the published 2026-07 run additionally needs the NCAR
+# glade forcing variant: `-o forcing.prefix=clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5`
+# (the public mirror serves the unfilled variant, which differs over
+# Antarctica/Greenland).
 #
 # ⚠️ CALIBRATION (#730): the interactive canopy conductance is UNCALIBRATED on
 # the deep, moist Richards soil and can OVER-TRANSPIRE (amip_sota disabled the
@@ -13,9 +33,9 @@
 # climatology accordingly, and tune the exposed knobs (stomatal_model / vc_max25
 # / g1 / gs_max) against ERA5/FLUXNET before treating fluxes as production.
 
-template_name: biophysics/lmip_canopy_10yr
-template_version: 1.0.0
-description: 10-year CRU-JRA biophysics LMIP, 2 deg latlon, hourly, two-leaf canopy + MOST
+template_name: biophysics/lmip_biophys_2deg
+template_version: 2.0.0
+description: 2 deg CRU-JRA biophysics LMIP (spin-up + production), hourly, two-leaf canopy + MOST, calibrated
 
 grid:
   type: latlon
@@ -30,7 +50,10 @@ physics:
   snow_albedo_feedback: true
   # Snow: the single-node bulk SWE budget (the production-consistent scheme, also
   # what AMIP + the EC-site harness run).  High-latitude soil carries a known cold
-  # bias + snow tower under it — a documented realism limit, not a crash.
+  # bias + snow tower under it — a documented realism limit, not a crash.  NOTE:
+  # no glacier sink exists, so ice sheets accumulate snow without bound
+  # (~3100 Gt/yr at 2 deg) — ice-sheet snow/albedo are not usable for science.
+  snow_scheme: single
   # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  ON for the
   # production run: without it, boreal/Arctic winter columns lose their energy
   # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
@@ -95,12 +118,15 @@ forcing:
   data_dir: data/crujra
   prefix: clmforc.CRUJRAv2.5_0.5x0.5
   suffix: ""
-  year_start: 1920
-  year_end: 1929                  # 10 contiguous years (stage all with download_lmip_data.sh)
+  year_start: 1975
+  year_end: 1984                  # 10 contiguous years (stage all with download_lmip_data.sh)
   k_neighbors: 4
 
 surfdata:
-  path: data/legoesm_surfdata_c250617.nc
+  # c260716 (Zenodo record 21401647).  The superseded c250617 over-stated global
+  # land area by ~26%, inflating every global TOTAL computed from a run made
+  # with it; c260716's land area is within 1.4% of the CLM LANDFRAC reference.
+  path: data/legoesm_surfdata_c260716.nc
 
 time:
   dt: 3600.0                      # 1 h

@@ -1,41 +1,50 @@
-# Fast smoke at ~4° latlon with the cheap surface-energy-balance path.
+# ~4 deg global BIOPHYSICS-ONLY LMIP smoke — the "does the global run stand up?"
+# test on the SAME physics as biophysics/lmip_biophys_2deg (two-leaf canopy +
+# MOST + multilayer Richards soil + the calibration selectors), but 4x fewer
+# cells and 30 model days instead of 10 years: minutes on a GPU, tens of
+# minutes on CPU.
 #
-# Target use: iterating on the pipeline with realistic CRU-JRA forcing
-# and a real ~40x speedup over the 2° two-leaf-canopy default.
+# Deliberately starts at day-of-year 0 (January = deep NH winter) so the
+# boreal/Arctic columns sit below freezing from step 1 — the regime the
+# freeze/thaw zero-curtain stabilises (without it ~3-8% of land cells NaN over
+# 10 yr).  A clean finish (no NaN gate trip, sane albedo north of ~50N) is the
+# green light for the 2 deg template.
 #
-# Cost breakdown vs spinup_5year (90x180 + two_leaf_canopy):
-#   * 45x90 = 4050 cols vs 16200      → ~4x fewer cells
-#   * simple_seb + constant bulk       → ~10x cheaper per step
-#   * 30 days (720 steps) vs 5 years   → 60x fewer steps
-#   → 1 model-month at 4° here is measured in minutes on CPU, tens of
-#     seconds on GPU (after compile).
-#
-# NOTE on grid: --resolution is one integer N producing N x 2N (=4°x4°
-# here — 4°lat, 4°lon).  If you really need 4° x 5° (unequal aspect),
-# the driver needs a small extension to accept (n_lat, n_lon); tell me.
-#
-# PHYSICS TRADE-OFFS to know:
-#   * simple_seb is skin-only SEB — no canopy Newton, no Farquhar/Ball-Berry,
-#     no leaf radiative transfer.  Latent heat is aerodynamic-limited.
-#   * bulk_scheme=constant is REQUIRED here — simple_seb + MOST is
-#     numerically unstable (T_sfc → ±∞).  The config validator will
-#     reject that combination if you try to override it via -o.
-#
-# Everything else (Richards, soil thermal, snow, prescribed LAI from
-# surfdata) is identical to the production template.
+# Need a REALLY cheap pipeline-iteration smoke instead?  Override to the skin
+# SEB path (~10x cheaper per step):
+#   -o physics.surface_scheme=simple_seb -o physics.bulk_scheme=constant
 
 template_name: biophysics/smoke_4deg
-template_version: 1.0.0
-description: Fast 4° biophysics smoke — simple_seb + constant bulk, 30-day CRU-JRA
+template_version: 2.0.0
+description: 4 deg biophysics LMIP smoke, two-leaf canopy + MOST, calibrated, 30-day Jan
 
 grid:
   type: latlon
-  resolution: 45                # 45 x 90 = 4° x 4°
+  resolution: 45                # 45 x 90 ~ 4 deg
 
 physics:
   land_mode: multilayer
-  surface_scheme: simple_seb    # skip the two-leaf canopy Newton
-  bulk_scheme: constant         # MUST pair with simple_seb (validator enforces)
+  surface_scheme: two_leaf_canopy   # exercises the per-cell canopy albedo path
+  bulk_scheme: most
+  stomatal_model: ball_berry
+  snow_albedo_feedback: true
+  snow_scheme: single
+  # ON: the point of this smoke is that boreal/Arctic winter columns keep their
+  # energy budget instead of drifting to NaN.
+  enable_freeze_thaw: true
+  # The three calibration selectors, matching lmip_biophys_2deg so this smoke
+  # exercises exactly the production configuration (see that template for the
+  # full rationale + per-selector reverts).
+  albedo_calibration: amip_multilayer
+  soil_n_layers: 10
+  soil_depth_m: 3.0
+  soil_growth_factor: 2.0
+  root_calibration: amip_multilayer
+  # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
+  vc_max25: null
+  g1: null
+  gs_max: null
+  stomata_enabled: false            # SimpleSEB-only Jarvis path; canopy ignores it
 
 forcing:
   source: cru_jra
@@ -43,32 +52,29 @@ forcing:
   prefix: clmforc.CRUJRAv2.5_0.5x0.5
   suffix: ""
   year_start: 1920
-  year_end: 1920                # single year (bump year_end for multi-year)
+  year_end: 1920                  # single year
   k_neighbors: 4
 
 surfdata:
-  path: data/legoesm_surfdata_c250617.nc
+  path: data/legoesm_surfdata_c260716.nc
 
 time:
-  dt: 3600.0                    # 1 h
-  n_steps: 720                  # 30 days — enough to see the monthly tape land
+  dt: 3600.0                      # 1 h
+  n_steps: 720                    # 30 days hourly (deep NH winter from doy 0)
   start_doy: 0.0
 
 restart:
-  from: ""
+  from: ""                        # cold start
 
 land_frac_min: 0.0                # any surfdata land (was 0.5; forcing now finite on all land)
 land_mask_file: ""
 
 output:
-  # Monthly tapes — same shape as the production spinup_5year template so
-  # analysis code carries over.  For a 30-day run this produces one slot
-  # per tape (Jan of year_start).  Bump n_steps to see more slots.
   tapes:
     - name: monthly
       freq: monthly
       average: mean
-      vars: [T_sfc, shflx, lhflx, albedo, LAI, runoff, precip]
+      vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip, reverted]
 
     - name: monthly_state
       freq: monthly
