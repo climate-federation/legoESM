@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -23,6 +24,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[2]
+
+#: Print settings. The defaults here are for a figure that will be READ on
+#: paper: 300 dpi raster plus a vector PDF, and type large enough to survive
+#: a two-column reduction. The previous 130 dpi / 7-8 pt was fine on screen
+#: and illegible in print.
+PUB = {"title": 10, "label": 10, "tick": 9, "suptitle": 12, "dpi": 300}
 
 # Fixed column order; a grid absent from a case leaves an annotated blank
 # rather than silently shifting the others along.
@@ -126,10 +133,20 @@ def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
         im = _panel(ax, lat, lon, a, cmap, kw)
         st = _status(found[g])
         colour = {"PASS": "#228833", "FAIL": "#EE6677"}.get(st, "0.3")
-        ax.set_title(f"{g}  [{st}]  day {t:g}", fontsize=9, color=colour)
-        ax.set_xlabel("lon [deg]", fontsize=8)
-        ax.tick_params(labelsize=7)
-    np.atleast_1d(axes)[0].set_ylabel("lat [deg]", fontsize=8)
+        # The panel's OWN range, always. On a shared scale a genuinely
+        # weaker arm renders as blank white, and a reader cannot tell that
+        # from a broken run -- which matters here because the arms are not
+        # all the same experiment (some grids carry realistic continents,
+        # some an idealised domain), so one arm routinely sets a scale the
+        # others never approach.
+        fin = a[np.isfinite(a)]
+        rng = (f"  [{fin.min():.3g}, {fin.max():.3g}]" if fin.size
+               else "  (no finite data)")
+        ax.set_title(f"{g}  [{st}]  day {t:g}\nown range{rng}",
+                     fontsize=PUB["title"], color=colour)
+        ax.set_xlabel("lon [deg]", fontsize=PUB["label"])
+        ax.tick_params(labelsize=PUB["tick"])
+    np.atleast_1d(axes)[0].set_ylabel("lat [deg]", fontsize=PUB["label"])
     if im is not None:
         fig.colorbar(im, ax=fig.axes, shrink=0.8, label=label, location="right")
     sub = (f"{case} — {label}, final saved time "
@@ -138,10 +155,12 @@ def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
         sub += (f"\nFIELD IS UNIFORM across every arm: full spread "
                 f"{hi - lo:.2e} — the scale is widened so machine-precision "
                 f"round-off is not drawn as structure")
-    fig.suptitle(sub, fontsize=11)
+    fig.suptitle(sub, fontsize=PUB["suptitle"])
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"maps_{case}.png"
-    fig.savefig(out, dpi=130)
+    fig.savefig(out, dpi=PUB["dpi"], bbox_inches="tight")
+    # Vector alongside the raster: a reviewer zooms, a typesetter rescales.
+    fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     return out
 
@@ -163,35 +182,58 @@ def build_contact_sheet(root: Path, out: Path) -> Path:
             ax = axes[i, j]
             ax.set_xticks([]); ax.set_yticks([])
             if g not in loaded:
-                ax.text(0.5, 0.5, "—", ha="center", va="center", color="0.6")
+                # A bare dash reads as a broken run. Say which it is, and
+                # hatch the panel so it cannot be mistaken for data.
+                ax.set_facecolor("0.94")
+                ax.text(0.5, 0.5, f"{g}\nnot run\nfor this case",
+                        ha="center", va="center", fontsize=6, color="0.45",
+                        linespacing=1.4)
             else:
                 lat, lon, a, _t = loaded[g]
                 _panel(ax, lat, lon, a, cmap, kw)
                 st = _status(found[g])
-                ax.text(0.02, 0.04, st, transform=ax.transAxes, fontsize=6,
+                ax.text(0.02, 0.05, st, transform=ax.transAxes,
+                        fontsize=PUB["tick"] - 2, fontweight="bold",
                         color={"PASS": "#228833",
-                               "FAIL": "#EE6677"}.get(st, "0.3"))
+                               "FAIL": "#EE6677"}.get(st, "0.3"),
+                        bbox=dict(facecolor="white", alpha=0.85,
+                                  edgecolor="none", pad=1.2))
                 if degenerate and j == 0:
-                    ax.text(0.02, 0.80, f"uniform (spread {hi - lo:.0e})",
-                            transform=ax.transAxes, fontsize=5, color="0.35")
+                    ax.text(0.02, 0.86,
+                            f"at rest: spread {hi - lo:.1e}",
+                            transform=ax.transAxes,
+                            fontsize=PUB["tick"] - 2, color="0.15",
+                            bbox=dict(facecolor="white", alpha=0.85,
+                                      edgecolor="none", pad=1.2))
             if i == 0:
-                ax.set_title(g, fontsize=8)
+                ax.set_title(g, fontsize=PUB["tick"])
             if j == 0:
                 # ALWAYS show the colour range next to the row name. A
                 # shared scale still stretches a physically negligible
                 # spread across the whole colormap -- the rest-state rows
                 # span 0.002 degC across arms, which without this label
                 # reads as structure instead of "flat to 4 decimals".
+                # Names are WRAPPED, never truncated: the old [:22] slice
+                # produced "rest_stratified_with_l", which is not a caption.
+                _nm = case.replace("rest_state_", "rest ").replace("_", " ")
+                _wrapped = "\n".join(textwrap.wrap(_nm, 16))
                 ax.set_ylabel(
-                    f"{case.replace('rest_state_', 'rest_')[:22]}\n"
-                    f"[{lo:.4g}, {hi:.4g}]",
-                    fontsize=6, rotation=0, ha="right", va="center")
-    fig.suptitle("legoESM ocean benchmark suite — every case on every grid.\n"
-                 "SSH for wave/adjustment cases, SST for tracer cases; one "
-                 "shared colour scale per ROW, its range printed beside the "
-                 "row name.", fontsize=9)
+                    f"{_wrapped}\n[{lo:.4g}, {hi:.4g}]",
+                    fontsize=PUB["tick"] - 1, rotation=0, ha="right",
+                    va="center")
+    fig.suptitle(
+        "legoESM ocean benchmark suite — every case on every grid\n"
+        "sea-surface height for the wave and adjustment cases, sea-surface "
+        "temperature for the tracer cases.\n"
+        "One shared colour scale per ROW, its range printed beside the row "
+        "name; each panel's own range is on the per-case figures.\n"
+        "Arms are NOT all the same experiment — some grids carry realistic "
+        "continents, some an idealised domain — so a pale panel on a shared "
+        "row scale is a weaker signal, not a failed run.",
+        fontsize=PUB["tick"])
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=140)
+    fig.savefig(out, dpi=PUB["dpi"], bbox_inches="tight")
+    fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     return out
 
