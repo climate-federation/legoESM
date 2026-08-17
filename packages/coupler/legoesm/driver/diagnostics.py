@@ -1413,6 +1413,7 @@ class DiagnosticCollector:
         hfls=None,
         rsutcs=None,
         rlutcs=None,
+        wap=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1796,6 +1797,10 @@ class DiagnosticCollector:
                 ('hus', q_v_np),
                 ('ua', u_east_np),
                 ('va', v_north_np),
+                # Pressure vertical velocity: same plev19 + regrid path as the
+                # rest, so subsidence becomes a published field instead of a
+                # continuity guess made downstream from monthly-mean winds.
+                ('wap', None if wap is None else np.asarray(wap)),
             ):
                 if _src is None:
                     continue

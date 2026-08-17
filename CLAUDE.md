@@ -26,9 +26,12 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
 - **DUAL adversarial review MANDATORY — TWO independent reviewers, never one**
-  (user directive 2026-08-12). Route by who WROTE the code:
+  (user directive 2026-08-12, restated as a STRICT rule 2026-08-13). The author
+  NEVER reviews its own code. Route by who WROTE the code — the two reviewers
+  are always the other two:
   **Claude-authored → codex + GLM-5.2** (`mcp__zai__ask_glm`);
-  **GLM-authored → codex + Claude**.
+  **GLM-authored → codex + Claude**;
+  **codex-authored → Claude + GLM-5.2**.
   Both BEFORE the PR, not after; report both verdicts in the PR body and in the
   status line. Subagents doing implementation must be told to run BOTH — they
   default to codex only. Applies to measurement harnesses and probes too: the
@@ -219,6 +222,34 @@ explicitly that you did not. "I was careful" is not compliance.
   clamp to the lookup-table range is one call deeper in
   `rrtmgp/optics/cloud_optics.py`. Same class as blaming a line without proving
   its enclosing function runs.
+- **BEFORE ATTRIBUTING A BIAS TO A COMPONENT, PROVE THE COMPONENT EXISTS AND
+  RUNS IN THE CONFIG UNDER TEST.** An ABSENT component and a BADLY-TUNED one
+  give the SAME symptom, and every tuning arm against an absent component
+  returns null. Enumerate, from the RESOLVED config and the LANE'S code path
+  (not the deck's comments): the scheme, its PROGNOSTIC STATE, and its inputs.
+  No prognostic state -> say so out loud; that is usually the finding.
+  Corollaries, each earned:
+  (a) **A `false` on a component switch does not mean "the simpler version" —
+  it may mean NOTHING.** Check what the lane actually falls back to.
+  (b) **A DECK COMMENT NAMING A FALLBACK IS A POINTER, NOT A FACT** (the prose
+  rule, applied to configs): grep the named symbol in that lane's setup.
+  (c) **When N different schemes for component A all fail to move a bias, STOP
+  TUNING A.** The limiter is upstream, or A's inputs are wrong.
+  (d) **A parameter wrong at BOTH ENDS of a physical range is a MISSING
+  DEPENDENCE, not a mistuning** — the thing it should depend on is not read.
+  FAILURE 2026-08-15, the most expensive of the campaign: the MPAS AMIP deck
+  set `use_multilayer_land: false` with the comment "this deck runs the slab".
+  There is NO slab land on the MPAS lane (`slab_land_active` is wired only on
+  the cube/general path), so the runs had **no land surface model at all** —
+  land T_sfc was the nearest OCEAN's prescribed SST minus 6.5 K/km, and land
+  evaporation a fixed 0.6 of saturation, with no soil, no water store, no
+  runoff, no stomata, no surface energy balance. Tropical deserts evaporated
+  3.5x observed and the rainforest 0.73x FROM THE SAME CONSTANT (corollary d,
+  unnoticed); sensible heat was ~25 W/m2 on Sahara and Amazon alike. Waves
+  9-11 spent GPU-hours swapping FIVE convection schemes and a dozen trigger
+  knobs against a tropical-land rain deficit no convection scheme could ever
+  fix (corollary c, unnoticed). Interactive soil moisture, bucket hydrology
+  and stomatal control are DEFAULTS for an AMIP case, not options.
 - **A GLOBAL STATISTIC ON A NON-UNIFORM GRID NEEDS AREA WEIGHTS.** Never
   `np.mean(field)` for a global mean on lat-lon (or any stretched grid) — use
   `cos(lat)` or the model's `areacella`. FAILURE: reported "+17 hPa of dry mass
@@ -704,6 +735,12 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
+
+**STRICT RULE, EVERY SESSION, EVERY MODEL (Opus included): be succinct AND
+clear.** Not a style preference, not a default that decays over a long session.
+Succinct = answer first, ~60 words, bullets not paragraphs (RULE 0). Clear =
+plain words a colleague outside this repo can act on, no bare identifiers
+(RULE -1). Both must hold; a reply that fails either one is a failed reply.
 
 ### RULE -1 — CLARITY IS THE HARD RULE. IF THE USER CANNOT FOLLOW IT, IT FAILED.
 User, 2026-08-12 (and 2026-08-07, 2026-08-11 — same complaint every time):

@@ -3277,10 +3277,6 @@ def _resolve_convection(config):
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
-            cape_sink_heating_ratio=getattr(
-                config, 'bechtold_cape_sink_heating_ratio', 5.0),
-            cape_relaxation_sink=getattr(
-                config, 'bechtold_cape_relaxation_sink', False),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3314,6 +3310,13 @@ def _resolve_convection(config):
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
             rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
+            delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
+            capdcycl_land_tau_scale=getattr(
+                config, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            subcloud_evap_scale=getattr(config, 'bechtold_subcloud_evap_scale', 1.0),
+            rhebc_land=getattr(config, 'bechtold_rhebc_land', 0.75),
+            rhebc_land_deep=getattr(config, 'bechtold_rhebc_land_deep', 0.70),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
             delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),

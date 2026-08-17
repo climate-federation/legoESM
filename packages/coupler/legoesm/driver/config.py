@@ -1441,6 +1441,24 @@ class ExperimentConfig(NamedTuple):
     # stable-tail selector, not this floor.  Appended at the tuple END to
     # preserve the positional ABI.
     hb_kvf_min: float | None = None
+    # IFS deep entrainment/detrainment base rates (plume-mixing control):
+    # epsilon_deep up = more dilution, weaker and shallower plumes;
+    # delta_deep down = less condensate leaked to the anvil, more left in
+    # the plume to rain out.  Wired 2026-08-13; before this the deep
+    # entrainment rate could not be set from any MIP driver at all.
+    # APPENDED, not inserted beside the other bechtold_* fields: this is a
+    # NamedTuple, so a mid-struct insertion silently reassigns every later
+    # positional argument.
+    bechtold_epsilon_deep: float = 1.75e-3  # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4    # BechtoldConfig.delta_deep [1/m]
+    # Scale on the LAND branch of the diurnal-cycle CAPE subtraction. The IFS
+    # value assumes a ~10 km mesh; 1.0 reproduces it, 0.0 removes the land
+    # branch while leaving the ocean branch alone -- which the on/off flag
+    # cannot do, because it disables both.
+    bechtold_capdcycl_land_tau_scale: float = 1.0
+    bechtold_subcloud_evap_scale: float = 1.0
+    bechtold_rhebc_land: float = 0.75
+    bechtold_rhebc_land_deep: float = 0.70
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1645,6 +1663,12 @@ class ExperimentConfig(NamedTuple):
             ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
+            ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
+            ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
+            ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
+            ("bechtold_subcloud_evap_scale", 0.1, 4.0),
+            ("bechtold_rhebc_land", 0.5, 1.0),
+            ("bechtold_rhebc_land_deep", 0.5, 1.0),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
@@ -3068,6 +3092,18 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_inplume_precip=getattr(
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_epsilon_deep=getattr(amip_cfg, 'bechtold_epsilon_deep', 1.75e-3),
+            bechtold_delta_deep=getattr(amip_cfg, 'bechtold_delta_deep', 0.75e-4),
+            bechtold_capdcycl_land_tau_scale=getattr(
+                amip_cfg, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            bechtold_subcloud_evap_scale=getattr(amip_cfg, 'bechtold_subcloud_evap_scale', 1.0),
+            bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
+            bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
+            bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
+            bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
+            bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
+            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
+            convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
             bechtold_use_ifs_shallow_closure=getattr(
@@ -3230,13 +3266,24 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_evap=self.bechtold_downdraft_evap,
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
-            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
-            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
-            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_epsilon_deep=self.bechtold_epsilon_deep,
+            bechtold_delta_deep=self.bechtold_delta_deep,
+            bechtold_capdcycl_land_tau_scale=self.bechtold_capdcycl_land_tau_scale,
+            bechtold_subcloud_evap_scale=self.bechtold_subcloud_evap_scale,
+            bechtold_rhebc_land=self.bechtold_rhebc_land,
+            bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
+            bechtold_rprcon=self.bechtold_rprcon,
+            bechtold_dnoprc=self.bechtold_dnoprc,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_subsidence_solve=self.bechtold_subsidence_solve,
+            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
+            convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,

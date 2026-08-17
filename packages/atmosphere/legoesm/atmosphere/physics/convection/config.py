@@ -81,6 +81,11 @@ __param_spec__ = {
             "dnoprc": {"units": "kg/kg", "bounds": (7.5e-5, 1.2e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS ZDNOPRC=3e-4 (cuascn.F90:277)", "shape": None},
             "rprcon": {"units": "1/m", "bounds": (3.5e-4, 5.6e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS RPRCON=1.4e-3 (sucumf.F90:164)", "shape": None},
             "delta_deep": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
+            "capdcycl_land_tau_scale": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "scale on the LAND timescale of RCAPDCYCL=2 (Bechtold et al. 2014, cumastrn.F90:780-793); the IFS value assumes a ~10 km mesh", "shape": None},
+            "subcloud_evap_scale": {"units": "1", "bounds": (0.1, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "scale on the IFS Kessler sub-cloud re-evaporation coefficient RCPECONS (sucumf.F90:176)", "shape": None},
+            "rhebc_land": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "sub-cloud evaporation RH break over land, IFS 0.75 (cuflxn.F90:222)", "shape": None},
+            "rhebc_land_deep": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "sub-cloud evaporation RH break over land for deep convection, IFS 0.70 (cuflxn.F90:223)", "shape": None},
+            "epsilon_deep": {"units": "1/m", "bounds": (5.775e-04, 3.5e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "IFS ENTRORG=1.75e-3 (sucumf.F90); bechtold.py multiplies this base rate by the height factor (1.3-RH)*f_scale, so the rate itself is a constant closure coefficient exactly as delta_deep is", "shape": None},
             "delta_midlevel": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) mid-level", "shape": None},
             "delta_shallow": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
             "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
@@ -1663,6 +1668,21 @@ class BechtoldConfig(NamedTuple):
     use_ifs_cape_qadv: bool = False
     # RCAPQADV blend weight (sucumf.F90:219).
     cape_qadv_weight: float = 0.8
+    # Scale on the LAND branch of the diurnal-cycle CAPE subtraction.  The IFS
+    # value was set for a ~10 km mesh; on a coarse mesh the surface heating it
+    # subtracts against is smeared and the term can delete convective energy
+    # that never returns, which shows up as a tropical LAND rain deficit with
+    # land evaporation at or above observed.  1.0 = IFS.
+    capdcycl_land_tau_scale: float = 1.0
+    # Sub-cloud convective rain re-evaporation.  Tropical LAND rain is 26 %
+    # below observed while land evaporation is AT observed, so rain is being
+    # lost between cloud base and the ground.  A smaller ``subcloud_evap_scale``
+    # slows that loss directly; a lower RH break stops the evaporation earlier
+    # and therefore also delivers more rain to the surface.  Defaults are the
+    # IFS values, whose setting assumes a far finer mesh than we run.
+    subcloud_evap_scale: float = 1.0
+    rhebc_land: float = 0.75
+    rhebc_land_deep: float = 0.70
     # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:
     # 222-223: 0.70 deep / 0.75 non-deep over land vs 0.85/0.92 ocean).
     # Needs the pipeline land_frac kwarg (None => ocean values, legacy).
