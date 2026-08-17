@@ -31,11 +31,14 @@ derivative-free.
 
 | category | live | dead | blocked | nondiff |
 |---|---:|---:|---:|---:|
-| convection | 66 | 43 | 5 | 0 |
+| convection | **74** | 43 | 5 | 0 |
 | microphysics | 85 | 66 | 4 | 0 |
 | gravity-wave drag | 14 | 18 | 4 | 0 |
 | radiation | — | — | — | — |
 | turbulence | running | | | |
+
+Convection was re-audited AFTER the CAPE promotion: 66 live -> 74, the eight
+added rows being exactly the promoted thresholds.
 
 **No `nondiff` parameters anywhere so far** — nothing produces a non-finite
 gradient, which is the outcome that would break a trainer outright.
@@ -86,6 +89,23 @@ signed across the whole physical CAPE range. The thresholds moved from tier 0 to
 tier 2. Gated by `tests/unit/test_cape_trigger_gradient.py`, which includes a
 control proving the UNFIXED trigger really was dead so the suite cannot pass
 vacuously.
+
+### CONFIRMED after the fix
+
+The convection category was re-audited at the post-promotion SHA. All eight
+CAPE thresholds now APPEAR (they produced zero rows before) and every one reads
+`live`:
+
+| scheme | verdict | grad |
+|---|---|---|
+| sbm | live | 4.85e-06 |
+| zhang_mcfarlane | live | 2.82e-06 |
+| dca | live | 1.72e-06 |
+| tiedtke | live | 1.55e-06 |
+| emanuel | live | 5.20e-07 |
+| mass_flux | live | 6.17e-08 |
+| edmf | live | 2.20e-08 |
+| bechtold | live | 1.49e-08 |
 
 ### A structural finding: the audit could not see what it was judging
 
