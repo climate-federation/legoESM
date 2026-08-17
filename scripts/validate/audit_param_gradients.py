@@ -546,6 +546,7 @@ def audit(
     dt: float = 600.0,
     run_finite_difference: bool = True,
     spinup_steps: int = 3,
+    on_progress=None,
 ) -> list[ParamVerdict]:
     states = build_states(nlev)
     key_map = scheme_key_map(categories)
@@ -595,7 +596,38 @@ def audit(
                 default=defaults[name], lower=float(c.min_val),
                 upper=float(c.max_val), grad_abs=float(g), fd_abs=fd,
                 verdict=verdict, note=note))
+        # PERSIST AFTER EVERY SCHEME.  A scheme costs minutes and a category
+        # hours; the turbulence category was killed at its four-hour walltime
+        # and left nothing at all, because results were written only at the
+        # end.  This costs milliseconds and turns a kill into a partial result.
+        if on_progress is not None:
+            on_progress(verdicts)
     return verdicts
+
+
+def _write_partial(json_out, categories, nlev, dt, verdicts, *, complete):
+    """Persist what has been audited SO FAR.
+
+    A single scheme can take tens of minutes, and a whole category hours; the
+    turbulence category was killed at its walltime after four hours and left
+    NOTHING, because results were written only at the end.  Writing after every
+    scheme costs milliseconds and turns a kill into a partial result.
+
+    ``complete`` records whether the run finished, so a reader can never mistake
+    a truncated file for a full audit.
+    """
+    if json_out is None:
+        return
+    from dataclasses import asdict as _asdict
+
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = json_out.with_suffix(json_out.suffix + ".tmp")
+    tmp.write_text(json.dumps(
+        {"categories": list(categories), "nlev": nlev, "dt": dt,
+         "complete": complete, "n_verdicts": len(verdicts),
+         "verdicts": [_asdict(v) for v in verdicts]}, indent=2))
+    # Atomic replace: a reader must never see a half-written file.
+    tmp.replace(json_out)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -628,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"unknown categories {unknown}; expected from {ATM_CATEGORIES}")
 
     verdicts = audit(categories, nlev=args.nlev, dt=args.dt,
+                     on_progress=lambda v: _write_partial(
+                         args.json_out, categories, args.nlev, args.dt, v,
+                         complete=False),
                      run_finite_difference=not args.no_finite_difference,
                      spinup_steps=args.spinup_steps)
     if not verdicts:
@@ -657,11 +692,9 @@ def main(argv: list[str] | None = None) -> int:
           "columns at cold start. It is the condition a tuner would also fail "
           "to exploit; it is not proof the field is unused in a full run.")
 
+    _write_partial(args.json_out, categories, args.nlev, args.dt, verdicts,
+                   complete=True)
     if args.json_out is not None:
-        args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(json.dumps(
-            {"categories": list(categories), "nlev": args.nlev, "dt": args.dt,
-             "verdicts": [asdict(v) for v in verdicts]}, indent=2))
         print(f"wrote {args.json_out}")
     # A non-differentiable parameter is a bug for every gradient trainer, so it
     # fails the run; dead/blocked are ratcheted by the test, not here.
