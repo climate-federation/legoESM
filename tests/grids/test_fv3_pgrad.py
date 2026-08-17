@@ -25,9 +25,12 @@ pattern-setter (``test_fv3_nh_core.py``) plus one this chain earns:
    NaN into a live expression -- in the primal or, via ``0 * NaN``, in
    the VJP alone.
 
-TOLERANCES: every numeric bound below is marked ``TOL-PENDING`` and set
-to a provisional 1e-12.  They are NOT measured -- the measurement job
-replaces each with ``measured X, bound = measured x N``.
+TOLERANCES: every numeric bound below is MEASURED (job 9425294, the
+LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10 (exact-0.0
+measurements get a 1e-15 eps guard).  Lane parity is bitwise on most
+gates; the worst nonzero figures are the jit-vs-eager winds at
+~4.9e-15 and the km=3 oracle v_ogp at 5.187e-15.  The one_grad_p FD
+gate's gap/floor measured 9.478e-03, so its margin is 9.5e-02.
 """
 from __future__ import annotations
 
@@ -156,6 +159,12 @@ def _rel(a, b) -> float:
 
 def _cmp(name, got, want, tol):
     r = _rel(got, want)
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and return
+    # instead of asserting the bound.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e})",
+              flush=True)
+        return
     assert r <= tol, (
         f"{name}: rel {r:.3e} > {tol:.3e} "
         f"(bitwise={np.array_equal(np.asarray(got), np.asarray(want))})")
@@ -413,6 +422,15 @@ def _assert_affine_and_roundoff_floor(name, f, primals, tol_affine,
         f"MEASURED second difference {num:.3e}")
     gap, ad = _vjp_fd_projection(f, primals, eps, seed=seed)
     floor = _fd_roundoff_floor(f, primals, eps)
+    # MEASUREMENT MODE: the quantity this bound carries is gap/floor (a
+    # multiple of the central difference's own roundoff floor), not a
+    # field parity -- print it as such.  The affine assert above keeps
+    # its already-measured bound and stays live.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel "
+              f"{gap / max(floor, 1e-300):.3e} (bound {margin:.3e}, "
+              f"quantity FD projection gap / roundoff floor)", flush=True)
+        return
     assert gap <= margin * floor, (
         f"{name}: FD projection gap {gap:.6e} exceeds {margin:g}x the "
         f"central-difference roundoff floor {floor:.6e} "
@@ -426,6 +444,10 @@ def _check_adjoint(name, f, primals, tol, seed=0):
     assert abs(lhs) > 0.0, (
         f"{name}: <J v, w> == 0 -- the identity is satisfied trivially, "
         f"so this gate proves nothing (check the window/scale)")
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
@@ -497,12 +519,12 @@ def test_a2b_ord4_jax_matches_numpy_lane(arm, replace):
     qi_j, qo_j = _run_a2b_jax(q, gs, replace=replace, **kw)
 
     box = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"a2b[{arm}] qout box", qo_j[box], qo_n[box], 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"a2b[{arm}] qin", qi_j, qi_n, 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every arm; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(f"a2b[{arm}] qout box", qo_j[box], qo_n[box], 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every arm; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(f"a2b[{arm}] qin", qi_j, qi_n, 1e-15)
     # replace semantics are tolerance-independent: False and None are
     # BOTH no-ops, True rewrites exactly the B box.
     if replace:
@@ -546,9 +568,9 @@ def test_a2b_ord4_jax_adjoint_consistency(arm):
             nw_corner=True)
         return qi[box], qo[box]
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint(f"a2b_ord4[{arm}]", f, (q,), 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual, worst duo 5.031e-16; bound = measured x 10 =
+    # 5.1e-15.
+    _check_adjoint(f"a2b_ord4[{arm}]", f, (q,), 5.1e-15)
 
 
 def test_a2b_gridstruct_view_rejects_float32_and_missing_keys():
@@ -590,9 +612,9 @@ def test_geopk_jax_matches_numpy_lane(km, cg, computehalo):
     want = npg.geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     got = geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"geopk[{km},cg={cg}].{name}", got[name], want[name], 1e-12)
+        # MEASURED (job 9425294 sweep): worst pkz (km=3) 1.249e-15; bound = measured x 10 =
+        # 1.3e-14.
+        _cmp(f"geopk[{km},cg={cg}].{name}", got[name], want[name], 1.3e-14)
     # Non-vacuity: the chain actually produced structure.
     assert float(np.abs(np.asarray(got["gz"])).max()) > 1.0
 
@@ -627,9 +649,9 @@ def test_geopk_jax_jit_eager_parity_and_no_retrace():
     eager = geopk(st["delp"], st["pt"], st["hs"], BD, **kw)
     jitted = geopk_jit(st["delp"], st["pt"], st["hs"], BD, **kw)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"geopk jit/eager {name}", jitted[name], eager[name], 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(f"geopk jit/eager {name}", jitted[name], eager[name], 1e-15)
 
     traces = {"n": 0}
 
@@ -747,9 +769,9 @@ def test_geopk_jax_adjoint_consistency():
         return (o["pk"][box], o["gz"][box], o["pe"], o["peln"],
                 o["pkz"])
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("geopk", f, (delp, pt, hs), 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual 8.889e-16; bound = measured x 10 =
+    # 8.9e-15.
+    _check_adjoint("geopk", f, (delp, pt, hs), 8.9e-15)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -824,12 +846,12 @@ def test_p_grad_c_jax_matches_numpy_lane(hydrostatic):
                 hydrostatic=hydrostatic)
     uc_j, vc_j = p_grad_c(1.0, delpc, pkc, gz, st["uc"], st["vc"], gs, BD,
                           npz=km, hydrostatic=hydrostatic)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp("p_grad_c uc", uc_j, uc_n, 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp("p_grad_c vc", vc_j, vc_n, 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp("p_grad_c uc", uc_j, uc_n, 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp("p_grad_c vc", vc_j, vc_n, 1e-15)
     # Non-vacuity: the update moved the winds.
     assert float(np.abs(np.asarray(uc_j) - st["uc"]).max()) > 0.0
     # Halo slots outside the write window are carried through EXACTLY.
@@ -845,9 +867,9 @@ def test_p_grad_c_jax_jit_eager_parity_and_no_retrace():
     eager = p_grad_c(*args, npz=km, hydrostatic=True)
     jitted = p_grad_c_jit(*args, npz=km, hydrostatic=True)
     for name, e, j in zip(("uc", "vc"), eager, jitted):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"p_grad_c jit/eager {name}", j, e, 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(f"p_grad_c jit/eager {name}", j, e, 1e-15)
 
     traces = {"n": 0}
 
@@ -978,13 +1000,13 @@ def test_p_grad_c_jax_adjoint_consistency():
                           hydrostatic=True)
         return uo[uw], vo[vw]
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("p_grad_c bracket", f_bracket, (pkc, gz), 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+    # MEASURED (job 9425294 sweep): adjoint residual 1.569e-16; bound = measured x 10 =
+    # 1.6e-15.
+    _check_adjoint("p_grad_c bracket", f_bracket, (pkc, gz), 1.6e-15)
+    # MEASURED (job 9425294 sweep): adjoint residual 6.631e-16; bound = measured x 10 =
+    # 6.7e-15.
     _check_adjoint("p_grad_c passthrough", f_pass,
-                   (st["uc"], st["vc"]), 1e-12)
+                   (st["uc"], st["vc"]), 6.7e-15)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1115,9 +1137,9 @@ def test_one_grad_p_jax_matches_numpy_lane(km, d_ext):
                                       **kw, **_ogp_flags())
     for name, j, n in (("u", u_j, u_n), ("v", v_j, v_n),
                        ("pk", pk_j, pk_n), ("gz", gz_j, gz_n)):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"one_grad_p[km={km},d_ext={d_ext}].{name}", j, n, 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/km/d_ext; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(f"one_grad_p[km={km},d_ext={d_ext}].{name}", j, n, 1e-15)
     # Non-vacuity: a2b replace really rewrote the B box, and the winds moved.
     assert not np.array_equal(np.asarray(pk_j), np.asarray(pk))
     assert float(np.abs(np.asarray(u_j) - u).max()) > 0.0
@@ -1132,9 +1154,9 @@ def test_one_grad_p_jax_jit_eager_parity_and_no_retrace():
     eager = one_grad_p(u, v, pk, gz, divg2, None, gs, BD, **kw)
     jitted = one_grad_p_jit(u, v, pk, gz, divg2, None, gs, BD, **kw)
     for name, e, j in zip(("u", "v", "pk", "gz"), eager, jitted):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"one_grad_p jit/eager {name}", j, e, 1e-12)
+        # MEASURED (job 9425294 sweep): worst v 4.925e-15; bound = measured x 10 =
+        # 5.0e-14.
+        _cmp(f"one_grad_p jit/eager {name}", j, e, 5.0e-14)
 
     traces = {"n": 0}
 
@@ -1340,9 +1362,9 @@ def test_one_grad_p_linear_group_is_affine_and_gap_is_roundoff():
     # measured x ~3, expressed as a MULTIPLE OF THE ULP FLOOR so it
     # cannot be satisfied by shrinking the probe step.
     tol_affine = 3.0
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    floor_margin = 10.0
+    # MEASURED (job 9425294 sweep): FD projection gap / roundoff floor 9.478e-03; bound = measured x 10 =
+    # 9.5e-02.
+    floor_margin = 9.5e-2
     _assert_affine_and_roundoff_floor("one_grad_p u/v/divg2", f_lin,
                                       p_lin, tol_affine, floor_margin)
 
@@ -1420,12 +1442,12 @@ def test_one_grad_p_jax_adjoint_consistency():
     hide under the strong one's contribution to the inner product."""
     km = 2
     f_pg, f_lin, p_pg, p_lin = _ogp_grad_setup(km)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("one_grad_p pk/gz", f_pg, p_pg, 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("one_grad_p u/v/divg2", f_lin, p_lin, 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual 2.534e-16; bound = measured x 10 =
+    # 2.6e-15.
+    _check_adjoint("one_grad_p pk/gz", f_pg, p_pg, 2.6e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) adjoint residual; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _check_adjoint("one_grad_p u/v/divg2", f_lin, p_lin, 1e-15)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1487,9 +1509,9 @@ def test_nh_p_grad_jax_matches_numpy_lane(km, use_logp):
     for name, j, n in (("u", u_j, u_n), ("v", v_j, v_n),
                        ("pp", pp_j, pp_n), ("pk3", pk_j, pk_n),
                        ("gz", gz_j, gz_n)):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"nh_p_grad[km={km},logp={use_logp}].{name}", j, n, 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/km/logp; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(f"nh_p_grad[km={km},logp={use_logp}].{name}", j, n, 1e-15)
     assert float(np.abs(np.asarray(u_j) - u).max()) > 0.0
 
 
@@ -1514,9 +1536,9 @@ def test_nh_p_grad_jax_jit_eager_parity_and_no_retrace():
     eager = nh_p_grad(u, v, pp, gz, delp, pk3, gs, BD, **kw)
     jitted = nh_p_grad_jit(u, v, pp, gz, delp, pk3, gs, BD, **kw)
     for name, e, j in zip(("u", "v", "pp", "pk3", "gz"), eager, jitted):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"nh_p_grad jit/eager {name}", j, e, 1e-12)
+        # MEASURED (job 9425294 sweep): worst v 4.938e-15; bound = measured x 10 =
+        # 5.0e-14.
+        _cmp(f"nh_p_grad jit/eager {name}", j, e, 5.0e-14)
 
     traces = {"n": 0}
 
@@ -1698,12 +1720,12 @@ def test_nh_p_grad_jax_adjoint_consistency():
     for the same reason as :func:`test_one_grad_p_jax_adjoint_consistency`."""
     km = 2
     f_pg, f_nh, p_pg, p_nh = _nhpg_grad_setup(km)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("nh_p_grad pk3/gz", f_pg, p_pg, 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _check_adjoint("nh_p_grad pp/u/v/delp", f_nh, p_nh, 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.267e-16; bound = measured x 10 =
+    # 1.3e-15.
+    _check_adjoint("nh_p_grad pk3/gz", f_pg, p_pg, 1.3e-15)
+    # MEASURED (job 9425294 sweep): adjoint residual 4.542e-16; bound = measured x 10 =
+    # 4.6e-15.
+    _check_adjoint("nh_p_grad pp/u/v/delp", f_nh, p_nh, 4.6e-15)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1756,17 +1778,19 @@ def test_pk3_and_pln_halo_jax_match_numpy_lane(km):
     npg.pk3_halo(pk3_n, delp, BD, npz=km, ptop=PTOP, akap=AKAP)
     pk3_j = pk3_halo(np.full((M_A, M_A, km + 1), SENT), delp, BD, npz=km,
                      ptop=PTOP, akap=AKAP)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"pk3_halo[km={km}]", pk3_j, pk3_n, 1e-12)
+    # MEASURED (job 9425294 sweep): 8.074e-46 -- sub-ULP of the ~1e30 pk3 field scale,
+    # i.e. rounding-identical; bound = 1e-15 eps guard (a literal
+    # measured-x-10 of 8e-45 would sit below one ULP of any compared
+    # value).
+    _cmp(f"pk3_halo[km={km}]", pk3_j, pk3_n, 1e-15)
 
     pln_n = np.full((M_A, M_A, km + 1), SENT)
     npg.pln_halo(pln_n, delp, BD, npz=km, ptop=PTOP)
     pln_j = pln_halo(np.full((M_A, M_A, km + 1), SENT), delp, BD, npz=km,
                      ptop=PTOP)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"pln_halo[km={km}]", pln_j, pln_n, 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both kms; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(f"pln_halo[km={km}]", pln_j, pln_n, 1e-15)
 
     # Tolerance-independent footprint: the same slots stay sentinel on
     # both lanes, and level 1 is NEVER written.
@@ -1782,9 +1806,9 @@ def test_pe_halo_jax_matches_numpy_lane(km):
     npg.pe_halo(pe_n, delp, BD, npz=km, ptop=PTOP)
     pe_j = pe_halo(np.full((N + 2, km + 1, N + 2), SENT), delp, BD,
                    npz=km, ptop=PTOP)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"pe_halo[km={km}]", pe_j, pe_n, 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both kms; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(f"pe_halo[km={km}]", pe_j, pe_n, 1e-15)
     assert np.array_equal(np.asarray(pe_j) == SENT, pe_n == SENT)
     # the whole interior keeps its sentinel (only the border ring runs)
     assert (np.asarray(pe_j)[1:N + 1, :, 1:N + 1] == SENT).all()
@@ -1806,9 +1830,9 @@ def test_halo_jax_jit_eager_parity_and_no_retrace(name, fn, jfn, mk,
     kw = dict(npz=km, ptop=PTOP, **extra)
     eager = fn(base, delp, BD, **kw)
     jitted = jfn(base, delp, BD, **kw)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"{name} jit/eager", jitted, eager, 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every halo routine; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(f"{name} jit/eager", jitted, eager, 1e-15)
 
     traces = {"n": 0}
 
@@ -1907,9 +1931,9 @@ def test_halo_jax_adjoint_consistency():
              lambda d: pln_halo(pk3, d, BD, npz=km, ptop=PTOP)),
             ("pe_halo",
              lambda d: pe_halo(pe, d, BD, npz=km, ptop=PTOP))):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _check_adjoint(name, f, (delp,), 1e-12)
+        # MEASURED (job 9425294 sweep): adjoint residual, worst pln_halo 5.009e-16; bound = measured x 10 =
+        # 5.1e-15.
+        _check_adjoint(name, f, (delp,), 5.1e-15)
 
 
 # ---------------------------------------------------------------- gate 5
@@ -1985,10 +2009,10 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
     gc_n = npg.geopk(f["delpc"], f["ptc"], f["hs"], BD, **kwc)
     gc_j = geopk(f["delpc"], f["ptc"], f["hs"], BD, **kwc)
     for name in ("pk", "gz", "pe", "peln", "pkz"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
+        # MEASURED (job 9425294 sweep): worst gz (km=2) 3.415e-16; bound = measured x 10 =
+        # 3.5e-15.
         _cmp(f"oracle km={km} geopk_c.{name}", gc_j[name], gc_n[name],
-             1e-12)
+             3.5e-15)
 
     # ---- p_grad_c
     uc_n, vc_n = np.array(f["uc"]), np.array(f["vc"])
@@ -1997,12 +2021,12 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
                 hydrostatic=True)
     uc_j, vc_j = p_grad_c(1.0, None, gc_j["pk"], gc_j["gz"], f["uc"],
                           f["vc"], gs, BD, npz=km, hydrostatic=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"oracle km={km} uc_pgc", uc_j, uc_n, 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp(f"oracle km={km} vc_pgc", vc_j, vc_n, 1e-12)
+    # MEASURED (job 9425294 sweep): 2.096e-16; bound = measured x 10 =
+    # 2.1e-15.
+    _cmp(f"oracle km={km} uc_pgc", uc_j, uc_n, 2.1e-15)
+    # MEASURED (job 9425294 sweep): 1.157e-16; bound = measured x 10 =
+    # 1.2e-15.
+    _cmp(f"oracle km={km} vc_pgc", vc_j, vc_n, 1.2e-15)
 
     # ---- D site + one_grad_p
     gd_n = npg.geopk(f["delp"], f["pt"], f["hs"], BD, **kwd)
@@ -2016,8 +2040,8 @@ def test_jax_chain_matches_numpy_lane_on_the_oracle_fixture(km):
         f["u"], f["v"], gd_j["pk"], gd_j["gz"], f["divg2"], None, gs, BD,
         **_ogp_kw(km, d_ext=d_ext), **_ogp_flags())
     for name, j, n in (("u_ogp", u_j, u_n), ("v_ogp", v_j, v_n)):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        _cmp(f"oracle km={km} {name}", j, n, 1e-12)
+        # MEASURED (job 9425294 sweep): worst v_ogp (km=3) 5.187e-15; bound = measured x 10 =
+        # 5.2e-14.
+        _cmp(f"oracle km={km} {name}", j, n, 5.2e-14)
     # Non-vacuity: the chain moved the D-grid winds.
     assert float(np.abs(np.asarray(u_j) - f["u"]).max()) > 0.0

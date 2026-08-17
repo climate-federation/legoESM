@@ -13,7 +13,7 @@ operation inside it happens in a kernel gated by
 which is exactly what per-kernel gates cannot see:
 
 1. **parity** -- JAX vs the NumPy twin from BYTE-IDENTICAL inputs, per
-   output, with a measured bound carrying a ``TOL-PENDING`` marker.
+   output, with a bound MEASURED in job 9425294 (measured x 10).
    Both pressure phases are fed the SAME NumPy ``csw_phase_3d`` output
    rather than each lane's own, so the comparison is one-variable: a
    c_sw parity difference cannot leak into a pressure-phase verdict;
@@ -59,8 +59,11 @@ TOLERANCE POLICY.  ``c_sw`` runs the upwind selects and the divergence
 terms; ``geopk`` is an accumulating recurrence; ``sim1_solver`` is a
 sequential Thomas sweep with a ``p_fac`` floor.  Per strategy section 4
 that spans the pointwise, accumulating and branch-switching classes, so
-every numeric bound below carries a ``TOL-PENDING`` marker for the
-orchestrator's measurement job plus a one-word class label.
+every numeric bound below is MEASURED (job 9425294, the
+LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10, keeping its
+class label.  Worst figures: nh vc parity 8.594e-14, and the one gate
+above 1e-9 in this file -- jit-vs-eager nh.ws3 at 1.625e-09
+(cancellation-amplified FMA in ws = (zs - gz_bot)/dt).
 
 COST.  These gates run six faces x three levels of ``c_sw`` per call, so
 they are minutes, not seconds; the jvp/vjp programs add more.  That is
@@ -81,7 +84,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from jax.test_util import check_grads  # noqa: E402
+
+
+from tests.grids.fv3_gate_helpers import gated_check_grads  # noqa: E402
 from legoesm.core import fv3_cgrid_phase_3d as jphase  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npphase  # noqa: E402
 from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
@@ -231,6 +236,13 @@ def _cmp(got, ref, name, tol):
     per = diff / (np.abs(b[ok]) + scale)
     rel = float(per.max())
     n_over = int((per > 1e-13).sum())
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip ONLY
+    # the tolerance assert; the structural checks above still raise.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e}, "
+              f"n_over {n_over}, max|diff| {float(diff.max()):.3e})",
+              flush=True)
+        return rel, n_over
     assert rel <= tol, (
         f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
         f"{n_over} of {int(ok.sum())} compared cells exceed 1e-13 "
@@ -292,6 +304,10 @@ def _check_adjoint(name, f, primals, tol, seed=0):
         f"so this gate proves nothing (check the window/scale)")
     assert np.isfinite(lhs) and np.isfinite(rhs), (
         f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return r
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
@@ -686,12 +702,10 @@ def test_csw_phase_3d_matches_numpy_lane(ctx, jctx, state_np, jstate,
     assert set(got) == set(names)
     for name in names:
         for t in range(6):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: branch-switching (c_sw upwind selects)]
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/face/arm; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
             _cmp(got[name][t], ref[t][name],
-                 f"csw_phase_3d.{name}[face {t + 1}]", 1e-13)
+                 f"csw_phase_3d.{name}[face {t + 1}]", 1e-15)
 
 
 def test_csw_phase_3d_km1_equals_the_certified_2d_kernel(jctx):
@@ -783,22 +797,18 @@ def test_cgrid_pressure_phase_3d_matches_numpy_lane(ctx, jctx, csw_np):
     assert set(got) == {"pk", "gz", "pe", "peln", "pkz", "uc", "vc"}
     for t in range(6):
         for name in _CGRID_GEOPK_COMPARED:
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: accumulating (geopk's p1d / gz recurrences)]
+            # MEASURED (job 9425294 sweep): worst gz 1.188e-15 (pk ~1.1e-16, pe/peln 0.0); bound = measured x 10 =
+            # 1.2e-14.
             _cmp(got[name][t], ref[t][name],
-                 f"cgrid_pressure.{name}[face {t + 1}]", 1e-12)
+                 f"cgrid_pressure.{name}[face {t + 1}]", 1.2e-14)
         for name in ("uc", "vc"):
             # p_grad_c MUTATES uc/vc in place in the NumPy lane
             # (dyn_core.F90:2073-2132); the JAX twin RETURNS them (R4 /
             # C4), so the reference is the MUTATED input array.
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: pointwise (p_grad_c has no inter-k coupling)]
+            # MEASURED (job 9425294 sweep): worst vc (face 5) 4.267e-14; bound = measured x 10 =
+            # 4.3e-13.
             _cmp(got[name][t], ref_in[t][name],
-                 f"cgrid_pressure.{name}[face {t + 1}]", 1e-13)
+                 f"cgrid_pressure.{name}[face {t + 1}]", 4.3e-13)
 
 
 def test_pkz_is_unwritten_on_the_cgrid_call(ctx, jctx, csw_np):
@@ -886,27 +896,22 @@ def test_cgrid_nh_pressure_phase_3d_matches_numpy_lane(ctx_topo,
 
     assert set(got) == {"pkc", "gz", "ws3", "uc", "vc"}
     for t in range(6):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: sequential recurrence (sim1 Thomas sweep)]
+        # MEASURED (job 9425294 sweep): worst 4.203e-16 (face 6); bound = measured x 10 =
+        # 4.3e-15.
         _cmp(got["pkc"][t], ref[t]["pkc"],
-             f"cgrid_nh.pkc[face {t + 1}]", 1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: sequential recurrence (gz back-build)]
-        _cmp(got["gz"][t], gz_ref[t], f"cgrid_nh.gz[face {t + 1}]", 1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: pointwise (ws = (zs - gz_bot)/dt)]
+             f"cgrid_nh.pkc[face {t + 1}]", 4.3e-15)
+        # MEASURED (job 9425294 sweep): worst 1.661e-15 (face 6); bound = measured x 10 =
+        # 1.7e-14.
+        _cmp(got["gz"][t], gz_ref[t], f"cgrid_nh.gz[face {t + 1}]", 1.7e-14)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(got["ws3"][t], ws_ref[t],
-             f"cgrid_nh.ws3[face {t + 1}]", 1e-12)
+             f"cgrid_nh.ws3[face {t + 1}]", 1e-15)
         for name in ("uc", "vc"):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: pointwise (NH p_grad_c, wk = delpc)]
+            # MEASURED (job 9425294 sweep): worst vc (face 6) 8.594e-14; bound = measured x 10 =
+            # 8.6e-13.
             _cmp(got[name][t], ref_in[t][name],
-                 f"cgrid_nh.{name}[face {t + 1}]", 1e-13)
+                 f"cgrid_nh.{name}[face {t + 1}]", 8.6e-13)
 
 
 def test_nh_stage_rebuilds_gz_and_fills_ws(jctx_topo, csw_np_nh,
@@ -961,10 +966,9 @@ def test_csw_phase_3d_jit_matches_eager(jctx, jstate):
     eager = jphase.csw_phase_3d(jctx, jstate, DT2, KM)
     fast = fn(jctx, jstate, DT2, KM)
     for name in npphase.CSW_OUT_2D:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: FMA contraction on a flux sum]
-        _cmp(fast[name], eager[name], f"jit-vs-eager csw.{name}", 1e-13)
+        # MEASURED (job 9425294 sweep): worst divg_d 1.323e-15; bound = measured x 10 =
+        # 1.4e-14.
+        _cmp(fast[name], eager[name], f"jit-vs-eager csw.{name}", 1.4e-14)
 
 
 def test_cgrid_pressure_phase_3d_jit_matches_eager(jctx, csw_np):
@@ -987,11 +991,10 @@ def test_cgrid_pressure_phase_3d_jit_matches_eager(jctx, csw_np):
             assert np.array_equal(np.asarray(fast[name]),
                                   np.asarray(eager[name])), name
             continue
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: FMA contraction on an accumulator]
+        # MEASURED (job 9425294 sweep): worst vc 2.283e-15; bound = measured x 10 =
+        # 2.3e-14.
         _cmp(fast[name], eager[name], f"jit-vs-eager pressure.{name}",
-             1e-12)
+             2.3e-14)
 
 
 def test_cgrid_nh_pressure_phase_3d_jit_matches_eager(jctx_topo,
@@ -1007,10 +1010,12 @@ def test_cgrid_nh_pressure_phase_3d_jit_matches_eager(jctx_topo,
     eager = jphase.cgrid_nh_pressure_phase_3d(*args, **kw)
     fast = fn(*args, **kw)
     for name in eager:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: FMA contraction on a Thomas sweep]
-        _cmp(fast[name], eager[name], f"jit-vs-eager nh.{name}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst ws3 1.625e-09 -- ws = (zs - gz_bot)/dt is a
+        # difference of nearly equal terms, so FMA contraction is amplified
+        # by the cancellation (uc/vc <= 6.0e-14, others <= 2.2e-15); bound =
+        # measured x 10 = 1.7e-08.  Named in the sweep report: the only
+        # cgrid gate measured above 1e-9.
+        _cmp(fast[name], eager[name], f"jit-vs-eager nh.{name}", 1.7e-8)
 
 
 def test_a_new_dt2_does_not_retrace_but_a_new_nord_does(jctx, jstate):
@@ -1257,11 +1262,10 @@ def test_csw_phase_3d_adjoint_identity_scalars(jctx, jstate):
             DT2, KM)
         return {"delpc": _win(out["delpc"]), "ptc": _win(out["ptc"])}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 6.347e-15; bound = measured x 10 =
+    # 6.4e-14.
     _check_adjoint("csw_phase_3d d(delp,pt,w)", f,
-                   (jstate["delp"], jstate["pt"], jstate["w"]), 1e-10)
+                   (jstate["delp"], jstate["pt"], jstate["w"]), 6.4e-14)
 
 
 def test_csw_phase_3d_adjoint_identity_winds(jctx, jstate):
@@ -1275,11 +1279,10 @@ def test_csw_phase_3d_adjoint_identity_winds(jctx, jstate):
         return {"uc": _win(out["uc"]), "vc": _win(out["vc"]),
                 "divg_d": _win(out["divg_d"])}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 2.802e-16; bound = measured x 10 =
+    # 2.9e-15.
     _check_adjoint("csw_phase_3d d(u,v)", f,
-                   (jstate["u"], jstate["v"]), 1e-10)
+                   (jstate["u"], jstate["v"]), 2.9e-15)
 
 
 def test_cgrid_pressure_phase_3d_adjoint_identity(jctx, csw_np):
@@ -1300,11 +1303,10 @@ def test_cgrid_pressure_phase_3d_adjoint_identity(jctx, csw_np):
         return {"gz": _win(out["gz"]), "uc": _win(out["uc"]),
                 "vc": _win(out["vc"])}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 2.030e-15; bound = measured x 10 =
+    # 2.1e-14.
     _check_adjoint("cgrid_pressure d(delpc,ptc)", f,
-                   (stacked["delpc"], stacked["ptc"]), 1e-10)
+                   (stacked["delpc"], stacked["ptc"]), 2.1e-14)
 
 
 def test_cgrid_nh_pressure_phase_3d_adjoint_identity(jctx_topo,
@@ -1331,12 +1333,11 @@ def test_cgrid_nh_pressure_phase_3d_adjoint_identity(jctx_topo,
         return {"pkc": _win(out["pkc"]), "gz": _win(out["gz"]),
                 "uc": _win(out["uc"])}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 3.338e-15; bound = measured x 10 =
+    # 3.4e-14.
     _check_adjoint("cgrid_nh d(delpc,ptc,wc)", f,
                    (stacked["delpc"], stacked["ptc"], stacked["wc"]),
-                   1e-10)
+                   3.4e-14)
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1365,8 +1366,9 @@ def test_csw_phase_3d_check_grads(jctx, jstate, order):
         return (jnp.sum(_win(out["delpc"]) ** 2)
                 + jnp.sum(_win(out["ptc"]) ** 2))
 
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement
-    # job will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: smooth-region finite differences]
-    check_grads(f, (one, one), order=order, modes=("fwd", "rev"),
-                atol=2e-2, rtol=2e-2, eps=1e-4)
+    # MEASURED (job 9425294 sweep): smallest-passing check_grads atol=rtol 1e-7
+    # (order=2; order=1 passed at 1e-11); bound = one decade up = 1e-6.
+    gated_check_grads(f"csw_phase_3d check_grads order={order}", f,
+                      (one, one), order=order,
+                      modes=("fwd", "rev"),
+                      atol=1e-6, rtol=1e-6, eps=1e-4)

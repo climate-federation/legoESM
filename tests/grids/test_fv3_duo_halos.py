@@ -78,6 +78,8 @@ import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 
 from legoesm.grids import fv3_duo_halos as jx  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import gate_scalar  # noqa: E402
 from legoesm.grids import fv3_native_ext_vector as exv  # noqa: E402
 from legoesm.grids import fv3_native_gridstruct as gsm  # noqa: E402
 from legoesm.grids.fv3_native_halos import (  # noqa: E402
@@ -129,9 +131,10 @@ def _rnd6(shape2, seed):
     return _rnd((6,) + tuple(shape2), seed)
 
 
-def _cmp(got, want, name):
+def _cmp(got, want, name, tol):
     """Max RELATIVE diff over finite slots, after requiring the
-    non-finite masks to match EXACTLY.
+    non-finite masks to match EXACTLY -- asserted against ``tol`` in
+    here (measure mode prints instead; the mask checks always raise).
 
     Three ways this refuses to hide a failure:
 
@@ -156,7 +159,8 @@ def _cmp(got, want, name):
         f"{name}: BOTH sides are entirely non-finite ({gm.size} slots) -- "
         f"this comparison would pass vacuously")
     scale = max(1.0, float(np.max(np.abs(want[~wm]))))
-    return float(np.max(np.abs(got[~gm] - want[~gm]))) / scale
+    rel = float(np.max(np.abs(got[~gm] - want[~gm]))) / scale
+    return gate_scalar(name, rel, tol)
 
 
 def _bitwise_equal(a, b):
@@ -392,13 +396,20 @@ def test_k2e_tables_are_the_pinned_nord2_oracle_tables():
         # 2.2e-16 on weights of order 0.7 / 0.3, i.e. 1-2 ULP, with 120
         # of the records bit-identical.  An exact-equality assertion
         # here reported a "content difference" that was pure rounding.
-        # TOL-PENDING: measured 2.2e-16 (job 9401521); bound = measured
-        # x ~45 to leave room for a different libm.  Re-measure before
-        # tightening.
+        # MEASURED (job 9425294 sweep): max weight delta 9.437e-16 (B; A 4.996e-16).
+        # Job 9401521 measured 2.2e-16 on the same fixture -- the delta moves
+        # with the build's libm, which is why the earlier bound carried x ~45
+        # headroom.  Bound = this sweep's measured x 10 = 9.5e-15.
+        # Re-measure before tightening further.
         cmax = max(abs(a - b)
                    for key in mine
                    for a, b in zip(mine[key][1], theirs[key][1]))
-        assert cmax < 1.0e-14, (
+        if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+            print(f"TOLMEASURE 'k2e coef {fam}': rel {cmax:.3e} "
+                  f"(bound 9.5e-15, quantity max abs Lagrange-weight "
+                  f"delta vs the Fortran fixture)", flush=True)
+            continue
+        assert cmax < 9.5e-15, (
             f"{fam}: Lagrange coefficients differ by {cmax:.3e}, far "
             f"above the 2.2e-16 rounding floor measured for this "
             f"fixture -- that is a formula difference, not rounding")
@@ -510,15 +521,15 @@ def test_k2e_remap_matches_numpy_and_jit(tab, stag, shape, ring):
     ref = [np.array(a, copy=True) for a in f6]
     gsm.k2e_remap_halo_rings(ref, stag, N, NG, k2e_nord=tab.k2e_nord)
     got = jx.k2e_remap_halo_rings(jnp.asarray(f6), tab, stag, ring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), f"k2e[{stag}]") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both stags; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), f"k2e[{stag}]", 1e-15)
     got_j = jx.k2e_remap_halo_rings_jit(jnp.asarray(f6), tab, stag, ring)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got_j, got, f"k2e[{stag}] jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): worst B 1.333e-16; bound = measured x 10 =
+    # 1.4e-15.
+    _cmp(got_j, got, f"k2e[{stag}] jit vs eager", 1.4e-15)
     assert not _bitwise_equal(got, f6)
 
 
@@ -528,9 +539,9 @@ def test_k2e_remap_geo_ring_matches_numpy(tab):
     ref = [np.array(a, copy=True) for a in f6]
     gsm.k2e_remap_halo_rings(ref, "A", N, tab.ngp, k2e_nord=tab.k2e_nord)
     got = jx.k2e_remap_halo_rings(jnp.asarray(f6), tab, "A", "geo")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), "k2e[A,geo]") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), "k2e[A,geo]", 1e-15)
 
 
 # ---------------------------------------------------------------------------
@@ -621,15 +632,15 @@ def test_corner_lagrange_fill_matches_numpy(tab, ectx, key, fld, stagger):
         op.fill(a)
         ref.append(a)
     got = jx.corner_lagrange_fill(jnp.asarray(f6), tab, key)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), f"corner[{key}]") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), f"corner[{key}]", 1e-15)
     got_j = jx.corner_lagrange_fill_jit(jnp.asarray(f6), tab, key)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got_j, got, f"corner[{key}] jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): worst a3 1.085e-14; bound = measured x 10 =
+    # 1.1e-13.
+    _cmp(got_j, got, f"corner[{key}] jit vs eager", 1.1e-13)
     # non-vacuity: the fill must move the 36 wedge slots per face
     assert not _bitwise_equal(got, f6)
 
@@ -639,9 +650,11 @@ def test_corner_lagrange_preserves_a_constant(tab):
     that does not need the NumPy lane at all."""
     f6 = jnp.full((6, MA, MA), 7.25, dtype=jnp.float64)
     got = jx.corner_lagrange_fill(f6, tab, "a3")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert float(jnp.max(jnp.abs(got - 7.25))) < 1e-12
+    # MEASURED (job 9425294 sweep): 1.137e-13 abs on the 7.25 field; bound = measured x 10 =
+    # 1.2e-12.
+    gate_scalar("corner lagrange constant",
+                float(jnp.max(jnp.abs(got - 7.25))), 1.2e-12,
+                quantity="max abs deviation from the constant 7.25")
 
 
 def test_corner_lagrange_diagonal_is_the_average_of_two_directions(tab,
@@ -662,9 +675,11 @@ def test_corner_lagrange_diagonal_is_the_average_of_two_directions(tab,
         vx = sum(w * f6[0][s - lo, j_t - lo] for w, s in zip(wx, sx))
         vy = sum(w * f6[0][i_t - lo, s - lo] for w, s in zip(wy, sy))
         want = 0.5 * (vx + vy)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert abs(got[0][i_t - lo, j_t - lo] - want) < 1e-12, (i_t, j_t)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), all probed wedge slots; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        gate_scalar(f"corner diagonal average ({i_t},{j_t})",
+                    abs(got[0][i_t - lo, j_t - lo] - want), 1e-15,
+                    quantity="abs diagonal-vs-average agreement")
 
 
 # ---------------------------------------------------------------------------
@@ -741,15 +756,15 @@ def test_c2l_ord2_face_matches_numpy_and_jit(tab, ectx):
             assert sc.sum() > 0, msg     # and scratch must exist at all
         gw = np.asarray(g)[:, win, win]
         rw = r[:, win, win]
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert _cmp(gw, rw, f"c2l {label} window") < 1e-12
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both orders; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(gw, rw, f"c2l {label} window", 1e-15)
         # a11*u1 + a12*v1 is a sum of products -> FMA contraction, so the
         # jit gate is a bound on the window, not bitwise on the array
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert _cmp(np.asarray(j)[:, win, win], gw,
-                    f"c2l {label} jit vs eager") < 1e-12
+        # MEASURED (job 9425294 sweep): worst va 2.983e-16; bound = measured x 10 =
+        # 3.0e-15.
+        _cmp(np.asarray(j)[:, win, win], gw,
+                    f"c2l {label} jit vs eager", 3.0e-15)
 
 
 def test_c2l_ord2_cgrid_face_matches_numpy(tab, ectx):
@@ -763,12 +778,12 @@ def test_c2l_ord2_cgrid_face_matches_numpy(tab, ectx):
         ru.append(a)
         rv.append(b)
     ga, gb = jx.c2l_ord2_cgrid_face(jnp.asarray(uc6), jnp.asarray(vc6), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(ga, np.stack(ru), "c2l_cgrid ua") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gb, np.stack(rv), "c2l_cgrid va") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(ga, np.stack(ru), "c2l_cgrid ua", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gb, np.stack(rv), "c2l_cgrid va", 1e-15)
 
 
 def test_pack_p1_matches_numpy(tab):
@@ -785,29 +800,29 @@ def test_projections_match_numpy_and_jit(tab, ectx):
     vg = _rnd6((m4, m4), 19)
     rd = [exv._a2d_project(ug[t], vg[t], t, ectx) for t in range(6)]
     gd_u, gd_v = jx.a2d_project(jnp.asarray(ug), jnp.asarray(vg), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gd_u, np.stack([r[0] for r in rd]), "a2d ud") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gd_v, np.stack([r[1] for r in rd]), "a2d vd") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gd_u, np.stack([r[0] for r in rd]), "a2d ud", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gd_v, np.stack([r[1] for r in rd]), "a2d vd", 1e-15)
     rc = [exv._a2c_project(ug[t], vg[t], t, ectx) for t in range(6)]
     gc_u, gc_v = jx.a2c_project(jnp.asarray(ug), jnp.asarray(vg), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gc_u, np.stack([r[0] for r in rc]), "a2c uc") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gc_v, np.stack([r[1] for r in rc]), "a2c vc") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gc_u, np.stack([r[0] for r in rc]), "a2c uc", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gc_v, np.stack([r[1] for r in rc]), "a2c vc", 1e-15)
     ju, jv = jx.a2d_project_jit(jnp.asarray(ug), jnp.asarray(vg), tab)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(ju, gd_u, "a2d ud jit vs eager") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(jv, gd_v, "a2d vd jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): 1.755e-16; bound = measured x 10 =
+    # 1.8e-15.
+    _cmp(ju, gd_u, "a2d ud jit vs eager", 1.8e-15)
+    # MEASURED (job 9425294 sweep): 1.936e-16; bound = measured x 10 =
+    # 2.0e-15.
+    _cmp(jv, gd_v, "a2d vd jit vs eager", 2.0e-15)
 
 
 def test_write_strips_match_numpy_including_the_overwrite_order(tab):
@@ -846,15 +861,15 @@ def test_geo_lattice_exchange_matches_numpy(tab, ectx):
     ref = [np.array(a, copy=True) for a in g6]
     exv._geo_lattice_exchange(ref, ectx)
     got = jx.geo_lattice_exchange(jnp.asarray(g6), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), "geo_lattice_exchange") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), "geo_lattice_exchange", 1e-15)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(jx.geo_lattice_exchange_jit(jnp.asarray(g6), tab), got,
-                "geo_lattice_exchange jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): 2.896e-16; bound = measured x 10 =
+    # 2.9e-15.
+    _cmp(jx.geo_lattice_exchange_jit(jnp.asarray(g6), tab), got,
+                "geo_lattice_exchange jit vs eager", 2.9e-15)
 
 
 # ---------------------------------------------------------------------------
@@ -870,15 +885,15 @@ def test_ext_scalar_a_matches_numpy_on_oracle_inputs(tab, ectx):
     ref = [np.array(a, copy=True) for a in f6]
     exv.ext_scalar_sixface(ref, "A", ectx)
     got = jx.ext_scalar_sixface(jnp.asarray(f6), tab, "A")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), "ext_scalar A") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), "ext_scalar A", 1e-15)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(jx.ext_scalar_sixface_jit(jnp.asarray(f6), tab, "A"), got,
-                "ext_scalar A jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): 9.801e-15; bound = measured x 10 =
+    # 9.9e-14.
+    _cmp(jx.ext_scalar_sixface_jit(jnp.asarray(f6), tab, "A"), got,
+                "ext_scalar A jit vs eager", 9.9e-14)
     # the compute domain must be untouched by an exchange
     sl = slice(NG, NG + N)
     assert _bitwise_equal(np.asarray(got)[:, sl, sl], f6[:, sl, sl])
@@ -889,9 +904,9 @@ def test_ext_scalar_b_matches_numpy(tab, ectx):
     ref = [np.array(a, copy=True) for a in f6]
     exv.ext_scalar_sixface(ref, "B", ectx)
     got = jx.ext_scalar_sixface(jnp.asarray(f6), tab, "B")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(got, np.stack(ref), "ext_scalar B") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, np.stack(ref), "ext_scalar B", 1e-15)
 
 
 def test_ext_vector_dgrid_matches_numpy_on_oracle_inputs(tab, ectx):
@@ -907,22 +922,22 @@ def test_ext_vector_dgrid_matches_numpy_on_oracle_inputs(tab, ectx):
     exv.ext_vector_dgrid_sixface(ru, rv, ectx)
     gu, gv = jx.ext_vector_dgrid_sixface(jnp.asarray(u6),
                                          jnp.asarray(v6), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gu, np.stack(ru), "ext_vector D u") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gv, np.stack(rv), "ext_vector D v") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gu, np.stack(ru), "ext_vector D u", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gv, np.stack(rv), "ext_vector D v", 1e-15)
     ju, jv = jx.ext_vector_dgrid_sixface_jit(jnp.asarray(u6),
                                              jnp.asarray(v6), tab)
     # weighted sum -> FMA contraction differs between the jitted and the
     # eager lowering; a bound, not bitwise (see the module docstring)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(ju, gu, "ext_vector D u jit vs eager") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(jv, gv, "ext_vector D v jit vs eager") < 1e-12
+    # MEASURED (job 9425294 sweep): 3.058e-14; bound = measured x 10 =
+    # 3.1e-13.
+    _cmp(ju, gu, "ext_vector D u jit vs eager", 3.1e-13)
+    # MEASURED (job 9425294 sweep): 2.503e-14; bound = measured x 10 =
+    # 2.6e-13.
+    _cmp(jv, gv, "ext_vector D v jit vs eager", 2.6e-13)
 
 
 def test_ext_vector_cgrid_matches_numpy_on_oracle_inputs(tab, ectx):
@@ -938,12 +953,12 @@ def test_ext_vector_cgrid_matches_numpy_on_oracle_inputs(tab, ectx):
     exv.ext_vector_cgrid_sixface(ru, rv, ectx)
     gu, gv = jx.ext_vector_cgrid_sixface(jnp.asarray(uc6),
                                          jnp.asarray(vc6), tab)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gu, np.stack(ru), "ext_vector C uc") < 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _cmp(gv, np.stack(rv), "ext_vector C vc") < 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gu, np.stack(ru), "ext_vector C uc", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gv, np.stack(rv), "ext_vector C vc", 1e-15)
 
 
 def test_ext_scalar_constant_field_is_preserved(tab):
@@ -952,9 +967,11 @@ def test_ext_scalar_constant_field_is_preserved(tab):
     invariant on the Fortran side)."""
     f6 = jnp.full((6, MA, MA), 7.25, dtype=jnp.float64)
     got = jx.ext_scalar_sixface(f6, tab, "A")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert float(jnp.max(jnp.abs(got - 7.25))) < 1e-12
+    # MEASURED (job 9425294 sweep): 1.279e-13 abs on the 7.25 field; bound = measured x 10 =
+    # 1.3e-12.
+    gate_scalar("ext_scalar constant",
+                float(jnp.max(jnp.abs(got - 7.25))), 1.3e-12,
+                quantity="max abs deviation from the constant 7.25")
 
 
 def test_ext_vector_a2d_variant_wiring(tab, kinked_gs6):
@@ -1318,9 +1335,11 @@ def test_adjoint_identity_holds_for_every_linear_kernel(tab):
     worst = {}
     for name, (fn, primals) in cases.items():
         worst[name] = _adjoint_residual(fn, primals)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert worst[name] < 1e-12, (name, worst[name])
+        # MEASURED (job 9425294 sweep): worst adjoint residual barrier1 1.776e-14 (a2d
+        # 4.456e-15, ext_vector_d 5.793e-15, all others <= 2.3e-15); bound =
+        # measured x 10 = 1.8e-13.
+        gate_scalar(f"halo adjoint {name}", worst[name], 1.8e-13,
+                    quantity="adjoint identity residual")
 
 
 # ---------------------------------------------------------------------------

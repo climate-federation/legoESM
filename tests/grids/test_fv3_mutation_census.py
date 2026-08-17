@@ -272,9 +272,10 @@ def _res(outcomes):
 
 
 def test_newly_failing_ignores_a_test_that_was_already_red():
-    """The suite currently carries known non-code failures (TOL-PENDING
-    provisional bounds). Counting one as detection is exactly the error the
-    census exists to expose."""
+    """The suite has carried known non-code failures (historically, the
+    provisional pre-measurement bounds, since closed by the job-9425294
+    sweep). Counting one as detection is exactly the error the census
+    exists to expose."""
     base = _res({"a": "pass", "b": "fail", "c": "pass"})
     mut = _res({"a": "pass", "b": "fail", "c": "fail"})
     assert mc.newly_failing(base, mut) == ["c"]

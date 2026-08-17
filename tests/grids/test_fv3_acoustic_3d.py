@@ -29,9 +29,10 @@ that is what the gates below interrogate:
   set is asserted against a manifest rather than eyeballed.
 
 TOLERANCE POLICY.  Everything here composes limiter-heavy kernels, so
-per strategy section 4 every numeric bound carries a ``TOL-PENDING``
-marker with a class label until the measurement job replaces it with
-``measured X, bound = measured x N``.
+per strategy section 4 every numeric bound is MEASURED (job 9425294,
+the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10 with its
+class label kept.  The worst figure in the file is the composed-loop
+u parity at 7.075e-13 (n_split=3).
 """
 from __future__ import annotations
 
@@ -146,10 +147,9 @@ def test_loop_parity_across_the_peel_scan_peel_structure(
     for nm in compared:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy loop {nm} (n_split={n_split})")
-        # TOL-PENDING: provisional bound; the measurement job replaces
-        # this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        # [class: branch-switching, composed over n_split sub-steps]
-        cmp_fields(state[nm], want, f"loop {nm} n_split={n_split}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst u (n_split=3) 7.075e-13 (composed sub-steps); bound = measured x 10 =
+        # 7.1e-12.
+        cmp_fields(state[nm], want, f"loop {nm} n_split={n_split}", 7.1e-12)
     if "w" in state:
         # The contract, asserted rather than compared: nothing on the
         # hydrostatic arm writes w, in EITHER lane.
@@ -240,9 +240,9 @@ def test_loop_jit_equals_eager_and_dt_stays_dynamic(jctx, jstate):
     ge = eager["state"] if isinstance(eager, dict) else eager
     gg = got["state"] if isinstance(got, dict) else got
     for nm in ("u", "v"):
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
-        # [class: FMA contraction, composed over sub-steps]
-        cmp_fields(gg[nm], ge[nm], f"loop jit-vs-eager {nm}", 1e-9)
+        # MEASURED (job 9425294 sweep): worst u 5.718e-13 (FMA over sub-steps); bound = measured x 10 =
+        # 5.8e-12.
+        cmp_fields(gg[nm], ge[nm], f"loop jit-vs-eager {nm}", 5.8e-12)
 
 
 # =====================================================================
@@ -272,10 +272,10 @@ def test_substep_parity(ctx, jctx, state_np, jstate, first_substep):
     for nm in ("delp", "pt", "u", "v"):
         want = np.stack([np.asarray(st[t][nm]) for t in range(6)])
         assert_real(want, f"numpy substep {nm}")
-        # TOL-PENDING: provisional bound; the measurement job replaces
-        # this.  DO NOT SHIP.   [class: branch-switching, one sub-step]
+        # MEASURED (job 9425294 sweep): worst u (first=True) 7.092e-14; bound = measured x 10 =
+        # 7.1e-13.
         cmp_fields(state[nm], want, f"substep {nm} first={first_substep}",
-                   1e-12)
+                   7.1e-13)
 
 
 def test_entry_exchange_parity(ctx, jctx, state_np, jstate):
@@ -295,9 +295,9 @@ def test_entry_exchange_parity(ctx, jctx, state_np, jstate):
     for nm in ("delp", "pt", "u", "v"):
         want = np.stack([np.asarray(st[t][nm]) for t in range(6)])
         assert_real(want, f"numpy entry-exchange {nm}")
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
-        # [class: exchange -- weighted stencil sums]
-        cmp_fields(got[nm], want, f"entry exchange {nm}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        cmp_fields(got[nm], want, f"entry exchange {nm}", 1e-15)
 
 
 def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
@@ -338,8 +338,9 @@ def test_substep_stage_bisect(ctx, jctx, state_np, jstate):
     j_csw = csw_phase_3d(jctx, jst, dt2, KM, nord=2)
     for nm in ("uc", "vc", "divg_d"):
         want = np.stack([np.asarray(n_csw[t][nm]) for t in range(6)])
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.  [class: stage]
-        cmp_fields(j_csw[nm], want, f"stage c_sw {nm}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        cmp_fields(j_csw[nm], want, f"stage c_sw {nm}", 1e-15)
 
     # The NumPy pressure phase's RETURN is not used: what this stage
     # contributes to the winds is its in-place mutation of n_csw's

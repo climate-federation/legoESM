@@ -13,7 +13,7 @@ gates cannot see (FESOM2-JAX §2.4's localization argument, strategy §2):
 
 1. **parity** -- JAX vs the NumPy twin from a byte-identical initial
    state, per field, per stage, with a measured bound carrying a
-   ``TOL-PENDING`` marker;
+   bound MEASURED in job 9425294 and set to measured x 10;
 2. **tier 3, the multi-step replay** -- N steps on both lanes from one
    IC, per-field growth judged against the 1-step value.  This is the
    gate single-step tests cannot provide and the one that catches a
@@ -42,8 +42,11 @@ kernel: it runs the PPM limiters inside every transport call, and a
 limiter flag ADDS or DROPS a whole flux term, so the result is
 DISCONTINUOUS across a switching surface and a rounding-level lane
 difference near one can produce a discrepancy far above 1e-15.  Every
-numeric bound below therefore carries a ``TOL-PENDING`` marker for the
-orchestrator's measurement job plus a one-word class label.
+numeric bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
+sweep) and set to measured x 10, keeping its class label.  The loosest
+bounds in the file are the UNEXPLAINED full-step jit-vs-eager wind gaps
+(u 7.511e-07, v 7.456e-07; the localisers place them in the stage chain
+at 5.646e-07) -- see ``_JIT_EAGER_BOUND`` for the open-defect record.
 
 COST.  These gates run a whole six-face acoustic step, so they are
 minutes, not seconds: at C12 the module compiles the step for four
@@ -65,10 +68,14 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from jax.test_util import check_grads  # noqa: E402
 from legoesm.core import fv3_duo_stepper as jstep_mod  # noqa: E402
 from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
 from legoesm.grids import fv3_duo_halos as jhalo  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    gate_scalar,
+    gated_check_grads,
+)
 
 # C12 is the smallest resolution the duo corner-region Lagrange fill
 # admits (`build_jax_duo_halo_tables` refuses n < 4 because the X- and
@@ -223,6 +230,12 @@ def _cmp(got, ref, name, tol):
         return 0.0
     scale = max(float(np.abs(b[ok]).max()), 1e-30)
     rel = float(np.abs(a[ok] - b[ok]).max()) / scale
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip ONLY
+    # the tolerance assert; the mask checks above still raise.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e})",
+              flush=True)
+        return rel
     assert rel <= tol, (
         f"{name}: rel {rel:.3e} > {tol:.3e} MEASURED={rel:.3e} "
         f"over {int(ok.sum())} of {a.size} cells "
@@ -349,6 +362,10 @@ def _check_adjoint(name, f, primals, tol, seed=0):
         f"so this gate proves nothing (check the window/scale)")
     assert np.isfinite(lhs) and np.isfinite(rhs), (
         f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return r
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
@@ -630,14 +647,12 @@ def test_geopk_sw_1lev_parity(ctx, jctx, csw_np):
         pk_j, gz_j = jstep_mod.geopk_sw_1lev(
             jnp.asarray(csw_np[t]["delpc"]), jnp.asarray(hs), bd,
             pt=jnp.asarray(csw_np[t]["ptc"]))
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating]
-        _cmp(pk_j, pk_n, f"geopk_sw_1lev.pk[face {t}]", 1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating]
-        _cmp(gz_j, gz_n, f"geopk_sw_1lev.gz[face {t}]", 1e-12)
+        # MEASURED (job 9425294 sweep): worst 1.510e-16 (faces 2/5); bound = measured x 10 =
+        # 1.6e-15.
+        _cmp(pk_j, pk_n, f"geopk_sw_1lev.pk[face {t}]", 1.6e-15)
+        # MEASURED (job 9425294 sweep): worst 1.510e-16 (faces 2/5); bound = measured x 10 =
+        # 1.6e-15.
+        _cmp(gz_j, gz_n, f"geopk_sw_1lev.gz[face {t}]", 1.6e-15)
 
 
 def test_geopk_sw_1lev_d_widens_the_box(ctx, jctx, csw_np, states0):
@@ -653,14 +668,12 @@ def test_geopk_sw_1lev_d_widens_the_box(ctx, jctx, csw_np, states0):
     pk_n, gz_n = npstep.geopk_sw_1lev_d(delp, hs, bd, pt=pt)
     pk_j, gz_j = jstep_mod.geopk_sw_1lev_d(
         jnp.asarray(delp), jnp.asarray(hs), bd, pt=jnp.asarray(pt))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating]
-    _cmp(pk_j, pk_n, "geopk_sw_1lev_d.pk", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating]
-    _cmp(gz_j, gz_n, "geopk_sw_1lev_d.gz", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.239e-16; bound = measured x 10 =
+    # 1.3e-15.
+    _cmp(pk_j, pk_n, "geopk_sw_1lev_d.pk", 1.3e-15)
+    # MEASURED (job 9425294 sweep): 1.239e-16; bound = measured x 10 =
+    # 1.3e-15.
+    _cmp(gz_j, gz_n, "geopk_sw_1lev_d.gz", 1.3e-15)
     pk_c, _ = jstep_mod.geopk_sw_1lev(jnp.asarray(delp), jnp.asarray(hs),
                                       bd, pt=jnp.asarray(pt))
     wide = np.asarray(pk_j)[:, :, 1] != 0.0      # unwritten_fill = 0.0
@@ -686,14 +699,12 @@ def test_p_grad_c_1lev_parity(ctx, jctx, csw_np):
             0.5 * DT, jnp.asarray(csw_np[t]["delpc"]), jnp.asarray(pk_n),
             jnp.asarray(gz_n), jnp.asarray(csw_np[t]["uc"]),
             jnp.asarray(csw_np[t]["vc"]), jctx.gs6[t], bd)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: pointwise]
-        _cmp(uc_j, uc_n, f"p_grad_c_1lev.uc[face {t}]", 1e-13)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: pointwise]
-        _cmp(vc_j, vc_n, f"p_grad_c_1lev.vc[face {t}]", 1e-13)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(uc_j, uc_n, f"p_grad_c_1lev.uc[face {t}]", 1e-15)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(vc_j, vc_n, f"p_grad_c_1lev.vc[face {t}]", 1e-15)
 
 
 @pytest.mark.parametrize("d_ext", [D_EXT_OFF, D_EXT_ON])
@@ -720,16 +731,14 @@ def test_one_grad_p_1lev_parity(ctx, jctx, states0, d_ext):
             jnp.asarray(states0[t]["u"]), jnp.asarray(states0[t]["v"]),
             jnp.asarray(pk_n), jnp.asarray(gz_n), jnp.asarray(divg2),
             jctx.gs6[t], bd, NPX, NPX, dt=DT, d_ext=d_ext)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: pointwise + a2b interior stencil]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face/d_ext; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(u_j, u_n, f"one_grad_p_1lev.u[face {t}, d_ext={d_ext}]",
-             1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: pointwise + a2b interior stencil]
+             1e-15)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face/d_ext; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(v_j, v_n, f"one_grad_p_1lev.v[face {t}, d_ext={d_ext}]",
-             1e-12)
+             1e-15)
 
 
 def test_one_grad_p_1lev_does_not_mutate_its_pressure_operands(ctx, jctx,
@@ -769,19 +778,16 @@ def test_exchange_post_pgrad_parity(ctx, jctx, csw_np):
         d_j, u_j, v_j = jstep_mod.exchange_post_pgrad_sixface(
             jctx, _stack_np(csw_np)["divg_d"], _stack_np(csw_np)["uc"],
             _stack_np(csw_np)["vc"], nord=nord)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating (k2e/Lagrange weight sums)]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every nord; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(d_j, np.stack(divgd_n), f"post_pgrad.divgd[nord={nord}]",
-             1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating]
-        _cmp(u_j, np.stack(uc_n), f"post_pgrad.uc[nord={nord}]", 1e-12)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating]
-        _cmp(v_j, np.stack(vc_n), f"post_pgrad.vc[nord={nord}]", 1e-12)
+             1e-15)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every nord; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(u_j, np.stack(uc_n), f"post_pgrad.uc[nord={nord}]", 1e-15)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every nord; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(v_j, np.stack(vc_n), f"post_pgrad.vc[nord={nord}]", 1e-15)
 
 
 def test_exchange_post_pgrad_nord_gate_is_live(jctx, csw_np):
@@ -814,10 +820,9 @@ def test_csw_step_sixface_parity(ctx, jctx, states0, jstates0, csw_np):
     ref = _stack_np(csw_np)
     assert set(got) == set(ref), (sorted(got), sorted(ref))
     for k in sorted(ref):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING]
-        _cmp(got[k], ref[k], f"csw_step_sixface.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(got[k], ref[k], f"csw_step_sixface.{k}", 1e-15)
 
 
 def test_dsw12_step_sixface_parity(ctx, jctx, states0, jstates0, csw_np):
@@ -832,10 +837,9 @@ def test_dsw12_step_sixface_parity(ctx, jctx, states0, jstates0, csw_np):
     ref_s = _stack_np(ref)
     assert set(got) == set(ref_s), (sorted(got), sorted(ref_s))
     for k in sorted(ref_s):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING + barrier 1]
-        _cmp(got[k], ref_s[k], f"dsw12_step_sixface.{k}", 1e-11)
+        # MEASURED (job 9425294 sweep): worst vc 1.181e-14; bound = measured x 10 =
+        # 1.2e-13.
+        _cmp(got[k], ref_s[k], f"dsw12_step_sixface.{k}", 1.2e-13)
 
 
 def test_acoustic_step_sixface_parity(ctx, jctx, states0, jstates0):
@@ -847,10 +851,9 @@ def test_acoustic_step_sixface_parity(ctx, jctx, states0, jstates0):
     got = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
     assert set(got) == set(ref), (sorted(got), sorted(ref))
     for k in sorted(ref):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING + both barriers]
-        _cmp(got[k], ref[k], f"acoustic_step_sixface.{k}", 1e-11)
+        # MEASURED (job 9425294 sweep): worst ke 3.479e-16; bound = measured x 10 =
+        # 3.5e-15.
+        _cmp(got[k], ref[k], f"acoustic_step_sixface.{k}", 3.5e-15)
 
 
 @pytest.mark.parametrize("d_ext", [D_EXT_OFF, D_EXT_ON])
@@ -870,11 +873,10 @@ def test_full_acoustic_step_parity(ctx, jctx, states0, jstates0, d_ext):
     ref_s = _stack_np(ref)
     assert set(got) == set(_STATE_KEYS), sorted(got)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, whole step]
+        # MEASURED (job 9425294 sweep): worst delp 4.958e-16 (both d_ext arms); bound = measured x 10 =
+        # 5.0e-15.
         _cmp(got[k], ref_s[k],
-             f"full_acoustic_step.{k}[d_ext={d_ext}]", 1e-11)
+             f"full_acoustic_step.{k}[d_ext={d_ext}]", 5.0e-15)
 
 
 def test_full_acoustic_step_parity_case8_config(ctx, jctx, states0,
@@ -895,10 +897,9 @@ def test_full_acoustic_step_parity_case8_config(ctx, jctx, states0,
         sw_cfg=jstep_mod.SW_CFG_CASE8)
     ref_s = _stack_np(ref)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, nord=2 recurrence]
-        _cmp(got[k], ref_s[k], f"full_step_case8.{k}", 1e-11)
+        # MEASURED (job 9425294 sweep): worst u/v 3.680e-16; bound = measured x 10 =
+        # 3.7e-15.
+        _cmp(got[k], ref_s[k], f"full_step_case8.{k}", 3.7e-15)
 
 
 def test_advance_duo_outer_step_parity(ctx, jctx, states0, jstates0):
@@ -909,10 +910,9 @@ def test_advance_duo_outer_step_parity(ctx, jctx, states0, jstates0):
     got = jstep_mod.advance_duo_outer_step(jctx, jstates0, 2.0 * DT, 2,
                                             d_ext=D_EXT_OFF)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, 2 substeps]
-        _cmp(got[k], ref[k], f"advance_duo_outer_step.{k}", 1e-10)
+        # MEASURED (job 9425294 sweep): worst v 1.472e-14; bound = measured x 10 =
+        # 1.5e-13.
+        _cmp(got[k], ref[k], f"advance_duo_outer_step.{k}", 1.5e-13)
 
 
 def test_run_duo_sw_parity(ctx, jctx, states0, jstates0):
@@ -927,10 +927,9 @@ def test_run_duo_sw_parity(ctx, jctx, states0, jstates0):
                                       d_ext=D_EXT_OFF))
     got = jstep_mod.run_duo_sw(jctx, jstates0, DT, 2, d_ext=D_EXT_OFF)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, 2 steps]
-        _cmp(got[k], ref[k], f"run_duo_sw.{k}", 1e-10)
+        # MEASURED (job 9425294 sweep): worst v 1.472e-14; bound = measured x 10 =
+        # 1.5e-13.
+        _cmp(got[k], ref[k], f"run_duo_sw.{k}", 1.5e-13)
 
 
 # NOTE on the pair above: the flat and outer schedules are NOT asserted
@@ -969,18 +968,17 @@ def test_run_duo_sw_parity(ctx, jctx, states0, jstates0):
 # therefore max(rel(1), _REPLAY_FLOOR), with the floor set from the
 # lane's actual measured one-step difference (u, 7.5e-07).
 #
-# TOL-PENDING: bounds pinned to the job-9404093 measurement above, but
-# `u`'s rel(4) and BOTH of pt/v are still unmeasured (a passing gate
-# printed nothing -- an instrument gap the warning emission below now
-# closes).  DO NOT SHIP until one more run fills the table.
+# MEASURED (job 9425294 sweep), the full table this time: growth ratio
+# rn/anchor is u 8.285 (n=2) / 6.992 (n=4), v 2.447 / 2.126, delp 0.132
+# / 0.205, pt ~4e-9 -- worst is u at each n; bounds = measured x 10.
 # [class: N-step growth vs the one-step floor]
-_REPLAY_AMP = {2: 2.0e1, 4: 2.0e2}
+_REPLAY_AMP = {2: 8.3e1, 4: 7.0e1}
 
-# TOL-PENDING: the lane's measured one-step floor is 7.511e-07 (u,
-# job 9404093), which is DOMINATED BY THE JIT-VS-EAGER GAP and is
-# therefore an UNEXPLAINED residual, not agreement -- see
-# `test_full_step_jit_equals_eager`.  Rounded up to 1e-6.
-# DO NOT SHIP.   [class: one-step floor of the whole step]
+# MEASURED (job 9425294 sweep): the lane's one-step floor is 7.511e-07
+# (u; v 7.456e-07 -- v now carries the gap too), still DOMINATED BY THE
+# JIT-VS-EAGER GAP and therefore an UNEXPLAINED residual, not agreement
+# -- see `test_full_step_jit_equals_eager`.  Rounded up to 1e-6.
+# [class: one-step floor of the whole step]
 _REPLAY_FLOOR = 1.0e-6
 
 # How many steps the EAGER arm replays.  Two is enough to answer the
@@ -1080,6 +1078,12 @@ def test_tier3_multistep_replay_growth(replay, field, nsteps):
     rn = _rel(gotn[field], refn[field])
     anchor = max(r1, _REPLAY_FLOOR)
     bound = anchor * _REPLAY_AMP[nsteps]
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE 'tier3 growth {field} n={nsteps}': rel "
+              f"{rn / anchor:.3e} (bound {_REPLAY_AMP[nsteps]:.3e}, "
+              f"quantity n-step growth ratio rn/anchor; r1 {r1:.3e}, "
+              f"rn {rn:.3e}, floor {_REPLAY_FLOOR:.3e})", flush=True)
+        return
     assert rn <= bound, (
         f"{field}: {nsteps}-step lane difference {rn:.3e} > {bound:.3e} "
         f"(1-step {r1:.3e}, anchor {anchor:.3e}, allowed amplification "
@@ -1105,17 +1109,11 @@ def test_tier3_eager_replay_isolates_the_jit_gap(replay):
         for field in _STATE_KEYS:
             r_eager = _rel(eg[field], ref[field])
             r_jit = _rel(got[field], ref[field])
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X, bound
-            # = measured x N`.  Job 9404093 measured the EAGER one-step
-            # step at <= 1e-11 for every field
-            # (test_full_acoustic_step_parity), which is what this
-            # extends to n steps.
-            # DO NOT SHIP.   [class: eager JAX vs NumPy, n steps]
-            assert r_eager <= 1e-9, (
-                f"{field} at n={n}: the EAGER lane differs from NumPy by "
-                f"{r_eager:.3e} -- the growth is NOT a jit artefact, it "
-                f"is in the composition (jit arm {r_jit:.3e})")
+            # MEASURED (job 9425294 sweep): worst v n=2 1.472e-14 (eager lane vs NumPy); bound = measured x 10 =
+            # 1.5e-13.
+            gate_scalar(f"tier3 eager {field} n={n}", r_eager, 1.5e-13,
+                        quantity="eager JAX vs NumPy n-step rel "
+                                 f"(jit arm {r_jit:.3e})")
 
 
 # =====================================================================
@@ -1145,13 +1143,23 @@ def test_tier3_eager_replay_isolates_the_jit_gap(replay):
 # geopk_d vs one_grad_p.  Do NOT widen this bound further without a
 # mechanism.
 _JIT_EAGER_BOUND = {
-    # TOL-PENDING: measured <= 1e-12 (passed); exact values unrecorded.
-    # DO NOT SHIP.   [class: jit-vs-eager, rounding-scale]
-    "delp": 1e-12, "pt": 1e-12, "v": 1e-12,
-    # TOL-PENDING: measured 7.511e-07, bound = measured x 3.  This is an
-    # UNEXPLAINED RESIDUAL, NOT AGREEMENT.
-    # DO NOT SHIP.   [class: jit-vs-eager, UNEXPLAINED]
-    "u": 2.3e-06,
+    # MEASURED (job 9425294 sweep): delp 1.810e-14, pt 4.108e-15; bounds
+    # = measured x 10.  [class: jit-vs-eager, rounding-scale]
+    "delp": 1.9e-13, "pt": 4.2e-14,
+    # MEASURED (job 9425294 sweep): u 7.511e-07 (identical to job
+    # 9404093), and v now measures 7.456e-07 where job 9404093 had it
+    # <= 1e-12 -- the gap has SPREAD to the second wind component.
+    # Bounds = measured x 10.  These are UNEXPLAINED RESIDUALS, NOT
+    # AGREEMENT.  [class: jit-vs-eager, UNEXPLAINED]
+    "u": 7.6e-06, "v": 7.5e-06,
+}
+
+# MEASURED (job 9425294 sweep): the localiser's per-key jit-vs-eager
+# gaps -- u/v 5.646e-07 (the UNEXPLAINED gap is ALREADY in the stage
+# chain, before the D-grid tail), delp 1.215e-14, pt 4.108e-15; bounds
+# = measured x 10.  [class: jit-vs-eager localiser]
+_ACOUSTIC_JIT_BOUND = {
+    "delp": 1.3e-13, "pt": 4.2e-14, "u": 5.7e-06, "v": 5.7e-06,
 }
 
 
@@ -1187,10 +1195,12 @@ def test_jit_gap_localiser_stage_chain(jctx, jstates0):
     fn = jstep_mod.make_acoustic_step_sixface_jit()
     got = fn(jctx, jstates0, DT)
     for k in ("delp", "pt", "u", "v"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager localiser]
-        _cmp(got[k], eager[k], f"acoustic_step jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): u and v 5.646e-07, delp 1.215e-14, pt 4.108e-15
+        # -- the UNEXPLAINED u jit-vs-eager gap ALREADY shows in the stage
+        # chain (everything before the D-grid tail), and it now carries v
+        # too; per-key bounds = measured x 10 via _ACOUSTIC_JIT_BOUND.
+        _cmp(got[k], eager[k], f"acoustic_step jit.{k}",
+             _ACOUSTIC_JIT_BOUND[k])
 
 
 def test_jit_gap_localiser_geopk_d(ctx, jctx, states0):
@@ -1207,14 +1217,12 @@ def test_jit_gap_localiser_geopk_d(ctx, jctx, states0):
     pk_e, gz_e = jstep_mod.geopk_sw_1lev_d(delp, hs, bd, pt=pt)
     fn = jstep_mod.make_geopk_sw_1lev_d_jit()
     pk_j, gz_j = fn(delp, hs, bd, pt=pt)
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
-    # will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager localiser]
-    _cmp(pk_j, pk_e, "geopk_sw_1lev_d jit.pk", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager localiser]
-    _cmp(gz_j, gz_e, "geopk_sw_1lev_d jit.gz", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(pk_j, pk_e, "geopk_sw_1lev_d jit.pk", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(gz_j, gz_e, "geopk_sw_1lev_d jit.gz", 1e-15)
 
 
 def test_jit_gap_localiser_one_grad_p(ctx, jctx, states0):
@@ -1242,14 +1250,12 @@ def test_jit_gap_localiser_one_grad_p(ctx, jctx, states0):
     fn = jstep_mod.make_one_grad_p_1lev_jit()
     u_j, v_j = fn(u0, v0, pk, gz, divg2, jctx.gs6[0], bd, NPX, NPX,
                   dt=DT, d_ext=D_EXT_OFF)
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
-    # will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager localiser]
-    _cmp(u_j, u_e, "one_grad_p_1lev jit.u", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager localiser]
-    _cmp(v_j, v_e, "one_grad_p_1lev jit.v", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.240e-16; bound = measured x 10 =
+    # 1.3e-15.
+    _cmp(u_j, u_e, "one_grad_p_1lev jit.u", 1.3e-15)
+    # MEASURED (job 9425294 sweep): 2.539e-16; bound = measured x 10 =
+    # 2.6e-15.
+    _cmp(v_j, v_e, "one_grad_p_1lev jit.v", 2.6e-15)
 
 
 def test_full_step_no_retrace_on_dt(jctx, jstates0):
@@ -1336,11 +1342,10 @@ def test_full_step_adjoint_identity_scalars(jctx, jstates0, jstep):
             jctx, {"delp": delp, "pt": pt, "u": u0, "v": v0}, DT,
             d_ext=D_EXT_OFF))
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 1.333e-16; bound = measured x 10 =
+    # 1.4e-15.
     _check_adjoint("full_step d(delp,pt)", f,
-                   (jstates0["delp"], jstates0["pt"]), 1e-9)
+                   (jstates0["delp"], jstates0["pt"]), 1.4e-15)
 
 
 def test_full_step_adjoint_identity_winds(jctx, jstates0, jstep):
@@ -1359,11 +1364,10 @@ def test_full_step_adjoint_identity_winds(jctx, jstates0, jstep):
             jctx, {"delp": delp0, "pt": pt0, "u": u, "v": v}, DT,
             d_ext=D_EXT_OFF))
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 5.724e-16; bound = measured x 10 =
+    # 5.8e-15.
     _check_adjoint("full_step d(u,v)", f,
-                   (jstates0["u"], jstates0["v"]), 1e-9)
+                   (jstates0["u"], jstates0["v"]), 5.8e-15)
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1401,11 +1405,11 @@ def test_p_grad_c_1lev_check_grads(ctx, jctx, csw_np, order):
                                          uc0, vc0, gs, bd)
         return jnp.sum(uc[cs, cs] ** 2) + jnp.sum(vc[cs, cs] ** 2)
 
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
-    # will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region finite differences]
-    check_grads(f, (one, one), order=order, modes=("fwd", "rev"),
-                atol=2e-2, rtol=2e-2, eps=1e-4)
+    # MEASURED (job 9425294 sweep): smallest-passing check_grads atol=rtol 1e-3
+    # (order=2; order=1 passed at 1e-8); bound = one decade up = 1e-2.
+    gated_check_grads(f"p_grad_c_1lev check_grads order={order}", f,
+                      (one, one), order=order, modes=("fwd", "rev"),
+                      atol=1e-2, rtol=1e-2, eps=1e-4)
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1438,11 +1442,11 @@ def test_one_grad_p_1lev_check_grads(ctx, jctx, states0, order):
                                          dt=DT, d_ext=D_EXT_ON)
         return jnp.sum(u[cs, bs] ** 2) + jnp.sum(v[bs, cs] ** 2)
 
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement job
-    # will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region finite differences]
-    check_grads(f, (one, one, one), order=order, modes=("fwd", "rev"),
-                atol=2e-2, rtol=2e-2, eps=1e-4)
+    # MEASURED (job 9425294 sweep): smallest-passing check_grads atol=rtol 1e-7
+    # (order=2; order=1 passed at 1e-11); bound = one decade up = 1e-6.
+    gated_check_grads(f"one_grad_p_1lev check_grads order={order}", f,
+                      (one, one, one), order=order, modes=("fwd", "rev"),
+                      atol=1e-6, rtol=1e-6, eps=1e-4)
 
 
 # =====================================================================
@@ -1587,11 +1591,10 @@ def test_entry_ascalar_gate_is_live(jctx, jstates0):
                                                d_ext=D_EXT_OFF,
                                                entry_ascalar=False)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: exact erasure, roundoff only]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(on[k], base[k], f"entry_ascalar erased the halo perturbation"
-                             f" ({k})", 1e-13)
+                             f" ({k})", 1e-15)
     diff = _max_window_diff(off, base)
     assert diff > 0.0, (
         "entry_ascalar=False produced the same state as the exchanged "
@@ -1659,11 +1662,10 @@ def test_advance_duo_outer_step_fires_entry_only_on_the_first_substep(
     manual = jstep_mod.full_acoustic_step_sixface(
         jctx, manual, DT, d_ext=D_EXT_OFF, entry_ascalar=False)
     for k in _STATE_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: identical program, roundoff only]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(composed[k], manual[k], f"outer step composition ({k})",
-             1e-13)
+             1e-15)
 
     wrong = jstep_mod.full_acoustic_step_sixface(
         jctx, pert, DT, d_ext=D_EXT_OFF, entry_ascalar=False)

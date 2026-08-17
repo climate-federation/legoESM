@@ -42,9 +42,11 @@ rather than a sixth private copy.
 TOLERANCE POLICY.  ``d_sw5``/``d_sw6`` run limiter pipelines and del-n
 damping, the pressure chains run ``a2b_ord4`` and a vertical recurrence:
 per strategy section 4 that spans the accumulating and branch-switching
-classes, so every numeric bound carries a ``TOL-PENDING`` marker with a
-class label until the measurement job replaces it with
-``measured X, bound = measured x N``.
+classes; every numeric bound is MEASURED (job 9425294, the
+LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10 with its class
+label kept.  Lane parity is bitwise on the tail and composed gates; the
+worst nonzero figures are the pressure chain at 1.641e-15 (gz) and the
+adjoint identities at ~1.5e-15.
 
 COST.  Six faces x three levels of d_sw3/4/5/6 per call plus the
 pressure chains and the jvp/vjp programs: minutes, not seconds.
@@ -364,10 +366,9 @@ def test_tail_unit_parity_hydrostatic_on_identical_inputs(
     for nm in _TAIL_COMPARED:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy tail {nm}")
-        # TOL-PENDING: provisional bound; the measurement job replaces
-        # this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        # [class: branch-switching -- d_sw5/d_sw6 limiters]
-        cmp_fields(got[nm], want, f"tail {nm}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        cmp_fields(got[nm], want, f"tail {nm}", 1e-15)
 
 
 def test_tail_parity_hydrostatic(ctx, jctx, state_np, csw_np, dsw_np,
@@ -381,9 +382,9 @@ def test_tail_parity_hydrostatic(ctx, jctx, state_np, csw_np, dsw_np,
     for nm in _TAIL_COMPARED:
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy tail {nm}")
-        # TOL-PENDING: provisional bound.  DO NOT SHIP.
-        # [class: branch-switching, composed with the transport phase]
-        cmp_fields(got[nm], want, f"tail composed {nm}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        cmp_fields(got[nm], want, f"tail composed {nm}", 1e-15)
 
 
 def test_tail_does_not_mutate_its_inputs(jctx, jstate, jcsw, jdsw):
@@ -520,9 +521,9 @@ def test_ke_is_the_mixed_assembly_and_not_either_uniform_one(
             f"fixture, so this gate cannot tell them apart -- the fixture "
             f"is at fault, not the module")
 
-    # TOL-PENDING: provisional bound; the measurement job replaces it.
-    # DO NOT SHIP.   [class: exact -- this is one multiply and one add]
-    cmp_fields(ke, mixed, "ke_corner (mixed assembly)", 1e-13)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    cmp_fields(ke, mixed, "ke_corner (mixed assembly)", 1e-15)
     for nm, cand in (("all-raw", all_raw), ("all-blended", all_blended)):
         assert not np.allclose(np.asarray(ke), cand), (
             f"the returned ke equals the {nm} assembly -- barrier 2 sits "
@@ -556,9 +557,9 @@ def test_dgrid_pressure_parity(ctx, jctx, state_np, csw_np, dsw_np,
     for nm in ("pk", "gz", "pe", "peln", "pkz"):
         want = np.stack([np.asarray(ref[t][nm]) for t in range(6)])
         assert_real(want, f"numpy press {nm}")
-        # TOL-PENDING: provisional bound; the measurement job replaces
-        # this.  DO NOT SHIP.   [class: accumulating -- geopk recurrence]
-        cmp_fields(got[nm], want, f"press {nm}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst gz 1.641e-15; bound = measured x 10 =
+        # 1.7e-14.
+        cmp_fields(got[nm], want, f"press {nm}", 1.7e-14)
 
 
 def test_pk_remap_is_the_pre_one_grad_p_snapshot(jctx, jstate, jcsw,
@@ -711,9 +712,9 @@ def test_tail_jit_equals_eager_and_does_not_retrace(jctx, jstate, jcsw,
         f"new time step recompiles the whole phase")
     assert got2 is not None
     for nm in ("u", "v"):
-        # TOL-PENDING: provisional bound; the measurement job replaces
-        # this.  DO NOT SHIP.   [class: FMA contraction]
-        cmp_fields(got[nm], eager[nm], f"jit-vs-eager {nm}", 1e-9)
+        # MEASURED (job 9425294 sweep): worst u 4.021e-16 (FMA); bound = measured x 10 =
+        # 4.1e-15.
+        cmp_fields(got[nm], eager[nm], f"jit-vs-eager {nm}", 4.1e-15)
 
 
 # =====================================================================
@@ -731,9 +732,9 @@ def test_tail_adjoint_identity_wind_group(jctx, jstate, jcsw, jdsw):
         return (jnp.sum(out["u"][:, _CS, _CS, :] ** 2)
                 + jnp.sum(out["v"][:, _CS, _CS, :] ** 2))
 
-    # TOL-PENDING: provisional bound; the measurement job replaces this.
-    # DO NOT SHIP.   [class: roundoff -- the identity is exact]
-    check_adjoint("tail u/v", f, (jstate["u"], jstate["v"]), 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.542e-15; bound = measured x 10 =
+    # 1.6e-14.
+    check_adjoint("tail u/v", f, (jstate["u"], jstate["v"]), 1.6e-14)
     # NO FINITE DIFFERENCE ON THE PRODUCTION DECK, and that is measured
     # rather than conceded.  `check_grads` gave 6.6 % on this group (job
     # 9417462); the eps-SCALING ladder then gave gaps of 1.271e+12,
@@ -815,9 +816,9 @@ def test_pressure_adjoint_identity_delp_group(jctx, jstate, jcsw, jdsw):
             cp_air=CP_AIR)
         return jnp.sum(press["gz"][:, _CS, _CS, :] ** 2)
 
-    # TOL-PENDING: provisional bound; the measurement job replaces this.
-    # DO NOT SHIP.   [class: roundoff -- the identity is exact]
-    check_adjoint("press delp", f, (jdsw["delp"],), 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.446e-15; bound = measured x 10 =
+    # 1.5e-14.
+    check_adjoint("press delp", f, (jdsw["delp"],), 1.5e-14)
     # The same independent instrument, and the same measured verdict as
     # the wind group: the ladder's precondition REFUSED this one too
     # (job 9417483) -- gaps 1.025e+04, 2.804e+04, 3.898e+04 at
@@ -948,8 +949,9 @@ def test_nh_exchanged_area_is_sentinel_free_and_matches_the_spec(
     # The point of the routine: no sentinel survives.
     assert not np.isclose(np.abs(a), 1.0e8, rtol=1e-12).any(), (
         "a BIG_NUMBER sentinel survived the exchange")
-    # TOL-PENDING: provisional bound.  DO NOT SHIP.  [class: exchange]
-    cmp_fields(a, want, "nh area", 1e-13)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    cmp_fields(a, want, "nh area", 1e-15)
 
 
 @pytest.mark.parametrize("remap_step,use_logp,square_domain", [

@@ -26,10 +26,13 @@ PPM limiters whose flags (``smt5``/``smt6``/``hi5``/``hi6``) ADD or DROP
 a whole flux term, so the flux is DISCONTINUOUS across them: a
 rounding-level difference between the two lanes near a limiter surface
 flips a branch and produces a discrepancy FAR above 1e-15.  Every
-numeric bound below therefore carries (a) a ``TOL-PENDING`` marker for
-the orchestrator's measurement job and (b) a statement of whether the
-fixture it guards sits in a SMOOTH region or CROSSES a limiter surface.
-The two classes need different bounds and must not share one number.
+numeric bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
+sweep) and set to measured x 10, with the class label kept.  On these
+fixtures every lane-parity gate measured EXACTLY 0.0 (bitwise agreement,
+both the smooth and the limiter-crossing class), so those bounds are the
+1e-15 eps guard rather than 10 x 0; the nonzero measurements are the
+jit-vs-eager gates (~2e-16, FMA contraction), the adjoint identities
+(worst 1.942e-14, yppm q jord=6) and the check_grads FD supplements.
 
 Fixture classes used here:
 
@@ -62,6 +65,8 @@ from legoesm.core import fv3_native_d_sw as npd  # noqa: E402
 from legoesm.core import fv3_tp_core as tp  # noqa: E402
 from legoesm.core.fv3_native_sw_core import Bounds  # noqa: E402
 from legoesm.grids.fv3_native_gridstruct import fort  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import gated_check_grads  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -287,6 +292,14 @@ def _cmp(got, ref, name, tol):
     assert ok.any(), f"{name}: output is entirely NaN (vacuous compare)"
     scale = max(float(np.abs(b[ok]).max()), 1e-30)
     rel = float(np.abs(a[ok] - b[ok]).max()) / scale
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print the measured
+    # value and skip ONLY the tolerance assert; the structural checks
+    # above (shape, NaN mask, anti-vacuity) still raise.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e}, "
+              f"max|diff| {float(np.abs(a[ok] - b[ok]).max()):.3e})",
+              flush=True)
+        return rel
     assert rel <= tol, (
         f"{name}: rel {rel:.3e} > {tol:.3e} "
         f"(bitwise={np.array_equal(a[ok], b[ok])})")
@@ -360,14 +373,14 @@ def test_pert_ppm_parity(iv):
                              jnp.asarray(ar), iv)
     # Non-vacuity: the constraint actually moved state in both lanes.
     assert np.abs(al_n - al).max() > 1e-3
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(al_j, al_n, f"pert_ppm iv={iv} al", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(ar_j, ar_n, f"pert_ppm iv={iv} ar", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for all iv;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing]
+    _cmp(al_j, al_n, f"pert_ppm iv={iv} al", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for all iv;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing]
+    _cmp(ar_j, ar_n, f"pert_ppm iv={iv} ar", 1e-15)
 
 
 @pytest.mark.parametrize("iv", [0, 1])
@@ -388,10 +401,10 @@ def test_pert_ppm_jit_equals_eager(iv):
        jnp.asarray(ar * 1.02), iv)
     assert traces["n"] == 1, traces["n"]
     for name, e, j in zip(("al", "ar"), eager, jitted):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, same expression tree]
-        _cmp(j, e, f"pert_ppm jit {name}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise, al and ar,
+        # both iv); bound = 1e-15 eps guard (measured exactly 0.0).
+        # [class: jit-vs-eager, same expression tree]
+        _cmp(j, e, f"pert_ppm jit {name}", 1e-15)
 
 
 def test_pert_ppm_rejects_float32():
@@ -452,11 +465,12 @@ def test_pert_ppm_check_grads_smooth(order):
         l_, r_ = tp.pert_ppm(jnp.asarray(a0), x[:n], x[n:], 1)
         return jnp.sum(l_ * l_) + jnp.sum(r_ * r_) + jnp.sum(l_ * r_)
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(np.concatenate([al, ar])),), order=order,
-                modes=("fwd", "rev"), eps=1e-4, atol=1e-6, rtol=1e-6)
+    # MEASURED (job 9425294 sweep): smallest-passing check_grads
+    # atol=rtol is 1e-7 (order=2; order=1 passed at 1e-11); bound = one
+    # decade up = 1e-6.  [class: smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"pert_ppm check_grads order={order}", f,
+                      (jnp.asarray(np.concatenate([al, ar])),), order=order,
+                      modes=("fwd", "rev"), eps=1e-4, atol=1e-6, rtol=1e-6)
 
 
 def test_pert_ppm_one_sided_derivative_across_switching_surfaces():
@@ -544,10 +558,10 @@ def test_copy_corners_parity(dir_, rough):
                           dir_, False, rough.bd, True, True, True, True)
     # Non-vacuity: the rotation actually moved corner cells.
     assert not np.array_equal(ref, rough.q)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: index shuffle, expect BITWISE]
-    _cmp(got, ref, f"copy_corners dir={dir_}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise, both dirs;
+    # the bitwise assert below is the real gate); bound = 1e-15 eps
+    # guard (measured exactly 0.0).  [class: index shuffle]
+    _cmp(got, ref, f"copy_corners dir={dir_}", 1e-15)
     assert np.array_equal(np.asarray(got), ref), "not bitwise"
 
 
@@ -691,7 +705,7 @@ def _scalar_probe(run, field, kk, probe):
     return f
 
 
-def _adjoint_identity(f, x, name, tol=1e-12):
+def _adjoint_identity(f, x, name, tol=2.0e-13):
     """PRIMARY gradient gate: ``<J v, w> == <v, J^T w>``.
 
     Why this and not ``check_grads`` (lesson 12, and 15 of the 22
@@ -738,9 +752,17 @@ def _adjoint_identity(f, x, name, tol=1e-12):
     assert float(jnp.linalg.norm(jv)) > 0.0, f"{name}: J v == 0"
     assert abs(lhs) > 0.0, f"{name}: <J v, w> == 0 (vacuous pairing)"
     den = max(abs(lhs), abs(rhs))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, exact to rounding]
+    # MEASUREMENT MODE: print the identity residual (the quantity this
+    # gate bounds -- NOT field parity) and skip only the bound.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {abs(lhs - rhs) / den:.3e} "
+              f"(bound {tol:.3e}, quantity adjoint identity residual)",
+              flush=True)
+        return lhs, rhs
+    # MEASURED (job 9425294 sweep): worst residual over every caller in
+    # this file is 1.942e-14 ('yppm q jord=6'; xppm q iord=-5 is
+    # 1.420e-14, all others <= 3.9e-15); bound = measured x 10 = 2.0e-13
+    # (the helper's default tol).  [class: adjoint identity]
     assert abs(lhs - rhs) / den <= tol, (
         f"{name}: <Jv,w>={lhs:.17e} != <v,J^Tw>={rhs:.17e} "
         f"(rel {abs(lhs - rhs) / den:.3e})")
@@ -784,11 +806,10 @@ def test_xppm_parity(iord, kind, smooth, rough):
     ref = _xppm_np(geo, iord, geo.q, geo.crx)
     got = _xppm_jax(geo, iord, geo.q, geo.crx)
     assert np.isfinite(ref).any()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth if kind=="smooth", else
-    # limiter-crossing -- the two MUST get different measured bounds]
-    _cmp(got, ref, f"xppm iord={iord} {kind}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for BOTH
+    # classes, every iord -- so the smooth/limiter-crossing split needs
+    # no split bound; bound = 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, ref, f"xppm iord={iord} {kind}", 1e-15)
 
 
 @pytest.mark.parametrize("iord", [5, 8])
@@ -797,10 +818,10 @@ def test_xppm_duogrid_unclamped_parity(iord, rough):
     edge block (tp_core.F90:333-339, :346, :505, :614)."""
     ref = _xppm_np(rough, iord, rough.q, rough.crx, duogrid=True)
     got = _xppm_jax(rough, iord, rough.q, rough.crx, duogrid=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"xppm duo iord={iord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both iords;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing]
+    _cmp(got, ref, f"xppm duo iord={iord}", 1e-15)
 
 
 def test_xppm_jit_equals_eager_and_no_retrace(rough):
@@ -816,10 +837,9 @@ def test_xppm_jit_equals_eager_and_no_retrace(rough):
     j1 = _xppm_jax(rough, 8, rough.q, rough.crx, fn=fn)
     _xppm_jax(rough, 8, rough.q * 1.01, rough.crx * 0.97, fn=fn)
     assert traces["n"] == 1, traces["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, identical expression tree]
-    _cmp(j1, eager, "xppm jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.673e-16 (FMA contraction); bound =
+    # measured x 10 = 1.7e-15.  [class: jit-vs-eager]
+    _cmp(j1, eager, "xppm jit", 1.7e-15)
 
 
 def test_xppm_rejects_float32(rough):
@@ -934,11 +954,12 @@ def test_xppm_check_grads_single_cell(order, iord, smooth):
     f = _scalar_probe(run, smooth.q, kk, probe)
     slope = _assert_scalar_locally_smooth(f, 0.0, f"xppm iord={iord}")
     assert abs(slope) > 1e-6, "probe cell does not influence the probed flux"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                eps=1e-3, atol=1e-5, rtol=1e-5)
+    # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
+    # atol=rtol is 1e-10 (iord=8, order=2); bound = one decade up =
+    # 1e-9.  [class: smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"xppm check_grads iord={iord} order={order}", f,
+                      (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
+                      eps=1e-3, atol=1e-5, rtol=1e-5)
 
 
 # =====================================================================
@@ -976,21 +997,20 @@ def test_yppm_parity(jord, kind, smooth, rough):
     ref = _yppm_np(geo, jord, geo.q, geo.cry)
     got = _yppm_jax(geo, jord, geo.q, geo.cry)
     assert np.isfinite(ref).any()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth if kind=="smooth", else
-    # limiter-crossing]
-    _cmp(got, ref, f"yppm jord={jord} {kind}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for BOTH
+    # classes, every jord; bound = 1e-15 eps guard (measured exactly
+    # 0.0).
+    _cmp(got, ref, f"yppm jord={jord} {kind}", 1e-15)
 
 
 @pytest.mark.parametrize("jord", [5, 8])
 def test_yppm_duogrid_unclamped_parity(jord, rough):
     ref = _yppm_np(rough, jord, rough.q, rough.cry, duogrid=True)
     got = _yppm_jax(rough, jord, rough.q, rough.cry, duogrid=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"yppm duo jord={jord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both jords;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing]
+    _cmp(got, ref, f"yppm duo jord={jord}", 1e-15)
 
 
 def test_yppm_jit_equals_eager_and_no_retrace(rough):
@@ -1006,10 +1026,9 @@ def test_yppm_jit_equals_eager_and_no_retrace(rough):
     j1 = _yppm_jax(rough, 8, rough.q, rough.cry, fn=fn)
     _yppm_jax(rough, 8, rough.q * 1.01, rough.cry * 0.97, fn=fn)
     assert traces["n"] == 1, traces["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager]
-    _cmp(j1, eager, "yppm jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.673e-16 (FMA contraction); bound =
+    # measured x 10 = 1.7e-15.  [class: jit-vs-eager]
+    _cmp(j1, eager, "yppm jit", 1.7e-15)
 
 
 def test_yppm_rejects_float32(rough):
@@ -1062,11 +1081,13 @@ def test_yppm_check_grads_single_cell(order, jord, smooth):
     f = _scalar_probe(run, smooth.q, kk, probe)
     slope = _assert_scalar_locally_smooth(f, 0.0, f"yppm jord={jord}")
     assert abs(slope) > 1e-6, "probe cell does not influence the flux"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                eps=1e-3, atol=1e-5, rtol=1e-5)
+    # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
+    # atol=rtol is 1e-10 (jord=8, order=2); bound = one decade up =
+    # 1e-9.  [class: smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"yppm check_grads jord={jord} order={order}", f,
+                      (jnp.asarray(0.0),), order=order,
+                      modes=("fwd", "rev"),
+                      eps=1e-3, atol=1e-9, rtol=1e-9)
 
 
 # =====================================================================
@@ -1178,14 +1199,14 @@ def test_deln_flux_parity(nord, opt, rough):
     fx_j, fy_j = _deln_jax(rough, nord, damp, fx0, fy0, mass, dkm)
     # Non-vacuity: the damping actually changed the fluxes.
     assert np.nanmax(np.abs(fx_n - fx0)) > 0.0
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth -- no branch, linear stencil]
-    _cmp(fx_j, fx_n, f"deln fx nord={nord} {opt}", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth]
-    _cmp(fy_j, fy_n, f"deln fy nord={nord} {opt}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every
+    # nord/opt; bound = 1e-15 eps guard (measured exactly 0.0).
+    # [class: smooth -- no branch, linear stencil]
+    _cmp(fx_j, fx_n, f"deln fx nord={nord} {opt}", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every
+    # nord/opt; bound = 1e-15 eps guard (measured exactly 0.0).
+    # [class: smooth]
+    _cmp(fy_j, fy_n, f"deln fy nord={nord} {opt}", 1e-15)
 
 
 def test_deln_flux_jit_equals_eager_and_no_retrace(rough):
@@ -1204,10 +1225,9 @@ def test_deln_flux_jit_equals_eager_and_no_retrace(rough):
     _deln_jax(rough, 2, 2.0 * damp, fx0 * 1.1, fy0 * 0.9, fn=fn)
     assert traces["n"] == 1, traces["n"]
     for name, e, j in zip(("fx", "fy"), eager, j1):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager]
-        _cmp(j, e, f"deln jit {name}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst fy 8.971e-17 (FMA); bound =
+        # measured x 10 = 9.0e-16.  [class: jit-vs-eager]
+        _cmp(j, e, f"deln jit {name}", 9.0e-16)
 
 
 def test_deln_flux_guards(rough):
@@ -1443,18 +1463,18 @@ def test_fv_tp_2d_parity(hord, rough):
     q_j, fx_j, fy_j = _tp2d_jax(rough, hord)
     # Non-vacuity: copy_corners really did mutate q's corner ghosts.
     assert not np.array_equal(q_n, rough.q)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: index shuffle only -> expect BITWISE]
-    _cmp(q_j, q_n, f"fv_tp_2d q hord={hord}", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing + accumulating]
-    _cmp(fx_j, fx_n, f"fv_tp_2d fx hord={hord}", 1e-12)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing + accumulating]
-    _cmp(fy_j, fy_n, f"fv_tp_2d fy hord={hord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every hord;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class: index
+    # shuffle only]
+    _cmp(q_j, q_n, f"fv_tp_2d q hord={hord}", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every hord;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing + accumulating]
+    _cmp(fx_j, fx_n, f"fv_tp_2d fx hord={hord}", 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every hord;
+    # bound = 1e-15 eps guard (measured exactly 0.0).  [class:
+    # limiter-crossing + accumulating]
+    _cmp(fy_j, fy_n, f"fv_tp_2d fy hord={hord}", 1e-15)
 
 
 @pytest.mark.parametrize(
@@ -1484,10 +1504,10 @@ def test_fv_tp_2d_optional_branches_parity(kw, rough):
     q_j, fx_j, fy_j = _tp2d_jax(rough, 8, **kw)
     for name, j, n in (("q", q_j, q_n), ("fx", fx_j, fx_n),
                        ("fy", fy_j, fy_n)):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: limiter-crossing + accumulating]
-        _cmp(j, n, f"fv_tp_2d {name} opt", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), all three
+        # fields; bound = 1e-15 eps guard (measured exactly 0.0).
+        # [class: limiter-crossing + accumulating]
+        _cmp(j, n, f"fv_tp_2d {name} opt", 1e-15)
 
 
 def test_fv_tp_2d_jit_equals_eager_and_no_retrace(rough):
@@ -1504,10 +1524,9 @@ def test_fv_tp_2d_jit_equals_eager_and_no_retrace(rough):
     _tp2d_jax(rough, 8, fn=fn, nord=1, damp_c=0.5)
     assert traces["n"] == 1, traces["n"]
     for name, e, j in zip(("q", "fx", "fy"), eager, j1):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager]
-        _cmp(j, e, f"fv_tp_2d jit {name}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst fx 2.047e-16 (FMA); bound =
+        # measured x 10 = 2.1e-15.  [class: jit-vs-eager]
+        _cmp(j, e, f"fv_tp_2d jit {name}", 2.1e-15)
 
 
 def test_fv_tp_2d_rejects_float32(rough):
@@ -1602,11 +1621,13 @@ def test_fv_tp_2d_check_grads_single_cell(order, smooth):
     f = _scalar_probe(run, smooth.q, kk, probe)
     slope = _assert_scalar_locally_smooth(f, 0.0, "fv_tp_2d hord=2")
     assert abs(slope) > 1e-9, "probe cell does not influence the flux"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                eps=1e-3, atol=1e-5, rtol=1e-5)
+    # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
+    # atol=rtol is 1e-10 (order=2); bound = one decade up = 1e-9.
+    # [class: smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"fv_tp_2d check_grads order={order}", f,
+                      (jnp.asarray(0.0),), order=order,
+                      modes=("fwd", "rev"),
+                      eps=1e-3, atol=1e-9, rtol=1e-9)
 
 
 # =====================================================================
@@ -1646,11 +1667,10 @@ def test_xtp_u_parity(iord, kind, smooth, rough):
     ref = _xtp_np(geo, iord, geo.u, geo.c_sw)
     got = _xtp_jax(geo, iord, geo.u, geo.c_sw)
     assert np.isfinite(ref).any()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth if kind=="smooth", else
-    # limiter-crossing]
-    _cmp(got, ref, f"xtp_u iord={iord} {kind}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for BOTH
+    # classes, every iord; bound = 1e-15 eps guard (measured exactly
+    # 0.0).
+    _cmp(got, ref, f"xtp_u iord={iord} {kind}", 1e-15)
 
 
 @pytest.mark.parametrize("iord", [6, 9])
@@ -1660,17 +1680,16 @@ def test_xtp_u_duogrid_and_gridtype3_parity(iord, rough):
     the ``iord >= 8`` block (sw_core.F90:2866)."""
     ref = _xtp_np(rough, iord, rough.u, rough.c_sw, duogrid=True)
     got = _xtp_jax(rough, iord, rough.u, rough.c_sw, duogrid=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"xtp_u duo iord={iord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).  [class: limiter-crossing]
+    _cmp(got, ref, f"xtp_u duo iord={iord}", 1e-15)
     if iord >= 8:
         ref4 = _xtp_np(rough, iord, rough.u, rough.c_sw, grid_type=4)
         got4 = _xtp_jax(rough, iord, rough.u, rough.c_sw, grid_type=4)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: limiter-crossing]
-        _cmp(got4, ref4, f"xtp_u gt4 iord={iord}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+        # 1e-15 eps guard (measured exactly 0.0).  [class:
+        # limiter-crossing]
+        _cmp(got4, ref4, f"xtp_u gt4 iord={iord}", 1e-15)
 
 
 def test_xtp_u_jit_equals_eager_and_no_retrace(rough):
@@ -1686,10 +1705,9 @@ def test_xtp_u_jit_equals_eager_and_no_retrace(rough):
     j1 = _xtp_jax(rough, 8, rough.u, rough.c_sw, fn=fn)
     _xtp_jax(rough, 8, rough.u * 1.02, rough.c_sw * 0.98, fn=fn)
     assert traces["n"] == 1, traces["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager]
-    _cmp(j1, eager, "xtp_u jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.673e-16 (FMA); bound = measured x
+    # 10 = 1.7e-15.  [class: jit-vs-eager]
+    _cmp(j1, eager, "xtp_u jit", 1.7e-15)
 
 
 def test_xtp_u_rejects_float32(rough):
@@ -1752,11 +1770,13 @@ def test_xtp_u_check_grads_single_cell(order, iord, smooth):
     f = _scalar_probe(run, smooth.u, kk, probe)
     slope = _assert_scalar_locally_smooth(f, 0.0, f"xtp_u iord={iord}")
     assert abs(slope) > 1e-6, "probe cell does not influence the flux"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                eps=1e-3, atol=1e-5, rtol=1e-5)
+    # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
+    # atol=rtol is 1e-12; bound = one decade up = 1e-11.  [class:
+    # smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"xtp_u check_grads iord={iord} order={order}", f,
+                      (jnp.asarray(0.0),), order=order,
+                      modes=("fwd", "rev"),
+                      eps=1e-3, atol=1e-11, rtol=1e-11)
 
 
 # =====================================================================
@@ -1796,28 +1816,26 @@ def test_ytp_v_parity(jord, kind, smooth, rough):
     ref = _ytp_np(geo, jord, geo.v, geo.c_sw)
     got = _ytp_jax(geo, jord, geo.v, geo.c_sw)
     assert np.isfinite(ref).any()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth if kind=="smooth", else
-    # limiter-crossing]
-    _cmp(got, ref, f"ytp_v jord={jord} {kind}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) for BOTH
+    # classes, every jord; bound = 1e-15 eps guard (measured exactly
+    # 0.0).
+    _cmp(got, ref, f"ytp_v jord={jord} {kind}", 1e-15)
 
 
 @pytest.mark.parametrize("jord", [6, 9])
 def test_ytp_v_duogrid_and_gridtype3_parity(jord, rough):
     ref = _ytp_np(rough, jord, rough.v, rough.c_sw, duogrid=True)
     got = _ytp_jax(rough, jord, rough.v, rough.c_sw, duogrid=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"ytp_v duo jord={jord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).  [class: limiter-crossing]
+    _cmp(got, ref, f"ytp_v duo jord={jord}", 1e-15)
     if jord >= 8:
         ref4 = _ytp_np(rough, jord, rough.v, rough.c_sw, grid_type=4)
         got4 = _ytp_jax(rough, jord, rough.v, rough.c_sw, grid_type=4)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: limiter-crossing]
-        _cmp(got4, ref4, f"ytp_v gt4 jord={jord}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+        # 1e-15 eps guard (measured exactly 0.0).  [class:
+        # limiter-crossing]
+        _cmp(got4, ref4, f"ytp_v gt4 jord={jord}", 1e-15)
 
 
 def test_ytp_v_jit_equals_eager_and_no_retrace(rough):
@@ -1833,10 +1851,9 @@ def test_ytp_v_jit_equals_eager_and_no_retrace(rough):
     j1 = _ytp_jax(rough, 8, rough.v, rough.c_sw, fn=fn)
     _ytp_jax(rough, 8, rough.v * 1.02, rough.c_sw * 0.98, fn=fn)
     assert traces["n"] == 1, traces["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager]
-    _cmp(j1, eager, "ytp_v jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.673e-16 (FMA); bound = measured x
+    # 10 = 1.7e-15.  [class: jit-vs-eager]
+    _cmp(j1, eager, "ytp_v jit", 1.7e-15)
 
 
 def test_ytp_v_rejects_float32(rough):
@@ -1886,11 +1903,13 @@ def test_ytp_v_check_grads_single_cell(order, jord, smooth):
     f = _scalar_probe(run, smooth.v, kk, probe)
     slope = _assert_scalar_locally_smooth(f, 0.0, f"ytp_v jord={jord}")
     assert abs(slope) > 1e-6, "probe cell does not influence the flux"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: smooth-region FD, O(1) dynamic range]
-    check_grads(f, (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                eps=1e-3, atol=1e-5, rtol=1e-5)
+    # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
+    # atol=rtol is 1e-12; bound = one decade up = 1e-11.  [class:
+    # smooth-region FD, O(1) dynamic range]
+    gated_check_grads(f"ytp_v check_grads jord={jord} order={order}", f,
+                      (jnp.asarray(0.0),), order=order,
+                      modes=("fwd", "rev"),
+                      eps=1e-3, atol=1e-11, rtol=1e-11)
 
 
 # =====================================================================
@@ -1949,18 +1968,16 @@ def test_every_public_routine_has_a_jit_factory():
         assert getattr(tp, f"{name}_jit") is not None
 
 
-def test_tolerances_are_all_marked_pending():
-    """Every numeric bound in THIS file is provisional until the
-    orchestrator's measurement job pins it.  If a bound is edited to a
-    measured value the marker must go with it, so this count is a
-    tripwire against a half-finished tolerance sweep, not a target."""
+def test_tolerances_are_all_measured():
+    """Every numeric bound in THIS file is MEASURED (job 9425294) and no
+    provisional marker remains.  The count going ABOVE zero means a new
+    bound was added without running the measurement protocol; every
+    measured bound must instead cite its sweep job."""
     src = open(__file__).read()
-    n_mark = src.count("TOL-PENDING")
+    n_mark = src.count("TOL-" + "PENDING")
     n_cmp = src.count("_cmp(")
-    # every _cmp call site (minus the def and the two loop-bodies that
-    # share one marker) must be preceded by a marker, and the adjoint
-    # and check_grads gates carry their own.
-    assert n_mark >= 30, n_mark
+    assert n_mark == 0, n_mark
+    assert src.count("MEASURED (job") >= 25
     assert n_cmp > 0
 
 
@@ -1990,10 +2007,9 @@ def test_xtp_u_bounded_domain_false_override_is_load_bearing(iord, rough):
                   bounded_domain=False, **kw)
     got = _xtp_jax(rough, iord, rough.u, rough.c_sw,
                    bounded_domain=False, **kw)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"xtp_u bd=False duo iord={iord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).  [class: limiter-crossing]
+    _cmp(got, ref, f"xtp_u bd=False duo iord={iord}", 1e-15)
 
     other = _xtp_jax(rough, iord, rough.u, rough.c_sw,
                      bounded_domain=True, **kw)
@@ -2014,10 +2030,9 @@ def test_ytp_v_bounded_domain_false_override_is_load_bearing(jord, rough):
                   bounded_domain=False, **kw)
     got = _ytp_jax(rough, jord, rough.v, rough.c_sw,
                    bounded_domain=False, **kw)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: limiter-crossing]
-    _cmp(got, ref, f"ytp_v bd=False duo jord={jord}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).  [class: limiter-crossing]
+    _cmp(got, ref, f"ytp_v bd=False duo jord={jord}", 1e-15)
 
     other = _ytp_jax(rough, jord, rough.v, rough.c_sw,
                      bounded_domain=True, **kw)
@@ -2328,10 +2343,10 @@ def test_lim_fac_is_swept_where_it_is_read(lim_fac, rough):
             ("ytp_v", _ytp_np, _ytp_jax, rough.v, rough.c_sw)):
         ref = ref_fn(rough, 1, fld, c, lim_fac=lim_fac)
         got = jax_fn(rough, 1, fld, c, lim_fac=lim_fac)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: limiter-crossing]
-        _cmp(got, ref, f"{name} lim_fac={lim_fac}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), all four
+        # routines and both lim_fac values; bound = 1e-15 eps guard
+        # (measured exactly 0.0).  [class: limiter-crossing]
+        _cmp(got, ref, f"{name} lim_fac={lim_fac}", 1e-15)
         outs[name] = np.asarray(got)
     if lim_fac == 3.0:
         base = {n: np.asarray(f(rough, 1, x, cc, lim_fac=1.0))

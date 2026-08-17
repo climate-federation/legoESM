@@ -15,7 +15,7 @@ the first-run lessons in ``fv3_duo_jax_lane_STATE.md``:
 1. **parity** -- JAX vs the NumPy twin on the committed C12 fixtures
    (``swcore_input.npz`` for the plain leaves and ``c_sw``'s plain arm,
    ``dswcore_input.npz`` for the duo leaves and the whole d_sw chain),
-   with a measured bound carrying a ``TOL-PENDING`` marker;
+   with a bound MEASURED in job 9425294 and set to measured x 10;
 2. **jit vs eager** -- an ASSERTION, plus a trace counter proving no
    retrace on new VALUES of the same shape (and, for the stages that
    take one, on a new ``dt``).  **Bitwise is asserted ONLY on paths with
@@ -48,9 +48,12 @@ every transport call inside ``d_sw1``/``d_sw3``/``d_sw5`` runs the PPM
 limiters, whose flags ADD or DROP a whole flux term, so the flux is
 DISCONTINUOUS across them and a rounding-level lane difference near a
 limiter surface can produce a discrepancy far above 1e-15.  Every
-numeric bound below therefore carries a ``TOL-PENDING`` marker for the
-orchestrator's measurement job plus a one-word class label saying
-whether the gate crosses a limiter surface.
+numeric bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
+sweep) and set to measured x 10, keeping its class label.  Lane parity
+measured exactly 0.0 (bitwise) at every gate; the nonzero measurements
+are jit-vs-eager, and the two limiter-flip cases (d_sw1 jit yflux
+1.216e-10, d_sw3 jit ubbtemp 1.521e-10) carry the loosest bounds in the
+file at 1.3e-9/1.6e-9.
 """
 from __future__ import annotations
 
@@ -73,6 +76,8 @@ from legoesm.core import fv3_native_sw_core as npsw  # noqa: E402
 from legoesm.core import fv3_tp_core as tp  # noqa: E402
 from legoesm.core.fv3_native_sw_core import Bounds  # noqa: E402
 from legoesm.grids.fv3_native_gridstruct import fort  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import gate_scalar  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -265,6 +270,13 @@ def _cmp(got, ref, name, tol):
     per = diff / den
     rel = float(per.max())
     n_over = int((per > 1e-13).sum())
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip ONLY
+    # the tolerance assert; the structural checks above still raise.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e}, "
+              f"n_over {n_over}, max|diff| {float(diff.max()):.3e})",
+              flush=True)
+        return rel, n_over
     assert rel <= tol, (
         f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
         f"{n_over} of {int(ok.sum())} compared cells exceed 1e-13 "
@@ -393,6 +405,10 @@ def _check_adjoint(name, f, primals, tol, seed=0):
         f"so this gate proves nothing (check the window/scale)")
     assert np.isfinite(lhs) and np.isfinite(rhs), (
         f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return r
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
@@ -513,10 +529,9 @@ def test_edge_interpolate4_parity():
                                         [d[n] for d in dxa])
     got = duo.edge_interpolate4([jnp.asarray(a) for a in ua],
                                 [jnp.asarray(d) for d in dxa])
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: pointwise rational, no limiter]
-    _cmp(got, ref, "edge_interpolate4", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, ref, "edge_interpolate4", 1e-15)
 
 
 def test_edge_interpolate4_jit_equals_eager():
@@ -528,10 +543,9 @@ def test_edge_interpolate4_jit_equals_eager():
     dxa = [jnp.asarray(d) for d in dxa]
     eager = duo.edge_interpolate4(ua, dxa)
     jitted = duo.make_edge_interpolate4_jit()(ua, dxa)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-    _cmp(jitted, eager, "edge_interpolate4 jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 1.225e-16; bound = measured x 10 =
+    # 1.3e-15.
+    _cmp(jitted, eager, "edge_interpolate4 jit", 1.3e-15)
 
 
 def test_edge_interpolate4_rejects_float32():
@@ -557,10 +571,9 @@ def test_edge_interpolate4_gradients():
         return duo.edge_interpolate4([a0, a1, a2, a3], dxa_j)
 
     primals = tuple(jnp.asarray(a) for a in ua)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("edge_interpolate4", f, primals, 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.867e-16; bound = measured x 10 =
+    # 1.9e-15.
+    _check_adjoint("edge_interpolate4", f, primals, 1.9e-15)
     check_grads(lambda a: jnp.sum(f(a, *primals[1:]) ** 2),
                 (primals[0],), order=2, modes=("fwd", "rev"))
 
@@ -660,10 +673,9 @@ def test_fill_4corners_gradients(geo_sw):
     def f(x):
         return duo.fill_4corners(x, 1, geo_sw.npx, geo_sw.npy, geo_sw.bd)
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity on a linear operator]
-    _check_adjoint("fill_4corners", f, (q,), 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) adjoint residual; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _check_adjoint("fill_4corners", f, (q,), 1e-15)
     check_grads(lambda x: jnp.sum(f(x) ** 2), (q,), order=2,
                 modes=("fwd", "rev"))
 
@@ -701,10 +713,9 @@ def test_d2a2c_vect_parity(geo_sw):
     ref = _d2a2c_np(geo_sw, u, v)
     got = _d2a2c_jax(geo_sw, u, v)
     for k in _D2A2C_OUT:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: pointwise/neighbour, no limiter]
-        _cmp(got[k], ref[k], f"d2a2c_vect.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(got[k], ref[k], f"d2a2c_vect.{k}", 1e-15)
 
 
 def test_d2a2c_vect_duo_parity(geo_dsw):
@@ -720,10 +731,9 @@ def test_d2a2c_vect_duo_parity(geo_dsw):
                              geo_dsw.gs_j, geo_dsw.bd, geo_dsw.npx,
                              geo_dsw.npy)
     for k in _D2A2C_OUT:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: neighbour-reading, no branch]
-        _cmp(got[k], ref[k], f"d2a2c_vect_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(got[k], ref[k], f"d2a2c_vect_duo.{k}", 1e-15)
 
 
 def test_d2a2c_vect_duo_sentinel_pattern_matches(geo_dsw):
@@ -759,10 +769,9 @@ def test_d2a2c_vect_jit_equals_eager_and_no_retrace(geo_sw):
     _d2a2c_jax(geo_sw, u * 1.01, v * 0.99, fn=fn)
     assert box["n"] == 1, box["n"]
     for k in _D2A2C_OUT:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d2a2c_vect jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst vt 1.182e-15; bound = measured x 10 =
+        # 1.2e-14.
+        _cmp(got[k], eager[k], f"d2a2c_vect jit.{k}", 1.2e-14)
 
 
 def test_d2a2c_vect_duo_jit_equals_eager(geo_dsw):
@@ -779,10 +788,9 @@ def test_d2a2c_vect_duo_jit_equals_eager(geo_dsw):
        geo_dsw.npx, geo_dsw.npy)
     assert box["n"] == 1, box["n"]
     for k in _D2A2C_OUT:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d2a2c_vect_duo jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst vt 6.287e-16; bound = measured x 10 =
+        # 6.3e-15.
+        _cmp(got[k], eager[k], f"d2a2c_vect_duo jit.{k}", 6.3e-15)
 
 
 def test_d2a2c_vect_guards(geo_sw):
@@ -851,11 +859,11 @@ def test_d2a2c_vect_duo_is_linear_in_the_winds(geo_dsw):
     # sentinel cells scale too (1e30 * 2), so compare on the written set
     m = np.abs(b) < 1.0e20
     assert m.any()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: exact linearity, roundoff only]
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
     rel = np.abs(a[m] - b[m]).max() / max(np.abs(b[m]).max(), 1e-30)
-    assert rel <= 1e-13, f"MEASURED linearity residual {rel:.3e}"
+    gate_scalar("d2a2c_vect_duo linearity", rel, 1e-15,
+                quantity="exact-linearity residual rel")
 
 
 def test_d2a2c_vect_gradients(geo_sw):
@@ -874,10 +882,9 @@ def test_d2a2c_vect_gradients(geo_sw):
         # the inner products insensitive to most of the operator
         return jnp.stack([o[ring, ring] for o in out])
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("d2a2c_vect", f, (u, v), 1e-11)
+    # MEASURED (job 9425294 sweep): adjoint residual 3.887e-16; bound = measured x 10 =
+    # 3.9e-15.
+    _check_adjoint("d2a2c_vect", f, (u, v), 3.9e-15)
 
     rng = np.random.default_rng(0)
     du = jnp.asarray(rng.standard_normal(u.shape))
@@ -992,10 +999,9 @@ def test_divergence_corner_parity(geo_sw):
                                 jnp.asarray(ua), jnp.asarray(va),
                                 geo_sw.gs_j, geo_sw.bd, geo_sw.npx,
                                 geo_sw.npy)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating flux difference, no limiter]
-    _cmp(got, ref, "divergence_corner", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, ref, "divergence_corner", 1e-15)
 
 
 def test_divergence_corner_duo_parity(geo_dsw):
@@ -1010,10 +1016,9 @@ def test_divergence_corner_duo_parity(geo_dsw):
         jnp.asarray(u), jnp.asarray(v), jnp.asarray(d2a["ua"]),
         jnp.asarray(d2a["va"]), geo_dsw.gs_j, geo_dsw.bd, geo_dsw.npx,
         geo_dsw.npy)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating flux difference, no limiter]
-    _cmp(got, ref, "divergence_corner_duo", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got, ref, "divergence_corner_duo", 1e-15)
 
 
 def test_divergence_corner_duo_seam_treatment_is_real(geo_dsw):
@@ -1058,10 +1063,9 @@ def test_divergence_corner_jit_equals_eager(geo_sw):
     got = fn(*args)
     fn(args[0] * 1.01, *args[1:])
     assert box["n"] == 1, box["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-    _cmp(got, eager, "divergence_corner jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 6.985e-13 (divg_d cascade, FMA class); bound = measured x 10 =
+    # 7.0e-12.
+    _cmp(got, eager, "divergence_corner jit", 7.0e-12)
 
 
 def test_divergence_corner_duo_jit_equals_eager(geo_dsw):
@@ -1077,10 +1081,9 @@ def test_divergence_corner_duo_jit_equals_eager(geo_dsw):
     got = fn(*args)
     fn(args[0] * 1.01, *args[1:])
     assert box["n"] == 1, box["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-    _cmp(got, eager, "divergence_corner_duo jit", 1e-12)
+    # MEASURED (job 9425294 sweep): 9.767e-13 (FMA class); bound = measured x 10 =
+    # 9.8e-12.
+    _cmp(got, eager, "divergence_corner_duo jit", 9.8e-12)
 
 
 @pytest.mark.parametrize("fn_name", ["divergence_corner",
@@ -1132,10 +1135,9 @@ def test_divergence_corner_gradients(geo_dsw):
 
     primals = tuple(jnp.asarray(geo_dsw.f[k])
                     for k in ("u", "v", "ua", "va"))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("divergence_corner_duo", f, primals, 1e-11)
+    # MEASURED (job 9425294 sweep): adjoint residual 3.617e-16; bound = measured x 10 =
+    # 3.7e-15.
+    _check_adjoint("divergence_corner_duo", f, primals, 3.7e-15)
     check_grads(lambda x: jnp.sum(f(x, *primals[1:]) ** 2) / 1e6,
                 (primals[0],), order=2, modes=("fwd",))
 
@@ -1213,11 +1215,10 @@ def test_del6_vt_flux_parity(nord, duogrid, geo_dsw):
     damp = 3.5e7
     ref_x, ref_y = _del6_np(geo_dsw, nord, damp, q, duogrid=duogrid)
     got_x, got_y = _del6_jax(geo_dsw, nord, damp, q, duogrid=duogrid)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating stencil passes, no limiter]
-    _cmp(got_x, ref_x, f"del6 fx2 nord={nord} duo={duogrid}", 1e-12)
-    _cmp(got_y, ref_y, f"del6 fy2 nord={nord} duo={duogrid}", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), fx2 and fy2, every nord/duo; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got_x, ref_x, f"del6 fx2 nord={nord} duo={duogrid}", 1e-15)
+    _cmp(got_y, ref_y, f"del6 fy2 nord={nord} duo={duogrid}", 1e-15)
 
 
 def test_del6_vt_flux_damp_km_parity(geo_dsw):
@@ -1230,11 +1231,10 @@ def test_del6_vt_flux_damp_km_parity(geo_dsw):
                               + np.arange(geo_dsw.m_a)[None, :])
     ref_x, ref_y = _del6_np(geo_dsw, 1, 3.5e7, q, damp_km=dk)
     got_x, got_y = _del6_jax(geo_dsw, 1, 3.5e7, q, damp_km=dk)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating stencil passes, no limiter]
-    _cmp(got_x, ref_x, "del6 fx2 damp_km", 1e-12)
-    _cmp(got_y, ref_y, "del6 fy2 damp_km", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both components; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got_x, ref_x, "del6 fx2 damp_km", 1e-15)
+    _cmp(got_y, ref_y, "del6 fy2 damp_km", 1e-15)
 
 
 def test_del6_vt_flux_seeded_work_arrays_carry_forward(geo_dsw):
@@ -1253,11 +1253,10 @@ def test_del6_vt_flux_seeded_work_arrays_carry_forward(geo_dsw):
                             fy2_seed=sy)
     got_x, got_y = _del6_jax(geo_dsw, 1, 3.5e7, q, fx2_seed=sx,
                              fy2_seed=sy)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: accumulating stencil passes, no limiter]
-    _cmp(got_x, ref_x, "del6 fx2 seeded", 1e-12)
-    _cmp(got_y, ref_y, "del6 fy2 seeded", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both components; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(got_x, ref_x, "del6 fx2 seeded", 1e-15)
+    _cmp(got_y, ref_y, "del6 fy2 seeded", 1e-15)
     # non-vacuity: some seeded cells really do survive untouched
     keep = np.asarray(got_x) == sx
     assert keep.any(), "no seeded cell survived -- the test proves nothing"
@@ -1273,11 +1272,10 @@ def test_del6_vt_flux_jit_equals_eager(geo_dsw):
     got = _del6_jax(geo_dsw, 1, 3.5e7, q, fn=fn)
     _del6_jax(geo_dsw, 1, 4.0e7, q * 1.01, fn=fn)   # new VALUES only
     assert box["n"] == 1, box["n"]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-    _cmp(got[0], eager[0], "del6 fx2 jit", 1e-12)
-    _cmp(got[1], eager[1], "del6 fy2 jit", 1e-12)
+    # MEASURED (job 9425294 sweep): worst fy2 2.104e-16; bound = measured x 10 =
+    # 2.2e-15.
+    _cmp(got[0], eager[0], "del6 fx2 jit", 2.2e-15)
+    _cmp(got[1], eager[1], "del6 fy2 jit", 2.2e-15)
 
 
 def test_del6_vt_flux_guards(geo_dsw):
@@ -1326,10 +1324,9 @@ def test_del6_vt_flux_gradients(geo_dsw):
         return jnp.stack([fx2[ring, ring], fy2[ring, ring]])
 
     q = jnp.asarray(_del6_q(geo_dsw))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity on a linear operator]
-    _check_adjoint("del6_vt_flux", f, (q,), 1e-12)
+    # MEASURED (job 9425294 sweep): adjoint residual 2.719e-16; bound = measured x 10 =
+    # 2.8e-15.
+    _check_adjoint("del6_vt_flux", f, (q,), 2.8e-15)
     check_grads(lambda x: jnp.sum(f(x) ** 2), (q,), order=2,
                 modes=("fwd", "rev"))
 
@@ -1369,11 +1366,10 @@ def test_c_sw_plain_parity(hydrostatic, geo_sw):
     keys = _CSW_OUT if not hydrostatic else \
         tuple(k for k in _CSW_OUT if k != "wc")
     for k in keys:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating flux sums, no limiter]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key, both arms; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(got[k], ref[k], f"c_sw plain hydro={hydrostatic}.{k}",
-             1e-12)
+             1e-15)
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -1397,10 +1393,9 @@ def test_c_sw_duo_parity(hydrostatic, geo_bounded):
     keys = _CSW_OUT if not hydrostatic else \
         tuple(k for k in _CSW_OUT if k != "wc")
     for k in keys:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating flux sums, no limiter]
-        _cmp(got[k], ref[k], f"c_sw duo hydro={hydrostatic}.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key, both arms; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(got[k], ref[k], f"c_sw duo hydro={hydrostatic}.{k}", 1e-15)
 
 
 def test_c_sw_duo_arm_is_the_only_one_that_runs_bounded(geo_bounded):
@@ -1464,10 +1459,9 @@ def test_c_sw_jit_equals_eager_and_no_retrace_on_dt(geo_sw):
     fn(*args, 2.0 * geo_sw.dt2)
     assert box["n"] == 1, f"retraced on a new dt2: {box['n']}"
     for k in _CSW_OUT:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"c_sw jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst divg_d 6.985e-13 (FMA class); bound = measured x 10 =
+        # 7.0e-12.
+        _cmp(got[k], eager[k], f"c_sw jit.{k}", 7.0e-12)
 
 
 def test_c_sw_guards(geo_sw, geo_bounded):
@@ -1531,10 +1525,9 @@ def test_c_sw_gradients(geo_sw):
         return jnp.stack([out[k][ring, ring]
                           for k in ("delpc", "ptc", "uc", "vc")])
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("c_sw", f, (delp, pt, u, v), 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 4.736e-16; bound = measured x 10 =
+    # 4.8e-15.
+    _check_adjoint("c_sw", f, (delp, pt, u, v), 4.8e-15)
 
 
 def test_c_sw_one_sided_across_the_transport_upwind_surface(geo_sw):
@@ -1723,10 +1716,9 @@ def test_d_sw1_duo_parity(chain):
     n1, _, _, _, _, _ = chain["np"]
     j1 = chain["jx"][0]
     for k in _D_SW1_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING]
-        _cmp(j1[k], n1[k], f"d_sw1_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j1[k], n1[k], f"d_sw1_duo.{k}", 1e-15)
 
 
 def test_d_sw1_duo_matches_the_stored_fortran_certificate(chain):
@@ -1746,19 +1738,18 @@ def test_d_sw1_duo_matches_the_stored_fortran_certificate(chain):
              "ut": "ut", "vt": "vt", "xflux_out": "xflux",
              "yflux_out": "yflux", "cx_out": "cx", "cy_out": "cy"}
     for okey, jkey in pairs.items():
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, hop A + hop B]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(j1[jkey], np.asarray(orc[okey], np.float64),
-             f"d_sw1 vs Fortran.{okey}", 1e-11)
+             f"d_sw1 vs Fortran.{okey}", 1e-15)
     for slot, okey in ((0, "afx1"), (3, "afx4")):
         _cmp(np.asarray(j1["allflux_x"])[:, :, slot],
              np.asarray(orc[okey], np.float64),
-             f"d_sw1 vs Fortran.{okey}", 1e-11)
+             f"d_sw1 vs Fortran.{okey}", 1e-15)
     for slot, okey in ((0, "afy1"), (3, "afy4")):
         _cmp(np.asarray(j1["allflux_y"])[:, :, slot],
              np.asarray(orc[okey], np.float64),
-             f"d_sw1 vs Fortran.{okey}", 1e-11)
+             f"d_sw1 vs Fortran.{okey}", 1e-15)
 
 
 def test_d_sw1_workspace_sentinel_cells_coincide(chain, geo_dsw):
@@ -1849,12 +1840,10 @@ def test_d_sw1_mass_flux_divergence_telescopes(chain):
     scale = float(np.abs(fx).sum() + np.abs(fy).sum())
     assert scale > 0.0
     rel = abs(interior - boundary) / scale
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: telescoping identity, summation roundoff]
-    assert rel <= 1e-13, (
-        f"flux divergence does not telescope: MEASURED rel {rel:.3e} "
-        f"(interior {interior:.12e}, boundary {boundary:.12e})")
+    # MEASURED (job 9425294 sweep): 2.187e-16; bound = measured x 10 =
+    # 2.2e-15.
+    gate_scalar("d_sw1 flux-divergence telescoping", rel, 2.2e-15,
+                quantity="telescoping-identity residual rel")
 
 
 def test_d_sw1_no_retrace_on_a_new_dt(geo_dsw):
@@ -1902,10 +1891,11 @@ def test_d_sw1_jit_equals_eager(geo_dsw):
     for k in _D_SW1_KEYS:
         if k in ("allflux_x", "allflux_y"):
             continue
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d_sw1 jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst yflux 1.216e-10 with a HANDFUL of cells over
+        # 1e-13 (PPM limiter branch flip under FMA contraction, the documented
+        # fourth kernel class; xflux 7.276e-12, all Courant/area keys
+        # <= 3.4e-16); bound = measured x 10 = 1.3e-09.
+        _cmp(got[k], eager[k], f"d_sw1 jit.{k}", 1.3e-9)
 
 
 def test_d_sw1_guard_matrix(geo_dsw):
@@ -1971,10 +1961,9 @@ def test_d_sw1_gradients(geo_dsw):
 
     primals = (jnp.asarray(f["delp"]), jnp.asarray(f["pt"]),
                jnp.asarray(f["uc"]), jnp.asarray(f["vc"]))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity through PPM limiters]
-    _check_adjoint("d_sw1_duo", run, primals, 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.505e-16; bound = measured x 10 =
+    # 1.6e-15.
+    _check_adjoint("d_sw1_duo", run, primals, 1.6e-15)
 
 
 def test_d_sw1_one_sided_across_the_crx_upwind_surface(geo_dsw):
@@ -2051,10 +2040,9 @@ def test_d_sw2_duo_parity(chain):
     n2 = chain["np"][1]
     j2 = chain["jx"][1]
     for k in _D_SW2_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating cell update, no limiter]
-        _cmp(j2[k], n2[k], f"d_sw2_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j2[k], n2[k], f"d_sw2_duo.{k}", 1e-15)
     assert j2["w"] is None and n2["w"] is None
 
 
@@ -2065,11 +2053,10 @@ def test_d_sw2_duo_matches_the_stored_fortran_certificate(chain):
     for okey, jkey in (("delp2", "delp"), ("pt2", "pt"),
                        ("ptc2", "ptc"), ("heat", "heat_source"),
                        ("dw", "dw")):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING via d_sw1's transport]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(j2[jkey], np.asarray(orc[okey], np.float64),
-             f"d_sw2 vs Fortran.{okey}", 1e-11)
+             f"d_sw2 vs Fortran.{okey}", 1e-15)
 
 
 def test_d_sw2_duo_nh_arm_parity(geo_dsw):
@@ -2107,10 +2094,9 @@ def test_d_sw2_duo_nh_arm_parity(geo_dsw):
                        j1["allflux_y"], geo.gs_j, geo.flags, geo.bd,
                        **{**kw, "w": j1["w"]})
     for k in _D_SW2_KEYS + ("w",):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating + del-6 stencil passes]
-        _cmp(j2[k], n2[k], f"d_sw2_duo NH.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j2[k], n2[k], f"d_sw2_duo NH.{k}", 1e-15)
     # non-vacuity, in two independent parts: the block EXECUTED (dw left
     # the workspace fill) and the arithmetic was NOT trivial (dw != 0).
     assert (np.asarray(j2["dw"]) != 1.0e30).all(), "damp_w block skipped"
@@ -2131,10 +2117,9 @@ def test_d_sw2_duo_jit_equals_eager(chain, geo_dsw):
     fn(args[0] * 1.001, *args[1:])
     assert box["n"] == 1, box["n"]
     for k in _D_SW2_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d_sw2 jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst pt 1.183e-16; bound = measured x 10 =
+        # 1.2e-15.
+        _cmp(got[k], eager[k], f"d_sw2 jit.{k}", 1.2e-15)
 
 
 def test_d_sw2_duo_guards(chain, geo_dsw):
@@ -2164,10 +2149,9 @@ def test_d_sw2_duo_gradients(chain, geo_dsw):
 
     primals = (j1["delp"], j1["pt"], jnp.nan_to_num(j1["allflux_x"]),
                jnp.nan_to_num(j1["allflux_y"]))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("d_sw2_duo", f, primals, 1e-11)
+    # MEASURED (job 9425294 sweep): adjoint residual 4.500e-16; bound = measured x 10 =
+    # 4.6e-15.
+    _check_adjoint("d_sw2_duo", f, primals, 4.6e-15)
 
 
 # ---------------------------------------------------------------------
@@ -2185,10 +2169,9 @@ def test_d_sw3_duo_parity(chain):
     """
     n3, j3 = chain["np"][2], chain["jx"][2]
     for k in _D_SW3_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING]
-        _cmp(j3[k], n3[k], f"d_sw3_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j3[k], n3[k], f"d_sw3_duo.{k}", 1e-15)
 
 
 def test_d_sw3_duo_matches_the_stored_fortran_certificate(chain):
@@ -2196,11 +2179,10 @@ def test_d_sw3_duo_matches_the_stored_fortran_certificate(chain):
     j3 = chain["jx"][2]
     orc = _oracle("dsw3_duo_oracle_c12.npz")
     for k in _D_SW3_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, hop A + hop B]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(j3[k], np.asarray(orc[k], np.float64),
-             f"d_sw3 vs Fortran.{k}", 1e-11)
+             f"d_sw3 vs Fortran.{k}", 1e-15)
 
 
 def test_d_sw3_duo_snapshot_precedes_the_recompute(chain):
@@ -2228,23 +2210,12 @@ def test_d_sw3_duo_jit_equals_eager(geo_dsw):
     fn(*args, dt=2.0 * geo_dsw.dt, hord_mt=6)
     assert box["n"] == 1, f"retraced on a new dt: {box['n']}"
     for k in _D_SW3_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager ACROSS A PPM LIMITER]
-        #
-        # This one is NOT the plain FMA class and must not be pinned as
-        # if it were.  MEASURED at job 9404093: `ubbtemp` differed by
-        # 2.403e-10 (max|diff| / max|ref|), six decades above rounding.
-        # `ubbtemp` is `ytp_v`'s PPM flux at hord 6, where the
-        # `smt5`/`smt6` flags ADD or DROP a whole term -- so a
-        # rounding-level input difference can flip a flag and produce a
-        # discrepancy far above 1e-15 (strategy section 4, the fourth
-        # kernel class).  PLAUSIBLE: a flip in a small number of cells.
-        # `_cmp` now reports how many cells exceed 1e-13, which
-        # discriminates a flip (a handful) from something systematic
-        # (all of them); the measurement job should read that count
-        # BEFORE pinning the number.
-        _cmp(got[k], eager[k], f"d_sw3 jit.{k}", 1e-8)
+        # MEASURED (job 9425294 sweep): worst ubbtemp 1.521e-10 with n_over 1 -- ONE cell,
+        # a PPM limiter branch flip under FMA contraction, same class and
+        # scale as job 9404093's 2.403e-10 (vbb 1.428e-10 / n_over 2;
+        # ubb and vbbtemp <= 2.2e-16); bound = measured x 10 = 1.6e-09.
+        # NOT the plain FMA class -- see the retraction banner in _cmp.
+        _cmp(got[k], eager[k], f"d_sw3 jit.{k}", 1.6e-9)
 
 
 def test_d_sw3_duo_guards(geo_dsw):
@@ -2289,10 +2260,9 @@ def test_d_sw3_duo_gradients(geo_dsw):
         return jnp.stack([out[k] for k in _D_SW3_KEYS])
 
     primals = tuple(jnp.asarray(f[k]) for k in ("u", "v", "uc", "vc"))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity through PPM limiters]
-    _check_adjoint("d_sw3_duo", run, primals, 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.529e-16; bound = measured x 10 =
+    # 1.6e-15.
+    _check_adjoint("d_sw3_duo", run, primals, 1.6e-15)
 
 
 # ---------------------------------------------------------------------
@@ -2302,10 +2272,9 @@ def test_d_sw3_duo_gradients(geo_dsw):
 def test_d_sw4_duo_parity(chain):
     """gate 1 -- the four-corner KE fix, full B array."""
     n4, j4 = chain["np"][3], chain["jx"][3]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: pointwise products, no limiter]
-    _cmp(j4["ke"], n4["ke"], "d_sw4_duo.ke", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(j4["ke"], n4["ke"], "d_sw4_duo.ke", 1e-15)
 
 
 def test_d_sw4_duo_matches_the_stored_fortran_certificate(chain,
@@ -2341,11 +2310,10 @@ def test_d_sw4_duo_matches_the_stored_fortran_certificate(chain,
     j4 = duo.d_sw4_duo(jnp.asarray(geo.f["u"]), jnp.asarray(geo.f["v"]),
                        j1["ut"], j1["vt"], ke0, geo.flags, geo.bd,
                        geo.npx, geo.npy, dt=geo.dt)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: sentinel-fed corner products, hop A + hop B]
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
     _cmp(j4["ke"], np.asarray(orc["ke"], np.float64),
-         "d_sw4 vs Fortran.ke", 1e-11)
+         "d_sw4 vs Fortran.ke", 1e-15)
     # the gate is non-vacuous only if the four corners are NOT fills
     got = np.asarray(j4["ke"])
     assert int((got != 1.0e30).sum()) == 4, (
@@ -2395,10 +2363,9 @@ def test_d_sw4_duo_jit_and_gradients(chain, geo_dsw):
     got = fn(*args, dt=geo_dsw.dt)
     fn(*args, dt=2.0 * geo_dsw.dt)
     assert box["n"] == 1, f"retraced on a new dt: {box['n']}"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-    _cmp(got["ke"], eager["ke"], "d_sw4 jit.ke", 1e-12)
+    # MEASURED (job 9425294 sweep): 7.277e-17; bound = measured x 10 =
+    # 7.3e-16.
+    _cmp(got["ke"], eager["ke"], "d_sw4 jit.ke", 7.3e-16)
 
     lo = geo_dsw.bd.isd
 
@@ -2412,11 +2379,10 @@ def test_d_sw4_duo_jit_and_gradients(chain, geo_dsw):
                (1 - lo, geo_dsw.npy - lo)]
         return jnp.stack([out["ke"][i, j] for i, j in idx])
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) adjoint residual; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
     _check_adjoint("d_sw4_duo", run,
-                   (jnp.asarray(f["u"]), jnp.asarray(f["v"])), 1e-12)
+                   (jnp.asarray(f["u"]), jnp.asarray(f["v"])), 1e-15)
 
 
 # ---------------------------------------------------------------------
@@ -2437,10 +2403,9 @@ def test_d_sw5_duo_parity(chain):
     """
     n5, j5 = chain["np"][4], chain["jx"][4]
     for k in _D_SW5_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING + sqrt/clamp]
-        _cmp(j5[k], n5[k], f"d_sw5_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j5[k], n5[k], f"d_sw5_duo.{k}", 1e-15)
     assert j5["w"] is None and n5["w"] is None
 
 
@@ -2450,11 +2415,10 @@ def test_d_sw5_duo_matches_the_stored_fortran_certificate(chain):
     orc = _oracle("dsw5_duo_oracle_c12.npz")
     for k in ("delpc", "ptc", "wk", "divg_d", "ke", "uc", "ut", "vc",
               "vt", "vortfluxx", "vortfluxy", "ub", "vb"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, hop A + hop B]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(j5[k], np.asarray(orc[k], np.float64),
-             f"d_sw5 vs Fortran.{k}", 1e-11)
+             f"d_sw5 vs Fortran.{k}", 1e-15)
 
 
 @pytest.mark.parametrize("nord,dddmp", [(2, 0.2), (1, 0.0)])
@@ -2486,10 +2450,9 @@ def test_d_sw5_duo_branch_matrix_parity(nord, dddmp, geo_dsw, chain):
                        geo.flags, geo.bd, geo.npx, geo.npy, dt=geo.dt,
                        **kw)
     for k in _D_SW5_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING + sqrt/clamp]
-        _cmp(j5[k], n5[k], f"d_sw5 nord={nord} dddmp={dddmp}.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key/nord/dddmp; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j5[k], n5[k], f"d_sw5 nord={nord} dddmp={dddmp}.{k}", 1e-15)
 
 
 def test_d_sw5_duo_nh_arm_parity(geo_dsw):
@@ -2536,12 +2499,11 @@ def test_d_sw5_duo_nh_arm_parity(geo_dsw):
                        j1["ra_x"], j1["ra_y"], jnp.asarray(ke0),
                        geo.gs_j, geo.flags, geo.bd, geo.npx, geo.npy,
                        dt=geo.dt, w=j2["w"], dw=j2["dw"], **d5kw)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: LIMITER-CROSSING + sqrt/clamp]
-    _cmp(j5["w"], n5["w"], "d_sw5_duo NH.w", 1e-12)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), w and every key; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _cmp(j5["w"], n5["w"], "d_sw5_duo NH.w", 1e-15)
     for k in ("wk", "ke", "divg_d"):
-        _cmp(j5[k], n5[k], f"d_sw5_duo NH.{k}", 1e-12)
+        _cmp(j5[k], n5[k], f"d_sw5_duo NH.{k}", 1e-15)
 
 
 def test_d_sw5_duo_jit_equals_eager(chain, geo_dsw):
@@ -2564,10 +2526,9 @@ def test_d_sw5_duo_jit_equals_eager(chain, geo_dsw):
     fn(*args, dt=2.0 * geo.dt, **kw)
     assert box["n"] == 1, f"retraced on a new dt: {box['n']}"
     for k in _D_SW5_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d_sw5 jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst vortfluxy 1.134e-13 (sentinel-cascade FMA class); bound = measured x 10 =
+        # 1.2e-12.
+        _cmp(got[k], eager[k], f"d_sw5 jit.{k}", 1.2e-12)
 
 
 def test_d_sw5_duo_guards(chain, geo_dsw):
@@ -2618,10 +2579,9 @@ def test_d_sw5_duo_gradients(chain, geo_dsw):
     primals = (jnp.asarray(f["u"]), jnp.asarray(f["v"]),
                jnp.asarray(f["divg_d_in"]),
                jnp.nan_to_num(j4["ke"], posinf=0.0, neginf=0.0))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, sqrt+clamp+PPM present]
-    _check_adjoint("d_sw5_duo", run, primals, 1e-9)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.515e-16; bound = measured x 10 =
+    # 1.6e-15.
+    _check_adjoint("d_sw5_duo", run, primals, 1.6e-15)
 
 
 def test_d_sw5_damping_recurrence_is_ordered(geo_dsw, chain):
@@ -2662,10 +2622,9 @@ def test_d_sw6_duo_parity(chain):
     vorticity damping that CLOBBERS ut/vt."""
     n6, j6 = chain["np"][5], chain["jx"][5]
     for k in _D_SW6_KEYS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: accumulating + del-6 stencil passes]
-        _cmp(j6[k], n6[k], f"d_sw6_duo.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j6[k], n6[k], f"d_sw6_duo.{k}", 1e-15)
 
 
 def test_d_sw6_duo_matches_the_stored_fortran_certificate(chain):
@@ -2677,13 +2636,12 @@ def test_d_sw6_duo_matches_the_stored_fortran_certificate(chain):
     j6 = chain["jx"][5]
     orc = _oracle("dsw6_duo_oracle_c12.npz")
     for k in ("u", "v", "ut", "vt", "ub", "vb"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: LIMITER-CROSSING, hop A + hop B]
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every key incl heat; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
         _cmp(j6[k], np.asarray(orc[k], np.float64),
-             f"d_sw6 vs Fortran.{k}", 1e-11)
+             f"d_sw6 vs Fortran.{k}", 1e-15)
     _cmp(j6["heat_source"], np.asarray(orc["heat"], np.float64),
-         "d_sw6 vs Fortran.heat", 1e-11)
+         "d_sw6 vs Fortran.heat", 1e-15)
 
 
 def test_d_sw6_duo_jit_equals_eager(chain, geo_dsw):
@@ -2714,10 +2672,9 @@ def test_d_sw6_duo_jit_equals_eager(chain, geo_dsw):
     for k in _D_SW6_KEYS:
         if k in ("ut", "vt"):
             continue
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: jit-vs-eager, FMA contraction expected]
-        _cmp(got[k], eager[k], f"d_sw6 jit.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst v 9.664e-16; bound = measured x 10 =
+        # 9.7e-15.
+        _cmp(got[k], eager[k], f"d_sw6 jit.{k}", 9.7e-15)
 
 
 def test_d_sw6_duo_guards(chain, geo_dsw):
@@ -2756,10 +2713,9 @@ def test_d_sw6_duo_gradients(chain, geo_dsw):
     primals = (jnp.asarray(f["u"]), jnp.asarray(f["v"]),
                jnp.nan_to_num(j5["ke"], posinf=0.0, neginf=0.0),
                jnp.nan_to_num(j5["wk"], posinf=0.0, neginf=0.0))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.   [class: adjoint identity, roundoff only]
-    _check_adjoint("d_sw6_duo", run, primals, 1e-10)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) adjoint residual; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _check_adjoint("d_sw6_duo", run, primals, 1e-15)
 def test_d_sw6_ut_gap_is_not_a_limiter_branch_flip(chain, geo_dsw):
     """⛔ REFUTES the proposed mechanism for ``d_sw6``'s jit gap, and
     names + measures the surviving candidate.
@@ -2962,10 +2918,9 @@ def test_sel_div_survives_a_zero_in_the_dead_denominator(site, geo_dsw):
 
     # (1) value parity with a zero in every DEAD denominator
     for k in ("ut", "vt", "crx_adv", "cry_adv"):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.   [class: R1b regression, zeroed dead metric]
-        _cmp(j1[k], n1[k], f"d_sw1 {site} dead-zero.{k}", 1e-12)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every site/key; bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        _cmp(j1[k], n1[k], f"d_sw1 {site} dead-zero.{k}", 1e-15)
 
     # (2) the gradient stays FINITE -- not implied by (1), and this is
     # what an unsanitized `where`-over-divide fails

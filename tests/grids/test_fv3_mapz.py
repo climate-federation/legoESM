@@ -40,9 +40,12 @@ lives in; one was a match string on a refusal Python itself performs.
 The margins are now relative, calibrated to that measurement, and every
 one of them REPORTS what it measured.
 
-TOLERANCE STATUS: every numeric agreement bound in this file carries a
-``TOL-PENDING`` marker and a provisional 1e-12.  They are NOT measured --
-one ``grep TOL-PENDING`` finds them all.
+TOLERANCE STATUS: every numeric agreement bound in this file is
+MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE sweep) and set to
+measured x 10 (exact-0.0 measurements get a 1e-15 eps guard).  The worst
+lane-parity figure is pkz at 8.002e-15; the adjoint identities peak at
+3.825e-14 (profile kord 9/13); the loosest bound in the file is the
+kord-9 A6-grouping value agreement at 2.427e-13 measured.
 """
 from __future__ import annotations
 
@@ -58,6 +61,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import gate_scalar  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import check_adjoint  # noqa: E402
 
@@ -210,9 +215,9 @@ def test_cs_limiters_jax_matches_numpy_lane(iv):
     ref = np.array(a4, copy=True)
     cs_limiters_n(ref, extm, iv)
     got = np.asarray(cs_limiters_j(jnp.asarray(a4), jnp.asarray(extm), iv))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[1:5], ref[1:5]) <= 1e-12, _rel(got[1:5], ref[1:5])
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), all iv; bound = 1e-15
+    # eps guard (measured exactly 0.0).
+    gate_scalar(f"cs_limiters iv={iv}", _rel(got[1:5], ref[1:5]), 1e-15)
     # Slots 0 and 1 are carried through untouched.
     assert np.array_equal(got[0], a4[0]) and np.array_equal(got[1], a4[1])
     # NON-VACUITY (not a tolerance): the limiter actually fired somewhere.
@@ -225,9 +230,9 @@ def test_cs_limiters_jax_jit_matches_eager(iv):
     eager = np.asarray(cs_limiters_j(jnp.asarray(a4), jnp.asarray(extm), iv))
     jitted = np.asarray(cs_limiters_jit(jnp.asarray(a4), jnp.asarray(extm),
                                         iv))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(jitted, eager) <= 1e-12, _rel(jitted, eager)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), all iv; bound = 1e-15
+    # eps guard (measured exactly 0.0).
+    gate_scalar(f"cs_limiters jit iv={iv}", _rel(jitted, eager), 1e-15)
 
 
 def test_cs_limiters_jax_no_retrace_and_production_policy():
@@ -531,10 +536,10 @@ def test_profile_jax_matches_numpy_lane_every_kord(kind, kord):
     delp = _delp_col(im, km)
     ref = _np_profile(kind, q1, delp, km, 1, kord)
     got = _jax_profile(kind, q1, delp, km, 1, kord)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[1:5], ref[1:5]) <= 1e-12, (kind, kord,
-                                               _rel(got[1:5], ref[1:5]))
+    # MEASURED (job 9425294 sweep): worst 1.940e-15 (both kinds, kord=17);
+    # bound = measured x 10 = 2.0e-14.
+    gate_scalar(f"profile {kind} kord={kord}", _rel(got[1:5], ref[1:5]),
+                2.0e-14)
     # NON-VACUITY: the profile is not the trivial AL = AR = qbar.
     assert np.abs(ref[2] - ref[1]).max() > 1e-6
 
@@ -550,10 +555,10 @@ def test_profile_jax_matches_numpy_lane_cold_column(kind, kord):
     delp = _delp_col(im, km, seed=11)
     ref = _np_profile(kind, q1, delp, km, 1, kord)
     got = _jax_profile(kind, q1, delp, km, 1, kord)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[1:5], ref[1:5]) <= 1e-12, (kind, kord,
-                                               _rel(got[1:5], ref[1:5]))
+    # MEASURED (job 9425294 sweep): worst 5.235e-15 (both kinds, most kords);
+    # bound = measured x 10 = 5.3e-14.
+    gate_scalar(f"profile cold {kind} kord={kord}",
+                _rel(got[1:5], ref[1:5]), 5.3e-14)
 
 
 @pytest.mark.parametrize("kord", (9, 15, 11))
@@ -575,10 +580,10 @@ def test_profile_jax_keeps_the_scalar_vs_cs_qmin_delta(kord):
     # is the oracle's, not a defect in one of them).
     for kind, got in (("scalar", a_s), ("cs", a_c)):
         ref = _np_profile(kind, q1, delp, km, 1, kord)
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert _rel(got[1:5], ref[1:5]) <= 1e-12, (kind, kord)
+        # MEASURED (job 9425294 sweep): worst 5.235e-15 (both kinds, every kord);
+        # bound = measured x 10 = 5.3e-14.
+        gate_scalar(f"profile qmin-delta {kind} kord={kord}",
+                    _rel(got[1:5], ref[1:5]), 5.3e-14)
 
 
 def test_profile_jax_kord15_nesting_difference():
@@ -609,10 +614,10 @@ def test_profile_jax_kord15_nesting_difference():
     for kind, got, qm in (("scalar", a_s, -1e30), ("cs", a_c, None)):
         ref = _np_profile(kind, q1, delp, KM, 1, 15,
                           qmin=(qm if kind == "scalar" else T_MIN))
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert _rel(got[1:5], ref[1:5]) <= 1e-12, kind
+        # MEASURED (job 9425294 sweep): worst 5.785e-16 (scalar); bound = measured
+        # x 10 = 5.8e-15.
+        gate_scalar(f"profile kord15-nesting {kind}",
+                    _rel(got[1:5], ref[1:5]), 5.8e-15)
 
 
 def test_profile_jax_kord12_uses_one_a6_grouping_and_kord9_two():
@@ -636,9 +641,10 @@ def test_profile_jax_kord12_uses_one_a6_grouping_and_kord9_two():
     a_c9 = _jax_profile("cs", q1, delp, km, 1, 9)
     assert a_s9[4].tobytes() != a_c9[4].tobytes(), \
         "kord=9 A6 is bitwise equal in both routines -- one grouping was lost"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(a_s9[4], a_c9[4]) <= 1e-12          # ...but equal in value
+    # MEASURED (job 9425294 sweep): 2.427e-13 (the two groupings really do
+    # round differently); bound = measured x 10 = 2.5e-12.
+    gate_scalar("profile kord9 a6-groupings", _rel(a_s9[4], a_c9[4]),
+                2.5e-12)   # ...but equal in value
 
 
 @pytest.mark.parametrize("iv", [-1, 0, 1, 2])
@@ -651,9 +657,10 @@ def test_profile_jax_matches_numpy_lane_every_iv(kind, iv):
     delp = _delp_col(im, km, seed=23)
     ref = _np_profile(kind, q1, delp, km, iv, 9, qmin=0.0)
     got = _jax_profile(kind, q1, delp, km, iv, 9, qmin=0.0)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[1:5], ref[1:5]) <= 1e-12, (kind, iv)
+    # MEASURED (job 9425294 sweep): worst 3.553e-17; bound = measured x 10 =
+    # 3.6e-16.
+    gate_scalar(f"profile {kind} iv={iv}", _rel(got[1:5], ref[1:5]),
+                3.6e-16)
 
 
 @pytest.mark.parametrize("kind", ["scalar", "cs"])
@@ -666,9 +673,10 @@ def test_profile_jax_iv_minus2_bottom_bc(kind):
     qs = np.array([0.5, -0.25, 1.5, 0.0])
     ref = _np_profile(kind, q1, delp, km, -2, 9, qs=qs)
     got = _jax_profile(kind, q1, delp, km, -2, 9, qs=qs)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[1:5], ref[1:5]) <= 1e-12, kind
+    # MEASURED (job 9425294 sweep): worst 1.433e-17 (cs); bound = measured x
+    # 10 = 1.5e-16.
+    gate_scalar(f"profile {kind} iv=-2 qs-bc", _rel(got[1:5], ref[1:5]),
+                1.5e-16)
     # NON-VACUITY: the BC actually moved the answer.
     other = _jax_profile(kind, q1, delp, km, -2, 9, qs=qs + 3.0)
     assert np.abs(other[1:5] - got[1:5]).max() > 1e-6
@@ -682,9 +690,10 @@ def test_profile_jax_jit_matches_eager(kind, kord):
     delp = _delp_col(im, km)
     eager = _jax_profile(kind, q1, delp, km, 1, kord)
     jitted = _jax_profile(kind, q1, delp, km, 1, kord, jit=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(jitted, eager) <= 1e-12, (kind, kord, _rel(jitted, eager))
+    # MEASURED (job 9425294 sweep): 3.233e-15 (every kind/kord); bound =
+    # measured x 10 = 3.3e-14.
+    gate_scalar(f"profile jit {kind} kord={kord}", _rel(jitted, eager),
+                3.3e-14)
 
 
 @pytest.mark.parametrize("kind", ["scalar", "cs"])
@@ -1001,9 +1010,10 @@ def test_map_jax_matches_numpy_lane_every_kord(kind, kord):
     pe1, q1, pe2, dp2, iv = _map_args(kind, km=KMP)
     ref = _run_map(kind, pe1, q1, pe2, KMP, KMP, iv, kord, dp2, lane="np")
     got = _run_map(kind, pe1, q1, pe2, KMP, KMP, iv, kord, dp2)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[:, 1:], ref[:, 1:]) <= 1e-12, (kind, kord)
+    # MEASURED (job 9425294 sweep): worst 4.403e-16; bound = measured x 10 =
+    # 4.5e-15.
+    gate_scalar(f"map {kind} kord={kord}", _rel(got[:, 1:], ref[:, 1:]),
+                4.5e-15)
     # NON-VACUITY: the rezone genuinely moved the field (a lane that
     # copied its input would pass every parity AND conservation test).
     assert np.abs(got[:, 1:] - q1[:, 1:]).max() > 1e-3
@@ -1014,9 +1024,9 @@ def test_map_jax_jit_matches_eager(kind):
     pe1, q1, pe2, dp2, iv = _map_args(kind, km=KMP)
     eager = _run_map(kind, pe1, q1, pe2, KMP, KMP, iv, 9, dp2)
     jitted = _run_map(kind, pe1, q1, pe2, KMP, KMP, iv, 9, dp2, jit=True)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(jitted, eager) <= 1e-12, (kind, _rel(jitted, eager))
+    # MEASURED (job 9425294 sweep): worst 3.302e-16 (map1_ppm); bound = measured
+    # x 10 = 3.4e-15.
+    gate_scalar(f"map jit {kind}", _rel(jitted, eager), 3.4e-15)
 
 
 @pytest.mark.parametrize("kind", MAP_KINDS)
@@ -1060,9 +1070,9 @@ def test_map1_q2_jax_divides_by_the_callers_dp2():
     # ...and the skewed answer still tracks the NumPy lane.
     ref_s = _run_map("map1_q2", pe1, q1, pe2, KMP, KMP, 0, 9, skew,
                      lane="np")
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[:, 1:], ref_s[:, 1:]) <= 1e-12
+    # MEASURED (job 9425294 sweep): 2.201e-16; bound = measured x 10 = 2.3e-15.
+    gate_scalar("map1_q2 skewed dp2", _rel(got[:, 1:], ref_s[:, 1:]),
+                2.3e-15)
 
 
 def test_map_scalar_jax_is_not_map1_ppm():
@@ -1115,9 +1125,10 @@ def test_map_jax_matches_numpy_lane_at_an_interface_tie(kind, mode):
     iv = {"map_scalar": 1, "map1_ppm": -1, "map1_q2": 0}[kind]
     ref = _run_map(kind, pe1, q1, pe2, km, km, iv, 9, dp2, lane="np")
     got = _run_map(kind, pe1, q1, pe2, km, km, iv, 9, dp2)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(got[:, 1:], ref[:, 1:]) <= 1e-12, (kind, mode)
+    # MEASURED (job 9425294 sweep): worst 3.308e-16 (map1_ppm, all modes); bound
+    # = measured x 10 = 3.4e-15.
+    gate_scalar(f"map tie {kind} {mode}", _rel(got[:, 1:], ref[:, 1:]),
+                3.4e-15)
 
 
 def test_map_jax_tie_spread_agrees_with_the_numpy_lane():
@@ -1137,10 +1148,11 @@ def test_map_jax_tie_spread_agrees_with_the_numpy_lane():
     for other in ("below", "above"):
         d_n = np.abs(out["np", "exact"] - out["np", other]).max()
         d_j = np.abs(out["jax", "exact"] - out["jax", other]).max()
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert abs(d_j - d_n) <= 1e-12 * max(d_n, 1.0), (other, d_n, d_j)
+        # MEASURED (job 9425294 sweep): exactly 0.0 (both directions); bound = 1e-15
+        # eps guard (measured exactly 0.0).
+        gate_scalar(f"map tie-spread {other}",
+                    abs(d_j - d_n) / max(d_n, 1.0), 1e-15,
+                    quantity="tie-spread agreement rel")
 
 
 # ------------------------------------------- the no-bracket path
@@ -1206,9 +1218,12 @@ def test_map_jax_conserves_the_column_integral_as_well_as_numpy(kind):
         out = _run_map(kind, pe1, q1, pe2, km, km, iv, 9, dp2, lane=lane)
         res[lane] = np.abs((out[:, 1:] * tgt_dp).sum(axis=1) - src).max() \
             / np.abs(src).max()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert res["jax"] <= max(3.0 * res["np"], 1e-12), (kind, res)
+    # MEASURED (job 9425294 sweep): res['jax'] = 1.486e-16 for all three kinds;
+    # floor = measured x 10 = 1.5e-15 (the 3x-NumPy term unchanged).
+    gate_scalar(f"map conservation {kind}", res["jax"],
+                max(3.0 * res["np"], 1.5e-15),
+                quantity="column-mass conservation defect rel"
+                         " (bound floor is the pinned term)")
     # NON-VACUITY: the target grid is genuinely different from the source
     # (on identical grids the rezone is the identity and conserves for
     # free).
@@ -1228,10 +1243,11 @@ def test_map_jax_preserves_a_constant_field(kind):
     q1[:, 1:] = 7.25
     iv = {"map_scalar": 1, "map1_ppm": -1, "map1_q2": 0}[kind]
     out = _run_map(kind, pe1, q1, pe2, km, km, iv, 9, _dp_1based(pe2))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(out[:, 1:] - 7.25).max() <= 1e-12 * 7.25, \
-        np.abs(out[:, 1:] - 7.25).max()
+    # MEASURED (job 9425294 sweep): 2.450e-16 (all kinds); bound = measured x 10
+    # = 2.5e-15.
+    gate_scalar(f"map constant-field {kind}",
+                np.abs(out[:, 1:] - 7.25).max() / 7.25, 2.5e-15,
+                quantity="constant-preservation rel")
 
 
 def test_map_jax_identity_remap_returns_the_cell_means():
@@ -1242,9 +1258,9 @@ def test_map_jax_identity_remap_returns_the_cell_means():
     pe1, _, _, _ = _lagrangian_edges(im=im, km=km)
     q1 = _column(im=im, km=km, amp=8.0)
     out = _run_map("map_scalar", pe1, q1, pe1, km, km, 1, 9)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(out[:, 1:], q1[:, 1:]) <= 1e-12, _rel(out[:, 1:], q1[:, 1:])
+    # MEASURED (job 9425294 sweep): 2.203e-16; bound = measured x 10 = 2.3e-15.
+    gate_scalar("map identity remap", _rel(out[:, 1:], q1[:, 1:]),
+                2.3e-15)
 
 
 # ------------------------------------------- guards
@@ -1438,20 +1454,20 @@ def _cmp_l2e(ref, out, keys, tol, label=""):
         got = np.asarray(getattr(out, k))
         want = ref[k]
         assert got.shape == want.shape, (k, got.shape, want.shape)
-        assert _rel(got, want) <= tol, (label, k, _rel(got, want))
+        gate_scalar(f"l2e {label} {k}", _rel(got, want), tol)
 
 
 # ------------------------------------------------------------- gate 1
 def test_driver_jax_matches_numpy_lane_hydrostatic():
     ref, out, _ = _run_driver_both(lambda: _face()[0])
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp_l2e(ref, out, _L2E_FIELDS, 1e-12, "hydro")
+    # MEASURED (job 9425294 sweep): worst field pkz 8.002e-15 (all others
+    # <= 5.5e-16); bound = measured x 10 = 8.1e-14.
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "hydro")
     for iq, qn in enumerate(ref["q"]):
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert _rel(np.asarray(out.q[iq]), qn) <= 1e-12, iq
+        # MEASURED (job 9425294 sweep): worst q[1] 5.421e-16; bound = measured x 10
+        # = 5.5e-15.
+        gate_scalar(f"l2e hydro q[{iq}]", _rel(np.asarray(out.q[iq]), qn),
+                    5.5e-15)
     assert isinstance(out, LagrangianToEulerianOut)
 
 
@@ -1459,9 +1475,9 @@ def test_driver_jax_matches_numpy_lane_not_last_step():
     """``last_step=False`` takes the OTHER closing arm (:996-1001, pt /=
     pkz) and skips the omega block entirely."""
     ref, out, _ = _run_driver_both(lambda: _face()[0], last_step=False)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp_l2e(ref, out, _L2E_FIELDS, 1e-12, "not-last")
+    # MEASURED (job 9425294 sweep): worst field pkz 8.002e-15 (pt 6.291e-15);
+    # bound = measured x 10 = 8.1e-14.
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "not-last")
 
 
 @pytest.mark.parametrize("w_limiter", [False, True])
@@ -1477,9 +1493,9 @@ def test_driver_jax_matches_numpy_lane_nonhydrostatic(w_limiter):
         return f
 
     ref, out, _ = _run_driver_both(_mk)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp_l2e(ref, out, _L2E_FIELDS + ("w", "delz"), 1e-12,
+    # MEASURED (job 9425294 sweep): worst field pkz 6.667e-16 (delz 5.890e-16),
+    # both limiter arms; bound = measured x 10 = 6.7e-15.
+    _cmp_l2e(ref, out, _L2E_FIELDS + ("w", "delz"), 6.7e-15,
              f"nh-limiter={w_limiter}")
     # NON-VACUITY: the limiter arm really is a different answer.
     if w_limiter:
@@ -1498,9 +1514,9 @@ def test_driver_jax_matches_numpy_lane_moist_closing_conversion():
         return f
 
     ref, out, _ = _run_driver_both(_mk, sphum_index=1)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    _cmp_l2e(ref, out, _L2E_FIELDS, 1e-12, "moist")
+    # MEASURED (job 9425294 sweep): worst field pkz 8.002e-15; bound = measured
+    # x 10 = 8.1e-14.
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "moist")
     # NON-VACUITY: sphum_index=1 is not sphum_index=0 on this fixture.
     f0 = _face()[0]
     f0["r_vir"] = 1.0
@@ -1519,11 +1535,11 @@ def test_driver_jax_jit_matches_eager():
     eager = l2e_j(**kw, q=q)
     jitted = lagrangian_to_eulerian_jit(**kw, q=q)
     for k in _L2E_FIELDS:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert _rel(np.asarray(getattr(jitted, k)),
-                    np.asarray(getattr(eager, k))) <= 1e-12, k
+        # MEASURED (job 9425294 sweep): worst field omga 8.845e-15 (pkz 7.869e-15);
+        # bound = measured x 10 = 8.9e-14.
+        gate_scalar(f"l2e jit {k}",
+                    _rel(np.asarray(getattr(jitted, k)),
+                         np.asarray(getattr(eager, k))), 8.9e-14)
 
 
 def test_driver_jax_no_retrace():
@@ -1699,38 +1715,44 @@ def test_driver_jax_conservation_invariants():
     ps1 = np.asarray(out.ps)[ia:ia + n, ia:ia + n]
     pe1 = np.asarray(out.pe)[1:n + 1, :, 1:n + 1]      # (i, k, j)
     # 1 -- dry mass, per column, no area weights (column-local operator).
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(dp1.sum(axis=2) - col0).max() <= 1e-12 * col0.max()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(dp1.sum(axis=2) - (ps1 - ptop)).max() <= 1e-12 * col0.max()
+    # MEASURED (job 9425294 sweep): exactly 0.0; bound = 1e-15 eps guard
+    # (measured exactly 0.0).
+    gate_scalar("l2e dry mass",
+                np.abs(dp1.sum(axis=2) - col0).max() / col0.max(), 1e-15,
+                quantity="column dry-mass closure rel")
+    # MEASURED (job 9425294 sweep): exactly 0.0; bound = 1e-15 eps guard
+    # (measured exactly 0.0).
+    gate_scalar("l2e ps closure",
+                np.abs(dp1.sum(axis=2) - (ps1 - ptop)).max() / col0.max(),
+                1e-15, quantity="ps-delp closure rel")
     # 2 -- per-tracer mass, each tracer separately.
     for iq, x in enumerate(q):
         now = np.asarray(out.q[iq])[ia:ia + n, ia:ia + n, :]
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job
-        # will replace this with `measured X, bound = measured x N`.  DO NOT
-        # SHIP.
-        assert np.abs((now * dp1).sum(axis=2) - m0[iq]).max() \
-            <= 1e-12 * np.abs(m0[iq]).max(), f"tracer {iq} mass"
+        # MEASURED (job 9425294 sweep): worst tracer2 2.929e-16; bound = measured x
+        # 10 = 3.0e-15.
+        gate_scalar(f"l2e tracer{iq} mass",
+                    np.abs((now * dp1).sum(axis=2) - m0[iq]).max()
+                    / np.abs(m0[iq]).max(), 3.0e-15,
+                    quantity="per-tracer mass closure rel")
         if iq < 2:      # NON-VACUITY: the non-constant tracers DID move
             assert np.abs(now - x[ia:ia + n, ia:ia + n, :]).max() > 1e-9
     # 3 -- pressure-thickness closure of the RETURNED fields.
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(np.diff(pe1, axis=1).transpose(0, 2, 1), dp1) <= 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(np.exp(np.asarray(out.peln)), pe1) <= 1e-12
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(np.asarray(out.pk)[ia:ia + n, ia:ia + n, :],
-                (pe1 ** akap).transpose(0, 2, 1)) <= 1e-12
+    # MEASURED (job 9425294 sweep): exactly 0.0; bound = 1e-15 eps guard
+    # (measured exactly 0.0).
+    gate_scalar("l2e pe-delp closure",
+                _rel(np.diff(pe1, axis=1).transpose(0, 2, 1), dp1), 1e-15)
+    # MEASURED (job 9425294 sweep): 8.477e-16; bound = measured x 10 = 8.5e-15.
+    gate_scalar("l2e peln-pe closure",
+                _rel(np.exp(np.asarray(out.peln)), pe1), 8.5e-15)
+    # MEASURED (job 9425294 sweep): 5.253e-16; bound = measured x 10 = 5.3e-15.
+    gate_scalar("l2e pk-pe closure",
+                _rel(np.asarray(out.pk)[ia:ia + n, ia:ia + n, :],
+                     (pe1 ** akap).transpose(0, 2, 1)), 5.3e-15)
     # 4 -- constant field in, constant field out.
     qc1 = np.asarray(out.q[2])[ia:ia + n, ia:ia + n, :]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(qc1 - 3.75).max() <= 1e-12 * 3.75, np.abs(qc1 - 3.75).max()
+    # MEASURED (job 9425294 sweep): 2.368e-16; bound = measured x 10 = 2.4e-15.
+    gate_scalar("l2e constant tracer", np.abs(qc1 - 3.75).max() / 3.75,
+                2.4e-15, quantity="constant-tracer preservation rel")
 
 
 def test_driver_jax_leaves_the_halo_bitwise_unchanged():
@@ -1797,10 +1819,12 @@ def test_driver_jax_w_limiter_conserves_weighted_momentum():
         if lim:
             assert w.max() <= W_MAX_MAPZ + 1e-9
             assert w.min() >= -abs(2.0 * W_MAX_MAPZ)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(mom[True] - mom[False]).max() \
-        <= 1e-12 * max(np.abs(mom[False]).max(), 1.0)
+    # MEASURED (job 9425294 sweep): exactly 0.0; bound = 1e-15 eps guard
+    # (measured exactly 0.0).
+    gate_scalar("l2e w-limiter momentum",
+                np.abs(mom[True] - mom[False]).max()
+                / max(np.abs(mom[False]).max(), 1.0), 1e-15,
+                quantity="limiter momentum-redistribution closure rel")
     # NON-VACUITY: the limiter really fired (otherwise this is trivial).
     assert np.asarray(outs[False].w).max() > W_MAX_MAPZ
     assert not np.array_equal(np.asarray(outs[True].w),
@@ -1815,17 +1839,19 @@ def test_driver_jax_nh_delz_column_height_is_conserved():
     out = l2e_j(**{k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
                    for k, v in f.items()}, q=[])
     after = np.asarray(out.delz).sum(axis=2)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(after - before).max() <= 1e-12 * np.abs(before).max()
+    # MEASURED (job 9425294 sweep): 3.339e-16; bound = measured x 10 = 3.4e-15.
+    gate_scalar("l2e delz height",
+                np.abs(after - before).max() / np.abs(before).max(), 3.4e-15,
+                quantity="column height closure rel")
     assert np.asarray(out.delz).max() < 0.0
     # A CONSTANT w with a matching ws BC comes back as that constant
     # (the iv=-2 reconstruction of a constant is the constant).
     ia, n = f["ng"], f["n"]
     ww = np.asarray(out.w)[ia:ia + n, ia:ia + n, :]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(ww - 5.0).max() <= 1e-12 * 5.0, np.abs(ww - 5.0).max()
+    # MEASURED (job 9425294 sweep): exactly 0.0; bound = 1e-15 eps guard
+    # (measured exactly 0.0).
+    gate_scalar("l2e constant w", np.abs(ww - 5.0).max() / 5.0, 1e-15,
+                quantity="constant-w preservation rel")
 
 
 # ------------------------------------------------------------- gate 4
@@ -1880,7 +1906,7 @@ def test_driver_jax_check_grads_order2_off_switch():
 # Adjoint consistency -- <J v, w> == <v, J^T w>, NO finite differences
 # ====================================================================== #
 
-def _assert_adjoint_consistent(f, args, seed=0, tol=1e-12, label=""):
+def _assert_adjoint_consistent(f, args, seed=0, tol=3.9e-13, label=""):
     """The dot-product test: ``<J v, w> == <v, J^T w>``.
 
     ``J v`` comes from ``jax.jvp`` (forward mode) and ``J^T w`` from
@@ -1912,9 +1938,11 @@ def _assert_adjoint_consistent(f, args, seed=0, tol=1e-12, label=""):
     lhs = float(jnp.sum(jv * w))
     rhs = float(sum(jnp.sum(a * b) for a, b in zip(v, jtw)))
     denom = max(abs(lhs), abs(rhs), 1e-30)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs(lhs - rhs) / denom <= tol, (label, lhs, rhs)
+    # MEASURED (job 9425294 sweep): worst residual over every caller is 3.825e-14
+    # (the profile kord 9/13 group, both kinds; driver/map/tie all
+    # <= 3.9e-16); default tol = measured x 10 = 3.9e-13.
+    gate_scalar(f"l2e adjoint {label}", abs(lhs - rhs) / denom, tol,
+                quantity="adjoint identity residual")
     # NON-VACUITY: a zero Jacobian satisfies the identity trivially.
     assert abs(lhs) > 0.0, (label, "<J v, w> == 0 -- the gate is vacuous")
 
@@ -2008,7 +2036,7 @@ def test_driver_jax_adjoint_consistency():
 # called it a failure.  No floor: normalise by the quantity's own scale.
 _AD_FD_REL = 1.5e-6
 # The one-sided derivative JUMP vs its closed form; see the assertion.
-_D_JUMP_REL = 1.0e-4
+_D_JUMP_REL = 1.9e-5
 
 def _tie_derivative_probe(im, km, which, q1, pe1, pe2b):
     """``f(t)``: the remapped value of the target layer whose TOP edge is
@@ -2113,10 +2141,12 @@ def test_map_jax_one_sided_derivatives_at_an_interface_tie(column):
     # is exactly 0 and the residual is the derivative's own drift across
     # the 2d evaluation interval (an O(d) effect, estimated ~1e-5
     # relative), so the derivative scale has to carry the bound there.
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs((g_plus - g_minus) - predicted) <= _D_JUMP_REL * max(
-        abs(predicted), abs(g_plus)), (g_plus - g_minus, predicted)
+    # MEASURED (job 9425294 sweep): worst 1.889e-06 (limited; smooth 1.521e-07);
+    # bound _D_JUMP_REL = measured x 10 = 1.9e-05.
+    gate_scalar(f"map tie derivative-jump {column}",
+                abs((g_plus - g_minus) - predicted)
+                / max(abs(predicted), abs(g_plus)), _D_JUMP_REL,
+                quantity="one-sided derivative-jump prediction rel")
     if column == "limited":
         # NON-VACUITY: this really is a derivative switching surface.
         assert abs(g_plus - g_minus) > 1e-6 * max(abs(g_plus), 1e-30)
@@ -2154,9 +2184,9 @@ def test_map_jax_zero_thickness_contained_target_is_finite_value_and_grad():
                            return_ok=True)
     assert bool(ok)
     assert np.isfinite(np.asarray(got)).all(), "PRIMAL NaN at 0/0"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(np.asarray(got)[:, 1:], ref[:, 1:]) <= 1e-12
+    # MEASURED (job 9425294 sweep): 4.756e-16; bound = measured x 10 = 4.8e-15.
+    gate_scalar("map_scalar zero-thickness contained",
+                _rel(np.asarray(got)[:, 1:], ref[:, 1:]), 4.8e-15)
 
     def loss(q_):
         return jnp.sum(map_scalar_j(jnp.asarray(pe1), q_, jnp.asarray(pe2),
@@ -2235,9 +2265,9 @@ def test_map_jax_degenerate_source_layer_the_walk_never_visits():
                          qs=jnp.asarray(qs), return_ok=True)
     assert bool(ok)
     assert np.isfinite(np.asarray(got)).all(), "PRIMAL non-finite"
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(np.asarray(got)[:, 1:], ref[:, 1:]) <= 1e-12
+    # MEASURED (job 9425294 sweep): 1.582e-16; bound = measured x 10 = 1.6e-15.
+    gate_scalar("map1_ppm degenerate-layer walk",
+                _rel(np.asarray(got)[:, 1:], ref[:, 1:]), 1.6e-15)
 
     def loss(q_, pe1_, pe2_):
         return jnp.sum(map1_ppm_j(pe1_, q_, pe2_, km, km, -2, 9,

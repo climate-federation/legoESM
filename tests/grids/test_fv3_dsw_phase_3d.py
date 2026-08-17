@@ -30,7 +30,7 @@ below interrogate the JOINS, and one join in particular:
 Gate classes, following the sibling 3-D module's file:
 
 1. **parity** -- JAX vs the NumPy twin from BYTE-IDENTICAL inputs, per
-   output, with a measured bound carrying a ``TOL-PENDING`` marker.
+   output, with a bound MEASURED in job 9425294 (measured x 10).
    Both lanes are fed the SAME NumPy ``csw_phase_3d`` output, so a
    ``c_sw`` parity difference cannot leak into a transport verdict;
 2. **cadence** -- perturb one LEVEL and one FACE and require the
@@ -65,7 +65,8 @@ TOLERANCE POLICY.  ``d_sw1`` runs the ``xppm``/``yppm`` limiter
 pipelines and ``del6_vt_flux``; ``d_sw2`` is a flux-divergence update;
 the exchanges are weighted stencil sums.  Per strategy section 4 that
 spans the accumulating and branch-switching classes, so every numeric
-bound below carries a ``TOL-PENDING`` marker plus a one-word class
+bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
+sweep) and set to measured x 10; each keeps a one-word class
 label.
 
 COST.  These gates run six faces x three levels of ``d_sw1`` AND
@@ -88,7 +89,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from jax.test_util import check_grads  # noqa: E402
+
+
+from tests.grids.fv3_gate_helpers import gated_check_grads  # noqa: E402
 from legoesm.core import fv3_dsw_phase_3d as jdsw  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npcg  # noqa: E402
 from legoesm.core import fv3_native_dsw_phase_3d as npdsw  # noqa: E402
@@ -249,6 +252,13 @@ def _cmp(got, ref, name, tol):
     per = diff / (np.abs(b[ok]) + scale)
     rel = float(per.max())
     n_over = int((per > 1e-13).sum())
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip ONLY
+    # the tolerance assert; the structural checks above still raise.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {rel:.3e} (bound {tol:.3e}, "
+              f"n_over {n_over}, max|diff| {float(diff.max()):.3e})",
+              flush=True)
+        return rel, n_over
     assert rel <= tol, (
         f"{name}: MEASURED per-element rel {rel:.3e} > {tol:.3e}; "
         f"{n_over} of {int(ok.sum())} compared cells exceed 1e-13 "
@@ -336,6 +346,10 @@ def _check_adjoint(name, f, primals, tol, seed=0):
         f"so this gate proves nothing (check the window/scale)")
     assert np.isfinite(lhs) and np.isfinite(rhs), (
         f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return r
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
@@ -642,12 +656,10 @@ def test_exchange_post_pgrad_3d_matches_numpy_lane(ctx, jctx, csw_np,
     got = jdsw.exchange_post_pgrad_3d(jctx, jcsw, KM, nord=2)
     for name in ("uc", "vc", "divg_d"):
         for t in range(6):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: accumulating (k2e / Lagrange weighted sums)]
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/face; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
             _cmp(got[name][t], ref[t][name],
-                 f"exchange.{name}[face {t + 1}]", 1e-12)
+                 f"exchange.{name}[face {t + 1}]", 1e-15)
 
 
 def test_the_exchange_actually_changes_the_halo(jctx, jcsw):
@@ -703,37 +715,28 @@ def test_dsw_transport_phase_3d_matches_numpy_lane(ctx, jctx, state_np,
 
     for t in range(6):
         for name in ("delp", "pt") + (() if hydrostatic else ("w",)):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: accumulating (d_sw2 flux divergence update)]
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/face/arm; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
             _cmp(got[name][t], ref[t][name],
-                 f"dsw.{name}[face {t + 1}]", 1e-12)
+                 f"dsw.{name}[face {t + 1}]", 1e-15)
         for name in ("allflux_x", "allflux_y"):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: branch-switching (xppm/yppm limiters in d_sw1)]
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), both flux fields, every face; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
             _cmp(got[name][t], ref[t][name],
-                 f"dsw.{name}[face {t + 1}]", 1e-12)
+                 f"dsw.{name}[face {t + 1}]", 1e-15)
         # the d_sw1 stage outputs the spec carries per level
         for name in _DSW1_COMPARED:
             want = np.stack([ref[t]["levels"][k][name]
                              for k in range(KM)], axis=2)
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: branch-switching (d_sw1 upwind + panel-edge
-            #  selects)]
-            _cmp(got[name][t], want, f"dsw1.{name}[face {t + 1}]", 1e-12)
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every field/face; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
+            _cmp(got[name][t], want, f"dsw1.{name}[face {t + 1}]", 1e-15)
         if not hydrostatic:
             want_dw = np.stack([ref[t]["levels"][k]["dw"]
                                 for k in range(KM)], axis=2)
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: accumulating (del-6 dw increment)]
-            _cmp(got["dw"][t], want_dw, f"dsw2.dw[face {t + 1}]", 1e-12)
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every face; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
+            _cmp(got["dw"][t], want_dw, f"dsw2.dw[face {t + 1}]", 1e-15)
 
 
 def test_capacitors_match_numpy_and_accumulate(ctx, jctx, state_np,
@@ -757,12 +760,10 @@ def test_capacitors_match_numpy_and_accumulate(ctx, jctx, state_np,
                                       flux_cap=_stack_cap(charge))
     for name in jdsw.CAPACITOR_FIELDS:
         for t in range(6):
-            # TOL-PENDING: provisional bound; the orchestrator's
-            # measurement job will replace this with `measured X,
-            # bound = measured x N`.  DO NOT SHIP.
-            # [class: accumulating (substep flux capacitor)]
+            # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every capacitor/face; bound =
+            # 1e-15 eps guard (measured exactly 0.0).
             _cmp(got[name][t], caps_np[t][name],
-                 f"capacitor.{name}[face {t + 1}]", 1e-12)
+                 f"capacitor.{name}[face {t + 1}]", 1e-15)
         a = _assert_real(got[name], f"capacitor {name}")
         b = np.asarray(_stack_cap(charge)[name], dtype=np.float64)
         assert not np.array_equal(a, b), (
@@ -1080,11 +1081,10 @@ def test_exchange_jit_matches_eager(jctx, jcsw):
     eager = jdsw.exchange_post_pgrad_3d(jctx, jcsw, KM, nord=2)
     fast = fn(jctx, jcsw, KM, nord=2)
     for name in eager:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: FMA contraction on a stencil sum]
+        # MEASURED (job 9425294 sweep): worst vc 2.085e-14; bound = measured x 10 =
+        # 2.1e-13.
         _cmp(fast[name], eager[name], f"jit-vs-eager exchange.{name}",
-             1e-12)
+             2.1e-13)
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False],
@@ -1106,10 +1106,9 @@ def test_dsw_transport_phase_3d_jit_matches_eager(jctx, jstate, jcsw,
     fast = fn(jctx, jstate, src, DT, KM, hydrostatic=hydrostatic)
     assert set(fast) == set(eager)
     for name in eager:
-        # TOL-PENDING: provisional bound; the orchestrator's measurement
-        # job will replace this with `measured X, bound = measured x N`.
-        # DO NOT SHIP.  [class: FMA contraction on a flux sum]
-        _cmp(fast[name], eager[name], f"jit-vs-eager dsw.{name}", 1e-12)
+        # MEASURED (job 9425294 sweep): worst allflux_y 3.765e-13 (sentinel-cascade FMA class); bound = measured x 10 =
+        # 3.8e-12.
+        _cmp(fast[name], eager[name], f"jit-vs-eager dsw.{name}", 3.8e-12)
 
 
 def test_a_new_dt_does_not_retrace_but_a_new_cfg_does(jctx, jstate,
@@ -1412,11 +1411,10 @@ def test_exchange_adjoint_identity(jctx, jcsw):
         return {"divg_d": _win(out["divg_d"]),
                 "uc": _win(out["uc"]), "vc": _win(out["vc"])}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 3.901e-16; bound = measured x 10 =
+    # 4.0e-15.
     _check_adjoint("exchange d(divgd,uc,vc)", f,
-                   (jcsw["divg_d"], jcsw["uc"], jcsw["vc"]), 1e-10)
+                   (jcsw["divg_d"], jcsw["uc"], jcsw["vc"]), 4.0e-15)
 
 
 def test_dsw_transport_adjoint_identity_scalars(jctx, jstate, jcsw):
@@ -1442,11 +1440,10 @@ def test_dsw_transport_adjoint_identity_scalars(jctx, jstate, jcsw):
                 "afx": out["allflux_x"][..., list(_SLOTS_WRITTEN_HYDRO)],
                 "afy": out["allflux_y"][..., list(_SLOTS_WRITTEN_HYDRO)]}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
+    # MEASURED (job 9425294 sweep): adjoint residual 1.920e-16; bound = measured x 10 =
+    # 2.0e-15.
     _check_adjoint("dsw d(delp,pt)", f,
-                   (jstate["delp"], jstate["pt"]), 1e-10)
+                   (jstate["delp"], jstate["pt"]), 2.0e-15)
 
 
 def test_dsw_transport_adjoint_identity_cgrid_winds(jctx, jstate, jcsw):
@@ -1465,10 +1462,9 @@ def test_dsw_transport_adjoint_identity_cgrid_winds(jctx, jstate, jcsw):
         return {"delp": _win(out["delp"]),
                 "afx": out["allflux_x"][..., list(_SLOTS_WRITTEN_HYDRO)]}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
-    _check_adjoint("dsw d(uc,vc)", f, (jcsw["uc"], jcsw["vc"]), 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.590e-16; bound = measured x 10 =
+    # 1.6e-15.
+    _check_adjoint("dsw d(uc,vc)", f, (jcsw["uc"], jcsw["vc"]), 1.6e-15)
 
 
 def test_dsw_transport_adjoint_identity_nh_w(jctx, jstate, jcsw_nh):
@@ -1485,10 +1481,9 @@ def test_dsw_transport_adjoint_identity_nh_w(jctx, jstate, jcsw_nh):
         return {"w": _win(out["w"]), "dw": out["dw"],
                 "afx": out["allflux_x"][..., list(_SLOTS_WRITTEN_NH)]}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
-    _check_adjoint("dsw NH d(w)", f, (jstate["w"],), 1e-10)
+    # MEASURED (job 9425294 sweep): adjoint residual 1.066e-15; bound = measured x 10 =
+    # 1.1e-14.
+    _check_adjoint("dsw NH d(w)", f, (jstate["w"],), 1.1e-14)
 
 
 def test_capacitor_adjoint_identity(jctx, jstate, jcsw):
@@ -1505,10 +1500,9 @@ def test_capacitor_adjoint_identity(jctx, jstate, jcsw):
             flux_cap={"mfx": mfx, "mfy": mfy, "cx": cx0, "cy": cy0})
         return {"mfx": out["mfx"], "mfy": out["mfy"]}
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job
-    # will replace this with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: adjoint identity, roundoff only]
-    _check_adjoint("dsw d(mfx,mfy)", f, (caps["mfx"], caps["mfy"]), 1e-10)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise) adjoint residual; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    _check_adjoint("dsw d(mfx,mfy)", f, (caps["mfx"], caps["mfy"]), 1e-15)
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -1544,8 +1538,9 @@ def test_dsw_transport_check_grads(jctx, jstate, jcsw, order):
         return (jnp.sum(_win(out["delp"]) ** 2)
                 + jnp.sum(_win(out["pt"]) ** 2))
 
-    # TOL-PENDING: provisional bounds; the orchestrator's measurement
-    # job will replace these with `measured X, bound = measured x N`.
-    # DO NOT SHIP.  [class: smooth-region finite differences]
-    check_grads(f, (one, one), order=order, modes=("fwd", "rev"),
-                atol=2e-2, rtol=2e-2, eps=1e-4)
+    # MEASURED (job 9425294 sweep): smallest-passing check_grads atol=rtol 1e-7
+    # (order=2; order=1 passed at 1e-12); bound = one decade up = 1e-6.
+    gated_check_grads(f"dsw_transport_phase_3d check_grads order={order}", f,
+                      (one, one), order=order,
+                      modes=("fwd", "rev"),
+                      atol=1e-6, rtol=1e-6, eps=1e-4)

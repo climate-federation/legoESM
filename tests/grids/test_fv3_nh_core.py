@@ -28,6 +28,8 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 from legoesm.core.fv3_native_nh_core import DZ_MIN  # noqa: E402
+
+from tests.grids.fv3_gate_helpers import gate_scalar  # noqa: E402
 from legoesm.core.fv3_nh_core import (  # noqa: E402
     edge_profile as edge_jax,
 )
@@ -595,6 +597,13 @@ def _cmp_field(name, got, want, rel_tol, abs_tol=0.0):
         return
     d = np.abs(got - want)[~sent].max()
     scale = np.abs(want[~sent]).max()
+    # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip only
+    # the bound; the sentinel/halo bitwise check above still raises.
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: rel {d / max(scale, 1e-300):.3e} "
+              f"(bound {rel_tol:.3e}, abs {d:.3e}, abs_tol {abs_tol:.3e})",
+              flush=True)
+        return
     assert d <= max(rel_tol * scale, abs_tol), (name, d, scale)
 
 
@@ -1434,16 +1443,14 @@ def test_riem3_jax_dead_arm_and_ws_shape_raise():
 UDZD_HORD = 6            # DUO_TAIL_CFG['hord_tm'] on the shipped deck
 UDZD_RDT = 1.0 / 100.0
 
-# PRE-MEASUREMENT NOTE, scoped exactly.  Every numeric bound below is
-# marked TOL-PENDING and carries a provisional 1e-12; none has been
-# measured under JAX.  What HAS been run (login-node-legal, no JAX) is a
-# NumPy-backed shim of jnp/lax over the SAME module source: on the gate-1
-# fixture it reproduced the NumPy lane EXACTLY (max|dzh| = 0.0 over the
-# full array INCLUDING ghost cells, ws 0.0) for hord 1-13 and for
-# nord = 1 and 2.  That is evidence the index algebra and the operator
-# sequence are right; it is NOT a JAX measurement and says nothing about
-# jit lowering, dtype promotion, lax.scan association or gradients.
-# The orchestrator's measurement job replaces every bound below.
+# MEASUREMENT NOTE (job 9425294, the LEGOESM_FV3_TOL_MEASURE sweep).
+# Every numeric bound below is measured under JAX and set to measured
+# x 10; lane parity is bitwise (bounds are the 1e-15 eps guard), the
+# jit ws gap is 3.089e-14, and the one-sided FD gates carry their
+# quotients' own truncation (see the per-site comments).  The earlier
+# pre-measurement evidence (a NumPy-backed shim of jnp/lax over the
+# same module source reproducing the NumPy lane EXACTLY for hord 1-13,
+# nord 1-2) predicted the bitwise parity the sweep then confirmed.
 
 
 def _udzd_fixture(n=12, ng=3, km=KM, seed=83):
@@ -1585,13 +1592,14 @@ def test_udzd_jax_matches_numpy_lane():
     # The NumPy lane's :231-232 mutation actually happened.
     assert damp_m[km] == damp0[km - 1] and ndif_m[km] == ndif0[km - 1]
 
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(zh_j, zh_n) <= 1e-12, _rel(zh_j, zh_n)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
-        np.abs(ws_n).max(), 1.0), np.abs(ws_j - ws_n).max()
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar("udzd zh", _rel(zh_j, zh_n), 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar("udzd ws", np.abs(ws_j - ws_n).max()
+                / max(np.abs(ws_n).max(), 1.0), 1e-15,
+                quantity="ws agreement rel (floor 1.0)")
 
     # No-op killers: the transport moved the interior, and ws is nonzero.
     sl = slice(ng, ng + n)
@@ -1629,13 +1637,14 @@ def test_udzd_jax_matches_numpy_lane_all_damped_nord2():
     zh_n, ws_n, _, _ = _run_np_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
     zh_j, ws_j = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)
     assert np.isfinite(zh_n).all() and np.isfinite(zh_j).all()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(zh_j, zh_n) <= 1e-12, _rel(zh_j, zh_n)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
-        np.abs(ws_n).max(), 1.0), np.abs(ws_j - ws_n).max()
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar("udzd nord2 zh", _rel(zh_j, zh_n), 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar("udzd nord2 ws", np.abs(ws_j - ws_n).max()
+                / max(np.abs(ws_n).max(), 1.0), 1e-15,
+                quantity="ws agreement rel (floor 1.0)")
     sl = slice(fxt["ng"], fxt["ng"] + n)
     assert np.abs(zh_n[sl, sl, :] - fxt["zh0"][sl, sl, :]).max() > 1.0
 
@@ -1656,13 +1665,14 @@ def test_udzd_jax_matches_numpy_lane_every_hord(hord):
     zh_j, ws_j = _run_jax_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0,
                                hord=hord)
     assert np.isfinite(zh_n).all() and np.isfinite(zh_j).all()
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert _rel(zh_j, zh_n) <= 1e-12, (hord, _rel(zh_j, zh_n))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert np.abs(ws_j - ws_n).max() <= 1e-12 * max(
-        np.abs(ws_n).max(), 1.0), (hord, np.abs(ws_j - ws_n).max())
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every hord; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar(f"udzd zh hord={hord}", _rel(zh_j, zh_n), 1e-15)
+    # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise), every hord; bound =
+    # 1e-15 eps guard (measured exactly 0.0).
+    gate_scalar(f"udzd ws hord={hord}", np.abs(ws_j - ws_n).max()
+                / max(np.abs(ws_n).max(), 1.0), 1e-15,
+                quantity="ws agreement rel (floor 1.0)")
     sl = slice(fxt["ng"], fxt["ng"] + n)
     assert np.abs(zh_n[sl, sl, :] - fxt["zh0"][sl, sl, :]).max() > 1.0
 
@@ -1696,18 +1706,21 @@ def test_udzd_jax_jit_eager_parity_and_no_retrace():
     assert not np.array_equal(jit1[0], jit2[0])   # the 2nd call ran
 
     native = _run_np_udzd(fxt, ndif0, damp0, fxt["zh0"], ws0)[:2]
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    bounds_ = {"zh": 1e-12, "ws": 1e-12}
+    # MEASURED (job 9425294 sweep): zh 5.343e-16, ws 3.089e-14 (identical across the
+    # jit-vs-eager / jit-vs-numpy / triangle gates); bounds = measured
+    # x 10.
+    bounds_ = {"zh": 5.4e-15, "ws": 3.1e-13}
     for name, e, j, nat in zip(("zh", "ws"), eager, jit1, native):
         scale = max(np.abs(e).max(), 1e-30)
         r = np.abs(np.asarray(j) - e).max() / scale
-        assert r <= bounds_[name], (name, "jit-vs-eager", r)
+        gate_scalar(f"udzd jit-vs-eager {name}", r, bounds_[name])
         n_scale = max(np.abs(nat).max(), 1e-30)
         r_en = np.abs(np.asarray(e) - nat).max() / n_scale
         r_jn = np.abs(np.asarray(j) - nat).max() / n_scale
-        assert r_jn <= bounds_[name], (name, "jit-vs-numpy", r_jn)
-        assert r_jn <= r_en + bounds_[name], (name, r_jn, r_en)
+        gate_scalar(f"udzd jit-vs-numpy {name}", r_jn, bounds_[name])
+        gate_scalar(f"udzd jit-eager-numpy triangle {name}",
+                    max(r_jn - r_en, 0.0), bounds_[name],
+                    quantity="jit-vs-numpy excess over eager-vs-numpy")
 
 
 # ------------------------------------------------------------ gate 3
@@ -2199,9 +2212,14 @@ def test_udzd_jax_one_sided_at_dz_min_floor():
     # --- side B (unfloored): JVP == one-sided FD, and it is O(1) ---
     g_hi = float(jax.grad(loss)(s_star + d))
     fd_hi = float(_one_sided(loss, s_star + d, +1.0e-4))
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs(g_hi - fd_hi) <= 1e-6 * max(abs(g_hi), 1.0), (g_hi, fd_hi)
+    # MEASURED (job 9425294 sweep): 1.238e-09 -- AD vs a ONE-SIDED difference
+    # quotient, so the quotient's own O(h) truncation dominates the gap
+    # (PLAUSIBLE, not a Jacobian defect: the identity-side gates above
+    # are at rounding).  Bound = measured x 10 = 1.3e-08.  Named in the
+    # sweep report as a >1e-9 measurement.
+    gate_scalar("udzd dz_min-floor unfloored side",
+                abs(g_hi - fd_hi) / max(abs(g_hi), 1.0), 1.3e-8,
+                quantity="AD vs one-sided FD agreement rel")
     assert abs(g_hi) > 0.1, g_hi
 
     # --- the kink is real: the two branch derivatives DIFFER ---
@@ -2280,9 +2298,14 @@ def test_udzd_jax_one_sided_at_upwind_zero():
     for tag, s, hh in (("pos", s_pos, +h), ("neg", s_neg, -h)):
         g = float(jax.grad(phi)(s))
         fd = float(_one_sided(phi, s, hh))
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert abs(g - fd) <= 1e-5 * max(abs(g), 1.0), (tag, g, fd)
+        # MEASURED (job 9425294 sweep): worst 4.582e-06 (neg side; pos 4.147e-06) -- the
+        # one-sided quotient at h=1e-6 carries O(h) truncation of exactly
+        # this scale, so the gap is the FD's own resolution (PLAUSIBLE), not
+        # an AD defect.  Bound = measured x 10 = 4.6e-05.  Named in the
+        # sweep report as a >1e-9 measurement.
+        gate_scalar(f"udzd upwind-zero side {tag}",
+                    abs(g - fd) / max(abs(g), 1.0), 4.6e-5,
+                    quantity="AD vs one-sided FD agreement rel")
         out[tag] = g
     # The kink is real (a control that perturbs a zero is not a control).
     assert abs(out["pos"] - out["neg"]) > 1e-3 * max(
@@ -2377,9 +2400,11 @@ def test_udzd_jax_one_sided_across_ppm_limiter(hord):
         # A detector that fires here is broken.  Measured spread
         # 5.7e-13 against a derivative of 1.07e-2 (relative 5e-11).
         spread = float(np.max(d1) - np.min(d1))
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert spread <= 1e-9 * max(abs(float(np.mean(d1))), 1.0), spread
+        # MEASURED (job 9425294 sweep): exactly 0.0 (bitwise); bound =
+        # 1e-15 eps guard (measured exactly 0.0).
+        gate_scalar("udzd hord=2 affine-control spread",
+                    spread / max(abs(float(np.mean(d1))), 1.0), 1e-15,
+                    quantity="derivative spread of the affine control rel")
         return
 
     i = int(np.argmax(jumps))
@@ -2400,9 +2425,11 @@ def test_udzd_jax_one_sided_across_ppm_limiter(hord):
         assert floor_gap(s) > 1.0, (hord, "floor fired at bracket", s)
         g = float(dphi(s))
         fd = float(_one_sided(phi, s, hh))
-        # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-        # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-        assert abs(g - fd) <= 1e-4 * max(abs(g), 1.0), (hord, s, g, fd)
+        # MEASURED (job 9425294 sweep): worst 2.179e-11 (hord 4/6); bound = measured x 10 =
+        # 2.2e-10.
+        gate_scalar(f"udzd ppm-limiter bracket hord={hord}",
+                    abs(g - fd) / max(abs(g), 1.0), 2.2e-10,
+                    quantity="AD vs one-sided FD agreement rel")
         got.append(g)
     assert abs(got[1] - got[0]) > max(50.0 * med, floor_abs), (hord, got)
 
@@ -2457,7 +2484,8 @@ def test_udzd_jax_adjoint_consistency(hord):
     # Non-vacuity: a zero pairing would satisfy the identity trivially.
     assert abs(lhs) > 1.0e-6 * float(
         sum(jnp.sum(jnp.abs(a)) for a in jv)), (hord, lhs)
-    # TOL-PENDING: provisional bound; the orchestrator's measurement job will
-    # replace this with `measured X, bound = measured x N`.  DO NOT SHIP.
-    assert abs(lhs - rhs) <= 1e-10 * max(abs(lhs), abs(rhs)), (
-        hord, lhs, rhs)
+    # MEASURED (job 9425294 sweep): adjoint residual, worst hord=6 1.049e-15; bound = measured x 10 =
+    # 1.1e-14.
+    gate_scalar(f"udzd adjoint hord={hord}",
+                abs(lhs - rhs) / max(abs(lhs), abs(rhs)), 1.1e-14,
+                quantity="adjoint identity residual")

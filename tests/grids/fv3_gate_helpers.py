@@ -45,6 +45,72 @@ import numpy as np
 # tried in this campaign and RETRACTED -- exact values only.
 FILL_VALUES = (1.0e30, 1.0e25)
 
+_MEASURE_ENV = "LEGOESM_FV3_TOL_MEASURE"
+
+
+def measure_mode() -> bool:
+    """True when the campaign's tolerance-measurement sweep is running.
+
+    In that mode every gate prints one ``TOLMEASURE {name!r}: ...`` line
+    (one grep harvests the whole run) and skips ONLY its numeric bound;
+    every structural assert stays live, so a measurement run cannot
+    silently bless a broken comparison.
+    """
+    return os.environ.get(_MEASURE_ENV) == "1"
+
+
+def gate_scalar(name, measured, tol, quantity="rel"):
+    """Tolerance gate on an ALREADY-COMPUTED scalar measure.
+
+    For call sites whose comparison is a bespoke expression (a
+    telescoping residual, a conservation defect, a one-sided FD
+    agreement, a growth ratio) rather than a field pair ``cmp_fields``
+    could take.  The caller keeps every structural assert live -- only
+    the numeric bound routes through here.  ``quantity`` names WHAT the
+    scalar measures, because an adjoint residual, an FD gap and a field
+    parity are different quantities and their printed lines must say so.
+    """
+    measured = float(measured)
+    if measure_mode():
+        print(f"TOLMEASURE {name!r}: rel {measured:.3e} "
+              f"(bound {tol:.3e}, quantity {quantity})", flush=True)
+        return measured
+    assert measured <= tol, (
+        f"{name}: MEASURED {quantity} {measured:.3e} > {tol:.3e}")
+    return measured
+
+
+def gated_check_grads(name, f, args, order, modes=("fwd", "rev"),
+                      eps=None, atol=None, rtol=None):
+    """``jax.test_util.check_grads`` with the campaign's measure mode.
+
+    Normal mode: plain ``check_grads`` at the given bounds.  Measure
+    mode: the smallest power of ten at which ``check_grads`` ITSELF
+    passes (``atol=rtol`` swept downward; its tangents come from a
+    seeded ``np.random.RandomState(0)``, so the scan is deterministic --
+    verified in the installed ``jax._src.public_test_util.check_jvp``),
+    printed as the measured value.  The quantity is check_grads' own
+    FD-vs-AD agreement, NOT field parity, and the printed line says so.
+    """
+    from jax.test_util import check_grads
+    if measure_mode():
+        passing = None
+        for expo in range(-1, -16, -1):
+            try:
+                check_grads(f, args, order=order, modes=modes, eps=eps,
+                            atol=10.0 ** expo, rtol=10.0 ** expo)
+            except AssertionError:
+                break
+            passing = 10.0 ** expo
+        shown = float("inf") if passing is None else passing
+        print(f"TOLMEASURE {name!r}: rel {shown:.3e} "
+              f"(bound {float(atol):.3e}, quantity smallest-passing "
+              f"check_grads atol=rtol, order={order}, eps={eps})",
+              flush=True)
+        return
+    check_grads(f, args, order=order, modes=modes, eps=eps, atol=atol,
+                rtol=rtol)
+
 
 def cmp_fields(got, ref, name, tol, fills=FILL_VALUES, floor_pct=10.0,
                n_over_at=1.0e-13):
@@ -130,7 +196,7 @@ def cmp_fields(got, ref, name, tol, fills=FILL_VALUES, floor_pct=10.0,
     n_over = int((per > n_over_at).sum())
     # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print every
     # comparison's measured value and DO NOT raise on the tolerance.
-    # Exists so one run can replace a whole file's TOL-PENDING bounds
+    # Exists so one run can replace a whole file's provisional bounds
     # with `measured x 10` instead of one first-failure per test per
     # run. Structural checks above (shapes, non-finite classes, fills,
     # anti-vacuity) still raise -- only the numeric bound is suspended,
@@ -227,6 +293,10 @@ def check_adjoint(name, f, primals, tol, seed=0):
         f"so this gate proves nothing (check the window/scale)")
     assert np.isfinite(lhs) and np.isfinite(rhs), (
         f"{name}: the inner products are not finite ({lhs}, {rhs})")
+    if measure_mode():
+        print(f"TOLMEASURE {name!r}: rel {r:.3e} (bound {tol:.3e}, "
+              f"quantity adjoint identity residual)", flush=True)
+        return r
     assert r <= tol, (
         f"{name}: adjoint residual {r:.3e} > {tol:.3e} "
         f"(<J v, w>={lhs:.12e}, <v, J^T w>={rhs:.12e}) -- MEASURED "
