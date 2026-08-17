@@ -990,17 +990,16 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
     for nm, npnm in ren.items():
         want = np.stack([np.asarray(x) for x in ref_carry[npnm]])
         assert_real(want, f"numpy nh carry {nm}")
-        # TOL-PENDING (codex MAJOR, and correct): 3.498e-10 was
-        # MEASURED, but calling it an fp64 accumulation floor was a
-        # claim I did not establish. ~1e-10 relative on a three-level
-        # recurrence is far too large to attribute to reassociation
-        # without a conditioning experiment or a km-scaling test, and
-        # neither was run. The bound below lets the suite proceed; it
-        # does NOT certify the residual as roundoff, and a real
-        # localized difference up to 3.5e-9 would pass it. Closing this
-        # means localizing the first differing primitive.
+        # RE-MEASURING (post edge_profile unroll, jobs 9424740/9424741):
+        # the previous 3.498e-10 was dominated by the edge_profile scan
+        # FMA defect, now fixed -- the stage-split localiser reads
+        # ~5.8e-10 ABSOLUTE (vs 1.847e-04 before) with the remainder
+        # wholly inside riem_solver3 (PLAUSIBLE same scan-compilation
+        # class; NOT measured). This bound is set tight to make the
+        # gate's own machinery print the exact post-fix number; the
+        # final bound is 10x whatever this run reports.
         # [class: accumulating -- the Riemann solve is a recurrence]
-        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 3.5e-9)
+        cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 1e-14)
 
     if remap_step:
         # `ws` is EXCLUDED, not forgotten: the fixture has flat
