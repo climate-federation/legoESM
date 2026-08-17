@@ -248,6 +248,15 @@ def main() -> int:
 
     _stage("importing jax")
     _import_jax()
+    # LEGOESM_HANG_DEBUG=1: dump every thread's Python stack to stderr every
+    # 5 minutes. Pure stdlib. Three 192-rank arms hung INSIDE the first
+    # (compiling+executing) call with nothing to bisect on; the periodic
+    # dump names the exact frame (jit compile vs PJRT execute / NCCL init).
+    import os as _os_hd
+    if _os_hd.environ.get("LEGOESM_HANG_DEBUG", "") == "1":
+        import faulthandler
+        faulthandler.dump_traceback_later(300, repeat=True)
+        _stage("hang-debug armed: stack dump every 300 s")
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
