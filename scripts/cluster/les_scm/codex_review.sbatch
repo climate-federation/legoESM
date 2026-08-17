@@ -35,7 +35,16 @@ OUT=/burg-archive/glab/users/pg2328/legoESM/logs/les_codex_review_$SLURM_JOB_ID.
 PROMPT=$(cat "$CODEX_PROMPT")
 
 echo "$PROMPT" > $CODEX_HOME/prompt.txt
-codex exec --sandbox read-only -C $WT "$PROMPT" 2>&1 | tee $OUT
+# CODEX_FLAGS passes extra CLI flags. Needed when $WT is NOT a git repo -- a
+# review that spans our repo AND an upstream oracle checkout has to be rooted
+# at their common parent, and codex refuses a non-repo root with "Not inside a
+# trusted directory" unless --skip-git-repo-check is given. That refusal cost a
+# whole review job, and it produced exactly two lines of output, which is what
+# the body-line guard below is for.
+# </dev/null: without it codex waits on stdin ("Reading additional input from
+# stdin...") under sbatch, where stdin is not a terminal.
+codex exec --sandbox read-only $CODEX_FLAGS -C $WT "$PROMPT" </dev/null 2>&1 \
+  | tee $OUT
 rc=$?
 echo "codex rc=$rc"
 # Count only lines that are NOT the prompt codex echoes back and NOT its own
