@@ -180,12 +180,13 @@ def test_lam_sm_zero_is_true_noop():
     aux smse is exactly 0 and the total loss equals the sum of the other terms."""
     data = _synthetic_data()
     p = init_ext_params()
-    l, (tm, am, pp, sa, sm, gb, le) = loss_ml(p, data, lam_sm=0.0)
+    l, (tm, am, pp, sa, sm, gb, le, tbm, lbm) = loss_ml(p, data, lam_sm=0.0)
     assert float(sm) == 0.0
     # the SM term contributes nothing: loss == sum of the other weighted terms
     import scripts.run.train_multilayer_land_era5 as _M
     expect = (float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp)
-              + _M._LAM_AMP * float(sa) + _M._LAM_LE * float(le))
+              + _M._LAM_AMP * float(sa) + _M._LAM_LE * float(le)
+              + _M._LAM_TBIAS_MON * float(tbm) + _M._LAM_LEBIAS_MON * float(lbm))
     assert abs(float(l) - expect) < 1e-6
 
 

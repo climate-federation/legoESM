@@ -203,7 +203,14 @@ def forward(cp, data, n_spin_years: int = 2):
     return jnp.stack(Tm), jnp.stack(Am), jnp.stack(Lm)
 
 
-def loss_fn(p, data, lam_alb=300.0, lam_pft=2.0, lam_le=_LAM_LE, n_spin_years=2):
+# MONTHLY-mean bias penalties (user 2026-08-17: "RMSE reduction is challenging —
+# natural variability. Reducing mean bias, including monthly, is a MUST").
+_LAM_TBIAS_MON = 30.0
+_LAM_LEBIAS_MON = 0.3
+
+
+def loss_fn(p, data, lam_alb=300.0, lam_pft=2.0, lam_le=_LAM_LE, n_spin_years=2,
+            lam_tbias_mon=_LAM_TBIAS_MON, lam_lebias_mon=_LAM_LEBIAS_MON):
     cp = constrain(p)
     T, A, L = forward(cp, data, n_spin_years)
     w = data["w"][None, :]
@@ -213,37 +220,50 @@ def loss_fn(p, data, lam_alb=300.0, lam_pft=2.0, lam_le=_LAM_LE, n_spin_years=2)
     # Finite-masked on BOTH sides (a non-finite model L must not poison the
     # gradient any more than a missing target); inputs sanitised BEFORE the diff
     # (where-NaN-gradient gotcha).  lam_le == 0 is a STATIC flag: term skipped.
-    if lam_le > 0.0:
+    if lam_le > 0.0 or lam_lebias_mon > 0.0:
         le_ok = jnp.isfinite(L) & jnp.isfinite(data["le"])
         L_s = jnp.where(le_ok, L, 0.0); le_t = jnp.where(le_ok, data["le"], 0.0)
         wle = w * le_ok
         lemse = jnp.sum(wle * (L_s - le_t) ** 2) / (jnp.sum(wle) + 1e-9)
+        # per-month area-weighted mean LE bias, squared, averaged over months
+        mb_le = jnp.sum(wle * (L_s - le_t), axis=1) / (jnp.sum(wle, axis=1) + 1e-9)
+        lebias_mon = jnp.mean(mb_le ** 2)
     else:
         lemse = jnp.zeros((), tmse.dtype)
+        lebias_mon = jnp.zeros((), tmse.dtype)
+    # per-month area-weighted mean skin-T bias (seasonal-cycle bias target)
+    mb_t = jnp.sum(w * (T - data["skt"]), axis=1) / jnp.sum(w)
+    tbias_mon = jnp.mean(mb_t ** 2)
     ann = (T - data["skt"]).mean(0)
     oh = data["dom_onehot"] * data["w"][:, None]
     pft_bias = (oh * ann[:, None]).sum(0) / (oh.sum(0) + 1e-9)
     present = (data["dom_onehot"].sum(0) > 0).astype(ann.dtype)
     ppft = jnp.sum(present * pft_bias ** 2) / jnp.sum(present + 1e-9)
-    return (tmse + lam_alb * amse + lam_pft * ppft + lam_le * lemse,
-            (tmse, amse, ppft, lemse))
+    return (tmse + lam_alb * amse + lam_pft * ppft + lam_le * lemse
+            + lam_tbias_mon * tbias_mon + lam_lebias_mon * lebias_mon,
+            (tmse, amse, ppft, lemse, tbias_mon, lebias_mon))
 
 
-def train(data, n_iter=80, lr=3e-2, lam_le=_LAM_LE):
+def train(data, n_iter=80, lr=3e-2, lam_le=_LAM_LE, lam_tbias_mon=_LAM_TBIAS_MON,
+          lam_lebias_mon=_LAM_LEBIAS_MON):
     p = init_raw_params()
-    # lam_le is STATIC (the loss branches on it in Python); passing it as a
-    # traced jit kwarg raises TracerBoolConversionError.
+    # weight kwargs are STATIC (the loss branches on them in Python); passing
+    # them as traced jit kwargs raises TracerBoolConversionError.
     vg = jax.jit(jax.value_and_grad(loss_fn, has_aux=True),
-                 static_argnames=("lam_le", "n_spin_years"))
+                 static_argnames=("lam_le", "n_spin_years",
+                                  "lam_tbias_mon", "lam_lebias_mon"))
     opt = optax.adam(lr); state = opt.init(p)
     for it in range(n_iter):
-        (l, (tm, am, pp, lm)), g = vg(p, data, lam_le=lam_le)
+        (l, (tm, am, pp, lm, tbm, lbm)), g = vg(
+            p, data, lam_le=lam_le, lam_tbias_mon=lam_tbias_mon,
+            lam_lebias_mon=lam_lebias_mon)
         if it == 0:
             assert_no_inert(g)          # strict no-inert-parameters gate
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if it % 10 == 0 or it == n_iter - 1:
             print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
-                  f"LE-RMSE {float(jnp.sqrt(lm)):.2f} "
+                  f"T-mbias {float(jnp.sqrt(tbm)):.3f} "
+                  f"LE-RMSE {float(jnp.sqrt(lm)):.2f} LE-mbias {float(jnp.sqrt(lbm)):.2f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} perPFT-bias-RMS {float(jnp.sqrt(pp)):.3f}")
     return {k: np.asarray(v).tolist() for k, v in constrain(p).items()}
 
@@ -313,6 +333,11 @@ def main():
     p.add_argument("--lam-le", type=float, default=_LAM_LE,
                    help="latent-heat loss weight (ERA5 slhf_wm2 dual target; needs an "
                         "npz fetched with mean_surface_latent_heat_flux)")
+    p.add_argument("--lam-tbias-mon", type=float, default=_LAM_TBIAS_MON,
+                   help="MONTHLY skin-T mean-bias penalty (seasonal-cycle bias is the "
+                        "primary target; RMSE fights natural variability)")
+    p.add_argument("--lam-lebias-mon", type=float, default=_LAM_LEBIAS_MON,
+                   help="MONTHLY latent-heat mean-bias penalty (0 disables)")
     p.add_argument("--out", default="results/land_tuned_params.json")
     args = p.parse_args()
     data = load_training_data(args.diurnal_npz, args.n_sub)
@@ -324,7 +349,8 @@ def main():
             "npz has no slhf_wm2 (latent-heat target): re-fetch with "
             "scripts/data/fetch_era5_hourly_climatology.py, or pass --lam-le 0 "
             "to explicitly train skin-T-only")
-    tuned = train(data, n_iter=args.iters, lam_le=args.lam_le)
+    tuned = train(data, n_iter=args.iters, lam_le=args.lam_le,
+                  lam_tbias_mon=args.lam_tbias_mon, lam_lebias_mon=args.lam_lebias_mon)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)

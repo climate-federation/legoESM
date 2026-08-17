@@ -146,6 +146,14 @@ _LAM_TBIAS = 0.0
 # footing.  This is the term that constrains the unfrozen canopy-conductance
 # chain (Vc_max25/g1/LCMA) and the plant water-stress thresholds.
 _LAM_LE = 0.02
+# MONTHLY-mean bias penalties (user 2026-08-17: "RMSE reduction is challenging —
+# natural variability. Reducing mean bias, including monthly, is a MUST").
+# Per-month area-weighted mean error, squared, averaged over the 12 months —
+# targets the seasonal-cycle bias directly while the RMSE terms hold the
+# spatial pattern.  Monthly T bias ~1.5 K and weight 30 puts the term at ~70
+# vs tmse ~6; monthly LE bias ~10 W/m2 and 0.3 puts it at ~30.
+_LAM_TBIAS_MON = 30.0
+_LAM_LEBIAS_MON = 0.3
 # Per-cell gradient-norm cap for the pre-train pathological-cell filter.  Healthy land
 # cells have a per-cell |grad| ~ 1e1-1e3 (logged p90 ~ 3e3); a near-singular stiff-clay/
 # saturated cell whose MOST flux backward is approaching the overflow reads 1e5-1e41.
@@ -506,7 +514,7 @@ def forward_ml(cp, data):
 
 
 def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_tbias=None,
-            lam_le=None):
+            lam_le=None, lam_tbias_mon=None, lam_lebias_mon=None):
     # weights default to the module globals (CLI-tunable) so the jitted
     # value_and_grad picks up an updated lam_amp without re-partialling.
     lam_alb = _LAM_ALB if lam_alb is None else lam_alb
@@ -515,6 +523,8 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     lam_sm = _LAM_SM if lam_sm is None else lam_sm
     lam_tbias = _LAM_TBIAS if lam_tbias is None else lam_tbias
     lam_le = _LAM_LE if lam_le is None else lam_le
+    lam_tbias_mon = _LAM_TBIAS_MON if lam_tbias_mon is None else lam_tbias_mon
+    lam_lebias_mon = _LAM_LEBIAS_MON if lam_lebias_mon is None else lam_lebias_mon
     cp = constrain_ext(p)
     T, A, W, L = forward_ml(cp, data)
     w = data["w"][None, :]
@@ -547,14 +557,21 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     # target.  Same finite-mask + input-sanitise pattern as the SM term (a NaN
     # reaching the diff poisons the VJP even where()-discarded); lam_le == 0 is a
     # STATIC flag, so the LE path is skipped entirely when off.
-    if lam_le > 0.0:
+    if lam_le > 0.0 or lam_lebias_mon > 0.0:
         le_ok = jnp.isfinite(L) & jnp.isfinite(data["le"])
         L_s = jnp.where(le_ok, L, 0.0)
         le_t = jnp.where(le_ok, data["le"], 0.0)
         wle = w * le_ok
         lemse = jnp.sum(wle * (L_s - le_t) ** 2) / (jnp.sum(wle) + 1e-9)
+        # per-month area-weighted mean LE bias, squared, averaged over months
+        mb_le = jnp.sum(wle * (L_s - le_t), axis=1) / (jnp.sum(wle, axis=1) + 1e-9)
+        lebias_mon = jnp.mean(mb_le ** 2)
     else:
         lemse = jnp.zeros((), tmse.dtype)
+        lebias_mon = jnp.zeros((), tmse.dtype)
+    # per-month area-weighted mean skin-T bias (the seasonal-cycle bias target)
+    mb_t = jnp.sum(w * (T - data["skt"]), axis=1) / jnp.sum(w)
+    tbias_mon = jnp.mean(mb_t ** 2)
     ann = (T - data["skt"]).mean(0)
     oh = data["dom_onehot"] * data["w"][:, None]
     pb = (oh * ann[:, None]).sum(0) / (oh.sum(0) + 1e-9)
@@ -566,8 +583,9 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     # Global (area-weighted) skin-T bias [K].  ``ann`` is the per-cell annual bias above.
     gbias = jnp.sum(data["w"] * ann) / jnp.sum(data["w"])
     loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse
-            + lam_tbias * gbias ** 2 + lam_le * lemse)
-    return loss, (tmse, amse, ppft, samp, smse, gbias, lemse)
+            + lam_tbias * gbias ** 2 + lam_le * lemse
+            + lam_tbias_mon * tbias_mon + lam_lebias_mon * lebias_mon)
+    return loss, (tmse, amse, ppft, samp, smse, gbias, lemse, tbias_mon, lebias_mon)
 
 
 def _params_dict(p):
@@ -747,9 +765,9 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         # Score + rank on the FULL training set at the log/checkpoint cadence (the batch
         # loss is too noisy to rank iterates); p here is the PRE-update iterate.
         if not use_batch:
-            score, (tm, am, pp, sa, sm, gb, lm) = float(l), aux
+            score, (tm, am, pp, sa, sm, gb, lm, tbm, lbm) = float(l), aux
         elif log or (ckpt_path and it > 0 and it % ckpt_every == 0):
-            fl, (tm, am, pp, sa, sm, gb, lm) = fscore(p); score = float(fl)
+            fl, (tm, am, pp, sa, sm, gb, lm, tbm, lbm) = fscore(p); score = float(fl)
         else:
             score = None
         if score is not None and np.isfinite(score) and score < best_l:
@@ -757,7 +775,8 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if log:
             print(f"# it {it:3d} loss {score:.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
-                  f"T-bias {float(gb):+.3f} LE-RMSE {float(jnp.sqrt(lm)):.2f} "
+                  f"T-bias {float(gb):+.3f} T-mbias {float(jnp.sqrt(tbm)):.3f} "
+                  f"LE-RMSE {float(jnp.sqrt(lm)):.2f} LE-mbias {float(jnp.sqrt(lbm)):.2f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} sm-RMSE {float(jnp.sqrt(sm)):.4f} "
                   f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
                   flush=True)
@@ -919,7 +938,7 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
 
 def main():
     global _BULK_SCHEME, _STOMATA_ON, _ELEV_BANDS_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
-    global _LAM_TBIAS, _LAM_LE
+    global _LAM_TBIAS, _LAM_LE, _LAM_TBIAS_MON, _LAM_LEBIAS_MON
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lam-tbias", type=float, default=_LAM_TBIAS,
@@ -965,6 +984,11 @@ def main():
     ap.add_argument("--lam-le", type=float, default=_LAM_LE,
                     help="latent-heat loss weight (ERA5 slhf_wm2 dual target; needs an "
                          "npz fetched with mean_surface_latent_heat_flux; 0 disables)")
+    ap.add_argument("--lam-tbias-mon", type=float, default=_LAM_TBIAS_MON,
+                    help="MONTHLY skin-T mean-bias penalty (seasonal-cycle bias is the "
+                         "primary calibration target; RMSE fights natural variability)")
+    ap.add_argument("--lam-lebias-mon", type=float, default=_LAM_LEBIAS_MON,
+                    help="MONTHLY latent-heat mean-bias penalty (0 disables)")
     ap.add_argument("--out", default="results/land_tuned_multilayer.json")
     ap.add_argument("--holdout", type=float, default=0.0,
                     help="fraction of sampled cells held OUT of training to report a "
@@ -1000,6 +1024,8 @@ def main():
     _LAM_SM = args.lam_sm
     _LAM_TBIAS = args.lam_tbias
     _LAM_LE = args.lam_le
+    _LAM_TBIAS_MON = args.lam_tbias_mon
+    _LAM_LEBIAS_MON = args.lam_lebias_mon
     _LAM_PFT = args.lam_pft
     _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
