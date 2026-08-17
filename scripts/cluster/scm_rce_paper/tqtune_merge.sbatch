@@ -61,6 +61,19 @@ done
 # Reported, never hidden: a uniform search over 20-26 parameters cannot be
 # called converged, and the size of the rank churn between two seeds is the
 # measurement that says how much of the ranking to believe.
+#
+# SKIPPED, not failed, for a single seed.  The reporter correctly refuses fewer
+# than two seeds, and a merge of one complete seed is a legitimate deliverable
+# in its own right -- letting that exit status mark the whole job FAILED would
+# hide a successful merge behind a step that was never applicable.
+N_SEEDS=$(echo $SEEDS | wc -w)
+if [ "$N_SEEDS" -lt 2 ]; then
+  echo "=== SEED AGREEMENT: SKIPPED ($N_SEEDS seed) ==="
+  echo "Needs two independent seeds; run again when the second completes."
+  echo "MERGE_STATUS=$([ $RC_ALL -eq 0 ] && echo OK || echo FAILED)"
+  echo ALLDONE
+  exit $RC_ALL
+fi
 echo "=== SEED AGREEMENT ==="
 JAX_ENABLE_X64=1 $PY $WT/scripts/validate/scm_rce_tq_seed_agreement.py \
   --arm-dir $REPO/results/scm_rce_tqtune \
