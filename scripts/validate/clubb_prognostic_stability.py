@@ -16,9 +16,17 @@ iter 48. Findings so far:
     Courant/forward-Euler timestep limit.
   * The wp2 buoyancy-production sign, the ``tau`` family, and
     ``calc_stability_correction`` all match CLUBB-JAX bit/round-off — i.e. the
-    per-piece port is faithful. The standalone SCM driver advances the means with
-    CLUBB alone (no dynamical-core numerical diffusion to damp grid-scale noise),
-    so part of this is a driver-exposure artifact a coupled run would damp.
+    per-piece port is faithful.
+
+RETRACTED (2026-08-12, #1508). This file used to add: "The standalone SCM driver
+advances the means with CLUBB alone (no dynamical-core numerical diffusion to
+damp grid-scale noise), so part of this is a driver-exposure artifact a coupled
+run would damp." That is wrong. The growth was CLUBB's own missing surface
+second-moment boundary condition (``calc_sfc_varnce``): with the level-0 row
+left at its initial seed, the Cauchy-Schwarz floor pinned the surface theta_l
+variance near 9e2 K^2. With the BC ported, the ``--mode production`` column runs
+a full simulated day (it reached non-finite T in 92 steps before), and the bare
+nu=0 dry column stays bounded without the host-diffusion stand-in.
 
 Run: ``JAX_ENABLE_X64=1 .venv/bin/python scripts/validate/clubb_prognostic_stability.py``
 """
@@ -89,14 +97,16 @@ def production(dt=75.0, nsteps=1152, nlev=30, sfc_dT=2.0, arm="prognostic",
     **What this can and cannot show.**  It is a BARE column: the means are
     advanced by forward Euler from the CLUBB tendency alone, with no dynamical
     core, no advective resupply, no moisture fixer and — the one that matters —
-    no host numerical diffusion.  A missing host diffusion has already produced
-    one FALSE instability on this scheme (iter 48-51), and
-    :func:`integrate_clubb_column` with its 0.05 stand-in completes this same
-    column even with the defective surface variance in place.  So a blowup here
-    localises an instability in the bare closure+driver COMBINATION, not
-    necessarily a defect in the closure alone, and it does NOT establish the
-    production failure mode; and the diagnostic arm is the control for the artifact rather
-    than a licence to skip that caveat.
+    no host numerical diffusion.  So a blowup here localises an instability in
+    the bare closure+driver COMBINATION, not necessarily a defect in the closure
+    alone, and it does NOT establish the production failure mode; the diagnostic
+    arm is the control.
+
+    This paragraph used to say that a missing host diffusion "has already
+    produced one FALSE instability on this scheme (iter 48-51)".  Retracted
+    (#1508): that instability was real and was the missing surface
+    second-moment BC.  With :func:`calc_sfc_varnce` ported, the bare nu=0 dry
+    column is bounded without the stand-in.
 
     The two arms are the two production entries, not one flag on one function:
     they carry different state (a single ``wp2`` field vs 15 packed moments).

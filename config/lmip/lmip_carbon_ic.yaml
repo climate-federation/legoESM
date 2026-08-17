@@ -1,0 +1,50 @@
+# Standard LMIP (single-point land) run config that STARTS AT the spun-up
+# land-carbon equilibrium instead of cold-starting the pools (issue #691).
+#
+#   # 1. fetch the published finidat (private release, 3.5 MB)
+#   mkdir -p data/land_carbon_ic
+#   gh release download land-carbon-ic-v1 -R climate-federation/legoESM \
+#       -p 'global_carbon_ic.npz' -D data/land_carbon_ic
+#
+#   # 2. run
+#   .venv/bin/python scripts/run/run_lmip.py --config config/lmip/lmip_carbon_ic.yaml
+#
+# Same schema as lmip_example.yaml: keys are argument dests of run_lmip.py
+# (dashes -> underscores), and explicit CLI flags still override them
+# (precedence: CLI > config file > parser default).  Move the site by overriding
+# `lat`/`lon` here or on the CLI -- the seed follows, because the finidat cell is
+# chosen by nearest LAND cell to the run's coordinates.
+#
+# Why this works: the eight pools are per-area densities [gC/m2], so seeding one
+# column from the nearest global cell involves no regridding and no area
+# weighting.  A cold start needs centuries to equilibrate soil carbon.
+#
+# It is a nearest-cell INITIALISATION, not an equilibrium of this site.  The
+# published IC's 0.025 %/yr drift is a GLOBAL, whole-grid number; a point run
+# picks one veg_type and soil_texture, while the finidat cell equilibrated under
+# its own grid-mean climate and a cover-weighted PFT MIXTURE.  The driver prints
+# the matched cell's dominant cover and warns when it disagrees with veg_type.
+# Expect drift toward this site's own equilibrium -- far less than from cold, but
+# not zero.  Do not quote a seeded point run as "at equilibrium" without its drift.
+#
+# Provenance / limits of the IC (docs/land/global_carbon_ic_spinup.md):
+#   * built flags-off, so it is the equilibrium of the PRODUCTION model;
+#   * the permafrost phi that scaled the seed is loaded with it and threaded into
+#     the run's SOM protection, so seeded high-latitude carbon is held rather
+#     than decaying away;
+#   * high latitudes are the known weak spot (global SOC 3.47 vs observed ~9.5
+#     kgC/m2, deficit Arctic-localized) -- for a boreal/tundra site, read the
+#     "Known limits" section before drawing conclusions from the seeded pools.
+lat: 40.0
+lon: -105.0
+days: 3650
+dt: 1800.0
+soil_texture: loam
+veg_type: c3_grass
+
+# The carbon cycle must be ON for there to be pools to seed; --carbon-ic with
+# carbon_scheme: none is a hard error, not a silent no-op.
+carbon_scheme: differland
+carbon_ic: data/land_carbon_ic/global_carbon_ic.npz
+
+snow_albedo_feedback: true

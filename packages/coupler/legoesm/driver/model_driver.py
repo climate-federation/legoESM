@@ -290,6 +290,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
             cfg, "cloud_clubb_cf_override_strength", None),
         clubb_cf_override_floor=getattr(
             cfg, "cloud_clubb_cf_override_floor", None),
+        saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
     )
 
 
@@ -1542,6 +1543,24 @@ class ModelDriver:
                     f"(stddev max={float(jnp.max(sso)):.0f} m, "
                     f"mean={float(jnp.mean(sso)):.1f} m)"
                 )
+        else:
+            # #1514 guard: an orographic GWD member with NO SSO file on a
+            # run that has a real land/ocean distribution launches from the
+            # scalar h_topo fallback — a fictional 500-m mountain over every
+            # ocean column (measured: -0.29 Pa spurious Southern-Ocean drag;
+            # it erased the eddy-driven westerlies and both storm tracks).
+            # Loud, not fatal: idealized configs keep the documented legacy
+            # fallback deliberately.
+            from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+                orographic_scalar_fallback_warning,
+            )
+            _msg = orographic_scalar_fallback_warning(
+                str(getattr(self.config, "gravity_wave_drag", "none")),
+                sso_path,
+                self._f_land is not None,
+            )
+            if _msg is not None:
+                logger.warning("  %s", _msg)
 
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
@@ -3171,6 +3190,14 @@ class ModelDriver:
                     self.config, "cloud_diagnostic_condensate_scheme", None),
                 adiabatic_lwc_rate=getattr(
                     self.config, "cloud_adiabatic_lwc_rate", None),
+                # The RH saturation CURVE sets the cloud fraction itself, so
+                # the clt diagnostic must thread it for the same reason as
+                # p_xr/alpha_xr above: without it a mixed_phase run would
+                # publish clt computed on the LIQUID curve while radiation
+                # integrated the mixed-phase cloud — the published clt would
+                # miss exactly the cold cirrus the switch adds (#1521).
+                saturation_scheme=getattr(
+                    self.config, "cloud_saturation_scheme", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,

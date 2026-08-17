@@ -28,17 +28,24 @@ import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 
 from legoesm.core.fv3_nh_core import (  # noqa: E402
+    edge_profile as edge_jax,
+    edge_profile_jit,
+    make_edge_profile_jit,
     make_riem_solver3_jit,
     make_riem_solver_c_jit,
     make_sim1_solver_jit,
+    make_update_dz_c_jit,
     riem_solver3 as riem3_jax,
     riem_solver3_jit,
     riem_solver_c as riem_c_jax,
     riem_solver_c_jit,
     sim1_solver as sim1_jax,
     sim1_solver_jit,
+    update_dz_c as udzc_jax,
+    update_dz_c_jit,
 )
 from legoesm.core.fv3_native_nh_core import (  # noqa: E402
+    DZ_MIN,
     sim1_solver as sim1_np,
 )
 from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
@@ -53,18 +60,30 @@ from tests.grids.test_fv3_native_nh_core import (  # noqa: E402
     _balanced_column,
     _BD,
     _BDR,
+    _rect_fields,
     _riem3_balanced_fixture,
     _riem3_fixture,
     _riem_c_fixture,
+    _run_native_edge_profile,
     _run_native_riem3,
     _run_native_riem_c,
     _run_native_sim1,
+    _run_native_update_dz_c,
+    edge_profile_limiter_certificate,
+    edge_profile_nonuniform_dense_certificate,
+    edge_profile_uniform_dense_certificate,
     riem3_flags_footprint_certificate,
     riem_c_contracts_balanced_certificate,
     riem_c_origin_relabel_certificate,
     riem_c_unbalanced_certificate,
     sim1_balanced_rest_certificate,
     sim1_dense_certificate,
+    update_dz_c_limiter_ws_certificate,
+    update_dz_c_nonuniform_reference_certificate,
+    update_dz_c_origin_relabel_certificate,
+    update_dz_c_rect_mixed_flags_certificate,
+    update_dz_c_uniform_gz_certificate,
+    update_dz_c_zero_wind_certificate,
 )
 
 GAMA = 1.0 / (1.0 - FV3_KAPPA)
@@ -790,6 +809,571 @@ def test_riem3_jax_rejects_float32_every_operand(bad):
                            ("zs", "w", "delz", "pt", "delp", "zh", "pe",
                             "ppe", "pk3", "pk", "peln", "ws")),
                   0.05, 1.0)
+
+
+# ======================================================================
+# edge_profile — JAX twin certification
+# ======================================================================
+
+def _run_jax_edge(q1, q2, j_lo, km, dp0, uniform_grid, limiter,
+                  jit=False):
+    """Functional driver with the shared edge_profile certificate
+    signature."""
+    fn = edge_profile_jit if jit else edge_jax
+    e1, e2 = fn(jnp.asarray(q1), jnp.asarray(q2), j_lo, km,
+                jnp.asarray(dp0), uniform_grid, limiter)
+    return np.asarray(e1), np.asarray(e2)
+
+
+def _edge_fixture(seed=19, ni=NI, km=KM):
+    rng = np.random.default_rng(seed)
+    q1 = 10.0 + rng.standard_normal((ni, km))
+    q2 = -3.0 + rng.standard_normal((ni, km))
+    dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
+    return q1, q2, dp0
+
+
+def _edge_grad_fixture(ni=NI, km=KM):
+    """DETERMINISTIC gradient fixture with the limiter switch provably off.
+
+    ``_edge_fixture``'s ``q2 = -3 + N(0,1)`` straddles zero, so the
+    ``limiter=1`` clamp (``jnp.where(q * qe < 0)``, C^0 exactly at the
+    zero crossing) can sit on its switch -- which makes the finite
+    differences inside ``check_grads`` meaningless there.  Here q1 is
+    strictly positive and q2 strictly negative, each bounded away from
+    zero by >= 9.9 with only a 1 % ripple, and the profile is still
+    NON-constant (the ripple varies in both i and k) so the
+    interpolation, and therefore the gradient, is nontrivial.
+
+    A same-sign INPUT does NOT by itself guarantee a same-sign edge
+    value: ``test_fv3_native_nh_core.py:1614`` records the oracle quirk
+    where the uniform branch turns a constant 7.5 into -19.2 at the top
+    edge.  So the off-switch property is not argued here -- the call
+    site MEASURES all four end products and asserts the margin.  The
+    limiter-ACTIVE certificate lives in the ``"limited"`` arm of
+    ``test_edge_profile_jax_matches_numpy_lane``, which drives the clamp
+    on purpose.
+    """
+    i = np.arange(ni, dtype=np.float64)[:, None]
+    k = np.arange(km, dtype=np.float64)[None, :]
+    q1 = 10.0 + 0.1 * np.cos(0.7 * i + 0.3 * k)
+    q2 = -10.0 + 0.1 * np.cos(1.1 * i + 0.5 * k + 1.0)
+    dp0 = np.linspace(1.0e4, 1.2e4, km)
+    return q1, q2, dp0
+
+
+# ---------------------------------------------------------------- gate 1
+# Tolerances PINNED TO MEASUREMENT (probe job 9371449, x64 CPU, these
+# fixtures): both lanes run the identical scan/recurrence sequence; XLA
+# FMA contraction leaves few-ULP divergence:
+#   nonuniform: qe1 rel 1.094e-15, qe2 rel 1.022e-15
+#   uniform:    qe1 rel 1.003e-15, qe2 rel 5.809e-16
+#   limited:    qe1 rel 7.004e-16, qe2 rel 1.022e-15
+# Bound below = measured x (~5) margin.
+@pytest.mark.parametrize("case", ["nonuniform", "uniform", "limited"])
+def test_edge_profile_jax_matches_numpy_lane(case):
+    q1, q2, dp0 = _edge_fixture()
+    uniform, limiter = {"nonuniform": (False, 0),
+                        "uniform": (True, 0),
+                        "limited": (False, 1)}[case]
+    if case == "limited":
+        # A top cell that yields a sign-opposed top edge (same ladder as
+        # the limiter certificate) so the clamp is EXERCISED, not vacuous.
+        for q_top in (-0.01, -0.1, -1.0, 0.01, 0.1, 1.0):
+            q1t = np.array(q1)
+            q1t[:, 0] = q_top
+            b1, _ = _run_native_edge_profile(q1t, q2, 0, KM, dp0, False, 0)
+            if (q1t[:, 0] * b1[:, 0] < 0.0).any():
+                q1 = q1t
+                break
+        else:
+            pytest.fail("no ladder value produced a sign-opposed edge")
+    e1_n, e2_n = _run_native_edge_profile(q1, q2, 0, KM, dp0, uniform,
+                                          limiter)
+    e1_j, e2_j = _run_jax_edge(q1, q2, 0, KM, dp0, uniform, limiter)
+    assert _rel(e1_j, e1_n) <= 5e-15, _rel(e1_j, e1_n)
+    assert _rel(e2_j, e2_n) <= 5e-15, _rel(e2_j, e2_n)
+    if case == "limited":
+        # Non-vacuity: at least one edge actually clamped to 0.
+        b1, _ = _run_native_edge_profile(q1, q2, 0, KM, dp0, False, 0)
+        assert np.any(e1_n[:, 0] != b1[:, 0])
+
+
+def test_edge_profile_jax_km2_matches_numpy_lane():
+    """km=2: the forward scan has ONE row and the bottom reads
+    q[:, km-2] == q[:, 0]; parity on a perturbed pair.  Measured (probe
+    job 9371449): qe1 rel 2.577e-15, qe2 rel 1.578e-15; bound = ~x4."""
+    q1, q2, dp0 = _edge_fixture(seed=23, ni=5, km=2)
+    e1_n, e2_n = _run_native_edge_profile(q1, q2, 0, 2, dp0, False, 0)
+    e1_j, e2_j = _run_jax_edge(q1, q2, 0, 2, dp0, False, 0)
+    assert np.isfinite(e1_n).all()
+    assert _rel(e1_j, e1_n) <= 1e-14, _rel(e1_j, e1_n)
+    assert _rel(e2_j, e2_n) <= 1e-14, _rel(e2_j, e2_n)
+
+
+# ---------------------------------------------------------------- gate 2
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_edge_profile_jax_nonuniform_dense_certificate(jit):
+    edge_profile_nonuniform_dense_certificate(
+        lambda *a: _run_jax_edge(*a, jit=jit))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_edge_profile_jax_uniform_dense_certificate(jit):
+    edge_profile_uniform_dense_certificate(
+        lambda *a: _run_jax_edge(*a, jit=jit))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_edge_profile_jax_limiter_certificate(jit):
+    edge_profile_limiter_certificate(
+        lambda *a: _run_jax_edge(*a, jit=jit))
+
+
+# ---------------------------------------------------------------- gate 3
+def test_edge_profile_jax_jit_eager_parity_and_no_retrace():
+    q1, q2, dp0 = _edge_fixture()
+    eager = _run_jax_edge(q1, q2, 0, KM, dp0, False, 0)
+
+    traces = {"n": 0}
+
+    def _counted(*a, **kw):
+        traces["n"] += 1
+        return edge_jax(*a, **kw)
+
+    fn = make_edge_profile_jit(_counted)   # the PRODUCTION jit policy
+
+    def _call(q1_, q2_):
+        return fn(jnp.asarray(q1_), jnp.asarray(q2_), 0, KM,
+                  jnp.asarray(dp0), False, 0)
+
+    jit1 = _call(q1, q2)
+    jit2 = _call(q1 * 1.01, q2 * 0.99)   # same shapes -> no retrace
+    assert traces["n"] == 1, traces["n"]
+    del jit2
+
+    # Bounds PINNED TO MEASUREMENT (probe job 9371848, x64 CPU, this
+    # fixture): qe1 1.036e-15, qe2 1.022e-15.  Both sit just ABOVE the
+    # 1e-15 inherited from the SIM1 gate, so the old expectation was the
+    # wrong one; bound = measured x ~10.  NB qe2 was never REPORTED as a
+    # failure only because the loop asserts qe1 first.
+    #
+    # A raised jit-vs-eager budget could hide a jit-ONLY regression, so
+    # the jit lane is ALSO bound directly against the NumPy fp64 lane --
+    # the certification authority -- at the same tolerance the eager
+    # lane is held to.  Measured (job 9371947): eager-vs-numpy and
+    # jit-vs-numpy are 1.093817e-15 (qe1) and 1.022090e-15 (qe2), equal
+    # to every printed digit.
+    #
+    # What that establishes, precisely: under this max-norm on this
+    # fixture, jit is no further from the authority than eager.  It does
+    # NOT exclude a jit change that happens to cancel against eager's own
+    # lane error, a change confined to non-maximal elements, or a
+    # common-mode eager+jit regression -- and it does not identify the
+    # mechanism.  XLA FMA contraction remains a PLAUSIBLE explanation,
+    # not an isolated one; that needs a non-contracted lowering
+    # (HLO/LLVM inspection) to confirm.
+    native = _run_native_edge_profile(q1, q2, 0, KM, dp0, False, 0)
+    for name, e, j, n in zip(("qe1", "qe2"), eager, jit1, native):
+        r = _rel(np.asarray(j), e)
+        assert r <= 1.1e-14, (name, r)
+        r_en, r_jn = _rel(np.asarray(e), n), _rel(np.asarray(j), n)
+        assert r_jn <= 1.1e-14, (name, "jit-vs-numpy", r_jn)
+        # The jit lane may not drift away from the authority relative to
+        # eager by more than the eager-jit budget itself.
+        assert r_jn <= r_en + 1.1e-14, (name, r_jn, r_en)
+
+
+# ---------------------------------------------------------------- gate 4
+def test_edge_profile_jax_check_grads_order2():
+    """Order-2 fwd+rev grads over all dynamic operands (q1, q2, dp0) on
+    both grid branches, plus the limiter=1 arm on a fixture PROVEN off
+    the zero-crossing switch (the jnp.where is C^0 exactly at
+    q*qe == 0; margin > 1 in product units here, far beyond any FD
+    step)."""
+    ni, km = 3, 4
+    q1, q2, dp0 = _edge_grad_fixture(ni=ni, km=km)
+
+    def f(q1_, q2_, dp0_):
+        e1, e2 = edge_jax(q1_, q2_, 0, km, dp0_, False, 0)
+        return jnp.sum(e1 * e1) + jnp.sum(e2 * e2)
+
+    check_grads(f, (jnp.asarray(q1), jnp.asarray(q2), jnp.asarray(dp0)),
+                order=2, modes=("fwd", "rev"))
+
+    # Uniform branch (dp0 is a dead read there -- q1/q2 only).
+    def fu(q1_, q2_):
+        e1, e2 = edge_jax(q1_, q2_, 0, km, jnp.asarray(dp0), True, 0)
+        return jnp.sum(e1 * e1) + jnp.sum(e2 * e2)
+
+    check_grads(fu, (jnp.asarray(q1), jnp.asarray(q2)), order=2,
+                modes=("fwd", "rev"))
+
+    # limiter=1: prove the clamp INACTIVE and off-switch on this fixture
+    # (all four q*qe products strictly positive with margin > 1).
+    e1, e2 = _run_jax_edge(q1, q2, 0, km, dp0, False, 0)
+    prods = (q1[:, 0] * e1[:, 0], q2[:, 0] * e2[:, 0],
+             q1[:, km - 1] * e1[:, km], q2[:, km - 1] * e2[:, km])
+    for p in prods:
+        assert (p > 1.0).all(), "limiter switch margin < 1 on fixture"
+    # Record the worst-case margin so a future fixture edit that quietly
+    # walks the products toward the switch fails here, not silently.
+    assert min(float(p.min()) for p in prods) > 50.0
+
+    def fl(q1_, q2_, dp0_):
+        e1_, e2_ = edge_jax(q1_, q2_, 0, km, dp0_, False, 1)
+        return jnp.sum(e1_ * e1_) + jnp.sum(e2_ * e2_)
+
+    check_grads(fl, (jnp.asarray(q1), jnp.asarray(q2),
+                     jnp.asarray(dp0)), order=2, modes=("fwd", "rev"))
+
+
+# ------------------------------------------------------------ guards
+@pytest.mark.parametrize("bad", ["q1", "q2", "dp0"])
+def test_edge_profile_jax_rejects_float32_every_operand(bad):
+    q1, q2, dp0 = _edge_fixture()
+    args = {"q1": q1, "q2": q2, "dp0": dp0}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        edge_jax(jnp.asarray(args["q1"]), jnp.asarray(args["q2"]), 0,
+                 KM, jnp.asarray(args["dp0"]), False, 0)
+
+
+def test_edge_profile_jax_km1_raises():
+    """km=1 rejected loudly (the NumPy lane raises IndexError on
+    q[:, 1]; the bottom row would silently WRAP on q[:, km-2])."""
+    a = jnp.ones((3, 1), jnp.float64)
+    with pytest.raises(ValueError, match="km=1"):
+        edge_jax(a, a, 0, 1, jnp.ones(1, jnp.float64), False, 0)
+
+
+# ======================================================================
+# update_dz_c — JAX twin certification
+# ======================================================================
+
+def _run_jax_udzc(bd, km, dt, dp0, zs, area, ut, vt, gz, ws, npx, npy,
+                  jit=False, **flags):
+    """Functional driver with the shared update_dz_c certificate
+    signature (bd shim -> static bounds tuple)."""
+    fn = update_dz_c_jit if jit else udzc_jax
+    gz_o, ws_o = fn(_bounds(bd), km, dt, jnp.asarray(dp0),
+                    jnp.asarray(zs), jnp.asarray(area), jnp.asarray(ut),
+                    jnp.asarray(vt), jnp.asarray(gz), jnp.asarray(ws),
+                    npx, npy, **flags)
+    return np.asarray(gz_o), np.asarray(ws_o)
+
+
+# ---------------------------------------------------------------- gate 1
+def test_udzc_jax_matches_numpy_lane_rect_mixed_flags():
+    """Strongest equivalence fixture: rectangular domain, nonuniform
+    dp0, signed winds, MIXED corner flags (exercises top/bottom/interior
+    ratios, both upwind branches, the corner fill and the ws diagnosis).
+    Measured (probe job 9371449, x64 CPU): gz rel 0.0, ws absdiff 0.0 —
+    BITWISE on this backend; the tolerant bound stays for backends whose
+    FMA contraction differs."""
+    ni, nj, ng = 12, 9, 3
+    npx, npy = ni + 1, nj + 1
+    bd = _BDR(1, ni, 1, nj, ng)
+    ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, KM, 71)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    flags = dict(sw_corner=True, se_corner=False, ne_corner=True,
+                 nw_corner=False)
+    args = (bd, KM, 100.0, dp0, zs, area, ut, vt, gz,
+            np.zeros((fi, fj)), npx, npy)
+    gz_n, ws_n = _run_native_update_dz_c(*args, **flags)
+    gz_j, ws_j = _run_jax_udzc(*args, **flags)
+    assert _rel(gz_j, gz_n) <= 5e-15, _rel(gz_j, gz_n)
+    assert np.abs(ws_j - ws_n).max() <= 5e-15 * max(
+        np.abs(ws_n).max(), 1.0), np.abs(ws_j - ws_n).max()
+    # Non-vacuity: transport moved gz.
+    assert np.abs(gz_n - gz).max() > 1.0
+    # Halo passthrough is bitwise (both lanes carry the input).
+    halo = np.ones((fi, fj), dtype=bool)
+    halo[ng - 1:ng + ni + 1, ng - 1:ng + nj + 1] = False
+    assert np.array_equal(gz_j[halo, :], gz[halo, :])
+
+
+def test_udzc_jax_km2_matches_numpy_lane():
+    """km=2: the interior interpolation has ONE level and bot_ratio
+    reads dp0[0]; parity on the rect fixture.  Measured (probe job
+    9371449): gz rel 0.0, ws absdiff 0.0 (bitwise on x64 CPU)."""
+    ni, nj, ng, km = 6, 5, 3, 2
+    npx, npy = ni + 1, nj + 1
+    bd = _BDR(1, ni, 1, nj, ng)
+    ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, km, 77)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    flags = dict(sw_corner=True, se_corner=True, ne_corner=True,
+                 nw_corner=True)
+    args = (bd, km, 100.0, dp0, zs, area, ut, vt, gz,
+            np.zeros((fi, fj)), npx, npy)
+    gz_n, ws_n = _run_native_update_dz_c(*args, **flags)
+    gz_j, ws_j = _run_jax_udzc(*args, **flags)
+    assert np.isfinite(gz_n).all()
+    assert _rel(gz_j, gz_n) <= 5e-15, _rel(gz_j, gz_n)
+    assert np.abs(ws_j - ws_n).max() <= 5e-15 * max(
+        np.abs(ws_n).max(), 1.0)
+
+
+# ---------------------------------------------------------------- gate 2
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_zero_wind_certificate(jit):
+    update_dz_c_zero_wind_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_uniform_gz_certificate(jit):
+    update_dz_c_uniform_gz_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_limiter_ws_certificate(jit):
+    update_dz_c_limiter_ws_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_nonuniform_reference_certificate(jit):
+    update_dz_c_nonuniform_reference_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_origin_relabel_certificate(jit):
+    update_dz_c_origin_relabel_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw))
+
+
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+def test_udzc_jax_rect_mixed_flags_certificate(jit):
+    # Measured (probe job 9371449): the JAX lane is BITWISE equal to the
+    # native lane on this fixture (x64 CPU), so it inherits the native
+    # lane's bitwise match to the independent corner reference; the
+    # tolerant bound stays for FMA-differing backends.
+    update_dz_c_rect_mixed_flags_certificate(
+        lambda *a, **kw: _run_jax_udzc(*a, jit=jit, **kw), tol=5e-15)
+
+
+# ---------------------------------------------------------------- gate 3
+def test_udzc_jax_jit_eager_parity_and_no_retrace():
+    ni, nj, ng = 12, 9, 3
+    npx, npy = ni + 1, nj + 1
+    bd = _BDR(1, ni, 1, nj, ng)
+    ut, vt, area, gz, zs, dp0 = _rect_fields(ni, nj, ng, KM, 71)
+    fi, fj = ni + 2 * ng, nj + 2 * ng
+    ws0 = np.zeros((fi, fj))
+    flags = dict(sw_corner=True, se_corner=False, ne_corner=True,
+                 nw_corner=False)
+    eager = _run_jax_udzc(bd, KM, 100.0, dp0, zs, area, ut, vt, gz, ws0,
+                          npx, npy, **flags)
+
+    traces = {"n": 0}
+
+    def _counted(*a, **kw):
+        traces["n"] += 1
+        return udzc_jax(*a, **kw)
+
+    fn = make_update_dz_c_jit(_counted)   # the PRODUCTION jit policy
+
+    def _call(ut_, gz_):
+        return fn(_bounds(bd), KM, 100.0, jnp.asarray(dp0),
+                  jnp.asarray(zs), jnp.asarray(area), jnp.asarray(ut_),
+                  jnp.asarray(vt), jnp.asarray(gz_), jnp.asarray(ws0),
+                  npx, npy, **flags)
+
+    jit1 = _call(ut, gz)
+    jit2 = _call(ut * 1.01, gz * 0.999)   # same shapes -> no retrace
+    assert traces["n"] == 1, traces["n"]
+    del jit2
+
+    # Bounds PINNED TO MEASUREMENT (probe job 9371848, x64 CPU, this
+    # fixture), PER FIELD because the two normalisations differ by four
+    # orders of magnitude:
+    #   gz 3.241e-16  (|gz|max 1.12e4 -- a large, well-scaled field)
+    #   ws 1.852e-15  (|ws|max 3.69   -- diagnosed from differences of
+    #                  gz-scale quantities, so cancellation-amplified
+    #                  relative to its own max)
+    # Bound = measured x ~10, kept separate so a gz regression cannot
+    # hide behind ws's looser budget.  As in the edge_profile gate, the
+    # jit lane is ALSO bound directly against the NumPy fp64 lane so a
+    # jit-only regression cannot hide inside the raised jit-vs-eager
+    # budget; see that gate for exactly what this does and does not
+    # establish (it does not exclude cancellation against eager's own
+    # lane error, non-maximal-element changes, or a common-mode
+    # regression, and it identifies no mechanism).
+    bounds = {"gz": 3.3e-15, "ws": 1.9e-14}
+    native = _run_native_update_dz_c(bd, KM, 100.0, dp0, zs, area, ut,
+                                     vt, gz, ws0, npx, npy, **flags)
+    for name, e, j, n in zip(("gz", "ws"), eager, jit1, native):
+        scale = max(np.abs(e).max(), 1e-30)
+        r = np.abs(np.asarray(j) - e).max() / scale
+        assert r <= bounds[name], (name, r)
+        n_scale = max(np.abs(n).max(), 1e-30)
+        r_en = np.abs(np.asarray(e) - n).max() / n_scale
+        r_jn = np.abs(np.asarray(j) - n).max() / n_scale
+        assert r_jn <= bounds[name], (name, "jit-vs-numpy", r_jn)
+        assert r_jn <= r_en + bounds[name], (name, r_jn, r_en)
+
+
+# ---------------------------------------------------------------- gate 4
+def test_udzc_jax_check_grads_order2_away_from_switches():
+    """Order-2 fwd+rev grads over all seven dynamic operands on a small
+    (n=4, ng=2, km=4) FD-friendly fixture, with BOTH C^0 switches proven
+    off with margin:
+
+    * the upwind flux ``jnp.where(xw > 0)`` — every advective interface
+      wind is bounded away from 0 (asserted below on an independent
+      3-line rebuild of the level interpolation);
+    * the ``dz_min`` bottom-up ``jnp.maximum`` floor — every level of
+      the OUTPUT clears the floor strictly (a fired floor would sit at
+      exactly gz[k+1] + DZ_MIN).
+    """
+    n, ng, km = 4, 2, 4
+    full = n + 2 * ng
+    npx = npy = n + 1
+    bd = _BD(n, ng)
+    bounds = _bounds(bd)
+    flags = dict(sw_corner=True, se_corner=True, ne_corner=True,
+                 nw_corner=True)
+    dt = 100.0
+
+    # FD-friendly magnitudes (area ~5e2, winds ~1e1, gz ~1e3): the
+    # certificate fixtures' 1e10 winds would make check_grads' fixed-eps
+    # numerical derivative meaningless.
+    #
+    # The winds are built DETERMINISTICALLY, not drawn until a seed
+    # happens to work: sign is a function of (i, j) ONLY (constant down
+    # the column), so every k-interpolation averages same-signed
+    # neighbours and cannot land on the upwind switch.  The per-column
+    # sinusoidal jitter puts |w| in ~[7.6, 12.6] (NOT [8, 12] -- the
+    # +-5 % multiplier widens both ends), so the guarantee taken from
+    # the algebra alone is only |mid| >= 7.6 and |top|, |bot| > 0; the
+    # numbers that matter are MEASURED and asserted below.  On this dp0
+    # (seed 55) they are: top 6.66, bottom 12.13, interior 8.54.
+    # The (i + j) checkerboard, with v in antiphase to u, makes BOTH
+    # upwind branches fire (asserted below -- a one-sided fixture would
+    # leave half the jnp.where untested).  Fixing the sign down each
+    # column excludes only switch-CROSSING inputs; both upwind arms
+    # still fire at the top, interior and bottom interfaces.
+    rng = np.random.default_rng(55)
+    dp0 = np.abs(1.0e4 + 2.0e3 * rng.standard_normal(km))
+    ii, jj = np.meshgrid(np.arange(full), np.arange(full), indexing="ij")
+    sgn_u = np.where((ii + jj) % 2 == 0, 1.0, -1.0)[:, :, None]
+    mag = ((8.0 + 4.0 * (np.arange(km) / max(km - 1, 1)))[None, None, :]
+           * (1.0 + 0.05 * np.sin(ii + 2.0 * jj))[:, :, None])
+    ut = sgn_u * mag
+    vt = -sgn_u * mag
+
+    # Off-switch control 1: rebuild the interface winds (the same 3-line
+    # dp0 interpolation, nh_utils.F90:94-133) and demand a margin far
+    # beyond any FD step at |wind| ~ 1e1, plus both-branches coverage.
+    tr = dp0[0] / (dp0[0] + dp0[1])
+    br = dp0[km - 1] / (dp0[km - 2] + dp0[km - 1])
+    assert 0.0 < tr < 1.0 and 0.0 < br < 1.0
+    for w in (ut, vt):
+        top = w[:, :, 0] + (w[:, :, 0] - w[:, :, 1]) * tr
+        bot = (w[:, :, km - 1]
+               + (w[:, :, km - 1] - w[:, :, km - 2]) * br)
+        mid = ((dp0[1:] * w[:, :, :-1] + dp0[:-1] * w[:, :, 1:])
+               / (dp0[:-1] + dp0[1:]))
+        assert min(np.abs(top).min(), np.abs(bot).min(),
+                   np.abs(mid).min()) > 4.0
+        n_pos = int((top > 0).sum() + (bot > 0).sum() + (mid > 0).sum())
+        n_neg = int((top < 0).sum() + (bot < 0).sum() + (mid < 0).sum())
+        assert n_pos > 0 and n_neg > 0, (n_pos, n_neg)
+
+    area = np.abs(5.0e2 * (1.0 + 0.1 * rng.standard_normal((full,
+                                                            full))))
+    gz = np.cumsum(
+        np.abs(500.0 + 100.0 * rng.standard_normal(
+            (full, full, km + 1))), axis=2)[:, :, ::-1].copy() * 3.0
+    zs = np.array(gz[:, :, km], copy=True)
+    ws0 = rng.standard_normal((full, full))   # nonzero halo passthrough
+
+    gz_o, ws_o = _run_jax_udzc(bd, km, dt, dp0, zs, area, ut, vt, gz,
+                               ws0, npx, npy, **flags)
+    # Off-switch control 2: the dz_min floor never fired (output strictly
+    # above gz[k+1] + DZ_MIN everywhere in the write window).
+    w = slice(ng - 1, ng + n + 1)
+    gap = (gz_o[w, w, :-1] - (gz_o[w, w, 1:] + DZ_MIN))
+    assert gap.min() > 1.0, f"dz_min floor margin {gap.min()} too small"
+
+    def _loss(gz_out, ws_out):
+        return jnp.sum(gz_out * gz_out) / 1e6 + jnp.sum(ws_out * ws_out)
+
+    def f(dp0_, ut_, vt_, gz_):
+        return _loss(*udzc_jax(
+            bounds, km, dt, dp0_, jnp.asarray(zs), jnp.asarray(area),
+            ut_, vt_, gz_, jnp.asarray(ws0), npx, npy, **flags))
+
+    check_grads(f, (jnp.asarray(dp0), jnp.asarray(ut), jnp.asarray(vt),
+                    jnp.asarray(gz)), order=2, modes=("fwd", "rev"))
+
+    def g(zs_, area_, ws_):
+        return _loss(*udzc_jax(
+            bounds, km, dt, jnp.asarray(dp0), zs_, area_,
+            jnp.asarray(ut), jnp.asarray(vt), jnp.asarray(gz), ws_,
+            npx, npy, **flags))
+
+    check_grads(g, (jnp.asarray(zs), jnp.asarray(area),
+                    jnp.asarray(ws0)), order=2, modes=("fwd", "rev"))
+
+    # Non-vacuity, and the LIMIT of what the ws operand certifies: the
+    # ws INPUT only survives where update_dz_c does not overwrite it, so
+    # this asserts a HALO PASSTHROUGH gradient (the write window covers
+    # is-1..ie+1; with ng=2 a one-cell ring remains) -- nothing more.
+    # It does NOT certify the ws DIAGNOSIS; that is exercised through
+    # the gz, wind, area, zs and dp0 operands above, which do flow
+    # through the computed ws in the loss.
+    halo = np.ones((full, full), dtype=bool)
+    halo[w, w] = False
+    assert halo.any()
+    g_ws = jax.grad(lambda ws_: g(jnp.asarray(zs), jnp.asarray(area),
+                                  ws_))(jnp.asarray(ws0))
+    assert np.abs(np.asarray(g_ws)[halo]).max() > 0.0
+
+
+# ------------------------------------------------------------ guards
+@pytest.mark.parametrize("bad", ["dp0", "zs", "area", "ut", "vt", "gz",
+                                 "ws"])
+def test_udzc_jax_rejects_float32_every_operand(bad):
+    n, ng = 4, 2
+    full = n + 2 * ng
+    args = {"dp0": np.full(KM, 1.0e4),
+            "zs": np.zeros((full, full)),
+            "area": np.full((full, full), 5.0e8),
+            "ut": np.zeros((full, full, KM)),
+            "vt": np.zeros((full, full, KM)),
+            "gz": np.zeros((full, full, KM + 1)),
+            "ws": np.zeros((full, full))}
+    args[bad] = args[bad].astype(np.float32)
+    with pytest.raises(TypeError, match=f"{bad}.*float64"):
+        udzc_jax((1, n, 1, n, ng), KM, 100.0,
+                 jnp.asarray(args["dp0"]), jnp.asarray(args["zs"]),
+                 jnp.asarray(args["area"]), jnp.asarray(args["ut"]),
+                 jnp.asarray(args["vt"]), jnp.asarray(args["gz"]),
+                 jnp.asarray(args["ws"]), n + 1, n + 1,
+                 sw_corner=True, se_corner=True, ne_corner=True,
+                 nw_corner=True)
+
+
+def test_udzc_jax_km1_and_ng1_raise():
+    """km=1 (the NumPy lane raises IndexError on dp0[1]) and ng=1 (the
+    NumPy lane's fort views silently WRAP on the is-2 upwind read) are
+    both loud errors here."""
+    n = 4
+    for km, ng, match in ((1, 2, "km=1"), (2, 1, "ng=1")):
+        full = n + 2 * ng
+        a2 = jnp.zeros((full, full), jnp.float64)
+        a3 = jnp.zeros((full, full, km), jnp.float64)
+        a3p = jnp.zeros((full, full, km + 1), jnp.float64)
+        with pytest.raises(ValueError, match=match):
+            udzc_jax((1, n, 1, n, ng), km, 100.0,
+                     jnp.full((km,), 1.0e4, jnp.float64), a2,
+                     jnp.full((full, full), 5.0e8, jnp.float64), a3, a3,
+                     a3p, a2, n + 1, n + 1, sw_corner=True,
+                     se_corner=True, ne_corner=True, nw_corner=True)
 
 
 def test_riem3_jax_dead_arm_and_ws_shape_raise():

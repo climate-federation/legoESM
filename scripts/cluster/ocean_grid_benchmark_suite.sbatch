@@ -22,11 +22,16 @@ CASES=(rest_state_stratified_with_land rest_state_uniform_with_land \
        geostrophic_adjustment phillips_two_layer inertia_gravity_wave \
        barotropic_wave lock_exchange)
 CASE=${CASES[${SLURM_ARRAY_TASK_ID:-0}]}
+# Optional single-arm rerun: GRID=<name> reruns just that grid for the case,
+# leaving the other arms' artifacts in place. Used when a fix touches one
+# dycore and rerunning the whole suite would change more than one variable.
+GRID_ARG=()
+if [[ -n "${GRID:-}" ]]; then GRID_ARG=(--grid "$GRID"); fi
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 echo "=== ocean benchmark suite | $CASE | $(date -Is) ==="
 srun .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
-    --only "$CASE" \
+    --only "$CASE" "${GRID_ARG[@]}" \
     --output "results/ocean_grid_benchmark/$CASE"
 echo "=== COMPLETED $CASE rc=$? $(date -Is) ==="

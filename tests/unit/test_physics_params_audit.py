@@ -240,13 +240,13 @@ class TestAIMIPDefaultsInteriorization:
         from legoesm.training.aimip_params import AIMIPClassicalParams
         params = AIMIPClassicalParams.from_defaults()
         vals = params.as_dict()
-        # gray_sfc_emissivity: canonical 1.0 in [0.5, 1.0] -> margin 0.025 -> 0.975
-        assert abs(float(vals["gray_sfc_emissivity"]) - 0.975) < 1e-5
-        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975
+        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975.
+        # (The gray twin of this assertion went away on 2026-08-11 with the
+        # gray knobs themselves; RRTMGP now carries the edge-knob case.)
         assert abs(float(vals["rrtmgp_sfc_emissivity"]) - 0.975) < 1e-5
         # raw is far from saturation -> non-trivial inverse-sigmoid gradient.
         # logit(0.95) ~= 2.94; a saturated edge default would give ~6.9.
-        raw = float(params.raw_values["gray_sfc_emissivity"])
+        raw = float(params.raw_values["rrtmgp_sfc_emissivity"])
         assert abs(raw) < 4.0
 
     def test_midrange_knob_exact_canonical(self):

@@ -487,6 +487,16 @@ def _make_hydrostatic_turbulence(
             ),
         }
 
+        # Surface turbulent fluxes [W/m^2, positive upward -- the schemes' own
+        # sign, already the CMOR convention], exported on the tendency exactly
+        # as the MPAS path below does.  They were missing HERE, so on the
+        # hydrostatic lane the CMOR hfls/hfss feed (and evspsbl = lhflx/L_v)
+        # had nothing to read, and a single-column water budget could not see
+        # its own evaporation: the SCM-RCE budget measured E = 0.0000 mm/day on
+        # a column whose bulk formula gives 1.559 (2026-08-11).  None-guarded,
+        # so a scheme without surface fluxes is byte-identical to before.
+        _shf_h = getattr(turb_out, "shflx", None)
+        _lhf_h = getattr(turb_out, "lhflx", None)
         tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
@@ -494,6 +504,12 @@ def _make_hydrostatic_turbulence(
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
+            shflx_sfc=(None if _shf_h is None else Field(
+                data=jnp.asarray(_shf_h).reshape(shape_2d),
+                name="shflx_sfc_turb", dims=dims_2d, units="W/m^2")),
+            lhflx_sfc=(None if _lhf_h is None else Field(
+                data=jnp.asarray(_lhf_h).reshape(shape_2d),
+                name="lhflx_sfc_turb", dims=dims_2d, units="W/m^2")),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

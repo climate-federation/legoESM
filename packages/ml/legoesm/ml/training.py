@@ -480,7 +480,8 @@ def load_checkpoint(
     eqx.Module
         Model with loaded weights.
     """
-    return eqx.tree_deserialise_leaves(str(path), model_template)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    return load_checkpoint_or_fail(str(path), model_template)
 
 
 @eqx.filter_jit

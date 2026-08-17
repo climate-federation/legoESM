@@ -776,6 +776,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "'two_column' thins the path by the exact "
                              "inversion of that identity (chi<=1, so it can "
                              "only DIM). 'none'=legacy, byte-identical.")
+    parser.add_argument("--cloud-saturation-scheme",
+                        dest="cloud_saturation_scheme",
+                        choices=["liquid", "mixed_phase"], default="liquid",
+                        help="Saturation curve for the cloud-fraction RH. "
+                             "'liquid' (legacy, byte-identical) measures RH "
+                             "against liquid (Tetens) saturation at every "
+                             "temperature, so ice-saturated TTL/anvil air "
+                             "(~205-245 K) reads RH ~0.55-0.75 < rh_crit and "
+                             "the RH cloud schemes diagnose NO cirrus where "
+                             "the model carries detrained ice (#1521). "
+                             "'mixed_phase' blends liquid/ice saturation by "
+                             "the scheme's own condensate ice-fraction ramp "
+                             "(IFS alpha(T) convention), warm cloud "
+                             "unchanged.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
@@ -1911,6 +1925,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_optics_inhomogeneity=args.cloud_optics_inhomogeneity,
         cloud_partial_coverage_optics=args.cloud_partial_coverage_optics,
+        cloud_saturation_scheme=args.cloud_saturation_scheme,
         cloud_vertical_overlap_optics=args.cloud_vertical_overlap_optics,
         cloud_n_subcolumns=args.cloud_n_subcolumns,
         cloud_fsd=args.cloud_fsd,
@@ -2509,10 +2524,11 @@ def _apply_aimip_classical_overrides(
     args._aimip_params = None
     if not getattr(args, "aimip_classical_checkpoint", None):
         return args
-    import equinox as eqx
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
     from legoesm.training.aimip_params import AIMIPClassicalParams
-    _p = eqx.tree_deserialise_leaves(
-        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults())
+    _p = load_checkpoint_or_fail(
+        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
+        what="--aimip-classical-checkpoint")
     args.convection = "tiedtke"
     args.turbulence = "louis"
     args.gravity_wave_drag = "mcfarlane"

@@ -312,6 +312,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "lint: static checks run through pytest because CI is disabled; skip in a fast inner loop with -m 'not lint'",
     # Complexity-tier ladder (docs/validation/TESTING.md). Opt-in selectors: run a rung
     # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
     # (does NOT tier-gate) so untagged tests still run until the suite is tagged.
