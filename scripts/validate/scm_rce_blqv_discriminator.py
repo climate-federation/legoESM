@@ -19,6 +19,21 @@ against an identical control, on one representative mass-flux scheme:
                      shear-only-K hypothesis directly: if the subcloud bias is
                      flux-through-collapsed-K, a K-profile scheme removes it
                      without touching the flux law.
+                     MEASURED 2026-08-17: +6.27 vs control +6.18 — NO EFFECT.
+                     Self-consistent: w* transport is driven by surface
+                     buoyancy flux, which the locked warm-moist state has
+                     destroyed; a buoyancy-driven closure cannot break a
+                     lock-in that suppresses buoyancy.
+* ``downdraft``    — emanuel with its PORTED unsaturated downdraft ENABLED
+                     (enable_unsaturated_downdraft, ships OFF): the one
+                     mechanism that imports low-theta_e air to the surface
+                     layer INDEPENDENT of local surface buoyancy, driven by
+                     rain evaporation aloft — i.e. the cold-pool surrogate.
+                     This is the surviving candidate after the first four arms
+                     all failed to move the surface state, and it is the only
+                     one that explains the adjustment-vs-mass-flux bimodality.
+                     Necessarily run on emanuel (its scheme owns the port), so
+                     its control is the emanuel arm, not mass_flux.
 
 Interpretation, pre-registered:
 * entrainment fixes the 0-2 km humidity while E moves little  -> missing
@@ -100,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
           f"cloudtop_entrainment_efficiency="
           f"{louis.cloudtop_entrainment_efficiency!r}")
 
+    dd_base = camp.make_physics_config(
+        radiation="rrtmgp", convection="emanuel", turbulence="louis",
+        microphysics="morrison", hard_saturation_adjustment=True)
+    dd_base, _st3 = camp.apply_subsidence_solve_override(
+        dd_base, "implicit_flux", category="convection")
+    _c, _s2, dd_sub = camp._active_subconfig(dd_base, "convection")
+    dd_cfg = camp._set_active_subconfig(
+        dd_base, "convection",
+        dd_sub._replace(enable_unsaturated_downdraft=True))
+
     hb_base = camp.make_physics_config(
         radiation="rrtmgp", convection=args.scheme,
         turbulence="holtslag_boville", microphysics="morrison",
@@ -112,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
             base, cloudtop_entrainment_efficiency=args.entrainment_efficiency),
         "coare3": _with_louis_override(base, bulk_scheme="coare3"),
         "hb": hb_base,
+        # The downdraft pair: emanuel without and with the ported shaft.
+        "emanuel_ctl": dd_base,
+        "downdraft": dd_cfg,
     }
 
     results = {}
