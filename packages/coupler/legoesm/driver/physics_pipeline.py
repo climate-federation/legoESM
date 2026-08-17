@@ -3318,8 +3318,6 @@ def _resolve_convection(config):
             rhebc_land=getattr(config, 'bechtold_rhebc_land', 0.75),
             rhebc_land_deep=getattr(config, 'bechtold_rhebc_land_deep', 0.70),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
-            epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
-            delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
                 config, 'bechtold_use_ifs_downdraft', True),
