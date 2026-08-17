@@ -1407,9 +1407,16 @@ def spectral_rollout(
             if phys_state_in is not None:
                 phys0 = phys_state_in
             else:
-                _ncol = int(grid.n_lat) * int(grid.n_lon)
-                _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
-                phys0 = _ps_init_u(_ncol, _nlev)
+                # Prefer the state-aware seed (shear-equilibrium TKE) over
+                # the scheme-floor initializer: a floor seed cannot spin up
+                # within a short window (sqrt-production bottleneck).
+                _seed_u = getattr(physics_fn, "seed_phys_state", None)
+                if _seed_u is not None:
+                    phys0 = _seed_u(initial_state, grid, sigma_coord)
+                else:
+                    _ncol = int(grid.n_lat) * int(grid.n_lon)
+                    _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+                    phys0 = _ps_init_u(_ncol, _nlev)
 
             def step_fn_stateful(carry, _):
                 state, phys_state = carry
@@ -1606,9 +1613,16 @@ def spectral_rollout(
         if phys_state_in is not None:
             phys0 = phys_state_in
         else:
-            _ncol = int(grid.n_lat) * int(grid.n_lon)
-            _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
-            phys0 = _ps_init(_ncol, _nlev)
+            # Prefer the state-aware seed (shear-equilibrium TKE) over the
+            # scheme-floor initializer: a floor seed cannot spin up within
+            # a short window (sqrt-production bottleneck; GLM option c).
+            _seed = getattr(physics_fn, "seed_phys_state", None)
+            if _seed is not None:
+                phys0 = _seed(initial_state, grid, sigma_coord)
+            else:
+                _ncol = int(grid.n_lat) * int(grid.n_lon)
+                _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+                phys0 = _ps_init(_ncol, _nlev)
         step_fn_ckpt = jax.checkpoint(
             step_fn_gated_stateful,
             prevent_cse=True,
@@ -3398,7 +3412,7 @@ def _train_spectral_loop(
         ms_weight_sum = 0.0
 
     def _rollout_one_segment(state, physics, n_seg_steps, time_offset_seconds,
-                             forcing_base=None):
+                             forcing_base=None, phys_state=None):
         """Run one autoregressive segment (n_seg_steps dycore steps).
 
         ``time_offset_seconds`` is the cumulative simulated time elapsed
@@ -3411,6 +3425,21 @@ def _train_spectral_loop(
         """
         if isinstance(physics, tuple):
             non_rad_fn, rad_fn = physics
+            # PROGNOSTIC PHYSICS MEMORY across chained segments (codex P0):
+            # a marked stateful physics_fn returns (state, phys_state) so
+            # segment k+1 continues from segment k's memory instead of
+            # re-seeding every seam. The caller threads ``phys_state``.
+            if hasattr(non_rad_fn, "with_phys_state"):
+                return spectral_rollout(
+                    state, non_rad_fn, grid, sigma, pe_config,
+                    config.dt, n_seg_steps,
+                    sponge_factor, spectral_filter,
+                    rad_physics_fn=rad_fn,
+                    rad_update_interval=rad_update_interval,
+                    sim_time_offset_seconds=time_offset_seconds,
+                    phys_state_in=phys_state,
+                    return_phys_state=True,
+                )
             return spectral_rollout(
                 state, non_rad_fn, grid, sigma, pe_config,
                 config.dt, n_seg_steps,
@@ -3418,14 +3447,14 @@ def _train_spectral_loop(
                 rad_physics_fn=rad_fn,
                 rad_update_interval=rad_update_interval,
                 sim_time_offset_seconds=time_offset_seconds,
-            )
+            ), None
         return spectral_rollout(
             state, physics, grid, sigma, pe_config,
             config.dt, n_seg_steps,
             sponge_factor, spectral_filter,
             sim_time_offset_seconds=time_offset_seconds,
             forcing_base=forcing_base,
-        )
+        ), None
 
     # --- rollout curriculum (NeuralGCM-style stability training) ---
     # Each phase supervises ONE autoregressive rollout to phase_lead hours
@@ -3461,7 +3490,7 @@ def _train_spectral_loop(
             # Curriculum phase: one rollout to the phase lead.
             tgt = (target_carry[k_target]
                    if type(target_carry) is tuple else target_carry)
-            pred = _rollout_one_segment(
+            pred, _ = _rollout_one_segment(
                 ic_spectral, physics, n_steps_phase, 0.0,
                 forcing_base=forcing_base,
             )
@@ -3473,10 +3502,11 @@ def _train_spectral_loop(
             total = jnp.float32(0.0)
             comp_total: dict = {}
             t_offset = 0.0
+            seg_ps = None    # physics memory chained across segments
             for k, n_seg in enumerate(segment_steps):
-                state = _rollout_one_segment(
+                state, seg_ps = _rollout_one_segment(
                     state, physics, n_seg, t_offset,
-                    forcing_base=forcing_base,
+                    forcing_base=forcing_base, phys_state=seg_ps,
                 )
                 seg_loss, seg_comp = _spectral_state_loss_components(
                     state, target_carry[k], grid, sigma,
@@ -3495,7 +3525,7 @@ def _train_spectral_loop(
             inv = 1.0 / ms_weight_sum
             return total * inv, {k: v * inv for k, v in comp_total.items()}
         # Legacy single-step path.
-        pred = _rollout_one_segment(
+        pred, _ = _rollout_one_segment(
             ic_spectral, physics, n_steps_rollout, 0.0,
             forcing_base=forcing_base,
         )

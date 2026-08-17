@@ -212,3 +212,160 @@ def test_state_kwargs_on_markerless_fn_raise():
             600.0, 2, None, None,
             rad_physics_fn=_rad_zero, rad_update_interval=2,
             return_phys_state=True)
+
+
+# ---- shear-equilibrium TKE seed (GLM option c) ----
+
+def _phys_state_with_tke(tke):
+    """PhysicsState (no field defaults) with only the tke slot live."""
+    from legoesm.atmosphere.physics.physics_state import PhysicsState
+
+    return PhysicsState(
+        tke=tke, conv_prog_profile=None, conv_stoch_state=None,
+        gwd_spectrum=None, prng_key=None, surface_T_sfc_override=None,
+        qke=None, clubb_moments=None, rad_heating=None, col_index=None)
+
+
+
+def test_seed_marker_preferred_over_floor_init():
+    """When the physics fn carries seed_phys_state, the rollout must use it
+    for the initial carry (counter starts at the seed value 7 -> the
+    heating ladder shifts by 7 per step relative to the floor-init run)."""
+    fn = _stub_physics(None, None, heat_per_unit_state=1.0e-5)
+    fn.seed_phys_state = lambda state, grid_, sigma_coord: jnp.asarray(7.0)
+    out_seeded, _, _ = _setup(4, fn)
+
+    plain = _stub_physics(None, None, heat_per_unit_state=1.0e-5)
+    out_floor, _, _ = _setup(4, plain)
+    dT = float(jnp.mean(jnp.asarray(out_seeded.T))
+               - jnp.mean(jnp.asarray(out_floor.T)))
+    # 4 steps x (+7 counter offset) x dt x coef, over sqrt(4 pi):
+    expected = 4 * 7.0 * 600.0 * 1.0e-5 / np.sqrt(4.0 * np.pi)
+    assert dT == pytest.approx(expected, rel=0.05)
+
+
+def test_shear_equilibrium_wp2_seed_values():
+    """The real seed: sheared columns get w = c_K L^2 S^2 within the clip
+    band; an unsheared column sits at the floor; values finite and within
+    [floor, cap]."""
+    from types import SimpleNamespace
+
+    from legoesm.training.aimip_params import (
+        _TKE_SEED_CAP, _TKE_SEED_CK, _TKE_SEED_FLOOR, _TKE_SEED_LENGTH_M,
+        _apply_wp2_seed,
+    )
+
+    grid = create_gaussian_grid(5)
+    sigma = create_sigma_coordinate(8)
+    ncol = grid.n_lat * grid.n_lon
+    # Carry with a sheared u profile (linear in level index).
+    carry = _carry(grid.n_lat, grid.n_lon, nlev=8, extras=False)
+    shear_u = jnp.broadcast_to(
+        jnp.linspace(30.0, 0.0, 8), (grid.n_lat, grid.n_lon, 8))
+    # SegmentCarry stores raw arrays (not Fields).
+    carry = carry._replace(u=shear_u)
+    state = carry_to_spectral_state(carry, grid)
+
+    from legoesm.atmosphere.physics.physics_state import PhysicsState
+    ps = _phys_state_with_tke(jnp.full((ncol, 8), 1.0e-6))
+    seeded = _apply_wp2_seed(ps, state, grid, sigma)
+    w = np.asarray(seeded.tke)
+    assert np.isfinite(w).all()
+    assert (w >= _TKE_SEED_FLOOR - 1e-15).all()
+    assert (w <= _TKE_SEED_CAP + 1e-12).all()
+    # The sheared column must escape the floor decisively somewhere.
+    assert float(w.max()) > 1e-2
+
+
+def test_unsheared_column_seeds_at_floor():
+    from legoesm.training.aimip_params import (
+        _TKE_SEED_FLOOR, _apply_wp2_seed,
+    )
+    grid = create_gaussian_grid(5)
+    sigma = create_sigma_coordinate(8)
+    ncol = grid.n_lat * grid.n_lon
+    carry = _carry(grid.n_lat, grid.n_lon, nlev=8, extras=False)   # u=v=0
+    state = carry_to_spectral_state(carry, grid)
+    ps = _phys_state_with_tke(jnp.full((ncol, 8), 1.0e-6))
+    seeded = _apply_wp2_seed(ps, state, grid, sigma)
+    np.testing.assert_allclose(np.asarray(seeded.tke), _TKE_SEED_FLOOR,
+                               rtol=1e-10)
+
+
+def test_supplied_phys_state_bypasses_the_seed():
+    """Chained segments must NOT re-seed (codex round 2 P0): with
+    phys_state_in supplied, the seed marker is ignored — proven by the
+    counter ladder starting from the supplied value, not the seed's."""
+    fn = _stub_physics(None, None, heat_per_unit_state=1.0e-5)
+    fn.seed_phys_state = lambda state, grid_, sigma_coord: jnp.asarray(100.0)
+
+    grid = create_gaussian_grid(5)
+    sigma = create_sigma_coordinate(4)
+    carry = _carry(grid.n_lat, grid.n_lon, extras=False)
+    state0 = carry_to_spectral_state(carry, grid)
+    kw = dict(rad_physics_fn=_rad_zero, rad_update_interval=2)
+    out_chained = spectral_rollout(
+        state0, fn, grid, sigma, SpectralPEConfig(semi_implicit=True),
+        600.0, 3, None, None, phys_state_in=jnp.asarray(0.0), **kw)
+    plain = _stub_physics(None, None, heat_per_unit_state=1.0e-5)
+    out_floor = spectral_rollout(
+        state0, plain, grid, sigma, SpectralPEConfig(semi_implicit=True),
+        600.0, 3, None, None, **kw)
+    # Identical ladders (both start at 0) -> the 100.0 seed never entered.
+    np.testing.assert_allclose(
+        np.asarray(out_chained.T_hat.data), np.asarray(out_floor.T_hat.data),
+        rtol=1e-12)
+
+
+def test_seed_has_zero_gradient_wrt_ck():
+    """stop_gradient contract: the trained c_K must not receive gradient
+    THROUGH the seed (retro-coupling into its own IC). Non-saturated case
+    so the clip is inactive."""
+    from legoesm.training.aimip_params import _apply_wp2_seed
+
+    grid = create_gaussian_grid(5)
+    sigma = create_sigma_coordinate(8)
+    ncol = grid.n_lat * grid.n_lon
+    carry = _carry(grid.n_lat, grid.n_lon, nlev=8, extras=False)
+    shear_u = jnp.broadcast_to(
+        jnp.linspace(30.0, 0.0, 8), (grid.n_lat, grid.n_lon, 8))
+    carry = carry._replace(u=shear_u)
+    state = carry_to_spectral_state(carry, grid)
+
+    def f(c_k):
+        ps = _phys_state_with_tke(jnp.full((ncol, 8), 1.0e-6))
+        seeded = _apply_wp2_seed(ps, state, grid, sigma, c_k=c_k)
+        return jnp.sum(seeded.tke)
+
+    val = float(f(0.548))
+    assert val > 8 * ncol * 1.0e-6          # seed engaged (not all-floor)
+    g = jax.grad(f)(0.548)
+    assert float(g) == 0.0                   # fully detached
+
+
+def test_seed_smoothing_stencil_exact():
+    """Replicated-edge 1-2-1: endpoints blend 3/4-1/4 with the neighbour
+    (raw endpoints would skip smoothing exactly at the surface)."""
+    import legoesm.training.aimip_params as ap
+
+    src_has = "0.75 * s2[:, :1] + 0.25 * s2[:, 1:2]" in __import__(
+        "inspect").getsource(ap._apply_wp2_seed)
+    assert src_has
+
+
+def test_factory_and_trainer_wiring_source_pins():
+    """The factory attaches seed markers on BOTH branches, and the trainer's
+    segment wrapper threads phys_state (codex round 2 P0 — without this,
+    every chained segment re-seeds)."""
+    import inspect
+
+    from legoesm.training import aimip_params as ap
+    from legoesm.training import neural_gcm_spectral as ngs
+
+    src = inspect.getsource(ap.make_aimip_classical_spectral_physics)
+    assert "non_rad_fn.seed_phys_state = _seed_phys_state" in src
+    assert "combined_fn.seed_phys_state = _seed_phys_state_combined" in src
+
+    src2 = inspect.getsource(ngs)
+    assert "phys_state_in=phys_state," in src2
+    assert "seg_ps = None" in src2 and "phys_state=seg_ps," in src2
