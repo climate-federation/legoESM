@@ -109,24 +109,25 @@ def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
         # a Tiedtke run cannot pick it up by accident.
         assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
 
-    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knob
-    # set must leave Tiedtke's own rates at their in-scheme defaults.
+    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knobs
+    # set must leave Tiedtke's own rates at their in-scheme defaults.  Asserted
+    # on the RESOLVED config, not on a patched constructor: the pipeline reads
+    # a pre-built `ConvectionConfig().tiedtke`, so a constructor spy would
+    # never fire and would pass no matter what the knob did.
     import legoesm.driver.physics_pipeline as pp
     from legoesm.driver.config import ExperimentConfig
-    seen = {}
-    real = cc.TiedtkeConfig
-    cc.TiedtkeConfig = lambda *a, **kw: (seen.update(kw), real(*a, **kw))[1]
-    try:
-        pp._resolve_convection(ExperimentConfig()._replace(
-            convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
-            bechtold_delta_deep=1.8e-4))
-    finally:
-        cc.TiedtkeConfig = real
-    defaults = real()
+    _kernel, resolved = pp._resolve_convection(ExperimentConfig()._replace(
+        convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
+        bechtold_delta_deep=1.8e-4))
+    defaults = cc.TiedtkeConfig()
     for field in ("epsilon_deep", "delta_deep"):
-        assert seen.get(field, getattr(defaults, field)) == getattr(
-            defaults, field), (
-            f"the Bechtold {field} knob reached TiedtkeConfig")
+        assert getattr(resolved, field) == getattr(defaults, field), (
+            f"the Bechtold {field} knob reached the Tiedtke config: "
+            f"{getattr(resolved, field)} != {getattr(defaults, field)}")
+    # And the values it would have carried are genuinely different, or the
+    # assertion above is satisfied by a knob that does nothing anywhere.
+    assert defaults.epsilon_deep != 3.0e-3
+    assert defaults.delta_deep != 1.8e-4
 
 
 def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
