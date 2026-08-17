@@ -73,7 +73,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
             "cape_qadv_weight": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "IFS RCAPQADV=0.8 (sucumf.F90:219)", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Bechtold et al. (2008)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Bechtold et al. (2008)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
@@ -117,7 +117,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "EDMF mass-flux stability cap", "shape": None},
             "a_u_init": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "EDMF scheme default", "shape": None},
             "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "EDMF scheme default", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: EDMF scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: EDMF scheme default", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "EDMF scheme default", "shape": None},
             "tau_a": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "EDMF scheme default", "shape": None},
         },
@@ -130,7 +130,7 @@ __param_spec__ = {
             "mixing_fraction": "numerics: per-iteration adjustment fraction (default 1.0 at domain boundary, not sigmoid-tunable)",
         },
         "params": {
-            "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Manabe et al. (1965) moist adjustment", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Manabe et al. (1965) moist adjustment", "shape": None},
         },
     },
     "EmanuelConfig": {
@@ -154,12 +154,24 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Emanuel (1991)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
             "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
+            "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
+            "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
+            "downdraft_omtrain_pa_s": {"units": "Pa/s", "bounds": (10.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTRAIN, rain fall speed (convect43c.f:194)", "shape": None},
+            "downdraft_omtsnow_pa_s": {"units": "Pa/s", "bounds": (1.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTSNOW, snow fall speed (convect43c.f:195)", "shape": None},
+            "downdraft_coeffr": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c COEFFR, rain evaporation rate coefficient (convect43c.f:196)", "shape": None},
+            "downdraft_coeffs": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c COEFFS, snow evaporation rate coefficient (convect43c.f:197)", "shape": None},
+            "downdraft_freeze_transition_K": {"units": "K", "bounds": (0.1, 5.0), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "smoothing width replacing the oracle's hard IF(T>273) phase switch", "shape": None},
+            "downdraft_inertia_scale_hPa": {"units": "hPa", "bounds": (5.0, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c FAC=20/(PH(I-1)-PH(I)) downdraft inertia (convect43c.f:776)", "shape": None},
+            "downdraft_taper_p_fraction": {"units": "1", "bounds": (0.9, 0.99), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c 0.949*P(1) taper of MP to zero at the surface (convect43c.f:779)", "shape": None},
+            "downdraft_dhdp_min": {"units": "J/kg/hPa", "bounds": (1.0, 50.0), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c DHDP floor guarding the MP divisor (convect43c.f:770)", "shape": None},
+            "downdraft_ep_gate_threshold": {"units": "1", "bounds": (0.0, 0.01), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c IF(EP(INB).LT.0.0001) whole-shaft skip (convect43c.f:717)", "shape": None},
+            "downdraft_ep_gate_width": {"units": "1", "bounds": (1e-6, 1e-3), "tunable_tier": 0, "transform": "sigmoid", "category": "downdraft", "reference": "smoothing width replacing the oracle's hard EP(INB) threshold", "shape": None},
             "dtmax": {"units": "K", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) CONVECT v4.3c DTMAX", "shape": None},
             "elcrit": {"units": "kg/kg", "bounds": (0.000363, 0.0033), "tunable_tier": 1, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c ELCRIT", "shape": None},
             "entp": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) CONVECT v4.3c ENTP", "shape": None},
@@ -246,7 +258,7 @@ __param_spec__ = {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) stability cap", "shape": None},
             "M_scale": {"units": "kg/m^2/s", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) equilibrium mass-flux scale", "shape": None},
             "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Arakawa & Wu (2013) scheme default", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Arakawa & Wu (2013) scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Arakawa & Wu (2013) scheme default", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Arakawa & Wu (2013) bulk plume", "shape": None},
             "tau_adj": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Arakawa & Wu (2013) mass-flux relaxation", "shape": None},
         },
@@ -258,7 +270,7 @@ __param_spec__ = {
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
         },
         "params": {
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Frierson (2007)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
             "rh_ref": {"units": "1", "bounds": (0.4, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Frierson (2007) reference RH", "shape": None, "legacy_name": "sbm_RH_ref"},
             "tau_c": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Frierson (2007) relaxation timescale", "shape": None, "legacy_name": "sbm_tau_c"},
         },
@@ -283,7 +295,7 @@ __param_spec__ = {
             "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
             "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Tiedtke (1989)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Tiedtke (1989)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
@@ -315,7 +327,7 @@ __param_spec__ = {
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Zhang & McFarlane (1995) stability cap", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 0, "transform": "sigmoid", "category": "trigger", "reference": "tier 0 / AD-unreachable, see _CAPE_TRIGGER_AD_NOTE (#1417). Original: Zhang & McFarlane (1995)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Zhang & McFarlane (1995)", "shape": None},
             "cmt_c_d": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "cmt_c_u": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Zhang & McFarlane (1995) bulk plume", "shape": None},
@@ -1071,6 +1083,22 @@ class EmanuelConfig(NamedTuple):
     # should override this to ``True``.
     enable_unsaturated_downdraft: bool = False
     downdraft_efficiency: float = 0.2
+    # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
+    # Read ONLY when ``enable_unsaturated_downdraft`` is set, which selects
+    # the ported shaft (``_emanuel_downdraft``) rather than the legacy
+    # column-integrated stand-in.  Defaults are Emanuel's published values.
+    downdraft_sigd: float = 0.05
+    downdraft_sigs: float = 0.12
+    downdraft_omtrain_pa_s: float = 50.0
+    downdraft_omtsnow_pa_s: float = 5.5
+    downdraft_coeffr: float = 1.0
+    downdraft_coeffs: float = 0.8
+    downdraft_freeze_transition_K: float = 1.0
+    downdraft_inertia_scale_hPa: float = 20.0
+    downdraft_taper_p_fraction: float = 0.949
+    downdraft_dhdp_min: float = 10.0
+    downdraft_ep_gate_threshold: float = 1.0e-4
+    downdraft_ep_gate_width: float = 1.0e-5
     smooth_trigger_sharpness: float = 0.5
     # Bulk-plume entrainment/detrainment for the cloud-base updraft.
     # Deep-convection value (~2e-4 /m): in Emanuel's scheme the
@@ -1309,7 +1337,23 @@ class TiedtkeConfig(NamedTuple):
 # stable columns -- most of the globe, most of the time -- these parameters are
 # collected by `build_trainable_params` and then silently do not move.
 #
-# Excluding them keeps the spec TRUTHFUL. Making them genuinely trainable needs
+# RESOLVED 2026-08-16: `cape_trigger` now uses a STRAIGHT-THROUGH estimator
+# (`_triggers._straight_through_step`): the forward value is the same hard
+# gate, bit for bit, while the backward pass uses a sigmoid widened by 1e3,
+# which is non-zero across the whole physical CAPE range. The thresholds are
+# therefore tier 2, not tier 0. The motivating evidence that they are
+# PHYSICALLY live: in the 2026-08-16 SCM-RCE campaign `dca` improved its
+# temperature-and-humidity score 65% (6.06 -> 2.13) by tuning its CAPE
+# threshold alone, found by a derivative-free search precisely because no
+# gradient could see it. Gated by tests/unit/test_cape_trigger_gradient.py,
+# which also pins that the UNFIXED sigmoid really was dead so the suite
+# cannot pass vacuously.
+#
+# The surrogate gradient is not the true derivative of a saturated sigmoid --
+# that derivative is genuinely zero. It is a descent direction with the
+# correct sign, which is what a trainer needs.
+#
+# HISTORICAL (pre-fix): Excluding them kept the spec TRUTHFUL. Making them genuinely trainable needs
 # a reformulated trigger (normalise by a CAPE scale, or soften the positive-part
 # clamp); both change trigger behaviour and must be validated as physics, not
 # slipped in as a tier edit. `kain_fritsch` is unaffected (cape_threshold = 0,
