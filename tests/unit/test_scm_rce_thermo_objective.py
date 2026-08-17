@@ -427,12 +427,15 @@ def test_signature_rejects_a_field_nothing_can_supply(monkeypatch):
 def test_physical_set_differs_from_aggressive_in_both_directions():
     from scripts.run import run_scm_rce_campaign as camp
 
-    tier, include_tier0, exclude = camp.resolve_param_selection(
+    tier, _include_tier0, exclude = camp.resolve_param_selection(
         "atm.conv.BechtoldConfig", "physical")
     assert tier == "aggressive"
-    # ADDS the AD-unreachable CAPE trigger ...
-    assert "atm.conv.BechtoldConfig.cape_threshold" in include_tier0
-    # ... and DROPS the numerics knob.
+    # DROPS the numerics knob — the direction that still distinguishes
+    # `physical` from `aggressive`.  (The other direction, ADDING the
+    # AD-unreachable CAPE trigger, no longer applies: the trigger gained a
+    # straight-through gradient and its threshold was promoted to tier 2, so
+    # the ordinary tier selection picks it up.  See
+    # test_the_cape_thresholds_are_trainable_not_tier_zero.)
     assert "atm.conv.BechtoldConfig.mc_normalize_scale" in exclude
 
 
@@ -443,7 +446,6 @@ def test_physical_set_never_admits_a_genuine_numerics_tier0():
 
     _tier, include_tier0, _exclude = camp.resolve_param_selection(
         "atm.conv.EmanuelConfig", "physical")
-    assert "atm.conv.EmanuelConfig.cape_threshold" in include_tier0
     for name in ("downdraft_dhdp_min", "downdraft_ep_gate_threshold",
                  "downdraft_ep_gate_width", "downdraft_freeze_transition_K"):
         assert f"atm.conv.EmanuelConfig.{name}" not in include_tier0
@@ -485,13 +487,21 @@ def test_tier0_optin_is_refused_for_a_non_tier0_name():
 
 
 def test_tier0_stays_excluded_without_the_optin():
+    """A genuine tier-0 parameter is still unreachable without the opt-in.
+
+    Uses one of Emanuel's numerics tier-0 entries: the CAPE threshold is no
+    longer an example, having been promoted to tier 2 once its gradient
+    existed.
+    """
     from legoesm.training.param_collector import build_trainable_params
 
     params = build_trainable_params(
-        active_scheme_keys={"atm.conv.BechtoldConfig"}, tier="aggressive",
+        active_scheme_keys={"atm.conv.EmanuelConfig"}, tier="aggressive",
         dtype=jnp.float64)
-    assert "atm.conv.BechtoldConfig.cape_threshold" not in {
-        c.name for c in params.constraints}
+    names = {c.name for c in params.constraints}
+    assert "atm.conv.EmanuelConfig.downdraft_dhdp_min" not in names
+    # ...while the promoted threshold IS now reachable by tier alone.
+    assert "atm.conv.EmanuelConfig.cape_threshold" in names
 
 
 # --------------------------------------------------------------------------- #
