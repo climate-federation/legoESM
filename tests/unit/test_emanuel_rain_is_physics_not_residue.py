@@ -9,17 +9,11 @@ the port happens to have, PLUS roundoff.
 
 So the closure test that now passes for emanuel passes BY CONSTRUCTION: routing
 the residual to rain launders any further leak into "precipitation", and the
-budget can no longer detect it.  This file restores the ability to tell them
-apart by computing ``EP·CLW`` INDEPENDENTLY from the mixer's own intermediates
-and comparing.
-
-* they agree  → the residual really is the precipitation production, and the
-  fix is faithful as well as conservative;
-* they differ → the difference is a SECOND leak that the budget alone can no
-  longer see, and the size of the gap measures it.
-
-The test therefore reports the gap whatever the verdict; it is a measurement
-first and an assertion second.
+budget can no longer detect it.  This file RECORDS the emitted rain and pins
+the one-sided clamp; the independent ``EP·CLW`` comparison that would fully
+separate physics from residue (via the mixer's ``ep``/``clw``/``ment``
+diagonal, with the surface-first flip) is an OPEN FOLLOW-UP — stated here so
+the file does not promise a check it does not contain.
 """
 
 from __future__ import annotations
@@ -106,13 +100,13 @@ def test_a_positive_residual_would_not_be_routed_to_rain():
     from legoesm.atmosphere.physics.convection import emanuel as E
 
     src = inspect.getsource(E)
-    # Match the SEMANTICS (a one-sided max on -net_water feeding the rain
-    # source), not an exact source line — the first version of this assertion
-    # broke on a pure rename, which is the source-inspection failure mode the
-    # repo's own rules warn about.
-    assert "jnp.maximum(-net_water, 0.0)" in src, (
-        "the residual is no longer clamped one-sided; water CREATION could be "
-        "emitted as negative rain")
-    assert "_residual[:, None] * add_weight" in src or (
-        "jnp.maximum(-net_water, 0.0)[:, None] * add_weight" in src), (
+    # Anchor on the RAIN-SOURCE assignment specifically.  A bare substring
+    # check on "jnp.maximum(-net_water, 0.0)" is vacuous against the named
+    # threat: the same expression exists in the LEGACY deficit block, so a
+    # two-sided rain residual would still pass it (third-review finding).
+    assert "_residual = jnp.maximum(-net_water, 0.0)" in src, (
+        "the rain residual is no longer the one-sided clamp assigned to "
+        "_residual; a two-sided form would emit water CREATION as negative "
+        "rain")
+    assert "_residual[:, None] * add_weight" in src, (
         "the rain source no longer distributes the clamped residual")

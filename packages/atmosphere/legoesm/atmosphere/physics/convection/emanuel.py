@@ -654,30 +654,45 @@ def emanuel_convection(
     #     evaporative cooling of the shaft remain ABSENT;
     #   * routing the residual to rain LAUNDERS any further water leak in this
     #     scheme into "precipitation", so the column-closure test can no longer
-    #     detect one here.  That is the price of closing the budget this way,
-    #     and it is why the rain source is separately measured in
-    #     tests/unit/test_emanuel_rain_is_physics_not_residue.py.
+    #     detect one here.  That is the price of closing the budget this way.
+    #     tests/unit/test_emanuel_rain_is_physics_not_residue.py RECORDS the
+    #     emitted rain; an independent EP·CLW comparison that would fully
+    #     separate physics from residue is an open follow-up, not a shipped
+    #     check — do not cite one that does not exist.
     #
-    # ``add_weight`` is zero when the column removes no vapour at all, in which
-    # case a negative residual would vanish silently — the original failure
-    # mode.  It cannot arise here (a negative residual REQUIRES net drying),
-    # but the guard below makes that structural rather than incidental.
-    _residual = jnp.maximum(-net_water, 0.0)
-    dq_r_conv_dt = jnp.where(
-        config.use_genuine_mixing,
-        _residual[:, None] * add_weight,
-        0.0,
-    )                                                     # ∫dq_r dp/g = |deficit|
-    # A residual that could not be placed (no drying anywhere) must not be
-    # dropped on the floor; that is exactly how EP·CLW disappeared before.
-    _placed = jnp.sum(dq_r_conv_dt * dp, axis=-1) / constants.g
-    _unplaced = jnp.where(config.use_genuine_mixing, _residual - _placed, 0.0)
-    dq_r_conv_dt = dq_r_conv_dt + jnp.where(
-        (drying_col <= 0.0)[:, None],
-        _unplaced[:, None] * (dp / jnp.sum(dp, axis=-1, keepdims=True))
-        * constants.g / jnp.maximum(dp, 1e-30),
-        0.0,
-    )
+    # FIDELITY BOUND (third-review finding): the oracle's ``WDTRAIN`` is
+    # ``EP·CLW`` PLUS the off-diagonal detrained-mixture condensate ``AWAT``
+    # (convect43c.f:730-735).  This port routes ``MENT·AWAT`` to cloud, so the
+    # residual UNDER-counts oracle PRECIP; the difference arrives late via the
+    # anvil → microphysics chain.  Conserving, and consistent with
+    # "microphysics owns precipitation", but the residual is NOT the whole of
+    # WDTRAIN and must not be described as such.
+    #
+    # STATIC gating, not ``jnp.where``: ``use_genuine_mixing`` is a Python bool
+    # on the config (the CLAUDE.md feature-gating rule), and the distinction is
+    # LOAD-BEARING here — an always-present zeros array would trip the
+    # non-hydrostatic bridge's ``dq_r_conv_dt is not None and n_tracers < 2``
+    # raise (integration.py:1140) for vapor-only runs that carried no rain at
+    # all, including the legacy path that predates this fix.  Legacy emits
+    # ``None``, exactly as sbm/dca/kuo do.
+    if config.use_genuine_mixing:
+        _residual = jnp.maximum(-net_water, 0.0)
+        dq_r_conv_dt = _residual[:, None] * add_weight    # ∫dq_r dp/g = _residual
+        # A residual that could not be placed (no drying anywhere) must not be
+        # dropped on the floor; that is exactly how EP·CLW disappeared before.
+        # Provably unreachable today (a negative residual REQUIRES net drying,
+        # since dq_c_conv_dt >= 0), kept structural rather than incidental.
+        # Distributed uniformly in mass: per level ``g/Σdp`` [1/(kg s)] times
+        # the residual [kg/m^2/s] gives kg/kg/s.
+        _placed = jnp.sum(dq_r_conv_dt * dp, axis=-1) / constants.g
+        _col_dp = jnp.sum(dp, axis=-1, keepdims=True)
+        dq_r_conv_dt = dq_r_conv_dt + jnp.where(
+            (drying_col <= 0.0)[:, None],
+            (_residual - _placed)[:, None] * constants.g / _col_dp,
+            0.0,
+        )
+    else:
+        dq_r_conv_dt = None
     # Down-scale only the spurious-excess case; when net_water<0 qc_scale=1.
     qc_scale = jnp.clip(
         1.0 - jnp.maximum(net_water, 0.0)
