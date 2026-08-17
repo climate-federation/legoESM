@@ -44,6 +44,7 @@ import os
 import sys
 import time
 import dataclasses
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -332,19 +333,72 @@ def build_surface_config(case, *, bulk_scheme: str = "constant",
     )
 
 
-# CLUBBParams entries with NO consumer anywhere in clubb.py, on either the
-# diagnostic or the prognostic path. They are registry entries without an
-# implementation, so they can never be tuned and their gradient is structurally
-# zero: the six C_invrs_tau_* belong to the Guo (2021) invrs_tau reformulation
-# that is not ported (compute_tau_family implements only the CAM-default
-# simple form), and the rest have no call site at all.
-CLUBB_UNIMPLEMENTED_PARAMS: tuple[str, ...] = (
-    "C10", "c_K10h", "Lscale_mu_coef", "mult_coef",
-    "coef_spread_DG_means_rt", "coef_spread_DG_means_thl",
-    "slope_coef_spread_DG_means_w",
-    "C_invrs_tau_bkgnd", "C_invrs_tau_sfc", "C_invrs_tau_shear",
-    "C_invrs_tau_N2", "C_invrs_tau_N2_wp2", "C_invrs_tau_N2_xp2",
-)
+def _dead_params_for(scheme: str) -> frozenset[str]:
+    """Config fields with no consumer, for whichever module owns ``scheme``.
+
+    CLUBB is the one that matters today (29 of its 102 coefficients are
+    registry entries with no implementation) but nothing here is CLUBB-specific,
+    so every closure gets the same check rather than only the one that was
+    caught.
+    """
+    from legoesm.atmosphere.physics.turbulence import config as turb_config
+    if scheme == "clubb":
+        from legoesm.atmosphere.physics.turbulence import clubb as mod
+        return unimplemented_params(mod, mod.CLUBBParams)
+    cls_name = {
+        "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
+        "tke": "TKEConfig", "mynn25": "MYNN25Config",
+        "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
+        "holtslag_boville": "HoltslagBovilleConfig",
+        "edmf": "TurbulentEDMFConfig",
+    }.get(scheme)
+    if cls_name is None:
+        raise ValueError(
+            f"no config class registered for turbulence scheme {scheme!r}; "
+            "add it here rather than silently skipping the dead-parameter "
+            "check for a new closure.")
+    # The scheme MODULE, not config.py: the config module only declares the
+    # fields, so every one of them would read as dead.
+    mod = importlib.import_module(
+        f"legoesm.atmosphere.physics.turbulence.{scheme}")
+    return unimplemented_params(mod, getattr(turb_config, cls_name))
+
+
+def unimplemented_params(module, config_cls) -> frozenset[str]:
+    """Fields of ``config_cls`` with NO consumer anywhere in ``module``.
+
+    A registry entry without an implementation can never be tuned -- its
+    gradient is structurally zero -- but the optimizer is handed it anyway and
+    reports it as "trained", which is how a fit can claim 33 trained parameters
+    while a third of them are wired to nothing.
+
+    DERIVED, not listed. The hardcoded tuple this replaces named 13 of CLUBB's
+    29 dead tunables; the other 16 (C13, C7_Lscale0, the two remaining
+    C_invrs_tau_*, Lscale_pert_coef, a_const, alpha_corr, omicron,
+    pdf_component_stdev_factor_w, thlp2_rad_coef, up2_sfc_coef,
+    upsilon_precip_frac_rat, wpxp_Ri_exp, xp3_coef_base, xp3_coef_slope,
+    z_displace) went to the optimizer as live parameters. A list goes stale the
+    first time the port grows a consumer or the config grows a field; reading
+    the source cannot.
+
+    The test is deliberately CRUDE -- the field name appearing anywhere in the
+    module outside its own declaration counts as a consumer. It therefore
+    UNDER-reports (a name mentioned only in a comment reads as live), which is
+    the safe direction: a live parameter wrongly frozen would silently shrink
+    the search space, while a dead one wrongly kept is caught by the existing
+    zero-gradient gate.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(module)
+    decl = re.search(
+        rf'class {config_cls.__name__}\(NamedTuple\):.*?(?=\n\S|\Z)',
+        src, re.S)
+    body = src.replace(decl.group(0), '') if decl else src
+    return frozenset(
+        f for f in config_cls._fields
+        if not re.search(rf'\b{re.escape(f)}\b', body))
 
 
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
@@ -977,17 +1031,34 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
           f"{_ranked[-1][1]['abs_max']:.3g}\n"
           f"    [{scheme}] largest: {_top}", flush=True)
 
+    dead = _dead_params_for(scheme)
+
     def _reason(name, stat):
         if not stat["finite"]:
             return "non-finite gradient"
-        field = name.rsplit(".", 1)[-1]
-        if scheme == "clubb" and field in CLUBB_UNIMPLEMENTED_PARAMS:
-            return ("UNIMPLEMENTED: no consumer anywhere in clubb.py on "
-                    "either path")
+        if name.rsplit(".", 1)[-1] in dead:
+            return "UNIMPLEMENTED: no consumer anywhere in the scheme module"
         return f"|grad| <= {args.grad_nonzero_tol:g} in preflight"
 
     frozen = {n: _reason(n, st) for n, st in stats.items() if not st["nonzero"]}
     keep = {n for n, st in stats.items() if st["nonzero"]}
+    # A parameter with no consumer must NEVER reach the optimizer, whatever its
+    # measured gradient. Relying on the zero-gradient gate alone let 16 of
+    # CLUBB's 29 dead tunables through as "trained": the gate tests |grad| >
+    # 1e-14, and a dead leaf in a long rollout can pick up round-off noise
+    # above that floor. Excluding them structurally is what makes n_trained
+    # mean what it says.
+    dead_but_live = {n for n in keep if n.rsplit(".", 1)[-1] in dead}
+    if dead_but_live:
+        for n in sorted(dead_but_live):
+            frozen[n] = ("UNIMPLEMENTED: no consumer anywhere in the scheme "
+                         f"module, yet |grad| = {stats[n]['abs_max']:.3g} "
+                         "> tol -- round-off on a disconnected leaf")
+        keep -= dead_but_live
+        print(f"    [{scheme}] {len(dead_but_live)} parameter(s) with no "
+              f"consumer had a NON-zero gradient and were excluded anyway: "
+              f"{', '.join(sorted(n.rsplit('.', 1)[-1] for n in dead_but_live))}",
+              flush=True)
     result.frozen = frozen
     if not keep:
         result.status = "no_active_gradient"
