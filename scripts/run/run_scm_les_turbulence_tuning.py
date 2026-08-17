@@ -962,6 +962,20 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
         result.wall_s = time.time() - t0
         return result
     stats = _grad_stats(preflight_grads, args.grad_nonzero_tol)
+    # The gradient SPECTRUM, not just its zero/non-zero flag. A loss of order 1
+    # whose gradient is 1e15 is not a physical sensitivity -- it is a near-
+    # singular denominator or a clip boundary, and it is why no line-search
+    # scale can find a reducing step (measured: clubb dL = -9.95e14,
+    # smagorinsky -1.82e17, both descent directions rejected at every scale).
+    # Printed unconditionally so a stalled fit names its own worst parameter
+    # instead of needing a second job to find it.
+    _ranked = sorted(stats.items(), key=lambda kv: -kv[1]["abs_max"])
+    _top = "  ".join(f"{n.rsplit('.', 1)[-1]}={s['abs_max']:.3g}"
+                     for n, s in _ranked[:8])
+    print(f"    [{scheme}] preflight loss={float(preflight_loss):.6g} "
+          f"|grad| max-to-min {_ranked[0][1]['abs_max']:.3g} .. "
+          f"{_ranked[-1][1]['abs_max']:.3g}\n"
+          f"    [{scheme}] largest: {_top}", flush=True)
 
     def _reason(name, stat):
         if not stat["finite"]:
