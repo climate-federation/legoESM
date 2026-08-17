@@ -284,6 +284,35 @@ for this panel's measured point.
    band-based — no 2-D state/geometry/sharding factory exists. Park
    until the panel-a 2-D microbench prices the pattern.
 
+## What FESOM2's scaling imports to (user question 2026-08-17)
+
+The FESOM2 curve on the figure is the native FORTRAN reference, not a
+JAX result. Its scaling mechanisms map onto levers this assessment
+already carries — ranked by our own receipts:
+
+1. **Exact per-pair message sizes** (FESOM's precomputed exchange
+   lists) → our per-round-MAX padding ships 2.0× the true halo
+   (receipt 26998727); the import is the ragged path after its
+   zero-slice pruning fix. Both MPAS and ocean lanes.
+2. **Node-aware partitioning + rank placement** (hierarchical METIS,
+   intra-node neighbours preferred) → unmeasured here; offline
+   receipt cheap (extend the partition scorer with an intra-node pair
+   fraction).
+3. **Rank-local mesh setup** (no global mesh per rank, ever) → we
+   OOM-patched the symptom (int32 maps); the full import removes the
+   setup wall entirely for >200-rank MPAS.
+4. **Non-blocking overlap of halo exchange with interior compute** →
+   refuted on the NCCL stack for many-round exchanges; becomes viable
+   again exactly when lever 1 collapses the exchange to 1-2
+   collectives.
+5. Their per-op comm cost is intrinsically small (persistent MPI) →
+   our equivalent was the 1.230 ms per-op residual, already cut by
+   the mcp2p env pair (−13..−18 %).
+
+Note the control: our CPU-MPI lanes already scale FESOM-like (lat-lon
+2-D eff 0.83 @512), so the gap is GPU-lane NCCL behaviour, not model
+structure — consistent with every receipt above.
+
 ## What NOT to build (measured refutations, still binding)
 
 - Interior/rim comm-compute overlap with the MANY-round halo (any
