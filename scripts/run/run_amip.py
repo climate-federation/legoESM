@@ -2248,9 +2248,10 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "--no-use-multilayer-land to override a --config YAML "
                      "that enables it.")
     # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
-    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']), but
-    # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
-    # only simple_seb is wired on MPAS.
+    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']).
+    # clm_ml still needs the coupled pipeline's per-column canopy grid
+    # threading, which this lane does not have; simple_seb and two_leaf are
+    # both wired (see the note on two_leaf below).
     if (args.use_multilayer_land
             and args.land_surface_scheme == "clm_ml"
             and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",

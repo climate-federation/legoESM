@@ -221,18 +221,25 @@ def test_multilayer_land_still_rejected_on_spectral():
         ]), parser)
 
 
-def test_canopy_schemes_rejected_on_mpas():
-    """Canopy surface schemes (two_leaf/clm_ml) need the coupled pipeline's
-    clm_ml threading — only simple_seb is wired on the MPAS lane; a canopy
-    selection must fail early, not silently run simple_seb."""
+def test_clm_ml_rejected_on_mpas_but_two_leaf_is_not():
+    """Only ``clm_ml`` is unwired on the MPAS lane.
+
+    It needs the coupled pipeline's per-column canopy grid threading, which
+    this lane does not have, so selecting it must fail early rather than
+    silently run something else. ``two_leaf`` IS wired here — the land step
+    dispatches to it and its solved canopy-air humidity reaches the turbulence
+    — and refusing it would leave a resistance-based land surface unreachable
+    on the lane the AMIP campaign runs on.
+    """
     parser = build_arg_parser()
-    for scheme in ("two_leaf", "clm_ml"):
-        with pytest.raises(SystemExit):
-            _postprocess_args(parser.parse_args([
-                "--dataset", "analytical",
-                "--grid-type", "mpas", "--discretization", "mpas",
-                "--use-multilayer-land", "--land-surface-scheme", scheme,
-            ]), parser)
+    mpas_args = ["--dataset", "analytical",
+                 "--grid-type", "mpas", "--discretization", "mpas",
+                 "--use-multilayer-land", "--land-surface-scheme"]
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args(mpas_args + ["clm_ml"]), parser)
+    args = _postprocess_args(parser.parse_args(mpas_args + ["two_leaf"]),
+                             parser)
+    assert args.land_surface_scheme == "two_leaf"
 
 
 def test_clm_surfdata_path_flows_to_config():
@@ -3613,7 +3620,7 @@ def test_cmip_resolution_deg_round_trips():
     one to two cells wide -- cannot be scored at all. Before this flag the
     field was reachable from no driver.
     """
-    import run_amip
+    from scripts.run import run_amip
     from legoesm.driver.config import OutputConfig
 
     p = run_amip.build_arg_parser()
