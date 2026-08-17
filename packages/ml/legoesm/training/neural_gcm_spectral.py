@@ -1168,6 +1168,8 @@ def spectral_rollout(
     *,
     sim_time_offset_seconds: float = 0.0,
     forcing_base: dict | None = None,
+    phys_state_in=None,
+    return_phys_state: bool = False,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -1182,6 +1184,24 @@ def spectral_rollout(
 
     Gradient checkpointing is applied per step so memory scales as
     O(1) per step rather than O(n_steps).
+
+    PROGNOSTIC PHYSICS STATE. When ``physics_fn`` carries the
+    ``with_phys_state`` / ``init_phys_state`` markers (the classical
+    split-rad factory attaches them), the scan carry additionally threads a
+    :class:`PhysicsState` (CLUBB wp2/TKE, Bechtold's organization +
+    stochastic state, the GWD spectrum, the PDF cloud fraction), so
+    stateful schemes keep their memory across steps instead of running at
+    their cold-start floors. Contract (deliberate first-order operator
+    split, made explicit per codex review): every RK stage of a step reads
+    the STEP-INITIAL physics memory; the updated memory is harvested once
+    per step from the pre-step state, and only that harvest enters the
+    next step (Bechtold's PRNG advances exactly once per step — stage
+    evaluations reuse the frozen key and their state outputs are
+    discarded). ``phys_state_in`` seeds the thread (None -> the scheme
+    floors via ``init_phys_state``); ``return_phys_state=True`` returns
+    ``(final_state, final_phys_state)`` so a CHAINED multi-segment loss
+    can carry the memory across segments instead of resetting it every
+    lead (codex P0).
 
     Parameters
     ----------
@@ -1295,23 +1315,9 @@ def spectral_rollout(
                 "seconds_of_day": jnp.mod(t, 86400.0),
             }
 
-        def step_fn(state, step_idx):
-            if forcing_base is not None:
-                fc = _forcing_at(step_idx)
-                def tendency_fn(s):
-                    phys = physics_fn(s, grid, sigma_coord, forcing=fc)
-                    return spectral_pe_tendencies(
-                        s, grid, sigma_coord, pe_config, phys,
-                    )
-            else:
-                def tendency_fn(s):
-                    phys = physics_fn(s, grid, sigma_coord)
-                    return spectral_pe_tendencies(
-                        s, grid, sigma_coord, pe_config, phys,
-                    )
-
-            new_state = _integrate(state, tendency_fn)
-
+        def step_post(new_state):
+            """Post-integration chain, shared by the stateless and stateful
+            ungated bodies (expressions unchanged — extracted verbatim)."""
             # Implicit sponge damping at model top
             if sponge_factor is not None:
                 new_state = apply_sponge_filter(new_state, sponge_factor, ms)
@@ -1361,8 +1367,83 @@ def spectral_rollout(
             # class-side ``_target_mass`` has by construction).
             if _target_mass is not None:
                 new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
+            return new_state
 
+        def step_fn(state, step_idx):
+            if forcing_base is not None:
+                fc = _forcing_at(step_idx)
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord, forcing=fc)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+            else:
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+
+            new_state = step_post(_integrate(state, tendency_fn))
             return new_state, None
+
+        # PROGNOSTIC PHYSICS STATE on the ungated path too (interval-1 /
+        # no-rad classical callers), same markers and operator-split
+        # contract as the rad-gated body below — without this, an
+        # interval-1 classical run would silently stay memoryless while
+        # the gated one threads state (codex P1). Marker + forcing_base
+        # has no caller (learned arms are markerless) and is refused
+        # loudly rather than half-supported.
+        _ps_entry_u = getattr(physics_fn, "with_phys_state", None)
+        _ps_init_u = getattr(physics_fn, "init_phys_state", None)
+        _thread_phys_u = _ps_entry_u is not None and _ps_init_u is not None
+        if _thread_phys_u and forcing_base is not None:
+            raise ValueError(
+                "spectral_rollout: a phys-state-marked physics_fn with "
+                "forcing_base has no supported path; thread forcing through "
+                "the stateful entry first.")
+
+        if _thread_phys_u:
+            if phys_state_in is not None:
+                phys0 = phys_state_in
+            else:
+                _ncol = int(grid.n_lat) * int(grid.n_lon)
+                _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+                phys0 = _ps_init_u(_ncol, _nlev)
+
+            def step_fn_stateful(carry, _):
+                state, phys_state = carry
+                # Harvest once per step on the pre-step state; stages read
+                # the step-initial memory (same contract as the gated body).
+                _, phys_state_new = _ps_entry_u(
+                    state, grid, sigma_coord, phys_state)
+
+                def tendency_fn(s):
+                    phys = _ps_entry_u(s, grid, sigma_coord, phys_state)[0]
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+
+                new_state = step_post(_integrate(state, tendency_fn))
+                return (new_state, phys_state_new), None
+
+            step_fn_ckpt = jax.checkpoint(
+                step_fn_stateful,
+                prevent_cse=True,
+                policy=jax.checkpoint_policies.nothing_saveable,
+            )
+            (final_state, final_ps), _ = jax.lax.scan(
+                step_fn_ckpt, (initial_state, phys0), None, length=n_steps,
+            )
+            if return_phys_state:
+                return final_state, final_ps
+            return final_state
+
+        if phys_state_in is not None or return_phys_state:
+            raise ValueError(
+                "spectral_rollout: phys_state_in/return_phys_state need a "
+                "physics_fn carrying the with_phys_state/init_phys_state "
+                "markers; this physics_fn has none.")
 
         # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
         # most aggressive memory-saving mode: every intermediate is
@@ -1418,37 +1499,25 @@ def spectral_rollout(
     # consistent dtype regardless of how the offset is supplied.
     _offset = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
 
-    def step_fn_gated(carry, step_idx):
-        state, cached_rad_tendency = carry
+    # PROGNOSTIC PHYSICS STATE thread — opt-in via markers the classical
+    # split-rad factory attaches to its non-rad callable. Without them
+    # (learned arms, older callers) the legacy stateless body below runs
+    # verbatim. With them, the scan carry gains a PhysicsState and every
+    # step feeds the previous step's prognostic physics memory back in:
+    # CLUBB's wp2/TKE, Bechtold's conv_prog_profile + stochastic state,
+    # the GWD spectrum, the PDF cloud fraction. Before this, the combined
+    # wrapper's updated state was DISCARDED every step, so every stateful
+    # scheme ran memoryless — CLUBB's turbulence energy sat at its floor
+    # forever, i.e. the arm effectively had no boundary-layer mixing
+    # (2026-08-17 scene-17 dissection; the same absent-component class as
+    # the nine-species fix, which said "carrying turbulence energy across
+    # steps on this path is separate work" — this is that work).
+    _ps_entry = getattr(physics_fn, "with_phys_state", None)
+    _ps_init = getattr(physics_fn, "init_phys_state", None)
+    _thread_phys = _ps_entry is not None and _ps_init is not None
 
-        # Refresh rad tendency at the start of every gating window.
-        # ``lax.cond`` retains backward-mode differentiability through
-        # the rad branch; on skipped steps the cached tensor flows
-        # through unchanged.
-        should_refresh = (step_idx % rad_update_interval) == 0
-        # Cumulative simulated time = optional caller-supplied offset
-        # plus per-step contribution from THIS rollout's scan index.
-        # Multi-step autoregressive supervision passes the wall time
-        # elapsed since the IC so segment k's rad call sees the right
-        # solar phase (otherwise every segment starts at 00 UTC and
-        # the diurnal cycle is frozen at the IC's time-of-day).
-        sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
-        new_rad_tendency = jax.lax.cond(
-            should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds),
-            lambda _: cached_rad_tendency,
-            operand=None,
-        )
-
-        def tendency_fn(s):
-            non_rad_phys = physics_fn(s, grid, sigma_coord)
-            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
-            return spectral_pe_tendencies(
-                s, grid, sigma_coord, pe_config, combined_phys,
-            )
-
-        new_state = _integrate(state, tendency_fn)
-
+    def _post_step(new_state):
+        """Shared post-integration chain (filters / positivity / anchor)."""
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
@@ -1475,8 +1544,91 @@ def spectral_rollout(
         # a radiation physics_fn is supplied.
         if _target_mass is not None:
             new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
+        return new_state
 
+    def _rad_refresh(state, cached_rad_tendency, step_idx):
+        # Refresh rad tendency at the start of every gating window.
+        # ``lax.cond`` retains backward-mode differentiability through
+        # the rad branch; on skipped steps the cached tensor flows
+        # through unchanged.
+        should_refresh = (step_idx % rad_update_interval) == 0
+        # Cumulative simulated time = optional caller-supplied offset
+        # plus per-step contribution from THIS rollout's scan index.
+        # Multi-step autoregressive supervision passes the wall time
+        # elapsed since the IC so segment k's rad call sees the right
+        # solar phase (otherwise every segment starts at 00 UTC and
+        # the diurnal cycle is frozen at the IC's time-of-day).
+        sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
+        return jax.lax.cond(
+            should_refresh,
+            lambda _: _call_rad(state, sim_time_seconds),
+            lambda _: cached_rad_tendency,
+            operand=None,
+        )
+
+    def step_fn_gated(carry, step_idx):
+        state, cached_rad_tendency = carry
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+
+        def tendency_fn(s):
+            non_rad_phys = physics_fn(s, grid, sigma_coord)
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = _post_step(_integrate(state, tendency_fn))
         return (new_state, new_rad_tendency), None
+
+    def step_fn_gated_stateful(carry, step_idx):
+        state, cached_rad_tendency, phys_state = carry
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+
+        # Harvest the updated prognostic physics state ONCE per step, on
+        # the PRE-STEP state (operator-split convention: all RK stages of
+        # this step read the same step-initial physics memory). Stage 1's
+        # in-integrator physics evaluation has identical inputs, so XLA
+        # may CSE the pair; if not, this costs one extra non-rad physics
+        # evaluation per step — correctness over compute here.
+        _, phys_state_new = _ps_entry(state, grid, sigma_coord, phys_state)
+
+        def tendency_fn(s):
+            non_rad_phys = _ps_entry(s, grid, sigma_coord, phys_state)[0]
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = _post_step(_integrate(state, tendency_fn))
+        return (new_state, new_rad_tendency, phys_state_new), None
+
+    if _thread_phys:
+        if phys_state_in is not None:
+            phys0 = phys_state_in
+        else:
+            _ncol = int(grid.n_lat) * int(grid.n_lon)
+            _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+            phys0 = _ps_init(_ncol, _nlev)
+        step_fn_ckpt = jax.checkpoint(
+            step_fn_gated_stateful,
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        (final_state, _, final_ps), _ = jax.lax.scan(
+            step_fn_ckpt,
+            (initial_state, init_rad_tendency, phys0),
+            jnp.arange(n_steps),
+        )
+        if return_phys_state:
+            return final_state, final_ps
+        return final_state
+
+    if phys_state_in is not None or return_phys_state:
+        raise ValueError(
+            "spectral_rollout: phys_state_in/return_phys_state need a "
+            "physics_fn carrying the with_phys_state/init_phys_state "
+            "markers (the classical split-rad factory attaches them); this "
+            "physics_fn has none, so the state would be silently ignored.")
 
     step_fn_ckpt = jax.checkpoint(
         step_fn_gated,

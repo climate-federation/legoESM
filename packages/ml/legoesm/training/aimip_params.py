@@ -1453,6 +1453,28 @@ def make_aimip_classical_spectral_physics(
             result = combined_raw(state, grid_, sigma_coord)
             return result[0] if isinstance(result, tuple) else result
 
+        def combined_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                        forcing=None):
+            # Same stateful contract as the split-rad entry below (codex P1:
+            # the non-split path must not stay silently memoryless).
+            result = combined_raw(
+                state, grid_, sigma_coord, phys_state=phys_state,
+                forcing=forcing,
+            )
+            if not (isinstance(result, tuple) and len(result) == 2):
+                raise TypeError(
+                    "stateful classical physics expected (tendencies, "
+                    f"phys_state), got {type(result)!r}")
+            return result
+
+        def _init_phys_state_combined(ncol: int, nlev: int, dtype=None):
+            from legoesm.atmosphere.physics.physics_state import (
+                init_physics_state,
+            )
+            return init_physics_state(ncol, nlev, physics_config, dtype=dtype)
+
+        combined_fn.with_phys_state = combined_fn_with_phys_state
+        combined_fn.init_phys_state = _init_phys_state_combined
         return combined_fn
 
     # Rad-split path: separate non-radiative and radiative callables.
@@ -1499,6 +1521,45 @@ def make_aimip_classical_spectral_physics(
             state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
         )
         return result[0] if isinstance(result, tuple) else result
+
+    def non_rad_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                   forcing=None):
+        """``(tendencies, phys_state_out)`` — the STATEFUL entry.
+
+        The combined spectral wrapper has always produced the updated
+        prognostic physics state (CLUBB's wp2/TKE, Bechtold's
+        ``conv_prog_profile`` + stochastic state, the GWD spectrum, the
+        PDF cloud fraction) and ``non_rad_fn`` above DISCARDS it — so the
+        WB/AIMIP spectral training rollout ran every stateful scheme
+        MEMORYLESS: CLUBB's turbulence energy sat at its floor forever,
+        i.e. effectively NO boundary-layer mixing (2026-08-17 scene-17
+        dissection: four in-scheme probes were bit-flat because they
+        patched outputs this lane threw away). ``spectral_rollout``
+        threads this entry's state through its scan carry when the
+        marker below is present.
+        """
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
+        if not (isinstance(result, tuple) and len(result) == 2):
+            # A silent fallback here would freeze the physics memory and
+            # reintroduce the memoryless pathology this entry exists to fix
+            # (codex P3) — fail loudly instead.
+            raise TypeError(
+                "stateful classical physics expected (tendencies, "
+                f"phys_state) from the combined wrapper, got {type(result)!r}")
+        return result
+
+    def _init_phys_state(ncol: int, nlev: int, dtype=None):
+        from legoesm.atmosphere.physics.physics_state import (
+            init_physics_state,
+        )
+        return init_physics_state(ncol, nlev, non_rad_cfg, dtype=dtype)
+
+    # Markers consumed by ``spectral_rollout``: their ABSENCE selects the
+    # legacy stateless path (learned arms, older callers) byte-identically.
+    non_rad_fn.with_phys_state = non_rad_fn_with_phys_state
+    non_rad_fn.init_phys_state = _init_phys_state
 
     def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
