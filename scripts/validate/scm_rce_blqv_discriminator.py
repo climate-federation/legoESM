@@ -13,6 +13,12 @@ against an identical control, on one representative mass-flux scheme:
 * ``coare3``       — ``bulk_scheme`` "constant" -> "coare3": stability-dependent
                      exchange plus the native convective-gustiness w* term that
                      is structurally inert under "constant".
+* ``hb``           — turbulence scheme louis -> holtslag_boville: the NONLOCAL
+                     w*-scaled K-profile with countergradient transport, i.e.
+                     the second reviewer's predicted fix.  It tests the
+                     shear-only-K hypothesis directly: if the subcloud bias is
+                     flux-through-collapsed-K, a K-profile scheme removes it
+                     without touching the flux law.
 
 Interpretation, pre-registered:
 * entrainment fixes the 0-2 km humidity while E moves little  -> missing
@@ -69,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("/burg-archive/glab/users/pg2328/legoESM/results"
                      "/rcemip_ref_sam300"))
     parser.add_argument("--entrainment-efficiency", type=float, default=0.2)
-    parser.add_argument("--arms", default="control,entrainment,coare3")
+    parser.add_argument("--arms", default="control,entrainment,coare3,hb")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -94,11 +100,18 @@ def main(argv: list[str] | None = None) -> int:
           f"cloudtop_entrainment_efficiency="
           f"{louis.cloudtop_entrainment_efficiency!r}")
 
+    hb_base = camp.make_physics_config(
+        radiation="rrtmgp", convection=args.scheme,
+        turbulence="holtslag_boville", microphysics="morrison",
+        hard_saturation_adjustment=True)
+    hb_base, _st2 = camp.apply_subsidence_solve_override(
+        hb_base, "implicit_flux", category="convection")
     arm_cfgs = {
         "control": base,
         "entrainment": _with_louis_override(
             base, cloudtop_entrainment_efficiency=args.entrainment_efficiency),
         "coare3": _with_louis_override(base, bulk_scheme="coare3"),
+        "hb": hb_base,
     }
 
     results = {}
