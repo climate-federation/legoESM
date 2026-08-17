@@ -25,7 +25,10 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 BT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/_pytest_${SLURM_JOB_ID:-0}
-$PY -m pytest -q --basetemp="$BT" "${TESTS:-tests/grids/test_fv3_dynamics.py}" 2>&1 | tail -30
+# UNQUOTED on purpose: TESTS may carry several files (word-split is the
+# point; a quoted expansion turned two paths into one bogus argument
+# and pytest exited 4 with "file or directory not found").
+$PY -m pytest -q --basetemp="$BT" ${TESTS:-tests/grids/test_fv3_dynamics.py} 2>&1 | tail -30
 echo "    pytest rc=${PIPESTATUS[0]}"
 rm -rf "$BT"
 echo DYNGATE_DONE
