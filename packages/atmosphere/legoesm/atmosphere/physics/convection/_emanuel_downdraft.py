@@ -77,19 +77,40 @@ from jax import lax
 from legoesm import constants
 
 __physics_contract__ = {
-    "units": (
-        "mp [kg/m^2/s] downdraft mass flux; qp [kg/kg] downdraft mixing "
-        "ratio; evap [(kg/kg)/s]; water [kg/kg] rain-water content; "
-        "wt [Pa/s] hydrometeor fall speed; dT_dt [K/s]; "
-        "dq_v_dt [(kg/kg)/s]; precip_mm_day [mm/day]. Profiles SURFACE-FIRST."
+    "summary": (
+        "Emanuel (1991) precipitating unsaturated downdraft: diagnoses the "
+        "rain shaft (rain-water content, evaporation, fall speed), the "
+        "downdraft mass flux it drives and that shaft's mixing ratio, and "
+        "returns the evaporative-cooling and moistening tendencies plus the "
+        "surface precipitation rate. A DIAGNOSIS, not an integration: the "
+        "caller applies the tendencies and owns the column water budget."
     ),
-    "signs": (
-        "mp >= 0 (a downward flux, magnitude only) and mp == 0 exactly at the "
-        "lowest level. evap >= 0. Evaporation COOLS (negative dT_dt) and "
-        "MOISTENS (positive dq_v_dt) the layer it occurs in, which for rain "
-        "falling out of cloud base is the sub-cloud layer."
+    "inputs": {
+        "T": "K", "q": "kg/kg", "qs": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa (interface below level i)",
+        "h_dry_static": "J/kg", "gz": "J/kg", "lv": "J/kg", "cpn": "J/kg/K",
+        "m_profile": "kg/m^2/s (adiabatic updraught mass flux)",
+        "ment": "kg/m^2/s (mixture mass fluxes)",
+        "elij": "kg/kg (condensate of each mixture)",
+        "clw": "kg/kg (adiabatic cloud water)",
+        "ep": "1 (precipitation efficiency)",
+    },
+    "outputs": {
+        "mp": "kg/m^2/s (downdraft mass flux, magnitude)",
+        "qp": "kg/kg (downdraft mixing ratio)",
+        "evap": "kg/kg/s", "water": "kg/kg (rain-water content)",
+        "wt": "Pa/s (hydrometeor fall speed)",
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "precip_mm_day": "mm/day",
+    },
+    "sign_convention": (
+        "All profiles are SURFACE-FIRST (i=0 is the lowest level, i+1 is "
+        "above i). mp >= 0 — it is a DOWNWARD flux reported as a magnitude — "
+        "and mp is exactly zero at the lowest level. evap >= 0. Evaporation "
+        "COOLS (dT_dt < 0) and MOISTENS (dq_v_dt > 0) the layer it occurs in, "
+        "which for rain falling out of cloud base is the sub-cloud layer."
     ),
-    "conserves": ["water"],
+    "conserves": ["none"],
     "differentiable": True,
     "reference": "Emanuel (1991) CONVECT v4.3c, convect43c.f lines 713-934",
     "idealized_test": (
@@ -116,6 +137,16 @@ _CL_ORACLE = 2500.0
 #: Density of liquid water [kg/m^3] used by the oracle's precipitation
 #: conversion (line 189).
 _ROWL_ORACLE = 1000.0
+#: Denominator of the oracle's ventilation factor (line 763), written there as
+#:     AFAC = COEFF*PH(I)*(QS(I)-QSM) / (1.0E4 + 2.0E3*PH(I)*QS(I))
+#: with PH in hPa.  Published fit, not a tunable closure.
+_AFAC_DENOM_CONST = 1.0e4
+_AFAC_DENOM_QS_COEFF = 2.0e3
+#: Phase-switch temperature [K] of the oracle's IF(T(I).GT.273.0) branch
+#: (line 749).  Deliberately the ORACLE's 273.0, NOT ``constants.T_freeze``:
+#: it selects rain-vs-snow fall speed and evaporation coefficients, and an
+#: oracle port reproduces the oracle.
+_PHASE_SWITCH_T_ORACLE_K = 273.0  # const-ok: oracle threshold, not a freezing point
 
 # --- AD-safe floors.  Each guards a DERIVATIVE, not a value. ------------- #
 _SQRT_FLOOR = 1.0e-30
@@ -186,7 +217,7 @@ def _fall_speed_and_coefficient(
     freezing point — reproducing the oracle means reproducing its constant,
     and the difference is far inside the blend width.
     """
-    warm = jax.nn.sigmoid((T - 273.0) / freeze_transition_K)  # const-ok: oracle threshold, not a freezing point
+    warm = jax.nn.sigmoid((T - _PHASE_SWITCH_T_ORACLE_K) / freeze_transition_K)
     wt = omtsnow + (omtrain - omtsnow) * warm
     coeff = coeffs + (coeffr - coeffs) * warm
     return wt, coeff
@@ -348,7 +379,8 @@ def emanuel_downdraft(
          T_up_i, lv_up_i, qs_below_i, qp_top_i, surf_i, top_i) = x
 
         qsm = 0.5 * (q_i + qp_up)
-        afac = coeff_i * ph_i * (qs_i - qsm) / (1.0e4 + 2.0e3 * ph_i * qs_i)
+        afac = coeff_i * ph_i * (qs_i - qsm) / (
+            _AFAC_DENOM_CONST + _AFAC_DENOM_QS_COEFF * ph_i * qs_i)
         afac = jnp.maximum(afac, 0.0)
         b6 = _HPA_TO_PA * dph_i * sigt_i * afac / wt_i
         c6 = (water_up * wt_up + wdtrain_i / sigd) / wt_i

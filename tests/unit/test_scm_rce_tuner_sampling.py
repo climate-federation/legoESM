@@ -155,7 +155,7 @@ def test_a_nan_default_score_does_not_block_every_trial(camp, monkeypatch):
 
     monkeypatch.setattr(camp, "run_cached", fake_run_cached)
     base = camp.make_physics_config(convection="bechtold")
-    _cfg, records, tuned = camp.tune_category_winner(
+    _cfg, records, tuned, tune_stats = camp.tune_category_winner(
         "convection", base, ref=SimpleNamespace(), cache={},
         days=1.0, dt=600.0, analysis_days=1.0,
         require_equilibrium=False, require_realism=False,
@@ -165,6 +165,10 @@ def test_a_nan_default_score_does_not_block_every_trial(camp, monkeypatch):
     assert math.isfinite(tuned.score), "tuner kept the NaN default"
     assert tuned.score == pytest.approx(0.5)
     assert records, "no parameter records written for a successful tune"
+    # The stats are per-call, so they must count this call's columns and no
+    # more: the default run plus the three trials.
+    assert set(tune_stats) == set(camp.EMPTY_TUNE_STATS)
+    assert sum(tune_stats.values()) > 0
 
 
 def test_a_non_finite_trial_is_never_accepted(camp, monkeypatch):
@@ -178,7 +182,7 @@ def test_a_non_finite_trial_is_never_accepted(camp, monkeypatch):
 
     monkeypatch.setattr(camp, "run_cached", fake_run_cached)
     base = camp.make_physics_config(convection="bechtold")
-    _cfg, _records, tuned = camp.tune_category_winner(
+    _cfg, _records, tuned, _tune_stats = camp.tune_category_winner(
         "convection", base, ref=SimpleNamespace(), cache={},
         days=1.0, dt=600.0, analysis_days=1.0,
         require_equilibrium=False, require_realism=False,

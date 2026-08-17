@@ -137,17 +137,21 @@ def test_bulk_state_agrees_with_the_validate_probe():
 def test_objective_value_dispatch_and_nan_mapping():
     from scripts.run.run_scm_rce_campaign import TUNE_OBJECTIVES, objective_value
 
-    run = SimpleNamespace(score=1.25, subcloud_score=7.5)
+    run = SimpleNamespace(score=1.25, subcloud_score=7.5, thermo_score=2.5)
     assert objective_value(run, "combined") == pytest.approx(1.25)
     assert objective_value(run, "subcloud") == pytest.approx(7.5)
-    assert set(TUNE_OBJECTIVES) == {"combined", "subcloud"}
+    assert objective_value(run, "thermo") == pytest.approx(2.5)
+    # Every selectable objective must dispatch; a name added to the tuple
+    # without a field mapping would otherwise fail only at tuning time.
+    assert set(TUNE_OBJECTIVES) == {"combined", "subcloud", "thermo"}
     with pytest.raises(ValueError, match="unknown objective"):
         objective_value(run, "condensate")
     # NaN must read as +inf: a NaN incumbent makes every ``trial < best``
     # comparison False and silently discards the whole search.
-    nan_run = SimpleNamespace(score=float("nan"), subcloud_score=float("nan"))
-    assert objective_value(nan_run, "combined") == float("inf")
-    assert objective_value(nan_run, "subcloud") == float("inf")
+    nan_run = SimpleNamespace(score=float("nan"), subcloud_score=float("nan"),
+                              thermo_score=float("nan"))
+    for name in TUNE_OBJECTIVES:
+        assert objective_value(nan_run, name) == float("inf")
 
 
 def test_fixed_scales_stop_a_tiny_humidity_error_outweighing_a_3K_bias():
@@ -165,8 +169,10 @@ def test_fixed_scales_stop_a_tiny_humidity_error_outweighing_a_3K_bias():
         ref, ref.T_ref + 3.0, ref.qv_ref, subcloud_weights=w)
     _t, qv_off, _c2 = score_subcloud_jax(
         ref, ref.T_ref, ref.qv_ref + 1.0e-4, subcloud_weights=w)
-    assert float(T_off) == pytest.approx(3.0, rel=1e-6)
-    assert float(qv_off) == pytest.approx(0.1, rel=1e-6)
+    # Tolerance is float32: the scores are accumulated in JAX's default dtype,
+    # and the 0.1 g/kg term lands on 0.09999982 there (exact under x64).
+    assert float(T_off) == pytest.approx(3.0, rel=1e-5)
+    assert float(qv_off) == pytest.approx(0.1, rel=1e-5)
     assert float(T_off) > 10.0 * float(qv_off)
 
 

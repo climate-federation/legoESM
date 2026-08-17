@@ -2873,6 +2873,7 @@ def tune_focused_params(
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics, RunDiagnostics]:
     """Tune ONE NAMED parameter set that spans SEVERAL scheme categories.
 
@@ -2956,6 +2957,7 @@ def tune_focused_params(
         large_scale_forcing=large_scale_forcing,
         bl_anchor_top_m=bl_anchor_top_m,
         subcloud_top_m=subcloud_top_m,
+        thermo_humidity=thermo_humidity,
     )
 
     defaults = {c.name: float(params.as_dict()[c.name]) for c in constraints}
@@ -3016,6 +3018,7 @@ def tune_focused_params(
             large_scale_forcing=large_scale_forcing,
             bl_anchor_top_m=bl_anchor_top_m,
             subcloud_top_m=subcloud_top_m,
+            thermo_humidity=thermo_humidity,
         )
         trial_score = objective_value(trial_run, objective)
         if trial_run.status == "ok" and trial_score < best_score:
