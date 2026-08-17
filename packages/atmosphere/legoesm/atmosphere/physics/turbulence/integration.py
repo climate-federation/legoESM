@@ -554,15 +554,15 @@ def _make_mpas_turbulence(
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     # Which schemes can be HANDED a surface flux instead of computing their
-    # own?  Only the non-TKE kernels that declare the keyword: louis and
-    # diagnostic clubb today.  smagorinsky, holtslag_boville and ysu do not,
-    # and the TKE-carrying kernels are called on a branch that never forwards
-    # it.  Resolved once here, from the static kernel, so land coupling with an
-    # unsupported scheme fails at build time with a scheme name rather than as
-    # a TypeError inside a traced column.
+    # own?  Exactly the kernels that declare the keyword — today louis,
+    # diagnostic clubb and clubb_lite.  smagorinsky, holtslag_boville, ysu,
+    # tke, mynn25 and edmf do not.  This is deliberately NOT keyed off
+    # ``needs_tke``: clubb and clubb_lite carry a prognostic energy field AND
+    # take the flux, so the two properties are independent.  Resolved once
+    # here from the static kernel, so an unsupported scheme raises with its own
+    # name on the first step instead of as a TypeError inside a traced column.
     _accepts_surface_flux = (
-        (not needs_tke)
-        and turb_fn is not None
+        turb_fn is not None
         and "surface_flux" in inspect.signature(turb_fn).parameters
     )
 
@@ -710,11 +710,12 @@ def _make_mpas_turbulence(
             if not _accepts_surface_flux:
                 raise ValueError(
                     f"turbulence scheme {scheme_name!r} cannot be handed the "
-                    "land surface fluxes: it computes its own from T_sfc/q_sfc "
-                    "and takes no 'surface_flux' argument. Silently dropping "
-                    "them would run the advertised land coupling with a "
-                    "surface flux the land model never solved. Use 'louis' or "
-                    "'clubb', or teach this scheme the argument.")
+                    "land surface fluxes: its kernel takes no 'surface_flux' "
+                    "argument, so it computes its own from T_sfc/q_sfc. "
+                    "Silently dropping them would run the advertised land "
+                    "coupling with a surface flux the land model never "
+                    "solved. Use louis, clubb or clubb_lite, or teach this "
+                    "scheme the argument.")
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
                 compute_surface_fluxes,
             )
@@ -733,6 +734,12 @@ def _make_mpas_turbulence(
                 _us,
             )
 
+        # Forwarded on BOTH branches: clubb and clubb_lite carry a prognostic
+        # energy field and still accept the flux, so gating this on the carry
+        # would drop the land coupling for exactly those two.
+        _sfc_kw = ({"surface_flux": _surface_flux}
+                   if _surface_flux is not None else {})
+
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
@@ -740,6 +747,7 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
+                **_sfc_kw,
             )
             tke_out = tke_new
         else:
@@ -747,8 +755,7 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
-                **({"surface_flux": _surface_flux}
-                   if _surface_flux is not None else {}),
+                **_sfc_kw,
             )
 
         # Cell → edge tendency projection.  Average the cell tendencies
