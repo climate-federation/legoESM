@@ -21,6 +21,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    beta_limited_surface_humidity,
+)
 from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.surface_energy import surface_radiation_fluxes
@@ -146,7 +149,26 @@ def compute_simple_seb_fluxes(
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Snow surface is freely evaporating (snowpack limits later).
     beta_effective = jnp.where(has_snow, 1.0, beta)
-    q_sfc = beta_effective * q_sat_sfc
+    # Condensation is NOT moisture-limited: water arriving on the surface does
+    # not have to come out of the soil.  Where the surface is colder than the
+    # air is moist (q_sat < q_air) the resistance drops out, so real dew and
+    # frost survive while a dry soil can never manufacture them.
+    beta_effective = jnp.where(q_sat_sfc < forcing.q_lowest, 1.0, beta_effective)
+    # beta throttles the GRADIENT, not the absolute humidity.  The product form
+    # beta*q_sat used here previously is not the beta method: beta is a flux
+    # efficiency (r_a/(r_a+r_s)), and applying it to a humidity leaves
+    #     E = beta*E_pot - rho*(1-beta)*q_air/r_a,
+    # whose second term is a condensation source that GROWS as the soil dries.
+    # Measured, offline global 5-year: latent flux pinned at its -150 W/m2
+    # condensation clamp over 91 % of land, mean -103, i.e. 3.6 mm/day of dew --
+    # more than global mean rainfall -- with the surface balancing it at 310 K
+    # everywhere and the Sahara irrigated to 0.276 volumetric moisture.
+    # This is the SAME helper the atmospheric surface layer already uses, so the
+    # two now agree instead of disagreeing on the SIGN of the flux (at
+    # q_air=0.010, q_sat=0.020, beta=0.4 the old form gave condensation where
+    # the atmosphere's gave evaporation).  f_land=1: this is the land tile.
+    q_sfc = beta_limited_surface_humidity(
+        q_sat_sfc, forcing.q_lowest, jnp.ones_like(q_sat_sfc), beta_effective)
 
     # Phase-appropriate latent heat (consistent with iter-68 gate above).
     L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
@@ -229,11 +251,19 @@ def compute_simple_seb_fluxes(
     # stability (the guard's purpose) and never destabilises.  Consumed by
     # solve_soil_thermal(surface_conductance=...).
     T_sfc_lin = T_surface + _SURFACE_LIN_DT_K
-    q_sfc_lin = beta_effective * jnp.where(
+    # Linearisation evaluates the SAME gradient-form humidity as the flux above
+    # (product form here would make lhflx_lin inconsistent with lhflx and
+    # mis-size the latent damping slope).  The dew bypass is re-evaluated at the
+    # perturbed saturation so the branch matches what the flux would do at T+dT.
+    q_sat_lin = jnp.where(
         has_snow,
         saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
         saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
     )
+    beta_eff_lin = jnp.where(has_snow, 1.0, beta)
+    beta_eff_lin = jnp.where(q_sat_lin < forcing.q_lowest, 1.0, beta_eff_lin)
+    q_sfc_lin = beta_limited_surface_humidity(
+        q_sat_lin, forcing.q_lowest, jnp.ones_like(q_sat_lin), beta_eff_lin)
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
