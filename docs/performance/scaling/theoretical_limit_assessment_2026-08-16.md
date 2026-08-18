@@ -197,8 +197,12 @@ Ranked levers:
    the rim), or cells/edges fills placed at their first consumers.
    Code change in the sharded step, not an env var. Unpriced.
    (iv) mcp2p on ragged WITH overlap flags: no help (7.81/8.49 vs
-   7.83/7.78). mcp2p on ragged WITHOUT overlap in flight (27041921) —
-   coloured+mcp2p 5.87-5.91 remains the lane best until that lands.
+   7.83/7.78). WITHOUT overlap (job 27041921): **NEW LANE BEST
+   5.70/5.75 ms** vs same-job ragged base 6.26/6.17 (ratio 0.921,
+   spread 1.4%) — the pair transfers to the 2-collective exchange.
+   s9@64 progression, all receipted: 9.60 baseline -> 8.40
+   size-colouring -> 6.98 wide -> 5.87 coloured+mcp2p -> 5.73
+   ragged+mcp2p (cumulative -40%). On the figure as step 4.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
