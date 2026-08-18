@@ -203,6 +203,33 @@ Ranked levers:
    s9@64 progression, all receipted: 9.60 baseline -> 8.40
    size-colouring -> 6.98 wide -> 5.87 coloured+mcp2p -> 5.73
    ragged+mcp2p (cumulative -40%). On the figure as step 4.
+2c. **Interior/rim split — the surviving wire-hiding design (2026-08-18,
+   unbuilt, dual design review pending).** Preconditions now all
+   receipted: async lowering of the 2 ragged collectives works (HLO
+   27041261); overlap fails ONLY because the fill gates every consumer
+   (27041201); single-collective overlap hides 79% when independent
+   work exists (microbench). Design: make the INTERIOR tendency
+   independent of the fill at the DEPENDENCY level — no manual sync:
+   (i) compute the full-field tendency from the PRE-fill local buffer
+   (interior cells correct by construction: their whole stencil is
+   owned; rim cells garbage); (ii) after the ragged fill lands,
+   recompute ONLY the rim band (cells within stencil reach of a ghost)
+   via the ring-distance indices the wide-halo machinery already
+   carries, and scatter into the tendency; (iii) XLA's latency-hiding
+   then hoists (i) between ragged-start and ragged-done on its own —
+   the mechanism the A/B proved functional. Cost: rim recompute is a
+   subset gather-compute (~surface/volume fraction, at s9@64 wide the
+   ghost fraction is ~0.45 of rows — the win shrinks as rim grows, so
+   price at NARROW depth too, where rim is ~10-15%). Risks (for
+   review): masked-garbage contamination via reductions (any global
+   sum before the rim patch must mask rim rows); double-compute
+   determinism (rim rows computed twice must take the SECOND value
+   bitwise); AD through the scatter (VJP of a scatter-overwrite is
+   well-defined but must be tested with check_grads); pytree/shape
+   stability of the rim index sets (static, from the partition build).
+   Compute cost bound: interior pass over all rows + rim pass over rim
+   rows = 1 + rim_frac of today's compute; wins iff hidden wire >
+   rim_frac * compute.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
