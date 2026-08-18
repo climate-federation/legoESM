@@ -49,6 +49,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Timestep [s]; 1800 is the published CORE2 setting.")
     p.add_argument("--year", type=int, default=1958,
                    help="JRA55-do forcing year (the Zenodo package ships 1958).")
+    p.add_argument("--tke-surface-bc", default="neumann",
+                   choices=("neumann", "dirichlet"),
+                   help="Surface TKE BC: 'neumann' = the C-parity FESOM2 "
+                        "reference (default); 'dirichlet' = the ported NEMO "
+                        "en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) boundary "
+                        "value (fesom-jax cb389c7) -- the first ORCA1-card "
+                        "branch for the three-grid convergence.")
     p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
                    help="Sea-ice cold start: 'fesom' = the C-faithful "
                         "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
@@ -206,6 +213,7 @@ def main() -> int:
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
                    "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
                    "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
+                   "tke_surface_bc": args.tke_surface_bc,
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
@@ -227,7 +235,8 @@ def main() -> int:
     # with is_first_step=False -- exactly integrate()'s own internal split
     # (integrate.py:153-165), just re-entered per chunk so only one day of
     # forcing is resident.
-    cfgs = dict(ale_cfg=AleConfig(), tke_cfg=TkeConfig(), gm_cfg=GMConfig(),
+    _tke_cfg = TkeConfig(use_dirichlet=(args.tke_surface_bc == "dirichlet"))
+    cfgs = dict(ale_cfg=AleConfig(), tke_cfg=_tke_cfg, gm_cfg=GMConfig(),
                 ice_cfg=IceConfig(whichEVP=1))
 
     def _scan_day(state_in, sf_day):

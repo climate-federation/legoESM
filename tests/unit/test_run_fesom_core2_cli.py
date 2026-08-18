@@ -89,3 +89,14 @@ def test_unknown_forcing_rejected():
     with pytest.raises(SystemExit):
         p.parse_args(["--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
                       "--forcing", "era5"])
+
+
+def test_tke_surface_bc_flag():
+    import pytest
+    p = m.build_arg_parser()
+    base = ["--mesh-dir", "M", "--ic-dir", "I", "--output", "O"]
+    assert p.parse_args(base).tke_surface_bc == "neumann"
+    assert p.parse_args(base + ["--tke-surface-bc", "dirichlet"]
+                        ).tke_surface_bc == "dirichlet"
+    with pytest.raises(SystemExit):
+        p.parse_args(base + ["--tke-surface-bc", "robin"])
