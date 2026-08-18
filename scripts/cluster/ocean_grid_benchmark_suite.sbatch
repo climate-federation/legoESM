@@ -36,6 +36,28 @@ cd "$REPO"; mkdir -p logs
 # Pin the library to the same checkout; see the note at the top.
 PYTHONPATH="$(printf '%s:' "$REPO"/packages/*/ )$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
+# FAIL LOUDLY if REPO resolved somewhere unexpected. Some SLURM sites copy the
+# submitted script to a spool directory, which makes BASH_SOURCE point away
+# from the checkout; the glob would then match nothing, a literal-star path
+# would sit in PYTHONPATH, Python would ignore it in silence, and the job would
+# quietly run the editable install's copy again -- i.e. the exact incident this
+# guard exists to prevent, reappearing with no symptom.
+[[ -d "$REPO/packages" && -n "$(echo "$REPO"/packages/*/)" ]] || {
+    echo "FATAL: REPO=$REPO has no packages/ (BASH_SOURCE=${BASH_SOURCE[0]})" >&2
+    exit 2; }
+# And PROVE the pin won: print where the library actually resolved from. The
+# string being right does not mean the import obeys it -- an editable install
+# that used a meta-path finder would beat PYTHONPATH silently.
+python_bin="${PYTHON_BIN:-$REPO/.venv/bin/python}"
+"$python_bin" - <<'PYCHK' || exit 2
+import sys, legoesm.ocean.dynamics.barotropic_mpas as m
+import os
+want = os.environ["REPO"]
+print(f"[provenance] legoesm.ocean resolves to {m.__file__}", flush=True)
+if not m.__file__.startswith(want):
+    sys.exit(f"FATAL: library came from OUTSIDE {want}; the PYTHONPATH pin "
+             f"did not win. Refusing to run against another checkout.")
+PYCHK
 CASES=(rest_state_stratified_with_land rest_state_uniform_with_land \
        rest_state_stratified_no_land rest_state_uniform_no_land \
        geostrophic_adjustment phillips_two_layer inertia_gravity_wave \

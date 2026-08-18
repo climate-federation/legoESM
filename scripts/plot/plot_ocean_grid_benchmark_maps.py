@@ -112,6 +112,35 @@ def _panel(ax, lat, lon, a, cmap: str, kw):
     return ax.pcolormesh(lon, lat, a, cmap=cmap, shading="auto", **kw)
 
 
+def _provenance(root: Path) -> str:
+    """One line naming WHICH run each figure was built from.
+
+    A missing panel is now obvious (hatched, labelled). A panel from a
+    PREVIOUS run is not: it is present, plausible, and silently wrong, so a
+    figure mixing two runs looks perfectly fine. The plotter reads whatever is
+    on disk, so the defence is to stamp what it read -- the commit, and the
+    oldest and newest artifact it drew from. A wide span means mixed runs.
+    """
+    import subprocess
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(_REPO), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=30).stdout.strip() or "?"
+    except Exception:
+        sha = "?"
+    stamps = sorted(p.stat().st_mtime
+                    for p in root.rglob("snapshots_latlon.npz"))
+    if not stamps:
+        return f"commit {sha} — no run artifacts found"
+    import datetime as _dt
+    fmt = lambda t: _dt.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    span_h = (stamps[-1] - stamps[0]) / 3600.0
+    warn = ("  ** artifacts span %.1f h — check this is ONE run **" % span_h
+            if span_h > 6.0 else "")
+    return (f"commit {sha} — {len(stamps)} arms, written "
+            f"{fmt(stamps[0])} to {fmt(stamps[-1])}{warn}")
+
+
 def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
     field, cmap, label = CASES[case]
     found = {g: _find(root, case, g) for g in GRIDS}
@@ -156,6 +185,8 @@ def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
                 f"{hi - lo:.2e} — the scale is widened so machine-precision "
                 f"round-off is not drawn as structure")
     fig.suptitle(sub, fontsize=PUB["suptitle"])
+    fig.text(0.005, 0.005, _provenance(root), fontsize=PUB["tick"] - 3,
+             color="0.45", ha="left", va="bottom")
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"maps_{case}.png"
     fig.savefig(out, dpi=PUB["dpi"], bbox_inches="tight")
@@ -165,8 +196,20 @@ def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
     return out
 
 
-def build_contact_sheet(root: Path, out: Path) -> Path:
-    """One page: rows = case, columns = grid."""
+def build_contact_sheet(root: Path, out: Path,
+                        per_panel: bool = False) -> Path:
+    """One page: rows = case, columns = grid.
+
+    ``per_panel`` scales EVERY panel to its own range instead of sharing one
+    scale down the row. Both sheets are emitted, because neither is honest
+    alone: colour encodes magnitude, so a shared scale is a visual claim that
+    the arms are comparable -- and here they are not, since some grids carry
+    realistic continents and some an idealised domain. On the shared sheet a
+    20x weaker arm renders as blank white; a printed range asks the reader to
+    mentally undo the encoding, which is caption-level honesty doing
+    figure-level work (GLM-5.2). So: the shared sheet for amplitude, the
+    per-panel sheet for structure, each saying which it is.
+    """
     cases = [c for c in CASES if any(_find(root, c, g) for g in GRIDS)]
     fig, axes = plt.subplots(len(cases), len(GRIDS),
                              figsize=(2.6 * len(GRIDS), 1.9 * len(cases)),
@@ -179,6 +222,8 @@ def build_contact_sheet(root: Path, out: Path) -> Path:
         kw, degenerate, (lo, hi) = _shared_scale(
             [v[2] for v in loaded.values()], cmap)
         for j, g in enumerate(GRIDS):
+            if per_panel and g in loaded:
+                kw, degenerate, (lo, hi) = _shared_scale([loaded[g][2]], cmap)
             ax = axes[i, j]
             ax.set_xticks([]); ax.set_yticks([])
             if g not in loaded:
@@ -225,12 +270,18 @@ def build_contact_sheet(root: Path, out: Path) -> Path:
         "legoESM ocean benchmark suite — every case on every grid\n"
         "sea-surface height for the wave and adjustment cases, sea-surface "
         "temperature for the tracer cases.\n"
-        "One shared colour scale per ROW, its range printed beside the row "
-        "name; each panel's own range is on the per-case figures.\n"
-        "Arms are NOT all the same experiment — some grids carry realistic "
-        "continents, some an idealised domain — so a pale panel on a shared "
-        "row scale is a weaker signal, not a failed run.",
+        + ("EACH PANEL ON ITS OWN COLOUR SCALE — read this sheet for spatial "
+           "STRUCTURE.\nMagnitudes are NOT comparable between panels here; "
+           "use the shared-scale sheet for that."
+           if per_panel else
+           "One shared colour scale per ROW, its range printed beside the row "
+           "name — read this sheet for AMPLITUDE.\nThe arms are NOT all the "
+           "same experiment (some grids carry realistic continents, some an "
+           "idealised domain), so a pale panel is a weaker signal, not a "
+           "failed run; the per-panel sheet shows its structure."),
         fontsize=PUB["tick"])
+    fig.text(0.005, 0.002, _provenance(root), fontsize=PUB["tick"] - 3,
+             color="0.45", ha="left", va="bottom")
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=PUB["dpi"], bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
@@ -251,6 +302,9 @@ def main() -> None:
     made = [p for p in (build_case_figure(a.runs_root, c, a.out_dir)
                         for c in CASES) if p]
     sheet = build_contact_sheet(a.runs_root, a.out_dir / "maps_all_cases.png")
+    build_contact_sheet(a.runs_root,
+                        a.out_dir / "maps_all_cases_per_panel_scale.png",
+                        per_panel=True)
     print(f"COMPLETED: {len(made)} case figures + {sheet}")
 
 

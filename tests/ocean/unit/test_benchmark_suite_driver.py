@@ -82,3 +82,73 @@ def test_plotter_labels_each_panel_with_its_own_range():
     assert "own range" in src, (
         "panels no longer print their own data range; a pale panel becomes "
         "indistinguishable from a broken one")
+
+
+# ---------------------------------------------------------------------------
+# The tests above assert the STRING. That is the shadow of the mechanism, not
+# the mechanism: an editable install that used a meta-path finder would beat
+# PYTHONPATH silently and every string assertion would still pass. GLM-5.2
+# refused to merge on exactly that, and it was right to. The test below
+# resolves a real import in a subprocess.
+# ---------------------------------------------------------------------------
+
+def test_the_pin_actually_wins_the_import():
+    """Resolve a module for real under the driver's own PYTHONPATH.
+
+    Measured here rather than reasoned about: without the pin this repo's
+    packages resolve through the editable install to whichever working copy it
+    points at; with it, they must resolve inside THIS checkout."""
+    import os
+    import subprocess
+    import sys
+
+    pkgs = sorted((_REPO / "packages").glob("*/"))
+    assert pkgs, "no packages/ found; the driver's glob would match nothing"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(d) for d in pkgs] + [str(_REPO / "src")])
+    code = ("import legoesm.ocean.dynamics.barotropic_mpas as m; "
+            "print(m.__file__)")
+    out = subprocess.run([sys.executable, "-c", code], env=env,
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr[-800:]
+    resolved = out.stdout.strip()
+    assert resolved.startswith(str(_REPO)), (
+        f"the PYTHONPATH pin did NOT win: legoesm.ocean resolved to "
+        f"{resolved}, outside {_REPO}. Every run using this driver would "
+        f"execute another checkout's library code.")
+
+
+def test_driver_refuses_to_run_if_the_pin_loses(driver):
+    """The runtime guard, not just the build-time one.
+
+    A silent fallback here reruns the original incident with no symptom, so
+    the driver must EXIT rather than warn."""
+    assert "provenance" in driver, "no runtime import-provenance check"
+    assert "exit 2" in driver, (
+        "the provenance check does not abort the job; a warning would be "
+        "ignored and the run would proceed against the wrong checkout")
+
+
+def test_driver_fails_loudly_if_repo_resolves_wrong(driver):
+    """Some SLURM sites spool the script, which breaks BASH_SOURCE.
+
+    That path is silent by construction -- the glob matches nothing and Python
+    ignores the literal star -- so it needs an explicit check."""
+    assert "FATAL" in driver and "packages" in driver, (
+        "no guard that REPO actually contains the packages tree")
+
+
+def test_figures_carry_provenance():
+    """A mixed-run figure looks fine, which is worse than a blank panel.
+
+    The plotter reads whatever is on disk with no manifest, so every figure
+    stamps the commit and the time span of the artifacts it drew from. A wide
+    span is the signal that two runs got mixed (GLM-5.2)."""
+    src = _PLOTTER.read_text()
+    assert "_provenance" in src, "figures carry no provenance stamp"
+    assert src.count("_provenance(root)") >= 2, (
+        "both the per-case figures and the contact sheet must be stamped")
+    assert "span" in src, (
+        "the stamp does not flag artifacts spanning a long window, which is "
+        "the signature of a figure built from two different runs")
