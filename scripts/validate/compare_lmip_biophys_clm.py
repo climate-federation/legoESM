@@ -422,9 +422,6 @@ def fig_lh_gpp(D, outdir):
     ax.set_title('Zonal GPP', fontsize=7.5)
     panel_letter(ax, 'c')
 
-    fig.suptitle(f'Annual-mean latent heat & zonal GPP ({D.y0}-{D.y1})',
-                 fontsize=8)
-
     print('\n=== Latent heat, annual mean (land, W/m2) ===')
     print(f'  legoESM : {float(wmean(lh_l, D.lego_w)):6.2f}')
     print(f'  CLM5.1  : {float(wmean(lh_c, D.clm_w)):6.2f}')
@@ -512,10 +509,6 @@ def fig_seasonal_biome(D, outdir):
                 for p, (c, ls) in OBS_STYLE.items()])
     fig.legend(handles=handles, loc='lower center', ncol=4, frameon=False,
                bbox_to_anchor=(0.5, -0.05))
-    fig.suptitle(f'Latent heat & GPP seasonality by biome ({D.y0}-{D.y1}; '
-                 'local-season composite, SH shifted 6 months; '
-                 'shading = model area-weighted IQR across cells)',
-                 fontsize=7.5)
     savefig(fig, outdir, 'fig_lmip_seasonal_biome')
 
 
