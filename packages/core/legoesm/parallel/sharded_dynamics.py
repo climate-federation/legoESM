@@ -2634,6 +2634,82 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
     return cell_ring, edge_ring
 
 
+def _build_rim_rings(global_mesh, partitions, max_lc, max_le,
+                     max_width):
+    """Per-device INWARD ring distances — the rim complement of
+    :func:`_build_wide_halo_rings`.
+
+    Returns ``(cell_rim, edge_rim)`` int32 arrays of shape
+    ``(n_dev, max_lc)`` / ``(n_dev, max_le)``:
+
+    * ``cell_rim[d, i]`` — BFS hops (over ``cellsOnCell``) from device
+      *d*'s i-th local cell to the nearest cell NOT owned by *d*;
+      non-owned (halo) rows are the seed and get 0; owned cells farther
+      than ``max_width`` hops (the interior) and padding rows get
+      ``_WIDE_RING_FAR``. The width-``w`` RIM — the owned cells whose
+      radius-``w`` stencil can see a ghost value, i.e. the rows an
+      interior/rim split must recompute after the halo fill — is
+      ``1 <= cell_rim <= w``.
+    * ``edge_rim[d, j]`` — min of the two adjacent cells' rim
+      distances (an edge is ghost-affected iff EITHER cell is —
+      dual to the outward builder's AND/max), ``_WIDE_RING_FAR`` when
+      padding.
+
+    The BFS seeds from every non-owned LOCAL cell; owned boundary cells
+    adjacent to a cell of another device that is absent from the local
+    halo cannot occur for ``max_width <= halo_depth`` (depth-1 closure
+    contains every neighbour of an owned cell), which the caller must
+    hold — asserted below.
+    """
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    n_dev = len(partitions)
+    cell_rim = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_rim = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    for d, part in enumerate(partitions):
+        g2l = part.cell_g2l
+        n_owned = part.n_owned_cells
+        n_local = part.n_local_cells
+        assert max_width >= 1, "rim width must be >= 1"
+        rim_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
+        # Seed: every local non-owned (halo) cell at distance 0.
+        rim_l[n_owned:n_local] = 0
+        frontier = np.asarray(part.local_cells[n_owned:n_local])
+        # done marks GLOBAL cells already labelled (seed + visited owned).
+        done = np.zeros(coc.shape[1], dtype=bool)
+        done[frontier] = True
+        for r in range(1, max_width + 1):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~done[nb]]
+            done[nb] = True
+            lidx = g2l[nb]
+            # keep OWNED rows only — the rim lives in the owned block.
+            nb_owned = lidx[(lidx >= 0) & (lidx < n_owned)]
+            rim_l[nb_owned] = r
+            frontier = nb
+        cell_rim[d] = rim_l.astype(np.int32)
+
+        le = np.asarray(part.local_edges)
+        c12 = coe[:, le]                          # (2, n_local_edges)
+        r12 = np.full_like(c12, _WIDE_RING_FAR, dtype=np.int64)
+        for side in range(2):
+            cs = c12[side]
+            valid = cs >= 0
+            lidx = np.full(cs.shape, -1, dtype=np.int64)
+            lidx[valid] = g2l[cs[valid]]
+            present = lidx >= 0
+            r12[side, present] = rim_l[lidx[present]]
+        edge_rim[d, :le.shape[0]] = np.min(
+            r12, axis=0).astype(np.int32)
+
+    return cell_rim, edge_rim
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 
