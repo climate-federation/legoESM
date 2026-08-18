@@ -308,6 +308,10 @@ def baked_init_params() -> dict:
         soil_dry_boost=_inv_ext(C.TUNED_SOIL_DRY_BOOST_MULTILAYER, "soil_dry_boost"),
         soil_alb_scale=_inv_ext(C.TUNED_SOIL_ALB_SCALE_MULTILAYER, "soil_alb_scale"),
         th_glacier_cboost=_inv_ext(C.TUNED_GLACIER_CBOOST_MULTILAYER, "th_glacier_cboost"),
+        # v6 Farquhar bake (dual-target LE calibration)
+        pft_vcmax=_inv_ext(np.asarray(C._TUNED_PFT_VCMAX_MULTILAYER), "pft_vcmax"),
+        pft_g1=_inv_ext(np.asarray(C._TUNED_PFT_G1_MULTILAYER), "pft_g1"),
+        pft_lcma=_inv_ext(np.asarray(C._TUNED_PFT_LCMA_MULTILAYER), "pft_lcma"),
     )
     p.update({k: jnp.asarray(v) for k, v in over.items()})
     return p

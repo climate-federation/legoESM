@@ -324,20 +324,21 @@ def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
     mult = np.asarray(_TUNED_PFT_ALBEDO_MULTILAYER)
     assert slab.shape == mult.shape
     delta = slab - mult                                  # slab brighter -> positive
-    # Multilayer is NOWHERE brighter than the slab (systematically darker/equal) —
-    # the documented direction of the -14 W/m^2 land darkening.
-    assert np.all(delta >= -1e-9), (
-        f"multilayer albedo brighter than slab at PFTs {np.where(delta < -1e-9)[0]}"
-        f" — no longer the systematically-darker calibration (#746)")
-    # Bare soil (PFT 0) carries the largest delta (~0.08 = slab 0.3802 vs ml 0.30).
-    assert delta[0] > 0.05
-    # Mean delta ~0.026 (≈ the -14 W/m^2 at land insolation), and BOUNDED: the
-    # regression guard — the multilayer table must not drift beyond ~0.05 mean
-    # darker than the slab without a deliberate re-tune (#746 item-3).
+    # 2026-08 v6 re-tune: BOTH tables are now calibrated against the SAME ERA5
+    # dual target (the "reconcile against a common reference" fix #746 item-3
+    # called for), so the old "multilayer nowhere brighter" pin is superseded.
+    # The residual per-PFT deltas reflect the two land models' different physics
+    # (multilayer bare soil uses the per-cell CLM soil-colour x scale; the slab
+    # uses one per-PFT value), not a calibration protocol mismatch.  Pin the
+    # NEW relationship: deltas small and bounded, mean modestly slab-brighter.
+    assert np.all(np.abs(delta) < 0.10), (
+        f"slab-vs-multilayer albedo delta exceeds 0.10 at PFTs "
+        f"{np.where(np.abs(delta) >= 0.10)[0]} — re-tune drifted the tables apart")
     mean_delta = float(np.mean(delta))
-    assert 0.015 < mean_delta < 0.05, (
-        f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the "
-        f"documented band — reconcile the two tuned tables (#746 item-3)")
+    assert 0.0 < mean_delta < 0.06, (
+        f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the v6 "
+        f"band [0, 0.06] — reconcile the two tuned tables (see "
+        f"docs/land/land_dual_target_calibration_runbook.md)")
 
 
 def test_nearest_regrid_longitude_wraps_at_seam():

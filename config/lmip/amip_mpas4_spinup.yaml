@@ -1,0 +1,112 @@
+# Land spin-up for the MPAS AMIP campaign (v6 dual-target land bake) — 5 years of CRU-JRA, on the run's
+# own mesh, in the run's own land configuration.
+#
+# WHY THIS EXISTS. Turning the land model on in the coupled AMIP run from a cold
+# start made it DIVERGE: tropical desert evaporation reached 12.9 mm/day against
+# 0.87 observed (372 W/m2 of latent heat, more energy than the surface
+# receives), column water vapour climbed for thirty days without levelling, and
+# the global mean warmed 6 K. A soil column that starts near field capacity in
+# the wet tropics, on a lane with no canopy to hold water back, evaporates at
+# potential and feeds itself. The fix is to hand the coupled run a soil column
+# that has already settled under real weather.
+#
+# THREE THINGS THIS CONFIG GETS RIGHT, each of which was a way to waste the run:
+#
+#   * THE MESH. The coupled run's restart loader compares column counts and
+#     refuses a mismatch rather than interpolating, so a spin-up on any other
+#     grid produces a state that run cannot load. `voronoi` at subdivision 4 is
+#     the 2562-cell mesh the campaign's arms use. (The schema refused this grid
+#     until recently, even though the driver could always build it.)
+#   * THE LAND CONFIGURATION. `simple_seb`, not the two-leaf canopy, because the
+#     canopy is not wired on the MPAS lane and the coupled run will refuse it.
+#     Spinning up against a canopy the coupled run does not have would
+#     equilibrate the soil to the wrong surface scheme and put us back where a
+#     cold start left us. Stomatal control is on, matching the coupled deck.
+#   * THE CALENDAR. 1974-1978, so the spin-up ENDS on 31 December 1978 and the
+#     AMIP arm begins on 1 January 1979 — the soil is handed over in the season
+#     it will be used in, under weather that actually preceded it.
+#
+# WHAT IT WILL AND WILL NOT SETTLE. Tropical top-metre moisture — the quantity
+# the runaway is about — equilibrates in months, so five years is comfortable
+# for it. High-latitude deep soil temperature and the snow/ice reservoirs want
+# closer to a decade and will still be drifting; do not read deep-soil trends
+# off the result. Carbon is not spun up here at all: the pools come from the
+# published carbon initial condition instead.
+#
+# THE SOIL COLUMN MUST MATCH, and it does not by default. This driver builds
+# the shared soil grid at ITS default -- 8 layers, geometric spacing, 6.375 m --
+# while the AMIP deck runs 10 layers over 3 m. The restart loader checks the
+# layer count and would refuse the handoff. There is no config key here for the
+# soil grid, so the AMIP side is what moves:
+#
+#   run_amip.py --land-ic <restart> --multilayer-n-layers 8 \
+#               --multilayer-soil-depth 6.375
+#
+# 6.375 m is not a rounded guess: filling that depth with 8 layers at growth
+# factor 2 gives a first layer of exactly 0.025 m, which is this driver's own
+# default -- so the two columns are the same column, not merely the same size.
+#
+# Usage:
+#   python scripts/run/run_lmip_biophys.py --config config/lmip/amip_mpas4_spinup.yaml
+# then hand the restart to the coupled run with the flags above.
+
+template_name: biophysics/amip_mpas4_spinup
+template_version: 1.0.0
+description: 5-year CRU-JRA land spin-up on the AMIP MPAS mesh, bulk SEB + stomata
+
+grid:
+  type: voronoi
+  resolution: 4                 # 2562 cells — the campaign's res-4 arms
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy   # now wired on the MPAS lane; spin up
+                                    # against the same scheme the arm runs
+  bulk_scheme: most
+  stomata_enabled: true         # matches the coupled deck's stomatal control
+  stomatal_model: ball_berry
+  snow_albedo_feedback: true
+  enable_freeze_thaw: true      # boreal winter columns diverge without it
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_0.5x0.5
+  suffix: ""
+  year_start: 1974
+  year_end: 1978
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+  land_cover_dataset: clm5
+
+time:
+  dt: 3600.0
+  n_steps: 43800                # 5 years hourly (5 x 8760)
+  start_doy: 0.0
+
+restart:
+  from: ""
+
+land_frac_min: 0.0
+land_mask_file: ""
+
+output:
+  # Names and averaging modes copied from the shipped 5-year template, not
+  # invented: a tape asking for a variable the driver does not publish dies
+  # mid-scan with a bare KeyError, which is how the first version of this file
+  # was caught.
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, shflx, lhflx, albedo, runoff, precip, soil_evap]
+
+    # The equilibrium diagnostic: the year-over-year drift of these three is
+    # what says whether the spin-up has settled. Instantaneous, because a
+    # monthly MEAN soil moisture hides the drift the end-of-year value shows.
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]

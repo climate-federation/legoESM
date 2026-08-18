@@ -103,12 +103,16 @@ cell order, so never rebuild coordinates from the unpermuted land index.
    (reviewed paste; the slab family `_TUNED_PFT_*` is separate). New
    canopy-conductance constants (Vc_max25/g1/LCMA) need bake wiring + dual
    review before first use.
-2. **Land IC**: `scripts/run/run_land_spinup.py --grid-type <grid> --resolution
-   <res> --years N --restart-out <land_ic.npz>` equilibrates the soil column
-   under the baked params on the TARGET AMIP grid.
-3. **AMIP config**: a `--config` YAML for `run_amip.py` setting
-   `--use-multilayer-land --land-ic <land_ic.npz>` (multilayer) or
-   `--slab-land-active` (slab fallback); CLI flags still override.
+2. **Land IC**: the LMIP spin-up (`scripts/run/run_lmip_biophys.py --config
+   config/lmip/amip_mpas4_spinup.yaml --output-dir <dir>`) — 5 years CRU-JRA on
+   the target AMIP mesh under the new bake; the restart loader refuses a
+   column-count mismatch, so re-run per mesh.  (`run_land_spinup.py` is the
+   idealized-forcing alternative.)
+3. **AMIP config**: `config/amip/amip_land_v6.yaml` records the IC + matching
+   soil-column flags (`--land-ic <restart> --multilayer-n-layers 8
+   --multilayer-soil-depth 6.375` on top of the production config); the slab
+   fallback needs no config (its bake family is picked up by
+   `--slab-land-active` directly).
 
 ## Known caveats (open, PLAUSIBLE)
 
