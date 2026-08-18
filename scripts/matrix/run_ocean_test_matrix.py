@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
@@ -125,7 +126,12 @@ import matplotlib.pyplot as plt
 GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
-    "mpas": "ico3",
+    # ico4 (2562 cells, 446 km effective), NOT ico3 (642 cells, 891 km).
+    # RESOLUTION-MATCHED to latlon 36x72 (444 km), cube C24 (384 km) and
+    # fesom pi (403 km global MEAN) to within 0.6%. At ico3 the MPAS arm was
+    # 2.3x coarser than every other arm, so a cross-grid comparison measured
+    # the resolution gap rather than the dycores.
+    "mpas": "ico4",
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
     "cs_regional": "C24",
@@ -138,12 +144,36 @@ GRID_RESOLUTIONS: dict[str, str] = {
 
 # Standard grid types for the full test matrix.
 # Regional grids are only added to specific test cases (gyre experiments).
-GRID_TYPES = ["cubed_sphere", "latlon", "mpas"]
+# OCEAN grids only. cubed_sphere was REMOVED 2026-08-11 (user directive):
+# it is not an ocean grid here -- there is no cubed-sphere ocean
+# configuration anyone runs, it failed geostrophic adjustment and Phillips
+# on its own gates, and its self-error at 2x resolution (0.738 degC on
+# geostrophic adjustment, 213x the lat-lon reference) meant no cross-grid
+# statement about it was interpretable. Keeping it in the registry made
+# every case spend a run producing a column nobody could read.
+# The atmosphere matrix still exercises the cubed sphere; this is the
+# OCEAN matrix.
+GRID_TYPES = ["latlon", "mpas"]
 REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
+
+# How far past the SOURCE mesh a regrid target may sit before it is dropped
+# as extrapolation, in multiples of that source point's LOCAL spacing (the
+# mean distance to its ~6 neighbours -- see _local_spacing).
+#
+# A HEURISTIC, not a topology test, calibrated only against the coastline it
+# has to resolve. Retained fraction of the 181x360 target mesh on the FESOM
+# pi wet-source set (codex 2026-08-11):
+#     multiplier   1.0 -> 70.5%     1.5 -> 76.5%     2.5 -> 85.3%
+# At 2.5 the Sahara, Amazon, Australia and Antarctic interior are accepted
+# as ocean again, which is the failure being fixed; central Asia is rejected
+# at every multiplier. That rules 2.5 out but does not make 1.5 right -- the
+# principled replacement is mesh-element containment (barycentric
+# interpolation inside the actual triangle).
+_TARGET_CUTOFF_SPACINGS = 1.5
 
 # --- Matched numerics for the cross-dycore lock-exchange comparison ---
 # A_v/K_v are the ONLY numerical parameters all four ocean dycores expose:
@@ -373,6 +403,19 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
 
+    # --- Inertia-gravity wave, f-PLANE CHANNEL (Bishnu et al. 2024) ---
+    # The global case above cites this reference but cannot verify wave
+    # behaviour on a sphere (see the block comment at igw_channel_mode).
+    # This one puts the wave where it is an exact eigenmode, so it can gate
+    # on the exact solution, the measured frequency, and mode purity.
+    # Two resolutions: the coarse one is the gate, the fine one exists so
+    # the pair gives a convergence rate (L2 should fall ~4x for 2x cells).
+    # latlon_channel parses "n_lat x n_lon"; the geometry is Cartesian and
+    # built by the runner, so the grid string only carries the cell counts.
+    for _res in ("20x40", "40x80"):
+        matrix.append(TestCase(
+            "inertia_gravity_wave_channel", "latlon_channel", _res, 1.0, 1.0))
+
     # --- Lock Exchange (NEMO / Petersen et al. 2015): latlon only ---
     # (cubed_sphere excluded — H_max=20 m + sharp T contrast across a
     # global cube face cannot be made stable with either the cd-grid
@@ -449,8 +492,11 @@ def _build_test_matrix() -> list[TestCase]:
         },
     ))
 
-    # --- Overflow (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Overflow (NEMO / Petersen et al. 2015): latlon ---
+    # cubed_sphere dropped 2026-08-11 with the rest of the cube arm (not an
+    # ocean grid); this was the last case still naming it explicitly rather
+    # than through GRID_TYPES.
+    for g in ["latlon"]:
         matrix.append(TestCase(
             "overflow", g, res[g], 0.5, 0.1))
 
@@ -535,8 +581,19 @@ TEST_MATRIX = _build_test_matrix()
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
+#: The ONE status->icon map.  Both ``record`` and the end-of-run summary read
+#: it, so a new status can never be added to one and forgotten in the other --
+#: the failure mode codex caught here, where a missing XFAIL key raised
+#: KeyError inside ``record``, the caller's ``except`` turned it into ERROR,
+#: and the waiver silently made the suite MORE red instead of less.
+STATUS_ICONS: dict[str, str] = {
+    "PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+    "XFAIL": "x ", "XPASS": "XX",
+}
+
+
 def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
+    icon = STATUS_ICONS[status]
     ALL_RESULTS.append({
         "test": tc.case, "grid": tc.grid_type,
         "resolution": tc.resolution, "status": status,
@@ -726,6 +783,148 @@ def _apply_pe_rel_sign(
     )
 
 
+#: Tracer-content drift a run may show, PER DAY, keyed on the MODELLING
+#: MODE the arm integrates in -- never on the arm's name. A benchmark that
+#: loosens a gate "for the FESOM arm" is an exemption list; one that keys on
+#: the mode holds every model in that mode to the same number.
+#:
+#:   moving_thickness (z-star / ALE): layer thicknesses move with eta, so
+#:       tracer CONTENT is conserved to round-off. MEASURED: lat-lon z-star
+#:       1.2e-15 over 2 days.
+#:   fixed_thickness (linfs, NEMO key_linssh): thicknesses are pinned and
+#:       the free-surface volume change is carried as a surface
+#:       concentration/dilution term, so content is conserved only to that
+#:       approximation. MEASURED: FESOM linfs 2.6e-6 over 2 days, and
+#:       3.4e-7/day on the 10-day geostrophic adjustment.
+#:
+#: Per DAY, not absolute: this suite runs 1- to 10-day cases and an
+#: absolute tolerance would let a short run hide a leak a longer one fails.
+#: Inertia-gravity-wave gates. Calibrated on the 2026-08-11 measurements
+#: recorded at the gate site, not chosen.
+#:   amplitude ratio -- instability only; there is deliberately no lower
+#:       bound, because damping on a coarse mesh is legitimate (measured
+#:       0.38 latlon / 0.43 mpas / 2.39 fesom / 2.61 tripole).
+#:   correlation with the IC -- the frozen-dycore check. A wave whose
+#:       period is 0.667 d cannot still look like its own initial condition
+#:       after 2 days (measured 0.49 / 0.40 / 0.20 / 0.24 on the arms that
+#:       propagate, against 1.00 on the cubed-sphere arm whose free surface
+#:       turned out to be frozen).
+def _igw_gate_metrics(eta_final, eta_init, wet=None):
+    """(amplitude ratio, correlation with the IC, peak |eta|) on OCEAN cells.
+
+    Both gate metrics come from here so they cannot disagree about which
+    cells count. Land holds the same constant in both fields on every arm;
+    for a zero-mean field like eta those points sit at the mean and barely
+    move the correlation, but they DO enter the peak-amplitude reduction,
+    and the moment a field has a non-zero ocean mean the identical land
+    block drags the correlation toward 1 -- toward the "frozen" verdict
+    this gate exists to detect (codex 2026-08-11).
+
+    A field with no variance left returns ``inf`` for the correlation, not
+    NaN: the gate below is a ``<=`` test, which NaN silently passes, so a
+    dycore that flattened the free surface would score a clean sheet.
+    """
+    f = np.asarray(eta_final, dtype=np.float64).ravel()
+    i0 = np.asarray(eta_init, dtype=np.float64).ravel()
+    ok = np.isfinite(f) & np.isfinite(i0)
+    if wet is not None and np.asarray(wet).size == f.size:
+        ok &= np.asarray(wet, dtype=bool)
+    if not ok.any():
+        return float("nan"), float("inf"), float("nan")
+    max_eta = float(np.max(np.abs(f[ok])))
+    max_init = float(np.max(np.abs(i0[ok])))
+    amp = max_eta / max_init if max_init > 1e-12 else float("nan")
+    if ok.sum() > 2 and np.std(f[ok]) > 1e-30 and np.std(i0[ok]) > 1e-30:
+        corr = float(np.corrcoef(f[ok], i0[ok])[0, 1])
+    else:
+        corr = float("inf")
+    return amp, corr, max_eta
+
+
+_IGW_AMP_UPPER = 5.0
+#: Arms whose only land is poleward of 80 deg, so a zonally periodic IC is
+#: nearly a steady state on them. The real-geometry arms (fesom, tripole)
+#: carry continents and are not the same boundary-value problem.
+_AQUAPLANET_OCEAN_GRIDS = ("latlon", "mpas")
+
+_BWAVE_ENERGY_FLOOR = 0.02
+_BWAVE_ENERGY_CEILING = 1.5
+#: Channel-IGW gates. The case is an EXACT eigenmode, so these are real
+#: accuracy statements, unlike anything the global case could assert.
+#: Calibrated on the first run and recorded there; L2 should scale as
+#: dx^2 for a 2nd-order C-grid.
+_IGWC_CFL_S_PER_M = 3.0e-3
+#: MEASURED 2026-08-12 at the base 20x40 (dx = 100 km, 20 points per
+#: wavelength): L2 0.0659, refining to 0.0294 at 40x80 with dt scaled with
+#: dx. The gate sits just above the base value with ~20% headroom.
+#:
+#: CONVERGENCE IS ~1.3 ON THE DEFAULT LANE, AND THAT IS CORRECT BEHAVIOUR,
+#: NOT A DEFECT. SETTLED 2026-08-12 by measurement; the earlier guess in
+#: this comment (that coriolis_scheme="matsuno_split" was the limiter) was
+#: WRONG and is retracted. What was actually measured, on this case:
+#:   - refine dx at FIXED dt -> order 1.82, so SPACE is second order;
+#:   - refine dt on a FIXED grid -> order 0.99, so TIME is FIRST order;
+#:   - theta 0.55 -> 0.50 moves the mixed order 1.15 -> 1.31, a real but
+#:     secondary contribution;
+#:   - the error is amplitude-INDEPENDENT to 5 digits at 100x smaller
+#:     amplitude (eta/H = 1.9e-5), which REFUTES the lagged nonlinear
+#:     thickness H_u_old/H_v_old as the cause -- that term is nonlinear;
+#:   - swapping coriolis_scheme alone, or outer_integrator alone, changes
+#:     nothing, because the second-order settings are GATED IN A CHAIN.
+#: The limiter is the explicitly lagged old-time slow forcing. All three
+#: knobs must move together (barotropic_slow_forcing_ab2 requires
+#: coriolis_scheme="explicit_ab2", which requires outer_integrator="ab2"),
+#: and moving all three gives order 1.95 with L2 3x smaller. The default
+#: lane is first order in time BY CONSTRUCTION. Both lanes are pinned in
+#: tests/ocean/unit/test_barotropic_accuracy.py, so this stays measured.
+_IGWC_L2_MAX = 0.08          # relative L2 in eta at 1.25 periods
+_IGWC_OMEGA_ERR_MAX = 0.03   # measured vs analytic frequency
+_IGWC_PURITY_MIN = 0.95      # fraction of eta variance still in the mode
+
+_IGW_AMP_FLOOR = 0.03
+_IGW_IC_CORR_UPPER = 0.95
+
+_MODE_TRACER_DRIFT_TOL_PER_DAY = {
+    "moving_thickness": 1.0e-8,
+    "fixed_thickness": 5.0e-6,
+}
+
+
+def _modelling_mode(grid_type: str, config=None) -> str:
+    """Which vertical-coordinate class this arm integrates in.
+
+    Raises on an unrecognised setting rather than defaulting: silently
+    calling a fixed-thickness arm "moving" would hold it to a tolerance it
+    cannot meet, and the reverse would hide a real leak.
+    """
+    if grid_type == "fesom":
+        vc = getattr(config, "vertical_coordinate", "linfs")
+        if vc == "linfs":
+            return "fixed_thickness"
+        if vc == "zstar":
+            return "moving_thickness"
+        raise ValueError(
+            f"_modelling_mode: unknown FESOM vertical_coordinate {vc!r}; "
+            f"expected 'linfs' or 'zstar'.")
+    # Every other ocean arm here integrates z-star.
+    return "moving_thickness"
+
+
+def _tracer_drift_tolerance(grid_type: str, days: float, config=None) -> float:
+    """Absolute tracer-drift tolerance for a run of *days* days.
+
+    Strictly proportional to the run length. An earlier revision used
+    ``max(days, 1.0)``, which handed a 0.1-day quick run a full day's
+    budget -- a 10x weakening of exactly the short runs where a leak is
+    hardest to see (codex 2026-08-11).
+    """
+    if not (float(days) > 0.0):
+        raise ValueError(f"_tracer_drift_tolerance: days must be positive, "
+                         f"got {days!r}")
+    mode = _modelling_mode(grid_type, config)
+    return _MODE_TRACER_DRIFT_TOL_PER_DAY[mode] * float(days)
+
+
 def _compute_drift(values: list[float]) -> float:
     """Scalar drift wrapper.
 
@@ -844,6 +1043,23 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+def _local_spacing(tree, src: np.ndarray, n_ring: int = 6) -> np.ndarray:
+    """Per-source-point mesh spacing: mean distance to its ~6 neighbours.
+
+    NOT the distance to the single nearest neighbour: that is the MINIMUM
+    over the ring, so on a mesh with mixed spacing it underestimates the
+    cell size and a cutoff built on it deletes legitimate interior targets
+    (MEASURED on FESOM pi: 16% of the interior dropped). A triangular or
+    Voronoi mesh has about six neighbours, so their mean is the cell scale.
+    """
+    k = min(n_ring + 1, src.shape[0])
+    d, _ = tree.query(src, k=k)
+    if d.ndim == 1:
+        d = d[:, None]
+    return d[:, 1:].mean(axis=1) if d.shape[1] > 1 else np.full(
+        src.shape[0], np.inf)
+
+
 def _build_latlon_weights(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -854,8 +1070,14 @@ def _build_latlon_weights(
     target_lat: np.ndarray | None = None,
     target_lon: np.ndarray | None = None,
     ocean_mask: np.ndarray | None = None,
+    linear: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build KDTree interpolation weights from unstructured to lat-lon grid.
+
+    ``linear=True`` (default) fits a plane in the target's tangent frame and
+    is exact for a linear field; ``linear=False`` is the older
+    inverse-distance weighting, kept for callers that need convex
+    (guaranteed in-range) weights without the ``limit`` flag.
 
     Returns (idxs, weights) arrays of shape (n_lat*n_lon, K) for K-nearest-
     neighbor inverse-distance weighting in 3-D Cartesian coordinates.
@@ -918,30 +1140,123 @@ def _build_latlon_weights(
         dists = dists[:, None]
         idxs = idxs[:, None]
 
+    # A GLOBAL mesh needs a target-side cutoff too. Without one, every
+    # target beyond the mesh's own coverage silently takes the nearest
+    # source point however far away, and the weights renormalise to 1 so
+    # the result looks like data. MEASURED 2026-08-11: the FESOM pi mesh is
+    # a REAL-GEOMETRY ocean mesh (its own depth runs -30..-6000 m, every
+    # node wet; nearest node 2695 km away over central Asia, 1808 km over
+    # the Sahara, 1410 km over the Amazon), so 22% of the target mesh sits
+    # over continents the mesh does not cover -- all of it previously
+    # filled by extrapolation. That arm's wet fraction read 0.94 against
+    # 0.89 for the aquaplanet arms; it is 0.75 with this cutoff.
+    #
+    # LOCAL, not one global number: on a mesh whose spacing runs 57 to
+    # 595 km a global median is at once too loose at the fine end and too
+    # tight at the coarse end.
+    local_cutoff = None
+    if max_dist is None and src.shape[0] > 1:
+        local_cutoff = (_TARGET_CUTOFF_SPACINGS
+                        * _local_spacing(tree, src)[idxs[:, 0]])
+
+    if linear:
+        # LINEARLY CONSISTENT weights: fit a plane through the stencil in
+        # the target's local tangent plane and take its value AT the
+        # target. IDW is only zeroth-order consistent, so on a mesh whose
+        # neighbours are one-sided it biases toward the denser side and
+        # adding neighbours does not help (MEASURED on FESOM pi: k = 1, 3,
+        # 6, 12 all leave ~1.9 K on a field that is a pure function of
+        # latitude). The weights remain a linear combination of the same
+        # stencil values, so they are returned in the SAME (idxs, w) form
+        # -- but they are SIGNED, so callers must pass limit=True.
+        up = tgt
+        pole = np.tile(np.array([0.0, 0.0, 1.0]), (tgt.shape[0], 1))
+        e1 = np.cross(pole, up)
+        n1 = np.linalg.norm(e1, axis=1, keepdims=True)
+        e1 = np.where(n1 > 1e-8, e1 / np.maximum(n1, 1e-30),
+                      np.tile(np.array([1.0, 0.0, 0.0]), (tgt.shape[0], 1)))
+        e2 = np.cross(up, e1)
+        off = src[idxs] - tgt[:, None, :]
+        # Tangent-plane coordinates: no dateline and no pole, because the
+        # frame is built AT the target. Fitting in raw (lon, lat) would make
+        # a stencil straddling +-180 deg appear 358 deg wide.
+        A = np.stack([np.ones(off.shape[:2]),
+                      np.einsum("nkj,nj->nk", off, e1),
+                      np.einsum("nkj,nj->nk", off, e2)], axis=-1)
+        wl = 1.0 / np.maximum(dists, 1e-12) ** 2
+        Aw = A * wl[..., None]
+        lhs = np.einsum("nkj,nkl->njl", Aw, A)
+        # Ridge: a degenerate stencil (collinear, or K < 3) is singular;
+        # this falls back toward the weighted mean instead of raising.
+        lhs = lhs + np.eye(3) * (1e-10 * np.trace(lhs, axis1=1, axis2=2)
+                                 [:, None, None] + 1e-30)
+        try:
+            inv = np.linalg.inv(lhs)
+        except np.linalg.LinAlgError:
+            inv = np.tile(np.eye(3), (lhs.shape[0], 1, 1))
+        # Row 0 of (A^T W A)^-1 A^T W evaluates the fit at the target.
+        w = np.einsum("nj,nkj->nk", inv[:, 0, :], Aw)
+        bad = ~np.all(np.isfinite(w), axis=1)
+        if bad.any():
+            w[bad] = (1.0 / np.maximum(dists[bad], 1e-12))
+    else:
+        w = 1.0 / np.maximum(dists, 1e-12)
+
     # Map indices back to the full (unmasked) array
     if ocean_idx is not None:
         idxs = ocean_idx[idxs]
 
-    w = 1.0 / np.maximum(dists, 1e-12)
     # Zero out weights for target points too far from any source cell.
     if max_dist is not None:
-        too_far = dists[:, 0] > max_dist
-        w[too_far] = 0.0
+        w[dists[:, 0] > max_dist] = 0.0
+    elif local_cutoff is not None:
+        w[dists[:, 0] > local_cutoff] = 0.0
     w_sum = w.sum(axis=1, keepdims=True)
-    w = np.where(w_sum > 0, w / np.maximum(w_sum, 1e-30), 0.0)
+    # IDW weights are positive so the sum is a scale; LINEAR weights sum to
+    # 1 by construction, and a sum near zero means the fit is degenerate --
+    # normalising by it would amplify noise, so those targets are dropped.
+    if linear:
+        w = np.where(np.abs(w_sum) > 1e-8, w, 0.0)
+    else:
+        w = np.where(w_sum > 0, w / np.maximum(w_sum, 1e-30), 0.0)
     return idxs, w
 
 
 def _apply_weights(vals: np.ndarray, idxs: np.ndarray, w: np.ndarray,
-                   n_lat: int, n_lon: int) -> np.ndarray:
-    """Apply precomputed IDW weights, handling NaN source values."""
+                   n_lat: int, n_lon: int, limit: bool = False) -> np.ndarray:
+    """Apply precomputed interpolation weights, handling NaN source values.
+
+    ``limit`` clips each target to the min/max of its own stencil. Needed
+    only for the LINEAR weights (``_build_latlon_weights(linear=True)``),
+    which are signed and can overshoot at a discontinuity -- MEASURED: a
+    25 K step regrids to [4.36, 30.51] from data spanning [5, 30]. IDW
+    weights are convex and cannot, so the default stays off.
+
+    IT COSTS ACCURACY AT A SMOOTH EXTREMUM, where the true value legitimately
+    lies outside the stencil range: on a field linear in 3-D position the
+    clip takes the max error from 0.045 to 0.291 and the RMS from 0.0024 to
+    0.018 (codex 2026-08-11). Every regrid number quoted elsewhere is WITH
+    the clip, i.e. the pessimistic one. Boundedness is worth that because an
+    unbounded temperature is a conservation-diagnostic failure; the upgrade
+    that gets both is barycentric interpolation inside the containing
+    element.
+    """
     v = vals[idxs]
     v_valid = np.isfinite(v)
     v_safe = np.where(v_valid, v, 0.0)
     wm = w * v_valid
     ws = wm.sum(axis=1, keepdims=True)
+    # ``ws > 0``, not ``abs(ws) > 0``, and DELIBERATELY asymmetric with the
+    # build-side guard: signed linear weights whose surviving sum has gone
+    # negative (source NaNs removed part of the stencil) no longer
+    # reconstruct anything, and renormalising by a negative sum would return
+    # a confident wrong number. NaN is the right output there.
     wn = np.where(ws > 0, wm / np.maximum(ws, 1e-30), 0)
     result = np.sum(v_safe * wn, axis=1)
+    if limit:
+        big = np.where(v_valid, v_safe, -np.inf).max(axis=1)
+        small = np.where(v_valid, v_safe, np.inf).min(axis=1)
+        result = np.clip(result, small, big)
     return np.where(ws.ravel() > 0, result, np.nan).reshape(n_lat, n_lon)
 
 
@@ -1089,7 +1404,9 @@ def _bin_to_latlon(
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
                                      max_dist=max_dist,
                                      ocean_mask=ocean_mask)
-    return _apply_weights(vals, idxs, w, n_lat, n_lon)
+    # limit=True: the weights are signed (linear fit), so a target next
+    # to a discontinuity could otherwise leave the data range.
+    return _apply_weights(vals, idxs, w, n_lat, n_lon, limit=True)
 
 
 def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
@@ -1144,7 +1461,16 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
     
     # For land mask, apply threshold to ensure binary values
     mask_interp = np.where(mask_interp > 0.5, 1.0, 0.0)
-    
+
+    # A target beyond the SOURCE mesh's reach is not ocean, whatever its
+    # nearest node says. The FESOM pi mesh has real continents, so without
+    # this the mask called them ocean (wet fraction 0.94 vs 0.89 for the
+    # aquaplanet arms; 0.75 with the cutoff). Same rule as the field
+    # regrid, so mask and field agree about where the mesh ends.
+    if src_3d.shape[0] > 1:
+        cutoff = _TARGET_CUTOFF_SPACINGS * _local_spacing(tree, src_3d)[indices]
+        mask_interp = np.where(distances > cutoff, 0.0, mask_interp)
+
     return mask_interp.reshape(n_lat, n_lon)
 
 
@@ -1307,7 +1633,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
                                      ocean_mask=ocean_mask)
     out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
-        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
+        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon,
+                                     limit=True)
     return out
 
 
@@ -1820,7 +2147,8 @@ def _bin_cross_section(
                                          ocean_mask=ocean_mask)
         ll = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
         for lev in range(nlev):
-            ll[..., lev] = _apply_weights(flat[:, lev], idxs, w, n_lat, n_lon)
+            ll[..., lev] = _apply_weights(flat[:, lev], idxs, w,
+                                          n_lat, n_lon, limit=True)
     else:
         ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
 
@@ -2337,6 +2665,12 @@ def _parse_resolution(tc: TestCase):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "cs_regional":
         return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon_channel":
+        # "n_lat x n_lon" cell counts. The channel cases build their own
+        # Cartesian geometry, so the string carries counts only -- the
+        # physical cell size is the case's own constant.
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
     elif tc.grid_type == "tripole":
@@ -2994,6 +3328,39 @@ def _make_check_fn(grid_type: str):
         return check_fn
 
 
+def _area_weighted_eta_var(state, grid_type: str, grid) -> float:
+    """Area-weighted mean of eta^2 over OCEAN cells -- a PE proxy.
+
+    The barotropic-wave case used to gate on the GLOBAL PEAK of |eta|,
+    which is not a smooth functional of the state: it reports wherever the
+    dispersing packet happens to be constructively interfering at the
+    sample instant, so it neither converges nor measures dissipation
+    (GLM-5.2 2026-08-11). The area-weighted variance is proportional to
+    available potential energy, is smooth, and decays at the scheme's
+    actual dissipation rate.
+    """
+    eta = np.asarray(state.eta.data, dtype=np.float64)
+    _MISSING = object()
+    mobj = getattr(state, "land_mask", getattr(state, "land_mask_grid",
+                                               _MISSING))
+    mask = (np.asarray(mobj.data, dtype=np.float64) > 0.5
+            if mobj is not _MISSING else np.ones_like(eta, dtype=bool))
+    if grid_type == "mpas":
+        area = np.asarray(grid.areaCell, dtype=np.float64)
+    else:
+        area = np.asarray(getattr(grid, "area", np.ones(eta.size)),
+                          dtype=np.float64)
+    if area.size == eta.size:
+        w = area.reshape(eta.shape)
+    else:
+        w = np.ones_like(eta)
+    w = np.where(mask & np.isfinite(eta), w, 0.0)
+    tot = float(w.sum())
+    if not tot > 0.0:
+        return float("nan")
+    return float(np.sum(w * np.nan_to_num(eta) ** 2) / tot)
+
+
 def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
     """Return a scalar_fn(state) -> dict for diagnostics.
 
@@ -3548,7 +3915,8 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3639,7 +4007,8 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3723,7 +4092,8 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3802,7 +4172,8 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3861,7 +4232,14 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    _base_scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+
+    def scalar_fn(s):
+        """Base scalars plus the AREA-WEIGHTED <eta^2>, the quantity this
+        case is actually gated on (see the gate block below)."""
+        out = dict(_base_scalar_fn(s))
+        out["eta_var"] = _area_weighted_eta_var(s, tc.grid_type, grid)
+        return out
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -3933,24 +4311,53 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     # the wavefront geometry, not damping.  Relaxed to 0.5 to
     # tolerate this while still catching damping-out (ratio→0)
     # or runaway growth (ratio→large via the upper gate).
+    # --- Gates rebuilt 2026-08-11 on the ENERGY, not the peak ---
+    #
+    # eta_conservation (min/max of the global peak over a window) and
+    # min_final_amplitude (an end-tail order statistic of the same peak)
+    # are REPORTED but NOT GATED. For a dispersing packet on a global
+    # basin the global peak reports where the wavefront happens to be
+    # constructively interfering at the sample instant; it is not a smooth
+    # functional of the state and it does not converge. MEASURED across the
+    # four arms: eta_cons spans 0.454-0.554 and min_final_amp 0.098-0.202,
+    # so the old 0.5 and 0.1 m thresholds -- both hand-picked, as their own
+    # comments admitted -- sliced straight through the arms' natural
+    # scatter, failing lat-lon by 2% on one and FESOM by 9% on the other
+    # while MPAS and tripole passed for no physical reason.
+    #
+    # The area-weighted <eta^2> IS smooth and is proportional to available
+    # potential energy. MEASURED e-folding time over the final half:
+    # latlon 2.71 d, mpas 2.95 d, fesom 2.63 d, tripole 8.41 d -- i.e. the
+    # arms agree on the dissipation rate to within a factor 3, and FESOM
+    # (whose low end-PEAK looked like over-dissipation through the old
+    # gate) is right alongside lat-lon. Final/initial <eta^2>: 0.206,
+    # 0.215, 0.187, 0.368.
+    #
+    # Thresholds are set OUTSIDE the measured spread, not through it:
+    # the floor is ~9x below the smallest measured survivor and the
+    # ceiling catches spurious energy GROWTH, which is the failure mode a
+    # free-surface scheme actually has.
+    ev = diag.get("eta_var", [])
+    if len(ev) >= 2 and np.isfinite(ev[0]) and ev[0] > 0:
+        energy_ratio = float(ev[-1] / ev[0])
+    else:
+        energy_ratio = float("nan")
+    notes += f", energy_ratio={energy_ratio:.3f}"
     ok, notes = _apply_value_threshold(
-        ok, notes, eta_conservation, 0.5,
-        label="eta_conservation_lower", op="ge",
-        n_samples=n_eta)
+        ok, notes, energy_ratio, _BWAVE_ENERGY_FLOOR,
+        label="barotropic energy_ratio_floor (wave extinguished)", op="ge",
+        n_samples=len(ev))
     ok, notes = _apply_value_threshold(
-        ok, notes, eta_conservation, 1.5,
-        label="eta_conservation_upper", op="le",
-        n_samples=n_eta)
+        ok, notes, energy_ratio, _BWAVE_ENERGY_CEILING,
+        label="barotropic energy_ratio_ceiling (spurious growth)", op="le",
+        n_samples=len(ev))
     ok, notes = _apply_value_threshold(
         ok, notes, mean_eta_drift, 1e-4,
         label="mean_eta_drift", op="le", units="m",
         n_samples=len(mean_eta_series))
     # min_final_amplitude > 0.1 m: use op="ge" with 0.1; this
     # catches over-damped runs that lose all wave amplitude.
-    ok, notes = _apply_value_threshold(
-        ok, notes, min_final_amplitude, 0.1,
-        label="min_final_amplitude", op="ge", units="m",
-        n_samples=n_eta)
+    # min_final_amplitude: reported only (see the block above).
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4687,7 +5094,8 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # geostrophic_adjustment has no T forcing → T should be
     # conserved.  Apply 1e-8 relative T-drift tolerance.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     ok, notes = _apply_value_threshold(
         ok, notes, max_speed_final, 1.0,
@@ -5111,14 +5519,45 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         ok, notes, T_abs_drift, 5.0,
         label="T_abs_drift", op="le", units="C",
         n_samples=n_T)
-    ok, notes = _apply_value_threshold(
-        ok, notes, eta_growth, 0.8,
-        label="eta_growth_lower", op="ge",
-        n_samples=n_eta)
-    ok, notes = _apply_value_threshold(
-        ok, notes, eta_growth, 10.0,
-        label="eta_growth_upper", op="le",
-        n_samples=n_eta)
+    # --- eta_growth is gated on the AQUAPLANET arms only (2026-08-11) ---
+    #
+    # The classical Phillips problem needs a zonally UNBLOCKED channel: the
+    # imposed zonal jet is only a steady solution of the unforced equations
+    # when nothing blocks it. On an arm with real continents that IC is a
+    # solution to a different operator than the one being integrated, so
+    # what this number measures there is the size of the initial ADJUSTMENT,
+    # not baroclinic growth.
+    #
+    # MEASURED 2026-08-11, and note the second line refutes the obvious
+    # guess (that it is coastal trapping):
+    #   * every arm starts at max|eta| = 0.050 m, so the ICs do match;
+    #   * the growth is INTERIOR, not boundary-trapped -- restricted to
+    #     cells more than 5 from any land it is 19.3 (fesom) and 31.7
+    #     (tripole) against 21.1 and 33.7 over the full wet domain, and the
+    #     coastal share of eta^2 variance (14.5%, 33%) is no larger
+    #     relative to coastal AREA (7%, 18%) than on the aquaplanet arms;
+    #   * it is not growth at all but a SHOCK: the real-geometry arms jump
+    #     0.05 -> 1.53 (fesom) and 0.05 -> 2.07 (tripole) inside the FIRST
+    #     output interval and then plateau or decay, where an instability
+    #     would grow over days. The aquaplanet arms jump to 0.24 and 0.21.
+    #
+    # So the gate is kept where the IC is nearly consistent (the aquaplanet
+    # arms cluster at 2.4-2.8, well inside the band) and reported as a
+    # DIAGNOSTIC where it is not. Retuning the threshold instead would just
+    # hide a false positive behind a bigger number; unregistering the case
+    # would throw away its tracer-conservation coverage, which is real.
+    if tc.grid_type in _AQUAPLANET_OCEAN_GRIDS:
+        ok, notes = _apply_value_threshold(
+            ok, notes, eta_growth, 0.8,
+            label="eta_growth_lower", op="ge",
+            n_samples=n_eta)
+        ok, notes = _apply_value_threshold(
+            ok, notes, eta_growth, 10.0,
+            label="eta_growth_upper", op="le",
+            n_samples=n_eta)
+    else:
+        notes += (" [eta_growth UNGATED on a real-geometry arm: the "
+                  "zonal-jet IC is not a steady state on a blocked basin]")
     ok, notes = _apply_value_threshold(
         ok, notes, max_eta_overall, 5.0,
         label="max_eta_amplitude", op="le", units="m",
@@ -5188,6 +5627,127 @@ def _get_cell_latlon_rad(grid_type, grid):
 # Analytical dispersion: omega^2 = f^2 + g*H*(kx^2 + ky^2)
 # Tests the barotropic pressure-gradient and Coriolis terms.
 # ===========================================================================
+
+# ===========================================================================
+# Runner: Inertia-Gravity Wave, f-PLANE CHANNEL (Bishnu et al. 2024)
+# ===========================================================================
+# Reference: Bishnu et al. (2024), "A Verification Suite of Test Cases for
+# the Barotropic Solver of Ocean Models", JAMES, 10.1029/2022MS003545.
+#
+# WHY THIS EXISTS ALONGSIDE THE GLOBAL CASE. The global
+# `inertia_gravity_wave` case cites the same paper but does not implement
+# it: it imposes a plane wave built with a CONSTANT f0 = 1e-4 on a sphere
+# where the model integrates f = 2*Omega*sin(lat) over +-1.46e-4. That is
+# not an eigenmode anywhere, so it disperses immediately -- the (k,l) mode
+# carries 50% of the variance at t=0 and 1-14% two outputs later -- and no
+# wave-speed gate is constructible on it (MEASURED 2026-08-11: a phase fit
+# returns omega 11-20x too slow with R^2 0.56-0.90, the diagnostic failing
+# its own control). Worse, its L2-vs-analytic gate ran to 2.997 wave
+# periods, where the analytic field is within 0.3% of the IC, so a FROZEN
+# dycore scored the best L2 of any arm.
+#
+# This case fixes all of that by putting the wave where it is an exact
+# eigenmode: a Cartesian f-plane channel, x-periodic with WALLS in y,
+# built by `create_beta_plane_cgrid_geometry(beta=0)` -- uniform dx/dy, no
+# metric terms, and f evaluated as the same constant at every stagger
+# point (MITgcm ini_cori.F convention).
+#
+# THE MODE. A plane wave is NOT an eigenmode of a walled channel: the
+# Coriolis-induced meridional velocity would not vanish at the walls. The
+# correct solution is the POINCARE channel mode, with l quantised so that
+# v vanishes on both walls:
+#
+#   theta = k x - omega t,  k = 2 pi m / Lx,  l = n pi / Ly
+#   v   = V sin(l y) sin(theta)
+#   u   = [Bc cos(l y) + Bs sin(l y)] cos(theta)
+#   eta = [Ac cos(l y) + As sin(l y)] cos(theta)
+#   As  = V f H k / (f^2 + g H l^2)
+#   Ac  = -omega l As / (f k),  Bc = -g l As / f,  Bs = omega As / (H k)
+#   omega^2 = f^2 + g H (k^2 + l^2)
+#
+# The dispersion relation is not imposed -- it FALLS OUT of requiring the
+# two independent expressions for As to agree, which is the check that the
+# mode is consistent. VERIFIED in tests/ocean/unit/test_igw_channel_mode.py
+# by substituting the closed form back into the three linear shallow-water
+# equations. MEASURED relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the
+# central difference's own truncation) and v = 0 at the walls to 1.2e-19
+# m/s against a 1e-3 m/s mode amplitude; the test ASSERTS the looser 1e-6
+# so other hardware cannot turn a correct mode red. That file also carries
+# the controls that make those numbers mean something -- scaling any ONE of
+# eta, u, v by 5% drives the residual above 1e-3; a plane wave, which
+# passes the residual check, is caught by the wall condition; and the
+# domain, depth, f0 and mode numbers are pinned against independent
+# literals so a coherently WRONG channel cannot pass the rest.
+# ===========================================================================
+
+#: FIXED physical domain -- the resolution string sets the CELL COUNT, so
+#: refining it is a genuine convergence test. An earlier revision fixed dx
+#: instead, which made the "fine" arm a BIGGER domain at the same 20 points
+#: per wavelength: the two arms were different problems and their L2 values
+#: were not comparable.
+_IGWC_LX_M = 4000.0e3
+_IGWC_LY_M = 2000.0e3
+_IGWC_H = 1000.0          # flat bottom [m]
+_IGWC_F0 = 1.0e-4         # f-plane Coriolis [1/s]
+_IGWC_M = 2               # zonal mode number (periodic)
+_IGWC_N = 1               # meridional mode number (walls => l = n pi / Ly)
+_IGWC_V_AMP = 1.0e-3      # meridional velocity amplitude [m/s]; the case is
+                          # LINEAR, so the amplitude only sets the scale.
+
+#: Run length in wave periods. DELIBERATELY NON-INTEGER: at an integer
+#: number of periods the exact solution returns to the initial condition
+#: and "close to analytic" degenerates into "close to your own IC", which
+#: is exactly how the global case came to rank a frozen dycore best. At
+#: 1.25 periods a frozen field is in quadrature with the truth.
+_IGWC_PERIODS = 1.25
+
+
+def _igw_channel_params(n_lat: int, n_lon: int):
+    """(Lx, Ly, k, l, omega, period) for the channel mode."""
+    lx = _IGWC_LX_M
+    ly = _IGWC_LY_M
+    k = 2.0 * np.pi * _IGWC_M / lx
+    l = np.pi * _IGWC_N / ly
+    omega = np.sqrt(_IGWC_F0 ** 2 + _G_EARTH * _IGWC_H * (k ** 2 + l ** 2))
+    return lx, ly, k, l, omega, 2.0 * np.pi / omega
+
+
+def igw_channel_mode(x, y, t, n_lat: int, n_lon: int):
+    """Exact Poincare channel mode: returns (eta, u, v) at (x, y, t).
+
+    ``x``/``y`` are metres from the channel's south-west corner. Public
+    (no leading underscore) because the unit test verifies it by
+    substitution into the linear shallow-water equations.
+    """
+    _lx, _ly, k, l, omega, _p = _igw_channel_params(n_lat, n_lon)
+    f, g, h = _IGWC_F0, _G_EARTH, _IGWC_H
+    a_s = _IGWC_V_AMP * f * h * k / (f ** 2 + g * h * l ** 2)
+    a_c = -omega * l * a_s / (f * k)
+    b_c = -g * l * a_s / f
+    b_s = omega * a_s / (h * k)
+    th = k * x - omega * t
+    eta = (a_c * np.cos(l * y) + a_s * np.sin(l * y)) * np.cos(th)
+    u = (b_c * np.cos(l * y) + b_s * np.sin(l * y)) * np.cos(th)
+    v = _IGWC_V_AMP * np.sin(l * y) * np.sin(th)
+    return eta, u, v
+
+
+def _igw_channel_coords(n_lat: int, n_lon: int):
+    """Cell-centre and face coordinates [m] from the SW corner.
+
+    C-grid staggering on this geometry: eta at centres (n_lat, n_lon), u
+    on east faces (n_lat, n_lon+1), v on north faces (n_lat+1, n_lon). The
+    v rows j = 0 and j = n_lat are the WALLS, and the mode puts sin(l*y)
+    exactly zero there by construction.
+    """
+    dx = _IGWC_LX_M / n_lon
+    dy = _IGWC_LY_M / n_lat
+    x_c = (np.arange(n_lon) + 0.5) * dx
+    y_c = (np.arange(n_lat) + 0.5) * dy
+    x_u = np.arange(n_lon + 1) * dx         # east faces, incl. both ends
+    y_v = np.arange(n_lat + 1) * dy         # north faces: y_v[0]=0=wall
+    return x_c, y_c, x_u, y_v
+
 
 def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     """Initialize a sinusoidal inertia-gravity wave perturbation.
@@ -5347,6 +5907,181 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         f"edge IC rather than a silent fall-through to the cube branch.")
 
 
+def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
+                                     days: float) -> tuple[str, float, str]:
+    """Bishnu et al. (2024) inertia-gravity wave, as actually specified.
+
+    Gates on the three things the global case cannot: agreement with the
+    EXACT solution at a non-integer number of periods, the measured wave
+    FREQUENCY, and mode purity. See the block comment above
+    ``igw_channel_mode`` for why the global case cannot.
+    """
+    import time as _time
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    t_wall = _time.time()
+    params = _parse_resolution(tc)
+    n_lat, n_lon = params["n_lat"], params["n_lon"]
+    _lx, _ly, k, l, omega, period = _igw_channel_params(n_lat, n_lon)
+    x_c, y_c, x_u, y_v = _igw_channel_coords(n_lat, n_lon)
+
+    dx_m = _IGWC_LX_M / n_lon
+    dy_m = _IGWC_LY_M / n_lat
+    grid = create_beta_plane_cgrid_geometry(
+        n_lat, n_lon, dx_m=dx_m, dy_m=dy_m,
+        f0=_IGWC_F0, beta=0.0, cartesian_pseudo_lat=True)
+    z_coord = create_ocean_z_star(n_levels=1, H_max=_IGWC_H)
+    # implicit_cn, NOT the default explicit_substep. MEASURED 2026-08-12 on
+    # this very case: the split-explicit barotropic solver propagates the
+    # external gravity wave at ~0.54*sqrt(gH) -- period 1.86x too long, and
+    # it gets WORSE with more substeps (1.862 at 30, 1.951 at 120, 1.971 at
+    # 480), so it is not a CFL or filter artefact. implicit_cn gives 1.000.
+    # Reproduced on both this Cartesian geometry and the production regional
+    # lat-lon grid, at 20 and 40 points per wavelength, with no damping.
+    # A case that verifies wave SPEED cannot run on a solver that gets it
+    # wrong by 2x; the defect is tracked separately.
+    config = LatLonCGridOceanConfig()
+    config = config._replace(
+        barotropic=config.barotropic._replace(
+            barotropic_solver="implicit_cn"))
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=_IGWC_H,
+        land_mask_override=np.ones((n_lat, n_lon)))
+
+    # Exact mode at t=0, each field at ITS OWN stagger point.
+    xc2, yc2 = np.meshgrid(x_c, y_c)
+    xu2, yu2 = np.meshgrid(x_u, y_c)
+    xv2, yv2 = np.meshgrid(x_c, y_v)
+    eta0, _u_c, _v_c = igw_channel_mode(xc2, yc2, 0.0, n_lat, n_lon)
+    _e_u, u0, _v_u = igw_channel_mode(xu2, yu2, 0.0, n_lat, n_lon)
+    _e_v, _u_v, v0 = igw_channel_mode(xv2, yv2, 0.0, n_lat, n_lon)
+    state = state._replace(
+        eta=Field(jnp.asarray(eta0)),
+        u=Field(jnp.asarray(u0[..., None])),
+        v=Field(jnp.asarray(v0[..., None])))
+
+    # dt from the gravity-wave CFL; c = sqrt(gH).
+    c_grav = float(np.sqrt(_G_EARTH * _IGWC_H))
+    # dt PROPORTIONAL TO dx, so the refinement pair measures the SPATIAL
+    # order rather than a mixture. A fixed dt (or a min() against a
+    # constant) leaves the time error unchanged under refinement and flatts
+    # the apparent convergence rate -- measured 0.77 instead of ~2 before
+    # this was fixed. The constant gives ~300 s at dx = 100 km, i.e. CFL
+    # 0.30 on c = sqrt(gH).
+    dt = _IGWC_CFL_S_PER_M * min(dx_m, dy_m)
+    t_final = _IGWC_PERIODS * period
+    n_steps = max(1, int(round(t_final / dt)))
+    dt = t_final / n_steps                    # land exactly on t_final
+    diag_every = max(1, n_steps // 20)
+
+    def _eta_np(s):
+        return np.asarray(s.eta.data, dtype=np.float64)
+
+    # Projection onto the mode's two quadratures. A 2-D FFT is the natural
+    # tool on a doubly-periodic domain; here y is WALLED, so the y
+    # structure is the mode shape Y(y), not a Fourier harmonic. Projecting
+    # on Y(y)cos(kx) and Y(y)sin(kx) gives cos(omega t) and sin(omega t),
+    # whose arctan2 is the phase -- the wave-speed measurement the global
+    # case could not make.
+    y_shape = (igw_channel_mode(np.zeros_like(yc2), yc2, 0.0, n_lat, n_lon)[0]
+               / max(abs(np.cos(0.0)), 1e-30))
+    p_cos = y_shape * np.cos(k * xc2)
+    p_sin = y_shape * np.sin(k * xc2)
+    norm = float(np.sum(y_shape ** 2))
+
+    times, phases, purity = [], [], []
+
+    def scalar_fn(s):
+        e = _eta_np(s)
+        a = float(np.sum(e * p_cos)); b = float(np.sum(e * p_sin))
+        return {"eta_var": float(np.mean(e ** 2)),
+                "proj_c": a, "proj_s": b,
+                "mass": float(np.mean(e))}
+
+    check_fn = _make_check_fn(tc.grid_type)
+    lon_deg = np.degrees(np.asarray(grid.lon_T))
+    lat_deg = np.degrees(np.asarray(grid.lat_T))
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, d: model.step(s, d), state, dt, n_steps, check_fn,
+        scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"IGW channel ({tc.grid_type})", total_days=t_final / 86400.0)
+
+    # --- L2 against the EXACT solution at t_final ---
+    eta_end = _eta_np(state)
+    eta_exact = igw_channel_mode(xc2, yc2, t_final, n_lat, n_lon)[0]
+    denom = float(np.sqrt(np.mean(eta_exact ** 2)))
+    l2_rel = float(np.sqrt(np.mean((eta_end - eta_exact) ** 2)) /
+                   max(denom, 1e-30))
+
+    # --- measured omega from the projection phase ---
+    pc = np.asarray(diag.get("proj_c", []), dtype=np.float64)
+    ps = np.asarray(diag.get("proj_s", []), dtype=np.float64)
+    n_samp = min(pc.size, ps.size)
+    if n_samp >= 3:
+        t_samp = np.arange(n_samp) * diag_every * dt
+        ph = np.unwrap(np.arctan2(ps[:n_samp], pc[:n_samp]))
+        fit = np.polyfit(t_samp, ph, 1)
+        omega_fit = abs(float(fit[0]))
+        resid = ph - np.polyval(fit, t_samp)
+        ss = 1.0 - float(np.sum(resid ** 2) /
+                         max(np.sum((ph - ph.mean()) ** 2), 1e-30))
+        omega_err = abs(omega_fit - omega) / omega
+    else:
+        omega_fit = omega_err = ss = float("nan")
+
+    # --- mode purity: variance explained by the analytic mode shape ---
+    # Least-squares reconstruction from the two quadratures, then the
+    # variance it explains. An earlier revision divided by sum(Y^2) instead
+    # of the patterns' own norms and returned exactly 0.25 for a perfect
+    # mode -- a normalisation bug, not a physical result.
+    nc = float(np.sum(p_cos ** 2)); ns = float(np.sum(p_sin ** 2))
+    a_end = float(np.sum(eta_end * p_cos)); b_end = float(np.sum(eta_end * p_sin))
+    recon = (a_end / max(nc, 1e-30)) * p_cos + (b_end / max(ns, 1e-30)) * p_sin
+    resid = float(np.sum((eta_end - recon) ** 2))
+    purity_frac = 1.0 - resid / max(float(np.sum(eta_end ** 2)), 1e-30)
+
+    ev = diag.get("eta_var", [])
+    energy_ratio = (float(ev[-1] / ev[0]) if len(ev) >= 2 and ev[0] > 0
+                    else float("nan"))
+
+    notes = (f"L2_rel={l2_rel:.4f}, omega_fit={omega_fit:.4e} "
+             f"(exact {omega:.4e}, err={omega_err * 100:.2f}%, R2={ss:.4f}), "
+             f"purity={purity_frac:.4f}, energy_ratio={energy_ratio:.4f}, "
+             f"periods={_IGWC_PERIODS}, dt={dt:.1f}s")
+
+    ok, notes = _apply_value_threshold(
+        ok, notes, l2_rel, _IGWC_L2_MAX,
+        label="IGW channel L2 vs exact", op="le", n_samples=n_steps)
+    ok, notes = _apply_value_threshold(
+        ok, notes, omega_err, _IGWC_OMEGA_ERR_MAX,
+        label="IGW channel omega error", op="le", n_samples=n_samp)
+    ok, notes = _apply_value_threshold(
+        ok, notes, purity_frac, _IGWC_PURITY_MIN,
+        label="IGW channel mode purity", op="ge", n_samples=n_steps)
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": t_final / 86400.0, "dt": dt, "H_max": _IGWC_H,
+        "f0": _IGWC_F0, "omega_exact": omega, "omega_fit": omega_fit,
+        "period_hours": period / 3600.0, "L2_rel": l2_rel,
+        "mode_purity": purity_frac, "energy_ratio": energy_ratio,
+        "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{_time.time() - t_wall:.1f}s"})
+    return ("PASS" if ok else "FAIL", wall, notes)
+
+
 def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
                               ) -> tuple[str, float, str]:
     """Bishnu et al. 2024: inertia-gravity (Poincare) wave propagation.
@@ -5409,44 +6144,61 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 
     l2_err = float(np.sqrt(np.mean((eta_final - eta_exact)**2)) /
                    max(np.sqrt(np.mean(eta_exact**2)), 1e-30))
-    max_eta = float(np.max(np.abs(eta_final)))
-    max_eta_init = float(np.max(np.abs(eta_init)))
-    if max_eta_init > 1e-12 and np.isfinite(max_eta):
-        amplitude_ratio = max_eta / max_eta_init
-    else:
-        amplitude_ratio = float("nan")
+    _MISSING = object()
+    _mask_obj = getattr(state, "land_mask",
+                        getattr(state, "land_mask_grid", _MISSING))
+    wet = (np.asarray(_mask_obj.data, dtype=np.float64).ravel() > 0.5
+           if _mask_obj is not _MISSING else None)
+    amplitude_ratio, ic_corr, max_eta = _igw_gate_metrics(
+        eta_final, eta_init, wet)
     notes = (f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, "
              f"amp_ratio={amplitude_ratio:.3f}, omega={omega:.2e}")
-    # iter-132 (codex iter-131-followup HIGH-1): apply the
-    # documented IGW PASS gates.
-    # iter-138b (iter-137 production finding FAIL-2): the doc
-    # threshold ``l2_error < 0.1`` is for FULL mode (2 days,
-    # higher-resolution).  At quick mode (0.2 days, 36x72)
-    # the wave hasn't fully propagated AND coarse grids have
-    # significant numerical dispersion → L2 ~ 1.0-2.0 is
-    # expected.  Use a days-aware threshold: 0.1 for full
-    # mode (>= 1 day), 2.0 for quick mode (< 1 day).
-    # The amplitude_ratio gate stays unchanged — it remains
-    # a meaningful sanity check for both modes.
-    l2_threshold = 0.1 if days >= 1.0 else 2.0
-    # iter-140 (iter-139 follow-up MPAS finding): the doc
-    # amp_ratio range [0.8, 1.2] is for FULL mode where the
-    # wave reaches steady state.  Quick-mode coarse-grid runs
-    # (ico3, ~5° resolution, 0.2 days) show legitimate
-    # numerical damping (amp_ratio ~ 0.5-0.85 on cube/MPAS).
-    # Use the same pattern as L2: doc threshold for full
-    # mode, relaxed [0.5, 1.5] for quick.
-    amp_lower = 0.8 if days >= 1.0 else 0.5
-    amp_upper = 1.2 if days >= 1.0 else 1.5
+    notes += f", L2_UNGATED, corr_with_IC={ic_corr:.3f}"
+
+    # NO WAVE-SPEED GATE, and it is not an oversight -- it is not
+    # constructible on this case as posed (measured 2026-08-11).
+    #
+    # The obvious construction is to project eta(t) onto the IC pattern and
+    # its quadrature and fit the phase in time. Done: it returns an angular
+    # frequency 11-20x SLOWER than the theoretical 1.09e-4 on all four arms
+    # (5.0e-6 latlon, 5.5e-6 mpas, 9.4e-6 fesom, 8.2e-6 tripole) with a
+    # phase-fit R^2 of only 0.56-0.90. That is the DIAGNOSTIC failing its
+    # own control, not four independent dycores sharing a defect: the
+    # (k=2, l=2) mode explains 50% of the variance at t=0 and collapses to
+    # 1-14% within two output intervals, so by mid-run there is no coherent
+    # mode left whose phase means anything, and the number is a fit to
+    # noise. It is recorded here, and NOT shipped as a gate.
+    #
+    # A speed gate needs the CASE rebuilt so a coherent mode survives: a
+    # localized Gaussian packet narrow enough that f is nearly constant
+    # across it, an equatorial Kelvin or Yanai wave (analytic on the sphere
+    # with the real f), or a Hough mode. Until then this case gates on
+    # stability and on having propagated at all, and CANNOT detect a wrong
+    # phase speed -- stated so the gap stays visible instead of being
+    # mistaken for coverage.
+    # The module constants are used INLINE, deliberately. A local alias
+    # (``amp_upper = _IGW_AMP_UPPER``) is what caused the 2026-08-11
+    # NameError: a refactor deleted the assignment and left the uses. Worse,
+    # had the local been named the same as the global it would have silently
+    # resolved to the global instead of raising -- a wrong number rather
+    # than a crash, which no linter can catch (GLM-5.2). Inlining removes
+    # the failure mode instead of detecting it.
     ok, notes = _apply_value_threshold(
-        ok, notes, l2_err, l2_threshold,
-        label="IGW L2 vs analytical", op="lt")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_lower,
-        label="IGW amplitude_ratio_lower", op="ge")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_upper,
+        ok, notes, amplitude_ratio, _IGW_AMP_UPPER,
         label="IGW amplitude_ratio_upper", op="le")
+    # FLOOR too: without one, an arm that extinguishes the wave passes both
+    # the (upper-only) stability gate and the decorrelation gate, because
+    # numerical noise decorrelates just as well as physics does (codex
+    # 2026-08-11). Set an order of magnitude below the smallest MEASURED
+    # survivor (latlon 0.379), so it catches extinction without punishing
+    # the legitimate coarse-mesh damping the upper-only gate was meant to
+    # allow.
+    ok, notes = _apply_value_threshold(
+        ok, notes, amplitude_ratio, _IGW_AMP_FLOOR,
+        label="IGW amplitude_ratio_floor (wave extinguished)", op="ge")
+    ok, notes = _apply_value_threshold(
+        ok, notes, ic_corr, _IGW_IC_CORR_UPPER,
+        label="IGW corr_with_IC (frozen-dycore check)", op="le")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     _write_results_txt(output_dir, {
@@ -5828,6 +6580,86 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 # diagnostics so we don't repeat ~100 lines of boilerplate per case.
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Known failures (mirrors run_atmosphere_test_matrix.KNOWN_FAILURES / #1029)
+# ---------------------------------------------------------------------------
+# A waived FAIL becomes XFAIL; a full-length PASS becomes XPASS and is LOUD,
+# because an entry that has silently started passing is an entry that must be
+# removed.  ERROR, SKIP, short runs and any differently-caused FAIL pass
+# through unchanged, so the waiver cannot mask an unrelated regression.
+KNOWN_FAILURES: dict[tuple[str, str, str], dict] = {
+    # EMPTY, and it should stay that way.
+    #
+    # The one entry this registry ever held -- eady_uniform/mpas_channel/70km,
+    # #1609 -- is removed because the case PASSES its full 200 days again. It
+    # was destabilised by a free-surface Laplacian inherited from the
+    # collocated/cubed-sphere solvers (now off for this case) and by the
+    # absence of the depth-mean velocity viscosity that targets the rotational
+    # grid mode (now 1e3 m^2/s).
+    #
+    # A waiver that has started passing is a waiver that hides the next
+    # regression, which is why XPASS is loud and exits non-zero -- and it is
+    # exactly how this one announced itself.
+}
+
+
+def _blowup_day_from_results(out_dir) -> float | None:
+    """Parse the blow-up day this case recorded, or None if it did not blow up.
+
+    ``_write_results_txt`` prepends ``BLOWUP at step N (day D)`` to the notes
+    whenever a FAIL carries blow-up info, so the day is on disk even though the
+    runner's in-memory notes only carry the last clean diagnostic.  Returning
+    None (missing file, unreadable, no marker) FAILS CLOSED: no waiver.
+    """
+    if out_dir is None:
+        return None
+    try:
+        txt = (Path(out_dir) / "results.txt").read_text()
+    except (OSError, ValueError, TypeError):
+        return None
+    m = re.search(r"BLOWUP at step \d+ \(day ([0-9.]+)\)", txt)
+    if m is None:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None   # malformed marker (e.g. "1.2.3"): fail closed, no waiver
+
+
+def _apply_known_failure(tc: "TestCase", status: str, days: float,
+                         notes: str = "", out_dir=None) -> str:
+    """Remap a waived FAIL to XFAIL and a full-length PASS to XPASS.
+
+    The waiver requires ALL of:
+
+    * an entry keyed on this exact ``(case, grid_type, resolution)``;
+    * a run at least ``min_days`` long -- shorter lanes cannot reach the known
+      blow-up, so a failure there is a DIFFERENT bug and stays red;
+    * a recorded blow-up whose DAY falls inside ``expect_day_range``.
+
+    The day band is a POSITIVE signature of the known mechanism.  Matching on
+    the notes text was rejected in review: this case emits two different
+    failure notes depending on which detector fires first ("Non-finite values
+    in u" against a max_speed threshold string), and no substring covers both
+    without also covering every unrelated regression.
+
+    Anything else -- ERROR, SKIP, a short run, a blow-up outside the band, or a
+    FAIL with no recorded blow-up at all -- is returned unchanged.
+    """
+    entry = KNOWN_FAILURES.get((tc.case, tc.grid_type, tc.resolution))
+    if entry is None or days < entry["min_days"]:
+        return status
+    if status == "PASS":
+        return "XPASS"
+    if status != "FAIL":
+        return status   # ERROR / SKIP pass through
+    lo, hi = entry["expect_day_range"]
+    day = _blowup_day_from_results(out_dir)
+    if day is None or not (lo <= day <= hi):
+        return "FAIL"   # fail closed: a differently-timed failure is NOT waived
+    return "XFAIL"
+
+
 def _run_experiment_via_registry(
     tc, output_dir, days, *,
     exp_config,
@@ -5875,7 +6707,7 @@ def _run_experiment_via_registry(
     elif hasattr(cfg, "bottom_drag"):  # #501: nested DynBottomDragConfig
         setup_kw["bottom_drag_r"] = cfg.bottom_drag.bottom_drag_r
     for attr in ("tracer_advection", "barotropic_diffusion_alpha",
-                 "barotropic_div_damp"):
+                 "barotropic_div_damp", "barotropic_u_viscosity"):
         if hasattr(cfg, attr):
             setup_kw[attr] = getattr(cfg, attr)
     if eos_linear_factory is not None:
@@ -7001,6 +7833,7 @@ RUNNERS: dict[str, Callable] = {
     "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
+    "inertia_gravity_wave_channel": run_inertia_gravity_wave_channel,
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
@@ -8916,6 +9749,8 @@ def main():
 
         try:
             status, wall, notes = runner(tc, out_dir, days)
+            status = _apply_known_failure(tc, status, days, notes,
+                                          out_dir)
             record(tc, status, wall, notes)
         except NotImplementedError as e:
             record(tc, "SKIP", 0, str(e)[:120])
@@ -8962,10 +9797,9 @@ def main():
           f"{'Resolution':<10}  {'Time':>8}  Notes")
     print("-" * 90)
 
-    n_pass = n_fail = n_error = n_skip = 0
+    n_pass = n_fail = n_error = n_skip = n_xfail = n_xpass = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
-                "SKIP": "--"}[r["status"]]
+        icon = STATUS_ICONS[r["status"]]
         print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
               f"{r['test']:<22}  {r['resolution']:<10}  "
               f"{r['wall_time']:7.1f}s  {r['notes']}")
@@ -8975,12 +9809,17 @@ def main():
             n_fail += 1
         elif r["status"] == "SKIP":
             n_skip += 1
+        elif r["status"] == "XFAIL":
+            n_xfail += 1
+        elif r["status"] == "XPASS":
+            n_xpass += 1
         else:
             n_error += 1
 
     print("-" * 90)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
           f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
           f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
@@ -9023,6 +9862,7 @@ def main():
         json.dump({
             "results": ALL_RESULTS, "total_wall_time": total_wall,
             "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
+            "n_xfail": n_xfail, "n_xpass": n_xpass,
             "n_error": n_error, "quick_mode": args.quick,
             "levels": DEFAULT_NLEV, "dt": DEFAULT_DT,
         }, f, indent=2)
@@ -9031,6 +9871,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
                 f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
                 f"ERROR: {n_error}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
         f.write(f"Levels: {DEFAULT_NLEV}, dt: {DEFAULT_DT}s\n")
@@ -9086,7 +9927,14 @@ def main():
     # Generate rest-state cross-variant comparison
     _create_rest_state_cross_variant_comparison(output_base)
 
-    if n_fail > 0 or n_error > 0:
+    # XPASS gates too: a known-failure entry that has started passing is stale,
+    # and a stale waiver silently hides the next real regression on that case.
+    if n_fail > 0 or n_error > 0 or n_xpass > 0:
+        if n_xpass > 0:
+            print(f"  XPASS: {n_xpass} known-failure entr"
+                  f"{'y has' if n_xpass == 1 else 'ies have'} started passing "
+                  f"-- remove {'it' if n_xpass == 1 else 'them'} from "
+                  f"KNOWN_FAILURES.")
         sys.exit(1)
 
 

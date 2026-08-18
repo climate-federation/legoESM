@@ -236,7 +236,9 @@ def main(argv=None):
         wbe_spec.loader.exec_module(wbe)
 
         skeleton = wbe._build_skeleton(args.variant, cfg, spec_cfg, grid)
-        trained = eqx.tree_deserialise_leaves(args.checkpoint, skeleton)
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        trained = load_checkpoint_or_fail(
+            args.checkpoint, skeleton, what="the pressure-spinup diagnostic")
         if args.variant == "column_nn":
             from legoesm.training.neural_gcm_spectral import (
                 make_column_mlp_spectral_physics,
@@ -250,7 +252,9 @@ def main(argv=None):
             rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
             built = make_aimip_classical_spectral_physics(
                 trained, grid, spec_cfg.dt,
-                radiation=str(cfg.get("aimip_radiation", "gray")),
+                # rrtmgp by default like every other AIMIP path; a config
+                # may still name gray for a cheap diagnostic (Claude review).
+                radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 rad_update_interval_steps=rad_update_interval,
                 convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
                 turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
@@ -258,6 +262,9 @@ def main(argv=None):
                     cfg.get("aimip_surface_bulk_scheme", "constant")),
                 gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
                 microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
+                # A pressure-spinup diagnostic, not a model claim: it runs
+                # whatever the config names, including an unfilled family.
+                allow_unfilled_families=True,
                 cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
                 land_mask=None,
                 split_rad=rad_update_interval > 1,
@@ -341,6 +348,15 @@ def main(argv=None):
             m = ps[:, :, None] * dsig[None, None, :]
             return float((w[:, :, None] * m * T).sum() / (w[:, :, None] * m).sum())
 
+        def _sawtooth(state):
+            """Area-mean vertical-curvature norm of T [K^2] — the 2-dsigma
+            computational-mode detector for the centered vertical advection
+            (GLM review): a growing value flags point-to-point vertical
+            noise that mass-weighted means and single-level RMS both miss."""
+            T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data))
+            curv = T[..., 2:] - 2.0 * T[..., 1:-1] + T[..., :-2]
+            return float((w[:, :, None] * curv ** 2).sum() / curv.shape[-1])
+
         rows = []
         for k in range(len(cases_t) - lead_strides):
             s0 = cases_t[k].init_state
@@ -355,6 +371,9 @@ def main(argv=None):
                 "model_drift_K": tf - t0,
                 "era5_change_K": tt - t0,
                 "error_vs_era5_K": tf - tt,
+                "T_sawtooth_init_K2": _sawtooth(s0),
+                "T_sawtooth_forecast_K2": _sawtooth(fc),
+                "T_sawtooth_era5_at_lead_K2": _sawtooth(truth),
             })
         out = {
             "meta": {

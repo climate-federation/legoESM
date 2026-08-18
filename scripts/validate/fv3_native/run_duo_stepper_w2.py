@@ -94,7 +94,15 @@ def geographic_va(ctx, states):
     return v_geo6
 
 
-def build_nearest_map(ctx):
+def build_nearest_map(ctx, lon_deg=None):
+    """Nearest-cube-cell index map for a 181x360 lat-lon canvas.
+
+    ``lon_deg`` (default ``arange(360)`` — the historical W2/modon
+    canvas) selects the canvas longitudes: the Zenodo ``atmos_daily.nc``
+    files store T-CELL CENTRES at 0.5..359.5, so a field-to-field score
+    against them must pass ``0.5 + arange(360)`` (run_duo_stepper_case6
+    does).  Latitudes are always ``linspace(-90, 90, 181)``.
+    """
     n, ng = ctx["n"], ctx["ng"]
     sl = slice(ng, ng + n)
     cx = []
@@ -105,7 +113,9 @@ def build_nearest_map(ctx):
                             np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1))
     centers = np.concatenate(cx)                 # (6n^2, 3)
     lats = np.deg2rad(np.linspace(-90, 90, 181))
-    lons = np.deg2rad(np.arange(360, dtype=float))
+    if lon_deg is None:
+        lon_deg = np.arange(360, dtype=float)
+    lons = np.deg2rad(np.asarray(lon_deg, dtype=float))
     llon, llat = np.meshgrid(lons, lats)
     pts = np.stack([np.cos(llat) * np.cos(llon),
                     np.cos(llat) * np.sin(llon), np.sin(llat)], axis=-1)
@@ -152,11 +162,17 @@ def main():
                          "faithful re-extrapolation; a2d = keep the "
                          "projected geographic-corner values)")
     ap.add_argument("--oracle-conventions", action="store_true",
+                    default=True,
                     help="BOUNDED-conventions gridstruct (the lane the "
                          "Zenodo duo runs execute: extended-lattice "
                          "metrics, bounded_domain=True guards, corner "
                          "flags off — d_sw4 corner-KE fix and plain "
-                         "corner specials disabled)")
+                         "corner specials disabled).  DEFAULT since the "
+                         "km=1 corpus migration (2026-08-11): c_sw "
+                         "refuses duogrid on unbounded metrics "
+                         "(fv_arrays.F90:1512), so the old plain default "
+                         "could no longer run; flag kept as a no-op for "
+                         "CLI compatibility")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (

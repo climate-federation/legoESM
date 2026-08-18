@@ -52,11 +52,13 @@ from legoesm.core.fv3_native_state_3d import (
 # Loose physical sanity bounds for a dry hydrostatic column. Not tuning --
 # these are orders of magnitude above anything valid, so tripping one means
 # the integration has diverged, not that a coefficient needs adjusting.
-_SANE_MAX = {"delp": 1.0e6, "pt": 1.0e4, "u": 1.0e4, "v": 1.0e4}
+_SANE_MAX = {"delp": 1.0e6, "pt": 1.0e4, "u": 1.0e4, "v": 1.0e4,
+             "w": 1.0e3}
 
 
 def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
-                            scalars: bool, winds: bool) -> None:
+                            scalars: bool, winds: bool,
+                            w_field: bool = False) -> None:
     """Duo halo exchanges, applied per level.
 
     `dyn_core.F90:470/471` exchanges delp and pt (it == 1 only);
@@ -127,6 +129,13 @@ def exchange_state_halos_3d(ctx: dict, state: list, km: int, *,
             for t in range(6):
                 state[t]["u"][:, :, k] = u6[t]
                 state[t]["v"][:, :, k] = v6[t]
+        if w_field:
+            # NH only: dyn_core.F90:479-480 -- ext_scalar(w, ..., 0,0)
+            # every substep, AFTER the D winds (:466-482 order).
+            f6 = [state[t]["w"][:, :, k] for t in range(6)]
+            _pad_scalars_6(f6, ctx, n, ng, exchange_agrid_scalar_halos)
+            for t in range(6):
+                state[t]["w"][:, :, k] = f6[t]
 
 
 def _pad_scalars_6(f6, ctx, n, ng, fallback) -> None:
@@ -185,8 +194,29 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                         exchange: bool = True,
                         remap_step: bool = False,
                         remap_follows: bool = False,
-                        press_out: list | None = None) -> list:
+                        hydrostatic: bool = True,
+                        nh: dict | None = None,
+                        p_fac: float = 0.05, a_imp: float = 1.0,
+                        dp0: np.ndarray | None = None,
+                        use_logp: bool = False,
+                        press_out: list | None = None,
+                        stage_hook=None,
+                        flux_cap: list | None = None) -> list:
     """One `it` of `do it=1,n_split`. Returns the updated six-face state.
+
+    ``stage_hook``, when given, is called as ``stage_hook(name, payload)``
+    at the oracle's stage boundaries (payload = list of six per-face
+    dicts of arrays, live views -- the hook must copy).  Stage names
+    match the ORACLE STAGE-STATE instrument
+    (``gen_dyncore_stage_copy.py``).  Pure observation; ``None`` (the
+    default) is byte-identical to the pre-hook behaviour.
+
+    ``flux_cap`` is the six-face tracer flux-capacitor bundle
+    (``fv3_native_tracer2d.alloc_flux_capacitors``); ``d_sw1``
+    accumulates into it every sub-step (sw_core.F90:903-920).  The
+    CALLER zeroes it once per acoustic loop -- dyn_core.F90:313-316
+    "Empty the flux capacitors" runs at dyn_core ENTRY, not per
+    sub-step.
 
     `state` is mutated in place for delp/pt/u/v (matching the Fortran's
     intent(inout) dummies) and also returned for convenience.
@@ -196,23 +226,95 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
     `press_out`, when given, is filled in place with the six per-face
     geopk bundles (`pe`, `peln`, `pk`, `pkz`, `gz`, plus `pk_remap` on a
     remap step) that `Lagrangian_to_Eulerian` consumes.
+
+    ``hydrostatic=False`` runs the NH cadence: the first-substep gz
+    seed/rebuild from ``delz`` (:384-416), the per-substep ``w``
+    exchange (:479-480), the gz<->zh cadence around the C stage
+    (:535-581), ``update_dz_c``/``Riem_Solver_c``/NH ``p_grad_c``, the
+    d_sw w arms, and the NH D tail through ``nh_p_grad``.  ``nh`` is
+    the persistent carry built by :func:`build_nh_carry`; ``dp0`` is
+    ``dp_ref`` (both REQUIRED then).
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     dt2 = 0.5 * dt
+    if not hydrostatic and (nh is None or dp0 is None):
+        raise ValueError(
+            "acoustic_substep_3d: hydrostatic=False needs the persistent "
+            "nh carry (build_nh_carry) and dp0 (dp_ref)")
+
+    bd = ctx["bd"]
+    i0, j0 = bd.is_ - bd.isd, bd.js - bd.jsd
+    n = ctx["n"]
+
+    if not hydrostatic and first_substep:
+        # :384-416 -- gz(:,:,km+1) = zs over the PADDED box (duogrid
+        # forces bounded_domain), then gz(k) = gz(k+1) - delz over the
+        # COMPUTE window only.
+        for t in range(6):
+            gz = nh["gz6"][t]
+            gz[:, :, km] = nh["zs6"][t]
+            for k in range(km - 1, -1, -1):
+                gz[i0:i0 + n, j0:j0 + n, k] = (
+                    gz[i0:i0 + n, j0:j0 + n, k + 1]
+                    - state[t]["delz"][:, :, k])
 
     if exchange:
         exchange_state_halos_3d(ctx, state, km,
-                                scalars=first_substep, winds=True)
+                                scalars=first_substep, winds=True,
+                                w_field=not hydrostatic)
+    if stage_hook is not None:
+        # dyn_core.F90:437-438 (S01, it==1) + :471 (S02): the entry
+        # exchanges. One hook point covers both oracle dumps -- the wind
+        # exchange does not touch delp/pt.
+        stage_hook("S02_entryex", [{k: state[t][k]
+                                    for k in ("u", "v", "delp", "pt")}
+                                   for t in range(6)])
 
     csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2,
+                       hydrostatic=hydrostatic,
                        remap_follows=remap_follows)
-    cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2, ptop=ptop, akap=akap,
-                            cp_air=cp_air, a2b_ord=a2b_ord,
-                            remap_follows=remap_follows)
+    if stage_hook is not None:
+        stage_hook("S03_csw", csw)
+
+    if hydrostatic:
+        cgrid_pressure_phase_3d(ctx, csw, km, dt2=dt2, ptop=ptop,
+                                akap=akap, cp_air=cp_air, a2b_ord=a2b_ord,
+                                remap_follows=remap_follows,
+                                stage_hook=stage_hook)
+        csw_press = None
+    else:
+        from legoesm.core.fv3_native_cgrid_phase_3d import (
+            cgrid_nh_pressure_phase_3d,
+        )
+        from legoesm.core.fv3_native_dsw_tail_3d import _ext_scalar_planes_6
+        if first_substep:
+            # :535-557 -- duo-exchange gz, then save zh = gz (padded).
+            if exchange:
+                for k in range(km + 1):
+                    gz_k = [nh["gz6"][t][:, :, k] for t in range(6)]
+                    _ext_scalar_planes_6(ctx, gz_k)
+                    for t in range(6):
+                        nh["gz6"][t][:, :, k] = gz_k[t]
+            for t in range(6):
+                nh["zh6"][t][:] = nh["gz6"][t]
+        else:
+            # :559-581 -- restore gz = zh (padded).
+            for t in range(6):
+                nh["gz6"][t][:] = nh["zh6"][t]
+        csw_press = cgrid_nh_pressure_phase_3d(
+            ctx, csw, nh["gz6"], nh["ws3_6"], km, dt2=dt2, ptop=ptop,
+            akap=akap, cp_air=cp_air, p_fac=p_fac, a_imp=a_imp, dp0=dp0,
+            hs6=nh["hs6"], zs6=nh["zs6"], remap_follows=remap_follows)
+
     dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg,
-                                 remap_follows=remap_follows)
+                                 hydrostatic=hydrostatic,
+                                 remap_follows=remap_follows,
+                                 stage_hook=stage_hook,
+                                 flux_cap=flux_cap)
     tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
-                             remap_follows=remap_follows)
+                             hydrostatic=hydrostatic,
+                             remap_follows=remap_follows,
+                             stage_hook=stage_hook)
 
     # POST-d_sw scalar exchange, BEFORE the D-grid geopk.
     # dyn_core.F90:1336-1337 -- ext_scalar(delp,...,0,0) and
@@ -231,30 +333,95 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
                 f6 = [dsw[t][_nm][:, :, k] for t in range(6)]
                 _pad_scalars_6(f6, ctx, n_, ng_,
                                exchange_agrid_scalar_halos)
+    if stage_hook is not None:
+        # dyn_core.F90:1336-1337 (S15): post-d_sw delp/pt exchange.
+        stage_hook("S15_extdp2", [{k: dsw[t][k] for k in ("delp", "pt")}
+                                  for t in range(6)])
 
-    press = dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt, ptop=ptop,
-                                    akap=akap, cp_air=cp_air,
-                                    a2b_ord=a2b_ord, remap_step=remap_step,
-                                    remap_follows=remap_follows)
+    if hydrostatic:
+        press = dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt,
+                                        ptop=ptop, akap=akap,
+                                        cp_air=cp_air, a2b_ord=a2b_ord,
+                                        remap_step=remap_step,
+                                        remap_follows=remap_follows,
+                                        stage_hook=stage_hook)
+    else:
+        from legoesm.core.fv3_native_dsw_tail_3d import (
+            dgrid_nh_pressure_phase_3d,
+        )
+        press = dgrid_nh_pressure_phase_3d(
+            ctx, csw_press, dsw, tail,
+            nh, km, dt=dt, ptop=ptop, akap=akap, cp_air=cp_air,
+            p_fac=p_fac, a_imp=a_imp, dp0=dp0,
+            delz6=[state[t]["delz"] for t in range(6)],
+            remap_step=remap_step, use_logp=use_logp, cfg=cfg,
+            remap_follows=remap_follows)
     if press_out is not None:
         press_out[:] = press
 
     # Write the prognostic fields back. delp/pt come from d_sw2 (unit 4);
-    # u/v from d_sw6 as updated in place by one_grad_p (unit 5).
+    # u/v from d_sw6 as updated in place by nh_p_grad/one_grad_p; on the
+    # NH lane w carries Riem_Solver3's update (delz was mutated in place).
     for t in range(6):
         state[t]["delp"][:] = dsw[t]["delp"]
         state[t]["pt"][:] = dsw[t]["pt"]
         state[t]["u"][:] = tail[t]["u"]
         state[t]["v"][:] = tail[t]["v"]
+        if not hydrostatic:
+            state[t]["w"][:] = tail[t]["w"]
     return state
+
+
+def build_nh_carry(ctx: dict, km: int, hs6: list) -> dict:
+    """The persistent NH arrays one acoustic loop carries across substeps.
+
+    ``hs6`` is surface GEOPOTENTIAL (phis) per face; ``zs = phis/grav``
+    (``dyn_core.F90:262-278``).  ``gz6``/``zh6`` are padded (m_a, m_a,
+    km+1); ``ws3_6`` padded 2-D (the C-stage surface velocity);
+    ``ws6`` compute-window 2-D (the D-stage one); ``pk3_6`` padded
+    interfaces; ``pe6``/``pk6``/``peln6`` in their oracle layouts
+    (``field_shape``).
+    """
+    from legoesm.core.fv3_native_state_3d import field_shape
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
+
+    n, ng = ctx["n"], ctx["ng"]
+    m_a = n + 2 * ng
+    z = np.zeros
+    hs6 = [np.asarray(h, dtype=np.float64) for h in hs6]
+    return {
+        "hs6": hs6,
+        "zs6": [h / FV3_GRAV for h in hs6],
+        "gz6": [z((m_a, m_a, km + 1)) for _ in range(6)],
+        "zh6": [z((m_a, m_a, km + 1)) for _ in range(6)],
+        "ws3_6": [z((m_a, m_a)) for _ in range(6)],
+        "ws6": [z((n, n)) for _ in range(6)],
+        "pk3_6": [z((m_a, m_a, km + 1)) for _ in range(6)],
+        "pe6": [z(field_shape("pe", n, ng, km)) for _ in range(6)],
+        # dyn_core's pk is COMPUTE-window (is:ie, js:je, npz+1) -- the
+        # padded field_shape("pk") is the hydro geopk's own layout, a
+        # different array.  Riem_Solver3 writes pk[:, jc, k] with ni rows.
+        "pk6": [z((n, n, km + 1)) for _ in range(6)],
+        "peln6": [z(field_shape("peln", n, ng, km)) for _ in range(6)],
+    }
 
 
 def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      n_split: int, ptop: float, akap: float, cp_air: float,
                      cfg: dict | None = None, validate: bool = True,
                      remap_follows: bool = False,
-                     press_out: list | None = None) -> list:
+                     hydrostatic: bool = True,
+                     nh: dict | None = None,
+                     p_fac: float = 0.05, a_imp: float = 1.0,
+                     dp0: np.ndarray | None = None,
+                     use_logp: bool = False,
+                     press_out: list | None = None,
+                     flux_cap: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
+
+    ``flux_cap``: six-face tracer flux capacitors, pre-zeroed by the
+    caller (one zeroing per dyn_core call, dyn_core.F90:313-316);
+    every sub-step's ``d_sw1`` accumulates into it.
 
     `dt = bdt/n_split` (`dyn_core.F90:249`). The shipped duo decks run
     `k_split = 1`, so one call of this is one `dt_atmos`.
@@ -262,10 +429,20 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
     `press_out`, when given, receives the pressure bundle of the FINAL
     sub-step -- the one `dyn_core.F90:344-348` marks `remap_step` and the
     one `Lagrangian_to_Eulerian` reads.
+
+    ``hydrostatic=False``: pass ``dp0`` (dp_ref) and either a carry from
+    :func:`build_nh_carry` or None to have one built from ``ctx['hs6']``.
     """
     require_no_remap_needed(km, remap_follows=remap_follows)
     if n_split < 1:
         raise ValueError(f"n_split must be >= 1, got {n_split}")
+    if not hydrostatic and nh is None:
+        hs6 = ctx.get("hs6")
+        if hs6 is None:
+            raise ValueError(
+                "acoustic_loop_3d: hydrostatic=False needs ctx['hs6'] "
+                "(phis) to build the NH carry")
+        nh = build_nh_carry(ctx, km, hs6)
     dt = dt_atmos / float(n_split)
     n, ng = ctx["n"], ctx["ng"]
     for it in range(1, n_split + 1):
@@ -274,7 +451,11 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             ptop=ptop, akap=akap, cp_air=cp_air, cfg=cfg,
                             remap_step=remap_step,
                             remap_follows=remap_follows,
-                            press_out=(press_out if remap_step else None))
+                            hydrostatic=hydrostatic, nh=nh,
+                            p_fac=p_fac, a_imp=a_imp, dp0=dp0,
+                            use_logp=use_logp,
+                            press_out=(press_out if remap_step else None),
+                            flux_cap=flux_cap)
         if validate:
             # Fail at the sub-step that broke, not many steps later with a
             # field of NaN and no idea which stage produced it.
@@ -288,8 +469,10 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
             bd = ctx["bd"]
             i0, j0 = bd.is_ - bd.isd, bd.js - bd.jsd
             ni, nj = bd.ie - bd.is_ + 1, bd.je - bd.js + 1
+            fields = (("delp", "pt", "u", "v") if hydrostatic
+                      else ("delp", "pt", "u", "v", "w"))
             for t in range(6):
-                for name in ("delp", "pt", "u", "v"):
+                for name in fields:
                     # Compute window only: the corner-diagonal halo regions
                     # carry `sentinel` by construction, so scoring the full
                     # padded array would flag every healthy step. Scoring

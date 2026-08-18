@@ -170,10 +170,20 @@ def advance_TgC_ema(
 
 
 def _get(lp, name: str, fallback):
-    """Read from per-column params if available; else return fallback."""
+    """Read from per-column params if available; else return fallback.
+
+    ``None``-valued fields count as absent: LandSurfaceParams declares every
+    optional field with a ``None`` default, so ``getattr`` finds the attribute
+    and hands back the ``None`` — which then detonates arithmetic ("float -
+    NoneType") the first time a setup runs that never populated the field. The
+    LAI read below had grown its own local guard for exactly this; the AMIP
+    two-leaf run on the Voronoi mesh then hit the same trap on ``fC4``. One
+    guard here covers every field the same way.
+    """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    got = getattr(lp, name, None)
+    return fallback if got is None else got
 
 
 def compute_two_leaf_canopy_fluxes(

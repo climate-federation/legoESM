@@ -63,8 +63,18 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                oracle_conventions: bool = False,
                                omega: float | None = None,
                                k2e_nord: int = 2,
-                               topo_fn=None) -> dict:
+                               topo_fn=None,
+                               rotation_alpha: float = 0.0) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``rotation_alpha`` is the Zenodo ``test_case_nml`` ``alpha``, passed
+    RAW to the gridstruct builders exactly as the pinned Fortran uses it
+    (``test_cases.F90:783-790`` feeds the namelist value straight into
+    ``sin``/``cos`` — the deck's ``alpha = 45`` is 45 RADIANS; the
+    historical ``alpha*pi`` conversion in ``fv_control.F90:1105`` is
+    commented out).  It rotates the Coriolis fields ``f0``/``fC`` only;
+    the rotated IC winds/height take the same value through their own
+    builders (``w2_six_face_state(alpha=...)``).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
     Zenodo duo runs actually execute (proven by the C48 fms.out
@@ -99,6 +109,19 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
     if bad:
         raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
+    if (rotation_alpha != 0.0 and use_ext_metrics
+            and "metrics" not in ext_exclude):
+        # extend_gridstruct rebuilds ext-halo f0/fC as the UNROTATED
+        # 2*Om*sin(lat) (fv3_native_gridstruct extend_gridstruct
+        # Coriolis block) — mixing a rotated interior with unrotated
+        # halos is a silent Coriolis seam defect, so this diagnostic
+        # lane refuses rotated decks until that builder learns
+        # rotation_alpha.
+        raise ValueError(
+            "use_ext_metrics=True is not supported with "
+            "rotation_alpha != 0 unless 'metrics' is in ext_exclude "
+            "(extend_gridstruct halo f0/fC are unrotated; the "
+            "exclusion keeps that builder unreached)")
 
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
@@ -110,13 +133,15 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     if omega is None:
         omega = FV3_OMEGA
     if oracle_conventions:
-        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t,
-                                                   omega=omega)
+        gs6 = [build_fv3_native_gridstruct_bounded(
+                   n, ng, tile=t, omega=omega,
+                   rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
                                            radius=FV3_RADIUS_M,
-                                           omega=omega)
+                                           omega=omega,
+                                           rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
@@ -271,30 +296,36 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # so on the duo lane the halo carries the k2e-remapped value, not the
     # raw analytic one. d_sw5 reads f0 full-domain as `vort = wk + f0`
     # (sw_core.F90:1837-1862), so those halo slots are consumed, not
-    # decorative. The two differ by the remap's own truncation -- the port
-    # was using the EXACT value where the oracle uses an approximate one,
-    # which is still a divergence.
+    # decorative.
     #
-    # fill_corners(..., YDir) runs unconditionally under `cubed_sphere`, so
-    # it is ported here too rather than left to ext_scalar's Lagrange
-    # corner-region fill, which is a different operation.
+    # THE :800 fill_corners(f0, npx, npy, YDir) IS A NO-OP IN THE ORACLE.
+    # fill_corners_2d_r8 (fv_mp_mod.F90:1032-1105) guards its ENTIRE body
+    # with `if (present(BGRID)) ... elseif (present(AGRID))`, and the f0
+    # call passes NEITHER optional -- the routine falls through and writes
+    # nothing, so the oracle's f0 corner-diagonal regions keep
+    # ext_scalar's Lagrange corner-region fill.  An earlier port round
+    # implemented the fill the source APPEARS to perform
+    # (fill_corners_agrid_y after the exchange), which overwrote the
+    # correct corner values by 7-14% relative; d_sw5's fv_tp_2d
+    # (vort = wk + f0) consumes exactly those slots at corner cells, and
+    # the ORACLE STAGE-STATE instrument measured the result as u/v
+    # corner-wedge residuals of ~1.6e-6 per substep on every face --
+    # the dominant term of the one-step 9.79e-06 panel-boundary floor
+    # (stage table: fv3_duo_gaps/dynstage, jobs 9369492/9369507/9369527).
     if use_ext_bundle and "f0" not in ext_exclude:
-        from legoesm.grids.fv3_native_gridstruct import (
-            fill_corners_agrid_y,
-        )
         from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
 
         f0_6 = [np.array(gs["f0"], dtype=np.float64, copy=True)
                 for gs in gs6]
         ext_scalar_sixface(f0_6, "A", ectx)
         for t in range(6):
-            fill_corners_agrid_y(fort(f0_6[t], 1 - ng, 1 - ng), n + 1, ng)
             gs6[t] = {**gs6[t], "f0": f0_6[t]}
 
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
+            "rotation_alpha": float(rotation_alpha),
             "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
@@ -590,6 +621,18 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         average_allflux_shared_edges,
     )
 
+    # Lane guard (codex km=1 r2 finding 1): this assembler runs ONLY duo
+    # kernels (d_sw1_duo/d_sw2_duo) and is publicly callable with
+    # fabricated csw_outs, i.e. WITHOUT passing through c_sw's guard —
+    # the same upstream implication applies (fv_arrays.F90:1512:
+    # duogrid forces bounded_domain=.true.).
+    for _gs in ctx["gs6"]:
+        if not _gs.get("bounded_domain", False):
+            raise ValueError(
+                "dsw12_step_sixface: duo kernels require "
+                "bounded_domain=True on every face (fv_arrays.F90:1512); "
+                "build the context with oracle_conventions=True")
+
     n, ng = ctx["n"], ctx["ng"]
     bd = ctx["bd"]
     npx = n + 1
@@ -666,9 +709,17 @@ _SW_CFG_DEFAULT = {
 
 SW_CFG_CASE8 = {
     # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml:
-    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8
+    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8.
+    # nord_v: the oracle DERIVES it, dyn_core.F90:757
+    # ``nord_v(k) = min(2, flagstruct%nord)`` -> 2 for the deck's
+    # NORD=2 (was 1 here; codex c6 r1 #9).  Numerically DORMANT while
+    # damp_v == 0: both consumers are gated on the coefficient
+    # (fv3_native_duo_sw_core.py:1041 ``damp_v > 1.0e-5`` before
+    # del6_vt_flux; fv_tp_2d.py:1180 ``damp_c > 1e-4`` before
+    # _deln_flux), so this corrects the recorded configuration, not
+    # any number the case-8/case-6 decks produce.
     "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
-    "hord_mt": 8, "nord_v": 1, "damp_v": 0.0,
+    "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
     "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
 }
 
@@ -1002,10 +1053,11 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
                       u0: float | None = None,
                       gh0: float = 2.94e4) -> list:
     """Williamson case-2 BALANCED six-face state on the SW-via-
-    production convention (pt≡1, delp = g·h):
+    production convention (pt≡1, delp IS g·h, stored directly):
 
-        h = (gh0 - (a·Omega·u0 + u0^2/2) · S^2) / g,
+        delp = gh0 - (a·Omega·u0 + u0^2/2) · S^2      (oracle tree,
         S = -cos(lon)·cos(lat)·sin(alpha) + sin(lat)·cos(alpha)
+        test_cases.F90:1033-1036 — no gravity constant enters)
 
     Winds are the analytic solid-body projection (reuses
     analytic_swcore_state's certified D/C construction with ddelp=0),
@@ -1013,16 +1065,19 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     kinked-lattice cell centres (halos included; corner-diagonals are
     handled by the step-entry exchanges).
     """
-    from legoesm import constants
     from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
     a_r = FV3_RADIUS_M
     omega = FV3_OMEGA
-    g = constants.g                     # cancels: delp = g*h = gh0 - coef*S^2
     if u0 is None:
         # upstream test_cases case 2: Ubar = 2*pi*radius / (12 days)
         u0 = 2.0 * np.pi * a_r / (12.0 * 86400.0)
-    coef = (a_r * omega * u0 + 0.5 * u0 * u0)
+    # the oracle's operation tree, test_cases.F90:1033-1036:
+    # (Ubar*Ubar)/2. and S ** 2, assigned DIRECTLY to delp — no /g*g
+    # round trip (codex a45 r2 #4: the previous 0.5*u0*u0 / s*s / g*h
+    # form was ULP-off the oracle tree and off the shared
+    # solid_body_geopotential, breaking bit-comparability)
+    coef = (a_r * omega * u0 + (u0 * u0) / 2.0)
 
     states = []
     for gs in ctx["gs6"]:
@@ -1031,9 +1086,8 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
         lat = gs["agrid_lat"]
         s = (-np.cos(lon) * np.cos(lat) * np.sin(alpha)
              + np.sin(lat) * np.cos(alpha))
-        h = (gh0 - coef * s * s) / g
         st = dict(st)
-        st["delp"] = g * h
+        st["delp"] = gh0 - coef * s ** 2
         st["pt"] = np.ones_like(st["delp"])
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)

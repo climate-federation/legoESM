@@ -482,3 +482,189 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx, npy, npz,
                 * (pk[vi, vjp1, k + 1] - pk[vi, vj, k])
                 + (gz[vi, vj, k] - gz[vi, vjp1, k + 1])
                 * (pk[vi, vj, k + 1] - pk[vi, vjp1, k])))
+
+
+def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx, npy, npz,
+              dt, ptop, akap, use_logp: bool = False,
+              ng: int | None = None, duogrid: bool = True) -> None:
+    """``dyn_core.F90:2135-2230`` (``nh_p_grad``), verbatim port.
+
+    The NH D-stage pressure update that replaces ``one_grad_p`` at
+    ``beta = 0`` (the dispatch is ``beta < -0.1`` for one_grad_p, so 0
+    lands HERE — dyn_core.F90:1536-1543, trap #4 of the NH spec).
+
+    Mutates ``u``, ``v`` and — via ``a2b_ord4(replace=.true.)`` —
+    ``pp``, ``pk3``, ``gz`` IN PLACE: on return those three hold B-GRID
+    CORNER values on ``[is,ie+1] x [js,je+1]`` (trap #6: pkc is
+    perturbation pressure INTO this call and B-grid scratch AFTER it).
+    ``delp`` is read through a NO-replace a2b into a scratch and left
+    unmodified.
+
+    Windows (:2172-2181): the k=1 seed writes ``pp = 0`` and
+    ``pk3 = top_value`` over the B box only; ``top_value`` is ``peln1 =
+    log(ptop)`` under ``use_logp`` else ``ptk = ptop**akap`` (the ``**``
+    operator, :246-248, matching one_grad_p).
+
+    Per level (:2190-2230): ``wk`` = B-grid ``pk3`` interface
+    difference (the hydrostatic weight), ``wk1`` = B-grid ``delp`` (the
+    NH weight); u adds ``du1`` (hydrostatic form) plus the NH term in
+    ``pp``, then multiplies by ``rdx``; v likewise with ``rdy``.  The
+    grouping is copied exactly — see the p_grad_c note on why
+    regrouping changes the last bit.
+    """
+    from legoesm.core.fv3_native_d_sw import a2b_ord4
+
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd, ied, jed = bd.isd, bd.jsd, bd.ied, bd.jed
+    if ng is None:
+        ng = bd.ng
+
+    top_value = float(np.log(ptop)) if use_logp else ptop ** akap
+
+    b_i = _w(isd, is_, ie + 1)
+    b_j = _w(jsd, js, je + 1)
+
+    gsf = a2b_gridstruct_view(gs, bd)
+    wk_scratch = np.full((ied - isd + 1, jed - jsd + 1), np.nan,
+                         dtype=np.float64)
+
+    def _a2b_replace(plane) -> None:
+        a2b_ord4(fort(plane, isd, jsd), fort(wk_scratch, isd, jsd), gsf,
+                 npx, npy, is_, ie, js, je, ng, replace=True,
+                 duogrid=duogrid)
+
+    # :2172-2185 — k=1 B-box seed for pp/pk3; a2b for k>=2; gz EVERY k.
+    for k in range(npz + 1):
+        if k == 0:
+            pp[b_i, b_j, 0] = 0.0
+            pk3[b_i, b_j, 0] = top_value
+        else:
+            _a2b_replace(pp[:, :, k])
+            _a2b_replace(pk3[:, :, k])
+        _a2b_replace(gz[:, :, k])
+
+    rdx = np.asarray(gs["rdx"], dtype=np.float64)
+    rdy = np.asarray(gs["rdy"], dtype=np.float64)
+
+    # u: i in is..ie, j in js..je+1 (:2196-2211)
+    ui = _w(isd, is_, ie)
+    uip1 = _w(isd, is_ + 1, ie + 1)
+    uj = _w(jsd, js, je + 1)
+    # v: i in is..ie+1, j in js..je (:2213-2228)
+    vi = _w(isd, is_, ie + 1)
+    vj = _w(jsd, js, je)
+    vjp1 = _w(jsd, js + 1, je + 1)
+
+    wk = np.full_like(wk_scratch, np.nan)
+    wk1 = np.full_like(wk_scratch, np.nan)
+    for k in range(npz):
+        # :2191 — B-grid delp into wk1 (NO replace; delp unmodified)
+        a2b_ord4(fort(delp[:, :, k], isd, jsd), fort(wk1, isd, jsd), gsf,
+                 npx, npy, is_, ie, js, je, ng, replace=False,
+                 duogrid=duogrid)
+        # :2192-2195 — hydrostatic weight from pk3 interface differences
+        wk[b_i, b_j] = pk3[b_i, b_j, k + 1] - pk3[b_i, b_j, k]
+
+        # :2196-2211 — u: INCREMENT-then-scale, hydrostatic du1 + NH pp
+        du1 = dt / (wk[ui, uj] + wk[uip1, uj]) * (
+            (gz[ui, uj, k + 1] - gz[uip1, uj, k])
+            * (pk3[uip1, uj, k + 1] - pk3[ui, uj, k])
+            + (gz[ui, uj, k] - gz[uip1, uj, k + 1])
+            * (pk3[ui, uj, k + 1] - pk3[uip1, uj, k]))
+        u[ui, uj, k] = (u[ui, uj, k] + du1
+                        + dt / (wk1[ui, uj] + wk1[uip1, uj]) * (
+                            (gz[ui, uj, k + 1] - gz[uip1, uj, k])
+                            * (pp[uip1, uj, k + 1] - pp[ui, uj, k])
+                            + (gz[ui, uj, k] - gz[uip1, uj, k + 1])
+                            * (pp[ui, uj, k + 1] - pp[uip1, uj, k]))
+                        ) * rdx[ui, uj]
+
+        # :2213-2228 — v
+        dv1 = dt / (wk[vi, vj] + wk[vi, vjp1]) * (
+            (gz[vi, vj, k + 1] - gz[vi, vjp1, k])
+            * (pk3[vi, vjp1, k + 1] - pk3[vi, vj, k])
+            + (gz[vi, vj, k] - gz[vi, vjp1, k + 1])
+            * (pk3[vi, vj, k + 1] - pk3[vi, vjp1, k]))
+        v[vi, vj, k] = (v[vi, vj, k] + dv1
+                        + dt / (wk1[vi, vj] + wk1[vi, vjp1]) * (
+                            (gz[vi, vj, k + 1] - gz[vi, vjp1, k])
+                            * (pp[vi, vjp1, k + 1] - pp[vi, vj, k])
+                            + (gz[vi, vj, k] - gz[vi, vjp1, k + 1])
+                            * (pp[vi, vj, k + 1] - pp[vi, vjp1, k]))
+                        ) * rdy[vi, vj]
+
+
+def pk3_halo(pk3, delp, bd, *, npz, ptop, akap) -> None:
+    """``dyn_core.F90:1832-1884`` (``pk3_halo``), verbatim port.
+
+    Locally rebuilds the TWO x-rings (i in {is-2, is-1, ie+1, ie+2},
+    j = js..je) and TWO y-rings (j in {js-2, js-1, je+1, je+2},
+    i = is-2..ie+2) of ``pk3`` from halo ``delp`` — this is a local
+    recomputation, NOT a halo exchange (trap #10: replacing it with an
+    exchange changes both arithmetic and corner coverage).  Level 1
+    (the top interface) is NEVER written here.
+    """
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+
+    def _col(i, j):
+        pei = ptop
+        for k in range(npz):
+            pei = pei + delp[i - isd, j - jsd, k]
+            pk3[i - isd, j - jsd, k + 1] = np.exp(akap * np.log(pei))
+
+    for j in range(js, je + 1):
+        for i in (is_ - 2, is_ - 1, ie + 1, ie + 2):
+            _col(i, j)
+    for i in range(is_ - 2, ie + 2 + 1):
+        for j in (js - 2, js - 1, je + 1, je + 2):
+            _col(i, j)
+
+
+def pln_halo(pk3, delp, bd, *, npz, ptop) -> None:
+    """``dyn_core.F90:1886-1931`` (``pln_halo``) — the ``use_logp``
+    sibling of :func:`pk3_halo` (log(p) rings instead of p**kappa).
+    Dead on the pinned deck (USE_LOGP=F) but ten lines away."""
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+
+    def _col(i, j):
+        pet = ptop
+        for k in range(npz):
+            pet = pet + delp[i - isd, j - jsd, k]
+            pk3[i - isd, j - jsd, k + 1] = np.log(pet)
+
+    for j in range(js, je + 1):
+        for i in (is_ - 2, is_ - 1, ie + 1, ie + 2):
+            _col(i, j)
+    for i in range(is_ - 2, ie + 2 + 1):
+        for j in (js - 2, js - 1, je + 1, je + 2):
+            _col(i, j)
+
+
+def pe_halo(pe, delp, bd, *, npz, ptop) -> None:
+    """``dyn_core.F90:1933-1963`` (``pe_halo``), verbatim port.
+
+    Fills the ONE-ring edges of ``pe`` — i in {is-1, ie+1} for
+    j = js..je, then j in {js-1, je+1} for i = is-1..ie+1 — by local
+    hydrostatic integration of halo ``delp``.  ``pe`` is the oracle's
+    ``(is-1:ie+1, npz+1, js-1:je+1)`` (i, k, j) array; ``delp`` is the
+    padded (i, j, k) A-grid field.  Runs only on remap substeps
+    (:1441-1442).
+    """
+    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
+    isd, jsd = bd.isd, bd.jsd
+
+    def _col(i, j):
+        pe[i - (is_ - 1), 0, j - (js - 1)] = ptop
+        for k in range(npz):
+            pe[i - (is_ - 1), k + 1, j - (js - 1)] = (
+                pe[i - (is_ - 1), k, j - (js - 1)]
+                + delp[i - isd, j - jsd, k])
+
+    for j in range(js, je + 1):
+        for i in (is_ - 1, ie + 1):
+            _col(i, j)
+    for i in range(is_ - 1, ie + 1 + 1):
+        for j in (js - 1, je + 1):
+            _col(i, j)

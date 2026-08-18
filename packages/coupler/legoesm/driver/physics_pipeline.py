@@ -22,6 +22,7 @@ from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import (
     blend_surface_property,
     blend_surface_temperature,
+    blended_surface_albedo,
 )
 from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
@@ -302,8 +303,10 @@ class PhysicsPipeline:
         # byte-identical); set by build_physics_pipeline from ExperimentConfig.
         self._cloud_rh_crit = None
         self._cloud_q_c_diagnostic = None
+        self._cloud_conv_cloud_coeff = None
         self._cloud_conv_cloud_max = None
         self._cloud_conv_cloud_condensate = None
+        self._cloud_Nc_default = None
         self._cloud_inhomogeneity_factor = None
         self._cloud_optics_inhomogeneity = None
         self._cloud_partial_coverage_optics = None
@@ -314,6 +317,7 @@ class PhysicsPipeline:
         self._cloud_alpha_xr = None
         self._cloud_diagnostic_condensate_scheme = None
         self._cloud_adiabatic_lwc_rate = None
+        self._cloud_saturation_scheme = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -387,6 +391,89 @@ class PhysicsPipeline:
         if land_active and self.f_land is not None:
             emissivity = self._blend_land(emissivity, self.emissivity_land)
         return emissivity
+
+    def static_surface_albedo(self, sic, *, land_active, lat=None, snow=None):
+        """Surface SW albedo radiation uses absent a coupler override.
+
+        The shortwave twin of :meth:`static_surface_emissivity`, and for the
+        same reason: a coupled driver that holds only ``sw_net_sfc`` has to
+        divide by ``1 - albedo`` to recover the gross ``sw_down`` it hands the
+        surface, and it must divide by the albedo radiation actually USED.
+        Deblending an ocean/ice-only albedo while ``compute_radiation_core``
+        blended the land tile in loses ~36 W/m^2 over a land column at
+        ``albedo_land = 0.20`` — silently, with a surface energy budget that
+        does not close (#1556).
+
+        Mirrors the ocean/ice (+ optional land, + snow brightening) blend
+        formed in ``compute_radiation_core``.  ``lat``/``snow`` are optional in
+        the signature but NOT optional in practice: omitted, the land term
+        silently falls back to the bare vegetation albedo (via
+        :meth:`_land_albedo_eff`'s own ``None`` guard), which under
+        ``snow_albedo_feedback`` re-opens this defect over every snow-covered
+        column.  Both coupled drivers pass ``lat`` and the ``snow`` carry (via
+        ``snow_for_albedo_deblend``, which withholds it on ensembles, where it
+        is member-shaped).
+
+        That carry is the SEGMENT-END snow, so it is NOT the sample radiation
+        brightened with — and it is AHEAD of it, not behind: radiation receives
+        the snow at its refresh, then the physics step advances snow, and the
+        carry is written after the segment.  Under radiation subcycling the
+        held flux can be a refresh interval or more older still.  It is a small
+        correction on a correction and shares the segment-boundary staleness of
+        ``held_sw_net_sfc`` and ``_last_sfc_response``; the alternative,
+        dropping snow entirely, is a first-order error over every snow-covered
+        column.  The dynamic ``couple_surface_radiation`` path avoids the
+        question by deblending with the EXACT per-segment override it handed
+        radiation — one field per atmosphere segment, shared by every radiation
+        refresh inside it, not a per-refresh snapshot.
+
+        NOT the whole of that blend, and the gap is named rather than implied.
+        ``compute_radiation_core`` has two further terms this cannot see, both
+        matching the scope of the emissivity sibling (which likewise ignores
+        the multilayer tile's per-column ``emissivity``):
+
+          * ``dynamic_albedo`` — the zenith-dependent open-ocean albedo, which
+            needs the radiation solver's own cos(SZA) and the diurnal/orbital
+            state, none of which reach this call.
+          * the multilayer land tile's per-column ``albedo_veg``, used in place
+            of ``self.albedo_land`` whenever that tile is live.
+
+        So under either of those this returns a CLOSE blend, not the identical
+        one.  That is still strictly better than the ocean/ice-only expression
+        it replaces — it fixes the first-order land term, which is the tens of
+        W/m^2 — but a caller that needs the exact field should use the coupler's
+        dynamic path: with ``couple_surface_radiation`` on, the driver deblends
+        with ``_last_sfc_response.albedo``, the very field it fed radiation as
+        ``sfc_albedo_override``.  That holds for every segment AFTER a surface
+        response exists; the first segment (and any segment where the response
+        is still missing) seeds the override from this method, so it is on the
+        dynamic path too, just at the start of it.
+
+        Parameters
+        ----------
+        sic : array
+            Sea-ice concentration [0, 1].
+        land_active : bool
+            Whether the land tile contributes; matches
+            ``compute_radiation_core``'s gate.
+        lat, snow : array or None
+            Latitude and snow water equivalent for the snow-albedo feedback.
+            ``None`` ⇒ static vegetation albedo.
+
+        Raises
+        ------
+        ValueError
+            Via :func:`blended_surface_albedo`, when a land fraction is active
+            with no land albedo — rather than silently reflecting the OCEAN
+            albedo from every land column, which is the shape of the defect
+            this method exists to prevent.
+        """
+        _land = self.f_land if land_active else None
+        return blended_surface_albedo(
+            sic, _land, self.albedo_ice, self.albedo_ocean,
+            self._land_albedo_eff(lat, snow) if _land is not None else None,
+        )
+
     def _land_surface_bulk(self, T_low, u_low, v_low, p_s):
         """Lowest-level air density [kg/m^3] and wind speed [m/s] for the
         land surface bulk fluxes.
@@ -2250,9 +2337,11 @@ class PhysicsPipeline:
                                   and conv_precip is not None),
                 rh_crit=getattr(self, "_cloud_rh_crit", None),
                 q_c_diagnostic=getattr(self, "_cloud_q_c_diagnostic", None),
+                conv_cloud_coeff=getattr(self, "_cloud_conv_cloud_coeff", None),
                 conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     self, "_cloud_conv_cloud_condensate", None),
+                Nc_default=getattr(self, "_cloud_Nc_default", None),
                 cloud_inhomogeneity_factor=getattr(
                     self, "_cloud_inhomogeneity_factor", None),
                 cloud_optics_inhomogeneity=getattr(
@@ -2273,6 +2362,8 @@ class PhysicsPipeline:
                     self, "_clubb_cf_override_strength", None),
                 clubb_cf_override_floor=getattr(
                     self, "_clubb_cf_override_floor", None),
+                saturation_scheme=getattr(
+                    self, "_cloud_saturation_scheme", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -2795,6 +2886,7 @@ def _build_none_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
@@ -2846,11 +2938,13 @@ def _build_gray_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
+        del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
@@ -2945,6 +3039,7 @@ def _build_rrtmgp_radiation_fn(config):
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
@@ -3016,6 +3111,8 @@ def _build_rrtmgp_radiation_fn(config):
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
             cloud_path_ice=cloud_path_ice,
+            cloud_path_liq_lw=cloud_path_liq_lw,
+            cloud_path_ice_lw=cloud_path_ice_lw,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,
@@ -3170,10 +3267,16 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", None)
         _bechtold_kwargs = dict(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
+            # coefficients + the quasi-equilibrium heating-ceiling ratio
+            # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
+            M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
             # Vertical subsidence solve selector (day-65 blowup bisect,
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
+            cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
+            cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3207,6 +3310,13 @@ def _resolve_convection(config):
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
             rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
+            delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
+            capdcycl_land_tau_scale=getattr(
+                config, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            subcloud_evap_scale=getattr(config, 'bechtold_subcloud_evap_scale', 1.0),
+            rhebc_land=getattr(config, 'bechtold_rhebc_land', 0.75),
+            rhebc_land_deep=getattr(config, 'bechtold_rhebc_land_deep', 0.70),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
@@ -4085,6 +4195,9 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)
+    pipeline._cloud_conv_cloud_coeff = getattr(
+        config, 'cloud_conv_cloud_coeff', None)
+    pipeline._cloud_Nc_default = getattr(config, 'cloud_Nc_default', None)
     pipeline._cloud_inhomogeneity_factor = getattr(
         config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_optics_inhomogeneity = getattr(
@@ -4101,6 +4214,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_diagnostic_condensate_scheme', None)
     pipeline._cloud_adiabatic_lwc_rate = getattr(
         config, 'cloud_adiabatic_lwc_rate', None)
+    pipeline._cloud_saturation_scheme = getattr(
+        config, 'cloud_saturation_scheme', None)
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).

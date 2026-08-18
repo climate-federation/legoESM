@@ -729,6 +729,179 @@ def make_latlon_band_wall_multi_pad_body(mesh, halo: int = 1,
     return body
 
 
+def packed_exchange_mesh():
+    """The armed 1-D lat-band SPMD mesh when the packed per-stage exchange
+    (packing-plan bucket A) is enabled, else ``None``.
+
+    Env gate ``LEGOESM_LATLON_PACKED_EXCHANGE``: ``''`` / ``'0'`` (default)
+    is OFF; ``'1'`` is ON — any other value RAISES (dispatch-hardening house
+    rule, so a typo cannot silently run the default path).  ON additionally
+    requires the armed 1-D ``("lat",)`` band mesh: serial / MPI / the 2-D
+    ``("lat", "lon")`` tile mesh return ``None`` so callers keep their
+    default (byte-identical) per-exchange pads.
+    """
+    import os
+    val = os.environ.get("LEGOESM_LATLON_PACKED_EXCHANGE", "")
+    if val in ("", "0"):
+        return None
+    if val != "1":
+        raise ValueError(
+            f"LEGOESM_LATLON_PACKED_EXCHANGE must be '', '0' or '1'; "
+            f"got {val!r}")
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or tuple(getattr(mesh, "axis_names", ())) != ("lat",):
+        return None
+    return mesh
+
+
+def make_latlon_band_packed_pad_body(mesh, specs):
+    """PACKED multi-field, mixed-halo, mixed-SEMANTICS band exchange
+    (packing-plan bucket A): ONE north+south ``ppermute`` pair per dtype
+    group carries the RAW (un-lon-padded) edge rows of every field of a
+    stage's exchange epoch; the wall constants, the 180-deg pole fold and
+    the periodic lon wrap are applied LOCALLY after receipt.  Bit-exact vs
+    the per-exchange bodies: the ``ppermute`` is a bit-copy and both the
+    lon wrap (``jnp.pad(mode="wrap")``) and the fold act per-row, so they
+    commute with the lat exchange exactly.
+
+    ``specs`` — STATIC tuple, one entry per field (trace-time facts):
+
+    * ``("fold", halo, negate)`` — full fold-family pad; output
+      ``(nl + 2h, n_lon + 2h[, lev])``, bit-equal to
+      :func:`make_latlon_band_pad_body` (``pad_halo_latlon*`` semantics).
+    * ``("wall", halo, south_value, north_value)`` — lat-ONLY wall pad;
+      output ``(nl + 2h, ...)``, bit-equal to
+      :func:`make_latlon_band_wall_pad_body` (``pad_with_pole_bc_lat``
+      semantics).
+
+    An unknown kind raises ``ValueError`` (dispatch hardening).
+
+    POLAR BANDS: the poleward ghost is NOT remote — ``perm_north`` /
+    ``perm_south`` (from :func:`latlon_band_perms`) already omit the polar
+    direction on the end bands (band ``N-1`` is no ``perm_north`` target,
+    band ``0`` no ``perm_south`` target), so those bands receive zeros
+    there, overwritten by the LOCAL fold / wall constant via ``jnp.where``
+    — identical to the single-field bodies.  Per-field semantics (incl.
+    the fold's staggering-dependent lon-reversal) are applied AFTER the
+    buffer split, never on the packed buffer.
+
+    AD: the comm envelope is linear (reshape / concat / slice + the
+    self-transposing ``ppermute``; masks are data-independent selects) —
+    no ``custom_vjp`` needed.
+
+    Returns ``body(*fields) -> tuple(padded_fields)`` for use INSIDE a
+    shard_map over the ``"lat"`` axis.
+    """
+    # 1-D BAND mesh only: the fold branch wraps longitude LOCALLY, which is
+    # wrong for a lon-split ("lat", "lon") tile mesh (its lon ghosts are
+    # remote — the 2-D pad body's ring ppermute).  Reject rather than
+    # silently mis-wrap (codex r1 MINOR 1).
+    if tuple(mesh.axis_names) != ("lat",):
+        raise ValueError(
+            f"make_latlon_band_packed_pad_body: needs a 1-D ('lat',) band "
+            f"mesh (the fold branch wraps lon locally); got axes "
+            f"{tuple(mesh.axis_names)}")
+    n_dev = int(mesh.shape["lat"])
+    axis = "lat"
+    perm_north, perm_south = latlon_band_perms(n_dev)
+    specs = tuple(tuple(s) for s in specs)
+    for s in specs:
+        if s[0] == "fold":
+            if len(s) != 3:
+                raise ValueError(f"fold spec must be (kind, halo, negate): {s}")
+        elif s[0] == "wall":
+            if len(s) != 4:
+                raise ValueError(
+                    f"wall spec must be (kind, halo, south, north): {s}")
+        else:
+            raise ValueError(
+                f"make_latlon_band_packed_pad_body: unknown spec kind "
+                f"{s[0]!r} (expected 'fold' or 'wall')")
+    n_fields = len(specs)
+    if n_fields < 1:
+        raise ValueError("specs must name >= 1 field")
+
+    def body(*fields):
+        if len(fields) != n_fields:
+            raise ValueError(
+                f"packed pad body built for {n_fields} fields, got "
+                f"{len(fields)}")
+        b = jax.lax.axis_index(axis)
+
+        # Group by dtype (static trace-time fact) — one buffer / one
+        # ppermute pair per dtype group, matching the fused-pad contract.
+        groups: dict = {}
+        for i, f in enumerate(fields):
+            groups.setdefault(str(f.dtype), []).append(i)
+
+        south_recv: list = [None] * n_fields
+        north_recv: list = [None] * n_fields
+        for _, idxs in sorted(groups.items()):
+            s_flat, n_flat, widths = [], [], []
+            for i in idxs:
+                h = int(specs[i][1])
+                s_edge = fields[i][:h]     # my south rows
+                n_edge = fields[i][-h:]    # my north rows
+                w = 1
+                for d in s_edge.shape:
+                    w *= int(d)
+                widths.append(w)
+                # PRE-FLATTEN to (1, h*w*lev) BEFORE concat: mixed
+                # trailing dims after concat would force XLA layout
+                # copies; the payload stays contiguous on the minor axis.
+                s_flat.append(s_edge.reshape(1, w))
+                n_flat.append(n_edge.reshape(1, w))
+            south_buf = jnp.concatenate(s_flat, axis=1)
+            north_buf = jnp.concatenate(n_flat, axis=1)
+            # ONE ppermute pair for the whole dtype group.  My NORTH ghost
+            # = north neighbour's south rows (perm_north sends s -> s-1);
+            # my SOUTH ghost = south neighbour's north rows.
+            n_recv_buf = jax.lax.ppermute(south_buf, axis, perm_north)
+            s_recv_buf = jax.lax.ppermute(north_buf, axis, perm_south)
+            off = 0
+            for k, i in enumerate(idxs):
+                h = int(specs[i][1])
+                w = widths[k]
+                shp = (h,) + fields[i].shape[1:]
+                south_recv[i] = s_recv_buf[:, off:off + w].reshape(shp)
+                north_recv[i] = n_recv_buf[:, off:off + w].reshape(shp)
+                off += w
+
+        outs = []
+        for i, f in enumerate(fields):
+            spec = specs[i]
+            h = int(spec[1])
+            if spec[0] == "wall":
+                _, _, sv, nv = spec
+                s_wall = jnp.full_like(south_recv[i], sv)
+                n_wall = jnp.full_like(north_recv[i], nv)
+                s_ghost = jnp.where(b == 0, s_wall, south_recv[i])
+                n_ghost = jnp.where(b == n_dev - 1, n_wall, north_recv[i])
+                outs.append(
+                    jnp.concatenate([s_ghost, f, n_ghost], axis=0))
+            else:  # fold
+                negate = bool(spec[2])
+                pad_lon = ((0, 0), (h, h)) + ((0, 0),) * (f.ndim - 2)
+                data_lon = jnp.pad(f, pad_lon, mode="wrap")
+                # Lon-wrap the RAW received rows locally (per-row op —
+                # commutes bit-exactly with the exchange of raw rows).
+                s_recv_lon = jnp.pad(south_recv[i], pad_lon, mode="wrap")
+                n_recv_lon = jnp.pad(north_recv[i], pad_lon, mode="wrap")
+                s_ghost = jnp.where(
+                    b == 0, _pole_fold(data_lon[:h], negate), s_recv_lon)
+                n_ghost = jnp.where(
+                    b == n_dev - 1, _pole_fold(data_lon[-h:], negate),
+                    n_recv_lon)
+                outs.append(
+                    jnp.concatenate([s_ghost, data_lon, n_ghost], axis=0))
+        return tuple(outs)
+
+    return body
+
+
 def spmd_pole_end_masks():
     """``(south_mask, north_mask)`` TRACED scalar booleans for the active band
     under the armed lat-band SPMD backend, or ``None`` if SPMD is not active.

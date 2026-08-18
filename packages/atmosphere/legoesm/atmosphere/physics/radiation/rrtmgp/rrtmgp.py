@@ -544,6 +544,8 @@ class RRTMGP:
       o3_vmr: jnp.ndarray | None = None,
       cloud_path_liq: jnp.ndarray | None = None,
       cloud_path_ice: jnp.ndarray | None = None,
+      cloud_path_liq_lw: jnp.ndarray | None = None,
+      cloud_path_ice_lw: jnp.ndarray | None = None,
       cloud_r_eff_liq: jnp.ndarray | None = None,
       cloud_r_eff_ice: jnp.ndarray | None = None,
       cloud_fraction: jnp.ndarray | None = None,
@@ -589,6 +591,15 @@ class RRTMGP:
           Liquid water path per layer (ncol, nlev) [kg/m^2].
       cloud_path_ice : jnp.ndarray | None
           Ice water path per layer (ncol, nlev) [kg/m^2].
+      cloud_path_liq_lw : jnp.ndarray | None
+          Separate liquid water path for the LONGWAVE solve (ncol, nlev)
+          [kg/m^2].  ``None`` (default) reuses ``cloud_path_liq`` for both
+          streams (byte-identical legacy behaviour).  Populated by the
+          ``two_column`` partial-coverage optics, whose coverage inversion
+          is stream-specific (reflectance vs emissivity space).
+      cloud_path_ice_lw : jnp.ndarray | None
+          Separate ice water path for the LONGWAVE solve; see
+          ``cloud_path_liq_lw``.
       cloud_r_eff_liq : jnp.ndarray | None
           Liquid cloud effective radius (ncol, nlev) [m].
       cloud_r_eff_ice : jnp.ndarray | None
@@ -648,6 +659,12 @@ class RRTMGP:
           cloud_path_liq = jnp.asarray(cloud_path_liq).astype(_table_dtype)
       if cloud_path_ice is not None:
           cloud_path_ice = jnp.asarray(cloud_path_ice).astype(_table_dtype)
+      if cloud_path_liq_lw is not None:
+          cloud_path_liq_lw = jnp.asarray(
+              cloud_path_liq_lw).astype(_table_dtype)
+      if cloud_path_ice_lw is not None:
+          cloud_path_ice_lw = jnp.asarray(
+              cloud_path_ice_lw).astype(_table_dtype)
       if cloud_r_eff_liq is not None:
           cloud_r_eff_liq = jnp.asarray(cloud_r_eff_liq).astype(_table_dtype)
       if cloud_r_eff_ice is not None:
@@ -805,6 +822,13 @@ class RRTMGP:
           cpi_3d = jnp.clip(_add_halos(_cpi[:, None, ::-1]), 0.0, None)
           crl_3d = jnp.clip(_add_halos(_crl[:, None, ::-1]), 1.0e-6, None)
           cri_3d = jnp.clip(_add_halos(_cri[:, None, ::-1]), 1.0e-6, None)
+          # Separate LONGWAVE water paths (two_column coverage optics): same
+          # halo + post-clip treatment as the SW paths; default to the SW
+          # paths so every caller not passing them is byte-identical.
+          cpl_lw_3d = (cpl_3d if cloud_path_liq_lw is None else jnp.clip(
+              _add_halos(cloud_path_liq_lw[:, None, ::-1]), 0.0, None))
+          cpi_lw_3d = (cpi_3d if cloud_path_ice_lw is None else jnp.clip(
+              _add_halos(cloud_path_ice_lw[:, None, ::-1]), 0.0, None))
           if cloud_fraction is not None:
               # Clip AFTER ``_add_halos``: linear halo extrapolation of a
               # boundary cloud-fraction step (e.g. [0, 1]) produces halo
@@ -821,6 +845,7 @@ class RRTMGP:
               cf_3d = None
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
+          cpl_lw_3d = cpi_lw_3d = None
 
       # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
       # (same fix class as q_v / o3 / cf / cloud paths): linear halo
@@ -910,8 +935,8 @@ class RRTMGP:
       if lw_optical_field_only:
           lw_props = two_stream.compute_lw_optical_field(
               p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
-              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_3d,
-              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_3d,
+              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_lw_3d,
+              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_lw_3d,
               cloud_fraction=cf_3d,
               aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           )
@@ -942,9 +967,9 @@ class RRTMGP:
           vmr_fields,
           sfc_T_2d,
           cloud_r_eff_liq=crl_3d,
-          cloud_path_liq=cpl_3d,
+          cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,
-          cloud_path_ice=cpi_3d,
+          cloud_path_ice=cpi_lw_3d,
           cloud_fraction=cf_3d,
           aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,

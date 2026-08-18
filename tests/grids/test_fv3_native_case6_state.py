@@ -65,7 +65,14 @@ GH0 = 8.0e3 * FV3_GRAV          # :1215
 
 @pytest.fixture(scope="module")
 def ctx():
-    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"))
+    # oracle_conventions=True (km=1 corpus migration, 2026-08-11):
+    # duogrid on plain unbounded metrics is upstream-impossible
+    # (fv_arrays.F90:1512) and c_sw now refuses it; the analytic
+    # formula certs below compare both sides on the SAME gs, so the
+    # lane change cancels there — only the one-step mass gate runs the
+    # stepper.
+    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"),
+                                      oracle_conventions=True)
 
 
 @pytest.fixture(scope="module")

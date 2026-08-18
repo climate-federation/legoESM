@@ -102,7 +102,7 @@ def test_grep_filters_cannot_abort_the_run(source):
     """Regression: ``... | grep -vE "$FILT" | tee`` aborts under pipefail when
     grep filters out every line (grep exits 1 on no match)."""
     for line in source.splitlines():
-        if "grep -vE" in line:
+        if "grep --line-buffered -vE" in line:
             assert "|| true" in line, f"unguarded grep pipeline: {line.strip()}"
 
 

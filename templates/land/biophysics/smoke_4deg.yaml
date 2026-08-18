@@ -40,7 +40,7 @@ physics:
 forcing:
   source: cru_jra
   data_dir: data/crujra
-  prefix: clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5
+  prefix: clmforc.CRUJRAv2.5_0.5x0.5
   suffix: ""
   year_start: 1920
   year_end: 1920                # single year (bump year_end for multi-year)

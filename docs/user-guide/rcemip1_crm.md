@@ -13,6 +13,52 @@ scripts/run/run_rcemip1_crm.sh spinup                 # 60 days, gray + Kessler
 scripts/run/run_rcemip1_crm.sh production morrison    # 1 day, RRTMGP + clouds
 ```
 
+## Oracle-faithful configuration (gSAM `CASES/RCEMIP1`)
+
+The wrapper above is the legacy uniform-grid config. To run the case as gSAM
+runs it, drive `run_rcemip_plane.py` directly with the oracle's own vertical
+grid via `--sam-grd`:
+
+```bash
+GRD=<gSAM>/CASES/RCEMIP1/grd
+LEGOESM_RCEMIP_PLANE_FP32=1 JAX_PLATFORMS=cuda .venv/bin/python \
+  scripts/run/run_rcemip_plane.py \
+  --nx 128 --ny 128 --nlev 74 --sam-grd $GRD \
+  --dx 3000 --dt 6 --T-sfc 300.0 --insolation rcemip \
+  --precision float32 --semi-implicit --radiation-interval 60 \
+  --hyperdiff 1.0e7 --radiation rrtmgp --clouds --microphysics morrison \
+  --seed-kind band_noise --seed-kmax 8 --theta-noise-amp 0.05 \
+  --steps 864000 --print-every 7200 --snapshot-days 1.0 \
+  --checkpoint-every 14400 --restart latest --output results/<out>
+```
+
+What matches the oracle, and what does not:
+
+| setting | gSAM `prm_rect` / `grd` / `Build` | here |
+| --- | --- | --- |
+| vertical grid | 74 levels, 37 m first centre → 500 m aloft, 33 km top | `--sam-grd` reads the oracle file: INTERFACES identical; cell centres differ because legoESM defines the centre as the midpoint of its interfaces and SAM's scalar level is not. Interior levels are off by a quarter of the levels' second difference (~1.5 m where it stretches, 0 where uniform); the surface centre is off by `(z1-3*z0)/4` even on a uniform column, and the top lands exactly |
+| radiation | RRTM, `nrad=30` × dt 12 s = 360 s | RRTMGP, 360 s |
+| insolation | `solar_constant=551.58`, `zenith_angle=42.05`, perpetual | identical (`--insolation rcemip`) |
+| SST / surface | `OCEAN`, `tabs_s=300`, interactive fluxes | identical |
+| Coriolis / large-scale forcing | off / none | identical |
+| microphysics | `MICRO_SAM1MOM` (default) or `MICRO_M2005` | `morrison` (SAM M2005 flavor) |
+| **dx / domain** | 3000 m, 576×288 = 1728×864 km | 3000 m, 128² = 384×384 km (compute limit) |
+| **dt** | 12 s | **6 s** — see below |
+
+**Do not use `--microphysics kessler` for the spin-up.** It is warm-only, so a
+60-day spin-up equilibrates with no ice microphysics and no ice-radiative
+effect and then hands that biased upper troposphere to every production leg.
+Measured: `S_ice` climbs monotonically past 20 because nothing consumes the ice
+supersaturation, versus ~1.65 (the IFS homogeneous-freezing allowance) under
+morrison.
+
+**dt is 6 s, half the oracle's 12 s.** At dt=12 on this grid the run is
+MARGINALLY stable: it went non-finite in 3 of 6 attempts at convection onset
+and completed the other 3, with identical seed and flags — fp32 GPU
+non-determinism through a chaotic onset decides which. No single operator
+reproduces it. dt=6 has been robust in every run. `cfl_guard` warns above
+`0.08*dz_min`, which is a "expect trouble" marker, not a sharp limit.
+
 Short smoke on CPU, if you have no GPU:
 
 ```bash
@@ -63,6 +109,35 @@ minutes of simulated time. `kessler` and `sundqvist` inherit the state directly.
 | radiation | `rrtmgp --clouds` in both phases, refreshed every 150 steps = 900 s | inside the 300-1800 s RCEMIP norm; gray under-drives, see below |
 | microphysics | `kessler` (spin-up) / your choice (production) | |
 | SGS, acoustics | driver defaults: Smagorinsky `Cs = 0.19`, `--sgs-vertical`, `--substep-horizontal-acoustic`, `--semi-implicit` | CRM preset, 3-D SGS |
+
+### The initial condition must not be supersaturated
+
+`WING_T_V0` used to be pinned at 295 K. Wing 2018 Eq. (3) prescribes
+`T_v0 = T0*(1 + 0.608*q0)` with `T0` the case SST (303.4 K at SST 300 K), and
+`q0` is case data too — 12 / 18.65 / 24 g/kg at SST 295 / 300 / 305 K, "adjusted
+so that the relative humidity is near 80 % in the lower atmosphere". The pinned
+value left the initial column ~8 K too cold and therefore **139 % RH**: the run
+began 40 % supersaturated and condensed the excess in its first steps. That
+condensation kick — not hydrostatic adjustment — was the ~0.8 m/s `max|w|`
+spike previously documented at step 1. Both are fixed
+(`wing2018_T_v0`, `wing2018_q_sfc`); the IC now sits at 74-83 % RH across the
+three SSTs.
+
+### Supersaturation diagnostics
+
+Every print step reports `Smax=<S_liq>/<S_ice>`: the peak saturation ratio over
+warm cells (liquid) and sub-freezing cells (ice). `S_liq` and its per-level
+profile are also written into `profile_step_*.npz`. The run prints a verdict at
+the end and flags sustained liquid supersaturation above 1.02.
+
+Ice supersaturation is physical and expected: gSAM `MICRO_SAM1MOM/cloud.f90`
+(after IFS) allows pristine air below 235 K to reach
+`rh_homo = 2.583 - T/207.8` (~1.45 at 235 K, ~1.67 at 190 K) before
+homogeneous freezing, withdrawing the allowance where cloud ice already exists.
+That ramp is implemented in `thermo.homogeneous_freezing_rh_factor` and applied
+to the DEPOSITION target (not the nucleation gate) in morrison/thompson/p3; it
+is on by default and disabled per scheme with
+`homogeneous_ice_supersaturation=False`.
 
 ### The setting that decides whether it convects at all
 

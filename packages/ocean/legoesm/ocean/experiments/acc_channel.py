@@ -102,7 +102,17 @@ class ACCChannelConfig:
     A_v: float = 1.0e-5             # vertical viscosity [m^2/s]
     K_v: float = 5.0e-6             # vertical tracer diffusivity [m^2/s]
 
-    barotropic_diffusion_alpha: float = 0.05
+    # Free-surface Laplacian: OFF. Inherited from the collocated/cubed-sphere
+    # solvers (0.05 is the CUBED-SPHERE default, raised there for a
+    # face-boundary feedback); this is a C-grid case, which has no such
+    # checkerboard mode. At its resolution the setting implied a diffusivity
+    # of order 1e6 m^2/s against 1e2-1e3 for the real ocean, and it moved far
+    # more water than the flow itself.
+    #
+    # Measured, one variable at a time: with it OFF this case PASSES on both
+    # its grids, and it also passes with the derived velocity viscosity added,
+    # so no replacement is required -- unlike eady_uniform, which needed one.
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_div_damp: float = 0.05
 
     @property

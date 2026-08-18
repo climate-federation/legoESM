@@ -253,17 +253,25 @@ def test_gate_off_when_disabled_or_unsupported():
         _fake_driver("cubed_sphere", "spectral")) is False
 
 
-def test_per_volume_number_densities_excluded_from_advection():
-    # N_c/N_r are per-VOLUME [#/m^3]; advecting them with the mass-mixing-ratio
-    # operator applies the wrong conservation law (#772 review), so they are
-    # excluded — masses q_c/q_r still advect, the per-mass ice number N_i may.
-    # This is a contract guard: if the set changes, the compiled_segments
-    # readback fallback (non-advected tracers -> carry.<X>, NOT None, so a
-    # double-moment opt-in run keeps its numbers column-locked instead of
-    # dropping them) and the per-volume/per-mass units handling MUST be
-    # revisited together.
+def test_every_water_species_is_advected_now_that_all_are_per_mass():
+    # Was: N_c/N_r excluded, because they were stored per VOLUME [#/m^3] and
+    # the mass-mixing-ratio operator applies the wrong conservation law to one
+    # (#772 review).  The exclusion was never a fix — it left the mass moving
+    # while the number stayed, so the diagnosed particle size was wrong by O(1)
+    # once a cloud moved further than its own width.  Since 2026-08-14 all
+    # three numbers are stored PER MASS [#/kg], which is the density-aware
+    # transport the exclusion was waiting for, so every species advects.
+    #
+    # Contract guard: if this set shrinks again, the per-mass/per-volume
+    # conversions at the physics bridges and the compiled_segments readback
+    # fallback MUST be revisited together.
+    from legoesm.core.tracers import make_full_moisture_registry
     from legoesm.driver.compiled_segments import _ADVECTED_TRACER_NAMES
-    assert "N_c" not in _ADVECTED_TRACER_NAMES
-    assert "N_r" not in _ADVECTED_TRACER_NAMES
-    assert {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i"} <= set(
-        _ADVECTED_TRACER_NAMES)
+
+    assert set(_ADVECTED_TRACER_NAMES) == set(make_full_moisture_registry().names)
+    for name in ("N_c", "N_r", "N_i"):
+        assert name in _ADVECTED_TRACER_NAMES
+    # ... and the registry agrees they are all per-mass, which is what makes
+    # advecting them correct.
+    units = {t.name: t.units for t in make_full_moisture_registry().tracers}
+    assert units["N_c"] == units["N_r"] == units["N_i"] == "1/kg"

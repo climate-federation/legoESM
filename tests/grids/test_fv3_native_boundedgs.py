@@ -244,14 +244,20 @@ def test_csw_step_runs_on_bounded_lane(duo_ctx):
             assert np.all(np.isfinite(np.asarray(o[k])[3:-3, 3:-3])), k
 
 
-def test_csw_bounded_flag_inert_on_duo_lane(duo_ctx):
-    """The pre-7a71 gate runs executed c_sw with a hardcoded
-    bounded_domain=False; prove that was behaviorally inert on the duo
-    lane (every c_sw guard reading bounded is OR'd/AND'd with duogrid)
-    so those results remain valid: flag True vs False, byte-equal
-    outputs."""
-    from legoesm.core.fv3_native_sw_core import c_sw
+def test_csw_refuses_duo_without_bounded(duo_ctx):
+    """Successor of the flag-inertness proof (km=1 corpus migration,
+    2026-08-11): c_sw now REFUSES duogrid=True with bounded_domain=False
+    outright (fv_arrays.F90:1512 makes the pair unreachable upstream),
+    so the pre-7a71 hardcoded-False question is closed structurally —
+    the combination can no longer execute at all.  The byte-inertness of
+    the flag on the duo lane was proven before the guard landed (git
+    history of this test); the raise supersedes it.  Distinct contract
+    from c_sw_duo's test_duo_on_unbounded_metrics_is_refused: this one
+    flips ONLY the flag on an otherwise-bounded gs (flag-only refusal);
+    that one hands c_sw a plain gridstruct that never carried the key
+    (default-path refusal)."""
     from legoesm.core.fv3_native_duo_stepper import w2_six_face_state
+    from legoesm.core.fv3_native_sw_core import c_sw
 
     gs = duo_ctx["gs6"][0]
     bd = duo_ctx["bd"]
@@ -260,12 +266,11 @@ def test_csw_bounded_flag_inert_on_duo_lane(duo_ctx):
     args = (st["delp"], st["pt"], np.zeros_like(st["delp"]),
             st["u"], st["v"])
     out_t = c_sw(*args, gs, bd, n + 1, n + 1, 30.0, duogrid=True)
+    assert np.all(np.isfinite(np.asarray(out_t["delpc"])[3:-3, 3:-3]))
     gs_f = dict(gs)
     gs_f["bounded_domain"] = False
-    out_f = c_sw(*args, gs_f, bd, n + 1, n + 1, 30.0, duogrid=True)
-    for k in out_t:
-        assert np.array_equal(np.asarray(out_t[k]), np.asarray(out_f[k]),
-                              equal_nan=True), k
+    with pytest.raises(ValueError, match=r"fv_arrays\.F90:1512"):
+        c_sw(*args, gs_f, bd, n + 1, n + 1, 30.0, duogrid=True)
 
 
 def test_c48_matches_zenodo_run_log():

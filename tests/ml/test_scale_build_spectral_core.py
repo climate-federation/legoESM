@@ -132,6 +132,32 @@ def test_spectral_pe_config_defaults_and_overrides():
     assert pe_off.semi_implicit is False and pe_off.si_substeps == 2
 
 
+def test_spectral_pe_config_forwards_conservation_knobs():
+    """The WB spectral core reaches the SAME conserved-quantity constraints as
+    the AMIP/AIMIP lane: dry-mass anchor OFF by default (existing WB runs are
+    byte-identical) but switchable from YAML, energy-conserving vertical
+    transport + frictional heating ON by default and overridable."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+    from legoesm.training.scale_build import _spectral_pe_config
+
+    pe = _spectral_pe_config(_yml())
+    assert pe.fix_mass is False and pe.anchor_mass_to_initial is False
+    assert pe.vertical_advection_scheme == "sb_centered"
+    assert pe.frictional_heating is True
+    # Defaults track SpectralPEConfig, not a copy of its values.
+    assert (pe.fix_mass, pe.vertical_advection_scheme) == (
+        SpectralPEConfig().fix_mass,
+        SpectralPEConfig().vertical_advection_scheme,
+    )
+
+    pe_on = _spectral_pe_config(_yml(
+        fix_mass=True, anchor_mass_to_initial=True,
+        vertical_advection_scheme="upwind", frictional_heating=False))
+    assert pe_on.fix_mass is True and pe_on.anchor_mass_to_initial is True
+    assert pe_on.vertical_advection_scheme == "upwind"
+    assert pe_on.frictional_heating is False
+
+
 @pytest.mark.parametrize("mode", ["neural_gcm", "physics"])
 def test_spectral_core_raw_runs_finite_and_differentiable(mode):
     """build_mode_components(training_core='spectral'): the returned

@@ -209,6 +209,28 @@ def main(argv=None):
     from legoesm.training.scale_build import build_mode_components  # thin adapter (below)
     model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(cfg, yml)
 
+    # Warm the RRTMGP optics-table cache with a CONCRETE build, before anything
+    # traced runs.  RRTMGP reads its NetCDF gas-optics tables on first use and
+    # stashes them in a module-level cache keyed on static file paths and gas
+    # concentrations.  The classical arm constructs that stack inside
+    # ``make_run_seg``, which ``loss_fn`` below reaches under
+    # ``eqx.filter_jit(jax.value_and_grad(...))`` (data_parallel.py) — and
+    # inside a trace ``jnp.array(<numpy table>)`` is a tracer, so the loader's
+    # own ``np.asarray`` on it dies with TracerArrayConversionError (job
+    # 26905933, after the 6-minute ERA5 load; reproduced standalone on JAX
+    # 0.10.0).  One concrete call here fills the cache — its key holds only
+    # static paths/flags, never a trained leaf, so the in-trace build hits it
+    # and skips the load.  It is also where a broken physics config now fails,
+    # seconds in rather than minutes.  ``neural_gcm``/``sfno`` build a cheap
+    # closure here and are unaffected.  Mirrors the warm-up the AIMIP trainer
+    # runs before its train step (``neural_gcm_spectral.main``).
+    # Single-rank by construction in this campaign (ranks=1); at >1 rank every
+    # rank reads its own copy of the tables, because the cache is per-process.
+    # ``RRTMGP.preload_mpi`` (rank 0 reads + broadcasts) would avoid that, but
+    # it needs the arm's RRTMGPConfig, which is built inside the physics factory
+    # and not exposed here — wire it through if WB ever trains multi-rank.
+    make_run_seg(params)
+
     # --- ERA5 IC/target/forcing samples, sharded across ranks ---
     # #1286: the loader builds ONLY this rank's contiguous shard (fix B — never
     # the full global list) and keeps it HOST-resident (fix A — the training

@@ -86,6 +86,27 @@ def _load_scheme(results_dir: Path, scheme: str) -> dict[str, Any]:
     return json.loads((results_dir / f"scheme_{scheme}.json").read_text())
 
 
+# The two tuning drivers name the untuned arm differently in their per-scheme
+# checkpoints: run_scm_rce_convection_tuning.py writes "a_priori",
+# run_scm_rce_convection_intercomparison.py writes "prior".  Read both rather
+# than teaching one driver to duplicate the other's key — a silent {} here
+# would drop the dashed a-priori curve from every panel and look like a
+# plotting choice.
+_APRIORI_KEYS = ("a_priori", "prior")
+
+
+def _arm(rec: dict[str, Any], tuned: bool) -> dict[str, Any]:
+    if tuned:
+        return rec["tuned"]
+    for key in _APRIORI_KEYS:
+        if key in rec:
+            return rec[key]
+    raise KeyError(
+        f"per-scheme checkpoint has no a-priori arm; expected one of "
+        f"{_APRIORI_KEYS}, got {sorted(rec)}"
+    )
+
+
 def _ff(x: Any) -> float:
     try:
         return float(x)
@@ -139,8 +160,8 @@ def _profile_grid(
         rec = records[scheme]
         ax.plot(ref_profile * scale, pressure_hpa, color=REF_COLOR, lw=1.3,
                 zorder=3)
-        ap = rec["a_priori"].get(key)
-        tu = rec["tuned"].get(key)
+        ap = _arm(rec, tuned=False).get(key)
+        tu = _arm(rec, tuned=True).get(key)
         if ap:
             ax.plot(np.asarray(ap) * scale, pressure_hpa, color=SCM_COLOR,
                     lw=1.05, ls=(0, (4, 2)), zorder=4)

@@ -18,10 +18,32 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - ERA5: `era5_to_state.py` lat-lon → grid, Zarr cache.
 - Losses: `training/losses.py` imports `ml/loss.py`. No dup.
 - **MPI AD**: `global_sum_mpi` (allreduce SUM) full VJP. MPI halo: `_sendrecv_vjp` custom_vjp. `fix_mass`/`zero_mean_tendency` flow grads via global reductions. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
+- **NO INERT PARAMETERS EVER (STRICT, user 2026-08-17).** Every leaf of a trainable pytree must carry loss gradient. Mode-inactive params get frozen OUT of the trainable set (`_inactive_keys` pattern), and the first training step gates the rest via `assert_no_inert` (`train_land_params_era5.py`) — a zero-gradient leaf aborts the run. Any new trainer/calibrator adopts both pieces; a param "wired in but off" without being frozen out is a defect.
 
 ## Operating Mode
+- **TERSE BY DEFAULT.** Drop articles/filler/pleasantries/hedging; fragments fine. Report `[thing] [state] [next]`, not prose. No restating what was just done, no feature tours, no explaining a simplification at more length than the code. Numbers/tables over narration. Full prose ONLY when asked for it (report/walkthrough), or for security warnings, irreversible-action confirmations, and multi-step sequences where fragments risk misread. Code/commits/PRs/docstrings: written normally.
+- **DO WHAT WAS ASKED — DO NOT EXTRAPOLATE.** Deliver the requested thing, then STOP and report. Do not invent adjacent work because it seems useful: no unrequested helper/launcher/benchmark scripts, no extra files staged "for later", no speculative refactors, no scope widened from "fix X" to "also improve Y". If adjacent work looks warranted, NAME it in one line and let the user choose — do not pre-build it. Uncertain whether something is in scope? It is not; ask. Over-delivery is not helpfulness: it costs review time, buries the actual change, and creates artifacts nobody vetted.
+- **Irreversible / outward-facing actions need explicit permission EVERY time**: rewriting published history (`push --force*`), amending/squashing pushed commits, deleting or overwriting files the user created, `git reset --hard`, closing/merging PRs, installing or upgrading system packages, reboots. Approval for one such action does NOT carry to the next. Propose, then wait.
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
+- **DUAL adversarial review MANDATORY — TWO independent reviewers, never one**
+  (user directive 2026-08-12, restated as a STRICT rule 2026-08-13). The author
+  NEVER reviews its own code. Route by who WROTE the code — the two reviewers
+  are always the other two:
+  **Claude-authored → codex + GLM-5.2** (`mcp__zai__ask_glm`);
+  **GLM-authored → codex + Claude**;
+  **codex-authored → Claude + GLM-5.2**.
+  Both BEFORE the PR, not after; report both verdicts in the PR body and in the
+  status line. Subagents doing implementation must be told to run BOTH — they
+  default to codex only. Applies to measurement harnesses and probes too: the
+  instrument decides what we believe.
+  Why two: they catch DIFFERENT classes. Codex finds diff defects (broken
+  contracts, vacuous tests that cannot fail, silent fallbacks, binding gates
+  that accept the wrong arm). GLM finds MECHANISM defects (wrong objective,
+  wrong regime, a lever whose premise the receipts already falsified — it
+  retracted its own top-ranked lever once measurement contradicted it).
+  Reviewer disagreement is SIGNAL, not noise: name the disputed point and the
+  measurement that discriminates, run it if cheap, never average the two.
 - **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict.
   **If the review SUBAGENT dies (spend limit, API error), that is NOT a review
   waiver — the codex CLI is a separate binary with separate credentials and is
@@ -201,6 +223,34 @@ explicitly that you did not. "I was careful" is not compliance.
   clamp to the lookup-table range is one call deeper in
   `rrtmgp/optics/cloud_optics.py`. Same class as blaming a line without proving
   its enclosing function runs.
+- **BEFORE ATTRIBUTING A BIAS TO A COMPONENT, PROVE THE COMPONENT EXISTS AND
+  RUNS IN THE CONFIG UNDER TEST.** An ABSENT component and a BADLY-TUNED one
+  give the SAME symptom, and every tuning arm against an absent component
+  returns null. Enumerate, from the RESOLVED config and the LANE'S code path
+  (not the deck's comments): the scheme, its PROGNOSTIC STATE, and its inputs.
+  No prognostic state -> say so out loud; that is usually the finding.
+  Corollaries, each earned:
+  (a) **A `false` on a component switch does not mean "the simpler version" —
+  it may mean NOTHING.** Check what the lane actually falls back to.
+  (b) **A DECK COMMENT NAMING A FALLBACK IS A POINTER, NOT A FACT** (the prose
+  rule, applied to configs): grep the named symbol in that lane's setup.
+  (c) **When N different schemes for component A all fail to move a bias, STOP
+  TUNING A.** The limiter is upstream, or A's inputs are wrong.
+  (d) **A parameter wrong at BOTH ENDS of a physical range is a MISSING
+  DEPENDENCE, not a mistuning** — the thing it should depend on is not read.
+  FAILURE 2026-08-15, the most expensive of the campaign: the MPAS AMIP deck
+  set `use_multilayer_land: false` with the comment "this deck runs the slab".
+  There is NO slab land on the MPAS lane (`slab_land_active` is wired only on
+  the cube/general path), so the runs had **no land surface model at all** —
+  land T_sfc was the nearest OCEAN's prescribed SST minus 6.5 K/km, and land
+  evaporation a fixed 0.6 of saturation, with no soil, no water store, no
+  runoff, no stomata, no surface energy balance. Tropical deserts evaporated
+  3.5x observed and the rainforest 0.73x FROM THE SAME CONSTANT (corollary d,
+  unnoticed); sensible heat was ~25 W/m2 on Sahara and Amazon alike. Waves
+  9-11 spent GPU-hours swapping FIVE convection schemes and a dozen trigger
+  knobs against a tropical-land rain deficit no convection scheme could ever
+  fix (corollary c, unnoticed). Interactive soil moisture, bucket hydrology
+  and stomatal control are DEFAULTS for an AMIP case, not options.
 - **A GLOBAL STATISTIC ON A NON-UNIFORM GRID NEEDS AREA WEIGHTS.** Never
   `np.mean(field)` for a global mean on lat-lon (or any stretched grid) — use
   `cos(lat)` or the model's `areacella`. FAILURE: reported "+17 hPa of dry mass
@@ -556,6 +606,7 @@ prefer a small verified diff over a large plausible one.
 - Too expensive: say what ran/didn't, residual risk.
 - **CRITICAL — Controlled comparison: change ONE variable, hold the eval protocol FIXED to the baseline.** To claim a change (resolution, params, scheme, days) improved/degraded/"is comparable" vs a prior result, keep EVERYTHING else byte-identical to that baseline: forcing data + its sampling (years/days/hours/climatology), evaluation grid, metric definition (bias vs RMSE), region masks, timestepping. A metric that moved because the protocol/sampling changed is a **CONFOUND, not a result** — NEVER compare a number computed on one sampling/grid/metric to a number from another and call the difference an effect. If a resource limit (network cap, compute, time) forces a lighter or different sampling, **re-run the BASELINE at that SAME sampling before comparing** — a fresh baseline is cheap insurance; a confounded claim is not. Before writing "improved"/"degraded"/"better"/"comparable" vs any earlier number, explicitly confirm the two configs differ ONLY in the variable under test; if you cannot, say so and claim NO direction. Report the full config (data+sampling, grid, days/steps, params, metric) next to every number so the reader knows exactly what is being compared. Assuming two runs are comparable when the setup drifted is the error that turns "we improved it" into "we degraded it."
 - **CRITICAL — Precision gate for comparison/skill/causal claims (do NOT be sloppy — 2026-07-20 EC-site lesson).** (a) **Harness self-check FIRST**: before reporting a NEW scheme's skill vs a validated baseline, run the KNOWN baseline through your OWN harness and confirm it reproduces the baseline's established/published number (±small tol). If your harness scores a validated scheme wildly off — e.g. two-leaf H looked "broken" (NSE≈−1) when the paper figure tracks obs — the HARNESS is wrong; fix it BEFORE any new-scheme claim. (b) **Match the reference metric EXACTLY**: metric aggregation (daily-mean vs half-hourly point-wise NSE), window (multi-year JJA vs one summer), masks (valid-forcing) are ALL part of the protocol. Report the SAME metric the reference used, plus any alternative, WITH the sample N. A single-window point-wise metric is NOT a skill verdict, and never rank schemes by a metric that punishes one scheme's known artifact (point-wise scatter/spikes) while ignoring the dimension of interest (mean diurnal shape). (c) **Never let a QC mask flatter one side**: if you drop a scheme's unphysical spikes from scoring, report BOTH the failures-penalized primary score AND the separately-labeled plausible-only sensitivity score. (d) **Do NOT INFER causal origin — INSTRUMENT it**: "the spikes come from X" requires LOGGING X and the alternatives (raw vs intermediate vs final), not deduction from reading one code path; "correctly hooked up" requires reading the FULL path, not the entry point. (e) **Label every claim CONFIRMED (evidence shown) vs PLAUSIBLE (inferred)** — adversarial review WILL refute over-confident inferences; state uncertainty up front rather than presenting a verdict table that a five-minute check overturns.
+- **CRITICAL — A gradient/AD-tuning result that underperforms a known-good baseline is a BUG in your method until PROVEN otherwise — never attribute it to physics.** Before interpreting ANY optimizer/AD tuning outcome, or attributing a residual error to a physical cause (radiation, resolution, a scheme's structure): (1) **The differentiated loss MUST be the exact quantity you evaluate and report.** A truncated-BPTT / short-window / stop-gradient'd-spinup / cached-state proxy that differs from the full evaluation is an OBJECTIVE MISMATCH, not a result — the optimizer minimizes the proxy while the eval barely moves. Differentiate the real objective (e.g. the full RCE equilibrium the eval scores), or prove the proxy is tight. (2) **Verify AD actually flows:** a finite-difference check on ≥1 parameter (analytic grad vs `(L(x+ε)−L(x−ε))/2ε`, ratio≈1) and confirm gradients are finite AND non-negligible (not silently zeroed by `stop_gradient`, a frozen/`enable_*=False` leaf, a `lax.stop_gradient`/`jax.lax.cond` dead branch, or a detached recompute). (3) **Sanity vs the known-good baseline FIRST:** if a derivative-free or prior method got large improvements and your gradient method barely moves the loss, YOUR optimization is broken (weak objective, tiny effective LR, over-aggressive line-search backtracking to ~0 step, frozen leaves) — fix it before drawing conclusions. Concluding "the residual bias is radiative/structural, not tunable" from a run whose optimizer never actually worked is the exact error that ships a FALSE scientific claim. Near operationalization this is disqualifying: a barely-moving loss, a suspiciously-flat before/after, or a result that contradicts a known-good baseline BLOCKS delivery until the gradient path is verified end-to-end. See [[feedback_verify_ad_before_physics]].
 - **CRITICAL — Visual verify spatial/grid artifacts**: passing tests+norms NECESSARY ≠ SUFFICIENT for cubed-sphere ops, halo exchange, diffusion coeffs, grid metrics. Edge artifacts/cube imprint/grid-scale noise only detected visually (v-wind W2, wind_speed W5). Run `--only sw --grid cubed_sphere --quick` + inspect PNGs vs baseline. Norms can improve while artifacts worsen. Never claim "tests pass, edge fixed" from pytest alone.
 - **Diffusion sensitivity**: div damping + hyperdiff AMPLIFY halo errors at cubed-sphere face boundaries. Check W2 v-wind visually when touching `_hyperdiff_cube`, `_div_damp_cube`, diffusion params.
 - **Visual-regression gate (cube imprint)**: `scripts/validate/visual_regression.py --check` numericises the W2 v-wind cube-imprint check (SSIM + per-panel perceptual hash + edge-artifact ratio vs tiny committed ref in `tests/visual_baselines/`). Deterministic metric math gated in CI (`tests/test_visual_regression_metrics.py`); full cube-SW `--check` runs as a NIGHTLY non-blocking CI job until tolerances are calibrated across CI hardware. Tiny numeric baselines (.npy+json) ARE tracked — the one carve-out to "no tracked visual baselines".
@@ -685,6 +736,42 @@ Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `te
 Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
+
+**STRICT RULE, EVERY SESSION, EVERY MODEL (Opus included): be succinct AND
+clear.** Not a style preference, not a default that decays over a long session.
+Succinct = answer first, ~60 words, bullets not paragraphs (RULE 0). Clear =
+plain words a colleague outside this repo can act on, no bare identifiers
+(RULE -1). Both must hold; a reply that fails either one is a failed reply.
+
+### RULE -1 — CLARITY IS THE HARD RULE. IF THE USER CANNOT FOLLOW IT, IT FAILED.
+User, 2026-08-12 (and 2026-08-07, 2026-08-11 — same complaint every time):
+*"Ensure you are clearer — I have no clue what you are saying most of the
+time."* This outranks brevity: a short reply nobody understands is worse than
+no reply. Brevity was already being followed when this was said; the defect is
+UNEXPLAINED INTERNAL DETAIL, not length.
+
+MECHANICAL TEST, apply to every sentence before sending: could a colleague who
+knows climate modelling but has never opened this repo act on it? If it needs a
+file name, a function name, a job id, or a flag to make sense — REWRITE IT.
+
+- Say the THING, not the SYMBOL. "the model runs radiation 18 times more often
+  than intended", not "split_rad=False makes rad_update_interval_steps inert".
+- NO identifiers in a reply: no file:line, no function names, no config keys,
+  no job ids, no PR numbers, unless the user asked for that exact thing. They
+  belong in the commit message. A number the user should act on is fine.
+- One idea per line. If a line has a clause explaining a clause, split it.
+- State the CONSEQUENCE first, the cause second, and stop. Not the mechanism,
+  not how it was found, not who found it.
+- Never write a sentence whose subject is a piece of code. The subject should
+  be the model, the run, the campaign, the number, or the user's decision.
+- When something is wrong, lead with what is now false and what to do. Not
+  with a narrative of the discovery.
+- A question to the user is numbered options in plain words, with your pick.
+
+FAILURE PATTERN, all three callouts: long autonomous stretches. Each status
+reply drifted back into repo-internal vocabulary ("the pin", "the waiver", "the
+factory", "the skeleton") that means nothing outside this session. Re-read this
+section whenever a session runs long, and before every status report.
 
 ### RULE 0 — HARD CAP ~60 WORDS. ANSWER FIRST. STANDING ORDER, ALL SESSIONS.
 Five callouts in two days (2026-08-07/08). Not a style preference — a cap.

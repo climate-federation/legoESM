@@ -231,7 +231,13 @@ def test_analytic_cold_point_matches_the_oracle():
     base = _load_baseline()
     T_o = np.asarray(base["T"], dtype=np.float64)
     T_cold_o = float(T_o.min())
-    T_cap = ic.WING_T_V0 - ic.WING_GAMMA * ic.WING_Z_T   # virtual == actual, q_t~0
+    # The gSAM-SOUNDING calibration is what this gate is about: it is the
+    # triple that was fitted THROUGH the oracle's cold point.  The module
+    # DEFAULTS are the published RCEMIP protocol (Wing Eq. 3), whose analytic
+    # cap sits ~8 K warmer by construction — asserting the oracle fit against
+    # the protocol constants would be asserting that two different things are
+    # the same thing.  See test_module_defaults_are_the_published_protocol.
+    T_cap = ic.GSAM_SND_T_V0 - ic.GSAM_SND_GAMMA * ic.WING_Z_T  # virtual == actual, q_t~0
     assert abs(T_cap - T_cold_o) <= _ANALYTIC_COLD_POINT_TOL_K, (
         f"analytic tropopause cap {T_cap:.3f} K vs oracle cold point "
         f"{T_cold_o:.3f} K. Fix the CONSTANTS, not this tolerance — a fit that "
@@ -253,8 +259,8 @@ def test_analytic_fallback_is_anchored_to_the_oracle():
     for a faithful RCEMIP1 column.
     """
     base = _load_baseline()
-    e = _analytic_errors(ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT,
-                         base)
+    e = _analytic_errors(ic.GSAM_SND_T_V0, ic.GSAM_SND_GAMMA,
+                         ic.GSAM_SND_Q_SFC, base)
     # NOTE dq_sfc_rel is ~0 BY CONSTRUCTION for the shipped q_sfc: it is
     # defined as the value that reproduces the sounding's lowest level through
     # this very shape function. It is kept because it is NOT vacuous for the
@@ -293,11 +299,37 @@ def test_analytic_fallback_is_not_supersaturated():
     future recalibration needs the scope back, that is a signal about the
     calibration, not a licence to narrow the gate.
     """
-    z_hit, rh = _first_supersaturated_z(
-        ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT, z_max=30_000.0)
-    assert z_hit is None, (
-        f"analytic IC supersaturates at z={z_hit:.0f} m "
-        f"(max RH {rh.max():.3f} over 0-30 km)")
+    for label, triple in (
+            ("protocol defaults",
+             (ic.WING_T_V0, ic.WING_GAMMA, ic.WING_Q_SFC_DEFAULT)),
+            ("gSAM-sounding calibration",
+             (ic.GSAM_SND_T_V0, ic.GSAM_SND_GAMMA, ic.GSAM_SND_Q_SFC))):
+        z_hit, rh = _first_supersaturated_z(*triple, z_max=30_000.0)
+        assert z_hit is None, (
+            f"{label}: analytic IC supersaturates at z={z_hit:.0f} m "
+            f"(max RH {rh.max():.3f} over 0-30 km)")
+
+
+def test_module_defaults_are_the_published_protocol():
+    """The module ships the PUBLISHED RCEMIP-1 constants, not the gSAM fit.
+
+    Which triple is the default is a scientific choice with consequences for
+    every consumer that calls the wing2018_* functions bare, so it is pinned
+    rather than left to a comment.  Wing et al. (2018) Tab A1 / Eq. (3):
+    Gamma = 0.0067 K/m, q0 = 18.65 g/kg at SST 300 K, T_v0 = T0(1+0.608 q0).
+    """
+    assert ic.WING_GAMMA == pytest.approx(0.0067, abs=1e-12)
+    assert ic.WING_Q_SFC_DEFAULT == pytest.approx(0.01865, abs=1e-12)
+    assert ic.WING_T_V0 == pytest.approx(
+        ic.wing2018_T_v0(300.0, 0.01865), rel=1e-12)
+    # ... and the alternative is still available, unmixed, for a caller that
+    # wants gSAM's own initial column.
+    assert ic.GSAM_SND_GAMMA == pytest.approx(0.0069901, abs=1e-12)
+    assert ic.GSAM_SND_T_V0 == pytest.approx(299.274, abs=1e-9)
+    assert ic.GSAM_SND_Q_SFC == pytest.approx(0.0142014, abs=1e-12)
+    # The two are materially different — a test that passed for both would be
+    # measuring nothing.
+    assert abs(ic.WING_T_V0 - ic.GSAM_SND_T_V0) > 3.0
 
 
 def test_pre_oracle_constants_fail_the_gate():
