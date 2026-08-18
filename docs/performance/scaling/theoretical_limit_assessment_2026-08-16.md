@@ -230,6 +230,35 @@ Ranked levers:
    Compute cost bound: interior pass over all rows + rim pass over rim
    rows = 1 + rim_frac of today's compute; wins iff hidden wire >
    rim_frac * compute.
+   DESIGN REVIEW VERDICTS (2026-08-18, both reviewers):
+   - GLM: mechanism sound (shared reads don't serialize; SSA), rim
+     subset recompute is the right shape (break-even rim ~40-60%),
+     scatter-overwrite with unique_indices is AD-exact (grads flow
+     through the SECOND value by construction), ghosts must be
+     STALE-FINITE never NaN (0*NaN backward hazard), receipts =
+     bitwise-vs-unsplit + NaN-poison forward. Prefer the LAYOUT-SPLIT
+     formulation (interior-prefix/rim-suffix packed arrays — no
+     scatter at all) if reindexing is acceptable.
+   - codex: the win is NOT obtainable by scattering rows from a second
+     full call to the tendency function (it always evaluates full
+     arrays) — a SUBSET/rim execution path in the RHS, or a compact
+     static rim submesh fed to the unchanged RHS, is REQUIRED. Rim
+     membership must come from the ACTUAL dependency graph (PV via
+     vertices + kiteAreas, APVM, del4, edgesOnEdge tangential paths),
+     not cellsOnCell hops alone — the committed `_build_rim_rings`
+     (cell-hop BFS) is a conservative approximation whose width must
+     be VERIFIED by the ghost-poison test before any receipt. Change
+     surface: `_ragged_halo_fill` (factor pre-fill buffers),
+     `_make_local_wide_step` (launch fill -> interior work -> rim
+     patch of all four tendency channels), new static rim plan
+     threaded through `make_voronoi_sharded_step`. Seven existing
+     gates must stay green (wide equivalence, AD, native parity,
+     SPMD-vs-serial, ragged schedule, multicontroller parity) + a new
+     GPU split-vs-unsplit integration gate (CPU cannot run the ragged
+     collective).
+   STATUS: spec complete, build NOT started — this is the next major
+   work item; est. multi-session. The rim ring builder + tests are
+   committed (65eaea84d).
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
