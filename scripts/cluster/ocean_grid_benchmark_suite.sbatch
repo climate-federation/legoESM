@@ -4,6 +4,20 @@
 # cubed_sphere / spectral where registered).
 #
 # Submit:  sbatch --array=0-8 scripts/cluster/ocean_grid_benchmark_suite.sbatch
+#
+# Then:    .venv/bin/python scripts/plot/plot_ocean_grid_benchmark_maps.py
+#          -> results/ocean_grid_benchmark/maps/{maps_<case>,maps_all_cases}.{png,pdf}
+#
+# Runs from the checkout the SCRIPT lives in, not a hardcoded path, and pins
+# PYTHONPATH to that same checkout. Both matter: the venv is an editable
+# install pointing at ONE working copy, so a job launched from a worktree
+# without this ran that worktree's scripts against a DIFFERENT copy's library
+# code. When that other copy had uncommitted work in progress, seven arms
+# failed with an error that belonged to somebody else's branch.
+#
+# The tripole arm needs data/grids/eORCA1.2_mesh_mask.nc (~480 MB). It is not
+# in git; symlink it from a checkout that has it, or those arms error and the
+# figure shows an empty column.
 #SBATCH --job-name=ocn-bench
 #SBATCH --account=bd1083_gpu
 #SBATCH --partition=gpu
@@ -15,8 +29,13 @@
 #SBATCH --output=logs/ocnbench_%A_%a.out
 #SBATCH --error=logs/ocnbench_%A_%a.out
 set -euo pipefail
-REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
+# The checkout this script belongs to, so a worktree runs ITS OWN code.
+# Override with REPO=... only when you mean to.
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$REPO"; mkdir -p logs
+# Pin the library to the same checkout; see the note at the top.
+PYTHONPATH="$(printf '%s:' "$REPO"/packages/*/ )$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
 CASES=(rest_state_stratified_with_land rest_state_uniform_with_land \
        rest_state_stratified_no_land rest_state_uniform_no_land \
        geostrophic_adjustment phillips_two_layer inertia_gravity_wave \
