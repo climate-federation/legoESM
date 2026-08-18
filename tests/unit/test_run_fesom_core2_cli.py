@@ -24,31 +24,55 @@ def test_arg_parser_round_trip():
 
 
 def test_snapshot_writer_conventions(tmp_path):
-    """Writer must emit the comparator's node-cloud conventions: (n, nlev)
-    tracers, degrees in [-180, 180], land_mask 1.0 == OCEAN, positive-down
-    depths -- and tolerate fesom-jax's level-first state orientation."""
-    n, nlev = 7, 4
+    """Writer must emit the comparator's node-cloud conventions: (n, nreal)
+    tracers (padded bottom slot sliced off), degrees in [-180, 180],
+    land_mask 1.0 == OCEAN, positive-down depths.  The state contract is
+    NODE-first (nod2D, nl) with nl = nreal + 1 padded slots; the writer
+    REFUSES level-first input rather than heuristically transposing (codex
+    FESOM-arm hardening) -- the old 'tolerate level-first' expectation was
+    stale against that guard."""
+    n, nreal = 7, 3
+    nl = nreal + 1                                       # +1 padded bottom slot
     mesh = types.SimpleNamespace(
         nod2D=n,
         geo_coord_nod2D=np.stack(
             [np.deg2rad(np.linspace(10.0, 350.0, n)),    # lon rad, wraps >180
              np.deg2rad(np.linspace(-60.0, 60.0, n))], axis=1),
-        node_layer_mask=np.ones((n, nlev), dtype=bool),
-        Z=-np.array([5.0, 15.0, 30.0, 60.0]),            # negative-down inside
+        node_layer_mask=np.ones((n, nl), dtype=bool),
+        Z=-np.array([5.0, 15.0, 30.0]),                  # nreal midpoints
         depth=-np.full(n, 100.0),
     )
     state = types.SimpleNamespace(
-        T=np.arange(nlev * n, dtype=np.float64).reshape(nlev, n),  # level-first
-        S=np.full((nlev, n), 35.0),
+        T=np.arange(n * nl, dtype=np.float64).reshape(n, nl),  # node-first
+        S=np.full((n, nl), 35.0),
         eta_n=np.zeros(n), a_ice=np.zeros(n), m_ice=np.zeros(n),
     )
     p = m.write_snapshot(tmp_path, "day0001", state, mesh)
     z = np.load(p)
-    assert z["T"].shape == (n, nlev)                     # node-first out
-    assert z["T"][0, 1] == state.T[1, 0]                 # transpose, not reshape
+    assert z["T"].shape == (n, nreal)                    # padded slot sliced
+    assert z["T"][0, 1] == state.T[0, 1]                 # passthrough layout
     assert z["lon_T"].min() >= -180.0 and z["lon_T"].max() <= 180.0
     assert z["land_mask"].min() == 1.0                   # 1.0 == OCEAN
     assert (z["z_center_ref"] > 0).all() and (z["H_bathy"] > 0).all()
+
+
+def test_snapshot_writer_refuses_level_first(tmp_path):
+    """The guard that replaced the transpose heuristic must actually fire."""
+    import pytest
+    n, nl = 7, 4
+    mesh = types.SimpleNamespace(
+        nod2D=n,
+        geo_coord_nod2D=np.zeros((n, 2)),
+        node_layer_mask=np.ones((n, nl), dtype=bool),
+        Z=-np.array([5.0, 15.0, 30.0]),
+        depth=-np.full(n, 100.0),
+    )
+    state = types.SimpleNamespace(
+        T=np.zeros((nl, n)), S=np.zeros((nl, n)),        # level-first: refuse
+        eta_n=np.zeros(n), a_ice=np.zeros(n), m_ice=np.zeros(n),
+    )
+    with pytest.raises(SystemExit):
+        m.write_snapshot(tmp_path, "day0001", state, mesh)
 
 
 def test_forcing_flag_round_trip_and_default():
