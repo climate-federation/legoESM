@@ -1,0 +1,124 @@
+# The 10-year cold-start spin-up that PRODUCED the published LMIP biophysics
+# soil-state IC (docs/land/lmip_biophys_soil_ic_spinup.md) — committed so the
+# IC's provenance is a runnable config, not a description.
+#
+# What the IC is: the end-of-run land restart (restart_1985_d000h00.npz) of this
+# run — spun-up soil moisture + soil temperature profiles (10 layers / 3.0 m),
+# snow and canopy state for every land column at ~2 deg, after 10 years of
+# CRU-JRA forcing (1975-1984, noleap), calibrated biophysics.  Warm-starting
+# from it replaces this ~8 h A100 spin-up.
+#
+#   # fetch the published IC (Zenodo record 21986853, concept DOI
+#   # 10.5281/zenodo.21986852; md5-pinned in the script):
+#   ./scripts/data/download_lmip_data.sh --soil-ic-only
+#
+#   # consume the IC (any biophysics LMIP run on the SAME grid + soil grid):
+#   python scripts/run/run_lmip_biophys.py --config <your config.yaml> \
+#       --output-dir <dir> \
+#       --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz
+#   # or, via the experiment workflow:
+#   python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
+#       --name prod --output-dir <dir> --machine derecho_gpu \
+#       -o forcing.year_start=1985 -o forcing.year_end=1994 \
+#       -o restart.from=data/lmip_soil_ic/restart_1985_d000h00.npz
+#
+#   # rebuild the IC = run THIS file (forcing years 1975-1984 must be staged):
+#   python scripts/run/run_lmip_biophys.py \
+#       --config config/lmip/lmip_biophys_soil_ic.yaml --output-dir <dir>
+#
+# SCHEMA NOTE: unlike the sibling lmip_carbon_ic.yaml (argparse dests for
+# run_lmip.py, the single-point driver), this is a fully-resolved experiment
+# config for run_lmip_biophys.py --config (the global biophysics driver), i.e.
+# the config.yaml that scripts/run/init_experiment.py generates.
+#
+# The restart loader is fail-loud on the contract that matters: it raises on
+# restart-version, land_mode, land-column-count, or soil-layer-count mismatch.
+# It does NOT compare per-column coordinates — use the IC only on the exact
+# grid it was built on (latlon 90 x 180, 10 layers / 3.0 m).
+#
+# Faithful to the as-run config of experiment `spinup_1975_calib` (Derecho,
+# initialized 2026-07-28 from biophysics/lmip_calibrated_spinup at commit
+# 14461553438f18d336985870770c38a4555d3552 on lmip-calibrated-config,
+# JAX_ENABLE_X64=1 on GPU), with two deliberate edits for portability:
+#   * forcing.data_dir + surfdata.path are repo-relative (as-run they pointed at
+#     /glade/work/linnia/legoESM/data/...); stage with
+#     scripts/data/download_lmip_data.sh.
+#   * NOTE the as-run forcing was the glade "filled_antarct_and_grnlnd" CRU-JRA
+#     archive (prefix below).  The public CESM mirror serves the UNFILLED
+#     variant under a different prefix, so an off-NCAR rebuild differs over
+#     Antarctica/Greenland — see the runbook's rebuild section.
+#
+# The output tapes are as-run (2026-07-27 template state, BEFORE budget-closure
+# taping was added to the templates).  Tapes are diagnostics only — they do not
+# affect the model state, so the restart/IC is unaffected by the tape list.
+
+template_name: biophysics/lmip_calibrated_spinup
+template_version: 1.0.0
+description: 10-year cold-start spin-up, calibrated biophysics LMIP, 2 deg latlon,
+  hourly, two-leaf canopy + MOST
+
+grid:
+  type: latlon
+  resolution: 90                  # 90 x 180 ~ 2 deg
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy # mechanistic canopy (intrinsic Ball-Berry stomata)
+  bulk_scheme: most               # stability-dependent surface exchange (land)
+  stomatal_model: ball_berry
+  snow_albedo_feedback: true
+  snow_scheme: single             # bulk SWE budget — the stable production scheme
+  enable_freeze_thaw: true        # REQUIRED globally: without it boreal columns NaN
+  # The three 2026-07 calibration selectors (see the calibrated templates for
+  # the full rationale + how to revert each one for a controlled comparison):
+  albedo_calibration: amip_multilayer   # ERA5-tuned snow/glacier albedo
+  soil_n_layers: 10                     # AMIP-parity soil grid (10 / 3.0 m);
+  soil_depth_m: 3.0                     # growth_factor 2.0 -> 2.93 mm top layer
+  soil_growth_factor: 2.0
+  root_calibration: amip_multilayer     # per-PFT root depth + theta_wp/theta_fc
+  # Stomatal/photosynthesis knobs at per-PFT surfdata defaults (uncalibrated;
+  # #730 GPP bias applies — see runbook "Known limits"):
+  vc_max25: null
+  g1: null
+  gs_max: null
+  stomata_enabled: false          # SimpleSEB-only Jarvis path; inert for the canopy
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5
+  suffix: ''
+  year_start: 1975
+  year_end: 1984                  # 10 contiguous spin-up years
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+  land_cover_dataset: clm5
+
+time:
+  dt: 3600.0                      # 1 h
+  n_steps: 87600                  # 10 years hourly (10 * 8760, noleap)
+  start_doy: 0.0
+
+restart:
+  from: ''                        # COLD START — this run IS the spin-up
+
+land_frac_min: 0.0
+land_mask_file: ''
+
+output:
+  tapes:
+  - name: monthly
+    freq: monthly
+    average: mean
+    vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap,
+           runoff, precip, reverted]
+  - name: monthly_state
+    freq: monthly
+    average: inst
+    vars: [T_soil_top, theta_soil_top, snow_depth]
+  - name: annual
+    freq: annual
+    average: mean
+    vars: [T_sfc, shflx, lhflx, runoff, precip]
