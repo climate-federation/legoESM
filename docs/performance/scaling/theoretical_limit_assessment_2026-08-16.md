@@ -236,6 +236,21 @@ Known blockers and exits:
    microbench the 2-D pad body alone @16-64 first (prices fold +
    corner traffic); only then wire the GPU lane. The √-bytes claim
    is unpriced until then.
+2b. **The 192-rank hang RESOLVED to a thin-band trigger (2026-08-18,
+   job 27036060): LL2880@192 (15-row bands) runs clean — 6.74 ms,
+   63.98 GC/s, the lane's best throughput — while LL2304@192 (12-row
+   bands) deadlocks NCCL channel setup on the first call.** Seven
+   candidates refuted along the way (latency-hiding scheduler,
+   fused-halo path, XLA comm-splitting, CUMEM allocator, mcp2p pair,
+   P2P transport, eager connect); rank count refuted by this receipt
+   and by 16-row bands at 144 working. The same 12-row program runs
+   fine on CPU virtual devices, so the comm pattern is legal —
+   NCCL-specific init behaviour under the thin-band halo/pole-window
+   graph. PRACTICAL RULE until root-caused in the pad-window code:
+   keep bands ≥ ~15 rows (n_lat/n_dev ≥ 15); the preflight should
+   refuse thinner. Root-cause hunt = code reading of the band
+   halo/pole-fold window construction at nrows=12, no cluster time
+   needed to start.
 3. Harness: the in-flight 192 arms run **12 timed steps**; the
    campaign's own lesson is 12 steps = 7.7 % spread on identical
    arms, 60 steps = 0.3 %. Fine for "does it run at 192 / rough
