@@ -37,7 +37,9 @@ python -c "import jax; print(jax.devices())"       # must list a GpuDevice
 # … one call per year you want to force with
 ```
 This symlinks CRU-JRA `Solr/Prec/TPQWL` from glade into `data/crujra/`, and
-downloads the CLM5 surfdata from Zenodo into `data/legoesm_surfdata_c260716.nc`.
+downloads from Zenodo the CLM5 surfdata (`data/legoesm_surfdata_c260716.nc`)
+and the published spun-up 2° soil-state IC (`data/lmip_soil_ic/`, md5-pinned —
+see `docs/land/lmip_biophys_soil_ic_spinup.md`).
 
 ---
 
@@ -216,9 +218,11 @@ qsub -A $ACCT $ROOT/prod_1985/run.sh
 # ... then 1995-2004 from prod_1985's restart_1995, 2005-2014 from restart_2005.
 ```
 
-Phase 0 can be skipped: its end state is published (Zenodo record 21986853,
-`restart_1985_d000h00.npz`) — download it and point the first production
-block's `restart.from` at it.
+Phase 0 can be skipped: its end state is published (Zenodo record 21986853) —
+`./scripts/data/download_lmip_data.sh --soil-ic-only` stages it, then point the
+first production block's
+`restart.from` at `data/lmip_soil_ic/restart_1985_d000h00.npz`.
+See `docs/land/lmip_biophys_soil_ic_spinup.md` for its scorecard and limits.
 
 For the 30-year analysis, open all per-year monthly files at once:
 `xarray.open_mfdataset("$ROOT/prod_*/lmip_biophys.monthly.????.nc", combine="by_coords")`.

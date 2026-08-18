@@ -17,7 +17,7 @@
 #       --output-dir <dir> \
 #       --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz
 #   # or, via the experiment workflow:
-#   python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
+#   python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \
 #       --name prod --output-dir <dir> --machine derecho_gpu \
 #       -o forcing.year_start=1985 -o forcing.year_end=1994 \
 #       -o restart.from=data/lmip_soil_ic/restart_1985_d000h00.npz
@@ -52,6 +52,8 @@
 # taping was added to the templates).  Tapes are diagnostics only — they do not
 # affect the model state, so the restart/IC is unaffected by the tape list.
 
+# template_name records the AS-RUN template; it has since been consolidated
+# into biophysics/lmip_biophys_2deg (same resolved physics, cold-start default).
 template_name: biophysics/lmip_calibrated_spinup
 template_version: 1.0.0
 description: 10-year cold-start spin-up, calibrated biophysics LMIP, 2 deg latlon,

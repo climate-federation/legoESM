@@ -49,7 +49,7 @@ python scripts/run/run_lmip_biophys.py --config <your config.yaml> \
     --output-dir <dir> --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz
 
 # experiment workflow (production block warm-started at 1985)
-python scripts/run/init_experiment.py biophysics/lmip_canopy_10yr \
+python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \
     --name prod --output-dir $ROOT/prod --machine derecho_gpu \
     -o forcing.year_start=1985 -o forcing.year_end=1994 \
     -o restart.from=data/lmip_soil_ic/restart_1985_d000h00.npz
@@ -107,7 +107,7 @@ walltime request (Derecho, `derecho_gpu` machine profile).
 for y in $(seq 1975 1984); do ./scripts/data/download_lmip_data.sh --year $y; done
 
 # 2. run (experiment workflow; or call run_lmip_biophys.py --config directly)
-python scripts/run/init_experiment.py biophysics/lmip_calibrated_spinup \
+python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \
     --name soil_ic_rebuild --output-dir $ROOT/soil_ic_rebuild --machine derecho_gpu \
     -o forcing.year_start=1975 -o forcing.year_end=1984
 cd $ROOT/soil_ic_rebuild && qsub -A <ACCT> run.sh
@@ -125,9 +125,10 @@ Notes that keep a rebuild honest:
   over Antarctica and Greenland. On glade, point `--crujra-src` at the filled
   archive (prefix `clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5`) to
   reproduce the published forcing.
-- **Template availability.** `biophysics/lmip_calibrated_spinup` ships on the
-  calibrated-config branch ([TBD-6: PR #]); until that merges, the committed
-  YAML above is the self-contained equivalent (same resolved physics).
+- **Template naming.** The IC was built from `biophysics/lmip_calibrated_spinup`,
+  since consolidated into `biophysics/lmip_biophys_2deg` (PR #1624, same
+  resolved physics — its cold-start defaults ARE this spin-up).  The committed
+  YAML above is the as-run record; the template is the living entry point.
 - **Tapes.** The as-built run predates budget-closure taping in the templates;
   a rebuild from the current template tapes more diagnostics. Tapes do not
   enter the model state, so the restart is unaffected.
@@ -231,12 +232,6 @@ science.
 | surfdata | `legoesm_surfdata_c260716.nc` (Zenodo record 21401647) |
 | forcing | CRU-JRA v2.5 `filled_antarct_and_grnlnd`, glade archive, years 1975–1984 |
 | product | `restart_1985_d000h00.npz`, 3.4 MB, md5 `e619b555cf6bd018a19ac8a52f77b52a`; Zenodo record 21986853 (concept DOI `10.5281/zenodo.21986852`). Fields: `T_soil`, `psi_soil`, `theta_soil`, `runoff_surface`, `runoff_subsurface`, `snow_depth`, `snow_age` (all `(16200, …)` float64) + bookkeeping (`restart_version` 1, `t_end_s` = 3.1536e8 s = exactly 10 noleap years, `n_steps_completed` 87600, provenance JSON) |
-
-## Before publishing (fill-in checklist)
-
-| tag | needed | where to get it |
-|---|---|---|
-| TBD-6 | calibrated-config PR number (the branch shipping `biophysics/lmip_calibrated_spinup`) | after opening it |
 
 ## Related
 
