@@ -292,7 +292,30 @@ Ranked levers:
    comm schedule that the plan never uses) — replace with a
    vectorized, comm-free compact-closure builder before any
    production-scale receipt.
-   GLM review of the phase-1 code itself still owed.
+   GLM review landed 2026-08-18 evening (r4) — the WIRING CHECKLIST,
+   each item mechanical:
+   (1) INTERIOR-EDGE LEAK (the big one): interior-classified edges with
+   wide tangential (edgesOnEdge) stencils read unfilled halo in the
+   pre-fill pass and are never overwritten; the static closure gate is
+   structurally blind (compares rim/scatter rows only). Fixes: edge rim
+   from edge-graph BFS or an overhang margin on the predicate, AND the
+   wiring receipt must be a BITWISE diff of ALL owned rows vs the
+   unsplit step (not rim rows only). rim FAR-edge exact-cover tripwire
+   added to the builder (this commit).
+   (2) padded-submesh runs need where-based masking (multiplicative
+   mask x NaN garbage leaks through row reductions) and a NaN-canary
+   bitwise assertion; mask BEFORE indexing (negative take wraps).
+   (3) buffer discipline: gather must read the post-wait receive
+   buffer (double-buffer if reused); no per-device reduction between
+   interior pass and rim overwrite (diagnostics/CFL stats included);
+   the tendency buffer must never be read by the interior pass.
+   (4) branch-dependent stencils (limiters, APVM upwind selection)
+   mean smooth-IC gates under-cover: production runs need a masked-
+   read assertion (any -1/external read on a non-pad row = hard error)
+   rather than outcome-only gates.
+   (5) sizing holds (submesh 0.2-1 ms vs 2-3 ms window) IFF the
+   submesh RHS is one pre-compiled static-shape call; budget against
+   the MIN rank window, not the mean.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a

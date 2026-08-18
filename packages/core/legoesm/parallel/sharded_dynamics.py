@@ -2770,6 +2770,18 @@ def _build_rim_plan(global_mesh, partitions, cell_rim, edge_rim,
         own_e_rows = np.where(
             (edge_rim[d, :n_owned_e] >= 0)
             & (edge_rim[d, :n_owned_e] <= rim_width))[0]
+        # EXACT-COVER tripwire (GLM r4 Q2.4): every device-owned edge
+        # must be classified — scatter (0..width) or interior (finite
+        # rim > width). A FAR owned edge (an adjacent cell absent from
+        # the device-local region) would be computed from garbage by
+        # the interior pass and never overwritten; refuse to build.
+        _own_rim = edge_rim[d, :n_owned_e]
+        if (_own_rim == _WIDE_RING_FAR).any():
+            _n_far = int((_own_rim == _WIDE_RING_FAR).sum())
+            raise ValueError(
+                f"rim plan device {d}: {_n_far} owned edges have FAR rim "
+                f"distance (adjacent cell missing from the device-local "
+                f"region) — neither scatter nor interior covers them")
         scatter_e_global = np.sort(
             np.asarray(part.local_edges)[own_e_rows])
         seed_cells = coe[:, scatter_e_global].ravel()
