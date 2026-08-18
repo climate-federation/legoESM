@@ -444,23 +444,27 @@ class TestComputeAMOCFromState:
             f"got {a_pos}"
         )
 
-    def test_sign_convention_negative_v_gives_negative_amoc(self):
-        """Anomalous reversed cell (v<0 surface) → reported AMOC negative.
-
-        ``moc_streamfunction`` makes ψ positive in this case; the
-        helper returns ``-min(positive)`` which is ≤ 0 (only the
-        non-zero positive peak counts so ``min`` picks zero —
-        meaning the AMOC is reported as a magnitude bounded above
-        by zero, signalling a collapsed cell).  The sign convention
-        is unambiguous: a reversed-cell run yields ≤ 0, never the
-        same positive value as the normal case.
-        """
-        v_neg, h, mask, grid, _ = self._make_synthetic(sign=-1.0)
+    def test_reversed_cell_reports_same_magnitude(self):
+        """SIGN-AGNOSTIC semantics (2026-08-11): psi's sign encodes grid
+        orientation, not physical direction -- this suite's own old
+        docstring said a reversed cell makes psi POSITIVE here, while on
+        the production tripole state the NORMAL cell's psi is positive
+        (which made the old -min() report -0.13 Sv against a
+        cross-validated 9.8 Sv).  The diagnostic now returns the
+        surface-referenced peak MAGNITUDE (amoc_core semantics), so a
+        reversed cell reports the same positive strength and direction is
+        not inferable from this scalar."""
+        v_pos, h, mask, grid, _ = self._make_synthetic(sign=+1.0)
+        v_neg, _, _, _, _ = self._make_synthetic(sign=-1.0)
+        a_pos = compute_amoc_from_state(
+            v_pos, h, mask, grid, target_lat_deg=26.5, basin="global",
+        )
         a_neg = compute_amoc_from_state(
             v_neg, h, mask, grid, target_lat_deg=26.5, basin="global",
         )
-        assert a_neg <= 0.0, (
-            f"Negative v should give non-positive AMOC; got {a_neg}"
+        assert a_pos > 0.0
+        assert a_neg == a_pos, (
+            f"magnitude must be orientation-invariant: {a_pos} vs {a_neg}"
         )
 
     def test_target_lat_out_of_range_returns_nan(self):

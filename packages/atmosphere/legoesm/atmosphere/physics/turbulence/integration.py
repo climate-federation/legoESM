@@ -295,6 +295,57 @@ def _resolve_T_sfc(T_col, phys_state):
     return jnp.where(override > SFC_T_OVERRIDE_VALID_MIN, override, fallback)
 
 
+def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
+    """Fold a per-step PRESCRIBED surface kinematic flux into the scheme config.
+
+    The sibling of :func:`_resolve_T_sfc`, and it exists for the same reason:
+    the nine closures share one signature that carries no clock, so a case
+    whose surface flux VARIES IN TIME (a diurnal cycle -- Wangara Day 33) has
+    no way to reach them through ``SurfaceLayerConfig``, which holds a single
+    run-constant scalar.  The SCM writes the current value into
+    ``phys_state.surface_wth_override`` / ``surface_wqv_override`` before every
+    tendency evaluation and this rewrites the config leaf the closure already
+    reads, so no closure signature changes and no scheme learns about time.
+
+    Units and the round trip: the overrides are KINEMATIC ([K m/s] and
+    [(kg/kg) m/s], positive UPWARD, the ``SCMForcing.w_th_s``/``w_qv_s``
+    convention) and are converted here with the SAME ``rho`` handed to the
+    closure, so a scheme that divides straight back out recovers exactly the
+    prescribed value -- ``ysu.py``'s ``wtheta_sfc = shflx / (rho[:, -1] *
+    c_pd)`` is the exact inverse of the line below.  NOT every consumer: HB
+    rebuilds its kinematic flux with a DRY-air ``rrho = R_d*T/p`` on purpose
+    (oracle fidelity, holtslag_boville.py), so it recovers ``wth`` times
+    ``rho_moist/rho_dry`` -- ~0.5 % at 8 g/kg, exactly 1 on a dry case. That
+    offset is the pre-existing convention gap the run-constant config scalar
+    already had; this route does not add to it.
+
+    PRECEDENCE: an override present replaces the config scalar, because it is
+    the value for THIS step and the config's is the value for the whole run.
+    Absent (``None``, the default) the config passes through untouched, so
+    every existing run is byte-identical.
+
+    Static Python ``is None`` tests on pytree leaves -- the feature-gating
+    pattern, not a traced selection.
+    """
+    if phys_state is None:
+        return scheme_config
+    wth = getattr(phys_state, "surface_wth_override", None)
+    wqv = getattr(phys_state, "surface_wqv_override", None)
+    if wth is None and wqv is None:
+        return scheme_config
+    surface = scheme_config.surface
+    # rho[:, -1] is the LOWEST FULL level, the same one whose wind and
+    # temperature compute_surface_fluxes is handed.
+    rho_sfc = rho[:, -1]
+    if wth is not None:
+        surface = surface._replace(
+            prescribed_shflx_w_m2=rho_sfc * constants.c_pd * wth)
+    if wqv is not None:
+        surface = surface._replace(
+            prescribed_lhflx_w_m2=rho_sfc * constants.L_v * wqv)
+    return scheme_config._replace(surface=surface)
+
+
 def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
     """Package a turbulence scheme's carry for combined.py's ``phys_updates``.
 
@@ -479,6 +530,10 @@ def _make_hydrostatic_turbulence(
         # Surface conditions
         T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        # A per-step prescribed surface flux (a diurnal cycle the run-constant
+        # config scalar cannot carry) enters here; identity without one.
+        step_config = _resolve_prescribed_surface_fluxes(
+            scheme_config, phys_state, rho)
 
         if needs_tke:
             # Read (or seed) the prognostic carry from PhysicsState — tke/qke, or
@@ -489,7 +544,7 @@ def _make_hydrostatic_turbulence(
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
             )
             tke_out = tke_new
         else:
@@ -499,7 +554,7 @@ def _make_hydrostatic_turbulence(
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -709,6 +764,10 @@ def _make_mpas_turbulence(
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col, land_beta)
 
+        # A per-step prescribed surface flux (a diurnal cycle the run-constant
+        # config scalar cannot carry) enters here; identity without one.
+        step_config = _resolve_prescribed_surface_fluxes(
+            scheme_config, phys_state, rho)
         # ``forcing["shflx_land"]`` / ``forcing["lhflx_land"]`` — the land
         # scheme's OWN turbulent fluxes, blended by land fraction into the
         # surface flux the BL scheme consumes.  This exists because handing
@@ -742,7 +801,7 @@ def _make_mpas_turbulence(
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
                 u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], scheme_config.surface,
+                T_sfc, q_sfc, rho[:, -1], step_config.surface,
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
@@ -766,7 +825,7 @@ def _make_mpas_turbulence(
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
             )
             tke_out = tke_new
@@ -774,7 +833,7 @@ def _make_mpas_turbulence(
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
             )
 
@@ -963,20 +1022,25 @@ def _make_nonhydrostatic_turbulence(
         T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
+        # A per-step prescribed surface flux (a diurnal cycle the run-constant
+        # config scalar cannot carry) enters here; identity without one.
+        step_config = _resolve_prescribed_surface_fluxes(
+            scheme_config, phys_state, rho_col)
+
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_col, dt, scheme_config,
+                T_sfc, q_sfc, rho_col, dt, step_config,
             )
             tke_out = tke_new
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_col, dt, scheme_config,
+                T_sfc, q_sfc, rho_col, dt, step_config,
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -1096,6 +1160,10 @@ def _make_spectral_pe_turbulence(
 
         T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        # A per-step prescribed surface flux (a diurnal cycle the run-constant
+        # config scalar cannot carry) enters here; identity without one.
+        step_config = _resolve_prescribed_surface_fluxes(
+            scheme_config, phys_state, rho)
 
         if needs_tke:
             tke_in = _read_turb_carry(
@@ -1103,7 +1171,7 @@ def _make_spectral_pe_turbulence(
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
             )
             tke_out = tke_new
         else:
@@ -1111,7 +1179,7 @@ def _make_spectral_pe_turbulence(
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, step_config,
             )
 
         # Reshape tendencies to grid space

@@ -836,7 +836,8 @@ def compute_mixing_lengths(
         l_eps = l_k
     else:
         raise ValueError(
-            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2."
+            f"Unknown tke_mxl_choice={cfg.tke_mxl_choice!r}; expected 1 or 2 "
+            f"(Veros), 3 (NEMO nn_mxl=3) or 4 (NEMO nn_mxl=2)."
         )
     return l_k, l_eps
 
@@ -2146,6 +2147,7 @@ def tke_vertical_mixing(
         T_cell=_Tn2, S_cell=_Sn2, p_cell=p_cell,
         dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
         n2_mode=cfg.n2_mode,
+        n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
         adiabatic_over_dz_half=veros_slots,
         t_depth=t_depth, w_depth=w_depth,
     )
@@ -2172,6 +2174,7 @@ def tke_vertical_mixing(
             T_cell=T_n2b, S_cell=S_n2b, p_cell=p_cell,
             dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
             n2_mode=cfg.n2_mode,
+            n2_eos_form=getattr(cfg, "n2_eos_form", "seos"),
             adiabatic_over_dz_half=veros_slots,
             t_depth=t_depth, w_depth=w_depth,
         )
