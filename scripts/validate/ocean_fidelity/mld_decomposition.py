@@ -100,25 +100,40 @@ def main() -> int:
             bottom_depth=H))
         mld_T = t_threshold_mld(T, zc, wet, H)
 
-        # Area weights: cos(lat) is correct on lat-lon and an acceptable
-        # node weight on the quasi-uniform meshes; stated, not hidden.
-        wgt = np.cos(np.deg2rad(lat)) * (mask > 0.5)
+        # NODE MEANS LIE ON A REFINED MESH (caught 2026-08-18: FESOM's
+        # shelf-concentrated nodes dominated the Antarctic band and
+        # manufactured a 0.03 ratio the open ocean does not have).  Regrid
+        # every MLD field to a uniform 1-degree grid FIRST, then take
+        # cos(lat)-weighted band means -- same treatment for every mesh.
+        from compare_omip_nemo import regrid_curv_to_latlon
+        tgt_lat = np.arange(-89.5, 90.0, 1.0)
+        tgt_lon = np.arange(0.5, 360.0, 1.0)
+        lon = np.asarray(z0["lon_T"], dtype=np.float64)
+
+        def rg(f):
+            out, flag = regrid_curv_to_latlon(f, lat, lon, mask,
+                                              tgt_lat, tgt_lon)
+            return np.where(flag > 0.5, out, np.nan)
+
+        mld_sig_g, mld_sigT_g, mld_T_g = rg(mld_sig), rg(mld_sigT), rg(mld_T)
+        wgt2 = np.cos(np.deg2rad(tgt_lat))[:, None] * np.ones(tgt_lon.size)
+        lat2 = tgt_lat[:, None] * np.ones(tgt_lon.size)
         print(f"\n=== {label} ({path}) ===")
         print(f"{'band':22s} {'sigma':>7} {'sigmaT':>7} {'T02':>7} "
               f"{'sig/sigT':>9}  verdict")
         for bn, (lo, hi) in BANDS.items():
-            m = (lat >= lo) & (lat < hi) & (wgt > 0)
+            m = (lat2 >= lo) & (lat2 < hi)
             if not m.any():
                 print(f"{bn:22s}  (no cells)")
                 continue
 
             def am(f):
                 v = f[m]
-                ww = wgt[m]
+                ww = wgt2[m]
                 good = np.isfinite(v)
                 return float((v[good] * ww[good]).sum() / ww[good].sum())
 
-            s_, st_, t_ = am(mld_sig), am(mld_sigT), am(mld_T)
+            s_, st_, t_ = am(mld_sig_g), am(mld_sigT_g), am(mld_T_g)
             r = s_ / st_ if st_ > 0 else np.nan
             verdict = ("T-controlled (closure-class)" if r > 0.8
                        else "S-controlled (lens/coord-class)" if r < 0.6
