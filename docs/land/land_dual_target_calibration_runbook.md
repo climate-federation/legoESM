@@ -114,6 +114,22 @@ cell order, so never rebuild coordinates from the unpermuted land index.
    fallback needs no config (its bake family is picked up by
    `--slab-land-active` directly).
 
+## v7 — per-PFT canopy snow masking (2026-08-18)
+
+The v6 NH>55 albedo residual was PFT-structured (forests +0.05 too bright,
+tundra/bare/grass -0.05..-0.09 too dark): the canopy-snow-masking signature.
+`LandAlbedoConfig.snow_cover_scale` (per-cell, PFT-weighted from the trainable
+`pft_snowmask` table, 1.0 = legacy) closes it: the v7 multilayer fit learned
+forests <1 / tundra-shrub-crop >1 and the NH mean albedo bias went -0.028 ->
++0.003 with all-global biases skin-T +0.16 K / albedo +0.007 / LE +0.35 W/m2
+(held-out skin-T bias +0.14 K).  Baked as `_TUNED_PFT_SNOWMASK_MULTILAYER` and
+wired in `clm_multilayer_setup`.  The SLAB v7 fit was REJECTED: with no canopy
+its mask acted as one more brightness knob and bought temperature with a
++0.074 global albedo bias — the slab bake stays at v6.  Residual multilayer
+spots: boreal-evergreen belt slightly over-bright (temperature-vs-albedo
+trade), Sahel/Arabia over-bright (dry-soil brightening), Tibet warm spot
+reduced but present.
+
 ## Review demands before the bake is trusted coupled (GLM, 2026-08-18)
 
 * **Coupled A/B vs the previous bake** (30-day AMIP arm, one variable = the

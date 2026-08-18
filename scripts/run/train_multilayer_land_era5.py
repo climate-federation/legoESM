@@ -319,6 +319,8 @@ def baked_init_params() -> dict:
         pft_vcmax=_inv_ext(np.asarray(C._TUNED_PFT_VCMAX_MULTILAYER), "pft_vcmax"),
         pft_g1=_inv_ext(np.asarray(C._TUNED_PFT_G1_MULTILAYER), "pft_g1"),
         pft_lcma=_inv_ext(np.asarray(C._TUNED_PFT_LCMA_MULTILAYER), "pft_lcma"),
+        pft_snowmask=_inv_ext(np.asarray(C._TUNED_PFT_SNOWMASK_MULTILAYER),
+                              "pft_snowmask"),
     )
     p.update({k: jnp.asarray(v) for k, v in over.items()})
     return p
