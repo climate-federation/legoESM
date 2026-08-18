@@ -44,9 +44,11 @@ DISCONTINUOUS across a switching surface and a rounding-level lane
 difference near one can produce a discrepancy far above 1e-15.  Every
 numeric bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
 sweep) and set to measured x 10, keeping its class label.  The loosest
-bounds in the file are the UNEXPLAINED full-step jit-vs-eager wind gaps
+bounds in the file are the full-step jit-vs-eager wind gaps
 (u 7.511e-07, v 7.456e-07; the localisers place them in the stage chain
-at 5.646e-07) -- see ``_JIT_EAGER_BOUND`` for the open-defect record.
+at 5.646e-07), CHARACTERISED by probe job 9433881 as selector bit-flips
+at 6 of 2052 cells -- see ``_JIT_EAGER_BOUND`` for the record and the
+flip-cell census gate that now accompanies the magnitude bound.
 
 COST.  These gates run a whole six-face acoustic step, so they are
 minutes, not seconds: at C12 the module compiles the step for four
@@ -1129,56 +1131,120 @@ def test_tier3_eager_replay_isolates_the_jit_gap(replay):
 # gate 3 -- jit vs eager, and the retrace budget
 # =====================================================================
 
-# Per-field jit-vs-eager bounds, MEASURED in job 9404093.
+# Per-field jit-vs-eager bounds, MEASURED in job 9404093; the wind
+# entries CHARACTERISED by probe job 9433881
+# (scripts/validate/fv3_duo_jit_gap_localiser.py).
 #
-# ⛔ THE FMA EXPLANATION IS REFUTED FOR `u`, AND THIS IS THE ONE OPEN
-# DEFECT IN THIS MODULE.  XLA contracting `x*y + z` into an FMA moves a
-# result by a few ULP -- 1e-15 relative in f64.  The measured `u` gap is
-# 7.510956730778894e-07, which is 3.4e9 ULP.  That is not rounding, and
-# a bound written as "FMA, expected" would be certifying a residual
-# whose mechanism is unknown.  It is recorded here as UNEXPLAINED.
+# THE WIND GAP IS SELECTOR BIT-FLIPS BETWEEN TWO LEGAL COMPILATIONS,
+# NOT A LOWERING DEFECT.  The probe's per-cell census: u and v each
+# differ at exactly 6 of 2052 cells (all on face 3, rows j=3-4), each
+# an O(local-field) jump (~20 abs on fields O(1e5-1e7)); EVERY other
+# cell agrees at <= 2.1e-16.  The stage bisection places the injection
+# in ``d_sw3``: jitting the d_sw3->d_sw6 tail ALONE on inputs
+# BYTE-IDENTICAL to eager reproduces the full 5.646e-07 at the same 6
+# cells, and the first differing array is d_sw3's PPM output
+# ``ubbtemp`` -- a 6.29e-05 jump at THREE B-grid cells (face 3, j=1,
+# i=2/6/10) while every operand feeding it agrees to <= 3e-14.  A
+# nine-decade LOCAL amplification of an ulp-scale operand difference is
+# only reachable through a DISCONTINUOUS branch; d_sw3's hord-6 PPM
+# flux is exactly that (the smt5/smt6 limiter flags add or drop a whole
+# flux term -- fv3_tp_core's own non-smoothness inventory, and the same
+# anatomy as the fv3_nh_core edge_profile flips, here between two legal
+# XLA contractions of one program rather than vs the spec).  The old
+# ⛔ note's "3.4e9 ULP is not rounding" arithmetic assumed a SMOOTH
+# path; the path is not smooth, so the magnitude is expected.
 #
-# What is CONFIRMED, from the same run and with no inference:
-#   * the EAGER lane matches NumPy (test_full_acoustic_step_parity
-#     passed at 1e-11 on all four fields);
-#   * the tier-3 1-step jit-vs-NumPy `u` difference is
-#     7.510956730778894e-07 -- IDENTICAL TO SIXTEEN DIGITS to the
-#     jit-vs-eager gap here.  So the whole one-step `u` lane difference
-#     IS this gap, and all three tier-3 growth failures are downstream
-#     of it.
-#   * delp/pt/v passed at 1e-12, so only `u` carries it.
+# GROWTH (same probe): jit-vs-eager over 1/2/4/8 full steps measures
+# u 7.511e-07 / 8.285e-06 / 6.992e-06 / 5.021e-06 -- a ONE-TIME
+# injection that spreads to more cells by advection (6 -> 150 above
+# 1e-8) but SATURATES and decays in magnitude after step 2.  It does
+# not compound; identical table for the n_split cadence.  The tier-3
+# replay growth failures of job 9404093 are this, not a defect.
 #
-# The localisers below bisect it: stage chain vs D-grid tail, then
-# geopk_d vs one_grad_p.  Do NOT widen this bound further without a
-# mechanism.
+# A magnitude bound cannot distinguish 6 flipped cells from a
+# whole-field lowering defect, so the winds ALSO carry the flip-cell
+# census gate ``_FLIP_CELL_BOUND`` below: a systematic defect moves
+# hundreds of cells and goes red there even inside the magnitude bound.
+#
+# The u-to-v SPREAD (job 9404093 had v <= 1e-12, u-only): the only
+# functional change to the executed chain between the two jobs is
+# 932e5b1cd (d_sw1's panel-edge selects -> ``_sel_div``), which
+# re-lowered the program, and a legal re-compilation moving WHICH cells
+# sit within an ulp of a switching surface is precisely this
+# mechanism's behaviour.  PLAUSIBLE (not re-run at the old SHA); u's
+# value staying bit-identical across it while v moved is consistent.
 _JIT_EAGER_BOUND = {
     # MEASURED (job 9425294 sweep): delp 1.810e-14, pt 4.108e-15; bounds
     # = measured x 10.  [class: jit-vs-eager, rounding-scale]
     "delp": 1.9e-13, "pt": 4.2e-14,
-    # MEASURED (job 9425294 sweep): u 7.511e-07 (identical to job
-    # 9404093), and v now measures 7.456e-07 where job 9404093 had it
-    # <= 1e-12 -- the gap has SPREAD to the second wind component.
-    # Bounds = measured x 10.  These are UNEXPLAINED RESIDUALS, NOT
-    # AGREEMENT.  [class: jit-vs-eager, UNEXPLAINED]
+    # MEASURED (job 9425294 sweep): u 7.511e-07, v 7.456e-07; bounds =
+    # measured x 10.  [class: jit-vs-eager, selector bit-flips at 6 of
+    # 2052 cells -- CHARACTERISED, probe job 9433881; see block above]
     "u": 7.6e-06, "v": 7.5e-06,
 }
 
 # MEASURED (job 9425294 sweep): the localiser's per-key jit-vs-eager
-# gaps -- u/v 5.646e-07 (the UNEXPLAINED gap is ALREADY in the stage
-# chain, before the D-grid tail), delp 1.215e-14, pt 4.108e-15; bounds
-# = measured x 10.  [class: jit-vs-eager localiser]
+# gaps -- u/v 5.646e-07, delp 1.215e-14, pt 4.108e-15; bounds =
+# measured x 10.  The wind gap is ALREADY in the stage chain (before
+# the D-grid tail): probe job 9433881 shows the SAME 6 cells as the
+# full step, injected by d_sw3's PPM selector flips -- see the
+# _JIT_EAGER_BOUND block.  [class: jit-vs-eager localiser,
+# selector bit-flips CHARACTERISED]
 _ACOUSTIC_JIT_BOUND = {
     "delp": 1.3e-13, "pt": 4.2e-14, "u": 5.7e-06, "v": 5.7e-06,
 }
 
+# MEASURED (probe job 9433881): 6 of 2052 wind cells above 1e-10 under
+# _cmp's global metric, for BOTH u and v, in BOTH the full step and the
+# stage chain; bound = measured x 10.  This is the census half of the
+# wind gates: selector bit-flips touch a handful of cells, a systematic
+# lowering defect touches hundreds.
+_FLIP_CELL_BOUND = 60
+_FLIP_CELL_THRESH = 1e-10
+
+
+def _flip_cell_count(got, ref) -> int:
+    """Cells above ``_FLIP_CELL_THRESH`` under ``_cmp``'s GLOBAL metric.
+
+    Same scale (max|ref| over finite non-sentinel cells) as ``_cmp`` so
+    the count composes with the magnitude bounds it accompanies.
+    """
+    a = np.asarray(got, dtype=np.float64)
+    b = np.asarray(ref, dtype=np.float64)
+    ok = np.isfinite(a) & np.isfinite(b) \
+        & (np.abs(a) < _SENTINEL_FLOOR) & (np.abs(b) < _SENTINEL_FLOOR)
+    if not ok.any():
+        return 0
+    scale = max(float(np.abs(b[ok]).max()), 1e-30)
+    rel = np.where(ok, np.abs(a - b), 0.0) / scale
+    return int((rel > _FLIP_CELL_THRESH).sum())
+
+
+def _gate_flip_cells(got, ref, name: str) -> None:
+    """The census gate for a wind field, measure-mode aware like _cmp."""
+    n_flip = _flip_cell_count(got, ref)
+    if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+        print(f"TOLMEASURE {name!r}: flip_cells {n_flip} "
+              f"(bound {_FLIP_CELL_BOUND})", flush=True)
+        return
+    assert n_flip <= _FLIP_CELL_BOUND, (
+        f"{name}: {n_flip} cells above {_FLIP_CELL_THRESH:.0e} "
+        f"(bound {_FLIP_CELL_BOUND}) -- selector bit-flips touch a "
+        f"handful of cells (measured 6, probe job 9433881); hundreds+ "
+        f"means a SYSTEMATIC jit-vs-eager difference, which the "
+        f"magnitude bound alone cannot see")
+
 
 def test_full_step_jit_equals_eager(jctx, jstates0, jstep):
-    """gate 2 -- and the module's one open defect, see the block above.
+    """gate 2 -- magnitude bound + flip-cell census, see the block above.
 
     NOT bitwise: the step is one long chain of ``x*y + z`` and the
-    jitted lowering contracts those into FMAs, so a few-ULP gap would be
-    correct.  The measured `u` gap is nine orders larger than that, so
-    the bound it carries is labelled UNEXPLAINED rather than expected.
+    jitted lowering contracts those into FMAs, so a few-ULP gap is
+    expected everywhere -- and where those ulps cross the PPM limiter's
+    switching surface (d_sw3, hord 6), a finite O(local-field) jump at
+    a FEW cells is expected too (probe job 9433881: 6 of 2052 cells,
+    the rest at <= 2.1e-16).  The census gate is what separates that
+    characterised pattern from a systematic lowering defect.
     """
     eager = jstep_mod.full_acoustic_step_sixface(jctx, jstates0, DT,
                                                  d_ext=D_EXT_OFF)
@@ -1186,6 +1252,9 @@ def test_full_step_jit_equals_eager(jctx, jstates0, jstep):
     for k in _STATE_KEYS:
         _cmp(got[k], eager[k], f"full_step jit.{k}",
              _JIT_EAGER_BOUND[k])
+        if k in ("u", "v"):
+            _gate_flip_cells(got[k], eager[k],
+                             f"full_step jit.{k} flip_cells")
 
 
 def test_jit_gap_localiser_stage_chain(jctx, jstates0):
@@ -1197,20 +1266,28 @@ def test_jit_gap_localiser_stage_chain(jctx, jstates0):
     two localisers name the kernel.  If it already shows here, the tail
     is exonerated and the SW chain is the subject.
 
-    Either outcome is a result; the bound is _ACOUSTIC_JIT_BOUND (the
-    sweep's measured x 10, job 9425294 -- no longer provisional) and
-    the run PRINTS the number in both cases.
+    ANSWERED (probe job 9433881, fv3_duo_jit_gap_localiser.py): it
+    shows HERE, at the SAME 6 cells as the full step -- the tail is
+    exonerated (its two kernel localisers below measured bitwise /
+    1e-16 independently).  Within the chain the injection is d_sw3's
+    PPM output ``ubbtemp`` (3 B-grid cells, face 3, j=1, i=2/6/10;
+    operands agree to <= 3e-14): limiter selector bit-flips between two
+    legal compilations.  See the _JIT_EAGER_BOUND block for the full
+    record; this test now carries the same flip-cell census gate.
     """
     eager = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
     fn = jstep_mod.make_acoustic_step_sixface_jit()
     got = fn(jctx, jstates0, DT)
     for k in ("delp", "pt", "u", "v"):
         # MEASURED (job 9425294 sweep): u and v 5.646e-07, delp 1.215e-14, pt 4.108e-15
-        # -- the UNEXPLAINED u jit-vs-eager gap ALREADY shows in the stage
-        # chain (everything before the D-grid tail), and it now carries v
-        # too; per-key bounds = measured x 10 via _ACOUSTIC_JIT_BOUND.
+        # -- the wind jit-vs-eager gap ALREADY shows in the stage chain
+        # (selector bit-flips in d_sw3, probe job 9433881); per-key
+        # bounds = measured x 10 via _ACOUSTIC_JIT_BOUND.
         _cmp(got[k], eager[k], f"acoustic_step jit.{k}",
              _ACOUSTIC_JIT_BOUND[k])
+        if k in ("u", "v"):
+            _gate_flip_cells(got[k], eager[k],
+                             f"acoustic_step jit.{k} flip_cells")
 
 
 def test_jit_gap_localiser_geopk_d(ctx, jctx, states0):
