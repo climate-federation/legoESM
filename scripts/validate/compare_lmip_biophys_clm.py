@@ -400,9 +400,9 @@ def fig_lh_gpp(D, outdir):
         ax.plot(z, z.lat, color=col, ls=ls, lw=0.9,
                 label=f'{p} ({global_total(z):.0f})')
     ax.plot(zl, zl.lat, color=C_LEGO, ls=LS_LEGO,
-            label=f'legoESM ({tl:.0f} PgC yr$^{{-1}}$)')
+            label=f'legoESM ({tl:.0f})')
     ax.plot(zc, zc.lat, color=C_CLM, ls=LS_CLM,
-            label=f'CLM5.1-SP ({tc:.0f} PgC yr$^{{-1}}$)')
+            label=f'CLM5.1-SP ({tc:.0f})')
     for y in (-23.5, 0, 23.5):
         ax.axhline(y, color='0.6', lw=0.5, ls=':')
     ax.grid(axis='x', color='0.85', lw=0.4)
