@@ -255,9 +255,12 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 17 atmosphere + 5 ocean = 22 genuinely distinct implementations
-        # (atmosphere grew by tracer_transport_mpas + tracer_transport_latlon)
-        assert len(ATMOSPHERE_MATRIX) == 17
+        # 19 atmosphere + 5 ocean = 24 genuinely distinct implementations.
+        # NOTE: pre-existing drift absorbed here — HEAD carried 18 entries
+        # (tracer_transport_spectral landed without bumping this count, CI
+        # dark) while this assertion still said 17; fv3_duo_primitive_
+        # equations (the certified duo-cube lane) makes it 19.
+        assert len(ATMOSPHERE_MATRIX) == 19
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):

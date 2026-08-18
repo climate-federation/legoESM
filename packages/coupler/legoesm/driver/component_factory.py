@@ -75,6 +75,13 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "mpas",           "mpas"):        "mpas_primitive_equations",
     ("nonhydrostatic","mpas",           "mpas"):        "mpas_compressible_euler",
 
+    # --- FV3 six-face duo cube (certified fv_dynamics JAX lane) ---
+    # ONE solver serves both arms: the certified lane is a single program
+    # with a static ``hydrostatic`` switch.  Slice 1: dry, physics-off,
+    # fp64 only — the branch below refuses everything else loudly.
+    ("hydrostatic",   "fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
+    ("nonhydrostatic","fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
+
     # --- Doubly-periodic plane (CRM rollout, PR2c) ---
     # Plane only supports the non-hydrostatic compressible Euler dycore.
     # All other (model_type, plane) combinations fall through to
@@ -596,6 +603,68 @@ def create_atmosphere_dycore(
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
+
+    # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
+    if solver_name == "fv3_duo_primitive_equations":
+        # Slice 1 contract, enforced LOUDLY (the certified core REFUSES
+        # moist coupling: zvir != 0 / consv_te != 0 raise at
+        # fv3_dynamics.py:301-311, and require_f64_jax gates every leaf).
+        # This lane never routes physics tendencies, so any active scheme
+        # would be SILENTLY inert — the exact failure mode dispatch
+        # hardening exists to prevent.
+        _physics_on = {
+            name: getattr(config, name)
+            for name in ("radiation", "convection", "microphysics",
+                         "turbulence", "gravity_wave_drag")
+            if getattr(config, name) != "none"
+        }
+        if _physics_on:
+            raise ValueError(
+                f"fv3_duo (slice 1) is DRY and physics-off: the certified "
+                f"fv_dynamics lane refuses moist coupling "
+                f"(fv3_dynamics.py:301-311) and the driver lane routes no "
+                f"physics tendencies, so these active schemes would be "
+                f"silently inert: {_physics_on}. Set them all to 'none' "
+                f"(with --allow-disabled-physics in run_amip).")
+        if config.held_suarez_forcing:
+            raise ValueError(
+                "fv3_duo (slice 1) does not apply Held-Suarez forcing — "
+                "the lane steps pure adiabatic dynamics; the flag would be "
+                "silently inert. Drop --held-suarez-forcing.")
+        if config.precision != "fp64":
+            raise ValueError(
+                f"fv3_duo requires precision='fp64' (require_f64_jax gates "
+                f"every state leaf in the certified lane; an f32 IC is a "
+                f"run that lost bits before step 1), got "
+                f"config.precision={config.precision!r}.")
+        if config.distributed:
+            raise ValueError(
+                "fv3_duo (slice 1) is single-process only: the duo halo "
+                "exchange runs on the full six-face stack in one program; "
+                "no MPI/SPMD decomposition is wired.")
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.grids.factory import create_fv3_duo_grid
+
+        km = gc.nlev
+        if km not in (5, 10):
+            raise ValueError(
+                f"fv3_duo runs the analytic set_eta branch only "
+                f"(fv_eta.F90:334-344, km in {{5, 10}}); got grid.nlev="
+                f"{km}. The other km are hand-tabulated in the oracle and "
+                f"are not ported.")
+        # The duo lane steps its own six-face bundle, not the driver's
+        # standard cubed-sphere grid (which stays for lat/lon metadata /
+        # topography accessors) — discretization-keyed wiring, no driver
+        # grid dispatch (L1).
+        bundle = create_fv3_duo_grid(gc.resolution)
+        cfg = FV3DuoConfig(
+            km=km,
+            hydrostatic=(model_type == "hydrostatic"),
+        )
+        return FV3DuoDynamicsModel(bundle, cfg)
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":

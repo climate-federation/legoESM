@@ -92,6 +92,16 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas",
     ),
 
+    # -- FV3 six-face duo cube (certified fv_dynamics JAX lane) --
+    # ONE solver serves the hydrostatic AND nonhydrostatic arms (a static
+    # ``hydrostatic`` switch in the certified core), so a single entry;
+    # listed under its canonical "hydrostatic" axes.
+    SolverEntry(
+        "atmosphere", "hydrostatic", "fv3_duo_cube",
+        "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
+        "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
+    ),
+
     # -- U-cast (unstructured-cast hydrostatic primitive equations) --
     SolverEntry(
         "atmosphere", "hydrostatic", "u_cast",
