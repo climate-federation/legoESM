@@ -18,9 +18,11 @@
 #       -o forcing.year_start=1985 -o forcing.year_end=1994 \
 #       -o restart.from=$ROOT/spinup/restart_1985_d000h00.npz
 #
-# Each calibration selector reverts with one `-o` override (albedo_calibration /
-# root_calibration -> default, soil_n_layers/soil_depth_m -> 8/0.0), so a
-# controlled pre-calibration baseline is a documented command, not a checkout.
+# The calibration is plain parameter VALUES in this file (generic names, no
+# switches): delete the `albedo` block + glacier pair, the three `*_per_pft`
+# lists, or set soil_n_layers/soil_depth_m -> 8/0.0 to revert each piece to the
+# uncalibrated defaults — a controlled pre-calibration baseline is an edit or a
+# few `-o` overrides, not a checkout.
 #
 # ⚠️ Exact reproduction of the published 2026-07 run additionally needs the NCAR
 # glade forcing variant: `-o forcing.prefix=clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5`
@@ -59,18 +61,30 @@ physics:
   # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
   # land cells over 10 yr).  Bit-identical to sensible-only heat when disabled.
   enable_freeze_thaw: true
-  # Surface-albedo parameter set.  "amip_multilayer" adopts the 2026-07 ERA5
-  # recalibration that `clm_multilayer_setup` injects for the coupled multilayer
-  # land: brighter fresh/aged snow, the Niu-Yang half-cover scale (15.4 vs the
-  # uncalibrated 50 kg/m2 — the uncalibrated value leaves a 20 kg/m2 seasonal
-  # pack only ~38% covered where the calibrated one gives ~86%), faster snow-age
-  # decay, stronger dry-soil brightening, and a brighter ice-sheet base.  The
-  # LMIP path builds params from the RAW PFT/biome tables, so it never saw this.
-  # Set to "default" to reproduce a pre-2026-07-27 baseline byte-for-byte.
-  # NOTE: this calibration was tuned under SimpleSEB (amip_sota's land surface
-  # scheme), not the two-leaf canopy; the albedo terms are scheme-independent
-  # but the pairing has not been re-validated at LMIP scale.
-  albedo_calibration: amip_multilayer
+  # --- Surface albedo (values over LandAlbedoConfig's own field names) --------
+  # The 2026-07 ERA5 recalibration used by the coupled multilayer land: brighter
+  # fresh/aged snow, the Niu-Yang half-cover scale (15.42 vs the uncalibrated
+  # 50 kg/m2 — the uncalibrated value leaves a 20 kg/m2 seasonal pack only ~38%
+  # covered where the calibrated one gives ~86%), faster snow-age decay, and a
+  # stronger dry-soil brightening.  Delete the block (or any single field) to
+  # revert to the uncalibrated default byte-for-byte.  These are the AS-RUN
+  # 2026-07 values (the published run + soil-state IC), pinned by a CI test;
+  # the coupled land's clm_surface_map has since been retuned, so do NOT
+  # "sync" these to it — that would break reproduction.
+  # NOTE: tuned under SimpleSEB (amip_sota's land surface scheme), not the
+  # two-leaf canopy; the albedo terms are scheme-independent but the pairing has
+  # not been re-validated at LMIP scale.
+  albedo:
+    alpha_snow_max: 0.8077            # fresh-snow albedo (uncalibrated 0.8)
+    alpha_snow_min: 0.5207            # aged-snow albedo (uncalibrated 0.5)
+    snow_depth_crit: 15.4229          # Niu-Yang half-cover SWE [kg/m2] (uncal. 50)
+    tau_snow_decay: 317424.96         # snow-age decay [s] = 3.6739 days (uncal. 5 d)
+    soil_dry_albedo_boost: 0.1458     # dry-soil brightening (uncalibrated 0.11)
+  # Ice-sheet base albedo pair: the tuned broadband 0.7178, split with the
+  # uncalibrated pair's 0.20 vis-NIR contrast (ice is brighter in the visible).
+  # Delete both to revert to the uncalibrated 0.70/0.50.
+  glacier_albedo_vis: 0.8178
+  glacier_albedo_nir: 0.6178
   # --- Vertical soil grid -----------------------------------------------------
   # AMIP parity: 10 layers / 3.0 m (what clm_multilayer_setup + amip_sota run),
   # replacing the 8-layer / 6.375 m loader default.  The surfdata soil profile is
@@ -90,21 +104,36 @@ physics:
   # in depth, NOT mass-conservative; it was validated against the 8-layer default.
   # Changing the target grid exercises it in a new regime — soil texture/carbon
   # column integrals are approximate here.
-  # --- Root-zone water uptake -------------------------------------------------
-  # "amip_multilayer" replaces ONE global root e-folding depth + plant
-  # theta_wp/theta_fc (1.0 m / 0.15 / 0.30 for every column on Earth) with the
-  # calibrated PER-PFT tables at the column's dominant PFT: root depth
-  # 0.088-1.706 m, theta_wp 0.082-0.116, theta_fc 0.171-0.292.  The uniform 1 m
-  # over-supplies shallow-rooted grass and under-supplies deep-rooted forest.
+  # --- Root-zone water uptake (per-PFT values, CLM5 17-PFT order) -------------
+  # Replaces ONE global root e-folding depth + plant theta_wp/theta_fc
+  # (1.0 m / 0.15 / 0.30 for every column on Earth) with calibrated PER-PFT
+  # values applied at the column's dominant PFT — the uniform 1 m over-supplies
+  # shallow-rooted grass and under-supplies deep-rooted forest.  Delete all
+  # three lists to revert to the global scalars.  As-run 2026-07 values,
+  # pinned by the same CI snapshot test (the coupled path's tables have since
+  # been retuned).
   #
-  # ⚠️ THIS IS THE "TEST" HALF, NOT A KNOWN-GOOD DEFAULT.  Those tables were
+  # ⚠️ THIS IS THE "TEST" HALF, NOT A KNOWN-GOOD DEFAULT.  These values were
   # calibrated under SimpleSEB + MOST (amip_sota's land surface scheme), which
   # has its own beta_soil moisture path; the two-leaf canopy carries its own
-  # stomatal control, so the pairing is a hypothesis.  Run it against the
-  # `default` baseline before adopting.  Note also: this path applies the
-  # DOMINANT-PFT value (consistent with LAI/height/Vcmax/roughness here), whereas
-  # the coupled CLMSurfaceParamProvider PFT-fraction-WEIGHTS the same tables.
-  root_calibration: amip_multilayer
+  # stomatal control, so the pairing is a hypothesis.  Run against the
+  # scalar-default baseline before adopting.  Note also: this path applies the
+  # DOMINANT-PFT value (consistent with LAI/height/Vcmax/roughness here),
+  # whereas the coupled CLMSurfaceParamProvider PFT-fraction-WEIGHTS the same
+  # values.
+  # PFT order (surface_params.CLM5_PFT_NAMES): bare, NET-temperate, NET-boreal,
+  # NDT-boreal, BET-tropical, BET-temperate, BDT-tropical, BDT-temperate,
+  # BDT-boreal, BE-shrub, BD-temperate-shrub, BD-boreal-shrub, c3-arctic-grass,
+  # c3-grass, c4-grass, crop-c3, crop-c4
+  root_depth_per_pft: [0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408,
+                       1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488,
+                       0.477]          # [m]
+  theta_wp_per_pft:   [0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162,
+                       0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874,
+                       0.0869, 0.0822, 0.0988]   # [m3/m3]
+  theta_fc_per_pft:   [0.1706, 0.2249, 0.2351, 0.2253, 0.289, 0.2492, 0.2918,
+                       0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171,
+                       0.2193, 0.2123, 0.2469]   # [m3/m3]
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)

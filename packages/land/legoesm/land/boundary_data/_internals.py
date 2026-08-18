@@ -16,12 +16,6 @@ from legoesm.land.canopy.config import (
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
 )
-from legoesm.land.clm_surface_map import (
-    TUNED_GLACIER_ALBEDO_MULTILAYER,
-    TUNED_PFT_FC_MULTILAYER,
-    TUNED_PFT_ROOT_DEPTH_MULTILAYER,
-    TUNED_PFT_WP_MULTILAYER,
-)
 
 
 # Zone index into the 3-element biome lists: [boreal, temperate, tropical].
@@ -50,21 +44,6 @@ ALB_NIR_BARE = 0.3         # bare fallback NIR albedo [-]
 GLACIER_ALB_VIS = 0.70
 GLACIER_ALB_NIR = 0.50
 GLACIER_ALBEDO_DEFAULT = 0.6   # broadband for the SEB / slab path
-
-# --- AMIP-calibrated glacier albedo (2026-07 recalibration) ---
-# ``clm_multilayer_setup`` raises the snow-free ice-sheet base to
-# ``TUNED_GLACIER_ALBEDO_MULTILAYER`` (broadband) against ERA5, which the
-# uncalibrated pair above under-states (0.60).  The canopy two-stream consumes a
-# (visible, NIR) PAIR, and the broadband it integrates to is 0.5*(vis + NIR) —
-# PAR (0.48) and UV (0.02) ride the visible band, NIR is 0.50
-# (``radiative_transfer._PAR/_UV/_NIR_FRACTION``).  ``GLACIER_ALBEDO_DEFAULT``
-# = 0.5*(0.70 + 0.50) = 0.60 confirms that weighting in the existing constants.
-# So centre the calibrated pair on the tuned broadband while preserving the
-# vis-NIR contrast of the uncalibrated pair (ice is brighter in the visible).
-GLACIER_ALB_CONTRAST = GLACIER_ALB_VIS - GLACIER_ALB_NIR
-GLACIER_ALB_VIS_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER + 0.5 * GLACIER_ALB_CONTRAST
-GLACIER_ALB_NIR_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER - 0.5 * GLACIER_ALB_CONTRAST
-GLACIER_ALBEDO_TUNED = TUNED_GLACIER_ALBEDO_MULTILAYER   # broadband, SEB / slab path
 
 # --- Soil-texture fallback where HWSD has no soil (sandy default) ---
 FALLBACK_SAND_PCT = 92.0
@@ -116,23 +95,6 @@ def pft_lookup_arrays() -> dict[str, np.ndarray]:
         hc[i] = PFT_CANOPY_HEIGHT[biome]
     return {"vc3": vc3, "vc4": vc4, "rz0m": rz0m, "rd": rd,
             "hc": hc, "fc4": fc4, "is_veg": is_veg}
-
-
-def tuned_pft_root_arrays() -> dict[str, np.ndarray]:
-    """Per-CLM5-PFT (length-17) calibrated root-zone water-uptake parameters.
-
-    The AMIP recalibration's root e-folding depth and PLANT moisture-stress
-    thresholds, as length-``N_PFT_CLM5`` arrays indexed the same way as
-    :func:`pft_lookup_arrays` (so a dominant-PFT gather lines up).  The LMIP path
-    otherwise runs a single GLOBAL root_depth / theta_wp / theta_fc from
-    ``MultiLayerLandConfig``, which over-supplies shallow-rooted grass and
-    under-supplies deep-rooted forest.
-    """
-    return {
-        "root_depth": np.asarray(TUNED_PFT_ROOT_DEPTH_MULTILAYER, dtype=np.float64),
-        "theta_wp": np.asarray(TUNED_PFT_WP_MULTILAYER, dtype=np.float64),
-        "theta_fc": np.asarray(TUNED_PFT_FC_MULTILAYER, dtype=np.float64),
-    }
 
 
 def cover1d(a):

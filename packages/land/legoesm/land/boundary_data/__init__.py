@@ -54,16 +54,6 @@ from legoesm.land.boundary_data.point import (
     PointSurfaceParams,
     surface_params_at_point,
 )
-# Ice-surface albedo constants — public here so callers never reach into the
-# private ``_internals`` module (cross-module private imports are banned).
-from legoesm.land.boundary_data._internals import (
-    GLACIER_ALB_VIS,
-    GLACIER_ALB_NIR,
-    GLACIER_ALBEDO_DEFAULT,
-    GLACIER_ALB_VIS_TUNED,
-    GLACIER_ALB_NIR_TUNED,
-    GLACIER_ALBEDO_TUNED,
-)
 
 __all__ = [
     # builders
@@ -78,7 +68,4 @@ __all__ = [
     "make_step_land_params_updater",
     # single-point
     "PointSurfaceParams", "surface_params_at_point",
-    # glacier ice-surface albedo (uncalibrated defaults + AMIP recalibration)
-    "GLACIER_ALB_VIS", "GLACIER_ALB_NIR", "GLACIER_ALBEDO_DEFAULT",
-    "GLACIER_ALB_VIS_TUNED", "GLACIER_ALB_NIR_TUNED", "GLACIER_ALBEDO_TUNED",
 ]

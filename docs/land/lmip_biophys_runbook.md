@@ -128,9 +128,10 @@ listed there can be overridden.
 
 **Rules the validator enforces:**
 
-- scheme selectors (`surface_scheme`, `bulk_scheme`, `snow_scheme`,
-  `albedo_calibration`, `root_calibration`, …) are membership-checked — a typo
-  or an unimplemented scheme fails at config-load time, never silently.
+- scheme selectors (`surface_scheme`, `bulk_scheme`, `snow_scheme`, …) are
+  membership-checked, and parameter blocks (`albedo` field names, the
+  `*_per_pft` list lengths/ranges) are validated — a typo or an unimplemented
+  scheme fails at config-load time, never silently.
 - `forcing.year_end >= forcing.year_start`
 - `output.tapes` must have at least one tape
 

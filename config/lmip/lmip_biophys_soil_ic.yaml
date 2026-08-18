@@ -39,7 +39,7 @@
 # Faithful to the as-run config of experiment `spinup_1975_calib` (Derecho,
 # initialized 2026-07-28 from biophysics/lmip_calibrated_spinup at commit
 # 14461553438f18d336985870770c38a4555d3552 on lmip-calibrated-config,
-# JAX_ENABLE_X64=1 on GPU), with two deliberate edits for portability:
+# JAX_ENABLE_X64=1 on GPU), with three deliberate edits for portability:
 #   * forcing.data_dir + surfdata.path are repo-relative (as-run they pointed at
 #     /glade/work/linnia/legoESM/data/...); stage with
 #     scripts/data/download_lmip_data.sh.
@@ -47,6 +47,10 @@
 #     archive (prefix below).  The public CESM mirror serves the UNFILLED
 #     variant under a different prefix, so an off-NCAR rebuild differs over
 #     Antarctica/Greenland — see the runbook's rebuild section.
+#   * the as-run selector keys (albedo_calibration/root_calibration =
+#     "amip_multilayer") were retired for explicit parameter values; the
+#     numbers in the physics block are exactly what those selectors resolved
+#     to at the run commit, so the resolved physics is unchanged.
 #
 # The output tapes are as-run (2026-07-27 template state, BEFORE budget-closure
 # taping was added to the templates).  Tapes are diagnostics only — they do not
@@ -71,13 +75,32 @@ physics:
   snow_albedo_feedback: true
   snow_scheme: single             # bulk SWE budget — the stable production scheme
   enable_freeze_thaw: true        # REQUIRED globally: without it boreal columns NaN
-  # The three 2026-07 calibration selectors (see the calibrated templates for
-  # the full rationale + how to revert each one for a controlled comparison):
-  albedo_calibration: amip_multilayer   # ERA5-tuned snow/glacier albedo
+  # The 2026-07 calibrated parameter values (see biophysics/lmip_biophys_2deg
+  # for the full rationale + how to revert each block).  The as-run config
+  # named these via two selector keys (albedo_calibration/root_calibration =
+  # "amip_multilayer"); those selectors were retired in favour of explicit
+  # values — the numbers below are exactly what the selectors resolved to at
+  # the run commit, so the physics is unchanged (edit 3 in the list above).
+  albedo:                               # ERA5-tuned snow albedo (as-run values)
+    alpha_snow_max: 0.8077
+    alpha_snow_min: 0.5207
+    snow_depth_crit: 15.4229
+    tau_snow_decay: 317424.96           # [s] = 3.6739 days
+    soil_dry_albedo_boost: 0.1458
+  glacier_albedo_vis: 0.8178            # tuned broadband 0.7178 +/- half the
+  glacier_albedo_nir: 0.6178            #   uncalibrated pair's 0.20 contrast
   soil_n_layers: 10                     # AMIP-parity soil grid (10 / 3.0 m);
   soil_depth_m: 3.0                     # growth_factor 2.0 -> 2.93 mm top layer
   soil_growth_factor: 2.0
-  root_calibration: amip_multilayer     # per-PFT root depth + theta_wp/theta_fc
+  root_depth_per_pft: [0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408,
+                       1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488,
+                       0.477]           # [m], CLM5 17-PFT order
+  theta_wp_per_pft:   [0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162,
+                       0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874,
+                       0.0869, 0.0822, 0.0988]   # [m3/m3]
+  theta_fc_per_pft:   [0.1706, 0.2249, 0.2351, 0.2253, 0.289, 0.2492, 0.2918,
+                       0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171,
+                       0.2193, 0.2123, 0.2469]   # [m3/m3]
   # Stomatal/photosynthesis knobs at per-PFT surfdata defaults (uncalibrated;
   # #730 GPP bias applies — see runbook "Known limits"):
   vc_max25: null

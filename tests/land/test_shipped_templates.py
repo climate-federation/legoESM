@@ -48,18 +48,56 @@ def test_smoke_4deg_defaults():
 
 def test_lmip_biophys_2deg_ships_calibration_on():
     """The 2° template IS the calibrated configuration (the one the published
-    soil-state IC was spun up with): all three calibration selectors on, cold
-    start by default, and the corrected c260716 surfdata.  A silent revert to
-    pre-calibration defaults would spin up the wrong state and only surface
-    weeks later as a confusing climatology — pin it here."""
+    soil-state IC was spun up with): calibrated albedo + glacier + per-PFT root
+    values present, AMIP soil grid, cold start by default, and the corrected
+    c260716 surfdata.  A silent revert to pre-calibration defaults would spin
+    up the wrong state and only surface weeks later as a confusing
+    climatology — pin it here."""
     path = _TEMPLATE_DIR / "lmip_biophys_2deg.yaml"
     cfg = validate_config(yaml.safe_load(path.read_text()))
-    assert cfg.physics["albedo_calibration"] == "amip_multilayer"
-    assert cfg.physics["root_calibration"] == "amip_multilayer"
+    assert cfg.physics["albedo"], "calibrated albedo block missing"
+    assert cfg.physics["glacier_albedo_vis"] is not None
+    assert cfg.physics["root_depth_per_pft"] is not None
     assert (cfg.physics["soil_n_layers"], cfg.physics["soil_depth_m"]) == (10, 3.0)
     assert cfg.physics["snow_scheme"] == "single"
     assert cfg.restart["from"] == ""                       # cold start = spin-up
     assert cfg.surfdata["path"].endswith("c260716.nc")     # not the superseded c250617
+
+
+# The 2026-07 calibration SNAPSHOT the published 2° run / soil-state IC used
+# (clm_surface_map at the run commit 14461553 on lmip-calibrated-config).  The
+# coupled land's clm_surface_map has since been RETUNED (e.g. glacier broadband
+# 0.7981 vs this 0.7178), so the live constants can no longer serve as the
+# reference — the template deliberately freezes the as-run values, and this
+# snapshot is what protects them from a fat-fingered YAML edit.
+_ASRUN_ALBEDO = {"alpha_snow_max": 0.8077, "alpha_snow_min": 0.5207,
+                 "snow_depth_crit": 15.4229, "tau_snow_decay": 3.6739 * 86400.0,
+                 "soil_dry_albedo_boost": 0.1458}
+_ASRUN_GLACIER_BROADBAND = 0.7178
+_ASRUN_ROOT_DEPTH = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408,
+                     1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488,  # const-ok: per-PFT root DEPTH [m] snapshot; 0.622 is a rooting depth, not epsilon
+                     0.477)
+
+
+def test_template_values_match_the_asrun_calibration_snapshot():
+    """The template's numbers ARE the reproduction contract for the published
+    run and its soil-state IC — pin them to the as-run snapshot so an edit is a
+    deliberate, named act.  (An equality pin against the LIVE clm_surface_map
+    constants would be wrong: the coupled land has been retuned since, and
+    following it would silently break reproduction.)"""
+    path = _TEMPLATE_DIR / "lmip_biophys_2deg.yaml"
+    p = validate_config(yaml.safe_load(path.read_text())).physics
+    for k, v in _ASRUN_ALBEDO.items():
+        assert p["albedo"][k] == pytest.approx(v), k
+    # Glacier pair: integrates to the as-run broadband under the 0.5/0.5
+    # weights, preserving the uncalibrated pair's 0.20 vis-NIR contrast.
+    vis, nir = p["glacier_albedo_vis"], p["glacier_albedo_nir"]
+    assert 0.5 * (vis + nir) == pytest.approx(_ASRUN_GLACIER_BROADBAND)
+    assert vis - nir == pytest.approx(0.20)
+    assert tuple(p["root_depth_per_pft"]) == pytest.approx(_ASRUN_ROOT_DEPTH)
+    # wp < fc elementwise — a swapped pair makes beta_root degenerate.
+    assert all(w < f for w, f in zip(p["theta_wp_per_pft"],
+                                     p["theta_fc_per_pft"]))
 
 
 def test_smoke_matches_production_physics():

@@ -32,14 +32,30 @@ physics:
   # ON: the point of this smoke is that boreal/Arctic winter columns keep their
   # energy budget instead of drifting to NaN.
   enable_freeze_thaw: true
-  # The three calibration selectors, matching lmip_biophys_2deg so this smoke
-  # exercises exactly the production configuration (see that template for the
-  # full rationale + per-selector reverts).
-  albedo_calibration: amip_multilayer
+  # Calibrated parameter values, byte-identical to lmip_biophys_2deg so this
+  # smoke exercises exactly the production configuration (see that template for
+  # the full rationale, units, and how to revert each block); a test asserts
+  # the two templates' physics are EQUAL, so edit both or neither.
+  albedo:
+    alpha_snow_max: 0.8077
+    alpha_snow_min: 0.5207
+    snow_depth_crit: 15.4229
+    tau_snow_decay: 317424.96
+    soil_dry_albedo_boost: 0.1458
+  glacier_albedo_vis: 0.8178
+  glacier_albedo_nir: 0.6178
   soil_n_layers: 10
   soil_depth_m: 3.0
   soil_growth_factor: 2.0
-  root_calibration: amip_multilayer
+  root_depth_per_pft: [0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408,
+                       1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488,
+                       0.477]
+  theta_wp_per_pft:   [0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162,
+                       0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874,
+                       0.0869, 0.0822, 0.0988]
+  theta_fc_per_pft:   [0.1706, 0.2249, 0.2351, 0.2253, 0.289, 0.2492, 0.2918,
+                       0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171,
+                       0.2193, 0.2123, 0.2469]
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   vc_max25: null
   g1: null

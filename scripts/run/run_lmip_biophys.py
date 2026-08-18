@@ -47,14 +47,6 @@ import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
 from legoesm.surface_albedo import LandAlbedoConfig
-from legoesm.land.clm_surface_map import (
-    TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
-    TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
-    TUNED_SNOW_DCRIT_MULTILAYER,
-    TUNED_SNOW_TAU_DAYS_MULTILAYER,
-    TUNED_SOIL_DRY_BOOST_MULTILAYER,
-)
-from legoesm.land.boundary_data import GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
@@ -143,11 +135,15 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
-        albedo_calibration=cfg.physics.get("albedo_calibration", "default"),
+        albedo=cfg.physics.get("albedo") or {},
+        glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
+        glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
+        root_depth_per_pft=cfg.physics.get("root_depth_per_pft", None),
+        theta_wp_per_pft=cfg.physics.get("theta_wp_per_pft", None),
+        theta_fc_per_pft=cfg.physics.get("theta_fc_per_pft", None),
         soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
         soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
         soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
-        root_calibration=cfg.physics.get("root_calibration", "default"),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -398,35 +394,28 @@ def run(args) -> int:
         _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
     stomata = StomataConfig(**_stom)
 
-    # --- Surface-albedo calibration ------------------------------------------
-    # "default" leaves LandAlbedoConfig() / GLACIER_ALB_* untouched (bit-identical
-    # to every pre-existing LMIP run).  "amip_multilayer" adopts the 2026-07 ERA5
-    # recalibration that ``clm_multilayer_setup`` injects for the coupled
-    # multilayer land — the LMIP path builds params from the RAW PFT/biome tables
-    # and so never saw it.  Values are imported, never re-typed, so the two paths
-    # cannot drift apart.
-    # Per-PFT root-zone params (root depth + plant theta_wp/theta_fc) at the
-    # column's dominant PFT, vs ONE global value from MultiLayerLandConfig.
-    if args.root_calibration not in ("default", "amip_multilayer"):
-        raise ValueError(
-            f"unknown root_calibration {args.root_calibration!r} "
-            "(expected 'default' or 'amip_multilayer')")
-    _tuned_root = (args.root_calibration == "amip_multilayer")
-
+    # --- Surface albedo + root-zone parameters, straight from the config ------
+    # Generic values under generic names: ``physics.albedo`` carries
+    # LandAlbedoConfig field values (absent field = the existing default, so an
+    # empty block is bit-identical to every pre-existing LMIP run);
+    # ``physics.glacier_albedo_vis``/``_nir`` set the ice-sheet base albedo pair
+    # (absent = the uncalibrated module default); the three ``*_per_pft`` lists
+    # (length-17, CLM5 PFT order) set per-column root-zone water uptake at the
+    # dominant PFT (absent = the scalar MultiLayerLandConfig values).  All
+    # values were validated by lmip_config.validate_config.
+    _land_albedo = LandAlbedoConfig()._replace(
+        **{k: float(v) for k, v in (args.albedo or {}).items()})
     _glacier_alb = None
-    _land_albedo = LandAlbedoConfig()
-    if args.albedo_calibration == "amip_multilayer":
-        _land_albedo = _land_albedo._replace(
-            alpha_snow_max=TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
-            alpha_snow_min=TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
-            snow_depth_crit=TUNED_SNOW_DCRIT_MULTILAYER,
-            tau_snow_decay=TUNED_SNOW_TAU_DAYS_MULTILAYER * _SEC_PER_DAY,
-            soil_dry_albedo_boost=TUNED_SOIL_DRY_BOOST_MULTILAYER)
-        _glacier_alb = (GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED)
-    elif args.albedo_calibration != "default":
-        raise ValueError(
-            f"unknown albedo_calibration {args.albedo_calibration!r} "
-            "(expected 'default' or 'amip_multilayer')")
+    if args.glacier_albedo_vis is not None:
+        _glacier_alb = (float(args.glacier_albedo_vis),
+                        float(args.glacier_albedo_nir))
+    _pft_root = None
+    if args.root_depth_per_pft is not None:
+        _pft_root = {
+            "root_depth": np.asarray(args.root_depth_per_pft, dtype=np.float64),
+            "theta_wp": np.asarray(args.theta_wp_per_pft, dtype=np.float64),
+            "theta_fc": np.asarray(args.theta_fc_per_pft, dtype=np.float64),
+        }
 
     if args.land_mode == "multilayer":
         # Vertical soil grid.  ``init_land_surface_data`` now remaps the surfdata
@@ -463,7 +452,7 @@ def run(args) -> int:
 
     config, _params_nominal, gsd = init_land_surface_data(
         args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb,
-        tuned_root_params=_tuned_root)
+        pft_root_params=_pft_root)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
     # Year range: --year-end defaults to --year (single-year, backward-compat).
@@ -593,7 +582,7 @@ def run(args) -> int:
 
     update_land_params = make_step_land_params_updater(
         gsd, config.surface_scheme, glacier_alb=_glacier_alb,
-        tuned_root_params=_tuned_root)
+        pft_root_params=_pft_root)
 
     # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
     if getattr(args, "_cfg_output_tapes", None) is not None:

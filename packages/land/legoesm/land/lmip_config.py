@@ -11,11 +11,15 @@ An experiment is fully described by a YAML file with this schema::
       surface_scheme: two_leaf_canopy | simple_seb
       bulk_scheme: most | constant
       enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
-      albedo_calibration: default | amip_multilayer   # surface-albedo parameter set
+      albedo: {field: value}           # LandAlbedoConfig field values (absent = default)
+      glacier_albedo_vis: float        # ice-sheet base albedo pair (both or neither;
+      glacier_albedo_nir: float        #   absent = uncalibrated module default)
       soil_n_layers: int               # Richards soil layers (default 8)
       soil_depth_m: float              # total soil column depth [m] (0 = geometric default ~6.375)
       soil_growth_factor: float        # layer thickness ratio (2.0 = default geometric)
-      root_calibration: default | amip_multilayer     # per-PFT root depth + theta_wp/fc
+      root_depth_per_pft: [17 floats]  # per-PFT root-zone uptake, CLM5 PFT order
+      theta_wp_per_pft: [17 floats]    #   (all three together; absent = the scalar
+      theta_fc_per_pft: [17 floats]    #   MultiLayerLandConfig values)
 
     forcing:
       source: cru_jra | synthetic
@@ -51,6 +55,7 @@ overrides into a template and writes the resolved config to
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
@@ -74,22 +79,15 @@ _STOMATA_MODELS = ("ball_berry", "medlyn")
 # lane today; the key is validated so a config naming the (future) multilayer
 # snow column fails loudly here instead of silently running different physics.
 _SNOW_SCHEMES = ("single",)
-# Surface-albedo parameter set.  "default" = the uncalibrated LandAlbedoConfig /
-# GLACIER_ALB_* module defaults (bit-identical to every pre-2026-07-27 LMIP run).
-# "amip_multilayer" = the 2026-07 AMIP recalibration that ``clm_multilayer_setup``
-# injects for the coupled multilayer land (snow bright/aged albedo, Niu-Yang
-# half-cover scale, snow-age decay, dry-soil brightening, ice-sheet base albedo),
-# tuned against ERA5.  The LMIP path builds its params from the raw PFT/biome
-# tables and so never saw this calibration.
-_ALBEDO_CALIBRATIONS = ("default", "amip_multilayer")
-# Root-zone water-uptake parameter set.  "default" = ONE global root e-folding
-# depth + theta_wp/theta_fc from MultiLayerLandConfig (1.0 m / 0.15 / 0.30).
-# "amip_multilayer" = the calibrated PER-PFT tables at the column's DOMINANT PFT
-# (root depth 0.088-1.706 m, theta_wp 0.082-0.116, theta_fc 0.171-0.292).
-# UNVALIDATED PAIRING: those tables were calibrated under SimpleSEB, not the
-# two-leaf canopy — this is the "test" half of the recommendation, not a
-# known-good default.
-_ROOT_CALIBRATIONS = ("default", "amip_multilayer")
+# Per-PFT root tables are indexed by the CLM5 17-PFT axis (bare + 16 veg).
+_N_PFT_CLM5 = 17
+# The three per-PFT root-zone lists travel together (the builders gather all
+# three at the dominant PFT); partial specification is a config error.
+_PFT_ROOT_KEYS = ("root_depth_per_pft", "theta_wp_per_pft", "theta_fc_per_pft")
+# Retired 2026-08 selector keys: values now go in the config directly
+# (physics.albedo / glacier_albedo_vis+nir / the *_per_pft lists).  Rejected
+# loudly so an old config cannot silently run uncalibrated.
+_RETIRED_SELECTOR_KEYS = ("albedo_calibration", "root_calibration")
 # Vertical soil grid defaults = SoilGridConfig() (8 geometric layers from
 # dz_top 0.025 m, growth 2 -> 6.375 m total).  Kept as named module constants so
 # the schema default and the SoilGridConfig default cannot silently diverge.
@@ -192,13 +190,51 @@ def validate_config(data: dict) -> LMIPConfig:
     if physics["snow_scheme"] not in _SNOW_SCHEMES:
         raise ValueError(
             f"physics.snow_scheme={physics['snow_scheme']!r} not in {_SNOW_SCHEMES}")
-    # Surface-albedo calibration set (see _ALBEDO_CALIBRATIONS).  Defaults to
-    # "default" so an existing config reproduces its baseline byte-for-byte.
-    physics.setdefault("albedo_calibration", "default")
-    if physics["albedo_calibration"] not in _ALBEDO_CALIBRATIONS:
+    # Retired selector keys fail loudly: silently ignoring them would run an
+    # old calibrated config with the uncalibrated defaults.
+    for _rk in _RETIRED_SELECTOR_KEYS:
+        if _rk in physics:
+            raise ValueError(
+                f"physics.{_rk} was retired: give the parameter VALUES instead "
+                "(physics.albedo: {LandAlbedoConfig field: value}, "
+                "physics.glacier_albedo_vis/_nir, and the three "
+                "physics.*_per_pft lists).  See templates/land/biophysics/"
+                "lmip_biophys_2deg.yaml for the calibrated values.")
+    # --- Surface albedo: generic field values, generic names -----------------
+    # ``physics.albedo`` is an optional {field: value} block over
+    # LandAlbedoConfig's own field names; an absent field keeps that field's
+    # default, and an absent/empty block is bit-identical to every pre-existing
+    # LMIP run.  Bounds live with the scheme (__param_spec__); here we only
+    # reject unknown names and non-finite values.
+    physics.setdefault("albedo", {})
+    _alb = physics["albedo"]
+    if not isinstance(_alb, dict):
+        raise ValueError(f"physics.albedo must be a mapping (got {_alb!r})")
+    if _alb:
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _bad = set(_alb) - set(LandAlbedoConfig._fields)
+        if _bad:
+            raise ValueError(
+                f"physics.albedo: unknown field(s) {sorted(_bad)}; valid fields "
+                f"are {sorted(LandAlbedoConfig._fields)}")
+        for _k, _v in _alb.items():
+            if not isinstance(_v, (int, float)) or isinstance(_v, bool) \
+                    or not math.isfinite(float(_v)):
+                raise ValueError(
+                    f"physics.albedo.{_k} must be a finite number (got {_v!r})")
+    # Ice-sheet base albedo pair: both or neither, each a fraction in [0, 1].
+    _gv = physics.setdefault("glacier_albedo_vis", None)
+    _gn = physics.setdefault("glacier_albedo_nir", None)
+    if (_gv is None) != (_gn is None):
         raise ValueError(
-            f"physics.albedo_calibration={physics['albedo_calibration']!r} "
-            f"not in {_ALBEDO_CALIBRATIONS}")
+            "physics.glacier_albedo_vis and glacier_albedo_nir must be given "
+            "together (the canopy consumes a (vis, nir) pair).")
+    for _k, _v in (("glacier_albedo_vis", _gv), ("glacier_albedo_nir", _gn)):
+        if _v is not None and (not isinstance(_v, (int, float))
+                               or isinstance(_v, bool)
+                               or not (0.0 <= float(_v) <= 1.0)):
+            raise ValueError(
+                f"physics.{_k} must be an albedo fraction in [0, 1] (got {_v!r})")
     # Vertical soil discretisation.  Defaults reproduce SoilGridConfig() (8
     # geometric layers, dz_top 0.025 m -> ~6.375 m); AMIP parity is 10 / 3.0 m.
     # The surfdata soil profile is remapped onto THIS grid (init_land_surface_data
@@ -218,11 +254,38 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.soil_depth_m={_sd} is implausibly shallow for a land column "
             "(< 0.1 m); use 0 for the geometric default.")
-    physics.setdefault("root_calibration", "default")
-    if physics["root_calibration"] not in _ROOT_CALIBRATIONS:
+    # --- Per-PFT root-zone water uptake (optional; all three lists together) --
+    # Length-17 (CLM5 PFT order) values for the root e-folding depth [m] and
+    # the PLANT wilting-point / field-capacity thresholds [m3/m3], applied per
+    # column at the dominant PFT.  Absent -> the scalar MultiLayerLandConfig
+    # values (bit-identical to the pre-existing behaviour).
+    _given = [k for k in _PFT_ROOT_KEYS if physics.setdefault(k, None) is not None]
+    if _given and len(_given) != len(_PFT_ROOT_KEYS):
         raise ValueError(
-            f"physics.root_calibration={physics['root_calibration']!r} "
-            f"not in {_ROOT_CALIBRATIONS}")
+            f"physics.{_PFT_ROOT_KEYS} must be given together (got only "
+            f"{_given}); the builders gather all three at the dominant PFT.")
+    if _given:
+        for _k in _PFT_ROOT_KEYS:
+            _v = physics[_k]
+            if (not isinstance(_v, (list, tuple)) or len(_v) != _N_PFT_CLM5
+                    or not all(isinstance(x, (int, float))
+                               and not isinstance(x, bool)
+                               and math.isfinite(float(x)) for x in _v)):
+                raise ValueError(
+                    f"physics.{_k} must be a list of {_N_PFT_CLM5} finite "
+                    f"numbers (CLM5 PFT order)")
+            physics[_k] = [float(x) for x in _v]
+        for _x in physics["root_depth_per_pft"]:
+            if not (0.01 <= _x <= 10.0):  # coeff-ok: schema sanity bound on a root depth [m]
+                raise ValueError(
+                    f"physics.root_depth_per_pft entry {_x} outside sane "
+                    "range [0.01, 10] m")
+        for _w, _f in zip(physics["theta_wp_per_pft"],
+                          physics["theta_fc_per_pft"]):
+            if not (0.0 < _w < _f < 1.0):
+                raise ValueError(
+                    f"per-PFT theta_wp={_w} / theta_fc={_f} must satisfy "
+                    "0 < wp < fc < 1")
     physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
     _gf = physics["soil_growth_factor"]
     if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):  # coeff-ok: schema sanity bound on a layer-thickness RATIO

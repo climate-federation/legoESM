@@ -1,10 +1,10 @@
-"""Per-PFT root depth + plant theta_wp/theta_fc on the LMIP canopy path.
+"""Config-supplied per-PFT root-zone water-uptake parameters (LMIP path).
 
-The LMIP path runs ONE global ``root_depth``/``theta_wp``/``theta_fc`` from
-``MultiLayerLandConfig`` (1.0 m / 0.15 / 0.30) for every column on Earth.  These
-tests cover the opt-in per-PFT tables, and the two ways this could silently fail:
-the per-step rebuild dropping the params, and the bare-soil gap-fill fallback
-carrying ``None`` where the params carry arrays (a pytree structure mismatch).
+The three ``physics.*_per_pft`` lists (length-17, CLM5 PFT order) replace the
+single global ``MultiLayerLandConfig.root_depth``/``theta_wp``/``theta_fc``
+with per-column values gathered at the dominant PFT (the calibrated production
+values live in the templates, pinned by test_shipped_templates).  Absent lists
+must be bit-identical to the pre-existing scalar behaviour.
 """
 import jax.numpy as jnp
 import numpy as np
@@ -14,13 +14,7 @@ from legoesm.land.boundary_data import (
     make_step_land_params_updater,
     surface_data_to_land_params,
 )
-from legoesm.land.boundary_data._internals import tuned_pft_root_arrays
 from legoesm.land.canopy import CanopyConfig
-from legoesm.land.clm_surface_map import (
-    TUNED_PFT_FC_MULTILAYER,
-    TUNED_PFT_ROOT_DEPTH_MULTILAYER,
-    TUNED_PFT_WP_MULTILAYER,
-)
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import _get
 from legoesm.land.surface_params import N_PFT_CLM5
@@ -29,32 +23,13 @@ from tests.land.boundary_data.test_glacier_albedo_calibration import _gsd
 
 _BET = 4          # broadleaf evergreen tree — the dominant PFT in the fixture
 
-
-# --------------------------------------------------------------------------
-# The tables themselves
-# --------------------------------------------------------------------------
-def test_tuned_tables_are_wellformed():
-    rt = tuned_pft_root_arrays()
-    for k, v in rt.items():
-        assert v.shape == (N_PFT_CLM5,), k
-        assert np.isfinite(v).all(), k
-    # a wilting point at or above field capacity makes beta_root degenerate
-    assert (rt["theta_fc"] > rt["theta_wp"]).all()
-    assert (rt["root_depth"] > 0.0).all()
-
-
-def test_tuned_tables_are_public_and_match_the_accessor():
-    """Promoted from private (_TUNED_*) so cross-module imports are legal."""
-    rt = tuned_pft_root_arrays()
-    np.testing.assert_allclose(rt["root_depth"], TUNED_PFT_ROOT_DEPTH_MULTILAYER)
-    np.testing.assert_allclose(rt["theta_wp"], TUNED_PFT_WP_MULTILAYER)
-    np.testing.assert_allclose(rt["theta_fc"], TUNED_PFT_FC_MULTILAYER)
-
-
-def test_tuned_tables_span_a_real_range():
-    """The whole point: grass and forest must NOT share one rooting depth."""
-    rd = np.asarray(TUNED_PFT_ROOT_DEPTH_MULTILAYER)
-    assert rd.max() / rd.min() > 5.0
+# Synthetic per-PFT tables with distinct, recognisable values so a wrong gather
+# (off-by-one PFT, wrong table) produces a visibly wrong number.
+_ROOT = {
+    "root_depth": np.linspace(0.1, 1.7, N_PFT_CLM5),
+    "theta_wp": np.linspace(0.05, 0.12, N_PFT_CLM5),
+    "theta_fc": np.linspace(0.17, 0.30, N_PFT_CLM5),
+}
 
 
 # --------------------------------------------------------------------------
@@ -65,7 +40,7 @@ def test_default_leaves_fields_none_and_falls_back_to_config():
     an existing run is bit-identical."""
     gsd = _gsd([0.0, 0.0])
     lp = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), tuned_root_params=False)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=None)
     assert lp.root_depth is None and lp.theta_wp is None and lp.theta_fc is None
     cfg = MultiLayerLandConfig()
     assert _get(lp, "root_depth", cfg.root_depth) == cfg.root_depth
@@ -78,31 +53,29 @@ def test_get_treats_a_present_none_as_absent():
     default, a plain getattr would return None and poison the arithmetic."""
     gsd = _gsd([0.0, 0.0])
     lp = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), tuned_root_params=False)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=None)
     assert _get(lp, "root_depth", 1.0) == 1.0          # not None
 
 
 # --------------------------------------------------------------------------
-# Tuned path
+# Per-PFT path
 # --------------------------------------------------------------------------
-def test_tuned_populates_the_dominant_pft_values():
+def test_tables_populate_the_dominant_pft_values():
     gsd = _gsd([0.0, 0.0])
     lp = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), tuned_root_params=True)
-    for field, table in (("root_depth", TUNED_PFT_ROOT_DEPTH_MULTILAYER),
-                         ("theta_wp", TUNED_PFT_WP_MULTILAYER),
-                         ("theta_fc", TUNED_PFT_FC_MULTILAYER)):
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=_ROOT)
+    for field in ("root_depth", "theta_wp", "theta_fc"):
         v = np.asarray(getattr(lp, field))
         assert v.shape == (2,)
-        np.testing.assert_allclose(v, table[_BET], rtol=1e-12)
+        np.testing.assert_allclose(v, _ROOT[field][_BET], rtol=1e-12)
 
 
-def test_tuned_differs_from_the_global_default():
-    """If the calibrated value happened to equal the config scalar the whole
-    change would be a no-op — assert it actually moves."""
+def test_tables_differ_from_the_global_default():
+    """If the supplied value happened to equal the config scalar the whole
+    change would be a no-op — assert the fixture actually moves it."""
     gsd = _gsd([0.0, 0.0])
     lp = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), tuned_root_params=True)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=_ROOT)
     cfg = MultiLayerLandConfig()
     assert float(np.asarray(lp.root_depth)[0]) != pytest.approx(cfg.root_depth)
     assert float(np.asarray(lp.theta_wp)[0]) != pytest.approx(cfg.theta_wp)
@@ -112,19 +85,19 @@ def test_tuned_differs_from_the_global_default():
 # --------------------------------------------------------------------------
 # The two silent-failure modes
 # --------------------------------------------------------------------------
-@pytest.mark.parametrize("tuned", [False, True])
-def test_step_updater_matches_init_params(tuned):
+@pytest.mark.parametrize("tables", [None, _ROOT])
+def test_step_updater_matches_init_params(tables):
     """Params are rebuilt EVERY step; if the updater did not also receive
-    tuned_root_params the calibration would apply for exactly one timestep."""
+    pft_root_params the per-PFT values would apply for exactly one timestep."""
     gsd = _gsd([0.0, 0.0])
     lp0 = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), tuned_root_params=tuned)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=tables)
     upd = make_step_land_params_updater(
-        gsd, CanopyConfig(), tuned_root_params=tuned)
+        gsd, CanopyConfig(), pft_root_params=tables)
     lp1, _ = upd(jnp.full(2, 0.2), jnp.asarray(15.0), jnp.asarray(2000.0))
     for field in ("root_depth", "theta_wp", "theta_fc"):
         a, b = getattr(lp0, field), getattr(lp1, field)
-        if tuned:
+        if tables is not None:
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12)
         else:
             assert a is None and b is None
@@ -136,7 +109,7 @@ def test_bare_gap_fill_structure_matches():
     'None is not a valid value for jnp.array' — this is the regression."""
     gsd = _gsd([0.0, 0.0])
     upd = make_step_land_params_updater(
-        gsd, CanopyConfig(), tuned_root_params=True)
+        gsd, CanopyConfig(), pft_root_params=_ROOT)
     lp, _ = upd(jnp.full(2, 0.2), jnp.asarray(15.0), jnp.asarray(2000.0))
     assert lp.root_depth is not None
     assert np.isfinite(np.asarray(lp.root_depth)).all()
@@ -144,7 +117,19 @@ def test_bare_gap_fill_structure_matches():
 
 def test_bare_fallback_uses_the_bare_soil_pft_row():
     from legoesm.land.boundary_data.gap_fill import bare_canopy_params
-    fb = bare_canopy_params(3, tuned_root_params=True)
+    fb = bare_canopy_params(3, pft_root_params=_ROOT)
     np.testing.assert_allclose(
-        np.asarray(fb.root_depth), TUNED_PFT_ROOT_DEPTH_MULTILAYER[0], rtol=1e-12)
+        np.asarray(fb.root_depth), _ROOT["root_depth"][0], rtol=1e-12)
     assert bare_canopy_params(3).root_depth is None
+
+
+def test_gap_fill_refuses_root_params_it_cannot_match():
+    """fill_land_param_gaps has no tables to build a matching bare fallback
+    from — feeding it root-carrying params must fail loudly, not crash deep
+    inside a pytree map."""
+    from legoesm.land.boundary_data.gap_fill import fill_land_param_gaps
+    gsd = _gsd([0.0, 0.0])
+    lp = surface_data_to_land_params(
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), pft_root_params=_ROOT)
+    with pytest.raises(ValueError, match="per-column root fields"):
+        fill_land_param_gaps(lp, gsd)

@@ -1,33 +1,32 @@
-"""AMIP-calibrated glacier / snow albedo for the LMIP biophysics path.
+"""Config-supplied glacier ice-albedo pair for the LMIP biophysics path.
 
-The LMIP driver builds its per-column params from the RAW PFT/biome tables, so it
-never saw the 2026-07 recalibration that ``clm_multilayer_setup`` injects for the
-coupled multilayer land.  ``physics.albedo_calibration='amip_multilayer'`` adopts
-it.  The regression these tests exist for: the params are rebuilt EVERY step by
-``make_step_land_params_updater``, so an override applied only at init would be
-silently reverted after step 0.
+``physics.glacier_albedo_vis``/``_nir`` set the ice-sheet base albedo as plain
+values (the calibrated numbers live in the templates); ``None`` keeps the
+uncalibrated module defaults byte-for-byte.  The regression these tests exist
+for: the params are rebuilt EVERY step by ``make_step_land_params_updater``, so
+an override applied only at init would be silently reverted after step 0.
 """
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from legoesm.land.boundary_data import (
-    GLACIER_ALB_NIR,
-    GLACIER_ALB_NIR_TUNED,
-    GLACIER_ALB_VIS,
-    GLACIER_ALB_VIS_TUNED,
-    GLACIER_ALBEDO_DEFAULT,
-    GLACIER_ALBEDO_TUNED,
     make_step_land_params_updater,
     surface_data_to_land_params,
 )
+from legoesm.land.boundary_data._internals import (
+    GLACIER_ALB_NIR,
+    GLACIER_ALB_VIS,
+    GLACIER_ALBEDO_DEFAULT,
+)
 from legoesm.land.canopy import CanopyConfig
-from legoesm.land.clm_surface_map import TUNED_GLACIER_ALBEDO_MULTILAYER
 from legoesm.land.global_surface_data import GlobalSurfaceData, GlobalSurfaceDataConfig
 from legoesm.land.surface_params import N_PFT_CLM5
 
 _BE = 4          # broadleaf evergreen tree — the vegetated column
-_TUNED_PAIR = (GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED)
+# An arbitrary override pair for the mechanism tests (the calibrated production
+# values live in the templates, pinned by test_shipped_templates).
+_PAIR = (0.8178, 0.6178)
 
 
 def _gsd(glacier_frac):
@@ -58,27 +57,11 @@ def _gsd(glacier_frac):
     )
 
 
-# --------------------------------------------------------------------------
-# The derived vis/NIR pair
-# --------------------------------------------------------------------------
-def test_tuned_pair_broadband_matches_the_calibrated_value():
-    """The pair must integrate to the tuned BROADBAND albedo under the 0.5/0.5
-    vis-NIR weights the existing GLACIER_ALBEDO_DEFAULT already encodes."""
+def test_uncalibrated_default_pair_integrates_to_the_broadband():
+    """The SEB/slab path's broadband must be the 0.5/0.5 integral of the pair —
+    the weighting the config-supplied pair is documented against."""
     assert GLACIER_ALBEDO_DEFAULT == pytest.approx(
         0.5 * (GLACIER_ALB_VIS + GLACIER_ALB_NIR))
-    assert 0.5 * (GLACIER_ALB_VIS_TUNED + GLACIER_ALB_NIR_TUNED) == pytest.approx(
-        TUNED_GLACIER_ALBEDO_MULTILAYER)
-    assert GLACIER_ALBEDO_TUNED == pytest.approx(TUNED_GLACIER_ALBEDO_MULTILAYER)
-
-
-def test_tuned_pair_is_physical_and_brighter_than_the_default():
-    """Ice is brighter in the visible; the calibration RAISES the ice-sheet base
-    (ERA5 ~0.85 vs the uncalibrated 0.60)."""
-    assert 0.0 < GLACIER_ALB_NIR_TUNED < GLACIER_ALB_VIS_TUNED < 1.0
-    assert GLACIER_ALBEDO_TUNED > GLACIER_ALBEDO_DEFAULT
-    # contrast preserved from the uncalibrated pair
-    assert (GLACIER_ALB_VIS_TUNED - GLACIER_ALB_NIR_TUNED) == pytest.approx(
-        GLACIER_ALB_VIS - GLACIER_ALB_NIR)
 
 
 # --------------------------------------------------------------------------
@@ -93,14 +76,14 @@ def test_init_params_default_is_unchanged():
     assert float(lp.ALB_NIR[1]) == pytest.approx(GLACIER_ALB_NIR)
 
 
-def test_init_params_apply_the_tuned_pair_on_glacier_columns_only():
+def test_init_params_apply_the_pair_on_glacier_columns_only():
     gsd = _gsd([0.0, 1.0])
     lp = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), glacier_alb=_TUNED_PAIR)
-    assert float(lp.ALB_VIS[1]) == pytest.approx(GLACIER_ALB_VIS_TUNED)
-    assert float(lp.ALB_NIR[1]) == pytest.approx(GLACIER_ALB_NIR_TUNED)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), glacier_alb=_PAIR)
+    assert float(lp.ALB_VIS[1]) == pytest.approx(_PAIR[0])
+    assert float(lp.ALB_NIR[1]) == pytest.approx(_PAIR[1])
     # the vegetated column keeps its soil-colour background — untouched
-    assert float(lp.ALB_VIS[0]) != pytest.approx(GLACIER_ALB_VIS_TUNED)
+    assert float(lp.ALB_VIS[0]) != pytest.approx(_PAIR[0])
 
 
 # --------------------------------------------------------------------------
@@ -108,12 +91,12 @@ def test_init_params_apply_the_tuned_pair_on_glacier_columns_only():
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("glacier_alb,exp_vis,exp_nir", [
     (None, GLACIER_ALB_VIS, GLACIER_ALB_NIR),
-    (_TUNED_PAIR, GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED),
+    (_PAIR, _PAIR[0], _PAIR[1]),
 ])
 def test_step_updater_preserves_the_override(glacier_alb, exp_vis, exp_nir):
     """``make_step_land_params_updater`` rebuilds CanopyLandParams every step.
     If it did not receive the same glacier_alb, the ice albedo would silently
-    revert to the uncalibrated default after step 0 — the whole calibration
+    revert to the uncalibrated default after step 0 — the whole override
     would apply for exactly one timestep."""
     gsd = _gsd([0.0, 1.0])
     upd = make_step_land_params_updater(
@@ -128,9 +111,9 @@ def test_step_updater_agrees_with_init_params():
     run is discontinuous at step 1."""
     gsd = _gsd([0.0, 1.0])
     lp0 = surface_data_to_land_params(
-        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), glacier_alb=_TUNED_PAIR)
+        gsd, CanopyConfig(), 15.0, jnp.full(2, 0.2), glacier_alb=_PAIR)
     upd = make_step_land_params_updater(
-        gsd, CanopyConfig(), glacier_alb=_TUNED_PAIR)
+        gsd, CanopyConfig(), glacier_alb=_PAIR)
     lp1, _ = upd(jnp.full(2, 0.2), jnp.asarray(15.0), jnp.asarray(2000.0))
     np.testing.assert_allclose(np.asarray(lp0.ALB_VIS), np.asarray(lp1.ALB_VIS), rtol=1e-12)
     np.testing.assert_allclose(np.asarray(lp0.ALB_NIR), np.asarray(lp1.ALB_NIR), rtol=1e-12)
