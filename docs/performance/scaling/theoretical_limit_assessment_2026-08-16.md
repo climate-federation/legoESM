@@ -278,12 +278,15 @@ Ranked levers:
    lower-cell edge-ownership rule is unrelated to production rows and
    can miss / mis-scatter / double-patch. Use rim_part ONLY for the
    submesh.
-   (ii) closure is not RHS-complete: vertices are kept when ANY
-   incident cell is local, so PV at partially-closed vertices reads
-   masked -1 neighbours against a global kite/area denominator;
-   edgesOnEdge tangential paths similarly. The decisive gate is a
-   FULL-TENDENCY ghost-poison closure test (divergence/gradient tests
-   do not establish it); closure likely needs dependency-graph growth.
+   (ii) RESOLVED 2026-08-18 (test_rim_plan_closure.py): the FULL
+   tendency (energy PV via vertices + kites, APVM, del4 1e16) on the
+   submesh matches the global tendency at every rim entity to the f64
+   floor (1.39e-10, plateau across depths 2-4) at closure depth 2,
+   while depth 1 fails at 1.06e-3 — seven orders of separation, gate
+   provably non-vacuous. codex's partially-closed-vertex hazard does
+   not bite this RHS config at depth >= 2 (a real gap would keep
+   improving with depth; a plateau is closure). Gate must be re-run if
+   the RHS grows a new operator.
    (iii) per-device `partition_voronoi_mesh` is a Python-loop setup
    wall at s9/64 (~billions of iterations incl. rank-1's whole-mesh
    comm schedule that the plan never uses) — replace with a
