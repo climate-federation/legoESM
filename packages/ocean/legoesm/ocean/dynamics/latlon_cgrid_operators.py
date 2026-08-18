@@ -1876,9 +1876,15 @@ def equatorial_boost_factor(
     boost_v : (n_lat+1,)
         Boost factor at v-face latitudes.
     """
-    if boost <= 0.0:
-        raise ValueError(f"equatorial boost must be > 0 (a factor on A_h), "
-                         f"got {boost}")
+    import math
+    if not (math.isfinite(boost) and boost > 0.0):
+        raise ValueError(f"equatorial boost must be finite and > 0 (a factor "
+                         f"on A_h), got {boost}")
+    if not (math.isfinite(sigma_deg) and sigma_deg > 0.0):
+        # codex 9430935 MAJOR-1: sigma=0 (or nan/inf) reaches 0/0 at the
+        # equator and injects NaNs into momentum; the CLI made it reachable.
+        raise ValueError(f"equatorial sigma_deg must be finite and > 0, "
+                         f"got {sigma_deg}")
     if boost == 1.0:
         n_lat = grid.lat.shape[0]
         ones_u = jnp.ones(n_lat, dtype=grid.lat.dtype)

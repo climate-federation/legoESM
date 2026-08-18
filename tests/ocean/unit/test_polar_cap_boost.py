@@ -139,3 +139,28 @@ class TestEquatorialReduction:
             equatorial_boost_factor(g, sigma_deg=7.0, boost=0.0)
         with pytest.raises(ValueError):
             equatorial_boost_factor(g, sigma_deg=7.0, boost=-2.0)
+
+    def test_bad_sigma_raises(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        for sig in (0.0, -3.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                equatorial_boost_factor(g, sigma_deg=sig, boost=0.5)
+
+    def test_floor_binds_under_reduction(self):
+        """codex 9430935 MAJOR-2: with A_h_floor set, the composed scale may
+        not drop below floor/A_h under an equatorial reduction."""
+        import jax.numpy as jnp
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = LatLonCGridOceanConfig().replace_flat(
+            A_h=1.0e5, A_h_floor=2.0e4, A_h_eq_boost=0.05,
+            A_h_eq_sigma_deg=7.0)
+        lv = cfg.lateral_viscosity
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        eb_u, _ = equatorial_boost_factor(g, lv.A_h_eq_sigma_deg,
+                                          lv.A_h_eq_boost)
+        # the branch guard mirrored from ocean_pe_latlon_cgrid
+        fr = lv.A_h_floor / lv.A_h
+        shaped = jnp.maximum(eb_u, fr)
+        assert float(shaped.min()) >= fr - 1e-12
+        # and the unfloored reduction WOULD have gone below it (test bites)
+        assert float(eb_u.min()) < fr

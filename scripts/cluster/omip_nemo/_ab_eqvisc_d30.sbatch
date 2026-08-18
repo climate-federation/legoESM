@@ -90,13 +90,17 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 \
   --output $OUT 2>&1 | tail -25
-echo "=== run rc=$?"
+run_rc=$?
+echo "=== run rc=$run_rc"
+# codex 9430935 MAJOR-4: never score a failed or snapshot-less arm -- a stale
+# or missing snapshot scored silently looks like a completed arm.
+[ $run_rc -eq 0 ] || { echo "FATAL: run failed rc=$run_rc -- not scoring"; exit 1; }
 
 GT=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc
 GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_W.nc
 GU=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_U.nc
 SNAP=$OUT/snapshot_day0030.npz
-[ -f "$SNAP" ] || SNAP=$OUT/snapshot_final.npz
+[ -f "$SNAP" ] || { echo "FATAL: no day-30 snapshot at $SNAP -- not scoring a partial arm"; exit 1; }
 export JAX_PLATFORMS=cpu
 
 echo "=== score: Z20 + upwelling + EUC (matched recs 5:6, days 26-30) ==="

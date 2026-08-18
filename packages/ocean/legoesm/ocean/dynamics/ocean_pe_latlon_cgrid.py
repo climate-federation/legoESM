@@ -2673,6 +2673,18 @@ def _bc_horizontal_viscosity(
         # No-op when slope_foot_alpha = 0 (factors are 1.0 scalars).
         return t_u * _slope_E_u, t_v * _slope_E_v
 
+    def _floor_after_reduction(s_u, s_v):
+        # codex 9430935 MAJOR-2: an equatorial REDUCTION (A_h_eq_boost < 1)
+        # must not undercut the documented minimum effective viscosity
+        # (A_h_floor).  Applied ONLY in the boost<1 regime so every
+        # historical (boost>=1) config stays bit-identical -- there the
+        # composed scale already sits above the floored cos scaling.
+        _lv = config.lateral_viscosity
+        if _lv.A_h_eq_boost < 1.0 and _lv.A_h_floor > 0.0 and _lv.A_h > 0:
+            _fr = _lv.A_h_floor / _lv.A_h
+            return jnp.maximum(s_u, _fr), jnp.maximum(s_v, _fr)
+        return s_u, s_v
+
     # Lateral A_h-viscosity OPERATOR dispatch (dispatch discipline: unknown ->
     # ValueError). "flux_divergence" = Veros's component-wise harmonic friction
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
@@ -2885,6 +2897,7 @@ def _bc_horizontal_viscosity(
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
+            lap_scale_u, lap_scale_v = _floor_after_reduction(lap_scale_u, lap_scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
@@ -2903,6 +2916,7 @@ def _bc_horizontal_viscosity(
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
+            scale_u, scale_v = _floor_after_reduction(scale_u, scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
@@ -2950,6 +2964,7 @@ def _bc_horizontal_viscosity(
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
+            lap_scale_u, lap_scale_v = _floor_after_reduction(lap_scale_u, lap_scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
@@ -2968,6 +2983,7 @@ def _bc_horizontal_viscosity(
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
+            scale_u, scale_v = _floor_after_reduction(scale_u, scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
@@ -3006,6 +3022,16 @@ def _bc_horizontal_viscosity(
             f"got {_side_bc!r}"
         )
     if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0:
+            # codex 9430935 MAJOR-3: the side-drag takes a SCALAR A_h and
+            # would silently ignore the equatorial shaping -- refuse rather
+            # than run two different viscosities under one name.  (The
+            # pre-existing lat-scaling inconsistency of this term is
+            # documented above; the new shaping must not extend it.)
+            raise ValueError(
+                'lateral_side_bc="no_slip" does not support A_h_eq_boost '
+                "!= 1 (the wall side-drag would keep the unshaped A_h); "
+                "use free_slip or leave the equatorial shaping off.")
         du_drag, dv_drag = no_slip_sidedrag_cgrid(
             u, v, grid, config.lateral_viscosity.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
         du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
