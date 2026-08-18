@@ -1649,7 +1649,11 @@ class ModelDriver:
         if dt_safe < dc.dt:
             logger.warning(
                 f"  CFL: reducing dt from {dc.dt:.0f}s to {dt_safe:.0f}s "
-                f"for {gc.grid_type} C{gc.resolution}"
+                f"for {gc.grid_type} C{gc.resolution} — the GENERIC "
+                f"advective+acoustic heuristic (assumed 50+340 m/s, "
+                f"cfl_check_and_adjust), NOT a scheme-certified stability "
+                f"envelope (in particular not the fv3_duo deck's "
+                f"k_split/n_split envelope)"
             )
             self.config = self.config._replace(
                 dycore=dc._replace(dt=dt_safe),
@@ -5534,7 +5538,19 @@ class ModelDriver:
 
         Returns (step, day).  Detects distributed checkpoint directories
         and loads per-rank data when running under MPI.
+
+        fv3_duo refuses HERE, before any decode: run_amip calls
+        ``load_checkpoint`` before ``_run_fv3_duo``'s own no-restart
+        check, so without this early refusal a restart-configured duo
+        run would first try to decode a foreign-schema (cube) checkpoint
+        and die on an unrelated shape error (codex 2026-08-18 MAJOR).
         """
+        if self.config.dycore.discretization == "fv3_duo":
+            raise NotImplementedError(
+                "fv3_duo (slice 1) has no restart: the duo bundle is not "
+                "in the checkpoint schema, so there is no checkpoint this "
+                "lane could decode. Refusing BEFORE any decode is "
+                "attempted. Run from step 0 (drop --restart-from).")
         path = Path(path)
 
         # MPAS path: mirror of the dedicated MPAS branch in
@@ -7123,13 +7139,27 @@ class ModelDriver:
                 day = start_day + step * DT / 86400.0
                 blowup = self._fv3_duo_snapshot(bundle, step, day)
                 if blowup is not None:
+                    self._fv3_duo_write_status(blowup)
                     return blowup
         # Final-state digest (run manifest) hashes self.state — hand it
         # the ACTUAL final bundle, not the unused CD-grid scaffold.
         self.state = bundle
         logger.info("FV3 duo lane COMPLETED: %d steps in %.1fs",
                     n_steps_total, time.time() - t0)
+        self._fv3_duo_write_status("COMPLETED")
         return "COMPLETED"
+
+    def _fv3_duo_write_status(self, status: str) -> None:
+        """Persist the lane's terminal status as an EXPLICIT marker.
+
+        ``fv3duo_status.txt`` next to the snapshots: a clean run says
+        COMPLETED, a guard-tripped run says BLOWUP with day/step, and an
+        interrupted run leaves NO marker — so tooling distinguishes the
+        three without inferring from the run manifest's missing
+        ``state_digest`` (which is only written for COMPLETED and could
+        equally mean a digest-write failure; codex 2026-08-18 MINOR).
+        """
+        (self._output_dir / "fv3duo_status.txt").write_text(status + "\n")
 
     def _fv3_duo_snapshot(self, bundle: dict, step: int, day: float):
         """Write one minimal duo snapshot; return a BLOWUP status or None.

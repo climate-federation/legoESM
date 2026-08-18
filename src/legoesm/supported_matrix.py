@@ -20,13 +20,22 @@ from typing import NamedTuple
 
 
 class SolverEntry(NamedTuple):
-    """One genuinely distinct solver implementation."""
+    """One genuinely distinct solver implementation.
+
+    ``canonical_name`` / ``class_name`` are UNIQUE across the matrix
+    (enforced by tests/unit/test_deprecation_warnings.py), so a solver
+    serving MORE dynamics axes than its row lists cannot get a second
+    row — it declares the extra coverage in ``note`` instead (currently
+    the fv3_duo entry).  Consumers treating the matrix as the support
+    table must read ``note`` before concluding an axis is unsupported.
+    """
     component: str        # "atmosphere" | "ocean"
     dynamics: str         # "shallow_water" | "hydrostatic" | "nonhydrostatic"
     grid: str             # "cubed_sphere_cdgrid" | "spectral" | "latlon_fv" | ...
     canonical_name: str   # Canonical flat name for create_model / config
     class_name: str       # Canonical Python class name
     module: str           # Defining module path
+    note: str = ""        # Extra machine-readable coverage (e.g. more dynamics axes)
 
 
 # =====================================================================
@@ -100,6 +109,9 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "atmosphere", "hydrostatic", "fv3_duo_cube",
         "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
         "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
+        note="ALSO serves dynamics='nonhydrostatic' (static hydrostatic "
+             "switch in the certified core); one row because canonical "
+             "names are unique — nonhydrostatic fv3_duo IS supported.",
     ),
 
     # -- U-cast (unstructured-cast hydrostatic primitive equations) --

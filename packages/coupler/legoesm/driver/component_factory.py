@@ -262,6 +262,84 @@ def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
 # Atmosphere factory
 # =========================================================================
 
+# =========================================================================
+# fv3_duo slice-1 DEFAULT-DENY wall
+# =========================================================================
+#
+# The certified duo lane consumes ONLY the fields allow-listed below (read
+# from ``_run_fv3_duo`` + this factory branch); every OTHER ExperimentConfig
+# field is inert on this lane, so a non-default value is a request the run
+# would silently ignore -- the "successful wrong experiment" failure mode
+# (codex 2026-08-18: moisture flags, land/surface schemes, forcing decks and
+# IC selectors all sailed past the enumerated deny-list).  The specific
+# contract-citing refusals in the branch below stay as the fast path; this
+# wall is the backstop that makes the deny-list exhaustive by construction.
+
+_FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
+    # Grid selection (nlev is additionally pinned to {5, 10} in-branch).
+    "grid.grid_type", "grid.resolution", "grid.nlev",
+    # Lane selection + timestep (dt is the only dynamic deck quantity).
+    "dycore.model_type", "dycore.discretization", "dycore.dt",
+    # Integration span + reproducibility bookkeeping (manifest-recorded).
+    "days", "start_day", "seed",
+    # Pinned to 'fp64' by the specific guard (the ExperimentConfig default
+    # is 'fp32', so every valid duo config differs here).
+    "precision",
+    # The five scheme selectors are pinned to 'none' by the specific guard.
+    "radiation", "convection", "microphysics", "turbulence",
+    "gravity_wave_drag",
+    # Output cadence + destination -- the only OutputConfig fields the
+    # lane's snapshot writer reads.
+    "output.output_dir", "output.diag_days",
+    # CLI-default drift that CANNOT affect the duo dynamics (measured on a
+    # stock ``run_amip --discretization fv3_duo`` config, job 9433540):
+    # ``--clouds`` defaults to 'xu_randall' at the argparse layer, but cloud
+    # schemes feed ONLY the radiation optics and radiation is pinned 'none'
+    # above; ``--use-polar-filter`` (BooleanOptionalAction, default None =
+    # "no choice") gates a lat-lon-C-grid-only Fourier filter this
+    # cubed-sphere lane never builds.  Refusing either would refuse every
+    # stock CLI launch.
+    "cloud_scheme", "dycore.use_polar_filter",
+})
+
+
+def _flatten_config_fields(cfg, prefix: str = ""):
+    """Yield ``("a.b.c", value)`` leaves of a nested NamedTuple config."""
+    for name in cfg._fields:
+        val = getattr(cfg, name)
+        if hasattr(val, "_fields"):  # nested NamedTuple sub-config
+            yield from _flatten_config_fields(val, f"{prefix}{name}.")
+        else:
+            yield f"{prefix}{name}", val
+
+
+def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
+    """Refuse EVERY non-default, non-allow-listed field, all at once.
+
+    Diffs the incoming config field-by-field against a freshly
+    constructed default instance and raises ONE error naming every
+    offending path and value, so a mis-built launch script is fixed in
+    one round-trip instead of field-by-field.
+    """
+    defaults = dict(_flatten_config_fields(type(config)()))
+    offending = [
+        (path, val)
+        for path, val in _flatten_config_fields(config)
+        if path not in _FV3_DUO_ALLOWED_NONDEFAULT
+        and not (val == defaults[path])
+    ]
+    if offending:
+        listing = ", ".join(f"{p}={v!r}" for p, v in offending)
+        raise ValueError(
+            f"fv3_duo (slice 1) runs ONLY the certified dry-dynamics deck; "
+            f"the driver lane consumes no other configuration, so each field "
+            f"below would be SILENTLY inert -- a successful wrong experiment. "
+            f"Non-default unsupported fields ({len(offending)}): {listing}. "
+            f"Allowed non-default fields: "
+            f"{sorted(_FV3_DUO_ALLOWED_NONDEFAULT)}. Reset the offenders or "
+            f"choose a lane that supports them.")
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
@@ -642,6 +720,9 @@ def create_atmosphere_dycore(
                 "fv3_duo (slice 1) is single-process only: the duo halo "
                 "exchange runs on the full six-face stack in one program; "
                 "no MPI/SPMD decomposition is wired.")
+        # DEFAULT-DENY backstop: anything else non-default is refused,
+        # all offenders listed at once (see _refuse_fv3_duo_non_default).
+        _refuse_fv3_duo_non_default(config)
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
             FV3DuoDynamicsModel,

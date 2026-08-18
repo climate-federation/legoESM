@@ -3537,6 +3537,14 @@ def test_fv3_duo_discretization_flows_to_config():
     assert cfg.precision == "fp64"
     cfg.validate_strict()
 
+    # The factory's DEFAULT-DENY wall must accept a stock CLI-built duo
+    # config — an argparse default drifting off the ExperimentConfig
+    # default would otherwise refuse EVERY run_amip fv3_duo launch.
+    from legoesm.driver.component_factory import (
+        _refuse_fv3_duo_non_default,
+    )
+    _refuse_fv3_duo_non_default(cfg)
+
     # argparse rejects a typo before anything else runs.
     with pytest.raises(SystemExit):
         parser.parse_args(["--dataset", "analytical",

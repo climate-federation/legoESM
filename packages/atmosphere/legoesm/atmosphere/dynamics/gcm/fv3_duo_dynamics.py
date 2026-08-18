@@ -100,6 +100,15 @@ class FV3DuoDynamicsModel:
                 f"kord_tm selects the remap-theta_v-in-linear-p operator "
                 f"(fv_mapz.F90:495-501), which the certified lane does not "
                 f"port. The pinned deck runs kord_tm=-9.")
+        _kords = (config.kord_mt, config.kord_tm, config.kord_tr)
+        if _kords != (9, -9, 9):
+            raise ValueError(
+                f"(kord_mt, kord_tm, kord_tr)={_kords} is outside the "
+                f"certified deck: the duo-lane certification (full-step "
+                f"oracle parity) is DECK-PINNED to (9, -9, 9). Other remap "
+                f"orders would run OUTSIDE the certified configuration "
+                f"(or fail only at the first remap, step 1), so they are "
+                f"refused at construction.")
         if config.k_split < 1 or config.n_split < 1:
             raise ValueError(
                 f"k_split={config.k_split} / n_split={config.n_split} must "
@@ -133,7 +142,16 @@ class FV3DuoDynamicsModel:
         """Advance the bundled pytree by ``dt`` seconds (one fv_dynamics
         call: ``k_split`` remaps over ``k_split * n_split`` acoustic
         sub-steps).  Pure ``state -> state``; the input bundle is not
-        mutated."""
+        mutated.
+
+        Per-step HOST SYNC: ``check_nsplt_schedule`` inspects a concrete
+        output scalar (``np.asarray`` + ``bool``), so every ``step`` call
+        carries one device-to-host transfer that acts as a completion
+        barrier -- the step is jitted but NOT async-dispatch-pipelined.
+        This is the accepted cost of the C5 fail-closed guard (an nsplt
+        above NSPLT_MAX would otherwise under-advect tracers silently); a
+        future alternative is a fused in-graph check with a sticky
+        failure flag read at a coarser (segment) cadence."""
         if not isinstance(state, dict) or set(state) != set(
                 FV3_DUO_STATE_KEYS):
             got = sorted(state) if isinstance(state, dict) else type(

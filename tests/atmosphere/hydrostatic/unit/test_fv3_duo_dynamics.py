@@ -172,6 +172,22 @@ class TestFV3DuoDynamicsModel:
         with pytest.raises(ValueError, match="kord_tm"):
             FV3DuoDynamicsModel(bundle, FV3DuoConfig(kord_tm=9))
 
+    @pytest.mark.parametrize("kords", [
+        dict(kord_mt=13),
+        dict(kord_tr=7),
+        dict(kord_tm=-7),
+    ])
+    def test_non_pinned_kord_deck_refused_at_construction(self, bundle,
+                                                          kords):
+        """Certification is DECK-PINNED to (9, -9, 9): any other order is
+        refused at construction, not at the first remap on step 1."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        with pytest.raises(ValueError, match="DECK-PINNED"):
+            FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, **kords))
+
     def test_wrong_grid_type_raises(self):
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoDynamicsModel,
@@ -275,22 +291,25 @@ class TestComponentFactoryDispatch:
             ("nonhydrostatic", "fv3_duo", "cubed_sphere")
         ] == "fv3_duo_primitive_equations"
 
-    @pytest.mark.parametrize("bad", [
-        dict(radiation="gray"),
-        dict(convection="sbm"),
-        dict(microphysics="sundqvist"),
-        dict(turbulence="louis"),
-        dict(precision="fp32"),
-        dict(held_suarez_forcing=True),
-        dict(distributed=True),
+    @pytest.mark.parametrize("bad, frag", [
+        (dict(radiation="gray"), "silently inert"),
+        (dict(convection="sbm"), "silently inert"),
+        (dict(microphysics="sundqvist"), "silently inert"),
+        (dict(turbulence="louis"), "silently inert"),
+        (dict(gravity_wave_drag="rayleigh"), "silently inert"),
+        (dict(precision="fp32"), "fp64"),
+        (dict(held_suarez_forcing=True), "Held-Suarez"),
+        (dict(distributed=True), "single-process"),
     ])
-    def test_slice1_refusals_fire(self, bad):
-        """Every refusal raises BEFORE any (expensive) duo grid build."""
+    def test_slice1_refusals_fire(self, bad, frag):
+        """Every refusal raises BEFORE any (expensive) duo grid build,
+        with the refusal-SPECIFIC message fragment (a loose "fv3_duo"
+        match would pass on any unrelated error on the same path)."""
         from legoesm.driver.component_factory import create_atmosphere_dycore
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
         cfg = _fv3_duo_config(**bad)
-        with pytest.raises(ValueError, match="fv3_duo"):
+        with pytest.raises(ValueError, match=frag):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
 
@@ -322,6 +341,71 @@ class TestComponentFactoryDispatch:
         assert cls.__name__ == "FV3DuoDynamicsModel"
         assert "fv3_duo_primitive_equations" in canonical_solver_names(
             "atmosphere")
+
+
+class TestFV3DuoDefaultDenyWall:
+    """The refusal wall is DEFAULT-DENY (codex 2026-08-18 BLOCKERs): any
+    field differing from its ExperimentConfig default and not on the
+    explicit allow list is refused, all offenders listed in ONE error."""
+
+    # One representative smuggler per BLOCKER class: a moisture flag, a
+    # land field, a forcing-deck path.  Each reached _run_fv3_duo
+    # silently under the enumerated deny-list.
+    SMUGGLERS = [
+        ("hard_saturation_adjustment", True),
+        ("use_multilayer_land", True),
+        ("forcing_path", "/data/era5_sst.nc"),
+    ]
+
+    def test_default_plus_allowed_config_passes(self):
+        from legoesm.driver.component_factory import (
+            _refuse_fv3_duo_non_default,
+        )
+        _refuse_fv3_duo_non_default(_fv3_duo_config())  # must not raise
+
+    @pytest.mark.parametrize("field, value", SMUGGLERS)
+    def test_each_smuggler_refused_with_path_named(self, field, value):
+        from legoesm.driver.component_factory import (
+            _refuse_fv3_duo_non_default,
+        )
+        with pytest.raises(ValueError, match=field):
+            _refuse_fv3_duo_non_default(_fv3_duo_config(**{field: value}))
+
+    def test_all_offenders_listed_at_once(self):
+        from legoesm.driver.component_factory import (
+            _refuse_fv3_duo_non_default,
+        )
+        cfg = _fv3_duo_config(**dict(self.SMUGGLERS))
+        with pytest.raises(ValueError) as ei:
+            _refuse_fv3_duo_non_default(cfg)
+        msg = str(ei.value)
+        for field, _v in self.SMUGGLERS:
+            assert field in msg, f"error message omits offender {field}"
+
+    def test_nested_offender_named_by_dotted_path(self):
+        from legoesm.driver.component_factory import (
+            _refuse_fv3_duo_non_default,
+        )
+        cfg0 = _fv3_duo_config()
+        cfg = cfg0._replace(output=cfg0.output._replace(checkpoint_days=5))
+        with pytest.raises(ValueError, match="output.checkpoint_days"):
+            _refuse_fv3_duo_non_default(cfg)
+
+    def test_wall_is_wired_into_the_factory_branch(self):
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config(use_multilayer_land=True)
+        with pytest.raises(ValueError, match="use_multilayer_land"):
+            create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                     create_sigma_coordinate(KM))
+
+    def test_matrix_note_declares_nh_support(self):
+        from legoesm.supported_matrix import ATMOSPHERE_MATRIX
+        entries = [e for e in ATMOSPHERE_MATRIX
+                   if e.canonical_name == "fv3_duo_primitive_equations"]
+        assert len(entries) == 1
+        assert "nonhydrostatic" in entries[0].note
 
 
 # ---------------------------------------------------------------------
@@ -361,6 +445,63 @@ class TestModelDriverLane:
         # final-state digest source: the driver handed the ACTUAL bundle
         assert isinstance(driver.state, dict)
         assert set(driver.state) == {"state", "press", "q", "omga", "nh"}
+        # Physical invariants (codex MINOR: finiteness alone passes a
+        # physically corrupt state).  (1) Global dry mass — the certified
+        # flux-form core conserves area-weighted sum(delp) to fp64
+        # roundoff; compare the deterministic analytic IC to the final
+        # bundle over the compute windows.
+        ic = driver.model.dcmip16_initial_state(do_pert=True)
+        ng_, n_ = driver.model.grid.ng, driver.model.grid.n
+        cs = slice(ng_, ng_ + n_)
+        areas = np.stack([
+            np.asarray(driver.model.grid.ctx_np["gs6"][t]["area"])[cs, cs]
+            for t in range(6)])
+        assert (areas > 0.0).all()  # windows never see the halo poison
+
+        def _dry_mass(bundle):
+            delp = np.asarray(bundle["state"]["delp"])[:, cs, cs, :]
+            return float((delp.sum(axis=-1) * areas).sum())
+
+        m0, m1 = _dry_mass(ic), _dry_mass(driver.state)
+        drift = abs(m1 - m0) / m0
+        print(f"FV3DUO_DRY_MASS_DRIFT rel={drift:.3e} over {n_expect} steps")
+        assert drift < 1e-12, (
+            f"global dry-mass drift {drift:.3e} over {n_expect} steps "
+            f"exceeds the fp64-roundoff envelope 1e-12")
+        # (2) The driver's own 400 m/s wind envelope holds at the end.
+        umax = max(
+            float(np.abs(np.asarray(driver.state["state"][nm])).max())
+            for nm in ("u", "v"))
+        assert umax < 400.0, f"final max|wind|={umax:.1f} m/s >= 400"
+        # (3) Explicit terminal-status marker next to the snapshots.
+        assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
+            == "COMPLETED"
+
+    def test_blowup_writes_explicit_status_marker(self, tmp_path):
+        """A guard-tripped run leaves an EXPLICIT marker (not just a
+        missing manifest digest).  Cheap: an identity step (no jit
+        compile) plus a 0 m/s envelope trips the guard at the first
+        snapshot."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path))
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        driver.model.step = lambda bundle, dt: bundle
+        driver._FV3_DUO_BLOWUP_UMAX_MS = 0.0
+        status = driver.run()
+        assert status.startswith("BLOWUP"), f"got {status!r}"
+        marker = (tmp_path / "fv3duo_status.txt").read_text().strip()
+        assert marker == status
+
+    def test_restart_refused_before_any_decode(self, tmp_path):
+        """run_amip calls load_checkpoint BEFORE the lane's own check —
+        the refusal must fire before any decode or existence check
+        (a nonexistent path must hit the refusal, not FileNotFoundError)."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path))
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        with pytest.raises(NotImplementedError, match="decode"):
+            driver.load_checkpoint(tmp_path / "no_such_checkpoint.npz")
 
     def test_restart_refused(self, tmp_path):
         from legoesm.driver.model_driver import ModelDriver
