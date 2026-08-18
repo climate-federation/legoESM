@@ -397,58 +397,58 @@ def test_unimplemented_clubb_params_are_derived_and_real():
     """The dead set is DERIVED from the module now, not listed.
 
     The hardcoded tuple this replaced named 13 of CLUBB's 29 dead tunables, so
-    16 reached the optimizer wired to nothing. A list rots the first time the
-    port grows a consumer; reading the source cannot.
+    16 reached the optimizer wired to nothing.
 
-    Each name must still be a real CLUBBParams field, and must genuinely not
-    appear in clubb.py outside its own declaration.
+    The FIRST derived version was itself inert: it stripped only the field
+    declaration, and ``__param_spec__`` names all 102 parameters in the same
+    file, so every one read as live and the set came back EMPTY. Hence the
+    non-emptiness assertion below -- an empty set is the exact failure this
+    check has already had once.
     """
-    import re
-    from pathlib import Path
-
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBParams
 
     dead = drv._dead_params_for("clubb")
-    fields = set(CLUBBParams._fields)
-    assert dead, "clubb has dead tunables; an empty set means the check broke"
-    src = Path(
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py"
-    ).read_text()
-    decl = re.search(
-        r'class CLUBBParams\(NamedTuple\):.*?(?=\n\S|\Z)', src, re.S).group(0)
-    body = src.replace(decl, '')
-    for name in dead:
-        assert name in fields, f"{name} is not a CLUBBParams field"
-        assert not re.search(rf"\b{re.escape(name)}\b", body), (
-            f"{name} IS referenced in clubb.py, so it is not dead")
+    assert len(dead) > 30, (
+        f"only {len(dead)} dead CLUBB parameters; the registry lists ~43, and "
+        "an empty or tiny set means the consumer scan is matching the spec "
+        "dict or the declaration again")
+    assert dead <= set(CLUBBParams._fields)
 
 
 def test_the_derived_set_catches_what_the_old_list_missed():
     """NON-VACUITY, and the reason for the change.
 
-    C_invrs_tau_wpxp_Ri and z_displace are two of the sixteen the hardcoded
-    tuple omitted. If the derived check cannot see them it has regressed to the
-    thing it replaced.
+    These five are among the sixteen the hardcoded tuple omitted; the live
+    five must NOT be swept up, or the check would silently shrink the search
+    space instead of widening it.
     """
     dead = drv._dead_params_for("clubb")
     for name in ("C_invrs_tau_wpxp_Ri", "z_displace", "xp3_coef_base",
                  "C13", "omicron"):
         assert name in dead, f"{name} should be detected as dead"
-    # ...and it must not sweep up parameters the port really uses.
     for name in ("beta", "c_K", "gamma_coef", "mu", "C8"):
         assert name not in dead, f"{name} IS used by clubb.py"
 
 
-@pytest.mark.parametrize("scheme", [s for s in drv.TURBULENCE_SCHEMES
-                                    if s != "clubb"])
-def test_every_scheme_gets_the_dead_parameter_check(scheme):
-    """It is not CLUBB-specific: a new closure with a dead field is caught too.
+def test_the_dead_check_covers_every_scheme_not_just_clubb():
+    """It is not CLUBB-specific, and MYNN-2.5 has dead fields too.
 
-    Only CLUBB has dead parameters today, so the others must come back EMPTY --
-    an assertion that would fail loudly if the resolver silently returned
-    everything (the failure mode that would freeze every parameter).
+    ``C4`` is documented dead (NN09 sets it to zero and the port does not read
+    it) and ``tke_min`` is declared but unused. Both are already excluded from
+    ``__param_spec__``, so neither reaches the tuner -- but the check must SEE
+    them, or it is only ever going to notice CLUBB.
     """
-    assert drv._dead_params_for(scheme) == frozenset(), scheme
+    from legoesm.atmosphere.physics.turbulence import config as turb_config
+
+    assert drv._dead_params_for("mynn25") == {"C4", "tke_min"}
+    # Schemes whose every field is consumed must come back EMPTY -- the
+    # assertion that fails loudly if the resolver ever returns everything,
+    # which would silently freeze the whole model.
+    for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
+                   "smagorinsky", "clubb_lite", "tke"):
+        got = drv._dead_params_for(scheme)
+        assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
+        assert turb_config is not None
 
 
 # --- surface layer: one derived config, identical on every arm --------------

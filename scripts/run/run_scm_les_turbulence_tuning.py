@@ -392,13 +392,22 @@ def unimplemented_params(module, config_cls) -> frozenset[str]:
     import re
 
     src = inspect.getsource(module)
-    decl = re.search(
+    # Strip BOTH the field declaration and the __param_spec__ registry before
+    # looking for consumers. Stripping only the declaration returned an EMPTY
+    # dead set for CLUBB -- the spec dict names all 102 parameters in the same
+    # file, so every one of them read as live and this check was inert. The
+    # per-scheme "n trained" counts that looked like it working were the
+    # zero-gradient gate doing the work.
+    for pattern in (
         rf'class {config_cls.__name__}\(NamedTuple\):.*?(?=\n\S|\Z)',
-        src, re.S)
-    body = src.replace(decl.group(0), '') if decl else src
+        r'^__param_spec__\s*=\s*\{.*?^\}',
+    ):
+        m = re.search(pattern, src, re.S | re.M)
+        if m:
+            src = src.replace(m.group(0), '')
     return frozenset(
         f for f in config_cls._fields
-        if not re.search(rf'\b{re.escape(f)}\b', body))
+        if not re.search(rf'\b{re.escape(f)}\b', src))
 
 
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
