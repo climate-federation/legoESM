@@ -320,3 +320,47 @@ def test_the_classical_arm_passes_its_sample_forcing():
     }
     with pytest.raises(ValueError, match="prescribed surface temperature"):
         make_run_seg(params).raw(carry, 1, bad)
+
+
+def test_a_warmer_prescribed_surface_warms_the_lowest_level():
+    """The physical consequence, not just the wiring: with the surface
+    anchored to a prescribed field, a surface 10 K warmer than the air must
+    heat the lowest model level.  Before the fix the surface temperature WAS
+    the lowest air temperature, so the sensible heat flux was identically
+    zero and this difference was exactly 0.
+    """
+    from types import SimpleNamespace
+    from pathlib import Path
+    import yaml as _yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    repo = Path(__file__).resolve().parents[2]
+    yml = _yaml.safe_load(
+        (repo / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                          smoke=True, multi_step_hours=(6,), n_days=1)
+    _m, grid, sigma, params, make_run_seg, _loss, _dt = build_mode_components(
+        cfg, yml)
+
+    nlev = int(jnp.shape(sigma.sigma_full)[0])
+    carry = _carry(grid.n_lat, grid.n_lon, nlev=nlev, extras=False)
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    T_air = float(jnp.asarray(carry.T)[..., -1].mean())
+
+    def _run(T_sfc):
+        fc = {
+            "T_sfc": jnp.full((ncol,), T_sfc),
+            "sic": jnp.zeros((ncol,)),
+            "day_of_year": jnp.asarray(244.0),
+            "seconds_of_day": jnp.asarray(21600.0),
+        }
+        return make_run_seg(params).raw(carry, 2, fc)
+
+    cold = _run(T_air)
+    warm = _run(T_air + 10.0)
+    d_sfc = float(jnp.mean(jnp.asarray(warm.T)[..., -1]
+                           - jnp.asarray(cold.T)[..., -1]))
+    assert d_sfc > 1.0e-4, (
+        f"a 10 K warmer surface changed the lowest level by {d_sfc:.3e} K — "
+        "the surface heat flux is not reaching the atmosphere")
