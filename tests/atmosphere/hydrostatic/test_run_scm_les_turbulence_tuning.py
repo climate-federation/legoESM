@@ -393,26 +393,62 @@ def test_clubb_prognostic_can_be_disabled():
     assert cfg.turbulence.clubb.prognostic is False
 
 
-def test_unimplemented_clubb_params_are_named_and_real():
-    """Each listed parameter must exist on CLUBBParams (so the list cannot rot
-    into naming nonsense) AND appear nowhere in clubb.py as an attribute read.
+def test_unimplemented_clubb_params_are_derived_and_real():
+    """The dead set is DERIVED from the module now, not listed.
+
+    The hardcoded tuple this replaced named 13 of CLUBB's 29 dead tunables, so
+    16 reached the optimizer wired to nothing. A list rots the first time the
+    port grows a consumer; reading the source cannot.
+
+    Each name must still be a real CLUBBParams field, and must genuinely not
+    appear in clubb.py outside its own declaration.
     """
     import re
     from pathlib import Path
+
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBParams
 
+    dead = drv._dead_params_for("clubb")
     fields = set(CLUBBParams._fields)
+    assert dead, "clubb has dead tunables; an empty set means the check broke"
     src = Path(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py"
     ).read_text()
-    assert drv.CLUBB_UNIMPLEMENTED_PARAMS, "list should not be empty"
-    for name in drv.CLUBB_UNIMPLEMENTED_PARAMS:
+    decl = re.search(
+        r'class CLUBBParams\(NamedTuple\):.*?(?=\n\S|\Z)', src, re.S).group(0)
+    body = src.replace(decl, '')
+    for name in dead:
         assert name in fields, f"{name} is not a CLUBBParams field"
-        # an attribute read would look like `.name` / `params.name`
-        assert not re.search(rf"\.{re.escape(name)}\b", src), (
-            f"{name} IS read in clubb.py; it should be removed from "
-            "CLUBB_UNIMPLEMENTED_PARAMS"
-        )
+        assert not re.search(rf"\b{re.escape(name)}\b", body), (
+            f"{name} IS referenced in clubb.py, so it is not dead")
+
+
+def test_the_derived_set_catches_what_the_old_list_missed():
+    """NON-VACUITY, and the reason for the change.
+
+    C_invrs_tau_wpxp_Ri and z_displace are two of the sixteen the hardcoded
+    tuple omitted. If the derived check cannot see them it has regressed to the
+    thing it replaced.
+    """
+    dead = drv._dead_params_for("clubb")
+    for name in ("C_invrs_tau_wpxp_Ri", "z_displace", "xp3_coef_base",
+                 "C13", "omicron"):
+        assert name in dead, f"{name} should be detected as dead"
+    # ...and it must not sweep up parameters the port really uses.
+    for name in ("beta", "c_K", "gamma_coef", "mu", "C8"):
+        assert name not in dead, f"{name} IS used by clubb.py"
+
+
+@pytest.mark.parametrize("scheme", [s for s in drv.TURBULENCE_SCHEMES
+                                    if s != "clubb"])
+def test_every_scheme_gets_the_dead_parameter_check(scheme):
+    """It is not CLUBB-specific: a new closure with a dead field is caught too.
+
+    Only CLUBB has dead parameters today, so the others must come back EMPTY --
+    an assertion that would fail loudly if the resolver silently returned
+    everything (the failure mode that would freeze every parameter).
+    """
+    assert drv._dead_params_for(scheme) == frozenset(), scheme
 
 
 # --- surface layer: one derived config, identical on every arm --------------
