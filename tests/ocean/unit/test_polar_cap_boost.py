@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -116,3 +117,25 @@ class TestPolarCapBoostCombined:
         # Polar: eq=1, cap=10.
         assert float(eq_u[idx_85]) < 1.05
         assert float(cap_u[idx_85]) > 9.0
+
+
+class TestEquatorialReduction:
+    """boost < 1 = NEMO-style equatorial viscosity REDUCTION (ORCA1's
+    eddy_viscosity_3D drops ahm 20000 -> 1000 m2/s at the equator)."""
+
+    def test_reduction_at_equator_unity_far_away(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        bu, bv = equatorial_boost_factor(g, sigma_deg=7.0, boost=0.05)
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_eq = int(np.argmin(np.abs(lat_deg - 0.0)))
+        idx_45 = int(np.argmin(np.abs(lat_deg - 45.0)))
+        assert float(bu[idx_eq]) < 0.1          # ~0.05 at the equator
+        assert float(bu[idx_45]) > 0.99         # untouched at midlatitude
+        assert float(bu.min()) > 0.0            # never zero/negative
+
+    def test_nonpositive_boost_raises(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        with pytest.raises(ValueError):
+            equatorial_boost_factor(g, sigma_deg=7.0, boost=0.0)
+        with pytest.raises(ValueError):
+            equatorial_boost_factor(g, sigma_deg=7.0, boost=-2.0)

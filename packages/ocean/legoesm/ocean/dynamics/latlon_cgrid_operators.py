@@ -1863,8 +1863,11 @@ def equatorial_boost_factor(
     sigma_deg : float
         Gaussian half-width in degrees.  Typical values 3-7°.
     boost : float
-        Multiplier at the exact equator (lat=0).  Values >= 1.0;
-        boost = 1.0 disables the enhancement.  Typical values 3-10.
+        Multiplier at the exact equator (lat=0).  Must be > 0.
+        boost = 1.0 disables the shaping.  > 1 enhances (typical 3-10);
+        < 1 REDUCES equatorial viscosity (NEMO ORCA1's eddy_viscosity_3D
+        file drops ahm from 20000 to 1000 m²/s at the equator to let the
+        EUC exist -- boost=0.05 with sigma~7° approximates that shape).
 
     Returns
     -------
@@ -1873,7 +1876,10 @@ def equatorial_boost_factor(
     boost_v : (n_lat+1,)
         Boost factor at v-face latitudes.
     """
-    if boost <= 1.0:
+    if boost <= 0.0:
+        raise ValueError(f"equatorial boost must be > 0 (a factor on A_h), "
+                         f"got {boost}")
+    if boost == 1.0:
         n_lat = grid.lat.shape[0]
         ones_u = jnp.ones(n_lat, dtype=grid.lat.dtype)
         ones_v = jnp.ones(n_lat + 1, dtype=grid.lat.dtype)

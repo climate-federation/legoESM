@@ -1378,11 +1378,15 @@ class LateralViscosityConfig(NamedTuple):
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
                                     # for grids extending past 85°.
-    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
-                                    # > 1, multiplies A_h by 1 + (boost-1) *
-                                    # exp(-(lat/sigma)²), so horizontal momentum
-                                    # gets extra dissipation near the equator
-                                    # where f→0 leaves no rotational stiffness.
+    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity shaping.
+                                    # When != 1, multiplies A_h by 1 + (boost-1)
+                                    # * exp(-(lat/sigma)²).  > 1: extra
+                                    # dissipation near the equator where f→0
+                                    # leaves no rotational stiffness.  < 1 (>0):
+                                    # equatorial REDUCTION — NEMO ORCA1's
+                                    # eddy_viscosity_3D file drops ahm 20000 →
+                                    # 1000 m²/s at the equator so the EUC can
+                                    # exist; 0.05 with sigma ~7° mimics it.
                                     # Targets unconstrained equatorial dynamic
                                     # response at coarse resolution that drives
                                     # runaway upwelling cold tongues.  Typical

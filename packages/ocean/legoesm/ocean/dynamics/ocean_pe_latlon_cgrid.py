@@ -2727,7 +2727,7 @@ def _bc_horizontal_viscosity(
         # DELIBERATELY IGNORED here (NEMO owns the cos φ shape through MAX(e1,e2));
         # eq-boost / cap-boost / floor / B_h instead RAISE below (they would silently
         # double-scale or be silently dropped — vector-Laplacian extensions, not NEMO's).
-        if (config.lateral_viscosity.A_h_eq_boost > 1.0
+        if (config.lateral_viscosity.A_h_eq_boost != 1.0
                 or config.lateral_viscosity.A_h_cap_boost > 1.0
                 or config.lateral_viscosity.A_h_floor > 0.0):
             raise ValueError(
@@ -2804,7 +2804,7 @@ def _bc_horizontal_viscosity(
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -2874,7 +2874,7 @@ def _bc_horizontal_viscosity(
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
@@ -2889,10 +2889,10 @@ def _bc_horizontal_viscosity(
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
+        elif config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
@@ -2939,7 +2939,7 @@ def _bc_horizontal_viscosity(
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
@@ -2954,10 +2954,10 @@ def _bc_horizontal_viscosity(
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
+        elif config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
