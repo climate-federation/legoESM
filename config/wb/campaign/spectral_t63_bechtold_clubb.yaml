@@ -158,7 +158,7 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
-  surface_drag_confounded: true
+  surface_drag_confounded: "builder_refuses_classical_scheme"
   # #1464: NOT enabled here, deliberately. This campaign's classical arm runs
   # `clubb`, and the learned arm's drag builder refuses prognostic schemes
   # (clubb/tke/mynn25/clubb_lite/edmf) because it threads no PhysicsState and

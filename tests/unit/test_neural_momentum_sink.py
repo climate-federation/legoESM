@@ -15,6 +15,8 @@ bit-identical; and the network still owns the thermodynamics.
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -201,19 +203,31 @@ def test_campaign_builder_wires_the_drag_when_asked():
         "the opt-in flag is gone; the campaign cannot request the drag")
 
 
-def _schemes_the_drag_builder_refuses():
-    """Derived by asking the builder, not copied from it.
+def _all_turbulence_schemes():
+    """Every scheme name the turbulence factory dispatches on.
 
-    A hand-kept copy of its refusal list goes stale the moment a prognostic
-    scheme is added, and the campaign then dies at its first step instead of
-    in review.
+    Read out of the factory itself. A hand-kept list goes stale the moment a
+    scheme is added, and the new one would then be treated as equalisable by
+    the guard below and die at the campaign's first step instead.
     """
+    import re
+
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+
+    src = inspect.getsource(ti.get_turbulence_fn)
+    names = set(re.findall(r'config\.scheme\s*==\s*["\']([a-z0-9_]+)["\']', src))
+    names.discard("none")
+    assert len(names) >= 5, f"only found {sorted(names)} — the dispatch changed shape"
+    return names
+
+
+def _schemes_the_drag_builder_refuses():
+    """Derived by ASKING the builder, not by copying its list."""
     from legoesm.training.neural_gcm_spectral import (
         make_turbulence_only_spectral_physics,
     )
     refused = set()
-    for name in ("smagorinsky", "louis", "holtslag_boville", "ysu",
-                 "tke", "mynn25", "clubb", "clubb_lite", "edmf"):
+    for name in _all_turbulence_schemes():
         try:
             make_turbulence_only_spectral_physics(600.0, name)
         except ValueError:
@@ -246,22 +260,33 @@ def test_the_scheme_name_is_not_cosmetic():
         f"of {peak:.3g}, so matching the scheme names would pin nothing")
 
 
-def test_the_campaign_builder_reads_the_scheme_and_not_just_the_flag():
-    """The seam that was dead once already.
+def test_the_campaign_builder_passes_the_scheme_into_the_builder():
+    """The seam that was dead once already, checked structurally.
 
-    `scale_build` must pass the campaign's chosen scheme through to the
-    builder. If it reads only the on/off flag and keeps its own default, the
-    learned arm silently gets a different scheme from the classical arm and
-    every config guard below stays green while the confound survives.
+    A substring search for the key would stay green if the builder read it
+    into a log line and still called the drag factory with its own default —
+    the decoupled seam this fix already hit once. So find the CALL to the drag
+    factory in the abstract syntax tree and require that one of its arguments
+    is derived from the campaign's scheme key.
     """
-    import inspect
+    import ast
 
     from legoesm.training import scale_build as sb
-    src = inspect.getsource(sb)
-    assert "surface_drag_scheme" in src, (
-        "scale_build no longer reads surface_drag_scheme — the campaign's "
-        "choice of momentum scheme cannot reach the learned arm")
-    assert "momentum_physics_fn=" in src
+
+    tree = ast.parse(inspect.getsource(sb))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", None))
+             == "make_turbulence_only_spectral_physics"]
+    assert calls, (
+        "scale_build no longer calls make_turbulence_only_spectral_physics — "
+        "the learned arm is back to running with no surface drag")
+    wired = [c for c in calls
+             if "surface_drag_scheme" in ast.dump(c)]
+    assert wired, (
+        "scale_build calls the drag factory but never passes the campaign's "
+        "surface_drag_scheme into it, so every campaign silently gets the "
+        "factory default instead of its classical arm's scheme")
 
 
 def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
@@ -304,15 +329,34 @@ def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
         drag_on = neural.get("surface_drag") is True
         drag_scheme = neural.get("surface_drag_scheme")
 
-        # An explicit, machine-readable declaration that this campaign's two
-        # arms cannot be equalised. Allowed, but it must be DECLARED — the
-        # point is that every confounded campaign can be listed by grepping
-        # one key, instead of hiding behind a comment.
-        if neural.get("surface_drag_confounded") is True:
+        # A declaration that this campaign's two arms cannot be equalised.
+        # It must give a REASON, and the reason must be one this test can
+        # check — otherwise the key is a self-certified bypass and any
+        # campaign could delete its drag and wave the flag.
+        declared = neural.get("surface_drag_confounded")
+        if declared is not None:
+            scored_campaign = "wb/campaign/" in rel.replace("\\", "/")
             if drag_on:
                 problems.append(
                     f"{rel}: declares itself confounded and also enables the "
                     "drag; pick one")
+            elif declared == "builder_refuses_classical_scheme":
+                if classical_scheme not in refused:
+                    problems.append(
+                        f"{rel}: declares the builder refuses "
+                        f"{classical_scheme!r}, but it does not — this "
+                        "campaign can and must be equalised")
+            elif declared == "core_does_not_read_the_key":
+                if scored_campaign:
+                    problems.append(
+                        f"{rel}: is a scored campaign, so it runs on the core "
+                        "that DOES read the key; that reason does not apply")
+            else:
+                problems.append(
+                    f"{rel}: surface_drag_confounded={declared!r} is not a "
+                    "reason this test can check; use "
+                    "'builder_refuses_classical_scheme' or "
+                    "'core_does_not_read_the_key'")
             continue
 
         if classical_scheme in refused:

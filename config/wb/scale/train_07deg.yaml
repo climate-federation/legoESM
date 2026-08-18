@@ -82,7 +82,7 @@ neural_gcm:
   # flag would be a no-op that still perturbs the stored seconds-per-step
   # baselines. Marked rather than silently left: any neural-versus-classical
   # number from this config is confounded by the missing momentum sink.
-  surface_drag_confounded: true
+  surface_drag_confounded: "core_does_not_read_the_key"
   nn_hidden: 256
   nn_layers: 4
 sfno:
