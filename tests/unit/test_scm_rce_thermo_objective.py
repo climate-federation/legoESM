@@ -34,11 +34,13 @@ from legoesm.training.scm_rce_metrics import (
 
 
 #: Relative tolerance for a value that JAX computed in its default dtype.
-#: These scores are float32 sums over a column, which lands ~1e-7 from the
-#: analytic answer; asserting tighter measures the dtype, not the objective.
-#: The pure-numpy identities below (weighted_rmse, weight normalisation) keep
-#: their float64 tolerances.
-_F32_REL = 1e-6
+#: These scores are float32 sums over a column and land 0.5-2.5 ulps from the
+#: analytic answer (5.5e-9 to 2.9e-7 measured); asserting tighter measures the
+#: dtype, not the objective.  Set at 2e-6 rather than 1e-6 so the thinnest
+#: site keeps ~7x headroom: a reassociated float32 reduction over ~60 levels
+#: has a worst case near n*eps, which a different backend could reach.  Still
+#: 50x below the smallest error shown to fail these tests (1e-4 relative).
+_F32_REL = 2e-6
 
 
 def _ref(n=20):
