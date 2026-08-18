@@ -364,3 +364,53 @@ def test_a_warmer_prescribed_surface_warms_the_lowest_level():
     assert d_sfc > 1.0e-4, (
         f"a 10 K warmer surface changed the lowest level by {d_sfc:.3e} K — "
         "the surface heat flux is not reaching the atmosphere")
+
+
+# --------------------------------------------------------------------------
+# 5. the radiation g-point block size is reachable from the campaign config
+# --------------------------------------------------------------------------
+
+def _built_radiation_config(gpt_batch):
+    """Capture the RadiationConfig the classical builder hands to RRTMGP."""
+    from types import SimpleNamespace
+    from pathlib import Path
+    import yaml as _yaml
+
+    import legoesm.atmosphere.physics.radiation.integration as rad_int
+    from legoesm.training.scale_build import build_mode_components
+
+    repo = Path(__file__).resolve().parents[2]
+    yml = _yaml.safe_load(
+        (repo / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    if gpt_batch is not None:
+        yml["classical"] = dict(yml.get("classical", {}),
+                                rrtmgp_gpoint_batch_size=gpt_batch)
+    seen = {}
+    real = rad_int.make_radiation_physics
+
+    def spy(cfg, model_type, **kw):
+        seen["cfg"] = cfg
+        return real(cfg, model_type, **kw)
+
+    rad_int.make_radiation_physics = spy
+    try:
+        cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                              smoke=True, multi_step_hours=(6,), n_days=1)
+        _m, _g, _s, params, make_run_seg, _l, _dt = build_mode_components(cfg, yml)
+        make_run_seg(params)
+    finally:
+        rad_int.make_radiation_physics = real
+    return seen["cfg"]
+
+
+def test_the_gpoint_block_size_reaches_rrtmgp():
+    """The scratch this knob controls is 50.5 GiB at 16 and 44.7 GiB at 8 on
+    the real training step, so a knob that did not reach the scheme would be
+    the difference between a run that fits and one that does not."""
+    assert _built_radiation_config(8).rrtmgp.gpoint_batch_size == 8
+    assert _built_radiation_config(16).rrtmgp.gpoint_batch_size == 16
+
+
+def test_a_zero_gpoint_block_size_is_refused():
+    with pytest.raises(ValueError, match="rrtmgp_gpoint_batch_size"):
+        _built_radiation_config(0)

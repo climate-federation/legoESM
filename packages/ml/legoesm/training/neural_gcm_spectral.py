@@ -1342,9 +1342,17 @@ def spectral_rollout(
             + t / 86400.0
         )
         return {
-            # the SANITISED field, so radiation and the surface scheme cannot
-            # see two different surface temperatures (GLM)
-            "T_sfc": _sfc_override,
+            # The RAW field, NaN over land preserved.  It is tempting to
+            # publish the sanitised copy here so every consumer sees one
+            # value, but the consumers disagree ON PURPOSE: the learned
+            # arms (SFNO, column MLP) read NaN as "no prescribed surface
+            # here" and substitute the lowest-level air temperature, and
+            # handing them the finite -1e4 sentinel instead would feed
+            # -10000 K into every land column (codex, overruling an earlier
+            # GLM suggestion).  The sentinel belongs only in the physics
+            # state's override slot, which is where its contract is defined.
+            # This is exactly what spectral_amip_rollout has always done.
+            "T_sfc": forcing_base["T_sfc"],
             "sic": forcing_base["sic"],
             "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
             "seconds_of_day": jnp.mod(t, 86400.0),

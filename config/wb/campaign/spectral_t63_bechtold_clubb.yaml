@@ -185,3 +185,10 @@ classical:
   surface_bulk: "constant"
   rad_update_interval_steps: 6
   spatial_surface: false
+  # Radiation g-point block size (compile/memory tradeoff).  Measured with
+  # jax memory_analysis on the real value-and-grad step, T63/L32, 12 steps:
+  # 16 -> 50.5 GiB of scratch, 8 -> 44.7 GiB, 4 -> 44.9 GiB (no further gain,
+  # radiation stops being the binding term below 8).  The default 16 sat at
+  # the limit of an 80 GB card and a run died on it; 8 buys ~5.8 GiB of
+  # margin for the cost of walking twice as many blocks.
+  rrtmgp_gpoint_batch_size: 8

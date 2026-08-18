@@ -432,10 +432,25 @@ def _build_mode_components_spectral(cfg, yml):
                     "omit the key to leave the CAM trop-cloud-top taper "
                     "off.")
 
+        # Radiation g-point block size: the documented compile/memory
+        # tradeoff (see make_aimip_classical_spectral_physics).  The
+        # value-and-grad step needs ~50.5 GiB of scratch at T63/L32 with the
+        # default 16, which is at the limit of an 80 GB card; halving the
+        # block halves the radiation activations the backward pass holds, at
+        # the cost of more blocks to walk.  Exposed here so a run can be made
+        # to fit without editing code.
+        _gpt_batch = int(_cl.get("rrtmgp_gpoint_batch_size", 16))
+        if _gpt_batch < 1:
+            raise ValueError(
+                "classical.rrtmgp_gpoint_batch_size must be >= 1, got "
+                f"{_gpt_batch}; use the scan path by setting it to 1 rather "
+                "than 0 or a negative value.")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
+                rrtmgp_gpoint_batch_size=_gpt_batch,
                 clubb_top_press=_clubb_top, **_schemes)
         # The sample's forcing carries ERA5 skin temperature and the scene's
         # real calendar.  It used to be dropped here: the surface then sat at
