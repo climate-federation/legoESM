@@ -1,0 +1,133 @@
+#!/bin/bash -l
+#PBS -N legoesm_ll_spmd_ladder
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# ATM lat-lon SPMD (jax.distributed + NCCL) GPU strong-scaling ladder on
+# Derecho: 1 -> 2 -> 4 -> 8 -> 16 A100 across 4 nodes, one bench invocation
+# per rung. This is the multi-node lat-lon lane that WORKS on Derecho (native
+# ppermute band halos over NCCL); the route-A mpi4jax leg in scaling_gpu.sh
+# is the one that aborts past 4 GPUs (#660).
+#
+# The rows land in per-rung JSONL files (bench_atm_latlon_spmd_scaling.py
+# schema, NOT run_cpu_mpi_scaling's) — this is a SEPARATE curve/lane from the
+# route-A figure. Never splice its 8/16 rungs onto a route-A curve: different
+# transport and timing harness (controlled-comparison rule).
+#
+# Plumbing follows mc_nccl_canary.sh (PALS->OMPI rank shim, distinct
+# coordinator port per rung) + gpu_multinode_scaling.pbs lane C (NCCL env,
+# aws-ofi-nccl plugin wiring).
+#
+# SUBMIT (from the repo root):
+#   qsub -v LEGOESM_NCCL_OFI_LIB=<libdir> \
+#        scripts/cluster/scaling_derecho/latlon_spmd_gpu_ladder.pbs
+# Knobs via qsub -v (quote the whole -v arg if a value contains spaces;
+# values must never contain commas — qsub -v splits on them):
+#   RES="128 256"            n_lat list (n_lon = 2*n_lat)
+#   GPU_RANKS="1 2 4 8 16"   ladder; rungs above the granted GPUs are skipped
+#   NLEV=26  STEPS=65  WARMUP=5
+#   X64=1                    1 = float64 (default here), 0 = float32
+#   LEGOESM_LATLON_PACKED_EXCHANGE=1   arm the packed exchange (default off)
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if [ ! -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$SUBMIT_DIR)" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"
+cd "$REPO"
+
+RES="${RES:-128 256}"
+GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
+NLEV="${NLEV:-26}"
+STEPS="${STEPS:-65}"; WARMUP="${WARMUP:-5}"
+X64="${X64:-1}"
+export JAX_ENABLE_X64="$X64"
+
+# NCCL owns GPU traffic; GPU-aware cray-mpich OFF (mixed-stack deadlock hazard)
+export MPICH_GPU_SUPPORT_ENABLED=0
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
+    export NCCL_NET="AWS Libfabric"
+    echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
+else
+    export NCCL_IB_DISABLE=1
+    export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+    echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> NCCL on TCP sockets;"
+    echo "         curve points on sockets are NOT production numbers."
+fi
+
+TOTAL_GPUS=$(( $(sort -u "$PBS_NODEFILE" | wc -l) * 4 ))
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/latlon_spmd_${STAMP}}"
+mkdir -p "$OUTDIR"
+COORD_HOST="$(head -n 1 "$PBS_NODEFILE")"
+BASE_PORT="${BASE_PORT:-29850}"
+# Per-rank shim: one GPU per rank + bridge the PALS rank id to the OMPI env
+# contract the bench's --coordinator path reads (mc_nccl_canary.sh pattern).
+SHIM='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; '\
+'export OMPI_COMM_WORLD_RANK=${PALS_RANKID:-${OMPI_COMM_WORLD_RANK:-0}}; '\
+'exec "$@"'
+
+echo "=== HOSTS ==="; sort -u "$PBS_NODEFILE"; date
+echo "ladder=[$GPU_RANKS] res=[$RES] nlev=$NLEV steps=$STEPS x64=$X64"
+echo "packed_exchange=${LEGOESM_LATLON_PACKED_EXCHANGE:-0} outdir=$OUTDIR"
+
+rc=0; i=0
+for R in $RES; do
+  for N in $GPU_RANKS; do
+    if [ "$N" -gt "$TOTAL_GPUS" ]; then
+        echo "!!! SKIP N=$N > granted $TOTAL_GPUS GPUs" >&2
+        continue
+    fi
+    PPN=$(( N < 4 ? N : 4 ))
+    PORT=$(( BASE_PORT + i )); i=$(( i + 1 ))
+    export OMPI_COMM_WORLD_SIZE="$N"
+    export LEGOESM_JAX_COORDINATOR="${COORD_HOST}:${PORT}"
+    echo "=== LL${R} N=${N} (ppn=$PPN, coord ${COORD_HOST}:${PORT}) ==="
+    timeout 1500 mpiexec -n "$N" --ppn "$PPN" bash -c "$SHIM" _ \
+        "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
+        --multicontroller --coordinator "${COORD_HOST}:${PORT}" \
+        --n-devices "$N" --mode strong \
+        --n-lat "$R" --n-lon $(( 2 * R )) --nlev "$NLEV" \
+        --steps "$STEPS" --warmup "$WARMUP" \
+        --out "$OUTDIR/ll${R}_n${N}.jsonl" < /dev/null \
+        || { echo "LL${R} N=${N} FAILED"; rc=1; }
+    sleep 15
+  done
+done
+
+echo "=== RECEIPTS (per-rung steady medians) ==="
+"$PY" - "$OUTDIR" <<'EOF' || rc=1
+import glob, json, os, sys
+d = sys.argv[1]
+files = sorted(glob.glob(os.path.join(d, "ll*_n*.jsonl")))
+if not files:
+    print("NO OUTPUT FILES — NO VERDICT")
+    sys.exit(1)
+bad = 0
+for f in files:
+    lines = open(f).readlines()
+    if len(lines) != 1:
+        print(f"{os.path.basename(f)}: {len(lines)} lines (stale/partial)")
+        bad += 1
+        continue
+    r = json.loads(lines[0])
+    print(f"{os.path.basename(f)[:-6]:14s} "
+          f"steady_median_ms={r.get('steady_median_ms')} "
+          f"precision={r.get('precision')} n_devices={r.get('n_devices')}")
+if bad:
+    sys.exit(1)
+EOF
+echo "DONE rc=$rc"; exit $rc
