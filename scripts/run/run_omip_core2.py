@@ -925,6 +925,40 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     return _cfg
 
 
+def _ah_profile_from_file(grid, path, A_h_base: float):
+    """Latitudinal A_h profile from ORCA1's eddy_viscosity_3D.nc.
+
+    Zonal MEDIAN of the surface-level ahmf per source row, interpolated onto
+    the grid's nominal latitude rows and returned as a tuple of RATIOS to
+    ``A_h_base`` (the hashable static form LateralViscosityConfig carries).
+    The bipolar cap's nominal latitudes are distorted, but the file is a
+    uniform 20000 there, so the interpolation error multiplies a constant.
+    """
+    import netCDF4 as nc4
+    ds = nc4.Dataset(path)
+    try:
+        ahm = np.ma.filled(np.ma.masked_invalid(
+            ds.variables["ahmf_3d"][:]), np.nan).astype(np.float64).squeeze()
+        src_lat = np.asarray(ds.variables["nav_lat"][:], dtype=np.float64)
+    finally:
+        ds.close()
+    surf = ahm[0]                                  # (ny, nx), level 0
+    surf = np.where(surf > 0.0, surf, np.nan)      # 0 = land in this file
+    row_lat = np.nanmedian(src_lat, axis=1)        # (ny,)
+    row_ahm = np.nanmedian(surf, axis=1)
+    good = np.isfinite(row_lat) & np.isfinite(row_ahm)
+    if good.sum() < 10:
+        raise SystemExit(f"--A-h-profile-file {path}: <10 usable rows")
+    order = np.argsort(row_lat[good])
+    xs, ys = row_lat[good][order], row_ahm[good][order]
+    lat_deg = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+    prof = np.interp(lat_deg, xs, ys, left=ys[0], right=ys[-1]) / float(A_h_base)
+    print(f"[A_h profile] {path}: ratio min {prof.min():.4f} (lat "
+          f"{lat_deg[int(np.argmin(prof))]:.1f}) max {prof.max():.4f}; "
+          f"A_h_base {A_h_base:g}")
+    return tuple(float(x) for x in prof)
+
+
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
@@ -1026,7 +1060,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
-                  tke_lc=None, tke_etau=None,
+                  tke_lc=None, tke_etau=None, A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1323,6 +1357,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         )
         # #501/#661: _ovr carries FLAT names (A_h/C_smag_lap/barotropic_solver/
         # bottom_drag_r/...) now nested in sub-configs; replace_flat routes them.
+        if A_h_profile_file:
+            _ovr["A_h_lat_profile"] = _ah_profile_from_file(
+                grid, A_h_profile_file,
+                _ovr.get("A_h", config.lateral_viscosity.A_h))
         config = config.replace_flat(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
@@ -4177,6 +4215,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--A-h-eq-sigma-deg", type=float, default=None,
                    help="Gaussian half-width [deg] of the equatorial A_h shaping "
                         "(--A-h-eq-boost). NEMO ORCA1's eddy_viscosity_3D ramp is ~7.")
+    p.add_argument("--A-h-profile-file", type=str, default=None,
+                   help="ORCA1 eddy_viscosity_3D.nc: prescribe the LATITUDINAL "
+                        "A_h shape from the oracle's own momentum-viscosity "
+                        "file (zonal median, ratio to --A-h). Replaces "
+                        "--A-h-eq-boost. Tripole only.")
     p.add_argument("--adaptive-implicit-vertadv", action="store_true",
                    help="Enable adaptive-implicit vertical momentum advection "
                         "(Shchepetkin 2015 / NEMO ln_zad_Aimp) -- removes the vertical-CFL "
@@ -5287,6 +5330,9 @@ def main() -> int:
     # --grid tripole --tripole-vmix tke; reject every other context (they are
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
+    if args.A_h_profile_file and args.grid != "tripole":
+        raise SystemExit("--A-h-profile-file is tripole-only (the profile is "
+                         "built on the eORCA nominal latitude rows).")
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
                             args.tke_prognostic, args.tke_kappa_convention,
@@ -5458,6 +5504,7 @@ def main() -> int:
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             A_h_eq_sigma_deg=args.A_h_eq_sigma_deg,
+            A_h_profile_file=args.A_h_profile_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),

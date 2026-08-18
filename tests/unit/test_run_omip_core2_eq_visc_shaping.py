@@ -68,3 +68,42 @@ def test_shear_now2_variant_accepted_and_reaches_card():
     assert cfg.tke_shear_production == "nemo_face_native_now2"
     with pytest.raises(ValueError):
         orca1_zdftke_config(shear_production="face_native")
+
+
+def test_ah_profile_file_round_trip_and_helper(tmp_path):
+    """--A-h-profile-file parses; the helper reproduces the file's shape as
+    ratios (equator ~1000/20000, midlat ~1); replace_flat routes the tuple."""
+    import numpy as np
+    import netCDF4 as nc4
+    p = _build_arg_parser()
+    assert p.parse_args([]).A_h_profile_file is None
+    a = p.parse_args(["--A-h-profile-file", "/x/eddy.nc"])
+    assert a.A_h_profile_file == "/x/eddy.nc"
+
+    # synthetic file: 20000 everywhere, 1000 within 2 deg of the equator
+    ny, nx = 41, 8
+    lat = np.linspace(-80, 80, ny)[:, None] * np.ones((1, nx))
+    ahm = np.full((1, 3, ny, nx), 20000.0)
+    ahm[:, :, np.abs(lat[:, 0]) < 2.0, :] = 1000.0
+    f = tmp_path / "eddy.nc"
+    ds = nc4.Dataset(f, "w")
+    ds.createDimension("t", 1); ds.createDimension("z", 3)
+    ds.createDimension("y", ny); ds.createDimension("x", nx)
+    ds.createVariable("ahmf_3d", "f8", ("t", "z", "y", "x"))[:] = ahm
+    ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = lat
+    ds.close()
+
+    from scripts.run.run_omip_core2 import _ah_profile_from_file
+    from legoesm.grids.latlon import create_latlon_grid
+    g = create_latlon_grid(n_lat=90, n_lon=180)
+    prof = _ah_profile_from_file(g, str(f), 20000.0)
+    prof = np.asarray(prof)
+    lat_deg = np.degrees(np.asarray(g.lat))
+    assert prof[np.argmin(np.abs(lat_deg))] < 0.2       # ~0.05 at the equator
+    assert abs(prof[np.argmin(np.abs(lat_deg - 45))] - 1.0) < 0.05
+
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    cfg = LatLonCGridOceanConfig().replace_flat(
+        A_h=20000.0, A_h_lat_profile=tuple(float(x) for x in prof))
+    assert cfg.lateral_viscosity.A_h_lat_profile is not None
+    assert len(cfg.lateral_viscosity.A_h_lat_profile) == 90
