@@ -46,9 +46,9 @@ def global_setup():
     (_sm, _gc, _ge, _noc, _noe, max_lc, max_le, partitions,
      _co) = _build_voronoi_partition_infra(
         mesh, N_DEV, halo_depth=HALO_DEPTH)
-    cell_rim, _ = _build_rim_rings(mesh, partitions, max_lc, max_le,
-                                   RIM_WIDTH)
-    return mesh, sigma, state, partitions, cell_rim
+    cell_rim, edge_rim = _build_rim_rings(mesh, partitions, max_lc,
+                                          max_le, RIM_WIDTH)
+    return mesh, sigma, state, partitions, cell_rim, edge_rim
 
 
 def _sub_state(state, part, plan):
@@ -86,8 +86,9 @@ def _tendency(state, mesh, sigma):
 def _max_rim_err(depth, global_setup):
     from legoesm.parallel.sharded_dynamics import _build_rim_plan
 
-    mesh, sigma, state, partitions, cell_rim = global_setup
-    plans = _build_rim_plan(mesh, partitions, cell_rim, RIM_WIDTH, depth)
+    mesh, sigma, state, partitions, cell_rim, edge_rim = global_setup
+    plans = _build_rim_plan(mesh, partitions, cell_rim, edge_rim,
+                            RIM_WIDTH, depth)
     tend_g = _tendency(state, mesh, sigma)
     du_g = np.asarray(tend_g.du_dt.data)
     dT_g = np.asarray(tend_g.dT_dt.data)
@@ -111,11 +112,15 @@ def _max_rim_err(depth, global_setup):
 
 
 def test_shallow_closure_is_red(global_setup):
-    """Depth 1 must FAIL — a gate that cannot go red proves nothing."""
-    err = _max_rim_err(1, global_setup)
-    print(f"depth-1 closure err: {err:.3e}")
+    """Depth 0 must FAIL — a gate that cannot go red proves nothing.
+
+    (v2 seeds the closure from rim cells AND scatter-edge cells, so
+    depth 1 already covers this RHS stencil — the red control moved
+    from depth 1 to depth 0.)"""
+    err = _max_rim_err(0, global_setup)
+    print(f"depth-0 closure err: {err:.3e}")
     assert err > 1e-8, (
-        f"depth-1 closure unexpectedly exact (err {err:.2e}) — the gate "
+        f"depth-0 closure unexpectedly exact (err {err:.2e}) — the gate "
         f"is vacuous or the RHS stencil is narrower than believed")
 
 
@@ -126,7 +131,7 @@ def test_full_tendency_closure_depth(global_setup):
     # with nu_del4=1e16 — while depth 1 sits orders above. A missing
     # dependency would keep improving with depth; a plateau is closure.
     errs = {}
-    for depth in (2, 3, 4):
+    for depth in (1, 2, 3):
         errs[depth] = _max_rim_err(depth, global_setup)
         if errs[depth] < 1e-9:
             break

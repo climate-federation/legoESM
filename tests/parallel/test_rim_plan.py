@@ -35,10 +35,10 @@ def _setup(n_dev=6, subdivision=3, halo_depth=4, rim_width=2,
     (_sm, _gc, _ge, _noc, _noe, max_lc, max_le, partitions,
      _cell_owner) = _build_voronoi_partition_infra(
         mesh, n_dev, halo_depth=halo_depth)
-    cell_rim, _ = _build_rim_rings(mesh, partitions, max_lc, max_le,
-                                   rim_width)
-    plans = _build_rim_plan(mesh, partitions, cell_rim, rim_width,
-                            stencil_depth)
+    cell_rim, edge_rim = _build_rim_rings(mesh, partitions, max_lc,
+                                          max_le, rim_width)
+    plans = _build_rim_plan(mesh, partitions, cell_rim, edge_rim,
+                            rim_width, stencil_depth)
     return mesh, partitions, plans
 
 
@@ -115,6 +115,31 @@ def test_closure_overflow_raises():
         pytest.skip("mesh not divisible")
     (_sm, _gc, _ge, _noc, _noe, max_lc, max_le, partitions,
      _co) = _build_voronoi_partition_infra(mesh, n_dev, halo_depth=1)
-    cell_rim, _ = _build_rim_rings(mesh, partitions, max_lc, max_le, 1)
+    cell_rim, edge_rim = _build_rim_rings(mesh, partitions, max_lc,
+                                          max_le, 1)
     with pytest.raises(ValueError, match="closure leaves"):
-        _build_rim_plan(mesh, partitions, cell_rim, 1, 4)
+        _build_rim_plan(mesh, partitions, cell_rim, edge_rim, 1, 4)
+
+
+def test_edge_scatter_is_device_owned_and_rim_predicated(rim_setup):
+    """codex blocker (i): scatter targets must be DEVICE-owned edge rows
+    selected by the rim predicate 0 <= edge_rim <= width — never the
+    synthetic partition's edge-ownership, never a halo row."""
+    from legoesm.parallel.sharded_dynamics import _build_rim_rings
+
+    mesh, partitions, plans = rim_setup
+    # recompute edge_rim exactly as _setup did (width 2)
+    max_lc = max(p_.n_local_cells for p_ in partitions)
+    max_le = max(p_.n_local_edges for p_ in partitions)
+    _, edge_rim = _build_rim_rings(mesh, partitions, max_lc, max_le, 2)
+
+    for d, (part, plan) in enumerate(zip(partitions, plans)):
+        es = plan["edge_scatter"]
+        assert (es < part.n_owned_edges).all(), (
+            f"device {d}: edge_scatter names a halo row")
+        want = np.sort(np.where(
+            (edge_rim[d, :part.n_owned_edges] >= 0)
+            & (edge_rim[d, :part.n_owned_edges] <= 2))[0])
+        got = np.sort(es)
+        np.testing.assert_array_equal(got, want, err_msg=(
+            f"device {d}: edge_scatter != rim-predicated owned rows"))
