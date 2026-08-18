@@ -68,15 +68,9 @@ from legoesm import constants
 _APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
 
 # --- Weiss & Norman (1985) broadband → spectral fractions [-] ---
-# PUBLIC: consumers outside this module need the exact weights to convert a
-# BROADBAND surface albedo into the (visible, NIR) pair this scheme consumes.
-# The effective broadband albedo the scheme produces is
-#     PAR_FRACTION * ALB_VIS + NIR_FRACTION * ALB_NIR + UV_FRACTION * RHO_UV
-# — note UV rides a FIXED reflectance (RHO_UV), NOT ALB_VIS, so the weighting is
-# 0.48/0.50 on the pair, not 0.50/0.50.
-PAR_FRACTION = 0.48
-NIR_FRACTION = 0.50
-UV_FRACTION  = 0.02
+_PAR_FRACTION = 0.48
+_NIR_FRACTION = 0.50
+_UV_FRACTION  = 0.02
 
 # --- Erbs et al. (1982) diffuse-fraction correlation in clearness index k_t ---
 _ERBS_KT_LOW    = 0.22     # k_t below which the low-clearness branch applies
@@ -97,7 +91,7 @@ _RHO_NIR_SOIL = 0.30       # NIR soil reflectance factor (× (1 - FNonVeg))
 _KPB_PAR      = 0.46       # beam + scattered PAR extinction numerator (/cos SZA)
 _KD_PAR       = 0.72       # diffuse PAR extinction
 _KD_NIR_COEF  = 0.35       # diffuse NIR extinction coefficient
-RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
+_RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
 _KD_LW        = 0.78       # diffuse longwave extinction
 _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
@@ -200,11 +194,11 @@ def split_sw_components(
     sw_dir  = sw_down - sw_diff
 
     # Spectral fractions
-    PAR_dir  = PAR_FRACTION * sw_dir
-    PAR_diff = PAR_FRACTION * sw_diff
-    NIR_dir  = NIR_FRACTION * sw_dir
-    NIR_diff = NIR_FRACTION * sw_diff
-    UV       = UV_FRACTION * sw_down
+    PAR_dir  = _PAR_FRACTION * sw_dir
+    PAR_diff = _PAR_FRACTION * sw_diff
+    NIR_dir  = _NIR_FRACTION * sw_dir
+    NIR_diff = _NIR_FRACTION * sw_diff
+    UV       = _UV_FRACTION * sw_down
 
     # Apply night guard
     zero = jnp.zeros_like(sw_down)
@@ -352,11 +346,11 @@ def canopy_shortwave_rt(
     # mirrors the PAR Q_PDn split above.  (Previously both terms used UV_diff,
     # applying beam extinction to the diffuse flux and dropping UV_dir, which
     # mis-partitioned the beam/diffuse and leaf/soil UV split.)
-    Q_U    = ((1.0 - RHO_UV) * UV_dir  * (1.0 - jnp.exp(-kk_Pb * L_CI))
-            + (1.0 - RHO_UV) * UV_diff * (1.0 - exp_kk_Pd))
+    Q_U    = ((1.0 - _RHO_UV) * UV_dir  * (1.0 - jnp.exp(-kk_Pb * L_CI))
+            + (1.0 - _RHO_UV) * UV_diff * (1.0 - exp_kk_Pd))
     AUV_Sun  = Q_U * fSun
     AUV_Sh   = Q_U * (1.0 - fSun)
-    AUV_Soil = (1.0 - RHO_UV) * UV - Q_U
+    AUV_Soil = (1.0 - _RHO_UV) * UV - Q_U
 
     # ---- Total absorbed shortwave ----
     ASW_Sun  = APAR_Sun  + ANIR_Sun  + AUV_Sun

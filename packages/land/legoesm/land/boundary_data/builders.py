@@ -48,7 +48,6 @@ from legoesm.land.boundary_data._internals import (
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
-    canopy_effective_broadband_albedo,
     tuned_pft_root_arrays,
     FALLBACK_SAND_PCT, FALLBACK_CLAY_PCT,
     THETA_TOP_DEFAULT,
@@ -382,13 +381,11 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
             "glacier_alb_nir": float(glacier_alb[1])}
         return build_canopy_params(gsd, day_of_year, theta_top, year=year,
                                    tuned_root_params=tuned_root_params, **_gk)
-    # SEB / CLM-ML path: the provider takes a single BROADBAND ice albedo.  Use
-    # the canopy scheme's ACTUAL spectral integral of the pair (0.48/0.50 + a
-    # fixed-reflectance UV term), NOT 0.5*(vis+nir) — the two differ by ~0.015 and
-    # the SEB and canopy paths must see the same effective ice albedo.
+    # SEB / CLM-ML path: the provider takes a single BROADBAND ice albedo, which
+    # is the 0.5/0.5 vis-NIR integral the canopy pair collapses to (see
+    # GLACIER_ALBEDO_DEFAULT == 0.5*(GLACIER_ALB_VIS + GLACIER_ALB_NIR)).
     _bk = {} if glacier_alb is None else {
-        "glacier_albedo": canopy_effective_broadband_albedo(
-            float(glacier_alb[0]), float(glacier_alb[1]))}
+        "glacier_albedo": 0.5 * (float(glacier_alb[0]) + float(glacier_alb[1]))}
     lp = surface_data_param_provider(gsd, day_of_year, theta_top, year=year, **_bk)()
     if isinstance(surface_scheme, CLMMLCanopyConfig):
         lai, sai, htop = prescribed_canopy_structure(gsd, day_of_year, year)

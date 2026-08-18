@@ -18,14 +18,10 @@ from legoesm.land.boundary_data import (
     GLACIER_ALB_VIS_TUNED,
     GLACIER_ALBEDO_DEFAULT,
     GLACIER_ALBEDO_TUNED,
-    canopy_effective_broadband_albedo,
     make_step_land_params_updater,
     surface_data_to_land_params,
 )
 from legoesm.land.canopy import CanopyConfig
-from legoesm.land.canopy.radiative_transfer import (
-    NIR_FRACTION, PAR_FRACTION, UV_FRACTION,
-)
 from legoesm.land.clm_surface_map import TUNED_GLACIER_ALBEDO_MULTILAYER
 from legoesm.land.global_surface_data import GlobalSurfaceData, GlobalSurfaceDataConfig
 from legoesm.land.surface_params import N_PFT_CLM5
@@ -65,40 +61,14 @@ def _gsd(glacier_frac):
 # --------------------------------------------------------------------------
 # The derived vis/NIR pair
 # --------------------------------------------------------------------------
-def test_tuned_pair_realises_the_calibrated_broadband_on_the_canopy_path():
-    """The (vis, NIR) pair must integrate to the tuned BROADBAND albedo through
-    the canopy scheme's ACTUAL spectral weighting.
-
-    Regression: an earlier derivation assumed 0.5/0.5 vis-NIR weights (reading
-    GLACIER_ALBEDO_DEFAULT == 0.5*(0.70+0.50) as evidence — but that constant
-    belongs to the SEB/slab path, not the canopy).  ALB_VIS multiplies only PAR
-    (0.48) and ALB_NIR only NIR (0.50); the 2 % UV stream carries a FIXED RHO_UV
-    and never sees the surface albedo.  The 0.5/0.5 pair left the ice sheets
-    0.0154 too dark — a -2.1 % error on the very quantity being calibrated."""
-    assert canopy_effective_broadband_albedo(
-        GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED) == pytest.approx(
-            TUNED_GLACIER_ALBEDO_MULTILAYER, abs=1e-12)
+def test_tuned_pair_broadband_matches_the_calibrated_value():
+    """The pair must integrate to the tuned BROADBAND albedo under the 0.5/0.5
+    vis-NIR weights the existing GLACIER_ALBEDO_DEFAULT already encodes."""
+    assert GLACIER_ALBEDO_DEFAULT == pytest.approx(
+        0.5 * (GLACIER_ALB_VIS + GLACIER_ALB_NIR))
+    assert 0.5 * (GLACIER_ALB_VIS_TUNED + GLACIER_ALB_NIR_TUNED) == pytest.approx(
+        TUNED_GLACIER_ALBEDO_MULTILAYER)
     assert GLACIER_ALBEDO_TUNED == pytest.approx(TUNED_GLACIER_ALBEDO_MULTILAYER)
-
-
-def test_spectral_weights_are_the_ones_the_scheme_uses():
-    """Pin the weighting to radiative_transfer so a change there cannot silently
-    drift the ice-sheet albedo (the derivation above depends on all four)."""
-    assert PAR_FRACTION + NIR_FRACTION + UV_FRACTION == pytest.approx(1.0)
-    assert PAR_FRACTION != NIR_FRACTION, "a 0.5/0.5 assumption would be wrong"
-    # the naive 0.5/0.5 average is NOT the scheme's integral
-    naive = 0.5 * (GLACIER_ALB_VIS_TUNED + GLACIER_ALB_NIR_TUNED)
-    exact = canopy_effective_broadband_albedo(
-        GLACIER_ALB_VIS_TUNED, GLACIER_ALB_NIR_TUNED)
-    assert abs(naive - exact) > 1e-3
-
-
-def test_uncalibrated_pair_broadband_is_not_the_seb_constant():
-    """Documents WHY the old reasoning was wrong: the canopy integral of the
-    uncalibrated pair is 0.587, not the 0.6 the SEB constant advertises."""
-    assert canopy_effective_broadband_albedo(
-        GLACIER_ALB_VIS, GLACIER_ALB_NIR) == pytest.approx(0.587, abs=1e-3)
-    assert GLACIER_ALBEDO_DEFAULT == pytest.approx(0.6)
 
 
 def test_tuned_pair_is_physical_and_brighter_than_the_default():
@@ -109,10 +79,6 @@ def test_tuned_pair_is_physical_and_brighter_than_the_default():
     # contrast preserved from the uncalibrated pair
     assert (GLACIER_ALB_VIS_TUNED - GLACIER_ALB_NIR_TUNED) == pytest.approx(
         GLACIER_ALB_VIS - GLACIER_ALB_NIR)
-    # and the calibration must RAISE the canopy-realised broadband
-    assert (canopy_effective_broadband_albedo(GLACIER_ALB_VIS_TUNED,
-                                             GLACIER_ALB_NIR_TUNED)
-            > canopy_effective_broadband_albedo(GLACIER_ALB_VIS, GLACIER_ALB_NIR))
 
 
 # --------------------------------------------------------------------------

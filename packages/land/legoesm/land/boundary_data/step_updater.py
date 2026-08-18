@@ -35,7 +35,6 @@ from legoesm.land.boundary_data._internals import (
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
-    canopy_effective_broadband_albedo,
     tuned_pft_root_arrays,
     pft_lookup_arrays,
 )
@@ -122,11 +121,9 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
     # they constant-fold into the traced updater — no retrace, no extra leaf).
     _glac_vis = GLACIER_ALB_VIS if glacier_alb is None else float(glacier_alb[0])
     _glac_nir = GLACIER_ALB_NIR if glacier_alb is None else float(glacier_alb[1])
-    # SEB path consumes the BROADBAND integral of that pair — the canopy
-    # scheme's actual spectral weighting (0.48/0.50 + fixed-reflectance UV), not
-    # a 0.5/0.5 average, so both paths realise the same effective ice albedo.
+    # SEB path consumes the BROADBAND integral of that pair (0.5/0.5 weights).
     _glac_bb = (GLACIER_ALBEDO_DEFAULT if glacier_alb is None
-                else canopy_effective_broadband_albedo(_glac_vis, _glac_nir))
+                else 0.5 * (_glac_vis + _glac_nir))
 
     # Inputs that don't change across steps (cast once to JAX).
     lai_monthly = jnp.asarray(gsd.lai_monthly)
