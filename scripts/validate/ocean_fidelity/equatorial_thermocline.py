@@ -316,6 +316,28 @@ def _euc_merid_block(a, L, zc):
         finally:
             ds.close()
         un = np.nanmean(_select_recs(un, a.nemo_w_recs), axis=0)
+        # EUC WIDTH (GLM review): 100x lateral viscosity predicts a
+        # diffusively SMEARED jet (half-width >= 3-4 deg vs NEMO ~1-2); a
+        # NARROW and weak jet would falsify the viscosity attribution.
+        for lon0 in (200, 220, 240):
+            # core depth from NEMO's own profile at this lon (same on both
+            # sides so width is compared at one physical level)
+            prof_n = np.array([box_mean(un[k], lat_n, lon_n, 0.0, lon0,
+                                        1.0, 1.0) for k in range(zu.size)
+                               if zu[k] <= 400.0])
+            if not np.isfinite(prof_n).any():
+                continue
+            kc_n = int(np.nanargmax(prof_n))
+            zcore = zu[kc_n]
+            kc_o = int(np.argmin(np.abs(zc - zcore)))
+            print(f"\nEUC meridional profile at {lon0}E, core depth "
+                  f"{zcore:.0f} m (NEMO's core level), m/s:")
+            print(f"{'lat':>6} {'ours':>8} {'NEMO':>8}")
+            for lat0 in range(-6, 7):
+                o = box_mean(u_o[..., kc_o], lat_o, lon_o, lat0, lon0, 0.5, 1.0)
+                n = box_mean(un[kc_n], lat_n, lon_n, lat0, lon0, 0.5, 1.0)
+                print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
+
         print("\nEUC: equatorial zonal velocity, |lat|<=1 box mean, m/s.")
         print("max over 0-400 m (core speed) and its depth; + = eastward.")
         print(f"{'lon':>6} {'ours_max':>9} {'@m':>5} {'nemo_max':>9} {'@m':>5} "
