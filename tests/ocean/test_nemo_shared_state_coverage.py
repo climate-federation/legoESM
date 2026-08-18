@@ -329,14 +329,51 @@ def build_enumeration(gen) -> Enumeration:
             public_index.setdefault(mod, {}).update(decls)
 
     # 1. LIVE stp_MLF calls (REUSED parse) + 2. one-level dispatch descent.
+    #
+    # The descent is joined to `stpmlf_call_coverage.py` by (wrapper name,
+    # ordinal-among-same-name), NOT by line number.  Coverage's recorded line
+    # numbers are a HAND-MAINTAINED transcription of a moving file and are
+    # already known-stale -- `gen_step_wiring.py` says so in its own docstring
+    # and reports every one of them in the generated doc's DRIFT section.  A
+    # line join was used here originally and silently rotted when the oracle
+    # gained the #1455 SEQ-DUMP instrumentation: only 12 of 106 coverage
+    # entries still coincided with a live line.  MEASURED effect of the rot:
+    # the live chain LOST 12 files -- zdftke, dynspg_ts, traadv_fct,
+    # traldf_iso, zdfdrg, zdfevd, zdfmxl, dynkeg, dynldf_lev, dynzad, ldftra,
+    # diadct -- i.e. the TKE closure, the barotropic solver, tracer advection
+    # and isoneutral diffusion all went unenumerated, and `zdftke::dissl` (a
+    # SEEDED known-missing cross-step carry) vanished from the gate; while 6
+    # unrelated files -- ldfdyn, ldfeke, ldfslp, restart, trcstp, zdfmfc --
+    # were pulled IN by pure line coincidence.  A join that silently changes
+    # what is enumerated is worse than no join.
     calls = gen.parse_stpmlf(gen.STPMLF)
     live_names = {c.name for c in calls if c.live == "LIVE"}
-    live_lines = {c.line for c in calls if c.live == "LIVE"}
     sys.path.insert(0, GEN_DIR)
-    import stpmlf_call_coverage as cov  # noqa: E402  (oracle-side join source)
 
-    for entry in cov.CALLS:
-        if entry.line in live_lines:
+    # `load_coverage()` buckets CALLS by the wrapper name its `routine` field
+    # starts with, preserving order -- the same bucketing the generated wiring
+    # doc joins on, reused rather than re-derived.
+    buckets = gen.load_coverage()
+    n_sites = collections.Counter(c.name for c in calls)
+    seen: collections.Counter = collections.Counter()
+    for call in calls:
+        ordinal = seen[call.name]
+        seen[call.name] += 1
+        if call.live != "LIVE":
+            continue
+        entries = buckets.get(call.name, [])
+        # Selection order is the generator's, deliberately: the fan-out case
+        # is tested FIRST, or `zdf_phy` would take only its first child.
+        if (len(entries) > 1 and n_sites[call.name] == 1
+                and all("->" in e.routine for e in entries)):
+            # One call site coverage resolved into SEVERAL concrete routines
+            # (`zdf_phy` -> zdf_tke/zdf_evd/zdf_drg/...): every child runs.
+            chosen = entries
+        elif ordinal < len(entries):
+            chosen = [entries[ordinal]]
+        else:
+            chosen = []
+        for entry in chosen:
             tail = entry.routine.split("->")[-1]
             live_names |= set(re.findall(r"[A-Za-z_]\w*", tail))
 

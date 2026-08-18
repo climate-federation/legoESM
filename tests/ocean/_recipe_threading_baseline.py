@@ -371,9 +371,25 @@ CALL_SITE_BASELINE: tuple[tuple[str, int, str, str], ...] = (
     ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", 564, "compute_ocean_rho", "eos_depth"),
     ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", 317, "iterate_eos_and_pressure_anomaly", "eos_depth"),
     ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", 214, "iterate_eos_and_pressure_anomaly", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2536, "compute_hydrostatic_pressure", "g"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2560, "compute_ocean_rho", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/eos.py", 2562, "compute_hydrostatic_pressure", "g"),
+    # RE-PINNED (line drift only; main moved eos.py by ~155 lines).  These
+    # three are NOT resolver false positives: the enclosing helpers have no
+    # `g` / `eos_depth` parameter at all, so the card value is unforwardable
+    # and the callee default is taken unconditionally.
+    #   2691 is inside `compute_ocean_rho`'s IN-SITU branch (its "geometric"
+    #        branch returns earlier, reading `constants.g` directly at 2684).
+    #   2715/2717 are inside `compute_ocean_rho_and_pressure`, which takes
+    #        (state, z_coord, jacobian, eos_fn) only.
+    # SUSPECTED LIVE GAP, deliberately NOT fixed here: the DINO cards
+    # `nemo_dino_kamm`/`nemo_dino_kamm_mlf` pin g=9.80665 (constants.g is
+    # 9.80616) and eos_depth="geometric" (default "insitu"), and reach the
+    # convection bridge that calls 2715/2717 via convection_n2_mode
+    # ="adiabatic".  Whether that bridge is actually appended for those cards
+    # is further gated by `_fallback_owns_evd` (combined.py:260) which was NOT
+    # resolved, so this is PLAUSIBLE, not confirmed.  Same class as the open
+    # k_profiles.py:1127/1167 entries (#1603).
+    ("packages/ocean/legoesm/ocean/eos.py", 2691, "compute_hydrostatic_pressure", "g"),
+    ("packages/ocean/legoesm/ocean/eos.py", 2715, "compute_ocean_rho", "eos_depth"),
+    ("packages/ocean/legoesm/ocean/eos.py", 2717, "compute_hydrostatic_pressure", "g"),
     ("packages/ocean/legoesm/ocean/fidelity/box_heat_budget.py", 323, "gm_redi_tracer_tendency_latlon", "omega"),
     ("packages/ocean/legoesm/ocean/fidelity/mitgcm_baroclinic_gyre_recipe.py", 173, "mitgcm_canonical_ocean_config", "barotropic_solver"),
     ("packages/ocean/legoesm/ocean/fidelity/mitgcm_baroclinic_gyre_recipe.py", 173, "mitgcm_canonical_ocean_config", "tracer_advection"),
@@ -394,7 +410,11 @@ CALL_SITE_BASELINE: tuple[tuple[str, int, str, str], ...] = (
     ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", 4644, "iterate_eos_and_pressure_anomaly", "eos_depth"),
     ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", 4673, "compute_hydrostatic_pressure", "g"),
     ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", 677, "iterate_eos_and_pressure_anomaly", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/physics/lateral_mixing/mle_mpas.py", 289, "compute_buoyancy_frequency_adiabatic", "g"),
+    # RE-PINNED (line drift only).  MPAS lane: no card that pins `g`
+    # (nemo_dino_kamm, nemo_dino_kamm_mlf) selects the MPAS dycore, so no card
+    # value is dropped here.  Same reason as the already-baselined MPAS
+    # siblings ocean_model_mpas.py:564 and mpas_physics.py:422/441/447.
+    ("packages/ocean/legoesm/ocean/physics/lateral_mixing/mle_mpas.py", 298, "compute_buoyancy_frequency_adiabatic", "g"),
     ("packages/ocean/legoesm/ocean/physics/mpas_physics.py", 396, "restoring_surface_forcing", "c_p"),
     ("packages/ocean/legoesm/ocean/physics/mpas_physics.py", 422, "compute_ocean_rho", "eos_depth"),
     ("packages/ocean/legoesm/ocean/physics/mpas_physics.py", 441, "enhanced_diffusion_convection", "g"),
@@ -409,8 +429,11 @@ CALL_SITE_BASELINE: tuple[tuple[str, int, str, str], ...] = (
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", 1167, "compute_hydrostatic_pressure", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py", 339, "compute_buoyancy_frequency", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py", 552, "compute_buoyancy_frequency", "g"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py", 253, "compute_ocean_rho", "eos_depth"),
-    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py", 321, "kpp_vertical_mixing", "g"),
+    # RE-PINNED (line drift only).  MPAS lane, as above: the cards pinning
+    # `eos_depth` (nemo_paper, nemo_dino_kamm, nemo_dino_kamm_mlf) and `g`
+    # (the two kamm cards) all run the lat-lon C-grid, never MPAS.
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py", 275, "compute_ocean_rho", "eos_depth"),
+    ("packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py", 343, "kpp_vertical_mixing", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/richardson.py", 208, "compute_buoyancy_frequency_adiabatic", "g"),
     ("packages/ocean/legoesm/ocean/physics/vertical_mixing/richardson.py", 212, "compute_buoyancy_frequency", "g"),
 )

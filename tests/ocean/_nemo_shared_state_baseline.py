@@ -107,7 +107,6 @@ MODULE_DISPOSITION: dict[str, tuple] = {
     "diaar5": (WAIVED, "AR5/CMIP diagnostic accumulators; output only, no "
                        "tendency reads them"),
     "diadct": (WAIVED, "transport-section diagnostics; output only"),
-    "diaobs": (WAIVED, "observation-operator bookkeeping; output only"),
     "iom": (WAIVED, "XIOS/netCDF I/O plumbing"),
     "iom_def": (WAIVED, "XIOS/netCDF file-handle table"),
     "lib_mpp": (WAIVED, "MPI delayed-reduction bookkeeping; legoESM's DINO "
@@ -442,13 +441,17 @@ SYMBOL_DISPOSITION: dict[tuple[str, str], tuple] = {
     ("dynspg_ts", "CdU_v"): (THREADED, "drag at V for the barotropic solve"),
 
     # =====================================================================
-    # tradmp / ldfeke
+    # ldfeke
+    #
+    # `tradmp` USED to have `tclim`/`sclim` entries here.  They were never
+    # legitimately enumerated: `tra_dmp` is DEAD (ln_tradmp = F, ocean.output)
+    # and `diaobs.F90` -- the ONLY live-chain candidate that does `USE tradmp`
+    # -- was itself a phantom of the by-line coverage join this gate used to
+    # do (dia_obs's guard is UNRESOLVED, so it is never LIVE).  With the join
+    # done by (name, ordinal) both vanish from the enumeration, so the entries
+    # are stale and were removed.  Do not re-add them without first showing
+    # `tradmp` back in `Enumeration.symbols`.
     # =====================================================================
-    ("tradmp", "tclim"): (INERT, "T climatology for the damping term; DINO "
-                                 "runs no internal restoring",
-                          ("switch", "ln_tradmp", False)),
-    ("tradmp", "sclim"): (INERT, "S climatology for the damping term",
-                          ("switch", "ln_tradmp", False)),
     ("ldfeke", "eke_keS"): (WAIVED, "GEOMETRIC total-EKE source term, read only "
                                     "at ldfeke.F90:461 under l_ldfeke "
                                     "(ldftra.F90:96, default .FALSE., set true "
