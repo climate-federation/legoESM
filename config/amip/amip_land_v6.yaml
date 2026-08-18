@@ -27,14 +27,16 @@
 # too and --slab-land-active picks it up directly.
 #
 # NOTE on stomata: the v6 Farquhar conductance (Vc_max25/g1/LCMA) is calibrated
-# offline against monthly LE and baked, but the coupled stomatal path stays
-# DISABLED here (#741 found the pre-v6 conductance over-transpiring coupled).
-# Re-enabling is a one-key A/B (land_stomatal_beta: true) that should be run as
-# its own controlled arm before becoming default.
-
-template_name: amip/land_v6_overlay
-template_version: 1.0.0
-description: v6 dual-target land bake — spun-up IC + matching soil column
+# offline against monthly LE and baked, but coupled it stays TRIPLE-gated OFF:
+# reaching the Farquhar path needs land_stomatal_beta: true AND differland
+# carbon AND a prescribed carbon state, and AMIP initializes no such state —
+# so flipping land_stomatal_beta alone tests the JARVIS stomata, not the v6
+# tables (codex).  #741 found the pre-v6 conductance over-transpiring coupled,
+# and the offline-effective v6 g1 (~10) is ~35% stronger still (GLM predicts a
+# late-season LE collapse + hot bias if enabled naively): a coupled Farquhar
+# arm must wire the carbon state deliberately and run as a controlled A/B.
+# (No template_* keys here: run_amip's strict --config loader accepts only
+# argument dests.)
 
 use_multilayer_land: true
 multilayer_n_layers: 8

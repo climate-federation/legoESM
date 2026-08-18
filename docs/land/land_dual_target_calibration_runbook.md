@@ -114,6 +114,19 @@ cell order, so never rebuild coordinates from the unpermuted land index.
    fallback needs no config (its bake family is picked up by
    `--slab-land-active` directly).
 
+## Review demands before the bake is trusted coupled (GLM, 2026-08-18)
+
+* **Coupled A/B vs the previous bake** (30-day AMIP arm, one variable = the
+  bake): TOA imbalance/drift, land skin-T, land LE, precipitation pattern,
+  soil-moisture drift.  The offline gains are unproven coupled until this runs.
+* **Emissivity floor**: the multilayer fit reached 0.944 on a vegetated PFT
+  (physical floor ~0.95); raise the BOUNDS_EXT emissivity floor to 0.95 for
+  non-bare PFTs at the next re-tune.
+* **Beta/stomata double-count invariant test**: beta-on-flux and stomatal
+  conductance must never both throttle the same transpiration flux.
+* ERA5 land LE and skin T are themselves model output (HTESSEL), not
+  observations — carry that target uncertainty when interpreting residuals.
+
 ## Known caveats (open, PLAUSIBLE)
 
 * Vc_max25/LCMA may be collinear on a monthly-mean LE target with prescribed

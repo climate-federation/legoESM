@@ -4,8 +4,8 @@
 Run: PYTHONPATH=. python scripts/experiment/format_land_bake.py results/land_tuned_fullgrid.json
      PYTHONPATH=. python scripts/experiment/format_land_bake.py results/land/land_tuned_dual_slab.json --tier slab
 """
+import argparse
 import json
-import sys
 
 
 def _tuple(name, vals, per_line=7, ind=len(""), prec=4):
@@ -14,9 +14,13 @@ def _tuple(name, vals, per_line=7, ind=len(""), prec=4):
 
 
 def main():
-    cal = json.load(open(sys.argv[1]))
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("json_path")
+    ap.add_argument("--tier", choices=["multilayer", "slab"], default="multilayer")
+    args = ap.parse_args()
+    cal = json.load(open(args.json_path))
     g = lambda k: list(cal[k])
-    if "--tier" in sys.argv and sys.argv[sys.argv.index("--tier") + 1] == "slab":
+    if args.tier == "slab":
         # slab family: albedo/emissivity/W_max + glacier/snow scalars (the slab's
         # trainable set; root_depth is NOT slab-trainable — no gradient path)
         print("# --- paste into packages/land/legoesm/land/clm_surface_map.py (SLAB) ---\n")

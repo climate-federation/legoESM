@@ -302,21 +302,15 @@ def test_clm_loader_no_lai_when_climatology_absent(tmp_path):
 
 
 def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
-    """#746 item-3 audit: the multilayer land runs ~14 W/m^2 darker than the slab.
+    """Slab-vs-multilayer per-PFT albedo tables stay reconciled (v6 pin).
 
-    Root cause (from the land-albedo audit): the multilayer per-PFT albedo table
-    ``_TUNED_PFT_ALBEDO_MULTILAYER`` is systematically DARKER than the slab table
-    ``_TUNED_PFT_ALBEDO`` — the two were calibrated independently against
-    different ERA5 targets (slab = offline monthly; multilayer = 24-h coupled),
-    so they never had to agree in the mean.  This is a CALIBRATION inconsistency,
-    NOT a code/convention bug: the albedo assembly and the ``(1-alpha)*SW``
-    radiation interface are shared and correct between the two land models.
-
-    This test PINS the finding — direction, magnitude, and a regression BOUND —
-    so the multilayer vegetated albedo cannot silently drift even darker (which
-    would deepen the land cloud-albedo cold trap the issue tracks).  The fix for
-    the -14 W/m^2 is to reconcile the two tables against a common reference; that
-    is a re-tuning (spin-up) task, tracked on #746, not a code change here.
+    History: #746 item-3 found the multilayer table systematically ~0.026 darker
+    (-14 W/m^2 of land SW) because the two tiers were calibrated against
+    DIFFERENT ERA5 targets.  The 2026-08 v6 dual-target re-tune calibrated both
+    tiers against the SAME target — the reconciliation that audit called for —
+    so this test now pins the NEW relationship: per-PFT deltas bounded and the
+    mean modestly slab-brighter (residuals reflect the two models' different
+    bare-soil albedo physics, not a protocol mismatch).
     """
     from legoesm.land.clm_surface_map import (
         _TUNED_PFT_ALBEDO, _TUNED_PFT_ALBEDO_MULTILAYER)

@@ -143,10 +143,13 @@ TUNED_GLACIER_CBOOST_MULTILAYER = 4.3888
 # (clm_multilayer_ch) cannot be built; the per-cell value is used when a grid exists.
 TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
 # Farquhar canopy conductance (v6 dual-target LE calibration): EFFECTIVE-conductance
-# values fitted to monthly ERA5 latent heat — do NOT reuse as photosynthetic capacity
-# in the carbon cycle without an identifiability check (Vc_max25/LCMA may be collinear
-# on a monthly-mean LE target with prescribed LAI).  Consumed only when the Farquhar
-# stomata path is active (stomata.enabled + differland carbon); index 0 = bare soil.
+# values fitted to monthly ERA5 latent heat under the offline fixed-humidity scheme —
+# g1 ~10 is ~2x the Medlyn physiological envelope (part monthly-VPD convexity, part
+# conductance absorbing aerodynamic/humidity error; GLM review 2026-08-18).  Do NOT
+# reuse as photosynthetic capacity in the carbon cycle, and do NOT enable coupled
+# without a controlled A/B (#741 over-transpiration, predicted worse here).  Coupled
+# consumption is TRIPLE-gated: stomata.enabled AND carbon.scheme=="differland" AND a
+# prescribed carbon state, none of which AMIP sets by default.  Index 0 = bare soil.
 _TUNED_PFT_VCMAX_MULTILAYER = (0.00, 76.12, 70.07, 76.23, 64.34, 64.80, 45.75, 70.77, 63.87, 43.31, 61.90, 56.41, 61.44, 63.45, 40.55, 66.44, 43.48)
 _TUNED_PFT_G1_MULTILAYER = (1.000, 9.950, 10.273, 11.280, 10.351, 9.627, 10.046, 10.637, 10.796, 5.728, 9.964, 9.354, 8.207, 7.642, 7.143, 8.279, 5.116)
 _TUNED_PFT_LCMA_MULTILAYER = (67.54, 87.52, 87.49, 88.00, 44.80, 61.56, 58.92, 56.08, 63.96, 42.19, 62.64, 70.94, 44.78, 49.51, 34.23, 46.48, 54.02)
