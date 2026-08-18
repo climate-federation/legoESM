@@ -175,6 +175,30 @@ Ranked levers:
    nodes (arms b/d) — REFUTED as a lever on this jaxlib; the one-shot
    kernel flag compiles and runs (arm c) and stays on the ladder
    (GLM predicts inert cross-node; the ladder decides).
+2b. **2026-08-18 afternoon receipts — the ragged lever LANDED, the
+   overlap lever DIED, both cleanly:**
+   (i) RAGGED WIN at 64 (job 27040575, narrow parity green, 60-step
+   arms): ragged wide 6.25/6.29 ms vs coloured controls 6.79/6.61
+   (mean 6.70, spread 2.7%) — ratio 0.933. The 1.220x loss is GONE on
+   the current stack with no XLA flags; the one-shot flag is inert
+   (0.939). Replicated off-arms 6.17/6.28 in 27041201 (best 6.225
+   mean). The zero-size-slice pathology no longer binds at 64.
+   (ii) OVERLAP-BY-SCHEDULER REFUTED with mechanism (jobs 27041261 +
+   27041201): the latency-hiding scheduler DOES lower both ragged
+   collectives as async start/done pairs (HLO dump receipt,
+   is_sync:false) — the flag is not inert — yet the step gets 25-31%
+   SLOWER and wildly noisy (median 7.8-8.5, per-step 5.4-15.7). With
+   the wide fill at step start gating all compute there is NO
+   independent work to hide behind (GLM r3 predicted exactly this);
+   the async machinery only buys collisions. Scheduler flags are OFF
+   the table for this program shape.
+   (iii) Surviving overlap path = RESTRUCTURE: interior/rim split
+   (compute owned-interior tendencies while the exchange flies, then
+   the rim), or cells/edges fills placed at their first consumers.
+   Code change in the sharded step, not an env var. Unpriced.
+   (iv) mcp2p on ragged WITH overlap flags: no help (7.81/8.49 vs
+   7.83/7.78). mcp2p on ragged WITHOUT overlap in flight (27041921) —
+   coloured+mcp2p 5.87-5.91 remains the lane best until that lands.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
