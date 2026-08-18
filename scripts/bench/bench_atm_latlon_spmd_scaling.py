@@ -218,11 +218,20 @@ def main() -> int:
     # the later in-loop guard below is kept as a belt-and-braces check for the
     # weak-mode derived n_lat, but the fatal case is caught here at submit time.
     from legoesm.scaling_preflight import (
-        preflight_or_exit, validate_divisibility, validate_memory,
+        preflight_or_exit, validate_band_rows_gpu, validate_divisibility,
+        validate_memory,
     )
     if args.mode == "strong":
         preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
                           axis="n_lat")
+    # Thin-band NCCL-init deadlock guard: only the multi-node GPU lane is
+    # affected (the same program runs on CPU virtual devices), and it burns
+    # a full walltime silently, so refuse at submit time.
+    if args.multicontroller:
+        preflight_or_exit(validate_band_rows_gpu,
+                          (args.n_lat if args.mode == "strong"
+                           else args.nlat_per_dev * args.n_devices),
+                          args.n_devices, axis="n_lat")
     _n_lat_est = (args.n_lat if args.mode == "strong"
                   else args.nlat_per_dev * args.n_devices)
     _est = preflight_or_exit(
