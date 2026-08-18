@@ -130,6 +130,32 @@ spots: boreal-evergreen belt slightly over-bright (temperature-vs-albedo
 trade), Sahel/Arabia over-bright (dry-soil brightening), Tibet warm spot
 reduced but present.
 
+## Coupled A/B result (2026-08-18) — v7 does NOT transfer; old bake stays coupled default
+
+30-day AMIP Jan-1979, res-4 campaign lane, bitwise-identical land IC and
+atmosphere, one variable = the bake.  v7 arm: land LE **collapses 34.7 -> 12.3
+W/m2** (obs ~28-32), concentrated in the SNOW-FREE tropics (Amazon/Congo/
+Maritime Continent, -40 W/m2), land precip -0.12 mm/day, global precip -0.20;
+Antarctica planetary albedo moves strongly toward obs (+0.15), NH high
+latitudes brighten past the old arm.  Offline the same parameters are
+LE-unbiased — a pure offline->coupled transfer failure (the GLM ship condition
+that demanded this A/B was right).
+
+REFUTED mechanism: the calibration-vs-deployment stomata mismatch (Farquhar vs
+Jarvis).  Offline discriminator: v7 params give LE 40.8 W/m2 under Farquhar
+and **63.7 under Jarvis** — the coupled collapse (less LE) is the OPPOSITE
+sign, so the coupled consumption path, not the stomata scheme, drives it.
+CAUSE UNKNOWN — next discriminators: instrument the coupled arm's land
+beta_soil / q_sfc / absorbed-SW per cell (the compiled non-tiled lane
+reconstructs the land humidity from beta_soil, wp/fc/root changed in v7; and
+v7's brighter land cuts absorbed energy).  Do NOT flip the coupled default to
+v6/v7 until the coupled collapse is explained and fixed; offline artifacts
+(tuned JSONs, offline bake) remain valid for offline work.
+
+NOTE: the LMIP spin-up driver does NOT consume the baked tuned tables (two
+spin-ups under different bakes produced bitwise-identical restarts) — a
+per-bake land IC requires wiring the bake into run_lmip_biophys first.
+
 ## Snow-mask follow-ups (GLM review, 2026-08-18 — none blocking, all cheap)
 
 * **Thermostat test**: refit with the temperature terms frozen (albedo-only
