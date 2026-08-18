@@ -180,7 +180,9 @@ def _land_params(cp, data):
                          alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
                          snow_depth_crit=cp["snow_dcrit"],
                          tau_snow_decay=cp["snow_tau_days"] * 86400.0,
-                         snow_cover_scale=data["pft"] @ cp["pft_snowmask"]))
+                         snow_cover_scale=(
+                             (1.0 - data["fg"]) * (data["pft"] @ cp["pft_snowmask"])
+                             + data["fg"])))
     return lp, cfg
 
 

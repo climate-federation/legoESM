@@ -130,6 +130,26 @@ spots: boreal-evergreen belt slightly over-bright (temperature-vs-albedo
 trade), Sahel/Arabia over-bright (dry-soil brightening), Tibet warm spot
 reduced but present.
 
+## Snow-mask follow-ups (GLM review, 2026-08-18 — none blocking, all cheap)
+
+* **Thermostat test**: refit with the temperature terms frozen (albedo-only
+  loss); if the mask table diverges (esp. boreal), the fitted values are
+  temperature compensation, not burial physics.
+* **Bare-soil pin test**: pin bare mask = 1.0 and refit; if global scores
+  survive, the 0.92 was optimizer slack (dust-on-snow / warm-season leakage),
+  not physics.
+* **Two-term canopy snow**: the cover-only mask cannot represent
+  intercepted-snow BRIGHTENING (autumn/spring falls near 0 C); the boreal
+  ordering (0.99 boreal vs 0.89 temperate, reversed vs obs) suggests the two
+  effects cancel inside one knob.  Follow-up: add a canopy-snow albedo term
+  g(T, time-since-snowfall).
+* **Cover validation**: check the effective snow-cover fraction against
+  IMS/MODIS snow-cover obs, not only albedo — a cover knob absorbing an albedo
+  error passes the albedo score while degrading cover.
+* Boreal-evergreen residual (+0.08 bright, ~15-20 W/m2 local spring
+  absorption) is a DOCUMENTED temperature-vs-albedo compensation — chase the
+  underlying warm bias (roughness/stability, LAI) before letting albedo pay.
+
 ## Review demands before the bake is trusted coupled (GLM, 2026-08-18)
 
 * **Coupled A/B vs the previous bake** (30-day AMIP arm, one variable = the

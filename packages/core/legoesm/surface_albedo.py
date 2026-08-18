@@ -333,15 +333,14 @@ def land_albedo(
                  else base_albedo)
     f_snow = (snow_cover_fraction(snow_depth, config) if f_snow_override is None
               else f_snow_override)
-    if config.snow_cover_scale is not None:
+    if config.snow_cover_scale is not None and f_snow_override is None:
         # Canopy snow masking: scale the effective snow-covered fraction (forest
-        # canopies hide ground snow, scale<1; open tundra whitens faster, scale>1)
-        # and scale the banded pre-aggregate by the same factor (it is linear in
-        # the per-band cover) so both paths stay consistent.
-        scale = jnp.asarray(config.snow_cover_scale)
-        f_snow = jnp.clip(f_snow * scale, 0.0, 1.0)
-        if snow_contrib_override is not None:
-            snow_contrib_override = snow_contrib_override * jnp.clip(scale, 0.0, None)
+        # canopies hide ground snow, scale<1; open tundra whitens faster, scale>1).
+        # Applied ONLY when this function computed the cover itself: a caller that
+        # supplies f_snow_override (the elevation-band path) must scale each BAND's
+        # cover before aggregating — post-aggregate scaling can push the snow
+        # contribution above alpha_snow at scale>1 on saturated bands (codex).
+        f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)
     if snow_contrib_override is not None:
         # Banded path: each elevation band already blended its own age-decayed snow
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.

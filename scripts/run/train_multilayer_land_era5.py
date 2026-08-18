@@ -417,7 +417,9 @@ def build_multilayer_cfg(cp, data):
             alpha_glacier_ice=cp["glac_ice_alb"])
             if _ELEV_BANDS_ON else None),
         land_albedo=LandAlbedoConfig(
-            snow_cover_scale=data["pft"] @ cp["pft_snowmask"],  # canopy snow masking
+            # canopy snow masking; glacier cells blend to 1 (no canopy on ice)
+            snow_cover_scale=((1.0 - data["fg"]) * (data["pft"] @ cp["pft_snowmask"])
+                              + data["fg"]),
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
             tau_snow_decay=cp["snow_tau_days"] * 86400.0,    # days -> seconds

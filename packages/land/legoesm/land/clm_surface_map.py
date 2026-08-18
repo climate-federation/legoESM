@@ -574,8 +574,14 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
         # v7 per-PFT canopy snow masking, PFT-weighted to a per-cell scale (forests
         # hide ground snow, open tundra whitens faster) — closed the NH>55 mean
         # albedo bias offline (-0.028 -> +0.003).
-        snow_cover_scale=jnp.asarray(surface_map["pft_fractions"])
-        @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER),
+        # glacier/lake/urban remainder is folded into PFT 0 upstream, which would
+        # hand an ice sheet the BARE-SOIL mask (0.92) despite having no canopy —
+        # blend the mask toward 1 (full exposed-snow cover) with glacier fraction.
+        snow_cover_scale=(
+            (1.0 - jnp.asarray(surface_map["glacier_frac"]))
+            * (jnp.asarray(surface_map["pft_fractions"])
+               @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER))
+            + jnp.asarray(surface_map["glacier_frac"])),
         alpha_snow_max=TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
         alpha_snow_min=TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
         snow_depth_crit=TUNED_SNOW_DCRIT_MULTILAYER,
