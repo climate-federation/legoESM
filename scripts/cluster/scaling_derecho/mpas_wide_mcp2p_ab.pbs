@@ -1,0 +1,129 @@
+#!/bin/bash -l
+#PBS -N legoesm_mpas_ab
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=16:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# MPAS icosahedral A/B on Derecho: narrow vs wide-halo vs wide+mcp2p NCCL env.
+# PBS port of scripts/cluster/scaling_levante/mpas_nccl_confirm_s9_64.sbatch
+# (same protocol: palindrome arms, 65 steps, s9 lloyd-0, sfc, reorder-for-NDEV)
+# on the Derecho plumbing of gpu_multinode_scaling.pbs (PALS GPU pin, plugin).
+#
+# REQUIRES once, before any s9/s10 arm (big meshes are cache-or-prewarm only):
+#   LEGOESM_MESH_CACHE_DIR=<same path as below> JAX_PLATFORMS=cpu \
+#     python scripts/data/prewarm_voronoi_mesh.py --level 9 --lloyd 0
+#
+# SUBMIT (from the repo root):
+#   qsub -v LEGOESM_NCCL_OFI_LIB=<libdir> \
+#        scripts/cluster/scaling_derecho/mpas_wide_mcp2p_ab.pbs
+# 2-node shakeout first (s7@8, no prewarm needed):
+#   qsub -l select=2:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+#        -v LEGOESM_NCCL_OFI_LIB=<libdir>,NDEV=8,SUBDIV=7 \
+#        scripts/cluster/scaling_derecho/mpas_wide_mcp2p_ab.pbs
+# NOTE qsub -v splits on commas — never pass a value containing a comma.
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if [ ! -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$SUBMIT_DIR)" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"
+cd "$REPO"
+
+NDEV="${NDEV:-64}"; GPN="${GPN:-4}"
+SUBDIV="${SUBDIV:-9}"; NLEV="${NLEV:-26}"; STEPS="${STEPS:-65}"
+export LEGOESM_MESH_CACHE_DIR="${LEGOESM_MESH_CACHE_DIR:-/glade/work/$USER/legoesm_mesh_cache}"
+export JAX_ENABLE_X64=0
+# NCCL owns GPU traffic; GPU-aware cray-mpich OFF (mixed-stack deadlock hazard)
+export MPICH_GPU_SUPPORT_ENABLED=0
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
+    export NCCL_NET="AWS Libfabric"
+    echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
+else
+    export NCCL_IB_DISABLE=1
+    export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+    echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> NCCL on TCP sockets."
+    echo "         A/B deltas on sockets are NOT comparable to the campaign's."
+fi
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/mpas_ab_${STAMP}}"
+mkdir -p "$OUTDIR"
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; exec "$@"'
+MCP2P="NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072"
+echo "=== HOSTS ==="; sort -u "$PBS_NODEFILE"; date
+echo "s${SUBDIV}@${NDEV} nlev=$NLEV steps=$STEPS outdir=$OUTDIR"
+
+rc=0
+run_arm() {  # TAG WIDE EXTRA_ENV [VALIDITY]
+    local TAG=$1 WIDE=$2 EXTRA=$3 VAL=${4:-0} DBG=""
+    if [ "$VAL" = 1 ]; then
+        # SUBSYS=ENV is what makes NCCL print the env vars the val grep counts.
+        DBG="NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=ENV,INIT,TUNING,P2P NCCL_DEBUG_FILE=$OUTDIR/nccl_${TAG}.%h.%p"
+    fi
+    echo "=== s${SUBDIV}@${NDEV} [$TAG] wide=$WIDE env: ${EXTRA:-defaults} ==="
+    printf '%s\n' "$EXTRA" > "$OUTDIR/${TAG}.env"   # requested-env receipt
+    env $EXTRA $DBG LEGOESM_MPAS_WIDE_HALO="$WIDE" \
+        timeout 1200 mpiexec -n "$NDEV" --ppn "$GPN" bash -c "$PIN" _ \
+        "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+            --multicontroller --n-devices "$NDEV" \
+            --subdivision "$SUBDIV" --nlev "$NLEV" \
+            --steps "$STEPS" --warmup 5 --lloyd 0 --partition-method sfc \
+            --reorder-for "$NDEV" \
+            --out "$OUTDIR/${TAG}.jsonl" < /dev/null \
+        || { echo "${TAG} FAILED"; rc=1; }
+    sleep 15
+}
+
+# Discarded warm-up arm (node ramp must not alias into the first timed arm).
+run_arm warmup_discard 1 ""
+# Palindrome order equalises each config's mean time-position vs linear drift.
+for ARM in narrow_a wide_a mcp2p_a mcp2p_b wide_b narrow_b; do
+    case "$ARM" in
+        narrow_*) run_arm "$ARM" 0 "" ;;
+        wide_*)   run_arm "$ARM" 1 "" ;;
+        mcp2p_*)  run_arm "$ARM" 1 "$MCP2P" ;;
+    esac
+done
+# Validity arm: prove NCCL actually saw the mcp2p knobs (short, debug files).
+# 12 steps, NOT fewer: the bench refuses warmup(5) >= steps at entry.
+STEPS=12 run_arm val_mcp2p 1 "$MCP2P" 1
+
+echo "=== RECEIPTS ==="
+"$PY" - "$OUTDIR" <<'EOF' || rc=1
+import glob, json, os, sys
+d = sys.argv[1]
+EXPECT = sorted(["narrow_a", "narrow_b", "wide_a", "wide_b",
+                 "mcp2p_a", "mcp2p_b"])
+tags = sorted(os.path.basename(f)[:-6]
+              for f in glob.glob(os.path.join(d, "*_[ab].jsonl")))
+if tags != EXPECT:
+    print(f"ARM SET MISMATCH: have {tags} want {EXPECT} — NO VERDICT")
+    sys.exit(1)
+t = {}
+for tag in EXPECT:
+    lines = open(os.path.join(d, tag + ".jsonl")).readlines()
+    if len(lines) != 1:
+        print(f"{tag}: {len(lines)} lines (stale) — NO VERDICT"); sys.exit(1)
+    rec = json.loads(lines[0])
+    if not rec.get("valid", False):
+        print(f"{tag}: invalid — NO VERDICT"); sys.exit(1)
+    t.setdefault(tag[:-2], []).append(rec["steady_median_ms"])
+for cfg, v in sorted(t.items()):
+    print(f"{cfg:7s} reps {[round(x, 3) for x in v]}  "
+          f"mean {sum(v)/2:7.3f}  spread {abs(v[0]-v[1]):.3f} ms")
+EOF
+n=$(cat "$OUTDIR"/nccl_val_mcp2p.* 2>/dev/null | grep -c "NCCL_" || true)
+echo "val_mcp2p: ${n} NCCL env lines in debug files (0 = mcp2p arms VOID)"
+echo "DONE rc=$rc"; exit $rc
