@@ -28,3 +28,29 @@ def test_replace_flat_routes_reduction_into_lateral_viscosity():
     assert out.lateral_viscosity.A_h == 20000.0
     assert out.lateral_viscosity.A_h_eq_boost == 0.05
     assert out.lateral_viscosity.A_h_eq_sigma_deg == 7.0
+
+
+def test_tke_lc_etau_round_trip_and_choices():
+    """fesom-mimic card knobs (2026-08-18): parse, and reject junk."""
+    import pytest
+    p = _build_arg_parser()
+    a = p.parse_args([])
+    assert a.tke_lc is None and a.tke_etau is None
+    a = p.parse_args(["--tke-lc", "off", "--tke-etau", "none"])
+    assert a.tke_lc == "off" and a.tke_etau == "none"
+    with pytest.raises(SystemExit):
+        p.parse_args(["--tke-lc", "maybe"])
+    with pytest.raises(SystemExit):
+        p.parse_args(["--tke-etau", "surface"])
+
+
+def test_tke_lc_etau_reach_the_card():
+    """The overrides must land in the TKEConfig (silently-ignored-flag guard)."""
+    from scripts.run.run_omip_core2 import orca1_zdftke_config
+    base = orca1_zdftke_config()          # returns the TKEConfig itself
+    assert base.lc is True and base.etau_mode == "below_ml"
+    off = orca1_zdftke_config(lc=False, etau_mode="none")
+    assert off.lc is False and off.etau_mode == "none"
+    import pytest
+    with pytest.raises(ValueError):
+        orca1_zdftke_config(etau_mode="surface")

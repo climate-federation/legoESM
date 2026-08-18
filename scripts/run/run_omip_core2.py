@@ -508,7 +508,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         n2_eos_form: str | None = None,
                         prognostic: bool | None = None,
                         kappa_convention: str | None = None,
-                        shear_production: str | None = None):
+                        shear_production: str | None = None,
+                        lc: bool | None = None,
+                        etau_mode: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -815,6 +817,18 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # Langmuir + surface-TKE penetration overrides (``--tke-lc``/``--tke-etau``).
+    # DEFAULT keeps the ORCA1 card (ln_lc=T, nn_etau=1).  The OFF settings
+    # exist to build a "fesom-mimic" card: fesom-jax's CVMix TKE has no
+    # Langmuir and no etau penetration, and quantifying the FESOM2 skill gap
+    # requires running OUR physics with THOSE branches off (2026-08-18).
+    if lc is not None:
+        _cfg = _cfg._replace(lc=bool(lc))
+    if etau_mode is not None:
+        if etau_mode not in ("below_ml", "none"):
+            raise ValueError(f"orca1_zdftke_config etau_mode {etau_mode!r} "
+                             "invalid; expected 'below_ml' or 'none'.")
+        _cfg = _cfg._replace(etau_mode=etau_mode)
     # K-from-TKE amplitude (``--tke-kappa-convention``).  DEFAULT keeps the
     # card value (``veros_sqrte`` = NEMO's ``rn_ediff*zmxlm*sqrt(en)``);
     # ``gaspar_sqrt2e`` restores the legacy sqrt(2)-double-counting amplitude
@@ -913,7 +927,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
-                              tke_shear_production=None):
+                              tke_shear_production=None, tke_lc=None,
+                              tke_etau=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -942,6 +957,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
+                    ("--tke-lc", tke_lc),
+                    ("--tke-etau", tke_etau),
                     ("--tke-n2-mode", tke_n2_mode),
                     ("--tke-n2-eos-form", tke_n2_eos_form),
                     ("--tke-prognostic", tke_prognostic),
@@ -961,7 +978,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    n2_eos_form=tke_n2_eos_form,
                                    prognostic=tke_prognostic,
                                    kappa_convention=tke_kappa_convention,
-                                   shear_production=tke_shear_production)
+                                   shear_production=tke_shear_production,
+                                   lc=tke_lc, etau_mode=tke_etau)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -1006,6 +1024,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
+                  tke_lc=None, tke_etau=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1215,7 +1234,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
-            tke_shear_production=tke_shear_production)
+            tke_shear_production=tke_shear_production,
+            tke_lc=tke_lc, tke_etau=tke_etau)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -2306,7 +2326,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
-                            tke_n2_mode=None, tke_n2_eos_form=None):
+                            tke_n2_mode=None, tke_n2_eos_form=None,
+                            tke_lc=None, tke_etau=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -2327,6 +2348,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
+                        ("--tke-lc", tke_lc),
+                        ("--tke-etau", tke_etau),
                         ("--tke-n2-mode", tke_n2_mode),
                         ("--tke-n2-eos-form", tke_n2_eos_form),
                         ("--tke-prognostic", tke_prognostic),
@@ -4730,6 +4753,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-lc", type=str, default=None, choices=("on", "off"),
+                   help="Langmuir cell parameterisation in the tripole TKE "
+                        "card (NEMO ln_lc). None keeps the ORCA1 card (on). "
+                        "'off' exists for the fesom-mimic card: fesom-jax's "
+                        "CVMix TKE has no Langmuir term.")
+    p.add_argument("--tke-etau", type=str, default=None,
+                   choices=("below_ml", "none"),
+                   help="Surface-TKE penetration mode (NEMO nn_etau). None "
+                        "keeps the ORCA1 card (below_ml). 'none' for the "
+                        "fesom-mimic card (fesom-jax has no etau term).")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
                             "nemo_burchard"],
@@ -5256,7 +5289,8 @@ def main() -> int:
                             args.tke_prognostic, args.tke_kappa_convention,
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
-                            tke_n2_eos_form=args.tke_n2_eos_form)
+                            tke_n2_eos_form=args.tke_n2_eos_form,
+                            tke_lc=args.tke_lc, tke_etau=args.tke_etau)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5467,6 +5501,8 @@ def main() -> int:
             tke_prognostic=args.tke_prognostic,
             tke_kappa_convention=args.tke_kappa_convention,
             tke_shear_production=args.tke_shear_production,
+            tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
+            tke_etau=args.tke_etau,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
