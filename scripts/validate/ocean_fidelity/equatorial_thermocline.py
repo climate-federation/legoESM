@@ -108,6 +108,16 @@ def main() -> int:
                          "-- an absent undercurrent and an absent ascent need "
                          "different fixes. Record selection follows "
                          "--nemo-w-recs.")
+    ap.add_argument("--nemo-vfile", default=None,
+                    help="NEMO 5-day grid_V file (vo). With --meridional-lon, "
+                         "also prints the MERIDIONAL surface current v(lat) at "
+                         "each longitude — the Ekman-divergence carrier. With "
+                         "the wind stress matched (same NCAR bulk, vfac=0 both "
+                         "sides), a too-weak or displaced poleward v at "
+                         "+-1..3 deg implicates the vertical-viscosity "
+                         "profile, not the forcing.")
+    ap.add_argument("--v-depth-m", type=float, default=10.0,
+                    help="depth of the v(lat) comparison [m].")
     ap.add_argument("--meridional-lon", default=None,
                     help="comma list of longitudes (deg E). For each, print "
                          "the MERIDIONAL profile of w at --w-depth-m over "
@@ -296,6 +306,36 @@ def _euc_merid_block(a, L, zc):
                 o = box_mean(w_o[..., kl], lat_o, lon_o, lat0, lon0, 0.5, 1.0)
                 n = box_mean(wn[kn], lat_n, lon_n, lat0, lon0, 0.5, 1.0)
                 print(f"{lat0:6d} {1e6 * o:10.3f} {1e6 * n:10.3f}")
+
+    if a.nemo_vfile and a.meridional_lon:
+        v_o = np.asarray(snap["v"], dtype=np.float64)
+        if v_o.shape[0] == lat_o.shape[0] + 1:
+            # C-grid v faces (ny+1, nx, nz): average to T cells.
+            v_o = 0.5 * (v_o[:-1, :, :] + v_o[1:, :, :])
+        if v_o.shape[:2] != lat_o.shape:
+            raise SystemExit(f"v {v_o.shape} does not align with T coords "
+                             f"{lat_o.shape} -- refusing to index.")
+        ds = nc.Dataset(a.nemo_vfile)
+        try:
+            vn = np.ma.filled(np.ma.masked_invalid(
+                ds.variables["vo"][:]), np.nan).astype(np.float64)
+            zv = np.asarray(ds.variables["depthv"][:], dtype=np.float64)
+            lat_nv = np.asarray(ds.variables["nav_lat"][:])
+            lon_nv = np.asarray(ds.variables["nav_lon"][:]) % 360.0
+        finally:
+            ds.close()
+        vn = np.nanmean(_select_recs(vn, a.nemo_w_recs), axis=0)
+        kv_o = int(np.argmin(np.abs(zc - a.v_depth_m)))
+        kv_n = int(np.argmin(np.abs(zv - a.v_depth_m)))
+        for lon0 in (float(s) for s in a.meridional_lon.split(",")):
+            print(f"\nMeridional surface current v at {lon0:.0f}E, "
+                  f"{zc[kv_o]:.1f} m, m/s (+ = northward; the Ekman "
+                  "divergence carrier):")
+            print(f"{'lat':>6} {'ours':>8} {'NEMO':>8}")
+            for lat0 in range(-6, 7):
+                o = box_mean(v_o[..., kv_o], lat_o, lon_o, lat0, lon0, 0.5, 1.0)
+                n = box_mean(vn[kv_n], lat_nv, lon_nv, lat0, lon0, 0.5, 1.0)
+                print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
     if a.nemo_ufile:
         u_o = np.asarray(snap["u"], dtype=np.float64)
