@@ -49,3 +49,19 @@ def test_snapshot_writer_conventions(tmp_path):
     assert z["lon_T"].min() >= -180.0 and z["lon_T"].max() <= 180.0
     assert z["land_mask"].min() == 1.0                   # 1.0 == OCEAN
     assert (z["z_center_ref"] > 0).all() and (z["H_bathy"] > 0).all()
+
+
+def test_forcing_flag_round_trip_and_default():
+    p = m.build_arg_parser()
+    base = ["--mesh-dir", "M", "--ic-dir", "I", "--output", "O"]
+    assert p.parse_args(base).forcing == "jra55"
+    a = p.parse_args(base + ["--forcing", "core2_nyf", "--nyf-zarr", "/x/nyf.zarr"])
+    assert a.forcing == "core2_nyf" and a.nyf_zarr == "/x/nyf.zarr"
+
+
+def test_unknown_forcing_rejected():
+    import pytest
+    p = m.build_arg_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
+                      "--forcing", "era5"])

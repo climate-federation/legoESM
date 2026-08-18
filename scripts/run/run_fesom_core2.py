@@ -49,6 +49,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Timestep [s]; 1800 is the published CORE2 setting.")
     p.add_argument("--year", type=int, default=1958,
                    help="JRA55-do forcing year (the Zenodo package ships 1958).")
+    p.add_argument("--forcing", default="jra55",
+                   choices=("jra55", "core2_nyf"),
+                   help="Atmospheric forcing: 'jra55' = JRA55-do --year (the "
+                        "published hindcast card); 'core2_nyf' = the CORE-II "
+                        "normal-year store the NEMO reference and the legoESM "
+                        "tripole/MPAS arms use (needs --nyf-zarr) -- the "
+                        "matched-protocol option for the three-grid "
+                        "comparison. SSS restoring/runoff/chl and the PHC IC "
+                        "stay fesom-side either way; state those residual "
+                        "differences with every scored number.")
+    p.add_argument("--nyf-zarr", default=None,
+                   help="Path to nyf.zarr (built by legoESM's "
+                        "scripts/data/build_core2_nyf_zarr.py). Required with "
+                        "--forcing core2_nyf.")
     p.add_argument("--snapshot-every-days", type=float, default=30.0)
     p.add_argument("--output", required=True)
     return p
@@ -140,9 +154,20 @@ def main() -> int:
     sst0 = jnp.asarray(state.T[:, 0])
 
     t0 = time.time()
-    forcing = surface_forcing.build_surface_forcing(mesh, args.year, sst_ic=sst0)
-    print(f"[forcing] JRA55-do {args.year} ready in {time.time()-t0:.1f} s",
-          flush=True)
+    if args.forcing == "core2_nyf":
+        if not args.nyf_zarr:
+            raise SystemExit("--forcing core2_nyf requires --nyf-zarr")
+        forcing = surface_forcing.build_surface_forcing(
+            mesh, args.year, sst_ic=sst0, nyf_zarr=args.nyf_zarr)
+        print(f"[forcing] CORE-II NYF ({args.nyf_zarr}) ready in "
+              f"{time.time()-t0:.1f} s", flush=True)
+    elif args.forcing == "jra55":
+        forcing = surface_forcing.build_surface_forcing(mesh, args.year,
+                                                        sst_ic=sst0)
+        print(f"[forcing] JRA55-do {args.year} ready in {time.time()-t0:.1f} s",
+              flush=True)
+    else:  # argparse choices guard this; keep the dispatch loud anyway
+        raise SystemExit(f"unknown --forcing {args.forcing!r}")
 
     op = build_ssh_operator(mesh, dt=args.dt)
     stress = jnp.zeros((mesh.elem2D, 2))
@@ -156,12 +181,17 @@ def main() -> int:
                             "fesom_jax": str(Path(
                                 sys.modules["fesom_jax"].__file__).parent)},
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
+                   "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
-                   "protocol_note": ("JRA55-do year forcing + PHC3.0 winter "
-                                     "cold start; NOT the xgrid matched-pair "
-                                     "protocol -- three-model comparison")},
+                   "protocol_note": (
+                       "CORE-II NYF atmosphere (NEMO-matched) + PHC3.0 winter "
+                       "cold start; SSS/runoff/chl remain fesom-side"
+                       if args.forcing == "core2_nyf" else
+                       "JRA55-do year forcing + PHC3.0 winter "
+                       "cold start; NOT the xgrid matched-pair "
+                       "protocol -- three-model comparison")},
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
