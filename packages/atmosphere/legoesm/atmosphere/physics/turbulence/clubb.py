@@ -4332,7 +4332,22 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
                                 1, nzm - 2, _CAM_FILL_HOLES_TYPE)
     # CAM l_wp2_fill_holes_tke = True (fixed): TKE-conserving wp2 fill.
     wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
-    wp2_c = clip_variance(wp2_c, w_tol_sqd)
+    # BOTH thresholds, as upstream does. Passing only the floor here was a
+    # real defect: `advance_wp2_wp3_module.F90` calls `clip_variance` with the
+    # optional `wp2_max` and says why -- "We attempt to clip extreme values of
+    # wp2 to prevent a crash ... Chris Golaz found that instability caused by
+    # large wp2 in CLUBB led unrealistic results in AM3" (dschanen, 11 Apr
+    # 2011). That is exactly the failure measured here: on the two most
+    # vigorously convective cases the prognostic path ran away, scoring 15.2
+    # against 0.501 for the best closure on Wangara and carrying a parameter
+    # gradient of 1.3e16 against ~0.3 on the well-behaved cases.
+    #
+    # Note this cap was already applied on the DIAGNOSTIC phase-1 path
+    # (`clubb_turbulence`), and `clip_variance` already took the optional upper
+    # threshold, and `CLUBBConfig.wp2_max` already held upstream's 1000 m^2/s^2
+    # -- only the prognostic call site omitted it, which is the path the
+    # campaign runs.
+    wp2_c = clip_variance(wp2_c, w_tol_sqd, config.wp2_max)
     wp2_zt = jnp.maximum(zm2zt(wp2_c, gr), w_tol_sqd)
     wp3_c = clip_skewness(wp3_new, wp2_zt, gr.zt, sfc_elevation, skw_max)
     return wp2_c, wp3_c, wp2_zt

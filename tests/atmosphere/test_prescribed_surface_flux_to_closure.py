@@ -317,3 +317,50 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     assert float(midday.h_pbl[0]) > float(morning.h_pbl[0]), (
         "a stronger surface heat flux must deepen the convective PBL; "
         "equal depths mean the per-step value never reached the closure")
+
+
+# ---------------------------------------------------------------------------
+# CLUBB: wp2 is clipped at BOTH ends on the prognostic path
+# ---------------------------------------------------------------------------
+
+def test_clip_variance_applies_the_upper_threshold():
+    """The helper always could; the prognostic call site did not pass it."""
+    from legoesm.atmosphere.physics.turbulence.clubb import clip_variance
+
+    xp2 = jnp.asarray([[1e-9, 5.0, 5000.0, 7000.0]])
+    out = np.asarray(clip_variance(xp2, 1e-4, 1000.0))
+    assert out[0, 0] == pytest.approx(1e-4), "floor"
+    assert out[0, 1] == pytest.approx(5.0), "interior untouched"
+    assert out[0, 2] == pytest.approx(1000.0), "cap"
+    # the TOP level is deliberately left alone (nzm-1), matching upstream
+    assert out[0, 3] == pytest.approx(7000.0)
+
+
+def test_the_prognostic_path_passes_wp2_max():
+    """NON-VACUOUS source check, naming the symbol that RUNS.
+
+    Upstream calls clip_variance with the optional wp2_max and states the
+    reason: "instability caused by large wp2 in CLUBB led unrealistic results
+    in AM3". Our prognostic path passed only the floor, while the DIAGNOSTIC
+    path already capped -- so a source test that looked at the wrong one would
+    have passed throughout. This asserts on ``advance_wp2_wp3``, which is the
+    function the campaign's prognostic runs execute.
+    """
+    import inspect
+
+    from legoesm.atmosphere.physics.turbulence import clubb
+
+    src = inspect.getsource(clubb.advance_wp2_wp3)
+    assert "clip_variance(" in src, "the clip moved; update this test"
+    call = src[src.index("clip_variance("):]
+    call = call[:call.index(")") + 1]
+    assert "wp2_max" in call, (
+        f"advance_wp2_wp3 clips wp2 without an upper threshold: {call!r}")
+
+
+def test_wp2_max_matches_upstreams_value():
+    """1000 m^2/s^2, constants_clubb.F90. A cap at the wrong magnitude is
+    either inert or a new physics change."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+    assert CLUBBConfig().wp2_max == pytest.approx(1000.0)
