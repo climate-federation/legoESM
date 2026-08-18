@@ -270,6 +270,26 @@ Ranked levers:
    scatter of the four tendency channels, per-device padding to the max
    rim size, and the poison-verified stencil width. Phase 1 = builder +
    CPU test (operator on submesh == operator on full mesh at rim rows).
+   PHASE-1 CODE REVIEW (codex, 2026-08-18): landed (a90a68db6) but DO
+   NOT WIRE until three blockers clear:
+   (i) edge SCATTER set must come from `edge_rim` (predicate
+   `0 <= edge_rim <= width` — cut edges are 0 under the min rule)
+   restricted to device-owned shard rows; the synthetic partition's
+   lower-cell edge-ownership rule is unrelated to production rows and
+   can miss / mis-scatter / double-patch. Use rim_part ONLY for the
+   submesh.
+   (ii) closure is not RHS-complete: vertices are kept when ANY
+   incident cell is local, so PV at partially-closed vertices reads
+   masked -1 neighbours against a global kite/area denominator;
+   edgesOnEdge tangential paths similarly. The decisive gate is a
+   FULL-TENDENCY ghost-poison closure test (divergence/gradient tests
+   do not establish it); closure likely needs dependency-graph growth.
+   (iii) per-device `partition_voronoi_mesh` is a Python-loop setup
+   wall at s9/64 (~billions of iterations incl. rank-1's whole-mesh
+   comm schedule that the plan never uses) — replace with a
+   vectorized, comm-free compact-closure builder before any
+   production-scale receipt.
+   GLM review of the phase-1 code itself still owed.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
