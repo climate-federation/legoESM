@@ -6255,7 +6255,8 @@ class LatLonCGridOceanModel:
                 _vmix_cfg_here is not None
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
-                           "squared_centered") == "nemo_face_native"
+                           "squared_centered") in ("nemo_face_native",
+                                                   "nemo_face_native_now2")
             )
             if _keep_raw_faces:
                 cc_state = state
