@@ -156,6 +156,14 @@ def _get_radiation_fn(config: RadiationConfig):
     """Select the radiation backend based on config.scheme."""
     if config.scheme == "gray":
         return gray_radiation, config.gray
+    elif config.scheme == "simple_lw":
+        # Handled by its own branch in _call_radiation_backend: it needs cloud
+        # condensate, density and heights, not the (T, p, lat, insolation)
+        # signature the two-stream backends share.
+        raise ValueError(
+            "radiation scheme 'simple_lw' does not go through "
+            "_get_radiation_fn; _call_radiation_backend handles it directly."
+        )
     elif config.scheme == "rrtmgp":
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
@@ -572,6 +580,69 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d,
     )
 
 
+def _simple_lw_radiation(*, T, p_half, q_v, q_cloud, q_ice, config):
+    """Stevens (2005) simple longwave on the model's (ncol, nlev) column.
+
+    The kernel is written BOTTOM-UP because its optical depths are cumulative
+    from the surface, while model arrays are TOA-first, so the profiles are
+    flipped in and the tendency is flipped back. Heights, thicknesses and
+    density come from the shared hydrostatic helpers rather than re-derived.
+
+    Longwave only: this parameterization has no shortwave, and the DYCOMS and
+    ASTEX decks it serves are nocturnal / shortwave-off. The net upward flux is
+    reported as ``lw_flux_up`` with ``lw_flux_down`` zero -- the scheme fits a
+    NET flux and never defines the two separately, so splitting it would put a
+    number in the output that the scheme did not compute.
+    """
+    from legoesm.atmosphere.physics._shared import compute_layer_dz, compute_rho
+    from legoesm.atmosphere.physics.radiation.simple_lw import (
+        simple_lw_net_upward_flux,
+        simple_lw_temperature_tendency,
+    )
+
+    ncol, _nlev = T.shape
+    q_v_safe = jnp.zeros_like(T) if q_v is None else q_v
+    cond = jnp.zeros_like(T) if q_cloud is None else q_cloud
+    if q_ice is not None:
+        # gSAM's optical depth is qcl + qci (rad_simple line 54).
+        cond = cond + q_ice
+    dz = compute_layer_dz(T, p_half, q_v_safe)          # (ncol, nlev) TOA-first
+    rho = compute_rho(T, 0.5 * (p_half[:, :-1] + p_half[:, 1:]), q_v_safe)
+
+    # TOA-first -> bottom-up, and half-level heights with the surface at 0.
+    dz_up = dz[:, ::-1]
+    rho_up = rho[:, ::-1]
+    cond_up = cond[:, ::-1]
+    qt_up = (q_v_safe + cond)[:, ::-1]
+    z_half = jnp.concatenate(
+        [jnp.zeros((ncol, 1), dtype=dz.dtype), jnp.cumsum(dz_up, axis=1)],
+        axis=1)
+
+    # The kernel takes 1-D rho/dz/z_half, so map it over columns.
+    def _one(cond_c, qt_c, rho_c, dz_c, zh_c):
+        tend = simple_lw_temperature_tendency(
+            cond_c, qt_c, rho_c, dz_c, zh_c, config)
+        flux = simple_lw_net_upward_flux(
+            cond_c, qt_c, rho_c, dz_c, zh_c, config)
+        return tend, flux
+
+    tend_up, flux_up = jax.vmap(_one)(cond_up, qt_up, rho_up, dz_up, z_half)
+
+    heating = tend_up[:, ::-1]                       # back to TOA-first
+    lw_up = flux_up[:, ::-1]                         # (ncol, nlev+1)
+    zeros_f = jnp.zeros_like(lw_up)
+    zeros_c = jnp.zeros_like(heating)
+    return RadiationOutput(
+        lw_flux_up=lw_up,
+        lw_flux_down=zeros_f,
+        sw_flux_up=zeros_f,
+        sw_flux_down=zeros_f,
+        heating_rate=heating,
+        lw_heating_rate=heating,
+        sw_heating_rate=zeros_c,
+    )
+
+
 def _call_radiation_backend(
     radiation_config: RadiationConfig,
     T: jnp.ndarray,
@@ -642,6 +713,12 @@ def _call_radiation_backend(
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
     """
+    if radiation_config.scheme == "simple_lw":
+        return _simple_lw_radiation(
+            T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
+            config=radiation_config.simple_lw,
+        )
+
     if radiation_config.scheme == "gray":
         radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
         return radiation_fn(

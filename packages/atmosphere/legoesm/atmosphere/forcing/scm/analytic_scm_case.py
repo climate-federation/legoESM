@@ -15,11 +15,21 @@ from the same-named case in ``scripts/matrix/scm/`` -- those do not match:
   defaults to 0. Verified independently from the archive: its column heat
   budget over 9 h is -162.000 K m exactly, i.e. a constant -0.005 K m/s.
 
-Every case here therefore uses a CONSTANT prescribed kinematic surface heat
-flux, which also keeps ``SCMForcing.T_s`` out of the picture entirely -- a
+Every case here prescribes a kinematic surface heat FLUX rather than a surface
+temperature, which keeps ``SCMForcing.T_s`` out of the picture entirely -- a
 time-varying prescribed surface temperature cannot be traced (its validator
 materialises with NumPy), so a ``T_s``-driven case could not be gradient-tuned
 at all without changing that validator first.
+
+That flux is CONSTANT for every case except Wangara Day 33, whose defining
+feature is its diurnal cycle. This file previously said the flux was constant
+everywhere and built it that way, so Wangara's SCM arm ran its 09:00 value for
+all 8 h -- through the 13:00 maximum and the afternoon decay -- and took a
+uniform -5.5 m/s geostrophic wind where the LES uses a sheared profile. The
+LES driver reads both from ``legoesm.atmosphere.forcing.wangara_day33``; the
+spec now names the same functions, so the two sides really cannot be driven
+differently. A case declares non-steady forcing with
+``surface_theta_flux_fn`` / ``geostrophic_u_fn``.
 
 Two heights, deliberately distinct. The SCM column spans the LES DOMAIN
 (``les_lz_m``) so its lid matches the LES lid; SCORING stops at
@@ -42,6 +52,7 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (
 )
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing import wangara_day33
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -79,6 +90,46 @@ class AnalyticSCMCaseSpec:
     scored: tuple[str, ...]
     note: str
 
+    # --- non-steady forcing, for the cases that have it ---------------------
+    # A case whose surface flux varies in TIME, or whose geostrophic wind
+    # varies with HEIGHT, declares the function here and the loader uses it in
+    # place of the scalar above. Wangara Day 33 has both, and without them its
+    # SCM arm is a constant-flux, uniform-wind CBL that merely starts from the
+    # same 277 K sounding -- which is what it was: the LES driver pulls the
+    # diurnal cycle and the sheared geostrophic wind from
+    # `legoesm.atmosphere.forcing.wangara_day33` while this loader hard-coded
+    # `w_th_s = lambda _t: spec.sfc_theta_flux_K_m_s`, so the two sides WERE
+    # driven differently despite the claim that they could not be.
+    #
+    # `surface_theta_flux_fn(t_seconds) -> K m/s` is called with the SCM's own
+    # clock, which starts at zero; `t_start_s` is added first, so a case that
+    # keys its forcing to local time gets the right hour.
+    surface_theta_flux_fn: Any = None
+    geostrophic_u_fn: Any = None            # (z_m) -> m/s
+    t_start_s: float = 0.0
+
+    # WHERE THE WIND STARTS, which the LES driver decides and this column must
+    # copy. It is declared per case rather than inferred because the two live
+    # in different files and only the driver knows.
+    #
+    #   "geostrophic" — u = the geostrophic wind, v = 0. `run_spectral_les.py`
+    #     --ekman initialises `u = broadcast_to(u_tar)` with v at noise level,
+    #     so its SCM twin starts balanced too.
+    #   "rest" — u = v = 0. `run_spectral_cbl.py` (cbl AND wangara) builds
+    #     `u = zeros, v = zeros` and lets Coriolis and friction spin the wind
+    #     up from nothing.
+    #
+    # This is not a detail that averages out. Wangara's inertial period is
+    # 2*pi/|f| = 21.1 h and the benchmark is 8 h, so an initial-wind mismatch
+    # does NOT decay within the run -- it rotates. Starting the column at a
+    # uniform -5.5 m/s against an LES starting from rest measured u +2.4 and
+    # v -4.2 m/s of bias at the analysis window, against an LES profile whose
+    # own spread is 0.27 and 0.23 m/s: normalised errors of 9 and 18, IDENTICAL
+    # across all nine closures, which is the signature of the arm rather than
+    # the closures. The surface-flux boundary condition was a separate defect
+    # in the same arm and fixing it did not move these two terms at all.
+    initial_wind: str = "geostrophic"
+
     # The tuner reads these off the deck spec; analytic cases prescribe their
     # surface flux, so there is no bulk exchange coefficient to carry.
     @property
@@ -108,6 +159,10 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         theta0_K=300.0, inversion_z_m=800.0, lapse_above_K_m=0.008,
         inversion_width_m=0.0,             # driver uses a sharp jnp.where
         sfc_theta_flux_K_m_s=0.06,
+        # run_spectral_cbl.py builds u = v = 0. Numerically identical to
+        # "geostrophic" here (u_geo = v_geo = 0), declared so the driver's
+        # choice is recorded rather than coincidental.
+        initial_wind="rest",
         u_geo_m_s=0.0, v_geo_m_s=0.0, f_c=0.0,
         # run_spectral_cbl.py has NO sponge, so scoring runs to the lid.
         les_z0_m=0.1, les_lz_m=1600.0, les_domain_top_m=1600.0,
@@ -118,6 +173,49 @@ ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
         note="Nieuwstadt CBL_N91 dry convective boundary layer; constant "
              "+0.06 K m/s surface flux, no Coriolis, 4 h. NOT Wangara Day 33 "
              "despite the LES driver's --case-label.",
+    ),
+    "wangara": AnalyticSCMCaseSpec(
+        les_driver="run_spectral_cbl.py --case wangara",
+        # The capping inversion is `run_spectral_cbl.py`'s DEFAULT zi0/gamma:
+        # the wangara branch overrides only theta0, f_cor, t_start_s and Q0, so
+        # `th = where(z > 800, 277 + 0.008*(z-800), 277)` is what it built.
+        # MEASURED off frame 0 of the stored reference rather than read off the
+        # argparse defaults: theta = 277.000 +- 0.001 K below 800 m and a
+        # 0.00800 K/m lapse fitted above 900 m. Declaring no inversion here
+        # left the column uniform at 277 K, ~1.8 K colder than the LES in the
+        # domain mean, which is the whole of the -2.1 K theta bias that
+        # survived the surface-flux and initial-wind fixes.
+        theta0_K=277.0, inversion_z_m=800.0, lapse_above_K_m=0.008,
+        inversion_width_m=0.0,   # a sharp `where`, no tanh: matches the driver
+        # DIURNAL in the real case: the constant here is the flux at the 09:00
+        # start, and the SCM arm overrides it with the shared time-dependent
+        # forcing (see wangara_day33). It is carried so the spec stays
+        # comparable with its siblings, not because the case is steady.
+        sfc_theta_flux_K_m_s=0.0897,
+        u_geo_m_s=-5.5, v_geo_m_s=0.0, f_c=-8.2634e-5,
+        les_z0_m=0.01, les_lz_m=2000.0, les_domain_top_m=1700.0,
+        default_dt_s=10.0,
+        # Dry: the LES driver carries no moisture, so scoring q_v would compare
+        # a moist SCM against a dry reference. theta plus the Ekman-like wind
+        # structure under the height-dependent geostrophic forcing is what this
+        # case constrains.
+        scored=("theta", "u", "v"),
+        # The SAME module the LES driver reads, so the two sides really cannot
+        # be driven differently. Wired as functions rather than as the scalars
+        # above because both quantities genuinely vary.
+        surface_theta_flux_fn=wangara_day33.surface_theta_flux,
+        geostrophic_u_fn=wangara_day33.geostrophic_u,
+        t_start_s=wangara_day33.T_START_S,
+        # THE SAME run_spectral_cbl.py build: the LES starts from REST and
+        # spins the wind up under Coriolis. Starting this column at a uniform
+        # -5.5 m/s instead left u +2.4 and v -4.2 m/s biased at 8 h, 9x and
+        # 18x the LES profile's own spread, on every closure alike.
+        initial_wind="rest",
+        note="Wangara Day 33 convective boundary layer (Clarke et al. 1971), "
+             "DRY: diurnal surface heat flux peaking at 13:00 local, "
+             "southern-hemisphere Coriolis, height-dependent easterly "
+             "geostrophic wind, 09:00 start. NOT the Nieuwstadt CBL_N91 case, "
+             "which is the separate 'cbl' entry.",
     ),
     "ekman": AnalyticSCMCaseSpec(
         les_driver="run_spectral_les.py --ekman",
@@ -236,22 +334,65 @@ def load_analytic_scm_case(case: str, *, nlev: int = 48,
     theta = _theta_profile(spec, z_full)
     T_profile = theta * exner
     q_v_profile = np.zeros(nlev)                 # every analytic case is dry
-    u_profile = np.full(nlev, spec.u_geo_m_s)
-    v_profile = np.full(nlev, spec.v_geo_m_s)
+    # Initial wind: copy the LES driver's, which is per case (see the
+    # `initial_wind` field). Dispatch raises on an unknown value rather than
+    # falling through to a default -- a typo here is a silently different
+    # experiment, not an error.
+    if spec.initial_wind == "rest":
+        u_profile = np.zeros(nlev)
+        v_profile = np.zeros(nlev)
+    elif spec.initial_wind == "geostrophic":
+        # The PROFILE when the case declares one. Using the scalar here was
+        # the same defect the forcing had: a case with a sheared geostrophic
+        # wind would start uniform and be relaxed toward a sheared target.
+        if spec.geostrophic_u_fn is not None:
+            u_profile = np.asarray(spec.geostrophic_u_fn(z_full),
+                                   dtype=np.float64)
+        else:
+            u_profile = np.full(nlev, spec.u_geo_m_s)
+        v_profile = np.full(nlev, spec.v_geo_m_s)
+    else:
+        raise ValueError(
+            f"case {case!r}: initial_wind={spec.initial_wind!r} is not one of "
+            "'geostrophic' / 'rest'."
+        )
 
     from legoesm import constants
     rho_sfc = _P_S_PA / (constants.R_d * float(T_profile[-1]))
 
-    u_geo = jnp.full(nlev, spec.u_geo_m_s)
+    # Geostrophic wind: the scalar unless the case declares a PROFILE. Wangara
+    # Day 33's easterly jet is sheared (-5.5 m/s at the surface, kinking at
+    # 1 km), and a uniform -5.5 gives the SCM a different momentum forcing from
+    # the LES it is scored against.
+    if spec.geostrophic_u_fn is not None:
+        u_geo = jnp.asarray(spec.geostrophic_u_fn(z_full), dtype=jnp.float64)
+    else:
+        u_geo = jnp.full(nlev, spec.u_geo_m_s)
     v_geo = jnp.full(nlev, spec.v_geo_m_s)
-    flux = jnp.asarray(spec.sfc_theta_flux_K_m_s)
+
+    # Surface heat flux: the scalar unless the case declares a TIME FUNCTION.
+    # The scalar is evaluated at the run's first instant for a diurnal case, so
+    # using it there holds the 09:00 flux for the whole 8 h -- straight through
+    # the 13:00 maximum and the afternoon decay.
+    if spec.surface_theta_flux_fn is not None:
+        flux_fn = spec.surface_theta_flux_fn
+        t0 = float(spec.t_start_s)
+
+        def _w_th_s(t):
+            return jnp.asarray(flux_fn(jnp.asarray(t) + t0),
+                               dtype=jnp.float64)
+    else:
+        flux = jnp.asarray(spec.sfc_theta_flux_K_m_s)
+
+        def _w_th_s(_t):
+            return flux                       # CONSTANT, stays concrete
+
     forcing = SCMForcing(
         f_c=float(spec.f_c),
         u_geo=(lambda _t: u_geo) if spec.f_c != 0.0 else None,
         v_geo=(lambda _t: v_geo) if spec.f_c != 0.0 else None,
         prescribe="fluxes",
-        # CONSTANT, so it stays concrete under tracing.
-        w_th_s=lambda _t: flux,
+        w_th_s=_w_th_s,
     )
 
     return AnalyticSCMCase(

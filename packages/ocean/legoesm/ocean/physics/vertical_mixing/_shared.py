@@ -486,6 +486,7 @@ def compute_N2(
     adiabatic_over_dz_half: bool = False,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    n2_eos_form: str = "seos",
 ) -> jnp.ndarray:
     """N^2 at interfaces (shared by the TKE and CATKE closures).
 
@@ -557,9 +558,16 @@ def compute_N2(
         # double-count it).  NB the stretch factor is the LOCAL 1+eta/H_bathy,
         # NOT legoESM's z* Jacobian (eta+H)/H_max -- see the warning in
         # eos.nemo_bn2_live_ladders (#1226).
+        # ``n2_eos_form`` selects WHICH alpha/beta the bn2 assembly uses.
+        # 'seos' is the 3-term simplified fit; 'teos10' is NEMO's Roquet
+        # polynomial with the TEOS-10 coefficient set, which is what ORCA1
+        # runs (ln_teos10=.true.). This forward was MISSING -- the call
+        # omitted eos_form entirely, so n2_mode='nemo_bn2' silently took the
+        # S-EOS branch and the TEOS-10 port was unreachable from production
+        # (codex 9408213 #6).
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
-            T_cell, S_cell, t_depth, w_depth, g=g,
+            T_cell, S_cell, t_depth, w_depth, g=g, eos_form=n2_eos_form,
         )
     raise ValueError(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed', "

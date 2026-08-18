@@ -102,6 +102,28 @@ _TKE_DIAGNOSTIC_DT_S = 86400.0   # [s] 1-day pseudo-step → quasi-steady K
 _TKE_DIAGNOSTIC_N_ITER = 3       # backward-Euler sub-iterations (K within ~few %)
 
 
+
+def _bn2_ladder_kwargs(cfg, z_coord, state):
+    """``t_depth``/``w_depth`` for ``n2_mode="nemo_bn2"``, else ``{}``.
+
+    LIVE ladders, not static. NEMO evaluates bn2 on ``gdept(Kmm)`` =
+    ``gdept_0 * (1 + eta/ht_0)`` under z* (key_qco), and the C-grid TKE path
+    already uses ``nemo_bn2_live_ladders``. A first revision here called the
+    STATIC helper, which agrees only at eta = 0 -- so MPAS would have run a
+    different N2 from the tripole and the cross-grid comparison would have
+    measured the code rather than the physics, which is the precise thing
+    threading these was meant to prevent (codex 9408814 #2).
+
+    Deferred import: this bridge must not pull ``eos`` at module import time.
+    """
+    if getattr(cfg, "n2_mode", "insitu") != "nemo_bn2":
+        return {}
+    from legoesm.ocean.eos import nemo_bn2_live_ladders
+    t_depth, w_depth = nemo_bn2_live_ladders(
+        z_coord, state.eta.data, state.H_bathy.data)
+    return {"t_depth": t_depth, "w_depth": w_depth}
+
+
 def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None):
     """MPAS surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) plus the
     kinematic surface heat/salt fluxes for the KPP boundary-layer closure.
@@ -683,12 +705,17 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             "TKE bridge (the Veros T15 bottom Dirichlet row needs the "
             "bottom-level threading this bridge does not pass). Set "
             "bottom_tke_bc=False.")
-    if getattr(cfg, "n2_mode", "insitu") != "insitu":
+    if getattr(cfg, "n2_mode", "insitu") not in ("insitu", "nemo_bn2"):
         raise NotImplementedError(
             f"vertical_mixing.tke.n2_mode={getattr(cfg, 'n2_mode', 'insitu')!r} "
-            "is not wired on the MPAS ocean (the adiabatic/signed-N^2 path needs "
-            "the cell-centre hydrostatic pressure that this bridge does not "
-            "compute). MPAS supports n2_mode='insitu'.")
+            "is not wired on the MPAS ocean. 'adiabatic' needs the "
+            "cell-centre hydrostatic pressure this bridge does not compute. "
+            "'insitu_signed' needs only rho and dz_half, which this bridge "
+            "DOES pass -- it stays blocked because nothing has validated it "
+            "here, not because it is infeasible; wire it with a test if you "
+            "want it. MPAS supports 'insitu' and 'nemo_bn2', the latter "
+            "needing only the geometric depth ladders this bridge threads "
+            "from z_coord.")
     # NOTE: eice (under-ice lc/etau attenuation) IS wired on this bridge —
     # profiles_fn reads surface_forcing.ice_concentration under the shared
     # static gate (mirroring _run_mpas_kpp) and threads ice_frac into
@@ -852,6 +879,10 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
             # mxl choices 1/2 (bit-identical there).
             dz_ref=z_coord.dz_ref,
             jacobian=J,
+            # LIVE geometric depth ladders for n2_mode="nemo_bn2" -- the same
+            # gdept_0*(1+eta/ht_0) stretch the C-grid path applies, so both
+            # grids run the SAME stratification.
+            **_bn2_ladder_kwargs(cfg, z_coord, state),
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0

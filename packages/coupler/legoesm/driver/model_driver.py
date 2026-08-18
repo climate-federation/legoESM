@@ -8606,7 +8606,8 @@ class ModelDriver:
                 # never evolved), added 2026-07 — checkpoints written
                 # before then legitimately lack it, and the fresh seed's
                 # arange is byte-identical to what the save would have
-                # stored.  The ``PHYSSTATE_INPUT_FIELDS`` (dyn_tendency_*) are
+                # stored.  The ``PHYSSTATE_INPUT_FIELDS`` (the dyn_tendency_*
+                # pair and the prescribed surface-flux overrides) are
                 # likewise exempt: per-step driver INPUTS, never persisted
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.

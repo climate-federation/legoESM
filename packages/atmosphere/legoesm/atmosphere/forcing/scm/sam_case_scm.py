@@ -146,6 +146,18 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
+    "astex": SAMSCMCaseSpec(
+        gsam_dir="ASTEX209", latitude_deg=34.0, les_domain_top_m=2000.0,
+        default_dt_s=30.0, surface_mode="fluxes",
+        bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
+        # prm: docoriolis = .false., so the LES has NO Coriolis. Deriving it
+        # from the latitude would give 8.1e-5 and a rotation the reference
+        # does not have.
+        les_f_c=0.0, les_sponge_frac=0.85,
+        note="ASTEX flight 209 stratocumulus; prescribed surface fluxes "
+             "(SHF 10, LHF 25 W/m^2), same Stevens (2005) simple longwave as "
+             "DYCOMS via doradsimple.",
+    ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
         default_dt_s=30.0, surface_mode="fluxes",
