@@ -69,22 +69,61 @@ def t_threshold_mld(T, z, wet, H, dT=0.2, ref_depth_m=10.0):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--snapshot", action="append", required=True,
+    ap.add_argument("--snapshot", action="append", default=[],
                     help="label=path.npz (repeatable)")
+    ap.add_argument("--nemo-gridt", default=None,
+                    help="ORCA1 monthly grid_T -- the ORACLE's own ratio, the "
+                         "control without which a model's S-controlled band "
+                         "cannot be called a defect (Antarctic summer melt "
+                         "water IS salinity-stratified in the real ocean).")
+    ap.add_argument("--nemo-month", type=int, default=1)
     ap.add_argument("--delta-sigma", type=float, default=0.01)
     a = ap.parse_args()
+    if not a.snapshot and not a.nemo_gridt:
+        raise SystemExit("nothing to do: give --snapshot and/or --nemo-gridt")
 
     from legoesm.ocean.diagnostics import mixed_layer_depth
 
-    for spec in a.snapshot:
+    specs = list(a.snapshot)
+    if a.nemo_gridt:
+        specs.append(f"NEMO_m{a.nemo_month:02d}=__NEMO__")
+
+    for spec in specs:
         label, _, path = spec.partition("=")
-        z0 = np.load(path)
-        T = np.asarray(z0["T"], dtype=np.float64)
-        S = np.asarray(z0["S"], dtype=np.float64)
-        lat = np.asarray(z0["lat_T"], dtype=np.float64)
-        zc = np.abs(np.asarray(z0["z_center_ref"], dtype=np.float64))
-        H = np.asarray(z0["H_bathy"], dtype=np.float64)
-        mask = np.asarray(z0["land_mask"], dtype=np.float64)
+        if path == "__NEMO__":
+            import xarray as xr
+            ds = xr.open_dataset(a.nemo_gridt, decode_times=False)
+            from compare_omip_nemo import _nemo_record_months
+            tdim = ds["to"].dims[0]
+            nt = int(ds.sizes[tdim])
+            months = _nemo_record_months(ds, tdim, nt)
+            idx = [i for i in range(nt) if months[i] == a.nemo_month]
+            T = np.nanmean(np.asarray(ds["to"].values)[idx], axis=0)
+            S = np.nanmean(np.asarray(ds["so"].values)[idx], axis=0)
+            T = np.where((np.abs(T) > 1e10) | (T == 0.0), np.nan, T)
+            S = np.where((np.abs(S) > 1e10) | (S == 0.0), np.nan, S)
+            # (nlev, ny, nx) -> (ny, nx, nlev), matching the snapshot layout
+            T = np.moveaxis(T, 0, -1)
+            S = np.moveaxis(S, 0, -1)
+            lat = np.asarray(ds["nav_lat"].values, dtype=np.float64)
+            lon2d = np.asarray(ds["nav_lon"].values, dtype=np.float64)
+            zc = np.asarray(ds["deptht"].values, dtype=np.float64)
+            mask = np.isfinite(T[..., 0]).astype(np.float64)
+            wetlev = np.isfinite(T)
+            # bottom depth = deepest wet level centre (adequate: only used
+            # for fully-mixed columns)
+            kbot = np.where(wetlev.any(-1), wetlev.sum(-1) - 1, 0)
+            H = zc[np.clip(kbot, 0, zc.size - 1)]
+            z0 = {"lon_T": lon2d}
+            path = a.nemo_gridt
+        else:
+            z0 = np.load(path)
+            T = np.asarray(z0["T"], dtype=np.float64)
+            S = np.asarray(z0["S"], dtype=np.float64)
+            lat = np.asarray(z0["lat_T"], dtype=np.float64)
+            zc = np.abs(np.asarray(z0["z_center_ref"], dtype=np.float64))
+            H = np.asarray(z0["H_bathy"], dtype=np.float64)
+            mask = np.asarray(z0["land_mask"], dtype=np.float64)
         wet = ((zc[(None,) * H.ndim + (slice(None),)] < H[..., None])
                & (mask[..., None] > 0.5)).astype(np.float64)
 
