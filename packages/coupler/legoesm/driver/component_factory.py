@@ -293,9 +293,11 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     "output.output_dir", "output.diag_days",
     # CLI-default drift that CANNOT affect the duo dynamics (measured on a
     # stock ``run_amip --discretization fv3_duo`` config, job 9433540):
-    # ``--clouds`` defaults to 'xu_randall' at the argparse layer, but cloud
-    # schemes feed ONLY the radiation optics and radiation is pinned 'none'
-    # above; ``--use-polar-filter`` (BooleanOptionalAction, default None =
+    # ``--clouds`` defaults to 'xu_randall' at the argparse layer. The duo
+    # EXECUTION LOOP never evaluates physics or cloud diagnostics (the one
+    # other consumer, _create_diagnostics' clt at model_driver.py:3146, is
+    # not collected by this lane — codex 2026-08-18 corrected the earlier
+    # "only radiation optics" claim); ``--use-polar-filter`` (BooleanOptionalAction, default None =
     # "no choice") gates a lat-lon-C-grid-only Fourier filter this
     # cubed-sphere lane never builds.  Refusing either would refuse every
     # stock CLI launch.
@@ -304,7 +306,13 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
 
 
 def _flatten_config_fields(cfg, prefix: str = ""):
-    """Yield ``("a.b.c", value)`` leaves of a nested NamedTuple config."""
+    """Yield ``("a.b.c", value)`` fields of a nested NamedTuple config.
+
+    Recurses ONLY into NamedTuples; sequences/mappings are ATOMIC values
+    compared whole (a changed tuple is still refused as one field). A
+    frozen-surface test pins both this shape and the defaults it is
+    diffed against.
+    """
     for name in cfg._fields:
         val = getattr(cfg, name)
         if hasattr(val, "_fields"):  # nested NamedTuple sub-config

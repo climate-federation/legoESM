@@ -22,12 +22,12 @@ from typing import NamedTuple
 class SolverEntry(NamedTuple):
     """One genuinely distinct solver implementation.
 
-    ``canonical_name`` / ``class_name`` are UNIQUE across the matrix
-    (enforced by tests/unit/test_deprecation_warnings.py), so a solver
-    serving MORE dynamics axes than its row lists cannot get a second
-    row — it declares the extra coverage in ``note`` instead (currently
-    the fv3_duo entry).  Consumers treating the matrix as the support
-    table must read ``note`` before concluding an axis is unsupported.
+    ``(canonical_name, dynamics)`` pairs are UNIQUE across the matrix
+    (enforced by tests/unit/test_deprecation_warnings.py); a solver
+    serving several dynamics axes gets ONE ROW PER AXIS so consumers
+    filtering on ``dynamics`` see real coverage — free-text ``note`` is
+    NOT machine-readable (codex 2026-08-18) and never carries support
+    claims.
     """
     component: str        # "atmosphere" | "ocean"
     dynamics: str         # "shallow_water" | "hydrostatic" | "nonhydrostatic"
@@ -109,9 +109,13 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "atmosphere", "hydrostatic", "fv3_duo_cube",
         "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
         "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
-        note="ALSO serves dynamics='nonhydrostatic' (static hydrostatic "
-             "switch in the certified core); one row because canonical "
-             "names are unique — nonhydrostatic fv3_duo IS supported.",
+    ),
+    SolverEntry(
+        "atmosphere", "nonhydrostatic", "fv3_duo_cube",
+        "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
+        "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
+        note="same class as the hydrostatic row: ONE certified core with "
+             "a static hydrostatic switch.",
     ),
 
     # -- U-cast (unstructured-cast hydrostatic primitive equations) --

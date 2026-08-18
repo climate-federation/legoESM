@@ -464,6 +464,10 @@ class TestModelDriverLane:
 
         m0, m1 = _dry_mass(ic), _dry_mass(driver.state)
         drift = abs(m1 - m0) / m0
+        # Bound scope (codex 2026-08-18): 1e-12 is supported by ONE
+        # measurement — rel = 0.0 at THIS config (C12/km=5, hydro,
+        # this step count). It does not establish scaling with
+        # resolution, km, NH, or duration; a new config re-measures.
         print(f"FV3DUO_DRY_MASS_DRIFT rel={drift:.3e} over {n_expect} steps")
         assert drift < 1e-12, (
             f"global dry-mass drift {drift:.3e} over {n_expect} steps "
@@ -510,3 +514,65 @@ class TestModelDriverLane:
         driver.setup()
         with pytest.raises(NotImplementedError, match="restart"):
             driver._run_fv3_duo(start_step=7)
+
+
+# =====================================================================
+# The default-deny wall's own contract (codex BLOCKER + GLM MAJORs,
+# 2026-08-18): the wall diffs against ExperimentConfig() AT CALL TIME,
+# so a future default change would silently widen it. These tests
+# convert that drift into a review-gated CI failure.
+# =====================================================================
+
+def _wall_surface():
+    from legoesm.driver.component_factory import _flatten_config_fields
+    from legoesm.driver.config import ExperimentConfig
+    return sorted(_flatten_config_fields(ExperimentConfig()))
+
+
+def test_wall_default_surface_is_frozen():
+    """Golden hash of the flattened default surface.
+
+    Changing ANY ExperimentConfig default (or the flattener's shape)
+    moves this hash; updating the literal below is the review gate at
+    which _FV3_DUO_ALLOWED_NONDEFAULT must be re-justified — without
+    this, a default flipping to a value the duo lane silently ignores
+    recreates the "successful wrong experiment" (codex BLOCKER).
+    """
+    import hashlib
+    digest = hashlib.sha256(repr(_wall_surface()).encode()).hexdigest()
+    assert digest == _WALL_SURFACE_SHA256, (
+        f"ExperimentConfig's flattened default surface changed "
+        f"(sha256 {digest}). Re-review _FV3_DUO_ALLOWED_NONDEFAULT in "
+        f"component_factory.py against the new defaults, then update "
+        f"_WALL_SURFACE_SHA256 in this test.")
+
+
+# ponytail: filled by the first CI run's failure message; the VALUE is
+# the reviewable artifact, the mechanism is above.
+_WALL_SURFACE_SHA256 = "46d2fa25c5d0830dfeaf8a0d6a0d3ffae9cc0a2384aee0b0c4a6993d54c39142"
+
+
+def test_wall_leaf_types_are_scalar():
+    """Every flattened leaf is a scalar/tuple — no dict/list/ndarray.
+
+    GLM 2026-08-18: a mutable leaf (shared class-level dict mutated in
+    place) compares EQUAL to the default it aliases and passes the wall
+    silently; an ndarray leaf makes `==` ambiguous and crashes it. This
+    census makes any future such field fail here, in CI, with a named
+    path — before it can reach the wall at runtime.
+    """
+    import enum
+    ok = (str, int, float, bool, type(None), tuple, enum.Enum)
+    bad = [(p, type(v).__name__) for p, v in _wall_surface()
+           if not isinstance(v, ok)]
+    assert not bad, f"non-scalar config leaves (wall hazard): {bad}"
+
+
+def test_wall_allowlist_paths_are_live():
+    """Every allow-listed path exists in the surface (GLM: a stale entry
+    after a field rename is dead weight AND the rename escaped
+    re-justification)."""
+    from legoesm.driver.component_factory import _FV3_DUO_ALLOWED_NONDEFAULT
+    paths = {p for p, _ in _wall_surface()}
+    dead = _FV3_DUO_ALLOWED_NONDEFAULT - paths
+    assert not dead, f"allow-listed paths not in the config surface: {dead}"

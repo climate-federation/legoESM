@@ -7131,6 +7131,11 @@ class ModelDriver:
             else "nonhydrostatic",
             DT, n_steps_total, cfg.days, diag_interval)
 
+        # Overwrite any marker from a prior run in this directory FIRST:
+        # setup permits a same-config retry, and a stale COMPLETED/BLOWUP
+        # surviving an interrupted retry would misclassify it (codex
+        # 2026-08-18 MAJOR). RUNNING is the nonterminal state.
+        self._fv3_duo_write_status("RUNNING")
         bundle = self.model.dcmip16_initial_state(do_pert=True)
         t0 = time.time()
         for step in range(1, n_steps_total + 1):
@@ -7152,12 +7157,15 @@ class ModelDriver:
     def _fv3_duo_write_status(self, status: str) -> None:
         """Persist the lane's terminal status as an EXPLICIT marker.
 
-        ``fv3duo_status.txt`` next to the snapshots: a clean run says
-        COMPLETED, a guard-tripped run says BLOWUP with day/step, and an
-        interrupted run leaves NO marker — so tooling distinguishes the
-        three without inferring from the run manifest's missing
-        ``state_digest`` (which is only written for COMPLETED and could
-        equally mean a digest-write failure; codex 2026-08-18 MINOR).
+        ``fv3duo_status.txt`` next to the snapshots: RUNNING is written
+        before the first step (overwriting any stale marker from a prior
+        run in the same directory), then the terminal state — COMPLETED
+        or BLOWUP with day/step. An interrupted run therefore reads
+        RUNNING. SCOPE (codex 2026-08-18): the marker certifies the
+        STEP LOOP's outcome only; the run manifest's ``state_digest`` is
+        written afterwards by ``run()`` and can still fail
+        independently — consult the manifest for provenance, the marker
+        for loop outcome.
         """
         (self._output_dir / "fv3duo_status.txt").write_text(status + "\n")
 
