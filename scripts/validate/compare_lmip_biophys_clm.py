@@ -10,8 +10,9 @@ CTSM5.1-dev land-only simulation driven by the same CRU-JRA forcing
                                  global total) with each obs product as its
                                  own line
 * ``fig_lmip_seasonal_biome`` — biome-mean seasonal cycles of latent heat and
-                                 GPP (model area-weighted IQR shading; one
-                                 line per obs product)
+                                 GPP, composited by local season (SH cells
+                                 shifted 6 months; model area-weighted IQR
+                                 shading; one line per obs product)
 
 NO regridding anywhere: every dataset (legoESM 2 deg, CLM f19, obs 0.5 deg)
 is analysed on its NATIVE grid with its own land-area weights (cell area x
@@ -430,18 +431,30 @@ def fig_lh_gpp(D, outdir):
     savefig(fig, outdir, 'fig_lmip_lh_gpp')
 
 
+def local_season(clim):
+    """Composite a (month,lat,lon) climatology by LOCAL season: SH cells are
+    shifted 6 months so month 1 = mid-winter / month 7 = mid-summer for
+    every cell.  Removes the bimodality that mixing hemispheres in opposite
+    seasons puts into biome statistics (e.g. savanna/shrub in DJF)."""
+    shifted = clim.roll(month=-6, roll_coords=False)
+    return clim.where(clim.lat >= 0, shifted)
+
+
 def fig_seasonal_biome(D, outdir):
-    """Biome-mean seasonal cycles of LH and GPP for 4 forest/woody biomes.
-    Models with area-weighted IQR shading across cells; one line per obs
-    product.  Biome
-    masks are nearest-sampled onto each dataset's native grid."""
+    """Biome-mean seasonal cycles of LH and GPP for 4 forest/woody biomes,
+    composited by local season (SH cells shifted 6 months).  Models with
+    area-weighted IQR shading across cells; one line per obs product.
+    Biome masks are nearest-sampled onto each dataset's native grid."""
     import matplotlib.lines as mlines
     import matplotlib.pyplot as plt
 
     mon = np.arange(1, 13)
     cols = ['tropical_broadleaf', 'savanna_shrub',
             'temperate_forest', 'boreal_needleleaf']
-    obs = {v: D.obs_clim(v) for v in ('LH', 'GPP')}
+    obs = {v: {p: local_season(o) for p, o in D.obs_clim(v).items()}
+           for v in ('LH', 'GPP')}
+    lego = {v: local_season(D.lego[v]) for v in ('LH', 'GPP')}
+    clm = {v: local_season(D.clm[v]) for v in ('LH', 'GPP')}
 
     # per-dataset (field-independent) biome masks on native grids
     bm_lego = D.biome_on(D.lego.lat, D.lego.lon)
@@ -466,8 +479,8 @@ def fig_seasonal_biome(D, outdir):
             # models: line + area-weighted IQR shading across cells (same
             # weighting as the mean, so the band always brackets the line)
             for da, w, bm, col, ls in [
-                    (D.lego[var], D.lego_w, bm_lego, C_LEGO, LS_LEGO),
-                    (D.clm[var], D.clm_w, bm_clm, C_CLM, LS_CLM)]:
+                    (lego[var], D.lego_w, bm_lego, C_LEGO, LS_LEGO),
+                    (clm[var], D.clm_w, bm_clm, C_CLM, LS_CLM)]:
                 m = bm == i
                 sub = da.where(m & (w > 0))
                 line = wmean(sub, w.where(m, 0.0))
@@ -482,7 +495,7 @@ def fig_seasonal_biome(D, outdir):
             if c == 0:
                 ax.set_ylabel(ylab)
             if r == 1:
-                ax.set_xlabel('month')
+                ax.set_xlabel('month (local season)')
             ax.set_xticks([1, 4, 7, 10])
             ax.margins(y=0.10)
             panel_letter(ax, next(letters))
@@ -495,6 +508,7 @@ def fig_seasonal_biome(D, outdir):
     fig.legend(handles=handles, loc='lower center', ncol=4, frameon=False,
                bbox_to_anchor=(0.5, -0.05))
     fig.suptitle(f'Latent heat & GPP seasonality by biome ({D.y0}-{D.y1}; '
+                 'local-season composite, SH shifted 6 months; '
                  'shading = model area-weighted IQR across cells)',
                  fontsize=7.5)
     savefig(fig, outdir, 'fig_lmip_seasonal_biome')
